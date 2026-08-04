@@ -1,0 +1,31 @@
+# CS193V nano configuration.
+#
+# nano is the course editor because it is the only common terminal editor with a
+# permanently visible escape route — the shortcut bar at the bottom always shows how to
+# get out, which is exactly what a student who landed here by accident needs.
+#
+# It also matters that this file exists at all: with GIT_EDITOR, core.editor, VISUAL and
+# EDITOR all unset, `git var GIT_EDITOR` returns `vi`, and /usr/bin/vi is vim.tiny. So
+# `git commit` with no -m would strand a first-year student in a modal editor.
+
+set linenumbers          # so an error at "line 47" is findable
+set mouse                # click to position the cursor; students expect this
+set softwrap             # wrap long lines instead of scrolling sideways
+set tabsize 4
+set tabstospaces
+set constantshow         # always show the cursor position, not only after ^C
+set indicator            # a scrollbar, so long files feel navigable
+set autoindent
+set trimblanks
+
+# Syntax highlighting for everything nano ships with.
+include /usr/share/nano/*.nanorc
+
+# A few bindings that match muscle memory from GUI editors. Ctrl-S and Ctrl-Q are only
+# available because /etc/profile.d/10-cs193v-shell.sh turns off XON/XOFF flow control.
+# Ctrl-H is deliberately NOT bound: many terminals send it as backspace.
+bind ^S savefile  main
+bind ^Q exit      main
+bind ^F whereis   main
+bind ^Z undo      main
+bind ^Y redo      main

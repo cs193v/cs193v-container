@@ -1,0 +1,48 @@
+{
+  "$comment": [
+    "CS193V managed Claude Code policy. Lives at /etc/claude-code/ — deliberately NOT",
+    "under ~/.claude, which is a named volume: an image-provided file there would be",
+    "seeded once on first mount and never refreshed by a later image. In /etc it is part",
+    "of the image layer, so every --rebuild and every image update restores it.",
+    "",
+    "What is deliberately ABSENT, and why:",
+    "  defaultMode          - Claude Code's own default is kept. Permission prompts are",
+    "                         how a student learns what the agent wants to do, which is",
+    "                         the core skill of the course. Since the container is the",
+    "                         boundary, loosening it buys convenience, not safety.",
+    "  autoUpdatesChannel   - auto-update stays ENABLED, so students always have current",
+    "                         Claude Code. Accepted cost: versions drift between students.",
+    "  requiredMinimumVersion / requiredMaximumVersion - NEVER add these. They cause a",
+    "                         hard startup exit, which combined with a pinned image can",
+    "                         manufacture a container that refuses to start at all.",
+    "  MCP configuration    - none shipped, and not locked down either.",
+    "",
+    "The deny rules below stop ACCIDENTS, not attacks, and must be described that way.",
+    "An agent with Bash can read any of these files with `cat` regardless; no permission",
+    "rule can prevent that. What they do prevent is the ordinary case: an agent globbing",
+    "the home directory while looking for config, pulling a live token into its context,",
+    "where it can end up in a saved session transcript.",
+    "",
+    "Scope is deliberate and asymmetric. ~/.config/gh and the Vercel directory are denied",
+    "WHOLESALE, because the agent has no legitimate reason to look in either and the",
+    "credential filenames may change between tool versions. ~/.claude is denied only at",
+    "the credential FILE, because that directory also holds settings.json, plans/ and",
+    "session transcripts that the agent may legitimately need when a student asks why",
+    "their own configuration behaves a certain way.",
+    "",
+    "Only Read(...) and Edit(...) forms are used. Write(...) and Glob(...) path rules are",
+    "accepted by Claude Code and then SILENTLY IGNORED with a startup warning — a",
+    "security control that does nothing is worse than none. See VERIFICATION.md A.3",
+    "(deny-rule-forms) and A.11, which assert this both statically and functionally."
+  ],
+  "permissions": {
+    "deny": [
+      "Read(//home/student/.claude/.credentials.json)",
+      "Edit(//home/student/.claude/.credentials.json)",
+      "Read(//home/student/.config/gh/**)",
+      "Edit(//home/student/.config/gh/**)",
+      "Read(//home/student/.local/share/com.vercel.cli/**)",
+      "Edit(//home/student/.local/share/com.vercel.cli/**)"
+    ]
+  }
+}

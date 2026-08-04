@@ -1,0 +1,10 @@
+# Machine-specific, written by install-cs193v.sh. Never commit: it holds the memory cap
+# computed for one particular computer. Re-running the installer recomputes it.
+local.args
+
+# Student work. The directory itself is tracked (via .gitkeep) so the bind mount target
+# always exists; nothing inside it is.
+projects/*
+!projects/.gitkeep
+
+.DS_Store

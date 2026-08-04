@@ -1,0 +1,291 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Every student-facing string the launcher and installer print.
+#
+#  Edit freely — wording and tone here are yours, and nothing in the scripts depends
+#  on the phrasing. Each block starts with [[key]] on its own line and runs to the
+#  next [[key]]. {{PLACEHOLDER}} is substituted at runtime.
+#
+#  VERIFICATION.md §A.1 cross-references this file against the scripts, so an orphan
+#  key or a missing one is caught automatically.
+#
+#  House style, worth keeping: say what happened, say what to do, and never make a
+#  student guess whether something is their mistake or ours.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[help.usage]]
+cs193v — the CS193V course container
+
+  cs193v                     open a shell in the container
+  cs193v ports               check whether your servers are reachable
+  cs193v doctor              print a report to paste when asking for help
+
+  cs193v --rebuild           start the container over. Your files and logins are kept.
+  cs193v --full-rebuild      start over completely, including logging out.
+  cs193v --update            get the newest version of the course container.
+
+You can run cs193v in as many terminal windows as you like — they all open a shell in
+the same container. There is only ever one container.
+
+Your files live in the projects folder next to this script, and appear inside the
+container at /workspaces. Everything else in the container is temporary.
+
+[[err.running-as-root]]
+Do not run cs193v with sudo.
+
+Running it as root would start the container in a completely different mode that
+gives up the protection the container exists to provide, and would leave files in your
+projects folder that you cannot edit afterwards.
+
+Run it again without sudo:
+
+    ./cs193v
+
+If you got here because of a "permission denied" error, that error has a different
+cause — please contact course staff rather than working around it.
+
+[[err.no-podman]]
+Podman is not installed, or it is not on your PATH.
+
+Podman is the program that runs the course container. If you have not installed it
+yet, run the course installer script. If you believe you did install it, contact
+course staff and include the output of:
+
+    cs193v doctor
+
+[[err.podman-hangs]]
+Podman is installed but is not responding.
+
+This is a known problem on Macs that have been asleep: podman commands hang rather
+than failing. The usual fix is to restart podman's virtual machine:
+
+    podman machine stop
+    podman machine start
+
+Then try cs193v again. If that does not help, contact course staff.
+
+[[err.podman-too-old]]
+Your version of podman is too old for the course container.
+
+    you have:  {{FOUND}}
+    we need:   {{NEED}} or newer
+
+On Ubuntu or inside the WSL CS193V environment:
+
+    sudo apt update && sudo apt install --only-upgrade podman
+
+On a Mac: open Podman Desktop and let it update itself.
+
+Nothing has been changed on your computer. Contact course staff if the upgrade does
+not work.
+
+[[err.podman-unreachable]]
+Podman is installed but the course container cannot reach it.
+
+On a Mac this almost always means podman's virtual machine is not running:
+
+    podman machine start
+
+On Ubuntu or WSL, try:
+
+    podman info
+
+and send the output to course staff along with `cs193v doctor`.
+
+[[err.rootful]]
+Podman is running in "rootful" mode, and the course container needs "rootless" mode.
+
+This is not something to work around — rootless mode is what keeps the container from
+being able to touch the rest of your computer. Please contact course staff and include
+the output of:
+
+    cs193v doctor
+
+[[err.no-subuid]]
+Your account is missing something podman needs, and we do not want to guess at fixing
+it because it affects your whole computer.
+
+Specifically: the account {{USER}} has no entry in /etc/subuid. Podman uses that range
+of ID numbers to keep the container separated from the rest of your system.
+
+Run the course installer again — it can set this up, and it will ask your permission
+before changing anything:
+
+    bash install-cs193v.sh
+
+If that does not work, contact course staff with the output of:
+
+    id
+    cat /etc/subuid /etc/subgid
+
+Do not hand-edit those files yourself — it usually means something slightly unusual
+about how your account was created, and we would rather see it than guess.
+
+[[err.no-workspace]]
+Could not create the projects folder at:
+
+    {{DIR}}
+
+Check that you have permission to write there, then try again.
+
+[[err.no-args-file]]
+The file container.args is missing from the course folder:
+
+    {{FILE}}
+
+Something is wrong with the course files rather than with your computer. Please
+re-run the course installer, or contact course staff.
+
+[[err.no-image]]
+No course container image has been selected.
+
+This means container.args has no IMAGE line yet — normal before the course image has
+been published, but not something you should see as a student. Contact course staff.
+
+    {{FILE}}
+
+[[err.create-failed]]
+The course container could not be created.
+
+Podman said:
+
+{{OUT}}
+
+Please send all of the text above to course staff, along with the output of:
+
+    cs193v doctor
+
+[[err.other-directory]]
+There is already a CS193V container, and it is using a different folder from this one.
+
+    the container is using:  {{INUSE}}
+    you ran cs193v from:     {{YOURS}}
+
+If cs193v continued, you would be editing files in the first folder while believing
+you were working in the second — so it has stopped instead.
+
+Two ways forward:
+
+  * Work in the original folder:  cd {{INUSE}} && ./cs193v
+  * Or start fresh in this one:   ./cs193v --rebuild
+
+[[err.not-running]]
+The container is not running yet. Start it first with:
+
+    ./cs193v
+
+[[err.update-in-dev-mode]]
+There is no published image to update to — this copy is running a locally built image.
+
+[[err.pull-failed]]
+Could not download the course container.
+
+Podman said:
+
+{{OUT}}
+
+This is usually a network problem. It is safe to run `cs193v --update` again: podman
+keeps the parts that already downloaded, so a second attempt picks up where it left
+off rather than starting over.
+
+[[err.no-containerfile]]
+No Containerfile found at:
+
+    {{FILE}}
+
+[[warn.dev-mode]]
+NOTE: running a locally built image ({{IMAGE}}), not the published course image.
+If you are a student and did not do this on purpose, tell course staff — this line
+should not appear.
+
+[[warn.many-shells]]
+You have {{N}} shells open in the container. That is fine, but each one uses memory,
+so close any you are finished with if things start to feel slow.
+
+[[warn.machine-restart-failed]]
+Could not restart podman's virtual machine automatically. Try it by hand:
+
+    podman machine stop
+    podman machine start
+
+[[status.creating]]
+Setting up the course container...
+
+[[status.starting]]
+Starting the course container...
+
+[[status.rebuilding]]
+Starting the container over. Your files and logins are kept.
+
+[[status.rebuilt]]
+Done. Run ./cs193v to open a shell.
+
+[[status.cancelled]]
+Nothing was changed.
+
+[[status.full-rebuilt]]
+Done. You will need to log in again the next time you use claude or gh.
+
+[[status.pulling]]
+Downloading the course container. This can take a while on slow wifi, and it is safe
+to run again if it is interrupted.
+
+    {{IMAGE}}
+
+[[status.updated]]
+Updated. Run ./cs193v to open a shell.
+
+[[status.restarting-machine]]
+Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
+
+[[prompt.config-changed]]
+The course container settings have changed since your container was created.
+
+Podman cannot apply new settings to a container that already exists, so the container
+needs to be created again for the change to take effect. Your files are safe — they
+live in the projects folder on your own computer — and your logins are kept too.
+Anything currently running inside the container will stop.
+
+[[opt.keep-current]]
+Keep the current container for now
+[[opt.recreate]]
+Apply the new settings (recommended)
+
+[[prompt.newer-image]]
+A newer version of the course container is available.
+
+Updating restarts the container. Your files and your logins are safe; anything running
+inside it will stop.
+
+[[opt.keep-current-version]]
+Keep using the current version
+[[opt.update-now]]
+Update now (recommended)
+
+[[prompt.full-rebuild]]
+This will start completely over, including logging you out.
+
+  Kept:     everything in your projects folder
+  Removed:  your claude, gh and vercel logins, and anything installed in the container
+
+Use --rebuild instead if you only want a fresh container and would rather stay logged
+in.
+
+[[opt.cancel]]
+Cancel, change nothing
+[[opt.full-rebuild-go]]
+Yes, start over and log me out
+
+[[prompt.clock-drift]]
+The container's clock is {{SKEW}} seconds away from your computer's clock.
+
+This happens when a laptop sleeps: the small Linux virtual machine podman uses does not
+always catch up on waking. It causes confusing failures that look like network problems
+— secure connections rejected as "not yet valid", downloads failing, logins refused.
+
+The container cannot fix its own clock, so the fix is to restart podman's virtual
+machine. Anything currently running in the container will stop.
+
+[[opt.leave-clock]]
+Leave it for now
+[[opt.restart-machine]]
+Restart the virtual machine to fix the clock (recommended)

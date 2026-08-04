@@ -1,0 +1,571 @@
+#!/usr/bin/env bash
+#
+# CS193V container launcher.
+#
+# ONE script for macOS, native Ubuntu, and Windows (inside the WSL2 CS193V distro).
+# There is no PowerShell twin: every supported platform has bash.
+#
+# MUST STAY BASH 3.2 COMPATIBLE — macOS ships bash 3.2. That means:
+#   no associative arrays, no mapfile/readarray, no ${var,,}, no `read -t 0.5`,
+#   no |& , no &>> .
+# VERIFICATION.md §A.1 greps for all of these.
+#
+# It lives OUTSIDE the directory it mounts, so the container cannot see or rewrite it.
+# That replaces the devcontainer's read-only .devcontainer bind mount, and closes a hole
+# that trick leaves open: that mount and the writable workspace are two mounts of the
+# SAME filesystem with files owned by the agent's own uid, so link(2) — which checks
+# write permission only on the destination — yields a writable second name for the same
+# inode, which the host then reads on the next rebuild.
+
+set -u
+
+# ─── where we are ──────────────────────────────────────────────────────────────
+# Resolved from our own location, not the working directory, so `cs193v` works from
+# anywhere and always mounts its own sibling projects/.
+SELF="$0"
+while [ -L "$SELF" ]; do
+    _link="$(readlink "$SELF")"
+    case "$_link" in
+        /*) SELF="$_link" ;;
+        *)  SELF="$(dirname "$SELF")/$_link" ;;
+    esac
+done
+DIR="$(cd -- "$(dirname -- "$SELF")" && pwd -P)"
+
+ARGS_FILE="$DIR/container.args"
+LOCAL_ARGS_FILE="$DIR/local.args"
+MESSAGES="$DIR/messages.txt"
+WORKSPACE="$DIR/projects"
+CONTAINERFILE="$DIR/Containerfile"
+
+NAME="cs193v"
+DEV_IMAGE="localhost/cs193v:dev"
+MIN_PODMAN="5.7.0"
+ESC=$(printf '\033')
+
+# ─── output helpers ────────────────────────────────────────────────────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_RED=$(printf '\033[1;91m'); C_DIM=$(printf '\033[2m')
+    C_CYAN=$(printf '\033[1;36m'); C_YEL=$(printf '\033[1;33m')
+    C_OFF=$(printf '\033[0m')
+else
+    C_RED=''; C_DIM=''; C_CYAN=''; C_YEL=''; C_OFF=''
+fi
+
+info() { printf '%s\n' "$*"; }
+note() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+warn() { printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2; }
+
+# The red STOP banner, in the same spirit as the devcontainer's .error.sh: a novice must
+# be able to tell "this is course infrastructure, stop and contact staff" from "I typed
+# something wrong."
+die() {
+    printf '\n%s┏━━ STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓%s\n' "$C_RED" "$C_OFF" >&2
+    while IFS= read -r _l; do
+        printf '%s┃%s %s\n' "$C_RED" "$C_OFF" "$_l" >&2
+    done <<EOF
+$*
+EOF
+    printf '%s┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛%s\n\n' "$C_RED" "$C_OFF" >&2
+    exit 1
+}
+
+# Student-facing prose lives in messages.txt so it can be reworded without touching
+# logic. msg <key> [NAME=value ...]
+msg() {
+    local key="$1"; shift
+    local out kv n v
+    [ -f "$MESSAGES" ] || { printf '(messages.txt missing)\n'; return 1; }
+    out="$(awk -v k="[[$key]]" '
+        $0 == k { found = 1; next }
+        /^\[\[.*\]\]$/ { if (found) exit }
+        found { print }
+    ' "$MESSAGES")"
+    if [ -z "$out" ]; then printf '(missing message: %s)\n' "$key"; return 1; fi
+    for kv in "$@"; do
+        n="${kv%%=*}"; v="${kv#*=}"
+        v="$(printf '%s' "$v" | sed 's/[&|\\]/\\&/g')"
+        out="$(printf '%s\n' "$out" | sed "s|{{$n}}|$v|g")"
+    done
+    printf '%s\n' "$out"
+}
+
+# ─── portable timeout ──────────────────────────────────────────────────────────
+# GNU `timeout` is NOT on stock macOS, so this is hand-rolled with zero dependencies.
+# Every podman probe goes through it: after a Mac wakes from sleep, `podman info` HANGS
+# rather than fails (containers/podman#21675), and an unguarded probe makes the launcher
+# look frozen with no output at all.
+RT_OUT=''
+run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
+    local secs="$1"; shift
+    local tmp pid i rc
+    tmp="$(mktemp "${TMPDIR:-/tmp}/cs193v.XXXXXX")" || return 125
+    ( "$@" >"$tmp" 2>&1 ) & pid=$!
+    i=0; rc=124
+    while [ "$i" -lt "$((secs * 10))" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ "$rc" -eq 124 ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fi
+    RT_OUT="$(cat "$tmp")"
+    rm -f "$tmp"
+    return "$rc"
+}
+
+pm()  { run_timeout 20 podman "$@"; }     # a podman call that should be quick
+pmq() { run_timeout 20 podman "$@" >/dev/null 2>&1; }
+
+# ─── arrow-key menu ────────────────────────────────────────────────────────────
+# Never [y/N]: students do not know that convention this early in the quarter. The
+# default is always the SAFE option and is visually highlighted rather than signalled by
+# capitalisation. Falls back to the default when there is no tty.
+MENU_CHOICE=0
+menu() {                              # menu DEFAULT_INDEX opt1 opt2 ...
+    local def="$1"; shift
+    local opts n sel i key rest
+    opts=( "$@" ); n=${#opts[@]}; sel="$def"
+
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        MENU_CHOICE="$def"
+        printf '  (not a terminal; choosing "%s")\n' "${opts[$def]}"
+        return 0
+    fi
+
+    while :; do
+        i=0
+        while [ "$i" -lt "$n" ]; do
+            if [ "$i" -eq "$sel" ]; then
+                printf '  %s▸ %s%s\n' "$C_CYAN" "${opts[$i]}" "$C_OFF"
+            else
+                printf '    %s\n' "${opts[$i]}"
+            fi
+            i=$((i + 1))
+        done
+        printf '\n  %s(use the up and down arrow keys, then press Enter)%s' "$C_DIM" "$C_OFF"
+
+        IFS= read -rsn1 key
+        if [ "$key" = "$ESC" ]; then IFS= read -rsn2 rest; key="$key$rest"; fi
+
+        printf '\r%s[K' "$ESC"
+        printf '%s[%dA%s[J' "$ESC" "$((n + 1))" "$ESC"
+
+        case "$key" in
+            "$ESC[A"|k|K) sel=$(( (sel + n - 1) % n )) ;;
+            "$ESC[B"|j|J) sel=$(( (sel + 1) % n )) ;;
+            ''|"$(printf '\n')") break ;;
+            [1-9]) if [ "$key" -le "$n" ]; then sel=$((key - 1)); break; fi ;;
+        esac
+    done
+    printf '  %s▸ %s%s\n\n' "$C_CYAN" "${opts[$sel]}" "$C_OFF"
+    MENU_CHOICE="$sel"
+}
+
+confirm() {                           # confirm "no-text" "yes-text"  -> 0 if yes
+    menu 0 "$1" "$2"
+    [ "$MENU_CHOICE" -eq 1 ]
+}
+
+# ─── small utilities ───────────────────────────────────────────────────────────
+version_lt() {                        # version_lt A B -> prints yes if A < B
+    awk -v a="$1" -v b="$2" 'BEGIN{
+        na = split(a, A, "."); nb = split(b, B, ".")
+        for (i = 1; i <= 3; i++) {
+            x = (i <= na ? A[i] + 0 : 0); y = (i <= nb ? B[i] + 0 : 0)
+            if (x < y) { print "yes"; exit }
+            if (x > y) { print "no";  exit }
+        }
+        print "no" }'
+}
+
+sha_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    else shasum -a 256 | awk '{print $1}'; fi
+}
+
+# podman forces TERM=xterm and does not copy the client's value
+# (containers/podman#25683), which costs 256-colour support. But the image has a limited
+# terminfo set, so forwarding an exotic TERM verbatim would leave a full-screen editor
+# unable to start. Whitelist, and fall back to a safe 256-colour entry.
+safe_term() {
+    case "${TERM:-}" in
+        xterm|xterm-256color|xterm-color|screen|screen-256color|tmux|tmux-256color|\
+        vt100|vt220|linux|ansi|dumb|rxvt|rxvt-unicode-256color)
+            printf '%s' "$TERM" ;;
+        '') printf 'xterm-256color' ;;
+        *)  printf 'xterm-256color' ;;    # kitty, ghostty, alacritty, wezterm, foot...
+    esac
+}
+
+platform() {
+    case "$(uname -s)" in
+        Darwin) printf 'macos' ;;
+        Linux)  if grep -qi microsoft /proc/version 2>/dev/null; then printf 'wsl'
+                else printf 'linux'; fi ;;
+        *)      printf 'other' ;;
+    esac
+}
+
+has_machine() {                       # is a podman machine in play (macOS)?
+    [ "$(platform)" = macos ] || return 1
+    pmq machine list --format '{{.Name}}'
+}
+
+# ─── argument files ────────────────────────────────────────────────────────────
+ARGS=()
+IMAGE=''
+load_args() {
+    local f line word
+    ARGS=(); IMAGE=''
+    [ -f "$ARGS_FILE" ] || die "$(msg err.no-args-file FILE="$ARGS_FILE")"
+    for f in "$ARGS_FILE" "$LOCAL_ARGS_FILE"; do
+        [ -f "$f" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"
+            # trim both ends without bash 4 features
+            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -z "$line" ] && continue
+            case "$line" in
+                IMAGE=*) IMAGE="${line#IMAGE=}"; continue ;;
+            esac
+            for word in $line; do
+                ARGS[${#ARGS[@]}]="$word"
+            done
+        done < "$f"
+    done
+
+    # command line and environment override the pin, for the instructor's dev loop
+    [ -n "${CS193V_IMAGE:-}" ] && IMAGE="$CS193V_IMAGE"
+    [ -n "${OVERRIDE_IMAGE:-}" ] && IMAGE="$OVERRIDE_IMAGE"
+}
+
+# The flags the launcher itself contributes: identity, the workspace mount, and the
+# labels that make drift detectable.
+RUN_ARGS=()
+build_run_args() {
+    local relabel=''
+    # Relabel narrowly, and only where SELinux is actually enforcing. Never :Z, and
+    # never on a home or system directory: it walks every inode and can break unrelated
+    # host services.
+    if command -v getenforce >/dev/null 2>&1; then
+        [ "$(getenforce 2>/dev/null)" = "Enforcing" ] && relabel=',z'
+    fi
+
+    RUN_ARGS=( --name "$NAME" --detach )
+    RUN_ARGS[${#RUN_ARGS[@]}]="--label"
+    RUN_ARGS[${#RUN_ARGS[@]}]="cs193v.confighash=$(config_hash)"
+    RUN_ARGS[${#RUN_ARGS[@]}]="--label"
+    RUN_ARGS[${#RUN_ARGS[@]}]="cs193v.dir=$DIR"
+    RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
+    RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$WORKSPACE,dst=/workspaces,rw$relabel"
+    local a
+    for a in "${ARGS[@]}"; do RUN_ARGS[${#RUN_ARGS[@]}]="$a"; done
+}
+
+# Everything that would require a different container if it changed. `podman start`
+# reuses the container's STORED config and ignores the image digest, the port list,
+# keep-id and --memory alike — so without this, "exists -> start" would permanently
+# freeze each student's flags at whatever they were on first run, and edits to
+# container.args would never reach anyone.
+config_hash() {
+    { printf '%s\n' "$IMAGE" "$WORKSPACE"; printf '%s\n' "${ARGS[@]}"; } | sha_stdin
+}
+
+# ─── preflight ─────────────────────────────────────────────────────────────────
+preflight() {
+    if [ "$(id -u)" -eq 0 ]; then die "$(msg err.running-as-root)"; fi
+
+    if ! command -v podman >/dev/null 2>&1; then
+        die "$(msg err.no-podman PLATFORM="$(platform)")"
+    fi
+
+    if ! run_timeout 10 podman --version; then
+        die "$(msg err.podman-hangs)"
+    fi
+    local ver
+    ver="$(printf '%s' "$RT_OUT" | awk '{print $NF}')"
+    if [ "$(version_lt "$ver" "$MIN_PODMAN")" = yes ]; then
+        die "$(msg err.podman-too-old FOUND="$ver" NEED="$MIN_PODMAN" PLATFORM="$(platform)")"
+    fi
+
+    if ! pm info --format '{{.Host.Security.Rootless}}'; then
+        die "$(msg err.podman-unreachable PLATFORM="$(platform)")"
+    fi
+    if [ "$RT_OUT" != "true" ]; then
+        die "$(msg err.rootful)"
+    fi
+
+    if ! grep -q "^$(id -un):" /etc/subuid 2>/dev/null; then
+        case "$(platform)" in
+            linux|wsl) die "$(msg err.no-subuid USER="$(id -un)")" ;;
+        esac
+    fi
+
+    [ -d "$WORKSPACE" ] || mkdir -p "$WORKSPACE" || die "$(msg err.no-workspace DIR="$WORKSPACE")"
+}
+
+# ─── container state ───────────────────────────────────────────────────────────
+state() {                             # -> absent | created | exited | running | ...
+    if pm inspect "$NAME" --format '{{.State.Status}}'; then printf '%s' "$RT_OUT"
+    else printf 'absent'; fi
+}
+
+label_of() { pm inspect "$NAME" --format "{{index .Config.Labels \"$1\"}}" && printf '%s' "$RT_OUT"; }
+image_of() { pm inspect "$NAME" --format '{{.Image}}' && printf '%s' "$RT_OUT"; }
+
+resolve_image() {
+    if [ -z "$IMAGE" ]; then
+        if pmq image exists "$DEV_IMAGE"; then
+            IMAGE="$DEV_IMAGE"
+            warn "$(msg warn.dev-mode IMAGE="$DEV_IMAGE")"
+        else
+            die "$(msg err.no-image FILE="$ARGS_FILE")"
+        fi
+    elif [ "$IMAGE" = "$DEV_IMAGE" ]; then
+        warn "$(msg warn.dev-mode IMAGE="$DEV_IMAGE")"
+    fi
+}
+
+create_container() {
+    build_run_args
+    info "$(msg status.creating)"
+    if ! run_timeout 180 podman run "${RUN_ARGS[@]}" "$IMAGE"; then
+        die "$(msg err.create-failed OUT="$RT_OUT")"
+    fi
+}
+
+remove_container() { pmq rm -f "$NAME"; }
+
+remove_volumes() {
+    local v
+    for v in cs193v-claude cs193v-claude-json cs193v-gh cs193v-vercel; do
+        pmq volume rm "$v"
+    done
+}
+
+# The state machine. Everything that can silently give a student the wrong container is
+# checked here.
+ensure_container() {
+    local st want_hash have_hash have_image
+    st="$(state)"
+
+    if [ "$st" = absent ]; then
+        create_container
+        return
+    fi
+
+    # A container created from a DIFFERENT copy of the course directory. Without this
+    # check, a student who downloads a fresh copy after breaking something silently gets
+    # the old container with the old mount, and their edits appear to vanish.
+    local owner_dir
+    owner_dir="$(label_of cs193v.dir)"
+    if [ -n "$owner_dir" ] && [ "$owner_dir" != "$DIR" ]; then
+        die "$(msg err.other-directory INUSE="$owner_dir" YOURS="$DIR")"
+    fi
+
+    want_hash="$(config_hash)"
+    have_hash="$(label_of cs193v.confighash)"
+    have_image="$(image_of)"
+
+    if [ -n "$have_hash" ] && [ "$have_hash" != "$want_hash" ]; then
+        printf '\n'; msg prompt.config-changed
+        if confirm "$(msg opt.keep-current)" "$(msg opt.recreate)"; then
+            remove_container; create_container; return
+        fi
+    fi
+
+    # Same prompt shape for a newer pinned image.
+    if pmq image exists "$IMAGE"; then
+        pm image inspect "$IMAGE" --format '{{.Id}}'
+        local pinned_id="$RT_OUT"
+        if [ -n "$pinned_id" ] && [ -n "$have_image" ] && [ "$pinned_id" != "$have_image" ]; then
+            printf '\n'; msg prompt.newer-image
+            if confirm "$(msg opt.keep-current-version)" "$(msg opt.update-now)"; then
+                remove_container; create_container; return
+            fi
+        fi
+    fi
+
+    case "$st" in
+        running) : ;;
+        *) info "$(msg status.starting)"
+           pmq start "$NAME" || { remove_container; create_container; } ;;
+    esac
+}
+
+open_shell() {
+    local n
+    # A non-destructive nudge: many concurrent sessions is legitimate, but it is also how
+    # an invisible memory problem starts.
+    if pm top "$NAME" 2>/dev/null; then
+        n="$(printf '%s\n' "$RT_OUT" | grep -c 'bash' || true)"
+        [ "${n:-0}" -gt 6 ] && warn "$(msg warn.many-shells N="$n")"
+    fi
+    exec podman exec -it \
+        -w /workspaces \
+        -e "TERM=$(safe_term)" \
+        -e "COLORTERM=${COLORTERM:-}" \
+        "$NAME" bash -l
+}
+
+# ─── verbs ─────────────────────────────────────────────────────────────────────
+verb_ports() {
+    [ "$(state)" = running ] || die "$(msg err.not-running)"
+    exec podman exec -it -e "TERM=$(safe_term)" "$NAME" ports
+}
+
+verb_doctor() {
+    printf '%sCS193V container report%s\n' "$C_CYAN" "$C_OFF"
+    printf '%s\n' "-------------------------------------------------------------"
+    printf '  %-16s %s\n' "platform" "$(platform) / $(uname -m)"
+    printf '  %-16s %s\n' "course dir" "$DIR"
+
+    if command -v podman >/dev/null 2>&1 && run_timeout 10 podman --version; then
+        printf '  %-16s %s\n' "podman" "$(printf '%s' "$RT_OUT" | awk '{print $NF}')"
+    else
+        printf '  %-16s %s\n' "podman" "NOT FOUND or not responding"
+        return 1
+    fi
+
+    if has_machine; then
+        pm machine list --format '{{.Name}} {{.Running}}'
+        printf '  %-16s %s\n' "machine" "${RT_OUT:-none}"
+    fi
+
+    if pm info --format '{{.Host.MemTotal}} {{.Host.CPUs}} {{.Host.RootlessNetworkCmd}}'; then
+        printf '  %-16s %s\n' "podman sees" "$RT_OUT"
+    else
+        printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
+    fi
+
+    load_args
+    printf '  %-16s %s\n' "pinned image" "${IMAGE:-<unset: dev mode>}"
+
+    local st; st="$(state)"
+    printf '  %-16s %s\n' "container" "$st"
+    if [ "$st" != absent ]; then
+        pm inspect "$NAME" --format '{{.State.StartedAt}}'
+        printf '  %-16s %s\n' "started" "$RT_OUT"
+        local hv hw; hv="$(label_of cs193v.confighash)"; hw="$(config_hash)"
+        if [ "$hv" = "$hw" ]; then printf '  %-16s %s\n' "config" "matches container.args"
+        else printf '  %-16s %s\n' "config" "STALE — run cs193v and accept the recreate prompt"; fi
+        pm inspect "$NAME" --format '{{range .Mounts}}{{if eq .Destination "/workspaces"}}{{.Source}}{{end}}{{end}}'
+        printf '  %-16s %s\n' "workspace" "${RT_OUT:-?}"
+    fi
+
+    if [ "$st" = running ]; then
+        pm exec "$NAME" sh -c 'echo "$(id -u):$(id -g)"'
+        printf '  %-16s %s (host is %s:%s)\n' "in-container uid" "$RT_OUT" "$(id -u)" "$(id -g)"
+        pm exec "$NAME" sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null'
+        printf '  %-16s %s\n' "memory limit" "${RT_OUT:-unknown}"
+        pm exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z'
+        printf '  %-16s %s\n' "zombies" "${RT_OUT:-0}"
+        pm port "$NAME"
+        printf '  %-16s %s mappings (run: cs193v ports)\n' "published" "$(printf '%s\n' "$RT_OUT" | grep -c . || echo 0)"
+        check_clock
+    fi
+    printf '%s\n' "-------------------------------------------------------------"
+    printf '%s\n' "Paste all of the above when asking course staff for help."
+}
+
+# The container CANNOT fix its own wall clock: Linux time namespaces virtualise only
+# CLOCK_MONOTONIC and CLOCK_BOOTTIME, never CLOCK_REALTIME; setting the clock needs
+# CAP_SYS_TIME, which is not in podman's default set; and the kernel checks that
+# capability against the INITIAL user namespace anyway. So detection here, remedy in
+# the VM. Symptoms all look like network faults: TLS "certificate not yet valid", apt
+# complaining about future-dated release files, auth failures.
+check_clock() {
+    local hs cs skew
+    hs="$(date +%s)"
+    pm exec "$NAME" date +%s || return 0
+    cs="$RT_OUT"
+    case "$cs" in ''|*[!0-9]*) return 0 ;; esac
+    skew=$(( cs - hs )); [ "$skew" -lt 0 ] && skew=$(( -skew ))
+    if [ "$skew" -le 5 ]; then
+        printf '  %-16s %ss\n' "clock skew" "$skew"
+        return 0
+    fi
+    printf '  %-16s %ss  %sPROBLEM%s\n' "clock skew" "$skew" "$C_YEL" "$C_OFF"
+    has_machine || return 0
+    printf '\n'; msg prompt.clock-drift SKEW="$skew"
+    if confirm "$(msg opt.leave-clock)" "$(msg opt.restart-machine)"; then
+        info "$(msg status.restarting-machine)"
+        run_timeout 120 podman machine stop || true
+        run_timeout 180 podman machine start || warn "$(msg warn.machine-restart-failed)"
+    fi
+}
+
+verb_rebuild() {
+    preflight; load_args; resolve_image
+    info "$(msg status.rebuilding)"
+    remove_container
+    create_container
+    info "$(msg status.rebuilt)"
+}
+
+verb_full_rebuild() {
+    preflight; load_args; resolve_image
+    printf '\n'; msg prompt.full-rebuild
+    if ! confirm "$(msg opt.cancel)" "$(msg opt.full-rebuild-go)"; then
+        info "$(msg status.cancelled)"; return 0
+    fi
+    remove_container
+    remove_volumes
+    create_container
+    info "$(msg status.full-rebuilt)"
+}
+
+verb_update() {
+    preflight; load_args; resolve_image
+    if [ "$IMAGE" = "$DEV_IMAGE" ]; then die "$(msg err.update-in-dev-mode)"; fi
+    info "$(msg status.pulling IMAGE="$IMAGE")"
+    if ! run_timeout 1800 podman pull --retry 10 --retry-delay 5s "$IMAGE"; then
+        die "$(msg err.pull-failed OUT="$RT_OUT")"
+    fi
+    remove_container
+    create_container
+    info "$(msg status.updated)"
+}
+
+verb_print_command() {
+    load_args
+    if [ -z "$IMAGE" ]; then IMAGE="$DEV_IMAGE"; fi
+    build_run_args
+    printf 'podman run'
+    local a
+    for a in "${RUN_ARGS[@]}"; do printf ' %s' "$a"; done
+    printf ' %s\n' "$IMAGE"
+}
+
+verb_dev_build() {
+    preflight
+    [ -f "$CONTAINERFILE" ] || die "$(msg err.no-containerfile FILE="$CONTAINERFILE")"
+    local nocache=''
+    [ "${1:-}" = "--no-cache" ] && nocache='--no-cache'
+    info "building $DEV_IMAGE from $CONTAINERFILE"
+    # shellcheck disable=SC2086
+    podman build $nocache -t "$DEV_IMAGE" -f "$CONTAINERFILE" "$DIR" || die "build failed"
+    OVERRIDE_IMAGE="$DEV_IMAGE"
+    load_args; resolve_image
+    remove_container
+    create_container
+    open_shell
+}
+
+usage() {
+    msg help.usage
+}
+
+# ─── dispatch ──────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    '')                  preflight; load_args; resolve_image; ensure_container; open_shell ;;
+    ports)               preflight; verb_ports ;;
+    doctor)              verb_doctor ;;
+    --rebuild)           verb_rebuild ;;
+    --full-rebuild)      verb_full_rebuild ;;
+    --update)            verb_update ;;
+    --dev-print-command) verb_print_command ;;
+    --dev-build)         shift; verb_dev_build "${1:-}" ;;
+    -h|--help|help)      usage ;;
+    *)                   usage; exit 2 ;;
+esac

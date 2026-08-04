@@ -1,0 +1,14 @@
+This directory is where your work goes.
+
+Inside the container it appears at /workspaces. It is the ONLY directory shared between
+the container and your own computer, which means two things worth knowing:
+
+  * Anything you keep here is safe. `cs193v --rebuild` and `cs193v --full-rebuild` never
+    touch it, because it lives on your computer rather than inside the container.
+
+  * Anything you keep here is visible to the container, and therefore to any code the
+    agent runs. Treat API keys accordingly, and prefer throwaway ones for coursework.
+
+Make a directory per project. There is no structure to conform to.
+
+This file exists only so the directory is present before the container starts.

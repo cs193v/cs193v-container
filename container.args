@@ -1,0 +1,142 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CS193V container flags.  One flag (or flag + value) per line; # starts a comment.
+#  Read by ./cs193v — see `cs193v --dev-print-command` for the exact resulting line.
+#
+#  Machine-specific values (the memory cap) live in local.args, which the installer
+#  writes and git ignores.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── The image ─────────────────────────────────────────────────────────────────
+# Pinned by MANIFEST-LIST digest, not a per-architecture digest, so one pin serves
+# both the arm64 and amd64 legs. Bumping this line is how a fix ships: students run
+# `cs193v --update`, and the launcher notices the mismatch on their next launch even
+# if they don't.
+#
+# Empty until first publish — the launcher then runs in dev mode and says so.
+IMAGE=
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  INVARIANTS — never add any of these
+#
+#    --privileged            --cap-add=SYS_ADMIN      --cap-add=SYS_PTRACE
+#    --network=host          --pid=host               --ipc=host
+#    --userns=host           --security-opt seccomp=unconfined
+#    --security-opt unmask=ALL
+#    ...and never mount a podman or docker socket.
+#
+#  Host isolation comes from rootless podman's user namespace. It does NOT come from
+#  the capability set: root owns /usr/bin and /etc, so euid 0 inside the container can
+#  tamper with the toolchain using no capability at all. Nor from AppArmor, which is
+#  not confining this container — /proc/self/attr/current reads "crun (unconfined)".
+#
+#  Also do NOT copy the devcontainer CLI's automatic --security-opt label=disable. It
+#  silently strips SELinux type enforcement for anyone on Fedora or RHEL. The launcher
+#  adds `:z` to the workspace mount alone when SELinux is enforcing.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Identity ──────────────────────────────────────────────────────────────────
+# The EXPLICIT uid=/gid= form, not bare --userns=keep-id. The host side is read from
+# getuid() at launch, so this always means "whoever ran this command" -> container
+# 1000. Bare keep-id would map the host uid to the SAME number, which breaks on macOS
+# (501) and on six-digit enterprise uids. Rootless podman structurally cannot map
+# another account's uid: newuidmap checks /etc/subuid.
+#
+# NOTE: --userns=keep-id is a HARD ERROR on a rootful connection, not a no-op. The
+# launcher preflights for rootless and explains, rather than emitting a raw error.
+--userns=keep-id:uid=1000,gid=1000
+--user 1000:1000
+
+# ─── Networking ────────────────────────────────────────────────────────────────
+# Explicit, even though pasta is the rootless default from podman 5.0 — this is immune
+# to a stale ~/.config/containers/containers.conf naming slirp4netns or a bridge.
+--network=pasta
+
+# DO NOT ADD  --network=pasta:--host-lo-to-ns-lo
+#   It is a real flag and it works on native Linux and WSL2 (verified in Ubuntu
+#   26.04's passt snapshot: fwd.c rewrites the destination to loopback, and it is not
+#   deprecated). But it is SILENTLY INERT on macOS, because podman inside the machine
+#   VM strips HostIP and gvproxy dials 192.168.127.2, so the splice path is never
+#   taken. Shipping it would make identical student code work on Ubuntu and Windows
+#   and fail on Macs, which is the worst kind of divergence.
+#
+# DO NOT ADD  --network=pasta:-t,auto   (or any -t <addr>/auto form)
+#   Three independent failures on the passt Ubuntu 26.04 ships: `127.0.0.1/auto` does
+#   not parse (that grammar landed upstream three months after Ubuntu's snapshot);
+#   `-t auto` together with `-p` is FATAL, and podman appends its -p-derived -t after
+#   user options so the container never starts; and the bare form registers a NULL bind
+#   address across ports 1-65535, publishing every listening container port — including
+#   Claude Code's own sockets — to the local network, with no way to pin it to loopback.
+
+# ─── Published ports ───────────────────────────────────────────────────────────
+# Ports are frozen at container-create time; podman cannot add a mapping to a running
+# container. So this is a fixed set, and `ports` inside the container diagnoses the two
+# failure modes it creates.
+#
+# The host side is pinned to 127.0.0.1 on ALL THREE platforms — including Windows.
+# That prefix IS reachable from a Windows browser and is the documented fix for the
+# unprefixed form failing (podman#17972, #22562). Dropping it would bind 0.0.0.0
+# inside the distro, trigger the Defender prompt (declined by default on Public
+# networks like dorm wifi), and expose the student's dev server to the network.
+#
+# All >= 1024 (rootless podman refuses privileged host ports) and avoiding 5000 and
+# 7000, which macOS AirPlay Receiver occupies.
+#
+# Taught as "the 173 family": 4173 preview, 5173 vite, 6173 spare.
+-p 127.0.0.1:3000-3009:3000-3009      # next, express, bare node, serve, docusaurus
+-p 127.0.0.1:4173-4176:4173-4176      # vite preview
+-p 127.0.0.1:5173-5179:5173-5179      # vite dev — the range auto-increment lands in
+-p 127.0.0.1:6173-6182:6173-6182      # SPARE / assign-on-demand
+-p 127.0.0.1:8000-8009:8000-8009      # python http.server, django, uvicorn
+-p 127.0.0.1:8080-8084:8080-8084      # webpack-dev-server, http-server, misc
+
+# ─── Persistent state ──────────────────────────────────────────────────────────
+# Four volumes, holding logins only. No package caches: node_modules lives on the bind
+# mount and survives a rebuild anyway, so caches would not make --rebuild cheap — and a
+# persisted cache would survive the rebuild meant to clear it.
+#
+# The mount targets are pre-created student-owned in the Containerfile. That is what
+# makes podman's auto-chown work and lets the entrypoint run with no root phase.
+-v cs193v-claude:/home/student/.claude
+-v cs193v-claude-json:/home/student/.claude-json
+-v cs193v-gh:/home/student/.config/gh
+-v cs193v-vercel:/home/student/.local/share/com.vercel.cli
+
+# ─── Environment ───────────────────────────────────────────────────────────────
+# Consumed by the in-container `ports` command. Kept in step with the -p lines above;
+# `cs193v doctor` warns if they disagree.
+-e CS193V_PORTS=3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Deliberately ABSENT — each of these was considered and rejected
+#
+#  --cap-drop=ALL / --security-opt=no-new-privileges
+#      Mutually exclusive with sudo by construction: /usr/bin/sudo is setuid, and
+#      no-new-privileges makes execve ignore setuid bits. They would also buy nothing,
+#      since root owns the tamper targets and needs no capability to modify them.
+#
+#  --memory-swap
+#      The "equal to --memory" idiom is DOCKER's semantics. podman-run(1) requires the
+#      swap value to be strictly larger, so shipping it may make the container refuse
+#      to start — every student seeing an opaque failure on the flag meant to help.
+#
+#  --pids-limit (tighter than podman's 2048 default)
+#      Exhaustion does not kill the container, it WEDGES it: `podman exec` must fork
+#      into the same cgroup, so the launcher cannot get back in. It does not self-heal.
+#
+#  --cpus
+#      The cpu controller is frequently not delegated to rootless users, so this is
+#      silently ignored or errors depending on the distro.
+#
+#  --tmpfs /tmp
+#      The devcontainer's --tmpfs runArg was a workaround for buildah#6503 during
+#      FEATURE installs. There are no features here. /tmp on the writable layer means
+#      no RAM pressure and no size to tune, and --rebuild clears it anyway.
+#
+#  --init
+#      Bind-mounts the HOST's catatonit, which Ubuntu's podman package only Recommends
+#      — so a host missing it fails to start the container at all. PID 1 is a shell
+#      keep-alive loop in the image instead; see files/entrypoint.sh.
+#
+#  --shm-size
+#      Only mattered for Chrome, which is not installed.
+# ═══════════════════════════════════════════════════════════════════════════════
