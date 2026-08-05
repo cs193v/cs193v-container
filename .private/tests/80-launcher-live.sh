@@ -52,7 +52,7 @@ LB() { launcher_tty_repo 'exit\n' "$@"; }
 # This used to hang forever against real podman: -t allocates a pty and a pty never
 # delivers EOF, so the container's `bash -l` waited for input that could not arrive. Asserted
 # against real podman as well as the shim, because the pty is the real thing here.
-podman rm -f cs193v >/dev/null 2>&1 || true
+podman rm -f "$NAME" >/dev/null 2>&1 || true
 T0="$(date +%s)"
 out="$(./cs193v </dev/null 2>&1)"; rc=$?
 T1="$(date +%s)"
@@ -65,8 +65,8 @@ assert_says "noterm:explains-itself" "could not open a shell" "$out"
 assert_eq   "noterm:exits-nonzero" "1" "$rc"
 # The container was still created, which is what the message promises.
 assert_eq "noterm:container-is-up-anyway" "running" \
-          "$(podman inspect cs193v --format '{{.State.Status}}' 2>&1)"
-podman rm -f cs193v >/dev/null 2>&1 || true
+          "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
+podman rm -f "$NAME" >/dev/null 2>&1 || true
 
 # With a real terminal the same invocation opens a shell and returns promptly.
 T0="$(date +%s)"
@@ -76,33 +76,33 @@ if [ "$((T1 - T0))" -lt 60 ]; then pass "live:pty-launch-opens-a-shell-and-retur
 else fail "live:pty-launch-opens-a-shell-and-returns" "took $((T1 - T0))s"; fi
 record "perf:first-launch-seconds" "$((T1 - T0))"
 assert_eq "live:container-is-running-after-first-launch" "running" \
-          "$(podman inspect cs193v --format '{{.State.Status}}' 2>&1)"
+          "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 assert_eq "live:exactly-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
 
 # The mount really is the student's projects/ directory, on both sides.
 assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
-    "$(podman inspect cs193v \
+    "$(podman inspect "$NAME" \
        --format '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
 
 # keep-id in practice: a file the container creates is owned by the student on the host.
-podman exec cs193v sh -c 'echo live > /home/student/projects/.vt-live'
+podman exec "$NAME" sh -c 'echo live > /home/student/projects/.vt-live'
 assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(stat -c %u "$REPO/projects/.vt-live")"
 rm -f "$REPO/projects/.vt-live"
 
 # ─── idempotency and concurrency  (§2.2, §A.10) ────────────────────────────────
-before="$(podman inspect cs193v --format '{{.Id}}')"
+before="$(podman inspect "$NAME" --format '{{.Id}}')"
 i=0
 while [ "$i" -lt 20 ]; do LB >/dev/null 2>&1; i=$((i + 1)); done
 assert_eq "live:20-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
-assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect cs193v --format '{{.Id}}')"
+assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect "$NAME" --format '{{.Id}}')"
 
 # Four shells at once is legitimate and common — one per terminal window.
 for i in 1 2 3 4; do ( LB >/dev/null 2>&1 & ) ; done
 sleep 6
 assert_eq "live:concurrent-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
-          "$(podman inspect cs193v --format '{{.Id}}')"
-record "live:exec-sessions-after-four-shells" "$(podman top cs193v 2>/dev/null | wc -l | tr -d ' ')"
+          "$(podman inspect "$NAME" --format '{{.Id}}')"
+record "live:exec-sessions-after-four-shells" "$(podman top "$NAME" 2>/dev/null | wc -l | tr -d ' ')"
 
 # ─── the `podman start` config trap  (§2.5) ────────────────────────────────────
 # Refuse to start if container.args is already dirty. An earlier interrupted run leaving a
@@ -127,16 +127,16 @@ assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-prin
 out="$(LB)"
 assert_says "drift:prompt-is-shown" "settings have changed" "$out"
 assert_eq "drift:declining-keeps-the-same-container" "$before" \
-          "$(podman inspect cs193v --format '{{.Id}}')"
-if podman port cs193v | grep -q 9998; then
+          "$(podman inspect "$NAME" --format '{{.Id}}')"
+if podman port "$NAME" | grep -q 9998; then
     fail "drift:declining-does-not-apply-the-flag" "9998 is published without a recreate"
 else
     pass "drift:declining-does-not-apply-the-flag"
 fi
 # ...and a plain `podman start` must NOT pick it up either, which is the trap itself.
-podman stop cs193v >/dev/null 2>&1
-podman start cs193v >/dev/null 2>&1
-if podman port cs193v | grep -q 9998; then
+podman stop "$NAME" >/dev/null 2>&1
+podman start "$NAME" >/dev/null 2>&1
+if podman port "$NAME" | grep -q 9998; then
     fail "drift:podman-start-ignores-new-flags" \
          "podman start DID apply the new port — the confighash machinery may be unnecessary
 on this podman version, which is worth knowing"
@@ -146,7 +146,7 @@ fi
 
 # Accepting it must actually recreate with the flag.
 out="$(launcher_tty_repo '\033[B\nexit\n')"
-if podman port cs193v | grep -q 9998; then
+if podman port "$NAME" | grep -q 9998; then
     pass "drift:accepting-applies-the-new-flag"
 else
     fail "drift:accepting-applies-the-new-flag" \
@@ -154,7 +154,7 @@ else
 frozen at first run and edits to $REPO/.config/container.args never reach them"
 fi
 assert_ne "drift:accepting-created-a-new-container" "$before" \
-          "$(podman inspect cs193v --format '{{.Id}}')"
+          "$(podman inspect "$NAME" --format '{{.Id}}')"
 
 edit_remove $REPO/.config/container.args '9998'
 if cmp -s "$TMP/ca.bak" $REPO/.config/container.args; then
@@ -165,7 +165,7 @@ else
     cp "$TMP/ca.bak" $REPO/.config/container.args
 fi
 L --rebuild >/dev/null 2>&1
-assert_eq "drift:restored-config-has-46-ports" "46" "$(podman port cs193v | wc -l | tr -d ' ')"
+assert_eq "drift:restored-config-has-46-ports" "46" "$(podman port "$NAME" | wc -l | tr -d ' ')"
 
 # ─── two copies of the course directory  (§2.7) ────────────────────────────────
 rm -rf /tmp/vt-copy
@@ -181,18 +181,18 @@ rm -rf /tmp/vt-copy
 # ─── --rebuild preserves logins  (§2.3) ────────────────────────────────────────
 # A marker inside the ~/.claude volume stands in for a real login, so this can be checked
 # without one.
-podman exec cs193v sh -c 'echo marker > /home/student/.claude/.vt-marker'
-podman exec cs193v sh -c 'echo marker > /home/student/.config/gh/.vt-marker'
+podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker'
+podman exec "$NAME" sh -c 'echo marker > /home/student/.config/gh/.vt-marker'
 L --rebuild >/dev/null 2>&1
 assert_eq "rebuild:claude-volume-survives" "marker" \
-          "$(podman exec cs193v cat /home/student/.claude/.vt-marker 2>&1)"
+          "$(podman exec "$NAME" cat /home/student/.claude/.vt-marker 2>&1)"
 assert_eq "rebuild:gh-volume-survives" "marker" \
-          "$(podman exec cs193v cat /home/student/.config/gh/.vt-marker 2>&1)"
+          "$(podman exec "$NAME" cat /home/student/.config/gh/.vt-marker 2>&1)"
 # ...and things installed IN the container do not, which is the point of --rebuild.
-podman exec cs193v sh -c 'echo x > /tmp/.vt-ephemeral'
+podman exec "$NAME" sh -c 'echo x > /tmp/.vt-ephemeral'
 L --rebuild >/dev/null 2>&1
 assert_fail "rebuild:container-filesystem-is-reset" \
-            sh -c "podman exec cs193v test -f /tmp/.vt-ephemeral"
+            sh -c "podman exec ${NAME} test -f /tmp/.vt-ephemeral"
 # projects/ is on the host, so it is untouched by construction — assert it anyway.
 echo keep > "$REPO/projects/.vt-keep"
 L --rebuild >/dev/null 2>&1
@@ -202,16 +202,16 @@ rm -f "$REPO/projects/.vt-keep"
 # The policy files live in /etc, in the image layer, precisely so a rebuild restores them —
 # unlike anything under ~/.claude, which is a volume seeded once and never refreshed.
 assert_ok "rebuild:claude-policy-survives" \
-          sh -c "podman exec cs193v test -f /etc/claude-code/CLAUDE.md -a -f /etc/claude-code/managed-settings.json"
+          sh -c "podman exec ${NAME} test -f /etc/claude-code/CLAUDE.md -a -f /etc/claude-code/managed-settings.json"
 
 # ─── --full-rebuild  (§2.4, §9.2) — destructive, opt-in ────────────────────────
 if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
-    podman exec cs193v sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
+    podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
     printf '%b' '\033[B\n' | script -q -c "./cs193v --full-rebuild" /dev/null >/dev/null 2>&1
     assert_fail "full-rebuild:volume-contents-are-gone" \
-                sh -c "podman exec cs193v test -f /home/student/.claude/.vt-marker"
+                sh -c "podman exec ${NAME} test -f /home/student/.claude/.vt-marker"
     assert_eq "full-rebuild:container-is-running-again" "running" \
-              "$(podman inspect cs193v --format '{{.State.Status}}' 2>&1)"
+              "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 else
     skip "full-rebuild:volume-contents-are-gone" \
          "destructive — it deletes the claude/gh/vercel login volumes. Re-run with CS193V_DESTRUCTIVE=1"
@@ -262,18 +262,34 @@ assert_contains "ports-verb:runs-the-in-container-tool" "published:" "$(L ports)
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
 containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:containers" "$containers"
-assert_eq "cleanup:only-the-cs193v-container-exists" "cs193v" \
-          "$(printf '%s' "$containers" | sed 's/ *$//')"
+# This used to assert that the ONLY container on the machine was cs193v, which is how it
+# caught a leak: every throwaway container the suite starts uses --rm and gets a
+# podman-generated name, so a stray shows up as an extra entry. That breaks the moment a
+# second CS193V_INSTANCE exists on the machine, because a colleague's cs193v-<instance> is
+# then legitimately present and is not this suite's leak to report. So exclude the cs193v
+# family and assert the remainder is empty — same leak detection, no false alarm.
+strays="$(podman ps -a --format '{{.Names}}' | grep -vxF "$NAME" \
+          | grep -vE '^cs193v($|-)' | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "cleanup:no-stray-containers" "" "$(printf '%s' "$strays" | sed 's/ *$//')"
+assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exists '$NAME'"
+
 vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:volumes" "$vols"
+# Same scoping. The four are asserted by exact name so a MISSING one still fails, and the
+# instance suffix comes from $NAME so the expectation tracks whichever instance is running.
+mine="$(podman volume ls --format '{{.Name}}' \
+        | grep -xE "$NAME-(claude|claude-json|gh|vercel)" | LC_ALL=C sort | tr '\n' ' ')"
 assert_eq "cleanup:exactly-the-four-cs193v-volumes" \
-          "cs193v-claude cs193v-claude-json cs193v-gh cs193v-vercel" \
-          "$(printf '%s' "$vols" | sed 's/ *$//')"
+          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-vercel" \
+          "$(printf '%s' "$mine" | sed 's/ *$//')"
+stray_vols="$(podman volume ls --format '{{.Name}}' | grep -vE '^cs193v($|-)' \
+              | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "cleanup:no-stray-volumes" "" "$(printf '%s' "$stray_vols" | sed 's/ *$//')"
 
 # ─── §A.13 performance baselines — recorded, never asserted ────────────────────
 T0="$(date +%s%N)"; L --dev-print-command >/dev/null 2>&1; T1="$(date +%s%N)"
 record "perf:launcher-overhead-ms" "$(( (T1 - T0) / 1000000 ))"
-T0="$(date +%s%N)"; podman exec cs193v true; T1="$(date +%s%N)"
+T0="$(date +%s%N)"; podman exec "$NAME" true; T1="$(date +%s%N)"
 record "perf:podman-exec-overhead-ms" "$(( (T1 - T0) / 1000000 ))"
 T0="$(date +%s)"; L --rebuild >/dev/null 2>&1; T1="$(date +%s)"
 record "perf:rebuild-seconds" "$((T1 - T0))"

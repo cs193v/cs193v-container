@@ -26,8 +26,8 @@ cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
 cleanup() {
     # Never leave stray servers or scratch files behind in the student's projects/.
-    podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-    podman exec cs193v pkill -f inotifywait      >/dev/null 2>&1 || true
+    podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+    podman exec "$NAME" pkill -f inotifywait      >/dev/null 2>&1 || true
     rm -rf "$TMP" "$REPO"/projects/.vt-* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -95,19 +95,22 @@ assert_contains "flag:userns-keep-id-explicit" "--userns=keep-id:uid=1000,gid=10
 # Every published port must bind loopback only. An unprefixed -p binds 0.0.0.0 inside the
 # distro, exposes the student's dev server to dorm wifi, and triggers the Windows Defender
 # prompt (declined by default on Public networks).
-hostips="$(podman inspect cs193v --format '{{json .HostConfig.PortBindings}}' \
+hostips="$(podman inspect "$NAME" --format '{{json .HostConfig.PortBindings}}' \
            | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 print(" ".join(sorted({b["HostIp"] for v in d.values() for b in v})))')"
 assert_eq "ports:host-side-is-loopback-only" "127.0.0.1" "$hostips"
-assert_eq "ports:46-mappings" "46" "$(podman port cs193v | wc -l | tr -d ' ')"
+assert_eq "ports:46-mappings" "46" "$(podman port "$NAME" | wc -l | tr -d ' ')"
 
 mounts="$(I '{{json .Mounts}}')"
 assert_contains "mount:workspace-bind-points-at-projects" "$REPO/projects" "$mounts"
-for v in cs193v-claude cs193v-claude-json cs193v-gh cs193v-vercel; do
-    assert_contains "mount:volume-$v" "$v" "$mounts"
+# Base names, matching the launcher's remove_volumes: the instance suffix lives in $NAME, so
+# these read cs193v-claude for a student and cs193v-<instance>-claude for a developer. The
+# assertion NAME stays instance-free so results files compare across instances.
+for v in claude claude-json gh vercel; do
+    assert_contains "mount:volume-cs193v-$v" "$NAME-$v" "$mounts"
 done
-nvol="$(podman inspect cs193v --format '{{json .Mounts}}' \
+nvol="$(podman inspect "$NAME" --format '{{json .Mounts}}' \
         | python3 -c 'import json,sys; print(sum(1 for m in json.load(sys.stdin) if m["Type"]=="volume"))')"
 assert_eq "mount:exactly-four-volumes" "4" "$nvol"
 
@@ -123,7 +126,7 @@ assert_eq "identity:hostname" "cs193v-development" "$(E 'hostname')"
 # The banner needs a pty: it is guarded to interactive shells so that `podman exec <cmd>`
 # and this suite's own non-interactive calls do not get a screenful of box drawing.
 pty_login() {                     # pty_login KEYS -> everything the session printed
-    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it cs193v bash -l" /dev/null 2>&1
+    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it ${NAME} bash -l" /dev/null 2>&1
 }
 
 out="$(pty_login 'exit\n')"
@@ -219,14 +222,14 @@ record "kernel:free-vs-cgroup" \
 # The corrected colour check. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so the launcher forwards it explicitly — and so must this.
 assert_eq "term:256-colours-with-forwarded-TERM" "256" \
-          "$(podman exec -it -e TERM=xterm-256color cs193v tput colors 2>/dev/null | tr -d '\r')"
+          "$(podman exec -it -e TERM=xterm-256color "$NAME" tput colors 2>/dev/null | tr -d '\r')"
 record "term:colours-without-forwarding" \
-       "$(podman exec -it cs193v tput colors 2>/dev/null | tr -d '\r')"
+       "$(podman exec -it "$NAME" tput colors 2>/dev/null | tr -d '\r')"
 
 # -e at create time must reach every later exec session, not just the first process.
 assert_contains "env:CS193V_PORTS-visible-in-exec" "3000-3009" "$(E 'printenv CS193V_PORTS')"
-assert_ok "net:dns-resolves" sh -c "podman exec cs193v getent hosts registry.npmjs.org"
-assert_ok "net:https-egress-works" sh -c "podman exec cs193v curl -fsS -o /dev/null --max-time 20 https://registry.npmjs.org/"
+assert_ok "net:dns-resolves" sh -c "podman exec ${NAME} getent hosts registry.npmjs.org"
+assert_ok "net:https-egress-works" sh -c "podman exec ${NAME} curl -fsS -o /dev/null --max-time 20 https://registry.npmjs.org/"
 
 # PID 1 must be the reaping keep-alive loop, not `sleep infinity` — sleep never calls
 # wait(), so every orphan becomes a permanent zombie holding a pid slot against pids.max.
@@ -272,9 +275,9 @@ while True:
         except OSError:
             pass
 PY
-podman cp "$TMP/portprobe.py" cs193v:/tmp/cs193v-portprobe.py
+podman cp "$TMP/portprobe.py" "$NAME":/tmp/cs193v-portprobe.py
 SPEC="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/.*-p 127\.0\.0\.1:\([0-9]*-[0-9]*\):.*/\1/p' | paste -sd, -)"
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "$SPEC" 0.0.0.0
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "$SPEC" 0.0.0.0
 sleep 3
 
 ALL="$(printf '%s' "$SPEC" | tr ',' ' ' | tr '-' ' ' \
@@ -297,9 +300,9 @@ fi
 
 # Ports outside the published set must be refused, whatever they are bound to. This is the
 # second of the two invisible-from-inside failure modes.
-podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "4000,7000,8500,9100,3100" 0.0.0.0
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000,7000,8500,9100,3100" 0.0.0.0
 sleep 2
 reachable=""
 for p in 4000 7000 8500 9100 3100; do
@@ -311,13 +314,13 @@ if [ -z "$reachable" ]; then
 else
     fail "ports:unpublished-ports-are-refused" "unexpectedly reachable:$reachable"
 fi
-podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1
 
 # THE lesson the course teaches: a loopback-bound server inside is unreachable from the
 # host, because podman's forwarder delivers to the container's eth0, never its lo — while
 # the server's log still prints "Local: http://localhost:5173/".
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1
 sleep 2
 c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 if [ "$c" = 000 ]; then
@@ -327,11 +330,11 @@ else
          "got HTTP $c — a 127.0.0.1-bound server IS reachable on this platform, so the
 course's central ports lesson and $PRIVATE/CONTAINER-DESIGN.md's diagram are wrong here"
 fi
-podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1
 
 # The host side must be loopback-only in reality, not just in the flag.
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "3000" 0.0.0.0
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 0.0.0.0
 sleep 2
 listen="$( (ss -ltn 2>/dev/null || netstat -an) | grep ':3000' || true)"
 record "ports:host-listen-line" "$listen"
@@ -350,11 +353,11 @@ fi
 # The in-container `ports` command must diagnose each state correctly against real sockets.
 # Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound and the
 # loopback diagnosis has nothing to diagnose.
-podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 2
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1   # published, loopback
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "5174" 0.0.0.0     # published, wildcard
-podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "4000" 0.0.0.0     # unpublished
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1   # published, loopback
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "5174" 0.0.0.0     # published, wildcard
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000" 0.0.0.0     # unpublished
 sleep 3
 pout="$(E 'ports || true')"
 record "ports:diagnostic-output" "$(printf '%s' "$pout" | tr '\n' '|')"
@@ -362,7 +365,7 @@ assert_match "ports:diagnoses-published-wildcard-as-OK"  '5174 .*OK'            
 assert_match "ports:diagnoses-unpublished"               '4000 .*NOT PUBLISHED' "$pout"
 assert_match "ports:diagnoses-loopback-as-unreachable"   '3000 .*UNREACHABLE'   "$pout"
 assert_contains "ports:explains-why-0.0.0.0" "separate machine" "$pout"
-podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
@@ -374,7 +377,7 @@ assert_eq "files:container-write-readable-on-host" "hi" "$(cat "$REPO/projects/.
 
 echo "from-host" > "$REPO/projects/.vt-h"
 assert_ok "files:container-can-write-a-host-created-file" \
-          sh -c "podman exec cs193v sh -c 'echo more >> /home/student/projects/.vt-h'"
+          sh -c "podman exec ${NAME} sh -c 'echo more >> /home/student/projects/.vt-h'"
 assert_eq "files:container-sees-host-content" "from-host" "$(E 'head -1 /home/student/projects/.vt-h')"
 assert_eq "files:host-sees-container-append" "more" "$(tail -1 "$REPO/projects/.vt-h")"
 
@@ -393,7 +396,7 @@ record "files:case-sensitivity" \
 # the container, so this is what a dev server's hot reload depends on.
 if E 'command -v inotifywait' >/dev/null 2>&1; then
     E 'rm -f /tmp/vt-in'
-    podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+    podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
     sleep 1; E 'echo x >> /home/student/projects/.vt-c'; sleep 2
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then pass "files:inotify-fires-for-container-side-edits"
     else fail "files:inotify-fires-for-container-side-edits" \
@@ -402,14 +405,14 @@ if E 'command -v inotifywait' >/dev/null 2>&1; then
     # Host-side edits are expected NOT to fire on macOS and WSL. Recorded, because it
     # decides what CONTAINER-DESIGN.md's "known rough edges" must say.
     E 'rm -f /tmp/vt-in'
-    podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+    podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
     sleep 1; echo y >> "$REPO/projects/.vt-c"; sleep 3
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then
         record "files:inotify-for-host-side-edits" "FIRES"
     else
         record "files:inotify-for-host-side-edits" "DOES NOT FIRE"
     fi
-    podman exec cs193v pkill -f inotifywait >/dev/null 2>&1 || true
+    podman exec "$NAME" pkill -f inotifywait >/dev/null 2>&1 || true
 else
     record "files:inotify" "inotify-tools not installed in the container; run: sudo apt-get install -y inotify-tools"
 fi
@@ -443,7 +446,7 @@ except MemoryError:
     record "limits:oom-behaviour" "$(printf '%s' "$oom" | tr '\n' ' ')"
     assert_match "limits:allocation-loop-is-stopped" 'MemoryError|rc=(137|1|139)' "$oom"
     assert_eq "limits:container-survives-an-oom" "running" "$(I '{{.State.Status}}')"
-    assert_ok "limits:launcher-can-still-get-in-after-an-oom" sh -c "podman exec cs193v true"
+    assert_ok "limits:launcher-can-still-get-in-after-an-oom" sh -c "podman exec ${NAME} true"
 else
     skip "limits:allocation-loop-is-stopped" \
          "no memory cap in force (cgroup memory.max=$cg_mem) — running an unbounded
@@ -452,13 +455,13 @@ allocation loop would exhaust the HOST, not the container"
     skip "limits:launcher-can-still-get-in-after-an-oom" "no memory cap in force"
 fi
 
-# The pids limit, on a DISPOSABLE container. NEVER fork-bomb cs193v: pids exhaustion wedges
+# The pids limit, on a DISPOSABLE container. NEVER fork-bomb the live one: pids exhaustion wedges
 # it beyond `podman exec`'s reach and does not self-heal, so this would take the rest of
 # the suite down with it.
 # Once the limit bites, the shell cannot fork to run `echo` either — so "Cannot fork" IS
 # the success signal, and expecting a tidy "forks=N" report back from a shell that has run
 # out of processes was never going to work.
-forks="$(podman run --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-localhost/cs193v:dev}" sh -c \
+forks="$(podman run --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" sh -c \
     'i=0; while sleep 30 & do i=$((i+1)); [ $i -gt 200 ] && break; done; echo "forks=$i"' 2>&1 | tail -2)"
 record "limits:pids-limit-outcome" "$(printf '%s' "$forks" | tr '\n' ' ')"
 assert_match "limits:pids-limit-is-enforced" 'Cannot fork|forks=[0-9]+' "$forks"
@@ -476,4 +479,4 @@ case "$forks" in
 esac
 # And the real container must NOT be the one that hit the limit: pids exhaustion wedges a
 # container beyond `podman exec`'s reach and does not self-heal.
-assert_ok "limits:cs193v-itself-is-still-reachable" sh -c "podman exec cs193v true"
+assert_ok "limits:cs193v-itself-is-still-reachable" sh -c "podman exec ${NAME} true"

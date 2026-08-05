@@ -25,7 +25,7 @@ require_cmd script "needed to give the exec client a pty, as a real terminal wou
 SRV='python3 -m http.server 3000 --bind 0.0.0.0'
 MATRIX=""
 
-cleanup() { podman exec cs193v pkill -f 'http.server 3000' >/dev/null 2>&1 || true; }
+cleanup() { podman exec "$NAME" pkill -f 'http.server 3000' >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
@@ -33,19 +33,19 @@ probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
     cleanup; sleep 1
     # A pty, because that is what a terminal window gives it — pty teardown is one of the
     # candidate mechanisms for the server dying.
-    script -q -c "podman exec -it cs193v sh -c '$cmd'" /dev/null >/dev/null 2>&1 &
+    script -q -c "podman exec -it ${NAME} sh -c '$cmd'" /dev/null >/dev/null 2>&1 &
     local client=$!
     sleep 3
     kill -9 "$client" 2>/dev/null          # <-- the window being closed
     wait "$client" 2>/dev/null || true
     sleep 3
 
-    PROBE_ALIVE="$(podman exec cs193v sh -c \
+    PROBE_ALIVE="$(podman exec "$NAME" sh -c \
         'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
     local ppid fd1 http
-    ppid="$(podman exec cs193v sh -c \
+    ppid="$(podman exec "$NAME" sh -c \
         'p=$(pgrep -f "http.server 3000" | head -1); [ -n "$p" ] && awk "{print \$4}" /proc/$p/stat' 2>/dev/null)"
-    fd1="$(podman exec cs193v sh -c \
+    fd1="$(podman exec "$NAME" sh -c \
         'p=$(pgrep -f "http.server 3000" | head -1); [ -n "$p" ] && readlink /proc/$p/fd/1' 2>/dev/null)"
     http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 
@@ -68,12 +68,12 @@ SETSID_ALIVE="$PROBE_ALIVE"
 
 # Without -it, to isolate whether pty teardown is the mechanism rather than SIGHUP itself.
 cleanup; sleep 1
-podman exec cs193v sh -c "$SRV" >/dev/null 2>&1 &
+podman exec "$NAME" sh -c "$SRV" >/dev/null 2>&1 &
 NOTTY_CLIENT=$!
 sleep 3
 kill -9 "$NOTTY_CLIENT" 2>/dev/null; wait "$NOTTY_CLIENT" 2>/dev/null || true
 sleep 3
-NOTTY_ALIVE="$(podman exec cs193v sh -c \
+NOTTY_ALIVE="$(podman exec "$NAME" sh -c \
     'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
 record "sighup:no-tty" "alive=$NOTTY_ALIVE"
 MATRIX="$MATRIX
@@ -99,14 +99,14 @@ fi
 # Whatever the outcome, the container must not be damaged by a client dying — that happens
 # every time anyone closes a window.
 assert_eq "sighup:container-survives-the-client-dying" "running" "$(I '{{.State.Status}}')"
-assert_ok "sighup:launcher-can-still-attach" sh -c "podman exec cs193v true"
+assert_ok "sighup:launcher-can-still-attach" sh -c "podman exec ${NAME} true"
 # Killed clients are the normal case, so their leftovers must be reaped rather than
 # accumulate against pids.max and eventually wedge the container.
 sleep 2
 # `grep -c` prints 0 AND exits 1 when nothing matches, so a trailing `|| echo 0` in the
 # HOST shell would append a second line and break the integer comparison. Keep the
 # fallback inside the container's shell instead.
-z="$(podman exec cs193v sh -c 'ps -eo stat --no-headers | grep -c Z || true' 2>/dev/null)"
+z="$(podman exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z || true' 2>/dev/null)"
 z="$(printf '%s' "$z" | head -1 | tr -d ' \r')"
 record "sighup:zombies-after-five-killed-clients" "$z"
 if [ "${z:-0}" -le 2 ]; then

@@ -13,6 +13,17 @@
 # Each assertion prints its own line as it happens, so a hanging suite still shows you
 # how far it got. run-tests.sh only aggregates.
 
+# ─── the instance under test ───────────────────────────────────────────────────
+# Mirrors ./cs193v's CS193V_INSTANCE suffix, so a developer with their own instance runs
+# this suite against THEIR container instead of a colleague's. Every suite refers to
+# "$NAME" rather than a literal, and the image default is suffixed the same way the
+# launcher's DEV_IMAGE is. Unset -> plain "cs193v", byte-identical to before.
+NAME="cs193v${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
+# The dev image tag, suffixed the same way. Defined once here because three places used to
+# spell the default out, and a suffixed instance would have missed whichever one drifted.
+TEST_IMAGE_DEFAULT="localhost/cs193v:dev${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
+export NAME TEST_IMAGE_DEFAULT
+
 # ─── output ────────────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     A_GRN=$(printf '\033[32m'); A_RED=$(printf '\033[1;31m')
@@ -171,7 +182,7 @@ require_podman() {
 
 require_image() {                     # require_image  -> exports TEST_IMAGE
     require_podman
-    TEST_IMAGE="${CS193V_TEST_IMAGE:-localhost/cs193v:dev}"
+    TEST_IMAGE="${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}"
     export TEST_IMAGE
     if ! podman image exists "$TEST_IMAGE" 2>/dev/null; then
         fail "require:image" "The image $TEST_IMAGE does not exist.
@@ -181,10 +192,10 @@ Build it first:  ./cs193v --dev-build
     fi
 }
 
-require_running() {                   # require_running  -> the cs193v container is up
+require_running() {                   # require_running  -> the container under test is up
     require_podman
-    if [ "$(podman inspect cs193v --format '{{.State.Status}}' 2>/dev/null)" != running ]; then
-        fail "require:running" "The cs193v container is not running.
+    if [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" != running ]; then
+        fail "require:running" "The $NAME container is not running.
 Start it first:  ./cs193v --rebuild"
         exit 1
     fi
@@ -201,9 +212,9 @@ REPO="$(cd -- "$PRIVATE/.." && pwd -P)"
 export TESTS_DIR PRIVATE REPO
 
 # In-container and throwaway-container runners, matching VERIFICATION.md's E() and R().
-E() { podman exec cs193v sh -c "$1" 2>&1; }
-R() { podman run --rm --entrypoint sh "${TEST_IMAGE:-localhost/cs193v:dev}" -c "$1" 2>&1; }
-I() { podman inspect cs193v --format "$1" 2>&1; }
+E() { podman exec "$NAME" sh -c "$1" 2>&1; }
+R() { podman run --rm --entrypoint sh "${TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" -c "$1" 2>&1; }
+I() { podman inspect "$NAME" --format "$1" 2>&1; }
 
 # A scratch directory per suite, cleaned up on exit.
 new_tmpdir() {

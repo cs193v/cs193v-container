@@ -69,6 +69,38 @@ Four things need real values:
 `--dev-build` needs no registry and no published image, so all of this works before
 anything is pushed.
 
+### Two people on one computer: `CS193V_INSTANCE`
+
+By default every checkout on a machine shares the same container (`cs193v`), the same dev
+image (`localhost/cs193v:dev`) and the same four volumes. Two people developing at once
+therefore collide, and not cleanly: whoever ran `--dev-build` last owns the container the
+other is about to shell into, and either one's `--full-rebuild` deletes the other's logins.
+
+Set `CS193V_INSTANCE` to give yourself an independent set of all of them:
+
+```
+export CS193V_INSTANCE=yourname
+./cs193v --dev-build              # builds localhost/cs193v:dev-yourname
+./cs193v doctor                   # reports container cs193v-yourname
+```
+
+It suffixes the container name, the dev image tag and all four volume names together —
+partial suffixing would be worse than none, since `--full-rebuild` would still cross
+instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
+suffixed: those are already per-directory.
+
+**Published host ports are not namespaced by it, and cannot be.** The `-p` lines bind fixed
+host ports, so two instances compete for the same 46 and the second one to start fails at
+`podman run` — before it is a container at all. `.config/local.args` cannot get you out of
+this, because it is *appended* to `container.args`: a second set of `-p` lines adds
+mappings rather than replacing them. Until then, only one instance on a machine can be
+running at a time; stop the other one first, or work against a container you created by
+hand with no `-p` at all.
+
+The test suite honours `CS193V_INSTANCE` too, so `run-tests.sh` exercises your instance
+rather than a colleague's. With the variable unset, every name is byte-identical to what it
+was before — a student never sets it.
+
 ## Shipping a fix mid-quarter
 
 1. Edit the `Containerfile`; push to `main`. CI builds both architectures and prints the

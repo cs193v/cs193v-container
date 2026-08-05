@@ -48,6 +48,8 @@ PRIVATE="$DIR/.private"
 CONTAINERFILE="$PRIVATE/Containerfile"
 
 NAME="cs193v"
+# NAME and DEV_IMAGE are not final: CS193V_INSTANCE suffixes both. See "developer
+# instance" below.
 # Where the student's projects/ directory appears inside the container. Under $HOME rather
 # than at the root: the host directory is called projects/, so calling it anything else
 # inside is a name mismatch a student has to hold in their head for ten weeks, and a
@@ -251,6 +253,37 @@ has_machine() {                       # is a podman machine in play (macOS)?
     pmq machine list --format '{{.Name}}'
 }
 
+# ─── developer instance ────────────────────────────────────────────────────────
+# CS193V_INSTANCE gives one computer several INDEPENDENT installations. It suffixes the
+# container name, the dev image tag and the four volume names TOGETHER, which is the point:
+# suffixing only some of them is worse than suffixing none, because `--full-rebuild` in one
+# instance would still destroy the other instance's logins.
+#
+# This exists because two people developing the container on the same machine otherwise
+# share every one of them silently: the container `cs193v`, the image `localhost/cs193v:dev`,
+# and the volumes cs193v-claude and friends. The failure is not a clean collision but a slow
+# one — whoever runs `--dev-build` last owns the container the other is about to shell into.
+#
+# A student never sets it. With it unset every name is byte-identical to what it was
+# before, which is what keeps this from being a behaviour change for anyone but us.
+#
+# Deliberately NOT suffixed: MOUNT_DST, the workspace path, and the cs193v.dir label.
+# Those are already per-directory, and ensure_container's owner-dir check keys off
+# cs193v.dir, so two checkouts are distinguishable even with no instance set.
+INSTANCE="${CS193V_INSTANCE:-}"
+case "$INSTANCE" in
+    '') : ;;
+    # Anything outside this set would produce an invalid container or volume name, and
+    # podman's own error for that names neither CS193V_INSTANCE nor this script. A literal
+    # string rather than a messages.txt key, matching verb_dev_build: that catalogue is for
+    # student-facing prose, and no student ever sets this.
+    *[!A-Za-z0-9_-]*)
+        die "CS193V_INSTANCE=$INSTANCE is not usable as a name.
+Use only letters, digits, hyphens and underscores." ;;
+    *)  NAME="$NAME-$INSTANCE"
+        DEV_IMAGE="$DEV_IMAGE-$INSTANCE" ;;
+esac
+
 # ─── argument files ────────────────────────────────────────────────────────────
 ARGS=()
 IMAGE=''
@@ -269,6 +302,15 @@ load_args() {
                 IMAGE=*) IMAGE="${line#IMAGE=}"; continue ;;
             esac
             for word in $line; do
+                # The volume names live in container.args, not up here, so the instance
+                # suffix has to be applied as they are read. `cs193v-claude:/path` becomes
+                # `$NAME-claude:/path`, and since NAME is plain "cs193v" when no instance
+                # is set, this is a no-op for a student. Matching on the trailing colon is
+                # what keeps it off `--hostname cs193v-development`, the only other word
+                # here that starts with the same eight characters.
+                case "$word" in
+                    cs193v-*:*) word="$NAME-${word#cs193v-}" ;;
+                esac
                 ARGS[${#ARGS[@]}]="$word"
             done
         done < "$f"
@@ -394,10 +436,13 @@ create_container() {
 
 remove_container() { pmq rm -f "$NAME"; }
 
+# Base names, not full ones, so the instance suffix is applied in exactly one place and
+# cannot drift from the rewrite in load_args. "$NAME-claude" is "cs193v-claude" for a
+# student and "cs193v-<instance>-claude" for a developer, matching container.args either way.
 remove_volumes() {
     local v
-    for v in cs193v-claude cs193v-claude-json cs193v-gh cs193v-vercel; do
-        pmq volume rm "$v"
+    for v in claude claude-json gh vercel; do
+        pmq volume rm "$NAME-$v"
     done
 }
 
