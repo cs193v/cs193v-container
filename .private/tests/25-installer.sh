@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP"; shim_cleanup' EXIT
 # student is told to upgrade by one and accepted by the other.
 # Not /^version_lt() {$/ — the launcher's copy carries a trailing comment on the same line.
 sed -n '/^version_lt()/,/^}$/p' cs193v            > "$TMP/vl_launcher.sh"
-sed -n '/^version_lt()/,/^}$/p' install-cs193v.sh > "$TMP/vl_installer.sh"
+sed -n '/^version_lt()/,/^}$/p' $PRIVATE/install-cs193v.sh > "$TMP/vl_installer.sh"
 for f in vl_launcher vl_installer; do
     if [ "$(wc -l < "$TMP/$f.sh" | tr -d ' ')" -gt 3 ]; then pass "extract:$f"
     else fail "extract:$f" "could not extract version_lt"; exit 1; fi
@@ -56,7 +56,7 @@ MAC_VM_MAX_GB=16
 MAC_VM_MIN_GB=4
 host_ram_mb() { printf '%s' "$FAKE_RAM_MB"; }
 EOF
-sed -n '/^mac_vm_target_mb()/,/^}$/p' install-cs193v.sh >> "$TMP/vm.sh"
+sed -n '/^mac_vm_target_mb()/,/^}$/p' $PRIVATE/install-cs193v.sh >> "$TMP/vm.sh"
 vm_for() { ( . "$TMP/vm.sh"; FAKE_RAM_MB="$1" mac_vm_target_mb ); }
 #  8 GB: 75% = 6, but leave 4 for macOS -> 4 GB
 # 16 GB: 75% = 12, leave 12 -> 12 GB
@@ -109,7 +109,7 @@ done
 # podman is absent only worked on a machine that happened not to have it.
 shim_new
 shim_fake_id 1000 nosuchuser-cs193v
-run_consent() { PATH="$SHIM:$PATH" CS193V_DIR="$TMP/consent" bash install-cs193v.sh </dev/null 2>&1; }
+run_consent() { PATH="$SHIM:$PATH" CS193V_DIR="$TMP/consent" bash $PRIVATE/install-cs193v.sh </dev/null 2>&1; }
 out="$(run_consent)"
 assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
 assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
@@ -125,7 +125,7 @@ assert_says_not "consent:declining-skips-the-download" "Getting the course files
 # With podman already present and a subuid range already there, nothing needs consent at
 # all and the installer should say so rather than asking a pointless question.
 shim_new
-out="$(PATH="$SHIM:$PATH" CS193V_DIR="$TMP/noconsent" bash install-cs193v.sh </dev/null 2>&1 || true)"
+out="$(PATH="$SHIM:$PATH" CS193V_DIR="$TMP/noconsent" bash $PRIVATE/install-cs193v.sh </dev/null 2>&1 || true)"
 assert_says "consent:nothing-to-change-when-already-set-up" \
             "Nothing on your computer needs to change" "$out"
 assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
@@ -139,7 +139,7 @@ mkdir -p "$TMP/pkg/cs193v-main"
 ( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
 assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
 
-cp install-cs193v.sh "$TMP/installer.sh"
+cp $PRIVATE/install-cs193v.sh "$TMP/installer.sh"
 edit_sub "$TMP/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
 edit_sub "$TMP/installer.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
 assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
@@ -154,22 +154,22 @@ assert_says "install:first-run-finishes"     "Setup finished"  "$out1"
 assert_says "install:first-run-fetched"      "course files"    "$out1"
 assert_file "install:launcher-installed"     "$DEST/cs193v"
 assert_exec "install:launcher-executable"    "$DEST/cs193v"
-assert_file "install:args-installed"         "$DEST/container.args"
-assert_file "install:messages-installed"     "$DEST/messages.txt"
-assert_file "install:local-args-written"     "$DEST/local.args"
+assert_file "install:args-installed"         "$DEST/.config/container.args"
+assert_file "install:messages-installed"     "$DEST/.private/messages.txt"
+assert_file "install:local-args-written"     "$DEST/.config/local.args"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 
 # local.args must carry the cap AND the matching env var the in-container milestone check
 # reads, computed from what podman reports rather than from /proc.
-assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/local.args"
-assert_ok "install:local-args-has-memory-env" grep -q 'CS193V_MEMORY_MB=' "$DEST/local.args"
-cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/local.args")"
-env_mb="$(sed -n 's/^-e CS193V_MEMORY_MB=\([0-9]*\)/\1/p' "$DEST/local.args")"
+assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/.config/local.args"
+assert_ok "install:local-args-has-memory-env" grep -q 'CS193V_MEMORY_MB=' "$DEST/.config/local.args"
+cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/.config/local.args")"
+env_mb="$(sed -n 's/^-e CS193V_MEMORY_MB=\([0-9]*\)/\1/p' "$DEST/.config/local.args")"
 assert_eq "install:cap-and-env-agree" "$cap" "$env_mb"
 # The fake podman reports 8 GiB; the linux formula reserves 35% (min 3072) -> 5120.
 assert_eq "install:cap-matches-the-formula" "5120" "$cap"
-assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/local.args"
+assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/.config/local.args"
 
 # Now the actual §A.12 property. Everything except local.args and projects/ must be
 # byte-identical, and local.args must be identical too since the machine has not changed.
@@ -226,7 +226,7 @@ assert_eq       "missing-tarball:exits-nonzero"         "1" "$(last_rc)"
 #    installer would print "Setup finished" over a directory with no launcher in it. This
 #    is what the explicit per-file check exists for.
 mkdir -p "$TMP/pkg2/cs193v-main"
-cp "$REPO/messages.txt" "$TMP/pkg2/cs193v-main/"
+cp "$PRIVATE/messages.txt" "$TMP/pkg2/cs193v-main/"
 ( cd "$TMP/pkg2" && tar czf "$TMP/incomplete.tar.gz" cs193v-main )
 assert_ok "incomplete:archive-is-well-formed" tar tzf "$TMP/incomplete.tar.gz"
 out="$(run_with_tarball "$TMP/incomplete.tar.gz" "$TMP/broken-partial")"
@@ -239,13 +239,15 @@ assert_says     "incomplete:says-it-is-safe-to-retry"  "safe to run this script 
 # ─── the Windows stage-one script ──────────────────────────────────────────────
 # Not executable here, but its structure is checkable, and it is the one file no
 # Linux or macOS test run would otherwise look at.
-W=install-cs193v-windows.cmd
+W=$PRIVATE/install-cs193v-windows.cmd
 assert_ok "windows:requires-administrator"   grep -q 'net session' "$W"
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
 assert_ok "windows:translates-path-with-wslpath" grep -q 'wslpath' "$W"
+# Bare filename on purpose: the .cmd and the .sh are downloaded side by side, before any
+# .private/ directory exists, so stage one must reference its sibling.
 assert_ok "windows:hands-off-to-the-shared-installer" grep -q 'install-cs193v.sh' "$W"
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
-          sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' install-cs193v.sh"
+          sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/install-cs193v.sh"
 # A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click
 # past security warnings in a course about not trusting code.
 assert_ok "windows:is-cmd-not-ps1" test ! -f install-cs193v-windows.ps1

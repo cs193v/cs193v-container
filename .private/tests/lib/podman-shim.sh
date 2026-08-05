@@ -135,7 +135,7 @@ repo_copy() {                         # repo_copy -> prints the new directory
     local d
     d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-repo.XXXXXX")"
     # cp -a of the repo root, excluding .git, which is large and irrelevant here.
-    ( cd "$REPO" && tar cf - --exclude=.git --exclude=tests . ) | ( cd "$d" && tar xf - )
+    ( cd "$REPO" && tar cf - --exclude=.git --exclude=./.private/tests . ) | ( cd "$d" && tar xf - )
     SHIM_DIRS="${SHIM_DIRS:-} $d"
     printf '%s' "$d"
 }

@@ -6,33 +6,49 @@ Scaffolding for the CS193V course container. Students never read this file;
 This repo **is** the `~/cs193v` layout — students unpack it there, so the launcher and
 its `projects/` directory are siblings.
 
+A student's course directory shows them **two things**, and everything else is hidden. That
+is deliberate (issue #16): a first-year student opening `~/cs193v` should see the command they
+run and the folder their work goes in, not the machinery.
+
 ```
-cs193v                       the launcher (bash 3.2 compatible, one script, all platforms)
-container.args               every podman flag, heavily commented
-local.args                   machine-specific (memory cap); written by the installer, gitignored
-Containerfile                the image
-files/                       everything the image installs
-  entrypoint.sh              PID 1 — keep-alive + reaps orphans
-  ports                      the in-container port diagnostic
-  open-url                   the $BROWSER stub
-  am-i-in-a-container        the milestone check the install guides reference
-  nanorc
-  profile.d/                 stty -ixon
-  claude-code/               managed-settings.json + CLAUDE.md
-install-cs193v.sh            macOS / Ubuntu / WSL setup
-install-cs193v-windows.cmd   Windows stage one, then hands off to the above
-CONTAINER-DESIGN.md          student-facing: threat model, ports lesson, rough edges
-VERIFICATION.md              release gates — hand to a Claude Code instance per platform
-messages.txt                 all student-facing launcher strings
-.github/workflows/build.yml  multi-arch build + push + smoke test
+cs193v                         the launcher (bash 3.2 compatible, one script, all platforms)
+projects/                      the student's work; the only directory shared with the container
+
+.config/                       flag files the launcher reads
+  container.args               every podman flag, heavily commented
+  local.args                   machine-specific (memory cap); written by the installer, gitignored
+
+.private/                      everything needed to BUILD or MAINTAIN the image
+  Containerfile                the image
+  files/                       everything the image installs
+    entrypoint.sh              PID 1 — keep-alive + reaps orphans
+    ports                      the in-container port diagnostic
+    open-url                   the $BROWSER stub
+    am-i-in-a-container         the milestone check the install guides reference
+    rewrite-window-title.py    points the terminal's title at the course
+    nanorc
+    bash_logout                the goodbye on exit
+    profile.d/                 stty -ixon, and the entry banner
+    claude-code/               managed-settings.json + CLAUDE.md
+  messages.txt                 all student-facing launcher strings (script config, not reading)
+  install-cs193v.sh            macOS / Ubuntu / WSL setup
+  install-cs193v-windows.cmd   Windows stage one, then hands off to the above
+  CONTAINER-DESIGN.md          threat model, ports lesson, rough edges — publish this
+  VERIFICATION.md              release gates — hand to a Claude Code instance per platform
+  ERRORS.md                    what the first verification pass found, and what is still open
+  tests/                       the regression suite
+.github/workflows/build.yml    multi-arch build + push + smoke test
 ```
+
+Note `CONTAINER-DESIGN.md` is course *reading* but lives in `.private/` — publish it on the
+course website rather than expecting students to find it in a hidden directory.
 
 ## Before this works
 
 Four things need real values:
 
 1. **`install-cs193v.sh`** — set `REPO_OWNER` (and `REPO_NAME` if you rename it).
-2. **`container.args`** — the `IMAGE=` line is empty. Fill it with the **manifest-list**
+2. **`.config/container.args`** — the `IMAGE=` line is empty. Fill it with the **manifest-list**
    digest the CI run prints, not a per-architecture digest. Until then the launcher runs
    in dev mode against a locally built image and says so.
 3. **`.github/workflows/build.yml`** — pin `vercel_version` and `claude_code_version`
@@ -57,7 +73,7 @@ anything is pushed.
 
 1. Edit the `Containerfile`; push to `main`. CI builds both architectures and prints the
    digest to pin.
-2. Put that digest in `container.args`; commit.
+2. Put that digest in `.config/container.args`; commit.
 3. Students run `./cs193v --update`. Anyone who doesn't gets prompted on their next
    launch, because the launcher compares the running container's image against the pin.
 
@@ -69,15 +85,15 @@ immutable tag, so you always have a known-good one to point at.
 **§A is now a test suite.** Run it rather than pasting shell:
 
 ```
-tests/run-tests.sh                  # every automatable check
-tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
-tests/run-tests.sh --release        # the publishing blanks; fails until they are filled
-tests/run-tests.sh --list           # what exists, and in which tier
+.private/tests/run-tests.sh                  # every automatable check
+.private/tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
+.private/tests/run-tests.sh --release        # the publishing blanks; fails until filled
+.private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
 
 Zero dependencies beyond podman, python3 and shellcheck, and bash 3.2-compatible so it runs
-on a Mac. Then work through **`tests/MANUAL.md`** (what genuinely needs a human or another
-platform) and read **`ERRORS.md`** (what the first pass found, and what is still open).
+on a Mac. Then work through **`.private/tests/MANUAL.md`** (what genuinely needs a human or another
+platform) and read **`.private/ERRORS.md`** (what the first pass found, and what is still open).
 
 `VERIFICATION.md` keeps the prose, because the reasoning per check is worth having — but ten
 of its checks did not work as written and are corrected there and in the suite.
@@ -121,7 +137,7 @@ terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` v
 `podman diff` tamper detection; a VS Code-style port relay.
 
 Each rejection is documented where it would otherwise be tempting — the invariants block
-in `container.args`, and the comments in the `Containerfile`.
+in `.config/container.args`, and the comments in the `Containerfile`.
 
 ## One open item
 

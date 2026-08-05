@@ -17,6 +17,13 @@ Every item below is reproducible with `tests/run-tests.sh`. Sections:
 
 ## A. Fixed during this pass
 
+> **Layout note (issue #16):** paths in this file predate the restructure. Build and
+> maintenance files now live in `.private/`, flag files in `.config/`, and a student's course
+> directory contains only `cs193v` and `projects/`. So `Containerfile` is
+> `.private/Containerfile`, `messages.txt` is `.private/messages.txt`, `container.args` is
+> `.config/container.args`, and the suite runs as `.private/tests/run-tests.sh`.
+
+
 ### A1. The image could not be built at all (BLOCKING)
 
 `Containerfile` step 7 failed with exit 4:

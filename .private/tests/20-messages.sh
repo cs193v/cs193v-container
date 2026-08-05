@@ -28,7 +28,7 @@ else
          "could not extract msg() from cs193v — has it been renamed or reformatted?"
     exit 1
 fi
-MESSAGES="$REPO/messages.txt"
+MESSAGES="$PRIVATE/messages.txt"
 # shellcheck disable=SC1090
 . "$TMP/msg.sh"
 
@@ -36,8 +36,8 @@ MESSAGES="$REPO/messages.txt"
 # LC_ALL=C throughout: under en_US.UTF-8, sort and comm disagree about how to order
 # punctuation and comm aborts with "file 1 is not in sorted order" — which VERIFICATION.md
 # §A.1 does today, so its cross-reference has never actually run.
-grep -oE '^\[\[[a-z0-9._-]+\]\]' messages.txt | tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
-grep -ohE 'msg +[a-z0-9._-]+' cs193v install-cs193v.sh | awk '{print $2}' \
+grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
+grep -ohE 'msg +[a-z0-9._-]+' cs193v $PRIVATE/install-cs193v.sh | awk '{print $2}' \
     | LC_ALL=C sort -u > "$TMP/used"
 
 orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | tr '\n' ' ')"
@@ -45,22 +45,22 @@ missing="$(LC_ALL=C comm -13 "$TMP/defined" "$TMP/used" | tr '\n' ' ')"
 assert_eq "keys:no-orphans" "" "$(printf '%s' "$orphans" | sed 's/ *$//')"
 assert_eq "keys:none-missing" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
-dupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' messages.txt | LC_ALL=C sort | uniq -d | tr '\n' ' ')"
+dupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort | uniq -d | tr '\n' ' ')"
 assert_eq "keys:no-duplicates" "" "$(printf '%s' "$dupes" | sed 's/ *$//')"
 
 # A key defined with an empty body makes msg() return "(missing message: k)" at runtime,
 # which reaches the student verbatim.
 empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
-              /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' messages.txt)"
+              /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' $PRIVATE/messages.txt)"
 assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 
 # ─── placeholder coverage, both directions ─────────────────────────────────────
 # A {{NAME}} nobody supplies reaches the student as literal braces. An argument nobody
 # uses is dead weight that signals the message was meant to say something it does not.
-python3 - "$REPO" <<'PY' > "$TMP/ph"
+python3 - "$REPO" "$PRIVATE" <<'PY' > "$TMP/ph"
 import re, sys, os
-repo = sys.argv[1]
-msgs = open(os.path.join(repo, "messages.txt")).read()
+repo, private = sys.argv[1], sys.argv[2]
+msgs = open(os.path.join(private, "messages.txt")).read()
 
 bodies = {}
 key = None
@@ -74,8 +74,8 @@ bodies = {k: "\n".join(v) for k, v in bodies.items()}
 
 # Every `msg <key> NAME=... NAME=...` call site, across both scripts.
 calls = {}
-for name in ("cs193v", "install-cs193v.sh"):
-    for line in open(os.path.join(repo, name)):
+for name, root in (("cs193v", repo), ("install-cs193v.sh", private)):
+    for line in open(os.path.join(root, name)):
         for m in re.finditer(r'\bmsg\s+([a-z0-9._-]+)((?:\s+[A-Z_]+=(?:"[^"]*"|\S+))*)', line):
             k = m.group(1)
             calls.setdefault(k, set()).update(re.findall(r'([A-Z_]+)=', m.group(2) or ""))
@@ -151,9 +151,9 @@ assert_contains "msg:unknown-key-says-so" "missing message" "$(msg no.such.key 2
 # The box borders and the messages both contain plenty of non-ASCII, so python3 does the
 # measuring.
 require_cmd python3
-python3 - "$REPO" <<'PY' > "$TMP/width"
+python3 - "$REPO" "$PRIVATE" <<'PY' > "$TMP/width"
 import re, sys, os
-repo = sys.argv[1]
+repo, private = sys.argv[1], sys.argv[2]
 launcher = open(os.path.join(repo, "cs193v")).read()
 
 # The bottom border: ┗ + N×━ + ┛. Body lines are printed as "┃ " + text, so for the text
@@ -169,13 +169,13 @@ limit = box - 2
 # help.usage are printed plainly by info/warn/printf and are under no such constraint, so
 # holding them to the box width would be a made-up rule.
 boxed = set()
-for name in ("cs193v", "install-cs193v.sh"):
-    for line in open(os.path.join(repo, name)):
+for name, root in (("cs193v", repo), ("install-cs193v.sh", private)):
+    for line in open(os.path.join(root, name)):
         boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
 print("BOXED:%s" % ",".join(sorted(boxed)))
 
 key = None
-for line in open(os.path.join(repo, "messages.txt")).read().splitlines():
+for line in open(os.path.join(private, "messages.txt")).read().splitlines():
     km = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
     if km:
         key = km.group(1); continue

@@ -56,19 +56,19 @@ assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/st
 # present in the args files but missing from the run line.
 missing="$(LC_ALL=C comm -13 \
     <(printf '%s\n' "$line" | tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) \
-    <(sed 's/#.*//' "$COPY/container.args" "$COPY/local.args" 2>/dev/null \
+    <(sed 's/#.*//' "$COPY/.config/container.args" "$COPY/.config/local.args" 2>/dev/null \
         | tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) | tr '\n' ' ')"
 assert_eq "print:contains-every-args-file-flag" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
 # local.args is machine-specific and absent from a fresh clone; the memory cap must reach
 # the run line once the installer has written it.
-printf -- '--memory=2048m\n-e CS193V_MEMORY_MB=2048\n' > "$COPY/local.args"
+printf -- '--memory=2048m\n-e CS193V_MEMORY_MB=2048\n' > "$COPY/.config/local.args"
 line="$(launcher --dev-print-command)"
 assert_contains "print:includes-memory-cap"    "--memory=2048m"        "$line"
 assert_contains "print:includes-memory-env"    "CS193V_MEMORY_MB=2048" "$line"
 # local.args changing must change the hash, or the cap never reaches an existing container.
 h_with="$(current_hash)"
-rm -f "$COPY/local.args"
+rm -f "$COPY/.config/local.args"
 assert_ne "print:memory-cap-changes-confighash" "$h_with" "$(current_hash)"
 
 # A comment on the same line as a flag must not leak into the run line.
@@ -212,7 +212,7 @@ assert_eq       "foreign-dir:opens-no-shell"  "0" "$(shim_count '^exec ')"
 shim_new
 launcher >/dev/null 2>&1                       # one container, hash recorded
 shim_clear_log
-echo '-p 127.0.0.1:9998:9998' >> "$COPY/container.args"
+echo '-p 127.0.0.1:9998:9998' >> "$COPY/.config/container.args"
 out="$(launcher)"
 assert_says "drift:prompt-shown"    "settings have changed" "$out"
 assert_says "drift:explains-why"    "cannot apply new settings" "$out"
@@ -231,7 +231,7 @@ assert_eq "drift:accepted-creates-new" "1" "$(shim_count '^run ')"
 assert_contains "drift:new-container-has-the-flag" "9998" "$(shim_log | grep '^run ')"
 
 # Restore, and confirm a matching config produces no prompt at all.
-edit_remove "$COPY/container.args" '9998'
+edit_remove "$COPY/.config/container.args" '9998'
 shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
@@ -285,7 +285,7 @@ assert_eq "update:dev-mode-pulls-nothing" "0" "$(shim_count '^pull ')"
 
 PINNED="ghcr.io/example/cs193v@sha256:1111"
 shim_new
-edit_sub "$COPY/container.args" '^IMAGE=.*' "IMAGE=$PINNED"
+edit_sub "$COPY/.config/container.args" '^IMAGE=.*' "IMAGE=$PINNED"
 launcher --update >/dev/null 2>&1
 assert_eq "update:pulls" "1" "$(shim_count '^pull ')"
 assert_eq "update:recreates" "1" "$(shim_count '^run ')"
@@ -304,7 +304,7 @@ assert_contains "update:failure-shows-podman-line-1" "reading manifest" "$out"
 assert_contains "update:failure-shows-podman-line-3" "connection reset by peer" "$out"
 assert_says "update:failure-says-safe-to-retry" "safe to run" "$out"
 assert_not_contains "update:failure-no-sed-error" "unterminated" "$out"
-edit_sub "$COPY/container.args" '^IMAGE=.*' "IMAGE="
+edit_sub "$COPY/.config/container.args" '^IMAGE=.*' "IMAGE="
 
 # ─── ports and doctor ──────────────────────────────────────────────────────────
 shim_new
@@ -344,12 +344,12 @@ assert_says_not "doctor:agrees-with-the-launch-path" "settings have changed" "$(
 
 # Again with a pinned image, so the fix is not accidentally dev-mode-only.
 shim_new
-cp "$COPY/container.args" "$SHIM/ca.bak"
-edit_sub "$COPY/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:2222'
+cp "$COPY/.config/container.args" "$SHIM/ca.bak"
+edit_sub "$COPY/.config/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:2222'
 launcher >/dev/null 2>&1
 assert_says "doctor:matching-config-with-a-pinned-image" "matches container.args" \
             "$(launcher doctor)"
-cp "$SHIM/ca.bak" "$COPY/container.args"
+cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 
 # And drift must still be reported when it is real.
 shim_new
@@ -422,30 +422,30 @@ assert_eq "noterm:--rebuild-still-creates-a-container-piped" "1" "$(shim_count '
 # ─── malformed args files ──────────────────────────────────────────────────────
 shim_new
 assert_says "args:missing-file-refused" "container.args is missing" \
-    "$(rm -f "$COPY/container.args.bak"; mv "$COPY/container.args" "$COPY/container.args.bak"; \
-       launcher; mv "$COPY/container.args.bak" "$COPY/container.args")"
+    "$(rm -f "$COPY/.config/container.args.bak"; mv "$COPY/.config/container.args" "$COPY/.config/container.args.bak"; \
+       launcher; mv "$COPY/.config/container.args.bak" "$COPY/.config/container.args")"
 
 # A container.args holding only comments leaves ARGS empty. Expanding an empty array under
 # `set -u` is fatal on bash < 4.4 — every Mac — so this must produce our output, not a raw
 # "ARGS[@]: unbound variable" from bash.
 shim_new
-cp "$COPY/container.args" "$SHIM/ca.bak"
-printf '# every line here is a comment\n# and nothing else\nIMAGE=\n' > "$COPY/container.args"
+cp "$COPY/.config/container.args" "$SHIM/ca.bak"
+printf '# every line here is a comment\n# and nothing else\nIMAGE=\n' > "$COPY/.config/container.args"
 out="$(launcher --dev-print-command)"
 assert_not_contains "args:comment-only-no-unbound-variable" "unbound variable" "$out"
 assert_not_contains "args:comment-only-no-bash-error"       "cs193v: line"     "$out"
 assert_contains     "args:comment-only-still-prints-a-run-line" "podman run"   "$out"
 out="$(launcher)"
 assert_not_contains "args:comment-only-launch-no-bash-error" "unbound variable" "$out"
-cp "$SHIM/ca.bak" "$COPY/container.args"
+cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 
 # Blank lines, extra whitespace and inline comments must all be tolerated.
 shim_new
-cp "$COPY/container.args" "$SHIM/ca.bak"
+cp "$COPY/.config/container.args" "$SHIM/ca.bak"
 printf 'IMAGE=\n\n   \n   --network=pasta   # trailing comment\n\n-e FOO=bar\n' \
-    > "$COPY/container.args"
+    > "$COPY/.config/container.args"
 line="$(launcher --dev-print-command)"
 assert_contains "args:whitespace-tolerated" "--network=pasta" "$line"
 assert_contains "args:second-flag-kept"     "-e FOO=bar"      "$line"
 assert_not_contains "args:inline-comment-dropped" "trailing"  "$line"
-cp "$SHIM/ca.bak" "$COPY/container.args"
+cp "$SHIM/ca.bak" "$COPY/.config/container.args"

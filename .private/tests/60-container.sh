@@ -41,12 +41,12 @@ record "flag:memory"      "$MEM"
 record "flag:memory-swap" "$SWAP"
 # local.args holds the cap the installer computed for this machine; the container must
 # actually have it, or the protection is decorative.
-if [ -f "$REPO/local.args" ]; then
-    want_mb="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$REPO/local.args" | head -1)"
+if [ -f "$REPO/.config/local.args" ]; then
+    want_mb="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$REPO/.config/local.args" | head -1)"
     if [ -n "$want_mb" ]; then
         assert_eq "flag:memory-matches-local.args" "$((want_mb * 1048576))" "$MEM"
     else
-        record "flag:memory-matches-local.args" "local.args sets no cap on this machine"
+        record "flag:memory-matches-$REPO/.config/local.args" "local.args sets no cap on this machine"
     fi
 else
     record "flag:memory-matches-local.args" "no local.args (installer not run here)"
@@ -273,7 +273,7 @@ while True:
             pass
 PY
 podman cp "$TMP/portprobe.py" cs193v:/tmp/cs193v-portprobe.py
-SPEC="$(sed 's/#.*//' container.args | sed -n 's/.*-p 127\.0\.0\.1:\([0-9]*-[0-9]*\):.*/\1/p' | paste -sd, -)"
+SPEC="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/.*-p 127\.0\.0\.1:\([0-9]*-[0-9]*\):.*/\1/p' | paste -sd, -)"
 podman exec -d cs193v python3 /tmp/cs193v-portprobe.py "$SPEC" 0.0.0.0
 sleep 3
 
@@ -325,7 +325,7 @@ if [ "$c" = 000 ]; then
 else
     fail "ports:loopback-bound-server-is-unreachable" \
          "got HTTP $c — a 127.0.0.1-bound server IS reachable on this platform, so the
-course's central ports lesson and CONTAINER-DESIGN.md's diagram are wrong here"
+course's central ports lesson and $PRIVATE/CONTAINER-DESIGN.md's diagram are wrong here"
 fi
 podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1

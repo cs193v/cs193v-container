@@ -27,11 +27,11 @@ cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
 # container.args is edited in place to provoke config drift, so restore it from the backup
 # on ANY exit — an interrupted run must not leave the student's flag file modified.
-cp container.args "$TMP/ca.orig"
+cp $REPO/.config/container.args "$TMP/ca.orig"
 restore() {
-    if [ -f "$TMP/ca.orig" ] && ! cmp -s "$TMP/ca.orig" "$REPO/container.args"; then
-        cp "$TMP/ca.orig" "$REPO/container.args"
-        printf '  (restored container.args)\n'
+    if [ -f "$TMP/ca.orig" ] && ! cmp -s "$TMP/ca.orig" "$REPO/.config/container.args"; then
+        cp "$TMP/ca.orig" "$REPO/.config/container.args"
+        printf '  (restored $REPO/.config/container.args)\n'
     fi
     rm -rf "$TMP" /tmp/vt-copy 2>/dev/null
     shim_cleanup
@@ -108,19 +108,19 @@ record "live:exec-sessions-after-four-shells" "$(podman top cs193v 2>/dev/null |
 # Refuse to start if container.args is already dirty. An earlier interrupted run leaving a
 # stray -p line in it made six later assertions fail in confusing ways, because the
 # container was created WITH the flag before the drift test ever appended it.
-if grep -q 9998 container.args; then
-    fail "drift:container.args-is-clean-before-we-start" \
+if grep -q 9998 $REPO/.config/container.args; then
+    fail "drift:$REPO/.config/container.args-is-clean-before-we-start" \
          "container.args already contains a 9998 test flag from an earlier interrupted run.
-Run: git checkout -- container.args"
-    edit_remove container.args '9998'
+Run: git checkout -- $REPO/.config/container.args"
+    edit_remove $REPO/.config/container.args '9998'
 else
-    pass "drift:container.args-is-clean-before-we-start"
+    pass "drift:$REPO/.config/container.args-is-clean-before-we-start"
 fi
 # This is the one that cannot be faked: podman start reuses the container's STORED config
 # and ignores the port list entirely, so without the confighash check a student's flags
 # would be frozen at first run forever.
-cp container.args "$TMP/ca.bak"
-echo '-p 127.0.0.1:9998:9998' >> container.args
+cp $REPO/.config/container.args "$TMP/ca.bak"
+echo '-p 127.0.0.1:9998:9998' >> $REPO/.config/container.args
 
 assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-print-command)"
 # Declining must leave the container exactly as it was...
@@ -151,18 +151,18 @@ if podman port cs193v | grep -q 9998; then
 else
     fail "drift:accepting-applies-the-new-flag" \
          "9998 still not published after accepting the recreate — every student's flags are
-frozen at first run and edits to container.args never reach them"
+frozen at first run and edits to $REPO/.config/container.args never reach them"
 fi
 assert_ne "drift:accepting-created-a-new-container" "$before" \
           "$(podman inspect cs193v --format '{{.Id}}')"
 
-edit_remove container.args '9998'
-if cmp -s "$TMP/ca.bak" container.args; then
-    pass "drift:container.args-restored-exactly"
+edit_remove $REPO/.config/container.args '9998'
+if cmp -s "$TMP/ca.bak" $REPO/.config/container.args; then
+    pass "drift:$REPO/.config/container.args-restored-exactly"
 else
-    fail "drift:container.args-restored-exactly" \
-         "$(diff -u "$TMP/ca.bak" container.args | head -10)"
-    cp "$TMP/ca.bak" container.args
+    fail "drift:$REPO/.config/container.args-restored-exactly" \
+         "$(diff -u "$TMP/ca.bak" $REPO/.config/container.args | head -10)"
+    cp "$TMP/ca.bak" $REPO/.config/container.args
 fi
 L --rebuild >/dev/null 2>&1
 assert_eq "drift:restored-config-has-46-ports" "46" "$(podman port cs193v | wc -l | tr -d ' ')"
@@ -222,13 +222,13 @@ out="$(L --full-rebuild)"
 assert_says "full-rebuild:non-tty-changes-nothing" "Nothing was changed" "$out"
 
 # ─── --update  (§9.1) ──────────────────────────────────────────────────────────
-img="$(sed 's/#.*//' container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
+img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
 if [ -n "$img" ]; then
     assert_ok "update:pulls-and-recreates" sh -c "./cs193v --update </dev/null"
 else
     # Not a failure: IMAGE= is empty until the course image is published, which is tracked
     # as a release gate. There is nothing to update to.
-    skip "update:pulls-and-recreates" "IMAGE= is empty (dev mode); see tests/00-release-gates.sh"
+    skip "update:pulls-and-recreates" "IMAGE= is empty (dev mode); see $PRIVATE/tests/00-release-gates.sh"
     assert_says "update:refuses-in-dev-mode" "no published image" "$(L --update)"
 fi
 

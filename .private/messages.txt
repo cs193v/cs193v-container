@@ -118,7 +118,7 @@ separated from the rest of your system.
 Run the course installer again — it can set this up, and it will
 ask your permission before changing anything:
 
-    bash install-cs193v.sh
+    bash .private/install-cs193v.sh
 
 If that does not work, contact course staff with the output of:
 

@@ -32,11 +32,20 @@ while [ -L "$SELF" ]; do
 done
 DIR="$(cd -- "$(dirname -- "$SELF")" && pwd -P)"
 
-ARGS_FILE="$DIR/container.args"
-LOCAL_ARGS_FILE="$DIR/local.args"
-MESSAGES="$DIR/messages.txt"
+# The student's course directory holds only what they use: the launcher and projects/.
+# Flag files live in .config/, and everything needed to build or maintain the image --
+# including the message catalogue, which is script config rather than something a student
+# reads -- lives in .private/. See issue #16.
+CONFIG="$DIR/.config"
+ARGS_FILE="$CONFIG/container.args"
+LOCAL_ARGS_FILE="$CONFIG/local.args"
+MESSAGES="$DIR/.private/messages.txt"
 WORKSPACE="$DIR/projects"
-CONTAINERFILE="$DIR/Containerfile"
+# Build and maintenance files live in .private/, so a student's course directory holds only
+# what they actually use: the launcher, the two flag files, messages.txt and projects/.
+# See issue #16.
+PRIVATE="$DIR/.private"
+CONTAINERFILE="$PRIVATE/Containerfile"
 
 NAME="cs193v"
 # Where the student's projects/ directory appears inside the container. Under $HOME rather
@@ -608,7 +617,7 @@ verb_dev_build() {
     [ "${1:-}" = "--no-cache" ] && nocache='--no-cache'
     info "building $DEV_IMAGE from $CONTAINERFILE"
     # shellcheck disable=SC2086
-    podman build $nocache -t "$DEV_IMAGE" -f "$CONTAINERFILE" "$DIR" || die "build failed"
+    podman build $nocache -t "$DEV_IMAGE" -f "$CONTAINERFILE" "$PRIVATE" || die "build failed"
     OVERRIDE_IMAGE="$DEV_IMAGE"
     load_args; resolve_image
     remove_container

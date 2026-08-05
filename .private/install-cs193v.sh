@@ -439,12 +439,12 @@ This is usually a network problem. It is safe to run this script again."
     fi
     # Belt and braces: tar can still exit 0 having written only some entries, so check that
     # the files everything downstream depends on actually arrived.
-    for f in cs193v container.args messages.txt Containerfile; do
+    for f in cs193v .config/container.args .private/messages.txt .private/Containerfile; do
         [ -s "$DIR/$f" ] || die "The download finished but $f is missing or empty.
 That means the transfer was cut short. It is safe to run this script again."
     done
     chmod +x "$DIR/cs193v" || die "Could not make $DIR/cs193v executable."
-    mkdir -p "$DIR/projects"
+    mkdir -p "$DIR/projects" "$DIR/.config"
     ok "$DIR"
 }
 
@@ -472,23 +472,23 @@ On a Mac, try:  podman machine start"
         printf '# podman reported %s MB available; reserving %s MB for %s.\n' \
                "$total_mb" "$reserve_mb" \
                "$( [ "$PLAT" = linux ] && printf 'your desktop' || printf 'the virtual machine' )"
-    } > "$DIR/local.args"
+    } > "$DIR/.config/local.args"
 
     if [ "$cap_mb" -lt 1536 ]; then
-        printf '# No memory cap set: only %s MB was available, and a cap that low\n' "$cap_mb" >> "$DIR/local.args"
-        printf '# would break ordinary work more often than it would help.\n' >> "$DIR/local.args"
+        printf '# No memory cap set: only %s MB was available, and a cap that low\n' "$cap_mb" >> "$DIR/.config/local.args"
+        printf '# would break ordinary work more often than it would help.\n' >> "$DIR/.config/local.args"
         note "Only ${cap_mb} MB would be available to the container — not setting a limit."
         note "Tell course staff if builds fail; this machine is tight on memory."
     else
-        printf -- '--memory=%sm\n' "$cap_mb" >> "$DIR/local.args"
-        printf -- '-e CS193V_MEMORY_MB=%s\n' "$cap_mb" >> "$DIR/local.args"
+        printf -- '--memory=%sm\n' "$cap_mb" >> "$DIR/.config/local.args"
+        printf -- '-e CS193V_MEMORY_MB=%s\n' "$cap_mb" >> "$DIR/.config/local.args"
         ok "container may use up to ${cap_mb} MB (of ${total_mb} MB)"
     fi
 }
 
 pull_image() {
     local img
-    img="$(sed 's/#.*//' "$DIR/container.args" | awk -F= '/^IMAGE=/{print $2}' | tr -d ' ')"
+    img="$(sed 's/#.*//' "$DIR/.config/container.args" | awk -F= '/^IMAGE=/{print $2}' | tr -d ' ')"
     if [ -z "$img" ]; then
         note "No course image has been published yet — skipping the download."
         return 0

@@ -194,8 +194,11 @@ Start it first:  ./cs193v --rebuild"
 # Repo root, resolved from this file so suites work from any working directory.
 _assert_self="${BASH_SOURCE[0]:-$0}"
 TESTS_DIR="$(cd -- "$(dirname -- "$_assert_self")/.." && pwd -P)"
-REPO="$(cd -- "$TESTS_DIR/.." && pwd -P)"
-export TESTS_DIR REPO
+# The suite lives at .private/tests, so the repo root is TWO levels up, not one. $PRIVATE is
+# where every build and maintenance file now lives; $REPO holds only what a student uses.
+PRIVATE="$(cd -- "$TESTS_DIR/.." && pwd -P)"
+REPO="$(cd -- "$PRIVATE/.." && pwd -P)"
+export TESTS_DIR PRIVATE REPO
 
 # In-container and throwaway-container runners, matching VERIFICATION.md's E() and R().
 E() { podman exec cs193v sh -c "$1" 2>&1; }

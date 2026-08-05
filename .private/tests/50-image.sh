@@ -166,7 +166,7 @@ if [ "${ncache:-0}" -gt 1000 ]; then
     pass "tldr:cache-is-populated-at-build-time"
 else
     fail "tldr:cache-is-populated-at-build-time" \
-         "only ${ncache:-0} cached pages. Containerfile's `tldr --update` ends in '|| true',
+         "only ${ncache:-0} cached pages. $PRIVATE/Containerfile's `tldr --update` ends in '|| true',
 so a failed fetch during the image build is silent and students meet an
 empty tldr — with no man pages to fall back on."
 fi

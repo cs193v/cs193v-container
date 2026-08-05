@@ -81,7 +81,7 @@ MATRIX="$MATRIX
 cleanup
 
 record "sighup:MATRIX" "$(printf '%s' "$MATRIX" | tr '\n' '|')"
-printf '\n  the §A.8 matrix, for VERIFICATION.md §10:%s\n\n' "$MATRIX"
+printf '\n  the §A.8 matrix, for $PRIVATE/VERIFICATION.md §10:%s\n\n' "$MATRIX"
 
 # What the advice in the docs actually rests on. If setsid cannot outlive the client, then
 # there is no way for a student or an agent to keep a server running across a closed window,
@@ -92,8 +92,8 @@ if [ "$SETSID_ALIVE" = yes ]; then
 else
     fail "sighup:setsid-survives-so-there-is-a-way-to-detach" \
          "setsid did NOT survive the client being killed. Nothing a student runs can outlive
-a closed window, so CONTAINER-DESIGN.md's 'keep the window open' is the only
-workable advice and files/claude-code/CLAUDE.md must not suggest backgrounding."
+a closed window, so $PRIVATE/CONTAINER-DESIGN.md's 'keep the window open' is the only
+workable advice and $PRIVATE/files/claude-code/CLAUDE.md must not suggest backgrounding."
 fi
 
 # Whatever the outcome, the container must not be damaged by a client dying — that happens
@@ -125,12 +125,12 @@ fi
 if [ "$FG_ALIVE" = yes ]; then
     record "sighup:DOCS-vs-REALITY" \
         "a FOREGROUND server survived the client being killed on this platform, while
-CONTAINER-DESIGN.md and files/claude-code/CLAUDE.md both warn that closing a
+$PRIVATE/CONTAINER-DESIGN.md and $PRIVATE/files/claude-code/CLAUDE.md both warn that closing a
 window 'may stop' it. Confirm on macOS and WSL before rewording — see ERRORS.md D."
 else
     record "sighup:DOCS-vs-REALITY" "foreground server died, matching what the docs warn"
 fi
 assert_contains "sighup:CONTAINER-DESIGN-mentions-the-caveat" "closing a terminal window" \
-    "$(tr 'A-Z' 'a-z' < "$REPO/CONTAINER-DESIGN.md")"
+    "$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
 assert_contains "sighup:CLAUDE.md-mentions-the-caveat" "closing a terminal window" \
-    "$(tr 'A-Z' 'a-z' < "$REPO/files/claude-code/CLAUDE.md")"
+    "$(tr 'A-Z' 'a-z' < "$PRIVATE/files/claude-code/CLAUDE.md")"

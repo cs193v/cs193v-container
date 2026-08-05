@@ -32,13 +32,13 @@ podman machine list 2>/dev/null || echo "no podman machine (native Linux or WSL)
 instead of pasting shell by hand:
 
 ```sh
-tests/run-tests.sh                  # every automatable check, all tiers
-tests/run-tests.sh --tier static    # no podman, no image needed — milliseconds
-tests/run-tests.sh --release        # the publishing blanks (expected to fail until filled)
-tests/run-tests.sh --list           # what exists, and in which tier
+.private/tests/run-tests.sh                  # every automatable check, all tiers
+.private/tests/run-tests.sh --tier static    # no podman, no image needed — milliseconds
+.private/tests/run-tests.sh --release        # the publishing blanks (expected to fail until filled)
+.private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
 
-Then work through `tests/MANUAL.md`, which is what is genuinely left for a human or another
+Then work through `.private/tests/MANUAL.md`, which is what is genuinely left for a human or another
 platform, and `ERRORS.md`, which records what the first pass found.
 
 The prose below is kept because the *reasoning* for each check is worth having. But **ten of the

@@ -40,12 +40,12 @@ else
     skip "ci:prints-the-manifest-digest"     "no workflow file"
 fi
 # README lists the workflow in its file map, so the two must not drift apart.
-assert_contains "ci:readme-references-it" ".github/workflows/build.yml" "$(cat README.md)"
+assert_contains "ci:readme-references-it" ".github/workflows/build.yml" "$(cat $PRIVATE/README.md)"
 
 # ─── 2. the installer's repository ─────────────────────────────────────────────
 # REPO_OWNER=CHANGEME makes the tarball URL a 404, so the installer cannot complete at all
 # and VERIFICATION.md §1 and §A.12 cannot be run as shipped.
-owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' install-cs193v.sh | head -1)"
+owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' $PRIVATE/install-cs193v.sh | head -1)"
 assert_ne "installer:REPO_OWNER-is-set" "CHANGEME" "$owner"
 record    "installer:REPO_OWNER" "$owner"
 assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
@@ -53,7 +53,7 @@ assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 # ─── 3. the pinned image ───────────────────────────────────────────────────────
 # Pinned by MANIFEST-LIST digest, not a per-architecture digest, so one pin serves both the
 # arm64 and amd64 legs.
-img="$(sed 's/#.*//' container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
+img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
 assert_ne "image:IMAGE-is-pinned" "" "$img"
 record    "image:IMAGE" "${img:-<empty: dev mode>}"
 if [ -n "$img" ]; then
@@ -86,23 +86,23 @@ fi
 # commit produces different images on different days, so "students are all on the image we
 # tested" stops being true.
 for arg in VERCEL_VERSION CLAUDE_CODE_VERSION; do
-    v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" Containerfile | head -1)"
+    v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" $PRIVATE/Containerfile | head -1)"
     record "build:$arg" "$v"
     assert_ne "build:$arg-is-pinned" "latest" "$v"
 done
 # NODE_VERSION is already pinned; assert it stays that way and looks like a real version.
-nv="$(sed -n 's/^ARG NODE_VERSION=\(.*\)/\1/p' Containerfile | head -1)"
+nv="$(sed -n 's/^ARG NODE_VERSION=\(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
 assert_match "build:NODE_VERSION-is-explicit" '^[0-9]+\.[0-9]+\.[0-9]+$' "$nv"
 record "build:NODE_VERSION" "$nv"
 
 # ─── 5. the published checksums the install docs promise ───────────────────────
 # Both installers say their SHA-256 is published next to the download link, which is the
 # only thing making "read it before you run it" checkable for a student.
-record "checksum:install-cs193v.sh"          "$(sha256sum install-cs193v.sh | awk '{print $1}')"
-record "checksum:install-cs193v-windows.cmd" "$(sha256sum install-cs193v-windows.cmd | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v.sh"          "$(sha256sum $PRIVATE/install-cs193v.sh | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(sha256sum $PRIVATE/install-cs193v-windows.cmd | awk '{print $1}')"
 note_file="$REPO/PUBLISHED-CHECKSUMS.txt"
 if [ -f "$note_file" ]; then
-    for f in install-cs193v.sh install-cs193v-windows.cmd; do
+    for f in $PRIVATE/install-cs193v.sh $PRIVATE/install-cs193v-windows.cmd; do
         want="$(grep -F "$f" "$note_file" | awk '{print $1}' | head -1)"
         assert_eq "checksum:$f-matches-published" \
                   "$(sha256sum "$f" | awk '{print $1}')" "$want"

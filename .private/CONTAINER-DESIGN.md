@@ -19,9 +19,11 @@ You get a shell with node, python, git, the GitHub CLI, the Vercel CLI and Claud
 installed. You can run `./cs193v` in as many terminal windows as you like; they all open
 a shell in the **same** container. There is only ever one container.
 
-Everything about how it starts is in two plain text files you can read: `container.args`
-holds every flag, heavily commented, and `local.args` holds the one value that depends on
-your particular machine. To see exactly what runs:
+Everything about how it starts is in two plain text files you can read, in the `.config`
+folder next to the launcher: `container.args` holds every flag, heavily commented, and
+`local.args` holds the one value that depends on your particular machine. They are tucked
+out of the way so your course folder stays uncluttered, not to hide them. To see exactly
+what runs:
 
 ```
 ./cs193v --dev-print-command

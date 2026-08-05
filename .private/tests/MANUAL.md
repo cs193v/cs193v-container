@@ -7,8 +7,8 @@ through this on one machine of each platform and fill in §10's report template.
 Run the automated suite first — if it is red, fix that before spending human time here:
 
 ```sh
-tests/run-tests.sh                    # everything automatable
-tests/run-tests.sh --release          # the four publishing blanks
+.private/tests/run-tests.sh                    # everything automatable
+.private/tests/run-tests.sh --release          # the four publishing blanks
 ```
 
 Results recorded on **Ubuntu 26.04 native, rootless podman 5.7.0** are given below each
@@ -147,7 +147,7 @@ invocation is unverified.
 Destructive: it logs you out of claude, gh and vercel. Gated behind an opt-in so a routine
 suite run cannot do it to you:
 ```sh
-CS193V_DESTRUCTIVE=1 tests/run-tests.sh --tier live
+CS193V_DESTRUCTIVE=1 .private/tests/run-tests.sh --tier live
 ```
 
 ---
@@ -156,7 +156,7 @@ CS193V_DESTRUCTIVE=1 tests/run-tests.sh --tier live
 
 ### §1.3 — bash 3.2 on macOS
 `bash --version` (expect 3.2.x), then run the installer with `/bin/bash` explicitly, and run
-`tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose
+`.private/tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose
 so it can run here.
 *Expect:* no `mapfile`, associative-array or `${x,,}` errors.
 *Automated on Linux:* the ban-list greps, plus a check that every empty-array expansion uses
@@ -170,7 +170,7 @@ Then open `http://localhost:3000/` in the student's real browser. If `localhost`
 `127.0.0.1` works, record it — `localhost` may be resolving to `::1`.
 
 ### §5.2 — macOS provider: libkrun vs applehv (Apple Silicon)
-Run §A.7's ownership checks (`tests/run-tests.sh --tier container -k files`) under **both**:
+Run §A.7's ownership checks (`.private/tests/run-tests.sh --tier container -k files`) under **both**:
 ```sh
 podman machine stop
 CONTAINERS_MACHINE_PROVIDER=applehv podman machine init cs193v-test && podman machine start cs193v-test
@@ -191,7 +191,7 @@ Confirm or refute that podman 6 cannot run there; the support policy depends on 
 `wsl --import` from a hosted rootfs, which changes the installer.
 
 ### §5.5 — cgroup delegation in WSL
-With `systemd=true` in `/etc/wsl.conf`: `tests/run-tests.sh --tier container -k 60`
+With `systemd=true` in `/etc/wsl.conf`: `.private/tests/run-tests.sh --tier container -k 60`
 *Expect:* `kernel:cgroup-memory-max` equals `--memory`, not `max`. If it reads `max` the
 memory cap is **not enforced** and the protection is illusory.
 *Linux baseline:* enforced exactly — `memory.max` = 1073741824 for `--memory=1024m`.
