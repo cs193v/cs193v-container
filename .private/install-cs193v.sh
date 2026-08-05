@@ -205,6 +205,7 @@ need() { NEEDS[${#NEEDS[@]}]="$1"; NEEDS_WHY[${#NEEDS_WHY[@]}]="$2"; }
 PLAT="$(platform)"
 DIR=""
 DO_PODMAN_INSTALL=no
+DO_SSH_INSTALL=no
 DO_MACHINE_INIT=no
 DO_MACHINE_RESIZE=no
 DO_WSLCONF=no
@@ -236,6 +237,21 @@ Please upgrade podman and run this again:
             *)     need "Install podman (and uidmap)" \
                         "Podman runs the course container. Installing software needs your password." ;;
         esac
+    fi
+
+    # The ssh CLIENT, not a server. cs193v runs it on this computer to carry the course ports
+    # into the container's own loopback; nothing listens for incoming ssh anywhere.
+    if command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1; then
+        ok "ssh"
+    elif [ "$PLAT" = macos ]; then
+        # Every supported macOS ships openssh-client, so this means something unusual about
+        # the machine, and guessing at a fix would be worse than saying so.
+        die "ssh is missing from this Mac, which should not be possible.
+Please contact course staff rather than working around it."
+    else
+        DO_SSH_INSTALL=yes
+        need "Install openssh-client" \
+             "cs193v uses ssh on your own computer to connect your browser to servers you run inside the container. Without it the container still works, but nothing in it would be reachable at http://localhost. Installing software needs your password."
     fi
 
     if [ "$PLAT" = macos ]; then
@@ -335,13 +351,31 @@ choose_dir() {
     ok "$DIR"
 }
 
+# Installs podman and, on apt platforms, the ssh CLIENT alongside it.
+#
+# openssh-client belongs here rather than in an error message the launcher prints: it is a
+# machine prerequisite exactly like podman and uidmap, and this script is what provisions the
+# machine. cs193v uses it to forward the course ports from the student's loopback into the
+# container's, so without it the container works but nothing in it is reachable from a
+# browser. Macs ship it, and it is not apt-installable there, so DO_SSH_INSTALL is only ever
+# set on linux/wsl.
+#
+# The two are gated INDEPENDENTLY. A machine that already has podman but no ssh is a real
+# case — a minimal WSL distro is the likely one — and folding ssh into the podman flag would
+# skip it there for no reason.
 install_podman() {
-    [ "$DO_PODMAN_INSTALL" = yes ] || { skip "podman"; return; }
-    step "Installing podman"
+    if [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_SSH_INSTALL" = no ]; then
+        skip "podman and openssh-client"; return
+    fi
+    local pkgs=""
+    [ "$DO_PODMAN_INSTALL" = yes ] && pkgs="podman uidmap"
+    [ "$DO_SSH_INSTALL" = yes ]    && pkgs="$pkgs openssh-client"
+    step "Installing ${pkgs:-podman}"
     case "$PLAT" in
         linux|wsl)
             sudo apt-get update || die "apt-get update failed."
-            sudo apt-get install -y podman uidmap || die "Could not install podman."
+            # shellcheck disable=SC2086
+            sudo apt-get install -y $pkgs || die "Could not install $pkgs."
             ;;
         macos)
             local arch pkg url
@@ -364,6 +398,11 @@ You can install Podman Desktop by hand instead — https://podman-desktop.io/dow
     command -v podman >/dev/null 2>&1 || die "podman still is not on your PATH after installing.
 Try opening a new terminal window and running this script again."
     ok "podman $(podman --version | awk '{print $NF}')"
+    if [ "$DO_SSH_INSTALL" = yes ]; then
+        command -v ssh >/dev/null 2>&1 || die "ssh still is not on your PATH after installing.
+Try opening a new terminal window and running this script again."
+        ok "ssh installed"
+    fi
 }
 
 setup_wslconf() {

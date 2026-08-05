@@ -222,15 +222,19 @@ class TestEndToEnd(unittest.TestCase):
             cls.socks.append(s)
             return s
 
-        # One socket per state the tool claims to diagnose.
-        listen(socket.AF_INET, "0.0.0.0", 3007)      # published + wildcard  -> OK
-        listen(socket.AF_INET, "127.0.0.1", 3008)    # published + loopback  -> UNREACHABLE
-        listen(socket.AF_INET, "0.0.0.0", 4007)      # unpublished + wildcard -> NOT PUBLISHED
-        listen(socket.AF_INET, "127.0.0.1", 4008)    # unpublished + loopback -> two problems
+        # One socket per state the tool claims to diagnose. The bind address no longer decides
+        # reachability for IPv4 -- the tunnel's far end is the container's own loopback, so
+        # 127.0.0.1 and 0.0.0.0 both work -- so what is left is the PORT, plus the one bind
+        # address that still cannot be reached, ::1.
+        listen(socket.AF_INET, "0.0.0.0", 3007)      # forwarded + wildcard -> OK
+        listen(socket.AF_INET, "127.0.0.1", 3008)    # forwarded + loopback -> OK (was UNREACHABLE)
+        listen(socket.AF_INET, "0.0.0.0", 4007)      # not forwarded        -> NOT FORWARDED
+        listen(socket.AF_INET, "127.0.0.1", 4008)    # not forwarded        -> NOT FORWARDED
         listen(socket.AF_INET, "0.0.0.0", 5180)      # just past vite's range
-        # The IPv6 regression case, on a PUBLISHED port: a server told to bind "localhost"
-        # lands here, and the whole point is that it must be reported as UNREACHABLE with a
-        # readable address rather than as 32 hex digits.
+        # The IPv6 case, on a FORWARDED port. Two things are asserted about it: that the
+        # address renders readably rather than as 32 hex digits (the original regression), and
+        # that it is still called out -- an ssh -L whose far end is 127.0.0.1 cannot reach an
+        # IPv6-only listener, so this is the last remaining bind-address failure.
         cls.have_v6 = True
         try:
             listen(socket.AF_INET6, "::1", 5177)
@@ -256,17 +260,29 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("OK", self.rows[3007])
         self.assertIn("http://localhost:3007/", self.rows[3007])
 
-    def test_published_loopback_is_unreachable_and_names_the_fix(self):
-        self.assertIn("UNREACHABLE", self.rows[3008])
-        self.assertIn("--host 0.0.0.0", self.rows[3008])
+    def test_forwarded_loopback_is_now_OK(self):
+        # THE regression test for this whole change. A server bound to the container's
+        # 127.0.0.1 was the failure this command existed to explain, and the tunnel makes it
+        # work -- so the old UNREACHABLE verdict would now be a lie, and the old
+        # "--host 0.0.0.0" advice would send a student to fix something that is not broken.
+        self.assertIn("OK", self.rows[3008])
+        self.assertIn("http://localhost:3008/", self.rows[3008])
+        self.assertNotIn("UNREACHABLE", self.rows[3008])
 
-    def test_unpublished_wildcard_says_not_published(self):
-        self.assertIn("NOT PUBLISHED", self.rows[4007])
+    def test_nothing_still_demands_binding_all_interfaces(self):
+        # The 0.0.0.0 requirement is retired everywhere, not just on the row above.
+        self.assertNotIn("--host 0.0.0.0", self.out)
+        self.assertNotIn("Why 0.0.0.0", self.out)
+
+    def test_unforwarded_wildcard_says_not_forwarded(self):
+        self.assertIn("NOT FORWARDED", self.rows[4007])
         self.assertNotIn("--host", self.rows[4007])
 
-    def test_unpublished_loopback_names_both_problems(self):
-        self.assertIn("two problems", self.rows[4008])
-        self.assertIn("--host 0.0.0.0", self.rows[4008])
+    def test_unforwarded_loopback_is_only_a_port_problem_now(self):
+        # It used to be "two problems"; the bind address is no longer one of them.
+        self.assertIn("NOT FORWARDED", self.rows[4008])
+        self.assertNotIn("two problems", self.rows[4008])
+        self.assertNotIn("--host", self.rows[4008])
 
     def test_auto_increment_overflow_is_pointed_back_at_its_range(self):
         self.assertIn("5173-5179", self.rows[5180])
@@ -276,17 +292,23 @@ class TestEndToEnd(unittest.TestCase):
             self.skipTest("no IPv6 on this machine")
         row = self.rows[5177]
         self.assertIn("::1", row)
-        # The regression: 32 raw hex digits, which also wrecked the column alignment.
+        # The original regression: 32 raw hex digits, which also wrecked column alignment.
         self.assertNotIn("00000000", row)
-        # Published but loopback-bound is the diagnosis a student needs to hear.
+        # Still the one bind address the tunnel cannot reach, since the forward's far end is
+        # 127.0.0.1 -- and the advice must now name IPv4, not 0.0.0.0 specifically.
         self.assertIn("UNREACHABLE", row)
-        self.assertIn("--host 0.0.0.0", row)
+        self.assertIn("127.0.0.1", row)
+
+    def test_points_at_doctor_for_what_it_cannot_see(self):
+        # A missing forward and a downed tunnel are host-side facts that /proc cannot show,
+        # so an OK here is not a promise of reachability and must not read like one.
+        self.assertIn("cs193v doctor", self.out)
 
     def test_columns_stay_aligned(self):
         # Every data row must put STATUS at the same offset, or the table is unreadable.
         offsets = {self.rows[p].index(s)
                    for p in self.rows
-                   for s in ("OK", "UNREACHABLE", "NOT PUBLISHED", "system")
+                   for s in ("OK", "UNREACHABLE", "NOT FORWARDED", "system")
                    if s in self.rows[p]}
         self.assertEqual(len(offsets), 1, "STATUS column offsets: %s" % offsets)
 
@@ -299,12 +321,12 @@ class TestEndToEnd(unittest.TestCase):
                 self.assertIn("system", line, line)
                 self.assertNotIn("NOT PUBLISHED", line, line)
 
-    def test_explains_why_and_lists_the_published_set(self):
-        self.assertIn("published:", self.out)
+    def test_explains_why_and_lists_the_forwarded_set(self):
+        self.assertIn("forwarded:", self.out)
         self.assertIn("3000-3009", self.out)
-        self.assertIn("separate machine", self.out)
-        # The reassurance that 0.0.0.0 inside is not exposure outside.
-        self.assertIn("pinned to 127.0.0.1", self.out)
+        # The explanation is now about the PORT rather than the bind address, because the port
+        # is the only thing left for a student to get wrong on this side.
+        self.assertIn("port is what matters", self.out)
 
     def test_exit_status_is_nonzero_when_there_are_real_problems(self):
         self.assertEqual(self.rc, 1)

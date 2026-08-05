@@ -171,7 +171,9 @@ terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` v
 Each rejection is documented where it would otherwise be tempting — the invariants block
 in `.config/container.args`, and the comments in the `Containerfile`.
 
-## One open item
+## Open items
+
+### Enforcing the bind rule
 
 Enforcing the bind-`0.0.0.0` rule is deferred by decision. The gap, recorded so it isn't
 forgotten: **vite reads no `HOST` environment variable at all** (verified against vite
@@ -179,3 +181,43 @@ forgotten: **vite reads no `HOST` environment variable at all** (verified agains
 `--host`), and **Next.js reads `HOSTNAME`, not `HOST`**. So `ENV HOST=0.0.0.0` covers
 `react-scripts` and little else, while vite owns two of the six published ranges. The
 managed `CLAUDE.md` rule and `ports` are doing the real work today.
+
+### Revisit PID 1: is rejecting `--init` still the right call?
+
+`container.args` rejects `--init` because it bind-mounts the **host's** catatonit, which
+Ubuntu's podman package only *Recommends* — so a host missing it cannot start the container
+at all, which is a hard failure from a package we do not control. PID 1 is therefore a bash
+keep-alive loop in `files/entrypoint.sh`, chosen because a shell's `SIGCHLD` handler reaps
+any dead child it learns about.
+
+That reasoning is worth re-examining, and the tunnel work turned up a concrete data point.
+Measured while an ssh tunnel is up: the container holds **exactly one** `[sshd] <defunct>`,
+steady-state, for the tunnel's whole lifetime, dropping to zero when the tunnel exits. Eight
+tunnel cycles accumulated nothing, so there is no `pids.max` risk and nothing is broken.
+
+One persistent zombie is a smell, so the process tree was measured against a live tunnel
+rather than reasoned about:
+
+```
+  PID  PPID STAT  COMMAND
+    1     0 Ss    /bin/bash /usr/local/bin/cs193v-entrypoint
+    4     0 Ss    sshd-session: student [priv]
+    5     4 Z     [sshd] <defunct>          <-- the zombie
+    7     4 S     sshd-session: student
+```
+
+The zombie is pid 5, the original `sshd -i` that re-exec'd into `sshd-session`, and **its
+parent is pid 4, which is alive** — sshd's own privilege-separation monitor, running inside
+the container for as long as the tunnel does. A process is only reparented to PID 1 when its
+parent *dies*, so while pid 4 lives nothing PID 1 does can reap pid 5. Bash and catatonit
+would be equally powerless, and the zombie clears the moment the tunnel exits and pid 4 goes
+with it — which is exactly the 1-while-up / 0-while-down measurement.
+
+So this zombie is **not** evidence for or against `--init` in either direction; it is sshd's
+internal business. The `--init` question stands on its own merits, and the more interesting
+version of it is whether the rejection was aimed at the wrong target: the objection is
+specifically to bind-mounting the *host's* catatonit, which shipping our own init binary in
+the image would sidestep entirely while still giving PID 1 a real init.
+
+`doctor` reports a zombie count, so the docs must say that **1 is expected while a tunnel is
+up**, or a TA reads a healthy container as a faulty one.

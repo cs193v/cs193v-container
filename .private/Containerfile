@@ -32,8 +32,16 @@ RUN apt-get update \
       procps psmisc file unzip zip xz-utils \
       locales tzdata \
       fonts-noto-core fontconfig \
+      openssh-server \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
+# openssh-server provides the sshd that serves the loopback tunnel. It is a SERVER package
+# for a server that never listens: the launcher starts it per session as
+# `podman exec -i ... sshd -i`, so its connection is a pipe, not a socket. See
+# files/sshd_config, and the Networking section of .config/container.args for why the tunnel
+# exists at all. The openssh-CLIENT is on the host, not here; nothing in the container
+# initiates an ssh connection, and that asymmetry is the security argument.
+#
 # fonts-noto-core, not fonts-dejavu-core: the base image ships no fonts at all, and
 # anything that rasterizes text (Pillow, matplotlib, librsvg) needs one. Noto because a
 # large share of the web uses it, so rendered output looks unremarkable rather than
@@ -203,6 +211,21 @@ COPY files/ /tmp/cs193v-files/
 #     students meet its real hints and errors. The `git commit` editor trap is closed by
 #     EDITOR/VISUAL below, NOT by core.editor: git resolves
 #     GIT_EDITOR -> core.editor -> VISUAL -> EDITOR -> vi.
+#
+#  8. Installs the tunnel's sshd config, and pre-creates ~/.ssh STUDENT-OWNED at 0700.
+#     That directory is load-bearing for the same class of reason as item 5, and it was
+#     measured rather than assumed: the launcher bind-mounts authorized_keys INTO ~/.ssh, and
+#     if the directory does not already exist podman creates the mount's parent itself as
+#     ROOT (verified: root:root 0755). A root-owned ~/.ssh would then stop a student from
+#     ever writing their own id_ed25519 or known_hosts there. 0700 also keeps sshd's strict
+#     permission check happy without relying on the mount's own mode.
+#
+#     The config is then VALIDATED at build time with `sshd -t`, so a typo fails the build
+#     rather than a student's tunnel — the same principle as parsing managed-settings.json
+#     above. `sshd -t` also sanity-checks host keys, and the real one is per-machine and
+#     mounted at runtime, so a throwaway is generated purely to satisfy that check and
+#     deleted in the same layer. It must not survive: a host key baked into the image would
+#     be one private key shipped to every student.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url             /usr/local/bin/open-url; \
     install -m 0755 /tmp/cs193v-files/am-i-in-a-container  /usr/local/bin/am-i-in-a-container; \
@@ -228,6 +251,11 @@ RUN set -eux; \
     install -d -o student -g student -m 0700 /home/student/.local/share/com.vercel.cli; \
     install -d -o student -g student -m 0755 /home/student/.local/bin; \
     install -d -o student -g student -m 0755 /home/student/projects; \
+    install -d -o student -g student -m 0700 /home/student/.ssh; \
+    install -m 0644 /tmp/cs193v-files/sshd_config /etc/ssh/cs193v_sshd_config; \
+    ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/cs193v_host_ed25519_key; \
+    /usr/sbin/sshd -t -f /etc/ssh/cs193v_sshd_config; \
+    rm -f /etc/ssh/cs193v_host_ed25519_key /etc/ssh/cs193v_host_ed25519_key.pub; \
     su student -s /bin/sh -c 'npm config set prefix /home/student/.local'; \
     rm -f /etc/gitconfig; \
     rm -rf /tmp/cs193v-files

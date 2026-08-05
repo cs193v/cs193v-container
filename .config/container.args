@@ -24,6 +24,31 @@ IMAGE=
 #    --security-opt unmask=ALL
 #    ...and never mount a podman or docker socket.
 #
+#  THE TUNNEL'S OWN INVARIANTS. The host runs the ssh CLIENT and the container runs sshd;
+#  every one of these keeps it that way round, and the direction is the entire security
+#  argument -- see files/sshd_config.
+#
+#    never  ssh -R  (or RemoteForward, or `ssh -O forward -R`)
+#        A remote forward is the mirror image of what the tunnel does: the CONTAINER would
+#        ask the HOST to open a listening port. That is the "container tells your computer
+#        which ports to open" channel this project exists to avoid, it would need an sshd
+#        running on every student's laptop, and it would need a credential inside the
+#        container that logs in to the host. Refused by the server too (AllowTcpForwarding
+#        local), so this line is documentation of a property, not the only thing enforcing it.
+#
+#    never  -o ForwardAgent=yes / AddKeysToAgent / ssh-agent forwarding of any kind
+#        CONTAINER-DESIGN.md promises a student's own ssh and gpg keys never enter the
+#        container, and agent forwarding would hand it live use of them.
+#
+#    never  -o ClearAllForwardings=yes
+#        Not a security rule, a correctness one, and it reads like the opposite of what it
+#        does: ssh_config(5) clears forwardings given on the COMMAND LINE too, so it would
+#        silently delete all 46 forwards. Use `-F none` to ignore the student's own config.
+#
+#    never  ssh without -N
+#        The tunnel needs no remote command, and asking for one would allocate a shell and a
+#        pty inside the container for no reason.
+#
 #  Host isolation comes from rootless podman's user namespace. It does NOT come from
 #  the capability set: root owns /usr/bin and /etc, so euid 0 inside the container can
 #  tamper with the toolchain using no capability at all. Nor from AppArmor, which is
@@ -66,6 +91,14 @@ IMAGE=
 #   taken. Shipping it would make identical student code work on Ubuntu and Windows
 #   and fail on Macs, which is the worst kind of divergence.
 #
+#   SUPERSEDED, not wrong: the launcher now solves the same problem one layer up, with an
+#   ssh tunnel from the host into the container's own loopback. That deliberately does not
+#   touch the network stack at all -- its transport is a `podman exec` pipe, which is the
+#   thing this whole launcher already relies on to open a shell on all three platforms.
+#   The failure above is the reason it is done that way: any fix that rides the pasta or
+#   gvproxy path has to be proven separately on every platform, and this one has no
+#   network path to diverge. See "Published ports" below.
+#
 # DO NOT ADD  --network=pasta:-t,auto   (or any -t <addr>/auto form)
 #   Three independent failures on the passt Ubuntu 26.04 ships: `127.0.0.1/auto` does
 #   not parse (that grammar landed upstream three months after Ubuntu's snapshot);
@@ -74,27 +107,34 @@ IMAGE=
 #   address across ports 1-65535, publishing every listening container port — including
 #   Claude Code's own sockets — to the local network, with no way to pin it to loopback.
 
-# ─── Published ports ───────────────────────────────────────────────────────────
-# Ports are frozen at container-create time; podman cannot add a mapping to a running
-# container. So this is a fixed set, and `ports` inside the container diagnoses the two
-# failure modes it creates.
+# ─── Published ports: there are none, deliberately ─────────────────────────────
+# There are no -p lines here any more, and adding one back would BREAK the tunnel rather
+# than supplement it.
 #
-# The host side is pinned to 127.0.0.1 on ALL THREE platforms — including Windows.
-# That prefix IS reachable from a Windows browser and is the documented fix for the
-# unprefixed form failing (podman#17972, #22562). Dropping it would bind 0.0.0.0
-# inside the distro, trigger the Defender prompt (declined by default on Public
-# networks like dorm wifi), and expose the student's dev server to the network.
+# `podman run -p 127.0.0.1:3000:3000` and `ssh -L 127.0.0.1:3000:...` both want to bind host
+# 127.0.0.1:3000, and the second one to try gets EADDRINUSE. They are two implementations of
+# the same thing, not belt and braces, so the tunnel REPLACES publishing port for port.
 #
-# All >= 1024 (rootless podman refuses privileged host ports) and avoiding 5000 and
-# 7000, which macOS AirPlay Receiver occupies.
+# Why the tunnel won: podman's forwarder delivers to the container's eth0 and never touches
+# its lo, so a server bound to the container's 127.0.0.1 was unreachable from the student's
+# browser -- while its own log cheerfully printed "Local: http://localhost:5173/". Ten weeks
+# of every student hitting that, and `--host 0.0.0.0` on every command, was the cost of this
+# section. The tunnel's far end is resolved INSIDE the container, so it reaches lo; and since
+# 0.0.0.0 includes lo, it also reaches everything -p used to. It is a strict superset.
 #
-# Taught as "the 173 family": 4173 preview, 5173 vite, 6173 spare.
--p 127.0.0.1:3000-3009:3000-3009      # next, express, bare node, serve, docusaurus
--p 127.0.0.1:4173-4176:4173-4176      # vite preview
--p 127.0.0.1:5173-5179:5173-5179      # vite dev — the range auto-increment lands in
--p 127.0.0.1:6173-6182:6173-6182      # SPARE / assign-on-demand
--p 127.0.0.1:8000-8009:8000-8009      # python http.server, django, uvicorn
--p 127.0.0.1:8080-8084:8080-8084      # webpack-dev-server, http-server, misc
+# Two properties that came free, and one that did not:
+#
+#   * Ports are no longer frozen at container-create time. podman cannot add a mapping to a
+#     running container, but `ssh -O forward` can add one to a running TUNNEL -- so a port
+#     could be opened on demand with no recreate.
+#   * The host side is still loopback-only, and now for a structural reason rather than a
+#     flag: the ssh client binds 127.0.0.1 itself. Nothing is exposed to dorm wifi.
+#   * NOT free: a host port that is already busy. `podman run` used to fail loudly (and
+#     take the whole container down with it); the launcher now probes each port first and
+#     reports the ones it could not take. See ensure_tunnel in the launcher.
+#
+# The port LIST itself lives in CS193V_PORTS below -- one declaration, used both to build the
+# forwards and to tell `ports` what to expect, so the two cannot disagree.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
 # Four volumes, holding logins only. No package caches: node_modules lives on the bind
@@ -109,12 +149,31 @@ IMAGE=
 -v cs193v-vercel:/home/student/.local/share/com.vercel.cli
 
 # ─── Environment ───────────────────────────────────────────────────────────────
-# Consumed by the in-container `ports` command, and it MUST stay in step with the -p lines
-# above -- if it drifts, `ports` confidently gives wrong advice, which is worse than no
-# advice. That agreement is enforced at edit time by
-# tests/10-static.sh :: ports:CS193V_PORTS-matches--p-lines, which also checks the ranges
-# quoted in the managed CLAUDE.md. Enforcing it at edit time beats a runtime warning: it
-# fails before anyone ships a mismatch, rather than after a student has been misled.
+# THE port list, and the only one. The launcher parses this line to build its ssh -L
+# forwards, and passes the same value into the container for `ports` to compare listening
+# sockets against.
+#
+# It used to have to stay in step with a parallel set of -p lines, and tests/10-static.sh
+# asserted that agreement, because a drifted `ports` gives confidently wrong advice -- worse
+# than no advice. Deriving the forwards from this line instead makes that drift STRUCTURALLY
+# IMPOSSIBLE, so the test was deleted rather than rewritten. The remaining drift risk is the
+# ranges quoted in the managed CLAUDE.md, which is still checked at edit time.
+#
+# All >= 1024 (rootless podman refused privileged host ports, and an unprivileged ssh client
+# cannot bind them either) and avoiding 5000 and 7000, which macOS AirPlay Receiver occupies.
+#
+# Taught as "the 173 family": 4173 preview, 5173 vite, 6173 spare.
+#   3000-3009  next, express, bare node, serve, docusaurus
+#   4173-4176  vite preview
+#   5173-5179  vite dev -- the range vite's auto-increment lands in
+#   6173-6182  SPARE / assign-on-demand
+#   8000-8009  python http.server, django, uvicorn
+#   8080-8084  webpack-dev-server, http-server, misc
+#
+# Still hashed into cs193v.confighash, so changing it still prompts a recreate. It NEED not
+# be -- forwards are negotiated per session now -- but this value reaches the container
+# through -e at create time, so decoupling them would leave `ports` describing a set that is
+# no longer forwarded. A deliberate non-goal, not an oversight.
 -e CS193V_PORTS=3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
 
 # ═══════════════════════════════════════════════════════════════════════════════

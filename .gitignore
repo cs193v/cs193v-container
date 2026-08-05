@@ -2,6 +2,19 @@
 # computed for one particular computer. Re-running the installer recomputes it.
 .config/local.args
 
+# The loopback tunnel's key material, generated per machine by the launcher.
+#
+# PRIVATE KEYS. Committing tunnel-key or tunnel-host-key would publish one keypair to every
+# student and every reader of the repository, which is exactly the reason they are generated
+# per machine instead of baked into the image. The public halves and known_hosts are matched
+# too: they are per-machine derived files with nothing to gain from being tracked, and a
+# stale committed copy would be worse than none.
+#
+# The pattern covers tunnel-key, tunnel-key.pub, tunnel-host-key, tunnel-host-key.pub and
+# tunnel-known-hosts in one line, so a future addition beside them is ignored by default
+# rather than by remembering to come back here.
+.config/tunnel-*
+
 # Student work. The directory itself is tracked (via .gitkeep) so the bind mount target
 # always exists; nothing inside it is.
 projects/*

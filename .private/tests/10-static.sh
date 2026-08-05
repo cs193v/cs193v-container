@@ -206,32 +206,45 @@ assert_not_match "invariant:no-Z-relabel" ',Z' "$args_live"
 assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=1000" "$args_live"
 assert_contains "args:network-pasta"           "--network=pasta"                    "$args_live"
 
-# ─── published ports ───────────────────────────────────────────────────────────
-# Every host-side binding must be loopback. An unprefixed -p binds 0.0.0.0, which exposes
-# a student's dev server to dorm wifi and triggers the Windows Defender prompt.
-nonloopback="$(printf '%s\n' "$args_live" | grep -E '^\s*-p ' | grep -v '127\.0\.0\.1:' || true)"
-assert_eq  "ports:all-host-bindings-are-loopback" "" "$nonloopback"
+# ─── forwarded ports ───────────────────────────────────────────────────────────
+# A -p line does not merely duplicate the tunnel, it BREAKS it. Both bind host
+# 127.0.0.1:<port>, so whichever loses the race gets EADDRINUSE — and podman wins, because
+# the container is created before the tunnel starts, which means re-adding a -p line here
+# silently costs the student that port entirely. This is the strongest of the port
+# invariants and it replaced the old "every -p must be loopback-prefixed" check: with no -p
+# lines at all, the host side is loopback by construction, because the ssh client binds
+# 127.0.0.1 itself.
+published="$(printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
+assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 
+# The port set now comes from ONE declaration, CS193V_PORTS, which the launcher parses to
+# build its ssh -L flags and also passes into the container for `ports` to read. Host and
+# container side are therefore the same number by construction, so the old
+# "host range != container range" check has no failure left to catch and is gone.
 port_report="$(printf '%s\n' "$args_live" | python3 -c '
 import re, sys
-ranges = []
+spec = ""
 for line in sys.stdin:
-    m = re.search(r"-p\s+127\.0\.0\.1:(\d+)-(\d+):(\d+)-(\d+)", line)
+    m = re.search(r"CS193V_PORTS=([0-9,\-]+)", line)
     if m:
-        a, b, c, d = (int(x) for x in m.groups())
-        ranges.append((a, b, c, d))
-    else:
-        m = re.search(r"-p\s+127\.0\.0\.1:(\d+):(\d+)", line)
-        if m:
-            a, c = (int(x) for x in m.groups()); ranges.append((a, a, c, c))
+        spec = m.group(1)      # last wins, exactly as tunnel_ports() in the launcher does
 problems = []
 total = 0
-for a, b, c, d in ranges:
+if not spec:
+    problems.append("no CS193V_PORTS= line at all, so nothing would be forwarded")
+for chunk in spec.split(","):
+    if not chunk:
+        continue
+    if "-" in chunk:
+        a, b = (int(x) for x in chunk.split("-", 1))
+    else:
+        a = b = int(chunk)
+    if b < a:
+        problems.append("range %s is backwards" % chunk)
+        continue
     total += b - a + 1
-    if (a, b) != (c, d):
-        problems.append("host range %d-%d != container range %d-%d" % (a, b, c, d))
     if a < 1024:
-        problems.append("privileged port %d (rootless podman refuses these)" % a)
+        problems.append("privileged port %d (an unprivileged ssh client cannot bind these)" % a)
     for reserved in (5000, 7000):
         if a <= reserved <= b:
             problems.append("port %d collides with macOS AirPlay Receiver" % reserved)
@@ -241,16 +254,65 @@ print("\n".join(problems))
 assert_contains "ports:count-is-46" "total=46" "$port_report"
 assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=46" "$(printf '%s' "$port_report" | sed '/^$/d')"
 
-# CS193V_PORTS is what the in-container `ports` command reads. If it drifts from the -p
-# lines, `ports` confidently gives wrong advice — which is worse than no advice.
-declared="$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p')"
-derived="$(printf '%s\n' "$args_live" | sed -n 's/.*-p 127\.0\.0\.1:\([0-9]*-[0-9]*\):.*/\1/p' | paste -sd, -)"
-assert_eq  "ports:CS193V_PORTS-matches--p-lines" "$derived" "$declared"
+# ports:CS193V_PORTS-matches--p-lines is DELETED, not rewritten. It guarded the agreement
+# between CS193V_PORTS and a parallel set of -p lines; deriving the forwards from
+# CS193V_PORTS makes that disagreement structurally impossible, so there is nothing left to
+# assert. Enforcing an invariant by construction beats enforcing it by test.
 
-# The managed CLAUDE.md tells the agent which ranges are publishable. Same drift risk.
+# The managed CLAUDE.md quotes the ranges at the agent, and that IS still a second copy, so
+# it still needs the drift check.
+declared="$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
 claude_ranges="$(grep -oE '[0-9]{4}-[0-9]{4}' $PRIVATE/files/claude-code/CLAUDE.md | sort -u | paste -sd, -)"
-assert_eq  "ports:CLAUDE.md-matches--p-lines" \
-           "$(printf '%s' "$derived" | tr ',' '\n' | sort -u | paste -sd, -)" "$claude_ranges"
+assert_eq  "ports:CLAUDE.md-matches-CS193V_PORTS" \
+           "$(printf '%s' "$declared" | tr ',' '\n' | sort -u | paste -sd, -)" "$claude_ranges"
+
+# ─── the tunnel's invariants ───────────────────────────────────────────────────
+# The direction rule is the entire security argument: the host is the ssh CLIENT and the
+# container runs sshd. A remote forward would invert it, letting the container ask the host
+# to open a listening port — the "container tells your computer which ports to open" channel
+# this project exists to avoid. Enforced by the server too (AllowTcpForwarding local), so
+# these greps are defence in depth rather than the only guard.
+launcher_live="$(sed 's/#.*//' $REPO/cs193v)"
+assert_not_match "tunnel:never-asks-for-a-remote-forward" '(^|[[:space:]])-R([[:space:]]|$)' "$launcher_live"
+assert_not_contains "tunnel:no-RemoteForward"  "RemoteForward"  "$launcher_live"
+assert_not_contains "tunnel:no-agent-forwarding" "ForwardAgent=yes" "$launcher_live"
+# Not a security rule but a correctness one, and it reads like the opposite of what it does:
+# ssh_config(5) says ClearAllForwardings clears forwardings given on the COMMAND LINE too, so
+# it would silently delete all 46 -L flags.
+assert_not_contains "tunnel:no-ClearAllForwardings" "ClearAllForwardings" "$launcher_live"
+# -F none, or the student's own ~/.ssh/config could redirect or decorate the connection.
+assert_contains "tunnel:ignores-the-users-ssh-config" "-F none" "$launcher_live"
+# setsid(1) does not exist on macOS, so backgrounding must go through nohup.
+assert_contains "tunnel:uses-nohup-not-setsid" "nohup ssh" "$launcher_live"
+assert_not_match "tunnel:no-setsid" '(^|[[:space:]])setsid[[:space:]]' "$launcher_live"
+# A tunnel outliving its container holds every host port against a dead pipe, so the
+# replacement container's tunnel can bind none of them.
+assert_match "tunnel:remove_container-tears-the-tunnel-down" \
+             'remove_container\(\) \{ tunnel_down' "$launcher_live"
+
+sshd_conf="$(sed 's/^#.*//' $PRIVATE/files/sshd_config)"
+assert_contains "sshd:forwarding-is-local-only"   "AllowTcpForwarding local" "$sshd_conf"
+assert_contains "sshd:destinations-are-loopback"  "PermitOpen 127.0.0.1:*"   "$sshd_conf"
+assert_contains "sshd:no-agent-forwarding"        "AllowAgentForwarding no"  "$sshd_conf"
+assert_contains "sshd:no-x11"                     "X11Forwarding no"         "$sshd_conf"
+assert_contains "sshd:no-passwords"               "PasswordAuthentication no" "$sshd_conf"
+assert_contains "sshd:no-root-login"              "PermitRootLogin no"       "$sshd_conf"
+# ONE authorized_keys path, not OpenSSH's default pair. A writable authorized_keys2 would let
+# the container grant inbound access to itself.
+assert_not_contains "sshd:no-second-authorized-keys-file" "authorized_keys2" "$sshd_conf"
+
+# The image must carry the server, pre-create ~/.ssh student-owned, and validate the config at
+# build time. ~/.ssh is load-bearing and was measured, not guessed: without it podman creates
+# the bind mount's parent as ROOT (verified root:root 0755), which would lock a student out of
+# writing their own keys there.
+cf="$(cat $PRIVATE/Containerfile)"
+assert_contains "sshd:image-installs-openssh-server" "openssh-server" "$cf"
+assert_contains "sshd:image-precreates-dot-ssh" \
+                "install -d -o student -g student -m 0700 /home/student/.ssh" "$cf"
+assert_contains "sshd:config-is-validated-at-build-time" "sshd -t -f /etc/ssh/cs193v_sshd_config" "$cf"
+# A host key baked into the image would be one private key shipped to every student.
+assert_match "sshd:build-time-host-key-is-deleted" \
+             'rm -f /etc/ssh/cs193v_host_ed25519_key' "$cf"
 
 # ─── the tldr cache must not be able to fail silently  (#9) ────────────────────
 # `man` is deliberately absent, so tldr IS the command-line help. The build step that
@@ -295,6 +357,18 @@ assert_ok  "gitignore:gitkeep-is-tracked" git -C "$REPO" ls-files --error-unmatc
 # local.args holds one machine's memory cap; committing it would ship it to everyone.
 assert_ok  "gitignore:local.args-not-tracked" \
            sh -c "! git -C '$REPO' ls-files --error-unmatch $REPO/.config/local.args >/dev/null 2>&1"
+
+# The tunnel's PRIVATE KEYS. These are generated per machine precisely so that no keypair is
+# shared, and committing one would hand it to every student and every reader of the repo --
+# undoing the entire reason the host key is not baked into the image. Asserted by asking git
+# itself rather than by grepping .gitignore, so any spelling that actually works passes and
+# any that silently does not fails.
+for f in tunnel-key tunnel-key.pub tunnel-host-key tunnel-host-key.pub tunnel-known-hosts; do
+    assert_ok "gitignore:$f-is-ignored" \
+              git -C "$REPO" check-ignore -q ".config/$f"
+    assert_ok "gitignore:$f-not-tracked" \
+              sh -c "! git -C '$REPO' ls-files --error-unmatch '.config/$f' >/dev/null 2>&1"
+done
 
 # ─── Claude Code policy ────────────────────────────────────────────────────────
 assert_ok  "claude:managed-settings-is-valid-json" \

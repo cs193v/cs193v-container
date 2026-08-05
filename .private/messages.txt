@@ -19,6 +19,7 @@ cs193v — the CS193V course container
   cs193v ports               check whether your servers are reachable
   cs193v doctor              print a report to paste when asking for help
 
+  cs193v --reset-tunnel      fix it when your browser cannot reach your server
   cs193v --rebuild           start the container over. Your files and logins are kept.
   cs193v --full-rebuild      start over completely, including logging out.
   cs193v --update            get the newest version of the course container.
@@ -228,6 +229,33 @@ No Containerfile found at:
 
     {{FILE}}
 
+[[err.no-ssh]]
+The ssh command is not installed, or it is not on your PATH.
+
+cs193v uses ssh on YOUR computer to connect your browser to the
+servers you run inside the container. Without it, nothing you run
+in the container could be reached at http://localhost.
+
+The course installer sets this up along with podman, so the fix is
+to run the installer script again — it will pick up from wherever
+it left off and change nothing that is already correct.
+
+If you believe you already ran it, contact course staff and include
+the output of:
+
+    cs193v doctor
+
+[[err.tunnel-keygen]]
+Could not create the keys cs193v uses to connect your browser to
+the container.
+
+This almost always means the .config folder next to this script is
+not writable, or the disk is full. Check both, then try again. If
+neither looks wrong, contact course staff and include the output
+of:
+
+    cs193v doctor
+
 [[warn.dev-mode]]
 NOTE: running a locally built image ({{IMAGE}}), not the published course image.
 If you are a student and did not do this on purpose, tell course staff — this line
@@ -242,6 +270,49 @@ Could not restart podman's virtual machine automatically. Try it by hand:
 
     podman machine stop
     podman machine start
+
+[[warn.tunnel-failed]]
+The container started, but your browser will not be able to reach servers running
+inside it. Everything else works normally, so you can keep going — you just will
+not be able to load http://localhost pages from the container yet.
+
+Try:
+
+    cs193v --reset-tunnel
+
+If that does not help, send course staff the output of `cs193v doctor` and this file:
+
+    {{LOG}}
+
+{{OUT}}
+
+[[warn.tunnel-ports-busy]]
+These ports were already in use by another program on your computer, so servers you
+run inside the container on them will NOT be reachable:
+
+    {{PORTS}}
+
+Use a different port from the published list, or quit whatever else is using these
+and run `cs193v --reset-tunnel`. To find the culprit on a Mac or Linux machine:
+
+    lsof -nP -iTCP:PORT -sTCP:LISTEN
+
+[[warn.tunnel-no-ports]]
+No ports are listed in your settings file, so nothing you run inside the container
+will be reachable from your browser. That file should contain a CS193V_PORTS line:
+
+    {{FILE}}
+
+If you have not edited it, contact course staff — this line should not appear.
+
+[[warn.tunnel-bad-port]]
+Skipping "{{CHUNK}}" in the CS193V_PORTS setting: it is not a port or a port range,
+so it was ignored. Everything else still works. If you did not edit that setting
+yourself, contact course staff.
+
+[[warn.tunnel-reset-not-running]]
+There is no container running, so there was nothing to reconnect. The connection was
+cleaned up anyway. Run ./cs193v to start the container.
 
 [[status.creating]]
 Setting up the course container...
@@ -272,6 +343,12 @@ Updated. Run ./cs193v to open a shell.
 
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
+
+[[status.tunnel-resetting]]
+Reconnecting your browser to the container...
+
+[[status.tunnel-reset]]
+Reconnected. Servers running in the container should be reachable again.
 
 [[prompt.config-changed]]
 The course container settings have changed since your container was created.

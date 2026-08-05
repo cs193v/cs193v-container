@@ -3,24 +3,45 @@
 ports — is my dev server reachable from my browser, and if not, why?
 
 Reads the kernel's own socket table (/proc/net/tcp and /proc/net/tcp6), decodes which
-address each listener is bound to, and compares that against the ports this container
-actually publishes to the host.
+address each listener is bound to, and compares that against the ports the launcher
+forwards from the student's own computer into this container.
 
-It exists because a fixed published range has exactly two failure modes and BOTH are
-invisible from inside:
+WHAT CHANGED, AND WHY THIS FILE IS SHORTER THAN IT WAS
 
-  1. A server bound to the container's 127.0.0.1 is unreachable from the host browser.
-     The container is a separate machine, so "only this machine" excludes your browser.
-     Podman's port forwarder delivers to the container's eth0, never its loopback — so
-     the connection is refused while the server's log cheerfully prints
-     "Local: http://localhost:5173/". The log is a lie, not a hint.
+The launcher used to publish ports with `podman run -p`, and podman's forwarder delivers to
+the container's eth0 and never touches its lo. So a server bound to the container's
+127.0.0.1 was unreachable from the browser, and the fix was to make every student start
+every server with `--host 0.0.0.0`. That was the single biggest failure mode this command
+existed to explain.
 
-  2. A server on a port outside the published set is unreachable no matter what it is
-     bound to. vite's auto-increment walks 5173 -> 5174 -> 5175 when a port is busy, and
-     `python -m http.server` defaults to 8000, so this happens by accident constantly.
+It is gone. The launcher now runs an ssh client on the student's computer that forwards each
+course port into THIS container's own loopback, so binding 127.0.0.1 works, and binding
+0.0.0.0 still works too (0.0.0.0 includes lo). The bind address is no longer something a
+student has to get right, so this command no longer diagnoses it.
 
-The published set arrives as CS193V_PORTS at container-create time, because ports are
-frozen when the container is created and cannot be added to a running one.
+WHAT IS LEFT
+
+  1. A server on a port outside the forwarded set is unreachable no matter what it is bound
+     to. vite's auto-increment walks 5173 -> 5174 -> 5175 when a port is busy, and
+     `python -m http.server` defaults to 8000, so this still happens by accident constantly.
+
+  2. A server bound ONLY to ::1, the IPv6 loopback. The forward's far end is 127.0.0.1, so
+     an IPv6-only listener is still refused. This is rarer than it sounds in this image and
+     the old docstring here overstated it: it claimed a server told to bind "localhost"
+     lands on ::1, and that is NOT true here, because /etc/hosts maps localhost to
+     127.0.0.1 only and has no `::1 localhost` line. Measured in the shipped image:
+     `python3 -m http.server --bind localhost` and node's `listen(port, "localhost")` both
+     bind 127.0.0.1. Reaching ::1 takes asking for it explicitly.
+
+  3. Two failure modes this command CANNOT see, which is the honest limit of it. A forward
+     may be missing because something else on the student's computer already had that port,
+     or the tunnel may be down altogether. Both are facts about the HOST, and this command
+     reads /proc inside the container. So an OK here means "nothing is wrong on this side",
+     which is why the closing advice points at `cs193v doctor`, which runs on the host and
+     can see the other half.
+
+The forwarded set arrives as CS193V_PORTS at container-create time. It is the same single
+declaration the launcher parses to build the forwards, so the two cannot disagree.
 """
 
 import os
@@ -168,39 +189,46 @@ def main():
     for port in sorted(by_port):
         shown, wildcard = by_port[port]
         pub = published(port, ranges)
-        if pub and wildcard:
+        # An IPv6-loopback-only listener. The forward's far end is 127.0.0.1, so this one is
+        # still refused -- the only bind address left that does not work.
+        v6_only = shown == "::1"
+        if pub and not v6_only:
             status, advice = "OK", "http://localhost:%d/" % port
-        elif pub and not wildcard:
+        elif pub and v6_only:
             problems += 1
             status = "UNREACHABLE"
-            advice = "bound to %s only; restart it with --host 0.0.0.0" % shown
+            advice = "bound to ::1 (IPv6) only; restart it on 127.0.0.1 or 0.0.0.0"
         elif port < PRIVILEGED:
             # Listed for completeness, but not counted: a student cannot have started this
-            # and could not publish it anyway. Counting it would make the exit status and
-            # the closing explanation fire on a container with no problem at all.
+            # and it could not be forwarded anyway. Counting it would make the exit status
+            # and the closing explanation fire on a container with no problem at all.
             status = "system"
             advice = "a system service, not one of your servers"
-        elif wildcard:
+        elif v6_only:
             problems += 1
-            status = "NOT PUBLISHED"
-            advice = "restart it on a port in %s" % suggest(port, ranges)
+            status = "NOT FORWARDED"
+            advice = ("two problems: restart it on %s, on 127.0.0.1 or 0.0.0.0"
+                      % suggest(port, ranges))
         else:
             problems += 1
-            status = "NOT PUBLISHED"
-            advice = ("two problems: restart it on %s, with --host 0.0.0.0"
-                      % suggest(port, ranges))
+            status = "NOT FORWARDED"
+            advice = "restart it on a port in %s" % suggest(port, ranges)
         print("  %-6d %-15s %-14s %s" % (port, shown, status, advice))
 
     print("  " + "-" * 78)
-    print("  published: " + ", ".join("%d-%d" % (a, b) if a != b else str(a)
+    print("  forwarded: " + ", ".join("%d-%d" % (a, b) if a != b else str(a)
                                       for a, b in ranges))
     if problems:
         print()
-        print("  Why 0.0.0.0: this container is a separate machine from your browser.")
-        print("  127.0.0.1 means \"only this machine\", which excludes your browser.")
-        print("  0.0.0.0 means \"any interface\", which is what lets it through.")
-        print("  Your own machine is still the only one that can reach it: the host")
-        print("  side of every published port is pinned to 127.0.0.1.")
+        print("  Only these ports reach your browser. Your computer forwards each one")
+        print("  into this container, so a server on any other port has nothing")
+        print("  carrying it out -- the port is what matters, not the bind address.")
+    # The limit of what this command can know. Said always, not only on failure, because the
+    # case it covers is precisely the one where everything HERE looks fine: `ports` reads
+    # /proc inside the container and cannot see whether the host end of a forward exists.
+    print()
+    print("  If a port says OK and your browser still cannot reach it, the problem is")
+    print("  on your own computer, not in here. Run this THERE:  cs193v doctor")
     return 1 if problems else 0
 
 

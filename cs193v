@@ -47,6 +47,29 @@ WORKSPACE="$DIR/projects"
 PRIVATE="$DIR/.private"
 CONTAINERFILE="$PRIVATE/Containerfile"
 
+# ─── the tunnel's files ────────────────────────────────────────────────────────
+# Key material lives beside local.args in .config/, git-ignored, generated once per machine.
+# The private halves NEVER enter the container; the public half and the host key are
+# bind-mounted read-only, so a compromised container cannot alter who may log in.
+TUNNEL_KEY="$CONFIG/tunnel-key"
+TUNNEL_HOST_KEY="$CONFIG/tunnel-host-key"
+TUNNEL_KNOWN_HOSTS="$CONFIG/tunnel-known-hosts"
+# The name the tunnel connects to. Never resolved -- ProxyCommand replaces the connection
+# entirely -- but it IS the key that known_hosts is looked up under, so it has to be stable.
+TUNNEL_HOST="cs193v-tunnel"
+# And the account inside the container, which MUST be stated explicitly. ssh otherwise
+# defaults to the login name on the HOST -- so it would try to log in as whatever the
+# student's macOS or Windows account is called, and sshd would refuse it (AllowUsers student,
+# and the key is student's). The failure is a bare "Permission denied (publickey)" with
+# nothing pointing at the cause, and it would happen on every machine whose user is not
+# called "student" -- which is all of them.
+TUNNEL_USER="student"
+# Where the container's sshd finds its host key and config. Must match files/sshd_config's
+# HostKey line and the Containerfile's install path.
+TUNNEL_HOST_KEY_DST="/etc/ssh/cs193v_host_ed25519_key"
+TUNNEL_SSHD_CONFIG="/etc/ssh/cs193v_sshd_config"
+TUNNEL_AUTH_KEYS_DST="/home/student/.ssh/authorized_keys"
+
 NAME="cs193v"
 # NAME and DEV_IMAGE are not final: CS193V_INSTANCE suffixes both. See "developer
 # instance" below.
@@ -284,6 +307,22 @@ Use only letters, digits, hyphens and underscores." ;;
         DEV_IMAGE="$DEV_IMAGE-$INSTANCE" ;;
 esac
 
+# ─── the tunnel's runtime paths ────────────────────────────────────────────────
+# In TMPDIR, not .config/, for two reasons. A unix socket path is capped near 104 bytes on
+# macOS and 108 on Linux, and this launcher already expects deep course directories with
+# spaces in them (see the cs193v.dir label) -- so a socket under $DIR could simply be too
+# long to bind. And these are per-boot runtime state, not configuration: leaving a stale
+# socket in the student's course directory would be clutter that outlives its meaning.
+#
+# Keyed by a hash of $DIR so two checkouts never share a socket even with no instance set,
+# which matters because the control socket IS the tunnel's identity for -O check/exit.
+# run_timeout already uses ${TMPDIR:-/tmp}, so this is an existing idiom rather than a new
+# assumption about the platform.
+TUNNEL_ID="$(printf '%s\n' "$DIR" "$INSTANCE" | sha_stdin | cut -c1-12)"
+TUNNEL_CTL="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.ctl"
+TUNNEL_PID="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.pid"
+TUNNEL_LOG="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.log"
+
 # ─── argument files ────────────────────────────────────────────────────────────
 ARGS=()
 IMAGE=''
@@ -340,6 +379,17 @@ build_run_args() {
     RUN_ARGS[${#RUN_ARGS[@]}]="cs193v.dir=$DIR"
     RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
     RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$WORKSPACE,dst=$MOUNT_DST,rw$relabel"
+    # The tunnel's key material, read-only. Added here rather than in container.args because
+    # the paths are absolute and machine-specific -- the same reason local.args exists.
+    #
+    # Appended one element at a time, NOT via $(some_function) with word splitting: the
+    # course directory is allowed to contain spaces (see the cs193v.dir label) and a split
+    # would silently tear such a path in half, exactly as it would for the workspace mount
+    # immediately above.
+    RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
+    RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$TUNNEL_KEY.pub,dst=$TUNNEL_AUTH_KEYS_DST,ro"
+    RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
+    RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$TUNNEL_HOST_KEY,dst=$TUNNEL_HOST_KEY_DST,ro"
     local a
     # ${arr[@]+"${arr[@]}"}, not "${arr[@]}": expanding an EMPTY array under `set -u` is a
     # fatal "unbound variable" on bash < 4.4, which is every Mac. A container.args holding
@@ -367,7 +417,13 @@ config_hash() {
     # ~/projects, every container already on a student's machine would have kept the old
     # path with no recreate prompt, and the docs would have described a directory nobody
     # was standing in.
+    # The tunnel's mount destinations are hashed for exactly the reason MOUNT_DST is: they
+    # are decided here rather than in container.args, so nothing else would notice if they
+    # moved, and a container created without them cannot serve a tunnel at all -- sshd would
+    # have no authorized_keys and no host key. Without this, a student whose container
+    # predates the tunnel would get no recreate prompt and a tunnel that simply never works.
     { printf '%s\n' "$img" "$WORKSPACE" "$MOUNT_DST"
+      printf '%s\n' "$TUNNEL_AUTH_KEYS_DST" "$TUNNEL_HOST_KEY_DST"
       printf '%s\n' ${ARGS[@]+"${ARGS[@]}"}; } | sha_stdin
 }
 
@@ -377,6 +433,14 @@ preflight() {
 
     if ! command -v podman >/dev/null 2>&1; then
         die "$(msg err.no-podman)"
+    fi
+
+    # The tunnel needs the ssh CLIENT on the host -- not a server. macOS ships it and so does
+    # essentially every Linux; the realistic gap is a minimal WSL distro. Checked here rather
+    # than at first use so the diagnosis arrives before a container exists, and names the
+    # package rather than leaving a student to decode "ssh: command not found".
+    if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+        die "$(msg err.no-ssh)"
     fi
 
     if ! run_timeout 10 podman --version; then
@@ -427,14 +491,29 @@ resolve_image() {
 }
 
 create_container() {
+    # BEFORE podman run, not just before the tunnel starts. The key material is bind-mounted,
+    # and podman creates a missing bind-mount source as a DIRECTORY -- so a first run with no
+    # keys yet would silently mount a directory over authorized_keys and the host key, and
+    # sshd would then fail for a reason with no obvious connection to the cause.
+    tunnel_keys
     build_run_args
     info "$(msg status.creating)"
     if ! run_timeout 180 podman run ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$IMAGE"; then
         die "$(msg err.create-failed OUT="$RT_OUT")"
     fi
+    # Every verb that makes a container funnels through here, so the tunnel is raised in one
+    # place rather than at each of the six call sites where one could be forgotten. Failure is
+    # deliberately NOT fatal: the container and the shell are still perfectly usable, only the
+    # browser-facing ports are missing, and ensure_tunnel has already said so.
+    ensure_tunnel || true
 }
 
-remove_container() { pmq rm -f "$NAME"; }
+# The tunnel goes first, always. It holds every course port on the host's loopback, and those
+# are bound by a process that outlives the container -- so removing the container without it
+# leaves an ssh client holding all 46 ports against a pipe that no longer has anything on the
+# far end, and the REPLACEMENT container's tunnel then cannot bind a single one of them. That
+# turns a routine --rebuild into a total outage whose cause is invisible.
+remove_container() { tunnel_down; pmq rm -f "$NAME"; }
 
 # Base names, not full ones, so the instance suffix is applied in exactly one place and
 # cannot drift from the rewrite in load_args. "$NAME-claude" is "cs193v-claude" for a
@@ -444,6 +523,181 @@ remove_volumes() {
     for v in claude claude-json gh vercel; do
         pmq volume rm "$NAME-$v"
     done
+}
+
+# ─── the loopback tunnel ───────────────────────────────────────────────────────
+# What this is and why it exists: podman's port forwarder delivers to the container's eth0
+# and never touches its lo, so a server bound to the container's own 127.0.0.1 was
+# unreachable from the student's browser. Rather than publish ports, the launcher runs an ssh
+# CLIENT on the host that binds each course port on the host's loopback and asks an sshd
+# INSIDE the container to connect to the container's loopback for each arriving connection.
+#
+# The transport is a `podman exec` pipe, not a socket: sshd is started in inetd mode (-i), so
+# nothing listens anywhere in the system and the only way to reach it is to be able to run
+# `podman exec`, which already requires this user's own privileges. That choice is also what
+# makes it portable -- `podman exec` is what open_shell already relies on for a shell on all
+# three platforms, whereas --network=pasta:--host-lo-to-ns-lo was silently inert on macOS.
+#
+# One ssh process carries every forward: SSH multiplexes channels over one connection, so a
+# new browser connection costs a new channel, not a new `podman exec`. Measured: forwarded
+# throughput 322 MB/s and per-connection latency indistinguishable from a published port
+# (12.1ms vs 12.6ms), against 158ms per connection for any relay that spawns podman exec
+# per connection. That measurement is the whole reason this is ssh and not socat.
+
+# Generated once per machine. Not in the image (that would ship one private key to every
+# student) and not per container start (the host key would change on every --rebuild and
+# greet students with REMOTE HOST IDENTIFICATION HAS CHANGED for no reason).
+tunnel_keys() {
+    [ -f "$TUNNEL_KEY" ] || {
+        ssh-keygen -q -t ed25519 -N '' -C 'cs193v-tunnel' -f "$TUNNEL_KEY" </dev/null \
+            || die "$(msg err.tunnel-keygen)"
+    }
+    [ -f "$TUNNEL_HOST_KEY" ] || {
+        ssh-keygen -q -t ed25519 -N '' -C 'cs193v-tunnel-host' -f "$TUNNEL_HOST_KEY" </dev/null \
+            || die "$(msg err.tunnel-keygen)"
+    }
+    # Pin the container's host key, so StrictHostKeyChecking=yes has something to check and a
+    # student never sees an interactive "do you want to continue" prompt. Rewritten every
+    # time rather than appended to, so a regenerated host key cannot leave two entries.
+    printf '%s %s\n' "$TUNNEL_HOST" "$(cat "$TUNNEL_HOST_KEY.pub")" > "$TUNNEL_KNOWN_HOSTS"
+    chmod 600 "$TUNNEL_KEY" "$TUNNEL_HOST_KEY" 2>/dev/null || true
+}
+
+# Every port to forward, one per line, from the CS193V_PORTS value in container.args. Derived
+# rather than declared a second time: the in-container `ports` command compares listening
+# sockets against the same value, and a mismatch would make it give confidently wrong advice.
+# The LAST occurrence wins, matching podman's own last--e-wins behaviour, so local.args can
+# move one developer's instance out of another's way.
+tunnel_ports() {
+    local a spec chunk lo hi p
+    spec=''
+    for a in ${ARGS[@]+"${ARGS[@]}"}; do
+        case "$a" in CS193V_PORTS=*) spec="${a#CS193V_PORTS=}" ;; esac
+    done
+    [ -n "$spec" ] || return 0
+    for chunk in $(printf '%s' "$spec" | tr ',' ' '); do
+        case "$chunk" in
+            *-*) lo="${chunk%%-*}"; hi="${chunk##*-}" ;;
+            *)   lo="$chunk"; hi="$chunk" ;;
+        esac
+        # A malformed range must not spin forever, and must not be silently dropped either:
+        # container.args is a file people edit.
+        case "$lo$hi" in ''|*[!0-9]*) warn "$(msg warn.tunnel-bad-port CHUNK="$chunk")"; continue ;; esac
+        [ "$lo" -le "$hi" ] || { warn "$(msg warn.tunnel-bad-port CHUNK="$chunk")"; continue; }
+        p="$lo"
+        while [ "$p" -le "$hi" ]; do printf '%s\n' "$p"; p=$((p + 1)); done
+    done
+}
+
+# Is a tunnel alive for THIS course directory and instance? The control socket is the
+# identity, and -O check is the only honest test: a socket file can outlive its process.
+tunnel_alive() {
+    [ -S "$TUNNEL_CTL" ] || return 1
+    run_timeout 10 ssh -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1
+}
+
+tunnel_start() {
+    local fwd port n
+    fwd=''
+    n=0
+    for port in $(tunnel_ports); do
+        fwd="$fwd -L 127.0.0.1:$port:127.0.0.1:$port"
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || { warn "$(msg warn.tunnel-no-ports FILE="$ARGS_FILE")"; return 1; }
+
+    rm -f "$TUNNEL_CTL" "$TUNNEL_PID" "$TUNNEL_LOG"
+
+    # Backgrounded with & and a pidfile rather than `ssh -f`. -f is the idiomatic way to
+    # daemonize after authentication, but it forks and the pid we could capture is the parent
+    # that immediately exits -- leaving nothing for --reset-tunnel to kill when the tunnel
+    # wedges. Polling -O check below recovers the one thing -f was buying, which is finding
+    # out synchronously whether authentication actually succeeded.
+    #
+    # nohup, not setsid: a backgrounded ssh is still in the terminal's session, so closing
+    # the window can HUP it -- and setsid(1) DOES NOT EXIST on macOS. The log goes to TMPDIR
+    # so nohup never drops a nohup.out in the student's course directory.
+    #
+    # -F none: ignore the student's own ~/.ssh/config AND the system one, so nothing they
+    # have configured for other hosts can redirect or decorate this. NOT
+    # ClearAllForwardings, which reads like it would help and would in fact delete every -L
+    # below; see the invariants block in container.args.
+    #
+    # ExitOnForwardFailure is deliberately NOT set. With 46 forwards there are 46 chances one
+    # host port is already busy, and either raw behaviour is bad for a novice: the default
+    # loses one port silently, and =yes turns one unlucky port into a total outage. Instead
+    # every forward is attempted and the failures are read back out of the log below, which
+    # is the only way to report what ACTUALLY failed rather than what we predicted would.
+    #
+    # shellcheck disable=SC2086
+    nohup ssh -N -M -S "$TUNNEL_CTL" -F none \
+        -i "$TUNNEL_KEY" -o IdentitiesOnly=yes \
+        -o "ProxyCommand=podman exec -i $NAME /usr/sbin/sshd -i -f $TUNNEL_SSHD_CONFIG" \
+        -o "UserKnownHostsFile=$TUNNEL_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+        -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+        $fwd "$TUNNEL_USER@$TUNNEL_HOST" >"$TUNNEL_LOG" 2>&1 </dev/null &
+    printf '%s\n' "$!" > "$TUNNEL_PID"
+
+    local i
+    i=0
+    while [ "$i" -lt 60 ]; do
+        tunnel_alive && break
+        # If the client is already gone, there is nothing to wait for: report now with the
+        # log, rather than spending the remaining thirty seconds on a corpse.
+        kill -0 "$(cat "$TUNNEL_PID" 2>/dev/null)" 2>/dev/null || break
+        sleep 0.5
+        i=$((i + 1))
+    done
+    if ! tunnel_alive; then
+        warn "$(msg warn.tunnel-failed LOG="$TUNNEL_LOG" OUT="$(tail -5 "$TUNNEL_LOG" 2>/dev/null)")"
+        return 1
+    fi
+    tunnel_report_busy_ports
+    return 0
+}
+
+# Which forwards did not get their host port, according to ssh ITSELF rather than to a guess.
+#
+# The obvious alternative -- probe each port and see if something is listening -- is wrong in
+# exactly the case that matters: a port held by ANOTHER program answers a probe, so a busy
+# port would be counted as a working forward and the one thing this report exists to catch
+# would be the one thing it missed. Measured: doctor said "46 of 46" while 3005 was squatted.
+#
+# Reading the log is authoritative because tunnel_start truncates it, so it always describes
+# the tunnel that is running now. Both spellings are matched because the wording differs
+# between the bind failure and the channel setup that follows it.
+#
+# Probing would also have connected to every one of the student's own dev servers 46 times
+# per doctor run, which would show up in their logs as unexplained requests.
+tunnel_busy_ports() {                 # -> space-separated ports ssh could not bind
+    [ -f "$TUNNEL_LOG" ] || return 0
+    sed -n -e 's/.*cannot listen to port: \([0-9]*\).*/\1/p' \
+           -e 's/.*bind \[127\.0\.0\.1\]:\([0-9]*\).*/\1/p' "$TUNNEL_LOG" \
+        | sort -u | tr '\n' ' ' | sed 's/ *$//'
+}
+
+tunnel_report_busy_ports() {
+    local busy
+    busy="$(tunnel_busy_ports)"
+    [ -n "$busy" ] && warn "$(msg warn.tunnel-ports-busy PORTS="$busy")"
+    return 0
+}
+
+ensure_tunnel() {
+    tunnel_alive && return 0
+    tunnel_keys
+    tunnel_start || return 1
+}
+
+# Paired with remove_container, ALWAYS. A tunnel whose container is gone still holds every
+# host port it bound, which would stop the replacement container's tunnel from binding them
+# -- turning a routine --rebuild into a total outage with no visible cause.
+tunnel_down() {
+    if [ -S "$TUNNEL_CTL" ]; then
+        run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1
+    fi
+    rm -f "$TUNNEL_CTL" "$TUNNEL_PID"
 }
 
 # The state machine. Everything that can silently give a student the wrong container is
@@ -492,8 +746,15 @@ ensure_container() {
     case "$st" in
         running) : ;;
         *) info "$(msg status.starting)"
-           pmq start "$NAME" || { remove_container; create_container; } ;;
+           pmq start "$NAME" || { remove_container; create_container; return; } ;;
     esac
+
+    # Reached only when the container was already there -- created-and-tunnelled paths above
+    # all return. An existing container very often has no tunnel: the host rebooted, the
+    # student logged out and back in, or podman was restarted. So this is where "the container
+    # is fine but nothing reaches my server" gets fixed, and it is why ensure_tunnel has to be
+    # idempotent and cheap rather than something only the create path does.
+    ensure_tunnel || true
 }
 
 open_shell() {
@@ -578,12 +839,41 @@ verb_doctor() {
         printf '  %-16s %s\n' "memory limit" "${RT_OUT:-unknown}"
         pm exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z'
         printf '  %-16s %s\n' "zombies" "${RT_OUT:-0}"
-        pm port "$NAME"
-        printf '  %-16s %s mappings (run: cs193v ports)\n' "published" "$(printf '%s\n' "$RT_OUT" | grep -c . || echo 0)"
+        tunnel_doctor
         check_clock
     fi
     printf '%s\n' "-------------------------------------------------------------"
     printf '%s\n' "Paste all of the above when asking course staff for help."
+}
+
+# The tunnel's state is now the ONLY place host-side forwarding is visible, which makes this
+# load-bearing for support rather than decorative. It replaced a `podman port` count, and the
+# difference matters: the in-container `ports` command reads /proc/net/tcp and so cannot see
+# whether a forward exists on the host at all. When a student says "ports says OK but my
+# browser cannot reach it", this report is the answer, and nothing else is.
+tunnel_doctor() {
+    local want busy nbusy port pid
+    if tunnel_alive; then
+        pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
+        printf '  %-16s up (pid %s)\n' "tunnel" "${pid:-?}"
+    else
+        printf '  %-16s %sDOWN%s — run: cs193v --reset-tunnel\n' "tunnel" "$C_YEL" "$C_OFF"
+        return 0
+    fi
+
+    want=0
+    for port in $(tunnel_ports); do want=$((want + 1)); done
+    busy="$(tunnel_busy_ports)"
+    nbusy=0
+    for port in $busy; do nbusy=$((nbusy + 1)); done
+
+    if [ -z "$busy" ]; then
+        printf '  %-16s %s of %s forwarded\n' "tunnel ports" "$want" "$want"
+    else
+        printf '  %-16s %s of %s forwarded  %sNOT:%s %s\n' \
+            "tunnel ports" "$((want - nbusy))" "$want" "$C_YEL" "$C_OFF" "$busy"
+        printf '  %-16s another program on this computer holds those\n' ""
+    fi
 }
 
 # The container CANNOT fix its own wall clock: Linux time namespaces virtualise only
@@ -610,6 +900,12 @@ check_clock() {
         info "$(msg status.restarting-machine)"
         run_timeout 120 podman machine stop || true
         run_timeout 180 podman machine start || warn "$(msg warn.machine-restart-failed)"
+        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
+        # into a VM that just went away. Without this, the clock fix would silently cost the
+        # student every forwarded port, and the next symptom would look unrelated to the
+        # prompt they just accepted.
+        tunnel_down
+        ensure_tunnel || true
     fi
 }
 
@@ -619,6 +915,52 @@ verb_rebuild() {
     remove_container
     create_container
     info "$(msg status.rebuilt)"
+}
+
+# The escape hatch for a tunnel that has stopped answering. Its whole reason for existing is
+# the case where the tunnel is STUCK, so nothing in it may depend on the tunnel being healthy
+# -- that is the difference between this and tunnel_down.
+#
+# Worth saying plainly, because the symptom is easy to misread: a wedged tunnel does NOT stop
+# the container from starting. podman starts it regardless. What a stale tunnel blocks is the
+# NEXT tunnel binding the host ports it is still holding, so the symptom is "my browser cannot
+# reach my server", not "the container will not start".
+verb_reset_tunnel() {
+    preflight; load_args; resolve_image
+    info "$(msg status.tunnel-resetting)"
+
+    # 1. The clean way first, but TIME-BOXED. A wedged ssh may never answer -O exit, and
+    #    waiting forever for it is precisely the failure this verb exists to break out of.
+    if [ -S "$TUNNEL_CTL" ]; then
+        run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1 || true
+    fi
+
+    # 2. Then force. SIGTERM, a moment to land, then SIGKILL -- a process stopped with SIGSTOP
+    #    will never handle a TERM, and that is a realistic way to arrive here.
+    local pid
+    pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
+    case "${pid:-}" in
+        ''|*[!0-9]*) : ;;
+        *) if kill -0 "$pid" 2>/dev/null; then
+               kill "$pid" 2>/dev/null || true
+               sleep 1
+               kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+           fi ;;
+    esac
+
+    # 3. A leftover socket makes the next -O check report a dead tunnel as live, which would
+    #    make ensure_tunnel decide there was nothing to do.
+    rm -f "$TUNNEL_CTL" "$TUNNEL_PID" "$TUNNEL_LOG"
+
+    # 4. Only now is it meaningful to ask who still holds the ports. Anything left is NOT ours
+    #    -- it is another program on the student's computer -- and naming it is the difference
+    #    between a fixable problem and a mystery.
+    if [ "$(state)" != running ]; then
+        warn "$(msg warn.tunnel-reset-not-running)"
+        return 0
+    fi
+    ensure_tunnel || return 1
+    info "$(msg status.tunnel-reset)"
 }
 
 verb_full_rebuild() {
@@ -680,6 +1022,7 @@ case "${1:-}" in
     ports)               preflight; verb_ports ;;
     doctor)              verb_doctor ;;
     --rebuild)           verb_rebuild ;;
+    --reset-tunnel)      verb_reset_tunnel ;;
     --full-rebuild)      verb_full_rebuild ;;
     --update)            verb_update ;;
     --dev-print-command) verb_print_command ;;
