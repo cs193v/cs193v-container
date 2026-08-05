@@ -99,7 +99,7 @@ cat <<EOF
       ./cs193v
 
   Put your projects in $DIR/projects — inside the container they appear
-  at /workspaces.
+  at ~/projects.
 
   Useful later:
       ./cs193v doctor     a report to paste if you ask staff for help

@@ -276,34 +276,34 @@ podman exec cs193v pkill -f http.server
 
 ```sh
 # ownership round-trip, both directions
-E 'umask 022; echo hi > /workspaces/.vt-c'
+E 'umask 022; echo hi > /home/student/projects/.vt-c'
 rec owner-of-container-write   stat -c '%u %g %a' "$DIR/projects/.vt-c"   # expect host uid/gid, 644
 echo hi > "$DIR/projects/.vt-h"
-ckx container-can-write-host-file  sh -c 'podman exec cs193v sh -c "echo more >> /workspaces/.vt-h"'
-E 'chmod 600 /workspaces/.vt-c'
+ckx container-can-write-host-file  sh -c 'podman exec cs193v sh -c "echo more >> /home/student/projects/.vt-h"'
+E 'chmod 600 /home/student/projects/.vt-c'
 ck  mode-preserved 600  stat -c %a "$DIR/projects/.vt-c"
-E 'ln -s /etc/hostname /workspaces/.vt-link'
+E 'ln -s /etc/hostname /home/student/projects/.vt-link'
 rec symlink-readable   readlink "$DIR/projects/.vt-link"
 
 # inotify, CONTAINER-side edit — the case that matters (writer is always inside)
 E 'command -v inotifywait || sudo apt-get install -y inotify-tools >/dev/null 2>&1'
-podman exec -d cs193v sh -c 'inotifywait -q -e modify /workspaces/.vt-c > /tmp/vt-in 2>&1'
-sleep 1; E 'echo x >> /workspaces/.vt-c'; sleep 1
+podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+sleep 1; E 'echo x >> /home/student/projects/.vt-c'; sleep 1
 ckx inotify-container-side  sh -c 'podman exec cs193v test -s /tmp/vt-in'
 
 # inotify, HOST-side edit — expected to FAIL on macOS and WSL; RECORD which
 E 'rm -f /tmp/vt-in'
-podman exec -d cs193v sh -c 'inotifywait -q -e modify /workspaces/.vt-c > /tmp/vt-in 2>&1'
+podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
 sleep 1; echo y >> "$DIR/projects/.vt-c"; sleep 2
 podman exec cs193v test -s /tmp/vt-in && echo "host-side inotify: FIRES" \
                                       || echo "host-side inotify: DOES NOT FIRE"
 
 # case sensitivity — determines whether a Mac student's import bug reproduces
-E 'cd /workspaces && touch Aa && (ls aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)'
+E 'cd /home/student/projects && touch Aa && (ls aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)'
 
 # quantify the bind-mount penalty per platform
-time E 'mkdir -p /workspaces/.vt-many && cd /workspaces/.vt-many && for i in $(seq 1 2000); do : > f$i; done'
-time E 'rm -rf /workspaces/.vt-many'
+time E 'mkdir -p /home/student/projects/.vt-many && cd /home/student/projects/.vt-many && for i in $(seq 1 2000); do : > f$i; done'
+time E 'rm -rf /home/student/projects/.vt-many'
 ```
 
 ## A.8 The SIGHUP matrix — the disputed question, automated
@@ -465,7 +465,7 @@ time podman pull "$IMAGE"                    # cold pull; note the size actually
 time "$DIR/cs193v" --rebuild                 # container create
 time "$DIR/cs193v" --dev-print-command       # launcher overhead
 time podman exec cs193v true                 # exec overhead — relevant to the rejected relay design
-time E 'cd /workspaces && npm init -y >/dev/null && npm i --silent lodash'
+time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lodash'
 ```
 
 ## A.14 Cleanup assertions

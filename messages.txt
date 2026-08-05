@@ -27,7 +27,7 @@ You can run cs193v in as many terminal windows as you like — they all open a s
 the same container. There is only ever one container.
 
 Your files live in the projects folder next to this script, and appear inside the
-container at /workspaces. Everything else in the container is temporary.
+container at ~/projects. Everything else in the container is temporary.
 
 [[err.running-as-root]]
 Do not run cs193v with sudo.

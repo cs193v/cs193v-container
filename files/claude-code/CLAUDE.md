@@ -5,14 +5,15 @@ that are easy to get wrong here in ways that are invisible until a student is st
 
 ## Where things are
 
-- **`/workspaces`** is the only directory shared with the student's own computer. It is
+- **`~/projects`** (`/home/student/projects`) is the only directory shared with the
+  student's own computer. It is
   their `projects/` folder, bind-mounted. Everything a student wants to keep goes here.
-- Everything outside `/workspaces` lives only inside the container. It survives `stop`
+- Everything outside `~/projects` lives only inside the container. It survives `stop`
   and `start`, but is **destroyed** by `cs193v --rebuild`, which recreates the container
   from the course image.
 - `~/.claude`, `~/.config/gh` and the Vercel config directory are persistent volumes, so
   logins survive a rebuild. Nothing else in the home directory does.
-- The student creates their own project directories under `/workspaces`. There is no
+- The student creates their own project directories under `~/projects`. There is no
   pre-existing structure to conform to.
 
 ## Ports — read this before starting any server
@@ -71,7 +72,7 @@ Worth being accurate about, because the course is partly about this:
 
 - The student's files **outside** `projects/`, their host system, and their SSH and GPG
   keys are not reachable from here. No agent forwarding is configured.
-- Anything in `/workspaces` **is** reachable and writable, by design.
+- Anything in `~/projects` **is** reachable and writable, by design.
 - Network access is **unrestricted**. The stored Claude, GitHub and Vercel tokens can be
   sent anywhere by any code that runs here. The container does not contain that risk.
 - `sudo` works without a password. That is deliberate, so system packages can be

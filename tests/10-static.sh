@@ -117,6 +117,33 @@ assert_not_match "containerfile:pipx-vars-not-ENV" '^ENV.*PIPX' "$(cat Container
 
 assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' Containerfile
 
+# The bind mount lands at ~/projects, INSIDE $HOME alongside the four credential volumes.
+# The target must be pre-created student-owned in the image: podman auto-chowns an empty
+# named volume, but a bind mount onto a missing directory gets created root-owned, and then
+# nothing the student runs can write to their own work.
+assert_ok  "containerfile:precreates-the-projects-mount-student-owned" \
+           grep -qE 'install -d -o student -g student .*/home/student/projects' Containerfile
+assert_ok  "containerfile:workdir-is-the-projects-mount" \
+           grep -qx 'WORKDIR /home/student/projects' Containerfile
+# The old path must be gone, not merely shadowed — two directories would be worse than one
+# wrong one, because the docs would be right about a directory nobody is standing in.
+assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
+                    "$(cat Containerfile)"
+
+# WORKDIR, the launcher's -w and the mount destination must all name the same directory, or
+# the student's shell opens somewhere other than their files.
+wd="$(sed -n 's/^WORKDIR //p' Containerfile | head -1)"
+assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" \
+          "$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
+
+# config_hash decides whether an existing container is stale. It must cover the mount
+# DESTINATION, not just the source: when this moved from /workspaces to ~/projects, every
+# container already on a student machine would otherwise have kept the old mount silently,
+# because the destination was a constant baked into build_run_args and never hashed.
+assert_contains "launcher:confighash-covers-the-mount-destination" "MOUNT_DST" \
+                "$(sed -n '/^config_hash()/,/^}/p' cs193v)"
+
+
 # ─── container.args invariants ──────────────────────────────────────────────────
 # The block at the top of container.args lists these as "never add any of these". Host
 # isolation comes from the user namespace, and each of these punches through it.

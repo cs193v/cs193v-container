@@ -223,7 +223,7 @@ RUN set -eux; \
     install -d -o student -g student -m 0755 /home/student/.local/share; \
     install -d -o student -g student -m 0700 /home/student/.local/share/com.vercel.cli; \
     install -d -o student -g student -m 0755 /home/student/.local/bin; \
-    install -d -o student -g student -m 0755 /workspaces; \
+    install -d -o student -g student -m 0755 /home/student/projects; \
     su student -s /bin/sh -c 'npm config set prefix /home/student/.local'; \
     rm -f /etc/gitconfig; \
     rm -rf /tmp/cs193v-files
@@ -256,6 +256,6 @@ ENV LANG=en_US.UTF-8 \
 # see CONTAINER-DESIGN.md § Ports.
 
 USER student
-WORKDIR /workspaces
+WORKDIR /home/student/projects
 
 ENTRYPOINT ["/usr/local/bin/cs193v-entrypoint"]

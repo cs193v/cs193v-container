@@ -82,10 +82,10 @@ assert_eq "live:exactly-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
 # The mount really is the student's projects/ directory, on both sides.
 assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
     "$(podman inspect cs193v \
-       --format '{{range .Mounts}}{{if eq .Destination "/workspaces"}}{{.Source}}{{end}}{{end}}')"
+       --format '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
 
 # keep-id in practice: a file the container creates is owned by the student on the host.
-podman exec cs193v sh -c 'echo live > /workspaces/.vt-live'
+podman exec cs193v sh -c 'echo live > /home/student/projects/.vt-live'
 assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(stat -c %u "$REPO/projects/.vt-live")"
 rm -f "$REPO/projects/.vt-live"
 

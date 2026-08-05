@@ -330,34 +330,34 @@ podman exec cs193v pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
 # writes must be owned by the student on the host, and vice versa.
-E 'umask 022; echo hi > /workspaces/.vt-c'
+E 'umask 022; echo hi > /home/student/projects/.vt-c'
 assert_eq "files:container-write-is-host-owned" "$(id -u) $(id -g) 644" \
           "$(stat -c '%u %g %a' "$REPO/projects/.vt-c")"
 assert_eq "files:container-write-readable-on-host" "hi" "$(cat "$REPO/projects/.vt-c")"
 
 echo "from-host" > "$REPO/projects/.vt-h"
 assert_ok "files:container-can-write-a-host-created-file" \
-          sh -c "podman exec cs193v sh -c 'echo more >> /workspaces/.vt-h'"
-assert_eq "files:container-sees-host-content" "from-host" "$(E 'head -1 /workspaces/.vt-h')"
+          sh -c "podman exec cs193v sh -c 'echo more >> /home/student/projects/.vt-h'"
+assert_eq "files:container-sees-host-content" "from-host" "$(E 'head -1 /home/student/projects/.vt-h')"
 assert_eq "files:host-sees-container-append" "more" "$(tail -1 "$REPO/projects/.vt-h")"
 
-E 'chmod 600 /workspaces/.vt-c'
+E 'chmod 600 /home/student/projects/.vt-c'
 assert_eq "files:mode-changes-propagate" "600" "$(stat -c %a "$REPO/projects/.vt-c")"
 
-E 'ln -s /etc/hostname /workspaces/.vt-link'
+E 'ln -s /etc/hostname /home/student/projects/.vt-link'
 record "files:symlink-target-as-seen-from-host" "$(readlink "$REPO/projects/.vt-link")"
 
 # Case sensitivity determines whether a Mac student's `import './Button'` bug reproduces
 # here. Recorded, because the answer differs per platform and the docs must match it.
 record "files:case-sensitivity" \
-       "$(E 'cd /workspaces && touch .vt-Aa && (ls .vt-aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)')"
+       "$(E 'cd /home/student/projects && touch .vt-Aa && (ls .vt-aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)')"
 
 # inotify from INSIDE is the case that matters: in this course the writer is always inside
 # the container, so this is what a dev server's hot reload depends on.
 if E 'command -v inotifywait' >/dev/null 2>&1; then
     E 'rm -f /tmp/vt-in'
-    podman exec -d cs193v sh -c 'inotifywait -q -e modify /workspaces/.vt-c > /tmp/vt-in 2>&1'
-    sleep 1; E 'echo x >> /workspaces/.vt-c'; sleep 2
+    podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+    sleep 1; E 'echo x >> /home/student/projects/.vt-c'; sleep 2
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then pass "files:inotify-fires-for-container-side-edits"
     else fail "files:inotify-fires-for-container-side-edits" \
               "no event — hot reload will not work even for edits made inside the container"; fi
@@ -365,7 +365,7 @@ if E 'command -v inotifywait' >/dev/null 2>&1; then
     # Host-side edits are expected NOT to fire on macOS and WSL. Recorded, because it
     # decides what CONTAINER-DESIGN.md's "known rough edges" must say.
     E 'rm -f /tmp/vt-in'
-    podman exec -d cs193v sh -c 'inotifywait -q -e modify /workspaces/.vt-c > /tmp/vt-in 2>&1'
+    podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
     sleep 1; echo y >> "$REPO/projects/.vt-c"; sleep 3
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then
         record "files:inotify-for-host-side-edits" "FIRES"
@@ -380,11 +380,11 @@ fi
 # Quantify the bind-mount penalty. Recorded per platform — this is the number that decides
 # whether `npm install` is tolerable on a Mac.
 T0="$(date +%s)"
-E 'mkdir -p /workspaces/.vt-many && cd /workspaces/.vt-many && for i in $(seq 1 2000); do : > f$i; done'
+E 'mkdir -p /home/student/projects/.vt-many && cd /home/student/projects/.vt-many && for i in $(seq 1 2000); do : > f$i; done'
 T1="$(date +%s)"
 record "files:create-2000-files-on-the-bind-mount-seconds" "$((T1 - T0))"
 T0="$(date +%s)"
-E 'rm -rf /workspaces/.vt-many'
+E 'rm -rf /home/student/projects/.vt-many'
 T1="$(date +%s)"
 record "files:delete-2000-files-seconds" "$((T1 - T0))"
 

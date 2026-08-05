@@ -34,7 +34,7 @@ extension, which passed a large, undocumented set of flags to podman on your beh
 
 ## The one shared folder
 
-`~/cs193v/projects` on your computer is the same directory as `/workspaces` inside the
+`~/cs193v/projects` on your computer is the same directory as `~/projects` inside the
 container. It is the **only** thing shared between them.
 
 That has two consequences, and they are equally important:

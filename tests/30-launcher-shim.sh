@@ -49,7 +49,7 @@ assert_contains "print:has-name"       "--name cs193v" "$line"
 assert_contains "print:has-detach"     "--detach"      "$line"
 assert_contains "print:has-confighash" "cs193v.confighash=" "$line"
 assert_contains "print:has-dir-label"  "cs193v.dir=$COPY"   "$line"
-assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/workspaces,rw" "$line"
+assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/student/projects,rw" "$line"
 
 # One-directional on purpose: the launcher legitimately ADDS --name, --detach, --label and
 # --mount, so a plain diff would fail spuriously. What must be empty is the set of flags

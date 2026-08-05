@@ -60,7 +60,7 @@ from PIL import Image, ImageDraw, ImageFont
 f = ImageFont.truetype('/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf', 32)
 i = Image.new('RGB', (420, 60), 'white')
 ImageDraw.Draw(i).text((10, 10), 'Latin text renders', font=f, fill='black')
-i.save('/workspaces/font-check.png')"
+i.save('/home/student/projects/font-check.png')"
 ```
 
 *Expect:* legible glyphs, not boxes, when you open `projects/font-check.png` on your own

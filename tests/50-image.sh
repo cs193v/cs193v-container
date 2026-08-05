@@ -45,7 +45,7 @@ assert_not_contains "img:no-GIT_EDITOR" "GIT_EDITOR" "$env_json"
 
 assert_contains "img:entrypoint-is-the-keepalive" "cs193v-entrypoint" \
                 "$(podman image inspect "$TEST_IMAGE" --format '{{json .Config.Entrypoint}}')"
-assert_eq "img:workdir-is-workspaces" "/workspaces" \
+assert_eq "img:workdir-is-the-projects-mount" "/home/student/projects" \
           "$(podman image inspect "$TEST_IMAGE" --format '{{.Config.WorkingDir}}')"
 
 # No single layer should dominate: podman cannot resume a partial layer download but does
@@ -94,7 +94,7 @@ assert_eq "vol-targets-are-student-owned" "student student student student" \
 for d in .claude .claude-json .config/gh .local/share/com.vercel.cli .local/bin; do
     assert_ok "vol-target-exists:$d" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -d /home/student/$d'"
 done
-assert_eq "workspaces-is-student-owned" "student" "$(R 'stat -c %U /workspaces')"
+assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
 
 # ─── tooling that must be present ──────────────────────────────────────────────
 for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip; do
@@ -122,7 +122,7 @@ assert_ok "npm-install-g-needs-no-sudo" \
 # ─── the four helper commands ──────────────────────────────────────────────────
 assert_ok "helper:am-i-in-a-container" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'am-i-in-a-container'"
 assert_contains "helper:identity-cue-says-yes" "you are inside" "$(R 'am-i-in-a-container')"
-assert_contains "helper:identity-cue-explains-workspaces" "/workspaces" "$(R 'am-i-in-a-container')"
+assert_contains "helper:identity-cue-explains-the-projects-dir" "/home/student/projects" "$(R 'am-i-in-a-container')"
 
 # The $BROWSER stub: without it, `gh auth login` and `claude /login` leave a student
 # staring at a prompt that never returns.

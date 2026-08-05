@@ -6,7 +6,7 @@
 
 echo "Yes, you are inside the CS193V container!"
 echo
-echo "  workspace : /workspaces   (this is your projects/ folder on your own computer)"
+echo "  projects  : $HOME/projects   (this is your projects/ folder on your own computer)"
 echo "  user      : $(id -un) (uid $(id -u))"
 if [ -n "${CS193V_PORTS:-}" ]; then
     echo "  ports     : $CS193V_PORTS"

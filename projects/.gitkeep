@@ -1,6 +1,6 @@
 This directory is where your work goes.
 
-Inside the container it appears at /workspaces. It is the ONLY directory shared between
+Inside the container it appears at ~/projects. It is the ONLY directory shared between
 the container and your own computer, which means two things worth knowing:
 
   * Anything you keep here is safe. `cs193v --rebuild` and `cs193v --full-rebuild` never
