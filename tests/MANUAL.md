@@ -44,9 +44,28 @@ colour is not shown as escape codes (`R`), and output stays on screen after quit
 `unminimize` message. See ERRORS.md B6.
 
 ### §7.6 — fonts render as glyphs, not boxes
-**This check cannot pass as written today.** It asks you to render text with Pillow or
-matplotlib; neither is installed. And `fontconfig` is missing, so nothing can enumerate the
-271 Noto files that *are* installed. See ERRORS.md B7 before spending time here.
+Font *discovery* is now automated: `fontconfig` is installed and
+`50-image.sh :: fonts:sans-serif-resolves-to-noto` asserts that `fc-match sans-serif` resolves
+to a Noto face, which is the part that was actually broken.
+
+What a human can still add, if it matters to the course: neither Pillow nor matplotlib is in
+the image, so §7.6's original instruction cannot be followed as written. To check actual
+rasterisation, install one first — which is itself a useful check that a student can add
+packages:
+
+```sh
+python3 -m venv ~/venv && ~/venv/bin/pip install pillow
+~/venv/bin/python -c "
+from PIL import Image, ImageDraw, ImageFont
+f = ImageFont.truetype('/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf', 32)
+i = Image.new('RGB', (420, 60), 'white')
+ImageDraw.Draw(i).text((10, 10), 'Latin text renders', font=f, fill='black')
+i.save('/workspaces/font-check.png')"
+```
+
+*Expect:* legible glyphs, not boxes, when you open `projects/font-check.png` on your own
+machine. Note the explicit `truetype()` path — Pillow does not go through fontconfig, so this
+tests the font files rather than their discoverability.
 
 ### §8.1 / §8.2 — logins with no browser in the container
 `claude` then `/login`; then `gh auth login`; then `vercel login`.

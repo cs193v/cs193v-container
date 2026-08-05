@@ -248,7 +248,23 @@ instruction, and following it bloats the container with something that vanishes 
 `tests/50-image.sh` now asserts the property that matters (no real manual page) and records
 the stub's behaviour.
 
-### B7. 271 Noto font files are installed but nothing can enumerate them
+### ~~B7~~. 271 Noto font files were installed but nothing could enumerate them — **FIXED**
+
+`fontconfig` added explicitly to the apt line (it was only a *Recommends* of
+`fonts-noto-core`, and the line uses `--no-install-recommends`). Now:
+
+```
+fc-match: present
+NotoSans-Regular.ttf: "Noto Sans" "Regular"
+```
+
+Tests `fonts:fontconfig-is-installed` and `fonts:sans-serif-resolves-to-noto` pass. The Pillow
+/ matplotlib half is handled by rewriting `tests/MANUAL.md` §7.6, which could not be followed
+as written: it now automates the fontconfig resolution and gives a `pip install pillow`
+recipe for the human rasterisation check, noting that Pillow bypasses fontconfig so it tests
+the font files rather than their discoverability. GitHub issue #5.
+
+### B7 (original diagnosis)
 
 `fonts-noto-core` is present (42.5 MB installed) but **`fontconfig` is not**, so there is no
 `fc-list` or `fc-match`:
@@ -274,7 +290,21 @@ So today the image pays ~42 MB for fonts that nothing present can use. Either ad
 VERIFICATION.md §7.6 asks a human to render text with Pillow or matplotlib — that check
 cannot pass as written, because neither is installed.
 
-### B8. 295 MB of npm cache is baked into the image
+### ~~B8~~. 295 MB of npm cache was baked into the image — **FIXED**
+
+`npm cache clean --force` added to both `npm install -g` layers, in the *same* RUN — a file
+deleted in a later layer still ships in the earlier one. Measured effect:
+
+| | before | after |
+| --- | --- | --- |
+| image | 1.74 GB | **1.52 GB** |
+| `/root/.npm` | 295 MB | **1 MB** |
+| claude-code layer | 382 MB | **290 MB** |
+| vercel layer | 377 MB | **250 MB** |
+
+Test `img:npm-cache-not-baked-into-the-image`. GitHub issue #6.
+
+### B8 (original diagnosis)
 
 ```
 $ podman run --rm --entrypoint sh localhost/cs193v:dev -c 'sudo du -sh /root/.npm'

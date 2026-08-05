@@ -197,6 +197,19 @@ globals="$(R 'npm ls -g --depth=0 2>/dev/null')"
 record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
 assert_not_contains "absent:no-puppeteer" "puppeteer" "$globals"
 
+# The build-time `npm install -g` layers must not leave root's npm cache in the image. It is
+# pure dead weight in something students download over dorm wifi, and it inflates two of the
+# three layers that the resume-on-failure design cares about. The apt layer already cleans
+# /var/lib/apt/lists; this is the same hygiene for npm.
+cache_mb="$(R 'sudo du -sm /root/.npm 2>/dev/null | cut -f1' | tr -d ' \n')"
+record "img:root-npm-cache-mb" "${cache_mb:-0}"
+if [ "${cache_mb:-0}" -lt 20 ]; then
+    pass "img:npm-cache-not-baked-into-the-image"
+else
+    fail "img:npm-cache-not-baked-into-the-image" \
+         "/root/.npm is ${cache_mb} MB. Add 'npm cache clean --force' to each npm layer."
+fi
+
 # ─── fonts ─────────────────────────────────────────────────────────────────────
 # The base image ships no fonts at all, and anything that rasterizes text (Pillow,
 # matplotlib, librsvg) needs one. Noto because a large share of the web uses it, so

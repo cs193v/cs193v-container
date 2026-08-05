@@ -31,13 +31,18 @@ RUN apt-get update \
       nano less sudo uidmap \
       procps psmisc file unzip zip xz-utils \
       locales tzdata \
-      fonts-noto-core \
+      fonts-noto-core fontconfig \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
 # fonts-noto-core, not fonts-dejavu-core: the base image ships no fonts at all, and
 # anything that rasterizes text (Pillow, matplotlib, librsvg) needs one. Noto because a
 # large share of the web uses it, so rendered output looks unremarkable rather than
 # unmistakably-Linux. Terminal emoji and CJK come from the HOST terminal's fonts.
+#
+# fontconfig is listed EXPLICITLY because fonts-noto-core only Recommends it, and this
+# apt line uses --no-install-recommends. Without it there is no fc-list or fc-match, so
+# nothing that resolves fonts through fontconfig — librsvg, Pango, GD, ImageMagick — can
+# find the 271 Noto files, and the image pays 42 MB for fonts nothing can enumerate.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The student account. uid/gid 1000 is the Debian/Ubuntu convention for the first
@@ -128,13 +133,21 @@ RUN set -eux; \
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 4 — Vercel CLI
 # ─────────────────────────────────────────────────────────────────────────────
-RUN npm install -g "vercel@${VERCEL_VERSION}" && vercel --version
+# `npm cache clean --force` in the same layer, not a later one: a file deleted in a later
+# layer still ships in the earlier one. Root's npm cache is dead weight in something
+# students download over dorm wifi, and it was inflating this layer and the next by roughly
+# 150 MB each.
+RUN npm install -g "vercel@${VERCEL_VERSION}" \
+ && npm cache clean --force \
+ && vercel --version
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 5 — Claude Code.  MOST VOLATILE: keep it last so a version bump
 # invalidates only this layer and the small config layer after it.
 # ─────────────────────────────────────────────────────────────────────────────
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && claude --version
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && npm cache clean --force \
+ && claude --version
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 6 — course configuration
