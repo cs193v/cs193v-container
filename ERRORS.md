@@ -353,7 +353,47 @@ NodeSource's apt repo — the same pattern the `gh` layer already uses — which
 apt-managed Node 24 with security updates in exchange for one more third-party repo to
 trust. Worth a sentence in the Containerfile either way, so it is not re-litigated.
 
-### B13. `./cs193v` hangs forever when stdin is not a terminal
+### ~~B13~~. `./cs193v` hung forever when stdin was not a terminal — **FIXED**
+
+Fixed by refusing rather than by silently degrading. `open_shell` now checks `[ -t 0 ]` first
+and, with no terminal, prints a STOP banner that names what a script should use instead:
+
+```
+┏━━ STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ cs193v could not open a shell, because it is not being run from a
+┃ terminal — its input is coming from a file or another program rather
+┃ than from your keyboard.
+┃ ...
+┃ Your container is set up and running; only the shell was not opened.
+┃ These commands do not need a terminal, so they are the ones to use in
+┃ a script:
+┃
+┃     cs193v --rebuild     make sure a fresh container exists
+┃     cs193v ports         check whether your servers are reachable
+┃     cs193v doctor        print the status report
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+```
+
+Checked inside `open_shell` rather than in the dispatcher, deliberately: preflight, the drift
+prompts and creating or starting the container are all useful and idempotent, so a script
+that got this far has done real work and the message can honestly say the container is ready.
+Exits 1. New message key `err.needs-a-terminal`.
+
+`ports` and `doctor` also pass `-it`, but the commands they run exit on their own, so they
+were never affected and remain scriptable — which matters, because the refusal message
+points at them.
+
+Regression tests: `tests/30-launcher-shim.sh :: noterm:*` (nine assertions, including a
+wall-clock check that it refuses rather than hangs, that the container is still created, that
+no exec is attempted, that a pty-driven launch *does* open a shell, and that the three verbs
+named in the message still work with a redirected stdin) and
+`tests/80-launcher-live.sh :: noterm:*` against real podman, where the pty is genuine.
+
+Consequence for the test suite: bare launches now need a real terminal, so the shim and live
+tiers drive them through `script(1)` (`launcher_pty` / `LB`). That is a more faithful model of
+what a student does anyway.
+
+### B13 (original diagnosis)
 
 Found while automating §A.10. Measured:
 

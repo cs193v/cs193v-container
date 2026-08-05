@@ -170,9 +170,16 @@ i=0
 while [ "$i" -lt 20 ]; do launcher >/dev/null 2>&1; i=$((i + 1)); done
 assert_eq "state:20-launches-create-one-container" "1" "$(shim_count '^run ')"
 assert_eq "state:20-launches-remove-nothing"       "0" "$(shim_count '^rm ')"
-# Every launch after the first must open a shell, not recreate.
-if [ "$(shim_count '^exec -it')" -ge 20 ]; then pass "state:every-launch-opens-a-shell"
-else fail "state:every-launch-opens-a-shell" "only $(shim_count '^exec -it') exec sessions"; fi
+
+# Every launch after the first must open a shell rather than recreate. Driven through a pty,
+# because open_shell now refuses without a terminal — so a piped launch never gets this far,
+# which is exactly the behaviour the refusal is for.
+shim_new
+i=0
+while [ "$i" -lt 3 ]; do launcher_pty >/dev/null 2>&1; i=$((i + 1)); done
+assert_eq "state:pty-launches-create-one-container" "1" "$(shim_count '^run ')"
+if [ "$(shim_count '^exec -it')" -ge 3 ]; then pass "state:every-pty-launch-opens-a-shell"
+else fail "state:every-pty-launch-opens-a-shell" "only $(shim_count '^exec -it') exec sessions"; fi
 
 # A stopped container is started, never recreated — recreating would silently discard
 # anything the student installed inside it.
@@ -355,22 +362,62 @@ assert_contains "doctor:reports-stale-config" "STALE" "$(launcher doctor)"
 # (containers/podman#25683), costing 256-colour support. But the image ships a limited
 # terminfo set, so an exotic TERM cannot be forwarded verbatim or a full-screen editor
 # fails to start. Whitelist, and fall back to a safe 256-colour entry.
+# Driven through a pty: TERM is forwarded by open_shell, which now refuses without a
+# terminal, so a piped launch never reaches the exec at all.
 shim_new
-TERM=xterm-256color launcher >/dev/null 2>&1
+TERM=xterm-256color launcher_pty >/dev/null 2>&1
 assert_contains "term:known-term-forwarded" "TERM=xterm-256color" "$(shim_log)"
 for exotic in kitty ghostty alacritty wezterm foot xterm-kitty; do
     shim_new
-    TERM="$exotic" launcher >/dev/null 2>&1
+    TERM="$exotic" launcher_pty >/dev/null 2>&1
     assert_contains "term:$exotic-falls-back-to-256color" "TERM=xterm-256color" "$(shim_log)"
     assert_not_contains "term:$exotic-not-forwarded-verbatim" "TERM=$exotic" "$(shim_log)"
 done
 shim_new
-TERM='' launcher >/dev/null 2>&1
+TERM='' launcher_pty >/dev/null 2>&1
 assert_contains "term:empty-term-gets-a-default" "TERM=xterm-256color" "$(shim_log)"
 
 shim_new
 out="$(NO_COLOR=1 launcher bogusverb)"
 assert_not_match "no-color:emits-no-escapes" "$(printf '\033')" "$out"
+
+# ─── opening a shell requires a terminal  (ERRORS.md B13) ──────────────────────
+# `podman exec -it` allocates a pty, and a pty never delivers EOF the way a pipe does, so
+# with a redirected stdin the container's `bash -l` used to wait forever and the launcher
+# looked wedged with no output at all. It now refuses instead.
+shim_new
+out="$(launcher)"
+assert_says "noterm:refuses-without-a-terminal" "could not open a shell" "$out"
+assert_says "noterm:explains-why"               "not being run from a terminal" "$out"
+assert_says "noterm:says-the-container-is-fine" "container is set up and running" "$out"
+# The message has to name what a script SHOULD use, or it is just a dead end.
+assert_says "noterm:points-at-rebuild" "cs193v --rebuild" "$out"
+assert_says "noterm:points-at-doctor"  "cs193v doctor"    "$out"
+assert_says "noterm:points-at-podman-exec" "podman exec -it cs193v bash -lc" "$out"
+assert_eq   "noterm:exits-nonzero" "1" "$(launcher_rc)"
+# It must refuse, not hang. A wall-clock check, since hanging was the original bug.
+T0="$(date +%s)"; launcher >/dev/null 2>&1; T1="$(date +%s)"
+if [ "$((T1 - T0))" -lt 30 ]; then pass "noterm:refuses-promptly-instead-of-hanging"
+else fail "noterm:refuses-promptly-instead-of-hanging" "took $((T1 - T0))s"; fi
+# The work done before the shell is still real and idempotent — the message promises this.
+assert_eq "noterm:container-was-still-created" "1" "$(shim_count '^run ')"
+# And no shell was attempted.
+assert_eq "noterm:no-exec-attempted" "0" "$(shim_count '^exec -it')"
+# With a terminal, the very same invocation must go on to open the shell.
+shim_new
+launcher_pty >/dev/null 2>&1
+assert_contains "noterm:with-a-terminal-it-opens-a-shell" "bash -l" "$(shim_log)"
+
+# The scriptable verbs must NOT be caught by the refusal — they are what the message tells
+# people to use, so they have to work with a redirected stdin.
+for v in --dev-print-command doctor --rebuild; do
+    shim_new
+    assert_says_not "noterm:verb-$v-still-works-piped" "could not open a shell" \
+                    "$(launcher $v)"
+done
+shim_new
+launcher --rebuild >/dev/null 2>&1
+assert_eq "noterm:--rebuild-still-creates-a-container-piped" "1" "$(shim_count '^run ')"
 
 # ─── malformed args files ──────────────────────────────────────────────────────
 shim_new

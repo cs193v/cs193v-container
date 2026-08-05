@@ -60,11 +60,18 @@ launcher_tty() {                      # launcher_tty KEYS [ARGS...]
     for a in "$@"; do cmd="$cmd $a"; done
     # util-linux script takes -c CMD; BSD/macOS script takes the command as trailing words.
     if script --version 2>&1 | grep -qi util-linux; then
-        printf '%b' "$keys" | PATH="$SHIM:$PATH" script -q -c "$cmd" /dev/null 2>&1
+        printf '%b' "$keys" | PATH="$SHIM:$PATH" timeout 120 script -q -c "$cmd" /dev/null 2>&1
     else
         # shellcheck disable=SC2086
-        printf '%b' "$keys" | PATH="$SHIM:$PATH" script -q /dev/null $cmd 2>&1
+        printf '%b' "$keys" | PATH="$SHIM:$PATH" timeout 120 script -q /dev/null $cmd 2>&1
     fi
+}
+
+# A bare launch (no verb) through a pty. Needed because open_shell now REFUSES when stdin
+# is not a terminal, so `launcher` alone can no longer reach the shell — which is the point
+# of that refusal. `exit` is fed so the login shell terminates.
+launcher_pty() {                      # launcher_pty [ARGS...]
+    launcher_tty 'exit\n' "$@"
 }
 
 # The same thing against the REAL launcher and real podman — no shim on PATH. Used by the

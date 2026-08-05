@@ -432,6 +432,21 @@ ensure_container() {
 
 open_shell() {
     local n
+    # Refuse, rather than hang, when there is no terminal to open a shell on.
+    #
+    # `podman exec -it` allocates a pty, and a pty NEVER delivers EOF the way a pipe does —
+    # so with a redirected stdin the container's `bash -l` waits forever for input that
+    # cannot arrive, and the launcher looks wedged with no output. Redirecting from
+    # /dev/null does not help; only sending a literal `exit` does. Measured: see
+    # ERRORS.md B13.
+    #
+    # Checked here rather than in the dispatcher on purpose. Everything up to this point —
+    # preflight, the drift prompts, creating or starting the container — is useful and
+    # idempotent, so a script that gets this far has still done real work and the message
+    # can say so.
+    if [ ! -t 0 ]; then
+        die "$(msg err.needs-a-terminal)"
+    fi
     # A non-destructive nudge: many concurrent sessions is legitimate, but it is also how
     # an invisible memory problem starts.
     if pm top "$NAME" 2>/dev/null; then

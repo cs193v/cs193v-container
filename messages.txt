@@ -182,6 +182,26 @@ Two ways forward:
   * Work in the original folder:  cd {{INUSE}} && ./cs193v
   * Or start fresh in this one:   ./cs193v --rebuild
 
+[[err.needs-a-terminal]]
+cs193v could not open a shell, because it is not being run from a
+terminal — its input is coming from a file or from another program
+rather than from your keyboard.
+
+If you typed ./cs193v yourself and got this, please send it to
+course staff along with how you started it.
+
+Your container is set up and running; only the shell was not
+opened. These commands do not need a terminal, so they are the
+ones to use in a script:
+
+    cs193v --rebuild     make sure a fresh container exists
+    cs193v ports         check whether your servers are reachable
+    cs193v doctor        print the status report
+
+To run a single command inside the container:
+
+    podman exec -it cs193v bash -lc 'your command here'
+
 [[err.not-running]]
 The container is not running yet. Start it first with:
 

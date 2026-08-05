@@ -9,8 +9,9 @@
 #
 # §A.10's own verb loop hangs today, and NOT for the reason it looks like: `cs193v` with no
 # verb ends in `exec podman exec -it`, and -t allocates a pty, which never delivers EOF. So
-# `</dev/null` does not rescue it either — every call here feeds a literal `exit` and is
-# timeout-wrapped. See ERRORS.md B13.
+# `</dev/null` does not rescue it either. open_shell now REFUSES without a terminal rather
+# than hanging (ERRORS.md B13), so a bare launch here is driven through a real pty via LB()
+# and only the verbs use a plain pipe.
 #
 # Destructive: --full-rebuild deletes the four volumes, which is where claude/gh/vercel
 # logins live. That test is therefore gated behind CS193V_DESTRUCTIVE=1 and skipped
@@ -37,40 +38,42 @@ restore() {
 }
 trap restore EXIT INT TERM
 
-# The bare launcher ends in `exec podman exec -it`, which opens an interactive shell. It
-# must be fed an `exit`, not `</dev/null`: -t allocates a pty, and a pty never delivers EOF
-# the way a pipe does, so `bash -l` waits for input forever. Measured — see ERRORS.md B13.
-# Every call is also timeout-wrapped, so a regression here fails the suite instead of
-# wedging it.
+# L() drives the VERBS, which never open a shell and so work fine with a redirected stdin —
+# they are exactly what the refusal message tells scripts to use. Timeout-wrapped so a
+# regression fails the suite instead of wedging it.
 L() { printf 'exit\n' | timeout 90 ./cs193v "$@" 2>&1; }
 L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
-# ─── the launcher cannot be driven non-interactively  (ERRORS.md B13) ──────────
-# Documented as a test because it bites anyone automating this — a support script, CI, or
-# a verification battery. `./cs193v </dev/null` never returns.
+# LB() is a BARE launch — one that goes on to open a shell. It needs a real terminal, since
+# open_shell refuses without one, so it goes through script(1) with an `exit` fed in.
+LB() { launcher_tty_repo 'exit\n' "$@"; }
+
+# ─── a bare launch with no terminal refuses instead of hanging  (ERRORS.md B13) ─
+# This used to hang forever against real podman: -t allocates a pty and a pty never
+# delivers EOF, so the container's `bash -l` waited for input that could not arrive. Asserted
+# against real podman as well as the shim, because the pty is the real thing here.
 podman rm -f cs193v >/dev/null 2>&1 || true
-./cs193v </dev/null >/dev/null 2>&1 &
-probe=$!
-sleep 12
-if kill -0 "$probe" 2>/dev/null; then
-    kill -9 "$probe" 2>/dev/null
-    for p in $(pgrep -f 'exec -it -w /workspaces' 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
-    record "b13:stdin-devnull-hangs" \
-        "CONFIRMED — ./cs193v </dev/null does not return. open_shell passes -t
-unconditionally, and a pty never delivers EOF. Fix: pass -t only when [ -t 0 ]."
+T0="$(date +%s)"
+out="$(./cs193v </dev/null 2>&1)"; rc=$?
+T1="$(date +%s)"
+if [ "$((T1 - T0))" -lt 60 ]; then
+    pass "noterm:refuses-promptly-against-real-podman"
 else
-    wait "$probe" 2>/dev/null
-    pass "b13:stdin-devnull-no-longer-hangs"
+    fail "noterm:refuses-promptly-against-real-podman" "took $((T1 - T0))s — it may be hanging again"
 fi
-sleep 2
+assert_says "noterm:explains-itself" "could not open a shell" "$out"
+assert_eq   "noterm:exits-nonzero" "1" "$rc"
+# The container was still created, which is what the message promises.
+assert_eq "noterm:container-is-up-anyway" "running" \
+          "$(podman inspect cs193v --format '{{.State.Status}}' 2>&1)"
 podman rm -f cs193v >/dev/null 2>&1 || true
 
-# Feeding an `exit` must work, and promptly — this is the shape every test below uses.
+# With a real terminal the same invocation opens a shell and returns promptly.
 T0="$(date +%s)"
-out="$(L)"
+out="$(LB)"
 T1="$(date +%s)"
-if [ "$((T1 - T0))" -lt 60 ]; then pass "live:launcher-returns-when-fed-exit"
-else fail "live:launcher-returns-when-fed-exit" "took $((T1 - T0))s"; fi
+if [ "$((T1 - T0))" -lt 60 ]; then pass "live:pty-launch-opens-a-shell-and-returns"
+else fail "live:pty-launch-opens-a-shell-and-returns" "took $((T1 - T0))s"; fi
 record "perf:first-launch-seconds" "$((T1 - T0))"
 assert_eq "live:container-is-running-after-first-launch" "running" \
           "$(podman inspect cs193v --format '{{.State.Status}}' 2>&1)"
@@ -89,12 +92,12 @@ rm -f "$REPO/projects/.vt-live"
 # ─── idempotency and concurrency  (§2.2, §A.10) ────────────────────────────────
 before="$(podman inspect cs193v --format '{{.Id}}')"
 i=0
-while [ "$i" -lt 20 ]; do L >/dev/null 2>&1; i=$((i + 1)); done
+while [ "$i" -lt 20 ]; do LB >/dev/null 2>&1; i=$((i + 1)); done
 assert_eq "live:20-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
 assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect cs193v --format '{{.Id}}')"
 
 # Four shells at once is legitimate and common — one per terminal window.
-for i in 1 2 3 4; do ( L >/dev/null 2>&1 & ) ; done
+for i in 1 2 3 4; do ( LB >/dev/null 2>&1 & ) ; done
 sleep 6
 assert_eq "live:concurrent-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
@@ -121,7 +124,7 @@ echo '-p 127.0.0.1:9998:9998' >> container.args
 
 assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-print-command)"
 # Declining must leave the container exactly as it was...
-out="$(L)"
+out="$(LB)"
 assert_says "drift:prompt-is-shown" "settings have changed" "$out"
 assert_eq "drift:declining-keeps-the-same-container" "$before" \
           "$(podman inspect cs193v --format '{{.Id}}')"
