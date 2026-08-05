@@ -58,10 +58,14 @@ published set — rather than leaving anyone to guess.
 
 ## Long-running servers
 
-Closing a terminal window may stop a server started in it. Tell the student to keep the
-window open while a server should be running, and use a second window for other work —
-`cs193v` can be run in as many windows as they like, and they all attach to this same
-container.
+On Linux, closing a terminal window does **not** stop a server started in it: this was
+measured, and the server survives and stays reachable, though its output is discarded. On
+macOS and Windows it is unconfirmed, because the podman client the terminal talks to lives
+outside the virtual machine there.
+
+So do not promise the student either way. Suggest they keep the window open while a server
+should be running and use a second window for other work — `cs193v` can be run in as many
+windows as they like, and they all attach to this same container.
 
 If you background a server yourself, prefer your own background-execution mechanism over
 a bare `&`, so you can still read its output on a later turn.

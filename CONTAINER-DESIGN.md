@@ -223,8 +223,16 @@ which is worth learning. So it is deliberately not here.
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
 strangely, and staff will suggest it freely.
 
-One caveat: **closing a terminal window may stop a server you started in it.** Keep the
-window open while a server should be running, and use a second window for other work.
+One caveat about long-running servers, with the honest state of knowledge attached.
+**On Linux, closing a terminal window does not stop a server you started in it** — this was
+measured, and a server left running in the foreground survives and stays reachable, though
+its output goes nowhere. On **macOS and Windows this has not been confirmed**: the piece of
+podman that your terminal talks to lives outside the virtual machine there, so the answer
+may differ.
+
+Until that is checked, the safe habit is the simple one: keep the window open while a server
+should be running, and use a second window for other work. You can run `cs193v` in as many
+windows as you like.
 
 ---
 
@@ -308,8 +316,11 @@ Written down rather than discovered.
   notice on macOS or Windows. The shared-folder layer there does not deliver change
   notifications into the container. Editing from *inside* the container works — which is
   the normal case in this course.
-- **macOS and Windows are case-insensitive; Linux is not.** `import './Button'` can find
-  `button.tsx` on your Mac and then fail on a Linux build server.
+- **macOS is case-insensitive; Linux and this container are not.** `import './Button'` can
+  find `button.tsx` on your Mac and then fail in here, or on a Linux build server. On
+  Windows your files live inside the WSL environment on an ext4 filesystem — the
+  `\\wsl.localhost\CS193V\...` path mentioned above — so Windows students are
+  **case-sensitive too**, and do not have this particular hazard.
 - **A laptop that has slept can confuse podman.** On a Mac, commands may hang for a
   moment, and the container's clock can drift — which shows up as secure connections
   being rejected as "not yet valid," and looks exactly like a broken network.

@@ -109,8 +109,12 @@ IMAGE=
 -v cs193v-vercel:/home/student/.local/share/com.vercel.cli
 
 # ─── Environment ───────────────────────────────────────────────────────────────
-# Consumed by the in-container `ports` command. Kept in step with the -p lines above;
-# `cs193v doctor` warns if they disagree.
+# Consumed by the in-container `ports` command, and it MUST stay in step with the -p lines
+# above -- if it drifts, `ports` confidently gives wrong advice, which is worse than no
+# advice. That agreement is enforced at edit time by
+# tests/10-static.sh :: ports:CS193V_PORTS-matches--p-lines, which also checks the ranges
+# quoted in the managed CLAUDE.md. Enforcing it at edit time beats a runtime warning: it
+# fails before anyone ships a mismatch, rather than after a student has been misled.
 -e CS193V_PORTS=3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
 
 # ═══════════════════════════════════════════════════════════════════════════════

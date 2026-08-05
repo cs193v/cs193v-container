@@ -252,6 +252,28 @@ claude_ranges="$(grep -oE '[0-9]{4}-[0-9]{4}' files/claude-code/CLAUDE.md | sort
 assert_eq  "ports:CLAUDE.md-matches--p-lines" \
            "$(printf '%s' "$derived" | tr ',' '\n' | sort -u | paste -sd, -)" "$claude_ranges"
 
+# ─── documented claims must be true  (#11, #12, #14) ───────────────────────────
+# A comment that promises behaviour which does not exist is worse than no comment: the next
+# person to edit the port list will rely on it. container.args claimed `cs193v doctor` warns
+# when CS193V_PORTS and the -p lines disagree. verb_doctor never compared them.
+assert_not_contains "claims:no-phantom-doctor-ports-warning" "doctor" \
+                    "$(sed -n '/Environment/,/CS193V_PORTS=/p' container.args)"
+# The invariant itself is enforced statically instead, which is strictly better than a
+# runtime warning -- it fails at edit time rather than after a student is already misled.
+# (ports:CS193V_PORTS-matches--p-lines, above.)
+
+# CONTAINER-DESIGN.md said "macOS and Windows are case-insensitive". On Windows this design
+# puts projects/ inside the WSL distro's ext4 home, which IS case-sensitive -- and the doc
+# gives that very path a few lines later.
+assert_not_contains "claims:windows-not-called-case-insensitive" \
+                    "macOS and Windows are case-insensitive" "$(cat CONTAINER-DESIGN.md)"
+
+# Both docs warned that closing a window "may stop" a server. Measured on native Linux, all
+# five shapes survive and stay reachable. The docs must now say what was measured and be
+# explicit about which platforms are still unverified, rather than hedging vaguely.
+assert_contains "claims:sighup-states-the-linux-measurement" "Linux" \
+                "$(sed -n '/closing a terminal window/,+8p' CONTAINER-DESIGN.md)"
+
 # ─── .gitignore ────────────────────────────────────────────────────────────────
 # -F, not -x alone: `projects/*` as a BRE is "project" + "s" + zero-or-more "/".
 assert_ok  "gitignore:local.args"        grep -qxF 'local.args' .gitignore

@@ -202,7 +202,15 @@ Nine problems in the checklist itself. Several mean the checklist would have pro
 | 1.2 | Claims non-TTY "falls back to numbered selection rather than hanging". It does not — it picks the default. The **code is right and the doc is wrong**; picking the safe default is better than either alternative. |
 | 7.3 | Says to run `man ls`, while A.3 asserts `man` is deliberately absent. Self-contradictory. |
 
-### B2. `container.args:107` claims a warning that does not exist
+### ~~B2~~. `container.args` claimed a warning that does not exist — **FIXED**
+
+The comment promised `cs193v doctor` warns when `CS193V_PORTS` drifts from the `-p` lines.
+`verb_doctor` never compared them. Replaced with a pointer to
+`tests/10-static.sh :: ports:CS193V_PORTS-matches--p-lines`, which enforces the invariant at
+edit time — strictly better than a runtime warning, since it fails before a mismatch can
+ship. Guarded by `claims:no-phantom-doctor-ports-warning`. GitHub issue #11.
+
+### B2 (original diagnosis)
 
 > `# Consumed by the in-container ports command. Kept in step with the -p lines above;`
 > `# cs193v doctor warns if they disagree.`
@@ -211,7 +219,14 @@ Nine problems in the checklist itself. Several mean the checklist would have pro
 drop the claim. The new static tier enforces the invariant at build time instead, which is
 strictly better than a runtime warning — so dropping the sentence is the honest fix.
 
-### B3. `CONTAINER-DESIGN.md:305` — the case-sensitivity claim is wrong for Windows
+### ~~B3~~. The case-sensitivity claim was wrong for Windows — **FIXED**
+
+Scoped to macOS, and Windows corrected: the shipped layout puts `projects/` on the WSL
+distro's ext4 home, so Windows students are case-sensitive too and do **not** have the
+`import './Button'` hazard. Measured on this machine as `case-sensitive`. Guarded by
+`claims:windows-not-called-case-insensitive`. GitHub issue #12.
+
+### B3 (original diagnosis)
 
 > "macOS and Windows are case-insensitive; Linux is not."
 
