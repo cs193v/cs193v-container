@@ -321,6 +321,30 @@ assert_says "doctor:asks-for-a-paste"  "Paste all of the above" "$out"
 assert_eq "doctor:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
 
+# The positive case, and the one that was broken. A container created from the current
+# container.args must be reported as matching it. verb_doctor hashed IMAGE="" because it
+# never resolved the image, while the launch path hashed the resolved dev image — so in dev
+# mode (an empty IMAGE=, which is how the repo ships) doctor called EVERY container stale
+# and sent people chasing a recreate prompt that never appears.
+shim_new
+launcher >/dev/null 2>&1
+out="$(launcher doctor)"
+assert_says "doctor:reports-a-matching-config-as-matching" "matches container.args" "$out"
+assert_says_not "doctor:does-not-cry-stale-when-config-matches" "STALE" "$out"
+# Whatever doctor says has to agree with what a real launch decides, or one of the two is
+# lying to the student.
+assert_says_not "doctor:agrees-with-the-launch-path" "settings have changed" "$(launcher)"
+
+# Again with a pinned image, so the fix is not accidentally dev-mode-only.
+shim_new
+cp "$COPY/container.args" "$SHIM/ca.bak"
+edit_sub "$COPY/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:2222'
+launcher >/dev/null 2>&1
+assert_says "doctor:matching-config-with-a-pinned-image" "matches container.args" \
+            "$(launcher doctor)"
+cp "$SHIM/ca.bak" "$COPY/container.args"
+
+# And drift must still be reported when it is real.
 shim_new
 launcher >/dev/null 2>&1
 shim_set label_hash STALE

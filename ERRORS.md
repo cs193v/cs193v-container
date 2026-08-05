@@ -390,7 +390,35 @@ Not applied, since it changes launcher behaviour and is not blocking — the sui
 around it by feeding `exit` and timeout-wrapping every call. `install-cs193v.sh`'s
 `smoke_test` is unaffected: it only runs `--dev-print-command` and `doctor`.
 
-### B14. `cs193v doctor` always reports "config STALE" in dev mode
+### ~~B14~~. `cs193v doctor` always reported "config STALE" in dev mode — **FIXED**
+
+Fixed in `config_hash` rather than in `verb_doctor`, so every caller agrees by construction
+and no verb added later can reintroduce it:
+
+```sh
+ config_hash() {
++    local img="${IMAGE:-$DEV_IMAGE}"
+-    { printf '%s\n' "$IMAGE" "$WORKSPACE"
++    { printf '%s\n' "$img" "$WORKSPACE"
+       printf '%s\n' ${ARGS[@]+"${ARGS[@]}"}; } | sha_stdin
+ }
+```
+
+A `local`, so `IMAGE` is not mutated and doctor's honest `<unset: dev mode>` line still
+reads correctly. Now:
+
+```
+  pinned image     <unset: dev mode>
+  config           matches container.args
+```
+
+Regression tests in `tests/30-launcher-shim.sh`: `doctor:reports-a-matching-config-as-matching`,
+`doctor:does-not-cry-stale-when-config-matches`, `doctor:agrees-with-the-launch-path`, plus
+`doctor:matching-config-with-a-pinned-image` — which **passed before the fix**, confirming
+the bug was dev-mode-only exactly as diagnosed. `doctor:reports-stale-config` still passes,
+so real drift is still reported. Original diagnosis kept below for the record.
+
+### B14 (original diagnosis)
 
 `doctor` is described as "a report to paste when asking staff for help", so it must not lie.
 It currently does:

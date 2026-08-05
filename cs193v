@@ -297,7 +297,14 @@ build_run_args() {
 # freeze each student's flags at whatever they were on first run, and edits to
 # container.args would never reach anyone.
 config_hash() {
-    { printf '%s\n' "$IMAGE" "$WORKSPACE"
+    # The dev-image fallback lives HERE rather than at each call site, so every caller
+    # agrees by construction. verb_doctor resolved nothing and so hashed IMAGE="", while
+    # the launch path and --dev-print-command both hashed the resolved dev image — which
+    # made doctor report every dev-mode container as STALE and send people chasing a
+    # recreate prompt that never appears. A local, so IMAGE is not mutated and doctor's
+    # honest "<unset: dev mode>" line still reads correctly.
+    local img="${IMAGE:-$DEV_IMAGE}"
+    { printf '%s\n' "$img" "$WORKSPACE"
       printf '%s\n' ${ARGS[@]+"${ARGS[@]}"}; } | sha_stdin
 }
 
