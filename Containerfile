@@ -45,33 +45,69 @@ RUN apt-get update \
 # translation. Passwordless sudo is a deliberate course decision: CS193V trains
 # students not to run commands on their host, so system changes must be possible
 # from inside. See CONTAINER-DESIGN.md § "What sudo costs you".
-# ─────────────────────────────────────────────────────────────────────────────
-RUN groupadd -g 1000 student \
- && useradd -u 1000 -g 1000 -m -s /bin/bash student \
- && printf 'student ALL=(root) NOPASSWD:ALL\n' > /etc/sudoers.d/90-student \
- && chmod 0440 /etc/sudoers.d/90-student
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Layer 2 — Node, from the official tarball into root-owned /usr/local.
 #
-# NOT nvm. The devcontainer's nvm tree is drwxrwsr-x vscode:nvm — group-writable AND
-# setgid — so an agent can trojan the shared node/npm install with NO sudo at all,
-# which makes it the quietest tampering path available. Installing root-owned removes
-# that by construction rather than patching it afterwards.
+# The pre-existing occupant of 1000 has to go first. Since 23.04 the Ubuntu base image
+# ships its own `ubuntu` user at uid AND gid 1000, so a bare `groupadd -g 1000` fails
+# with "GID '1000' already exists" and exits 4, which aborts the build. Deleting it is
+# right rather than reusing it: the account is named in every prompt, path and error a
+# student reads, and `--userns=keep-id:uid=1000,gid=1000` pins the number, so the name
+# has to be ours.
+#
+# Guarded with getent rather than assumed, so this keeps working on a future base image
+# that drops the default user — and userdel removes the primary group with the user when
+# nothing else uses it, which is why the group check comes after and is separate.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) NARCH=x64 ;; \
-      arm64) NARCH=arm64 ;; \
-      *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    cd /tmp; \
-    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NARCH}.tar.xz"; \
-    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
-    grep " node-v${NODE_VERSION}-linux-${NARCH}.tar.xz\$" SHASUMS256.txt | sha256sum -c -; \
-    tar -xJf "node-v${NODE_VERSION}-linux-${NARCH}.tar.xz" \
-        -C /usr/local --strip-components=1 --no-same-owner; \
-    rm -f node-*.tar.xz SHASUMS256.txt; \
+    if getent passwd 1000 >/dev/null; then \
+      existing_user="$(getent passwd 1000 | cut -d: -f1)"; \
+      userdel -r "$existing_user" 2>/dev/null || userdel "$existing_user"; \
+    fi; \
+    if getent group 1000 >/dev/null; then \
+      groupdel "$(getent group 1000 | cut -d: -f1)"; \
+    fi; \
+    groupadd -g 1000 student; \
+    useradd -u 1000 -g 1000 -m -s /bin/bash student; \
+    printf 'student ALL=(root) NOPASSWD:ALL\n' > /etc/sudoers.d/90-student; \
+    chmod 0440 /etc/sudoers.d/90-student; \
+    test "$(id -u student)" = 1000; \
+    test "$(id -g student)" = 1000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 2 — Node, from NodeSource's apt repository.
+#
+# apt-managed on purpose, so `apt upgrade` inside the container picks up Node security
+# fixes. A tarball unpacked into /usr/local cannot be updated by anything a student runs:
+# every CVE would need an image rebuild and a NODE_VERSION bump, and until that shipped
+# there would be no way to patch it from inside.
+#
+# NodeSource rather than Ubuntu's own nodejs, because Ubuntu 26.04 carries node 22.22.1
+# with npm 9.2.0 — two majors behind on both — and de-bundles npm's vendored dependencies
+# into ~70 separate node-* packages, which diverges from what every tutorial a student
+# reads will do. NodeSource's nodistro suite carries amd64 and arm64, so one repo line
+# serves both legs of the manifest.
+#
+# NOT nvm. The devcontainer's nvm tree is drwxrwsr-x vscode:nvm — group-writable AND
+# setgid — so an agent can trojan the shared node/npm install with NO sudo at all, which
+# makes it the quietest tampering path available. apt installs root-owned into /usr/bin and
+# /usr/lib/node_modules, which removes that by construction.
+#
+# The exact patch version is pinned for a reproducible build, but the package is
+# deliberately NOT apt-mark hold'd — holding it would re-create the problem the switch away
+# from the tarball was meant to solve.
+#
+# The key is stored armored as .asc, which apt reads directly, so this needs no gnupg.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      -o /etc/apt/keyrings/nodesource.asc; \
+    chmod go+r /etc/apt/keyrings/nodesource.asc; \
+    printf 'deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_%s.x nodistro main\n' \
+      "${NODE_VERSION%%.*}" > /etc/apt/sources.list.d/nodesource.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "nodejs=${NODE_VERSION}-1nodesource1"; \
+    rm -rf /var/lib/apt/lists/*; \
+    test "$(node --version)" = "v${NODE_VERSION}"; \
     node --version; npm --version
 
 # ─────────────────────────────────────────────────────────────────────────────

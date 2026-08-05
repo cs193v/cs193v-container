@@ -54,10 +54,50 @@ def decode_v4(hexaddr):
     return ".".join(str(o) for o in octets)
 
 
-def listeners():
-    """-> set of (port, bound_address, is_wildcard)"""
+def decode_v6(hexaddr):
+    """/proc/net/tcp6 stores IPv6 as four little-endian 32-bit words.
+
+    '00000000000000000000000001000000' -> '::1'
+
+    This has to produce a real address, not the raw hex. A server told to bind
+    "localhost" in a dual-stack container binds ::1, which is by far the most common way
+    to hit the "unreachable from the browser" problem this whole command exists to
+    explain — so printing 32 hex digits at a student would fail at the one job that
+    matters most. ::ffff:a.b.c.d is unwrapped to its IPv4 form for the same reason: it is
+    what a dual-stack listener bound to an IPv4 address looks like here.
+    """
+    try:
+        words = [hexaddr[i:i + 8] for i in range(0, 32, 8)]
+        # Each 32-bit word is little-endian; the sequence of words is not.
+        raw = b"".join(int(w, 16).to_bytes(4, "little") for w in words)
+    except (ValueError, IndexError):
+        return hexaddr
+    try:
+        import socket
+        if raw[:12] == b"\x00" * 10 + b"\xff\xff":
+            return socket.inet_ntop(socket.AF_INET, raw[12:])
+        return socket.inet_ntop(socket.AF_INET6, raw)
+    except (OSError, ValueError):
+        return hexaddr
+
+
+# A listener on a privileged port is never a student's dev server: no published port is
+# below 3000, and rootless podman refuses to publish anything under 1024 at all. Reporting
+# systemd-resolved on :53 as "two problems" would be noise indistinguishable from a real
+# diagnosis.
+PRIVILEGED = 1024
+
+
+def listeners(paths=None):
+    """-> set of (port, bound_address, is_wildcard)
+
+    `paths` is injectable so the parser can be tested against captured /proc fixtures
+    rather than only whatever happens to be listening on the machine running the tests.
+    """
+    if paths is None:
+        paths = (("/proc/net/tcp", False), ("/proc/net/tcp6", True))
     found = set()
-    for path, v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+    for path, v6 in paths:
         try:
             with open(path) as fh:
                 lines = fh.read().splitlines()[1:]
@@ -70,8 +110,10 @@ def listeners():
             local, _, port_hex = f[1].rpartition(":")
             port = int(port_hex, 16)
             if v6:
-                wildcard = set(local) == {"0"}
-                shown = "::" if wildcard else "[" + local + "]"
+                shown = decode_v6(local)
+                # "::" accepts every interface; so does a dual-stack socket that reports
+                # an unwrapped 0.0.0.0.
+                wildcard = shown in ("::", "0.0.0.0")
             else:
                 shown = decode_v4(local)
                 wildcard = shown == "0.0.0.0"
@@ -88,10 +130,10 @@ def suggest(port, ranges):
     precision about which range is "nearest" — say to pick from the published list.
     """
     if not ranges:
-        return "the published list below"
+        return "one of the published ranges below"
     lo, hi = min(ranges, key=lambda r: min(abs(port - r[0]), abs(port - r[1])))
     if min(abs(port - lo), abs(port - hi)) > 20:
-        return "any published range (listed below)"
+        return "one of the published ranges below"
     return "%d-%d" % (lo, hi) if lo != hi else str(lo)
 
 
@@ -114,8 +156,10 @@ def main():
         if prev is None or (wildcard and not prev[1]):
             by_port[port] = (shown, wildcard)
 
-    print("  %-6s %-12s %-14s %s" % ("PORT", "BOUND TO", "STATUS", "WHAT TO DO"))
-    print("  " + "-" * 74)
+    # BOUND TO is 15 wide so a full IPv4 address and the common IPv6 forms fit without
+    # pushing the later columns out of line.
+    print("  %-6s %-15s %-14s %s" % ("PORT", "BOUND TO", "STATUS", "WHAT TO DO"))
+    print("  " + "-" * 78)
 
     problems = 0
     if not by_port:
@@ -130,6 +174,12 @@ def main():
             problems += 1
             status = "UNREACHABLE"
             advice = "bound to %s only; restart it with --host 0.0.0.0" % shown
+        elif port < PRIVILEGED:
+            # Listed for completeness, but not counted: a student cannot have started this
+            # and could not publish it anyway. Counting it would make the exit status and
+            # the closing explanation fire on a container with no problem at all.
+            status = "system"
+            advice = "a system service, not one of your servers"
         elif wildcard:
             problems += 1
             status = "NOT PUBLISHED"
@@ -139,9 +189,9 @@ def main():
             status = "NOT PUBLISHED"
             advice = ("two problems: restart it on %s, with --host 0.0.0.0"
                       % suggest(port, ranges))
-        print("  %-6d %-12s %-14s %s" % (port, shown, status, advice))
+        print("  %-6d %-15s %-14s %s" % (port, shown, status, advice))
 
-    print("  " + "-" * 74)
+    print("  " + "-" * 78)
     print("  published: " + ", ".join("%d-%d" % (a, b) if a != b else str(a)
                                       for a, b in ranges))
     if problems:

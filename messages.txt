@@ -32,36 +32,41 @@ container at /workspaces. Everything else in the container is temporary.
 [[err.running-as-root]]
 Do not run cs193v with sudo.
 
-Running it as root would start the container in a completely different mode that
-gives up the protection the container exists to provide, and would leave files in your
-projects folder that you cannot edit afterwards.
+Running it as root would start the container in a completely
+different mode that gives up the protection the container exists
+to provide, and would leave files in your projects folder that you
+cannot edit afterwards.
 
 Run it again without sudo:
 
     ./cs193v
 
-If you got here because of a "permission denied" error, that error has a different
-cause — please contact course staff rather than working around it.
+If you got here because of a "permission denied" error, that error
+has a different cause — please contact course staff rather than
+working around it.
 
 [[err.no-podman]]
 Podman is not installed, or it is not on your PATH.
 
-Podman is the program that runs the course container. If you have not installed it
-yet, run the course installer script. If you believe you did install it, contact
-course staff and include the output of:
+Podman is the program that runs the course container. If you have
+not installed it yet, run the course installer script. If you
+believe you did install it, contact course staff and include the
+output of:
 
     cs193v doctor
 
 [[err.podman-hangs]]
 Podman is installed but is not responding.
 
-This is a known problem on Macs that have been asleep: podman commands hang rather
-than failing. The usual fix is to restart podman's virtual machine:
+This is a known problem on Macs that have been asleep: podman
+commands hang rather than failing. The usual fix is to restart
+podman's virtual machine:
 
     podman machine stop
     podman machine start
 
-Then try cs193v again. If that does not help, contact course staff.
+Then try cs193v again. If that does not help, contact course
+staff.
 
 [[err.podman-too-old]]
 Your version of podman is too old for the course container.
@@ -75,13 +80,14 @@ On Ubuntu or inside the WSL CS193V environment:
 
 On a Mac: open Podman Desktop and let it update itself.
 
-Nothing has been changed on your computer. Contact course staff if the upgrade does
-not work.
+Nothing has been changed on your computer. Contact course staff if
+the upgrade does not work.
 
 [[err.podman-unreachable]]
 Podman is installed but the course container cannot reach it.
 
-On a Mac this almost always means podman's virtual machine is not running:
+On a Mac this almost always means podman's virtual machine is not
+running:
 
     podman machine start
 
@@ -92,23 +98,25 @@ On Ubuntu or WSL, try:
 and send the output to course staff along with `cs193v doctor`.
 
 [[err.rootful]]
-Podman is running in "rootful" mode, and the course container needs "rootless" mode.
+Podman is running in "rootful" mode, and the course container
+needs "rootless" mode.
 
-This is not something to work around — rootless mode is what keeps the container from
-being able to touch the rest of your computer. Please contact course staff and include
-the output of:
+This is not something to work around — rootless mode is what keeps
+the container from being able to touch the rest of your computer.
+Please contact course staff and include the output of:
 
     cs193v doctor
 
 [[err.no-subuid]]
-Your account is missing something podman needs, and we do not want to guess at fixing
-it because it affects your whole computer.
+Your account is missing something podman needs, and we do not want
+to guess at fixing it because it affects your whole computer.
 
-Specifically: the account {{USER}} has no entry in /etc/subuid. Podman uses that range
-of ID numbers to keep the container separated from the rest of your system.
+Specifically: the account {{USER}} has no entry in /etc/subuid.
+Podman uses that range of ID numbers to keep the container
+separated from the rest of your system.
 
-Run the course installer again — it can set this up, and it will ask your permission
-before changing anything:
+Run the course installer again — it can set this up, and it will
+ask your permission before changing anything:
 
     bash install-cs193v.sh
 
@@ -117,8 +125,9 @@ If that does not work, contact course staff with the output of:
     id
     cat /etc/subuid /etc/subgid
 
-Do not hand-edit those files yourself — it usually means something slightly unusual
-about how your account was created, and we would rather see it than guess.
+Do not hand-edit those files yourself — it usually means something
+slightly unusual about how your account was created, and we would
+rather see it than guess.
 
 [[err.no-workspace]]
 Could not create the projects folder at:
@@ -132,14 +141,16 @@ The file container.args is missing from the course folder:
 
     {{FILE}}
 
-Something is wrong with the course files rather than with your computer. Please
-re-run the course installer, or contact course staff.
+Something is wrong with the course files rather than with your
+computer. Please re-run the course installer, or contact course
+staff.
 
 [[err.no-image]]
 No course container image has been selected.
 
-This means container.args has no IMAGE line yet — normal before the course image has
-been published, but not something you should see as a student. Contact course staff.
+This means container.args has no IMAGE line yet — normal before
+the course image has been published, but not something you should
+see as a student. Contact course staff.
 
     {{FILE}}
 
@@ -150,18 +161,21 @@ Podman said:
 
 {{OUT}}
 
-Please send all of the text above to course staff, along with the output of:
+Please send all of the text above to course staff, along with the
+output of:
 
     cs193v doctor
 
 [[err.other-directory]]
-There is already a CS193V container, and it is using a different folder from this one.
+There is already a CS193V container, and it is using a different
+folder from this one.
 
     the container is using:  {{INUSE}}
     you ran cs193v from:     {{YOURS}}
 
-If cs193v continued, you would be editing files in the first folder while believing
-you were working in the second — so it has stopped instead.
+If cs193v continued, you would be editing files in the first
+folder while believing you were working in the second — so it has
+stopped instead.
 
 Two ways forward:
 
@@ -174,7 +188,8 @@ The container is not running yet. Start it first with:
     ./cs193v
 
 [[err.update-in-dev-mode]]
-There is no published image to update to — this copy is running a locally built image.
+There is no published image to update to — this copy is running a
+locally built image.
 
 [[err.pull-failed]]
 Could not download the course container.
@@ -183,9 +198,10 @@ Podman said:
 
 {{OUT}}
 
-This is usually a network problem. It is safe to run `cs193v --update` again: podman
-keeps the parts that already downloaded, so a second attempt picks up where it left
-off rather than starting over.
+This is usually a network problem. It is safe to run `cs193v
+--update` again: podman keeps the parts that already downloaded,
+so a second attempt picks up where it left off rather than
+starting over.
 
 [[err.no-containerfile]]
 No Containerfile found at:

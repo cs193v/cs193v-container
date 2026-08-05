@@ -1,0 +1,181 @@
+#!/bin/sh
+#
+# A fake `podman`, for testing the launcher's state machine without creating anything.
+#
+# Put its directory first on PATH and $CS193V_SHIM points at the same directory, which
+# holds both its configuration and its recorded state. Every invocation is appended to
+# $CS193V_SHIM/argv.log, one line, tab-separated, so a test can assert on what the
+# launcher actually asked podman to do.
+#
+# It is a state machine on purpose, not a stub: `run` flips state to running and stores
+# the labels and image it was handed, and `rm` flips it back to absent. That is what makes
+# VERIFICATION.md §A.10's idempotency property ("20 invocations, still exactly one
+# container") and §2.5's config-drift trap testable with no container in sight — the
+# second invocation reads back the hash the first one wrote.
+#
+# Configuration files, all optional (defaults in get()):
+#   version          what `podman --version` prints        [podman version 5.7.0]
+#   hang             if present, every call sleeps forever  (the woken-Mac case)
+#   rootless         .Host.Security.Rootless                [true]
+#   info_rc          exit code for `podman info`            [0]
+#   state            absent | created | running | exited    [absent]
+#   label_hash       the cs193v.confighash label            [] (empty until a run)
+#   label_dir        the cs193v.dir label                   [] (empty until a run)
+#   container_image  the container's .Image                 []
+#   image_exists     yes | no, for `podman image exists`    [yes]
+#   image_id         .Id for `podman image inspect`         [sha256:aaaa]
+#   run_rc           exit code for `podman run`             [0]
+#   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
+#   memory_max       what the in-container cgroup read prints [4294967296]
+#   exec_out         what `podman exec ... sh -c` prints    []
+#   top_out          what `podman top` prints               []
+#   port_out         what `podman port` prints              []
+
+SHIM="${CS193V_SHIM:?podman-fake needs CS193V_SHIM}"
+
+printf '%s\n' "$*" >> "$SHIM/argv.log"
+
+get() {                               # get KEY DEFAULT
+    if [ -f "$SHIM/$1" ]; then cat "$SHIM/$1"; else printf '%s' "$2"; fi
+}
+
+[ -f "$SHIM/hang" ] && { while :; do sleep 5; done; }
+
+# `podman --version` is checked before anything else and must stay cheap.
+case "${1:-}" in
+    --version) get version "podman version 5.7.0"; echo; exit 0 ;;
+esac
+
+STATE="$(get state absent)"
+
+# ─── inspect ───────────────────────────────────────────────────────────────────
+# Called as: podman inspect NAME --format FMT
+fmt_container() {                     # fmt_container FORMAT
+    case "$1" in
+        *'.State.Status'*)      printf '%s\n' "$STATE" ;;
+        *'cs193v.confighash'*)  get label_hash ''; echo ;;
+        *'cs193v.dir'*)         get label_dir ''; echo ;;
+        *'.State.StartedAt'*)   get started_at '2026-08-04T00:00:00Z'; echo ;;
+        *'.Image'*)             get container_image ''; echo ;;
+        *'.Mounts'*)            get mounts_out ''; echo ;;
+        *)                      echo '' ;;
+    esac
+}
+
+case "${1:-}" in
+    inspect)
+        # A container that does not exist must make inspect FAIL — that is precisely how
+        # the launcher's state() distinguishes absent from present.
+        [ "$STATE" = absent ] && { echo "Error: no such object: \"${2:-}\"" >&2; exit 125; }
+        shift
+        FMT=''
+        while [ "$#" -gt 0 ]; do
+            case "$1" in --format) shift; FMT="${1:-}" ;; --format=*) FMT="${1#--format=}" ;; esac
+            shift
+        done
+        fmt_container "$FMT"
+        exit 0
+        ;;
+
+    image)
+        case "${2:-}" in
+            exists)
+                [ "$(get image_exists yes)" = yes ] && exit 0 || exit 1 ;;
+            inspect)
+                shift 2
+                FMT=''
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in --format) shift; FMT="${1:-}" ;; --format=*) FMT="${1#--format=}" ;; esac
+                    shift
+                done
+                case "$FMT" in
+                    *'.Id'*)   get image_id 'sha256:aaaa'; echo ;;
+                    *'.User'*) echo student ;;
+                    *)         echo '' ;;
+                esac
+                exit 0 ;;
+        esac
+        exit 0
+        ;;
+
+    info)
+        RC="$(get info_rc 0)"
+        [ "$RC" -ne 0 ] && { echo "Error: cannot connect to podman" >&2; exit "$RC"; }
+        FMT=''
+        shift
+        while [ "$#" -gt 0 ]; do
+            case "$1" in --format) shift; FMT="${1:-}" ;; --format=*) FMT="${1#--format=}" ;; esac
+            shift
+        done
+        case "$FMT" in
+            *Rootless*)       get rootless true; echo ;;
+            # doctor asks for three values at once; write_local_args asks for MemTotal
+            # alone and does arithmetic on it, so the two must not be conflated.
+            *MemTotal*CPUs*)  printf '%s 4 pasta\n' "$(get mem_total 8589934592)" ;;
+            *MemTotal*)       get mem_total 8589934592; echo ;;
+            *)                echo '' ;;
+        esac
+        exit 0
+        ;;
+
+    run)
+        # Record what we were told, so the next invocation sees a consistent container.
+        # This is what makes drift detection and idempotency observable.
+        for a in "$@"; do
+            case "$a" in
+                cs193v.confighash=*) printf '%s' "${a#cs193v.confighash=}" > "$SHIM/label_hash" ;;
+                cs193v.dir=*)        printf '%s' "${a#cs193v.dir=}"        > "$SHIM/label_dir" ;;
+            esac
+            LAST="$a"
+        done
+        printf '%s' "${LAST:-}" > "$SHIM/last_image"
+        printf '%s' "$(get image_id 'sha256:aaaa')" > "$SHIM/container_image"
+        RC="$(get run_rc 0)"
+        if [ "$RC" -ne 0 ]; then
+            # Deliberately multi-line: this is the shape of output that broke msg().
+            get run_err 'Error: preparing container failed
+level=error msg="cannot set up pasta"' >&2
+            echo >&2
+            exit "$RC"
+        fi
+        printf 'running\n' > "$SHIM/state"
+        echo "0123456789abcdef"
+        exit 0
+        ;;
+
+    rm)      printf 'absent\n' > "$SHIM/state"; rm -f "$SHIM/label_hash" "$SHIM/label_dir"; echo cs193v; exit 0 ;;
+    start)   printf 'running\n' > "$SHIM/state"; echo cs193v; exit 0 ;;
+    stop)    printf 'exited\n'  > "$SHIM/state"; echo cs193v; exit 0 ;;
+    pull)    if [ "$(get pull_rc 0)" -ne 0 ]; then
+                 # printf, not echo: dash's echo interprets backslash escapes, so an
+                 # `echo "a\nb"` here would differ between /bin/sh implementations.
+                 get pull_err 'Error: initializing source docker://cs193v: reading manifest
+unexpected EOF' >&2
+                 echo >&2
+                 exit 1
+             fi
+             get image_id 'sha256:aaaa'; echo; exit 0 ;;
+    volume)  echo ''; exit 0 ;;
+    top)     get top_out ''; echo; exit 0 ;;
+    port)    get port_out ''; echo; exit 0 ;;
+    ps)      [ "$STATE" = running ] && echo "0123456789ab"; exit 0 ;;
+    build)   echo "Successfully tagged localhost/cs193v:dev"; exit 0 ;;
+    machine) echo ''; exit 0 ;;
+    exec)
+        # The launcher's doctor/check_clock use `podman exec NAME sh -c '...'`. Answer the
+        # handful of probes it makes; anything else is empty.
+        for a in "$@"; do LASTARG="$a"; done
+        case "${LASTARG:-}" in
+            *'id -u'*)        echo "1000:1000" ;;
+            *memory.max*)     get memory_max '4294967296'; echo ;;
+            *'grep -c Z'*)    echo 0 ;;
+            *)                case "$*" in
+                                  *'date +%s'*) get container_date "$(date +%s)"; echo ;;
+                                  *) get exec_out ''; echo ;;
+                              esac ;;
+        esac
+        exit 0
+        ;;
+esac
+
+exit 0

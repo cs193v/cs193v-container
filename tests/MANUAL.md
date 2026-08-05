@@ -1,0 +1,203 @@
+# Manual checks — what `run-tests.sh` cannot do
+
+Everything in `VERIFICATION.md` §A that a machine can decide is now automated. What is left
+needs a **person**, a **browser**, a **laptop lid**, or a **different platform**. Work
+through this on one machine of each platform and fill in §10's report template.
+
+Run the automated suite first — if it is red, fix that before spending human time here:
+
+```sh
+tests/run-tests.sh                    # everything automatable
+tests/run-tests.sh --release          # the four publishing blanks
+```
+
+Results recorded on **Ubuntu 26.04 native, rootless podman 5.7.0** are given below each
+item as a baseline, so you can tell "differs from Linux" from "broken".
+
+---
+
+## Needs a person on any platform
+
+### §1.2 — consent prompts render correctly
+Run `bash install-cs193v.sh` on a machine where podman is missing, so it has something to
+ask about.
+*Expect:* an arrow-key menu, not `[y/N]`. The **declining** option is selected by default
+and visually highlighted. Arrow keys move it; Enter confirms.
+*Automated already:* the non-TTY path, the wording, and that declining changes nothing
+(`25-installer.sh`). The pty-driven arrow-key path is automated for the **launcher's** menu
+(`30-launcher-shim.sh :: drift:accepted-*`), which is the same `menu()` function — so what
+is genuinely left is only "does it look right to a human".
+*Note:* §1.2 as written expects a numbered-selection fallback with no tty. There isn't one,
+and there shouldn't be — it picks the safe default. See ERRORS.md B1.
+
+### §7.2 — Ctrl-S does not freeze the terminal
+In `./cs193v`, press Ctrl-S, then type.
+*Expect:* typing still echoes. If it freezes, `stty -ixon` is not being applied.
+*Automated:* that the setting is installed in both `profile.d` and `bash.bashrc`
+(`50-image.sh :: shell:*`). Only the interactive effect needs a human.
+
+### §7.3 — pager behaviour
+A one-line `git diff`, then `git log`.
+*Expect:* the one-line diff prints without entering a pager (that's `LESS=FRX`'s `F`),
+colour is not shown as escape codes (`R`), and output stays on screen after quitting (`X`).
+*Do not* use `man ls` as §7.3 says — `man` is deliberately absent, and the stub prints an
+`unminimize` message. See ERRORS.md B6.
+
+### §7.6 — fonts render as glyphs, not boxes
+**This check cannot pass as written today.** It asks you to render text with Pillow or
+matplotlib; neither is installed. And `fontconfig` is missing, so nothing can enumerate the
+271 Noto files that *are* installed. See ERRORS.md B7 before spending time here.
+
+### §8.1 / §8.2 — logins with no browser in the container
+`claude` then `/login`; then `gh auth login`; then `vercel login`.
+*Expect:* a URL is **printed** by the `$BROWSER` stub and a device/paste-code flow
+completes. No callback port is published, so a redirect-only flow would fail — confirm it
+does not need one.
+During `gh auth login`, answer **yes** to "Authenticate Git with your GitHub credentials?"
+then confirm `git push` works from a test repo.
+*Automated:* the stub itself, and that all four credential directories are student-owned
+volumes with deny rules (`50-image.sh`).
+*While you are logged in, please also settle ERRORS.md B10:* run `claude` and check whether
+auto-update works. Claude Code is installed root-owned in `/usr/local/lib/node_modules`,
+which the student cannot write, so the "auto-update stays enabled" benefit may not be real.
+
+### §8.7 — a permission prompt in the wild
+Ask the agent to do something that triggers a prompt.
+*Expect:* wording a first-year student can act on. Record it — this is the moment the
+course's core skill is taught.
+
+### §A.11 — the deny rules actually deny
+Inside the container, with Claude Code logged in:
+```
+claude -p "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."
+claude -p "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."
+claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."
+claude -p "Which port ranges may a dev server use in this container? List them and nothing else."
+```
+*Expect, in order:* refusal; **success** (the deny covers the credential file, not the whole
+directory); refusal (whole subtree denied); the six published ranges from the managed
+`CLAUDE.md`.
+Also check `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` with no
+"ignored"/"invalid"/"unknown key" warning — a `Write(...)` or `Glob(...)` path rule would be
+accepted and then silently ignored.
+*Automated:* the rule *forms* are asserted statically and in the image
+(`10-static.sh`, `50-image.sh :: claude:deny-rules-are-Read-or-Edit-only`). Whether Claude
+Code honours them at runtime needs a real session.
+
+### §3.4 / §3.5 — real hot reload
+In a scratch project inside the container: `npm create vite`, run the dev server with
+`--host 0.0.0.0`, open it in a host browser, then edit a source file **from inside the
+container**.
+*Expect:* the page hot-reloads. `inotifywait` firing is necessary but not sufficient.
+Then edit the same file **from a host editor**.
+*Linux baseline:* container-side inotify fires (asserted), and **host-side also FIRES** on
+native Linux. On macOS and WSL host-side is expected not to; record which, because
+`CONTAINER-DESIGN.md`'s "known rough edges" depends on it.
+
+### §5.1 — closing a terminal window, for real
+Start a foreground server, then click the window's close button.
+*Expect:* the same result as the automated §A.8 matrix, which kills the `podman exec` client
+instead. If they differ, the automated probe is not modelling the real case.
+*Linux baseline:* see `70-sighup.sh` output, printed as a table.
+
+### §5.6 — what an OOM looks like to a student
+Run the allocation loop from an interactive shell.
+*Linux baseline:* the process is `Killed` and the shell reports **exit 137**; the container
+survives and `podman exec` still works (all asserted). Record the exact on-screen text —
+it becomes the troubleshooting entry for 137.
+
+### §2.8 — zombies after real use
+After a few hours of normal work: `podman exec cs193v ps -eo stat --no-headers | grep -c Z`
+*Expect:* 0, or a small number that does not grow.
+*Automated:* zero right now, zero after an orphan is deliberately created, and ≤2 after five
+killed exec clients (`60-container.sh`, `70-sighup.sh`).
+
+---
+
+## Needs sudo (skipped — nobody was at the keyboard)
+
+### §1.5 — `sudo ./cs193v` is refused
+*Expect:* a clear refusal explaining that this would run podman rootful and defeat the
+isolation model, exit non-zero, and create nothing.
+*Automated equivalent:* the same branch is exercised by faking `id` in
+`30-launcher-shim.sh :: root:*`, which asserts the refusal, the wording, a non-zero exit,
+that nothing is created, and that podman is not even contacted. Only the real `sudo`
+invocation is unverified.
+
+### §2.4 / §9.2 — `--full-rebuild` really deletes the volumes
+Destructive: it logs you out of claude, gh and vercel. Gated behind an opt-in so a routine
+suite run cannot do it to you:
+```sh
+CS193V_DESTRUCTIVE=1 tests/run-tests.sh --tier live
+```
+
+---
+
+## Needs another platform
+
+### §1.3 — bash 3.2 on macOS
+`bash --version` (expect 3.2.x), then run the installer with `/bin/bash` explicitly, and run
+`tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose
+so it can run here.
+*Expect:* no `mapfile`, associative-array or `${x,,}` errors.
+*Automated on Linux:* the ban-list greps, plus a check that every empty-array expansion uses
+the `${arr[@]+...}` guard — which is a **bash 3.2-only** failure that no Linux run can
+surface (ERRORS.md A5). Running the suite on a Mac is what actually proves it.
+
+### §4.5 / §4.7 — Windows firewall and a real browser
+On first port bind, note whether Windows Defender prompts. *Expect:* no prompt, since
+loopback publishing needs no exception. Record the exact wording if one appears.
+Then open `http://localhost:3000/` in the student's real browser. If `localhost` fails but
+`127.0.0.1` works, record it — `localhost` may be resolving to `::1`.
+
+### §5.2 — macOS provider: libkrun vs applehv (Apple Silicon)
+Run §A.7's ownership checks (`tests/run-tests.sh --tier container -k files`) under **both**:
+```sh
+podman machine stop
+CONTAINERS_MACHINE_PROVIDER=applehv podman machine init cs193v-test && podman machine start cs193v-test
+# ...then again with libkrun (podman 6's default)
+```
+*Expect:* both work. Libkrun's virtiofs **enforces** permissions where applehv's is
+permissive, and there are open reports of read-only bind mounts and `root nogroup` ownership
+(`podman#28316`, `#27893`, `#27679`). Confirm `--userns=keep-id:uid=1000,gid=1000` resolves
+it on both. **If libkrun fails, the install docs must pin applehv.**
+
+### §5.3 — Intel Mac
+Attempt the full install. The installer currently **refuses** these machines outright.
+Confirm or refute that podman 6 cannot run there; the support policy depends on it.
+
+### §5.4 — WSL `--name`
+`wsl --install -d Ubuntu-26.04 --name CS193V`
+*Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is
+`wsl --import` from a hosted rootfs, which changes the installer.
+
+### §5.5 — cgroup delegation in WSL
+With `systemd=true` in `/etc/wsl.conf`: `tests/run-tests.sh --tier container -k 60`
+*Expect:* `kernel:cgroup-memory-max` equals `--memory`, not `max`. If it reads `max` the
+memory cap is **not enforced** and the protection is illusory.
+*Linux baseline:* enforced exactly — `memory.max` = 1073741824 for `--memory=1024m`.
+
+### §6.1 / §6.2 / §6.3 — sleep, wake and clock drift (macOS, Windows)
+Sleep the laptop for hours — ideally two days — then:
+```sh
+./cs193v                                              # must give a status in seconds, not hang
+echo "host=$(date +%s) container=$(podman exec cs193v date +%s)"
+```
+*Expect:* a clear status within seconds; `podman info` is known to hang rather than fail
+after a Mac wakes (`podman#21675`). Clocks within a couple of seconds; if minutes apart,
+confirm `cs193v doctor` detects it and the offered VM restart fixes it. Also record whether
+podman **self-corrected** on resume — if it does, the check may be unnecessary.
+Then check `gvproxy` CPU: there are reports of ~400% after sleep (`podman#27279`).
+*Automated:* that every probe is timeout-wrapped and a hanging podman returns in ~14s with a
+"not responding" message rather than looking frozen (`30-launcher-shim.sh :: hang:*`).
+
+### §7.8 — terminal variety
+Repeat §7.2, §7.3 and the colour check under macOS Terminal.app, iTerm2, Windows Terminal
+and GNOME Terminal.
+*Automated:* `TERM` whitelisting for kitty/ghostty/alacritty/wezterm/foot, and that a
+forwarded `TERM` yields 256 colours where the bare `podman exec` yields 8.
+
+### §9.3 — WSL teardown
+`wsl --unregister CS193V`
+*Expect:* removes the distro without touching any other. Confirm a pre-existing distro
+still works.

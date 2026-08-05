@@ -158,8 +158,8 @@ menu() {
         if [ "$key" = "$ESC" ]; then IFS= read -rsn2 rest; key="$key$rest"; fi
         printf '\r%s[K' "$ESC"; printf '%s[%dA%s[J' "$ESC" "$((n + 1))" "$ESC"
         case "$key" in
-            "$ESC[A"|k|K) sel=$(( (sel + n - 1) % n )) ;;
-            "$ESC[B"|j|J) sel=$(( (sel + 1) % n )) ;;
+            "${ESC}[A"|k|K) sel=$(( (sel + n - 1) % n )) ;;
+            "${ESC}[B"|j|J) sel=$(( (sel + 1) % n )) ;;
             ''|"$(printf '\n')") break ;;
             [1-9]) if [ "$key" -le "$n" ]; then sel=$((key - 1)); break; fi ;;
         esac
@@ -280,7 +280,7 @@ Please upgrade podman and run this again:
 }
 
 mac_vm_target_mb() {
-    local host_gb share leave cap
+    local host_gb share leave
     host_gb=$(( $(host_ram_mb) / 1024 ))
     share=$(( host_gb * MAC_VM_SHARE_PCT / 100 ))
     leave=$(( host_gb - MAC_VM_LEAVE_GB ))
@@ -416,14 +416,34 @@ fetch_files() {
     mkdir -p "$DIR" || die "Could not create $DIR"
     # Overwrites the course files and leaves projects/ and local.args alone, so this is
     # also how updates arrive.
-    if ! curl -fsSL --retry 10 --retry-delay 3 "$TARBALL" \
-         | tar xz --strip-components=1 -C "$DIR"; then
+    #
+    # Two independent guards, because a dropped connection on dorm wifi is the single most
+    # likely thing to go wrong here and a half-installed course directory is worse than an
+    # obvious failure.
+    #
+    #   pipefail (in a subshell, so it stays local to this one pipeline) makes curl's
+    #   failure authoritative instead of relying on tar to notice it. GNU tar does exit 2
+    #   on a truncated or empty stream, but that is a property of one tar, not of the
+    #   construct — macOS ships a different tar entirely, and "the last command in the pipe
+    #   will spot the upstream error" is not something to build on.
+    #
+    #   The sentinel check below is what catches the case neither status can: an archive
+    #   that is well-formed but incomplete extracts cleanly and tar exits 0.
+    if ! ( set -o pipefail
+           curl -fsSL --retry 10 --retry-delay 3 "$TARBALL" \
+             | tar xz --strip-components=1 -C "$DIR" ); then
         die "Could not download the course files from:
     $TARBALL
 
 This is usually a network problem. It is safe to run this script again."
     fi
-    chmod +x "$DIR/cs193v"
+    # Belt and braces: tar can still exit 0 having written only some entries, so check that
+    # the files everything downstream depends on actually arrived.
+    for f in cs193v container.args messages.txt Containerfile; do
+        [ -s "$DIR/$f" ] || die "The download finished but $f is missing or empty.
+That means the transfer was cut short. It is safe to run this script again."
+    done
+    chmod +x "$DIR/cs193v" || die "Could not make $DIR/cs193v executable."
     mkdir -p "$DIR/projects"
     ok "$DIR"
 }

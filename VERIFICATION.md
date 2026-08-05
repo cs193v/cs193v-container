@@ -28,6 +28,37 @@ podman machine list 2>/dev/null || echo "no podman machine (native Linux or WSL)
 
 # §A. Automated battery — run this FIRST
 
+**§A is now a real test suite.** Everything below has been implemented in `tests/`, so run that
+instead of pasting shell by hand:
+
+```sh
+tests/run-tests.sh                  # every automatable check, all tiers
+tests/run-tests.sh --tier static    # no podman, no image needed — milliseconds
+tests/run-tests.sh --release        # the publishing blanks (expected to fail until filled)
+tests/run-tests.sh --list           # what exists, and in which tier
+```
+
+Then work through `tests/MANUAL.md`, which is what is genuinely left for a human or another
+platform, and `ERRORS.md`, which records what the first pass found.
+
+The prose below is kept because the *reasoning* for each check is worth having. But **ten of the
+checks as originally written did not work**, and several would have produced a misleading report in
+both directions. Corrected here and in the suite; see ERRORS.md B1 for the full list. The ones that
+mattered most:
+
+| Where | Was | Is |
+| --- | --- | --- |
+| §A.1 | `grep -qx 'projects/*'` — `*` is a BRE quantifier, so it never matched the literal line | needs `-F` |
+| §A.1 | `comm -3` aborts with "file 1 is not in sorted order" under `en_US.UTF-8` | needs `LC_ALL=C` |
+| §A.3 | `nvm-not-group-writable` printed `ok` while asserting nothing — the path does not exist by design | assert its absence |
+| §A.4 | expected `TERM`/`COLORTERM` in `.Config.Env` | impossible; they are per-`exec` |
+| §A.5 | `tput colors` with no `-e TERM` reported 8 — it **failed on a working system** | forward `TERM` as the launcher does |
+| §A.5 | `findmnt -no FSTYPE /tmp` returns **empty** — /tmp is not a mountpoint | `stat -f -c %T /tmp` |
+| §A.10 | the verb loop **hangs** on the empty verb, and `</dev/null` does not fix it — a pty never delivers EOF | feed it `exit` |
+| §A.12 | installer idempotency was **vacuous** — the consent menu declines with no tty and exits 0 first | drive it with a local tarball |
+| §1.2 | expected a numbered-selection fallback with no tty | there is none; it picks the safe default, which is better |
+| §7.3 | says to run `man ls`, while §A.3 asserts `man` is absent | use `git diff`/`git log` |
+
 Everything in this section is machine-checkable with no human in the loop. Run it before §1–9, which
 need a person (a browser, a laptop lid, a terminal window). Most defects will surface here, cheaply.
 
@@ -76,9 +107,14 @@ awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0; bad
   && echo "FAIL comment inside a continued RUN" || echo "PASS no comments inside continuations"
 command -v shellcheck && shellcheck "$DIR/cs193v" "$DIR/install-cs193v.sh"
 # messages.txt cross-reference: no orphan keys, no missing keys
-comm -3 <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$DIR/messages.txt" | tr -d '[]' | sort -u) \
-        <(grep -ohE 'msg +[a-z0-9._-]+' "$DIR"/cs193v "$DIR"/install-cs193v.sh | awk '{print $2}' | sort -u)
-grep -qx 'local.args' "$DIR/.gitignore" && grep -qx 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
+# LC_ALL=C throughout: under en_US.UTF-8 sort and comm disagree about punctuation and
+# comm aborts with "file 1 is not in sorted order", so this never actually ran.
+LC_ALL=C comm -3 \
+  <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$DIR/messages.txt" | tr -d '[]' | LC_ALL=C sort -u) \
+  <(grep -ohE 'msg +[a-z0-9._-]+' "$DIR"/cs193v "$DIR"/install-cs193v.sh | awk '{print $2}' | LC_ALL=C sort -u)
+grep -qxF 'local.args' "$DIR/.gitignore" && grep -qxF 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
+#   -F, not bare -x: `projects/*` as a BRE is "project"+"s"+zero-or-more-"/", so it matched
+#   "projects", "projects/", "projects//" — never the literal line. The check never fired.
 # Containerfile layer order: claude-code must be in the LAST software layer
 grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$DIR/Containerfile"
 ```
@@ -115,8 +151,12 @@ ckx  identity-cue                        R 'am-i-in-a-container'
 rec  open-url-stub                       R '/usr/local/bin/open-url https://example.com/x'
 ckfail man-absent                        R 'man git'                     # deliberately not restored
 ckx  tldr-present                        R 'command -v tldr'
-# nvm must NOT be group-writable (the no-sudo tampering path)
-ck  nvm-not-group-writable ok            R 'case "$(stat -c %A /usr/local/share/nvm)" in ?????w*) echo BAD;; *) echo ok;; esac'
+# There must be NO nvm tree at all. The original form was vacuous: /usr/local/share/nvm
+# does not exist by design (node comes from a root-owned install precisely so there is no
+# group-writable tree to trojan with no sudo), so `stat` failed, the case fell to the
+# catch-all, and it printed "ok" without asserting anything.
+ckfail no-nvm-tree                       R 'test -e /usr/local/share/nvm'
+ck  node-is-root-owned     root          R 'stat -c %U $(command -v node)'
 # tools deliberately excluded
 ck  no-extra-tools none                  R 'for t in rg fzf delta bat fd chromium google-chrome chrome; do command -v $t >/dev/null && echo $t; done; echo none'
 rec  npm-globals                         R 'npm ls -g --depth=0 2>/dev/null'   # vercel + claude-code, NO puppeteer
@@ -167,7 +207,9 @@ ck  capeff-zero  "CapEff:	0000000000000000"  E 'grep CapEff /proc/self/status'
 ck  apparmor  "crun (unconfined)"  E 'cat /proc/self/attr/current'   # AppArmor is NOT a layer here
 rec cgroup-memory-max      E 'cat /sys/fs/cgroup/memory.max'   # MUST equal --memory, not "max"
 ck  cgroup-pids  2048      E 'cat /sys/fs/cgroup/pids.max'
-ck  tmp-on-overlay overlay E 'findmnt -no FSTYPE /tmp'         # NOT tmpfs
+# NOT `findmnt -no FSTYPE /tmp`: /tmp is not a mountpoint (just a directory on the root
+# overlay), and findmnt without -T only reports real mountpoints, so it printed NOTHING.
+ck  tmp-not-tmpfs overlayfs E 'stat -f -c %T /tmp'             # NOT tmpfs
 rec shm-mount              E 'findmnt -no SIZE,OPTIONS /dev/shm'
 # corrects a claim in the design docs: seccomp does NOT block mount()
 ck  mount-allowed mount-allowed  E 'unshare -U --map-root-user -m -- mount -t tmpfs none /mnt && echo mount-allowed'
@@ -175,7 +217,10 @@ ckfail setns-blocked       E 'unshare -U --map-root-user -- nsenter --target 1 -
 rec inotify-watches        E 'cat /proc/sys/fs/inotify/max_user_watches'
 # /proc is NOT cgroup-aware — this is why CS193V_MEMORY_MB is passed in
 rec free-vs-cgroup         E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"'
-ck  colors  256            sh -c 'podman exec -it cs193v tput colors | tr -d "\r"'
+# -e TERM is REQUIRED. podman forces TERM=xterm and does not copy the client's value
+# (containers/podman#25683), so without this the probe reports 8 and FAILS on a correctly
+# working system. The launcher forwards TERM in open_shell/verb_ports; so must this.
+ck  colors  256            sh -c 'podman exec -it -e TERM=xterm-256color cs193v tput colors | tr -d "\r"'
 rec env-persists           E 'printenv CS193V_PORTS CS193V_MEMORY_MB'   # proves -e reaches exec sessions
 ckx dns                    E 'getent hosts registry.npmjs.org'
 ```
@@ -318,7 +363,15 @@ podman run --rm --pids-limit 64 "$IMAGE" sh -c \
 ## A.10 Launcher verbs and failure paths, using shims
 
 ```sh
-for v in "" ports doctor --dev-print-command; do "$DIR/cs193v" $v >/dev/null 2>&1; echo "verb '$v' -> $?"; done
+# The empty verb ends in `exec podman exec -it`, which opens an interactive shell. This
+# loop HANGS on it, and `</dev/null` does NOT help: -t allocates a pty, and a pty never
+# delivers EOF the way a pipe does, so `bash -l` waits for input forever. Measured.
+# Feed it an `exit` instead. (See ERRORS.md B13 for the two-line launcher fix that would
+# make `</dev/null` work: pass -t only when stdin is a terminal.)
+for v in ports doctor --dev-print-command; do
+  "$DIR/cs193v" $v >/dev/null 2>&1 </dev/null; echo "verb '$v' -> $?"
+done
+printf 'exit\n' | timeout 60 "$DIR/cs193v" >/dev/null 2>&1; echo "verb '' -> $?"
 
 # idempotency: 20 invocations, still exactly one container
 for i in $(seq 1 20); do "$DIR/cs193v" --dev-print-command >/dev/null; done

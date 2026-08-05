@@ -66,22 +66,45 @@ immutable tag, so you always have a known-good one to point at.
 
 ## Before students arrive
 
-Work through **`VERIFICATION.md`** on one machine of each platform. Start with **§A**,
-which is fully automated and needs no human — hand it to a Claude Code instance on the
-target machine and it will run itself.
+**§A is now a test suite.** Run it rather than pasting shell:
+
+```
+tests/run-tests.sh                  # every automatable check
+tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
+tests/run-tests.sh --release        # the publishing blanks; fails until they are filled
+tests/run-tests.sh --list           # what exists, and in which tier
+```
+
+Zero dependencies beyond podman, python3 and shellcheck, and bash 3.2-compatible so it runs
+on a Mac. Then work through **`tests/MANUAL.md`** (what genuinely needs a human or another
+platform) and read **`ERRORS.md`** (what the first pass found, and what is still open).
+
+`VERIFICATION.md` keeps the prose, because the reasoning per check is worth having — but ten
+of its checks did not work as written and are corrected there and in the suite.
 
 The reason this matters more than usual: **podman was never executed while this was
-designed** (it wasn't installed in the authoring environment). Every runtime claim is
-derived from source and issue trackers. §5 lists the questions research genuinely could
-not settle, and the answers change either the docs or the design:
+designed** (it wasn't installed in the authoring environment). Every runtime claim was
+derived from source and issue trackers — and the very first runtime step turned out to be
+broken, so the image had never built at all. See `ERRORS.md` A1.
 
-- does closing a terminal window kill a foreground server? (`huponexit` is off, and
-  conmon's source suggests the server survives with its output discarded)
-- does libkrun's enforcing virtiofs break bind mounts where applehv's permissive one
-  doesn't? (podman 6 made libkrun the macOS default; there are three open issues)
-- does podman 6 run on Intel Macs at all? (the installer currently refuses them)
-- does `systemd=true` in WSL actually deliver cgroup delegation, or is `--memory`
-  silently unenforced?
+§5 lists the questions research could not settle. **Answered on native Linux** (details and
+measurements in `ERRORS.md` §D):
+
+- does closing a terminal window kill a foreground server? — **No.** All five shapes
+  survive and stay reachable, exactly as conmon's source suggested. Both the design doc and
+  the managed `CLAUDE.md` currently warn otherwise; confirm on macOS and WSL before
+  rewording, since the exec client lives outside the VM there.
+- does `systemd=true` in WSL deliver cgroup delegation? — **still open**, but on native
+  Linux the cap is enforced exactly (`memory.max` == `--memory`), an OOM is clean at exit
+  137, and the container survives it.
+- does host-side `inotify` fire? — **Yes on Linux**, as predicted. Expect not on macOS/WSL.
+- is a loopback-bound server reachable from the host? — **No**, so the course's central
+  ports lesson holds. All 46 published ports work; unpublished ones are refused.
+- does `podman start` really ignore new flags? — **Yes**, so the `cs193v.confighash`
+  machinery is load-bearing rather than defensive.
+
+Still needing other hardware: libkrun vs applehv on Apple Silicon, whether podman 6 runs on
+an Intel Mac, and WSL's `--name` support.
 
 ## Deliberately not here
 
