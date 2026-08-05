@@ -252,6 +252,16 @@ claude_ranges="$(grep -oE '[0-9]{4}-[0-9]{4}' files/claude-code/CLAUDE.md | sort
 assert_eq  "ports:CLAUDE.md-matches--p-lines" \
            "$(printf '%s' "$derived" | tr ',' '\n' | sort -u | paste -sd, -)" "$claude_ranges"
 
+# ─── the tldr cache must not be able to fail silently  (#9) ────────────────────
+# `man` is deliberately absent, so tldr IS the command-line help. The build step that
+# populates its cache ended in `|| true`, which means a network hiccup during a CI build
+# would ship an image with NO help at all and nothing would report it. The build must fail
+# loudly instead.
+tldr_layer="$(sed -n '/tldr --update/p' Containerfile)"
+assert_not_contains "tldr:build-does-not-swallow-failure" "|| true" "$tldr_layer"
+assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
+                "$(sed -n '/tldr --update/,+3p' Containerfile)"
+
 # ─── documented claims must be true  (#11, #12, #14) ───────────────────────────
 # A comment that promises behaviour which does not exist is worse than no comment: the next
 # person to edit the port list will rely on it. container.args claimed `cs193v doctor` warns

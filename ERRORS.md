@@ -367,7 +367,19 @@ root-owned copy via `PATH`, which does put `/home/student/.local/bin` first) nee
 against a real login — see `tests/MANUAL.md`. If it does not, the stated "auto-update stays
 enabled" benefit is not being delivered.
 
-### B11. `tldr --update` failure is silent (`|| true`)
+### ~~B11~~. `tldr --update` failure was silent (`|| true`) — **FIXED**
+
+`|| true` removed, and the page count asserted in the SAME layer as the fetch so the build
+cannot succeed with an empty or truncated cache. A `tldr tar` smoke check runs too. Since
+`man` is deliberately absent, an empty cache means a student has no command-line help at
+all, which is exactly the failure a CI network hiccup would have shipped silently.
+
+Verified the guard has teeth rather than assuming: it returns non-zero against an empty
+directory and the build log shows `test 7409 -gt 1000`. Static guards
+`tldr:build-does-not-swallow-failure` and `tldr:build-asserts-the-cache-is-populated`.
+GitHub issue #9.
+
+### B11 (original diagnosis)
 
 `Containerfile:183` is `RUN su student -s /bin/sh -c 'tldr --update' || true`. It works — the
 built image has **7409 cached pages (30 MB)** and `tldr tar` succeeds under

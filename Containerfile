@@ -233,7 +233,20 @@ RUN set -eux; \
     rm -rf /tmp/cs193v-files
 
 # Populate tldr's cache as the student so it works offline on first use.
-RUN su student -s /bin/sh -c 'tldr --update' || true
+#
+# NOT `|| true`. `man` is deliberately absent from this image, which makes tldr the only
+# command-line help a student has — so an empty cache means no help at all, and a build that
+# tolerated a failed fetch would ship exactly that without saying a word. A network hiccup in
+# CI is precisely the case this has to catch.
+#
+# The page count is asserted in the SAME layer as the fetch, so the build cannot succeed with
+# an empty or half-written cache. The real cache holds ~7400 pages; 1000 is a floor low
+# enough not to be brittle if upstream reorganises, high enough that a failed or truncated
+# fetch cannot pass.
+RUN set -eux; \
+    su student -s /bin/sh -c 'tldr --update'; \
+    test "$(find /home/student/.cache/tldr -type f | wc -l)" -gt 1000; \
+    su student -s /bin/sh -c 'tldr tar' > /dev/null
 
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
