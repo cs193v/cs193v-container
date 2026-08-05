@@ -93,6 +93,44 @@ assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs
 assert_not_contains "containerfile:no-node-tarball-download" "nodejs.org/dist" \
                     "$(cat Containerfile)"
 
+args_live_early="$(sed 's/#.*//' container.args)"
+# ─── identity: hostname, banner, title, goodbye  (issues #3 and #4) ────────────
+# The hostname is the cheapest possible "you are somewhere else" signal: it lands in the
+# default prompt on every line, survives nano, and costs nothing. Without it the prompt
+# reads student@<random hex>, which tells a student nothing.
+assert_contains "args:hostname-is-cs193v-development" "--hostname cs193v-development" \
+                "$args_live_early"
+
+assert_ok  "containerfile:installs-the-welcome-banner" \
+           grep -q '20-cs193v-welcome.sh /etc/profile.d/' Containerfile
+assert_ok  "containerfile:installs-bash-logout" \
+           grep -qE 'bash_logout .*/home/student/.bash_logout' Containerfile
+
+# ~/.bashrc sets the window title THROUGH PS1 and re-emits it every prompt, so a title set
+# once at login is immediately overwritten. The image rewrites that one escape.
+assert_ok  "containerfile:rewrites-the-bashrc-window-title" \
+           grep -q 'CS193V Development Environment' Containerfile
+
+# The banner runs INSIDE the container, which cannot reach messages.txt — only projects/ is
+# mounted. So this text has to live in the image, and must not be "tidied" into messages.txt
+# later, which would silently blank the banner.
+assert_ok  "welcome:script-exists" test -f files/profile.d/20-cs193v-welcome.sh
+assert_contains "welcome:has-the-welcome-line" "Welcome to the CS193V" \
+                "$(cat files/profile.d/20-cs193v-welcome.sh)"
+assert_not_contains "welcome:text-is-NOT-in-messages.txt" "Welcome to the CS193V" \
+                    "$(cat messages.txt)"
+# Interactive-only, matching 10-cs193v-shell.sh, so `podman exec cs193v <cmd>` and every
+# non-interactive call in this suite stay silent.
+assert_contains "welcome:guards-on-interactive-shell" 'case $- in' \
+                "$(cat files/profile.d/20-cs193v-welcome.sh)"
+# [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
+assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
+                "$(cat files/profile.d/20-cs193v-welcome.sh)"
+assert_ok  "welcome:syntax" sh -n files/profile.d/20-cs193v-welcome.sh
+assert_ok  "logout:script-exists" test -f files/bash_logout
+assert_contains "logout:says-goodbye" "Goodbye" "$(cat files/bash_logout)"
+assert_ok  "logout:syntax" sh -n files/bash_logout
+
 # Since 23.04 the Ubuntu base image ships its own `ubuntu` user at uid AND gid 1000, so a
 # bare `groupadd -g 1000` exits 4 with "GID '1000' already exists" and aborts the build.
 # That is what stopped this image from ever building. The layer must clear 1000 first.

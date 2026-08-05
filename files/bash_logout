@@ -1,0 +1,24 @@
+# CS193V exit message. Installed as /home/student/.bash_logout, which bash runs when a
+# LOGIN shell exits -- and `cs193v` opens the container with `bash -l`, so this fires on the
+# normal way out.
+#
+# Deliberately does NOT clear the screen, though issue #4 asked for it. A novice's last
+# command output is very often the thing they are about to paste to course staff, and
+# wiping it on the way out would throw that away. The message plus the prompt and window
+# title reverting is an unambiguous enough break.
+#
+# It will not run if the shell is killed rather than exited. That is acceptable because this
+# is cosmetic -- nothing here needs undoing. It is exactly why the rejected background-colour
+# idea would have had to live in the launcher instead: a colour left applied after an
+# unclean exit would follow a student into unrelated work.
+#
+# Text lives here rather than in messages.txt because the container cannot see messages.txt;
+# only projects/ is mounted.
+
+case $- in
+    *i*)
+        if [ -t 1 ]; then
+            printf '\n  You have left the CS193V development environment. Goodbye!\n\n'
+        fi
+        ;;
+esac

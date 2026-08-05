@@ -259,6 +259,12 @@ actually are.
 
 ## Small things that are true here
 
+- **You always know you are inside.** Opening a shell clears the screen and shows a banner,
+  the window title says `CS193V Development Environment`, and the prompt reads
+  `student@cs193v-development`. Leaving prints a goodbye. A permanent border around the
+  terminal was investigated and rejected: the only portable way to pin a header discards
+  your scrollback, and changing the window's colours does nothing at all on the default
+  terminals of Ubuntu and macOS.
 - **`nano`** is the editor. `git commit` with no `-m` opens it. (Without this it would
   open `vim.tiny`, which is a genuinely bad first experience.)
 - **git is completely stock.** There is no `/etc/gitconfig`, so the hints and errors you

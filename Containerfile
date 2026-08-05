@@ -213,6 +213,10 @@ RUN set -eux; \
     install -m 0644 /tmp/cs193v-files/claude-code/CLAUDE.md             /etc/claude-code/CLAUDE.md; \
     python3 -c "import json;json.load(open('/etc/claude-code/managed-settings.json'))"; \
     install -m 0644 /tmp/cs193v-files/profile.d/10-cs193v-shell.sh /etc/profile.d/10-cs193v-shell.sh; \
+    install -m 0644 /tmp/cs193v-files/profile.d/20-cs193v-welcome.sh /etc/profile.d/20-cs193v-welcome.sh; \
+    install -o student -g student -m 0644 /tmp/cs193v-files/bash_logout /home/student/.bash_logout; \
+    python3 /tmp/cs193v-files/rewrite-window-title.py; \
+    grep -q 'CS193V Development Environment' /home/student/.bashrc; \
     cat /tmp/cs193v-files/profile.d/10-cs193v-shell.sh >> /etc/bash.bashrc; \
     install -o student -g student -m 0644 /tmp/cs193v-files/nanorc /home/student/.nanorc; \
     install -d -o student -g student -m 0700 /home/student/.claude; \

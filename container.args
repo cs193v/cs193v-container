@@ -35,6 +35,13 @@ IMAGE=
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── Identity ──────────────────────────────────────────────────────────────────
+# The hostname a student sees in their prompt. Ubuntu's default PS1 is \u@\h:\w$, so this
+# single flag makes every prompt line read student@cs193v-development -- the cheapest
+# possible "you are somewhere else" signal, present on every line, surviving nano, costing
+# nothing. Without it the prompt shows a random hex container id, which tells a student
+# nothing at all. See issue #3.
+--hostname cs193v-development
+
 # The EXPLICIT uid=/gid= form, not bare --userns=keep-id. The host side is read from
 # getuid() at launch, so this always means "whoever ran this command" -> container
 # 1000. Bare keep-id would map the host uid to the SAME number, which breaks on macOS

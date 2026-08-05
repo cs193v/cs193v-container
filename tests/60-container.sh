@@ -116,6 +116,43 @@ assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.
 assert_contains "env:CS193V_PORTS-reaches-the-container" "CS193V_PORTS=" "$(I '{{json .Config.Env}}')"
 record "pid1" "$(I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}')"
 
+# ─── identity: hostname, banner, goodbye  (#3, #4) ─────────────────────────────
+# The hostname is what makes Ubuntu's default prompt read student@cs193v-development.
+assert_eq "identity:hostname" "cs193v-development" "$(E 'hostname')"
+
+# The banner needs a pty: it is guarded to interactive shells so that `podman exec <cmd>`
+# and this suite's own non-interactive calls do not get a screenful of box drawing.
+pty_login() {                     # pty_login KEYS -> everything the session printed
+    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it cs193v bash -l" /dev/null 2>&1
+}
+
+out="$(pty_login 'exit\n')"
+n="$(printf '%s' "$out" | grep -ac 'Welcome to the CS193V' || true)"
+assert_eq "identity:banner-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
+assert_contains "identity:banner-has-the-title" "CS193V Development Environment" "$out"
+assert_contains "identity:prompt-shows-the-hostname" "cs193v-development" "$out"
+# The clear must come BEFORE the banner, or the banner scrolls away with the old content.
+if printf '%s' "$out" | grep -aq $'\033\[3J'; then
+    pass "identity:clears-scrollback-on-entry"
+else
+    fail "identity:clears-scrollback-on-entry" "no [3J in the session output"
+fi
+assert_contains "identity:goodbye-on-exit" "Goodbye" "$out"
+
+# A nested shell must NOT repeat the banner. /etc/profile.d only runs for login shells, so
+# this should hold for free -- but it is the difference between a helpful entry banner and
+# noise every time a student or an agent starts a subshell.
+out2="$(pty_login 'bash\nexit\nexit\n')"
+n2="$(printf '%s' "$out2" | grep -ac 'Welcome to the CS193V' || true)"
+assert_eq "identity:nested-shell-does-not-repeat-the-banner" "1" "$(printf '%s' "$n2" | head -1)"
+
+# And a non-interactive exec must be completely silent -- this is how the rest of this
+# suite, and any agent, runs commands in the container.
+plain="$(E 'echo hi')"
+assert_eq "identity:non-interactive-exec-is-silent" "hi" "$plain"
+assert_not_contains "identity:non-interactive-has-no-banner" "Welcome to the CS193V" "$plain"
+assert_not_contains "identity:non-interactive-has-no-goodbye" "Goodbye" "$plain"
+
 # ─── §A.5 kernel and namespaces ────────────────────────────────────────────────
 record "kernel:uid-map" "$(E 'cat /proc/self/uid_map')"
 # --userns=keep-id:uid=1000,gid=1000 must map the HOST user to container 1000, so files the

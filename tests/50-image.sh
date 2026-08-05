@@ -253,6 +253,38 @@ assert_contains "shell:profile.d-disables-ixon" "stty -ixon" \
                 "$(R 'cat /etc/profile.d/10-cs193v-shell.sh')"
 assert_contains "shell:bashrc-also-disables-ixon" "stty -ixon" "$(R 'cat /etc/bash.bashrc')"
 
+# ─── identity: hostname, banner, window title, goodbye  (#3, #4) ───────────────
+assert_ok "identity:welcome-banner-installed" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/20-cs193v-welcome.sh'"
+assert_eq "identity:welcome-banner-mode" "644" \
+          "$(R 'stat -c %a /etc/profile.d/20-cs193v-welcome.sh')"
+assert_ok "identity:bash_logout-installed" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.bash_logout'"
+assert_eq "identity:bash_logout-is-student-owned" "student" \
+          "$(R 'stat -c %U /home/student/.bash_logout')"
+
+# The window title must name the course...
+assert_contains "identity:window-title-names-the-course" "CS193V Development Environment" \
+                "$(R 'grep "e\]0;" /home/student/.bashrc')"
+# ...and Ubuntu's original title escape must be gone, or it would be re-emitted every
+# prompt and overwrite ours.
+assert_not_contains "identity:ubuntu-title-escape-removed" 'u@\h: \w\a' \
+                    "$(R 'grep "e\]0;" /home/student/.bashrc')"
+# But the VISIBLE prompt must be byte-identical to Ubuntu's. The whole point of the
+# hostname change is that the default prompt already carries the signal, so there is no
+# reason to touch what the student actually reads.
+# Ubuntu ships two visible PS1 assignments (a colour one and a plain fallback), neither of
+# which we touch. Counting them is robust where matching the exact string is a quoting trap.
+assert_eq "identity:both-visible-PS1-assignments-intact" "2" \
+    "$(R 'grep -c "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc' | tr -d ' ')"
+assert_contains "identity:visible-prompt-still-shows-user-at-host" 'u@' \
+    "$(R 'grep "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc | head -1')"
+
+# The banner text cannot come from messages.txt -- the container cannot see it -- so it has
+# to be in the image. Assert it really is.
+assert_contains "identity:banner-text-is-in-the-image" "Welcome to the CS193V" \
+                "$(R 'cat /etc/profile.d/20-cs193v-welcome.sh')"
+
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
 # is seeded once on first mount and then never refreshed by a later image.

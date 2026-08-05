@@ -108,7 +108,13 @@ an Intel Mac, and WSL's `--name` support.
 
 ## Deliberately not here
 
-So it isn't re-proposed: puppeteer and Chrome; `--cap-drop` / `no-new-privileges`
+So it isn't re-proposed: a persistent border or status bar around the terminal (needs a pty
+multiplexer; the one portable escape-sequence route, a `DECSTBM` scroll region, was measured
+against real VTE and **discards scrollback** — 40 lines in, 10 retained); changing the
+terminal's background colour (Ptyxis, the Ubuntu 26.04 default, accepts `OSC 11`, reports
+success on query, and renders nothing — and macOS Terminal.app ignores it, so it would be
+invisible on two of three platforms' default terminals and undetectable on one); puppeteer
+and Chrome; `--cap-drop` / `no-new-privileges`
 (mutually exclusive with the sudo decision, and they would buy nothing since root owns
 the tamper targets); a `serve` wrapper or tmux; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
