@@ -189,7 +189,11 @@ def main():
         print("  (nothing is listening inside the container)")
 
     for port in sorted(by_port):
-        shown, wildcard = by_port[port]
+        # The wildcard flag is deliberately NOT unpacked here. It used to decide the verdict --
+        # wildcard meant reachable and loopback meant refused -- and that is exactly the rule
+        # the tunnel retired. It survives in listeners() only to collapse the dual-stack case
+        # above, where a wildcard IPv6 row should win over an IPv4 one for the same port.
+        shown = by_port[port][0]
         pub = published(port, ranges)
         # An IPv6-loopback-only listener. The forward's far end is 127.0.0.1, so this one is
         # still refused -- the only bind address left that does not work.

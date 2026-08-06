@@ -283,10 +283,24 @@ ENV LANG=en_US.UTF-8 \
     VISUAL=nano \
     PAGER=less \
     LESS=FRX \
-    HOST=0.0.0.0 \
-    FLASK_RUN_HOST=0.0.0.0 \
     BROWSER=/usr/local/bin/open-url
-# GIT_EDITOR is deliberately NOT set. With GIT_EDITOR, core.editor, VISUAL and EDITOR all
+# HOST and FLASK_RUN_HOST are deliberately NOT set, and were REMOVED rather than left in
+# place. They existed for one reason: podman's forwarder never delivered to the container's
+# loopback, so every server had to bind 0.0.0.0, and these nudged the few frameworks that
+# read an environment variable into doing it. The launcher now forwards each course port into
+# the container's own loopback over ssh, so localhost, 127.0.0.1 and 0.0.0.0 all work and
+# there is nothing left to nudge.
+#
+# Leaving them would have been harmless in the sense that 0.0.0.0 still works. That is
+# exactly why they had to go: an environment variable that silently changes what a student's
+# server binds to, for a reason that no longer exists, is the kind of thing that survives for
+# years and then confuses whoever finds it. They also never worked as advertised -- vite
+# reads no HOST variable at all and Next.js reads HOSTNAME, so between them they covered
+# little more than react-scripts while vite owned two of the six port ranges.
+#
+# 50-image.sh asserts their ABSENCE, so re-adding one breaks a test rather than slipping in.
+#
+# GIT_EDITOR is deliberately NOT set either. With GIT_EDITOR, core.editor, VISUAL and EDITOR all
 # unset, `git var GIT_EDITOR` returns `vi` and /usr/bin/vi is vim.tiny — so `git commit`
 # with no -m strands a novice in a modal editor with no visible way out. The VS Code
 # extension hides this today by exporting GIT_EDITOR=true; we fix it properly instead.

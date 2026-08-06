@@ -211,12 +211,11 @@ container's own loopback, so `localhost`, `127.0.0.1` and `0.0.0.0` all work and
 nothing left to enforce. Vite's default of `localhost` — the exact case that could not be
 fixed — is now correct as it comes.
 
-**One loose end, deliberately left for a decision rather than taken:** `HOST=0.0.0.0` and
-`FLASK_RUN_HOST=0.0.0.0` are still set in the `Containerfile`'s `ENV` block, and
-`tests/50-image.sh` still asserts they are there. They are now vestigial — harmless, since
-`0.0.0.0` still works, but they are magic that exists to solve a problem that no longer
-exists. Removing them is a behaviour change for anything that reads `HOST`, so it is not
-folded into the tunnel work.
+`HOST=0.0.0.0` and `FLASK_RUN_HOST=0.0.0.0` are **gone from the image** rather than left in
+place as harmless leftovers. They only ever existed to push servers onto `0.0.0.0`, and with
+nothing left to push they would be an unexplained environment variable silently changing what
+a student's server binds to — the kind of thing that survives for years and then puzzles
+whoever finds it. `50-image.sh` now asserts their absence, so re-adding one breaks a test.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 

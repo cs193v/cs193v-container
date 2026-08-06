@@ -128,9 +128,13 @@ ck  img-user       student  podman image inspect "$IMAGE" --format '{{.User}}'
 rec img-size                podman image inspect "$IMAGE" --format '{{.Size}}'
 rec img-layers              podman image inspect "$IMAGE" --format '{{len .RootFS.Layers}}'
 podman image inspect "$IMAGE" --format '{{json .Config.Env}}' | jq -r '.[]' | sort
-   # MUST contain: EDITOR=nano VISUAL=nano PAGER=less LESS=FRX HOST=0.0.0.0
+   # MUST contain: EDITOR=nano VISUAL=nano PAGER=less LESS=FRX
    #               BROWSER=/usr/local/bin/open-url
-   # MUST NOT contain: GIT_EDITOR
+   # MUST NOT contain: GIT_EDITOR, HOST, FLASK_RUN_HOST
+   #   HOST and FLASK_RUN_HOST were removed with the bind-0.0.0.0 rule. They pushed servers
+   #   onto 0.0.0.0 because podman's forwarder never reached the container's loopback; the
+   #   ssh tunnel does, so they nudge nothing and would only be an unexplained variable
+   #   changing what a student's server binds to.
 # no single layer should dominate — the resume-on-failure design
 command -v skopeo && skopeo inspect --raw docker://"$IMAGE" | jq '[.layers[].size]|max'   # expect < 400 MB
 ```

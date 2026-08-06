@@ -32,10 +32,17 @@ record    "img:layer-count" "$(podman image inspect "$TEST_IMAGE" --format '{{le
 record    "img:architecture" "$(podman image inspect "$TEST_IMAGE" --format '{{.Architecture}}')"
 
 env_json="$(podman image inspect "$TEST_IMAGE" --format '{{json .Config.Env}}')"
-for want in "EDITOR=nano" "VISUAL=nano" "PAGER=less" "LESS=FRX" "HOST=0.0.0.0" \
-            "FLASK_RUN_HOST=0.0.0.0" "BROWSER=/usr/local/bin/open-url" \
-            "LANG=en_US.UTF-8"; do
+for want in "EDITOR=nano" "VISUAL=nano" "PAGER=less" "LESS=FRX" \
+            "BROWSER=/usr/local/bin/open-url" "LANG=en_US.UTF-8"; do
     assert_contains "img:env-has-$want" "$want" "$env_json"
+done
+# HOST and FLASK_RUN_HOST must stay GONE. They existed only to push servers onto 0.0.0.0,
+# because podman's forwarder never reached the container's loopback; the ssh tunnel does, so
+# they nudge nothing and would only be an unexplained environment variable that quietly
+# changes what a student's server binds to. Asserted as an absence for the same reason
+# GIT_EDITOR is: the tempting change is to add it back, so that has to break something.
+for forbidden in "HOST=" "FLASK_RUN_HOST="; do
+    assert_not_contains "img:no-$forbidden" "$forbidden" "$env_json"
 done
 # GIT_EDITOR must stay unset. With GIT_EDITOR, core.editor, VISUAL and EDITOR all unset,
 # `git var GIT_EDITOR` returns vi and /usr/bin/vi is vim.tiny, which strands a first-year

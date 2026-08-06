@@ -144,10 +144,19 @@ assert_ok  "containerfile:asserts-student-ids-at-build-time" \
 # GIT_EDITOR must stay unset: git resolves GIT_EDITOR -> core.editor -> VISUAL -> EDITOR
 # -> vi, and /usr/bin/vi is vim.tiny, which strands a novice on `git commit` with no -m.
 env_block="$(sed -n '/^ENV /,/^$/p' $PRIVATE/Containerfile)"
-for v in LANG EDITOR VISUAL PAGER LESS HOST BROWSER; do
+for v in LANG EDITOR VISUAL PAGER LESS BROWSER; do
     assert_contains "containerfile:env-has-$v" "$v=" "$env_block"
 done
 assert_not_contains "containerfile:no-GIT_EDITOR" "GIT_EDITOR" "$(sed 's/#.*//' $PRIVATE/Containerfile)"
+# HOST and FLASK_RUN_HOST are gone with the bind-0.0.0.0 rule, and must stay gone: with the
+# tunnel reaching the container's loopback there is nothing for them to nudge, so all they
+# could do is silently change what a student's server binds to for a reason that no longer
+# exists. Comments are stripped first, or the Containerfile's own explanation of the removal
+# matches itself and this passes while the ENV line is back.
+env_live="$(sed 's/#.*//' $PRIVATE/Containerfile | sed -n '/^ENV /,/^$/p')"
+for v in HOST FLASK_RUN_HOST; do
+    assert_not_contains "containerfile:no-$v-env" "$v=" "$env_live"
+done
 
 # PIPX_HOME/PIPX_BIN_DIR must be inline on the RUN, never ENV: as ENV they persist into
 # the runtime and point a student's own `pipx install` at root-owned /usr/local.
@@ -259,40 +268,48 @@ assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=46" "$(printf '%s
 # CS193V_PORTS makes that disagreement structurally impossible, so there is nothing left to
 # assert. Enforcing an invariant by construction beats enforcing it by test.
 
-# The managed CLAUDE.md quotes the ranges at the agent, and that IS still a second copy, so
-# it still needs the drift check.
-declared="$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
-claude_ranges="$(grep -oE '[0-9]{4}-[0-9]{4}' $PRIVATE/files/claude-code/CLAUDE.md | sort -u | paste -sd, -)"
-assert_eq  "ports:CLAUDE.md-matches-CS193V_PORTS" \
-           "$(printf '%s' "$declared" | tr ',' '\n' | sort -u | paste -sd, -)" "$claude_ranges"
+# ports:CLAUDE.md-matches-CS193V_PORTS is DELETED, and nothing replaces it.
+#
+# By decision, NOTHING asserts on the CONTENT of the managed CLAUDE.md. Two attempts were made
+# and both removed: an equality check against the port list, and a subset check over whatever
+# ranges the prose still named. Both punish ordinary rewording — a correct edit that happens
+# not to match the pattern fails the suite — and a test that fires on correct changes trains
+# people to delete it rather than heed it, which is worse than not having it.
+#
+# What guards that file instead: it is short enough to read in full, and a human reads it. The
+# suite still checks that it EXISTS and is readable in the image (50-image.sh), which is the
+# part a machine can judge.
 
 # ─── the tunnel's invariants ───────────────────────────────────────────────────
-# The direction rule is the entire security argument: the host is the ssh CLIENT and the
-# container runs sshd. A remote forward would invert it, letting the container ask the host
-# to open a listening port — the "container tells your computer which ports to open" channel
-# this project exists to avoid. Enforced by the server too (AllowTcpForwarding local), so
-# these greps are defence in depth rather than the only guard.
+# Only the ones with NO behavioural equivalent are checked here. Six greps that used to live in
+# this section were removed because a real test already proved the same thing, and a grep whose
+# only job is to restate what a behavioural test proves is pure brittleness -- it breaks on
+# refactors and buys nothing:
+#
+#   -R / RemoteForward in the launcher, and AllowTcpForwarding local in the config
+#       -> 80-launcher-live.sh :: tunnel:remote-forward-is-refused actually attempts a remote
+#          forward and asserts it is refused with zero listeners created.
+#   PermitOpen 127.0.0.1:*
+#       -> tunnel:cannot-proxy-off-box actually forwards to an off-box address and asserts the
+#          connection fails.
+#   ClearAllForwardings
+#       -> ports:46-forwards-on-the-host would find 0 forwards if they had been cleared.
+#   remove_container calling tunnel_down
+#       -> tunnel:releases-its-ports-when-the-container-dies and tunnel:comes-back-after-a-
+#          rebuild cover the consequence, which is what actually matters.
+#
+# What is left below either has no runtime symptom to test, or is a build-time structural fact.
 launcher_live="$(sed 's/#.*//' $REPO/cs193v)"
-assert_not_match "tunnel:never-asks-for-a-remote-forward" '(^|[[:space:]])-R([[:space:]]|$)' "$launcher_live"
-assert_not_contains "tunnel:no-RemoteForward"  "RemoteForward"  "$launcher_live"
 assert_not_contains "tunnel:no-agent-forwarding" "ForwardAgent=yes" "$launcher_live"
-# Not a security rule but a correctness one, and it reads like the opposite of what it does:
-# ssh_config(5) says ClearAllForwardings clears forwardings given on the COMMAND LINE too, so
-# it would silently delete all 46 -L flags.
-assert_not_contains "tunnel:no-ClearAllForwardings" "ClearAllForwardings" "$launcher_live"
-# -F none, or the student's own ~/.ssh/config could redirect or decorate the connection.
+# -F none, or the student's own ~/.ssh/config could redirect or decorate the connection. No
+# runtime symptom: it only shows up on a machine whose ssh config happens to interfere.
 assert_contains "tunnel:ignores-the-users-ssh-config" "-F none" "$launcher_live"
-# setsid(1) does not exist on macOS, so backgrounding must go through nohup.
+# setsid(1) does not exist on macOS, so backgrounding must go through nohup. The symptom would
+# only appear on a Mac, which this suite cannot reach.
 assert_contains "tunnel:uses-nohup-not-setsid" "nohup ssh" "$launcher_live"
 assert_not_match "tunnel:no-setsid" '(^|[[:space:]])setsid[[:space:]]' "$launcher_live"
-# A tunnel outliving its container holds every host port against a dead pipe, so the
-# replacement container's tunnel can bind none of them.
-assert_match "tunnel:remove_container-tears-the-tunnel-down" \
-             'remove_container\(\) \{ tunnel_down' "$launcher_live"
 
 sshd_conf="$(sed 's/^#.*//' $PRIVATE/files/sshd_config)"
-assert_contains "sshd:forwarding-is-local-only"   "AllowTcpForwarding local" "$sshd_conf"
-assert_contains "sshd:destinations-are-loopback"  "PermitOpen 127.0.0.1:*"   "$sshd_conf"
 assert_contains "sshd:no-agent-forwarding"        "AllowAgentForwarding no"  "$sshd_conf"
 assert_contains "sshd:no-x11"                     "X11Forwarding no"         "$sshd_conf"
 assert_contains "sshd:no-passwords"               "PasswordAuthentication no" "$sshd_conf"
@@ -396,23 +413,15 @@ lines="$(wc -l < $PRIVATE/files/claude-code/CLAUDE.md | tr -d ' ')"
 if [ "$lines" -lt 200 ]; then pass "claude:CLAUDE.md-under-200-lines"
 else fail "claude:CLAUDE.md-under-200-lines" "$lines lines"; fi
 
-# The bind-0.0.0.0 RULE must not come back into the managed CLAUDE.md. This file steers every
-# student's agent, so a stale instruction here does not merely misinform one reader -- it makes
-# the agent add `--host 0.0.0.0` to commands that do not need it, and then explain to the
-# student why it is required. That is the most expensive place in the repo for this claim to
-# survive, which is why it gets its own check.
+# NOTHING asserts on the CONTENT of the managed CLAUDE.md, or of CONTAINER-DESIGN.md, by
+# decision. Assertions forbidding the old bind-0.0.0.0 imperatives lived in both places
+# briefly and were removed: a test that matches on what prose SAYS fails whenever the prose is
+# reworded, including when it is reworded correctly, and a test that fires on correct changes
+# teaches people to delete it rather than heed it.
 #
-# The IMPERATIVES are targeted, not every mention of the address. The file legitimately says
-# 0.0.0.0 still works and that it includes loopback, and a blanket grep would forbid saying
-# anything true about it -- so this would fail for the wrong reason and get deleted.
-claude_md="$(cat $PRIVATE/files/claude-code/CLAUDE.md)"
-for imperative in 'must bind `0.0.0.0`' '--host 0.0.0.0' '--bind 0.0.0.0' '-H 0.0.0.0' \
-                  '--host=0.0.0.0'; do
-    assert_not_contains "claude:no-bind-all-rule[$imperative]" "$imperative" "$claude_md"
-done
-# The same rule, in the student-facing doc.
-assert_not_contains "design:no-bind-all-command-list" "--host 0.0.0.0" \
-                    "$(cat $PRIVATE/CONTAINER-DESIGN.md)"
+# What replaces them is behaviour. The claim "a loopback-bound server is reachable" is asserted
+# against a real server and a real tunnel in 60-container.sh and 80-launcher-live.sh, which
+# cannot pass while the docs' advice is wrong in a way that matters.
 
 # Every credential store that gets a volume must also get a deny rule, or a login token
 # lands in an agent transcript the first time it globs the home directory.

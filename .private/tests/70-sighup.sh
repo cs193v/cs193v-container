@@ -10,9 +10,12 @@
 # The result is RECORDED, not asserted, for the four shapes a student or an agent might
 # use — because the point is to find out, and then make the docs say it. What IS asserted
 # is the part the advice depends on: if `setsid` and `nohup` do not survive, then
-# files/claude-code/CLAUDE.md telling an agent to "prefer your own background-execution
-# mechanism" and CONTAINER-DESIGN.md telling students to "keep the window open" are the
-# only workable guidance, and if they DO survive there is a better answer to give.
+# CONTAINER-DESIGN.md telling students to "keep the window open" is the only workable
+# guidance, and if they DO survive there is a better answer to give.
+#
+# The managed CLAUDE.md used to carry the same caveat and no longer does — it was slimmed to
+# the few things an agent gets wrong here, and an unverified-off-Linux hedge did not make the
+# cut. Nothing in this suite asserts on that file's content any more.
 #
 # §5.1 still needs a human to close a real window and confirm it matches.
 
@@ -93,7 +96,7 @@ else
     fail "sighup:setsid-survives-so-there-is-a-way-to-detach" \
          "setsid did NOT survive the client being killed. Nothing a student runs can outlive
 a closed window, so $PRIVATE/CONTAINER-DESIGN.md's 'keep the window open' is the only
-workable advice and $PRIVATE/files/claude-code/CLAUDE.md must not suggest backgrounding."
+workable advice, and nothing anywhere should suggest backgrounding as a way around it."
 fi
 
 # Whatever the outcome, the container must not be damaged by a client dying — that happens
@@ -117,7 +120,7 @@ else
 pids.max (2048), and exhausting it wedges the container beyond podman exec's reach."
 fi
 
-# Documentation consistency. Both files currently say a closed window "may stop" a server.
+# Documentation consistency. CONTAINER-DESIGN.md says a closed window "may stop" a server.
 # On this platform every shape survived, so that warning is at best over-cautious here — but
 # it is hedged with "may", and the answer may genuinely differ on macOS and WSL where the
 # exec client lives outside the VM. So: record the discrepancy loudly rather than assert a
@@ -125,12 +128,16 @@ fi
 if [ "$FG_ALIVE" = yes ]; then
     record "sighup:DOCS-vs-REALITY" \
         "a FOREGROUND server survived the client being killed on this platform, while
-$PRIVATE/CONTAINER-DESIGN.md and $PRIVATE/files/claude-code/CLAUDE.md both warn that closing a
-window 'may stop' it. Confirm on macOS and WSL before rewording — see ERRORS.md D."
+$PRIVATE/CONTAINER-DESIGN.md warns that closing a window 'may stop' it. Confirm on macOS and
+WSL before rewording — see ERRORS.md D."
 else
     record "sighup:DOCS-vs-REALITY" "foreground server died, matching what the docs warn"
 fi
 assert_contains "sighup:CONTAINER-DESIGN-mentions-the-caveat" "closing a terminal window" \
     "$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
-assert_contains "sighup:CLAUDE.md-mentions-the-caveat" "closing a terminal window" \
-    "$(tr 'A-Z' 'a-z' < "$PRIVATE/files/claude-code/CLAUDE.md")"
+# The matching assertion against the managed CLAUDE.md is GONE, by decision. That file was
+# deliberately slimmed to the few things an agent gets wrong here, and the SIGHUP caveat did
+# not survive the cut: it is a hedge about behaviour that is measured on Linux and unverified
+# elsewhere, which is worth a paragraph in the student-facing doc and not worth spending an
+# agent's context on. The check stays on CONTAINER-DESIGN.md, which is where the caveat now
+# lives and where a student reads it.
