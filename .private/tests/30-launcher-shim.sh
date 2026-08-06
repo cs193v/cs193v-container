@@ -278,8 +278,8 @@ assert_eq "full-rebuild:non-tty-removes-nothing" "0" "$(shim_count '^rm ')"
 shim_clear_log
 launcher_tty '\033[B\n' --full-rebuild >/dev/null 2>&1
 assert_eq "full-rebuild:accepted-removes-container" "1" "$(shim_count '^rm ')"
-if [ "$(shim_count '^volume rm')" -eq 4 ]; then pass "full-rebuild:accepted-removes-4-volumes"
-else fail "full-rebuild:accepted-removes-4-volumes" "removed $(shim_count '^volume rm')"; fi
+if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "full-rebuild:accepted-removes-5-volumes"
+else fail "full-rebuild:accepted-removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
 
 # ─── --update  (§9.1) ──────────────────────────────────────────────────────────
 shim_new

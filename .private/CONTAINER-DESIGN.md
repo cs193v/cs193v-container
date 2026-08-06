@@ -15,8 +15,8 @@ cd ~/cs193v
 ./cs193v
 ```
 
-You get a shell with node, python, git, the GitHub CLI, the Vercel CLI and Claude Code
-installed. You can run `./cs193v` in as many terminal windows as you like; they all open
+You get a shell with node, python, git, the GitHub CLI, the Vercel CLI, Claude Code and
+Playwright with a headless Chromium installed. You can run `./cs193v` in as many terminal windows as you like; they all open
 a shell in the **same** container. There is only ever one container.
 
 Everything about how it starts is in two plain text files you can read, in the `.config`
@@ -256,13 +256,19 @@ does.
 
 ## What survives what
 
-| | your files in `projects/` | your logins | things installed in the container | port forwarding |
-| --- | --- | --- | --- | --- |
-| closing your terminal | ✅ | ✅ | ✅ | ✅ |
-| `--rebuild` | ✅ | ✅ | ❌ | ✅ (restarted) |
-| `--update` | ✅ | ✅ | ❌ | ✅ (restarted) |
-| `--full-rebuild` | ✅ | ❌ | ❌ | ✅ (restarted) |
-| restarting your computer | ✅ | ✅ | ✅ | ✅ (on next `cs193v`) |
+| | your files in `projects/` | your logins | things installed in the container | browsers you installed | port forwarding |
+| --- | --- | --- | --- | --- | --- |
+| closing your terminal | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--rebuild` | ✅ | ✅ | ❌ | ✅ | ✅ (restarted) |
+| `--update` | ✅ | ✅ | ❌ | ✅ | ✅ (restarted) |
+| `--full-rebuild` | ✅ | ❌ | ❌ | ❌ | ✅ (restarted) |
+| restarting your computer | ✅ | ✅ | ✅ | ✅ | ✅ (on next `cs193v`) |
+
+"Browsers you installed" is its own column because Playwright's browsers are the one
+package cache kept in a volume. The Chromium the course uses is part of the image, so it is
+always there — that column is about an *extra* one you downloaded by asking for a different
+Playwright version. `--full-rebuild` drops it, and the image's own Chromium comes straight
+back, so the worst case is one more download and never a broken setup.
 
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
 strangely, and staff will suggest it freely.
@@ -376,6 +382,15 @@ Written down rather than discovered.
   Windows your files live inside the WSL environment on an ext4 filesystem — the
   `\\wsl.localhost\CS193V\...` path mentioned above — so Windows students are
   **case-sensitive too**, and do not have this particular hazard.
+- **Browser tests are headless, and pinned to one Playwright version.** The container ships
+  Playwright with a Chromium headless shell, so `npm test` can drive a real browser with
+  nothing to install. Each Playwright release wants its *own* Chromium build, though, so a
+  project that asks for a different version prints
+  `Executable doesn't exist at …/ms-playwright/chromium_headless_shell-<number>`. That is not
+  a broken container: run `npx playwright install chromium` and it downloads the one your
+  version wants, once, and keeps it across rebuilds. To avoid the download entirely, run
+  `playwright --version` and use that exact version in your project. There is no display in
+  here, so `headless: false` cannot work.
 - **A laptop that has slept can confuse podman.** On a Mac, commands may hang for a
   moment, and the container's clock can drift — which shows up as secure connections
   being rejected as "not yet valid," and looks exactly like a broken network.

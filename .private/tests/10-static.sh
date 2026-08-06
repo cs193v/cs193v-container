@@ -213,6 +213,24 @@ done
 assert_not_match "invariant:no-Z-relabel" ',Z' "$args_live"
 
 assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=1000" "$args_live"
+
+# Every volume container.args CREATES must be one --full-rebuild REMOVES. That is two lists
+# in two files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside the
+# launcher's remove_volumes -- and a name added to one but not the other leaks a volume that
+# --full-rebuild silently keeps, which is precisely the state that verb exists to clear.
+#
+# This is a grep, which this file otherwise avoids when a behavioural test proves the same
+# thing. Nothing here duplicates one. 30-launcher-shim.sh counts the `volume rm` calls
+# --full-rebuild makes, which proves the launcher removes the volumes IT KNOWS ABOUT — it
+# compares remove_volumes against the shim's own expectation, never against container.args,
+# so a volume added to container.args alone passes it. MANUAL.md §2.4 is the only end-to-end
+# check and it is deliberately human, because the honest automated version would delete a
+# developer's real logins. That gap is what this grep covers.
+args_vols="$(printf '%s\n' "$args_live" \
+    | sed -n 's/.*-v cs193v-\([A-Za-z0-9_-]*\):.*/\1/p' | LC_ALL=C sort | tr '\n' ' ')"
+launcher_vols="$(sed -n 's/^[[:space:]]*for v in \(.*\); do$/\1/p' cs193v \
+    | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "volumes:launcher-removes-every-volume-args-creates" "$args_vols" "$launcher_vols"
 assert_contains "args:network-pasta"           "--network=pasta"                    "$args_live"
 
 # ─── forwarded ports ───────────────────────────────────────────────────────────

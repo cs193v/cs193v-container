@@ -144,9 +144,10 @@ command -v skopeo && skopeo inspect --raw docker://"$IMAGE" | jq '[.layers[].siz
 ```sh
 ck  uid-gid        "1000 1000 student"   R 'echo $(id -u) $(id -g) $(id -un)'
 rec passwd-student                       R 'getent passwd student'
-ck  vol-owners     "student student student student" \
+ck  vol-owners     "student student student student student" \
     R 'stat -c %U /home/student/.claude /home/student/.claude-json \
-                  /home/student/.config/gh /home/student/.local/share/com.vercel.cli | tr "\n" " " | sed "s/ $//"'
+                  /home/student/.config/gh /home/student/.local/share/com.vercel.cli \
+                  /home/student/.cache/ms-playwright | tr "\n" " " | sed "s/ $//"'
 ckfail no-gitconfig                      R 'test -e /etc/gitconfig'      # vanilla git, by decision
 ckx  sudo-works                          R 'sudo -n true'
 ck  git-editor     nano                  R 'git var GIT_EDITOR'          # NOT vi
@@ -163,7 +164,10 @@ ckfail no-nvm-tree                       R 'test -e /usr/local/share/nvm'
 ck  node-is-root-owned     root          R 'stat -c %U $(command -v node)'
 # tools deliberately excluded
 ck  no-extra-tools none                  R 'for t in rg fzf delta bat fd chromium google-chrome chrome; do command -v $t >/dev/null && echo $t; done; echo none'
-rec  npm-globals                         R 'npm ls -g --depth=0 2>/dev/null'   # vercel + claude-code, NO puppeteer
+#   ^ still none: a Chromium headless shell IS installed, but it lives in Playwright's cache
+#     and is launched by Playwright, never typed. No browser is on $PATH.
+rec  npm-globals                         R 'npm ls -g --depth=0 2>/dev/null'   # vercel + claude-code + playwright, NO puppeteer
+ck  playwright-browser-runs ok            R 'playwright screenshot -b chromium about:blank /tmp/p.png >/dev/null 2>&1 && echo ok'
 rec  versions                            R 'node -v; npm -v; python3 -V; gh --version|head -1; vercel --version; claude --version'
 ckx  numpy                               R 'python3 -c "import numpy"'
 rec  font-count                          R 'fc-list | wc -l'
@@ -191,7 +195,8 @@ ck  no-cap-add     "[] []" I '{{json .HostConfig.CapAdd}} {{json .HostConfig.Cap
 rec security-opt           I '{{json .HostConfig.SecurityOpt}}'  # no no-new-privileges, no label=disable
 ck  no-init        false   I '{{.HostConfig.Init}}'
 rec tmpfs                  I '{{json .HostConfig.Tmpfs}}'        # expect no /tmp entry
-rec shm-size               I '{{.HostConfig.ShmSize}}'           # podman default; puppeteer is out
+rec shm-size               I '{{.HostConfig.ShmSize}}'           # podman default; playwright passes
+#                                                                 # --disable-dev-shm-usage itself
 # NO published ports at all. `-p` and `ssh -L` both bind host 127.0.0.1:<port>, so a -p line
 # does not duplicate the tunnel, it takes the port away from it.
 ck  no-port-bindings "{}"  I '{{json .HostConfig.PortBindings}}'
