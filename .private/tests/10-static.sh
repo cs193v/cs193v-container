@@ -396,6 +396,24 @@ lines="$(wc -l < $PRIVATE/files/claude-code/CLAUDE.md | tr -d ' ')"
 if [ "$lines" -lt 200 ]; then pass "claude:CLAUDE.md-under-200-lines"
 else fail "claude:CLAUDE.md-under-200-lines" "$lines lines"; fi
 
+# The bind-0.0.0.0 RULE must not come back into the managed CLAUDE.md. This file steers every
+# student's agent, so a stale instruction here does not merely misinform one reader -- it makes
+# the agent add `--host 0.0.0.0` to commands that do not need it, and then explain to the
+# student why it is required. That is the most expensive place in the repo for this claim to
+# survive, which is why it gets its own check.
+#
+# The IMPERATIVES are targeted, not every mention of the address. The file legitimately says
+# 0.0.0.0 still works and that it includes loopback, and a blanket grep would forbid saying
+# anything true about it -- so this would fail for the wrong reason and get deleted.
+claude_md="$(cat $PRIVATE/files/claude-code/CLAUDE.md)"
+for imperative in 'must bind `0.0.0.0`' '--host 0.0.0.0' '--bind 0.0.0.0' '-H 0.0.0.0' \
+                  '--host=0.0.0.0'; do
+    assert_not_contains "claude:no-bind-all-rule[$imperative]" "$imperative" "$claude_md"
+done
+# The same rule, in the student-facing doc.
+assert_not_contains "design:no-bind-all-command-list" "--host 0.0.0.0" \
+                    "$(cat $PRIVATE/CONTAINER-DESIGN.md)"
+
 # Every credential store that gets a volume must also get a deny rule, or a login token
 # lands in an agent transcript the first time it globs the home directory.
 for store in .claude/.credentials.json .config/gh .local/share/com.vercel.cli; do
