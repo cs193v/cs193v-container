@@ -132,12 +132,12 @@ assert_contains "mount:workspace-bind-points-at-projects" "$REPO/projects" "$mou
 # Base names, matching the launcher's remove_volumes: the instance suffix lives in $NAME, so
 # these read cs193v-claude for a student and cs193v-<instance>-claude for a developer. The
 # assertion NAME stays instance-free so results files compare across instances.
-for v in claude claude-json gh vercel; do
+for v in claude claude-json gh vercel playwright; do
     assert_contains "mount:volume-cs193v-$v" "$NAME-$v" "$mounts"
 done
 nvol="$(podman inspect "$NAME" --format '{{json .Mounts}}' \
         | python3 -c 'import json,sys; print(sum(1 for m in json.load(sys.stdin) if m["Type"]=="volume"))')"
-assert_eq "mount:exactly-four-volumes" "4" "$nvol"
+assert_eq "mount:exactly-five-volumes" "5" "$nvol"
 
 assert_match "label:confighash-is-set" '.' "$(I '{{index .Config.Labels "cs193v.confighash"}}')"
 assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.dir"}}')"
@@ -499,6 +499,62 @@ T0="$(date +%s)"
 E 'rm -rf /home/student/projects/.vt-many'
 T1="$(date +%s)"
 record "files:delete-2000-files-seconds" "$((T1 - T0))"
+
+# ─── browser tests, in the container a student actually gets ───────────────────
+# 50-image.sh proves the browser works in the IMAGE. Two things it structurally cannot
+# reach are proved here instead, and both are how this feature would fail in the field.
+#
+# First: the volume. ~/.cache/ms-playwright is a named volume, so what the image put there
+# is visible only if podman copied it up on first mount. If that ever stopped happening the
+# image tests would still pass and every student would still have no browser.
+seeded="$(E 'ls -d /home/student/.cache/ms-playwright/chromium_headless_shell-* 2>/dev/null | head -1')"
+record "playwright:volume-holds" "$seeded"
+assert_match "playwright:volume-was-seeded-from-the-image" 'chromium_headless_shell-' "$seeded"
+assert_eq "playwright:volume-is-student-owned" "student" \
+          "$(E 'stat -c %U /home/student/.cache/ms-playwright')"
+# Student-writable is the whole reason the volume is student-owned: a project on another
+# playwright version has to be able to install its browser without sudo.
+assert_ok "playwright:volume-is-student-writable" \
+          sh -c "podman exec ${NAME} sh -c 'touch /home/student/.cache/ms-playwright/.wtest && rm /home/student/.cache/ms-playwright/.wtest'"
+
+# Second: the memory cap. The build runs uncapped, so a browser that only fits without
+# --memory would ship green and die on the student's first `npm test`.
+shot="$(E 'cd /tmp && timeout 180 playwright screenshot -b chromium about:blank /tmp/live.png >/dev/null 2>&1; wc -c < /tmp/live.png 2>/dev/null || echo 0' | tr -d ' \n')"
+E 'rm -f /tmp/live.png' >/dev/null 2>&1
+record "playwright:screenshot-bytes-under-the-memory-cap" "$shot"
+if [ "${shot:-0}" -gt 1000 ]; then
+    pass "playwright:chromium-runs-under-the-memory-cap"
+else
+    fail "playwright:chromium-runs-under-the-memory-cap" \
+         "rendered $shot bytes inside the live container. The image tier renders fine, so
+suspect the cgroup limit: cat /sys/fs/cgroup/memory.max in the container."
+fi
+
+# The round trip that matters, because it is the one the course sells: a project-local
+# @playwright/test, matching the image's playwright, driving the volume's browser through
+# `npm test`. Nothing above exercises the project-local resolution path at all.
+PW_V="$(E 'playwright --version' | tr -dc '0-9.')"
+E "rm -rf /home/student/projects/.vt-pw && mkdir -p /home/student/projects/.vt-pw" >/dev/null 2>&1
+# package.json is written directly rather than with `npm init -y`, which refuses a directory
+# whose name begins with a dot ("Invalid name: .vt-pw") — and the .vt- prefix is what this
+# suite's own cleanup trap keys on, so the directory name is not free to change.
+E "printf '%s' '{\"name\":\"cs193v-pw-probe\",\"version\":\"1.0.0\",\"private\":true,\"scripts\":{\"test\":\"playwright test\"}}' > /home/student/projects/.vt-pw/package.json" >/dev/null 2>&1
+# setContent, not a dev server: this is a test of the browser and the project-local runner,
+# and dragging a server into it would mean a port failure could masquerade as a browser one.
+E "cd /home/student/projects/.vt-pw && printf '%s\n' \"import { test, expect } from '@playwright/test';\" \"test('renders', async ({ page }) => { await page.setContent('<h1>cs193v</h1>'); await expect(page.locator('h1')).toHaveText('cs193v'); });\" > probe.spec.ts" >/dev/null 2>&1
+pwinst="$(E "cd /home/student/projects/.vt-pw && timeout 300 npm install --no-audit --no-fund -D @playwright/test@$PW_V 2>&1 | tail -4")"
+npmout="$(E "cd /home/student/projects/.vt-pw && timeout 300 npm test 2>&1 | tail -15")"
+record "playwright:npm-test-output" "$(printf '%s' "$npmout" | tr '\n' ' ' | cut -c1-300)"
+case "$npmout" in
+    *"1 passed"*) pass "playwright:npm-test-round-trip-with-a-project-local-runner" ;;
+    *) fail "playwright:npm-test-round-trip-with-a-project-local-runner" \
+            "a project-local @playwright/test@$PW_V could not drive the baked browser.
+npm install said:
+$(printf '%s' "$pwinst" | tail -4)
+npm test said:
+$(printf '%s' "$npmout" | tail -8)" ;;
+esac
+E 'rm -rf /home/student/projects/.vt-pw' >/dev/null 2>&1
 
 # ─── §A.9 resource limits ──────────────────────────────────────────────────────
 # A clean OOM: the greedy process dies, the container survives, and the launcher can still

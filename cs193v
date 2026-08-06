@@ -520,7 +520,7 @@ remove_container() { tunnel_down; pmq rm -f "$NAME"; }
 # student and "cs193v-<instance>-claude" for a developer, matching container.args either way.
 remove_volumes() {
     local v
-    for v in claude claude-json gh vercel; do
+    for v in claude claude-json gh vercel playwright; do
         pmq volume rm "$NAME-$v"
     done
 }

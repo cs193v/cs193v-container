@@ -68,6 +68,20 @@ assert_eq "noterm:container-is-up-anyway" "running" \
           "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 
+# How many containers did OUR launcher leave running? `podman ps -q | wc -l` used to answer
+# this, and it was wrong for the same reason cleanup:no-stray-containers was, further down:
+# it counts every running container on the MACHINE, so a colleague's cs193v-<instance> — or
+# anything else the user happens to be running — makes an idempotent launcher look like it
+# created a second container. The leak detection is kept intact by counting our own instance
+# by exact name and reporting any non-cs193v container alongside it, so a stray with a
+# podman-generated name still shows up.
+ours_running() {
+    local mine strays
+    mine="$(podman ps --format '{{.Names}}' | grep -cxF "$NAME" || true)"
+    strays="$(podman ps --format '{{.Names}}' | grep -vxF "$NAME" | grep -vcE '^cs193v($|-)' || true)"
+    printf '%s' "$(( ${mine:-0} + ${strays:-0} ))"
+}
+
 # With a real terminal the same invocation opens a shell and returns promptly.
 T0="$(date +%s)"
 out="$(LB)"
@@ -77,7 +91,7 @@ else fail "live:pty-launch-opens-a-shell-and-returns" "took $((T1 - T0))s"; fi
 record "perf:first-launch-seconds" "$((T1 - T0))"
 assert_eq "live:container-is-running-after-first-launch" "running" \
           "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
-assert_eq "live:exactly-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
+assert_eq "live:exactly-one-container" "1" "$(ours_running)"
 
 # The mount really is the student's projects/ directory, on both sides.
 assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
@@ -93,13 +107,13 @@ rm -f "$REPO/projects/.vt-live"
 before="$(podman inspect "$NAME" --format '{{.Id}}')"
 i=0
 while [ "$i" -lt 20 ]; do LB >/dev/null 2>&1; i=$((i + 1)); done
-assert_eq "live:20-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
+assert_eq "live:20-launches-still-one-container" "1" "$(ours_running)"
 assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect "$NAME" --format '{{.Id}}')"
 
 # Four shells at once is legitimate and common — one per terminal window.
 for i in 1 2 3 4; do ( LB >/dev/null 2>&1 & ) ; done
 sleep 6
-assert_eq "live:concurrent-launches-still-one-container" "1" "$(podman ps -q | wc -l | tr -d ' ')"
+assert_eq "live:concurrent-launches-still-one-container" "1" "$(ours_running)"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
 record "live:exec-sessions-after-four-shells" "$(podman top "$NAME" 2>/dev/null | wc -l | tr -d ' ')"
@@ -190,7 +204,7 @@ assert_eq "live:second-copy-is-refused" "1" \
           "$(/tmp/vt-copy/cs193v >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
 assert_says "live:second-copy-explains-both-paths" "different folder" \
             "$(/tmp/vt-copy/cs193v </dev/null 2>&1)"
-assert_eq "live:second-copy-created-nothing" "1" "$(podman ps -q | wc -l | tr -d ' ')"
+assert_eq "live:second-copy-created-nothing" "1" "$(ours_running)"
 rm -rf /tmp/vt-copy
 
 # ─── --rebuild preserves logins  (§2.3) ────────────────────────────────────────
@@ -371,12 +385,12 @@ assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exis
 
 vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:volumes" "$vols"
-# Same scoping. The four are asserted by exact name so a MISSING one still fails, and the
+# Same scoping. The five are asserted by exact name so a MISSING one still fails, and the
 # instance suffix comes from $NAME so the expectation tracks whichever instance is running.
 mine="$(podman volume ls --format '{{.Name}}' \
-        | grep -xE "$NAME-(claude|claude-json|gh|vercel)" | LC_ALL=C sort | tr '\n' ' ')"
-assert_eq "cleanup:exactly-the-four-cs193v-volumes" \
-          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-vercel" \
+        | grep -xE "$NAME-(claude|claude-json|gh|vercel|playwright)" | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "cleanup:exactly-the-five-cs193v-volumes" \
+          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-playwright $NAME-vercel" \
           "$(printf '%s' "$mine" | sed 's/ *$//')"
 stray_vols="$(podman volume ls --format '{{.Name}}' | grep -vE '^cs193v($|-)' \
               | LC_ALL=C sort | tr '\n' ' ')"

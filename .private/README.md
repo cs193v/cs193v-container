@@ -108,6 +108,17 @@ forwards and what `ports` expects. This only works because there are no `-p` lin
 `local.args` is *appended*, so a second set of `-p` flags used to add mappings rather than
 replace them, and moving ports this way was impossible.
 
+One gotcha when you bump `PLAYWRIGHT_VERSION`: the browser lives in the `cs193v-playwright`
+volume, and podman seeds a volume from the image only while the volume is EMPTY. So a
+rebuilt image does not refresh a volume you already have. Drop it first:
+
+```
+podman volume rm cs193v-$CS193V_INSTANCE-playwright
+```
+
+Nothing is lost — the image re-seeds it on the next create. A student never hits this,
+because their first container is also their first volume.
+
 The test suite honours `CS193V_INSTANCE` too, so `run-tests.sh` exercises your instance
 rather than a colleague's. With the variable unset, every name is byte-identical to what it
 was before — a student never sets it.
@@ -185,6 +196,19 @@ and Chrome; `--cap-drop` / `no-new-privileges`
 the tamper targets); a `serve` wrapper or tmux; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
 `podman diff` tamper detection.
+
+**No longer on this list: a browser.** "puppeteer and Chrome" was rejected and that decision
+is now reversed — the course's test harnesses are browser tests, so `npm test` needs one. It
+is Playwright with a Chromium *headless shell*, not puppeteer with Chrome, and the difference
+is not cosmetic: Chrome for Testing publishes no linux-arm64 build at all, so the puppeteer
+route downloads an x86-64 binary onto an Apple Silicon machine and installs it happily
+(puppeteer#7740). Playwright ships its own arm64 build. The image checks the ELF
+`e_machine` of what it got and takes a screenshot at build time, so a wrong-architecture or
+unlaunchable browser fails the build instead of the student.
+
+`--shm-size` stays rejected, but the reason in `container.args` had to be rewritten: it used
+to be "Chrome is not installed", and now the honest reason is that Playwright puts
+`--disable-dev-shm-usage` in its own default chromium arguments.
 
 **No longer on this list: a VS Code-style port relay.** It was rejected, and that decision
 was reversed deliberately — see the ports chapter of `CONTAINER-DESIGN.md`. Two of the three

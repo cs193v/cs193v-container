@@ -18,6 +18,16 @@ ARG NODE_VERSION=24.18.1
 ARG VERCEL_VERSION=latest
 ARG CLAUDE_CODE_VERSION=latest
 
+# Pinned to an exact patch rather than the `1.62` range the devcontainer feature used, and
+# never `latest`: this version chooses the Chromium build, so a floating pin would quietly
+# change which browser every student gets between one CI run and the next.
+#
+# 1.61.0 is a FLOOR, not a preference. Playwright's platform table gained `ubuntu26.04` in
+# 1.61.0; 1.60 and earlier resolve this base image to ubuntu24.04 and are unsupported on it.
+# Verified by grepping playwright-core's bundle: 0 hits in 1.58 and 1.60, 28 in 1.61 and
+# 1.62.1. The devcontainer this came from is on Ubuntu 24.04 and so never met this limit.
+ARG PLAYWRIGHT_VERSION=1.62.1
+
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +149,85 @@ RUN set -eux; \
     gh --version
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 4 — Vercel CLI
+# Layer 4 — Playwright's CLI, and Chromium's system libraries
+#
+# The image ships a browser because the course's test harnesses are browser tests: Claude
+# Code writes them on the student's behalf and `npm test` runs them. Nothing else here
+# needed one, which is why `puppeteer and Chrome` were on the rejected list until now.
+#
+# THE LIBRARIES ARE THE HALF THAT HAS TO BE BAKED. Not one of the 21 packages Chromium
+# needs is in this base image — measured with dpkg, not assumed — so leaving them out would
+# put a sudo-and-apt detour in the middle of `npm test`: it needs root, it needs the Ubuntu
+# archives, and /usr/lib is in no volume and no bind mount, so every --rebuild would destroy
+# it again. The browser itself is the cheap half; it lands in a cache that IS a volume.
+#
+# `install-deps` rather than a hand-copied apt list: the list belongs to the pinned version,
+# so it cannot drift from the browser it serves, and playwright runs exactly the
+# `apt-get install -y --no-install-recommends` this file would have written by hand.
+#
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD is deliberately NOT set. The feature this replaces needed
+# PUPPETEER_SKIP_DOWNLOAD because puppeteer fetches a browser from its install hook;
+# playwright@1.62.1 declares no `scripts` at all, so `npm install -g` downloads nothing and
+# the guard would be cargo cult.
+#
+# `npm cache clean --force` in the same layer, for the reason spelled out on the Vercel
+# layer below.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+ && npm cache clean --force \
+ && playwright --version \
+ && playwright install-deps chromium \
+ && rm -rf /var/lib/apt/lists/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 5 — the Chromium headless shell, and the proof that it works
+#
+# --only-shell: the headless shell is what playwright drives for a headless run anyway.
+# Measured at this revision, the shell is a 114 MB download and the full Chrome for Testing
+# build is another 184 MB on top of it — `playwright install chromium` fetches both. There is
+# no display in this container, so the headed browser those 184 MB buy could never be watched.
+#
+# Installed AS THE STUDENT, which is load-bearing twice: the runtime path is the student's
+# own cache, and podman's first-mount copy of this directory into the cs193v-playwright
+# volume inherits whatever ownership it finds here.
+#
+# PLAYWRIGHT_BROWSERS_PATH is set NOWHERE — not as ENV, not inline. Playwright's default is
+# ~/.cache/ms-playwright, which is both the path the volume covers and the path a
+# project-local @playwright/test searches with no configuration. Setting it would break the
+# one workflow this exists for.
+#
+# The three checks come from the feature this replaces, where they were written after a
+# wrong-architecture browser shipped (puppeteer#7740): the binary is for THIS cpu, it
+# executes, and playwright can actually drive it. A missing library shows up only in the
+# last one — the first two pass happily on an image whose Chromium cannot start.
+#
+# The `find` covers BOTH layouts deliberately. The feature globbed
+# chrome-headless-shell-linux*/chrome-headless-shell, which exists on x86-64 only: Chrome for
+# Testing has no linux-arm64 leg at all, so on arm64 playwright ships its own build and
+# unpacks it to chrome-linux/headless_shell. The glob finds nothing there, so it would have
+# failed the arm64 half of a multi-arch build with a message blaming provisioning.
+#
+# The probe is written and deleted in THIS layer. Deleted in a later one, it would still ship.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    su student -s /bin/sh -c 'playwright install --only-shell chromium'; \
+    CHROME_BIN="$(find /home/student/.cache/ms-playwright -type f \
+        \( -name chrome-headless-shell -o -name headless_shell \) -perm -u+x | head -1)"; \
+    test -n "$CHROME_BIN"; \
+    case "$(uname -m)" in \
+      x86_64)  WANT_ELF=3e00 ;; \
+      aarch64) WANT_ELF=b700 ;; \
+      *) echo "FATAL: no Chromium is provisioned for $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    test "$(od -An -t x1 -j 18 -N 2 -- "$CHROME_BIN" | tr -d ' \n')" = "$WANT_ELF"; \
+    timeout 60 "$CHROME_BIN" --version; \
+    su student -s /bin/sh -c 'timeout 120 playwright screenshot -b chromium \
+        about:blank /home/student/.cache/chromium-probe.png'; \
+    test -s /home/student/.cache/chromium-probe.png; \
+    rm -f /home/student/.cache/chromium-probe.png
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 6 — Vercel CLI
 # ─────────────────────────────────────────────────────────────────────────────
 # `npm cache clean --force` in the same layer, not a later one: a file deleted in a later
 # layer still ships in the earlier one. Root's npm cache is dead weight in something
@@ -150,7 +238,7 @@ RUN npm install -g "vercel@${VERCEL_VERSION}" \
  && vercel --version
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 5 — Claude Code.  MOST VOLATILE: keep it last so a version bump
+# Layer 7 — Claude Code.  MOST VOLATILE: keep it last so a version bump
 # invalidates only this layer and the small config layer after it.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
@@ -158,7 +246,7 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 6 — course configuration
+# Layer 8 — course configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
 # tldr, installed system-wide via pipx. Stands in for man pages, which the Ubuntu base
@@ -196,7 +284,10 @@ COPY files/ /tmp/cs193v-files/
 #
 #  4. Installs the nanorc.
 #
-#  5. Pre-creates every volume mount point STUDENT-OWNED. This is the load-bearing part.
+#  5. Pre-creates all FIVE volume mount points STUDENT-OWNED. This is the load-bearing part.
+#     ~/.cache/ms-playwright already exists by now — Layer 5 put the browser there — but it
+#     is listed here anyway so that one block names every mount point the volume set covers,
+#     rather than four of them plus one created as a side effect three layers earlier.
 #     podman auto-chowns an EMPTY named volume to the container user on first mount, then
 #     re-chowns it to match the image's directory at the mount target if that directory
 #     exists — and a root-owned target both yields a root-owned volume AND permanently
@@ -249,6 +340,8 @@ RUN set -eux; \
     install -d -o student -g student -m 0755 /home/student/.local; \
     install -d -o student -g student -m 0755 /home/student/.local/share; \
     install -d -o student -g student -m 0700 /home/student/.local/share/com.vercel.cli; \
+    install -d -o student -g student -m 0755 /home/student/.cache; \
+    install -d -o student -g student -m 0755 /home/student/.cache/ms-playwright; \
     install -d -o student -g student -m 0755 /home/student/.local/bin; \
     install -d -o student -g student -m 0755 /home/student/projects; \
     install -d -o student -g student -m 0700 /home/student/.ssh; \

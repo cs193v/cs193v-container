@@ -145,8 +145,64 @@ assert_contains "helper:ports-without-env-explains" "rebuild" "$(R 'ports 2>&1 |
 assert_contains "helper:ports-with-env-works" "forwarded:" \
                 "$(R 'CS193V_PORTS=3000-3009 ports 2>&1 || true')"
 
+# ─── Playwright and its browser ────────────────────────────────────────────────
+# The course's test harnesses are browser tests, so the browser is part of the image rather
+# than something `npm test` installs on first use. These assert the three things that can
+# each ship a broken image while the build still goes green.
+PW_CACHE=/home/student/.cache/ms-playwright
+
+record "playwright:cli-version" "$(R 'playwright --version 2>&1')"
+assert_ok "playwright:cli-is-installed" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'playwright --version'"
+
+# The FLOOR is asserted, not the exact pin. 1.61.0 is the first playwright whose platform
+# table knows ubuntu26.04; older ones resolve this base image to ubuntu24.04 and install a
+# browser for a distribution this is not. The exact version is recorded rather than asserted
+# because CI is expected to pin versions with --build-arg, and a test that fails on a
+# deliberate pin is a test people learn to ignore.
+pw_floor="$(R 'playwright --version 2>&1' | tr -dc "0-9.\n" | awk -F. '
+    {maj=$1+0; min=$2+0}
+    END {print (maj > 1 || (maj == 1 && min >= 61)) ? "ok" : "TOO OLD for ubuntu26.04"}')"
+assert_eq "playwright:version-is-at-least-1.61-for-ubuntu26.04" "ok" "$pw_floor"
+
+assert_ok "playwright:headless-shell-is-baked-in" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'ls -d $PW_CACHE/chromium_headless_shell-*'"
+# --only-shell must hold. The full Chrome for Testing build is a further 184 MB download on
+# top of the shell, and unusable here anyway: there is no display, so nothing runs headed.
+assert_eq "playwright:no-full-chromium-only-the-shell" "" \
+          "$(R "ls -d $PW_CACHE/chromium-[0-9]* 2>/dev/null || true")"
+# Student-owned for the same reason the tldr cache is, plus one more: podman copies this
+# directory into the cs193v-playwright volume on first mount, so root-owned content here
+# would produce a volume the student cannot write to.
+assert_eq "playwright:cache-is-student-owned" "student" "$(R "stat -c %U $PW_CACHE")"
+
+# The puppeteer#7740 failure mode, checked in the image rather than only at build time: a
+# browser for the wrong CPU unpacks, installs and passes every test except running.
+arch_ok="$(R 'bin="$(find /home/student/.cache/ms-playwright -type f \( -name chrome-headless-shell -o -name headless_shell \) -perm -u+x | head -1)"; case "$(uname -m)" in x86_64) want=3e00 ;; aarch64) want=b700 ;; *) want=unsupported-arch ;; esac; got="$(od -An -t x1 -j 18 -N 2 -- "$bin" | tr -d " \n")"; if [ "$got" = "$want" ]; then echo match; else echo "got=$got want=$want bin=$bin"; fi')"
+assert_eq "playwright:browser-arch-matches-the-image" "match" "$arch_ok"
+
+# The one that proves the other three mean something. A missing shared library shows up
+# nowhere else: the binary exists, it is the right architecture, and it still cannot start.
+# --network=none for the same reason tldr:works-offline uses it — the browser is supposed to
+# be IN the image, so nothing here may quietly download it.
+shot="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" -c \
+        'timeout 120 playwright screenshot -b chromium about:blank /tmp/probe.png >/dev/null 2>&1; wc -c < /tmp/probe.png 2>/dev/null || echo 0' \
+        2>/dev/null | tr -d ' \n')"
+record "playwright:offline-screenshot-bytes" "$shot"
+if [ "${shot:-0}" -gt 1000 ]; then
+    pass "playwright:drives-chromium-offline"
+else
+    fail "playwright:drives-chromium-offline" \
+         "rendered $shot bytes with no network. The browser is baked into the image, so this
+must work with --network=none. A missing system library looks exactly like this."
+fi
+
 # ─── things deliberately NOT installed ─────────────────────────────────────────
 # Each was considered and rejected; re-adding one should break a test rather than slip in.
+#
+# chromium/chrome stay on this list even though a Chromium build now ships: what is asserted
+# is that no browser is on $PATH. The headless shell lives in the Playwright cache and is
+# launched by Playwright, never typed by a student, and `code` is still absent entirely.
 assert_eq "absent:no-extra-tools" "none" \
     "$(R 'for t in rg fzf delta bat fd chromium google-chrome chrome code; do command -v $t >/dev/null && echo $t; done; echo none')"
 # man pages are stripped by the base image and deliberately not restored; tldr stands in.
