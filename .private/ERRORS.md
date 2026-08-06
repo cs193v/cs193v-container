@@ -650,11 +650,86 @@ correct as written for Linux.
 
 ### D4. Is a loopback-bound server reachable from the host?
 
-**No — connection refused**, exactly as the course teaches. `podman port` publishes to the
-container's `eth0` and the forwarder never touches its `lo`. The host side really is
-loopback-only (`ss` shows `127.0.0.1:3000`, not `0.0.0.0:3000`), and it is not reachable
-from the LAN. All 46 published ports are reachable from the host; the five unpublished ports
-tested are all refused. The central ports lesson holds on this platform.
+**Now YES — 200. This answer is deliberately the opposite of what it used to be.**
+
+The original measurement stands as a description of `podman run -p`: connection refused,
+because the forwarder publishes to the container's `eth0` and never touches its `lo`. That
+was the central ports lesson, and it cost `--host 0.0.0.0` on every command for ten weeks.
+
+The launcher now forwards the course ports over an ssh tunnel into the container's own
+loopback instead, so the same test returns **200**, and a `0.0.0.0`-bound server still
+returns 200 as well — the tunnel is a strict superset of what publishing did. The host side
+is still loopback-only, now structurally rather than by flag: the ssh client binds
+`127.0.0.1` itself. Verified unreachable from this machine's own LAN address (`10.0.2.15`).
+
+The one bind address that is still refused is **`::1` alone** — the forward's far end is
+IPv4. That is narrow in practice: `localhost` resolves to `127.0.0.1` and nothing else in
+this image (no `::1 localhost` line in `/etc/hosts`), so both
+`python3 -m http.server --bind localhost` and node's `listen(port, "localhost")` bind IPv4.
+This also corrects a claim `files/ports` used to make in its own docstring — that binding
+"localhost" lands on `::1` — which was not true for this image.
+
+### D4a. The tunnel, measured
+
+Ubuntu 26.04 native, rootless podman 5.7.0, OpenSSH 10.2p1 on both ends.
+
+**Does `sshd -i` work?** Yes, and **unprivileged**. `podman exec -i <ctr> /usr/sbin/sshd -i
+-f <conf>` authenticates and runs as `student` with no `-u 0`. OpenSSH 9.8 split sshd into
+`sshd`/`sshd-session` and 10.0 added `sshd-auth`; inetd mode survives it. `/run/sshd` comes
+with the package and was not needed. This was the gate for the whole design — the fallback
+was an sshd on a published TCP port — and it passed, so the fallback was never built.
+
+| | |
+| --- | --- |
+| forwarded channel throughput | **322 MB/s** (300 MB in 0.98 s) |
+| pasta published port, same server | 2.53 GB/s |
+| ssh session channel over the same pipe | 363 MB/s |
+| latency, 50 sequential connections, tunnel | **12.1 ms** each |
+| latency, same, published port | 12.6 ms each |
+| small requests while 300 MB is in flight | 11.2 ms (vs 11.4 ms idle) |
+| 46 forwards, one connection | one ssh pid owns all 46; up in 570 ms |
+| tunnel start, wall clock | ~600 ms |
+
+Bulk transfer is ~8× slower than pasta and still 2.6 Gbit/s, so a 5 MB bundle costs ~15 ms.
+**Latency is indistinguishable**, which is the number that matters and the reason this is ssh
+rather than a socat relay: a new TCP connection becomes a new SSH channel over the existing
+connection, not a new `podman exec` at 158 ms (D9). Head-of-line blocking was looked for and
+not found — per-channel flow control does its job.
+
+`MaxSessions` does **not** cap `direct-tcpip` forwards, so 46 is not near any limit.
+
+**Security invariants, tested rather than asserted.** An attempted `-R` is refused with
+`administratively prohibited` and creates **zero** listeners, enforced by
+`AllowTcpForwarding local` in the server's own config rather than by the client's flags.
+Forwarding to an off-box address is refused at channel-open by `PermitOpen 127.0.0.1:*`,
+while the container's own direct egress to that same address still works (301) — so the
+refusal is the config, not the network. The read-only `authorized_keys` mount cannot be
+written (`EROFS`) or unlinked (`EPERM`) from inside.
+
+**Lifecycle.** Killing the container underneath a live tunnel frees every host port in
+**under 1 s**: the `podman exec` pipe closes and ssh exits, with no help from
+`ServerAliveInterval` (which is kept for a *wedged* rather than closed pipe — a frozen
+machine VM on macOS). A tunnel SIGSTOPped so it can never answer `-O exit` is still
+recovered by `cs193v --reset-tunnel`, which time-boxes the clean path and then kills. A host
+port already held by another program costs **that port only**, named in the output, where
+`podman run -p` used to fail outright and take the whole container with it.
+
+**Zombies: exactly 1 while a tunnel is up, 0 with none, and 8 tunnel cycles accumulated
+none.** It is sshd's own re-exec'd process, and `ps -o ppid` shows its parent is sshd's
+privsep monitor *inside* the container, alive for the tunnel's lifetime — so it is never
+reparented to PID 1 and no PID 1 could reap it. `doctor` reports a zombie count, so **1 is
+expected** now rather than a fault. See `README.md`'s open item on `--init`.
+
+**Not verified, no hardware:** macOS (the gvproxy leg, where `--host-lo-to-ns-lo` silently
+failed) and WSL2 (whether Windows' localhost forwarding reaches an ssh-bound `127.0.0.1`
+listener the way it reaches a pasta-bound one — `container.args` establishes it does for
+pasta, citing podman#17972 and #22562).
+
+**Incidental, and it bit during this work:** `--userns=keep-id` makes podman create an
+ID-mapped copy of the image layers (`storage-chown-by-maps`), and it does not appear to share
+those between image tags that share layers. Each new tag therefore costs roughly another full
+image (~1.5 GB), not a thin layer. This machine hit "no space left on device" at 95% full on
+the first attempt to run a derived image.
 
 ### D5. cgroup delegation — is `memory.max` the cap, or `max`?
 

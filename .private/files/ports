@@ -80,12 +80,14 @@ def decode_v6(hexaddr):
 
     '00000000000000000000000001000000' -> '::1'
 
-    This has to produce a real address, not the raw hex. A server told to bind
-    "localhost" in a dual-stack container binds ::1, which is by far the most common way
-    to hit the "unreachable from the browser" problem this whole command exists to
-    explain — so printing 32 hex digits at a student would fail at the one job that
-    matters most. ::ffff:a.b.c.d is unwrapped to its IPv4 form for the same reason: it is
-    what a dual-stack listener bound to an IPv4 address looks like here.
+    This has to produce a real address, not the raw hex, because ::1 is now the ONLY bind
+    address the tunnel cannot reach — so this is the one row where the address itself is the
+    diagnosis, and printing 32 hex digits at a student would fail at exactly the job that
+    still matters. (This docstring used to claim binding "localhost" lands on ::1 and that
+    it was the most common failure. Measured in the shipped image, it does not: /etc/hosts
+    maps localhost to 127.0.0.1 with no `::1 localhost` line.) ::ffff:a.b.c.d is unwrapped to
+    its IPv4 form because that is what a dual-stack listener on an IPv4 address looks like
+    here, and it IS reachable, so it must not be mistaken for the IPv6-only case.
     """
     try:
         words = [hexaddr[i:i + 8] for i in range(0, 32, 8)]
@@ -102,10 +104,10 @@ def decode_v6(hexaddr):
         return hexaddr
 
 
-# A listener on a privileged port is never a student's dev server: no published port is
-# below 3000, and rootless podman refuses to publish anything under 1024 at all. Reporting
-# systemd-resolved on :53 as "two problems" would be noise indistinguishable from a real
-# diagnosis.
+# A listener on a privileged port is never a student's dev server: no forwarded port is
+# below 3000, and an unprivileged ssh client could not bind one on the host side anyway.
+# Reporting systemd-resolved on :53 as a problem would be noise indistinguishable from a
+# real diagnosis.
 PRIVILEGED = 1024
 
 
@@ -143,18 +145,18 @@ def listeners(paths=None):
 
 
 def suggest(port, ranges):
-    """What to advise for a port outside the published set.
+    """What to advise for a port outside the forwarded set.
 
     A port just past the end of a range is almost always an auto-increment overflow
     (vite walks 5173 -> 5174 -> ... and can step past 5179), so point back at that
     range. A port nowhere near anything was chosen freely, so don't invent false
-    precision about which range is "nearest" — say to pick from the published list.
+    precision about which range is "nearest" — say to pick from the forwarded list.
     """
     if not ranges:
-        return "one of the published ranges below"
+        return "one of the forwarded ranges below"
     lo, hi = min(ranges, key=lambda r: min(abs(port - r[0]), abs(port - r[1])))
     if min(abs(port - lo), abs(port - hi)) > 20:
-        return "one of the published ranges below"
+        return "one of the forwarded ranges below"
     return "%d-%d" % (lo, hi) if lo != hi else str(lo)
 
 
@@ -162,9 +164,9 @@ def main():
     spec = os.environ.get("CS193V_PORTS", "")
     if not spec:
         sys.stderr.write(
-            "CS193V_PORTS is not set, so I do not know which ports this container\n"
-            "publishes. That variable is set when the container is created, so this\n"
-            "usually means the container predates it — try:  cs193v --rebuild\n"
+            "CS193V_PORTS is not set, so I do not know which ports reach your browser.\n"
+            "That variable is set when the container is created, so this usually means\n"
+            "the container predates it — try:  cs193v --rebuild\n"
         )
         return 2
     ranges = parse_ranges(spec)

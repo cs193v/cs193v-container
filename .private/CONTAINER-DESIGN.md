@@ -52,7 +52,7 @@ running in the container — including code an agent wrote and ran. So:
 - An agent working on one project **can read every other project** in `projects/`,
   including its `.env` files. This is a real consequence of using one container for
   everything, and it was chosen knowingly: separate containers per project cannot share
-  the published port range, and they would still share your logins — so it would protect
+  the forwarded port range, and they would still share your logins — so it would protect
   the cheaper secrets while leaving the valuable ones reachable anyway.
 
 Worth separating two different harms. An agent **reading** another project's secrets is
@@ -77,6 +77,13 @@ Honest version, because a vague one is worse than none.
   relayed both by default, which meant anything in the container could silently
   authenticate as you anywhere those keys are registered, and obtain signatures from your
   GPG key without a prompt. That is now simply gone.
+
+  One clarification, since the port forwarding uses ssh: that tunnel has its own dedicated
+  key, generated on your computer for this purpose alone, and **your** keys are not involved
+  and never enter the container. The direction is also the opposite of what would be
+  dangerous — your computer connects *in*, and the container is configured to refuse the
+  reverse. Nothing in the container can ask your computer to open a port or connect anywhere
+  on its behalf.
 
 The mechanism, briefly: podman runs **rootless**, so the container lives in a Linux user
 namespace. Inside it, `root` is mapped to an unprivileged throwaway ID on your real
@@ -115,7 +122,7 @@ Easy to remember as "the 173 family": **4173** vite preview, **5173** vite dev, 
 spare. A server on any other port is unreachable, full stop. Podman cannot add a port to
 a container that is already running, so this set is fixed when the container is created.
 
-### Your server must bind `0.0.0.0`, not `localhost`
+### The bind address does not matter. The port does.
 
 A server does not listen on a *port*. It listens on an **(address, port) pair**, and the
 address decides which network interfaces it will accept connections on:
@@ -128,67 +135,72 @@ address decides which network interfaces it will accept connections on:
 `0.0.0.0` is not an address you connect *to*. It is a wildcard meaning "don't restrict
 me."
 
-Now the part that matters: **the container is a separate machine from your browser.** It
-has its own network stack, its own `lo`, its own `eth0`. The container's `127.0.0.1` is a
-completely different loopback interface from your computer's — same name, unrelated
-thing.
+Here is the part worth understanding: **the container is a separate machine from your
+browser.** It has its own network stack, its own `lo`, its own `eth0`. The container's
+`127.0.0.1` is a completely different loopback interface from your computer's — same name,
+unrelated thing.
 
-So when you publish a port, the forwarding path is:
+Two separate machines means something has to carry your browser's connection from one to the
+other. That is `cs193v`'s job, and it does it with an **ssh tunnel**:
 
 ```
    your browser  ──  http://localhost:3000
         │
-   ┌────▼──── YOUR COMPUTER ──────────────────┐
-   │  127.0.0.1:3000   ◀ only you can connect │
-   │        │                                  │
-   │        │  podman's port forwarder         │
-   └────────┼──────────────────────────────────┘
-            ▼
-   ┌── THE CONTAINER (its own network stack) ──┐
-   │  eth0:3000   ◀ the forwarder arrives HERE │
-   │  lo:3000     ◀ ...never here              │
-   │                                            │
-   │  bound 0.0.0.0    → both  ✓ works          │
-   │  bound 127.0.0.1  → lo only ✗ refused      │
-   └────────────────────────────────────────────┘
+   ┌────▼──── YOUR COMPUTER ─────────────────────────┐
+   │  127.0.0.1:3000   ◀ only you can connect        │
+   │        │                                         │
+   │        │  one ssh client, all 46 ports           │
+   └────────┼─────────────────────────────────────────┘
+            ▼  (not a network connection — see below)
+   ┌── THE CONTAINER (its own network stack) ────────┐
+   │  sshd connects to the container's OWN loopback   │
+   │                                                  │
+   │  lo:3000     ◀ the tunnel arrives HERE  ✓        │
+   │  eth0:3000   ◀ and 0.0.0.0 covers lo too  ✓      │
+   │                                                  │
+   │  bound 127.0.0.1  ✓ works                        │
+   │  bound 0.0.0.0    ✓ works                        │
+   │  bound ::1 only   ✗ refused (see below)          │
+   └──────────────────────────────────────────────────┘
 ```
 
-A server bound to the container's `127.0.0.1` is listening at a door the forwarder never
-knocks on. Your browser gets a connection refused — **while the server's log cheerfully
-prints `Local: http://localhost:5173/`.** That log line is a lie, not a hint: it means
-*its own* localhost, which nothing outside the container can ever reach.
+Because the tunnel's far end is the container's *own loopback*, a server bound to
+`127.0.0.1` works. And because `0.0.0.0` includes loopback, one bound that way works too.
+**So there is no `--host` flag to remember.** `vite`, `next dev`, `flask run` and
+`python3 -m http.server` all work as they come.
 
-So:
+What still bites is the **port**. A server on anything outside the six ranges has nothing
+carrying it out of the container, and the failure looks identical to a broken app: a
+connection refused, **while the server's log cheerfully prints
+`Local: http://localhost:5173/`.** That log line is not a lie any more, but it is not a
+promise either — it describes a door that only exists inside.
 
-```
-vite --host 0.0.0.0                  # vite reads NO host environment variable
-next dev -H 0.0.0.0
-python3 -m http.server --bind 0.0.0.0
-flask run --host=0.0.0.0
-uvicorn --host 0.0.0.0
-```
+For vite, set `strictPort: true`. Without it a busy port silently walks 5173 → 5174 → 5175,
+which can wander out of the forwarded range — and then you get a connection refused with
+nothing anywhere explaining why.
 
-For vite, also set `strictPort: true`. Without it, a busy port silently walks
-5173 → 5174 → 5175, which can wander out of the published range — and then you get a
-connection refused with nothing anywhere explaining why.
+### The one address that still doesn't work: `::1`
 
-### Doesn't `0.0.0.0` expose my server to the world?
+The tunnel's far end is `127.0.0.1`, which is IPv4. A server bound **only** to `::1`, the
+IPv6 loopback, is therefore still refused.
 
-No, and the reason is worth following, because it is where two ideas people usually
-conflate come apart.
+You are unlikely to hit this by accident. In this container `localhost` resolves to
+`127.0.0.1` and nothing else — there is no `::1 localhost` line in `/etc/hosts` — so both
+`python3 -m http.server --bind localhost` and node's `listen(port, "localhost")` bind IPv4.
+Reaching `::1` takes asking for it by name.
 
-There are **two addresses** in a published port, at opposite ends of the same pipe:
+### Is my server exposed to the dorm network?
 
-- On **your computer**, the host side is pinned to `127.0.0.1`. That is what stops the
-  dorm network from reaching your server.
-- Inside **the container**, the server binds `0.0.0.0`. That is what lets the forwarder
-  deliver to it.
+No, and for a structurally better reason than before.
 
-The "only this machine" guarantee is not lost; it moves to the boundary that actually
-faces the network, instead of living in your application. Which is a better place for it,
-and a decent lesson: **the app declares what it serves, the boundary declares who may
-reach it.** The genuinely dangerous combination is `0.0.0.0` on the *host* side — which
-is exactly what most tutorials on the internet will show you.
+Your computer's end of the tunnel is a listening socket bound to `127.0.0.1` — the ssh
+client binds it that way, so "only this machine" is not a flag anyone can forget or a
+setting that could drift. It is what the tunnel *is*. Nothing on the network can reach it,
+which was verified by trying from this machine's own LAN address and getting nothing.
+
+And the useful lesson survives intact: **the app declares what it serves, the boundary
+declares who may reach it.** The genuinely dangerous thing is exposing the *host* side to
+the network, which is exactly what most tutorials on the internet will show you.
 
 ### When something isn't reachable
 
@@ -197,33 +209,74 @@ ports
 ```
 
 It reads the kernel's own socket table, works out what each server is bound to, compares
-that against the published set, and tells you the specific problem. Both of the failure
-modes above are otherwise completely invisible from inside the container.
+that against the forwarded set, and tells you the specific problem.
 
-### Why the old setup didn't have this problem
+It has one honest limit, worth knowing because it is the confusing case: `ports` runs
+*inside* the container, so it cannot see the other end of the tunnel. If it says `OK` and
+your browser still cannot connect, the problem is on your own computer — most often another
+program already holding that port. Run this **there**, not in the container:
+
+```
+cs193v doctor
+```
+
+It reports whether the tunnel is up and names any port it could not forward.
+
+If it says the tunnel is down, or things stop working after your computer sleeps:
+
+```
+cs193v --reset-tunnel
+```
+
+### Why this is an ssh tunnel, and not what came before
 
 VS Code's extension ran a relay **inside** the container, connecting over the container's
-own loopback — so a `127.0.0.1`-bound server worked. It also watched for new listening
-sockets and forwarded them automatically, which is why nobody ever had to think about it.
+own loopback, and watched for new listening sockets to forward automatically. That is why
+nobody using it ever had to think about bind addresses.
 
-That is genuinely nicer, and it was considered. Reproducing it needs a background process
-running on your computer for the whole session, and it re-introduces a channel where the
-container tells your computer which ports to open. It also hides the distinction above,
-which is worth learning. So it is deliberately not here.
+This is the same idea, deliberately reintroduced, with two of its properties kept and one
+dropped:
+
+- **Kept:** a loopback-bound server just works, which is what made the old setup feel easy.
+- **Kept:** your computer decides what it opens. The tunnel forwards a fixed list; the
+  container is never asked which ports it would like.
+- **Dropped:** automatic forwarding of *new* ports. That is the part that required the
+  container to tell your computer what to open, and the fixed list is the reason it does
+  not.
+
+The earlier design fixed this at the network layer instead, and it is worth recording why
+that failed: `podman`'s own `--host-lo-to-ns-lo` option does exactly the right thing on
+Linux and is silently inert on macOS, where podman runs inside a virtual machine. That would
+have made identical code work on Ubuntu and fail on Macs. The tunnel avoids the whole class
+of problem by not touching the network at all — it runs over the same `podman exec` channel
+that `cs193v` already uses to give you a shell, which necessarily works everywhere a shell
+does.
 
 ---
 
 ## What survives what
 
-| | your files in `projects/` | your logins | things installed in the container |
-| --- | --- | --- | --- |
-| closing your terminal | ✅ | ✅ | ✅ |
-| `--rebuild` | ✅ | ✅ | ❌ |
-| `--update` | ✅ | ✅ | ❌ |
-| `--full-rebuild` | ✅ | ❌ | ❌ |
+| | your files in `projects/` | your logins | things installed in the container | port forwarding |
+| --- | --- | --- | --- | --- |
+| closing your terminal | ✅ | ✅ | ✅ | ✅ |
+| `--rebuild` | ✅ | ✅ | ❌ | ✅ (restarted) |
+| `--update` | ✅ | ✅ | ❌ | ✅ (restarted) |
+| `--full-rebuild` | ✅ | ❌ | ❌ | ✅ (restarted) |
+| restarting your computer | ✅ | ✅ | ✅ | ✅ (on next `cs193v`) |
 
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
 strangely, and staff will suggest it freely.
+
+The port forwarding column is the one that needs a word of explanation. The tunnel is a
+program running on *your* computer, not inside the container, so it is a separate thing that
+can be up or down. It is started whenever you run `cs193v`, torn down and restarted around
+any rebuild, and deliberately **left running when you close your terminal** — otherwise
+closing a window would quietly make a server you left running unreachable, which would be a
+worse trap than the one all of this exists to remove.
+
+It does not survive your computer restarting, because nothing does; the next `cs193v` brings
+it back. If you ever suspect it, `cs193v doctor` will tell you, and
+`cs193v --reset-tunnel` fixes it without disturbing the container or anything running in it.
 
 One caveat about long-running servers, with the honest state of knowledge attached.
 **On Linux, closing a terminal window does not stop a server you started in it** — this was

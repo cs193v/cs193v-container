@@ -70,7 +70,7 @@ tests the font files rather than their discoverability.
 ### §8.1 / §8.2 — logins with no browser in the container
 `claude` then `/login`; then `gh auth login`; then `vercel login`.
 *Expect:* a URL is **printed** by the `$BROWSER` stub and a device/paste-code flow
-completes. No callback port is published, so a redirect-only flow would fail — confirm it
+completes. No callback port is forwarded, so a redirect-only flow would fail — confirm it
 does not need one.
 During `gh auth login`, answer **yes** to "Authenticate Git with your GitHub credentials?"
 then confirm `git push` works from a test repo.
@@ -94,7 +94,7 @@ claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."
 claude -p "Which port ranges may a dev server use in this container? List them and nothing else."
 ```
 *Expect, in order:* refusal; **success** (the deny covers the credential file, not the whole
-directory); refusal (whole subtree denied); the six published ranges from the managed
+directory); refusal (whole subtree denied); the six forwarded ranges from the managed
 `CLAUDE.md`.
 Also check `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` with no
 "ignored"/"invalid"/"unknown key" warning — a `Write(...)` or `Glob(...)` path rule would be
@@ -104,10 +104,14 @@ accepted and then silently ignored.
 Code honours them at runtime needs a real session.
 
 ### §3.4 / §3.5 — real hot reload
-In a scratch project inside the container: `npm create vite`, run the dev server with
-`--host 0.0.0.0`, open it in a host browser, then edit a source file **from inside the
+In a scratch project inside the container: `npm create vite`, run the dev server **with no
+`--host` flag at all**, open it in a host browser, then edit a source file **from inside the
 container**.
-*Expect:* the page hot-reloads. `inotifywait` firing is necessary but not sufficient.
+*Expect:* the page hot-reloads. `inotifywait` firing is necessary but not sufficient. Running
+vite unflagged is deliberate: it binds `localhost`, which is exactly the case that used to be
+unreachable, so this doubles as the end-to-end proof that the `--host 0.0.0.0` rule is really
+retired. Watch the HMR websocket too — it shares one pipe with asset loading, and measured
+contention was nil, but a human watching a real edit loop is the honest check.
 Then edit the same file **from a host editor**.
 *Linux baseline:* container-side inotify fires (asserted), and **host-side also FIRES** on
 native Linux. On macOS and WSL host-side is expected not to; record which, because
@@ -127,9 +131,16 @@ it becomes the troubleshooting entry for 137.
 
 ### §2.8 — zombies after real use
 After a few hours of normal work: `podman exec cs193v ps -eo stat --no-headers | grep -c Z`
-*Expect:* 0, or a small number that does not grow.
-*Automated:* zero right now, zero after an orphan is deliberately created, and ≤2 after five
-killed exec clients (`60-container.sh`, `70-sighup.sh`).
+*Expect:* **1** while the port forwarding is up, and 0 with it down. That one is `[sshd]
+<defunct>` and it is expected, not a leak: it is the original `sshd -i` that re-exec'd into
+`sshd-session`, and its parent is sshd's own privsep monitor, which stays alive as long as the
+tunnel does — so it is never reparented to PID 1 and no PID 1 could reap it. It clears when
+the tunnel exits, and eight tunnel restarts accumulated none. `cs193v doctor` reports this
+count, so a TA reading "zombies 1" should not treat it as a fault.
+What matters is that it does not **grow**, and that anything other than sshd is reaped.
+*Automated:* zero non-sshd zombies right now, zero after an orphan is deliberately created,
+and ≤2 after five killed exec clients (`60-container.sh`, `70-sighup.sh`). The sshd one is
+recorded rather than asserted.
 
 ---
 
@@ -164,10 +175,20 @@ the `${arr[@]+...}` guard — which is a **bash 3.2-only** failure that no Linux
 surface (ERRORS.md A5). Running the suite on a Mac is what actually proves it.
 
 ### §4.5 / §4.7 — Windows firewall and a real browser
-On first port bind, note whether Windows Defender prompts. *Expect:* no prompt, since
-loopback publishing needs no exception. Record the exact wording if one appears.
+On first port bind, note whether Windows Defender prompts. *Expect:* still no prompt, since a
+loopback bind needs no exception — but the binding process changed from pasta to `ssh` and
+Defender's rules are per-executable, so this must be re-checked rather than inherited. Record
+the exact wording if one appears.
 Then open `http://localhost:3000/` in the student's real browser. If `localhost` fails but
 `127.0.0.1` works, record it — `localhost` may be resolving to `::1`.
+
+**And the one that matters most on Windows:** run the server bound to the container's
+`127.0.0.1` (no `--host`). The ssh client binds `127.0.0.1` *inside the WSL2 distro*, and the
+browser is on Windows, so this depends on Windows' localhost forwarding reaching an
+ssh-bound listener the way it reaches a pasta-bound one. `container.args` establishes it does
+for pasta (podman#17972, #22562) and ssh binds the same way — but "binds the same way" is the
+reasoning that made `--host-lo-to-ns-lo` fail on macOS, so it is unverified until someone
+tries it. If this fails, the tunnel does not work on Windows and nothing should ship.
 
 ### §5.2 — macOS provider: libkrun vs applehv (Apple Silicon)
 Run §A.7's ownership checks (`.private/tests/run-tests.sh --tier container -k files`) under **both**:

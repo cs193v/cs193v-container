@@ -45,7 +45,10 @@ assert_eq "dispatch:unknown-verb-creates-nothing" "0" "$(shim_count '^run ')"
 shim_new
 assert_eq "print:exits-0" "0" "$(launcher_rc --dev-print-command)"
 line="$(launcher --dev-print-command)"
-assert_contains "print:has-name"       "--name cs193v" "$line"
+# "$NAME", not the literal: under CS193V_INSTANCE the name is cs193v-<instance>, and
+# "--name cs193v" is a SUBSTRING of that, so a literal here would keep passing while
+# asserting nothing about the thing it names.
+assert_contains "print:has-name"       "--name $NAME"  "$line"
 assert_contains "print:has-detach"     "--detach"      "$line"
 assert_contains "print:has-confighash" "cs193v.confighash=" "$line"
 assert_contains "print:has-dir-label"  "cs193v.dir=$COPY"   "$line"
@@ -315,7 +318,7 @@ shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
 out="$(launcher ports)"
-assert_says "ports:execs-the-in-container-tool" "cs193v ports" "$(shim_log | tr '\n' ' ')"
+assert_says "ports:execs-the-in-container-tool" "$NAME ports" "$(shim_log | tr '\n' ' ')"
 
 shim_new
 out="$(launcher doctor)"

@@ -92,17 +92,42 @@ record "flag:shm-size" "$(I '{{.HostConfig.ShmSize}}')"
 assert_contains "flag:userns-keep-id-explicit" "--userns=keep-id:uid=1000,gid=1000" \
                 "$(./cs193v --dev-print-command </dev/null)"
 
-# Every published port must bind loopback only. An unprefixed -p binds 0.0.0.0 inside the
-# distro, exposes the student's dev server to dorm wifi, and triggers the Windows Defender
-# prompt (declined by default on Public networks).
-hostips="$(podman inspect "$NAME" --format '{{json .HostConfig.PortBindings}}' \
-           | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-print(" ".join(sorted({b["HostIp"] for v in d.values() for b in v})))')"
-assert_eq "ports:host-side-is-loopback-only" "127.0.0.1" "$hostips"
-assert_eq "ports:46-mappings" "46" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+# The container must publish NOTHING. A -p line does not supplement the ssh tunnel, it
+# competes with it: both bind host 127.0.0.1:<port> and the loser gets EADDRINUSE. podman wins
+# that race, because the container is created before the tunnel starts, so a stray -p line
+# would silently take the port away from the student rather than double-serve it.
+assert_eq "ports:container-publishes-nothing" "{}" "$(I '{{json .HostConfig.PortBindings}}')"
+assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+
+# The forwards live on the HOST instead, in one ssh process. Loopback-only is now structural
+# rather than a flag that could be forgotten -- the ssh client binds 127.0.0.1 itself -- but it
+# is asserted anyway, because it is what keeps a dev server off dorm wifi.
+fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+nfwd="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true)"
+assert_eq "ports:46-forwards-on-the-host" "46" "${nfwd:-0}"
+wild="$(ss -ltn 2>/dev/null | awk '{print $4}' \
+        | grep -E ':(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$' \
+        | grep -v '^127\.0\.0\.1:' || true)"
+assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
+
+# One process for all 46 -- the multiplexing that makes a new connection cost a channel rather
+# than a 158ms podman exec. If this ever became 46 processes, the design regressed.
+nproc_fwd="$(ss -ltnp 2>/dev/null | grep -E '127\.0\.0\.1:(300[0-9])' \
+             | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | grep -c . || true)"
+assert_eq "ports:one-ssh-process-carries-them-all" "1" "${nproc_fwd:-0}"
 
 mounts="$(I '{{json .Mounts}}')"
+# sshd cannot serve the tunnel without these, and they must be READ-ONLY so a compromised
+# container cannot change who may log in.
+assert_contains "tunnel:authorized_keys-is-mounted" "authorized_keys" "$mounts"
+# Asked of the parsed JSON rather than by regex over one long line: the destination is
+# "/home/student/.ssh/authorized_keys", so a pattern anchored on a quote before the filename
+# silently never matches and the assertion passes for the wrong reason.
+writable="$(printf '%s' "$mounts" | python3 -c 'import json,sys
+print(" ".join(m["Destination"] for m in json.load(sys.stdin)
+               if ("/.ssh/" in m["Destination"] or "cs193v_host" in m["Destination"])
+               and m["RW"]))')"
+assert_eq "tunnel:key-mounts-are-read-only" "" "$writable"
 assert_contains "mount:workspace-bind-points-at-projects" "$REPO/projects" "$mounts"
 # Base names, matching the launcher's remove_volumes: the instance suffix lives in $NAME, so
 # these read cs193v-claude for a student and cs193v-<instance>-claude for a developer. The
@@ -235,16 +260,27 @@ assert_ok "net:https-egress-works" sh -c "podman exec ${NAME} curl -fsS -o /dev/
 # wait(), so every orphan becomes a permanent zombie holding a pid slot against pids.max.
 record "pid1:cmdline" "$(E 'cat /proc/1/cmdline | tr "\0" " "')"
 assert_not_contains "pid1:is-not-bare-sleep" "sleep infinity" "$(E 'cat /proc/1/cmdline | tr "\0" " "')"
-assert_eq "pid1:no-zombies-right-now" "0" "$(E 'ps -eo stat --no-headers | grep -c Z || true')"
+
+# sshd's OWN zombie is excluded, and this is not a fudge -- it is a process PID 1 provably
+# cannot reap. While the tunnel is up the container holds exactly one `[sshd] <defunct>`: the
+# original `sshd -i` that re-exec'd into sshd-session. Measured `ps -o ppid`, its parent is
+# sshd's privilege-separation monitor, which stays ALIVE for the tunnel's lifetime -- and a
+# process is only reparented to PID 1 when its parent dies, so no PID 1, bash or catatonit,
+# could collect it. It clears when the tunnel exits. Counting it here would make a healthy
+# container fail, and asserting "at most 1" would let a real leak hide behind it; naming the
+# exclusion keeps the test meaning what it says. See README.md's open item on --init.
+zcount() { E 'ps -eo stat,comm --no-headers | awk "\$1 ~ /Z/ && \$2 != \"sshd\" {n++} END {print n+0}"'; }
+record "pid1:zombie-count-including-sshd" "$(E 'ps -eo stat --no-headers | grep -c Z || true')"
+assert_eq "pid1:no-zombies-right-now" "0" "$(zcount)"
 
 # The reaping claim, tested rather than assumed: orphan a process and check PID 1 collects
 # it instead of leaving a zombie.
 E 'setsid sh -c "sleep 0.2 & exit" >/dev/null 2>&1' >/dev/null 2>&1
 sleep 2
-assert_eq "pid1:reaps-orphans" "0" "$(E 'ps -eo stat --no-headers | grep -c Z || true')"
+assert_eq "pid1:reaps-orphans" "0" "$(zcount)"
 
 # ─── §A.6 the full port matrix, all 46 ─────────────────────────────────────────
-# One process binding every published port, rather than 46 http.servers: faster, and it
+# One process binding every forwarded port, rather than 46 http.servers: faster, and it
 # cannot half-start.
 cat > "$TMP/portprobe.py" <<'PY'
 import socket, selectors, sys
@@ -276,8 +312,14 @@ while True:
             pass
 PY
 podman cp "$TMP/portprobe.py" "$NAME":/tmp/cs193v-portprobe.py
-SPEC="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/.*-p 127\.0\.0\.1:\([0-9]*-[0-9]*\):.*/\1/p' | paste -sd, -)"
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "$SPEC" 0.0.0.0
+# From CS193V_PORTS, which is now the single declaration the launcher also derives its
+# forwards from -- there are no -p lines left to read.
+SPEC="$(sed 's/#.*//' $REPO/.config/container.args \
+        | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
+# Bound to 127.0.0.1, NOT 0.0.0.0. This is the whole point of the change: the container's own
+# loopback used to be the one place the forwarder never reached, so testing the wildcard case
+# here would pass just as well before the tunnel existed and prove nothing.
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "$SPEC" 127.0.0.1
 sleep 3
 
 ALL="$(printf '%s' "$SPEC" | tr ',' ' ' | tr '-' ' ' \
@@ -293,13 +335,14 @@ for p in $ALL; do
     [ "$c" = 200 ] || badports="$badports $p($c)"
 done
 if [ -z "$badports" ]; then
-    pass "ports:all-46-published-ports-reach-the-container"
+    pass "ports:all-46-forwarded-ports-reach-a-loopback-bound-server"
 else
-    fail "ports:all-46-published-ports-reach-the-container" "unreachable:$badports"
+    fail "ports:all-46-forwarded-ports-reach-a-loopback-bound-server" "unreachable:$badports"
 fi
 
-# Ports outside the published set must be refused, whatever they are bound to. This is the
-# second of the two invisible-from-inside failure modes.
+# Ports outside the forwarded set must be refused, whatever they are bound to. With the bind
+# address no longer mattering, this is the ONLY failure mode left that is invisible from
+# inside the container.
 podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1
 podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000,7000,8500,9100,3100" 0.0.0.0
@@ -310,27 +353,52 @@ for p in 4000 7000 8500 9100 3100; do
     [ "$c" = 000 ] || reachable="$reachable $p($c)"
 done
 if [ -z "$reachable" ]; then
-    pass "ports:unpublished-ports-are-refused"
+    pass "ports:unforwarded-ports-are-refused"
 else
-    fail "ports:unpublished-ports-are-refused" "unexpectedly reachable:$reachable"
+    fail "ports:unforwarded-ports-are-refused" "unexpectedly reachable:$reachable"
 fi
 podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 1
 
-# THE lesson the course teaches: a loopback-bound server inside is unreachable from the
-# host, because podman's forwarder delivers to the container's eth0, never its lo — while
-# the server's log still prints "Local: http://localhost:5173/".
+# THE assertion this change exists for, and it is deliberately the inverse of what it used to
+# be. A 127.0.0.1-bound server inside was unreachable, because podman's forwarder delivers to
+# the container's eth0 and never its lo; the tunnel's far end IS that lo, so it must now
+# answer. The 46-port loop above already covers this, but it is asserted alone as well so a
+# failure here is unambiguous rather than one line in a list of 46.
 podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1
 sleep 2
 c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
-if [ "$c" = 000 ]; then
-    pass "ports:loopback-bound-server-is-unreachable"
+if [ "$c" = 200 ]; then
+    pass "ports:loopback-bound-server-IS-reachable"
 else
-    fail "ports:loopback-bound-server-is-unreachable" \
-         "got HTTP $c — a 127.0.0.1-bound server IS reachable on this platform, so the
-course's central ports lesson and $PRIVATE/CONTAINER-DESIGN.md's diagram are wrong here"
+    fail "ports:loopback-bound-server-IS-reachable" \
+         "got HTTP $c — the ssh tunnel is not reaching the container's own loopback on this
+platform, which is the entire premise of the current design. Check: cs193v doctor"
 fi
 podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+sleep 1
+
+# ::1 alone is the one bind address still out of reach, since the forward's far end is IPv4.
+# Recorded rather than asserted as a pass/fail of the design: if a future ssh reaches it, that
+# is an improvement, and the docs are then what is wrong.
+podman exec -d "$NAME" python3 -c 'import socket
+s=socket.socket(socket.AF_INET6); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("::1",3001)); s.listen(4)
+while True:
+    c,_=s.accept(); c.recv(4096)
+    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"); c.close()' \
+    >/dev/null 2>&1
+sleep 2
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3001/)"
+record "ports:ipv6-only-server-http" "$c"
+if [ "$c" = 000 ]; then
+    pass "ports:ipv6-only-is-refused-as-documented"
+else
+    fail "ports:ipv6-only-is-refused-as-documented" \
+         "got HTTP $c — ::1-only IS reachable, which is better than documented. Update
+CONTAINER-DESIGN.md, files/ports and ERRORS.md D4 rather than leaving them pessimistic."
+fi
+podman exec "$NAME" pkill -f 'AF_INET6' >/dev/null 2>&1 || true
 sleep 1
 
 # The host side must be loopback-only in reality, not just in the flag.
@@ -350,21 +418,25 @@ else
     record "ports:not-reachable-from-the-LAN" "no non-loopback address on this host"
 fi
 
-# The in-container `ports` command must diagnose each state correctly against real sockets.
-# Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound and the
-# loopback diagnosis has nothing to diagnose.
+# The in-container `ports` command must diagnose what is LEFT to diagnose, against real
+# sockets. Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound.
 podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 sleep 2
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1   # published, loopback
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "5174" 0.0.0.0     # published, wildcard
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000" 0.0.0.0     # unpublished
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1   # forwarded, loopback
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "5174" 0.0.0.0     # forwarded, wildcard
+podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000" 0.0.0.0     # not forwarded
 sleep 3
 pout="$(E 'ports || true')"
 record "ports:diagnostic-output" "$(printf '%s' "$pout" | tr '\n' '|')"
-assert_match "ports:diagnoses-published-wildcard-as-OK"  '5174 .*OK'            "$pout"
-assert_match "ports:diagnoses-unpublished"               '4000 .*NOT PUBLISHED' "$pout"
-assert_match "ports:diagnoses-loopback-as-unreachable"   '3000 .*UNREACHABLE'   "$pout"
-assert_contains "ports:explains-why-0.0.0.0" "separate machine" "$pout"
+assert_match "ports:diagnoses-forwarded-wildcard-as-OK" '5174 .*OK'            "$pout"
+assert_match "ports:diagnoses-unforwarded"              '4000 .*NOT FORWARDED' "$pout"
+# The one that had to change: loopback is now OK, and the old UNREACHABLE verdict here would
+# be a lie that sends a student to fix something that is not broken.
+assert_match "ports:diagnoses-forwarded-loopback-as-OK" '3000 .*OK'            "$pout"
+assert_not_contains "ports:no-longer-demands-bind-all" "--host 0.0.0.0"        "$pout"
+# And it must be honest about the half it cannot see: a missing forward or a downed tunnel are
+# host-side facts that /proc/net/tcp does not contain.
+assert_contains "ports:points-at-doctor-for-host-side-faults" "cs193v doctor"  "$pout"
 podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────

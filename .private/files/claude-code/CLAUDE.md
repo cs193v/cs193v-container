@@ -18,8 +18,8 @@ that are easy to get wrong here in ways that are invisible until a student is st
 
 ## Ports — read this before starting any server
 
-Only these ports reach the student's browser. They are fixed when the container is
-created and **cannot be added to a running container**:
+Only these ports reach the student's browser. The student's own computer forwards each one
+into this container, and the set is fixed when the container is created:
 
 ```
 3000-3009    4173-4176    5173-5179    6173-6182    8000-8009    8080-8084
@@ -27,34 +27,32 @@ created and **cannot be added to a running container**:
 
 `6173-6182` is the spare block — use it when a tool's usual port is taken.
 
-**Every server must bind `0.0.0.0`, never `localhost` or `127.0.0.1`.**
+**The port is what matters. The bind address does not.**
 
-This container is a separate machine from the student's browser. `127.0.0.1` means "only
-this machine", which excludes their browser. The host's port forwarder delivers to the
-container's `eth0`, never its loopback — so a loopback-bound server is refused, while its
-log still prints `Local: http://localhost:5173/`. **That log line is a lie**, and it is
-the single most common way to waste a student's afternoon.
+`localhost`, `127.0.0.1` and `0.0.0.0` all work, because the forward's far end is this
+container's own loopback, and `0.0.0.0` includes loopback too. So there is no `--host` flag
+to remember and no reason to add one.
 
-The host side is separately pinned to `127.0.0.1`, so binding `0.0.0.0` inside does not
-expose anything to the network. Both are needed; they are opposite ends of one pipe.
+The one exception, and it is narrow: a server bound **only to `::1`**, the IPv6 loopback, is
+still unreachable, because the forward's far end is IPv4. Very little does this by default —
+measured in this image, both `python3 -m http.server --bind localhost` and node's
+`listen(port, "localhost")` bind `127.0.0.1` — so it takes asking for `::1` explicitly.
+Don't.
 
-Concretely:
+What *will* break a student's afternoon is the **port**, not the address. A server on
+anything outside the ranges above has nothing carrying it out of the container, and the
+failure looks identical to a broken app: a connection refused with the server's own log
+cheerfully printing `Local: http://localhost:5173/`.
 
-```
-vite --host 0.0.0.0            # vite reads NO host env var; the flag is required
-next dev -H 0.0.0.0
-python3 -m http.server --bind 0.0.0.0
-flask run --host=0.0.0.0
-uvicorn --host 0.0.0.0
-```
+For vite, set `strictPort: true` in the config. Without it a busy port silently walks
+5173 → 5174 → 5175 and can wander out of the forwarded range, which produces exactly that
+unexplained connection refused.
 
-For vite, also set `strictPort: true` in the config. Without it a busy port silently
-walks 5173 → 5174 → 5175 and can wander out of the published range, which produces a
-connection refused with nothing anywhere explaining why.
-
-**If a server is not reachable, run `ports`.** It reads the kernel's socket table and
-names the specific problem — bound to the wrong address, or listening outside the
-published set — rather than leaving anyone to guess.
+**If a server is not reachable, run `ports`.** It reads the kernel's socket table and names
+the specific problem rather than leaving anyone to guess. Note its limit: it runs *inside*
+the container, so it cannot see whether the forward exists on the student's own computer. If
+it says `OK` and the browser still cannot connect, the problem is out there, and
+`cs193v doctor` on the student's own machine is what shows it.
 
 ## Long-running servers
 
@@ -75,7 +73,10 @@ a bare `&`, so you can still read its output on a later turn.
 Worth being accurate about, because the course is partly about this:
 
 - The student's files **outside** `projects/`, their host system, and their SSH and GPG
-  keys are not reachable from here. No agent forwarding is configured.
+  keys are not reachable from here. No agent forwarding is configured. There *is* an sshd
+  running here while the port forwarding is up, but it is reachable only from the student's
+  own computer, it is configured to refuse remote forwarding, and its key is not theirs — so
+  it is not a way back out to their machine.
 - Anything in `~/projects` **is** reachable and writable, by design.
 - Network access is **unrestricted**. The stored Claude, GitHub and Vercel tokens can be
   sent anywhere by any code that runs here. The container does not contain that risk.

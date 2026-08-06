@@ -120,7 +120,14 @@ fi
 # and ignores the port list entirely, so without the confighash check a student's flags
 # would be frozen at first run forever.
 cp $REPO/.config/container.args "$TMP/ca.bak"
-echo '-p 127.0.0.1:9998:9998' >> $REPO/.config/container.args
+# The drift vehicle is an ENV VAR, not a -p line. It used to be `-p 127.0.0.1:9998:9998`, and
+# that is now a forbidden flag: -p and the tunnel's ssh -L both bind the same host port, so a
+# static test forbids -p from appearing in container.args at all. Writing one here, even
+# temporarily, would mean the suite itself produced the state it forbids -- and an interrupted
+# run would leave it behind. An env var tests exactly the same thing: podman start reuses the
+# container's STORED config, so an edit here must not take effect without a recreate.
+echo '-e CS193V_DRIFT_TEST=9998' >> $REPO/.config/container.args
+drift_applied() { podman inspect "$NAME" --format '{{json .Config.Env}}' | grep -q 9998; }
 
 assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-print-command)"
 # Declining must leave the container exactly as it was...
@@ -128,17 +135,17 @@ out="$(LB)"
 assert_says "drift:prompt-is-shown" "settings have changed" "$out"
 assert_eq "drift:declining-keeps-the-same-container" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
-if podman port "$NAME" | grep -q 9998; then
-    fail "drift:declining-does-not-apply-the-flag" "9998 is published without a recreate"
+if drift_applied; then
+    fail "drift:declining-does-not-apply-the-flag" "the new flag took effect without a recreate"
 else
     pass "drift:declining-does-not-apply-the-flag"
 fi
 # ...and a plain `podman start` must NOT pick it up either, which is the trap itself.
 podman stop "$NAME" >/dev/null 2>&1
 podman start "$NAME" >/dev/null 2>&1
-if podman port "$NAME" | grep -q 9998; then
+if drift_applied; then
     fail "drift:podman-start-ignores-new-flags" \
-         "podman start DID apply the new port — the confighash machinery may be unnecessary
+         "podman start DID apply the new flag — the confighash machinery may be unnecessary
 on this podman version, which is worth knowing"
 else
     pass "drift:podman-start-ignores-new-flags"
@@ -146,12 +153,12 @@ fi
 
 # Accepting it must actually recreate with the flag.
 out="$(launcher_tty_repo '\033[B\nexit\n')"
-if podman port "$NAME" | grep -q 9998; then
+if drift_applied; then
     pass "drift:accepting-applies-the-new-flag"
 else
     fail "drift:accepting-applies-the-new-flag" \
-         "9998 still not published after accepting the recreate — every student's flags are
-frozen at first run and edits to $REPO/.config/container.args never reach them"
+         "the flag still is not applied after accepting the recreate — every student's flags
+are frozen at first run and edits to $REPO/.config/container.args never reach them"
 fi
 assert_ne "drift:accepting-created-a-new-container" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
@@ -165,7 +172,15 @@ else
     cp "$TMP/ca.bak" $REPO/.config/container.args
 fi
 L --rebuild >/dev/null 2>&1
-assert_eq "drift:restored-config-has-46-ports" "46" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+# The container publishes nothing; the 46 forwards live on the host, in one ssh process. A
+# rebuild has to tear the old tunnel down and bring a new one up, and getting that wrong is
+# how a routine --rebuild becomes a total outage: a tunnel outliving its container keeps every
+# host port bound against a dead pipe, so the replacement can bind none of them.
+assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+nfwd="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true)"
+assert_eq "drift:tunnel-is-rebuilt-with-46-forwards" "46" "${nfwd:-0}"
+assert_match "drift:doctor-reports-the-tunnel-up" 'tunnel +up' "$(L doctor)"
 
 # ─── two copies of the course directory  (§2.7) ────────────────────────────────
 rm -rf /tmp/vt-copy
@@ -251,13 +266,94 @@ prompts) and the stored hash equals --dev-print-command's. One-line fix in verb_
 See ERRORS.md B14."
 fi
 assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000' "$out"
-assert_match "doctor:counts-published-ports" '46 mappings' "$out"
+# doctor's tunnel section replaced a `podman port` count, and it is now the ONLY place
+# host-side forwarding state is visible: the in-container `ports` command reads /proc and
+# cannot see whether a forward exists out here. That makes these two lines load-bearing for
+# support rather than decorative.
+assert_match "doctor:reports-the-tunnel-is-up" 'tunnel +up \(pid [0-9]+\)' "$out"
+assert_match "doctor:counts-forwarded-ports" 'tunnel ports +46 of 46' "$out"
 assert_match "doctor:reports-clock-skew" 'clock skew' "$out"
 assert_match "doctor:reports-zombies" 'zombies' "$out"
+# Exactly one zombie is EXPECTED while a tunnel is up: sshd's own re-exec'd process, whose
+# parent is sshd's privsep monitor inside the container, so it is never reparented to PID 1 and
+# no PID 1 could reap it. Recorded rather than asserted because the count is 0 with no tunnel
+# and this file must not turn a documented fact into a flaky test. See README.md's --init item.
+record "doctor:zombie-count-with-a-tunnel-up" "$(printf '%s' "$out" | sed -n 's/.*zombies *\([0-9]*\).*/\1/p')"
 record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
 
 # ─── ports verb against a real container ───────────────────────────────────────
-assert_contains "ports-verb:runs-the-in-container-tool" "published:" "$(L ports)"
+assert_contains "ports-verb:runs-the-in-container-tool" "forwarded:" "$(L ports)"
+
+# ─── the tunnel's own lifecycle ────────────────────────────────────────────────
+# Each of these is a way the tunnel can strand a student with a container that looks perfectly
+# healthy and a browser that cannot reach anything.
+fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+count_fwd() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true; }
+
+# Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
+# pidfile are named by a hash of (course directory, instance), so a glob picks up every other
+# checkout's and instance's files too -- including stale ones whose process is long dead. That
+# is not hypothetical: it made the two --reset-tunnel assertions below skip with "no pidfile"
+# while a perfectly good tunnel was running, which is worse than failing.
+tunnel_pid() { L doctor | sed -n 's/.*tunnel  *up (pid \([0-9]*\)).*/\1/p' | head -1; }
+# And take the control socket from that process's own command line, so it cannot disagree.
+tunnel_ctl() {
+    local p; p="$(tunnel_pid)"
+    [ -n "$p" ] || return 0
+    ps -p "$p" -o args= 2>/dev/null | sed -n 's/.*-S \([^ ]*\).*/\1/p' | head -1
+}
+CTL="$(tunnel_ctl)"
+record "tunnel:control-socket" "${CTL:-<none>}"
+
+# THE test: a server bound to the container's OWN loopback, which was unreachable by design
+# before this change, must answer from the host.
+podman exec -d "$NAME" python3 -m http.server 3000 --bind 127.0.0.1 >/dev/null 2>&1
+sleep 2
+assert_eq "tunnel:loopback-bound-server-is-reachable" "200" \
+          "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3000/)"
+podman exec "$NAME" pkill -f http.server >/dev/null 2>&1 || true
+
+# A remote forward inverts the direction the whole design rests on, and the SERVER refuses it
+# -- so this holds even if the launcher were changed to ask for one.
+if [ -n "$CTL" ]; then
+    out_r="$(ssh -S "$CTL" -O forward -R 127.0.0.1:19999:127.0.0.1:3000 student@cs193v-tunnel 2>&1 || true)"
+    assert_contains "tunnel:remote-forward-is-refused" "forwarding request failed" "$out_r"
+    assert_eq "tunnel:refused-forward-creates-no-listener" "0" \
+              "$(ss -ltn 2>/dev/null | grep -c ':19999' || true)"
+    # ...and it must not be usable as a proxy to anywhere but the container's own loopback.
+    ssh -S "$CTL" -O forward -L 127.0.0.1:13999:1.1.1.1:80 student@cs193v-tunnel >/dev/null 2>&1 || true
+    assert_eq "tunnel:cannot-proxy-off-box" "000" \
+              "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 http://127.0.0.1:13999/)"
+else
+    fail "tunnel:remote-forward-is-refused" "no control socket found in ${TMPDIR:-/tmp}"
+fi
+
+# A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means
+# -O exit can never be answered, and a reset that waited for it would hang forever.
+TPID="$(tunnel_pid)"
+if [ -n "$TPID" ] && kill -STOP "$TPID" 2>/dev/null; then
+    L --reset-tunnel >/dev/null 2>&1
+    assert_fail "reset-tunnel:kills-a-stopped-tunnel" sh -c "kill -0 $TPID 2>/dev/null"
+    assert_eq "reset-tunnel:restores-all-46-forwards" "46" "$(count_fwd)"
+else
+    skip "reset-tunnel:kills-a-stopped-tunnel" "no tunnel pidfile to stop"
+    skip "reset-tunnel:restores-all-46-forwards" "see above"
+fi
+
+# A tunnel that outlives its container would hold all 46 host ports against a dead pipe. It
+# must notice and let go, or the next container gets none of them.
+podman kill "$NAME" >/dev/null 2>&1
+i=0
+while [ "$i" -lt 15 ]; do
+    [ "$(count_fwd)" = 0 ] && break
+    sleep 1; i=$((i + 1))
+done
+assert_eq "tunnel:releases-its-ports-when-the-container-dies" "0" "$(count_fwd)"
+record "tunnel:seconds-to-release-ports" "$i"
+# --reset-tunnel must be safe to suggest even then, rather than erroring at a stopped container.
+assert_says "reset-tunnel:says-so-when-nothing-is-running" "no container running" "$(L --reset-tunnel)"
+L --rebuild >/dev/null 2>&1
+assert_eq "tunnel:comes-back-after-a-rebuild" "46" "$(count_fwd)"
 
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
 containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | tr '\n' ' ')"

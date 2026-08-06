@@ -3,13 +3,23 @@
 #
 # Unit and end-to-end tests for files/ports, the in-container diagnostic.
 #
-# It exists because a fixed published port range has exactly two failure modes and BOTH
-# are invisible from inside the container, so this is the tool standing between a student
-# and a lost afternoon. Two things get tested:
+# It exists because a fixed forwarded port range has failure modes that are invisible from
+# inside the container, so this is the tool standing between a student and a lost afternoon.
+#
+# The set of those failure modes SHRANK when the launcher started forwarding the course ports
+# into the container's own loopback over ssh: the bind address stopped mattering for IPv4, so
+# "bound to 127.0.0.1" went from the headline diagnosis to a normal OK. What is left is the
+# port itself, plus ::1-only, plus two host-side faults this command structurally cannot see.
+# Several tests here assert the ABSENCE of the old advice, because leaving it in would send a
+# student to fix something that is not broken.
+#
+# Two things get tested:
 #
 #   * the parsers, against captured /proc/net/tcp{,6} fixtures — including the IPv6 case,
-#     which used to print 32 raw hex digits at the student in the single most common
-#     failure situation (a server told to bind "localhost" binds ::1 on a dual-stack box).
+#     which used to print 32 raw hex digits at the student. (The old comment here said that
+#     was "the single most common failure situation" because binding "localhost" lands on
+#     ::1 on a dual-stack box. Measured in the shipped image, it does not: /etc/hosts has no
+#     `::1 localhost` line, so localhost resolves to 127.0.0.1 and nothing else.)
 #   * the whole command, against real sockets bound on this machine, asserting each of the
 #     four states it claims to diagnose.
 #
@@ -85,7 +95,7 @@ class TestPublished(unittest.TestCase):
             self.assertTrue(ports.published(p, self.r), p)
 
     def test_just_outside(self):
-        # 5180 is the first port vite's auto-increment can reach that is NOT published.
+        # 5180 is the first port vite's auto-increment can reach that is NOT forwarded.
         for p in (2999, 3010, 5172, 5180, 8085, 4000, 7000, 5000):
             self.assertFalse(ports.published(p, self.r), p)
 
@@ -107,10 +117,15 @@ class TestDecodeV4(unittest.TestCase):
 class TestDecodeV6(unittest.TestCase):
     """The regression this whole class exists for.
 
-    A server told to bind "localhost" in a dual-stack container binds ::1. That is the
-    most common way to land in the "my browser can't see it" situation, and the tool used
-    to answer with `[00000000000000000000000001000000]`, which also broke the column
-    alignment of every row after it.
+    The tool used to answer with `[00000000000000000000000001000000]` for an IPv6 listener,
+    which also broke the column alignment of every row after it.
+
+    This matters MORE now than it did, not less: ::1 is the only bind address the ssh tunnel
+    cannot reach, so it is the one row where the address itself is the diagnosis rather than
+    incidental detail. (The original note here said binding "localhost" lands on ::1 and was
+    the most common failure. That was measured and is false for this image — /etc/hosts has
+    no `::1 localhost` line — so the case is rarer, but when it happens it is the whole
+    answer.)
     """
 
     def test_loopback_is_not_raw_hex(self):
@@ -150,10 +165,10 @@ class TestSuggest(unittest.TestCase):
 
     def test_a_freely_chosen_port_gets_no_false_precision(self):
         for p in (4000, 9100, 1234):
-            self.assertIn("published ranges", ports.suggest(p, self.r))
+            self.assertIn("forwarded ranges", ports.suggest(p, self.r))
 
     def test_no_ranges_at_all(self):
-        self.assertIn("published", ports.suggest(3000, []))
+        self.assertIn("forwarded", ports.suggest(3000, []))
 
 
 class TestListenersFromFixtures(unittest.TestCase):
@@ -256,7 +271,7 @@ class TestEndToEnd(unittest.TestCase):
         for s in cls.socks:
             s.close()
 
-    def test_published_wildcard_is_OK_with_a_clickable_url(self):
+    def test_forwarded_wildcard_is_OK_with_a_clickable_url(self):
         self.assertIn("OK", self.rows[3007])
         self.assertIn("http://localhost:3007/", self.rows[3007])
 
@@ -314,12 +329,12 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_privileged_system_ports_are_not_called_student_problems(self):
         # systemd-resolved on :53 and cups on :631 are not a student's dev server, and
-        # rootless podman could not publish them anyway. Reporting them as problems made
+        # rootless podman could not have published them anyway, and no forward covers them. Reporting them as problems made
         # the closing explanation and the exit status fire on a healthy container.
         for port, line in self.rows.items():
             if port < 1024:
                 self.assertIn("system", line, line)
-                self.assertNotIn("NOT PUBLISHED", line, line)
+                self.assertNotIn("NOT FORWARDED", line, line)
 
     def test_explains_why_and_lists_the_forwarded_set(self):
         self.assertIn("forwarded:", self.out)

@@ -135,7 +135,7 @@ assert_fail "helper:open-url-needs-an-argument" \
 assert_ok "helper:ports-is-installed" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v ports'"
 # Without CS193V_PORTS it must explain itself rather than crash or lie.
 assert_contains "helper:ports-without-env-explains" "rebuild" "$(R 'ports 2>&1 || true')"
-assert_contains "helper:ports-with-env-works" "published:" \
+assert_contains "helper:ports-with-env-works" "forwarded:" \
                 "$(R 'CS193V_PORTS=3000-3009 ports 2>&1 || true')"
 
 # ─── things deliberately NOT installed ─────────────────────────────────────────

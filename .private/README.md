@@ -33,7 +33,7 @@ projects/                      the student's work; the only directory shared wit
   messages.txt                 all student-facing launcher strings (script config, not reading)
   install-cs193v.sh            macOS / Ubuntu / WSL setup
   install-cs193v-windows.cmd   Windows stage one, then hands off to the above
-  CONTAINER-DESIGN.md          threat model, ports lesson, rough edges — publish this
+  CONTAINER-DESIGN.md          threat model, ports and the tunnel, rough edges — publish this
   VERIFICATION.md              release gates — hand to a Claude Code instance per platform
   ERRORS.md                    what the first verification pass found, and what is still open
   tests/                       the regression suite
@@ -89,13 +89,24 @@ partial suffixing would be worse than none, since `--full-rebuild` would still c
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.
 
-**Published host ports are not namespaced by it, and cannot be.** The `-p` lines bind fixed
-host ports, so two instances compete for the same 46 and the second one to start fails at
-`podman run` — before it is a container at all. `.config/local.args` cannot get you out of
-this, because it is *appended* to `container.args`: a second set of `-p` lines adds
-mappings rather than replacing them. Until then, only one instance on a machine can be
-running at a time; stop the other one first, or work against a container you created by
-hand with no `-p` at all.
+**Host ports are not namespaced by it, but you can move them.** Two instances still compete
+for the same 46 host ports, because the ports themselves are a fixed list rather than
+something derived from the instance name. What changed with the tunnel is that this is now
+survivable rather than fatal: the losing instance no longer fails to *start*, it starts
+normally and reports which ports it could not forward.
+
+To get out of the way entirely, override `CS193V_PORTS` in `.config/local.args` (git-ignored,
+and read **after** `container.args`, with the last occurrence winning — the same rule podman
+applies to a repeated `-e`):
+
+```
+-e CS193V_PORTS=13000-13009,14173-14176,15173-15179,16173-16182,18000-18009,18080-18084
+```
+
+The launcher derives its `ssh -L` forwards from that value, so one line moves both the
+forwards and what `ports` expects. This only works because there are no `-p` lines left:
+`local.args` is *appended*, so a second set of `-p` flags used to add mappings rather than
+replace them, and moving ports this way was impossible.
 
 The test suite honours `CS193V_INSTANCE` too, so `run-tests.sh` exercises your instance
 rather than a colleague's. With the variable unset, every name is byte-identical to what it
@@ -146,8 +157,15 @@ measurements in `ERRORS.md` §D):
   Linux the cap is enforced exactly (`memory.max` == `--memory`), an OOM is clean at exit
   137, and the container survives it.
 - does host-side `inotify` fire? — **Yes on Linux**, as predicted. Expect not on macOS/WSL.
-- is a loopback-bound server reachable from the host? — **No**, so the course's central
-  ports lesson holds. All 46 published ports work; unpublished ones are refused.
+- is a loopback-bound server reachable from the host? — **Yes now, and that is the point.**
+  It used to be No, which was the course's central ports lesson and the reason for
+  `--host 0.0.0.0`. The launcher forwards the course ports into the container's own loopback
+  over ssh, so all 46 reach a `127.0.0.1`-bound server, a `0.0.0.0`-bound one still works,
+  and ports outside the set are still refused. `::1`-only is the one address left out.
+- how much does the tunnel cost? — **latency, nothing** (12.1 ms per connection vs 12.6 ms
+  for a published port), **throughput, about 8×** (322 MB/s vs pasta's 2.53 GB/s, so a 5 MB
+  bundle costs ~15 ms). One ssh process carries all 46 forwards, which is why a new
+  connection costs a channel rather than a 158 ms `podman exec`.
 - does `podman start` really ignore new flags? — **Yes**, so the `cs193v.confighash`
   machinery is load-bearing rather than defensive.
 
@@ -166,21 +184,39 @@ and Chrome; `--cap-drop` / `no-new-privileges`
 (mutually exclusive with the sudo decision, and they would buy nothing since root owns
 the tamper targets); a `serve` wrapper or tmux; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
-`podman diff` tamper detection; a VS Code-style port relay.
+`podman diff` tamper detection.
+
+**No longer on this list: a VS Code-style port relay.** It was rejected, and that decision
+was reversed deliberately — see the ports chapter of `CONTAINER-DESIGN.md`. Two of the three
+original objections were addressed rather than overruled: the container is never asked which
+ports to open (the forward list is fixed and comes from `CS193V_PORTS`), and the relay is one
+ssh process rather than a supervised fleet. The third objection — that it hides the
+bind-address distinction — was accepted as true and judged worth the cost.
 
 Each rejection is documented where it would otherwise be tempting — the invariants block
 in `.config/container.args`, and the comments in the `Containerfile`.
 
 ## Open items
 
-### Enforcing the bind rule
+### ~~Enforcing the bind rule~~ — resolved by the tunnel
 
-Enforcing the bind-`0.0.0.0` rule is deferred by decision. The gap, recorded so it isn't
-forgotten: **vite reads no `HOST` environment variable at all** (verified against vite
-8.1.5 — `server.host` defaults to `localhost` and is settable only by config or
-`--host`), and **Next.js reads `HOSTNAME`, not `HOST`**. So `ENV HOST=0.0.0.0` covers
-`react-scripts` and little else, while vite owns two of the six published ranges. The
-managed `CLAUDE.md` rule and `ports` are doing the real work today.
+**Closed.** This was the open item: enforcing bind-`0.0.0.0` was impossible to do properly,
+because **vite reads no `HOST` environment variable at all** (verified against vite 8.1.5 —
+`server.host` defaults to `localhost` and is settable only by config or `--host`) and
+**Next.js reads `HOSTNAME`, not `HOST`**. So `ENV HOST=0.0.0.0` covered `react-scripts` and
+little else, while vite owned two of the six ranges.
+
+The ssh tunnel removes the requirement rather than enforcing it: its far end is the
+container's own loopback, so `localhost`, `127.0.0.1` and `0.0.0.0` all work and there is
+nothing left to enforce. Vite's default of `localhost` — the exact case that could not be
+fixed — is now correct as it comes.
+
+**One loose end, deliberately left for a decision rather than taken:** `HOST=0.0.0.0` and
+`FLASK_RUN_HOST=0.0.0.0` are still set in the `Containerfile`'s `ENV` block, and
+`tests/50-image.sh` still asserts they are there. They are now vestigial — harmless, since
+`0.0.0.0` still works, but they are magic that exists to solve a problem that no longer
+exists. Removing them is a behaviour change for anything that reads `HOST`, so it is not
+folded into the tunnel work.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 

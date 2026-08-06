@@ -188,10 +188,20 @@ rec security-opt           I '{{json .HostConfig.SecurityOpt}}'  # no no-new-pri
 ck  no-init        false   I '{{.HostConfig.Init}}'
 rec tmpfs                  I '{{json .HostConfig.Tmpfs}}'        # expect no /tmp entry
 rec shm-size               I '{{.HostConfig.ShmSize}}'           # podman default; puppeteer is out
-# every published port must bind loopback only
-podman inspect cs193v --format '{{json .HostConfig.PortBindings}}' \
-  | jq -r 'to_entries[] | .value[].HostIp' | sort -u        # expect exactly: 127.0.0.1
-ck  port-count     46      sh -c 'podman port cs193v | wc -l | tr -d " "'
+# NO published ports at all. `-p` and `ssh -L` both bind host 127.0.0.1:<port>, so a -p line
+# does not duplicate the tunnel, it takes the port away from it.
+ck  no-port-bindings "{}"  I '{{json .HostConfig.PortBindings}}'
+ck  port-count     0       sh -c 'podman port cs193v | wc -l | tr -d " "'
+# The forwards live on the HOST, in one ssh process, and every one must be loopback-only.
+# Loopback here is structural rather than a flag: the ssh client binds 127.0.0.1 itself.
+ss -ltn | awk '{print $4}' | grep -cE '^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+  # expect exactly: 46
+ss -ltnp | grep -E ':(300[0-9]|517[3-9])' | grep -c 'users:(("ssh"'   # all owned by ssh
+ss -ltn | awk '{print $4}' | grep -E ':(300[0-9]|517[3-9])$' | grep -v '^127\.0\.0\.1:'
+  # expect NO output — a 0.0.0.0 forward would expose a dev server to dorm wifi
+# The two read-only key mounts must be present, or sshd has no host key and no authorized_keys
+I '{{json .Mounts}}' | grep -c 'authorized_keys'                     # expect 1, and RO
+ck  tunnel-up      "up"    sh -c '"$DIR/cs193v" doctor | sed -n "s/^  tunnel  *\(up\).*/\1/p"'
 rec mounts                 I '{{json .Mounts}}'                  # 4 volumes + 1 bind at <DIR>/projects
 ckx config-hash-label      sh -c 'podman inspect cs193v --format "{{index .Config.Labels \"cs193v.confighash\"}}" | grep -q .'
 rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, CS193V_MEMORY_MB, TERM, COLORTERM
@@ -227,10 +237,13 @@ ckx dns                    E 'getent hosts registry.npmjs.org'
 
 ## A.6 The full port matrix — all 46, no browser
 
+Bound to `127.0.0.1` on purpose throughout, not `0.0.0.0`: that is the case the tunnel
+exists to make work, so testing the easy one would prove nothing about the change.
+
 ```sh
 ALL="$(seq 3000 3009) $(seq 4173 4176) $(seq 5173 5179) $(seq 6173 6182) $(seq 8000 8009) $(seq 8080 8084)"
 for p in $ALL; do
-  podman exec -d cs193v python3 -m http.server "$p" --bind 0.0.0.0 >/dev/null 2>&1
+  podman exec -d cs193v python3 -m http.server "$p" --bind 127.0.0.1 >/dev/null 2>&1
 done
 sleep 2
 for p in $ALL; do
@@ -239,28 +252,72 @@ for p in $ALL; do
 done
 podman exec cs193v pkill -f http.server
 
-# unpublished ports must be refused
+# ports outside the forwarded set must be refused
 for p in 4000 7000 8500 9100 3100; do
   podman exec -d cs193v python3 -m http.server "$p" --bind 0.0.0.0 >/dev/null 2>&1; sleep 0.5
   c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$p/")
-  [ "$c" = 000 ] && echo "PASS unpublished $p refused" || echo "FAIL unpublished $p reachable ($c)"
+  [ "$c" = 000 ] && echo "PASS unforwarded $p refused" || echo "FAIL unforwarded $p reachable ($c)"
 done
 podman exec cs193v pkill -f http.server
 
-# a loopback-bound server inside must NOT be reachable  (the lesson the course teaches)
+# the direction invariant, tested rather than asserted: a remote forward must be REFUSED by
+# the server, and must create no listener
+CTL="$(ls "${TMPDIR:-/tmp}"/cs193v-*.ctl 2>/dev/null | head -1)"
+ssh -S "$CTL" -O forward -R 127.0.0.1:19999:127.0.0.1:3000 student@cs193v-tunnel 2>&1 \
+  | grep -q 'forwarding request failed' && echo "PASS -R refused" || echo "FAIL -R was ACCEPTED"
+[ "$(ss -ltn | grep -c ':19999')" = 0 ] && echo "PASS no listener created" \
+                                        || echo "FAIL something is listening on 19999"
+
+# and the tunnel must not be usable as a proxy past the container's own loopback
+ssh -S "$CTL" -O forward -L 127.0.0.1:13999:1.1.1.1:80 student@cs193v-tunnel 2>/dev/null
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:13999/)
+[ "$c" = 000 ] && echo "PASS PermitOpen blocks off-box destinations" \
+              || echo "FAIL the tunnel proxied to 1.1.1.1 ($c)"
+
+# a busy host port must cost THAT port only, not the container
+python3 -c 'import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",3005)); s.listen(1); time.sleep(60)' &
+sleep 1; "$DIR/cs193v" --reset-tunnel 2>&1 | grep -q 3005 \
+  && echo "PASS busy port is named" || echo "FAIL busy port not reported"
+"$DIR/cs193v" doctor | grep -q 'NOT: 3005' \
+  && echo "PASS doctor names it too" || echo "FAIL doctor missed it"
+kill %1 2>/dev/null; "$DIR/cs193v" --reset-tunnel >/dev/null 2>&1
+
+# a loopback-bound server inside MUST be reachable  (this expectation is deliberately
+# inverted from what it was: the ssh tunnel's far end is the container's own loopback, and
+# reaching it is the entire point of the change)
 podman exec -d cs193v python3 -m http.server 3000 --bind 127.0.0.1; sleep 1
 c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/)
-[ "$c" = 000 ] && echo "PASS loopback-bound unreachable" \
-              || echo "FAIL loopback-bound REACHABLE ($c) — design doc is wrong for this platform"
+[ "$c" = 200 ] && echo "PASS loopback-bound reachable" \
+              || echo "FAIL loopback-bound UNREACHABLE ($c) — the tunnel is not working here"
 
-# cs193v ports must diagnose all four states
-podman exec -d cs193v python3 -m http.server 5174 --bind 0.0.0.0     # published + 0.0.0.0
-podman exec -d cs193v python3 -m http.server 4000 --bind 0.0.0.0     # unpublished
+# ...and a 0.0.0.0-bound one must STILL be reachable. The tunnel is a superset, so this is
+# the no-regression half: it is what worked before the change.
+podman exec -d cs193v python3 -m http.server 8080 --bind 0.0.0.0; sleep 1
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/)
+[ "$c" = 200 ] && echo "PASS wildcard-bound still reachable" \
+              || echo "FAIL wildcard-bound REGRESSED ($c)"
+
+# ::1 alone is the one bind address the tunnel cannot reach, since the far end is IPv4.
+podman exec -d cs193v python3 -c 'import http.server,socket,socketserver
+class S(socketserver.TCPServer): address_family=socket.AF_INET6; allow_reuse_address=True
+S(("::1",5177),http.server.SimpleHTTPRequestHandler).serve_forever()'; sleep 1
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:5177/)
+[ "$c" = 000 ] && echo "PASS ::1-only is refused, as documented" \
+              || echo "NOTE ::1-only is reachable ($c) — better than documented, update the docs"
+
+# cs193v ports must diagnose what is LEFT to diagnose. The bind address is no longer one of
+# them for IPv4, so the states are: forwarded, not forwarded, and ::1-only.
+podman exec -d cs193v python3 -m http.server 4000 --bind 0.0.0.0     # not forwarded
 "$DIR/cs193v" ports
-   # expect: 3000 loopback-only -> "restart with --host 0.0.0.0"
-   #         4000 listening, NOT published -> suggests an in-range port
-   #         5174 published + 0.0.0.0 -> OK
+   # expect: 3000 127.0.0.1  -> OK  (was "restart with --host 0.0.0.0")
+   #         8080 0.0.0.0    -> OK
+   #         5177 ::1        -> UNREACHABLE, names 127.0.0.1 as the fix
+   #         4000 listening, NOT FORWARDED -> suggests an in-range port
+   #         and a closing pointer at `cs193v doctor` for what it cannot see
 podman exec cs193v pkill -f http.server
+podman exec cs193v pkill -f SimpleHTTP
 
 # host side must be loopback-only, not LAN-exposed
 podman exec -d cs193v python3 -m http.server 3000 --bind 0.0.0.0; sleep 1
@@ -550,10 +607,14 @@ cannot get in.
 
 Mostly automated in §A.7. What still needs a person:
 
-**3.4 — Real HMR.** In a scratch project inside the container, `npm create vite`, run the dev server with
-`--host 0.0.0.0`, open it in a host browser, and edit a source file **from inside the container**.
-*Expect:* the page hot-reloads. `inotifywait` firing (§A.7) is necessary but not sufficient — this
-confirms the whole chain.
+**3.4 — Real HMR.** In a scratch project inside the container, `npm create vite`, run the dev server
+**with no `--host` flag at all**, open it in a host browser, and edit a source file **from inside the
+container**.
+*Expect:* the page hot-reloads. Two things at once here: `inotifywait` firing (§A.7) is necessary but
+not sufficient for HMR, and running vite unflagged — which binds `localhost` — is the case that used
+to be unreachable. If this works, the whole chain works and the `--host 0.0.0.0` rule really is
+retired. Also watch the websocket: HMR over the tunnel shares one pipe with asset loading, and
+measured contention was nil, but a human watching a real editor loop is the honest check.
 
 **3.5 — Host-side editing.** Edit the same file from a host editor with the page open.
 *Expect:* on native Linux it reloads. On macOS and WSL it likely does **not**. Record which; this
@@ -566,8 +627,26 @@ determines what the docs must say.
 Fully automated in §A.6. What still needs a person:
 
 **4.5 — Firewall prompt (Windows only).** On first port bind, note whether Windows Defender prompts.
-*Expect:* no prompt, since loopback publishing needs no exception. If one appears, record the exact
-wording — it is safe to decline.
+*Expect:* still no prompt, since a loopback bind needs no exception. But the binding process changed
+from pasta to `ssh`, and Defender's rules are per-executable, so this needs re-checking rather than
+inheriting the old answer. If a prompt appears, record the exact wording — it is safe to decline.
+
+**4.6 — Windows localhost forwarding (Windows only).** This is the biggest unverified risk in the
+tunnel design. Inside the WSL2 distro the ssh client binds `127.0.0.1:3000`; the browser is on
+Windows. `container.args` establishes that Windows' localhost forwarding reaches a *pasta*-bound
+listener there, citing podman#17972 and #22562, and ssh binds the same way — but "binds the same way"
+is exactly the kind of reasoning that made `--host-lo-to-ns-lo` fail on macOS.
+*Expect:* `http://localhost:3000` in a Windows browser reaches a server bound to the container's
+`127.0.0.1`. If it does not, the tunnel does not work on Windows and this must be reported before
+anything ships.
+
+**4.7 — macOS (Mac only).** The other unverified leg. `podman exec` reaches the machine VM through
+gvproxy's control channel, which is the same path `cs193v` already uses for a shell, so the tunnel
+should work — but throughput through that channel is unmeasured, and macOS is where the previous
+attempt silently failed.
+*Expect:* a `127.0.0.1`-bound server inside is reachable from Safari. Record the throughput of a large
+asset for comparison against the Linux figure of 322 MB/s, and check that the tunnel survives the Mac
+sleeping and waking.
 
 **4.7 — A real browser.** Open `http://localhost:3000/` in the student's actual browser, not `curl`.
 *Expect:* loads. On Windows, if `localhost` fails but `127.0.0.1` works, record it — `localhost` may be
