@@ -338,9 +338,42 @@ The two `npm install -g` layers leave root's npm cache behind. It is dead weight
 `@anthropic-ai/claude-code` (277 MB) themselves. Adding `&& npm cache clean --force` to each
 npm layer would remove it. The apt layer already cleans `/var/lib/apt/lists` properly.
 
-### B9. Layer sizes defeat the resume-on-failure design
+### ~~B9~~. Layer sizes defeat the resume-on-failure design — **WITHDRAWN**
 
-`VERIFICATION.md` §A.2 wants no layer over 400 MB, because podman cannot resume a partial
+The 400 MB per-layer ceiling is dropped as a requirement, and `img:no-layer-over-400MB` is
+deleted from `tests/50-image.sh` along with the `img:largest-layer-mb` record that fed it.
+
+It was never met, and three layers are over the line now rather than the one this section
+originally reported. `podman history` against a current `--dev-build`:
+
+| Layer | Size |
+| --- | --- |
+| apt system packages | **622 MB** |
+| `npm install -g playwright` (incl. `install-deps chromium`) | **339 MB** |
+| `npm install -g @anthropic-ai/claude-code` | 296 MB |
+| `playwright install chromium` + smoke screenshot | 279 MB |
+| `npm install -g vercel` | 248 MB |
+| node, from the nodesource apt repo | 201 MB |
+| the `ubuntu:26.04` base layer itself | 112 MB |
+| gh, from the cli.github.com apt repo | 43 MB |
+
+Playwright is what settles it. It arrived in daf749f, after this finding was written, and it
+contributes **618 MB across two layers** — nearly the apt layer again. A browser binary
+cannot be split, so no rearrangement of the Containerfile brings that under 400 MB; only
+dropping Playwright would, and the course wants it. The apt layer's own options were to drop
+`build-essential` (gcc-15 and g++-15 are ~120 MB of it, and it is there for native npm
+modules) or to split apt across RUN steps that correspond to nothing a reader would
+recognize. Neither is worth a download students do once.
+
+What the design actually depends on is layer **order** — claude-code last, so a version bump
+does not re-download node, gh and vercel. That is unchanged and still asserted by
+`tests/10-static.sh :: containerfile:claude-code-is-last-software-layer`. A student on bad
+wifi can still lose a large layer on a retry; that cost is now accepted rather than tested
+for. The measurement below is kept because it is the number any future revisit starts from.
+
+### B9 (original diagnosis)
+
+`VERIFICATION.md` §A.2 wanted no layer over 400 MB, because podman cannot resume a partial
 layer download but does keep completed ones — so the layer split is what limits what a
 student loses when dorm wifi drops. Measured:
 

@@ -135,8 +135,9 @@ podman image inspect "$IMAGE" --format '{{json .Config.Env}}' | jq -r '.[]' | so
    #   onto 0.0.0.0 because podman's forwarder never reached the container's loopback; the
    #   ssh tunnel does, so they nudge nothing and would only be an unexplained variable
    #   changing what a student's server binds to.
-# no single layer should dominate — the resume-on-failure design
-command -v skopeo && skopeo inspect --raw docker://"$IMAGE" | jq '[.layers[].size]|max'   # expect < 400 MB
+# Layer sizes are recorded by nothing and gated by nothing. There was a "no layer over
+# 400 MB" ceiling here for the resume-on-failure design; it was withdrawn rather than met —
+# see ERRORS.md B9 / issue #7. Layer ORDER is still asserted, in §A.1.
 ```
 
 ## A.3 Image contents, via throwaway containers
