@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# CS193V exit message.
+#
+# Two callers, mirroring cs193v-welcome:
+#
+#   1. cs193v-shell, after the tmux session ends -- the normal path. tmux restores the
+#      host terminal from the alternate screen first, so this prints onto the student's
+#      own shell, which is exactly where a farewell belongs.
+#   2. ~/.bash_logout, for a login shell opened OUTSIDE tmux.
+#
+# It is a command rather than inline text in .bash_logout because inside tmux .bash_logout
+# fires once per TAB. Every tab close would print a goodbye into a pane that is in the act
+# of disappearing -- a flash of text nobody can read, and a farewell for something the
+# student has not left. .bash_logout is guarded on $TMUX for that reason and this is what
+# it calls when the guard passes.
+#
+# Deliberately does NOT clear the screen, though issue #4 asked for it. A novice's last
+# command output is very often the thing they are about to paste to course staff, and
+# wiping it on the way out would throw that away. The message plus the prompt and window
+# title reverting is an unambiguous enough break.
+#
+# Text lives here rather than in messages.txt because the container cannot see
+# messages.txt; only projects/ is mounted.
+
+[ -t 1 ] || exit 0
+
+# shellcheck source=cs193v-strings.sh
+. /etc/cs193v/strings.sh
+
+printf '\n  %s\n\n' "$CS193V_GOODBYE"

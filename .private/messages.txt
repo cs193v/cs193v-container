@@ -24,8 +24,11 @@ cs193v — the CS193V course container
   cs193v --full-rebuild      start over completely, including logging out.
   cs193v --update            get the newest version of the course container.
 
-You can run cs193v in as many terminal windows as you like — they all open a shell in
-the same container. There is only ever one container.
+Closing your terminal window does not stop your work: run cs193v again and your tabs
+come back, still running.
+
+You can run cs193v in as many terminal windows as you like — each gets its own set of
+tabs in the same container. There is only ever one container.
 
 Your files live in the projects folder next to this script, and appear inside the
 container at ~/projects. Everything else in the container is temporary.
@@ -262,8 +265,8 @@ If you are a student and did not do this on purpose, tell course staff — this 
 should not appear.
 
 [[warn.many-shells]]
-You have {{N}} shells open in the container. That is fine, but each one uses memory,
-so close any you are finished with if things start to feel slow.
+You have {{N}} terminal windows open on the container. That is fine, but each one and
+all of its tabs use memory, so close any you are finished with if things feel slow.
 
 [[warn.machine-restart-failed]]
 Could not restart podman's virtual machine automatically. Try it by hand:

@@ -1,24 +1,27 @@
-# CS193V exit message. Installed as /home/student/.bash_logout, which bash runs when a
-# LOGIN shell exits -- and `cs193v` opens the container with `bash -l`, so this fires on the
-# normal way out.
+# CS193V exit message, for a login shell that is NOT a tmux tab.
 #
-# Deliberately does NOT clear the screen, though issue #4 asked for it. A novice's last
-# command output is very often the thing they are about to paste to course staff, and
-# wiping it on the way out would throw that away. The message plus the prompt and window
-# title reverting is an unambiguous enough break.
+# Installed as /home/student/.bash_logout, which bash runs when a LOGIN shell exits. The
+# text lives in /usr/local/bin/cs193v-goodbye; this file only decides whether to run it.
 #
-# It will not run if the shell is killed rather than exited. That is acceptable because this
-# is cosmetic -- nothing here needs undoing. It is exactly why the rejected background-colour
-# idea would have had to live in the launcher instead: a colour left applied after an
-# unclean exit would follow a student into unrelated work.
+# THE $TMUX GUARD. tmux runs a login shell in every tab, so without it this fires once per
+# TAB -- a farewell printed into a pane that is in the act of closing, for something the
+# student has not actually left. Worse, it would say "you have left the CS193V development
+# environment" while they are still sitting in it with four other tabs open.
 #
-# Text lives here rather than in messages.txt because the container cannot see messages.txt;
-# only projects/ is mounted.
+# On the tmux path the goodbye is printed by cs193v-shell instead, after the whole session
+# ends and tmux has restored the host terminal from the alternate screen. What is left for
+# this file is `podman exec -it cs193v bash -l`, the documented path for scripts and for
+# diagnosis, which has no tmux around it and should still say goodbye.
+#
+# It will not run if the shell is killed rather than exited. That is acceptable because
+# this is cosmetic -- nothing here needs undoing. It is exactly why the rejected
+# background-colour idea would have had to live in the launcher instead: a colour left
+# applied after an unclean exit would follow a student into unrelated work.
 
 case $- in
     *i*)
-        if [ -t 1 ]; then
-            printf '\n  You have left the CS193V development environment. Goodbye!\n\n'
+        if [ -t 1 ] && [ -z "${TMUX:-}" ]; then
+            cs193v-goodbye
         fi
         ;;
 esac

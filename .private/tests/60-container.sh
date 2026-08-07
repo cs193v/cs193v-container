@@ -155,9 +155,9 @@ pty_login() {                     # pty_login KEYS -> everything the session pri
 }
 
 out="$(pty_login 'exit\n')"
-n="$(printf '%s' "$out" | grep -ac 'Welcome to the CS193V' || true)"
+n="$(printf '%s' "$out" | grep -acF "$CS193V_WELCOME" || true)"
 assert_eq "identity:banner-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
-assert_contains "identity:banner-has-the-title" "CS193V Development Environment" "$out"
+assert_contains "identity:banner-has-the-title" "$CS193V_TITLE" "$out"
 assert_contains "identity:prompt-shows-the-hostname" "cs193v-development" "$out"
 # The clear must come BEFORE the banner, or the banner scrolls away with the old content.
 if printf '%s' "$out" | grep -aq $'\033\[3J'; then
@@ -165,21 +165,169 @@ if printf '%s' "$out" | grep -aq $'\033\[3J'; then
 else
     fail "identity:clears-scrollback-on-entry" "no [3J in the session output"
 fi
-assert_contains "identity:goodbye-on-exit" "Goodbye" "$out"
+assert_contains "identity:goodbye-on-exit" "$CS193V_GOODBYE" "$out"
 
 # A nested shell must NOT repeat the banner. /etc/profile.d only runs for login shells, so
 # this should hold for free -- but it is the difference between a helpful entry banner and
 # noise every time a student or an agent starts a subshell.
 out2="$(pty_login 'bash\nexit\nexit\n')"
-n2="$(printf '%s' "$out2" | grep -ac 'Welcome to the CS193V' || true)"
+n2="$(printf '%s' "$out2" | grep -acF "$CS193V_WELCOME" || true)"
 assert_eq "identity:nested-shell-does-not-repeat-the-banner" "1" "$(printf '%s' "$n2" | head -1)"
 
 # And a non-interactive exec must be completely silent -- this is how the rest of this
 # suite, and any agent, runs commands in the container.
 plain="$(E 'echo hi')"
 assert_eq "identity:non-interactive-exec-is-silent" "hi" "$plain"
-assert_not_contains "identity:non-interactive-has-no-banner" "Welcome to the CS193V" "$plain"
-assert_not_contains "identity:non-interactive-has-no-goodbye" "Goodbye" "$plain"
+assert_not_contains "identity:non-interactive-has-no-banner" "$CS193V_WELCOME" "$plain"
+assert_not_contains "identity:non-interactive-has-no-goodbye" "$CS193V_GOODBYE" "$plain"
+
+# ─── the tmux landing point ────────────────────────────────────────────────────
+# Everything above drove `bash -l`, which is the path a SCRIPT takes and must keep working
+# unchanged. This drives cs193v-shell, which is what a student gets.
+#
+# What this tier covers is session lifecycle -- create, reattach, stay independent -- which
+# needs a real container and real podman exec clients. What the session LOOKS LIKE is
+# 65-tmux.sh's job; it drives a real tmux under an instrument and reads rendered screens.
+TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
+
+pty_shell() {                     # pty_shell KEYS -> everything the session printed
+    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null 2>&1
+}
+tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
+
+tmux_kill_all
+out="$(pty_shell 'exit\n')"
+# The banner belongs to tab one.
+#
+# NOT a count of occurrences in the pty stream, which is what the `bash -l` assertions above
+# can safely do. tmux repaints the pane when a client attaches, re-emitting the banner text
+# verbatim with a cursor-position escape in front of it -- so the raw stream legitimately
+# contains it more than once and a count would fail on correct behaviour. The real property
+# is "tab one has it, later tabs do not", and that is asserted against rendered panes below.
+assert_contains "tmux:banner-appears-in-the-first-tab" "$CS193V_WELCOME" "$out"
+# The title bar is the persistent frame -- the thing the DECSTBM route could not deliver.
+assert_contains "tmux:title-bar-is-drawn" "$CS193V_TITLE" "$out"
+# The tab count badge, which is how a student knows other tabs can exist at all.
+assert_contains "tmux:tab-count-badge" "1 TAB" "$out"
+assert_contains "tmux:new-tab-button-is-drawn" "+ NEW TAB" "$out"
+# set-titles on: without it allow-rename swallows the shell's OSC 0 and the window title
+# silently stops naming the course.
+assert_contains "tmux:sets-the-host-window-title" "$CS193V_TITLE" "$out"
+# exit in the last tab ends the session, leaves the container, and says goodbye once.
+assert_contains "tmux:goodbye-on-exit" "$CS193V_GOODBYE" "$out"
+n="$(printf '%s' "$out" | grep -ac 'Goodbye' || true)"
+assert_eq "tmux:goodbye-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
+# exit-empty on: no server may survive the last session.
+assert_ok "tmux:no-server-survives-the-last-exit" \
+          sh -c "! podman exec ${NAME} $TM list-sessions >/dev/null 2>&1"
+
+# THE BANNER MUST NOT FIRE IN EVERY TAB. tmux runs the login shell in each one, so before
+# the $TMUX guard went into /etc/profile.d/20-cs193v-welcome.sh, pressing CTRL+T cleared the
+# pane and redrew the box every time. Read from rendered panes, which is redraw-independent.
+tmux_kill_all
+pty_shell 'sleep 600\n' >/dev/null 2>&1 &
+bclient=$!
+sleep 6
+w1="$(E "$TM list-windows -F '#{window_id}'" | head -1)"
+E "$TM new-window -d" >/dev/null 2>&1
+sleep 2
+w2="$(E "$TM list-windows -F '#{window_id}'" | tail -1)"
+assert_contains "tmux:first-tab-has-the-banner" "$CS193V_WELCOME" \
+                "$(E "$TM capture-pane -p -t $w1")"
+assert_not_contains "tmux:a-new-tab-does-not-repeat-the-banner" "$CS193V_WELCOME" \
+                    "$(E "$TM capture-pane -p -t $w2")"
+# ...and closing a tab must not say goodbye, for the same reason: .bash_logout runs per tab.
+assert_not_contains "tmux:a-new-tab-does-not-say-goodbye" "$CS193V_GOODBYE" \
+                    "$(E "$TM capture-pane -p -t $w2")"
+kill -9 "$bclient" 2>/dev/null; wait "$bclient" 2>/dev/null || true
+sleep 2
+tmux_kill_all
+
+# The lockdown, read from the live server rather than from the file.
+tmux_kill_all
+E "$TM new-session -d -x 80 -y 24 'sleep 120'" >/dev/null 2>&1
+assert_eq "tmux:live-prefix-table-is-empty" "" "$(E "$TM list-keys -T prefix 2>/dev/null")"
+assert_eq "tmux:live-copy-mode-vi-table-is-empty" "" "$(E "$TM list-keys -T copy-mode-vi 2>/dev/null")"
+assert_eq "tmux:live-prefix-is-None" "None" "$(E "$TM show -gv prefix")"
+assert_eq "tmux:live-destroy-unattached-is-off" "off" "$(E "$TM show -gv destroy-unattached")"
+assert_eq "tmux:live-six-tab-bindings" "6" \
+    "$(E "$TM list-keys -T root" | grep -cE ' (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ')"
+tmux_kill_all
+# `E()` merges stderr, and tmux writes "table prefix doesn't exist" THERE when a table is
+# empty -- which is the success case. Silence it inside the container or the assertion
+# compares against an error message and fails on correct behaviour.
+
+# REATTACH. Close the terminal window (kill the exec client) and the session must survive
+# with its windows, and the next launch must land back in it rather than making a new one.
+# This is the behaviour destroy-unattached off exists for; see ERRORS.md D1.
+# Backgrounded as a PIPELINE, not as a call to pty_shell. `$!` after `f &` is the pid of the
+# subshell running f, and killing that leaves script/podman/the tmux client happily alive --
+# so the window was never really "closed" and every assertion below it measured nothing. In
+# `printf ... | script ... &`, `$!` is the last element of the pipeline, which is script
+# itself, and killing that does tear the client down.
+tmux_kill_all
+printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+client=$!
+sleep 6
+E "$TM new-window -d" >/dev/null 2>&1
+sleep 1
+first="$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
+kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
+sleep 3
+assert_eq "tmux:session-survives-the-window-closing" "$first" \
+          "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
+
+# THE CLIENT DOES NOT DIE WITH THE WINDOW, AND THAT IS WHY THE LAUNCHER PRUNES.
+#
+# Asserted rather than assumed, because the whole reattach design rests on it and it is
+# deeply counter-intuitive: conmon keeps the exec session's pty open after the host-side
+# `podman exec` is gone, so the tmux client inside stays blocked on it and tmux reports the
+# session as attached indefinitely. Both ptys still exist and are still writable, so nothing
+# in the container can tell this apart from a live client.
+#
+# If this assertion ever starts failing, that is GOOD NEWS -- it means clients now die on
+# their own and prune_stale_tmux_clients in ./cs193v can be deleted. Read it that way rather
+# than "fixing" the test.
+assert_eq "tmux:a-closed-window-leaves-the-client-attached-(conmon)" "1" \
+          "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
+assert_ne "tmux:the-session-records-who-attached-it" "" \
+          "$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
+
+# What ./cs193v does before it attaches: detach clients whose host process is gone. Done
+# here by hand because this tier drives cs193v-shell directly and never runs the launcher;
+# the launcher's own copy of the rule is asserted statically in 10-static.sh and exercised
+# for real in the live tier.
+stale_pid="$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
+if kill -0 "$stale_pid" 2>/dev/null; then
+    fail "tmux:the-recorded-client-pid-is-really-gone" "pid $stale_pid is still alive on the host"
+else
+    pass "tmux:the-recorded-client-pid-is-really-gone"
+fi
+E "$TM detach-client -s '=$first'" >/dev/null 2>&1
+sleep 1
+assert_eq "tmux:pruning-frees-the-session" "0" \
+          "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
+
+printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+client2=$!
+sleep 6
+assert_eq "tmux:relaunch-reattaches-rather-than-creating" "1" \
+          "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
+assert_eq "tmux:reattached-session-is-the-same-one" "$first" \
+          "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
+assert_eq "tmux:reattached-session-kept-its-tabs" "2" \
+          "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)"
+
+# A SECOND concurrent launch must get its OWN session, because the first one's client is
+# attached. CONTAINER-DESIGN.md promises each terminal window its own set of tabs.
+printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+client3=$!
+sleep 6
+assert_eq "tmux:second-window-gets-its-own-session" "2" \
+          "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
+kill -9 "$client2" "$client3" 2>/dev/null; wait 2>/dev/null || true
+sleep 2
+tmux_kill_all
 
 # ─── §A.5 kernel and namespaces ────────────────────────────────────────────────
 record "kernel:uid-map" "$(E 'cat /proc/self/uid_map')"

@@ -83,6 +83,61 @@ MATRIX="$MATRIX
   $(printf '%-12s alive=%s' no-tty "$NOTTY_ALIVE")"
 cleanup
 
+# THE SHAPE A STUDENT ACTUALLY HAS, now that `./cs193v` lands in tmux.
+#
+# The four shapes above are direct children of the exec client. A student's server is not:
+# it runs in a tmux pane, owned by a tmux server that lives in the container and is not a
+# descendant of the connection the terminal made. So the mechanism is different, and so is
+# what can break it -- not conmon, but `destroy-unattached`, which the upstream prototype
+# set to `on` and which would destroy the session, and every pane in it, the instant the
+# client went away. This is the regression test for that setting being off.
+#
+# ASSERTED, not recorded, unlike the four above: those were open questions being measured,
+# this is a documented promise (CONTAINER-DESIGN.md, ERRORS.md D1) that a one-line config
+# change could silently reverse.
+TMX="tmux -L cs193v -f /etc/cs193v/tmux.conf"
+cleanup
+podman exec "$NAME" sh -c "$TMX kill-server" >/dev/null 2>&1 || true
+sleep 1
+# Fed a long-running command rather than left with the suite's own stdin. With stdin at EOF
+# the login shell in tab one exits immediately, which closes the tab, which ends the session
+# -- and the probe below would then be measuring a container with no tmux in it at all.
+# `$!` after a pipeline is its LAST element, which is script, so the kill still lands.
+printf 'sleep 600\n' | script -q -c "podman exec -it ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+TMUX_CLIENT=$!
+sleep 6
+podman exec "$NAME" sh -c "$TMX new-window -d '$SRV'" >/dev/null 2>&1
+sleep 3
+TMUX_BEFORE="$(podman exec "$NAME" sh -c \
+    'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
+kill -9 "$TMUX_CLIENT" 2>/dev/null; wait "$TMUX_CLIENT" 2>/dev/null || true
+sleep 4
+TMUX_ALIVE="$(podman exec "$NAME" sh -c \
+    'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
+TMUX_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
+record "sighup:in-a-tmux-tab" "before=$TMUX_BEFORE alive=$TMUX_ALIVE http=$TMUX_HTTP"
+MATRIX="$MATRIX
+  $(printf '%-12s alive=%-4s http=%s' tmux-tab "$TMUX_ALIVE" "$TMUX_HTTP")"
+
+if [ "$TMUX_BEFORE" != yes ]; then
+    fail "sighup:server-in-a-tab-survives-the-window-closing" \
+         "the probe server never started in the tab, so the check proved nothing"
+elif [ "$TMUX_ALIVE" = yes ]; then
+    pass "sighup:server-in-a-tab-survives-the-window-closing"
+else
+    fail "sighup:server-in-a-tab-survives-the-window-closing" \
+         "a server running in a tmux tab died when the exec client was killed. Almost
+certainly destroy-unattached is back on in files/tmux/tmux.conf: it destroys an unattached
+session and every pane in it. CONTAINER-DESIGN.md promises the opposite, and ERRORS.md D1
+records the measurement it rests on."
+fi
+# ...and the orphaned session must still be there to be picked up, or "run ./cs193v again
+# and your tabs come back" is false even though the process survived.
+assert_ok "sighup:orphaned-session-is-still-reattachable" \
+          sh -c "podman exec ${NAME} $TMX list-sessions >/dev/null 2>&1"
+podman exec "$NAME" sh -c "$TMX kill-server" >/dev/null 2>&1 || true
+cleanup
+
 record "sighup:MATRIX" "$(printf '%s' "$MATRIX" | tr '\n' '|')"
 printf '\n  the §A.8 matrix, for $PRIVATE/VERIFICATION.md §10:%s\n\n' "$MATRIX"
 
@@ -133,7 +188,13 @@ WSL before rewording — see ERRORS.md D."
 else
     record "sighup:DOCS-vs-REALITY" "foreground server died, matching what the docs warn"
 fi
-assert_contains "sighup:CONTAINER-DESIGN-mentions-the-caveat" "closing a terminal window" \
+# Deliberately loose. This used to look for the exact phrase "closing a terminal window",
+# and broke when the paragraph was reworded -- correctly -- from a hedged caveat into a
+# statement that a server survives, which is what the tabs made true. Matching a two-word
+# topic rather than a sentence keeps the check meaningful (the doc must still address what
+# closing the window does) without failing every time the prose improves. The behaviour
+# itself is asserted above, against a real server.
+assert_contains "sighup:CONTAINER-DESIGN-mentions-the-caveat" "terminal window" \
     "$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
 # The matching assertion against the managed CLAUDE.md is GONE, by decision. That file was
 # deliberately slimmed to the few things an agent gets wrong here, and the SIGHUP caveat did

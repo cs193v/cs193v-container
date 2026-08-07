@@ -344,9 +344,49 @@ assert_contains "identity:visible-prompt-still-shows-user-at-host" 'u@' \
     "$(R 'grep "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc | head -1')"
 
 # The banner text cannot come from messages.txt -- the container cannot see it -- so it has
-# to be in the image. Assert it really is.
-assert_contains "identity:banner-text-is-in-the-image" "Welcome to the CS193V" \
-                "$(R 'cat /etc/profile.d/20-cs193v-welcome.sh')"
+# to be in the image. Assert it really is. The text lives in the cs193v-welcome COMMAND;
+# /etc/profile.d/20-cs193v-welcome.sh only decides whether to call it.
+assert_contains "identity:banner-text-is-in-the-image" "$CS193V_WELCOME" \
+                "$(R 'cat /etc/cs193v/strings.sh')"
+
+# ─── tmux: the landing point ───────────────────────────────────────────────────
+# `./cs193v` runs cs193v-shell. Everything here is "is the image actually able to do that",
+# as distinct from 65-tmux.sh, which drives a real session and asserts on what it looks like.
+for cmd in cs193v-shell cs193v-welcome cs193v-goodbye; do
+    assert_ok "tmux:$cmd-installed" \
+              sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/$cmd'"
+    assert_eq "tmux:$cmd-mode" "755" "$(R "stat -c %a /usr/local/bin/$cmd")"
+done
+
+assert_ok "tmux:conf-installed" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tmux.conf'"
+assert_eq "tmux:conf-mode" "644" "$(R 'stat -c %a /etc/cs193v/tmux.conf')"
+assert_eq "tmux:conf-is-root-owned" "root" "$(R 'stat -c %U /etc/cs193v/tmux.conf')"
+assert_ok "tmux:tabname-installed" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tabname.bash'"
+assert_eq "tmux:tabname-mode" "644" "$(R 'stat -c %a /etc/cs193v/tabname.bash')"
+
+# NOT at tmux's default paths. cs193v-shell names the file with -f, which suppresses both
+# /etc/tmux.conf and ~/.tmux.conf -- and it is the second one that matters, since tmux lets
+# a student's own file win and re-arm the prefix key the config exists to remove.
+assert_ok "tmux:no-etc-tmux-conf" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /etc/tmux.conf'"
+assert_ok "tmux:no-user-tmux-conf" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /home/student/.tmux.conf'"
+
+# Every interactive bash, and therefore every tab, must pick up the label hook. A tmux
+# default-command would reach tab one only.
+assert_contains "tmux:bashrc-sources-the-tabname-hook" "/etc/cs193v/tabname.bash" \
+                "$(R 'cat /etc/bash.bashrc')"
+
+assert_ok "tmux:binary-present" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v tmux >/dev/null'"
+record    "tmux:version" "$(R 'tmux -V')"
+# THE TERMINFO GATE. default-terminal is tmux-256color, whose entry ships in ncurses-term,
+# which is only a Recommends -- and this image builds with --no-install-recommends. Without
+# it tmux exits with "missing or unsuitable terminal" and NOBODY can open a shell.
+assert_ok "tmux:tmux-256color-terminfo-present" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'infocmp tmux-256color >/dev/null'"
 
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there

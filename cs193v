@@ -757,6 +757,45 @@ ensure_container() {
     ensure_tunnel || true
 }
 
+# Is this pid one of OUR exec clients, still alive on this machine?
+#
+# `kill -0` alone is not enough: pids are reused, and a recycled one would make us treat a
+# stale session as live and hand the student a brand-new one instead of their tabs. Checking
+# that the process is a podman is cheap and rules out essentially every reuse.
+host_client_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    ps -o args= -p "$1" 2>/dev/null | grep -q podman
+}
+
+# Detach tmux clients whose terminal window is gone.
+#
+# MEASURED, and it is the reason this function exists at all. Closing a terminal window does
+# NOT kill the tmux client inside the container: conmon keeps the exec session's pty open,
+# the client stays blocked reading it, and tmux goes on reporting the session as attached --
+# indefinitely, not for a few seconds. Nothing inside the container can distinguish that from
+# a live client; both ptys still exist and both are still writable.
+#
+# Left alone, that quietly breaks the behaviour the tabs exist for. cs193v-shell attaches to
+# a session only if it has no client, so it would never find one, every launch would build a
+# fresh session, and the student's real tabs would pile up unreachable behind a ghost.
+#
+# The host is the only side that CAN tell, because the client is a `podman exec` process it
+# started, so cs193v-shell stamps each session with the pid that attached it and this prunes
+# the ones whose process has gone. Cheap, and idempotent.
+prune_stale_tmux_clients() {
+    [ "$(state)" = running ] || return 0
+    pm exec "$NAME" tmux -L cs193v list-sessions \
+        -F '#{session_name} #{session_attached} #{@cs193v_host_pid}' 2>/dev/null || return 0
+    printf '%s\n' "$RT_OUT" | while read -r _s _att _pid; do
+        [ -n "$_s" ] || continue
+        [ "${_att:-0}" = 0 ] && continue
+        case "${_pid:-}" in ''|0) continue ;; esac
+        host_client_alive "$_pid" && continue
+        podman exec "$NAME" tmux -L cs193v detach-client -s "=$_s" >/dev/null 2>&1
+    done
+    return 0
+}
+
 open_shell() {
     local n
     # Refuse, rather than hang, when there is no terminal to open a shell on.
@@ -776,15 +815,36 @@ open_shell() {
     fi
     # A non-destructive nudge: many concurrent sessions is legitimate, but it is also how
     # an invisible memory problem starts.
-    if pm top "$NAME" 2>/dev/null; then
-        n="$(printf '%s\n' "$RT_OUT" | grep -c 'bash' || true)"
+    #
+    # This counts tmux CLIENTS -- one per attached terminal window -- where it used to count
+    # `bash` processes in `podman top`. It had to change with the landing point: every tab
+    # is a bash now, so a process count would fire at six tabs in a single window, which is
+    # ordinary use of the very thing the tab bar exists to encourage. Clients preserve what
+    # the check originally meant, and therefore when it originally fired: "how many terminal
+    # windows have you got pointed at this container".
+    if pm exec "$NAME" tmux -L cs193v list-clients -F '#{client_tty}' 2>/dev/null; then
+        n="$(printf '%s\n' "$RT_OUT" | grep -c . || true)"
         [ "${n:-0}" -gt 6 ] && warn "$(msg warn.many-shells N="$n")"
     fi
+    # Must run BEFORE the exec, or the session the student should be getting back still
+    # looks occupied and they get a new one instead.
+    prune_stale_tmux_clients
+
+    # cs193v-shell puts the student inside tmux; see files/cs193v-shell. CS193V_CONTAINER is
+    # passed because its failure path has to tell a student the exact `podman exec` line to
+    # run, and nothing inside the container can work out the container's name --
+    # CS193V_INSTANCE may have suffixed it, and the hostname is cs193v-development either way.
+    #
+    # CS193V_CLIENT_PID is this shell's own pid, which `exec` hands straight to podman -- so
+    # it IS the pid of the client process, and it is what prune_stale_tmux_clients looks for
+    # on the next launch.
     exec podman exec -it \
         -w "$MOUNT_DST" \
         -e "TERM=$(safe_term)" \
         -e "COLORTERM=${COLORTERM:-}" \
-        "$NAME" bash -l
+        -e "CS193V_CONTAINER=$NAME" \
+        -e "CS193V_CLIENT_PID=$$" \
+        "$NAME" cs193v-shell
 }
 
 # ─── verbs ─────────────────────────────────────────────────────────────────────
@@ -839,11 +899,39 @@ verb_doctor() {
         printf '  %-16s %s\n' "memory limit" "${RT_OUT:-unknown}"
         pm exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z'
         printf '  %-16s %s\n' "zombies" "${RT_OUT:-0}"
+        tmux_doctor
         tunnel_doctor
         check_clock
     fi
     printf '%s\n' "-------------------------------------------------------------"
     printf '%s\n' "Paste all of the above when asking course staff for help."
+}
+
+# tmux is the landing point, so "what is my session doing" is now a support question. A
+# student who says "my tabs vanished" or "I have two windows showing the same thing" is
+# describing session state that nothing else in this report would show.
+#
+# Sessions and their window counts, plus how many clients are attached to each: a session
+# with 0 clients is one waiting to be picked back up by the next `./cs193v`, which is normal
+# and is what closing a terminal window leaves behind. Two clients on one session is the
+# mirrored case, which is the benign race cs193v-shell documents.
+tmux_doctor() {
+    local out
+    if pm exec "$NAME" tmux -L cs193v list-sessions \
+           -F '#{session_name} #{session_windows}w #{session_attached} attached' 2>/dev/null; then
+        out="$RT_OUT"
+    else
+        printf '  %-16s none (nobody is in the container right now)\n' "tmux sessions"
+        return 0
+    fi
+    if [ -z "$out" ]; then
+        printf '  %-16s none (nobody is in the container right now)\n' "tmux sessions"
+        return 0
+    fi
+    printf '  %-16s %s\n' "tmux sessions" "$(printf '%s\n' "$out" | head -1)"
+    printf '%s\n' "$out" | tail -n +2 | while IFS= read -r line; do
+        [ -n "$line" ] && printf '  %-16s %s\n' "" "$line"
+    done
 }
 
 # The tunnel's state is now the ONLY place host-side forwarding is visible, which makes this

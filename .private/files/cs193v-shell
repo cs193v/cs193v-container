@@ -1,0 +1,177 @@
+#!/bin/bash
+#
+# The CS193V landing point. `./cs193v` runs this instead of `bash -l`.
+#
+# Three jobs:
+#
+#   1. Put the student inside tmux, so the course title bar and the tab bar are always on
+#      screen. See /etc/cs193v/tmux.conf for what that configuration is and why.
+#
+#   2. Reattach rather than start fresh. Closing a terminal window must not throw away a
+#      running dev server -- that property is measured in ERRORS.md section D and
+#      regression-tested in tests/70-sighup.sh, and tmux would have quietly reversed it.
+#
+#   3. Fail LOUDLY if tmux will not start, rather than limping into a bare shell that
+#      silently is not the environment the course documents.
+#
+# Runs as `student` under `podman exec -it`, with the working directory set to
+# ~/projects by the launcher.
+
+set -u
+
+CONF=/etc/cs193v/tmux.conf
+SOCKET=cs193v
+PREFIX=cs193v
+
+# The container name, for the diagnostic instructions in the failure path. The launcher
+# passes it because CS193V_INSTANCE can suffix it and nothing inside the container can
+# work it out -- the hostname is `cs193v-development` regardless.
+CONTAINER="${CS193V_CONTAINER:-cs193v}"
+
+# A DEDICATED SOCKET, not tmux's default.
+#
+# It makes "the server cs193v-shell talks to" and "the server started with our locked-down
+# config" the same thing by construction. On the default socket they can come apart: a tmux
+# server started by anything else -- a staff `podman exec -it ... bash -l` session, a
+# student experimenting -- would be running stock tmux with all 70 prefix bindings, and we
+# would attach a student to it and hand them an environment that is not the one documented.
+#
+# The cost is that a student who types plain `tmux` gets a separate, stock tmux server.
+# That is the right answer anyway: they asked for tmux, not for the course's tmux.
+#
+# The tab-label hook does not need to know about this. tmux exports $TMUX into every pane
+# and a bare `tmux` inside a pane follows it to the right server.
+tm() { tmux -L "$SOCKET" -f "$CONF" "$@"; }
+
+# ─── the loud failure ──────────────────────────────────────────────────────────
+# ASCII only, and no reliance on terminfo. A broken locale or a missing tmux-256color
+# terminfo entry are two of the likelier reasons to be in here, so the error must not
+# depend on the machinery that just failed.
+fail() {
+    exec >&2
+    printf '\n'
+    printf '  +--------------------------------------------------------------+\n'
+    printf '  |  CS193V: could not start your development environment        |\n'
+    printf '  +--------------------------------------------------------------+\n'
+    printf '\n'
+    printf '  %s\n' "$1"
+    printf '\n'
+    printf '  This is a fault in the container image, not something you did.\n'
+    printf '  Please send this whole message to the course staff.\n'
+    if [ -n "${2:-}" ]; then
+        printf '\n  What tmux said:\n\n'
+        printf '%s\n' "$2" | sed 's/^/      /'
+    fi
+    printf '\n  To collect a report to send them, on your own computer:\n'
+    printf '\n      ./cs193v doctor\n'
+    printf '\n  And to get a plain shell in the container for a closer look:\n'
+    printf '\n      podman exec -it %s bash -lc am-i-in-a-container\n' "$CONTAINER"
+    printf '\n'
+    exit 1
+}
+
+command -v tmux >/dev/null 2>&1 \
+    || fail "tmux is not installed in this image."
+[ -r "$CONF" ] \
+    || fail "the tmux configuration is missing or unreadable at $CONF."
+
+# ─── the clean break ───────────────────────────────────────────────────────────
+# 2J clears the visible screen; 3J clears the SCROLLBACK too, which is what "prior commands
+# are no longer visible" actually requires. Done HERE, on the host terminal, before tmux
+# takes the alternate screen -- so entering the container is still the clean break it was
+# before tmux, and there is nothing of the student's own session left behind tmux when it
+# exits. cs193v-welcome repeats it inside the pane, which is a harmless no-op on a fresh
+# tab and is what the non-tmux path needs.
+[ -t 1 ] && printf '\033[2J\033[3J\033[H'
+
+# ─── pick a session ────────────────────────────────────────────────────────────
+# Attach to an existing session that has no client, and only create one if there is not
+# one going spare. That single rule gives both behaviours the course wants:
+#
+#   * close your terminal window, run ./cs193v again  ->  your tabs and your running
+#     server are still there, because the session you orphaned is the one with no client.
+#   * run ./cs193v in a second window while the first is open  ->  a new session, because
+#     the first one's client is attached. Each window gets its own tabs, which is what
+#     CONTAINER-DESIGN.md promises.
+#
+# Only `cs193v-*` sessions are candidates, so a session someone made by hand is never
+# hijacked out from under them.
+#
+# There is a benign race: two launches at the same instant can both see the same free
+# session and both attach to it, which mirrors them rather than erroring. Not worth
+# locking against -- the failure mode is two terminals showing the same thing until one
+# is closed.
+target=""
+while read -r attached name; do
+    [ "${attached:-1}" = 0 ] || continue
+    case "$name" in
+        "$PREFIX"-*) target="$name"; break ;;
+    esac
+done <<EOF
+$(tm list-sessions -F '#{session_attached} #{session_name}' 2>/dev/null)
+EOF
+
+errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
+
+# WHO IS HOLDING THIS SESSION. Recorded so the LAUNCHER can prune stale clients before it
+# runs us -- see prune_stale_tmux_clients in ./cs193v for the measurement behind this.
+#
+# The short version: when a student closes their terminal window, the tmux client inside
+# the container does NOT die. conmon keeps the exec session's pty open, the client stays
+# blocked on it, and tmux reports the session as attached forever. Nothing in here can tell
+# that apart from a live client -- both ptys exist and both are writable, measured. The
+# host can, because the client is a `podman exec` process it started itself, so it is the
+# host that does the pruning and all we do is leave it the pid it needs.
+# NOTE the plain -t, with no `=` prefix, unlike every other target in this file. `set-option`
+# resolves -t as a target-PANE, and the `=` exact-match prefix is a target-session/window
+# spec -- pass `=cs193v-1` here and tmux answers "no such session" and sets nothing, silently
+# as far as the student is concerned. Exact names still win tmux's lookup order (exact, then
+# prefix, then fnmatch), so `cs193v-1` cannot be captured by `cs193v-10`.
+stamp_owner() { tm set-option -t "$1" @cs193v_host_pid "${CS193V_CLIENT_PID:-0}" 2>/dev/null; }
+
+if [ -n "$target" ]; then
+    # `=` is tmux's exact-match prefix. Without it `cs193v-1` also matches `cs193v-10`.
+    stamp_owner "$target"
+    tm attach-session -t "=$target" 2>"$errfile"
+    rc=$?
+else
+    n=1
+    while tm has-session -t "=$PREFIX-$n" 2>/dev/null; do n=$(( n + 1 )); done
+    sess="$PREFIX-$n"
+
+    # Created DETACHED and then attached, rather than in one blocking call, purely so the
+    # owner pid can be stamped on it in between -- `new-session` without -d never returns.
+    #
+    # -x/-y are not optional with -d. A detached session is created at tmux's default 80x24
+    # and only resized when a client attaches, and cs193v-welcome draws a box sized to the
+    # terminal at the moment it runs. Without the real size the banner would be drawn for
+    # the wrong width and then not reflow, so the first thing a student sees would be a
+    # broken box.
+    #
+    # The first window runs the banner and then becomes the login shell. This is what
+    # confines the banner to tab one: every LATER tab is created by tmux itself from the
+    # default command, which is a plain login shell with no banner in it.
+    #
+    # No -n flag. Passing -n would set the window name AND switch automatic-rename off,
+    # pinning the label forever so the tab could never track the running process.
+    if tm new-session -d -s "$sess" \
+          -x "$(tput cols 2>/dev/null || echo 80)" \
+          -y "$(tput lines 2>/dev/null || echo 24)" \
+          'cs193v-welcome; exec bash -l' 2>"$errfile"; then
+        stamp_owner "$sess"
+        tm attach-session -t "=$sess" 2>>"$errfile"
+        rc=$?
+    else
+        rc=1
+    fi
+fi
+
+if [ "$rc" -ne 0 ]; then
+    fail "tmux exited with status $rc without giving you a shell." "$(cat "$errfile" 2>/dev/null)"
+fi
+
+rm -f "$errfile"
+
+# tmux has restored the host terminal from the alternate screen by now, so this lands on
+# the student's own shell rather than in a pane that is disappearing.
+cs193v-goodbye
