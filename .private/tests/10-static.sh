@@ -203,6 +203,22 @@ assert_not_contains "man:never-says-unminimize" "unminimize" "$(sed 's/#.*//' $P
 assert_ok  "man:build-checks-the-stub-took" \
            grep -q 'man git 2>&1 | grep -F unminimize' $PRIVATE/Containerfile
 
+# ─── ssh, scp and telnet  (issue #2) ───────────────────────────────────────────
+# These are course tools: logging into a remote machine, copying a file across, and typing
+# an HTTP request at a web server by hand. They are named on the apt line rather than
+# arriving as a dependency of something else — `ssh` and `scp` were in the image for a year
+# only because openssh-server Depends on openssh-client, which is not a promise. If the
+# tunnel ever stopped needing sshd, they would vanish and the only symptom would be a lab
+# exercise that no longer works.
+apt_line="$(sed -n '/^RUN apt-get update/,/rm -rf \/var\/lib\/apt\/lists/p' $PRIVATE/Containerfile)"
+assert_contains "net:openssh-client-named-explicitly" "openssh-client" "$apt_line"
+assert_contains "net:telnet-installed"                "inetutils-telnet" "$apt_line"
+# `telnet` on Ubuntu 26.04 is a transitional dummy whose whole content is a dependency on
+# inetutils-telnet, and transitional packages get removed. Naming it would work today and
+# break on some future release for a reason nobody would connect to this line.
+assert_not_match "net:not-the-transitional-telnet-package" \
+                 '(^|[[:space:]])telnet([[:space:]]|\\|$)' "$apt_line"
+
 # ─── tmux: the landing point ───────────────────────────────────────────────────
 # `./cs193v` runs cs193v-shell, which puts the student inside tmux. These assertions cover
 # the properties that are load-bearing and would fail SILENTLY: a student would still get a

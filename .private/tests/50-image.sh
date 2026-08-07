@@ -104,10 +104,93 @@ done
 assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
 
 # ─── tooling that must be present ──────────────────────────────────────────────
-for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip; do
+for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip ssh scp telnet; do
     assert_ok "have:$cmd" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version' | tr '\n' ' ')"
+
+# ─── ssh, scp and telnet really work  (issue #2) ───────────────────────────────
+# Not just "the binary is on PATH". The course reason for each of these is a round trip:
+# logging into a remote machine, copying a file across, and typing an HTTP request at a web
+# server by hand. So each one is exercised for real, against a server started inside the
+# same throwaway container — --network=none throughout, so nothing here needs the internet
+# and every connection is over the container's own loopback.
+#
+# apt-mark comes first, because it is the assertion that says this is DELIBERATE. `ssh` and
+# `scp` were in the image long before anyone chose them: openssh-server Depends on
+# openssh-client, so they arrived as a dependency while the Containerfile said they were
+# absent. `showmanual` is exactly the difference between "we asked for this" and "something
+# else happened to need it", and only the first is a promise.
+manual="$(R 'apt-mark showmanual 2>/dev/null')"
+assert_contains "net:openssh-client-is-installed-on-purpose" "openssh-client"   "$manual"
+assert_contains "net:telnet-is-installed-on-purpose"         "inetutils-telnet" "$manual"
+
+# sshd runs UNPRIVILEGED here, as student, which is what the tunnel's own sshd does too
+# (see files/sshd_config). It is not a stylistic choice: started as root it refuses the
+# student account outright, because useradd left that account with no password and a root
+# sshd reads a locked password field as "no login allowed".
+#
+# The Subsystem line is not optional either. OpenSSH 9 and later carry scp over SFTP, so
+# without it `ssh` succeeds and `scp` fails with a bare "Connection closed" — which looks
+# like a broken scp rather than a missing subsystem.
+sshout="$(timeout 240 podman run --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+set -e
+cd /tmp
+ssh-keygen -q -t ed25519 -N "" -f hostkey && chmod 600 hostkey
+ssh-keygen -q -t ed25519 -N "" -f userkey
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cp userkey.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+{
+  echo "Port 2222"
+  echo "ListenAddress 127.0.0.1"
+  echo "HostKey /tmp/hostkey"
+  echo "AuthorizedKeysFile /home/student/.ssh/authorized_keys"
+  echo "PasswordAuthentication no"
+  echo "UsePAM no"
+  echo "PidFile /tmp/sshd.pid"
+  echo "AllowUsers student"
+  echo "Subsystem sftp /usr/lib/openssh/sftp-server"
+} > /tmp/sshd.conf
+/usr/sbin/sshd -f /tmp/sshd.conf
+sleep 1
+OPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /tmp/userkey"
+ssh -q $OPT -p 2222 student@127.0.0.1 "echo SSH-ROUND-TRIP-OK"
+echo scp-payload > /tmp/src.txt
+scp -q $OPT -P 2222 /tmp/src.txt student@127.0.0.1:/tmp/dst.txt
+printf "SCP-GOT:%s\n" "$(cat /tmp/dst.txt)"
+' 2>&1 || true)"
+assert_contains "net:ssh-can-log-into-a-remote-machine" "SSH-ROUND-TRIP-OK"   "$sshout"
+assert_contains "net:scp-can-copy-a-file-across"        "SCP-GOT:scp-payload" "$sshout"
+
+# And telnet against a real web server, because seeing what an HTTP request looks like when
+# you type it yourself is the whole reason it is installed.
+#
+# Two traps here, both of which cost this test a red run before it was right, and both of
+# which a student scripting telnet will hit too:
+#
+#  * Send LF, NOT CRLF. telnet speaks NVT, where a bare CR must go out as CR NUL and only a
+#    LF becomes CR LF on the wire. So `printf "GET / HTTP/1.0\r\n\r\n"` arrives at the
+#    server as "GET / HTTP/1.0\x0d\x00" and is answered with 400 Bad request version.
+#    Pressing Enter in an interactive telnet sends LF, which is why this works by hand and
+#    fails in a pipe — write what the keyboard would send.
+#
+#  * Hold stdin open afterwards. telnet exits as soon as its input reaches EOF, and with a
+#    plain `printf | telnet` that happens before the server's reply comes back, so the
+#    output is the three connection lines and nothing else.
+telout="$(timeout 120 podman run --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &
+i=0
+while [ "$i" -lt 20 ]; do
+    curl -s -o /dev/null http://127.0.0.1:8099/ && break
+    sleep 0.5
+    i=$((i + 1))
+done
+{ printf "GET / HTTP/1.0\n\n"; sleep 3; } | telnet 127.0.0.1 8099 2>&1
+' 2>&1 || true)"
+assert_contains "net:telnet-reaches-a-web-server"  "Connected to 127.0.0.1" "$telout"
+# The status line is the point of the exercise: it is what a student is meant to SEE coming
+# back when they type a request by hand.
+assert_contains "net:telnet-shows-the-http-response" "HTTP/1.0 200 OK" "$telout"
 assert_ok "numpy-imports" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import numpy\"'"
 
 # Passwordless sudo is a deliberate course decision: CS193V trains students not to run

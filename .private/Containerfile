@@ -42,7 +42,7 @@ RUN apt-get update \
       procps psmisc file unzip zip xz-utils \
       locales tzdata \
       fonts-noto-core fontconfig \
-      openssh-server \
+      openssh-server openssh-client inetutils-telnet \
       tmux ncurses-term \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
@@ -63,8 +63,32 @@ RUN apt-get update \
 # for a server that never listens: the launcher starts it per session as
 # `podman exec -i ... sshd -i`, so its connection is a pipe, not a socket. See
 # files/sshd_config, and the Networking section of .config/container.args for why the tunnel
-# exists at all. The openssh-CLIENT is on the host, not here; nothing in the container
-# initiates an ssh connection, and that asymmetry is the security argument.
+# exists at all.
+#
+# openssh-client and inetutils-telnet are here FOR THE STUDENT, and they overturn what this
+# comment used to say. It claimed the client lived on the host only, that nothing in the
+# container ever initiates an ssh connection, and that the asymmetry was the security
+# argument. Two things were wrong with that.
+#
+# It was not TRUE. openssh-server Depends on openssh-client, so `ssh`, `scp` and `sftp` have
+# been in every image ever built — by accident rather than by decision, and documented as
+# absent while they were present.
+#
+# And it is not what the course wants. Logging into a remote machine, copying a file across
+# with scp, and typing an HTTP request at a web server by hand are things a systems course
+# teaches, not things it withholds. Issue #2.
+#
+# The security argument does not survive contact with the rest of the image either: there is
+# no egress filtering (deliberately — see the staff README), and curl, wget and git are all
+# here already. A student who can `curl` anything on the internet is not newly dangerous for
+# also being able to `ssh` to it.
+#
+# They are named EXPLICITLY rather than left to the dependency. A transitive dependency is
+# not a promise: if the tunnel ever stopped needing sshd, `ssh` and `scp` would vanish from
+# the image and the only sign would be a lab exercise that had quietly stopped working.
+#
+# inetutils-telnet, not `telnet`: on Ubuntu 26.04 `telnet` is a transitional dummy package
+# whose entire content is a dependency on this one, and transitional packages get removed.
 #
 # fonts-noto-core, not fonts-dejavu-core: the base image ships no fonts at all, and
 # anything that rasterizes text (Pillow, matplotlib, librsvg) needs one. Noto because a

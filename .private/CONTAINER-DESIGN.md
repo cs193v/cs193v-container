@@ -388,6 +388,10 @@ actually are.
   signal, and the recovery is Ctrl-Q, which nobody knows. That is turned off here.
 - **No `man` pages** (the base image strips them). `tldr <command>` instead — and typing
   `man git` tells you so and names the `tldr` page to try, rather than failing obscurely.
+- **`ssh`, `scp` and `telnet` are here.** Log into a remote machine, copy a file across, or
+  talk to a web server by hand — `telnet example.com 80`, then type `GET / HTTP/1.0` and
+  press Enter twice, and you see the raw reply. (Press Enter; do not try to type the `\r\n`
+  yourself. telnet turns your Enter into the CRLF the protocol wants.)
 - **No browser.** Anything that would open one prints the URL for you to copy.
 - **No `ripgrep`, `fzf`, `bat`, `fd` or `delta`.** Use `grep`, `find` and `git diff`.
 - **`git diff` shows moved code differently from rewritten code**, which is useful when
