@@ -409,8 +409,9 @@ that ordering is the durable lesson, and the comment there says so.
 The `absent:no-puppeteer` assertion that sat in that block was **removed by decision**, not
 repaired — so nothing in the suite now fails if puppeteer is reintroduced as an npm global.
 The rejection itself still stands and is still argued in the README's "Deliberately not
-here"; it is documentation-only. Note `VERIFICATION.md` §A.3's `npm-globals` line still reads
-"NO puppeteer" in its trailing comment, which is now a hope rather than a check.
+here"; it is documentation-only, and `VERIFICATION.md` §A.3 now says so at the point a TA
+would otherwise assume the opposite. That line carried the same `2>/dev/null` as the
+automated one and has been corrected the same way: exit status first, then record.
 
 Guards: `npm:*` in `tests/50-image.sh` and `containerfile:*-installed-as-student` in
 `tests/10-static.sh`. GitHub issue #13.

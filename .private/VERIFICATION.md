@@ -166,7 +166,16 @@ ck  node-is-root-owned     root          R 'stat -c %U $(command -v node)'
 ck  no-extra-tools none                  R 'for t in rg fzf delta bat fd chromium google-chrome chrome; do command -v $t >/dev/null && echo $t; done; echo none'
 #   ^ still none: a Chromium headless shell IS installed, but it lives in Playwright's cache
 #     and is launched by Playwright, never typed. No browser is on $PATH.
-rec  npm-globals                         R 'npm ls -g --depth=0 2>/dev/null'   # vercel + claude-code + playwright, NO puppeteer
+# The `2>/dev/null` this line used to carry is exactly what made the automated version
+# vacuous. While the globals lived in root's prefix and the student's had no lib/ at all,
+# `npm ls -g` exited 254 with an ENOENT — the redirect swallowed it, so anything matched
+# against that output was being compared to the empty string and passed for the wrong
+# reason. Check the exit status first, then record. Issue #13.
+ckx  npm-ls-g-succeeds                   R 'npm ls -g --depth=0 >/dev/null'
+rec  npm-globals                         R 'npm ls -g --depth=0'         # vercel + claude-code + playwright, in the STUDENT's prefix
+#   ^ puppeteer is deliberately NOT checked for here. The assertion that did was removed by
+#     decision, so nothing enforces its absence any more — the rejection rests on the
+#     argument in README's "Deliberately not here" alone.
 ck  playwright-browser-runs ok            R 'playwright screenshot -b chromium about:blank /tmp/p.png >/dev/null 2>&1 && echo ok'
 rec  versions                            R 'node -v; npm -v; python3 -V; gh --version|head -1; vercel --version; claude --version'
 ckx  numpy                               R 'python3 -c "import numpy"'
