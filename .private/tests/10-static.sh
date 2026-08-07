@@ -45,6 +45,13 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
 # VERIFICATION.md §5.2/§5.3. The BASH4= assignment below is excluded, or the ban list
 # matches its own definition.
+#
+# THE GLOB IS `tests/*.sh`, TOP LEVEL ONLY, AND tests/tmux-harness/ IS EXEMPT ON PURPOSE.
+# Do not widen it. That directory is copied into the container and run there, by the
+# container's own bash 5 -- it never executes on the host, so bash 3.2 is not a constraint
+# on it, and holding it to one would mean rewriting vendored code for a platform it will
+# never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
+# is the part that matters.
 hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/*.sh \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
@@ -114,22 +121,164 @@ assert_ok  "containerfile:rewrites-the-bashrc-window-title" \
 # The banner runs INSIDE the container, which cannot reach messages.txt — only projects/ is
 # mounted. So this text has to live in the image, and must not be "tidied" into messages.txt
 # later, which would silently blank the banner.
-assert_ok  "welcome:script-exists" test -f $PRIVATE/files/profile.d/20-cs193v-welcome.sh
-assert_contains "welcome:has-the-welcome-line" "Welcome to the CS193V" \
-                "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
-assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "Welcome to the CS193V" \
+#
+# The TEXT lives in files/cs193v-welcome and the DECISION to print it lives in
+# files/profile.d/20-cs193v-welcome.sh. They were split when tmux became the landing point:
+# tmux runs the login shell in every tab, so profile.d fires per-tab, while the banner must
+# appear once. The first tab gets it from cs193v-shell; profile.d now covers only the
+# non-tmux path, `podman exec -it cs193v bash -l`.
+# ─── the shared strings ────────────────────────────────────────────────────────
+# The text the container prints is defined once, in files/cs193v-strings.sh, and read by
+# the scripts that print it AND by this suite (lib/assert.sh sources it). So these check the
+# DEFINITIONS are present and non-empty; the checks further down then use the values rather
+# than repeating them, and rewording a string no longer reddens tests in three tiers.
+assert_ok  "strings:file-exists" test -f $PRIVATE/files/cs193v-strings.sh
+assert_ok  "strings:syntax"      sh -n $PRIVATE/files/cs193v-strings.sh
+assert_ne  "strings:title-is-defined"   "" "${CS193V_TITLE:-}"
+assert_ne  "strings:welcome-is-defined" "" "${CS193V_WELCOME:-}"
+assert_ne  "strings:goodbye-is-defined" "" "${CS193V_GOODBYE:-}"
+assert_ok  "containerfile:installs-the-strings" \
+           grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' $PRIVATE/Containerfile
+
+assert_ok  "welcome:script-exists" test -f $PRIVATE/files/cs193v-welcome
+# The script must SOURCE the shared definitions rather than carry its own copy, or the two
+# drift and the tests go on passing against text nobody sees.
+assert_contains "welcome:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
+                "$(cat $PRIVATE/files/cs193v-welcome)"
+assert_contains "welcome:has-the-welcome-line" 'CS193V_WELCOME' \
+                "$(cat $PRIVATE/files/cs193v-welcome)"
+assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELCOME" \
                     "$(cat $PRIVATE/messages.txt)"
+# [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
+assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
+                "$(cat $PRIVATE/files/cs193v-welcome)"
+assert_ok  "welcome:syntax" sh -n $PRIVATE/files/cs193v-welcome
+
+assert_ok  "welcome:hook-exists" test -f $PRIVATE/files/profile.d/20-cs193v-welcome.sh
 # Interactive-only, matching 10-cs193v-shell.sh, so `podman exec cs193v <cmd>` and every
 # non-interactive call in this suite stay silent.
 assert_contains "welcome:guards-on-interactive-shell" 'case $- in' \
                 "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
-# [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
-assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
+# The $TMUX guard is what keeps the banner out of every new tab. Without it, CTRL+T clears
+# the pane and redraws the box, which is the failure the split above exists to prevent.
+assert_contains "welcome:hook-skips-inside-tmux" 'TMUX' \
                 "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
-assert_ok  "welcome:syntax" sh -n $PRIVATE/files/profile.d/20-cs193v-welcome.sh
-assert_ok  "logout:script-exists" test -f $PRIVATE/files/bash_logout
-assert_contains "logout:says-goodbye" "Goodbye" "$(cat $PRIVATE/files/bash_logout)"
-assert_ok  "logout:syntax" sh -n $PRIVATE/files/bash_logout
+assert_ok  "welcome:hook-syntax" sh -n $PRIVATE/files/profile.d/20-cs193v-welcome.sh
+
+assert_ok  "logout:script-exists" test -f $PRIVATE/files/cs193v-goodbye
+assert_contains "logout:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
+                "$(cat $PRIVATE/files/cs193v-goodbye)"
+assert_contains "logout:says-goodbye" 'CS193V_GOODBYE' "$(cat $PRIVATE/files/cs193v-goodbye)"
+assert_ok  "logout:syntax" sh -n $PRIVATE/files/cs193v-goodbye
+assert_ok  "logout:hook-exists" test -f $PRIVATE/files/bash_logout
+# Same reason as the banner: .bash_logout fires once per TAB inside tmux, so the farewell
+# would print into a pane that is closing, for something the student has not left.
+assert_contains "logout:hook-skips-inside-tmux" 'TMUX' "$(cat $PRIVATE/files/bash_logout)"
+assert_ok  "logout:hook-syntax" sh -n $PRIVATE/files/bash_logout
+
+# ─── tmux: the landing point ───────────────────────────────────────────────────
+# `./cs193v` runs cs193v-shell, which puts the student inside tmux. These assertions cover
+# the properties that are load-bearing and would fail SILENTLY: a student would still get a
+# terminal, just not the locked-down one the course documents.
+#
+# Nothing here re-tests what the config DOES -- 65-tmux.sh drives a real tmux inside the
+# container and asserts on rendered screens for that. This is the cheap tier: the files
+# exist, the image installs them, and the handful of settings that no screen makes obvious
+# are set.
+tmux_conf="$(cat $PRIVATE/files/tmux/tmux.conf)"
+
+assert_ok  "tmux:conf-exists"    test -f $PRIVATE/files/tmux/tmux.conf
+assert_ok  "tmux:tabname-exists" test -f $PRIVATE/files/tmux/tabname.bash
+assert_ok  "tmux:tabname-syntax" bash -n $PRIVATE/files/tmux/tabname.bash
+assert_ok  "tmux:shell-exists"   test -f $PRIVATE/files/cs193v-shell
+assert_ok  "tmux:shell-syntax"   bash -n $PRIVATE/files/cs193v-shell
+
+assert_ok  "tmux:package-installed" \
+           grep -qE '^ +tmux ncurses-term' $PRIVATE/Containerfile
+# ncurses-term carries the tmux-256color terminfo entry and is only a Recommends, so
+# --no-install-recommends drops it. Without it tmux does not start AT ALL, which with tmux
+# as the landing point means nobody can open a shell.
+assert_contains "tmux:ncurses-term-installed" "ncurses-term" "$(cat $PRIVATE/Containerfile)"
+
+assert_ok  "tmux:containerfile-installs-conf" \
+           grep -q 'tmux/tmux.conf     /etc/cs193v/tmux.conf' $PRIVATE/Containerfile
+assert_ok  "tmux:containerfile-installs-tabname" \
+           grep -q 'tmux/tabname.bash  /etc/cs193v/tabname.bash' $PRIVATE/Containerfile
+for cmd in cs193v-shell cs193v-welcome cs193v-goodbye; do
+    assert_ok "tmux:containerfile-installs-$cmd" \
+              grep -qE "$cmd +/usr/local/bin/$cmd" $PRIVATE/Containerfile
+done
+# The hook must reach every tab, which /etc/bash.bashrc does and a tmux default-command
+# does not -- that reaches tab one only, which is a silent half-working state.
+assert_ok  "tmux:containerfile-wires-the-tabname-hook" \
+           grep -q 'etc/cs193v/tabname.bash; fi' $PRIVATE/Containerfile
+# A bad config is now a container nobody can get into, so it must fail the BUILD.
+assert_ok  "tmux:containerfile-validates-the-config" \
+           grep -q 'tmux -L cs193vbuild' $PRIVATE/Containerfile
+
+# The disarm. Emptying all four tables is the whole basis of "only these actions exist";
+# `unbind -a` without -T clears the prefix table alone, so each one is named.
+assert_contains "tmux:no-prefix-key" "set -g prefix None" "$tmux_conf"
+for tbl in prefix root copy-mode copy-mode-vi; do
+    assert_contains "tmux:unbinds-$tbl" "unbind -a -T $tbl" "$tmux_conf"
+done
+
+# Six root bindings, because each of the three actions has an ALT key and a key that works
+# without Meta. macOS terminals compose Option by default, so an ALT-only keymap would be
+# unreachable for most of the class.
+n="$(grep -cE '^bind -N ".*" +-n +(M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
+     $PRIVATE/files/tmux/tmux.conf || true)"
+assert_eq  "tmux:six-root-tab-bindings" "6" "$n"
+# ...and the same six inside copy mode, or the tab bar goes dead the moment the wheel is
+# brushed, which is exactly when a confused student reaches for it.
+n="$(grep -cE '^bind -T copy-mode (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
+     $PRIVATE/files/tmux/tmux.conf || true)"
+assert_eq  "tmux:six-copy-mode-tab-bindings" "6" "$n"
+# The escape hatch out of copy mode. Without it a stray scroll leaves a dead keyboard.
+assert_contains "tmux:copy-mode-any-key-escapes" "bind -T copy-mode Any copy-mode -q" "$tmux_conf"
+
+# destroy-unattached MUST be off. `on` (which is what the upstream prototype sets) destroys
+# a session the moment its last client goes, which kills every pane and therefore every
+# server a student left running -- reversing the property measured in ERRORS.md D1 and
+# asserted in 70-sighup.sh.
+assert_contains "tmux:destroy-unattached-is-off" "set -g destroy-unattached off" "$tmux_conf"
+# Stated rather than inherited: the prototype relied on `off` being the 3.6 default, so its
+# regression test passed while the config had no opinion. Scrollbars on make nano flicker.
+assert_contains "tmux:scrollbars-explicitly-off" "set -g pane-scrollbars off" "$tmux_conf"
+# allow-rename off swallows the shell's OSC 0, so without set-titles the window title
+# silently stops naming the course.
+assert_contains "tmux:sets-the-window-title" "set -g set-titles on" "$tmux_conf"
+assert_contains "tmux:title-bar-says-CS193V" "$CS193V_TITLE" "$tmux_conf"
+# The prototype's title bar dropped the V. Everything else in this project has it.
+assert_not_contains "tmux:title-bar-not-missing-the-V" "CS193 Development" "$tmux_conf"
+
+# -f suppresses BOTH /etc/tmux.conf and ~/.tmux.conf. Installing to /etc/tmux.conf instead
+# would let a student's own ~/.tmux.conf win and re-arm a prefix key.
+assert_contains "tmux:shell-names-the-config-explicitly" '-f "$CONF"' \
+                "$(cat $PRIVATE/files/cs193v-shell)"
+assert_contains "tmux:shell-uses-a-dedicated-socket" '-L "$SOCKET"' \
+                "$(cat $PRIVATE/files/cs193v-shell)"
+# Reattach before create is what makes a closed window recoverable rather than lost.
+assert_contains "tmux:shell-prefers-an-unattached-session" "session_attached" \
+                "$(cat $PRIVATE/files/cs193v-shell)"
+assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat $REPO/cs193v)"
+# Closing a terminal window does NOT kill the tmux client inside the container -- conmon
+# keeps the pty open and tmux reports the session attached forever (asserted live in
+# 60-container.sh). Only the host can tell a stale client from a live one, so the launcher
+# prunes them before attaching. Without it, "close the window, run cs193v again, get your
+# tabs back" silently becomes a brand-new session every time.
+assert_contains "launcher:prunes-stale-tmux-clients" "prune_stale_tmux_clients" \
+                "$(cat $REPO/cs193v)"
+assert_contains "launcher:passes-its-pid-so-the-prune-can-work" 'CS193V_CLIENT_PID=$$' \
+                "$(cat $REPO/cs193v)"
+assert_contains "tmux:shell-records-the-owning-client" "@cs193v_host_pid" \
+                "$(cat $PRIVATE/files/cs193v-shell)"
+# The tab-label hook arms itself once per prompt so that only the command the student typed
+# can relabel. On Ubuntu 26.04 systemd's own PROMPT_COMMAND entry runs after ours and used
+# to spend that arming flag, which disabled EVERY label silently -- the fallback looks
+# exactly like having no hook at all. See ERRORS.md D0.
+assert_contains "tmux:tabname-ignores-other-prompt-command-entries" 'PROMPT_COMMAND[@]' \
+                "$(cat $PRIVATE/files/tmux/tabname.bash)"
 
 # Since 23.04 the Ubuntu base image ships its own `ubuntu` user at uid AND gid 1000, so a
 # bare `groupadd -g 1000` exits 4 with "GID '1000' already exists" and aborts the build.
@@ -378,8 +527,13 @@ assert_not_contains "claims:windows-not-called-case-insensitive" \
 # Both docs warned that closing a window "may stop" a server. Measured on native Linux, all
 # five shapes survive and stay reachable. The docs must now say what was measured and be
 # explicit about which platforms are still unverified, rather than hedging vaguely.
+#
+# The claim has a second dependency now: with tmux as the landing point it is
+# `destroy-unattached off` that keeps a pane alive, not conmon. That half is asserted where
+# it can be asserted properly -- tmux:destroy-unattached-is-off above, and behaviourally in
+# 70-sighup.sh -- rather than by matching more prose here.
 assert_contains "claims:sighup-states-the-linux-measurement" "Linux" \
-                "$(sed -n '/closing a terminal window/,+8p' $PRIVATE/CONTAINER-DESIGN.md)"
+                "$(sed -n '/does not stop a server/,+8p' $PRIVATE/CONTAINER-DESIGN.md)"
 
 # ─── .gitignore ────────────────────────────────────────────────────────────────
 # -F, not -x alone: `projects/*` as a BRE is "project" + "s" + zero-or-more "/".
@@ -454,5 +608,16 @@ done
 require_cmd shellcheck "Run: sudo apt install -y shellcheck"
 assert_ok  "shellcheck:cs193v"  shellcheck --severity=warning cs193v
 assert_ok  "shellcheck:install" shellcheck --severity=warning $PRIVATE/install-cs193v.sh
+# The landing point and its two helpers. cs193v-shell is the only way a student gets a
+# shell, so a quoting bug in it is a container nobody can enter.
+assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
+                                      $PRIVATE/files/cs193v-shell \
+                                      $PRIVATE/files/cs193v-welcome \
+                                      $PRIVATE/files/cs193v-goodbye
+# tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
+# meant to stay diffable against it, so local style fixes would cost more than they buy.
+# Its host-side driver is ours and is checked.
+assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC1090,SC1091 \
+                                    $PRIVATE/tests/65-tmux.sh
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh

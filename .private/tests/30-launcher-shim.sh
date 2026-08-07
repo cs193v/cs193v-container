@@ -407,9 +407,17 @@ assert_eq "noterm:container-was-still-created" "1" "$(shim_count '^run ')"
 # And no shell was attempted.
 assert_eq "noterm:no-exec-attempted" "0" "$(shim_count '^exec -it')"
 # With a terminal, the very same invocation must go on to open the shell.
+#
+# The landing point is cs193v-shell, not `bash -l`: it puts the student inside tmux and
+# picks a session to attach to. `bash -l` remains what the refusal message points scripts
+# at, which is asserted separately above -- the two must not be conflated, because the
+# whole point of that message is that it names the path which does NOT go through tmux.
 shim_new
 launcher_pty >/dev/null 2>&1
-assert_contains "noterm:with-a-terminal-it-opens-a-shell" "bash -l" "$(shim_log)"
+assert_contains "noterm:with-a-terminal-it-opens-a-shell" "cs193v-shell" "$(shim_log)"
+# The failure path inside the container has to print an exact `podman exec` line, and only
+# the launcher knows the container's name -- CS193V_INSTANCE may have suffixed it.
+assert_contains "noterm:passes-the-container-name-in" "CS193V_CONTAINER=" "$(shim_log)"
 
 # The scriptable verbs must NOT be caught by the refusal — they are what the message tells
 # people to use, so they have to work with a redirected stdin.

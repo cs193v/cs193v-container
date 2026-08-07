@@ -634,6 +634,92 @@ one thing §5.1 was meant to settle. **Confirm on macOS and WSL before rewording
 client lives outside the VM there, so the answer may genuinely differ. §5.1 (closing a real
 window by hand) is still worth doing to check the simulation models it.
 
+**This measurement now has a second dependency, and it is a config setting.** The landing
+point is tmux, so a student's server is a process inside a tmux pane rather than a direct
+child of the `podman exec` client — and whether it survives is decided by
+`destroy-unattached`, not by conmon. The prototype this configuration came from set it
+**on**, which destroys a session the instant its last client goes away: that would have
+killed every pane, and therefore every server, and turned the whole of D1 into "no, closing
+the window kills your work" without anything in the tree recording that it had changed.
+
+`files/tmux/tmux.conf` sets `destroy-unattached off` for exactly this reason, and says so
+where it sits. `70-sighup.sh` asserts the tmux shape alongside the five original ones, so
+flipping it back breaks a test rather than a student's afternoon. What the reattach design
+adds on top is that the orphaned session is not merely alive but *recoverable*: the next
+`./cs193v` attaches to it, because cs193v-shell prefers a session with no client.
+
+### D0. systemd's prompt hook silently disabled every tab label
+
+**Found by the ported screen suite, and it would have shipped.** `files/tmux/tabname.bash`
+adds the second word to a tab label (`sudo apt install` rather than `sudo`) from a bash
+`DEBUG` trap, armed once per prompt by a `PROMPT_COMMAND` entry so that only the command the
+student actually typed can relabel. On Ubuntu 26.04 the arming flag was being spent before
+the student's command ever arrived:
+
+```
+armed=0 cmd=[_cs193v_precmd]                    <- ours, arms the hook
+armed=1 cmd=[__systemd_osc_context_precmdline]  <- systemd's, spends it
+armed=0 cmd=[sudo python3 ...]                  <- the real command, disarmed
+```
+
+bash 5.1+ makes `PROMPT_COMMAND` an **array**, and this image ends up with two entries:
+
+```
+declare -a PROMPT_COMMAND=([0]="_cs193v_precmd" [1]="__systemd_osc_context_precmdline")
+```
+
+Ours is element 0 and can only ever be element 0, because `/etc/profile` sources
+`/etc/bash.bashrc` — where the hook is wired — *before* the `profile.d` loop that brings in
+systemd's shell integration. So systemd's entry always runs after ours.
+
+The symptom was total and silent: every label fell back to tmux's one-word default, which is
+also what you get with no hook at all, so nothing looked broken. The prototype never saw it
+because it installed the hook with `default-command 'bash --rcfile … -i'` — a non-login
+shell, which reads neither `/etc/profile` nor `profile.d`.
+
+The fix skips any `$BASH_COMMAND` that is itself an entry in `PROMPT_COMMAND`, and skips it
+*without* disarming. Matching against `PROMPT_COMMAND` rather than naming systemd's function
+means the next release can ship a different prompt hook without this quietly breaking again.
+
+Two things worth keeping from this. **A non-login shell and a login shell are not
+interchangeable for testing shell integration** — `/etc/profile` and `profile.d` only run for
+the latter, and that is what a student gets. And the same difference caused a second, separate
+failure in the suite: Debian's `/etc/profile` **assigns** `PATH` rather than appending to it,
+so a `PATH` exported into tmux's environment is gone by the time the first prompt appears.
+
+### D1a. A closed window leaves the tmux client attached — forever
+
+**Measured, and it is the more surprising half of D1.** Killing the host-side `podman exec`
+client does not kill the tmux *client* inside the container. conmon keeps the exec session's
+pty open, so the in-container client stays blocked reading it and tmux goes on reporting the
+session as attached. Not for a few seconds — indefinitely; sessions from tests minutes
+earlier were still `attached=1`.
+
+```
+  PID  PPID STAT TTY    COMMAND
+  926     0 Ss+  pts/0  /bin/bash /usr/local/bin/cs193v-shell      <- host client long gone
+  931   926 S+   pts/0  tmux ... new-session -s cs193v-1           <- the client, still attached
+  933     1 Ss   ?      tmux ... (the server)
+```
+
+**Nothing inside the container can tell this apart from a live client.** Both were checked:
+the pty still exists, is still readable, and is still *writable* (`printf "" > /dev/pts/0`
+succeeds on the dead one), and `ppid` is 0 for a live and a dead one alike, because the
+parent is outside the pid namespace either way.
+
+Left alone this silently breaks the thing tabs exist for. `cs193v-shell` attaches to a
+session only if it has no client, so it would never find one, every launch would build a
+fresh session, and the student's real tabs would pile up unreachable behind a ghost — the
+exact "invisible orphaned session" failure that `destroy-unattached on` was meant to prevent.
+
+The fix is `prune_stale_tmux_clients` in `./cs193v`, and it has to live on the **host**
+because the host is the only side that can tell: the client is a `podman exec` process it
+started itself. `cs193v-shell` stamps each session with `@cs193v_host_pid`, and the next
+launch detaches any session whose recorded pid is gone (checked with `kill -0` plus a
+`ps | grep podman` guard against pid reuse). `60-container.sh` asserts the whole chain,
+including the conmon behaviour itself — **if that assertion ever starts failing it is good
+news**, because it means clients die on their own now and the prune can be deleted.
+
 ### D2. Does seccomp block `mount()` in a nested user namespace?
 
 **No — `ALLOWED`.** This confirms the correction the design docs already make against their

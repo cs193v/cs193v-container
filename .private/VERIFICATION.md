@@ -736,6 +736,14 @@ output remains on screen after quitting.
 Windows Terminal and GNOME Terminal.
 *Expect:* consistent. Record any terminal where colour or key handling differs.
 
+**7.9 — The tab keys, per terminal.** See `tests/MANUAL.md` §7.9 for the matrix. This cannot be
+automated in principle: `65-tmux.sh` injects the key bytes directly and so proves only that the
+container responds to them, never that a given terminal emits them.
+*Expect:* `CTRL+T`, clicking a tab and clicking `+ NEW TAB` work everywhere. `SHIFT+LEFT/RIGHT`
+work wherever the terminal sends `CSI 1;2D`/`1;2C`. `ALT+…` is expected to fail on macOS unless
+the student has enabled Option-as-Meta, which is precisely why every action also has a key or a
+click that does not need it.
+
 ---
 
 ## 8. Claude Code

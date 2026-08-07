@@ -16,8 +16,9 @@ cd ~/cs193v
 ```
 
 You get a shell with node, python, git, the GitHub CLI, the Vercel CLI, Claude Code and
-Playwright with a headless Chromium installed. You can run `./cs193v` in as many terminal windows as you like; they all open
-a shell in the **same** container. There is only ever one container.
+Playwright with a headless Chromium installed, inside a tabbed terminal that tells you where
+you are. You can run `./cs193v` in as many terminal windows as you like; each gets its own
+set of tabs in the **same** container. There is only ever one container.
 
 Everything about how it starts is in two plain text files you can read, in the `.config`
 folder next to the launcher: `container.args` holds every flag, heavily commented, and
@@ -284,16 +285,22 @@ It does not survive your computer restarting, because nothing does; the next `cs
 it back. If you ever suspect it, `cs193v doctor` will tell you, and
 `cs193v --reset-tunnel` fixes it without disturbing the container or anything running in it.
 
-One caveat about long-running servers, with the honest state of knowledge attached.
-**On Linux, closing a terminal window does not stop a server you started in it** — this was
-measured, and a server left running in the foreground survives and stays reachable, though
-its output goes nowhere. On **macOS and Windows this has not been confirmed**: the piece of
-podman that your terminal talks to lives outside the virtual machine there, so the answer
-may differ.
+A note about long-running servers, with the honest state of knowledge attached.
+**Closing your terminal window does not stop a server you started in it.** On Linux this was
+measured directly: a server left running in the foreground survives and stays reachable,
+though its output goes nowhere.
 
-Until that is checked, the safe habit is the simple one: keep the window open while a server
-should be running, and use a second window for other work. You can run `cs193v` in as many
-windows as you like.
+The tabbed terminal makes that sturdier than a measurement on one platform. What your window
+is attached to is a tmux *client*; your shells and your servers are inside a tmux *server*
+that lives in the container and is not a descendant of the connection your terminal made. So
+closing the window disconnects a viewer rather than killing anything, and there is no
+plausible platform difference in that — where the earlier answer really did depend on how
+podman behaves on each host. It has still not been confirmed by hand on macOS or Windows,
+which is worth doing.
+
+So you do not need a second window to keep a server alive, and you do not need to leave
+anything open overnight: `./cs193v` again picks up exactly where you left off. Use another
+tab for other work, and `exit` when you actually mean to stop something.
 
 ---
 
@@ -328,12 +335,50 @@ actually are.
 
 ## Small things that are true here
 
-- **You always know you are inside.** Opening a shell clears the screen and shows a banner,
-  the window title says `CS193V Development Environment`, and the prompt reads
-  `student@cs193v-development`. Leaving prints a goodbye. A permanent border around the
-  terminal was investigated and rejected: the only portable way to pin a header discards
-  your scrollback, and changing the window's colours does nothing at all on the default
-  terminals of Ubuntu and macOS.
+- **You always know you are inside.** A title bar across the top of the terminal says
+  `CS193V Development Environment` for as long as you are in the container, the window
+  title says the same, and the prompt reads `student@cs193v-development`. Entering clears
+  the screen and shows a banner; leaving prints a goodbye.
+
+  Getting that permanent title bar took a second attempt. Pinning a header with escape
+  sequences alone was tried first and abandoned, because the only portable mechanism for it
+  throws away your scrollback — 40 lines of output in, 10 kept. Changing the window's
+  background colour was tried too, and does nothing at all on the default terminals of
+  Ubuntu and macOS. What works is a terminal multiplexer, which is what the tabs below are
+  running on.
+- **You get tabs.** The bar under the title shows one block per tab, labelled with whatever
+  is running in it — `bash`, `python3`, `claude`, `git commit` — and a count on the left so
+  it is obvious when other tabs exist. Click a tab to switch to it, or click `+ NEW TAB` on
+  the right for another. `exit` closes a tab; exiting the last one leaves the container.
+
+  | | |
+  |---|---|
+  | New tab | **CTRL+T** — or click `+ NEW TAB` |
+  | Previous / next tab | **SHIFT+LEFT** / **SHIFT+RIGHT** — or click the tab |
+  | Close a tab | `exit` |
+
+  `ALT+T` and `ALT+LEFT` / `ALT+RIGHT` do the same things, if you prefer them. On a Mac
+  they need one setting changed first: macOS terminals treat Option as a way to type
+  accented characters, so `ALT+T` produces `†` until you turn that off. In Terminal.app it
+  is Settings → Profiles → Keyboard → **Use Option as Meta key**; in iTerm2, Profiles →
+  Keys → Left Option Key → **Esc+**. You never have to do this — `CTRL+T` and the arrow
+  keys above work everywhere without it.
+
+  **Nothing else is bound.** There is no prefix key, and the several hundred shortcuts a
+  terminal multiplexer normally ships with have been removed rather than hidden, so there
+  is no combination you can hit by accident that splits the screen, opens a menu, or leaves
+  you somewhere you cannot get out of. If you already know tmux: `CTRL+B` does nothing here,
+  and is passed through to your shell as an ordinary "move back one character".
+
+  Your scrollback is 50,000 lines per tab and belongs to the container, not to your terminal
+  — so it survives switching tabs and coming back. Selecting with the mouse copies to your
+  own clipboard. If you would rather use your terminal's native selection, hold SHIFT while
+  dragging.
+- **Closing your terminal window does not stop your work.** A dev server running in a tab
+  keeps running. Run `./cs193v` again and you are back in the same tabs, with the same
+  scrollback and the same server still serving. This is the one thing worth knowing that is
+  different from a plain shell: there is state you can come back to, and closing the window
+  is not how you shut things down. `exit` is.
 - **`nano`** is the editor. `git commit` with no `-m` opens it. (Without this it would
   open `vim.tiny`, which is a genuinely bad first experience.)
 - **git is completely stock.** There is no `/etc/gitconfig`, so the hints and errors you

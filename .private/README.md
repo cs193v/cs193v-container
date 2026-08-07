@@ -22,13 +22,18 @@ projects/                      the student's work; the only directory shared wit
   Containerfile                the image
   files/                       everything the image installs
     entrypoint.sh              PID 1 — keep-alive + reaps orphans
+    cs193v-shell               THE LANDING POINT — picks a tmux session and attaches
+    cs193v-welcome             the entry banner
+    cs193v-goodbye             the goodbye on exit
+    tmux/tmux.conf             the beginner-locked tmux configuration
+    tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
     ports                      the in-container port diagnostic
     open-url                   the $BROWSER stub
     am-i-in-a-container         the milestone check the install guides reference
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
-    bash_logout                the goodbye on exit
-    profile.d/                 stty -ixon, and the entry banner
+    bash_logout                runs cs193v-goodbye, outside tmux only
+    profile.d/                 stty -ixon, and the entry banner outside tmux
     claude-code/               managed-settings.json + CLAUDE.md
   messages.txt                 all student-facing launcher strings (script config, not reading)
   install-cs193v.sh            macOS / Ubuntu / WSL setup
@@ -37,6 +42,7 @@ projects/                      the student's work; the only directory shared wit
   VERIFICATION.md              release gates — hand to a Claude Code instance per platform
   ERRORS.md                    what the first verification pass found, and what is still open
   tests/                       the regression suite
+    tmux-harness/              the screen-scraping tmux suite, run inside the container
 .github/workflows/build.yml    multi-arch build + push + smoke test
 ```
 
@@ -185,15 +191,12 @@ an Intel Mac, and WSL's `--name` support.
 
 ## Deliberately not here
 
-So it isn't re-proposed: a persistent border or status bar around the terminal (needs a pty
-multiplexer; the one portable escape-sequence route, a `DECSTBM` scroll region, was measured
-against real VTE and **discards scrollback** — 40 lines in, 10 retained); changing the
-terminal's background colour (Ptyxis, the Ubuntu 26.04 default, accepts `OSC 11`, reports
-success on query, and renders nothing — and macOS Terminal.app ignores it, so it would be
-invisible on two of three platforms' default terminals and undetectable on one); puppeteer
-and Chrome; `--cap-drop` / `no-new-privileges`
+So it isn't re-proposed: changing the terminal's background colour (Ptyxis, the Ubuntu 26.04
+default, accepts `OSC 11`, reports success on query, and renders nothing — and macOS
+Terminal.app ignores it, so it would be invisible on two of three platforms' default terminals
+and undetectable on one); puppeteer and Chrome; `--cap-drop` / `no-new-privileges`
 (mutually exclusive with the sudo decision, and they would buy nothing since root owns
-the tamper targets); a `serve` wrapper or tmux; ripgrep/fzf/bat/fd/delta; man pages;
+the tamper targets); a `serve` wrapper; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
 `podman diff` tamper detection.
 
@@ -209,6 +212,29 @@ unlaunchable browser fails the build instead of the student.
 `--shm-size` stays rejected, but the reason in `container.args` had to be rewritten: it used
 to be "Chrome is not installed", and now the honest reason is that Playwright puts
 `--disable-dev-shm-usage` in its own default chromium arguments.
+
+**No longer on this list: tmux, and the persistent frame it makes possible.** Both were
+rejected, and both decisions were reversed deliberately. The frame was rejected because the
+only portable escape-sequence route to one, a `DECSTBM` scroll region, was measured against
+real VTE and **discards scrollback** — 40 lines in, 10 retained. tmux was rejected in the
+same breath and "for the same class of cost", on the grounds that it breaks the terminal's
+own scrollback and needs Shift to select text.
+
+That second rejection was the wrong reading, and a prototype settled it by measurement
+rather than argument. tmux does not *break* scrollback, it *replaces* it: 50,000 lines per
+tab, kept by tmux instead of by the terminal, where the DECSTBM route genuinely discarded
+lines. And Shift+drag is not a workaround imposed on the student, it is the escape hatch —
+plain drag copies through OSC 52 and reaches the same system clipboard, with Shift+drag
+still available for anyone who wants their terminal's own selection. So the frame is now
+what the container actually has: a title bar and a tab bar, always on screen, which is what
+issue #4 asked for and could not previously be built.
+
+What did *not* get overruled is the rest of that prototype's cost, and it is worth knowing
+what was paid. The configuration is 500 lines because all four key tables are emptied and
+rebuilt: turning `mouse on` after `unbind -a -T root` leaves a session where the wheel
+enters a modal copy mode with a dead keyboard and no key that exits, which is the worst
+failure available to a beginner. `.private/files/tmux/tmux.conf` documents each trap where
+it sits.
 
 **No longer on this list: a VS Code-style port relay.** It was rejected, and that decision
 was reversed deliberately — see the ports chapter of `CONTAINER-DESIGN.md`. Two of the three

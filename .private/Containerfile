@@ -43,8 +43,22 @@ RUN apt-get update \
       locales tzdata \
       fonts-noto-core fontconfig \
       openssh-server \
+      tmux ncurses-term \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
+# tmux is the student's landing point: `./cs193v` runs cs193v-shell, which puts them inside
+# a locked-down tmux rather than a bare bash. See files/tmux/tmux.conf for the whole of that
+# configuration and files/cs193v-shell for how a session is chosen. It is in Ubuntu main on
+# both 24.04 and 26.04, all architectures, maintained by Ubuntu's security team, which is
+# why a multiplexer is an apt line here rather than a vendored binary.
+#
+# ncurses-term is listed EXPLICITLY, for the same reason fontconfig is a few lines up: it is
+# only a Recommends, this apt line uses --no-install-recommends, and nothing hard-depends on
+# it. It carries the `tmux-256color` terminfo entry -- ncurses-base ships only a handful of
+# common entries and that is not among them. Without it tmux refuses to start at all:
+# `default-terminal "tmux-256color"` becomes "missing or unsuitable terminal", which with
+# tmux as the landing point means no student can open a shell. The build-time check further
+# down would catch it, which is the point of having one.
 # openssh-server provides the sshd that serves the loopback tunnel. It is a SERVER package
 # for a server that never listens: the launcher starts it per session as
 # `podman exec -i ... sshd -i`, so its connection is a pipe, not a socket. See
@@ -268,8 +282,11 @@ COPY files/ /tmp/cs193v-files/
 #
 # What it does, in order:
 #
-#  1. Installs the four helper commands: the $BROWSER stub, the milestone check, the
-#     `ports` diagnostic, and the entrypoint.
+#  1. Installs the helper commands: the $BROWSER stub, the milestone check, the `ports`
+#     diagnostic, the entrypoint, and the three that make up the landing point --
+#     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
+#     last two are commands rather than inline shell because they now have two callers
+#     each: the tmux path and the plain `bash -l` path. See item 9.
 #
 #  2. Installs the Claude Code course policy into /etc/claude-code — deliberately NOT
 #     under ~/.claude, which is a named volume: an image-provided file there is seeded
@@ -317,11 +334,40 @@ COPY files/ /tmp/cs193v-files/
 #     mounted at runtime, so a throwaway is generated purely to satisfy that check and
 #     deleted in the same layer. It must not survive: a host key baked into the image would
 #     be one private key shipped to every student.
+#
+#  9. Installs the tmux configuration into /etc/cs193v/ and the tab-label hook's source
+#     line into /etc/bash.bashrc.
+#
+#     NOT /etc/tmux.conf. cs193v-shell names the file with an explicit `-f`, which
+#     suppresses BOTH of tmux's default paths — /etc/tmux.conf and ~/.tmux.conf. The
+#     student-writable one is the reason: tmux lets ~/.tmux.conf win, so a student who
+#     created it could re-arm a prefix key and put back the 70 bindings the configuration
+#     exists to remove, then ask staff about a terminal nobody can reproduce.
+#
+#     The hook goes in /etc/bash.bashrc rather than being handed to tmux as a
+#     `default-command`, because bash.bashrc reaches every interactive shell and therefore
+#     every tab with no tmux involvement. Handing a hooked shell to `new-session` instead
+#     is a trap that was measured during prototyping: it reaches the FIRST tab only, so
+#     wrapper labels work in tab one and silently nowhere else. It is appended LAST, after
+#     10-cs193v-shell.sh, because the hook composes PROMPT_COMMAND and anything assigning
+#     that wholesale afterwards would silently drop it.
+#
+#     VALIDATED at build time, on the same principle as `sshd -t` and the JSON parse above,
+#     and with more reason than either: tmux is now the only way in, so a configuration
+#     error is not a degraded session, it is no session at all. A server is started on a
+#     throwaway socket with the real config and then interrogated — no errors reported, the
+#     prefix table empty, all six tab bindings present — and killed in the same layer. It
+#     runs as `student` because that is who will run it, and it doubles as proof that the
+#     tmux-256color terminfo entry from ncurses-term is actually present, since tmux will
+#     not start without it.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url             /usr/local/bin/open-url; \
     install -m 0755 /tmp/cs193v-files/am-i-in-a-container  /usr/local/bin/am-i-in-a-container; \
     install -m 0755 /tmp/cs193v-files/ports                /usr/local/bin/ports; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh        /usr/local/bin/cs193v-entrypoint; \
+    install -m 0755 /tmp/cs193v-files/cs193v-shell         /usr/local/bin/cs193v-shell; \
+    install -m 0755 /tmp/cs193v-files/cs193v-welcome       /usr/local/bin/cs193v-welcome; \
+    install -m 0755 /tmp/cs193v-files/cs193v-goodbye       /usr/local/bin/cs193v-goodbye; \
     install -d -m 0755 /etc/claude-code; \
     install -m 0644 /tmp/cs193v-files/claude-code/managed-settings.json /etc/claude-code/managed-settings.json; \
     install -m 0644 /tmp/cs193v-files/claude-code/CLAUDE.md             /etc/claude-code/CLAUDE.md; \
@@ -332,6 +378,21 @@ RUN set -eux; \
     python3 /tmp/cs193v-files/rewrite-window-title.py; \
     grep -q 'CS193V Development Environment' /home/student/.bashrc; \
     cat /tmp/cs193v-files/profile.d/10-cs193v-shell.sh >> /etc/bash.bashrc; \
+    install -d -m 0755 /etc/cs193v; \
+    install -m 0644 /tmp/cs193v-files/cs193v-strings.sh  /etc/cs193v/strings.sh; \
+    sh -n /etc/cs193v/strings.sh; \
+    install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
+    install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \
+    printf '\n# CS193V tab labels inside tmux. Must stay last: it composes PROMPT_COMMAND.\nif [ -n "${TMUX:-}" ]; then . /etc/cs193v/tabname.bash; fi\n' >> /etc/bash.bashrc; \
+    bash -n /etc/cs193v/tabname.bash; \
+    infocmp tmux-256color > /dev/null; \
+    su student -s /bin/bash -c 'tmux -L cs193vbuild -f /etc/cs193v/tmux.conf new-session -d -x 80 -y 24 "sleep 60"'; \
+    test -z "$(su student -s /bin/bash -c 'tmux -L cs193vbuild show-messages' | grep -F 'tmux.conf' || true)"; \
+    test -z "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T prefix' 2>/dev/null || true)"; \
+    test -z "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T copy-mode-vi' 2>/dev/null || true)"; \
+    test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T root' | grep -cE ' (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ')" = 6; \
+    test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild show -gv destroy-unattached')" = off; \
+    su student -s /bin/bash -c 'tmux -L cs193vbuild kill-server'; \
     install -o student -g student -m 0644 /tmp/cs193v-files/nanorc /home/student/.nanorc; \
     install -d -o student -g student -m 0700 /home/student/.claude; \
     install -d -o student -g student -m 0700 /home/student/.claude-json; \

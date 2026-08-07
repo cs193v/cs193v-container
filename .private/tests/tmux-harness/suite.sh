@@ -1,0 +1,858 @@
+#!/usr/bin/env bash
+#
+# Screen-level verification of the CS193V tmux configuration.
+#
+# RUNS INSIDE THE CONTAINER. ../65-tmux.sh copies this directory in with `podman cp` and
+# runs it there, so the config under test is the INSTALLED /etc/cs193v/tmux.conf, the tmux
+# is the image's apt tmux, and the shell hook is the real /etc/bash.bashrc line -- not a
+# copy of any of them exercised somewhere else.
+#
+# It runs the real tmux inside an instrumented outer tmux, injects the exact byte sequences
+# a student's terminal would send, and asserts on the rendered screen: text, structure, and
+# colour contrast under both light and dark host palettes.
+#
+# WHAT THIS TIER IS FOR. The cheap tiers assert that files exist and settings are set.
+# This one is the only thing that can see what a student SEES -- that the wheel does not
+# strand them in a mode with a dead keyboard, that the chrome is legible on a light theme,
+# that clicking a tab works, that a hundred-odd keys a beginner might mash do nothing.
+# Every check here was written against a bug that actually happened during prototyping.
+#
+# Forked from the multiplexer prototype's tmux/tests/test-suite.sh. Divergences are marked
+# `# FORK:` and they are not cosmetic -- the container's config differs from the prototype's
+# in six ways, and several of the prototype's assertions assert the OPPOSITE of what this
+# configuration should do.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
+
+S=tmuxtest
+SOCK="cs193v-t$$"
+# FORK: the installed path, not a file in the source tree.
+CONF="${CS193V_TMUX_CONF:-/etc/cs193v/tmux.conf}"
+# Read from the image's own definition rather than repeated here, so rewording the title
+# does not redden this suite. See files/cs193v-strings.sh.
+# shellcheck source=/dev/null
+[ -r /etc/cs193v/strings.sh ] && . /etc/cs193v/strings.sh
+TITLE="${CS193V_TITLE:?/etc/cs193v/strings.sh did not define CS193V_TITLE}"
+it() { tmux -L "$SOCK" "$@"; }     # "inner tmux": the instance under test
+
+cleanup() { it kill-server 2>/dev/null; hx_teardown; }
+trap cleanup EXIT
+
+# --- structure probes -------------------------------------------------------
+# Fingerprint of the session's shape plus whether any pane has entered a mode. If a keystroke
+# splits a pane, opens copy mode, kills a window, or detaches, this string changes.
+probe_struct() {
+  it list-panes -a -F '#{window_index}.#{pane_index}.#{pane_in_mode}' 2>/dev/null |
+    sort | tr '\n' ',' | sed 's/,$//'
+}
+probe_win() { it display-message -p -t cs193v '#{window_index}' 2>/dev/null; }
+probe_name() { it display-message -p -t cs193v '#{window_name}' 2>/dev/null; }
+probe_mode() { it display-message -p -t cs193v '#{pane_in_mode}' 2>/dev/null; }
+probe_wincount() { it list-windows -t cs193v 2>/dev/null | wc -l | tr -d ' '; }
+
+# ============================================================================
+hx_section "packaging and prerequisites"
+# FORK: the prototype ran `apt-cache policy tmux` here to prove tmux comes from Ubuntu main.
+# That cannot work in this image -- the Containerfile deletes /var/lib/apt/lists to keep the
+# layer small, so there is no candidate to report. The claim it was making is about the
+# distribution anyway, not about our image; 50-image.sh records the installed version.
+#
+# What matters HERE is the two things whose absence stops a student getting a shell at all.
+if command -v tmux >/dev/null 2>&1; then
+  hx_pass "tmux is installed in the image"
+  hx_note "tmux $(tmux -V | awk '{print $2}')"
+else
+  hx_fail "tmux is installed in the image"; hx_summary "tmux"; exit 1
+fi
+# The terminfo gate. default-terminal is tmux-256color, whose entry ships in ncurses-term --
+# a Recommends, which --no-install-recommends drops. Without it tmux exits immediately with
+# "missing or unsuitable terminal" and NOBODY can open a shell.
+if infocmp tmux-256color >/dev/null 2>&1; then
+  hx_pass "the tmux-256color terminfo entry is present (ncurses-term)"
+else
+  hx_fail "the tmux-256color terminfo entry is present (ncurses-term)" \
+          "tmux will refuse to start; the image is missing ncurses-term"
+fi
+if [ -r "$CONF" ]; then
+  hx_pass "the configuration is installed at $CONF"
+else
+  hx_fail "the configuration is installed at $CONF"; hx_summary "tmux"; exit 1
+fi
+# -f suppresses both of tmux's default config paths, so neither may exist to be picked up.
+for stray in /etc/tmux.conf "$HOME/.tmux.conf"; do
+  if [ -e "$stray" ]; then
+    hx_fail "no stray tmux config at $stray" "a file here could override the locked-down config"
+  else
+    hx_pass "no stray tmux config at $stray"
+  fi
+done
+
+# ============================================================================
+hx_section "config integrity"
+FAKEBIN="$(hx_fake_binary claude)"
+# Second fixture: `claude` installed the npm way, as a script run by a node interpreter.
+# /proc then reports the interpreter, which is the failure mode worth documenting.
+cp "$(readlink -f "$(command -v python3)")" "$FAKEBIN/node"
+printf '#!/usr/bin/env node\nimport time; time.sleep(300)\n' > "$FAKEBIN/claude-npm"
+chmod +x "$FAKEBIN/claude-npm"
+
+hx_start "$S" "tmux -L $SOCK -f $CONF new-session -s cs193v"
+# FORK: the prototype waited for its keyboard hint, "ALT+T new tab". There is no hint any
+# more -- the course teaches the keys rather than advertising them -- so the thing to wait
+# for is the button that replaced it.
+if hx_wait "$S" '\+ NEW TAB' 12; then
+  hx_pass "session starts and the tab bar is visible"
+else
+  hx_fail "session starts and the tab bar is visible" "screen: $(hx_cap "$S" | head -3)"
+  hx_summary "tmux"; exit 1
+fi
+hx_settle 1.5
+
+# A tmux config error does not abort the server -- it is reported in show-messages and shown
+# to the user, which ALSO puts the pane into a message-viewing mode. That is how a misplaced
+# `-N` flag silently unbound all three keys while making the "SCROLLED BACK" banner appear on
+# a session nobody had scrolled. Both halves are now regression-tested.
+msgs="$(it show-messages 2>/dev/null)"
+if printf '%s' "$msgs" | grep -qiE 'unknown|invalid|error|ambiguous|bad '; then
+  hx_fail "the config loads with zero error messages" \
+          "$(printf '%s' "$msgs" | grep -iE 'unknown|invalid|error|ambiguous|bad ' | head -3)"
+else
+  hx_pass "the config loads with zero error messages"
+fi
+hx_expect_eq "no pane is in a mode at startup" "$(probe_mode)" "0"
+
+# --- R1 as a direct keymap audit -------------------------------------------
+# tmux can enumerate its own keymap, so this requirement is auditable rather than merely
+# pokeable. NOTE: the audit must run against the live ATTACHED session. A detached probe
+# session is destroyed instantly by `destroy-unattached on`, which takes the server with it
+# (exit-empty) and leaves the next command talking to a fresh DEFAULT-config server -- which
+# looks exactly like a catastrophic config failure and is entirely an artifact of the test.
+keys="$(it list-keys 2>/dev/null)"
+BASELINE_KEYS="$(printf '%s\n' "$keys" | grep -c 'bind-key')"
+hx_note "bindings defined in the entire server: $BASELINE_KEYS"
+for tbl in prefix copy-mode-vi; do
+  if [ "$(printf '%s\n' "$keys" | grep -c -- "-T $tbl ")" -eq 0 ]; then
+    hx_pass "the '$tbl' key table is completely empty"
+  else
+    hx_fail "the '$tbl' key table is completely empty" \
+            "$(printf '%s\n' "$keys" | grep -m2 -- "-T $tbl ")"
+  fi
+done
+pfx="$(it show-options -g prefix; it show-options -g prefix2)"
+hx_expect_contains "no prefix key is set" "$pfx" "prefix None"
+hx_expect_contains "no secondary prefix key is set" "$pfx" "prefix2 None"
+
+# The keys must actually be bound. This is the assertion that would have caught the -N bug
+# immediately (a misplaced -N flag registers nothing and reports no error).
+#
+# FORK: six, not three. Each action has an ALT key and a key that needs no Meta, because
+# macOS terminals compose Option by default and an ALT-only keymap is unreachable for most
+# of the class.
+for k in "M-t" "C-t" "M-Left" "S-Left" "M-Right" "S-Right"; do
+  if printf '%s\n' "$keys" | grep -qE -- "-T root +$k "; then
+    hx_pass "$k is bound in the root table (no prefix needed)"
+  else
+    hx_fail "$k is bound in the root table" "not present in list-keys"
+  fi
+done
+# ...and all six again inside copy mode, or the tab bar goes dead the instant the wheel is
+# brushed -- which is exactly when a confused student reaches for it.
+for k in "M-t" "C-t" "M-Left" "S-Left" "M-Right" "S-Right"; do
+  if printf '%s\n' "$keys" | grep -qE -- "-T copy-mode +$k "; then
+    hx_pass "$k still works while scrolled back"
+  else
+    hx_fail "$k still works while scrolled back" "not bound in the copy-mode table"
+  fi
+done
+# Clicking the chip is the only route to a new tab that needs no keyboard at all.
+if printf '%s\n' "$keys" | grep -qE -- "-T root +MouseDown1StatusRight "; then
+  hx_pass "the + NEW TAB chip is bound to a click"
+else
+  hx_fail "the + NEW TAB chip is bound to a click" "MouseDown1StatusRight is not bound"
+fi
+
+# No binding anywhere may invoke a destructive or confusing command.
+for danger in split-window detach-client command-prompt choose-tree choose-window kill-window \
+              kill-pane kill-session kill-server display-menu display-popup rename-window \
+              rename-session resize-pane swap-pane next-layout break-pane join-pane \
+              switch-client suspend-client source-file run-shell new-session; do
+  if printf '%s\n' "$keys" | grep -qE -- "(^|[ ;{])$danger([ ;}]|$)"; then
+    hx_fail "no keybinding can invoke '$danger'" "$(printf '%s\n' "$keys" | grep -m1 -- "$danger")"
+  else
+    hx_pass "no keybinding can invoke '$danger'"
+  fi
+done
+
+# --- the scrollbar must stay OFF -------------------------------------------
+# This is a regression test for a measured bug, not a style preference. With pane-scrollbars on,
+# tmux adds and removes the scrollbar column depending on whether there is scrollback to show --
+# and an alternate-screen program (nano, vim, less) has none, so the column flickers in and out.
+# Each change RESIZES the pane, and ncurses repaints the whole screen on every resize. Measured:
+# geometry oscillated 100x27 <-> 99x27 eight times in five seconds, which made nano unusable.
+if [ "$(it show-options -gv pane-scrollbars 2>/dev/null)" = "off" ]; then
+  hx_pass "pane-scrollbars is off (prevents the alternate-screen resize flicker)"
+else
+  hx_fail "pane-scrollbars is off" \
+          "got '$(it show-options -gv pane-scrollbars 2>/dev/null)' -- full-screen apps will flicker"
+fi
+
+# --- portability of the 3.6-only block -------------------------------------
+# The target is Ubuntu 26.04 (tmux 3.6). The %if gate is belt-and-braces so the file still loads
+# cleanly on 3.4, where copy-mode-position-format does not exist. Prove the gate works in BOTH
+# directions by loading a copy whose gate can never be true and checking it is still error-free.
+GATED="$(mktemp)"
+sed 's/#{>=:#{version},3.6}/#{>=:#{version},99.0}/' "$CONF" > "$GATED"
+SOCK2="cs193vgate$$"
+tmux -L "$SOCK2" -f "$GATED" new-session -d -s gate 2>/dev/null
+gmsg="$(tmux -L "$SOCK2" show-messages 2>/dev/null)"
+gkeys="$(tmux -L "$SOCK2" list-keys 2>/dev/null | grep -c 'bind-key')"
+# FORK: this used to be a skip. Under the prototype's `destroy-unattached on`, a detached
+# probe session was destroyed the instant it was created -- taking the server with it via
+# exit-empty -- so the check could never actually run and had to be excused. With
+# destroy-unattached off (see Part 5 of the config, and ERRORS.md D1 for why) the probe
+# survives and this is a real assertion again.
+if [ -z "$gkeys" ] || [ "$gkeys" = "0" ]; then
+  hx_fail "the config is error-free when the 3.6 block is gated off (simulates tmux 3.4)" \
+          "the probe session reported no bindings at all -- the server did not come up"
+elif printf '%s' "$gmsg" | grep -qiE 'unknown|invalid|error'; then
+  hx_fail "the config is error-free when the 3.6 block is gated off (simulates tmux 3.4)" \
+          "$(printf '%s' "$gmsg" | grep -iE 'unknown|invalid|error' | head -3)"
+else
+  hx_pass "the config is error-free when the 3.6 block is gated off (simulates tmux 3.4)"
+fi
+tmux -L "$SOCK2" kill-server 2>/dev/null
+
+# ============================================================================
+hx_section "startup appearance"
+# Two status lines now: line 0 is the course title bar, line 1 is the tab bar. Every screen-row
+# assertion below is offset accordingly (row 1 = title, row 2 = tabs, in 1-based capture terms).
+title="$(hx_cap "$S" | sed -n 1p)"
+hx_note "title bar: [$title]"
+# FORK: "CS193V", not "CS193". The prototype's title bar dropped the V; the banner, the
+# window title and the hostname in this project all have it, and this is the most visible
+# string in the whole environment.
+hx_expect_contains "a title bar names the environment" "$title" "$TITLE"
+case "$title" in
+  " "*"$TITLE"*)
+    hx_pass "the title bar text is centered" ;;
+  *)
+    hx_fail "the title bar text is centered" "[$title]" ;;
+esac
+hx_expect_absent "the title bar is separate from the tab list" "$title" "TAB"
+hx_check_colors "$S" "title bar (row 0)" --rows 0 --require-explicit
+
+# The chrome deliberately has NO background of its own any more (dropped at the course staff's
+# request: tmux's habit of suppressing a background that matches the terminal's made it unreliable
+# across terminals). So the bar's text sits directly on whatever background the student's theme
+# provides, and the requirement becomes: every text run must stay legible under BOTH a light and a
+# dark host palette on its own. That is what the contrast floor checks, without --require-explicit.
+hx_check_colors "$S" "chrome text is legible on light AND dark terminals" --rows 0,1
+
+bar="$(hx_cap "$S" | sed -n 2p)"
+hx_note "tab bar: [$bar]"
+hx_expect_contains "tab bar states how many tabs exist" "$bar" "1 TAB"
+# FORK: the prototype asserted a keyboard cheat sheet here -- "ALT+T new tab   ALT+LEFT /
+# ALT+RIGHT switch tab". By course decision the chrome no longer advertises any key: the
+# keys are taught in class, and the bar stays quiet so tab labels get the width. What is
+# asserted instead is the button that replaced the hint, and that no hint came back.
+hx_expect_contains "tab bar offers a clickable new-tab button" "$bar" "+ NEW TAB"
+hx_expect_absent "the chrome advertises no keybindings" "$bar" "ALT+"
+hx_expect_absent "the chrome advertises no keybindings (CTRL)" "$bar" "CTRL+"
+hx_expect_absent "the chrome advertises no keybindings (SHIFT)" "$bar" "SHIFT+"
+hx_expect_absent "no SCROLLED BACK banner on a fresh session" "$bar" "SCROLLED BACK"
+hx_check_colors "$S" "+ NEW TAB chip" --grep "NEW TAB" --require-explicit
+
+# Row 3 is the pane border: the dividing line between the chrome and the student's own output.
+# tmux draws borders only BETWEEN panes, so with one full-width pane this top edge is as close to
+# "a border around the terminal" as tmux can get -- there is no left, right, or bottom edge.
+border="$(hx_cap "$S" | sed -n 3p)"
+case "$border" in
+  *"━"*) hx_pass "a border line separates the chrome from the terminal area" ;;
+  *)     hx_fail "a border line separates the chrome from the terminal area" "row 3: [$border]" ;;
+esac
+hx_expect_absent "the border carries no title (the tab bar already names the process)" "$border" "bash"
+hx_check_colors "$S" "pane border (row 2)" --rows 2 --min-contrast 3
+if hx_wait "$S" '1 bash' 8; then
+  hx_pass "first tab is labeled with its running process (bash)"
+else
+  hx_fail "first tab is labeled with its running process" "bar: [$(hx_cap "$S" | sed -n 2p)]"
+fi
+
+# Claim the fixture name from inside the pane. Without this the pane's ~/.bashrc prepends
+# ~/.local/bin and a REAL claude install wins the lookup -- the test then launches actual
+# Claude Code and "passes" while measuring nothing.
+hx_use_fixture "$S" "$FAKEBIN" claude
+
+# ============================================================================
+hx_section "new tab: CTRL+T, ALT+T, and the chip (host-terminal encodings)"
+# FORK: CTRL+T leads, because it is the key that works with no terminal configuration
+# anywhere -- a plain control byte, 0x14. ALT+T is kept as the fast path for anyone whose
+# terminal sends Meta.
+#
+# NOTE what this section can and cannot prove. It injects bytes straight into the inner
+# tmux's pty, so it proves the CONTAINER responds correctly to each encoding. It cannot
+# prove a given terminal EMITS them -- that is not a property of anything in here, and it
+# is why tests/MANUAL.md §7.9 exists.
+for spec in "REQ:CTRL+T (a plain control byte -- every terminal):$KEY_CTRL_T" \
+            "REQ:ESC-prefix (macOS Terminal.app, xterm, Windows Terminal):$KEY_ALT_T_ESCPREFIX" \
+            "INFO:CSI-u (kitty keyboard protocol):$KEY_ALT_T_CSIU"; do
+  tier="${spec%%:*}"; rest="${spec#*:}"; label="${rest%:*}"; hex="${rest##*:}"
+  before="$(probe_wincount)"
+  hx_hex "$S" "$hex"; hx_settle 1.2
+  after="$(probe_wincount)"
+  if [ "$after" -gt "$before" ]; then
+    hx_pass "ALT+T opens a tab via $label"
+  elif [ "$tier" = REQ ]; then
+    hx_fail "ALT+T opens a tab via $label" "window count stayed at $before"
+  else
+    hx_skip "ALT+T via $label -- not parsed by tmux (compatibility note only)"
+  fi
+done
+n="$(probe_wincount)"
+if [ "$n" -ge 2 ]; then
+  hx_pass "multiple tabs coexist ($n open)"
+  hx_expect_contains "tab bar pluralizes the count" "$(hx_cap "$S" | sed -n 2p)" "TABS"
+
+else
+  hx_fail "multiple tabs coexist"
+fi
+
+# FORK: clicking the chip. This is the whole reason the chip exists -- it is the one way to
+# open a tab that needs neither a working Meta key nor anyone to have told the student a
+# keystroke, so if it silently stops being clickable the fallback plan for macOS is gone.
+#
+# The click must land on the chip and NOT be swallowed by the generic MouseDown1Status
+# binding that switches tabs; that is what the separate range=right region in
+# status-format[1] is for.
+if loc="$(hx_find "$S" "+ NEW TAB")"; then
+  set -- $loc
+  before="$(probe_wincount)"
+  hx_click "$S" "$1" "$(($2 + 2))"
+  hx_settle 1.5
+  after="$(probe_wincount)"
+  if [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+    hx_pass "clicking the + NEW TAB chip opens a tab ($before -> $after)"
+  else
+    hx_fail "clicking the + NEW TAB chip opens a tab" "count stayed at $before"
+  fi
+else
+  hx_fail "clicking the + NEW TAB chip opens a tab" "could not find the chip on the tab bar"
+fi
+
+# ============================================================================
+hx_section "switch tabs: SHIFT and ALT arrows (host-terminal encodings)"
+# FORK: SHIFT+LEFT/RIGHT lead. They are a modified-key encoding rather than a control byte,
+# so unlike CTRL+T they do depend on the terminal sending the modifier parameter -- which is
+# exactly why the NEW TAB key is the control byte and not SHIFT+DOWN. If shift+arrow turns
+# out not to be transmitted on some terminal, tabs there are still openable and still
+# clickable; only the keyboard shortcut for switching is lost.
+for spec in "REQ:SHIFT+arrow, CSI 1;2 (every mainstream terminal):$KEY_SHIFT_LEFT:$KEY_SHIFT_RIGHT" \
+            "REQ:ESC-prefix (macOS Terminal.app 'Option as Meta'):$KEY_ALT_LEFT_ESCPREFIX:$KEY_ALT_RIGHT_ESCPREFIX" \
+            "REQ:CSI 1;3 (Windows Terminal, iTerm2, VS Code):$KEY_ALT_LEFT_CSI3:$KEY_ALT_RIGHT_CSI3" \
+            "REQ:SS3 / application-cursor mode:$KEY_ALT_LEFT_SS3:$KEY_ALT_RIGHT_SS3" \
+            "INFO:CSI 1;9 (older xterm, Meta as bit 8):$KEY_ALT_LEFT_CSI9:$KEY_ALT_RIGHT_CSI9"; do
+  tier="${spec%%:*}"; rest="${spec#*:}"
+  label="${rest%%:*}"; rest="${rest#*:}"
+  lhex="${rest%:*}"; rhex="${rest##*:}"
+  for dir in LEFT RIGHT; do
+    [ "$dir" = LEFT ] && hex="$lhex" || hex="$rhex"
+    p0="$(probe_win)"
+    hx_hex "$S" "$hex"; hx_settle 1
+    p1="$(probe_win)"
+    if [ "$p1" != "$p0" ] && [ -n "$p1" ]; then
+      hx_pass "ALT+$dir switches tab via $label ($p0 -> $p1)"
+    elif [ "$tier" = REQ ]; then
+      hx_fail "ALT+$dir switches tab via $label" "window index stayed at $p0"
+    else
+      hx_skip "ALT+$dir via $label -- not parsed by tmux (compatibility note only)"
+    fi
+  done
+done
+hx_expect_eq "tabs are numbered from 1, not 0" "$(it list-windows -t cs193v -F '#{window_index}' | head -1)" "1"
+
+# ============================================================================
+hx_section "tabs are labeled with the running process"
+hx_cmd "$S" "$(hx_fake_run claude 300)"
+hx_settle 3
+hx_expect_eq "tab label follows the running process automatically" "$(probe_name)" "claude"
+
+# Both labels must be visible at once -- the point of R3 is seeing what is in the tab you are
+# NOT looking at.
+hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"; hx_settle 1.2
+hx_use_fixture "$S" "$FAKEBIN" claude
+hx_cmd "$S" "python3"
+hx_settle 3
+bar="$(hx_cap "$S" | sed -n 2p)"
+hx_expect_contains "tab bar shows the other tab's process (claude)" "$bar" "claude"
+hx_expect_contains "tab bar shows this tab's process (python3)" "$bar" "python3"
+hx_note "tab bar: [$bar]"
+
+hx_hex "$S" "$KEY_CTRL_D"; hx_settle 2.5
+hx_expect_eq "tab label reverts to 'bash' when the process exits" "$(probe_name)" "bash"
+
+# FORK: THE REASON THE HOOK IS NOT OPTIONAL HERE.
+#
+# In the prototype this was an informational skip: a `#!/usr/bin/env node` script is reported
+# by /proc as `node`, but that machine's `claude` happened to be a native binary so nothing
+# was actually broken. This image installs Claude Code with `npm install -g`, so the script
+# case IS the real case, and `node` would be the label on most tabs in the course.
+#
+# `claude-npm` is deliberately NOT on the tab-label list, so it still demonstrates the raw
+# behaviour -- and that is the point: the label is wrong exactly until a name is listed,
+# which is why /etc/cs193v/tabname.bash lists `claude`. The positive half is asserted in the
+# hook section below.
+hx_cmd "$S" "claude-npm"
+hx_settle 3
+wrapname="$(probe_name)"
+if [ "$wrapname" = "node" ]; then
+  hx_pass "an unlisted node script is labeled 'node' (which is why 'claude' is on the list)"
+elif [ "$wrapname" = "claude-npm" ]; then
+  hx_pass "a script-based claude is labeled by its own name"
+else
+  hx_skip "a script-based claude is labeled '$wrapname' -- /proc reports the interpreter, not the script"
+  hx_note "if claude ships as a node script, use the automatic-rename-format override noted in README.md"
+fi
+hx_hex "$S" "03"; hx_settle 1
+
+# ============================================================================
+hx_section "R3/R6  tab bar legibility and clickability"
+hx_check_colors "$S" "tmux tab bar (row 1)" --rows 1
+
+if loc="$(hx_find "$S" "claude")"; then
+  set -- $loc
+  before="$(probe_win)"
+  hx_click "$S" "$1" "$2"
+  hx_settle 1.2
+  if [ "$(probe_win)" != "$before" ] && [ "$(probe_name)" = "claude" ]; then
+    hx_pass "clicking a tab name switches to that tab"
+  else
+    hx_fail "clicking a tab name switches to that tab" "win $before -> $(probe_win), name $(probe_name)"
+  fi
+else
+  hx_fail "clicking a tab name switches to that tab" "could not find 'claude' in the tab bar"
+fi
+
+# Right-click is a genuine R1 risk: tmux ships context menus on the status line and the pane.
+for target in "the tab bar:10:1" "inside the terminal:20:12"; do
+  what="${target%%:*}"; rest="${target#*:}"; cx="${rest%:*}"; cy="${rest##*:}"
+  before="$(probe_struct)"
+  hx_str "$S" "$(printf '\033[<2;%d;%dM' "$cx" "$cy")"
+  hx_str "$S" "$(printf '\033[<2;%d;%dm' "$cx" "$cy")"
+  hx_settle 1
+  scr="$(hx_cap "$S")"
+  if [ "$(probe_struct)" = "$before" ] &&
+     ! printf '%s' "$scr" | grep -qE 'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename'; then
+    hx_pass "right-clicking $what opens no menu"
+  else
+    hx_fail "right-clicking $what opens no menu" "$(printf '%s' "$scr" | sed -n '2,4p')"
+  fi
+done
+
+# ============================================================================
+hx_section "R5/R6  scrollback, mouse wheel, and the copy-mode trap"
+# Run this on a FRESH tab. The R3 tests above left a 300-second `claude` fixture running in the
+# current tab, and typing a shell loop into a sleeping process produces no output at all -- which
+# looks exactly like "scrollback is broken" but is really the test aiming at the wrong pane.
+hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
+hx_settle 1.5
+hx_wait "$S" '\$' 8 || true
+hx_cmd "$S" 'for i in $(seq 1 400); do echo "LINE_$i"; done'
+hx_wait "$S" 'LINE_400' 15 || true
+hx_settle 1
+hx_expect_contains "output reaches the bottom of the buffer" "$(hx_cap "$S")" "LINE_400"
+
+hx_wheel_up "$S" 15 40 12
+hx_settle 1.2
+scrolled="$(hx_cap "$S")"
+if printf '%s' "$scrolled" | grep -qE 'LINE_(2[0-9][0-9]|3[0-4][0-9])'; then
+  hx_pass "mouse wheel scrolls back through history"
+else
+  hx_fail "mouse wheel scrolls back through history" "row 2: $(printf '%s' "$scrolled" | sed -n '2p')"
+fi
+# Being scrolled back must be VISIBLE, but only briefly. It is announced by a self-expiring
+# `display-message -d 3000` on status line 0 (the decorative title row), not by a banner that sits
+# there for as long as the student stays scrolled back.
+hx_expect_contains "scrolling back announces itself" "$(hx_cap "$S" | sed -n 1p)" "SCROLLED BACK"
+
+# tmux draws a position indicator -- "[0/0]", i.e. [scroll_position/history_size] -- in the top
+# right of any pane in copy mode. It is informative for a tmux user and pure jargon for a beginner,
+# and it also appears when merely DRAGGING TO SELECT, since that enters copy mode too. Turned off
+# via copy-mode-position-format (tmux 3.6+).
+indicator="$(hx_cap "$S" | grep -oE '\[[0-9]+/[0-9]+\]' | head -1)"
+if [ -z "$indicator" ]; then
+  hx_pass "no [N/M] copy-mode position indicator is shown"
+else
+  hx_fail "no [N/M] copy-mode position indicator is shown" "found: $indicator"
+fi
+hx_check_colors "$S" "scrolled-back message" --grep "SCROLLED BACK" --require-explicit
+hx_expect_absent "the notice does not squat on the tab bar" "$(hx_cap "$S" | sed -n 2p)" "SCROLLED BACK"
+
+# ...and it clears itself a few seconds after the last scroll, with no keypress from the student.
+sleep 4.5
+hx_expect_absent "the notice disappears on its own (~3s)" "$(hx_cap "$S" | head -2)" "SCROLLED BACK"
+hx_expect_contains "the title bar returns once the notice expires" \
+                   "$(hx_cap "$S" | sed -n 1p)" "$TITLE"
+# Expiring the message must NOT have quietly scrolled us back to the bottom.
+hx_expect_eq "the pane is still scrolled back after the notice expires" "$(probe_mode)" "1"
+
+# The three allowed actions must still work while scrolled back, or the tab bar goes dead the
+# moment a student brushes the wheel.
+before="$(probe_win)"
+hx_hex "$S" "$KEY_ALT_RIGHT_ESCPREFIX"; hx_settle 1.2
+if [ "$(probe_win)" != "$before" ] && [ "$(probe_mode)" = "0" ]; then
+  hx_pass "ALT+RIGHT still switches tabs while scrolled back (and leaves the mode)"
+else
+  hx_fail "ALT+RIGHT still switches tabs while scrolled back" \
+          "win $before -> $(probe_win), in_mode $(probe_mode)"
+fi
+
+# THE TRAP TEST: after scrolling up, any keystroke must return to a live prompt.
+hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"; hx_settle 1.2
+hx_wheel_up "$S" 15 40 10; hx_settle 1
+hx_expect_eq "wheel-up put the pane in a mode (as tmux does)" "$(probe_mode)" "1"
+hx_str "$S" "x"
+hx_settle 1
+if [ "$(probe_mode)" = "0" ]; then
+  hx_pass "typing any key escapes the scrollback view (no dead-end)"
+else
+  hx_fail "typing any key escapes the scrollback view" "pane is still in a mode"
+fi
+hx_hex "$S" "15"; hx_settle 0.5
+
+hx_wheel_up "$S" 15 40 6; hx_settle 0.8
+hx_wheel_down "$S" 15 40 25
+hx_settle 1.2
+hx_expect_contains "wheel scrolls forward back to the live prompt" "$(hx_cap "$S")" "LINE_400"
+hx_expect_eq "scrolling to the bottom exits the mode automatically" "$(probe_mode)" "0"
+
+hx_expect_eq "scrollback depth is configured" \
+             "$(it show-options -gv history-limit)" "50000"
+
+# ============================================================================
+hx_section "R6  clipboard: selection reaches the host via OSC 52"
+hx_tmux set-buffer -b probe "" 2>/dev/null || true
+hx_cmd "$S" 'clear; echo COPYME_XYZ'
+hx_wait "$S" 'COPYME_XYZ' 8 || true
+hx_settle 0.8
+if loc="$(hx_find "$S" "COPYME_XYZ")"; then
+  set -- $loc
+  row="$1"; col="$2"
+  hx_str "$S" "$(printf '\033[<0;%d;%dM' "$col" "$row")"
+  for c in $(seq $((col + 1)) $((col + 10))); do
+    hx_str "$S" "$(printf '\033[<32;%d;%dM' "$c" "$row")"
+  done
+  hx_str "$S" "$(printf '\033[<0;%d;%dm' "$((col + 10))" "$row")"
+  hx_settle 1.5
+  if hx_tmux show-buffer 2>/dev/null | grep -q 'COPYME'; then
+    hx_pass "drag-selection copies to the host clipboard via OSC 52"
+  else
+    hx_fail "drag-selection copies to the host clipboard via OSC 52" \
+            "host clipboard: [$(hx_tmux show-buffer 2>/dev/null | head -1)]"
+  fi
+  hx_expect_eq "the selection gesture leaves no lingering mode" "$(probe_mode)" "0"
+
+  # A selection drag enters copy mode internally, which used to trigger the SCROLLED BACK
+  # banner -- so highlighting a word told the student something about scrolling, which is the
+  # wrong thing to say. Releasing the mouse also copies and clears the highlight, which looks
+  # like "it unselected itself and did nothing". Both are now regression-tested: the drag must
+  # say COPIED, and must never mention scrolling.
+  chrome="$(hx_cap "$S" | head -2)"
+  hx_expect_contains "releasing a drag says it COPIED" "$chrome" "COPIED"
+  hx_expect_absent "a selection drag never mentions scrolling" "$chrome" "SCROLLED BACK"
+  hx_expect_contains "the copy notice points at SHIFT+drag as the alternative" "$chrome" "SHIFT"
+  hx_check_colors "$S" "copy notice" --grep "COPIED" --require-explicit
+  sleep 3
+  hx_expect_absent "the copy notice expires on its own too" "$(hx_cap "$S" | head -2)" "COPIED"
+else
+  hx_fail "drag-selection copies to the host clipboard via OSC 52" "could not find COPYME_XYZ"
+fi
+
+# ============================================================================
+hx_section "R1  no other keybinding does anything"
+hx_note "mashing ${#FORBIDDEN_KEYS[@]} key combinations a beginner might hit by accident"
+# NOTE: the deny pattern deliberately does NOT include bash's "[1]+ Stopped" job-control
+# output. Ctrl+Z suspending a foreground job is ordinary UNIX shell behavior that happens
+# with or without a multiplexer; flagging it would be a false positive.
+hx_test_forbidden_keys "$S" probe_struct \
+  'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename|\(detached\)|choose|--INSERT--|SCROLLED BACK'
+if [ "$(probe_wincount)" -ge 2 ]; then
+  hx_pass "tabs survived the key battery ($(probe_wincount) still open)"
+else
+  hx_fail "tabs survived the key battery" "only $(probe_wincount) left"
+fi
+if it list-sessions 2>/dev/null | grep -q 'cs193v'; then
+  hx_pass "the session was never detached or destroyed by a stray key"
+else
+  hx_fail "the session was never detached or destroyed by a stray key"
+fi
+hx_expect_eq "no stray key left the pane in a mode" "$(probe_mode)" "0"
+
+# ============================================================================
+hx_section "R3  the tab bar under stress"
+for _ in $(seq 1 10); do hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"; done
+hx_settle 3
+n="$(probe_wincount)"
+hx_note "$n tabs open; bar: [$(hx_cap "$S" | sed -n 2p)]"
+if [ "$n" -ge 10 ]; then
+  hx_pass "$n tabs open without corrupting the screen"
+else
+  hx_fail "many tabs open" "only $n"
+fi
+hx_check_colors "$S" "tab bar with $n tabs" --rows 1
+
+# Narrow window. Testing at 40 columns is what revealed, in the prototype, that a fixed-width
+# keyboard hint pushed every tab name off the bar.
+#
+# FORK: the prototype width-gated that hint so it would yield below 80 columns. The hint is
+# gone and the gate with it, so what is asserted now is different: the chip is only 11
+# columns and is NOT gated, because it is the only mouse route to a new tab and must survive
+# at any size -- but the tab names still have to be visible alongside it.
+hx_tmux resize-window -t "$S" -x 40 -y 20 2>/dev/null || true
+hx_settle 2.5
+narrow="$(hx_cap "$S" | sed -n 2p)"
+hx_note "at 40 columns: [$narrow]"
+hx_expect_contains "at 40 columns the tab count still shows" "$narrow" "TAB"
+hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TAB"
+if printf '%s' "$narrow" | grep -q "bash"; then
+  hx_pass "at 40 columns tab names are still visible"
+else
+  hx_fail "at 40 columns tab names are still visible" "the chrome is crowding out the tabs"
+fi
+hx_tmux resize-window -t "$S" -x "$HX_W" -y "$HX_H" 2>/dev/null || true
+hx_settle 2
+
+# ============================================================================
+hx_section "R7  exit closes the tab; last exit ends the session"
+# Test the actual requirement on a KNOWN-CLEAN tab: open one with ALT+T (guaranteed to be a
+# fresh bash prompt) and type `exit`. Testing it on whatever tab happens to be focused is
+# unreliable -- earlier tests leave a python3 REPL behind, and a REPL ignores both `exit`
+# (it just prints "Use exit() or Ctrl-D") and Ctrl+C.
+hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
+hx_settle 1.5
+hx_wait "$S" '\$' 8 || true
+before="$(probe_wincount)"
+hx_cmd "$S" 'exit'
+hx_settle 1.5
+after="$(probe_wincount)"
+if [ -n "$after" ] && [ "$after" -lt "$before" ]; then
+  hx_pass "typing 'exit' closes the current tab ($before -> $after)"
+else
+  hx_fail "typing 'exit' closes the current tab" "count stayed at $before"
+fi
+
+# Now drain the rest so the "last tab" case can be tested. Ctrl+C interrupts a running program,
+# Ctrl+D sends EOF, which exits a REPL *and* a shell -- between them every tab can be closed.
+closed=0
+guard=0
+while [ "$(probe_wincount)" -gt 1 ] && [ "$guard" -lt 40 ]; do
+  before="$(probe_wincount)"
+  hx_hex "$S" "03"; hx_settle 0.3        # interrupt anything running
+  hx_hex "$S" "$KEY_CTRL_D"; hx_settle 0.8
+  after="$(probe_wincount)"
+  [ -n "$after" ] && [ "$after" -lt "$before" ] && closed=$((closed + 1))
+  guard=$((guard + 1))
+done
+if [ "$(probe_wincount)" = "1" ]; then
+  hx_pass "all but the last tab could be closed ($closed closed)"
+else
+  hx_fail "all but the last tab could be closed" "remaining=$(probe_wincount)"
+fi
+
+hx_cmd "$S" 'exit'
+hx_settle 3
+if it has-session -t cs193v 2>/dev/null; then
+  hx_fail "closing the last tab ends the session" "the session is still alive"
+else
+  hx_pass "closing the last tab ends the session (nothing left to reattach to)"
+fi
+# Poll rather than checking once. Server shutdown is not instantaneous: for a moment after the
+# last session is destroyed the socket is still accepting connections while `exit-empty` tears
+# it down, and `list-sessions` in that window prints nothing at all -- which is neither the
+# "no server" message nor a live session, and read as a failure on a single-shot check.
+gone=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  out="$(it list-sessions 2>&1)"
+  if printf '%s' "$out" | grep -qE 'no server|No such file|error connecting'; then gone=1; break; fi
+  if [ -z "$out" ] && ! it has-session -t cs193v 2>/dev/null; then gone=1; break; fi
+  sleep 0.5
+done
+if [ "$gone" -eq 1 ]; then
+  hx_pass "the tmux server shut down (no orphaned background session)"
+else
+  hx_fail "the tmux server shut down" "$(it list-sessions 2>&1 | head -2)"
+fi
+
+# ============================================================================
+hx_section "tab labels: wrapper commands show what they are running"
+# tmux labels tabs from the foreground process NAME, so `sudo apt install nginx` reads "sudo".
+# tmux cannot fix this by configuration: `display-message -a` dumps every format variable it knows
+# and none contains the argument vector (verified). /etc/cs193v/tabname.bash is the bridge.
+#
+# FORK, AND IT SIMPLIFIES THE TEST. The prototype had to install the hook with
+# `set -g default-command 'bash --rcfile .../bashrc -i'`, and warned that handing the hooked
+# shell to `new-session` instead reaches tab one only. In the container none of that applies:
+# the hook's source line is in /etc/bash.bashrc, which every interactive bash reads, so every
+# tab gets it with no tmux involvement at all. This session is therefore started exactly the
+# way cs193v-shell starts one -- which means the test now exercises the real wiring rather
+# than a stand-in for it.
+#
+# First, assert the wiring actually exists. Without this the label tests below could all pass
+# against a hook that was sourced some other way.
+if grep -q '/etc/cs193v/tabname.bash' /etc/bash.bashrc 2>/dev/null; then
+  hx_pass "the tab-label hook is wired into /etc/bash.bashrc (so it reaches every tab)"
+else
+  hx_fail "the tab-label hook is wired into /etc/bash.bashrc" \
+          "no reference to /etc/cs193v/tabname.bash -- labels will be one word everywhere"
+fi
+
+S2=tmuxhook
+SOCK2H="cs193vhook$$"
+it2() { tmux -L "$SOCK2H" "$@"; }
+FAKESUDO="$(mktemp -d)"
+# Real sudo would demand a password; this stand-in parses flags the way sudo does, then execs.
+cat > "$FAKESUDO/sudo" <<'FAKE'
+#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -u|-g|-U|-C|-p) shift 2 ;; -*) shift ;; *) break ;; esac; done
+exec "$@"
+FAKE
+chmod +x "$FAKESUDO/sudo"
+# Long-running stand-ins for the multi-tools, so a label can be observed while one is "running".
+# Several of these (npm, npx, cargo) are not installed here at all, and the point of the test is the
+# LABEL the hook computes from the typed text, not whether the tool exists.
+for _fake in git npm npx docker make cargo pytest apt apt-get pip3; do
+  printf '#!/bin/sh\nsleep 45\n' > "$FAKESUDO/$_fake"
+  chmod +x "$FAKESUDO/$_fake"
+done
+
+# No default-command: /etc/bash.bashrc carries the hook, so a plain session gets it.
+hx_start "$S2" "env PATH=$FAKESUDO:\$PATH tmux -L $SOCK2H -f $CONF new-session -s cs193v"
+if hx_wait "$S2" '\+ NEW TAB' 12; then
+  probe_name2() { it2 display-message -p -t cs193v '#{window_name}' 2>/dev/null; }
+
+  # FORK, AND IT COST AN ENTIRE FAILING SECTION TO FIND.
+  #
+  # Exporting PATH into tmux's environment is NOT enough here, even though it was in the
+  # prototype. The prototype ran `bash --rcfile ... -i`, a non-login shell. This
+  # configuration deliberately runs the real LOGIN shell, so that the hook arrives the way
+  # it does for a student -- and Debian's /etc/profile assigns PATH unconditionally rather
+  # than appending to it. Every fake tool was therefore stripped before the first label test
+  # ran, `git`/`npm`/`sudo` resolved to the real ones, and all fifteen label assertions
+  # failed while the hook itself was working perfectly.
+  #
+  # Claim PATH from INSIDE the pane instead, after the login shell has finished with it.
+  # This is the same idiom hx_use_fixture uses for the claude fixture, and for the same
+  # underlying reason.
+  hx_cmd "$S2" "export PATH=$FAKESUDO:\$PATH; hash -r"
+  hx_settle 0.8
+  hx_cmd "$S2" "command -v sudo"
+  hx_settle 0.8
+  hx_expect_contains "the fake tools win the PATH lookup inside the pane" \
+                     "$(hx_cap "$S2")" "$FAKESUDO/sudo"
+
+  hx_cmd "$S2" "sudo python3 -c 'import time; time.sleep(30)'"
+  hx_settle 2.5
+  hx_expect_eq "a wrapper command shows the real command too" "$(probe_name2)" "sudo python3"
+  hx_hex "$S2" "03"; hx_settle 1.5
+  hx_expect_eq "the label returns to the shell at the prompt" "$(probe_name2)" "bash"
+
+  # The hook must reach tabs created later, not just the first one. This is the assertion
+  # that catches the default-command trap the prototype documented -- a hooked shell handed
+  # only to `new-session` reaches tab one and silently nowhere else. /etc/bash.bashrc has no
+  # such failure mode, which is why the container wires it there.
+  #
+  # PATH has to be re-claimed in the new tab too: it is a fresh login shell, so /etc/profile
+  # has reset it again.
+  hx_hex "$S2" "$KEY_ALT_T_ESCPREFIX"; hx_settle 3
+  hx_cmd "$S2" "export PATH=$FAKESUDO:\$PATH; hash -r"
+  hx_settle 0.8
+  hx_cmd "$S2" "sudo python3 -c 'import time; time.sleep(30)'"
+  hx_settle 2.5
+  hx_expect_eq "the hook reaches tabs opened with ALT+T" "$(probe_name2)" "sudo python3"
+  hx_hex "$S2" "03"; hx_settle 1.5
+
+  # Multi-purpose tools show their subcommand, which is the informative half.
+  label_check() { # typed expected
+    hx_cmd "$S2" "$1"
+    hx_settle 2.2
+    hx_expect_eq "label for \`$1\`" "$(probe_name2)" "$2"
+    hx_hex "$S2" "03"; hx_settle 1.2
+  }
+  label_check "git commit -m 'a message'"              "git commit"
+  label_check "npm install express"                    "npm install"
+  label_check "docker run -it ubuntu"                  "docker run"
+  label_check "make -j4 all"                           "make all"
+
+  # The rule is RECURSIVE: `apt` is itself on the list, so "sudo apt" keeps unwrapping to reach the
+  # subcommand. It stops at the first word that is not a runner, and is capped at three words.
+  label_check "sudo apt update"                        "sudo apt update"
+  label_check "sudo apt install nginx"                 "sudo apt install"
+  label_check "sudo apt-get upgrade"                   "sudo apt-get upgrade"
+  label_check "sudo pip3 install requests"             "sudo pip3 install"
+  label_check "sudo docker run ubuntu"                 "sudo docker run"
+  label_check "sudo -u root npm install"               "sudo npm install"
+  label_check "sudo apt"                               "sudo apt"
+  # `time` is a bash KEYWORD, so the DEBUG trap only ever sees the inner command -- which is why
+  # this labels as "git commit" and not "time git commit". Not a bug; bash never shows us the word.
+  label_check "time git commit"                        "git commit"
+  # `-c` is ambiguous and both readings must work: code for python3, a setting for git.
+  label_check "python3 -c 'import time; time.sleep(30)'" "python3"
+  label_check "git -c user.name=x commit"              "git commit"
+  # An argument keeps only its basename, so labels stay short.
+  label_check "python3 -m http.server 8080"            "python3 http.server"
+  # REGRESSION (reported from real use): a command that finishes while the student is looking at a
+  # DIFFERENT tab must still revert its label. This used to fail permanently. precmd's
+  # `set-window-option automatic-rename on` had no -t target, and a tmux command run inside a pane
+  # resolves against the session's CURRENT window rather than its own -- so the option landed on
+  # whatever tab was active, the background tab kept automatic-rename off, and its pinned label
+  # ("python3 slowpoke.py") never reverted, not even after switching back to it.
+  bgwin="$(it2 display-message -p -t cs193v '#{window_index}')"
+  hx_cmd "$S2" "python3 -c 'import time; time.sleep(4)'"
+  hx_settle 2
+  hx_expect_eq "the label is pinned while a listed command runs" "$(probe_name2)" "python3"
+  hx_hex "$S2" "$KEY_ALT_T_ESCPREFIX"      # switch away while it is still running
+  hx_settle 6.5                            # ...and let it finish in the background
+  hx_expect_eq "a background tab's label reverts when its command finishes" \
+    "$(it2 display-message -p -t "cs193v:$bgwin" '#{window_name}' 2>/dev/null)" "bash"
+  hx_expect_eq "automatic-rename is restored on the background tab" \
+    "$(it2 display-message -p -t "cs193v:$bgwin" '#{automatic-rename}' 2>/dev/null)" "1"
+  hx_cmd "$S2" 'exit'; hx_settle 1.5       # close the extra tab this test opened
+
+  # FORK: `claude` IS on the list now, so it can no longer stand in for "a command the hook
+  # ignores". That is the single most important divergence in this file, and it is not a
+  # test-only detail: Claude Code is installed here with `npm install -g`, so
+  # /usr/local/bin/claude is a script with a `#!/usr/bin/env node` shebang and /proc reports
+  # the INTERPRETER. Without the hook every Claude Code tab in the course reads `node`.
+  #
+  # So the claude case is now a positive assertion, using the fixture rather than the real
+  # CLI -- see hx_fake_run for why that must never be a bare command name.
+  hx_cmd "$S2" "$(hx_fake_run claude 30)"
+  hx_settle 2.5
+  hx_expect_eq "claude is labeled 'claude', not 'node'" "$(probe_name2)" "claude"
+  hx_hex "$S2" "03"; hx_settle 1
+  hx_assert_no_real_claude "claude label test"
+
+  # ...and something genuinely off the list still goes to tmux's native mechanism, which is
+  # the cheaper and always-accurate path.
+  #
+  # `sleep`, not `less`. less was the obvious stand-in and does not work: the image sets
+  # LESS=FRX, and F means "quit immediately if the content fits one screen", so less on a
+  # short file exits before the label can ever be read.
+  hx_cmd "$S2" "sleep 20"
+  hx_settle 2.5
+  hx_expect_eq "a command not on the list is labeled natively" "$(probe_name2)" "sleep"
+  hx_hex "$S2" "03"; hx_settle 1
+
+  # And the hook must not have smuggled in any extra keybinding. Compared against the count taken
+  # at startup, NOT against the original server -- the R7 section above deliberately shut that one
+  # down, so querying it now would report 0 and fail for entirely the wrong reason.
+  hx_expect_eq "the hook adds no keybindings" \
+    "$(it2 list-keys 2>/dev/null | grep -c 'bind-key')" "$BASELINE_KEYS"
+else
+  hx_fail "hooked session starts" "screen: $(hx_cap "$S2" | head -3)"
+fi
+it2 kill-server 2>/dev/null
+hx_stop "$S2"
+
+hx_summary "tmux prototype"

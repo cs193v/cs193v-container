@@ -211,6 +211,21 @@ PRIVATE="$(cd -- "$TESTS_DIR/.." && pwd -P)"
 REPO="$(cd -- "$PRIVATE/.." && pwd -P)"
 export TESTS_DIR PRIVATE REPO
 
+# ─── the strings the container prints ──────────────────────────────────────────
+# Sourced from the SAME file the image installs at /etc/cs193v/strings.sh, so a test never
+# repeats a string that a script also spells out. Rewording the greeting used to turn three
+# tests red across three tiers, none of them a real regression — and the usual answer to
+# that is to weaken the assertion, which is how a suite stops being worth reading.
+#
+# A deleted or blanked string still fails, which is the part worth keeping: these assert
+# `$CS193V_WELCOME` appears, not that "some greeting" appears.
+#
+# Read on the HOST, straight out of .private/files/ — no container needed, so the static
+# tier can use them too. That is why the file has no logic in it.
+# shellcheck source=../../files/cs193v-strings.sh
+[ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
+export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
+
 # In-container and throwaway-container runners, matching VERIFICATION.md's E() and R().
 E() { podman exec "$NAME" sh -c "$1" 2>&1; }
 R() { podman run --rm --entrypoint sh "${TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" -c "$1" 2>&1; }

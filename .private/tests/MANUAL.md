@@ -237,6 +237,34 @@ and GNOME Terminal.
 *Automated:* `TERM` whitelisting for kitty/ghostty/alacritty/wezterm/foot, and that a
 forwarded `TERM` yields 256 colours where the bare `podman exec` yields 8.
 
+### §7.9 — the tab keys, per terminal
+**This is the one thing about the multiplexer that automation cannot settle**, because it is
+a property of the student's terminal, not of the container. `65-tmux.sh` proves the
+container *responds* to each key by injecting the bytes directly; it cannot prove the
+terminal *sends* them.
+
+In each of macOS Terminal.app, iTerm2, VS Code's terminal, Windows Terminal, GNOME
+Terminal/Ptyxis:
+
+| | Expect |
+|---|---|
+| `CTRL+T` | new tab. A plain control byte — should work everywhere, no exceptions |
+| `SHIFT+LEFT` / `SHIFT+RIGHT` | switch tabs. Needs the terminal to send `CSI 1;2D`/`1;2C` rather than a bare arrow |
+| click `+ NEW TAB` | new tab |
+| click a tab | switches to it |
+| `ALT+T`, `ALT+LEFT/RIGHT` | work only where Option/Alt sends Meta — see below |
+
+**ALT is expected to fail on macOS out of the box**, and that is why it is not the only
+key for anything. Terminal.app composes Option (Option+T types `†`) unless "Use Option as
+Meta key" is ticked per profile; iTerm2 defaults left Option to Normal; VS Code needs
+`terminal.integrated.macOptionIsMeta`; Ghostty, WezTerm and Alacritty all compose by
+default. Record which of these still hold — the list was compiled from documentation, not
+from hardware.
+
+If `SHIFT+arrow` turns out not to be transmitted somewhere, that terminal is degraded but
+not broken: `CTRL+T` still opens tabs and clicking still switches them. Note it here rather
+than treating it as a release blocker.
+
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other. Confirm a pre-existing distro
