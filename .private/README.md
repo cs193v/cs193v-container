@@ -194,7 +194,7 @@ an Intel Mac, and WSL's `--name` support.
 So it isn't re-proposed: changing the terminal's background colour (Ptyxis, the Ubuntu 26.04
 default, accepts `OSC 11`, reports success on query, and renders nothing — and macOS
 Terminal.app ignores it, so it would be invisible on two of three platforms' default terminals
-and undetectable on one); puppeteer and Chrome; `--cap-drop` / `no-new-privileges`
+and undetectable on one); `--cap-drop` / `no-new-privileges`
 (mutually exclusive with the sudo decision, and they would buy nothing since root owns
 the tamper targets); a `serve` wrapper; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
