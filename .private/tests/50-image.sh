@@ -206,18 +206,50 @@ fi
 assert_eq "absent:no-extra-tools" "none" \
     "$(R 'for t in rg fzf delta bat fd chromium google-chrome chrome code; do command -v $t >/dev/null && echo $t; done; echo none')"
 # man pages are stripped by the base image and deliberately not restored; tldr stands in.
-#
-# `man git` does NOT fail, though: Ubuntu's minimized image leaves a /usr/bin/man stub that
-# exits 0 and prints "you can run the 'unminimize' command". So assert the property that
-# actually matters — no real manual page is produced — and record the stub's behaviour,
-# which is its own usability problem (see ERRORS.md B6: it points a novice at a command
-# that bloats the container and does not survive a rebuild).
 manout="$(R 'man git 2>&1; echo "rc=$?"')"
 record "absent:man-behaviour" "$(printf '%s' "$manout" | tr '\n' ' ')"
 assert_not_contains "absent:no-real-man-page-for-git" "GIT(1)" "$manout"
 assert_not_contains "absent:man-db-not-installed"     "GITHUB" "$manout"
 assert_ok "absent:tldr-stands-in-for-man" \
           sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'tldr --version'"
+
+# ─── what `man` says instead  (issue #8) ───────────────────────────────────────
+# Ubuntu's minimized base leaves its OWN /usr/bin/man behind: a stub that exits 0 and
+# prints "To restore this content, including manpages, you can run the 'unminimize'
+# command". For a first-year student that is worse than "command not found", because it
+# reads as an instruction — and following it downloads hundreds of megabytes into a
+# container the next `cs193v --rebuild` throws away, so the manual pages it promised
+# disappear again with nothing to explain why. It is replaced.
+assert_not_contains "man:does-not-advertise-unminimize" "unminimize" "$manout"
+assert_not_contains "man:does-not-say-the-system-was-minimized" "has been minimized" "$manout"
+assert_says "man:says-man-pages-are-absent" "man pages are not installed" "$manout"
+# Naming tldr is the whole point: "not installed" alone leaves a student with nowhere to go.
+assert_says "man:points-at-the-tldr-page-for-what-was-asked-for" "tldr git" "$manout"
+# It FAILS. `man git` genuinely did not produce a manual page, and `git commit --help` runs
+# `man` underneath and has to be able to tell — exiting 0 is what made the base image's
+# stub read as success.
+assert_not_contains "man:exits-nonzero" "rc=0" "$manout"
+# stderr, like man's own "No manual entry for": a pipeline must not collect our apology as
+# though it were the page.
+assert_eq "man:writes-nothing-to-stdout" "" "$(R 'man git 2>/dev/null')"
+
+# A section argument must not become the suggestion — `man 3 printf` is `tldr printf`, not
+# `tldr 3`. This is the one place the argument parsing can go quietly wrong.
+sect="$(R 'man 3 printf 2>&1')"
+assert_says "man:section-argument-suggests-the-page" "tldr printf" "$sect"
+assert_says_not "man:section-argument-is-not-the-suggestion" "tldr 3" "$sect"
+# No argument at all must still be useful rather than a bare error.
+assert_says "man:no-argument-still-points-at-tldr" "tldr <command>" "$(R 'man 2>&1')"
+
+# End to end, and the reason this is worth an image-tier test rather than a static one:
+# `git commit --help` shells out to `man git-commit`, so what a student sees when they ask
+# git for help is decided here — and the page it names has to be one tldr actually has,
+# offline, from the cache baked into the image.
+githelp="$(R 'git commit --help')"
+assert_says "man:git-help-goes-through-the-stub" "tldr git-commit" "$githelp"
+assert_contains "man:the-suggested-page-really-exists" "Commit files to the repository" \
+    "$(podman run --rm --network=none --user 1000:1000 --entrypoint sh "$TEST_IMAGE" \
+       -c 'tldr git-commit 2>&1' || true)"
 
 # tldr is the replacement for man, so its page cache has to be baked in. `tldr --update`
 # does that at build time — but the Containerfile ends that line with `|| true`, so a

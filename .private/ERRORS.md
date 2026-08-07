@@ -250,11 +250,9 @@ answer is hardcoded, so a student who runs it on their host by mistake is active
 misinformed. A one-line `[ -f /run/.containerenv ] || [ -f /.dockerenv ]` guard would fix
 it without changing the happy path.
 
-### B6. `man git` exits 0 and tells students to run `unminimize`
+### ~~B6~~. `man git` exits 0 and tells students to run `unminimize` — **FIXED**
 
-`CONTAINER-DESIGN.md` and the managed `CLAUDE.md` both say man pages are not installed and
-`tldr` stands in. True in effect, but Ubuntu's minimized image leaves a `/usr/bin/man` stub
-that **exits 0** and prints:
+Ubuntu's minimized image left a `/usr/bin/man` stub that **exits 0** and prints:
 
 ```
 This system has been minimized by removing packages and content that are
@@ -266,9 +264,21 @@ command. You will still need to ensure the 'man-db' package is installed.
 
 For a first-year student that is worse than `command not found`: it reads as an
 instruction, and following it bloats the container with something that vanishes on the next
-`--rebuild`. Consider replacing `/usr/bin/man` with a two-line stub pointing at `tldr`.
-`tests/50-image.sh` now asserts the property that matters (no real manual page) and records
-the stub's behaviour.
+`--rebuild`.
+
+`files/man` replaces it. It says manual pages are not installed here, names the `tldr` page
+for whatever was asked about — the *last non-option* argument, so `man 3 printf` suggests
+`tldr printf` rather than `tldr 3` — and **exits non-zero**, because `man git` genuinely did
+not produce a manual page and `git commit --help`, which runs `man git-commit` underneath,
+has to be able to tell.
+
+It is installed over `/usr/bin/man` rather than shadowed from `/usr/local/bin`, or the
+original would stay reachable by full path and to anything with a fixed `PATH`. The build
+itself greps `man git` for `unminimize` and fails if it is still there, so a future base
+image that reinstates the advice breaks CI rather than a student.
+
+Guards: `man:*` in `tests/10-static.sh` and `tests/50-image.sh`, including one that checks
+the page it names (`tldr git-commit`) really is in the offline cache. GitHub issue #8.
 
 ### ~~B7~~. 271 Noto font files were installed but nothing could enumerate them — **FIXED**
 

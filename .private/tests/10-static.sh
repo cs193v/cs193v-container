@@ -25,6 +25,7 @@ assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
 assert_ok  "syntax:am-i-in-container"  sh -n $PRIVATE/files/am-i-in-a-container
+assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ports"             python3 -c "import ast;ast.parse(open('$PRIVATE/files/ports').read())"
 assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
 assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
@@ -175,6 +176,32 @@ assert_ok  "logout:hook-exists" test -f $PRIVATE/files/bash_logout
 # would print into a pane that is closing, for something the student has not left.
 assert_contains "logout:hook-skips-inside-tmux" 'TMUX' "$(cat $PRIVATE/files/bash_logout)"
 assert_ok  "logout:hook-syntax" sh -n $PRIVATE/files/bash_logout
+
+# ─── man  (issue #8) ───────────────────────────────────────────────────────────
+# Manual pages are deliberately absent and tldr stands in, but Ubuntu's minimized base
+# leaves a /usr/bin/man of its own that exits 0 and says to run `unminimize` — which a
+# first-year student reads as an instruction, and which downloads hundreds of megabytes
+# into a container the next --rebuild discards. Our stub replaces it.
+#
+# /usr/bin, not /usr/local/bin: shadowing would leave the original reachable by full path
+# and to anything with a fixed PATH. If this assertion is ever "fixed" by moving the
+# install to /usr/local/bin, the unminimize advice comes straight back.
+assert_ok  "man:script-exists" test -f $PRIVATE/files/man
+assert_ok  "man:containerfile-replaces-usr-bin-man" \
+           grep -qE 'files/man +/usr/bin/man' $PRIVATE/Containerfile
+# grep, not assert_not_contains: its needle is matched literally, so a `*` in it would
+# assert nothing at all rather than acting as a wildcard.
+assert_fail "man:not-shadowed-from-usr-local" \
+            grep -qE 'files/man +/usr/local/bin' $PRIVATE/Containerfile
+man_stub="$(cat $PRIVATE/files/man)"
+assert_contains "man:points-at-tldr"      'tldr'   "$man_stub"
+assert_contains "man:stub-exits-nonzero"  'exit 1' "$man_stub"
+# The one word that must never reach a student from this container.
+assert_not_contains "man:never-says-unminimize" "unminimize" "$(sed 's/#.*//' $PRIVATE/files/man)"
+# And the build refuses an image whose `man git` still carries the base image's advice, so
+# a base-image change that reinstates it fails CI rather than a student.
+assert_ok  "man:build-checks-the-stub-took" \
+           grep -q 'man git 2>&1 | grep -F unminimize' $PRIVATE/Containerfile
 
 # ─── tmux: the landing point ───────────────────────────────────────────────────
 # `./cs193v` runs cs193v-shell, which puts the student inside tmux. These assertions cover
@@ -614,6 +641,13 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
                                       $PRIVATE/files/cs193v-shell \
                                       $PRIVATE/files/cs193v-welcome \
                                       $PRIVATE/files/cs193v-goodbye
+# The small /bin/sh helpers. `man` is here rather than left to the image tier because it
+# runs as root-owned /usr/bin/man for every student: a quoting bug in it would turn every
+# `man something` into a shell error on top of the missing manual page.
+assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
+                                $PRIVATE/files/open-url \
+                                $PRIVATE/files/am-i-in-a-container \
+                                $PRIVATE/files/man
 # tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
 # meant to stay diffable against it, so local style fixes would cost more than they buy.
 # Its host-side driver is ours and is checked.

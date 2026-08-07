@@ -288,6 +288,15 @@ COPY files/ /tmp/cs193v-files/
 #     last two are commands rather than inline shell because they now have two callers
 #     each: the tmux path and the plain `bash -l` path. See item 9.
 #
+#     `man` is the odd one out and goes to /usr/bin, not /usr/local/bin, because it
+#     REPLACES something rather than adding it. Ubuntu's minimized base leaves a
+#     /usr/bin/man of its own that exits 0 and tells the reader to run `unminimize` — an
+#     instruction that downloads hundreds of megabytes into a container the next
+#     `cs193v --rebuild` discards. Shadowing it from /usr/local/bin would leave that stub
+#     reachable as `/usr/bin/man` and to anything with a fixed PATH, so it is overwritten.
+#     Manual pages stay deliberately absent and tldr stands in; files/man says exactly that
+#     and names the tldr page to try. Issue #8.
+#
 #  2. Installs the Claude Code course policy into /etc/claude-code — deliberately NOT
 #     under ~/.claude, which is a named volume: an image-provided file there is seeded
 #     once on first mount and then never refreshed by a later image. /etc is in the image
@@ -368,6 +377,9 @@ RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/cs193v-shell         /usr/local/bin/cs193v-shell; \
     install -m 0755 /tmp/cs193v-files/cs193v-welcome       /usr/local/bin/cs193v-welcome; \
     install -m 0755 /tmp/cs193v-files/cs193v-goodbye       /usr/local/bin/cs193v-goodbye; \
+    install -m 0755 /tmp/cs193v-files/man                  /usr/bin/man; \
+    sh -n /usr/bin/man; \
+    test -z "$(man git 2>&1 | grep -F unminimize || true)"; \
     install -d -m 0755 /etc/claude-code; \
     install -m 0644 /tmp/cs193v-files/claude-code/managed-settings.json /etc/claude-code/managed-settings.json; \
     install -m 0644 /tmp/cs193v-files/claude-code/CLAUDE.md             /etc/claude-code/CLAUDE.md; \

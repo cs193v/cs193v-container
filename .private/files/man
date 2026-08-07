@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+# The `man` a CS193V student meets. Issue #8.
+#
+# Ubuntu's minimized base image leaves a /usr/bin/man of its own behind -- a stub that
+# prints "To restore this content, including manpages, you can run the 'unminimize'
+# command" and then EXITS 0. For a first-year student that is worse than "command not
+# found", because it reads as an instruction: following it downloads several hundred
+# megabytes into a container that the next `cs193v --rebuild` throws away, so the manual
+# pages it promised disappear again with nothing to explain why.
+#
+# Manual pages are deliberately not installed -- see "Deliberately not here" in the staff
+# README -- and tldr stands in, with its page cache baked into the image so it works with
+# no network. So this says what is actually true, names the command to type instead, and
+# exits NON-ZERO, because `man git` genuinely did not produce a manual page and anything
+# that runs `man` on a student's behalf has to be able to tell.
+#
+# The command suggested is the LAST argument that is not an option, which is what makes
+# `man 3 printf` suggest `tldr printf` rather than `tldr 3`.
+
+page=''
+for arg in "$@"; do
+    case "$arg" in
+        -*) ;;
+        *)  page="$arg" ;;
+    esac
+done
+[ -n "$page" ] || page='<command>'
+
+# stderr, like man's own "No manual entry for" — this is a failure, not output. A student
+# sees it either way; a pipeline does not silently collect it as if it were a manual page.
+{
+    printf '\n'
+    printf 'man pages are not installed in the CS193V container.\n'
+    printf '\n'
+    printf 'Try tldr instead. It prints short, example-first help, and it works\n'
+    printf 'offline:\n'
+    printf '\n'
+    printf '    tldr %s\n' "$page"
+    printf '\n'
+    printf 'Many commands also print a summary of their own with --help.\n'
+    printf '\n'
+} >&2
+exit 1

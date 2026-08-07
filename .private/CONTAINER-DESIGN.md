@@ -386,7 +386,8 @@ actually are.
   `git config --global user.name` and `user.email`.
 - **Ctrl-S is safe.** Normally it freezes a terminal — it sends an ancient "stop output"
   signal, and the recovery is Ctrl-Q, which nobody knows. That is turned off here.
-- **No `man` pages** (the base image strips them). `tldr <command>` instead.
+- **No `man` pages** (the base image strips them). `tldr <command>` instead — and typing
+  `man git` tells you so and names the `tldr` page to try, rather than failing obscurely.
 - **No browser.** Anything that would open one prints the URL for you to copy.
 - **No `ripgrep`, `fzf`, `bat`, `fd` or `delta`.** Use `grep`, `find` and `git diff`.
 - **`git diff` shows moved code differently from rewritten code**, which is useful when
