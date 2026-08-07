@@ -8,15 +8,17 @@
 #
 #     ./cs193v --dev-build
 #
-# Three of §A.3's checks are corrected rather than copied:
+# Two of §A.3's checks are corrected rather than copied:
 #   * nvm-not-group-writable was vacuous. /usr/local/share/nvm does not exist by design —
 #     node comes from the official tarball into root-owned /usr/local precisely so there is
 #     no group-writable nvm tree to trojan — so `stat` failed, the case fell through to the
 #     catch-all, and it printed "ok" while asserting nothing. Here it asserts the absence.
-#   * the skopeo layer-size check was guarded by `command -v skopeo &&`, so it silently
-#     did nothing on a machine without skopeo. It is now a real assertion.
 #   * the multi-arch manifest assertion moved to the release tier: a local --dev-build is
 #     single-arch by definition, so asserting two architectures here can only ever fail.
+#
+# §A.2's per-layer size ceiling is deliberately NOT here. See issue #7 in ERRORS.md B9: the
+# requirement that no layer exceed 400 MB was withdrawn, not met. Layer ORDER is still
+# load-bearing and still tested, in 10-static.sh.
 
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
@@ -54,34 +56,6 @@ assert_contains "img:entrypoint-is-the-keepalive" "cs193v-entrypoint" \
                 "$(podman image inspect "$TEST_IMAGE" --format '{{json .Config.Entrypoint}}')"
 assert_eq "img:workdir-is-the-projects-mount" "/home/student/projects" \
           "$(podman image inspect "$TEST_IMAGE" --format '{{.Config.WorkingDir}}')"
-
-# No single layer should dominate: podman cannot resume a partial layer download but does
-# keep completed ones, so a student on bad wifi loses at most one layer per retry. That is
-# the whole reason for the layer ordering.
-#
-# `podman history`, not `skopeo inspect --raw containers-storage:`: the raw manifest is not
-# available for a locally built image, so skopeo returns nothing and this check silently
-# recorded "could not read" instead of asserting.
-biggest="$(podman history --format '{{.Size}}' "$TEST_IMAGE" 2>/dev/null \
-           | python3 -c 'import sys, re
-best = 0
-for line in sys.stdin:
-    m = re.match(r"([0-9.]+)\s*([kKMGB]*B?)", line.strip())
-    if not m:
-        continue
-    n = float(m.group(1))
-    mult = {"B": 1, "kB": 1000, "MB": 1000**2, "GB": 1000**3}.get(m.group(2), 1)
-    best = max(best, n * mult)
-print(int(best))')"
-if [ -n "$biggest" ] && [ "$biggest" -gt 0 ]; then
-    record "img:largest-layer-mb" "$((biggest / 1048576))"
-    if [ "$biggest" -lt 419430400 ]; then pass "img:no-layer-over-400MB"
-    else fail "img:no-layer-over-400MB" \
-              "largest layer is $((biggest / 1048576)) MB; a student whose wifi drops loses
-that much on every retry, which is what the layer split exists to avoid"; fi
-else
-    fail "img:no-layer-over-400MB" "could not read layer sizes from podman history"
-fi
 
 # ─── §A.3 identity and ownership ───────────────────────────────────────────────
 assert_eq "uid-gid-name" "1000 1000 student" "$(R 'echo $(id -u) $(id -g) $(id -un)')"
