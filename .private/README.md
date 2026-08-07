@@ -78,7 +78,7 @@ anything is pushed.
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
-image (`localhost/cs193v:dev`) and the same four volumes. Two people developing at once
+image (`localhost/cs193v:dev`) and the same five volumes. Two people developing at once
 therefore collide, and not cleanly: whoever ran `--dev-build` last owns the container the
 other is about to shell into, and either one's `--full-rebuild` deletes the other's logins.
 
@@ -90,7 +90,7 @@ export CS193V_INSTANCE=yourname
 ./cs193v doctor                   # reports container cs193v-yourname
 ```
 
-It suffixes the container name, the dev image tag and all four volume names together —
+It suffixes the container name, the dev image tag and all five volume names together —
 partial suffixing would be worse than none, since `--full-rebuild` would still cross
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.

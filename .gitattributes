@@ -1,0 +1,24 @@
+# Keep CLAUDE.md out of what a student unpacks.
+#
+# This repo IS the ~/cs193v layout — the installer downloads
+# https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.tar.gz and unpacks it into
+# the student's course directory. That directory is deliberately kept to TWO visible items,
+# the launcher and projects/ (issue #16), so a developer-facing CLAUDE.md sitting next to
+# them would undo that.
+#
+# GitHub builds those archives with `git archive`, which honours export-ignore, so the file
+# is present for anyone working in the repo and absent from every student download.
+#
+# THE LEADING SLASH IS LOAD-BEARING. Patterns here match like .gitignore ones: without it,
+# `CLAUDE.md` matches that basename at ANY depth, which also strips
+# files/claude-code/CLAUDE.md -- the managed Claude Code policy the image installs into
+# /etc/claude-code. Verified: unanchored, that file was in the tree and absent from the
+# archive, so building the image from a downloaded tarball would have failed. Anchored, only
+# the root file goes.
+#
+# Verify both halves after changing this:
+#
+#     git archive HEAD | tar -t | grep -c '^CLAUDE.md'                # expect 0
+#     git archive HEAD | tar -t | grep -c 'claude-code/CLAUDE.md'     # expect 1
+#
+/CLAUDE.md export-ignore

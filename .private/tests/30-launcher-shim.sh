@@ -261,7 +261,7 @@ shim_clear_log
 launcher --rebuild >/dev/null 2>&1
 assert_eq "rebuild:removes-container" "1" "$(shim_count '^rm ')"
 assert_eq "rebuild:creates-container" "1" "$(shim_count '^run ')"
-# --rebuild must keep logins: the four volumes are never touched.
+# --rebuild must keep logins: none of the five volumes is touched.
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
 assert_says "rebuild:says-logins-kept" "logins are kept" "$(launcher --rebuild)"
 

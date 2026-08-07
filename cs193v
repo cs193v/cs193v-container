@@ -278,7 +278,7 @@ has_machine() {                       # is a podman machine in play (macOS)?
 
 # ─── developer instance ────────────────────────────────────────────────────────
 # CS193V_INSTANCE gives one computer several INDEPENDENT installations. It suffixes the
-# container name, the dev image tag and the four volume names TOGETHER, which is the point:
+# container name, the dev image tag and all five volume names TOGETHER, which is the point:
 # suffixing only some of them is worse than suffixing none, because `--full-rebuild` in one
 # instance would still destroy the other instance's logins.
 #

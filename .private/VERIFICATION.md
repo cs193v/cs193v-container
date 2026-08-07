@@ -211,7 +211,7 @@ ss -ltn | awk '{print $4}' | grep -E ':(300[0-9]|517[3-9])$' | grep -v '^127\.0\
 # The two read-only key mounts must be present, or sshd has no host key and no authorized_keys
 I '{{json .Mounts}}' | grep -c 'authorized_keys'                     # expect 1, and RO
 ck  tunnel-up      "up"    sh -c '"$DIR/cs193v" doctor | sed -n "s/^  tunnel  *\(up\).*/\1/p"'
-rec mounts                 I '{{json .Mounts}}'                  # 4 volumes + 1 bind at <DIR>/projects
+rec mounts                 I '{{json .Mounts}}'                  # 5 volumes + 1 bind at <DIR>/projects
 ckx config-hash-label      sh -c 'podman inspect cs193v --format "{{index .Config.Labels \"cs193v.confighash\"}}" | grep -q .'
 rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, CS193V_MEMORY_MB, TERM, COLORTERM
 rec pid1                   I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'

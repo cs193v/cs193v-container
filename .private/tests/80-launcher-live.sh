@@ -13,7 +13,7 @@
 # than hanging (ERRORS.md B13), so a bare launch here is driven through a real pty via LB()
 # and only the verbs use a plain pipe.
 #
-# Destructive: --full-rebuild deletes the four volumes, which is where claude/gh/vercel
+# Destructive: --full-rebuild deletes all five volumes, four of which are where claude/gh/vercel
 # logins live. That test is therefore gated behind CS193V_DESTRUCTIVE=1 and skipped
 # otherwise, so running the suite can never log anybody out by surprise.
 
