@@ -46,7 +46,13 @@ L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s'
 
 # LB() is a BARE launch — one that goes on to open a shell. It needs a real terminal, since
 # open_shell refuses without one, so it goes through script(1) with an `exit` fed in.
-LB() { launcher_tty_repo 'exit\n' "$@"; }
+#
+# The leading bare ENTER acknowledges any warning (issue #19): the repo ships no pinned
+# image, so every launch here announces dev mode and then stops for an ENTER before the
+# exec. Without it that ENTER would be eaten from the `exit`, tmux would get nothing, and
+# the test would sit at a live shell until the 120-second timeout. An extra ENTER when
+# there was nothing to acknowledge is harmless — it lands on the container's own prompt.
+LB() { launcher_tty_repo '\nexit\n' "$@"; }
 
 # ─── a bare launch with no terminal refuses instead of hanging  (ERRORS.md B13) ─
 # This used to hang forever against real podman: -t allocates a pty and a pty never
@@ -165,8 +171,9 @@ else
     pass "drift:podman-start-ignores-new-flags"
 fi
 
-# Accepting it must actually recreate with the flag.
-out="$(launcher_tty_repo '\033[B\nexit\n')"
+# Accepting it must actually recreate with the flag. Down-arrow and ENTER for the menu,
+# then a second ENTER for the warning acknowledgement, then `exit` for the shell itself.
+out="$(launcher_tty_repo '\033[B\n\nexit\n')"
 if drift_applied; then
     pass "drift:accepting-applies-the-new-flag"
 else

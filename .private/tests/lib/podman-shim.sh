@@ -74,6 +74,54 @@ launcher_pty() {                      # launcher_pty [ARGS...]
     launcher_tty 'exit\n' "$@"
 }
 
+# A bare launch on a pty whose stdin stays OPEN and silent, started in the BACKGROUND.
+#
+# This is the only way to tell "the launcher is waiting for input" apart from "the launcher
+# read end-of-input and carried on". Every other helper here feeds `script` from a printf
+# pipe, and that pipe closes the moment it is drained — which a blocked `read` sees as EOF
+# and returns from, so a launcher that never waited at all would look identical.
+#
+# A fifo held open by a writer that never writes is what keeps it from reaching EOF. Sets
+# $PTY_OUT (the transcript, which grows as it goes), $PTY_PID and $PTY_HOLDER; stop it with
+# launcher_pty_silent_stop, which must be called or the fifo's holder lives for two minutes.
+launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
+    local cmd="${LAUNCHER_DIR:-$REPO}/cs193v" a
+    for a in "$@"; do cmd="$cmd $a"; done
+    PTY_FIFO="$SHIM/silent.fifo"; PTY_OUT="$SHIM/silent.out"
+    rm -f "$PTY_FIFO" "$PTY_OUT"; mkfifo "$PTY_FIFO"
+    : > "$PTY_OUT"
+    sleep 120 > "$PTY_FIFO" &
+    PTY_HOLDER=$!
+    if script --version 2>&1 | grep -qi util-linux; then
+        PATH="$SHIM:$PATH" script -q -c "$cmd" /dev/null < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
+    else
+        # shellcheck disable=SC2086
+        PATH="$SHIM:$PATH" script -q /dev/null $cmd < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
+    fi
+    PTY_PID=$!
+}
+
+# Wait up to SECS for PHRASE to appear in the transcript. Returns 1 if the launcher exits
+# first, so a launcher that does not wait fails in a second rather than after the timeout.
+launcher_pty_silent_wait() {          # launcher_pty_silent_wait SECS PHRASE
+    local i=0 n
+    n=$(( $1 * 2 ))
+    while [ "$i" -lt "$n" ]; do
+        grep -q "$2" "$PTY_OUT" 2>/dev/null && return 0
+        kill -0 "$PTY_PID" 2>/dev/null || return 1
+        sleep 0.5
+        i=$((i + 1))
+    done
+    return 1
+}
+
+launcher_pty_silent_stop() {
+    kill "$PTY_PID" "$PTY_HOLDER" 2>/dev/null
+    wait "$PTY_PID" 2>/dev/null
+    wait "$PTY_HOLDER" 2>/dev/null
+    rm -f "$PTY_FIFO"
+}
+
 # The same thing against the REAL launcher and real podman — no shim on PATH. Used by the
 # live tier, where the whole point is that podman is genuine.
 # KEYS should end with an `exit\n` when the launcher will go on to open a shell, since a
@@ -110,6 +158,35 @@ case "\$1" in
 esac
 EOF
     chmod +x "$SHIM/id"
+}
+
+# Fake `ssh`, so a launch can reach open_shell having warned about NOTHING.
+#
+# Against the fake podman the tunnel can never come up — its ProxyCommand is
+# `podman exec -i ... sshd -i`, and the fake serves no sshd — so every shim launch warns
+# that the tunnel failed. That is realistic and worth keeping for every other test here,
+# but it means the quiet path cannot be reached at all without this.
+#
+# It answers `-O check` and `-O exit` directly, and for the master it creates the control
+# socket the launcher tests for with `[ -S ]`. python3 because a unix socket cannot be made
+# from the shell; the file survives the process, so the socket does not need holding open —
+# only the master does, for the `kill -0` in tunnel_start's wait loop.
+shim_fake_ssh() {
+    cat > "$SHIM/ssh" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *" -O check "*|*" -O exit "*) exit 0 ;;
+esac
+ctl=''; prev=''
+for a in "$@"; do
+    [ "$prev" = "-S" ] && ctl="$a"
+    prev="$a"
+done
+[ -n "$ctl" ] && python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)' "$ctl"
+sleep 30
+EOF
+    chmod +x "$SHIM/ssh"
 }
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,

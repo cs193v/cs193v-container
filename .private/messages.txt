@@ -353,6 +353,12 @@ Reconnecting your browser to the container...
 [[status.tunnel-reset]]
 Reconnected. Servers running in the container should be reachable again.
 
+[[prompt.acknowledge-warnings]]
+Please read the note above before you carry on. Opening the container replaces
+everything on this screen, so this is the last chance to see it.
+
+Press ENTER to continue.
+
 [[prompt.config-changed]]
 The course container settings have changed since your container was created.
 

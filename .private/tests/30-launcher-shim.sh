@@ -430,6 +430,83 @@ shim_new
 launcher --rebuild >/dev/null 2>&1
 assert_eq "noterm:--rebuild-still-creates-a-container-piped" "1" "$(shim_count '^run ')"
 
+# ─── warnings survive the shell being opened  (issue #19) ──────────────────────
+# open_shell's last act is `exec podman exec -it ... cs193v-shell`, and cs193v-shell
+# attaches tmux, which switches the terminal to its alternate screen — erasing everything
+# printed before it. So every warning the launcher has was displayed and none of them was
+# readable: the dev-image advisory, "the tunnel did not come up", "these ports are already
+# in use". The launcher now stops for ENTER whenever it warned.
+#
+# The shim's launches warn twice over, with no arranging needed: no IMAGE is pinned, so dev
+# mode is announced, and the fake podman cannot serve an ssh tunnel, so the tunnel fails.
+#
+# exec_out makes the moment the container is opened visible in the transcript: it is what
+# the fake prints for the final `podman exec -it`, and that is the only exec whose output
+# is not captured or discarded by the launcher.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+out="$(launcher_tty '\nexit\n' | strip_ansi)"
+assert_says "ack:a-warned-launch-asks-for-enter" "Press ENTER to continue" "$out"
+# The warning itself has to still be on screen at that point — acknowledging a message you
+# cannot see is no better than not being shown it.
+assert_says "ack:the-warning-is-still-on-screen" "locally built image" "$out"
+# ENTER goes on to open the shell rather than giving up.
+assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
+# And the prompt comes BEFORE the container is opened, not after it has already swallowed
+# the screen. Line numbers from the transcript, so this asserts on order, not just presence.
+p_ack="$(printf '%s\n' "$out" | grep -n 'Press ENTER to continue' | head -1 | cut -d: -f1)"
+p_shell="$(printf '%s\n' "$out" | grep -n 'SHELL-OPENED' | head -1 | cut -d: -f1)"
+if [ -n "$p_ack" ] && [ -n "$p_shell" ] && [ "$p_ack" -lt "$p_shell" ]; then
+    pass "ack:prompt-comes-before-the-container-is-opened"
+else
+    fail "ack:prompt-comes-before-the-container-is-opened" \
+         "prompt at line ${p_ack:-none}, shell opened at line ${p_shell:-none}:
+$out"
+fi
+
+# It WAITS, rather than printing a prompt and carrying on regardless — which is the whole
+# of the fix, and what an ordering check alone cannot tell apart. Driven with a terminal
+# that stays open and says nothing, so nothing can be mistaken for an answer.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+launcher_pty_silent_start
+if launcher_pty_silent_wait 30 'Press ENTER'; then
+    pass "ack:prompt-reached-on-a-silent-terminal"
+    assert_eq "ack:silence-does-not-open-the-shell" "0" "$(shim_count '^exec -it')"
+else
+    fail "ack:prompt-reached-on-a-silent-terminal" \
+         "the launcher never asked, or exited without asking:
+$(cat "$PTY_OUT" 2>/dev/null)"
+    fail "ack:silence-does-not-open-the-shell" "no prompt was reached, so nothing was held"
+fi
+launcher_pty_silent_stop
+
+# A launch with nothing to say must NOT stop for an acknowledgement. A pause on every
+# single launch teaches a student to press ENTER without reading, which costs the fix its
+# whole value — the prompt has to mean "there is something here".
+#
+# Two things have to be arranged for a shim launch to have nothing to say: a pinned image,
+# so dev mode is not announced, and an ssh that succeeds, so the tunnel does not fail.
+shim_new
+shim_fake_ssh
+shim_set exec_out "SHELL-OPENED"
+cp "$COPY/.config/container.args" "$SHIM/ca.bak"
+edit_sub "$COPY/.config/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:3333'
+out="$(launcher_tty 'exit\n' | strip_ansi)"
+assert_says_not "ack:a-quiet-launch-warns-about-nothing" "NOTE:" "$out"
+assert_says_not "ack:a-quiet-launch-does-not-stop" "Press ENTER to continue" "$out"
+assert_contains "ack:a-quiet-launch-still-opens-the-shell" "SHELL-OPENED" "$out"
+cp "$SHIM/ca.bak" "$COPY/.config/container.args"
+
+# Warning and prompting are separate: the verbs warn too, and they return to the student's
+# own shell with their output intact, so stopping them would be a pause for nothing.
+# Through a pty, or the acknowledgement would decline to prompt for want of a terminal and
+# this would pass without asserting anything.
+shim_new
+out="$(launcher_tty '\n' --reset-tunnel | strip_ansi)"
+assert_says "ack:a-verb-still-warns" "no container running" "$out"
+assert_says_not "ack:a-verb-does-not-stop-to-be-acknowledged" "Press ENTER to continue" "$out"
+
 # ─── malformed args files ──────────────────────────────────────────────────────
 shim_new
 assert_says "args:missing-file-refused" "container.args is missing" \

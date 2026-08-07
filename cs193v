@@ -95,7 +95,53 @@ fi
 
 info() { printf '%s\n' "$*"; }
 note() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
-warn() { printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2; }
+
+# A warning has to be ACKNOWLEDGED, not merely printed. The launcher's last act is
+# `exec podman exec -it ... cs193v-shell`, and cs193v-shell attaches tmux, which switches
+# the terminal to its alternate screen -- so every line printed beforehand is wiped from
+# view before a student has read a word of it. The dev-image advisory, "the tunnel did not
+# come up" and "these ports were already in use" were all displayed and none of them was
+# readable: the student got a banner, a shell prompt, and no idea why their browser cannot
+# reach their server. Issue #19.
+#
+# So warn() records, and open_shell waits for ENTER before the exec when anything was
+# recorded. die() needs nothing of the sort -- it exits, so nothing ever starts tmux, and
+# the red box stays on screen. Nor do the verbs: --rebuild, --update and friends return to
+# the student's own shell with their output intact.
+#
+# The record is a FILE rather than a variable because tunnel_start runs
+# `for port in $(tunnel_ports)`, and tunnel_ports warns about a malformed CS193V_PORTS
+# entry from inside that command substitution -- a subshell, where an assignment would be
+# discarded on return. The text reaches the terminal either way, since warn() writes to
+# stderr and `$( )` does not capture it; it is exactly the record, the half that decides
+# whether the student gets a chance to read it, that a variable would lose. $$ stays the
+# parent shell's pid inside a subshell, so both halves agree on the path.
+WARN_ACK="${TMPDIR:-/tmp}/cs193v-warned.$$"
+# Pids are reused, so a file left behind by a crash could otherwise make a launch with
+# nothing to say stop and ask to be acknowledged.
+rm -f "$WARN_ACK"
+trap 'rm -f "$WARN_ACK"' EXIT
+
+warn() {
+    printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2
+    # An unwritable TMPDIR must not turn a warning into a failure: the student still sees
+    # the text, they just do not get stopped for it.
+    { : >> "$WARN_ACK"; } 2>/dev/null || true
+}
+
+# Hold the screen so anything warn() printed survives what comes next. See warn().
+acknowledge_warnings() {
+    local _ack
+    [ -e "$WARN_ACK" ] || return 0
+    rm -f "$WARN_ACK"
+    # open_shell has already refused a non-terminal stdin, so this cannot normally fire --
+    # but a prompt nobody can answer would turn "we printed a warning" into "the launcher
+    # hangs", which is a worse bug than the one being fixed.
+    [ -t 0 ] || return 0
+    printf '\n'
+    note "$(msg prompt.acknowledge-warnings)"
+    IFS= read -r _ack || true
+}
 
 # The red STOP banner, in the same spirit as the devcontainer's .error.sh: a novice must
 # be able to tell "this is course infrastructure, stop and contact staff" from "I typed
@@ -829,6 +875,12 @@ open_shell() {
     # Must run BEFORE the exec, or the session the student should be getting back still
     # looks occupied and they get a new one instead.
     prune_stale_tmux_clients
+
+    # LAST, so it covers everything printed on the way here -- including warn.many-shells
+    # just above -- and so the warnings are still the newest thing on screen while the
+    # student reads them. One line further down is `exec`, after which tmux's alternate
+    # screen erases all of it. See warn().
+    acknowledge_warnings
 
     # cs193v-shell puts the student inside tmux; see files/cs193v-shell. CS193V_CONTAINER is
     # passed because its failure path has to tell a student the exact `podman exec` line to
