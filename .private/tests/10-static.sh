@@ -70,13 +70,23 @@ assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0} {cont=0}' $PRIVATE/Containerfile)"
 assert_eq  "containerfile:no-comments-in-continuations" "" "$bad"
 
+# Whole-line comments blanked, line NUMBERS preserved, so an ordering check cannot match the
+# Containerfile's own prose about the thing it is checking. Layer 2's comment contains the
+# words "every `npm install -g` in this file depends on them", which is exactly that trap —
+# the same one the ban-list greps at the top of this file have to dodge.
+cf_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/Containerfile)"
+cf_grep() { printf '%s\n' "$cf_code" | grep -nE "$1" | head -1 | cut -d: -f1; }
+
 # Layer order is load-bearing: podman cannot resume a partial layer download but does keep
 # completed ones, so the most volatile software must come last. If claude-code moved
 # earlier, every version bump would re-download node, gh and vercel too.
-ln_node="$(grep -n 'deb.nodesource.com' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-ln_gh="$(grep -n 'cli.github.com/packages' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-ln_vercel="$(grep -n 'npm install -g "vercel' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-ln_claude="$(grep -n 'npm install -g "@anthropic-ai/claude-code' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
+#
+# Quote-agnostic: the install lines are wrapped in `su student -s /bin/sh -c "..."` now, so
+# the package name is single-quoted inside a double-quoted string.
+ln_node="$(cf_grep 'deb\.nodesource\.com')"
+ln_gh="$(cf_grep 'cli\.github\.com/packages')"
+ln_vercel="$(cf_grep "npm install -g [\"']vercel")"
+ln_claude="$(cf_grep "npm install -g [\"']@anthropic-ai/claude-code")"
 if [ -n "$ln_claude" ] && [ -n "$ln_vercel" ] && [ -n "$ln_gh" ] && [ -n "$ln_node" ] \
    && [ "$ln_claude" -gt "$ln_vercel" ] && [ "$ln_vercel" -gt "$ln_gh" ] && [ "$ln_gh" -gt "$ln_node" ]; then
     pass "containerfile:claude-code-is-last-software-layer"
@@ -100,6 +110,40 @@ assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs
 # No tarball left behind.
 assert_not_contains "containerfile:no-node-tarball-download" "nodejs.org/dist" \
                     "$(cat $PRIVATE/Containerfile)"
+
+# ─── the globals go in the STUDENT's npm prefix  (issue #13) ───────────────────
+# Every `npm install -g` in the build must run as `student`. Installed as root they land in
+# nodesource's /usr prefix while the student's is ~/.local — npm reads one prefix, so the
+# tools become invisible to `npm ls -g` and updates write a second copy elsewhere on PATH.
+#
+# Asserted here, in milliseconds, rather than only in the image tier: reverting this costs a
+# ~2 GB rebuild to discover otherwise.
+for pkg in playwright vercel '@anthropic-ai/claude-code'; do
+    line="$(printf '%s\n' "$cf_code" | grep -nE "npm install -g [\"']$pkg" | head -1)"
+    case "$line" in
+        *"su student"*) pass "containerfile:$pkg-installed-as-student" ;;
+        '') fail "containerfile:$pkg-installed-as-student" "no 'npm install -g $pkg' line found" ;;
+        *)  fail "containerfile:$pkg-installed-as-student" \
+                 "installed as root — it must run under 'su student':
+$line" ;;
+    esac
+done
+# The prefix has to be configured BEFORE the first install, or that install silently uses
+# root's and the ordering above buys nothing. Comment-stripped, or layer 2's own prose about
+# `npm install -g` matches ahead of any actual install line.
+ln_prefix="$(cf_grep 'npm config set prefix /home/student/\.local')"
+ln_firstglobal="$(cf_grep 'npm install -g')"
+if [ -n "$ln_prefix" ] && [ -n "$ln_firstglobal" ] && [ "$ln_prefix" -lt "$ln_firstglobal" ]; then
+    pass "containerfile:npm-prefix-set-before-first-global-install"
+else
+    fail "containerfile:npm-prefix-set-before-first-global-install" \
+         "want prefix < first install; got prefix=${ln_prefix:-none} first-install=${ln_firstglobal:-none}"
+fi
+# ~/.local/lib/node_modules must be pre-created, or `npm ls -g` on an untouched prefix exits
+# 254 with ENOENT instead of printing an empty tree.
+assert_ok "containerfile:student-node-modules-precreated" \
+          grep -qE 'install -d -o student -g student .*/home/student/\.local/lib/node_modules' \
+          $PRIVATE/Containerfile
 
 args_live_early="$(sed 's/#.*//' $REPO/.config/container.args)"
 # ─── identity: hostname, banner, title, goodbye  (issues #3 and #4) ────────────

@@ -368,21 +368,44 @@ whether `build-essential` is needed — it is there for native npm modules, but 
 needs it could `sudo apt install` it, which is exactly what passwordless sudo is for.
 Cleaning the npm cache (B8) would also bring both npm layers under 400 MB.
 
-### B10. `npm ls -g` shows nothing, and Claude Code auto-update may not work
+### ~~B10~~. `npm ls -g` shows nothing, and Claude Code auto-update may not work — **FIXED**
 
-Build-time globals live in root-owned `/usr/local/lib/node_modules`, while the student's npm
-prefix is `/home/student/.local`. Both are deliberate. The consequences are not obviously
-intended:
+The path in the original report was wrong, and worth correcting because it sent two other
+documents the same way: the globals were in **`/usr/lib/node_modules`** (nodesource's apt
+prefix). `/usr/local/lib/node_modules` never existed.
 
-- `npm ls -g --depth=0` prints nothing, though `vercel` and `claude` are installed.
-- `managed-settings.json` deliberately leaves `autoUpdatesChannel` alone so "students always
-  have current Claude Code" — but the student cannot write to
-  `/usr/local/lib/node_modules/@anthropic-ai`, so an in-place npm update would need sudo.
+The cause was ordering. Layers 4–7 ran `npm install -g` as **root**, whose prefix is `/usr`,
+while layer 8 — three layers later — pointed the *student's* prefix at `~/.local`. npm reads
+exactly one global prefix, so the two never met.
 
-Whether Claude Code's own updater handles this (it may install to `~/.local` and shadow the
-root-owned copy via `PATH`, which does put `/home/student/.local/bin` first) needs checking
-against a real login — see `tests/MANUAL.md`. If it does not, the stated "auto-update stays
-enabled" benefit is not being delivered.
+Two consequences, one of them worse than reported:
+
+- `npm ls -g --depth=0` did not "print nothing". It **exited 254** with an `ENOENT` on
+  `/home/student/.local/lib` and six lines of npm error, because nothing had ever created
+  that directory — the build pre-created `.local`, `.local/bin` and `.local/share`, but not
+  `.local/lib`.
+- **Auto-update worked**, which settles the question this entry parked for a human. Verified
+  without a login: `claude doctor` reports `Running: npm-global`, and the updater's
+  npm-global branch — read out of the shipped binary — runs `npm install -g <pkg>` with
+  `cwd: homedir()` and **no `--prefix`**, so it resolved the *student's* prefix. Running
+  exactly that as `student` produced a working, student-owned copy at `~/.local`, with
+  `~/.local/bin/claude` winning on `PATH`. So the "auto-update stays enabled" benefit was
+  real; it was just arriving as a second copy that shadowed the image's.
+
+The fix moves the prefix setup into layer 2, beside Node, and runs all three
+`npm install -g` calls under `su student`. `npm ls -g` now lists playwright, vercel and
+Claude Code; an update rewrites the same directory instead of shadowing another one.
+
+What the fix does **not** change: an update still writes ~283 MB into the container's
+writable layer, because overlayfs copies a file up in full when it is modified. That cost is
+recorded in `files/claude-code/managed-settings.json` rather than designed away.
+
+It also un-vacuumed a test. `absent:no-puppeteer` in `tests/50-image.sh` matched against
+`$(npm ls -g --depth=0 2>/dev/null)` — a command that errored, with its stderr discarded — so
+it was comparing "puppeteer" to the empty string and would have passed on an image that had
+puppeteer installed. It now asserts the command succeeds first. Guards: `npm:*` in
+`tests/50-image.sh` and `containerfile:*-installed-as-student` in `tests/10-static.sh`.
+GitHub issue #13.
 
 ### ~~B11~~. `tldr --update` failure was silent (`|| true`) — **FIXED**
 

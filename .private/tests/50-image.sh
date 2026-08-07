@@ -370,23 +370,66 @@ assert_ok "node:is-an-apt-package" \
 record "node:apt-package-version" "$(R 'dpkg-query -Wf "\${Version}" nodejs')"
 assert_eq "node:not-apt-mark-held" "" "$(R 'apt-mark showhold' | tr -d ' \n')"
 assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/lib')"
-# puppeteer would pull a whole Chrome; it is out, which is also why --shm-size is absent.
-globals="$(R 'npm ls -g --depth=0 2>/dev/null')"
+# ─── the student's global npm prefix  (issue #13) ──────────────────────────────
+# playwright, vercel and Claude Code are installed AS THE STUDENT, into the student's own
+# npm prefix, so `npm ls -g` answers the question a student is actually asking.
+#
+# They used to be installed as root. Root's prefix is nodesource's /usr and the student's is
+# ~/.local, and npm reads exactly one of them — so the three tools were invisible to
+# `npm ls -g`, and `~/.local/lib` did not exist at all, which made the command CRASH with
+# ENOENT and six lines of npm error rather than print an empty tree.
+#
+# Assert the command SUCCEEDS before matching on its output. That is the whole reason
+# `absent:no-puppeteer` below was worth nothing: it used to read
+# `npm ls -g --depth=0 2>/dev/null` — a command that errored, with its stderr discarded — so
+# it matched "puppeteer" against the empty string and would have passed just as happily on
+# an image that had puppeteer installed.
+assert_ok "npm:ls-g-succeeds" \
+          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
+globals="$(R 'npm ls -g --depth=0')"
 record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
+for pkg in "@anthropic-ai/claude-code" vercel playwright; do
+    assert_contains "npm:ls-g-lists-$pkg" "$pkg" "$globals"
+done
+# puppeteer would pull a whole Chrome; it is out, which is also why --shm-size is absent.
 assert_not_contains "absent:no-puppeteer" "puppeteer" "$globals"
 
-# The build-time `npm install -g` layers must not leave root's npm cache in the image. It is
-# pure dead weight in something students download over dorm wifi, and it inflates two of the
-# three layers that the resume-on-failure design cares about. The apt layer already cleans
-# /var/lib/apt/lists; this is the same hygiene for npm.
-cache_mb="$(R 'sudo du -sm /root/.npm 2>/dev/null | cut -f1' | tr -d ' \n')"
-record "img:root-npm-cache-mb" "${cache_mb:-0}"
-if [ "${cache_mb:-0}" -lt 20 ]; then
-    pass "img:npm-cache-not-baked-into-the-image"
-else
-    fail "img:npm-cache-not-baked-into-the-image" \
-         "/root/.npm is ${cache_mb} MB. Add 'npm cache clean --force' to each npm layer."
-fi
+# Student-owned, so `npm update -g` and Claude Code's own updater work in place rather than
+# writing a second copy somewhere else on PATH.
+assert_eq "npm:globals-are-student-owned" "student student student" \
+    "$(R 'stat -c %U /home/student/.local/lib/node_modules/@anthropic-ai/claude-code \
+                     /home/student/.local/lib/node_modules/vercel \
+                     /home/student/.local/lib/node_modules/playwright' | tr '\n' ' ' | sed 's/ *$//')"
+# And the prefix must be writable with no sudo — that is what the whole arrangement buys.
+assert_ok "npm:student-prefix-is-writable-without-sudo" \
+          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/lib/node_modules && test -w /home/student/.local/bin'"
+for cmd in claude vercel playwright; do
+    assert_eq "npm:$cmd-resolves-in-the-student-prefix" "/home/student/.local/bin/$cmd" \
+              "$(R "command -v $cmd")"
+done
+
+# The `npm install -g` layers must not leave an npm cache in the image. It is pure dead
+# weight in something students download over dorm wifi, and it inflates the layers that the
+# resume-on-failure design cares about. The apt layer already cleans /var/lib/apt/lists;
+# this is the same hygiene for npm.
+#
+# BOTH caches are measured. The installs run as the student now, so /home/student/.npm is
+# the one that actually gets written — checking only /root/.npm would pass on an image
+# carrying 150 MB of student cache.
+for who in root student; do
+    case "$who" in
+        root) dir=/root/.npm ;;
+        *)    dir=/home/student/.npm ;;
+    esac
+    cache_mb="$(R "sudo du -sm $dir 2>/dev/null | cut -f1" | tr -d ' \n')"
+    record "img:$who-npm-cache-mb" "${cache_mb:-0}"
+    if [ "${cache_mb:-0}" -lt 20 ]; then
+        pass "img:npm-cache-not-baked-into-the-image:$who"
+    else
+        fail "img:npm-cache-not-baked-into-the-image:$who" \
+             "$dir is ${cache_mb} MB. Add 'npm cache clean --force', as that user, to each npm layer."
+    fi
+done
 
 # ─── fonts ─────────────────────────────────────────────────────────────────────
 # The base image ships no fonts at all, and anything that rasterizes text (Pillow,

@@ -157,6 +157,18 @@ RUN set -eux; \
 # from the tarball was meant to solve.
 #
 # The key is stored armored as .asc, which apt reads directly, so this needs no gnupg.
+#
+# THE STUDENT'S NPM PREFIX IS SET HERE, in the same layer, because every `npm install -g`
+# below depends on it and npm reads exactly ONE global prefix. Root's is nodesource's /usr;
+# the student's is ~/.local. Setting it after those installs -- which is where it used to
+# live, down in layer 8 -- meant the tools went to /usr as root while the student read
+# ~/.local, so `npm ls -g` never saw them and Claude Code's updater wrote a second copy into
+# ~/.local that shadowed the first on PATH. See issue #13.
+#
+# ~/.local/lib/node_modules is pre-created rather than left to the first install. An npm
+# prefix whose lib/ does not exist makes `npm ls -g` EXIT 254 with an ENOENT stack and a
+# debug-log path instead of printing an empty tree -- which is what a student got before the
+# installs moved here, and would get again on any prefix nothing had written to yet.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
     install -d -m 0755 /etc/apt/keyrings; \
@@ -169,7 +181,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends "nodejs=${NODE_VERSION}-1nodesource1"; \
     rm -rf /var/lib/apt/lists/*; \
     test "$(node --version)" = "v${NODE_VERSION}"; \
-    node --version; npm --version
+    node --version; npm --version; \
+    install -d -o student -g student -m 0755 /home/student/.local; \
+    install -d -o student -g student -m 0755 /home/student/.local/bin; \
+    install -d -o student -g student -m 0755 /home/student/.local/lib; \
+    install -d -o student -g student -m 0755 /home/student/.local/lib/node_modules; \
+    su student -s /bin/sh -c 'npm config set prefix /home/student/.local'; \
+    test "$(su student -s /bin/sh -c 'npm config get prefix')" = /home/student/.local; \
+    su student -s /bin/sh -c 'npm ls -g --depth=0' > /dev/null
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 3 — GitHub CLI
@@ -209,13 +228,23 @@ RUN set -eux; \
 # the guard would be cargo cult.
 #
 # `npm cache clean --force` in the same layer, for the reason spelled out on the Vercel
-# layer below.
+# layer below -- as the STUDENT, since that is now whose cache gets written.
+#
+# THE TWO HALVES RUN AS DIFFERENT USERS, deliberately. The npm install goes to the student's
+# prefix (issue #13, see layer 2), but `install-deps` is an apt install and needs root, which
+# is the layer's own user. Splitting them across two layers would be the obvious alternative
+# and is worse: the library set belongs to the pinned playwright version, so they must
+# invalidate together.
+#
+# The binary is named by absolute path, not found on PATH: the ENV that puts
+# ~/.local/bin first is in layer 8, several layers below this, and `su` resets PATH anyway.
 # ─────────────────────────────────────────────────────────────────────────────
-RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
- && npm cache clean --force \
- && playwright --version \
- && playwright install-deps chromium \
- && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    su student -s /bin/sh -c "npm install -g 'playwright@${PLAYWRIGHT_VERSION}'"; \
+    su student -s /bin/sh -c 'npm cache clean --force'; \
+    /home/student/.local/bin/playwright --version; \
+    /home/student/.local/bin/playwright install-deps chromium; \
+    rm -rf /var/lib/apt/lists/*
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 5 — the Chromium headless shell, and the proof that it works
@@ -248,7 +277,7 @@ RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
 # The probe is written and deleted in THIS layer. Deleted in a later one, it would still ship.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
-    su student -s /bin/sh -c 'playwright install --only-shell chromium'; \
+    su student -s /bin/sh -c '/home/student/.local/bin/playwright install --only-shell chromium'; \
     CHROME_BIN="$(find /home/student/.cache/ms-playwright -type f \
         \( -name chrome-headless-shell -o -name headless_shell \) -perm -u+x | head -1)"; \
     test -n "$CHROME_BIN"; \
@@ -259,8 +288,8 @@ RUN set -eux; \
     esac; \
     test "$(od -An -t x1 -j 18 -N 2 -- "$CHROME_BIN" | tr -d ' \n')" = "$WANT_ELF"; \
     timeout 60 "$CHROME_BIN" --version; \
-    su student -s /bin/sh -c 'timeout 120 playwright screenshot -b chromium \
-        about:blank /home/student/.cache/chromium-probe.png'; \
+    su student -s /bin/sh -c 'timeout 120 /home/student/.local/bin/playwright screenshot \
+        -b chromium about:blank /home/student/.cache/chromium-probe.png'; \
     test -s /home/student/.cache/chromium-probe.png; \
     rm -f /home/student/.cache/chromium-probe.png
 
@@ -268,20 +297,30 @@ RUN set -eux; \
 # Layer 6 — Vercel CLI
 # ─────────────────────────────────────────────────────────────────────────────
 # `npm cache clean --force` in the same layer, not a later one: a file deleted in a later
-# layer still ships in the earlier one. Root's npm cache is dead weight in something
-# students download over dorm wifi, and it was inflating this layer and the next by roughly
-# 150 MB each.
-RUN npm install -g "vercel@${VERCEL_VERSION}" \
- && npm cache clean --force \
- && vercel --version
+# layer still ships in the earlier one. The npm cache is dead weight in something students
+# download over dorm wifi, and it was inflating this layer and the next by roughly 150 MB
+# each. It is the STUDENT's cache that has to be cleaned now -- /home/student/.npm, not
+# /root/.npm -- because the install runs as the student. 50-image.sh measures both.
+RUN set -eux; \
+    su student -s /bin/sh -c "npm install -g 'vercel@${VERCEL_VERSION}'"; \
+    su student -s /bin/sh -c 'npm cache clean --force'; \
+    /home/student/.local/bin/vercel --version
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 7 — Claude Code.  MOST VOLATILE: keep it last so a version bump
 # invalidates only this layer and the small config layer after it.
 # ─────────────────────────────────────────────────────────────────────────────
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && npm cache clean --force \
- && claude --version
+#
+# Installed as the student for the reason in layer 2, and this is the layer where it matters
+# most: Claude Code's auto-updater is left enabled on purpose, it detects this as an
+# `npm-global` install, and its update path runs `npm install -g` with no `--prefix`. So it
+# writes wherever the STUDENT's prefix points. Installed here, that is the same directory the
+# image put it in and the update is genuinely in place; installed as root it was a different
+# directory, and the update quietly shadowed the image's copy via PATH. Issue #13.
+RUN set -eux; \
+    su student -s /bin/sh -c "npm install -g '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}'"; \
+    su student -s /bin/sh -c 'npm cache clean --force'; \
+    /home/student/.local/bin/claude --version
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 8 — course configuration
@@ -345,8 +384,10 @@ COPY files/ /tmp/cs193v-files/
 #     run with no root phase and no sudo, which is what the devcontainer's five
 #     `sudo chown -R` calls were working around.
 #
-#  6. Points npm's global prefix at the student's home, so `npm install -g` works without
-#     sudo. Build-time globals stay in root-owned /usr/local.
+#  6. (Moved to layer 2.) npm's global prefix, and the ~/.local directories it needs, are
+#     set up alongside Node now — every `npm install -g` in this file depends on them, so
+#     configuring the prefix down here meant the build-time globals went to root's prefix
+#     instead of the student's. See issue #13 and the comment on layer 2.
 #
 #  7. Removes /etc/gitconfig if the base image has one. git stays completely stock so
 #     students meet its real hints and errors. The `git commit` editor trap is closed by
@@ -434,19 +475,16 @@ RUN set -eux; \
     install -d -o student -g student -m 0700 /home/student/.claude-json; \
     install -d -o student -g student -m 0755 /home/student/.config; \
     install -d -o student -g student -m 0700 /home/student/.config/gh; \
-    install -d -o student -g student -m 0755 /home/student/.local; \
     install -d -o student -g student -m 0755 /home/student/.local/share; \
     install -d -o student -g student -m 0700 /home/student/.local/share/com.vercel.cli; \
     install -d -o student -g student -m 0755 /home/student/.cache; \
     install -d -o student -g student -m 0755 /home/student/.cache/ms-playwright; \
-    install -d -o student -g student -m 0755 /home/student/.local/bin; \
     install -d -o student -g student -m 0755 /home/student/projects; \
     install -d -o student -g student -m 0700 /home/student/.ssh; \
     install -m 0644 /tmp/cs193v-files/sshd_config /etc/ssh/cs193v_sshd_config; \
     ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/cs193v_host_ed25519_key; \
     /usr/sbin/sshd -t -f /etc/ssh/cs193v_sshd_config; \
     rm -f /etc/ssh/cs193v_host_ed25519_key /etc/ssh/cs193v_host_ed25519_key.pub; \
-    su student -s /bin/sh -c 'npm config set prefix /home/student/.local'; \
     rm -f /etc/gitconfig; \
     rm -rf /tmp/cs193v-files
 

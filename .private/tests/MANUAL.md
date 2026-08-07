@@ -76,9 +76,11 @@ During `gh auth login`, answer **yes** to "Authenticate Git with your GitHub cre
 then confirm `git push` works from a test repo.
 *Automated:* the stub itself, and that all four credential directories are student-owned
 volumes with deny rules (`50-image.sh`).
-*While you are logged in, please also settle ERRORS.md B10:* run `claude` and check whether
-auto-update works. Claude Code is installed root-owned in `/usr/local/lib/node_modules`,
-which the student cannot write, so the "auto-update stays enabled" benefit may not be real.
+*ERRORS.md B10 no longer needs settling here.* It asked whether Claude Code's auto-update
+works given where the CLI is installed; it does, and the check turned out not to need a
+login — see B10, now fixed. Claude Code is installed as the student in
+`/home/student/.local/lib/node_modules`, which the student owns, so an update rewrites it in
+place. `npm:*` in `50-image.sh` holds that.
 
 ### §8.7 — a permission prompt in the wild
 Ask the agent to do something that triggers a prompt.

@@ -388,6 +388,9 @@ actually are.
   signal, and the recovery is Ctrl-Q, which nobody knows. That is turned off here.
 - **No `man` pages** (the base image strips them). `tldr <command>` instead — and typing
   `man git` tells you so and names the `tldr` page to try, rather than failing obscurely.
+- **`claude`, `vercel` and `playwright` are ordinary global npm packages**, installed in your
+  own prefix rather than system-wide — so `npm ls -g` lists them, `npm update -g` works, and
+  `npm install -g <anything>` needs no `sudo`. Claude Code keeps itself up to date this way.
 - **`ssh`, `scp` and `telnet` are here.** Log into a remote machine, copy a file across, or
   talk to a web server by hand — `telnet example.com 80`, then type `GET / HTTP/1.0` and
   press Enter twice, and you see the raw reply. (Press Enter; do not try to type the `\r\n`
