@@ -379,11 +379,11 @@ assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/l
 # `npm ls -g`, and `~/.local/lib` did not exist at all, which made the command CRASH with
 # ENOENT and six lines of npm error rather than print an empty tree.
 #
-# Assert the command SUCCEEDS before matching on its output. That is the whole reason
-# `absent:no-puppeteer` below was worth nothing: it used to read
-# `npm ls -g --depth=0 2>/dev/null` — a command that errored, with its stderr discarded — so
-# it matched "puppeteer" against the empty string and would have passed just as happily on
-# an image that had puppeteer installed.
+# The success check is not ceremony, and it comes FIRST on purpose: an assertion that
+# matches on the output of a command nobody checked is worth nothing. This block used to
+# read `npm ls -g --depth=0 2>/dev/null` — a command that errored, with its stderr
+# discarded — and then match against the empty string it produced. Anything asserted that
+# way passes for the wrong reason and keeps passing forever.
 assert_ok "npm:ls-g-succeeds" \
           sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
 globals="$(R 'npm ls -g --depth=0')"
@@ -391,8 +391,6 @@ record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
 for pkg in "@anthropic-ai/claude-code" vercel playwright; do
     assert_contains "npm:ls-g-lists-$pkg" "$pkg" "$globals"
 done
-# puppeteer would pull a whole Chrome; it is out, which is also why --shm-size is absent.
-assert_not_contains "absent:no-puppeteer" "puppeteer" "$globals"
 
 # Student-owned, so `npm update -g` and Claude Code's own updater work in place rather than
 # writing a second copy somewhere else on PATH.

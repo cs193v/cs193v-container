@@ -400,12 +400,20 @@ What the fix does **not** change: an update still writes ~283 MB into the contai
 writable layer, because overlayfs copies a file up in full when it is modified. That cost is
 recorded in `files/claude-code/managed-settings.json` rather than designed away.
 
-It also un-vacuumed a test. `absent:no-puppeteer` in `tests/50-image.sh` matched against
+It also turned up a vacuous test. The globals block in `tests/50-image.sh` matched against
 `$(npm ls -g --depth=0 2>/dev/null)` — a command that errored, with its stderr discarded — so
-it was comparing "puppeteer" to the empty string and would have passed on an image that had
-puppeteer installed. It now asserts the command succeeds first. Guards: `npm:*` in
-`tests/50-image.sh` and `containerfile:*-installed-as-student` in `tests/10-static.sh`.
-GitHub issue #13.
+every assertion in it was comparing against the empty string and passing for the wrong
+reason. The block now asserts the command SUCCEEDS before matching anything on its output;
+that ordering is the durable lesson, and the comment there says so.
+
+The `absent:no-puppeteer` assertion that sat in that block was **removed by decision**, not
+repaired — so nothing in the suite now fails if puppeteer is reintroduced as an npm global.
+The rejection itself still stands and is still argued in the README's "Deliberately not
+here"; it is documentation-only. Note `VERIFICATION.md` §A.3's `npm-globals` line still reads
+"NO puppeteer" in its trailing comment, which is now a hope rather than a check.
+
+Guards: `npm:*` in `tests/50-image.sh` and `containerfile:*-installed-as-student` in
+`tests/10-static.sh`. GitHub issue #13.
 
 ### ~~B11~~. `tldr --update` failure was silent (`|| true`) — **FIXED**
 
