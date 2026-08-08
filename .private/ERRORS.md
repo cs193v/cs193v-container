@@ -131,7 +131,8 @@ non-empty. All three failure shapes are tested.
 ### A7. Every error message overflowed the STOP box
 
 The box is 69 display columns; message bodies ran to 88. Text spilled past the border on
-every single error.
+every single error. (71 columns since B16, which is what gave the ≤67 wrapping done here a
+right-hand border to line up against.)
 
 **Fix applied:** the 26 over-wide lines in `die()`-routed messages rewrapped to ≤67
 columns. Verified word-for-word identical afterwards — only line breaks changed, no wording
@@ -732,6 +733,49 @@ cannot descend into them and silently undercounts — `podman unshare du` is the
 them. Size disks from `df` deltas, never from a reported image size.
 
 Still not measured, and now never will be: cold **pull** time.
+
+### ~~B16~~. The STOP box had no right side — **FIXED** (issue #21)
+
+`die()` drew `┏━━ STOP ━━┓` and `┗━━┛`, corners and all, then every body line as `┃ text`
+and nothing further. Three walls, in both scripts, since they were written.
+
+**Why nothing caught it.** Two checks in `20-messages.sh` looked like they should have, and
+neither could:
+
+- The width lint computed its limit as `box - 2`, which is `"┃ "` and no closing border. It
+  encoded the bug as the specification, so the geometry could never fail it.
+- `die:all-lines-inside-the-box` counted body lines with `grep -c '┃'`, which counts lines
+  **containing** the character and never how many are on one. One wall scored exactly what
+  two would.
+
+A third consequence had gone unnoticed for the same reason: `install-cs193v.sh` drew the
+box in two places — its `die()` and the Intel-Mac refusal heredoc — and the two had drifted
+**a column apart** (69 vs 68). With no right edge there is no width to fail to line up.
+
+**Fix applied:** one `box()` renderer, duplicated verbatim into the installer the way
+`version_lt` already is (it is curl-piped and cannot source anything), with the borders
+**generated** from a single `BOX_W` rather than typed out. Four hand-drawn copies became
+none; `box:launcher-draws-the-box-in-one-place` fails if any grows back, and
+`box:both-copies-identical` diffs the two.
+
+Three things that made this more than a padding change:
+
+- **Width is 71, not 69.** The 67-column text field is what A7 already hand-wrapped
+  messages.txt to, so widening by two rewrapped **zero** messages. Keeping 69 would have
+  meant a text field of 65 and re-breaking 10 lines of prose that a human had chosen the
+  breaks for — A7's churn again, to save two columns of an 80-column terminal.
+- **Long lines wrap now.** `err.create-failed` and `err.pull-failed` interpolate raw podman
+  output, which is written to no width at all and cannot be hand-wrapped in messages.txt.
+  A line that already fits is emitted untouched, so every hand-chosen break survives. A
+  word with no space in it — a container id, a deep path — is broken hard, because the
+  alternative is breaching the wall.
+- **Padding is measured in display columns without a locale.** `${#s}` counts characters in
+  a UTF-8 locale and **bytes** in the C locale (measured: 32 vs 34 on a line containing an
+  em dash), so a student with `LC_ALL=C` would have seen every `—` and `§` line two columns
+  short. `awk length()` is worse — mawk is not multibyte-aware and scores the border at 3×,
+  which is how A7's first attempt passed vacuously. Stripping UTF-8 continuation bytes
+  (`0x80-0xBF`) and counting the rest needs no locale at all; verified byte-identical
+  output under gawk, mawk and busybox awk.
 
 ---
 
