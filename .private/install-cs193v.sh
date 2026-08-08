@@ -79,23 +79,24 @@ cat <<'EOF'
 EOF
 }
 
+# Drawn by box() rather than typed out. Hand-drawn, this was the one STOP box in either
+# script whose art had drifted — a column narrower than the one die() drew — and the
+# missing right edge is why that was invisible for so long (issue #21).
 say_intel_mac() {
-cat <<'EOF'
+    printf '\n'
+    box '  ' <<'EOF'
 
-  ┏━━ STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃
-  ┃  This Mac has an Intel processor.
-  ┃
-  ┃  The course container needs a Mac with Apple Silicon (M1 or newer),
-  ┃  or a Windows or Linux computer.
-  ┃
-  ┃  Please contact course staff BEFORE the first lab and we will sort
-  ┃  out an alternative for you. This is not something you can fix, and
-  ┃  it is not your fault — please do not spend time troubleshooting it.
-  ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+This Mac has an Intel processor.
+
+The course container needs a Mac with Apple Silicon (M1 or newer),
+or a Windows or Linux computer.
+
+Please contact course staff BEFORE the first lab and we will sort
+out an alternative for you. This is not something you can fix, and
+it is not your fault — please do not spend time troubleshooting it.
 
 EOF
+    printf '\n'
 }
 
 say_done() {
@@ -137,12 +138,89 @@ ok()    { printf '    %s✓%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
 skip()  { printf '    %s· %s (already done)%s\n' "$C_DIM" "$*" "$C_OFF"; }
 note()  { printf '    %s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
 
+# The STOP box, in display columns, corners included. See the launcher: this block, and
+# box() below it, are duplicated VERBATIM from cs193v the way version_lt already is —
+# this script is curl-piped and standalone, so it cannot source anything. 20-messages.sh
+# diffs the two copies and renders both.
+BOX_W=71
+
+# Draws the STOP box around whatever it is given on stdin. $1 is a left indent.
+#
+# Duplicated verbatim in install-cs193v.sh, the way version_lt already is: the installer is
+# curl-piped and standalone, so it cannot source anything from here. 20-messages.sh renders
+# BOTH copies and asserts the same shape of both.
+#
+# awk, and LC_ALL=C awk in particular, because the padding has to be measured in DISPLAY
+# COLUMNS and every other way of doing that is wrong somewhere we ship:
+#
+#   * bash's ${#s} counts characters only in a UTF-8 locale and BYTES in the C locale, so
+#     a student with LC_ALL=C would see every line containing — or § padded two columns
+#     short. Measured: 32 vs 34 for the same string.
+#   * awk's own length() is not multibyte-aware in mawk (Ubuntu's default), which scores
+#     the ━ border at 3× and is exactly how an earlier width check passed vacuously.
+#
+# Stripping UTF-8 continuation bytes (0x80-0xBF) and counting what is left turns a byte
+# count into a character count with no locale involved at all. Verified identical under
+# gawk, mawk and busybox awk. Everything the box ever contains is a narrow character;
+# nothing here would survive CJK, and nothing routes CJK to it.
+box() {
+    LC_ALL=C awk -v w="$BOX_W" -v ind="${1:-}" -v red="$C_RED" -v off="$C_OFF" '
+        function dw(s,  t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+        # The first n display columns of s, kept whole: a multibyte character is never
+        # sliced down the middle, which is what a byte-wise substr would do.
+        function dsub(s, n,  i, c, out, cnt) {
+            out = ""; cnt = 0
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c ~ /[\200-\277]/) { out = out c; continue }
+                if (cnt >= n) break
+                cnt++; out = out c
+            }
+            return out
+        }
+        function rule(n,  s) { s = ""; while (n-- > 0) s = s "━"; return s }
+        function row(text,  pad, n) {
+            pad = ""; n = lim - dw(text)
+            while (n-- > 0) pad = pad " "
+            printf "%s%s┃%s %s%s %s┃%s\n", ind, red, off, text, pad, red, off
+        }
+        # Wrap rather than spill. err.create-failed and err.pull-failed interpolate raw
+        # podman output, which is written to no width at all and cannot be hand-wrapped in
+        # messages.txt -- only here. A line that already fits is emitted untouched, so the
+        # hand-chosen line breaks in messages.txt survive exactly as written.
+        function put(text,  lead, rest, chunk, k, brk) {
+            # Continuation lines keep the original indent, so a wrapped "    cs193v doctor"
+            # stays visibly one item rather than starting a new column.
+            lead = text; sub(/[^ ].*$/, "", lead)
+            if (dw(lead) >= lim) lead = ""
+            rest = text
+            while (dw(rest) > lim) {
+                chunk = dsub(rest, lim)
+                brk = 0
+                for (k = length(chunk); k > length(lead); k--)
+                    if (substr(chunk, k, 1) == " ") { brk = k; break }
+                if (brk > 0) {
+                    row(substr(chunk, 1, brk - 1))
+                    rest = lead substr(rest, brk + 1)
+                } else {
+                    # No space to break at: a container id, a URL or a deep path. Broken
+                    # hard, because the alternative is breaching the wall we just drew.
+                    row(chunk)
+                    rest = lead substr(rest, length(chunk) + 1)
+                }
+            }
+            if (dw(rest) > dw(lead) || dw(text) <= lim) row(rest)
+        }
+        BEGIN { lim = w - 4; printf "%s%s┏━━ STOP %s┓%s\n", ind, red, rule(w - 10), off }
+        # A tab has no defined width inside a box, and podman emits them.
+        { t = $0; gsub(/\t/, " ", t); put(t) }
+        END { printf "%s%s┗%s┛%s\n", ind, red, rule(w - 2), off }
+    '
+}
+
 die() {
-    printf '\n  %s┏━━ STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓%s\n' "$C_RED" "$C_OFF" >&2
-    while IFS= read -r l; do printf '  %s┃%s %s\n' "$C_RED" "$C_OFF" "$l" >&2; done <<EOF
-$*
-EOF
-    printf '  %s┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛%s\n' "$C_RED" "$C_OFF" >&2
+    printf '\n' >&2
+    printf '%s\n' "$*" | box '  ' >&2
     printf '\n  Nothing further has been changed. Please send all of the text above to\n' >&2
     printf '  course staff — that is exactly what we need to help.\n\n' >&2
     exit 1
