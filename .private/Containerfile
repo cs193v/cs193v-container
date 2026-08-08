@@ -1,33 +1,71 @@
 # CS193V course container.
 #
-# Build:   podman build -t localhost/cs193v:dev .
-# CI:      see .github/workflows/build.yml (multi-arch, pushed to ghcr.io)
+# Build:   ./cs193v --build        (students and staff alike; wraps podman build)
 #
-# LAYER ORDERING IS DELIBERATE. podman cannot resume a partial layer download, but it
-# does keep completed layers — so a student whose wifi drops mid-pull loses at most one
-# layer on retry. The most volatile software (claude-code) goes LAST, so bumping it
-# invalidates only a small final layer instead of forcing a full rebuild.
+# THIS FILE IS THE DISTRIBUTION. There is no registry and no published image: every
+# student builds this on their own machine at install time. That makes the pins below
+# load-bearing in a way they were not when a CI job baked one artifact for everyone —
+# see "Pinned inputs" underneath the ARGs.
+#
+# LAYER ORDERING IS DELIBERATE, and it now serves a different purpose than it was written
+# for. It was written when students PULLED this image: podman cannot resume a partial layer
+# download, so putting the most volatile software last meant a dropped connection cost at
+# most one layer. Building locally, the same ordering buys BUILD-CACHE reuse — measured,
+# bumping CLAUDE_CODE_VERSION costs 89 s and 95 MB against 224 s and 728 MB cold. A killed
+# build also resumes at the failed step, which is finer-grained than layer-level pull
+# resume ever was.
+#
+# THAT PAYOFF DEPENDS ENTIRELY ON WHERE THE VERSION ARGs SIT -- see the note above each of
+# them. With all four in a block at the top, the identical bump cost 250 s and 726 MB and
+# re-ran 18 of 23 steps, because an in-scope ARG is part of every later step's cache key.
+# Ordering alone buys nothing. 10-static.sh asserts the placement.
 #
 # Everything below is deliberate; see CONTAINER-DESIGN.md for the reasoning.
 
-FROM ubuntu:26.04
-
-# Pin these in CI. `latest` is a placeholder so a local `podman build` works out of the
-# box; a published image MUST be built with explicit versions or the digest pin is a lie.
-ARG NODE_VERSION=24.18.1
-ARG VERCEL_VERSION=latest
-ARG CLAUDE_CODE_VERSION=latest
-
-# Pinned to an exact patch rather than the `1.62` range the devcontainer feature used, and
-# never `latest`: this version chooses the Chromium build, so a floating pin would quietly
-# change which browser every student gets between one CI run and the next.
+# Pinned by MANIFEST-LIST digest, not a per-architecture one, so this single line serves
+# both the arm64 leg (every supported Mac, and Windows-on-ARM) and the amd64 leg. podman
+# resolves the list and picks the student's own architecture.
 #
-# 1.61.0 is a FLOOR, not a preference. Playwright's platform table gained `ubuntu26.04` in
-# 1.61.0; 1.60 and earlier resolve this base image to ubuntu24.04 and are unsupported on it.
-# Verified by grepping playwright-core's bundle: 0 hits in 1.58 and 1.60, 28 in 1.61 and
-# 1.62.1. The devcontainer this came from is on Ubuntu 24.04 and so never met this limit.
-ARG PLAYWRIGHT_VERSION=1.62.1
+# The `26.04` TAG MOVES. Ubuntu republishes it whenever the base rolls forward, so on the
+# tag alone two students installing a week apart would build on different base images —
+# the one drift this file can close in a single line, and the reason it is closed here.
+#
+# THE TAG IS DECORATION. In `name:tag@digest` the digest wins outright and the tag is not
+# checked against it, so editing `26.04` here changes nothing at all — a future release
+# bump that touches only the tag would silently keep building 26.04. It is kept because
+# `FROM ubuntu@sha256:678c...` alone tells a reader nothing about what this is. Change
+# both, or neither.
+#
+# Getting a new one, both parts:
+#     skopeo inspect --raw docker://docker.io/library/ubuntu:<tag> | sha256sum
+# Note that `podman manifest inspect` and `skopeo` both REFUSE a `tag@digest` reference
+# ("references with both a tag and digest are currently not supported"), which is why
+# 00-release-gates.sh strips the tag before it verifies this line.
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
 
+# ─── Pinned inputs ─────────────────────────────────────────────────────────────
+# All four are exact, and none of them may be `latest`. These used to be CI's job: the
+# published image was built once with explicit versions and every student pulled that one
+# artifact, so a floating ARG only meant CI drifted between runs. Now each student runs
+# this build themselves, and a floating ARG means TWO STUDENTS IN THE SAME LAB SECTION
+# GET DIFFERENT SOFTWARE. `00-release-gates.sh` §3 enforces it.
+#
+# The rationale for each individual pin sits beside that pin, not here — see below.
+#
+# EACH VERSION ARG IS DECLARED IMMEDIATELY BEFORE THE LAYER THAT USES IT, not in a block up
+# here, and that placement is load-bearing rather than tidiness. MEASURED: with all four
+# declared here, bumping CLAUDE_CODE_VERSION re-ran 18 of 23 steps -- 250 s and 726 MB, no
+# cheaper than a cold build. buildah puts every in-scope build arg into each step's cache
+# key (you can see it in the step headers: `|5 CLAUDE_CODE_VERSION=... DEBIAN_FRONTEND=...`),
+# so an ARG declared at the top invalidates the cache for everything after it. The layer
+# ordering below cannot help, because the ARG fires before any of those layers do.
+#
+# Declared at the point of use, a bump invalidates only that layer onward, which is what the
+# ordering was designed to give. Moving one of these back up here silently costs a student
+# a full rebuild for a one-line version bump, and nothing would fail to warn you.
+#
+# DEBIAN_FRONTEND is the exception that proves it: it stays global because every apt layer
+# needs it and its value never changes, so it never invalidates anything.
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,7 +207,14 @@ RUN set -eux; \
 # prefix whose lib/ does not exist makes `npm ls -g` EXIT 254 with an ENOENT stack and a
 # debug-log path instead of printing an empty tree -- which is what a student got before the
 # installs moved here, and would get again on any prefix nothing had written to yet.
+#
+# THE PIN ITSELF is verified rather than assumed: NodeSource's nodistro suite retains the
+# whole 24.x patch history (24.0.0 onward as of this pin), so unlike a distro archive that
+# drops superseded packages, this exact-version pin does not expire out from under a student
+# who installs in week 6 -- which matters now that students build rather than pull. Re-check
+# with `apt-cache madison nodejs` before assuming it of a future major.
 # ─────────────────────────────────────────────────────────────────────────────
+ARG NODE_VERSION=24.18.1
 RUN set -eux; \
     install -d -m 0755 /etc/apt/keyrings; \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -239,6 +284,15 @@ RUN set -eux; \
 # The binary is named by absolute path, not found on PATH: the ENV that puts
 # ~/.local/bin first is in layer 8, several layers below this, and `su` resets PATH anyway.
 # ─────────────────────────────────────────────────────────────────────────────
+# Pinned to an exact patch rather than the `1.62` range the devcontainer feature used, and
+# never `latest`: this version chooses the Chromium build, so a floating pin would quietly
+# change which browser every student gets.
+#
+# 1.61.0 is a FLOOR, not a preference. Playwright's platform table gained `ubuntu26.04` in
+# 1.61.0; 1.60 and earlier resolve this base image to ubuntu24.04 and are unsupported on it.
+# Verified by grepping playwright-core's bundle: 0 hits in 1.58 and 1.60, 28 in 1.61 and
+# 1.62.1. The devcontainer this came from is on Ubuntu 24.04 and so never met this limit.
+ARG PLAYWRIGHT_VERSION=1.62.1
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g 'playwright@${PLAYWRIGHT_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
@@ -301,6 +355,7 @@ RUN set -eux; \
 # download over dorm wifi, and it was inflating this layer and the next by roughly 150 MB
 # each. It is the STUDENT's cache that has to be cleaned now -- /home/student/.npm, not
 # /root/.npm -- because the install runs as the student. 50-image.sh measures both.
+ARG VERCEL_VERSION=58.8.0
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g 'vercel@${VERCEL_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
@@ -317,6 +372,13 @@ RUN set -eux; \
 # writes wherever the STUDENT's prefix points. Installed here, that is the same directory the
 # image put it in and the update is genuinely in place; installed as root it was a different
 # directory, and the update quietly shadowed the image's copy via PATH. Issue #13.
+#
+# THE PIN is the one most often bumped, and the only one whose partner is checked at build
+# time but never verified: /etc/claude-code/managed-settings.json is parsed for valid JSON
+# further down, which does NOT prove the installed Claude Code accepts its schema. Bumping
+# this means re-testing that pair. Declared here rather than at the top of the file so the
+# bump does not invalidate the whole build -- see the note beside DEBIAN_FRONTEND.
+ARG CLAUDE_CODE_VERSION=2.1.225
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \

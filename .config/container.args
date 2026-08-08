@@ -7,12 +7,24 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── The image ─────────────────────────────────────────────────────────────────
-# Pinned by MANIFEST-LIST digest, not a per-architecture digest, so one pin serves
-# both the arm64 and amd64 legs. Bumping this line is how a fix ships: students run
-# `cs193v --update`, and the launcher notices the mismatch on their next launch even
-# if they don't.
+# EMPTY IS THE NORMAL STATE, and it is not a blank waiting to be filled. There is no
+# registry: .private/Containerfile is the distribution, and every student builds it on
+# their own machine at install time. Empty means "build it locally", which is what the
+# installer does and what `cs193v --build` does afterwards.
 #
-# Empty until first publish — the launcher then runs in dev mode and says so.
+# Bumping the base image digest or a pinned version in the Containerfile is how a fix
+# ships. Students run `cs193v --update`; anyone who doesn't gets prompted on their next
+# launch, because the launcher compares a hash of the Containerfile and files/ against the
+# cs193v.buildhash label baked into their image. That comparison replaces the digest pin —
+# podman assigns a new image ID on every build, so the image ID alone cannot distinguish
+# "rebuilt" from "out of date", but the recipe only moves when staff move it.
+#
+# A VALUE HERE IS AN OVERRIDE, AND IT STILL WORKS. Set it to a registry reference and the
+# launcher pulls that instead of building, and `--update` goes back to being a pull. That
+# path is kept alive deliberately: publishing an image later — as an optimisation for
+# students on slow machines, say — should be a decision, not a rewrite. If you do fill it
+# in, use a MANIFEST-LIST digest rather than a per-architecture one, so a single line
+# serves both the arm64 and amd64 legs, and never a floating tag.
 IMAGE=
 
 # ═══════════════════════════════════════════════════════════════════════════════

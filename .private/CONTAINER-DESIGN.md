@@ -320,8 +320,14 @@ The realistic way that happens is not sabotage but **prompt injection**: an agen
 web page, a README, or an npm package's docs containing instructions, and it has a shell.
 That is not exotic. It is the central hazard of the whole practice this course teaches.
 
-Which is why `--rebuild` matters: it restores the container to exactly the published
-image. If anything ever feels off, rebuild rather than investigate.
+Which is why `--rebuild` matters: it restores the container to exactly the image the
+course container was built from. If anything ever feels off, rebuild rather than
+investigate.
+
+That property survives the fact that the image is built on your own computer rather than
+downloaded. What tampering changes is the container's writable layer, not the image
+underneath it — and `--rebuild` throws that layer away and starts a new container from the
+image, without rebuilding or re-downloading anything. It takes about two seconds.
 
 For the same reason, the capability set is left at podman's defaults rather than
 tightened. Tightening it would look reassuring and achieve nothing: `root` **owns**

@@ -95,6 +95,31 @@ else
          "want node < gh < vercel < claude-code; got node=$ln_node gh=$ln_gh vercel=$ln_vercel claude=$ln_claude"
 fi
 
+# EACH VERSION ARG MUST SIT NEXT TO THE LAYER THAT USES IT, never in a tidy block at the
+# top of the file. This is a performance contract, and it is invisible: buildah folds every
+# in-scope build arg into each step's cache key, so an ARG declared above the RUN steps
+# invalidates the cache for all of them. Measured — bumping CLAUDE_CODE_VERSION with the
+# ARGs at the top cost 250 s and 726 MB (18 of 23 steps re-ran); with each declared at its
+# point of use, 89 s and 95 MB. Nothing breaks if someone tidies them back into a block, so
+# nothing would catch it. This does. See ERRORS.md B5.
+cf_lines="$(sed 's/#.*//' $PRIVATE/Containerfile)"
+for pair in NODE_VERSION:nodesource PLAYWRIGHT_VERSION:playwright@ VERCEL_VERSION:vercel@ CLAUDE_CODE_VERSION:claude-code@; do
+    var="${pair%%:*}"; use="${pair#*:}"
+    ln_arg="$(printf '%s\n' "$cf_lines" | grep -n "^ARG $var=" | head -1 | cut -d: -f1)"
+    ln_use="$(printf '%s\n' "$cf_lines" | grep -nF "$use" | head -1 | cut -d: -f1)"
+    if [ -z "$ln_arg" ] || [ -z "$ln_use" ]; then
+        fail "containerfile:$var-declared-near-its-use" "could not locate ARG ($ln_arg) or use ($ln_use)"
+    elif [ "$ln_arg" -lt "$ln_use" ] && [ $(( ln_use - ln_arg )) -le 12 ]; then
+        pass "containerfile:$var-declared-near-its-use"
+    else
+        fail "containerfile:$var-declared-near-its-use" \
+             "ARG $var is at line $ln_arg but is first used at line $ln_use ($(( ln_use - ln_arg )) lines later).
+An ARG invalidates podman's build cache for every step below it, so declaring this one far
+from its layer makes a one-line version bump cost every student a full rebuild. Move it to
+sit directly above the RUN that uses it."
+    fi
+done
+
 # Node is apt-managed, so `apt upgrade` inside the container can pick up security fixes —
 # a tarball in /usr/local cannot be patched by anything a student runs. Authenticity comes
 # from the signed repository rather than a hand-checked SHASUMS file.

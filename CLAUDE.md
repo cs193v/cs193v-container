@@ -14,14 +14,16 @@ The variable suffixes the **container name, the dev image tag, and all five volu
 together**. `.private/tests/lib/assert.sh` mirrors the same suffix, so `run-tests.sh`
 follows automatically.
 
-Without it you share `cs193v`, `localhost/cs193v:dev` and the volumes with whoever else is
+Without it you share `cs193v`, `localhost/cs193v:local` and the volumes with whoever else is
 working. The failure is not a clean collision but a slow one: whoever ran `--dev-build`
 last owns the container you are about to shell into, and either person's `--full-rebuild`
 deletes the other's logins.
 
 - Pick a name nobody is using — check `podman ps -a` and `podman images` for `cs193v-*`.
-- Use `./cs193v --dev-build`, not a bare `podman build`. It suffixes the tag for you;
-  `podman build -t localhost/cs193v:dev` clobbers the shared one.
+- Use `./cs193v --dev-build`, not a bare `podman build`. It suffixes the tag for you, and
+  it is the only path that applies the `cs193v.buildhash` label the launcher checks for
+  staleness; `podman build -t localhost/cs193v:local` clobbers the shared one and produces
+  an unlabelled image that silently never prompts for a rebuild.
 
 ## 2. Host ports are NOT namespaced, and that produces failures you did not cause
 

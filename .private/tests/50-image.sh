@@ -6,14 +6,14 @@
 # Everything here runs in throwaway containers, so it needs the image but never the live
 # cs193v container. Build it first:
 #
-#     ./cs193v --dev-build
+#     ./cs193v --build
 #
 # Two of §A.3's checks are corrected rather than copied:
 #   * nvm-not-group-writable was vacuous. /usr/local/share/nvm does not exist by design —
 #     node comes from the official tarball into root-owned /usr/local precisely so there is
 #     no group-writable nvm tree to trojan — so `stat` failed, the case fell through to the
 #     catch-all, and it printed "ok" while asserting nothing. Here it asserts the absence.
-#   * the multi-arch manifest assertion moved to the release tier: a local --dev-build is
+#   * the multi-arch manifest assertion moved to the release tier: a locally built image is
 #     single-arch by definition, so asserting two architectures here can only ever fail.
 #
 # §A.2's per-layer size ceiling is deliberately NOT here. See issue #7 in ERRORS.md B9: the

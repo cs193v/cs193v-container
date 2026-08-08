@@ -24,6 +24,8 @@
 #   container_image  the container's .Image                 []
 #   image_exists     yes | no, for `podman image exists`    [yes]
 #   image_id         .Id for `podman image inspect`         [sha256:aaaa]
+#   image_buildhash  the cs193v.buildhash image label       [] (unlabelled)
+#   image_created    .Created for `podman image inspect`    [2026-08-04T00:00:00Z]
 #   run_rc           exit code for `podman run`             [0]
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
 #   memory_max       what the in-container cgroup read prints [4294967296]
@@ -89,6 +91,10 @@ case "${1:-}" in
                     shift
                 done
                 case "$FMT" in
+                    # Order matters: the buildhash probe asks for .Labels, and the
+                    # .Id probe must not swallow it.
+                    *buildhash*) get image_buildhash ''; echo ;;
+                    *'.Created'*) get image_created '2026-08-04T00:00:00Z'; echo ;;
                     *'.Id'*)   get image_id 'sha256:aaaa'; echo ;;
                     *'.User'*) echo student ;;
                     *)         echo '' ;;
@@ -159,7 +165,7 @@ unexpected EOF' >&2
     top)     get top_out ''; echo; exit 0 ;;
     port)    get port_out ''; echo; exit 0 ;;
     ps)      [ "$STATE" = running ] && echo "0123456789ab"; exit 0 ;;
-    build)   echo "Successfully tagged localhost/cs193v:dev"; exit 0 ;;
+    build)   echo "Successfully tagged localhost/cs193v:local"; exit 0 ;;
     machine) echo ''; exit 0 ;;
     exec)
         # The launcher's doctor/check_clock use `podman exec NAME sh -c '...'`. Answer the

@@ -17,83 +17,111 @@ set -u
 
 cd "$REPO" || exit 1
 
-# ─── 1. CI, which does not exist ───────────────────────────────────────────────
-# README.md and the Containerfile both point at it. Without it there is no multi-arch
-# image, so IMAGE= can never be filled, so every student runs permanently in dev mode and
-# sees the "tell course staff — this line should not appear" warning on every launch.
-# It also makes VERIFICATION.md §A.2's manifest assertions, §A.12's digest check and
-# §9.1's --update path unrunnable by construction.
-assert_file "ci:workflow-exists" "$REPO/.github/workflows/build.yml"
-if [ -f "$REPO/.github/workflows/build.yml" ]; then
-    wf="$(cat "$REPO/.github/workflows/build.yml")"
-    assert_contains "ci:builds-both-architectures" "linux/arm64" "$wf"
-    assert_contains "ci:builds-amd64"              "linux/amd64" "$wf"
-    # The digest pin is only meaningful if the build is reproducible from pinned inputs.
-    assert_contains "ci:pins-vercel-version"       "vercel_version" "$wf"
-    assert_contains "ci:pins-claude-code-version"  "claude_code_version" "$wf"
-    assert_contains "ci:prints-the-manifest-digest" "digest" "$wf"
-else
-    skip "ci:builds-both-architectures"      "no workflow file"
-    skip "ci:builds-amd64"                   "no workflow file"
-    skip "ci:pins-vercel-version"            "no workflow file"
-    skip "ci:pins-claude-code-version"       "no workflow file"
-    skip "ci:prints-the-manifest-digest"     "no workflow file"
-fi
-# README lists the workflow in its file map, so the two must not drift apart.
-assert_contains "ci:readme-references-it" ".github/workflows/build.yml" "$(cat $PRIVATE/README.md)"
-
-# ─── 2. the installer's repository ─────────────────────────────────────────────
+# ─── 1. the installer's repository ─────────────────────────────────────────────
 # REPO_OWNER=CHANGEME makes the tarball URL a 404, so the installer cannot complete at all
-# and VERIFICATION.md §1 and §A.12 cannot be run as shipped.
+# and VERIFICATION.md §1 cannot be run as shipped. This is now the ONLY blank left that is
+# engineering rather than website work.
 owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' $PRIVATE/install-cs193v.sh | head -1)"
 assert_ne "installer:REPO_OWNER-is-set" "CHANGEME" "$owner"
 record    "installer:REPO_OWNER" "$owner"
 assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 
-# ─── 3. the pinned image ───────────────────────────────────────────────────────
-# Pinned by MANIFEST-LIST digest, not a per-architecture digest, so one pin serves both the
-# arm64 and amd64 legs.
+# ─── 2. the recipe is the distribution, so its pins are the release gate ───────
+# THIS SECTION REPLACED A REGISTRY CHECK, and it is stricter than the one it replaced.
+#
+# It used to assert that IMAGE= held a published manifest-list digest and that CI built
+# both architectures. There is no registry now: .private/Containerfile is what ships, and
+# every student builds it. A floating input used to mean CI drifted between runs and one
+# artifact still reached everybody; now it means TWO STUDENTS GET DIFFERENT SOFTWARE, and
+# nothing downstream can detect that it happened.
+#
+# Empty IMAGE= is therefore correct and expected. A value is a deliberate override — see
+# .config/container.args — and only its shape is checked, not its existence.
 img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
-assert_ne "image:IMAGE-is-pinned" "" "$img"
-record    "image:IMAGE" "${img:-<empty: dev mode>}"
+record "image:IMAGE" "${img:-<empty: built locally, the normal state>}"
 if [ -n "$img" ]; then
-    assert_contains "image:pinned-by-digest-not-tag" "@sha256:" "$img"
-    assert_not_contains "image:not-pinned-to-latest" ":latest" "$img"
-    # A published image must actually be published.
+    # An override is allowed, but a floating one is not: it would reintroduce exactly the
+    # drift this section exists to prevent, and silently.
+    assert_contains "image:override-pinned-by-digest-not-tag" "@sha256:" "$img"
+    assert_not_contains "image:override-not-latest" ":latest" "$img"
     if command -v podman >/dev/null 2>&1; then
-        assert_ok "image:pin-resolves-in-the-registry" podman manifest inspect "$img"
-        if podman manifest inspect "$img" >/dev/null 2>&1; then
-            plats="$(podman manifest inspect "$img" \
-                     | python3 -c 'import json,sys
+        assert_ok "image:override-resolves-in-the-registry" podman manifest inspect "$img"
+    else
+        skip "image:override-resolves-in-the-registry" "podman not installed"
+    fi
+else
+    skip "image:override-pinned-by-digest-not-tag"  "IMAGE= is empty (normal)"
+    skip "image:override-not-latest"                "IMAGE= is empty (normal)"
+    skip "image:override-resolves-in-the-registry"  "IMAGE= is empty (normal)"
+fi
+
+# The base image. A moving tag is the one drift a single line can close, so it must be
+# closed: `ubuntu:26.04` is republished as the base rolls forward, and on the tag alone two
+# students a week apart build on different foundations. Pinned by MANIFEST-LIST digest, not
+# a per-architecture one, so the single line serves both the arm64 and amd64 legs.
+from="$(sed -n 's/^FROM \(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
+record "build:FROM" "$from"
+assert_contains "build:base-image-pinned-by-digest" "@sha256:" "$from"
+# `podman manifest inspect` and skopeo both REFUSE a name:tag@digest reference outright
+# ("Docker references with both a tag and digest are currently not supported"), even though
+# podman build accepts it happily. Strip the tag to inspect it. The Containerfile keeps the
+# tag for readability and says there that it is decoration — the digest is what builds.
+from_digest="${from%@*}@${from##*@}"
+from_digest="${from_digest%%:*}@${from##*@}"
+record "build:FROM-normalised" "$from_digest"
+if command -v podman >/dev/null 2>&1 && [ "$from" != "${from#*@sha256:}" ]; then
+    if podman manifest inspect "$from_digest" >/dev/null 2>&1; then
+        plats="$(podman manifest inspect "$from_digest" \
+                 | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 print(" ".join(sorted("%s/%s" % (m["platform"]["os"], m["platform"]["architecture"])
                       for m in d.get("manifests", []))))' 2>/dev/null)"
-            record "image:platforms" "$plats"
-            assert_contains "image:manifest-has-amd64" "linux/amd64" "$plats"
-            assert_contains "image:manifest-has-arm64" "linux/arm64" "$plats"
-        fi
+        record "build:base-platforms" "$plats"
+        # Both legs must be in the list the digest names, or the pin builds on exactly one
+        # of the two architectures students actually have.
+        assert_contains "build:base-has-amd64" "linux/amd64" "$plats"
+        assert_contains "build:base-has-arm64" "linux/arm64" "$plats"
     else
-        skip "image:pin-resolves-in-the-registry" "podman not installed"
+        fail "build:base-digest-resolves" "podman manifest inspect $from_digest failed"
     fi
 else
-    skip "image:pinned-by-digest-not-tag"    "IMAGE= is empty"
-    skip "image:not-pinned-to-latest"        "IMAGE= is empty"
-    skip "image:pin-resolves-in-the-registry" "IMAGE= is empty"
+    skip "build:base-has-amd64" "podman not installed"
+    skip "build:base-has-arm64" "podman not installed"
 fi
 
-# ─── 4. reproducible build inputs ──────────────────────────────────────────────
-# `latest` in a build ARG makes the digest pin a lie: the same Containerfile at the same
-# commit produces different images on different days, so "students are all on the image we
-# tested" stops being true.
-for arg in VERCEL_VERSION CLAUDE_CODE_VERSION; do
+# ─── 3. reproducible build inputs ──────────────────────────────────────────────
+# `latest` in a build ARG means the student who installs on Tuesday and the student who
+# installs on Thursday are running different software. CLAUDE_CODE_VERSION is the sharpest
+# case: this is a course about using Claude Code, so a skew there is a skew in the subject
+# being taught, and the managed-settings.json schema it has to accept is only checked for
+# valid JSON at build time — never against the version that actually installs.
+for arg in VERCEL_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
     v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" $PRIVATE/Containerfile | head -1)"
     record "build:$arg" "$v"
     assert_ne "build:$arg-is-pinned" "latest" "$v"
+    assert_match "build:$arg-looks-like-a-version" '^[0-9]+\.[0-9]+\.[0-9]+$' "$v"
 done
-# NODE_VERSION is already pinned; assert it stays that way and looks like a real version.
+# NODE_VERSION is an exact apt version. Verified rather than assumed: NodeSource's nodistro
+# suite retains the whole 24.x patch history, so unlike a distro archive that drops
+# superseded packages this pin does not expire mid-quarter. Re-check with
+# `apt-cache madison nodejs` before trusting the same of a future major.
 nv="$(sed -n 's/^ARG NODE_VERSION=\(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
 assert_match "build:NODE_VERSION-is-explicit" '^[0-9]+\.[0-9]+\.[0-9]+$' "$nv"
 record "build:NODE_VERSION" "$nv"
+
+# ─── 4. the recipe actually builds ─────────────────────────────────────────────
+# The gate that the registry contract used to provide implicitly: CI proved the image
+# built before anyone could pin its digest. Nothing proves that now unless this does, and
+# a Containerfile that fails to build is not a degraded release, it is no release —
+# every student's install stops at the same step.
+#
+# Slow and disk-hungry by nature, so it is opt-in even within this opt-in tier: it needs
+# several GB free and many minutes. Run it on a machine with room before the quarter.
+if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
+    assert_ok "build:no-cache-build-succeeds" "$REPO/cs193v" --build --no-cache
+else
+    skip "build:no-cache-build-succeeds" "set CS193V_RELEASE_BUILD=yes (needs ~6 GB free and many minutes)"
+fi
 
 # ─── 5. the published checksums the install docs promise ───────────────────────
 # Both installers say their SHA-256 is published next to the download link, which is the
