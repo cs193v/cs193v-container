@@ -377,9 +377,19 @@ recognize. Neither is worth a download students do once.
 
 What the design actually depends on is layer **order** — claude-code last, so a version bump
 does not re-download node, gh and vercel. That is unchanged and still asserted by
-`tests/10-static.sh :: containerfile:claude-code-is-last-software-layer`. A student on bad
-wifi can still lose a large layer on a retry; that cost is now accepted rather than tested
-for. The measurement below is kept because it is the number any future revisit starts from.
+`tests/10-static.sh :: containerfile:claude-code-is-last-software-layer`.
+
+**B5 then removed most of what remained of the concern**, which is worth stating because it
+is easy to read this withdrawal as merely giving up. Students build the image rather than
+pulling it, so the premise the 400 MB ceiling rested on — "podman cannot resume a partial
+layer *download*" — no longer describes what students do. A killed build resumes at the
+failed RUN step, which is finer-grained than layer-level pull resume ever was, and layer
+order now buys build-cache reuse instead: a `CLAUDE_CODE_VERSION` bump re-runs two small
+layers rather than re-downloading ~300 MB. The residual cost is that a build interrupted
+inside the 622 MB apt step redoes that step, which is a smaller and rarer loss than the one
+this finding was about. Accepted rather than tested for, either way.
+
+The measurement below is kept because it is the number any future revisit starts from.
 
 ### B9 (original diagnosis)
 
@@ -648,12 +658,80 @@ it stays clean.
 
 ### B5. `REPO_OWNER="CHANGEME"`, empty `IMAGE=`, missing CI, `latest` build args
 
-Tracked as release gates, not regressions: `tests/run-tests.sh --release`. Currently 5
-failures, all four blanks. The consequential one is the **missing
-`.github/workflows/build.yml`** — referenced by `README.md:27,38` and `Containerfile:4`.
-Without it there is no multi-arch image, so `IMAGE=` can never be filled, so every student
-runs permanently in dev mode and sees the "tell course staff — this line should not appear"
-warning on every launch.
+**RESOLVED, by removing three of the four rather than filling them in.** Down to 1 release
+failure from 5, and the survivor is `REPO_OWNER` — website work, not engineering.
+
+B5's diagnosis was right and its implied remedy was wrong. It read the missing
+`.github/workflows/build.yml` as *the* consequential blank, because without CI there is no
+multi-arch image, so `IMAGE=` can never be filled, so every student runs permanently in dev
+mode and sees the "tell course staff — this line should not appear" warning on every
+launch. All of that followed correctly from the premise that students **pull** the image.
+
+The premise was the thing to question. Nothing had ever exercised the pull path — no
+workflow on any branch or in any commit, no tags, `IMAGE=` empty, `pull_image()` a no-op
+that printed "No course image has been published yet" and returned 0 — while `--dev-build`
+had been the staff loop from the start and every test tier ran against the locally built
+image. The repo had one tested way to obtain an image and one untested one, and it was
+scaffolded to ship the untested one.
+
+So the image is now built on each student's machine, and B5's four blanks resolve as:
+
+| Blank | Outcome |
+|---|---|
+| `.github/workflows/build.yml` | **Gone.** No registry, so no multi-arch build to run, no digest to print, and no token to hold. |
+| `IMAGE=` | **Not a blank.** Empty is the normal state and means "build locally"; a value is an optional override that still pulls. |
+| `latest` build args | **Filled, and now enforced harder than CI would have.** A floating `ARG` used to mean CI drifted between runs while one artifact still reached everybody. It now means two students get different software, so `00-release-gates.sh` §3 pins `VERCEL_VERSION`, `CLAUDE_CODE_VERSION` and `PLAYWRIGHT_VERSION`, and the base image is digest-pinned as well. |
+| `REPO_OWNER` | **Still open.** Unchanged by any of this. |
+
+What the change costs, recorded so it is not rediscovered:
+
+* **Nine build-time assertions moved from CI onto students.** `README.md:208-210` had it
+  right — they exist so a wrong-architecture browser or an empty `tldr` cache fails the
+  build instead of the student. They are kept rather than softened, because a student with
+  no `tldr` and no `man` has no command-line help at all and would never know; `build_image`
+  retries three times instead, which is cheap because podman keeps completed layers. The
+  retry lives in the launcher, not the installer, so the red STOP box appears at most once.
+* **Upstream rot is now a ten-week runtime dependency.** `nodejs=24.18.1-1nodesource1` is an
+  exact apt version, and the pin survives only because NodeSource's nodistro suite retains
+  the whole 24.x patch history back to 24.0.0 — checked with `apt-cache madison nodejs` and
+  by `HEAD`-ing both arch `.deb`s, not assumed. A distro archive that drops superseded
+  packages would have made this pin expire mid-quarter, for every new install at once.
+* **`cs193v.buildhash` replaces the digest as the staleness signal**, and it had to: podman
+  mints a new image ID on every build, including a rebuild of identical input, so an image
+  ID distinguishes "rebuilt" from "not rebuilt" but never "current" from "out of date".
+
+**Measured, on x86-64 with fast network** (a student on dorm wifi is bounded by the
+728 MB, not by the CPU):
+
+| | wall | transferred | disk |
+|---|---|---|---|
+| Cold `--build --no-cache`, nothing to a running container | 224 s | 728 MB | 4.1 GB peak, **4.3 GB retained** |
+| `CLAUDE_CODE_VERSION` bump, warm cache | 89 s | 95 MB | — |
+| The same bump with the version `ARG`s at the top of the file | 250 s | 726 MB | — |
+
+Three things in that table are worth keeping.
+
+**Retained exceeds peak**, which looks impossible until you see why: creating the container
+costs roughly the image's size *again*, because `--userns=keep-id` makes podman write an
+ID-mapped copy of every layer (the ~1.5 GB this document's D-series recorded; it is ~2.2 GB
+now). That cost lands *after* the build's own peak. It is also a real student-facing failure
+mode — a build can succeed and then the create fails with
+`creating an ID-mapped copy of layer ...: lchown ...: no space left on device`, naming
+neither the cause nor the fact that the build was fine. `err.create-no-disk` now catches it.
+
+**The last two rows are the same bump, differing only in where four `ARG` lines sit.**
+buildah folds every in-scope build arg into each step's cache key, so version `ARG`s
+declared in a tidy block at the top invalidate the cache for everything below them and the
+layer ordering never gets a chance to pay off. Declared at their point of use, the cache
+holds through the vercel layer. This was found by measuring a claim that had already been
+written down as fact in three places.
+
+**`podman system df` is not a disk measurement.** It reported 2.177 GB where the store on
+disk held 6.7 GB. Rootless layer directories are owned by mapped subuids, so a plain `du`
+cannot descend into them and silently undercounts — `podman unshare du` is the way to read
+them. Size disks from `df` deltas, never from a reported image size.
+
+Still not measured, and now never will be: cold **pull** time.
 
 ---
 

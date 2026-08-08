@@ -71,7 +71,7 @@ TUNNEL_SSHD_CONFIG="/etc/ssh/cs193v_sshd_config"
 TUNNEL_AUTH_KEYS_DST="/home/student/.ssh/authorized_keys"
 
 NAME="cs193v"
-# NAME and DEV_IMAGE are not final: CS193V_INSTANCE suffixes both. See "developer
+# NAME and LOCAL_IMAGE are not final: CS193V_INSTANCE suffixes both. See "developer
 # instance" below.
 # Where the student's projects/ directory appears inside the container. Under $HOME rather
 # than at the root: the host directory is called projects/, so calling it anything else
@@ -80,7 +80,7 @@ NAME="cs193v"
 # the Containerfile's WORKDIR and pre-created directory must match it, which
 # 10-static.sh :: launcher:mount-destination-matches-WORKDIR asserts.
 MOUNT_DST="/home/student/projects"
-DEV_IMAGE="localhost/cs193v:dev"
+LOCAL_IMAGE="localhost/cs193v:local"
 MIN_PODMAN="5.7.0"
 ESC=$(printf '\033')
 
@@ -329,7 +329,7 @@ has_machine() {                       # is a podman machine in play (macOS)?
 # instance would still destroy the other instance's logins.
 #
 # This exists because two people developing the container on the same machine otherwise
-# share every one of them silently: the container `cs193v`, the image `localhost/cs193v:dev`,
+# share every one of them silently: the container `cs193v`, the image `localhost/cs193v:local`,
 # and the volumes cs193v-claude and friends. The failure is not a clean collision but a slow
 # one — whoever runs `--dev-build` last owns the container the other is about to shell into.
 #
@@ -350,7 +350,7 @@ case "$INSTANCE" in
         die "CS193V_INSTANCE=$INSTANCE is not usable as a name.
 Use only letters, digits, hyphens and underscores." ;;
     *)  NAME="$NAME-$INSTANCE"
-        DEV_IMAGE="$DEV_IMAGE-$INSTANCE" ;;
+        LOCAL_IMAGE="$LOCAL_IMAGE-$INSTANCE" ;;
 esac
 
 # ─── the tunnel's runtime paths ────────────────────────────────────────────────
@@ -365,6 +365,12 @@ esac
 # run_timeout already uses ${TMPDIR:-/tmp}, so this is an existing idiom rather than a new
 # assumption about the platform.
 TUNNEL_ID="$(printf '%s\n' "$DIR" "$INSTANCE" | sha_stdin | cut -c1-12)"
+# The build's output, teed here so a failure can be classified from podman's own words --
+# see build_image. Keyed by TUNNEL_ID like the tunnel's files, so two instances on one
+# machine do not overwrite each other's, and overwritten rather than appended so it cannot
+# grow without bound. Not cleaned up on exit deliberately: after a failed build it is the
+# thing to ask a student for, and the next build truncates it anyway.
+BUILD_LOG="${TMPDIR:-/tmp}/cs193v-build-$TUNNEL_ID.log"
 TUNNEL_CTL="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.ctl"
 TUNNEL_PID="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.pid"
 TUNNEL_LOG="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.log"
@@ -451,13 +457,13 @@ build_run_args() {
 # freeze each student's flags at whatever they were on first run, and edits to
 # container.args would never reach anyone.
 config_hash() {
-    # The dev-image fallback lives HERE rather than at each call site, so every caller
-    # agrees by construction. verb_doctor resolved nothing and so hashed IMAGE="", while
-    # the launch path and --dev-print-command both hashed the resolved dev image — which
-    # made doctor report every dev-mode container as STALE and send people chasing a
-    # recreate prompt that never appears. A local, so IMAGE is not mutated and doctor's
-    # honest "<unset: dev mode>" line still reads correctly.
-    local img="${IMAGE:-$DEV_IMAGE}"
+    # The locally-built-image fallback lives HERE rather than at each call site, so every
+    # caller agrees by construction. verb_doctor resolved nothing and so hashed IMAGE="",
+    # while the launch path and --dev-print-command both hashed the resolved local image —
+    # which made doctor report every unpinned container as STALE and send people chasing a
+    # recreate prompt that never appears (ERRORS.md B14). A local, so IMAGE is not mutated
+    # and doctor's own image line still distinguishes pinned from built-here.
+    local img="${IMAGE:-$LOCAL_IMAGE}"
     # MOUNT_DST is hashed as well as WORKSPACE. It used to be a constant baked into
     # build_run_args and never hashed at all — so when the mount moved from /workspaces to
     # ~/projects, every container already on a student's machine would have kept the old
@@ -522,18 +528,117 @@ state() {                             # -> absent | created | exited | running |
 
 label_of() { pm inspect "$NAME" --format "{{index .Config.Labels \"$1\"}}" && printf '%s' "$RT_OUT"; }
 image_of() { pm inspect "$NAME" --format '{{.Image}}' && printf '%s' "$RT_OUT"; }
+# The image's own labels, as against label_of's container labels. Used for
+# cs193v.buildhash; see build_hash.
+image_label_of() { pm image inspect "$1" --format "{{index .Labels \"$2\"}}" && printf '%s' "$RT_OUT"; }
+
+# A fingerprint of the RECIPE: the Containerfile plus every file COPY reaches. Baked into
+# the image as a label at build time and compared against the on-disk files at launch, so
+# a student whose course files have moved on gets offered a rebuild.
+#
+# This is the replacement for the digest pin. A pinned image announced a new version by
+# its digest changing; with the image built on the student's own machine there is no
+# digest to change -- podman assigns a new image ID on every build, including rebuilds of
+# identical input, so the image ID says "rebuilt", not "out of date". The recipe is the
+# only thing that actually moves when staff ship a fix.
+#
+# Hashed from INSIDE $PRIVATE with relative paths, deliberately: hashing absolute paths
+# would make the value depend on where the student put their course folder, so moving or
+# renaming it would look like an update and prompt a pointless rebuild.
+#
+# files/ is the whole of the rest of the build context -- `COPY files/` is the only COPY
+# in the Containerfile -- so the Containerfile plus that tree covers it.
+#
+# NAMES ARE HASHED AS WELL AS CONTENTS, in one sorted list, so that adding an empty file or
+# renaming an existing one changes the value. Contents alone would miss both, and a rename
+# is exactly the kind of edit that changes what the image contains.
+#
+# Written to spawn a fixed handful of processes rather than one per file, because this runs
+# on EVERY launch: the obvious `while read f; do cat "$f"; done` form measured 88 ms against
+# a launcher whose whole overhead is ~511 ms (ERRORS.md D9), and this measures 14 ms for the
+# same result. `tr | xargs -0`, not a bare `xargs`, so a future filename containing a space
+# is hashed rather than silently split -- and -0 rather than GNU's -d, which macOS lacks.
+build_hash() {
+    local list
+    list="$( cd "$PRIVATE" 2>/dev/null && find Containerfile files -type f 2>/dev/null | LC_ALL=C sort )"
+    { printf '%s\n' "$list"
+      ( cd "$PRIVATE" 2>/dev/null && printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 cat 2>/dev/null )
+    } | sha_stdin
+}
 
 resolve_image() {
     if [ -z "$IMAGE" ]; then
-        if pmq image exists "$DEV_IMAGE"; then
-            IMAGE="$DEV_IMAGE"
-            warn "$(msg warn.dev-mode IMAGE="$DEV_IMAGE")"
+        if pmq image exists "$LOCAL_IMAGE"; then
+            IMAGE="$LOCAL_IMAGE"
         else
-            die "$(msg err.no-image FILE="$ARGS_FILE")"
+            die "$(msg err.no-image)"
         fi
-    elif [ "$IMAGE" = "$DEV_IMAGE" ]; then
-        warn "$(msg warn.dev-mode IMAGE="$DEV_IMAGE")"
     fi
+}
+
+# `podman build`, plus the label that makes staleness detectable.
+#
+# Deliberately NOT wrapped in run_timeout, unlike pull and run. run_timeout exists to stop
+# a SILENT hang, and a build is the opposite of silent -- podman streams every step. A
+# fixed timeout here would instead kill a build that is merely slow, which on the weakest
+# machine a student might own is the normal case, and it would do it after the student had
+# already waited out most of it.
+build_image() {
+    [ -f "$CONTAINERFILE" ] || die "$(msg err.no-containerfile FILE="$CONTAINERFILE")"
+    local nocache='' attempt=1 tries=3 hash
+    # --no-cache retries once only. The retry below is worth having because podman keeps
+    # every completed layer, so a second attempt resumes at the step that failed -- and
+    # --no-cache is precisely the flag that throws that away, so retrying it would mean
+    # re-running a twenty-minute build from zero. It is a staff verb regardless.
+    [ "${1:-}" = "--no-cache" ] && { nocache='--no-cache'; tries=1; }
+    hash="$(build_hash)"
+    info "$(msg status.building IMAGE="$LOCAL_IMAGE")"
+
+    # THE RETRY LIVES HERE, not in the installer, and that placement is the point. This
+    # build reaches seven separate network origins -- the Ubuntu archive, NodeSource,
+    # cli.github.com, npm, the Playwright CDN, PyPI and the tldr pages -- and several of
+    # its steps fail hard on purpose rather than shipping a quietly degraded image (see
+    # the tldr layer). Those assertions were written when ONE CI machine ran this build;
+    # now every student does, on dorm wifi, so a transient failure is routine rather than
+    # exceptional and recovering from it must be automatic.
+    #
+    # Retrying here rather than in the installer means the student sees the red STOP box
+    # at most once. An installer-side loop would print it on every intermediate attempt,
+    # and STOP is supposed to mean "stop and contact staff" -- three of them followed by
+    # success would teach a student to ignore the one banner that must never be ignored.
+    while :; do
+        # TEE, not a bare stream and not a capture. The output has to reach the terminal as
+        # it happens -- across a four-minute build the step-by-step lines are the only
+        # progress indicator a student has -- but it ALSO has to be readable afterwards, so
+        # that a failure can be classified from podman's own words. err.build-failed still
+        # carries no {{OUT}}: the text is already on their screen, and replaying it inside
+        # the STOP box would just print it twice.
+        #
+        # PIPESTATUS because the pipeline's own status is tee's, which is always 0. Bash 3.2
+        # has it, so this stays macOS-safe.
+        # shellcheck disable=SC2086
+        podman build $nocache \
+                --label "cs193v.buildhash=$hash" \
+                -t "$LOCAL_IMAGE" -f "$CONTAINERFILE" "$PRIVATE" 2>&1 | tee "$BUILD_LOG"
+        [ "${PIPESTATUS[0]}" -eq 0 ] && return 0
+
+        # OUT OF DISK IS READ FROM PODMAN'S MESSAGE, not inferred from free space, and that
+        # distinction was measured rather than reasoned about. An earlier version asked
+        # `podman info` how much room was left and got the WRONG ANSWER every time: by the
+        # time a failed build has returned, podman has already rolled back the partial layer
+        # and handed the space back, so the machine looks fine at exactly the moment you
+        # check. A genuine ENOSPC build then told the student "this is usually a network
+        # problem", which is advice to go fix the wrong thing.
+        #
+        # It also must not be retried: retrying only spends the student's time twice to
+        # arrive at the same wall.
+        if grep -qi 'no space left on device' "$BUILD_LOG" 2>/dev/null; then
+            die "$(msg err.build-no-disk)"
+        fi
+        [ "$attempt" -ge "$tries" ] && die "$(msg err.build-failed)"
+        attempt=$(( attempt + 1 ))
+        warn "$(msg warn.build-retry ATTEMPT="$attempt" TRIES="$tries")"
+    done
 }
 
 create_container() {
@@ -545,6 +650,20 @@ create_container() {
     build_run_args
     info "$(msg status.creating)"
     if ! run_timeout 180 podman run ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$IMAGE"; then
+        # Out of disk gets its own message HERE as well as in build_image, because creating
+        # the container is a second, separate disk cost and a surprisingly large one:
+        # --userns=keep-id makes podman write an ID-MAPPED COPY of every layer, so a
+        # successful build is followed by allocating roughly the image's size again
+        # (ERRORS.md D-series measured ~1.5 GB at the time; it is ~2.2 GB now). A student
+        # who has just watched a four-minute build succeed then gets
+        #   "creating an ID-mapped copy of layer ...: lchown ...: no space left on device"
+        # which names neither the cause they can act on nor the fact that the build itself
+        # was fine. Checked after the failure rather than before it: the cost depends on
+        # the image, and refusing pre-emptively would block installs that would have worked.
+        case "$RT_OUT" in
+            *'no space left on device'*|*'No space left on device'*)
+                die "$(msg err.create-no-disk)" ;;
+        esac
         die "$(msg err.create-failed OUT="$RT_OUT")"
     fi
     # Every verb that makes a container funnels through here, so the tunnel is raised in one
@@ -777,7 +896,32 @@ ensure_container() {
         fi
     fi
 
-    # Same prompt shape for a newer pinned image.
+    # Is the IMAGE itself out of date relative to the course files on disk? This is the
+    # question the digest pin used to answer, and it is how a mid-quarter fix now reaches a
+    # student who never runs --update: staff change the Containerfile, the student's next
+    # `./cs193v` notices the recipe moved, and offers to rebuild.
+    #
+    # Only for the locally built image. A pinned one came from a registry and carries no
+    # label of ours, so there is nothing to compare and nothing we could rebuild.
+    #
+    # Guarded on a non-empty label for the same reason the confighash check above is: an
+    # image built before this existed has none, and an unknown answer must not nag. It
+    # self-corrects on the first rebuild.
+    if [ "$IMAGE" = "$LOCAL_IMAGE" ] && [ -f "$CONTAINERFILE" ] && pmq image exists "$IMAGE"; then
+        local have_recipe
+        have_recipe="$(image_label_of "$IMAGE" cs193v.buildhash)"
+        if [ -n "$have_recipe" ] && [ "$have_recipe" != "$(build_hash)" ]; then
+            printf '\n'; msg prompt.image-stale
+            if confirm "$(msg opt.keep-current-version)" "$(msg opt.rebuild-now)"; then
+                build_image; remove_container; create_container; return
+            fi
+        fi
+    fi
+
+    # Same prompt shape for a newer pinned image. Distinct from the check above and both
+    # are needed: that one asks "is the image behind the recipe", this one asks "is the
+    # CONTAINER behind the image" -- which is what fires after a rebuild that the student
+    # declined to let recreate the container, and on a freshly pulled pin.
     if pmq image exists "$IMAGE"; then
         pm image inspect "$IMAGE" --format '{{.Id}}'
         local pinned_id="$RT_OUT"
@@ -929,8 +1073,34 @@ verb_doctor() {
         printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
     fi
 
+    # The image, and whether it still matches the recipe it was built from. This is the
+    # replacement for "what digest are you on?" -- the first question in any support thread
+    # about behaviour that staff cannot reproduce, and the one a locally built image would
+    # otherwise have no answer to.
     load_args
-    printf '  %-16s %s\n' "pinned image" "${IMAGE:-<unset: dev mode>}"
+    local img="${IMAGE:-$LOCAL_IMAGE}"
+    if [ -n "$IMAGE" ]; then
+        printf '  %-16s %s\n' "image" "$IMAGE (pinned)"
+    elif pmq image exists "$LOCAL_IMAGE"; then
+        printf '  %-16s %s\n' "image" "$LOCAL_IMAGE (built here)"
+    else
+        printf '  %-16s %s\n' "image" "$LOCAL_IMAGE — NOT BUILT; run ./cs193v --build"
+    fi
+    if pmq image exists "$img"; then
+        pm image inspect "$img" --format '{{.Created}}'
+        printf '  %-16s %s\n' "image built" "${RT_OUT:-?}"
+        local hb
+        hb="$(image_label_of "$img" cs193v.buildhash)"
+        if [ ! -f "$CONTAINERFILE" ]; then
+            printf '  %-16s %s\n' "image recipe" "cannot check — no $CONTAINERFILE"
+        elif [ -z "$hb" ]; then
+            printf '  %-16s %s\n' "image recipe" "not recorded (pinned, or built before this was tracked)"
+        elif [ "$hb" = "$(build_hash)" ]; then
+            printf '  %-16s %s\n' "image recipe" "matches Containerfile ($(printf '%s' "$hb" | cut -c1-12))"
+        else
+            printf '  %-16s %s\n' "image recipe" "STALE — run ./cs193v --build"
+        fi
+    fi
 
     local st; st="$(state)"
     printf '  %-16s %s\n' "container" "$st"
@@ -1115,13 +1285,21 @@ verb_full_rebuild() {
     info "$(msg status.full-rebuilt)"
 }
 
+# Two ways to get a newer image, chosen by whether a pin is set rather than by a flag, so
+# a student runs the same command either way. Empty IMAGE= is the norm and means "build
+# it"; a filled one means there is a registry to fetch from, and that path is kept working
+# so publishing an image later stays an option rather than a rewrite. See container.args.
 verb_update() {
-    preflight; load_args; resolve_image
-    if [ "$IMAGE" = "$DEV_IMAGE" ]; then die "$(msg err.update-in-dev-mode)"; fi
-    info "$(msg status.pulling IMAGE="$IMAGE")"
-    if ! run_timeout 1800 podman pull --retry 10 --retry-delay 5s "$IMAGE"; then
-        die "$(msg err.pull-failed OUT="$RT_OUT")"
+    preflight; load_args
+    if [ -n "$IMAGE" ]; then
+        info "$(msg status.pulling IMAGE="$IMAGE")"
+        if ! run_timeout 1800 podman pull --retry 10 --retry-delay 5s "$IMAGE"; then
+            die "$(msg err.pull-failed OUT="$RT_OUT")"
+        fi
+    else
+        build_image
     fi
+    resolve_image
     remove_container
     create_container
     info "$(msg status.updated)"
@@ -1129,7 +1307,7 @@ verb_update() {
 
 verb_print_command() {
     load_args
-    if [ -z "$IMAGE" ]; then IMAGE="$DEV_IMAGE"; fi
+    if [ -z "$IMAGE" ]; then IMAGE="$LOCAL_IMAGE"; fi
     build_run_args
     printf 'podman run'
     local a
@@ -1137,18 +1315,27 @@ verb_print_command() {
     printf ' %s\n' "$IMAGE"
 }
 
-verb_dev_build() {
+# The student-facing build. Also what the installer calls, so the path a student takes on
+# day one is the path staff exercise every day rather than a second one written alongside
+# it.
+#
+# OVERRIDE_IMAGE, not a direct assignment: load_args re-reads container.args and would
+# otherwise put the pin back, and the freshly built image is unambiguously the one to
+# create the container from.
+verb_build() {
     preflight
-    [ -f "$CONTAINERFILE" ] || die "$(msg err.no-containerfile FILE="$CONTAINERFILE")"
-    local nocache=''
-    [ "${1:-}" = "--no-cache" ] && nocache='--no-cache'
-    info "building $DEV_IMAGE from $CONTAINERFILE"
-    # shellcheck disable=SC2086
-    podman build $nocache -t "$DEV_IMAGE" -f "$CONTAINERFILE" "$PRIVATE" || die "build failed"
-    OVERRIDE_IMAGE="$DEV_IMAGE"
+    build_image "${1:-}"
+    OVERRIDE_IMAGE="$LOCAL_IMAGE"
     load_args; resolve_image
     remove_container
     create_container
+}
+
+# The staff development loop: the same build, then straight into a shell. Kept as its own
+# verb rather than a flag on --build because the shell is the whole point of it -- and
+# because every note, doc and muscle memory in this project says --dev-build.
+verb_dev_build() {
+    verb_build "${1:-}"
     open_shell
 }
 
@@ -1165,6 +1352,7 @@ case "${1:-}" in
     --reset-tunnel)      verb_reset_tunnel ;;
     --full-rebuild)      verb_full_rebuild ;;
     --update)            verb_update ;;
+    --build)             shift; verb_build "${1:-}" ;;
     --dev-print-command) verb_print_command ;;
     --dev-build)         shift; verb_dev_build "${1:-}" ;;
     -h|--help|help)      usage ;;

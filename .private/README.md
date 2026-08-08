@@ -43,42 +43,93 @@ projects/                      the student's work; the only directory shared wit
   ERRORS.md                    what the first verification pass found, and what is still open
   tests/                       the regression suite
     tmux-harness/              the screen-scraping tmux suite, run inside the container
-.github/workflows/build.yml    multi-arch build + push + smoke test
 ```
+
+There is no `.github/` directory, and that is the design rather than an omission — see
+"How the image reaches a student" below.
 
 Note `CONTAINER-DESIGN.md` is course *reading* but lives in `.private/` — publish it on the
 course website rather than expecting students to find it in a hidden directory.
 
+## How the image reaches a student
+
+**It doesn't. They build it.** `.private/Containerfile` is the distribution: the installer
+runs `./cs193v --build`, and the image is assembled on the student's own machine. There is
+no registry, no published artifact, and no CI.
+
+That is a deliberate reversal of the original plan, and the reasoning is worth keeping,
+because "just publish it to ghcr" is the obvious first suggestion anyone will make:
+
+* **The pull path was never exercised and the build path always was.** `--dev-build` has
+  been the staff loop since the beginning and every test tier runs against the locally
+  built image. Shipping the tested path is the smaller risk, not the larger one.
+* **Multi-arch was the expensive part.** A published image needs a manifest list covering
+  amd64 and arm64, and two build steps make emulated cross-building genuinely nasty rather
+  than merely slow: layer 5 launches Chromium and takes a screenshot, and layer 8 starts a
+  tmux server and interrogates its key table. Building locally is always native.
+* **A registry is a same-day-for-everyone failure.** A package set private, an account
+  rotated, or an anonymous pull quota hit by one lab section behind one campus NAT breaks
+  every student at once, with no local workaround.
+* **`--rebuild` and `--full-rebuild` never touch the image**, so the recovery loop staff
+  suggest freely still costs two seconds and no network. The build is genuinely one-time.
+
+What it costs, so nobody rediscovers it the hard way:
+
+* **The pins in the Containerfile are now load-bearing.** A floating `ARG` used to mean CI
+  drifted between runs while one artifact still reached everybody; now it means two
+  students get different software. `00-release-gates.sh` §3 enforces every one of them.
+* **The build's hard assertions now fail on students, not on CI.** Nine steps fail the
+  build rather than ship a degraded image — the `tldr --update` page-count floor is the
+  sharpest. They are kept (a student with no `tldr` and no `man` has no help at all and
+  would never know), and `build_image` retries three times instead, which is cheap because
+  podman keeps every completed layer.
+* **Upstream rot lands on students.** Nothing runs this build on a schedule. `NODE_VERSION`
+  is an exact apt version and survives only because NodeSource's nodistro suite retains the
+  whole 24.x patch history — verified with `apt-cache madison nodejs`, not assumed. Re-check
+  that before trusting the same of a future major.
+* **Disk, measured.** Nothing to a running container costs **224 s, 4.1 GB of transient
+  peak, and 4.3 GB retained** for an image reported as 2.2 GB. Creating the container is a
+  second cost roughly equal to the image again, because `--userns=keep-id` writes an
+  ID-mapped copy of every layer — which is why retained exceeds peak. Do not size a disk
+  from `podman system df`: it reported 2.2 GB where the store held 6.7 GB.
+
 ## Before this works
 
-Four things need real values:
+Two things need real values:
 
-1. **`install-cs193v.sh`** — set `REPO_OWNER` (and `REPO_NAME` if you rename it).
-2. **`.config/container.args`** — the `IMAGE=` line is empty. Fill it with the **manifest-list**
-   digest the CI run prints, not a per-architecture digest. Until then the launcher runs
-   in dev mode against a locally built image and says so.
-3. **`.github/workflows/build.yml`** — pin `vercel_version` and `claude_code_version`
-   rather than leaving them at `latest`, or the digest pin does not mean what it claims.
-4. **The course website** — host `install-cs193v.sh` and `install-cs193v-windows.cmd`
+1. **`install-cs193v.sh`** — set `REPO_OWNER` (and `REPO_NAME` if you rename it). This is
+   the only remaining blank that is engineering rather than website work, and
+   `run-tests.sh --release` fails on exactly this one thing until it is filled in.
+2. **The course website** — host `install-cs193v.sh` and `install-cs193v-windows.cmd`
    with their SHA-256 published next to the links.
+
+`.config/container.args`'s empty `IMAGE=` is **not** a third blank. Empty is the normal
+state and means "build locally"; a value is an optional override that still pulls, kept
+working so that publishing an image later stays a decision rather than a rewrite.
 
 ## Your development loop
 
 ```
-./cs193v --dev-build              # build localhost/cs193v:dev, recreate, drop into a shell
+./cs193v --dev-build              # build the image, recreate, drop into a shell
 ./cs193v --dev-build --no-cache   # prove the network fetches still work
+./cs193v --build                  # the same build, without the shell — what students run
 ./cs193v --dev-print-command      # see the exact podman run line
 ./cs193v --rebuild                # fresh container; logins kept
 ./cs193v --full-rebuild           # test the cold-start path a student sees
 ```
 
-`--dev-build` needs no registry and no published image, so all of this works before
-anything is pushed.
+`--dev-build` is `--build` plus a shell, and both go through the same `build_image`. That
+matters more than it used to: the path you exercise every day is now the path a student
+takes on day one, including its retry, its out-of-disk message, and the
+`cs193v.buildhash` label. There is no second implementation to drift.
+
+`--no-cache` retries once only, deliberately — the retry exists because podman keeps
+completed layers, which is exactly what `--no-cache` throws away.
 
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
-image (`localhost/cs193v:dev`) and the same five volumes. Two people developing at once
+image (`localhost/cs193v:local`) and the same five volumes. Two people developing at once
 therefore collide, and not cleanly: whoever ran `--dev-build` last owns the container the
 other is about to shell into, and either one's `--full-rebuild` deletes the other's logins.
 
@@ -86,7 +137,7 @@ Set `CS193V_INSTANCE` to give yourself an independent set of all of them:
 
 ```
 export CS193V_INSTANCE=yourname
-./cs193v --dev-build              # builds localhost/cs193v:dev-yourname
+./cs193v --dev-build              # builds localhost/cs193v:local-yourname
 ./cs193v doctor                   # reports container cs193v-yourname
 ```
 
@@ -131,14 +182,38 @@ was before — a student never sets it.
 
 ## Shipping a fix mid-quarter
 
-1. Edit the `Containerfile`; push to `main`. CI builds both architectures and prints the
-   digest to pin.
-2. Put that digest in `.config/container.args`; commit.
-3. Students run `./cs193v --update`. Anyone who doesn't gets prompted on their next
-   launch, because the launcher compares the running container's image against the pin.
+1. Edit the `Containerfile` (or anything under `files/`); push to `main`.
+2. Students run `./cs193v --update`, which rebuilds. Anyone who doesn't gets prompted on
+   their next launch.
 
-Rollback is `git revert` on the `IMAGE=` line. CI also tags every build with a dated,
-immutable tag, so you always have a known-good one to point at.
+**What makes step 2 work is `cs193v.buildhash`.** The launcher hashes the Containerfile
+plus every file under `files/` and bakes it into the image as a label at build time; on
+each launch it compares that label against the files on disk and offers a rebuild when
+they differ. This is the replacement for the digest pin, and it is not merely an
+equivalent — the image ID could not do this job. podman mints a new image ID on every
+build, including a rebuild of byte-identical input, so an image ID says "rebuilt", not
+"out of date". The recipe only moves when staff move it.
+
+Two properties worth knowing:
+
+* **A version bump is cheap for students — but only because of where the `ARG` sits.**
+  Measured: bumping `CLAUDE_CODE_VERSION` costs **89 s and 95 MB**, with podman's cache
+  holding through the vercel layer and only the last ten steps re-running.
+
+  That is a fix, not a property that came for free. With the version `ARG`s declared in a
+  block at the top of the Containerfile — the obvious, tidy arrangement — the same bump
+  cost **250 s and 726 MB, re-running 18 of 23 steps**, i.e. nothing at all was saved.
+  buildah folds every in-scope build arg into each step's cache key, so a top-level `ARG`
+  invalidates everything after it and the layer ordering never gets a chance to help. Each
+  version `ARG` is therefore declared immediately above the layer that uses it. **Moving one
+  back to the top would silently cost every student a full rebuild for a one-line bump**,
+  and no test would fail.
+* **An unlabelled image never nags.** An image built before the label existed has none,
+  and the check treats unknown as "don't prompt" — the same rule the confighash check
+  follows. It self-corrects on the first rebuild.
+
+Rollback is `git revert` on the Containerfile. There is no dated-tag safety net any more:
+`git` is the only history, so a bad pin is recoverable only by reverting the commit.
 
 ## Before students arrive
 

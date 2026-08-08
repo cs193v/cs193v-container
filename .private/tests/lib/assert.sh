@@ -17,11 +17,11 @@
 # Mirrors ./cs193v's CS193V_INSTANCE suffix, so a developer with their own instance runs
 # this suite against THEIR container instead of a colleague's. Every suite refers to
 # "$NAME" rather than a literal, and the image default is suffixed the same way the
-# launcher's DEV_IMAGE is. Unset -> plain "cs193v", byte-identical to before.
+# launcher's LOCAL_IMAGE is. Unset -> plain "cs193v", byte-identical to before.
 NAME="cs193v${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
 # The dev image tag, suffixed the same way. Defined once here because three places used to
 # spell the default out, and a suffixed instance would have missed whichever one drifted.
-TEST_IMAGE_DEFAULT="localhost/cs193v:dev${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
+TEST_IMAGE_DEFAULT="localhost/cs193v:local${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
 export NAME TEST_IMAGE_DEFAULT
 
 # ─── output ────────────────────────────────────────────────────────────────────
@@ -186,8 +186,8 @@ require_image() {                     # require_image  -> exports TEST_IMAGE
     export TEST_IMAGE
     if ! podman image exists "$TEST_IMAGE" 2>/dev/null; then
         fail "require:image" "The image $TEST_IMAGE does not exist.
-Build it first:  ./cs193v --dev-build
-(or point CS193V_TEST_IMAGE at a published image)"
+Build it first:  ./cs193v --build
+(or point CS193V_TEST_IMAGE at another image)"
         exit 1
     fi
 }

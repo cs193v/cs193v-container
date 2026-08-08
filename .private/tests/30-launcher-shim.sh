@@ -153,13 +153,23 @@ assert_says "unreachable:refused"         "cannot reach it" "$out"
 assert_eq       "unreachable:creates-nothing" "0"               "$(shim_count '^run ')"
 
 # ─── image resolution ──────────────────────────────────────────────────────────
+# No pin and nothing built: the only actionable answer is "build it", and it has to name
+# the command. There is no registry to fall back to.
 shim_new; shim_set image_exists no
 out="$(launcher)"
-assert_says "image:no-pin-and-no-dev-image-refuses" "No course container image" "$out"
-assert_eq       "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
+assert_says "image:nothing-built-refuses"      "has not been built" "$out"
+assert_says "image:nothing-built-says-how"     "--build"            "$out"
+assert_eq   "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
 
+# A locally built image is the NORMAL case now, not a staff-only escape hatch, so the
+# launch must be silent about it. The old warn.dev-mode told any student who saw it to
+# contact staff; left in place it would fire for every student on every launch, which is
+# the fastest way to teach a class to ignore the launcher's warnings.
 shim_new
-assert_says "image:dev-mode-warns" "locally built image" "$(launcher)"
+out="$(launcher 2>&1)"
+assert_says_not "image:local-image-does-not-warn"   "locally built" "$out"
+assert_says_not "image:local-image-no-staff-scare"  "tell course staff" "$out"
+assert_eq       "image:local-image-launches" "1" "$(shim_count '^run ')"
 
 # ─── the state machine  (§2.1, §2.2) ───────────────────────────────────────────
 shim_new
@@ -254,6 +264,33 @@ shim_clear_log
 launcher_tty '\033[B\n' >/dev/null 2>&1
 assert_eq "newer-image:accepted-recreates" "1" "$(shim_count '^run ')"
 
+# ─── a stale recipe  (the replacement for the digest pin) ──────────────────────
+# How a mid-quarter fix reaches a student who never runs --update. With no registry there
+# is no digest to change, and podman mints a new image ID on every build including a
+# no-op one — so the IMAGE ID cannot answer "is this out of date". The recipe can.
+shim_new
+launcher >/dev/null 2>&1
+shim_set image_buildhash "0000deadbeefnotthecurrentrecipe"
+shim_clear_log
+out="$(launcher)"
+assert_says "stale-recipe:prompt-shown" "has been updated since" "$out"
+assert_eq   "stale-recipe:declined-builds-nothing" "0" "$(shim_count '^build ')"
+assert_eq   "stale-recipe:declined-keeps-container" "0" "$(shim_count '^run ')"
+
+shim_clear_log
+launcher_tty '\033[B\n' >/dev/null 2>&1
+assert_eq "stale-recipe:accepted-rebuilds"  "1" "$(shim_count '^build ')"
+assert_eq "stale-recipe:accepted-recreates" "1" "$(shim_count '^run ')"
+
+# An image built before the label existed has none, and an UNKNOWN answer must not nag —
+# the same rule the confighash check follows. Nagging on every launch with no way to
+# silence it is how a class learns to click through prompts.
+shim_new
+launcher >/dev/null 2>&1
+shim_clear_log
+assert_says_not "stale-recipe:unlabelled-does-not-nag" "has been updated since" "$(launcher)"
+assert_eq       "stale-recipe:unlabelled-builds-nothing" "0" "$(shim_count '^build ')"
+
 # ─── --rebuild and --full-rebuild  (§2.3, §2.4) ────────────────────────────────
 shim_new
 launcher >/dev/null 2>&1
@@ -282,9 +319,17 @@ if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "full-rebuild:accepted-remo
 else fail "full-rebuild:accepted-removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
 
 # ─── --update  (§9.1) ──────────────────────────────────────────────────────────
+# With no pin — the normal case — --update BUILDS. It used to refuse outright, on the
+# reasoning that there was no published image to update to; now the Containerfile is what
+# ships, so "get the newest version" means rebuilding from the newest recipe.
 shim_new
-assert_says "update:refused-in-dev-mode" "no published image" "$(launcher --update)"
-assert_eq "update:dev-mode-pulls-nothing" "0" "$(shim_count '^pull ')"
+launcher --update >/dev/null 2>&1
+assert_eq "update:unpinned-builds"        "1" "$(shim_count '^build ')"
+assert_eq "update:unpinned-pulls-nothing" "0" "$(shim_count '^pull ')"
+assert_eq "update:unpinned-recreates"     "1" "$(shim_count '^run ')"
+# The recipe fingerprint has to be on the image, or nothing downstream can tell a stale
+# image from a current one — see ensure_container and doctor.
+assert_contains "update:build-labels-the-recipe" "cs193v.buildhash=" "$(shim_log | grep '^build ')"
 
 PINNED="ghcr.io/example/cs193v@sha256:1111"
 shim_new
@@ -359,6 +404,31 @@ shim_new
 launcher >/dev/null 2>&1
 shim_set label_hash STALE
 assert_contains "doctor:reports-stale-config" "STALE" "$(launcher doctor)"
+
+# doctor is "the report to paste when asking for help", so it has to answer the first
+# question staff will ask about behaviour they cannot reproduce. That question used to be
+# "what digest are you on"; with the image built on the student's own machine the
+# answerable form is which image, when it was built, and whether it still matches the
+# course files. VERIFICATION.md §A.1 calls doctor untrustworthy if it lies here.
+shim_new
+launcher >/dev/null 2>&1
+out="$(launcher doctor)"
+assert_says "doctor:names-the-image"      "localhost/cs193v:local" "$out"
+assert_says "doctor:says-it-was-built-here" "built here"           "$out"
+assert_says "doctor:dates-the-image"      "image built"            "$out"
+assert_says "doctor:reports-the-recipe"   "image recipe"           "$out"
+
+shim_new
+launcher >/dev/null 2>&1
+shim_set image_buildhash "0000deadbeefnotthecurrentrecipe"
+assert_contains "doctor:reports-a-stale-recipe" "STALE" "$(launcher doctor | grep 'image recipe')"
+
+# Nothing built yet: doctor must say so rather than printing a tag that does not exist,
+# and must name the command that fixes it.
+shim_new; shim_set image_exists no
+out="$(launcher doctor)"
+assert_says "doctor:says-when-nothing-is-built" "NOT BUILT" "$out"
+assert_says "doctor:says-how-to-build"          "--build"   "$out"
 
 # ─── terminal handling ─────────────────────────────────────────────────────────
 # podman forces TERM=xterm and does not copy the client's value
@@ -437,8 +507,13 @@ assert_eq "noterm:--rebuild-still-creates-a-container-piped" "1" "$(shim_count '
 # readable: the dev-image advisory, "the tunnel did not come up", "these ports are already
 # in use". The launcher now stops for ENTER whenever it warned.
 #
-# The shim's launches warn twice over, with no arranging needed: no IMAGE is pinned, so dev
-# mode is announced, and the fake podman cannot serve an ssh tunnel, so the tunnel fails.
+# The shim's launches warn with no arranging needed: the fake podman cannot serve an ssh
+# tunnel, so the tunnel fails and warn.tunnel-failed is printed.
+#
+# This used to warn TWICE, the second being a dev-image advisory for an unpinned IMAGE.
+# That warning is gone -- a locally built image is now the normal case, not a fault -- so
+# the tunnel failure is the only warning left to hang this on. Any surviving warning would
+# do; what is being tested is the ENTER gate, not which warning triggered it.
 #
 # exec_out makes the moment the container is opened visible in the transcript: it is what
 # the fake prints for the final `podman exec -it`, and that is the only exec whose output
@@ -449,7 +524,7 @@ out="$(launcher_tty '\nexit\n' | strip_ansi)"
 assert_says "ack:a-warned-launch-asks-for-enter" "Press ENTER to continue" "$out"
 # The warning itself has to still be on screen at that point — acknowledging a message you
 # cannot see is no better than not being shown it.
-assert_says "ack:the-warning-is-still-on-screen" "locally built image" "$out"
+assert_says "ack:the-warning-is-still-on-screen" "browser will not be able to reach" "$out"
 # ENTER goes on to open the shell rather than giving up.
 assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
 # And the prompt comes BEFORE the container is opened, not after it has already swallowed
@@ -485,8 +560,10 @@ launcher_pty_silent_stop
 # single launch teaches a student to press ENTER without reading, which costs the fix its
 # whole value — the prompt has to mean "there is something here".
 #
-# Two things have to be arranged for a shim launch to have nothing to say: a pinned image,
-# so dev mode is not announced, and an ssh that succeeds, so the tunnel does not fail.
+# Two things are arranged so a shim launch has nothing to say: an ssh that succeeds, so the
+# tunnel does not fail, and a pinned image. The pin used to be here to suppress the dev-image
+# advisory, which no longer exists; it still earns its place, because a pinned IMAGE is also
+# what skips the stale-recipe check, and that check is the other thing that can speak up.
 shim_new
 shim_fake_ssh
 shim_set exec_out "SHELL-OPENED"

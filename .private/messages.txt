@@ -22,6 +22,8 @@ cs193v — the CS193V course container
   cs193v --reset-tunnel      fix it when your browser cannot reach your server
   cs193v --rebuild           start the container over. Your files and logins are kept.
   cs193v --full-rebuild      start over completely, including logging out.
+  cs193v --build             build the course container. The installer does this for
+                             you; run it yourself only if you are told to.
   cs193v --update            get the newest version of the course container.
 
 Closing your terminal window does not stop your work: run cs193v again and your tabs
@@ -150,13 +152,20 @@ computer. Please re-run the course installer, or contact course
 staff.
 
 [[err.no-image]]
-No course container image has been selected.
+The course container has not been built on this computer yet.
 
-This means container.args has no IMAGE line yet — normal before
-the course image has been published, but not something you should
-see as a student. Contact course staff.
+Build it with:
 
-    {{FILE}}
+    ./cs193v --build
+
+That takes a while the first time — it downloads and assembles
+the whole course environment — and it is safe to run again if it
+is interrupted.
+
+If you just ran the installer and got this, send course staff the
+output of:
+
+    cs193v doctor
 
 [[err.create-failed]]
 The course container could not be created.
@@ -211,9 +220,50 @@ The container is not running yet. Start it first with:
 
     ./cs193v
 
-[[err.update-in-dev-mode]]
-There is no published image to update to — this copy is running a
-locally built image.
+[[err.build-failed]]
+The course container could not be built. Podman's own output is
+on the screen above this box, ending at the step that failed.
+
+This is most often a network problem. It is safe to run it again:
+podman keeps every step that finished, so a second attempt picks
+up at the step that failed rather than starting over.
+
+    ./cs193v --build
+
+If it stops at the same step twice, send course staff everything
+above, along with the output of:
+
+    cs193v doctor
+
+[[err.build-no-disk]]
+The course container could not be built: this computer ran out of
+disk space part-way through.
+
+Free up some space and run it again. Podman keeps every step that
+finished, so it picks up where it stopped:
+
+    ./cs193v --build
+
+Building needs several gigabytes free — more than the finished
+container ends up occupying, because the pieces are assembled
+before the leftovers are cleared away.
+
+If you cannot free up that much space, contact course staff.
+
+[[err.create-no-disk]]
+The course container was built, but there was not enough disk
+space left to start it.
+
+The build itself worked — nothing is wrong with it, and it does
+not need doing again. Starting the container needs its own space
+on top of the build, roughly the size of the container again.
+
+Free up a few gigabytes and run this, which will pick up from
+where it stopped:
+
+    ./cs193v
+
+If you cannot free up that much space, contact course staff.
 
 [[err.pull-failed]]
 Could not download the course container.
@@ -259,10 +309,10 @@ of:
 
     cs193v doctor
 
-[[warn.dev-mode]]
-NOTE: running a locally built image ({{IMAGE}}), not the published course image.
-If you are a student and did not do this on purpose, tell course staff — this line
-should not appear.
+[[warn.build-retry]]
+That step did not finish — usually a dropped connection rather than anything you did.
+Trying again (attempt {{ATTEMPT}} of {{TRIES}}). Everything that already finished is
+kept, so this picks up where it stopped rather than starting over.
 
 [[warn.many-shells]]
 You have {{N}} terminal windows open on the container. That is fine, but each one and
@@ -335,6 +385,13 @@ Nothing was changed.
 [[status.full-rebuilt]]
 Done. You will need to log in again the next time you use claude or gh.
 
+[[status.building]]
+Building the course container. This is the big one. It takes a while the first time —
+it downloads and assembles the whole course environment — and it is safe to run again
+if it is interrupted, because podman keeps every step that finished.
+
+    {{IMAGE}}
+
 [[status.pulling]]
 Downloading the course container. This can take a while on slow wifi, and it is safe
 to run again if it is interrupted.
@@ -382,6 +439,15 @@ inside it will stop.
 Keep using the current version
 [[opt.update-now]]
 Update now (recommended)
+
+[[prompt.image-stale]]
+The course container has been updated since yours was built.
+
+Rebuilding takes a while, and restarts the container. Your files and your logins are
+safe; anything running inside it will stop.
+
+[[opt.rebuild-now]]
+Rebuild now (recommended)
 
 [[prompt.full-rebuild]]
 This will start completely over, including logging you out.

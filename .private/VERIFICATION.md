@@ -78,7 +78,10 @@ ckfail() { local n="$1"; shift; if "$@" >/dev/null 2>&1; then FAIL=$((FAIL+1)); 
 rec()    { printf 'RECORD %-28s %s\n' "$1" "$("${@:2}" 2>&1 | tr '\n' ' ')"; }
 
 DIR="$HOME/cs193v"                        # or wherever the student put it
-IMAGE="$(grep -oE 'ghcr\.io/[^ ]+' "$DIR/container.args" | head -1)"
+# Whatever the launcher resolves: the optional pin from container.args, else the image
+# built on this machine. Empty IMAGE= is the normal state — see .config/container.args.
+IMAGE="$(sed 's/#.*//' "$DIR/.config/container.args" | sed -n 's/^IMAGE=//p' | tr -d ' ' | head -1)"
+IMAGE="${IMAGE:-localhost/cs193v:local${CS193V_INSTANCE:+-$CS193V_INSTANCE}}"
 E()  { podman exec cs193v sh -c "$1"; }                       # in the live container
 R()  { podman run --rm --entrypoint sh "$IMAGE" -c "$1"; }     # throwaway
 I()  { podman inspect cs193v --format "$1"; }
@@ -122,8 +125,11 @@ grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$DIR/Containerfile"
 ## A.2 Image assertions
 
 ```sh
-podman manifest inspect "$IMAGE" | jq -r '.manifests[].platform | .os+"/"+.architecture'
-                                          # expect linux/amd64 AND linux/arm64
+# NOT a multi-arch manifest check. The image is built on this machine, so it is
+# single-arch by definition and always will be. What is worth checking is that it came
+# from the recipe on disk — the label that replaced the digest pin.
+rec img-recipe              podman image inspect "$IMAGE" --format '{{index .Labels "cs193v.buildhash"}}'
+rec img-built               podman image inspect "$IMAGE" --format '{{.Created}}'
 ck  img-user       student  podman image inspect "$IMAGE" --format '{{.User}}'
 rec img-size                podman image inspect "$IMAGE" --format '{{.Size}}'
 rec img-layers              podman image inspect "$IMAGE" --format '{{len .RootFS.Layers}}'
@@ -537,7 +543,13 @@ cat "$DIR/local.args"             # recompute by the documented formula and comp
 ## A.13 Performance baseline — record, do not assert
 
 ```sh
-time podman pull "$IMAGE"                    # cold pull; note the size actually transferred
+# Needs ~8 GB free; see ERRORS.md B5 for why that is nearly twice what the build retains.
+# Reference baseline, x86-64 with fast network — a student on dorm wifi is bounded by the
+# 728 MB rather than by the CPU, so expect wall time to scale with their link:
+#     cold build + container create   224 s, 728 MB, 4.1 GB peak / 4.3 GB retained
+#     CLAUDE_CODE_VERSION bump         89 s,  95 MB
+#     --full-rebuild                    6 s,   0 MB   (re-seeds the 267 MB browser locally)
+time "$DIR/cs193v" --build --no-cache        # cold build; note wall time AND peak disk
 time "$DIR/cs193v" --rebuild                 # container create
 time "$DIR/cs193v" --dev-print-command       # launcher overhead
 time podman exec cs193v true                 # exec overhead — relevant to the rejected relay design
@@ -609,8 +621,11 @@ reuses the container's stored config and ignores the image digest, ports, `keep-
 alike. If this fails, every student's flags are frozen at first run and edits to `container.args` never
 reach them.
 
-**2.6 — Stale-image detection.** Point `IMAGE=` at a different digest, then `./cs193v`.
-*Expect:* a prompt to update rather than silently continuing on the old image.
+**2.6 — Stale-image detection.** Touch the recipe — add a comment line to
+`.private/Containerfile` — then `./cs193v`.
+*Expect:* a prompt to rebuild rather than silently continuing on the old image. This is the
+`cs193v.buildhash` label doing the job the digest pin used to do; the image ID cannot,
+because podman mints a new one on every build including a no-op rebuild.
 
 **2.7 — Two copies refused.** See §A.10.
 
@@ -776,8 +791,9 @@ the course's core skill is taught.
 
 ## 9. Teardown
 
-**9.1 — Volumes survive an image update.** `./cs193v --update` after a new digest is published.
-*Expect:* logins intact.
+**9.1 — Volumes survive an image update.** `./cs193v --update` after editing the
+Containerfile. *Expect:* the image rebuilds, the container is recreated, and logins are
+intact.
 
 **9.2 — Full reset is clean.** `./cs193v --full-rebuild`; confirm `podman volume ls` no longer lists the
 four `cs193v-*` volumes.
@@ -824,5 +840,6 @@ ANSWERS TO THE DISPUTED QUESTIONS — quote actual output verbatim:
 
 SURPRISES (passed, but not as expected):
 
-TIMINGS: first pull ____   first launch ____   subsequent launch ____   --rebuild ____
+TIMINGS: cold build ____ (peak disk ____)   first launch ____   subsequent launch ____   --rebuild ____
+         (x86-64 reference: 224 s / 4.1 GB peak, 4.3 GB retained. Compare, do not assume.)
 ```

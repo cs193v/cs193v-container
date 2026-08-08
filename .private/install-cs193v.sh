@@ -54,6 +54,17 @@ MAC_VM_LEAVE_GB=4
 MAC_VM_MAX_GB=16
 MAC_VM_MIN_GB=4
 
+# And how much DISK to give it. Sized for a build rather than a download: a measured cold
+# build peaks at 4.5 GB of disk to produce a 2.2 GB image (see ERRORS.md B5), and a quarter
+# of student projects and node_modules goes on top of that. Set explicitly rather than left to
+# podman's default, which is not something this script should silently depend on when the
+# machine is now a build host and not just a run host.
+#
+# Costs nothing up front — the disk image is sparse, so this is a ceiling, not an
+# allocation. `podman machine set --disk-size` can only GROW a disk, which is why the
+# resize path below checks before asking.
+MAC_VM_DISK_GB=64
+
 TARBALL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_BRANCH.tar.gz"
 
 say_welcome() {
@@ -435,19 +446,55 @@ setup_machine() {
     [ "$PLAT" = macos ] || return 0
     local want; want="$(mac_vm_target_mb)"
     if [ "$DO_MACHINE_INIT" = yes ]; then
-        step "Creating podman's virtual machine (${want} MB)"
-        podman machine init --memory "$want" --now || die "Could not create the podman virtual machine."
+        step "Creating podman's virtual machine (${want} MB, ${MAC_VM_DISK_GB} GB disk)"
+        podman machine init --memory "$want" --disk-size "$MAC_VM_DISK_GB" --now \
+            || die "Could not create the podman virtual machine."
         ok "created and started"
     elif [ "$DO_MACHINE_RESIZE" = yes ]; then
         step "Resizing podman's virtual machine to ${want} MB"
         podman machine stop >/dev/null 2>&1
         podman machine set --memory "$want" || die "Could not resize the podman virtual machine."
+        grow_machine_disk
         podman machine start || die "Could not restart the podman virtual machine."
         ok "resized and restarted"
     else
         podman machine start >/dev/null 2>&1 || true
         skip "podman virtual machine"
+        grow_machine_disk_when_stopped
     fi
+}
+
+# A machine that predates this script — or one created before the container was something
+# students build rather than download — can have a disk too small to build in. Growing it
+# is safe and reversible in the only direction that matters: podman refuses to SHRINK a
+# machine disk, so this only ever asks when the current size is smaller, and treats a
+# refusal as non-fatal because a too-small disk fails later with a message that names it.
+#
+# `.Resources.DiskSize` is in GB while `.Resources.Memory` two functions up is in MB — an
+# inconsistency in podman's own output, not a typo here. If that ever changed to bytes the
+# comparison would simply always be satisfied and this would quietly stop growing anything,
+# which is the harmless direction for it to fail in.
+grow_machine_disk() {
+    local have
+    have="$(podman machine inspect --format '{{.Resources.DiskSize}}' 2>/dev/null | head -1)"
+    case "$have" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$have" -ge "$MAC_VM_DISK_GB" ] && return 0
+    note "Growing the virtual machine's disk from ${have} GB to ${MAC_VM_DISK_GB} GB,"
+    note "which the container build needs. This does not use the space up front."
+    podman machine set --disk-size "$MAC_VM_DISK_GB" \
+        || note "Could not grow it; continuing. If the build runs out of space, tell course staff."
+}
+
+# The same, for the path where nothing else needed the machine stopped. `podman machine
+# set` requires a stopped machine, so this stops it only if there is actually work to do.
+grow_machine_disk_when_stopped() {
+    local have
+    have="$(podman machine inspect --format '{{.Resources.DiskSize}}' 2>/dev/null | head -1)"
+    case "$have" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$have" -ge "$MAC_VM_DISK_GB" ] && return 0
+    podman machine stop >/dev/null 2>&1
+    grow_machine_disk
+    podman machine start >/dev/null 2>&1 || true
 }
 
 fetch_files() {
@@ -525,20 +572,66 @@ On a Mac, try:  podman machine start"
     fi
 }
 
-pull_image() {
-    local img
-    img="$(sed 's/#.*//' "$DIR/.config/container.args" | awk -F= '/^IMAGE=/{print $2}' | tr -d ' ')"
-    if [ -z "$img" ]; then
-        note "No course image has been published yet — skipping the download."
-        return 0
-    fi
-    step "Downloading the course container"
-    note "This is the big one. It is safe to re-run if it is interrupted:"
-    note "podman keeps whatever finished downloading."
-    podman pull --retry 10 --retry-delay 5s "$img" || die "Could not download the course container.
+# Build the course container, rather than download one.
+#
+# There is no registry and no published image: the Containerfile that arrived with the
+# course files IS the distribution, and every student assembles it here. Delegated to the
+# launcher rather than calling `podman build` directly, so the command a student runs on
+# day one is the same code path staff exercise daily -- including its retry, its
+# out-of-disk message and the recipe label the launcher later checks for staleness.
+#
+# The launcher prints its own progress and draws its own STOP box on failure, so this
+# adds neither.
+build_image() {
+    step "Building the course container"
+    note "This is the big one, and it is the slow part of this script: it downloads and"
+    note "assembles the whole course environment. Leave it running."
+    note "It is safe to run this script again — podman keeps every step that finished."
+    "$DIR/cs193v" --build || exit 1
+    ok "built"
+}
 
-It is safe to run this script again — podman keeps the parts that finished."
-    ok "downloaded"
+# Enough room to BUILD, which is a different question from enough room to run, and the
+# threshold is measured rather than guessed. Going from nothing to a running container on a
+# clean machine: 224 s, 4.1 GB of transient peak, and 4.3 GB still gone at the end — for an
+# image whose reported size is 2.2 GB.
+#
+# TWO costs, and the second is the one that surprises. The build peaks above its own result
+# because at each step's commit the same bytes exist in the layers already written, in the
+# working container, and in the new layer being computed from it; the in-step cleanups that
+# keep the final image small (`rm -rf /var/lib/apt/lists/*`, `npm cache clean --force`) add
+# to the peak precisely because those bytes are fetched, unpacked and discarded without ever
+# reaching a layer. Then CREATING the container costs roughly the image's size AGAIN:
+# --userns=keep-id makes podman write an ID-mapped copy of every layer (ERRORS.md D-series).
+# That second cost lands after the build, which is why retained (4.3 GB) exceeds peak (4.1).
+#
+# 8 GB rather than the 4.3 GB actually consumed, because a later REBUILD transiently holds
+# the old image and its ID-mapped copy alongside the new ones — measured to fail with
+# "no space left on device" at container-create time with 7.8 GB free.
+#
+# Do NOT size this from `podman system df` or from an image's reported size. Both are
+# logical figures: they said 2.2 GB where the store on disk held 6.7 GB. Checked before the
+# long step rather than after it, because the alternative is telling a student they are out
+# of disk part-way through a build they have already waited out.
+#
+# Advisory: it warns and continues rather than refusing. podman's figures are for the
+# graph root's own filesystem -- inside the virtual machine on macOS and WSL -- and a
+# wrong guess must not block an install that would have worked.
+check_disk() {
+    local out alloc used free_gb
+    out="$(podman info --format '{{.Store.GraphRootAllocated}} {{.Store.GraphRootUsed}}' 2>/dev/null)" || return 0
+    alloc="${out%% *}"; used="${out##* }"
+    case "$alloc" in ''|*[!0-9]*) return 0 ;; esac
+    case "$used"  in ''|*[!0-9]*) return 0 ;; esac
+    [ "$alloc" -gt 0 ] || return 0
+    free_gb=$(( (alloc - used) / 1073741824 ))
+    if [ "$free_gb" -lt 8 ]; then
+        note "Only about ${free_gb} GB is free where podman stores containers."
+        note "Setting up needs about 8 GB free. If it stops part-way, free up space"
+        note "and re-run this script — it will pick up where it stopped."
+    else
+        ok "${free_gb} GB free for the container"
+    fi
 }
 
 smoke_test() {
@@ -546,7 +639,26 @@ smoke_test() {
     "$DIR/cs193v" --dev-print-command >/dev/null || die "The launcher could not build a podman command.
 Send course staff the output of:  $DIR/cs193v --dev-print-command"
     ok "launcher reads its configuration"
+    # That the IMAGE EXISTS, which nothing else here checks. Without this the script can
+    # print "Setup finished" over an installation with no runnable container in it --
+    # the same shape of failure as ERRORS.md A6, where a truncated download passed.
+    if ! podman image exists "$(image_ref)"; then
+        die "The course container was not built, but setup did not stop.
+
+Please send this to course staff, along with the output of:
+    $DIR/cs193v doctor"
+    fi
+    ok "course container is present"
     if "$DIR/cs193v" doctor >/dev/null 2>&1; then ok "doctor runs"; else note "doctor reported problems — run: $DIR/cs193v doctor"; fi
+}
+
+# Whatever the launcher will actually run: the pin from container.args if staff have set
+# one, otherwise the locally built tag. Must stay in step with the launcher's LOCAL_IMAGE
+# and its resolve_image; 25-installer.sh asserts they agree.
+image_ref() {
+    local img
+    img="$(sed 's/#.*//' "$DIR/.config/container.args" | awk -F= '/^IMAGE=/{print $2}' | tr -d ' ')"
+    printf '%s' "${img:-localhost/cs193v:local}"
 }
 
 # ─── main ──────────────────────────────────────────────────────────────────────
@@ -560,6 +672,7 @@ setup_wslconf
 setup_machine
 fetch_files
 write_local_args
-pull_image
+check_disk
+build_image
 smoke_test
 say_done

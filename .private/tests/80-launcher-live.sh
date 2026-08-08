@@ -47,11 +47,13 @@ L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s'
 # LB() is a BARE launch — one that goes on to open a shell. It needs a real terminal, since
 # open_shell refuses without one, so it goes through script(1) with an `exit` fed in.
 #
-# The leading bare ENTER acknowledges any warning (issue #19): the repo ships no pinned
-# image, so every launch here announces dev mode and then stops for an ENTER before the
-# exec. Without it that ENTER would be eaten from the `exit`, tmux would get nothing, and
-# the test would sit at a live shell until the 120-second timeout. An extra ENTER when
-# there was nothing to acknowledge is harmless — it lands on the container's own prompt.
+# The leading bare ENTER acknowledges any warning (issue #19). Which warnings a launch here
+# produces is not fixed — the dev-image advisory that used to guarantee one is gone, and
+# against real podman the tunnel usually comes up — so this must work whether or not the
+# launcher stopped. It does: if there was a warning, this ENTER answers it, and without one
+# the ENTER lands harmlessly on the container's own prompt. What it must not do is let the
+# `exit` be eaten by the acknowledgement, which would leave tmux with nothing and park the
+# test at a live shell until the 120-second timeout.
 LB() { launcher_tty_repo '\nexit\n' "$@"; }
 
 # ─── a bare launch with no terminal refuses instead of hanging  (ERRORS.md B13) ─
@@ -261,18 +263,25 @@ assert_says "full-rebuild:non-tty-changes-nothing" "Nothing was changed" "$out"
 img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
 if [ -n "$img" ]; then
     assert_ok "update:pulls-and-recreates" sh -c "./cs193v --update </dev/null"
+    skip "update:unpinned-rebuilds" "IMAGE= is pinned, so --update pulls rather than builds"
 else
-    # Not a failure: IMAGE= is empty until the course image is published, which is tracked
-    # as a release gate. There is nothing to update to.
-    skip "update:pulls-and-recreates" "IMAGE= is empty (dev mode); see $PRIVATE/tests/00-release-gates.sh"
-    assert_says "update:refuses-in-dev-mode" "no published image" "$(L --update)"
+    # Empty IMAGE= is the normal state, so here --update REBUILDS. It no longer refuses:
+    # the Containerfile is the distribution, so "get the newest version" means rebuilding
+    # from the newest recipe. See .config/container.args.
+    skip "update:pulls-and-recreates" "IMAGE= is empty (the normal state); --update builds instead"
+    # Deliberately not run here even though it would work: with a warm cache this is
+    # seconds, but with a cold one or an edited Containerfile it is a full multi-minute
+    # build, and a tier that creates real containers should not sometimes take twenty
+    # minutes. The build-vs-pull branch is covered exhaustively in the shim tier
+    # (update:unpinned-builds and friends), which is where that logic actually lives.
+    skip "update:unpinned-rebuilds" "would trigger a real image build; covered in 30-launcher-shim.sh"
 fi
 
 # ─── doctor against a real container ───────────────────────────────────────────
 out="$(L doctor)"
 assert_contains "doctor:reports-the-real-podman-version" "5." "$out"
 # KNOWN BUG, documented as ERRORS.md B14: verb_doctor calls load_args but never
-# resolve_image, so in dev mode (empty IMAGE=) it hashes IMAGE="" while every other path
+# resolve_image, so with no pin (empty IMAGE=) it hashes IMAGE="" while every other path
 # hashes the resolved dev image — and doctor therefore always reports "config STALE" and
 # tells you to accept a recreate prompt that will never appear. Left failing on purpose:
 # doctor is the report staff ask for first, so it must not lie.
@@ -283,7 +292,7 @@ else
          "doctor says the config is STALE while the launch path agrees it matches (0 recreate
 prompts) and the stored hash equals --dev-print-command's. One-line fix in verb_doctor:
   load_args
-+ [ -z \"\$IMAGE\" ] && IMAGE=\"\$DEV_IMAGE\"
++ [ -z \"\$IMAGE\" ] && IMAGE=\"\$LOCAL_IMAGE\"
 See ERRORS.md B14."
 fi
 assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000' "$out"
