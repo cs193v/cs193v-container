@@ -207,8 +207,14 @@ out="$(pty_shell 'exit\n')"
 assert_contains "tmux:banner-appears-in-the-first-tab" "$CS193V_WELCOME" "$out"
 # The title bar is the persistent frame -- the thing the DECSTBM route could not deliver.
 assert_contains "tmux:title-bar-is-drawn" "$CS193V_TITLE" "$out"
-# The tab count badge, which is how a student knows other tabs can exist at all.
-assert_contains "tmux:tab-count-badge" "1 TAB" "$out"
+# The tab count badge is how a student knows other tabs can exist at all -- but at ONE tab
+# there are no other tabs for it to be telling them about, so it is not drawn (issue #26).
+# This session opens exactly one tab, so what must be true here is the absence.
+#
+# "1 TAB" and not "TAB": the + NEW TAB chip below is the thing that stays, and is the route
+# to the second tab that brings the badge back. 65-tmux.sh asserts that return; this tier
+# only needs to know the chrome the launcher lands a student in is the quiet one.
+assert_not_contains "tmux:no-tab-count-badge-at-one-tab" "1 TAB" "$out"
 assert_contains "tmux:new-tab-button-is-drawn" "+ NEW TAB" "$out"
 # set-titles on: without it allow-rename swallows the shell's OSC 0 and the window title
 # silently stops naming the course.

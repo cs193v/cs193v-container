@@ -252,7 +252,17 @@ hx_check_colors "$S" "chrome text is legible on light AND dark terminals" --rows
 
 bar="$(hx_cap "$S" | sed -n 2p)"
 hx_note "tab bar: [$bar]"
-hx_expect_contains "tab bar states how many tabs exist" "$bar" "1 TAB"
+# ONE TAB MEANS NO TAB BAR CONTENT (issue #26). A count of one and a list of one are both
+# answers to a question nobody asked: they take a row of chrome to tell a student who has
+# opened nothing that they have opened nothing. The count and the labels earn their space
+# the moment a second tab exists, and not before -- which is asserted further down, where
+# the second tab gets opened.
+#
+# This assertion used to run the other way ("tab bar states how many tabs exist", expecting
+# "1 TAB"), so the old behaviour was not merely uncovered, it was pinned. Note that the
+# needle is "1 TAB" and not "TAB": the + NEW TAB chip stays, and is the reason a student
+# with one tab can get a second one.
+hx_expect_absent "no tab count when there is only one tab" "$bar" "1 TAB"
 # FORK: the prototype asserted a keyboard cheat sheet here -- "ALT+T new tab   ALT+LEFT /
 # ALT+RIGHT switch tab". By course decision the chrome no longer advertises any key: the
 # keys are taught in class, and the bar stays quiet so tab labels get the width. What is
@@ -274,11 +284,24 @@ case "$border" in
 esac
 hx_expect_absent "the border carries no title (the tab bar already names the process)" "$border" "bash"
 hx_check_colors "$S" "pane border (row 2)" --rows 2 --min-contrast 3
-if hx_wait "$S" '1 bash' 8; then
-  hx_pass "first tab is labeled with its running process (bash)"
-else
-  hx_fail "first tab is labeled with its running process" "bar: [$(hx_cap "$S" | sed -n 2p)]"
-fi
+
+# The other half of issue #26: no label block either. "1 bash" is the single tab naming
+# itself to a student who has no second tab to tell it apart from.
+#
+# This is where "first tab is labeled with its running process (bash)" used to be. It was
+# a real requirement and still is, so it has MOVED to the multi-tab section below rather
+# than been dropped -- a label that stops tracking the running process would otherwise
+# become invisible to the suite.
+bar="$(hx_cap "$S" | sed -n 2p)"
+hx_expect_absent "no tab labels when there is only one tab" "$bar" "bash"
+
+# Which leaves exactly one thing on the row. Asserted positively as well, because two
+# absences would also be satisfied by a bar that failed to draw at all.
+case "$(printf '%s' "$bar" | tr -d ' ')" in
+  "+NEWTAB") hx_pass "a single tab leaves nothing on the bar but the new-tab button" ;;
+  *)         hx_fail "a single tab leaves nothing on the bar but the new-tab button" \
+                     "bar: [$bar]" ;;
+esac
 
 # Claim the fixture name from inside the pane. Without this the pane's ~/.bashrc prepends
 # ~/.local/bin and a REAL claude install wins the lookup -- the test then launches actual
@@ -315,6 +338,20 @@ if [ "$n" -ge 2 ]; then
   hx_pass "multiple tabs coexist ($n open)"
   hx_expect_contains "tab bar pluralizes the count" "$(hx_cap "$S" | sed -n 2p)" "TABS"
 
+  # Issue #26: the count and the labels are hidden at one tab, so this is where both have
+  # to come BACK. Suppressing chrome that never returns would pass the absence checks above
+  # just as well as suppressing it conditionally does.
+  hx_expect_contains "tab count reappears once a second tab exists" \
+                     "$(hx_cap "$S" | sed -n 2p)" "$n TABS"
+  # Moved here from "startup appearance", where it asserted the single tab's label. The
+  # requirement is unchanged -- a tab is labelled with what is running in it -- but with
+  # one tab there is now no label to find.
+  if hx_wait "$S" '1 bash' 8; then
+    hx_pass "tabs are labeled with their running process (bash)"
+  else
+    hx_fail "tabs are labeled with their running process" \
+            "bar: [$(hx_cap "$S" | sed -n 2p)]"
+  fi
 else
   hx_fail "multiple tabs coexist"
 fi
@@ -656,6 +693,14 @@ while [ "$(probe_wincount)" -gt 1 ] && [ "$guard" -lt 40 ]; do
 done
 if [ "$(probe_wincount)" = "1" ]; then
   hx_pass "all but the last tab could be closed ($closed closed)"
+
+  # Issue #26 on the way back DOWN, which is the direction nothing else here exercises. A
+  # student who opens a second tab and closes it again should get the quiet bar back, not
+  # a "1 TAB" badge left behind by a format that only re-evaluated upwards.
+  hx_settle 1.5
+  bar="$(hx_cap "$S" | sed -n 2p)"
+  hx_expect_absent "the tab count goes away again when tabs are closed" "$bar" "1 TAB"
+  hx_expect_absent "the tab labels go away again when tabs are closed" "$bar" "bash"
 else
   hx_fail "all but the last tab could be closed" "remaining=$(probe_wincount)"
 fi
