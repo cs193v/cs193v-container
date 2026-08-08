@@ -357,6 +357,10 @@ actually are.
   it is obvious when other tabs exist. Click a tab to switch to it, or click `+ NEW TAB` on
   the right for another. `exit` closes a tab; exiting the last one leaves the container.
 
+  With **one** tab open there is nothing to switch between, so the count and the single
+  label are hidden and the bar carries only `+ NEW TAB`. Both appear the moment a second
+  tab exists and go away again when it closes.
+
   | | |
   |---|---|
   | New tab | **CTRL+T** — or click `+ NEW TAB` |
