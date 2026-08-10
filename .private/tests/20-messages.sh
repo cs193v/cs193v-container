@@ -181,13 +181,21 @@ else:
 print("BOX:%d" % box)
 limit = box - 4
 
-# Only messages routed through die() are boxed. status.*, prompt.*, opt.*, warn.* and
-# help.usage are printed plainly by info/warn/printf and are under no such constraint, so
-# holding them to the box width would be a made-up rule.
+# Only messages that end up INSIDE a box are held to the box width. The rest of status.*,
+# prompt.*, opt.*, warn.* and help.usage are printed plainly by info/warn/printf and are
+# under no such constraint, so holding them to it would be a made-up rule.
+#
+# TWO ROUTES INTO A BOX, not one. `die "$(msg k)"` was the only one until the build grew a
+# success box (issue #22), which reaches it as `msg k | celebrate`. Matching only the die
+# form left the new message unlinted, and it went in three columns too wide and wrapped
+# mid-sentence -- "Run the following command to enter the / development environment:" --
+# which is precisely what this lint exists to prevent. Any new way of reaching box() needs
+# a pattern here.
 boxed = set()
 for name, root in (("cs193v", repo), ("install-cs193v.sh", private)):
     for line in open(os.path.join(root, name)):
         boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
+        boxed.update(re.findall(r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b', line))
 print("BOXED:%s" % ",".join(sorted(boxed)))
 
 key = None
@@ -244,36 +252,10 @@ record "box:unboxed-lines-over-80-cols" "${wide:-0} (informational; these are no
 # in the four corners, and a right wall on every body line in between.
 #
 # Widths in DISPLAY COLUMNS via python3, for the reason recorded above the width lint —
-# mawk's length() would score the border at 3× and pass vacuously.
-box_problems() {                      # box art on stdin -> one line per structural problem
-    python3 -c '
-import sys
-lines = sys.stdin.read().splitlines()
-# The box is everything from the lid to the floor. Leading indentation is part of it: the
-# installer indents its box by two columns and the launcher does not, and a body line that
-# disagrees with its own lid about that is just as broken as a missing wall.
-top = next((i for i, l in enumerate(lines) if "┏" in l), None)
-bot = next((i for i, l in enumerate(lines) if "┗" in l), None)
-if top is None or bot is None or bot <= top:
-    print("no complete box found in the output"); sys.exit(0)
-box = lines[top:bot + 1]
-w = len(box[0])
-for n, l in enumerate(box):
-    want = ("┏", "┓") if n == 0 else \
-           ("┗", "┛") if n == len(box) - 1 else ("┃", "┃")
-    ind = len(l) - len(l.lstrip(" "))
-    ind0 = len(box[0]) - len(box[0].lstrip(" "))
-    s = l.strip()
-    if len(l) != w:
-        print("line %d is %d columns, the lid is %d: %r" % (n, len(l), w, l))
-    if ind != ind0:
-        print("line %d is indented %d columns, the lid is %d: %r" % (n, ind, ind0, l))
-    if not s.startswith(want[0]):
-        print("line %d has no left border: %r" % (n, l))
-    if not s.endswith(want[1]):
-        print("line %d has no right border: %r" % (n, l))
-'
-}
+# mawk's length() would score the border at 3× and pass vacuously. The checker itself is
+# box_problems() in lib/assert.sh, shared since the build's success box gave a second suite
+# a box to check.
+require_cmd python3
 
 # There must be exactly one place that draws it. Before the fix there were four — die() in
 # each script, plus the Intel-Mac refusal typed out as a heredoc, plus the launcher's own
@@ -283,7 +265,11 @@ for n, l in enumerate(box):
 for boxsrc in "launcher:$REPO/cs193v" "installer:$PRIVATE/install-cs193v.sh"; do
     who="${boxsrc%%:*}"; f="${boxsrc#*:}"
     # box() builds its borders inside an awk printf; anything else is hand-drawn art.
-    hand="$(grep -n '[┏┗┃]' "$f" | grep -v printf || true)"
+    #
+    # Comments are exempt. The geometry needs explaining somewhere, and explaining it means
+    # naming the characters -- "┏━━ is four columns" is documentation, not a second box. The
+    # first version of this check had no such exemption and failed on its own comment.
+    hand="$(grep -n '[┏┗┃]' "$f" | grep -v printf | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
     assert_eq "box:$who-draws-the-box-in-one-place" "" "$hand"
 done
 
