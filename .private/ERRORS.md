@@ -777,6 +777,51 @@ Three things that made this more than a padding change:
   (`0x80-0xBF`) and counting the rest needs no locale at all; verified byte-identical
   output under gawk, mawk and busybox awk.
 
+### ~~B17~~. `--build` reported itself in podman's voice, and never said it worked — **FIXED** (issues #22, #23, #24)
+
+The longest thing this course asks of a student's computer, as it looked before:
+
+```
+STEP 6/23: RUN set -eux;     install -d -m 0755 /etc/apt/keyrings;     curl -fsSL https://deb...
+--> Using cache fceef1716e32e78f6958efc4540010e24e49ee22b499a96c71e6a41789551f34
+   ... 76 lines of this on a FULLY CACHED build; thousands on a cold one ...
+Setting up the course container...
+$
+```
+
+Three separate complaints, one cause — nobody had ever decided what this command should
+print, so it printed podman's stdout and then stopped. Note the last line: the build had
+**succeeded**, and the final thing on screen is a progress message with no completion, which
+is precisely what an interrupted command looks like.
+
+**Why nothing caught it.** There was no coverage of the build's *output* to miss it with.
+The shim tier asserted `--build` calls `podman build` (`shim_count '^build '`) and the live
+tier asserted an image exists afterwards; both are about what the launcher **does**, and
+neither reads a line of what the student is **shown**. The fake podman helped hide it — its
+`build` printed one `Successfully tagged` line, so even a test that had looked would have
+seen nothing resembling a real build. It emits real `STEP i/N` lines now.
+
+**Fixed as:** a bar rendered from podman's own step numbering, a spinner on the 180-second
+`podman run`, and a green success box. Four things are worth recording beyond the UI:
+
+- **Hiding output made an error message a lie.** `err.build-failed` said "Podman's own
+  output is on the screen above this box, ending at the step that failed" — true only for
+  as long as the raw output *was* on the screen. The failing tail now goes INSIDE the box.
+  This is the half of #23 that is a correctness bug rather than a presentation one, and it
+  is only reachable when a build fails, which is when it matters most.
+- **`--dev-build` keeps the raw output.** Staff debugging a build need podman's words as
+  they arrive; a bar is the wrong instrument. That split is also what makes hiding the
+  output from `--build` affordable at all.
+- **Not a terminal → no carriage returns.** A `\r`-redrawn bar in a CI log or a
+  `| tee build.txt` is one unreadable line thousands of columns long — and that is the
+  exact path a student uses when staff ask them to send the output. Piped, it prints one
+  plain line per step.
+- **The width lint had a hole the moment a second route into a box existed.** It collected
+  its keys by matching `die "$(msg k)"`, so `msg k | celebrate` was unlinted, and the new
+  message went in three columns too wide and wrapped mid-sentence ("Run the following
+  command to enter the / development environment:"). Caught by eye, not by the suite;
+  the lint now matches both routes.
+
 ---
 
 ## C. Not run, and why

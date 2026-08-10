@@ -166,6 +166,41 @@ assert_file() {   [ -f "$2" ] && pass "$1" || fail "$1" "not a file: $2"; }
 assert_no_file() { [ -e "$2" ] && fail "$1" "exists but should not: $2" || pass "$1"; }
 assert_exec()  {  [ -x "$2" ] && pass "$1" || fail "$1" "not executable: $2"; }
 
+# ─── box art ───────────────────────────────────────────────────────────────────
+# Shared because two suites draw conclusions from it now: 20-messages.sh renders die() and
+# the installer's boxes, and 30-launcher-shim.sh renders the build's success box -- the
+# first box in this project that is not an error. See issue #21 for what it is checking and
+# why neither of the checks that came before it could.
+box_problems() {                      # box art on stdin -> one line per structural problem
+    python3 -c '
+import sys
+lines = sys.stdin.read().splitlines()
+# The box is everything from the lid to the floor. Leading indentation is part of it: the
+# installer indents its box by two columns and the launcher does not, and a body line that
+# disagrees with its own lid about that is just as broken as a missing wall.
+top = next((i for i, l in enumerate(lines) if "┏" in l), None)
+bot = next((i for i, l in enumerate(lines) if "┗" in l), None)
+if top is None or bot is None or bot <= top:
+    print("no complete box found in the output"); sys.exit(0)
+box = lines[top:bot + 1]
+w = len(box[0])
+for n, l in enumerate(box):
+    want = ("┏", "┓") if n == 0 else \
+           ("┗", "┛") if n == len(box) - 1 else ("┃", "┃")
+    ind = len(l) - len(l.lstrip(" "))
+    ind0 = len(box[0]) - len(box[0].lstrip(" "))
+    s = l.strip()
+    if len(l) != w:
+        print("line %d is %d columns, the lid is %d: %r" % (n, len(l), w, l))
+    if ind != ind0:
+        print("line %d is indented %d columns, the lid is %d: %r" % (n, ind, ind0, l))
+    if not s.startswith(want[0]):
+        print("line %d has no left border: %r" % (n, l))
+    if not s.endswith(want[1]):
+        print("line %d has no right border: %r" % (n, l))
+'
+}
+
 # ─── requirements ──────────────────────────────────────────────────────────────
 # By project decision these HARD-FAIL rather than skip: a green run must mean the whole
 # thing was exercised, not that half of it quietly opted out. The message names the exact
