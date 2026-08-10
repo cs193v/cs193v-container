@@ -195,6 +195,42 @@ pty_shell() {                     # pty_shell KEYS -> everything the session pri
 }
 tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 
+# A terminal window that stays open, for the tests that then close it.
+#
+# Backgrounded as a PIPELINE, not as `pty_shell ... &`. `$!` after `f &` is the pid of the
+# SUBSHELL running f, and killing that leaves script, podman and the tmux client happily
+# alive -- so the window was never really closed and every assertion after it measures
+# nothing. In `printf ... | script ... &`, `$!` is the last element of the pipeline, which is
+# script itself. Defined once so no call site can get that wrong again.
+start_client() {                  # start_client -> sets CLIENT_JOB (script's pid)
+    printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+    CLIENT_JOB=$!
+}
+
+# Close it, and do not come back until it is REALLY gone (issue #32).
+#
+# What dies when a student closes their window is the `podman exec` client, and that is
+# script's child -- `\$\$` above is expanded by the shell script -c spawns, which then execs
+# into podman, so the pid it stamps into @cs193v_host_pid is that child and not script.
+#
+# So kill the CHILD and wait for SCRIPT. Killing script first is what made this racy: SIGKILL
+# is not propagated to descendants, so the client is orphaned onto a subreaper that may not
+# be scheduled promptly, and its death becomes something a test can only sample and hope for.
+# Done this way round the kernel does the synchronising for us -- script reaps the client
+# before exiting, and `wait` returns only once script itself is reaped, so by the time this
+# returns the client is out of the process table. No sleep, no polling, nothing to tune.
+close_client() {                  # close_client SCRIPT_PID -> sets CLOSED_PID
+    CLOSED_PID="$(pgrep -P "$1" | head -1)"
+    if [ -n "$CLOSED_PID" ]; then
+        kill -9 "$CLOSED_PID" 2>/dev/null
+    else
+        # No child to find. Fall back to the old behaviour rather than `wait` on a script
+        # whose client is still running -- that would block for the full `sleep 600`.
+        kill -9 "$1" 2>/dev/null
+    fi
+    wait "$1" 2>/dev/null || true
+}
+
 tmux_kill_all
 out="$(pty_shell 'exit\n')"
 # The banner belongs to tab one.
@@ -231,8 +267,7 @@ assert_ok "tmux:no-server-survives-the-last-exit" \
 # the $TMUX guard went into /etc/profile.d/20-cs193v-welcome.sh, pressing CTRL+T cleared the
 # pane and redrew the box every time. Read from rendered panes, which is redraw-independent.
 tmux_kill_all
-pty_shell 'sleep 600\n' >/dev/null 2>&1 &
-bclient=$!
+start_client; bclient=$CLIENT_JOB
 sleep 6
 w1="$(E "$TM list-windows -F '#{window_id}'" | head -1)"
 E "$TM new-window -d" >/dev/null 2>&1
@@ -245,8 +280,7 @@ assert_not_contains "tmux:a-new-tab-does-not-repeat-the-banner" "$CS193V_WELCOME
 # ...and closing a tab must not say goodbye, for the same reason: .bash_logout runs per tab.
 assert_not_contains "tmux:a-new-tab-does-not-say-goodbye" "$CS193V_GOODBYE" \
                     "$(E "$TM capture-pane -p -t $w2")"
-kill -9 "$bclient" 2>/dev/null; wait "$bclient" 2>/dev/null || true
-sleep 2
+close_client "$bclient"
 tmux_kill_all
 
 # The lockdown, read from the live server rather than from the file.
@@ -266,20 +300,24 @@ tmux_kill_all
 # REATTACH. Close the terminal window (kill the exec client) and the session must survive
 # with its windows, and the next launch must land back in it rather than making a new one.
 # This is the behaviour destroy-unattached off exists for; see ERRORS.md D1.
-# Backgrounded as a PIPELINE, not as a call to pty_shell. `$!` after `f &` is the pid of the
-# subshell running f, and killing that leaves script/podman/the tmux client happily alive --
-# so the window was never really "closed" and every assertion below it measured nothing. In
-# `printf ... | script ... &`, `$!` is the last element of the pipeline, which is script
-# itself, and killing that does tear the client down.
 tmux_kill_all
-printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
-client=$!
+start_client; client=$CLIENT_JOB
 sleep 6
 E "$TM new-window -d" >/dev/null 2>&1
 sleep 1
 first="$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
-kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
-sleep 3
+# close_client returns only once the client is out of the process table, so everything below
+# is reasoning about a window that is definitively closed rather than one that is probably
+# closed by now. That matters in both directions: the pid check further down used to sample
+# an asynchronous death exactly once and could go red on a slow machine, and the conmon
+# assertion just below used to be able to pass for the WRONG reason -- a client that was
+# still alive is of course still attached (#32).
+close_client "$client"
+# The stamped pid must be the client we actually spawned. Nothing checked this before, so
+# nothing could tell a correct stamp from a plausible one -- and "the pid recorded is not the
+# pid the test kills" is exactly what made this block racy.
+assert_eq "tmux:the-stamped-pid-is-the-client-we-spawned" "$CLOSED_PID" \
+          "$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
 assert_eq "tmux:session-survives-the-window-closing" "$first" \
           "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
 
@@ -305,7 +343,12 @@ assert_ne "tmux:the-session-records-who-attached-it" "" \
 # for real in the live tier.
 stale_pid="$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
 if kill -0 "$stale_pid" 2>/dev/null; then
-    fail "tmux:the-recorded-client-pid-is-really-gone" "pid $stale_pid is still alive on the host"
+    fail "tmux:the-recorded-client-pid-is-really-gone" \
+         "pid $stale_pid is still on the host after close_client's wait() returned, which
+should not be reachable -- script reaps the client before it exits. Report the state below
+rather than re-running: STAT=Z would mean it was reaped by someone else and left a corpse,
+and a live podman would mean the wrong process was killed.
+$(ps -o pid=,ppid=,stat=,etime=,args= -p "$stale_pid" 2>&1)"
 else
     pass "tmux:the-recorded-client-pid-is-really-gone"
 fi
@@ -314,8 +357,7 @@ sleep 1
 assert_eq "tmux:pruning-frees-the-session" "0" \
           "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
 
-printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
-client2=$!
+start_client; client2=$CLIENT_JOB
 sleep 6
 assert_eq "tmux:relaunch-reattaches-rather-than-creating" "1" \
           "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
@@ -326,13 +368,12 @@ assert_eq "tmux:reattached-session-kept-its-tabs" "2" \
 
 # A SECOND concurrent launch must get its OWN session, because the first one's client is
 # attached. CONTAINER-DESIGN.md promises each terminal window its own set of tabs.
-printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
-client3=$!
+start_client; client3=$CLIENT_JOB
 sleep 6
 assert_eq "tmux:second-window-gets-its-own-session" "2" \
           "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
-kill -9 "$client2" "$client3" 2>/dev/null; wait 2>/dev/null || true
-sleep 2
+close_client "$client2"
+close_client "$client3"
 tmux_kill_all
 
 # ─── §A.5 kernel and namespaces ────────────────────────────────────────────────
