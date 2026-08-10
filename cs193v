@@ -121,7 +121,10 @@ WARN_ACK="${TMPDIR:-/tmp}/cs193v-warned.$$"
 # Pids are reused, so a file left behind by a crash could otherwise make a launch with
 # nothing to say stop and ask to be acknowledged.
 rm -f "$WARN_ACK"
-trap 'rm -f "$WARN_ACK"' EXIT
+# meter_kill, not just rm: an animator left running would draw its next frame over
+# whatever came after it -- a STOP box, a shell prompt -- 100ms after the launcher stopped
+# caring. See meter_stop.
+trap 'rm -f "$WARN_ACK" "$METER_STATE"; [ -n "${METER_PID:-}" ] && kill "$METER_PID" 2>/dev/null; :' EXIT
 
 warn() {
     printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2
@@ -258,6 +261,107 @@ celebrate() {                         # celebrate TITLE  <- body on stdin
     printf '\n'
 }
 
+# ─── the progress meter ────────────────────────────────────────────────────────
+# One line that moves, shared by everything slow enough to need it.
+#
+# WHY THIS IS A BACKGROUND PROCESS AND NOT JUST A printf. The bar advances when podman
+# finishes a step, and the slow steps -- Playwright, Chromium, the apt layers -- hold a
+# single frame for minutes. Drawing only on step boundaries therefore means a meter that
+# sits perfectly still for minutes, which reads as a hang: exactly the impression this
+# feature exists to remove. Something has to redraw while nothing is happening.
+#
+# It cannot be done in the reader. build_progress is an awk blocked on `read` between STEP
+# lines -- no code of ours runs while it waits, so it cannot animate. So the reader only
+# records state and an animator owns the line, ten frames a second, until it is told to stop.
+#
+# The two halves meet through a FILE rather than a variable because the animator is a
+# background subshell: an assignment in either one is invisible to the other. Written whole
+# on every update and re-read on every frame, so a torn read costs one frame and fixes
+# itself 100ms later rather than corrupting anything.
+METER_W=40
+
+# Braille rather than the ASCII / - \ | this replaced. Eight frames of a dot pattern
+# orbiting a 2x4 cell, which reads as motion at a glance instead of as a character
+# flickering between four shapes -- and cannot be mistaken for punctuation in the output.
+#
+# A `case` rather than ${FRAMES:i:1}: substring extraction on a multibyte string is
+# character-wise in a UTF-8 locale and BYTE-wise in the C locale, so indexing would slice
+# these three-byte glyphs into fragments for anyone running LC_ALL=C. Same trap as box().
+meter_glyph() {                       # meter_glyph N  -> the Nth frame, N in 0..7
+    case "$1" in
+        0) printf '⣾' ;; 1) printf '⣽' ;; 2) printf '⣻' ;; 3) printf '⢿' ;;
+        4) printf '⡿' ;; 5) printf '⣟' ;; 6) printf '⣯' ;; *) printf '⣷' ;;
+    esac
+}
+
+meter_write() {                       # meter_write CUR TOTAL LABEL
+    printf '%s %s %s\n' "$1" "$2" "$3" > "$METER_STATE" 2>/dev/null || true
+}
+
+# One frame. Before the first STEP arrives the total is unknown, so there is no bar to draw
+# and the label carries the line on its own -- which is what the base-image download is.
+meter_draw() {                        # meter_draw FRAME CUR TOTAL LABEL
+    local frame="$1" cur="$2" tot="$3" label="$4" filled n bar='' pad='' g
+    g="$(meter_glyph "$frame")"
+    if [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
+        filled=$(( METER_W * cur / tot ))
+        [ "$filled" -gt "$METER_W" ] && filled="$METER_W"
+        n="$filled";                  while [ "$n" -gt 0 ]; do bar="$bar█";  n=$((n - 1)); done
+        n=$(( METER_W - filled ));    while [ "$n" -gt 0 ]; do pad="$pad░"; n=$((n - 1)); done
+        printf '\r  %s [%s%s]  %s/%s  %s%s[K' "$g" "$bar" "$pad" "$cur" "$tot" "$label" "$ESC"
+    else
+        printf '\r  %s  %s%s[K' "$g" "$label" "$ESC"
+    fi
+}
+
+# The animator. Stops when the state file goes away, which is how meter_stop ends it without
+# depending on a signal arriving.
+meter_animate() {
+    local i=0 cur tot label
+    while [ -f "$METER_STATE" ]; do
+        cur=''; tot=''; label=''
+        IFS=' ' read -r cur tot label < "$METER_STATE" 2>/dev/null || true
+        meter_draw "$i" "${cur:-0}" "${tot:-0}" "${label:-}"
+        i=$(( (i + 1) % 8 ))
+        sleep 0.1
+    done
+}
+
+# Nothing animates when stdout is not a terminal: \r cannot overdraw a pipe or a log file,
+# and ten frames a second of it would be thousands of columns of noise in the file staff ask
+# a student to send. Callers print plainly in that case.
+meter_start() {                       # meter_start TOTAL LABEL
+    [ -t 1 ] || return 0
+    meter_write "0" "${1:-0}" "${2:-}"
+    meter_animate &
+    METER_PID=$!
+}
+
+meter_label() {                       # meter_label CUR TOTAL LABEL  -- update in place
+    [ -n "$METER_PID" ] || return 0
+    meter_write "$1" "$2" "$3"
+}
+
+# Leaves the line finished rather than mid-frame, and ALWAYS newlines, so whatever the caller
+# prints next starts clean instead of landing inside the bar.
+meter_stop() {                        # meter_stop [CUR TOTAL LABEL]
+    [ -n "$METER_PID" ] || return 0
+    local cur='' tot='' label=''
+    # Read before deleting: with no arguments the closing frame is "whatever it had reached,
+    # complete", so the line is left finished rather than stopped mid-fill.
+    [ -f "$METER_STATE" ] && IFS=' ' read -r cur tot label < "$METER_STATE" 2>/dev/null
+    rm -f "$METER_STATE"
+    kill "$METER_PID" 2>/dev/null
+    wait "$METER_PID" 2>/dev/null || true
+    METER_PID=''
+    if [ "$#" -ge 2 ]; then
+        meter_draw 0 "$1" "$2" "${3:-}"
+    elif [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
+        meter_draw 0 "$tot" "$tot" ""
+    fi
+    printf '\n'
+}
+
 # ─── the build's progress bar ──────────────────────────────────────────────────
 # Turns `podman build`'s output into one line that moves (issue #23). What it replaces was
 # not a design decision anybody made -- it was podman's stdout, and on a cold build that is
@@ -279,31 +383,39 @@ celebrate() {                         # celebrate TITLE  <- body on stdin
 build_progress() {
     local tty=0
     [ -t 1 ] && tty=1
-    LC_ALL=C awk -v tty="$tty" -v esc="$ESC" '
+    LC_ALL=C awk -v tty="$tty" -v esc="$ESC" -v statef="$METER_STATE" '
         function rep(s, n,  o) { o = ""; while (n-- > 0) o = o s; return o }
+        # On a terminal this RECORDS rather than draws: meter_animate owns the line, so that
+        # it keeps moving between steps instead of freezing for the length of one. close()
+        # after every write, not fflush -- awk appends to an open handle, so without the
+        # close the file would grow and the animator would keep reading the first, stalest
+        # line forever.
+        function state(c, t, l) {
+            printf "%d %d %s\n", c, t, l > statef
+            close(statef)
+        }
         function draw(  filled) {
             if (tot <= 0) return
+            if (tty) { state(cur, tot, label); return }
             filled = int(width * cur / tot + 0.5)
-            if (tty) printf "\r  [%s%s]  %d/%d %s[K", rep("█", filled),
-                            rep("░", width - filled), cur, tot, esc
-            else     printf "  [%s%s]  %d/%d\n", rep("█", filled),
-                            rep("░", width - filled), cur, tot
+            printf "  [%s%s]  %d/%d\n", rep("█", filled), rep("░", width - filled), cur, tot
             fflush()
         }
-        BEGIN { width = 40; cur = 0; tot = 0; pulled = 0 }
+        BEGIN { width = 40; cur = 0; tot = 0; pulled = 0; label = "" }
         # Pulling the base image happens BEFORE step 1 and is the slowest part of a cold
         # build on slow wifi, so it gets a note rather than sitting behind an empty bar. One
         # note, not one per blob: podman emits a line per layer per percentage.
         #
-        # NO TRAILING NEWLINE ON A TERMINAL. It had one, which put the note on a row of its
-        # own and left the bar to start on the row BELOW -- so a cold build showed the note
-        # stranded above a bar instead of the single line the bar is supposed to be. The note
-        # now sits on the row the bar owns and is erased by the first draw(), which opens
-        # with \r and closes with ESC[K.
+        # ON A TERMINAL THIS IS A LABEL, NOT A LINE. Printed as its own line with a trailing
+        # newline, it stranded the note on one row and left the bar to start on the row below
+        # -- so a cold build showed two rows where the bar is meant to be one. It is now
+        # handed to the meter, which shows it beside the animation until a bar exists and then
+        # replaces it. Piped, there is nothing to overdraw, so it stays a plain line.
         /^(Trying to pull|Getting image source signatures|Copying blob|Copying config)/ {
             if (!pulled) {
                 pulled = 1
-                if (tty) printf "\r  Downloading the base image...%s[K", esc
+                label = "Downloading the base image..."
+                if (tty) state(0, 0, label)
                 else     printf "  Downloading the base image...\n"
                 fflush()
             }
@@ -312,13 +424,14 @@ build_progress() {
         /^STEP [0-9]+\/[0-9]+:/ {
             s = $2; sub(/:$/, "", s); split(s, a, "/")
             cur = a[1] + 0; tot = a[2] + 0
+            # The note has served its purpose once a step exists to report.
+            label = ""
             draw()
             next
         }
-        END {
-            if (tty && tot > 0) printf "\n"
-            fflush()
-        }
+        # No newline here on a terminal: meter_stop owns ending the line, because the meter
+        # outlives this awk -- the container-creation step is still to come.
+        END { fflush() }
     '
 }
 
@@ -393,23 +506,23 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     if [ -n "$RT_SPIN" ]; then
         # Drawn once up front rather than only from inside the loop, so a command that
         # returns immediately still announces itself instead of flashing nothing.
-        if [ -t 1 ]; then printf '%s  ' "$RT_SPIN"; else printf '%s\n' "$RT_SPIN"; fi
+        if [ -t 1 ]; then printf '  %s  %s' "$(meter_glyph 0)" "$RT_SPIN"
+        else printf '%s\n' "$RT_SPIN"; fi
     fi
     while [ "$i" -lt "$((secs * 10))" ]; do
         if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
         if [ -n "$RT_SPIN" ] && [ -t 1 ] && [ "$((i % 2))" -eq 0 ]; then
-            case "$frame" in
-                0) ch='|' ;; 1) ch='/' ;; 2) ch='-' ;; *) ch='\' ;;
-            esac
-            frame=$(( (frame + 1) % 4 ))
-            printf '\r%s  %s' "$RT_SPIN" "$ch"
+            # Same braille frames as the meter, so the two never look like different
+            # programs. meter_glyph is the single definition of them.
+            printf '\r  %s  %s' "$(meter_glyph "$frame")" "$RT_SPIN"
+            frame=$(( (frame + 1) % 8 ))
         fi
         sleep 0.1
         i=$((i + 1))
     done
     # Leave the line clean either way: the caller prints its own outcome next, and a
     # half-drawn spinner frame ahead of it would look like part of the message.
-    [ -n "$RT_SPIN" ] && [ -t 1 ] && printf '\r%s%s[K\n' "$RT_SPIN" "$ESC"
+    [ -n "$RT_SPIN" ] && [ -t 1 ] && printf '\r  %s%s[K\n' "$RT_SPIN" "$ESC"
     if [ "$rc" -eq 124 ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fi
     RT_OUT="$(cat "$tmp")"
     rm -f "$tmp"
@@ -565,6 +678,10 @@ TUNNEL_ID="$(printf '%s\n' "$DIR" "$INSTANCE" | sha_stdin | cut -c1-12)"
 BUILD_LOG="${TMPDIR:-/tmp}/cs193v-build-$TUNNEL_ID.log"
 # Set by --dev-build only: staff get podman's raw output, students get build_progress.
 BUILD_RAW=''
+# Where the progress meter's reader and its animator meet. Keyed by TUNNEL_ID like the rest,
+# so two instances on one machine do not redraw each other's bar. See meter_start.
+METER_STATE="${TMPDIR:-/tmp}/cs193v-meter-$TUNNEL_ID"
+METER_PID=''
 TUNNEL_CTL="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.ctl"
 TUNNEL_PID="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.pid"
 TUNNEL_LOG="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.log"
@@ -787,6 +904,10 @@ build_image() {
     [ "${1:-}" = "--no-cache" ] && { nocache='--no-cache'; tries=1; }
     hash="$(build_hash)"
     info "$(msg status.building IMAGE="$LOCAL_IMAGE")"
+    # Started before podman, with no total yet: on a cold build the base-image pull comes
+    # first and there is no step count to show until STEP 1 arrives. build_progress fills
+    # both in as it reads.
+    [ -n "$BUILD_RAW" ] || meter_start 0 ""
 
     # THE RETRY LIVES HERE, not in the installer, and that placement is the point. This
     # build reaches seven separate network origins -- the Ubuntu archive, NodeSource,
@@ -825,6 +946,9 @@ build_image() {
                     -t "$LOCAL_IMAGE" -f "$CONTAINERFILE" "$PRIVATE" 2>&1 \
                 | tee "$BUILD_LOG" | build_progress
         fi
+        # The meter deliberately stays RUNNING on success: create_container is the next
+        # step and shares this bar (issue #24), so the line is closed by verb_build rather
+        # than here.
         [ "${PIPESTATUS[0]}" -eq 0 ] && return 0
 
         # OUT OF DISK IS READ FROM PODMAN'S MESSAGE, not inferred from free space, and that
@@ -837,6 +961,7 @@ build_image() {
         #
         # It also must not be retried: retrying only spends the student's time twice to
         # arrive at the same wall.
+        meter_stop
         if grep -qi 'no space left on device' "$BUILD_LOG" 2>/dev/null; then
             die "$(msg err.build-no-disk)"
         fi
@@ -848,6 +973,7 @@ build_image() {
             die "$(msg err.build-failed OUT="$(tail -n 12 "$BUILD_LOG" 2>/dev/null)")"
         attempt=$(( attempt + 1 ))
         warn "$(msg warn.build-retry ATTEMPT="$attempt" TRIES="$tries")"
+        [ -n "$BUILD_RAW" ] || meter_start 0 ""
     done
 }
 
@@ -1542,6 +1668,7 @@ verb_print_command() {
 verb_build() {
     preflight
     build_image "${1:-}"
+    meter_stop
     OVERRIDE_IMAGE="$LOCAL_IMAGE"
     load_args; resolve_image
     remove_container

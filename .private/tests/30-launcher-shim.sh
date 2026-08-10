@@ -713,18 +713,32 @@ assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --build)"
 # Everything above runs with stdout redirected, where both indicators deliberately fall
 # back to plain lines. The redraw-in-place behaviour only exists on a pty, so it can only
 # be seen from one -- and it is the whole point of #23 and #24.
-CR="$(printf '\r')"
 shim_new
 shim_set state absent
 raw="$(launcher_tty '' --build)"
-# A carriage return before the bar is what "one line that moves" means. Without it this
-# would be 23 lines of bar scrolling past, which is not obviously better than 23 STEP lines.
-assert_contains "build:bar-redraws-in-place-on-a-terminal" "$CR  [" "$raw"
-# #24: the creation step animates rather than sitting silent. One frame is enough to prove
-# it is wired up -- against the fake podman `run` returns at once, and a real one is what
-# makes it spin. The frame is drawn before the first poll for exactly this reason.
-assert_contains "build:creation-step-animates-on-a-terminal" \
-                "${CR}Setting up the course container" "$raw"
+
+# "One line that moves" means the bar is drawn AFTER a carriage return -- without that it
+# would be 23 bars scrolling past, which is not obviously better than 23 STEP lines.
+#
+# Asserted as "some \r-delimited segment contains a bar" rather than by matching a literal
+# "\r  [". The prefix is not the property: the meter now draws an animation frame between
+# the margin and the bracket, so a literal needle pinned the layout rather than the
+# behaviour and broke on a change that kept the behaviour intact.
+redrawn() {                           # redrawn NEEDLE  <- transcript on stdin
+    python3 -c '
+import sys, re
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+needle = sys.argv[1]
+segs = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s) for s in raw.split("\r")[1:]]
+print("yes" if any(needle in s for s in segs) else "no")' "$1"
+}
+assert_eq "build:bar-redraws-in-place-on-a-terminal" "yes" \
+          "$(printf '%s' "$raw" | redrawn '[█')"
+# The creation step animates rather than sitting silent. One frame is enough to prove it is
+# wired up -- against the fake podman `run` returns at once, and a real one is what makes it
+# spin. The frame is drawn before the first poll for exactly this reason.
+assert_eq "build:creation-step-animates-on-a-terminal" "yes" \
+          "$(printf '%s' "$raw" | redrawn 'Setting up the course container')"
 
 # --- one line, and the setup step is part of it -------------------------------
 # Asserted against the rendered SCREEN, not the byte stream. A \r-redrawn bar appears in the
@@ -764,3 +778,52 @@ fi
 bars="$(printf '%s\n' "$screen" | grep -c '\[█\|\[░' || true)"
 assert_eq "build:exactly-one-progress-bar-on-screen" "1" "${bars:-0}"
 
+
+# --- ISSUE 2: something must move while a step is in progress ------------------
+# The bar advances only when podman finishes a step, and the slow steps (Chromium,
+# Playwright) hold one frame for minutes. A meter that sits perfectly still for that long
+# reads as a hang, which is the thing the whole feature exists to prevent.
+#
+# NOT TESTABLE FROM THE NON-TTY FORM, and not testable from a build that finishes at once
+# either -- with every line available immediately there is no interval during which a step
+# is "in progress". build_delay makes podman dribble its output out so there is.
+shim_new
+shim_set state absent
+shim_set build_delay 0.4
+shim_set build_out 'STEP 1/2: FROM ubuntu:26.04
+STEP 2/2: RUN something-slow
+COMMIT localhost/cs193v:local
+Successfully tagged localhost/cs193v:local'
+raw="$(launcher_tty '' --build)"
+
+# Braille, because the frames have to be distinguishable from each other at a glance and
+# from the ASCII / - \ | spinner this replaced.
+frames="$(printf '%s' "$raw" | python3 -c '
+import sys
+s = sys.stdin.buffer.read().decode("utf-8", "replace")
+seen = []
+for ch in s:
+    if 0x2800 <= ord(ch) <= 0x28FF and ch not in seen:
+        seen.append(ch)
+print("".join(seen))')"
+if [ -n "$frames" ]; then
+    pass "build:animation-uses-braille-frames"
+    record "build:frames-observed" "$frames"
+else
+    fail "build:animation-uses-braille-frames" "no U+2800-U+28FF glyph anywhere in the output"
+fi
+
+# The real assertion: it ADVANCES. One frame proves a character was printed; several
+# distinct ones prove something is redrawing while podman is still working on a step.
+nframes="$(printf '%s' "$frames" | python3 -c 'import sys; print(len(sys.stdin.read().strip()))')"
+if [ "${nframes:-0}" -ge 3 ]; then
+    pass "build:animation-advances-while-a-step-is-slow"
+else
+    fail "build:animation-advances-while-a-step-is-slow" \
+         "only ${nframes:-0} distinct frame(s); a still meter is the failure being tested for"
+fi
+
+# And the ASCII spinner must be gone rather than merely unused -- a frame table left behind
+# is what the next person copies.
+assert_eq "build:no-ascii-spinner-frames-remain" "0" \
+          "$(grep -c "ch='|'" "$REPO/cs193v" || true)"
