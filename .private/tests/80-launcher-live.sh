@@ -133,8 +133,15 @@ assert_eq "live:20-launches-still-one-container" "1" "$(ours_running)"
 assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect "$NAME" --format '{{.Id}}')"
 
 # Four shells at once is legitimate and common — one per terminal window.
-for i in 1 2 3 4; do ( LB >/dev/null 2>&1 & ) ; done
-sleep 6
+#
+# `LB &`, not `( LB & )`, and then `wait`. The four still run concurrently, which is the whole
+# point of the test; what changes is that they are this shell's own children, so the kernel
+# tells us when the last one is done instead of us guessing six seconds. Same reasoning as
+# close_client in 60-container.sh — and it removes a failure the fixed sleep could produce on a
+# loaded machine, where a fourth launch still in flight when the count is taken looks exactly
+# like a launcher that created a second container.
+for i in 1 2 3 4; do LB >/dev/null 2>&1 & done
+wait
 assert_eq "live:concurrent-launches-still-one-container" "1" "$(ours_running)"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
@@ -360,13 +367,11 @@ record "tunnel:control-socket" "${CTL:-<none>}"
 clean_vt_processes
 podman exec -d "$NAME" python3 -m http.server 3000 --bind 127.0.0.1 >/dev/null 2>&1
 srv_code=000
-i=0
-while [ "$i" -lt 50 ]; do
+srv_answered() {                      # 0 once anything at all comes back from :3000
     srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3000/)"
-    [ "$srv_code" = 000 ] || break
-    sleep 0.1
-    i=$((i + 1))
-done
+    [ "$srv_code" != 000 ]
+}
+wait_until 5 srv_answered || true
 # One last attempt with the original's patience, so a 2 s timeout cannot be what fails this.
 [ "$srv_code" = 200 ] || \
     srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3000/)"

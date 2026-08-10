@@ -124,9 +124,13 @@ done
 # After a Mac wakes from sleep, `podman info` hangs rather than failing
 # (containers/podman#21675). Every probe is timeout-wrapped so the launcher says something
 # instead of looking frozen. The point of this test is the elapsed time.
+# ONE hanging launch, not two. The elapsed time IS the assertion here, so the wait itself is
+# not negotiable — but it used to be paid twice, once for the clock and once again for the
+# message, and a single run yields the elapsed time, the exit status and the output together.
+# All three assertions below are unchanged; what is gone is the second eleven-second wait.
 shim_new; shim_touch hang
 T0="$(date +%s)"
-rc="$(launcher_rc)"
+out="$(launcher)"; rc=$?
 T1="$(date +%s)"
 ELAPSED=$((T1 - T0))
 assert_eq "hang:exits-nonzero" "1" "$rc"
@@ -136,8 +140,7 @@ else
     fail "hang:returns-in-seconds-not-minutes" "took ${ELAPSED}s"
 fi
 record "hang:elapsed-seconds" "$ELAPSED"
-shim_new; shim_touch hang
-assert_says "hang:message-says-not-responding" "not responding" "$(launcher)"
+assert_says "hang:message-says-not-responding" "not responding" "$out"
 
 # ─── rootless and reachability ─────────────────────────────────────────────────
 # --userns=keep-id is a HARD ERROR on a rootful connection, not a no-op, so this must be

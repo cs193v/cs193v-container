@@ -108,6 +108,11 @@ else
   hx_fail "session starts and the tab bar is visible" "screen: $(hx_cap "$S" | head -3)"
   hx_summary "tmux"; exit 1
 fi
+# A DURATION, deliberately. What comes next reads `show-messages` and asserts it holds NO
+# config errors, and an error the server has not got round to reporting yet would satisfy that
+# just as well as an error-free config does. There is no positive condition to poll for when
+# the expected answer is "nothing arrived", so this waits for a while instead. See the note on
+# hx_until in lib.sh for the general rule.
 hx_settle 1.5
 
 # A tmux config error does not abort the server -- it is reported in show-messages and shown
@@ -323,7 +328,12 @@ for spec in "REQ:CTRL+T (a plain control byte -- every terminal):$KEY_CTRL_T" \
             "INFO:CSI-u (kitty keyboard protocol):$KEY_ALT_T_CSIU"; do
   tier="${spec%%:*}"; rest="${spec#*:}"; label="${rest%:*}"; hex="${rest##*:}"
   before="$(probe_wincount)"
-  hx_hex "$S" "$hex"; hx_settle 1.2
+  hx_hex "$S" "$hex"
+  # 2 s where the fixed sleep was 1.2. The ceiling is only reached by an encoding tmux does
+  # NOT parse -- which is a deliberate INFO case in this list -- so the two that must work
+  # return in a few tens of milliseconds and the one that must not gets MORE patience than
+  # before, not less.
+  hx_until_ne 'probe_wincount' "$before" 2
   after="$(probe_wincount)"
   if [ "$after" -gt "$before" ]; then
     hx_pass "ALT+T opens a tab via $label"
@@ -367,7 +377,7 @@ if loc="$(hx_find "$S" "+ NEW TAB")"; then
   set -- $loc
   before="$(probe_wincount)"
   hx_click "$S" "$1" "$(($2 + 2))"
-  hx_settle 1.5
+  hx_until_ne 'probe_wincount' "$before" 6
   after="$(probe_wincount)"
   if [ -n "$after" ] && [ "$after" -gt "$before" ]; then
     hx_pass "clicking the + NEW TAB chip opens a tab ($before -> $after)"
@@ -396,7 +406,8 @@ for spec in "REQ:SHIFT+arrow, CSI 1;2 (every mainstream terminal):$KEY_SHIFT_LEF
   for dir in LEFT RIGHT; do
     [ "$dir" = LEFT ] && hex="$lhex" || hex="$rhex"
     p0="$(probe_win)"
-    hx_hex "$S" "$hex"; hx_settle 1
+    hx_hex "$S" "$hex"
+    hx_until_ne 'probe_win' "$p0" 2      # 2 s ceiling; see the note in the new-tab loop above
     p1="$(probe_win)"
     if [ "$p1" != "$p0" ] && [ -n "$p1" ]; then
       hx_pass "ALT+$dir switches tab via $label ($p0 -> $p1)"
@@ -412,21 +423,35 @@ hx_expect_eq "tabs are numbered from 1, not 0" "$(it list-windows -t cs193v -F '
 # ============================================================================
 hx_section "tabs are labeled with the running process"
 hx_cmd "$S" "$(hx_fake_run claude 300)"
-hx_settle 3
+hx_until 'probe_name' claude 8
 hx_expect_eq "tab label follows the running process automatically" "$(probe_name)" "claude"
 
 # Both labels must be visible at once -- the point of R3 is seeing what is in the tab you are
 # NOT looking at.
-hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"; hx_settle 1.2
+w0="$(probe_win)"
+hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"
+hx_until_ne 'probe_win' "$w0" 6
 hx_use_fixture "$S" "$FAKEBIN" claude
 hx_cmd "$S" "python3"
-hx_settle 3
+# WAIT FOR THE REPL, NOT FOR ITS LABEL, because a keystroke is sent to it below.
+#
+# /etc/cs193v/tabname.bash renames the window from bash's DEBUG trap, which fires when the
+# command line is SUBMITTED -- before the fork, let alone before python is ready to read. So
+# `hx_until 'probe_name' python3` is satisfied in about fifty milliseconds and says nothing
+# about whether anything is listening yet. The CTRL+D below then lands in the gap and is lost,
+# and the label never reverts. Measured exactly that, but only with both test lanes running:
+# on an idle machine python3 wins the race and the bug is invisible.
+#
+# The label is still the right thing to wait for at the sites that only ASSERT on the label.
+# It is the wrong thing anywhere the next step types at the program.
+hx_wait "$S" '>>>' 10 || true
 bar="$(hx_cap "$S" | sed -n 2p)"
 hx_expect_contains "tab bar shows the other tab's process (claude)" "$bar" "claude"
 hx_expect_contains "tab bar shows this tab's process (python3)" "$bar" "python3"
 hx_note "tab bar: [$bar]"
 
-hx_hex "$S" "$KEY_CTRL_D"; hx_settle 2.5
+hx_hex "$S" "$KEY_CTRL_D"
+hx_until 'probe_name' bash 8
 hx_expect_eq "tab label reverts to 'bash' when the process exits" "$(probe_name)" "bash"
 
 # FORK: THE REASON THE HOOK IS NOT OPTIONAL HERE.
@@ -441,7 +466,10 @@ hx_expect_eq "tab label reverts to 'bash' when the process exits" "$(probe_name)
 # which is why /etc/cs193v/tabname.bash lists `claude`. The positive half is asserted in the
 # hook section below.
 hx_cmd "$S" "claude-npm"
-hx_settle 3
+# Which name appears is the question being asked, so there is nothing to poll FOR -- only
+# something to poll away from. Any of node / claude-npm / something else is a result; "bash"
+# means the command has not started yet.
+hx_until_ne 'probe_name' bash 6
 wrapname="$(probe_name)"
 if [ "$wrapname" = "node" ]; then
   hx_pass "an unlisted node script is labeled 'node' (which is why 'claude' is on the list)"
@@ -451,7 +479,7 @@ else
   hx_skip "a script-based claude is labeled '$wrapname' -- /proc reports the interpreter, not the script"
   hx_note "if claude ships as a node script, use the automatic-rename-format override noted in README.md"
 fi
-hx_hex "$S" "03"; hx_settle 1
+hx_hex "$S" "03"; hx_until 'probe_name' bash 6
 
 # ============================================================================
 hx_section "R3/R6  tab bar legibility and clickability"
@@ -461,7 +489,7 @@ if loc="$(hx_find "$S" "claude")"; then
   set -- $loc
   before="$(probe_win)"
   hx_click "$S" "$1" "$2"
-  hx_settle 1.2
+  hx_until_ne 'probe_win' "$before" 6
   if [ "$(probe_win)" != "$before" ] && [ "$(probe_name)" = "claude" ]; then
     hx_pass "clicking a tab name switches to that tab"
   else
@@ -477,7 +505,7 @@ for target in "the tab bar:10:1" "inside the terminal:20:12"; do
   before="$(probe_struct)"
   hx_str "$S" "$(printf '\033[<2;%d;%dM' "$cx" "$cy")"
   hx_str "$S" "$(printf '\033[<2;%d;%dm' "$cx" "$cy")"
-  hx_settle 1
+  hx_settle 1                         # a DURATION: the claim is that NO menu opened
   scr="$(hx_cap "$S")"
   if [ "$(probe_struct)" = "$before" ] &&
      ! printf '%s' "$scr" | grep -qE 'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename'; then
@@ -492,16 +520,21 @@ hx_section "R5/R6  scrollback, mouse wheel, and the copy-mode trap"
 # Run this on a FRESH tab. The R3 tests above left a 300-second `claude` fixture running in the
 # current tab, and typing a shell loop into a sleeping process produces no output at all -- which
 # looks exactly like "scrollback is broken" but is really the test aiming at the wrong pane.
+n0="$(probe_wincount)"
 hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
-hx_settle 1.5
+# Wait for the WINDOW before waiting for the prompt. `hx_wait '\$'` on its own would be
+# satisfied by the prompt still on screen in the tab we are leaving, so the fixed sleep this
+# replaces was load-bearing in a way that was not obvious -- the poll has to be for the new
+# window existing, and only then for its prompt.
+hx_until_ne 'probe_wincount' "$n0" 6
 hx_wait "$S" '\$' 8 || true
 hx_cmd "$S" 'for i in $(seq 1 400); do echo "LINE_$i"; done'
 hx_wait "$S" 'LINE_400' 15 || true
-hx_settle 1
 hx_expect_contains "output reaches the bottom of the buffer" "$(hx_cap "$S")" "LINE_400"
 
 hx_wheel_up "$S" 15 40 12
-hx_settle 1.2
+hx_until 'probe_mode' 1 6
+hx_wait "$S" 'SCROLLED BACK' 6 || true
 scrolled="$(hx_cap "$S")"
 if printf '%s' "$scrolled" | grep -qE 'LINE_(2[0-9][0-9]|3[0-4][0-9])'; then
   hx_pass "mouse wheel scrolls back through history"
@@ -527,7 +560,10 @@ hx_check_colors "$S" "scrolled-back message" --grep "SCROLLED BACK" --require-ex
 hx_expect_absent "the notice does not squat on the tab bar" "$(hx_cap "$S" | sed -n 2p)" "SCROLLED BACK"
 
 # ...and it clears itself a few seconds after the last scroll, with no keypress from the student.
-sleep 4.5
+# hx_gone, not a fixed sleep: the notice expiring IS the thing being waited for, so polling for
+# it is the assertion's own condition rather than a guess at how long `-d 3000` takes. A notice
+# that never expires still fails, at the ceiling, exactly as the 4.5 s sleep made it fail.
+hx_gone "$S" 'SCROLLED BACK' 8 || true
 hx_expect_absent "the notice disappears on its own (~3s)" "$(hx_cap "$S" | head -2)" "SCROLLED BACK"
 hx_expect_contains "the title bar returns once the notice expires" \
                    "$(hx_cap "$S" | sed -n 1p)" "$TITLE"
@@ -537,7 +573,8 @@ hx_expect_eq "the pane is still scrolled back after the notice expires" "$(probe
 # The three allowed actions must still work while scrolled back, or the tab bar goes dead the
 # moment a student brushes the wheel.
 before="$(probe_win)"
-hx_hex "$S" "$KEY_ALT_RIGHT_ESCPREFIX"; hx_settle 1.2
+hx_hex "$S" "$KEY_ALT_RIGHT_ESCPREFIX"
+hx_until_ne 'probe_win' "$before" 6
 if [ "$(probe_win)" != "$before" ] && [ "$(probe_mode)" = "0" ]; then
   hx_pass "ALT+RIGHT still switches tabs while scrolled back (and leaves the mode)"
 else
@@ -546,21 +583,25 @@ else
 fi
 
 # THE TRAP TEST: after scrolling up, any keystroke must return to a live prompt.
-hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"; hx_settle 1.2
-hx_wheel_up "$S" 15 40 10; hx_settle 1
+w0="$(probe_win)"
+hx_hex "$S" "$KEY_ALT_LEFT_ESCPREFIX"
+hx_until_ne 'probe_win' "$w0" 6
+hx_wheel_up "$S" 15 40 10
+hx_until 'probe_mode' 1 6
 hx_expect_eq "wheel-up put the pane in a mode (as tmux does)" "$(probe_mode)" "1"
 hx_str "$S" "x"
-hx_settle 1
+hx_until 'probe_mode' 0 6
 if [ "$(probe_mode)" = "0" ]; then
   hx_pass "typing any key escapes the scrollback view (no dead-end)"
 else
   hx_fail "typing any key escapes the scrollback view" "pane is still in a mode"
 fi
-hx_hex "$S" "15"; hx_settle 0.5
+hx_hex "$S" "15"; hx_settle 0.5       # Ctrl+U clears the line; nothing observable to poll for
 
-hx_wheel_up "$S" 15 40 6; hx_settle 0.8
+hx_wheel_up "$S" 15 40 6
+hx_until 'probe_mode' 1 6
 hx_wheel_down "$S" 15 40 25
-hx_settle 1.2
+hx_until 'probe_mode' 0 6
 hx_expect_contains "wheel scrolls forward back to the live prompt" "$(hx_cap "$S")" "LINE_400"
 hx_expect_eq "scrolling to the bottom exits the mode automatically" "$(probe_mode)" "0"
 
@@ -571,8 +612,12 @@ hx_expect_eq "scrollback depth is configured" \
 hx_section "R6  clipboard: selection reaches the host via OSC 52"
 hx_tmux set-buffer -b probe "" 2>/dev/null || true
 hx_cmd "$S" 'clear; echo COPYME_XYZ'
-hx_wait "$S" 'COPYME_XYZ' 8 || true
-hx_settle 0.8
+# WAIT FOR THE OUTPUT, NOT FOR THE ECHO. `hx_wait "$S" 'COPYME_XYZ'` matches the moment the
+# command line is TYPED -- the needle is in what the shell echoes back -- so hx_find below
+# then locates the text on the prompt row, `clear` wipes that row, and the drag selects
+# nothing. A 0.8 s settle used to hide this by outlasting the race; on a slower machine it
+# would not have. Dropping the command line from the capture makes the wait mean what it says.
+hx_until_ok "hx_cap $S | grep -v 'clear;' | grep -q COPYME_XYZ" 8
 if loc="$(hx_find "$S" "COPYME_XYZ")"; then
   set -- $loc
   row="$1"; col="$2"
@@ -581,7 +626,7 @@ if loc="$(hx_find "$S" "COPYME_XYZ")"; then
     hx_str "$S" "$(printf '\033[<32;%d;%dM' "$c" "$row")"
   done
   hx_str "$S" "$(printf '\033[<0;%d;%dm' "$((col + 10))" "$row")"
-  hx_settle 1.5
+  hx_until_ok "hx_tmux show-buffer 2>/dev/null | grep -q COPYME" 6
   if hx_tmux show-buffer 2>/dev/null | grep -q 'COPYME'; then
     hx_pass "drag-selection copies to the host clipboard via OSC 52"
   else
@@ -600,7 +645,7 @@ if loc="$(hx_find "$S" "COPYME_XYZ")"; then
   hx_expect_absent "a selection drag never mentions scrolling" "$chrome" "SCROLLED BACK"
   hx_expect_contains "the copy notice points at SHIFT+drag as the alternative" "$chrome" "SHIFT"
   hx_check_colors "$S" "copy notice" --grep "COPIED" --require-explicit
-  sleep 3
+  hx_gone "$S" 'COPIED' 8 || true
   hx_expect_absent "the copy notice expires on its own too" "$(hx_cap "$S" | head -2)" "COPIED"
 else
   hx_fail "drag-selection copies to the host clipboard via OSC 52" "could not find COPYME_XYZ"
@@ -628,8 +673,9 @@ hx_expect_eq "no stray key left the pane in a mode" "$(probe_mode)" "0"
 
 # ============================================================================
 hx_section "R3  the tab bar under stress"
+n0="$(probe_wincount)"
 for _ in $(seq 1 10); do hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"; done
-hx_settle 3
+hx_until 'probe_wincount' "$((n0 + 10))" 10
 n="$(probe_wincount)"
 hx_note "$n tabs open; bar: [$(hx_cap "$S" | sed -n 2p)]"
 if [ "$n" -ge 10 ]; then
@@ -647,7 +693,9 @@ hx_check_colors "$S" "tab bar with $n tabs" --rows 1
 # columns and is NOT gated, because it is the only mouse route to a new tab and must survive
 # at any size -- but the tab names still have to be visible alongside it.
 hx_tmux resize-window -t "$S" -x 40 -y 20 2>/dev/null || true
-hx_settle 2.5
+# The outer resize returns immediately; what has to be waited for is the INNER tmux noticing
+# its pty changed size and redrawing the bar at the new width. Ask the inner server.
+hx_until 'it display-message -p -t cs193v "#{window_width}"' 40 6
 narrow="$(hx_cap "$S" | sed -n 2p)"
 hx_note "at 40 columns: [$narrow]"
 hx_expect_contains "at 40 columns the tab count still shows" "$narrow" "TAB"
@@ -658,7 +706,7 @@ else
   hx_fail "at 40 columns tab names are still visible" "the chrome is crowding out the tabs"
 fi
 hx_tmux resize-window -t "$S" -x "$HX_W" -y "$HX_H" 2>/dev/null || true
-hx_settle 2
+hx_until 'it display-message -p -t cs193v "#{window_width}"' "$HX_W" 6
 
 # ============================================================================
 hx_section "R7  exit closes the tab; last exit ends the session"
@@ -666,12 +714,13 @@ hx_section "R7  exit closes the tab; last exit ends the session"
 # fresh bash prompt) and type `exit`. Testing it on whatever tab happens to be focused is
 # unreliable -- earlier tests leave a python3 REPL behind, and a REPL ignores both `exit`
 # (it just prints "Use exit() or Ctrl-D") and Ctrl+C.
+n0="$(probe_wincount)"
 hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
-hx_settle 1.5
+hx_until_ne 'probe_wincount' "$n0" 6      # the window, then its prompt -- see the R5 section
 hx_wait "$S" '\$' 8 || true
 before="$(probe_wincount)"
 hx_cmd "$S" 'exit'
-hx_settle 1.5
+hx_until 'probe_wincount' "$((before - 1))" 8
 after="$(probe_wincount)"
 if [ -n "$after" ] && [ "$after" -lt "$before" ]; then
   hx_pass "typing 'exit' closes the current tab ($before -> $after)"
@@ -685,8 +734,9 @@ closed=0
 guard=0
 while [ "$(probe_wincount)" -gt 1 ] && [ "$guard" -lt 40 ]; do
   before="$(probe_wincount)"
-  hx_hex "$S" "03"; hx_settle 0.3        # interrupt anything running
-  hx_hex "$S" "$KEY_CTRL_D"; hx_settle 0.8
+  hx_hex "$S" "03"; hx_settle 0.3        # interrupt anything running -- nothing to poll for
+  hx_hex "$S" "$KEY_CTRL_D"
+  hx_until_ne 'probe_wincount' "$before" 2
   after="$(probe_wincount)"
   [ -n "$after" ] && [ "$after" -lt "$before" ] && closed=$((closed + 1))
   guard=$((guard + 1))
@@ -697,7 +747,11 @@ if [ "$(probe_wincount)" = "1" ]; then
   # Issue #26 on the way back DOWN, which is the direction nothing else here exercises. A
   # student who opens a second tab and closes it again should get the quiet bar back, not
   # a "1 TAB" badge left behind by a format that only re-evaluated upwards.
-  hx_settle 1.5
+  # Wait for the bar to reach its one-tab STATE, not for a duration. Polling for the absence
+  # of "1 TAB" would be the wrong shape -- it would also be satisfied by a bar caught halfway
+  # through a redraw, which is exactly the reading the two assertions below must not get.
+  # "+ NEW TAB and nothing else" is the positive form of the same condition.
+  hx_until 'hx_cap "$S" | sed -n 2p | tr -d " "' '+NEWTAB' 6
   bar="$(hx_cap "$S" | sed -n 2p)"
   hx_expect_absent "the tab count goes away again when tabs are closed" "$bar" "1 TAB"
   hx_expect_absent "the tab labels go away again when tabs are closed" "$bar" "bash"
@@ -706,7 +760,7 @@ else
 fi
 
 hx_cmd "$S" 'exit'
-hx_settle 3
+hx_until_ok '! it has-session -t cs193v 2>/dev/null' 8
 if it has-session -t cs193v 2>/dev/null; then
   hx_fail "closing the last tab ends the session" "the session is still alive"
 else
@@ -775,6 +829,7 @@ done
 hx_start "$S2" "env PATH=$FAKESUDO:\$PATH tmux -L $SOCK2H -f $CONF new-session -s cs193v"
 if hx_wait "$S2" '\+ NEW TAB' 12; then
   probe_name2() { it2 display-message -p -t cs193v '#{window_name}' 2>/dev/null; }
+  probe_wincount2() { it2 list-windows -t cs193v 2>/dev/null | wc -l | tr -d ' '; }
 
   # FORK, AND IT COST AN ENTIRE FAILING SECTION TO FIND.
   #
@@ -790,16 +845,15 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   # This is the same idiom hx_use_fixture uses for the claude fixture, and for the same
   # underlying reason.
   hx_cmd "$S2" "export PATH=$FAKESUDO:\$PATH; hash -r"
-  hx_settle 0.8
   hx_cmd "$S2" "command -v sudo"
-  hx_settle 0.8
+  hx_until_ok "hx_cap $S2 | grep -qF '$FAKESUDO/sudo'" 6
   hx_expect_contains "the fake tools win the PATH lookup inside the pane" \
                      "$(hx_cap "$S2")" "$FAKESUDO/sudo"
 
   hx_cmd "$S2" "sudo python3 -c 'import time; time.sleep(30)'"
-  hx_settle 2.5
+  hx_until 'probe_name2' 'sudo python3' 8
   hx_expect_eq "a wrapper command shows the real command too" "$(probe_name2)" "sudo python3"
-  hx_hex "$S2" "03"; hx_settle 1.5
+  hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
   hx_expect_eq "the label returns to the shell at the prompt" "$(probe_name2)" "bash"
 
   # The hook must reach tabs created later, not just the first one. This is the assertion
@@ -809,20 +863,27 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   #
   # PATH has to be re-claimed in the new tab too: it is a fresh login shell, so /etc/profile
   # has reset it again.
-  hx_hex "$S2" "$KEY_ALT_T_ESCPREFIX"; hx_settle 3
+  c0="$(probe_wincount2)"
+  hx_hex "$S2" "$KEY_ALT_T_ESCPREFIX"
+  hx_until_ne 'probe_wincount2' "$c0" 6
   hx_cmd "$S2" "export PATH=$FAKESUDO:\$PATH; hash -r"
-  hx_settle 0.8
   hx_cmd "$S2" "sudo python3 -c 'import time; time.sleep(30)'"
-  hx_settle 2.5
+  hx_until 'probe_name2' 'sudo python3' 8
   hx_expect_eq "the hook reaches tabs opened with ALT+T" "$(probe_name2)" "sudo python3"
-  hx_hex "$S2" "03"; hx_settle 1.5
+  hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
 
   # Multi-purpose tools show their subcommand, which is the informative half.
+  # SIXTEEN CALLS, and it used to be the single most expensive thing in this file: 2.2 s + 1.2 s
+  # of fixed sleep each, 54 seconds of the suite spent waiting for something that happens in
+  # about eighty milliseconds. Both waits now poll the label itself, with ceilings four times
+  # longer than the sleeps they replace -- so this is more patient on a slow machine and
+  # roughly free on a fast one. The hx_expect_eq between them is unchanged and is still what
+  # decides the result: a label that never arrives fails here exactly as it always did.
   label_check() { # typed expected
     hx_cmd "$S2" "$1"
-    hx_settle 2.2
+    hx_until 'probe_name2' "$2" 8
     hx_expect_eq "label for \`$1\`" "$(probe_name2)" "$2"
-    hx_hex "$S2" "03"; hx_settle 1.2
+    hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
   }
   label_check "git commit -m 'a message'"              "git commit"
   label_check "npm install express"                    "npm install"
@@ -854,15 +915,20 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   # ("python3 slowpoke.py") never reverted, not even after switching back to it.
   bgwin="$(it2 display-message -p -t cs193v '#{window_index}')"
   hx_cmd "$S2" "python3 -c 'import time; time.sleep(4)'"
-  hx_settle 2
+  hx_until 'probe_name2' python3 8
   hx_expect_eq "the label is pinned while a listed command runs" "$(probe_name2)" "python3"
   hx_hex "$S2" "$KEY_ALT_T_ESCPREFIX"      # switch away while it is still running
-  hx_settle 6.5                            # ...and let it finish in the background
+  # ...and let it finish in the background. The sleep(4) has to elapse whatever we do, so the
+  # win here is only the slack the 6.5 s sleep carried -- but the ceiling is now 12 s, which is
+  # what a machine slow enough to need it would have failed on before.
+  hx_until "it2 display-message -p -t cs193v:$bgwin '#{window_name}'" bash 12
   hx_expect_eq "a background tab's label reverts when its command finishes" \
     "$(it2 display-message -p -t "cs193v:$bgwin" '#{window_name}' 2>/dev/null)" "bash"
   hx_expect_eq "automatic-rename is restored on the background tab" \
     "$(it2 display-message -p -t "cs193v:$bgwin" '#{automatic-rename}' 2>/dev/null)" "1"
-  hx_cmd "$S2" 'exit'; hx_settle 1.5       # close the extra tab this test opened
+  c0="$(probe_wincount2)"                  # close the extra tab this test opened
+  hx_cmd "$S2" 'exit'
+  hx_until 'probe_wincount2' "$((c0 - 1))" 8
 
   # FORK: `claude` IS on the list now, so it can no longer stand in for "a command the hook
   # ignores". That is the single most important divergence in this file, and it is not a
@@ -873,9 +939,9 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   # So the claude case is now a positive assertion, using the fixture rather than the real
   # CLI -- see hx_fake_run for why that must never be a bare command name.
   hx_cmd "$S2" "$(hx_fake_run claude 30)"
-  hx_settle 2.5
+  hx_until 'probe_name2' claude 8
   hx_expect_eq "claude is labeled 'claude', not 'node'" "$(probe_name2)" "claude"
-  hx_hex "$S2" "03"; hx_settle 1
+  hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
   hx_assert_no_real_claude "claude label test"
 
   # ...and something genuinely off the list still goes to tmux's native mechanism, which is
@@ -885,9 +951,9 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   # LESS=FRX, and F means "quit immediately if the content fits one screen", so less on a
   # short file exits before the label can ever be read.
   hx_cmd "$S2" "sleep 20"
-  hx_settle 2.5
+  hx_until 'probe_name2' sleep 8
   hx_expect_eq "a command not on the list is labeled natively" "$(probe_name2)" "sleep"
-  hx_hex "$S2" "03"; hx_settle 1
+  hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
 
   # And the hook must not have smuggled in any extra keybinding. Compared against the count taken
   # at startup, NOT against the original server -- the R7 section above deliberately shut that one

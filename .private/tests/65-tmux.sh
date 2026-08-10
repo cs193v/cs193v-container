@@ -70,7 +70,26 @@ fi
 # by hx_emit in the harness, and are replayed here through pass/fail/skip so that all ~130
 # checks land individually in the project's own report with the project's own counters.
 # Without that the whole suite would collapse to one line and a failure would name nothing.
-podman exec -e HX_TSV="$TSV_IN" "$NAME" bash "$DEST/suite.sh" > "$(new_tmpdir)/suite.log" 2>&1
+# Two optional passthroughs, as a plain string rather than an array: bash 3.2 empty-array
+# expansion under `set -u` is a trap this project already documents, and two flags do not
+# justify the guard idiom.
+#
+#   CS193V_TIMING     -> per-section elapsed, replayed below as record() lines. This is the
+#                        only window into where the slowest suite spends its time: the suite's
+#                        own stdout goes to a temp file and is discarded.
+#   CS193V_TMUX_CONF  -> run against a copy of the config rather than the installed one. That
+#                        is how a deliberately reintroduced bug is checked to still be caught,
+#                        without rebuilding the image. RECORDED when set, so a run that tested
+#                        something other than what the image installs says so in its results
+#                        instead of looking like an ordinary green run.
+HX_ENV=""
+[ -n "${CS193V_TIMING:-}" ] && HX_ENV="$HX_ENV -e HX_TIMING=1"
+if [ -n "${CS193V_TMUX_CONF:-}" ]; then
+    HX_ENV="$HX_ENV -e CS193V_TMUX_CONF=$CS193V_TMUX_CONF"
+    record "tmux:config-under-test" "$CS193V_TMUX_CONF — NOT the installed /etc/cs193v/tmux.conf"
+fi
+# shellcheck disable=SC2086
+podman exec -e HX_TSV="$TSV_IN" $HX_ENV "$NAME" bash "$DEST/suite.sh" > "$(new_tmpdir)/suite.log" 2>&1
 out="$(podman exec "$NAME" cat "$TSV_IN" 2>/dev/null)"
 
 if [ -z "$out" ]; then
@@ -83,6 +102,10 @@ n=0
 # and the counter would come back zero.
 while IFS="$(printf '\t')" read -r status name detail; do
     [ -n "${name:-}" ] || continue
+    # TIME rows are section timings, not checks. They need their own case or the `*)` default
+    # below would report each one as a failure — and they must not be counted as checks either,
+    # or "checks-replayed" would say something different depending on CS193V_TIMING.
+    if [ "$status" = TIME ]; then record "$name" "${detail:-}"; continue; fi
     n=$((n + 1))
     case "$status" in
         PASS) pass "$name" ;;
