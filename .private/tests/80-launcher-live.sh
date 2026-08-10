@@ -38,10 +38,16 @@ restore() {
     # gets that far. Without this, an interrupted live run leaks them into projects/ and the
     # next 60-container.sh run inherits them -- see clean_vt_fixtures for why that lies.
     clean_vt_fixtures
+    # Exactly the same hole, one resource over: the :3000 server further down is reaped by an
+    # inline pkill that only runs if the suite gets that far, so an interrupted run left a
+    # listener on a FORWARDED port and the next 60-container.sh run measured it instead of its
+    # own (#34).
+    clean_vt_processes
     shim_cleanup
 }
 trap restore EXIT INT TERM
 clean_vt_fixtures                     # ...and at START, which is the half a kill cannot skip
+clean_vt_processes                    # a no-op while the container does not exist yet
 
 # L() drives the VERBS, which never open a shell and so work fine with a redirected stdin —
 # they are exactly what the refusal message tells scripts to use. Timeout-wrapped so a
@@ -345,11 +351,27 @@ record "tunnel:control-socket" "${CTL:-<none>}"
 
 # THE test: a server bound to the container's OWN loopback, which was unreachable by design
 # before this change, must answer from the host.
+#
+# Swept FIRST, so 3000 is provably free and a 200 can only have come from the server started
+# here. A leftover wildcard-bound server -- what 70-sighup.sh leaves if it is killed -- passed
+# this assertion while proving the opposite of what it says, since wildcard is the case that
+# always worked (#34). Then poll instead of sleeping: python's http.server writes its "Serving
+# HTTP on ..." line to a discarded stderr, so its readiness is not otherwise observable.
+clean_vt_processes
 podman exec -d "$NAME" python3 -m http.server 3000 --bind 127.0.0.1 >/dev/null 2>&1
-sleep 2
-assert_eq "tunnel:loopback-bound-server-is-reachable" "200" \
-          "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3000/)"
-podman exec "$NAME" pkill -f http.server >/dev/null 2>&1 || true
+srv_code=000
+i=0
+while [ "$i" -lt 50 ]; do
+    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3000/)"
+    [ "$srv_code" = 000 ] || break
+    sleep 0.1
+    i=$((i + 1))
+done
+# One last attempt with the original's patience, so a 2 s timeout cannot be what fails this.
+[ "$srv_code" = 200 ] || \
+    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3000/)"
+assert_eq "tunnel:loopback-bound-server-is-reachable" "200" "$srv_code"
+container_pkill 'http.server 3000'
 
 # A remote forward inverts the direction the whole design rests on, and the SERVER refuses it
 # -- so this holds even if the launcher were changed to ask for one.

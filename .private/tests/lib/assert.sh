@@ -320,6 +320,69 @@ new_tmpdir() {
 # Only the .vt- prefix is ever removed. Nothing else in projects/ is this suite's to delete.
 clean_vt_fixtures() { rm -rf "$REPO"/projects/.vt-* 2>/dev/null || true; }
 
+# ─── the processes the suites start inside the container ────────────────────────
+# NEVER ASK pgrep A QUESTION THROUGH E(). E() wraps its argument in `sh -c "$1"`, so that
+# shell's own command line contains the pattern and `pgrep -f` matches the shell -- the check
+# then answers "a process is running" with nothing running at all. Measured:
+#
+#     $ podman exec cs193v sh -c 'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no'
+#     yes                                     # with no server anywhere, and curl saying 000
+#
+# 70-sighup.sh asked exactly that way, which made its whole alive= column unconditionally
+# "yes" and two assertions unconditionally green (#34). Exec pgrep DIRECTLY instead: it
+# excludes its own pid, and passing the pattern as one argv word leaves no shell to match.
+container_pgrep() {                   # container_pgrep PATTERN -> 0 if anything matches
+    podman exec "$NAME" pgrep -f "$1" >/dev/null 2>&1
+}
+
+# Kill and then WAIT, rather than kill and hope. The suites bind the same ports over and over,
+# and a bind issued while the previous holder is still dying fails -- which used to be silent
+# and is now an assertion, so sampling the teardown would turn a real pass into a flake. Same
+# reasoning as #32: wait for the thing to be gone instead of guessing how long it takes.
+# Measured at 0.35 s here, against the 1-2 s the sleeps it replaces guessed at.
+container_pkill() {                   # container_pkill PATTERN -> returns when nothing matches
+    local i=0
+    podman exec "$NAME" pkill -f "$1" >/dev/null 2>&1 || true
+    while [ "$i" -lt 200 ]; do
+        container_pgrep "$1" || return 0
+        sleep 0.05
+        i=$((i + 1))
+    done
+    return 1                          # 10 s and still there: the caller's assertion will say so
+}
+
+# The process half of clean_vt_fixtures, and it exists for the same reason: an EXIT trap does
+# not run on KILL, so a killed run leaves its servers listening and only start-up cleanup can
+# get rid of them. What that costs is worse than a stray process -- a leftover listener on a
+# forwarded port answers the NEXT run's request, so `ports:...-reach-a-loopback-bound-server`
+# passed with nothing bound to loopback and `ports:not-reachable-from-the-LAN` passed with
+# nothing exposed to the LAN (#34).
+#
+# One marker per thing the suites start, and every pattern is NARROW on purpose: a developer's
+# own dev server in their own container is not this suite's to kill. `http.server 3000` is the
+# port 70-sighup.sh and 80-launcher-live.sh both use, not http.server in general.
+#
+# A no-op when the container is not running: podman exec fails, pkill matches nothing and
+# container_pkill returns immediately. That is what lets 80-launcher-live.sh call it before
+# the launcher has created anything.
+clean_vt_processes() {
+    container_pkill cs193v-portprobe
+    container_pkill inotifywait
+    container_pkill 'http.server 3000'
+}
+
+# How many of them a previous run left behind. Recorded rather than swept silently, so a run
+# that was killed leaves a trace in the results instead of being invisible. Counts PROCESSES,
+# not probes: one abandoned probe accounts for two, its `sh -c` wrapper and the python inside.
+#
+# `pgrep -c` prints 0 AND exits 1 when nothing matches, the same trap run-tests.sh documents
+# for `grep -c`, so take its output and ignore its status.
+count_vt_processes() {
+    local n
+    n="$(podman exec "$NAME" pgrep -cf 'cs193v-portprobe|inotifywait|http\.server 3000' 2>/dev/null | head -1)"
+    printf '%s' "${n:-0}"
+}
+
 # Print the summary when a suite is run directly rather than through run-tests.sh.
 # grep -c prints 0 and exits 1 on no match, so take its output and ignore its status.
 _count() {
