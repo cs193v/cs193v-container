@@ -300,6 +300,37 @@ E() { podman exec "$NAME" sh -c "$1" 2>&1; }
 R() { podman run --rm --entrypoint sh "${TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" -c "$1" 2>&1; }
 I() { podman inspect "$NAME" --format "$1" 2>&1; }
 
+# ─── waiting for something, rather than waiting a while ────────────────────────
+# Three loops in this suite were already hand-rolled versions of this — container_pkill just
+# below, probe_start in 60-container.sh, and the http.server poll in 80-launcher-live.sh —
+# which is the usual sign that the shape belongs in one place.
+#
+# THE CEILING IS NOT THE COST. It is only reached when the thing never happens, which is when
+# the assertion that follows was going to fail anyway. So a ceiling here is set generously
+# larger than the fixed sleep it replaces: more patient than the old wait on a slow machine,
+# and near-free on a fast one. And this never replaces an assertion — every call site still
+# asserts afterwards, so a wait that times out reports the same failure it always did, just
+# later. Nothing here can turn a red check green.
+#
+# WHAT IT MUST NOT BE USED FOR: proving that nothing happened. Polling for an absence returns
+# the instant the thing is absent, which for something that was never present is immediately —
+# so a check that a stray key changed nothing, or that a killed server stayed dead, keeps its
+# fixed sleep. Those are marked at their call sites.
+#
+# CMD is run directly rather than eval'd, so anything with a pipe in it wants a shell function.
+# 20 Hz because that is what container_pkill already polls at and its teardown is measured at
+# 0.35 s; a slower tick would make the commonest wait here worse than it is today.
+wait_until() {                        # wait_until SECS CMD [ARGS...]  -> 0 as soon as CMD succeeds
+    local limit="$1"; shift
+    local i=0 max=$((limit * 20))
+    while [ "$i" -lt "$max" ]; do
+        "$@" && return 0
+        sleep 0.05
+        i=$((i + 1))
+    done
+    return 1
+}
+
 # A scratch directory per suite, cleaned up on exit.
 new_tmpdir() {
     local d
@@ -340,15 +371,11 @@ container_pgrep() {                   # container_pgrep PATTERN -> 0 if anything
 # and is now an assertion, so sampling the teardown would turn a real pass into a flake. Same
 # reasoning as #32: wait for the thing to be gone instead of guessing how long it takes.
 # Measured at 0.35 s here, against the 1-2 s the sleeps it replaces guessed at.
+_container_gone() { ! container_pgrep "$1"; }
 container_pkill() {                   # container_pkill PATTERN -> returns when nothing matches
-    local i=0
     podman exec "$NAME" pkill -f "$1" >/dev/null 2>&1 || true
-    while [ "$i" -lt 200 ]; do
-        container_pgrep "$1" || return 0
-        sleep 0.05
-        i=$((i + 1))
-    done
-    return 1                          # 10 s and still there: the caller's assertion will say so
+    # 10 s and still there: return 1 and let the caller's assertion say so.
+    wait_until 10 _container_gone "$1"
 }
 
 # The process half of clean_vt_fixtures, and it exists for the same reason: an EXIT trap does

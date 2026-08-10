@@ -204,6 +204,23 @@ pty_shell() {                     # pty_shell KEYS -> everything the session pri
 }
 tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 
+# ─── readiness, instead of a guess at how long readiness takes ─────────────────
+# Every one of these replaced a fixed `sleep 6` or `sleep 1`, and they are all POSITIVE
+# conditions -- a client attached, a pane drew something, the session count reached N. See
+# wait_until in lib/assert.sh for why that distinction is the whole rule: a fixed sleep stays
+# wherever the thing being proved is that nothing happened.
+#
+# These also fail FASTER than the sleeps did in the one case that matters. A client that died
+# on the way up used to be measured six seconds later, against a container with nothing in it;
+# now the wait runs out and the assertion names it.
+tmux_client_attached() { [ "$(E "$TM list-clients -F 1" | head -1)" = 1 ]; }
+tmux_sessions_are()    { [ "$(E "$TM list-sessions -F 1" | grep -c .)" = "$1" ]; }
+tmux_unattached()      { [ "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)" = 0 ]; }
+tmux_windows_are()     { [ "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)" = "$1" ]; }
+# A pane that has printed nothing yet is indistinguishable from one whose banner is missing,
+# so the two absence assertions below have to wait for the pane to have drawn SOMETHING.
+tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | tr -d '[:space:]')" ]; }
+
 # A terminal window that stays open, for the tests that then close it.
 #
 # Backgrounded as a PIPELINE, not as `pty_shell ... &`. `$!` after `f &` is the pid of the
@@ -277,11 +294,12 @@ assert_ok "tmux:no-server-survives-the-last-exit" \
 # pane and redrew the box every time. Read from rendered panes, which is redraw-independent.
 tmux_kill_all
 start_client; bclient=$CLIENT_JOB
-sleep 6
+wait_until 30 tmux_client_attached
 w1="$(E "$TM list-windows -F '#{window_id}'" | head -1)"
+wait_until 20 tmux_pane_drawn "$w1"
 E "$TM new-window -d" >/dev/null 2>&1
-sleep 2
 w2="$(E "$TM list-windows -F '#{window_id}'" | tail -1)"
+wait_until 20 tmux_pane_drawn "$w2"
 assert_contains "tmux:first-tab-has-the-banner" "$CS193V_WELCOME" \
                 "$(E "$TM capture-pane -p -t $w1")"
 assert_not_contains "tmux:a-new-tab-does-not-repeat-the-banner" "$CS193V_WELCOME" \
@@ -311,9 +329,9 @@ tmux_kill_all
 # This is the behaviour destroy-unattached off exists for; see ERRORS.md D1.
 tmux_kill_all
 start_client; client=$CLIENT_JOB
-sleep 6
+wait_until 30 tmux_client_attached
 E "$TM new-window -d" >/dev/null 2>&1
-sleep 1
+wait_until 10 tmux_windows_are 2
 first="$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
 # close_client returns only once the client is out of the process table, so everything below
 # is reasoning about a window that is definitively closed rather than one that is probably
@@ -362,12 +380,12 @@ else
     pass "tmux:the-recorded-client-pid-is-really-gone"
 fi
 E "$TM detach-client -s '=$first'" >/dev/null 2>&1
-sleep 1
+wait_until 10 tmux_unattached
 assert_eq "tmux:pruning-frees-the-session" "0" \
           "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
 
 start_client; client2=$CLIENT_JOB
-sleep 6
+wait_until 30 tmux_client_attached
 assert_eq "tmux:relaunch-reattaches-rather-than-creating" "1" \
           "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
 assert_eq "tmux:reattached-session-is-the-same-one" "$first" \
@@ -378,7 +396,7 @@ assert_eq "tmux:reattached-session-kept-its-tabs" "2" \
 # A SECOND concurrent launch must get its OWN session, because the first one's client is
 # attached. CONTAINER-DESIGN.md promises each terminal window its own set of tabs.
 start_client; client3=$CLIENT_JOB
-sleep 6
+wait_until 30 tmux_sessions_are 2
 assert_eq "tmux:second-window-gets-its-own-session" "2" \
           "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
 close_client "$client2"
@@ -480,6 +498,10 @@ assert_eq "pid1:no-zombies-right-now" "0" "$(zcount)"
 # The reaping claim, tested rather than assumed: orphan a process and check PID 1 collects
 # it instead of leaving a zombie.
 E 'setsid sh -c "sleep 0.2 & exit" >/dev/null 2>&1' >/dev/null 2>&1
+# A FIXED SLEEP ON PURPOSE, and one of the few left. The zombie count was already 0 one
+# assertion ago, so `wait_until 10 <count is 0>` would return instantly -- before the orphan
+# had even been created, let alone reaped -- and pass without testing anything. The wait has to
+# outlast the thing appearing as well as the thing being collected, which only a duration can.
 sleep 2
 assert_eq "pid1:reaps-orphans" "0" "$(zcount)"
 
@@ -540,19 +562,18 @@ SPEC="$(sed 's/#.*//' $REPO/.config/container.args \
 # REMOVED FIRST: the file is the one thing here a previous run could have written, and reading
 # a stale "probe ready" would be the very failure this is fixing.
 PROBE_N=0
+probe_reported() {                    # 0 once the probe has written its report line
+    PROBE_REPORT="$(podman exec "$NAME" cat "$PROBE_OUT" 2>/dev/null)"
+    case "$PROBE_REPORT" in probe*) return 0 ;; esac
+    return 1
+}
 probe_start() {                       # probe_start SPEC ADDR -> $PROBE_REPORT
-    local i=0
     PROBE_N=$((PROBE_N + 1))
     PROBE_OUT="/tmp/vt-probe.$PROBE_N"
     podman exec "$NAME" rm -f "$PROBE_OUT" >/dev/null 2>&1 || true
     podman exec -d "$NAME" sh -c \
         "python3 /tmp/cs193v-portprobe.py '$1' '$2' > $PROBE_OUT 2>&1" >/dev/null
-    while [ "$i" -lt 100 ]; do
-        PROBE_REPORT="$(podman exec "$NAME" cat "$PROBE_OUT" 2>/dev/null)"
-        case "$PROBE_REPORT" in probe*) return 0 ;; esac
-        sleep 0.1
-        i=$((i + 1))
-    done
+    wait_until 10 probe_reported && return 0
     PROBE_REPORT="the probe never reported anything in 10 s"
     return 1
 }
@@ -731,9 +752,15 @@ record "files:case-sensitivity" \
 # inotify from INSIDE is the case that matters: in this course the writer is always inside
 # the container, so this is what a dev server's hot reload depends on.
 if E 'command -v inotifywait' >/dev/null 2>&1; then
+    # The `sleep 1` before the write stays a duration: `-q` means inotifywait prints nothing
+    # when the watch is established (deliberately — anything it printed would land in
+    # /tmp/vt-in and make `test -s` pass without an event), so there is nothing to poll for.
+    # The wait AFTER the write is a different matter: the event arriving is exactly the
+    # positive condition, and it is what the assertion then re-checks.
+    watch_fired() { E 'test -s /tmp/vt-in' >/dev/null 2>&1; }
     E 'rm -f /tmp/vt-in'
     podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
-    sleep 1; E 'echo x >> /home/student/projects/.vt-c'; sleep 2
+    sleep 1; E 'echo x >> /home/student/projects/.vt-c'; wait_until 5 watch_fired || true
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then pass "files:inotify-fires-for-container-side-edits"
     else fail "files:inotify-fires-for-container-side-edits" \
               "no event — hot reload will not work even for edits made inside the container"; fi
@@ -742,7 +769,7 @@ if E 'command -v inotifywait' >/dev/null 2>&1; then
     # decides what CONTAINER-DESIGN.md's "known rough edges" must say.
     E 'rm -f /tmp/vt-in'
     podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
-    sleep 1; echo y >> "$REPO/projects/.vt-c"; sleep 3
+    sleep 1; echo y >> "$REPO/projects/.vt-c"; wait_until 5 watch_fired || true
     if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then
         record "files:inotify-for-host-side-edits" "FIRES"
     else

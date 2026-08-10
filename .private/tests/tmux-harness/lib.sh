@@ -86,7 +86,29 @@ hx_fail() {
 }
 hx_skip() { HX_SKIP=$((HX_SKIP + 1)); hx_emit SKIP "$1" "${2:-}"; printf '  %sSKIP%s %s\n' "$C_Y" "$C_0" "$1"; }
 hx_note() { printf '       %s\n' "$1"; }
-hx_section() { printf '\n%s== %s%s\n' "$C_B" "$1" "$C_0"; }
+
+# Section timing, silent unless HX_TIMING is set. This is the only visibility the project has
+# into where its slowest suite spends its time -- the suite's own stdout is written to a temp
+# file by 65-tmux.sh and thrown away, so a number printed here would never be read. The rows
+# go into $HX_TSV instead, and 65-tmux.sh replays them as record() lines.
+#
+# $EPOCHREALTIME is a bash 5 variable and costs no subprocess. This file may use it freely: it
+# runs in the container and never on a TA's Mac, which is the whole reason the directory is
+# exempt from the bash 3.2 rule.
+HX_SECT=''
+HX_SECT_T0=''
+_hx_section_end() {
+  [ -n "${HX_TIMING:-}" ] || return 0
+  [ -n "$HX_SECT" ] || return 0
+  hx_emit TIME "section $HX_SECT" \
+    "$(awk "BEGIN{printf \"%.1fs\", $EPOCHREALTIME - $HX_SECT_T0}")"
+  HX_SECT=''
+}
+hx_section() {
+  _hx_section_end
+  HX_SECT="$1"; HX_SECT_T0="$EPOCHREALTIME"
+  printf '\n%s== %s%s\n' "$C_B" "$1" "$C_0"
+}
 
 hx_expect_contains() { # desc haystack needle
   case "$2" in *"$3"*) hx_pass "$1" ;; *) hx_fail "$1" "expected to find: $3" ;; esac
@@ -99,6 +121,7 @@ hx_expect_eq() { # desc actual expected
 }
 
 hx_summary() { # label
+  _hx_section_end                     # close the last section, which no hx_section follows
   printf '\n%s---- %s: %s%d passed%s, %s%d failed%s, %d skipped ----%s\n' \
     "$C_B" "${1:-results}" "$C_G" "$HX_PASS" "$C_0$C_B" \
     "$([ "$HX_FAIL" -gt 0 ] && echo "$C_R" || echo "$C_G")" "$HX_FAIL" "$C_0$C_B" "$HX_SKIP" "$C_0"
@@ -171,13 +194,92 @@ hx_wheel_down() {
 hx_cap() { hx_tmux capture-pane -p -t "$1" 2>/dev/null; }            # plain text
 hx_cap_ansi() { hx_tmux capture-pane -p -e -t "$1" 2>/dev/null; }    # text + SGR colors
 
+# --- waiting for something, rather than waiting a while ---------------------
+#
+# hx_settle pays its full duration whether the screen settled in 50 ms or not, so every one
+# of them is a guess in two directions at once: too short and the suite flakes on a slower
+# machine, too long and every run pays the difference. But wherever a keystroke has just been
+# injected there IS a positive condition to wait for -- the window count went up, the label
+# changed, the pane left copy mode -- and hx_wait already proves the shape works for the
+# screen. The rest of these do the same for the structure probes.
+#
+# THE TIMEOUT IS NOT THE COST. It is only reached when the thing never happens, which is when
+# the assertion that follows was going to fail anyway. So each ceiling at the call sites is
+# set LARGER than the fixed sleep it replaces: the wait is strictly more patient than the old
+# one on a slow machine and strictly faster on a fast one.
+#
+# And none of these replaces an assertion. Every call site still asserts afterwards against a
+# freshly read probe, so a wait that times out reports exactly the failure it always did --
+# just later. Nothing here can turn a red check green.
+HX_POLL=0.05                          # 20 Hz. A tmux client round trip is ~5 ms.
+
+# Once per wait, not once per poll: awk is the only float arithmetic available and a fork per
+# tick would cost more than the sleep it is timing.
+_hx_polls() { awk "BEGIN{printf \"%d\", ($1) / $HX_POLL}"; }
+
 # Wait until the screen matches an extended regex. Returns 1 on timeout.
 hx_wait() { # session regex [timeout_seconds]
-  local name="$1" re="$2" limit="${3:-8}" i=0 max
-  max="$(awk "BEGIN{printf \"%d\", $limit * 5}")"   # poll 5x/second
+  local name="$1" re="$2" i=0 max
+  max="$(_hx_polls "${3:-8}")"
   while [ "$i" -lt "$max" ]; do
     if hx_cap "$name" | grep -qE "$re"; then return 0; fi
-    sleep 0.2
+    sleep "$HX_POLL"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait until a probe reports an expected value. The probe is a command STRING, evaluated the
+# same way hx_test_forbidden_keys evaluates its own probe argument.
+hx_until() { # 'probe command' expected [timeout_seconds]
+  local cmd="$1" want="$2" i=0 max
+  max="$(_hx_polls "${3:-8}")"
+  while [ "$i" -lt "$max" ]; do
+    [ "$(eval "$cmd" 2>/dev/null)" = "$want" ] && return 0
+    sleep "$HX_POLL"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# ...or until it reports anything other than what it reported before. NON-EMPTY and different,
+# not merely different: a probe answers "" for the moment a window is being created or
+# destroyed, and treating that as the change would return before the thing had happened.
+hx_until_ne() { # 'probe command' baseline [timeout_seconds]
+  local cmd="$1" base="$2" i=0 max out
+  max="$(_hx_polls "${3:-8}")"
+  while [ "$i" -lt "$max" ]; do
+    out="$(eval "$cmd" 2>/dev/null)"
+    [ -n "$out" ] && [ "$out" != "$base" ] && return 0
+    sleep "$HX_POLL"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The general case: wait until a command succeeds. For conditions that are not one probe's
+# value -- "the clipboard contains COPYME", "the session is gone".
+hx_until_ok() { # 'command' [timeout_seconds]
+  local cmd="$1" i=0 max
+  max="$(_hx_polls "${2:-8}")"
+  while [ "$i" -lt "$max" ]; do
+    eval "$cmd" >/dev/null 2>&1 && return 0
+    sleep "$HX_POLL"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The other half of hx_wait: something must go AWAY on its own. ONLY for things that expire by
+# themselves -- the SCROLLED BACK and COPIED notices, which are `display-message -d 3000`.
+# Never for "nothing happened": an absence that was never a presence is not evidence, and the
+# checks that prove a forbidden key did nothing keep their fixed sleep for that reason.
+hx_gone() { # session regex [timeout_seconds]
+  local name="$1" re="$2" i=0 max
+  max="$(_hx_polls "${3:-8}")"
+  while [ "$i" -lt "$max" ]; do
+    hx_cap "$name" | grep -qE "$re" || return 0
+    sleep "$HX_POLL"
     i=$((i + 1))
   done
   return 1
@@ -269,10 +371,13 @@ hx_assert_no_real_claude() { # desc
 # Always claim the name from inside the pane and assert you got the fixture.
 hx_use_fixture() { # session fixture_dir name
   local name_sess="$1" dir="$2" name="$3" out
+  # Both commands are sent without waiting between them: send-keys writes to the pty and the
+  # line discipline queues the second line until the shell asks for it, so the ordering is the
+  # kernel's problem rather than ours. What has to be waited for is the OUTPUT of the second
+  # one, which is the thing the capture below reads.
   hx_cmd "$name_sess" "export PATH=$dir:\$PATH; hash -r"
-  hx_settle 0.5
   hx_cmd "$name_sess" "command -v $name"
-  hx_settle 0.8
+  hx_until_ok "hx_cap $name_sess | grep -qF '$dir/$name'" 6 || true
   out="$(hx_cap "$name_sess")"
   case "$out" in
     *"$dir/$name"*) hx_pass "fixture '$name' resolves to the test copy, not a real install" ;;

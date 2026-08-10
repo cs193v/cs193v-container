@@ -211,8 +211,27 @@ current_hash() {
 repo_copy() {                         # repo_copy -> prints the new directory
     local d
     d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-repo.XXXXXX")"
-    # cp -a of the repo root, excluding .git, which is large and irrelevant here.
-    ( cd "$REPO" && tar cf - --exclude=.git --exclude=./.private/tests . ) | ( cd "$d" && tar xf - )
+    # SNAPSHOT ONCE, on the first call, and serve every later copy from that. Two reasons, and
+    # the second is why it matters now that run-tests.sh runs two lanes:
+    #
+    #   * every copy this suite makes is then of the SAME tree, so a test late in the file
+    #     cannot silently disagree with one early in it about what the repo contains;
+    #   * 80-launcher-live.sh appends a drift flag to $REPO/.config/container.args and takes it
+    #     away again, and it runs in the other lane. A copy taken during that window would
+    #     capture the flag. Nothing in here currently asserts anything that would break — the
+    #     launcher reads the same copied file, so the two agree — but "I could not find an
+    #     assertion it breaks" is not the standard this suite holds itself to elsewhere.
+    #
+    # The first call happens in this suite's first half-minute, while the other lane is still
+    # in the image tier; the live tier cannot start until image, container and tmux are done.
+    if [ -z "${REPO_SNAPSHOT:-}" ]; then
+        REPO_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-snap.XXXXXX")"
+        SHIM_DIRS="${SHIM_DIRS:-} $REPO_SNAPSHOT"
+        # tar, not cp -a: it is the form that can exclude .git, which is large and irrelevant.
+        ( cd "$REPO" && tar cf - --exclude=.git --exclude=./.private/tests . ) \
+            | ( cd "$REPO_SNAPSHOT" && tar xf - )
+    fi
+    cp -a "$REPO_SNAPSHOT/." "$d/"
     SHIM_DIRS="${SHIM_DIRS:-} $d"
     printf '%s' "$d"
 }

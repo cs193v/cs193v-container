@@ -48,6 +48,16 @@ clean_vt_processes
 alive() { container_pgrep 'http.server 3000' && echo yes || echo no; }
 srv_pid() { podman exec "$NAME" pgrep -f 'http.server 3000' 2>/dev/null | head -1; }
 
+# Readiness, in place of the `sleep 3`s that guessed at it. HTTP rather than pgrep: the process
+# existing and the socket being bound are not the same instant, and every measurement below is
+# about a server that ANSWERS. `|| true` at each call site on purpose -- a server that never
+# comes up is itself a result, recorded as alive=no http=000 exactly as the sleep would have.
+#
+# The `sleep 3`s AFTER each kill stay. "It is still alive three seconds later" is a negative,
+# and polling for a negative returns instantly and proves nothing; see wait_until in
+# lib/assert.sh.
+srv_up() { curl -s -o /dev/null --max-time 2 http://127.0.0.1:3000/; }
+
 probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
     local label="$1" cmd="$2"
     cleanup
@@ -55,10 +65,10 @@ probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
     # candidate mechanisms for the server dying.
     script -q -c "podman exec -it ${NAME} sh -c '$cmd'" /dev/null >/dev/null 2>&1 &
     local client=$!
-    sleep 3
+    wait_until 15 srv_up || true
     kill -9 "$client" 2>/dev/null          # <-- the window being closed
     wait "$client" 2>/dev/null || true
-    sleep 3
+    sleep 3                                # a DURATION, deliberately: see srv_up above
 
     PROBE_ALIVE="$(alive)"
     local p ppid fd1 http
@@ -93,9 +103,9 @@ SETSID_ALIVE="$PROBE_ALIVE"
 cleanup
 podman exec "$NAME" sh -c "$SRV" >/dev/null 2>&1 &
 NOTTY_CLIENT=$!
-sleep 3
+wait_until 15 srv_up || true
 kill -9 "$NOTTY_CLIENT" 2>/dev/null; wait "$NOTTY_CLIENT" 2>/dev/null || true
-sleep 3
+sleep 3                                    # a DURATION, deliberately: see srv_up above
 NOTTY_ALIVE="$(alive)"
 record "sighup:no-tty" "alive=$NOTTY_ALIVE"
 MATRIX="$MATRIX
@@ -115,21 +125,23 @@ cleanup
 # this is a documented promise (CONTAINER-DESIGN.md, ERRORS.md D1) that a one-line config
 # change could silently reverse.
 TMX="tmux -L cs193v -f /etc/cs193v/tmux.conf"
+tmux_gone()     { ! podman exec "$NAME" sh -c "$TMX list-sessions" >/dev/null 2>&1; }
+tmux_attached() { [ "$(podman exec "$NAME" sh -c "$TMX list-clients -F 1" 2>/dev/null | head -1)" = 1 ]; }
 cleanup
 podman exec "$NAME" sh -c "$TMX kill-server" >/dev/null 2>&1 || true
-sleep 1
+wait_until 10 tmux_gone
 # Fed a long-running command rather than left with the suite's own stdin. With stdin at EOF
 # the login shell in tab one exits immediately, which closes the tab, which ends the session
 # -- and the probe below would then be measuring a container with no tmux in it at all.
 # `$!` after a pipeline is its LAST element, which is script, so the kill still lands.
 printf 'sleep 600\n' | script -q -c "podman exec -it ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
 TMUX_CLIENT=$!
-sleep 6
+wait_until 30 tmux_attached
 podman exec "$NAME" sh -c "$TMX new-window -d '$SRV'" >/dev/null 2>&1
-sleep 3
+wait_until 15 srv_up || true
 TMUX_BEFORE="$(alive)"
 kill -9 "$TMUX_CLIENT" 2>/dev/null; wait "$TMUX_CLIENT" 2>/dev/null || true
-sleep 4
+sleep 4                                    # a DURATION, deliberately: see srv_up above
 TMUX_ALIVE="$(alive)"
 TMUX_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 record "sighup:in-a-tmux-tab" "before=$TMUX_BEFORE alive=$TMUX_ALIVE http=$TMUX_HTTP"
@@ -177,6 +189,10 @@ assert_eq "sighup:container-survives-the-client-dying" "running" "$(I '{{.State.
 assert_ok "sighup:launcher-can-still-attach" sh -c "podman exec ${NAME} true"
 # Killed clients are the normal case, so their leftovers must be reaped rather than
 # accumulate against pids.max and eventually wedge the container.
+#
+# A DURATION, deliberately. `wait_until <zombie count is low>` would return on the first poll,
+# because the count is already low before the reaping being tested has had to happen — the
+# same vacuity trap as pid1:reaps-orphans in 60-container.sh.
 sleep 2
 # `grep -c` prints 0 AND exits 1 when nothing matches, so a trailing `|| echo 0` in the
 # HOST shell would append a second line and break the integer comparison. Keep the
