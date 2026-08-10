@@ -34,9 +34,14 @@ restore() {
         printf '  (restored $REPO/.config/container.args)\n'
     fi
     rm -rf "$TMP" /tmp/vt-copy 2>/dev/null
+    # .vt-live and .vt-keep below are removed by inline rm lines that only run if the suite
+    # gets that far. Without this, an interrupted live run leaks them into projects/ and the
+    # next 60-container.sh run inherits them -- see clean_vt_fixtures for why that lies.
+    clean_vt_fixtures
     shim_cleanup
 }
 trap restore EXIT INT TERM
+clean_vt_fixtures                     # ...and at START, which is the half a kill cannot skip
 
 # L() drives the VERBS, which never open a shell and so work fine with a redirected stdin —
 # they are exactly what the refusal message tells scripts to use. Timeout-wrapped so a
@@ -107,6 +112,9 @@ assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
        --format '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
 
 # keep-id in practice: a file the container creates is owned by the student on the host.
+# Removed FIRST: this stats whoever owns the file, so a leftover host-owned .vt-live from an
+# earlier run would pass it with the container having written nothing at all (issue #30).
+rm -f "$REPO/projects/.vt-live"
 podman exec "$NAME" sh -c 'echo live > /home/student/projects/.vt-live'
 assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(stat -c %u "$REPO/projects/.vt-live")"
 rm -f "$REPO/projects/.vt-live"
