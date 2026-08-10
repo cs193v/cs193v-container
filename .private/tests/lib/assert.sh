@@ -261,6 +261,40 @@ Build it first:  ./cs193v --build
     fi
 }
 
+# ─── the 46 forwarded host ports ───────────────────────────────────────────────
+# The port list spelled out ONCE. It was in three places, and a fourth was about to be added
+# for require_tunnel below -- which is exactly the drift the launcher's own single CS193V_PORTS
+# declaration exists to avoid.
+CS193V_FWD_RE='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+# grep -c prints 0 AND exits 1 on no match, the trap documented for it elsewhere in this file.
+count_forwards() {
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$CS193V_FWD_RE" || true
+}
+
+# The container tier reaches the container's own loopback THROUGH the tunnel, so it needs the
+# 46 forwards up before it asserts anything about ports.
+#
+# It cannot assume they are: 80-launcher-live.sh now releases the tunnel when it finishes, on
+# purpose, so that a completed run does not sit on 46 ports another developer's run needs. The
+# cost of that is exactly here -- a second run arrives with the container still up and no
+# tunnel -- and paying it with the launcher's own verb is better than leaving a developer to
+# discover it from a wall of red port assertions.
+#
+# HARD-FAILS if they still do not come up, by the same project decision as require_image: a
+# green run must mean the whole thing really ran. The message names the likeliest cause,
+# because it is one nobody can deduce from the assertion that would otherwise fail.
+require_tunnel() {
+    [ "$(count_forwards)" = 46 ] && return 0
+    ( cd "$REPO" && printf 'exit\n' | timeout 90 ./cs193v --reset-tunnel ) >/dev/null 2>&1 || true
+    [ "$(count_forwards)" = 46 ] && return 0
+    fail "require:tunnel" "only $(count_forwards) of the 46 forwarded ports are up, and
+--reset-tunnel did not fix it. Another cs193v instance on this machine is probably holding
+them: CS193V_INSTANCE does not namespace the port list, so the first instance to start wins.
+Check:  ./cs193v doctor        (the 'tunnel ports' line names what is missing)
+        ss -ltnp | grep :3000  (the ssh -i path names the checkout that owns them)"
+    exit 1
+}
+
 require_running() {                   # require_running  -> the container under test is up
     require_podman
     if [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" != running ]; then

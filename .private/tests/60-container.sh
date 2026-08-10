@@ -21,6 +21,10 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
 require_running
+# The port matrix below reaches the container's own loopback through the tunnel, and a
+# back-to-back run arrives with the container up and the tunnel gone -- 80-launcher-live.sh
+# releases it on purpose so a finished run does not sit on 46 ports. See require_tunnel.
+require_tunnel
 cd "$REPO" || exit 1
 
 TMP="$(new_tmpdir)"
@@ -111,9 +115,21 @@ assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | tr -d 
 # The forwards live on the HOST instead, in one ssh process. Loopback-only is now structural
 # rather than a flag that could be forgotten -- the ssh client binds 127.0.0.1 itself -- but it
 # is asserted anyway, because it is what keeps a dev server off dorm wifi.
-fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
-nfwd="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true)"
-assert_eq "ports:46-forwards-on-the-host" "46" "${nfwd:-0}"
+nfwd="$(count_forwards)"
+# Spelled out rather than assert_eq, because "expected 46, actual 0" names neither of the two
+# things that actually cause it, and both are ordinary rather than exotic. 80-launcher-live.sh
+# now RELEASES the tunnel when it finishes, so a container left running by an earlier session
+# has no forwards until somebody launches again; and the 46 ports are not namespaced by
+# CS193V_INSTANCE, so a colleague's instance may simply be holding them.
+if [ "${nfwd:-0}" = 46 ]; then
+    pass "ports:46-forwards-on-the-host"
+else
+    fail "ports:46-forwards-on-the-host" "${nfwd:-0} of 46 are forwarded.
+The container is running but its tunnel is not: the live tier hands the ports back when it
+finishes, so a container from an earlier run has none until the next launch.
+Run:  ./cs193v          (and ./cs193v doctor if they do not come back -- another instance on
+                         this machine may be holding them; see CLAUDE.md)"
+fi
 wild="$(ss -ltn 2>/dev/null | awk '{print $4}' \
         | grep -E ':(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$' \
         | grep -v '^127\.0\.0\.1:' || true)"
