@@ -84,7 +84,7 @@ EOF
 # missing right edge is why that was invisible for so long (issue #21).
 say_intel_mac() {
     printf '\n'
-    box '  ' <<'EOF'
+    box STOP "$C_RED" '  ' <<'EOF'
 
 This Mac has an Intel processor.
 
@@ -164,7 +164,8 @@ BOX_W=71
 # gawk, mawk and busybox awk. Everything the box ever contains is a narrow character;
 # nothing here would survive CJK, and nothing routes CJK to it.
 box() {
-    LC_ALL=C awk -v w="$BOX_W" -v ind="${1:-}" -v red="$C_RED" -v off="$C_OFF" '
+    LC_ALL=C awk -v w="$BOX_W" -v title="${1:-STOP}" -v red="${2-$C_RED}" \
+                 -v ind="${3:-}" -v off="$C_OFF" '
         function dw(s,  t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
         # The first n display columns of s, kept whole: a multibyte character is never
         # sliced down the middle, which is what a byte-wise substr would do.
@@ -211,7 +212,13 @@ box() {
             }
             if (dw(rest) > dw(lead) || dw(text) <= lim) row(rest)
         }
-        BEGIN { lim = w - 4; printf "%s%s┏━━ STOP %s┓%s\n", ind, red, rule(w - 10), off }
+        # "┏━━ " is four columns and " " plus "┓" is two, so the rule takes what a title of
+        # this width leaves. Measured with dw() like everything else, so a title is free to
+        # contain whatever the messages do.
+        BEGIN {
+            lim = w - 4
+            printf "%s%s┏━━ %s %s┓%s\n", ind, red, title, rule(w - 6 - dw(title)), off
+        }
         # A tab has no defined width inside a box, and podman emits them.
         { t = $0; gsub(/\t/, " ", t); put(t) }
         END { printf "%s%s┗%s┛%s\n", ind, red, rule(w - 2), off }
@@ -220,7 +227,7 @@ box() {
 
 die() {
     printf '\n' >&2
-    printf '%s\n' "$*" | box '  ' >&2
+    printf '%s\n' "$*" | box STOP "$C_RED" '  ' >&2
     printf '\n  Nothing further has been changed. Please send all of the text above to\n' >&2
     printf '  course staff — that is exactly what we need to help.\n\n' >&2
     exit 1

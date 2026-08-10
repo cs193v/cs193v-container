@@ -123,6 +123,17 @@ matters more than it used to: the path you exercise every day is now the path a 
 takes on day one, including its retry, its out-of-disk message, and the
 `cs193v.buildhash` label. There is no second implementation to drift.
 
+They differ in exactly one thing, and it is deliberate: **`--dev-build` shows you podman's
+raw output and `--build` shows a progress bar** (issue #23). Debugging a build needs
+podman's words as they arrive; a student needs to know it is moving. So the loop above is
+still the right one for staff, but it is no longer what a student sees — run `--build` in a
+terminal when you are changing anything about how the build *reports itself*, and remember
+that piping it (`| tee`, CI) deliberately switches the bar to one plain line per step.
+
+A failed build no longer leaves podman's output on the screen, so `err.build-failed` now
+carries the last lines of `$BUILD_LOG` inside the STOP box. That log is still the thing to
+ask a student for; it is not deleted on exit.
+
 `--no-cache` retries once only, deliberately — the retry exists because podman keeps
 completed layers, which is exactly what `--no-cache` throws away.
 

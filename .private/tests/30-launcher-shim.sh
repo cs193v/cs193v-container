@@ -614,3 +614,114 @@ assert_contains "args:whitespace-tolerated" "--network=pasta" "$line"
 assert_contains "args:second-flag-kept"     "-e FOO=bar"      "$line"
 assert_not_contains "args:inline-comment-dropped" "trailing"  "$line"
 cp "$SHIM/ca.bak" "$COPY/.config/container.args"
+
+# ─── what --build SHOWS a student  (issues #22, #23, #24) ──────────────────────
+# The build is the longest thing this course asks a student's computer to do, and until
+# now it reported itself entirely in podman's voice: every STEP line with the whole shell
+# command in it, thousands of lines on a cold build, ending -- after `Setting up the course
+# container...` -- with nothing at all. No indication it had worked.
+#
+# WHY NOTHING CAUGHT THIS. There was no coverage of the build's OUTPUT to miss it with. The
+# shim tier asserted that `--build` calls `podman build` (shim_count '^build ') and the live
+# tier asserted the image exists afterwards; both are about what the launcher DOES, and
+# neither reads a line of what the student is shown. The fake podman helped hide it too --
+# its `build` printed a single "Successfully tagged" line, so even a test that had looked at
+# the output would have seen nothing resembling a real build. It emits real STEP lines now.
+shim_new
+shim_set state absent
+COPY="$(repo_copy)"
+LAUNCHER_DIR="$COPY"
+out="$(launcher --build)"
+
+# --- #23: podman's own output must not be what the student reads ---------------
+# The needle is the COMMAND TEXT, not the word STEP: it is the shell being echoed back --
+# `RUN set -eux; apt-get install ...` -- that makes the real thing unreadable, and a
+# progress line is entitled to say "step 12 of 23" in its own words.
+assert_not_contains "build:no-raw-podman-commands" "apt-get install -y package-number" "$out"
+assert_not_contains "build:no-raw-cache-lines"     "--> Using cache"                   "$out"
+assert_says_not     "build:no-raw-commit-line"     "COMMIT localhost"                  "$out"
+
+# ...but SOMETHING has to move, or this is just a four-minute silence with better manners.
+# The last step must be reached: a progress display that stalls at 3/23 and then succeeds
+# is worse than none, because it reads as a hang.
+#
+# Matched on the BAR, not on the bare count. "1/23" appears in podman's own `STEP 1/23:`
+# line, so asserting that alone passes against the raw output this is meant to replace --
+# which is exactly what it did when first written. The bracketed bar cannot.
+assert_contains "build:draws-a-progress-bar"           "█"          "$out"
+assert_match    "build:progress-starts-at-the-first-step" '\] +1/23'  "$out"
+assert_match    "build:progress-reaches-the-last-step"    '\] +23/23' "$out"
+
+# The prose that explains what is happening stays -- it is the only place a student is told
+# this is normal and interruptible.
+assert_says "build:still-explains-the-wait" "safe to run again" "$out"
+
+# --- #22: it must say it worked ------------------------------------------------
+assert_says "build:announces-success"        "Build Successful"      "$out"
+assert_says "build:success-names-the-next-command" "./cs193v"        "$out"
+assert_says "build:success-is-friendly"      "Happy vibecoding"      "$out"
+# Drawn in the same box everything else is drawn in, and closed -- see 20-messages.sh, which
+# owns box(). Asserted here too because this is the FIRST non-error thing ever put in one.
+#
+# require_cmd, and no `|| true` on the call: box_problems measures display columns with
+# python3, and swallowing its failure would turn "the checker could not run" into a pass,
+# which is the vacuous-green this project hard-fails on elsewhere for the same reason.
+require_cmd python3
+probs="$(printf '%s\n' "$out" | box_problems)"
+if [ -z "$probs" ]; then
+    pass "build:success-box-is-closed"
+else
+    fail "build:success-box-is-closed" "$probs"
+fi
+
+# --- #24: the container-creation step must not go silent -----------------------
+# `podman run` is given up to 180 seconds and, on a machine slow enough to need them, said
+# nothing for all of them. The last line a student saw was "Setting up the course
+# container..." -- which is exactly what an interrupted command looks like.
+assert_says "build:creation-step-is-announced" "Setting up the course container" "$out"
+assert_says "build:creation-step-reports-done" "Ready"                           "$out"
+
+# --- the staff path keeps the raw output ---------------------------------------
+# --dev-build exists to debug the build, and a progress bar is the wrong instrument for
+# that. It is also why hiding the output from --build is affordable at all.
+shim_new
+shim_set state absent
+out="$(launcher --dev-build)"
+assert_contains "dev-build:keeps-raw-podman-output" "apt-get install -y package-number" "$out"
+assert_says_not "dev-build:no-success-box-before-a-shell" "Happy vibecoding" "$out"
+
+# --- a FAILED build must still be diagnosable ----------------------------------
+# The consequence of #23 that is easy to miss. err.build-failed said "Podman's own output is
+# on the screen above this box, ending at the step that failed" -- true only for as long as
+# the raw output WAS on the screen. Hiding it without changing this makes the launcher lie
+# to a student at the exact moment they are stuck, so the failing output has to come back
+# INSIDE the box.
+shim_new
+shim_set state absent
+shim_set build_rc 1
+shim_set build_out 'STEP 6/23: RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+curl: (6) Could not resolve host: deb.nodesource.com
+Error: building at STEP "RUN curl -fsSL https://deb.nodesource.com/...": exit status 6'
+out="$(launcher --build 2>&1)"
+assert_contains "build-failed:shows-the-failing-step"   "STEP 6/23"                     "$out"
+assert_contains "build-failed:shows-podmans-diagnosis"  "Could not resolve host"        "$out"
+assert_says     "build-failed:says-it-is-safe-to-retry" "safe to run it again"          "$out"
+assert_says_not "build-failed:no-longer-claims-output-is-above" "on the screen above"   "$out"
+assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --build)"
+
+# --- the terminal case, which is the one a student is in ----------------------
+# Everything above runs with stdout redirected, where both indicators deliberately fall
+# back to plain lines. The redraw-in-place behaviour only exists on a pty, so it can only
+# be seen from one -- and it is the whole point of #23 and #24.
+CR="$(printf '\r')"
+shim_new
+shim_set state absent
+raw="$(launcher_tty '' --build)"
+# A carriage return before the bar is what "one line that moves" means. Without it this
+# would be 23 lines of bar scrolling past, which is not obviously better than 23 STEP lines.
+assert_contains "build:bar-redraws-in-place-on-a-terminal" "$CR  [" "$raw"
+# #24: the creation step animates rather than sitting silent. One frame is enough to prove
+# it is wired up -- against the fake podman `run` returns at once, and a real one is what
+# makes it spin. The frame is drawn before the first poll for exactly this reason.
+assert_contains "build:creation-step-animates-on-a-terminal" \
+                "${CR}Setting up the course container" "$raw"

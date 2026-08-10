@@ -221,8 +221,9 @@ The container is not running yet. Start it first with:
     ./cs193v
 
 [[err.build-failed]]
-The course container could not be built. Podman's own output is
-on the screen above this box, ending at the step that failed.
+The course container could not be built. Podman stopped here:
+
+{{OUT}}
 
 This is most often a network problem. It is safe to run it again:
 podman keeps every step that finished, so a second attempt picks
@@ -370,6 +371,9 @@ cleaned up anyway. Run ./cs193v to start the container.
 [[status.creating]]
 Setting up the course container...
 
+[[status.created]]
+Ready.
+
 [[status.starting]]
 Starting the course container...
 
@@ -391,6 +395,14 @@ it downloads and assembles the whole course environment — and it is safe to ru
 if it is interrupted, because podman keeps every step that finished.
 
     {{IMAGE}}
+
+[[status.build-succeeded]]
+The container was built successfully. Run the following command to
+enter the development environment:
+
+    ./cs193v
+
+Happy vibecoding!
 
 [[status.pulling]]
 Downloading the course container. This can take a while on slow wifi, and it is safe
