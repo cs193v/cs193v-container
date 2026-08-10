@@ -423,7 +423,15 @@ build_progress() {
         }
         /^STEP [0-9]+\/[0-9]+:/ {
             s = $2; sub(/:$/, "", s); split(s, a, "/")
-            cur = a[1] + 0; tot = a[2] + 0
+            # PLUS ONE on a terminal: creating the container is the slowest single step of a
+            # --build and used to sit outside the meter, so the bar completed and the student
+            # then waited on an unmetered line (issue #24). It is step n+1 now. Piped, there
+            # is no meter for it to be part of, so the count stays what podman reported.
+            #
+            # NOTE FOR THE NEXT EDITOR: this whole awk program is inside a single-quoted
+            # shell string, so an apostrophe in a comment here ENDS it and the launcher stops
+            # parsing. Write "does not" rather than "doesn t".
+            cur = a[1] + 0; tot = a[2] + (tty ? 1 : 0)
             # The note has served its purpose once a step exists to report.
             label = ""
             draw()
@@ -499,7 +507,7 @@ RT_OUT=''
 RT_SPIN=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
-    local tmp pid i rc frame ch
+    local tmp pid i rc frame
     tmp="$(mktemp "${TMPDIR:-/tmp}/cs193v.XXXXXX")" || return 125
     ( "$@" >"$tmp" 2>&1 ) & pid=$!
     i=0; rc=124; frame=0
@@ -984,13 +992,31 @@ create_container() {
     # sshd would then fail for a reason with no obvious connection to the cause.
     tunnel_keys
     build_run_args
-    # The label goes to run_timeout rather than to info(), so the same line carries the
-    # spinner while podman works and is cleared when it is done (issue #24). Cleared
-    # afterwards in both directions -- an unset RT_SPIN would put a spinner on the next
-    # probe that happens to be slow.
-    RT_SPIN="$(msg status.creating)"
+    # IF A BUILD IS STILL HOLDING THE METER, THIS IS ITS LAST STEP (issue #24). The label
+    # goes beside the bar exactly like the base-image note, and the bar completes when podman
+    # returns -- so a --build shows one moving line from the first pull to a built container.
+    #
+    # Reached on its own by a bare ./cs193v, by --rebuild and by --update as well, where no
+    # build ran and there is no meter. Those keep a standalone animated line: inventing a
+    # "step 24 of 24" for them would be a count of nothing.
+    #
+    # Read from the meter's own state rather than from a variable, because the step count
+    # came from podman and was parsed in a subshell -- the pipeline build_progress runs in.
+    local mcur='' mtot=''
+    if [ -n "$METER_PID" ] && [ -f "$METER_STATE" ]; then
+        IFS=' ' read -r mcur mtot _ < "$METER_STATE" 2>/dev/null || true
+    fi
+    if [ "${mtot:-0}" -gt 0 ] 2>/dev/null; then
+        meter_label "${mcur:-0}" "$mtot" "$(msg status.creating)"
+        RT_SPIN=''
+    else
+        # No meter: run_timeout carries the label and animates it itself. Cleared in both
+        # directions afterwards -- a stale RT_SPIN would animate the next slow probe.
+        RT_SPIN="$(msg status.creating)"
+    fi
     if ! run_timeout 180 podman run ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$IMAGE"; then
         RT_SPIN=''
+        meter_stop
         # Out of disk gets its own message HERE as well as in build_image, because creating
         # the container is a second, separate disk cost and a surprisingly large one:
         # --userns=keep-id makes podman write an ID-MAPPED COPY of every layer, so a
@@ -1008,7 +1034,11 @@ create_container() {
         die "$(msg err.create-failed OUT="$RT_OUT")"
     fi
     RT_SPIN=''
-    info "$(msg status.created)"
+    if [ "${mtot:-0}" -gt 0 ] 2>/dev/null; then
+        meter_stop "$mtot" "$mtot" "$(msg status.created)"
+    else
+        info "$(msg status.created)"
+    fi
     # Every verb that makes a container funnels through here, so the tunnel is raised in one
     # place rather than at each of the six call sites where one could be forgotten. Failure is
     # deliberately NOT fatal: the container and the shell are still perfectly usable, only the
@@ -1668,7 +1698,6 @@ verb_print_command() {
 verb_build() {
     preflight
     build_image "${1:-}"
-    meter_stop
     OVERRIDE_IMAGE="$LOCAL_IMAGE"
     load_args; resolve_image
     remove_container

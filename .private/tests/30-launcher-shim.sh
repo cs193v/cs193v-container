@@ -763,7 +763,11 @@ STEP 2/3: RUN apt-get install -y something
 STEP 3/3: LABEL x=y
 COMMIT localhost/cs193v:local
 Successfully tagged localhost/cs193v:local'
-screen="$(launcher_tty '' --build | render_pty)"
+# Kept BOTH forms of one run: the rendered screen answers "what does the student end up
+# looking at", the raw transcript answers "what was drawn in a single redraw". Neither
+# question can be asked of the other's form.
+raw="$(launcher_tty '' --build)"
+screen="$(printf '%s' "$raw" | render_pty)"
 
 # ISSUE 1. "Downloading the base image..." ended with a newline, so the bar's \r returned to
 # the line BELOW it and the student got the note stranded on one row with a bar under it.
@@ -777,6 +781,29 @@ else
 fi
 bars="$(printf '%s\n' "$screen" | grep -c '\[█\|\[░' || true)"
 assert_eq "build:exactly-one-progress-bar-on-screen" "1" "${bars:-0}"
+
+# ISSUE 3. Creating the container is the slowest single step and was outside the meter, so
+# the bar completed at 3/3 and the student then waited on an unmetered line. It counts as
+# the n+1'th step now, and its label goes beside the meter like the download note.
+assert_match "build:meter-counts-container-setup-as-a-step" '\] +4/4' "$screen"
+if printf '%s\n' "$screen" | grep -qxE ' *Setting up the course container\.\.\. *'; then
+    fail "build:setup-is-not-its-own-step" \
+         "the setup step still occupies its own row:
+$screen"
+else
+    pass "build:setup-is-not-its-own-step"
+fi
+
+# And the label belongs BESIDE the meter, the way the download note does -- not on a line of
+# its own above or below it. Checked on a single \r-delimited redraw, so it can only pass if
+# one draw call emitted both the bar and the label.
+beside="$(printf '%s' "$raw" | python3 -c '
+import sys, re
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+segs = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s) for s in raw.split("\r")]
+pat = re.compile(r"\]\s+\d+/\d+\s+Setting up the course container")
+print("yes" if any(pat.search(s) for s in segs) else "no")')"
+assert_eq "build:setup-label-sits-beside-the-meter" "yes" "$beside"
 
 
 # --- ISSUE 2: something must move while a step is in progress ------------------
