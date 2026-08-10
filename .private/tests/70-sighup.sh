@@ -28,12 +28,29 @@ require_cmd script "needed to give the exec client a pty, as a real terminal wou
 SRV='python3 -m http.server 3000 --bind 0.0.0.0'
 MATRIX=""
 
-cleanup() { podman exec "$NAME" pkill -f 'http.server 3000' >/dev/null 2>&1 || true; }
+# On 3000, which is FORWARDED, and this suite's whole subject is processes that outlive the
+# client that started them -- so a run killed here leaves a wildcard-bound listener on a
+# forwarded port, and 60-container.sh's loopback assertions then pass against it with nothing
+# of their own bound (#34). An EXIT trap does not run on KILL, so sweep at start too.
+cleanup() { container_pkill 'http.server 3000'; }
 trap cleanup EXIT
+clean_vt_processes
+
+# Alive means "a server is answering", and asking that question is where this suite was wrong.
+# It ran `podman exec $NAME sh -c 'pgrep -f "http.server 3000" ...'`, and the sh -c's OWN
+# command line contains the pattern, so pgrep matched the shell: measured answering "yes" with
+# no server anywhere and curl returning 000. Every alive= below was therefore unconditionally
+# yes, which made sighup:setsid-survives... and the destroy-unattached regression test pass
+# whatever happened (#34). container_pgrep execs pgrep directly, which cannot self-match.
+#
+# The measurements this restores are unchanged from what ERRORS.md's §A.8 matrix records --
+# every shape really does survive here. The tests just could not have told us otherwise.
+alive() { container_pgrep 'http.server 3000' && echo yes || echo no; }
+srv_pid() { podman exec "$NAME" pgrep -f 'http.server 3000' 2>/dev/null | head -1; }
 
 probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
     local label="$1" cmd="$2"
-    cleanup; sleep 1
+    cleanup
     # A pty, because that is what a terminal window gives it — pty teardown is one of the
     # candidate mechanisms for the server dying.
     script -q -c "podman exec -it ${NAME} sh -c '$cmd'" /dev/null >/dev/null 2>&1 &
@@ -43,13 +60,16 @@ probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
     wait "$client" 2>/dev/null || true
     sleep 3
 
-    PROBE_ALIVE="$(podman exec "$NAME" sh -c \
-        'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
-    local ppid fd1 http
-    ppid="$(podman exec "$NAME" sh -c \
-        'p=$(pgrep -f "http.server 3000" | head -1); [ -n "$p" ] && awk "{print \$4}" /proc/$p/stat' 2>/dev/null)"
-    fd1="$(podman exec "$NAME" sh -c \
-        'p=$(pgrep -f "http.server 3000" | head -1); [ -n "$p" ] && readlink /proc/$p/fd/1' 2>/dev/null)"
+    PROBE_ALIVE="$(alive)"
+    local p ppid fd1 http
+    # The pid comes from the same self-match-free lookup, or ppid and fd1 describe the shell
+    # that went looking rather than the server. ppid=0 is expected and not a bug: the parent
+    # is conmon, which lives outside the container's pid namespace.
+    p="$(srv_pid)"
+    if [ -n "$p" ]; then
+        ppid="$(E "awk '{print \$4}' /proc/$p/stat")"
+        fd1="$(E "readlink /proc/$p/fd/1")"
+    fi
     http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 
     record "sighup:$label" "alive=$PROBE_ALIVE http=$http ppid=${ppid:-none} fd1=${fd1:-none}"
@@ -70,14 +90,13 @@ probe setsid     "setsid $SRV >/tmp/s.log 2>&1 & sleep 60"
 SETSID_ALIVE="$PROBE_ALIVE"
 
 # Without -it, to isolate whether pty teardown is the mechanism rather than SIGHUP itself.
-cleanup; sleep 1
+cleanup
 podman exec "$NAME" sh -c "$SRV" >/dev/null 2>&1 &
 NOTTY_CLIENT=$!
 sleep 3
 kill -9 "$NOTTY_CLIENT" 2>/dev/null; wait "$NOTTY_CLIENT" 2>/dev/null || true
 sleep 3
-NOTTY_ALIVE="$(podman exec "$NAME" sh -c \
-    'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
+NOTTY_ALIVE="$(alive)"
 record "sighup:no-tty" "alive=$NOTTY_ALIVE"
 MATRIX="$MATRIX
   $(printf '%-12s alive=%s' no-tty "$NOTTY_ALIVE")"
@@ -108,12 +127,10 @@ TMUX_CLIENT=$!
 sleep 6
 podman exec "$NAME" sh -c "$TMX new-window -d '$SRV'" >/dev/null 2>&1
 sleep 3
-TMUX_BEFORE="$(podman exec "$NAME" sh -c \
-    'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
+TMUX_BEFORE="$(alive)"
 kill -9 "$TMUX_CLIENT" 2>/dev/null; wait "$TMUX_CLIENT" 2>/dev/null || true
 sleep 4
-TMUX_ALIVE="$(podman exec "$NAME" sh -c \
-    'pgrep -f "http.server 3000" >/dev/null && echo yes || echo no' 2>/dev/null)"
+TMUX_ALIVE="$(alive)"
 TMUX_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 record "sighup:in-a-tmux-tab" "before=$TMUX_BEFORE alive=$TMUX_ALIVE http=$TMUX_HTTP"
 MATRIX="$MATRIX

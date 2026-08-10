@@ -26,15 +26,19 @@ cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
 cleanup() {
     # Never leave stray servers or scratch files behind in the student's projects/.
-    podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-    podman exec "$NAME" pkill -f inotifywait      >/dev/null 2>&1 || true
+    clean_vt_processes
     rm -rf "$TMP" 2>/dev/null || true
     clean_vt_fixtures
 }
 trap cleanup EXIT
-# ...and again at START, because the trap above cannot run if this process is killed. See
-# clean_vt_fixtures: the fixtures below are written with `>`, which keeps an existing file's
-# mode, so a leftover from a killed run makes an assertion report on the wrong file (#30).
+# ...and again at START, because the trap above cannot run if this process is killed. Both
+# halves of that, and for the same reason:
+#   * clean_vt_fixtures -- the fixtures below are written with `>`, which keeps an existing
+#     file's mode, so a leftover makes an assertion report on the wrong file (#30).
+#   * clean_vt_processes -- a leftover LISTENER answers this run's requests, so the port
+#     assertions passed with nothing of this run's bound at all (#34).
+record "container:leftover-processes-from-an-earlier-run" "$(count_vt_processes)"
+clean_vt_processes
 clean_vt_fixtures
 
 # ─── §A.4 the flags the container was actually created with ────────────────────
@@ -484,23 +488,34 @@ assert_eq "pid1:reaps-orphans" "0" "$(zcount)"
 # cannot half-start.
 cat > "$TMP/portprobe.py" <<'PY'
 import socket, selectors, sys
-# argv[1] is a comma list of ranges; bind every port in them on 0.0.0.0.
+# argv[1] is a comma list of ports and ranges; argv[2] is the address to bind them on.
 ports = []
 for chunk in sys.argv[1].split(","):
     if "-" in chunk:
         a, b = chunk.split("-"); ports += list(range(int(a), int(b) + 1))
     else:
         ports.append(int(chunk))
+# A ":" in the address is what makes it IPv6. One probe for both families, so the ::1 case is
+# not a second inline script with its own sleep and its own pkill pattern to remember.
+fam = socket.AF_INET6 if ":" in sys.argv[2] else socket.AF_INET
 sel = selectors.DefaultSelector()
 bound = []
 for p in ports:
-    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s = socket.socket(fam); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((sys.argv[2], p)); s.listen(16); s.setblocking(False)
         sel.register(s, selectors.EVENT_READ); bound.append(p)
     except OSError:
         pass
-print("bound %d" % len(bound), flush=True)
+# THE SUITE READS THIS LINE AND ASSERTS ON IT. It used to print "bound %d" into a discarded
+# stdout -- every probe is started with `podman exec -d` -- so a probe that bound NOTHING
+# looked exactly like one that bound all 46, and a leftover listener from a killed run
+# answered the requests in its place (#34). Naming the ports it could not get turns that from
+# a silent pass into a failure that says which port and therefore what to look for.
+missing = [p for p in ports if p not in bound]
+print("probe %s: %d/%d bound%s"
+      % ("ready" if not missing else "INCOMPLETE", len(bound), len(ports),
+         "" if not missing else ", missing " + " ".join(str(p) for p in missing)), flush=True)
 while True:
     for key, _ in sel.select(timeout=60):
         try:
@@ -516,11 +531,51 @@ podman cp "$TMP/portprobe.py" "$NAME":/tmp/cs193v-portprobe.py
 # forwards from -- there are no -p lines left to read.
 SPEC="$(sed 's/#.*//' $REPO/.config/container.args \
         | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
+
+# Start a probe and WAIT FOR ITS REPORT rather than for a fixed number of seconds. The report
+# is printed after the last listen(), so its arrival is the readiness signal -- 0.24 s
+# measured, where the `sleep 3` it replaces was a guess in both directions at once.
+#
+# Its own file per probe, because the `ports` diagnosis below runs three at a time, and
+# REMOVED FIRST: the file is the one thing here a previous run could have written, and reading
+# a stale "probe ready" would be the very failure this is fixing.
+PROBE_N=0
+probe_start() {                       # probe_start SPEC ADDR -> $PROBE_REPORT
+    local i=0
+    PROBE_N=$((PROBE_N + 1))
+    PROBE_OUT="/tmp/vt-probe.$PROBE_N"
+    podman exec "$NAME" rm -f "$PROBE_OUT" >/dev/null 2>&1 || true
+    podman exec -d "$NAME" sh -c \
+        "python3 /tmp/cs193v-portprobe.py '$1' '$2' > $PROBE_OUT 2>&1" >/dev/null
+    while [ "$i" -lt 100 ]; do
+        PROBE_REPORT="$(podman exec "$NAME" cat "$PROBE_OUT" 2>/dev/null)"
+        case "$PROBE_REPORT" in probe*) return 0 ;; esac
+        sleep 0.1
+        i=$((i + 1))
+    done
+    PROBE_REPORT="the probe never reported anything in 10 s"
+    return 1
+}
+
+# Every probe start is now asserted, not assumed. A bind that fails is the one fault that used
+# to be invisible from either side: the leftover holding the port answers the request, so the
+# check passes while measuring the leftover instead of this run (#34).
+assert_probe() {                      # assert_probe NAME SPEC ADDR
+    probe_start "$2" "$3" || true
+    case "$PROBE_REPORT" in
+        "probe ready"*) pass "$1" ;;
+        *) fail "$1" "$PROBE_REPORT
+Something else in the container is holding those ports. The suite sweeps leftovers at start,
+so this is either a real in-container conflict or a process that appeared during the run." ;;
+    esac
+}
+
+probe_stop() { container_pkill cs193v-portprobe; }
+
 # Bound to 127.0.0.1, NOT 0.0.0.0. This is the whole point of the change: the container's own
 # loopback used to be the one place the forwarder never reached, so testing the wildcard case
 # here would pass just as well before the tunnel existed and prove nothing.
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "$SPEC" 127.0.0.1
-sleep 3
+assert_probe "ports:probe-bound-all-46-on-loopback" "$SPEC" 127.0.0.1
 
 ALL="$(printf '%s' "$SPEC" | tr ',' ' ' | tr '-' ' ' \
        | python3 -c 'import sys
@@ -543,10 +598,8 @@ fi
 # Ports outside the forwarded set must be refused, whatever they are bound to. With the bind
 # address no longer mattering, this is the ONLY failure mode left that is invisible from
 # inside the container.
-podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-sleep 1
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000,7000,8500,9100,3100" 0.0.0.0
-sleep 2
+probe_stop
+assert_probe "ports:probe-bound-the-five-unforwarded-ports" "4000,7000,8500,9100,3100" 0.0.0.0
 reachable=""
 for p in 4000 7000 8500 9100 3100; do
     c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$p/")"
@@ -557,16 +610,14 @@ if [ -z "$reachable" ]; then
 else
     fail "ports:unforwarded-ports-are-refused" "unexpectedly reachable:$reachable"
 fi
-podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-sleep 1
+probe_stop
 
 # THE assertion this change exists for, and it is deliberately the inverse of what it used to
 # be. A 127.0.0.1-bound server inside was unreachable, because podman's forwarder delivers to
 # the container's eth0 and never its lo; the tunnel's far end IS that lo, so it must now
 # answer. The 46-port loop above already covers this, but it is asserted alone as well so a
 # failure here is unambiguous rather than one line in a list of 46.
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1
-sleep 2
+assert_probe "ports:probe-bound-3000-on-loopback" "3000" 127.0.0.1
 c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
 if [ "$c" = 200 ]; then
     pass "ports:loopback-bound-server-IS-reachable"
@@ -575,20 +626,17 @@ else
          "got HTTP $c — the ssh tunnel is not reaching the container's own loopback on this
 platform, which is the entire premise of the current design. Check: cs193v doctor"
 fi
-podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-sleep 1
+probe_stop
 
 # ::1 alone is the one bind address still out of reach, since the forward's far end is IPv4.
 # Recorded rather than asserted as a pass/fail of the design: if a future ssh reaches it, that
 # is an improvement, and the docs are then what is wrong.
-podman exec -d "$NAME" python3 -c 'import socket
-s=socket.socket(socket.AF_INET6); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("::1",3001)); s.listen(4)
-while True:
-    c,_=s.accept(); c.recv(4096)
-    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"); c.close()' \
-    >/dev/null 2>&1
-sleep 2
+#
+# The probe binds it, rather than a second inline python of its own: "refused" is a `000` that
+# looks identical whether ::1 is unreachable or nothing ever listened on it, and the bind
+# report is the positive control that tells those apart. (Verified from inside the container,
+# where `curl http://[::1]:3001/` answers 200 while the host's 127.0.0.1:3001 gets nothing.)
+assert_probe "ports:probe-bound-3001-on-ipv6-loopback" "3001" "::1"
 c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3001/)"
 record "ports:ipv6-only-server-http" "$c"
 if [ "$c" = 000 ]; then
@@ -598,12 +646,12 @@ else
          "got HTTP $c — ::1-only IS reachable, which is better than documented. Update
 CONTAINER-DESIGN.md, files/ports and ERRORS.md D4 rather than leaving them pessimistic."
 fi
-podman exec "$NAME" pkill -f 'AF_INET6' >/dev/null 2>&1 || true
-sleep 1
+probe_stop
 
-# The host side must be loopback-only in reality, not just in the flag.
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 0.0.0.0
-sleep 2
+# The host side must be loopback-only in reality, not just in the flag. Both checks below are
+# only worth anything if something really is bound to 0.0.0.0 INSIDE: with nothing bound they
+# pass on an absence, which is what a leftover loopback probe used to arrange (#34).
+assert_probe "ports:probe-bound-3000-on-the-wildcard" "3000" 0.0.0.0
 listen="$( (ss -ltn 2>/dev/null || netstat -an) | grep ':3000' || true)"
 record "ports:host-listen-line" "$listen"
 assert_not_match "ports:host-does-not-listen-on-0.0.0.0" '0\.0\.0\.0:3000|\*:3000|\[::\]:3000' "$listen"
@@ -619,13 +667,12 @@ else
 fi
 
 # The in-container `ports` command must diagnose what is LEFT to diagnose, against real
-# sockets. Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound.
-podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
-sleep 2
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "3000" 127.0.0.1   # forwarded, loopback
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "5174" 0.0.0.0     # forwarded, wildcard
-podman exec -d "$NAME" python3 /tmp/cs193v-portprobe.py "4000" 0.0.0.0     # not forwarded
-sleep 3
+# sockets. Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound --
+# and probe_stop waits for it to be GONE, so the loopback bind below cannot race its death.
+probe_stop
+assert_probe "ports:probe-bound-3000-loopback-for-the-diagnosis" "3000" 127.0.0.1
+assert_probe "ports:probe-bound-5174-wildcard-for-the-diagnosis" "5174" 0.0.0.0
+assert_probe "ports:probe-bound-4000-unforwarded-for-the-diagnosis" "4000" 0.0.0.0
 pout="$(E 'ports || true')"
 record "ports:diagnostic-output" "$(printf '%s' "$pout" | tr '\n' '|')"
 assert_match "ports:diagnoses-forwarded-wildcard-as-OK" '5174 .*OK'            "$pout"
@@ -637,7 +684,7 @@ assert_not_contains "ports:no-longer-demands-bind-all" "--host 0.0.0.0"        "
 # And it must be honest about the half it cannot see: a missing forward or a downed tunnel are
 # host-side facts that /proc/net/tcp does not contain.
 assert_contains "ports:points-at-doctor-for-host-side-faults" "cs193v doctor"  "$pout"
-podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
+probe_stop
 
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
@@ -701,7 +748,12 @@ if E 'command -v inotifywait' >/dev/null 2>&1; then
     else
         record "files:inotify-for-host-side-edits" "DOES NOT FIRE"
     fi
-    podman exec "$NAME" pkill -f inotifywait >/dev/null 2>&1 || true
+    # A leftover watcher cannot fake an event -- its stdout is the fd of the /tmp/vt-in that
+    # the `rm -f` above unlinked, so what it writes goes to an orphaned inode, not to the file
+    # this run reads. What it does do is accumulate one inotify instance per killed run
+    # against the container's limit (max_user_instances = 128, measured), which is why the
+    # start-of-suite sweep covers inotifywait as well as the probe (#34).
+    container_pkill inotifywait
 else
     record "files:inotify" "inotify-tools not installed in the container; run: sudo apt-get install -y inotify-tools"
 fi
