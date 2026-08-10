@@ -43,6 +43,11 @@ restore() {
     # listener on a FORWARDED port and the next 60-container.sh run measured it instead of its
     # own (#34).
     clean_vt_processes
+    # And the 46 host ports, for the same reason one resource further out: a run that is
+    # interrupted has still started tunnels, and leaving them bound hands the next developer a
+    # failure they did not cause. Guarded because this trap can fire before release_tunnel is
+    # even parsed -- require_image bails out above it.
+    command -v release_tunnel >/dev/null 2>&1 && release_tunnel
     shim_cleanup
 }
 trap restore EXIT INT TERM
@@ -221,8 +226,7 @@ L --rebuild >/dev/null 2>&1
 # how a routine --rebuild becomes a total outage: a tunnel outliving its container keeps every
 # host port bound against a dead pipe, so the replacement can bind none of them.
 assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
-fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
-nfwd="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true)"
+nfwd="$(count_forwards)"
 assert_eq "drift:tunnel-is-rebuilt-with-46-forwards" "46" "${nfwd:-0}"
 assert_match "drift:doctor-reports-the-tunnel-up" 'tunnel +up' "$(L doctor)"
 
@@ -338,8 +342,8 @@ assert_contains "ports-verb:runs-the-in-container-tool" "forwarded:" "$(L ports)
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────
 # Each of these is a way the tunnel can strand a student with a container that looks perfectly
 # healthy and a browser that cannot reach anything.
-fwd_re='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
-count_fwd() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$fwd_re" || true; }
+# The port list itself lives in lib/assert.sh, spelled out once for all three tiers.
+count_fwd() { count_forwards; }
 
 # Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
 # pidfile are named by a hash of (course directory, instance), so a glob picks up every other
@@ -355,6 +359,35 @@ tunnel_ctl() {
 }
 CTL="$(tunnel_ctl)"
 record "tunnel:control-socket" "${CTL:-<none>}"
+
+# ─── giving the 46 host ports back ─────────────────────────────────────────────
+# This tier is the only thing in the suite that STARTS tunnels, and it used to finish with all
+# 46 of them bound -- which the assertions here require while they run, and which is a hostile
+# thing to leave behind once they have. CS193V_INSTANCE does not namespace the forwarded ports
+# (CLAUDE.md), so a held tunnel means the next developer to run these tests gets none of them
+# and watches their run fail for a reason they did not cause. "Whoever tested last still owns
+# the ports" is exactly the slow collision CLAUDE.md warns about, produced by the suite itself.
+#
+# SCOPED TO OUR OWN TUNNEL, by asking the launcher through tunnel_pid rather than globbing
+# TMPDIR or matching on `ssh`: doctor honours CS193V_INSTANCE, so a colleague's tunnel is
+# invisible to it and cannot be killed by accident. Do not "simplify" this to a pkill.
+#
+# A plain kill, not `ssh -O exit`. The pid came from the launcher itself, SIGTERM makes the
+# master release its listening sockets and unlink its control socket, and if a stale socket
+# ever did survive, tunnel_start rm -f's it before starting the next one. Waiting for the
+# ports to actually go is the point -- a kill that has not taken effect yet is indistinguishable
+# from one that never will, and the assertion below would then be measuring the wrong instant.
+#
+# The CONTAINER is deliberately left running: it is what the developer goes on to use, and the
+# next `./cs193v` brings the tunnel back in about a second.
+no_forwards() { [ "$(count_fwd)" = 0 ]; }
+release_tunnel() {
+    local p
+    p="$(tunnel_pid)"
+    [ -n "$p" ] || return 0
+    kill "$p" 2>/dev/null || true
+    wait_until 15 no_forwards
+}
 
 # THE test: a server bound to the container's OWN loopback, which was unreachable by design
 # before this change, must answer from the host.
@@ -456,3 +489,13 @@ T0="$(date +%s)"; L --rebuild >/dev/null 2>&1; T1="$(date +%s)"
 record "perf:rebuild-seconds" "$((T1 - T0))"
 T0="$(date +%s)"; L >/dev/null 2>&1; T1="$(date +%s)"
 record "perf:subsequent-launch-seconds" "$((T1 - T0))"
+
+# ─── hand the ports back  (must be last: everything above needs the tunnel up) ─
+# Asserted rather than done quietly, because "the suite gave the ports back" is a promise the
+# next developer's run depends on, and a release that silently did not happen looks identical
+# to one that did until their run fails instead. The EXIT trap calls this too, for the runs
+# that never reach this line.
+release_tunnel
+assert_eq "cleanup:the-46-forwards-are-released" "0" "$(count_fwd)"
+record "cleanup:tunnel-released" \
+       "the container is still running; the next ./cs193v brings the tunnel back"

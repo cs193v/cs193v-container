@@ -23,6 +23,9 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
 require_running
+# Every probe below reads the server's HTTP code through the forwarded port, so the tunnel has
+# to be up; the live tier hands it back when it finishes. See require_tunnel.
+require_tunnel
 require_cmd script "needed to give the exec client a pty, as a real terminal would"
 
 SRV='python3 -m http.server 3000 --bind 0.0.0.0'
