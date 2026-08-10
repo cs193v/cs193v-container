@@ -307,6 +307,19 @@ new_tmpdir() {
     printf '%s' "$d"
 }
 
+# Every fixture a suite leaves in the student's projects/ is named .vt-something, so one
+# glob finds the lot. Call this at suite START as well as from the EXIT trap.
+#
+# Both, not either. A trap does not run when the process is KILLED -- measured: bash runs an
+# EXIT trap on INT, TERM and HUP, and not on KILL -- so a run torn down outright leaves its
+# fixtures behind, and start-up cleanup is the only kind that survives that. The failure it
+# prevents is not a missing file but a lying assertion: `>` truncates an existing file and
+# keeps its mode, so a leftover .vt-c made 60-container.sh report the PREVIOUS run's
+# permissions as if the container had just written them (issue #30).
+#
+# Only the .vt- prefix is ever removed. Nothing else in projects/ is this suite's to delete.
+clean_vt_fixtures() { rm -rf "$REPO"/projects/.vt-* 2>/dev/null || true; }
+
 # Print the summary when a suite is run directly rather than through run-tests.sh.
 # grep -c prints 0 and exits 1 on no match, so take its output and ignore its status.
 _count() {

@@ -28,9 +28,14 @@ cleanup() {
     # Never leave stray servers or scratch files behind in the student's projects/.
     podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
     podman exec "$NAME" pkill -f inotifywait      >/dev/null 2>&1 || true
-    rm -rf "$TMP" "$REPO"/projects/.vt-* 2>/dev/null || true
+    rm -rf "$TMP" 2>/dev/null || true
+    clean_vt_fixtures
 }
 trap cleanup EXIT
+# ...and again at START, because the trap above cannot run if this process is killed. See
+# clean_vt_fixtures: the fixtures below are written with `>`, which keeps an existing file's
+# mode, so a leftover from a killed run makes an assertion report on the wrong file (#30).
+clean_vt_fixtures
 
 # ─── §A.4 the flags the container was actually created with ────────────────────
 assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
@@ -596,7 +601,22 @@ podman exec "$NAME" pkill -f cs193v-portprobe >/dev/null 2>&1 || true
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
 # writes must be owned by the student on the host, and vice versa.
-E 'umask 022; echo hi > /home/student/projects/.vt-c'
+#
+# The 644 is about the file the container CREATES, which is why the container unlinks it
+# first and umask -- not `install -m` -- decides the mode. `install -m` would chmod after
+# creating, and a mode set explicitly inside the container is already what
+# files:mode-changes-propagate proves below; nothing would then be left watching the
+# creation path. That path is the one VERIFICATION.md §5.2 exists to compare across macOS
+# providers, libkrun's virtiofs enforcing permissions where applehv's is permissive. If a
+# platform ever legitimately answers something other than 644 here, downgrade this to
+# record() -- do not make it self-fulfilling by setting the mode the assertion checks.
+#
+# The stale file is seeded ON PURPOSE. `>` truncates an existing file and PRESERVES its
+# mode, so before the rm this assertion reported whatever the last run's `chmod 600` below
+# had left -- green normally, red after any run that was killed before its cleanup (#30).
+# Seeding the exact leftover proves the independence on every run instead of assuming it.
+printf 'stale\n' > "$REPO/projects/.vt-c" && chmod 600 "$REPO/projects/.vt-c"
+E 'rm -f /home/student/projects/.vt-c; umask 022; echo hi > /home/student/projects/.vt-c'
 assert_eq "files:container-write-is-host-owned" "$(id -u) $(id -g) 644" \
           "$(stat -c '%u %g %a' "$REPO/projects/.vt-c")"
 assert_eq "files:container-write-readable-on-host" "hi" "$(cat "$REPO/projects/.vt-c")"
@@ -610,7 +630,9 @@ assert_eq "files:host-sees-container-append" "more" "$(tail -1 "$REPO/projects/.
 E 'chmod 600 /home/student/projects/.vt-c'
 assert_eq "files:mode-changes-propagate" "600" "$(stat -c %a "$REPO/projects/.vt-c")"
 
-E 'ln -s /etc/hostname /home/student/projects/.vt-link'
+# -f, or a leftover link makes `ln` fail silently -- its error is not checked -- and the
+# record below then reports the PREVIOUS run's target as if it were this run's (#30).
+E 'ln -sf /etc/hostname /home/student/projects/.vt-link'
 record "files:symlink-target-as-seen-from-host" "$(readlink "$REPO/projects/.vt-link")"
 
 # Case sensitivity determines whether a Mac student's `import './Button'` bug reproduces
@@ -645,6 +667,10 @@ fi
 
 # Quantify the bind-mount penalty. Recorded per platform — this is the number that decides
 # whether `npm install` is tolerable on a Mac.
+# Cleared before the clock starts, like .vt-pw below: over a leftover directory this times
+# 2000 truncations rather than 2000 creations, and clearing it inside the timed region would
+# charge the delete to the create (#30).
+E 'rm -rf /home/student/projects/.vt-many'
 T0="$(date +%s)"
 E 'mkdir -p /home/student/projects/.vt-many && cd /home/student/projects/.vt-many && for i in $(seq 1 2000); do : > f$i; done'
 T1="$(date +%s)"
