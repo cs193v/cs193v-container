@@ -725,3 +725,42 @@ assert_contains "build:bar-redraws-in-place-on-a-terminal" "$CR  [" "$raw"
 # makes it spin. The frame is drawn before the first poll for exactly this reason.
 assert_contains "build:creation-step-animates-on-a-terminal" \
                 "${CR}Setting up the course container" "$raw"
+
+# --- one line, and the setup step is part of it -------------------------------
+# Asserted against the rendered SCREEN, not the byte stream. A \r-redrawn bar appears in the
+# transcript once per step and on screen once, so counting occurrences in the raw bytes
+# answers a different question from the one being asked here. See render_pty in lib.
+#
+# Both bugs below were shipped by the first version of the progress bar and neither was
+# catchable by the assertions that came with it, because those all read the non-tty form --
+# which has no \r, no overdrawing and therefore neither defect.
+shim_new
+shim_set state absent
+# Real cold-build shape: podman pulls the base image before STEP 1 exists.
+shim_set build_out 'Trying to pull docker.io/library/ubuntu:26.04...
+Getting image source signatures
+Copying blob sha256:aaaa
+Copying blob sha256:bbbb
+Copying config sha256:cccc
+Writing manifest to image destination
+STEP 1/3: FROM ubuntu:26.04
+STEP 2/3: RUN apt-get install -y something
+--> Using cache abcdef
+STEP 3/3: LABEL x=y
+COMMIT localhost/cs193v:local
+Successfully tagged localhost/cs193v:local'
+screen="$(launcher_tty '' --build | render_pty)"
+
+# ISSUE 1. "Downloading the base image..." ended with a newline, so the bar's \r returned to
+# the line BELOW it and the student got the note stranded on one row with a bar under it.
+# The note belongs beside the bar, on the one row the bar owns.
+if printf '%s\n' "$screen" | grep -qxE ' *Downloading the base image\.\.\.'; then
+    fail "build:pull-note-shares-the-bar-line" \
+         "the download note is on a row of its own:
+$screen"
+else
+    pass "build:pull-note-shares-the-bar-line"
+fi
+bars="$(printf '%s\n' "$screen" | grep -c '\[█\|\[░' || true)"
+assert_eq "build:exactly-one-progress-bar-on-screen" "1" "${bars:-0}"
+

@@ -292,12 +292,19 @@ build_progress() {
         }
         BEGIN { width = 40; cur = 0; tot = 0; pulled = 0 }
         # Pulling the base image happens BEFORE step 1 and is the slowest part of a cold
-        # build on slow wifi, so it gets its own note rather than sitting behind an empty
-        # bar. One note, not one per blob: podman emits a line per layer per percentage.
+        # build on slow wifi, so it gets a note rather than sitting behind an empty bar. One
+        # note, not one per blob: podman emits a line per layer per percentage.
+        #
+        # NO TRAILING NEWLINE ON A TERMINAL. It had one, which put the note on a row of its
+        # own and left the bar to start on the row BELOW -- so a cold build showed the note
+        # stranded above a bar instead of the single line the bar is supposed to be. The note
+        # now sits on the row the bar owns and is erased by the first draw(), which opens
+        # with \r and closes with ESC[K.
         /^(Trying to pull|Getting image source signatures|Copying blob|Copying config)/ {
             if (!pulled) {
                 pulled = 1
-                printf "  Downloading the base image...\n"
+                if (tty) printf "\r  Downloading the base image...%s[K", esc
+                else     printf "  Downloading the base image...\n"
                 fflush()
             }
             next

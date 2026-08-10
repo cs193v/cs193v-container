@@ -201,6 +201,40 @@ for n, l in enumerate(box):
 '
 }
 
+# ─── replaying a terminal ──────────────────────────────────────────────────────
+# A pty transcript is not what the student SEES -- it is the byte stream that produced it.
+# Anything drawn with \r overwrites what came before on that line, so "the bar appears 23
+# times" and "the bar appears once, updated 23 times" are the same bytes and completely
+# different screens. Assertions about a redrawn display have to be made against the screen.
+#
+# Replays the three things this launcher actually emits: \r (column 0), \n (new line) and
+# ESC[K (erase to end of line). Other CSI sequences are colour and are dropped.
+render_pty() {                        # raw transcript on stdin -> one repr()'d line per row
+    python3 -c '
+import re, sys
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+# Mark ESC[K so it survives colour-stripping, then drop every other CSI sequence.
+raw = raw.replace("\x1b[K", "\x00")
+raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
+rows, cur, col = [], [], 0
+for ch in raw:
+    if ch == "\n":
+        rows.append("".join(cur)); cur, col = [], 0
+    elif ch == "\r":
+        col = 0
+    elif ch == "\x00":                 # ESC[K -- erase from the cursor to end of line
+        del cur[col:]
+    else:
+        while len(cur) < col: cur.append(" ")
+        if col < len(cur): cur[col] = ch
+        else: cur.append(ch)
+        col += 1
+rows.append("".join(cur))
+for r in rows:
+    print(r.rstrip())
+'
+}
+
 # ─── requirements ──────────────────────────────────────────────────────────────
 # By project decision these HARD-FAIL rather than skip: a green run must mean the whole
 # thing was exercised, not that half of it quietly opted out. The message names the exact
