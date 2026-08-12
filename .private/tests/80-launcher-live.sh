@@ -60,6 +60,19 @@ clean_vt_processes                    # a no-op while the container does not exi
 L() { printf 'exit\n' | timeout 90 ./cs193v "$@" 2>&1; }
 L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
+# LV() is L() for the verbs that CHANGE something — --rebuild, --update, --full-rebuild. Since #41
+# those refuse while a session is live, and this suite raises the container repeatedly so it can
+# `podman exec` into it, so they have to be given the precondition a student actually has: nothing
+# running.
+#
+# WITHOUT THIS THE SUITE LIES. A refused verb exits 1 having done nothing, so
+# rebuild:container-filesystem-is-reset finds its marker file still there and fails for the wrong
+# reason, and the twenty-launch idempotency loop becomes twenty refusals that still "pass" the
+# do-not-recreate check. Both happened. Plain L() is kept for `doctor`, `ports` and
+# --dev-print-command, which are read-only, exempt from the refusal, and in `ports`' case need the
+# container UP.
+LV() { release_container; L "$@"; }
+
 # LB() is a BARE launch — one that goes on to open a shell. It needs a real terminal, since
 # open_shell refuses without one, so it goes through script(1) with an `exit` fed in.
 #
@@ -70,7 +83,10 @@ L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s'
 # the ENTER lands harmlessly on the container's own prompt. What it must not do is let the
 # `exit` be eaten by the acknowledgement, which would leave tmux with nothing and park the
 # test at a live shell until the 120-second timeout.
-LB() { launcher_tty_repo '\nexit\n' "$@"; }
+#
+# It releases the container first, for the same reason LV() does: a bare launch against a live
+# session is refused, and this suite holds the container up between groups.
+LB() { release_container; launcher_tty_repo '\nexit\n' "$@"; }
 
 # ─── a bare launch with no terminal refuses instead of hanging  (ERRORS.md B13) ─
 # This used to hang forever against real podman: -t allocates a pty and a pty never
@@ -87,8 +103,11 @@ else
 fi
 assert_says "noterm:explains-itself" "could not open a shell" "$out"
 assert_eq   "noterm:exits-nonzero" "1" "$rc"
-# The container was still created, which is what the message promises.
-assert_eq "noterm:container-is-up-anyway" "running" \
+# INVERTED BY #41. The container is still CREATED, which is what the message promises -- but it is
+# no longer left running, because a running container with nobody attached is the exact state the
+# change exists to abolish. err.needs-a-terminal was reworded from "set up and running" to say it
+# has been stopped again, and 30-launcher-shim.sh asserts that wording.
+assert_eq "noterm:container-is-created-but-not-left-running" "exited" \
           "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 
@@ -106,6 +125,19 @@ ours_running() {
     printf '%s' "$(( ${mine:-0} + ${strays:-0} ))"
 }
 
+# The same count over containers in ANY state, which is what "did the launcher create a second
+# one?" now has to ask. #41 means a finished launch leaves ours stopped, so ours_running would
+# answer 0 for a perfectly healthy launcher and 0 again for one that created nothing at all --
+# it can no longer tell those apart, and every idempotency assertion below depends on the
+# distinction. ours_running is still the right question for "is something running that should
+# not be", which is what the leak checks use it for.
+ours_existing() {
+    local mine strays
+    mine="$(podman ps -a --format '{{.Names}}' | grep -cxF "$NAME" || true)"
+    strays="$(podman ps -a --format '{{.Names}}' | grep -vxF "$NAME" | grep -vcE '^cs193v($|-)' || true)"
+    printf '%s' "$(( ${mine:-0} + ${strays:-0} ))"
+}
+
 # With a real terminal the same invocation opens a shell and returns promptly.
 T0="$(date +%s)"
 out="$(LB)"
@@ -113,11 +145,23 @@ T1="$(date +%s)"
 if [ "$((T1 - T0))" -lt 60 ]; then pass "live:pty-launch-opens-a-shell-and-returns"
 else fail "live:pty-launch-opens-a-shell-and-returns" "took $((T1 - T0))s"; fi
 record "perf:first-launch-seconds" "$((T1 - T0))"
-assert_eq "live:container-is-running-after-first-launch" "running" \
+# INVERTED BY #41, and this is the headline live assertion for it: LB() feeds `exit`, so the
+# session really ended, and a session that has ended must leave nothing running. Against real
+# podman rather than the shim because the trap has to survive a real pty teardown and a real
+# `podman stop`.
+assert_eq "live:a-finished-session-leaves-nothing-running" "exited" \
           "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
-assert_eq "live:exactly-one-container" "1" "$(ours_running)"
+assert_eq "live:exactly-one-container" "1" "$(ours_existing)"
+assert_eq "live:nothing-is-left-running" "0" "$(ours_running)"
+# ...and the 46 host ports went back, which is the half that does NOT happen by itself: the tunnel
+# is a HOST process and outlives the container unless the teardown takes it down deliberately.
+# Waited on rather than sampled -- ssh unbinding is not instantaneous, and a bare check here would
+# be a flake that looked like a leak. no_forwards lives in lib/assert.sh beside the port list.
+wait_until 30 no_forwards || true
+assert_eq "live:a-finished-session-releases-the-ports" "0" "$(count_forwards)"
 
-# The mount really is the student's projects/ directory, on both sides.
+# The mount really is the student's projects/ directory, on both sides. Inspect works on a stopped
+# container, so this needs nothing raised.
 assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
     "$(podman inspect "$NAME" \
        --format '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
@@ -125,6 +169,11 @@ assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
 # keep-id in practice: a file the container creates is owned by the student on the host.
 # Removed FIRST: this stats whoever owns the file, so a leftover host-owned .vt-live from an
 # earlier run would pass it with the container having written nothing at all (issue #30).
+#
+# hold_container because the launch above deliberately left the container stopped and `podman
+# exec` needs it up. Every group below that execs into the container does the same; see
+# hold_container in lib/assert.sh for why the suite raises it itself.
+hold_container
 rm -f "$REPO/projects/.vt-live"
 podman exec "$NAME" sh -c 'echo live > /home/student/projects/.vt-live'
 assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(stat -c %u "$REPO/projects/.vt-live")"
@@ -134,23 +183,81 @@ rm -f "$REPO/projects/.vt-live"
 before="$(podman inspect "$NAME" --format '{{.Id}}')"
 i=0
 while [ "$i" -lt 20 ]; do LB >/dev/null 2>&1; i=$((i + 1)); done
-assert_eq "live:20-launches-still-one-container" "1" "$(ours_running)"
+assert_eq "live:20-launches-still-one-container" "1" "$(ours_existing)"
+# This one gets STRONGER under #41, not weaker. It used to prove twenty launches reused a
+# container that never stopped; it now proves twenty stop/start cycles preserve the container's
+# identity -- which is the real content of the promise that `podman stop` was chosen over `rm` so
+# that things installed with sudo survive until a rebuild.
 assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect "$NAME" --format '{{.Id}}')"
+assert_eq "live:20-launches-leave-nothing-running" "0" "$(ours_running)"
 
-# Four shells at once is legitimate and common — one per terminal window.
+# ─── the exited -> running race, which is the one podman cannot make atomic ─────
+# This group used to assert that four simultaneous launches all got a shell in one container,
+# because several windows sharing a container was the design. #41 allows one session, so what
+# four concurrent launches must now produce is ONE winner and three refusals -- and this is the
+# only test in the suite that can prove it, because it is a genuine race against real podman.
+#
+# It matters because `podman start` is idempotent and reports nothing (measured, 5.7.0), so the
+# launcher's `state` check cannot win this on its own: all four can see `exited` and all four can
+# start it. The tie is broken one layer down, by tmux refusing a duplicate session name inside the
+# container. If that backstop regressed, this is where it shows up.
 #
 # `LB &`, not `( LB & )`, and then `wait`. The four still run concurrently, which is the whole
-# point of the test; what changes is that they are this shell's own children, so the kernel
-# tells us when the last one is done instead of us guessing six seconds. Same reasoning as
-# close_client in 60-container.sh — and it removes a failure the fixed sleep could produce on a
-# loaded machine, where a fourth launch still in flight when the count is taken looks exactly
-# like a launcher that created a second container.
-for i in 1 2 3 4; do LB >/dev/null 2>&1 & done
-wait
-assert_eq "live:concurrent-launches-still-one-container" "1" "$(ours_running)"
+# point; what changes is that they are this shell's own children, so the kernel tells us when the
+# last one is done instead of us guessing six seconds.
+podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
+wait_until 20 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" != running ]" || true
+RACE_OUT="$(new_tmpdir)/race"
+mkdir -p "$RACE_OUT"
+
+# THE FOUR LAUNCHES MUST HOLD THEIR SESSIONS, and that is the whole difficulty of this test.
+#
+# NOT LB(), for two separate reasons, and the second one cost a flaky failure to find:
+#
+#   1. LB releases the container first. Four concurrent releases racing four concurrent starts
+#      means a launcher that has just won the claim can be stopped by a sibling's release -- not
+#      the race being measured. The single release above is the precondition instead.
+#   2. LB feeds `exit`, so each launch finishes in about five seconds. Four of those SERIALIZE
+#      more often than they collide: each creates a session, leaves, and stops the container
+#      before the next arrives, and every one of them legitimately wins. The refusal count is
+#      then nondeterministic -- measured at 3 of 4 on one run and 1 of 4 on the very next, from
+#      identical code. An "exactly 3" assertion against that shape is wrong by construction, and
+#      loosening it to a range would have hidden the regression it exists to catch.
+#
+# Feeding `sleep 600` makes all four hold their session, so exactly one CAN win. `$!` after a
+# pipeline is its last element, which is script, so the kills at the end land on the right pids.
+RACE_PIDS=''
+for i in 1 2 3 4; do
+    printf 'sleep 600\n' | timeout 120 script -q -c "$REPO/cs193v" /dev/null >"$RACE_OUT/$i" 2>&1 &
+    RACE_PIDS="$RACE_PIDS $!"
+done
+refused_count() { grep -l 'already have a CS193V session' "$RACE_OUT"/* 2>/dev/null | grep -c . || true; }
+three_refused() { [ "$(refused_count)" = 3 ]; }
+# Wait for the losers to have given up rather than for the sleeps to expire. A timeout here is not
+# the assertion -- the count is read and asserted below either way.
+wait_until 90 three_refused || true
+refused="$(refused_count)"
+assert_eq "live:concurrent-launches-still-one-container" "1" "$(ours_existing)"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
-record "live:exec-sessions-after-four-shells" "$(podman top "$NAME" 2>/dev/null | wc -l | tr -d ' ')"
+record "live:concurrent-launches-refused" "$refused of 4"
+# THREE of four, and exactly three. Fewer means two sessions were handed out in one container, which
+# is the thing #41 forbids; four means nobody could work at all. Which LAYER caught each loser is
+# deliberately not asserted -- the state check and the tmux claim produce the same message, and
+# which one fires depends on timing.
+if [ "$refused" = 3 ]; then
+    pass "live:exactly-one-of-four-concurrent-launches-wins"
+else
+    fail "live:exactly-one-of-four-concurrent-launches-wins" \
+         "$refused of 4 launches were refused, want exactly 3. Fewer means two sessions were handed
+out in one container -- most likely the tmux duplicate-session claim in cs193v-shell regressed, since
+that is the only thing breaking the tie once two launches both see a stopped container. Four means
+every launch was refused and nobody could work. Transcripts are in $RACE_OUT."
+fi
+# shellcheck disable=SC2086
+[ -n "$RACE_PIDS" ] && kill -9 $RACE_PIDS 2>/dev/null
+wait 2>/dev/null || true
+release_container
 
 # ─── the `podman start` config trap  (§2.5) ────────────────────────────────────
 # Refuse to start if container.args is already dirty. An earlier interrupted run leaving a
@@ -201,6 +308,11 @@ fi
 
 # Accepting it must actually recreate with the flag. Down-arrow and ENTER for the menu,
 # then a second ENTER for the warning acknowledgement, then `exit` for the shell itself.
+#
+# release_container first, and not via LB() because the keystrokes differ: a bare launch against a
+# live session is refused before the drift prompt is ever reached, so without this the assertions
+# below fail claiming the confighash machinery is broken when nothing was even attempted.
+release_container
 out="$(launcher_tty_repo '\033[B\n\nexit\n')"
 if drift_applied; then
     pass "drift:accepting-applies-the-new-flag"
@@ -220,14 +332,29 @@ else
          "$(diff -u "$TMP/ca.bak" $REPO/.config/container.args | head -10)"
     cp "$TMP/ca.bak" $REPO/.config/container.args
 fi
-L --rebuild >/dev/null 2>&1
-# The container publishes nothing; the 46 forwards live on the host, in one ssh process. A
-# rebuild has to tear the old tunnel down and bring a new one up, and getting that wrong is
-# how a routine --rebuild becomes a total outage: a tunnel outliving its container keeps every
-# host port bound against a dead pipe, so the replacement can bind none of them.
+LV --rebuild >/dev/null 2>&1
+# The container publishes nothing; the 46 forwards live on the host, in one ssh process.
 assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
-nfwd="$(count_forwards)"
-assert_eq "drift:tunnel-is-rebuilt-with-46-forwards" "46" "${nfwd:-0}"
+
+# INVERTED BY #41. This used to assert 46 forwards immediately after --rebuild, because a rebuild
+# left the container running with a fresh tunnel. Maintenance verbs now stop what they built --
+# nobody is attached when they finish -- so the honest assertion is that the rebuild hands the
+# ports BACK, and that the next launch brings them up again.
+#
+# The underlying hazard the old assertion guarded is unchanged and still worth naming: a tunnel
+# outliving its container keeps every course port bound against a dead pipe, so the replacement
+# can bind none of them and a routine --rebuild becomes a total outage with no visible cause.
+# Both halves below are that same property, read at the two moments it can break.
+wait_until 30 no_forwards || true
+assert_eq "drift:rebuild-hands-the-ports-back" "0" "$(count_forwards)"
+assert_eq "drift:rebuild-leaves-nothing-running" "exited" \
+          "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
+# ...and the round trip: a launch after a rebuild really does get all 46 back. This is the
+# assertion that would catch a teardown which released the ports but left something holding them.
+LB >/dev/null 2>&1
+hold_container
+require_tunnel
+assert_eq "drift:a-launch-after-a-rebuild-restores-the-forwards" "46" "$(count_forwards)"
 assert_match "drift:doctor-reports-the-tunnel-up" 'tunnel +up' "$(L doctor)"
 
 # ─── two copies of the course directory  (§2.7) ────────────────────────────────
@@ -238,50 +365,73 @@ assert_eq "live:second-copy-is-refused" "1" \
           "$(/tmp/vt-copy/cs193v >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
 assert_says "live:second-copy-explains-both-paths" "different folder" \
             "$(/tmp/vt-copy/cs193v </dev/null 2>&1)"
-assert_eq "live:second-copy-created-nothing" "1" "$(ours_running)"
+assert_eq "live:second-copy-created-nothing" "1" "$(ours_existing)"
 rm -rf /tmp/vt-copy
 
 # ─── --rebuild preserves logins  (§2.3) ────────────────────────────────────────
 # A marker inside the ~/.claude volume stands in for a real login, so this can be checked
 # without one.
+#
+# hold_container before every exec group in this section. #41 makes `--rebuild` end with the
+# container stopped, so each of these `podman exec` calls would otherwise fail with "container is
+# not running" -- and an assert_fail like rebuild:container-filesystem-is-reset would PASS for
+# that reason instead of the one it is testing, which is the worst outcome available here.
+hold_container
 podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker'
 podman exec "$NAME" sh -c 'echo marker > /home/student/.config/gh/.vt-marker'
-L --rebuild >/dev/null 2>&1
+LV --rebuild >/dev/null 2>&1
+hold_container
 assert_eq "rebuild:claude-volume-survives" "marker" \
           "$(podman exec "$NAME" cat /home/student/.claude/.vt-marker 2>&1)"
 assert_eq "rebuild:gh-volume-survives" "marker" \
           "$(podman exec "$NAME" cat /home/student/.config/gh/.vt-marker 2>&1)"
 # ...and things installed IN the container do not, which is the point of --rebuild.
 podman exec "$NAME" sh -c 'echo x > /tmp/.vt-ephemeral'
-L --rebuild >/dev/null 2>&1
-assert_fail "rebuild:container-filesystem-is-reset" \
-            sh -c "podman exec ${NAME} test -f /tmp/.vt-ephemeral"
+LV --rebuild >/dev/null 2>&1
+hold_container
+# Guarded, because this is an assert_fail and those are the ones that pass for free when the
+# precondition is wrong. If the container is not up, `test -f` fails because exec failed.
+if [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" != running ]; then
+    fail "rebuild:container-filesystem-is-reset" \
+         "could not raise the container, so this would have passed without testing anything"
+else
+    assert_fail "rebuild:container-filesystem-is-reset" \
+                sh -c "podman exec ${NAME} test -f /tmp/.vt-ephemeral"
+fi
 # projects/ is on the host, so it is untouched by construction — assert it anyway.
 echo keep > "$REPO/projects/.vt-keep"
-L --rebuild >/dev/null 2>&1
+LV --rebuild >/dev/null 2>&1
 assert_eq "rebuild:projects-untouched" "keep" "$(cat "$REPO/projects/.vt-keep")"
 rm -f "$REPO/projects/.vt-keep"
 
 # The policy files live in /etc, in the image layer, precisely so a rebuild restores them —
 # unlike anything under ~/.claude, which is a volume seeded once and never refreshed.
+hold_container
 assert_ok "rebuild:claude-policy-survives" \
           sh -c "podman exec ${NAME} test -f /etc/claude-code/CLAUDE.md -a -f /etc/claude-code/managed-settings.json"
 
 # ─── --full-rebuild  (§2.4, §9.2) — destructive, opt-in ────────────────────────
 if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
+    hold_container
     podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
     printf '%b' '\033[B\n' | script -q -c "./cs193v --full-rebuild" /dev/null >/dev/null 2>&1
+    hold_container
     assert_fail "full-rebuild:volume-contents-are-gone" \
                 sh -c "podman exec ${NAME} test -f /home/student/.claude/.vt-marker"
-    assert_eq "full-rebuild:container-is-running-again" "running" \
+    # INVERTED BY #41: like every maintenance verb, --full-rebuild leaves nothing running. Read
+    # BEFORE the hold_container above would confuse it, so this samples the state the verb itself
+    # left -- which is why it re-stops first rather than trusting where we happen to be.
+    podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
+    printf '%b' '\033[B\n' | script -q -c "./cs193v --full-rebuild" /dev/null >/dev/null 2>&1
+    assert_eq "full-rebuild:leaves-nothing-running" "exited" \
               "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 else
     skip "full-rebuild:volume-contents-are-gone" \
          "destructive — it deletes the claude/gh/vercel login volumes. Re-run with CS193V_DESTRUCTIVE=1"
-    skip "full-rebuild:container-is-running-again" "see above"
+    skip "full-rebuild:leaves-nothing-running" "see above"
 fi
 # Whether or not it ran, --full-rebuild must refuse to proceed without an explicit yes.
-out="$(L --full-rebuild)"
+out="$(LV --full-rebuild)"
 assert_says "full-rebuild:non-tty-changes-nothing" "Nothing was changed" "$out"
 
 # ─── --update  (§9.1) ──────────────────────────────────────────────────────────
@@ -303,6 +453,13 @@ else
 fi
 
 # ─── doctor against a real container ───────────────────────────────────────────
+# Most of what doctor prints -- the in-container uid, the memory limit, zombies, the tmux and
+# tunnel sections, the clock skew -- is guarded on the container actually RUNNING, because none of
+# it can be read from a stopped one. Since #41 the preceding groups leave it stopped, so the report
+# has to be given something to report on. Without both of these, five assertions below fail against
+# a perfectly correct doctor that simply had nothing to look at.
+hold_container
+require_tunnel
 out="$(L doctor)"
 assert_contains "doctor:reports-the-real-podman-version" "5." "$out"
 # KNOWN BUG, documented as ERRORS.md B14: verb_doctor calls load_args but never
@@ -337,6 +494,9 @@ record "doctor:zombie-count-with-a-tunnel-up" "$(printf '%s' "$out" | sed -n 's/
 record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
 
 # ─── ports verb against a real container ───────────────────────────────────────
+# `ports` requires a running container and does not start one -- correctly, since it is a
+# read-only report. Under #41 that means the suite has to raise it first.
+hold_container
 assert_contains "ports-verb:runs-the-in-container-tool" "forwarded:" "$(L ports)"
 
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────
@@ -357,6 +517,11 @@ tunnel_ctl() {
     [ -n "$p" ] || return 0
     ps -p "$p" -o args= 2>/dev/null | sed -n 's/.*-S \([^ ]*\).*/\1/p' | head -1
 }
+# The tunnel has to be up before we can ask which one is ours. Since #41 the groups above end with
+# it deliberately down -- a stopped container has no tunnel -- so this is the common case here now,
+# and without it tunnel_pid finds nothing and the forward-direction assertions below fail with "no
+# control socket found" rather than testing anything.
+require_tunnel
 CTL="$(tunnel_ctl)"
 record "tunnel:control-socket" "${CTL:-<none>}"
 
@@ -380,7 +545,6 @@ record "tunnel:control-socket" "${CTL:-<none>}"
 #
 # The CONTAINER is deliberately left running: it is what the developer goes on to use, and the
 # next `./cs193v` brings the tunnel back in about a second.
-no_forwards() { [ "$(count_fwd)" = 0 ]; }
 release_tunnel() {
     local p
     p="$(tunnel_pid)"
@@ -398,6 +562,10 @@ release_tunnel() {
 # always worked (#34). Then poll instead of sleeping: python's http.server writes its "Serving
 # HTTP on ..." line to a discarded stderr, so its readiness is not otherwise observable.
 clean_vt_processes
+# Both halves of this test's precondition, made explicit: a running container to serve from, and
+# the 46 forwards to reach it through. Neither survives a maintenance verb any more, and without
+# this the assertion below would fail with 000 and read like a broken tunnel.
+require_tunnel
 podman exec -d "$NAME" python3 -m http.server 3000 --bind 127.0.0.1 >/dev/null 2>&1
 srv_code=000
 srv_answered() {                      # 0 once anything at all comes back from :3000
@@ -450,7 +618,16 @@ assert_eq "tunnel:releases-its-ports-when-the-container-dies" "0" "$(count_fwd)"
 record "tunnel:seconds-to-release-ports" "$i"
 # --reset-tunnel must be safe to suggest even then, rather than erroring at a stopped container.
 assert_says "reset-tunnel:says-so-when-nothing-is-running" "no container running" "$(L --reset-tunnel)"
-L --rebuild >/dev/null 2>&1
+# INVERTED BY #41: a rebuild used to end with a fresh tunnel and all 46 forwards up. It now ends
+# with the container stopped and the ports handed back, so what has to be true is that the next
+# LAUNCH brings them back -- which is the property that actually matters, since a tunnel that could
+# not be re-established after a rebuild would leave the student with no forwarding at all.
+LV --rebuild >/dev/null 2>&1
+wait_until 30 no_forwards || true
+assert_eq "tunnel:a-rebuild-hands-the-ports-back" "0" "$(count_fwd)"
+LB >/dev/null 2>&1
+hold_container
+require_tunnel
 assert_eq "tunnel:comes-back-after-a-rebuild" "46" "$(count_fwd)"
 
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
@@ -483,11 +660,12 @@ assert_eq "cleanup:no-stray-volumes" "" "$(printf '%s' "$stray_vols" | sed 's/ *
 # ─── §A.13 performance baselines — recorded, never asserted ────────────────────
 T0="$(date +%s%N)"; L --dev-print-command >/dev/null 2>&1; T1="$(date +%s%N)"
 record "perf:launcher-overhead-ms" "$(( (T1 - T0) / 1000000 ))"
+hold_container
 T0="$(date +%s%N)"; podman exec "$NAME" true; T1="$(date +%s%N)"
 record "perf:podman-exec-overhead-ms" "$(( (T1 - T0) / 1000000 ))"
-T0="$(date +%s)"; L --rebuild >/dev/null 2>&1; T1="$(date +%s)"
+T0="$(date +%s)"; LV --rebuild >/dev/null 2>&1; T1="$(date +%s)"
 record "perf:rebuild-seconds" "$((T1 - T0))"
-T0="$(date +%s)"; L >/dev/null 2>&1; T1="$(date +%s)"
+T0="$(date +%s)"; release_container; L >/dev/null 2>&1; T1="$(date +%s)"
 record "perf:subsequent-launch-seconds" "$((T1 - T0))"
 
 # ─── hand the ports back  (must be last: everything above needs the tunnel up) ─
@@ -497,5 +675,10 @@ record "perf:subsequent-launch-seconds" "$((T1 - T0))"
 # that never reach this line.
 release_tunnel
 assert_eq "cleanup:the-46-forwards-are-released" "0" "$(count_fwd)"
+# Leave the container stopped as well, which since #41 is the honest resting state rather than a
+# courtesy: a running container is supposed to mean somebody has a terminal open on it, and a
+# suite that walks away leaving one up is asserting an invariant it just broke. Whichever suite
+# needs it next raises it through hold_container.
+podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
 record "cleanup:tunnel-released" \
-       "the container is still running; the next ./cs193v brings the tunnel back"
+       "the ports are back and the container is stopped; the next ./cs193v brings both up"

@@ -116,7 +116,22 @@ working so that publishing an image later stays a decision rather than a rewrite
 ./cs193v --dev-print-command      # see the exact podman run line
 ./cs193v --rebuild                # fresh container; logins kept
 ./cs193v --full-rebuild           # test the cold-start path a student sees
+./cs193v --stop                   # stop it by hand — see below, you will need this
 ```
+
+**Read this before the first time a verb refuses you.** Since issue #41 the container only runs
+while a terminal window is open on it, and every verb above except `--dev-build` **leaves it
+stopped when it finishes**. Two things follow that will otherwise waste your afternoon:
+
+- Each of these verbs **refuses while a session is live**, naming `--stop`. So you cannot
+  `--rebuild` from a second terminal while your first one is sitting in a shell. Leave the shell,
+  or run `--stop`.
+- `--rebuild` no longer leaves you a running container to `podman exec` into. If you want one
+  without a shell — which is what the test suite wants — start it yourself with
+  `podman start cs193v-$CS193V_INSTANCE`. There is deliberately no launcher verb for it: "running
+  with nobody attached" is the state #41 abolished, and adding a verb for it would put a hole in
+  the invariant to serve the tests. `hold_container` in `tests/lib/assert.sh` is that one line, and
+  says so.
 
 `--dev-build` is `--build` plus a shell, and both go through the same `build_image`. That
 matters more than it used to: the path you exercise every day is now the path a student
@@ -252,10 +267,13 @@ broken, so the image had never built at all. See `ERRORS.md` A1.
 §5 lists the questions research could not settle. **Answered on native Linux** (details and
 measurements in `ERRORS.md` §D):
 
-- does closing a terminal window kill a foreground server? — **No.** All five shapes
-  survive and stay reachable, exactly as conmon's source suggested. Both the design doc and
-  the managed `CLAUDE.md` currently warn otherwise; confirm on macOS and WSL before
-  rewording, since the exec client lives outside the VM there.
+- does closing a terminal window kill a foreground server? — **It does now, because issue #41
+  made it.** The measurement was **No**: all five shapes survived and stayed reachable, exactly
+  as conmon's source suggested. That answer stands as a fact about podman and is still recorded
+  (`ERRORS.md` D1, `sighup:tab-matrix-*`), but it is no longer the behaviour a student sees. #41
+  judged "closing the window provably does nothing" to be the wrong default, so the launcher
+  traps SIGHUP and stops the container. The measurement is now the *reason the host has to do
+  it*: nothing inside the container can detect a closed window, since the client never dies.
 - does `systemd=true` in WSL deliver cgroup delegation? — **still open**, but on native
   Linux the cap is enforced exactly (`memory.max` == `--memory`), an OOM is clean at exit
   137, and the container survives it.
@@ -328,6 +346,42 @@ original objections were addressed rather than overruled: the container is never
 ports to open (the forward list is fixed and comes from `CS193V_PORTS`), and the relay is one
 ssh process rather than a supervised fleet. The third objection — that it hides the
 bind-address distinction — was accepted as true and judged worth the cost.
+
+**No longer on this list: stopping the container when the terminal closes.** The original design
+deliberately did the opposite, and issue #41 reversed it. Four alternatives were considered and
+rejected on the way, and each is worth recording because each looks better than it is:
+
+- **Reference-counting live terminals**, so several windows could share one container and the last
+  one out stopped it. Rejected on failure modes, not on effort. It needs the same "is anyone still
+  there?" question answered, and it answers it from host-side state that can go stale — and the two
+  wrong answers are not symmetric. A refcount that wrongly says "someone is still there" **leaks**
+  a running container, which the next launch and `--stop` both recover from. A refusal that wrongly
+  says it **locks a student out of their own container** with a message they know to be false. Given
+  a choice about which way to be wrong, the leak wins. So multiple windows went away entirely, and
+  a single `podman ps` check replaced ~40 lines of bookkeeping.
+- **`podman run -it --rm`**, letting the container's life be the terminal's by construction, with no
+  trap to get right. Rejected on three counts: `--rm` throws away the writable layer, so things
+  installed with `sudo` would no longer survive until a rebuild; a second launch cannot `run` the
+  same name, so the `exec` path is needed anyway and there would be two paths instead of one; and
+  the tunnel's `ProxyCommand` needs the container already up, which a foreground `run` does not give.
+- **`podman rm` instead of `stop`** on teardown. Cleaner in the abstract and it would make prompt
+  injection unable to persist at all, but it silently redefines `--rebuild` as a no-op and breaks the
+  documented promise that packages you install stay installed. `stop` keeps the writable layer, and
+  the `exited → podman start` path was already written and tested.
+- **A grace period** before stopping, so an accidental close could be undone. Rejected because it
+  reintroduces precisely the confusion #41 removes: "closing the window stops things, except
+  sometimes, for a while" is harder to hold in your head than either rule alone.
+
+The cost that was accepted rather than solved: an accidental window close is **unrecoverable**. Every
+tab, its scrollback and any `claude` session mid-task go with it, where the old design would have
+handed them all back. That is stated plainly in `CONTAINER-DESIGN.md` rather than hidden. Also
+accepted: a force-quit runs no trap, so it leaves a container up with nothing attached — tolerated
+because it degrades to exactly the old behaviour, and both the refusal and `--stop` recover from it.
+
+One thing NOT done, and available if the lost-work cost turns out to bite: `podman stop` sends
+SIGTERM to PID 1 only, and every other process in the container is killed by the cgroup teardown.
+So no student process gets a clean shutdown, and `nano`'s emergency-save on TERM never fires.
+TERMing the container's own processes before the stop would fix that; it is a separate change.
 
 Each rejection is documented where it would otherwise be tempting — the invariants block
 in `.config/container.args`, and the comments in the `Containerfile`.

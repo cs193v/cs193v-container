@@ -22,6 +22,17 @@ first run (about 114 MB), which works but is slow and is not what the image was 
   does not limit what a test can reach. That list limits what the student's own browser can
   reach from outside. A test hitting `http://localhost:9999` is fine.
 
+## Nothing here outlives the terminal
+
+This container is stopped when the student closes their terminal window, and everything running
+in it stops with it. There is no way around this from inside — `nohup`, `setsid` and
+backgrounding all die with the container.
+
+So never tell the student to leave a server running and come back to it later, and never treat a
+long-running process as something that will still be there next session. If work needs to
+survive, it has to be a file in `~/projects` (which is on their own computer) rather than a
+running process.
+
 ## Miscellaneous
 
 - `sudo` works without a password.

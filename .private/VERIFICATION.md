@@ -390,6 +390,22 @@ time E 'rm -rf /home/student/projects/.vt-many'
 
 ## A.8 The SIGHUP matrix — the disputed question, automated
 
+> **REFRAMED BY ISSUE #41.** The matrix below still runs and still comes back `alive=yes` for every
+> shape, but it no longer answers the question in this heading, and the simulation it uses is no
+> longer the right one.
+>
+> Killing the `podman exec` client modelled a closed window only while the launcher `exec`'d into
+> podman. It does not now: the launcher stays resident for the session, so a closing window signals
+> the **launcher**, whose trap stops the whole container. Killing the client instead leaves the
+> launcher alive and the container up — a real state (a force-quit) but not this one.
+>
+> So the probes below now measure what happens when a **tab** closes, inside a container that stays
+> up, and they are recorded rather than asserted (`sighup:tab-matrix-*`). The window-closing question
+> is answered by destroying the pty, which HUPs the foreground process group exactly as a terminal
+> does; `70-sighup.sh` does that and asserts the container stops, the 46 forwards come back, and a
+> server in a tab dies with it. The one thing still not automatable is the actual close button — see
+> §5.1, which is now the most important manual check in `tests/MANUAL.md`.
+
 "Closing the terminal window" is simulatable: kill the local `podman exec` **client** process. This turns
 the single most important open question into a repeatable matrix.
 
@@ -690,9 +706,16 @@ resolving to `::1`.
 
 ## 5. Disputed behaviours needing a human or specific hardware
 
-**5.1 — Closing a terminal window, for real.** §A.8 simulates it by killing the exec client. Also do it
-by hand — click the window's close button with a foreground server running — and confirm the result
-matches the automated matrix. If they differ, the automated probe is not modelling the real case.
+**5.1 — Closing a terminal window, for real.** Since #41 this is the check the feature rests on, and
+the full procedure now lives in `tests/MANUAL.md` §5.1. In short: start a server in a tab, reach it
+from the browser, click the window's close button, and confirm the container goes to `exited`, the 46
+forwards are released, and the next `./cs193v` reuses the same container with fresh tabs.
+
+Automated and green on Linux, where `70-sighup.sh` destroys the pty — the same mechanism a terminal
+uses. What no automation can do is press the button, and **what no Linux run can answer is macOS and
+WSL**, where the `podman exec` client lives outside the VM. Do it on Terminal.app, iTerm2 and WSL, and
+force-quit each of them too: expect a container left running, explained by the next `./cs193v` and
+cleared by `--stop`.
 
 **5.2 — macOS provider behaviour (Apple Silicon only).** Run §A.7's ownership checks under **both**
 providers:

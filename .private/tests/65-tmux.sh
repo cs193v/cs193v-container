@@ -140,11 +140,17 @@ else
 A fixture is resolving through PATH to the real CLI. See hx_fake_run in tmux-harness/lib.sh."
 fi
 
-# The suite kills its own tmux servers on exit, but a crashed run might not have. Anything
-# left alive on a stray socket would be picked up by the NEXT `./cs193v` as a session to
-# reattach to, handing a student a test fixture instead of a shell. Match on the socket
-# files rather than on process names: tmux rewrites its own argv, so `pkill -f "tmux -L …"`
-# does not reliably match a running server.
+# The suite kills its own tmux servers on exit, but a crashed run might not have.
+#
+# The reason changed with #41 and the cleanup is still needed. It used to be that a session left on
+# a stray socket would be ADOPTED by the next `./cs193v`, handing a student a test fixture instead
+# of a shell -- nothing reattaches now, so that particular hazard is gone. What remains is that
+# these servers hold processes and pid slots inside a container that is meant to be idle, and a
+# fixture left on the `cs193v` socket itself would make the next launch's session claim fail: the
+# launcher would refuse with err.session-in-use against a container nobody is really in.
+#
+# Match on the socket files rather than on process names: tmux rewrites its own argv, so
+# `pkill -f "tmux -L …"` does not reliably match a running server.
 podman exec "$NAME" sh -c '
     for s in /tmp/tmux-*/*; do
         [ -S "$s" ] || continue

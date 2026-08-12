@@ -853,6 +853,29 @@ any of them with `tests/run-tests.sh --tier container` (every `REC` line) and
 
 ### D1. The SIGHUP matrix — does closing the window kill a server?
 
+> **SUPERSEDED AS ADVICE BY ISSUE #41, BUT NOT AS MEASUREMENT.** Everything below is still an
+> accurate account of what conmon and podman do, and it is still what `70-sighup.sh` records.
+> What changed is the conclusion drawn from it.
+>
+> The finding here — that nothing dies when the exec client goes away — was originally read as
+> good news, and the design leaned on it: the container outlived every window and the next
+> `./cs193v` reattached you to your tabs. #41 reversed that judgement. Closing a window is the
+> universal gesture for "I am done", and a design where it provably means *nothing* leaves a
+> student with servers running in a container they have forgotten is up.
+>
+> So the launcher now stops the container when its terminal goes away. The measurement below is
+> **why that has to be done from the host**: nothing inside the container can detect a closed
+> window at all. The client does not die, the pty stays open, and tmux reports the session
+> attached indefinitely — so `destroy-unattached on` would not fire, and no in-container
+> mechanism could substitute. The only party that can tell is the process the window actually
+> kills, which is the launcher. See `open_shell`/`shell_teardown` in `cs193v`, and the rewritten
+> `70-sighup.sh`.
+>
+> The four-shape matrix is still measured, now under `sighup:tab-matrix-*`, and still comes back
+> `alive=yes` for all four. It answers "what happens when a TAB closes" rather than a window. The
+> old `setsid`-survives assertion is **deleted**: advising a student to detach a server with
+> `setsid` would be advising them to do something the container's own lifetime undoes.
+
 **No. Every shape survives on native Linux.**
 
 ```
@@ -889,6 +912,16 @@ where it sits. `70-sighup.sh` asserts the tmux shape alongside the five original
 flipping it back breaks a test rather than a student's afternoon. What the reattach design
 adds on top is that the orphaned session is not merely alive but *recoverable*: the next
 `./cs193v` attaches to it, because cs193v-shell prefers a session with no client.
+
+**Post-#41 footnote on that last paragraph.** The reattach half is gone — `cs193v-shell` now
+claims one fixed session name and refuses a duplicate — but `destroy-unattached` is still `off`,
+and the reasoning above is *not* why any more. The current reason is narrower and easier to get
+wrong: setting it `on` would not fire on a closed window (per the measurement at the top of this
+entry, the client does not die), so it would buy nothing against the case it appears to address,
+while newly breaking the case it does reach — closing one **tab** briefly leaves the session
+unattached, and `on` would destroy the session and every other tab with it. The comment in
+`files/tmux/tmux.conf` says this where it sits, so nobody re-derives the old argument and then
+"simplifies" the setting on the strength of it.
 
 ### D0. systemd's prompt hook silently disabled every tab label
 
@@ -954,13 +987,27 @@ session only if it has no client, so it would never find one, every launch would
 fresh session, and the student's real tabs would pile up unreachable behind a ghost — the
 exact "invisible orphaned session" failure that `destroy-unattached on` was meant to prevent.
 
-The fix is `prune_stale_tmux_clients` in `./cs193v`, and it has to live on the **host**
+The fix *was* `prune_stale_tmux_clients` in `./cs193v`, and it had to live on the **host**
 because the host is the only side that can tell: the client is a `podman exec` process it
-started itself. `cs193v-shell` stamps each session with `@cs193v_host_pid`, and the next
-launch detaches any session whose recorded pid is gone (checked with `kill -0` plus a
-`ps | grep podman` guard against pid reuse). `60-container.sh` asserts the whole chain,
-including the conmon behaviour itself — **if that assertion ever starts failing it is good
-news**, because it means clients die on their own now and the prune can be deleted.
+started itself. `cs193v-shell` stamped each session with `@cs193v_host_pid`, and the next
+launch detached any session whose recorded pid was gone (`kill -0` plus a `ps | grep podman`
+guard against pid reuse).
+
+**All of that is deleted, and issue #41 is why.** The prune existed to serve reattachment — it
+made an orphaned session findable so the next launch could adopt it. Nothing reattaches now: the
+container stops when the terminal does, so there is no orphaned session to prune, and the stamp,
+the liveness check and the prune went together.
+
+**The measurement above is not obsolete, though — it is now load-bearing for something else.**
+Because nothing inside the container can distinguish a dead client from a live one, no
+in-container mechanism can implement "stop when the window closes" *at all*: not
+`destroy-unattached`, not tmux's client tracking, not a watchdog. That is precisely why the
+teardown lives on the host, as a SIGHUP trap in `open_shell`. This entry is the reason that design
+is not over-engineering.
+
+`60-container.sh` still asserts the conmon behaviour itself — **if that assertion ever starts
+failing it is good news**, because clients dying on their own would make `destroy-unattached on` a
+viable second line of defence.
 
 ### D2. Does seccomp block `mount()` in a nested user namespace?
 

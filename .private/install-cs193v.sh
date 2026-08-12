@@ -113,9 +113,13 @@ cat <<EOF
   Put your projects in $DIR/projects — inside the container they appear
   at ~/projects.
 
+  Closing the terminal window stops the container and anything running
+  in it. Your files are on your own computer, so they are always safe.
+
   Useful later:
       ./cs193v doctor     a report to paste if you ask staff for help
       ./cs193v ports      why can't my browser see my server?
+      ./cs193v --stop     stop it if a window was closed unexpectedly
   ────────────────────────────────────────────────────────────────────
 
 EOF

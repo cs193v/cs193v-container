@@ -31,8 +31,13 @@ out="$(launcher --help)"
 assert_says "usage:mentions-ports"   "cs193v ports"   "$out"
 assert_says "usage:mentions-doctor"  "cs193v doctor"  "$out"
 assert_contains "usage:mentions-rebuild" "--rebuild"      "$out"
-# The "many windows are fine" promise is the one students most need up front.
-assert_says "usage:explains-many-windows" "as many terminal windows" "$out"
+# INVERTED BY #41. This used to assert the "many windows are fine" promise, which was the thing
+# students most needed up front. Closing a window now stops the container, so the two facts
+# students most need up front are that leaving takes your dev server with it, and that a second
+# place to work is a TAB rather than a window.
+assert_says "usage:says-closing-the-window-stops-things" "stops the container" "$out"
+assert_says "usage:points-at-tabs-not-windows" "CTRL+T" "$out"
+assert_contains "usage:mentions-stop" "--stop" "$out"
 
 assert_eq "dispatch:unknown-verb-exits-2" "2" "$(launcher_rc bogusverb)"
 assert_says "dispatch:unknown-verb-prints-usage" "cs193v ports" "$(launcher bogusverb)"
@@ -207,6 +212,128 @@ launcher >/dev/null 2>&1
 assert_eq "state:exited-is-started" "1" "$(shim_count '^start ')"
 assert_eq "state:exited-is-not-recreated" "0" "$(shim_count '^run ')"
 
+# ─── closing the terminal stops the container  (#41) ───────────────────────────
+# The invariant every assertion in this group serves: A RUNNING CONTAINER IMPLIES AN OPEN
+# TERMINAL. The shim is the cheap place to hold the state machine to that, because none of it
+# needs a real container -- only that the launcher issues the right podman calls in the right
+# order and refuses at the right times.
+shim_state() { cat "$SHIM/state" 2>/dev/null; }
+
+# A launch that finishes leaves nothing running. Driven through a pty, because a piped launch
+# refuses at the tty check -- which stops the container too, but for a different reason, and
+# asserting on that would prove the wrong thing.
+shim_new
+launcher_pty >/dev/null 2>&1
+assert_eq "lifecycle:a-finished-session-leaves-nothing-running" "exited" "$(shim_state)"
+if [ "$(shim_count '^stop ')" -ge 1 ]; then pass "lifecycle:the-launcher-stops-the-container"
+else fail "lifecycle:the-launcher-stops-the-container" \
+          "no podman stop was issued, so the container outlived its terminal"; fi
+# -t bounds podman's OWN grace period, which defaults to 10 and would otherwise be spent
+# waiting on a PID 1 that traps TERM and exits in milliseconds. -i so an already-removed
+# container (a --rebuild from elsewhere) is not an error.
+assert_says "lifecycle:the-stop-is-bounded-and-forgiving" "stop -t 3 -i" \
+            "$(shim_log | tr '\n' ' ')"
+
+# The refusal. Piped rather than through a pty on purpose: refuse_if_session_live runs BEFORE
+# open_shell's tty check, so this is reachable without one -- and that ordering is what makes
+# the message a student sees rather than a hang.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_clear_log
+out="$(launcher)"
+assert_says "lifecycle:a-second-launch-refuses" "already have a CS193V session" "$out"
+assert_says "lifecycle:the-refusal-names-the-way-out" "cs193v --stop" "$out"
+# The crash caveat carries real weight: without it the message asserts something a student with
+# no other window open knows to be false, and a message they have caught lying once is one they
+# will not read again.
+assert_says "lifecycle:the-refusal-admits-it-may-be-a-crash" "crash" "$out"
+assert_eq "lifecycle:the-refusal-exits-nonzero" "1" "$(launcher_rc)"
+assert_eq "lifecycle:the-refusal-creates-nothing" "0" "$(shim_count '^run ')"
+assert_eq "lifecycle:the-refusal-removes-nothing" "0" "$(shim_count '^rm ')"
+# ...and it must not stop the container it just refused to disturb. Getting this wrong would
+# make a second launch a weapon: it would kill the session it was protecting.
+assert_eq "lifecycle:the-refusal-stops-nothing" "0" "$(shim_count '^stop ')"
+
+# Every maintenance verb refuses while a session is live, pointing at the same --stop, so there
+# is ONE answer to "the container is busy" rather than one per verb.
+for v in --rebuild --update --full-rebuild --build; do
+    shim_new
+    launcher >/dev/null 2>&1
+    shim_set state running
+    shim_clear_log
+    assert_says "lifecycle:$v-refuses-while-a-session-is-live" \
+                "already have a CS193V session" "$(launcher $v)"
+    assert_eq "lifecycle:$v-does-not-remove-a-live-container" "0" "$(shim_count '^rm ')"
+done
+
+# ...and each one stops the container when it finishes, because none of them is a session and
+# nobody is attached when they are done. This is what keeps the invariant above exact: without
+# it, "running" would mean either "somebody is working" or "a rebuild happened at some point",
+# and doctor could not tell a student which.
+for v in --rebuild --update; do
+    shim_new
+    shim_clear_log
+    launcher $v >/dev/null 2>&1
+    assert_eq "lifecycle:$v-leaves-nothing-running" "exited" "$(shim_state)"
+done
+
+# ─── --stop ────────────────────────────────────────────────────────────────────
+# The unified escape hatch, and the one command the refusal above names.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_clear_log
+# With no tty, menu() picks the SAFE default -- which for a verb that throws away a running
+# session must be "cancel". A --stop that stopped things when driven from a script would be a
+# footgun in exactly the place this project is most careful about.
+out="$(launcher --stop)"
+assert_eq "lifecycle:stop-defaults-to-cancel-without-a-tty" "running" "$(shim_state)"
+assert_says "lifecycle:stop-warns-before-it-acts" "anything running inside it will stop" "$out"
+
+# Down-arrow then ENTER selects the non-default, exactly as the --full-rebuild test does.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_clear_log
+launcher_tty '\033[B\n' --stop >/dev/null 2>&1
+assert_eq "lifecycle:stop-accepted-stops-the-container" "exited" "$(shim_state)"
+
+# Idempotent, because the student most likely to run it is the one who has already run it: the
+# refusal named --stop, they ran it, and they are trying again.
+shim_new
+shim_set state exited
+assert_says "lifecycle:stop-on-a-stopped-container-says-so" "nothing to stop" "$(launcher --stop)"
+assert_eq "lifecycle:stop-on-a-stopped-container-exits-0" "0" "$(launcher_rc --stop)"
+
+# ─── losing the create race  (#41) ─────────────────────────────────────────────
+# `podman run --name` IS the atomic test-and-set for absent -> running: name uniqueness is
+# enforced under podman's own database lock, so of two simultaneous launches exactly one creates
+# the container and the other gets this. Measured against podman 5.7.0 -- rc=125 and "the
+# container name ... is already in use by <id>".
+#
+# What this pins is that the loser gets the REFUSAL and not err.create-failed with a wall of
+# podman output, for something whose real meaning is "you already have a session open".
+shim_new
+shim_set run_rc 125
+shim_set run_err 'Error: creating container storage: the container name "cs193v" is already in use by 15bb56cdbb36. You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.'
+out="$(launcher)"
+assert_says "race:lost-create-is-reported-as-a-live-session" \
+            "already have a CS193V session" "$out"
+# BOTH negatives are flattened through _flatten, because these strings are inside the STOP box
+# and a raw substring match would silently stop matching the moment the box re-wraps a line --
+# an assert_not_contains that can no longer match is one that passes forever.
+#
+# The first spelling of this checked for "could not create", and err.create-failed actually says
+# "could not BE created", so it was vacuous on the day it was written.
+assert_not_contains "race:lost-create-is-not-reported-as-a-create-failure" \
+                    "could not be created" "$(_flatten "$out")"
+# The one that matters most: podman's own words must not reach the student here. err.create-failed
+# interpolates {{OUT}}, so getting this wrong shows a novice "creating container storage: ...
+# lchown ..." for something that means "you already have a window open".
+assert_not_contains "race:lost-create-does-not-leak-podmans-output" \
+                    "creating container storage" "$(_flatten "$out")"
+
 # ─── a container from a different copy of the course directory  (§2.7) ─────────
 # Without this a student who re-downloads after breaking something silently gets the old
 # container with the old mount, and their edits appear to vanish.
@@ -364,6 +491,10 @@ assert_says "ports:refused-when-not-running" "not running yet" "$(launcher ports
 
 shim_new
 launcher >/dev/null 2>&1
+# ...and put it back to running, which a bare launch no longer leaves behind (#41): that launch
+# has no terminal, so it refuses and stops the container on the way out. Without this the fake
+# is `exited` here and `ports` correctly refuses -- testing the line above instead of this one.
+shim_set state running
 shim_clear_log
 out="$(launcher ports)"
 assert_says "ports:execs-the-in-container-tool" "$NAME ports" "$(shim_log | tr '\n' ' ')"
@@ -465,7 +596,11 @@ shim_new
 out="$(launcher)"
 assert_says "noterm:refuses-without-a-terminal" "could not open a shell" "$out"
 assert_says "noterm:explains-why"               "not being run from a terminal" "$out"
-assert_says "noterm:says-the-container-is-fine" "container is set up and running" "$out"
+# INVERTED BY #41: the container is no longer left running, because a running container with
+# nothing attached is exactly the state the change exists to prevent -- so the message can
+# promise it is set up, but not that it is up.
+assert_says "noterm:says-the-container-is-set-up" "container is set up" "$out"
+assert_says "noterm:says-it-was-stopped-again"    "has been stopped again" "$out"
 # The message has to name what a script SHOULD use, or it is just a dead end.
 assert_says "noterm:points-at-rebuild" "cs193v --rebuild" "$out"
 assert_says "noterm:points-at-doctor"  "cs193v doctor"    "$out"

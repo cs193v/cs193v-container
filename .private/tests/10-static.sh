@@ -370,21 +370,131 @@ assert_contains "tmux:shell-names-the-config-explicitly" '-f "$CONF"' \
                 "$(cat $PRIVATE/files/cs193v-shell)"
 assert_contains "tmux:shell-uses-a-dedicated-socket" '-L "$SOCKET"' \
                 "$(cat $PRIVATE/files/cs193v-shell)"
-# Reattach before create is what makes a closed window recoverable rather than lost.
-assert_contains "tmux:shell-prefers-an-unattached-session" "session_attached" \
-                "$(cat $PRIVATE/files/cs193v-shell)"
 assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat $REPO/cs193v)"
-# Closing a terminal window does NOT kill the tmux client inside the container -- conmon
-# keeps the pty open and tmux reports the session attached forever (asserted live in
-# 60-container.sh). Only the host can tell a stale client from a live one, so the launcher
-# prunes them before attaching. Without it, "close the window, run cs193v again, get your
-# tabs back" silently becomes a brand-new session every time.
-assert_contains "launcher:prunes-stale-tmux-clients" "prune_stale_tmux_clients" \
-                "$(cat $REPO/cs193v)"
-assert_contains "launcher:passes-its-pid-so-the-prune-can-work" 'CS193V_CLIENT_PID=$$' \
-                "$(cat $REPO/cs193v)"
-assert_contains "tmux:shell-records-the-owning-client" "@cs193v_host_pid" \
-                "$(cat $PRIVATE/files/cs193v-shell)"
+
+# ─── the lifecycle: closing the terminal stops the container  (#41) ─────────────
+# Four assertions used to live here, and they pinned the OPPOSITE design: reattach to an
+# unattached session, prune stale clients, stamp the owning pid. All three mechanisms are gone,
+# so the assertions went with them. What follows pins the shape that replaced them AND the
+# deletions themselves, because the failure mode of a half-applied change here is a student's
+# container left running forever with nothing attached to it.
+#
+# FUNCTION BODIES, not the whole file, for the exec check below. `exec podman exec` MUST still
+# appear in verb_ports -- that is not a session and takes no reference -- so a file-wide check
+# for its absence would forbid the one place it is still right.
+fn_body() {                           # fn_body NAME FILE -> that function's source
+    sed -n "/^$1() {/,/^}/p" "$2"
+}
+launcher_src="$(cat $REPO/cs193v)"
+shell_src="$(cat $PRIVATE/files/cs193v-shell)"
+open_shell_body="$(fn_body open_shell $REPO/cs193v)"
+# stop_container, not shell_teardown: the latter is only the once-guarded wrapper the trap uses,
+# and the ordering that matters lives in the former, which --stop and the maintenance verbs
+# also call. Asserting the order against the wrapper would pass while the real stop had it
+# backwards.
+teardown_body="$(fn_body stop_container $REPO/cs193v)"
+guard_body="$(fn_body shell_teardown $REPO/cs193v)"
+
+# THE load-bearing line. `exec` replaces the launcher with podman, so no process survives the
+# shell to stop anything -- which is precisely why the old design could not have implemented
+# #41 without this changing, and why it is asserted ahead of everything else here.
+assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shell_body"
+assert_contains "launcher:installs-the-teardown-trap" "trap shell_teardown" "$open_shell_body"
+# EXIT alone is not enough: a closed window delivers HUP, and bash without a HUP trap dies
+# without running the EXIT one. INT/TERM cover Ctrl-C and a kill.
+for sig in EXIT HUP INT TERM; do
+    assert_match "launcher:teardown-traps-$sig" "trap shell_teardown.*$sig" "$open_shell_body"
+done
+
+# The tunnel goes down BEFORE the container, always. remove_container documents why in full:
+# an ssh client outliving its container holds all 46 host ports against a dead pipe, so the
+# next tunnel can bind none of them. Asserted as an ORDER, because both lines being present
+# in the wrong sequence is the bug.
+assert_contains "launcher:teardown-drops-the-tunnel" "tunnel_down" "$teardown_body"
+assert_contains "launcher:teardown-stops-the-container" "stop -t" "$teardown_body"
+td_grep() { printf '%s\n' "$teardown_body" | grep -nE "$1" | head -1 | cut -d: -f1; }
+ln_tun="$(td_grep 'tunnel_down')"; ln_stop="$(td_grep 'stop -t')"
+if [ -n "$ln_tun" ] && [ -n "$ln_stop" ] && [ "$ln_tun" -lt "$ln_stop" ]; then
+    pass "launcher:teardown-drops-the-tunnel-before-the-container"
+else
+    fail "launcher:teardown-drops-the-tunnel-before-the-container" \
+         "want tunnel_down before the stop; got tunnel_down=$ln_tun stop=$ln_stop"
+fi
+# Reuse pm/pmq rather than a fourth hand-rolled timeout, and bound podman's OWN grace period:
+# entrypoint.sh traps TERM and exits immediately, so `stop`'s default -t 10 spends seven
+# seconds of headroom on a process that exits in milliseconds. -i keeps --stop idempotent.
+assert_match "launcher:teardown-bounds-podmans-own-grace" 'stop -t [0-9]' "$teardown_body"
+# HUP runs the handler and EXIT then runs it again, so without a guard the student gets two
+# "stopping" lines for one stop.
+assert_contains "launcher:teardown-runs-once" "TEARDOWN_DONE" "$guard_body"
+
+# One session at a time. The refusal is the whole student-facing contract of #41, and its
+# message has to name the way out or a force-quit strands somebody.
+assert_contains "launcher:refuses-a-second-session" "err.session-in-use" "$launcher_src"
+assert_contains "messages:refusal-exists" "[[err.session-in-use]]" "$(cat $PRIVATE/messages.txt)"
+assert_contains "messages:refusal-names-the-way-out" "--stop" \
+                "$(sed -n '/\[\[err.session-in-use\]\]/,/^\[\[/p' $PRIVATE/messages.txt)"
+# The crash caveat is load-bearing prose, not decoration: without it the message asserts
+# something a student with no other window open knows to be false, and they stop believing it.
+assert_match "messages:refusal-admits-it-may-be-a-crash" 'crash' \
+             "$(sed -n '/\[\[err.session-in-use\]\]/,/^\[\[/p' $PRIVATE/messages.txt)"
+assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
+
+# Every verb that would disturb a live session refuses first, pointing at the same --stop, so
+# there is ONE way to deal with "the container is busy" rather than one per verb.
+for v in verb_rebuild verb_update verb_full_rebuild verb_build; do
+    assert_contains "launcher:$v-refuses-while-a-session-is-live" \
+                    "refuse_if_session_live" "$(fn_body $v $REPO/cs193v)"
+done
+assert_match "launcher:bare-launch-refuses-while-a-session-is-live" \
+             "''\).*refuse_if_session_live" "$launcher_src"
+
+# --reset-tunnel MUST NOT refuse. Its entire purpose is fixing the tunnel WHILE a session is
+# live, and require_tunnel in lib/assert.sh calls it for exactly that reason, so wiring the
+# refusal into it would break the one verb students are told to reach for.
+#
+# THE POSITIVES ABOVE ARE WHAT KEEP THIS FROM GOING VACUOUS, and that is not a hypothetical
+# worry: an assert_not_contains for a name that exists nowhere passes forever and tests
+# nothing, which is exactly how #34's self-matching pgrep made this suite green whatever
+# happened. Rename the helper and the loop above fails loudly rather than this quietly.
+assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
+                    "refuse_if_session_live" "$(fn_body verb_reset_tunnel $REPO/cs193v)"
+
+# The deletions. Each of these strings is the whole of a mechanism that #41 removes, so its
+# survival means the old design is still half-wired underneath the new one.
+#
+# WHOLE-LINE COMMENTS BLANKED FIRST, exactly as the Containerfile ordering checks above do it,
+# and for the same reason: both scripts document what they removed, and that prose would match
+# these greps and fail forever. NOT `sed 's/#.*//'` -- that also eats inline `#` inside code,
+# and every tmux format string here is of the form '#{session_name}', so the broader strip would
+# hide a genuinely surviving `#{@cs193v_host_pid}` instead of catching it.
+launcher_code="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
+shell_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/files/cs193v-shell)"
+assert_not_contains "launcher:no-stale-client-pruning-left" \
+                    "prune_stale_tmux_clients" "$launcher_code"
+assert_not_contains "launcher:no-client-pid-plumbing-left" "CS193V_CLIENT_PID" "$launcher_code"
+assert_not_contains "launcher:no-host-client-liveness-check-left" \
+                    "host_client_alive" "$launcher_code"
+assert_not_contains "tmux:shell-no-longer-stamps-an-owner" "@cs193v_host_pid" "$shell_code"
+assert_not_contains "tmux:shell-no-longer-hunts-for-a-free-session" \
+                    "session_attached" "$shell_code"
+# Only one client can exist now, so a warning about having six of them can never fire.
+assert_not_contains "launcher:no-many-shells-warning-left" "warn.many-shells" "$launcher_code"
+assert_not_contains "messages:no-many-shells-string-left" \
+                    "[[warn.many-shells]]" "$(cat $PRIVATE/messages.txt)"
+
+# The race the state check cannot win on its own. `podman start` is idempotent and reports
+# nothing (measured against podman 5.7.0), so two launches that both see `exited` both reach
+# cs193v-shell -- and the tmux session name is what breaks the tie, atomically, inside the
+# container where it cannot go stale across a stop. Measured: rc=1, "duplicate session: NAME".
+assert_contains "tmux:shell-claims-one-fixed-session" "duplicate session" "$shell_src"
+# The lost-race exit status is a CONTRACT BETWEEN TWO FILES: cs193v-shell returns it, and the
+# launcher turns it into the refusal. Nothing else would notice them drifting apart, and the
+# symptom would be a lost race printing cs193v-shell's "this is a fault in the container image,
+# not something you did" box -- both wrong and alarming for something a student caused by
+# opening a second window.
+assert_contains "tmux:shell-defines-the-lost-race-status" "RACE_LOST_STATUS=3" "$shell_src"
+assert_contains "launcher:agrees-on-the-lost-race-status" "RACE_LOST_STATUS=3" "$launcher_src"
 # The tab-label hook arms itself once per prompt so that only the command the student typed
 # can relabel. On Ubuntu 26.04 systemd's own PROMPT_COMMAND entry runs after ours and used
 # to spend that arming flag, which disabled EVERY label silently -- the fallback looks
@@ -636,16 +746,30 @@ assert_not_contains "claims:no-phantom-doctor-ports-warning" "doctor" \
 assert_not_contains "claims:windows-not-called-case-insensitive" \
                     "macOS and Windows are case-insensitive" "$(cat $PRIVATE/CONTAINER-DESIGN.md)"
 
-# Both docs warned that closing a window "may stop" a server. Measured on native Linux, all
-# five shapes survive and stay reachable. The docs must now say what was measured and be
-# explicit about which platforms are still unverified, rather than hedging vaguely.
+# INVERTED BY #41. This used to require the doc to state the Linux measurement that closing a
+# window does NOT stop a server. That is no longer the behaviour, so the old promise must be gone
+# and the new one present.
 #
-# The claim has a second dependency now: with tmux as the landing point it is
-# `destroy-unattached off` that keeps a pane alive, not conmon. That half is asserted where
-# it can be asserted properly -- tmux:destroy-unattached-is-off above, and behaviourally in
-# 70-sighup.sh -- rather than by matching more prose here.
-assert_contains "claims:sighup-states-the-linux-measurement" "Linux" \
-                "$(sed -n '/does not stop a server/,+8p' $PRIVATE/CONTAINER-DESIGN.md)"
+# Both halves are asserted, and the negative is the one that matters: a doc which added the new
+# claim while leaving the old paragraph somewhere else would be actively worse than one that had
+# not been updated at all, and nothing else would catch it.
+#
+# Checked for the DIRECTION of the claim rather than for the topic being mentioned. The old check in
+# 70-sighup.sh looked only for the phrase "terminal window" and stayed green through a complete
+# reversal of what the doc said about it, which is how a documentation test survives the thing it
+# exists to catch.
+design_md="$(cat $PRIVATE/CONTAINER-DESIGN.md)"
+assert_not_contains "claims:no-stale-promise-that-work-survives-a-closed-window" \
+                    "does not stop a server" "$design_md"
+assert_not_contains "claims:no-stale-promise-of-tabs-coming-back" \
+                    "back in the same tabs" "$design_md"
+assert_contains "claims:closing-the-window-is-documented-as-stopping-things" \
+                "Closing your terminal window stops the container" "$design_md"
+# The COST has to be stated, not glossed. An accidental close is unrecoverable where the old design
+# handed everything back, and a doc that says only "it stops" undersells what a student loses.
+assert_match "claims:the-lost-work-cost-is-stated" 'unsaved' "$design_md"
+# ...and the way out of a refusal, since that is the one message a student is guaranteed to hit.
+assert_contains "claims:the-stop-verb-is-documented" "cs193v --stop" "$design_md"
 
 # ─── .gitignore ────────────────────────────────────────────────────────────────
 # -F, not -x alone: `projects/*` as a BRE is "project" + "s" + zero-or-more "/".

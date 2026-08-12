@@ -53,6 +53,20 @@ Do not kill the other developer's tunnel. To get out of the way, override `CS193
 
 That moves both the forwards and what the in-container `ports` command expects.
 
+**This got a lot better with issue #41, but it did not go away.** Closing your terminal window now
+stops your container *and* takes its tunnel down, handing all 46 ports back — so the usual cause of
+this, a tunnel from a session somebody finished with hours ago, largely stops happening. Two
+instances that are *both live right now* still collide exactly as described above.
+
+Two related consequences for working here:
+
+- **A container running with nothing attached to it is now an anomaly**, not the normal state.
+  `./cs193v doctor` says so and points at `./cs193v --stop`. It means a terminal was force-quit, or
+  a launcher was killed without its trap running.
+- **A second `./cs193v` against your own live session is refused**, not given a second session. If
+  you forget `CS193V_INSTANCE` while someone else is working, you now find out immediately instead
+  of silently sharing their container.
+
 ## Also worth knowing
 
 - **Disk is tight.** An interrupted `podman build` or `podman pull` fails loudly, but can

@@ -1,240 +1,288 @@
 #!/usr/bin/env bash
 # TIER: container
 #
-# VERIFICATION.md §A.8 — the SIGHUP matrix, which is the single most important open
-# question in the design and the one the docs currently hedge on.
+# WHAT CLOSING THE TERMINAL WINDOW DOES. Issue #41 inverted the answer, so this file is a
+# rewrite rather than an edit, and it is worth saying plainly what changed and why.
 #
-# "Closing the terminal window" is simulatable: kill the local `podman exec` CLIENT process.
-# That turns a question nobody could answer from source into a repeatable matrix.
+# It used to assert the OPPOSITE, and its headline assertion was
+# `sighup:server-in-a-tab-survives-the-window-closing`. The container outlived every window, tmux
+# kept the session, and the measured result (ERRORS.md D1) was that a dev server survived and
+# stayed reachable through its forwarded port. That was deliberate, documented and
+# regression-tested here. #41 decided it was the wrong default for a novice: closing a window
+# looks like leaving, so it should be leaving.
 #
-# The result is RECORDED, not asserted, for the four shapes a student or an agent might
-# use — because the point is to find out, and then make the docs say it. What IS asserted
-# is the part the advice depends on: if `setsid` and `nohup` do not survive, then
-# CONTAINER-DESIGN.md telling students to "keep the window open" is the only workable
-# guidance, and if they DO survive there is a better answer to give.
+# THE SIMULATION ALSO HAD TO CHANGE, and this is the subtle part. The old file killed the
+# `podman exec` CLIENT, on the grounds that that is what closing a window does. Under the new
+# design that models nothing: the launcher no longer `exec`s into podman, so a closing window
+# signals the LAUNCHER, and the launcher is what stops the container. So the probe here kills the
+# `script` process owning the pty, which closes the master side and makes the kernel deliver
+# SIGHUP to the foreground process group -- the actual mechanism rather than a stand-in for it.
 #
-# The managed CLAUDE.md used to carry the same caveat and no longer does — it was slimmed to
-# the few things an agent gets wrong here, and an unverified-off-Linux hedge did not make the
-# cut. Nothing in this suite asserts on that file's content any more.
+# That is why this could not be a sed of the old file. Killing the exec client now leaves the
+# launcher alive and the container up, which is a real state -- see the force-quit group -- but
+# not the one a closed window produces.
 #
-# §5.1 still needs a human to close a real window and confirm it matches.
+# ERRORS.md D1's measurements are NOT deleted. They are still true about conmon and about
+# processes inside a live container, and the four-shape matrix is still recorded at the end,
+# demoted from advice to a record: "you can detach a server with setsid" stopped being useful
+# guidance the moment the container stopped outliving the window.
+#
+# §5.1 still needs a human to close a real window, and it is the only way to ask this on macOS
+# and WSL, where the exec client lives outside the VM.
 
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
+. "$(dirname -- "$0")/lib/podman-shim.sh"
 
-require_running
-# Every probe below reads the server's HTTP code through the forwarded port, so the tunnel has
-# to be up; the live tier hands it back when it finishes. See require_tunnel.
-require_tunnel
-require_cmd script "needed to give the exec client a pty, as a real terminal would"
+require_image
+require_cmd script "needed to give the launcher a pty, as a real terminal would"
+require_cmd curl "needed to read a server through a forwarded port"
 
 SRV='python3 -m http.server 3000 --bind 0.0.0.0'
-MATRIX=""
+TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
+LOG="$(mktemp "${TMPDIR:-/tmp}/cs193v-sighup.XXXXXX")"
 
-# On 3000, which is FORWARDED, and this suite's whole subject is processes that outlive the
-# client that started them -- so a run killed here leaves a wildcard-bound listener on a
-# forwarded port, and 60-container.sh's loopback assertions then pass against it with nothing
-# of their own bound (#34). An EXIT trap does not run on KILL, so sweep at start too.
-cleanup() { container_pkill 'http.server 3000'; }
+# ─── predicates, so every wait is on a condition rather than a duration ─────────
+st() { podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null; }
+container_running() { [ "$(st)" = running ]; }
+container_stopped() { case "$(st)" in running) return 1 ;; *) return 0 ;; esac; }
+session_up() { podman exec "$NAME" $TM has-session -t '=cs193v' >/dev/null 2>&1; }
+srv_up()     { curl -s -o /dev/null --max-time 2 http://127.0.0.1:3000/; }
+
+# THIS IS THE ONE SUITE THAT MUST NOT HAVE THE CONTAINER HELD UP.
+#
+# Every other suite in this tier calls require_running, which since #41 starts the container itself
+# (see hold_container in lib/assert.sh). Here a running container is precisely what makes the
+# launcher refuse, so each probe has to begin from a stopped one -- which is what release_container,
+# hold_container's opposite number, is for. Without it this whole file would be asserting against
+# err.session-in-use and proving nothing, while LOOKING like it worked: the failure mode #34 taught
+# this suite to fear.
+
+PTY_PIDS=''
+cleanup() {
+    # shellcheck disable=SC2086
+    [ -n "$PTY_PIDS" ] && kill -9 $PTY_PIDS 2>/dev/null
+    rm -f "$LOG"
+    container_running && container_pkill 'http.server 3000'
+    return 0
+}
 trap cleanup EXIT
 clean_vt_processes
 
-# Alive means "a server is answering", and asking that question is where this suite was wrong.
-# It ran `podman exec $NAME sh -c 'pgrep -f "http.server 3000" ...'`, and the sh -c's OWN
-# command line contains the pattern, so pgrep matched the shell: measured answering "yes" with
-# no server anywhere and curl returning 000. Every alive= below was therefore unconditionally
-# yes, which made sighup:setsid-survives... and the destroy-unattached regression test pass
-# whatever happened (#34). container_pgrep execs pgrep directly, which cannot self-match.
+# Start a real launcher under a real pty, and return the pid whose death closes that pty.
 #
-# The measurements this restores are unchanged from what ERRORS.md's §A.8 matrix records --
-# every shape really does survive here. The tests just could not have told us otherwise.
-alive() { container_pgrep 'http.server 3000' && echo yes || echo no; }
-srv_pid() { podman exec "$NAME" pgrep -f 'http.server 3000' 2>/dev/null | head -1; }
-
-# Readiness, in place of the `sleep 3`s that guessed at it. HTTP rather than pgrep: the process
-# existing and the socket being bound are not the same instant, and every measurement below is
-# about a server that ANSWERS. `|| true` at each call site on purpose -- a server that never
-# comes up is itself a result, recorded as alive=no http=000 exactly as the sleep would have.
-#
-# The `sleep 3`s AFTER each kill stay. "It is still alive three seconds later" is a negative,
-# and polling for a negative returns instantly and proves nothing; see wait_until in
-# lib/assert.sh.
-srv_up() { curl -s -o /dev/null --max-time 2 http://127.0.0.1:3000/; }
-
-probe() {                             # probe LABEL COMMAND -> sets PROBE_ALIVE
-    local label="$1" cmd="$2"
-    cleanup
-    # A pty, because that is what a terminal window gives it — pty teardown is one of the
-    # candidate mechanisms for the server dying.
-    script -q -c "podman exec -it ${NAME} sh -c '$cmd'" /dev/null >/dev/null 2>&1 &
-    local client=$!
-    wait_until 15 srv_up || true
-    kill -9 "$client" 2>/dev/null          # <-- the window being closed
-    wait "$client" 2>/dev/null || true
-    sleep 3                                # a DURATION, deliberately: see srv_up above
-
-    PROBE_ALIVE="$(alive)"
-    local p ppid fd1 http
-    # The pid comes from the same self-match-free lookup, or ppid and fd1 describe the shell
-    # that went looking rather than the server. ppid=0 is expected and not a bug: the parent
-    # is conmon, which lives outside the container's pid namespace.
-    p="$(srv_pid)"
-    if [ -n "$p" ]; then
-        ppid="$(E "awk '{print \$4}' /proc/$p/stat")"
-        fd1="$(E "readlink /proc/$p/fd/1")"
-    fi
-    http="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
-
-    record "sighup:$label" "alive=$PROBE_ALIVE http=$http ppid=${ppid:-none} fd1=${fd1:-none}"
-    MATRIX="$MATRIX
-  $(printf '%-12s alive=%-4s http=%-4s ppid=%-6s fd1=%s' \
-      "$label" "$PROBE_ALIVE" "$http" "${ppid:-none}" "${fd1:-none}")"
-    cleanup
+# `sleep 600` is fed rather than nothing: with stdin at EOF the login shell in tab one exits
+# immediately, which closes the tab, which ends the session -- so the probe would be measuring a
+# container nobody was in. `$!` after a pipeline is its LAST element, which is script, and that is
+# exactly the pid whose death has to look like a window closing.
+launch_in_pty() {                     # launch_in_pty -> sets PTY_PID
+    printf 'sleep 600\n' | script -q -c "$REPO/cs193v" /dev/null >"$LOG" 2>&1 &
+    PTY_PID=$!
+    PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
 
-# The four shapes, in increasing order of detachment.
+# ─── 1. closing the window stops the container ─────────────────────────────────
+release_container
+launch_in_pty
+if ! wait_until 90 session_up; then
+    fail "sighup:the-probe-got-a-session" \
+         "the launcher never reached a tmux session in 90s, so nothing below would prove anything.
+Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
+    exit 1
+fi
+pass "sighup:the-probe-got-a-session"
+
+# A server in a tab: what a student actually has, and what the old file asserted must SURVIVE
+# this. It must now die with the window.
+podman exec "$NAME" sh -c "$TM new-window -d '$SRV'" >/dev/null 2>&1
+wait_until 20 srv_up || true
+BEFORE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
+FWD_BEFORE="$(count_forwards)"
+record "sighup:forwards-while-a-session-is-open" "$FWD_BEFORE of 46"
+
+# THE WINDOW CLOSING. Killing script closes the pty master, and the kernel HUPs the foreground
+# process group -- the launcher and its podman exec child.
+kill -9 "$PTY_PID" 2>/dev/null
+wait "$PTY_PID" 2>/dev/null || true
+
+if wait_until 45 container_stopped; then
+    pass "sighup:closing-the-window-stops-the-container"
+else
+    fail "sighup:closing-the-window-stops-the-container" \
+         "the container is still $(st) 45s after the pty was destroyed. Either the launcher never
+received SIGHUP, or its trap did not run -- and on this platform that is the whole of #41 not
+working. First thing to check: that open_shell traps HUP and not only EXIT. bash's default action
+for SIGHUP is to die WITHOUT running an EXIT trap, which would look exactly like this."
+fi
+
+# The tunnel is a HOST process holding 46 loopback ports, so it does not die with the container --
+# it has to be taken down deliberately. Forgetting would mean the next launch could bind none of
+# its ports, which is the failure remove_container documents; this is its test on the teardown path.
+if wait_until 30 no_forwards; then
+    pass "sighup:closing-the-window-releases-the-forwarded-ports"
+else
+    fail "sighup:closing-the-window-releases-the-forwarded-ports" \
+         "$(count_forwards) of the 46 forwards are still bound (there were $FWD_BEFORE while the
+session was open). An ssh client outliving its container holds every course port against a pipe
+with nothing on the far end, so the next launch gets no forwarding at all."
+fi
+
+# ...and the server in the tab went with it. If it was never reachable the assertion below is
+# weaker than intended, so say so rather than quietly banking a pass -- that is exactly how #34's
+# self-matching pgrep made this file green through anything.
+if [ "$BEFORE_HTTP" != 200 ]; then
+    record "sighup:server-in-a-tab-was-not-reachable-first" \
+           "http=$BEFORE_HTTP before the kill, so a-server-in-a-tab-dies proves less than it reads"
+fi
+assert_fail "sighup:a-server-in-a-tab-dies-with-the-window" srv_up
+
+# ─── 2. `exit` stops it too, by the same path ──────────────────────────────────
+# One teardown, not two: `exit` and a closed window both arrive as the podman exec child ending.
+# If these two ever disagree, the trap is doing something the ordinary path is not.
+release_container
+out="$(launcher_tty_repo '\nexit\n' 2>&1)"
+if wait_until 45 container_stopped; then
+    pass "sighup:exiting-the-shell-stops-the-container"
+else
+    fail "sighup:exiting-the-shell-stops-the-container" "the container is still $(st)"
+fi
+assert_says "sighup:the-student-is-told-it-is-stopping" "Stopping the container" "$out"
+
+# ─── 3. relaunching gets the same container, not a new one ─────────────────────
+# `podman stop` and not `rm`, so the writable layer survives and things installed with sudo still
+# persist until a rebuild -- which is what CONTAINER-DESIGN.md's "what survives what" table
+# promises. A teardown that recreated here would silently break that promise, and nothing a
+# student did would reveal it until they lost a package.
+ID_BEFORE="$(podman inspect "$NAME" --format '{{.Id}}' 2>/dev/null)"
+assert_fail "sighup:a-stopped-container-accepts-no-exec" sh -c "podman exec $NAME true"
+launcher_tty_repo '\nexit\n' >/dev/null 2>&1
+assert_eq "sighup:relaunching-reuses-the-same-container" "$ID_BEFORE" \
+          "$(podman inspect "$NAME" --format '{{.Id}}' 2>/dev/null)"
+
+# ─── 4. one session at a time, live ────────────────────────────────────────────
+# The shim tier proves the refusal's logic cheaply. What only real podman shows is that it fires
+# against a container genuinely running with a genuine tmux session in it.
+release_container
+launch_in_pty
+if wait_until 90 session_up; then
+    out="$(cd "$REPO" && ./cs193v 2>&1 </dev/null)"
+    assert_says "sighup:a-second-launch-refuses" "already have a CS193V session" "$out"
+    assert_says "sighup:the-refusal-names-the-way-out" "cs193v --stop" "$out"
+    # It must not disturb the session it refused to touch. Getting this wrong would make a second
+    # launch a weapon against the first.
+    assert_ok "sighup:the-refusal-leaves-the-first-session-alone" \
+              sh -c "podman exec $NAME $TM has-session -t '=cs193v'"
+else
+    fail "sighup:a-second-launch-refuses" "no session came up to refuse against"
+fi
+
+# --stop is what the refusal tells them to run, so it had better work from here. Down-arrow then
+# ENTER, because menu() defaults to the safe option and the safe option is cancel.
+launcher_tty_repo '\033[B\n' --stop >/dev/null 2>&1 || true
+if wait_until 45 container_stopped; then
+    pass "sighup:stop-clears-a-live-session"
+else
+    fail "sighup:stop-clears-a-live-session" "the container is still $(st) after --stop"
+fi
+kill -9 "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null || true
+
+# ─── 5. the force-quit leftover, the one state that still leaks ────────────────
+# SIGKILL runs no trap, so a force-quit leaves a container up with nothing attached. That is
+# tolerated by design: it degrades to exactly the old behaviour, and both the refusal and --stop
+# recover from it. But the recovery has to genuinely work, because a student who cannot get back
+# in is worse off than one whose container merely stayed up.
+release_container
+launch_in_pty
+if wait_until 90 session_up; then
+    # The LAUNCHER, not the pty: no HUP, so no trap and no teardown.
+    LAUNCHER_PID="$(pgrep -P "$PTY_PID" | head -1)"
+    if [ -n "$LAUNCHER_PID" ]; then
+        kill -9 "$LAUNCHER_PID" 2>/dev/null
+        sleep 2                        # A DURATION, deliberately: this asserts a NON-event.
+        if container_running; then
+            pass "sighup:a-force-quit-leaves-the-container-up-as-designed"
+        else
+            record "sighup:force-quit-stopped-it-anyway" \
+                   "the container stopped with no trap having run, which is not what killing the
+launcher should do. Worth understanding before trusting the teardown path."
+        fi
+        # The refusal has to EXPLAIN this, not just refuse. A student who force-quit knows there
+        # is no other window, so a message that only says "you have a session open" reads as
+        # wrong, and a message they have caught lying once is one they stop reading.
+        assert_says "sighup:a-leftover-container-is-explained-not-just-refused" "crash" \
+                    "$(cd "$REPO" && ./cs193v 2>&1 </dev/null)"
+        launcher_tty_repo '\033[B\n' --stop >/dev/null 2>&1 || true
+        if wait_until 45 container_stopped; then
+            pass "sighup:stop-recovers-a-force-quit-leftover"
+        else
+            fail "sighup:stop-recovers-a-force-quit-leftover" "still $(st) -- the student is stuck"
+        fi
+    else
+        record "sighup:force-quit" "could not find the launcher under the pty in order to kill it"
+    fi
+fi
+kill -9 "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null || true
+
+# ─── 6. the tab-close matrix, kept as a RECORD ────────────────────────────────
+# What these four shapes measure is still real: whether a process outlives the `podman exec`
+# client that started it, inside a container that stays up. That is now the "a tab closed"
+# question rather than the "a window closed" one, and it underpins no advice any more. The old
+# `sighup:setsid-survives-so-there-is-a-way-to-detach` assertion is DELETED, because telling a
+# student to setsid a server is telling them to do something the container's own lifetime undoes.
+#
+# Kept so ERRORS.md D1's table still has a live source rather than a frozen quotation.
+release_container
+podman start "$NAME" >/dev/null 2>&1
+wait_until 20 container_running || true
+MATRIX=""
+probe() {                             # probe LABEL COMMAND
+    container_pkill 'http.server 3000'
+    script -q -c "podman exec -it ${NAME} sh -c '$2'" /dev/null >/dev/null 2>&1 &
+    local client=$!
+    wait_until 15 container_pgrep 'http.server 3000' || true
+    kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
+    sleep 2                           # A DURATION, deliberately: "still alive" is a non-event.
+    local alive
+    container_pgrep 'http.server 3000' && alive=yes || alive=no
+    record "sighup:tab-matrix-$1" "alive=$alive"
+    MATRIX="$MATRIX
+  $(printf '%-12s alive=%s' "$1" "$alive")"
+    container_pkill 'http.server 3000'
+}
 probe foreground "$SRV"
-FG_ALIVE="$PROBE_ALIVE"
 probe background "$SRV & sleep 60"
-BG_ALIVE="$PROBE_ALIVE"
 probe nohup      "nohup $SRV >/tmp/s.log 2>&1 & sleep 60"
-NOHUP_ALIVE="$PROBE_ALIVE"
 probe setsid     "setsid $SRV >/tmp/s.log 2>&1 & sleep 60"
-SETSID_ALIVE="$PROBE_ALIVE"
-
-# Without -it, to isolate whether pty teardown is the mechanism rather than SIGHUP itself.
-cleanup
-podman exec "$NAME" sh -c "$SRV" >/dev/null 2>&1 &
-NOTTY_CLIENT=$!
-wait_until 15 srv_up || true
-kill -9 "$NOTTY_CLIENT" 2>/dev/null; wait "$NOTTY_CLIENT" 2>/dev/null || true
-sleep 3                                    # a DURATION, deliberately: see srv_up above
-NOTTY_ALIVE="$(alive)"
-record "sighup:no-tty" "alive=$NOTTY_ALIVE"
-MATRIX="$MATRIX
-  $(printf '%-12s alive=%s' no-tty "$NOTTY_ALIVE")"
-cleanup
-
-# THE SHAPE A STUDENT ACTUALLY HAS, now that `./cs193v` lands in tmux.
-#
-# The four shapes above are direct children of the exec client. A student's server is not:
-# it runs in a tmux pane, owned by a tmux server that lives in the container and is not a
-# descendant of the connection the terminal made. So the mechanism is different, and so is
-# what can break it -- not conmon, but `destroy-unattached`, which the upstream prototype
-# set to `on` and which would destroy the session, and every pane in it, the instant the
-# client went away. This is the regression test for that setting being off.
-#
-# ASSERTED, not recorded, unlike the four above: those were open questions being measured,
-# this is a documented promise (CONTAINER-DESIGN.md, ERRORS.md D1) that a one-line config
-# change could silently reverse.
-TMX="tmux -L cs193v -f /etc/cs193v/tmux.conf"
-tmux_gone()     { ! podman exec "$NAME" sh -c "$TMX list-sessions" >/dev/null 2>&1; }
-tmux_attached() { [ "$(podman exec "$NAME" sh -c "$TMX list-clients -F 1" 2>/dev/null | head -1)" = 1 ]; }
-cleanup
-podman exec "$NAME" sh -c "$TMX kill-server" >/dev/null 2>&1 || true
-wait_until 10 tmux_gone
-# Fed a long-running command rather than left with the suite's own stdin. With stdin at EOF
-# the login shell in tab one exits immediately, which closes the tab, which ends the session
-# -- and the probe below would then be measuring a container with no tmux in it at all.
-# `$!` after a pipeline is its LAST element, which is script, so the kill still lands.
-printf 'sleep 600\n' | script -q -c "podman exec -it ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
-TMUX_CLIENT=$!
-wait_until 30 tmux_attached
-podman exec "$NAME" sh -c "$TMX new-window -d '$SRV'" >/dev/null 2>&1
-wait_until 15 srv_up || true
-TMUX_BEFORE="$(alive)"
-kill -9 "$TMUX_CLIENT" 2>/dev/null; wait "$TMUX_CLIENT" 2>/dev/null || true
-sleep 4                                    # a DURATION, deliberately: see srv_up above
-TMUX_ALIVE="$(alive)"
-TMUX_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:3000/)"
-record "sighup:in-a-tmux-tab" "before=$TMUX_BEFORE alive=$TMUX_ALIVE http=$TMUX_HTTP"
-MATRIX="$MATRIX
-  $(printf '%-12s alive=%-4s http=%s' tmux-tab "$TMUX_ALIVE" "$TMUX_HTTP")"
-
-if [ "$TMUX_BEFORE" != yes ]; then
-    fail "sighup:server-in-a-tab-survives-the-window-closing" \
-         "the probe server never started in the tab, so the check proved nothing"
-elif [ "$TMUX_ALIVE" = yes ]; then
-    pass "sighup:server-in-a-tab-survives-the-window-closing"
-else
-    fail "sighup:server-in-a-tab-survives-the-window-closing" \
-         "a server running in a tmux tab died when the exec client was killed. Almost
-certainly destroy-unattached is back on in files/tmux/tmux.conf: it destroys an unattached
-session and every pane in it. CONTAINER-DESIGN.md promises the opposite, and ERRORS.md D1
-records the measurement it rests on."
-fi
-# ...and the orphaned session must still be there to be picked up, or "run ./cs193v again
-# and your tabs come back" is false even though the process survived.
-assert_ok "sighup:orphaned-session-is-still-reattachable" \
-          sh -c "podman exec ${NAME} $TMX list-sessions >/dev/null 2>&1"
-podman exec "$NAME" sh -c "$TMX kill-server" >/dev/null 2>&1 || true
-cleanup
-
 record "sighup:MATRIX" "$(printf '%s' "$MATRIX" | tr '\n' '|')"
-printf '\n  the §A.8 matrix, for $PRIVATE/VERIFICATION.md §10:%s\n\n' "$MATRIX"
+printf '\n  the tab-close matrix, for $PRIVATE/ERRORS.md D1:%s\n\n' "$MATRIX"
 
-# What the advice in the docs actually rests on. If setsid cannot outlive the client, then
-# there is no way for a student or an agent to keep a server running across a closed window,
-# and "keep the window open" is the only truthful thing the docs can say. If it can, the
-# docs should say how.
-if [ "$SETSID_ALIVE" = yes ]; then
-    pass "sighup:setsid-survives-so-there-is-a-way-to-detach"
-else
-    fail "sighup:setsid-survives-so-there-is-a-way-to-detach" \
-         "setsid did NOT survive the client being killed. Nothing a student runs can outlive
-a closed window, so $PRIVATE/CONTAINER-DESIGN.md's 'keep the window open' is the only
-workable advice, and nothing anywhere should suggest backgrounding as a way around it."
-fi
-
-# Whatever the outcome, the container must not be damaged by a client dying — that happens
-# every time anyone closes a window.
-assert_eq "sighup:container-survives-the-client-dying" "running" "$(I '{{.State.Status}}')"
-assert_ok "sighup:launcher-can-still-attach" sh -c "podman exec ${NAME} true"
-# Killed clients are the normal case, so their leftovers must be reaped rather than
-# accumulate against pids.max and eventually wedge the container.
-#
-# A DURATION, deliberately. `wait_until <zombie count is low>` would return on the first poll,
-# because the count is already low before the reaping being tested has had to happen — the
-# same vacuity trap as pid1:reaps-orphans in 60-container.sh.
+# Killing exec clients is still routine -- every closed tab is one -- so their leftovers must be
+# reaped rather than pile up against pids.max (2048), which wedges the container beyond
+# `podman exec`'s reach and does not self-heal. A DURATION, deliberately: the count is already low
+# before the reaping being tested has had to happen, so wait_until would return on the first poll
+# and prove nothing. Same vacuity trap as pid1:reaps-orphans in 60-container.sh.
 sleep 2
-# `grep -c` prints 0 AND exits 1 when nothing matches, so a trailing `|| echo 0` in the
-# HOST shell would append a second line and break the integer comparison. Keep the
-# fallback inside the container's shell instead.
 z="$(podman exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z || true' 2>/dev/null)"
 z="$(printf '%s' "$z" | head -1 | tr -d ' \r')"
-record "sighup:zombies-after-five-killed-clients" "$z"
+record "sighup:zombies-after-the-matrix" "$z"
 if [ "${z:-0}" -le 2 ]; then
     pass "sighup:killed-clients-do-not-leak-zombies"
 else
     fail "sighup:killed-clients-do-not-leak-zombies" \
-         "$z zombies after five killed exec clients — these hold pid slots against
-pids.max (2048), and exhausting it wedges the container beyond podman exec's reach."
+         "$z zombies after four killed exec clients -- these hold pid slots against pids.max."
 fi
 
-# Documentation consistency. CONTAINER-DESIGN.md says a closed window "may stop" a server.
-# On this platform every shape survived, so that warning is at best over-cautious here — but
-# it is hedged with "may", and the answer may genuinely differ on macOS and WSL where the
-# exec client lives outside the VM. So: record the discrepancy loudly rather than assert a
-# wording, and let the per-platform runs decide what the docs should say.
-if [ "$FG_ALIVE" = yes ]; then
-    record "sighup:DOCS-vs-REALITY" \
-        "a FOREGROUND server survived the client being killed on this platform, while
-$PRIVATE/CONTAINER-DESIGN.md warns that closing a window 'may stop' it. Confirm on macOS and
-WSL before rewording — see ERRORS.md D."
-else
-    record "sighup:DOCS-vs-REALITY" "foreground server died, matching what the docs warn"
-fi
-# Deliberately loose. This used to look for the exact phrase "closing a terminal window",
-# and broke when the paragraph was reworded -- correctly -- from a hedged caveat into a
-# statement that a server survives, which is what the tabs made true. Matching a two-word
-# topic rather than a sentence keeps the check meaningful (the doc must still address what
-# closing the window does) without failing every time the prose improves. The behaviour
-# itself is asserted above, against a real server.
-assert_contains "sighup:CONTAINER-DESIGN-mentions-the-caveat" "terminal window" \
-    "$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
-# The matching assertion against the managed CLAUDE.md is GONE, by decision. That file was
-# deliberately slimmed to the few things an agent gets wrong here, and the SIGHUP caveat did
-# not survive the cut: it is a hedge about behaviour that is measured on Linux and unverified
-# elsewhere, which is worth a paragraph in the student-facing doc and not worth spending an
-# agent's context on. The check stays on CONTAINER-DESIGN.md, which is where the caveat now
-# lives and where a student reads it.
+# ─── 7. the docs must describe the behaviour, not its opposite ────────────────
+# Loose about wording, strict about the CLAIM. The old version checked only that
+# CONTAINER-DESIGN.md mentioned "terminal window", which stayed green through a total reversal of
+# what the doc said about it -- a check that survives the thing it exists to catch.
+design="$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
+assert_contains "sighup:CONTAINER-DESIGN-addresses-closing-the-window" "terminal window" "$design"
+assert_match "sighup:CONTAINER-DESIGN-says-it-STOPS-things" \
+             'clos[a-z]*( your| the)? terminal[^.]*stop|stop[^.]*clos[a-z]*( your| the)? terminal' \
+             "$design"
+
+# Leave the container stopped, which is now the honest resting state. hold_container will raise it
+# for whichever suite needs it next, and leaving 46 ports bound for the next developer is exactly
+# what #29 stopped doing.
+release_container

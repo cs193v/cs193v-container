@@ -257,13 +257,23 @@ does.
 
 ## What survives what
 
-| | your files in `projects/` | your logins | things installed in the container | browsers you installed | port forwarding |
-| --- | --- | --- | --- | --- | --- |
-| closing your terminal | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--rebuild` | ✅ | ✅ | ❌ | ✅ | ✅ (restarted) |
-| `--update` | ✅ | ✅ | ❌ | ✅ | ✅ (restarted) |
-| `--full-rebuild` | ✅ | ❌ | ❌ | ❌ | ✅ (restarted) |
-| restarting your computer | ✅ | ✅ | ✅ | ✅ | ✅ (on next `cs193v`) |
+The first row is the one to read carefully, because it is the one people get wrong.
+**Closing your terminal window stops the container**, and anything that was running inside it
+stops too. Your *files* are never at risk — they live on your own computer — but a dev server,
+a `claude` session, an editor with unsaved changes: those go.
+
+| | your files in `projects/` | your logins | things installed in the container | browsers you installed | things you were running | port forwarding |
+| --- | --- | --- | --- | --- | --- | --- |
+| closing your terminal | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+| `exit` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+| `--rebuild` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+| `--update` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+| `--full-rebuild` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ (back on next `cs193v`) |
+| restarting your computer | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+
+Note what the first row does **not** say. Things you installed with `sudo` are still there when
+you come back, and so are your logins. Closing the window stops the container; it does not throw
+it away. Only `--rebuild` and friends do that.
 
 "Browsers you installed" is its own column because Playwright's browsers are the one
 package cache kept in a volume. The Chromium the course uses is part of the image, so it is
@@ -274,33 +284,41 @@ back, so the worst case is one more download and never a broken setup.
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
 strangely, and staff will suggest it freely.
 
-The port forwarding column is the one that needs a word of explanation. The tunnel is a
-program running on *your* computer, not inside the container, so it is a separate thing that
-can be up or down. It is started whenever you run `cs193v`, torn down and restarted around
-any rebuild, and deliberately **left running when you close your terminal** — otherwise
-closing a window would quietly make a server you left running unreachable, which would be a
-worse trap than the one all of this exists to remove.
+### Leaving, and coming back
 
-It does not survive your computer restarting, because nothing does; the next `cs193v` brings
-it back. If you ever suspect it, `cs193v doctor` will tell you, and
-`cs193v --reset-tunnel` fixes it without disturbing the container or anything running in it.
+`exit` and closing the window do the same thing, on purpose. There is no third way to leave that
+means something different, and nothing keeps running in the background afterwards. When you come
+back with `./cs193v` you get the same container — your packages, your logins — and a fresh set of
+tabs.
 
-A note about long-running servers, with the honest state of knowledge attached.
-**Closing your terminal window does not stop a server you started in it.** On Linux this was
-measured directly: a server left running in the foreground survives and stays reachable,
-though its output goes nowhere.
+**One window at a time.** Run `cs193v` while a session is already open somewhere and it will tell
+you so rather than opening a second one. If you want another place to work, that is what tabs are
+for: **CTRL+T**. The same message appears if a previous session ended badly — a force-quit, a
+crash, a laptop that lost power — because from the outside those look identical. Either way the fix
+is the same:
 
-The tabbed terminal makes that sturdier than a measurement on one platform. What your window
-is attached to is a tmux *client*; your shells and your servers are inside a tmux *server*
-that lives in the container and is not a descendant of the connection your terminal made. So
-closing the window disconnects a viewer rather than killing anything, and there is no
-plausible platform difference in that — where the earlier answer really did depend on how
-podman behaves on each host. It has still not been confirmed by hand on macOS or Windows,
-which is worth doing.
+```
+cs193v --stop
+```
 
-So you do not need a second window to keep a server alive, and you do not need to leave
-anything open overnight: `./cs193v` again picks up exactly where you left off. Use another
-tab for other work, and `exit` when you actually mean to stop something.
+That stops the container so the next `cs193v` starts cleanly.
+
+The port forwarding column needs a word of explanation. The tunnel is a program running on *your*
+computer, not inside the container, so it is a separate thing that can be up or down. It is started
+whenever you run `cs193v` and taken down whenever the container stops — including when you close
+your window, which hands all 46 ports back. That is deliberate: a tunnel left holding ports for a
+container that is gone would stop the *next* one from working, and the symptom ("my browser cannot
+reach my server") would point nowhere near the cause.
+
+If you ever suspect it, `cs193v doctor` will tell you, and `cs193v --reset-tunnel` fixes it without
+disturbing the container or anything running in it.
+
+**Why it works this way.** The container used to outlive the window, and running `cs193v` again put
+you back into the same tabs with the same servers still running. That is genuinely useful, and it
+was given up on purpose: it meant a student could have work running that they had no idea was
+running, in a container they had forgotten was up, and "closing the window" — the universal gesture
+for *I am done* — quietly meant nothing at all. Being able to stop things by closing the window is
+worth more than being able to resume them by reopening it.
 
 ---
 
@@ -355,7 +373,8 @@ actually are.
 - **You get tabs.** The bar under the title shows one block per tab, labelled with whatever
   is running in it — `bash`, `python3`, `claude`, `git commit` — and a count on the left so
   it is obvious when other tabs exist. Click a tab to switch to it, or click `+ NEW TAB` on
-  the right for another. `exit` closes a tab; exiting the last one leaves the container.
+  the right for another. `exit` closes a tab; exiting the last one leaves the container and stops
+  it.
 
   With **one** tab open there is nothing to switch between, so the count and the single
   label are hidden and the bar carries only `+ NEW TAB`. Both appear the moment a second
@@ -384,11 +403,12 @@ actually are.
   — so it survives switching tabs and coming back. Selecting with the mouse copies to your
   own clipboard. If you would rather use your terminal's native selection, hold SHIFT while
   dragging.
-- **Closing your terminal window does not stop your work.** A dev server running in a tab
-  keeps running. Run `./cs193v` again and you are back in the same tabs, with the same
-  scrollback and the same server still serving. This is the one thing worth knowing that is
-  different from a plain shell: there is state you can come back to, and closing the window
-  is not how you shut things down. `exit` is.
+- **Closing your terminal window stops everything in it.** A dev server running in a tab stops
+  when the window closes, and so does anything else you had going. This is the one thing worth
+  knowing that is different from a plain shell: closing the window is not just leaving the room,
+  it is turning the lights off. `exit` does exactly the same thing. Your files are untouched
+  either way — they are on your own computer, not in the container. See "Leaving, and coming
+  back" above.
 - **`nano`** is the editor. `git commit` with no `-m` opens it. (Without this it would
   open `vim.tiny`, which is a genuinely bad first experience.)
 - **git is completely stock.** There is no `/etc/gitconfig`, so the hints and errors you

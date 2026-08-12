@@ -271,6 +271,12 @@ count_forwards() {
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$CS193V_FWD_RE" || true
 }
 
+# "The ports have gone back", as a predicate rather than a sample, because ssh does not unbind
+# instantly and a bare check right after a teardown is a flake that reads as a leak. Lives here
+# beside the port list for the same reason that does: #41 made every teardown release the
+# forwards, so three suites were about to define this, and two of them already had.
+no_forwards() { [ "$(count_forwards)" = 0 ]; }
+
 # The container tier reaches the container's own loopback THROUGH the tunnel, so it needs the
 # 46 forwards up before it asserts anything about ports.
 #
@@ -285,6 +291,11 @@ count_forwards() {
 # because it is one nobody can deduce from the assertion that would otherwise fail.
 require_tunnel() {
     [ "$(count_forwards)" = 46 ] && return 0
+    # The container has to be up first, or --reset-tunnel correctly declines with
+    # warn.tunnel-reset-not-running and this fails with a message about port squatting that names
+    # entirely the wrong cause. Since #41 a stopped container is the NORMAL resting state, so
+    # this is the common path here rather than an edge case. See hold_container.
+    hold_container
     ( cd "$REPO" && printf 'exit\n' | timeout 90 ./cs193v --reset-tunnel ) >/dev/null 2>&1 || true
     [ "$(count_forwards)" = 46 ] && return 0
     fail "require:tunnel" "only $(count_forwards) of the 46 forwarded ports are up, and
@@ -295,11 +306,53 @@ Check:  ./cs193v doctor        (the 'tunnel ports' line names what is missing)
     exit 1
 }
 
+# Hold the container up for a suite to test against.
+#
+# THIS EXISTS BECAUSE OF #41, and it is the one place the suite has to step outside the student
+# path. Every ordinary way of finishing with the container now stops it -- closing the terminal,
+# and every maintenance verb -- so `./cs193v --rebuild` no longer leaves anything running and
+# the old advice in require_running's failure message had become impossible to follow.
+#
+# `podman start` rather than a launcher verb, deliberately: there is no student-facing way to
+# say "run with nobody attached", because that state is exactly what #41 abolished, and adding a
+# verb for it would put a hole in the invariant purely to serve the tests. Driving raw podman is
+# honest about being a test fixture, and the suite already does it throughout -- E/I/R, and the
+# drift group's own stop/start pair.
+#
+# The tunnel comes back via --reset-tunnel, which is exempt from the session refusal for exactly
+# the reason it is used here: its whole purpose is fixing the tunnel while a session is live.
+hold_container() {
+    [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" = running ] && return 0
+    podman start "$NAME" >/dev/null 2>&1 || return 1
+    wait_until 15 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" = running ]"
+}
+
+# The other half of hold_container, and just as necessary. Put the container back to stopped, which
+# since #41 is the precondition for RUNNING THE LAUNCHER AT ALL.
+#
+# The two pull in opposite directions and a suite needs both, which is the part that is easy to get
+# wrong: a suite must raise the container to `podman exec` into it, and must lower it again before
+# `./cs193v` or any maintenance verb, because those refuse while a session is live. Skipping this is
+# not a hang or an error -- the verb prints err.session-in-use and exits 1, so an idempotency test
+# quietly becomes a test of twenty refusals and still counts as having run. That is exactly what it
+# did the first time this was written, and it is why both helpers say so here.
+release_container() {
+    case "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" in
+        running) : ;;
+        *) return 0 ;;
+    esac
+    podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
+    wait_until 20 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" != running ]"
+}
+
 require_running() {                   # require_running  -> the container under test is up
     require_podman
+    hold_container
     if [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" != running ]; then
-        fail "require:running" "The $NAME container is not running.
-Start it first:  ./cs193v --rebuild"
+        fail "require:running" "The $NAME container is not running, and podman start could not
+raise it. Create one first:  ./cs193v --rebuild
+That no longer LEAVES it running -- since #41 a container only stays up while a terminal window
+is open on it -- so the suite starts it itself. If this failed, the container does not exist."
         exit 1
     fi
 }

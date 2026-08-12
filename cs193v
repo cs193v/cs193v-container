@@ -1031,6 +1031,24 @@ create_container() {
             *'no space left on device'*|*'No space left on device'*)
                 die "$(msg err.create-no-disk)" ;;
         esac
+        # Lost the create race -- not a failure, and it must not read like one.
+        #
+        # `podman run --name` IS a test-and-set: name uniqueness is enforced under podman's own
+        # database lock, so of two simultaneous launches exactly one creates the container and
+        # the other arrives here. That makes this the ATOMIC half of refuse_if_session_live for
+        # the absent -> running transition, where the state check alone is only a check-then-act.
+        #
+        # Measured against podman 5.7.0: rc=125 and
+        #   Error: creating container storage: the container name "cs193v" is already in use by
+        #   <id>. You have to remove that container to be able to reuse that name...
+        # Matched on the STRING, not the status: 125 is podman's generic "failed before running
+        # the container" code and says nothing about which error it was.
+        #
+        # Without this the loser dies with err.create-failed and a wall of podman output, for
+        # something whose real meaning is "you already have a session open".
+        case "$RT_OUT" in
+            *'already in use'*) die "$(msg err.session-in-use)" ;;
+        esac
         die "$(msg err.create-failed OUT="$RT_OUT")"
     fi
     RT_SPIN=''
@@ -1249,14 +1267,7 @@ ensure_container() {
         return
     fi
 
-    # A container created from a DIFFERENT copy of the course directory. Without this
-    # check, a student who downloads a fresh copy after breaking something silently gets
-    # the old container with the old mount, and their edits appear to vanish.
-    local owner_dir
-    owner_dir="$(label_of cs193v.dir)"
-    if [ -n "$owner_dir" ] && [ "$owner_dir" != "$DIR" ]; then
-        die "$(msg err.other-directory INUSE="$owner_dir" YOURS="$DIR")"
-    fi
+    refuse_if_foreign_dir
 
     want_hash="$(config_hash)"
     have_hash="$(label_of cs193v.confighash)"
@@ -1320,47 +1331,125 @@ ensure_container() {
     ensure_tunnel || true
 }
 
-# Is this pid one of OUR exec clients, still alive on this machine?
+# ─── the session's lifetime ────────────────────────────────────────────────────
+# ONE session at a time, and it ends when the terminal does. Issue #41.
 #
-# `kill -0` alone is not enough: pids are reused, and a recycled one would make us treat a
-# stale session as live and hand the student a brand-new one instead of their tabs. Checking
-# that the process is a podman is cheap and rules out essentially every reuse.
-host_client_alive() {
-    kill -0 "$1" 2>/dev/null || return 1
-    ps -o args= -p "$1" 2>/dev/null | grep -q podman
-}
+# The design here used to be the exact opposite, and it is worth knowing what went and why,
+# because the deletion is most of this change. The container outlived every window; tmux ran
+# with `destroy-unattached off` so a session survived its client; cs193v-shell reattached to
+# whichever session had no client; and because closing a window does NOT kill the tmux client
+# inside the container -- conmon keeps the exec pty open and tmux reports the session attached
+# forever, measured, see ERRORS.md D1 -- the launcher had to stamp each session with the host
+# pid that attached it and prune the ghosts before every launch.
+#
+# All of that is gone -- the liveness check, the pruning, the owner stamp, the client pid the
+# stamp needed, and the warning about having too many windows open. What makes the replacement
+# this much smaller is that the container now STOPS, so there is never an orphaned session to
+# reason about and never more than one client to count. 10-static.sh asserts each of those
+# names is absent, so this paragraph deliberately does not spell them out: the launcher's own
+# documentation of a ban is the classic thing that matches the ban's own grep.
 
-# Detach tmux clients whose terminal window is gone.
+# The status cs193v-shell exits with when it loses the session-claim race. A CONTRACT BETWEEN
+# TWO FILES -- see the claim block in files/cs193v-shell -- and 10-static.sh asserts that both
+# spell it the same, because nothing else would notice them drifting apart and the symptom
+# would be a lost race printing that script's "fault in the container image" box.
+RACE_LOST_STATUS=3
+TEARDOWN_DONE=''
+
+# What ends the session: `exit` from the last tab, the window closing, and Ctrl-C alike. All
+# three arrive here the same way, as the podman exec child terminating with a signal pending
+# that we trapped -- which is why there is one teardown and not three.
 #
-# MEASURED, and it is the reason this function exists at all. Closing a terminal window does
-# NOT kill the tmux client inside the container: conmon keeps the exec session's pty open,
-# the client stays blocked reading it, and tmux goes on reporting the session as attached --
-# indefinitely, not for a few seconds. Nothing inside the container can distinguish that from
-# a live client; both ptys still exist and both are still writable.
+# THE TUNNEL GOES FIRST, ALWAYS, for the reason remove_container spells out at length: an ssh
+# client that outlives its container keeps all 46 host ports bound on the host's loopback
+# against a pipe with nothing on the far end, so the NEXT tunnel can bind none of them and the
+# student's next launch silently has no forwarding at all.
 #
-# Left alone, that quietly breaks the behaviour the tabs exist for. cs193v-shell attaches to
-# a session only if it has no client, so it would never find one, every launch would build a
-# fresh session, and the student's real tabs would pile up unreachable behind a ghost.
+# TWO TIMEOUTS, TWO JOBS, and conflating them is the easy mistake here:
+#   * `-t 3` is PODMAN's own SIGTERM-then-SIGKILL grace on PID 1. The default is 10, and
+#     files/entrypoint.sh traps TERM and exits immediately, so the default would spend seven
+#     of those seconds waiting on a process that exits in milliseconds.
+#   * pmq is the outer bound on podman ITSELF hanging -- a slept Mac, a wedged VM -- which is
+#     precisely what pm/pmq exist for, so this needs no fourth hand-rolled number.
+#   * `-i` so an already-gone container is not an error. That really happens: a --rebuild run
+#     from another window removes the container this shell was attached to.
 #
-# The host is the only side that CAN tell, because the client is a `podman exec` process it
-# started, so cs193v-shell stamps each session with the pid that attached it and this prunes
-# the ones whose process has gone. Cheap, and idempotent.
-prune_stale_tmux_clients() {
-    [ "$(state)" = running ] || return 0
-    pm exec "$NAME" tmux -L cs193v list-sessions \
-        -F '#{session_name} #{session_attached} #{@cs193v_host_pid}' 2>/dev/null || return 0
-    printf '%s\n' "$RT_OUT" | while read -r _s _att _pid; do
-        [ -n "$_s" ] || continue
-        [ "${_att:-0}" = 0 ] && continue
-        case "${_pid:-}" in ''|0) continue ;; esac
-        host_client_alive "$_pid" && continue
-        podman exec "$NAME" tmux -L cs193v detach-client -s "=$_s" >/dev/null 2>&1
-    done
+# Worth knowing rather than assuming, because the flag name invites the wrong belief: podman
+# TERMs ONLY PID 1. Every other process in the container is killed by the cgroup teardown, so
+# no student process gets a clean shutdown whether -t is 3 or 10, and an unsaved nano buffer is
+# lost either way. Making that work would mean TERMing the container's own processes before the
+# stop; deliberately not done, see .private/README.md.
+stop_container() {
+    # Sampled ONCE, up front, so the message and the action cannot disagree -- and so a verb
+    # that was cancelled before it built anything (--full-rebuild answering "cancel") does not
+    # announce that it is stopping a container which never existed.
+    local was_running
+    was_running=''
+    [ "$(state)" = running ] && was_running=1
+
+    [ -n "$was_running" ] && note "$(msg status.stopping)"
+    # UNCONDITIONAL, even when the container has already gone: a --rebuild run from another
+    # window can have removed it out from under this shell, and an ssh client that outlives its
+    # container still holds all 46 host ports against a pipe with nothing on the far end. That
+    # is the failure remove_container documents, and skipping this on the "nothing to do" path
+    # is how it would come back.
+    tunnel_down
+    [ -n "$was_running" ] && pmq stop -t 3 -i "$NAME"
     return 0
 }
 
+# The trapped wrapper. Separate from stop_container because the once-guard is only needed on
+# this path: HUP runs the handler and EXIT then runs it again, and a second `podman stop` would
+# print a second "stopping" line at the student for something already done. The maintenance
+# verbs and --stop call stop_container directly, each exactly once.
+shell_teardown() {
+    [ -n "$TEARDOWN_DONE" ] && return 0
+    TEARDOWN_DONE=1
+    stop_container
+}
+
+# Refuse to disturb a session that is already open, and name the one way out of it.
+#
+# `state` = running IS the whole test, and it is deliberately no smarter than that. The
+# alternative considered was a host-side registry of live clients so that several windows could
+# share one container; it needs the same liveness question answered and it fails WORSE. A wrong
+# answer there locks a student out of their own container, where a wrong answer here merely
+# leaves one running -- which both the next launch and --stop recover from. See
+# .private/README.md for the whole comparison.
+#
+# This is a check-then-act, so it is racy on its own, and it is NOT what carries the guarantee.
+# It exists to produce a good message before any work happens. The rule is made true one layer
+# down by an atomic claim: podman's own container-name uniqueness for absent -> running, and
+# tmux's session namespace for exited -> running, since `podman start` is idempotent and
+# reports nothing. Both measured; see the same README section.
+refuse_if_session_live() {
+    [ "$(state)" = running ] || return 0
+    die "$(msg err.session-in-use)"
+}
+
+# A container created from a DIFFERENT copy of the course directory. Without this check, a
+# student who downloads a fresh copy after breaking something silently gets the old container
+# with the old mount, and their edits appear to vanish.
+#
+# THIS MUST BE ASKED BEFORE refuse_if_session_live, and getting that order wrong is a mistake
+# #41 made once already: the session refusal only knows that SOMETHING is running, so on a
+# machine with two copies of the course directory it answered "you already have a session open
+# in another window" -- true, but it buried the one fact the student had to know, and its advice
+# (`--stop`, then launch again) would have walked them straight back into the wrong container.
+# Ownership is the more specific diagnosis, so it wins. 30-launcher-shim.sh's foreign-dir group
+# is the regression test.
+refuse_if_foreign_dir() {
+    local owner_dir
+    owner_dir="$(label_of cs193v.dir)"
+    [ -n "$owner_dir" ] || return 0
+    [ "$owner_dir" = "$DIR" ] && return 0
+    die "$(msg err.other-directory INUSE="$owner_dir" YOURS="$DIR")"
+}
+
 open_shell() {
-    local n
+    # Declared BEFORE the exec below, not at the point of use: `local rc` is itself a command
+    # and would reset $? to 0 before we could read the child's status.
+    local rc
     # Refuse, rather than hang, when there is no terminal to open a shell on.
     #
     # `podman exec -it` allocates a pty, and a pty NEVER delivers EOF the way a pipe does —
@@ -1374,46 +1463,63 @@ open_shell() {
     # idempotent, so a script that gets this far has still done real work and the message
     # can say so.
     if [ ! -t 0 ]; then
+        # ...but it does not get to leave a container running with nothing attached to it,
+        # which is the exact state #41 exists to prevent. So the work is undone before the
+        # message, and err.needs-a-terminal says "set up" rather than "up and running".
+        shell_teardown
         die "$(msg err.needs-a-terminal)"
     fi
-    # A non-destructive nudge: many concurrent sessions is legitimate, but it is also how
-    # an invisible memory problem starts.
-    #
-    # This counts tmux CLIENTS -- one per attached terminal window -- where it used to count
-    # `bash` processes in `podman top`. It had to change with the landing point: every tab
-    # is a bash now, so a process count would fire at six tabs in a single window, which is
-    # ordinary use of the very thing the tab bar exists to encourage. Clients preserve what
-    # the check originally meant, and therefore when it originally fired: "how many terminal
-    # windows have you got pointed at this container".
-    if pm exec "$NAME" tmux -L cs193v list-clients -F '#{client_tty}' 2>/dev/null; then
-        n="$(printf '%s\n' "$RT_OUT" | grep -c . || true)"
-        [ "${n:-0}" -gt 6 ] && warn "$(msg warn.many-shells N="$n")"
-    fi
-    # Must run BEFORE the exec, or the session the student should be getting back still
-    # looks occupied and they get a new one instead.
-    prune_stale_tmux_clients
 
-    # LAST, so it covers everything printed on the way here -- including warn.many-shells
-    # just above -- and so the warnings are still the newest thing on screen while the
-    # student reads them. One line further down is `exec`, after which tmux's alternate
-    # screen erases all of it. See warn().
+    # LAST, so it covers everything printed on the way here and the warnings are still the
+    # newest thing on screen while the student reads them. One line further down the student is
+    # inside tmux, whose alternate screen erases all of it. See warn().
     acknowledge_warnings
+
+    # THE TRAP, AND NOT `exec`. This is the line the whole of #41 rests on.
+    #
+    # `exec` replaced this process with podman, so no process survived the shell to stop
+    # anything and the container simply stayed up forever. The launcher now stays resident for
+    # the length of the session and tears it down afterwards.
+    #
+    # HUP IS TRAPPED EXPLICITLY, and that is not redundant with EXIT: bash's default action for
+    # SIGHUP is to die WITHOUT running the EXIT trap, so closing the window -- the one case this
+    # exists for -- would leave the container up.
+    #
+    # FOREGROUND, not backgrounded-and-waited. Backgrounding raises the question of whether
+    # `podman exec -it` takes SIGTTIN on its first read from the tty; it should not, because job
+    # control is off in a non-interactive shell so the child stays in the terminal's foreground
+    # process group -- but that is an assumption worth not needing. Foregrounded, the same
+    # SIGHUP that closes the window kills the child AND is pending for us, so bash runs the
+    # handler as soon as it reaps it.
+    trap shell_teardown EXIT HUP INT TERM
 
     # cs193v-shell puts the student inside tmux; see files/cs193v-shell. CS193V_CONTAINER is
     # passed because its failure path has to tell a student the exact `podman exec` line to
     # run, and nothing inside the container can work out the container's name --
     # CS193V_INSTANCE may have suffixed it, and the hostname is cs193v-development either way.
-    #
-    # CS193V_CLIENT_PID is this shell's own pid, which `exec` hands straight to podman -- so
-    # it IS the pid of the client process, and it is what prune_stale_tmux_clients looks for
-    # on the next launch.
-    exec podman exec -it \
+    podman exec -it \
         -w "$MOUNT_DST" \
         -e "TERM=$(safe_term)" \
         -e "COLORTERM=${COLORTERM:-}" \
         -e "CS193V_CONTAINER=$NAME" \
-        -e "CS193V_CLIENT_PID=$$" \
         "$NAME" cs193v-shell
+    rc=$?
+
+    # A lost claim race is not a fault -- it is the refusal arriving one layer down. Two
+    # launches both found a stopped container, both started it (podman start is idempotent and
+    # says nothing), and tmux handed the single session to whichever asked first. The loser
+    # reports it with the SAME message as the state check, so a student never has to care which
+    # layer caught them.
+    #
+    # The trap is cleared FIRST. The winner owns this container, and letting our teardown run
+    # would stop it out from under their session -- turning a harmless race into the one
+    # failure this whole mechanism exists to prevent.
+    if [ "$rc" = "$RACE_LOST_STATUS" ]; then
+        TEARDOWN_DONE=1
+        trap - EXIT HUP INT TERM
+        die "$(msg err.session-in-use)"
+    fi
+    return "$rc"
 }
 
 # ─── verbs ─────────────────────────────────────────────────────────────────────
@@ -1477,6 +1583,25 @@ verb_doctor() {
 
     local st; st="$(state)"
     printf '  %-16s %s\n' "container" "$st"
+    # What "running" MEANS changed with #41, and doctor is where a student or a TA reads it. Every
+    # ordinary way of finishing now stops the container, so `exited` is the healthy resting state
+    # and must not look like a fault -- while `running` means somebody has a window open, or a
+    # window was force-quit and no trap ran.
+    #
+    # DELIBERATELY NOT GUESSED AT. The obvious thing is to ask tmux whether a client is attached,
+    # and it does not work: conmon keeps a dead session's pty open, so tmux reports a client
+    # indefinitely after the window is gone (measured; ERRORS.md D1). A `list-clients` check would
+    # therefore answer "attached" in exactly the case worth reporting. Deciding it host-side means a
+    # `ps` scan for our own exec process, which is a heuristic this launcher does not otherwise need.
+    #
+    # So both readings are printed and the student picks -- which is the same choice
+    # err.session-in-use makes, and for the same reason: they know whether they have a window open,
+    # and no test here can.
+    case "$st" in
+        exited)  printf '  %-16s %s\n' "" "normal — nothing is open right now" ;;
+        running) printf '  %-16s %s\n' "" "a terminal window has this open. If you have none"
+                 printf '  %-16s %s\n' "" "open, one was force-quit — run: cs193v --stop" ;;
+    esac
     if [ "$st" != absent ]; then
         pm inspect "$NAME" --format '{{.State.StartedAt}}'
         printf '  %-16s %s\n' "started" "$RT_OUT"
@@ -1503,13 +1628,14 @@ verb_doctor() {
 }
 
 # tmux is the landing point, so "what is my session doing" is now a support question. A
-# student who says "my tabs vanished" or "I have two windows showing the same thing" is
-# describing session state that nothing else in this report would show.
+# student who says "my tabs vanished" is describing session state that nothing else here shows.
 #
-# Sessions and their window counts, plus how many clients are attached to each: a session
-# with 0 clients is one waiting to be picked back up by the next `./cs193v`, which is normal
-# and is what closing a terminal window leaves behind. Two clients on one session is the
-# mirrored case, which is the benign race cs193v-shell documents.
+# Sessions and their window counts, plus the clients attached to each. WHAT THESE NUMBERS MEAN
+# INVERTED WITH #41, and the old reading is now the diagnosis rather than the normal case:
+# there is exactly one session, it has exactly one client, and it lives only as long as the
+# terminal does. A session with 0 clients used to be "waiting to be picked back up by the next
+# ./cs193v"; now nothing picks it up, and seeing one means a window was force-quit and the
+# container outlived it. Two clients on one session is no longer reachable at all.
 tmux_doctor() {
     local out
     if pm exec "$NAME" tmux -L cs193v list-sessions \
@@ -1593,11 +1719,37 @@ check_clock() {
 }
 
 verb_rebuild() {
-    preflight; load_args; resolve_image
+    preflight; refuse_if_session_live; load_args; resolve_image
     info "$(msg status.rebuilding)"
     remove_container
     create_container
     info "$(msg status.rebuilt)"
+}
+
+# Stop the container by hand. The unified answer to "the container is busy", which is why every
+# refusal in this script names it.
+#
+# It exists as a student-facing verb rather than as advice to run `podman stop` because the
+# student who needs it is the one whose terminal was force-quit or whose machine crashed: they
+# have a container running with nothing attached to it, `./cs193v` refuses, and this is the one
+# command that gets them back to a state where launching works. Advice to run a raw podman
+# command would be the only place in the course that asks that of them.
+#
+# Prompted, because it can throw away work: anything running in a session belonging to another
+# window dies with the container, and a student who mis-reads a refusal should not be one
+# keystroke from stopping the session they are actually using.
+verb_stop() {
+    preflight; load_args
+    if [ "$(state)" != running ]; then
+        info "$(msg status.already-stopped)"
+        return 0
+    fi
+    printf '\n'; msg prompt.stop
+    if ! confirm "$(msg opt.cancel)" "$(msg opt.stop-go)"; then
+        info "$(msg status.cancelled)"; return 0
+    fi
+    stop_container
+    info "$(msg status.stopped)"
 }
 
 # The escape hatch for a tunnel that has stopped answering. Its whole reason for existing is
@@ -1647,7 +1799,7 @@ verb_reset_tunnel() {
 }
 
 verb_full_rebuild() {
-    preflight; load_args; resolve_image
+    preflight; refuse_if_session_live; load_args; resolve_image
     printf '\n'; msg prompt.full-rebuild
     if ! confirm "$(msg opt.cancel)" "$(msg opt.full-rebuild-go)"; then
         info "$(msg status.cancelled)"; return 0
@@ -1663,7 +1815,7 @@ verb_full_rebuild() {
 # it"; a filled one means there is a registry to fetch from, and that path is kept working
 # so publishing an image later stays an option rather than a rewrite. See container.args.
 verb_update() {
-    preflight; load_args
+    preflight; refuse_if_session_live; load_args
     if [ -n "$IMAGE" ]; then
         info "$(msg status.pulling IMAGE="$IMAGE")"
         if ! run_timeout 1800 podman pull --retry 10 --retry-delay 5s "$IMAGE"; then
@@ -1696,7 +1848,7 @@ verb_print_command() {
 # otherwise put the pin back, and the freshly built image is unambiguously the one to
 # create the container from.
 verb_build() {
-    preflight
+    preflight; refuse_if_session_live
     build_image "${1:-}"
     OVERRIDE_IMAGE="$LOCAL_IMAGE"
     load_args; resolve_image
@@ -1720,17 +1872,41 @@ usage() {
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────────────────
+#
+# THE INVARIANT THIS ENFORCES: a running container implies an open terminal. Issue #41.
+#
+# Which is why every maintenance verb ends in stop_container and not one of them leaves a
+# container up for the next command. They are not sessions -- nobody is attached when they
+# finish -- so leaving one running would break the invariant that makes the refusal above them
+# honest and `doctor` readable: with this, "running" always means "somebody is in there", and a
+# running container with nothing attached is a force-quit leftover rather than one of four
+# ordinary outcomes nobody can tell apart.
+#
+# THE STOPS LIVE HERE, NOT INSIDE THE VERBS, and the reason is --dev-build: it shares verb_build
+# and then goes straight into a shell, so a stop inside the verb would tear down the container
+# it is about to hand you. That is the same reason the --build success box is out here rather
+# than in verb_build (issue #22), so this follows a line the file had already drawn.
+#
+# ports, doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
+# its whole purpose is fixing the tunnel WHILE a session is live.
 case "${1:-}" in
-    '')                  preflight; load_args; resolve_image; ensure_container; open_shell ;;
+    # refuse_if_foreign_dir FIRST: "this container belongs to a different copy of the course
+    # directory" is a more specific diagnosis than "something is already running", and losing it
+    # behind the session refusal would send a student to --stop and then straight back into the
+    # wrong container. See the comment on the function.
+    '')                  preflight; refuse_if_foreign_dir; refuse_if_session_live
+                         load_args; resolve_image; ensure_container; open_shell ;;
     ports)               preflight; verb_ports ;;
     doctor)              verb_doctor ;;
-    --rebuild)           verb_rebuild ;;
+    --stop)              verb_stop ;;
+    --rebuild)           verb_rebuild; stop_container ;;
     --reset-tunnel)      verb_reset_tunnel ;;
-    --full-rebuild)      verb_full_rebuild ;;
-    --update)            verb_update ;;
+    --full-rebuild)      verb_full_rebuild; stop_container ;;
+    --update)            verb_update; stop_container ;;
     # The success box belongs to --build and not to verb_build, because --dev-build shares
     # the verb and goes straight into a shell afterwards (issue #22).
     --build)             shift; verb_build "${1:-}"
+                         stop_container
                          msg status.build-succeeded | celebrate "Build Successful!" ;;
     --dev-print-command) verb_print_command ;;
     --dev-build)         shift; verb_dev_build "${1:-}" ;;

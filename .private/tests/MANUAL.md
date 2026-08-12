@@ -120,10 +120,30 @@ native Linux. On macOS and WSL host-side is expected not to; record which, becau
 `CONTAINER-DESIGN.md`'s "known rough edges" depends on it.
 
 ### §5.1 — closing a terminal window, for real
-Start a foreground server, then click the window's close button.
-*Expect:* the same result as the automated §A.8 matrix, which kills the `podman exec` client
-instead. If they differ, the automated probe is not modelling the real case.
-*Linux baseline:* see `70-sighup.sh` output, printed as a table.
+**The single most important manual check in this file**, because the whole of issue #41 rests on
+one thing no automation can press: the close button.
+
+Start a server in a tab (`python3 -m http.server 3000`), confirm you can reach
+`http://localhost:3000` from your browser, then **click the window's close button**.
+
+*Expect:*
+- `podman ps -a` shows the container `exited` within a few seconds.
+- `ss -ltn | grep 3000` shows nothing — the 46 forwards went back with it.
+- `./cs193v` again gives you a working shell with **fresh tabs**, and `podman inspect --format
+  '{{.Id}}'` shows the **same** container id as before (stopped, not recreated).
+
+*What a failure means:* the launcher did not receive SIGHUP, or its trap did not run. The container
+is left running with nothing attached, which is survivable — `./cs193v` refuses and names
+`--stop` — but the feature is silently not working on that platform.
+
+*Linux baseline:* automated, and green. `70-sighup.sh` destroys the pty rather than pressing the
+button, which is the same mechanism (closing the master HUPs the foreground process group). This
+check exists to confirm that equivalence on a real terminal.
+
+**Worth doing on macOS (Terminal.app and iTerm2) and on WSL**, where the `podman exec` client lives
+outside the VM and nothing in the Linux suite can answer for them. Also try **force-quitting** the
+terminal on each: expect the container left running, and `./cs193v` to explain it and point at
+`--stop`.
 
 ### §5.6 — what an OOM looks like to a student
 Run the allocation loop from an interactive shell.

@@ -216,7 +216,7 @@ assert_not_contains "identity:non-interactive-has-no-goodbye" "$CS193V_GOODBYE" 
 TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
 
 pty_shell() {                     # pty_shell KEYS -> everything the session printed
-    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null 2>&1
+    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" /dev/null 2>&1
 }
 tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 
@@ -229,9 +229,10 @@ tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 # These also fail FASTER than the sleeps did in the one case that matters. A client that died
 # on the way up used to be measured six seconds later, against a container with nothing in it;
 # now the wait runs out and the assertion names it.
+# tmux_sessions_are and tmux_unattached went with #41's reattach group: one counted up to the
+# second concurrent session that is now refused, the other waited for the pruning that no longer
+# exists. Both would have sat here as helpers nothing called.
 tmux_client_attached() { [ "$(E "$TM list-clients -F 1" | head -1)" = 1 ]; }
-tmux_sessions_are()    { [ "$(E "$TM list-sessions -F 1" | grep -c .)" = "$1" ]; }
-tmux_unattached()      { [ "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)" = 0 ]; }
 tmux_windows_are()     { [ "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)" = "$1" ]; }
 # A pane that has printed nothing yet is indistinguishable from one whose banner is missing,
 # so the two absence assertions below have to wait for the pane to have drawn SOMETHING.
@@ -245,15 +246,17 @@ tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | tr -d '[:space:
 # nothing. In `printf ... | script ... &`, `$!` is the last element of the pipeline, which is
 # script itself. Defined once so no call site can get that wrong again.
 start_client() {                  # start_client -> sets CLIENT_JOB (script's pid)
-    printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} -e CS193V_CLIENT_PID=\$\$ ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+    printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
     CLIENT_JOB=$!
 }
 
 # Close it, and do not come back until it is REALLY gone (issue #32).
 #
-# What dies when a student closes their window is the `podman exec` client, and that is
-# script's child -- `\$\$` above is expanded by the shell script -c spawns, which then execs
-# into podman, so the pid it stamps into @cs193v_host_pid is that child and not script.
+# The `podman exec` client is script's child, so that is what has to be killed to simulate the
+# window going away in THIS harness -- which drives cs193v-shell directly and never runs the
+# launcher. Note that this is no longer what closing a real window does: since #41 a real window
+# closing signals the LAUNCHER, which stops the whole container. 70-sighup.sh models that, by
+# destroying the pty instead; here the point is only to leave a session with a dead client behind.
 #
 # So kill the CHILD and wait for SCRIPT. Killing script first is what made this racy: SIGKILL
 # is not propagated to descendants, so the client is orphaned onto a subreaper that may not
@@ -340,83 +343,72 @@ tmux_kill_all
 # empty -- which is the success case. Silence it inside the container or the assertion
 # compares against an error message and fails on correct behaviour.
 
-# REATTACH. Close the terminal window (kill the exec client) and the session must survive
-# with its windows, and the next launch must land back in it rather than making a new one.
-# This is the behaviour destroy-unattached off exists for; see ERRORS.md D1.
+# ─── ONE SESSION, CLAIMED ATOMICALLY  (#41) ────────────────────────────────────
+# This group used to test REATTACH: close the window, and the next launch lands back in the same
+# session with the same tabs. That was the design, it was measured, and #41 removed it -- the
+# container now stops when the terminal does, so there is never an orphaned session to return to.
+# With it went the @cs193v_host_pid stamp, the launcher's stale-client pruning, and the promise
+# that a second window gets its own tabs.
+#
+# What replaces it is the claim. cs193v-shell creates ONE session called `cs193v`, and a second
+# attempt fails on the duplicate name rather than adopting anything.
 tmux_kill_all
 start_client; client=$CLIENT_JOB
 wait_until 30 tmux_client_attached
 E "$TM new-window -d" >/dev/null 2>&1
 wait_until 10 tmux_windows_are 2
 first="$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
-# close_client returns only once the client is out of the process table, so everything below
-# is reasoning about a window that is definitively closed rather than one that is probably
-# closed by now. That matters in both directions: the pid check further down used to sample
-# an asynchronous death exactly once and could go red on a slow machine, and the conmon
-# assertion just below used to be able to pass for the WRONG reason -- a client that was
-# still alive is of course still attached (#32).
-close_client "$client"
-# The stamped pid must be the client we actually spawned. Nothing checked this before, so
-# nothing could tell a correct stamp from a plausible one -- and "the pid recorded is not the
-# pid the test kills" is exactly what made this block racy.
-assert_eq "tmux:the-stamped-pid-is-the-client-we-spawned" "$CLOSED_PID" \
-          "$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
-assert_eq "tmux:session-survives-the-window-closing" "$first" \
-          "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
+assert_eq "tmux:the-session-has-one-fixed-name" "cs193v" "$first"
 
-# THE CLIENT DOES NOT DIE WITH THE WINDOW, AND THAT IS WHY THE LAUNCHER PRUNES.
+# THE SECOND LAUNCH IS REFUSED, and this is the part the launcher's `podman ps` check cannot do.
+# `podman start` is idempotent and reports nothing, so two launches that both find a stopped
+# container both start it and both arrive here; tmux's session namespace is what breaks the tie,
+# atomically, inside the container where it cannot go stale across a stop.
 #
-# Asserted rather than assumed, because the whole reattach design rests on it and it is
-# deeply counter-intuitive: conmon keeps the exec session's pty open after the host-side
-# `podman exec` is gone, so the tmux client inside stays blocked on it and tmux reports the
-# session as attached indefinitely. Both ptys still exist and are still writable, so nothing
-# in the container can tell this apart from a live client.
-#
-# If this assertion ever starts failing, that is GOOD NEWS -- it means clients now die on
-# their own and prune_stale_tmux_clients in ./cs193v can be deleted. Read it that way rather
-# than "fixing" the test.
-assert_eq "tmux:a-closed-window-leaves-the-client-attached-(conmon)" "1" \
-          "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
-assert_ne "tmux:the-session-records-who-attached-it" "" \
-          "$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
-
-# What ./cs193v does before it attaches: detach clients whose host process is gone. Done
-# here by hand because this tier drives cs193v-shell directly and never runs the launcher;
-# the launcher's own copy of the rule is asserted statically in 10-static.sh and exercised
-# for real in the live tier.
-stale_pid="$(E "$TM list-sessions -F '#{@cs193v_host_pid}'" | head -1)"
-if kill -0 "$stale_pid" 2>/dev/null; then
-    fail "tmux:the-recorded-client-pid-is-really-gone" \
-         "pid $stale_pid is still on the host after close_client's wait() returned, which
-should not be reachable -- script reaps the client before it exits. Report the state below
-rather than re-running: STAT=Z would mean it was reaped by someone else and left a corpse,
-and a live podman would mean the wrong process was killed.
-$(ps -o pid=,ppid=,stat=,etime=,args= -p "$stale_pid" 2>&1)"
-else
-    pass "tmux:the-recorded-client-pid-is-really-gone"
-fi
-E "$TM detach-client -s '=$first'" >/dev/null 2>&1
-wait_until 10 tmux_unattached
-assert_eq "tmux:pruning-frees-the-session" "0" \
-          "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
-
-start_client; client2=$CLIENT_JOB
-wait_until 30 tmux_client_attached
-assert_eq "tmux:relaunch-reattaches-rather-than-creating" "1" \
-          "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
-assert_eq "tmux:reattached-session-is-the-same-one" "$first" \
-          "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
-assert_eq "tmux:reattached-session-kept-its-tabs" "2" \
+# Run WITHOUT a pty on purpose. `script` swallows the child's exit status unless given -e, and the
+# status IS the assertion here -- the duplicate is detected by `new-session -d` before anything
+# needs a terminal, so no pty is required to reach it.
+podman exec "$NAME" cs193v-shell >/dev/null 2>&1
+rc=$?
+assert_eq "tmux:a-second-session-is-refused-with-the-agreed-status" "3" "$rc"
+assert_eq "tmux:a-refused-launch-creates-no-second-session" "1" \
+          "$(E "$TM list-sessions -F 1" | grep -c .)"
+# ...and it left the first session's tabs alone. A claim that half-succeeded would be worse than
+# one that failed outright.
+assert_eq "tmux:a-refused-launch-leaves-the-first-session-intact" "2" \
           "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)"
 
-# A SECOND concurrent launch must get its OWN session, because the first one's client is
-# attached. CONTAINER-DESIGN.md promises each terminal window its own set of tabs.
-start_client; client3=$CLIENT_JOB
-wait_until 30 tmux_sessions_are 2
-assert_eq "tmux:second-window-gets-its-own-session" "2" \
-          "$(E "$TM list-sessions -F '#{session_name}'" | grep -c . )"
-close_client "$client2"
-close_client "$client3"
+# close_client returns only once the client is out of the process table, so everything below is
+# reasoning about a window that is definitively closed rather than probably closed by now (#32).
+close_client "$client"
+
+# THE CLIENT DOES NOT DIE WITH THE WINDOW. This is still true, still counter-intuitive, and now
+# load-bearing for a different reason than before.
+#
+# conmon keeps the exec session's pty open after the host-side `podman exec` is gone, so the tmux
+# client inside stays blocked on it and tmux reports the session as attached indefinitely. Both
+# ptys still exist and are still writable, so NOTHING INSIDE THE CONTAINER CAN TELL THIS APART
+# from a live client.
+#
+# It used to be the reason the launcher had to prune ghost clients. It is now the reason the HOST
+# has to be what stops the container: no in-container mechanism -- not destroy-unattached, not
+# tmux's own client tracking -- can detect a closed window, so the only party that can is the
+# process the window actually kills. That is why open_shell traps HUP rather than leaving the
+# container to notice its own abandonment.
+#
+# If this assertion ever starts failing, that is GOOD NEWS: clients would be dying on their own,
+# and `destroy-unattached on` would become a viable second line of defence. Read it that way
+# rather than "fixing" the test.
+assert_eq "tmux:a-closed-window-leaves-the-client-attached-(conmon)" "1" \
+          "$(E "$TM list-sessions -F '#{session_attached}'" | head -1)"
+
+# And the session itself outlives its client, which is what destroy-unattached off buys. In real
+# use nothing observes this any more -- the container is stopping -- but it is what makes closing
+# a TAB harmless, and flipping the setting would silently make every tab close destroy the session.
+assert_eq "tmux:the-session-outlives-its-client" "cs193v" \
+          "$(E "$TM list-sessions -F '#{session_name}'" | head -1)"
+assert_eq "tmux:destroy-unattached-did-not-take-the-windows" "2" \
+          "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)"
 tmux_kill_all
 
 # ─── §A.5 kernel and namespaces ────────────────────────────────────────────────

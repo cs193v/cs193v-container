@@ -18,6 +18,8 @@ cs193v — the CS193V course container
   cs193v                     open a shell in the container
   cs193v ports               check whether your servers are reachable
   cs193v doctor              print a report to paste when asking for help
+  cs193v --stop              stop the container, if a terminal window was closed
+                             without you noticing
 
   cs193v --reset-tunnel      fix it when your browser cannot reach your server
   cs193v --rebuild           start the container over. Your files and logins are kept.
@@ -26,11 +28,11 @@ cs193v — the CS193V course container
                              you; run it yourself only if you are told to.
   cs193v --update            get the newest version of the course container.
 
-Closing your terminal window does not stop your work: run cs193v again and your tabs
-come back, still running.
+Closing your terminal window stops the container, and anything running inside it. A
+dev server you started will stop. Your files are safe — they live on your own computer.
 
-You can run cs193v in as many terminal windows as you like — each gets its own set of
-tabs in the same container. There is only ever one container.
+Use tabs rather than a second window: CTRL+T opens one, and they all share the one
+container. Only one terminal window at a time can be in the container.
 
 Your files live in the projects folder next to this script, and appear inside the
 container at ~/projects. Everything else in the container is temporary.
@@ -195,6 +197,9 @@ Two ways forward:
   * Work in the original folder:  cd {{INUSE}} && ./cs193v
   * Or start fresh in this one:   ./cs193v --rebuild
 
+If that container is open in another terminal window right now,
+run ./cs193v --stop first.
+
 [[err.needs-a-terminal]]
 cs193v could not open a shell, because it is not being run from a
 terminal — its input is coming from a file or from another program
@@ -203,9 +208,10 @@ rather than from your keyboard.
 If you typed ./cs193v yourself and got this, please send it to
 course staff along with how you started it.
 
-Your container is set up and running; only the shell was not
-opened. These commands do not need a terminal, so they are the
-ones to use in a script:
+Your container is set up, and has been stopped again — it only
+stays running while a terminal window is open on it. These
+commands do not need a terminal, so they are the ones to use in
+a script:
 
     cs193v --rebuild     make sure a fresh container exists
     cs193v ports         check whether your servers are reachable
@@ -219,6 +225,21 @@ To run a single command inside the container:
 The container is not running yet. Start it first with:
 
     ./cs193v
+
+[[err.session-in-use]]
+You already have a CS193V session open in another terminal window.
+
+Switch to that window and carry on working there. Only one
+window at a time can be in the container — if you want a second
+place to work, open a new tab there with CTRL+T.
+
+(You may also see this message if your previous session crashed,
+or if you closed a terminal window in a way that did not shut
+things down. If so, that's okay; the fix is the same.)
+
+To stop the container so you can start again:
+
+    cs193v --stop
 
 [[err.build-failed]]
 The course container could not be built. Podman stopped here:
@@ -314,10 +335,6 @@ of:
 That step did not finish — usually a dropped connection rather than anything you did.
 Trying again (attempt {{ATTEMPT}} of {{TRIES}}). Everything that already finished is
 kept, so this picks up where it stopped rather than starting over.
-
-[[warn.many-shells]]
-You have {{N}} terminal windows open on the container. That is fine, but each one and
-all of its tabs use memory, so close any you are finished with if things feel slow.
 
 [[warn.machine-restart-failed]]
 Could not restart podman's virtual machine automatically. Try it by hand:
@@ -416,6 +433,15 @@ Updated. Run ./cs193v to open a shell.
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
 
+[[status.stopping]]
+Stopping the container...
+
+[[status.stopped]]
+The container has stopped. Run cs193v again when you want it back.
+
+[[status.already-stopped]]
+The container is not running, so there is nothing to stop.
+
 [[status.tunnel-resetting]]
 Reconnecting your browser to the container...
 
@@ -474,6 +500,16 @@ in.
 Cancel, change nothing
 [[opt.full-rebuild-go]]
 Yes, start over and log me out
+
+[[prompt.stop]]
+This stops the container. If you have a session open in another terminal window,
+it will close, and anything running inside it will stop.
+
+Your files in the projects folder are on your own computer, so they are not
+affected.
+
+[[opt.stop-go]]
+Stop the container
 
 [[prompt.clock-drift]]
 The container's clock is {{SKEW}} seconds away from your computer's clock.
