@@ -151,14 +151,22 @@ rm -f "$WARN_ACK"
 # `trap ... EXIT` silently drops whatever the first one did -- and both of those handlers run at
 # moments when the animator may still be alive.
 #
+# WAITED FOR after the kill, so that the animator's TERM handler gets to run: it parks the
+# cursor below the block, which is what keeps a Ctrl-C during a build from putting the shell
+# prompt through the middle of one. Without the wait the prompt races the park and usually wins.
+# Bounded by a single frame, and only reached when a meter was actually running.
+#
 # cursor_show unconditionally, not only when the meter was running: this is the last chance to
 # undo cursor_hide, and getting it wrong costs the student an invisible cursor in every command
 # they run afterwards. Showing a cursor that was never hidden does nothing. Being in here rather
-# than in the trap body is what extends it to shell_teardown and rebuild_interrupted -- the two
-# handlers above, both of which can fire with the cursor hidden.
+# than in the trap body is what extends both of those to shell_teardown and rebuild_interrupted
+# -- the two handlers above, either of which can fire with a live animator and a hidden cursor.
 transient_cleanup() {
     rm -f "$WARN_ACK" "$METER_STATE"
-    [ -n "${METER_PID:-}" ] && kill "$METER_PID" 2>/dev/null
+    if [ -n "${METER_PID:-}" ]; then
+        kill "$METER_PID" 2>/dev/null
+        wait "$METER_PID" 2>/dev/null
+    fi
     cursor_show
     :
 }
@@ -274,11 +282,145 @@ box() {
         # contain whatever the messages do.
         BEGIN {
             lim = w - 4
+            # Built rather than passed in, so this function stays copy-pasteable into
+            # install-cs193v.sh with nothing else to keep in step. See the note above.
+            esc = sprintf("%c", 27)
             printf "%s%s┏━━ %s %s┓%s\n", ind, red, title, rule(w - 6 - dw(title)), off
         }
-        # A tab has no defined width inside a box, and podman emits them.
-        { t = $0; gsub(/\t/, " ", t); put(t) }
+        # A tab has no defined width inside a box, and podman emits them. So do COLOUR
+        # SEQUENCES and CARRIAGE RETURNS, and those two are worse than untidy, because this box
+        # interpolates raw podman output verbatim -- err.build-failed carries the tail of
+        # $BUILD_LOG, and err.create-failed the whole of a failure:
+        #
+        #   * dw() measures a colour sequence as the columns its BYTES would occupy, so a line
+        #     carrying one comes out 11 columns short and takes the right wall in with it;
+        #   * a \r sends the rest of the row back to column 0 on the way to the terminal, over
+        #     the wall this has already drawn.
+        #
+        # Found by feeding a realistic build log to it rather than by reading one: apt, npm and
+        # the Playwright download all emit both, and neither can appear in messages.txt where
+        # somebody might have noticed it.
+        {
+            t = $0
+            gsub(esc "\\[[0-9;?]*[A-Za-z]", "", t)
+            gsub(esc ".", "", t)
+            # Only the last segment of a self-overwriting line was ever on a screen.
+            n = split(t, seg, "\r")
+            if (n > 1) { t = ""; for (i = n; i >= 1; i--) if (seg[i] != "") { t = seg[i]; break } }
+            gsub(/\t/, " ", t)
+            put(t)
+        }
         END { printf "%s%s┗%s┛%s\n", ind, red, rule(w - 2), off }
+    '
+}
+
+# The build's output box: the last few lines podman printed, under the meter's caption row,
+# redrawn three times a second while a build runs (issue #23 left the screen with nothing on it
+# that moves on a human timescale during the four minutes when apt, npm and Chromium are the
+# ones doing the work).
+#
+# NOT box(), and not a mode added to it. That one wraps a long line rather than cutting it, is
+# as tall as whatever it is handed, and is duplicated verbatim into install-cs193v.sh with
+# 20-messages.sh rendering both copies to assert they still match -- so teaching it a
+# truncating fixed-height mode would put back the duplication issue #21 removed and would
+# change a renderer that 26 messages depend on. The requirements here are the opposite ones:
+# the height is fixed by the geometry rather than by the content, because a box that changed
+# height between frames would move the rows above it, and for the same reason a long line has
+# to be cut rather than allowed to become two rows.
+#
+# PRINTABLE ASCII ONLY, which is what keeps this cheap enough to run three times a second: with
+# no multibyte characters in the body, awk's length() IS the display width and substr() cannot
+# slice a character in half, so none of box()'s dw()/dsub() arithmetic is needed here. It costs
+# a stray checkmark out of npm; it buys a box that cannot be broken by whatever seven
+# third-party tools decide to print into it. The ellipsis is the one exception -- a single
+# column, appended after the text has already been cut to fit.
+#
+# THE ESCAPE SEQUENCES GO FIRST, before the ASCII filter. Their parameters are printable ASCII,
+# so filtering first would delete the ESC and leave a literal "[1;32mdone" on the screen.
+#
+# The apostrophe rule from build_progress applies: this is a single-quoted shell string, so an
+# apostrophe in a comment below ENDS it. Write "does not" rather than "doesn t".
+meter_tail_box() {                    # -> the whole box, one printf-ready blob, or nothing
+    [ "$METER_ROWS" -gt 0 ] || return 0
+    # tail -n 40 rather than -n $METER_ROWS: the filter below drops blank lines, commit ids and
+    # our own notes, and a burst of those would leave the box half empty if it were fed exactly
+    # as many lines as it has rows. tail seeks from the end, so the size of the log is free.
+    tail -n 40 "$METER_LOG" 2>/dev/null | LC_ALL=C awk -v rows="$METER_ROWS" \
+            -v w="$METER_BOX_W" -v dim="$C_DIM" -v off="$C_OFF" -v esc="$ESC" '
+        function rule(n,  s) { s = ""; while (n-- > 0) s = s "━"; return s }
+        # Cut to fit or padded to exactly the text field, so every row is the same width as the
+        # lid no matter what it holds.
+        function body(t,  pad, n) {
+            if (length(t) > lim) return substr(t, 1, lim - 1) "…"
+            pad = ""; n = lim - length(t); while (n-- > 0) pad = pad " "
+            return t pad
+        }
+        BEGIN { lim = w - 4; k = 0 }
+        {
+            t = $0
+            gsub(esc "\\[[0-9;?]*[A-Za-z]", "", t)     # colour, cursor moves, erases
+            gsub(esc ".", "", t)                       # anything else two characters long
+            # A self-overwriting progress line arrives as ONE record with carriage returns in
+            # it, and only its last segment was ever on a screen.
+            n = split(t, seg, "\r")
+            if (n > 1) { t = ""; for (i = n; i >= 1; i--) if (seg[i] != "") { t = seg[i]; break } }
+            gsub(/\t/, " ", t)                         # a tab has no width inside a box
+            gsub(/[^ -~]/, "", t)                      # space through tilde: printable ASCII
+            # A BLANK LINE GETS A ROW like any other, rather than being swallowed to save one.
+            # podman emits them between some steps, and the box is a window onto the log: a
+            # student comparing a row here with the file staff asked them to send should be able
+            # to count lines. Consequence worth knowing: a line that was ONLY a colour sequence,
+            # or only characters the filter above removes, arrives here empty and now spends a row
+            # too. Rare enough in build output to be the honest trade.
+            #
+            # THE ONE EXCLUSION IS OURS RATHER THAN PODMANS. build_note_fold appends these to the
+            # same log while the meter is still running, and they are addressed to staff -- they
+            # report that this launcher has lost track of which Containerfile instruction a step
+            # is, which is neither something a student can act on nor something podman said.
+            #
+            # No apostrophe in that sentence, and none anywhere below: this whole awk program is a
+            # single-quoted shell string, so one ENDS it. It cost a syntax error to relearn.
+            #
+            # AND THE BLANK LINE IN FRONT OF IT GOES TOO. The note begins with a newline on
+            # purpose -- podman does not always end its last line with one, and without it the
+            # note would be glued onto the end of podman output in the log staff read -- so that
+            # separator belongs to our text, not to the build. Left in, it is the NEWEST line by
+            # the time build_note_fold runs, so the box would end on a blank row and give up a row
+            # of real content on every build where the label check fires. Only ever removed when a
+            # note line is what follows it, so a blank line podman actually printed is untouched.
+            if (t ~ /^cs193v:/) {
+                if (k > 0 && keep[k] == "") k--
+                next
+            }
+            # COMMIT IDS ARE NOT DROPPED, and that is a decision rather than an omission. They
+            # are 22 of the 134 lines of a warm build and they cost half the window -- with them
+            # in, the eight rows reach back to STEP 22 instead of STEP 19 -- but this box is a
+            # window onto what podman said, not an edited version of it, and a student comparing
+            # it with a log staff asked them to send should find the same lines in both. If it is
+            # ever reconsidered, note that podman prints them TWO ways: "--> <hash>" between
+            # steps and the finished image id on a line of its own at the end.
+            keep[++k] = t
+        }
+        # Padded out to `rows` even when fewer lines survived, so the height of the box never
+        # depends on what the log happened to contain.
+        #
+        # EVERY GLYPH COMES OUT OF A printf, the same way box() does it, rather than being
+        # concatenated into a string first. 20-messages.sh greps both scripts for box characters
+        # outside a printf and calls what it finds hand-drawn art -- which is the bug that grew
+        # back four times before issue #21, and the rule is worth keeping even though this is a
+        # second renderer rather than a fifth copy of the first.
+        #
+        # The rows go out as one stream separated by \r\n, with no trailing separator: the caller
+        # captures the lot and prints it as the tail of a single frame.
+        END {
+            printf "  %s┏%s┓%s%s[K", dim, rule(w - 2), off, esc
+            first = (k > rows ? k - rows + 1 : 1)
+            for (i = 0; i < rows; i++) {
+                j = first + i
+                printf "\r\n  %s┃ %s ┃%s%s[K", dim, body(j <= k ? keep[j] : ""), off, esc
+            }
+            printf "\r\n  %s┗%s┛%s%s[K", dim, rule(w - 2), off, esc
+        }
     '
 }
 
@@ -349,24 +491,67 @@ meter_write() {                       # meter_write CUR TOTAL RETRY LABEL
 #
 # Row 1:  <glyph> [####....]  7/24                    (retrying: 1/2)
 # Row 2:       Installing the Vercel CLI...
+# Rows 3+:     a box holding the last few lines podman printed. See meter_tail_box.
 #
 # The marker is right-aligned at the terminal edge, so it is beside the block rather than
 # jostling the label whose length changes at every step.
 METER_W=40
 METER_COLS=80
+METER_LINES=24
+
+# The output box, in body rows and display columns. Zero rows means no box at all, which is
+# what a short or narrow terminal, a non-terminal stdout and every caller other than the build
+# gets -- the block is then exactly the two rows it was before.
+#
+# EIGHT ROWS, so the whole block is twelve: half of a default 80x24 terminal, which leaves a
+# dozen rows of what came before it still readable, and visibly less than the `tail -n 12` the
+# STOP box shows if the build then fails. Eight lines is also enough to hold a coherent chunk
+# of apt or npm output rather than a strobing single line.
+METER_ROWS_MAX=8
+METER_ROWS=0
+METER_BOX_W=0
+METER_H=2
+# The file the box tails, set by meter_start. Empty for every meter that is not a build.
+METER_LOG=''
+# Which row of the block the cursor is on, 0 before anything is drawn. The whole block is
+# addressed relative to this, so it is the one piece of state a frame needs from the last one.
+METER_ROW=0
 
 # Row 1 is 52 columns of furniture, so a full-width bar plus a 17-column marker fits an
 # 80-column terminal with room to spare and nothing shrinks there. Below that the BAR gives
 # way rather than the words: a count and a step name a student can read out to staff are
 # worth more than the last ten cells of a bar.
+#
+# THE BOX SHRINKS RATHER THAN WRAPS, and it stops three columns short of BOX_W's own width
+# rather than two: a box drawn to the last cell of a row leaves some terminals holding a
+# pending wrap, and the next frame's cursor move would then land a row low and smear the block
+# permanently. Same reason meter_mark stops one short. Below 44 columns there is no useful text
+# field left, and below twelve lines the block would be the whole screen, so the box goes and
+# the two rows carry on alone.
 meter_fit() {
     METER_COLS="$(tput cols 2>/dev/null || printf '%s' "${COLUMNS:-80}")"
     case "$METER_COLS" in ''|*[!0-9]*) METER_COLS=80 ;; esac
+    METER_LINES="$(tput lines 2>/dev/null || printf '%s' "${LINES:-24}")"
+    case "$METER_LINES" in ''|*[!0-9]*) METER_LINES=24 ;; esac
     METER_W=40
     if [ "$METER_COLS" -lt 72 ]; then
         METER_W=$(( METER_COLS - 32 ))
         [ "$METER_W" -lt 10 ] && METER_W=10
     fi
+    METER_ROWS=0
+    METER_BOX_W=$(( METER_COLS - 3 ))
+    [ "$METER_BOX_W" -gt "$BOX_W" ] && METER_BOX_W="$BOX_W"
+    if [ -n "$METER_LOG" ] && [ "$METER_BOX_W" -ge 44 ]; then
+        METER_ROWS=$(( METER_LINES - 8 ))
+        [ "$METER_ROWS" -gt "$METER_ROWS_MAX" ] && METER_ROWS="$METER_ROWS_MAX"
+        [ "$METER_ROWS" -lt 4 ] && METER_ROWS=0
+    fi
+    # How tall the block is: the two rows, plus a lid and a floor around any body rows. Every
+    # relative cursor move in the meter is derived from this and METER_ROW, so the formula lives
+    # here once rather than at each of the places that step through the block.
+    METER_H=2
+    [ "$METER_ROWS" -gt 0 ] && METER_H=$(( METER_ROWS + 4 ))
+    return 0
 }
 
 meter_bar() {                         # meter_bar CUR TOTAL -> [████░░░░]
@@ -394,17 +579,29 @@ meter_mark() {                        # meter_mark RETRY W1 -> padding + (retryi
     printf '%s%s' "$pad" "$mark"
 }
 
-# One frame, both rows. FIRST opens the block instead of redrawing over it: the cursor rests
-# at the end of row 2 between frames, so every later frame steps back up to row 1 first.
+# One frame, the whole block. METER_ROW says which row the cursor is resting on, so a frame
+# begins by stepping back up to row 1 -- and a METER_ROW of 0 opens the block by drawing it
+# rather than by redrawing over it, which is what the first frame does.
 #
 # RELATIVE MOVES AND A PLAIN \n, never absolute positioning. When the block sits at the
-# bottom of the screen the terminal scrolls, and both rows travel up together -- absolute
+# bottom of the screen the terminal scrolls, and every row travels up together -- absolute
 # coordinates would keep pointing at where the block used to be.
-meter_draw() {                        # meter_draw FRAME CUR TOTAL RETRY LABEL [FIRST]
-    local frame="$1" cur="$2" tot="$3" retry="$4" label="$5" first="${6:-}"
+#
+# IT ENDS WITH ESC[J, erasing whatever is below the last row. That is what makes the region
+# self-healing: a resize that shrinks the box, and the closing frame that draws none at all,
+# would otherwise leave the rows it used to occupy stranded underneath. Nothing below the block
+# is ever lost to it, because the block is the last thing printed until it is finished with.
+#
+# METER_ROW is updated AFTER each write rather than once at the end, because bash defers a trap
+# until the current builtin has finished -- so the TERM handler in meter_animate always sees
+# where the cursor really is. The box goes out as a single printf, so a signal arriving inside
+# that one write is the only case it can be wrong about, and then only about how far down to
+# park a cursor nobody is reading.
+meter_draw() {                        # meter_draw FRAME CUR TOTAL RETRY LABEL [BOX]
+    local frame="$1" cur="$2" tot="$3" retry="$4" label="$5" boxblob="${6:-}"
     local g count w1
     g="$(meter_glyph "$frame")"
-    [ -z "$first" ] && printf '\r%s[1A' "$ESC"
+    [ "$METER_ROW" -gt 1 ] && printf '\r%s[%dA' "$ESC" $(( METER_ROW - 1 ))
     if [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
         count="$cur/$tot"
         # 2 indent + glyph + space + bracketed bar + 2 + the count.
@@ -414,26 +611,62 @@ meter_draw() {                        # meter_draw FRAME CUR TOTAL RETRY LABEL [
     else
         printf '\r  %s%s%s[K' "$g" "$(meter_mark "$retry" 3)" "$ESC"
     fi
+    METER_ROW=1
     # Indented to sit under the bar rather than under the glyph, so the moving cell stays the
     # leftmost thing in the block and the words line up with what they describe.
     printf '\r\n     %s%s[K' "$label" "$ESC"
+    METER_ROW=2
+    # Already a blob of complete rows, separated the same way these two are. Empty whenever
+    # there is no box -- a short terminal, a narrow one, or any meter that is not a build.
+    if [ -n "$boxblob" ]; then
+        printf '\r\n%s' "$boxblob"
+        METER_ROW="$METER_H"
+    fi
+    printf '%s[J' "$ESC"
+}
+
+# Where the cursor is parked when the block is being abandoned mid-flight rather than finished:
+# just below it, so that a shell prompt lands under an intact block instead of through the
+# middle of one. Only Ctrl-C arrives here, by way of the EXIT trap killing the animator; before
+# this the prompt landed on whichever row the last frame happened to stop on, which was survivable
+# while the block was two rows tall and is not now.
+meter_park() {
+    local n=$(( METER_H - METER_ROW ))
+    # Skipped rather than emitted with a zero: ESC[0B moves down a row on most terminals rather
+    # than nowhere at all.
+    [ "$n" -gt 0 ] && printf '\r%s[%dB' "$ESC" "$n"
+    printf '\r\n'
 }
 
 # The animator. Stops when the state file goes away, which is how meter_stop ends it without
 # depending on a signal arriving.
+#
+# ON THE WAY OUT IT LEAVES THE CURSOR ON ROW 1. That is meter_stop's precondition, and it is
+# what lets the parent shell stop knowing how tall the block is -- which it cannot know: the
+# height comes from the terminal size, WINCH is handled here, and the parent is blocked inside
+# podman for the whole four minutes during which a student might resize the window.
+#
+# THE BOX IS REFRESHED EVERY THIRD FRAME, not every frame. The spinner has to move at 10 Hz to
+# read as motion, but eight lines of log replaced ten times a second read as a blur rather than
+# as text, and every refresh is a tail and an awk. Three a second is legible and nearly free.
 meter_animate() {
-    local i=0 cur tot retry label
-    # A resize changes where the marker belongs and, below 72 columns, how wide the bar may
-    # be. Re-measured on the signal rather than once per frame, which would fork tput ten
-    # times a second for an event that happens approximately never.
-    trap 'meter_fit' WINCH
+    local i=0 t=0 cur tot retry label box=''
+    # A resize changes where the marker belongs, how wide the bar and the box may be, and how
+    # many rows the box may have. Re-measured on the signal rather than once per frame, which
+    # would fork tput ten times a second for an event that happens approximately never. The box
+    # is re-rendered in the handler too, so its width can never lag the geometry it is drawn to.
+    trap 'meter_fit; box="$(meter_tail_box)"' WINCH
+    trap 'meter_park; exit 0' TERM
     while [ -f "$METER_STATE" ]; do
         cur=''; tot=''; retry=''; label=''
         IFS=' ' read -r cur tot retry label < "$METER_STATE" 2>/dev/null || true
-        meter_draw "$i" "${cur:-0}" "${tot:-0}" "${retry:--}" "${label:-}"
-        i=$(( (i + 1) % 8 ))
+        [ "$(( t % 3 ))" -eq 0 ] && box="$(meter_tail_box)"
+        meter_draw "$i" "${cur:-0}" "${tot:-0}" "${retry:--}" "${label:-}" "$box"
+        i=$(( (i + 1) % 8 )); t=$(( t + 1 ))
         sleep 0.1
     done
+    [ "$METER_ROW" -gt 1 ] && printf '\r%s[%dA' "$ESC" $(( METER_ROW - 1 ))
+    printf '\r'
 }
 
 # Nothing animates when stdout is not a terminal: \r cannot overdraw a pipe or a log file,
@@ -444,12 +677,21 @@ meter_animate() {
 # anything can redraw them -- and if the animator owned the opening frame, a meter_stop that
 # arrived before its first tick would step up into whatever was printed above and overwrite
 # it. Drawing it synchronously makes that race impossible rather than unlikely.
-meter_start() {                       # meter_start TOTAL LABEL
+meter_start() {                       # meter_start TOTAL LABEL [LOG]
     [ -t 1 ] || return 0
+    # Set before meter_fit, which only looks for room for a box when there is something to put
+    # in it, and before the fork, so that the animator inherits it. Every caller but the build
+    # leaves it empty and gets the two-row block unchanged.
+    METER_LOG="${3:-}"
     meter_fit
+    METER_ROW=0
     cursor_hide
     meter_write "0" "${1:-0}" '-' "${2:-}"
-    meter_draw 0 0 "${1:-0}" '-' "${2:-}" first
+    # NO BOX ON THE OPENING FRAME. The log does not exist yet at this point -- build_image has
+    # just removed it and tee has not created it -- so there is nothing to put in one. The
+    # animator adds it a tenth of a second later and the block grows by ten rows, which needs no
+    # special handling because every move a frame makes is relative to where the cursor is.
+    meter_draw 0 0 "${1:-0}" '-' "${2:-}"
     meter_animate &
     METER_PID=$!
 }
@@ -470,15 +712,26 @@ meter_label() {                       # meter_label CUR TOTAL LABEL  -- update i
 # ROWS, because the caption names the step that failed and it belongs directly above the STOP
 # box -- and the bar stays where it stopped. Filling it to tot/tot, which this used to do,
 # drew a completed build immediately above the words "the build failed".
+#
+# THE OUTPUT BOX GOES ON BOTH PATHS. It is scaffolding for a build that is happening, and by
+# here one is not: on success the block collapses past it to a single line, and on failure the
+# same lines are about to be repeated inside the STOP box, wrapped rather than cut and with the
+# rest of the log behind them. Two boxes saying nearly the same thing is worse than one.
 meter_stop() {                        # meter_stop ok|bad [CUR TOTAL LABEL]
     [ -n "$METER_PID" ] || return 0
     local outcome="$1"; shift
     local cur='' tot='' retry='' label=''
     [ -f "$METER_STATE" ] && IFS=' ' read -r cur tot retry label < "$METER_STATE" 2>/dev/null
     rm -f "$METER_STATE"
-    kill "$METER_PID" 2>/dev/null
+    # WAITED FOR, NOT KILLED. The animator leaves its loop when the state file goes -- that is
+    # what the loop condition is for -- and on the way out it puts the cursor on row 1, which is
+    # what the drawing below assumes. Killing it instead left the cursor wherever that frame had
+    # reached, and the ESC[1A that used to be here assumed it was the end of row 2: a one-row
+    # error when it was wrong, which was survivable while the block was two rows tall and is an
+    # eleven-row one now. Costs at most one frame, 100 ms.
     wait "$METER_PID" 2>/dev/null || true
     METER_PID=''
+    METER_ROW=1
     if [ "$#" -ge 2 ]; then cur="$1"; tot="$2"; label="${3:-$label}"; fi
     cur="${cur:-0}"; tot="${tot:-0}"
     # Before the final frame, not after: whatever the caller prints next -- a STOP box, a
@@ -486,18 +739,22 @@ meter_stop() {                        # meter_stop ok|bad [CUR TOTAL LABEL]
     # thing is a die() that never returns here.
     cursor_show
     if [ "$outcome" = bad ]; then
+        # Drawn with no box, and meter_draw ends with ESC[J -- which is what takes the live one
+        # off the screen ahead of the STOP box.
         meter_draw bad "$cur" "$tot" '-' "$label"
         printf '\n'
         return 0
     fi
-    printf '\r%s[1A' "$ESC"
     if [ "$tot" -gt 0 ] 2>/dev/null; then
         printf '\r  %s %s  %s/%s  %s%s[K' "$(meter_glyph ok)" "$(meter_bar "$cur" "$tot")" \
                "$cur" "$tot" "$label" "$ESC"
     else
         printf '\r  %s  %s%s[K' "$(meter_glyph ok)" "$label" "$ESC"
     fi
-    printf '\r\n%s[K' "$ESC"
+    # ESC[J rather than ESC[K, and it does both jobs: it erases the caption row from the cursor
+    # onwards AND every row below, which is where the box was. The cursor is left on the blank
+    # caption row, so whatever prints next -- the success box, a shell -- starts on a clean row.
+    printf '\r\n%s[J' "$ESC"
 }
 
 # ─── reading the Containerfile's steps ─────────────────────────────────────────
@@ -1218,12 +1475,22 @@ build_image() {
     hash="$(build_hash)"
     info "$(msg status.building IMAGE="$IMAGE")"
     rm -f "$BUILD_NOTE"
+    # THE LOG IS CLEARED HERE rather than left for tee to truncate, because the output box opens
+    # on the tail of this file and the file deliberately outlives the run that wrote it (see
+    # BUILD_LOG). Without this, a student re-running --build after a failure would spend the
+    # first moment of the new build watching the last eight lines of the one that just failed.
+    # Nothing is lost: tee truncates it milliseconds later anyway.
+    rm -f "$BUILD_LOG"
     # Started before podman with no total, and build_progress fills both the total and the
     # first label in from its own parse of the Containerfile within milliseconds of the
     # pipeline coming up. Deliberately not computed here as well: the arithmetic for what the
     # total is -- instructions, plus podman's injected LABEL step, plus creating the
     # container -- belongs in exactly one place.
-    [ -n "$BUILD_RAW" ] || meter_start 0 ""
+    #
+    # The log is handed over as the box's source. It stays the box's source for the whole life of
+    # the meter, so the box is still showing COMMIT and "Successfully tagged" while the last step
+    # -- creating the container -- runs. That reads as a build that is done, which it is.
+    [ -n "$BUILD_RAW" ] || meter_start 0 "" "$BUILD_LOG"
 
     # THE RETRY LIVES HERE, not in the installer, and that placement is the point. This
     # build reaches seven separate network origins -- the Ubuntu archive, NodeSource,

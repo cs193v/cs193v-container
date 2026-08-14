@@ -30,6 +30,43 @@ is genuinely left is only "does it look right to a human".
 *Note:* §1.2 as written expects a numbered-selection fallback with no tty. There isn't one,
 and there shouldn't be — it picks the safe default. See ERRORS.md B1.
 
+### The build's progress block (no § — it postdates VERIFICATION.md)
+`ERRORS.md` B18 records the cursor strobe: the meter left the cursor blinking between two rows at
+10 Hz, every byte of the transcript was correct, and it was found by a person running an install.
+**A transcript cannot show a display artefact that exists only in time**, so this needs eyes on
+it after any change to `meter_*`.
+
+Watch a genuinely cold build in an 80×24 terminal, all four minutes of it:
+
+```sh
+podman rmi "localhost/cs193v:local-$CS193V_INSTANCE"   # or ./cs193v --rebuild --no-cache
+./cs193v --rebuild
+```
+
+`--rebuild` builds only when the recipe moved, which is why the image is removed first: a warm
+`--rebuild` is a two-second recreate with no meter to look at. `--rebuild --no-cache` forces one
+too, and is the better choice if you also want to watch the network fetches.
+
+*Expect:*
+- Bar, step name, and a box of podman's output that fills within a second or two and keeps
+  moving. During the base-image download it should show `Copying blob` byte counts climbing — if
+  it sits still *there*, the box is missing the one phase it exists for.
+- No flicker and no tearing at 10 Hz, and the box's right wall dead straight all the way down.
+- **Resize mid-build**: narrower than 73 columns and back, then shorter than twelve rows and
+  back. The box should shrink, disappear and return with the block intact — no rows stranded
+  below it, no smearing.
+- **Ctrl-C mid-build**: the prompt lands *below* an intact block, and the cursor comes back —
+  type something and check it echoes.
+- At the end the box is gone: one `✓` row, then the green box on clean rows.
+
+Then let one fail (drop the network during the build): one red STOP box, no live box above it, a
+`✗` with the bar frozen where it stopped, and the failing lines readable inside the STOP box.
+
+*Automated:* the layout, the sanitising, the eight rows, the geometry ladder and both endings,
+against a fake podman on a pty (`30-launcher-shim.sh :: tailbox:*`). What needs a human is
+timing, flicker, and whether real podman output is worth reading — none of which is in a
+transcript.
+
 ### §7.2 — Ctrl-S does not freeze the terminal
 In `./cs193v`, press Ctrl-S, then type.
 *Expect:* typing still echoes. If it freezes, `stty -ixon` is not being applied.
