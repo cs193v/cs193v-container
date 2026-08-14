@@ -124,6 +124,48 @@ flattened output:              $hay" ;;
     esac
 }
 
+# Assert on a message by KEY rather than by quoting its prose. A test that hardcodes what a
+# message says fails the day somebody rewords messages.txt — punishing the wrong change, and
+# teaching the next person that editing student-facing text breaks the suite.
+#
+# The block parser is msg()'s own, copied rather than approximated, so a test and the launcher
+# cannot disagree about where a message ends. Flattened for the same reason assert_says flattens
+# its haystack, and because assert_says flattens only that side.
+#
+# TRUNCATED AT THE FIRST {{PLACEHOLDER}}: the rest is filled in at runtime, so only the literal
+# prefix is a phrase the student is guaranteed to read. warn.tunnel-failed interpolates {{LOG}}
+# and {{OUT}}, which is most of its tail.
+msg_text() {                          # msg_text KEY -> its literal prose, one flattened line
+    local t
+    t="$(awk -v k="[[$1]]" '
+        $0 == k { found = 1; next }
+        /^\[\[.*\]\]$/ { if (found) exit }
+        found { print }
+    ' "$PRIVATE/messages.txt")"
+    # Trimmed at both ends: flattening a block that ends in a newline leaves a trailing space,
+    # and a needle whose last character is a space would not match a phrase at the end of a line.
+    t="$(_flatten "${t%%\{\{*}")"
+    t="${t# }"
+    printf '%s' "${t% }"
+}
+
+# An unknown or all-placeholder key FAILS rather than passing vacuously, which is the trap the
+# negative form would otherwise set: assert_says_not with an empty needle passes every time.
+assert_says_key() {                   # assert_says_key NAME KEY TEXT
+    local phrase; phrase="$(msg_text "$2")"
+    case "$phrase" in
+        ''|' ') fail "$1" "no literal prose for message key: $2" ; return 0 ;;
+    esac
+    assert_says "$1" "$phrase" "$3"
+}
+assert_says_not_key() {               # assert_says_not_key NAME KEY TEXT
+    local phrase; phrase="$(msg_text "$2")"
+    case "$phrase" in
+        ''|' ') fail "$1" "no literal prose for message key: $2" ; return 0 ;;
+    esac
+    assert_says_not "$1" "$phrase" "$3"
+}
+
 assert_match() {                      # assert_match NAME ERE ACTUAL
     if printf '%s\n' "$3" | grep -qE "$2"; then pass "$1"
     else fail "$1" "expected to match: /$2/
