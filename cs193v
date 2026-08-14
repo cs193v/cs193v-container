@@ -428,9 +428,8 @@ build_progress() {
         /^STEP [0-9]+\/[0-9]+:/ {
             s = $2; sub(/:$/, "", s); split(s, a, "/")
             # PLUS ONE on a terminal: creating the container is the slowest single step of a
-            # build and used to sit outside the meter, so the bar completed and the student
-            # then waited on an unmetered line (issue #24). It is step n+1 now. Piped, there
-            # is no meter for it to be part of, so the count stays what podman reported.
+            # build, so it is step n+1 rather than an unmetered wait after the bar completes
+            # (issue #24). Piped, there is no meter, so the count stays what podman reported.
             #
             # NOTE FOR THE NEXT EDITOR: this whole awk program is inside a single-quoted
             # shell string, so an apostrophe in a comment here ENDS it and the launcher stops
@@ -688,15 +687,11 @@ TUNNEL_ID="$(printf '%s\n' "$DIR" "$INSTANCE" | sha_stdin | cut -c1-12)"
 # grow without bound. Not cleaned up on exit deliberately: after a failed build it is the
 # thing to ask a student for, and the next build truncates it anyway.
 BUILD_LOG="${TMPDIR:-/tmp}/cs193v-build-$TUNNEL_ID.log"
-# Staff get podman's raw output, students get build_progress. An environment variable rather
-# than a verb: there used to be a --dev-build for this, and it earned its keep back when it
-# also dropped you into a shell -- but `./cs193v --rebuild && ./cs193v` is that, and a whole
-# verb whose only remaining job is choosing an output format is a verb too many. A progress
-# bar is still the wrong instrument for debugging a build that HANGS, which is the one thing
-# $BUILD_LOG cannot be read for afterwards, so the capability stays.
+# Set CS193V_BUILD_RAW=1 for podman's raw output instead of build_progress. Staff only, and it
+# earns its keep on a build that HANGS -- the one failure $BUILD_LOG cannot be read for
+# afterwards, because a bar shows nothing and the log is never written.
 BUILD_RAW="${CS193V_BUILD_RAW:-}"
-# Set by build_image on success, read by verb_rebuild: the success box belongs to a run that
-# actually built something, not to every recreate. See verb_rebuild.
+# Set by build_image on success, read by verb_rebuild: only a run that really built celebrates.
 BUILT=''
 # Where the progress meter's reader and its animator meet. Keyed by TUNNEL_ID like the rest,
 # so two instances on one machine do not redraw each other's bar. See meter_start.
@@ -888,21 +883,14 @@ build_hash() {
     } | sha_stdin
 }
 
-# Has the recipe moved since the image was built? TRUE means "the files on disk no longer
-# describe the image you have", which is the ONE question that distinguishes a rebuild that
-# must build from one that only has to recreate a container.
+# Has the recipe moved since the image was built? TWO CALLERS AND THEY MUST AGREE: verb_rebuild
+# decides whether to build, ensure_container whether to offer, so it is written once.
 #
-# TWO CALLERS AND THEY MUST AGREE: verb_rebuild uses it to decide whether to build at all, and
-# ensure_container uses it to decide whether to offer. Written once for that reason -- the two
-# answering differently is exactly the shape of ERRORS.md B14, where doctor and the launch path
-# hashed different things and doctor called every container stale.
-#
-# EVERY "return 1" HERE MEANS "DO NOT NAG", and each is a separate unknown rather than a no:
+# EVERY "return 1" MEANS "DO NOT NAG", and each is an unknown rather than a no:
 #   * no Containerfile -- nothing to compare against.
 #   * no image -- a different problem, and not this function's to report.
-#   * no label -- an image built before the label existed, or by a bare `podman build`, which
-#     CLAUDE.md warns staff off precisely because it produces one of these. An unknown answer
-#     must not turn into a rebuild prompt; it self-corrects on the first real build.
+#   * no label -- an image built before the label existed, or by a bare `podman build`. An
+#     unknown must not become a rebuild prompt; it self-corrects on the first real build.
 recipe_moved() {
     [ -f "$CONTAINERFILE" ] || return 1
     pmq image exists "$IMAGE" || return 1
@@ -916,11 +904,9 @@ recipe_moved() {
 # this computer yet" is a different problem from anything podman would say when asked to run
 # a tag that is not there.
 #
-# ONE CALL SITE, and it is the bare launch. Every other path that creates a container goes
-# through verb_rebuild, which BUILDS a missing image rather than refusing -- so this is not the
-# general guard it used to be, it is specifically the answer to "the shortest command must not
-# silently start a four-minute build". A student who typed `./cs193v` gets told what to run;
-# a student who typed the verb that builds gets a build.
+# ONE CALL SITE, the bare launch, and that is the point: verb_rebuild builds a missing image
+# rather than refusing, so this is what stops the shortest command a student can type from
+# silently starting a four-minute build. It names the verb to run instead.
 require_image() {
     pmq image exists "$IMAGE" || die "$(msg err.no-image)"
 }
@@ -967,9 +953,8 @@ build_image() {
         # student can act on, so the stream now goes through build_progress, which renders
         # the one thing in it that is progress.
         #
-        # $BUILD_RAW is the staff escape hatch, set by CS193V_BUILD_RAW. Staff debugging a
-        # build need podman's words as they arrive, and a progress bar is the wrong instrument
-        # for that; it is also what makes hiding the output from a student affordable.
+        # $BUILD_RAW is the staff escape hatch: podman's words as they arrive, which is what
+        # debugging a build needs and a progress bar cannot give.
         #
         # PIPESTATUS because the pipeline's own status is the LAST stage's, which is tee's
         # or awk's and always 0. Bash 3.2 has it, so this stays macOS-safe.
@@ -987,10 +972,8 @@ build_image() {
         # The meter deliberately stays RUNNING on success: create_container is the next
         # step and shares this bar (issue #24), so the line is closed there rather than here.
         #
-        # BUILT is what earns the success box. verb_rebuild recreates the container whether or
-        # not it built anything, so without this every two-second recreate would end in
-        # "Build Successful!" and tell a student to enter an environment they are already
-        # being handed.
+        # BUILT earns the success box: verb_rebuild recreates whether or not it built, and a
+        # two-second recreate must not announce "Build Successful!".
         [ "${PIPESTATUS[0]}" -eq 0 ] && { BUILT=1; return 0; }
 
         # OUT OF DISK IS READ FROM PODMAN'S MESSAGE, not inferred from free space, and that
@@ -1313,17 +1296,14 @@ ensure_container() {
         fi
     fi
 
-    # Is the IMAGE itself out of date relative to the course files on disk? This is the
-    # question the digest pin used to answer, and it is how a mid-quarter fix reaches a student
-    # who never runs --rebuild: staff change the Containerfile, the student's next `./cs193v`
-    # notices the recipe moved, and offers to rebuild. It is the ONLY thing that notices, which
-    # is why the launcher builds the image itself rather than letting anyone hand it one.
+    # How a mid-quarter fix reaches a student who never runs --rebuild: staff change the
+    # Containerfile, and the student's next `./cs193v` notices and offers to rebuild. It is the
+    # ONLY thing that notices, which is why the launcher builds the image itself rather than
+    # letting anyone hand it one.
     #
-    # IT ASKS HERE AND DOES NOT ASK IN verb_rebuild, which is the same predicate reaching two
-    # different conclusions on purpose. Here the student asked for a shell and a build is a
-    # four-minute surprise, so it is offered with "keep the current version" as the default.
-    # There they typed the verb whose job is to make the container match the recipe, so
-    # building is the answer to what they asked rather than an interruption of it.
+    # IT ASKS HERE AND verb_rebuild DOES NOT, on the same predicate, deliberately: this student
+    # asked for a shell and a four-minute build is an interruption, so it is offered with "keep
+    # the current version" as the default. There, building is what they asked for.
     if recipe_moved; then
         printf '\n'; msg prompt.image-stale
         if confirm "$(msg opt.keep-current-version)" "$(msg opt.rebuild-now)"; then
@@ -1395,10 +1375,8 @@ TEARDOWN_DONE=''
 # stop; deliberately not done, see .private/README.md.
 stop_container() {
     # Sampled ONCE, up front, so the message and the action cannot disagree: nothing announces
-    # that it is stopping a container which is not running. That used to matter most for a verb
-    # cancelled at a prompt before it built anything; --rebuild no longer prompts, but the
-    # sampling stays because shell_teardown reaches here on paths where the container may
-    # already have gone -- see the unconditional tunnel_down below.
+    # that it is stopping a container which is not running. shell_teardown reaches here on paths
+    # where the container may already have gone -- see the unconditional tunnel_down below.
     local was_running
     was_running=''
     [ "$(state)" = running ] && was_running=1
@@ -1729,44 +1707,26 @@ check_clock() {
     fi
 }
 
-# THE ONE VERB THAT MAKES A CONTAINER MATCH THE RECIPE. It replaced four -- --build,
-# --rebuild, --full-rebuild and --dev-build -- which between them named two operations and
-# three presentation choices, and differed by a line or two each.
+# The only verb that creates a container. What decides whether it BUILDS first is the recipe
+# hash, not a flag:
 #
-# WHAT DECIDES WHETHER IT BUILDS IS THE RECIPE HASH, NOT THE FLAG THE STUDENT PICKED, and that
-# is the whole idea. The two old verbs were a question put to the person least able to answer
-# it: "has staff changed the Containerfile since your image was built?" is not something a
-# student knows, and picking wrong was silent either way -- --rebuild left them on a stale
-# image, --build spent minutes rebuilding one that was already current. recipe_moved knows.
-# So the cheap path stays cheap without being a separate command:
-#
-#   recipe unchanged  ->  recreate only, ~2s, no network, no disk    (the old --rebuild)
-#   recipe moved      ->  build, then recreate                       (the old --build)
+#   recipe unchanged  ->  recreate only, ~2s, no network, no disk
+#   recipe moved      ->  build, then recreate
 #   no image at all   ->  build; this is the installer's first run
-#   --no-cache        ->  build regardless, staff and the release gate
+#   --no-cache        ->  build regardless, for staff and the release gate
 #
-# NO PROMPT, unlike ensure_container's use of the same predicate, and the asymmetry is
-# deliberate -- see the comment there. This is also why the verb is safe for the installer to
-# call with no tty (install-cs193v.sh): nothing here waits on a keypress.
+# It prompts for nothing, which is what lets install-cs193v.sh call it with no tty; note that
+# ensure_container ASKS on the same predicate -- see the comment there.
 #
-# --logout is a MODIFIER rather than the old --full-rebuild verb, and it carries no confirm.
-# The prompt --full-rebuild had existed because its name did not say it logged you out; this
-# name says so. Worth knowing that this is the only irreversible thing the launcher does: the
-# claude, gh and vercel volumes go, and re-logging in is real work for a student.
-#
-# THE STOP AND THE SUCCESS BOX LIVE HERE NOW, not in dispatch. They sat out there because
-# --dev-build shared this verb's body and then went straight into a shell, so a stop inside
-# would have torn down the container it was about to hand you (issues #22, #41). With that verb
-# gone, no path creates a container and leaves it running, and dispatch is a plain table again.
+# --logout also deletes the claude, gh and vercel volumes: the only irreversible thing the
+# launcher does.
 verb_rebuild() {
     local nocache='' wipe=''
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-cache) nocache='--no-cache' ;;
             --logout)   wipe=1 ;;
-            # Strict, where the old --build silently ignored a stray argument: build_image only
-            # ever looked for --no-cache, so `--build --logout` would have quietly built and
-            # kept the volumes. With two modifiers that both matter, a typo has to be loud.
+            # Strict: with two modifiers that both matter, a typo has to be loud.
             *)          usage; exit 2 ;;
         esac
         shift
@@ -1777,10 +1737,9 @@ verb_rebuild() {
     if [ -n "$nocache" ] || ! pmq image exists "$IMAGE" || recipe_moved; then
         build_image "$nocache"
     elif [ -n "$wipe" ]; then
-        # TWO KEYS, because status.rebuilding promises that logins are kept and that promise is
-        # false here. Printed ONLY on the no-build branches: build_image starts the progress
-        # meter and create_container closes it (issue #24), so a line here on the build branch
-        # would land in the middle of a live bar.
+        # TWO KEYS: status.rebuilding promises logins are kept, which is false here. Printed only
+        # on the no-build branches -- build_image owns the progress meter until create_container
+        # closes it (issue #24), so a line here would land in the middle of a live bar.
         info "$(msg status.rebuilding-logout)"
     else
         info "$(msg status.rebuilding)"
@@ -1791,9 +1750,8 @@ verb_rebuild() {
     create_container
     stop_container
 
-    # THE LOGOUT IS REPORTED WHETHER OR NOT A BUILD HAPPENED, which is why this is not one
-    # if/elif chain ending in the box: a --rebuild --logout that also built would otherwise
-    # finish on "Build Successful!" and never mention that the student is now logged out.
+    # Not one if/elif chain ending in the box: the logout has to be reported whether or not a
+    # build happened, or a --logout that also built would never mention it.
     if [ -n "$wipe" ]; then
         info "$(msg status.full-rebuilt)"
     elif [ -z "$BUILT" ]; then
@@ -1892,19 +1850,9 @@ usage() {
 #
 # THE INVARIANT THIS ENFORCES: a running container implies an open terminal. Issue #41.
 #
-# Which is why every maintenance verb ends in stop_container and not one of them leaves a
-# container up for the next command. They are not sessions -- nobody is attached when they
-# finish -- so leaving one running would break the invariant that makes the refusal above them
-# honest and `doctor` readable: with this, "running" always means "somebody is in there", and a
-# running container with nothing attached is a force-quit leftover rather than one of four
-# ordinary outcomes nobody can tell apart.
-#
-# THE STOP AND THE SUCCESS BOX USED TO LIVE HERE and now do not, which is worth a line because
-# it was deliberate in both directions. They were hoisted out of the verbs because --dev-build
-# shared verb_build's body and then opened a shell, so a stop inside would have torn down the
-# container it was about to hand you (issues #22, #41). With --dev-build and --build both gone
-# there is no such path left: verb_rebuild is the only verb that creates a container, so it owns
-# its own stop and dispatch is a plain table.
+# Which is why verb_rebuild ends in stop_container rather than leaving one up for the next
+# command. Nobody is attached when it finishes, so "running" always means "somebody is in
+# there", and a running container with nothing attached is a force-quit leftover.
 #
 # ports, doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
 # its whole purpose is fixing the tunnel WHILE a session is live.
@@ -1919,8 +1867,7 @@ case "${1:-}" in
     doctor)              verb_doctor ;;
     --stop)              verb_stop ;;
     --reset-tunnel)      verb_reset_tunnel ;;
-    # "$@" rather than "${1:-}": --logout and --no-cache are independent and may be given
-    # together, in either order.
+    # "$@", not "${1:-}": the two modifiers are independent and may be given together.
     --rebuild)           shift; verb_rebuild "$@" ;;
     --dev-print-command) verb_print_command ;;
     -h|--help|help)      usage ;;

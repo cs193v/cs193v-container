@@ -443,11 +443,9 @@ assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 # Every verb that would disturb a live session refuses first, pointing at the same --stop, so
 # there is ONE way to deal with "the container is busy" rather than one per verb.
 #
-# ONE VERB TO CHECK NOW. This was a loop over verb_rebuild, verb_full_rebuild and verb_build;
-# the merge made those one verb, and shellcheck rightly objects to a loop that runs once
-# (SC2043), so it is unrolled. IF A SECOND CONTAINER-CREATING VERB IS EVER ADDED it needs its
-# own line here: the assert_not_contains below is only meaningful while at least one positive
-# assertion names this helper -- see the comment there.
+# ONE VERB TO CHECK, so this is unrolled rather than a loop (shellcheck SC2043). IF A SECOND
+# CONTAINER-CREATING VERB IS EVER ADDED it needs its own line here: the assert_not_contains
+# below is only meaningful while at least one positive assertion names this helper.
 assert_contains "launcher:verb_rebuild-refuses-while-a-session-is-live" \
                 "refuse_if_session_live" "$(fn_body verb_rebuild $REPO/cs193v)"
 assert_match "launcher:bare-launch-refuses-while-a-session-is-live" \
@@ -589,10 +587,9 @@ assert_not_match "invariant:no-Z-relabel" ',Z' "$args_live"
 
 assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=1000" "$args_live"
 
-# Every volume container.args CREATES must be one `--rebuild --logout` REMOVES. That is two
-# lists in two files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside the
-# launcher's remove_volumes -- and a name added to one but not the other leaks a volume that
-# --logout silently keeps, which is precisely the state that modifier exists to clear.
+# Every volume container.args CREATES must be one `--rebuild --logout` REMOVES. Two lists in two
+# files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside remove_volumes --
+# and a name in one but not the other leaks a volume --logout silently keeps.
 #
 # This is a grep, which this file otherwise avoids when a behavioural test proves the same
 # thing. Nothing here duplicates one. 30-launcher-shim.sh counts the `volume rm` calls

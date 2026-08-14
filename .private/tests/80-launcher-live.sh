@@ -412,12 +412,9 @@ assert_ok "rebuild:claude-policy-survives" \
 
 # ─── --rebuild --logout  (§2.4, §9.2) — destructive, opt-in ────────────────────
 #
-# NO PTY HARNESS ANY MORE. This used to be `printf '\033[B\n' | script -q -c ...`, feeding a
-# down-arrow and a newline to the menu --full-rebuild put in the way. --logout carries no
-# confirm, so the verb is a plain call and the keystrokes were the only reason `script` was
-# here. What that costs is stated plainly: there is no longer a non-tty run that changes
-# nothing, because there is no prompt to default to "cancel" -- which is exactly why this whole
-# block stays gated behind CS193V_DESTRUCTIVE=1.
+# NO PTY HARNESS: --logout carries no confirm, so these are plain calls. The cost is that there
+# is no non-tty run that changes nothing -- no prompt to default to "cancel" -- which is
+# exactly why this whole block stays gated behind CS193V_DESTRUCTIVE=1.
 if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
     hold_container
     podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
