@@ -258,10 +258,9 @@ assert_eq "lifecycle:the-refusal-stops-nothing" "0" "$(shim_count '^stop ')"
 # Every maintenance verb refuses while a session is live, pointing at the same --stop, so there
 # is ONE answer to "the container is busy" rather than one per verb.
 #
-# THE MODIFIERS ARE IN THIS LIST, not just the bare verb, because they take different paths
-# through verb_rebuild -- --logout reaches remove_volumes and --no-cache reaches build_image --
-# and the refusal has to come before either. A --logout that refused only AFTER deleting the
-# login volumes would be the worst failure in this file.
+# THE MODIFIERS ARE IN THIS LIST, not just the bare verb: --logout reaches remove_volumes and
+# --no-cache reaches build_image, and the refusal has to come before either. A --logout that
+# refused only AFTER deleting the login volumes would be the worst failure in this file.
 
 # Name and argument list carried separately, so an assertion name stays a single word while the
 # verb under test is two.
@@ -423,20 +422,14 @@ assert_eq       "stale-recipe:unlabelled-builds-nothing" "0" "$(shim_count '^bui
 
 # ─── --rebuild, and its two modifiers  (§2.3, §2.4) ────────────────────────────
 #
-# ONE VERB WHERE THERE WERE FOUR. --build, --full-rebuild and --dev-build are gone; what decides
-# whether this builds is the recipe hash rather than which flag the student picked, which is why
-# the two hash-gate assertions below are the load-bearing ones in this section.
-#
-# THE CHEAP PATH IS CHEAP, and this is the assertion the whole merge rests on. --build and
-# --rebuild were separate verbs because one cost minutes and the other two seconds; merging them
-# is only defensible if the recipe hash keeps the cheap case cheap. If the build count here ever
-# reads 1, a 2s recovery command has silently become a multi-minute one.
+# THE HASH GATE IS WHAT THIS SECTION IS FOR. The recipe decides whether --rebuild builds, so the
+# two assertions that matter most are that it does NOT build when the recipe matches and DOES
+# when it moved. If the first ever counts 1, a 2s recovery command has become a multi-minute one.
 #
 # "The recipe matches" is arranged BY BUILDING, which is what podman-fake's `build` arm exists
 # for -- it records the cs193v.buildhash it was handed, so the next invocation sees an image
-# genuinely labelled with the launcher's own current hash. Computing that hash here a second
-# time would be a test that agreed with itself rather than with the launcher. Note this makes
-# --no-cache's own coverage do double duty: it is the thing that forces that first build.
+# labelled with the launcher's own current hash. Computing that hash here a second time would be
+# a test that agreed with itself rather than with the launcher.
 shim_new
 launcher --rebuild --no-cache >/dev/null 2>&1
 assert_eq "rebuild:no-cache-builds-anyway" "1" "$(shim_count '^build ')"
@@ -452,12 +445,10 @@ assert_eq "rebuild:current-recipe-builds-nothing" "0" "$(shim_count '^build ')"
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
 out="$(launcher --rebuild)"
 assert_says "rebuild:says-logins-kept" "logins are kept" "$out"
-# ...AND IT MUST NOT CELEBRATE A BUILD IT DID NOT DO. This is the successor to
-# dev-build:no-success-box-before-a-shell, which asserted the same class of thing about the one
-# old path that built without celebrating. Now that one verb both builds and merely recreates,
-# the box is gated on $BUILT -- so a two-second recreate ending in "Build Successful!" and
-# "Happy vibecoding" would be the launcher congratulating itself for nothing and telling the
-# student to enter an environment it did not prepare.
+# ...AND IT MUST NOT CELEBRATE A BUILD IT DID NOT DO. One verb both builds and merely recreates,
+# so the box is gated on $BUILT: a two-second recreate ending in "Build Successful!" would
+# congratulate the launcher for nothing and send the student into an environment it did not
+# prepare.
 assert_says_not "rebuild:no-box-when-nothing-was-built" "Build Successful" "$out"
 assert_says_not "rebuild:no-vibecoding-when-nothing-was-built" "Happy vibecoding" "$out"
 
@@ -482,10 +473,8 @@ shim_clear_log
 launcher --rebuild >/dev/null 2>&1
 assert_eq "rebuild:unlabelled-builds-nothing" "0" "$(shim_count '^build ')"
 
-# --logout, which replaced --full-rebuild. NO PROMPT, deliberately: the modifier says what it
-# does in a way "--full-rebuild" never did. That makes the non-tty behaviour the interesting
-# case -- it now ACTS rather than cancelling, so this is the assertion that would catch the
-# modifier being wired to a menu by mistake.
+# --logout, which has NO PROMPT deliberately. That makes the non-tty behaviour the interesting
+# case -- it ACTS rather than cancelling, so this would catch the modifier being wired to a menu.
 shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
@@ -494,14 +483,12 @@ assert_eq "logout:removes-container" "1" "$(shim_count '^rm ')"
 if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "logout:removes-5-volumes"
 else fail "logout:removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
 assert_says "logout:says-you-are-logged-out" "log in again" "$out"
-# ...and it must NOT claim the thing it just deleted was kept. status.rebuilding says "logins
-# are kept", which is the wrong announcement for this path and was the first bug the merge
-# introduced.
+# ...and it must NOT claim the thing it just deleted was kept: status.rebuilding says "logins are
+# kept", which is the wrong announcement for this path.
 assert_says_not "logout:does-not-promise-logins-kept" "logins are kept" "$out"
 
-# A stray modifier is refused rather than ignored. The old --build passed its argument to
-# build_image, which only ever looked for --no-cache -- so `--build --logout` quietly built and
-# kept the volumes. With two modifiers that both matter, a typo has to be loud.
+# A stray modifier is refused rather than ignored: with two modifiers that both matter, a typo
+# that silently means "keep the volumes" is the failure worth being loud about.
 assert_eq "rebuild:unknown-modifier-exits-2" "2" "$(launcher_rc --rebuild --lgout)"
 shim_new
 launcher >/dev/null 2>&1
@@ -848,18 +835,14 @@ assert_says "build:creation-step-is-announced" "Setting up the course container"
 assert_says "build:creation-step-reports-done" "Ready"                           "$out"
 
 # --- the staff path keeps the raw output ---------------------------------------
-# CS193V_BUILD_RAW replaced the --dev-build verb, which had become a whole verb for choosing an
-# output format once `--rebuild && ./cs193v` covered the rest of what it did. What survives is
-# the capability, because a progress bar is the wrong instrument for debugging a build -- and
-# specifically for one that HANGS, which is the one failure $BUILD_LOG cannot be read for
-# afterwards. It is also what makes hiding the output from a student affordable at all.
+# CS193V_BUILD_RAW is the staff switch for podman's raw output. A progress bar is the wrong
+# instrument for debugging a build that HANGS -- the one failure $BUILD_LOG cannot be read for
+# afterwards -- and having the switch is what makes hiding the output from a student affordable.
 #
-# --no-cache, NOT `shim_set state absent`, and the difference is why this test failed when it
-# was first written. An absent CONTAINER does not make the launcher build: podman-fake reports
-# image_exists=yes by default and carries no buildhash, so the hash gate reads "unknown, do not
-# nag" and --rebuild recreates without building. There is then no raw output to find -- and,
-# worse, the negative assertion below PASSES vacuously for the same reason. --no-cache is the
-# one modifier that forces a build regardless of what the gate thinks.
+# --no-cache, NOT `shim_set state absent`. An absent CONTAINER does not make the launcher build:
+# podman-fake reports image_exists=yes and carries no buildhash, so the hash gate reads
+# "unknown, do not nag" and --rebuild recreates without building. There would then be no raw
+# output to find, and -- worse -- the negative assertion below would pass VACUOUSLY.
 shim_new
 shim_set state absent
 out="$(CS193V_BUILD_RAW=1 launcher --rebuild --no-cache)"
