@@ -42,7 +42,7 @@ container. It is the **only** thing shared between them.
 
 That has two consequences, and they are equally important:
 
-**Your work is safe.** `--rebuild` and even `--full-rebuild` never touch it, because it
+**Your work is safe.** `--rebuild`, even with `--logout`, never touches it, because it
 lives on your computer, not inside the container. You can throw the container away as
 often as you like.
 
@@ -267,18 +267,17 @@ a `claude` session, an editor with unsaved changes: those go.
 | closing your terminal | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 | `exit` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 | `--rebuild` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
-| `--build` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
-| `--full-rebuild` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ (back on next `cs193v`) |
+| `--rebuild --logout` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ (back on next `cs193v`) |
 | restarting your computer | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 
 Note what the first row does **not** say. Things you installed with `sudo` are still there when
 you come back, and so are your logins. Closing the window stops the container; it does not throw
-it away. Only `--rebuild` and friends do that.
+it away. Only `--rebuild` does that.
 
 "Browsers you installed" is its own column because Playwright's browsers are the one
 package cache kept in a volume. The Chromium the course uses is part of the image, so it is
 always there — that column is about an *extra* one you downloaded by asking for a different
-Playwright version. `--full-rebuild` drops it, and the image's own Chromium comes straight
+Playwright version. `--rebuild --logout` drops it, and the image's own Chromium comes straight
 back, so the worst case is one more download and never a broken setup.
 
 `--rebuild` is cheap and safe. It is the right first move when something is behaving
@@ -442,9 +441,9 @@ actually are.
 ./cs193v                    open a shell
 ./cs193v ports              why can't my browser see my server?
 ./cs193v doctor             a report to paste when asking staff for help
-./cs193v --rebuild          fresh container; files and logins kept
-./cs193v --full-rebuild     fresh everything, including logging out
-./cs193v --build            build the course container, or get the newest version of it
+./cs193v --rebuild          fresh container; files and logins kept. Builds a newer
+                            course container first if there is one.
+./cs193v --rebuild --logout fresh everything, including logging out
 ```
 
 Inside the container: `ports` and `am-i-in-a-container`.

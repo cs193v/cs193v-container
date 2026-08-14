@@ -676,7 +676,14 @@ build_image() {
     note "This is the big one, and it is the slow part of this script: it downloads and"
     note "assembles the whole course environment. Leave it running."
     note "It is safe to run this script again — podman keeps every step that finished."
-    "$DIR/cs193v" --build || exit 1
+    # --rebuild, which reads oddly for a first install and is right anyway: it is the launcher's
+    # only container-creating verb, and with no image on the machine yet its first act is to
+    # build one. There is deliberately no separate --build to call -- one verb means the path a
+    # student takes on day one cannot drift from the one staff run every day.
+    #
+    # Nothing here needs a terminal: --rebuild prompts for nothing, which is what lets this run
+    # under `curl | bash` and under the test suite alike.
+    "$DIR/cs193v" --rebuild || exit 1
     ok "built"
 }
 

@@ -54,13 +54,13 @@ course website rather than expecting students to find it in a hidden directory.
 ## How the image reaches a student
 
 **It doesn't. They build it.** `.private/Containerfile` is the distribution: the installer
-runs `./cs193v --build`, and the image is assembled on the student's own machine. There is
+runs `./cs193v --rebuild`, and the image is assembled on the student's own machine. There is
 no registry, no published artifact, and no CI.
 
 That is a deliberate reversal of the original plan, and the reasoning is worth keeping,
 because "just publish it to ghcr" is the obvious first suggestion anyone will make:
 
-* **The pull path was never exercised and the build path always was.** `--dev-build` has
+* **The pull path was never exercised and the build path always was.** Building locally has
   been the staff loop since the beginning and every test tier runs against the locally
   built image. Shipping the tested path is the smaller risk, not the larger one.
 * **Multi-arch was the expensive part.** A published image needs a manifest list covering
@@ -70,7 +70,7 @@ because "just publish it to ghcr" is the obvious first suggestion anyone will ma
 * **A registry is a same-day-for-everyone failure.** A package set private, an account
   rotated, or an anonymous pull quota hit by one lab section behind one campus NAT breaks
   every student at once, with no local workaround.
-* **`--rebuild` and `--full-rebuild` never touch the image**, so the recovery loop staff
+* **`--rebuild` does not touch the image unless the recipe moved**, so the recovery loop staff
   suggest freely still costs two seconds and no network. The build is genuinely one-time.
 
 What it costs, so nobody rediscovers it the hard way:
@@ -119,18 +119,24 @@ reaches a student" above.
 ## Your development loop
 
 ```
-./cs193v --dev-build              # build the image, recreate, drop into a shell
-./cs193v --dev-build --no-cache   # prove the network fetches still work
-./cs193v --build                  # the same build, without the shell — what students run
-./cs193v --dev-print-command      # see the exact podman run line
-./cs193v --rebuild                # fresh container; logins kept
-./cs193v --full-rebuild           # test the cold-start path a student sees
-./cs193v --stop                   # stop it by hand — see below, you will need this
+./cs193v --rebuild                     # recreate; builds first IF the recipe moved
+./cs193v --rebuild --no-cache          # force a cold build — prove the network fetches work
+CS193V_BUILD_RAW=1 ./cs193v --rebuild  # podman's raw output instead of the progress bar
+./cs193v --rebuild --logout            # test the cold-start path a student sees
+./cs193v --dev-print-command           # see the exact podman run line
+./cs193v --stop                        # stop it by hand — see below, you will need this
 ```
 
+**There is one verb here where there were four.** `--build`, `--full-rebuild` and `--dev-build`
+are gone; `--rebuild` is all of them, and what decides whether it builds is the recipe hash
+rather than which flag you picked. So the everyday loop is `./cs193v --rebuild && ./cs193v`:
+the first is a two-second recreate when your Containerfile has not moved and a real build when
+it has, and the second drops you into a shell. That second step is what `--dev-build` used to
+save you, and it was not worth a verb.
+
 **Read this before the first time a verb refuses you.** Since issue #41 the container only runs
-while a terminal window is open on it, and every verb above except `--dev-build` **leaves it
-stopped when it finishes**. Two things follow that will otherwise waste your afternoon:
+while a terminal window is open on it, and every verb above **leaves it stopped when it
+finishes**. Two things follow that will otherwise waste your afternoon:
 
 - Each of these verbs **refuses while a session is live**, naming `--stop`. So you cannot
   `--rebuild` from a second terminal while your first one is sitting in a shell. Leave the shell,
@@ -142,17 +148,18 @@ stopped when it finishes**. Two things follow that will otherwise waste your aft
   the invariant to serve the tests. `hold_container` in `tests/lib/assert.sh` is that one line, and
   says so.
 
-`--dev-build` is `--build` plus a shell, and both go through the same `build_image`. That
-matters more than it used to: the path you exercise every day is now the path a student
-takes on day one, including its retry, its out-of-disk message, and the
-`cs193v.buildhash` label. There is no second implementation to drift.
+You and a student now run the *same command*, not merely the same `build_image` — which
+matters more than the old arrangement did: the path you exercise every day is the path a
+student takes on day one, including its retry, its out-of-disk message, and the
+`cs193v.buildhash` label. There is no second implementation to drift, and no second verb
+either.
 
-They differ in exactly one thing, and it is deliberate: **`--dev-build` shows you podman's
-raw output and `--build` shows a progress bar** (issue #23). Debugging a build needs
-podman's words as they arrive; a student needs to know it is moving. So the loop above is
-still the right one for staff, but it is no longer what a student sees — run `--build` in a
-terminal when you are changing anything about how the build *reports itself*, and remember
-that piping it (`| tee`, CI) deliberately switches the bar to one plain line per step.
+What you do get that a student does not is `CS193V_BUILD_RAW=1`, which shows you **podman's
+raw output instead of the progress bar** (issue #23). Debugging a build needs podman's words as
+they arrive; a student needs to know it is moving. It replaced `--dev-build`, which had become
+a whole verb for choosing an output format. Leave it unset when you are changing anything about
+how the build *reports itself*, and remember that piping the default (`| tee`, CI) deliberately
+switches the bar to one plain line per step.
 
 A failed build no longer leaves podman's output on the screen, so `err.build-failed` now
 carries the last lines of `$BUILD_LOG` inside the STOP box. That log is still the thing to
@@ -165,19 +172,19 @@ completed layers, which is exactly what `--no-cache` throws away.
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
 image (`localhost/cs193v:local`) and the same five volumes. Two people developing at once
-therefore collide, and not cleanly: whoever ran `--dev-build` last owns the container the
-other is about to shell into, and either one's `--full-rebuild` deletes the other's logins.
+therefore collide, and not cleanly: whoever ran `--rebuild` last owns the container the
+other is about to shell into, and either one's `--rebuild --logout` deletes the other's logins.
 
 Set `CS193V_INSTANCE` to give yourself an independent set of all of them:
 
 ```
 export CS193V_INSTANCE=yourname
-./cs193v --dev-build              # builds localhost/cs193v:local-yourname
+./cs193v --rebuild                # builds localhost/cs193v:local-yourname
 ./cs193v doctor                   # reports container cs193v-yourname
 ```
 
 It suffixes the container name, the dev image tag and all five volume names together —
-partial suffixing would be worse than none, since `--full-rebuild` would still cross
+partial suffixing would be worse than none, since `--rebuild --logout` would still cross
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.
 
@@ -218,8 +225,8 @@ was before — a student never sets it.
 ## Shipping a fix mid-quarter
 
 1. Edit the `Containerfile` (or anything under `files/`); push to `main`.
-2. Students run `./cs193v --build`, which rebuilds. Anyone who doesn't gets prompted on
-   their next launch.
+2. Students run `./cs193v --rebuild`, which sees the moved recipe and builds. Anyone who
+   doesn't gets prompted on their next launch.
 
 **What makes step 2 work is `cs193v.buildhash`.** The launcher hashes the Containerfile
 plus every file under `files/` and bakes it into the image as a label at build time; on

@@ -6,7 +6,7 @@
 # Everything here runs in throwaway containers, so it needs the image but never the live
 # cs193v container. Build it first:
 #
-#     ./cs193v --build
+#     ./cs193v --rebuild
 #
 # Two of §A.3's checks are corrected rather than copied:
 #   * nvm-not-group-writable was vacuous. /usr/local/share/nvm does not exist by design —

@@ -809,9 +809,10 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
   as long as the raw output *was* on the screen. The failing tail now goes INSIDE the box.
   This is the half of #23 that is a correctness bug rather than a presentation one, and it
   is only reachable when a build fails, which is when it matters most.
-- **`--dev-build` keeps the raw output.** Staff debugging a build need podman's words as
-  they arrive; a bar is the wrong instrument. That split is also what makes hiding the
-  output from `--build` affordable at all.
+- **Staff can still get the raw output.** Debugging a build needs podman's words as they
+  arrive; a bar is the wrong instrument. That split is also what makes hiding the output from
+  a student affordable at all. Reached by `--dev-build` at the time; the verb is gone and
+  `CS193V_BUILD_RAW=1` is the switch now.
 - **Not a terminal → no carriage returns.** A `\r`-redrawn bar in a CI log or a
   `| tee build.txt` is one unreadable line thousands of columns long — and that is the
   exact path a student uses when staff ask them to send the output. Piped, it prints one
@@ -831,9 +832,9 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
   unreachable. The launcher's root refusal is covered instead by faking `id` in the shim
   tier, which exercises the same branch. `unshare -r` is not usable here (writing
   `/proc/self/uid_map` is not permitted in this sandbox).
-- **`--full-rebuild`'s volume deletion** — gated behind `CS193V_DESTRUCTIVE=1` so a normal
+- **`--rebuild --logout`'s volume deletion** — gated behind `CS193V_DESTRUCTIVE=1` so a normal
   run can never log anyone out. Re-run with that set to cover §2.4 and §9.2.
-- **Multi-arch manifest (§A.2)** — a local `--dev-build` is single-arch by definition. Moved
+- **Multi-arch manifest (§A.2)** — a locally built image is single-arch by definition. Moved
   to the release tier, where it belongs.
 - **Everything needing another platform or a person** — §1.2's rendering, §1.3 (bash 3.2 on
   a Mac), §3.4/§3.5 (real HMR), §4.5/§4.7 (a browser, Defender), §5.1–§5.6, §6.x (sleep and

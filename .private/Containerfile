@@ -1,6 +1,6 @@
 # CS193V course container.
 #
-# Build:   ./cs193v --build        (students and staff alike; wraps podman build)
+# Build:   ./cs193v --rebuild      (students and staff alike; wraps podman build)
 #
 # THIS FILE IS THE DISTRIBUTION. There is no registry and no published image: every
 # student builds this on their own machine at install time. That makes the pins below

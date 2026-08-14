@@ -3,7 +3,7 @@ This directory is where your work goes.
 Inside the container it appears at ~/projects. It is the ONLY directory shared between
 the container and your own computer, which means two things worth knowing:
 
-  * Anything you keep here is safe. `cs193v --rebuild` and `cs193v --full-rebuild` never
+  * Anything you keep here is safe. `cs193v --rebuild` and `cs193v --rebuild --logout` never
     touch it, because it lives on your computer rather than inside the container.
 
   * Anything you keep here is visible to the container, and therefore to any code the

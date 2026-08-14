@@ -564,9 +564,9 @@ cat "$DIR/local.args"             # recompute by the documented formula and comp
 # 728 MB rather than by the CPU, so expect wall time to scale with their link:
 #     cold build + container create   224 s, 728 MB, 4.1 GB peak / 4.3 GB retained
 #     CLAUDE_CODE_VERSION bump         89 s,  95 MB
-#     --full-rebuild                    6 s,   0 MB   (re-seeds the 267 MB browser locally)
-time "$DIR/cs193v" --build --no-cache        # cold build; note wall time AND peak disk
-time "$DIR/cs193v" --rebuild                 # container create
+#     --rebuild --logout                6 s,   0 MB   (re-seeds the 267 MB browser locally)
+time "$DIR/cs193v" --rebuild --no-cache      # cold build; note wall time AND peak disk
+time "$DIR/cs193v" --rebuild                 # container create only — the recipe has not moved
 time "$DIR/cs193v" --dev-print-command       # launcher overhead
 time podman exec cs193v true                 # exec overhead — relevant to the rejected relay design
 time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lodash'
@@ -629,8 +629,10 @@ support thread, so it must be trustworthy.
 **2.3 — `--rebuild` preserves logins.** Log in to `claude` and `gh`, then `./cs193v --rebuild`.
 *Expect:* container recreated; both logins still valid; `projects/` untouched.
 
-**2.4 — `--full-rebuild` drops logins.** `./cs193v --full-rebuild`
-*Expect:* a confirmation prompt; afterwards both logins are gone and `projects/` is still untouched.
+**2.4 — `--rebuild --logout` drops logins.** `./cs193v --rebuild --logout`
+*Expect:* NO confirmation prompt — the modifier says what it does, which is why the prompt
+`--full-rebuild` had was dropped with it. Afterwards both logins are gone and `projects/` is
+still untouched.
 
 **2.5 — Config-drift detection.** See §A.10. **This is a known podman behaviour trap** — `podman start`
 reuses the container's stored config and ignores the image digest, ports, `keep-id` and `--memory`
@@ -814,12 +816,13 @@ the course's core skill is taught.
 
 ## 9. Teardown
 
-**9.1 — Volumes survive an image update.** `./cs193v --build` after editing the
-Containerfile. *Expect:* the image rebuilds, the container is recreated, and logins are
-intact.
+**9.1 — Volumes survive an image update.** `./cs193v --rebuild` after editing the
+Containerfile. *Expect:* the image rebuilds because the recipe moved, the container is
+recreated, and logins are intact. Run it a second time with nothing edited and *expect* no
+build at all — that is the hash gate, and it is what makes one verb serve both jobs.
 
-**9.2 — Full reset is clean.** `./cs193v --full-rebuild`; confirm `podman volume ls` no longer lists the
-four `cs193v-*` volumes.
+**9.2 — Full reset is clean.** `./cs193v --rebuild --logout`; confirm `podman volume ls` no longer
+lists the four `cs193v-*` volumes.
 
 **9.3 — WSL teardown (Windows).** `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other WSL distro. Confirm any pre-existing distro

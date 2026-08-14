@@ -146,7 +146,7 @@
 # gets thrown away is a 114 MB browser download, not a few seconds of npm work. The image
 # ships one Chromium build already, so the volume is not what makes the common case work —
 # it is what stops a student who needs a DIFFERENT playwright version from re-downloading
-# its browser after every rebuild. --full-rebuild still clears it, and the image's own copy
+# its browser after every rebuild. --rebuild --logout still clears it, and the image's own copy
 # comes straight back, so nothing is stranded.
 #
 # The mount targets are pre-created student-owned in the Containerfile. That is what
