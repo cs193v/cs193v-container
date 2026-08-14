@@ -176,7 +176,7 @@ isolation model, exit non-zero, and create nothing.
 that nothing is created, and that podman is not even contacted. Only the real `sudo`
 invocation is unverified.
 
-### §2.4 / §9.2 — `--full-rebuild` really deletes the volumes
+### §2.4 / §9.2 — `--rebuild --logout` really deletes the volumes
 Destructive: it logs you out of claude, gh and vercel. Gated behind an opt-in so a routine
 suite run cannot do it to you:
 ```sh

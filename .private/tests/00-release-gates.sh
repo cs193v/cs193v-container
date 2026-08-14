@@ -103,7 +103,7 @@ record "build:NODE_VERSION" "$nv"
 # Slow and disk-hungry by nature, so it is opt-in even within this opt-in tier: it needs
 # several GB free and many minutes. Run it on a machine with room before the quarter.
 if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
-    assert_ok "build:no-cache-build-succeeds" "$REPO/cs193v" --build --no-cache
+    assert_ok "build:no-cache-build-succeeds" "$REPO/cs193v" --rebuild --no-cache
 else
     skip "build:no-cache-build-succeeds" "set CS193V_RELEASE_BUILD=yes (needs ~6 GB free and many minutes)"
 fi

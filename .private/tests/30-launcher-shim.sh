@@ -166,7 +166,7 @@ assert_eq       "unreachable:creates-nothing" "0"               "$(shim_count '^
 shim_new; shim_set image_exists no
 out="$(launcher)"
 assert_says "image:nothing-built-refuses"      "has not been built" "$out"
-assert_says "image:nothing-built-says-how"     "--build"            "$out"
+assert_says "image:nothing-built-says-how"     "--rebuild"          "$out"
 assert_eq   "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
 
 # A locally built image is the NORMAL case now, not a staff-only escape hatch, so the
@@ -257,29 +257,37 @@ assert_eq "lifecycle:the-refusal-stops-nothing" "0" "$(shim_count '^stop ')"
 
 # Every maintenance verb refuses while a session is live, pointing at the same --stop, so there
 # is ONE answer to "the container is busy" rather than one per verb.
-for v in --rebuild --full-rebuild --build; do
+#
+# THE MODIFIERS ARE IN THIS LIST, not just the bare verb, because they take different paths
+# through verb_rebuild -- --logout reaches remove_volumes and --no-cache reaches build_image --
+# and the refusal has to come before either. A --logout that refused only AFTER deleting the
+# login volumes would be the worst failure in this file.
+
+# Name and argument list carried separately, so an assertion name stays a single word while the
+# verb under test is two.
+for spec in "rebuild:--rebuild" "rebuild-logout:--rebuild --logout" "rebuild-nocache:--rebuild --no-cache"; do
+    name="${spec%%:*}"; v="${spec#*:}"
     shim_new
     launcher >/dev/null 2>&1
     shim_set state running
     shim_clear_log
-    assert_says "lifecycle:$v-refuses-while-a-session-is-live" \
+    assert_says "lifecycle:$name-refuses-while-a-session-is-live" \
                 "already have a CS193V session" "$(launcher $v)"
-    assert_eq "lifecycle:$v-does-not-remove-a-live-container" "0" "$(shim_count '^rm ')"
+    assert_eq "lifecycle:$name-does-not-remove-a-live-container" "0" "$(shim_count '^rm ')"
+    assert_eq "lifecycle:$name-does-not-remove-a-live-containers-volumes" \
+              "0" "$(shim_count '^volume rm ')"
 done
 
-# ...and each one stops the container when it finishes, because none of them is a session and
-# nobody is attached when they are done. This is what keeps the invariant above exact: without
-# it, "running" would mean either "somebody is working" or "a rebuild happened at some point",
-# and doctor could not tell a student which.
-#
-# --build stands where --update used to, and it is the one that most needs checking now: it is
-# the verb a student is told to run when their container is out of date, so it is the one they
-# are most likely to run and walk away from.
-for v in --rebuild --build; do
+# ...and it stops the container when it finishes, because it is not a session and nobody is
+# attached when it is done. This is what keeps the invariant above exact: without it, "running"
+# would mean either "somebody is working" or "a rebuild happened at some point", and doctor
+# could not tell a student which.
+for spec in "rebuild:--rebuild" "rebuild-logout:--rebuild --logout"; do
+    name="${spec%%:*}"; v="${spec#*:}"
     shim_new
     shim_clear_log
     launcher $v >/dev/null 2>&1
-    assert_eq "lifecycle:$v-leaves-nothing-running" "exited" "$(shim_state)"
+    assert_eq "lifecycle:$name-leaves-nothing-running" "exited" "$(shim_state)"
 done
 
 # ─── --stop ────────────────────────────────────────────────────────────────────
@@ -295,7 +303,7 @@ out="$(launcher --stop)"
 assert_eq "lifecycle:stop-defaults-to-cancel-without-a-tty" "running" "$(shim_state)"
 assert_says "lifecycle:stop-warns-before-it-acts" "anything running inside it will stop" "$out"
 
-# Down-arrow then ENTER selects the non-default, exactly as the --full-rebuild test does.
+# Down-arrow then ENTER selects the non-default, exactly as the stale-recipe test does.
 shim_new
 launcher >/dev/null 2>&1
 shim_set state running
@@ -387,7 +395,7 @@ assert_says_not "nodrift:no-prompt" "settings have changed" "$out"
 assert_eq "nodrift:no-recreate" "0" "$(shim_count '^run ')"
 
 # ─── a stale recipe  (the replacement for the digest pin, §2.6) ────────────────
-# How a mid-quarter fix reaches a student who never runs --build. With no registry there
+# How a mid-quarter fix reaches a student who never runs --rebuild. With no registry there
 # is no digest to change, and podman mints a new image ID on every build including a
 # no-op one — so the IMAGE ID cannot answer "is this out of date". The recipe can.
 shim_new
@@ -413,37 +421,93 @@ shim_clear_log
 assert_says_not "stale-recipe:unlabelled-does-not-nag" "has been updated since" "$(launcher)"
 assert_eq       "stale-recipe:unlabelled-builds-nothing" "0" "$(shim_count '^build ')"
 
-# ─── --rebuild and --full-rebuild  (§2.3, §2.4) ────────────────────────────────
+# ─── --rebuild, and its two modifiers  (§2.3, §2.4) ────────────────────────────
+#
+# ONE VERB WHERE THERE WERE FOUR. --build, --full-rebuild and --dev-build are gone; what decides
+# whether this builds is the recipe hash rather than which flag the student picked, which is why
+# the two hash-gate assertions below are the load-bearing ones in this section.
+#
+# THE CHEAP PATH IS CHEAP, and this is the assertion the whole merge rests on. --build and
+# --rebuild were separate verbs because one cost minutes and the other two seconds; merging them
+# is only defensible if the recipe hash keeps the cheap case cheap. If the build count here ever
+# reads 1, a 2s recovery command has silently become a multi-minute one.
+#
+# "The recipe matches" is arranged BY BUILDING, which is what podman-fake's `build` arm exists
+# for -- it records the cs193v.buildhash it was handed, so the next invocation sees an image
+# genuinely labelled with the launcher's own current hash. Computing that hash here a second
+# time would be a test that agreed with itself rather than with the launcher. Note this makes
+# --no-cache's own coverage do double duty: it is the thing that forces that first build.
 shim_new
-launcher >/dev/null 2>&1
+launcher --rebuild --no-cache >/dev/null 2>&1
+assert_eq "rebuild:no-cache-builds-anyway" "1" "$(shim_count '^build ')"
+assert_contains "rebuild:no-cache-reaches-podman" "--no-cache" "$(shim_log | grep '^build ')"
+assert_contains "rebuild:labels-the-recipe" "cs193v.buildhash=" "$(shim_log | grep '^build ')"
+
 shim_clear_log
 launcher --rebuild >/dev/null 2>&1
 assert_eq "rebuild:removes-container" "1" "$(shim_count '^rm ')"
 assert_eq "rebuild:creates-container" "1" "$(shim_count '^run ')"
+assert_eq "rebuild:current-recipe-builds-nothing" "0" "$(shim_count '^build ')"
 # --rebuild must keep logins: none of the five volumes is touched.
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
-assert_says "rebuild:says-logins-kept" "logins are kept" "$(launcher --rebuild)"
+out="$(launcher --rebuild)"
+assert_says "rebuild:says-logins-kept" "logins are kept" "$out"
+# ...AND IT MUST NOT CELEBRATE A BUILD IT DID NOT DO. This is the successor to
+# dev-build:no-success-box-before-a-shell, which asserted the same class of thing about the one
+# old path that built without celebrating. Now that one verb both builds and merely recreates,
+# the box is gated on $BUILT -- so a two-second recreate ending in "Build Successful!" and
+# "Happy vibecoding" would be the launcher congratulating itself for nothing and telling the
+# student to enter an environment it did not prepare.
+assert_says_not "rebuild:no-box-when-nothing-was-built" "Build Successful" "$out"
+assert_says_not "rebuild:no-vibecoding-when-nothing-was-built" "Happy vibecoding" "$out"
 
+# ...AND THE EXPENSIVE PATH HAPPENS WITHOUT BEING ASKED FOR. A moved recipe makes the same
+# command build, with no prompt: the student typed the verb whose job is to make the container
+# match the recipe, so building is the answer to what they asked rather than an interruption of
+# it. Contrast the bare launch in the section above, which asks -- same predicate, opposite
+# default, deliberately.
+shim_new
+launcher >/dev/null 2>&1
+shim_set image_buildhash "0000deadbeefnotthecurrentrecipe"
+shim_clear_log
+out="$(launcher --rebuild)"
+assert_eq "rebuild:moved-recipe-builds" "1" "$(shim_count '^build ')"
+assert_eq "rebuild:moved-recipe-recreates" "1" "$(shim_count '^run ')"
+assert_says_not "rebuild:moved-recipe-does-not-ask" "has been updated since" "$out"
+# An unlabelled image is an UNKNOWN, not a stale one, and must not provoke a build here either
+# -- the same rule the bare launch follows. This is the case a bare `podman build` produces.
 shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
-out="$(launcher --full-rebuild)"
-assert_says "full-rebuild:warns-about-logout" "logging you out" "$out"
-assert_says "full-rebuild:lists-what-is-kept" "projects folder" "$out"
-# The safe option is the default, so a non-TTY run must change nothing.
-assert_says "full-rebuild:non-tty-cancels" "Nothing was changed" "$out"
-assert_eq "full-rebuild:non-tty-removes-nothing" "0" "$(shim_count '^rm ')"
+launcher --rebuild >/dev/null 2>&1
+assert_eq "rebuild:unlabelled-builds-nothing" "0" "$(shim_count '^build ')"
 
+# --logout, which replaced --full-rebuild. NO PROMPT, deliberately: the modifier says what it
+# does in a way "--full-rebuild" never did. That makes the non-tty behaviour the interesting
+# case -- it now ACTS rather than cancelling, so this is the assertion that would catch the
+# modifier being wired to a menu by mistake.
+shim_new
+launcher >/dev/null 2>&1
 shim_clear_log
-launcher_tty '\033[B\n' --full-rebuild >/dev/null 2>&1
-assert_eq "full-rebuild:accepted-removes-container" "1" "$(shim_count '^rm ')"
-if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "full-rebuild:accepted-removes-5-volumes"
-else fail "full-rebuild:accepted-removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
+out="$(launcher --rebuild --logout)"
+assert_eq "logout:removes-container" "1" "$(shim_count '^rm ')"
+if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "logout:removes-5-volumes"
+else fail "logout:removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
+assert_says "logout:says-you-are-logged-out" "log in again" "$out"
+# ...and it must NOT claim the thing it just deleted was kept. status.rebuilding says "logins
+# are kept", which is the wrong announcement for this path and was the first bug the merge
+# introduced.
+assert_says_not "logout:does-not-promise-logins-kept" "logins are kept" "$out"
 
-# There is no --update tier here any more, and no pull tier at all. Both went with the pin:
-# with the Containerfile as the distribution, "get the newest version" and "build it" are one
-# operation, so --build is the only way to a new image and is covered under "what --build
-# SHOWS a student" below. VERIFICATION.md §9.1 names --build for the same reason.
+# A stray modifier is refused rather than ignored. The old --build passed its argument to
+# build_image, which only ever looked for --no-cache -- so `--build --logout` quietly built and
+# kept the volumes. With two modifiers that both matter, a typo has to be loud.
+assert_eq "rebuild:unknown-modifier-exits-2" "2" "$(launcher_rc --rebuild --lgout)"
+shim_new
+launcher >/dev/null 2>&1
+shim_clear_log
+launcher --rebuild --lgout >/dev/null 2>&1
+assert_eq "rebuild:unknown-modifier-changes-nothing" "0" "$(shim_count '^rm ')"
 
 # ─── ports and doctor ──────────────────────────────────────────────────────────
 shim_new
@@ -516,7 +580,7 @@ assert_contains "doctor:reports-a-stale-recipe" "STALE" "$(launcher doctor | gre
 shim_new; shim_set image_exists no
 out="$(launcher doctor)"
 assert_says "doctor:says-when-nothing-is-built" "NOT BUILT" "$out"
-assert_says "doctor:says-how-to-build"          "--build"   "$out"
+assert_says "doctor:says-how-to-build"          "--rebuild" "$out"
 
 # ─── terminal handling ─────────────────────────────────────────────────────────
 # podman forces TERM=xterm and does not copy the client's value
@@ -660,7 +724,7 @@ launcher_pty_silent_stop
 shim_new
 shim_fake_ssh
 shim_set exec_out "SHELL-OPENED"
-launcher --build >/dev/null 2>&1
+launcher --rebuild --no-cache >/dev/null 2>&1
 out="$(launcher_tty 'exit\n' | strip_ansi)"
 assert_says_not "ack:a-quiet-launch-warns-about-nothing" "NOTE:" "$out"
 assert_says_not "ack:a-quiet-launch-does-not-stop" "Press ENTER to continue" "$out"
@@ -706,14 +770,14 @@ assert_contains "args:second-flag-kept"     "-e FOO=bar"      "$line"
 assert_not_contains "args:inline-comment-dropped" "trailing"  "$line"
 cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 
-# ─── what --build SHOWS a student  (issues #22, #23, #24) ──────────────────────
+# ─── what a BUILD SHOWS a student  (issues #22, #23, #24) ──────────────────────
 # The build is the longest thing this course asks a student's computer to do, and until
 # now it reported itself entirely in podman's voice: every STEP line with the whole shell
 # command in it, thousands of lines on a cold build, ending -- after `Setting up the course
 # container...` -- with nothing at all. No indication it had worked.
 #
 # WHY NOTHING CAUGHT THIS. There was no coverage of the build's OUTPUT to miss it with. The
-# shim tier asserted that `--build` calls `podman build` (shim_count '^build ') and the live
+# shim tier asserted that the build verb calls `podman build` (shim_count '^build ') and the live
 # tier asserted the image exists afterwards; both are about what the launcher DOES, and
 # neither reads a line of what the student is shown. The fake podman helped hide it too --
 # its `build` printed a single "Successfully tagged" line, so even a test that had looked at
@@ -722,11 +786,11 @@ shim_new
 shim_set state absent
 COPY="$(repo_copy)"
 LAUNCHER_DIR="$COPY"
-out="$(launcher --build)"
+out="$(launcher --rebuild --no-cache)"
 
 # --- what it DOES, before what it shows ----------------------------------------
 # These three moved here from the deleted --update tier, which is where they used to live.
-# --build is the only path to a new image now, so this is the only place they can live.
+# `--rebuild` is the only path to a new image now, so this is the only place they can live.
 #
 # The label is the load-bearing one: without it nothing downstream can tell a stale image from
 # a current one — see ensure_container and doctor — and a bare `podman build` produces an
@@ -784,13 +848,34 @@ assert_says "build:creation-step-is-announced" "Setting up the course container"
 assert_says "build:creation-step-reports-done" "Ready"                           "$out"
 
 # --- the staff path keeps the raw output ---------------------------------------
-# --dev-build exists to debug the build, and a progress bar is the wrong instrument for
-# that. It is also why hiding the output from --build is affordable at all.
+# CS193V_BUILD_RAW replaced the --dev-build verb, which had become a whole verb for choosing an
+# output format once `--rebuild && ./cs193v` covered the rest of what it did. What survives is
+# the capability, because a progress bar is the wrong instrument for debugging a build -- and
+# specifically for one that HANGS, which is the one failure $BUILD_LOG cannot be read for
+# afterwards. It is also what makes hiding the output from a student affordable at all.
+#
+# --no-cache, NOT `shim_set state absent`, and the difference is why this test failed when it
+# was first written. An absent CONTAINER does not make the launcher build: podman-fake reports
+# image_exists=yes by default and carries no buildhash, so the hash gate reads "unknown, do not
+# nag" and --rebuild recreates without building. There is then no raw output to find -- and,
+# worse, the negative assertion below PASSES vacuously for the same reason. --no-cache is the
+# one modifier that forces a build regardless of what the gate thinks.
 shim_new
 shim_set state absent
-out="$(launcher --dev-build)"
-assert_contains "dev-build:keeps-raw-podman-output" "apt-get install -y package-number" "$out"
-assert_says_not "dev-build:no-success-box-before-a-shell" "Happy vibecoding" "$out"
+out="$(CS193V_BUILD_RAW=1 launcher --rebuild --no-cache)"
+assert_contains "build-raw:keeps-raw-podman-output" "apt-get install -y package-number" "$out"
+# ...and the default does NOT, which is the half that protects the student. Asserted here
+# rather than trusted, because an env var read at the wrong moment defaults the wrong way
+# silently -- there is no error, just a wall of shell at a first-year student.
+shim_new
+shim_set state absent
+out="$(launcher --rebuild --no-cache)"
+# The anti-vacuity guard for the assertion below: status.building is printed by build_image on
+# both output paths, so this proves a build really was attempted and the absence of podman's
+# words is a choice rather than an absence of anything to hide.
+assert_says "build-raw:default-still-built-something" "Building the course container" "$out"
+assert_not_contains "build-raw:default-hides-raw-podman-output" \
+                    "apt-get install -y package-number" "$out"
 
 # --- a FAILED build must still be diagnosable ----------------------------------
 # The consequence of #23 that is easy to miss. err.build-failed said "Podman's own output is
@@ -804,12 +889,12 @@ shim_set build_rc 1
 shim_set build_out 'STEP 6/23: RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 curl: (6) Could not resolve host: deb.nodesource.com
 Error: building at STEP "RUN curl -fsSL https://deb.nodesource.com/...": exit status 6'
-out="$(launcher --build 2>&1)"
+out="$(launcher --rebuild --no-cache 2>&1)"
 assert_contains "build-failed:shows-the-failing-step"   "STEP 6/23"                     "$out"
 assert_contains "build-failed:shows-podmans-diagnosis"  "Could not resolve host"        "$out"
 assert_says     "build-failed:says-it-is-safe-to-retry" "safe to run it again"          "$out"
 assert_says_not "build-failed:no-longer-claims-output-is-above" "on the screen above"   "$out"
-assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --build)"
+assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --rebuild --no-cache)"
 
 # --- the terminal case, which is the one a student is in ----------------------
 # Everything above runs with stdout redirected, where both indicators deliberately fall
@@ -817,7 +902,7 @@ assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --build)"
 # be seen from one -- and it is the whole point of #23 and #24.
 shim_new
 shim_set state absent
-raw="$(launcher_tty '' --build)"
+raw="$(launcher_tty '' --rebuild --no-cache)"
 
 # "One line that moves" means the bar is drawn AFTER a carriage return -- without that it
 # would be 23 bars scrolling past, which is not obviously better than 23 STEP lines.
@@ -868,7 +953,7 @@ Successfully tagged localhost/cs193v:local'
 # Kept BOTH forms of one run: the rendered screen answers "what does the student end up
 # looking at", the raw transcript answers "what was drawn in a single redraw". Neither
 # question can be asked of the other's form.
-raw="$(launcher_tty '' --build)"
+raw="$(launcher_tty '' --rebuild --no-cache)"
 screen="$(printf '%s' "$raw" | render_pty)"
 
 # ISSUE 1. "Downloading the base image..." ended with a newline, so the bar's \r returned to
@@ -923,7 +1008,7 @@ shim_set build_out 'STEP 1/2: FROM ubuntu:26.04
 STEP 2/2: RUN something-slow
 COMMIT localhost/cs193v:local
 Successfully tagged localhost/cs193v:local'
-raw="$(launcher_tty '' --build)"
+raw="$(launcher_tty '' --rebuild --no-cache)"
 
 # Braille, because the frames have to be distinguishable from each other at a glance and
 # from the ASCII / - \ | spinner this replaced.

@@ -442,10 +442,14 @@ assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 
 # Every verb that would disturb a live session refuses first, pointing at the same --stop, so
 # there is ONE way to deal with "the container is busy" rather than one per verb.
-for v in verb_rebuild verb_full_rebuild verb_build; do
-    assert_contains "launcher:$v-refuses-while-a-session-is-live" \
-                    "refuse_if_session_live" "$(fn_body $v $REPO/cs193v)"
-done
+#
+# ONE VERB TO CHECK NOW. This was a loop over verb_rebuild, verb_full_rebuild and verb_build;
+# the merge made those one verb, and shellcheck rightly objects to a loop that runs once
+# (SC2043), so it is unrolled. IF A SECOND CONTAINER-CREATING VERB IS EVER ADDED it needs its
+# own line here: the assert_not_contains below is only meaningful while at least one positive
+# assertion names this helper -- see the comment there.
+assert_contains "launcher:verb_rebuild-refuses-while-a-session-is-live" \
+                "refuse_if_session_live" "$(fn_body verb_rebuild $REPO/cs193v)"
 assert_match "launcher:bare-launch-refuses-while-a-session-is-live" \
              "''\).*refuse_if_session_live" "$launcher_src"
 
@@ -585,14 +589,14 @@ assert_not_match "invariant:no-Z-relabel" ',Z' "$args_live"
 
 assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=1000" "$args_live"
 
-# Every volume container.args CREATES must be one --full-rebuild REMOVES. That is two lists
-# in two files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside the
+# Every volume container.args CREATES must be one `--rebuild --logout` REMOVES. That is two
+# lists in two files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside the
 # launcher's remove_volumes -- and a name added to one but not the other leaks a volume that
-# --full-rebuild silently keeps, which is precisely the state that verb exists to clear.
+# --logout silently keeps, which is precisely the state that modifier exists to clear.
 #
 # This is a grep, which this file otherwise avoids when a behavioural test proves the same
 # thing. Nothing here duplicates one. 30-launcher-shim.sh counts the `volume rm` calls
-# --full-rebuild makes, which proves the launcher removes the volumes IT KNOWS ABOUT — it
+# `--rebuild --logout` makes, which proves the launcher removes the volumes IT KNOWS ABOUT — it
 # compares remove_volumes against the shim's own expectation, never against container.args,
 # so a volume added to container.args alone passes it. MANUAL.md §2.4 is the only end-to-end
 # check and it is deliberately human, because the honest automated version would delete a

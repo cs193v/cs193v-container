@@ -38,7 +38,12 @@ if [ -d "$store" ]; then
     ln -sfn "$store/.claude.json" "$link" 2>/dev/null || true
 fi
 
-# If given a command, run it instead (used by --dev-build smoke tests).
+# If given a command, run it instead of keeping the container alive. NOTHING IN THIS REPO USES
+# THIS: the comment here used to credit --dev-build's smoke tests, which was already wrong before
+# that verb was removed -- verb_dev_build passed no command, and 50-image.sh reaches into the
+# image with `--entrypoint sh`, bypassing this file entirely. Kept because `podman run <image>
+# <cmd>` is the obvious thing to try by hand and silently keeping the container alive instead
+# would be a poor answer to it.
 if [ "$#" -gt 0 ]; then
     exec "$@"
 fi

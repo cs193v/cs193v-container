@@ -13,7 +13,7 @@
 # than hanging (ERRORS.md B13), so a bare launch here is driven through a real pty via LB()
 # and only the verbs use a plain pipe.
 #
-# Destructive: --full-rebuild deletes all five volumes, four of which are where claude/gh/vercel
+# Destructive: `--rebuild --logout` deletes all five volumes, four of which are where claude/gh/vercel
 # logins live. That test is therefore gated behind CS193V_DESTRUCTIVE=1 and skipped
 # otherwise, so running the suite can never log anybody out by surprise.
 
@@ -60,7 +60,7 @@ clean_vt_processes                    # a no-op while the container does not exi
 L() { printf 'exit\n' | timeout 90 ./cs193v "$@" 2>&1; }
 L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
-# LV() is L() for the verbs that CHANGE something — --rebuild, --build, --full-rebuild. Since #41
+# LV() is L() for the verb that CHANGES something — --rebuild, with or without its modifiers. Since #41
 # those refuse while a session is live, and this suite raises the container repeatedly so it can
 # `podman exec` into it, so they have to be given the precondition a student actually has: nothing
 # running.
@@ -410,36 +410,48 @@ hold_container
 assert_ok "rebuild:claude-policy-survives" \
           sh -c "podman exec ${NAME} test -f /etc/claude-code/CLAUDE.md -a -f /etc/claude-code/managed-settings.json"
 
-# ─── --full-rebuild  (§2.4, §9.2) — destructive, opt-in ────────────────────────
+# ─── --rebuild --logout  (§2.4, §9.2) — destructive, opt-in ────────────────────
+#
+# NO PTY HARNESS ANY MORE. This used to be `printf '\033[B\n' | script -q -c ...`, feeding a
+# down-arrow and a newline to the menu --full-rebuild put in the way. --logout carries no
+# confirm, so the verb is a plain call and the keystrokes were the only reason `script` was
+# here. What that costs is stated plainly: there is no longer a non-tty run that changes
+# nothing, because there is no prompt to default to "cancel" -- which is exactly why this whole
+# block stays gated behind CS193V_DESTRUCTIVE=1.
 if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
     hold_container
     podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
-    printf '%b' '\033[B\n' | script -q -c "./cs193v --full-rebuild" /dev/null >/dev/null 2>&1
+    LV --rebuild --logout >/dev/null 2>&1
     hold_container
-    assert_fail "full-rebuild:volume-contents-are-gone" \
+    assert_fail "logout:volume-contents-are-gone" \
                 sh -c "podman exec ${NAME} test -f /home/student/.claude/.vt-marker"
-    # INVERTED BY #41: like every maintenance verb, --full-rebuild leaves nothing running. Read
-    # BEFORE the hold_container above would confuse it, so this samples the state the verb itself
-    # left -- which is why it re-stops first rather than trusting where we happen to be.
+    # INVERTED BY #41: like every maintenance verb, this leaves nothing running. Read BEFORE the
+    # hold_container above would confuse it, so this samples the state the verb itself left --
+    # which is why it re-stops first rather than trusting where we happen to be.
     podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
-    printf '%b' '\033[B\n' | script -q -c "./cs193v --full-rebuild" /dev/null >/dev/null 2>&1
-    assert_eq "full-rebuild:leaves-nothing-running" "exited" \
+    LV --rebuild --logout >/dev/null 2>&1
+    assert_eq "logout:leaves-nothing-running" "exited" \
               "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
+    # It must not have taken the slow path to get here. --logout says nothing about the image, so
+    # with the recipe unchanged this is a volume drop and a recreate -- and the assertion is worth
+    # making against real podman because the hash gate is the one thing standing between a
+    # two-second logout and a multi-minute one.
+    assert_says_not "logout:does-not-rebuild-a-current-image" \
+                    "Building the course container" "$(LV --rebuild --logout)"
 else
-    skip "full-rebuild:volume-contents-are-gone" \
+    skip "logout:volume-contents-are-gone" \
          "destructive — it deletes the claude/gh/vercel login volumes. Re-run with CS193V_DESTRUCTIVE=1"
-    skip "full-rebuild:leaves-nothing-running" "see above"
+    skip "logout:leaves-nothing-running" "see above"
+    skip "logout:does-not-rebuild-a-current-image" "see above"
 fi
-# Whether or not it ran, --full-rebuild must refuse to proceed without an explicit yes.
-out="$(LV --full-rebuild)"
-assert_says "full-rebuild:non-tty-changes-nothing" "Nothing was changed" "$out"
 
-# ─── --build  (§9.1) ───────────────────────────────────────────────────────────
-# Deliberately not run here even though it would work: with a warm cache a rebuild is
-# seconds, but with a cold one or an edited Containerfile it is a full multi-minute build,
-# and a tier that creates real containers should not sometimes take twenty minutes. What
-# --build does is covered in the shim tier (build:builds and friends), which is where that
-# logic lives.
+# ─── building a newer image  (§9.1) ────────────────────────────────────────────
+# Deliberately not forced here even though it would work: with the recipe unchanged --rebuild
+# does not build at all, which is the point of the hash gate and is asserted just above; with
+# --no-cache it is a full multi-minute build, and a tier that creates real containers should
+# not sometimes take twenty minutes. The forced build is the release gate's job
+# (build:no-cache-build-succeeds), and what the verb DOES either way is covered in the shim
+# tier (rebuild:moved-recipe-builds and friends), which is where that logic lives.
 #
 # There is no longer a second branch to choose between: --update and its pull are gone, so
 # this tier no longer has to read container.args to find out which one it would exercise.

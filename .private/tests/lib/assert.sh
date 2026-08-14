@@ -255,7 +255,7 @@ require_image() {                     # require_image  -> exports TEST_IMAGE
     export TEST_IMAGE
     if ! podman image exists "$TEST_IMAGE" 2>/dev/null; then
         fail "require:image" "The image $TEST_IMAGE does not exist.
-Build it first:  ./cs193v --build
+Build it first:  ./cs193v --rebuild
 (or point CS193V_TEST_IMAGE at another image)"
         exit 1
     fi
