@@ -97,9 +97,8 @@ assert_eq "placeholders:none-dead"    "UNUSED:"     "$(grep '^UNUSED:' "$TMP/ph"
 # ─── msg() substitution behaviour ──────────────────────────────────────────────
 # The bug this catches: sed's replacement text cannot contain a newline, so a multi-line
 # value made msg() emit "sed: unterminated `s' command" and then return NOTHING — so
-# die() drew an empty red STOP box. err.create-failed and err.pull-failed both pass raw
-# podman output, which is always multi-line. This is the error a stuck student is most
-# likely to see.
+# die() drew an empty red STOP box. err.create-failed passes raw podman output, which is
+# always multi-line. This is the error a stuck student is most likely to see.
 multi='Error: preparing container failed
 level=error msg="cannot set up pasta"
 Error: netavark: unable to bind'
@@ -114,8 +113,12 @@ assert_not_contains "msg:multiline-substitutes"   "{{OUT}}"                     
 # Metacharacters must survive literally. `&` is the trap: bash 5.2+ expands & in the
 # replacement of ${var//pat/rep} to the matched text (sed semantics) while bash 3.2 takes
 # it literally — so the obvious fix would corrupt this string on Linux and not on macOS.
+#
+# err.create-failed again, because it is now the only message that interpolates raw podman
+# output: err.pull-failed went with the pull path. Two messages used to share this duty and
+# each was exercised once; one message exercised twice covers the same substitution code.
 nasty='trouble with A&B and a|pipe and a\backslash and /slash and {{OUT}} literal'
-out="$(msg err.pull-failed OUT="$nasty" 2>&1)"
+out="$(msg err.create-failed OUT="$nasty" 2>&1)"
 assert_contains "msg:ampersand-is-literal"  "A&B"          "$out"
 assert_contains "msg:pipe-is-literal"       "a|pipe"       "$out"
 assert_contains "msg:backslash-is-literal"  'a\backslash'  "$out"
@@ -328,8 +331,8 @@ else
 fi
 
 # A line too long to fit must WRAP inside the box, not push the right wall out past it or
-# spill into the terminal. This is not hypothetical tidiness: err.create-failed and
-# err.pull-failed interpolate raw podman output, which is written to no width at all, and
+# spill into the terminal. This is not hypothetical tidiness: err.create-failed
+# interpolates raw podman output, which is written to no width at all, and
 # a single `Error: ... /very/long/path ...` line is the common shape. Nothing in
 # messages.txt can be hand-wrapped to fix that — only die() can.
 shim_new

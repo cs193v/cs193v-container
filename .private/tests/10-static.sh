@@ -442,7 +442,7 @@ assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 
 # Every verb that would disturb a live session refuses first, pointing at the same --stop, so
 # there is ONE way to deal with "the container is busy" rather than one per verb.
-for v in verb_rebuild verb_update verb_full_rebuild verb_build; do
+for v in verb_rebuild verb_full_rebuild verb_build; do
     assert_contains "launcher:$v-refuses-while-a-session-is-live" \
                     "refuse_if_session_live" "$(fn_body $v $REPO/cs193v)"
 done

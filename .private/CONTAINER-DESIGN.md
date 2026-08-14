@@ -267,7 +267,7 @@ a `claude` session, an editor with unsaved changes: those go.
 | closing your terminal | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 | `exit` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 | `--rebuild` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
-| `--update` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
+| `--build` | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 | `--full-rebuild` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ (back on next `cs193v`) |
 | restarting your computer | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ (back on next `cs193v`) |
 
@@ -444,7 +444,7 @@ actually are.
 ./cs193v doctor             a report to paste when asking staff for help
 ./cs193v --rebuild          fresh container; files and logins kept
 ./cs193v --full-rebuild     fresh everything, including logging out
-./cs193v --update           get the newest course container
+./cs193v --build            build the course container, or get the newest version of it
 ```
 
 Inside the container: `ports` and `am-i-in-a-container`.

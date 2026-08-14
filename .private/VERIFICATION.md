@@ -78,10 +78,10 @@ ckfail() { local n="$1"; shift; if "$@" >/dev/null 2>&1; then FAIL=$((FAIL+1)); 
 rec()    { printf 'RECORD %-28s %s\n' "$1" "$("${@:2}" 2>&1 | tr '\n' ' ')"; }
 
 DIR="$HOME/cs193v"                        # or wherever the student put it
-# Whatever the launcher resolves: the optional pin from container.args, else the image
-# built on this machine. Empty IMAGE= is the normal state — see .config/container.args.
-IMAGE="$(sed 's/#.*//' "$DIR/.config/container.args" | sed -n 's/^IMAGE=//p' | tr -d ' ' | head -1)"
-IMAGE="${IMAGE:-localhost/cs193v:local${CS193V_INSTANCE:+-$CS193V_INSTANCE}}"
+# The image built on this machine, which is the only image there is: nothing in
+# container.args names one and no environment variable overrides it. The suffix mirrors the
+# launcher's, so this runs against your own instance — see .config/container.args.
+IMAGE="localhost/cs193v:local${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
 E()  { podman exec cs193v sh -c "$1"; }                       # in the live container
 R()  { podman run --rm --entrypoint sh "$IMAGE" -c "$1"; }     # throwaway
 I()  { podman inspect cs193v --format "$1"; }
@@ -814,7 +814,7 @@ the course's core skill is taught.
 
 ## 9. Teardown
 
-**9.1 — Volumes survive an image update.** `./cs193v --update` after editing the
+**9.1 — Volumes survive an image update.** `./cs193v --build` after editing the
 Containerfile. *Expect:* the image rebuilds, the container is recreated, and logins are
 intact.
 

@@ -17,7 +17,7 @@
 # Mirrors ./cs193v's CS193V_INSTANCE suffix, so a developer with their own instance runs
 # this suite against THEIR container instead of a colleague's. Every suite refers to
 # "$NAME" rather than a literal, and the image default is suffixed the same way the
-# launcher's LOCAL_IMAGE is. Unset -> plain "cs193v", byte-identical to before.
+# launcher's IMAGE is. Unset -> plain "cs193v", byte-identical to before.
 NAME="cs193v${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
 # The dev image tag, suffixed the same way. Defined once here because three places used to
 # spell the default out, and a suffixed instance would have missed whichever one drifted.

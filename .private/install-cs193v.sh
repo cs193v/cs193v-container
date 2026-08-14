@@ -189,10 +189,10 @@ box() {
             while (n-- > 0) pad = pad " "
             printf "%s%s┃%s %s%s %s┃%s\n", ind, red, off, text, pad, red, off
         }
-        # Wrap rather than spill. err.create-failed and err.pull-failed interpolate raw
-        # podman output, which is written to no width at all and cannot be hand-wrapped in
-        # messages.txt -- only here. A line that already fits is emitted untouched, so the
-        # hand-chosen line breaks in messages.txt survive exactly as written.
+        # Wrap rather than spill. err.create-failed interpolates raw podman output, which is
+        # written to no width at all and cannot be hand-wrapped in messages.txt -- only here.
+        # A line that already fits is emitted untouched, so the hand-chosen line breaks in
+        # messages.txt survive exactly as written.
         function put(text,  lead, rest, chunk, k, brk) {
             # Continuation lines keep the original indent, so a wrapped "    cs193v doctor"
             # stays visibly one item rather than starting a new column.
@@ -731,7 +731,13 @@ Send course staff the output of:  $DIR/cs193v --dev-print-command"
     # That the IMAGE EXISTS, which nothing else here checks. Without this the script can
     # print "Setup finished" over an installation with no runnable container in it --
     # the same shape of failure as ERRORS.md A6, where a truncated download passed.
-    if ! podman image exists "$(image_ref)"; then
+    #
+    # The tag is spelled out rather than derived. It used to be read out of container.args,
+    # because a pin there could name a registry image instead -- there is no pin any more and
+    # the launcher's IMAGE is a constant, so parsing anything would be parsing to find out
+    # what is written here. Deliberately unsuffixed: CS193V_INSTANCE is a staff development
+    # tool and the installer never runs under one (see CLAUDE.md).
+    if ! podman image exists localhost/cs193v:local; then
         die "The course container was not built, but setup did not stop.
 
 Please send this to course staff, along with the output of:
@@ -739,15 +745,6 @@ Please send this to course staff, along with the output of:
     fi
     ok "course container is present"
     if "$DIR/cs193v" doctor >/dev/null 2>&1; then ok "doctor runs"; else note "doctor reported problems — run: $DIR/cs193v doctor"; fi
-}
-
-# Whatever the launcher will actually run: the pin from container.args if staff have set
-# one, otherwise the locally built tag. Must stay in step with the launcher's LOCAL_IMAGE
-# and its resolve_image; 25-installer.sh asserts they agree.
-image_ref() {
-    local img
-    img="$(sed 's/#.*//' "$DIR/.config/container.args" | awk -F= '/^IMAGE=/{print $2}' | tr -d ' ')"
-    printf '%s' "${img:-localhost/cs193v:local}"
 }
 
 # ─── main ──────────────────────────────────────────────────────────────────────

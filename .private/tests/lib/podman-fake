@@ -21,10 +21,10 @@
 #   state            absent | created | running | exited    [absent]
 #   label_hash       the cs193v.confighash label            [] (empty until a run)
 #   label_dir        the cs193v.dir label                   [] (empty until a run)
-#   container_image  the container's .Image                 []
 #   image_exists     yes | no, for `podman image exists`    [yes]
-#   image_id         .Id for `podman image inspect`         [sha256:aaaa]
-#   image_buildhash  the cs193v.buildhash image label       [] (unlabelled)
+#   image_buildhash  the cs193v.buildhash image label       [] (unlabelled). A successful
+#                    `build` overwrites it with the label it was handed, so "the image
+#                    matches the current recipe" is arranged by building.
 #   image_created    .Created for `podman image inspect`    [2026-08-04T00:00:00Z]
 #   run_rc           exit code for `podman run`             [0]
 #   build_out        whole `podman build` output, verbatim  [a realistic STEP i/N run]
@@ -62,7 +62,6 @@ fmt_container() {                     # fmt_container FORMAT
         *'cs193v.confighash'*)  get label_hash ''; echo ;;
         *'cs193v.dir'*)         get label_dir ''; echo ;;
         *'.State.StartedAt'*)   get started_at '2026-08-04T00:00:00Z'; echo ;;
-        *'.Image'*)             get container_image ''; echo ;;
         *'.Mounts'*)            get mounts_out ''; echo ;;
         *)                      echo '' ;;
     esac
@@ -95,11 +94,8 @@ case "${1:-}" in
                     shift
                 done
                 case "$FMT" in
-                    # Order matters: the buildhash probe asks for .Labels, and the
-                    # .Id probe must not swallow it.
                     *buildhash*) get image_buildhash ''; echo ;;
                     *'.Created'*) get image_created '2026-08-04T00:00:00Z'; echo ;;
-                    *'.Id'*)   get image_id 'sha256:aaaa'; echo ;;
                     *'.User'*) echo student ;;
                     *)         echo '' ;;
                 esac
@@ -139,7 +135,6 @@ case "${1:-}" in
             LAST="$a"
         done
         printf '%s' "${LAST:-}" > "$SHIM/last_image"
-        printf '%s' "$(get image_id 'sha256:aaaa')" > "$SHIM/container_image"
         RC="$(get run_rc 0)"
         if [ "$RC" -ne 0 ]; then
             # Deliberately multi-line: this is the shape of output that broke msg().
@@ -156,15 +151,6 @@ level=error msg="cannot set up pasta"' >&2
     rm)      printf 'absent\n' > "$SHIM/state"; rm -f "$SHIM/label_hash" "$SHIM/label_dir"; echo cs193v; exit 0 ;;
     start)   printf 'running\n' > "$SHIM/state"; echo cs193v; exit 0 ;;
     stop)    printf 'exited\n'  > "$SHIM/state"; echo cs193v; exit 0 ;;
-    pull)    if [ "$(get pull_rc 0)" -ne 0 ]; then
-                 # printf, not echo: dash's echo interprets backslash escapes, so an
-                 # `echo "a\nb"` here would differ between /bin/sh implementations.
-                 get pull_err 'Error: initializing source docker://cs193v: reading manifest
-unexpected EOF' >&2
-                 echo >&2
-                 exit 1
-             fi
-             get image_id 'sha256:aaaa'; echo; exit 0 ;;
     volume)  echo ''; exit 0 ;;
     top)     get top_out ''; echo; exit 0 ;;
     port)    get port_out ''; echo; exit 0 ;;
@@ -180,6 +166,20 @@ unexpected EOF' >&2
         # build_delay makes the output arrive SLOWLY, one line per delay. Without it every
         # line is available at once and a build finishes in milliseconds -- which cannot show
         # whether anything animates while a step is in progress, because no step ever is.
+        #
+        # THE RECIPE LABEL IS RECORDED, exactly as `run` records the container's labels and
+        # for the same reason: the next invocation has to see a consistent image. A real build
+        # stamps cs193v.buildhash onto what it produces, so a test arranges "this image matches
+        # the recipe on disk" by building rather than by computing the launcher's hash a second
+        # time. Only on success -- a failed build produces no image to label.
+        if [ "$(get build_rc 0)" -eq 0 ]; then
+            for a in "$@"; do
+                case "$a" in
+                    cs193v.buildhash=*)
+                        printf '%s' "${a#cs193v.buildhash=}" > "$SHIM/image_buildhash" ;;
+                esac
+            done
+        fi
         delay="$(get build_delay 0)"
         if [ -f "$SHIM/build_out" ]; then
             if [ "$delay" = 0 ]; then

@@ -60,7 +60,7 @@ clean_vt_processes                    # a no-op while the container does not exi
 L() { printf 'exit\n' | timeout 90 ./cs193v "$@" 2>&1; }
 L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
-# LV() is L() for the verbs that CHANGE something — --rebuild, --update, --full-rebuild. Since #41
+# LV() is L() for the verbs that CHANGE something — --rebuild, --build, --full-rebuild. Since #41
 # those refuse while a session is live, and this suite raises the container repeatedly so it can
 # `podman exec` into it, so they have to be given the precondition a student actually has: nothing
 # running.
@@ -434,23 +434,16 @@ fi
 out="$(LV --full-rebuild)"
 assert_says "full-rebuild:non-tty-changes-nothing" "Nothing was changed" "$out"
 
-# ─── --update  (§9.1) ──────────────────────────────────────────────────────────
-img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
-if [ -n "$img" ]; then
-    assert_ok "update:pulls-and-recreates" sh -c "./cs193v --update </dev/null"
-    skip "update:unpinned-rebuilds" "IMAGE= is pinned, so --update pulls rather than builds"
-else
-    # Empty IMAGE= is the normal state, so here --update REBUILDS. It no longer refuses:
-    # the Containerfile is the distribution, so "get the newest version" means rebuilding
-    # from the newest recipe. See .config/container.args.
-    skip "update:pulls-and-recreates" "IMAGE= is empty (the normal state); --update builds instead"
-    # Deliberately not run here even though it would work: with a warm cache this is
-    # seconds, but with a cold one or an edited Containerfile it is a full multi-minute
-    # build, and a tier that creates real containers should not sometimes take twenty
-    # minutes. The build-vs-pull branch is covered exhaustively in the shim tier
-    # (update:unpinned-builds and friends), which is where that logic actually lives.
-    skip "update:unpinned-rebuilds" "would trigger a real image build; covered in 30-launcher-shim.sh"
-fi
+# ─── --build  (§9.1) ───────────────────────────────────────────────────────────
+# Deliberately not run here even though it would work: with a warm cache a rebuild is
+# seconds, but with a cold one or an edited Containerfile it is a full multi-minute build,
+# and a tier that creates real containers should not sometimes take twenty minutes. What
+# --build does is covered in the shim tier (build:builds and friends), which is where that
+# logic lives.
+#
+# There is no longer a second branch to choose between: --update and its pull are gone, so
+# this tier no longer has to read container.args to find out which one it would exercise.
+skip "build:rebuilds-and-recreates" "would trigger a real image build; covered in 30-launcher-shim.sh"
 
 # ─── doctor against a real container ───────────────────────────────────────────
 # Most of what doctor prints -- the in-container uid, the memory limit, zombies, the tmux and
@@ -462,21 +455,16 @@ hold_container
 require_tunnel
 out="$(L doctor)"
 assert_contains "doctor:reports-the-real-podman-version" "5." "$out"
-# KNOWN BUG, documented as ERRORS.md B14: verb_doctor calls load_args but never
-# resolve_image, so with no pin (empty IMAGE=) it hashes IMAGE="" while every other path
-# hashes the resolved dev image — and doctor therefore always reports "config STALE" and
-# tells you to accept a recreate prompt that will never appear. Left failing on purpose:
-# doctor is the report staff ask for first, so it must not lie.
-if printf '%s' "$out" | grep -q 'matches container.args'; then
-    pass "doctor:reports-config-matches"
-else
-    fail "doctor:reports-config-matches" \
-         "doctor says the config is STALE while the launch path agrees it matches (0 recreate
-prompts) and the stored hash equals --dev-print-command's. One-line fix in verb_doctor:
-  load_args
-+ [ -z \"\$IMAGE\" ] && IMAGE=\"\$LOCAL_IMAGE\"
-See ERRORS.md B14."
-fi
+# ERRORS.md B14, fixed, kept as the regression test for it. verb_doctor called load_args but
+# never resolved the image, so it hashed IMAGE="" while every other path hashed the resolved
+# one — and doctor then reported "config STALE" for a container that matched perfectly, telling
+# staff to go and accept a recreate prompt that never appears. doctor is the report staff ask
+# for first, so it must not lie.
+#
+# The image reference is a constant now that the pin is gone, so every path hashes the same
+# value by construction. This assertion has become structural rather than a fix that could
+# quietly come undone, which is a reason to keep it cheap, not a reason to drop it.
+assert_says "doctor:reports-config-matches" "matches container.args" "$out"
 assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000' "$out"
 # doctor's tunnel section replaced a `podman port` count, and it is now the ONLY place
 # host-side forwarding state is visible: the in-container `ports` command reads /proc and

@@ -87,6 +87,15 @@ What it costs, so nobody rediscovers it the hard way:
   is an exact apt version and survives only because NodeSource's nodistro suite retains the
   whole 24.x patch history — verified with `apt-cache madison nodejs`, not assumed. Re-check
   that before trusting the same of a future major.
+* **The pull path is gone rather than dormant.** `IMAGE=` in `container.args`, the
+  `--update` verb and its pull branch, `CS193V_IMAGE` and `OVERRIDE_IMAGE` were all removed
+  outright. Keeping an untested override cost more than it saved: the stale-recipe check only
+  ran when the resolved image equalled the locally built tag, so any value in any of them
+  silently switched rebuild prompts off while `doctor` went on reporting `STALE` — and with
+  `CS193V_INSTANCE` set, "the locally built tag" is suffixed, so even naming the obvious
+  image did it. Publishing later now means writing that path and its messages again. That is
+  a decision to make once rather than a line to fill in, which is the whole of what this
+  section's first bullet is claiming.
 * **Disk, measured.** Nothing to a running container costs **224 s, 4.1 GB of transient
   peak, and 4.3 GB retained** for an image reported as 2.2 GB. Creating the container is a
   second cost roughly equal to the image again, because `--userns=keep-id` writes an
@@ -103,9 +112,9 @@ Two things need real values:
 2. **The course website** — host `install-cs193v.sh` and `install-cs193v-windows.cmd`
    with their SHA-256 published next to the links.
 
-`.config/container.args`'s empty `IMAGE=` is **not** a third blank. Empty is the normal
-state and means "build locally"; a value is an optional override that still pulls, kept
-working so that publishing an image later stays a decision rather than a rewrite.
+There is no third blank. `.config/container.args` used to carry an empty `IMAGE=` line that
+looked like one; it is gone, along with the rest of the pull path — see "How the image
+reaches a student" above.
 
 ## Your development loop
 
@@ -209,7 +218,7 @@ was before — a student never sets it.
 ## Shipping a fix mid-quarter
 
 1. Edit the `Containerfile` (or anything under `files/`); push to `main`.
-2. Students run `./cs193v --update`, which rebuilds. Anyone who doesn't gets prompted on
+2. Students run `./cs193v --build`, which rebuilds. Anyone who doesn't gets prompted on
    their next launch.
 
 **What makes step 2 work is `cs193v.buildhash`.** The launcher hashes the Containerfile

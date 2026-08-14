@@ -24,9 +24,9 @@ cs193v — the CS193V course container
   cs193v --reset-tunnel      fix it when your browser cannot reach your server
   cs193v --rebuild           start the container over. Your files and logins are kept.
   cs193v --full-rebuild      start over completely, including logging out.
-  cs193v --build             build the course container. The installer does this for
-                             you; run it yourself only if you are told to.
-  cs193v --update            get the newest version of the course container.
+  cs193v --build             build the course container, or build it again to get the
+                             newest version of it. The installer does this for you the
+                             first time.
 
 Closing your terminal window stops the container, and anything running inside it. A
 dev server you started will stop. Your files are safe — they live on your own computer.
@@ -287,18 +287,6 @@ where it stopped:
 
 If you cannot free up that much space, contact course staff.
 
-[[err.pull-failed]]
-Could not download the course container.
-
-Podman said:
-
-{{OUT}}
-
-This is usually a network problem. It is safe to run `cs193v
---update` again: podman keeps the parts that already downloaded,
-so a second attempt picks up where it left off rather than
-starting over.
-
 [[err.no-containerfile]]
 No Containerfile found at:
 
@@ -421,15 +409,6 @@ enter the development environment:
 
 Happy vibecoding!
 
-[[status.pulling]]
-Downloading the course container. This can take a while on slow wifi, and it is safe
-to run again if it is interrupted.
-
-    {{IMAGE}}
-
-[[status.updated]]
-Updated. Run ./cs193v to open a shell.
-
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
 
@@ -467,23 +446,14 @@ Keep the current container for now
 [[opt.recreate]]
 Apply the new settings (recommended)
 
-[[prompt.newer-image]]
-A newer version of the course container is available.
-
-Updating restarts the container. Your files and your logins are safe; anything running
-inside it will stop.
-
-[[opt.keep-current-version]]
-Keep using the current version
-[[opt.update-now]]
-Update now (recommended)
-
 [[prompt.image-stale]]
 The course container has been updated since yours was built.
 
 Rebuilding takes a while, and restarts the container. Your files and your logins are
 safe; anything running inside it will stop.
 
+[[opt.keep-current-version]]
+Keep using the current version
 [[opt.rebuild-now]]
 Rebuild now (recommended)
 

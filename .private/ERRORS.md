@@ -680,7 +680,7 @@ So the image is now built on each student's machine, and B5's four blanks resolv
 | Blank | Outcome |
 |---|---|
 | `.github/workflows/build.yml` | **Gone.** No registry, so no multi-arch build to run, no digest to print, and no token to hold. |
-| `IMAGE=` | **Not a blank.** Empty is the normal state and means "build locally"; a value is an optional override that still pulls. |
+| `IMAGE=` | **Gone.** It was kept for a while as an optional override that still pulled, then removed outright along with `CS193V_IMAGE`, `OVERRIDE_IMAGE` and `--update`'s pull branch. An override nothing exercised was not free: the stale-recipe check ran only when the resolved image equalled the locally built tag, so any value in any of them turned rebuild prompts off silently while `doctor` still said `STALE`. |
 | `latest` build args | **Filled, and now enforced harder than CI would have.** A floating `ARG` used to mean CI drifted between runs while one artifact still reached everybody. It now means two students get different software, so `00-release-gates.sh` §3 pins `VERCEL_VERSION`, `CLAUDE_CODE_VERSION` and `PLAYWRIGHT_VERSION`, and the base image is digest-pinned as well. |
 | `REPO_OWNER` | **Still open.** Unchanged by any of this. |
 
@@ -833,8 +833,6 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
   `/proc/self/uid_map` is not permitted in this sandbox).
 - **`--full-rebuild`'s volume deletion** — gated behind `CS193V_DESTRUCTIVE=1` so a normal
   run can never log anyone out. Re-run with that set to cover §2.4 and §9.2.
-- **`--update`** — `IMAGE=` is empty, so there is nothing to update to. Covered against a
-  fake registry in the shim tier.
 - **Multi-arch manifest (§A.2)** — a local `--dev-build` is single-arch by definition. Moved
   to the release tier, where it belongs.
 - **Everything needing another platform or a person** — §1.2's rendering, §1.3 (bash 3.2 on

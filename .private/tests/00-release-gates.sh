@@ -35,25 +35,10 @@ assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 # artifact still reached everybody; now it means TWO STUDENTS GET DIFFERENT SOFTWARE, and
 # nothing downstream can detect that it happened.
 #
-# Empty IMAGE= is therefore correct and expected. A value is a deliberate override — see
-# .config/container.args — and only its shape is checked, not its existence.
-img="$(sed 's/#.*//' $REPO/.config/container.args | sed -n 's/^IMAGE=\(.*\)/\1/p' | tr -d ' ' | head -1)"
-record "image:IMAGE" "${img:-<empty: built locally, the normal state>}"
-if [ -n "$img" ]; then
-    # An override is allowed, but a floating one is not: it would reintroduce exactly the
-    # drift this section exists to prevent, and silently.
-    assert_contains "image:override-pinned-by-digest-not-tag" "@sha256:" "$img"
-    assert_not_contains "image:override-not-latest" ":latest" "$img"
-    if command -v podman >/dev/null 2>&1; then
-        assert_ok "image:override-resolves-in-the-registry" podman manifest inspect "$img"
-    else
-        skip "image:override-resolves-in-the-registry" "podman not installed"
-    fi
-else
-    skip "image:override-pinned-by-digest-not-tag"  "IMAGE= is empty (normal)"
-    skip "image:override-not-latest"                "IMAGE= is empty (normal)"
-    skip "image:override-resolves-in-the-registry"  "IMAGE= is empty (normal)"
-fi
+# There is nothing left to check about the image REFERENCE, and that is the point: the
+# IMAGE= line is gone from container.args and the launcher's IMAGE is a constant, so there is
+# no value here that a release could get wrong. What ships is the recipe, so the pins below
+# are the whole of this gate.
 
 # The base image. A moving tag is the one drift a single line can close, so it must be
 # closed: `ubuntu:26.04` is republished as the base rolls forward, and on the tag alone two

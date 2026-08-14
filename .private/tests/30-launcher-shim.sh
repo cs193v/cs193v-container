@@ -257,7 +257,7 @@ assert_eq "lifecycle:the-refusal-stops-nothing" "0" "$(shim_count '^stop ')"
 
 # Every maintenance verb refuses while a session is live, pointing at the same --stop, so there
 # is ONE answer to "the container is busy" rather than one per verb.
-for v in --rebuild --update --full-rebuild --build; do
+for v in --rebuild --full-rebuild --build; do
     shim_new
     launcher >/dev/null 2>&1
     shim_set state running
@@ -271,7 +271,11 @@ done
 # nobody is attached when they are done. This is what keeps the invariant above exact: without
 # it, "running" would mean either "somebody is working" or "a rebuild happened at some point",
 # and doctor could not tell a student which.
-for v in --rebuild --update; do
+#
+# --build stands where --update used to, and it is the one that most needs checking now: it is
+# the verb a student is told to run when their container is out of date, so it is the one they
+# are most likely to run and walk away from.
+for v in --rebuild --build; do
     shim_new
     shim_clear_log
     launcher $v >/dev/null 2>&1
@@ -382,20 +386,8 @@ out="$(launcher)"
 assert_says_not "nodrift:no-prompt" "settings have changed" "$out"
 assert_eq "nodrift:no-recreate" "0" "$(shim_count '^run ')"
 
-# ─── a newer pinned image  (§2.6) ──────────────────────────────────────────────
-shim_new
-launcher >/dev/null 2>&1
-shim_set image_id "sha256:bbbbnewer"           # the pin now resolves to something else
-shim_clear_log
-out="$(launcher)"
-assert_says "newer-image:prompt-shown" "newer version" "$out"
-assert_eq "newer-image:declined-keeps-container" "0" "$(shim_count '^run ')"
-shim_clear_log
-launcher_tty '\033[B\n' >/dev/null 2>&1
-assert_eq "newer-image:accepted-recreates" "1" "$(shim_count '^run ')"
-
-# ─── a stale recipe  (the replacement for the digest pin) ──────────────────────
-# How a mid-quarter fix reaches a student who never runs --update. With no registry there
+# ─── a stale recipe  (the replacement for the digest pin, §2.6) ────────────────
+# How a mid-quarter fix reaches a student who never runs --build. With no registry there
 # is no digest to change, and podman mints a new image ID on every build including a
 # no-op one — so the IMAGE ID cannot answer "is this out of date". The recipe can.
 shim_new
@@ -448,41 +440,10 @@ assert_eq "full-rebuild:accepted-removes-container" "1" "$(shim_count '^rm ')"
 if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "full-rebuild:accepted-removes-5-volumes"
 else fail "full-rebuild:accepted-removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
 
-# ─── --update  (§9.1) ──────────────────────────────────────────────────────────
-# With no pin — the normal case — --update BUILDS. It used to refuse outright, on the
-# reasoning that there was no published image to update to; now the Containerfile is what
-# ships, so "get the newest version" means rebuilding from the newest recipe.
-shim_new
-launcher --update >/dev/null 2>&1
-assert_eq "update:unpinned-builds"        "1" "$(shim_count '^build ')"
-assert_eq "update:unpinned-pulls-nothing" "0" "$(shim_count '^pull ')"
-assert_eq "update:unpinned-recreates"     "1" "$(shim_count '^run ')"
-# The recipe fingerprint has to be on the image, or nothing downstream can tell a stale
-# image from a current one — see ensure_container and doctor.
-assert_contains "update:build-labels-the-recipe" "cs193v.buildhash=" "$(shim_log | grep '^build ')"
-
-PINNED="ghcr.io/example/cs193v@sha256:1111"
-shim_new
-edit_sub "$COPY/.config/container.args" '^IMAGE=.*' "IMAGE=$PINNED"
-launcher --update >/dev/null 2>&1
-assert_eq "update:pulls" "1" "$(shim_count '^pull ')"
-assert_eq "update:recreates" "1" "$(shim_count '^run ')"
-assert_contains "update:pulls-the-pinned-digest" "$PINNED" "$(shim_log | grep '^pull ')"
-assert_contains "update:retries-on-flaky-wifi" "--retry" "$(shim_log | grep '^pull ')"
-
-# A failed pull is the commonest student failure after a dropped connection, and its
-# message interpolates multi-line podman output — the case that used to print a blank box.
-shim_new
-shim_set pull_rc 1
-shim_set pull_err 'Error: initializing source docker://cs193v: reading manifest
-unexpected EOF
-Error: pulling image: connection reset by peer'
-out="$(launcher --update)"
-assert_contains "update:failure-shows-podman-line-1" "reading manifest" "$out"
-assert_contains "update:failure-shows-podman-line-3" "connection reset by peer" "$out"
-assert_says "update:failure-says-safe-to-retry" "safe to run" "$out"
-assert_not_contains "update:failure-no-sed-error" "unterminated" "$out"
-edit_sub "$COPY/.config/container.args" '^IMAGE=.*' "IMAGE="
+# There is no --update tier here any more, and no pull tier at all. Both went with the pin:
+# with the Containerfile as the distribution, "get the newest version" and "build it" are one
+# operation, so --build is the only way to a new image and is covered under "what --build
+# SHOWS a student" below. VERIFICATION.md §9.1 names --build for the same reason.
 
 # ─── ports and doctor ──────────────────────────────────────────────────────────
 shim_new
@@ -512,9 +473,11 @@ assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
 
 # The positive case, and the one that was broken. A container created from the current
 # container.args must be reported as matching it. verb_doctor hashed IMAGE="" because it
-# never resolved the image, while the launch path hashed the resolved dev image — so in dev
-# mode (an empty IMAGE=, which is how the repo ships) doctor called EVERY container stale
-# and sent people chasing a recreate prompt that never appears.
+# never resolved the image, while the launch path hashed the resolved dev image — so with an
+# empty IMAGE=, which is how the repo shipped, doctor called EVERY container stale and sent
+# people chasing a recreate prompt that never appears. The pin that made those two answers
+# differ is gone and IMAGE is a constant now, so this asserts a property that has become
+# structural — which is the right direction for it to move, not a reason to delete it.
 shim_new
 launcher >/dev/null 2>&1
 out="$(launcher doctor)"
@@ -523,15 +486,6 @@ assert_says_not "doctor:does-not-cry-stale-when-config-matches" "STALE" "$out"
 # Whatever doctor says has to agree with what a real launch decides, or one of the two is
 # lying to the student.
 assert_says_not "doctor:agrees-with-the-launch-path" "settings have changed" "$(launcher)"
-
-# Again with a pinned image, so the fix is not accidentally dev-mode-only.
-shim_new
-cp "$COPY/.config/container.args" "$SHIM/ca.bak"
-edit_sub "$COPY/.config/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:2222'
-launcher >/dev/null 2>&1
-assert_says "doctor:matching-config-with-a-pinned-image" "matches container.args" \
-            "$(launcher doctor)"
-cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 
 # And drift must still be reported when it is real.
 shim_new
@@ -699,19 +653,18 @@ launcher_pty_silent_stop
 # whole value — the prompt has to mean "there is something here".
 #
 # Two things are arranged so a shim launch has nothing to say: an ssh that succeeds, so the
-# tunnel does not fail, and a pinned image. The pin used to be here to suppress the dev-image
-# advisory, which no longer exists; it still earns its place, because a pinned IMAGE is also
-# what skips the stale-recipe check, and that check is the other thing that can speak up.
+# tunnel does not fail, and an image whose recipe label matches the files on disk, so the
+# stale-recipe check has nothing to speak up about. A pinned IMAGE used to do that second job
+# by skipping the check outright; there is no pin any more, so the image is BUILT, which is
+# both how the label actually gets onto it and what a student's own machine does.
 shim_new
 shim_fake_ssh
 shim_set exec_out "SHELL-OPENED"
-cp "$COPY/.config/container.args" "$SHIM/ca.bak"
-edit_sub "$COPY/.config/container.args" '^IMAGE=.*' 'IMAGE=ghcr.io/example/cs193v@sha256:3333'
+launcher --build >/dev/null 2>&1
 out="$(launcher_tty 'exit\n' | strip_ansi)"
 assert_says_not "ack:a-quiet-launch-warns-about-nothing" "NOTE:" "$out"
 assert_says_not "ack:a-quiet-launch-does-not-stop" "Press ENTER to continue" "$out"
 assert_contains "ack:a-quiet-launch-still-opens-the-shell" "SHELL-OPENED" "$out"
-cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 
 # Warning and prompting are separate: the verbs warn too, and they return to the student's
 # own shell with their output intact, so stopping them would be a pause for nothing.
@@ -733,7 +686,7 @@ assert_says "args:missing-file-refused" "container.args is missing" \
 # "ARGS[@]: unbound variable" from bash.
 shim_new
 cp "$COPY/.config/container.args" "$SHIM/ca.bak"
-printf '# every line here is a comment\n# and nothing else\nIMAGE=\n' > "$COPY/.config/container.args"
+printf '# every line here is a comment\n# and nothing else\n' > "$COPY/.config/container.args"
 out="$(launcher --dev-print-command)"
 assert_not_contains "args:comment-only-no-unbound-variable" "unbound variable" "$out"
 assert_not_contains "args:comment-only-no-bash-error"       "cs193v: line"     "$out"
@@ -745,7 +698,7 @@ cp "$SHIM/ca.bak" "$COPY/.config/container.args"
 # Blank lines, extra whitespace and inline comments must all be tolerated.
 shim_new
 cp "$COPY/.config/container.args" "$SHIM/ca.bak"
-printf 'IMAGE=\n\n   \n   --network=pasta   # trailing comment\n\n-e FOO=bar\n' \
+printf '\n   \n   --network=pasta   # trailing comment\n\n-e FOO=bar\n' \
     > "$COPY/.config/container.args"
 line="$(launcher --dev-print-command)"
 assert_contains "args:whitespace-tolerated" "--network=pasta" "$line"
@@ -770,6 +723,17 @@ shim_set state absent
 COPY="$(repo_copy)"
 LAUNCHER_DIR="$COPY"
 out="$(launcher --build)"
+
+# --- what it DOES, before what it shows ----------------------------------------
+# These three moved here from the deleted --update tier, which is where they used to live.
+# --build is the only path to a new image now, so this is the only place they can live.
+#
+# The label is the load-bearing one: without it nothing downstream can tell a stale image from
+# a current one — see ensure_container and doctor — and a bare `podman build` produces an
+# image without it, which is exactly the hazard CLAUDE.md warns staff about.
+assert_eq "build:builds"                  "1" "$(shim_count '^build ')"
+assert_eq "build:creates-the-container"   "1" "$(shim_count '^run ')"
+assert_contains "build:labels-the-recipe" "cs193v.buildhash=" "$(shim_log | grep '^build ')"
 
 # --- #23: podman's own output must not be what the student reads ---------------
 # The needle is the COMMAND TEXT, not the word STEP: it is the shell being echoed back --
