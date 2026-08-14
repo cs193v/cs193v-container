@@ -249,9 +249,9 @@ for n, l in enumerate(box):
 # times" and "the bar appears once, updated 23 times" are the same bytes and completely
 # different screens. Assertions about a redrawn display have to be made against the screen.
 #
-# Replays the five things this launcher actually emits: \r (column 0), \n (new line), ESC[K
-# (erase to end of line) and ESC[nA / ESC[nB (cursor up and down). Other CSI sequences are
-# colour and are dropped.
+# Replays the six things this launcher actually emits: \r (column 0), \n (new line), ESC[K
+# (erase to end of line), ESC[J (erase to end of SCREEN) and ESC[nA / ESC[nB (cursor up and
+# down). Other CSI sequences are colour and are dropped.
 #
 # THE CURSOR MOVES ARE NOT OPTIONAL TO MODEL, and getting this wrong fails in the reassuring
 # direction. The progress meter is a two-row block that redraws by stepping back up to its
@@ -259,6 +259,12 @@ for n, l in enumerate(box):
 # line -- would replay every frame as a fresh pair of rows and then report a screen full of
 # bars that no student ever saw. Every screen assertion in 30-launcher-shim.sh would go on
 # passing against it.
+#
+# ESC[J IS THE SAME HAZARD IN THE SAME DIRECTION. It is how the build's output box is taken off
+# the screen -- on success, on failure, and whenever a resize makes the block shorter -- so a
+# replayer that dropped it would keep every row the launcher had just erased and report a screen
+# with a box on it that a student never sees. An assertion that the box is GONE by the end would
+# fail loudly, which is the good case; one that counts the boxes on screen would simply lie.
 #
 # So rows stay ADDRESSABLE rather than append-only: the cursor is (row, col), and writing to
 # a row that has already been written overwrites it, which is what a terminal does.
@@ -271,6 +277,10 @@ raw = sys.stdin.buffer.read().decode("utf-8", "replace")
 raw = raw.replace("\x1b[K", "\x00")
 raw = re.sub(r"\x1b\[([0-9]*)A", lambda m: "\x01" * max(1, int(m.group(1) or 1)), raw)
 raw = re.sub(r"\x1b\[([0-9]*)B", lambda m: "\x02" * max(1, int(m.group(1) or 1)), raw)
+# ESC[J and ESC[0J are the same thing, erase-to-end-of-screen, and the launcher emits the short
+# form. The other parameters (1J, 2J) are not emitted and deliberately fall through to be
+# dropped, so that a future one cannot be silently modelled as the wrong thing.
+raw = re.sub(r"\x1b\[0?J", "\x03", raw)
 # The `?` is for PRIVATE-MODE sequences, and it is load-bearing: the meter hides the cursor
 # with ESC[?25l and restores it with ESC[?25h, and without `?` in this class neither matches --
 # so both would survive into the "rendered screen" as literal garbage and break assertions
@@ -293,6 +303,9 @@ for ch in raw:
         row += 1; at(row)
     elif ch == "\x00":                 # ESC[K -- erase from the cursor to end of line
         del at(row)[col:]
+    elif ch == "\x03":                 # ESC[J -- erase from the cursor to end of screen
+        del at(row)[col:]
+        del rows[row + 1:]
     else:
         cur = at(row)
         while len(cur) < col: cur.append(" ")

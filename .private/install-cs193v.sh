@@ -221,10 +221,34 @@ box() {
         # contain whatever the messages do.
         BEGIN {
             lim = w - 4
+            # Built rather than passed in, so this function stays copy-pasteable into
+            # install-cs193v.sh with nothing else to keep in step. See the note above.
+            esc = sprintf("%c", 27)
             printf "%s%s┏━━ %s %s┓%s\n", ind, red, title, rule(w - 6 - dw(title)), off
         }
-        # A tab has no defined width inside a box, and podman emits them.
-        { t = $0; gsub(/\t/, " ", t); put(t) }
+        # A tab has no defined width inside a box, and podman emits them. So do COLOUR
+        # SEQUENCES and CARRIAGE RETURNS, and those two are worse than untidy, because this box
+        # interpolates raw podman output verbatim -- err.build-failed carries the tail of
+        # $BUILD_LOG, and err.create-failed the whole of a failure:
+        #
+        #   * dw() measures a colour sequence as the columns its BYTES would occupy, so a line
+        #     carrying one comes out 11 columns short and takes the right wall in with it;
+        #   * a \r sends the rest of the row back to column 0 on the way to the terminal, over
+        #     the wall this has already drawn.
+        #
+        # Found by feeding a realistic build log to it rather than by reading one: apt, npm and
+        # the Playwright download all emit both, and neither can appear in messages.txt where
+        # somebody might have noticed it.
+        {
+            t = $0
+            gsub(esc "\\[[0-9;?]*[A-Za-z]", "", t)
+            gsub(esc ".", "", t)
+            # Only the last segment of a self-overwriting line was ever on a screen.
+            n = split(t, seg, "\r")
+            if (n > 1) { t = ""; for (i = n; i >= 1; i--) if (seg[i] != "") { t = seg[i]; break } }
+            gsub(/\t/, " ", t)
+            put(t)
+        }
         END { printf "%s%s┗%s┛%s\n", ind, red, rule(w - 2), off }
     '
 }

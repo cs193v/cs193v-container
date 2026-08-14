@@ -169,10 +169,11 @@ completed layers, which is exactly what `--no-cache` throws away.
 
 #### The bar is two rows, and it names the step it is on
 
-What a student watching `--rebuild` build something sees is one block of two rows: bar, count
-and — during a retry — a right-aligned `(retrying: 1/2)` on the first; the name of the current
-step on the second. It ends on a green `✓` with the caption row erased, or a red `✗` with the bar
-frozen where it stopped and the failed step still named beneath it.
+What a student watching `--rebuild` build something sees is one block. Bar, count and — during a
+retry — a right-aligned `(retrying: 1/2)` on the first row; the name of the current step on the
+second; and under those a box holding the last eight lines podman printed (next section). It ends
+on a green `✓` with the caption row erased, or a red `✗` with the bar frozen where it stopped and
+the failed step still named beneath it.
 
 The cursor is hidden for the duration (`ESC[?25l`) and restored in `meter_stop` and again from
 `transient_cleanup`. Without that it strobes between the two rows at 10 Hz on any terminal with
@@ -214,6 +215,94 @@ which scrolled the meter up the screen and put a warning a student cannot act on
 a build that then succeeded. The marker says it in place, and the bar **holds at the step
 that failed** while podman replays the cached steps ahead of it — that work is done and on
 disk, so counting it again from zero would tell a student they had lost time they had not.
+
+#### And under it, the last eight lines podman printed
+
+The bar is honest and it is calm, and it is also **silent**: a bar, a count and a step name,
+none of which change on a human timescale during the four minutes when apt, npm, Playwright and
+Chromium are the ones doing the work. So the block ends in a dim, untitled box — eight rows of
+whatever podman last said, refreshed three times a second. It is there for reassurance and for
+interest. It is not the diagnosis: that is still `$BUILD_LOG` and the `tail -n 12` the STOP box
+carries on failure.
+
+**The animator tails the log; the reader does not feed it.** `tee` writes `$BUILD_LOG` before
+`build_progress` reads the same stream, so `meter_tail_box` just runs `tail` on that file. The
+alternative — a ring buffer inside `build_progress`'s awk — has to rewrite a state file on
+*every* input line, because awk has no portable clock to throttle with (`systime()` is absent
+from BSD awk) and going stale during a 90-second step is exactly the failure to avoid. It would
+also need a sentinel against torn reads, and it could never learn a new width on `WINCH`.
+Tailing the log costs two `exec`s per refresh and buys all three.
+
+It also means **the box shows the base-image download chatter that the meter deliberately
+hides**. `build_progress` collapses `Copying blob …` to a single note because podman emits a line
+per layer per percentage; in the box those byte counts are the best thing on the screen, because
+the download is the longest phase and the one with nothing else to look at.
+
+Things worth knowing before changing any of it:
+
+- **One process draws the block.** The animator owns the terminal at 10 Hz and overdraws anything
+  else within 100 ms — the reason staff text goes to `$BUILD_NOTE` rather than to stdout. A
+  second writer for the box would be that bug with a new name.
+- **The body is printable ASCII only.** With no multibyte characters in it, awk's `length()` *is*
+  the display width and `substr()` cannot slice a character in half, so none of `box()`'s
+  `dw()`/`dsub()` arithmetic is needed in a renderer that runs three times a second. It costs a
+  stray `✔` out of npm and it buys a box that seven third-party tools cannot break.
+- **`box()` was not extended, deliberately.** It wraps rather than cuts, is as tall as its
+  content, and is duplicated verbatim into `install-cs193v.sh` with `20-messages.sh` asserting
+  the copies match. The live box cuts, is a height set by the terminal, and is redrawn in place.
+  Both still emit every glyph from a `printf`, which is what `box:*-draws-the-box-in-one-place`
+  checks — box art typed into a string anywhere else is the issue #21 bug growing back.
+- **`box()` sanitises now too**, and that was a live bug rather than a tidy-up: it interpolates
+  raw podman output through `err.build-failed`, and a colour sequence or a `\r` in those lines
+  broke the right wall on every failure late enough to have one. ERRORS.md B19 has the detail.
+  Both boxes strip the same two things for the same reason; only the live one is ASCII-only.
+- **Exactly one kind of line is dropped**, and it is not podman's: anything starting `cs193v:`.
+  `build_note_fold` appends those to the same log while the meter is still running, and they are
+  addressed to staff — they report that the launcher's own parse of the Containerfile has drifted,
+  which is neither something a student can act on nor something podman said. Blank lines get a row
+  like anything else, so a row here and a line in `$BUILD_LOG` can still be counted against each
+  other; the cost is that a line which was *only* a colour sequence now spends a row too.
+- **Commit ids are deliberately NOT dropped.** They are 22 of the 134 lines of a warm build and
+  keeping them costs half the window — eight rows reach back to `STEP 22` rather than `STEP 19`.
+  That price was considered and paid: the box is a window onto what podman said, not an edited
+  version of it, and a student reading a line out to staff has to be able to find that line in
+  the log. `30-launcher-shim.sh :: tailbox:shows-podmans-*` pins both shapes podman prints them
+  in, because a filter that came back would come back knowing only about the `--> ` one.
+- **`build_image` clears `$BUILD_LOG` before starting the meter.** The log deliberately outlives
+  the run that wrote it, so without that a student re-running `--build` after a failure would
+  spend the first moment of the new build reading the end of the old one.
+- **It shrinks before it goes.** `min(8, LINES - 8)` body rows, `min(BOX_W, COLS - 3)` wide, and
+  no box at all below four rows or 44 columns — which is exactly the two-row block that shipped
+  before it existed. The three-column margin rather than two is not arithmetic sloppiness: a box
+  drawn to the last cell of a row leaves some terminals holding a pending wrap, and then the next
+  frame's cursor move lands a row low and smears the block permanently.
+- **Both endings erase it**, with the `ESC[J` that every frame already ends with. On success the
+  block collapses past it to one line; on failure the same lines are about to appear inside the
+  STOP box, wrapped rather than cut and with the rest of the log behind them. Two boxes saying
+  nearly the same thing is worse than one.
+- **It freezes for the last step.** Creating the container takes 10–60 s after `podman build` has
+  returned, so the box sits on `COMMIT` / `Successfully tagged` while the caption says "Setting up
+  the course container...". That reads as a build that is done, which it is, and it costs no
+  ten-row collapse in the middle of the block.
+
+The frame protocol changed to carry it, and the changes are the interesting part:
+
+- **`METER_ROW` says where the cursor is**, and every frame steps up `METER_ROW - 1` rows to
+  reach row 1. Still relative moves only: the block scrolls when it sits at the bottom of the
+  screen, and absolute coordinates would keep pointing at where it used to be.
+- **Every frame ends with `ESC[J`.** That is what makes the region self-healing — a resize that
+  shrinks the box, or the box going away, would otherwise leave its old rows stranded below.
+- **`meter_stop` waits for the animator instead of killing it.** The animator leaves the cursor
+  on row 1 on its way out, which is the precondition for redrawing the closing frame. Killing it
+  left the cursor wherever that frame had reached, and the `ESC[1A` that used to be there assumed
+  the end of row 2 — a one-row error when it was wrong, survivable at two rows tall and an
+  eleven-row one now.
+- **A Ctrl-C parks the cursor below the block.** The EXIT trap kills the animator and then waits
+  for it, so its `TERM` handler gets to run; without the wait the shell prompt wins the race and
+  lands through the middle of the block.
+- **`render_pty` had to learn `ESC[J`** or every new screen assertion would have passed
+  vacuously, which is the same hazard `assert.sh` already records for `ESC[nA`. A replayer that
+  drops it keeps every row the launcher just erased.
 
 ### Two people on one computer: `CS193V_INSTANCE`
 

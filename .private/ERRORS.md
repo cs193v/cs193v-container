@@ -899,6 +899,56 @@ Containerfile. What is worth recording beyond the UI:
   that was correct but held for 40 ms failed an assertion about a display working perfectly.
   Piped output emits one line per step, by the step, so every step is in it exactly once.
 
+### ~~B19~~. Four minutes of a bar that could not say what was *happening* — **FIXED**
+
+B18 gave every step a name. What a student watching a cold build still had was a name that
+changed a dozen times in four minutes over a bar that moved a dozen times: honest, calm, and
+indistinguishable from a hang during the two-minute stretches when apt or Chromium own the
+machine. Meanwhile podman was saying something every few hundred milliseconds, into
+`$BUILD_LOG`, where nobody reads it until something has already gone wrong.
+
+**Fixed as:** the block ends in a dim, untitled box holding the last eight lines podman printed,
+refreshed three times a second. The animator tails `$BUILD_LOG` — `tee` already writes it before
+`build_progress` reads the same stream — rather than being fed by the reader, which has no
+portable clock to throttle a per-line state file with (`systime()` is absent from BSD awk) and
+could never learn a new width on `WINCH`. The design is in `.private/README.md`.
+
+Three things found on the way, all worth more than the feature:
+
+- **The STOP box has been rendering broken since the failing output was moved inside it.** B17
+  put `tail -n 12 "$BUILD_LOG"` into `err.build-failed`, which means `box()` interpolates *raw
+  podman output* — and `box()` stripped tabs and nothing else. Fed a realistic build log it comes
+  apart two ways: `dw()` measures a colour sequence as the columns its **bytes** would occupy, so
+  a line carrying one is padded 11 columns short and drags the right wall in with it; and a `\r`
+  sends the rest of the row back to column 0 on the way to the terminal, straight over the wall
+  already drawn. apt, npm and the Playwright download all emit both, so this is the *normal* case
+  for a build that failed late, not an exotic one. It survived because no line in `messages.txt`
+  can contain either, so nothing anybody read by eye would ever show it — it needed a fixture
+  built out of what podman actually prints. Both are stripped now, in both copies of `box()`,
+  which also covers `err.create-failed` and `err.pull-failed` interpolating a whole failure.
+
+- **`meter_stop` had been racing the animator all along.** It killed the animator and then
+  emitted `ESC[1A`, which assumes the cursor is at the end of row 2 — true only when the kill
+  landed while the animator was in its `sleep`, which is very nearly always. The rest of the time
+  the closing frame went a row too high and overwrote whatever was above the block. Nobody had
+  seen it because at two rows tall the damage was one row of a bar that was being redrawn anyway;
+  at twelve rows it would be up to eleven rows of it. The animator now exits **cooperatively**
+  when the state file goes and leaves the cursor on row 1 on the way out — a postcondition the
+  parent can rely on without knowing how tall the block is. It cannot know: the height comes from
+  the terminal size, `WINCH` is handled in the animator, and the parent is blocked inside podman
+  for the entire four minutes during which a student might resize the window.
+- **`render_pty` would have passed every new assertion vacuously, for the third time.** It models
+  the sequences it has been taught and silently strips the rest, and the box is taken off the
+  screen with `ESC[J`. Unmodelled, that erase does nothing to the replayed screen — so "the box is
+  gone by the end" would have read a screen that still had it, and "how many boxes are on screen"
+  would have quietly answered two. Failing in the reassuring direction, in the same file, in the
+  same way as B18's `ESC[1A` and the two vacuous assertions before it. `ESC[J` is modelled now.
+
+One deliberate reversal, recorded so that nobody later reads it as a slip: **the box shows the
+`Copying blob` chatter that `build_progress` collapses to a single note.** Per-layer,
+per-percentage lines are noise beside a bar, and they are also the only thing moving during the
+base-image download — the longest phase of a cold install and the one with nothing else to watch.
+
 ---
 
 ## C. Not run, and why

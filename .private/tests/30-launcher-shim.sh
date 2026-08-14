@@ -1249,7 +1249,14 @@ shim_set state absent
 shim_set image_exists no
 shim_set build_steps 12
 shim_set build_die_at 7
-shim_set build_delay 0.15
+# THE DELAY IS WHAT MAKES THE MARKER CATCHABLE, and 0.15 was not enough. The marker is only in
+# the state file from the start of the retry until the first step PAST the one that failed, and
+# the cached steps ahead of it replay instantly -- so that window is one step's delay long, and
+# at 0.15 it was a single frame out of twenty. That frame is missed whenever the machine is busy
+# enough to stretch the animator's interval, which is exactly what running five suites at once
+# does. Doubled, so the window spans three frames and the assertion is about the display rather
+# than about the load average.
+shim_set build_delay 0.3
 raw="$(launcher_tty '' --rebuild)"
 screen="$(printf '%s' "$raw" | render_pty)"
 pairs="$(printf '%s' "$raw" | frame_pairs)"
@@ -1336,3 +1343,221 @@ assert_match     "build-failed:marks-the-block-as-failed" '✗' "$screen"
 assert_not_match "build-failed:bar-is-not-drawn-complete" '\] +7/7' "$screen"
 assert_match     "build-failed:bar-stops-where-it-stopped" '✗ .*\] +6/7' "$screen"
 assert_not_match "build-failed:no-spinner-frame-left-behind" '[⣾⣽⣻⢿⡿⣟⣯⣷] .*\] +6/7' "$screen"
+
+# ─── the build's output box ────────────────────────────────────────────────────
+# The block has a third element now: a dim box under the caption row holding the last eight lines
+# podman printed. The meter was honest but SILENT -- a bar, a count and a step name, none of
+# which change on a human timescale during the four minutes when apt, npm and Chromium are the
+# ones doing the work.
+#
+# ASSERTED ON A MID-BUILD SCREEN, which needs its own helper: both endings take the box away, so
+# the final screen -- the form every other screen assertion in this file reads -- cannot answer a
+# single question about it. Frames end with ESC[J (see meter_draw) and the LAST of those is
+# meter_stop closing the block, so the frame before it is the last one that still had a box on
+# the screen. Derived from the protocol rather than by hunting for box art, which on the failure
+# path would find the STOP box instead.
+render_pty_mid() {                    # transcript on stdin -> the prefix through the last box frame
+    python3 -c '
+import sys
+raw = sys.stdin.buffer.read()
+mark = b"\x1b[J"
+parts = raw.split(mark)
+keep = parts[:-2] if len(parts) > 2 else parts[:1]
+sys.stdout.buffer.write(mark.join(keep) + mark)'
+}
+
+# THE TITLELESS LID IS THIS BOX'S SIGNATURE, and it is what tells it apart from a message box on
+# the same screen. box() draws "┏━━ STOP " and "┏━━ Build Successful! "; this one has no title, so
+# a run of bars straight after the corner can only be this.
+TAILBOX_LID='┏━━━━'
+
+# A 300-column line, built without seq or printf tricks so it reads the same on a Mac.
+tailbox_long='LONG:'
+while [ "${#tailbox_long}" -lt 300 ]; do tailbox_long="${tailbox_long}0123456789"; done
+
+# THE LAST LINE IS NEVER EMITTED: shim_set writes the value with no trailing newline and the fake
+# podman reads it with `while read`, which drops a final unterminated line. "Successfully tagged"
+# is the deliberate sacrifice, and it leaves COMMIT as the newest line on the screen.
+#
+# The eight rows the box should end up holding are, oldest first: the tab line, a BLANK row, the
+# coloured line, the progress line, the unicode line, the long line, the marker and COMMIT.
+#
+# NO SYNTHETIC `cs193v:` LINE IN HERE, and that is the point rather than an omission. This fixture
+# already provokes a REAL one -- its `STEP 1/3: FROM ubuntu:26.04` is not the instruction the
+# launcher parsed, so the label check fires and build_note_fold appends the genuine note to the
+# log while the meter is still running. That is the only way those lines ever occur: appended at
+# the END, behind a blank line the note itself supplies. An inline one, which is what this had at
+# first, cannot be told apart from a blank podman printed and so tested the wrong thing.
+tailbox_out="$(printf '%s\n' \
+    'STEP 1/3: FROM ubuntu:26.04' \
+    'Trying to pull docker.io/library/ubuntu:26.04...' \
+    'Copying blob sha256:aaaa' \
+    'STEP 2/3: RUN apt-get install -y something' \
+    'STEP 3/3: LABEL x=y' \
+    "$(printf 'a\ttab\tseparated\tline')" \
+    '' \
+    "$(printf '\033[1;32m+ apt-get install -y nodejs\033[0m')" \
+    "$(printf 'Downloading |###   | 30%% of 167.7 MiB\rDownloading |######| 100%% of 167.7 MiB')" \
+    'unicode ✔ check and ─ dash' \
+    "$tailbox_long" \
+    'ZZTOPMARKER is the newest line of the build' \
+    'COMMIT localhost/cs193v:local' \
+    'Successfully tagged localhost/cs193v:local')"
+
+shim_new
+shim_set state absent
+shim_set build_delay 0.05
+shim_set run_delay 0.3
+shim_set build_out "$tailbox_out"
+raw="$(launcher_tty '' --rebuild --no-cache)"
+mid="$(printf '%s' "$raw" | render_pty_mid | render_pty)"
+
+assert_contains "tailbox:appears-during-the-build" "$TAILBOX_LID" "$mid"
+assert_contains "tailbox:shows-the-newest-line" 'ZZTOPMARKER is the newest line' "$mid"
+# A BLANK LINE GETS A ROW rather than being swallowed to save one, so that a row here and a line
+# in $BUILD_LOG can still be counted against each other. The window is full in this fixture, so an
+# all-spaces body row can only be the blank line rendered -- it cannot be padding.
+blanks="$(printf '%s\n' "$mid" | grep -c '^  ┃ *┃$' || true)"
+assert_eq "tailbox:blank-lines-get-a-row-of-their-own" "1" "${blanks:-0}"
+
+# --- what the sanitiser has to survive ----------------------------------------
+assert_contains     "tailbox:tabs-become-spaces" 'a tab separated line' "$mid"
+assert_contains     "tailbox:colour-is-stripped-but-not-the-words" '+ apt-get install -y nodejs' "$mid"
+# The half that catches getting the ORDER wrong: filter the non-ASCII first and the ESC goes
+# while its parameters stay, leaving a literal "[1;32mdone" on the screen.
+assert_not_contains "tailbox:no-escape-parameters-survive" '1;32m' "$mid"
+assert_contains     "tailbox:progress-line-shows-its-last-segment" '100% of 167.7 MiB' "$mid"
+assert_not_contains "tailbox:progress-line-drops-what-it-overwrote" '30% of 167.7 MiB' "$mid"
+assert_contains     "tailbox:non-ascii-is-dropped-not-mangled" 'check and' "$mid"
+assert_not_contains "tailbox:no-multibyte-reaches-the-box-body" '✔' "$mid"
+# Cut rather than wrapped. A 300-column line that became two rows would push every row above it
+# up the screen, once per refresh.
+assert_contains     "tailbox:long-lines-are-cut" '…' "$mid"
+
+# --- what must not be in it ---------------------------------------------------
+# The REAL note this fixture provokes, not a stand-in for one. It is the launcher talking about
+# its own parse, addressed to staff, and it reaches them through the log either way.
+assert_not_contains "tailbox:staff-notes-are-not-shown" \
+                    'is not the instruction the launcher parsed' "$mid"
+assert_not_contains "tailbox:staff-notes-leave-no-cs193v-prefix" 'cs193v: ' "$mid"
+# AND NOT THE BLANK LINE THE NOTE BRINGS WITH IT. That newline is deliberate -- podman does not
+# always terminate its last line, so without it the note would be glued onto podman output in the
+# log staff read -- but it belongs to our text. Left in, it is the NEWEST line by the time
+# build_note_fold has run, so the box would end on a blank row and give up a row of real content on
+# every build where the check fires. Pinned by the row count above being 1 rather than 2.
+
+# --- podman's own words, hashes included --------------------------------------
+# COMMIT IDS STAY, and this is pinned rather than left to chance. They are 22 of the 134 lines of
+# a warm build and keeping them costs half the window -- eight rows reach back to STEP 22 instead
+# of STEP 19 -- but the box is a window onto what podman said rather than an edited version of it,
+# and a student reading a line out to staff has to be able to find it in the log.
+#
+# BOTH SHAPES, because podman prints them two ways: "--> <hash>" between steps, and the finished
+# image id on a line of its own at the end. A filter that came back would most likely come back
+# knowing only about the arrow, which is exactly how the first version of this went.
+#
+# Its own fixture: the window in the one above is eight rows and already has eight things to say.
+shim_new
+shim_set state absent
+shim_set build_delay 0.05
+shim_set build_out "$(printf '%s\n' \
+    'STEP 1/2: FROM ubuntu:26.04' \
+    'STEP 2/2: LABEL x=y' \
+    '--> Using cache abcdef123456' \
+    '--> 67c2a5fbf5f5' \
+    'COMMIT localhost/cs193v:local' \
+    'c78dcba8632d226f7d460bd4a70a14f856f5889dd0f5a490fcb686ea4e53462b' \
+    'Successfully tagged localhost/cs193v:local')"
+hashes="$(printf '%s' "$(launcher_tty '' --rebuild --no-cache)" | render_pty_mid | render_pty)"
+assert_contains "tailbox:shows-podmans-short-commit-ids" '--> 67c2a5fbf5f5' "$hashes"
+assert_contains "tailbox:shows-podmans-image-id" 'c78dcba8632d226f7d460bd4' "$hashes"
+# On a warm build and during a retry's cache replay these are ALL there is, and they are what
+# explains the bar racing back up to the step that failed.
+assert_contains "tailbox:shows-cache-lines" '--> Using cache abcdef123456' "$hashes"
+
+# --- it is a box, and it is part of the block ---------------------------------
+# Eight rows whatever the log held, which is what keeps the two rows above it still.
+rows="$(printf '%s\n' "$mid" | grep -c '^  ┃' || true)"
+assert_eq "tailbox:is-eight-rows" "8" "${rows:-0}"
+# One box, not one per frame: the block is redrawn in place, and this is the assertion that
+# render_pty's ESC[nA and ESC[J modelling exists to make meaningful.
+lids="$(printf '%s\n' "$mid" | grep -c '┏' || true)"
+assert_eq "tailbox:exactly-one-box-on-screen" "1" "${lids:-0}"
+assert_eq "tailbox:rows-line-up" "" "$(printf '%s\n' "$mid" | box_problems)"
+# Two rows under the bar, with the caption row between them -- one block, not a box that happens
+# to be somewhere on the same screen.
+gap="$(printf '%s\n' "$mid" | awk '/\] +[0-9]+\/[0-9]+/ { bar = NR } /┏/ { lid = NR } END { print (bar && lid) ? lid - bar : "nothing found" }')"
+assert_eq "tailbox:lid-sits-two-rows-under-the-bar" "2" "$gap"
+
+# --- both endings take it away ------------------------------------------------
+screen="$(printf '%s' "$raw" | render_pty)"
+assert_not_contains "tailbox:gone-after-a-successful-build" "$TAILBOX_LID" "$screen"
+assert_not_contains "tailbox:no-build-output-survives-the-collapse" 'ZZTOPMARKER' "$screen"
+# The box that IS left is the green one, and it is still square: the ESC[J that erased eight rows
+# had to stop at the right one.
+assert_contains "tailbox:the-box-left-after-success-is-the-success-box" 'Build Successful' "$screen"
+assert_eq "tailbox:success-box-is-intact" "" "$(printf '%s\n' "$screen" | box_problems)"
+
+shim_new
+shim_set state absent
+shim_set build_delay 0.05
+shim_set build_out "$tailbox_out"
+shim_set build_rc 1
+raw="$(launcher_tty '' --rebuild --no-cache)"
+screen="$(printf '%s' "$raw" | render_pty)"
+assert_not_contains "tailbox:gone-when-the-build-fails" "$TAILBOX_LID" "$screen"
+assert_eq "tailbox:stop-box-is-intact" "" "$(printf '%s\n' "$screen" | box_problems)"
+# AND THE FAILING LINES ARE STILL REPORTED. Taking the live box away on the failure path is only
+# affordable because err.build-failed carries the tail of the log inside the STOP box -- wrapped
+# rather than cut, and with the rest of the log behind it. If that ever stopped being true, this
+# change would have removed the diagnosis rather than a duplicate of it.
+assert_contains "tailbox:failing-lines-are-still-reported-in-the-stop-box" \
+                'ZZTOPMARKER' "$screen"
+
+# --- not a terminal, no box ---------------------------------------------------
+# The piped form is what staff ask a student to send. A \r-redrawn box in it would be unreadable,
+# and podman's raw voice is what issue #23 took out of it in the first place.
+#
+# A FRESH SHIM, and that is not tidiness: reusing the one above leaves build_rc at 1, the build
+# fails, and err.build-failed then carries the tail of the log -- podman output, legitimately, in
+# the STOP box. The assertion below would fail against a launcher that was behaving perfectly.
+shim_new
+shim_set state absent
+shim_set build_out "$tailbox_out"
+out="$(launcher --rebuild --no-cache)"
+assert_not_contains "tailbox:not-drawn-when-piped" "$TAILBOX_LID" "$out"
+assert_not_contains "tailbox:no-build-output-when-piped" 'ZZTOPMARKER' "$out"
+
+# --- terminals too small for it ------------------------------------------------
+# THE SIZE COMES FROM meter_fit's FALLBACK CHAIN, driven by a tput that fails. script starts its
+# pty with no window size at all -- `stty size` reports 0 0 -- so tput answers from terminfo and
+# every other test here silently gets 80x24. Breaking tput moves the answer to $LINES/$COLUMNS,
+# which is the documented fallback and the only lever that works the same way on a Mac.
+tailbox_at() {                        # tailbox_at ROWS COLS -> the mid-build screen
+    shim_new
+    shim_set state absent
+    shim_set build_delay 0.05
+    shim_set build_out "$tailbox_out"
+    printf '#!/bin/sh\nexit 1\n' > "$SHIM/tput"
+    chmod +x "$SHIM/tput"
+    export LINES="$1" COLUMNS="$2"
+    local t="$(launcher_tty '' --rebuild --no-cache)"
+    unset LINES COLUMNS
+    printf '%s' "$t" | render_pty_mid | render_pty
+}
+
+# 14 rows leaves room for six, not eight: the block stays half the screen rather than all of it.
+mid="$(tailbox_at 14 80)"
+rows="$(printf '%s\n' "$mid" | grep -c '^  ┃' || true)"
+assert_eq "tailbox:shrinks-to-fit-a-short-terminal" "6" "${rows:-0}"
+
+# Below four rows it goes entirely, and what is left is exactly the two-row block that shipped
+# before it existed -- not a broken box, and not a block that has eaten the whole screen.
+mid="$(tailbox_at 10 80)"
+assert_not_contains "tailbox:absent-on-a-very-short-terminal" "$TAILBOX_LID" "$mid"
+assert_match        "tailbox:bar-survives-a-very-short-terminal" '\] +[0-9]+/[0-9]+' "$mid"
+
+# Same at the other edge: under 44 columns there is no text field worth drawing walls around.
+mid="$(tailbox_at 24 46)"
+assert_not_contains "tailbox:absent-on-a-narrow-terminal" "$TAILBOX_LID" "$mid"
+assert_match        "tailbox:bar-survives-a-narrow-terminal" '\] +[0-9]+/[0-9]+' "$mid"
