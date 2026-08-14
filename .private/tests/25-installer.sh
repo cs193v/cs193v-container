@@ -160,13 +160,10 @@ assert_file "install:local-args-written"     "$DEST/.config/local.args"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 
-# local.args must carry the cap AND the matching env var the in-container milestone check
-# reads, computed from what podman reports rather than from /proc.
+# local.args must carry the memory cap, computed from what podman reports rather than from
+# /proc -- which inside a container reports the host's RAM, not the cgroup limit.
 assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/.config/local.args"
-assert_ok "install:local-args-has-memory-env" grep -q 'CS193V_MEMORY_MB=' "$DEST/.config/local.args"
 cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/.config/local.args")"
-env_mb="$(sed -n 's/^-e CS193V_MEMORY_MB=\([0-9]*\)/\1/p' "$DEST/.config/local.args")"
-assert_eq "install:cap-and-env-agree" "$cap" "$env_mb"
 # The fake podman reports 8 GiB; the linux formula reserves 35% (min 3072) -> 5120.
 assert_eq "install:cap-matches-the-formula" "5120" "$cap"
 assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/.config/local.args"

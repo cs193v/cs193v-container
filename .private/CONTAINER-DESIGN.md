@@ -447,7 +447,7 @@ actually are.
 ./cs193v --rebuild --logout fresh everything, including logging out
 ```
 
-Inside the container: `ports` and `am-i-in-a-container`.
+Inside the container: `ports`.
 
 ---
 

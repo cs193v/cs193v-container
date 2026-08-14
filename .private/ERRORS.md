@@ -243,14 +243,6 @@ On Windows this design puts `projects/` inside the WSL distro's **ext4** home
 sentence is right for macOS and wrong for the shipped Windows layout — and it matters,
 because it is offered as the reason a Mac student's `import './Button'` bug appears later.
 
-### B4. `am-i-in-a-container` does not check anything
-
-It unconditionally prints "Yes, you are inside the CS193V container!". Deliberate per its
-own comment, and the guides only ever run it inside — but the name is a question and the
-answer is hardcoded, so a student who runs it on their host by mistake is actively
-misinformed. A one-line `[ -f /run/.containerenv ] || [ -f /.dockerenv ]` guard would fix
-it without changing the happy path.
-
 ### ~~B6~~. `man git` exits 0 and tells students to run `unminimize` — **FIXED**
 
 Ubuntu's minimized image left a `/usr/bin/man` stub that **exits 0** and prints:
@@ -1130,8 +1122,8 @@ claim verbatim. AppArmor is not confining this container.
 
 ### D7. `/proc` is not cgroup-aware
 
-`free=3398MB cgroup=1024MB`. Confirms why `CS193V_MEMORY_MB` has to be passed in — a student
-running `free` inside sees the host's RAM, not their limit.
+`free=3398MB cgroup=1024MB`. A student running `free` inside sees the host's RAM, not their
+limit, so nothing in `/proc` can tell them what their cap actually is.
 
 ### D8. Does `podman start` really ignore new flags?
 

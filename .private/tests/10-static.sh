@@ -24,7 +24,6 @@ assert_ok  "syntax:install"           bash -n $PRIVATE/install-cs193v.sh
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
-assert_ok  "syntax:am-i-in-container"  sh -n $PRIVATE/files/am-i-in-a-container
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ports"             python3 -c "import ast;ast.parse(open('$PRIVATE/files/ports').read())"
 assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
@@ -230,7 +229,7 @@ assert_ok  "welcome:hook-exists" test -f $PRIVATE/files/profile.d/20-cs193v-welc
 assert_contains "welcome:guards-on-interactive-shell" 'case $- in' \
                 "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
 # The $TMUX guard is what keeps the banner out of every new tab. Without it, CTRL+T clears
-# the pane and redraws the box, which is the failure the split above exists to prevent.
+# the pane and greets again, which is the failure the split above exists to prevent.
 assert_contains "welcome:hook-skips-inside-tmux" 'TMUX' \
                 "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
 assert_ok  "welcome:hook-syntax" sh -n $PRIVATE/files/profile.d/20-cs193v-welcome.sh
@@ -856,7 +855,6 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
 # `man something` into a shell error on top of the missing manual page.
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
-                                $PRIVATE/files/am-i-in-a-container \
                                 $PRIVATE/files/man
 # tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
 # meant to stay diffable against it, so local style fixes would cost more than they buy.

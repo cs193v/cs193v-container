@@ -407,8 +407,8 @@ COPY files/ /tmp/cs193v-files/
 #
 # What it does, in order:
 #
-#  1. Installs the helper commands: the $BROWSER stub, the milestone check, the `ports`
-#     diagnostic, the entrypoint, and the three that make up the landing point --
+#  1. Installs the helper commands: the $BROWSER stub, the `ports` diagnostic, the
+#     entrypoint, and the three that make up the landing point --
 #     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
 #     last two are commands rather than inline shell because they now have two callers
 #     each: the tmux path and the plain `bash -l` path. See item 9.
@@ -497,14 +497,13 @@ COPY files/ /tmp/cs193v-files/
 #     tmux-256color terminfo entry from ncurses-term is actually present, since tmux will
 #     not start without it.
 RUN set -eux; \
-    install -m 0755 /tmp/cs193v-files/open-url             /usr/local/bin/open-url; \
-    install -m 0755 /tmp/cs193v-files/am-i-in-a-container  /usr/local/bin/am-i-in-a-container; \
-    install -m 0755 /tmp/cs193v-files/ports                /usr/local/bin/ports; \
-    install -m 0755 /tmp/cs193v-files/entrypoint.sh        /usr/local/bin/cs193v-entrypoint; \
-    install -m 0755 /tmp/cs193v-files/cs193v-shell         /usr/local/bin/cs193v-shell; \
-    install -m 0755 /tmp/cs193v-files/cs193v-welcome       /usr/local/bin/cs193v-welcome; \
-    install -m 0755 /tmp/cs193v-files/cs193v-goodbye       /usr/local/bin/cs193v-goodbye; \
-    install -m 0755 /tmp/cs193v-files/man                  /usr/bin/man; \
+    install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
+    install -m 0755 /tmp/cs193v-files/ports           /usr/local/bin/ports; \
+    install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
+    install -m 0755 /tmp/cs193v-files/cs193v-shell    /usr/local/bin/cs193v-shell; \
+    install -m 0755 /tmp/cs193v-files/cs193v-welcome  /usr/local/bin/cs193v-welcome; \
+    install -m 0755 /tmp/cs193v-files/cs193v-goodbye  /usr/local/bin/cs193v-goodbye; \
+    install -m 0755 /tmp/cs193v-files/man             /usr/bin/man; \
     sh -n /usr/bin/man; \
     test -z "$(man git 2>&1 | grep -F unminimize || true)"; \
     install -d -m 0755 /etc/claude-code; \

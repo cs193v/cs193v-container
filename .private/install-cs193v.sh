@@ -656,7 +656,6 @@ On a Mac, try:  podman machine start"
         note "Tell course staff if builds fail; this machine is tight on memory."
     else
         printf -- '--memory=%sm\n' "$cap_mb" >> "$DIR/.config/local.args"
-        printf -- '-e CS193V_MEMORY_MB=%s\n' "$cap_mb" >> "$DIR/.config/local.args"
         ok "container may use up to ${cap_mb} MB (of ${total_mb} MB)"
     fi
 }

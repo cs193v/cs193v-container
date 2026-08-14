@@ -18,14 +18,16 @@
 # prose lives in messages.txt. This file is part of the image; the container still cannot
 # see messages.txt, and 10-static.sh still asserts the banner text is absent from it.
 
-# The name of the environment. Appears in the entry banner, in the tmux title bar across the
-# top of the terminal, and in the host terminal's window title.
+# The name of the environment. Appears in the tmux title bar across the top of the terminal,
+# and in the host terminal's window title.
+#
+# Nothing that RUNS reads this: tmux.conf and rewrite-window-title.py both carry the literal,
+# because neither can source a shell file. So this is the one definition the tests check those
+# two copies against, which is what keeps them from drifting apart unnoticed.
 CS193V_TITLE='CS193V Development Environment'
 
-# The entry banner's greeting line, and the two lines under it.
+# The entry banner's greeting line.
 CS193V_WELCOME='Welcome to the CS193V Development Environment!'
-CS193V_WELCOME_HINT_1='Your files are in ~/projects. Run `ports` if a server is not'
-CS193V_WELCOME_HINT_2='reachable, or `am-i-in-a-container` to see this setup again.'
 
 # Printed once, after the whole tmux session ends — not per tab. See cs193v-goodbye.
 CS193V_GOODBYE='You have left the CS193V development environment. Goodbye!'

@@ -29,7 +29,6 @@ projects/                      the student's work; the only directory shared wit
     tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
     ports                      the in-container port diagnostic
     open-url                   the $BROWSER stub
-    am-i-in-a-container         the milestone check the install guides reference
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
     bash_logout                runs cs193v-goodbye, outside tmux only

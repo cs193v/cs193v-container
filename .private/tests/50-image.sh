@@ -183,11 +183,7 @@ assert_eq "npm-prefix-is-in-home" "/home/student/.local" "$(R 'npm config get pr
 assert_ok "npm-install-g-needs-no-sudo" \
           sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
 
-# ─── the four helper commands ──────────────────────────────────────────────────
-assert_ok "helper:am-i-in-a-container" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'am-i-in-a-container'"
-assert_contains "helper:identity-cue-says-yes" "you are inside" "$(R 'am-i-in-a-container')"
-assert_contains "helper:identity-cue-explains-the-projects-dir" "/home/student/projects" "$(R 'am-i-in-a-container')"
-
+# ─── the three helper commands ─────────────────────────────────────────────────
 # The $BROWSER stub: without it, `gh auth login` and `claude /login` leave a student
 # staring at a prompt that never returns.
 out="$(R '/usr/local/bin/open-url https://example.com/verify?code=ABCD')"

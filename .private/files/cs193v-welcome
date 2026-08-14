@@ -1,13 +1,14 @@
 #!/bin/sh
 #
-# CS193V entry banner: clear the screen, then say unmistakably where you are.
+# CS193V entry banner: clear the screen, then say where you are.
 #
-# This is a COMMAND rather than inline shell because it now has two callers:
+# This is a COMMAND rather than inline shell because it has two callers:
 #
 #   1. the first tab of a new tmux session, from cs193v-shell -- the normal path a student
-#      takes, and the reason it had to stop living in /etc/profile.d. tmux runs the login
-#      shell in EVERY tab, so a banner in profile.d would clear the screen and redraw the
-#      box each time a student pressed CTRL+T.
+#      takes. tmux runs the login shell in EVERY tab, so printing this from /etc/profile.d
+#      unconditionally would clear the screen and greet again every time a student pressed
+#      CTRL+T. cs193v-shell passes it as that window's command instead, so it reaches tab one
+#      and nothing else.
 #   2. /etc/profile.d/20-cs193v-welcome.sh, for a shell opened outside tmux -- which is
 #      `podman exec -it cs193v bash -l`, the documented path for scripts and for
 #      diagnosing a container whose tmux will not start.
@@ -15,25 +16,10 @@
 # WHY THE TEXT IS HARD-CODED HERE and not in messages.txt, unlike every other
 # student-facing string in this project: this runs INSIDE the container, and the container
 # cannot see messages.txt. Only projects/ is bind-mounted, and messages.txt sits outside it
-# next to the launcher. Moving this text to messages.txt would silently blank the banner.
+# next to the launcher. Moving this text to messages.txt would silently blank the greeting.
 #
-# WHAT WAS TRIED AND REJECTED, so it is not re-proposed (see issue #4):
-#
-#   Changing the background colour. Ptyxis, the default terminal on Ubuntu 26.04, accepts
-#   OSC 11 and answers the query with the new value, then paints its own palette background
-#   anyway -- so nothing changes visually and the failure CANNOT be feature-detected. macOS
-#   Terminal.app does not support OSC 11 at all. It would have been invisible on the default
-#   terminal of two of three target platforms.
-#
-#   A persistent frame drawn with escape sequences alone. DECSTBM reserves rows only, never
-#   columns; DECSLRM is xterm-only in practice. A sticky top header via DECSTBM does work,
-#   but measured against real VTE it DESTROYS SCROLLBACK -- 40 lines of output, only 10
-#   retained -- because lines scrolled out of a partial scrolling region are discarded
-#   rather than saved.
-#
-#   That second rejection is the one that no longer stands. A persistent frame IS what the
-#   container has now: the tmux title bar and tab bar, always on screen, with 50,000 lines
-#   of scrollback rather than none. See .private/README.md for the reversal.
+# Where you are is carried continuously by the tmux title bar across the top of every tab.
+# This is the one-time greeting at the moment of entry, and needs to be no more than that.
 
 [ -t 1 ] || exit 0
 
@@ -42,37 +28,9 @@
 # shellcheck source=cs193v-strings.sh
 . /etc/cs193v/strings.sh
 
-# 2J clears the visible screen; 3J clears the SCROLLBACK as well, which is what
+# 2J clears the visible screen; 3J clears the SCROLLBACK too, which is what
 # "prior commands are no longer visible" actually requires. Deliberate, and not
 # undoable -- entering the container is meant to be a clean break.
 printf '\033[2J\033[3J\033[H'
 
-_cs193v_title="$CS193V_TITLE"
-# tput needs terminfo for $TERM; the launcher forwards only a whitelisted TERM,
-# but fall back anyway rather than drawing a broken box.
-_cs193v_cols="$(tput cols 2>/dev/null || echo 0)"
-[ "$_cs193v_cols" -ge 40 ] 2>/dev/null || _cs193v_cols=64
-[ "$_cs193v_cols" -gt 72 ] && _cs193v_cols=72
-_cs193v_inner=$(( _cs193v_cols - 4 ))
-# Measured, not a magic number. This used to be a literal 31 for a 30-character title, so the
-# box was off-centre by a column and would have gone visibly wrong the moment anyone edited
-# the title.
-_cs193v_len=${#_cs193v_title}
-_cs193v_pad=$(( (_cs193v_inner - _cs193v_len) / 2 ))
-[ "$_cs193v_pad" -lt 0 ] && _cs193v_pad=0
-
-_cs193v_rule=''
-_cs193v_i=0
-while [ "$_cs193v_i" -lt "$_cs193v_inner" ]; do
-    _cs193v_rule="$_cs193v_rule═"
-    _cs193v_i=$(( _cs193v_i + 1 ))
-done
-
-printf '\n  \033[1m╔%s╗\033[0m\n' "$_cs193v_rule"
-printf '  \033[1m║\033[0m%*s\033[1m%s\033[0m%*s\033[1m║\033[0m\n' \
-    "$_cs193v_pad" "" "$_cs193v_title" \
-    "$(( _cs193v_inner - _cs193v_pad - _cs193v_len ))" ""
-printf '  \033[1m╚%s╝\033[0m\n' "$_cs193v_rule"
 printf '\n  %s\n\n' "$CS193V_WELCOME"
-printf '  \033[2m%s\n' "$CS193V_WELCOME_HINT_1"
-printf '  %s\033[0m\n\n' "$CS193V_WELCOME_HINT_2"

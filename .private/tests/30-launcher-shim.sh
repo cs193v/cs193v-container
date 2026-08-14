@@ -70,10 +70,9 @@ assert_eq "print:contains-every-args-file-flag" "" "$(printf '%s' "$missing" | s
 
 # local.args is machine-specific and absent from a fresh clone; the memory cap must reach
 # the run line once the installer has written it.
-printf -- '--memory=2048m\n-e CS193V_MEMORY_MB=2048\n' > "$COPY/.config/local.args"
+printf -- '--memory=2048m\n' > "$COPY/.config/local.args"
 line="$(launcher --dev-print-command)"
 assert_contains "print:includes-memory-cap"    "--memory=2048m"        "$line"
-assert_contains "print:includes-memory-env"    "CS193V_MEMORY_MB=2048" "$line"
 # local.args changing must change the hash, or the cap never reaches an existing container.
 h_with="$(current_hash)"
 rm -f "$COPY/.config/local.args"

@@ -159,7 +159,6 @@ ckfail no-gitconfig                      R 'test -e /etc/gitconfig'      # vanil
 ckx  sudo-works                          R 'sudo -n true'
 ck  git-editor     nano                  R 'git var GIT_EDITOR'          # NOT vi
 ckx  nanorc                              R 'test -f /home/student/.nanorc'
-ckx  identity-cue                        R 'am-i-in-a-container'
 rec  open-url-stub                       R '/usr/local/bin/open-url https://example.com/x'
 ckfail man-absent                        R 'man git'                     # deliberately not restored
 ckx  tldr-present                        R 'command -v tldr'
@@ -229,7 +228,7 @@ I '{{json .Mounts}}' | grep -c 'authorized_keys'                     # expect 1,
 ck  tunnel-up      "up"    sh -c '"$DIR/cs193v" doctor | sed -n "s/^  tunnel  *\(up\).*/\1/p"'
 rec mounts                 I '{{json .Mounts}}'                  # 5 volumes + 1 bind at <DIR>/projects
 ckx config-hash-label      sh -c 'podman inspect cs193v --format "{{index .Config.Labels \"cs193v.confighash\"}}" | grep -q .'
-rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, CS193V_MEMORY_MB, TERM, COLORTERM
+rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, TERM, COLORTERM
 rec pid1                   I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'
 ```
 
@@ -250,13 +249,13 @@ rec shm-mount              E 'findmnt -no SIZE,OPTIONS /dev/shm'
 ck  mount-allowed mount-allowed  E 'unshare -U --map-root-user -m -- mount -t tmpfs none /mnt && echo mount-allowed'
 ckfail setns-blocked       E 'unshare -U --map-root-user -- nsenter --target 1 --mount true'
 rec inotify-watches        E 'cat /proc/sys/fs/inotify/max_user_watches'
-# /proc is NOT cgroup-aware — this is why CS193V_MEMORY_MB is passed in
+# /proc is NOT cgroup-aware — `free` in here reports the host's RAM, not the cap
 rec free-vs-cgroup         E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"'
 # -e TERM is REQUIRED. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so without this the probe reports 8 and FAILS on a correctly
 # working system. The launcher forwards TERM in open_shell/verb_ports; so must this.
 ck  colors  256            sh -c 'podman exec -it -e TERM=xterm-256color cs193v tput colors | tr -d "\r"'
-rec env-persists           E 'printenv CS193V_PORTS CS193V_MEMORY_MB'   # proves -e reaches exec sessions
+rec env-persists           E 'printenv CS193V_PORTS'   # proves -e reaches exec sessions
 ckx dns                    E 'getent hosts registry.npmjs.org'
 ```
 

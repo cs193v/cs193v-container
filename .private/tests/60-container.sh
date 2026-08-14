@@ -174,7 +174,7 @@ record "pid1" "$(I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}')"
 assert_eq "identity:hostname" "cs193v-development" "$(E 'hostname')"
 
 # The banner needs a pty: it is guarded to interactive shells so that `podman exec <cmd>`
-# and this suite's own non-interactive calls do not get a screenful of box drawing.
+# and this suite's own non-interactive calls do not get a greeting mixed into their output.
 pty_login() {                     # pty_login KEYS -> everything the session printed
     printf '%b' "$1" | timeout 45 script -q -c "podman exec -it ${NAME} bash -l" /dev/null 2>&1
 }
@@ -182,7 +182,6 @@ pty_login() {                     # pty_login KEYS -> everything the session pri
 out="$(pty_login 'exit\n')"
 n="$(printf '%s' "$out" | grep -acF "$CS193V_WELCOME" || true)"
 assert_eq "identity:banner-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
-assert_contains "identity:banner-has-the-title" "$CS193V_TITLE" "$out"
 assert_contains "identity:prompt-shows-the-hostname" "cs193v-development" "$out"
 # The clear must come BEFORE the banner, or the banner scrolls away with the old content.
 if printf '%s' "$out" | grep -aq $'\033\[3J'; then
@@ -286,8 +285,6 @@ out="$(pty_shell 'exit\n')"
 # contains it more than once and a count would fail on correct behaviour. The real property
 # is "tab one has it, later tabs do not", and that is asserted against rendered panes below.
 assert_contains "tmux:banner-appears-in-the-first-tab" "$CS193V_WELCOME" "$out"
-# The title bar is the persistent frame -- the thing the DECSTBM route could not deliver.
-assert_contains "tmux:title-bar-is-drawn" "$CS193V_TITLE" "$out"
 # The tab count badge is how a student knows other tabs can exist at all -- but at ONE tab
 # there are no other tabs for it to be telling them about, so it is not drawn (issue #26).
 # This session opens exactly one tab, so what must be true here is the absence.
@@ -297,9 +294,6 @@ assert_contains "tmux:title-bar-is-drawn" "$CS193V_TITLE" "$out"
 # only needs to know the chrome the launcher lands a student in is the quiet one.
 assert_not_contains "tmux:no-tab-count-badge-at-one-tab" "1 TAB" "$out"
 assert_contains "tmux:new-tab-button-is-drawn" "+ NEW TAB" "$out"
-# set-titles on: without it allow-rename swallows the shell's OSC 0 and the window title
-# silently stops naming the course.
-assert_contains "tmux:sets-the-host-window-title" "$CS193V_TITLE" "$out"
 # exit in the last tab ends the session, leaves the container, and says goodbye once.
 assert_contains "tmux:goodbye-on-exit" "$CS193V_GOODBYE" "$out"
 n="$(printf '%s' "$out" | grep -ac 'Goodbye' || true)"
@@ -310,7 +304,7 @@ assert_ok "tmux:no-server-survives-the-last-exit" \
 
 # THE BANNER MUST NOT FIRE IN EVERY TAB. tmux runs the login shell in each one, so before
 # the $TMUX guard went into /etc/profile.d/20-cs193v-welcome.sh, pressing CTRL+T cleared the
-# pane and redrew the box every time. Read from rendered panes, which is redraw-independent.
+# pane and greeted again every time. Read from rendered panes, which is redraw-independent.
 tmux_kill_all
 start_client; bclient=$CLIENT_JOB
 wait_until 30 tmux_client_attached
@@ -336,6 +330,14 @@ assert_eq "tmux:live-prefix-table-is-empty" "" "$(E "$TM list-keys -T prefix 2>/
 assert_eq "tmux:live-copy-mode-vi-table-is-empty" "" "$(E "$TM list-keys -T copy-mode-vi 2>/dev/null")"
 assert_eq "tmux:live-prefix-is-None" "None" "$(E "$TM show -gv prefix")"
 assert_eq "tmux:live-destroy-unattached-is-off" "off" "$(E "$TM show -gv destroy-unattached")"
+# The title bar, from the live server and NOT from the pty stream.
+#
+# `#{T:...}` expands the format tmux will actually render, so nothing the PANE printed can
+# satisfy this. That distinction is the whole assertion: $CS193V_TITLE is a substring of
+# $CS193V_WELCOME, so the same needle matched against a session capture is answered by the
+# greeting and says nothing about whether a title bar exists at all.
+assert_contains "tmux:title-bar-is-drawn" "$CS193V_TITLE" \
+                "$(E "$TM display-message -p '#{T:status-format[0]}'")"
 assert_eq "tmux:live-six-tab-bindings" "6" \
     "$(E "$TM list-keys -T root" | grep -cE ' (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ')"
 tmux_kill_all
@@ -469,8 +471,8 @@ assert_eq "kernel:setns-into-pid1-is-blocked" "blocked" \
           "$(E 'unshare -U --map-root-user -- nsenter --target 1 --mount true >/dev/null 2>&1 && echo ALLOWED || echo blocked')"
 
 record "kernel:inotify-max-user-watches" "$(E 'cat /proc/sys/fs/inotify/max_user_watches')"
-# /proc is NOT cgroup-aware, which is the whole reason CS193V_MEMORY_MB is passed in: a
-# student running `free` inside the container sees the host's RAM, not their cap.
+# /proc is NOT cgroup-aware: a student running `free` inside the container sees the host's
+# RAM, not their cap. Recorded because the discrepancy is the point.
 record "kernel:free-vs-cgroup" \
        "$(E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"')"
 

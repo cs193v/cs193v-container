@@ -82,7 +82,7 @@ fail() {
     printf '\n  To collect a report to send them, on your own computer:\n'
     printf '\n      ./cs193v doctor\n'
     printf '\n  And to get a plain shell in the container for a closer look:\n'
-    printf '\n      podman exec -it %s bash -lc am-i-in-a-container\n' "$CONTAINER"
+    printf '\n      podman exec -it %s bash -l\n' "$CONTAINER"
     printf '\n'
     exit 1
 }
@@ -113,10 +113,10 @@ errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
 # -d never returns, so this is the only shape in which its failure can be inspected -- and its
 # failure is the whole point here, because that is how a lost race announces itself.
 #
-# -x/-y are not optional with -d. A detached session is created at tmux's default 80x24 and
-# only resized when a client attaches, and cs193v-welcome draws a box sized to the terminal at
-# the moment it runs. Without the real size the banner would be drawn for the wrong width and
-# then not reflow, so the first thing a student sees would be a broken box.
+# -x/-y are not optional with -d. A detached session is created at tmux's default 80x24 and only
+# resized when a client attaches, so anything the first window prints before then is laid out for
+# 80 columns and does not reflow afterwards. Passing the real terminal size means what a student
+# sees on entry was written for the terminal they are actually sitting at.
 #
 # The first window runs the banner and then becomes the login shell. This is what confines the
 # banner to tab one: every LATER tab is created by tmux itself from the default command, which

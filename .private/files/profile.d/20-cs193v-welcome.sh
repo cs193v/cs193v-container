@@ -1,13 +1,13 @@
 # CS193V entry banner, for a login shell opened OUTSIDE tmux.
 #
 # The banner itself lives in /usr/local/bin/cs193v-welcome; this file only decides whether
-# to run it. See that script for the text, and for what was tried and rejected.
+# to run it. See that script for the text.
 #
 # THE $TMUX GUARD IS THE WHOLE POINT OF THIS FILE'S CURRENT SHAPE.
 #
 # `./cs193v` now lands the student in tmux, and tmux runs the login shell in EVERY tab. So
-# a banner printed unconditionally from /etc/profile.d would clear the screen and redraw
-# the box every single time a student pressed CTRL+T -- turning a one-time "here is where
+# a banner printed unconditionally from /etc/profile.d would clear the screen and greet
+# again every single time a student pressed CTRL+T -- turning a one-time "here is where
 # you are" into a recurring interruption that also wipes the pane. The first tab gets the
 # banner from cs193v-shell instead, which passes `cs193v-welcome` as that window's command
 # and so reaches tab one and nothing else.
