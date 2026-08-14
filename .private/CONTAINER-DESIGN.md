@@ -304,8 +304,9 @@ That stops the container so the next `cs193v` starts cleanly.
 
 The port forwarding column needs a word of explanation. The tunnel is a program running on *your*
 computer, not inside the container, so it is a separate thing that can be up or down. It is started
-whenever you run `cs193v` and taken down whenever the container stops — including when you close
-your window, which hands all 46 ports back. That is deliberate: a tunnel left holding ports for a
+when you open a session with `cs193v`, and taken down whenever the container stops — including when
+you close your window, which hands all 46 ports back. Maintenance commands like `cs193v --rebuild`
+never raise one: they end with the container stopped, so a tunnel for it could serve nobody. That is deliberate: a tunnel left holding ports for a
 container that is gone would stop the *next* one from working, and the symptom ("my browser cannot
 reach my server") would point nowhere near the cause.
 

@@ -128,7 +128,17 @@ rm -f "$WARN_ACK"
 # meter_kill, not just rm: an animator left running would draw its next frame over
 # whatever came after it -- a STOP box, a shell prompt -- 100ms after the launcher stopped
 # caring. See meter_stop.
-trap 'rm -f "$WARN_ACK" "$METER_STATE"; [ -n "${METER_PID:-}" ] && kill "$METER_PID" 2>/dev/null; :' EXIT
+#
+# A named function rather than an inline trap body so the two teardowns that install their own
+# handlers can CALL it instead of shadowing it. Bash keeps exactly one EXIT trap, so a second
+# `trap ... EXIT` silently drops whatever the first one did -- and both of those handlers run at
+# moments when the animator may still be alive.
+transient_cleanup() {
+    rm -f "$WARN_ACK" "$METER_STATE"
+    [ -n "${METER_PID:-}" ] && kill "$METER_PID" 2>/dev/null
+    :
+}
+trap transient_cleanup EXIT
 
 warn() {
     printf '%s%s%s\n' "$C_YEL" "$*" "$C_OFF" >&2
@@ -1074,11 +1084,10 @@ create_container() {
     else
         info "$(msg status.created)"
     fi
-    # Every verb that makes a container funnels through here, so the tunnel is raised in one
-    # place rather than at each of the six call sites where one could be forgotten. Failure is
-    # deliberately NOT fatal: the container and the shell are still perfectly usable, only the
-    # browser-facing ports are missing, and ensure_tunnel has already said so.
-    ensure_tunnel || true
+    # NO TUNNEL HERE. Creating a container is not what makes one wanted -- opening a session is
+    # -- and since #41 the only verb that creates one stops it again on the next line. A tunnel
+    # raised here would be bound for a container nobody is in, and torn down having served
+    # nothing. See the dispatch, which is where it is raised now.
 }
 
 # The tunnel goes first, always. It holds every course port on the host's loopback, and those
@@ -1263,12 +1272,51 @@ ensure_tunnel() {
     tunnel_start || return 1
 }
 
+# SIGTERM, a moment to land, then SIGKILL. Shared with --reset-tunnel, which is where this
+# escalation was written: a tunnel stopped with SIGSTOP will never handle a TERM, and that is a
+# realistic way to arrive at either caller.
+tunnel_kill_pid() {
+    local pid
+    pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
+    case "${pid:-}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || return 0
+    # IDENTIFIED BEFORE KILLED. Pids are reused, and this file outlives the process it names --
+    # a machine that lost power mid-session leaves one behind, and the number is handed out
+    # again within days. So kill only something that still looks like our own tunnel: the
+    # control socket being torn down is on its command line, and on nothing else's. Skipping
+    # the kill costs 46 ports until --reset-tunnel; killing a stranger's process costs whatever
+    # that process was doing.
+    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+        *"$TUNNEL_CTL"*) : ;;
+        *) return 0 ;;
+    esac
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    return 0
+}
+
 # Paired with remove_container, ALWAYS. A tunnel whose container is gone still holds every
 # host port it bound, which would stop the replacement container's tunnel from binding them
 # -- turning a routine --rebuild into a total outage with no visible cause.
+#
+# Since #41 this is the ONE path that gives the 46 ports back -- --rebuild, --stop and the end
+# of a session all arrive here -- so it may not settle for asking nicely. The pidfile is the
+# only record of who holds those ports, and deleting it without first killing what it names is
+# how a wedged master became unfindable: doctor then says DOWN while all 46 are still bound,
+# --reset-tunnel has nothing left to force, and the next tunnel binds none of them. Measured,
+# with a master stopped by SIGSTOP: --rebuild took 14s, reported `0 of 46 forwarded`, and told
+# the student to go looking for another program on their computer.
 tunnel_down() {
-    if [ -S "$TUNNEL_CTL" ]; then
-        run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1
+    # Time-boxed, because a wedged ssh may never answer -O exit -- and the box expiring is
+    # itself the signal that asking did not work.
+    if [ -S "$TUNNEL_CTL" ] && run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit \
+           "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1; then
+        :                         # accepted; the master is on its way out under its own power
+    else
+        tunnel_kill_pid           # wedged, or no socket to ask through
     fi
     rm -f "$TUNNEL_CTL" "$TUNNEL_PID"
 }
@@ -1316,13 +1364,6 @@ ensure_container() {
         *) info "$(msg status.starting)"
            pmq start "$NAME" || { remove_container; create_container; return; } ;;
     esac
-
-    # Reached only when the container was already there -- created-and-tunnelled paths above
-    # all return. An existing container very often has no tunnel: the host rebooted, the
-    # student logged out and back in, or podman was restarted. So this is where "the container
-    # is fine but nothing reaches my server" gets fixed, and it is why ensure_tunnel has to be
-    # idempotent and cheap rather than something only the create path does.
-    ensure_tunnel || true
 }
 
 # ─── the session's lifetime ────────────────────────────────────────────────────
@@ -1396,10 +1437,43 @@ stop_container() {
 # this path: HUP runs the handler and EXIT then runs it again, and a second `podman stop` would
 # print a second "stopping" line at the student for something already done. The maintenance
 # verbs and --stop call stop_container directly, each exactly once.
+#
+# transient_cleanup because installing this on EXIT replaces the trap that would otherwise have
+# done it. Nothing depends on that today -- the meter is stopped and the acknowledgement consumed
+# long before open_shell -- but a handler that silently drops the animator's kill is a trap in
+# both senses.
 shell_teardown() {
     [ -n "$TEARDOWN_DONE" ] && return 0
     TEARDOWN_DONE=1
+    transient_cleanup
     stop_container
+}
+
+# The same job for verb_rebuild's create window: podman run --detach returns, and until
+# stop_container runs on the next line there is a container up that nobody is in. Since #41
+# `state` = running IS the session test, so a Ctrl-C landing there does not just leave a
+# container -- it makes the next `./cs193v` refuse to launch, naming a session that does not
+# exist.
+#
+# Signals only, not EXIT: create_container's own failures (ENOSPC, a podman run that never came
+# up) die with nothing running, so EXIT would buy nothing and would shadow transient_cleanup.
+# The animator goes FIRST -- it redraws ten times a second and would otherwise paint over the
+# "stopping" line -- and the exit then lets the EXIT trap run it again, which is harmless.
+#
+# The status is passed in rather than fixed at 130, because all three signals arrive here and
+# 128+signal is what a caller reads to tell "the student pressed Ctrl-C" from "the window was
+# closed". Reporting SIGINT for a SIGHUP would be a small lie told to every script that checks.
+rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
+    # RT_SPIN FIRST, and it is not cosmetic. create_container sets it for `podman run` and clears
+    # it on the line after; interrupting in between leaves it set, and run_timeout then prints it
+    # to STDOUT on every later call -- including the one inside `$(state)`, whose `[ -t 1 ]` is
+    # false because a command substitution's stdout is a pipe. state() then answers "Setting up
+    # the course container... running" instead of "running", stop_container decides the container
+    # is not up, and the interrupt leaves running exactly what this handler exists to stop.
+    RT_SPIN=''
+    transient_cleanup
+    stop_container
+    exit "${1:-130}"
 }
 
 # Refuse to disturb a session that is already open, and name the one way out of it.
@@ -1747,8 +1821,15 @@ verb_rebuild() {
 
     remove_container
     [ -n "$wipe" ] && remove_volumes
+    # Cleared on the line after stop_container rather than left installed: past there is nothing
+    # running to clean up, and an interrupt during the success box should behave like an
+    # interrupt anywhere else. Same shape as open_shell's handoff.
+    trap 'rebuild_interrupted 130' INT
+    trap 'rebuild_interrupted 143' TERM
+    trap 'rebuild_interrupted 129' HUP
     create_container
     stop_container
+    trap - INT TERM HUP
 
     # Not one if/elif chain ending in the box: the logout has to be reported whether or not a
     # build happened, or a --logout that also built would never mention it.
@@ -1805,18 +1886,11 @@ verb_reset_tunnel() {
         run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1 || true
     fi
 
-    # 2. Then force. SIGTERM, a moment to land, then SIGKILL -- a process stopped with SIGSTOP
-    #    will never handle a TERM, and that is a realistic way to arrive here.
-    local pid
-    pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
-    case "${pid:-}" in
-        ''|*[!0-9]*) : ;;
-        *) if kill -0 "$pid" 2>/dev/null; then
-               kill "$pid" 2>/dev/null || true
-               sleep 1
-               kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-           fi ;;
-    esac
+    # 2. Then force, UNCONDITIONALLY -- the difference between this verb and tunnel_down, which
+    #    forces only when the clean way did not work. Here the clean way answering proves
+    #    nothing: this is the escape hatch, and it is used by someone who has already decided
+    #    the tunnel is lying to them.
+    tunnel_kill_pid
 
     # 3. A leftover socket makes the next -O check report a dead tunnel as live, which would
     #    make ensure_tunnel decide there was nothing to do.
@@ -1856,13 +1930,24 @@ usage() {
 #
 # ports, doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
 # its whole purpose is fixing the tunnel WHILE a session is live.
+#
+# The same invariant decides where the TUNNEL is raised, and it is raised here, once. It used to
+# be raised in create_container and again at the end of ensure_container -- two sites, both
+# spelling "a container exists", which is the wrong predicate: --rebuild made one and stopped it
+# on the next line, so its tunnel held all 46 host ports (which CS193V_INSTANCE does NOT
+# namespace, see CLAUDE.md) for a container nobody could be in. This arm is the only place a
+# session begins, and ensure_container is called from nowhere else, so one call covers every path
+# the two used to. Failure is deliberately NOT fatal: the container and the shell are still
+# perfectly usable, only the browser-facing ports are missing, and ensure_tunnel has said so.
 case "${1:-}" in
     # refuse_if_foreign_dir FIRST: "this container belongs to a different copy of the course
     # directory" is a more specific diagnosis than "something is already running", and losing it
     # behind the session refusal would send a student to --stop and then straight back into the
     # wrong container. See the comment on the function.
     '')                  preflight; refuse_if_foreign_dir; refuse_if_session_live
-                         load_args; require_image; ensure_container; open_shell ;;
+                         load_args; require_image; ensure_container
+                         ensure_tunnel || true
+                         open_shell ;;
     ports)               preflight; verb_ports ;;
     doctor)              verb_doctor ;;
     --stop)              verb_stop ;;

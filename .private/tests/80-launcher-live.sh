@@ -627,6 +627,35 @@ hold_container
 require_tunnel
 assert_eq "tunnel:comes-back-after-a-rebuild" "46" "$(count_fwd)"
 
+# The same wedge as the --reset-tunnel pair above, but arriving at tunnel_down instead. Since #41
+# tunnel_down is the ONE path that hands the 46 ports back -- --rebuild, --stop and the end of a
+# session all go through it -- and it used to ask `-O exit` politely, discard the answer, and
+# delete the pidfile regardless. A master that cannot answer therefore kept every port AND took
+# the only record of which process held them: doctor reported the tunnel DOWN while all 46 were
+# still bound, --reset-tunnel had nothing left to force, and the launcher told the student to go
+# looking for another program on their computer. Measured before the fix, master SIGSTOPped:
+# --rebuild took 14s -- ten of them spent in the timeout for nothing -- and doctor then said
+# `0 of 46 forwarded`.
+#
+# podman stop does not settle this by itself, which is why the wedge has to be tested here and
+# not just asserted about ssh: killing the container closes the pipe, but a STOPPED master never
+# runs again to notice, and its 46 listening sockets stay bound until something kills the process.
+WPID="$(tunnel_pid)"
+if [ -n "$WPID" ] && kill -STOP "$WPID" 2>/dev/null; then
+    LV --rebuild >/dev/null 2>&1
+    assert_fail "rebuild:kills-a-wedged-tunnel" sh -c "kill -0 $WPID 2>/dev/null"
+    wait_until 30 no_forwards || true
+    assert_eq "rebuild:hands-the-ports-back-with-a-wedged-tunnel" "0" "$(count_fwd)"
+    # Unconditionally, and AFTER the assertions: this test is meant to be run against a launcher
+    # that fails it, and a failure leaves a stopped process holding all 46 ports for everyone else
+    # on the machine. SIGKILL because SIGSTOP means nothing gentler will ever be handled.
+    kill -9 "$WPID" 2>/dev/null || true
+    wait_until 15 no_forwards || true
+else
+    skip "rebuild:kills-a-wedged-tunnel" "no tunnel pidfile to stop"
+    skip "rebuild:hands-the-ports-back-with-a-wedged-tunnel" "see above"
+fi
+
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
 containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:containers" "$containers"

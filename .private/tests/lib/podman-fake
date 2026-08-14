@@ -27,6 +27,8 @@
 #                    matches the current recipe" is arranged by building.
 #   image_created    .Created for `podman image inspect`    [2026-08-04T00:00:00Z]
 #   run_rc           exit code for `podman run`             [0]
+#   run_hold         present = `podman run` blocks, container already up, until this file
+#                    is removed  [absent]
 #   build_out        whole `podman build` output, verbatim  [a realistic STEP i/N run]
 #   build_steps      how many STEPs the default emits       [23]
 #   build_rc         exit code for `podman build`           [0]
@@ -144,6 +146,15 @@ level=error msg="cannot set up pasta"' >&2
             exit "$RC"
         fi
         printf 'running\n' > "$SHIM/state"
+        # run_hold holds `podman run` open AFTER the container is up, which is the shape a real
+        # detached run has: the container is running before the CLI returns. It exists so a test
+        # can aim at verb_rebuild's create window -- the moment between "there is a container" and
+        # stop_container -- which is otherwise milliseconds wide and cannot be hit on purpose.
+        #
+        # A FILE to delete rather than a number of seconds to sleep: the test then decides when
+        # the window closes instead of guessing a duration that is too short on a loaded machine
+        # and wasted time on an idle one.
+        while [ -f "$SHIM/run_hold" ]; do sleep 0.1; done
         echo "0123456789abcdef"
         exit 0
         ;;

@@ -345,6 +345,47 @@ assert_not_contains "race:lost-create-is-not-reported-as-a-create-failure" \
 assert_not_contains "race:lost-create-does-not-leak-podmans-output" \
                     "creating container storage" "$(_flatten "$out")"
 
+# ─── interrupting the create window  (#41) ─────────────────────────────────────
+# `podman run --detach` returns with a container UP, and verb_rebuild stops it on the next line.
+# A Ctrl-C in between leaves one running with nobody in it -- and since #41 `state` = running IS
+# the session test, so the cost is not just a stray container: the next `./cs193v` refuses to
+# launch, naming a session that does not exist, and the student has to be told about --stop to
+# get out of a hole the launcher dug.
+#
+# run_hold holds the window open until this test lets go, rather than racing a gap that is
+# milliseconds wide against a poll. The signal goes to the launcher alone, not to a process group,
+# so what is tested is the handler rather than podman's own response to Ctrl-C.
+#
+# SIGTERM, not the SIGINT a student actually sends, and the reason is a bash rule rather than a
+# preference: a non-interactive shell sets SIGINT to SIG_IGN in every command it starts with `&`,
+# and a signal ignored on entry cannot be trapped. So a backgrounded launcher CANNOT receive a
+# Ctrl-C from this harness -- the first version of this test sent one and watched the launcher
+# sit in run_timeout's 180s loop, having never run the handler. A student's Ctrl-C reaches a
+# foreground job of an interactive shell, where SIGINT is not ignored. TERM and HUP are trapped
+# by the same handler and are not special-cased by that rule, so this exercises the same path.
+shim_new
+shim_set state absent
+shim_set run_hold 1
+PATH="$SHIM:$PATH" "${LAUNCHER_DIR:-$REPO}/cs193v" --rebuild >/dev/null 2>&1 &
+rb=$!
+container_is_up() { [ "$(cat "$SHIM/state" 2>/dev/null)" = running ]; }
+if wait_until 30 container_is_up; then
+    kill -TERM "$rb" 2>/dev/null
+    # Waited for ONCE and the status kept: a second wait on a reaped pid reports 127, which would
+    # look like the launcher exiting on a missing command.
+    wait "$rb" 2>/dev/null; rb_rc=$?
+    assert_eq "interrupt:stops-the-container-it-created" "1" "$(shim_count '^stop ')"
+    # 128+15, and it has to survive the handler: a teardown that swallowed the signal and exited 0
+    # would tell a script that the rebuild succeeded. Per-signal, so a caller can still tell a
+    # Ctrl-C (130) from a closed window (129).
+    assert_eq "interrupt:exits-128-plus-the-signal" "143" "$rb_rc"
+else
+    kill "$rb" 2>/dev/null
+    fail "interrupt:stops-the-container-it-created" "podman run never reported a container up"
+    fail "interrupt:exits-128-plus-the-signal" "see above"
+fi
+rm -f "$SHIM/run_hold"
+
 # ─── a container from a different copy of the course directory  (§2.7) ─────────
 # Without this a student who re-downloads after breaking something silently gets the old
 # container with the old mount, and their edits appear to vanish.
@@ -495,6 +536,35 @@ launcher >/dev/null 2>&1
 shim_clear_log
 launcher --rebuild --lgout >/dev/null 2>&1
 assert_eq "rebuild:unknown-modifier-changes-nothing" "0" "$(shim_count '^rm ')"
+
+# ...AND IT RAISES NO TUNNEL AT ALL. --rebuild stops the container it just created, so a tunnel
+# raised for it is bound for a container nobody can be in and torn down having served nothing --
+# while holding all 46 host ports meanwhile, which CS193V_INSTANCE does NOT namespace, so a
+# recreate in one checkout could take them from a colleague's live session (CLAUDE.md).
+#
+# Asserted on the FILES rather than by watching `ss` during the run: an ssh that is never spawned
+# cannot bind anything, which is the whole claim, and it needs no sampling to establish.
+#
+# THE LOG IS THE ONE THAT PROVES IT. Counting the control socket and pidfile is not enough and the
+# first version of this made that mistake: tunnel_down rm -f's both, so a launcher that raised a
+# tunnel and tore it down again leaves the same empty directory as one that never raised one, and
+# the assertion passed against the very code it was written to catch. The log is created by the
+# redirection on tunnel_start's `nohup ssh`, and NOTHING removes it except the next tunnel_start
+# and --reset-tunnel -- so its absence means no ssh was ever spawned. $BUILD_LOG lives in the same
+# directory and is not evidence of anything, hence the exclusion.
+#
+# shim_new gives the launcher a TMPDIR under $SHIM, so the answer is about THIS launch -- these
+# files are named from a hash of the course directory, and the real /tmp holds this checkout's
+# actual tunnel plus every other instance's. Deliberately NO shim_fake_ssh: a real ssh cannot
+# reach fake podman's container, so an attempt would leave the log behind and warn, which is
+# exactly what is being ruled out here.
+shim_new
+out="$(launcher --rebuild)"
+assert_eq "rebuild:raises-no-tunnel" "0" \
+    "$(ls "$SHIM"/tmp/cs193v-*.ctl "$SHIM"/tmp/cs193v-*.pid "$SHIM"/tmp/cs193v-*.log 2>/dev/null \
+       | grep -v 'cs193v-build-' | wc -l | tr -d ' ')"
+# ...and says nothing about one either. By KEY, so rewording the message cannot break this.
+assert_says_not_key "rebuild:says-nothing-about-the-tunnel" warn.tunnel-failed "$out"
 
 # ─── ports and doctor ──────────────────────────────────────────────────────────
 shim_new
@@ -667,7 +737,7 @@ out="$(launcher_tty '\nexit\n' | strip_ansi)"
 assert_says "ack:a-warned-launch-asks-for-enter" "Press ENTER to continue" "$out"
 # The warning itself has to still be on screen at that point — acknowledging a message you
 # cannot see is no better than not being shown it.
-assert_says "ack:the-warning-is-still-on-screen" "browser will not be able to reach" "$out"
+assert_says_key "ack:the-warning-is-still-on-screen" warn.tunnel-failed "$out"
 # ENTER goes on to open the shell rather than giving up.
 assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
 # And the prompt comes BEFORE the container is opened, not after it has already swallowed
@@ -713,7 +783,10 @@ shim_fake_ssh
 shim_set exec_out "SHELL-OPENED"
 launcher --rebuild --no-cache >/dev/null 2>&1
 out="$(launcher_tty 'exit\n' | strip_ansi)"
-assert_says_not "ack:a-quiet-launch-warns-about-nothing" "NOTE:" "$out"
+# By KEY, and it had to change to keep meaning anything: this asserted on "NOTE:", the prefix of
+# the dev-image advisory, which no longer exists anywhere in the launcher or messages.txt -- so it
+# could not fail. The tunnel failure is the warning this arrangement actually suppresses.
+assert_says_not_key "ack:a-quiet-launch-warns-about-nothing" warn.tunnel-failed "$out"
 assert_says_not "ack:a-quiet-launch-does-not-stop" "Press ENTER to continue" "$out"
 assert_contains "ack:a-quiet-launch-still-opens-the-shell" "SHELL-OPENED" "$out"
 

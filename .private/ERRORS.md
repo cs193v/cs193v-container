@@ -1083,8 +1083,15 @@ written (`EROFS`) or unlinked (`EPERM`) from inside.
 **Lifecycle.** Killing the container underneath a live tunnel frees every host port in
 **under 1 s**: the `podman exec` pipe closes and ssh exits, with no help from
 `ServerAliveInterval` (which is kept for a *wedged* rather than closed pipe — a frozen
-machine VM on macOS). A tunnel SIGSTOPped so it can never answer `-O exit` is still
-recovered by `cs193v --reset-tunnel`, which time-boxes the clean path and then kills. A host
+machine VM on macOS). A tunnel SIGSTOPped so it can never answer `-O exit` is recovered by
+**every** teardown, not only `cs193v --reset-tunnel`: `tunnel_down` time-boxes the clean path
+and forces when the box expires, so `--rebuild`, `--stop` and the end of a session all hand the
+ports back. It did not always. Measured before that changed, with a master SIGSTOPped:
+`--rebuild` spent 10 s in the timeout, deleted the pidfile without killing what it named, and
+left `doctor` reporting the tunnel **down** while all 46 ports were still bound — with nothing
+left for `--reset-tunnel` to force, and the student advised to look for another program on their
+computer. The kill checks the process's own command line for the control socket first, because a
+pidfile outlives its process and pids are reused. A host
 port already held by another program costs **that port only**, named in the output, where
 `podman run -p` used to fail outright and take the whole container with it.
 
