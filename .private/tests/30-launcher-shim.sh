@@ -992,6 +992,12 @@ assert_eq "build:creation-step-animates-on-a-terminal" "yes" \
 # which has no \r, no overdrawing and therefore neither defect.
 shim_new
 shim_set state absent
+# DELAYS ARE REQUIRED, not incidental. With every line available at once the download phase is
+# over inside a millisecond, and creating the container returns instantly -- while the animator
+# draws ten times a second. Both rows would then be asserted against a frame that may or may
+# not have been drawn, which is a coin toss rather than a test.
+shim_set build_delay 0.05
+shim_set run_delay 0.3
 # Real cold-build shape: podman pulls the base image before STEP 1 exists.
 shim_set build_out 'Trying to pull docker.io/library/ubuntu:26.04...
 Getting image source signatures
@@ -1011,41 +1017,71 @@ Successfully tagged localhost/cs193v:local'
 raw="$(launcher_tty '' --rebuild --no-cache)"
 screen="$(printf '%s' "$raw" | render_pty)"
 
-# ISSUE 1. "Downloading the base image..." ended with a newline, so the bar's \r returned to
-# the line BELOW it and the student got the note stranded on one row with a bar under it.
-# The note belongs beside the bar, on the one row the bar owns.
-if printf '%s\n' "$screen" | grep -qxE ' *Downloading the base image\.\.\.'; then
-    fail "build:pull-note-shares-the-bar-line" \
-         "the download note is on a row of its own:
-$screen"
-else
-    pass "build:pull-note-shares-the-bar-line"
-fi
+# THE BLOCK IS TWO ROWS, and the step name has a row of its own directly under the bar. That
+# reverses what this file used to assert, deliberately: once every step is named and a retry
+# can be reported beside the bar, what the meter has to say no longer fits one line, and a
+# line that wraps breaks \r redrawing outright -- the bar smears across two rows and never
+# recovers, which is the failure the one-line form was always one long label away from.
+#
+# What must still hold is that the name belongs to the BLOCK: drawn in the same frame as the
+# bar, on the row immediately below it, never stranded elsewhere on the screen.
+#
+# FRAMES ARE RECONSTRUCTED FROM THE TRANSCRIPT rather than read off the final screen, because
+# a successful build collapses the block to its one finished line -- by the end there is no
+# caption row left to look at.
+# The caption is found by looking for the next segment that STARTS WITH A NEWLINE rather than
+# by taking the one after the bar, and that is not fussiness: the pty is in cooked mode, so
+# ONLCR turns the meter's \r\n into \r\r\n and leaves an empty segment between the two rows.
+# Pinning the offset would make this assert something about the tty layer instead of about the
+# launcher. The caption row is the one the line feed opens, whether or not it has any words in
+# it -- an empty one is what "labels are switched off" looks like.
+frame_pairs() {                       # transcript on stdin -> "BAR<TAB>CAPTION" per frame
+    python3 -c '
+import sys, re
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+segs = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s) for s in raw.split("\r")]
+for i, s in enumerate(segs):
+    if re.search(r"\]\s+\d+/\d+", s):
+        cap = ""
+        for t in segs[i + 1:i + 4]:
+            if t.startswith("\n"):
+                cap = t.strip(); break
+        print(s.strip() + "\t" + cap)'
+}
+TAB="$(printf '\t')"
+pairs="$(printf '%s' "$raw" | frame_pairs)"
+
+# ISSUE 1. The download used to be a note printed with a trailing newline, which sent the
+# bar's \r to the row below it and left the note stranded above a bar of its own. It is step 1
+# of the meter now -- podman resolves FROM by pulling, and numbers that step 1 itself -- so it
+# arrives with a bar and a name like every other step.
+assert_match "build:download-is-step-one-with-a-bar" \
+             "\] +1/[0-9]+$TAB""Downloading the base image" "$pairs"
+
 bars="$(printf '%s\n' "$screen" | grep -c '\[█\|\[░' || true)"
 assert_eq "build:exactly-one-progress-bar-on-screen" "1" "${bars:-0}"
 
 # ISSUE 3. Creating the container is the slowest single step and was outside the meter, so
 # the bar completed at 3/3 and the student then waited on an unmetered line. It counts as
-# the n+1'th step now, and its label goes beside the meter like the download note.
+# the n+1'th step now, and its name goes in the block like the rest.
 assert_match "build:meter-counts-container-setup-as-a-step" '\] +4/4' "$screen"
+# The count is not pinned here: the bar holds at the last step podman announced WHILE the
+# container is being created and only completes when it returns, which is the honest reading of
+# a step that is still running. What matters is that the name is in the block.
+assert_match "build:setup-label-sits-in-the-meter-block" \
+             "\] +[0-9]+/4$TAB""Setting up the course container" "$pairs"
+
+# The finished block is ONE row: the caption is erased, the outcome takes the spinner's cell
+# and the closing word moves up beside the bar. A student is not left looking at a spinner
+# frame beside a build that has finished, which is what this did before.
+assert_match "build:finished-block-collapses-to-one-row" '✓ .*\] +4/4  Ready' "$screen"
 if printf '%s\n' "$screen" | grep -qxE ' *Setting up the course container\.\.\. *'; then
-    fail "build:setup-is-not-its-own-step" \
-         "the setup step still occupies its own row:
+    fail "build:no-caption-row-survives-the-collapse" \
+         "the caption row is still on the screen after the build finished:
 $screen"
 else
-    pass "build:setup-is-not-its-own-step"
+    pass "build:no-caption-row-survives-the-collapse"
 fi
-
-# And the label belongs BESIDE the meter, the way the download note does -- not on a line of
-# its own above or below it. Checked on a single \r-delimited redraw, so it can only pass if
-# one draw call emitted both the bar and the label.
-beside="$(printf '%s' "$raw" | python3 -c '
-import sys, re
-raw = sys.stdin.buffer.read().decode("utf-8", "replace")
-segs = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s) for s in raw.split("\r")]
-pat = re.compile(r"\]\s+\d+/\d+\s+Setting up the course container")
-print("yes" if any(pat.search(s) for s in segs) else "no")')"
-assert_eq "build:setup-label-sits-beside-the-meter" "yes" "$beside"
 
 
 # --- ISSUE 2: something must move while a step is in progress ------------------
@@ -1096,3 +1132,207 @@ fi
 # is what the next person copies.
 assert_eq "build:no-ascii-spinner-frames-remain" "0" \
           "$(grep -c "ch='|'" "$REPO/cs193v" || true)"
+
+
+# ─── the meter says what the build is DOING ────────────────────────────────────
+# The side text used to be blank for the whole build: two labels existed, one for the download
+# and one for creating the container, and between them a student watched a bar advance with no
+# idea what it was working on. Every step is named now, from `####>` markers in the
+# Containerfile, which the launcher parses because podman emits no comments and never re-runs
+# a cached RUN.
+#
+# The fixture's STEP lines echo the REAL Containerfile's instructions, which is what makes the
+# labels line up: the launcher checks each step's echoed text against what it parsed and
+# switches labels off if they disagree. So this is also the test that the check does not
+# misfire on a build that is telling the truth.
+#
+# ASSERTED ON THE PIPED FORM, deliberately, and this is the one place where that form is the
+# better instrument. Piped output is one line per step, emitted BY the step -- so every step
+# that podman announces is in it exactly once. The pty form is sampled by an animator running
+# at a fixed rate, so which steps happen to be caught depends on how long each one took, and a
+# label that is correct but held for 40ms would fail an assertion about a display that is
+# working perfectly. Layout is what the pty form is for; content is what this is for.
+shim_new
+shim_set state absent
+{ "${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps \
+      | awk -F'\t' -v n=23 '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
+  printf 'STEP 23/23: LABEL "cs193v.buildhash"="deadbeef"\n'
+  printf 'COMMIT localhost/cs193v:local\nSuccessfully tagged localhost/cs193v:local\n'
+} > "$SHIM/build_out"
+# --no-cache is what FORCES the build, and it is not decoration. --rebuild is the only verb that
+# builds now, and it builds only when the recipe moved or the image is missing -- podman-fake
+# reports image_exists=yes, so without this it would recreate the container and never call
+# `podman build` at all, and every assertion below would pass vacuously against no output.
+out="$(launcher --rebuild --no-cache)"
+
+# Named steps, spread across the build rather than only at its ends. The count is podman's own
+# 23 here: the +1 for creating the container exists only where there is a meter to put it in.
+assert_match "labels:names-the-node-step"      '\] +[0-9]+/23  Installing Node'           "$out"
+assert_match "labels:names-the-chromium-step"  '\] +[0-9]+/23  Installing Chromium'       "$out"
+assert_match "labels:names-the-vercel-step"    '\] +[0-9]+/23  Installing the Vercel CLI' "$out"
+assert_match "labels:names-the-first-step"     '\] +1/23  Downloading the base image'     "$out"
+# The tail of the file is ENV/USER/WORKDIR/ENTRYPOINT plus the LABEL podman synthesizes from
+# our own --label flag. None of them has a marker of its own, and the last one has no line in
+# the Containerfile at all, so all five inherit the closing marker rather than going blank.
+assert_match "labels:tail-steps-inherit-the-closing-marker" '\] +23/23  Finishing up' "$out"
+# EVERY step is named. The whole point is that the side text is never blank mid-build, so a
+# step that reached the bar without a name is the regression to catch.
+unnamed="$(printf '%s\n' "$out" | grep -cE '\] +[0-9]+/23 *$' || true)"
+assert_eq "labels:no-step-is-left-unnamed" "0" "${unnamed:-0}"
+
+# And on a terminal the same labels ride in the block, on the row under the bar. Layout only --
+# see above for why the content assertions do not live here.
+shim_set build_delay 0.05
+raw="$(launcher_tty '' --rebuild --no-cache)"
+pairs="$(printf '%s' "$raw" | frame_pairs)"
+assert_match "labels:ride-in-the-block-on-a-terminal" \
+             "\] +[0-9]+/24$TAB""Installing " "$pairs"
+# 24 = 22 instructions + podman's injected LABEL step + creating the container. The count the
+# meter commits to comes from podman; the parse only supplies it before podman has spoken.
+assert_match "labels:total-counts-every-step" '\] +24/24' "$(printf '%s' "$raw" | render_pty)"
+
+# A step is never labelled with a guess. If podman echoes an instruction that is not the one
+# the launcher parsed, its whole mapping is suspect -- so the labels stop rather than name the
+# wrong step, and the build carries on. A missing label is unhelpful; a wrong one is a lie.
+#
+# The build log this asserts on is unambiguously the one THIS launch wrote, rather than whichever
+# instance last built on this machine, because shim_new points the launcher's TMPDIR at $SHIM/tmp.
+shim_new
+shim_set state absent
+shim_set build_out 'STEP 1/3: FROM something-the-containerfile-does-not-say
+STEP 2/3: RUN neither-is-this
+STEP 3/3: LABEL x=y
+COMMIT localhost/cs193v:local
+Successfully tagged localhost/cs193v:local'
+raw="$(launcher_tty '' --rebuild --no-cache)"
+screen="$(printf '%s' "$raw" | render_pty)"
+pairs="$(printf '%s' "$raw" | frame_pairs)"
+assert_says     "mismatch:build-still-succeeds"  "Build Successful" "$screen"
+assert_match    "mismatch:bar-and-count-survive" '\] +4/4'          "$screen"
+# No CONTAINERFILE label survives the mismatch. Two things deliberately still do, and naming
+# them is the point of matching on the labels themselves rather than on "any caption":
+#
+#   * "Setting up the course container..." comes from messages.txt, not from the parse, so it
+#     must keep working when the parsed labels are switched off;
+#   * "Downloading the base image..." can appear BEFORE the first STEP line, because that is
+#     the window in which podman has not said anything to contradict the parse yet. Showing a
+#     name during the download at all requires trusting the parse until podman speaks, and it
+#     stops the instant it does.
+assert_not_match "mismatch:no-label-is-guessed" \
+                 "$TAB""(Installing|Adding |Caching|Finishing|Creating the student)" "$pairs"
+# ...and it is recorded where staff will find it, which is the log a stuck student is asked
+# for. Not on the screen: on a terminal that belongs to the meter, and it is not something a
+# student can act on.
+notes="$(cat "$SHIM"/tmp/cs193v-build-*.log 2>/dev/null | grep -c 'not the instruction' || true)"
+assert_ne "mismatch:recorded-in-the-build-log" "0" "${notes:-0}"
+assert_says_not "mismatch:not-shown-to-the-student" "not the instruction" "$screen"
+
+
+# ─── a retry is reported BESIDE the bar, not underneath it ─────────────────────
+# What this replaces: three lines of yellow prose per attempt, printed under the meter, which
+# scrolled the block up the screen and put a warning a student cannot act on in front of a
+# build that then went on to succeed. STOP is the banner that means "stop"; a retry is not one.
+#
+# build_die_at fails the FIRST attempt only, after announcing the step that fails -- podman's
+# own order, and the launcher depends on it: the step that failed is the last STEP line in the
+# log, which is what it reads to hold the bar there.
+#
+# THE BUILD IS FORCED BY AN ABSENT IMAGE HERE, NOT BY --no-cache, and that is the one thing in
+# this section that cannot be changed for tidiness. build_image sets tries=1 when it is handed
+# --no-cache, because --no-cache throws away every cached layer and a retry would restart a
+# twenty-minute build from zero -- so under --no-cache there is no second attempt, no retry, and
+# `(retrying: 1/2)` can never be drawn. The assertions below would then fail for a reason that
+# has nothing to do with the display they are about. An absent image forces the build and leaves
+# tries=3 alone.
+shim_new
+shim_set state absent
+shim_set image_exists no
+shim_set build_steps 12
+shim_set build_die_at 7
+shim_set build_delay 0.15
+raw="$(launcher_tty '' --rebuild)"
+screen="$(printf '%s' "$raw" | render_pty)"
+pairs="$(printf '%s' "$raw" | frame_pairs)"
+
+assert_match "retry:marker-appears-beside-the-bar" '\(retrying: 1/2\)' "$pairs"
+# RETRIES, not attempts: tries=3 means two of them, and a student who sees 2/2 has seen the
+# last one rather than a budget with one still in hand.
+assert_not_match "retry:marker-counts-retries-not-attempts" '\(retrying: [0-9]+/3\)' "$pairs"
+assert_says "retry:build-still-succeeds" "Build Successful" "$screen"
+assert_says_not "retry:no-yellow-prose-under-the-meter" "Trying again"     "$screen"
+assert_says_not "retry:no-retry-warning-text"           "did not finish"   "$screen"
+
+# THE BAR DOES NOT REWIND. A retried build re-runs from step 1 and replays every completed
+# step from the layer cache in about a second; that work is done and on disk, so counting it
+# again from zero would tell a student they had lost twenty minutes they had not lost.
+steps="$(printf '%s' "$raw" | python3 -c '
+import sys, re
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+segs = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s) for s in raw.split("\r")]
+ns = [int(m.group(1)) for s in segs for m in [re.search(r"\]\s+(\d+)/", s)] if m]
+print("monotonic" if all(b >= a for a, b in zip(ns, ns[1:])) else "rewound to %r" % (ns,))')"
+assert_eq "retry:bar-never-goes-backwards" "monotonic" "$steps"
+
+# And the marker goes once the step it describes has succeeded, so a build that recovered from
+# one dropped connection does not carry the word "retrying" to its final frame.
+assert_not_match "retry:marker-is-gone-by-the-end" 'retrying' "$screen"
+
+# ─── the cursor does not strobe, and is always given back ──────────────────────
+# The block redraws ten times a second and leaves the cursor wherever the last write ended --
+# the bar row on one frame, the caption row on the next -- so a terminal that blinks its cursor
+# flashes it between two positions. Invisible in a transcript, which is exactly why the first
+# version of this shipped with it: every assertion in this file reads bytes, and the bytes were
+# perfect. Found by someone running an install and looking at it.
+#
+# THE ASSERTION THAT MATTERS IS THE LAST ONE. Hiding the cursor is a nicety; failing to give it
+# back leaves the student typing blind in that terminal afterwards, which is far worse than the
+# strobe this fixes. So the test is not "does it hide" but "is the final cursor sequence in the
+# whole transcript a SHOW", checked on success and on failure, since those exit by different
+# routes -- meter_stop then a box, versus meter_stop then die.
+cursor_last() {                       # transcript on stdin -> hidden | shown | none
+    python3 -c '
+import sys, re
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+seq = re.findall(r"\x1b\[\?25([lh])", raw)
+print("none" if not seq else ("hidden" if seq[-1] == "l" else "shown"))'
+}
+
+shim_new
+shim_set state absent
+shim_set build_steps 4
+shim_set build_delay 0.1
+raw="$(launcher_tty '' --rebuild --no-cache)"
+assert_contains "cursor:hidden-while-the-meter-runs" "$(printf '\033')[?25l" "$raw"
+assert_eq "cursor:restored-after-a-successful-build" "shown" "$(printf '%s' "$raw" | cursor_last)"
+
+# Not a terminal -> nothing animates, so there is nothing to hide and no sequence to leak into
+# a log file a student sends to staff.
+out="$(launcher --rebuild --no-cache)"
+assert_not_contains "cursor:no-escape-sequences-when-piped" "$(printf '\033')[?25" "$out"
+
+shim_new
+shim_set state absent
+shim_set build_steps 6
+shim_set build_rc 1
+raw="$(launcher_tty '' --rebuild --no-cache)"
+assert_eq "cursor:restored-when-the-build-fails" "shown" "$(printf '%s' "$raw" | cursor_last)"
+
+# And the rendered screen must be free of them, or every other screen assertion in this file is
+# reading cursor-control bytes as if they were something the student saw. render_pty strips
+# private-mode sequences only because it was taught to; a class of [0-9;] alone does not.
+screen="$(printf '%s' "$raw" | render_pty)"
+assert_not_contains "cursor:sequences-do-not-reach-the-rendered-screen" "25l" "$screen"
+
+# ─── a failed build stops where it stopped ─────────────────────────────────────
+# The closing frame used to fill the bar to tot/tot regardless, so a student got a COMPLETED
+# progress bar directly above the words "the course container could not be built".
+shim_new
+shim_set state absent
+shim_set build_steps 6
+shim_set build_rc 1
+raw="$(launcher_tty '' --rebuild --no-cache)"
+screen="$(printf '%s' "$raw" | render_pty)"
+assert_match     "build-failed:marks-the-block-as-failed" '✗' "$screen"
+assert_not_match "build-failed:bar-is-not-drawn-complete" '\] +7/7' "$screen"
+assert_match     "build-failed:bar-stops-where-it-stopped" '✗ .*\] +6/7' "$screen"
+assert_not_match "build-failed:no-spinner-frame-left-behind" '[⣾⣽⣻⢿⡿⣟⣯⣷] .*\] +6/7' "$screen"

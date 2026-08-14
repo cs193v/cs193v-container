@@ -815,6 +815,90 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
   command to enter the / development environment:"). Caught by eye, not by the suite;
   the lint now matches both routes.
 
+### ~~B18~~. The bar moved but said nothing, and a retry buried it in prose — **FIXED**
+
+B17 gave `--build` a bar. What it did not give it was anything to say. The side text had two
+labels — the base-image download and creating the container — and between them, for the whole
+build, the row beside the meter was blank. A student watched a bar advance for four minutes
+with no idea what it was doing. Three smaller things in the same area:
+
+- the download sat **outside** the bar. Not a decision: the total came from podman's
+  `STEP n/N`, which does not arrive until the download has finished, and the meter drew no bar
+  without a total. So the longest phase of a cold install on dorm wifi was the one phase with
+  no bar;
+- a failed step printed three lines of yellow prose **under** the meter, once per attempt,
+  and started a fresh bar — leaving a finished-looking bar stranded above a warning about a
+  build that usually went on to succeed;
+- the closing frame kept a spinner glyph, so a completed install ended on `⣾`, and it filled
+  the bar to `tot/tot` **even when the build had failed** — a 100% progress bar directly above
+  the words "the course container could not be built".
+
+**Fixed as:** a two-row block — bar, count and a right-aligned `(retrying: n/m)` on one row,
+the name of the current step on the other — ending on `✓` with the caption erased, or `✗`
+with the bar frozen where it stopped. Step names come from `####>` markers in the
+Containerfile. What is worth recording beyond the UI:
+
+- **The labels cannot come from the build output, and that is not a preference.** podman emits
+  no comments, and a cache hit prints `--> Using cache` without running the command — so an
+  `echo` inside a `RUN` would go silent on precisely the warm builds and retries where a
+  student is most likely to be watching. The launcher parses the Containerfile itself, which
+  means it numbers that file's instructions and has to agree with buildah about the answer.
+- **So the mapping is verified rather than trusted.** podman echoes the instruction on every
+  `STEP` line; the launcher compares it with what it parsed and, on any disagreement, drops
+  the labels for the rest of the build and records both texts in `$BUILD_LOG`. Deliberately
+  **not** fatal: a label is not load-bearing, and dying over one would block a student's
+  install, minutes into a cold download, over side text. The disagreement is a hard failure in
+  `00-release-gates.sh` instead, where real podman and staff are.
+- **Only the first label is shown before podman can confirm it**, and unavoidably: naming the
+  download means naming it while podman is still silent. If the parse is wrong the first
+  `STEP` line takes every label away, so the exposure is bounded by the download itself.
+- **`STEP 23/23` is podman's, not ours.** The Containerfile has 22 instructions; buildah adds
+  a `LABEL` step synthesized from the launcher's own `--label cs193v.buildhash` flag. It lands
+  *last*, which is why an index→label mapping built from the file is correct for 1-22 without
+  the two totals ever having to match. Discovered by reading a real build log, after a count
+  of the file said 22 and the meter said 24.
+- **A retry holds the bar at the step that failed.** Retries are per-*run* — `build_image`
+  re-runs the whole `podman build`, and buildah has no per-step retry — but the layer cache
+  replays every completed step in about a second, so that work really is done and on disk.
+  Rewinding the bar to 1 would tell a student they had lost twenty minutes they had not.
+  Reading the failed step out of `$BUILD_LOG` depends on podman announcing a step *before*
+  running it, which is also what made the first version of the fake's failure knob wrong.
+- **THE CURSOR STROBED, AND NO TEST COULD HAVE FOUND IT.** The block redraws ten times a second
+  and the terminal cursor comes to rest wherever the last write ended — the bar row on one
+  frame, the caption row on the next — so a terminal that blinks its cursor flashed it between
+  two positions at 10 Hz. The bytes were perfect; every assertion in the suite reads bytes.
+  Found by a human running an install and looking at it, which is the entire lesson: a
+  transcript cannot show you a display artefact that exists only in time.
+
+  Fixed with `ESC[?25l` / `ESC[?25h` around the meter, and **the restore is the half that
+  matters** — exiting with the cursor hidden leaves the student typing blind in that terminal
+  afterwards, which is much worse than the strobe. Restored in `meter_stop` *before* the final
+  frame (the failure path goes straight into `die` and never comes back) and again from the EXIT
+  trap, which bash runs on INT, TERM and HUP as well as normal exit — verified, because Ctrl-C
+  during a four-minute build is an ordinary thing to do. The test asserts the *last* cursor
+  sequence in the transcript is a show, on both the success and failure routes, rather than
+  asserting that hiding happens.
+
+  It also caught a third hole in the same helpers: `render_pty` and `strip_ansi` matched
+  `ESC[[0-9;]*[A-Za-z]`, which does not match a private-mode sequence like `ESC[?25l`. Both
+  would have passed the sequences straight through into the "rendered screen" that assertions
+  read as what the student saw.
+- **The test harness had to learn a row cursor first, and this is the important one.**
+  `render_pty` replayed `\r`, `\n` and `ESC[K` and silently dropped every other CSI sequence,
+  so a meter emitting `ESC[1A` would have had its cursor moves discarded and its two rows
+  replayed as unrelated lines. Every screen assertion in `30-launcher-shim.sh` would have gone
+  on **passing** against a screen no student ever saw. Failing in the reassuring direction is
+  the failure mode this project keeps finding in its own test lib; it is why the replayer grew
+  a `(row, col)` cursor in the same change as the meter.
+- **Two of those assertions were already passing vacuously** once the block collapsed on
+  success: they forbade the label having a row of its own, and the finished block erases that
+  row. Re-aimed to assert what the design now means — one bar row, the caption directly under
+  it, drawn in the same frame.
+- **Content is asserted on the piped form, layout on the pty.** The pty form is sampled by an
+  animator at a fixed rate, so which steps get drawn depends on how long each took; a label
+  that was correct but held for 40 ms failed an assertion about a display working perfectly.
+  Piped output emits one line per step, by the step, so every step is in it exactly once.
+
 ---
 
 ## C. Not run, and why

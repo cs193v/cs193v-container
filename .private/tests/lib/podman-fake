@@ -27,11 +27,14 @@
 #                    matches the current recipe" is arranged by building.
 #   image_created    .Created for `podman image inspect`    [2026-08-04T00:00:00Z]
 #   run_rc           exit code for `podman run`             [0]
+#   run_delay        seconds `podman run` takes             [0]
 #   run_hold         present = `podman run` blocks, container already up, until this file
 #                    is removed  [absent]
 #   build_out        whole `podman build` output, verbatim  [a realistic STEP i/N run]
 #   build_steps      how many STEPs the default emits       [23]
 #   build_rc         exit code for `podman build`           [0]
+#   build_die_at     stop after this many STEPs and fail,
+#                    on the FIRST build only                [0] (0 = never)
 #   build_delay      seconds to pause between output lines   [0] (0 = all at once)
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
 #   memory_max       what the in-container cgroup read prints [4294967296]
@@ -137,6 +140,17 @@ case "${1:-}" in
             LAST="$a"
         done
         printf '%s' "${LAST:-}" > "$SHIM/last_image"
+        # Creating a container is the slowest single step of a real build and the meter counts
+        # it as one, so anything asserting what that step LOOKS like needs it to take long
+        # enough to be drawn. Returning instantly leaves a window of about zero milliseconds
+        # for a display that redraws ten times a second, which is a coin toss rather than a test.
+        #
+        # A DURATION, unlike run_hold below, and the two are not redundant: run_hold aims at the
+        # window between "there is a container" and stop_container, which needs the CLI held open
+        # after the state flips; this one aims at the meter's last STEP, which needs `run` to be
+        # slow BEFORE anything about it is observable.
+        rd="$(get run_delay 0)"
+        [ "$rd" != 0 ] && sleep "$rd"
         RC="$(get run_rc 0)"
         if [ "$RC" -ne 0 ]; then
             # Deliberately multi-line: this is the shape of output that broke msg().
@@ -178,20 +192,15 @@ level=error msg="cannot set up pasta"' >&2
         # line is available at once and a build finishes in milliseconds -- which cannot show
         # whether anything animates while a step is in progress, because no step ever is.
         #
-        # THE RECIPE LABEL IS RECORDED, exactly as `run` records the container's labels and
-        # for the same reason: the next invocation has to see a consistent image. A real build
-        # stamps cs193v.buildhash onto what it produces, so a test arranges "this image matches
-        # the recipe on disk" by building rather than by computing the launcher's hash a second
-        # time. Only on success -- a failed build produces no image to label.
-        if [ "$(get build_rc 0)" -eq 0 ]; then
-            for a in "$@"; do
-                case "$a" in
-                    cs193v.buildhash=*)
-                        printf '%s' "${a#cs193v.buildhash=}" > "$SHIM/image_buildhash" ;;
-                esac
-            done
-        fi
         delay="$(get build_delay 0)"
+        # WHICH ATTEMPT THIS IS. build_rc is one value for the whole shim, so with it alone a
+        # build either always fails or always succeeds -- and the retry display is precisely
+        # the case where the first attempt must fail and the second must not. Counted here
+        # rather than passed in, because the launcher decides how many times to try.
+        attempt=1
+        [ -f "$SHIM/build_attempts" ] && attempt=$(( $(cat "$SHIM/build_attempts") + 1 ))
+        echo "$attempt" > "$SHIM/build_attempts"
+        die_at="$(get build_die_at 0)"
         if [ -f "$SHIM/build_out" ]; then
             if [ "$delay" = 0 ]; then
                 cat "$SHIM/build_out"
@@ -203,11 +212,46 @@ level=error msg="cannot set up pasta"' >&2
             i=1
             while [ "$i" -le "$n" ]; do
                 echo "STEP $i/$n: RUN set -eux; apt-get install -y package-number-$i && echo done"
+                # Stop mid-build on the first attempt only, the way a dropped connection does.
+                # ANNOUNCED FIRST, THEN FAILED, because that is podman's order and the launcher
+                # depends on it: the step that failed is the LAST STEP line in the log, which is
+                # what it reads to hold the bar there while the retry replays the cache. Failing
+                # before the line was printed made the number one too low and cleared the retry
+                # marker the instant the retry began.
+                if [ "$attempt" = 1 ] && [ "$die_at" != 0 ] && [ "$i" = "$die_at" ]; then
+                    echo "error: build failed: network is unreachable" >&2
+                    exit 1
+                fi
                 echo "--> Using cache 4ec498e1806de291e7859998e9c4e251296ffece50ec40bc11e5b81e3f5$i"
+                # A CACHE HIT COSTS NO TIME, and on a retry that is the point: the steps the
+                # first attempt completed replay instantly and the delay applies only from the
+                # step that failed onward, which is what makes the bar race back up to where
+                # it stopped rather than crawling there.
+                if [ "$delay" != 0 ] && { [ "$die_at" = 0 ] || [ "$i" -ge "$die_at" ]; }; then
+                    sleep "$delay"
+                fi
                 i=$((i + 1))
             done
             echo "COMMIT localhost/cs193v:local"
             echo "Successfully tagged localhost/cs193v:local"
+        fi
+        # THE RECIPE LABEL IS RECORDED, exactly as `run` records the container's labels and
+        # for the same reason: the next invocation has to see a consistent image. A real build
+        # stamps cs193v.buildhash onto what it produces, so a test arranges "this image matches
+        # the recipe on disk" by building rather than by computing the launcher's hash a second
+        # time. Only on success -- a failed build produces no image to label.
+        #
+        # DOWN HERE RATHER THAN AT THE TOP OF THIS ARM, which is where it started, because
+        # build_die_at exits from the middle of the loop above: stamping before the output meant
+        # an attempt that then died still labelled an image it never produced, so the next
+        # invocation's staleness check read a recipe match that no build had earned.
+        if [ "$(get build_rc 0)" -eq 0 ]; then
+            for a in "$@"; do
+                case "$a" in
+                    cs193v.buildhash=*)
+                        printf '%s' "${a#cs193v.buildhash=}" > "$SHIM/image_buildhash" ;;
+                esac
+            done
         fi
         exit "$(get build_rc 0)"
         ;;

@@ -249,31 +249,58 @@ for n, l in enumerate(box):
 # times" and "the bar appears once, updated 23 times" are the same bytes and completely
 # different screens. Assertions about a redrawn display have to be made against the screen.
 #
-# Replays the three things this launcher actually emits: \r (column 0), \n (new line) and
-# ESC[K (erase to end of line). Other CSI sequences are colour and are dropped.
+# Replays the five things this launcher actually emits: \r (column 0), \n (new line), ESC[K
+# (erase to end of line) and ESC[nA / ESC[nB (cursor up and down). Other CSI sequences are
+# colour and are dropped.
+#
+# THE CURSOR MOVES ARE NOT OPTIONAL TO MODEL, and getting this wrong fails in the reassuring
+# direction. The progress meter is a two-row block that redraws by stepping back up to its
+# first row, so a replayer that dropped ESC[1A -- as this one did while the meter was one
+# line -- would replay every frame as a fresh pair of rows and then report a screen full of
+# bars that no student ever saw. Every screen assertion in 30-launcher-shim.sh would go on
+# passing against it.
+#
+# So rows stay ADDRESSABLE rather than append-only: the cursor is (row, col), and writing to
+# a row that has already been written overwrites it, which is what a terminal does.
 render_pty() {                        # raw transcript on stdin -> one repr()'d line per row
     python3 -c '
 import re, sys
 raw = sys.stdin.buffer.read().decode("utf-8", "replace")
-# Mark ESC[K so it survives colour-stripping, then drop every other CSI sequence.
+# Mark the sequences with meaning so they survive colour-stripping, then drop the rest. The
+# count in ESC[nA defaults to 1 when omitted, which is the form the meter emits.
 raw = raw.replace("\x1b[K", "\x00")
-raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
-rows, cur, col = [], [], 0
+raw = re.sub(r"\x1b\[([0-9]*)A", lambda m: "\x01" * max(1, int(m.group(1) or 1)), raw)
+raw = re.sub(r"\x1b\[([0-9]*)B", lambda m: "\x02" * max(1, int(m.group(1) or 1)), raw)
+# The `?` is for PRIVATE-MODE sequences, and it is load-bearing: the meter hides the cursor
+# with ESC[?25l and restores it with ESC[?25h, and without `?` in this class neither matches --
+# so both would survive into the "rendered screen" as literal garbage and break assertions
+# about rows the student sees as clean. Same failure shape as the cursor moves above.
+raw = re.sub(r"\x1b\[[?0-9;]*[A-Za-z]", "", raw)
+rows, row, col = [[]], 0, 0
+def at(r):
+    while len(rows) <= r: rows.append([])
+    return rows[r]
 for ch in raw:
     if ch == "\n":
-        rows.append("".join(cur)); cur, col = [], 0
+        # Column 0 as well as the next row: the pty is in cooked mode, so ONLCR turns this
+        # into CRLF on the way out. The launcher pairs it with \r anyway.
+        row += 1; col = 0; at(row)
     elif ch == "\r":
         col = 0
+    elif ch == "\x01":                 # ESC[nA -- up, never past the top of the transcript
+        row = max(0, row - 1)
+    elif ch == "\x02":                 # ESC[nB -- down
+        row += 1; at(row)
     elif ch == "\x00":                 # ESC[K -- erase from the cursor to end of line
-        del cur[col:]
+        del at(row)[col:]
     else:
+        cur = at(row)
         while len(cur) < col: cur.append(" ")
         if col < len(cur): cur[col] = ch
         else: cur.append(ch)
         col += 1
-rows.append("".join(cur))
 for r in rows:
-    print(r.rstrip())
+    print("".join(r).rstrip())
 '
 }
 
