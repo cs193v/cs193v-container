@@ -4,11 +4,25 @@
 #
 # MUST STAY BASH 3.2 COMPATIBLE.
 
+# The real temporary directory, captured before shim_new starts redirecting TMPDIR at the
+# launcher. Every mktemp in this file uses it, or the second shim would be created inside the
+# first and shim_cleanup would delete a repo copy still in use.
+SHIM_HOST_TMPDIR="${SHIM_HOST_TMPDIR:-${TMPDIR:-/tmp}}"
+
 # shim_new [DIR]  -> creates a shim, sets $SHIM, and puts it first on $PATH for `launcher`.
 # A fresh shim per test keeps state from leaking between cases.
+#
+# THE LAUNCHER GETS A TMPDIR OF ITS OWN, and that is not tidiness. The tunnel's control socket,
+# pidfile and log are named from a hash of (course directory, instance) under TMPDIR -- the same
+# names the REAL tunnel for this checkout uses. So a shim launch of any verb that reaches
+# tunnel_down (every --rebuild here) was reaching through the fake podman and shutting down the
+# developer's actual tunnel, and, when run-tests.sh runs its two lanes at once, the live tier's
+# as well. The cheap lane is supposed to touch no ports; without this it touched all 46.
 shim_new() {
-    SHIM="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-shim.XXXXXX")"
+    SHIM="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-shim.XXXXXX")"
     export SHIM CS193V_SHIM="$SHIM"
+    mkdir -p "$SHIM/tmp"
+    export TMPDIR="$SHIM/tmp"
     cp "$TESTS_DIR/lib/podman-fake" "$SHIM/podman"
     chmod +x "$SHIM/podman"
     : > "$SHIM/argv.log"
@@ -210,7 +224,7 @@ current_hash() {
 # working tree. Sets $LAUNCHER_DIR, which `launcher` honours.
 repo_copy() {                         # repo_copy -> prints the new directory
     local d
-    d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-repo.XXXXXX")"
+    d="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-repo.XXXXXX")"
     # SNAPSHOT ONCE, on the first call, and serve every later copy from that. Two reasons, and
     # the second is why it matters now that run-tests.sh runs two lanes:
     #
@@ -225,7 +239,7 @@ repo_copy() {                         # repo_copy -> prints the new directory
     # The first call happens in this suite's first half-minute, while the other lane is still
     # in the image tier; the live tier cannot start until image, container and tmux are done.
     if [ -z "${REPO_SNAPSHOT:-}" ]; then
-        REPO_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-snap.XXXXXX")"
+        REPO_SNAPSHOT="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-snap.XXXXXX")"
         SHIM_DIRS="${SHIM_DIRS:-} $REPO_SNAPSHOT"
         # tar, not cp -a: it is the form that can exclude .git, which is large and irrelevant.
         ( cd "$REPO" && tar cf - --exclude=.git --exclude=./.private/tests . ) \
