@@ -168,6 +168,54 @@ ask a student for; it is not deleted on exit.
 `--no-cache` retries once only, deliberately — the retry exists because podman keeps
 completed layers, which is exactly what `--no-cache` throws away.
 
+#### The bar is two rows, and it names the step it is on
+
+What a student watching `--rebuild` build something sees is one block of two rows: bar, count
+and — during a retry — a right-aligned `(retrying: 1/2)` on the first; the name of the current
+step on the second. It ends on a green `✓` with the caption row erased, or a red `✗` with the bar
+frozen where it stopped and the failed step still named beneath it.
+
+The cursor is hidden for the duration (`ESC[?25l`) and restored in `meter_stop` and again from
+`transient_cleanup`. Without that it strobes between the two rows at 10 Hz on any terminal with
+a blinking cursor — and `transient_cleanup` rather than the EXIT trap body is deliberate: it is
+what `shell_teardown` and `rebuild_interrupted` call, so a Ctrl-C mid-build gives the cursor
+back by the same route a clean exit does. If you ever add a path that leaves the meter running,
+restore it there too: exiting with the cursor hidden leaves a student typing blind.
+
+**The step names come from `####>` lines in the Containerfile**, each naming its own
+instruction and every one after it until the next marker. The launcher parses them itself
+(`CF_PARSE_AWK`), because there is no way to get them out of the build: podman emits no
+comments, and it never re-runs a cached `RUN`, so an `echo` would go silent on exactly the
+warm builds and retries where a student is most likely to be watching. Consequences worth
+knowing before you touch either file:
+
+- **Rewording a marker changes `cs193v.buildhash`** and so prompts every student to rebuild.
+  Mostly cached, but a prompt all the same — batch a reword with a change that earns one.
+- **`--dev-steps` prints the parse** (index, label, instruction). It is the seam the tests
+  drive; `15-containerfile-parse.sh` pins the parsing rules against fixtures in under a
+  second, and `00-release-gates.sh` diffs the parse against real podman's own `STEP` lines,
+  which is the only check that can prove the two agree.
+- **The labels are verified per step, not trusted.** podman echoes the instruction on each
+  `STEP` line, so the launcher compares it with what it parsed and, on any disagreement,
+  switches the labels off for the rest of the build and records why in `$BUILD_LOG`. A
+  missing label is unhelpful; a wrong one is a lie. It never fails the build — the meter must
+  not be able to stop an install — which is why the same disagreement is a hard failure in
+  the release gate instead.
+- **No heredocs and no `# escape=` in the Containerfile**, and no `\` followed by whitespace.
+  The parse is line-based, so any of them would shift every label after it. `10-static.sh`
+  forbids all three.
+
+The download is step 1 rather than a preamble: podman resolves `FROM` by pulling and numbers
+that step 1 itself. To have a bar during it — before podman has announced any total — the
+launcher uses its own instruction count as a provisional denominator, and podman's number
+overrides it at `STEP 1`.
+
+A retry no longer prints anything. It used to print three lines of yellow prose per attempt,
+which scrolled the meter up the screen and put a warning a student cannot act on in front of
+a build that then succeeded. The marker says it in place, and the bar **holds at the step
+that failed** while podman replays the cached steps ahead of it — that work is done and on
+disk, so counting it again from zero would tell a student they had lost time they had not.
+
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev

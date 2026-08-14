@@ -318,11 +318,6 @@ of:
 
     cs193v doctor
 
-[[warn.build-retry]]
-That step did not finish — usually a dropped connection rather than anything you did.
-Trying again (attempt {{ATTEMPT}} of {{TRIES}}). Everything that already finished is
-kept, so this picks up where it stopped rather than starting over.
-
 [[warn.machine-restart-failed]]
 Could not restart podman's virtual machine automatically. Try it by hand:
 

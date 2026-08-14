@@ -152,9 +152,11 @@ launcher_tty_repo() {                 # launcher_tty_repo KEYS [ARGS...]
     fi
 }
 
-# A pty makes the launcher turn colour on, so assertions need the escapes gone.
+# A pty makes the launcher turn colour on, so assertions need the escapes gone. The `?` in the
+# class catches private-mode sequences -- the meter's ESC[?25l / ESC[?25h cursor hiding -- which
+# a class of only [0-9;] leaves behind in the middle of the text being matched.
 strip_ansi() {
-    sed -e 's/'"$(printf '\033')"'\[[0-9;]*[A-Za-z]//g' -e 's/'"$(printf '\r')"'//g'
+    sed -e 's/'"$(printf '\033')"'\[[?0-9;]*[A-Za-z]//g' -e 's/'"$(printf '\r')"'//g'
 }
 
 # Fake `id`, so the "refuses to run as root" branch is reachable without root. unshare -r

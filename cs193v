@@ -101,6 +101,23 @@ fi
 info() { printf '%s\n' "$*"; }
 note() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
 
+# THE CURSOR IS HIDDEN WHILE THE METER RUNS, and that is not a cosmetic nicety. The block
+# redraws ten times a second and the cursor comes to rest wherever the last write left it --
+# the end of the bar row on one frame, the end of the caption row on the next -- so a terminal
+# that blinks its cursor strobes it between two places at 10 Hz. It is invisible in a
+# transcript, which is why no test caught it and why it took someone watching a real install.
+#
+# RESTORING IT IS THE HALF THAT MATTERS. A launcher that exits with the cursor still hidden
+# leaves the student typing blind in that terminal for everything they do afterwards, which is
+# a great deal worse than a strobe. So it is restored in meter_stop and again from the EXIT
+# trap -- which bash runs on INT, TERM and HUP as well as on a normal exit (verified; Ctrl-C
+# during a four-minute build is an entirely ordinary thing for a student to do).
+#
+# `return 0` on both: the -t test is the last command, and a non-terminal stdout must not make
+# these look like failures to a caller or to `set -e` if this script ever gains it.
+cursor_hide() { [ -t 1 ] && printf '%s[?25l' "$ESC"; return 0; }
+cursor_show() { [ -t 1 ] && printf '%s[?25h' "$ESC"; return 0; }
+
 # A warning has to be ACKNOWLEDGED, not merely printed. The launcher's last act is
 # `exec podman exec -it ... cs193v-shell`, and cs193v-shell attaches tmux, which switches
 # the terminal to its alternate screen -- so every line printed beforehand is wiped from
@@ -133,9 +150,16 @@ rm -f "$WARN_ACK"
 # handlers can CALL it instead of shadowing it. Bash keeps exactly one EXIT trap, so a second
 # `trap ... EXIT` silently drops whatever the first one did -- and both of those handlers run at
 # moments when the animator may still be alive.
+#
+# cursor_show unconditionally, not only when the meter was running: this is the last chance to
+# undo cursor_hide, and getting it wrong costs the student an invisible cursor in every command
+# they run afterwards. Showing a cursor that was never hidden does nothing. Being in here rather
+# than in the trap body is what extends it to shell_teardown and rebuild_interrupted -- the two
+# handlers above, both of which can fire with the cursor hidden.
 transient_cleanup() {
     rm -f "$WARN_ACK" "$METER_STATE"
     [ -n "${METER_PID:-}" ] && kill "$METER_PID" 2>/dev/null
+    cursor_show
     :
 }
 trap transient_cleanup EXIT
@@ -301,41 +325,112 @@ METER_W=40
 # A `case` rather than ${FRAMES:i:1}: substring extraction on a multibyte string is
 # character-wise in a UTF-8 locale and BYTE-wise in the C locale, so indexing would slice
 # these three-byte glyphs into fragments for anyone running LC_ALL=C. Same trap as box().
-meter_glyph() {                       # meter_glyph N  -> the Nth frame, N in 0..7
+# ok and bad are the two endings rather than frames: the animation has stopped and the line
+# is being left on the screen, so what sat in the glyph column has to say which way it went.
+# A spinner frame left there reads as a build still running, which is what it did before.
+meter_glyph() {                       # meter_glyph N|ok|bad  -> one cell
     case "$1" in
+        ok)  printf '%s✓%s' "$C_GRN" "$C_OFF" ;;
+        bad) printf '%s✗%s' "$C_RED" "$C_OFF" ;;
         0) printf '⣾' ;; 1) printf '⣽' ;; 2) printf '⣻' ;; 3) printf '⢿' ;;
         4) printf '⡿' ;; 5) printf '⣟' ;; 6) printf '⣯' ;; *) printf '⣷' ;;
     esac
 }
 
-meter_write() {                       # meter_write CUR TOTAL LABEL
-    printf '%s %s %s\n' "$1" "$2" "$3" > "$METER_STATE" 2>/dev/null || true
+meter_write() {                       # meter_write CUR TOTAL RETRY LABEL
+    printf '%s %s %s %s\n' "$1" "$2" "${3:--}" "$4" > "$METER_STATE" 2>/dev/null || true
 }
 
-# One frame. Before the first STEP arrives the total is unknown, so there is no bar to draw
-# and the label carries the line on its own -- which is what the base-image download is.
-meter_draw() {                        # meter_draw FRAME CUR TOTAL LABEL
-    local frame="$1" cur="$2" tot="$3" label="$4" filled n bar='' pad='' g
-    g="$(meter_glyph "$frame")"
-    if [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
-        filled=$(( METER_W * cur / tot ))
-        [ "$filled" -gt "$METER_W" ] && filled="$METER_W"
-        n="$filled";                  while [ "$n" -gt 0 ]; do bar="$bar█";  n=$((n - 1)); done
-        n=$(( METER_W - filled ));    while [ "$n" -gt 0 ]; do pad="$pad░"; n=$((n - 1)); done
-        printf '\r  %s [%s%s]  %s/%s  %s%s[K' "$g" "$bar" "$pad" "$cur" "$tot" "$label" "$ESC"
-    else
-        printf '\r  %s  %s%s[K' "$g" "$label" "$ESC"
+# TWO ROWS, and the second one is why there are cursor moves in here at all. Everything the
+# meter has to say no longer fits on one line: 40 cells of bar, a count, a step name and a
+# retry marker come to about 105 columns, and a wrapped line breaks \r redrawing outright --
+# the bar smears across two rows and never recovers. Splitting it puts the fixed-width
+# furniture on one row and the prose on another, and leaves room to say more later.
+#
+# Row 1:  <glyph> [####....]  7/24                    (retrying: 1/2)
+# Row 2:       Installing the Vercel CLI...
+#
+# The marker is right-aligned at the terminal edge, so it is beside the block rather than
+# jostling the label whose length changes at every step.
+METER_W=40
+METER_COLS=80
+
+# Row 1 is 52 columns of furniture, so a full-width bar plus a 17-column marker fits an
+# 80-column terminal with room to spare and nothing shrinks there. Below that the BAR gives
+# way rather than the words: a count and a step name a student can read out to staff are
+# worth more than the last ten cells of a bar.
+meter_fit() {
+    METER_COLS="$(tput cols 2>/dev/null || printf '%s' "${COLUMNS:-80}")"
+    case "$METER_COLS" in ''|*[!0-9]*) METER_COLS=80 ;; esac
+    METER_W=40
+    if [ "$METER_COLS" -lt 72 ]; then
+        METER_W=$(( METER_COLS - 32 ))
+        [ "$METER_W" -lt 10 ] && METER_W=10
     fi
+}
+
+meter_bar() {                         # meter_bar CUR TOTAL -> [████░░░░]
+    local cur="$1" tot="$2" filled n bar='' pad=''
+    filled=$(( METER_W * cur / tot ))
+    [ "$filled" -gt "$METER_W" ] && filled="$METER_W"
+    [ "$filled" -lt 0 ] && filled=0
+    n="$filled";                  while [ "$n" -gt 0 ]; do bar="$bar█"; n=$((n - 1)); done
+    n=$(( METER_W - filled ));    while [ "$n" -gt 0 ]; do pad="$pad░"; n=$((n - 1)); done
+    printf '[%s%s]' "$bar" "$pad"
+}
+
+# The retry marker, right-aligned against the terminal edge. Padded rather than positioned
+# with ESC[<col>G, and the width is COMPUTED rather than measured: row 1 holds multibyte
+# glyphs and possibly a colour escape, so ${#row} would count neither in screen columns.
+meter_mark() {                        # meter_mark RETRY W1 -> padding + (retrying: n/m)
+    local retry="$1" w1="$2" mark n pad=''
+    [ -n "$retry" ] && [ "$retry" != '-' ] || return 0
+    mark="(retrying: $retry)"
+    # One column short of the edge on purpose: writing the last cell makes some terminals
+    # set a pending wrap, and a wrapped row 1 would put the cursor move on the wrong line.
+    n=$(( METER_COLS - w1 - ${#mark} - 1 ))
+    [ "$n" -lt 2 ] && n=2
+    while [ "$n" -gt 0 ]; do pad="$pad "; n=$((n - 1)); done
+    printf '%s%s' "$pad" "$mark"
+}
+
+# One frame, both rows. FIRST opens the block instead of redrawing over it: the cursor rests
+# at the end of row 2 between frames, so every later frame steps back up to row 1 first.
+#
+# RELATIVE MOVES AND A PLAIN \n, never absolute positioning. When the block sits at the
+# bottom of the screen the terminal scrolls, and both rows travel up together -- absolute
+# coordinates would keep pointing at where the block used to be.
+meter_draw() {                        # meter_draw FRAME CUR TOTAL RETRY LABEL [FIRST]
+    local frame="$1" cur="$2" tot="$3" retry="$4" label="$5" first="${6:-}"
+    local g count w1
+    g="$(meter_glyph "$frame")"
+    [ -z "$first" ] && printf '\r%s[1A' "$ESC"
+    if [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
+        count="$cur/$tot"
+        # 2 indent + glyph + space + bracketed bar + 2 + the count.
+        w1=$(( 8 + METER_W + ${#count} ))
+        printf '\r  %s %s  %s%s%s[K' "$g" "$(meter_bar "$cur" "$tot")" "$count" \
+               "$(meter_mark "$retry" "$w1")" "$ESC"
+    else
+        printf '\r  %s%s%s[K' "$g" "$(meter_mark "$retry" 3)" "$ESC"
+    fi
+    # Indented to sit under the bar rather than under the glyph, so the moving cell stays the
+    # leftmost thing in the block and the words line up with what they describe.
+    printf '\r\n     %s%s[K' "$label" "$ESC"
 }
 
 # The animator. Stops when the state file goes away, which is how meter_stop ends it without
 # depending on a signal arriving.
 meter_animate() {
-    local i=0 cur tot label
+    local i=0 cur tot retry label
+    # A resize changes where the marker belongs and, below 72 columns, how wide the bar may
+    # be. Re-measured on the signal rather than once per frame, which would fork tput ten
+    # times a second for an event that happens approximately never.
+    trap 'meter_fit' WINCH
     while [ -f "$METER_STATE" ]; do
-        cur=''; tot=''; label=''
-        IFS=' ' read -r cur tot label < "$METER_STATE" 2>/dev/null || true
-        meter_draw "$i" "${cur:-0}" "${tot:-0}" "${label:-}"
+        cur=''; tot=''; retry=''; label=''
+        IFS=' ' read -r cur tot retry label < "$METER_STATE" 2>/dev/null || true
+        meter_draw "$i" "${cur:-0}" "${tot:-0}" "${retry:--}" "${label:-}"
         i=$(( (i + 1) % 8 ))
         sleep 0.1
     done
@@ -344,37 +439,135 @@ meter_animate() {
 # Nothing animates when stdout is not a terminal: \r cannot overdraw a pipe or a log file,
 # and ten frames a second of it would be thousands of columns of noise in the file staff ask
 # a student to send. Callers print plainly in that case.
+# THE FIRST FRAME IS DRAWN HERE, in the foreground, before the animator exists. Every later
+# frame begins by moving the cursor up a row, so the two rows have to be on the screen before
+# anything can redraw them -- and if the animator owned the opening frame, a meter_stop that
+# arrived before its first tick would step up into whatever was printed above and overwrite
+# it. Drawing it synchronously makes that race impossible rather than unlikely.
 meter_start() {                       # meter_start TOTAL LABEL
     [ -t 1 ] || return 0
-    meter_write "0" "${1:-0}" "${2:-}"
+    meter_fit
+    cursor_hide
+    meter_write "0" "${1:-0}" '-' "${2:-}"
+    meter_draw 0 0 "${1:-0}" '-' "${2:-}" first
     meter_animate &
     METER_PID=$!
 }
 
 meter_label() {                       # meter_label CUR TOTAL LABEL  -- update in place
     [ -n "$METER_PID" ] || return 0
-    meter_write "$1" "$2" "$3"
+    # No retry: the only caller is the container-creation step, which is reached solely after
+    # a build has succeeded, so a marker still standing there would be describing the past.
+    meter_write "$1" "$2" '-' "$3"
 }
 
-# Leaves the line finished rather than mid-frame, and ALWAYS newlines, so whatever the caller
-# prints next starts clean instead of landing inside the bar.
-meter_stop() {                        # meter_stop [CUR TOTAL LABEL]
+# Leaves the block finished rather than mid-frame. The outcome is required, because the glyph
+# column is the one place that says which way it went and a spinner frame left in it reads as
+# a build still running.
+#
+# SUCCESS COLLAPSES THE BLOCK to its one finished line: the caption row is erased and the
+# cursor left on it, so the next thing printed starts on a clean row. FAILURE KEEPS BOTH
+# ROWS, because the caption names the step that failed and it belongs directly above the STOP
+# box -- and the bar stays where it stopped. Filling it to tot/tot, which this used to do,
+# drew a completed build immediately above the words "the build failed".
+meter_stop() {                        # meter_stop ok|bad [CUR TOTAL LABEL]
     [ -n "$METER_PID" ] || return 0
-    local cur='' tot='' label=''
-    # Read before deleting: with no arguments the closing frame is "whatever it had reached,
-    # complete", so the line is left finished rather than stopped mid-fill.
-    [ -f "$METER_STATE" ] && IFS=' ' read -r cur tot label < "$METER_STATE" 2>/dev/null
+    local outcome="$1"; shift
+    local cur='' tot='' retry='' label=''
+    [ -f "$METER_STATE" ] && IFS=' ' read -r cur tot retry label < "$METER_STATE" 2>/dev/null
     rm -f "$METER_STATE"
     kill "$METER_PID" 2>/dev/null
     wait "$METER_PID" 2>/dev/null || true
     METER_PID=''
-    if [ "$#" -ge 2 ]; then
-        meter_draw 0 "$1" "$2" "${3:-}"
-    elif [ "${tot:-0}" -gt 0 ] 2>/dev/null; then
-        meter_draw 0 "$tot" "$tot" ""
+    if [ "$#" -ge 2 ]; then cur="$1"; tot="$2"; label="${3:-$label}"; fi
+    cur="${cur:-0}"; tot="${tot:-0}"
+    # Before the final frame, not after: whatever the caller prints next -- a STOP box, a
+    # success box, a shell -- must have the cursor back, and on the failure path the very next
+    # thing is a die() that never returns here.
+    cursor_show
+    if [ "$outcome" = bad ]; then
+        meter_draw bad "$cur" "$tot" '-' "$label"
+        printf '\n'
+        return 0
     fi
-    printf '\n'
+    printf '\r%s[1A' "$ESC"
+    if [ "$tot" -gt 0 ] 2>/dev/null; then
+        printf '\r  %s %s  %s/%s  %s%s[K' "$(meter_glyph ok)" "$(meter_bar "$cur" "$tot")" \
+               "$cur" "$tot" "$label" "$ESC"
+    else
+        printf '\r  %s  %s%s[K' "$(meter_glyph ok)" "$label" "$ESC"
+    fi
+    printf '\r\n%s[K' "$ESC"
 }
+
+# ─── reading the Containerfile's steps ─────────────────────────────────────────
+# Where the meter's side text comes from. Each `####> text` line in the Containerfile labels
+# the instruction below it and every instruction after that until the next marker, so ~13
+# markers name all 23 steps.
+#
+# WHY THE LAUNCHER PARSES THE FILE AT ALL, rather than reading the labels out of the build
+# output: podman does not emit comments. A real build log is `STEP`, `--> Using cache`, `-->`
+# and `COMMIT`, nothing else, so a marker cannot reach us through the stream. Nor can an
+# `echo` inside a RUN -- a cache hit prints `--> Using cache` and never runs the command, so
+# the labels would vanish on exactly the warm builds and retries where a student is most
+# likely to be watching.
+#
+# ONE PARSER, TWO CALLERS. This is awk source shared by build_progress, which needs the table
+# in-process to label each step as it arrives, and by --dev-steps, which prints it for the
+# tests and for the release gate to diff against real podman. Duplicating it is how the two
+# would come to disagree about a continuation line, and a parse that disagrees with podman
+# silently names the wrong step for the rest of a build.
+#
+# COUNTING RULE, which is podman's: one instruction per line that is not blank, not a comment
+# and not the continuation of the line above. Comments are stripped BEFORE continuations are
+# joined, so a `#` line in the middle of a continued RUN does not end it. A line ending in a
+# backslash continues; a backslash followed by a space does not, which is why 10-static.sh
+# forbids that and heredocs, whose body lines this would miscount as instructions.
+#
+# The apostrophe rule from build_progress applies here too -- single-quoted shell string.
+CF_PARSE_AWK='
+function cf_squeeze(s) {              # podman-insensitive form: whitespace runs -> one space
+    gsub(/[ \t]+/, " ", s)
+    sub(/^ /, "", s); sub(/ $/, "", s)
+    return s
+}
+# cf_parse(FILE, label, text) -> instruction count, filling label[i] and text[i] 1-based.
+function cf_parse(f, label, text,   line, sticky, n, cont, buf) {
+    sticky = ""; n = 0; cont = 0; buf = ""
+    while ((getline line < f) > 0) {
+        sub(/\r$/, "", line)          # a Windows checkout must parse the same as a Unix one
+        if (line ~ /^[ \t]*####>/) {
+            # Inside a continuation this is just a comment, the same as podman sees it.
+            if (!cont) {
+                sticky = line
+                sub(/^[ \t]*####>[ \t]*/, "", sticky)
+                sub(/[ \t]+$/, "", sticky)
+            }
+            continue
+        }
+        if (line ~ /^[ \t]*#/) continue
+        if (cont) {
+            buf = buf line
+            cont = (line ~ /\\$/)
+            if (cont) sub(/\\$/, "", buf)
+            else      text[n] = cf_squeeze(buf)
+            continue
+        }
+        if (line ~ /^[ \t]*$/) continue
+        n++
+        label[n] = sticky
+        buf = line
+        cont = (line ~ /\\$/)
+        if (cont) sub(/\\$/, "", buf)
+        else      text[n] = cf_squeeze(buf)
+    }
+    close(f)
+    # A file that ends mid-continuation still has to yield the text it did read, or the last
+    # instruction would compare as empty against podman and blank the labels.
+    if (cont) text[n] = cf_squeeze(buf)
+    return n
+}
+'
 
 # ─── the build's progress bar ──────────────────────────────────────────────────
 # Turns `podman build`'s output into one line that moves (issue #23). What it replaces was
@@ -388,50 +581,84 @@ meter_stop() {                        # meter_stop [CUR TOTAL LABEL]
 # STOP box. Hiding the output without that change would have made the launcher tell a stuck
 # student to read something that is not there.
 #
-# `STEP i/N:` is podman's own numbering, so the total comes from podman rather than from a
-# count of Containerfile lines that would drift the moment one is added.
+# `STEP i/N:` is podman's own numbering, so the total that the bar COMMITS to comes from
+# podman rather than from a count of Containerfile lines that would drift the moment one is
+# added. The Containerfile count is used before that, as a provisional total, for the one
+# stretch where podman has said nothing yet: the base-image download, which is step 1 and the
+# slowest part of a cold install. Podman overrides it at STEP 1, so the worst a miscount can
+# do is show a wrong denominator during the download and then correct itself.
 #
 # NOT A TERMINAL -> no carriage returns, one line per step. A \r-redrawn bar in a CI log or
 # a `| tee build.txt` is an unreadable single line thousands of columns long, and this is
 # the exact path a student uses when staff ask them to send the output.
-build_progress() {
+build_progress() {                    # build_progress [RETRY] [FLOOR]
     local tty=0
     [ -t 1 ] && tty=1
-    LC_ALL=C awk -v tty="$tty" -v esc="$ESC" -v statef="$METER_STATE" '
+    LC_ALL=C awk -v tty="$tty" -v esc="$ESC" -v statef="$METER_STATE" \
+            -v cf="$CONTAINERFILE" -v notef="$BUILD_NOTE" \
+            -v retry="${1:--}" -v floor="${2:-0}" -v injected=1 "$CF_PARSE_AWK"'
         function rep(s, n,  o) { o = ""; while (n-- > 0) o = o s; return o }
         # On a terminal this RECORDS rather than draws: meter_animate owns the line, so that
         # it keeps moving between steps instead of freezing for the length of one. close()
         # after every write, not fflush -- awk appends to an open handle, so without the
         # close the file would grow and the animator would keep reading the first, stalest
         # line forever.
-        function state(c, t, l) {
-            printf "%d %d %s\n", c, t, l > statef
+        #
+        # RETRY IS THE THIRD FIELD, ahead of the label, because the reader is a shell
+        # `read -r cur tot retry label` and the last variable is the one that collects the
+        # rest of the line -- so the label, which has spaces, has to be last. It is never
+        # empty for the same reason: a bare "-" holds the column when there is no retry.
+        function state(c, t, r, l) {
+            printf "%d %d %s %s\n", c, t, r, l > statef
             close(statef)
         }
-        function draw(  filled) {
+        function draw(  filled, mark) {
             if (tot <= 0) return
-            if (tty) { state(cur, tot, label); return }
+            if (tty) { state(cur, tot, retry, label); return }
             filled = int(width * cur / tot + 0.5)
-            printf "  [%s%s]  %d/%d\n", rep("█", filled), rep("░", width - filled), cur, tot
+            mark = (retry == "-" ? "" : "  (retrying: " retry ")")
+            printf "  [%s%s]  %d/%d  %s%s\n", rep("█", filled), rep("░", width - filled),
+                                              cur, tot, label, mark
             fflush()
         }
-        BEGIN { width = 40; cur = 0; tot = 0; pulled = 0; label = "" }
-        # Pulling the base image happens BEFORE step 1 and is the slowest part of a cold
-        # build on slow wifi, so it gets a note rather than sitting behind an empty bar. One
-        # note, not one per blob: podman emits a line per layer per percentage.
+        BEGIN {
+            width = 40; cur = 0; tot = 0; pulled = 0; label = ""
+            ninstr = cf_parse(cf, cflabel, cftext)
+            labels_ok = (ninstr > 0)
+            # THE BAR EXISTS FROM THE FIRST FRAME, which is the whole reason the parse
+            # happens. podman announces its own step count only after the download, so a
+            # total taken from podman alone leaves the longest phase of a cold install with
+            # no bar -- which is what this replaced. Plus injected for the LABEL step podman
+            # synthesizes from our own --label flag, plus one for creating the container.
+            #
+            # THIS IS THE ONE LABEL SHOWN BEFORE PODMAN CONFIRMS ANYTHING, and it cannot be
+            # otherwise: naming the download means naming it while podman is still silent.
+            # If the parse turns out to be wrong, the check below takes every label away at
+            # the first STEP line -- so the exposure is bounded by the download itself.
+            #
+            # STARTS AT floor ON A RETRY, not at 1. This runs again for every attempt, and an
+            # opening frame of "1/24, downloading the base image" would rewind the bar and
+            # rename the step for the few milliseconds before the first STEP line arrives --
+            # brief, but it is the exact impression holding the bar at floor exists to avoid.
+            if (tty && ninstr > 0) {
+                cur = (floor > 1 ? floor : 1)
+                tot = ninstr + injected + 1
+                label = cflabel[cur > ninstr ? ninstr : cur]
+                state(cur, tot, retry, label)
+            }
+        }
+        # Pulling the base image happens during step 1 -- podman resolves FROM by pulling,
+        # and prints this chatter before it prints STEP 1 -- so the label is already right
+        # and there is nothing to do here but keep it to ONE note. podman emits a line per
+        # layer per percentage otherwise.
         #
-        # ON A TERMINAL THIS IS A LABEL, NOT A LINE. Printed as its own line with a trailing
-        # newline, it stranded the note on one row and left the bar to start on the row below
-        # -- so a cold build showed two rows where the bar is meant to be one. It is now
-        # handed to the meter, which shows it beside the animation until a bar exists and then
-        # replaces it. Piped, there is nothing to overdraw, so it stays a plain line.
+        # ON A TERMINAL THERE IS NOTHING TO PRINT AT ALL now: the meter is already showing
+        # step 1 of N with this label beside it. Piped, there is no meter and no other output
+        # until STEP 1 lands minutes later, so the note stays a plain line there.
         /^(Trying to pull|Getting image source signatures|Copying blob|Copying config)/ {
             if (!pulled) {
                 pulled = 1
-                label = "Downloading the base image..."
-                if (tty) state(0, 0, label)
-                else     printf "  Downloading the base image...\n"
-                fflush()
+                if (!tty && label != "") { printf "  %s\n", label; fflush() }
             }
             next
         }
@@ -444,9 +671,38 @@ build_progress() {
             # NOTE FOR THE NEXT EDITOR: this whole awk program is inside a single-quoted
             # shell string, so an apostrophe in a comment here ENDS it and the launcher stops
             # parsing. Write "does not" rather than "doesn t".
-            cur = a[1] + 0; tot = a[2] + (tty ? 1 : 0)
-            # The note has served its purpose once a step exists to report.
+            n = a[1] + 0; tot = a[2] + (tty ? 1 : 0)
+            # THE BAR DOES NOT GO BACKWARDS ON A RETRY. A retried build re-runs from step 1
+            # and replays every completed step from the layer cache in about a second, so the
+            # honest reading is not "we lost that progress" -- the work is done and on disk --
+            # it is "we are having another go at the step that failed". floor is that step.
+            cur = (n > floor ? n : floor)
+            # And the marker goes once the retry has served its purpose.
+            if (n > floor) retry = "-"
+            # THE LABEL IS ONLY SHOWN WHEN PODMAN CONFIRMS THE STEP. podman echoes the
+            # instruction on this line, so the mapping is checkable rather than merely
+            # believed: if what it echoes is not the instruction we think step n is, our
+            # parse of the Containerfile has drifted and every label after this one would
+            # name the wrong thing. A missing label is unhelpful; a wrong one is a lie.
+            #
+            # Steps past ninstr are skipped, not failed: the last one is the LABEL podman
+            # synthesizes from --label, which has no line in the file to match, so checking
+            # it would blank the labels on every build there has ever been.
+            if (labels_ok && n <= ninstr) {
+                got = cf_squeeze(substr($0, index($0, ": ") + 2))
+                if (got != cftext[n]) {
+                    labels_ok = 0
+                    # Leading newline: podman does not always end its last line with one, and
+                    # this gets appended to that log rather than to a fresh file.
+                    printf "\ncs193v: step %d is not the instruction the launcher parsed, so the\n", n >> notef
+                    printf "cs193v: progress labels were switched off for the rest of this build.\n" >> notef
+                    printf "cs193v:   podman: %s\n", got       >> notef
+                    printf "cs193v:   parsed: %s\n", cftext[n] >> notef
+                    close(notef)
+                }
+            }
             label = ""
+            if (labels_ok) label = cflabel[cur > ninstr ? ninstr : cur]
             draw()
             next
         }
@@ -697,6 +953,12 @@ TUNNEL_ID="$(printf '%s\n' "$DIR" "$INSTANCE" | sha_stdin | cut -c1-12)"
 # grow without bound. Not cleaned up on exit deliberately: after a failed build it is the
 # thing to ask a student for, and the next build truncates it anyway.
 BUILD_LOG="${TMPDIR:-/tmp}/cs193v-build-$TUNNEL_ID.log"
+# Anything build_progress needs to tell staff rather than the student -- currently only a
+# label/instruction mismatch. A SEPARATE FILE, folded into $BUILD_LOG once podman has
+# finished, rather than appended to it directly: tee holds that file open at its own offset
+# and does not use O_APPEND, so a concurrent append from awk would be overwritten by tee's
+# next write. It cannot go to the screen either, on a terminal that belongs to the meter.
+BUILD_NOTE="$BUILD_LOG.note"
 # Set CS193V_BUILD_RAW=1 for podman's raw output instead of build_progress. Staff only, and it
 # earns its keep on a build that HANGS -- the one failure $BUILD_LOG cannot be read for
 # afterwards, because a bar shows nothing and the log is never written.
@@ -921,6 +1183,23 @@ require_image() {
     pmq image exists "$IMAGE" || die "$(msg err.no-image)"
 }
 
+# The step the last build attempt reached, so a retry can hold the bar there instead of
+# rewinding it. Read from the log rather than from the meter, because the meter is only
+# running on a terminal and the number is wanted either way.
+build_last_step() {                   # -> step number reached, or 0
+    local n
+    n="$(sed -n 's/^STEP \([0-9]*\)\/.*/\1/p' "$BUILD_LOG" 2>/dev/null | tail -n 1)"
+    case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
+}
+
+# Whatever build_progress had to say to staff, moved into the log now that tee has let go of
+# it. See BUILD_NOTE for why it cannot be written there directly.
+build_note_fold() {
+    [ -s "$BUILD_NOTE" ] || return 0
+    cat "$BUILD_NOTE" >> "$BUILD_LOG" 2>/dev/null || true
+    rm -f "$BUILD_NOTE"
+}
+
 # `podman build`, plus the label that makes staleness detectable.
 #
 # Deliberately NOT wrapped in run_timeout, unlike run. run_timeout exists to stop a SILENT
@@ -930,7 +1209,7 @@ require_image() {
 # most of it.
 build_image() {
     [ -f "$CONTAINERFILE" ] || die "$(msg err.no-containerfile FILE="$CONTAINERFILE")"
-    local nocache='' attempt=1 tries=3 hash
+    local nocache='' attempt=1 tries=3 hash retry='-' floor=0
     # --no-cache retries once only. The retry below is worth having because podman keeps
     # every completed layer, so a second attempt resumes at the step that failed -- and
     # --no-cache is precisely the flag that throws that away, so retrying it would mean
@@ -938,9 +1217,12 @@ build_image() {
     [ "${1:-}" = "--no-cache" ] && { nocache='--no-cache'; tries=1; }
     hash="$(build_hash)"
     info "$(msg status.building IMAGE="$IMAGE")"
-    # Started before podman, with no total yet: on a cold build the base-image pull comes
-    # first and there is no step count to show until STEP 1 arrives. build_progress fills
-    # both in as it reads.
+    rm -f "$BUILD_NOTE"
+    # Started before podman with no total, and build_progress fills both the total and the
+    # first label in from its own parse of the Containerfile within milliseconds of the
+    # pipeline coming up. Deliberately not computed here as well: the arithmetic for what the
+    # total is -- instructions, plus podman's injected LABEL step, plus creating the
+    # container -- belongs in exactly one place.
     [ -n "$BUILD_RAW" ] || meter_start 0 ""
 
     # THE RETRY LIVES HERE, not in the installer, and that placement is the point. This
@@ -977,14 +1259,23 @@ build_image() {
             podman build $nocache \
                     --label "cs193v.buildhash=$hash" \
                     -t "$IMAGE" -f "$CONTAINERFILE" "$PRIVATE" 2>&1 \
-                | tee "$BUILD_LOG" | build_progress
+                | tee "$BUILD_LOG" | build_progress "$retry" "$floor"
         fi
         # The meter deliberately stays RUNNING on success: create_container is the next
         # step and shares this bar (issue #24), so the line is closed there rather than here.
         #
         # BUILT earns the success box: verb_rebuild recreates whether or not it built, and a
         # two-second recreate must not announce "Build Successful!".
-        [ "${PIPESTATUS[0]}" -eq 0 ] && { BUILT=1; return 0; }
+        #
+        # build_note_fold on BOTH arms, before anything else looks at the log: a mismatch note
+        # is worth having whether the build then succeeded or failed, and on the failing arm the
+        # tail that goes inside the STOP box is read from $BUILD_LOG a few lines down.
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+            build_note_fold
+            BUILT=1
+            return 0
+        fi
+        build_note_fold
 
         # OUT OF DISK IS READ FROM PODMAN'S MESSAGE, not inferred from free space, and that
         # distinction was measured rather than reasoned about. An earlier version asked
@@ -996,19 +1287,35 @@ build_image() {
         #
         # It also must not be retried: retrying only spends the student's time twice to
         # arrive at the same wall.
-        meter_stop
+        #
+        # THE METER IS CLOSED ONLY ON THE WAY TO A BOX, not on every failure, which is the
+        # difference between this and what it did before. A retry keeps the same block on the
+        # screen and changes what it says; tearing it down and starting another one left a
+        # finished-looking bar stranded above three lines of yellow text, once per attempt.
         if grep -qi 'no space left on device' "$BUILD_LOG" 2>/dev/null; then
+            meter_stop bad
             die "$(msg err.build-no-disk)"
         fi
         # The failing output goes INSIDE the box now. It used to be left on the screen and
         # pointed at ("Podman's own output is above this box"), which stopped being true the
         # moment build_progress took the screen over. The tail, not the whole log: the last
         # lines are the ones that name the failure, and the box wraps rather than spills.
-        [ "$attempt" -ge "$tries" ] &&
+        if [ "$attempt" -ge "$tries" ]; then
+            meter_stop bad
             die "$(msg err.build-failed OUT="$(tail -n 12 "$BUILD_LOG" 2>/dev/null)")"
+        fi
+        # THE RETRY IS REPORTED BESIDE THE BAR, not underneath it. What was here was three
+        # lines of yellow prose per attempt, which scrolled the meter up the screen and put a
+        # warning a student cannot act on in front of a build that then went on to succeed.
+        # The marker says the same thing in the same place, and it counts RETRIES rather than
+        # attempts: tries=3 means two of them.
+        #
+        # floor holds the bar at the step that failed while podman replays the cached steps
+        # ahead of it, which takes about a second and would otherwise look like losing the
+        # whole build.
+        floor="$(build_last_step)"
         attempt=$(( attempt + 1 ))
-        warn "$(msg warn.build-retry ATTEMPT="$attempt" TRIES="$tries")"
-        [ -n "$BUILD_RAW" ] || meter_start 0 ""
+        retry="$(( attempt - 1 ))/$(( tries - 1 ))"
     done
 }
 
@@ -1043,7 +1350,7 @@ create_container() {
     fi
     if ! run_timeout 180 podman run ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$IMAGE"; then
         RT_SPIN=''
-        meter_stop
+        meter_stop bad
         # Out of disk gets its own message HERE as well as in build_image, because creating
         # the container is a second, separate disk cost and a surprisingly large one:
         # --userns=keep-id makes podman write an ID-MAPPED COPY of every layer, so a
@@ -1080,7 +1387,7 @@ create_container() {
     fi
     RT_SPIN=''
     if [ "${mtot:-0}" -gt 0 ] 2>/dev/null; then
-        meter_stop "$mtot" "$mtot" "$(msg status.created)"
+        meter_stop ok "$mtot" "$mtot" "$(msg status.created)"
     else
         info "$(msg status.created)"
     fi
@@ -1916,6 +2223,26 @@ verb_print_command() {
     printf ' %s\n' "$IMAGE"
 }
 
+# What the meter thinks the build is going to do, as a table: index, label, instruction text.
+# The seam the parser is tested through -- buried inside build_progress it could only be
+# reached by running a whole build, which is the wrong granularity for "does a comment inside
+# a continuation end it". 15-containerfile-parse.sh drives this with fixture Containerfiles,
+# and 00-release-gates.sh diffs it against the STEP lines of a real podman build, which is the
+# only check that can prove the parse and podman agree.
+#
+# Plain strings rather than messages.txt keys, like the other --dev verbs: that catalogue is
+# for students.
+verb_dev_steps() {
+    local f="${1:-$CONTAINERFILE}"
+    [ -f "$f" ] || die "$(msg err.no-containerfile FILE="$f")"
+    LC_ALL=C awk -v cf="$f" "$CF_PARSE_AWK"'
+        BEGIN {
+            n = cf_parse(cf, label, text)
+            for (i = 1; i <= n; i++) printf "%d\t%s\t%s\n", i, label[i], text[i]
+        }
+    '
+}
+
 usage() {
     msg help.usage
 }
@@ -1955,6 +2282,9 @@ case "${1:-}" in
     # "$@", not "${1:-}": the two modifiers are independent and may be given together.
     --rebuild)           shift; verb_rebuild "$@" ;;
     --dev-print-command) verb_print_command ;;
+    # No preflight: this one reads the Containerfile and nothing else, which is what lets the
+    # unit tier drive it with no podman on PATH at all.
+    --dev-steps)         shift; verb_dev_steps "${1:-}" ;;
     -h|--help|help)      usage ;;
     *)                   usage; exit 2 ;;
 esac

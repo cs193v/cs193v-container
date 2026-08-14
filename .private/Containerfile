@@ -20,6 +20,21 @@
 # re-ran 18 of 23 steps, because an in-scope ARG is part of every later step's cache key.
 # Ordering alone buys nothing. 10-static.sh asserts the placement.
 #
+# `####>` LINES ARE THE PROGRESS METER'S SIDE TEXT, not ordinary comments. Each one names the
+# instruction below it and every instruction after that until the next marker, so a student
+# watching `./cs193v --rebuild` reads "Installing Chromium..." beside the bar instead of nothing.
+# The launcher parses them out of this file (see CF_PARSE_AWK in ../cs193v) because podman
+# does not emit comments and does not re-run a cached RUN, so there is no way to get this text
+# out of the build itself.
+#
+# Three rules, all enforced by 10-static.sh:
+#   - a marker sits directly above a top-level instruction, never inside a `\` continuation;
+#   - the first one is above FROM, so the label is never blank;
+#   - no heredocs and no `# escape=` anywhere in this file -- the parser counts instructions
+#     line by line, and either one would shift every label after it.
+# Rewording one is free logic-wise, but it changes cs193v.buildhash and so prompts every
+# student to rebuild. Batch reword with a change that warrants a rebuild anyway.
+#
 # Everything below is deliberate; see CONTAINER-DESIGN.md for the reasoning.
 
 # Pinned by MANIFEST-LIST digest, not a per-architecture one, so this single line serves
@@ -41,6 +56,7 @@
 # Note that `podman manifest inspect` and `skopeo` both REFUSE a `tag@digest` reference
 # ("references with both a tag and digest are currently not supported"), which is why
 # 00-release-gates.sh strips the tag before it verifies this line.
+####> Downloading the base image...
 FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
 
 # ─── Pinned inputs ─────────────────────────────────────────────────────────────
@@ -66,6 +82,7 @@ FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914
 #
 # DEBIAN_FRONTEND is the exception that proves it: it stays global because every apt layer
 # needs it and its value never changes, so it never invalidates anything.
+####> Installing system packages...
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +173,7 @@ RUN apt-get update \
 # that drops the default user — and userdel removes the primary group with the user when
 # nothing else uses it, which is why the group check comes after and is separate.
 # ─────────────────────────────────────────────────────────────────────────────
+####> Creating the student account...
 RUN set -eux; \
     if getent passwd 1000 >/dev/null; then \
       existing_user="$(getent passwd 1000 | cut -d: -f1)"; \
@@ -214,6 +232,7 @@ RUN set -eux; \
 # who installs in week 6 -- which matters now that students build rather than pull. Re-check
 # with `apt-cache madison nodejs` before assuming it of a future major.
 # ─────────────────────────────────────────────────────────────────────────────
+####> Installing Node...
 ARG NODE_VERSION=24.18.1
 RUN set -eux; \
     install -d -m 0755 /etc/apt/keyrings; \
@@ -238,6 +257,7 @@ RUN set -eux; \
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 3 — GitHub CLI
 # ─────────────────────────────────────────────────────────────────────────────
+####> Installing the GitHub CLI...
 RUN set -eux; \
     mkdir -p /etc/apt/keyrings; \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -292,6 +312,7 @@ RUN set -eux; \
 # 1.61.0; 1.60 and earlier resolve this base image to ubuntu24.04 and are unsupported on it.
 # Verified by grepping playwright-core's bundle: 0 hits in 1.58 and 1.60, 28 in 1.61 and
 # 1.62.1. The devcontainer this came from is on Ubuntu 24.04 and so never met this limit.
+####> Installing Playwright...
 ARG PLAYWRIGHT_VERSION=1.62.1
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g 'playwright@${PLAYWRIGHT_VERSION}'"; \
@@ -330,6 +351,7 @@ RUN set -eux; \
 #
 # The probe is written and deleted in THIS layer. Deleted in a later one, it would still ship.
 # ─────────────────────────────────────────────────────────────────────────────
+####> Installing Chromium...
 RUN set -eux; \
     su student -s /bin/sh -c '/home/student/.local/bin/playwright install --only-shell chromium'; \
     CHROME_BIN="$(find /home/student/.cache/ms-playwright -type f \
@@ -355,6 +377,7 @@ RUN set -eux; \
 # download over dorm wifi, and it was inflating this layer and the next by roughly 150 MB
 # each. It is the STUDENT's cache that has to be cleaned now -- /home/student/.npm, not
 # /root/.npm -- because the install runs as the student. 50-image.sh measures both.
+####> Installing the Vercel CLI...
 ARG VERCEL_VERSION=58.8.0
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g 'vercel@${VERCEL_VERSION}'"; \
@@ -378,6 +401,7 @@ RUN set -eux; \
 # further down, which does NOT prove the installed Claude Code accepts its schema. Bumping
 # this means re-testing that pair. Declared here rather than at the top of the file so the
 # bump does not invalidate the whole build -- see the note beside DEBIAN_FRONTEND.
+####> Installing Claude Code...
 ARG CLAUDE_CODE_VERSION=2.1.225
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}'"; \
@@ -394,10 +418,12 @@ RUN set -eux; \
 # PIPX_HOME/PIPX_BIN_DIR are set INLINE, not as ENV: as ENV they would persist into the
 # runtime and point a student's own `pipx install` at root-owned /usr/local, where it
 # would fail.
+####> Installing tldr...
 RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin \
     pipx install tldr \
  && tldr --version
 
+####> Adding the course files...
 COPY files/ /tmp/cs193v-files/
 
 # NOTE ON STYLE: no `#` comments inside the RUN below. The Dockerfile parser does strip
@@ -561,11 +587,13 @@ RUN set -eux; \
 # an empty or half-written cache. The real cache holds ~7400 pages; 1000 is a floor low
 # enough not to be brittle if upstream reorganises, high enough that a failed or truncated
 # fetch cannot pass.
+####> Caching the tldr pages...
 RUN set -eux; \
     su student -s /bin/sh -c 'tldr --update'; \
     test "$(find /home/student/.cache/tldr -type f | wc -l)" -gt 1000; \
     su student -s /bin/sh -c 'tldr tar' > /dev/null
 
+####> Finishing up...
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     PATH=/home/student/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \

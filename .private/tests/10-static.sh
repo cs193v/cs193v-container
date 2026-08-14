@@ -70,6 +70,67 @@ assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0} {cont=0}' $PRIVATE/Containerfile)"
 assert_eq  "containerfile:no-comments-in-continuations" "" "$bad"
 
+# ─── what the progress meter's labels depend on ────────────────────────────────
+# The launcher parses this file line by line to learn what each step is called (`####>`
+# markers) and to check, against the instruction podman echoes, that it is looking at the step
+# it thinks it is. Everything below is a construct that would silently shift that numbering.
+# None of it is used here, and forbidding it is cheaper than teaching the parser Dockerfile
+# syntax this file has no reason to contain.
+
+# HEREDOCS ARE THE DANGEROUS ONE. podman supports `RUN <<EOF`, and a line-based parse counts
+# every line of the body as another instruction -- so one heredoc would misname every step
+# after it, and the mismatch check would switch the labels off for the rest of the build.
+bad="$(grep -nE '^[[:space:]]*(RUN|COPY|ADD)[[:space:]].*<<-?[A-Za-z_"'"'"']' $PRIVATE/Containerfile || true)"
+assert_eq  "containerfile:no-heredocs" "" "$bad"
+
+# `# escape=` changes the line-continuation character out from under the parser, which decides
+# where one instruction ends and the next begins.
+bad="$(grep -nE '^[[:space:]]*#[[:space:]]*escape[[:space:]]*=' $PRIVATE/Containerfile || true)"
+assert_eq  "containerfile:no-escape-directive" "" "$bad"
+
+# A backslash followed by trailing whitespace continues nothing -- docker does not treat it as
+# a continuation -- but it reads exactly like one, so the parser and the human would disagree
+# about how many instructions the file has.
+bad="$(grep -nE '\\[[:space:]]+$' $PRIVATE/Containerfile || true)"
+assert_eq  "containerfile:no-space-after-a-continuation" "" "$bad"
+
+# A blank line inside a continuation is the one case where podman's own behaviour is not worth
+# depending on, so it is forbidden rather than handled.
+bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*$/{print FILENAME":"NR": blank line inside a continuation"} {cont=0}' \
+       $PRIVATE/Containerfile)"
+assert_eq  "containerfile:no-blank-lines-in-continuations" "" "$bad"
+
+# A marker must sit above a top-level instruction. Inside a continuation it is only a comment,
+# so podman ignores it and the step it was meant to name goes unnamed.
+bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*####>/{print FILENAME":"NR": "$0} {cont=0}' \
+       $PRIVATE/Containerfile)"
+assert_eq  "containerfile:no-markers-in-continuations" "" "$bad"
+
+# THE FIRST MARKER MUST PRECEDE FROM, or step 1 -- the base-image download, the longest part of
+# a cold install -- is the one step with no name beside its bar.
+first_marker="$(grep -nE '^[[:space:]]*####>' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
+first_instr="$(grep -nE '^[[:space:]]*FROM[[:space:]]' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
+if [ -n "$first_marker" ] && [ -n "$first_instr" ] && [ "$first_marker" -lt "$first_instr" ]; then
+    pass "containerfile:a-marker-precedes-FROM"
+else
+    fail "containerfile:a-marker-precedes-FROM" \
+         "first ####> is at line ${first_marker:-none}, FROM is at line ${first_instr:-none}"
+fi
+
+# EVERY STEP IS NAMED, checked through the launcher's own parser rather than by counting
+# markers here -- a second implementation of the counting rule is exactly how the two would
+# come to disagree. Markers are sticky, so this fails only when a section is added ahead of
+# the first marker, which cannot happen, or when the closing marker is removed.
+unnamed="$("$REPO/cs193v" --dev-steps | awk -F'\t' '$2 == "" { print $1": "$3 }')"
+assert_eq  "containerfile:every-step-has-a-label" "" "$unnamed"
+
+# The tail of the file -- ENV, USER, WORKDIR, ENTRYPOINT and the LABEL podman synthesizes from
+# the launcher's --label flag -- has no marker of its own and inherits the last one. That is
+# only correct if the last marker is a closing one rather than the name of a specific job, so
+# a student is not told the build is "Caching the tldr pages..." while it sets WORKDIR.
+last_label="$("$REPO/cs193v" --dev-steps | tail -1 | cut -f2)"
+assert_eq  "containerfile:closing-marker-covers-the-tail" "Finishing up..." "$last_label"
+
 # Whole-line comments blanked, line NUMBERS preserved, so an ordering check cannot match the
 # Containerfile's own prose about the thing it is checking. Layer 2's comment contains the
 # words "every `npm install -g` in this file depends on them", which is exactly that trap —

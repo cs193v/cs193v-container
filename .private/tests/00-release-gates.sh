@@ -104,8 +104,56 @@ record "build:NODE_VERSION" "$nv"
 # several GB free and many minutes. Run it on a machine with room before the quarter.
 if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
     assert_ok "build:no-cache-build-succeeds" "$REPO/cs193v" --rebuild --no-cache
+
+    # ─── 4b. the launcher and podman agree about what the steps ARE ────────────
+    # THE ONE PLACE THIS CAN BE SETTLED. The progress meter names each step from `####>`
+    # markers in the Containerfile, which means the launcher numbers that file's instructions
+    # itself and trusts its own numbering to pick the label for `STEP n/N`. Nothing on a
+    # student's machine can be allowed to fail over a disagreement -- a label is not
+    # load-bearing, so the launcher drops the labels and finishes the build -- and that is
+    # exactly why the disagreement has to be a hard failure HERE instead, in staff's hands,
+    # with real podman and the real Containerfile.
+    #
+    # 15-containerfile-parse.sh pins the parsing RULES against fixtures in half a second. It
+    # cannot pin them against podman, because only podman knows what podman does.
+    log="$(ls -t "${TMPDIR:-/tmp}"/cs193v-build-*.log 2>/dev/null | head -1)"
+    if [ -z "$log" ]; then
+        fail "steps:build-log-was-found" "no cs193v-build-*.log in ${TMPDIR:-/tmp} after a build"
+    else
+        record "steps:build-log" "$log"
+        # Squeezed on both sides, the way the launcher compares them: podman deletes the
+        # backslash-newline of a continued instruction and keeps every other byte, so the
+        # joined text differs from ours only in runs of whitespace.
+        podman_steps="$(sed -n 's/^STEP \([0-9]*\)\/[0-9]*: /\1\t/p' "$log" \
+                        | awk -F'\t' '{ t = $2; gsub(/[ \t]+/, " ", t)
+                                        sub(/^ /, "", t); sub(/ $/, "", t); print $1"\t"t }')"
+        n_podman="$(sed -n 's/^STEP [0-9]*\/\([0-9]*\):.*/\1/p' "$log" | head -1)"
+        ours="$("$REPO/cs193v" --dev-steps | cut -f1,3)"
+        n_ours="$(printf '%s\n' "$ours" | wc -l | tr -d ' ')"
+
+        # podman adds one step of its own: the LABEL it synthesizes from the launcher's
+        # --label cs193v.buildhash flag, which has no line in the Containerfile. It lands
+        # LAST, which is what keeps every parsed label correct without the two totals ever
+        # having to match -- so this asserts the relationship rather than a number.
+        record "steps:counts" "containerfile=$n_ours podman=$n_podman"
+        assert_eq "steps:podman-adds-only-the-injected-label" \
+                  "$(( n_ours + 1 ))" "${n_podman:-0}"
+
+        # And every instruction podman announced is the one we think it is. This is the
+        # assertion that a heredoc, an `# escape=` directive or a mishandled continuation
+        # would break, and the only one that would notice.
+        diff_out="$(diff <(printf '%s\n' "$podman_steps" | head -n "$n_ours") \
+                         <(printf '%s\n' "$ours") 2>&1 || true)"
+        assert_eq "steps:every-instruction-matches-podman" "" "$diff_out"
+
+        # A build that had to switch the labels off says so in the log; on a build of the
+        # real Containerfile by real podman it never should.
+        assert_eq "steps:labels-were-not-switched-off" "0" \
+                  "$(grep -c 'not the instruction the launcher parsed' "$log" || true)"
+    fi
 else
     skip "build:no-cache-build-succeeds" "set CS193V_RELEASE_BUILD=yes (needs ~6 GB free and many minutes)"
+    skip "steps:every-instruction-matches-podman" "needs the real build above"
 fi
 
 # ─── 5. the published checksums the install docs promise ───────────────────────
