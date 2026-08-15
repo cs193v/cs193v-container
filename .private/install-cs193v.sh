@@ -118,7 +118,6 @@ cat <<EOF
 
   Useful later:
       ./cs193v doctor     a report to paste if you ask staff for help
-      ./cs193v ports      why can't my browser see my server?
       ./cs193v --stop     stop it if a window was closed unexpectedly
   ────────────────────────────────────────────────────────────────────
 

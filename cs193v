@@ -1146,8 +1146,8 @@ tunnel_keys() {
 }
 
 # Every port to forward, one per line, from the CS193V_PORTS value in container.args. Derived
-# rather than declared a second time: the in-container `ports` command compares listening
-# sockets against the same value, and a mismatch would make it give confidently wrong advice.
+# rather than declared a second time: the same value is handed to the container through -e, so
+# what a student is told reaches their browser and what is actually forwarded cannot disagree.
 # The LAST occurrence wins, matching podman's own last--e-wins behaviour, so local.args can
 # move one developer's instance out of another's way.
 tunnel_ports() {
@@ -1591,11 +1591,6 @@ open_shell() {
 }
 
 # ─── verbs ─────────────────────────────────────────────────────────────────────
-verb_ports() {
-    [ "$(state)" = running ] || die "$(msg err.not-running)"
-    exec podman exec -it -e "TERM=$(safe_term)" "$NAME" ports
-}
-
 verb_doctor() {
     printf '%sCS193V container report%s\n' "$C_CYAN" "$C_OFF"
     printf '%s\n' "-------------------------------------------------------------"
@@ -1718,11 +1713,11 @@ tmux_doctor() {
     done
 }
 
-# The tunnel's state is now the ONLY place host-side forwarding is visible, which makes this
+# The tunnel's state is the ONLY place host-side forwarding is visible, which makes this
 # load-bearing for support rather than decorative. It replaced a `podman port` count, and the
-# difference matters: the in-container `ports` command reads /proc/net/tcp and so cannot see
-# whether a forward exists on the host at all. When a student says "ports says OK but my
-# browser cannot reach it", this report is the answer, and nothing else is.
+# difference matters: nothing inside the container can see whether a forward exists on the host
+# at all, so when a student's server is listening on a forwarded port and their browser still
+# cannot reach it, this report is the answer, and nothing else is.
 tunnel_doctor() {
     local want busy nbusy port pid
     if tunnel_alive; then
@@ -1928,7 +1923,7 @@ usage() {
 # command. Nobody is attached when it finishes, so "running" always means "somebody is in
 # there", and a running container with nothing attached is a force-quit leftover.
 #
-# ports, doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
+# doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
 # its whole purpose is fixing the tunnel WHILE a session is live.
 #
 # The same invariant decides where the TUNNEL is raised, and it is raised here, once. It used to
@@ -1948,7 +1943,6 @@ case "${1:-}" in
                          load_args; require_image; ensure_container
                          ensure_tunnel || true
                          open_shell ;;
-    ports)               preflight; verb_ports ;;
     doctor)              verb_doctor ;;
     --stop)              verb_stop ;;
     --reset-tunnel)      verb_reset_tunnel ;;

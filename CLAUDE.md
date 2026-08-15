@@ -55,7 +55,7 @@ Do not kill the other developer's tunnel. To get out of the way, override `CS193
 -e CS193V_PORTS=13000-13009,14173-14176,15173-15179,16173-16182,18000-18009,18080-18084
 ```
 
-That moves both the forwards and what the in-container `ports` command expects.
+That moves both the forwards and the list the container is told about.
 
 **This got a lot better with issue #41, but it did not go away.** Closing your terminal window now
 stops your container *and* takes its tunnel down, handing all 46 ports back — so the usual cause of

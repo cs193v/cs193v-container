@@ -130,7 +130,7 @@
 #     reports the ones it could not take. See ensure_tunnel in the launcher.
 #
 # The port LIST itself lives in CS193V_PORTS below -- one declaration, used both to build the
-# forwards and to tell `ports` what to expect, so the two cannot disagree.
+# forwards and to tell the container which ones they are, so the two cannot disagree.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
 # Four volumes holding logins, and ONE holding a package cache. That last one is an
@@ -162,14 +162,14 @@
 
 # ─── Environment ───────────────────────────────────────────────────────────────
 # THE port list, and the only one. The launcher parses this line to build its ssh -L
-# forwards, and passes the same value into the container for `ports` to compare listening
-# sockets against.
+# forwards, and passes the same value into the container so a student -- or the agent
+# answering their question -- can see which ports reach their browser.
 #
 # It used to have to stay in step with a parallel set of -p lines, and tests/10-static.sh
-# asserted that agreement, because a drifted `ports` gives confidently wrong advice -- worse
-# than no advice. Deriving the forwards from this line instead makes that drift STRUCTURALLY
-# IMPOSSIBLE, so the test was deleted rather than rewritten. The remaining drift risk is the
-# ranges quoted in the managed CLAUDE.md, which is still checked at edit time.
+# asserted that agreement, because a list that disagreed with the forwards gives confidently
+# wrong advice -- worse than no advice. Deriving the forwards from this line instead makes that
+# drift STRUCTURALLY IMPOSSIBLE, so the test was deleted rather than rewritten. The remaining
+# drift risk is the ranges quoted in the managed CLAUDE.md, which is still checked at edit time.
 #
 # All >= 1024 (rootless podman refused privileged host ports, and an unprivileged ssh client
 # cannot bind them either) and avoiding 5000 and 7000, which macOS AirPlay Receiver occupies.
@@ -184,7 +184,7 @@
 #
 # Still hashed into cs193v.confighash, so changing it still prompts a recreate. It NEED not
 # be -- forwards are negotiated per session now -- but this value reaches the container
-# through -e at create time, so decoupling them would leave `ports` describing a set that is
+# through -e at create time, so decoupling them would leave the container naming a set that is
 # no longer forwarded. A deliberate non-goal, not an oversight.
 -e CS193V_PORTS=3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
 

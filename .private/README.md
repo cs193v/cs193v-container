@@ -27,7 +27,6 @@ projects/                      the student's work; the only directory shared wit
     cs193v-goodbye             the goodbye on exit
     tmux/tmux.conf             the beginner-locked tmux configuration
     tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
-    ports                      the in-container port diagnostic
     open-url                   the $BROWSER stub
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
@@ -202,9 +201,9 @@ applies to a repeated `-e`):
 ```
 
 The launcher derives its `ssh -L` forwards from that value, so one line moves both the
-forwards and what `ports` expects. This only works because there are no `-p` lines left:
-`local.args` is *appended*, so a second set of `-p` flags used to add mappings rather than
-replace them, and moving ports this way was impossible.
+forwards and the list the container is told about. This only works because there are no `-p`
+lines left: `local.args` is *appended*, so a second set of `-p` flags used to add mappings
+rather than replace them, and moving ports this way was impossible.
 
 One gotcha when you bump `PLAYWRIGHT_VERSION`: the browser lives in the `cs193v-playwright`
 volume, and podman seeds a volume from the image only while the volume is EMPTY. So a

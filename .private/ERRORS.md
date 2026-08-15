@@ -78,31 +78,6 @@ and not on macOS. Verified directly. Tests cover a value containing a newline *a
 `& | \ /`, plus a value containing `{{OUT}}` itself (which naive looping would spin on
 forever).
 
-### A3. `files/ports` printed 32 hex digits instead of an IPv6 address
-
-The most common real failure this tool exists to explain — a server told to bind
-`localhost` binds `::1` on a dual-stack container — rendered as:
-
-```
-5174   [00000000000000000000000001000000] UNREACHABLE  bound to [000000...] only; ...
-```
-
-which also destroyed the column alignment of every row after it.
-
-**Fix applied:** a real `decode_v6()` (four little-endian 32-bit words, network word order),
-unwrapping `::ffff:a.b.c.d` to its IPv4 form, `BOUND TO` widened to 15 columns.
-`listeners()` also takes an injectable path now so the parser is testable against captured
-`/proc` fixtures rather than only whatever happens to be listening.
-
-### A4. `files/ports` counted system services as student problems
-
-`systemd-resolved` on `:53` and cups on `:631` were reported as `NOT PUBLISHED — two
-problems`, inflating the problem count and making the command exit non-zero on a healthy
-container. No published port is below 3000 and rootless podman refuses to publish anything
-under 1024 at all, so a privileged listener is never a student's dev server.
-
-**Fix applied:** still listed, now as `system`, and not counted.
-
 ### A5. bash 3.2 landmine: empty-array expansion under `set -u`
 
 `cs193v` expanded `"${ARGS[@]}"` and `"${RUN_ARGS[@]}"` unguarded. On bash < 4.4 — **every
@@ -204,8 +179,8 @@ Nine problems in the checklist itself. Several mean the checklist would have pro
 | A.1 | The `comm -3` message cross-reference aborts with `comm: file 1 is not in sorted order` under `en_US.UTF-8`, because sort and comm disagree about punctuation. Needs `LC_ALL=C`. It passes cleanly once fixed: 41 keys, zero orphans, zero missing. |
 | A.3 | `nvm-not-group-writable` is **vacuous**. `/usr/local/share/nvm` does not exist by design, so `stat` fails, the case falls to the catch-all, and it prints `ok` while asserting nothing. |
 | A.4 | Says `.Config.Env` should contain `TERM` and `COLORTERM`. Impossible — those are passed per-`exec`, never at create time. |
-| A.5 | The 256-colour probe calls `podman exec -it` with **no `-e TERM`**, so TERM defaults to `xterm` and it reports 8. It **fails on a correctly working system**. The launcher forwards TERM in `open_shell`/`verb_ports`; the probe must too. |
-| A.10 | The verb loop `for v in "" ports doctor ...` **hangs**: the empty verb reaches `exec podman exec -it` with stdin still on the terminal. Needs `</dev/null`. |
+| A.5 | The 256-colour probe calls `podman exec -it` with **no `-e TERM`**, so TERM defaults to `xterm` and it reports 8. It **fails on a correctly working system**. The launcher forwards TERM in `open_shell`; the probe must too. |
+| A.10 | The verb loop `for v in "" doctor ...` **hangs**: the empty verb reaches `podman exec -it` with stdin still on the terminal. Needs `</dev/null`. |
 | A.12 | The installer idempotency check is **vacuous**. `bash install-cs193v.sh </dev/null` hits the consent menu, which with no tty picks the safe default ("Stop, do not change anything") and exits 0 before touching anything, so the before/after state hashes are trivially identical. |
 | 1.2 | Claims non-TTY "falls back to numbered selection rather than hanging". It does not — it picks the default. The **code is right and the doc is wrong**; picking the safe default is better than either alternative. |
 | 7.3 | Says to run `man ls`, while A.3 asserts `man` is deliberately absent. Self-contradictory. |
@@ -220,8 +195,7 @@ ship. Guarded by `claims:no-phantom-doctor-ports-warning`. GitHub issue #11.
 
 ### B2 (original diagnosis)
 
-> `# Consumed by the in-container ports command. Kept in step with the -p lines above;`
-> `# cs193v doctor warns if they disagree.`
+> `# Kept in step with the -p lines above; cs193v doctor warns if they disagree.`
 
 `verb_doctor` never compares `CS193V_PORTS` against the `-p` lines. Either implement it or
 drop the claim. The new static tier enforces the invariant at build time instead, which is
@@ -511,7 +485,6 @@ and, with no terminal, prints a STOP banner that names what a script should use 
 ┃ a script:
 ┃
 ┃     cs193v --rebuild     make sure a fresh container exists
-┃     cs193v ports         check whether your servers are reachable
 ┃     cs193v doctor        print the status report
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
@@ -521,9 +494,8 @@ prompts and creating or starting the container are all useful and idempotent, so
 that got this far has done real work and the message can honestly say the container is ready.
 Exits 1. New message key `err.needs-a-terminal`.
 
-`ports` and `doctor` also pass `-it`, but the commands they run exit on their own, so they
-were never affected and remain scriptable — which matters, because the refusal message
-points at them.
+`doctor` also passes `-it`, but the commands it runs exit on their own, so it was never
+affected and remains scriptable — which matters, because the refusal message points at it.
 
 Regression tests: `tests/30-launcher-shim.sh :: noterm:*` (nine assertions, including a
 wall-clock check that it refuses rather than hangs, that the container is still created, that
@@ -1032,8 +1004,8 @@ The one bind address that is still refused is **`::1` alone** — the forward's 
 IPv4. That is narrow in practice: `localhost` resolves to `127.0.0.1` and nothing else in
 this image (no `::1 localhost` line in `/etc/hosts`), so both
 `python3 -m http.server --bind localhost` and node's `listen(port, "localhost")` bind IPv4.
-This also corrects a claim `files/ports` used to make in its own docstring — that binding
-"localhost" lands on `::1` — which was not true for this image.
+This also corrects a claim that was documented here for a while — that binding "localhost"
+lands on `::1` — which was never true for this image.
 
 ### D4a. The tunnel, measured
 

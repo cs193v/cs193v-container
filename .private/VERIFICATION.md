@@ -253,7 +253,7 @@ rec inotify-watches        E 'cat /proc/sys/fs/inotify/max_user_watches'
 rec free-vs-cgroup         E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"'
 # -e TERM is REQUIRED. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so without this the probe reports 8 and FAILS on a correctly
-# working system. The launcher forwards TERM in open_shell/verb_ports; so must this.
+# working system. The launcher forwards TERM in open_shell; so must this.
 ck  colors  256            sh -c 'podman exec -it -e TERM=xterm-256color cs193v tput colors | tr -d "\r"'
 rec env-persists           E 'printenv CS193V_PORTS'   # proves -e reaches exec sessions
 ckx dns                    E 'getent hosts registry.npmjs.org'
@@ -331,15 +331,15 @@ c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:5177/)
 [ "$c" = 000 ] && echo "PASS ::1-only is refused, as documented" \
               || echo "NOTE ::1-only is reachable ($c) — better than documented, update the docs"
 
-# cs193v ports must diagnose what is LEFT to diagnose. The bind address is no longer one of
-# them for IPv4, so the states are: forwarded, not forwarded, and ::1-only.
+# `ss` inside the container must name the bind address, which is what a student has to be able
+# to read to tell a reachable server from an unreachable one.
 podman exec -d cs193v python3 -m http.server 4000 --bind 0.0.0.0     # not forwarded
-"$DIR/cs193v" ports
-   # expect: 3000 127.0.0.1  -> OK  (was "restart with --host 0.0.0.0")
-   #         8080 0.0.0.0    -> OK
-   #         5177 ::1        -> UNREACHABLE, names 127.0.0.1 as the fix
-   #         4000 listening, NOT FORWARDED -> suggests an in-range port
-   #         and a closing pointer at `cs193v doctor` for what it cannot see
+podman exec cs193v ss -ltn
+   # expect: 127.0.0.1:3000  a forwarded port, loopback-bound  -> reachable
+   #         0.0.0.0:8080    a forwarded port, wildcard-bound  -> reachable
+   #         [::1]:5177      the one address the tunnel cannot reach
+   #         0.0.0.0:4000    listening but outside CS193V_PORTS -> not forwarded
+   # whether a forward exists at all is host-side: `cs193v doctor`, not this.
 podman exec cs193v pkill -f http.server
 podman exec cs193v pkill -f SimpleHTTP
 
@@ -465,7 +465,7 @@ podman run --rm --pids-limit 64 "$IMAGE" sh -c \
 # delivers EOF the way a pipe does, so `bash -l` waits for input forever. Measured.
 # Feed it an `exit` instead. (See ERRORS.md B13 for the two-line launcher fix that would
 # make `</dev/null` work: pass -t only when stdin is a terminal.)
-for v in ports doctor --dev-print-command; do
+for v in doctor --dev-print-command; do
   "$DIR/cs193v" $v >/dev/null 2>&1 </dev/null; echo "verb '$v' -> $?"
 done
 printf 'exit\n' | timeout 60 "$DIR/cs193v" >/dev/null 2>&1; echo "verb '' -> $?"

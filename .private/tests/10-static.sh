@@ -25,7 +25,6 @@ assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
-assert_ok  "syntax:ports"             python3 -c "import ast;ast.parse(open('$PRIVATE/files/ports').read())"
 assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
 assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 
@@ -378,9 +377,11 @@ assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat $
 # deletions themselves, because the failure mode of a half-applied change here is a student's
 # container left running forever with nothing attached to it.
 #
-# FUNCTION BODIES, not the whole file, for the exec check below. `exec podman exec` MUST still
-# appear in verb_ports -- that is not a session and takes no reference -- so a file-wide check
-# for its absence would forbid the one place it is still right.
+# FUNCTION BODIES, not the whole file, for the exec check below. The check has to name
+# open_shell specifically: what must never exec is the SESSION, because a launcher replaced by
+# podman cannot run its teardown trap. A file-wide grep for `exec podman` would be answered by
+# prose as readily as by code -- the warn() comment near the top of the launcher contains the
+# string -- so it would pass or fail for reasons that have nothing to do with the invariant.
 fn_body() {                           # fn_body NAME FILE -> that function's source
     sed -n "/^$1() {/,/^}/p" "$2"
 }
@@ -616,7 +617,7 @@ published="$(printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
 assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 
 # The port set now comes from ONE declaration, CS193V_PORTS, which the launcher parses to
-# build its ssh -L flags and also passes into the container for `ports` to read. Host and
+# build its ssh -L flags and also passes into the container to be read there. Host and
 # container side are therefore the same number by construction, so the old
 # "host range != container range" check has no failure left to catch and is gone.
 port_report="$(printf '%s\n' "$args_live" | python3 -c '

@@ -4,7 +4,7 @@
 #
 #   tests/run-tests.sh                    everything except the release gates
 #   tests/run-tests.sh --tier static      one tier (comma-separated for several)
-#   tests/run-tests.sh -k ports           only suites whose filename matches
+#   tests/run-tests.sh -k tmux            only suites whose filename matches
 #   tests/run-tests.sh --release          the "not shippable yet" gates
 #   tests/run-tests.sh --serial           one suite at a time, in file order
 #   tests/run-tests.sh --list             what exists, in which tier, and in which lane
@@ -15,7 +15,6 @@
 # suite needs no edit here.
 #
 #   static     no podman, no image, no network. Milliseconds.
-#   unit       language-level unit tests (files/ports).
 #   shim       the launcher's state machine against a fake podman on PATH. No containers.
 #   image      assertions about the built image, via throwaway containers.
 #   container  assertions about a live cs193v container: flags, kernel, ports, files.
@@ -29,7 +28,7 @@
 # ─── the two lanes ─────────────────────────────────────────────────────────────
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
 #
-#   cheap    static, unit, shim        a fake podman on PATH. No container, no ports.
+#   cheap    static, shim              a fake podman on PATH. No container, no ports.
 #   podman   image, container, live    one container, one tunnel, the 46 forwarded ports.
 #
 # So they run at the same time. IMAGE, CONTAINER AND LIVE MUST STAY IN ONE LANE, and in file
@@ -49,7 +48,7 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
-DEFAULT_TIERS="static unit shim image container live"
+DEFAULT_TIERS="static shim image container live"
 TIERS=""
 FILTER=""
 PARALLEL=yes
@@ -102,14 +101,14 @@ wanted() {                            # wanted TIER -> 0 if it is in $TIERS
 # published images.)
 lane_of() {                           # lane_of TIER -> cheap | podman
     case "$1" in
-        static|unit|shim) printf 'cheap' ;;
-        *)                printf 'podman' ;;
+        static|shim) printf 'cheap' ;;
+        *)           printf 'podman' ;;
     esac
 }
 
 # ─── discover ──────────────────────────────────────────────────────────────────
 SUITES=""
-for f in "$DIR"/[0-9][0-9]-*.sh "$DIR"/[0-9][0-9]-*.py; do
+for f in "$DIR"/[0-9][0-9]-*.sh; do
     [ -f "$f" ] || continue
     SUITES="$SUITES $f"
 done
@@ -183,10 +182,7 @@ TIMEFORMAT='%3R'
 exec 3>&1 4>&2
 
 run_suite() {                         # run_suite FILE  — output goes to the real terminal
-    case "$1" in
-        *.py) python3 "$1" 1>&3 2>&4 || true ;;
-        *)    bash "$1" 1>&3 2>&4 || true ;;
-    esac
+    bash "$1" 1>&3 2>&4 || true
 }
 
 run_lane() {                          # run_lane FILE...  — sequential, in the order given
@@ -229,7 +225,7 @@ LANES=one
 [ "$PARALLEL" = yes ] && [ -n "$CHEAP" ] && [ -n "$PODMAN" ] && LANES=two
 
 printf '%sCS193V container tests%s  %s(tiers: %s)%s\n' "$C_BOLD" "$C_OFF" "$C_DIM" "$TIERS" "$C_OFF"
-[ "$LANES" = two ] && printf '%stwo lanes: the podman tiers below, and static/unit/shim alongside them%s\n' \
+[ "$LANES" = two ] && printf '%stwo lanes: the podman tiers below, and static/shim alongside them%s\n' \
                              "$C_DIM" "$C_OFF"
 printf '%s\n' "-------------------------------------------------------------------"
 
