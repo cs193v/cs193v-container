@@ -98,6 +98,7 @@ RUN apt-get update \
       locales tzdata \
       fonts-noto-core fontconfig \
       openssh-server openssh-client inetutils-telnet \
+      iproute2 lsof \
       tmux ncurses-term \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
@@ -144,6 +145,18 @@ RUN apt-get update \
 #
 # inetutils-telnet, not `telnet`: on Ubuntu 26.04 `telnet` is a transitional dummy package
 # whose entire content is a dependency on this one, and transitional packages get removed.
+#
+# iproute2 and lsof answer the question this course asks more than any other: "my browser
+# cannot reach my server -- what is it actually listening on?" The base image ships neither,
+# and without them the only way to see a listening socket is to read /proc/net/tcp and
+# /proc/net/tcp6 and decode the addresses by hand: little-endian hex, and four byte-swapped
+# 32-bit words for IPv6. That is not something to ask a student to do, and it is not
+# something to ask an agent to reinvent per session either -- `ss -ltn` is two packages and
+# the answer everything on the internet will tell them to type.
+#
+# lsof as well as ss because they answer different halves. `ss -ltnp` names the bind address,
+# which is the half that decides whether the tunnel can reach it; `lsof -i :3000` names the
+# process, which is the half that says what to stop. Neither is inferable from the other.
 #
 # fonts-noto-core, not fonts-dejavu-core: the base image ships no fonts at all, and
 # anything that rasterizes text (Pillow, matplotlib, librsvg) needs one. Noto because a
@@ -433,8 +446,8 @@ COPY files/ /tmp/cs193v-files/
 #
 # What it does, in order:
 #
-#  1. Installs the helper commands: the $BROWSER stub, the `ports` diagnostic, the
-#     entrypoint, and the three that make up the landing point --
+#  1. Installs the helper commands: the $BROWSER stub, the entrypoint, and the three that
+#     make up the landing point --
 #     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
 #     last two are commands rather than inline shell because they now have two callers
 #     each: the tmux path and the plain `bash -l` path. See item 9.
@@ -524,7 +537,6 @@ COPY files/ /tmp/cs193v-files/
 #     not start without it.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
-    install -m 0755 /tmp/cs193v-files/ports           /usr/local/bin/ports; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
     install -m 0755 /tmp/cs193v-files/cs193v-shell    /usr/local/bin/cs193v-shell; \
     install -m 0755 /tmp/cs193v-files/cs193v-welcome  /usr/local/bin/cs193v-welcome; \

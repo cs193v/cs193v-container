@@ -9,7 +9,7 @@
 # Two of §A.5's checks are corrected rather than copied:
 #   * the 256-colour probe called `podman exec -it` with no -e TERM, so TERM defaulted to
 #     xterm and it reported 8 colours — it FAILED on a correctly working system. The
-#     launcher forwards TERM in open_shell/verb_ports, so the probe has to as well.
+#     launcher forwards TERM in open_shell, so the probe has to as well.
 #   * §A.4's note that .Config.Env should hold TERM and COLORTERM is impossible: those are
 #     passed per-exec, never at create time.
 #
@@ -568,7 +568,7 @@ SPEC="$(sed 's/#.*//' $REPO/.config/container.args \
 # is printed after the last listen(), so its arrival is the readiness signal -- 0.24 s
 # measured, where the `sleep 3` it replaces was a guess in both directions at once.
 #
-# Its own file per probe, because the `ports` diagnosis below runs three at a time, and
+# Its own file per probe, because the listener listing below runs two at a time, and
 # REMOVED FIRST: the file is the one thing here a previous run could have written, and reading
 # a stale "probe ready" would be the very failure this is fixing.
 PROBE_N=0
@@ -675,7 +675,7 @@ if [ "$c" = 000 ]; then
 else
     fail "ports:ipv6-only-is-refused-as-documented" \
          "got HTTP $c — ::1-only IS reachable, which is better than documented. Update
-CONTAINER-DESIGN.md, files/ports and ERRORS.md D4 rather than leaving them pessimistic."
+CONTAINER-DESIGN.md and ERRORS.md D4 rather than leaving them pessimistic."
 fi
 probe_stop
 
@@ -697,24 +697,19 @@ else
     record "ports:not-reachable-from-the-LAN" "no non-loopback address on this host"
 fi
 
-# The in-container `ports` command must diagnose what is LEFT to diagnose, against real
-# sockets. Kill the 0.0.0.0 probe from the LAN check first, or 3000 is still wildcard-bound --
-# and probe_stop waits for it to be GONE, so the loopback bind below cannot race its death.
+# `ss` is how a student -- or the agent answering their question -- finds out what a server is
+# actually bound to, so it has to report real sockets from inside, not just exist. Kill the
+# 0.0.0.0 probe from the LAN check first, and probe_stop waits for it to be GONE, so the
+# loopback bind below cannot race its death.
 probe_stop
-assert_probe "ports:probe-bound-3000-loopback-for-the-diagnosis" "3000" 127.0.0.1
-assert_probe "ports:probe-bound-5174-wildcard-for-the-diagnosis" "5174" 0.0.0.0
-assert_probe "ports:probe-bound-4000-unforwarded-for-the-diagnosis" "4000" 0.0.0.0
-pout="$(E 'ports || true')"
-record "ports:diagnostic-output" "$(printf '%s' "$pout" | tr '\n' '|')"
-assert_match "ports:diagnoses-forwarded-wildcard-as-OK" '5174 .*OK'            "$pout"
-assert_match "ports:diagnoses-unforwarded"              '4000 .*NOT FORWARDED' "$pout"
-# The one that had to change: loopback is now OK, and the old UNREACHABLE verdict here would
-# be a lie that sends a student to fix something that is not broken.
-assert_match "ports:diagnoses-forwarded-loopback-as-OK" '3000 .*OK'            "$pout"
-assert_not_contains "ports:no-longer-demands-bind-all" "--host 0.0.0.0"        "$pout"
-# And it must be honest about the half it cannot see: a missing forward or a downed tunnel are
-# host-side facts that /proc/net/tcp does not contain.
-assert_contains "ports:points-at-doctor-for-host-side-faults" "cs193v doctor"  "$pout"
+assert_probe "ports:probe-bound-3000-loopback-for-the-listing" "3000" 127.0.0.1
+assert_probe "ports:probe-bound-5174-wildcard-for-the-listing" "5174" 0.0.0.0
+sout="$(E 'ss -ltn || true')"
+record "ports:in-container-listener-listing" "$(printf '%s' "$sout" | tr '\n' '|')"
+# The bind address is the whole point: these two lines are what a student has to be able to
+# tell apart, because one of them is why their browser cannot connect and the other is not.
+assert_match "ports:ss-shows-a-loopback-bind"  '127\.0\.0\.1:3000' "$sout"
+assert_match "ports:ss-shows-a-wildcard-bind"  '(0\.0\.0\.0|\*):5174' "$sout"
 probe_stop
 
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────

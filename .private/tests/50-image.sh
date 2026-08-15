@@ -98,6 +98,20 @@ record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; ver
 manual="$(R 'apt-mark showmanual 2>/dev/null')"
 assert_contains "net:openssh-client-is-installed-on-purpose" "openssh-client"   "$manual"
 assert_contains "net:telnet-is-installed-on-purpose"         "inetutils-telnet" "$manual"
+# Same argument for the two that answer "what is my server actually listening on?". The base
+# image ships neither, and without them the only way to see a listening socket is to decode
+# /proc/net/tcp by hand -- which is not something to ask a student, or an agent, to do.
+assert_contains "net:iproute2-is-installed-on-purpose"       "iproute2"         "$manual"
+assert_contains "net:lsof-is-installed-on-purpose"           "lsof"             "$manual"
+# And the packages have to have produced the COMMANDS. `ss -ltn` names the bind address, which
+# is the half that decides whether the tunnel can reach it; `lsof -i` names the process, which
+# is the half that says what to stop. ss is run for real rather than merely located, because it
+# is the one a student is told to type; lsof exits non-zero when it matches nothing, so asking
+# it to list sockets in an idle container would fail for the wrong reason.
+assert_ok "net:ss-lists-listeners" \
+          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'ss -ltn'"
+assert_ok "net:lsof-is-on-PATH" \
+          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'command -v lsof'"
 
 # sshd runs UNPRIVILEGED here, as student, which is what the tunnel's own sshd does too
 # (see files/sshd_config). It is not a stylistic choice: started as root it refuses the
@@ -183,20 +197,14 @@ assert_eq "npm-prefix-is-in-home" "/home/student/.local" "$(R 'npm config get pr
 assert_ok "npm-install-g-needs-no-sudo" \
           sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
 
-# ─── the three helper commands ─────────────────────────────────────────────────
-# The $BROWSER stub: without it, `gh auth login` and `claude /login` leave a student
+# ─── the $BROWSER stub ─────────────────────────────────────────────────────────
+# Without it, `gh auth login` and `claude /login` leave a student
 # staring at a prompt that never returns.
 out="$(R '/usr/local/bin/open-url https://example.com/verify?code=ABCD')"
 assert_contains "helper:open-url-prints-the-url" "https://example.com/verify?code=ABCD" "$out"
 assert_contains "helper:open-url-explains-why"   "no browser" "$out"
 assert_fail "helper:open-url-needs-an-argument" \
             sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
-
-assert_ok "helper:ports-is-installed" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v ports'"
-# Without CS193V_PORTS it must explain itself rather than crash or lie.
-assert_contains "helper:ports-without-env-explains" "rebuild" "$(R 'ports 2>&1 || true')"
-assert_contains "helper:ports-with-env-works" "forwarded:" \
-                "$(R 'CS193V_PORTS=3000-3009 ports 2>&1 || true')"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather

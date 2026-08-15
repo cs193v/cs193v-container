@@ -2,7 +2,7 @@
 # TIER: unit
 #
 # The Containerfile parser, one edge case at a time. No podman, no image, no network -- the
-# unit tier, alongside 40-ports.py.
+# unit tier, which this is now the only member of.
 #
 # WHY THIS EXISTS AS ITS OWN SUITE. The progress meter's side text comes from `####>` markers
 # in the Containerfile, and the launcher has to number that file's instructions EXACTLY the way

@@ -8,6 +8,16 @@ is already taken.
 Host's localhost is SSH forwarded to the container localhost, so servers can bind
 to localhost. Binding ::1 does not work because forwarding is done over IPv4.
 
+To find out what is actually listening and where it is bound, use `ss -ltn` — that is the
+question to answer first when the student says their browser cannot reach their server, and
+the bind address is the half that decides it. `lsof -i` names the process holding a port.
+Both are installed; do not install network tools.
+
+Whether a port is forwarded on the student's own computer is not visible from in here at all.
+If the server is listening on a port in $CS193V_PORTS at an address other than ::1 and the
+browser still cannot reach it, the answer is `./cs193v doctor`, which the student runs on
+their own computer, not in this container.
+
 ## Browser tests
 
 Playwright and the Chromium headless shell are already installed in this image. When a

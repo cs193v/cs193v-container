@@ -68,9 +68,8 @@ L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s'
 # WITHOUT THIS THE SUITE LIES. A refused verb exits 1 having done nothing, so
 # rebuild:container-filesystem-is-reset finds its marker file still there and fails for the wrong
 # reason, and the twenty-launch idempotency loop becomes twenty refusals that still "pass" the
-# do-not-recreate check. Both happened. Plain L() is kept for `doctor`, `ports` and
-# --dev-print-command, which are read-only, exempt from the refusal, and in `ports`' case need the
-# container UP.
+# do-not-recreate check. Both happened. Plain L() is kept for `doctor` and --dev-print-command,
+# which are read-only and exempt from the refusal.
 LV() { release_container; L "$@"; }
 
 # LB() is a BARE launch — one that goes on to open a shell. It needs a real terminal, since
@@ -476,9 +475,8 @@ assert_contains "doctor:reports-the-real-podman-version" "5." "$out"
 assert_says "doctor:reports-config-matches" "matches container.args" "$out"
 assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000' "$out"
 # doctor's tunnel section replaced a `podman port` count, and it is now the ONLY place
-# host-side forwarding state is visible: the in-container `ports` command reads /proc and
-# cannot see whether a forward exists out here. That makes these two lines load-bearing for
-# support rather than decorative.
+# host-side forwarding state is visible: nothing inside the container can see whether a forward
+# exists out here. That makes these two lines load-bearing for support rather than decorative.
 assert_match "doctor:reports-the-tunnel-is-up" 'tunnel +up \(pid [0-9]+\)' "$out"
 assert_match "doctor:counts-forwarded-ports" 'tunnel ports +46 of 46' "$out"
 assert_match "doctor:reports-clock-skew" 'clock skew' "$out"
@@ -489,12 +487,6 @@ assert_match "doctor:reports-zombies" 'zombies' "$out"
 # and this file must not turn a documented fact into a flaky test. See README.md's --init item.
 record "doctor:zombie-count-with-a-tunnel-up" "$(printf '%s' "$out" | sed -n 's/.*zombies *\([0-9]*\).*/\1/p')"
 record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
-
-# ─── ports verb against a real container ───────────────────────────────────────
-# `ports` requires a running container and does not start one -- correctly, since it is a
-# read-only report. Under #41 that means the suite has to raise it first.
-hold_container
-assert_contains "ports-verb:runs-the-in-container-tool" "forwarded:" "$(L ports)"
 
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────
 # Each of these is a way the tunnel can strand a student with a container that looks perfectly

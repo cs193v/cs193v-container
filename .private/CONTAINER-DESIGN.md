@@ -205,17 +205,26 @@ the network, which is exactly what most tutorials on the internet will show you.
 
 ### When something isn't reachable
 
+There are two halves to this, and they are checked in different places. Start inside the
+container, with what your server is actually doing:
+
 ```
-ports
+ss -ltn
 ```
 
-It reads the kernel's own socket table, works out what each server is bound to, compares
-that against the forwarded set, and tells you the specific problem.
+That lists every port something is listening on, and — the column that matters — the address
+each one is bound to. Check it against two things: that the port is one of the forwarded ones
+(`echo $CS193V_PORTS`), and that the address is not `::1`, which is the one bind address the
+tunnel cannot reach. `127.0.0.1`, `0.0.0.0` and `*` are all fine.
 
-It has one honest limit, worth knowing because it is the confusing case: `ports` runs
-*inside* the container, so it cannot see the other end of the tunnel. If it says `OK` and
-your browser still cannot connect, the problem is on your own computer — most often another
-program already holding that port. Run this **there**, not in the container:
+Claude is in here with you and can do this for you — "nothing can reach my dev server, what's
+it bound to?" is a reasonable thing to ask it. `lsof -i` is also installed, if what you need
+is *which process* has a port rather than what it is bound to.
+
+If your server is listening on a forwarded port at a workable address and your browser still
+cannot connect, the problem is on your own computer — most often another program already
+holding that port. Nothing inside the container can see that. Run this **there**, not in the
+container:
 
 ```
 cs193v doctor
@@ -440,14 +449,11 @@ actually are.
 
 ```
 ./cs193v                    open a shell
-./cs193v ports              why can't my browser see my server?
 ./cs193v doctor             a report to paste when asking staff for help
 ./cs193v --rebuild          fresh container; files and logins kept. Builds a newer
                             course container first if there is one.
 ./cs193v --rebuild --logout fresh everything, including logging out
 ```
-
-Inside the container: `ports`.
 
 ---
 

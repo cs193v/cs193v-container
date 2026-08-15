@@ -28,7 +28,6 @@ for v in --help -h help; do
     assert_eq "dispatch:$v-exits-0" "0" "$(launcher_rc "$v")"
 done
 out="$(launcher --help)"
-assert_says "usage:mentions-ports"   "cs193v ports"   "$out"
 assert_says "usage:mentions-doctor"  "cs193v doctor"  "$out"
 assert_contains "usage:mentions-rebuild" "--rebuild"      "$out"
 # INVERTED BY #41. This used to assert the "many windows are fine" promise, which was the thing
@@ -40,7 +39,7 @@ assert_says "usage:points-at-tabs-not-windows" "CTRL+T" "$out"
 assert_contains "usage:mentions-stop" "--stop" "$out"
 
 assert_eq "dispatch:unknown-verb-exits-2" "2" "$(launcher_rc bogusverb)"
-assert_says "dispatch:unknown-verb-prints-usage" "cs193v ports" "$(launcher bogusverb)"
+assert_says "dispatch:unknown-verb-prints-usage" "cs193v doctor" "$(launcher bogusverb)"
 # A typo must not create anything.
 assert_eq "dispatch:unknown-verb-creates-nothing" "0" "$(shim_count '^run ')"
 
@@ -565,21 +564,7 @@ assert_eq "rebuild:raises-no-tunnel" "0" \
 # ...and says nothing about one either. By KEY, so rewording the message cannot break this.
 assert_says_not_key "rebuild:says-nothing-about-the-tunnel" warn.tunnel-failed "$out"
 
-# ─── ports and doctor ──────────────────────────────────────────────────────────
-shim_new
-shim_set state absent
-assert_says "ports:refused-when-not-running" "not running yet" "$(launcher ports)"
-
-shim_new
-launcher >/dev/null 2>&1
-# ...and put it back to running, which a bare launch no longer leaves behind (#41): that launch
-# has no terminal, so it refuses and stops the container on the way out. Without this the fake
-# is `exited` here and `ports` correctly refuses -- testing the line above instead of this one.
-shim_set state running
-shim_clear_log
-out="$(launcher ports)"
-assert_says "ports:execs-the-in-container-tool" "$NAME ports" "$(shim_log | tr '\n' ' ')"
-
+# ─── doctor ────────────────────────────────────────────────────────────────────
 shim_new
 out="$(launcher doctor)"
 assert_contains "doctor:reports-platform"  "platform"     "$out"

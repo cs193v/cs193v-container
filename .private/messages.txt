@@ -16,7 +16,6 @@
 cs193v — the CS193V course container
 
   cs193v                     open a shell in the container
-  cs193v ports               check whether your servers are reachable
   cs193v doctor              print a report to paste when asking for help
   cs193v --stop              stop the container, if a terminal window was closed
                              without you noticing
@@ -213,17 +212,11 @@ commands do not need a terminal, so they are the ones to use in
 a script:
 
     cs193v --rebuild     make sure a fresh container exists
-    cs193v ports         check whether your servers are reachable
     cs193v doctor        print the status report
 
 To run a single command inside the container:
 
     podman exec -it cs193v bash -lc 'your command here'
-
-[[err.not-running]]
-The container is not running yet. Start it first with:
-
-    ./cs193v
 
 [[err.session-in-use]]
 You already have a CS193V session open in another terminal window.
