@@ -25,6 +25,8 @@ assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
+assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
+assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
 assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
 assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 
@@ -278,6 +280,28 @@ assert_contains "welcome:has-the-welcome-line" 'CS193V_WELCOME' \
                 "$(cat $PRIVATE/files/cs193v-welcome)"
 assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELCOME" \
                     "$(cat $PRIVATE/messages.txt)"
+
+# THE SAME RULE, for setup-git's prose. It runs in the container too, so its catalogue is a
+# separate file installed into the image — and the tidy-looking mistake is to fold those keys into
+# messages.txt, where the container cannot read them and every screen would render
+# "(missing message: ...)". Checked in both directions: no key of one file is defined in the other.
+sgkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/files/setup-git-messages.txt | LC_ALL=C sort -u)"
+lkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort -u)"
+assert_ne "setup-git:catalogue-has-keys" "" "$sgkeys"
+both="$(printf '%s\n' "$sgkeys" | grep -xF -f <(printf '%s\n' "$lkeys") | tr '\n' ' ')"
+if [ -z "$both" ]; then
+    pass "setup-git:catalogues-do-not-overlap"
+else
+    fail "setup-git:catalogues-do-not-overlap" "defined in BOTH catalogues: $both
+A key name means two different things then, which is not wrong at runtime -- each script reads
+its own file -- but it is wrong for anyone reading either one, and it is wrong for the tests:
+assert_says_key defaulted to the launcher's catalogue and asserted the wrong prose until
+msg_text learned to take a file. Rename one of them."
+fi
+# And setup-git must not reach for the launcher's file, which would work on the host and be empty
+# in the image -- the exact shape of bug the welcome banner's rule exists to prevent.
+assert_not_contains "setup-git:does-not-read-messages.txt" "private/messages.txt" \
+                    "$(cat $PRIVATE/files/setup-git)"
 # [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
 assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
                 "$(cat $PRIVATE/files/cs193v-welcome)"
@@ -904,8 +928,23 @@ done
 # Last, because require_cmd aborts the suite: a missing shellcheck should not hide the
 # result of every check above it.
 require_cmd shellcheck "Run: sudo apt install -y shellcheck"
-assert_ok  "shellcheck:cs193v"  shellcheck --severity=warning cs193v
+# -x so shellcheck FOLLOWS the `. "$UI"` into cs193v-ui.sh. Without it, every variable the
+# launcher sets for the helper to read — MESSAGES, RT_SPIN — is reported unused (SC2034), and
+# the alternative to following the source is excluding the check that would catch a genuinely
+# dead variable. The `source-path=SCRIPTDIR` directive in cs193v is what makes this work from
+# any working directory rather than only from the repo root.
+assert_ok  "shellcheck:cs193v"  shellcheck -x --severity=warning cs193v
 assert_ok  "shellcheck:install" shellcheck --severity=warning $PRIVATE/install-cs193v.sh
+# The shared presentation layer, checked ALONE as well as through the launcher: the container
+# sources it with no launcher in the picture, so it has to stand up by itself.
+#
+# SC2034 excluded, and only here. Every variable in a library looks unused from inside it —
+# C_YEL is read by the launcher's warn(), RT_OUT by half its callers — so the check cannot say
+# anything true about this file. It stays on for both scripts that consume it.
+assert_ok  "shellcheck:ui" shellcheck --severity=warning --exclude=SC2034 \
+                           $PRIVATE/files/cs193v-ui.sh
+# setup-git and any future setup-*: they source the helper, so -x here too.
+assert_ok  "shellcheck:setup-git" shellcheck -x --severity=warning $PRIVATE/files/setup-git
 # The landing point and its two helpers. cs193v-shell is the only way a student gets a
 # shell, so a quoting bug in it is a container nobody can enter.
 assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
@@ -925,3 +964,15 @@ assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC10
                                     $PRIVATE/tests/65-tmux.sh
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh
+# setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
+# set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot
+# resolve a path built from $0.
+assert_ok  "shellcheck:setup-git-tests" shellcheck --severity=warning \
+                                        --exclude=SC1090,SC1091,SC2034 \
+                                        $PRIVATE/tests/lib/setup-git-shim.sh \
+                                        $PRIVATE/tests/35-setup-git-shim.sh \
+                                        $PRIVATE/tests/45-setup-git.sh \
+                                        $PRIVATE/tests/90-setup-git-github.sh
+# The two fakes are /bin/sh, like lib/podman-fake, and are run as commands by the suites above.
+assert_ok  "shellcheck:setup-git-fakes" shellcheck --severity=warning \
+                                        $PRIVATE/tests/lib/gh-fake $PRIVATE/tests/lib/git-fake

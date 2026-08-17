@@ -1,0 +1,856 @@
+#!/usr/bin/env bash
+#
+# setup-git — walk a student through configuring git and GitHub for the course.
+#
+# Runs INSIDE the container, as the student. Installed as /usr/local/bin/setup-git.
+#
+# WHAT THIS IS FOR. Nothing in the course can be submitted until git has an identity and gh
+# holds a credential that can reach the student's homework repository. Every step of that has a
+# failure mode whose symptom is a bare 404 or "Permission denied" with nothing in it naming the
+# cause: a token owned by the wrong account, a permission left on Read-only, an organization
+# invitation never accepted. So this asks four questions, runs six commands, and then PROVES the
+# token works by doing everything the course will ask of it against a sandbox repository —
+# because `gh auth login --with-token` accepts a token that can do nothing at all. cli/cli's
+# HeaderHasMinimumScopes returns nil on an empty X-Oauth-Scopes header ("assume that it is an
+# integration token and give up on detecting its capabilities"), which every fine-grained token
+# sends. A successful login is therefore not evidence of anything, and the verification stage
+# below is not belt-and-braces; it is the whole point.
+#
+# MUST STAY BASH 3.2 COMPATIBLE even though it only ever runs on the container's bash 5. That is
+# what lets 45-setup-git.sh source its validators on a TA's Mac. No associative arrays, no
+# mapfile, no ${var,,}, no `read -t 0.5`.
+#
+# THE PROSE IS NOT IN HERE. It is in setup-git-messages.txt, installed beside this script, in
+# the same [[key]] format as the launcher's messages.txt and read by the same msg(). Wording is
+# staff's to change without reading a line of this file.
+
+set -u
+
+# ─── configuration ─────────────────────────────────────────────────────────────
+# The four values a future quarter has to move, and nothing else. Overridable from the
+# environment so the test suite and a staff dry run can point at a scratch organization
+# instead of the real one — a student never sets any of them.
+CS193V_GH_ORG="${CS193V_GH_ORG:-cs193v-students}"
+# Derived from the org by default, so overriding the org alone moves both.
+CS193V_GH_SANDBOX="${CS193V_GH_SANDBOX:-$CS193V_GH_ORG/install-sandbox}"
+# The expiration students are told to choose, as a date. GitHub's prefill parameter wants a
+# number of DAYS, so the date is converted at runtime — see expiry_days.
+CS193V_TOKEN_EXPIRY="${CS193V_TOKEN_EXPIRY:-2026-12-31}"
+# Whether to offer the prefilled token link at all.
+#
+# THIS IS A SWITCH BECAUSE THE PREFILL WAS KNOWN-FRAGILE, AND IT WAS TESTED. GitHub's template
+# URLs (August 2025) accept name, description, target_name, expires_in and one parameter per
+# permission — but community discussion #188111 reports target_name updating the dropdown's DISPLAY
+# without initialising the form state, so the page would show the organization while the token was
+# created under the student's own account. Resource owner cannot be changed afterwards, which would
+# make that the most expensive failure available here, and the instructions tell students to check
+# exactly the field that would be lying.
+#
+# MEASURED 2026-08-17 against the real page: the link works and the token really does belong to the
+# organization. So this ships as `yes`. Re-measure it if GitHub touches that page — MANUAL.md says
+# how — and set it to `no` if it regresses: the by-hand steps are always printed and carry the
+# screen on their own. It is a switch rather than an emptied message key because 20-messages.sh
+# forbids empty bodies, and rightly: msg() renders a missing key as "(missing message: k)" straight
+# to the student.
+CS193V_TOKEN_PREFILL="${CS193V_TOKEN_PREFILL:-yes}"
+
+# Where the shared code and the prose live. Both are absolute image paths, and both are
+# overridable for exactly one reason: 45-setup-git.sh runs this script on the HOST, out of the
+# checkout, where /etc/cs193v does not exist.
+UI="${CS193V_UI:-/etc/cs193v/ui.sh}"
+MESSAGES="${CS193V_MESSAGES:-/etc/cs193v/setup-git-messages.txt}"
+
+# GIT AUTH MUST NEVER PROMPT. Without this, a git command whose credential is refused stops and
+# asks for a username — with the cursor hidden, behind a spinner, inside a 60-second timeout.
+# The student sees a frozen row rather than a failure they can act on. Exported once here rather
+# than per command so nothing can be added later that forgets it.
+export GIT_TERMINAL_PROMPT=0
+# And the same for gh, for the same reason. run_timeout redirects stdout, so gh already sees a
+# non-terminal and suppresses its prompts on its own — this is belt and braces against a future
+# caller that does not, because `gh pr merge` asking "delete the branch?" behind a spinner is a
+# hang with no way to answer it.
+export GH_PROMPT_DISABLED=1
+
+# ─── the shared presentation layer ─────────────────────────────────────────────
+# Colours, box(), the arrow-key menu, msg(), run_timeout() and run_step() are the launcher's,
+# installed into the image by the Containerfile. Same guard and same reason as the launcher's:
+# a script with no box() cannot draw the box that would report the missing file.
+if [ ! -r "$UI" ]; then
+    printf 'setup-git: cannot read %s\n' "$UI" >&2
+    printf 'The course container is incomplete. Please ask the course staff for help.\n' >&2
+    exit 1
+fi
+# SCRIPTDIR, not a bare relative path: shellcheck resolves `source=` against the WORKING
+# directory, so without this `shellcheck -x` finds nothing and reports every variable this file
+# sets for the helper to read as unused.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=cs193v-ui.sh
+. "$UI"
+
+# ─── rendering the prose ───────────────────────────────────────────────────────
+# *ASTERISKS MARK EMPHASIS*, rendered in the same bright cyan the menu highlights with. Pairs
+# on one line; an unpaired one closes itself at end of line rather than colouring the rest of
+# the screen. Done here rather than by putting escape sequences in the message file, so the
+# prose stays readable and rewordable by someone who has never seen an ANSI code.
+# ONE PARSER, two callers. It was written twice — once for a string and once for a whole message —
+# and the two copies differed only in the indent, which is exactly the shape of duplication this
+# project drift-checks everywhere else.
+#
+# Blank lines stay empty rather than becoming two spaces, so nothing invisible ends up in a
+# student's copy-paste.
+emph_stream() {                       # emph_stream [INDENT]   -- text on stdin
+    awk -v on="$C_CYAN" -v off="$C_OFF" -v pad="${1:-}" '
+        {
+            n = split($0, part, /\*/)
+            line = part[1]
+            for (i = 2; i <= n; i++) line = line ((i % 2) == 0 ? on : off) part[i]
+            if (n % 2 == 0) line = line off
+            print (line == "" ? "" : pad line)
+        }'
+}
+
+# One string, unindented: for the corrections that continue a line a student is already typing on.
+emph() {                              # emph TEXT -> the same text, *emphasis* coloured
+    printf '%s\n' "$1" | emph_stream
+}
+
+# A whole message, ready to read: emphasis applied and every non-blank line indented two columns,
+# which is the margin every screen in this script shares.
+render() {                            # render KEY [NAME=value ...]
+    msg "$@" | emph_stream '  '
+}
+
+say() { printf '\n'; render "$@"; }   # a screen: one blank line, then the block
+
+# ─── the failure box ───────────────────────────────────────────────────────────
+# What a student sends to staff. Not die(): die() puts its whole argument in the box, and what
+# belongs in the box here is only the command's stderr — the prose above it has to be readable
+# prose, and the box has to be obviously a verbatim quote of something a machine said.
+#
+# SG_CMD is written by run_noted, from inside a SUBSHELL: run_timeout backgrounds what it runs,
+# so an assignment there is invisible here. Hence a file, the same reason $BUILD_NOTE is one.
+fail_to_staff() {                     # fail_to_staff RC
+    say err.setup-failed "CMD=$(last_cmd)" "RC=$1"
+    printf '%s\n' "$RT_OUT" | box "$(msg title.error)" "$C_RED" '  '
+    printf '\n'
+    exit 1
+}
+
+note_cmd() { printf '%s\n' "$*" > "$SG_CMD" 2>/dev/null || true; }
+last_cmd() { cat "$SG_CMD" 2>/dev/null || printf '(unknown)'; }
+
+# ─── validation ────────────────────────────────────────────────────────────────
+# These three are pure: input in, a verdict out, no terminal and no network. That is deliberate —
+# they are what 45-setup-git.sh drives through the --dev-* seams, as a table, on a machine with
+# no container anywhere in the picture.
+#
+# THE VERDICT IS A VARIABLE, NOT STDOUT, and that is not a style choice. The first two also have
+# to hand back the NORMALISED value, and a function that prints its verdict has to be called as
+# `v="$(validate_email "$x")"` — a subshell, where the assignment to VALID_EMAIL is discarded on
+# return. That bug was live for exactly as long as it took to run the validator table: every
+# verdict was right and every accepted address came back empty.
+
+trim() {                              # trim TEXT -> the same, outer whitespace removed
+    printf '%s' "$1" | awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print }'
+}
+
+# validate_email INPUT -> `ok`, `invalid` or `subdomain`; VALID_EMAIL set on ok.
+#
+# THREE OUTCOMES, NOT TWO, because a Stanford student typing me@cs.stanford.edu has not made a
+# typo — they have given a real address of theirs that is not the one the course roster knows.
+# "That is not a valid @stanford.edu email address" would be a lie to their face; the subdomain
+# verdict gets its own message.
+#
+# NOT RFC 5322, deliberately. That grammar permits quoted local parts with spaces and embedded
+# comments — `"my name"@stanford.edu` is legal mail and is not anybody's SUNet address — so
+# implementing it would accept typos while costing a hundred lines. The local part accepted here
+# is the practical one: what Stanford issues, plus the plus-addressing and dots people use.
+VALID_EMAIL=''
+EMAIL_VERDICT=''
+validate_email() {
+    local raw lp domain lower
+    VALID_EMAIL=''; EMAIL_VERDICT=invalid
+    raw="$(trim "$1")"
+    # Exactly one @, with something on each side. Checked with globs rather than a regex so the
+    # two-@ case is rejected before anything tries to split on it.
+    case "$raw" in
+        *@*@*|@*|*@) return 0 ;;
+        *@*)         : ;;
+        *)           return 0 ;;
+    esac
+    lp="${raw%@*}"
+    domain="${raw#*@}"
+    # This also rejects every space, tab and control character, which is why nothing below has
+    # to worry about echoing a control character back at the terminal.
+    if ! printf '%s' "$lp" | LC_ALL=C grep -qE '^[A-Za-z0-9._%+-]{1,64}$'; then
+        return 0
+    fi
+    # A leading, trailing or doubled dot is invalid in a local part and is always a typo.
+    case "$lp" in .*|*.|*..*) return 0 ;; esac
+    # The domain is compared case-insensitively and stored lower-cased. The local part is NOT
+    # touched: local parts are case-sensitive in the standard even though Stanford's are not,
+    # and echoing back something a student did not type invites "that's not what I typed".
+    lower="$(printf '%s' "$domain" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+        stanford.edu)   VALID_EMAIL="$lp@stanford.edu"; EMAIL_VERDICT=ok ;;
+        *.stanford.edu) EMAIL_VERDICT=subdomain ;;
+        *)              EMAIL_VERDICT=invalid ;;
+    esac
+}
+
+# validate_name INPUT -> `ok` or `empty`; VALID_NAME set on ok.
+#
+# ONE FAILURE MESSAGE, so every rejection is the same one: "Please enter your name." A hundred
+# characters of pasted nonsense and an empty line are the same mistake from a student's side.
+#
+# awk '{$1=$1; print}' trims and squeezes runs of whitespace in one pass, which is why "Jane
+# Doe" typed with three spaces comes out with one. Non-ASCII is left completely alone: José
+# Ángel is a name, and a control-character filter that ate UTF-8 continuation bytes would
+# mangle a good fraction of the class.
+VALID_NAME=''
+NAME_VERDICT=''
+validate_name() {
+    local squeezed
+    VALID_NAME=''; NAME_VERDICT=empty
+    squeezed="$(printf '%s' "$1" | LC_ALL=C awk '{ $1 = $1; print }')"
+    if printf '%s' "$squeezed" | LC_ALL=C grep -q '[[:cntrl:]]'; then return 0; fi
+    [ -n "$squeezed" ]         || return 0
+    [ "${#squeezed}" -le 100 ] || return 0
+    VALID_NAME="$squeezed"; NAME_VERDICT=ok
+}
+
+# token_kind INPUT -> fine | classic | empty | unknown
+#
+# The classic case is worth telling apart rather than lumping in with "that is not a token".
+# A personal access token (classic) with the `repo` scope would very nearly work, which is
+# exactly why a student who made one needs to be told that this course wants the other kind
+# and why — not told that what they are holding is not a token.
+token_kind() {
+    local t; t="$(trim "$1")"
+    case "$t" in
+        '')           printf 'empty\n' ;;
+        github_pat_*) printf 'fine\n' ;;
+        ghp_*)        printf 'classic\n' ;;
+        *)            printf 'unknown\n' ;;
+    esac
+}
+
+# ─── the token link ────────────────────────────────────────────────────────────
+# GitHub's prefill takes a LIFETIME IN DAYS, and staff configure a DATE — so the difference is
+# computed here, on every run, which is also what keeps the link honest as the quarter goes on.
+#
+# ARITHMETIC RATHER THAN `date -d`, because -d is a GNU extension and 45-setup-git.sh runs this
+# on a TA's Mac, where it silently means something else. This is the standard days-from-civil
+# algorithm; CS193V_TODAY exists so a test can pin the answer instead of changing it daily.
+expiry_days() {
+    local today
+    today="${CS193V_TODAY:-$(date -u +%Y-%m-%d)}"
+    LC_ALL=C awk -v a="$today" -v b="$CS193V_TOKEN_EXPIRY" '
+        function days(s,   p, y, m, d, era, yoe, doy, doe) {
+            split(s, p, "-"); y = p[1] + 0; m = p[2] + 0; d = p[3] + 0
+            if (m <= 2) y--
+            era = int((y >= 0 ? y : y - 399) / 400)
+            yoe = y - era * 400
+            doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+            return era * 146097 + doe - 719468
+        }
+        BEGIN {
+            n = days(b) - days(a)
+            # A configured expiry that has already passed is staff rot, not student error, and
+            # there is nothing useful to say to a student about it. 30 days keeps them working
+            # while 00-release-gates.sh is what fails loudly about the date itself.
+            if (n < 30) n = 30
+            print n
+        }'
+}
+
+token_url() {
+    printf '%s?name=CS193V&target_name=%s&expires_in=%s&contents=write&issues=write&pull_requests=write' \
+           'https://github.com/settings/personal-access-tokens/new' \
+           "$CS193V_GH_ORG" "$(expiry_days)"
+}
+
+# The signup link carries the address they just gave us, so the first field is filled in. Only
+# @ needs escaping in what validate_email lets through.
+email_encoded() {
+    printf '%s' "$1" | sed 's/@/%40/'
+}
+
+sandbox_url() { printf 'https://github.com/%s.git' "$CS193V_GH_SANDBOX"; }
+
+# ─── screens ───────────────────────────────────────────────────────────────────
+# One prompt, validated, then confirmed. The confirmation is a menu rather than a y/n for the
+# reason menu() records: students do not know that convention this early in the quarter.
+#
+# THE DEFAULT IS "YES", which is the one place this script departs from the launcher's rule that
+# the highlighted option is always the safe one. Nothing here is destructive — the cost of
+# getting it wrong is one more trip round a loop that is already free — and defaulting to "no"
+# on a question a student has just answered correctly makes the common path the slow one.
+ask_email() {
+    local input first=yes
+    while :; do
+        if [ "$first" = yes ]; then
+            printf '\n%s ' "$(render prompt.email)"
+            first=no
+        fi
+        IFS= read -r input || input=''
+        validate_email "$input"
+        case "$EMAIL_VERDICT" in
+            ok) : ;;
+            subdomain) printf '  %s %s ' "$(emph "$(msg err.email-subdomain)")" \
+                                         "$(emph "$(msg prompt.retry)")"; continue ;;
+            *)         printf '  %s %s ' "$(emph "$(msg err.email-invalid)")" \
+                                         "$(emph "$(msg prompt.retry)")"; continue ;;
+        esac
+        say confirm.entered "VALUE=$VALID_EMAIL"
+        printf '\n'
+        menu 0 "$(msg opt.correct)" "$(msg opt.retype)"
+        if [ "$MENU_CHOICE" -eq 0 ]; then SG_EMAIL="$VALID_EMAIL"; return 0; fi
+        first=yes
+    done
+}
+
+ask_name() {
+    local input first=yes
+    while :; do
+        if [ "$first" = yes ]; then
+            printf '\n%s ' "$(render prompt.name)"
+            first=no
+        fi
+        IFS= read -r input || input=''
+        validate_name "$input"
+        if [ "$NAME_VERDICT" != ok ]; then
+            printf '  %s %s ' "$(emph "$(msg err.name-empty)")" "$(emph "$(msg prompt.retry)")"
+            continue
+        fi
+        say confirm.entered "VALUE=$VALID_NAME"
+        printf '\n'
+        menu 0 "$(msg opt.correct)" "$(msg opt.retype)"
+        if [ "$MENU_CHOICE" -eq 0 ]; then SG_NAME="$VALID_NAME"; return 0; fi
+        first=yes
+    done
+}
+
+# The account, the address on it, and the organization invitation. All three are arranged before
+# a student ever runs this — but a token cannot name the organization as its resource owner
+# until the invitation is accepted, and the symptom of skipping it is a 404 three screens later
+# with four possible causes. Asking here turns that into a checklist.
+github_checkpoint() {
+    say github.checkpoint "EMAIL_ENC=$(email_encoded "$SG_EMAIL")" "ORG=$CS193V_GH_ORG"
+    printf '\n'
+    menu 0 "$(msg opt.all-done)" "$(msg opt.need-help)"
+    [ "$MENU_CHOICE" -eq 0 ] && return 0
+    # No command failed here, so the box carries what the student chose instead of a stderr. The
+    # value staff get from it is knowing WHERE they gave up, which the command line names.
+    note_cmd 'setup-git: the GitHub account checkpoint'
+    RT_OUT="$(msg opt.need-help)"
+    # 1 rather than 0: nothing returned a status here, and "failed with exit code 0" reads as a
+    # contradiction. 1 is what the script is about to exit with.
+    fail_to_staff 1
+}
+
+# Asks until it has something shaped like a fine-grained token. Shape only: whether it WORKS is
+# what the whole verification stage is for.
+ask_token() {
+    local input kind first
+    say token.intro
+    if [ "$CS193V_TOKEN_PREFILL" = yes ]; then
+        say token.prefill "URL=$(token_url)" "EXPIRY=$CS193V_TOKEN_EXPIRY"
+        render token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
+    else
+        say token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
+    fi
+    say token.paste
+    # SAME `first` DANCE AS ask_email, and for the same reason: an empty answer is corrected in
+    # place -- "We didn't get anything. Try again:" and the cursor right after it -- while the two
+    # block-length messages get the full prompt again underneath them, because an inline "Try
+    # again:" after six lines of prose reads as part of the prose.
+    first=yes
+    while :; do
+        if [ "$first" = yes ]; then
+            printf '\n%s ' "$(render prompt.token)"
+            first=no
+        fi
+        # -s so nothing echoes. The token then never reaches the scrollback, which matters more
+        # here than it looks: tmux keeps 50,000 lines per tab, and a student asking for help
+        # screenshots their terminal.
+        IFS= read -rs input || input=''
+        printf '\n'
+        kind="$(token_kind "$input")"
+        case "$kind" in
+            fine) : ;;
+            empty)   printf '  %s %s ' "$(emph "$(msg err.token-empty)")" \
+                                       "$(emph "$(msg prompt.retry)")"; continue ;;
+            classic) say err.token-classic; first=yes; continue ;;
+            *)       say err.token-shape;   first=yes; continue ;;
+        esac
+        SG_TOKEN="$(trim "$input")"
+        # A receipt, because -s means a mis-paste is otherwise invisible: a truncated token and
+        # a good one look exactly the same, which is a blank screen. The prefix and the length
+        # are enough to tell those apart and are not enough to be worth stealing.
+        printf '\n'
+        render token.receipt "PREFIX=$(printf '%s' "$SG_TOKEN" | cut -c1-11)" \
+                             "LEN=$(printf '%s' "$SG_TOKEN" | wc -c | tr -d ' ')"
+        return 0
+    done
+}
+
+# ─── the commands, as rows ─────────────────────────────────────────────────────
+# THE LABEL IS THE COMMAND, which is the point of showing them at all: a student can see exactly
+# what was done to their machine, repeat it by hand, and read it out to staff. The one exception
+# is the login, whose real argument is the token — see gh_login.
+config_step() {                       # config_step LABEL CMD...
+    local label="$1"; shift
+    note_cmd "$label"
+    run_step "$label" "$@"
+}
+
+# THE TOKEN GOES OVER STDIN, NEVER IN ARGV. `gh auth login --with-token` reads it from stdin, so
+# a function is all that is needed to keep it out of the process table, out of the row on the
+# screen, and out of anything a test or a bug report could capture.
+gh_login() { printf '%s\n' "$SG_TOKEN" | gh auth login --with-token; }
+
+apply_config() {
+    local lbl
+    say status.running-commands
+    printf '\n'
+
+    lbl="$(printf 'git config --global user.email "%s"' "$SG_EMAIL")"
+    config_step "$lbl" git config --global user.email "$SG_EMAIL" || fail_to_staff $?
+
+    lbl="$(printf 'git config --global user.name "%s"' "$SG_NAME")"
+    config_step "$lbl" git config --global user.name "$SG_NAME" || fail_to_staff $?
+
+    config_step 'git config --global pull.rebase true' \
+                git config --global pull.rebase true || fail_to_staff $?
+
+    # Not in the issue's list, added on purpose: without it `git init` prints seven lines of
+    # advice about the initial branch name every time, and a student's local `master` then
+    # disagrees with GitHub's `main` for no reason they can see.
+    config_step 'git config --global init.defaultBranch main' \
+                git config --global init.defaultBranch main || fail_to_staff $?
+
+    config_step 'gh auth login --with-token < your-token' gh_login || fail_to_staff $?
+    config_step 'gh auth setup-git' gh auth setup-git || fail_to_staff $?
+}
+
+# Which account GitHub says the token belongs to. One call, and it catches the paste that came
+# from a roommate's screen or from the wrong browser profile — which would otherwise surface as
+# a permissions failure that no amount of fixing permissions could cure.
+#
+# SETS SG_LOGIN RATHER THAN PRINTING IT, because the obvious form —
+# `SG_LOGIN="$(whoami_login)"` — is a subshell, and the two things the failure path needs are both
+# set inside it: RT_OUT, which is what the staff box quotes, and the recorded command, which is
+# what it names. A failed `gh api user` drew an empty box under the words "(unknown)" until this
+# stopped being a command substitution. Same trap as validate_email's, one function along.
+whoami_login() {                      # -> 0 and SG_LOGIN set, or the call's own rc
+    RT_ROW='' RT_SPIN=''
+    note_cmd 'gh api user'
+    run_timeout 30 gh api user --jq .login || return $?
+    SG_LOGIN="$RT_OUT"
+}
+
+# ─── verification ──────────────────────────────────────────────────────────────
+# FIVE ROWS, EACH GROUPING SEVERAL COMMANDS, and the grouping is not cosmetic: it is exactly the
+# granularity of the token's permission set, so a row that fails names one permission rather
+# than a list. Fifteen rows would be more honest about the work and less useful about the cause.
+#
+# Names are a readable prefix plus 64 random hex characters. The randomness is what lets a whole
+# lab section run this at once against one repository; the prefix is what lets staff see what
+# the churn in that repository is, and clean it up.
+hexname() {
+    LC_ALL=C od -An -tx1 -N32 /dev/urandom | LC_ALL=C tr -d ' \n'
+}
+
+# Arguments containing spaces come back quoted, so what a student reads out to staff is something
+# they could paste. Only for display and for the failure box; nothing is parsed back.
+quoted() {                            # quoted CMD... -> the same, spacey arguments in quotes
+    local a out=''
+    for a in "$@"; do
+        case "$a" in
+            *[[:space:]]*) out="$out \"$a\"" ;;
+            *)             out="$out $a" ;;
+        esac
+    done
+    printf '%s' "${out# }"
+}
+
+# The plan --dev-probe-plan prints, accumulated in a file.
+#
+# A FILE, AND A PLACEHOLDER RETURNED ON STDOUT, because half of these commands have their output
+# captured: `url="$(run_noted gh pr create ...)"`. Printing the command to stdout in dry mode puts
+# it inside that capture rather than in the plan, which is exactly what the first dry run did —
+# every `gh pr create` line vanished from the plan, and each line after it took its issue number
+# from the tail of a command string. Handing back a URL-shaped placeholder instead means dry mode
+# runs the SAME code as a real run, rather than a second path that can be wrong on its own.
+plan_add() {
+    [ -n "${SG_DRY:-}" ] && printf '%s\n' "$*" >> "$SG_PLAN"
+    return 0
+}
+
+# run_noted CMD...  — record the command, then run it (or, in dry mode, add it to the plan).
+#
+# DRY MODE IS WHAT --dev-probe-plan PRINTS, and it runs the real probe functions rather than a
+# hand-written list, so the plan cannot drift from what actually happens. It is also how
+# 45-setup-git.sh asserts that no probe ever tries to approve its own pull request, delete a
+# pull request, or delete an issue — the three things the original design asked for that GitHub
+# does not permit.
+run_noted() {
+    local shown; shown="$(quoted "$@")"
+    note_cmd "$shown"
+    if [ -n "${SG_DRY:-}" ]; then
+        plan_add "$shown"
+        printf 'https://github.com/%s/1\n' "$CS193V_GH_SANDBOX"
+        return 0
+    fi
+    "$@"
+}
+
+git_c() { run_noted git -C "$SG_CLONE" "$@"; }
+
+probe_clone() {
+    rm -rf "$SG_CLONE"
+    run_noted git clone --quiet "$(sandbox_url)" "$SG_CLONE"
+}
+
+probe_pull() { git_c pull --quiet; }
+
+# Three branches, because the pull request stage needs a base that is not the default branch
+# (branch A), a head to merge into it (branch B), and a head for a pull request that gets closed
+# rather than merged (branch C). Nothing is ever pushed to the default branch: every student has
+# write access to this repository, so the probes stay off the one ref that matters.
+probe_push() {
+    local base=main
+    [ -n "${SG_DRY:-}" ] || base="$(git -C "$SG_CLONE" rev-parse --abbrev-ref HEAD)"
+    printf '%s\n' "$base" > "$SG_TMP/base"
+    git_c checkout -q -b "$SG_BR_A"                                     || return $?
+    git_c push -q origin "$SG_BR_A"                                     || return $?
+    remember_branch "$SG_BR_A"
+    git_c checkout -q -b "$SG_BR_B"                                     || return $?
+    write_probe_file "$SG_HEX-b"                                        || return $?
+    git_c add -A                                                        || return $?
+    git_c commit -q -m "cs193v setup check"                             || return $?
+    git_c push -q origin "$SG_BR_B"                                     || return $?
+    remember_branch "$SG_BR_B"
+    git_c checkout -q "$base"                                           || return $?
+    git_c checkout -q -b "$SG_BR_C"                                     || return $?
+    write_probe_file "$SG_HEX-c"                                        || return $?
+    git_c add -A                                                        || return $?
+    git_c commit -q -m "cs193v setup check"                             || return $?
+    git_c push -q origin "$SG_BR_C"                                     || return $?
+    remember_branch "$SG_BR_C"
+}
+
+# NAMED FROM THE HEX, NOT FROM THE BRANCH. The branch names carry a `cs193v-setup/` prefix so
+# staff can see what the churn in the sandbox is — and a slash in a filename is a directory, so
+# the first version of this wrote setup-checks/cs193v-setup/<hex>.txt into a directory that
+# mkdir -p had not been told about. Found by reading --dev-probe-plan, not by a failed push.
+write_probe_file() {                  # write_probe_file TAG
+    plan_add "write setup-checks/$1.txt"
+    [ -n "${SG_DRY:-}" ] && return 0
+    mkdir -p "$SG_CLONE/setup-checks" || return $?
+    printf 'This branch was created by setup-git and can be deleted.\n' \
+        > "$SG_CLONE/setup-checks/$1.txt"
+}
+
+# Every branch this creates is written down as it is created, not derived afterwards, so the
+# cleanup on the failure path knows exactly what to take away and nothing else.
+remember_branch() {
+    printf '%s\n' "$1" >> "$SG_TMP/branches"
+}
+
+# And forgotten as it is deleted, so the teardown below only has the branches a FAILED run left
+# behind. Without this, a clean run deletes each branch twice — once here and once from the trap —
+# and the second attempt fails silently against a ref that is already gone. Harmless, but it makes
+# "what did the failure path leave behind?" impossible to see, in the log or in a test.
+forget_branch() {
+    [ -f "$SG_TMP/branches" ] || return 0
+    grep -vxF "$1" "$SG_TMP/branches" > "$SG_TMP/branches.new" 2>/dev/null || :
+    mv "$SG_TMP/branches.new" "$SG_TMP/branches" 2>/dev/null || :
+    return 0
+}
+
+# List, create, close: all three Issues operations, one permission, one message. The issue is
+# closed HERE rather than by the pull request that links it, because a linked issue closes only
+# on a merge into the DEFAULT branch and this design deliberately never merges into that.
+probe_issue() {
+    local url
+    run_noted gh issue list --repo "$CS193V_GH_SANDBOX" --state open --limit 5 || return $?
+    url="$(run_noted gh issue create --repo "$CS193V_GH_SANDBOX" \
+                     --title "cs193v setup check $SG_HEX" --body 'Opened by setup-git.')" || return $?
+    printf '%s\n' "${url##*/}" > "$SG_TMP/issue"
+    run_noted gh issue close --repo "$CS193V_GH_SANDBOX" "${url##*/}"
+    # THE NUMBER STAYS ON DISK, unlike a deleted branch name: probe_pr reads it to link the issue
+    # from the pull request. Removing it here to spare the teardown a second close made the pull
+    # request body say "Closes #0" -- caught by reading --dev-probe-plan, which is the whole
+    # argument for that seam printing the real commands rather than a hand-written list. Closing an
+    # already-closed issue is a silent no-op, so the duplicate costs nothing.
+}
+
+# Create, review, merge, close, and the ref deletions. The review is a COMMENT rather than an
+# approval: GitHub answers a request to approve your own pull request with 422 "Can not approve
+# your own pull request", so an approval here could never pass. Neither pull request is deleted,
+# because pull requests cannot be deleted at all — the second is closed.
+probe_pr() {
+    local base issue url1 url2
+    base="$(cat "$SG_TMP/base")"
+    issue="$(cat "$SG_TMP/issue" 2>/dev/null || printf '0')"
+    url1="$(run_noted gh pr create --repo "$CS193V_GH_SANDBOX" --base "$SG_BR_A" --head "$SG_BR_B" \
+                      --title "cs193v setup check $SG_HEX" \
+                      --body "Opened by setup-git. Closes #$issue")" || return $?
+    run_noted gh pr review --repo "$CS193V_GH_SANDBOX" "${url1##*/}" \
+              --comment --body 'Reviewed by setup-git.'          || return $?
+    run_noted gh pr merge --repo "$CS193V_GH_SANDBOX" "${url1##*/}" --merge || return $?
+    url2="$(run_noted gh pr create --repo "$CS193V_GH_SANDBOX" --base "$base" --head "$SG_BR_C" \
+                      --title "cs193v setup check $SG_HEX" \
+                      --body 'Opened by setup-git.')"            || return $?
+    run_noted gh pr close --repo "$CS193V_GH_SANDBOX" "${url2##*/}" || return $?
+    git_c push -q origin --delete "$SG_BR_B"                       || return $?
+    forget_branch "$SG_BR_B"
+    git_c push -q origin --delete "$SG_BR_C"                       || return $?
+    forget_branch "$SG_BR_C"
+    git_c push -q origin --delete "$SG_BR_A"                       || return $?
+    forget_branch "$SG_BR_A"
+    # Last, once nothing else needs the number: the issue was closed by probe_issue, so a run that
+    # gets this far leaves the teardown nothing to do. A run that does not still leaves it a number
+    # to close, which is the only case that needs one.
+    rm -f "$SG_TMP/issue"
+}
+
+# Which account owns the repositories this token can reach. The reason this is worth a call:
+# a token created under the student's own account instead of the organization is both the most
+# likely mistake and the only unrecoverable one — resource owner cannot be changed afterwards —
+# and it produces exactly the same 404 as three other causes. If the answer is positive (the
+# token sees the student's own repositories and none of the organization's) the student gets told
+# what happened; if it is empty or ambiguous, they get the four-item checklist instead.
+token_owner_wrong() {
+    local owners
+    RT_ROW='' RT_SPIN=''
+    run_timeout 30 gh api 'user/repos?per_page=100' --jq '[.[].owner.login] | unique | join(" ")' \
+        || return 1
+    owners="$RT_OUT"
+    [ -n "$owners" ] || return 1
+    case " $owners " in *" $CS193V_GH_ORG "*) return 1 ;; esac
+    case " $owners " in *" $SG_LOGIN "*) return 0 ;; esac
+    return 1
+}
+
+# Environmental failures, told apart from permission failures by what the command said. A whole
+# lab section starting at once really does trip GitHub's secondary rate limit, and blaming the
+# student's permissions for it would send them to edit a token that was already correct.
+classify_failure() {
+    case "$RT_OUT" in
+        *"Could not resolve host"*|*"Temporary failure in name resolution"*|\
+        *"Failed to connect to github.com"*|*"Network is unreachable"*|\
+        *"connection refused"*|*"Connection refused"*|*"dial tcp"*)
+            printf 'network\n' ;;
+        *"secondary rate limit"*|*"rate limit exceeded"*)
+            printf 'rate-limit\n' ;;
+        *)  printf '\n' ;;
+    esac
+}
+
+# SG_FAIL_RC is kept because the staff box reports it. It used to say `exit code 1` whatever the
+# command actually returned, which is the one number in that box a student cannot look up and
+# staff cannot guess -- caught by injecting a failure with exit code 42 and reading the box.
+probe_row() {                         # probe_row LABEL FN KEY
+    local rc
+    run_step "$1" "$2"; rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    SG_FAIL_KEY="$3"; SG_FAIL_RC="$rc"
+    return 1
+}
+
+run_probes() {
+    SG_HEX="$(hexname)"
+    SG_BR_A="cs193v-setup/$(hexname)"
+    SG_BR_B="cs193v-setup/$(hexname)"
+    SG_BR_C="cs193v-setup/$(hexname)"
+    probe_row 'git clone' probe_clone err.clone  || return 1
+    probe_row 'git pull'  probe_pull  err.clone  || return 1
+    probe_row 'git push'  probe_push  err.push   || return 1
+    probe_row 'gh issue'  probe_issue err.issues || return 1
+    probe_row 'gh pr'     probe_pr    err.prs    || return 1
+    return 0
+}
+
+# 0 = verified; 1 = ask for the token again; 2 = stop, having said why.
+verify() {
+    local kind
+    while :; do
+        say status.verifying
+        printf '\n'
+        if run_probes; then return 0; fi
+        kind="$(classify_failure)"
+        case "$kind" in
+            network)    say err.network;    return 2 ;;
+            rate-limit) say err.rate-limit; return 2 ;;
+        esac
+        if [ "$SG_FAIL_KEY" = err.clone ] && token_owner_wrong; then
+            say err.clone-wrong-owner "LOGIN=$SG_LOGIN" "ORG=$CS193V_GH_ORG"
+        else
+            say "$SG_FAIL_KEY" "ORG=$CS193V_GH_ORG"
+        fi
+        say prompt.how-to-proceed
+        printf '\n'
+        menu 0 "$(msg opt.followed-instructions)" "$(msg opt.reenter-token)" "$(msg opt.stuck)"
+        case "$MENU_CHOICE" in
+            0) continue ;;
+            1) return 1 ;;
+            *) fail_to_staff "$SG_FAIL_RC" ;;
+        esac
+    done
+}
+
+# ─── teardown ──────────────────────────────────────────────────────────────────
+# THE CURSOR IS THE HALF THAT MATTERS. run_step hides it for the duration of a row, and a script
+# that exits with it hidden leaves the student typing blind in that terminal for everything they
+# do afterwards — ERRORS.md B18, found by watching a real install rather than by reading a
+# transcript. Restored here, so a Ctrl-C in the middle of a probe gives it back by the same route
+# a clean exit does.
+#
+# The sandbox is tidied on the FAILURE path as well as the success one, silently and
+# best-effort: a student who gives up halfway should not leave a branch and an open issue behind
+# for the next person to wonder about, and nothing about the tidying is their business.
+sg_cleanup() {
+    local b n
+    cursor_show
+    if [ -n "${SG_CLONE:-}" ] && [ -d "$SG_CLONE/.git" ] && [ -f "$SG_TMP/branches" ]; then
+        while IFS= read -r b; do
+            [ -n "$b" ] && git -C "$SG_CLONE" push -q origin --delete "$b" >/dev/null 2>&1
+        done < "$SG_TMP/branches"
+    fi
+    if [ -f "$SG_TMP/issue" ]; then
+        n="$(cat "$SG_TMP/issue")"
+        [ -n "$n" ] && gh issue close --repo "$CS193V_GH_SANDBOX" "$n" >/dev/null 2>&1
+    fi
+    [ -n "${SG_TMP:-}" ] && rm -rf "$SG_TMP"
+    return 0
+}
+
+# ─── already set up ────────────────────────────────────────────────────────────
+# A second run is the normal case, not an edge one: a token expires, a permission was wrong, or
+# `--rebuild --logout` cleared the volumes. Re-asking for a name and an email that are already
+# correct is the wrong response to any of those.
+#
+# ALL THREE HAVE TO BE KNOWN for this screen to appear. If the token is missing or GitHub will
+# not say who it belongs to, then setup is not finished whatever the git config says, and the
+# ordinary flow is the right place to be.
+already_configured() {
+    local n e
+    n="$(git config --global user.name 2>/dev/null || true)"
+    e="$(git config --global user.email 2>/dev/null || true)"
+    [ -n "$n" ] && [ -n "$e" ] || return 1
+    gh auth token >/dev/null 2>&1   || return 1
+    whoami_login                    || return 1
+    [ -n "$SG_LOGIN" ]              || return 1
+    SG_NAME="$n"; SG_EMAIL="$e"
+    return 0
+}
+
+# ─── the developer seams ───────────────────────────────────────────────────────
+# The pure functions and the two generated artefacts, exposed so 45-setup-git.sh can drive them
+# as tables with no container, no terminal and no network — the same seam --dev-steps is for the
+# launcher. Handled before the terminal check, because none of them needs one.
+dev_seam() {
+    case "$1" in
+        --dev-validate-email)
+            validate_email "${2-}"; printf '%s %s\n' "$EMAIL_VERDICT" "$VALID_EMAIL" ;;
+        --dev-validate-name)
+            validate_name "${2-}"; printf '%s %s\n' "$NAME_VERDICT" "$VALID_NAME" ;;
+        --dev-token-kind)
+            token_kind "${2-}" ;;
+        --dev-print-token-url)
+            token_url; printf '\n' ;;
+        --dev-probe-plan)
+            SG_DRY=1
+            SG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-git-dry.XXXXXX")"
+            SG_CMD="$SG_TMP/cmd"; SG_CLONE="$SG_TMP/sandbox"; SG_PLAN="$SG_TMP/plan"
+            : > "$SG_PLAN"
+            run_probes >/dev/null 2>&1
+            cat "$SG_PLAN"
+            rm -rf "$SG_TMP" ;;
+        *)  printf 'setup-git: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+}
+
+# ─── main ──────────────────────────────────────────────────────────────────────
+SG_EMAIL=''; SG_NAME=''; SG_TOKEN=''; SG_LOGIN=''
+SG_TMP=''; SG_CLONE=''; SG_CMD=''; SG_FAIL_KEY=''
+SG_HEX=''; SG_BR_A=''; SG_BR_B=''; SG_BR_C=''; SG_PLAN=''; SG_FAIL_RC=1
+
+main() {
+    local rc
+
+    case "${1-}" in
+        --dev-*) dev_seam "$@"; exit $? ;;
+        '')      : ;;
+        *)       printf 'setup-git: unknown option %s\n' "$1" >&2; exit 2 ;;
+    esac
+
+    # Every screen is a question, so there is nothing this can usefully do without a terminal.
+    # menu() would pick its default and the reads would see EOF, which would march through the
+    # whole script answering "yes" to everything and then fail somewhere unrelated.
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        printf '\n'; render err.no-terminal; printf '\n'
+        exit 1
+    fi
+
+    SG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-git.XXXXXX")" || exit 1
+    SG_CMD="$SG_TMP/cmd"
+    # Never under ~/projects: that directory is the student's own work, shared with their
+    # computer, and issue #16 keeps it showing them two things and nothing else.
+    SG_CLONE="$SG_TMP/sandbox"
+    trap sg_cleanup EXIT
+    cursor_hide
+
+    if already_configured; then
+        say already.configured "NAME=$SG_NAME" "EMAIL=$SG_EMAIL" "LOGIN=$SG_LOGIN"
+        say prompt.what-now
+        printf '\n'
+        menu 0 "$(msg opt.just-check)" "$(msg opt.start-over)" "$(msg opt.quit)"
+        case "$MENU_CHOICE" in
+            0)  verify; rc=$?
+                [ "$rc" -eq 0 ] && { msg status.all-set | celebrate "$(msg title.all-set)"; exit 0; }
+                [ "$rc" -eq 2 ] && exit 1
+                ;;                    # 1 = they want to re-enter the token: fall through
+            1)  SG_NAME=''; SG_EMAIL='' ;;
+            *)  exit 0 ;;
+        esac
+    fi
+
+    say intro
+    [ -n "$SG_EMAIL" ] || ask_email
+    [ -n "$SG_NAME" ]  || ask_name
+    github_checkpoint
+
+    # The loop is the token, and only the token. A student who has to make a new one does not
+    # have to retype their name and address to do it.
+    while :; do
+        ask_token
+        apply_config
+        whoami_login; rc=$?
+        if [ "$rc" -ne 0 ]; then
+            # Told apart here as well as after a probe: "we cannot reach GitHub" is not a reason to
+            # send a student to check a token that was fine, and this is the first call that touches
+            # the network, so it is the one most likely to meet a campus wifi that has not come up.
+            case "$(classify_failure)" in
+                network)    say err.network;    exit 1 ;;
+                rate-limit) say err.rate-limit; exit 1 ;;
+            esac
+            fail_to_staff "$rc"
+        fi
+        say confirm.account "LOGIN=$SG_LOGIN"
+        printf '\n'
+        menu 0 "$(msg opt.thats-me)" "$(msg opt.not-my-account)"
+        [ "$MENU_CHOICE" -eq 0 ] || continue
+        verify; rc=$?
+        [ "$rc" -eq 0 ] && break
+        [ "$rc" -eq 2 ] && exit 1
+    done
+
+    msg status.all-set | celebrate "$(msg title.all-set)"
+}
+
+main "$@"

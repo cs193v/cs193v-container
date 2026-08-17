@@ -10,7 +10,7 @@ export CS193V_INSTANCE=yourname     # letters, digits, - and _ only
 ```
 
 Several people — and several Claude Code sessions — develop this container on one machine.
-The variable suffixes the **container name, the dev image tag, and all five volumes
+The variable suffixes the **container name, the dev image tag, and all six volumes
 together**. `.private/tests/lib/assert.sh` mirrors the same suffix, so `run-tests.sh`
 follows automatically.
 

@@ -171,3 +171,49 @@ if [ -f "$note_file" ]; then
 else
     skip "checksum:matches-published" "no PUBLISHED-CHECKSUMS.txt to compare against"
 fi
+
+# ─── 6. the token expiry a student is told to choose ───────────────────────────
+# setup-git hands students a prefilled link with an expiration in it, and names the same date in
+# the by-hand steps. That date is the one value in this project that goes stale on a CALENDAR
+# rather than on a change to the code, so nothing in the everyday suite can catch it: every test
+# still passes, and a student is told to pick a date in the past.
+#
+# THIS LIVES IN THE RELEASE TIER for exactly that reason. A check in `static` would start failing
+# one day for everybody with no change to blame, which is how a suite gets ignored. Here it is
+# read once before the quarter starts, which is when the date needs setting anyway.
+#
+# setup-git clamps a stale date to a 30-day floor rather than emitting a negative lifetime, so the
+# consequence of ignoring this is a token that expires mid-quarter, not a broken link.
+expiry="$(sed -n 's/^CS193V_TOKEN_EXPIRY="${CS193V_TOKEN_EXPIRY:-\([0-9-]*\)}".*/\1/p' \
+          $PRIVATE/files/setup-git | head -1)"
+record "setup-git:token-expiry" "$expiry"
+assert_match "setup-git:token-expiry-is-a-date" '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$expiry"
+# 60 days, not one: a date inside the quarter it is meant to outlast is as wrong as a past one,
+# and a token that dies in week 8 costs every student who has one a repeat of setup-git.
+# The lifetime is read back out of setup-git's own link rather than recomputed here, so the two
+# cannot disagree about a leap year. The two path overrides are the same ones 45-setup-git.sh
+# uses: this runs on the HOST, where the image's /etc/cs193v does not exist.
+days="$(CS193V_TOKEN_EXPIRY="$expiry" \
+        CS193V_UI="$PRIVATE/files/cs193v-ui.sh" \
+        CS193V_MESSAGES="$PRIVATE/files/setup-git-messages.txt" \
+        bash "$PRIVATE/files/setup-git" --dev-print-token-url 2>/dev/null \
+        | sed -n 's/.*expires_in=\([0-9]*\).*/\1/p')"
+record "setup-git:token-lifetime-days" "$days"
+if [ -n "$days" ] && [ "$days" -ge 60 ]; then
+    pass "setup-git:token-expiry-is-comfortably-in-the-future"
+else
+    fail "setup-git:token-expiry-is-comfortably-in-the-future" \
+         "CS193V_TOKEN_EXPIRY in files/setup-git is $expiry, which is less than 60 days away.
+Set it past the end of the quarter — students are told to choose it, and the prefilled
+link carries it as a lifetime in days."
+fi
+
+# The organization and the sandbox repository are the other two values a new quarter moves, and
+# a placeholder left in either would fail on every student at once. Recorded rather than asserted
+# against a literal: the point is that a human reads them before the quarter starts.
+for v in CS193V_GH_ORG CS193V_GH_SANDBOX; do
+    val="$(sed -n "s/^$v=\"\${$v:-\([^}]*\)}\".*/\1/p" $PRIVATE/files/setup-git | head -1)"
+    record "setup-git:$v" "$val"
+    assert_ne "setup-git:$v-is-set" "" "$val"
+    assert_says_not "setup-git:$v-is-not-a-placeholder" "CHANGEME" "$val"
+done

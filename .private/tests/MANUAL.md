@@ -67,6 +67,113 @@ against a fake podman on a pty (`30-launcher-shim.sh :: tailbox:*`). What needs 
 timing, flicker, and whether real podman output is worth reading — none of which is in a
 transcript.
 
+### `setup-git` — the four things only GitHub can answer (issue #49)
+
+The sequence, the messages, the redaction and every validator are automated
+(`35-setup-git-shim.sh`, `45-setup-git.sh`). Four things are not, and cannot be: they are facts
+about GitHub's behaviour, they are undocumented in the direction we need them, and they can change
+without notice. `90-setup-git-github.sh` is the harness for all four — it skips unless you hand it
+a token, and it redirects `HOME`, `GH_CONFIG_DIR` and `GIT_CONFIG_GLOBAL` into a throwaway
+directory so it cannot touch your own login or gitconfig.
+
+**1. Does the prefilled token link actually prefill?** **Measured 2026-08-17: yes** — the link
+works and the token really belongs to the organization, so `CS193V_TOKEN_PREFILL` ships as `yes`.
+Re-measure this whenever GitHub touches that page, because the failure it guards against is the
+most expensive one available: [community discussion
+#188111](https://github.com/orgs/community/discussions/188111) reports `target_name` updating the
+Resource owner dropdown's *display* without initialising the form state, which would show
+`cs193v-students` while creating the token under the student's own account. Resource owner cannot
+be changed afterwards, and the instructions tell students to check exactly the field that would be
+lying.
+
+*To re-measure:* open the link `setup-git --dev-print-token-url` prints, fill nothing in by hand,
+generate the token, and then look at the token's own page: does it belong to the organization? Also check
+whether choosing the resource owner by hand wipes the other prefilled fields, as the same thread
+reports. If either reproduces, set `CS193V_TOKEN_PREFILL=no` in `files/setup-git` — the by-hand
+steps are already written and carry the screen on their own.
+
+**2. Which permission does each failing row actually report?** This is the measurement the failure
+messages are built on. Make four tokens, each like a student's but with one permission held back,
+and run one per token:
+```sh
+CS193V_GH_TEST_TOKEN=<contents: read only>  CS193V_GH_EXPECT_ROW='git push' \
+  CS193V_GH_EXPECT_KEY=err.push    .private/tests/run-tests.sh --tier github
+CS193V_GH_TEST_TOKEN=<no Issues>            CS193V_GH_EXPECT_ROW='gh issue' \
+  CS193V_GH_EXPECT_KEY=err.issues  .private/tests/run-tests.sh --tier github
+CS193V_GH_TEST_TOKEN=<no Pull requests>     CS193V_GH_EXPECT_ROW='gh pr' \
+  CS193V_GH_EXPECT_KEY=err.prs     .private/tests/run-tests.sh --tier github
+CS193V_GH_TEST_TOKEN=<resource owner: you>  CS193V_GH_EXPECT_ROW='git clone' \
+  .private/tests/run-tests.sh --tier github
+```
+*Expect:* the named row fails and no earlier one does. The suite records what GitHub said verbatim
+(`github:what-github-said`) — **rewrite the message in `setup-git-messages.txt` from that rather
+than from the docs** if the two disagree.
+
+**Measured 2026-08-17**, three of the four, against the image's gh 2.97:
+
+| Ablation | Row that failed | Message | Notes |
+|---|---|---|---|
+| Contents → Read-only | `git push` | `err.push` | as designed |
+| Issues → No access | `gh issue` | `err.issues` | fails at `gh issue **create**`, not `list` |
+| Pull requests → No access | `gh pr` | `err.prs` | as designed |
+| Resource owner → yourself | — | — | **NOT MEASURED**, see below |
+
+The Issues row is the interesting one. `gh issue list` **succeeds** with the Issues permission at No
+access — listing is covered by repository read — so the failure lands on `create`, and gh reports it
+over GraphQL rather than REST: `GraphQL: Resource not accessible by personal access token`. Two
+consequences worth keeping: `err.issues` naming *Read and write* is exactly right rather than
+accidentally right, and any future filter written against the REST wording alone would miss this.
+
+**3. Does `/user/repos` tell an org-owned token from a personally-owned one?** **NOT MEASURED, and
+it needs a second GitHub account.** `setup-git` claims outright that a token belongs to the wrong
+account, and it earns that claim by finding the student's own repositories in `GET /user/repos` and
+none of the organization's. The ablation that would settle it — a token whose resource owner is
+yourself — cannot be run from an account that OWNS cs193v-students, because there is no way to tell
+"the token reached the org repo through resource-owner scoping" from "it reached it because this
+account administers the org". Settling it takes a throwaway account added to the organization as a
+plain member.
+
+The two one-liners that answer it, given a token of each kind. `GH_TOKEN` stores nothing and logs
+nobody out, so neither of these disturbs your own login:
+
+```sh
+GH_TOKEN=<org-scoped token>      gh api 'user/repos?per_page=100' --jq '[.[].owner.login]|unique'
+GH_TOKEN=<personally-scoped>     gh api 'user/repos?per_page=100' --jq '[.[].owner.login]|unique'
+```
+
+*Expect:* the first lists `cs193v-students`, the second lists only the account's own name. If the
+second lists the organization too, the discriminator cannot work and `err.clone-wrong-owner` and
+`token_owner_wrong` should both be deleted rather than left as a path that never runs.
+
+**WHY LEAVING IT UNMEASURED IS SAFE, while leaving it unrecorded would not be.** `token_owner_wrong`
+returns "not wrong" unless it has positive evidence — a non-empty owner list, the organization
+absent from it, and the student's own login present — so every ambiguous answer, including an empty
+one, falls through to the four-item checklist. The failure mode of being wrong here is a student
+reading a checklist that includes the real cause as its first item, not a student being told
+something false. That is why this ships unmeasured; it is also why it must not be described as
+verified.
+
+**4. What does a pending token, or a non-member, actually look like?** **NOT MEASURED.** Both
+produce the same 404 as the two causes above, which is why the `git clone` message is a checklist.
+Reproduce each once against a token awaiting approval and against an account that has not accepted
+its invitation, and check that the checklist covers what you see. Same second-account requirement as
+§3 for the non-member half.
+
+### `setup-git` — the display, which no transcript can show
+Run it for real in an 80×24 terminal, with a working token.
+
+*Expect:*
+- One row per command, the braille spinner turning in column 5 while each runs, replaced by a
+  green `✓` — no flicker, and no row drawn twice or left half-erased.
+- A failing row's `✗` in red, in the same column, with the rows above it untouched.
+- The token invisible as you paste it, then a receipt naming its prefix and length.
+- **Ctrl-C in the middle of a probe: the cursor comes back.** Type something and check it echoes.
+  This is ERRORS.md B18's failure mode in a second place, and a transcript cannot show it.
+- The green ALL SET box closed and square on the right.
+
+*Automated:* the glyphs, the messages, the ordering, the redaction and the cursor sequences
+(`35-setup-git-shim.sh`). What needs eyes is timing and flicker.
+
 ### §7.2 — Ctrl-S does not freeze the terminal
 In `./cs193v`, press Ctrl-S, then type.
 *Expect:* typing still echoes. If it freezes, `stty -ixon` is not being applied.
@@ -214,8 +321,10 @@ that nothing is created, and that podman is not even contacted. Only the real `s
 invocation is unverified.
 
 ### §2.4 / §9.2 — `--rebuild --logout` really deletes the volumes
-Destructive: it logs you out of claude, gh and vercel. Gated behind an opt-in so a routine
-suite run cannot do it to you:
+Destructive: it logs you out of claude, gh and vercel, and takes the git identity `setup-git`
+configured with them — the credential helper line lives in that volume, so leaving it behind would
+point git at a token that no longer exists. Gated behind an opt-in so a routine suite run cannot do
+it to you:
 ```sh
 CS193V_DESTRUCTIVE=1 .private/tests/run-tests.sh --tier live
 ```

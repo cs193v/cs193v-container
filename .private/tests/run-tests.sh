@@ -22,6 +22,9 @@
 #   live       the launcher driving real podman: idempotency, drift, cleanup.
 #   release    release gates — NOT run by default. These fail until the repo is
 #              shippable, which is a standing state of affairs, not a regression.
+#   github     setup-git against the real GitHub API — NOT run by default, and skipped even
+#              when asked for unless CS193V_GH_TEST_TOKEN is set. It needs a real credential
+#              and it writes to a repository the whole class can see.
 #
 # image/container/live HARD-FAIL rather than skip when their prerequisite is missing, by
 # project decision: a green run must mean the whole thing really ran.

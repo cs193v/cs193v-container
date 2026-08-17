@@ -157,12 +157,12 @@ assert_contains "mount:workspace-bind-points-at-projects" "$REPO/projects" "$mou
 # Base names, matching the launcher's remove_volumes: the instance suffix lives in $NAME, so
 # these read cs193v-claude for a student and cs193v-<instance>-claude for a developer. The
 # assertion NAME stays instance-free so results files compare across instances.
-for v in claude claude-json gh vercel playwright; do
+for v in claude claude-json gh vercel playwright git; do
     assert_contains "mount:volume-cs193v-$v" "$NAME-$v" "$mounts"
 done
 nvol="$(podman inspect "$NAME" --format '{{json .Mounts}}' \
         | python3 -c 'import json,sys; print(sum(1 for m in json.load(sys.stdin) if m["Type"]=="volume"))')"
-assert_eq "mount:exactly-five-volumes" "5" "$nvol"
+assert_eq "mount:exactly-six-volumes" "6" "$nvol"
 
 assert_match "label:confighash-is-set" '.' "$(I '{{index .Config.Labels "cs193v.confighash"}}')"
 assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.dir"}}')"

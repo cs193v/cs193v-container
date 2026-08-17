@@ -519,8 +519,11 @@ launcher >/dev/null 2>&1
 shim_clear_log
 out="$(launcher --rebuild --logout)"
 assert_eq "logout:removes-container" "1" "$(shim_count '^rm ')"
-if [ "$(shim_count '^volume rm')" -eq 5 ]; then pass "logout:removes-5-volumes"
-else fail "logout:removes-5-volumes" "removed $(shim_count '^volume rm')"; fi
+# SIX, since setup-git: the git identity and the credential helper live in a volume of their own
+# now, and --logout takes them with the tokens. Counted rather than named, so a volume added to
+# container.args and forgotten in remove_volumes fails here.
+if [ "$(shim_count '^volume rm')" -eq 6 ]; then pass "logout:removes-6-volumes"
+else fail "logout:removes-6-volumes" "removed $(shim_count '^volume rm')"; fi
 assert_says "logout:says-you-are-logged-out" "log in again" "$out"
 # ...and it must NOT claim the thing it just deleted was kept: status.rebuilding says "logins are
 # kept", which is the wrong announcement for this path.
