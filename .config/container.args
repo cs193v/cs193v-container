@@ -133,8 +133,8 @@
 # forwards and to tell the container which ones they are, so the two cannot disagree.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
-# Four volumes holding logins, and ONE holding a package cache. That last one is an
-# exception to a rule this file used to state flatly, so here is the rule and why the
+# Five volumes holding logins and settings, and ONE holding a package cache. That last one is
+# an exception to a rule this file used to state flatly, so here is the rule and why the
 # exception earns it.
 #
 # The rule: no package caches. node_modules lives on the bind mount and survives a rebuild
@@ -157,6 +157,15 @@
 -v cs193v-claude:/home/student/.claude
 -v cs193v-claude-json:/home/student/.claude-json
 -v cs193v-gh:/home/student/.config/gh
+# The git identity and the gh credential helper line, which is why this one exists and why it is
+# .config/git rather than ~/.gitconfig. `git config --global` writes $XDG_CONFIG_HOME/git/config
+# when that file exists and ~/.gitconfig does not, so the Containerfile creates it empty and
+# every --global write lands in here. Without the volume they land in the writable layer, and
+# --rebuild -- the command staff tell students to run to GET a fix -- would silently take away
+# the identity setup-git configured and the credential helper `gh auth setup-git` wrote, while
+# the token itself survived next door in cs193v-gh. The student's next `git commit` would then
+# ask them who they are, for a reason nothing on their screen could explain.
+-v cs193v-git:/home/student/.config/git
 -v cs193v-vercel:/home/student/.local/share/com.vercel.cli
 -v cs193v-playwright:/home/student/.cache/ms-playwright
 

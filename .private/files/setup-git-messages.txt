@@ -1,0 +1,303 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Every student-facing string setup-git prints.
+#
+#  Edit freely — wording and tone here are yours, and nothing in the script depends on the
+#  phrasing. Same format as .private/messages.txt and read by the same msg(): each block
+#  starts with [[key]] on its own line and runs to the next [[key]], and {{PLACEHOLDER}} is
+#  substituted at runtime. 20-messages.sh cross-references this file against setup-git, so an
+#  orphan key or a missing one is caught automatically.
+#
+#  WHY THIS IS NOT messages.txt. setup-git runs INSIDE the container, and the container cannot
+#  see messages.txt — only projects/ is bind-mounted. So this file is installed into the image
+#  at /etc/cs193v/setup-git-messages.txt, which also means cs193v.buildhash covers it: reword
+#  something here and students are prompted to rebuild, so they actually get the new words.
+#
+#  *ASTERISKS MARK EMPHASIS* and are rendered as bright cyan, the same colour the arrow-key
+#  menu highlights with. They come in pairs on one line. Nothing that ends up inside a box may
+#  use them: box() measures display columns and the markup is removed after it counts, so the
+#  box would come out two columns narrow. 20-messages.sh asserts that.
+#
+#  House style, worth keeping: say what happened, say what to do, and never make a student
+#  guess whether something is their mistake or ours.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[intro]]
+Welcome to Git Setup!
+
+This script will help configure your system so that you can manage your code through the git
+utility and the website GitHub. We will describe these tools more later in the quarter. For
+now, we need to get some information from you.
+
+[[prompt.email]]
+*What is your @stanford.edu email address?*
+
+[[err.email-invalid]]
+That is not a valid @stanford.edu email address.
+
+[[err.email-subdomain]]
+Please use your regular @stanford.edu email address.
+
+[[prompt.name]]
+*What is your full name?*
+
+[[err.name-empty]]
+Please enter your name.
+
+[[prompt.retry]]
+*Try again:*
+
+[[confirm.entered]]
+You entered *{{VALUE}}*. Is that correct?
+
+[[opt.correct]]
+Yes, that's correct.
+
+[[opt.retype]]
+No, I want to retype that.
+
+[[github.checkpoint]]
+*Before we go on, three things need to be true on GitHub.*
+
+1. *You have a GitHub account.*
+   If you don't have one yet, create one here — this link fills in your email address
+   for you:
+
+       https://github.com/signup?user_email={{EMAIL_ENC}}
+
+   If you already have a GitHub account, you can use it. You do not need a new one for
+   this course.
+
+2. *Your @stanford.edu address is on that account.*
+   Add it here — you can keep your personal address on the account too:
+
+       https://github.com/settings/emails
+
+3. *You have accepted your invitation to the {{ORG}} organization.*
+   We emailed it to you. You can also accept it here:
+
+       https://github.com/orgs/{{ORG}}/invitation
+
+Let us know when you're done!
+
+[[opt.all-done]]
+Yep, all done!
+
+[[opt.need-help]]
+Uh oh, something's wrong. I need help!
+
+[[token.intro]]
+Now that you're on GitHub, you'll need to set up a *fine-grained access token* for the
+course. This is what will let you submit your homework. (We will describe what a
+"fine-grained access token" means in more detail later this quarter. For now, think of it as
+a password that is only allowed to do a few specific things.)
+
+[[token.prefill]]
+*Open this link.* It fills in almost everything for you:
+
+    {{URL}}
+
+Then, on that page:
+
+  1. Under *Repository access*, choose *All repositories*.
+  2. Check that *Expiration* reads *{{EXPIRY}}*.
+  3. Check that *Repository permissions* lists exactly these:
+
+         Contents         Read and write
+         Issues           Read and write
+         Pull requests    Read and write
+         Metadata         Read-only        (GitHub adds this one for you)
+
+  4. Scroll to the bottom and click *Generate token*.
+
+If that link doesn't work, you can set the same thing up by hand:
+
+[[token.byhand]]
+  1. Go to https://github.com/settings/personal-access-tokens
+  2. Click *Generate new token*.
+  3. For *Token name*, type CS193V.
+  4. For *Resource owner*, choose *{{ORG}}*. If you don't see it in the list, you
+     haven't accepted your invitation yet — see step 3 above.
+  5. For *Expiration*, choose *Custom...* and pick *{{EXPIRY}}*.
+  6. For *Repository access*, choose *All repositories*.
+  7. Open *Repository permissions* and set *Contents*, *Issues* and *Pull requests*
+     each to *Read and write*.
+  8. Scroll to the bottom and click *Generate token*.
+
+[[token.paste]]
+When you are done, copy your access token and paste it here. Also, make sure to save it in a
+safe place; once you close the window with the token in it, you won't be able to see it again!
+
+Nothing will appear on the screen as you paste. That is on purpose — it keeps your token from
+staying visible in this window.
+
+[[prompt.token]]
+*Your token:*
+
+[[token.receipt]]
+Got it: *{{PREFIX}}...* ({{LEN}} characters)
+
+[[err.token-empty]]
+We didn't get anything.
+
+[[err.token-classic]]
+That looks like a *personal access token (classic)*, not a fine-grained access token. The two
+work differently, and this course needs a fine-grained one. Use the link above — the page you
+land on should be titled *New fine-grained personal access token*.
+
+[[err.token-shape]]
+That doesn't look like a GitHub access token. A fine-grained access token starts with
+*github_pat_*. Check that you copied the whole thing.
+
+[[status.running-commands]]
+We're now going to run some commands on your behalf to get everything set up for you:
+
+[[confirm.account]]
+GitHub says this access token belongs to *@{{LOGIN}}*. Is that your account?
+
+[[opt.thats-me]]
+Yes, that's me.
+
+[[opt.not-my-account]]
+No, that's not my account.
+
+[[status.verifying]]
+Verifying that your access token has the appropriate permissions...
+
+[[status.all-set]]
+Git and GitHub set up successfully! You're all set!
+
+[[title.all-set]]
+ALL SET
+
+[[title.error]]
+ERROR
+
+[[err.setup-failed]]
+*Oh no, setup failed!* Please contact the course staff, and share the following details:
+
+Command *{{CMD}}* failed with exit code *{{RC}}*
+stderr:
+
+[[err.clone]]
+*Oh no, we can't reach the course's practice repository!*
+
+Your access token was accepted by GitHub, so this is almost certainly about what the token is
+allowed to do. Please check these, in this order:
+
+1. *Resource owner.* Open https://github.com/settings/personal-access-tokens and click your
+   CS193V token. *Resource owner* must read *{{ORG}}*, not your own username. If it reads
+   your username, that token cannot see any course repository, and you will need to make a
+   new one — resource owner cannot be changed after a token has been created.
+
+2. *Repository access.* On the same page, this must be *All repositories*.
+
+3. *Contents.* Under *Repository permissions*, *Contents* must be *Read and write*. If you
+   change it, click *Update token* at the bottom.
+
+4. *Your invitation.* If you have not accepted your invitation to {{ORG}} yet, do that
+   first, then come back: https://github.com/orgs/{{ORG}}/invitation
+
+[[err.clone-wrong-owner]]
+*Oh no, your access token belongs to the wrong account!*
+
+The token you pasted was created with *@{{LOGIN}}* as its *Resource owner*, which means it can
+only reach your own repositories — not the course's. It needs to be *{{ORG}}* instead.
+
+Resource owner cannot be changed after a token has been created, so this one cannot be fixed
+and you will need to make a new one. When you do, the *Resource owner* box is the second thing
+on the page, above *Repository access*:
+
+    https://github.com/settings/personal-access-tokens
+
+You can delete the old token from that same page once the new one works.
+
+[[err.push]]
+*Oh no, we can't* git push*!*
+
+This is most likely because your access token's *Contents* permission is set to *Read-only*
+instead of *Read and write*. To correct this:
+
+  1. Open https://github.com/settings/personal-access-tokens
+  2. Click your *CS193V* token.
+  3. Scroll to *Repository permissions* and set *Contents* to *Read and write*.
+  4. Scroll to the bottom and click *Update token*.
+
+You do not need to make a new token, and your token will not change — you can keep using the
+one you already pasted.
+
+[[err.issues]]
+*Oh no, we can't work with GitHub issues!*
+
+This is most likely because your access token's *Issues* permission is not set to *Read and
+write*. To correct this:
+
+  1. Open https://github.com/settings/personal-access-tokens
+  2. Click your *CS193V* token.
+  3. Scroll to *Repository permissions* and set *Issues* to *Read and write*.
+  4. Scroll to the bottom and click *Update token*.
+
+You do not need to make a new token, and your token will not change — you can keep using the
+one you already pasted.
+
+[[err.prs]]
+*Oh no, we can't work with pull requests!*
+
+This is most likely because your access token's *Pull requests* permission is not set to
+*Read and write*. To correct this:
+
+  1. Open https://github.com/settings/personal-access-tokens
+  2. Click your *CS193V* token.
+  3. Scroll to *Repository permissions* and set *Pull requests* to *Read and write*.
+  4. Scroll to the bottom and click *Update token*.
+
+You do not need to make a new token, and your token will not change — you can keep using the
+one you already pasted.
+
+[[err.network]]
+*Oh no, we can't reach GitHub!*
+
+This usually means the network isn't working, rather than anything being wrong with your
+setup. Check that you can load https://github.com in your browser, then run *setup-git*
+again.
+
+[[err.rate-limit]]
+*GitHub has asked us to slow down.*
+
+This happens when a lot of people set things up at the same time. Wait a minute, then run
+*setup-git* again.
+
+[[prompt.how-to-proceed]]
+Let us know how you want to proceed:
+
+[[opt.followed-instructions]]
+I was able to follow those instructions. Continue with setup.
+
+[[opt.reenter-token]]
+Let me re-enter my access token.
+
+[[opt.stuck]]
+I'm stuck! I'll need some help.
+
+[[already.configured]]
+*Git and GitHub are already set up on this computer.*
+
+  Your name:       {{NAME}}
+  Your email:      {{EMAIL}}
+  GitHub account:  @{{LOGIN}}
+
+[[prompt.what-now]]
+What would you like to do?
+
+[[opt.just-check]]
+Just check that everything still works.
+
+[[opt.start-over]]
+Start over from the beginning.
+
+[[opt.quit]]
+Nothing, thanks — quit.
+
+[[err.no-terminal]]
+setup-git asks you questions, so it has to be run from a terminal window.
+
+Open the course container the normal way, then type: setup-git

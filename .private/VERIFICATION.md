@@ -226,7 +226,7 @@ ss -ltn | awk '{print $4}' | grep -E ':(300[0-9]|517[3-9])$' | grep -v '^127\.0\
 # The two read-only key mounts must be present, or sshd has no host key and no authorized_keys
 I '{{json .Mounts}}' | grep -c 'authorized_keys'                     # expect 1, and RO
 ck  tunnel-up      "up"    sh -c '"$DIR/cs193v" doctor | sed -n "s/^  tunnel  *\(up\).*/\1/p"'
-rec mounts                 I '{{json .Mounts}}'                  # 5 volumes + 1 bind at <DIR>/projects
+rec mounts                 I '{{json .Mounts}}'                  # 6 volumes + 1 bind at <DIR>/projects
 ckx config-hash-label      sh -c 'podman inspect cs193v --format "{{index .Config.Labels \"cs193v.confighash\"}}" | grep -q .'
 rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, TERM, COLORTERM
 rec pid1                   I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'
@@ -575,7 +575,7 @@ time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lo
 
 ```sh
 rec containers podman ps -a --format '{{.Names}}'          # expect only cs193v
-rec volumes    podman volume ls --format '{{.Name}}'        # expect only the four cs193v-*
+rec volumes    podman volume ls --format '{{.Name}}'        # expect only the six cs193v-*
 rec images     podman images --format '{{.Repository}}:{{.Tag}}'
 rm -f "$DIR"/projects/.vt-*
 echo "A-battery: PASS=$PASS FAIL=$FAIL"
@@ -821,7 +821,7 @@ recreated, and logins are intact. Run it a second time with nothing edited and *
 build at all — that is the hash gate, and it is what makes one verb serve both jobs.
 
 **9.2 — Full reset is clean.** `./cs193v --rebuild --logout`; confirm `podman volume ls` no longer
-lists the four `cs193v-*` volumes.
+lists the six `cs193v-*` volumes.
 
 **9.3 — WSL teardown (Windows).** `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other WSL distro. Confirm any pre-existing distro

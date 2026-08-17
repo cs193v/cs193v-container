@@ -23,11 +23,11 @@ TMP="$(new_tmpdir)"
 trap 'rm -rf "$TMP"; shim_cleanup' EXIT
 
 # ─── the two pure functions, extracted and unit-tested ─────────────────────────
-# version_lt is duplicated in the launcher and the installer. If they ever disagree, a
+# version_lt is duplicated in cs193v-ui.sh and the installer. If they ever disagree, a
 # student is told to upgrade by one and accepted by the other.
-# Not /^version_lt() {$/ — the launcher's copy carries a trailing comment on the same line.
-sed -n '/^version_lt()/,/^}$/p' cs193v            > "$TMP/vl_launcher.sh"
-sed -n '/^version_lt()/,/^}$/p' $PRIVATE/install-cs193v.sh > "$TMP/vl_installer.sh"
+# Not /^version_lt() {$/ — the helper's copy carries a trailing comment on the same line.
+sed -n '/^version_lt()/,/^}$/p' $PRIVATE/files/cs193v-ui.sh > "$TMP/vl_launcher.sh"
+sed -n '/^version_lt()/,/^}$/p' $PRIVATE/install-cs193v.sh  > "$TMP/vl_installer.sh"
 for f in vl_launcher vl_installer; do
     if [ "$(wc -l < "$TMP/$f.sh" | tr -d ' ')" -gt 3 ]; then pass "extract:$f"
     else fail "extract:$f" "could not extract version_lt"; exit 1; fi
@@ -46,6 +46,36 @@ for pair in "5.7.0 5.7.0 no" "5.6.0 5.7.0 yes" "5.6.9 5.7.0 yes" "5.7.1 5.7.0 no
     assert_eq "version_lt:installer($a<$b)" "$want" "$(run_vl vl_installer "$a" "$b")"
 done
 # 5.10 vs 5.9 is the classic numeric-vs-lexical trap; asserted above for both copies.
+
+# ─── the menu answers the same keys in both copies ─────────────────────────────
+# menu() is the second function the installer has to carry rather than source, and it had no
+# check at all until setup-git made cs193v-ui.sh the third consumer.
+#
+# NOT A BYTE-FOR-BYTE DIFF, unlike box() and version_lt, and the reason is worth stating so
+# nobody "fixes" it into one: the installer's copy is deliberately NOT verbatim. Its output is
+# nested two columns deeper than the launcher's and its hint reads "up and down arrows, then
+# Enter" rather than the longer form, because it prints inside an indented step list. Diffing
+# the whole function would fail on that presentation difference forever, and the only way to
+# make it pass would be to change how the installer looks.
+#
+# What must not drift is which KEYS work. A student who learns j/k or the digit shortcuts from
+# one script and finds them dead in the other has been taught something false, and that is the
+# realistic drift: someone teaches one copy a new key and never touches the other. So this
+# compares the case block alone, indentation stripped.
+for f in ui:$PRIVATE/files/cs193v-ui.sh inst:$PRIVATE/install-cs193v.sh; do
+    sed -n '/^menu() {/,/^}$/p' "${f#*:}" \
+        | sed -n '/case "\$key" in/,/esac/p' | sed 's/^[[:space:]]*//' > "$TMP/keys.${f%%:*}"
+done
+# Extraction asserted first, or an empty file would match an empty file and this would pass
+# forever having read nothing — the trap this suite records for version_lt above.
+if [ "$(grep -c '.' "$TMP/keys.ui")" -ge 5 ]; then pass "menu:key-table-extractable"
+else fail "menu:key-table-extractable" "could not find menu()'s case block in cs193v-ui.sh"; fi
+assert_eq "menu:same-keys-in-both-copies" "" "$(diff "$TMP/keys.ui" "$TMP/keys.inst" 2>&1)"
+# The four things that table has to answer, named individually so a deletion says which.
+assert_contains "menu:arrow-up-works"   '${ESC}[A' "$(cat "$TMP/keys.ui")"
+assert_contains "menu:arrow-down-works" '${ESC}[B' "$(cat "$TMP/keys.ui")"
+assert_contains "menu:enter-selects"    'break'    "$(cat "$TMP/keys.ui")"
+assert_contains "menu:digits-select"    '[1-9]'    "$(cat "$TMP/keys.ui")"
 
 # The macOS VM sizing formula. A Mac's containers run in a fixed-size VM that does not
 # scale with the host, and podman's default is too small for this course.

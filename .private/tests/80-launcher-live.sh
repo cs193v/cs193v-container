@@ -378,12 +378,21 @@ rm -rf /tmp/vt-copy
 hold_container
 podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker'
 podman exec "$NAME" sh -c 'echo marker > /home/student/.config/gh/.vt-marker'
+# THE GIT IDENTITY, WRITTEN THE WAY setup-git WRITES IT, rather than a marker file dropped into
+# the directory. That is the whole point of the case: the identity surviving depends on
+# `git config --global` choosing ~/.config/git/config over ~/.gitconfig, which it does only
+# because the Containerfile pre-created the first one empty. A marker file would survive whatever
+# git decided, and this is the failure that would otherwise reach students as "the fix staff told
+# me to install deleted my name".
+podman exec "$NAME" sh -c 'git config --global user.email vt@stanford.edu'
 LV --rebuild >/dev/null 2>&1
 hold_container
 assert_eq "rebuild:claude-volume-survives" "marker" \
           "$(podman exec "$NAME" cat /home/student/.claude/.vt-marker 2>&1)"
 assert_eq "rebuild:gh-volume-survives" "marker" \
           "$(podman exec "$NAME" cat /home/student/.config/gh/.vt-marker 2>&1)"
+assert_eq "rebuild:git-identity-survives" "vt@stanford.edu" \
+          "$(podman exec "$NAME" git config --global user.email 2>&1)"
 # ...and things installed IN the container do not, which is the point of --rebuild.
 podman exec "$NAME" sh -c 'echo x > /tmp/.vt-ephemeral'
 LV --rebuild >/dev/null 2>&1
@@ -397,6 +406,7 @@ else
     assert_fail "rebuild:container-filesystem-is-reset" \
                 sh -c "podman exec ${NAME} test -f /tmp/.vt-ephemeral"
 fi
+podman exec "$NAME" git config --global --unset-all user.email >/dev/null 2>&1 || true
 # projects/ is on the host, so it is untouched by construction — assert it anyway.
 echo keep > "$REPO/projects/.vt-keep"
 LV --rebuild >/dev/null 2>&1
@@ -417,10 +427,16 @@ assert_ok "rebuild:claude-policy-survives" \
 if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
     hold_container
     podman exec "$NAME" sh -c 'echo marker > /home/student/.claude/.vt-marker' 2>/dev/null || true
+    podman exec "$NAME" sh -c 'git config --global user.email vt@stanford.edu' 2>/dev/null || true
     LV --rebuild --logout >/dev/null 2>&1
     hold_container
     assert_fail "logout:volume-contents-are-gone" \
                 sh -c "podman exec ${NAME} test -f /home/student/.claude/.vt-marker"
+    # The git volume goes with the others, and that is the right reading of "log out": the
+    # credential helper `gh auth setup-git` wrote lives in it, so leaving it behind would point git
+    # at a token that had just been deleted.
+    assert_eq "logout:git-identity-is-gone" "" \
+              "$(podman exec "$NAME" git config --global user.email 2>/dev/null)"
     # INVERTED BY #41: like every maintenance verb, this leaves nothing running. Read BEFORE the
     # hold_container above would confuse it, so this samples the state the verb itself left --
     # which is why it re-stops first rather than trusting where we happen to be.
@@ -436,7 +452,8 @@ if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
                     "Building the course container" "$(LV --rebuild --logout)"
 else
     skip "logout:volume-contents-are-gone" \
-         "destructive — it deletes the claude/gh/vercel login volumes. Re-run with CS193V_DESTRUCTIVE=1"
+         "destructive — it deletes the claude/gh/vercel/git volumes. Re-run with CS193V_DESTRUCTIVE=1"
+    skip "logout:git-identity-is-gone" "see above"
     skip "logout:leaves-nothing-running" "see above"
     skip "logout:does-not-rebuild-a-current-image" "see above"
 fi
@@ -664,12 +681,12 @@ assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exis
 
 vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:volumes" "$vols"
-# Same scoping. The five are asserted by exact name so a MISSING one still fails, and the
+# Same scoping. The six are asserted by exact name so a MISSING one still fails, and the
 # instance suffix comes from $NAME so the expectation tracks whichever instance is running.
 mine="$(podman volume ls --format '{{.Name}}' \
-        | grep -xE "$NAME-(claude|claude-json|gh|vercel|playwright)" | LC_ALL=C sort | tr '\n' ' ')"
-assert_eq "cleanup:exactly-the-five-cs193v-volumes" \
-          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-playwright $NAME-vercel" \
+        | grep -xE "$NAME-(claude|claude-json|gh|vercel|playwright|git)" | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "cleanup:exactly-the-six-cs193v-volumes" \
+          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-git $NAME-playwright $NAME-vercel" \
           "$(printf '%s' "$mine" | sed 's/ *$//')"
 stray_vols="$(podman volume ls --format '{{.Name}}' | grep -vE '^cs193v($|-)' \
               | LC_ALL=C sort | tr '\n' ' ')"

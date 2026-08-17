@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# A fake `git`, the companion to lib/gh-fake. See that file for the arrangement and why.
+#
+# It is a little more than a stub in three places, each because setup-git reads something back:
+#
+#   * `clone` creates the destination with a .git in it, so the cleanup path — which refuses to
+#     push --delete into a directory that is not a clone — is reachable and therefore testable;
+#   * `rev-parse --abbrev-ref HEAD` answers with a branch name, because that answer becomes the
+#     base of the second pull request;
+#   * `config --global` really stores and really reads back, because the already-configured
+#     screen is decided by what those reads return.
+#
+# Configuration files, all optional:
+#   fail_at         a substring; the first invocation whose argv contains it fails       []
+#   fail_rc         the exit code that failure uses                                   [128]
+#   fail_err        what it writes to stderr when it fails    [remote: Permission ...]
+#   default_branch  what rev-parse answers                                          [main]
+#   gitconfig       the store `config --global` reads and writes      [created on demand]
+
+SHIM="${CS193V_SGSHIM:?git-fake needs CS193V_SGSHIM}"
+ALL="git $*"
+
+printf '%s\n' "$ALL" >> "$SHIM/argv.log"
+
+get() {                               # get KEY DEFAULT
+    if [ -f "$SHIM/$1" ]; then cat "$SHIM/$1"; else printf '%s' "$2"; fi
+}
+
+if [ -f "$SHIM/fail_at" ]; then
+    pat="$(cat "$SHIM/fail_at")"
+    case "$ALL" in
+        *"$pat"*)
+            printf '%s\n' "$(get fail_err 'remote: Permission to cs193v-students/install-sandbox.git denied.')" >&2
+            exit "$(get fail_rc 128)" ;;
+    esac
+fi
+
+# -C DIR is stripped so the subcommand is always $1, the way it is for real git.
+if [ "${1:-}" = "-C" ]; then shift 2; fi
+
+CFG="$SHIM/gitconfig"
+
+case "${1:-}" in
+    clone)
+        # The destination is the last argument.
+        dst=""
+        for a in "$@"; do dst="$a"; done
+        mkdir -p "$dst/.git" ;;
+    rev-parse)
+        get default_branch main; echo ;;
+    config)
+        shift
+        [ "${1:-}" = "--global" ] && shift
+        key="${1:-}"; shift
+        if [ $# -gt 0 ]; then
+            printf '%s=%s\n' "$key" "$*" >> "$CFG"
+        else
+            [ -f "$CFG" ] || exit 1
+            v="$(grep "^$key=" "$CFG" | tail -1)" || exit 1
+            [ -n "$v" ] || exit 1
+            printf '%s\n' "${v#*=}"
+        fi ;;
+    *)  : ;;
+esac
+exit 0

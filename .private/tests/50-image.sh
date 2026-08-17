@@ -65,14 +65,15 @@ assert_eq "home-is-student" "/home/student" "$(R 'echo $HOME')"
 # The load-bearing one. podman auto-chowns an EMPTY named volume to the container user on
 # first mount, then re-chowns it to match the image's directory at the mount target if that
 # directory exists — so a root-owned target yields a root-owned volume AND permanently
-# disables further auto-chown. Getting these four right in the image is what lets the
+# disables further auto-chown. Getting these five right in the image is what lets the
 # entrypoint run with no root phase and no `sudo chown -R`.
-assert_eq "vol-targets-are-student-owned" "student student student student" \
+assert_eq "vol-targets-are-student-owned" "student student student student student" \
     "$(R 'stat -c %U /home/student/.claude /home/student/.claude-json \
-                     /home/student/.config/gh /home/student/.local/share/com.vercel.cli \
+                     /home/student/.config/gh /home/student/.config/git \
+                     /home/student/.local/share/com.vercel.cli \
           | tr "\n" " " | sed "s/ $//"')"
 # And they must exist before any volume is mounted, or podman creates them root-owned.
-for d in .claude .claude-json .config/gh .local/share/com.vercel.cli .local/bin; do
+for d in .claude .claude-json .config/gh .config/git .local/share/com.vercel.cli .local/bin; do
     assert_ok "vol-target-exists:$d" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -d /home/student/$d'"
 done
 assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
@@ -188,6 +189,50 @@ assert_ok "sudo-works-without-a-password" sh -c "podman run --rm --entrypoint sh
 # git stays completely stock so students meet its real hints and errors.
 assert_fail "no-etc-gitconfig" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /etc/gitconfig'"
 assert_eq "git-editor-is-nano" "nano" "$(R 'git var GIT_EDITOR')"
+
+# ─── where `git config --global` writes ────────────────────────────────────────
+# THE ASSERTION THAT PINS THE WHOLE cs193v-git VOLUME. `git config --global` writes
+# $XDG_CONFIG_HOME/git/config if that file EXISTS and ~/.gitconfig does not, and ~/.gitconfig
+# otherwise. The Containerfile creates the first one empty for exactly that reason, so every
+# --global write — setup-git's identity and `gh auth setup-git`'s credential helper — lands in the
+# directory the volume mounts instead of in the writable layer that --rebuild throws away.
+#
+# Nothing about that is visible in either file, and getting it wrong fails NOWHERE: setup would
+# work perfectly and a student would silently lose their identity the first time staff shipped a
+# fix. So it is asserted by doing it and asking git where it went.
+assert_ok "gitconfig:xdg-file-exists-empty" sh -c \
+    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.config/git/config && ! test -s /home/student/.config/git/config'"
+assert_fail "gitconfig:no-home-gitconfig" sh -c \
+    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /home/student/.gitconfig'"
+assert_contains "gitconfig:global-writes-land-in-the-volume-path" \
+    "/home/student/.config/git/config" \
+    "$(R 'git config --global user.name Probe >/dev/null 2>&1; git config --global --show-origin user.name')"
+assert_fail "gitconfig:global-write-does-not-make-a-home-gitconfig" sh -c \
+    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'git config --global user.name Probe >/dev/null 2>&1; test -e /home/student/.gitconfig'"
+
+# ─── setup-git and the shared presentation layer ───────────────────────────────
+# The container's copy of box(), menu() and msg(), plus the script and the prose that use them.
+# Checked here rather than only statically because the install is where they can go missing: a
+# forgotten line in the Containerfile is invisible in the checkout.
+for f in /etc/cs193v/ui.sh /etc/cs193v/setup-git-messages.txt /usr/local/bin/setup-git; do
+    assert_ok "setup-git:installed:$f" sh -c \
+        "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -s $f'"
+done
+assert_ok "setup-git:is-executable" sh -c \
+    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/setup-git'"
+assert_ok "setup-git:is-on-the-path" sh -c \
+    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v setup-git >/dev/null'"
+# The installed copies parse under the container's own bash, which is the one that will run them.
+assert_ok "setup-git:installed-copy-parses" sh -c \
+    "podman run --rm --entrypoint bash '$TEST_IMAGE' -n /usr/local/bin/setup-git"
+assert_ok "setup-git:installed-ui-parses" sh -c \
+    "podman run --rm --entrypoint bash '$TEST_IMAGE' -n /etc/cs193v/ui.sh"
+# And it really reads the installed prose and the installed helper with no environment help,
+# which is the one thing the host-side suites cannot check: they both override those paths.
+assert_contains "setup-git:reads-the-installed-catalogue" "terminal" \
+    "$(R 'setup-git </dev/null 2>&1 || true')"
+assert_contains "setup-git:dev-seam-works-in-the-image" "target_name=cs193v-students" \
+    "$(R 'setup-git --dev-print-token-url')"
 assert_ok "nanorc-installed" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.nanorc'"
 assert_eq "nanorc-is-student-owned" "student" "$(R 'stat -c %U /home/student/.nanorc')"
 

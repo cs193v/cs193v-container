@@ -25,6 +25,10 @@ projects/                      the student's work; the only directory shared wit
     cs193v-shell               THE LANDING POINT — picks a tmux session and attaches
     cs193v-welcome             the entry banner
     cs193v-goodbye             the goodbye on exit
+    cs193v-ui.sh               THE SHARED PRESENTATION LAYER — sourced by the launcher AND,
+                               as /etc/cs193v/ui.sh, by everything in the image that draws
+    setup-git                  guides a student through git and GitHub (issue #49)
+    setup-git-messages.txt     all of setup-git's prose, messages.txt's format
     tmux/tmux.conf             the beginner-locked tmux configuration
     tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
     open-url                   the $BROWSER stub
@@ -113,6 +117,44 @@ Two things need real values:
 There is no third blank. `.config/container.args` used to carry an empty `IMAGE=` line that
 looked like one; it is gone, along with the rest of the pull path — see "How the image
 reaches a student" above.
+
+### And four things on GitHub, before `setup-git` works for anybody
+
+`setup-git` (issue #49) configures git and then proves the student's fine-grained access token can
+do everything the course will ask of it. Three of these four are settings rather than code, and
+each one breaks *every* student at once if it is wrong. `run-tests.sh --release` records the values
+`setup-git` is compiled with and fails if the token expiry has gone stale.
+
+1. **`cs193v-students` → Settings → Personal access tokens → "Do not require administrator
+   approval".** Requiring approval is GitHub's **default**, and it applies to fine-grained tokens
+   *only* — the docs are explicit that "Only fine-grained personal access tokens, not personal
+   access tokens (classic), are subject to approval". A token awaiting approval "will only be able
+   to read public resources", so a private sandbox answers 404 and every student stops at the
+   `git clone` row until an owner clicks approve.
+2. **Students must be organization MEMBERS, not outside collaborators.** This is not a preference:
+   "Fine-grained personal access tokens do not currently support being used to contribute to
+   repositories where the user is an outside or repository collaborator." An outside collaborator
+   cannot even *name* the organization as a token's resource owner. Worth knowing because GitHub
+   Classroom's default for individual assignments adds students as outside collaborators, which
+   would break the whole design silently.
+3. **`cs193v-students/install-sandbox`** — private, with a default branch and at least one commit.
+   An empty repository has no default branch, so `git clone` "succeeds" with
+   `warning: You appear to have cloned an empty repository`, `git pull` fails for a reason that has
+   nothing to do with permissions, and the first student to run `setup-git` would create the
+   default branch with their own push. Everybody needs write access to it. Protecting that branch
+   against force-push and deletion is worth doing: every student can write to it and no probe ever
+   needs to. Leave **"Allow merge commits"** on, which is the default: the probes merge one pull
+   request — into a branch of their own rather than the default one — and a repository configured
+   to permit only squashing would fail that row for every student.
+4. **The token expiry in `files/setup-git`** (`CS193V_TOKEN_EXPIRY`) — a date, past the end of the
+   quarter. Students are told to choose it, and GitHub's prefilled link wants a lifetime in *days*,
+   so `setup-git` converts it on every run. A stale date is clamped to a 30-day floor rather than
+   emitted as a negative lifetime, so the symptom is tokens expiring in week 8 rather than a broken
+   link — which is why the release gate reads it and nothing in the everyday suite does.
+
+The sandbox accumulates closed issues, and that is expected rather than a fault: deleting an issue
+needs admin permission on the repository, which no student has, so `setup-git` closes them.
+Branches it creates are deleted, on the failure path as well as the success one.
 
 ## Your development loop
 
@@ -303,10 +345,50 @@ The frame protocol changed to carry it, and the changes are the interesting part
   vacuously, which is the same hazard `assert.sh` already records for `ESC[nA`. A replayer that
   drops it keeps every row the launcher just erased.
 
+### One place that draws: `files/cs193v-ui.sh`
+
+Colours, `box()`, `die()`, `celebrate()`, the arrow-key `menu()`, `msg()`, `run_timeout()`,
+`meter_glyph()`, `run_step()` and `version_lt()` live in **one file**, and it is under `files/` so
+that it is installed into the image as `/etc/cs193v/ui.sh`. The launcher sources it out of the
+checkout; `setup-git` and any future `setup-*` source the installed copy, the way `cs193v-welcome`
+and `cs193v-goodbye` already source `/etc/cs193v/strings.sh`.
+
+That arrangement arrived with `setup-git`, which needed a menu and a box inside the container and
+would otherwise have been a third copy of both. What it replaced was one copy per script; what is
+left is **two** — `install-cs193v.sh` still carries its own, because it is curl-piped and
+standalone and can source nothing at all. `20-messages.sh` diffs `box()` between the two and
+`25-installer.sh` unit-tests `version_lt` in both.
+
+Four things to know before touching it:
+
+- **`menu()` is NOT byte-identical in the installer, deliberately**, so it has a *behavioural*
+  drift check rather than a diff: the installer's copy prints two columns deeper and shortens its
+  hint, because it lives inside an indented step list. What must not drift is which keys work, so
+  `25-installer.sh` compares the `case` block alone. A diff of the whole function would fail
+  forever on presentation, and the only way to make it pass would be to change how the installer
+  looks.
+- **The launcher is no longer self-contained**, so it carries a guard: an unreadable `ui.sh` gets a
+  plain `printf` refusal, because a launcher with no `box()` cannot draw the box that would report
+  it. This is less of a change than it sounds — `MESSAGES` has always pointed into `.private/`, so
+  the launcher could never print a word without that directory.
+- **`cs193v.buildhash` covers it**, since it sits under `files/`. A purely host-side tweak to
+  `box()` therefore prompts every student to rebuild. Mostly cached, but a prompt — batch it with a
+  change that earns one, the same rule the `####>` markers follow.
+- **`run_timeout` has two spinner modes now.** `RT_SPIN` covers a wait and clears its line on the
+  way out; `RT_ROW` leaves the row on the screen with a `✓` or `✗` where the spinner was, which is
+  what `run_step` is and what `setup-git`'s two lists of commands are made of. Same poll loop, same
+  glyphs, different ending — rather than a second animator with its own frame rate to drift.
+
+The build's two-row bar is **not** part of this and was deliberately not unified with `run_step`:
+it has a progress fraction over a stream of step events, a background animator (its reader is
+blocked in `awk` and cannot animate), a state file, a `WINCH` refit and an eight-row log tail.
+Teaching it a "list of independent rows" mode is the trade already rejected for `box()` versus the
+tail box — the requirements are the opposite ones.
+
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
-image (`localhost/cs193v:local`) and the same five volumes. Two people developing at once
+image (`localhost/cs193v:local`) and the same six volumes. Two people developing at once
 therefore collide, and not cleanly: whoever ran `--rebuild` last owns the container the
 other is about to shell into, and either one's `--rebuild --logout` deletes the other's logins.
 
@@ -318,7 +400,7 @@ export CS193V_INSTANCE=yourname
 ./cs193v doctor                   # reports container cs193v-yourname
 ```
 
-It suffixes the container name, the dev image tag and all five volume names together —
+It suffixes the container name, the dev image tag and all six volume names together —
 partial suffixing would be worse than none, since `--rebuild --logout` would still cross
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.
@@ -400,6 +482,8 @@ Rollback is `git revert` on the Containerfile. There is no dated-tag safety net 
 .private/tests/run-tests.sh                  # every automatable check
 .private/tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
 .private/tests/run-tests.sh --release        # the publishing blanks; fails until filled
+CS193V_GH_TEST_TOKEN=github_pat_... \
+  .private/tests/run-tests.sh --tier github  # setup-git against the real GitHub; skips without
 .private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
 

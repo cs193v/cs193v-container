@@ -135,13 +135,21 @@ flattened output:              $hay" ;;
 # TRUNCATED AT THE FIRST {{PLACEHOLDER}}: the rest is filled in at runtime, so only the literal
 # prefix is a phrase the student is guaranteed to read. warn.tunnel-failed interpolates {{LOG}}
 # and {{OUT}}, which is most of its tail.
-msg_text() {                          # msg_text KEY -> its literal prose, one flattened line
+#
+# THE FILE IS A PARAMETER, defaulting to the launcher's catalogue, because there are two of them
+# now: the container cannot see messages.txt, so setup-git carries its own at
+# files/setup-git-messages.txt. Both once defined a key called err.needs-a-terminal, with
+# different prose and for different reasons, and this function silently read the launcher's — a
+# suite failing on prose it never asked about. 10-static.sh now forbids a key from appearing in
+# both files, and this takes an argument; either alone would have been enough, and both is right,
+# because the argument is what makes an assertion say which catalogue it means.
+msg_text() {                          # msg_text KEY [FILE] -> its literal prose, one flattened line
     local t
     t="$(awk -v k="[[$1]]" '
         $0 == k { found = 1; next }
         /^\[\[.*\]\]$/ { if (found) exit }
         found { print }
-    ' "$PRIVATE/messages.txt")"
+    ' "${2:-$PRIVATE/messages.txt}")"
     # Trimmed at both ends: flattening a block that ends in a newline leaves a trailing space,
     # and a needle whose last character is a space would not match a phrase at the end of a line.
     t="$(_flatten "${t%%\{\{*}")"
@@ -151,15 +159,15 @@ msg_text() {                          # msg_text KEY -> its literal prose, one f
 
 # An unknown or all-placeholder key FAILS rather than passing vacuously, which is the trap the
 # negative form would otherwise set: assert_says_not with an empty needle passes every time.
-assert_says_key() {                   # assert_says_key NAME KEY TEXT
-    local phrase; phrase="$(msg_text "$2")"
+assert_says_key() {                   # assert_says_key NAME KEY TEXT [FILE]
+    local phrase; phrase="$(msg_text "$2" "${4-}")"
     case "$phrase" in
         ''|' ') fail "$1" "no literal prose for message key: $2" ; return 0 ;;
     esac
     assert_says "$1" "$phrase" "$3"
 }
-assert_says_not_key() {               # assert_says_not_key NAME KEY TEXT
-    local phrase; phrase="$(msg_text "$2")"
+assert_says_not_key() {               # assert_says_not_key NAME KEY TEXT [FILE]
+    local phrase; phrase="$(msg_text "$2" "${4-}")"
     case "$phrase" in
         ''|' ') fail "$1" "no literal prose for message key: $2" ; return 0 ;;
     esac

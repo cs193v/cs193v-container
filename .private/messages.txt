@@ -24,7 +24,8 @@ cs193v — the CS193V course container
   cs193v --rebuild           start the container over. Your files and logins are kept.
                              If the course container has been updated since yours was
                              built, this builds the new one, which takes a while.
-  cs193v --rebuild --logout  the same, and also log out of claude, gh and vercel.
+  cs193v --rebuild --logout  the same, and also log out of claude, gh and vercel, and
+                             forget the name and email you gave setup-git.
 
 Closing your terminal window stops the container, and anything running inside it. A
 dev server you started will stop. Your files are safe — they live on your own computer.

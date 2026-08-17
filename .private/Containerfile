@@ -474,10 +474,10 @@ COPY files/ /tmp/cs193v-files/
 #
 #  4. Installs the nanorc.
 #
-#  5. Pre-creates all FIVE volume mount points STUDENT-OWNED. This is the load-bearing part.
+#  5. Pre-creates all SIX volume mount points STUDENT-OWNED. This is the load-bearing part.
 #     ~/.cache/ms-playwright already exists by now — Layer 5 put the browser there — but it
 #     is listed here anyway so that one block names every mount point the volume set covers,
-#     rather than four of them plus one created as a side effect three layers earlier.
+#     rather than five of them plus one created as a side effect three layers earlier.
 #     podman auto-chowns an EMPTY named volume to the container user on first mount, then
 #     re-chowns it to match the image's directory at the mount target if that directory
 #     exists — and a root-owned target both yields a root-owned volume AND permanently
@@ -494,6 +494,18 @@ COPY files/ /tmp/cs193v-files/
 #     students meet its real hints and errors. The `git commit` editor trap is closed by
 #     EDITOR/VISUAL below, NOT by core.editor: git resolves
 #     GIT_EDITOR -> core.editor -> VISUAL -> EDITOR -> vi.
+#
+#     AND CREATES AN EMPTY ~/.config/git/config, which is the one file here whose EXISTENCE is
+#     the whole point rather than its contents. `git config --global` writes
+#     $XDG_CONFIG_HOME/git/config if that file exists and ~/.gitconfig does not, and
+#     ~/.gitconfig otherwise — git's own documented rule. So creating it empty moves every
+#     --global write, setup-git's and `gh auth setup-git`'s credential helper alike, into the
+#     directory the cs193v-git volume mounts. Without it they land in ~/.gitconfig, which is
+#     the container's writable layer, which --rebuild destroys: a mid-quarter fix would wipe
+#     every student's git identity and their credential helper while their token survived in
+#     the gh volume, and the next `git commit` would ask them who they are. Nothing is
+#     configured by this file being here; it stays stock and empty until setup-git runs.
+#     50-image.sh asserts a --global write really lands in it.
 #
 #  8. Installs the tunnel's sshd config, and pre-creates ~/.ssh STUDENT-OWNED at 0700.
 #     That directory is load-bearing for the same class of reason as item 5, and it was
@@ -535,6 +547,17 @@ COPY files/ /tmp/cs193v-files/
 #     runs as `student` because that is who will run it, and it doubles as proof that the
 #     tmux-256color terminfo entry from ncurses-term is actually present, since tmux will
 #     not start without it.
+#
+# 10. Installs setup-git, its message catalogue, and /etc/cs193v/ui.sh — the shared
+#     presentation layer the LAUNCHER also sources, out of the checkout. That is why it lives
+#     under files/ rather than being inlined anywhere: one definition of box(), the arrow-key
+#     menu and msg() serves the launcher and everything in here that draws.
+#
+#     `bash -n` on both, on the same principle as `sshd -t` and the tmux interrogation above:
+#     a syntax error in setup-git is a student who cannot set up GitHub at all, and it costs
+#     nothing to find at build time. The catalogue gets a grep for one known key instead,
+#     because it has no syntax to check and an empty or truncated copy would otherwise show up
+#     as "(missing message: intro)" on the student's first screen.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
@@ -557,6 +580,12 @@ RUN set -eux; \
     install -d -m 0755 /etc/cs193v; \
     install -m 0644 /tmp/cs193v-files/cs193v-strings.sh  /etc/cs193v/strings.sh; \
     sh -n /etc/cs193v/strings.sh; \
+    install -m 0644 /tmp/cs193v-files/cs193v-ui.sh          /etc/cs193v/ui.sh; \
+    install -m 0644 /tmp/cs193v-files/setup-git-messages.txt /etc/cs193v/setup-git-messages.txt; \
+    install -m 0755 /tmp/cs193v-files/setup-git             /usr/local/bin/setup-git; \
+    bash -n /etc/cs193v/ui.sh; \
+    bash -n /usr/local/bin/setup-git; \
+    test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \
     printf '\n# CS193V tab labels inside tmux. Must stay last: it composes PROMPT_COMMAND.\nif [ -n "${TMUX:-}" ]; then . /etc/cs193v/tabname.bash; fi\n' >> /etc/bash.bashrc; \
@@ -574,6 +603,8 @@ RUN set -eux; \
     install -d -o student -g student -m 0700 /home/student/.claude-json; \
     install -d -o student -g student -m 0755 /home/student/.config; \
     install -d -o student -g student -m 0700 /home/student/.config/gh; \
+    install -d -o student -g student -m 0755 /home/student/.config/git; \
+    install -o student -g student -m 0644 /dev/null /home/student/.config/git/config; \
     install -d -o student -g student -m 0755 /home/student/.local/share; \
     install -d -o student -g student -m 0700 /home/student/.local/share/com.vercel.cli; \
     install -d -o student -g student -m 0755 /home/student/.cache; \

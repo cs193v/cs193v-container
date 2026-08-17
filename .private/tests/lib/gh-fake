@@ -1,0 +1,69 @@
+#!/bin/sh
+#
+# A fake `gh`, for driving setup-git end to end with no GitHub and no token.
+#
+# Same arrangement as lib/podman-fake, and for the same reason: what setup-git has to get right
+# is which command it runs when, what it does with the answer, and which message it shows when one
+# fails — none of which needs a real API, and all of which is untestable against one. A real run
+# would also need a real credential in the repository and would leave branches in a repository
+# every student can see.
+#
+# Put its directory first on PATH and point $CS193V_SGSHIM at it. Every invocation is appended to
+# $CS193V_SGSHIM/argv.log, one line, prefixed with the command name, so a test can assert on the
+# exact sequence setup-git asked for — and, just as importantly, on what it never asked for.
+#
+# Configuration files, all optional (defaults in get()):
+#   fail_at      a substring; the first invocation whose argv contains it fails    []
+#   fail_rc      the exit code that failure uses                                   [1]
+#   fail_err     what it writes to stderr when it fails    [gh: HTTP 403 ...]
+#   login        what `gh api user --jq .login` prints                             [janedoe]
+#   owners       what the user/repos owner query prints            [cs193v-students]
+#   auth_token   present => `gh auth token` succeeds                          [absent]
+#   issue_no     the number in the URL `gh issue create` prints                    [7]
+#   pr_no        the number in the URL `gh pr create` prints                       [9]
+
+SHIM="${CS193V_SGSHIM:?gh-fake needs CS193V_SGSHIM}"
+ALL="gh $*"
+
+printf '%s\n' "$ALL" >> "$SHIM/argv.log"
+
+get() {                               # get KEY DEFAULT
+    if [ -f "$SHIM/$1" ]; then cat "$SHIM/$1"; else printf '%s' "$2"; fi
+}
+
+# THE TOKEN MUST NEVER BE IN ARGV, which is half of what the suite asserts, so this records $*
+# and the suite greps the log for the token. `gh auth login --with-token` therefore has to drain
+# stdin rather than ignore it: leaving the pipe unread gives the writer EPIPE, and setup-git would
+# see the login "fail" for a reason that has nothing to do with the login.
+case "$ALL" in
+    "gh auth login"*) cat >/dev/null 2>&1 ;;
+esac
+
+# Failure injection comes before every answer below, so a test can break any single step and
+# assert that the rows before it stayed green and nothing after it ran.
+if [ -f "$SHIM/fail_at" ]; then
+    pat="$(cat "$SHIM/fail_at")"
+    case "$ALL" in
+        *"$pat"*)
+            printf '%s\n' "$(get fail_err 'gh: HTTP 403: Resource not accessible by personal access token')" >&2
+            exit "$(get fail_rc 1)" ;;
+    esac
+fi
+
+case "$ALL" in
+    "gh auth token"*)
+        [ -f "$SHIM/auth_token" ] || exit 1
+        printf 'github_pat_11FAKE0000000000000000000\n' ;;
+    # The owner query first: it is also an `api user` call, so matching in the other order would
+    # answer it with a login and setup-git would read that as "the token sees no repositories".
+    *"api user/repos"*)
+        get owners cs193v-students; echo ;;
+    *"api user"*)
+        get login janedoe; echo ;;
+    "gh issue create"*)
+        printf 'https://github.com/cs193v-students/install-sandbox/issues/%s\n' "$(get issue_no 7)" ;;
+    "gh pr create"*)
+        printf 'https://github.com/cs193v-students/install-sandbox/pull/%s\n' "$(get pr_no 9)" ;;
+    *)  : ;;
+esac
+exit 0
