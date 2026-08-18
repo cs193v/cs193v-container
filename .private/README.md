@@ -164,6 +164,7 @@ Branches it creates are deleted, on the failure path as well as the success one.
 CS193V_BUILD_RAW=1 ./cs193v --rebuild  # podman's raw output instead of the progress bar
 ./cs193v --rebuild --logout            # test the cold-start path a student sees
 ./cs193v --dev-print-command           # see the exact podman run line
+./cs193v --dev-args                    # the args-file parse, one word per line
 ./cs193v --stop                        # stop it by hand — see below, you will need this
 ```
 

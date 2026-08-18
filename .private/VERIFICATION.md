@@ -102,6 +102,18 @@ sed 's/#.*//' "$DIR/cs193v" "$DIR/install-cs193v.sh" \
 sed 's/#.*//' "$DIR/cs193v" "$DIR/install-cs193v.sh" \
   | grep -nE 'read[^|]*-t *0?\.[0-9]' \
   && echo "FAIL fractional read -t" || echo "PASS no fractional read -t"
+# WHAT THE TWO GREPS ABOVE CANNOT DO is catch a construct that parses on bash 3.2 and 4+ alike
+# but MATCHES DIFFERENT STRINGS. Shell patterns are where that lives, and nothing in the gates
+# runs 3.2, so these two are a REPORT rather than a gate: each hit is a line that §1.3 has to be
+# run on a Mac to clear. Hits are legitimate — do not "fix" them to get to zero.
+#
+# NO COMMENT STRIPPING HERE, unlike every check above, and that is not an oversight: `${var#"…"}`
+# contains its own `#`, so `sed 's/#.*//'` truncates the construct being looked for and the grep
+# then finds nothing. `case[^#]*` is what keeps the first pattern off the sed and grep SCRIPTS that
+# legitimately hold `[[:space:]]` -- load_args' own trim, and the /etc/wsl.conf greps in the
+# installer. Named by function rather than by line, because these two greps will outlive the numbers.
+grep -nE 'case[^#]*\[:[a-z]+:\]'   "$DIR/cs193v" "$DIR/install-cs193v.sh"   # class in a case bracket
+grep -nE '\$\{[A-Za-z_]+[#%]{1,2}"' "$DIR/cs193v" "$DIR/install-cs193v.sh"  # quoted nested pattern
 # No `#` comments inside a line-continued RUN in the Containerfile. The parser does strip
 # them, but if that ever changed, a comment would swallow the command after it and
 # silently produce a broken image.
@@ -573,7 +585,13 @@ cat "$DIR/local.args"             # recompute by the documented formula and comp
 #     --rebuild --logout                6 s,   0 MB   (re-seeds the 267 MB browser locally)
 time "$DIR/cs193v" --rebuild --no-cache      # cold build; note wall time AND peak disk
 time "$DIR/cs193v" --rebuild                 # container create only — the recipe has not moved
-time "$DIR/cs193v" --dev-print-command       # launcher overhead
+time "$DIR/cs193v" --dev-print-command       # launcher overhead, NO podman calls: expect ~60 ms
+# WHY THAT NUMBER MOVED. It was 511 ms until #57, and all but ~60 ms of it was load_args forking
+# `sed` once per line of container.args -- 239 forks for 11 lines that carry an argument. Count the
+# forks rather than trusting the clock on a loaded machine; 16-args-parse.sh does this portably,
+# through a shim, because a Mac has no strace.
+strace -f -e trace=execve "$DIR/cs193v" --dev-print-command 2>&1 >/dev/null \
+  | grep -c 'execve("/usr/bin/sed'          # expect 11 -- one per line with content, not per line
 time podman exec cs193v true                 # exec overhead — relevant to the rejected relay design
 time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lodash'
 ```
@@ -603,8 +621,24 @@ highlighted. Arrow keys move the selection; Enter confirms. In a non-TTY context
 numbered selection rather than hanging.
 
 **1.3 — bash 3.2 compatibility.** On macOS: `bash --version` (expect 3.2.x), then run the installer
-with `/bin/bash` explicitly.
-*Expect:* no `mapfile`, associative-array, or `${x,,}` errors.
+with `/bin/bash` explicitly, and run `.private/tests/run-tests.sh --tier unit`.
+*Expect:* no `mapfile`, associative-array, or `${x,,}` errors, and a green unit tier.
+
+**GLOB AND PATTERN BEHAVIOUR CAN ONLY BE SETTLED HERE, and §A.1 cannot help.** That grep catches bash
+4 *syntax* — a construct that is a parse error on 3.2. It is blind to one that parses on both and
+**matches different strings**, and shell pattern matching is where that lives: a POSIX character class
+inside a `case` bracket (`case "$line" in *[![:space:]]*)`), a quoted nested pattern
+(`${line#"${line%%[![:space:]]*}"}`), and bracket expressions generally. Nothing in the gates runs bash
+3.2 — the CI and every dev machine is Linux with bash 5 — so a construct like that ships on the
+strength of an argument unless a person runs it on a Mac. Any change that adds or edits one needs this
+check before it ships; §A.1 has the greps that find them.
+
+Live example, for whoever reads this next: `load_args`' whitespace guard. Issue #57's measurement work
+found the launcher forking `sed` once per line of `container.args` — 239 forks, ~700 ms of a ~1.8 s
+startup — and the fix is a `case "$line" in *[![:space:]]*)` guard that skips the 228 comment and blank
+lines. The class *semantics* were verified equivalent to `sed`'s on Linux (all 254 byte values × `C`,
+`C.UTF-8`, `en_US.UTF-8`, zero disagreements), which is the easy half. Whether bash 3.2 reads
+`[![:space:]]` inside a `case` bracket the same way is the half no Linux run can answer.
 
 **1.4 — Version floor.** If podman < 5.7.0 is available, or via the shim in §A.10:
 *Expect:* the launcher refuses, names the platform-specific fix, exits non-zero, and creates nothing.
@@ -620,6 +654,15 @@ consent — confirm it did rather than failing with a raw podman error.
 *Expect:* every flag in `container.args` appears in the printed `podman run` line, with the memory cap
 from `local.args` and no flag mangled by quoting. This is the first thing to ask a student for in any
 support thread, so it must be trustworthy.
+
+`./cs193v --dev-args` prints the same parse one word per line, which is what makes a word BOUNDARY
+visible — `--dev-print-command` joins the words with spaces, so it cannot distinguish one word holding
+a space from two words, and a word that is a bare `\r` does not show in it at all. That verb is the seam
+`16-args-parse.sh` drives; it is automated there against a corpus of CRLF, whitespace-only, indented
+comment and no-trailing-newline files, so the by-hand version is only worth running when the parse
+itself is what you changed.
+*Expect:* one word per line, no blank lines, and the words in `container.args` order with
+`local.args`' after them.
 
 ---
 

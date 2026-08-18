@@ -89,6 +89,32 @@ ln -sf "$COPY/cs193v" "$SHIM/cs193v-link"
 assert_contains "print:resolves-through-symlink" "src=$COPY/projects" \
     "$(PATH="$SHIM:$PATH" "$SHIM/cs193v-link" --dev-print-command 2>&1)"
 
+# ─── --dev-args agrees with the run line  (issue #57) ──────────────────────────
+# 16-args-parse.sh asserts everything about the args parse through `--dev-args`, so that verb
+# has to be the SAME parse that reaches podman. Nothing else ties the two together: --dev-args
+# prints ARGS and --dev-print-command prints RUN_ARGS, and load_args feeding both is an
+# implementation detail a future edit could break while leaving the unit tier green — which
+# would leave a whole suite asserting things about a verb nobody runs.
+#
+# The comparison is one-directional, like print:contains-every-args-file-flag above and for the
+# same reason: build_run_args legitimately ADDS --name, --detach, the labels and the mounts, so
+# every word of --dev-args must appear in the run line but not the reverse.
+#
+# JOINED WITH SPACES AND MATCHED AS ONE STRING, not word by word: that is what makes this
+# sensitive to ORDER, which is the half a set comparison would throw away -- and order is what
+# decides which of two conflicting flags podman honours.
+dev_args_joined="$(launcher --dev-args | tr '\n' ' ' | sed 's/ *$//')"
+assert_ne       "dev-args:prints-something"            ""                  "$dev_args_joined"
+assert_contains "dev-args:every-word-reaches-run-line" "$dev_args_joined" \
+                "$(launcher --dev-print-command)"
+# One word per line is the contract 16-args-parse.sh relies on to see a word boundary at all.
+assert_eq "dev-args:one-word-per-line" "0" \
+    "$(launcher --dev-args | grep -c '[[:space:]]' || true)"
+# local.args must reach it too, or the unit tier is only ever testing one of the two files.
+printf -- '--memory=2048m\n' > "$COPY/.config/local.args"
+assert_contains "dev-args:includes-local-args" "--memory=2048m" "$(launcher --dev-args)"
+rm -f "$COPY/.config/local.args"
+
 # ─── refuses to run as root  (§1.5) ────────────────────────────────────────────
 shim_new
 shim_fake_id 0 root

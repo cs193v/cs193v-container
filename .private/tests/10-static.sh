@@ -725,6 +725,36 @@ launcher_vols="$(sed -n 's/^[[:space:]]*for v in \(.*\); do$/\1/p' cs193v \
 assert_eq "volumes:launcher-removes-every-volume-args-creates" "$args_vols" "$launcher_vols"
 assert_contains "args:network-pasta"           "--network=pasta"                    "$args_live"
 
+# ─── load_args pays for content, not for lines  (issue #57) ────────────────────
+# container.args is 239 lines of which 228 are a comment or blank, and load_args used to trim
+# each one with a `sed` in a command substitution BEFORE testing whether the line held anything:
+# 239 forks, ~700ms of the launcher's ~1.8s startup. The order is the whole fix, so it is the
+# thing to assert.
+#
+# 16-args-parse.sh proves the COST behaviourally, by counting sed calls through a shim, which is
+# the stronger test. This grep is here for the case that one cannot see: a rewrite that keeps the
+# fork count at 11 for today's file while putting the guard somewhere it no longer dominates. The
+# order is the invariant; the count is a consequence of it.
+#
+# Read out of the FUNCTION BODY, not the file, so line numbers cannot drift with edits elsewhere,
+# and the patterns are specific enough that the function's own comments — which discuss both the
+# guard and the retired `[ -z ]` test — cannot match them.
+la_body="$(awk '/^load_args\(\) \{/ { f = 1 } f { print } f && /^}/ { exit }' cs193v)"
+la_guard="$(printf '%s\n' "$la_body" | grep -n 'case "\$line" in \*\[!\[:space:\]\]\*)' | head -1 | cut -d: -f1)"
+la_trim="$( printf '%s\n' "$la_body" | grep -n "sed -e 's/\^\[\[:space:\]\]\*//'"      | head -1 | cut -d: -f1)"
+assert_ne "load_args:body-was-found"    ""  "$la_body"
+assert_ne "load_args:has-content-guard" ""  "$la_guard"
+assert_ne "load_args:has-a-trim"        ""  "$la_trim"
+if [ -n "$la_guard" ] && [ -n "$la_trim" ]; then
+    assert_eq "load_args:guard-precedes-the-trim" "yes" \
+        "$([ "$la_guard" -lt "$la_trim" ] && printf yes || printf no)"
+fi
+# A whitespace test, not an emptiness test: `[ -z "$line" ]` here would skip only the lines that
+# are already empty, so indenting that comment block — a reflow, not a semantic edit — would put
+# all 239 forks back. 16-args-parse.sh has the case that catches it.
+assert_not_match "load_args:guard-is-not-an-emptiness-test" \
+    '\[ -z "\$line" \] && continue' "$(printf '%s\n' "$la_body" | sed 's/#.*//')"
+
 # ─── forwarded ports ───────────────────────────────────────────────────────────
 # A -p line does not merely duplicate the tunnel, it BREAKS it. Both bind host
 # 127.0.0.1:<port>, so whichever loses the race gets EADDRINUSE — and podman wins, because
@@ -998,7 +1028,8 @@ assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
 assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                     $PRIVATE/tests/65-tmux.sh
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
-                                           $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh
+                                           $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
+                                           $PRIVATE/tests/16-args-parse.sh
 # setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
 # set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot
 # resolve a path built from $0.
