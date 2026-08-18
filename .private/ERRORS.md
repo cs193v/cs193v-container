@@ -1345,7 +1345,10 @@ asking `dpkg` which package owns each helper binary. From `strace -f -tt -e trac
 call has to move or be cached rather than tuned. **Not done** — the answers do not change between
 launches, but `err.rootful` and `err.podman-unreachable` depend on it and a macOS machine can be
 rootful, so it needs its own change. With `load_args` fixed this is the largest single item left in the
-~1.8 s a bare `./cs193v` spends before its first line of output.
+~1 s a bare `./cs193v` spends between announcing itself and opening a shell — and the launcher now
+says `Entering the CS193V development environment...` before any of it, so what is left is a wait a
+student can see rather than silence they have to interpret (issue #57). The number is still worth
+taking, but nobody is now staring at a blank screen while it is paid.
 
 Two smaller ones measured alongside it, also not done: `run_timeout` costs **21 ms per call** in
 `mktemp` + `mkfifo` + two subshells + `cat` + `rm` before podman starts (217 ms for ten calls around

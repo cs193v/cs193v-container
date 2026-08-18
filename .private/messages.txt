@@ -361,14 +361,14 @@ yourself, contact course staff.
 There is no container running, so there was nothing to reconnect. The connection was
 cleaned up anyway. Run ./cs193v to start the container.
 
+[[status.entering]]
+Entering the CS193V development environment...
+
 [[status.creating]]
 Setting up the course container...
 
 [[status.created]]
 Ready.
-
-[[status.starting]]
-Starting the course container...
 
 [[status.rebuilding]]
 Starting the container over. Your files and logins are kept.

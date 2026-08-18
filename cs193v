@@ -1695,10 +1695,12 @@ ensure_container() {
         fi
     fi
 
+    # NOTHING IS ANNOUNCED HERE, deliberately (issue #57). This printed "Starting the course
+    # container...", which named an implementation detail a student cannot act on at the one moment
+    # they are already waiting -- and the launch has said what it is doing before this runs.
     case "$st" in
         running) : ;;
-        *) info "$(msg status.starting)"
-           pmq start "$NAME" || { remove_container; create_container; return; } ;;
+        *) pmq start "$NAME" || { remove_container; create_container; return; } ;;
     esac
 }
 
@@ -2317,11 +2319,20 @@ usage() {
 # the two used to. Failure is deliberately NOT fatal: the container and the shell are still
 # perfectly usable, only the browser-facing ports are missing, and ensure_tunnel has said so.
 case "${1:-}" in
-    # refuse_if_foreign_dir FIRST: "this container belongs to a different copy of the course
-    # directory" is a more specific diagnosis than "something is already running", and losing it
-    # behind the session refusal would send a student to --stop and then straight back into the
-    # wrong container. See the comment on the function.
-    '')                  preflight; refuse_if_foreign_dir; refuse_if_session_live
+    # ANNOUNCED BEFORE THE FIRST PROBE, and the order is the whole of issue #57. Everything on this
+    # arm is silent when it succeeds, and it is not quick: preflight's single `podman info` measures
+    # 536-1222 ms by itself (ERRORS.md D11) and the probes behind it take the rest of a second -- so
+    # a student typed a command and watched nothing happen for long enough to wonder whether they
+    # had typed it wrong. `info` rather than anything animated: it reaches a redirected log and a
+    # piped transcript as well as a terminal, and it leaves no frame clock, no cursor state and
+    # nothing that has to be taken down before the next thing printed.
+    #
+    # refuse_if_foreign_dir FIRST of the checks: "this container belongs to a different copy of the
+    # course directory" is a more specific diagnosis than "something is already running", and
+    # losing it behind the session refusal would send a student to --stop and then straight back
+    # into the wrong container. See the comment on the function.
+    '')                  info "$(msg status.entering)"
+                         preflight; refuse_if_foreign_dir; refuse_if_session_live
                          load_args; require_image; ensure_container
                          ensure_tunnel || true
                          open_shell ;;

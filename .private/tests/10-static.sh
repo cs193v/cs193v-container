@@ -555,8 +555,17 @@ assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 # below is only meaningful while at least one positive assertion names this helper.
 assert_contains "launcher:verb_rebuild-refuses-while-a-session-is-live" \
                 "refuse_if_session_live" "$(fn_body verb_rebuild $REPO/cs193v)"
-assert_match "launcher:bare-launch-refuses-while-a-session-is-live" \
-             "''\).*refuse_if_session_live" "$launcher_src"
+# THE WHOLE ARM, not one line of it. The bare launch's statements are spread over several lines --
+# it announces itself before the first probe (issue #57) and reflowing that was enough to make a
+# line-scoped match fail while the invariant it exists for was untouched. Extracted from `'')` to
+# its `;;`, so an empty extraction fails this rather than passing it vacuously.
+bare_arm="$(sed -n "/^    '')/,/;;/p" $REPO/cs193v)"
+assert_contains "launcher:bare-launch-refuses-while-a-session-is-live" \
+                "refuse_if_session_live" "$bare_arm"
+# And it says so BEFORE any of them. 30-launcher-shim.sh pins the order in the output; this pins
+# that the arm is where the announcement lives, so no verb inherits it and none of the checks
+# above it can run first.
+assert_contains "launcher:bare-launch-announces-itself" "status.entering" "$bare_arm"
 
 # --reset-tunnel MUST NOT refuse. Its entire purpose is fixing the tunnel WHILE a session is
 # live, and require_tunnel in lib/assert.sh calls it for exactly that reason, so wiring the
