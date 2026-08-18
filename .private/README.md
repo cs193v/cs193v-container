@@ -376,8 +376,19 @@ Four things to know before touching it:
   change that earns one, the same rule the `####>` markers follow.
 - **`run_timeout` has two spinner modes now.** `RT_SPIN` covers a wait and clears its line on the
   way out; `RT_ROW` leaves the row on the screen with a `✓` or `✗` where the spinner was, which is
-  what `run_step` is and what `setup-git`'s two lists of commands are made of. Same poll loop, same
+  what `run_step` is and what `setup-git`'s two lists of commands are made of. Same loop, same
   glyphs, different ending — rather than a second animator with its own frame rate to drift.
+- **And two ways of waiting, which is #38.** A call with nothing to draw — every probe, so nearly
+  every call — blocks in `read -t` on a pipe the command's wrapper holds open, and so returns the
+  moment the status lands instead of on the next tick of a 10 Hz poll. A call with a label keeps
+  that poll loop, because a spinner needs a frame clock and bash 3.2 cannot `read -t 0.1`; the
+  branch doubles as the fallback if `mkfifo` ever fails, so the exact path is never load-bearing.
+  Two things there are load-bearing and easy to undo by tidying: the wrapper closes the pipe for
+  the command itself (`9>&-`), or a conmon that outlives podman holds it open and an EOF becomes a
+  hang; and the wrapper publishes the command's *own* pid, because `$!` there names a subshell
+  rather than the command, so the ceiling would otherwise disown a hung `podman info` instead of
+  killing it. `12-run-timeout.sh` pins all of it, including a twenty-probe latency guard — the
+  regression #38 fixed was invisible to every other assertion in the suite.
 
 The build's two-row bar is **not** part of this and was deliberately not unified with `run_step`:
 it has a progress fraction over a stream of step events, a background animator (its reader is
@@ -524,6 +535,21 @@ measurements in `ERRORS.md` §D):
   connection costs a channel rather than a 158 ms `podman exec`.
 - does `podman start` really ignore new flags? — **Yes**, so the `cs193v.confighash`
   machinery is load-bearing rather than defensive.
+- how much of a launch was the launcher waiting for itself? — **about a third of it**, and #38
+  took it back. Two poll loops, both waiting for something that could have told us: `run_timeout`
+  asked `kill -0` every 100 ms about **its own child**, and `tunnel_start` slept a flat 0.5 s
+  between `ssh -O check` probes. Measured, before → after: a bare launch against the fake podman
+  **3.55 s → 2.16 s** (14 podman calls, so ~100 ms of nothing each); `doctor` against real podman
+  **4.04 s → 3.10 s**; tunnel bring-up against a real container **0.55 s → 0.086 s**.
+  **`ssh -f` was rejected here and that decision is reversed.** The reason recorded against it was
+  real — `-f` forks, so `$!` is a process that has already exited, and a pidfile holding a dead
+  number would make `--reset-tunnel` silently decline to kill a wedged master while `doctor`
+  reported it up. What it missed is that the pid need not come from `$!`: `ssh -O check` prints
+  `Master running (pid=N)`, and the launcher already runs one on the next line. `-f` is also the
+  more honest test — it returns after authentication *and* after forwarding is set up, whereas
+  `-O check` answering proves only that the mux socket is listening, so the busy-ports report used
+  to run while the 46 binds might still be in flight. This is the one wait in the launcher that
+  could not simply be polled faster: the probe is a whole `ssh` process, not a builtin.
 
 Still needing other hardware: libkrun vs applehv on Apple Silicon, whether podman 6 runs on
 an Intel Mac, and WSL's `--name` support.

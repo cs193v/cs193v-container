@@ -726,6 +726,9 @@ sg_cleanup() {
         [ -n "$n" ] && gh issue close --repo "$CS193V_GH_SANDBOX" "$n" >/dev/null 2>&1
     fi
     [ -n "${SG_TMP:-}" ] && rm -rf "$SG_TMP"
+    # run_step is run_timeout, and run_timeout leaves a scratch file behind when a signal stops
+    # it mid-row. Only it can name them, so the sweep lives beside it in ui.sh.
+    rt_cleanup
     return 0
 }
 

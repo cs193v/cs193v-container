@@ -289,9 +289,29 @@ msg() {
 # silence was "Setting up the course container..." -- which is what an interrupted command
 # looks like.
 #
-# The poll loop was already here, at 10 Hz, so the spinner costs one printf per two ticks
-# and no extra process. The frame is picked with a `case`, not `cut -c`, because a
-# subprocess every 0.2s for three minutes is 900 of them for four characters of output.
+# TWO WAYS TO WAIT, and which one a call gets depends only on whether there is a label to
+# animate. Issue #38: this function spent longer noticing that its child had finished than the
+# child spent running. Measured, before -> after: a launch that finds its container already
+# there makes ~14 podman calls and took 3.55s against the fake podman, now 2.16s; `doctor`
+# against REAL podman, 4.04s -> 3.10s.
+#
+#   * NOTHING TO DRAW -- every probe, which is nearly every call -- blocks in `read -t` on a
+#     pipe the command's wrapper holds open. That returns the moment the status lands, and
+#     `read -t` is poll(2) with a deadline, so the ceiling costs nothing extra and neither
+#     outcome involves sleeping. A 4ms `podman image exists` costs 4ms rather than the ~100ms
+#     the poll below took to notice it, and a launch does fourteen of them.
+#   * A LABEL TO DRAW keeps the 10 Hz poll loop, because a spinner needs a frame clock and
+#     bash 3.2 cannot `read -t 0.1` -- fractional timeouts are bash 4, and a static test
+#     forbids them, which makes that ban load-bearing rather than hygienic. The cost is one
+#     tick on a 180s `podman run` and on each of setup-git's rows, which is invisible; the
+#     alternative was a third animated process to own the frames.
+#     THE SAME BRANCH IS THE FALLBACK when mkfifo declines -- a TMPDIR on a filesystem with
+#     no FIFOs, which is what a WSL student pointed at /mnt/c would have -- so the exact path
+#     is skippable and never load-bearing.
+#
+# The poll loop's spinner costs one printf per two ticks and no extra process. The frame is
+# picked with a `case`, not `cut -c`, because a subprocess every 0.2s for three minutes is
+# 900 of them for four characters of output.
 RT_OUT=''
 RT_SPIN=''
 # The second mode, added for setup-git's lists of commands. See run_step below for what it is
@@ -299,9 +319,11 @@ RT_SPIN=''
 RT_ROW=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
-    local tmp pid i rc frame lbl pad end
-    tmp="$(mktemp "${TMPDIR:-/tmp}/cs193v.XXXXXX")" || return 125
-    ( "$@" >"$tmp" 2>&1 ) & pid=$!
+    local tmp fifo pid cpid i rc frame lbl pad end line
+    # $$ IN THE NAME so that rt_cleanup can sweep what a signal interrupted. A remembered path
+    # cannot: half these calls are made from inside a command substitution, and a variable
+    # assigned in that subshell never reaches the parent's trap. See rt_cleanup.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/cs193v-$$.XXXXXX")" || return 125
     i=0; rc=124; frame=0
     # One animation, two callers. RT_ROW wins if both are somehow set, because a persistent
     # row is the more specific request. The indent differs because the two live in different
@@ -309,28 +331,82 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     # item in setup-git's four-space list.
     lbl="$RT_SPIN"; pad='  '
     [ -n "$RT_ROW" ] && { lbl="$RT_ROW"; pad='    '; }
-    if [ -n "$lbl" ]; then
-        # Drawn once up front rather than only from inside the loop, so a command that
-        # returns immediately still announces itself instead of flashing nothing.
-        #
-        # RT_ROW is the exception, and deliberately: with no tty there is no row to overwrite,
-        # so it says nothing here and prints its one line at the end WITH the outcome on it.
-        # That is what makes a piped transcript one line per step rather than one line per
-        # step twice.
-        if [ -t 1 ]; then printf '%s%s  %s' "$pad" "$(meter_glyph 0)" "$lbl"
-        elif [ -z "$RT_ROW" ]; then printf '%s\n' "$lbl"; fi
-    fi
-    while [ "$i" -lt "$((secs * 10))" ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
-        if [ -n "$lbl" ] && [ -t 1 ] && [ "$((i % 2))" -eq 0 ]; then
-            # Same braille frames as the meter, so the two never look like different
-            # programs. meter_glyph is the single definition of them.
-            printf '\r%s%s  %s' "$pad" "$(meter_glyph "$frame")" "$lbl"
-            frame=$(( (frame + 1) % 8 ))
+    # UNIQUE BY CONSTRUCTION: mktemp created $tmp with O_EXCL, so nothing else on this machine
+    # holds the name this is derived from -- two developers' launchers cannot meet in one
+    # TMPDIR. And mkfifo REFUSES a name that exists, so the worst a collision could do is send
+    # the call down the poll branch.
+    fifo="$tmp.fifo"
+    if [ -n "$lbl" ] || ! mkfifo "$fifo" 2>/dev/null; then
+        # Only reachable with a name mktemp just proved unique, so anything under it is our
+        # own litter from a run that was killed between the mkfifo and the unlink below.
+        rm -f "$fifo"
+        ( "$@" >"$tmp" 2>&1 ) & pid=$!
+        if [ -n "$lbl" ]; then
+            # Drawn once up front rather than only from inside the loop, so a command that
+            # returns immediately still announces itself instead of flashing nothing.
+            #
+            # RT_ROW is the exception, and deliberately: with no tty there is no row to
+            # overwrite, so it says nothing here and prints its one line at the end WITH the
+            # outcome on it. That is what makes a piped transcript one line per step rather
+            # than one line per step twice.
+            if [ -t 1 ]; then printf '%s%s  %s' "$pad" "$(meter_glyph 0)" "$lbl"
+            elif [ -z "$RT_ROW" ]; then printf '%s\n' "$lbl"; fi
         fi
-        sleep 0.1
-        i=$((i + 1))
-    done
+        while [ "$i" -lt "$((secs * 10))" ]; do
+            if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
+            if [ -n "$lbl" ] && [ -t 1 ] && [ "$((i % 2))" -eq 0 ]; then
+                # Same braille frames as the meter, so the two never look like different
+                # programs. meter_glyph is the single definition of them.
+                printf '\r%s%s  %s' "$pad" "$(meter_glyph "$frame")" "$lbl"
+                frame=$(( (frame + 1) % 8 ))
+            fi
+            sleep 0.1
+            i=$((i + 1))
+        done
+    else
+        # THE PIPE IS A DEATH CERTIFICATE. The wrapper subshell holds the write end, and its
+        # last act is to print the command's status down it -- so the read below returns the
+        # moment that lands, rather than at the next tick of a clock nobody set.
+        #
+        # 9>&- CLOSES IT FOR THE COMMAND ITSELF, which is not belt and braces: podman leaves
+        # conmon behind, and anything that inherited the write end would hold the pipe open
+        # after podman had gone and turn an EOF into a hang.
+        #
+        # THE TWO OPENS ARE A RENDEZVOUS -- each blocks until the other arrives, which is how
+        # a FIFO with no writer and no reader gets both. mktemp above forked first, so a
+        # machine that cannot fork has already left with 125 rather than waiting here.
+        #
+        # TWO LINES COME BACK, AND THE PID IS THE FIRST OF THEM. It has to be: the wrapper is a
+        # subshell AROUND the command here, not the command itself -- bash execs a subshell
+        # holding one command in place, which is why the poll branch's $! is podman, and this
+        # one's is not. Killing only what $! names at the ceiling would leave the hung
+        # `podman info` this whole function exists to time out running as an orphan.
+        ( "$@" >"$tmp" 2>&1 9>&- & c=$!; printf '%s\n' "$c" >&9
+          wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+        exec 9<"$fifo"
+        # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
+        # signal arriving during the wait leaves nothing behind in TMPDIR.
+        rm -f "$fifo"
+        cpid=''; line=''
+        # ONE CEILING, NOT TWO. The pid arrives the microsecond the wrapper forks, so this read
+        # is a formality -- and if it is not, the wrapper never got as far as a command and
+        # there is no status to wait for either, so skipping the second read keeps the worst
+        # case at $secs rather than doubling it.
+        read -t "$secs" -r cpid <&9
+        case "$cpid" in
+            ''|*[!0-9]*) cpid='' ;;
+            *)           read -t "$secs" -r line <&9 ;;
+        esac
+        exec 9<&-
+        # WHETHER A NUMBER ARRIVED, deliberately not read's own exit status -- which is >128 on
+        # bash 4 and 1 on the 3.2 macOS ships, so testing it would mean two behaviours. A line
+        # IS the answer. No line with the wrapper still alive is the box expiring. No line with
+        # it gone is the wrapper itself having been killed, and only `wait` can describe that.
+        case "$line" in
+            ''|*[!0-9]*) kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; rc=$?; } ;;
+            *)           rc="$line"; wait "$pid" 2>/dev/null ;;
+        esac
+    fi
     # TWO ENDINGS, and the difference between them is the whole of what RT_ROW adds. RT_SPIN
     # covered a wait, so it takes the glyph away and leaves the caller a clean line to print
     # its own outcome on -- a half-drawn spinner frame ahead of a message looks like part of
@@ -343,10 +419,37 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     elif [ -n "$RT_SPIN" ] && [ -t 1 ]; then
         printf '\r  %s%s[K\n' "$RT_SPIN" "$ESC"
     fi
-    if [ "$rc" -eq 124 ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fi
+    # THE COMMAND FIRST, THEN WHATEVER IS WRAPPING IT. cpid is set only by the branch whose $!
+    # is a subshell rather than the command, and skipping it there would end the wait while
+    # leaving the hung process behind -- which is not a timeout, it is a disowning.
+    if [ "$rc" -eq 124 ]; then
+        [ -n "$cpid" ] && kill -9 "$cpid" 2>/dev/null
+        kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+    fi
     RT_OUT="$(cat "$tmp")"
     rm -f "$tmp"
     return "$rc"
+}
+
+# What a signal leaves behind. run_timeout removes its own scratch file on every path that
+# reaches the end of it, and a Ctrl-C during a four-minute `podman run` is the path that does
+# not -- so one file has been orphaned in TMPDIR per interrupted call since long before the
+# pipe arrived. Called from the two EXIT traps that already exist for this: the launcher's
+# transient_cleanup and setup-git's sg_cleanup.
+#
+# A GLOB ON OUR OWN PID, not a remembered path, because run_timeout is called from inside
+# command substitutions -- state, label_of, image_label_of -- and a variable assigned in that
+# subshell never reaches the parent's trap. The name is the only channel that survives, and $$
+# stays the parent shell's pid inside a subshell, which is what makes the two halves agree on
+# it; WARN_ACK is built on the same fact.
+#
+# SCOPED TO $$ RATHER THAN TO cs193v-*, and that is not caution: CS193V_INSTANCE does not
+# suffix these, so a second developer's launcher has live scratch files in the same TMPDIR and
+# a wider glob would delete them mid-probe.
+rt_cleanup() {
+    rm -f "${TMPDIR:-/tmp}"/cs193v-$$.* 2>/dev/null
+    return 0
 }
 
 # ─── a row that runs a command ─────────────────────────────────────────────────
