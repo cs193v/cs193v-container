@@ -123,15 +123,28 @@ render() {                            # render KEY [NAME=value ...]
 say() { printf '\n'; render "$@"; }   # a screen: one blank line, then the block
 
 # ─── the failure box ───────────────────────────────────────────────────────────
-# What a student sends to staff. Not die(): die() puts its whole argument in the box, and what
-# belongs in the box here is only the command's stderr — the prose above it has to be readable
-# prose, and the box has to be obviously a verbatim quote of something a machine said.
+# What a student sends to staff, and ALL THREE FACTS ARE INSIDE THE BOX (issue #54). The command
+# and its exit code used to be prose above it, which reads well and travels badly: a student
+# selects the box, pastes the box, and staff are handed a bare "HTTP 403" with nothing naming what
+# produced it or what it returned. The prose above is now one sentence saying where to send them.
+#
+# NOT die(), which is a STOP box on stderr with no title of its own and no indent — this screen is
+# an ERROR, it is the student's to read, and it lines up with the two-column margin everything
+# else here uses.
+#
+# "Command output", not "stderr": run_timeout captures what it runs with >"$tmp" 2>&1, so RT_OUT
+# is both streams, and a label promising one of them would be wrong the moment a failing command
+# says anything on stdout.
+#
+# THE PIPELINE STAYS ON ONE LINE. 20-messages.sh works out which messages end up in a box by
+# matching `msg KEY ... | box` within a single line, and a boxed key it cannot see is a key whose
+# markup and width nothing checks — which is exactly how a message goes in two columns too wide.
 #
 # SG_CMD is written by run_noted, from inside a SUBSHELL: run_timeout backgrounds what it runs,
 # so an assignment there is invisible here. Hence a file, the same reason $BUILD_NOTE is one.
 fail_to_staff() {                     # fail_to_staff RC
-    say err.setup-failed "CMD=$(last_cmd)" "RC=$1"
-    printf '%s\n' "$RT_OUT" | box "$(msg title.error)" "$C_RED" '  '
+    say err.setup-failed
+    msg err.setup-failed-details "CMD=$(last_cmd)" "RC=$1" "OUT=$RT_OUT" | box "$(msg title.error)" "$C_RED" '  '
     printf '\n'
     exit 1
 }
@@ -502,8 +515,8 @@ github_checkpoint() {
     printf '\n'
     menu 0 "$(msg opt.all-done)" "$(msg opt.need-help)"
     [ "$MENU_CHOICE" -eq 0 ] && return 0
-    # No command failed here, so the box carries what the student chose instead of a stderr. The
-    # value staff get from it is knowing WHERE they gave up, which the command line names.
+    # No command failed here, so the box carries what the student chose where a command's output
+    # would go. The value staff get from it is knowing WHERE they gave up, which the command names.
     note_cmd 'setup-git: the GitHub account checkpoint'
     RT_OUT="$(msg opt.need-help)"
     # 1 rather than 0: nothing returned a status here, and "failed with exit code 0" reads as a
@@ -829,7 +842,7 @@ run_probes() {
 
 # 0 = verified; 1 = ask for the token again; 2 = stop, having said why.
 verify() {
-    local kind
+    local kind failed_out
     while :; do
         say status.verifying
         printf '\n'
@@ -839,11 +852,20 @@ verify() {
             network)    say err.network;    return 2 ;;
             rate-limit) say err.rate-limit; return 2 ;;
         esac
+        # THE FAILING COMMAND'S OUTPUT, PUT BACK (issue #64). token_owner_wrong is a run_timeout,
+        # and run_timeout writes RT_OUT — so by the time the menu below is answered, what the probe
+        # said has been replaced by a list of GitHub account names, and that is what the staff box
+        # would quote. Both rows keyed err.clone reach this, which is `git clone` and `git pull`:
+        # the two failures a student is most likely to have, reported with the wrong text.
+        failed_out="$RT_OUT"
         if [ "$SG_FAIL_KEY" = err.clone ] && token_owner_wrong; then
             say err.clone-wrong-owner "LOGIN=$SG_LOGIN" "ORG=$CS193V_GH_ORG"
         else
             say "$SG_FAIL_KEY" "ORG=$CS193V_GH_ORG"
         fi
+        # Restored at the join rather than inside token_owner_wrong: that function has four ways
+        # out, and this is the one place every one of them arrives at.
+        RT_OUT="$failed_out"
         say prompt.how-to-proceed
         printf '\n'
         menu 0 "$(msg opt.followed-instructions)" "$(msg opt.reenter-token)" "$(msg opt.stuck)"
