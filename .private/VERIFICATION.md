@@ -669,7 +669,9 @@ itself is what you changed.
 ## 2. Container lifecycle
 
 **2.1 — First launch.** `./cs193v`
-*Expect:* container created and a shell opens. Note wall-clock time to first prompt.
+*Expect:* container created and a shell opens. Note wall-clock time to first prompt — and that
+`Entering the CS193V development environment...` appears *immediately*, before that wait rather
+than after it (issue #57). What is being timed is the gap between that line and the prompt.
 
 **2.2 — Multiple shells.** Open three more terminals, run `./cs193v` in each.
 *Expect:* all four attach to the **same** container. `podman ps` shows exactly one. No refusal — the

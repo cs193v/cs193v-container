@@ -203,6 +203,62 @@ assert_says_not "image:local-image-does-not-warn"   "locally built" "$out"
 assert_says_not "image:local-image-no-staff-scare"  "tell course staff" "$out"
 assert_eq       "image:local-image-launches" "1" "$(shim_count '^run ')"
 
+# ─── the launch says something before it does anything  (issue #57) ────────────
+# A bare ./cs193v is SILENT on every path where it succeeds, and it is not quick: preflight's
+# single `podman info` measures 536-1222 ms by itself (ERRORS.md D11) and the probes behind it
+# take the rest of a second. A student typed a command and watched nothing happen for long
+# enough to wonder whether they had typed it wrong.
+#
+# WHAT IS ASSERTED IS THE ORDER, not the presence of a sentence. A message printed after the
+# probes would pass a `contains` check and fix nothing at all, so every case here pins the line
+# to the FRONT of the output -- ahead of the first podman call, and ahead of the first way the
+# launch can refuse.
+#
+# Piped throughout, deliberately: the announcement is a plain `info`, with no terminal branch
+# and nothing animated, so a pty would test the harness rather than the launcher. That is the
+# whole of what dropping the progress indicator bought.
+shim_new
+out="$(launcher)"
+assert_says_key "entering:announced" status.entering "$out"
+assert_eq "entering:is-the-first-line" "$(msg_text status.entering)" \
+          "$(printf '%s\n' "$out" | head -1)"
+# Once, not once per path through ensure_container -- a second call site added later would
+# otherwise be invisible, since every other assertion here is satisfied by the first.
+assert_eq "entering:said-once" "1" \
+          "$(printf '%s\n' "$out" | grep -cF "$(msg_text status.entering)" || true)"
+
+# Before the earliest refusal there is, which is the case the order matters most in: the box
+# explains a launch the student can already see was attempted.
+shim_new; shim_set version "podman version 5.6.0"
+out="$(launcher)"
+p_say="$(printf '%s\n' "$out" | grep -nF "$(msg_text status.entering)" | head -1 | cut -d: -f1)"
+p_box="$(printf '%s\n' "$out" | grep -n 'STOP' | head -1 | cut -d: -f1)"
+if [ -n "$p_say" ] && [ -n "$p_box" ] && [ "$p_say" -lt "$p_box" ]; then
+    pass "entering:precedes-a-refusal"
+else
+    fail "entering:precedes-a-refusal" "sentence at line ${p_say:-none}, STOP box at ${p_box:-none}"
+fi
+
+# "Starting the course container..." is gone. It named an implementation detail at the one
+# moment a student is already waiting, and the launch has announced itself in better words by
+# the time this path is reached. The behaviour it used to describe must be untouched, which is
+# the second assertion: the container is still STARTED rather than recreated.
+shim_new
+launcher >/dev/null 2>&1                       # create, so the config hash matches
+shim_set state exited
+shim_clear_log
+out="$(launcher)"
+assert_says_not "starting:message-is-gone"  "Starting the course container" "$out"
+assert_eq       "starting:still-starts-it"  "1" "$(shim_count '^start ')"
+assert_says_key "starting:still-announced"  status.entering "$out"
+
+# No verb inherits it. Each of these prints its own first line already, and a second one saying
+# a shell is being entered would be a lie in every case -- none of them opens one.
+for v in doctor --rebuild --stop --dev-print-command; do
+    shim_new
+    assert_says_not_key "entering:verb-$v-says-nothing" status.entering "$(launcher $v)"
+done
+
 # ─── the state machine  (§2.1, §2.2) ───────────────────────────────────────────
 shim_new
 assert_eq "state:absent-creates-one" "1" "$(launcher_rc >/dev/null; shim_count '^run ')"
