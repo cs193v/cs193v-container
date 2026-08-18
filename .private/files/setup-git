@@ -219,20 +219,45 @@ validate_name() {
     VALID_NAME="$squeezed"; NAME_VERDICT=ok
 }
 
-# token_kind INPUT -> fine | classic | empty | unknown
+# token_kind INPUT -> fine | classic | partial | empty | unknown
 #
-# The classic case is worth telling apart rather than lumping in with "that is not a token".
-# A personal access token (classic) with the `repo` scope would very nearly work, which is
-# exactly why a student who made one needs to be told that this course wants the other kind
-# and why — not told that what they are holding is not a token.
+# THE SHAPE IS THE REAL ONE, AND IT WAS MEASURED: 2026-08-18, against a live fine-grained token.
+# 93 characters — `github_pat_`, then 22 alphanumerics, an underscore, and 59 more. Before issue
+# #53 this checked the prefix and nothing else, so `github_pat_x` was accepted and a paste that
+# came up short travelled all the way to `gh auth login` before anything noticed it.
+#
+# THE RISK IN CHECKING A LENGTH IS GITHUB MOVING IT. Their token-format announcement says lengths
+# may GROW, and the day a longer token appears, this screen is where the whole class stops. So the
+# pattern is written down in exactly one place, and 45-setup-git.sh asserts it against
+# $CS193V_GH_TEST_TOKEN whenever a real token is to hand — which makes a format change something a
+# test run reports rather than something a lab section discovers.
+#
+# FIVE VERDICTS, because three of these are different mistakes with different fixes:
+#   * classic — a personal access token (classic) with the `repo` scope would very nearly work,
+#     which is exactly why a student who made one needs to be told that this course wants the other
+#     kind and why, not told that what they are holding is not a token.
+#   * partial — the right prefix and the right alphabet, but short. That is a paste that was cut
+#     off, and "copy the whole thing" is the fix; "that is not a token" would send them to make
+#     another one.
+#   * unknown — everything else, including something LONGER than 93, which is what pasting twice
+#     looks like.
 token_kind() {
     local t; t="$(trim "$1")"
     case "$t" in
-        '')           printf 'empty\n' ;;
-        github_pat_*) printf 'fine\n' ;;
-        ghp_*)        printf 'classic\n' ;;
-        *)            printf 'unknown\n' ;;
+        '')    printf 'empty\n';   return 0 ;;
+        ghp_*) printf 'classic\n'; return 0 ;;
     esac
+    # grep -E rather than a case glob, because a glob cannot count; LC_ALL=C so [A-Za-z0-9] means
+    # the ASCII sixty-two and not whatever a locale's collation would add to it. 11 + 22 + 1 + 59.
+    if printf '%s' "$t" | LC_ALL=C grep -qE '^github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}$'; then
+        printf 'fine\n'; return 0
+    fi
+    # ${#t} rather than a third pattern: the alphabet test on the line above has already excluded
+    # every byte that is not ASCII, so a character count and a byte count cannot disagree here.
+    if printf '%s' "$t" | LC_ALL=C grep -qE '^github_pat_[A-Za-z0-9_]*$' && [ "${#t}" -lt 93 ]; then
+        printf 'partial\n'; return 0
+    fi
+    printf 'unknown\n'
 }
 
 # ─── the token link ────────────────────────────────────────────────────────────
@@ -279,6 +304,142 @@ email_encoded() {
 
 sandbox_url() { printf 'https://github.com/%s.git' "$CS193V_GH_SANDBOX"; }
 
+# ─── reading what the student types ────────────────────────────────────────────
+# TWO READERS, AND BOTH GIVE THE CURSOR BACK. main() hides the cursor for the whole run, because the
+# command rows redraw and the menus redraw and a cursor coming to rest in either of them strobes
+# (ERRORS.md B18) — but a prompt with no cursor in it cannot be told from a program that has
+# stopped, which is the first of issue #53's three complaints. So the two functions that WAIT for
+# typing show it for exactly as long as they are waiting and hide it again on the way out. Hidden
+# stays the state everything else runs under, and sg_cleanup stays the one place that guarantees it
+# comes back.
+read_line() {                         # read_line -> LINE_INPUT, echoed by the terminal as usual
+    cursor_show
+    IFS= read -r LINE_INPUT || LINE_INPUT=''
+    cursor_hide
+}
+
+# THE TOKEN IS NOT ECHOED, IT IS TALLIED. `read -rs` showed nothing at all, so a paste that silently
+# failed and a paste that worked looked identical — a blank line either way — and the receipt this
+# replaces existed only to tell those two apart after the event. What is drawn instead is three
+# dots, the number of characters between them, and three more:
+#
+#     Your token: ••• ... 87 more characters ... •••
+#
+# ONE DOT PER CHARACTER BELOW SG_DOTS_MAX, the count only above it. Two reasons, and the second is
+# the one that decided the number: "... -1 more characters ..." is what a five-character typo would
+# otherwise render as, and 93 dots beside a prompt is about 108 columns, which WRAPS on the
+# 80-column terminal MANUAL.md says to test in — and a line that has wrapped can no longer be
+# redrawn with \r.
+SG_DOTS_MAX=12
+
+# What a terminal sends for "delete that". Both computed once at load, not per keystroke: a
+# $(printf) inside the loop is a fork inside the loop, and a pasted token arrives 93 characters at
+# a time.
+SG_DEL="$(printf '\177')"
+SG_BS="$(printf '\b')"
+
+# The tally's prose, fetched ONCE per read and split around the number, for that same reason: msg()
+# is an awk over the catalogue, and calling it per keystroke leaves the line visibly lagging a paste
+# that has already finished. @@ stands in for the placeholder — nothing in the prose contains it —
+# and what comes back is the two halves that the redraw prints a count between.
+SG_TALLY_PRE=''
+SG_TALLY_POST=''
+tally_prepare() {
+    local t; t="$(msg token.more-characters N=@@)"
+    case "$t" in
+        *@@*) SG_TALLY_PRE="${t%%@@*}"; SG_TALLY_POST="${t#*@@}" ;;
+        # A reworded message that has lost its {{N}}: say what it says, with no number, rather than
+        # printing the whole of it twice with the count in the middle.
+        *)    SG_TALLY_PRE="$t";        SG_TALLY_POST='' ;;
+    esac
+}
+
+# ONE LINE, REDRAWN WHERE IT ALREADY IS. \r returns to column 0 of the row the cursor is on, and
+# ESC[K takes away whatever the previous tally left to the right of this one — which is what makes a
+# backspace exact, since the tally shrinks as well as grows. NO VERTICAL CURSOR MOVE, ever: that is
+# run_step's rule in cs193v-ui.sh, and B18 is the record of what breaking it looks like.
+#
+# The prompt is redrawn WITH the tally rather than printed once by the caller, because \r goes back
+# past it. That is the whole reason read_secret takes it as an argument.
+secret_draw() {                       # secret_draw PROMPT N
+    local dots='' i=0
+    if [ "$2" -le "$SG_DOTS_MAX" ]; then
+        while [ "$i" -lt "$2" ]; do dots="$dots•"; i=$((i + 1)); done
+        printf '\r%s%s%s[K' "$1" "$dots" "$ESC"
+    else
+        printf '\r%s••• %s%s%s%s%s •••%s[K' \
+               "$1" "$C_DIM" "$SG_TALLY_PRE" "$(($2 - 6))" "$SG_TALLY_POST" "$C_OFF" "$ESC"
+    fi
+}
+
+# THE TERMINAL IS SET ONCE FOR THE WHOLE READ, and that is the half that keeps a pasted token off
+# the screen. `read -s` turns echo off for the duration of ONE character and hands the terminal back
+# afterwards, so a paste arriving in chunks — which is what a paste over ssh does — can land a chunk
+# in the gap between two reads and have the terminal echo it, in clear text, into 50,000 lines of
+# tmux scrollback in a window students screenshot for help. MEASURED: that gap is microseconds wide
+# and an 89-character chunk pushed at once survives the loop intact, so this is belt and braces
+# rather than a fix — but what it is bracing is a credential.
+#
+# -icanon comes with it because the loop wants each character as it arrives rather than a line when
+# Enter is pressed. ISIG is deliberately left alone: Ctrl-C here must still stop the script.
+secret_tty_off() {
+    SG_STTY="$(stty -g 2>/dev/null || printf '')"
+    [ -n "$SG_STTY" ] && stty -echo -icanon 2>/dev/null
+    return 0
+}
+
+# AND GIVEN BACK FROM sg_cleanup TOO, exactly like the cursor and for exactly the same reason: a
+# Ctrl-C in the middle of a paste would otherwise leave the student typing invisibly in that
+# terminal for everything they did afterwards. B18, in a third place.
+secret_tty_on() {
+    [ -n "${SG_STTY:-}" ] && stty "$SG_STTY" 2>/dev/null
+    SG_STTY=''
+    return 0
+}
+
+read_secret() {                       # read_secret PROMPT -> SECRET_INPUT
+    local c n=0
+    SECRET_INPUT=''
+    tally_prepare
+    secret_tty_off
+    cursor_show
+    secret_draw "$1" 0
+    # -s IS KEPT even though the terminal above has echo off already, and not as decoration: stty is
+    # allowed to be missing or to refuse, and this loop has to stay silent when it is.
+    while IFS= read -rsn1 c; do
+        case "$c" in
+            '')  break ;;             # Enter
+            # A KEY THAT SENDS AN ESCAPE SEQUENCE, swallowed to the END of the sequence rather
+            # than to a fixed length. An arrow is three bytes and menu() reads it as three — but
+            # what arrives here is not only arrows: a terminal with bracketed paste left switched
+            # on wraps the paste itself in ESC[200~ and ESC[201~, which are six each, and stopping
+            # short of the end of one tallies "00~" as three characters of somebody's token and
+            # then fails the shape check for a reason no message could explain.
+            "$ESC")
+                IFS= read -rsn1 c || c=''
+                [ "$c" = '[' ] || continue
+                # A CSI's parameters are digits, semicolons and the occasional private marker; the
+                # first byte that is none of those ends the sequence, whatever its length was.
+                while IFS= read -rsn1 c; do
+                    case "$c" in [0-9]|';'|'?'|'<'|'='|'>') : ;; *) break ;; esac
+                done
+                continue ;;
+            "$SG_DEL"|"$SG_BS") [ "$n" -gt 0 ] || continue
+                                SECRET_INPUT="${SECRET_INPUT%?}"; n=$((n - 1)) ;;
+            # Every other control character is dropped rather than tallied. What a terminal sends for
+            # Home, or around a bracketed paste, is not part of anybody's token, and a dot drawn for
+            # it would make the count disagree with what token_kind is about to be given.
+            [[:cntrl:]])        continue ;;
+            *)                  SECRET_INPUT="$SECRET_INPUT$c"; n=$((n + 1)) ;;
+        esac
+        secret_draw "$1" "$n"
+    done
+    cursor_hide
+    secret_tty_on
+    # The newline the terminal did not echo, because echo was off when Enter was pressed.
+    printf '\n'
+}
+
 # ─── screens ───────────────────────────────────────────────────────────────────
 # One prompt, validated, then confirmed. The confirmation is a menu rather than a y/n for the
 # reason menu() records: students do not know that convention this early in the quarter.
@@ -294,7 +455,7 @@ ask_email() {
             printf '\n%s ' "$(render prompt.email)"
             first=no
         fi
-        IFS= read -r input || input=''
+        read_line; input="$LINE_INPUT"
         validate_email "$input"
         case "$EMAIL_VERDICT" in
             ok) : ;;
@@ -318,7 +479,7 @@ ask_name() {
             printf '\n%s ' "$(render prompt.name)"
             first=no
         fi
-        IFS= read -r input || input=''
+        read_line; input="$LINE_INPUT"
         validate_name "$input"
         if [ "$NAME_VERDICT" != ok ]; then
             printf '  %s %s ' "$(emph "$(msg err.name-empty)")" "$(emph "$(msg prompt.retry)")"
@@ -352,8 +513,14 @@ github_checkpoint() {
 
 # Asks until it has something shaped like a fine-grained token. Shape only: whether it WORKS is
 # what the whole verification stage is for.
+#
+# EVERY REJECTION LOOKS THE SAME NOW (issue #53): the message, and then *Try again:* on a line of
+# its own with the tally after it. This used to reprint the whole prompt block after the two long
+# messages, because an inline "Try again:" appended to the END of a paragraph reads as part of the
+# paragraph — which was true, and stopped mattering the moment the retry got a line to itself. The
+# `first` flag that bookkeeping needed went with it.
 ask_token() {
-    local input kind first
+    local kind prompt
     say token.intro
     if [ "$CS193V_TOKEN_PREFILL" = yes ]; then
         say token.prefill "URL=$(token_url)" "EXPIRY=$CS193V_TOKEN_EXPIRY"
@@ -362,37 +529,22 @@ ask_token() {
         say token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
     fi
     say token.paste
-    # SAME `first` DANCE AS ask_email, and for the same reason: an empty answer is corrected in
-    # place -- "We didn't get anything. Try again:" and the cursor right after it -- while the two
-    # block-length messages get the full prompt again underneath them, because an inline "Try
-    # again:" after six lines of prose reads as part of the prose.
-    first=yes
+    printf '\n'
+    prompt="$(render prompt.token) "
     while :; do
-        if [ "$first" = yes ]; then
-            printf '\n%s ' "$(render prompt.token)"
-            first=no
-        fi
-        # -s so nothing echoes. The token then never reaches the scrollback, which matters more
-        # here than it looks: tmux keeps 50,000 lines per tab, and a student asking for help
-        # screenshots their terminal.
-        IFS= read -rs input || input=''
-        printf '\n'
-        kind="$(token_kind "$input")"
+        read_secret "$prompt"
+        kind="$(token_kind "$SECRET_INPUT")"
         case "$kind" in
-            fine) : ;;
-            empty)   printf '  %s %s ' "$(emph "$(msg err.token-empty)")" \
-                                       "$(emph "$(msg prompt.retry)")"; continue ;;
-            classic) say err.token-classic; first=yes; continue ;;
-            *)       say err.token-shape;   first=yes; continue ;;
+            # The tally counted every character that arrived, spaces included, and trim() is what
+            # the token is made of: a paste that picked up a space at either end is not a mistake
+            # worth a message about.
+            fine)    SG_TOKEN="$(trim "$SECRET_INPUT")"; SECRET_INPUT=''; return 0 ;;
+            empty)   say err.token-empty ;;
+            classic) say err.token-classic ;;
+            partial) say err.token-partial ;;
+            *)       say err.token-shape ;;
         esac
-        SG_TOKEN="$(trim "$input")"
-        # A receipt, because -s means a mis-paste is otherwise invisible: a truncated token and
-        # a good one look exactly the same, which is a blank screen. The prefix and the length
-        # are enough to tell those apart and are not enough to be worth stealing.
-        printf '\n'
-        render token.receipt "PREFIX=$(printf '%s' "$SG_TOKEN" | cut -c1-11)" \
-                             "LEN=$(printf '%s' "$SG_TOKEN" | wc -c | tr -d ' ')"
-        return 0
+        prompt="$(render prompt.retry) "
     done
 }
 
@@ -716,6 +868,9 @@ verify() {
 sg_cleanup() {
     local b n
     cursor_show
+    # THE OTHER HALF OF THE SAME BUG. read_secret turns echo off for the length of a paste, so a
+    # Ctrl-C at the token prompt lands here with a terminal that shows nothing the student types.
+    secret_tty_on
     if [ -n "${SG_CLONE:-}" ] && [ -d "$SG_CLONE/.git" ] && [ -f "$SG_TMP/branches" ]; then
         while IFS= read -r b; do
             [ -n "$b" ] && git -C "$SG_CLONE" push -q origin --delete "$b" >/dev/null 2>&1
@@ -757,13 +912,24 @@ already_configured() {
 # as tables with no container, no terminal and no network — the same seam --dev-steps is for the
 # launcher. Handled before the terminal check, because none of them needs one.
 dev_seam() {
+    local line
     case "$1" in
         --dev-validate-email)
             validate_email "${2-}"; printf '%s %s\n' "$EMAIL_VERDICT" "$VALID_EMAIL" ;;
         --dev-validate-name)
             validate_name "${2-}"; printf '%s %s\n' "$NAME_VERDICT" "$VALID_NAME" ;;
         --dev-token-kind)
-            token_kind "${2-}" ;;
+            # NO SECOND ARGUMENT MEANS STDIN, which is not a convenience. The one caller that hands
+            # this a REAL token is 45-setup-git.sh's canary against $CS193V_GH_TEST_TOKEN, and an
+            # argument would put a live credential in the process table of whatever machine the
+            # suite is running on — the same reason gh_login feeds `gh auth login` over a pipe.
+            #
+            # `|| true`, NOT `|| line=''`, and that distinction cost a wrong answer once already: a
+            # token piped in with no trailing newline makes read return 1 having read the whole
+            # thing, so clobbering the variable on a non-zero status reports `empty` for a perfectly
+            # good token. The same trap the launcher's own reads avoid by not doing this.
+            if [ "$#" -ge 2 ]; then token_kind "$2"
+            else line=''; IFS= read -r line || true; token_kind "$line"; fi ;;
         --dev-print-token-url)
             token_url; printf '\n' ;;
         --dev-probe-plan)
@@ -782,6 +948,10 @@ dev_seam() {
 SG_EMAIL=''; SG_NAME=''; SG_TOKEN=''; SG_LOGIN=''
 SG_TMP=''; SG_CLONE=''; SG_CMD=''; SG_FAIL_KEY=''
 SG_HEX=''; SG_BR_A=''; SG_BR_B=''; SG_BR_C=''; SG_PLAN=''; SG_FAIL_RC=1
+# What the two readers hand back, and the terminal settings read_secret borrows. Globals for the
+# reason VALID_EMAIL is one: a value handed back on stdout has to be read in a subshell, where an
+# assignment made on the way is discarded on return.
+LINE_INPUT=''; SECRET_INPUT=''; SG_STTY=''
 
 main() {
     local rc

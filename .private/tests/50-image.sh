@@ -79,7 +79,11 @@ done
 assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
 
 # ─── tooling that must be present ──────────────────────────────────────────────
-for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip ssh scp telnet; do
+# stty is in that list because setup-git's token prompt turns echo off with it (issue #53). It comes
+# from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
+# assuming it, since a base image that dropped it would be discovered by a student pasting a
+# credential onto a visible screen.
+for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip ssh scp telnet stty; do
     assert_ok "have:$cmd" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version' | tr '\n' ' ')"

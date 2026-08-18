@@ -166,13 +166,22 @@ Run it for real in an 80×24 terminal, with a working token.
 - One row per command, the braille spinner turning in column 5 while each runs, replaced by a
   green `✓` — no flicker, and no row drawn twice or left half-erased.
 - A failing row's `✗` in red, in the same column, with the rows above it untouched.
-- The token invisible as you paste it, then a receipt naming its prefix and length.
+- **The cursor blinking at `Your token:` before you type anything.** Issue #53: it was hidden for
+  the whole run, and a prompt with no cursor in it reads as a program that has stopped.
+- The token itself never on the screen as you paste it — what appears instead is
+  `••• ... 87 more characters ... •••`, growing as the paste lands, on one line that does *not*
+  wrap. Backspace over it and the count comes down cleanly with no smear.
 - **Ctrl-C in the middle of a probe: the cursor comes back.** Type something and check it echoes.
   This is ERRORS.md B18's failure mode in a second place, and a transcript cannot show it.
+- **Ctrl-C while `Your token:` is waiting: the cursor comes back *and typing echoes*.** That prompt
+  turns echo off at the terminal for the length of the paste, so this is the same failure mode in a
+  third place, and the worse one — a student who loses echo loses it for the whole session.
 - The green ALL SET box closed and square on the right.
 
-*Automated:* the glyphs, the messages, the ordering, the redaction and the cursor sequences
-(`35-setup-git-shim.sh`). What needs eyes is timing and flicker.
+*Automated:* the glyphs, the messages, the ordering, the redaction, the tally's count and width,
+and the cursor sequences (`35-setup-git-shim.sh`), plus that the terminal is handed back with echo
+on (`35 :: tty:*`) — which that suite settles by asking the pty after the run rather than by reading
+the transcript. What needs eyes is timing and flicker.
 
 ### §7.2 — Ctrl-S does not freeze the terminal
 In `./cs193v`, press Ctrl-S, then type.

@@ -117,19 +117,62 @@ assert_eq "name:100-characters-accepted" "ok"    "$(name_verdict "$N100")"
 assert_eq "name:101-characters-rejected" "empty" "$(name_verdict "$N101")"
 
 # ─── the token shape ───────────────────────────────────────────────────────────
-# The classic token is told apart from junk on purpose. One with the `repo` scope would very
-# nearly work, so a student holding one needs to know this course wants the other kind — not to
-# be told that what they are holding is not a token.
+# FIVE VERDICTS, AND THE TABLE ASSERTS WHICH ONE — the same argument the email table makes. Three
+# of these are separate rows because they are separate mistakes: a classic token with the `repo`
+# scope would very nearly work, so its holder needs to know this course wants the other kind; a
+# paste that came up short needs "copy the whole thing"; and everything else needs to be told what
+# a token looks like.
+#
+# THE SHAPE IS A LENGTH NOW, WHICH IS WHY THE FIXTURES ARE FULL-SIZED. Until issue #53 this checked
+# the prefix alone, so every fixture here was a stub and `github_pat_x` was a valid token as far as
+# the script was concerned. A real fine-grained token is 93 characters: `github_pat_`, 22
+# alphanumerics, an underscore, and 59 more — measured 2026-08-18 against a live one.
 kind() { bash "$SG" --dev-token-kind "$1"; }
-assert_eq "token:fine-grained"     "fine"    "$(kind 'github_pat_11ABCDE0abcdefghij')"
-assert_eq "token:classic"          "classic" "$(kind 'ghp_16C7e42F292c6912E7710c838347Ae178B4a')"
-assert_eq "token:oauth-is-unknown" "unknown" "$(kind 'gho_16C7e42F292c6912E7710c838347Ae178B4a')"
-assert_eq "token:server-is-unknown" "unknown" "$(kind 'ghs_16C7e42F292c6912E7710c838347Ae178B4a')"
-assert_eq "token:empty"            "empty"   "$(kind '')"
-assert_eq "token:spaces-only"      "empty"   "$(kind '   ')"
-assert_eq "token:prose"            "unknown" "$(kind 'my token is secret')"
+# Built rather than typed out, so the three numbers that make up the shape are visible in the test
+# as well as in the script, and a fixture cannot be a character out by a typo nobody can see.
+T22="11ABCDEFG0$(printf 'a%.0s' $(seq 1 12))"
+T59="$(printf 'b%.0s' $(seq 1 59))"
+TOK="github_pat_${T22}_${T59}"
+assert_eq "token:length-is-93" "93" "$(printf '%s' "$TOK" | LC_ALL=C awk '{print length($0)}')"
+
+assert_eq "token:fine-grained"      "fine"    "$(kind "$TOK")"
 # A paste out of a browser very often carries a newline or a space. Trimmed, not rejected.
-assert_eq "token:padded-paste-accepted" "fine" "$(kind '  github_pat_11ABCDE  ')"
+assert_eq "token:padded-paste-accepted" "fine" "$(kind "  $TOK  ")"
+assert_eq "token:classic"           "classic" "$(kind 'ghp_16C7e42F292c6912E7710c838347Ae178B4a')"
+assert_eq "token:oauth-is-unknown"  "unknown" "$(kind 'gho_16C7e42F292c6912E7710c838347Ae178B4a')"
+assert_eq "token:server-is-unknown" "unknown" "$(kind 'ghs_16C7e42F292c6912E7710c838347Ae178B4a')"
+assert_eq "token:empty"             "empty"   "$(kind '')"
+assert_eq "token:spaces-only"       "empty"   "$(kind '   ')"
+assert_eq "token:prose"             "unknown" "$(kind 'my token is secret')"
+
+# A TRUNCATED PASTE IS ITS OWN VERDICT. 50 characters is the case issue #53 drew, and it was
+# accepted outright before that issue: it has the right prefix, and the prefix was the whole check.
+assert_eq "token:half-a-paste-is-partial" "partial" \
+          "$(kind "$(printf '%s' "$TOK" | cut -c1-50)")"
+assert_eq "token:prefix-alone-is-partial" "partial" "$(kind 'github_pat_')"
+assert_eq "token:old-stub-is-partial"     "partial" "$(kind 'github_pat_11ABCDE0abcdefghij')"
+
+# And these three are NOT partial, because none of them is a token that got cut off: one character
+# too many is what pasting twice starts to look like, and the other two are the right length with
+# the wrong shape — the checks a length comparison on its own would pass.
+assert_eq "token:one-too-long-is-unknown"  "unknown" "$(kind "${TOK}x")"
+assert_eq "token:hyphen-is-unknown"        "unknown" "$(kind "github_pat_${T22}-${T59}")"
+assert_eq "token:no-separator-is-unknown"  "unknown" "$(kind "github_pat_${T22}${T59}x")"
+
+# THE ONE ASSERTION THAT CAN CATCH GITHUB MOVING THE FORMAT, and the reason a strict shape check is
+# defensible at all: with a real token to hand, the pattern is checked against reality rather than
+# against this file's idea of it. Skipped without one — the github tier is opt-in — and it prints no
+# token on either path, whether it passes or fails.
+# OVER STDIN, NOT AS AN ARGUMENT: an argument would put a live credential in the process table for
+# as long as the check runs, which is exactly what setup-git refuses to do with the same token three
+# functions later. The verdict is all that comes back, so a failure here prints `partial` or
+# `unknown` and never the token.
+if [ -n "${CS193V_GH_TEST_TOKEN:-}" ]; then
+    assert_eq "token:a-real-token-is-fine" "fine" \
+              "$(printf '%s' "$CS193V_GH_TEST_TOKEN" | bash "$SG" --dev-token-kind)"
+else
+    skip "token:a-real-token-is-fine" "set CS193V_GH_TEST_TOKEN to check the shape against GitHub"
+fi
 
 # ─── the prefilled link ────────────────────────────────────────────────────────
 # CS193V_TODAY is what makes this assertable at all: expires_in is a number of DAYS and staff

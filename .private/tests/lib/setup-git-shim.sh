@@ -132,6 +132,34 @@ sg_says_not() {                       # sg_says_not NAME KEY TEXT
     assert_not_contains "$1" "$phrase" "$(sg_plain "$3")"
 }
 
+# THE STATES A LINE WENT THROUGH, which is a different thing from the lines in the transcript.
+# read_secret redraws its tally with \r after every keystroke, so a 93-character paste writes 94
+# states onto one physical line and only the last of them was ever on a screen. Splitting on \r is
+# what turns those back into something assertable — the same thing box() does with podman's
+# self-overwriting output, and for the same reason. Colour comes off here too, so neither reader
+# below has to know about it.
+sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, colour removed
+    printf '%s' "$1" | tr '\r' '\n' | sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
+}
+
+# The last row mentioning a needle: the final state of the line it was drawn on, which is what a
+# student was left looking at.
+sg_final() {                          # sg_final TEXT NEEDLE -> the last row mentioning NEEDLE
+    sg_rows "$1" | grep -- "$2" | tail -1
+}
+
+# HOW MANY TIMES A PROMPT WAS ASKED, which is not how many times it was written: one 93-character
+# paste puts `Your token:` on the wire 94 times. What happens exactly once per ask is the state
+# BEFORE the first keystroke — the prompt with an empty tally after it — so that is what this counts.
+# Until issue #53 these counts came from the receipt line, which the tally replaced.
+#
+# The needle is an ERE, and the prose it is given comes from the catalogue rather than being quoted
+# here, for the reason sg_says exists: a test that hardcodes wording fails the day somebody rewords
+# the catalogue, which punishes the wrong change.
+sg_asks() {                           # sg_asks TEXT PROMPT -> times PROMPT was drawn with nothing after it
+    sg_rows "$1" | grep -cE "^[[:space:]]*$2[[:space:]]*$" || true
+}
+
 # The same, for a phrase rather than a key. Needed more often than it looks: `exit code 42` is
 # rendered as `exit code <cyan>42<off>`, so a needle spanning an emphasised word matches nothing in
 # the raw transcript, and the failure reads as the number being wrong rather than the escape

@@ -127,14 +127,15 @@ If that link doesn't work, you can set the same thing up by hand:
 When you are done, copy your access token and paste it here. Also, make sure to save it in a
 safe place; once you close the window with the token in it, you won't be able to see it again!
 
-Nothing will appear on the screen as you paste. That is on purpose — it keeps your token from
-staying visible in this window.
+Your token itself will not appear on the screen. That is on purpose — it keeps your token from
+staying visible in this window. What you will see instead is a row of dots with a count of the
+characters in it, so you can tell that your paste landed.
 
 [[prompt.token]]
 *Your token:*
 
-[[token.receipt]]
-Got it: *{{PREFIX}}...* ({{LEN}} characters)
+[[token.more-characters]]
+... {{N}} more characters ...
 
 [[err.token-empty]]
 We didn't get anything.
@@ -144,9 +145,13 @@ That looks like a *personal access token (classic)*, not a fine-grained access t
 work differently, and this course needs a fine-grained one. Use the link above — the page you
 land on should be titled *New fine-grained personal access token*.
 
+[[err.token-partial]]
+That looks like only part of an access token — it is shorter than a real one. Copy the whole
+thing, from *github_pat_* through to the very last character, and paste it again.
+
 [[err.token-shape]]
-That doesn't look like a GitHub access token. A fine-grained access token starts with
-*github_pat_*. Check that you copied the whole thing.
+The token you entered looks incorrect. Tokens begin with *github_pat_* followed by a long
+string of letters and numbers.
 
 [[status.running-commands]]
 We're now going to run some commands on your behalf to get everything set up for you:
