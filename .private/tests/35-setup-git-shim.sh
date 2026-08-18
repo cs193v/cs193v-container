@@ -35,10 +35,18 @@ SGM="$PRIVATE/files/setup-git-messages.txt"
 # per run, because those change with each fresh shim.
 SG_ENV="CS193V_UI=$PRIVATE/files/cs193v-ui.sh CS193V_MESSAGES=$SGM"
 SG_ENV="$SG_ENV CS193V_GH_ORG=cs193v-students CS193V_TOKEN_EXPIRY=2026-12-31 CS193V_TODAY=2026-08-17"
-# A token shaped like the real thing, and long enough that a truncated paste would be visibly
-# different. The whole point of several assertions below is that this string never appears
-# anywhere a human or a log could read it.
-TOKEN='github_pat_11ABCDEFG0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+# THE REAL SHAPE, NOT MERELY A LONG STRING: 93 characters, `github_pat_` then 22 alphanumerics, an
+# underscore and 59 more, which is what token_kind has required since issue #53. Built from its
+# three parts rather than typed out, the same way 45-setup-git.sh builds its table fixture, because
+# a hand-typed one that is a character short is a fixture nobody can tell from a bug.
+#
+# The whole point of several assertions below is that this string never appears anywhere a human or
+# a log could read it. TOKEN_B is the run of `b`s on its own: a fragment of the token is as good as
+# the token to anyone reading over a shoulder, so it gets its own assertion.
+TOKEN_B="$(printf 'b%.0s' $(seq 1 59))"
+TOKEN="github_pat_11ABCDEFG0aaaaaaaaaaaa_$TOKEN_B"
+# 87 = 93 - the three dots drawn at each end. What the tally says while the token is being pasted.
+TOKEN_MID=87
 
 # The keystrokes for a clean first run: email, Enter to confirm, name, Enter to confirm, Enter at
 # the checkpoint, the token, Enter at "is that your account?".
@@ -102,23 +110,47 @@ assert_match "parse:issue-number-comes-from-gh" 'issue close --repo [^ ]* 4242' 
 assert_match "parse:pr-number-comes-from-gh"    'pr merge --repo [^ ]* 9999'    "$(sg_log)"
 
 # ─── the token never gets out ──────────────────────────────────────────────────
-# THE MOST IMPORTANT ASSERTION IN THIS FILE. The token is read with `read -rs` so it never
-# echoes, passed to gh over stdin so it never reaches argv, and shown redacted in the row that
-# names the login command. Each of those three is a separate place it could leak, and tmux keeps
-# 50,000 lines of scrollback per tab while students screenshot their terminals for help.
+# THE MOST IMPORTANT ASSERTION IN THIS FILE. read_secret reads the token one character at a time
+# with echo turned off at the terminal, drawing a tally rather than the characters, so it never
+# reaches the screen; it is passed to gh over stdin so it never reaches argv; and the row that names
+# the login command is redacted. Each of those three is a separate place it could leak, and tmux
+# keeps 50,000 lines of scrollback per tab while students screenshot their terminals for help.
 sg_new
 out="$(sg_tty "$HAPPY")"
 assert_not_contains "secret:not-in-the-transcript" "$TOKEN" "$out"
 assert_not_contains "secret:not-in-the-command-log" "$TOKEN" "$(sg_log)"
 # Not even a recognisable chunk of it: a partial echo would be as good as the whole thing to
 # anyone reading over a shoulder.
-assert_not_contains "secret:no-fragment-in-the-transcript" "0aaaaaaaaaaaaaaaa" "$out"
-# What IS shown: the redacted row, and a receipt with the prefix and the length so a truncated
-# paste is visibly different from a good one.
+assert_not_contains "secret:no-fragment-in-the-transcript" "$TOKEN_B" "$out"
 sg_has "secret:login-row-is-redacted" "gh auth login --with-token < your-token" "$out"
-sg_has "secret:receipt-shows-the-prefix" "github_pat_" "$out"
-assert_says "secret:receipt-shows-the-length" \
-            "($(printf '%s' "$TOKEN" | wc -c | tr -d ' ') characters)" "$out"
+
+# ─── what IS shown while it is pasted ──────────────────────────────────────────
+# The tally, which is issue #53's second half: `read -rs` showed nothing at all, so a paste that
+# silently failed looked exactly like one that worked. THE COUNT IS THE FEEDBACK — six dots and a
+# number, not 93 dots, because 93 dots beside the prompt is about 108 columns and wraps on the
+# 80-column terminal MANUAL.md says to test in.
+sg_has "tally:counts-the-hidden-characters" "$TOKEN_MID more characters" "$out"
+
+tally="$(sg_final "$out" "$TOKEN_MID more characters")"
+assert_eq "tally:draws-six-dots-not-ninety-three" "6" \
+          "$(printf '%s' "$tally" | grep -o '•' | wc -l | tr -d ' ')"
+
+# NO WRAPPED LINE AT THAT PROMPT. Measured in display columns rather than bytes, because a • is
+# three bytes and mawk's length() would score this at 3× and pass vacuously — the same trap box()
+# records. A line that has wrapped cannot be redrawn with \r, which is how the tally is drawn at all.
+cols="$(printf '%s' "$tally" | LC_ALL=C awk '{ t = $0; gsub(/[\200-\277]/, "", t); print length(t) }')"
+assert_eq "tally:fits-an-80-column-terminal" "yes" \
+          "$([ "${cols:-999}" -le 80 ] && printf 'yes' || printf '%s columns' "$cols")"
+
+# THE CURSOR IS VISIBLE WHILE IT WAITS, which is issue #53's first half: main() hides it for the
+# whole run, and a prompt with no cursor in it cannot be told from a program that has stopped.
+# Asserted as an ORDERING — the show sequence immediately ahead of the prompt — because a bare
+# "[?25h appears somewhere" would pass on the one the EXIT trap emits at the end of every run.
+assert_match "cursor:shown-at-the-token-prompt" "$SG_ESC\[\?25h.{0,60}Your token" \
+             "$(printf '%s' "$out" | tr -d '\r')"
+# And the same for the two prompts that echo normally, which were just as cursorless.
+assert_match "cursor:shown-at-the-email-prompt" "$SG_ESC\[\?25h" \
+             "$(printf '%s' "$out" | tr -d '\r' | sed -n '/email address/,$p' | head -1)"
 
 # ─── the four permission failures ──────────────────────────────────────────────
 # One injected failure each, and three things asserted every time: the row that failed carries a
@@ -204,7 +236,7 @@ sg_set fail_at 'issue create'
 out="$(sg_tty "$HAPPY|\n$STUCK")"
 assert_eq "retry:probes-run-a-second-time" "2" "$(sg_count 'gh issue create')"
 assert_eq "retry:does-not-ask-for-the-token-again" "1" \
-          "$(printf '%s' "$out" | grep -c 'characters)' || true)"
+          "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 
 # "Let me re-enter my access token" goes back to the token prompt and nowhere further back: the
 # name and the address are already right and asking for them again would be punishing the
@@ -213,7 +245,7 @@ sg_new
 sg_set fail_at 'issue create'
 out="$(sg_tty "$HAPPY|\033[B|\n|$TOKEN\n|\n$STUCK")"
 assert_eq "retoken:asks-for-the-token-twice" "2" \
-          "$(printf '%s' "$out" | grep -c 'characters)' || true)"
+          "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 assert_eq "retoken:asks-for-the-email-once" "1" \
           "$(printf '%s' "$out" | grep -c 'What is your @stanford.edu' || true)"
 assert_eq "retoken:asks-for-the-name-once" "1" \
@@ -240,7 +272,7 @@ assert_eq "stuck:the-box-is-closed" "" "$probs"
 sg_new
 out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\033[B|\n|$TOKEN\n|\n")"
 assert_eq "wrong-account:asks-for-the-token-twice" "2" \
-          "$(printf '%s' "$out" | grep -c 'characters)' || true)"
+          "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 sg_says "wrong-account:eventually-succeeds" status.all-set "$out"
 
 # ─── the environmental failures ────────────────────────────────────────────────
@@ -295,6 +327,25 @@ sg_says "classic-token:then-accepts-the-right-one" status.all-set "$out"
 sg_new
 out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|hello\n|$TOKEN\n|\n")"
 sg_says "junk-token:says-what-one-looks-like" err.token-shape "$out"
+# FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
+# because "... -1 more characters ..." is what a short typo would otherwise render as.
+assert_eq "junk-token:draws-one-dot-per-character" "5" \
+          "$(sg_final "$out" "Your token:" | grep -o '•' | wc -l | tr -d ' ')"
+sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
+           "$(sg_final "$out" "Your token:")"
+
+# A TRUNCATED PASTE IS THE CASE ISSUE #53 DREW, and it was accepted outright before that issue: the
+# check was the prefix, and half a token still has the prefix. It reaches `gh auth login` now only
+# in the sense that the good one pasted after it does.
+sg_new
+HALF="$(printf '%s' "$TOKEN" | cut -c1-50)"
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$HALF\n|$TOKEN\n|\n")"
+sg_says "partial-token:says-it-is-only-part-of-one" err.token-partial "$out"
+sg_says_not "partial-token:does-not-say-it-is-not-a-token" err.token-shape "$out"
+# 44 = 50 - the six dots. The number a student compares against the one a whole token shows.
+sg_has "partial-token:counts-what-did-arrive" "44 more characters" "$out"
+assert_eq "partial-token:nothing-ran-with-it" "1" "$(sg_count 'gh auth login')"
+sg_says "partial-token:then-accepts-the-right-one" status.all-set "$out"
 
 # ─── the checkpoint's escape hatch ─────────────────────────────────────────────
 # "Uh oh, something's wrong" at the GitHub checkpoint has to stop, not carry on into a token
@@ -386,3 +437,19 @@ sg_new
 sg_set fail_at 'clone'
 out="$(sg_tty "$HAPPY$STUCK")"
 assert_contains "cursor:restored-on-failure"    "[?25h" "$out"
+
+# ─── and so does the terminal ──────────────────────────────────────────────────
+# read_secret turns echo off AT THE TERMINAL for the length of a paste rather than leaving it to
+# `read -s` per character — see the comment there for what that buys. What it costs is a second
+# thing that has to be given back, with a worse failure than the cursor's if it is not: a student
+# typing invisibly for the rest of the session. sg_cleanup gives it back on every path the cursor is
+# given back on, but no transcript can show tty state — so this asks the pty itself, afterwards.
+sg_new
+SG_RUN="bash -c 'env $SG_ENV TMPDIR=$SGSHIM CS193V_SGSHIM=$SGSHIM bash $SG_SETUP_GIT; stty -a'"
+out="$(sg_tty "$HAPPY")"
+SG_RUN=''
+sg_says "tty:the-run-still-succeeds" status.all-set "$out"
+# Word-bounded, because stty -a also prints echoe, echok, echoctl and echoke.
+assert_match     "tty:echo-is-on-afterwards"     '(^| )echo( |$)'    "$(sg_plain "$out")"
+assert_not_match "tty:echo-is-not-left-off"      '(^| )-echo( |$)'   "$(sg_plain "$out")"
+assert_not_match "tty:canonical-mode-is-restored" '(^| )-icanon( |$)' "$(sg_plain "$out")"

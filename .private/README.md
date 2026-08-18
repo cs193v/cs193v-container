@@ -156,6 +156,16 @@ The sandbox accumulates closed issues, and that is expected rather than a fault:
 needs admin permission on the repository, which no student has, so `setup-git` closes them.
 Branches it creates are deleted, on the failure path as well as the success one.
 
+And one thing that is GitHub's to change rather than ours. `setup-git` checks the *shape* of a token
+before it tries it: 93 characters, `github_pat_` then 22 alphanumerics, an underscore and 59 more —
+measured against a live token on 2026-08-18, for issue #53. That is what turns a truncated paste into
+"copy the whole thing" rather than a 401 three screens later, and it is also a hostage to a format
+whose own announcement says token lengths may grow. If that ever happens, every student stops at the
+token prompt being told their token looks incorrect. The pattern is in `token_kind` in
+`files/setup-git` and nowhere else, and `45-setup-git.sh :: token:a-real-token-is-fine` checks it
+against `$CS193V_GH_TEST_TOKEN` whenever one is to hand — which is the cheap way to find out before a
+lab section does.
+
 ## Your development loop
 
 ```
