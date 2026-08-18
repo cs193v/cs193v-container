@@ -89,7 +89,7 @@ SG_RUN="$SG_RUN $NAME setup-git"
 SG_TIMEOUT=600
 
 # Same clean first run 35-setup-git-shim.sh uses. The trailing arrows pick "I'm stuck" if a probe
-# fails, which is what produces the staff box and the exact stderr — the thing worth reading when
+# fails, which is what produces the staff box and the exact output — the thing worth reading when
 # the point of the run is to find out what GitHub said.
 KEYS="cs193v-test@stanford.edu\n|\n|CS193V Setup Test\n|\n|\n|$CS193V_GH_TEST_TOKEN\n|\n|\033[B|\033[B|\n"
 

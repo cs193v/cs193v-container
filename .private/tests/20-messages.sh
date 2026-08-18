@@ -281,8 +281,16 @@ record "box:messages-drawn-in-a-box" \
 #
 # Down here rather than beside the other sgkeys checks because the width half needs $BOXW, which is
 # read out of the helper just above.
-for k in $(grep -oE '(celebrate|box) [^|]*msg [a-z0-9._-]+|msg [a-z0-9._-]+ \| (celebrate|box)' "$SGS" \
-           | grep -oE 'msg [a-z0-9._-]+' | awk '{print $2}' | LC_ALL=C sort -u); do
+#
+# THREE FORMS, AND TWO PASSES OVER THE FILE. `box ... msg K` and `msg K | box` were the only ways in
+# until issue #54 gave the staff box a message with ARGUMENTS -- `msg K "CMD=..." | box "$(msg
+# title.error)"` -- which neither pattern matches, so the new key would have gone in unlinted. The
+# third form cannot simply join the alternation: one match per position means the longest of them
+# would swallow `... | box "$(msg title.error)"` whole and drop title.error from the set. Two
+# independent greps let one line answer to both.
+for k in $( { grep -oE '(celebrate|box) [^|]*msg [a-z0-9._-]+' "$SGS"
+              grep -oE 'msg [a-z0-9._-]+[^|]*\|[[:space:]]*(celebrate|box)' "$SGS"; } \
+            | grep -oE 'msg [a-z0-9._-]+' | awk '{print $2}' | LC_ALL=C sort -u); do
     body="$(sed -n "/^\[\[$k\]\]$/,/^\[\[/p" "$SGM" | grep -v '^\[\[')"
     assert_ne "sgkeys:$k-was-found" "" "$body"
     assert_not_contains "sgkeys:$k-has-no-markup" "*" "$body"

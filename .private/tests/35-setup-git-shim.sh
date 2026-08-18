@@ -171,7 +171,13 @@ sg_has     "fail-clone:names-the-resource-owner-first"  "Resource owner" "$out"
 assert_contains "fail-clone:the-row-failed" "✗" "$out"
 assert_eq       "fail-clone:nothing-after-it-ran" "0" "$(sg_count 'git pull')"
 sg_says "fail-clone:ends-with-the-staff-box" err.setup-failed "$out"
-sg_has     "fail-clone:box-quotes-the-command" "git clone --quiet" "$out"
+# THE BOX, NOT THE TRANSCRIPT, and that distinction is the whole of issue #54: the command and the
+# exit code used to be prose above the box, so a needle looked for anywhere in the output said
+# nothing about what a student actually pastes to staff. sg_box cuts the box out; assert_says
+# flattens the walls away and rejoins whatever box() wrapped.
+sgbox="$(sg_box "$out")"
+assert_says "fail-clone:box-names-the-command"  "Failed command: git clone --quiet" "$sgbox"
+assert_says "fail-clone:box-quotes-the-failure" "remote: Permission to"             "$sgbox"
 
 sg_new
 sg_set fail_at 'push -q origin cs193v-setup'
@@ -203,11 +209,22 @@ sg_says_not "fail-pr:does-not-blame-issues" err.issues "$out"
 # the organization — and falls back to the four-item checklist when the evidence is not there.
 sg_new
 sg_set fail_at 'clone'
+sg_set fail_rc 128
+sg_set fail_err 'fatal: repository not found'
 sg_set owners 'janedoe'
 out="$(sg_tty "$HAPPY$STUCK")"
 sg_says "wrong-owner:says-so-outright" err.clone-wrong-owner "$out"
 sg_has     "wrong-owner:names-the-account" "@janedoe" "$out"
 sg_says_not "wrong-owner:not-the-generic-checklist" err.clone "$out"
+
+# AND THE BOX STILL QUOTES THE CLONE (issue #64). The evidence for the message above comes from
+# token_owner_wrong, which is a run_timeout, and run_timeout writes RT_OUT — so the staff box used
+# to quote that probe's answer, `janedoe`, under a heading naming `git clone`. Measured: this is
+# the box a student sent staff for every clone and pull failure, not an edge case.
+sgbox="$(sg_box "$out")"
+assert_says "wrong-owner:box-quotes-the-clone-failure"    "fatal: repository not found" "$sgbox"
+assert_says "wrong-owner:box-reports-the-clone-exit-code" "Exit code: 128"              "$sgbox"
+sg_has_not  "wrong-owner:box-does-not-quote-the-owner-probe" "janedoe" "$sgbox"
 
 # Ambiguous evidence must NOT produce the specific message. An empty list means the token can see
 # nothing at all, which is consistent with several causes, and guessing wrong here sends a student
@@ -252,19 +269,20 @@ assert_eq "retoken:asks-for-the-name-once" "1" \
           "$(printf '%s' "$out" | grep -c 'What is your full name' || true)"
 
 # "I'm stuck" is the only path that ends in the staff box, and it has to carry the command, the
-# exit code and the stderr — the three things staff cannot diagnose without.
+# exit code and the command's output — the three things staff cannot diagnose without, all three
+# INSIDE the box, because what a student sends is what they can select (issue #54).
 sg_new
 sg_set fail_at 'issue create'
 sg_set fail_rc 42
 sg_set fail_err 'gh: HTTP 403: Resource not accessible by personal access token'
 out="$(sg_tty "$HAPPY$STUCK")"
-sg_has "stuck:reports-the-exit-code" "exit code 42" "$out"
-sg_has "stuck:quotes-the-stderr" "Resource not accessible by personal access token" "$out"
-sg_has "stuck:names-the-command" "gh issue create" "$out"
-# The stderr goes inside a box, drawn by the one box() there is.
-sg_has "stuck:stderr-is-boxed" "┏━━ " "$out"
-probs="$(sg_box "$out" | box_problems)"
-assert_eq "stuck:the-box-is-closed" "" "$probs"
+sgbox="$(sg_box "$out")"
+assert_ne   "stuck:the-box-is-drawn" "" "$sgbox"
+assert_says "stuck:box-names-the-command"     "Failed command: gh issue create" "$sgbox"
+assert_says "stuck:box-reports-the-exit-code" "Exit code: 42"                   "$sgbox"
+assert_says "stuck:box-quotes-the-output" \
+            "Resource not accessible by personal access token" "$sgbox"
+assert_eq "stuck:the-box-is-closed" "" "$(printf '%s\n' "$sgbox" | box_problems)"
 
 # ─── the wrong-account branch ──────────────────────────────────────────────────
 # Answering "no, that's not my account" goes back to the token prompt without running a single
@@ -359,17 +377,19 @@ assert_eq "checkpoint-help:configures-nothing" "0" \
 
 # ─── a failed config command ───────────────────────────────────────────────────
 # The other route into the staff box, and the one issue #49 spells out: a `git config` that fails
-# is not something a student can act on, so it goes straight to staff with the command and the
-# stderr rather than through a menu.
+# is not something a student can act on, so it goes straight to staff with the command and what the
+# command said, rather than through a menu.
 sg_new
 sg_set fail_at 'config --global pull.rebase'
 sg_set fail_rc 6
 sg_set fail_err 'error: could not lock config file /home/student/.config/git/config'
 out="$(sg_tty "$HAPPY")"
 sg_says "config-fails:goes-to-staff" err.setup-failed "$out"
-sg_has "config-fails:names-the-command" "git config --global pull.rebase true" "$out"
-sg_has "config-fails:reports-the-exit-code" "exit code 6" "$out"
-sg_has "config-fails:quotes-the-stderr" "could not lock config file" "$out"
+sgbox="$(sg_box "$out")"
+assert_says "config-fails:box-names-the-command" \
+            "Failed command: git config --global pull.rebase true" "$sgbox"
+assert_says "config-fails:box-reports-the-exit-code" "Exit code: 6"          "$sgbox"
+assert_says "config-fails:box-quotes-the-output" "could not lock config file" "$sgbox"
 assert_eq "config-fails:never-reached-the-login" "0" "$(sg_count 'gh auth login')"
 
 # ─── the second run ────────────────────────────────────────────────────────────

@@ -180,8 +180,11 @@ ERROR
 [[err.setup-failed]]
 *Oh no, setup failed!* Please contact the course staff, and share the following details:
 
-Command *{{CMD}}* failed with exit code *{{RC}}*
-stderr:
+[[err.setup-failed-details]]
+Failed command: {{CMD}}
+Exit code: {{RC}}
+Command output:
+{{OUT}}
 
 [[err.clone]]
 *Oh no, we can't reach the course's practice repository!*
