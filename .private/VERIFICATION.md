@@ -184,7 +184,14 @@ rec  npm-globals                         R 'npm ls -g --depth=0'         # verce
 #     argument in README's "Deliberately not here" alone.
 ck  playwright-browser-runs ok            R 'playwright screenshot -b chromium about:blank /tmp/p.png >/dev/null 2>&1 && echo ok'
 rec  versions                            R 'node -v; npm -v; python3 -V; gh --version|head -1; vercel --version; claude --version'
-ckx  numpy                               R 'python3 -c "import numpy"'
+#   Python is a floor, not a library set (issue #44): no library is preinstalled, so what is
+#   checked is that a student can install any of them with no sudo and no flag.
+ck   pip-needs-no-flags   ok             R 'pip3 install --no-index tabulate 2>&1 | grep -q externally-managed && echo BLOCKED || echo ok'
+ck   sudo-pip-refuses     refuses        R 'sudo pip3 install --no-index tabulate 2>&1 | grep -q externally-managed && echo refuses || echo OPEN'
+ck   no-apt-numpy         gone           R 'python3 -c "import numpy" 2>/dev/null && echo PRESENT || echo gone'
+ckx  c-extension-headers                 R 'ls /usr/include/python3*/Python.h'
+ck   venv-works-offline   ok             R 'python3 -m venv /tmp/v >/dev/null 2>&1 && /tmp/v/bin/pip --version >/dev/null && echo ok'
+rec  python-user-site                    R 'python3 -c "import site;print(site.getusersitepackages())"'
 rec  font-count                          R 'fc-list | wc -l'
 rec  font-sans                           R 'fc-match sans-serif'         # expect a Noto face
 # Claude Code policy files

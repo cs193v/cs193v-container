@@ -356,6 +356,11 @@ downloaded. What tampering changes is the container's writable layer, not the im
 underneath it — and `--rebuild` throws that layer away and starts a new container from the
 image, without rebuilding or re-downloading anything. It takes about two seconds.
 
+**One command not to use: `sudo pip3 install`.** Plain `pip3 install` needs no `sudo` — it writes
+your own `~/.local` — and with `sudo` it is refused on purpose, because that would write into the
+directory Ubuntu's package manager owns, and the two would then be fighting over the same files.
+So if you ever see `error: externally-managed-environment`, the fix is to drop the `sudo`.
+
 For the same reason, the capability set is left at podman's defaults rather than
 tightened. Tightening it would look reassuring and achieve nothing: `root` **owns**
 `/usr/bin` and `/etc`, so it needs no special permission to modify them. And AppArmor is
@@ -430,6 +435,23 @@ actually are.
 - **`claude`, `vercel` and `playwright` are ordinary global npm packages**, installed in your
   own prefix rather than system-wide — so `npm ls -g` lists them, `npm update -g` works, and
   `npm install -g <anything>` needs no `sudo`. Claude Code keeps itself up to date this way.
+- **Python has an interpreter and `pip`, and no libraries.** Nothing beyond the standard library
+  is preinstalled, and `pip3 install pandas` — or anything else — works with **no `sudo` and no
+  flags**. It installs into `~/.local`, your own directory, the same place the npm packages above
+  live. Installing pandas, matplotlib and requests together takes about 11 seconds.
+
+  Four things follow from that:
+
+  - Those packages are part of the container, so they survive `exit` and closing the window, but
+    **`--rebuild` removes them**, along with everything else you installed. Getting them back
+    needs the internet — so if you are about to work offline, install what you need first.
+  - `python3 -m venv .venv` works exactly as it does on any other machine, if you would rather
+    keep one project's packages to itself.
+  - `pipx install <tool>` is the one for Python *programs* rather than libraries. It gives each
+    tool its own private set of packages so they cannot break each other, and `tldr` is installed
+    that way.
+  - A C compiler and Python's own headers are both here, so a package with no prebuilt wheel for
+    this Python still builds from source rather than failing.
 - **`ssh`, `scp` and `telnet` are here.** Log into a remote machine, copy a file across, or
   talk to a web server by hand — `telnet example.com 80`, then type `GET / HTTP/1.0` and
   press Enter twice, and you see the raw reply. (Press Enter; do not try to type the `\r\n`

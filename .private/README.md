@@ -552,6 +552,35 @@ unlaunchable browser fails the build instead of the student.
 to be "Chrome is not installed", and now the honest reason is that Playwright puts
 `--disable-dev-shm-usage` in its own default chromium arguments.
 
+**Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
+headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open
+item below for the set that was deferred. These are the branches that were measured and dropped, so
+none is re-proposed:
+
+| Rejected | The measurement that killed it |
+| --- | --- |
+| A student-owned venv first on `PATH` | Two pythons. `sudo python3` (via `secure_path`) and any `#!/usr/bin/python3` shebang silently miss the libraries. Installing into the student's **user site** instead gets the same "no sudo, no flags" ergonomics with one interpreter — verified: `/usr/bin/python3`, `#!/usr/bin/python3` and `#!/usr/bin/env python3` all see it. |
+| apt libraries (`python3-pandas`, `python3-matplotlib`, …) | 209 MB for older versions than pip's (pandas 2.3.3 against 3.0.5), and 71 MB of that is `python3-sympy` + `unicode-data`, hard `Depends` of Debian's `python3-fonttools` and usable by nothing a student touches. |
+| `rm /usr/lib/python3.14/EXTERNALLY-MANAGED` to disable PEP 668 | Identical to `PIP_BREAK_SYSTEM_PACKAGES=1` for pip, but **it does not survive**: the marker is a plain file (not a conffile) in `libpython3.14-stdlib`, and `apt reinstall libpython3.14-stdlib` restores it. A stdlib security update mid-quarter would silently re-break `pip`. |
+| Moving `tldr` out of the root-owned `/usr/local/pipx` for uniformity | It would put tldr's dependency tree into the student's import set, where an ordinary `pip install -U` could break the only command help in an image with no `man`. Worse, the tldr gates test the *image*, not a student's later state, so that breakage would be invisible to the suite. |
+| `python3-setuptools` on the apt line | PEP 517 build isolation downloads its own backend — a forced `psutil` source build worked with no system setuptools. Debian also de-vendors it into 11 packages. What that costs is small and exact: `pip install --no-build-isolation` fails with `BackendUnavailable`, and `import pkg_resources` / `setuptools` / `distutils` are all `ModuleNotFoundError` (in a fresh venv too — Python 3.12 bundles none of them). `pip3 install setuptools` fixes it in two seconds with no sudo. |
+
+**The floor is free, measured.** `python3-dev` costs 39.2 MB of packages (mostly
+`libpython3.14-dev`, plus the `libpython3.14` shared library this image did not previously have),
+and removing `python3-numpy` freed 39.2 MB — 27 MB of numpy and 11.7 MB of the `libblas3`,
+`liblapack3` and `libgfortran5` that Debian's numpy links against and nothing else here wanted.
+Installed size moved by −20 KB, and the image came out **14.3 MB smaller** (2,165,775,565 against
+2,180,064,389 bytes). Do not repeat the estimate this replaced: apt's "38 MB additional disk" for
+`python3-dev` was measured on a container that lacked dependencies `build-essential` already
+provides here.
+
+`python3-numpy` was **removed** rather than kept: nothing in the image imported it
+(`rewrite-window-title.py` imports `sys` alone), `apt remove` takes only it and
+`python3-numpy-dev`, and one apt-managed library beside a pip-installed set is the state that
+misleads — `pip list` reports a version pip cannot upgrade in place, and `pip install -U numpy`
+leaves apt's copy shadowed but on disk. `50-image.sh` asserts its absence, so re-adding it fails a
+test.
+
 **No longer on this list: tmux, and the persistent frame it makes possible.** Both were
 rejected, and both decisions were reversed deliberately. The frame was rejected because the
 only portable escape-sequence route to one, a `DECSTBM` scroll region, was measured against
@@ -641,6 +670,45 @@ place as harmless leftovers. They only ever existed to push servers onto `0.0.0.
 nothing left to push they would be an unexplained environment variable silently changing what
 a student's server binds to — the kind of thing that survives for years and then puzzles
 whoever finds it. `50-image.sh` now asserts their absence, so re-adding one breaks a test.
+
+### Python's library set — deferred, not refused (issue #44)
+
+The image installs no Python library. On demand costs **11 s and 56 MB** for pandas, matplotlib,
+requests and openpyxl, with no sudo and no flags, so the floor is genuinely sufficient for a student
+who has network and does not rebuild. What preinstalling would buy is exactly three things, and each
+is a real cost of not having it:
+
+- **It survives `--rebuild`.** The design doc tells students to rebuild first when anything seems
+  wrong, and staff say the same — and that throws away the writable layer, so it deletes their
+  packages *and* pip's cache at the moment they are already confused.
+- **It works offline.** Measured on a bare floor with `--network=none`: name-resolution failure and
+  `No matching distribution found for pandas`. Everything else here is deliberately offline-capable
+  — tldr's page cache is baked for this reason, Chromium is in the image, the npm globals are baked.
+- **It pins one version for everybody.** This is the Containerfile's own red line ("TWO STUDENTS IN
+  THE SAME LAB SECTION GET DIFFERENT SOFTWARE"), enforced by `00-release-gates.sh` §3 for every
+  other input. An unpinned `pip install pandas` in week 6 walks straight into it, and a student's
+  bug report stops being reproducible.
+
+**Revisit when Python analysis becomes graded work**, which is the case where uniformity stops being
+a nicety. The menu, measured in the student's user site so it is re-decidable without re-measuring:
+
+| Set (cumulative) | User site | Install |
+| --- | --- | --- |
+| numpy + pandas + requests + openpyxl | 152 MB | 6 s |
+| + matplotlib | 247 MB | 11 s |
+| + scipy + scikit-learn + seaborn | 445 MB | 20 s |
+| + ipython + jupyterlab/notebook | 652 MB | 38 s |
+
+scipy is +139 MB of that third row on its own (it bundles its own OpenBLAS, as numpy does), seaborn
+is +2 MB once matplotlib is there, and Jupyter's default port 8888 is **not** in `CS193V_PORTS` — so
+notebooks need `jupyter lab --port 8000` or a change to the port list.
+
+**Where the layer goes if it comes back:** between the Vercel layer and the Claude Code layer,
+installed as `su student -s /bin/sh -c "pip3 install --user --no-cache-dir ..."` with `==` pins. That
+is the only slot that gets both halves of the cache contract — a library bump does not re-run
+Playwright and Chromium (224 s), and a `CLAUDE_CODE_VERSION` bump, the pin most often touched, does
+not re-run the libraries. `--no-cache-dir` matters: pip's cache is 56 MB and would otherwise ship in
+the layer, the same reason `npm cache clean --force` runs in-layer two steps up.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 
