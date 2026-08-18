@@ -1,0 +1,204 @@
+#!/bin/sh
+#
+# CS193V restricted environment — the runtime half of "is this sandbox actually inert?"
+#
+# WHY THIS EXISTS. The sandbox's properties come from two files that cannot see each other:
+# the `restricted` stage of .private/Containerfile decides what is installed, and
+# .config/restricted.args decides how the container is run. Every guarantee the course makes
+# to students depends on BOTH being right at the same time. Nothing else would notice if they
+# drifted -- a `--network=none` lost in an edit leaves a container that starts, works, and
+# quietly has the internet.
+#
+# So this runs at every launch, before the student gets a shell, and the launcher REFUSES TO
+# OPEN ONE if it fails. A warning would be the wrong shape: the person who needs to know is
+# about to put sensitive data in here.
+#
+# IT IS ALSO THE TEST SUITE. 60-container.sh runs this exact script rather than re-listing
+# the same assertions, so there is one definition of "inert" and the guard cannot drift from
+# the thing that tests the guard. That is the arrangement cs193v-strings.sh already uses for
+# prose, and the reason is the same: a second copy is a second thing to forget.
+#
+# WHAT IT DELIBERATELY DOES NOT DO.
+#
+#   * It does not walk the filesystem. `find / -perm /6000` and the "is Claude Code absent"
+#     checks live in the Containerfile, asserted at BUILD time, because they take seconds and
+#     their answers cannot change after the image is built. This half is only the things that
+#     depend on how the container was *run*, and it has to stay fast enough to sit in front of
+#     every shell.
+#
+#   * It is not a defence against a hostile container. A process inside here could lie to it.
+#     That is not the threat: the threat is an honest mistake in a config file, and for that
+#     an inside-out check is exactly right. The launcher separately asks `podman inspect` about
+#     the things the host can answer authoritatively -- NetworkMode, CapDrop, the mount
+#     options -- which no code in here can influence. Two views, different trust.
+#
+# Usage:  cs193v-selfcheck [-v]
+#   silent and exit 0 when everything passes; -v prints every check.
+#   On failure, prints only the failures, to stderr, and exits 1.
+
+set -u
+
+VERBOSE=0
+[ "${1:-}" = "-v" ] && VERBOSE=1
+
+FAILED=''
+PASSED=0
+
+ok() {
+    PASSED=$(( PASSED + 1 ))
+    [ "$VERBOSE" = 1 ] && printf '  ok    %s\n' "$1"
+    return 0
+}
+
+bad() {
+    # Two arguments: the check's name, and what a human should do about it.
+    FAILED="$FAILED
+  FAILED  $1
+          $2"
+    return 0
+}
+
+# check <name> <remedy> <command...>  -- passes when the command succeeds
+check() {
+    _name="$1"; _remedy="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then ok "$_name"; else bad "$_name" "$_remedy"; fi
+}
+
+# refute <name> <remedy> <command...>  -- passes when the command FAILS
+refute() {
+    _name="$1"; _remedy="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then bad "$_name" "$_remedy"; else ok "$_name"; fi
+}
+
+# expect <name> <remedy> <actual> <wanted>  -- passes when the two strings match
+expect() {
+    if [ "$3" = "$4" ]; then ok "$1"; else bad "$1" "$2 (found: ${3:-nothing})"; fi
+}
+
+# The per-mount option field for a mountpoint, or empty if nothing is mounted there.
+# /proc/self/mountinfo field 5 is the mount point and field 6 the options -- this is the
+# authoritative view from inside, and unlike `mount` output it needs no extra package.
+mount_opts() {
+    awk -v mp="$1" '$5 == mp { print $6; exit }' /proc/self/mountinfo 2>/dev/null
+}
+
+mount_is_ro() {
+    case ",$(mount_opts "$1")," in
+        *,ro,*) return 0 ;;
+        *)      return 1 ;;
+    esac
+}
+
+# ─── 0. Am I even the right container? ─────────────────────────────────────────
+# Everything below would fail in the development container, which would be a confusing way
+# to learn that this was run in the wrong place.
+if ! grep -q 'Restricted' /etc/cs193v/strings.sh 2>/dev/null; then
+    printf 'cs193v-selfcheck: this is not the CS193V restricted environment.\n' >&2
+    printf 'It is only meaningful inside the container that ./cs193v restricted starts.\n' >&2
+    exit 2
+fi
+
+# ─── 1. Identity and privilege ─────────────────────────────────────────────────
+check "runs-as-uid-1000" \
+      "The container was started without --user 1000:1000." \
+      test "$(id -u)" = 1000
+
+# An empty effective capability set is what makes the read-only mount undefeatable: without
+# CAP_SYS_ADMIN there is no remount, and there is no route to uid 0 to obtain it.
+expect "no-effective-capabilities" \
+       "--cap-drop=ALL is missing from .config/restricted.args." \
+       "$(awk '/^CapEff:/ {print $2}' /proc/self/status)" 0000000000000000
+
+expect "no-new-privileges-is-set" \
+       "--security-opt=no-new-privileges is missing from .config/restricted.args." \
+       "$(awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)" 1
+
+# sudo is never installed in this stage rather than removed from it, so its presence would
+# mean the container is running the wrong IMAGE, not that a flag was lost.
+refute "sudo-is-absent" \
+       "This container is running the dev image. Check the --target of the build." \
+       command -v sudo
+
+refute "claude-is-absent" \
+       "This container is running the dev image. Check the --target of the build." \
+       command -v claude
+
+refute "ports-is-absent" \
+       "This container is running the dev image. Check the --target of the build." \
+       command -v ports
+
+# ─── 2. The network ────────────────────────────────────────────────────────────
+# /sys/class/net rather than `ip`: iproute2 is not installed, and this is the same
+# information. --network=none leaves a namespace whose only interface is loopback.
+expect "only-loopback-exists" \
+       "--network=none is missing from .config/restricted.args." \
+       "$(ls /sys/class/net 2>/dev/null | tr -d ' \n')" lo
+
+# The real question, asked the way a student's code would ask it. With no route this returns
+# ENETUNREACH immediately rather than timing out, so the 3-second ceiling is a backstop
+# against a misconfiguration that leaves the connection hanging -- not the expected path.
+refute "cannot-open-a-tcp-connection" \
+       "This container can reach the network. --network=none is missing or ineffective." \
+       python3 -c 'import socket; socket.create_connection(("1.1.1.1", 443), timeout=3)'
+
+refute "cannot-resolve-dns" \
+       "This container can resolve hostnames, so it has a working resolver." \
+       python3 -c 'import socket; socket.getaddrinfo("example.com", 443)'
+
+# ─── 3. The mounts ─────────────────────────────────────────────────────────────
+# Both halves matter and they fail differently: an unwritable projects/ with no restricted/
+# is a broken sandbox, and a writable projects/ is a leaking one.
+check "projects-is-mounted-read-only" \
+      "The projects mount is missing ,ro in .config/restricted.args." \
+      mount_is_ro "$HOME/projects"
+
+# Written as a real write attempt rather than a permission-bit inspection, because the mount
+# flag is the thing that matters and no mode on the directory would reveal it. The canary is
+# removed if it somehow succeeded, so a failing sandbox does not also litter the student's
+# work with marker files.
+if touch "$HOME/projects/.cs193v-selfcheck-canary" 2>/dev/null; then
+    rm -f "$HOME/projects/.cs193v-selfcheck-canary" 2>/dev/null || true
+    bad "projects-cannot-be-written" \
+        "projects/ is WRITABLE: code in here could modify your work or leave data in it."
+else
+    ok "projects-cannot-be-written"
+fi
+
+check "restricted-exists" \
+      "The restricted/ bind mount is missing from .config/restricted.args." \
+      test -d "$HOME/restricted"
+
+if touch "$HOME/restricted/.cs193v-selfcheck-canary" 2>/dev/null; then
+    rm -f "$HOME/restricted/.cs193v-selfcheck-canary" 2>/dev/null || true
+    ok "restricted-is-writable"
+else
+    bad "restricted-is-writable" \
+        "restricted/ is not writable, so analysis output would have nowhere to go."
+fi
+
+# No named volume may be mounted here. Any volume shared read-write with the development
+# container would be a two-way channel between the sandbox and the agent -- and ~/.claude
+# would be the worst of them, because the sandbox could write files the agent later reads.
+# Checked structurally: the only mounts under $HOME are the two bind mounts above.
+unexpected="$(awk -v h="$HOME" '
+    $5 ~ "^" h "/" { print $5 }
+' /proc/self/mountinfo 2>/dev/null | grep -vxF "$HOME/projects" | grep -vxF "$HOME/restricted" || true)"
+if [ -z "$unexpected" ]; then
+    ok "no-other-mounts-under-home"
+else
+    bad "no-other-mounts-under-home" \
+        "Unexpected mount(s), which may be a shared volume: $(printf '%s' "$unexpected" | tr '\n' ' ')"
+fi
+
+# ─── Report ────────────────────────────────────────────────────────────────────
+if [ -n "$FAILED" ]; then
+    printf 'cs193v-selfcheck: the restricted environment is NOT in its expected state.\n' >&2
+    printf '%s\n\n' "$FAILED" >&2
+    printf 'Do not put sensitive data in this container until this is fixed.\n' >&2
+    printf 'The two files that decide these properties are .config/restricted.args\n' >&2
+    printf 'and the `restricted` stage of .private/Containerfile.\n' >&2
+    exit 1
+fi
+
+[ "$VERBOSE" = 1 ] && printf '\n%s checks passed; the restricted environment is inert.\n' "$PASSED"
+exit 0

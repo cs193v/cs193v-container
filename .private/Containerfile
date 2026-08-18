@@ -7,6 +7,19 @@
 # load-bearing in a way they were not when a CI job baked one artifact for everyone —
 # see "Pinned inputs" underneath the ARGs.
 #
+# THERE ARE THREE STAGES, and the split is the security boundary of the restricted
+# environment. `base` holds everything both environments share; `dev` adds the things a
+# student develops with; `restricted` adds nothing but its own identity. See the stage
+# banners below, and CONTAINER-DESIGN.md § "Working with data Claude cannot see".
+#
+#   THE SPLIT IS ADDITIVE, AND THAT IS THE WHOLE POINT. `restricted` is not `dev` with the
+#   dangerous parts deleted -- it never receives them. A subtractive arrangement (one image,
+#   then a layer that removes sudo and Claude Code) was rejected: it is a blacklist, so every
+#   future addition to the shared layers silently reaches the sandbox until somebody
+#   remembers to come back here and remove it. Nothing warns you. Adding a package to `base`
+#   is therefore a decision about BOTH environments, and if it belongs to only one it goes in
+#   that stage.
+#
 # LAYER ORDERING IS DELIBERATE, and it now serves a different purpose than it was written
 # for. It was written when students PULLED this image: podman cannot resume a partial layer
 # download, so putting the most volatile software last meant a dropped connection cost at
@@ -19,6 +32,12 @@
 # them. With all four in a block at the top, the identical bump cost 250 s and 726 MB and
 # re-ran 18 of 23 steps, because an in-scope ARG is part of every later step's cache key.
 # Ordering alone buys nothing. 10-static.sh asserts the placement.
+#
+# IT ALSO DEPENDS ON `COPY files/` STAYING AT THE END OF EACH LEAF STAGE. It is duplicated
+# into `dev` and `restricted` rather than done once in `base`, which looks like the tidier
+# arrangement and is the expensive one: a COPY in `base` would make editing any helper script
+# invalidate `base`, and every leaf would then re-run its apt and npm installs. Editing
+# files/ is the single most common thing staff do, so it must stay the cheapest.
 #
 # Everything below is deliberate; see CONTAINER-DESIGN.md for the reasoning.
 
@@ -41,7 +60,7 @@
 # Note that `podman manifest inspect` and `skopeo` both REFUSE a `tag@digest` reference
 # ("references with both a tag and digest are currently not supported"), which is why
 # 00-release-gates.sh strips the tag before it verifies this line.
-FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03 AS base
 
 # ─── Pinned inputs ─────────────────────────────────────────────────────────────
 # All four are exact, and none of them may be `latest`. These used to be CI's job: the
@@ -64,8 +83,13 @@ FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914
 # ordering was designed to give. Moving one of these back up here silently costs a student
 # a full rebuild for a one-line version bump, and nothing would fail to warn you.
 #
+# An ARG is scoped to the stage that declares it, which is why NODE_VERSION and
+# PLAYWRIGHT_VERSION sit in `base` and the two CLI pins sit in `dev`: each is declared in
+# the stage that consumes it, and none of them crosses a stage boundary.
+#
 # DEBIAN_FRONTEND is the exception that proves it: it stays global because every apt layer
-# needs it and its value never changes, so it never invalidates anything.
+# needs it and its value never changes, so it never invalidates anything. It is re-declared
+# in each leaf stage for the same reason -- ARG does not cross a FROM.
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,12 +99,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl wget \
       git build-essential \
-      python3 python3-pip python3-numpy pipx \
-      nano less sudo uidmap \
+      python3 python3-pip python3-venv python3-numpy pipx \
+      nano less \
       procps psmisc file unzip zip xz-utils \
       locales tzdata \
       fonts-noto-core fontconfig \
-      openssh-server openssh-client inetutils-telnet \
       tmux ncurses-term \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
@@ -97,36 +120,18 @@ RUN apt-get update \
 # `default-terminal "tmux-256color"` becomes "missing or unsuitable terminal", which with
 # tmux as the landing point means no student can open a shell. The build-time check further
 # down would catch it, which is the point of having one.
-# openssh-server provides the sshd that serves the loopback tunnel. It is a SERVER package
-# for a server that never listens: the launcher starts it per session as
-# `podman exec -i ... sshd -i`, so its connection is a pipe, not a socket. See
-# files/sshd_config, and the Networking section of .config/container.args for why the tunnel
-# exists at all.
 #
-# openssh-client and inetutils-telnet are here FOR THE STUDENT, and they overturn what this
-# comment used to say. It claimed the client lived on the host only, that nothing in the
-# container ever initiates an ssh connection, and that the asymmetry was the security
-# argument. Two things were wrong with that.
+# python3-venv is listed EXPLICITLY for the same class of reason, and it became load-bearing
+# rather than merely tidy when the restricted environment arrived. It ships `ensurepip`, and
+# without it `python3 -m venv` fails outright. It has in fact been present all along -- as a
+# transitive Depends of `pipx`, which is here for `tldr` -- so `python3 -m venv` worked by
+# side effect. That is not a promise: drop tldr and Python dependency management in the
+# sandbox breaks, because a venv in the project tree is the ONLY route a sandbox has to a
+# third-party Python package. See CONTAINER-DESIGN.md § "The dependency doctrine".
 #
-# It was not TRUE. openssh-server Depends on openssh-client, so `ssh`, `scp` and `sftp` have
-# been in every image ever built — by accident rather than by decision, and documented as
-# absent while they were present.
-#
-# And it is not what the course wants. Logging into a remote machine, copying a file across
-# with scp, and typing an HTTP request at a web server by hand are things a systems course
-# teaches, not things it withholds. Issue #2.
-#
-# The security argument does not survive contact with the rest of the image either: there is
-# no egress filtering (deliberately — see the staff README), and curl, wget and git are all
-# here already. A student who can `curl` anything on the internet is not newly dangerous for
-# also being able to `ssh` to it.
-#
-# They are named EXPLICITLY rather than left to the dependency. A transitive dependency is
-# not a promise: if the tunnel ever stopped needing sshd, `ssh` and `scp` would vanish from
-# the image and the only sign would be a lab exercise that had quietly stopped working.
-#
-# inetutils-telnet, not `telnet`: on Ubuntu 26.04 `telnet` is a transitional dummy package
-# whose entire content is a dependency on this one, and transitional packages get removed.
+# NOT HERE, and each in `dev` instead, because the restricted stage must never receive them:
+# sudo, uidmap (it ships setuid newuidmap/newgidmap), and the three network clients
+# openssh-server, openssh-client and inetutils-telnet. See the `dev` banner.
 #
 # fonts-noto-core, not fonts-dejavu-core: the base image ships no fonts at all, and
 # anything that rasterizes text (Pillow, matplotlib, librsvg) needs one. Noto because a
@@ -141,9 +146,11 @@ RUN apt-get update \
 # ─────────────────────────────────────────────────────────────────────────────
 # The student account. uid/gid 1000 is the Debian/Ubuntu convention for the first
 # human user, which makes --userns=keep-id line up on Ubuntu and WSL without
-# translation. Passwordless sudo is a deliberate course decision: CS193V trains
-# students not to run commands on their host, so system changes must be possible
-# from inside. See CONTAINER-DESIGN.md § "What sudo costs you".
+# translation.
+#
+# The sudoers entry that used to live in this layer is in `dev` now. It is a property of one
+# environment rather than of the account, and putting it here would hand it to the sandbox
+# as well.
 #
 # The pre-existing occupant of 1000 has to go first. Since 23.04 the Ubuntu base image
 # ships its own `ubuntu` user at uid AND gid 1000, so a bare `groupadd -g 1000` fails
@@ -166,8 +173,6 @@ RUN set -eux; \
     fi; \
     groupadd -g 1000 student; \
     useradd -u 1000 -g 1000 -m -s /bin/bash student; \
-    printf 'student ALL=(root) NOPASSWD:ALL\n' > /etc/sudoers.d/90-student; \
-    chmod 0440 /etc/sudoers.d/90-student; \
     test "$(id -u student)" = 1000; \
     test "$(id -g student)" = 1000
 
@@ -195,6 +200,12 @@ RUN set -eux; \
 # from the tarball was meant to solve.
 #
 # The key is stored armored as .asc, which apt reads directly, so this needs no gnupg.
+#
+# NODE IS IN `base`, AND THAT IS A REQUIREMENT RATHER THAN A CONVENIENCE. The sandbox mounts
+# the same projects/ directory as the development container, so a native addon compiled into
+# node_modules/ there has to load here. Sharing one stage is what makes node's ABI, glibc and
+# architecture identical by construction; two independent installs could drift a patch
+# version apart and break every compiled addon with an ABI error.
 #
 # THE STUDENT'S NPM PREFIX IS SET HERE, in the same layer, because every `npm install -g`
 # below depends on it and npm reads exactly ONE global prefix. Root's is nodesource's /usr;
@@ -236,26 +247,17 @@ RUN set -eux; \
     su student -s /bin/sh -c 'npm ls -g --depth=0' > /dev/null
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 3 — GitHub CLI
-# ─────────────────────────────────────────────────────────────────────────────
-RUN set -eux; \
-    mkdir -p /etc/apt/keyrings; \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
-    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
-    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
-      "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/github-cli.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends gh; \
-    rm -rf /var/lib/apt/lists/*; \
-    gh --version
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Layer 4 — Playwright's CLI, and Chromium's system libraries
 #
 # The image ships a browser because the course's test harnesses are browser tests: Claude
 # Code writes them on the student's behalf and `npm test` runs them. Nothing else here
 # needed one, which is why `puppeteer and Chrome` were on the rejected list until now.
+#
+# IT IS IN `base`, and the restricted environment is the second reason for that. With no
+# network of any kind, a headless Chromium driven over the container's own loopback is how a
+# sandbox turns HTML or SVG into a PNG -- so it is also what removes the only common apt wall
+# in the Node data-analysis stack (`canvas`, which needs system cairo and pango). See
+# CONTAINER-DESIGN.md.
 #
 # THE LIBRARIES ARE THE HALF THAT HAS TO BE BAKED. Not one of the 21 packages Chromium
 # needs is in this base image — measured with dpkg, not assumed — so leaving them out would
@@ -282,7 +284,7 @@ RUN set -eux; \
 # invalidate together.
 #
 # The binary is named by absolute path, not found on PATH: the ENV that puts
-# ~/.local/bin first is in layer 8, several layers below this, and `su` resets PATH anyway.
+# ~/.local/bin first is further down, and `su` resets PATH anyway.
 # ─────────────────────────────────────────────────────────────────────────────
 # Pinned to an exact patch rather than the `1.62` range the devcontainer feature used, and
 # never `latest`: this version chooses the Chromium build, so a floating pin would quietly
@@ -347,6 +349,163 @@ RUN set -eux; \
     test -s /home/student/.cache/chromium-probe.png; \
     rm -f /home/student/.cache/chromium-probe.png
 
+# tldr, installed system-wide via pipx. Stands in for man pages, which the Ubuntu base
+# image strips and which we deliberately do not restore.
+#
+# PIPX_HOME/PIPX_BIN_DIR are set INLINE, not as ENV: as ENV they would persist into the
+# runtime and point a student's own `pipx install` at root-owned /usr/local, where it
+# would fail.
+RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin \
+    pipx install tldr \
+ && tldr --version
+
+# Populate tldr's cache as the student so it works offline on first use.
+#
+# In `base` rather than in each leaf, and "offline" is no longer a figure of speech: the
+# restricted environment has no network at all, so a cache that was not baked here could
+# never be filled there.
+#
+# NOT `|| true`. `man` is deliberately absent from this image, which makes tldr the only
+# command-line help a student has — so an empty cache means no help at all, and a build that
+# tolerated a failed fetch would ship exactly that without saying a word. A network hiccup in
+# CI is precisely the case this has to catch.
+#
+# The page count is asserted in the SAME layer as the fetch, so the build cannot succeed with
+# an empty or half-written cache. The real cache holds ~7400 pages; 1000 is a floor low
+# enough not to be brittle if upstream reorganises, high enough that a failed or truncated
+# fetch cannot pass.
+RUN set -eux; \
+    su student -s /bin/sh -c 'tldr --update'; \
+    test "$(find /home/student/.cache/tldr -type f | wc -l)" -gt 1000; \
+    su student -s /bin/sh -c 'tldr tar' > /dev/null
+
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    PATH=/home/student/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \
+    EDITOR=nano \
+    VISUAL=nano \
+    PAGER=less \
+    LESS=FRX \
+    BROWSER=/usr/local/bin/open-url
+# In `base`, so both stages inherit one definition. ENV crosses a FROM within the same
+# build; ARG does not.
+#
+# HOST and FLASK_RUN_HOST are deliberately NOT set, and were REMOVED rather than left in
+# place. They existed for one reason: podman's forwarder never delivered to the container's
+# loopback, so every server had to bind 0.0.0.0, and these nudged the few frameworks that
+# read an environment variable into doing it. The launcher now forwards each course port into
+# the container's own loopback over ssh, so localhost, 127.0.0.1 and 0.0.0.0 all work and
+# there is nothing left to nudge.
+#
+# Leaving them would have been harmless in the sense that 0.0.0.0 still works. That is
+# exactly why they had to go: an environment variable that silently changes what a student's
+# server binds to, for a reason that no longer exists, is the kind of thing that survives for
+# years and then confuses whoever finds it. They also never worked as advertised -- vite
+# reads no HOST variable at all and Next.js reads HOSTNAME, so between them they covered
+# little more than react-scripts while vite owned two of the six port ranges.
+#
+# 50-image.sh asserts their ABSENCE, so re-adding one breaks a test rather than slipping in.
+#
+# GIT_EDITOR is deliberately NOT set either. With GIT_EDITOR, core.editor, VISUAL and EDITOR all
+# unset, `git var GIT_EDITOR` returns `vi` and /usr/bin/vi is vim.tiny — so `git commit`
+# with no -m strands a novice in a modal editor with no visible way out. The VS Code
+# extension hides this today by exporting GIT_EDITOR=true; we fix it properly instead.
+#
+# LESS=FRX is git's own default (PAGER_ENV in git's Makefile): F quits if the output fits
+# one screen, R passes ANSI colour through, X leaves output on screen instead of wiping
+# it. Setting it here extends that to man, journalctl and a student's own `... | less`.
+#
+# HOST/FLASK_RUN_HOST are a partial measure only. Verified: vite reads NO host env var
+# (server.host defaults to 'localhost', settable only by config or --host) and Next.js
+# reads HOSTNAME, not HOST. Enforcing the bind-address rule is deliberately deferred;
+# see CONTAINER-DESIGN.md § Ports.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STAGE `dev` — the development environment. This is the image `./cs193v` runs.
+#
+#  Everything from here down is what the sandbox must NOT have, which is why it is a
+#  separate stage rather than a section of one long file:
+#
+#    sudo          full control of the container's own contents, and the tamper path
+#                  CONTAINER-DESIGN.md § "sudo works, and what that costs" describes
+#    uidmap        ships setuid newuidmap/newgidmap
+#    openssh-*     the tunnel's sshd, plus ssh/scp for the student
+#    telnet        a network client, for a course exercise
+#    gh, vercel    credentialled network CLIs
+#    claude-code   the agent the sandbox exists to keep away from the data
+#    ports         a diagnostic for forwarded ports, of which the sandbox has none
+#
+#  Adding something here is the DEFAULT and needs no justification beyond the usual.
+#  Adding something to `base` gives it to the sandbox too, and that is the decision to
+#  think about.
+# ═══════════════════════════════════════════════════════════════════════════════
+FROM base AS dev
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# The packages that make this the development environment, and the passwordless sudoers
+# entry that goes with them.
+#
+# Passwordless sudo is a deliberate course decision: CS193V trains students not to run
+# commands on their host, so system changes must be possible from inside. See
+# CONTAINER-DESIGN.md § "What sudo costs you". It is scoped to this stage because the
+# restricted environment's read-only mount depends on there being no route to uid 0 at all:
+# see CONTAINER-DESIGN.md § "Working with data Claude cannot see".
+#
+# openssh-server provides the sshd that serves the loopback tunnel. It is a SERVER package
+# for a server that never listens: the launcher starts it per session as
+# `podman exec -i ... sshd -i`, so its connection is a pipe, not a socket. See
+# files/sshd_config, and the Networking section of .config/container.args for why the tunnel
+# exists at all.
+#
+# openssh-client and inetutils-telnet are here FOR THE STUDENT, and they overturn what this
+# comment used to say. It claimed the client lived on the host only, that nothing in the
+# container ever initiates an ssh connection, and that the asymmetry was the security
+# argument. Two things were wrong with that.
+#
+# It was not TRUE. openssh-server Depends on openssh-client, so `ssh`, `scp` and `sftp` have
+# been in every image ever built — by accident rather than by decision, and documented as
+# absent while they were present.
+#
+# And it is not what the course wants. Logging into a remote machine, copying a file across
+# with scp, and typing an HTTP request at a web server by hand are things a systems course
+# teaches, not things it withholds. Issue #2.
+#
+# The security argument does not survive contact with the rest of the image either: there is
+# no egress filtering (deliberately — see the staff README), and curl, wget and git are all
+# here already. A student who can `curl` anything on the internet is not newly dangerous for
+# also being able to `ssh` to it.
+#
+# They are named EXPLICITLY rather than left to the dependency. A transitive dependency is
+# not a promise: if the tunnel ever stopped needing sshd, `ssh` and `scp` would vanish from
+# the image and the only sign would be a lab exercise that had quietly stopped working.
+#
+# inetutils-telnet, not `telnet`: on Ubuntu 26.04 `telnet` is a transitional dummy package
+# whose entire content is a dependency on this one, and transitional packages get removed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      sudo uidmap \
+      openssh-server openssh-client inetutils-telnet \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf 'student ALL=(root) NOPASSWD:ALL\n' > /etc/sudoers.d/90-student \
+ && chmod 0440 /etc/sudoers.d/90-student \
+ && sudo -n -u root true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 3 — GitHub CLI
+# ─────────────────────────────────────────────────────────────────────────────
+RUN set -eux; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
+      "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*; \
+    gh --version
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 6 — Vercel CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,16 +546,6 @@ RUN set -eux; \
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 8 — course configuration
 # ─────────────────────────────────────────────────────────────────────────────
-
-# tldr, installed system-wide via pipx. Stands in for man pages, which the Ubuntu base
-# image strips and which we deliberately do not restore.
-#
-# PIPX_HOME/PIPX_BIN_DIR are set INLINE, not as ENV: as ENV they would persist into the
-# runtime and point a student's own `pipx install` at root-owned /usr/local, where it
-# would fail.
-RUN PIPX_HOME=/usr/local/pipx PIPX_BIN_DIR=/usr/local/bin \
-    pipx install tldr \
- && tldr --version
 
 COPY files/ /tmp/cs193v-files/
 
@@ -446,6 +595,10 @@ COPY files/ /tmp/cs193v-files/
 #     run with no root phase and no sudo, which is what the devcontainer's five
 #     `sudo chown -R` calls were working around.
 #
+#     The restricted stage creates none of these four login directories, because it mounts
+#     none of the volumes. That absence is deliberate and the self-check asserts it: a
+#     ~/.claude in the sandbox would suggest a login lives there.
+#
 #  6. (Moved to layer 2.) npm's global prefix, and the ~/.local directories it needs, are
 #     set up alongside Node now — every `npm install -g` in this file depends on them, so
 #     configuring the prefix down here meant the build-time globals went to root's prefix
@@ -453,7 +606,7 @@ COPY files/ /tmp/cs193v-files/
 #
 #  7. Removes /etc/gitconfig if the base image has one. git stays completely stock so
 #     students meet its real hints and errors. The `git commit` editor trap is closed by
-#     EDITOR/VISUAL below, NOT by core.editor: git resolves
+#     EDITOR/VISUAL above, NOT by core.editor: git resolves
 #     GIT_EDITOR -> core.editor -> VISUAL -> EDITOR -> vi.
 #
 #  8. Installs the tunnel's sshd config, and pre-creates ~/.ssh STUDENT-OWNED at 0700.
@@ -550,59 +703,157 @@ RUN set -eux; \
     rm -f /etc/gitconfig; \
     rm -rf /tmp/cs193v-files
 
-# Populate tldr's cache as the student so it works offline on first use.
-#
-# NOT `|| true`. `man` is deliberately absent from this image, which makes tldr the only
-# command-line help a student has — so an empty cache means no help at all, and a build that
-# tolerated a failed fetch would ship exactly that without saying a word. A network hiccup in
-# CI is precisely the case this has to catch.
-#
-# The page count is asserted in the SAME layer as the fetch, so the build cannot succeed with
-# an empty or half-written cache. The real cache holds ~7400 pages; 1000 is a floor low
-# enough not to be brittle if upstream reorganises, high enough that a failed or truncated
-# fetch cannot pass.
-RUN set -eux; \
-    su student -s /bin/sh -c 'tldr --update'; \
-    test "$(find /home/student/.cache/tldr -type f | wc -l)" -gt 1000; \
-    su student -s /bin/sh -c 'tldr tar' > /dev/null
+USER student
+WORKDIR /home/student/projects
 
-ENV LANG=en_US.UTF-8 \
-    LC_ALL=en_US.UTF-8 \
-    PATH=/home/student/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \
-    EDITOR=nano \
-    VISUAL=nano \
-    PAGER=less \
-    LESS=FRX \
-    BROWSER=/usr/local/bin/open-url
-# HOST and FLASK_RUN_HOST are deliberately NOT set, and were REMOVED rather than left in
-# place. They existed for one reason: podman's forwarder never delivered to the container's
-# loopback, so every server had to bind 0.0.0.0, and these nudged the few frameworks that
-# read an environment variable into doing it. The launcher now forwards each course port into
-# the container's own loopback over ssh, so localhost, 127.0.0.1 and 0.0.0.0 all work and
-# there is nothing left to nudge.
+ENTRYPOINT ["/usr/local/bin/cs193v-entrypoint"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STAGE `restricted` — the sandbox. This is the image `./cs193v restricted` runs.
 #
-# Leaving them would have been harmless in the sense that 0.0.0.0 still works. That is
-# exactly why they had to go: an environment variable that silently changes what a student's
-# server binds to, for a reason that no longer exists, is the kind of thing that survives for
-# years and then confuses whoever finds it. They also never worked as advertised -- vite
-# reads no HOST variable at all and Next.js reads HOSTNAME, so between them they covered
-# little more than react-scripts while vite owned two of the six port ranges.
+#  It exists so that code an agent wrote can be run over data the agent must never see.
+#  The agent is not here, and neither is any way to install it or to reach the network --
+#  but the important half of that promise is enforced at RUNTIME by .config/restricted.args
+#  (--network=none, --cap-drop=ALL, --security-opt=no-new-privileges, projects/ read-only)
+#  and verified at launch by cs193v-selfcheck. This stage is the other half: it makes sure
+#  there is nothing here to find in the first place.
 #
-# 50-image.sh asserts their ABSENCE, so re-adding one breaks a test rather than slipping in.
+#  WHAT MAKES THIS STAGE SAFE IS WHAT IT DOES NOT INHERIT, not what it deletes. It builds
+#  `FROM base`, so sudo, gh, vercel, Claude Code, sshd and `ports` were never installed --
+#  see the `dev` banner for the list and the file header for why the split is additive.
 #
-# GIT_EDITOR is deliberately NOT set either. With GIT_EDITOR, core.editor, VISUAL and EDITOR all
-# unset, `git var GIT_EDITOR` returns `vi` and /usr/bin/vi is vim.tiny — so `git commit`
-# with no -m strands a novice in a modal editor with no visible way out. The VS Code
-# extension hides this today by exporting GIT_EDITOR=true; we fix it properly instead.
+#  The one genuinely subtractive step is the setuid strip below, and it has to be: eleven
+#  setuid binaries come from the base OS itself (passwd, util-linux, PAM), not from anything
+#  this file installs, so they cannot be omitted -- only removed.
+# ═══════════════════════════════════════════════════════════════════════════════
+FROM base AS restricted
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+COPY files/ /tmp/cs193v-files/
+
+# Same style rule as the dev configuration layer above: no `#` comments inside the RUN.
 #
-# LESS=FRX is git's own default (PAGER_ENV in git's Makefile): F quits if the output fits
-# one screen, R passes ANSI colour through, X leaves output on screen instead of wiping
-# it. Setting it here extends that to man, journalctl and a student's own `... | less`.
+# This is deliberately NOT a copy of that layer with lines removed. It installs the shared
+# landing point -- the entrypoint, the shell, the banner, the tab labels, nano -- and then
+# three things that differ, each of which exists to make it impossible to mistake this
+# container for the development one:
 #
-# HOST/FLASK_RUN_HOST are a partial measure only. Verified: vite reads NO host env var
-# (server.host defaults to 'localhost', settable only by config or --host) and Next.js
-# reads HOSTNAME, not HOST. Enforcing the bind-address rule is deliberately deferred;
-# see CONTAINER-DESIGN.md § Ports.
+#   * /etc/cs193v/strings.sh comes from cs193v-strings-restricted.sh. That one file carries
+#     the title, the greeting and the long CS193V_WELCOME_BODY explaining what the sandbox
+#     guards and what it does not, so cs193v-welcome itself needs no fork -- it sources
+#     whatever strings.sh is here. The tests read the same file, so a reworded string cannot
+#     turn them red while a deleted one still does.
+#
+#   * /etc/cs193v/tmux.conf comes from tmux-restricted.conf: a red title bar and tab
+#     colours, and `set-clipboard off`, which closes the OSC 52 channel the development
+#     container deliberately leaves open. It is an OVERRIDE rather than a fork -- the shared
+#     620-line configuration goes in beside it as /etc/cs193v/tmux-shared.conf and is pulled
+#     in with source-file, so every future fix to the real configuration reaches both
+#     environments. See that file. The show-messages check below greps for `.conf` rather
+#     than a filename, so an error reported against either one fails the build.
+#
+#   * the ~/.bashrc window title names the restricted environment, via the same
+#     rewrite-window-title.py the dev stage uses -- it takes the title as an argument now,
+#     so there is one script and no second copy of the escape-sequence pattern to drift.
+#
+# `ports` is absent rather than replaced. Nothing is forwarded out of this container, so the
+# command has no meaning here, and a version that explained itself would still be a command
+# a student could reach for. `am-i-in-a-container` needs no variant: it already prints its
+# port block only `if [ -n "${CS193V_PORTS:-}" ]`, which is unset here.
+#
+# ~/restricted is pre-created student-owned for the same reason ~/projects is: it is a bind
+# mount target, and podman creates a missing one as root.
+#
+# The four login directories the dev stage creates are deliberately absent -- no volumes are
+# mounted here, so a ~/.claude would only imply a credential lives in it.
+RUN set -eux; \
+    install -m 0755 /tmp/cs193v-files/open-url             /usr/local/bin/open-url; \
+    install -m 0755 /tmp/cs193v-files/am-i-in-a-container  /usr/local/bin/am-i-in-a-container; \
+    install -m 0755 /tmp/cs193v-files/cs193v-selfcheck     /usr/local/bin/cs193v-selfcheck; \
+    install -m 0755 /tmp/cs193v-files/entrypoint.sh        /usr/local/bin/cs193v-entrypoint; \
+    install -m 0755 /tmp/cs193v-files/cs193v-shell         /usr/local/bin/cs193v-shell; \
+    install -m 0755 /tmp/cs193v-files/cs193v-welcome       /usr/local/bin/cs193v-welcome; \
+    install -m 0755 /tmp/cs193v-files/cs193v-goodbye       /usr/local/bin/cs193v-goodbye; \
+    install -m 0755 /tmp/cs193v-files/man                  /usr/bin/man; \
+    sh -n /usr/bin/man; \
+    sh -n /usr/local/bin/cs193v-selfcheck; \
+    test -z "$(man git 2>&1 | grep -F unminimize || true)"; \
+    install -m 0644 /tmp/cs193v-files/profile.d/10-cs193v-shell.sh /etc/profile.d/10-cs193v-shell.sh; \
+    install -m 0644 /tmp/cs193v-files/profile.d/20-cs193v-welcome.sh /etc/profile.d/20-cs193v-welcome.sh; \
+    install -o student -g student -m 0644 /tmp/cs193v-files/bash_logout /home/student/.bash_logout; \
+    python3 /tmp/cs193v-files/rewrite-window-title.py 'CS193V: Restricted Environment'; \
+    grep -q 'CS193V: Restricted Environment' /home/student/.bashrc; \
+    cat /tmp/cs193v-files/profile.d/10-cs193v-shell.sh >> /etc/bash.bashrc; \
+    install -d -m 0755 /etc/cs193v; \
+    install -m 0644 /tmp/cs193v-files/cs193v-strings-restricted.sh /etc/cs193v/strings.sh; \
+    sh -n /etc/cs193v/strings.sh; \
+    install -m 0644 /tmp/cs193v-files/tmux/tmux.conf            /etc/cs193v/tmux-shared.conf; \
+    install -m 0644 /tmp/cs193v-files/tmux/tmux-restricted.conf /etc/cs193v/tmux.conf; \
+    install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \
+    printf '\n# CS193V tab labels inside tmux. Must stay last: it composes PROMPT_COMMAND.\nif [ -n "${TMUX:-}" ]; then . /etc/cs193v/tabname.bash; fi\n' >> /etc/bash.bashrc; \
+    bash -n /etc/cs193v/tabname.bash; \
+    infocmp tmux-256color > /dev/null; \
+    su student -s /bin/bash -c 'tmux -L cs193vbuild -f /etc/cs193v/tmux.conf new-session -d -x 80 -y 24 "sleep 60"'; \
+    test -z "$(su student -s /bin/bash -c 'tmux -L cs193vbuild show-messages' | grep -F '.conf' || true)"; \
+    test -z "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T prefix' 2>/dev/null || true)"; \
+    test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T root' | grep -cE ' (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ')" = 6; \
+    test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild show -gv set-clipboard')" = off; \
+    su student -s /bin/bash -c 'tmux -L cs193vbuild kill-server'; \
+    install -o student -g student -m 0644 /tmp/cs193v-files/nanorc /home/student/.nanorc; \
+    install -d -o student -g student -m 0755 /home/student/.cache; \
+    install -d -o student -g student -m 0755 /home/student/projects; \
+    install -d -o student -g student -m 0755 /home/student/restricted; \
+    rm -f /etc/gitconfig; \
+    rm -rf /tmp/cs193v-files
+
+# THE INERTNESS ASSERTIONS. Every one of these is a property the sandbox's whole purpose
+# rests on, checked here so that a mistake fails the BUILD rather than a student's data.
+#
+# They are the expensive half of cs193v-selfcheck, which the launcher runs at every start:
+# these walk the filesystem, so they belong at build time, and the cheap dynamic half --
+# no network, no capabilities, projects/ read-only -- belongs at launch. Between them, a
+# desync between this file and .config/restricted.args cannot go unnoticed.
+#
+# THE SETUID STRIP IS FIRST, and it is not optional. Removing sudo, uidmap and openssh takes
+# five setuid binaries out of the picture (sudo.ws, newuidmap, newgidmap, ssh-agent,
+# ssh-keysign), but eleven remain from the base OS: chage, chfn, chsh, expiry, gpasswd,
+# mount, passwd, su, umount, pam_extrausers_chkpwd and unix_chkpwd. None can do anything
+# useful for a uid-1000 process with no capabilities, and none is needed by anything here --
+# but a setuid binary is exactly the shape of a future privilege-escalation bug, and the
+# read-only mount depends on there being no route to uid 0. `no-new-privileges` at runtime
+# makes execve ignore the bits as well; this removes them.
+#
+# `sudo` is checked by three names on purpose. On Ubuntu 26.04 /usr/bin/sudo is a symlink
+# into /etc/alternatives, and the real setuid binary is /usr/bin/sudo.ws -- so a check for
+# /usr/bin/sudo alone would pass on an image that still had a working sudo.
+RUN set -eux; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + ; \
+    test -z "$(find / -xdev -perm /6000 -type f)"; \
+    test ! -e /usr/bin/sudo; \
+    test ! -e /usr/bin/sudo.ws; \
+    test -z "$(command -v sudo || true)"; \
+    test ! -e /etc/sudoers.d/90-student; \
+    test -z "$(command -v claude || true)"; \
+    test ! -e /home/student/.local/bin/claude; \
+    test ! -d /home/student/.local/lib/node_modules/@anthropic-ai; \
+    test ! -d /etc/claude-code; \
+    test -z "$(command -v gh || true)"; \
+    test -z "$(command -v vercel || true)"; \
+    test -z "$(command -v ports || true)"; \
+    test ! -e /usr/sbin/sshd; \
+    test ! -e /etc/ssh/cs193v_sshd_config; \
+    test ! -d /home/student/.claude; \
+    test ! -d /home/student/.config/gh; \
+    test ! -d /home/student/.local/share/com.vercel.cli; \
+    test -d /home/student/restricted; \
+    test -x /usr/local/bin/cs193v-selfcheck; \
+    grep -q 'Restricted' /etc/cs193v/strings.sh; \
+    node --version; \
+    python3 --version; \
+    python3 -m venv /tmp/venv-probe; \
+    /tmp/venv-probe/bin/python -c 'import sys; print(sys.prefix)'; \
+    rm -rf /tmp/venv-probe
 
 USER student
 WORKDIR /home/student/projects

@@ -68,11 +68,44 @@ while [ "$_cs193v_i" -lt "$_cs193v_inner" ]; do
     _cs193v_i=$(( _cs193v_i + 1 ))
 done
 
-printf '\n  \033[1m╔%s╗\033[0m\n' "$_cs193v_rule"
-printf '  \033[1m║\033[0m%*s\033[1m%s\033[0m%*s\033[1m║\033[0m\n' \
-    "$_cs193v_pad" "" "$_cs193v_title" \
-    "$(( _cs193v_inner - _cs193v_pad - _cs193v_len ))" ""
-printf '  \033[1m╚%s╝\033[0m\n' "$_cs193v_rule"
+# The box's own attribute comes from the strings file, so the restricted environment can draw
+# a red box with no second copy of this script. Defaulting to bold keeps an older strings.sh
+# rendering exactly as it did.
+#
+# Built into variables and emitted through %s rather than interpolated into the format
+# string: a value from a sourced file has no business being parsed as a printf format.
+_cs193v_on="$(printf '\033[%sm' "${CS193V_BANNER_SGR:-1}")"
+_cs193v_off="$(printf '\033[0m')"
+
+printf '\n  %s╔%s╗%s\n' "$_cs193v_on" "$_cs193v_rule" "$_cs193v_off"
+printf '  %s║%s%*s%s%s%s%*s%s║%s\n' \
+    "$_cs193v_on" "$_cs193v_off" \
+    "$_cs193v_pad" "" \
+    "$_cs193v_on" "$_cs193v_title" "$_cs193v_off" \
+    "$(( _cs193v_inner - _cs193v_pad - _cs193v_len ))" "" \
+    "$_cs193v_on" "$_cs193v_off"
+printf '  %s╚%s╝%s\n' "$_cs193v_on" "$_cs193v_rule" "$_cs193v_off"
 printf '\n  %s\n\n' "$CS193V_WELCOME"
+
+# The long explanation, when there is one. Only the restricted environment sets this: a
+# sandbox has to say what it does and does not protect before a student puts sensitive data
+# in it, and three lines of hint cannot carry that. Unset in the development container, so
+# its banner is byte-for-byte what it always was.
+#
+# Printed as written, NOT reflowed. The line breaks belong to whoever wrote the prose, and a
+# wrapper here would fight them; the strings file says to keep lines under ~64 columns.
+# Blank lines are emitted bare rather than as two spaces, so no line carries trailing
+# whitespace.
+if [ -n "${CS193V_WELCOME_BODY:-}" ]; then
+    printf '%s\n' "$CS193V_WELCOME_BODY" | while IFS= read -r _cs193v_line; do
+        if [ -n "$_cs193v_line" ]; then
+            printf '  %s\n' "$_cs193v_line"
+        else
+            printf '\n'
+        fi
+    done
+    printf '\n'
+fi
+
 printf '  \033[2m%s\n' "$CS193V_WELCOME_HINT_1"
 printf '  %s\033[0m\n\n' "$CS193V_WELCOME_HINT_2"

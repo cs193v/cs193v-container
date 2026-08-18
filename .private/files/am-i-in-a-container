@@ -4,9 +4,27 @@
 # with the same shape as the devcontainer's `am-i-in-a-dev-container`, so the guides read
 # the same way.
 
+# WHICH container, from the same strings file the banner and the tmux title bar read, so all
+# three name the environment identically and there is no fourth copy of the name to drift.
+# There are two containers now and telling them apart is the whole point of this command.
+# shellcheck source=cs193v-strings.sh
+. /etc/cs193v/strings.sh
+
 echo "Yes, you are inside the CS193V container!"
 echo
-echo "  projects  : $HOME/projects   (this is your projects/ folder on your own computer)"
+echo "  this is   : $CS193V_TITLE"
+
+# Whether projects/ is writable is the clearest single difference between the two
+# environments, and it is READ rather than assumed: access(W_OK) reports EROFS for a
+# read-only mount, so this reflects the mount flag and not the directory's mode.
+if [ -w "$HOME/projects" ]; then
+    echo "  projects  : $HOME/projects   (this is your projects/ folder on your own computer)"
+else
+    echo "  projects  : $HOME/projects   (your projects/ folder, mounted READ-ONLY here)"
+fi
+if [ -d "$HOME/restricted" ]; then
+    echo "  restricted: $HOME/restricted   (read-write; the sensitive data goes here)"
+fi
 echo "  user      : $(id -un) (uid $(id -u))"
 if [ -n "${CS193V_PORTS:-}" ]; then
     echo "  ports     : $CS193V_PORTS"

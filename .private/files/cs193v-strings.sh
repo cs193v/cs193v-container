@@ -27,5 +27,16 @@ CS193V_WELCOME='Welcome to the CS193V Development Environment!'
 CS193V_WELCOME_HINT_1='Your files are in ~/projects. Run `ports` if a server is not'
 CS193V_WELCOME_HINT_2='reachable, or `am-i-in-a-container` to see this setup again.'
 
+# CS193V_WELCOME_BODY is deliberately UNSET here. cs193v-welcome prints it between the
+# greeting and the hints when it is set, and skips it entirely when it is not — so this
+# banner stays exactly the three lines it has always been. The restricted environment sets
+# it, because a sandbox has to explain what it does and does not protect before a student
+# puts sensitive data in it. See cs193v-strings-restricted.sh.
+
+# The SGR the entry banner draws its box with. Plain bold here; the restricted environment
+# uses bold red. cs193v-welcome defaults to this value when the variable is absent, so an
+# older strings.sh still renders correctly.
+CS193V_BANNER_SGR='1'
+
 # Printed once, after the whole tmux session ends — not per tab. See cs193v-goodbye.
 CS193V_GOODBYE='You have left the CS193V development environment. Goodbye!'
