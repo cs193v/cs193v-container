@@ -371,6 +371,28 @@ assert_contains "net:telnet-installed"                "inetutils-telnet" "$apt_l
 assert_not_match "net:not-the-transitional-telnet-package" \
                  '(^|[[:space:]])telnet([[:space:]]|\\|$)' "$apt_line"
 
+# ─── Python: the floor, and nothing above it  (issue #44) ──────────────────────
+# The image ships an interpreter and the means to install libraries, not the libraries. These
+# four assertions pin that shape, because every one of them would fail silently: a student
+# would still get a working `python3` and only find out later, mid-assignment.
+#
+# python3-dev is the half of the compiler story pip cannot download. build-essential is already
+# on this line; without the headers a source build dies at `fatal error: Python.h: No such file
+# or directory` — verified against psutil, which compiles once they are there.
+assert_contains "python:dev-headers-named-explicitly" "python3-dev" "$apt_line"
+# python3-venv, for the reason openssh-client is named just above: it is in the image
+# today only because pipx Depends on it, and a dependency is not a promise. `python3 -m venv` is
+# what pip's own externally-managed error tells a student to reach for.
+assert_contains "python:venv-named-explicitly"        "python3-venv" "$apt_line"
+# numpy was REMOVED, and re-adding it has to be a test failure rather than a quiet return to the
+# mixed state: one apt-managed library beside a pip-installed set means `pip list` reports a
+# version pip cannot upgrade in place, and `pip install -U numpy` leaves apt's copy shadowed but
+# still on disk. If a library set is ever wanted, it belongs in a pip layer, not on this line.
+assert_not_contains "python:no-apt-managed-libraries" "python3-numpy" "$apt_line"
+# setuptools is absent on purpose — PEP 517 build isolation downloads its own backend, and
+# Debian de-vendors setuptools into 11 packages. Named here so the absence is a decision.
+assert_not_contains "python:no-apt-setuptools"        "python3-setuptools" "$apt_line"
+
 # ─── tmux: the landing point ───────────────────────────────────────────────────
 # `./cs193v` runs cs193v-shell, which puts the student inside tmux. These assertions cover
 # the properties that are load-bearing and would fail SILENTLY: a student would still get a
@@ -619,6 +641,19 @@ done
 # PIPX_HOME/PIPX_BIN_DIR must be inline on the RUN, never ENV: as ENV they persist into
 # the runtime and point a student's own `pipx install` at root-owned /usr/local.
 assert_not_match "containerfile:pipx-vars-not-ENV" '^ENV.*PIPX' "$(cat $PRIVATE/Containerfile)"
+
+# PIP_BREAK_SYSTEM_PACKAGES is the exact mirror of that rule, and the reason is the same one read
+# the other way round: the pipx variables must not reach the student's shell, and this one is
+# useless unless it does. Without it in the ENV, `pip3 install X` and even `pip3 install --user X`
+# fail with externally-managed-environment, and #44's whole complaint comes back. Comments are
+# stripped first, or the Containerfile's own explanation of the variable satisfies this while the
+# ENV entry itself is gone.
+assert_contains "containerfile:pip-guard-is-ENV" "PIP_BREAK_SYSTEM_PACKAGES=" "$env_live"
+# And it must NOT have been done by deleting Ubuntu's marker file instead: that is the same thing
+# to pip, but `apt reinstall libpython3.14-stdlib` restores the file, so a stdlib security update
+# mid-quarter would silently re-break pip. Verified, not assumed.
+assert_not_contains "containerfile:pep668-marker-not-deleted" "EXTERNALLY-MANAGED" \
+                    "$(sed 's/#.*//' $PRIVATE/Containerfile)"
 
 assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' $PRIVATE/Containerfile
 

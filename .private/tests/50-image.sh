@@ -180,7 +180,59 @@ assert_contains "net:telnet-reaches-a-web-server"  "Connected to 127.0.0.1" "$te
 # The status line is the point of the exercise: it is what a student is meant to SEE coming
 # back when they type a request by hand.
 assert_contains "net:telnet-shows-the-http-response" "HTTP/1.0 200 OK" "$telout"
-assert_ok "numpy-imports" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import numpy\"'"
+# ─── Python: the floor works, and it is only a floor  (issue #44) ──────────────
+# This section replaced a single `numpy-imports` assertion. numpy is gone — nothing in the image
+# imported it, and one apt-managed library beside a pip-installed set is the state that misleads
+# — so what has to be tested now is not which libraries are here but that a student can get any
+# library they want, without sudo and without a flag.
+#
+# ALL OF IT RUNS --network=none, deliberately. `pip install <real package>` would test the
+# internet as much as the image, and the suite's tldr tests already establish that offline is
+# the standard for this file. --no-index makes pip do everything except reach an index, so the
+# only two outcomes are the two this distinguishes.
+pipout="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+          -c 'pip3 install --no-index tabulate 2>&1' || true)"
+# THE ASSERTION #44 IS ABOUT. Without PIP_BREAK_SYSTEM_PACKAGES in the image's ENV, Ubuntu's
+# PEP 668 marker makes this — and `pip3 install --user` too — fail with an 11-line
+# externally-managed-environment error, and the only ways forward are a venv or a flag named
+# --break-system-packages. A student meeting that on their first `pip3 install` is the whole
+# problem the ENV solves.
+assert_not_contains "python:pip-install-needs-no-flags" "externally-managed" "$pipout"
+# And pip must have got as far as looking for the package, or the assertion above passes for the
+# wrong reason — any early failure would also contain no such message.
+assert_contains "python:pip-reached-the-resolver" "Could not find a version" "$pipout"
+# The other half, and it is deliberate rather than an oversight: sudo's env_reset strips the
+# variable, so root's pip still honours the marker and the apt-managed tree stays protected.
+# This also fails if someone "simplifies" the ENV away by deleting the marker file instead —
+# which looks identical until `apt reinstall libpython3.14-stdlib` puts the file back.
+sudopip="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+           -c 'sudo pip3 install --no-index tabulate 2>&1' || true)"
+assert_contains "python:sudo-pip-still-refuses" "externally-managed" "$sudopip"
+# numpy's absence is asserted, not merely un-asserted: re-adding it to the apt line would
+# restore exactly the mixed provenance this removed.
+assert_fail "python:no-apt-managed-numpy" \
+            sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import numpy\"'"
+# python3-dev, checked by the artifact that matters rather than by the package name: without
+# Python.h a source build dies at `fatal error: Python.h: No such file or directory`, and
+# build-essential on its own does not fix it.
+assert_ok "python:c-extension-headers-present" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'ls /usr/include/python3*/Python.h'"
+# python3-venv is named on the apt line rather than inherited from pipx, and a venv has to work
+# offline: `python3 -m venv` bootstraps pip from python3-pip-whl, so it needs no index at all.
+venvout="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+           -c 'python3 -m venv /tmp/v >/dev/null 2>&1 && /tmp/v/bin/pip --version' || true)"
+assert_contains "python:venv-works-offline" "pip " "$venvout"
+# Where a student's own installs land, and that they can be written with no sudo. ~/.local is
+# also the npm prefix, so this directory being student-owned is load-bearing twice.
+assert_ok "python:user-site-is-writable" \
+          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local'"
+record "python:user-site" "$(R 'python3 -c "import site;print(site.getusersitepackages())"')"
+record "python:pip-version" "$(R 'pip3 --version')"
+# The two additions to the apt line are DELIBERATE, not inherited — the same argument as
+# net:openssh-client-is-installed-on-purpose a few lines up. python3-venv in particular has been
+# in every image ever built, purely because pipx depends on it.
+assert_contains "python:dev-is-installed-on-purpose"  "python3-dev"  "$manual"
+assert_contains "python:venv-is-installed-on-purpose" "python3-venv" "$manual"
 
 # Passwordless sudo is a deliberate course decision: CS193V trains students not to run
 # commands on their host, so system changes must be possible from inside.
