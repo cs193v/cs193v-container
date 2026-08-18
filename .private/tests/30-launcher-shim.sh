@@ -945,6 +945,13 @@ assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --rebuild --no-c
 # be seen from one -- and it is the whole point of #23 and #24.
 shim_new
 shim_set state absent
+# A DELAY ON `run`, for the reason the block below spells out at length: the creation caption is
+# drawn by the meter's animator at 10 Hz, and the fake podman's `run` returns in milliseconds.
+# Until #38 the WAIT supplied that delay by accident -- the poll loop inside run_timeout noticed
+# a finished child only on its next 100ms tick, so there was always a frame in which to draw the
+# caption. With the wait exact, the label can now be written and cleared between two frames, and
+# what was asserted here was the polling rather than the animation.
+shim_set run_delay 0.3
 raw="$(launcher_tty '' --rebuild --no-cache)"
 
 # "One line that moves" means the bar is drawn AFTER a carriage return -- without that it
@@ -1448,6 +1455,15 @@ assert_not_contains "tailbox:staff-notes-leave-no-cs193v-prefix" 'cs193v: ' "$mi
 shim_new
 shim_set state absent
 shim_set build_delay 0.05
+# A DELAY ON `run`, so the box this reads is one drawn from the COMPLETE log. render_pty_mid
+# takes the frame before the last ESC[J, which assumes exactly one trailing frame after the last
+# boxed one -- and how many the creation step produces is a matter of timing. Seven lines 50ms
+# apart is barely one box refresh (the box redraws every third frame), so an off-by-one there
+# selects a box drawn before podman printed the image id. Holding `run` open for 0.3s guarantees
+# several complete box frames instead of exactly one, whichever frame is picked. Until #38 the
+# poll loop inside run_timeout supplied that slack by accident: with a meter running the creation
+# step is an UNLABELLED run_timeout call, so it now returns in ~10ms rather than ~100ms.
+shim_set run_delay 0.3
 shim_set build_out "$(printf '%s\n' \
     'STEP 1/2: FROM ubuntu:26.04' \
     'STEP 2/2: LABEL x=y' \

@@ -185,21 +185,37 @@ EOF
 #
 # It answers `-O check` and `-O exit` directly, and for the master it creates the control
 # socket the launcher tests for with `[ -S ]`. python3 because a unix socket cannot be made
-# from the shell; the file survives the process, so the socket does not need holding open —
-# only the master does, for the `kill -0` in tunnel_start's wait loop.
+# from the shell; the file survives the process, so the socket does not need holding open.
+#
+# TWO THINGS HERE MODEL ssh FEATURES THE LAUNCHER DEPENDS ON, so they have to keep matching
+# ssh(1) rather than matching the launcher:
+#
+#   * -f MUST RETURN. Real ssh forks after authenticating and setting its forwarding up, and
+#     the foreground process exits 0 — which is the whole reason tunnel_start uses it (#38).
+#     A fake that stayed in the foreground instead would sit there until run_timeout's ceiling
+#     and report a tunnel failure, which is what this did before -f: the launcher backgrounded
+#     it, so sleeping was free. Without -f it still sleeps, because a caller that backgrounds
+#     this expects a master to stay alive.
+#   * -O check PRINTS "Master running (pid=N)" ON STDERR, and tunnel_record_pid reads the
+#     pidfile out of exactly that. A fake that only exited 0 would send it to its `ps` fallback,
+#     which finds nothing here because no fake process carries the control socket on its
+#     command line — so doctor would report "up (pid ?)" for a tunnel it can see.
 shim_fake_ssh() {
     cat > "$SHIM/ssh" <<'EOF'
 #!/bin/sh
 case " $* " in
-    *" -O check "*|*" -O exit "*) exit 0 ;;
+    *" -O check "*) echo "Master running (pid=$$)" >&2; exit 0 ;;
+    *" -O exit "*)  exit 0 ;;
 esac
-ctl=''; prev=''
+ctl=''; prev=''; fork=no
 for a in "$@"; do
     [ "$prev" = "-S" ] && ctl="$a"
+    [ "$a" = "-f" ] && fork=yes
     prev="$a"
 done
 [ -n "$ctl" ] && python3 -c 'import socket, sys
 s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)' "$ctl"
+[ "$fork" = yes ] && exit 0
 sleep 30
 EOF
     chmod +x "$SHIM/ssh"

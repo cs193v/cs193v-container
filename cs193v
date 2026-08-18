@@ -156,6 +156,9 @@ rm -f "$WARN_ACK"
 # -- the two handlers above, either of which can fire with a live animator and a hidden cursor.
 transient_cleanup() {
     rm -f "$WARN_ACK" "$METER_STATE"
+    # run_timeout's scratch files, which only it can name. A Ctrl-C inside a probe -- or inside
+    # the three minutes of `podman run` -- otherwise leaves one in TMPDIR per call.
+    rt_cleanup
     if [ -n "${METER_PID:-}" ]; then
         kill "$METER_PID" 2>/dev/null
         wait "$METER_PID" 2>/dev/null
@@ -1450,15 +1453,45 @@ tunnel_start() {
 
     rm -f "$TUNNEL_CTL" "$TUNNEL_PID" "$TUNNEL_LOG"
 
-    # Backgrounded with & and a pidfile rather than `ssh -f`. -f is the idiomatic way to
-    # daemonize after authentication, but it forks and the pid we could capture is the parent
-    # that immediately exits -- leaving nothing for --reset-tunnel to kill when the tunnel
-    # wedges. Polling -O check below recovers the one thing -f was buying, which is finding
-    # out synchronously whether authentication actually succeeded.
+    # -f, WHICH THIS USED TO REFUSE. The refusal was right about its reason and wrong about the
+    # conclusion, so both halves are worth recording. -f daemonizes after authentication, and
+    # the pid we could capture from it is the parent that immediately exits -- so writing $!
+    # into the pidfile would record a DEAD number, and tunnel_kill_pid, which checks that the
+    # pid still looks like our own tunnel before killing it, would then decline to kill
+    # anything while doctor reported "up (pid <dead>)". --reset-tunnel would silently do
+    # nothing to a wedged master. That is a real trap, not a stylistic preference.
     #
-    # nohup, not setsid: a backgrounded ssh is still in the terminal's session, so closing
-    # the window can HUP it -- and setsid(1) DOES NOT EXIST on macOS. The log goes to TMPDIR
-    # so nohup never drops a nohup.out in the student's course directory.
+    # What it missed is that the pid need not come from $! at all: the master will say. See
+    # tunnel_record_pid, which reads it out of the -O check below that runs anyway.
+    #
+    # And what the & + poll cost is issue #38: `-O check` answering tells you WHETHER
+    # authentication succeeded but not WHEN, so a tunnel that came up in 60ms still paid a flat
+    # 500ms sleep -- on every launch, since #41 takes the tunnel down with the terminal. This is
+    # also the one wait in the launcher that could not be polled cheaply, because the probe is a
+    # whole ssh process rather than a builtin.
+    #
+    # -f IS ALSO STRICTLY MORE HONEST than the poll it replaces. ssh forks only after it has
+    # authenticated AND set its forwarding up, whereas -O check answering proves only that the
+    # mux socket is listening -- so tunnel_report_busy_ports below used to run while the 46
+    # binds might still be in progress, and now cannot.
+    #
+    # TIME-BOXED, because -f in the foreground is a wait with no ceiling of its own: a wedged
+    # `podman exec` in the ProxyCommand would hang here forever, which is the failure
+    # run_timeout exists to prevent everywhere else.
+    #
+    # -E, not a shell redirect, and that is required rather than tidier: run_timeout owns the
+    # command's stdout and stderr and deletes the file it points them at, so a master that
+    # survived the fork would be writing its ServerAlive failures into a deleted inode --
+    # costing doctor exactly the wedged-tunnel diagnostics it exists to print. -E is ssh's own
+    # log, opened by ssh and kept across the fork. It appends, which the rm -f above makes
+    # equivalent to truncating -- tunnel_busy_ports depends on the log describing THIS tunnel.
+    #
+    # nohup STILL EARNS ITS PLACE, and for a reason -f makes easy to get wrong: -f detaches the
+    # MASTER (daemon(3) calls setsid), but the ProxyCommand `podman exec` was forked before
+    # that and keeps the old process group. Without nohup's inherited SIG_IGN, closing the
+    # window would HUP the tunnel's transport out from under a master that survived. setsid(1)
+    # remains not an option -- it DOES NOT EXIST on macOS. The log goes to TMPDIR so nohup
+    # never drops a nohup.out in the student's course directory.
     #
     # -F none: ignore the student's own ~/.ssh/config AND the system one, so nothing they
     # have configured for other hosts can redirect or decorate this. NOT
@@ -1471,31 +1504,51 @@ tunnel_start() {
     # every forward is attempted and the failures are read back out of the log below, which
     # is the only way to report what ACTUALLY failed rather than what we predicted would.
     #
+    # TWO QUESTIONS, ONE REPORT. ssh's own status answers "did it get as far as backgrounding
+    # itself"; tunnel_alive answers "is a master listening on our socket now", which is the only
+    # thing that makes the tunnel usable, and which also fills RT_OUT with the pid. Either
+    # failing means the same thing to a student and gets the same message -- the log is where
+    # the difference between them is written down.
+    #
     # shellcheck disable=SC2086
-    nohup ssh -N -M -S "$TUNNEL_CTL" -F none \
-        -i "$TUNNEL_KEY" -o IdentitiesOnly=yes \
-        -o "ProxyCommand=podman exec -i $NAME /usr/sbin/sshd -i -f $TUNNEL_SSHD_CONFIG" \
-        -o "UserKnownHostsFile=$TUNNEL_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
-        -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
-        -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-        $fwd "$TUNNEL_USER@$TUNNEL_HOST" >"$TUNNEL_LOG" 2>&1 </dev/null &
-    printf '%s\n' "$!" > "$TUNNEL_PID"
-
-    local i
-    i=0
-    while [ "$i" -lt 60 ]; do
-        tunnel_alive && break
-        # If the client is already gone, there is nothing to wait for: report now with the
-        # log, rather than spending the remaining thirty seconds on a corpse.
-        kill -0 "$(cat "$TUNNEL_PID" 2>/dev/null)" 2>/dev/null || break
-        sleep 0.5
-        i=$((i + 1))
-    done
-    if ! tunnel_alive; then
+    if ! run_timeout 30 nohup ssh -f -N -M -S "$TUNNEL_CTL" -E "$TUNNEL_LOG" -F none \
+           -i "$TUNNEL_KEY" -o IdentitiesOnly=yes \
+           -o "ProxyCommand=podman exec -i $NAME /usr/sbin/sshd -i -f $TUNNEL_SSHD_CONFIG" \
+           -o "UserKnownHostsFile=$TUNNEL_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+           -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
+           -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+           $fwd "$TUNNEL_USER@$TUNNEL_HOST" </dev/null || ! tunnel_alive; then
         warn "$(msg warn.tunnel-failed LOG="$TUNNEL_LOG" OUT="$(tail -5 "$TUNNEL_LOG" 2>/dev/null)")"
         return 1
     fi
+    tunnel_record_pid
     tunnel_report_busy_ports
+    return 0
+}
+
+# The master's own pid, asked of the master. `ssh -O check` answers "Master running (pid=N)",
+# run_timeout leaves that in RT_OUT, and tunnel_alive has just run one -- so this costs nothing
+# and is the thing that lets tunnel_start use -f at all. Not anchored to the end of the line:
+# ssh terminates that message with \r\n.
+#
+# THE FALLBACK IS THE IDENTITY TEST tunnel_kill_pid ALREADY TRUSTS -- our control socket is on
+# the master's command line and on nothing else's -- so an ssh that ever stops saying it costs a
+# fork here rather than a broken --reset-tunnel.
+#
+# Writing nothing is better than writing a guess: doctor prints "up (pid ?)" for an empty
+# pidfile, and tunnel_kill_pid declines a pid it cannot identify. A wrong number, by contrast,
+# is a signal sent to whatever now owns it.
+tunnel_record_pid() {
+    local pid
+    pid="$(printf '%s' "$RT_OUT" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    if [ -z "$pid" ]; then
+        pid="$(ps -Ao pid=,args= 2>/dev/null | grep -F "$TUNNEL_CTL" | grep -v ' grep ' \
+               | awk 'NR == 1 { print $1 }')"
+    fi
+    case "${pid:-}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    printf '%s\n' "$pid" > "$TUNNEL_PID"
     return 0
 }
 
