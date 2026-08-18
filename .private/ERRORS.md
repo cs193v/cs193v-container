@@ -1245,7 +1245,7 @@ recreate prompt does apply it.
 | first launch | 2 s |
 | subsequent launch | 2 s |
 | `--rebuild` | 2 s |
-| launcher overhead (`--dev-print-command`) | 511 ms |
+| launcher overhead (`--dev-print-command`) | 511 ms → **~60 ms** after D10 |
 | `podman exec` overhead | 158 ms |
 | 2000 files created on the bind mount | < 1 s |
 | case sensitivity | case-sensitive |
@@ -1253,3 +1253,103 @@ recreate prompt does apply it.
 | `tput colors` without forwarding | **8** — proves §A.5's original probe was broken |
 | zombies after 5 killed exec clients | 0 |
 | image size | 1.74 GB |
+
+### D10. Where the launcher's 511 ms of "overhead" actually went
+
+`--dev-print-command` makes **no podman calls at all** — it is `load_args`, `build_run_args` and a
+`printf` — and it measured 583–781 ms. All but ~60 ms of that was one line.
+
+`load_args` trimmed each line with `sed` in a command substitution, and it did the trim **before**
+testing whether the line had anything on it:
+
+```sh
+line="${line%%#*}"                                    # a comment line is now empty
+line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[ -z "$line" ] && continue                            # ...but the test came AFTER the sed
+```
+
+`container.args` is 239 lines, of which **228 are a comment or blank and 11 carry an argument**, so a
+launch forked `sed` 239 times to trim strings that were already empty. Counted with
+`strace -f -e trace=execve`: exactly 239 `sed` execs per parse, now 11. Measured on the shipped file:
+
+| form | wall clock | `sed` execs |
+| --- | --- | --- |
+| as written | 691–1137 ms | 239 |
+| `[ -z "$line" ]` moved above the trim | 45–64 ms | 11 |
+| **a `case "$line" in *[![:space:]]*)` guard above the trim** | **29–64 ms** | **11** |
+| the trim replaced by pure bash, no fork | 18–20 ms | 0 |
+| one `sed` for the whole file via `< <(sed …)` | 28–36 ms | 1 |
+
+**Why the whitespace guard rather than moving `[ -z ]`.** Both leave 11 forks on the file as it
+stands and both parse identically. `[ -z ]` skips only the *already empty* lines, so it holds only
+while the comments start in column 1 — indenting that 228-line block, a reflow rather than a semantic
+edit, puts **230** forks back. The whitespace test asks the question the code means, so the answer does
+not depend on the file's layout. `16-args-parse.sh` has the case, and it fails on the `[ -z ]` variant.
+
+**The trim was kept, and two things about it are worth writing down.**
+
+*It is not what protects podman from a stray `\r`.* Deleting `[ -z "$line" ] && continue` outright,
+changing nothing else, gives byte-identical output on a CRLF fixture holding a blank line, a
+whitespace-only line, a column-1 comment and an indented comment. The trim removes the `\r`, and an
+emptied `$line` then splits into zero fields. The guard is an optimisation, not a correctness gate —
+which is why it should say what it means rather than test for emptiness.
+
+*Default IFS is space, tab and newline ONLY,* so `\r`, `\v` and `\f` are **not** field separators.
+An *untrimmed* `"\r"` splits into ONE field — a bare `\r` — where `"   "` splits into none:
+
+| `$line` | fields from `for word in $line` |
+| --- | --- |
+| `"   "` | 0 |
+| `""` | 0 |
+| `"\r"` | **1** |
+| `" \t\v\f\r "` | **1** |
+
+Nothing depends on that today, because the trim always runs first. It is the trap waiting for whoever
+replaces the `sed` with parameter expansion: a bash trim covering only space and tab would put a bare
+`\r` on the `podman run` line for every blank line of a CRLF `local.args`, which is what a person
+editing that git-ignored file on Windows produces. The replacement measured 18–20 ms and was rejected
+for exactly this reason — ~30 ms is not worth owning `[[:space:]]`'s definition while `preflight` still
+carries ~570 ms (D11).
+
+**Also found, not fixed:** if `sed` is missing or broken, `load_args` yields an empty `ARGS` and the
+container is created with no volumes, ports or memory cap, reporting nothing. Verified identical before
+and after this change, so it is neither caused nor fixed here.
+
+### D11. `podman info` costs ~570 ms, and 48 `dpkg` processes are why
+
+`preflight` calls `pm info --format '{{.Host.Security.Rootless}}'`, which looks like a field lookup and
+is not: podman builds the whole info struct regardless of `--format`, and on Debian/Ubuntu that means
+asking `dpkg` which package owns each helper binary. From `strace -f -tt -e trace=execve`:
+
+```
+/usr/bin/dpkg -S /usr/lib/podman/netavark      -> 6 x dpkg-query --search + 1 dpkg-query -W
+/usr/bin/dpkg -S /usr/lib/podman/aardvark-dns  -> same
+/usr/bin/dpkg -S /usr/bin/slirp4netns          -> same
+/usr/bin/dpkg -S /usr/bin/pasta                -> same
+/usr/bin/dpkg -S /usr/bin/crun                 -> same
+/usr/bin/dpkg -S /usr/bin/conmon               -> same
+```
+
+48 processes, and one `dpkg -S` alone measures 66–103 ms.
+
+| probe | measured |
+| --- | --- |
+| `podman info --format '{{.Host.Security.Rootless}}'` | **536–1222 ms** |
+| `podman info` unformatted | 564–623 ms — `--format` saves nothing |
+| `podman --version` | 17–26 ms |
+| `podman inspect … --format` | 25–63 ms |
+| `podman image exists` | 21–37 ms |
+| `podman system connection list` | 17–24 ms |
+
+`podman info --help` offers only `--format`: there is no flag that skips the package lookup, so the
+call has to move or be cached rather than tuned. **Not done** — the answers do not change between
+launches, but `err.rootful` and `err.podman-unreachable` depend on it and a macOS machine can be
+rootful, so it needs its own change. With `load_args` fixed this is the largest single item left in the
+~1.8 s a bare `./cs193v` spends before its first line of output.
+
+Two smaller ones measured alongside it, also not done: `run_timeout` costs **21 ms per call** in
+`mktemp` + `mkfifo` + two subshells + `cat` + `rm` before podman starts (217 ms for ten calls around
+`true`, and a launch makes ~10 probes), and three probes are asked twice — `refuse_if_foreign_dir` from
+both dispatch and `ensure_container`, `state()` likewise, and `podman image exists` from both
+`require_image` and `recipe_moved`. One `podman inspect` returning state and both labels together
+measures **34–37 ms** against **84–106 ms** for the three separate calls.

@@ -929,9 +929,32 @@ load_args() {
         [ -f "$f" ] || continue
         while IFS= read -r line || [ -n "$line" ]; do
             line="${line%%#*}"
+            # NOTHING LEFT BUT WHITESPACE -> there is no argument on this line. Asked HERE,
+            # ahead of the trim, because the trim is a subshell and a sed: container.args is
+            # 239 lines of which 228 are a comment or blank, and paying that for each of them
+            # cost ~700ms of the launcher's ~1.8s startup. Issue #57, measured with
+            # `strace -e trace=execve` -- 239 sed execs per launch, now 11.
+            #
+            # A WHITESPACE TEST RATHER THAN `[ -z ]`, and the difference is not style. `[ -z ]`
+            # moved up here skips only the already-empty lines, so it holds only while the
+            # comments start in column 1: indent that 228-line block and every line is
+            # whitespace-rather-than-empty and all 239 seds come back. This asks the question
+            # the code actually means, so the answer does not depend on how the file is laid out.
+            #
+            # THE TRIM STAYS, and here is the trap for whoever next tries to replace it with
+            # parameter expansion. Default IFS is space, tab and newline ONLY, so \r, \v and \f
+            # are NOT field separators -- the sed is what takes the \r off every line of a CRLF
+            # local.args, and an untrimmed "\r" line splits into ONE field, a bare \r, which
+            # then reaches the podman run line. A bash trim has to cover [[:space:]], not just
+            # space and tab. See VERIFICATION.md §1.3: a POSIX class in a `case` bracket has to be
+            # cleared on a real bash 3.2 by hand, because A.1's grep cannot see it.
+            #
+            # This also retires the `[ -z "$line" ] && continue` that used to sit below the trim:
+            # every line reaching it now holds a non-whitespace character, so the trim cannot
+            # return empty and the test could never fire.
+            case "$line" in *[![:space:]]*) ;; *) continue ;; esac
             # trim both ends without bash 4 features
             line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            [ -z "$line" ] && continue
             for word in $line; do
                 # The volume names live in container.args, not up here, so the instance
                 # suffix has to be applied as they are read. `cs193v-claude:/path` becomes
@@ -2227,6 +2250,29 @@ verb_print_command() {
     printf ' %s\n' "$IMAGE"
 }
 
+# The args files' parse, one word per line. The seam 16-args-parse.sh drives.
+#
+# WHY NOT --dev-print-command, which already prints every one of these words: it joins them
+# with spaces, so `--label a="x y"` and the two words `--label` `a="x` print the same thing,
+# and a word that is a bare \r is invisible in it entirely. Nearly everything load_args can
+# get wrong is a WORD BOUNDARY, and that verb is the one thing that cannot show one. Same
+# argument as verb_dev_steps below, one layer down.
+#
+# ONE WORD PER LINE NEEDS NO NUL DELIMITER, which is worth stating because it looks unsafe:
+# load_args reads with `read`, which splits its input on newlines, so no word in ARGS can
+# contain one. Nor can a word be empty -- word splitting on whitespace IFS drops empty fields.
+#
+# Plain strings rather than messages.txt keys, like the other --dev verbs: that catalogue is
+# for students.
+verb_dev_args() {
+    load_args
+    local a
+    # ${ARGS[@]+"..."}, for the reason build_run_args spells out: expanding an EMPTY array
+    # under `set -u` is fatal on bash 3.2, and an args file of nothing but comments is exactly
+    # the case this verb exists to let a test ask about.
+    for a in ${ARGS[@]+"${ARGS[@]}"}; do printf '%s\n' "$a"; done
+}
+
 # What the meter thinks the build is going to do, as a table: index, label, instruction text.
 # The seam the parser is tested through -- buried inside build_progress it could only be
 # reached by running a whole build, which is the wrong granularity for "does a comment inside
@@ -2285,6 +2331,9 @@ case "${1:-}" in
     # "$@", not "${1:-}": the two modifiers are independent and may be given together.
     --rebuild)           shift; verb_rebuild "$@" ;;
     --dev-print-command) verb_print_command ;;
+    # No preflight here either, and 16-args-parse.sh asserts it by counting podman calls: the
+    # args files are all this reads, and the unit tier drives it with no podman running.
+    --dev-args)          verb_dev_args ;;
     # No preflight: this one reads the Containerfile and nothing else, which is what lets the
     # unit tier drive it with no podman on PATH at all.
     --dev-steps)         shift; verb_dev_steps "${1:-}" ;;
