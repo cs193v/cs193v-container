@@ -2315,6 +2315,10 @@ verb_dev_tunnel() {
     printf 'ctl\t%s\n'  "$TUNNEL_CTL"
     printf 'pid\t%s\n'  "$TUNNEL_PID"
     printf 'log\t%s\n'  "$TUNNEL_LOG"
+    # NOT one of the tunnel's files, and here anyway: it is keyed by the same TUNNEL_ID, and the
+    # release gate has to be able to find OUR build's log. It used to glob TMPDIR for the newest
+    # cs193v-build-*.log, which is per-machine and therefore a colleague's as often as ours (#74).
+    printf 'buildlog\t%s\n' "$BUILD_LOG"
     local port
     for port in $(tunnel_ports); do printf 'port\t%s\n' "$port"; done
 }

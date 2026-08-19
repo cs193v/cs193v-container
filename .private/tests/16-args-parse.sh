@@ -300,6 +300,19 @@ assert_match "tunnel:ctl-path-is-a-cs193v-socket" 'cs193v-[0-9a-f]+\.ctl$' "$ctl
 assert_eq "tunnel:pid-path-shares-the-ctl-stem" "${ctl%.ctl}.pid" "$pidf"
 assert_eq "tunnel:log-path-shares-the-ctl-stem" "${ctl%.ctl}.log" "$logf"
 
+# 5b. THE BUILD LOG, which is the one that does NOT share the stem: the launcher writes
+#     cs193v-build-<id>.log, not cs193v-<id>.something. It is reported here because
+#     00-release-gates.sh used to find it with `ls -t /tmp/cs193v-build-*.log | head -1` -- newest
+#     on the MACHINE -- which throws away the very keying that makes it per-instance, so a
+#     colleague's --rebuild finishing after ours handed the release gate THEIR build to diff
+#     against OUR Containerfile (#74). Asked of the launcher for the reason lib/assert.sh's port
+#     header gives: one derivation cannot drift from the launcher, and a copy of a naming rule in
+#     a test already has.
+buildf="$(tun_field buildlog)"
+tid="${ctl##*/cs193v-}"; tid="${tid%.ctl}"
+assert_eq "tunnel:buildlog-shares-the-tunnel-id" \
+          "$(dirname "$ctl")/cs193v-build-$tid.log" "$buildf"
+
 # 6. And the id MOVES WITH CS193V_INSTANCE, which is the whole basis of the ownership test in
 #    lib/assert.sh: two instances of the same checkout must not be able to mistake each other's
 #    tunnel for their own.

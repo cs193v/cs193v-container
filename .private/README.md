@@ -485,6 +485,63 @@ that our control socket really is on that pid's command line (`tunnel_kill_pid`'
 test, for the same reason: pids are reused and the file outlives the process), and counts only
 the sockets that pid holds.
 
+**And its own containers from a colleague's** (issue #74). The live tier counts containers to
+decide whether the launcher was idempotent and whether anything leaked, and it used to count
+every container on the machine that was not named `cs193v-something`. A throwaway is exactly
+that: `R()` and `50-image.sh` run `podman run --rm` with no `--name`, so podman picks one, and
+a neighbour's throwaway was indistinguishable from ours. Seven assertions went red — and
+intermittently, since a throwaway lives for seconds. Every `podman run` in the podman tiers now
+carries `--label cs193v.test=$NAME` (`VT_RUN` in `tests/lib/assert.sh`), the counts ask podman
+for that label, and `10-static.sh` fails if a future one is written without it. Volumes cannot
+be labelled the same way — the launcher creates them implicitly with `-v name:path` — so the
+stray-volume check compares against a snapshot taken when the suite started instead of sweeping
+the whole machine.
+
+The instrument is checked before anything is read through it: `live:a-neighbours-throwaway-is-not-
+counted` starts decoy containers with a *colleague's* label and an unrelated one, asserts the count
+ignores both, and then starts one with *our* label and asserts it is counted. That turns #74 into a
+fixture rather than a race between two developers — nothing in this file needs a second checkout to
+be present to go red — and the second half is what stops the fix from passing by having quietly
+stopped counting, which would throw away the leak detection the check exists for.
+
+**And three more of the same shape, found while auditing for it.** The rule they all break is one
+rule: *an assertion's verdict may not depend on another checkout's activity.*
+
+- The §2.7 two-copies group copied the repo to a literal `/tmp/vt-copy`, and `restore()` deleted
+  the same path. Two live tiers destroyed each other's copy both ways round: a colleague's `rm -rf`
+  between our `cp` and our launcher call makes `live:second-copy-is-refused` answer 127, and their
+  copy still being there makes `cp -a` **nest** ours inside it, so the launcher we then run is
+  theirs. It goes under `$TMP` now, this run's own `mktemp -d`. Note what the assertion does *not*
+  do: checking "we did not delete a foreign `/tmp/vt-copy`" needs a fixture at that shared path, and
+  then our verdict depends on whether a colleague is mid-group — the rule again, one layer out. So
+  it asserts where the copy lives instead.
+- `12-run-timeout.sh` proved the timeout kills its command by hunting `pgrep -f '^sleep 30$'` and
+  then `pkill -9`-ing it. Machine-wide, and `sleep 30` is what *every* run of that file spawns — so
+  it reported a survivor that was never ours and then killed a colleague's live command, failing two
+  assertions in *their* run. It does not even need a second developer: `60-container.sh` backgrounds
+  ~63 of them inside a container to reach `--pids-limit`, a rootless container's processes are
+  ordinary host processes, and that suite runs in the other lane of the same run. `exec -a vt-nap-$$`
+  renames argv[0] without adding a process, so what the ceiling has to kill is unchanged.
+- `00-release-gates.sh` found the build log with `ls -t "$TMPDIR"/cs193v-build-*.log | head -1` —
+  newest on the *machine*. The launcher keys that name on `TUNNEL_ID` precisely so two instances do
+  not overwrite each other's, and the glob threw it away, so a colleague's `--rebuild` finishing last
+  handed the gate their build to diff against our Containerfile. `--dev-tunnel` prints a `buildlog`
+  row now and `fwd_init` reads it, for the reason the port list is derived rather than written out.
+
+One thing this suite now hands back that it used to keep: the off-box proxy check asks our own ssh
+master for `-L 127.0.0.1:$OFFBOX_PORT:...`, which binds locally the moment it is asked. Without a
+`-O cancel` that held a port chosen precisely *because* nobody had reserved it, until the tunnel
+came down.
+
+Audited and deliberately left alone, so it is not re-derived: `free_unforwarded_ports` starts every
+instance at the same pool head, but its `ss -ltn` filter already skips anything bound, the container
+tier's uses bind *inside* the container, and the one real host bind was the `-O cancel` above — what
+is left is a seconds-wide TOCTOU with nothing measured behind it. `65-tmux.sh`'s
+`/tmp/cs193v-tmux-tests`, `70-sighup.sh`'s `/tmp/s.log` and `90-setup-git-github.sh`'s throwaway
+`HOME` are all *inside* `$NAME` and so already namespaced. The shim tier binds no host ports: its
+real `ssh` has a `podman exec` ProxyCommand against fake podman and never connects, and `shim_new`
+gives the launcher a `TMPDIR` under `$SHIM`.
+
 One gotcha when you bump `PLAYWRIGHT_VERSION`: the browser lives in the `cs193v-playwright`
 volume, and podman seeds a volume from the image only while the volume is EMPTY. So a
 rebuilt image does not refresh a volume you already have. Drop it first:

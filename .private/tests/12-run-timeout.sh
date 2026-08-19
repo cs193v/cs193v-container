@@ -31,7 +31,10 @@ cd "$REPO" || exit 1
 # run_timeout reads TMPDIR on every call. Without this they would be asking a question about
 # whatever else on the machine happens to write there.
 WORK="$(new_tmpdir)"
-trap 'rm -rf "$WORK"' EXIT
+# The decoy below is started after this line, so the trap has to read it lazily. A killed run
+# would otherwise leave a `sleep 30` behind -- harmless in itself, but this file is about not
+# leaving processes for other runs to trip over.
+trap 'rm -rf "$WORK"; [ -n "${DECOY:-}" ] && kill -9 "$DECOY" 2>/dev/null; true' EXIT
 export TMPDIR="$WORK"
 
 # Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
@@ -70,10 +73,40 @@ run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' || true
 assert_contains "rt:captures-stdout" "to-stdout" "$RT_OUT"
 assert_contains "rt:captures-stderr" "to-stderr" "$RT_OUT"
 
+# ─── A COLLEAGUE'S RUN, STANDING RIGHT HERE  (#74) ─────────────────────────────
+# `pgrep` and `pkill` are machine-wide and `sleep 30` is not ours: it is what EVERY run of this
+# file spawns, and what 60-container.sh backgrounds ~63 of inside a container to reach
+# --pids-limit -- host-visible, since a rootless container's processes are ordinary host
+# processes, and in the OTHER LANE OF THE SAME RUN. So the kill check below used to answer a
+# question about a process it had not started, and then SIGKILL it.
+#
+# Both halves land in the other checkout. It reports a survivor that was never ours; and the
+# pkill reaches a command whose own ceiling had not fired yet, so THEIR
+# rt:the-ceiling-returns-124 sees 137 and THEIR box looks like it did not hold.
+#
+# The decoy makes that deterministic rather than a race between two developers. It is deliberately
+# named the old way, because "a sleep 30 on this machine that this file did not start" is exactly
+# what must be invisible here.
+sh -c 'exec sleep 30' & DECOY=$!
+# WAITED FOR, or this passes vacuously: until the exec has happened the decoy is still a `sh` and
+# the pattern under test would not have matched it either way.
+decoy_is_up() { pgrep -f '^sleep 30$' >/dev/null 2>&1; }
+wait_until 5 decoy_is_up || true
+
 # ─── the ceiling ───────────────────────────────────────────────────────────────
 # The reason the function exists: after a Mac wakes from sleep `podman info` HANGS rather than
 # failing (containers/podman#21675), and an unguarded probe makes the launcher look frozen.
-boxed_1s() { run_timeout 1 sh -c 'exec sleep 30'; }
+#
+# THE COMMAND CARRIES A NAME OF OURS, keyed on this process, because the kill check below has to
+# ask about a process THIS run started and `sleep 30` names half the machine (see the decoy above).
+#
+# `exec -a` rather than a wrapper or a distinctive duration. The exec is load-bearing -- it is what
+# makes run_timeout's $cpid the sleep itself rather than a shell around it, which is the whole
+# distinction the check is testing -- and -a renames argv[0] without adding a process, so what the
+# ceiling has to kill is byte-for-byte what it was. A duration nobody else would pick would work
+# too and is worse: a kill that failed would then leave the process for minutes instead of 30 s.
+NAP="vt-nap-$$"
+boxed_1s() { run_timeout 1 bash -c "exec -a $NAP sleep 30"; }
 E="$(elapsed boxed_1s)"; RC=$?
 assert_eq "rt:the-ceiling-returns-124" "124" "$RC"
 if faster_than 1 "$E"; then
@@ -85,15 +118,34 @@ else
 fi
 record "rt:one-second-box-seconds" "$E"
 
-# AND IT KILLS THE COMMAND, not merely whatever bash happened to background. `exec sleep 30`
-# above makes the command identifiable; a timeout that left it running would be a disowning
-# dressed as a timeout, and the wedged podman it was called on would still be wedged.
-if pgrep -f '^sleep 30$' >/dev/null 2>&1; then
-    fail "rt:the-ceiling-kills-the-command" "sleep 30 outlived the box"
-    pkill -9 -f '^sleep 30$' 2>/dev/null
+# AND IT KILLS THE COMMAND, not merely whatever bash happened to background. `exec -a $NAP`
+# above makes the command identifiable AS OURS; a timeout that left it running would be a
+# disowning dressed as a timeout, and the wedged podman it was called on would still be wedged.
+if pgrep -f "^$NAP 30\$" >/dev/null 2>&1; then
+    fail "rt:the-ceiling-kills-the-command" "$NAP 30 outlived the box"
+    pkill -9 -f "^$NAP 30\$" 2>/dev/null
 else
     pass "rt:the-ceiling-kills-the-command"
 fi
+
+# ...AND IT LEFT THE DECOY ALONE. Not a nicety: a pkill that reaches it is this suite reaching
+# into another developer's run and killing the command their own ceiling was about to time out.
+# By pid rather than by pattern, because the pattern is the thing under test.
+#
+# THE STATE, NOT `kill -0`, and that is not fussiness -- it is the first way this was written and
+# it PASSED while the decoy was being SIGKILLed. The decoy is this shell's child, so a kill leaves
+# a zombie until bash reaps it, and kill -0 succeeds on a zombie. Whether the reap has happened
+# yet is a race with how loaded the machine is: standalone it had, so the check went red; inside a
+# full run it had not, so the same code went green. A check that reports "left alone" for a
+# process this suite just killed is worse than no check.
+case "$(ps -p "$DECOY" -o state= 2>/dev/null | tr -d ' \n')" in
+    ''|Z*) fail "rt:a-neighbours-sleep-is-left-alone" \
+                "the decoy standing in for another checkout's run was killed by this suite" ;;
+    *)     pass "rt:a-neighbours-sleep-is-left-alone" ;;
+esac
+kill -9 "$DECOY" 2>/dev/null || true
+wait "$DECOY" 2>/dev/null || true
+DECOY=''
 
 # ─── the pipe's two failure modes ──────────────────────────────────────────────
 # A GRANDCHILD MUST NOT HOLD THE WRITE END. podman leaves conmon behind, so anything that

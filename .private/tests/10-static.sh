@@ -57,6 +57,32 @@ hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
+# ─── every throwaway container the suite starts is labelled as ours ────────────
+# The live tier tells its own containers from a colleague's by a label, because a `podman run --rm`
+# with no --name gets a name podman chose and there is nothing else to go on (#74, and VT_LABEL in
+# lib/assert.sh). One `podman run` written without it reopens the hole INVISIBLY: the container
+# lives for seconds, it reddens somebody else's run rather than the run that wrote it, and it
+# arrives as a flake. So the rule is checked here rather than trusted to review.
+#
+# ONLY THE SUITES THAT DRIVE REAL PODMAN, which is what the tier line names. 30-launcher-shim.sh
+# is excluded on purpose and by construction: it runs against a fake podman on PATH, creates
+# nothing, and legitimately says "podman run" as an assertion needle.
+#
+# `--label` rather than `$VT_RUN` is the thing looked for, so that the one line which spells the
+# label out passes on its own terms and a future second runner can too.
+real_podman="$PRIVATE/tests/lib/assert.sh"
+for f in $PRIVATE/tests/[0-9][0-9]-*.sh; do
+    case "$(sed -n 's/^#[[:space:]]*TIER:[[:space:]]*\([a-z]*\).*/\1/p' "$f" | head -1)" in
+        image|container|live) real_podman="$real_podman $f" ;;
+    esac
+done
+# -H so the failure names the file even when the list is one entry long, and the comment filter
+# is anchored to grep's own file:line: prefix rather than looking for a `#` anywhere.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+bare="$(grep -Hn 'podman run' $real_podman | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+        | grep -v -- '--label' || true)"
+assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \

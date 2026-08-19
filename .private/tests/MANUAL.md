@@ -377,6 +377,16 @@ so it can run here.
 the `${arr[@]+...}` guard — which is a **bash 3.2-only** failure that no Linux run can
 surface (ERRORS.md A5). Running the suite on a Mac is what actually proves it.
 
+**Also watch for a bare `"$@"` in a function that some caller invokes with no arguments.** Bash
+before 4.4 treats `"$@"` and `"$*"` as *unset* when there are no positional parameters, so under
+`set -u` — which every suite here sets — such a function aborts on this platform and returns
+nothing. It is the same failure as the empty-array one and it is **not** covered by a grep: a bare
+`"$@"` is correct in most of the places it appears here (`assert_ok`, `run_suite`), and only the
+zero-argument call sites are wrong, which no static check can tell apart. `ours_containers` in
+`80-launcher-live.sh` was written this way once; it takes one explicit optional word now, which is
+the shape to prefer. On a Mac the symptom is a run of idempotency assertions comparing against an
+empty string.
+
 ### §4.5 / §4.7 — Windows firewall and a real browser
 On first port bind, note whether Windows Defender prompts. *Expect:* still no prompt, since a
 loopback bind needs no exception — but the binding process changed from pasta to `ssh` and

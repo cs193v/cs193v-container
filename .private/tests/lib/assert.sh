@@ -369,7 +369,7 @@ Build it first:  ./cs193v --rebuild
 # calls it, and the three port-aware suites call it once at the top so that reading $FWD1 at
 # top level is safe.
 FWD_SPEC='' FWD_PORTS='' FWD_LIST='' FWD_N=0 FWD_RE='' FWD_ANY_RE=''
-FWD1='' FWD2='' FWD_CTL='' FWD_PIDFILE='' FWD_READY=''
+FWD1='' FWD2='' FWD_CTL='' FWD_PIDFILE='' FWD_BUILDLOG='' FWD_READY=''
 fwd_init() {
     [ -n "$FWD_READY" ] && return 0
     FWD_READY=1
@@ -378,6 +378,11 @@ fwd_init() {
     FWD_SPEC="$(printf '%s\n' "$out"    | awk -F'\t' '$1 == "spec" { print $2 }')"
     FWD_CTL="$(printf '%s\n' "$out"     | awk -F'\t' '$1 == "ctl"  { print $2 }')"
     FWD_PIDFILE="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "pid"  { print $2 }')"
+    # NOT a tunnel file, and read from the same seam for the same reason: it is keyed by TUNNEL_ID,
+    # so only the launcher can name this instance's build log. 00-release-gates.sh globbed TMPDIR
+    # for the newest cs193v-build-*.log instead, and diffed a colleague's build against our
+    # Containerfile whenever theirs finished last (#74).
+    FWD_BUILDLOG="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "buildlog" { print $2 }')"
     FWD_PORTS="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "port" { print $2 }')"
     FWD_N="$(printf '%s\n' "$FWD_PORTS" | grep -c '[0-9]')" || true
     FWD_N="${FWD_N:-0}"
@@ -408,6 +413,7 @@ Check:  ./cs193v --dev-tunnel
     FWD1="$(printf '%s\n' "$FWD_PORTS" | sed -n 1p)"
     FWD2="$(printf '%s\n' "$FWD_PORTS" | sed -n 2p)"
     export FWD_SPEC FWD_PORTS FWD_LIST FWD_N FWD_RE FWD_ANY_RE FWD1 FWD2 FWD_CTL FWD_PIDFILE
+    export FWD_BUILDLOG
 }
 
 # A host port that is NOT one of ours and is free RIGHT NOW. Two suites need one and neither can
@@ -643,9 +649,33 @@ export TESTS_DIR PRIVATE REPO
 [ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
 export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
 
+# ─── OUR OWN THROWAWAY CONTAINERS ──────────────────────────────────────────────
+# `podman run --rm` with no --name gets a podman-generated one (`nervous_bohr`), and a generated
+# name is indistinguishable from a colleague's. 80-launcher-live.sh counted every container on the
+# machine that was not named cs193v-something as a stray of OURS, so a neighbouring checkout
+# running the image tier reddened seven live assertions at once -- four idempotency counts, two
+# leak counts and cleanup:no-stray-containers (#74). Parallel development on one machine is the
+# documented workflow (CLAUDE.md), so the suite has to be able to ignore work that is not its own.
+#
+# THE LABEL IS THE DISCRIMINATOR, because it is the one thing about a generated container we
+# control. It carries $NAME rather than a bare marker, so two instances on one machine can tell
+# their throwaways apart as well -- which is what lets the stray check stay a LEAK check instead of
+# becoming a machine-wide sweep: a throwaway of ours that outlived its --rm still shows up.
+#
+# A VARIABLE, NOT A FUNCTION, and that is not a preference. Most of the call sites are a
+# `podman run` written inside an `sh -c "..."` string for assert_ok, where a bash function would
+# not exist -- but $VT_RUN expands before sh is ever started. 10-static.sh enforces that every
+# `podman run` in the suites that drive real podman goes through it, because one written without
+# the label would reopen the hole invisibly: the container lives for seconds and only ever reddens
+# somebody else's run.
+VT_LABEL="cs193v.test=$NAME"
+VT_RUN="podman run --label $VT_LABEL"
+export VT_LABEL VT_RUN
+
 # In-container and throwaway-container runners, matching VERIFICATION.md's E() and R().
 E() { podman exec "$NAME" sh -c "$1" 2>&1; }
-R() { podman run --rm --entrypoint sh "${TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" -c "$1" 2>&1; }
+# $VT_RUN unquoted, deliberately: it is a command PREFIX and has to word-split.
+R() { $VT_RUN --rm --entrypoint sh "${TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" -c "$1" 2>&1; }
 I() { podman inspect "$NAME" --format "$1" 2>&1; }
 
 # ─── waiting for something, rather than waiting a while ────────────────────────

@@ -74,7 +74,7 @@ assert_eq "vol-targets-are-student-owned" "student student student student stude
           | tr "\n" " " | sed "s/ $//"')"
 # And they must exist before any volume is mounted, or podman creates them root-owned.
 for d in .claude .claude-json .config/gh .config/git .local/share/com.vercel.cli .local/bin; do
-    assert_ok "vol-target-exists:$d" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -d /home/student/$d'"
+    assert_ok "vol-target-exists:$d" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -d /home/student/$d'"
 done
 assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
 
@@ -84,7 +84,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
 for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip ssh scp telnet stty; do
-    assert_ok "have:$cmd" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
+    assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version' | tr '\n' ' ')"
 
@@ -114,9 +114,9 @@ assert_contains "net:lsof-is-installed-on-purpose"           "lsof"             
 # is the one a student is told to type; lsof exits non-zero when it matches nothing, so asking
 # it to list sockets in an idle container would fail for the wrong reason.
 assert_ok "net:ss-lists-listeners" \
-          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'ss -ltn'"
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'ss -ltn'"
 assert_ok "net:lsof-is-on-PATH" \
-          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'command -v lsof'"
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'command -v lsof'"
 
 # sshd runs UNPRIVILEGED here, as student, which is what the tunnel's own sshd does too
 # (see files/sshd_config). It is not a stylistic choice: started as root it refuses the
@@ -126,7 +126,7 @@ assert_ok "net:lsof-is-on-PATH" \
 # The Subsystem line is not optional either. OpenSSH 9 and later carry scp over SFTP, so
 # without it `ssh` succeeds and `scp` fails with a bare "Connection closed" — which looks
 # like a broken scp rather than a missing subsystem.
-sshout="$(timeout 240 podman run --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+sshout="$(timeout 240 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 set -e
 cd /tmp
 ssh-keygen -q -t ed25519 -N "" -f hostkey && chmod 600 hostkey
@@ -170,7 +170,7 @@ assert_contains "net:scp-can-copy-a-file-across"        "SCP-GOT:scp-payload" "$
 #  * Hold stdin open afterwards. telnet exits as soon as its input reaches EOF, and with a
 #    plain `printf | telnet` that happens before the server's reply comes back, so the
 #    output is the three connection lines and nothing else.
-telout="$(timeout 120 podman run --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+telout="$(timeout 120 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &
 i=0
 while [ "$i" -lt 20 ]; do
@@ -194,7 +194,7 @@ assert_contains "net:telnet-shows-the-http-response" "HTTP/1.0 200 OK" "$telout"
 # internet as much as the image, and the suite's tldr tests already establish that offline is
 # the standard for this file. --no-index makes pip do everything except reach an index, so the
 # only two outcomes are the two this distinguishes.
-pipout="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+pipout="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" \
           -c 'pip3 install --no-index tabulate 2>&1' || true)"
 # THE ASSERTION #44 IS ABOUT. Without PIP_BREAK_SYSTEM_PACKAGES in the image's ENV, Ubuntu's
 # PEP 668 marker makes this — and `pip3 install --user` too — fail with an 11-line
@@ -209,27 +209,27 @@ assert_contains "python:pip-reached-the-resolver" "Could not find a version" "$p
 # variable, so root's pip still honours the marker and the apt-managed tree stays protected.
 # This also fails if someone "simplifies" the ENV away by deleting the marker file instead —
 # which looks identical until `apt reinstall libpython3.14-stdlib` puts the file back.
-sudopip="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+sudopip="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" \
            -c 'sudo pip3 install --no-index tabulate 2>&1' || true)"
 assert_contains "python:sudo-pip-still-refuses" "externally-managed" "$sudopip"
 # numpy's absence is asserted, not merely un-asserted: re-adding it to the apt line would
 # restore exactly the mixed provenance this removed.
 assert_fail "python:no-apt-managed-numpy" \
-            sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import numpy\"'"
+            sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import numpy\"'"
 # python3-dev, checked by the artifact that matters rather than by the package name: without
 # Python.h a source build dies at `fatal error: Python.h: No such file or directory`, and
 # build-essential on its own does not fix it.
 assert_ok "python:c-extension-headers-present" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'ls /usr/include/python3*/Python.h'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'ls /usr/include/python3*/Python.h'"
 # python3-venv is named on the apt line rather than inherited from pipx, and a venv has to work
 # offline: `python3 -m venv` bootstraps pip from python3-pip-whl, so it needs no index at all.
-venvout="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+venvout="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" \
            -c 'python3 -m venv /tmp/v >/dev/null 2>&1 && /tmp/v/bin/pip --version' || true)"
 assert_contains "python:venv-works-offline" "pip " "$venvout"
 # Where a student's own installs land, and that they can be written with no sudo. ~/.local is
 # also the npm prefix, so this directory being student-owned is load-bearing twice.
 assert_ok "python:user-site-is-writable" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local'"
 record "python:user-site" "$(R 'python3 -c "import site;print(site.getusersitepackages())"')"
 record "python:pip-version" "$(R 'pip3 --version')"
 # The two additions to the apt line are DELIBERATE, not inherited — the same argument as
@@ -240,10 +240,10 @@ assert_contains "python:venv-is-installed-on-purpose" "python3-venv" "$manual"
 
 # Passwordless sudo is a deliberate course decision: CS193V trains students not to run
 # commands on their host, so system changes must be possible from inside.
-assert_ok "sudo-works-without-a-password" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'sudo -n true'"
+assert_ok "sudo-works-without-a-password" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'sudo -n true'"
 
 # git stays completely stock so students meet its real hints and errors.
-assert_fail "no-etc-gitconfig" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /etc/gitconfig'"
+assert_fail "no-etc-gitconfig" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /etc/gitconfig'"
 assert_eq "git-editor-is-nano" "nano" "$(R 'git var GIT_EDITOR')"
 
 # ─── where `git config --global` writes ────────────────────────────────────────
@@ -257,14 +257,14 @@ assert_eq "git-editor-is-nano" "nano" "$(R 'git var GIT_EDITOR')"
 # work perfectly and a student would silently lose their identity the first time staff shipped a
 # fix. So it is asserted by doing it and asking git where it went.
 assert_ok "gitconfig:xdg-file-exists-empty" sh -c \
-    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.config/git/config && ! test -s /home/student/.config/git/config'"
+    "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.config/git/config && ! test -s /home/student/.config/git/config'"
 assert_fail "gitconfig:no-home-gitconfig" sh -c \
-    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /home/student/.gitconfig'"
+    "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /home/student/.gitconfig'"
 assert_contains "gitconfig:global-writes-land-in-the-volume-path" \
     "/home/student/.config/git/config" \
     "$(R 'git config --global user.name Probe >/dev/null 2>&1; git config --global --show-origin user.name')"
 assert_fail "gitconfig:global-write-does-not-make-a-home-gitconfig" sh -c \
-    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'git config --global user.name Probe >/dev/null 2>&1; test -e /home/student/.gitconfig'"
+    "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'git config --global user.name Probe >/dev/null 2>&1; test -e /home/student/.gitconfig'"
 
 # ─── setup-git and the shared presentation layer ───────────────────────────────
 # The container's copy of box(), menu() and msg(), plus the script and the prose that use them.
@@ -272,31 +272,31 @@ assert_fail "gitconfig:global-write-does-not-make-a-home-gitconfig" sh -c \
 # forgotten line in the Containerfile is invisible in the checkout.
 for f in /etc/cs193v/ui.sh /etc/cs193v/setup-git-messages.txt /usr/local/bin/setup-git; do
     assert_ok "setup-git:installed:$f" sh -c \
-        "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -s $f'"
+        "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -s $f'"
 done
 assert_ok "setup-git:is-executable" sh -c \
-    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/setup-git'"
+    "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/setup-git'"
 assert_ok "setup-git:is-on-the-path" sh -c \
-    "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v setup-git >/dev/null'"
+    "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v setup-git >/dev/null'"
 # The installed copies parse under the container's own bash, which is the one that will run them.
 assert_ok "setup-git:installed-copy-parses" sh -c \
-    "podman run --rm --entrypoint bash '$TEST_IMAGE' -n /usr/local/bin/setup-git"
+    "$VT_RUN --rm --entrypoint bash '$TEST_IMAGE' -n /usr/local/bin/setup-git"
 assert_ok "setup-git:installed-ui-parses" sh -c \
-    "podman run --rm --entrypoint bash '$TEST_IMAGE' -n /etc/cs193v/ui.sh"
+    "$VT_RUN --rm --entrypoint bash '$TEST_IMAGE' -n /etc/cs193v/ui.sh"
 # And it really reads the installed prose and the installed helper with no environment help,
 # which is the one thing the host-side suites cannot check: they both override those paths.
 assert_contains "setup-git:reads-the-installed-catalogue" "terminal" \
     "$(R 'setup-git </dev/null 2>&1 || true')"
 assert_contains "setup-git:dev-seam-works-in-the-image" "target_name=cs193v-students" \
     "$(R 'setup-git --dev-print-token-url')"
-assert_ok "nanorc-installed" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.nanorc'"
+assert_ok "nanorc-installed" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.nanorc'"
 assert_eq "nanorc-is-student-owned" "student" "$(R 'stat -c %U /home/student/.nanorc')"
 
 # npm's global prefix points at the student's home so `npm install -g` works without sudo,
 # while build-time globals stay in root-owned /usr/local.
 assert_eq "npm-prefix-is-in-home" "/home/student/.local" "$(R 'npm config get prefix')"
 assert_ok "npm-install-g-needs-no-sudo" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
 
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
@@ -305,7 +305,7 @@ out="$(R '/usr/local/bin/open-url https://example.com/verify?code=ABCD')"
 assert_contains "helper:open-url-prints-the-url" "https://example.com/verify?code=ABCD" "$out"
 assert_contains "helper:open-url-explains-why"   "no browser" "$out"
 assert_fail "helper:open-url-needs-an-argument" \
-            sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
+            sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather
@@ -315,7 +315,7 @@ PW_CACHE=/home/student/.cache/ms-playwright
 
 record "playwright:cli-version" "$(R 'playwright --version 2>&1')"
 assert_ok "playwright:cli-is-installed" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'playwright --version'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'playwright --version'"
 
 # The FLOOR is asserted, not the exact pin. 1.61.0 is the first playwright whose platform
 # table knows ubuntu26.04; older ones resolve this base image to ubuntu24.04 and install a
@@ -328,7 +328,7 @@ pw_floor="$(R 'playwright --version 2>&1' | tr -dc "0-9.\n" | awk -F. '
 assert_eq "playwright:version-is-at-least-1.61-for-ubuntu26.04" "ok" "$pw_floor"
 
 assert_ok "playwright:headless-shell-is-baked-in" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'ls -d $PW_CACHE/chromium_headless_shell-*'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'ls -d $PW_CACHE/chromium_headless_shell-*'"
 # --only-shell must hold. The full Chrome for Testing build is a further 184 MB download on
 # top of the shell, and unusable here anyway: there is no display, so nothing runs headed.
 assert_eq "playwright:no-full-chromium-only-the-shell" "" \
@@ -347,7 +347,7 @@ assert_eq "playwright:browser-arch-matches-the-image" "match" "$arch_ok"
 # nowhere else: the binary exists, it is the right architecture, and it still cannot start.
 # --network=none for the same reason tldr:works-offline uses it — the browser is supposed to
 # be IN the image, so nothing here may quietly download it.
-shot="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" -c \
+shot="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c \
         'timeout 120 playwright screenshot -b chromium about:blank /tmp/probe.png >/dev/null 2>&1; wc -c < /tmp/probe.png 2>/dev/null || echo 0' \
         2>/dev/null | tr -d ' \n')"
 record "playwright:offline-screenshot-bytes" "$shot"
@@ -373,7 +373,7 @@ record "absent:man-behaviour" "$(printf '%s' "$manout" | tr '\n' ' ')"
 assert_not_contains "absent:no-real-man-page-for-git" "GIT(1)" "$manout"
 assert_not_contains "absent:man-db-not-installed"     "GITHUB" "$manout"
 assert_ok "absent:tldr-stands-in-for-man" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'tldr --version'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'tldr --version'"
 
 # ─── what `man` says instead  (issue #8) ───────────────────────────────────────
 # Ubuntu's minimized base leaves its OWN /usr/bin/man behind: a stub that exits 0 and
@@ -410,7 +410,7 @@ assert_says "man:no-argument-still-points-at-tldr" "tldr <command>" "$(R 'man 2>
 githelp="$(R 'git commit --help')"
 assert_says "man:git-help-goes-through-the-stub" "tldr git-commit" "$githelp"
 assert_contains "man:the-suggested-page-really-exists" "Commit files to the repository" \
-    "$(podman run --rm --network=none --user 1000:1000 --entrypoint sh "$TEST_IMAGE" \
+    "$($VT_RUN --rm --network=none --user 1000:1000 --entrypoint sh "$TEST_IMAGE" \
        -c 'tldr git-commit 2>&1' || true)"
 
 # tldr is the replacement for man, so its page cache has to be baked in. `tldr --update`
@@ -430,13 +430,13 @@ fi
 assert_eq "tldr:cache-is-student-owned" "student" \
           "$(R 'stat -c %U /home/student/.cache/tldr')"
 # The whole point of pre-caching: it must work on first use with no network at all.
-offline="$(podman run --rm --network=none --entrypoint sh "$TEST_IMAGE" -c 'tldr tar 2>&1' || true)"
+offline="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c 'tldr tar 2>&1' || true)"
 assert_contains "tldr:works-offline" "Archiving utility" "$offline"
 assert_not_contains "tldr:offline-does-not-error" "Traceback" "$offline"
 # NOT vacuous, unlike VERIFICATION.md §A.3's version: node comes from the official tarball
 # into root-owned /usr/local specifically so there is no group-writable nvm tree, which is
 # the quietest way to trojan a shared node/npm with no sudo at all.
-assert_fail "absent:no-nvm-tree" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /usr/local/share/nvm'"
+assert_fail "absent:no-nvm-tree" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /usr/local/share/nvm'"
 assert_eq "absent:node-is-root-owned" "root" "$(R 'stat -c %U $(command -v node)')"
 assert_eq "absent:node-not-group-writable" "ok" \
     "$(R 'case "$(stat -c %A "$(command -v node)")" in ?????w*) echo BAD;; *) echo ok;; esac')"
@@ -445,7 +445,7 @@ assert_eq "absent:global-node-modules-root-owned" "root" \
     "$(R 'stat -c %U "$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")/lib/node_modules" 2>/dev/null || echo root')"
 # Node must be apt-managed, so a student can pick up security fixes from inside.
 assert_ok "node:is-an-apt-package" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'dpkg -s nodejs >/dev/null'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'dpkg -s nodejs >/dev/null'"
 record "node:apt-package-version" "$(R 'dpkg-query -Wf "\${Version}" nodejs')"
 assert_eq "node:not-apt-mark-held" "" "$(R 'apt-mark showhold' | tr -d ' \n')"
 assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/lib')"
@@ -464,7 +464,7 @@ assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/l
 # discarded — and then match against the empty string it produced. Anything asserted that
 # way passes for the wrong reason and keeps passing forever.
 assert_ok "npm:ls-g-succeeds" \
-          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
 globals="$(R 'npm ls -g --depth=0')"
 record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
 for pkg in "@anthropic-ai/claude-code" vercel playwright; do
@@ -479,7 +479,7 @@ assert_eq "npm:globals-are-student-owned" "student student student" \
                      /home/student/.local/lib/node_modules/playwright' | tr '\n' ' ' | sed 's/ *$//')"
 # And the prefix must be writable with no sudo — that is what the whole arrangement buys.
 assert_ok "npm:student-prefix-is-writable-without-sudo" \
-          sh -c "podman run --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/lib/node_modules && test -w /home/student/.local/bin'"
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/lib/node_modules && test -w /home/student/.local/bin'"
 for cmd in claude vercel playwright; do
     assert_eq "npm:$cmd-resolves-in-the-student-prefix" "/home/student/.local/bin/$cmd" \
               "$(R "command -v $cmd")"
@@ -546,18 +546,18 @@ assert_match "locale:utf8-works" "UTF-8" "$(R 'locale charmap 2>/dev/null || ech
 # which looks exactly like a crash, and the recovery (Ctrl-Q) is unknown to novices.
 # Applied twice on purpose: profile.d for login shells, bash.bashrc for interactive
 # non-login ones.
-assert_ok "shell:profile.d-installed" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/10-cs193v-shell.sh'"
+assert_ok "shell:profile.d-installed" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/10-cs193v-shell.sh'"
 assert_contains "shell:profile.d-disables-ixon" "stty -ixon" \
                 "$(R 'cat /etc/profile.d/10-cs193v-shell.sh')"
 assert_contains "shell:bashrc-also-disables-ixon" "stty -ixon" "$(R 'cat /etc/bash.bashrc')"
 
 # ─── identity: hostname, banner, window title, goodbye  (#3, #4) ───────────────
 assert_ok "identity:welcome-banner-installed" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/20-cs193v-welcome.sh'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/20-cs193v-welcome.sh'"
 assert_eq "identity:welcome-banner-mode" "644" \
           "$(R 'stat -c %a /etc/profile.d/20-cs193v-welcome.sh')"
 assert_ok "identity:bash_logout-installed" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.bash_logout'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.bash_logout'"
 assert_eq "identity:bash_logout-is-student-owned" "student" \
           "$(R 'stat -c %U /home/student/.bash_logout')"
 
@@ -589,25 +589,25 @@ assert_contains "identity:banner-text-is-in-the-image" "$CS193V_WELCOME" \
 # as distinct from 65-tmux.sh, which drives a real session and asserts on what it looks like.
 for cmd in cs193v-shell cs193v-welcome cs193v-goodbye; do
     assert_ok "tmux:$cmd-installed" \
-              sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/$cmd'"
+              sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/$cmd'"
     assert_eq "tmux:$cmd-mode" "755" "$(R "stat -c %a /usr/local/bin/$cmd")"
 done
 
 assert_ok "tmux:conf-installed" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tmux.conf'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tmux.conf'"
 assert_eq "tmux:conf-mode" "644" "$(R 'stat -c %a /etc/cs193v/tmux.conf')"
 assert_eq "tmux:conf-is-root-owned" "root" "$(R 'stat -c %U /etc/cs193v/tmux.conf')"
 assert_ok "tmux:tabname-installed" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tabname.bash'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tabname.bash'"
 assert_eq "tmux:tabname-mode" "644" "$(R 'stat -c %a /etc/cs193v/tabname.bash')"
 
 # NOT at tmux's default paths. cs193v-shell names the file with -f, which suppresses both
 # /etc/tmux.conf and ~/.tmux.conf -- and it is the second one that matters, since tmux lets
 # a student's own file win and re-arm the prefix key the config exists to remove.
 assert_ok "tmux:no-etc-tmux-conf" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /etc/tmux.conf'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /etc/tmux.conf'"
 assert_ok "tmux:no-user-tmux-conf" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /home/student/.tmux.conf'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '! test -e /home/student/.tmux.conf'"
 
 # Every interactive bash, and therefore every tab, must pick up the label hook. A tmux
 # default-command would reach tab one only.
@@ -615,21 +615,21 @@ assert_contains "tmux:bashrc-sources-the-tabname-hook" "/etc/cs193v/tabname.bash
                 "$(R 'cat /etc/bash.bashrc')"
 
 assert_ok "tmux:binary-present" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v tmux >/dev/null'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v tmux >/dev/null'"
 record    "tmux:version" "$(R 'tmux -V')"
 # THE TERMINFO GATE. default-terminal is tmux-256color, whose entry ships in ncurses-term,
 # which is only a Recommends -- and this image builds with --no-install-recommends. Without
 # it tmux exits with "missing or unsuitable terminal" and NOBODY can open a shell.
 assert_ok "tmux:tmux-256color-terminfo-present" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'infocmp tmux-256color >/dev/null'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'infocmp tmux-256color >/dev/null'"
 
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
 # is seeded once on first mount and then never refreshed by a later image.
-assert_ok "claude:managed-settings-present" sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/managed-settings.json'"
-assert_ok "claude:CLAUDE.md-present"        sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/CLAUDE.md'"
+assert_ok "claude:managed-settings-present" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/managed-settings.json'"
+assert_ok "claude:CLAUDE.md-present"        sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/CLAUDE.md'"
 assert_ok "claude:managed-settings-parses-in-the-image" \
-          sh -c "podman run --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import json;json.load(open(1 and \\\"/etc/claude-code/managed-settings.json\\\"))\"'"
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import json;json.load(open(1 and \\\"/etc/claude-code/managed-settings.json\\\"))\"'"
 assert_eq "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" \
     "$(R 'python3 -c "
 import json
@@ -663,4 +663,4 @@ assert_eq "entrypoint:seeds-valid-json" "ok" \
 # Given a command it must exec it rather than entering the keep-alive loop, which is what
 # lets `podman run IMAGE sh -c ...` work at all — including in these very tests.
 assert_eq "entrypoint:execs-a-given-command" "handed-through" \
-          "$(podman run --rm "$TEST_IMAGE" sh -c 'echo handed-through' 2>&1)"
+          "$($VT_RUN --rm "$TEST_IMAGE" sh -c 'echo handed-through' 2>&1)"

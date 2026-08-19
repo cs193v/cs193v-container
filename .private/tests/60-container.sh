@@ -943,7 +943,7 @@ fi
 # Once the limit bites, the shell cannot fork to run `echo` either — so "Cannot fork" IS
 # the success signal, and expecting a tidy "forks=N" report back from a shell that has run
 # out of processes was never going to work.
-forks="$(podman run --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" sh -c \
+forks="$($VT_RUN --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" sh -c \
     'i=0; while sleep 30 & do i=$((i+1)); [ $i -gt 200 ] && break; done; echo "forks=$i"' 2>&1 | tail -2)"
 record "limits:pids-limit-outcome" "$(printf '%s' "$forks" | tr '\n' ' ')"
 assert_match "limits:pids-limit-is-enforced" 'Cannot fork|forks=[0-9]+' "$forks"

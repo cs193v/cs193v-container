@@ -116,9 +116,25 @@ if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
     #
     # 15-containerfile-parse.sh pins the parsing RULES against fixtures in half a second. It
     # cannot pin them against podman, because only podman knows what podman does.
-    log="$(ls -t "${TMPDIR:-/tmp}"/cs193v-build-*.log 2>/dev/null | head -1)"
+    # ASKED OF THE LAUNCHER, not globbed. This was `ls -t "$TMPDIR"/cs193v-build-*.log | head -1`
+    # -- the newest one on the MACHINE. The launcher keys the name on a hash of the course
+    # directory and the instance precisely so two instances do not overwrite each other's
+    # (BUILD_LOG in ./cs193v), and the glob threw that away: a colleague's --rebuild finishing
+    # after ours handed this section THEIR build to diff against OUR Containerfile, and the stale
+    # logs of every instance ever built here are candidates too, since the launcher deliberately
+    # never deletes them. Same fix as #46 -- one derivation, from the launcher, via --dev-tunnel.
+    #
+    # Through fwd_init rather than a second call to the seam, so there is still only one place that
+    # parses it. What that inherits, and it is worth knowing: fwd_init HARD-FAILS when fewer than two
+    # ports are declared, which this check does not care about. That is the right trade -- a checkout
+    # whose CS193V_PORTS cannot be read is not one to certify a release from -- but it means a
+    # release build can now stop here for a reason that is about ports.
+    fwd_init
+    log="$FWD_BUILDLOG"
+    [ -n "$log" ] && [ -f "$log" ] || log=''
     if [ -z "$log" ]; then
-        fail "steps:build-log-was-found" "no cs193v-build-*.log in ${TMPDIR:-/tmp} after a build"
+        fail "steps:build-log-was-found" "cs193v --dev-tunnel names this instance's build log as
+${FWD_BUILDLOG:-<nothing>}, and there is no file there after a build."
     else
         record "steps:build-log" "$log"
         # Squeezed on both sides, the way the launcher compares them: podman deletes the

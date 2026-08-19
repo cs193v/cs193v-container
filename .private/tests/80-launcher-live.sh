@@ -37,7 +37,13 @@ restore() {
         cp "$TMP/ca.orig" "$REPO/.config/container.args"
         printf '  (restored $REPO/.config/container.args)\n'
     fi
-    rm -rf "$TMP" /tmp/vt-copy 2>/dev/null
+    rm -rf "$TMP" 2>/dev/null   # the §2.7 repo copy lives under $TMP, so this covers it too
+    # The decoy containers, for the same reason clean_vt_fixtures is called at both ends: a run
+    # torn down between starting one and removing it would leave a container carrying OUR label,
+    # and the next run's cleanup:no-stray-containers would correctly report it as our leak.
+    for _d in ${DECOY_OTHER_INSTANCE:-} ${DECOY_UNRELATED:-} ${DECOY_OURS:-}; do
+        podman rm -f "$_d" >/dev/null 2>&1 || true
+    done
     # .vt-live and .vt-keep below are removed by inline rm lines that only run if the suite
     # gets that far. Without this, an interrupted live run leaks them into projects/ and the
     # next 60-container.sh run inherits them -- see clean_vt_fixtures for why that lies.
@@ -57,6 +63,11 @@ restore() {
 trap restore EXIT INT TERM
 clean_vt_fixtures                     # ...and at START, which is the half a kill cannot skip
 clean_vt_processes                    # a no-op while the container does not exist yet
+
+# Which volumes were already here. Read at START because that is the only thing that makes
+# cleanup:no-stray-volumes at the bottom a statement about THIS run rather than about the whole
+# machine -- see the assertion for why volumes cannot be attributed the way containers now are.
+VOLS_AT_START="$(podman volume ls --format '{{.Name}}' 2>/dev/null)"
 
 # L() drives the VERBS, which never open a shell and so work fine with a redirected stdin —
 # they are exactly what the refusal message tells scripts to use. Timeout-wrapped so a
@@ -114,19 +125,40 @@ assert_eq "noterm:container-is-created-but-not-left-running" "exited" \
           "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>&1)"
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 
-# How many containers did OUR launcher leave running? `podman ps -q | wc -l` used to answer
-# this, and it was wrong for the same reason cleanup:no-stray-containers was, further down:
-# it counts every running container on the MACHINE, so a colleague's cs193v-<instance> — or
-# anything else the user happens to be running — makes an idempotent launcher look like it
-# created a second container. The leak detection is kept intact by counting our own instance
-# by exact name and reporting any non-cs193v container alongside it, so a stray with a
-# podman-generated name still shows up.
-ours_running() {
-    local mine strays
-    mine="$(podman ps --format '{{.Names}}' | grep -cxF "$NAME" || true)"
-    strays="$(podman ps --format '{{.Names}}' | grep -vxF "$NAME" | grep -vcE '^cs193v($|-)' || true)"
+# How many containers did OUR launcher leave running? `podman ps -q | wc -l` used to answer this,
+# and it was wrong for the same reason cleanup:no-stray-containers was, further down: it counts
+# every running container on the MACHINE. Excluding the cs193v family by name fixed a colleague's
+# cs193v-<instance> being counted, and left the other half open -- a THROWAWAY has a
+# podman-generated name, so the suite's own `podman run --rm` containers and a neighbouring
+# checkout's were equally unnamed and equally counted. A colleague running the image tier turned
+# seven assertions here red, and did it intermittently, because a throwaway lives for seconds (#74).
+#
+# So the question is asked the only way that has an answer: by exact name for the container the
+# launcher makes, and by OUR OWN LABEL for the throwaways this suite starts. Nothing else on the
+# machine is this suite's business. See VT_LABEL in lib/assert.sh for why a label is the only
+# discriminator available for a name podman chose, and for the static check that keeps every
+# `podman run` in the podman tiers carrying it.
+#
+# THE LEAK DETECTION IS THE POINT OF THE SECOND HALF and it survives intact: a throwaway of ours
+# that outlived its --rm still carries our label and so is still counted. What is gone is only the
+# part that counted other people's.
+#
+# ONE EXPLICIT PARAMETER, NOT "$@", and that is a bash 3.2 requirement rather than a preference.
+# ours_running calls this with no arguments, and bash before 4.4 treats "$@" as UNSET when there
+# are no positional parameters -- so under the `set -u` at the top of this file the function would
+# abort on the TAs' Macs, ours_running would answer nothing, and four idempotency assertions below
+# would fail for a reason invisible on Linux. Same family as the empty-array trap 10-static.sh
+# guards and MANUAL.md records; asking for one optional word removes the question instead of
+# guarding it.
+ours_containers() {                   # ours_containers [-a]  -> mine + our throwaways
+    local all="${1:-}" mine strays
+    # shellcheck disable=SC2086      # deliberately unquoted: empty must expand to NO argument
+    mine="$(podman ps $all --format '{{.Names}}' | grep -cxF "$NAME")" || true
+    # shellcheck disable=SC2086
+    strays="$(podman ps $all --filter "label=$VT_LABEL" --format '{{.Names}}' | grep -c .)" || true
     printf '%s' "$(( ${mine:-0} + ${strays:-0} ))"
 }
+ours_running() { ours_containers; }
 
 # The same count over containers in ANY state, which is what "did the launcher create a second
 # one?" now has to ask. #41 means a finished launch leaves ours stopped, so ours_running would
@@ -134,12 +166,49 @@ ours_running() {
 # it can no longer tell those apart, and every idempotency assertion below depends on the
 # distinction. ours_running is still the right question for "is something running that should
 # not be", which is what the leak checks use it for.
-ours_existing() {
-    local mine strays
-    mine="$(podman ps -a --format '{{.Names}}' | grep -cxF "$NAME" || true)"
-    strays="$(podman ps -a --format '{{.Names}}' | grep -vxF "$NAME" | grep -vcE '^cs193v($|-)' || true)"
-    printf '%s' "$(( ${mine:-0} + ${strays:-0} ))"
+ours_existing() { ours_containers -a; }
+
+# ─── ANOTHER DEVELOPER'S CONTAINERS, STANDING RIGHT HERE  (#74) ────────────────
+# The two helpers above are the instrument every idempotency and leak assertion in this file is
+# read through, and a broken instrument looks exactly like a broken launcher -- both are just a
+# count that is one too high. So they are checked against the thing that broke them before
+# anything is concluded from them, the same reasoning as tmux:harness-selftest.
+#
+# THE DECOYS ARE WHAT #74 MEASURED. A throwaway gets a name podman chose (`nervous_bohr`), so
+# excluding the `cs193v-*` family could not tell a colleague's `podman run --rm` from ours and a
+# neighbour running the image tier turned seven assertions here red -- intermittently, since a
+# throwaway lives for seconds. This makes that a fixture instead of a race between two developers:
+# nothing below needs a second checkout to be present to go red.
+#
+# All three carry --label, so throwaways:every-podman-run-is-labelled-as-ours stays satisfied; two
+# of them deliberately carry the WRONG one. `--name`-less on purpose -- a generated name is the
+# whole difficulty.
+decoy_start() {                       # decoy_start LABEL -> prints the container id
+    podman run -d --rm --label "$1" --entrypoint sleep "$TEST_IMAGE" 300 2>/dev/null
 }
+DECOY_OTHER_INSTANCE="$(decoy_start "cs193v.test=$NAME-decoy")"   # a colleague's throwaway
+DECOY_UNRELATED="$(decoy_start 'cs193v.other=1')"                 # nobody's business here
+if [ -z "$DECOY_OTHER_INSTANCE" ] || [ -z "$DECOY_UNRELATED" ]; then
+    fail "live:a-neighbours-throwaway-is-not-counted" "could not start the decoy containers"
+    fail "live:an-unrelated-container-is-not-counted" "see above"
+    fail "live:our-own-leaked-throwaway-IS-counted"   "see above"
+else
+    # ZERO, not "the same as before": nothing of ours exists yet -- the launch above removed the
+    # container -- so the honest expectation is a bare 0, and a helper that counted the machine
+    # answers 2. Read as one assertion each, so a failure names WHICH kind leaked through.
+    assert_eq "live:a-neighbours-throwaway-is-not-counted" "0" "$(ours_existing)"
+    podman rm -f "$DECOY_OTHER_INSTANCE" >/dev/null 2>&1
+    assert_eq "live:an-unrelated-container-is-not-counted" "0" "$(ours_existing)"
+    podman rm -f "$DECOY_UNRELATED" >/dev/null 2>&1
+    # AND THE OTHER DIRECTION, which is the half that keeps this from passing by having stopped
+    # counting altogether: one of OURS that outlived its --rm still has to show up, because that
+    # is the leak cleanup:no-stray-containers was added for and caught.
+    DECOY_OURS="$(decoy_start "$VT_LABEL")"
+    assert_eq "live:our-own-leaked-throwaway-IS-counted" "1" "$(ours_existing)"
+    podman rm -f "$DECOY_OURS" >/dev/null 2>&1
+    DECOY_OURS=''
+fi
+DECOY_OTHER_INSTANCE='' DECOY_UNRELATED=''
 
 # With a real terminal the same invocation opens a shell and returns promptly.
 T0="$(date +%s)"
@@ -361,15 +430,39 @@ assert_eq "drift:a-launch-after-a-rebuild-restores-the-forwards" "$FWD_N" "$(cou
 assert_match "drift:doctor-reports-the-tunnel-up" 'tunnel +up' "$(L doctor)"
 
 # ─── two copies of the course directory  (§2.7) ────────────────────────────────
-rm -rf /tmp/vt-copy
-cp -a "$REPO" /tmp/vt-copy
-rm -rf /tmp/vt-copy/tests
+# NOT AT A PATH EVERY CHECKOUT SHARES, which is what this was: `rm -rf /tmp/vt-copy` followed by
+# `cp -a "$REPO" /tmp/vt-copy`, plus the same literal in restore(). Two live tiers at once destroyed
+# each other's copy both ways round -- their rm -rf landing between our cp and our launcher call
+# makes live:second-copy-is-refused answer 127 where it wants 1, and their copy still being there
+# makes `cp -a` NEST ours inside it, so the launcher we go on to run is THEIRS (#74). Measured by
+# leaving a foreign file at /tmp/vt-copy and watching this group delete it.
+#
+# THE ASSERTION IS STRUCTURAL, on purpose. Checking "we did not delete a foreign /tmp/vt-copy" needs
+# a fixture at that shared path, and then OUR verdict depends on whether a colleague still running
+# the old code happens to be in this group -- which is the very rule being fixed. Where the copy
+# lives is the whole property, nobody else can affect the answer, and a future simplification back
+# to a literal fails it.
+# UNDER $TMP, which is this run's own mktemp -d. Any directory other than $REPO satisfies what is
+# being tested -- ensure_container compares the cs193v.dir label against $DIR -- and a unique one
+# additionally gives the refused launch its own TUNNEL_ID, so it cannot reach a real tunnel's
+# files. The suite's own scratch already existed; the group just was not using it.
+VT_COPY="$TMP/vt-copy"
+case "$VT_COPY" in
+    "$TMP"/*) pass "live:the-repo-copy-is-inside-this-runs-scratch-dir" ;;
+    *)        fail "live:the-repo-copy-is-inside-this-runs-scratch-dir" \
+                   "the copy is at $VT_COPY, which every checkout on this machine shares" ;;
+esac
+rm -rf "$VT_COPY"
+cp -a "$REPO" "$VT_COPY"
+# .private/tests, not tests/ -- the suite moved and this line did not follow it, so the copy has
+# been carrying the whole test tree.
+rm -rf "$VT_COPY/.private/tests"
 assert_eq "live:second-copy-is-refused" "1" \
-          "$(/tmp/vt-copy/cs193v >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
+          "$("$VT_COPY/cs193v" >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
 assert_says "live:second-copy-explains-both-paths" "different folder" \
-            "$(/tmp/vt-copy/cs193v </dev/null 2>&1)"
+            "$("$VT_COPY/cs193v" </dev/null 2>&1)"
 assert_eq "live:second-copy-created-nothing" "1" "$(ours_existing)"
-rm -rf /tmp/vt-copy
+rm -rf "$VT_COPY"
 
 # ─── --rebuild preserves logins  (§2.3) ────────────────────────────────────────
 # A marker inside the ~/.claude volume stands in for a real login, so this can be checked
@@ -623,6 +716,14 @@ elif [ -n "$CTL" ]; then
     ssh -S "$CTL" -O forward -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
     assert_eq "tunnel:cannot-proxy-off-box" "000" \
               "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:$OFFBOX_PORT/")"
+    # ...AND THE PORT GOES BACK. `-O forward -L` binds locally the moment it is asked, before any
+    # remote channel is attempted, so without a cancel this holds $OFFBOX_PORT until
+    # release_tunnel -- a port chosen precisely BECAUSE nobody had reserved it. Symmetric with
+    # tunnel:refused-forward-creates-no-listener above, and the same courtesy as
+    # cleanup:the-forwards-are-released: what this suite borrows, it hands back.
+    ssh -S "$CTL" -O cancel -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
+    assert_eq "tunnel:the-borrowed-port-is-handed-back" "0" \
+              "$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE ":$OFFBOX_PORT\$" || true)"
 else
     # All three, not just the first. The results file must have the same lines whichever branch
     # ran: a result that vanishes reads as a suite someone shortened, and this is the arm nobody
@@ -701,14 +802,18 @@ fi
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
 containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:containers" "$containers"
-# This used to assert that the ONLY container on the machine was cs193v, which is how it
-# caught a leak: every throwaway container the suite starts uses --rm and gets a
-# podman-generated name, so a stray shows up as an extra entry. That breaks the moment a
-# second CS193V_INSTANCE exists on the machine, because a colleague's cs193v-<instance> is
-# then legitimately present and is not this suite's leak to report. So exclude the cs193v
-# family and assert the remainder is empty — same leak detection, no false alarm.
-strays="$(podman ps -a --format '{{.Names}}' | grep -vxF "$NAME" \
-          | grep -vE '^cs193v($|-)' | LC_ALL=C sort | tr '\n' ' ')"
+# This used to assert that the ONLY container on the machine was cs193v, which is how it caught a
+# leak: every throwaway the suite starts uses --rm and gets a podman-generated name, so one that
+# outlived its --rm showed up as an extra entry. Excluding the cs193v family by name stopped a
+# colleague's cs193v-<instance> from counting; it could not stop a colleague's THROWAWAY, whose
+# generated name is exactly what this was looking for (#74). Measured: a neighbouring checkout
+# running the image tier made this "interesting_antonelli sweet_booth".
+#
+# So it asks for our label instead, and the leak it was added for still fails it — one of ours
+# that survived carries the label and is named here. Anyone else's is now invisible, which is the
+# honest answer: a container this suite did not start is not this suite's to report.
+strays="$(podman ps -a --filter "label=$VT_LABEL" --format '{{.Names}}' \
+          | LC_ALL=C sort | tr '\n' ' ')"
 assert_eq "cleanup:no-stray-containers" "" "$(printf '%s' "$strays" | sed 's/ *$//')"
 assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exists '$NAME'"
 
@@ -721,8 +826,20 @@ mine="$(podman volume ls --format '{{.Name}}' \
 assert_eq "cleanup:exactly-the-six-cs193v-volumes" \
           "$NAME-claude $NAME-claude-json $NAME-gh $NAME-git $NAME-playwright $NAME-vercel" \
           "$(printf '%s' "$mine" | sed 's/ *$//')"
+# NEW SINCE THIS SUITE STARTED, and outside the cs193v family. Volumes cannot be labelled from
+# here -- the launcher creates them implicitly with `-v name:path`, so there is no flag of ours to
+# hang a label on -- and asking the whole machine put this assertion's verdict in the hands of
+# every other volume the developer owns: one `podman volume create` for an unrelated project
+# reddens it, with nothing wrong in the change under test. Same shape as the container half above
+# (#74), one resource over, and the only attribution available is WHEN a volume appeared.
+#
+# A volume already on this machine when the suite started is not this run's leak, whoever owns it.
+# One that appeared during the run and is not in the cs193v family is, and still fails. The limit
+# worth stating: a colleague creating one mid-run would still land here. Nothing either suite does
+# creates one, so that is a hole with nothing behind it rather than the measured failure the
+# container half was.
 stray_vols="$(podman volume ls --format '{{.Name}}' | grep -vE '^cs193v($|-)' \
-              | LC_ALL=C sort | tr '\n' ' ')"
+              | grep -vxF "$VOLS_AT_START" | LC_ALL=C sort | tr '\n' ' ')"
 assert_eq "cleanup:no-stray-volumes" "" "$(printf '%s' "$stray_vols" | sed 's/ *$//')"
 
 # ─── §A.13 performance baselines — recorded, never asserted ────────────────────
