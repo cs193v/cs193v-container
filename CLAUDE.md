@@ -6,10 +6,10 @@ debugging time and neither is visible from the code.
 ## 1. Set `CS193V_INSTANCE` first
 
 ```sh
-export CS193V_INSTANCE=yourname     # letters, digits, - and _ only
+export CS193V_INSTANCE=yourname   # letters, digits, - and _ only
 ```
 
-Several people — and several Claude Code sessions — develop this container on one machine.
+Several people develop this container on one machine.
 The variable suffixes the **container name, the dev image tag, and all six volumes
 together**. `.private/tests/lib/assert.sh` mirrors the same suffix, so `run-tests.sh`
 follows automatically.
@@ -29,62 +29,33 @@ deletes the other's logins.
   build when they do not. Force one with `--rebuild --no-cache`; watch podman's raw output
   instead of the progress bar with `CS193V_BUILD_RAW=1`.
 
-## 2. Host ports are NOT namespaced, and that produces failures you did not cause
+## 2. Move your ports in `.config/local.args`
 
-`CS193V_INSTANCE` does not suffix the 46 forwarded ports — they are a fixed list, the same
-for every instance. The launcher's ssh tunnel binds `127.0.0.1:<port>` for each one, so
-**the first instance to start wins and any other gets none of them**. The losing instance
-still starts and works normally; it just cannot forward.
-
-A port or tunnel failure appearing "because of" an edit that could not possibly affect it is
-still most likely this. What changed with issue #46 is that the suite now says so instead of
-lying in either direction: it derives the port list from the launcher (`./cs193v --dev-tunnel`),
-so the override below is safe to use — no test hardcodes a port any more — and it counts only
-the forwards **its own** tunnel holds, so a colleague's 46 can no longer satisfy the check that
-guards the container tier. If somebody else has your ports, `require:tunnel` hard-fails and
-names the checkout holding them, and the container tier stops there rather than banking passes
-on their ssh process.
-
-**Check that before you blame your change:**
-
-```sh
-./cs193v doctor          # look at the "tunnel ports" line: "0 of 46 forwarded ...
-                         # another program on this computer holds those"
-ss -ltnp | grep :3000    # the ssh process's -i path names the checkout that owns them
-```
-
-Do not kill the other developer's tunnel. To get out of the way, override `CS193V_PORTS` in
-`.config/local.args` (git-ignored, read **after** `container.args`, last occurrence wins):
+`CS193V_PORTS` is **not** a shell variable — exporting it does nothing. It is a `-e` line in
+the args files, and `.config/local.args` (git-ignored) is read after `container.args`, last
+occurrence winning:
 
 ```
--e CS193V_PORTS=13000-13009,14173-14176,15173-15179,16173-16182,18000-18009,18080-18084
+-e CS193V_PORTS=13000-13002,13005
 ```
 
-That moves both the forwards and the list the container is told about — and the test suite
-follows it, because `run-tests.sh` reads the same value through the same launcher. Recreate the
-container afterwards (`./cs193v --rebuild`) so its own `CS193V_PORTS` matches what is being
-forwarded; the container tier checks that those two agree and tells you if they do not.
+`CS193V_INSTANCE` does not namespace host ports, so without this every instance competes for
+the same set. Pick a small set that overlaps nobody — comma-separated ports and ranges, **at
+least two**: `fwd_init` in `tests/lib/assert.sh` hard-fails the port-aware suites below that,
+because assertions need a second port to hold while the first is bound. A malformed chunk is
+warned about and skipped rather than fatal, so a typo silently shrinks your set.
 
-**This got a lot better with issue #41, but it did not go away.** Closing your terminal window now
-stops your container *and* takes its tunnel down, handing all 46 ports back — so the usual cause of
-this, a tunnel from a session somebody finished with hours ago, largely stops happening. Two
-instances that are *both live right now* still collide exactly as described above.
+**Recreate the container after moving them** (`./cs193v --rebuild`). `-e` is applied at create
+time and `podman start` reuses the stored value, so an edit with no recreate leaves the
+container naming one set while the tunnel forwards another. `60-container.sh` asserts they agree.
 
-Two related consequences for working here:
+The tests follow the override automatically — they read the expanded list out of
+`cs193v --dev-tunnel`, so no test names a port. If a port or ssh-forwarding test fails, check
+what else is running on this machine before assuming the fault is yours.
 
-- **A container running with nothing attached to it is now an anomaly**, not the normal state.
-  `./cs193v doctor` says so and points at `./cs193v --stop`. It means a terminal was force-quit, or
-  a launcher was killed without its trap running.
-- **A second `./cs193v` against your own live session is refused**, not given a second session. If
-  you forget `CS193V_INSTANCE` while someone else is working, you now find out immediately instead
-  of silently sharing their container.
-
-## Also worth knowing
-
-- **Disk is tight.** An interrupted `podman build` or `podman pull` fails loudly, but can
-  leave damaged storage that outlives the failure. `podman system check --quick` is ~0.2 s
-  and worth running if podman starts behaving strangely; the full check is slow and reports
-  mtime-only false positives, so do not reach for `--repair` on its say-so.
+Closing your terminal window stops your container *and* takes its tunnel down, handing its
+ports back — so the usual cause of a phantom conflict, a tunnel from a session somebody
+finished with hours ago, largely stops happening.
 
 ## Where things live
 
