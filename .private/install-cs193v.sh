@@ -714,6 +714,14 @@ build_image() {
 # clean machine: 224 s, 4.1 GB of transient peak, and 4.3 GB still gone at the end — for an
 # image whose reported size is 2.2 GB.
 #
+# THOSE FIGURES PREDATE CODEX, which took the image to 2.48 GB (2,477,510,743 bytes, from
+# 2,165,835,982) and a cold build to 242 s, both measured on the development machine. The peak and
+# retained numbers are deliberately NOT adjusted: they were measured from nothing on a CLEAN graph
+# root, a rebuild in place does not reproduce that, and scaling them by the image delta would be
+# arithmetic dressed as measurement. The 8 GB floor below was chosen with roughly 3.7 GB of
+# headroom over the 4.3 GB it cites, so ~312 MB more image does not exhaust it — but a genuine
+# re-measurement needs a clean machine and is worth doing before the quarter.
+#
 # TWO costs, and the second is the one that surprises. The build peaks above its own result
 # because at each step's commit the same bytes exist in the layers already written, in the
 # working container, and in the new layer being computed from it; the in-step cleanups that

@@ -67,13 +67,13 @@ assert_eq "home-is-student" "/home/student" "$(R 'echo $HOME')"
 # directory exists — so a root-owned target yields a root-owned volume AND permanently
 # disables further auto-chown. Getting these five right in the image is what lets the
 # entrypoint run with no root phase and no `sudo chown -R`.
-assert_eq "vol-targets-are-student-owned" "student student student student student" \
-    "$(R 'stat -c %U /home/student/.claude /home/student/.claude-json \
+assert_eq "vol-targets-are-student-owned" "student student student student student student" \
+    "$(R 'stat -c %U /home/student/.claude /home/student/.claude-json /home/student/.codex \
                      /home/student/.config/gh /home/student/.config/git \
                      /home/student/.local/share/com.vercel.cli \
           | tr "\n" " " | sed "s/ $//"')"
 # And they must exist before any volume is mounted, or podman creates them root-owned.
-for d in .claude .claude-json .config/gh .config/git .local/share/com.vercel.cli .local/bin; do
+for d in .claude .claude-json .codex .config/gh .config/git .local/share/com.vercel.cli .local/bin; do
     assert_ok "vol-target-exists:$d" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -d /home/student/$d'"
 done
 assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/student/projects')"
@@ -83,10 +83,10 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude nano less sudo tldr curl unzip ssh scp telnet stty; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
-record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version' | tr '\n' ' ')"
+record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | tr '\n' ' ')"
 
 # ─── ssh, scp and telnet really work  (issue #2) ───────────────────────────────
 # Not just "the binary is on PATH". The course reason for each of these is a round trip:
@@ -467,20 +467,21 @@ assert_ok "npm:ls-g-succeeds" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
 globals="$(R 'npm ls -g --depth=0')"
 record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
-for pkg in "@anthropic-ai/claude-code" vercel playwright; do
+for pkg in "@anthropic-ai/claude-code" "@openai/codex" vercel playwright; do
     assert_contains "npm:ls-g-lists-$pkg" "$pkg" "$globals"
 done
 
 # Student-owned, so `npm update -g` and Claude Code's own updater work in place rather than
 # writing a second copy somewhere else on PATH.
-assert_eq "npm:globals-are-student-owned" "student student student" \
+assert_eq "npm:globals-are-student-owned" "student student student student" \
     "$(R 'stat -c %U /home/student/.local/lib/node_modules/@anthropic-ai/claude-code \
+                     /home/student/.local/lib/node_modules/@openai/codex \
                      /home/student/.local/lib/node_modules/vercel \
                      /home/student/.local/lib/node_modules/playwright' | tr '\n' ' ' | sed 's/ *$//')"
 # And the prefix must be writable with no sudo — that is what the whole arrangement buys.
 assert_ok "npm:student-prefix-is-writable-without-sudo" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/lib/node_modules && test -w /home/student/.local/bin'"
-for cmd in claude vercel playwright; do
+for cmd in claude codex vercel playwright; do
     assert_eq "npm:$cmd-resolves-in-the-student-prefix" "/home/student/.local/bin/$cmd" \
               "$(R "command -v $cmd")"
 done
@@ -632,10 +633,53 @@ assert_ok "tmux:tmux-256color-terminfo-present" \
 assert_ok "files:inotifywait-present" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v inotifywait >/dev/null'"
 
+# ─── the course notes: ONE file, two agents ───────────────────────────────────
+# /etc/claude-code/CLAUDE.md is a SYMLINK to /etc/cs193v/agent-notes.md, and the entrypoint
+# links ~/.codex/AGENTS.md at the same file, so Claude Code and Codex cannot be told different
+# things. Both live in /etc rather than in either tool's home, because those homes are named
+# volumes: a file seeded there on first mount is never refreshed by a later image.
+#
+# WHAT THIS CANNOT PROVE is that Claude Code follows the symlink in its managed slot -- only a
+# real session does, which is MANUAL.md §A.11's port-ranges prompt. What it proves is the half a
+# machine can judge: one real file, both names reaching it, readable by the student.
+assert_eq "notes:claude-managed-slot-is-a-link-to-the-one-file" "/etc/cs193v/agent-notes.md" \
+    "$(R 'readlink -f /etc/claude-code/CLAUDE.md')"
+assert_eq "notes:codex-global-slot-is-a-link-to-the-one-file" "/etc/cs193v/agent-notes.md" \
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1; readlink -f /home/student/.codex/AGENTS.md')"
+assert_eq "notes:readable-through-both-names" "ok" \
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1
+          test -r /etc/claude-code/CLAUDE.md && test -r /home/student/.codex/AGENTS.md && echo ok')"
+# Not student-writable, or the course notes are advisory. Tested on the TARGET, since that is
+# what a write would land on -- a writable symlink to a read-only file writes nothing.
+assert_eq "notes:not-student-writable" "ok" \
+    "$(R 'test ! -w /etc/cs193v/agent-notes.md && echo ok')"
+
+# ─── Codex ─────────────────────────────────────────────────────────────────────
+# AS THE STUDENT, which is the whole of what issue #71 asked for here: the wrapper installs into
+# the student's own npm prefix, and this is the assertion that it is executable from the account
+# that will run it rather than only from root. --network=none because a version check must not
+# need the internet, and because a codex that phoned home on startup would be worth knowing about.
+assert_ok "codex:runs-as-the-student-with-no-network" \
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'codex --version'"
+record    "codex:version" "$(R 'codex --version 2>&1' | head -1)"
+# The pin took effect. Asserted rather than recorded: a floating version means two students in
+# one lab section get different software, which 00-release-gates.sh guards in the recipe and this
+# guards in the artifact.
+codex_want="$(sed -n 's/^ARG CODEX_VERSION=\(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
+assert_contains "codex:installed-version-matches-the-pin" "$codex_want" "$(R 'codex --version 2>&1')"
+# System bubblewrap. NOT a sandbox assertion: no sandbox policy is shipped, and Anthropic's own
+# docs say bwrap cannot mount a fresh /proc in an unprivileged container. This is here because
+# without the package codex prints "could not find system bubblewrap ... install bubblewrap with
+# your package manager" at EVERY start, and a student can act on that advice with sudo and lose it
+# again at the next --rebuild.
+assert_ok "codex:system-bwrap-is-present" \
+          sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'bwrap --version'"
+
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
 # is seeded once on first mount and then never refreshed by a later image.
 assert_ok "claude:managed-settings-present" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/managed-settings.json'"
+# -f, not -e: it is a symlink now, and -f follows it, so this fails if the target went missing.
 assert_ok "claude:CLAUDE.md-present"        sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/CLAUDE.md'"
 assert_ok "claude:managed-settings-parses-in-the-image" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import json;json.load(open(1 and \\\"/etc/claude-code/managed-settings.json\\\"))\"'"

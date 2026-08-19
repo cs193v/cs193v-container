@@ -247,13 +247,15 @@ machine. Note the explicit `truetype()` path — Pillow does not go through font
 tests the font files rather than their discoverability.
 
 ### §8.1 / §8.2 — logins with no browser in the container
-`claude` then `/login`; then `gh auth login`; then `vercel login`.
+`claude` then `/login`; then `gh auth login`; then `vercel login`; then
+`codex login --device-auth` (the browser flow wants a callback on localhost:1455, which nothing
+forwards yet — see issue #71).
 *Expect:* a URL is **printed** by the `$BROWSER` stub and a device/paste-code flow
 completes. No callback port is forwarded, so a redirect-only flow would fail — confirm it
 does not need one.
 During `gh auth login`, answer **yes** to "Authenticate Git with your GitHub credentials?"
 then confirm `git push` works from a test repo.
-*Automated:* the stub itself, and that all four credential directories are student-owned
+*Automated:* the stub itself, and that all five credential directories are student-owned
 volumes with deny rules (`50-image.sh`).
 *ERRORS.md B10 no longer needs settling here.* It asked whether Claude Code's auto-update
 works given where the CLI is installed; it does, and the check turned out not to need a
@@ -272,11 +274,21 @@ Inside the container, with Claude Code logged in:
 claude -p "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."
 claude -p "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."
 claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."
+claude -p "Use the Read tool on /home/student/.codex/auth.json."
+claude -p "Run: cat /home/student/.codex/auth.json | head -c 20"
 claude -p "Which port ranges may a dev server use in this container? List them and nothing else."
 ```
 *Expect, in order:* refusal; **success** (the deny covers the credential file, not the whole
-directory); refusal (whole subtree denied); the six forwarded ranges from the managed
-`CLAUDE.md`.
+directory); refusal (whole subtree denied); refusal (`~/.codex` is denied wholesale, for the
+reason in `managed-settings.json`: OpenAI moves the credential filename, and `history.jsonl` is
+every prompt the student has typed); **success** (Bash is not covered by a `Read(...)` rule, and
+that is the honest limit of these rules rather than a gap — an agent with Bash can read anything
+the student can); the six forwarded ranges from the notes.
+
+*Also:* the same port-ranges answer proves the SYMLINK works — `/etc/claude-code/CLAUDE.md` is a
+link to `/etc/cs193v/agent-notes.md` now, and nothing in the suite can prove Claude Code follows
+it in the managed slot. Ask codex the same question (`codex exec "Which port ranges may a dev
+server use here?"`) to cover the other end of the same file.
 Also check `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` with no
 "ignored"/"invalid"/"unknown key" warning — a `Write(...)` or `Glob(...)` path rule would be
 accepted and then silently ignored.
@@ -356,7 +368,7 @@ that nothing is created, and that podman is not even contacted. Only the real `s
 invocation is unverified.
 
 ### §2.4 / §9.2 — `--rebuild --logout` really deletes the volumes
-Destructive: it logs you out of claude, gh and vercel, and takes the git identity `setup-git`
+Destructive: it logs you out of claude, codex, gh and vercel, and takes the git identity `setup-git`
 configured with them — the credential helper line lives in that volume, so leaving it behind would
 point git at a token that no longer exists. Gated behind an opt-in so a routine suite run cannot do
 it to you:

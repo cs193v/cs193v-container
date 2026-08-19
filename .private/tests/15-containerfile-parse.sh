@@ -218,7 +218,12 @@ assert_fail "missing:reports-an-error" "$REPO/cs193v" --dev-steps "$WORK/does-no
 # ─── the real Containerfile ────────────────────────────────────────────────────
 # The fixtures above pin the rules; this pins the file the rules are applied to. The count is
 # asserted against podman itself in 00-release-gates.sh, which is the only place it can be.
-assert_eq "real:parses-every-instruction" "22" "$(count "$PRIVATE/Containerfile")"
+#
+# A LITERAL ON PURPOSE, unlike the forward counts #46 derived: deriving this from the same parse
+# it is checking would assert nothing at all. It is a canary -- add a layer and the number moves,
+# so you are made to look. Codex moved it by TWO, from 22, because `ARG` is an instruction in its
+# own right and takes a step of its own beside the `RUN`.
+assert_eq "real:parses-every-instruction" "24" "$(count "$PRIVATE/Containerfile")"
 assert_match "real:first-step-is-the-base-image" \
              '^1	Downloading the base image\.\.\.	FROM ubuntu:' "$(steps "$PRIVATE/Containerfile")"
 # No instruction text may be empty: that is what a mis-joined continuation looks like, and it

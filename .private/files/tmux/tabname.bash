@@ -48,7 +48,7 @@ case "$-" in *i*) ;; *) return 0 ;; esac
 #               unrelated jobs. "git" could be a commit, a clone, or a 20-minute rebase; "npm"
 #               could be an install or a dev server. The subcommand is the informative part.
 #
-# FORK: `claude`, `gh` and `vercel` added -- the three course tools, none of which the
+# FORK: `claude`, `codex`, `gh` and `vercel` added -- the four course tools, none of which the
 # prototype's machine had installed the way this image installs them.
 #
 # `claude` is not a nicety, it is the reason the hook ships at all. Claude Code is installed
@@ -60,10 +60,16 @@ case "$-" in *i*) ;; *) return 0 ;; esac
 # `automatic-rename-format` conditional mapping `node` to `claude`, was rejected: it would
 # also relabel a student's own `node server.js`, which is a thing this course expects them
 # to run.
+#
+# `codex` is on the list for the SAME reason and not by analogy: `npm install -g @openai/codex`
+# installs a three-file wrapper whose bin is a `#!/usr/bin/env node` script, and the 251 MB
+# native binary it spawns is a CHILD process, so the pane's foreground command is `node` there
+# too. It also earns its place as a multi-tool -- `codex resume` and `codex exec` are different
+# enough jobs to be worth a second word.
 _CS193V_SHOW_ARG="sudo doas env time nice ionice nohup stdbuf xargs setsid
                   git python python3 pip pip3 npm npx node yarn pnpm deno
                   make cargo go docker podman apt apt-get gem bundle poetry uv pytest
-                  claude gh vercel"
+                  claude codex gh vercel"
 
 # A CAVEAT ABOUT `time`, which is worth knowing before you extend this list: `time` is a bash
 # KEYWORD, not a command, and bash reports only the *inner* command to the DEBUG trap. Typing

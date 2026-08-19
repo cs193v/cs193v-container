@@ -3,7 +3,7 @@
 # $BROWSER stub.
 #
 # Tools that want to open a URL — `gh auth login`, `vercel`, `claude /login`,
-# `gh pr create --web` — consult $BROWSER. Inside a container there is no browser and no
+# `codex login`, `gh pr create --web` — consult $BROWSER. Inside a container there is no browser and no
 # route to the host's, so without this they either fail with "command not found" or
 # silently do nothing, leaving a student staring at a prompt that never returns.
 #

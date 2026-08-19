@@ -565,7 +565,7 @@ launcher --rebuild >/dev/null 2>&1
 assert_eq "rebuild:removes-container" "1" "$(shim_count '^rm ')"
 assert_eq "rebuild:creates-container" "1" "$(shim_count '^run ')"
 assert_eq "rebuild:current-recipe-builds-nothing" "0" "$(shim_count '^build ')"
-# --rebuild must keep logins: none of the five volumes is touched.
+# --rebuild must keep logins: none of the seven volumes is touched.
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
 out="$(launcher --rebuild)"
 assert_says "rebuild:says-logins-kept" "logins are kept" "$out"
@@ -607,8 +607,8 @@ assert_eq "logout:removes-container" "1" "$(shim_count '^rm ')"
 # SIX, since setup-git: the git identity and the credential helper live in a volume of their own
 # now, and --logout takes them with the tokens. Counted rather than named, so a volume added to
 # container.args and forgotten in remove_volumes fails here.
-if [ "$(shim_count '^volume rm')" -eq 6 ]; then pass "logout:removes-6-volumes"
-else fail "logout:removes-6-volumes" "removed $(shim_count '^volume rm')"; fi
+if [ "$(shim_count '^volume rm')" -eq 7 ]; then pass "logout:removes-7-volumes"
+else fail "logout:removes-7-volumes" "removed $(shim_count '^volume rm')"; fi
 assert_says "logout:says-you-are-logged-out" "log in again" "$out"
 # ...and it must NOT claim the thing it just deleted was kept: status.rebuilding says "logins are
 # kept", which is the wrong announcement for this path.
@@ -1235,8 +1235,8 @@ assert_eq "build:no-ascii-spinner-frames-remain" "0" \
 shim_new
 shim_set state absent
 { "${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps \
-      | awk -F'\t' -v n=23 '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
-  printf 'STEP 23/23: LABEL "cs193v.buildhash"="deadbeef"\n'
+      | awk -F'\t' -v n=25 '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
+  printf 'STEP 25/25: LABEL "cs193v.buildhash"="deadbeef"\n'
   printf 'COMMIT localhost/cs193v:local\nSuccessfully tagged localhost/cs193v:local\n'
 } > "$SHIM/build_out"
 # --no-cache is what FORCES the build, and it is not decoration. --rebuild is the only verb that
@@ -1246,18 +1246,19 @@ shim_set state absent
 out="$(launcher --rebuild --no-cache)"
 
 # Named steps, spread across the build rather than only at its ends. The count is podman's own
-# 23 here: the +1 for creating the container exists only where there is a meter to put it in.
-assert_match "labels:names-the-node-step"      '\] +[0-9]+/23  Installing Node'           "$out"
-assert_match "labels:names-the-chromium-step"  '\] +[0-9]+/23  Installing Chromium'       "$out"
-assert_match "labels:names-the-vercel-step"    '\] +[0-9]+/23  Installing the Vercel CLI' "$out"
-assert_match "labels:names-the-first-step"     '\] +1/23  Downloading the base image'     "$out"
+# 25 here: the +1 for creating the container exists only where there is a meter to put it in.
+assert_match "labels:names-the-node-step"      '\] +[0-9]+/25  Installing Node'           "$out"
+assert_match "labels:names-the-chromium-step"  '\] +[0-9]+/25  Installing Chromium'       "$out"
+assert_match "labels:names-the-vercel-step"    '\] +[0-9]+/25  Installing the Vercel CLI' "$out"
+assert_match "labels:names-the-codex-step"     '\] +[0-9]+/25  Installing Codex'          "$out"
+assert_match "labels:names-the-first-step"     '\] +1/25  Downloading the base image'     "$out"
 # The tail of the file is ENV/USER/WORKDIR/ENTRYPOINT plus the LABEL podman synthesizes from
 # our own --label flag. None of them has a marker of its own, and the last one has no line in
 # the Containerfile at all, so all five inherit the closing marker rather than going blank.
-assert_match "labels:tail-steps-inherit-the-closing-marker" '\] +23/23  Finishing up' "$out"
+assert_match "labels:tail-steps-inherit-the-closing-marker" '\] +25/25  Finishing up' "$out"
 # EVERY step is named. The whole point is that the side text is never blank mid-build, so a
 # step that reached the bar without a name is the regression to catch.
-unnamed="$(printf '%s\n' "$out" | grep -cE '\] +[0-9]+/23 *$' || true)"
+unnamed="$(printf '%s\n' "$out" | grep -cE '\] +[0-9]+/25 *$' || true)"
 assert_eq "labels:no-step-is-left-unnamed" "0" "${unnamed:-0}"
 
 # And on a terminal the same labels ride in the block, on the row under the bar. Layout only --
@@ -1266,10 +1267,14 @@ shim_set build_delay 0.05
 raw="$(launcher_tty '' --rebuild --no-cache)"
 pairs="$(printf '%s' "$raw" | frame_pairs)"
 assert_match "labels:ride-in-the-block-on-a-terminal" \
-             "\] +[0-9]+/24$TAB""Installing " "$pairs"
-# 24 = 22 instructions + podman's injected LABEL step + creating the container. The count the
+             "\] +[0-9]+/26$TAB""Installing " "$pairs"
+# 26 = 24 instructions + podman's injected LABEL step + creating the container. The count the
 # meter commits to comes from podman; the parse only supplies it before podman has spoken.
-assert_match "labels:total-counts-every-step" '\] +24/24' "$(printf '%s' "$raw" | render_pty)"
+#
+# The instruction count moved by TWO when codex arrived, not one: `ARG CODEX_VERSION` is an
+# instruction in its own right and gets its own step, which is worth knowing before assuming a
+# new layer costs +1 here.
+assert_match "labels:total-counts-every-step" '\] +26/26' "$(printf '%s' "$raw" | render_pty)"
 
 # A step is never labelled with a guess. If podman echoes an instruction that is not the one
 # the launcher parsed, its whole mapping is suspect -- so the labels stop rather than name the

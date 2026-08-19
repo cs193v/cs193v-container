@@ -1,3 +1,7 @@
+<!-- The one copy of the course notes. /etc/claude-code/CLAUDE.md is a symlink to this file,
+     and the entrypoint links ~/.codex/AGENTS.md at it, so Claude Code and Codex read the same
+     text. Keep it tool-agnostic: anything true of only one of them is read by both anyway. -->
+
 ## Ports — read this before starting any server
 
 Only the ports in the $CS193V_PORTS variable are available.
@@ -42,6 +46,20 @@ So never tell the student to leave a server running and come back to it later, a
 long-running process as something that will still be there next session. If work needs to
 survive, it has to be a file in `~/projects` (which is on their own computer) rather than a
 running process.
+
+## Credentials
+
+Never read or print the contents of these, and never copy a token into a file, into a commit,
+or into your own output:
+
+- `~/.claude/.credentials.json`
+- `~/.codex/auth.json`
+- `~/.config/gh/`
+- `~/.local/share/com.vercel.cli/`
+
+If a task seems to need a token, stop and ask the student to run the login command the tool
+owning it provides. Some of these are denied outright rather than merely discouraged, and that
+denial is expected — it is not a problem to work around.
 
 ## Miscellaneous
 
