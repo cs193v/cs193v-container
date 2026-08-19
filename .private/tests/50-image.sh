@@ -675,6 +675,47 @@ assert_contains "codex:installed-version-matches-the-pin" "$codex_want" "$(R 'co
 assert_ok "codex:system-bwrap-is-present" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'bwrap --version'"
 
+# ─── the managed policy, and proof that codex actually reads it ────────────────
+assert_ok "codex:managed-policy-present" \
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/codex/managed_config.toml'"
+assert_ok "codex:managed-policy-parses-in-the-image" \
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import tomllib;tomllib.load(open(1 and \\\"/etc/codex/managed_config.toml\\\",\\\"rb\\\"))\"'"
+# Readable by the student, since codex runs as the student; not writable, or the policy is
+# advisory. (sudo can still change it -- inherent to the sudo decision, and documented as such.)
+assert_eq "codex:managed-policy-is-readable-by-student" "ok" \
+    "$(R 'test -r /etc/codex/managed_config.toml && echo ok')"
+assert_eq "codex:managed-policy-not-student-writable" "ok" \
+    "$(R 'test ! -w /etc/codex/managed_config.toml && echo ok')"
+
+# `codex doctor` reports the EFFECTIVE policy, so this is a functional check rather than a file
+# check -- and it needs a positive control, because the two values the course ships are also
+# codex's own defaults. On their own these assertions would pass just as well against an image
+# carrying no policy at all, which is the "passes for the wrong reason" trap this suite records
+# elsewhere.
+# NO QUOTED PATTERNS in what R() runs: it hands the string to `sh -c`, so an inner "approval
+# policy" arrives as two arguments and grep reads the second as a filename. `-e` twice, and a dot
+# for the space, keeps the pattern a single shell word.
+record    "codex:doctor-sandbox-line" \
+          "$(R 'codex doctor 2>&1 | grep -e approval.policy -e filesystem.sandbox | tr -s " "' | tr '\n' ' ')"
+assert_contains "codex:doctor-reports-the-shipped-approval-policy" "OnRequest" \
+                "$(R 'codex doctor 2>&1 | grep -e approval.policy')"
+
+# THE CONTROL. A managed file that says something DIFFERENT must change what doctor reports; if it
+# does not, /etc/codex is not being read and the assertion above means nothing. Verified by hand
+# before it was written here: untrusted surfaces as UnlessTrusted.
+codex_probe="$(new_tmpdir)"
+printf 'approval_policy = "untrusted"\n' > "$codex_probe/managed_config.toml"
+assert_contains "codex:the-managed-policy-is-really-read" "UnlessTrusted" \
+    "$($VT_RUN --rm --network=none -v "$codex_probe/managed_config.toml:/etc/codex/managed_config.toml:ro" \
+       --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1 | grep -E "approval policy"' 2>&1)"
+rm -rf "$codex_probe"
+
+# approvals_reviewer is NOT asserted here, and that is a limitation rather than an oversight:
+# `codex doctor`, even with --all, never names the reviewer, so nothing in this suite can tell
+# `user` from `auto_review`. Only a live escalation shows who answers it -- MANUAL.md carries that
+# check. Worth knowing because codex ignores unknown keys in silence, so a future rename of this
+# key would leave the course shipping a setting that does nothing.
+
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
 # is seeded once on first mount and then never refreshed by a later image.

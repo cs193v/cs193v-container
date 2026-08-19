@@ -1,0 +1,46 @@
+# CS193V managed Codex policy.
+#
+# Lives at /etc/codex/managed_config.toml -- deliberately NOT in ~/.codex, which is a named
+# volume: a file placed there by the image is seeded once on first mount and then never
+# refreshed by a later image, and a student can edit it. In /etc it is part of the image layer,
+# so every --rebuild and every image update restore it. Same reasoning, and the same pair of
+# reasons, as /etc/claude-code/managed-settings.json next door.
+#
+# THE THREE KEYS BELOW ARE CODEX'S OWN DEFAULTS FOR THE FIRST TWO, AND NOT FOR THE THIRD.
+# Writing the defaults down is deliberate rather than redundant: it pins them against an
+# upstream default that moves, and it puts the course's posture in one readable file instead of
+# leaving a reader to infer it from an absence.
+#
+#   sandbox_mode = "workspace-write"
+#       The boundary. Codex may read anywhere and write inside the workspace; anything further
+#       is an escalation it has to ask about. On Linux this is enforced with bubblewrap, which
+#       needs a nested user namespace -- see the staff README's open item for why that may not
+#       hold inside rootless podman, and what codex does when it cannot get one.
+#
+#   approval_policy = "on-request"
+#       WHEN codex stops to ask: when it wants out of the sandbox. Not "untrusted", which asks
+#       about everything outside a built-in trusted set.
+#
+#   approvals_reviewer = "auto_review"
+#       WHO answers. `user` is the default and puts the question to the student; `auto_review`
+#       hands it to codex's reviewer subagent instead.
+#
+#       THIS IS A DELIBERATE DIVERGENCE from the Claude Code policy beside it, and it is the one
+#       thing in this file that is not simply a written-down default. managed-settings.json keeps
+#       Claude Code's permission prompts on the grounds that they are how a student learns what
+#       an agent wants to do -- and the same argument says a student should answer codex's
+#       escalations too. Course staff chose the reviewer subagent anyway. Recorded here rather
+#       than argued: whoever revisits this should know it was a decision and not an oversight.
+#
+# What is deliberately ABSENT:
+#   requirements.toml     - no HARD constraints are shipped. These are managed DEFAULTS, and a
+#                           student who edits ~/.codex/config.toml can still move them. Making
+#                           them unmovable is a separate decision, and the precedence between a
+#                           managed default and a student's own config is not something the
+#                           reference states -- see the staff README.
+#   [sandbox_workspace_write] and default_permissions
+#                         - the reference says not to combine either with sandbox_mode.
+#   MCP configuration     - none shipped, and not locked down either, matching Claude Code.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"

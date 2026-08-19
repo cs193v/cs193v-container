@@ -1171,6 +1171,47 @@ else fail "notes:under-200-lines" "$lines lines"; fi
 # against a real server and a real tunnel in 60-container.sh and 80-launcher-live.sh, which
 # cannot pass while the docs' advice is wrong in a way that matters.
 
+# ─── Codex managed policy ─────────────────────────────────────────────────────
+# /etc/codex/managed_config.toml, the analogue of managed-settings.json next door, and in /etc for
+# the same two reasons: ~/.codex is a named volume, so a file placed there by the image is seeded
+# once and never refreshed, and the student can edit it.
+CODEX_POLICY="$PRIVATE/files/codex/managed_config.toml"
+assert_file "codex:managed-config-exists" "$CODEX_POLICY"
+assert_ok   "codex:managed-config-is-valid-toml" \
+            python3 -c "import tomllib;tomllib.load(open('$CODEX_POLICY','rb'))"
+
+# THE EXACT KEY SET, not a subset, and the values with it. Two reasons this is asserted rather
+# than recorded. First, codex SILENTLY IGNORES a key it does not recognise -- verified against the
+# real binary: a bogus key leaves `codex doctor` reporting "config loaded" with no warning at all
+# -- so a typo is a policy that does nothing and says nothing, the same failure mode as a
+# Write(...) rule in managed-settings.json. Second, the reference says not to combine sandbox_mode
+# with `default_permissions` or `[sandbox_workspace_write]`, and an exact key set is what keeps
+# either from arriving later without anyone noticing. Asserted on the PARSED keys rather than by
+# grepping the file, because the file's own comments name both of those.
+codex_keys="$(python3 -c "
+import tomllib
+print(' '.join(sorted(tomllib.load(open('$CODEX_POLICY','rb')))))" 2>&1)" \
+    || codex_keys="the check itself failed: $codex_keys"
+assert_eq "codex:policy-has-exactly-the-three-keys" \
+          "approval_policy approvals_reviewer sandbox_mode" "$codex_keys"
+
+codex_values="$(python3 -c "
+import tomllib
+d = tomllib.load(open('$CODEX_POLICY','rb'))
+print('%s %s %s' % (d['sandbox_mode'], d['approval_policy'], d['approvals_reviewer']))" 2>&1)" \
+    || codex_values="the check itself failed: $codex_values"
+# approvals_reviewer = auto_review is a DELIBERATE DIVERGENCE from the Claude Code policy, which
+# keeps its prompts in front of the student on the grounds that answering them is the course's core
+# skill. Course staff chose the reviewer subagent for codex anyway; it is asserted here so the
+# divergence stays a decision on the record rather than drifting back by accident in either
+# direction. See the staff README.
+assert_eq "codex:policy-is-workspace-write-on-request-auto-review" \
+          "workspace-write on-request auto_review" "$codex_values"
+
+assert_ok "codex:containerfile-installs-the-managed-policy" \
+          grep -q 'install -m 0644 /tmp/cs193v-files/codex/managed_config.toml /etc/codex/managed_config.toml' \
+          $PRIVATE/Containerfile
+
 # ─── the credential stores: ONE list, three files ─────────────────────────────
 # Every credential store that gets a volume must also get a deny rule, or a login token lands in
 # an agent transcript the first time an agent globs the home directory.

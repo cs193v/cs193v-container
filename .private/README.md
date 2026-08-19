@@ -859,63 +859,57 @@ Playwright and Chromium (224 s), and a `CLAUDE_CODE_VERSION` bump, the pin most 
 not re-run the libraries. `--no-cache-dir` matters: pip's cache is 56 MB and would otherwise ship in
 the layer, the same reason `npm cache clean --force` runs in-layer two steps up.
 
-### Codex's sandbox posture — deferred, deliberately (issue #71)
+### ~~Codex's sandbox posture~~ — decided (issue #71)
 
-Codex ships on **its own defaults**, and `/etc/codex/` does not exist. That is a decision to
-postpone a decision, taken so staff can use the tool before choosing a posture for it, and this
-is the research so it does not have to be redone.
+**Resolved after staff used the tool.** `/etc/codex/managed_config.toml` now ships three keys, and
+`files/codex/managed_config.toml` carries the per-key reasoning:
 
-Codex has two independent knobs. `sandbox_mode` (`read-only` / `workspace-write` /
-`danger-full-access`) is the technical boundary; `approval_policy` (`untrusted` / `on-request` /
-`never` / `granular`) decides when it stops and asks. It defaults to `workspace-write` +
-`on-request`. Managed policy would go in `/etc/codex/managed_config.toml` (soft defaults) and
-`/etc/codex/requirements.toml` (hard constraints — `allowed_sandbox_modes`,
-`allowed_approval_policies`), which is the exact analogue of `/etc/claude-code/managed-settings.json`
-and, being in `/etc`, is restored by every `--rebuild` — unlike anything in the `cs193v-codex`
-volume.
-
-**The posture to match is Claude Code's, and Claude Code has no boundary here.** Its Bash sandbox
-is opt-in: nothing sets `sandbox.enabled` and nothing is in `/sandbox`'s project settings, so
-inside this container Claude Code can touch anything the student can, and **permission prompts are
-the only control**. That is the deliberate choice recorded in `managed-settings.json` — the
-container is the boundary, so loosening buys convenience rather than safety.
-
-Four things to know before writing a policy:
-
-- **The parity pair is `sandbox_mode = "danger-full-access"` + `approval_policy = "untrusted"`.**
-  `untrusted` is the analogue of Claude Code's default mode; `on-request` is the autonomous one.
-  Pairing full access with the default `on-request` leaves codex nothing to escalate out of, so it
-  largely **stops asking** — that is `--dangerously-skip-permissions` behaviour reached by
-  accident, and it is how to get parity wrong while believing you have it.
-- **Nested bubblewrap probably cannot work here, and Anthropic documents it for the same tool:**
-  "Bubblewrap fails to start inside a container: in an unprivileged container, bubblewrap cannot
-  mount a fresh `/proc` filesystem", with `enableWeakerNestedSandbox` as the workaround, to be used
-  "only when the outer container already provides the isolation boundary you need". That is rootless
-  podman, and codex's sandbox is the same `bwrap` doing the same nested mount. The configuration
-  everyone recommends for containers — `--cap-add SYS_ADMIN --security-opt seccomp=unconfined` — is
-  on the invariants list in `container.args` and is not available.
-- **A middle option needs no claim about the boundary at all:** ship only
-  `approval_policy = "untrusted"`. Prompts are then on whichever way the sandbox resolves, no branch
-  is silent, and `danger-full-access` never appears in a course file. It rests on one unverified
-  assumption — that `untrusted` still prompts under a bypassed sandbox — which a live session settles.
-- **Claude Code's own sandbox needs `bubblewrap` AND `socat`** on Linux (plus ripgrep and a seccomp
-  filter). The image now has bubblewrap, for codex's startup warning, so that dependency set is
-  half-provisioned. Harmless while the sandbox stays off; worth knowing rather than rediscovering.
-
-What to record while using it, on Ubuntu **and** on a Mac — a Mac runs the container inside podman's
-own VM, a different kernel with no host AppArmor policy in play, so a boundary that differs by
-platform is the failure this has to rule out:
-
-```
-bwrap --version                     # the apt copy executes at all
-codex                               # any bwrap warning? which sandbox does it report?
-codex exec 'create /home/student/projects/scratch.txt with the word ok'
-codex exec 'read /etc/hostname'
-codex exec 'run: sudo apt-get install -y sl'    # does it ask before escalating?
+```toml
+sandbox_mode       = "workspace-write"
+approval_policy    = "on-request"
+approvals_reviewer = "auto_review"
 ```
 
-Do it on a container that has not been tinkered with: a student's own `~/.codex/config.toml` lives
-in the volume, so `--rebuild` does **not** clear it and only `--rebuild --logout` does.
+The first two are codex's own defaults, written down rather than left implicit so an upstream
+default cannot move under the course. **The third is a deliberate divergence from the Claude Code
+policy beside it**, and the argument against it is on the record: `managed-settings.json` keeps
+Claude Code's prompts because answering them is the course's core skill, and the same reasoning
+says a student should answer codex's escalations. Course staff chose the reviewer subagent anyway,
+with the documented behaviour in hand. Recorded here so whoever revisits it knows it was a decision.
+
+Three things learned against the real binary, all of which shape what the suite can and cannot
+promise:
+
+- **`/etc/codex/managed_config.toml` really is read.** Proved by control rather than assumed: an
+  override saying `approval_policy = "untrusted"` makes `codex doctor` report `UnlessTrusted`
+  instead of `OnRequest`. `50-image.sh` runs exactly that probe, because the two values the course
+  ships are also codex's defaults — so without the control, those assertions would pass against an
+  image carrying no policy at all.
+- **codex ignores an unrecognised key in silence.** A bogus key leaves `codex doctor` reporting
+  "config loaded" with no warning, so a typo or an upstream rename is a policy that does nothing
+  and says nothing. That is why `10-static.sh` pins the exact key SET and the values, not a subset.
+- **Nothing can assert `approvals_reviewer`.** `codex doctor`, even with `--all`, never names the
+  reviewer, so no test can tell `user` from `auto_review`. Only a live escalation shows who
+  answers, and `MANUAL.md` carries that check. Combined with the silent-ignore behaviour above,
+  this is the one setting in the course that could quietly stop applying.
+
+What is still NOT shipped, and why:
+
+- **No `requirements.toml`.** These are managed DEFAULTS, so a student who edits
+  `~/.codex/config.toml` can still move them — and that file lives in the `cs193v-codex` volume,
+  which `--rebuild` does **not** clear (only `--rebuild --logout` does). Making the posture
+  unmovable is a separate decision. The precedence between a managed default and a student's own
+  config is stated nowhere in the reference; the enterprise page's ordering implies managed wins,
+  which if true would make the current file a pin rather than a default. Settle it the way the
+  read-check above was settled — a conflicting value and `codex doctor` — before relying on either
+  reading.
+- **Nested bubblewrap is still not proven to work here.** Anthropic documents the same tool failing
+  in an unprivileged container ("bubblewrap cannot mount a fresh `/proc`"), and the container flags
+  that would fix it are on the invariants list. `codex doctor` reports `filesystem sandbox
+  restricted` in this image, but it reports that for `read-only` too, so the label does not
+  distinguish a working `workspace-write` boundary from a coarser one. What a student would notice
+  is whether an escalation happens at all — which is now the reviewer subagent's business, not
+  theirs.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 
