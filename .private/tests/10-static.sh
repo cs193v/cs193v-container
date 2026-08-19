@@ -452,7 +452,50 @@ n="$(grep -cE '^bind -T copy-mode (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
      $PRIVATE/files/tmux/tmux.conf || true)"
 assert_eq  "tmux:six-copy-mode-tab-bindings" "6" "$n"
 # The escape hatch out of copy mode. Without it a stray scroll leaves a dead keyboard.
-assert_contains "tmux:copy-mode-any-key-escapes" "bind -T copy-mode Any copy-mode -q" "$tmux_conf"
+#
+# GUARDED, and the guard is the whole assertion. tmux's `Any` matches MOUSE events as well as
+# keystrokes, so unguarded it fired on the button press that begins every selection gesture and
+# scrolled the student to the bottom before they could select anything (#61). The equality form
+# is asserted literally because the obvious alternative is wrong: mouse_x is 0-based, so a click
+# in column 1 reports "0", which a truthiness test reads as FALSE and treats as a keystroke.
+assert_contains "tmux:copy-mode-any-key-escapes" \
+                'bind -T copy-mode Any if -F "#{==:#{mouse_x},}" { copy-mode -q }' "$tmux_conf"
+# The + NEW TAB chip must keep working while scrolled back, for the same reason the six tab keys
+# above are repeated in that table -- and it is the only route to a new tab that needs no keyboard
+# at all, so it is the one that matters most. Its click resolves to the pane the mouse is over,
+# which while scrolled back is a pane in copy mode; the tab LABELS need no such line, because a
+# click on one resolves to that tab's own pane, which is not in a mode.
+assert_contains "tmux:copy-mode-new-tab-chip" \
+                "bind -T copy-mode MouseDown1StatusRight" "$tmux_conf"
+# Copying while scrolled back must NOT cancel the mode. Cancelling returns the pane to the live
+# screen, so the student got the right text on the clipboard and was still thrown to the bottom the
+# moment they released the button -- the second half of #61, reported from a real terminal after the
+# `Any` guard above had fixed the press. The no-clear form is what holds the view still.
+# NO MOUSE-DRIVEN COPY PATH AT ALL, and this is the invariant that replaced two rounds of trying to
+# make one work. tmux can only reach a student's clipboard through OSC 52, and a terminal is free not
+# to implement that escape -- the one this course is taught from does not, measured by hand outside
+# any container. So selection is the terminal's job (SHIFT+drag, which never reaches tmux) and these
+# two assertions state that tmux does not attempt it: no copy commands, and no selection to copy.
+# Asserted over the CODE, not the file: the config deliberately names both removed commands in prose,
+# in a "what used to be here, so nobody rebuilds it by accident" note, and a whole-file grep would
+# fail on the documentation of the very invariant it is checking.
+conf_code="$(grep -v '^[[:space:]]*#' $PRIVATE/files/tmux/tmux.conf || true)"
+assert_not_contains "tmux:no-mouse-copy-path" "copy-pipe" "$conf_code"
+assert_not_contains "tmux:no-mouse-selection" "begin-selection" "$conf_code"
+# ...and the gesture that used to copy has to say what does work instead. One user option, because
+# six bindings display it and a student-facing string repeated six times drifts.
+assert_contains "tmux:copy-hint-names-shift" 'set -g @copy-hint "TO COPY: hold SHIFT' "$tmux_conf"
+# The clipboard override stays, and it is worth being clear about what it is FOR now that tmux copies
+# nothing: an APPLICATION in a tab writing its own OSC 52 (claude, vim, a student's program). tmux's
+# unaided write carries an EMPTY target, which xterm's ctlseqs defines as `s0` -- PRIMARY plus cut
+# buffer 0 -- so those writes went somewhere Ctrl+V never reads. With this override the app's own
+# target composes with the literal `c`: an app naming PRIMARY comes out as `\033]52;cp;...`, both
+# selections. Measured with a pane writing `\033]52;p;...`.
+#
+# KEEP %p1 IN THE STRING. The form circulated everywhere drops it, and tmux then emits no clipboard
+# write whatsoever rather than a wrong one -- silently. Measured both ways on a pty; see the note in
+# the config and tmux-harness/clipprobe.py, the only instrument here that can see the difference.
+assert_contains "tmux:osc52-names-the-clipboard" 'Ms=\\E]52;c%p1%s;%p2%s\\007' "$tmux_conf"
 
 # destroy-unattached MUST be off. `on` (which is what the upstream prototype sets) destroys
 # a session the moment its last client goes, which kills every pane and therefore every

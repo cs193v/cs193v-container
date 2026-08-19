@@ -176,9 +176,51 @@ hx_cmd() { hx_str "$1" "$2"; hx_enter "$1"; }   # type a shell command and run i
 # --- mouse injection (SGR 1006 protocol, what every modern emulator sends) ---
 #
 # Coordinates are 1-based, like the wire protocol: row 1 is the top line.
-hx_click() { # session row col
-  hx_str "$1" "$(printf '\033[<0;%d;%dM' "$3" "$2")"
-  hx_str "$1" "$(printf '\033[<0;%d;%dm' "$3" "$2")"
+# A click is a PRESS and a RELEASE, and on the wire they are two separate events. Splitting
+# them is not pedantry: tmux dispatches MouseDown1Pane the moment the button goes down, before
+# it can know whether a drag follows, and a press with no release is precisely what issue #61
+# was about. A helper that can only send whole clicks cannot express that test.
+#
+# The optional 4th argument is the SGR button code -- 0 is button 1, 2 is button 3 (right).
+hx_press()   { hx_str "$1" "$(printf '\033[<%d;%d;%dM' "${4:-0}" "$3" "$2")"; }  # session row col [button]
+hx_release() { hx_str "$1" "$(printf '\033[<%d;%d;%dm' "${4:-0}" "$3" "$2")"; }  # session row col [button]
+
+hx_click() { # session row col [button]
+  hx_press "$@"
+  hx_release "$@"
+}
+
+# Drag from (row1,col1) to (row2,col2): press, one motion per column across row1 towards col2,
+# one motion at the destination cell, release there. Motion with button 1 held is SGR code 32.
+#
+# THE EXPECTED STRINGS IN THE SCROLLBACK SELECTION TESTS WERE MEASURED AGAINST THIS EXACT
+# SEQUENCE, including the one-cell end behaviour it produces -- a same-row drag from 18 to 27
+# copies columns 18 to 26. That is a property of where the cursor ends up, not a defect to
+# correct here, but it does mean that "tidying" the sequence silently rewrites what those tests
+# assert. Re-measure them if you touch it.
+hx_drag() { # session row1 col1 row2 col2
+  local name="$1" r1="$2" c1="$3" r2="$4" c2="$5" c step
+  hx_press "$name" "$r1" "$c1"
+  if [ "$c1" -le "$c2" ]; then step=1; else step=-1; fi
+  for c in $(seq "$c1" "$step" "$c2"); do
+    hx_str "$name" "$(printf '\033[<32;%d;%dM' "$c" "$r1")"
+  done
+  hx_str "$name" "$(printf '\033[<32;%d;%dM' "$c2" "$r2")"
+  hx_release "$name" "$r2" "$c2"
+}
+
+# n clicks in the same cell. THE GAP BETWEEN THEM IS REQUIRED, not padding: tmux promotes a
+# press to SecondClick/DoubleClick/TripleClick off its own click timer, and pairs delivered
+# with no gap at all are not reliably promoted -- the test then silently exercises n ordinary
+# single clicks, which is a green run that proves nothing about double-clicking.
+hx_multiclick() { # session row col n
+  local name="$1" r="$2" c="$3" n="$4" i
+  for i in $(seq "$n"); do
+    hx_press "$name" "$r" "$c"
+    hx_release "$name" "$r" "$c"
+    sleep 0.06
+  done
+  sleep 0.4
 }
 hx_wheel_up() { # session row col [count]
   local n="${4:-3}"
@@ -187,6 +229,24 @@ hx_wheel_up() { # session row col [count]
 hx_wheel_down() {
   local n="${4:-3}"
   for _ in $(seq "$n"); do hx_str "$1" "$(printf '\033[<65;%d;%dM' "$3" "$2")"; done
+}
+
+# Wheel up until something is on screen, rather than guessing a scroll depth. "40 notches" is
+# really an assertion about how many lines a notch scrolls AND how much history happens to sit
+# above the target -- both of which move the moment the fixture above them changes. This polls
+# for the row the test actually wants.
+#
+# A notch is not always three lines: the FIRST wheel-up only ENTERS copy mode (that is tmux's
+# own root binding), and only the ones after it scroll.
+hx_scroll_to() { # session regex [max_notches]
+  local name="$1" re="$2" max="${3:-60}" i=0
+  while [ "$i" -lt "$max" ]; do
+    hx_cap "$name" | grep -qE "$re" && return 0
+    hx_wheel_up "$name" "$((HX_H / 2))" "$((HX_W / 2))" 1
+    i=$((i + 1))
+    sleep 0.05
+  done
+  hx_cap "$name" | grep -qE "$re"
 }
 
 # --- screen capture ---------------------------------------------------------

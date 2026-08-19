@@ -468,6 +468,44 @@ If `SHIFT+arrow` turns out not to be transmitted somewhere, that terminal is deg
 not broken: `CTRL+T` still opens tabs and clicking still switches them. Note it here rather
 than treating it as a release blocker.
 
+### §7.10 — SHIFT+drag, per terminal (#61)
+**This one cannot be automated even in principle**, and the reason is the mechanism itself: holding
+Shift makes the terminal suppress mouse reporting and select the glyphs it has already drawn, so
+nothing reaches tmux and there are no bytes for `65-tmux.sh` to inject. Its absence from the suite is
+the feature working. What the suite *can* prove, and does, is the other half: no tmux gesture copies
+anything and no clipboard sequence is ever emitted (`tmux-harness/clipprobe.py`).
+
+Selection is the terminal's job because tmux can only reach a clipboard through OSC 52, and a
+terminal is free not to implement it. **The machine this course is developed on does not** — measured
+by hand, no container involved:
+
+```sh
+printf '\033]52;c;%s\a' "$(printf CLIPTEST | base64)"   # then check the clipboard
+```
+
+In each of macOS Terminal.app, iTerm2, VS Code's terminal, Windows Terminal, GNOME
+Terminal/Ptyxis:
+
+| | Expect |
+|---|---|
+| plain drag in the pane | nothing is selected, and the amber hint names SHIFT+drag |
+| `SHIFT`+drag | the terminal's own selection appears |
+| ...then that terminal's copy key (`CTRL+SHIFT+C`, `⌘C`) | the text pastes into another app |
+| wheel back, then `SHIFT`+drag | selects the scrolled-back text on screen — **the gesture the whole design rests on** |
+| plain drag inside `claude`, and inside `nano` | reaches the app; no hint appears |
+| the `printf` above | record whether this terminal implements OSC 52 at all |
+
+**The modifier is the risk, and it is a real one.** The hint says `SHIFT`, which is what xterm, VTE,
+kitty, Alacritty, WezTerm and Ghostty use to bypass mouse reporting — but `Fn` and `Option` are both
+used in the wild, and this list was compiled from documentation rather than from hardware. If any
+mainstream terminal needs a different modifier, that is not a degraded case to note and move on
+from: the hint is now the *primary* instruction for copying text, so either `@copy-hint` in
+`files/tmux/tmux.conf` or the student paragraph in `CONTAINER-DESIGN.md` has to carry the exception.
+
+Also worth recording per terminal: a selection made by the terminal returns a soft-wrapped line
+**with** a newline at the wrap, because the terminal copies what it drew. tmux's own copy used to
+return one unbroken line. Nothing can be done about that from inside the container.
+
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other. Confirm a pre-existing distro

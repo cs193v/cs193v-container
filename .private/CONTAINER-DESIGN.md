@@ -414,9 +414,13 @@ actually are.
   and is passed through to your shell as an ordinary "move back one character".
 
   Your scrollback is 50,000 lines per tab and belongs to the container, not to your terminal
-  — so it survives switching tabs and coming back. Selecting with the mouse copies to your
-  own clipboard. If you would rather use your terminal's native selection, hold SHIFT while
-  dragging.
+  — so it survives switching tabs and coming back.
+
+  **To copy text, hold SHIFT while you drag**, then copy the way you always do in this
+  terminal (`CTRL+SHIFT+C`, or `⌘C` on a Mac). Dragging without SHIFT does nothing on
+  purpose: the container cannot reach your computer's clipboard, and holding SHIFT hands the
+  selection to your terminal, which can. It works the same way when you have scrolled back,
+  because your terminal is selecting what is on the screen in front of you.
 - **Closing your terminal window stops everything in it.** A dev server running in a tab stops
   when the window closes, and so does anything else you had going. This is the one thing worth
   knowing that is different from a plain shell: closing the window is not just leaving the room,
