@@ -331,6 +331,20 @@ worth more than being able to resume them by reopening it.
 
 ---
 
+## The two agents answer to different rules
+
+Claude Code asks **you** before it does things. That is deliberate — deciding what to allow is one
+of the skills this course is about — and the container is what makes saying yes survivable.
+
+Codex is set up differently, and you should know which is which. It runs with a workspace boundary:
+it may read widely, write inside the project you are working in, and anything beyond that counts as
+stepping outside. When it wants to step outside, **a reviewer decides rather than you** — course
+staff configured it that way in `/etc/codex/managed_config.toml`, which is part of the image, so a
+`--rebuild` restores it. Settings you put in `~/.codex/config.toml` yourself are your own and
+survive a rebuild; only `--rebuild --logout` clears them.
+
+Neither arrangement is a security boundary on its own. The container is.
+
 ## `sudo` works, and what that costs
 
 `sudo` needs no password inside the container. That is deliberate: the course would

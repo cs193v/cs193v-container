@@ -263,6 +263,29 @@ login — see B10, now fixed. Claude Code is installed as the student in
 `/home/student/.local/lib/node_modules`, which the student owns, so an update rewrites it in
 place. `npm:*` in `50-image.sh` holds that.
 
+### Codex's approval reviewer — the one setting nothing can assert
+`/etc/codex/managed_config.toml` ships `approvals_reviewer = "auto_review"`, and `codex doctor`
+never names the reviewer even with `--all`, so no test in the suite can tell `user` from
+`auto_review`. Only a live escalation shows who answers.
+
+Inside the container, logged in to codex, ask for something that needs to leave the workspace:
+```
+codex exec 'run: sudo apt-get install -y sl'
+codex exec 'append a line to /home/student/.bashrc'
+```
+*Expect:* the escalation is decided **without the student being asked** — the reviewer subagent
+answers it. If a prompt reaches the student instead, the setting is not in effect: codex ignores an
+unrecognised key in silence (verified), so an upstream rename would look exactly like this and
+nothing else would fail.
+*Also record* whether the sandbox stopped the command at all. `codex doctor` says `filesystem
+sandbox restricted`, but it says that for `read-only` too, and Anthropic documents bubblewrap being
+unable to mount a fresh `/proc` in an unprivileged container — so a write that simply succeeds
+outside `~/projects`, with no escalation, is the signal that there is no boundary here to escalate
+out of.
+*Automated:* that the file is present, parses, is student-readable and not student-writable, and
+that codex really reads `/etc/codex` at all — the last one by overriding the policy with a
+different value and watching `codex doctor` change (`50-image.sh`).
+
 ### §8.7 — a permission prompt in the wild
 Ask the agent to do something that triggers a prompt.
 *Expect:* wording a first-year student can act on. Record it — this is the moment the

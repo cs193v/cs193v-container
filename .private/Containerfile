@@ -504,14 +504,29 @@ RUN set -eux; \
 # no sandbox policy is shipped (see below) and codex therefore runs on its `workspace-write`
 # default and really does invoke bwrap.
 #
-# NO SANDBOX POLICY IS SHIPPED, deliberately, and /etc/codex does not exist. codex reads managed
-# defaults from /etc/codex/managed_config.toml and hard constraints from
-# /etc/codex/requirements.toml -- the exact analogue of /etc/claude-code/managed-settings.json --
-# and both are left absent for now so staff can use the tool on its own defaults before choosing
-# a posture. The staff README's open items records what that decision will need, including the
-# trap: `danger-full-access` paired with codex's default `approval_policy = "on-request"` leaves
-# nothing to escalate out of, so it largely stops asking. Note also that a student's own
-# ~/.codex/config.toml lives in a volume, so --rebuild does not clear it; --rebuild --logout does.
+# THE SANDBOX POLICY IS SHIPPED, in /etc/codex/managed_config.toml, installed by layer 9 -- the
+# analogue of /etc/claude-code/managed-settings.json, and in /etc for the same two reasons:
+# ~/.codex is a named volume, so a file placed there is seeded once and never refreshed, and the
+# student can edit it. See files/codex/managed_config.toml for what each key is for; the short
+# version is `workspace-write` + `on-request` (codex's own defaults, written down so they cannot
+# drift under us) and `approvals_reviewer = "auto_review"`, which is a deliberate divergence from
+# the Claude Code policy beside it and is recorded as one.
+#
+# TWO THINGS THAT BITE, both verified against the real binary rather than reasoned about:
+#
+#   * codex IGNORES A KEY IT DOES NOT RECOGNISE, in silence. A bogus key leaves `codex doctor`
+#     reporting "config loaded" with no warning, so a typo or an upstream rename is a policy that
+#     does nothing and says nothing. Layer 9 parses the TOML, 10-static.sh pins the exact key set
+#     and values, and 50-image.sh proves codex really reads /etc/codex by overriding it with a
+#     DIFFERENT value and watching doctor's output change. That last one is the only assertion of
+#     the three that could not pass against an image carrying no policy at all.
+#   * NOTHING CAN ASSERT approvals_reviewer. `codex doctor`, even with --all, never names the
+#     reviewer, so no test here can tell `user` from `auto_review`; only a live escalation shows
+#     who answers. MANUAL.md carries that check.
+#
+# These are managed DEFAULTS, not hard constraints: no requirements.toml is shipped, and a
+# student's own ~/.codex/config.toml lives in a volume that --rebuild does NOT clear (only
+# --rebuild --logout does), so anything they set there survives a rebuild.
 # ─────────────────────────────────────────────────────────────────────────────
 ####> Installing Codex...
 ARG CODEX_VERSION=0.148.0
@@ -721,6 +736,9 @@ RUN set -eux; \
     install -d -m 0755 /etc/claude-code; \
     install -m 0644 /tmp/cs193v-files/claude-code/managed-settings.json /etc/claude-code/managed-settings.json; \
     python3 -c "import json;json.load(open('/etc/claude-code/managed-settings.json'))"; \
+    install -d -m 0755 /etc/codex; \
+    install -m 0644 /tmp/cs193v-files/codex/managed_config.toml /etc/codex/managed_config.toml; \
+    python3 -c "import tomllib;tomllib.load(open('/etc/codex/managed_config.toml','rb'))"; \
     install -m 0644 /tmp/cs193v-files/profile.d/10-cs193v-shell.sh /etc/profile.d/10-cs193v-shell.sh; \
     install -m 0644 /tmp/cs193v-files/profile.d/20-cs193v-welcome.sh /etc/profile.d/20-cs193v-welcome.sh; \
     install -o student -g student -m 0644 /tmp/cs193v-files/bash_logout /home/student/.bash_logout; \
