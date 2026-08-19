@@ -298,9 +298,19 @@ mkdir -p "$RACE_OUT"
 #
 # Feeding `sleep 600` makes all four hold their session, so exactly one CAN win. `$!` after a
 # pipeline is its last element, which is script, so the kills at the end land on the right pids.
+#
+# THE LEADING BARE ENTER IS LOAD-BEARING, and leaving it out is what made this group flaky at ~14%
+# of runs. acknowledge_warnings READS A LINE whenever the launcher warned, and here a warning is
+# systematic rather than incidental: four launches race for the forwarded host ports, only one ssh
+# master can bind them, so three of the four are told those ports are in use. Whichever of those
+# three wins the SESSION then had its `sleep 600` eaten by the prompt, held nothing, ended early,
+# and a sibling legitimately won -- 2 of 4 refusals with the one-session invariant never broken.
+# Measured: 3 failures in 21 runs unfixed against 0 in 20 fixed, and in a failing run sampled from
+# inside the container tmux never had more than ONE session. LB() above has fed this same leading
+# ENTER since #19 and for this same reason; this group was written without it.
 RACE_PIDS=''
 for i in 1 2 3 4; do
-    printf 'sleep 600\n' | timeout 120 script -q -c "$REPO/cs193v" /dev/null >"$RACE_OUT/$i" 2>&1 &
+    printf '\nsleep 600\n' | timeout 120 script -q -c "$REPO/cs193v" /dev/null >"$RACE_OUT/$i" 2>&1 &
     RACE_PIDS="$RACE_PIDS $!"
 done
 refused_count() { grep -l 'already have a CS193V session' "$RACE_OUT"/* 2>/dev/null | grep -c . || true; }
@@ -309,6 +319,16 @@ three_refused() { [ "$(refused_count)" = 3 ]; }
 # the assertion -- the count is read and asserted below either way.
 wait_until 90 three_refused || true
 refused="$(refused_count)"
+# THE HARNESS REALLY IS HOLDING THE SESSION, asserted rather than assumed, and this is what makes
+# the count below mean what it claims. container_pgrep rather than E(), for the reason its own
+# header gives: asked through a shell, the pattern matches that shell and the answer is always yes.
+if container_pgrep 'sleep 600'; then
+    pass "live:the-race-really-held-its-session"
+else
+    fail "live:the-race-really-held-its-session" \
+         "the command fed to hold the winner's session is not running inside the container, so the
+four launches serialized rather than collided and the count below is not measuring the race."
+fi
 assert_eq "live:concurrent-launches-still-one-container" "1" "$(ours_existing)"
 assert_eq "live:concurrent-launches-do-not-recreate" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
@@ -321,10 +341,14 @@ if [ "$refused" = 3 ]; then
     pass "live:exactly-one-of-four-concurrent-launches-wins"
 else
     fail "live:exactly-one-of-four-concurrent-launches-wins" \
-         "$refused of 4 launches were refused, want exactly 3. Fewer means two sessions were handed
-out in one container -- most likely the tmux duplicate-session claim in cs193v-shell regressed, since
-that is the only thing breaking the tie once two launches both see a stopped container. Four means
-every launch was refused and nobody could work. Transcripts are in $RACE_OUT."
+         "$refused of 4 launches were refused, want exactly 3.
+READ live:the-race-really-held-its-session FIRST, because fewer than three has two very different
+causes and that assertion tells them apart. If it FAILED, the winner was not holding its session, so
+the four serialized instead of colliding and a sibling won legitimately -- a fault in this harness,
+not in the launcher. If it PASSED, two launches really were handed a session in one container, which
+is what #41 forbids, and the tmux duplicate-session claim in cs193v-shell is where to look. Four
+means every launch was refused and nobody could work. Transcripts are in $RACE_OUT; the count of
+them carrying the welcome banner is how many launches got a shell."
 fi
 # shellcheck disable=SC2086
 [ -n "$RACE_PIDS" ] && kill -9 $RACE_PIDS 2>/dev/null
