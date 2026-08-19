@@ -1429,24 +1429,116 @@ assert_not_match "build-failed:no-spinner-frame-left-behind" '[⣾⣽⣻⢿⡿�
 #
 # ASSERTED ON A MID-BUILD SCREEN, which needs its own helper: both endings take the box away, so
 # the final screen -- the form every other screen assertion in this file reads -- cannot answer a
-# single question about it. Frames end with ESC[J (see meter_draw) and the LAST of those is
-# meter_stop closing the block, so the frame before it is the last one that still had a box on
-# the screen. Derived from the protocol rather than by hunting for box art, which on the failure
-# path would find the STOP box instead.
+# single question about it. Frames end with ESC[J (see meter_draw), so the transcript can be cut
+# at any frame boundary and replayed.
+#
+# WHICH FRAME, AND THIS PARAGRAPH USED TO ARGUE THE OTHER WAY. It said the frame to take was the
+# one before the last ESC[J -- derived from the protocol "rather than by hunting for box art,
+# which on the failure path would find the STOP box instead". The protocol does not in fact say
+# how many frames follow the last boxed one (#56), and the objection it raised against searching
+# for the box turned out to be answerable: the thing to search for is the TITLELESS lid, which no
+# message box can produce. So the selection is content-derived now, and the reason the old
+# argument gave for not doing that is what TAILBOX_LID is for.
+
+# THE TITLELESS LID IS THIS BOX'S SIGNATURE, and it is what tells it apart from a message box on
+# the same screen. box() draws "┏━━ STOP " and "┏━━ Build Successful! "; this one has no title, so
+# a run of bars straight after the corner can only be this.
+#
+# DEFINED ABOVE render_pty_mid because that function now selects on it.
+TAILBOX_LID='┏━━━━'
+
 render_pty_mid() {                    # transcript on stdin -> the prefix through the last box frame
     python3 -c '
 import sys
 raw = sys.stdin.buffer.read()
 mark = b"\x1b[J"
+lid = sys.argv[1].encode("utf-8")
 parts = raw.split(mark)
-keep = parts[:-2] if len(parts) > 2 else parts[:1]
-sys.stdout.buffer.write(mark.join(keep) + mark)'
+# THE LAST FRAME THAT ACTUALLY DREW THE BOX, found by looking for the lid rather than by counting
+# back from the end. This was `parts[:-2]` -- "the frame before the last ESC[J" -- which is the
+# boxed one only when EXACTLY ONE frame follows it, and how many follow is a matter of timing:
+# meter_stop draws the closing frame, and anything that redraws between the last line of the build
+# and that close adds another. So a shift of one in the trailing count changed WHICH box six
+# assertions were reading, and the wrong answer is a correctly drawn box that is simply older --
+# which is why nothing downstream can notice it. See the group below for what that group of tests
+# does and does not claim about the flake #56 reports.
+#
+# parts[i] is the text between mark i-1 and mark i, so joining parts[:i+1] and re-adding the mark
+# reproduces the transcript through the frame that ended at mark i. parts[-1] is left out of the
+# search: it is whatever followed the final mark, and no mark terminates it.
+boxed = [i for i, part in enumerate(parts[:-1]) if lid in part]
+if boxed:
+    keep = parts[:boxed[-1] + 1]
+else:
+    # NO FRAME DREW A BOX AT ALL, which is a real answer rather than a failure: three assertions
+    # here run the launcher in a terminal too small for the box and need a mid-build screen to
+    # show that it is absent. Fall back to the positional rule so those read what they always did.
+    keep = parts[:-2] if len(parts) > 2 else parts[:1]
+sys.stdout.buffer.write(mark.join(keep) + mark)' "$TAILBOX_LID"
 }
 
-# THE TITLELESS LID IS THIS BOX'S SIGNATURE, and it is what tells it apart from a message box on
-# the same screen. box() draws "┏━━ STOP " and "┏━━ Build Successful! "; this one has no title, so
-# a run of bars straight after the corner can only be this.
-TAILBOX_LID='┏━━━━'
+# ─── render_pty_mid picks the frame by content, not by position (#56) ──────────
+# The selector is the shared dependency of six assertions at three call sites, and it is worth
+# testing directly because the thing it can get wrong is invisible in all six: it returns a
+# perfectly drawn box that is simply an OLDER one, and every assertion then reads a screen that
+# looks right and predates the line it was asked about.
+#
+# SYNTHETIC TRANSCRIPTS, not a launcher run. The bug is a function of how many frames follow the
+# last boxed one, and that is exactly what a real run will not hold still -- #56 records ten
+# iterations standalone, ten under four CPU burners and ten on main, all of which passed, against
+# one failure inside a full suite run. So the count is supplied here instead of raced for.
+#
+# WHAT THIS DOES AND DOES NOT CLAIM. It settles the selector's contract: given a transcript, the
+# frame it returns is the last one that drew a box, whatever follows it. It does NOT reproduce the
+# observed flake, and should not be read as having done so -- #56 could not force that failure in
+# thirty attempts, and its other candidate mechanism is a last boxed frame whose CONTENT lagged the
+# log, which no choice of frame can repair. That half is what the `run_delay 0.3` at all three call
+# sites is for. Two independent mitigations for one observation, because the observation is a
+# single data point and only one of the two can be tested deterministically.
+#
+# Two rows per frame, redrawn in place the way meter_draw does it: up two, carriage return, write
+# both rows again, then ESC[J. That is the smallest thing render_pty will model as a block being
+# overdrawn, which is what makes "the newest frame wins on screen" true at all.
+MID_J="$(printf '\033[J')"
+mid_frame() {                         # mid_frame ROW2 -> one two-row frame, cursor back at the top
+    printf '\033[2A\rbar\n%s\n' "$1"
+}
+# oldest first: the box exists for three frames but its CONTENT only changes on the third, which
+# is the every-third-frame refresh that makes the off-by-one selectable in the first place.
+mid_boxed="$(mid_frame "$TAILBOX_LID STALE-BOX")$MID_J$(mid_frame "$TAILBOX_LID STALE-BOX")$MID_J$(mid_frame "$TAILBOX_LID FRESH-BOX")"
+mid_close="$(mid_frame 'CLOSED')"
+mid_extra="$(mid_frame 'CREATING')"
+mid_tail='┏━━ Build Successful! ━━┓'
+
+mid_screen() { printf '%s' "$1" | render_pty_mid | render_pty; }
+
+# ONE trailing frame -- the shape the positional rule assumed, and the one it got right. Kept as
+# the control: a fix that broke this would be trading one off-by-one for another.
+one="$(mid_screen "$mid_boxed$MID_J$mid_close$MID_J$mid_tail")"
+assert_contains "mid:with-one-frame-after-the-box-the-fresh-box-is-picked" "FRESH-BOX" "$one"
+assert_not_contains "mid:with-one-frame-after-the-box-no-stale-box-survives" "STALE-BOX" "$one"
+
+# TWO trailing frames -- the shape that produced the observed failure. The extra frame is not
+# hypothetical: #38 made container creation an unlabelled run_timeout call returning in ~10ms
+# where the old poll loop took ~100ms, which removed about one animator frame of slack.
+two="$(mid_screen "$mid_boxed$MID_J$mid_extra$MID_J$mid_close$MID_J$mid_tail")"
+assert_contains "mid:with-two-frames-after-the-box-the-fresh-box-is-still-picked" "FRESH-BOX" "$two"
+assert_not_contains "mid:the-selected-screen-is-not-a-later-frame" "CREATING" "$two"
+assert_not_contains "mid:the-selected-screen-is-never-the-closing-frame" "CLOSED" "$two"
+# THE SAME SCREEN EITHER WAY, which is the property that makes the six assertions downstream
+# independent of timing rather than merely lucky.
+assert_eq "mid:the-trailing-frame-count-does-not-change-the-answer" "$one" "$two"
+
+# AND WHEN NOTHING DREW A BOX, the fallback still answers with a mid-build screen rather than
+# with the last one: tailbox:absent-on-a-very-short-terminal and its two siblings assert that no
+# box is there, and they can only mean it about a frame from DURING the build.
+none="$(mid_screen "$(mid_frame 'EARLY')$MID_J$(mid_frame 'MIDDLE')$MID_J$mid_close$MID_J$mid_tail")"
+assert_contains     "mid:with-no-box-anywhere-it-falls-back-to-a-mid-build-frame" "MIDDLE" "$none"
+assert_not_contains "mid:the-fallback-does-not-reach-the-closing-frame" "CLOSED" "$none"
+# A transcript with no ESC[J at all takes the len(parts) > 2 arm and must not crash or come back
+# empty -- the piped launcher draws no meter, and that is the transcript it produces.
+assert_contains "mid:a-transcript-with-no-frames-comes-back-whole" "NOFRAMES" \
+                "$(printf 'NOFRAMES' | render_pty_mid)"
 
 # A 300-column line, built without seq or printf tricks so it reads the same on a Mac.
 tailbox_long='LONG:'
@@ -1623,6 +1715,13 @@ tailbox_at() {                        # tailbox_at ROWS COLS -> the mid-build sc
     shim_new
     shim_set state absent
     shim_set build_delay 0.05
+    # THE THIRD CALL SITE, and until #56 the only one of the three without this. The selector above
+    # no longer counts frames from the end, so a shift in the trailing count cannot move which box
+    # is read -- but a build shorter than one box refresh can still produce NO complete box frame
+    # at all, and then there is nothing for a content-derived selector to find and the fallback
+    # returns a boxless screen. shrinks-to-fit-a-short-terminal asserts a row COUNT, so that would
+    # read as 0 rows rather than as the wrong box. Cheap, and it makes all three sites agree.
+    shim_set run_delay 0.3
     shim_set build_out "$tailbox_out"
     printf '#!/bin/sh\nexit 1\n' > "$SHIM/tput"
     chmod +x "$SHIM/tput"
