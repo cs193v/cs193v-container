@@ -664,18 +664,31 @@ real VTE and **discards scrollback** — 40 lines in, 10 retained. tmux was reje
 same breath and "for the same class of cost", on the grounds that it breaks the terminal's
 own scrollback and needs Shift to select text.
 
-That second rejection was the wrong reading, and a prototype settled it by measurement
-rather than argument. tmux does not *break* scrollback, it *replaces* it: 50,000 lines per
-tab, kept by tmux instead of by the terminal, where the DECSTBM route genuinely discarded
-lines. And Shift+drag is not a workaround imposed on the student, it is the escape hatch —
-plain drag copies through OSC 52 and reaches the same system clipboard, with Shift+drag
-still available for anyone who wants their terminal's own selection. So the frame is now
-what the container actually has: a title bar and a tab bar, always on screen, which is what
-issue #4 asked for and could not previously be built.
+That second rejection was half right, and it took issue #61 and three rounds of measurement
+to establish which half. tmux does not *break* scrollback, it *replaces* it: 50,000 lines
+per tab, kept by tmux instead of by the terminal, where the DECSTBM route genuinely
+discarded lines. So the frame is now what the container actually has: a title bar and a tab
+bar, always on screen, which is what issue #4 asked for and could not previously be built.
+
+**But "needs Shift to select text" was correct, and this file said otherwise for a while.**
+It claimed Shift+drag was merely an alternative — "plain drag copies through OSC 52 and
+reaches the same system clipboard". That is true only on a terminal that implements OSC 52,
+and a terminal is free not to. **The machine this container is developed on does not**:
+`printf '\033]52;c;'"$(printf CLIPTEST | base64)"'\a'` typed straight into it, with no
+container anywhere, leaves the clipboard empty. Two rounds of #61 fixed a tmux-side
+selection that held the view still and copied exactly the right characters, and it made no
+difference to anyone on such a terminal — the copy had nowhere to go, while the message said
+`COPIED to the clipboard`.
+
+So mouse selection is gone from tmux entirely (see Part 3 of `files/tmux/tmux.conf`): a drag
+selects nothing and displays the gesture that does work. Shift+drag is not the escape hatch,
+it is **the route**, and the cost the prototype named is the cost we pay. What is kept is the
+half that was never in doubt: an application's own OSC 52 still passes through, so a program
+that copies to the clipboard still can — on a terminal that implements it.
 
 What did *not* get overruled is the rest of that prototype's cost, and it is worth knowing
-what was paid. The configuration is 500 lines because all four key tables are emptied and
-rebuilt: turning `mouse on` after `unbind -a -T root` leaves a session where the wheel
+what was paid. The configuration runs to several hundred lines because all four key tables are
+emptied and rebuilt: turning `mouse on` after `unbind -a -T root` leaves a session where the wheel
 enters a modal copy mode with a dead keyboard and no key that exits, which is the worst
 failure available to a beginner. `.private/files/tmux/tmux.conf` documents each trap where
 it sits.

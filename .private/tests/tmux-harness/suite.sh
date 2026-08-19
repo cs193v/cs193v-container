@@ -50,6 +50,9 @@ probe_struct() {
 probe_win() { it display-message -p -t cs193v '#{window_index}' 2>/dev/null; }
 probe_name() { it display-message -p -t cs193v '#{window_name}' 2>/dev/null; }
 probe_mode() { it display-message -p -t cs193v '#{pane_in_mode}' 2>/dev/null; }
+# How far back the pane is scrolled, in lines. EMPTY when the pane is not in a mode, which is why
+# every check that reads it pairs it with probe_mode rather than trusting it alone.
+probe_pos() { it display-message -p -t cs193v '#{scroll_position}' 2>/dev/null; }
 probe_wincount() { it list-windows -t cs193v 2>/dev/null | wc -l | tr -d ' '; }
 
 # ============================================================================
@@ -503,8 +506,7 @@ fi
 for target in "the tab bar:10:1" "inside the terminal:20:12"; do
   what="${target%%:*}"; rest="${target#*:}"; cx="${rest%:*}"; cy="${rest##*:}"
   before="$(probe_struct)"
-  hx_str "$S" "$(printf '\033[<2;%d;%dM' "$cx" "$cy")"
-  hx_str "$S" "$(printf '\033[<2;%d;%dm' "$cx" "$cy")"
+  hx_click "$S" "$cy" "$cx" 2          # button 3 == SGR code 2
   hx_settle 1                         # a DURATION: the claim is that NO menu opened
   scr="$(hx_cap "$S")"
   if [ "$(probe_struct)" = "$before" ] &&
@@ -548,8 +550,9 @@ hx_expect_contains "scrolling back announces itself" "$(hx_cap "$S" | sed -n 1p)
 
 # tmux draws a position indicator -- "[0/0]", i.e. [scroll_position/history_size] -- in the top
 # right of any pane in copy mode. It is informative for a tmux user and pure jargon for a beginner,
-# and it also appears when merely DRAGGING TO SELECT, since that enters copy mode too. Turned off
-# via copy-mode-position-format (tmux 3.6+).
+# and it used to appear when merely dragging to select, since that entered copy mode too -- which no
+# longer happens, because a drag no longer selects anything (see the section on that below). Turned
+# off via copy-mode-position-format (tmux 3.6+).
 indicator="$(hx_cap "$S" | grep -oE '\[[0-9]+/[0-9]+\]' | head -1)"
 if [ -z "$indicator" ]; then
   hx_pass "no [N/M] copy-mode position indicator is shown"
@@ -609,48 +612,291 @@ hx_expect_eq "scrollback depth is configured" \
              "$(it show-options -gv history-limit)" "50000"
 
 # ============================================================================
-hx_section "R6  clipboard: selection reaches the host via OSC 52"
-hx_tmux set-buffer -b probe "" 2>/dev/null || true
-hx_cmd "$S" 'clear; echo COPYME_XYZ'
-# WAIT FOR THE OUTPUT, NOT FOR THE ECHO. `hx_wait "$S" 'COPYME_XYZ'` matches the moment the
-# command line is TYPED -- the needle is in what the shell echoes back -- so hx_find below
-# then locates the text on the prompt row, `clear` wipes that row, and the drag selects
-# nothing. A 0.8 s settle used to hide this by outlasting the race; on a slower machine it
-# would not have. Dropping the command line from the capture makes the wait mean what it says.
-hx_until_ok "hx_cap $S | grep -v 'clear;' | grep -q COPYME_XYZ" 8
-if loc="$(hx_find "$S" "COPYME_XYZ")"; then
-  set -- $loc
-  row="$1"; col="$2"
-  hx_str "$S" "$(printf '\033[<0;%d;%dM' "$col" "$row")"
-  for c in $(seq $((col + 1)) $((col + 10))); do
-    hx_str "$S" "$(printf '\033[<32;%d;%dM' "$c" "$row")"
-  done
-  hx_str "$S" "$(printf '\033[<0;%d;%dm' "$((col + 10))" "$row")"
-  hx_until_ok "hx_tmux show-buffer 2>/dev/null | grep -q COPYME" 6
-  if hx_tmux show-buffer 2>/dev/null | grep -q 'COPYME'; then
-    hx_pass "drag-selection copies to the host clipboard via OSC 52"
-  else
-    hx_fail "drag-selection copies to the host clipboard via OSC 52" \
-            "host clipboard: [$(hx_tmux show-buffer 2>/dev/null | head -1)]"
-  fi
-  hx_expect_eq "the selection gesture leaves no lingering mode" "$(probe_mode)" "0"
+hx_section "R6  the mouse does not select text -- the terminal does (#61)"
+#
+# WHAT THIS SECTION ASSERTS IS AN ABSENCE, and that is the point. Two rounds of #61 made a
+# tmux-side selection work correctly -- the right characters, the view held still -- and it made no
+# difference, because a tmux-side copy can only reach a student's clipboard through OSC 52 and the
+# terminal this course is taught from does not implement that escape. Measured by hand, outside any
+# container: `printf '\033]52;c;'"$(printf CLIPTEST | base64)"'\a'` leaves the clipboard empty.
+#
+# So selection was handed back to the terminal, where SHIFT+drag has always worked, and the mouse
+# gestures now do nothing except say so. That makes tmux's own paste buffer the thing to watch: it
+# must stay EMPTY after every gesture, in the scrollback and at a live prompt alike. A check that
+# looked for the right text would have passed all along; only a check that demands nothing at all
+# can tell this design from the one it replaced.
+#
+# SHIFT+drag ITSELF IS NOT TESTABLE FROM IN HERE, and cannot be: holding Shift makes the terminal
+# suppress mouse reporting, so nothing reaches tmux and there are no bytes to inject. Its absence
+# from this suite is the mechanism working, not a gap. The manual matrix in MANUAL.md covers it.
+n0="$(probe_wincount)"
+hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
+hx_until_ne 'probe_wincount' "$n0" 6
+hx_wait "$S" '\$' 8 || true
 
-  # A selection drag enters copy mode internally, which used to trigger the SCROLLED BACK
-  # banner -- so highlighting a word told the student something about scrolling, which is the
-  # wrong thing to say. Releasing the mouse also copies and clears the highlight, which looks
-  # like "it unselected itself and did nothing". Both are now regression-tested: the drag must
-  # say COPIED, and must never mention scrolling.
-  chrome="$(hx_cap "$S" | head -2)"
-  hx_expect_contains "releasing a drag says it COPIED" "$chrome" "COPIED"
-  hx_expect_absent "a selection drag never mentions scrolling" "$chrome" "SCROLLED BACK"
-  hx_expect_contains "the copy notice points at SHIFT+drag as the alternative" "$chrome" "SHIFT"
-  hx_check_colors "$S" "copy notice" --grep "COPIED" --require-explicit
-  hx_gone "$S" 'COPIED' 8 || true
-  hx_expect_absent "the copy notice expires on its own too" "$(hx_cap "$S" | head -2)" "COPIED"
+# The marker is assembled from $M at runtime so the ECHOED COMMAND LINE does not contain it: crow
+# searches the visible screen, and once the fixture is scrolled back into view the typed command is
+# on screen too, so a literal marker in the command would be matched first and every gesture would
+# aim at the wrong row. selftest.sh uses the same trick.
+#
+# 35 filler lines, which is more than the ~26 rows a pane has under the chrome: the fixture has to
+# be genuinely off-screen (asserted below) and no further back than that, because every case rewinds
+# to it and the wheel costs a round trip per notch.
+hx_cmd "$S" 'clear; M=SELECT; printf "%-10s alpha beta gamma delta\n" "${M}_ME"; for i in $(seq 1 35); do echo "FILL_$i"; done'
+hx_wait "$S" 'FILL_35' 15 || true
+hx_expect_absent "the selection fixture starts off-screen, in the scrollback" \
+                 "$(hx_cap "$S")" "SELECT_ME"
+
+# PIN THE SECTION TO ITS OWN TAB, and read the mode from that tab by number rather than from
+# "whichever tab is current". Several checks here click the TAB BAR, and a click that lands on a tab
+# label switches tabs -- correctly, via the root table, because a click on another tab's label
+# resolves to that tab's pane, which is not in a mode. probe_mode would then report the wrong pane
+# and the rest of the section would quietly measure a tab that was never scrolled back. That is not
+# hypothetical: it is what this section did until the empty-bar-space click below stopped being
+# aimed at a magic column.
+cwin="$(probe_win)"
+cmode() { it display-message -p -t "cs193v:$cwin" '#{pane_in_mode}' 2>/dev/null; }
+cpos()  { it display-message -p -t "cs193v:$cwin" '#{scroll_position}' 2>/dev/null; }
+crow()  { hx_cap "$S" | awk -v n="$1" '$0 ~ n {print NR; exit}'; }
+ccopy() { it show-buffer 2>/dev/null; }
+# Rewind to the fixture. Three things, and each one was a bug in this section before it was one of
+# its rules:
+#
+#   * EMPTY THE BUFFER FIRST, or a gesture that copies nothing at all -- which is now every gesture
+#     -- inherits the previous case's clipboard and passes on it.
+#   * RESET TO THE LIVE BOTTOM FIRST, so every case starts from the same scroll position instead of
+#     from wherever the last gesture left the pane. Without this, hx_scroll_to returns without
+#     scrolling when the fixture is still on screen, and scrolls its full ceiling when the pane is
+#     deep in the history. `send-keys -X cancel` is the harness resetting state between cases, not
+#     part of what is under test; it errors harmlessly when the pane is not in a mode.
+#   * FAIL, not note, if the fixture cannot be brought back. hx_note goes to the suite's stdout,
+#     which 65-tmux.sh writes to a temp file and discards -- only hx_emit rows reach the report.
+cback() {
+  it delete-buffer 2>/dev/null || true
+  it select-window -t "cs193v:$cwin" 2>/dev/null || true
+  it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
+  hx_settle 0.2
+  hx_scroll_to "$S" 'SELECT_ME' 40 || hx_fail "the fixture can be rewound into view" \
+      "hx_scroll_to gave up after 40 notches; the gesture that follows would aim at the wrong row"
+  hx_settle 0.3
+}
+
+# --- the three selection gestures, in the scrollback -------------------------
+# Each one: nothing copied, the view exactly where it was, and the hint on screen. The drag is the
+# gesture from the issue's own steps; the two multi-clicks are separate KEYS (SecondClick1Pane and
+# friends) rather than variations of it, which is why they get their own checks rather than a loop
+# over one.
+cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
+hx_drag "$S" "$cr" 18 "$((cr + 3))" 20
+hx_settle 0.8
+hx_expect_eq "a drag in the scrollback copies NOTHING" "$(ccopy)" ""
+hx_expect_eq "a drag in the scrollback leaves the pane scrolled back" "$(cmode)" "1"
+hx_expect_eq "a drag in the scrollback does not move the view" "$(cpos)" "$cstart"
+hx_expect_contains "a drag in the scrollback explains SHIFT+drag instead" \
+                   "$(hx_cap "$S" | head -2)" "hold SHIFT"
+
+cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
+hx_multiclick "$S" "$cr" 16 2
+hx_settle 0.6
+hx_expect_eq "double-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
+hx_expect_eq "double-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+hx_expect_contains "double-clicking explains SHIFT+drag too" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+
+cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
+hx_multiclick "$S" "$cr" 16 3
+hx_settle 0.6
+hx_expect_eq "triple-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
+hx_expect_eq "triple-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+
+# --- and at a live prompt ----------------------------------------------------
+# Same three gestures, the other arm of every guard in Part 3. The mode check is the one that would
+# catch a copy path sneaking back in through copy-mode: a selection used to enter it.
+# CANCEL BEFORE TYPING, here and before the app fixture below. If any gesture above has left the
+# pane in a mode -- which is exactly what a regression to a tmux-side selection would do -- the `Any`
+# hatch eats the first character of the next command and the shell runs `lear; echo ...`. The command
+# then fails, crow finds nothing, every later gesture aims at row "" and the whole section reports a
+# cascade of unrelated failures. Seen for real in the red run that preceded this design.
+it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
+hx_settle 0.3
+# NO `clear` ANYWHERE IN THIS SECTION, and it is not a style choice. ncurses' `clear` emits the E3
+# capability, which clears tmux's SCROLLBACK as well as the screen -- measured, history_size 10 -> 0
+# -- so a single `clear` here destroys the fixture that the section below rewinds to, and every
+# check there then fails for a reason that has nothing to do with what it tests. That cost a full
+# suite run to find. The marker is assembled from $P at runtime for the usual reason: crow searches
+# the visible screen, and the echoed command line is on it.
+hx_cmd "$S" 'P=PROMPT; echo ${P}LINE here'
+hx_until_ok "hx_cap $S | grep -q 'PROMPTLINE here'" 8
+lr="$(crow 'PROMPTLINE here$')"
+it delete-buffer 2>/dev/null || true
+hx_drag "$S" "$lr" 1 "$lr" 11
+hx_settle 0.8
+hx_expect_eq "a drag at a live prompt copies NOTHING" "$(ccopy)" ""
+hx_expect_eq "a drag at a live prompt leaves no lingering mode" "$(cmode)" "0"
+hx_expect_contains "a drag at a live prompt explains SHIFT+drag" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+hx_expect_absent "no gesture claims to have copied anything any more" "$(hx_cap "$S" | head -2)" "COPIED"
+# The hint is chrome, so it answers to the same two rules as the rest of it: legible on either host
+# theme, and self-expiring rather than a banner that sits there.
+hx_check_colors "$S" "SHIFT+drag hint" --grep "hold SHIFT" --require-explicit
+hx_gone "$S" 'hold SHIFT' 8 || true
+hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+
+it delete-buffer 2>/dev/null || true
+hx_multiclick "$S" "$lr" 3 2
+hx_settle 0.6
+hx_expect_eq "double-clicking at a live prompt copies NOTHING" "$(ccopy)" ""
+hx_expect_eq "double-clicking at a live prompt leaves no lingering mode" "$(cmode)" "0"
+
+# --- but a mouse-aware app must still get the drag ---------------------------
+# THE ONE REGRESSION THIS DESIGN COULD CAUSE. Every gesture above reaches its hint through the else
+# arm of a guard whose true arm forwards to the application; break the guard and claude, nano, vim
+# and less all lose the mouse at once. `cat -v` after enabling SGR mouse reporting is the smallest
+# possible stand-in for such an app: it renders the raw bytes, so a forwarded event is visible ON
+# SCREEN, and the hint must NOT appear.
+it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
+hx_settle 0.2
+hx_cmd "$S" "printf '\\033[?1006h\\033[?1000h'; cat -v"
+hx_settle 0.8
+hx_expect_eq "a mouse-reporting app is detected as one" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "1"
+# THE FORWARDED COORDINATES ARE PANE-RELATIVE. tmux translates the event before handing it on, so a
+# press at screen row 8 reaches the app as row 5: the two status lines and the pane border sit above
+# the pane. Derived here rather than hardcoded, so this check follows the chrome if it ever changes.
+drag_row=8
+hx_drag "$S" "$drag_row" 5 "$drag_row" 9
+hx_settle 0.8
+app_saw="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
+hx_expect_contains "a drag inside a mouse-aware app still reaches the app" \
+                   "$app_saw" "[<0;5;$((drag_row - 3))M"
+hx_expect_absent "and does NOT get the SHIFT+drag hint" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+hx_hex "$S" "03"
+hx_settle 0.4
+# TURN MOUSE REPORTING BACK OFF, or everything after this section measures the wrong thing. Killing
+# `cat` does not undo the `\033[?1000h` it was reading through: the pane keeps asking for mouse
+# events, mouse_any_flag stays 1, and every wheel event is then FORWARDED to the pane instead of
+# scrolling tmux back -- so the scrollback checks below cannot rewind to the fixture at all and fail
+# in a way that looks nothing like its cause. Found the hard way; a real app resets this on exit.
+hx_cmd "$S" "printf '\\033[?1000l\\033[?1006l'"
+hx_settle 0.5
+hx_expect_eq "the mouse goes back to tmux when the app stops asking for it" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
+
+# ============================================================================
+hx_section "R6  clicks and drags never move the scrollback view (#61)"
+#
+# THE BUG AS REPORTED. `bind -T copy-mode Any` is the "you can never be stuck" escape hatch, and
+# tmux's `Any` pseudo-key matches MOUSE events as well as keystrokes -- so a button press, which is
+# the first half of every drag and arrives before any motion, cancelled copy mode. Cancelling copy
+# mode returns the pane to the live screen, which is the jump to the bottom of a 50,000-line
+# scrollback. Guarding the hatch on "did this event carry a mouse position" is the fix, and these
+# checks are what hold it in place now that no gesture copies anything.
+cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
+hx_press "$S" "$cr" 18
+hx_settle 0.6
+hx_expect_eq "a button press while scrolled back stays in the scrollback view" "$(cmode)" "1"
+hx_expect_eq "a button press while scrolled back does not move the view" "$(cpos)" "$cstart"
+hx_release "$S" "$cr" 18
+hx_settle 0.4
+hx_expect_eq "releasing that button does not move the view either" "$(cmode)" "1"
+
+# Column 1 is the reason the guard tests `#{==:#{mouse_x},}` rather than the truthiness of mouse_x:
+# coordinates are 0-based, so a click there reports "0", which tmux's conditional reads as FALSE. A
+# truthiness test would take the leftmost column for a keystroke and scroll the student to the
+# bottom -- one column wide, and invisible to every other check here.
+cback; cr="$(crow SELECT_ME)"
+hx_click "$S" "$cr" 1
+hx_settle 0.6
+hx_expect_eq "clicking column 1 while scrolled back does not move the view" "$(cmode)" "1"
+
+# EMPTY BAR SPACE HAS TO BE FOUND, NOT GUESSED. A fixed column was over a tab label by the time the
+# suite reached this section -- the bar had grown to six tabs -- so the click switched tabs instead
+# of doing nothing, and every check after it measured the wrong pane. The gap between the last label
+# and the + NEW TAB chip is always empty, and two columns left of the chip's `+` is outside its
+# range=right region, so the click lands on the status line's default region.
+cback
+if loc="$(hx_find "$S" "+ NEW TAB")"; then
+  set -- $loc
+  hx_click "$S" "$1" "$(($2 - 2))"
+  hx_settle 0.6
+  hx_expect_eq "clicking empty tab-bar space does not move the view" "$(cmode)" "1"
+  hx_expect_eq "clicking empty tab-bar space does not switch tabs" "$(probe_win)" "$cwin"
 else
-  hx_fail "drag-selection copies to the host clipboard via OSC 52" "could not find COPYME_XYZ"
+  hx_fail "clicking empty tab-bar space does not move the view" "could not locate the chip"
 fi
 
+# A right-click is its own key (MouseDown3Pane) and cancelled the mode under the unguarded hatch.
+cback; cr="$(crow SELECT_ME)"
+hx_click "$S" "$cr" 5 2
+hx_settle 0.6
+hx_expect_eq "right-clicking while scrolled back does not move the view" "$(cmode)" "1"
+# The pane border is a LOCK, not a regression: measured, a border click never cancelled the mode even
+# with the bug present, because tmux does not deliver it to the pane's mode table at all. Kept
+# because "no mouse event anywhere in the chrome scrolls the view away" is the property, and a reader
+# who finds this green in both directions should know it was checked rather than assumed. Row 3 is
+# the border, drawn there by pane-border-status top.
+cback
+hx_click "$S" 3 40
+hx_settle 0.6
+hx_expect_eq "clicking the pane border does not move the view" "$(cmode)" "1"
+
+# --- the escape hatch must still be a hatch ----------------------------------
+# The guard narrows what `Any` fires for, so both halves of "you can never be stuck" are re-asserted
+# here against the fixture, not just in the LINE_400 tab above.
+cback
+hx_str "$S" "x"
+hx_until 'cmode' 0 6
+hx_expect_eq "a keystroke still leaves the scrollback view" "$(cmode)" "0"
+hx_hex "$S" "15"; hx_settle 0.3
+cback
+hx_wheel_down "$S" "$((HX_H / 2))" "$((HX_W / 2))" 30
+hx_until 'cmode' 0 6
+hx_expect_eq "scrolling to the bottom still leaves the scrollback view" "$(cmode)" "0"
+
+# --- the one action that needs no keyboard at all ---------------------------
+# The + NEW TAB chip is the only route to a new tab that needs neither a working Meta key nor prior
+# instruction. Its click resolves to the pane the mouse is over -- which while scrolled back is a
+# pane in copy mode -- so it needs its own copy-mode binding. The tab LABELS do not: a click on
+# another tab's label resolves to THAT tab's pane, which is not in a mode, so the root binding
+# handles it. Left last because it lands the suite in the new tab, at a live prompt.
+cback
+n0="$(probe_wincount)"
+if loc="$(hx_find "$S" "+ NEW TAB")"; then
+  set -- $loc
+  hx_click "$S" "$1" "$(($2 + 2))"
+  hx_until_ne 'probe_wincount' "$n0" 6
+  if [ "$(probe_wincount)" -gt "$n0" ]; then
+    hx_pass "clicking + NEW TAB while scrolled back still opens a tab"
+  else
+    hx_fail "clicking + NEW TAB while scrolled back still opens a tab" \
+            "count stayed at $n0 -- the chip is dead in the copy-mode key table"
+  fi
+  # probe_mode, not cmode, and deliberately: the subject is the tab the chip just opened, which is
+  # now the current one -- not the fixture tab the rest of the section pins itself to.
+  hx_expect_eq "the tab the chip opened is a live prompt, not a scrolled-back view" \
+               "$(probe_mode)" "0"
+else
+  hx_fail "clicking + NEW TAB while scrolled back still opens a tab" \
+          "could not find the chip on the tab bar"
+fi
+
+# ============================================================================
+hx_section "R6  no clipboard write is emitted at all, on a bare pty"
+#
+# WHY A SECOND INSTRUMENT EXISTS. Everything above watches the inner tmux through the outer one, and
+# an outer tmux is not a terminal: it accepts an OSC 52 write and stores the payload whatever
+# selection the sequence names. That blind spot passed a green "the drag reached the host clipboard"
+# while a real terminal was putting the text on PRIMARY, where Ctrl+V never looks -- and it could not
+# see a gesture that emitted no write at all. clipprobe.py runs tmux on a bare pty and reads the wire.
+#
+# The assertion is now that tmux writes NOTHING. Selection belongs to the terminal, so the config
+# must make no clipboard claim at all -- and this is the check that fails the day a copy path creeps
+# back in, whatever it copies and wherever it puts it.
+clip_out="$(python3 "$HX_DIR/clipprobe.py" "$CONF" 2>&1)"
+clip_target() {
+  printf '%s\n' "$clip_out" | awk -F'\t' -v g="$1" '$1 == g {print $2; hit = 1} END {if (!hit) print "NO-RESULT"}'
+}
+for gesture in scrolled-back-drag live-prompt-drag live-prompt-double-click; do
+  hx_expect_eq "$gesture writes no clipboard sequence" "$(clip_target "$gesture")" "NONE"
+done
 # ============================================================================
 hx_section "R1  no other keybinding does anything"
 hx_note "mashing ${#FORBIDDEN_KEYS[@]} key combinations a beginner might hit by accident"
