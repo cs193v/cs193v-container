@@ -625,7 +625,7 @@ assert_eq "rebuild:unknown-modifier-changes-nothing" "0" "$(shim_count '^rm ')"
 
 # ...AND IT RAISES NO TUNNEL AT ALL. --rebuild stops the container it just created, so a tunnel
 # raised for it is bound for a container nobody can be in and torn down having served nothing --
-# while holding all 46 host ports meanwhile, which CS193V_INSTANCE does NOT namespace, so a
+# while holding every forwarded host port meanwhile, which CS193V_INSTANCE does NOT namespace, so a
 # recreate in one checkout could take them from a colleague's live session (CLAUDE.md).
 #
 # Asserted on the FILES rather than by watching `ss` during the run: an ssh that is never spawned

@@ -601,7 +601,7 @@ for sig in EXIT HUP INT TERM; do
 done
 
 # The tunnel goes down BEFORE the container, always. remove_container documents why in full:
-# an ssh client outliving its container holds all 46 host ports against a dead pipe, so the
+# an ssh client outliving its container holds every forwarded host port against a dead pipe, so the
 # next tunnel can bind none of them. Asserted as an ORDER, because both lines being present
 # in the wrong sequence is the bug.
 assert_contains "launcher:teardown-drops-the-tunnel" "tunnel_down" "$teardown_body"
@@ -896,8 +896,19 @@ for chunk in spec.split(","):
 print("total=%d" % total)
 print("\n".join(problems))
 ')"
-assert_contains "ports:count-is-46" "total=46" "$port_report"
-assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=46" "$(printf '%s' "$port_report" | sed '/^$/d')"
+# 47, not 46, since codex's login callback joined the list. A LITERAL here on purpose, unlike the
+# forward counts in the port-aware suites, which #46 derived from `--dev-tunnel` because they must
+# follow a local.args override: this one checks the DEFAULT set the repo ships, so a number is the
+# canary -- change the shipped list and you are made to look at it.
+assert_contains "ports:count-is-47" "total=47" "$port_report"
+assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=47" "$(printf '%s' "$port_report" | sed '/^$/d')"
+
+# The one member of the default list that is not a dev-server port. `codex login` runs a server on
+# 1455 inside the container and the student's browser connects to it, which is exactly what the
+# tunnel already does for every other port. Asserted because without it `codex login` hangs,
+# having printed a URL whose callback goes nowhere.
+assert_match "ports:codex-login-callback-is-forwarded" '(^|,)1455(,|-|$)' \
+             "$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
 
 # ports:CS193V_PORTS-matches--p-lines is DELETED, not rewritten. It guarded the agreement
 # between CS193V_PORTS and a parallel set of -p lines; deriving the forwards from
