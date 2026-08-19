@@ -76,21 +76,37 @@ without notice. `90-setup-git-github.sh` is the harness for all four — it skip
 a token, and it redirects `HOME`, `GH_CONFIG_DIR` and `GIT_CONFIG_GLOBAL` into a throwaway
 directory so it cannot touch your own login or gitconfig.
 
-**1. Does the prefilled token link actually prefill?** **Measured 2026-08-17: yes** — the link
-works and the token really belongs to the organization, so `CS193V_TOKEN_PREFILL` ships as `yes`.
-Re-measure this whenever GitHub touches that page, because the failure it guards against is the
-most expensive one available: [community discussion
-#188111](https://github.com/orgs/community/discussions/188111) reports `target_name` updating the
-Resource owner dropdown's *display* without initialising the form state, which would show
-`cs193v-students` while creating the token under the student's own account. Resource owner cannot
-be changed afterwards, and the instructions tell students to check exactly the field that would be
-lying.
+**1. Does the prefilled token link actually prefill — all of it?** The link is now the whole of
+what most students do: issue #58 deleted the four numbered checks that asked them to read the
+prefilled fields back off the page, so nothing between the link and `Generate token` will catch a
+field that did not take. That makes this the measurement the token flow rests on.
 
-*To re-measure:* open the link `setup-git --dev-print-token-url` prints, fill nothing in by hand,
-generate the token, and then look at the token's own page: does it belong to the organization? Also check
-whether choosing the resource owner by hand wipes the other prefilled fields, as the same thread
-reports. If either reproduces, set `CS193V_TOKEN_PREFILL=no` in `files/setup-git` — the by-hand
-steps are already written and carry the screen on their own.
+*To re-measure:* open the link `setup-git --dev-print-token-url` prints, fill in **nothing** by
+hand, click *Generate token* and confirm, then open the token's own page at
+<https://github.com/settings/personal-access-tokens> and read three fields:
+
+| field | must read | status |
+|---|---|---|
+| Resource owner | `cs193v-students` | **measured 2026-08-17: yes** |
+| Repository access | `All repositories` | **measured 2026-08-19: yes** |
+| Expiration | whatever `CS193V_TOKEN_EXPIRY` says | **NOT MEASURED** |
+
+**Expiration is the one still unmeasured**, and it is the one nothing else can catch. A wrong
+**Repository access** would stop the student at `git clone` with `err.clone`, which names it as
+item 2 and is recoverable; a wrong **Expiration** is silent until the token dies mid-quarter, and
+neither the probes nor any test can see it — `00-release-gates.sh` checks the date `setup-git` is
+compiled with, not the date GitHub gave the token. If it reads wrong, put one line back into
+`token.prefill` naming the field — there are four rows of headroom on that screen — and record
+what GitHub actually did here.
+
+Resource owner stays the most expensive of the three, and is worth re-reading whenever GitHub
+touches that page: [community discussion
+#188111](https://github.com/orgs/community/discussions/188111) reports `target_name` updating the
+dropdown's *display* without initialising the form state, which would show `cs193v-students` while
+creating the token under the student's own account, and that cannot be changed afterwards. Also
+check whether choosing the resource owner by hand wipes the other prefilled fields, as the same
+thread reports. If either reproduces, set `CS193V_TOKEN_PREFILL=no` in `files/setup-git`: that
+skips the link and the menu with it and prints the by-hand steps as the only route.
 
 **2. Which permission does each failing row actually report?** This is the measurement the failure
 messages are built on. Make four tokens, each like a student's but with one permission held back,
@@ -160,9 +176,19 @@ its invitation, and check that the checklist covers what you see. Same second-ac
 §3 for the non-member half.
 
 ### `setup-git` — the display, which no transcript can show
-Run it for real in an 80×24 terminal, with a working token.
+Run it for real in an 80×24 terminal, with a working token. **The container's tmux takes the top
+row for its status line, so the budget is 23, not 24** — which is the arithmetic issue #58 turned
+on.
 
 *Expect:*
+- **The token screen does not scroll, on any of its three paths.** Measured at 80 columns: the
+  link and its menu are 19 rows, "Yes, I see my token" through to `Your token:` is 21, and the
+  by-hand steps through to `Your token:` are 22. If any of them scrolls, something has been
+  reworded past 76 columns and `20-messages.sh` should have said so.
+- **The link is on a line of its own and selects cleanly.** It is 157 characters, so it soft-wraps
+  on anything under ~160 columns; that is issue #67, not this.
+- **Arrowing down to "That link didn't work for me" reaches the eight by-hand steps**, and
+  choosing the default reaches the paste prompt without them ever appearing.
 - One row per command, the braille spinner turning in column 5 while each runs, replaced by a
   green `✓` — no flicker, and no row drawn twice or left half-erased.
 - A failing row's `✗` in red, in the same column, with the rows above it untouched.

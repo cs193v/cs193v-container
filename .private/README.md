@@ -28,7 +28,8 @@ projects/                      the student's work; the only directory shared wit
     cs193v-ui.sh               THE SHARED PRESENTATION LAYER — sourced by the launcher AND,
                                as /etc/cs193v/ui.sh, by everything in the image that draws
     setup-git                  guides a student through git and GitHub (issue #49)
-    setup-git-messages.txt     all of setup-git's prose, messages.txt's format
+    setup-git-messages.txt     all of setup-git's prose, messages.txt's format,
+                               hard-wrapped at 76 columns (issue #58 — see below)
     tmux/tmux.conf             the beginner-locked tmux configuration
     tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
     open-url                   the $BROWSER stub
@@ -155,6 +156,27 @@ each one breaks *every* student at once if it is wrong. `run-tests.sh --release`
 The sandbox accumulates closed issues, and that is expected rather than a fault: deleting an issue
 needs admin permission on the repository, which no student has, so `setup-git` closes them.
 Branches it creates are deleted, on the failure path as well as the success one.
+
+### The prose is hard-wrapped at 76 columns, and that is load-bearing
+
+`files/setup-git-messages.txt` is wrapped at 76 rather than at whatever looks right in the editor,
+because `render()` indents every line by two and a line that reaches the right edge **soft-wraps**
+— costing a second row, invisibly, to anyone reading in a wide window. The container's tmux takes
+one row for its status line, so an 80×24 terminal leaves 23.
+
+Issue #58 is what that arithmetic cost. The token screen printed the prefilled link *and* the
+by-hand steps to everybody, in a file wrapped at 94, and came to **53 rows**: a student who
+followed the link reached `Your token:` with the link scrolled off the top. The fix was both
+halves — the by-hand steps moved behind a menu, and the file rewrapped — and the screens are now
+19, 21 and 22 rows. `20-messages.sh :: sgkeys:every-line-fits-an-80-column-terminal` holds the
+width, substituting `{{ORG}}` and `{{EXPIRY}}` from `setup-git`'s own defaults and exempting the
+one line that carries the prefilled link, which is 157 characters of GitHub's making and is issue
+#67's to shorten.
+
+Rewrapping is also when emphasis gets split across a line break, and `emph_stream` closes an
+unpaired asterisk at end of line — so `titled *New` / `fine-grained token*.` renders the first
+half plain and the second half's full stop in cyan. Every assertion in the suite strips the markup
+before comparing and so cannot see it; `sgkeys:emphasis-is-paired-on-every-line` can.
 
 And one thing that is GitHub's to change rather than ours. `setup-git` checks the *shape* of a token
 before it tries it: 93 characters, `github_pat_` then 22 alphanumerics, an underscore and 59 more —

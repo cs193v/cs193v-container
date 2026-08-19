@@ -99,41 +99,125 @@ sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; nex
                 /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$SGM")"
 assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')"
 
+# ─── the container's prose fits an 80-column terminal ──────────────────────────
+# WHY 76 AND NOT 80. render() indents every line by two columns, and a line that reaches the
+# right edge SOFT-wraps rather than being refused — so it costs a second row, invisibly, in a
+# file whose author was looking at a 120-column window. That is the whole of issue #58's
+# symptom: the catalogue was hard-wrapped at 94, every paragraph line took two rows on the
+# 80-column terminal MANUAL.md says to test in, and the token screen came to 53 rows against the
+# 23 the container's tmux leaves visible. 76 + 2 = 78 keeps two columns in hand.
+#
+# {{ORG}} AND {{EXPIRY}} ARE SUBSTITUTED, from setup-git's own defaults rather than from a copy
+# here, because "cs193v-students" is eight columns longer than the placeholder it replaces and a
+# line that fits in the file can overflow on a student's screen.
+#
+# THE {{URL}} LINE IS EXEMPT and that is not a loophole: the prefilled link is 157 characters of
+# GitHub's making, it cannot be wrapped without breaking it, and shortening it is issue #67.
+sgwide="$(python3 - "$SGM" "$SGS" <<'WIDE'
+import re, sys
+cat, script = sys.argv[1], sys.argv[2]
+src = open(script).read()
+def default(var, fallback):
+    m = re.search(r'^%s="\$\{%s:-([^}]*)\}"' % (var, var), src, re.M)
+    return m.group(1) if m else fallback
+subs = {"ORG": default("CS193V_GH_ORG", "cs193v-students"),
+        "EXPIRY": default("CS193V_TOKEN_EXPIRY", "2026-12-31")}
+key = None
+for n, line in enumerate(open(cat).read().splitlines(), 1):
+    m = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
+    if m:
+        key = m.group(1); continue
+    if key is None or "{{URL}}" in line:
+        continue
+    text = line.replace("*", "")
+    for k, v in subs.items():
+        text = text.replace("{{%s}}" % k, v)
+    if len(text) > 76:
+        print("%s (line %d): %d columns" % (key, n, len(text)))
+WIDE
+)"
+assert_eq "sgkeys:every-line-fits-an-80-column-terminal" "" "$sgwide"
+
+# EMPHASIS DOES NOT SURVIVE A LINE BREAK, and rewrapping is exactly when somebody splits one.
+# emph_stream closes an unpaired *asterisk* at end of line, so `titled *New` / `fine-grained
+# token*.` renders the first half plain and the second half's full stop in cyan — inside out,
+# and invisible to every assertion in this suite, which strips the markup before comparing.
+# Introduced twice while rewrapping this file for issue #58, which is the argument for the check.
+sgodd="$(awk '/^\[\[[a-z0-9._-]+\]\]$/ { key = $0; next }
+              key != "" { n = gsub(/\*/, "*"); if (n % 2) printf "%s line %d; ", key, NR }' "$SGM")"
+assert_eq "sgkeys:emphasis-is-paired-on-every-line" "" "$(printf '%s' "$sgodd" | sed 's/; *$//')"
+
 
 # ─── placeholder coverage, both directions ─────────────────────────────────────
 # A {{NAME}} nobody supplies reaches the student as literal braces. An argument nobody
 # uses is dead weight that signals the message was meant to say something it does not.
+#
+# BOTH CATALOGUES, and the second one was unchecked in either direction until issue #58 moved a
+# placeholder: token.prefill carried {{EXPIRY}} for the four checks that issue deleted, and a
+# token.prefill that lost its {{URL}} instead would hand every student instructions with no link
+# in them. The container's catalogue is reached four ways rather than one — `msg`, `render`,
+# `say`, and `say "$SG_FAIL_KEY"` — so the call form matched here is the alternation, the same
+# widening the orphan check above needed.
 python3 - "$REPO" "$PRIVATE" <<'PY' > "$TMP/ph"
 import re, sys, os
 repo, private = sys.argv[1], sys.argv[2]
-msgs = open(os.path.join(private, "messages.txt")).read()
 
-bodies = {}
-key = None
-for line in msgs.splitlines():
-    m = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
-    if m:
-        key = m.group(1); bodies[key] = []
-    elif key:
-        bodies[key].append(line)
-bodies = {k: "\n".join(v) for k, v in bodies.items()}
-
-# Every `msg <key> NAME=... NAME=...` call site, across both scripts.
-calls = {}
-for name, root in (("cs193v", repo), ("install-cs193v.sh", private)):
-    for line in open(os.path.join(root, name)):
-        for m in re.finditer(r'\bmsg\s+([a-z0-9._-]+)((?:\s+[A-Z_]+=(?:"[^"]*"|\S+))*)', line):
-            k = m.group(1)
-            calls.setdefault(k, set()).update(re.findall(r'([A-Z_]+)=', m.group(2) or ""))
+CATALOGUES = (
+    (os.path.join(private, "messages.txt"),
+     (os.path.join(repo, "cs193v"), os.path.join(private, "install-cs193v.sh")),
+     r'\bmsg\s+'),
+    (os.path.join(private, "files", "setup-git-messages.txt"),
+     (os.path.join(private, "files", "setup-git"),),
+     r'\b(?:msg|render|say)\s+'),
+)
 
 unsupplied, unused = [], []
-for k, body in bodies.items():
-    needed = set(re.findall(r"\{\{([A-Z_]+)\}\}", body))
-    given = calls.get(k, set())
-    for p in sorted(needed - given):
-        unsupplied.append("%s needs {{%s}} but no call site supplies it" % (k, p))
-    for p in sorted(given - needed):
-        unused.append("%s is passed %s= but has no {{%s}}" % (k, p, p))
+for catalogue, scripts, callform in CATALOGUES:
+    bodies = {}
+    key = None
+    for line in open(catalogue).read().splitlines():
+        m = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
+        if m:
+            key = m.group(1); bodies[key] = []
+        elif key:
+            bodies[key].append(line)
+    bodies = {k: "\n".join(v) for k, v in bodies.items()}
+
+    # Every call site, with the NAME=value arguments it passes.
+    #
+    # THE ARGUMENTS ARE READ TO END OF LINE rather than matched one at a time, because an
+    # argument can contain a nested command substitution with its own quoted string inside it —
+    # `say github.checkpoint "EMAIL_ENC=$(email_encoded "$SG_EMAIL")" "ORG=$ORG"` — and a
+    # per-argument pattern stops at the first space inside that and never sees ORG. It reported
+    # the message as missing a placeholder nobody had failed to supply.
+    #
+    # A KEY NAMED BY A VARIABLE supplies its arguments to whatever key it turns out to be:
+    # `say "$SG_FAIL_KEY" "ORG=$ORG"` is how err.clone, err.push, err.issues and err.prs are
+    # reached, the key having been chosen three lines earlier by probe_row. Those arguments are
+    # pooled and credited to any key that has no direct call site of its own, and the dead-weight
+    # check is skipped for exactly those keys — an indirect site says nothing about which of the
+    # four its arguments were meant for.
+    calls, indirect = {}, set()
+    for path in scripts:
+        for line in open(path):
+            if line.lstrip().startswith("#"):
+                continue
+            for m in re.finditer(callform + r'"?\$', line):
+                indirect.update(re.findall(r'\b([A-Z_]+)=', line[m.end():]))
+            for m in re.finditer(callform + r'([a-z0-9._-]+)', line):
+                k = m.group(1)
+                calls.setdefault(k, set()).update(re.findall(r'\b([A-Z_]+)=', line[m.end():]))
+
+    who = os.path.basename(catalogue)
+    for k, body in bodies.items():
+        needed = set(re.findall(r"\{\{([A-Z_]+)\}\}", body))
+        direct = k in calls
+        given = calls.get(k, indirect)
+        for p in sorted(needed - given):
+            unsupplied.append("%s: %s needs {{%s}} but no call site supplies it" % (who, k, p))
+        if direct:
+            for p in sorted(given - needed):
+                unused.append("%s: %s is passed %s= but has no {{%s}}" % (who, k, p, p))
 print("UNSUPPLIED:" + "; ".join(unsupplied))
 print("UNUSED:" + "; ".join(unused))
 PY
