@@ -623,6 +623,15 @@ record    "tmux:version" "$(R 'tmux -V')"
 assert_ok "tmux:tmux-256color-terminfo-present" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'infocmp tmux-256color >/dev/null'"
 
+# ─── inotify-tools ─────────────────────────────────────────────────────────────
+# inotifywait is what 60-container.sh watches a container-side write with, and that assertion is
+# the ONLY check of the hot-reload claim CONTAINER-DESIGN.md makes to students. The package was
+# missing from the image until #39, so the check guarded itself out of existence on every run and
+# recorded a sentence instead. Asserted HERE as well as exercised there, so a package that drops
+# out of layer 1 fails at the tier that can say why rather than as a watch that did not fire.
+assert_ok "files:inotifywait-present" \
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v inotifywait >/dev/null'"
+
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
 # is seeded once on first mount and then never refreshed by a later image.

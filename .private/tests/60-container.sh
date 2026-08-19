@@ -804,40 +804,81 @@ record "files:case-sensitivity" \
        "$(E 'cd /home/student/projects && touch .vt-Aa && (ls .vt-aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)')"
 
 # inotify from INSIDE is the case that matters: in this course the writer is always inside
-# the container, so this is what a dev server's hot reload depends on.
-if E 'command -v inotifywait' >/dev/null 2>&1; then
-    # The `sleep 1` before the write stays a duration: `-q` means inotifywait prints nothing
-    # when the watch is established (deliberately — anything it printed would land in
-    # /tmp/vt-in and make `test -s` pass without an event), so there is nothing to poll for.
-    # The wait AFTER the write is a different matter: the event arriving is exactly the
-    # positive condition, and it is what the assertion then re-checks.
-    watch_fired() { E 'test -s /tmp/vt-in' >/dev/null 2>&1; }
-    E 'rm -f /tmp/vt-in'
-    podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
-    sleep 1; E 'echo x >> /home/student/projects/.vt-c'; wait_until 5 watch_fired || true
-    if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then pass "files:inotify-fires-for-container-side-edits"
-    else fail "files:inotify-fires-for-container-side-edits" \
-              "no event — hot reload will not work even for edits made inside the container"; fi
+# the container, so this is what a dev server's hot reload depends on. CONTAINER-DESIGN.md tells
+# students their dev server's hot reload works for edits made inside the container, and this is
+# the only check of that claim anywhere.
+#
+# NO LONGER GUARDED ON THE TOOL BEING INSTALLED, which is the whole of #39. inotify-tools was not
+# in the image, so this block took an `else` branch on every run since it was written: the
+# assertion had never once executed, and the `record` standing in for it printed the same
+# sentence every time -- which reads like coverage in the summary counts rather than like the
+# absence of it. Found by mutation-testing #29's converted waits, when the mutant built to break
+# this check could not break it.
+#
+# The package is in layer 1 of the Containerfile now, and 50-image.sh holds it there. So a
+# missing inotifywait is a broken image rather than a machine this suite cannot ask, and this
+# tier's rule is that a missing prerequisite fails loudly instead of quietly opting out -- see
+# run-tests.sh's tier notes.
+#
+# THE PRECONDITION IS ITS OWN ASSERTION, and it is not a restatement of the behaviour below: the
+# watch can fail to fire with the tool perfectly present (a kernel limit, the overlay, the bind
+# mount), and those are different faults with different fixes. Named separately so the failure
+# says which one happened, including on a bare `--tier container` run that never built the image.
+# THE INNER `sh -c` IS LOAD-BEARING, and this was written without it first. `command` is a shell
+# BUILTIN and podman exec runs its argv directly rather than through a shell, so
+# `podman exec $NAME command -v x` asks crun for a binary called `command` and gets 127 --
+# "executable file `command` not found in $PATH" -- whatever is or is not installed in there. It
+# failed against an image that demonstrably had inotifywait in it, while the behaviour assertion
+# below passed on a real event: a precondition check that cannot pass is worth no more than one
+# that cannot fail. E() wraps every other in-container check this way for the same reason.
+assert_ok "files:inotifywait-is-in-the-container" \
+          sh -c "podman exec ${NAME} sh -c 'command -v inotifywait' >/dev/null 2>&1"
 
-    # Host-side edits are expected NOT to fire on macOS and WSL. Recorded, because it
-    # decides what CONTAINER-DESIGN.md's "known rough edges" must say.
-    E 'rm -f /tmp/vt-in'
-    podman exec -d "$NAME" sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
-    sleep 1; echo y >> "$REPO/projects/.vt-c"; wait_until 5 watch_fired || true
-    if E 'test -s /tmp/vt-in' >/dev/null 2>&1; then
-        record "files:inotify-for-host-side-edits" "FIRES"
-    else
-        record "files:inotify-for-host-side-edits" "DOES NOT FIRE"
-    fi
-    # A leftover watcher cannot fake an event -- its stdout is the fd of the /tmp/vt-in that
-    # the `rm -f` above unlinked, so what it writes goes to an orphaned inode, not to the file
-    # this run reads. What it does do is accumulate one inotify instance per killed run
-    # against the container's limit (max_user_instances = 128, measured), which is why the
-    # start-of-suite sweep covers inotifywait as well as the probe (#34).
-    container_pkill inotifywait
-else
-    record "files:inotify" "inotify-tools not installed in the container; run: sudo apt-get install -y inotify-tools"
-fi
+# THE EVENT FILE MUST NOT BE ABLE TO HOLD ANYTHING ELSE, and this is not a hypothetical: the
+# redirect here was `2>&1`, so with inotifywait missing the SHELL's own
+# `sh: 1: inotifywait: not found` landed in /tmp/vt-in and `test -s` was true. Measured on the
+# unguarded first draft of #39 -- against an image with no inotify-tools in it,
+# files:inotify-fires-for-container-side-edits PASSED and the host-side record said FIRES, both
+# off that one error line. So stderr goes to a file of its own, and the assertion asks for the
+# EVENT rather than for bytes: `-e modify` makes inotifywait print "<path> MODIFY", and nothing
+# else it or the shell can say contains that word.
+#
+# The `sleep 1` before the write stays a duration: `-q` means inotifywait prints nothing
+# when the watch is established, so there is nothing to poll for. The wait AFTER the write is a
+# different matter: the event arriving is exactly the positive condition, and it is what the
+# assertion then reads.
+watch_fired() { E 'test -s /tmp/vt-in' >/dev/null 2>&1; }
+watch_start() {                       # watch_start -> a fresh watch on .vt-c, stderr kept apart
+    E 'rm -f /tmp/vt-in /tmp/vt-in.err'
+    podman exec -d "$NAME" sh -c \
+        'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>/tmp/vt-in.err'
+}
+watch_start
+sleep 1; E 'echo x >> /home/student/projects/.vt-c'; wait_until 5 watch_fired || true
+fired="$(E 'cat /tmp/vt-in 2>/dev/null')"
+case "$fired" in
+    *MODIFY*) pass "files:inotify-fires-for-container-side-edits" ;;
+    *) fail "files:inotify-fires-for-container-side-edits" \
+            "no MODIFY event — hot reload will not work even for edits made inside the container
+/tmp/vt-in:     ${fired:-<empty>}
+its stderr:     $(E 'cat /tmp/vt-in.err 2>/dev/null')" ;;
+esac
+
+# Host-side edits are expected NOT to fire on macOS and WSL. Recorded, because it
+# decides what CONTAINER-DESIGN.md's "known rough edges" must say -- and until #39 this
+# record was never reached either, so that paragraph rested on no measurement from here.
+watch_start
+sleep 1; echo y >> "$REPO/projects/.vt-c"; wait_until 5 watch_fired || true
+case "$(E 'cat /tmp/vt-in 2>/dev/null')" in
+    *MODIFY*) record "files:inotify-for-host-side-edits" "FIRES" ;;
+    *)        record "files:inotify-for-host-side-edits" "DOES NOT FIRE" ;;
+esac
+# A leftover watcher cannot fake an event -- its stdout is the fd of the /tmp/vt-in that
+# the `rm -f` above unlinked, so what it writes goes to an orphaned inode, not to the file
+# this run reads. What it does do is accumulate one inotify instance per killed run
+# against the container's limit (max_user_instances = 128, measured), which is why the
+# start-of-suite sweep covers inotifywait as well as the probe (#34).
+container_pkill inotifywait
 
 # Quantify the bind-mount penalty. Recorded per platform — this is the number that decides
 # whether `npm install` is tolerable on a Mac.

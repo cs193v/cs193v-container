@@ -386,17 +386,27 @@ E 'ln -s /etc/hostname /home/student/projects/.vt-link'
 rec symlink-readable   readlink "$DIR/projects/.vt-link"
 
 # inotify, CONTAINER-side edit — the case that matters (writer is always inside)
-E 'command -v inotifywait || sudo apt-get install -y inotify-tools >/dev/null 2>&1'
-podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+#
+# NO on-the-fly `apt-get install inotify-tools` here any more, and that line leaving is the point
+# of #39: it was covering for the package being absent from the image, which is why the automated
+# form of this check (60-container.sh) guarded itself out of existence and never ran once. The
+# package is in layer 1 of the Containerfile now, so a missing inotifywait is a finding.
+#
+# AND STDERR GOES SOMEWHERE ELSE, with the event named rather than counted. Both redirects here
+# used to be `2>&1` into the file `test -s` then examined, so with inotifywait missing the shell's
+# own "not found" satisfied the check — measured, both halves passed and the host-side line
+# reported FIRES off that one error string.
+ckx inotifywait-installed  sh -c 'podman exec cs193v sh -c "command -v inotifywait"'
+podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>/tmp/vt-in.err'
 sleep 1; E 'echo x >> /home/student/projects/.vt-c'; sleep 1
-ckx inotify-container-side  sh -c 'podman exec cs193v test -s /tmp/vt-in'
+ckx inotify-container-side  sh -c 'podman exec cs193v grep -q MODIFY /tmp/vt-in'
 
 # inotify, HOST-side edit — expected to FAIL on macOS and WSL; RECORD which
-E 'rm -f /tmp/vt-in'
-podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>&1'
+E 'rm -f /tmp/vt-in /tmp/vt-in.err'
+podman exec -d cs193v sh -c 'inotifywait -q -e modify /home/student/projects/.vt-c > /tmp/vt-in 2>/tmp/vt-in.err'
 sleep 1; echo y >> "$DIR/projects/.vt-c"; sleep 2
-podman exec cs193v test -s /tmp/vt-in && echo "host-side inotify: FIRES" \
-                                      || echo "host-side inotify: DOES NOT FIRE"
+podman exec cs193v grep -q MODIFY /tmp/vt-in && echo "host-side inotify: FIRES" \
+                                             || echo "host-side inotify: DOES NOT FIRE"
 
 # case sensitivity — determines whether a Mac student's import bug reproduces
 E 'cd /home/student/projects && touch Aa && (ls aA >/dev/null 2>&1 && echo CASE-INSENSITIVE || echo case-sensitive)'
