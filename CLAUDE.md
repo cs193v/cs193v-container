@@ -84,3 +84,15 @@ Two related consequences for working here:
 project has deliberately made and un-made. Read it before proposing anything structural;
 several tempting ideas are recorded there as already tried and rejected, with the
 measurement that killed them.
+
+## How to design tests
+
+Always red-first with tests: write the tests, watch them fail, then confirm your fix causes the tests to pass.
+
+## How to run tests
+
+Don't pipe the tests through head or tail; you can't read all the results if there's a failure. Instead, redirect the output of the tests to a file, read that file, then clean it up when you're done.
+
+## How to write commits and PRs
+
+Previous commits and PRs were extremely verbose. That's unnecessary here. Be concise about what the commit or PR does; one paragraph max.
