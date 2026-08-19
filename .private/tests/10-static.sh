@@ -842,7 +842,7 @@ assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=46" "$(printf '%s
 #       -> tunnel:cannot-proxy-off-box actually forwards to an off-box address and asserts the
 #          connection fails.
 #   ClearAllForwardings
-#       -> ports:46-forwards-on-the-host would find 0 forwards if they had been cleared.
+#       -> ports:every-forward-is-on-the-host would find 0 forwards if they had been cleared.
 #   remove_container calling tunnel_down
 #       -> tunnel:releases-its-ports-when-the-container-dies and tunnel:comes-back-after-a-
 #          rebuild cover the consequence, which is what actually matters.

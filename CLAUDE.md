@@ -36,9 +36,14 @@ for every instance. The launcher's ssh tunnel binds `127.0.0.1:<port>` for each 
 **the first instance to start wins and any other gets none of them**. The losing instance
 still starts and works normally; it just cannot forward.
 
-Every test that reaches a server through a forwarded port then fails, for that reason
-alone, with nothing wrong in your change. This is the single most likely explanation for a
-port or tunnel failure appearing "because of" an edit that could not possibly affect it.
+A port or tunnel failure appearing "because of" an edit that could not possibly affect it is
+still most likely this. What changed with issue #46 is that the suite now says so instead of
+lying in either direction: it derives the port list from the launcher (`./cs193v --dev-tunnel`),
+so the override below is safe to use — no test hardcodes a port any more — and it counts only
+the forwards **its own** tunnel holds, so a colleague's 46 can no longer satisfy the check that
+guards the container tier. If somebody else has your ports, `require:tunnel` hard-fails and
+names the checkout holding them, and the container tier stops there rather than banking passes
+on their ssh process.
 
 **Check that before you blame your change:**
 
@@ -55,7 +60,10 @@ Do not kill the other developer's tunnel. To get out of the way, override `CS193
 -e CS193V_PORTS=13000-13009,14173-14176,15173-15179,16173-16182,18000-18009,18080-18084
 ```
 
-That moves both the forwards and the list the container is told about.
+That moves both the forwards and the list the container is told about — and the test suite
+follows it, because `run-tests.sh` reads the same value through the same launcher. Recreate the
+container afterwards (`./cs193v --rebuild`) so its own `CS193V_PORTS` matches what is being
+forwarded; the container tier checks that those two agree and tells you if they do not.
 
 **This got a lot better with issue #41, but it did not go away.** Closing your terminal window now
 stops your container *and* takes its tunnel down, handing all 46 ports back — so the usual cause of

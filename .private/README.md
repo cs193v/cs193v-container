@@ -197,6 +197,7 @@ CS193V_BUILD_RAW=1 ./cs193v --rebuild  # podman's raw output instead of the prog
 ./cs193v --rebuild --logout            # test the cold-start path a student sees
 ./cs193v --dev-print-command           # see the exact podman run line
 ./cs193v --dev-args                    # the args-file parse, one word per line
+./cs193v --dev-tunnel                  # the forwarded ports, and this instance's tunnel files
 ./cs193v --stop                        # stop it by hand — see below, you will need this
 ```
 
@@ -467,6 +468,22 @@ The launcher derives its `ssh -L` forwards from that value, so one line moves bo
 forwards and the list the container is told about. This only works because there are no `-p`
 lines left: `local.args` is *appended*, so a second set of `-p` flags used to add mappings
 rather than replace them, and moving ports this way was impossible.
+
+**The test suite follows the override too** (issue #46). It reads the expanded list out of
+`cs193v --dev-tunnel`, which prints `tunnel_ports()`' own answer plus the tunnel's control
+socket, pidfile and log paths — so no test names a port, and the suite exercises whatever this
+instance really forwards. Recreate the container after moving them (`./cs193v --rebuild`): the
+container's `CS193V_PORTS` is set with `-e` at create time and `podman start` reuses the stored
+value, so an edit with no recreate leaves the container naming one set while the tunnel forwards
+another. `60-container.sh` asserts those two agree and says which is which if they do not.
+
+That verb is also how the suite tells *its own* forwards from a colleague's. `count_forwards()`
+used to count any listener on the default ports, so with a second checkout holding all 46 the
+container tier greenlit itself on somebody else's ssh process and `70-sighup.sh` recorded
+"46 of 46" for a run that held none — the same shape as #34. It now reads the pidfile, checks
+that our control socket really is on that pid's command line (`tunnel_kill_pid`'s own identity
+test, for the same reason: pids are reused and the file outlives the process), and counts only
+the sockets that pid holds.
 
 One gotcha when you bump `PLAYWRIGHT_VERSION`: the browser lives in the `cs193v-playwright`
 volume, and podman seeds a volume from the image only while the volume is EMPTY. So a

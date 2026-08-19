@@ -1431,17 +1431,28 @@ tunnel_keys() {
     chmod 600 "$TUNNEL_KEY" "$TUNNEL_HOST_KEY" 2>/dev/null || true
 }
 
-# Every port to forward, one per line, from the CS193V_PORTS value in container.args. Derived
-# rather than declared a second time: the same value is handed to the container through -e, so
-# what a student is told reaches their browser and what is actually forwarded cannot disagree.
-# The LAST occurrence wins, matching podman's own last--e-wins behaviour, so local.args can
-# move one developer's instance out of another's way.
-tunnel_ports() {
-    local a spec chunk lo hi p
+# The CS193V_PORTS value the container is actually given, as declared. The LAST occurrence wins,
+# matching podman's own last--e-wins behaviour, so local.args can move one developer's instance
+# out of another's way -- see README.md's CS193V_INSTANCE section.
+#
+# ITS OWN FUNCTION because two things need the raw value and must not disagree about which one it
+# is: tunnel_ports below expands it into the forwards, and --dev-tunnel prints it for the test
+# suite, which asserts that the container's own environment reports exactly this (issue #46).
+tunnel_port_spec() {                  # -> the last CS193V_PORTS value, or nothing
+    local a spec
     spec=''
     for a in ${ARGS[@]+"${ARGS[@]}"}; do
         case "$a" in CS193V_PORTS=*) spec="${a#CS193V_PORTS=}" ;; esac
     done
+    printf '%s' "$spec"
+}
+
+# Every port to forward, one per line, from the CS193V_PORTS value in container.args. Derived
+# rather than declared a second time: the same value is handed to the container through -e, so
+# what a student is told reaches their browser and what is actually forwarded cannot disagree.
+tunnel_ports() {
+    local spec chunk lo hi p
+    spec="$(tunnel_port_spec)"
     [ -n "$spec" ] || return 0
     for chunk in $(printf '%s' "$spec" | tr ',' ' '); do
         case "$chunk" in
@@ -2275,6 +2286,39 @@ verb_dev_args() {
     for a in ${ARGS[@]+"${ARGS[@]}"}; do printf '%s\n' "$a"; done
 }
 
+# The tunnel's own facts: which host ports it forwards, and the files that identify it. The seam
+# tests/lib/assert.sh reads, and the answer to issue #46.
+#
+# THE PORTS COME FROM tunnel_ports, not from a re-parse of the args files, which is the whole
+# point. local.args can move them, the launcher honours that, and the suite did not -- it carried
+# five copies of the default list, so the documented CS193V_PORTS override reddened five
+# assertions that had nothing wrong with them. One derivation, printed from the same function
+# that builds the ssh -L flags, is what makes that class of drift impossible rather than merely
+# absent today.
+#
+# THE PATHS ARE HERE BECAUSE "ARE THESE 46 LISTENERS MINE" HAS NO OTHER CHEAP ANSWER, and that
+# question is the other half of #46: count_forwards used to count any listener on those ports, so
+# a colleague's tunnel satisfied the gate for an instance holding none of them. TUNNEL_ID hashes
+# the course directory and the instance, so a test cannot derive these names -- and with the
+# control socket in hand a test can apply tunnel_kill_pid's own identity test, which is the only
+# honest one available: our socket is on our master's command line and on nothing else's.
+#
+# TAB-SEPARATED KEY AND VALUE, repeated for `port`, like --dev-args prints one word per line: a
+# path can contain a space and a key cannot contain a tab, so the split is unambiguous. warn()
+# writes to stderr, so a malformed range in the args file cannot corrupt this.
+#
+# Plain strings rather than messages.txt keys, like the other --dev verbs: that catalogue is
+# for students.
+verb_dev_tunnel() {
+    load_args
+    printf 'spec\t%s\n' "$(tunnel_port_spec)"
+    printf 'ctl\t%s\n'  "$TUNNEL_CTL"
+    printf 'pid\t%s\n'  "$TUNNEL_PID"
+    printf 'log\t%s\n'  "$TUNNEL_LOG"
+    local port
+    for port in $(tunnel_ports); do printf 'port\t%s\n' "$port"; done
+}
+
 # What the meter thinks the build is going to do, as a table: index, label, instruction text.
 # The seam the parser is tested through -- buried inside build_progress it could only be
 # reached by running a whole build, which is the wrong granularity for "does a comment inside
@@ -2345,6 +2389,11 @@ case "${1:-}" in
     # No preflight here either, and 16-args-parse.sh asserts it by counting podman calls: the
     # args files are all this reads, and the unit tier drives it with no podman running.
     --dev-args)          verb_dev_args ;;
+    # No preflight, for the same reason and asserted the same way: 16-args-parse.sh counts podman
+    # calls, and this verb reads the args files and does string arithmetic on TMPDIR paths. It is
+    # what the test suite derives the forwarded port list from, so it must be answerable on a
+    # machine with no podman at all -- the unit tier's whole promise.
+    --dev-tunnel)        verb_dev_tunnel ;;
     # No preflight: this one reads the Containerfile and nothing else, which is what lets the
     # unit tier drive it with no podman on PATH at all.
     --dev-steps)         shift; verb_dev_steps "${1:-}" ;;
