@@ -351,48 +351,219 @@ Build it first:  ./cs193v --rebuild
     fi
 }
 
-# ─── the 46 forwarded host ports ───────────────────────────────────────────────
-# The port list spelled out ONCE. It was in three places, and a fourth was about to be added
-# for require_tunnel below -- which is exactly the drift the launcher's own single CS193V_PORTS
-# declaration exists to avoid.
-CS193V_FWD_RE='^127\.0\.0\.1:(300[0-9]|417[3-6]|517[3-9]|61(7[3-9]|8[0-2])|800[0-9]|808[0-4])$'
+# ─── the forwarded host ports ──────────────────────────────────────────────────
+# ASKED OF THE LAUNCHER, never spelled out here. `cs193v --dev-tunnel` prints the expanded list
+# straight out of tunnel_ports() -- container.args then local.args, last CS193V_PORTS wins,
+# exactly as the ssh -L flags are built -- plus the paths that identify this instance's tunnel.
+#
+# WHY THAT MATTERS RATHER THAN BEING TIDIER (issue #46). CLAUDE.md and README.md both document
+# overriding CS193V_PORTS in local.args as THE way to get out of another instance's way, and the
+# launcher honours it. This suite did not: the default list was written out in five places, none
+# of which read local.args, so a developer following the documented advice reddened the port
+# matrix, the LAN-exposure check, the one-ssh-process check and the container's own environment
+# assertion -- five failures with nothing wrong in the change under test. One derivation cannot
+# drift from the launcher; five copies had already drifted from it by construction.
+#
+# LAZY AND CACHED. The cheap lane (static, unit, shim) sources this file too and must not pay a
+# launcher fork it never uses -- the same cost concern as #57, one layer out. Every helper below
+# calls it, and the three port-aware suites call it once at the top so that reading $FWD1 at
+# top level is safe.
+FWD_SPEC='' FWD_PORTS='' FWD_LIST='' FWD_N=0 FWD_RE='' FWD_ANY_RE=''
+FWD1='' FWD2='' FWD_CTL='' FWD_PIDFILE='' FWD_READY=''
+fwd_init() {
+    [ -n "$FWD_READY" ] && return 0
+    FWD_READY=1
+    local out alt
+    out="$("$REPO/cs193v" --dev-tunnel 2>/dev/null)" || true
+    FWD_SPEC="$(printf '%s\n' "$out"    | awk -F'\t' '$1 == "spec" { print $2 }')"
+    FWD_CTL="$(printf '%s\n' "$out"     | awk -F'\t' '$1 == "ctl"  { print $2 }')"
+    FWD_PIDFILE="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "pid"  { print $2 }')"
+    FWD_PORTS="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "port" { print $2 }')"
+    FWD_N="$(printf '%s\n' "$FWD_PORTS" | grep -c '[0-9]')" || true
+    FWD_N="${FWD_N:-0}"
+    # HARD-FAILS, by the same project decision as require_image: a suite that quietly carried on
+    # with no ports would test nothing and say so nowhere. Two is the floor because several
+    # assertions need a second port to hold while the first one is bound elsewhere.
+    if [ "$FWD_N" -lt 2 ]; then
+        fail "require:ports" "cs193v --dev-tunnel named $FWD_N forwarded ports.
+Every port assertion in this suite derives from that list, so there is nothing to test.
+Check:  ./cs193v --dev-tunnel
+        the CS193V_PORTS line in .config/container.args, and any override in .config/local.args"
+        exit 1
+    fi
+    # The forms the assertions want. FWD_LIST is what portprobe.py takes; the two EREs match a
+    # listening address, with and without the loopback anchor, because "no forward is exposed to
+    # the LAN" is the same set asked about a different bind address.
+    FWD_LIST="$(printf '%s' "$FWD_PORTS" | tr '\n' ',' | sed 's/,$//')"
+    alt="$(printf '%s' "$FWD_PORTS" | tr '\n' '|' | sed 's/|$//')"
+    # BRACKETS, NOT BACKSLASHES, for the dots. Both users of FWD_RE pass it to awk through -v,
+    # and awk processes escape sequences in a -v value: gawk warns "escape sequence `\.' treated
+    # as plain `.'" on stderr -- into the middle of a suite's output -- and then matches any
+    # character where a literal dot was meant. `[.]` is portable ERE and needs no escaping.
+    FWD_RE="^127[.]0[.]0[.]1:($alt)\$"
+    FWD_ANY_RE=":($alt)\$"
+    # The first two, as the derived stand-ins for what used to be a literal 3000 and 3001. Every
+    # assertion that binds "a forwarded port" takes one of these, so with no override in play the
+    # suite exercises byte-identically the ports it always did.
+    FWD1="$(printf '%s\n' "$FWD_PORTS" | sed -n 1p)"
+    FWD2="$(printf '%s\n' "$FWD_PORTS" | sed -n 2p)"
+    export FWD_SPEC FWD_PORTS FWD_LIST FWD_N FWD_RE FWD_ANY_RE FWD1 FWD2 FWD_CTL FWD_PIDFILE
+}
+
+# A host port that is NOT one of ours and is free RIGHT NOW. Two suites need one and neither can
+# name it: 60-container.sh probes "a port outside the set is refused", and 80-launcher-live.sh asks
+# the tunnel for a forward it must decline and then asserts nothing is listening.
+#
+# BOTH FILTERS EARN THEIR PLACE, and the second is the one that is easy to miss. Any fixed number
+# can be INSIDE this instance's forwarded set once local.args moves it -- 4000 and 19999 were both
+# written out in the suite, and a set containing either inverted the assertion that used them, which
+# is #46 arriving from the opposite direction. And a port ANOTHER instance forwards answers from the
+# host through their tunnel, so it would come back 200 with nothing wrong here.
+#
+# Ports, not one port, because a caller may need two distinct ones. Returns fewer than asked if the
+# pool runs dry; every caller checks and says so rather than testing nothing.
+free_unforwarded_ports() {            # free_unforwarded_ports N -> up to N ports, space separated
+    local want="${1:-1}" out='' n=0 p padded
+    fwd_init
+    padded=" $(printf '%s' "$FWD_PORTS" | tr '\n' ' ') "
+    for p in 4000 7000 8500 9100 3100 9200 9300 9400 12345 4444 19999 13999 23456 34567; do
+        case "$padded" in *" $p "*) continue ;; esac
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$p\$" && continue
+        out="$out $p"
+        n=$((n + 1))
+        [ "$n" -ge "$want" ] && break
+    done
+    printf '%s' "${out# }"
+}
+
+# WHICH ssh MASTER IS OURS, and this is the other half of #46. count_forwards used to count any
+# listener on the default ports with no notion of an owner, and require_tunnel greenlit the whole
+# container tier the moment that count reached 46 -- so with a colleague's checkout holding the
+# default list and the instance under test forwarding on 13000+, four assertions passed and
+# `sighup:forwards-while-a-session-is-open` recorded "46 of 46" while this instance held none of
+# them. Same shape as #34: a port assertion passing without this run having bound anything.
+#
+# THE IDENTITY TEST IS THE LAUNCHER'S OWN, copied rather than approximated: tunnel_kill_pid kills
+# the pid in the pidfile only if our control socket is on its command line, because pids are
+# reused and that file outlives the process it names. Nothing else distinguishes our master from
+# another checkout's -- both are `ssh` run by this user with 46 -L flags.
+#
+# THE PIDFILE RATHER THAN `cs193v doctor`, which also knows: doctor costs a `podman info`, 536-1222
+# ms of it (ERRORS.md D11), and count_forwards is called from `wait_until 30 no_forwards`, which
+# polls at 20 Hz. Two cheap forks per poll is affordable; a podman probe per poll is not. It is
+# also strictly more capable -- doctor's line is gated on tunnel_alive, so it goes quiet exactly
+# when a master is wedged, which is the case two live-tier assertions deliberately create.
+tunnel_owner_pid() {                  # -> the pid of THIS instance's ssh master, or nothing
+    fwd_init
+    local pid
+    pid="$(cat "$FWD_PIDFILE" 2>/dev/null)"
+    case "${pid:-}" in ''|*[!0-9]*) return 0 ;; esac
+    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+        *"$FWD_CTL"*) printf '%s' "$pid" ;;
+    esac
+}
+
+# Every one of OUR ports that OUR master is listening on, one per line. `ss -ltnp` yields the
+# listening pid for this user's own sockets, which is what makes the ownership filter possible at
+# all -- ports:one-ssh-process-carries-them-all has relied on that since the tunnel landed.
+fwd_owned_ports() {
+    local pid
+    pid="$(tunnel_owner_pid)"
+    [ -n "$pid" ] || return 0
+    ss -ltnp 2>/dev/null \
+        | awk -v p="pid=$pid," -v re="$FWD_RE" '$0 ~ p && $4 ~ re { sub(/.*:/, "", $4); print $4 }' \
+        | LC_ALL=C sort -u
+}
+
 # grep -c prints 0 AND exits 1 on no match, the trap documented for it elsewhere in this file.
 count_forwards() {
-    ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE "$CS193V_FWD_RE" || true
+    local n
+    n="$(fwd_owned_ports | grep -c '[0-9]')" || true
+    printf '%s' "${n:-0}"
 }
 
 # "The ports have gone back", as a predicate rather than a sample, because ssh does not unbind
 # instantly and a bare check right after a teardown is a flake that reads as a leak. Lives here
 # beside the port list for the same reason that does: #41 made every teardown release the
 # forwards, so three suites were about to define this, and two of them already had.
+#
+# It now means OUR tunnel holds none, which is the question every caller was actually asking. Read
+# the old way, `live:a-finished-session-releases-the-ports` failed on a neighbour's ssh process.
 no_forwards() { [ "$(count_forwards)" = 0 ]; }
 
-# The container tier reaches the container's own loopback THROUGH the tunnel, so it needs the
-# 46 forwards up before it asserts anything about ports.
+# Ours, and not ours: the ports we expect that our master is not holding, and who has them. This
+# is the diagnostic require_tunnel's message has always described and never been able to print.
+fwd_missing_ports() {                 # -> space-separated ports of ours that our master lacks
+    local owned p out
+    fwd_init
+    owned=" $(fwd_owned_ports | tr '\n' ' ')"
+    out=''
+    for p in $FWD_PORTS; do
+        case "$owned" in *" $p "*) ;; *) out="$out $p" ;; esac
+    done
+    printf '%s' "${out# }"
+}
+
+# Who is listening on a port that should have been ours, named as specifically as the kernel will
+# let us. `ss -ltnp` shows a pid only for this user's own sockets, so "no pid visible" is itself
+# informative: it means another account on this machine, not another checkout of ours.
+fwd_squatters() {                     # -> one line per missing port, up to LIMIT lines
+    local limit="${1:-5}" n=0 p line pid who
+    for p in $(fwd_missing_ports); do
+        [ "$n" -ge "$limit" ] && { printf '  ... and more\n'; return 0; }
+        line="$(ss -ltnp 2>/dev/null | awk -v a=":$p\$" '$4 ~ a { print; exit }')"
+        if [ -z "$line" ]; then
+            who='nothing is listening on it -- our own tunnel never bound it'
+        else
+            pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p')"
+            if [ -n "$pid" ]; then
+                # The -i path names the CHECKOUT that owns it, which is exactly what CLAUDE.md
+                # tells a human to go and read off this line by hand. Taken as the word after the
+                # FIRST -i, not with a `.*-i ` sed: the tunnel's own ProxyCommand ends in
+                # `sshd -i -f <config>`, so a greedy match reports "-f" and names nothing.
+                who="$(ps -p "$pid" -o args= 2>/dev/null \
+                       | tr ' ' '\n' | awk '$0 == "-i" { getline; print; exit }')"
+                who="pid $pid  ${who:-$(ps -p "$pid" -o comm= 2>/dev/null)}"
+            else
+                who="another user's process (no pid visible to us)"
+            fi
+        fi
+        printf '  %-6s %s\n' "$p" "$who"
+        n=$((n + 1))
+    done
+}
+
+# The container tier reaches the container's own loopback THROUGH the tunnel, so it needs its
+# forwards up before it asserts anything about ports.
 #
 # It cannot assume they are: 80-launcher-live.sh now releases the tunnel when it finishes, on
-# purpose, so that a completed run does not sit on 46 ports another developer's run needs. The
+# purpose, so that a completed run does not sit on ports another developer's run needs. The
 # cost of that is exactly here -- a second run arrives with the container still up and no
 # tunnel -- and paying it with the launcher's own verb is better than leaving a developer to
 # discover it from a wall of red port assertions.
 #
 # HARD-FAILS if they still do not come up, by the same project decision as require_image: a
 # green run must mean the whole thing really ran. The message names the likeliest cause,
-# because it is one nobody can deduce from the assertion that would otherwise fail.
+# because it is one nobody can deduce from the assertion that would otherwise fail -- and since
+# the count is now ownership-scoped, it can finally reach the screen in the case it describes.
 require_tunnel() {
-    [ "$(count_forwards)" = 46 ] && return 0
+    fwd_init
+    [ "$(count_forwards)" = "$FWD_N" ] && return 0
     # The container has to be up first, or --reset-tunnel correctly declines with
     # warn.tunnel-reset-not-running and this fails with a message about port squatting that names
     # entirely the wrong cause. Since #41 a stopped container is the NORMAL resting state, so
     # this is the common path here rather than an edge case. See hold_container.
     hold_container
     ( cd "$REPO" && printf 'exit\n' | timeout 90 ./cs193v --reset-tunnel ) >/dev/null 2>&1 || true
-    [ "$(count_forwards)" = 46 ] && return 0
-    fail "require:tunnel" "only $(count_forwards) of the 46 forwarded ports are up, and
---reset-tunnel did not fix it. Another cs193v instance on this machine is probably holding
-them: CS193V_INSTANCE does not namespace the port list, so the first instance to start wins.
+    [ "$(count_forwards)" = "$FWD_N" ] && return 0
+    fail "require:tunnel" "only $(count_forwards) of the $FWD_N ports THIS instance forwards are
+bound by its own tunnel, and --reset-tunnel did not fix it. Missing, and who has them:
+$(fwd_squatters)
+Another cs193v instance on this machine is probably holding them: CS193V_INSTANCE does not
+namespace the port list, so the first instance to start wins.
 Check:  ./cs193v doctor        (the 'tunnel ports' line names what is missing)
-        ss -ltnp | grep :3000  (the ssh -i path names the checkout that owns them)"
+To get out of the way, override CS193V_PORTS in .config/local.args -- this suite follows it.
+See CLAUDE.md."
     exit 1
 }
 
@@ -563,16 +734,18 @@ container_pkill() {                   # container_pkill PATTERN -> returns when 
 # nothing exposed to the LAN (#34).
 #
 # One marker per thing the suites start, and every pattern is NARROW on purpose: a developer's
-# own dev server in their own container is not this suite's to kill. `http.server 3000` is the
-# port 70-sighup.sh and 80-launcher-live.sh both use, not http.server in general.
+# own dev server in their own container is not this suite's to kill. `http.server $FWD1` is the
+# one port 70-sighup.sh and 80-launcher-live.sh both use, not http.server in general -- derived
+# rather than written out, because $FWD1 is whichever port this instance really forwards (#46).
 #
 # A no-op when the container is not running: podman exec fails, pkill matches nothing and
 # container_pkill returns immediately. That is what lets 80-launcher-live.sh call it before
 # the launcher has created anything.
 clean_vt_processes() {
+    fwd_init
     container_pkill cs193v-portprobe
     container_pkill inotifywait
-    container_pkill 'http.server 3000'
+    container_pkill "http.server $FWD1"
 }
 
 # How many of them a previous run left behind. Recorded rather than swept silently, so a run
@@ -583,7 +756,8 @@ clean_vt_processes() {
 # for `grep -c`, so take its output and ignore its status.
 count_vt_processes() {
     local n
-    n="$(podman exec "$NAME" pgrep -cf 'cs193v-portprobe|inotifywait|http\.server 3000' 2>/dev/null | head -1)"
+    fwd_init
+    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|http\.server $FWD1" 2>/dev/null | head -1)"
     printf '%s' "${n:-0}"
 }
 

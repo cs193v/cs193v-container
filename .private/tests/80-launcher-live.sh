@@ -22,6 +22,10 @@ set -u
 . "$(dirname -- "$0")/lib/podman-shim.sh"
 
 require_image
+# The forwarded set, from the launcher: $FWD_N below is however many ports this instance really
+# forwards, and $FWD1 the first of them. Written out, every count here was a literal 46 and the
+# server further down was a literal 3000 (#46).
+fwd_init
 cd "$REPO" || exit 1
 
 TMP="$(new_tmpdir)"
@@ -38,7 +42,7 @@ restore() {
     # gets that far. Without this, an interrupted live run leaks them into projects/ and the
     # next 60-container.sh run inherits them -- see clean_vt_fixtures for why that lies.
     clean_vt_fixtures
-    # Exactly the same hole, one resource over: the :3000 server further down is reaped by an
+    # Exactly the same hole, one resource over: the server on $FWD1 further down is reaped by an
     # inline pkill that only runs if the suite gets that far, so an interrupted run left a
     # listener on a FORWARDED port and the next 60-container.sh run measured it instead of its
     # own (#34).
@@ -353,7 +357,7 @@ assert_eq "drift:rebuild-leaves-nothing-running" "exited" \
 LB >/dev/null 2>&1
 hold_container
 require_tunnel
-assert_eq "drift:a-launch-after-a-rebuild-restores-the-forwards" "46" "$(count_forwards)"
+assert_eq "drift:a-launch-after-a-rebuild-restores-the-forwards" "$FWD_N" "$(count_forwards)"
 assert_match "drift:doctor-reports-the-tunnel-up" 'tunnel +up' "$(L doctor)"
 
 # ─── two copies of the course directory  (§2.7) ────────────────────────────────
@@ -495,7 +499,7 @@ assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000'
 # host-side forwarding state is visible: nothing inside the container can see whether a forward
 # exists out here. That makes these two lines load-bearing for support rather than decorative.
 assert_match "doctor:reports-the-tunnel-is-up" 'tunnel +up \(pid [0-9]+\)' "$out"
-assert_match "doctor:counts-forwarded-ports" 'tunnel ports +46 of 46' "$out"
+assert_match "doctor:counts-forwarded-ports" "tunnel ports +$FWD_N of $FWD_N" "$out"
 assert_match "doctor:reports-clock-skew" 'clock skew' "$out"
 assert_match "doctor:reports-zombies" 'zombies' "$out"
 # Exactly one zombie is EXPECTED while a tunnel is up: sshd's own re-exec'd process, whose
@@ -508,7 +512,7 @@ record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────
 # Each of these is a way the tunnel can strand a student with a container that looks perfectly
 # healthy and a browser that cannot reach anything.
-# The port list itself lives in lib/assert.sh, spelled out once for all three tiers.
+# The port list itself is derived once in lib/assert.sh, for all three tiers.
 count_fwd() { count_forwards; }
 
 # Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
@@ -516,13 +520,20 @@ count_fwd() { count_forwards; }
 # checkout's and instance's files too -- including stale ones whose process is long dead. That
 # is not hypothetical: it made the two --reset-tunnel assertions below skip with "no pidfile"
 # while a perfectly good tunnel was running, which is worse than failing.
-tunnel_pid() { L doctor | sed -n 's/.*tunnel  *up (pid \([0-9]*\)).*/\1/p' | head -1; }
-# And take the control socket from that process's own command line, so it cannot disagree.
-tunnel_ctl() {
-    local p; p="$(tunnel_pid)"
-    [ -n "$p" ] || return 0
-    ps -p "$p" -o args= 2>/dev/null | sed -n 's/.*-S \([^ ]*\).*/\1/p' | head -1
-}
+#
+# THROUGH --dev-tunnel NOW, not `L doctor`, and both halves of that are improvements rather than
+# tidying. Cost: doctor runs preflight, so every call paid a `podman info` -- 536-1222ms (ERRORS.md
+# D11) -- and release_tunnel calls this from the EXIT trap. Capability: doctor's pid line is gated
+# on tunnel_alive, so it goes SILENT for a master that has been SIGSTOPped, which is exactly the
+# state the two wedge cases below create on purpose; they had to reach it before wedging it. The
+# identity test is unchanged and is the launcher's own -- tunnel_owner_pid checks that our control
+# socket is on that pid's command line before believing the pidfile (lib/assert.sh).
+tunnel_pid() { tunnel_owner_pid; }
+# EMPTY UNLESS THE SOCKET IS REALLY THERE, using tunnel_alive's own test. --dev-tunnel prints the
+# path this instance WOULD use, which is what makes it derivable at all -- but the caller below
+# branches on "did we find a control socket", and a path that always answers would turn its else
+# arm into dead code and report a missing socket as a failed forwarding request instead.
+tunnel_ctl() { [ -S "$FWD_CTL" ] && printf '%s' "$FWD_CTL"; }
 # The tunnel has to be up before we can ask which one is ours. Since #41 the groups above end with
 # it deliberately down -- a stopped container has no tunnel -- so this is the common case here now,
 # and without it tunnel_pid finds nothing and the forward-direction assertions below fail with "no
@@ -531,7 +542,7 @@ require_tunnel
 CTL="$(tunnel_ctl)"
 record "tunnel:control-socket" "${CTL:-<none>}"
 
-# ─── giving the 46 host ports back ─────────────────────────────────────────────
+# ─── giving the host ports back ────────────────────────────────────────────────
 # This tier is the only thing in the suite that STARTS tunnels, and it used to finish with all
 # 46 of them bound -- which the assertions here require while they run, and which is a hostile
 # thing to leave behind once they have. CS193V_INSTANCE does not namespace the forwarded ports
@@ -562,42 +573,64 @@ release_tunnel() {
 # THE test: a server bound to the container's OWN loopback, which was unreachable by design
 # before this change, must answer from the host.
 #
-# Swept FIRST, so 3000 is provably free and a 200 can only have come from the server started
+# Swept FIRST, so the port is provably free and a 200 can only have come from the server started
 # here. A leftover wildcard-bound server -- what 70-sighup.sh leaves if it is killed -- passed
 # this assertion while proving the opposite of what it says, since wildcard is the case that
 # always worked (#34). Then poll instead of sleeping: python's http.server writes its "Serving
 # HTTP on ..." line to a discarded stderr, so its readiness is not otherwise observable.
 clean_vt_processes
 # Both halves of this test's precondition, made explicit: a running container to serve from, and
-# the 46 forwards to reach it through. Neither survives a maintenance verb any more, and without
+# the forwards to reach it through. Neither survives a maintenance verb any more, and without
 # this the assertion below would fail with 000 and read like a broken tunnel.
 require_tunnel
-podman exec -d "$NAME" python3 -m http.server 3000 --bind 127.0.0.1 >/dev/null 2>&1
+podman exec -d "$NAME" python3 -m http.server "$FWD1" --bind 127.0.0.1 >/dev/null 2>&1
 srv_code=000
-srv_answered() {                      # 0 once anything at all comes back from :3000
-    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:3000/)"
+srv_answered() {                      # 0 once anything at all comes back from the first port
+    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$FWD1/")"
     [ "$srv_code" != 000 ]
 }
 wait_until 5 srv_answered || true
 # One last attempt with the original's patience, so a 2 s timeout cannot be what fails this.
 [ "$srv_code" = 200 ] || \
-    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3000/)"
+    srv_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$FWD1/")"
 assert_eq "tunnel:loopback-bound-server-is-reachable" "200" "$srv_code"
-container_pkill 'http.server 3000'
+container_pkill "http.server $FWD1"
 
 # A remote forward inverts the direction the whole design rests on, and the SERVER refuses it
 # -- so this holds even if the launcher were changed to ask for one.
-if [ -n "$CTL" ]; then
-    out_r="$(ssh -S "$CTL" -O forward -R 127.0.0.1:19999:127.0.0.1:3000 student@cs193v-tunnel 2>&1 || true)"
+#
+# THE TWO HOST PORTS ARE DERIVED, and they were the last two written out in this suite. They have to
+# be OUTSIDE this instance's forwarded set: the listener check below counts what is bound on the
+# first one and expects nothing, so an instance whose CS193V_PORTS happened to include it saw its own
+# forward and failed an assertion about a refusal that had worked perfectly. Measured with
+# CS193V_PORTS=...,19999,...: `ss -ltn | grep -c :19999` answered 1. Same defect as #46, one port
+# over, so it is fixed the same way -- free_unforwarded_ports in lib/assert.sh.
+UNFWD2="$(free_unforwarded_ports 2)"
+RFWD_PORT="$(printf '%s' "$UNFWD2" | awk '{print $1}')"
+OFFBOX_PORT="$(printf '%s' "$UNFWD2" | awk '{print $2}')"
+record "tunnel:ports-borrowed-for-the-refusal-checks" "${UNFWD2:-<none>}"
+if [ -z "$RFWD_PORT" ] || [ -z "$OFFBOX_PORT" ]; then
+    fail "tunnel:remote-forward-is-refused" "no two host ports are both outside this instance's
+forwarded set and free right now, so there is nothing to ask for a forward on."
+    fail "tunnel:refused-forward-creates-no-listener" "see above"
+    fail "tunnel:cannot-proxy-off-box" "see above"
+elif [ -n "$CTL" ]; then
+    out_r="$(ssh -S "$CTL" -O forward -R "127.0.0.1:$RFWD_PORT:127.0.0.1:$FWD1" student@cs193v-tunnel 2>&1 || true)"
     assert_contains "tunnel:remote-forward-is-refused" "forwarding request failed" "$out_r"
     assert_eq "tunnel:refused-forward-creates-no-listener" "0" \
-              "$(ss -ltn 2>/dev/null | grep -c ':19999' || true)"
+              "$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE ":$RFWD_PORT\$" || true)"
     # ...and it must not be usable as a proxy to anywhere but the container's own loopback.
-    ssh -S "$CTL" -O forward -L 127.0.0.1:13999:1.1.1.1:80 student@cs193v-tunnel >/dev/null 2>&1 || true
+    ssh -S "$CTL" -O forward -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
     assert_eq "tunnel:cannot-proxy-off-box" "000" \
-              "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 http://127.0.0.1:13999/)"
+              "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:$OFFBOX_PORT/")"
 else
-    fail "tunnel:remote-forward-is-refused" "no control socket found in ${TMPDIR:-/tmp}"
+    # All three, not just the first. The results file must have the same lines whichever branch
+    # ran: a result that vanishes reads as a suite someone shortened, and this is the arm nobody
+    # is watching. (The pre-existing version reported only one of them.)
+    fail "tunnel:remote-forward-is-refused" "no control socket at $FWD_CTL, which is where this
+instance's tunnel keeps it (cs193v --dev-tunnel), so there was nothing to ask for a forward."
+    fail "tunnel:refused-forward-creates-no-listener" "see above"
+    fail "tunnel:cannot-proxy-off-box" "see above"
 fi
 
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means
@@ -606,10 +639,10 @@ TPID="$(tunnel_pid)"
 if [ -n "$TPID" ] && kill -STOP "$TPID" 2>/dev/null; then
     L --reset-tunnel >/dev/null 2>&1
     assert_fail "reset-tunnel:kills-a-stopped-tunnel" sh -c "kill -0 $TPID 2>/dev/null"
-    assert_eq "reset-tunnel:restores-all-46-forwards" "46" "$(count_fwd)"
+    assert_eq "reset-tunnel:restores-every-forward" "$FWD_N" "$(count_fwd)"
 else
     skip "reset-tunnel:kills-a-stopped-tunnel" "no tunnel pidfile to stop"
-    skip "reset-tunnel:restores-all-46-forwards" "see above"
+    skip "reset-tunnel:restores-every-forward" "see above"
 fi
 
 # A tunnel that outlives its container would hold all 46 host ports against a dead pipe. It
@@ -634,7 +667,7 @@ assert_eq "tunnel:a-rebuild-hands-the-ports-back" "0" "$(count_fwd)"
 LB >/dev/null 2>&1
 hold_container
 require_tunnel
-assert_eq "tunnel:comes-back-after-a-rebuild" "46" "$(count_fwd)"
+assert_eq "tunnel:comes-back-after-a-rebuild" "$FWD_N" "$(count_fwd)"
 
 # The same wedge as the --reset-tunnel pair above, but arriving at tunnel_down instead. Since #41
 # tunnel_down is the ONE path that hands the 46 ports back -- --rebuild, --stop and the end of a
@@ -709,7 +742,7 @@ record "perf:subsequent-launch-seconds" "$((T1 - T0))"
 # to one that did until their run fails instead. The EXIT trap calls this too, for the runs
 # that never reach this line.
 release_tunnel
-assert_eq "cleanup:the-46-forwards-are-released" "0" "$(count_fwd)"
+assert_eq "cleanup:the-forwards-are-released" "0" "$(count_fwd)"
 # Leave the container stopped as well, which since #41 is the honest resting state rather than a
 # courtesy: a running container is supposed to mean somebody has a terminal open on it, and a
 # suite that walks away leaving one up is asserting an invariant it just broke. Whichever suite

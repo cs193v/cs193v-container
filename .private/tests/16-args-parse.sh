@@ -239,3 +239,77 @@ agrees "corpus:indenting-comments-changes-no-word"
 fix_reset
 printf -- '# a\n\n   \n\t\n' | fix_args container.args
 assert_eq "cost:no-content-no-forks" "0" "$(sed_calls)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# --dev-tunnel: the port list the suite derives from, and the tunnel's own file names
+#
+# WHY IT LIVES IN THIS FILE. It is load_args' other consumer, and the only one whose answer the
+# TEST SUITE depends on: lib/assert.sh reads it to find out which ports to assert about, so a
+# mis-parse here does not fail one assertion, it silently points every port assertion in the
+# container and live tiers at the wrong ports. That is issue #46 in the other direction -- the
+# suite used to read container.args itself and ignore local.args, and five assertions reddened
+# for a developer who used the documented CS193V_PORTS override.
+#
+# The fixture is the same one above: a real launcher, our args files, no podman.
+tun()        { "$FIX/cs193v" --dev-tunnel 2>/dev/null; }
+tun_field()  { tun | awk -F'\t' -v k="$1" '$1 == k { print $2 }'; }
+tun_ports()  { tun | awk -F'\t' '$1 == "port" { print $2 }' | tr '\n' ' ' | sed 's/ *$//'; }
+
+# 1. The spec, and its expansion, from container.args alone. A bare port, a range and a
+#    comma list in one value, because those are the three shapes tunnel_ports walks.
+fix_reset
+printf -- '-e CS193V_PORTS=3000,4173-4175,8080\n' | fix_args container.args
+assert_eq "tunnel:spec-is-the-declared-value" "3000,4173-4175,8080" "$(tun_field spec)"
+assert_eq "tunnel:ranges-are-expanded-in-order" "3000 4173 4174 4175 8080" "$(tun_ports)"
+
+# 2. THE CASE #46 IS ABOUT: local.args wins, in the spec AND in the expansion. Both are checked
+#    because they are read by different callers -- the spec is what the container's environment
+#    must equal, the expansion is what the suite probes -- and a fix that moved only one of them
+#    would leave the two disagreeing, which is worse than the original bug.
+printf -- '-e CS193V_PORTS=13000-13002\n' | fix_args local.args
+assert_eq "tunnel:local-args-overrides-the-spec" "13000-13002" "$(tun_field spec)"
+assert_eq "tunnel:local-args-overrides-the-ports" "13000 13001 13002" "$(tun_ports)"
+
+# 3. A backwards range is warned about and contributes nothing -- and, the part that matters for a
+#    machine reading this, the warning goes to STDERR and leaves stdout parseable. tunnel_ports
+#    warns for a reason: container.args is a file people edit.
+fix_reset
+printf -- '-e CS193V_PORTS=3005-3000,8080\n' | fix_args container.args
+assert_eq "tunnel:backwards-range-contributes-no-port" "8080" "$(tun_ports)"
+# BY KEY, not by quoting the prose, per assert_says_key's own reasoning -- and the chunk itself is
+# asserted separately, because that half is behaviour rather than wording: a warning that does not
+# name which chunk it skipped sends a developer to read all 239 lines of container.args.
+badout="$("$FIX/cs193v" --dev-tunnel 2>&1 >/dev/null)"
+assert_says_key "tunnel:backwards-range-warns" warn.tunnel-bad-port "$badout"
+assert_contains "tunnel:the-warning-names-the-bad-chunk" "3005-3000" "$badout"
+
+# 4. No CS193V_PORTS at all: no port lines, and still exit 0. The launcher's own warn.tunnel-no-ports
+#    covers the student-facing half of this; here the point is that the seam does not become
+#    unparseable, because fwd_init's hard-fail message is what a developer has to be shown instead.
+fix_reset
+printf -- '--memory=1g\n' | fix_args container.args
+assert_eq "tunnel:no-ports-declared-prints-none" "" "$(tun_ports)"
+assert_eq "tunnel:no-ports-declared-prints-an-empty-spec" "" "$(tun_field spec)"
+assert_exit "tunnel:no-ports-declared-still-exits-0" 0 "$FIX/cs193v" --dev-tunnel
+
+# 5. The three paths are the tunnel's real ones: one id, three extensions. This is what lets a test
+#    ask "is this listener MINE" at all -- TUNNEL_ID hashes the course directory and the instance,
+#    so nothing outside the launcher can derive it.
+ctl="$(tun_field ctl)"; pidf="$(tun_field pid)"; logf="$(tun_field log)"
+assert_match "tunnel:ctl-path-is-a-cs193v-socket" 'cs193v-[0-9a-f]+\.ctl$' "$ctl"
+assert_eq "tunnel:pid-path-shares-the-ctl-stem" "${ctl%.ctl}.pid" "$pidf"
+assert_eq "tunnel:log-path-shares-the-ctl-stem" "${ctl%.ctl}.log" "$logf"
+
+# 6. And the id MOVES WITH CS193V_INSTANCE, which is the whole basis of the ownership test in
+#    lib/assert.sh: two instances of the same checkout must not be able to mistake each other's
+#    tunnel for their own.
+other="$(CS193V_INSTANCE=vt-other "$FIX/cs193v" --dev-tunnel 2>/dev/null \
+         | awk -F'\t' '$1 == "ctl" { print $2 }')"
+assert_ne "tunnel:the-id-changes-with-CS193V_INSTANCE" "$ctl" "$other"
+
+# 7. AND IT MUST ASK PODMAN NOTHING, for the same reason --dev-args must: this seam is read by the
+#    unit tier, and one line added to its dispatch arm would move it out of that tier silently,
+#    because podman IS installed wherever this suite actually runs.
+: > "$WORK/podman.count"
+PATH="$WORK/bin:$PATH" "$FIX/cs193v" --dev-tunnel >/dev/null 2>&1
+assert_eq "tunnel:asks-podman-nothing" "0" "$(awk 'END { print NR }' "$WORK/podman.count")"
