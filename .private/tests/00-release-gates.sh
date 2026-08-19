@@ -80,7 +80,7 @@ fi
 # case: this is a course about using Claude Code, so a skew there is a skew in the subject
 # being taught, and the managed-settings.json schema it has to accept is only checked for
 # valid JSON at build time — never against the version that actually installs.
-for arg in VERCEL_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
+for arg in VERCEL_VERSION CODEX_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
     v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" $PRIVATE/Containerfile | head -1)"
     record "build:$arg" "$v"
     assert_ne "build:$arg-is-pinned" "latest" "$v"

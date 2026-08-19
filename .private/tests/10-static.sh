@@ -173,13 +173,20 @@ cf_grep() { printf '%s\n' "$cf_code" | grep -nE "$1" | head -1 | cut -d: -f1; }
 ln_node="$(cf_grep 'deb\.nodesource\.com')"
 ln_gh="$(cf_grep 'cli\.github\.com/packages')"
 ln_vercel="$(cf_grep "npm install -g [\"']vercel")"
+ln_codex="$(cf_grep "npm install -g [\"']@openai/codex")"
 ln_claude="$(cf_grep "npm install -g [\"']@anthropic-ai/claude-code")"
-if [ -n "$ln_claude" ] && [ -n "$ln_vercel" ] && [ -n "$ln_gh" ] && [ -n "$ln_node" ] \
-   && [ "$ln_claude" -gt "$ln_vercel" ] && [ "$ln_vercel" -gt "$ln_gh" ] && [ "$ln_gh" -gt "$ln_node" ]; then
+# CODEX SITS BEFORE CLAUDE CODE, and which of the two is last is a cache-cost decision rather
+# than a preference. A bump re-runs its own layer plus every layer after it, and these are the two
+# biggest layers in the file -- measured with `podman history`: codex 312 MB, Claude Code 298 MB.
+# With codex earlier, a CLAUDE_CODE_VERSION bump -- the pin most often moved -- re-runs ~323 MB;
+# with codex last, the same bump would drag codex along for ~635 MB.
+if [ -n "$ln_claude" ] && [ -n "$ln_codex" ] && [ -n "$ln_vercel" ] && [ -n "$ln_gh" ] && [ -n "$ln_node" ] \
+   && [ "$ln_claude" -gt "$ln_codex" ] && [ "$ln_codex" -gt "$ln_vercel" ] \
+   && [ "$ln_vercel" -gt "$ln_gh" ] && [ "$ln_gh" -gt "$ln_node" ]; then
     pass "containerfile:claude-code-is-last-software-layer"
 else
     fail "containerfile:claude-code-is-last-software-layer" \
-         "want node < gh < vercel < claude-code; got node=$ln_node gh=$ln_gh vercel=$ln_vercel claude=$ln_claude"
+         "want node < gh < vercel < codex < claude-code; got node=$ln_node gh=$ln_gh vercel=$ln_vercel codex=$ln_codex claude=$ln_claude"
 fi
 
 # EACH VERSION ARG MUST SIT NEXT TO THE LAYER THAT USES IT, never in a tidy block at the
@@ -190,7 +197,8 @@ fi
 # point of use, 89 s and 95 MB. Nothing breaks if someone tidies them back into a block, so
 # nothing would catch it. This does. See ERRORS.md B5.
 cf_lines="$(sed 's/#.*//' $PRIVATE/Containerfile)"
-for pair in NODE_VERSION:nodesource PLAYWRIGHT_VERSION:playwright@ VERCEL_VERSION:vercel@ CLAUDE_CODE_VERSION:claude-code@; do
+for pair in NODE_VERSION:nodesource PLAYWRIGHT_VERSION:playwright@ VERCEL_VERSION:vercel@ \
+            CODEX_VERSION:@openai/codex@ CLAUDE_CODE_VERSION:claude-code@; do
     var="${pair%%:*}"; use="${pair#*:}"
     ln_arg="$(printf '%s\n' "$cf_lines" | grep -n "^ARG $var=" | head -1 | cut -d: -f1)"
     ln_use="$(printf '%s\n' "$cf_lines" | grep -nF "$use" | head -1 | cut -d: -f1)"
@@ -230,7 +238,7 @@ assert_not_contains "containerfile:no-node-tarball-download" "nodejs.org/dist" \
 #
 # Asserted here, in milliseconds, rather than only in the image tier: reverting this costs a
 # ~2 GB rebuild to discover otherwise.
-for pkg in playwright vercel '@anthropic-ai/claude-code'; do
+for pkg in playwright vercel '@openai/codex' '@anthropic-ai/claude-code'; do
     line="$(printf '%s\n' "$cf_code" | grep -nE "npm install -g [\"']$pkg" | head -1)"
     case "$line" in
         *"su student"*) pass "containerfile:$pkg-installed-as-student" ;;
@@ -433,6 +441,16 @@ tmux_conf="$(cat $PRIVATE/files/tmux/tmux.conf)"
 assert_ok  "tmux:conf-exists"    test -f $PRIVATE/files/tmux/tmux.conf
 assert_ok  "tmux:tabname-exists" test -f $PRIVATE/files/tmux/tabname.bash
 assert_ok  "tmux:tabname-syntax" bash -n $PRIVATE/files/tmux/tabname.bash
+# Every course tool must be ON the two-word label list, and this is a grep rather than a
+# behavioural test on purpose: the MECHANISM is already proven behaviourally for `claude` in the
+# tmux harness ("claude is labeled 'claude', not 'node'"), so what is left to catch is a tool
+# quietly dropping off the list. `claude` and `codex` are the load-bearing pair -- both install
+# via `npm install -g` as a `#!/usr/bin/env node` script, so /proc reports the INTERPRETER and
+# every tab of the course's two agents would otherwise read `node`.
+tabname_list="$(sed -n '/^_CS193V_SHOW_ARG=/,/"$/p' $PRIVATE/files/tmux/tabname.bash)"
+for tool in claude codex gh vercel; do
+    assert_match "tmux:tabname-lists-$tool" "(^|[[:space:]])$tool([[:space:]]|\"|$)" "$tabname_list"
+done
 assert_ok  "tmux:shell-exists"   test -f $PRIVATE/files/cs193v-shell
 assert_ok  "tmux:shell-syntax"   bash -n $PRIVATE/files/cs193v-shell
 
@@ -735,7 +753,7 @@ assert_not_contains "containerfile:pep668-marker-not-deleted" "EXTERNALLY-MANAGE
 
 assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' $PRIVATE/Containerfile
 
-# The bind mount lands at ~/projects, INSIDE $HOME alongside the four credential volumes.
+# The bind mount lands at ~/projects, INSIDE $HOME alongside the five credential volumes.
 # The target must be pre-created student-owned in the image: podman auto-chowns an empty
 # named volume, but a bind mount onto a missing directory gets created root-owned, and then
 # nothing the student runs can write to their own work.
@@ -1036,6 +1054,9 @@ done
 #
 # A FOURTH COPY OF THAT PATH IS WHAT MADE A FOURTH COPY OF THE BUG CHEAP, so there is one.
 managed="$PRIVATE/files/claude-code/managed-settings.json"
+# The notes are the other file this section reaches for, and they get the same treatment:
+# one spelling, handed to whatever needs it.
+NOTES="$PRIVATE/files/agent-notes.md"
 assert_ok  "claude:managed-settings-is-valid-json" \
            python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$managed"
 
@@ -1095,25 +1116,109 @@ else:
 ' "$managed" "$forbidden")"
 done
 
-lines="$(wc -l < $PRIVATE/files/claude-code/CLAUDE.md | tr -d ' ')"
-if [ "$lines" -lt 200 ]; then pass "claude:CLAUDE.md-under-200-lines"
-else fail "claude:CLAUDE.md-under-200-lines" "$lines lines"; fi
+# ONE FILE, TWO TOOLS. The notes are the only real copy: /etc/claude-code/CLAUDE.md is a
+# symlink to them, and the entrypoint links ~/.codex/AGENTS.md at them on every start, because
+# codex reads global instructions only from $CODEX_HOME and that directory is a volume -- a file
+# baked inside it would be seeded once on first mount and never refreshed.
+assert_file "notes:the-one-real-file-exists" "$NOTES"
+assert_ok  "notes:containerfile-links-the-claude-managed-slot" \
+           grep -q 'ln -sfn /etc/cs193v/agent-notes.md /etc/claude-code/CLAUDE.md' $PRIVATE/Containerfile
+assert_ok  "notes:entrypoint-links-the-codex-global-slot" \
+           grep -qE 'ln -sfn /etc/cs193v/agent-notes\.md .*\.codex/AGENTS\.md' $PRIVATE/files/entrypoint.sh
 
-# NOTHING asserts on the CONTENT of the managed CLAUDE.md, or of CONTAINER-DESIGN.md, by
-# decision. Assertions forbidding the old bind-0.0.0.0 imperatives lived in both places
-# briefly and were removed: a test that matches on what prose SAYS fails whenever the prose is
-# reworded, including when it is reworded correctly, and a test that fires on correct changes
-# teaches people to delete it rather than heed it.
+# An `@word` outside backticks is an IMPORT to Claude Code -- it expands the file at that path
+# into context -- and ordinary prose to codex. The notes already say "add `@playwright/test` at
+# exactly that version", which is safe only because it is backticked. This is the one thing in a
+# shared file that breaks differently for each reader, so it is checked rather than remembered.
+at_imports="$(python3 -c "
+import re
+t = open('$NOTES').read()
+t = re.sub(r'\`\`\`.*?\`\`\`', '', t, flags=re.S)
+t = re.sub(r'\`[^\`]*\`', '', t)
+print(' '.join(re.findall(r'(?:^|\s)(@[A-Za-z0-9._/-]+)', t, flags=re.M)))
+" 2>&1)" || at_imports="the check itself failed: $at_imports"
+assert_eq  "notes:no-unbackticked-at-import" "" "$at_imports"
+
+lines="$(wc -l < $NOTES | tr -d ' ')"
+if [ "$lines" -lt 200 ]; then pass "notes:under-200-lines"
+else fail "notes:under-200-lines" "$lines lines"; fi
+
+# NOTHING asserts on the PROSE of the notes, or of CONTAINER-DESIGN.md, by decision.
+# Assertions forbidding the old bind-0.0.0.0 imperatives lived in both places briefly and were
+# removed: a test that matches on what prose SAYS fails whenever the prose is reworded, including
+# when it is reworded correctly, and a test that fires on correct changes teaches people to
+# delete it rather than heed it.
+#
+# THE CREDENTIAL PATHS ARE THE ONE EXCEPTION, and the distinction is what keeps that decision
+# intact rather than quietly abandoning it. A path is not prose: it is a third copy of a list the
+# volume set and the deny rules already hold, and the cross-check below matches the paths alone,
+# so every sentence around them can be rewritten freely without touching a test. The port ranges
+# stay unasserted for exactly the reason above -- that check existed, twice, and was deleted both
+# times.
 #
 # What replaces them is behaviour. The claim "a loopback-bound server is reachable" is asserted
 # against a real server and a real tunnel in 60-container.sh and 80-launcher-live.sh, which
 # cannot pass while the docs' advice is wrong in a way that matters.
 
-# Every credential store that gets a volume must also get a deny rule, or a login token
-# lands in an agent transcript the first time it globs the home directory.
-for store in .claude/.credentials.json .config/gh .local/share/com.vercel.cli; do
+# ─── the credential stores: ONE list, three files ─────────────────────────────
+# Every credential store that gets a volume must also get a deny rule, or a login token lands in
+# an agent transcript the first time an agent globs the home directory.
+#
+# THIS LINE IS THE SOURCE for both checks below, so adding a store means editing one line. The
+# second check is why that matters: the notes NAME these paths, because "never read credential
+# files" gives codex no way to know that ~/.config/gh holds a token rather than ordinary config
+# it might legitimately open while helping with `gh`. Naming them makes the notes a THIRD place
+# the same paths are written, and this is what stops the three drifting apart.
+#
+# Codex is denied WHOLESALE, with gh and vercel, rather than at its credential file alone. Its
+# location is something OpenAI moves -- `cli_auth_credentials_store` already exists -- so a rule
+# naming auth.json would keep passing while protecting nothing; and ~/.codex/history.jsonl is
+# every prompt the student has typed to codex. ~/.claude stays file-level because it doubles as
+# Claude Code's own config and transcript home, which it legitimately reads.
+CRED_STORES=".claude/.credentials.json .config/gh .codex .local/share/com.vercel.cli"
+
+for store in $CRED_STORES; do
     assert_contains "claude:denies-$store" "$store" "$(cat "$managed")"
+    assert_contains "notes:names-$store"   "$store" "$(cat $NOTES)"
 done
+
+# And the other direction, which is the one a reword cannot break: every path the notes name
+# must be COVERED by a deny rule, so the notes cannot promise a protection the rules do not
+# implement. A wholesale rule ends in `/**`, so "covered" is a prefix test rather than equality:
+# ~/.codex/auth.json is covered by Read(//home/student/.codex/**).
+#
+# Only the Credentials section is scanned. The notes name ~/projects elsewhere and that is not a
+# thing to deny, so scanning every ~/ path in the file would demand a rule for it.
+#
+# THE THREE FILES SPELL THE SAME PATH THREE WAYS -- `~/...` in the notes, `//home/student/...` in
+# the rules, `/home/student/...` in container.args -- so everything is normalised to a leading
+# /home/student before it is compared.
+uncovered="$(python3 -c "
+import json, re, sys
+rules = []
+for r in json.load(open(sys.argv[1]))['permissions']['deny']:
+    m = re.match(r'(?:Read|Edit)\((.*)\)\$', r)
+    if m:
+        rules.append(re.sub(r'^/+', '/', m.group(1)))
+text = open(sys.argv[2]).read()
+sec = re.search(r'^#+ *Credentials\b(.*?)(?=^#+ |\Z)', text, flags=re.S | re.M)
+bad = []
+for tilde in re.findall(r'~/[A-Za-z0-9._/-]+', sec.group(1) if sec else ''):
+    path = '/home/student/' + tilde[2:]
+    covered = False
+    for r in rules:
+        stem = r[:-3] if r.endswith('/**') else None
+        if stem is not None:
+            if path == stem or path.startswith(stem + '/'):
+                covered = True
+        elif path == r:
+            covered = True
+    if not covered:
+        bad.append(tilde)
+print('' if sec else 'NO-CREDENTIALS-SECTION')
+print(' '.join(sorted(set(bad))))
+" "$managed" "$NOTES" 2>&1)" || uncovered="the check itself failed: $uncovered"
+assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$uncovered" | sed '/^$/d')"
 
 # ─── shellcheck ────────────────────────────────────────────────────────────────
 # Last, because require_cmd aborts the suite: a missing shellcheck should not hide the

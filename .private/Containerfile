@@ -449,7 +449,91 @@ RUN set -eux; \
     /home/student/.local/bin/vercel --version
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 7 — Claude Code.  MOST VOLATILE: keep it last so a version bump
+# Layer 7 — OpenAI Codex
+#
+# BEFORE Claude Code, not after, and that ordering is a cache-cost decision rather than a
+# preference. A bump re-runs its own layer plus every layer below it, and these are the two
+# biggest layers in the file -- MEASURED with `podman history`, not estimated: codex 312 MB,
+# Claude Code 298 MB, and ~25 MB of config and tldr-cache layers after them.
+#
+# So the question is only which tool's bump is the cheap one. Claude Code's pin is the one most
+# often moved, and with codex ABOVE it that bump re-runs ~323 MB; with codex below, the same bump
+# would drag codex's 312 MB along for ~635 MB. The codex bump pays that price instead, which is
+# the right way round while Claude Code is the pin that moves. 10-static.sh asserts the order.
+#
+# (Do not compare those layer sizes against the "89 s and 95 MB" for a CLAUDE_CODE_VERSION bump
+# at the top of this file: that figure is the DELTA podman reports for the bump, not the size of
+# the layer it rebuilds. Cold build of this recipe, measured on the development machine: 242 s.)
+#
+# THE npm PACKAGE IS A WRAPPER. `@openai/codex` is three files and 11 KB: a node script that
+# spawns a native binary out of a platform optionalDependency (`@openai/codex-linux-x64` or
+# `-linux-arm64`, aliased to this exact version, so pinning the wrapper pins the binary too).
+# Two consequences elsewhere in this repo: /proc reports the INTERPRETER for a `#!/usr/bin/env
+# node` script, which is why files/tmux/tabname.bash lists `codex` for the same reason it lists
+# `claude`; and the vendored tree carries its own `rg` and `zsh` off the student's PATH, so the
+# "ripgrep is deliberately absent" decision in the staff README is untouched.
+#
+# INSTALLED AS THE STUDENT for the reason in layer 2, and codex makes the same demand Claude
+# Code does: the wrapper detects npm (it sets CODEX_MANAGED_BY_NPM=1) and its update advice is
+# `npm install -g @openai/codex@latest`, which writes whatever the STUDENT's prefix points at.
+# Installed as root it would land in nodesource's /usr prefix, invisible to `npm ls -g`, and an
+# update would put a SECOND 309 MB copy in ~/.local that shadows this one on PATH. Issue #13.
+#
+# THE VERSION CHECK RUNS AS THE STUDENT, unlike the vercel and claude checks just below and
+# above, which run as root by absolute path. Two reasons: it is what proves the binary is
+# reachable and executable from the account that will actually run it (issue #71 asks for
+# exactly that), and running it as root would leave a stray /root/.codex in the image.
+#
+# THE ELF CHECK is layer 5's, for layer 5's reason. npm picks the platform package from `os`
+# and `cpu` fields, and if that selection is ever wrong the symptom is a wrong-architecture
+# binary that installs perfectly happily -- which is what the Chromium check was written for
+# after puppeteer#7740.
+#
+# BUBBLEWRAP IS HERE AND NOT ON LAYER 1'S apt LINE, which will look like untidiness to whoever
+# reads this next. It is a build-cost decision: layer 1 sits above everything, so adding a
+# package there turns any future change to this file into a full ~2.5 GB rebuild for every
+# student instead of re-running the layers from here down. Layer 4 already establishes the shape
+# -- an apt install as root in a later layer, beside an npm install as the student.
+#
+# What it buys is exact, and it is not a sandbox. codex ships its own vendored bwrap but prefers
+# a system one, warning at every start when there is none: "Codex could not find system
+# bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager." In THIS
+# container that warning is worse than noise, because a student can run the `sudo apt install`
+# it suggests and the next --rebuild silently undoes it. The package also takes codex's
+# documented "improved sandbox startup on Ubuntu/AppArmor hosts" path, which matters because
+# no sandbox policy is shipped (see below) and codex therefore runs on its `workspace-write`
+# default and really does invoke bwrap.
+#
+# NO SANDBOX POLICY IS SHIPPED, deliberately, and /etc/codex does not exist. codex reads managed
+# defaults from /etc/codex/managed_config.toml and hard constraints from
+# /etc/codex/requirements.toml -- the exact analogue of /etc/claude-code/managed-settings.json --
+# and both are left absent for now so staff can use the tool on its own defaults before choosing
+# a posture. The staff README's open items records what that decision will need, including the
+# trap: `danger-full-access` paired with codex's default `approval_policy = "on-request"` leaves
+# nothing to escalate out of, so it largely stops asking. Note also that a student's own
+# ~/.codex/config.toml lives in a volume, so --rebuild does not clear it; --rebuild --logout does.
+# ─────────────────────────────────────────────────────────────────────────────
+####> Installing Codex...
+ARG CODEX_VERSION=0.148.0
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bubblewrap; \
+    rm -rf /var/lib/apt/lists/*; \
+    bwrap --version; \
+    su student -s /bin/sh -c "npm install -g '@openai/codex@${CODEX_VERSION}'"; \
+    su student -s /bin/sh -c 'npm cache clean --force'; \
+    su student -s /bin/sh -c '/home/student/.local/bin/codex --version' | grep -qF "${CODEX_VERSION}"; \
+    CODEX_BIN="$(find /home/student/.local/lib/node_modules/@openai -type f -name codex -perm -u+x | head -1)"; \
+    test -n "$CODEX_BIN"; \
+    case "$(uname -m)" in \
+      x86_64)  WANT_ELF=3e00 ;; \
+      aarch64) WANT_ELF=b700 ;; \
+      *) echo "FATAL: no Codex is provisioned for $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    test "$(od -An -t x1 -j 18 -N 2 -- "$CODEX_BIN" | tr -d ' \n')" = "$WANT_ELF"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 8 — Claude Code.  MOST VOLATILE: keep it last so a version bump
 # invalidates only this layer and the small config layer after it.
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -473,7 +557,7 @@ RUN set -eux; \
     /home/student/.local/bin/claude --version
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer 8 — course configuration
+# Layer 9 — course configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
 # tldr, installed system-wide via pipx. Stands in for man pages, which the Ubuntu base
@@ -518,6 +602,22 @@ COPY files/ /tmp/cs193v-files/
 #     layer, so --rebuild and every image update restore it. The JSON is parsed at build
 #     time so a typo fails the build instead of a student's session.
 #
+#     THE NOTES THEMSELVES ARE ONE FILE FOR TWO AGENTS, and they are not here: they live at
+#     /etc/cs193v/agent-notes.md with item 10's other shared files, and /etc/claude-code/CLAUDE.md
+#     is a SYMLINK to them. Codex reads global instructions only from $CODEX_HOME, which is a
+#     volume, so files/entrypoint.sh links ~/.codex/AGENTS.md at the same file on every start —
+#     the "seeded once, never refreshed" trap this item exists to avoid, met a second time.
+#
+#     A symlink rather than Claude Code's `@path` import, which is what its docs show first and
+#     therefore what the next reader will propose. The import would allow Claude-only text below
+#     it, and costs an external-import approval dialog whose behaviour in the MANAGED slot is
+#     undocumented — and where a decline is silent, permanent, and takes the notes with it. The
+#     docs bless a symlink for exactly this case. Switching later is one line.
+#
+#     The build-time grep is for an `@word` outside backticks. Claude Code would read one as an
+#     import and expand a file into the student's context; codex reads it as prose. It is the one
+#     thing in a shared file that breaks differently for each reader.
+#
 #  3. Turns off XON/XOFF flow control for interactive shells, via both profile.d (login
 #     shells) and bash.bashrc (interactive non-login). Ctrl-S is "save" in every GUI
 #     editor; on a terminal it freezes all output with no echo, which looks exactly like
@@ -525,7 +625,7 @@ COPY files/ /tmp/cs193v-files/
 #
 #  4. Installs the nanorc.
 #
-#  5. Pre-creates all SIX volume mount points STUDENT-OWNED. This is the load-bearing part.
+#  5. Pre-creates all SEVEN volume mount points STUDENT-OWNED. This is the load-bearing part.
 #     ~/.cache/ms-playwright already exists by now — Layer 5 put the browser there — but it
 #     is listed here anyway so that one block names every mount point the volume set covers,
 #     rather than five of them plus one created as a side effect three layers earlier.
@@ -620,7 +720,6 @@ RUN set -eux; \
     test -z "$(man git 2>&1 | grep -F unminimize || true)"; \
     install -d -m 0755 /etc/claude-code; \
     install -m 0644 /tmp/cs193v-files/claude-code/managed-settings.json /etc/claude-code/managed-settings.json; \
-    install -m 0644 /tmp/cs193v-files/claude-code/CLAUDE.md             /etc/claude-code/CLAUDE.md; \
     python3 -c "import json;json.load(open('/etc/claude-code/managed-settings.json'))"; \
     install -m 0644 /tmp/cs193v-files/profile.d/10-cs193v-shell.sh /etc/profile.d/10-cs193v-shell.sh; \
     install -m 0644 /tmp/cs193v-files/profile.d/20-cs193v-welcome.sh /etc/profile.d/20-cs193v-welcome.sh; \
@@ -629,6 +728,10 @@ RUN set -eux; \
     grep -q 'CS193V Development Environment' /home/student/.bashrc; \
     cat /tmp/cs193v-files/profile.d/10-cs193v-shell.sh >> /etc/bash.bashrc; \
     install -d -m 0755 /etc/cs193v; \
+    install -m 0644 /tmp/cs193v-files/agent-notes.md      /etc/cs193v/agent-notes.md; \
+    ln -sfn /etc/cs193v/agent-notes.md /etc/claude-code/CLAUDE.md; \
+    test -r /etc/claude-code/CLAUDE.md; \
+    test -z "$(grep -oE '(^|[[:space:]])@[A-Za-z0-9._/-]+' /etc/cs193v/agent-notes.md || true)"; \
     install -m 0644 /tmp/cs193v-files/cs193v-strings.sh  /etc/cs193v/strings.sh; \
     sh -n /etc/cs193v/strings.sh; \
     install -m 0644 /tmp/cs193v-files/cs193v-ui.sh          /etc/cs193v/ui.sh; \
@@ -651,6 +754,7 @@ RUN set -eux; \
     su student -s /bin/bash -c 'tmux -L cs193vbuild kill-server'; \
     install -o student -g student -m 0644 /tmp/cs193v-files/nanorc /home/student/.nanorc; \
     install -d -o student -g student -m 0700 /home/student/.claude; \
+    install -d -o student -g student -m 0700 /home/student/.codex; \
     install -d -o student -g student -m 0700 /home/student/.claude-json; \
     install -d -o student -g student -m 0755 /home/student/.config; \
     install -d -o student -g student -m 0700 /home/student/.config/gh; \

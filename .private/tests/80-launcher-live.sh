@@ -13,7 +13,7 @@
 # than hanging (ERRORS.md B13), so a bare launch here is driven through a real pty via LB()
 # and only the verbs use a plain pipe.
 #
-# Destructive: `--rebuild --logout` deletes all five volumes, four of which are where claude/gh/vercel
+# Destructive: `--rebuild --logout` deletes all seven volumes, five of which are where claude/codex/gh/vercel
 # logins live. That test is therefore gated behind CS193V_DESTRUCTIVE=1 and skipped
 # otherwise, so running the suite can never log anybody out by surprise.
 
@@ -576,7 +576,7 @@ if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
                     "Building the course container" "$(LV --rebuild --logout)"
 else
     skip "logout:volume-contents-are-gone" \
-         "destructive — it deletes the claude/gh/vercel/git volumes. Re-run with CS193V_DESTRUCTIVE=1"
+         "destructive — it deletes the claude/codex/gh/vercel/git volumes. Re-run with CS193V_DESTRUCTIVE=1"
     skip "logout:git-identity-is-gone" "see above"
     skip "logout:leaves-nothing-running" "see above"
     skip "logout:does-not-rebuild-a-current-image" "see above"
@@ -846,12 +846,12 @@ assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exis
 
 vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | tr '\n' ' ')"
 record "cleanup:volumes" "$vols"
-# Same scoping. The six are asserted by exact name so a MISSING one still fails, and the
+# Same scoping. The seven are asserted by exact name so a MISSING one still fails, and the
 # instance suffix comes from $NAME so the expectation tracks whichever instance is running.
 mine="$(podman volume ls --format '{{.Name}}' \
-        | grep -xE "$NAME-(claude|claude-json|gh|vercel|playwright|git)" | LC_ALL=C sort | tr '\n' ' ')"
-assert_eq "cleanup:exactly-the-six-cs193v-volumes" \
-          "$NAME-claude $NAME-claude-json $NAME-gh $NAME-git $NAME-playwright $NAME-vercel" \
+        | grep -xE "$NAME-(claude|claude-json|codex|gh|vercel|playwright|git)" | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "cleanup:exactly-the-seven-cs193v-volumes" \
+          "$NAME-claude $NAME-claude-json $NAME-codex $NAME-gh $NAME-git $NAME-playwright $NAME-vercel" \
           "$(printf '%s' "$mine" | sed 's/ *$//')"
 # NEW SINCE THIS SUITE STARTED, and outside the cs193v family. Volumes cannot be labelled from
 # here -- the launcher creates them implicitly with `-v name:path`, so there is no flag of ours to

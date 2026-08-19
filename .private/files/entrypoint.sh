@@ -38,6 +38,20 @@ if [ -d "$store" ]; then
     ln -sfn "$store/.claude.json" "$link" 2>/dev/null || true
 fi
 
+# The course notes, for Codex. Same class of problem as the line above and a different shape of
+# fix: codex reads global instructions ONLY from $CODEX_HOME/AGENTS.md, and ~/.codex is a named
+# volume — so a copy baked into the image there would be seeded on first mount and never
+# refreshed again, which is the whole reason the notes live in /etc. Linking them on every start
+# means an image update reaches a student who logged in weeks ago.
+#
+# `-f` because the volume outlives the image: a stale link, or a copy left by an earlier build,
+# must lose to the current file. A student who wants their own global instructions writes
+# ~/.codex/AGENTS.override.md, which codex reads FIRST — and which therefore also replaces the
+# course notes entirely rather than adding to them.
+if [ -d "$HOME/.codex" ]; then
+    ln -sfn /etc/cs193v/agent-notes.md "$HOME/.codex/AGENTS.md" 2>/dev/null || true
+fi
+
 # If given a command, run it instead of keeping the container alive. NOTHING IN THIS REPO USES
 # THIS: the comment here used to credit --dev-build's smoke tests, which was already wrong before
 # that verb was removed -- verb_dev_build passed no command, and 50-image.sh reaches into the

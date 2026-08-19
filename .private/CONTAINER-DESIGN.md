@@ -15,7 +15,7 @@ cd ~/cs193v
 ./cs193v
 ```
 
-You get a shell with node, python, git, the GitHub CLI, the Vercel CLI, Claude Code and
+You get a shell with node, python, git, the GitHub CLI, the Vercel CLI, Claude Code, Codex and
 Playwright with a headless Chromium installed, inside a tabbed terminal that tells you where
 you are. You can run `./cs193v` in as many terminal windows as you like; each gets its own
 set of tabs in the **same** container. There is only ever one container.

@@ -37,7 +37,10 @@ projects/                      the student's work; the only directory shared wit
     nanorc
     bash_logout                runs cs193v-goodbye, outside tmux only
     profile.d/                 stty -ixon, and the entry banner outside tmux
-    claude-code/               managed-settings.json + CLAUDE.md
+    agent-notes.md             THE COURSE NOTES BOTH AGENTS READ — installed once as
+                               /etc/cs193v/agent-notes.md; /etc/claude-code/CLAUDE.md is a
+                               symlink to it and the entrypoint links ~/.codex/AGENTS.md at it
+    claude-code/               managed-settings.json (the notes moved out — see above)
   messages.txt                 all student-facing launcher strings (script config, not reading)
   install-cs193v.sh            macOS / Ubuntu / WSL setup
   install-cs193v-windows.cmd   Windows stage one, then hands off to the above
@@ -433,7 +436,7 @@ tail box — the requirements are the opposite ones.
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
-image (`localhost/cs193v:local`) and the same six volumes. Two people developing at once
+image (`localhost/cs193v:local`) and the same seven volumes. Two people developing at once
 therefore collide, and not cleanly: whoever ran `--rebuild` last owns the container the
 other is about to shell into, and either one's `--rebuild --logout` deletes the other's logins.
 
@@ -445,7 +448,7 @@ export CS193V_INSTANCE=yourname
 ./cs193v doctor                   # reports container cs193v-yourname
 ```
 
-It suffixes the container name, the dev image tag and all six volume names together —
+It suffixes the container name, the dev image tag and all seven volume names together —
 partial suffixing would be worse than none, since `--rebuild --logout` would still cross
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.
@@ -855,6 +858,64 @@ is the only slot that gets both halves of the cache contract — a library bump 
 Playwright and Chromium (224 s), and a `CLAUDE_CODE_VERSION` bump, the pin most often touched, does
 not re-run the libraries. `--no-cache-dir` matters: pip's cache is 56 MB and would otherwise ship in
 the layer, the same reason `npm cache clean --force` runs in-layer two steps up.
+
+### Codex's sandbox posture — deferred, deliberately (issue #71)
+
+Codex ships on **its own defaults**, and `/etc/codex/` does not exist. That is a decision to
+postpone a decision, taken so staff can use the tool before choosing a posture for it, and this
+is the research so it does not have to be redone.
+
+Codex has two independent knobs. `sandbox_mode` (`read-only` / `workspace-write` /
+`danger-full-access`) is the technical boundary; `approval_policy` (`untrusted` / `on-request` /
+`never` / `granular`) decides when it stops and asks. It defaults to `workspace-write` +
+`on-request`. Managed policy would go in `/etc/codex/managed_config.toml` (soft defaults) and
+`/etc/codex/requirements.toml` (hard constraints — `allowed_sandbox_modes`,
+`allowed_approval_policies`), which is the exact analogue of `/etc/claude-code/managed-settings.json`
+and, being in `/etc`, is restored by every `--rebuild` — unlike anything in the `cs193v-codex`
+volume.
+
+**The posture to match is Claude Code's, and Claude Code has no boundary here.** Its Bash sandbox
+is opt-in: nothing sets `sandbox.enabled` and nothing is in `/sandbox`'s project settings, so
+inside this container Claude Code can touch anything the student can, and **permission prompts are
+the only control**. That is the deliberate choice recorded in `managed-settings.json` — the
+container is the boundary, so loosening buys convenience rather than safety.
+
+Four things to know before writing a policy:
+
+- **The parity pair is `sandbox_mode = "danger-full-access"` + `approval_policy = "untrusted"`.**
+  `untrusted` is the analogue of Claude Code's default mode; `on-request` is the autonomous one.
+  Pairing full access with the default `on-request` leaves codex nothing to escalate out of, so it
+  largely **stops asking** — that is `--dangerously-skip-permissions` behaviour reached by
+  accident, and it is how to get parity wrong while believing you have it.
+- **Nested bubblewrap probably cannot work here, and Anthropic documents it for the same tool:**
+  "Bubblewrap fails to start inside a container: in an unprivileged container, bubblewrap cannot
+  mount a fresh `/proc` filesystem", with `enableWeakerNestedSandbox` as the workaround, to be used
+  "only when the outer container already provides the isolation boundary you need". That is rootless
+  podman, and codex's sandbox is the same `bwrap` doing the same nested mount. The configuration
+  everyone recommends for containers — `--cap-add SYS_ADMIN --security-opt seccomp=unconfined` — is
+  on the invariants list in `container.args` and is not available.
+- **A middle option needs no claim about the boundary at all:** ship only
+  `approval_policy = "untrusted"`. Prompts are then on whichever way the sandbox resolves, no branch
+  is silent, and `danger-full-access` never appears in a course file. It rests on one unverified
+  assumption — that `untrusted` still prompts under a bypassed sandbox — which a live session settles.
+- **Claude Code's own sandbox needs `bubblewrap` AND `socat`** on Linux (plus ripgrep and a seccomp
+  filter). The image now has bubblewrap, for codex's startup warning, so that dependency set is
+  half-provisioned. Harmless while the sandbox stays off; worth knowing rather than rediscovering.
+
+What to record while using it, on Ubuntu **and** on a Mac — a Mac runs the container inside podman's
+own VM, a different kernel with no host AppArmor policy in play, so a boundary that differs by
+platform is the failure this has to rule out:
+
+```
+bwrap --version                     # the apt copy executes at all
+codex                               # any bwrap warning? which sandbox does it report?
+codex exec 'create /home/student/projects/scratch.txt with the word ok'
+codex exec 'read /etc/hostname'
+codex exec 'run: sudo apt-get install -y sl'    # does it ask before escalating?
+```
+
+Do it on a container that has not been tinkered with: a student's own `~/.codex/config.toml` lives
+in the volume, so `--rebuild` does **not** clear it and only `--rebuild --logout` does.
 
 ### Revisit PID 1: is rejecting `--init` still the right call?
 

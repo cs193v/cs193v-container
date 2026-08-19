@@ -133,7 +133,7 @@
 # forwards and to tell the container which ones they are, so the two cannot disagree.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
-# Five volumes holding logins and settings, and ONE holding a package cache. That last one is
+# Six volumes holding logins and settings, and ONE holding a package cache. That last one is
 # an exception to a rule this file used to state flatly, so here is the rule and why the
 # exception earns it.
 #
@@ -156,6 +156,17 @@
 # volume inherits.
 -v cs193v-claude:/home/student/.claude
 -v cs193v-claude-json:/home/student/.claude-json
+# Codex, and it holds MORE than a login: auth.json, the student's own config.toml, sessions/ and
+# history.jsonl, which is every prompt they have typed to it. Same credentials-plus-state shape as
+# ~/.claude next door, so it gets the same treatment -- one volume over the whole directory. There
+# is no narrower option: a single file cannot be a volume target, and the ~/.claude.json symlink
+# trick does not transfer, because codex rewrites its auth file and an atomic replace would swap
+# the symlink for a real file in the writable layer -- a login silently lost at the next --rebuild.
+#
+# The course notes are deliberately NOT in here. ~/.codex/AGENTS.md is a symlink the entrypoint
+# points at /etc/cs193v/agent-notes.md on every start, so an image update reaches a student whose
+# volume was created weeks ago. See files/entrypoint.sh.
+-v cs193v-codex:/home/student/.codex
 -v cs193v-gh:/home/student/.config/gh
 # The git identity and the gh credential helper line, which is why this one exists and why it is
 # .config/git rather than ~/.gitconfig. `git config --global` writes $XDG_CONFIG_HOME/git/config

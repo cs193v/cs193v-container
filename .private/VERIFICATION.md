@@ -130,7 +130,10 @@ LC_ALL=C comm -3 \
 grep -qxF 'local.args' "$DIR/.gitignore" && grep -qxF 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
 #   -F, not bare -x: `projects/*` as a BRE is "project"+"s"+zero-or-more-"/", so it matched
 #   "projects", "projects/", "projects//" — never the literal line. The check never fired.
-# Containerfile layer order: claude-code must be in the LAST software layer
+# Containerfile layer order: node < gh < vercel < codex < claude-code, most volatile LAST.
+# Codex sits before Claude Code on cost, not taste: they are the two biggest layers in the file
+# (measured with `podman history`: codex 312 MB, Claude Code 298 MB), and Claude Code's pin is the
+# one most often moved, so it is the one whose bump should not drag the other along.
 grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$DIR/Containerfile"
 ```
 
@@ -163,8 +166,8 @@ podman image inspect "$IMAGE" --format '{{json .Config.Env}}' | jq -r '.[]' | so
 ```sh
 ck  uid-gid        "1000 1000 student"   R 'echo $(id -u) $(id -g) $(id -un)'
 rec passwd-student                       R 'getent passwd student'
-ck  vol-owners     "student student student student student" \
-    R 'stat -c %U /home/student/.claude /home/student/.claude-json \
+ck  vol-owners     "student student student student student student" \
+    R 'stat -c %U /home/student/.claude /home/student/.claude-json /home/student/.codex \
                   /home/student/.config/gh /home/student/.local/share/com.vercel.cli \
                   /home/student/.cache/ms-playwright | tr "\n" " " | sed "s/ $//"'
 ckfail no-gitconfig                      R 'test -e /etc/gitconfig'      # vanilla git, by decision
@@ -190,12 +193,12 @@ ck  no-extra-tools none                  R 'for t in rg fzf delta bat fd chromiu
 # against that output was being compared to the empty string and passed for the wrong
 # reason. Check the exit status first, then record. Issue #13.
 ckx  npm-ls-g-succeeds                   R 'npm ls -g --depth=0 >/dev/null'
-rec  npm-globals                         R 'npm ls -g --depth=0'         # vercel + claude-code + playwright, in the STUDENT's prefix
+rec  npm-globals                         R 'npm ls -g --depth=0'         # vercel + codex + claude-code + playwright, in the STUDENT's prefix
 #   ^ puppeteer is deliberately NOT checked for here. The assertion that did was removed by
 #     decision, so nothing enforces its absence any more — the rejection rests on the
 #     argument in README's "Deliberately not here" alone.
 ck  playwright-browser-runs ok            R 'playwright screenshot -b chromium about:blank /tmp/p.png >/dev/null 2>&1 && echo ok'
-rec  versions                            R 'node -v; npm -v; python3 -V; gh --version|head -1; vercel --version; claude --version'
+rec  versions                            R 'node -v; npm -v; python3 -V; gh --version|head -1; vercel --version; claude --version; codex --version'
 #   Python is a floor, not a library set (issue #44): no library is preinstalled, so what is
 #   checked is that a student can install any of them with no sudo and no flag.
 ck   pip-needs-no-flags   ok             R 'pip3 install --no-index tabulate 2>&1 | grep -q externally-managed && echo BLOCKED || echo ok'
@@ -865,7 +868,9 @@ Mostly automated in §A.11. What still needs a person:
 *Expect:* a URL is **printed** (via the `BROWSER` stub) and a device/paste code flow completes. No
 callback port is published, so a redirect-only flow would fail — confirm it does not need one.
 
-**8.2 — `gh` and `vercel` login.** `gh auth login`, then `vercel login`.
+**8.2 — `gh`, `vercel` and `codex` login.** `gh auth login`, then `vercel login`, then
+`codex login --device-auth`. Codex's browser flow wants a callback on localhost:1455, which
+nothing forwards yet, so device-auth is the route that works — see issue #71.
 *Expect:* both complete with a printed URL or emailed code. During `gh auth login`, answer **yes** to
 "Authenticate Git with your GitHub credentials?" and then confirm `git push` works from a test repo.
 
