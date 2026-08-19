@@ -49,8 +49,15 @@ TOKEN="github_pat_11ABCDEFG0aaaaaaaaaaaa_$TOKEN_B"
 TOKEN_MID=87
 
 # The keystrokes for a clean first run: email, Enter to confirm, name, Enter to confirm, Enter at
-# the checkpoint, the token, Enter at "is that your account?".
-HAPPY="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\n"
+# the checkpoint, Enter at "Yes, I see my token" (issue #58's menu), the token, Enter at "is that
+# your account?".
+#
+# THAT SIXTH ENTER IS THE NEW ONE, and every sequence below that reaches the token prompt needs
+# one -- including the ones that come BACK to it, because re-entering ask_token draws the menu
+# again. A sequence one keystroke short does not fail where the keystroke is missing: menu() eats
+# the token's first line as its answer and the run fails somewhere further on, for a reason the
+# assertion cannot name.
+HAPPY="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n"
 
 # ─── the happy path ────────────────────────────────────────────────────────────
 sg_new
@@ -151,6 +158,42 @@ assert_match "cursor:shown-at-the-token-prompt" "$SG_ESC\[\?25h.{0,60}Your token
 # And the same for the two prompts that echo normally, which were just as cursorless.
 assert_match "cursor:shown-at-the-email-prompt" "$SG_ESC\[\?25h" \
              "$(printf '%s' "$out" | tr -d '\r' | sed -n '/email address/,$p' | head -1)"
+
+# ─── the two ways to get a token (issue #58) ───────────────────────────────────
+# The link screen ends in a choice, and the by-hand steps sit behind it. Printing both to
+# everybody is what made this screen 53 rows on an 80-column terminal, of which the container's
+# tmux leaves 23 visible — so the student who followed the link arrived at `Your token:` with the
+# link itself scrolled off. Two things are asserted here: the fallback is REACHABLE, and it is out
+# of the way of the student who did not need it.
+sg_new
+out="$(sg_tty "$HAPPY")"
+sg_says "prefill:offers-the-link"  token.prefill "$out"
+sg_says "prefill:offers-a-way-out" opt.by-hand   "$out"
+# The link itself, not merely the words around it: the prefilled parameters are the whole point of
+# offering it, and 45-setup-git.sh is what checks each one.
+sg_has "prefill:the-link-is-prefilled" "settings/personal-access-tokens/new?name=CS193V" "$out"
+sg_says_not "prefill:hides-the-by-hand-steps" token.byhand "$out"
+# Generating a token takes two clicks. A student who stops at the first sees no token at all and
+# has nothing to paste, which looks from their side like the link having failed.
+sg_has "prefill:names-the-confirmation" "confirm when GitHub asks you to" "$out"
+sg_says "prefill:the-link-path-still-works" status.all-set "$out"
+
+# Arrowing down is the only way to the by-hand steps, and it has to end at the same prompt.
+BYHAND="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\033[B|\n|$TOKEN\n|\n"
+sg_new
+out="$(sg_tty "$BYHAND")"
+sg_says "byhand:shows-the-steps"      token.byhand   "$out"
+sg_says "byhand:then-accepts-a-token" status.all-set "$out"
+# THE THREE THINGS THE OLD STEPS GOT WRONG about GitHub's page, each asserted by the phrase that
+# fixes it, because each one stopped a student who followed the instructions exactly:
+#   * the page is opened directly, so there is no "Generate new token" button to click first;
+#   * the section is called Permissions, not Repository permissions;
+#   * the three permissions have to be ADDED before they can be set to Read and write, and
+#     nothing on the page lists them until they are.
+sg_has_not "byhand:no-generate-new-token-step"        "Generate new token"         "$out"
+sg_has     "byhand:names-the-permissions-section"     "Under Permissions"          "$out"
+sg_has     "byhand:says-a-permission-must-be-added"   "Add permissions"            "$out"
+sg_has     "byhand:says-they-arrive-read-only"        "added as Read-only"         "$out"
 
 # ─── the four permission failures ──────────────────────────────────────────────
 # One injected failure each, and three things asserted every time: the row that failed carries a
@@ -260,7 +303,7 @@ assert_eq "retry:does-not-ask-for-the-token-again" "1" \
 # student for our failure.
 sg_new
 sg_set fail_at 'issue create'
-out="$(sg_tty "$HAPPY|\033[B|\n|$TOKEN\n|\n$STUCK")"
+out="$(sg_tty "$HAPPY|\033[B|\n|\n|$TOKEN\n|\n$STUCK")"
 assert_eq "retoken:asks-for-the-token-twice" "2" \
           "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 assert_eq "retoken:asks-for-the-email-once" "1" \
@@ -288,7 +331,7 @@ assert_eq "stuck:the-box-is-closed" "" "$(printf '%s\n' "$sgbox" | box_problems)
 # Answering "no, that's not my account" goes back to the token prompt without running a single
 # probe: there is nothing to learn from probing a token that belongs to somebody else.
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\033[B|\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\033[B|\n|\n|$TOKEN\n|\n")"
 assert_eq "wrong-account:asks-for-the-token-twice" "2" \
           "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 sg_says "wrong-account:eventually-succeeds" status.all-set "$out"
@@ -316,7 +359,7 @@ sg_says_not "ratelimit:does-not-blame-the-token" err.issues "$out"
 # that a rejection re-prompts on the spot rather than starting the screen over, and that the two
 # email messages are actually different where the transcript in issue #49 says they are.
 sg_new
-out="$(sg_tty "not an email\n|me@gmail.com\n|me@nested.stanford.edu\n|   jdoe@stanford.edu   \n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\n")"
+out="$(sg_tty "not an email\n|me@gmail.com\n|me@nested.stanford.edu\n|   jdoe@stanford.edu   \n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
 assert_eq "retry-email:complains-twice-about-the-shape" "2" \
           "$(printf '%s' "$out" | grep -c 'not a valid @stanford.edu' || true)"
 assert_says "retry-email:has-a-separate-message-for-a-subdomain" \
@@ -326,7 +369,7 @@ sg_says "retry-email:still-gets-there" status.all-set "$out"
 
 # "No, I want to retype that" asks the same question again rather than moving on.
 sg_new
-out="$(sg_tty "typo@stanford.edu\n|\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\n")"
+out="$(sg_tty "typo@stanford.edu\n|\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
 assert_eq "retype-email:asks-again" "2" \
           "$(printf '%s' "$out" | grep -c 'What is your @stanford.edu' || true)"
 assert_match "retype-email:configures-the-second-answer" \
@@ -337,13 +380,13 @@ assert_not_match "retype-email:never-configures-the-first" \
 # A classic token is turned away before anything runs, with its own message: one with the `repo`
 # scope would very nearly work, so "that is not a token" would be both wrong and unhelpful.
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|ghp_16C7e42F292c6912E7710c838347Ae178B4a\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|ghp_16C7e42F292c6912E7710c838347Ae178B4a\n|$TOKEN\n|\n")"
 sg_says "classic-token:says-which-kind-it-is" err.token-classic "$out"
 assert_eq "classic-token:nothing-ran-with-it" "0" "$(sg_count 'gh auth login.*ghp_')"
 sg_says "classic-token:then-accepts-the-right-one" status.all-set "$out"
 
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|hello\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|hello\n|$TOKEN\n|\n")"
 sg_says "junk-token:says-what-one-looks-like" err.token-shape "$out"
 # FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
 # because "... -1 more characters ..." is what a short typo would otherwise render as.
@@ -357,7 +400,7 @@ sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
 # in the sense that the good one pasted after it does.
 sg_new
 HALF="$(printf '%s' "$TOKEN" | cut -c1-50)"
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$HALF\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$HALF\n|$TOKEN\n|\n")"
 sg_says "partial-token:says-it-is-only-part-of-one" err.token-partial "$out"
 sg_says_not "partial-token:does-not-say-it-is-not-a-token" err.token-shape "$out"
 # 44 = 50 - the six dots. The number a student compares against the one a whole token shows.
@@ -414,7 +457,7 @@ assert_eq "second-run:configures-nothing" "0" \
 sg_new
 sg_touch auth_token
 printf 'user.name=Wrong Name\nuser.email=wrong@stanford.edu\n' > "$SGSHIM/gitconfig"
-out="$(sg_tty "\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|$TOKEN\n|\n")"
+out="$(sg_tty "\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
 sg_has "start-over:asks-for-the-address-again" "What is your @stanford.edu" "$out"
 assert_match "start-over:configures-the-new-answer" 'user.email jdoe@stanford.edu' "$(sg_log)"
 
@@ -443,6 +486,18 @@ out="$(sg_tty "$HAPPY$STUCK")"
 assert_eq "cleanup:deletes-the-branches-it-pushed" "3" "$(sg_count 'push -q origin --delete')"
 assert_match "cleanup:closes-the-issue-it-opened" 'gh issue close' "$(sg_log)"
 sg_has_not "cleanup:says-nothing-about-it" "--delete" "$out"
+
+# ─── nothing invisible in what a student copies ────────────────────────────────
+# A blank line inside a message is a blank line. emph_stream used to end one with two spaces and a
+# reset sequence — awk's split() returns 0 fields for an empty string, 0 is even, and the branch
+# that closes an unpaired *asterisk* fired on nothing. Neither a screen nor any assertion here
+# could show it, because both strip the escapes; a student pasting a screenful into a help request
+# carries it. Checked against the whole transcript rather than one message, since every message
+# with a paragraph break in it was affected.
+sg_new
+out="$(sg_tty "$HAPPY")"
+assert_eq "copy:no-line-is-invisible-whitespace" "" \
+          "$(sg_rows "$out" | grep -nE '^[[:space:]]+$' | head -3 | tr '\n' ' ')"
 
 # ─── the cursor comes back ─────────────────────────────────────────────────────
 # run_step hides the cursor for the duration of a row. A script that exits with it hidden leaves

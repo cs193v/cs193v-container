@@ -8,7 +8,7 @@
 # holds a credential that can reach the student's homework repository. Every step of that has a
 # failure mode whose symptom is a bare 404 or "Permission denied" with nothing in it naming the
 # cause: a token owned by the wrong account, a permission left on Read-only, an organization
-# invitation never accepted. So this asks four questions, runs six commands, and then PROVES the
+# invitation never accepted. So this asks five questions, runs six commands, and then PROVES the
 # token works by doing everything the course will ask of it against a sandbox repository —
 # because `gh auth login --with-token` accepts a token that can do nothing at all. cli/cli's
 # HeaderHasMinimumScopes returns nil on an empty X-Oauth-Scopes header ("assume that it is an
@@ -48,10 +48,12 @@ CS193V_TOKEN_EXPIRY="${CS193V_TOKEN_EXPIRY:-2026-12-31}"
 #
 # MEASURED 2026-08-17 against the real page: the link works and the token really does belong to the
 # organization. So this ships as `yes`. Re-measure it if GitHub touches that page — MANUAL.md says
-# how — and set it to `no` if it regresses: the by-hand steps are always printed and carry the
-# screen on their own. It is a switch rather than an emptied message key because 20-messages.sh
-# forbids empty bodies, and rightly: msg() renders a missing key as "(missing message: k)" straight
-# to the student.
+# how — and set it to `no` if it regresses: `no` skips the link and the menu with it, and prints
+# the by-hand steps as the only route, which is what they were before issue #58 put them behind a
+# choice. That mode is 24 rows on an 80-column terminal against the 23 tmux leaves, so the top line
+# of the intro scrolls; the steps and the prompt do not. It is a switch rather than an emptied
+# message key because 20-messages.sh forbids empty bodies, and rightly: msg() renders a missing key
+# as "(missing message: k)" straight to the student.
 CS193V_TOKEN_PREFILL="${CS193V_TOKEN_PREFILL:-yes}"
 
 # Where the shared code and the prose live. Both are absolute image paths, and both are
@@ -96,10 +98,14 @@ fi
 # and the two copies differed only in the indent, which is exactly the shape of duplication this
 # project drift-checks everywhere else.
 #
-# Blank lines stay empty rather than becoming two spaces, so nothing invisible ends up in a
-# student's copy-paste.
+# BLANK LINES STAY EMPTY, and the test for one is `$0 == ""` rather than anything the parser
+# below works out, which it got wrong for as long as this existed: awk's split() returns 0 fields
+# for an empty string, 0 is even, so the "close an unpaired asterisk" line appended a reset
+# sequence to nothing and every blank line inside every message went out as two spaces and an
+# escape. Invisible on a screen, and in a student's copy-paste, which is where it matters.
 emph_stream() {                       # emph_stream [INDENT]   -- text on stdin
     awk -v on="$C_CYAN" -v off="$C_OFF" -v pad="${1:-}" '
+        $0 == "" { print ""; next }
         {
             n = split($0, part, /\*/)
             line = part[1]
@@ -532,13 +538,32 @@ github_checkpoint() {
 # messages, because an inline "Try again:" appended to the END of a paragraph reads as part of the
 # paragraph — which was true, and stopped mattering the moment the retry got a line to itself. The
 # `first` flag that bookkeeping needed went with it.
+#
+# THE FALLBACK IS BEHIND A MENU (issue #58), and the reason is a measurement rather than a
+# preference: this screen printed BOTH ways of making a token to every student, one after the
+# other, and came to 53 rows on an 80-column terminal when the container's tmux leaves 23 of them
+# visible. A student who followed the link arrived at `Your token:` with the link itself scrolled
+# off the top. Now the link path is 21 rows and the by-hand path 22, so neither scrolls at all --
+# and the by-hand steps are read only by the student who asked for them.
+#
+# THE DEFAULT IS "YES, I SEE MY TOKEN", which is the same departure from the launcher's
+# safe-default rule that ask_email makes, for the same reason: nothing here is destructive, and
+# the cost of arrowing down is one keystroke on the path almost nobody takes.
 ask_token() {
-    local kind prompt
+    local kind prompt byhand=yes
     say token.intro
     if [ "$CS193V_TOKEN_PREFILL" = yes ]; then
-        say token.prefill "URL=$(token_url)" "EXPIRY=$CS193V_TOKEN_EXPIRY"
-        render token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
-    else
+        # NO "EXPIRY=" ANY MORE. The date is named in the by-hand steps and nowhere else: the
+        # link carries it as a lifetime in days, and the four checks that used to ask a student
+        # to read it back off the page went with issue #58.
+        say token.prefill "URL=$(token_url)"
+        printf '\n'
+        menu 0 "$(msg opt.have-token)" "$(msg opt.by-hand)"
+        [ "$MENU_CHOICE" -eq 0 ] && byhand=no
+    fi
+    # An `if` rather than `[ ... ] &&`, because this is the last command in the branch and a
+    # false test would make ask_token itself return 1.
+    if [ "$byhand" = yes ]; then
         say token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
     fi
     say token.paste
