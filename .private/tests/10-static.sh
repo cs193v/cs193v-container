@@ -1025,25 +1025,74 @@ for f in tunnel-key tunnel-key.pub tunnel-host-key tunnel-host-key.pub tunnel-kn
 done
 
 # ─── Claude Code policy ────────────────────────────────────────────────────────
+# ONE SPELLING OF THE PATH, which every check below is handed. Three of them used to build a
+# command substitution around `files/claude-code/managed-settings.json` RELATIVE to the repo
+# root; #16 moved files/ under .private/ and updated one of the four copies. The suite does not
+# run from .private/, so the other three raised FileNotFoundError on every run since c723f6b,
+# the substitution yielded the empty string, and each assertion then measured nothing:
+# `assert_eq "" ""` passes, and so does `assert_not_contains <needle> ""` -- the vacuous-pass
+# trap lib/assert.sh documents for the negative form. Verified with #73's three mutants (a
+# Write() deny rule, and each forbidden key added at top level): all three survived.
+#
+# A FOURTH COPY OF THAT PATH IS WHAT MADE A FOURTH COPY OF THE BUG CHEAP, so there is one.
+managed="$PRIVATE/files/claude-code/managed-settings.json"
 assert_ok  "claude:managed-settings-is-valid-json" \
-           python3 -c "import json;json.load(open('$PRIVATE/files/claude-code/managed-settings.json'))"
+           python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$managed"
 
+# EVERY DERIVED CHECK ANSWERS WITH A SENTINEL WHEN IT IS HAPPY, never with the empty string,
+# because the empty string is also what a crashed python3 leaves behind and no assertion can
+# tell those two apart. `rules-ok` here is the spelling 50-image.sh's sibling check already
+# uses on the same file inside the image; the two now agree rather than nearly agreeing.
+#
+# THE PATH ARRIVES AS argv, not interpolated into the program text: $PRIVATE is a real
+# directory path and a course folder is allowed an apostrophe in it, which would end the
+# quoting and turn a policy check into a syntax error.
+#
 # Write(...) and Glob(...) path rules are accepted and then silently ignored with a
 # startup warning. A security control that does nothing is worse than none.
 bad_rules="$(python3 -c '
-import json
-d = json.load(open("files/claude-code/managed-settings.json"))
+import json, sys
+d = json.load(open(sys.argv[1]))
 bad = [x for x in d.get("permissions", {}).get("deny", [])
        if not x.startswith(("Read(", "Edit("))]
-print(",".join(bad))
-')"
-assert_eq  "claude:deny-rules-are-Read-or-Edit-only" "" "$bad_rules"
+print("BAD:" + ",".join(bad) if bad else "rules-ok")
+' "$managed")"
+assert_eq  "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" "$bad_rules"
 
 # requiredMinimumVersion/requiredMaximumVersion cause a hard startup exit, which combined
 # with a pinned image can manufacture a container that refuses to start at all.
+#
+# ASKED OF THE DOCUMENT'S KEYS -- not of the permissions subtree, and not of the file's text.
+# Both are TOP-LEVEL settings, as the file's own $comment says, so ["permissions"] was the wrong
+# subtree even once the path was right: with the key added at top level the check still could not
+# see the thing it forbids. And the text cannot be searched instead, because that same $comment
+# names both keys in its "NEVER add these" prose -- a grep over the document would fail on the
+# very comment that documents the rule. A setting IS a key, so keys are what this reads, walked
+# recursively so a nested section cannot hide one, and matched as a whole key rather than as a
+# substring.
+#
+# AND IT SAYS "absent" RATHER THAN SAYING NOTHING. This is the shape the whole group had wrong:
+# an assertion whose happy answer is the empty string is an assertion that a crash also
+# satisfies, so assert_not_contains is the wrong verb here no matter how good the path is. A
+# document with no `permissions` key is reported as not understood rather than as clean, which
+# is the one reading under which "I could not find it" can never mean "it is not there".
 for forbidden in requiredMinimumVersion requiredMaximumVersion; do
-    assert_not_contains "claude:no-$forbidden" "$forbidden" \
-        "$(python3 -c 'import json;print(json.dumps(json.load(open("files/claude-code/managed-settings.json"))["permissions"]))')"
+    assert_eq "claude:no-$forbidden" "absent" "$(python3 -c '
+import json, sys
+def walk(node):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k
+            for x in walk(v): yield x
+    elif isinstance(node, list):
+        for v in node:
+            for x in walk(v): yield x
+keys = list(walk(json.load(open(sys.argv[1]))))
+if "permissions" not in keys:
+    print("UNREADABLE: no permissions key, so this document was not understood")
+else:
+    print("PRESENT as a setting key" if sys.argv[2] in keys else "absent")
+' "$managed" "$forbidden")"
 done
 
 lines="$(wc -l < $PRIVATE/files/claude-code/CLAUDE.md | tr -d ' ')"
@@ -1063,8 +1112,7 @@ else fail "claude:CLAUDE.md-under-200-lines" "$lines lines"; fi
 # Every credential store that gets a volume must also get a deny rule, or a login token
 # lands in an agent transcript the first time it globs the home directory.
 for store in .claude/.credentials.json .config/gh .local/share/com.vercel.cli; do
-    assert_contains "claude:denies-$store" "$store" \
-        "$(cat $PRIVATE/files/claude-code/managed-settings.json)"
+    assert_contains "claude:denies-$store" "$store" "$(cat "$managed")"
 done
 
 # ─── shellcheck ────────────────────────────────────────────────────────────────
