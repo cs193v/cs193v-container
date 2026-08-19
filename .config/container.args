@@ -206,7 +206,21 @@
 # be -- forwards are negotiated per session now -- but this value reaches the container
 # through -e at create time, so decoupling them would leave the container naming a set that is
 # no longer forwarded. A deliberate non-goal, not an oversight.
--e CS193V_PORTS=3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
+#
+# 1455 IS NOT A DEV-SERVER PORT, and it is in this list anyway. `codex login` runs its OAuth
+# callback server on 1455 INSIDE the container and the student's own browser connects to it --
+# the same direction this tunnel already carries for every other port, so it needs nothing new:
+# the launcher builds its ssh -L flags from this line, and adding the port here is the whole
+# change. Without it `codex login` hangs, having printed a URL whose callback goes nowhere.
+#
+# It belongs HERE rather than in a second list beside it, and that was decided rather than
+# defaulted to. A launcher-side constant would keep 1455 out of the value the container is told,
+# but this value has never meant "ports for your servers": it is the list of ports that reach the
+# student's browser, and 1455 does reach it. A second source would also give up the property this
+# section rests on -- one declaration, so what is forwarded and what the container is told cannot
+# disagree -- and every port count in the suite would have to know which of the two it meant.
+# What it costs instead is one line in the shared agent notes telling an agent not to bind it.
+-e CS193V_PORTS=1455,3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Deliberately ABSENT — each of these was considered and rejected

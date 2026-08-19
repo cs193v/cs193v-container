@@ -33,10 +33,10 @@
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
 #
 #   cheap    static, unit, shim        a fake podman on PATH. No container, no ports.
-#   podman   image, container, live    one container, one tunnel, the 46 forwarded ports.
+#   podman   image, container, live    one container, one tunnel, the forwarded ports.
 #
 # So they run at the same time. IMAGE, CONTAINER AND LIVE MUST STAY IN ONE LANE, and in file
-# order: they share the container, and CS193V_INSTANCE does not namespace the 46 forwarded
+# order: they share the container, and CS193V_INSTANCE does not namespace the forwarded
 # host ports (see CLAUDE.md), so a second lane touching real podman would fight the first for
 # them and produce failures that look exactly like real regressions. The cheap lane cannot:
 # its launcher runs from a throwaway copy of the repo, and TUNNEL_ID is a hash of the
