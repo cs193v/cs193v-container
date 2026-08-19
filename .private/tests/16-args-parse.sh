@@ -273,7 +273,20 @@ missing_err="$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
 assert_says_key "missing:no-container-args-says-so" err.no-args-file "$missing_err"
 # AND IT NAMES THE PATH. The keyed assertion above cannot see {{FILE}}, and that interpolation is
 # what tells a developer with two checkouts which one of them is broken.
-assert_contains "missing:the-error-names-the-file" "$FIX/.config/container.args" "$missing_err"
+#
+# COMPARED WITH THE WHITESPACE TAKEN OUT OF BOTH SIDES, and that is not belt-and-braces. box()
+# hard-wraps its body to the STOP box width and will break a long path MID-TOKEN, so the same
+# assertion reads `.../course/.config/container.args` on one line under a short $TMPDIR and
+# `.../contain` + `er.args` on two under a longer one. assert_says is no help: it flattens box art
+# but only COLLAPSES runs of whitespace, and cannot rejoin a token the wrap split.
+#
+# Written the naive way first, which is worth recording because of how it passed: it is green under
+# TMPDIR=/tmp, where the fixture path is short enough to fit, and red the moment the suite is run
+# with $TMPDIR somewhere longer -- which is exactly what #76 forces a developer to do. An assertion
+# that depends on the length of a temp path is one nobody would think to distrust.
+squash_ws() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | tr -d '[:space:]'; }
+assert_contains "missing:the-error-names-the-file" \
+                "$(squash_ws "$FIX/.config/container.args")" "$(squash_ws "$missing_err")"
 # ON STDERR, WITH STDOUT EMPTY. --dev-args is read by a machine; box art on stdout would arrive
 # as words in the list a caller is parsing.
 assert_eq "missing:nothing-reaches-stdout" "" "$("$FIX/cs193v" --dev-args 2>/dev/null)"
