@@ -23,10 +23,11 @@
 # and a word boundary is what nearly everything in here is about. Same reason --dev-steps exists
 # for the Containerfile parser.
 #
-# NOT COVERED HERE, and deliberately: the rest of load_args' contract -- the missing-file paths,
-# the container.args-then-local.args read order, the cs193v-*:* volume rewrite, globbing through
-# the unquoted `for word in $line`, quotes staying literal. None of it is touched by #57's
-# change. It is issue #63, and this file is where it should land.
+# THE REST OF load_args' CONTRACT lands in its own section at the bottom -- the missing-file
+# paths, the container.args-then-local.args read order, the cs193v-*:* volume rewrite, globbing
+# through the unquoted `for word in $line`, quotes staying literal. None of it is touched by
+# #57's change, which is why it is kept apart from the corpus above rather than folded into it.
+# It was issue #63.
 
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
@@ -239,6 +240,206 @@ agrees "corpus:indenting-comments-changes-no-word"
 fix_reset
 printf -- '# a\n\n   \n\t\n' | fix_args container.args
 assert_eq "cost:no-content-no-forks" "0" "$(sed_calls)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# the rest of load_args' contract  (#63)
+#
+# Everything above is about ONE line of the loop -- the trim, and #57's reordering of it. The
+# rest of the function was unasserted anywhere in the suite: the two missing-file paths, the
+# read order CLAUDE.md's "local.args is read after container.args, last occurrence winning"
+# rests on, the instance rewrite that renames six volumes, and what the unquoted expansion does
+# to a word full of shell metacharacters. Every flag the container is created with comes out of
+# here, so none of it was cheap to leave unmeasured.
+#
+# RED-FIRST BY MUTATION, since coverage of correct code has no failing behaviour to start from.
+# Eight mutants of load_args were run against the assertions below: the required-file die
+# dropped, each of the two `[ -f ]` guards weakened to `[ -e ]`, the read order swapped, the
+# volume rewrite removed, its trailing colon dropped, the expansion quoted, and `set -f` wrapped
+# round the loop. Each is caught by the assertion naming the property it broke -- the `[ -e ]`
+# one only after it survived the first draft of this section, which is what the silent-skip
+# assertion below exists for and why its comment is the longest one here.
+#
+# NO `agrees` IN THIS SECTION, which is not an omission. The oracle answers a #57 question --
+# "do the two trim orders agree" -- and it cannot answer these: it does not die on a missing
+# file, and it globs against the suite's own working directory rather than the fixture's.
+
+# ─── the missing-file paths ────────────────────────────────────────────────────
+# container.args ships in the repo, so its absence is a broken install rather than something a
+# student did, and it has to say so. Without the die the parse would simply produce an empty
+# ARGS and the student would get podman's complaint about a run line with no flags on it.
+fix_reset
+assert_exit "missing:no-container-args-exits-1" 1 "$FIX/cs193v" --dev-args
+missing_err="$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
+assert_says_key "missing:no-container-args-says-so" err.no-args-file "$missing_err"
+# AND IT NAMES THE PATH. The keyed assertion above cannot see {{FILE}}, and that interpolation is
+# what tells a developer with two checkouts which one of them is broken.
+assert_contains "missing:the-error-names-the-file" "$FIX/.config/container.args" "$missing_err"
+# ON STDERR, WITH STDOUT EMPTY. --dev-args is read by a machine; box art on stdout would arrive
+# as words in the list a caller is parsing.
+assert_eq "missing:nothing-reaches-stdout" "" "$("$FIX/cs193v" --dev-args 2>/dev/null)"
+
+# A DIRECTORY where container.args should be takes the same path, because `[ -f ]` is the
+# question the guard asks. Worth holding: `[ -e ]` would let it through to the read and the
+# student would get bash's "Is a directory" instead of ours.
+fix_reset
+mkdir -p "$FIX/.config/container.args"
+assert_exit "missing:a-directory-is-not-an-args-file" 1 "$FIX/cs193v" --dev-args
+assert_says_key "missing:a-directory-says-the-same-thing" err.no-args-file \
+                "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
+rmdir "$FIX/.config/container.args"
+
+# local.args is git-ignored and optional, so NOT existing is its ordinary state -- the `[ -f ]`
+# continue is the only thing that makes that ordinary rather than fatal.
+fix_reset
+printf -- '-m 1g\n' | fix_args container.args
+assert_eq "missing:absent-local-args-is-skipped" "-m
+1g" "$(parsed)"
+assert_exit "missing:absent-local-args-still-exits-0" 0 "$FIX/cs193v" --dev-args
+assert_eq "missing:absent-local-args-is-silent" "" "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
+
+# ...and a DIRECTORY named local.args is skipped rather than fatal, which is the asymmetry with
+# container.args above: one file is required and one is not, and the same `[ -f ]` produces both
+# answers.
+#
+# THE ASSERTION THAT HOLDS THE GUARD IS THE SILENT ONE, and that is a measurement rather than a
+# preference. Replacing this `[ -f ]` with `[ -e ]` changes NEITHER the word list NOR the exit
+# status: bash opens the directory, the `read` fails with EISDIR before the body runs once, and
+# the parse comes out byte-identical at status 0. What it does produce is
+# `read: 0: read error: Is a directory` on stderr -- so stdout and the status cannot tell the two
+# spellings apart and only silence can. Found by mutating the guard and watching the obvious
+# assertions stay green.
+mkdir -p "$FIX/.config/local.args"
+assert_eq "missing:a-local-args-directory-is-skipped" "-m
+1g" "$(parsed)"
+assert_exit "missing:a-local-args-directory-still-exits-0" 0 "$FIX/cs193v" --dev-args
+assert_eq "missing:a-local-args-directory-is-skipped-silently" "" \
+          "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
+rmdir "$FIX/.config/local.args"
+
+# ─── the read order CLAUDE.md makes a promise about ───────────────────────────
+# "local.args is read AFTER container.args, last occurrence winning" is CLAUDE.md section 2, and
+# it is the entire mechanism behind the documented CS193V_PORTS override. It is true only
+# because of the order of the `for f in` list, and a swap would be invisible to every assertion
+# above: both files' words still reach the run line, just the other way round. So the fixture
+# uses values that can be told apart, and the assertion is the whole list in order -- "both
+# files got there" is exactly the weaker claim that would survive the swap.
+fix_reset
+printf -- '-m 1g\n--cpus 1\n' | fix_args container.args
+printf -- '-m 8g\n--cpus 4\n' | fix_args local.args
+assert_eq "order:container-args-is-read-first" "-m
+1g
+--cpus
+1
+-m
+8g
+--cpus
+4" "$(parsed)"
+# And the consequence, read off the run line rather than restated: the LAST -m podman sees is
+# local.args'. This is the sentence the documentation makes, and podman's own
+# last-occurrence-wins is what turns it into an override.
+assert_eq "order:the-last-occurrence-is-local-args" "8g" \
+          "$(parsed | awk '$0 == "-m" { want = 1; next } want { v = $0; want = 0 } END { print v }')"
+
+# ─── the instance rewrite, which renames six volumes ──────────────────────────
+# The volume names live in container.args, so the CS193V_INSTANCE suffix has to be applied as
+# they are read. The pattern that does it, `cs193v-*:*`, needs the trailing colon for exactly
+# one reason, which cs193v:940 states and nothing held: `--hostname cs193v-development` is the
+# other word in that file beginning with the same eight characters, and renaming it would give
+# every instance a different hostname inside the container.
+#
+# WITH THE INSTANCE FORCED, not taken from the environment. NAME follows CS193V_INSTANCE, so on
+# a run with it unset -- a TA's machine, and a student's launcher -- the rewrite is the identity
+# and an assertion written against "$NAME" would hold while saying nothing at all.
+inst_parsed() { CS193V_INSTANCE="$1" "$FIX/cs193v" --dev-args; }
+fix_reset
+printf -- '%s\n' '-v cs193v-claude:/home/student/.claude' \
+                 '-v cs193v-claude-json:/home/student/.claude-json' \
+                 '--hostname cs193v-development' \
+                 '--label cs193v.dir=/somewhere' \
+                 '-e SEED=cs193v-claude:/elsewhere' | fix_args container.args
+assert_eq "instance:the-suffix-lands-on-the-volume-names" "-v
+cs193v-vt9-claude:/home/student/.claude
+-v
+cs193v-vt9-claude-json:/home/student/.claude-json
+--hostname
+cs193v-development
+--label
+cs193v.dir=/somewhere
+-e
+SEED=cs193v-claude:/elsewhere" "$(inst_parsed vt9)"
+# The three words the pattern must NOT touch, each for its own reason, so a widened pattern
+# fails on the one it widened past: the hostname has no colon, the label's prefix is
+# `cs193v.` rather than `cs193v-`, and SEED= holds a volume-shaped value but does not START
+# with the prefix -- the match is anchored at the beginning of the word.
+assert_eq "instance:nothing-but-a-volume-name-is-rewritten" "3" \
+          "$(inst_parsed vt9 | grep -c 'cs193v-development\|cs193v\.dir=\|SEED=cs193v-claude')"
+# And with no instance at all it is the identity, which is what keeps this off a student's run.
+assert_eq "instance:no-instance-renames-nothing" "-v
+cs193v-claude:/home/student/.claude
+-v
+cs193v-claude-json:/home/student/.claude-json
+--hostname
+cs193v-development
+--label
+cs193v.dir=/somewhere
+-e
+SEED=cs193v-claude:/elsewhere" "$(inst_parsed '')"
+
+# ─── what the unquoted expansion does to a metacharacter ──────────────────────
+# `for word in $line` is unquoted, so every word is also a GLOB PATTERN matched against the
+# directory ./cs193v was run FROM. This section is a RECORD of what that does, not a promise
+# that it should keep doing it -- and the second case below is the argument for changing it.
+#
+# Realistic values are inert, and the reason is luck rather than design: the whole word is the
+# pattern, so `-e PATTERN=*.txt` would have to match a file literally named `-e PATTERN=...`.
+#
+# RUN FROM A DIRECTORY WITH KNOWN CONTENTS. The answer is a directory listing, so reading it out
+# of the working tree would make the assertion depend on which files happen to be in the repo
+# root that week.
+GLOBDIR="$WORK/globdir"
+mkdir -p "$GLOBDIR"
+: > "$GLOBDIR/one.txt"
+: > "$GLOBDIR/two.txt"
+globbed() { ( cd "$GLOBDIR" && "$FIX/cs193v" --dev-args ); }
+
+fix_reset
+printf -- '%s\n' '-e PATTERN=*.txt' '-e Q=?' '-e BRACKET=[abc]' | fix_args container.args
+assert_eq "glob:a-pattern-inside-a-value-is-inert" "-e
+PATTERN=*.txt
+-e
+Q=?
+-e
+BRACKET=[abc]" "$(globbed)"
+
+# THE CASE THAT IS NOT INERT, pinned so it is on the record rather than in someone's memory: a
+# word that is a bare pattern expands, so one local.args produces different podman flags
+# depending on where the launcher was started. Nothing in the shipped container.args is this
+# shape, which is the only reason it has never bitten.
+fix_reset
+printf -- '%s\n' '--label bare *' | fix_args container.args
+assert_eq "glob:a-bare-pattern-expands-to-the-working-directory" "--label
+bare
+one.txt
+two.txt" "$(globbed)"
+# ...and one matching nothing stays literal, which is bash's nullglob-off default and the reason
+# the case above is the exception rather than the rule.
+fix_reset
+printf -- '%s\n' '--label bare *.nomatch' | fix_args container.args
+assert_eq "glob:a-pattern-matching-nothing-stays-literal" "--label
+bare
+*.nomatch" "$(globbed)"
+
+# ─── quotes and backslashes stay literal ──────────────────────────────────────
+# The expansion splits words but performs no quote removal, so `--label x="a b"` is TWO words
+# with the quote marks still inside them. That is why build_run_args appends ARGS element by
+# element instead of word-splitting a string, and it means there is no way to write a single
+# flag containing a space in these files. Pinned because the obvious reading of the file says
+# otherwise, and someone will eventually put a space in a --label and expect it to survive.
+fix_reset
+printf -- '%s\n' '--label x="a b"' '--label y=a\ b' "--label z='c d'" | fix_args container.args
+assert_eq "literal:quotes-and-backslashes-are-not-interpreted" \
+          "$(printf '%s\n' '--label' 'x="a' 'b"' '--label' 'y=a\' 'b' '--label' "z='c" "d'")" \
+          "$(parsed)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # --dev-tunnel: the port list the suite derives from, and the tunnel's own file names
