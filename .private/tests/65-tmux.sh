@@ -32,6 +32,12 @@ set -u
 require_running
 require_cmd podman
 
+# Scratch for the harness's own output, removed on any exit. A `$(new_tmpdir)` inline at the
+# podman exec below is what this was, and nothing ever deleted it: 16 KB in /tmp per run of the
+# suite, found while measuring #76's leaks.
+TMP="$(new_tmpdir)"
+trap 'rm -rf "$TMP"' EXIT
+
 HARNESS_SRC="$(dirname -- "$0")/tmux-harness"
 DEST=/tmp/cs193v-tmux-tests
 TSV_IN="$DEST/results.tsv"
@@ -89,7 +95,7 @@ if [ -n "${CS193V_TMUX_CONF:-}" ]; then
     record "tmux:config-under-test" "$CS193V_TMUX_CONF — NOT the installed /etc/cs193v/tmux.conf"
 fi
 # shellcheck disable=SC2086
-podman exec -e HX_TSV="$TSV_IN" $HX_ENV "$NAME" bash "$DEST/suite.sh" > "$(new_tmpdir)/suite.log" 2>&1
+podman exec -e HX_TSV="$TSV_IN" $HX_ENV "$NAME" bash "$DEST/suite.sh" > "$TMP/suite.log" 2>&1
 out="$(podman exec "$NAME" cat "$TSV_IN" 2>/dev/null)"
 
 if [ -z "$out" ]; then

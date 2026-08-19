@@ -1155,6 +1155,7 @@ assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC10
                                     $PRIVATE/tests/65-tmux.sh
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
+                                           $PRIVATE/tests/14-test-harness.sh \
                                            $PRIVATE/tests/16-args-parse.sh
 # setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
 # set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot

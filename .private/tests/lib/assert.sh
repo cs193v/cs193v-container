@@ -41,8 +41,28 @@ if [ -z "${CS193V_RESULTS:-}" ]; then
 fi
 : "${CS193V_SUITE:=$(basename "${0:-suite}")}"
 
+# A FAILED WRITE HERE IS FATAL, and that is the whole point of the check. This file is the ONLY
+# thing run-tests.sh counts -- never the screen -- so a printf that fails and is ignored drops a
+# result while the terminal still says PASS. It drops FAIL as readily as PASS, so a run that
+# filled the disk reports `0 fail` and exits 0 having lost real failures.
+#
+# MEASURED, not imagined (#76): /tmp here is a 3.7 GB tmpfs, the suites had leaked 2.9 GB of
+# repo copies into it, and an image-tier run started printing `write error: Disk quota exceeded`
+# between PASS lines and had to be discarded because nobody could tell which of its results had
+# survived. Same family as #34, #46 and #73: a number that looks measured and is not.
+#
+# `exit` really does end the suite: no assertion in this suite is called from a subshell -- every
+# pass/fail is a statement, and the $( ) around them are values being handed IN. run-tests.sh
+# turns the non-zero exit into a failed run, so this cannot be swallowed by `|| true`.
 _emit() {                             # _emit STATUS NAME
-    printf '%s\t%s\t%s\n' "$1" "$CS193V_SUITE" "$2" >> "$CS193V_RESULTS"
+    printf '%s\t%s\t%s\n' "$1" "$CS193V_SUITE" "$2" >> "$CS193V_RESULTS" && return 0
+    printf '\n%sFATAL%s  cannot append to $CS193V_RESULTS (%s): results are being LOST.\n' \
+           "$A_RED" "$A_OFF" "$CS193V_RESULTS" >&2
+    printf '        %s\n' \
+           "run-tests.sh counts that file rather than the screen, so this run cannot be" \
+           "summarised -- a dropped FAIL would be reported as a pass. Check free space on" \
+           "that filesystem." >&2
+    exit 97
 }
 
 # Detail lines go to stdout only. Keeping them out of the results file is what lets the
@@ -714,6 +734,71 @@ new_tmpdir() {
     local d
     d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-t.XXXXXX")"
     printf '%s' "$d"
+}
+
+# ─── fixture copies of the course tree ─────────────────────────────────────────
+# ONE EXCLUSION LIST, because three places make such a copy and each carried its own set:
+# repo_copy in lib/podman-shim.sh, the fake GitHub archive in 25-installer.sh, and the §2.7
+# second-copy group in 80-launcher-live.sh. Every one of them was missing something another had.
+#
+# Paths are tar's, relative to $REPO:
+#
+#   .git              11 MB of history no fixture reads.
+#   ./.private/tests  the suite itself. 80-launcher-live.sh used to copy it and delete it again.
+#   ./projects        THE DEVELOPER'S OWN WORK, and the one that mattered: 57 MB here, a
+#                     node_modules tree the live tier leaves behind, against a 780 KB course
+#                     tree. It is a bind-mount target no fixture ever reads through, and
+#                     repo_copy was making two 58 MB copies of it per call into a tmpfs (#76).
+#
+# Anything else that needs leaving out belongs on this line, not in a caller.
+COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects"
+
+# copy_course_tree DST  -> a fixture copy of $REPO at DST, minus the above.
+#
+# tar rather than cp -a: it is the form that can exclude. PLAIN PATHS ONLY, no `*` glob, because
+# the libs run under BSD tar on the TAs' Macs as well as GNU tar here and the two-command form
+# below needs no assumption about whether a `*` crosses a `/`.
+#
+# projects/ IS PUT BACK, holding .gitkeep and nothing else, so a copy is what a FRESH CHECKOUT
+# looks like. The launcher would create it (`[ -d "$WORKSPACE" ] || mkdir -p`) and so would the
+# installer, but a fixture that differs from a checkout is a fixture that can lie.
+copy_course_tree() {                  # copy_course_tree DST -> 0 on success
+    local d="$1" x opts=''
+    for x in $COURSE_COPY_EXCLUDES; do opts="$opts --exclude=$x"; done
+    mkdir -p "$d" || return 1
+    # shellcheck disable=SC2086   # deliberately word-split: it is a list of tar options
+    ( cd "$REPO" && tar cf - $opts . ) | ( cd "$d" && tar xf - ) || return 1
+    mkdir -p "$d/projects" && cp "$REPO/projects/.gitkeep" "$d/projects/.gitkeep"
+}
+
+# What an EARLIER, KILLED run left in a scratch directory. Called at suite START as well as from
+# an EXIT trap, for the reason 60-container.sh gives for its own two-ended cleanup (#34): a trap
+# does not run when the process is killed, and a killed suite is ordinary here -- Ctrl+C, a
+# --tier run cut short, run-tests.sh's own kill_tree.
+#
+# BY PID, NOT BY AGE, and that is the load-bearing part. This directory is SHARED: /tmp is one
+# filesystem, CS193V_INSTANCE does not namespace it, and #76 was measured on a machine with two
+# checkouts of this repo on it -- so another run of these same suites can have its own working
+# directories sitting here right now. A blanket glob would delete one out from under it. Every
+# name carries the pid of the suite that made it, so "is that suite still alive" is the whole
+# test. A recycled pid leaves one directory behind, which the next sweep gets.
+#
+# TWO THINGS ARE DELIBERATELY LEFT ALONE. Another developer's directories, since `kill -0` cannot
+# answer for a pid that is not ours; and a name with no pid in it, because there is nothing in it
+# to ask a question of and a wrong guess deletes a running suite's scratch.
+sweep_stale_tmpdirs() {               # sweep_stale_tmpdirs DIR PREFIX... -> how many it removed
+    local dir="$1" p d base pid n=0
+    shift
+    for p in "$@"; do
+        for d in "$dir/$p".*; do
+            [ -d "$d" ] && [ -O "$d" ] || continue
+            base="${d##*/}"; base="${base#*.}"; pid="${base%%.*}"
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            kill -0 "$pid" 2>/dev/null && continue
+            rm -rf "$d" 2>/dev/null && n=$((n + 1))
+        done
+    done
+    printf '%s' "$n"
 }
 
 # Every fixture a suite leaves in the student's projects/ is named .vt-something, so one

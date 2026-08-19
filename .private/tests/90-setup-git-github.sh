@@ -60,6 +60,10 @@ fi
 require_cmd script "needed to drive the arrow-key menus through a pty"
 require_running
 
+# The shim directories go on a trap rather than only on the last line of the file: this suite
+# talks to the real API, so it is the one most likely to be interrupted mid-wait (#76).
+trap 'sg_cleanup_all' EXIT
+
 ORG="${CS193V_GH_ORG:-cs193v-students}"
 SANDBOX="${CS193V_GH_SANDBOX:-$ORG/install-sandbox}"
 EXPECT_ROW="${CS193V_GH_EXPECT_ROW:-}"

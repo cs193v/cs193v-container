@@ -9,6 +9,17 @@
 # first and shim_cleanup would delete a repo copy still in use.
 SHIM_HOST_TMPDIR="${SHIM_HOST_TMPDIR:-${TMPDIR:-/tmp}}"
 
+# The single snapshot repo_copy serves every copy from. A PATH rather than a variable, for the
+# reason repo_copy's own comment gives; $$ is the SUITE's pid, so it also tells the sweep
+# below and shim_cleanup which of these directories are ours and which a concurrent run's.
+SHIM_SNAPSHOT="$SHIM_HOST_TMPDIR/cs193v-snap.$$"
+
+# Whatever an earlier, KILLED run left here. See sweep_stale_tmpdirs in lib/assert.sh for why it
+# goes by pid rather than by age, and why it is called at suite start and not only on exit.
+shim_sweep_stale() {                  # -> how many directories it removed
+    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap
+}
+
 # shim_new [DIR]  -> creates a shim, sets $SHIM, and puts it first on $PATH for `launcher`.
 # A fresh shim per test keeps state from leaking between cases.
 #
@@ -19,14 +30,13 @@ SHIM_HOST_TMPDIR="${SHIM_HOST_TMPDIR:-${TMPDIR:-/tmp}}"
 # developer's actual tunnel, and, when run-tests.sh runs its two lanes at once, the live tier's
 # as well. The cheap lane is supposed to touch no ports; without this it touched all 46.
 shim_new() {
-    SHIM="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-shim.XXXXXX")"
+    SHIM="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-shim.$$.XXXXXX")"
     export SHIM CS193V_SHIM="$SHIM"
     mkdir -p "$SHIM/tmp"
     export TMPDIR="$SHIM/tmp"
     cp "$TESTS_DIR/lib/podman-fake" "$SHIM/podman"
     chmod +x "$SHIM/podman"
     : > "$SHIM/argv.log"
-    SHIM_DIRS="${SHIM_DIRS:-} $SHIM"
 }
 
 shim_set() {                          # shim_set KEY VALUE
@@ -47,10 +57,17 @@ shim_count() {                        # shim_count ERE
     printf '%s' "${n:-0}"
 }
 
+# BY GLOB ON OUR OWN PID, NOT FROM A LIST OF DIRECTORIES. This kept a list, and both makers
+# of these directories get called from inside a command substitution somewhere: repo_copy at
+# every one of its call sites, and shim_new inside 25-installer.sh's run_with_tarball. The
+# entry was appended in a subshell and never reached this function, which is what made a
+# CLEAN run leak rather than only a killed one -- 350 MB of repo copies per run, plus three
+# shims per installer run (#76). The pid in every name is what lets one glob find exactly
+# ours and leave a concurrent run's alone.
 shim_cleanup() {
-    local d
-    for d in ${SHIM_DIRS:-}; do [ -n "$d" ] && rm -rf "$d"; done
-    SHIM_DIRS=""
+    rm -rf "$SHIM_SNAPSHOT" \
+           "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".* \
+           "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* 2>/dev/null || true
 }
 
 # Run the launcher with the fake podman first on PATH. stdin is closed: the real launcher
@@ -240,9 +257,16 @@ current_hash() {
 
 # A throwaway copy of the repo, so a test can mutate container.args without touching the
 # working tree. Sets $LAUNCHER_DIR, which `launcher` honours.
+#
+# NEITHER THE MEMO NOR THE CLEANUP CAN LIVE IN A VARIABLE. Every call site is
+# `COPY="$(repo_copy)"`, which is a subshell: the snapshot path and the cleanup entry were
+# both assigned in it and neither ever reached the suite. So the memo never fired — every call
+# re-tarred the whole tree — and shim_cleanup was never told about a single directory, which
+# means a CLEAN run leaked all of them and not just a killed one. Measured at 51 copies and 51
+# snapshots in a 3.7 GB tmpfs, 2.9 GB between them (#76). Both now live at paths named from
+# $$, which is the suite's pid inside a command substitution as well as outside one.
 repo_copy() {                         # repo_copy -> prints the new directory
     local d
-    d="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-repo.XXXXXX")"
     # SNAPSHOT ONCE, on the first call, and serve every later copy from that. Two reasons, and
     # the second is why it matters now that run-tests.sh runs two lanes:
     #
@@ -256,14 +280,8 @@ repo_copy() {                         # repo_copy -> prints the new directory
     #
     # The first call happens in this suite's first half-minute, while the other lane is still
     # in the image tier; the live tier cannot start until image, container and tmux are done.
-    if [ -z "${REPO_SNAPSHOT:-}" ]; then
-        REPO_SNAPSHOT="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-snap.XXXXXX")"
-        SHIM_DIRS="${SHIM_DIRS:-} $REPO_SNAPSHOT"
-        # tar, not cp -a: it is the form that can exclude .git, which is large and irrelevant.
-        ( cd "$REPO" && tar cf - --exclude=.git --exclude=./.private/tests . ) \
-            | ( cd "$REPO_SNAPSHOT" && tar xf - )
-    fi
-    cp -a "$REPO_SNAPSHOT/." "$d/"
-    SHIM_DIRS="${SHIM_DIRS:-} $d"
+    [ -d "$SHIM_SNAPSHOT" ] || copy_course_tree "$SHIM_SNAPSHOT" || return 1
+    d="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-repo.$$.XXXXXX")"
+    cp -a "$SHIM_SNAPSHOT/." "$d/"
     printf '%s' "$d"
 }

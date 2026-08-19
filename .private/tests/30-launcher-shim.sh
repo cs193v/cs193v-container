@@ -18,6 +18,9 @@ set -u
 
 require_cmd script "needed to drive the arrow-key menu through a pty"
 trap 'shim_cleanup' EXIT
+# ...and at START as well, because that trap cannot run if the suite is KILLED, which is
+# ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
+record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 
 COPY="$(repo_copy)"
 LAUNCHER_DIR="$COPY"

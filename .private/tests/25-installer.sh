@@ -21,6 +21,9 @@ set -u
 cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
 trap 'rm -rf "$TMP"; shim_cleanup' EXIT
+# ...and at START as well, because that trap cannot run if the suite is KILLED, which is
+# ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
+record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 
 # ─── the two pure functions, extracted and unit-tested ─────────────────────────
 # version_lt is duplicated in cs193v-ui.sh and the installer. If they ever disagree, a
@@ -163,9 +166,11 @@ assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
 # ─── §A.12 idempotency, done for real ──────────────────────────────────────────
 # Serve the course files from a local tarball shaped the way GitHub's archive endpoint
 # does — a single top-level directory, which is why the installer strips one component.
-mkdir -p "$TMP/pkg/cs193v-main"
-( cd "$REPO" && tar cf - --exclude=.git --exclude=tests . ) \
-    | ( cd "$TMP/pkg/cs193v-main" && tar xf - )
+#
+# AND HOLDING WHAT THAT ENDPOINT HOLDS, which is tracked files: projects/.gitkeep and no
+# node_modules. Its own excludes carried the developer's projects/ into the fixture instead, so
+# this gzipped 58 MB — 1.7 s of CPU — and then extracted it twice, once per idempotency run (#76).
+copy_course_tree "$TMP/pkg/cs193v-main"
 ( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
 assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
 

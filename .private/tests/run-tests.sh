@@ -131,6 +131,10 @@ WALL_T0=$SECONDS
 RESULTS="$(mktemp "${TMPDIR:-/tmp}/cs193v-run.XXXXXX")"
 export CS193V_RESULTS="$RESULTS"
 TIMINGS="$(mktemp "${TMPDIR:-/tmp}/cs193v-time.XXXXXX")"
+# Suites that exited without finishing, one per line. A FILE rather than a variable because the
+# cheap lane runs inside a subshell, so a counter set there would never come back — the same
+# thing that made repo_copy leak (#76).
+CRASHES="$(mktemp "${TMPDIR:-/tmp}/cs193v-crash.XXXXXX")"
 CHEAPLOG=""
 CHEAP_PID=""
 CHEAP_FLUSHED=no
@@ -162,7 +166,7 @@ kill_tree() {                         # kill_tree PID
 cleanup() {
     [ -n "$CHEAP_PID" ] && kill_tree "$CHEAP_PID"
     flush_cheap
-    rm -f "$RESULTS" "$TIMINGS"
+    rm -f "$RESULTS" "$TIMINGS" "$CRASHES"
     [ -n "$CHEAPLOG" ] && rm -f "$CHEAPLOG"
     return 0
 }
@@ -185,8 +189,13 @@ trap 'cleanup; exit 130' INT TERM
 TIMEFORMAT='%3R'
 exec 3>&1 4>&2
 
+# A SUITE THAT DIES IS RECORDED, not shrugged off. This used to end in `|| true` and the whole
+# verdict rested on the FAIL count in $RESULTS, so a suite that exited half way through — a
+# `set -u` slip, a kill, or _emit finding the results file unwritable — cost the run its results
+# and nothing else: the summary counted what had survived and reported `0 fail` (#76).
 run_suite() {                         # run_suite FILE  — output goes to the real terminal
-    bash "$1" 1>&3 2>&4 || true
+    bash "$1" 1>&3 2>&4 || printf '%s\t%s\n' "$?" "$(basename "$1")" >> "$CRASHES"
+    return 0
 }
 
 run_lane() {                          # run_lane FILE...  — sequential, in the order given
@@ -274,6 +283,21 @@ if [ "$RAN" -gt 1 ]; then
     printf '  %s%8ss  wall clock%s\n\n' "$C_DIM" "$((SECONDS - WALL_T0))" "$C_OFF"
 fi
 
+# Printed BEFORE the counts, because a suite that died makes the counts an undercount and the
+# reader needs to know that before reading them. rc 97 is _emit's: see lib/assert.sh.
+if [ -s "$CRASHES" ]; then
+    printf '%sSUITES THAT DIED%s\n' "$C_RED" "$C_OFF"
+    while IFS="	" read -r rc suite; do
+        printf '  %s  exited %s without finishing\n' "$suite" "$rc"
+        # 97 is _emit's, and it means the counts below are an undercount of a run that had
+        # already stopped recording — a different thing from a suite that merely fell over.
+        [ "$rc" = 97 ] && printf '  %s\n' \
+            "      its results file could not be written, so results were LOST and every" \
+            "      count below is an undercount"
+    done < "$CRASHES"
+    printf '\n'
+fi
+
 if [ "$F" -gt 0 ]; then
     printf '%sFAILURES%s\n' "$C_RED" "$C_OFF"
     grep "^FAIL	" "$RESULTS" | while IFS="	" read -r _st suite name; do
@@ -285,4 +309,6 @@ printf '%s%s pass%s   ' "$C_GRN" "$P" "$C_OFF"
 [ "$F" -gt 0 ] && printf '%s%s fail%s   ' "$C_RED" "$F" "$C_OFF" || printf '0 fail   '
 printf '%s%s skip   %s recorded%s\n' "$C_DIM" "$S" "$R" "$C_OFF"
 
-[ "$F" -eq 0 ]
+# A dead suite fails the run even with no FAIL line to its name: the point of the count is that
+# it can be trusted, and it cannot be when a suite stopped early.
+[ "$F" -eq 0 ] && [ ! -s "$CRASHES" ]

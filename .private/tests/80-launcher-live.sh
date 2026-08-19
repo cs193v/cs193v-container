@@ -279,7 +279,9 @@ assert_eq "live:20-launches-leave-nothing-running" "0" "$(ours_running)"
 # last one is done instead of us guessing six seconds.
 podman stop -t 3 -i "$NAME" >/dev/null 2>&1 || true
 wait_until 20 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" != running ]" || true
-RACE_OUT="$(new_tmpdir)/race"
+# UNDER $TMP, which restore() removes. A new_tmpdir of its own is what this was, and nothing
+# ever deleted it: a 16 KB directory per live run, found while measuring #76's leaks.
+RACE_OUT="$TMP/race"
 mkdir -p "$RACE_OUT"
 
 # THE FOUR LAUNCHES MUST HOLD THEIR SESSIONS, and that is the whole difficulty of this test.
@@ -477,10 +479,11 @@ case "$VT_COPY" in
                    "the copy is at $VT_COPY, which every checkout on this machine shares" ;;
 esac
 rm -rf "$VT_COPY"
-cp -a "$REPO" "$VT_COPY"
-# .private/tests, not tests/ -- the suite moved and this line did not follow it, so the copy has
-# been carrying the whole test tree.
-rm -rf "$VT_COPY/.private/tests"
+# copy_course_tree, not `cp -a "$REPO"`: all this group needs is a working launcher at a path
+# that is not $REPO, and the wholesale copy carried .git AND the developer's projects/ — 69 MB
+# for a refusal that reads one label (#76). It leaves the test tree out as well, which is what
+# the `rm -rf "$VT_COPY/.private/tests"` under this line used to be for.
+copy_course_tree "$VT_COPY"
 assert_eq "live:second-copy-is-refused" "1" \
           "$("$VT_COPY/cs193v" >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
 assert_says "live:second-copy-explains-both-paths" "different folder" \

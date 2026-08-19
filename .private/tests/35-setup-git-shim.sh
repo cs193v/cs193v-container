@@ -27,6 +27,12 @@ cd "$REPO" || exit 1
 
 require_cmd script "needed to drive the arrow-key menus through a pty"
 
+# THIS SUITE HAD NO TRAP AT ALL, so sg_cleanup_all was never called and every shim directory it
+# made survived the run — 241 of them were in /tmp when #76 was measured. Both ends, the way
+# 60-container.sh does it: the trap for a normal exit, the sweep for a run that was killed.
+trap 'sg_cleanup_all' EXIT
+record "sg:leftover-dirs-from-an-earlier-run" "$(sg_sweep_stale)"
+
 SG_SETUP_GIT="$PRIVATE/files/setup-git"
 SGM="$PRIVATE/files/setup-git-messages.txt"
 # Every run needs these four: two to find the helper and the catalogue in the CHECKOUT rather than

@@ -16,7 +16,7 @@ SGDIRS=''
 # A fresh one per case keeps state from leaking between them, and it doubles as the run's TMPDIR
 # so setup-git's own scratch directory lands somewhere the suite can look at and clean up.
 sg_new() {
-    SGSHIM="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-sg.XXXXXX")"
+    SGSHIM="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-sg.$$.XXXXXX")"
     export SGSHIM CS193V_SGSHIM="$SGSHIM"
     if [ "${1:-fake}" = fake ]; then
         cp "$TESTS_DIR/lib/gh-fake"  "$SGSHIM/gh"
@@ -30,7 +30,16 @@ sg_set()   { printf '%s' "$2" > "$SGSHIM/$1"; }
 sg_touch() { : > "$SGSHIM/$1"; }
 sg_log()   { cat "$SGSHIM/argv.log" 2>/dev/null; }
 sg_count() { sg_log | grep -cE "$1" || true; }
-sg_cleanup_all() { local d; for d in $SGDIRS; do rm -rf "$d"; done; }
+sg_cleanup_all() { local d; for d in $SGDIRS; do rm -rf "$d"; done; SGDIRS=''; }
+
+# What an earlier, KILLED run left behind. The pid in each name is what makes this safe to run
+# while another suite is working; see sweep_stale_tmpdirs in lib/assert.sh. Called at suite start
+# as well as from an EXIT trap, because a trap does not run when the process is killed — and
+# until #76 there was no trap either, so 35-setup-git-shim.sh leaked every one of these on a
+# clean run: 241 of them were sitting in /tmp when that was measured.
+sg_sweep_stale() {                    # -> how many directories it removed
+    sweep_stale_tmpdirs "${TMPDIR:-/tmp}" cs193v-sg
+}
 
 # ONE KEYSTROKE AT A TIME, separated by |, with a pause between them — and that is a requirement,
 # not politeness. MEASURED: bash's `read -n1` puts the terminal into non-canonical mode and
