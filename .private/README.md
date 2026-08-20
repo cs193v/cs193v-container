@@ -33,6 +33,9 @@ projects/                      the student's work; the only directory shared wit
     tmux/tmux.conf             the beginner-locked tmux configuration
     tmux/tabname.bash          tab labels for wrapper commands ("sudo apt", "claude")
     open-url                   the $BROWSER stub
+    shortlink                  a local redirect server, so a URL a student must click
+                               fits on one line (issue #67). python3, not shell: it has
+                               to LISTEN, and /dev/tcp cannot
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
     bash_logout                runs cs193v-goodbye, outside tmux only
@@ -172,9 +175,13 @@ by-hand steps to everybody, in a file wrapped at 94, and came to **53 rows**: a 
 followed the link reached `Your token:` with the link scrolled off the top. The fix was both
 halves — the by-hand steps moved behind a menu, and the file rewrapped — and the screens are now
 19, 21 and 22 rows. `20-messages.sh :: sgkeys:every-line-fits-an-80-column-terminal` holds the
-width, substituting `{{ORG}}` and `{{EXPIRY}}` from `setup-git`'s own defaults and exempting the
-one line that carries the prefilled link, which is 157 characters of GitHub's making and is issue
-#67's to shorten.
+width, substituting `{{ORG}}` and `{{EXPIRY}}` from `setup-git`'s own defaults. It used to exempt
+the one line carrying the prefilled link — 157 characters of GitHub's making — and issue #67 closed
+that by not printing GitHub's URL at all: `shortlink` serves a redirect and the line is now about 28
+characters. The lint substitutes the widest short URL that could appear rather than a real one,
+because the port is chosen at runtime; the assertion that the URL a *run* produces fits is
+`35-setup-git-shim.sh :: prefill:the-link-fits-an-80-column-terminal`, which measures the rows that
+reached the pty. Before the fix the widest was 163 columns.
 
 Rewrapping is also when emphasis gets split across a line break, and `emph_stream` closes an
 unpaired asterisk at end of line — so `titled *New` / `fine-grained token*.` renders the first
@@ -190,6 +197,45 @@ token prompt being told their token looks incorrect. The pattern is in `token_ki
 `files/setup-git` and nowhere else, and `45-setup-git.sh :: token:a-real-token-is-fine` checks it
 against `$CS193V_GH_TEST_TOKEN` whenever one is to hand — which is the cheap way to find out before a
 lab section does.
+
+### `shortlink`, and the one failure it can produce that looks like nothing
+
+`files/shortlink` binds the highest free port in `$CS193V_PORTS`, serves a 302 to the real URL, and
+prints `http://localhost:PORT/magic-link` — or `/magic-token-link` when `setup-git` asks. Both
+that and the `$BROWSER` stub go through it.
+Two things about it are worth knowing before a student's report makes no sense.
+
+**A caller that captures the stub's output never shows the student anything, and `claude`
+`/login` is one.** `open-url` prints its box to stdout, which was fine while every caller
+inherited stdio. Claude Code (measured on 2.1.225) consults `$BROWSER` correctly, runs the stub,
+and captures its stdout — so the box is discarded and the student sees Claude's own long URL
+instead. The stub really did run: `pgrep -af '[s]hortlink'` in the container shows the server
+holding a forwarded port. This is a known limitation rather than a mystery, and the fix is a
+one-line change to write to `/dev/tty` (verified to escape the pipe) — held back deliberately,
+because that box would land inside a full-screen TUI that repaints over it. Whether `gh` and
+`vercel` capture too is not yet established. The lesson worth keeping: a `$BROWSER` handler's
+contract is *open a browser*, so its stdout is legitimately noise to whoever called it.
+
+**It can hand out a link the browser cannot reach, and it cannot tell.** The port has to be free
+*inside* the container and forwarded *on the host*, and only the second is invisible from in there:
+if another program on the student's machine held that port when the tunnel came up, `ssh` never
+bound it and never retries. The student clicks and gets a connection refused. `cs193v doctor` on the
+host names those ports, and the launcher already warns about them at startup — that warning is the
+thing to ask the student to scroll back for.
+
+**The nastier one: a stale origin.** The browser keys its HTTP cache *and any service worker* on the
+origin `http://localhost:PORT`, which outlives whatever used to listen there. A student who once ran
+a PWA tutorial on that port has a service worker registered against it, and Workbox's default
+`navigateFallback` serves the app shell for any navigation in scope — so they click the link and get
+**their own project** instead of GitHub, with no error, nothing in any log, and `ss -ltn` showing our
+server sitting there having received zero requests. Three things make it unlikely rather than
+impossible: the slugs are `magic-link` and `magic-token-link`, which nothing routes (`/token`,
+which setup-git used at first, is exactly the kind of name that does), so there is usually no cache entry to
+hit; ports are taken from the high end, which is where real apps are least likely to have lived; and
+the response is a 302 with `Cache-Control: no-store`, so we never poison the origin for anything
+that comes later. If it does happen, a hard reload or unregistering the worker in devtools fixes it —
+and in `setup-git` the student already has the right escape hatch in front of them, the *"That link
+didn't work for me"* menu entry, whose by-hand URL is short enough not to need any of this.
 
 ## Your development loop
 

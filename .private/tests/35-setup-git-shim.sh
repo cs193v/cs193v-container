@@ -175,14 +175,62 @@ sg_new
 out="$(sg_tty "$HAPPY")"
 sg_says "prefill:offers-the-link"  token.prefill "$out"
 sg_says "prefill:offers-a-way-out" opt.by-hand   "$out"
-# The link itself, not merely the words around it: the prefilled parameters are the whole point of
-# offering it, and 45-setup-git.sh is what checks each one.
-sg_has "prefill:the-link-is-prefilled" "settings/personal-access-tokens/new?name=CS193V" "$out"
+# THE LINK ITSELF, and where to look for it MOVED with issue #67. The prefilled parameters are the
+# whole point of offering the link, and they used to be on the screen because the screen carried the
+# whole 157-character URL. They are now behind a redirect, so what the student sees is the short URL
+# and what carries the parameters is the argument setup-git handed shortlink -- which is why the
+# fake logs its argv. Both halves are asserted, because either one alone would pass while the
+# student was being shown a link to nothing. 45-setup-git.sh still checks each parameter.
+sg_has "prefill:the-link-is-short" "http://localhost:8084/magic-token-link" "$out"
+assert_eq "prefill:shortlink-was-asked-for-the-prefilled-url" "1" \
+          "$(sg_count 'shortlink https://github.com/settings/personal-access-tokens/new[?]name=CS193V')"
 sg_says_not "prefill:hides-the-by-hand-steps" token.byhand "$out"
 # Generating a token takes two clicks. A student who stops at the first sees no token at all and
 # has nothing to paste, which looks from their side like the link having failed.
 sg_has "prefill:names-the-confirmation" "confirm when GitHub asks you to" "$out"
 sg_says "prefill:the-link-path-still-works" status.all-set "$out"
+
+# ─── the link fits an 80-column terminal (issue #67) ───────────────────────────
+# THE REGRESSION TEST FOR #67, and it has to live here rather than in 20-messages.sh. The
+# catalogue line is `    {{URL}}`: what wraps is the VALUE setup-git substitutes, and only a run
+# of the script produces that. A catalogue lint can bound what the placeholder costs at worst; it
+# cannot see which URL the script chose to pass.
+#
+# WHY WRAPPING COSTS A TOKEN rather than merely looking untidy: tmux.conf hands text selection
+# back to the terminal (SHIFT+drag), and the terminal selects what it has DRAWN — so a URL long
+# enough to wrap comes back with a newline in the middle of it. Some terminals then send GitHub
+# only the first half, the page silently drops the parameters that were in the second, and the
+# student ends up holding a token with permissions the course cannot use. The symptom arrives
+# three screens later as a bare 404.
+record "prefill:widest-row" "$(sg_widest_row "$out") columns"
+assert_eq "prefill:the-link-fits-an-80-column-terminal" "" "$(sg_rows_over 80 "$out")"
+
+# THE SERVER IS ENDED WHEN THE SCREEN IS DONE. It would go on its own after fifteen minutes, but a
+# student who finished in two should not be holding a forwarded port for the other thirteen -- that
+# is a port their own dev server wants. The pid comes out of the log rather than the pidfile
+# because sg_cleanup deletes the directory the pidfile was in.
+slpid="$(sg_log | sed -n 's/^shortlink-pid //p' | tail -1)"
+if [ -n "$slpid" ]; then
+    assert_fail "prefill:the-redirect-server-was-ended" kill -0 "$slpid"
+else
+    fail "prefill:the-redirect-server-was-ended" "the fake never recorded a pid"
+fi
+
+# ─── with no shortlink at all: the long URL, and nothing broken ────────────────
+# A TA's Mac has no /usr/local/bin/shortlink, and 45-setup-git.sh drives this script there. The
+# real shortlink degrades the same way when no port is forwarded, so this one case covers both --
+# and what it must show is the URL this screen printed before any of this existed.
+sg_new
+rm -f "$SGSHIM/shortlink"
+out="$(sg_tty "$HAPPY")"
+sg_says "noshortlink:still-offers-the-link" token.prefill "$out"
+sg_has  "noshortlink:falls-back-to-the-long-url" \
+        "settings/personal-access-tokens/new?name=CS193V" "$out"
+sg_says "noshortlink:the-flow-still-completes" status.all-set "$out"
+# AND IT WRAPS, which is the measurement that says the short link is doing the work rather than
+# something else having changed. Recorded rather than asserted: this is the old behaviour, and a
+# test that demanded it stay broken would be the wrong shape.
+record "noshortlink:widest-row" "$(sg_widest_row "$out") columns"
 
 # Arrowing down is the only way to the by-hand steps, and it has to end at the same prompt.
 BYHAND="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\033[B|\n|$TOKEN\n|\n"

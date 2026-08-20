@@ -21,7 +21,11 @@ sg_new() {
     if [ "${1:-fake}" = fake ]; then
         cp "$TESTS_DIR/lib/gh-fake"  "$SGSHIM/gh"
         cp "$TESTS_DIR/lib/git-fake" "$SGSHIM/git"
-        chmod +x "$SGSHIM/gh" "$SGSHIM/git"
+        # shortlink joins the fakes rather than getting its own switch: setup-git asks for it on
+        # every run that reaches the token screen, and a run without it is the DEGRADED path --
+        # the long URL, which is what a TA's Mac gets and what one case below asks for by name.
+        cp "$TESTS_DIR/lib/shortlink-fake" "$SGSHIM/shortlink"
+        chmod +x "$SGSHIM/gh" "$SGSHIM/git" "$SGSHIM/shortlink"
     fi
     : > "$SGSHIM/argv.log"
     SGDIRS="$SGDIRS $SGSHIM"
@@ -149,6 +153,37 @@ sg_says_not() {                       # sg_says_not NAME KEY TEXT
 # below has to know about it.
 sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, colour removed
     printf '%s' "$1" | tr '\r' '\n' | sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
+}
+
+# EVERY ROW THAT DID NOT FIT, which is the shape issue #67 needed and nothing here had. The
+# catalogue lint in 20-messages.sh can bound what a *placeholder* costs; it cannot see which URL
+# the script decided to substitute into it, and that is the half that wrapped.
+#
+# 80 AND NOT 76 is deliberate: the lint measures a catalogue line before render() indents it,
+# and this measures what actually reached the pty, indent included. The two limits are the same
+# limit seen from opposite sides.
+#
+# WIDTHS IN CODE POINTS, via python3, for the reason 20-messages.sh records: these rows carry box
+# art, and mawk counts bytes, so `━` would score three columns and every box would look overwide.
+sg_rows_over() {                      # sg_rows_over LIMIT TEXT -> "COLUMNS: row" per row too wide
+    sg_rows "$2" | LIMIT="$1" python3 -c '
+import os, sys
+limit = int(os.environ["LIMIT"])
+for row in sys.stdin.read().splitlines():
+    row = row.rstrip()
+    if len(row) > limit:
+        print("%d: %s" % (len(row), row))
+'
+}
+
+# The widest row there was, for the results file. A number that moves is worth seeing even on a
+# run where nothing failed.
+sg_widest_row() {                     # sg_widest_row TEXT -> the column count of the widest row
+    sg_rows "$1" | python3 -c '
+import sys
+rows = [r.rstrip() for r in sys.stdin.read().splitlines()]
+print(max([len(r) for r in rows]) if rows else 0)
+'
 }
 
 # The last row mentioning a needle: the final state of the line it was drawn on, which is what a

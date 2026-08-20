@@ -247,12 +247,43 @@ machine. Note the explicit `truetype()` path — Pillow does not go through font
 tests the font files rather than their discoverability.
 
 ### §8.1 / §8.2 — logins with no browser in the container
-`claude` then `/login`; then `gh auth login`; then `vercel login`; then
-`codex login --device-auth` (the browser flow wants a callback on localhost:1455, which nothing
-forwards yet — see issue #71).
-*Expect:* a URL is **printed** by the `$BROWSER` stub and a device/paste-code flow
-completes. No callback port is forwarded, so a redirect-only flow would fail — confirm it
-does not need one.
+`claude` then `/login`; then `gh auth login`; then `vercel login`; then `codex login`.
+*Expect:* a login completes. Whether you SEE the `$BROWSER` stub's box depends on the caller —
+see the known limitation below.
+
+**1455 IS FORWARDED NOW (#71), so try codex's browser flow before reaching for
+`--device-auth`.** Its callback wants `localhost:1455`, and that port is first in the
+`CS193V_PORTS` line in `container.args`; the text here used to say nothing forwarded it, which
+stopped being true when it was added. If the redirect flow works, say so — the same question is
+open for the other three, and issue #82 is where it gets measured.
+
+**KNOWN LIMITATION, MEASURED — `claude` `/login` does not show the short link.** Claude Code
+does consult `$BROWSER` and does run our stub (verified: 2.1.225 spawns `process.env.BROWSER` on
+Linux, and a `shortlink` server really does appear on a forwarded port). But it spawns it with
+its **stdout captured**, so the stub's box goes into a pipe and is discarded, and what you see is
+Claude's own full-length URL. Nothing is broken and nothing needs doing about it during a release
+check — it is recorded so nobody re-diagnoses it from a 298 MB binary.
+`podman exec <container> pgrep -af '[s]hortlink'` is how to confirm the stub ran. Fixing it means
+writing to `/dev/tty` instead of stdout, which is deliberately NOT done yet: the box would land
+in the middle of a full-screen TUI that repaints.
+
+**THE ONE THING NO SUITE CAN CHECK, and the feature rests on it (issue #67).** Use a caller that
+does NOT capture — `setup-git` is the one that matters, and `gh auth login`, `vercel login` and
+`codex login` are worth checking since nobody has established whether they capture. The stub
+prints a short `http://localhost:PORT/magic-link` served by `shortlink` (setup-git's is
+`/magic-token-link`) inside the container.
+**Click it, from the terminal, inside tmux** — CMD+click on Terminal.app and iTerm2, CTRL+click
+on Windows Terminal and GNOME Terminal. `mouse on` means tmux sees ordinary clicks, so whether
+the terminal still intercepts a click on a URL is a per-terminal question, and this is the only
+place it gets answered. Do it on every platform.
+
+If clicking does not work somewhere, that is worth recording but is **not** a blocker: 39
+characters can be retyped, and SHIFT+drag copies them in one piece, which is the whole of what
+#67 was about. What WOULD be a blocker is the link not resolving at all — check `cs193v doctor`
+on the host for a port the tunnel could not bind.
+
+Also worth one look: open the same link **twice**, and open it again after a few minutes. It is
+meant to serve any number of times for fifteen minutes and then stop.
 During `gh auth login`, answer **yes** to "Authenticate Git with your GitHub credentials?"
 then confirm `git push` works from a test repo.
 *Automated:* the stub itself, and that all five credential directories are student-owned

@@ -315,6 +315,40 @@ token_url() {
            "$CS193V_GH_ORG" "$(expiry_days)"
 }
 
+# WHAT THE STUDENT IS ACTUALLY SHOWN, which is not what token_url returns. That URL is 157
+# characters, and at 80 columns it wraps -- which is not a cosmetic problem: tmux hands text
+# selection back to the terminal (SHIFT+drag, see tmux.conf at `mouse on`) and the terminal
+# selects what it has DRAWN, so a wrapped URL comes back with a newline in the middle of it.
+# Some terminals then send GitHub only the first half, the page silently discards the parameters
+# that were in the second, and the student is left holding a token whose permissions the course
+# cannot use -- diagnosed three screens later as a bare 404. That is issue #67.
+#
+# `shortlink` serves a redirect on one of the container's forwarded ports and prints a URL about
+# 39 characters long, which fits, copies in one piece, and can be retyped.
+#
+# THE SLUG IS `magic-token-link` AND NOT `token`, which is what this shipped with first. `/token`
+# is a route a student's own project plausibly serves -- it is the obvious name for an auth
+# endpoint -- and the browser keys its cache and any service worker on the ORIGIN, which outlives
+# whatever used to listen on that port. A student who had served /token on this port could get
+# their own app back instead of GitHub, with nothing anywhere to explain it. Nothing routes
+# `magic-token-link`.
+#
+# TWO REASONS THIS IS GUARDED AND NEITHER IS HYPOTHETICAL. 45-setup-git.sh drives this script on
+# a TA's Mac, where /usr/local/bin/shortlink does not exist; and shortlink itself degrades to
+# printing its argument when no port is forwarded. Both roads lead back to the long URL, which is
+# the URL that has always been printed here -- so there is no branch anywhere else in this file.
+#
+# token_url STAYS PURE, returning the long form, because it is a --dev-steps seam that
+# 45-setup-git.sh checks parameter by parameter with no container and no network in the picture.
+# What the student sees is this function; what GitHub is asked for is that one.
+token_link() {
+    if command -v shortlink > /dev/null 2>&1; then
+        shortlink "$(token_url)" --pidfile "$SG_TMP/link.pid" magic-token-link
+    else
+        token_url
+    fi
+}
+
 # The signup link carries the address they just gave us, so the first field is filled in. Only
 # @ needs escaping in what validate_email lets through.
 email_encoded() {
@@ -556,7 +590,7 @@ ask_token() {
         # NO "EXPIRY=" ANY MORE. The date is named in the by-hand steps and nowhere else: the
         # link carries it as a lifetime in days, and the four checks that used to ask a student
         # to read it back off the page went with issue #58.
-        say token.prefill "URL=$(token_url)"
+        say token.prefill "URL=$(token_link)"
         printf '\n'
         menu 0 "$(msg opt.have-token)" "$(msg opt.by-hand)"
         [ "$MENU_CHOICE" -eq 0 ] && byhand=no
@@ -926,6 +960,13 @@ sg_cleanup() {
     if [ -f "$SG_TMP/issue" ]; then
         n="$(cat "$SG_TMP/issue")"
         [ -n "$n" ] && gh issue close --repo "$CS193V_GH_SANDBOX" "$n" >/dev/null 2>&1
+    fi
+    # The redirect server, if token_link started one. It would go on its own after fifteen
+    # minutes, but a student who finished in two should not be holding a forwarded port for the
+    # other thirteen -- that is a port their own dev server wants. Best-effort and silent: the
+    # pidfile is absent on every path that never reached the token screen.
+    if [ -n "${SG_TMP:-}" ] && [ -f "$SG_TMP/link.pid" ]; then
+        kill "$(cat "$SG_TMP/link.pid")" 2>/dev/null || true
     fi
     [ -n "${SG_TMP:-}" ] && rm -rf "$SG_TMP"
     # run_step is run_timeout, and run_timeout leaves a scratch file behind when a signal stops

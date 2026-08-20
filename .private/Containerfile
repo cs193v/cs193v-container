@@ -596,11 +596,22 @@ COPY files/ /tmp/cs193v-files/
 #
 # What it does, in order:
 #
-#  1. Installs the helper commands: the $BROWSER stub, the entrypoint, and the three that
-#     make up the landing point --
+#  1. Installs the helper commands: the $BROWSER stub, `shortlink` behind it, the entrypoint,
+#     and the three that
 #     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
 #     last two are commands rather than inline shell because they now have two callers
 #     each: the tmux path and the plain `bash -l` path. See item 9.
+#
+#     `shortlink` is the one python3 program this image installs, and it is python3 for a
+#     reason it cannot avoid: it has to LISTEN on a socket, which bash's /dev/tcp cannot do
+#     and which socat and netcat are not here for. It gets a syntax check by the same
+#     argument as `sh -n /usr/bin/man` below -- `compile()` rather than `py_compile`, which
+#     would drop a .pyc into /usr/local/bin -- then two behavioural checks that cost
+#     nothing at build time: `--help` answers, and with no $CS193V_PORTS in the environment
+#     it degrades to printing the URL it was handed. That degradation is the contract every
+#     caller relies on to need no conditional, and the build is the cheapest place to
+#     notice it broken. What it does when a port IS forwarded needs a container with the
+#     tunnel behind it, and that is 50-image.sh and 60-container.sh.
 #
 #     `man` is the odd one out and goes to /usr/bin, not /usr/local/bin, because it
 #     REPLACES something rather than adding it. Ubuntu's minimized base leaves a
@@ -726,6 +737,11 @@ COPY files/ /tmp/cs193v-files/
 #     as "(missing message: intro)" on the student's first screen.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
+    install -m 0755 /tmp/cs193v-files/shortlink       /usr/local/bin/shortlink; \
+    python3 -c "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" /usr/local/bin/shortlink; \
+    /usr/local/bin/shortlink --help > /dev/null; \
+    sl_out="$(/usr/local/bin/shortlink https://example.com/build-check || true)"; \
+    test "$sl_out" = https://example.com/build-check; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
     install -m 0755 /tmp/cs193v-files/cs193v-shell    /usr/local/bin/cs193v-shell; \
     install -m 0755 /tmp/cs193v-files/cs193v-welcome  /usr/local/bin/cs193v-welcome; \

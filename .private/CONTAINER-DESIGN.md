@@ -481,7 +481,12 @@ actually are.
   talk to a web server by hand — `telnet example.com 80`, then type `GET / HTTP/1.0` and
   press Enter twice, and you see the raw reply. (Press Enter; do not try to type the `\r\n`
   yourself. telnet turns your Enter into the CRLF the protocol wants.)
-- **No browser.** Anything that would open one prints the URL for you to copy.
+- **No browser.** Anything that would open one prints a URL instead. It will usually be a
+  short `http://localhost:PORT/magic-link` rather than the real address: the container
+  serves that link to your browser over the tunnel and redirects you on, because the real
+  addresses are long enough to wrap, and a URL that has wrapped copies with a line break in
+  the middle of it. Those links are served by your container, so they stop working after
+  fifteen minutes and when the container stops.
 - **No `ripgrep`, `fzf`, `bat`, `fd` or `delta`.** Use `grep`, `find` and `git diff`.
 - **`git diff` shows moved code differently from rewritten code**, which is useful when
   reviewing an agent's work. Turn it on with

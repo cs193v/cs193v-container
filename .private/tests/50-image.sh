@@ -83,7 +83,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | tr '\n' ' ')"
@@ -306,6 +306,149 @@ assert_contains "helper:open-url-prints-the-url" "https://example.com/verify?cod
 assert_contains "helper:open-url-explains-why"   "no browser" "$out"
 assert_fail "helper:open-url-needs-an-argument" \
             sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
+# THE STUB'S TWO ASSERTIONS ABOVE RUN WITH NO $CS193V_PORTS, and that is load-bearing rather
+# than incidental: $VT_RUN is a bare `podman run` with no -e flags, so shortlink finds no
+# forwarded port, degrades to printing its argument, and open-url prints exactly what it always
+# did. That is the contract every caller of shortlink leans on to need no conditional of its own.
+out="$(R 'CS193V_PORTS=3000-3002 /usr/local/bin/open-url https://example.com/verify?code=ABCD')"
+assert_match "helper:open-url-shortens-when-a-port-is-forwarded" \
+             "http://localhost:300[0-2]/magic-link" "$out"
+assert_not_contains "helper:open-url-shortened-hides-the-long-url" \
+                    "example.com/verify" "$out"
+assert_contains "helper:open-url-shortened-says-it-expires" "15 minutes" "$out"
+
+# ─── shortlink  (issue #67) ────────────────────────────────────────────────────
+# ENTIRELY INSIDE ONE THROWAWAY CONTAINER, and that is not a shortcut: a fresh container has its
+# own network namespace, so every port in it is free and the curl that proves the redirect can run
+# beside the server that serves it. Nothing here needs the tunnel, which is what 60-container.sh
+# is for -- the half only a real container and a real host can answer is whether the port is
+# reachable from OUTSIDE, and it is the only shortlink assertion that lives there.
+#
+# `sl` runs a whole shell line with a port list in the environment. Every case sets its own, so
+# one case cannot leave a port bound for the next -- the container is discarded either way.
+#
+# `export`, AND NOT the `VAR=value command` prefix this first used. The prefix only exports to a
+# COMMAND, and most cases here start with `l=$(shortlink ...)` -- an assignment, not a command, so
+# `CS193V_PORTS=3000-3002 l=$(...)` is simply two assignments and shortlink saw neither. It then
+# did exactly what it promises with no port list: printed its argument unchanged, so `$l` was the
+# real URL and every curl below went to github.com and came back 302 from THERE. Two assertions
+# passed on that, one of them because the pidfile it looked for was never created. Same family as
+# issue #79 -- an assertion that passes without the thing under test having run.
+sl() { R "export CS193V_PORTS=$1; $2"; }
+
+assert_ok "shortlink:help-answers" \
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/shortlink --help > /dev/null'"
+
+# THE PORT COMES FROM THE LIST, HIGHEST FIRST. "Any free port" would be a bug rather than a
+# simplification: only the forwarded ones are reachable, and a server on any other looks exactly
+# like a broken link.
+assert_eq "shortlink:takes-the-highest-port-in-the-list" \
+          "http://localhost:3009/token" \
+          "$(sl 3000-3009 '/usr/local/bin/shortlink https://example.com/a token')"
+assert_eq "shortlink:parses-a-comma-separated-list" \
+          "http://localhost:8084/token" \
+          "$(sl 3000,8084,5173 '/usr/local/bin/shortlink https://example.com/a token')"
+# A malformed chunk is SKIPPED rather than fatal, the same way the launcher's tunnel_ports treats
+# one: container.args is a file people edit, and the launcher has already warned by now.
+assert_eq "shortlink:skips-a-malformed-chunk" \
+          "http://localhost:3001/token" \
+          "$(sl 3000-3001,not-a-port '/usr/local/bin/shortlink https://example.com/a token')"
+
+# THE DEGRADATION, asserted in both of its shapes: no list at all, and a list with nothing free.
+# Both print the input and exit 3, because a caller must be able to print the answer unconditionally.
+out="$(R '/usr/local/bin/shortlink https://example.com/plain; echo rc=$?')"
+assert_contains "shortlink:no-ports-prints-the-input" "https://example.com/plain" "$out"
+assert_contains "shortlink:no-ports-exits-3" "rc=3" "$out"
+
+# ─── the redirect itself ───────────────────────────────────────────────────────
+# ONE SHELL LINE PER CASE because the server has to still be running when curl asks. -D- keeps the
+# headers, which is where everything worth asserting is.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink "https://github.com/settings/personal-access-tokens/new?name=CS193V&contents=write" token); curl -sD- -o /dev/null --max-time 5 "$l"')"
+assert_match "shortlink:answers-302"   "^HTTP/1[.]. 302" "$out"
+assert_contains "shortlink:sends-the-location" \
+                "Location: https://github.com/settings/personal-access-tokens/new?name=CS193V&contents=write" "$out"
+# 302 AND NOT 301, and no-store beside it. A permanent redirect is remembered per origin and path
+# for months, and these ports get reused -- by the next shortlink and by the student's own
+# projects. A 301 here would silently send a later project's route to GitHub with nothing anywhere
+# to explain it.
+assert_not_match "shortlink:never-301" "^HTTP/1[.]. 301" "$out"
+assert_contains  "shortlink:forbids-caching" "Cache-Control: no-store" "$out"
+
+# SERVES REPEATEDLY, which is the whole reason it is not a one-shot. A browser opening one URL
+# preconnects speculatively and asks for /favicon.ico, and a student double-clicks and presses
+# Back -- a server that closed after its first response would spend it on none of those.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a token); for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} " --max-time 5 "$l"; done')"
+assert_eq "shortlink:redirects-every-time" "302 302 302" "$(printf '%s' "$out" | tr -s ' ' | sed 's/ *$//')"
+
+# THE SLUG IS NEVER EMPTY, and `/` is the path it must never serve: the browser keys its cache and
+# any service worker on the ORIGIN, which outlives whatever used to listen there, so the one path a
+# student's own project is likely to have served is the one we stay off. Nothing routes /magic-link.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a); echo "$l"; curl -s -o /dev/null -w " root=%{http_code}" --max-time 5 http://localhost:3002/; curl -s -o /dev/null -w " slug=%{http_code}" --max-time 5 "$l"')"
+assert_contains "shortlink:default-slug-is-magic-link" "http://localhost:3002/magic-link" "$out"
+assert_contains "shortlink:bare-root-is-not-served"    "root=404" "$out"
+assert_contains "shortlink:default-slug-redirects"     "slug=302" "$out"
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a token); curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:3002/nope')"
+assert_eq "shortlink:unknown-path-is-404" "404" "$out"
+
+# LOOPBACK ONLY. The tunnel's far end is the container's IPv4 loopback, so that is all that is
+# needed; the wildcard would additionally publish the redirect on the container's eth0.
+out="$(sl 3000-3002 '/usr/local/bin/shortlink https://example.com/a token > /dev/null; ss -ltn')"
+assert_match     "shortlink:binds-loopback"   "127[.]0[.]0[.]1:3002" "$out"
+assert_not_match "shortlink:binds-no-wildcard" "(0[.]0[.]0[.]0|\[::\]):3002" "$out"
+
+# ─── what a caller needs to be true ───────────────────────────────────────────
+# THE ONE BUG THAT PASSES EVERY CHECK MADE BY HAND. `link=$(shortlink ...)` reads the pipe until
+# EOF and only then waits for the child, and EOF arrives when the LAST descriptor on the write end
+# closes -- so a server that inherited fd 1 hangs the caller forever, whatever its parent does.
+# Run at a prompt, stdout is a tty, nobody reads to EOF, and it returns instantly. This is the
+# only place that difference is visible, so `timeout` is the assertion.
+out="$(sl 3000-3002 'timeout 10 sh -c "l=\$(/usr/local/bin/shortlink https://example.com/a token); echo returned=\$l"')"
+assert_contains "shortlink:command-substitution-returns" "returned=http://localhost:3002/token" "$out"
+
+# ITS OWN SESSION, so a Ctrl-C in the caller's foreground process group does not take the link
+# down at the moment the student is about to click it. Compared against the shell that started it
+# rather than to a literal: what matters is that they differ.
+out="$(sl 3000-3002 '/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token > /dev/null; sleep 1; echo "daemon=$(ps -o sid= -p "$(cat /tmp/sl.pid)" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
+record "shortlink:sessions" "$out"
+# The two numbers have to DIFFER, so the assertion is that the "they are equal" pattern matched
+# nothing. Comparing them any other way would need the values in the suite, and they only exist
+# inside the container.
+assert_eq "shortlink:runs-in-its-own-session" "" \
+          "$(printf '%s' "$out" | sed -n 's/.*daemon=\([0-9]*\) caller=\1$/SAME/p')"
+
+# --pidfile, and the pid in it is one a caller can actually end -- which is what setup-git's
+# sg_cleanup does rather than leaving a forwarded port held for the rest of the fifteen minutes.
+# The file goes away with the process: a pidfile that outlives what it names is the trap the
+# launcher documents at tunnel_kill_pid, since pids get reused.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token); sleep 1; kill "$(cat /tmp/sl.pid)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"; test -e /tmp/sl.pid && echo pidfile=left || echo pidfile=removed')"
+assert_contains "shortlink:pidfile-kill-stops-it"   "gone=000" "$out"
+assert_contains "shortlink:pidfile-is-removed"      "pidfile=removed" "$out"
+
+# AND IT LETS GO ON ITS OWN, so nothing depends on a caller remembering. --timeout 1 rather than
+# waiting out the real 900s default.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
+assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
+
+# CONCURRENT CALLS CANNOT COLLIDE, because binding IS the free-port test -- never check and then
+# bind, which two racing callers would both pass.
+out="$(sl 3000-3002 'for s in one two three; do /usr/local/bin/shortlink https://example.com/$s $s; done')"
+assert_eq "shortlink:three-callers-get-three-ports" "3" \
+          "$(printf '%s' "$out" | grep -c 'http://localhost:300[0-2]/')"
+assert_eq "shortlink:those-ports-are-distinct" "3" \
+          "$(printf '%s' "$out" | sed 's|.*localhost:||;s|/.*||' | sort -u | grep -c .)"
+
+# ─── what it refuses ──────────────────────────────────────────────────────────
+# THIS IS AN OPEN REDIRECTOR BY DESIGN and its argument reaches a response header, so the two
+# things that must not get through are a scheme a browser should not be sent to and a newline,
+# which would end the Location header and let the rest of the argument write headers of its own.
+for bad in 'file:///etc/passwd' 'javascript:alert(1)' 'notaurl'; do
+    assert_eq "shortlink:refuses-$bad" "2" \
+              "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink '$bad' > /dev/null 2>&1; echo \$?")"
+done
+assert_eq "shortlink:refuses-a-newline-in-the-url" "2" \
+          "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink \"\$(printf 'https://x.example/a\\r\\nX-Evil: 1')\" > /dev/null 2>&1; echo \$?")"
+assert_eq "shortlink:refuses-a-slug-with-a-slash" "2" \
+          "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink https://example.com/a 'has/slash' > /dev/null 2>&1; echo \$?")"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather

@@ -761,6 +761,73 @@ assert_match "ports:ss-shows-a-loopback-bind"  "127\.0\.0\.1:$FWD1" "$sout"
 assert_match "ports:ss-shows-a-wildcard-bind"  "(0\.0\.0\.0|\*):$FWD2" "$sout"
 probe_stop
 
+# ─── shortlink, from the browser's side  (issue #67) ──────────────────────────
+# THE ONE ASSERTION ONLY THIS TIER CAN MAKE. 50-image.sh proves the redirect inside a throwaway
+# container, where every port is free and the curl runs beside the server -- which says nothing
+# about whether a student's BROWSER can reach it. That needs a real container, a real tunnel and a
+# curl on the host, and it is the whole premise of the feature: the short URL is worth nothing if
+# the port it names is not carried out of the container.
+#
+# Derived from $FWD_PORTS rather than named, like every other port in this suite: shortlink walks
+# $CS193V_PORTS from the top, so the port it must have taken is the highest one this instance
+# forwards. With no override in play that is 8084; here it is whatever local.args says.
+FWD_HIGH="$(printf '%s\n' $FWD_PORTS | sort -n | tail -1)"
+FWD_NEXT="$(printf '%s\n' $FWD_PORTS | sort -n | tail -2 | head -1)"
+record "shortlink:ports-under-test" "highest $FWD_HIGH, next $FWD_NEXT"
+
+container_pkill shortlink
+sl_url="$(E 'shortlink https://example.com/e2e?a=1 token')"
+assert_eq "shortlink:takes-the-highest-forwarded-port" \
+          "http://localhost:$FWD_HIGH/token" "$sl_url"
+
+# THE END TO END. Headers kept, because the two things worth asserting are both in them, and
+# curl'd from the HOST -- the same side of the tunnel a student's browser is on.
+sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$FWD_HIGH/token")"
+record "shortlink:host-side-headers" "$(printf '%s' "$sl_head" | tr -d '\r' | tr '\n' '|')"
+if printf '%s' "$sl_head" | grep -qE '^HTTP/1[.]. 302'; then
+    pass "shortlink:the-browser-gets-a-redirect"
+else
+    fail "shortlink:the-browser-gets-a-redirect" \
+         "no 302 from http://127.0.0.1:$FWD_HIGH/token — the short link a student is told to
+click does not reach the container. That is the premise of the feature, not a detail of it.
+Check:  cs193v doctor"
+fi
+assert_match "shortlink:the-redirect-names-the-real-url" \
+             "Location: https://example[.]com/e2e[?]a=1" "$sl_head"
+# The path is not incidental: a student's own project may have served this origin before, and the
+# browser keys its cache and any service worker on the origin rather than on what is listening.
+# So the slug has to be the one thing nothing else routes, and `/` has to stay unserved.
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_HIGH/")"
+assert_eq "shortlink:bare-root-is-not-served-through-the-tunnel" "404" "$c"
+
+# AND IT GETS OUT OF THE WAY of a port that is already taken -- which is the case that decides
+# whether a student's dev server and this can coexist. The probe holds the top port; shortlink
+# must come down one rather than fail or, worse, print a port it does not hold.
+#
+# THE FIRST SERVER GOES FIRST, and leaving that out is how this was written wrong once: the
+# shortlink from the assertions above was still holding $FWD_HIGH, so the probe could not bind it
+# and reported 0/1 -- which reads as a mysterious in-container conflict rather than as the suite
+# competing with itself.
+container_pkill shortlink
+assert_probe "shortlink:probe-holds-the-highest-port" "$FWD_HIGH" 127.0.0.1
+sl_url2="$(E 'shortlink https://example.com/second token')"
+assert_eq "shortlink:steps-down-past-a-busy-port" \
+          "http://localhost:$FWD_NEXT/token" "$sl_url2"
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_NEXT/token")"
+assert_eq "shortlink:the-second-choice-is-reachable-too" "302" "$c"
+probe_stop
+container_pkill shortlink
+
+# NOTHING LEFT HOLDING A PORT. A leaked redirect server is a forwarded port a student's dev
+# server cannot have, and it would sit there for the full fifteen minutes.
+#
+# `[s]hortlink` RATHER THAN `shortlink`, and this is not a flourish: E() runs its argument through
+# `sh -c`, so the shell doing the counting has "shortlink" in its own command line and `pgrep -f`
+# matched it. The count was 1 whatever was or was not running. The bracket makes the pattern match
+# the string "shortlink" while the command line containing it does not.
+assert_eq "shortlink:leaves-nothing-behind" "0" \
+          "$(E 'pgrep -cf "[s]hortlink" || true' | tr -d ' \n')"
+
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
 # writes must be owned by the student on the host, and vice versa.

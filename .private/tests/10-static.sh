@@ -24,6 +24,11 @@ assert_ok  "syntax:install"           bash -n $PRIVATE/install-cs193v.sh
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
+# THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS, and `compile()` rather than py_compile for the
+# reason the Containerfile records: py_compile would drop a .pyc beside it.
+assert_ok  "syntax:shortlink"         python3 -c \
+           "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" \
+           $PRIVATE/files/shortlink
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
 assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
@@ -1338,6 +1343,10 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
                                 $PRIVATE/files/man
+# files/shortlink is deliberately NOT in that list: it is python3, and shellcheck asked to read it
+# reports a syntax error on the first line it does not understand. Its check is the compile() above.
+assert_match "shortlink:is-python-not-shell" "^#!/usr/bin/env python3$" \
+             "$(head -1 $PRIVATE/files/shortlink)"
 # tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
 # meant to stay diffable against it, so local style fixes would cost more than they buy.
 # Its host-side driver is ours and is checked.
