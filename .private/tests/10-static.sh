@@ -121,7 +121,7 @@ door_tail='install'; door_head='bash '
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
 bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
-        | grep -v 'bash -n' | grep -v installer_host || true)"
+        | grep -v 'bash -n' | grep -vE 'installer_host|installer_tty' || true)"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
 # And the door has to do the thing it exists for. Extraction asserted first: an empty
@@ -131,6 +131,29 @@ if [ "$(printf '%s' "$door" | grep -c '.')" -ge 4 ]; then pass "installer-door:e
 else fail "installer-door:extractable" "could not find installer_host in lib/podman-shim.sh"; fi
 assert_contains "installer-door:redirects-HOME"        'HOME=' "$door"
 assert_contains "installer-door:puts-the-shim-first"   'PATH="$SHIM' "$door"
+
+# The pty door is a second copy of the same rule, for the reason its own comment gives, so
+# the agreement is asserted rather than assumed.
+ttydoor="$(sed -n '/^installer_tty()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$ttydoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:tty-extractable"
+else fail "installer-door:tty-extractable" "could not find installer_tty"; fi
+assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
+assert_contains "installer-door:tty-puts-the-shim-first" 'PATH=$SHIM' "$ttydoor"
+
+# ─── the fake sudo cannot execute anything ─────────────────────────────────────
+# All four of the installer's privileged calls go through one name, so a sudo that never
+# execs makes the whole shim tier structurally unable to change this machine. That is worth
+# more than any assertion about what a case happened to do -- and it is one negated test
+# away from being false if an exec branch is ever added, so the absence is checked here.
+sudofake="$PRIVATE/tests/lib/sudo-fake"
+assert_ok "sudo-fake:exists" test -x "$sudofake"
+bare="$(grep -nE '(^|[^-[:alnum:]_])(exec|eval)([^[:alnum:]_]|$)' "$sudofake" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+assert_eq "sudo-fake:never-executes-anything" "" "$bare"
+# ...and it is on PATH for EVERY shim run, not only the cases that assert on it, so a case
+# written later cannot reach the real sudo by forgetting to ask for the fake.
+assert_contains "sudo-fake:installed-by-shim_new" 'lib/sudo-fake' \
+                "$(sed -n '/^shim_new()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
 
 # ...and no run in the cheap lane may use the UNEDITED installer, whose TARBALL is the real
 # GitHub URL. That is how the shim tier came to make a live network request on every run,
