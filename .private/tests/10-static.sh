@@ -160,6 +160,20 @@ else fail "installer-door:extractable" "could not find installer_host in lib/pod
 assert_contains "installer-door:redirects-HOME"        'HOME=' "$door"
 assert_contains "installer-door:puts-the-shim-first"   'PATH="$SHIM' "$door"
 
+# ...and no run in the cheap lane may use the UNEDITED installer, whose TARBALL is the real
+# GitHub URL. That is how the shim tier came to make a live network request on every run,
+# in a tier whose own header says "no podman, no image, no network", with `|| true` hiding
+# what came back. Every case now runs a copy whose TARBALL is a file:// path, so the rule
+# is simply that the original is never handed to the door.
+#
+# Assembled second-literal-first for the same reason as the needle above: written in one
+# piece this line would match itself.
+net_arg='install-cs193v.sh'; net_fn='installer_host'
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+bare="$(grep -Hn "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "installer-door:never-runs-the-unedited-installer" "" "$bare"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \

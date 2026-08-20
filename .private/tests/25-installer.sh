@@ -147,6 +147,27 @@ for t in 2048 4096 8192 16384 32768; do
     esac
 done
 
+# ─── the course files, served from a local tarball  (§A.12 needs this too) ─────
+# BUILT BEFORE THE CONSENT CASES, not beside the idempotency ones it was written for, and
+# that ordering is the whole point: the run below that reaches fetch_files used to use the
+# UNEDITED installer, whose TARBALL is the real GitHub URL. So the cheap lane -- whose own
+# header says "no podman, no image, no network" -- made a live request on every run, with
+# `|| true` hiding whatever came back. Driven, not read: it reaches "Getting the course
+# files" and prints the "Could not download" box in about a second, because a 404 is not a
+# --retry condition. It becomes thirty seconds the day GitHub is unreachable.
+#
+# Shaped the way GitHub's archive endpoint shapes it -- a single top-level directory, which
+# is why the installer strips one component -- AND HOLDING WHAT THAT ENDPOINT HOLDS, which
+# is tracked files: projects/.gitkeep and no node_modules. Its own excludes carried the
+# developer's projects/ into the fixture instead, so this gzipped 58 MB (#76).
+copy_course_tree "$TMP/pkg/cs193v-main"
+( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
+assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
+cp $PRIVATE/install-cs193v.sh "$TMP/installer.sh"
+edit_sub "$TMP/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
+edit_sub "$TMP/installer.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
+assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
+
 # ─── consent: nothing changes without a yes  (§1.2) ────────────────────────────
 # menu() with no tty picks the DEFAULT, which for consent is "Stop, do not change
 # anything". VERIFICATION.md §1.2 claims it falls back to numbered selection; it does not,
@@ -157,7 +178,7 @@ done
 # podman is absent only worked on a machine that happened not to have it.
 shim_new
 shim_fake_id 1000 nosuchuser-cs193v
-run_consent() { installer_host "$PRIVATE/install-cs193v.sh" CS193V_DIR="$TMP/consent"; }
+run_consent() { installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent"; }
 out="$(run_consent)"
 assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
 assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
@@ -173,26 +194,69 @@ assert_says_not "consent:declining-skips-the-download" "Getting the course files
 # With podman already present and a subuid range already there, nothing needs consent at
 # all and the installer should say so rather than asking a pointless question.
 shim_new
-out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_DIR="$TMP/noconsent" || true)"
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noconsent" || true)"
 assert_says "consent:nothing-to-change-when-already-set-up" \
             "Nothing on your computer needs to change" "$out"
 assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
 
-# ─── §A.12 idempotency, done for real ──────────────────────────────────────────
-# Serve the course files from a local tarball shaped the way GitHub's archive endpoint
-# does — a single top-level directory, which is why the installer strips one component.
+# ─── the refusals, and the one place a lie would be worst ──────────────────────
+# Four `die`s and one guard that nothing reached. All of them are non-tty-reachable
+# because none of them gets as far as needing consent -- survey refuses first.
 #
-# AND HOLDING WHAT THAT ENDPOINT HOLDS, which is tracked files: projects/.gitkeep and no
-# node_modules. Its own excludes carried the developer's projects/ into the fixture instead, so
-# this gzipped 58 MB — 1.7 s of CPU — and then extracted it twice, once per idempotency run (#76).
-copy_course_tree "$TMP/pkg/cs193v-main"
-( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
-assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
+# NO_COLOR IS NOT HERE ON PURPOSE. The colour block asks `[ -t 1 ] && [ -z "$NO_COLOR" ]`,
+# and every run in this suite reads its output through a command substitution, so stdout is
+# a pipe and colour is already off. An assertion that NO_COLOR suppresses colour would pass
+# without NO_COLOR doing anything. It needs a pty, and it waits for one.
 
-cp $PRIVATE/install-cs193v.sh "$TMP/installer.sh"
-edit_sub "$TMP/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-edit_sub "$TMP/installer.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
-assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
+# An operating system this script does not support must say so and stop, rather than
+# guessing that anything not-Darwin is Ubuntu.
+shim_new
+shim_fake_uname FreeBSD amd64
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/bsd")"
+assert_says "unsupported-os:says-what-it-supports" "supports macOS, Ubuntu" "$out"
+assert_says "unsupported-os:names-what-it-found"   "FreeBSD" "$out"
+assert_no_file "unsupported-os:changes-nothing" "$TMP/bsd"
+assert_eq "unsupported-os:exits-1" "1" \
+          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/bsd2")"
+
+# A podman older than MIN_PODMAN. version_lt is unit-tested above over twelve pairs; what
+# this adds is that the comparison is WIRED to a refusal, and that the refusal tells a
+# student how to fix it on their own platform.
+shim_new
+shim_set version "podman version 4.9.3"
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
+assert_says "podman-old:refused"            "needs 5.7.0 or newer" "$out"
+assert_says "podman-old:names-what-it-found" "Podman 4.9.3"        "$out"
+assert_says "podman-old:says-how-to-upgrade" "only-upgrade podman" "$out"
+assert_no_file "podman-old:changes-nothing" "$TMP/old"
+
+# podman missing entirely is NOT here, and the reason is worth writing down rather than
+# quietly dropping. The shim's whole job is to BE podman, and taking the fake away just
+# exposes the REAL /usr/bin/podman that `command -v` then finds -- so the branch cannot be
+# reached from a PATH shim at all, only from a machine that genuinely has no podman. That is
+# a fixture container, so both consent wordings (the macOS "installs system-wide" fork and
+# the Ubuntu "needs your password" one) wait for the install tier rather than being faked
+# badly here.
+
+# A destination it cannot create. Not a fake: a directory mode 555 is a real unwritable
+# parent, which is what a student hits when they point this at somewhere they do not own.
+shim_new
+mkdir -p "$TMP/ro" && chmod 555 "$TMP/ro"
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
+assert_says_not "unwritable-dest:does-not-claim-success" "Setup finished" "$out"
+assert_eq "unwritable-dest:exits-1" "1" \
+          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
+chmod 755 "$TMP/ro"
+
+# THE WORST POSSIBLE LIE, and the one smoke_test exists to prevent: a build that produced
+# no image, reported over the words "Setup finished". The installer's own comment calls this
+# ERRORS.md A6's shape -- a truncated download that passed.
+shim_new
+shim_set image_exists no
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noimage")"
+assert_says "no-image:refuses-to-claim-success" "was not built, but setup did not stop" "$out"
+assert_says_not "no-image:does-not-say-finished" "Setup finished" "$out"
+assert_says "no-image:tells-them-what-to-send-staff" "doctor" "$out"
 
 DEST="$TMP/dest"
 shim_new
