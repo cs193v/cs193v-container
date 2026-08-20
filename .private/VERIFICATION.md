@@ -613,7 +613,7 @@ time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lo
 
 ```sh
 rec containers podman ps -a --format '{{.Names}}'          # expect only cs193v
-rec volumes    podman volume ls --format '{{.Name}}'        # expect only the six cs193v-*
+rec volumes    podman volume ls --format '{{.Name}}'        # expect only the cs193v-* set
 rec images     podman images --format '{{.Repository}}:{{.Tag}}'
 rm -f "$DIR"/projects/.vt-*
 echo "A-battery: PASS=$PASS FAIL=$FAIL"
@@ -961,14 +961,23 @@ click that does not need it.
 Mostly automated in §A.11. What still needs a person:
 
 **8.1 — Login with no host browser.** `claude` then `/login` inside the container.
-*Expect:* a URL is **printed** (via the `BROWSER` stub) and a device/paste code flow completes. No
-callback port is published, so a redirect-only flow would fail — confirm it does not need one.
+*Expect:* a URL is **printed** and a device/paste code flow completes. Nothing is *published* with
+`-p`, deliberately, but the ssh tunnel forwards every port in `CS193V_PORTS` from host loopback to
+container loopback, so a callback landing on one of those ports **is** reachable — the claim that
+used to sit here, that a redirect-only flow must fail, stopped being true when the tunnel landed
+(#82). Known and measured, so do not re-diagnose it from a 298 MB binary: Claude Code consults
+`$BROWSER` and really does run the stub, but captures its stdout, so the box is discarded and what
+you see is Claude's own full-length URL. `podman exec <container> pgrep -af '[s]hortlink'` confirms
+the stub ran. `tests/MANUAL.md` §8.1 is the fuller account.
 
 **8.2 — `gh`, `vercel` and `codex` login.** `gh auth login`, then `vercel login`, then
-`codex login --device-auth`. Codex's browser flow wants a callback on localhost:1455, which
-nothing forwards yet, so device-auth is the route that works — see issue #71.
-*Expect:* both complete with a printed URL or emailed code. During `gh auth login`, answer **yes** to
-"Authenticate Git with your GitHub credentials?" and then confirm `git push` works from a test repo.
+`codex login`. **1455 is forwarded now (#71)**, first in the `CS193V_PORTS` line in
+`.config/container.args`, so try codex's browser flow before reaching for `--device-auth`. If the
+redirect flow completes, say so — that is the measurement #82 asks for, and the same question is
+open for the other two.
+*Expect:* all three complete with a printed URL or emailed code. During `gh auth login`, answer
+**yes** to "Authenticate Git with your GitHub credentials?" and then confirm `git push` works from
+a test repo.
 
 **8.7 — A permission prompt in the wild.** Ask the agent to do something that triggers a prompt.
 *Expect:* the prompt is comprehensible to a first-year student. Record the wording; this is the moment
@@ -983,8 +992,8 @@ Containerfile. *Expect:* the image rebuilds because the recipe moved, the contai
 recreated, and logins are intact. Run it a second time with nothing edited and *expect* no
 build at all — that is the hash gate, and it is what makes one verb serve both jobs.
 
-**9.2 — Full reset is clean.** `./cs193v --rebuild --logout`; confirm `podman volume ls` no longer
-lists the six `cs193v-*` volumes.
+**9.2 — Full reset is clean.** `./cs193v --rebuild --logout`; confirm `podman volume ls` shows all
+`cs193v-*` volumes gone.
 
 **9.3 — WSL teardown (Windows).** `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other WSL distro. Confirm any pre-existing distro
