@@ -738,6 +738,22 @@ assert_eq "claude:policy-is-readable-by-student" "ok" \
 assert_eq "claude:policy-not-student-writable" "ok" \
     "$(R 'test ! -w /etc/claude-code/managed-settings.json && echo ok')"
 
+# ─── the two halves of #77 ──────────────────────────────────────────────────────
+# The renderer, read out of the file the image actually ships rather than out of the repo copy
+# 10-static.sh reads. Same sentinel discipline: "ABSENT" rather than the empty string, because
+# an empty answer is also what a crashed python3 leaves behind.
+assert_eq "claude:image-pins-the-fullscreen-renderer" "fullscreen" \
+    "$(R 'python3 -c "import json;print(json.load(open(\"/etc/claude-code/managed-settings.json\")).get(\"tui\",\"ABSENT\"))"')"
+# ...and the variable that keeps its copy-on-select from promising a paste route this container
+# does not have. Asserted from a process's real environment rather than by reading the ENV line,
+# so a layer ordering that dropped it would be caught.
+#
+# WHAT THIS DOES NOT PROVE, recorded rather than glossed: that Claude Code still honours the
+# variable. It is internal and undocumented, there is no non-interactive readout of the renderer
+# or the mouse mode, and the behavioural check needs a logged-in session. tests/MANUAL.md 7.11.
+assert_eq "claude:image-turns-off-drag-selection" "1" \
+    "$(R 'printf %s "$CLAUDE_CODE_DISABLE_MOUSE_CLICKS"')"
+
 # ─── the entrypoint's ~/.claude.json symlink ────────────────────────────────────
 # ~/.claude.json must be a FILE, and a single file cannot be a volume target, so the volume
 # is a directory and the entrypoint symlinks into it. Idempotent, so it is safe on every

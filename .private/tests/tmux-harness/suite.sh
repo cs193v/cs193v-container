@@ -780,6 +780,53 @@ hx_settle 0.5
 hx_expect_eq "the mouse goes back to tmux when the app stops asking for it" \
              "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
 
+# --- and the OTHER arm of the same guard: a full-screen app (#77) ------------
+# THE ARM THAT HAD NO COVERAGE. WheelUpPane forwards on
+# `alternate_on || pane_in_mode || mouse_any_flag`, and everything above this line exercises
+# only the mouse_any_flag term. The alternate_on term is what nano, less, vim and Claude Code's
+# fullscreen renderer all rely on, and until #77 nothing here would have noticed it being
+# dropped from the condition -- the mouse_any_flag checks above pass either way.
+#
+# `printf '\033[?1049h'; cat -v` is the smallest possible full-screen app: it takes the
+# alternate screen and asks for NOTHING else, so it isolates the one term. Deliberately no
+# mouse reporting -- with `?1000h` as well this would just be the block above again.
+it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
+hx_settle 0.2
+hx_cmd "$S" "printf '\\033[?1049h'; cat -v"
+hx_settle 0.8
+hx_expect_eq "a full-screen app is detected as one" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{alternate_on}')" "1"
+hx_expect_eq "...and it is NOT detected through the mouse term" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
+# The whole point: the wheel must NOT scroll tmux back over a full-screen app.
+#
+# AND IT IS SWALLOWED RATHER THAN FORWARDED, which is worth stating because the obvious third
+# assertion here -- "so the app got it instead" -- is FALSE and was written that way first.
+# Measured against this exact fixture: with alternate_on 1 and no mouse mode, the app receives
+# nothing at all, and adding `?1007h` (alternate scroll) to the fixture changes nothing. tmux
+# has no mouse bytes it is allowed to send, because the app never asked for any. So "nano does
+# not scroll back in tmux" is true because NOTHING happens, not because nano scrolls.
+#
+# The third check below is therefore a liveness check, not a delivery check, and it is here to
+# stop the two above passing for the wrong reason: a pane whose fixture had died would also be
+# out of a mode and also show no banner.
+hx_wheel_up "$S" "$((HX_H / 2))" "$((HX_W / 2))" 3
+hx_settle 0.8
+hx_expect_eq "the wheel does not put a full-screen app's pane into copy mode" "$(cmode)" "0"
+hx_expect_absent "and does NOT announce SCROLLED BACK over it" "$(hx_cap "$S" | head -2)" "SCROLLED BACK"
+hx_expect_eq "...measured against a full-screen app that is still running" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{pane_current_command}')" "cat"
+hx_hex "$S" "03"
+hx_settle 0.4
+# LEAVE THE ALTERNATE SCREEN, for the same reason the block above turns mouse reporting back
+# off: `cat` dying does not undo the `?1049h` it was reading through, alternate_on stays 1, and
+# every wheel event after this point is forwarded to the pane instead of scrolling tmux -- so the
+# scrollback checks below could not rewind to their fixture at all.
+hx_cmd "$S" "printf '\\033[?1049l'"
+hx_settle 0.5
+hx_expect_eq "the wheel goes back to tmux when the app leaves the alternate screen" \
+             "$(it display-message -p -t "cs193v:$cwin" '#{alternate_on}')" "0"
+
 # ============================================================================
 hx_section "R6  clicks and drags never move the scrollback view (#61)"
 #

@@ -430,6 +430,13 @@ actually are.
   Your scrollback is 50,000 lines per tab and belongs to the container, not to your terminal
   — so it survives switching tabs and coming back.
 
+  **Claude Code is the one exception, and it is deliberate.** It draws its own full-screen
+  view and scrolls itself, so the wheel moves Claude Code's conversation rather than the
+  50,000 lines behind it, and what it has printed is not in that scrollback. Codex is not
+  like this: it prints into the scrollback the same way `python3` or `git log` does, so the
+  wheel scrolls the tab. The two agents behaving differently is a property of the agents
+  rather than a choice made here — see issue #77.
+
   **To copy text, hold SHIFT while you drag**, then copy the way you always do in this
   terminal (`CTRL+SHIFT+C`, or `⌘C` on a Mac). Dragging without SHIFT does nothing on
   purpose: the container cannot reach your computer's clipboard, and holding SHIFT hands the

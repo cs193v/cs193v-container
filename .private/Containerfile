@@ -809,7 +809,30 @@ RUN set -eux; \
     su student -s /bin/sh -c 'tldr tar' > /dev/null
 
 ####> Finishing up...
+#
+# CLAUDE_CODE_DISABLE_MOUSE_CLICKS IS HALF OF ISSUE #77 AND MUST NOT BE READ ON ITS OWN.
+# The other half is `"tui": "fullscreen"` in files/claude-code/managed-settings.json, which is
+# what makes the wheel reach Claude Code at all. Turning that on also turns on the fullscreen
+# renderer's `copyOnSelect`, which DEFAULTS TO TRUE: a drag then writes the selection out over
+# OSC 52 and toasts "copied N chars to tmux buffer - paste with <prefix>p". Measured. This
+# configuration sets `prefix None`, so that is instructions to press a key that does not exist,
+# about text the student cannot reach -- the same class of failure a9336c0 deleted tmux's own
+# copy path over, arriving through the application instead of through tmux.
+#
+# THE NAME IS A TRAP: it does not disable clicks. It switches Claude Code's tracking from
+# `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so button press and release are still
+# reported -- clicking a link or a button inside the agent still works, which is what
+# tmux.conf's MouseDown1Pane binding exists for -- and only MOTION is dropped. Measured both
+# ways in the container: mouse_any_flag stays 1 so the wheel guard still forwards, while a drag
+# and a double-click each produce zero paste buffers and no toast. SHIFT+drag is untouched,
+# because it never reaches the application in the first place.
+#
+# An internal, undocumented variable, so it can vanish without notice. Nothing can assert that
+# Claude Code still honours it -- there is no non-interactive readout of the renderer or of the
+# mouse mode (`claude config` is not a subcommand and `claude doctor` reports installation
+# health only), and the behavioural check needs a logged-in session. tests/MANUAL.md carries it.
 ENV LANG=en_US.UTF-8 \
+    CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 \
     LC_ALL=en_US.UTF-8 \
     PATH=/home/student/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \
     EDITOR=nano \

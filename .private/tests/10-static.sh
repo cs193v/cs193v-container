@@ -1127,6 +1127,39 @@ else:
 ' "$managed" "$forbidden")"
 done
 
+# THE FULLSCREEN RENDERER (#77), and the one env var that makes it safe here.
+#
+# Claude Code ships two renderers. The classic one draws on the MAIN screen and never asks for
+# mouse reporting, so all three terms of tmux's wheel guard -- alternate_on, pane_in_mode,
+# mouse_any_flag (files/tmux/tmux.conf:195) -- are false, and the wheel scrolls TMUX instead of
+# the agent. Measured in the container against a logged-in session: classic gives
+# `alt=0 mouse=0`, `tui: fullscreen` gives `alt=1 mouse=1`.
+#
+# READ AS A KEY rather than grepped, for exactly the reason the two forbidden keys above are:
+# this file's own $comment prose names the value, so a text search would pass on the comment
+# that documents the setting.
+assert_eq "claude:tui-is-fullscreen" "fullscreen" "$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1])).get("tui", "ABSENT"))
+' "$managed")"
+
+# CLAUDE_CODE_DISABLE_MOUSE_CLICKS IS PART OF THE SAME FIX AND MUST NOT BE SEPARATED FROM IT.
+#
+# The fullscreen renderer turns on `copyOnSelect`, which defaults to TRUE, and a drag inside it
+# then writes the selection out over OSC 52. Measured: the toast reads "copied N chars to tmux
+# buffer - paste with <prefix>p", and this configuration sets `prefix None` -- so the student is
+# told to press a key that does not exist, about text they cannot reach. That is the failure #61
+# deleted tmux's own copy path over, arriving by a different door.
+#
+# The variable is MISNAMED and the name is the trap: it does not disable clicks. It switches
+# Claude Code's tracking from `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so button
+# press/release is still reported -- clicking a link or a button in the agent still works, which
+# is what tmux.conf's MouseDown1Pane binding exists for -- and only MOTION is dropped. Measured
+# both ways: the wheel guard still sees mouse_any_flag=1, and a drag and a double-click each
+# produce zero paste buffers and no toast.
+assert_ok "claude:drag-selection-is-off-in-the-image" \
+          grep -q 'CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1' $PRIVATE/Containerfile
+
 # ONE FILE, TWO TOOLS. The notes are the only real copy: /etc/claude-code/CLAUDE.md is a
 # symlink to them, and the entrypoint links ~/.codex/AGENTS.md at them on every start, because
 # codex reads global instructions only from $CODEX_HOME and that directory is a volume -- a file
