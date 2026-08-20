@@ -474,7 +474,13 @@ choose_dir() {
         printf '    path: '; IFS= read -r DIR
         case "$DIR" in
             '')  DIR="$DEFAULT_DIR" ;;
-            "~"/*) DIR="$HOME/${DIR#~/}" ;;
+            # ${DIR#"~"/} WITH THE TILDE QUOTED. The pattern half of a #-expansion is
+            # tilde-EXPANDED, so the unquoted form asked to strip a literal "/home/you/"
+            # from a string beginning "~/" -- which matches nothing, strips nothing, and
+            # built $HOME/~/whatever: the course installed into a directory named "~"
+            # inside the student's home. The case pattern above was always right; only the
+            # strip was wrong, which is why it looked correct.
+            "~"/*) DIR="$HOME/${DIR#"~"/}" ;;
         esac
     fi
     ok "$DIR"

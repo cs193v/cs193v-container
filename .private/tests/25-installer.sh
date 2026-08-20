@@ -258,6 +258,132 @@ assert_says "no-image:refuses-to-claim-success" "was not built, but setup did no
 assert_says_not "no-image:does-not-say-finished" "Setup finished" "$out"
 assert_says "no-image:tells-them-what-to-send-staff" "doctor" "$out"
 
+# ─── everything behind the consent menu  (§1.2's other half) ────────────────────
+# menu() takes the safe default when stdin or stdout is not a terminal, so with no tty
+# ask_consent DECLINES and returns -- which is why nothing in this suite had ever executed
+# install_podman, setup_subuid, setup_wslconf or setup_machine's resize arm. A pty is not a
+# nicety here, it is the only way past line one of every host-changing step.
+#
+# The resize is the vehicle for "consent accepted" rather than the subuid range, and that is
+# deliberate: it needs consent, it executes a real branch on the far side, and it leaves the
+# rest of the run intact. Forcing consent with a faked `id` instead makes the launcher's own
+# preflight refuse later (the faked user has no /etc/subuid entry), so the run cannot reach
+# the end and "Setup finished" stops being assertable.
+
+# Down-arrow then Enter: the path a student actually takes, escape sequence and all.
+shim_new; shim_fake_mac
+# machine_list and machine_mem are shim FILES, not environment variables. An existing
+# machine that is too small is the only thing on this host that needs consent AND leaves the
+# rest of the run working -- but handed to installer_tty as env vars they did nothing, the
+# survey found no machine, nothing needed permission, and the run sailed straight past the
+# menu. "It finished" passed while every assertion about the resize failed.
+shim_set machine_list podman-machine-default; shim_set machine_mem 4096
+out="$(installer_tty '\033[B\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says "consent-yes:the-arrow-moved-the-selection" "Go ahead" "$out"
+assert_says "consent-yes:the-resize-ran"     "Resizing podman's virtual machine to 12288 MB" "$out"
+assert_says "consent-yes:reports-the-resize" "resized and restarted" "$out"
+assert_says "consent-yes:finishes"           "Setup finished" "$out"
+# The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
+# before setting memory -- podman refuses to change a running one -- and start it again.
+assert_says "consent-yes:stopped-before-setting" "machine stop"              "$(installer_log)"
+assert_says "consent-yes:set-the-memory"         "machine set --memory 12288" "$(installer_log)"
+assert_says "consent-yes:started-again"          "machine start"              "$(installer_log)"
+# Nothing on this path needs root, so the fake sudo must have been left alone entirely.
+assert_eq "consent-yes:needed-no-privilege" "" "$(sudo_log)"
+
+# Enter on its own leaves the default selected, which is the refusal.
+shim_new; shim_fake_mac
+shim_set machine_list podman-machine-default; shim_set machine_mem 4096
+out="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says "consent-no:declines-on-a-tty"  "Nothing was changed" "$out"
+assert_says "consent-no:offers-a-way-forward" "contact course staff" "$out"
+assert_says_not "consent-no:the-log-shows-no-resize" "machine set" "$(installer_log)"
+assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer_log)"
+
+# The digit shortcut. The key TABLE is diffed against the launcher's copy above, which proves
+# the digits are listed; this proves they work in the installer's own copy.
+shim_new; shim_fake_mac
+shim_set machine_list podman-machine-default; shim_set machine_mem 4096
+out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says "consent-digit:selects-and-accepts" "resized and restarted" "$out"
+
+# ─── setup_subuid, executing for the first time ────────────────────────────────
+# The one privileged call reachable from here. sudo-fake records it and runs nothing, so what
+# is asserted is the command the installer WOULD have run as root -- the range included,
+# because a wrong range is a silent failure much later, inside podman.
+shim_new; shim_fake_id 1000 nosuchuser-cs193v
+out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says "subuid:step-announced" "Setting up your account's ID range" "$out"
+assert_says "subuid:reports-success" "subuid range added for nosuchuser-cs193v" "$out"
+assert_says "subuid:asks-root-for-the-right-range" \
+            "usermod --add-subuids 200000-265535 --add-subgids 200000-265535 nosuchuser-cs193v" \
+            "$(sudo_log)"
+# This run cannot reach the end and that is correct rather than a gap: the faked account has
+# no real /etc/subuid entry, so the launcher's own preflight refuses at --rebuild. Recorded
+# so the reason is visible instead of looking like a missing assertion.
+record "subuid:what-happens-after-a-faked-usermod" \
+       "$(printf '%s' "$out" | grep -c 'Setup finished') finished-lines"
+
+# ...and when root refuses. The die must name the account and tell them what to send staff.
+shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail usermod
+out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says "subuid-fails:names-the-account" "Could not add a subuid range for nosuchuser-cs193v" "$out"
+assert_says "subuid-fails:says-what-to-send" "cat /etc/subuid" "$out"
+assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out"
+
+# ─── choose_dir, which only exists on a tty ────────────────────────────────────
+# CS193V_DIR IS DELIBERATELY UNSET for these four, which is the whole reason installer_host
+# and installer_tty redirect HOME: with it unset, DEFAULT_DIR is $HOME/cs193v and the
+# installer really does mkdir, untar and chmod there. Nothing on this path needs privilege,
+# so HOME is the only thing standing between these cases and the developer's home directory.
+# Each asserts the destination it landed on, so a case that escaped the door fails loudly.
+shim_new
+out="$(installer_tty '\n' "$TMP/installer.sh" | strip_ansi)"
+assert_says "choosedir:enter-takes-the-default" "$SHIM/home/cs193v" "$out"
+assert_ok   "choosedir:default-really-created"  test -x "$SHIM/home/cs193v/cs193v"
+assert_says "choosedir:default-finishes"        "Setup finished" "$out"
+
+shim_new
+out="$(installer_tty "2$SHIM/typed\n" "$TMP/installer.sh" | strip_ansi)"
+assert_says "choosedir:typed-path-is-used"   "$SHIM/typed" "$out"
+assert_ok   "choosedir:typed-path-created"   test -x "$SHIM/typed/cs193v"
+
+shim_new
+out="$(installer_tty '2\n' "$TMP/installer.sh" | strip_ansi)"
+assert_says "choosedir:empty-input-falls-back" "$SHIM/home/cs193v" "$out"
+assert_ok   "choosedir:fallback-created"       test -x "$SHIM/home/cs193v/cs193v"
+
+shim_new
+out="$(installer_tty '2~/elsewhere\n' "$TMP/installer.sh" | strip_ansi)"
+assert_says "choosedir:tilde-is-expanded"    "$SHIM/home/elsewhere" "$out"
+assert_ok   "choosedir:tilde-target-created" test -x "$SHIM/home/elsewhere/cs193v"
+# NOT asserted: that "~/elsewhere" is absent from the transcript. A pty echoes the keys this
+# test feeds it, so the literal string is there whatever the installer did with it -- the
+# assertion would have been reporting on its own input. The exact expanded path above, plus a
+# launcher existing at it, is the evidence.
+
+# ─── colour, which needs a terminal to mean anything ───────────────────────────
+# Not asserted anywhere before now, and it could not be: every other run in this file reads
+# its output through a command substitution, so stdout is a pipe, `[ -t 1 ]` is false and
+# colour is already off. An assertion there would have passed with NO_COLOR doing nothing.
+shim_new
+# BEFORE "Building the course container", which is where the installer hands over to the
+# launcher -- whose progress meter draws cursor escapes on a tty of its own accord. Asserting
+# over the whole transcript measured the meter, not the colour decision.
+pre() { sed -n '1,/Building the course container/p'; }
+raw="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | pre)"
+if printf '%s' "$raw" | grep -q "$(printf '\033')\["; then pass "colour:on-with-a-terminal"
+else fail "colour:on-with-a-terminal" "no escape sequences in a pty transcript"; fi
+assert_says "colour:the-coloured-run-got-that-far" "Looking at your computer" "$raw"
+
+shim_new
+raw="$(installer_tty '\n' "$TMP/installer.sh" NO_COLOR=1 CS193V_DIR="$SHIM/dest" | pre)"
+if printf '%s' "$raw" | grep -q "$(printf '\033')\["; then
+    fail "colour:NO_COLOR-suppresses-it" "escape sequences survived NO_COLOR=1"
+else pass "colour:NO_COLOR-suppresses-it"; fi
+# ...and the run really ran, so the check above is not passing on an empty transcript.
+assert_says "colour:NO_COLOR-run-got-that-far" "Looking at your computer" "$raw"
+
 DEST="$TMP/dest"
 shim_new
 run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST"; }

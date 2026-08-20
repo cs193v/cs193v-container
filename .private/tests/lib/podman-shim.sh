@@ -36,6 +36,13 @@ shim_new() {
     export TMPDIR="$SHIM/tmp"
     cp "$TESTS_DIR/lib/podman-fake" "$SHIM/podman"
     chmod +x "$SHIM/podman"
+    # UNCONDITIONALLY, not only for the cases that assert on it. Every shim run then has a
+    # sudo that cannot execute anything, so no case -- including one written later, and
+    # including a PTY case that could really sit prompting for the developer's password --
+    # can reach the four privileged calls in install-cs193v.sh.
+    cp "$TESTS_DIR/lib/sudo-fake" "$SHIM/sudo"
+    chmod +x "$SHIM/sudo"
+    : > "$SHIM/sudo.log"
     : > "$SHIM/argv.log"
 }
 
@@ -46,6 +53,8 @@ shim_set() {                          # shim_set KEY VALUE
 shim_touch() { : > "$SHIM/$1"; }      # for flag-style keys like `hang`
 
 shim_log()  { cat "$SHIM/argv.log" 2>/dev/null; }
+# What the installer WOULD have run as root, from the most recent installer_host run.
+sudo_log()  { cat "$(cat "$SHIM_LAST" 2>/dev/null)/sudo.log" 2>/dev/null; }
 shim_clear_log() { : > "$SHIM/argv.log"; }
 
 # How many invocations matched an extended regex. Used for "exactly one container was
@@ -229,6 +238,35 @@ installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] 
 
 # argv.log from the most recent installer_host run, whichever subshell it happened in.
 installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
+
+# The same door, through a real pty. Needed because menu() deliberately takes the safe
+# default when stdin or stdout is not a terminal, so with no tty ask_consent DECLINES and
+# every step after it is unreachable -- which is why nothing had ever executed
+# install_podman, setup_subuid or setup_wslconf.
+#
+# KEYS goes through printf %b: \033[B is down, \n is Enter. menu() also accepts a DIGIT,
+# which selects and breaks in one keystroke (`[1-9]) sel=$((key-1)); break`), so a case that
+# is not specifically about arrow keys should send "2" rather than an escape sequence.
+#
+# HOME= IS SPELT OUT AGAIN HERE rather than shared with installer_host, because a pty needs
+# a command STRING and the other needs an argv. 10-static.sh asserts both doors set it --
+# the same way this project handles version_lt and box() being duplicated between the
+# launcher and the installer: assert the agreement rather than pretend there is one copy.
+installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
+    local keys="$1" script="$2"; shift 2
+    local cmd a
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    cmd="env HOME=$SHIM/home PATH=$SHIM:$PATH"
+    for a in "$@"; do cmd="$cmd $a"; done
+    cmd="$cmd bash $script"
+    if script --version 2>&1 | grep -qi util-linux; then
+        printf '%b' "$keys" | timeout 120 script -q -c "$cmd" /dev/null 2>&1
+    else
+        # shellcheck disable=SC2086
+        printf '%b' "$keys" | timeout 120 script -q /dev/null $cmd 2>&1
+    fi
+}
 
 # Fake `uname` and `sysctl`, which is what makes the macOS arm executable on Linux.
 #
