@@ -213,3 +213,143 @@ assert_contains "runner:a-dead-suite-fails-the-run" "[rc=1]"                "$ou
 assert_contains "runner:still-counts-what-ran"      "2 pass"                "$out"
 assert_match    "runner:names-the-one-that-could-not-record" '03-cannot-record\.sh +exited 97' "$out"
 assert_contains "runner:says-results-were-lost"    "results were LOST"     "$out"
+
+# ─── a CHECKER that could not run must fail, not pass ──────────────────────────
+# THE SAME DEFECT AS #76, one layer in. box_problems and render_pty both pipe their input
+# through `python3 -c`, and both are read by assertions whose HAPPY answer is the empty string:
+# `assert_eq NAME "" "$(... | box_problems)"` and `assert_not_contains NAME needle "$(...
+# | render_pty)"`. So an interpreter that dies prints nothing, and nothing is the happy answer.
+#
+# MEASURED ON 740a14f, not imagined (#79): a fake python3 that printed a traceback and exited 1
+# left 26 assertions in the cheap lane passing with no checker having run — nine box_problems
+# sites and ten render_pty-fed negatives among them. `require_cmd python3` guarded three of
+# those call sites and caught none of it: the sabotaged interpreter EXISTS, so `command -v`
+# was satisfied.
+#
+# DRIVEN THROUGH A CHILD, for the reason the results-file fixture above is: the assertion under
+# test has to really FAIL, and a failing assertion in this process would fail this suite. The
+# child sources assert.sh with its own $CS193V_RESULTS and its own PATH.
+#
+# THIS IS THE DURABLE HALF OF AN AUDIT, and the other half is written down rather than automated:
+# VERIFICATION.md §A.15 carries the differential-sabotage recipe that found the twenty-six, the
+# before-and-after counts, and the argument for why it is a hand-run audit instead of a tier
+# (`lane_of` would serialise a `sabotage` tier behind the container, and DEFAULT_TIERS would have
+# to exclude it -- an unrun gate being the same defect over again). What lives HERE is the part
+# that costs milliseconds and therefore runs on every single run.
+FAKEBIN="$WORK/fake-dead"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/python3" <<'FAKE'
+#!/bin/sh
+printf 'Traceback (most recent call last):\n  SyntheticError: sabotaged interpreter\n' >&2
+exit 1
+FAKE
+chmod 755 "$FAKEBIN/python3"
+
+# BOTH SHAPES, spelled exactly as the suites spell them. The box is a closed one and the
+# transcript is clean, so with a working interpreter both of these PASS — which is what the
+# control run below is for.
+cat > "$WORK/checker.sh" <<'CHILD'
+set -u
+. "$1"
+assert_eq "box:closed" "" "$(printf '┏━━┓\n┃ x┃\n┗━━┛\n' | box_problems)"
+assert_not_contains "screen:no-escape-parameters" "1;32m" "$(printf 'hello\n' | render_pty)"
+CHILD
+
+# THE SENTINEL IS RENAMED ON THE WAY IN, and finding out why is worth the line: the child's
+# report QUOTES $CHECKER_DIED in its failure detail, and the assertions below are the same
+# assertions that now refuse any value carrying it -- so reading the child's output raw fails
+# every one of them on the strength of the thing it is reporting. Renaming it leaves the rest of
+# the detail, including which command died, exactly as the child wrote it.
+out="$(PATH="$FAKEBIN:$PATH" CS193V_RESULTS="$WORK/checker.tsv" CS193V_SUITE=checker \
+       bash "$WORK/checker.sh" "$TESTS_DIR/lib/assert.sh" 2>/dev/null \
+       | sed "s/$CHECKER_DIED/A-CHECKER-DIED-HERE/g")"
+assert_contains "checker:a-dead-box-checker-fails"  "FAIL  box:closed"                  "$out"
+assert_contains "checker:a-dead-pty-replayer-fails" "FAIL  screen:no-escape-parameters" "$out"
+# AND IT NAMES WHAT DIED, with the status. Without this the next person reads a bare
+# "expected: / actual:" mismatch and goes hunting for a box that was never drawn.
+assert_contains "checker:says-which-command-died"   "exit 1 from: python3"              "$out"
+
+# THE CONTROL, and it is not optional: a fixture whose box art is broken or whose transcript
+# is dirty would fail both assertions above for the wrong reason, and this pair of tests would
+# then pass forever no matter what assert.sh did.
+ctl="$(CS193V_RESULTS="$WORK/checker-ok.tsv" CS193V_SUITE=checker \
+       bash "$WORK/checker.sh" "$TESTS_DIR/lib/assert.sh" 2>/dev/null)"
+assert_not_contains "checker:the-fixture-is-green-with-a-real-interpreter" "FAIL" "$ctl"
+
+# ─── ...and a POISONED interpreter is caught at the door ───────────────────────
+# The other half, and the one no sentinel can see: an interpreter that exits 0 and prints
+# something else. run_checker cannot help — there is no failure to notice — so this is what
+# require_python3 is for, and why require_cmd is not enough on its own.
+POISONBIN="$WORK/fake-poison"
+mkdir -p "$POISONBIN"
+cat > "$POISONBIN/python3" <<'FAKE'
+#!/bin/sh
+echo SABOTAGEPOISON
+exit 0
+FAKE
+chmod 755 "$POISONBIN/python3"
+
+cat > "$WORK/poison.sh" <<'CHILD'
+set -u
+. "$1"
+require_python3
+pass "poison:got-past-the-guard"
+CHILD
+out="$(PATH="$POISONBIN:$PATH" CS193V_RESULTS="$WORK/poison.tsv" CS193V_SUITE=poison \
+       bash "$WORK/poison.sh" "$TESTS_DIR/lib/assert.sh" 2>&1; printf '[rc=%s]' "$?")"
+assert_contains     "python3:a-poisoned-interpreter-is-rejected" "FAIL  require:python3" "$out"
+assert_contains     "python3:the-guard-aborts-the-suite"         "[rc=1]"                "$out"
+assert_not_contains "python3:nothing-runs-after-the-guard"       "poison:got-past"       "$out"
+# And it lets a REAL interpreter through, or every suite that calls it is dead on arrival.
+out="$(CS193V_RESULTS="$WORK/python3-ok.tsv" CS193V_SUITE=poison \
+       bash "$WORK/poison.sh" "$TESTS_DIR/lib/assert.sh" 2>&1)"
+assert_contains "python3:a-real-interpreter-passes-the-guard" "PASS  poison:got-past-the-guard" "$out"
+
+# ─── assert_fail must not accept "could not run" as a failure ─────────────────
+# 125, 126 and 127 are not the command failing, they are the command never happening: podman
+# refusing before it started a container, a file that is not executable, a binary that is not
+# installed. Six `podman run --rm` sites in 50-image.sh are assert_fails, so a podman that
+# cannot start the throwaway made every one of them green with no container created — and
+# `srv_up` in 70-sighup.sh is a bare curl, which exits 127 if curl is missing.
+cat > "$WORK/exits.sh" <<'CHILD'
+set -u
+. "$1"
+assert_fail "rc1:is-a-real-failure"  sh -c 'exit 1'
+assert_fail "rc125:cannot-be-run"    sh -c 'exit 125'
+assert_fail "rc126:cannot-be-run"    sh -c 'exit 126'
+assert_fail "rc127:cannot-be-run"    sh -c 'exit 127'
+assert_fail "rc0:succeeded"          sh -c 'exit 0'
+CHILD
+out="$(CS193V_RESULTS="$WORK/exits.tsv" CS193V_SUITE=exits \
+       bash "$WORK/exits.sh" "$TESTS_DIR/lib/assert.sh" 2>&1)"
+assert_contains "assert-fail:an-ordinary-failure-still-passes" "PASS  rc1:is-a-real-failure" "$out"
+assert_contains "assert-fail:rejects-125" "FAIL  rc125:cannot-be-run" "$out"
+assert_contains "assert-fail:rejects-126" "FAIL  rc126:cannot-be-run" "$out"
+assert_contains "assert-fail:rejects-127" "FAIL  rc127:cannot-be-run" "$out"
+assert_contains "assert-fail:still-rejects-success" "FAIL  rc0:succeeded" "$out"
+
+# ─── a record carries its VALUE into the results file ─────────────────────────
+# WHY THIS IS THE HARNESS'S BUSINESS AND NOT COSMETIC. `record` is how every platform-dependent
+# number reaches a human, and the line it wrote was `REC<TAB>suite<TAB>name` with the value
+# dropped — so a diff of two runs' results could not see a record go from "46 of 46" to nothing.
+# That is exactly how #34 and #46 lied: a number that looked measured and was not.
+cat > "$WORK/rec.sh" <<'CHILD'
+set -u
+. "$1"
+record "rec:a-number"    "46 of 46"
+record "rec:two-lines"   "$(printf 'first\tsecond\nthird\n')"
+record "rec:nothing"     ""
+CHILD
+CS193V_RESULTS="$WORK/rec.tsv" CS193V_SUITE=rec \
+    bash "$WORK/rec.sh" "$TESTS_DIR/lib/assert.sh" >/dev/null 2>&1
+assert_eq "record:the-value-is-the-fourth-field" "46 of 46" \
+          "$(awk -F'\t' '$3 == "rec:a-number" { print $4 }' "$WORK/rec.tsv")"
+# ONE LINE PER RESULT is the property the whole file rests on, so newlines and tabs in a value
+# are flattened rather than carried through.
+assert_eq "record:a-multiline-value-stays-one-line" "first second third" \
+          "$(awk -F'\t' '$3 == "rec:two-lines" { print $4 }' "$WORK/rec.tsv")"
+assert_eq "record:the-file-is-still-one-line-per-result" "3" "$(wc -l < "$WORK/rec.tsv" | tr -d ' ')"
+# An EMPTY value is still four fields: "the value went away" has to be visible as an empty
+# field, which is the whole point of putting it on the wire.
+assert_eq "record:an-empty-value-is-still-a-field" "4" \
+          "$(awk -F'\t' '$3 == "rec:nothing" { print NF }' "$WORK/rec.tsv")"

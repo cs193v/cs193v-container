@@ -31,6 +31,9 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 else
     A_GRN=''; A_RED=''; A_YEL=''; A_DIM=''; A_OFF=''
 fi
+# A literal tab, so _emit can append an optional fourth field without paying a `printf`
+# subshell on every one of the eleven hundred assertions in a run.
+A_TAB=$(printf '\t')
 
 # The file every assertion appends to. run-tests.sh sets it; if a test file is run
 # directly (which is supported, and useful while writing one) fall back to a temp file.
@@ -54,8 +57,12 @@ fi
 # `exit` really does end the suite: no assertion in this suite is called from a subshell -- every
 # pass/fail is a statement, and the $( ) around them are values being handed IN. run-tests.sh
 # turns the non-zero exit into a failed run, so this cannot be swallowed by `|| true`.
-_emit() {                             # _emit STATUS NAME
-    printf '%s\t%s\t%s\n' "$1" "$CS193V_SUITE" "$2" >> "$CS193V_RESULTS" && return 0
+# THE VALUE IS A FOURTH FIELD when there is one, which today means every `record`. It used to be
+# dropped, so a diff of two runs' results could not see a record go from "46 of 46" to nothing --
+# and that is precisely how #34 and #46 lied, with a number that looked measured and was not.
+# run-tests.sh's count() anchors on `^STATUS\t`, so nothing downstream notices.
+_emit() {                             # _emit STATUS NAME [VALUE]
+    printf '%s\t%s\t%s\n' "$1" "$CS193V_SUITE" "$2${3+$A_TAB$3}" >> "$CS193V_RESULTS" && return 0
     printf '\n%sFATAL%s  cannot append to $CS193V_RESULTS (%s): results are being LOST.\n' \
            "$A_RED" "$A_OFF" "$CS193V_RESULTS" >&2
     printf '        %s\n' \
@@ -80,19 +87,74 @@ skip() { _emit SKIP "$1"; printf '  %sSKIP%s  %s %s\n' "$A_YEL" "$A_OFF" "$1" "$
 
 # For VERIFICATION.md's "record, do not assert" items — genuinely platform-dependent
 # values that a human needs to read, but which no fixed expectation would survive.
+# FLATTENED ONCE, for the file and the screen alike: the results file is one line per result and
+# every consumer of it splits on tabs, so a newline or a tab inside a recorded value would forge
+# a second result out of nothing.
 record() {
-    _emit REC "$1"
-    printf '  %sREC %s  %s = %s\n' "$A_DIM" "$A_OFF" "$1" "$(printf '%s' "${2:-}" | tr '\n' ' ')"
+    local v
+    v="$(printf '%s' "${2:-}" | tr '\n\t' '  ')"
+    _emit REC "$1" "$v"
+    printf '  %sREC %s  %s = %s\n' "$A_DIM" "$A_OFF" "$1" "$v"
+}
+
+# ─── a checker that COULD NOT RUN ──────────────────────────────────────────────
+# THE VACUOUS-GREEN THIS FILE HARD-FAILS ON, arriving through the checkers rather than through an
+# assertion. box_problems and render_pty below both pipe their input through `python3 -c`, and
+# both are read by assertions whose HAPPY answer is the empty string -- `assert_eq NAME ""
+# "$(... | box_problems)"` and `assert_not_contains NAME needle "$(... | render_pty)"`. An
+# interpreter that dies prints nothing, and nothing is the happy answer.
+#
+# MEASURED, NOT IMAGINED (#79). A fake python3 that printed a traceback and exited 1 left 26
+# assertions in the cheap lane passing with no checker having run: ten box_problems sites, ten
+# render_pty-fed negatives, and six more behind the two catalogue width lints, spread across
+# 20-messages.sh, 30-launcher-shim.sh and 35-setup-git-shim.sh. `require_cmd python3` guarded
+# three of those sites and caught none of it, because the sabotaged interpreter EXISTS and
+# `command -v` asks nothing else.
+#
+# SO THE FAILURE TRAVELS IN THE VALUE, not in a marker file. The two shim suites, which hold most
+# of the twenty-six, define no $TMP and run under `set -u`, so a marker written to "$TMP/..." would abort
+# the very `$( )` it was meant to protect and pass vacuously again. A sentinel in the value
+# survives `$( )`, survives a pipe from one checker into another, and reaches the negative
+# assertions -- which is the half no happy-side sentinel can reach.
+#
+# It is this project's own doctrine (10-static.sh: "EVERY DERIVED CHECK ANSWERS WITH A SENTINEL
+# WHEN IT IS HAPPY") read from the failing side.
+CHECKER_DIED='CS193V-CHECKER-DID-NOT-RUN'
+
+# ALWAYS EXITS 0, deliberately: the caller is a `$( )` whose value is about to be asserted on, and
+# the assertion is what should do the failing. Naming the command matters as much as the status --
+# `render_pty_mid | render_pty` is two checkers in one substitution.
+run_checker() {                       # run_checker CMD [ARGS...]
+    local rc
+    "$@"
+    rc=$?
+    [ "$rc" -eq 0 ] || printf '%s (exit %s from: %s)\n' "$CHECKER_DIED" "$rc" "$1"
+    return 0
+}
+
+# The first line of every assertion that compares strings, so no call site has to remember. It
+# covers the negative forms too, which are the ones that cannot be fixed any other way: there is
+# no happy-side sentinel that satisfies "the output does not contain X".
+_checker_ok() {                       # _checker_ok NAME [VALUE...]  -> 1, and FAILs, if one died
+    local v
+    for v in "${2-}" "${3-}"; do
+        case "$v" in
+            *"$CHECKER_DIED"*) fail "$1" "$v"; return 1 ;;
+        esac
+    done
+    return 0
 }
 
 # ─── assertions ────────────────────────────────────────────────────────────────
 assert_eq() {                         # assert_eq NAME EXPECTED ACTUAL
+    _checker_ok "$1" "$2" "$3" || return 0
     if [ "$2" = "$3" ]; then pass "$1"
     else fail "$1" "expected: $2
 actual:   $3"; fi
 }
 
 assert_ne() {                         # assert_ne NAME NOT_EXPECTED ACTUAL
+    _checker_ok "$1" "$2" "$3" || return 0
     if [ "$2" != "$3" ]; then pass "$1"
     else fail "$1" "expected anything but: $2"; fi
 }
@@ -100,6 +162,7 @@ assert_ne() {                         # assert_ne NAME NOT_EXPECTED ACTUAL
 # Literal substring, not a pattern — the thing being searched for is usually a path or a
 # flag full of regex metacharacters.
 assert_contains() {                   # assert_contains NAME NEEDLE HAYSTACK
+    _checker_ok "$1" "$2" "$3" || return 0
     case "$3" in
         *"$2"*) pass "$1" ;;
         *) fail "$1" "expected to contain: $2
@@ -108,6 +171,7 @@ actual:                $3" ;;
 }
 
 assert_not_contains() {               # assert_not_contains NAME NEEDLE HAYSTACK
+    _checker_ok "$1" "$2" "$3" || return 0
     case "$3" in
         *"$2"*) fail "$1" "expected NOT to contain: $2
 actual:                    $3" ;;
@@ -127,6 +191,7 @@ _flatten() {
 }
 
 assert_says() {                       # assert_says NAME PHRASE TEXT
+    _checker_ok "$1" "$2" "$3" || return 0
     local hay; hay="$(_flatten "$3")"
     case "$hay" in
         *"$2"*) pass "$1" ;;
@@ -136,6 +201,7 @@ flattened output:          $hay" ;;
 }
 
 assert_says_not() {                   # assert_says_not NAME PHRASE TEXT
+    _checker_ok "$1" "$2" "$3" || return 0
     local hay; hay="$(_flatten "$3")"
     case "$hay" in
         *"$2"*) fail "$1" "expected the output NOT to say: $2
@@ -195,12 +261,14 @@ assert_says_not_key() {               # assert_says_not_key NAME KEY TEXT [FILE]
 }
 
 assert_match() {                      # assert_match NAME ERE ACTUAL
+    _checker_ok "$1" "$2" "$3" || return 0
     if printf '%s\n' "$3" | grep -qE "$2"; then pass "$1"
     else fail "$1" "expected to match: /$2/
 actual:             $3"; fi
 }
 
 assert_not_match() {                  # assert_not_match NAME ERE ACTUAL
+    _checker_ok "$1" "$2" "$3" || return 0
     if printf '%s\n' "$3" | grep -qE "$2"; then
         fail "$1" "expected NOT to match: /$2/
 actual:                 $3"
@@ -215,10 +283,25 @@ assert_ok() {                         # assert_ok NAME CMD...
 $out"; fi
 }
 
-assert_fail() {                       # assert_fail NAME CMD...   (must exit non-zero)
+# 125, 126 AND 127 ARE NOT A FAILURE. They are the command never having happened: podman
+# refusing before it started a container, a file that is not executable, a binary that is not
+# installed. Six `podman run --rm` sites in 50-image.sh are assert_fails, so a podman that could
+# not start the throwaway made every one of them green with no container created -- and `srv_up`
+# in 70-sighup.sh is a bare curl, which exits 127 if curl is missing.
+#
+# MEASURED before narrowing the band, because the point is to keep the refusals this suite
+# deliberately provokes: `podman run` on a missing image is 125, and `podman exec` into a stopped
+# container -- which sighup:a-stopped-container-accepts-no-exec exists to provoke -- is 255.
+assert_fail() {                       # assert_fail NAME CMD...  (must exit non-zero, having RUN)
     local n="$1"; shift
-    local out
-    if out="$("$@" 2>&1)"; then fail "$n" "expected failure but it succeeded: $*
+    local out rc
+    out="$("$@" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "$n" "expected failure but it succeeded: $*
+$out"
+    elif [ "$rc" -ge 125 ] && [ "$rc" -le 127 ]; then
+        fail "$n" "exit $rc means the command could not be RUN, which is not the failure this
+asserts: $*
 $out"
     else pass "$n"; fi
 }
@@ -242,9 +325,12 @@ assert_exec()  {  [ -x "$2" ] && pass "$1" || fail "$1" "not executable: $2"; }
 # first box in this project that is not an error. See issue #21 for what it is checking and
 # why neither of the checks that came before it could.
 box_problems() {                      # box art on stdin -> one line per structural problem
-    python3 -c '
+    run_checker python3 -c '
 import sys
-lines = sys.stdin.read().splitlines()
+# DECODED THE WAY render_pty decodes, and for the same reason: this reads a pty transcript, a
+# stray byte in one is ordinary, and `sys.stdin.read()` raised UnicodeDecodeError on it -- which
+# left the caller holding the empty string and passing.
+lines = sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()
 # The box is everything from the lid to the floor. Leading indentation is part of it: the
 # installer indents its box by two columns and the launcher does not, and a body line that
 # disagrees with its own lid about that is just as broken as a missing wall.
@@ -297,7 +383,7 @@ for n, l in enumerate(box):
 # So rows stay ADDRESSABLE rather than append-only: the cursor is (row, col), and writing to
 # a row that has already been written overwrites it, which is what a terminal does.
 render_pty() {                        # raw transcript on stdin -> one repr()'d line per row
-    python3 -c '
+    run_checker python3 -c '
 import re, sys
 raw = sys.stdin.buffer.read().decode("utf-8", "replace")
 # Mark the sequences with meaning so they survive colour-stripping, then drop the rest. The
@@ -352,6 +438,26 @@ for r in rows:
 require_cmd() {                       # require_cmd CMD [HINT]
     command -v "$1" >/dev/null 2>&1 && return 0
     fail "require:$1" "$1 is not installed.${2:+ $2}"
+    exit 1
+}
+
+# python3 GETS ITS OWN DOOR, and require_cmd is deliberately left exactly as it is: it is shared
+# with podman, shellcheck, curl and script, and a smoke test for those belongs at their own doors.
+#
+# WHY A SMOKE TEST AT ALL. run_checker catches the interpreter that DIES; nothing in a `command
+# -v` catches the one that answers every program with the wrong thing, and #79's sabotage run
+# found its 26 vacuous passes with an interpreter that existed. Comparing output is the only
+# question a poisoned interpreter cannot pass, because it exits 0.
+#
+# CALL IT ABOVE THE FIRST PRODUCER, not beside the assertion that reads one: 20-messages.sh
+# called `require_cmd python3` 172 lines below the catalogue width lint that already needed it.
+require_python3() {
+    require_cmd python3 "Run: sudo apt install -y python3"
+    [ "$(python3 -c 'print(1)' 2>/dev/null)" = 1 ] && return 0
+    fail "require:python3" "python3 is on \$PATH but does not run a program:
+\`python3 -c 'print(1)'\` printed something other than 1.
+Every box-art and pty-replay check here is measured with it, and several read the empty string as
+their happy answer -- so carrying on would pass them without measuring anything."
     exit 1
 }
 

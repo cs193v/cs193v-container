@@ -18,6 +18,15 @@ set -u
 
 cd "$REPO" || exit 1
 
+# ABOVE THE FIRST CHECK THAT USES IT, which here is syntax:shortlink four lines down. Twelve
+# checks in this file derive an answer from python3, and two of them -- syntax:shortlink and
+# claude:managed-settings-is-valid-json -- are assert_oks, so their whole verdict IS the
+# interpreter's exit status. Measured (#79): an interpreter that prints something else and exits 0
+# passes both while compiling and parsing nothing. The other ten answer with a sentinel and fail
+# on it, which is why the file cannot go green either way -- but a pass that measured nothing is
+# still a pass that measured nothing.
+require_python3
+
 # ─── syntax ────────────────────────────────────────────────────────────────────
 assert_ok  "syntax:cs193v"            bash -n cs193v
 assert_ok  "syntax:install"           bash -n $PRIVATE/install-cs193v.sh
@@ -1087,13 +1096,23 @@ assert_ok  "claude:managed-settings-is-valid-json" \
 #
 # Write(...) and Glob(...) path rules are accepted and then silently ignored with a
 # startup warning. A security control that does nothing is worse than none.
+#
+# INDEXED, NOT `.get`, AND AN EMPTY LIST IS NOT "ok" -- both halves measured (#79). This read
+# `d.get("permissions", {}).get("deny", [])`, so "every rule in the list is well formed" was
+# satisfied by there being no list: with `"deny": []` injected -- Claude Code granted unrestricted
+# read of every credential store in the image -- this printed `rules-ok` and passed, and so did
+# it with `permissions` or `deny` renamed. Indexing turns a missing key into a traceback, which
+# the guard idiom on this statement reports; emptiness has to be asked about separately, because
+# an empty list is perfectly well formed and means the opposite of what this assertion claims.
 bad_rules="$(python3 -c '
 import json, sys
-d = json.load(open(sys.argv[1]))
-bad = [x for x in d.get("permissions", {}).get("deny", [])
-       if not x.startswith(("Read(", "Edit("))]
-print("BAD:" + ",".join(bad) if bad else "rules-ok")
-' "$managed")"
+rules = json.load(open(sys.argv[1]))["permissions"]["deny"]
+bad = [x for x in rules if not x.startswith(("Read(", "Edit("))]
+if not rules:
+    print("NO-DENY-RULES: the deny list is empty, so this document denies nothing")
+else:
+    print("BAD:" + ",".join(bad) if bad else "rules-ok")
+' "$managed" 2>&1)" || bad_rules="the check itself failed: $bad_rules"
 assert_eq  "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" "$bad_rules"
 
 # requiredMinimumVersion/requiredMaximumVersion cause a hard startup exit, which combined
@@ -1267,8 +1286,20 @@ assert_ok "codex:containerfile-installs-the-managed-policy" \
 # Claude Code's own config and transcript home, which it legitimately reads.
 CRED_STORES=".claude/.credentials.json .config/gh .codex .local/share/com.vercel.cli"
 
+# THE RULES, NOT THE DOCUMENT'S TEXT, and this is the hazard the comment above
+# claude:no-requiredMinimumVersion warns about, one screen up, unfixed until #79. This was
+# `assert_contains "claude:denies-$store" "$store" "$(cat "$managed")"` -- a text search over the
+# whole file, and the file's own $comment prose names three of these four paths. Measured: with
+# `"deny": []` injected, three of the four passed on the strength of the comment that documents
+# the rules, and only com.vercel.cli failed, because the prose happens to say "the Vercel
+# directory" rather than the path. Parsed and joined, there is nothing but rules to match against.
+deny_rules="$(python3 -c '
+import json, sys
+print("\n".join(json.load(open(sys.argv[1]))["permissions"]["deny"]))
+' "$managed" 2>&1)" || deny_rules="the check itself failed: $deny_rules"
+
 for store in $CRED_STORES; do
-    assert_contains "claude:denies-$store" "$store" "$(cat "$managed")"
+    assert_contains "claude:denies-$store" "$store" "$deny_rules"
     assert_contains "notes:names-$store"   "$store" "$(cat $NOTES)"
 done
 

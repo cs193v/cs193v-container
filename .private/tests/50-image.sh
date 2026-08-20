@@ -867,12 +867,25 @@ assert_ok "claude:managed-settings-present" sh -c "$VT_RUN --rm --entrypoint sh 
 assert_ok "claude:CLAUDE.md-present"        sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/claude-code/CLAUDE.md'"
 assert_ok "claude:managed-settings-parses-in-the-image" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import json;json.load(open(1 and \\\"/etc/claude-code/managed-settings.json\\\"))\"'"
+# INDEXED, NOT `.get`, AND AN EMPTY LIST IS NOT "ok" -- the same two corrections 10-static.sh's
+# sibling check needed, and they matter MORE here: that file has an UNREADABLE guard and a
+# forbidden-key check beside it, and this tier has neither, so this is the only assertion the
+# image's copy of the policy has to get past.
+#
+# MEASURED THROUGH THIS IMAGE, not inferred from the static tier (#79). The three mutants were
+# bind-mounted over /etc/claude-code/managed-settings.json in a throwaway -- the technique
+# codex:the-managed-policy-is-really-read already uses a few lines up -- and the old form printed
+# `rules-ok` for all three: an empty deny list, a renamed `deny`, and a renamed `permissions`.
+# An empty list means Claude Code may read every credential store in the image.
+#
+# R() folds stderr into its answer, so a missing key arrives as a traceback rather than as
+# silence, and this assertion fails on it. That is the guard idiom, paid for by the runner.
 assert_eq "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" \
     "$(R 'python3 -c "
 import json
-d = json.load(open(\"/etc/claude-code/managed-settings.json\"))
-bad = [x for x in d.get(\"permissions\", {}).get(\"deny\", []) if not x.startswith((\"Read(\", \"Edit(\"))]
-print(\"BAD:\" + str(bad) if bad else \"rules-ok\")"')"
+rules = json.load(open(\"/etc/claude-code/managed-settings.json\"))[\"permissions\"][\"deny\"]
+bad = [x for x in rules if not x.startswith((\"Read(\", \"Edit(\"))]
+print(\"NO-DENY-RULES\" if not rules else (\"BAD:\" + str(bad) if bad else \"rules-ok\"))"')"
 # World-readable, since Claude Code runs as the student and must be able to read it.
 assert_eq "claude:policy-is-readable-by-student" "ok" \
     "$(R 'test -r /etc/claude-code/managed-settings.json && test -r /etc/claude-code/CLAUDE.md && echo ok')"

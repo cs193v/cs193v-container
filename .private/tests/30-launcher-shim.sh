@@ -961,10 +961,15 @@ assert_says "build:success-is-friendly"      "Happy vibecoding"      "$out"
 # Drawn in the same box everything else is drawn in, and closed -- see 20-messages.sh, which
 # owns box(). Asserted here too because this is the FIRST non-error thing ever put in one.
 #
-# require_cmd, and no `|| true` on the call: box_problems measures display columns with
-# python3, and swallowing its failure would turn "the checker could not run" into a pass,
-# which is the vacuous-green this project hard-fails on elsewhere for the same reason.
-require_cmd python3
+# THIS COMMENT USED TO CLAIM require_cmd COVERED IT, and the claim was the defect (#79). It said
+# that swallowing box_problems' failure "would turn the checker could not run into a pass", which
+# is true, and then guarded it with `command -v` -- which is satisfied by an interpreter that
+# exists and cannot run a program. Measured: with a sabotaged python3 first on $PATH the guard
+# passed and this assertion went vacuous anyway.
+#
+# What actually covers it is box_problems answering with $CHECKER_DIED, which every assertion
+# below refuses. require_python3 is the other half: it runs a program rather than looking one up.
+require_python3
 probs="$(printf '%s\n' "$out" | box_problems)"
 if [ -z "$probs" ]; then
     pass "build:success-box-is-closed"
@@ -1456,7 +1461,7 @@ assert_not_match "build-failed:no-spinner-frame-left-behind" '[⣾⣽⣻⢿⡿�
 TAILBOX_LID='┏━━━━'
 
 render_pty_mid() {                    # transcript on stdin -> the prefix through the last box frame
-    python3 -c '
+    run_checker python3 -c '
 import sys
 raw = sys.stdin.buffer.read()
 mark = b"\x1b[J"

@@ -17,6 +17,14 @@ set -u
 
 cd "$REPO" || exit 1
 
+# ABOVE EVERY PRODUCER, which is the whole point of where this line sits. Four checks below
+# measure display columns with python3 -- the catalogue width lint at the top, the box width
+# lint, setup-git's boxed messages and box_problems -- and this used to be `require_cmd python3`
+# 172 lines below the first of them, so a broken interpreter was found only after the earliest
+# check that needed it had already answered. See require_python3 in lib/assert.sh for why
+# `command -v` is not the question.
+require_python3
+
 TMP="$(new_tmpdir)"
 trap 'rm -rf "$TMP"; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
@@ -124,7 +132,12 @@ assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')
 # chosen at runtime and this suite has no container: the widest port shortlink can bind (65535)
 # and the longest slug anything mints (`magic-token-link`, setup-git's). A caller that grows a
 # longer slug than that has to come back here, which is the point.
-sgwide="$(python3 - "$SGM" "$SGS" <<'WIDE'
+# THROUGH run_checker, like every other producer feeding an empty-is-happy assertion. This is
+# one of the five #79's differential still found vacuous after the shared checkers were fixed:
+# require_python3 at the top of this file covers the interpreter being broken when the suite
+# STARTS, and nothing covered this program dying on its own. The heredoc is stdin, which the
+# wrapper passes straight through.
+sgwide="$(run_checker python3 - "$SGM" "$SGS" <<'WIDE'
 import re, sys
 cat, script = sys.argv[1], sys.argv[2]
 src = open(script).read()
@@ -295,8 +308,7 @@ assert_contains "msg:unknown-key-says-so" "missing message" "$(msg no.such.key 2
 # not multibyte-aware: `length()` on the box border returns 207 rather than 69, because
 # every ━ is three bytes. An earlier version of this check used awk and passed vacuously.
 # The box borders and the messages both contain plenty of non-ASCII, so python3 does the
-# measuring.
-require_cmd python3
+# measuring. require_python3 is at the top of the file, above the first check that needs it.
 python3 - "$REPO" "$PRIVATE" <<'PY' > "$TMP/width"
 import re, sys, os
 repo, private = sys.argv[1], sys.argv[2]
@@ -357,7 +369,18 @@ for line in open(os.path.join(private, "messages.txt")).read().splitlines():
         # Not a failure — nothing draws a border around these. Recorded because an
         # 80-column terminal still soft-wraps them, which is a wording call, not a bug.
         print("WIDE:%s: %d cols" % (key, len(line)))
+# THE LAST LINE THIS PROGRAM PRINTS, and it is the only thing standing between the three checks
+# below and a vacuous green. Every one of them reads this file for a line that is there only when
+# something is WRONG -- `grep '^LONG:'`, `grep -c '^WIDE:'` -- so a lint that stopped early leaves
+# the happy answer behind. Measured (#79): a `raise SystemExit` injected immediately after the
+# BOXED line above left box:no-message-line-overflows passing and the whole suite reporting 0
+# fail, with not one catalogue line having been measured.
+#
+# No interpreter poison can forge it either, which is why it is this rather than a marker file:
+# an interpreter that prints something else prints something that is not WIDTHS-OK.
+print("WIDTHS-OK")
 PY
+assert_contains "box:the-width-lint-ran-to-completion" "WIDTHS-OK" "$(cat "$TMP/width")"
 BOXW="$(sed -n 's/^BOX:\(.*\)/\1/p' "$TMP/width")"
 if [ "$BOXW" != none ] && [ "${BOXW:-0}" -gt 20 ]; then
     pass "box:width-detected"
@@ -394,7 +417,10 @@ for k in $( { grep -oE '(celebrate|box) [^|]*msg [a-z0-9._-]+' "$SGS"
     # rather than spills, so an over-wide line is not a broken box any more — it is a line whose
     # breaks nobody chose, in the message a stuck student is reading. Measured in display columns
     # by python3, because mawk would score a — at 3× and pass vacuously.
-    wide="$(printf '%s\n' "$body" | python3 -c '
+    # run_checker for the reason the catalogue lint above carries it: `assert_eq NAME ""` is
+    # satisfied by a checker that printed nothing at all. These four were the rest of #79's
+    # residue.
+    wide="$(printf '%s\n' "$body" | run_checker python3 -c '
 import sys
 lim = int(sys.argv[1]) - 4
 for line in sys.stdin.read().splitlines():
@@ -435,8 +461,7 @@ record "box:unboxed-lines-over-80-cols" "${wide:-0} (informational; these are no
 # Widths in DISPLAY COLUMNS via python3, for the reason recorded above the width lint —
 # mawk's length() would score the border at 3× and pass vacuously. The checker itself is
 # box_problems() in lib/assert.sh, shared since the build's success box gave a second suite
-# a box to check.
-require_cmd python3
+# a box to check, and it answers with $CHECKER_DIED rather than with silence when it cannot run.
 
 # There must be exactly one place that draws it. Before the fix there were four — die() in
 # each script, plus the Intel-Mac refusal typed out as a heredoc, plus the launcher's own
@@ -480,9 +505,14 @@ else
 fi
 assert_eq "box:both-copies-identical" "" \
           "$(diff "$TMP/box.cs193v-ui.sh" "$TMP/box.install-cs193v.sh" 2>&1)"
-assert_eq "box:both-widths-identical" \
-          "$(grep -c '^BOX_W=71$' "$PRIVATE/files/cs193v-ui.sh")" \
-          "$(grep -c '^BOX_W=71$' "$PRIVATE/install-cs193v.sh")"
+# ONE APIECE, not "the two counts agree". This compared `grep -c '^BOX_W=71$'` in one file
+# against the same count in the other, and 0 == 0 is agreement: measured (#79), renaming BOX_W in
+# BOTH files leaves this passing. What each side has to do is declare the width, so that is what
+# is asked -- of each of them, separately.
+for widthsrc in "ui:$PRIVATE/files/cs193v-ui.sh" "installer:$PRIVATE/install-cs193v.sh"; do
+    who="${widthsrc%%:*}"; f="${widthsrc#*:}"
+    assert_eq "box:$who-declares-the-same-width" "1" "$(grep -c '^BOX_W=71$' "$f")"
+done
 # And the launcher must not have kept a copy of its own on the way out, which a botched
 # extraction would leave behind: two definitions in one file, the second silently winning.
 assert_eq "box:launcher-has-no-copy" "0" "$(grep -c '^box() {$' "$REPO/cs193v")"
