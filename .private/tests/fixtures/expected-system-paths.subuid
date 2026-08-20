@@ -1,0 +1,25 @@
+# Every path outside the course tree that install-cs193v.sh changes on a machine whose only
+# missing piece is a subuid range. Read this list; it is the blast radius of a real install.
+#
+#   /etc/subuid, /etc/subgid   what the installer set out to change
+#   /etc/subuid-, /etc/subgid- usermod's own backups of them
+#   /etc/passwd, /etc/shadow   usermod rewrites the whole shadow suite, not just the ranges
+#   /etc/.pwd.lock             its lock file
+#   /work                      the read-only mount this harness adds, not the installer
+#   the bare directories       mtimes, from writing the files above
+#
+# Lines beginning # are comments. Anything appearing in `podman diff` and NOT here fails the
+# run, and anything here that stops appearing fails it too -- so this is a claim in both
+# directions rather than a filter that quietly grows.
+A /work
+C /etc
+C /etc/.pwd.lock
+C /etc/passwd
+C /etc/shadow
+C /etc/subgid
+C /etc/subgid-
+C /etc/subuid
+C /etc/subuid-
+C /home
+C /home/student
+C /tmp
