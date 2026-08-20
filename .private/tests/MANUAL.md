@@ -551,6 +551,42 @@ Also worth recording per terminal: a selection made by the terminal returns a so
 **with** a newline at the wrap, because the terminal copies what it drew. tmux's own copy used to
 return one unbroken line. Nothing can be done about that from inside the container.
 
+### §7.11 — Claude Code scrolls itself, and does not claim a copy it cannot deliver (#77)
+
+The only part of #77 that cannot be automated, and it needs a **logged-in** session: everything
+before Claude Code's REPL — sign-in, and the "Accessing workspace:" trust prompt — renders on the
+main screen no matter which renderer is configured, so a probe run against a fresh container
+measures the wrong thing. That confound cost two false readings while #77 was being diagnosed.
+
+`./cs193v`, then in a tab: `claude`, `/login` if needed, and ask it for 100 lines of output.
+
+| | Expect |
+|---|---|
+| the wheel, over Claude Code | **Claude Code's** conversation scrolls |
+| the amber "SCROLLED BACK" banner | never appears while Claude Code is in front |
+| Claude Code's own drawing | fills the pane, not a third of it |
+| a plain drag inside Claude Code | selects nothing, and **no "copied … to tmux buffer" toast** |
+| `SHIFT`+drag inside Claude Code | the terminal's own selection, exactly as at a shell prompt |
+| clicking a link or a button inside Claude Code | still works — only motion reporting is off |
+| resize the window mid-session | no flicker, no stale layout |
+
+The toast is the one to watch for. `copyOnSelect` defaults to **true** in the fullscreen renderer
+and writes over OSC 52; measured, the message reads *"copied N chars to tmux buffer · paste with
+&lt;prefix&gt;p"*, and this configuration has no prefix key. `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` in the
+Containerfile is what suppresses it. **If that toast ever comes back, the variable has stopped
+being honoured** — it is internal and undocumented, Claude Code auto-updates in this image, and
+nothing in the automated tiers can see it (there is no non-interactive readout of the renderer or
+the mouse mode: `claude config` is not a subcommand and `claude doctor` reports installation health
+only).
+
+Then the same wheel test with `codex`, where the expectation is the **opposite** and that is not a
+bug: tmux scrolls, the banner does appear, and codex uses part of the pane. Its TUI is inline by
+design at 0.148 — measured, `tui.alternate_screen` governs only the transcript overlay — so its
+output really is in the 50,000-line scrollback and copy mode is the right way to read it.
+
+**Known, filed separately as #83:** `CTRL+T` is bound to "new tab", so Codex's own *"ctrl + t to
+view transcript"* never reaches it. Do not report that as a failure of this section.
+
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other. Confirm a pre-existing distro
