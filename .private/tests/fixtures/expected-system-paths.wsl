@@ -1,0 +1,18 @@
+# Everything outside the course tree that changes on a WSL-looking machine whose only
+# missing piece is systemd in wsl.conf.
+#
+#   /etc/wsl.conf   the change -- but see below, this fixture's run.sh arranges the starting
+#                   state at boot, so the path appears whichever way the installer went and
+#                   it is the CONTENT report that distinguishes the four states
+#   /work           the read-only mount this harness adds, not the installer
+#   the bare dirs   mtimes
+#
+# Notably ABSENT and worth noticing: no /etc/passwd, no /etc/shadow, no /etc/subuid. Unlike
+# the subuid fixture, nothing here goes near the shadow suite -- setup_wslconf is two file
+# writes and touches nothing else, which is the claim.
+A /etc/wsl.conf
+A /work
+C /etc
+C /home
+C /home/student
+C /tmp
