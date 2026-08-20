@@ -37,8 +37,8 @@ set -u
 #  gathered in one place. Everything below this block is logic.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-REPO_OWNER="CHANGEME"                     # e.g. htiek
-REPO_NAME="cs193v"                        # the public course container repo
+REPO_OWNER="cs193v"
+REPO_NAME="cs193v-container"
 REPO_BRANCH="main"
 
 MIN_PODMAN="5.7.0"
