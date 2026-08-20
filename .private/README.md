@@ -205,16 +205,41 @@ prints `http://localhost:PORT/magic-link` — or `/magic-token-link` when `setup
 that and the `$BROWSER` stub go through it.
 Two things about it are worth knowing before a student's report makes no sense.
 
-**A caller that captures the stub's output never shows the student anything, and `claude`
-`/login` is one.** `open-url` prints its box to stdout, which was fine while every caller
-inherited stdio. Claude Code (measured on 2.1.225) consults `$BROWSER` correctly, runs the stub,
-and captures its stdout — so the box is discarded and the student sees Claude's own long URL
-instead. The stub really did run: `pgrep -af '[s]hortlink'` in the container shows the server
-holding a forwarded port. This is a known limitation rather than a mystery, and the fix is a
-one-line change to write to `/dev/tty` (verified to escape the pipe) — held back deliberately,
-because that box would land inside a full-screen TUI that repaints over it. Whether `gh` and
-`vercel` capture too is not yet established. The lesson worth keeping: a `$BROWSER` handler's
-contract is *open a browser*, so its stdout is legitimately noise to whoever called it.
+**The link is shown in a tmux popup, and stdout is now the fallback rather than the plan.**
+`open-url` used to print its box to stdout, which was fine while every caller inherited stdio.
+Claude Code (measured on 2.1.225) consults `$BROWSER` correctly, runs the stub, and *captures
+its stdout* — so the box went to a pipe nobody read and the student saw Claude's own long URL
+instead. That was issue #85, and the lesson is worth keeping: a `$BROWSER` handler's contract is
+*open a browser*, so its stdout is legitimately noise to whoever called it, and this stub cannot
+rely on being read.
+
+Writing to `/dev/tty` does escape the pipe — verified — and was still no good, because the box
+lands inside a full-screen TUI that repaints over it. What survives is a tmux popup: tmux draws
+one *over* the panes and keeps drawing it, and does not update panes while one is present. Both
+measured. So `files/cs193v-linkbox` draws the box, `open-url` raises it with `display-popup`, and
+stdout is printed only in the two cases where a popup is impossible or wrong — no tmux at all
+(`podman exec`, a plain ssh, a bare `podman run`), or `shortlink` exiting 3 because no forwarded
+port was free. That second one is not squeamishness: `box()` breaks an unbreakable token rather
+than breaching its own wall, so a real OAuth URL splits across four rows inside the box — issue
+#67 reappearing inside the thing built to cure it.
+
+Three details that will not be obvious from the code, each of which cost a debugging round:
+
+- **`display-popup` blocks its caller.** So `open-url` detaches with `setsid`, the same shape as
+  `shortlink`'s own `detach()`. A foreground call would hold `$BROWSER` open for the full fifteen
+  minutes, and Claude Code would not reach its "paste the code" prompt until the student
+  dismissed a box telling them to go and fetch that code.
+- **The box closes when the link is actually clicked**, because `shortlink --served-file` touches
+  a path once it has served the redirect and the box polls for it. Only past the 404 branch: a
+  browser opening one URL also asks for `/favicon.ico`, and counting that would take the box down
+  before the student had read it.
+- **Ctrl+C is not handled anywhere, and that is the implementation.** tmux forwards it into the
+  popup as a real SIGINT, the default disposition kills the renderer, and `-E` closes the popup on
+  a non-zero exit — so the box goes and the student's *second* Ctrl+C reaches their program as it
+  always would. Adding a `trap ... INT` would break that; the tmux harness asserts it.
+
+Whether `gh` and `vercel` capture stdout too is still not established, and no longer matters
+much: in tmux they all get the popup regardless.
 
 **It can hand out a link the browser cannot reach, and it cannot tell.** The port has to be free
 *inside* the container and forwarded *on the host*, and only the second is invisible from in there:

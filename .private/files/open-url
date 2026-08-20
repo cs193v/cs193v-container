@@ -11,36 +11,98 @@
 # forwards to the host browser. We still do not rebuild that channel — nothing here reaches
 # the browser on the student's computer, and nothing here can.
 #
-# WHAT DID CHANGE, and it is worth being precise about because the comment that used to sit
-# here said the opposite. Printing the URL was called "the honest degradation", and it was —
-# but the honesty was in not pretending to reach the host's browser, not in the length of
-# the line. An OAuth authorize URL is longer than GitHub's 157-character token link, and at
-# 80 columns those wrap; tmux hands text selection back to the terminal (see tmux.conf at
-# `mouse on`), the terminal selects what it has DRAWN, and a wrapped URL therefore comes
-# back with a newline in the middle of it. That is issue #67, and it costs a student a
-# working login.
+# THE URL GOES THROUGH `shortlink`, which serves a redirect on one of the forwarded ports and
+# hands back something around 32 characters. An OAuth authorize URL is longer than GitHub's
+# 157-character token link, and at 80 columns those wrap; tmux hands text selection back to the
+# terminal (see tmux.conf at `mouse on`), the terminal selects what it has DRAWN, and a wrapped
+# URL therefore comes back with a newline in the middle of it. That is issue #67, and it costs a
+# student a working login. The direction is still browser-to-container — the student's own
+# browser asking the container for a redirect over the ssh tunnel that `cs193v` already raises —
+# rather than container-to-browser. Nothing new is exposed: any process in here could already
+# bind those ports and serve that browser anything at all.
 #
-# So the URL goes through `shortlink`, which serves a redirect on one of the forwarded ports
-# and hands back something around 32 characters. The direction is still browser-to-container
-# — the student's own browser asking the container for a redirect over the ssh tunnel that
-# `cs193v` already raises — rather than container-to-browser. Nothing new is exposed: any
-# process in here could already bind those ports and serve that browser anything at all.
+# ─── AND THEN NOBODY SAW IT, WHICH IS ISSUE #85 ────────────────────────────────
 #
-# NO BRANCH ON WHETHER IT WORKED, beyond the one line of prose below: shortlink prints its
-# argument unchanged and exits 3 when no port is forwarded, so the fallback is the URL this
-# script has always printed.
+# Printing the box below was right while every caller inherited stdio. Claude Code consults
+# $BROWSER correctly, runs this stub, and CAPTURES ITS STDOUT — so the box went to a pipe
+# nobody read and the student saw Claude's own 400-character URL instead. That is not a bug in
+# Claude Code: a $BROWSER handler's contract is *open a browser*, so its stdout is legitimately
+# noise to whoever called it. The lesson is that this stub cannot rely on being read.
+#
+# Writing to /dev/tty escapes the pipe — verified — and is still no good: it lands inside a
+# full-screen TUI which repaints over it a quarter of a second later. The one surface that
+# survives is a tmux popup, which tmux draws OVER the panes and keeps drawing. So when there is
+# a tmux to ask, the link goes in a popup (see cs193v-linkbox) and NOT to stdout, and the box
+# below is what a caller gets when there is not.
+#
+# TWO CASES STILL PRINT, and both are the old behaviour unchanged:
+#
+#   * NO TMUX. podman exec, a plain ssh, a bare `podman run` — nowhere to put a popup. Printing
+#     is all there is, and it is what this always did.
+#   * SHORTENING FAILED (exit 3: no forwarded port was free). The long URL must not go in the
+#     box, because box() breaks an unbreakable token rather than breaching its own wall — a real
+#     OAuth URL splits across four rows — which would recreate #67 inside the thing meant to
+#     cure it. And with no server there is nothing to report a click either.
 #
 # Limitation worth knowing: this only helps tools that honour $BROWSER. Anything calling
 # xdg-open directly is unaffected unless we also ship a command by that name.
+
+# HOW LONG THE LINK LIVES, and the box counts down to this same moment — so the two numbers
+# have to be one number. Passed to shortlink explicitly rather than left to its default,
+# because cs193v-linkbox has to draw the countdown and therefore needs the value too, and a
+# value declared in one file and displayed by another is a value that drifts.
+# 10-static.sh :: linkbox:the-two-timeouts-agree is what notices if it does.
+LINK_TIMEOUT=900
 
 if [ "$#" -eq 0 ]; then
     echo "usage: open-url <url>" >&2
     exit 2
 fi
 
-url="$(shortlink "$1" 2>/dev/null)" || short=no
+# The two files shortlink reports through. A directory rather than two loose paths so one
+# `rmdir` can tidy the pair, and mktemp -d rather than a fixed name because two tools can want
+# a browser at the same moment.
+statedir="$(mktemp -d 2>/dev/null)" || statedir=""
+
+if [ -n "$statedir" ]; then
+    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" \
+                          --pidfile "$statedir/pid" \
+                          --served-file "$statedir/served" 2>/dev/null)"
+    rc=$?
+else
+    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" 2>/dev/null)"
+    rc=$?
+fi
 [ -n "$url" ] || url="$1"
-[ "$url" = "$1" ] && short=no
+[ "$url" = "$1" ] && rc=3          # shortlink degraded: it printed its argument back
+
+# ─── the popup, when there is a tmux to put it in ──────────────────────────────
+if [ "$rc" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux > /dev/null 2>&1; then
+    rows="$(cs193v-linkbox --url "$url" --expires-in "$LINK_TIMEOUT" --rows 2>/dev/null)"
+    case "$rows" in ''|*[!0-9]*) rows=10 ;; esac
+
+    # -B because cs193v-linkbox draws its own border, and -s so that a bare reset inside the
+    # box lands on the popup's background rather than the terminal's.
+    #
+    # DETACHED, AND NOT AS A PRECAUTION. `display-popup` BLOCKS its caller until the popup
+    # closes — measured — so a foreground call here would hold $BROWSER open for the whole
+    # fifteen minutes and Claude Code would not reach its "paste the code" prompt until the
+    # student dismissed a box telling them to go and get that code. setsid rather than a bare
+    # `&` so the popup survives this script exiting and takes no SIGHUP with it, the same shape
+    # shortlink's own detach() uses.
+    setsid tmux display-popup -B -E -w 71 -h "$rows" \
+        -s 'fg=#F5F2E1,bg=#15158C' \
+        ${TMUX_PANE:+-t "$TMUX_PANE"} \
+        "cs193v-linkbox --url '$url' --expires-in $LINK_TIMEOUT \
+                        --pidfile '$statedir/pid' --served-file '$statedir/served'" \
+        < /dev/null > /dev/null 2>&1 &
+    exit 0
+fi
+
+# ─── otherwise, the box this always printed ────────────────────────────────────
+# Nothing owns $statedir now: no popup is going to watch those files, and shortlink removes its
+# own on the way out. rmdir rather than rm -r, so this can only ever remove an empty directory.
+[ -n "$statedir" ] && rmdir "$statedir" 2>/dev/null
 
 printf '\n'
 printf '  ┌─────────────────────────────────────────────────────────────────┐\n'
@@ -48,7 +110,7 @@ printf '  │  Open this URL in your browser:                                 �
 printf '  └─────────────────────────────────────────────────────────────────┘\n'
 printf '\n    %s\n\n' "$url"
 printf '  (You are inside the CS193V container, which has no browser of its own.\n'
-if [ "${short:-yes}" = yes ]; then
+if [ "$rc" -eq 0 ]; then
     printf '   Click the link above, or type it into the browser on your own computer.\n'
     printf '   It is served by this container and stops working after 15 minutes.)\n\n'
 else

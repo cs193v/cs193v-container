@@ -24,6 +24,9 @@ assert_ok  "syntax:install"           bash -n $PRIVATE/install-cs193v.sh
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
+# bash, not sh, and deliberately: the link box needs $SECONDS for a countdown that a
+# keystroke cannot stall, and `read -rsn1 -t` to poll for one. Neither is POSIX.
+assert_ok  "syntax:linkbox"           bash -n $PRIVATE/files/cs193v-linkbox
 # THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS, and `compile()` rather than py_compile for the
 # reason the Containerfile records: py_compile would drop a .pyc beside it.
 assert_ok  "syntax:shortlink"         python3 -c \
@@ -1343,10 +1346,29 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
                                 $PRIVATE/files/man
+# -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
+# inside the image. shellcheck reports the unresolvable source at info level, which
+# --severity=warning drops, so this stays quiet without hiding a real finding.
+assert_ok  "shellcheck:linkbox" shellcheck -x --severity=warning \
+                                $PRIVATE/files/cs193v-linkbox
 # files/shortlink is deliberately NOT in that list: it is python3, and shellcheck asked to read it
 # reports a syntax error on the first line it does not understand. Its check is the compile() above.
 assert_match "shortlink:is-python-not-shell" "^#!/usr/bin/env python3$" \
              "$(head -1 $PRIVATE/files/shortlink)"
+
+# THE BOX COUNTS DOWN TO THE MOMENT THE SERVER GIVES UP, so the two numbers have to be the
+# same one. open-url passes --timeout explicitly instead of letting shortlink default,
+# because the renderer has to draw that countdown and therefore needs the value too --
+# and a value in one file displayed by another is a value that drifts. This is the check
+# that notices. Both are plain literals, so it is a grep.
+sl_timeout="$(sed -n 's/^DEFAULT_TIMEOUT = \([0-9][0-9]*\)$/\1/p' $PRIVATE/files/shortlink)"
+ou_timeout="$(sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' $PRIVATE/files/open-url)"
+# Asserted to BE a number first. Without this the comparison below passes vacuously the
+# moment either declaration is renamed -- the empty string equals the empty string, and the
+# check reports green having measured nothing. Same family as issue #79.
+assert_match "linkbox:shortlink-declares-a-timeout" "^[0-9]+$" "$sl_timeout"
+assert_match "linkbox:open-url-declares-a-timeout"  "^[0-9]+$" "$ou_timeout"
+assert_eq    "linkbox:the-two-timeouts-agree" "$sl_timeout" "$ou_timeout"
 # tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
 # meant to stay diffable against it, so local style fixes would cost more than they buy.
 # Its host-side driver is ours and is checked.

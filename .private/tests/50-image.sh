@@ -83,7 +83,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | tr '\n' ' ')"
@@ -428,6 +428,40 @@ assert_contains "shortlink:pidfile-is-removed"      "pidfile=removed" "$out"
 # waiting out the real 900s default.
 out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
 assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
+
+# ...and the pidfile goes with it, which is what makes its ABSENCE a usable "the link is dead"
+# signal rather than only a kill handle. open-url's popup polls for exactly this (issue #85):
+# a box counting down against a server that already gave up would be advertising a dead link.
+out="$(sl 3000-3002 '/usr/local/bin/shortlink https://example.com/a --timeout 1 --pidfile /tmp/t.pid token > /dev/null; sleep 3; test -e /tmp/t.pid && echo pidfile=left || echo pidfile=removed')"
+assert_contains "shortlink:timeout-removes-the-pidfile" "pidfile=removed" "$out"
+
+# ─── --served-file, the "they clicked it" signal  (issue #85) ──────────────────
+# open-url puts a box on screen naming the link and needs to take it down again the moment the
+# student actually follows it. The server is the only thing that knows: it is what serves the
+# redirect. So it touches a file, and the box watches for it.
+#
+# WHY THE FLAG IS NAMED FOR WHAT SHORTLINK DOES rather than for what open-url wants it for:
+# "touch PATH when the first redirect is served" is a fact about this server, and it keeps
+# shortlink knowing nothing about popups. It reports; the caller decides what it means.
+#
+# THE FIRST ASSERTION IS THE ONE THAT MATTERS, and it is the negative. A file created when the
+# server STARTS would satisfy "it exists after a click" every time while signalling nothing --
+# the box would close the instant it opened, and the suite would be green. So: absent while the
+# server is up and unvisited, present after exactly one request.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/hit token); sleep 1; test -e /tmp/hit && echo before=present || echo before=absent; curl -s -o /dev/null --max-time 5 "$l"; sleep 1; test -e /tmp/hit && echo after=present || echo after=absent')"
+assert_contains "shortlink:served-file-absent-until-visited" "before=absent" "$out"
+assert_contains "shortlink:served-file-appears-when-served"  "after=present" "$out"
+
+# A request to a path that is NOT the slug is a 404 and must not count as a click. Otherwise a
+# browser asking this origin for /favicon.ico takes the box down before the student has read it.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/h2 token); curl -s -o /dev/null --max-time 5 http://localhost:3002/favicon.ico; sleep 1; test -e /tmp/h2 && echo present || echo absent')"
+assert_eq "shortlink:a-404-is-not-a-click" "absent" "$out"
+
+# The link keeps working afterwards. Collapsing "served once" into "server exits" would have
+# saved this flag, but then a prefetch or a retry would kill the link before the student
+# arrived -- see shortlink:redirects-every-time above, which this must not contradict.
+out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/h3 token); curl -s -o /dev/null --max-time 5 "$l"; sleep 1; curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$l"')"
+assert_eq "shortlink:still-serves-after-the-first-hit" "302" "$out"
 
 # CONCURRENT CALLS CANNOT COLLIDE, because binding IS the free-port test -- never check and then
 # bind, which two racing callers would both pass.

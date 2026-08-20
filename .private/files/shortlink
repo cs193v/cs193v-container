@@ -54,15 +54,16 @@ DEFAULT_TIMEOUT = 900
 # nothing routes `/magic-link`.
 DEFAULT_SLUG = "magic-link"
 
-USAGE = """usage: shortlink [--timeout SECONDS] [--pidfile PATH] URL [SLUG]
+USAGE = """usage: shortlink [--timeout SECONDS] [--pidfile PATH] [--served-file PATH] URL [SLUG]
 
 Serves a redirect to URL on one of this container's forwarded ports and prints the short
 URL to standard output. The server runs in the background and exits after SECONDS
 (default %d).
 
-  SLUG        the path to serve it on (default %s)
-  --timeout   how long to keep serving; 0 waits forever
-  --pidfile   where to write the server's pid, so a caller can end it early
+  SLUG           the path to serve it on (default %s)
+  --timeout      how long to keep serving; 0 waits forever
+  --pidfile      where to write the server's pid, so a caller can end it early
+  --served-file  a path to touch once the redirect has actually been served
 
 Exit status: 0 shortened, 3 no forwarded port was free (the URL is printed unchanged),
 2 bad arguments.
@@ -159,6 +160,12 @@ class Redirector(BaseHTTPRequestHandler):
     # because BaseHTTPRequestHandler is instantiated per request by the server.
     target = ""
     path_wanted = "/"
+    # WHY A SERVER KNOWS SOMETHING NOBODY ELSE DOES. open-url draws a box naming this link and
+    # has to take it down again the moment the student actually follows it -- and this is the
+    # only thing in the container that can tell: it is what answers the request. So it touches
+    # a path and the box watches for it. That is the whole of the coupling, and it is one way:
+    # nothing here knows a box exists. See open-url.
+    served_file = ""
 
     server_version = "cs193v-shortlink"
     sys_version = ""
@@ -194,6 +201,18 @@ class Redirector(BaseHTTPRequestHandler):
         # own projects. A 301 here would mean a student whose later project served this path on
         # this port being silently sent to GitHub, with nothing anywhere to explain it. no-store
         # says the same thing to every layer that might otherwise keep the answer.
+        # ONLY HERE, PAST THE 404, and the placement is the whole assertion. The comment above
+        # serve()'s loop already records that a browser opening one URL does not make one
+        # request: it preconnects and asks for /favicon.ico. Touching this on every request
+        # would fire on that favicon, and open-url's box would vanish before the student had
+        # read the link it was showing them.
+        if self.served_file:
+            try:
+                # Touch rather than write. The reader polls for existence, and an empty file is
+                # the smallest thing that can carry "it happened". 0600 because /tmp is shared.
+                os.close(os.open(self.served_file, os.O_CREAT | os.O_WRONLY, 0o600))
+            except OSError:
+                pass
         escaped = html.escape(self.target, quote=True)
         page = ('<!doctype html><meta charset="utf-8"><title>Redirecting</title>'
                 '<p>Redirecting to <a href="%s">%s</a>\n' % (escaped, escaped))
@@ -254,7 +273,7 @@ def detach():                         # -> True in the daemon, False in the orig
     return True
 
 
-def serve(server, timeout, pidfile):
+def serve(server, timeout, pidfile, served_file=""):
     if pidfile:
         try:
             with open(pidfile, "w") as fh:
@@ -279,16 +298,21 @@ def serve(server, timeout, pidfile):
             server.handle_request()
     finally:
         server.server_close()
-        if pidfile:
-            try:
-                os.unlink(pidfile)
-            except OSError:
-                pass
+        # Both go, for the same reason: a file that outlives the server it describes is a lie a
+        # caller will act on. The pidfile names a pid that can be reused; the served-file says
+        # "they clicked" about a link that no longer resolves.
+        for path in (pidfile, served_file):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 def main(argv):
     timeout = DEFAULT_TIMEOUT
     pidfile = ""
+    served_file = ""
     args = []
     i = 0
     while i < len(argv):
@@ -306,6 +330,11 @@ def main(argv):
             if i >= len(argv) or not argv[i]:
                 die("--pidfile needs a path")
             pidfile = argv[i]
+        elif a == "--served-file":
+            i += 1
+            if i >= len(argv) or not argv[i]:
+                die("--served-file needs a path")
+            served_file = argv[i]
         elif a.startswith("-") and a != "-":
             die("unknown option: %s\n\n%s" % (a, USAGE))
         else:
@@ -335,11 +364,12 @@ def main(argv):
 
     Redirector.target = url
     Redirector.path_wanted = "/" + slug
+    Redirector.served_file = served_file
     server.RequestHandlerClass = Redirector
     port = server.server_address[1]
 
     if detach():
-        serve(server, timeout, pidfile)
+        serve(server, timeout, pidfile, served_file)
         os._exit(0)
 
     # The parent's copy of the listening socket goes now rather than at exit: the daemon is
