@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+#
+# shortlink — hand a student a URL short enough to click, copy and retype.
+#
+# Installed as /usr/local/bin/shortlink. Runs INSIDE the container, as the student.
+#
+# WHAT THIS IS FOR. The only way out of this container is a URL printed in a terminal, and the
+# ones that matter are long: setup-git's prefilled token link is 157 characters, and an OAuth
+# authorize URL is longer. At 80 columns those wrap, and a wrapped URL is not merely untidy —
+# tmux.conf hands text selection back to the terminal (SHIFT+drag, see the note at `mouse on`),
+# and the terminal selects what it has DRAWN, so a URL that wrapped comes back with a newline in
+# the middle of it. Paste that into a browser and some terminals send only the first half; GitHub
+# silently drops the parameters that were in the second, and the student ends up holding a token
+# with permissions the course cannot use. The symptom arrives three screens later as a bare 404.
+# That is issue #67.
+#
+# So this binds one of the forwarded ports, serves a redirect on it, and prints the short URL:
+#
+#     $ shortlink 'https://github.com/settings/personal-access-tokens/new?name=...' token
+#     http://localhost:8084/token
+#
+# WHY THIS WORKS AT ALL, since the container has no browser and no route to the host's: the ssh
+# tunnel `cs193v` raises at launch forwards host 127.0.0.1:PORT to the container's OWN loopback
+# for every port in $CS193V_PORTS, and it binds all of them before the student's shell starts. So
+# a server here on one of those ports is reachable from the browser over there, with nothing new
+# built. See CONTAINER-DESIGN.md, "Ports, and the one thing that will bite you".
+#
+# THIS IS NOT A URL SHORTENER in the bit.ly sense and nothing leaves the machine: no service is
+# called, and the long URL is never sent anywhere except to the student's own browser, by the
+# student's own browser asking for it.
+#
+# PYTHON RATHER THAN SHELL, which every other helper in this image is: this has to LISTEN on a
+# socket, and bash's /dev/tcp can only connect. socat and netcat are deliberately not in the
+# image. python3 is, as root's interpreter — see the Containerfile's "THE PYTHON SPLIT".
+
+import html
+import os
+import re
+import signal
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# How long the server lives when nobody tells it otherwise. Fifteen minutes is sized to the
+# slowest real path: a student who follows setup-git's link, discovers they have not accepted
+# their organization invitation, accepts it, and comes back. A caller that knows when it is
+# finished should pass --pidfile and kill it instead of shortening this.
+DEFAULT_TIMEOUT = 900
+
+# THE SLUG IS NEVER EMPTY, and this default is chosen rather than obvious. See "the stale origin"
+# below: the browser keys its cache and any service worker on the ORIGIN, which outlives whatever
+# used to listen on that port, so the one path we must not serve on is a path a student's own
+# project might have served. `/` is the worst possible choice and `/open` is not much better;
+# nothing routes `/magic-link`.
+DEFAULT_SLUG = "magic-link"
+
+USAGE = """usage: shortlink [--timeout SECONDS] [--pidfile PATH] URL [SLUG]
+
+Serves a redirect to URL on one of this container's forwarded ports and prints the short
+URL to standard output. The server runs in the background and exits after SECONDS
+(default %d).
+
+  SLUG        the path to serve it on (default %s)
+  --timeout   how long to keep serving; 0 waits forever
+  --pidfile   where to write the server's pid, so a caller can end it early
+
+Exit status: 0 shortened, 3 no forwarded port was free (the URL is printed unchanged),
+2 bad arguments.
+""" % (DEFAULT_TIMEOUT, DEFAULT_SLUG)
+
+SLUG_RE = re.compile(r"\A[A-Za-z0-9._-]{1,32}\Z")
+
+
+def die(message):
+    sys.stderr.write("shortlink: %s\n" % message)
+    sys.exit(2)
+
+
+# ─── what we are willing to redirect to ────────────────────────────────────────
+# VALIDATION MATTERS HERE MORE THAN IT LOOKS, because this is an open redirector by design and
+# the argument reaches a response header. A carriage return or newline in the URL would end the
+# Location header and let the rest of the argument write headers of its own; scheme-checking
+# keeps `file:` and `javascript:` out of a link a student is being told to trust. Neither is a
+# likely accident, and both are one line.
+def check_url(url):
+    if not url.startswith(("http://", "https://")):
+        die("URL must start with http:// or https:// (got: %.40s)" % url)
+    for ch in url:
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            die("URL contains a control character")
+    return url
+
+
+# ─── which port ────────────────────────────────────────────────────────────────
+# THE PORT MUST COME FROM $CS193V_PORTS, and "any free port" would be a bug rather than a
+# simplification: only these ports are forwarded, so a server on any other one is reachable from
+# nothing, and the failure looks exactly like a broken link — a connection refused, from a URL
+# that reads as perfectly ordinary.
+#
+# The same range syntax the launcher's tunnel_ports() expands, and a malformed chunk is skipped
+# rather than fatal, for the same reason: container.args is a file people edit, and the launcher
+# has already warned about it by the time anything in here runs.
+def candidate_ports():
+    spec = os.environ.get("CS193V_PORTS", "")
+    ports = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        lo, _, hi = chunk.partition("-")
+        if not hi:
+            hi = lo
+        if not (lo.isdigit() and hi.isdigit()):
+            continue
+        lo, hi = int(lo), int(hi)
+        if lo > hi or lo < 1 or hi > 65535:
+            continue
+        ports.extend(range(lo, hi + 1))
+    # HIGH TO LOW, which is a choice about the student rather than about us. The low end of the
+    # default list is where dev servers live -- 3000, 5173 -- so taking a port from the top both
+    # keeps us out of the way of `npm run dev` and lands on a port least likely to have hosted a
+    # real app, which is the other half of the stale-origin problem below.
+    #
+    # IT IS ALSO WHAT KEEPS US OFF 1455, and that is worth knowing rather than rediscovering.
+    # `codex login` receives its browser callback there (#71), and agent-notes.md tells anything
+    # running in here not to bind it. 1455 is the LOWEST port in the shipped list, so walking down
+    # from the top reaches it only when every other forwarded port is already taken. It is not
+    # excluded by name on purpose: container.args is the single declaration of what reaches the
+    # student's browser, and a copy of the number here would be the second source #71 refused.
+    # If the walk direction is ever reversed, this becomes a real conflict -- start there.
+    return sorted(set(ports), reverse=True)
+
+
+# BIND, THEN REPORT -- never check whether a port is free and then bind it. Two shortlinks racing
+# would both pass the check and one would fail the bind, and the one that failed would have
+# already printed. Binding IS the check, and the port we print is one we are holding.
+#
+# 127.0.0.1 AND NOT 0.0.0.0. The tunnel's far end is the container's IPv4 loopback, so loopback is
+# all that is needed; the wildcard would additionally publish the redirect on the container's
+# eth0, which buys nothing and is one more thing to explain.
+def bind_forwarded_port():
+    for port in candidate_ports():
+        server = None
+        try:
+            server = HTTPServer(("127.0.0.1", port), None, bind_and_activate=False)
+            server.server_bind()
+            server.server_activate()
+            return server
+        except OSError:
+            if server is not None:
+                server.server_close()
+            continue
+    return None
+
+
+# ─── the redirect ──────────────────────────────────────────────────────────────
+class Redirector(BaseHTTPRequestHandler):
+    # Set by main() before the server starts. Class attributes rather than constructor arguments
+    # because BaseHTTPRequestHandler is instantiated per request by the server.
+    target = ""
+    path_wanted = "/"
+
+    server_version = "cs193v-shortlink"
+    sys_version = ""
+
+    # Without this the header comes out as "cs193v-shortlink " -- version_string() joins the two
+    # names with a space and the second one is deliberately empty.
+    def version_string(self):
+        return self.server_version
+
+    # SILENCED, and not as tidying: the default writes a request line to stderr, and stderr here
+    # is whatever the caller was drawing on -- setup-git's screen, mid-render, with the cursor
+    # hidden. The daemon's stderr is /dev/null anyway (see detach), so this is belt and braces
+    # for a foreground run.
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        self._respond(body=True)
+
+    def do_HEAD(self):
+        self._respond(body=False)
+
+    def _respond(self, body):
+        # The query is ignored: a browser can append one, and the path is what identifies us.
+        path = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path != self.path_wanted:
+            self._send(404, b"Not found. This link expects " +
+                            self.path_wanted.encode() + b"\n",
+                       "text/plain; charset=utf-8", body)
+            return
+        # 302, NEVER 301. A permanent redirect is remembered by the browser per origin and path,
+        # for months, and these ports get reused -- by the next shortlink, and by the student's
+        # own projects. A 301 here would mean a student whose later project served this path on
+        # this port being silently sent to GitHub, with nothing anywhere to explain it. no-store
+        # says the same thing to every layer that might otherwise keep the answer.
+        escaped = html.escape(self.target, quote=True)
+        page = ('<!doctype html><meta charset="utf-8"><title>Redirecting</title>'
+                '<p>Redirecting to <a href="%s">%s</a>\n' % (escaped, escaped))
+        self._send(302, page.encode("utf-8"), "text/html; charset=utf-8", body,
+                   location=self.target)
+
+    def _send(self, status, payload, ctype, body, location=None):
+        self.send_response(status)
+        if location is not None:
+            self.send_header("Location", location)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if body:
+            self.wfile.write(payload)
+
+
+# ─── getting out of the caller's way ───────────────────────────────────────────
+# TWO SEPARATE PROBLEMS LIVE HERE, and conflating them is how this gets written wrong.
+#
+# 1. THE PIPE. The whole point of this tool is `link="$(shortlink "$url" token)"`, and command
+#    substitution reads the pipe until EOF and only THEN waits for the child. EOF arrives when
+#    the LAST descriptor on the write end closes -- not when the process that printed exits. A
+#    server that inherited fd 1 therefore hangs the caller forever, and the parent exiting does
+#    not help in the slightest.
+#
+#    This is the failure worth the paragraph, because it passes every check anyone would make by
+#    hand: run `shortlink URL slug` at a prompt and stdout is a tty, nobody is reading to EOF,
+#    and it returns instantly. It fails only in the one shape the design is built around, inside
+#    a screen drawn with the cursor hidden, where a hang is indistinguishable from a dead
+#    terminal. So the redirect of fds 0/1/2 happens in the MIDDLE child, BEFORE the second fork
+#    and before this function returns to the parent -- which makes the parent's waitpid below the
+#    guarantee that no copy of the write end survives our own exit.
+#
+# 2. THE SESSION. Without setsid the server stays in the caller's process group and keeps the
+#    caller's tty as its controlling terminal. A Ctrl-C at setup-git's token prompt signals the
+#    whole foreground group -- killing the link the student is about to click -- and a controlling
+#    terminal it never reads is the SIGTTIN liability the launcher already reasons about at
+#    open_shell. The second fork means the daemon is not a session leader and so can never
+#    reacquire one.
+#
+# The daemon is left with no parent of its own, which is correct here: PID 1 in this container is
+# entrypoint.sh, whose stated second job is reaping exactly this.
+def detach():                         # -> True in the daemon, False in the original process
+    pid = os.fork()
+    if pid > 0:
+        os.waitpid(pid, 0)            # the middle child; it exits as soon as it has forked
+        return False
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    if devnull > 2:
+        os.close(devnull)
+    if os.fork() > 0:
+        os._exit(0)
+    return True
+
+
+def serve(server, timeout, pidfile):
+    if pidfile:
+        try:
+            with open(pidfile, "w") as fh:
+                fh.write("%d\n" % os.getpid())
+        except OSError:
+            pass
+    # SIGTERM HAS TO BECOME AN EXCEPTION for the cleanup below to happen at all: the default
+    # action terminates the process outright, so a caller that ends us early through --pidfile
+    # would leave the pidfile behind naming a pid that no longer exists. setup-git's own scratch
+    # directory would have taken that away with it, but a pidfile that outlives its process is
+    # exactly the trap the launcher documents at tunnel_kill_pid -- pids get reused.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        # A one-second poll so the deadline is honoured whether or not anyone connects. Serving
+        # REPEATEDLY rather than once is deliberate: a browser opening one URL does not make one
+        # request -- it preconnects speculatively and asks for /favicon.ico -- and a student
+        # double-clicks, presses Back, and comes back from an OAuth round trip to click again. A
+        # server that closed after the first response would spend it on none of those.
+        server.timeout = 1
+        deadline = None if timeout == 0 else time.monotonic() + timeout
+        while deadline is None or time.monotonic() < deadline:
+            server.handle_request()
+    finally:
+        server.server_close()
+        if pidfile:
+            try:
+                os.unlink(pidfile)
+            except OSError:
+                pass
+
+
+def main(argv):
+    timeout = DEFAULT_TIMEOUT
+    pidfile = ""
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            sys.stdout.write(USAGE)
+            return 0
+        elif a == "--timeout":
+            i += 1
+            if i >= len(argv) or not argv[i].isdigit():
+                die("--timeout needs a number of seconds")
+            timeout = int(argv[i])
+        elif a == "--pidfile":
+            i += 1
+            if i >= len(argv) or not argv[i]:
+                die("--pidfile needs a path")
+            pidfile = argv[i]
+        elif a.startswith("-") and a != "-":
+            die("unknown option: %s\n\n%s" % (a, USAGE))
+        else:
+            args.append(a)
+        i += 1
+
+    if not args or len(args) > 2:
+        sys.stderr.write(USAGE)
+        return 2
+    url = check_url(args[0])
+    slug = args[1] if len(args) == 2 else DEFAULT_SLUG
+    if not SLUG_RE.match(slug):
+        die("slug must be 1-32 characters of letters, digits, dot, dash or underscore "
+            "(got: %.40s)" % slug)
+
+    server = bind_forwarded_port()
+    # THE DEGRADATION IS THE INPUT, UNCHANGED, and it is what makes this safe to call from
+    # anywhere. With no $CS193V_PORTS there is no forwarded port to be reachable on -- a bare
+    # `podman run` of this image, which is how 50-image.sh reaches in -- and with every candidate
+    # busy there is none free. Either way the caller gets a URL that works, printed exactly as it
+    # was handed in, and its screen is merely as long as it was before this existed. The distinct
+    # exit status is for the tests and for a caller that wants to say something about it; nothing
+    # is written to stderr, because stderr is somebody's screen.
+    if server is None:
+        sys.stdout.write("%s\n" % url)
+        return 3
+
+    Redirector.target = url
+    Redirector.path_wanted = "/" + slug
+    server.RequestHandlerClass = Redirector
+    port = server.server_address[1]
+
+    if detach():
+        serve(server, timeout, pidfile)
+        os._exit(0)
+
+    # The parent's copy of the listening socket goes now rather than at exit: the daemon is
+    # already accepting on it, and leaving a second holder open is a thing someone would later
+    # have to work out the meaning of.
+    server.socket.close()
+    sys.stdout.write("http://localhost:%d/%s\n" % (port, slug))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        # The caller went away mid-print. Nothing to report and nowhere to report it.
+        os._exit(0)

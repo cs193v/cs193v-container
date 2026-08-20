@@ -860,19 +860,23 @@ clean_vt_processes() {
     fwd_init
     container_pkill cs193v-portprobe
     container_pkill inotifywait
+    container_pkill shortlink
     container_pkill "http.server $FWD1"
 }
 
 # How many of them a previous run left behind. Recorded rather than swept silently, so a run
 # that was killed leaves a trace in the results instead of being invisible. Counts PROCESSES,
 # not probes: one abandoned probe accounts for two, its `sh -c` wrapper and the python inside.
+# shortlink is in the pattern for the same reason: it detaches on purpose, so a suite that failed
+# between starting one and killing it leaves a forwarded port held for fifteen minutes, and that
+# is exactly the kind of leftover the next run must not measure instead of its own.
 #
 # `pgrep -c` prints 0 AND exits 1 when nothing matches, the same trap run-tests.sh documents
 # for `grep -c`, so take its output and ignore its status.
 count_vt_processes() {
     local n
     fwd_init
-    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|http\.server $FWD1" 2>/dev/null | head -1)"
+    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|shortlink|http\.server $FWD1" 2>/dev/null | head -1)"
     printf '%s' "${n:-0}"
 }
 

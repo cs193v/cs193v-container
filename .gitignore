@@ -21,3 +21,10 @@ projects/*
 !projects/.gitkeep
 
 .DS_Store
+
+# Python bytecode. files/shortlink is a python3 program, so anyone who reaches for
+# `python3 -m py_compile` on it -- the obvious way to syntax-check one -- drops a
+# __pycache__ beside it. Both the Containerfile and 10-static.sh use `compile()` instead,
+# for exactly that reason; this is here for the times somebody does it by hand anyway.
+__pycache__/
+*.pyc

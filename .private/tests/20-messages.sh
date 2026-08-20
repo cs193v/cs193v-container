@@ -114,8 +114,16 @@ assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')
 # here, because "cs193v-students" is eight columns longer than the placeholder it replaces and a
 # line that fits in the file can overflow on a student's screen.
 #
-# THE {{URL}} LINE IS EXEMPT and that is not a loophole: the prefilled link is 157 characters of
-# GitHub's making, it cannot be wrapped without breaking it, and shortening it is issue #67.
+# {{URL}} IS SUBSTITUTED TOO, AND USED TO BE EXEMPT. The exemption was honest while it lasted --
+# the prefilled link was 157 characters of GitHub's making and could not be wrapped without
+# breaking it -- but it exempted the one line on this screen whose wrapping actually costs a
+# student a token, which is issue #67. `shortlink` is what closed it: setup-git now hands the
+# student a local redirect instead, so the line is lintable like every other.
+#
+# THE VALUE IS THE WORST CASE, not whatever a run would really produce, because the port is
+# chosen at runtime and this suite has no container: the widest port shortlink can bind (65535)
+# and the longest slug anything mints (`magic-token-link`, setup-git's). A caller that grows a
+# longer slug than that has to come back here, which is the point.
 sgwide="$(python3 - "$SGM" "$SGS" <<'WIDE'
 import re, sys
 cat, script = sys.argv[1], sys.argv[2]
@@ -124,13 +132,14 @@ def default(var, fallback):
     m = re.search(r'^%s="\$\{%s:-([^}]*)\}"' % (var, var), src, re.M)
     return m.group(1) if m else fallback
 subs = {"ORG": default("CS193V_GH_ORG", "cs193v-students"),
-        "EXPIRY": default("CS193V_TOKEN_EXPIRY", "2026-12-31")}
+        "EXPIRY": default("CS193V_TOKEN_EXPIRY", "2026-12-31"),
+        "URL": "http://localhost:65535/magic-token-link"}
 key = None
 for n, line in enumerate(open(cat).read().splitlines(), 1):
     m = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
     if m:
         key = m.group(1); continue
-    if key is None or "{{URL}}" in line:
+    if key is None:
         continue
     text = line.replace("*", "")
     for k, v in subs.items():

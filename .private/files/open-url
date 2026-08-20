@@ -8,8 +8,27 @@
 # silently do nothing, leaving a student staring at a prompt that never returns.
 #
 # The devcontainer papers over this by pointing $BROWSER at a helper that genuinely
-# forwards to the host browser. We deliberately do not rebuild that channel; printing the
-# URL is the honest degradation.
+# forwards to the host browser. We still do not rebuild that channel — nothing here reaches
+# the browser on the student's computer, and nothing here can.
+#
+# WHAT DID CHANGE, and it is worth being precise about because the comment that used to sit
+# here said the opposite. Printing the URL was called "the honest degradation", and it was —
+# but the honesty was in not pretending to reach the host's browser, not in the length of
+# the line. An OAuth authorize URL is longer than GitHub's 157-character token link, and at
+# 80 columns those wrap; tmux hands text selection back to the terminal (see tmux.conf at
+# `mouse on`), the terminal selects what it has DRAWN, and a wrapped URL therefore comes
+# back with a newline in the middle of it. That is issue #67, and it costs a student a
+# working login.
+#
+# So the URL goes through `shortlink`, which serves a redirect on one of the forwarded ports
+# and hands back something around 32 characters. The direction is still browser-to-container
+# — the student's own browser asking the container for a redirect over the ssh tunnel that
+# `cs193v` already raises — rather than container-to-browser. Nothing new is exposed: any
+# process in here could already bind those ports and serve that browser anything at all.
+#
+# NO BRANCH ON WHETHER IT WORKED, beyond the one line of prose below: shortlink prints its
+# argument unchanged and exits 3 when no port is forwarded, so the fallback is the URL this
+# script has always printed.
 #
 # Limitation worth knowing: this only helps tools that honour $BROWSER. Anything calling
 # xdg-open directly is unaffected unless we also ship a command by that name.
@@ -19,10 +38,19 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
+url="$(shortlink "$1" 2>/dev/null)" || short=no
+[ -n "$url" ] || url="$1"
+[ "$url" = "$1" ] && short=no
+
 printf '\n'
 printf '  ┌─────────────────────────────────────────────────────────────────┐\n'
 printf '  │  Open this URL in your browser:                                 │\n'
 printf '  └─────────────────────────────────────────────────────────────────┘\n'
-printf '\n    %s\n\n' "$1"
+printf '\n    %s\n\n' "$url"
 printf '  (You are inside the CS193V container, which has no browser of its own.\n'
-printf '   Copy the URL above into the browser on your own computer.)\n\n'
+if [ "${short:-yes}" = yes ]; then
+    printf '   Click the link above, or type it into the browser on your own computer.\n'
+    printf '   It is served by this container and stops working after 15 minutes.)\n\n'
+else
+    printf '   Copy the URL above into the browser on your own computer.)\n\n'
+fi
