@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# A fake `sudo`. It RECORDS AND IT NEVER EXECUTES, and that second half is the point rather
+# than a simplification.
+#
+# install-cs193v.sh reaches the host through exactly four privileged calls -- `apt-get
+# update`, `apt-get install`, `usermod --add-subuids`, `installer -pkg` and the `tee` into
+# /etc/wsl.conf -- and every one of them goes through this one name. So a fake sudo that
+# never execs makes the whole shim tier structurally unable to change the machine, which is
+# a stronger statement than any assertion about what it happened to do.
+#
+# A fake that sometimes exec'd would be one negated test away from running the real thing,
+# so there is no exec branch at all and 10-static.sh asserts there is none. When a case
+# wants the EFFECT of a privileged command, that is what the fixture-container tier is for.
+#
+# It also matters that this is on PATH for every shim run rather than only the cases that
+# want it: the developer running the suite has no passwordless sudo, so a call that escaped
+# would fail with "no tty present" in a piped run -- but a PTY-driven case really would sit
+# there prompting for their password, with keystrokes the test is feeding going into it.
+#
+# Configuration, all optional:
+#   sudo_fail   newline-separated substrings; any invocation whose argv contains one exits 1
+#               (e.g. "apt-get update", "usermod", "installer -pkg"). []
+#
+# Every invocation is appended to $CS193V_SHIM/sudo.log, one line, so a test can assert on
+# what the installer WOULD have run.
+
+SHIM="${CS193V_SHIM:?sudo-fake needs CS193V_SHIM}"
+
+printf '%s\n' "$*" >> "$SHIM/sudo.log"
+
+if [ -f "$SHIM/sudo_fail" ]; then
+    # `|| [ -n "$pat" ]` because shim_set writes with printf and no trailing newline, so
+    # read returns the last (and usually only) line with a FALSE status -- the loop body
+    # never ran, every configured failure silently did nothing, and the case asserting a
+    # refusal saw a success.
+    while IFS= read -r pat || [ -n "$pat" ]; do
+        [ -n "$pat" ] || continue
+        case " $* " in
+            *"$pat"*)
+                echo "sudo-fake: refusing '$pat' as configured" >&2
+                exit 1 ;;
+        esac
+    done < "$SHIM/sudo_fail"
+fi
+
+exit 0
