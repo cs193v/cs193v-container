@@ -587,16 +587,18 @@ output really is in the 50,000-line scrollback and copy mode is the right way to
 **Known, filed separately as #83:** `CTRL+T` is bound to "new tab", so Codex's own *"ctrl + t to
 view transcript"* never reaches it. Do not report that as a failure of this section.
 
-*Linux baseline (Ubuntu 26.04 native, rootless podman 5.7.0):* **no flicker**, and **no "copied …
-to tmux buffer" toast** on a plain drag. Those were the two rows that were reasons to doubt the
-change at all — the toast is the one `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` exists to suppress, and
-the flicker was the open question about running an alt-screen renderer under this tmux — and both
-are clear.
+*Linux baseline (Ubuntu 26.04 native, rootless podman 5.7.0):* **every row above passes.** Two of
+them were the reasons to doubt this change at all and are the ones to watch on another platform:
+no flicker, which was the open question about running an alt-screen renderer under this tmux, and
+no "copied … to tmux buffer" toast, which is the entire job of
+`CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1`.
 
-**The other five rows are not yet recorded on any platform, and the wheel is the one that
-matters.** Everything automatable about it is: `alt=1 mouse=1` off the shipped image proves tmux
-forwards the event. What no test reaches is "…and Claude Code then scrolls its own transcript".
-Do not read the two results above as covering it.
+**The wheel row is why this section exists**, because it is the one part of #77 that no test
+reaches. `alt=1 mouse=1` off the shipped image proves tmux *forwards* the event and stops there;
+"…and Claude Code then scrolls its own transcript" has no automated equivalent, so it has to be
+re-checked by a person after a Claude Code update — and Claude Code auto-updates in this image.
+Codex's opposite behaviour, described just above, is measured rather than merely expected: on a
+live logged-in session its pane reports `alt=0 mouse=0` and it draws 14 rows of 34.
 
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`
