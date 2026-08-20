@@ -20,7 +20,22 @@ set -u
 
 cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
-trap 'rm -rf "$TMP"; shim_cleanup' EXIT
+
+# The cheapest tripwire for the whole class of accident installer_host exists to prevent.
+# $HOME here is the REAL one -- the door redirects it for the installer's process only --
+# so if any case in this file ever writes the course tree into the developer's own home
+# directory, the run that did it says so, rather than a colleague finding it weeks later.
+#
+# COMPARED AGAINST THE START, not asserted absent: a TA may legitimately have installed the
+# course at the default location on this very machine, and a check that failed for them
+# would be edited out rather than read. What must not happen is that it APPEARS during a run.
+# Sampled at both ends because a killed run cannot reach its own EXIT trap.
+home_state() { if [ -e "$HOME/cs193v" ]; then printf 'present'; else printf 'absent'; fi; }
+HOME_AT_START="$(home_state)"
+record "door:the-real-home-at-suite-start" "$HOME_AT_START"
+
+door_check() { assert_eq "door:the-real-home-is-as-we-found-it" "$HOME_AT_START" "$(home_state)"; }
+trap 'door_check; rm -rf "$TMP"; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
 # ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
@@ -142,7 +157,7 @@ done
 # podman is absent only worked on a machine that happened not to have it.
 shim_new
 shim_fake_id 1000 nosuchuser-cs193v
-run_consent() { PATH="$SHIM:$PATH" CS193V_DIR="$TMP/consent" bash $PRIVATE/install-cs193v.sh </dev/null 2>&1; }
+run_consent() { installer_host "$PRIVATE/install-cs193v.sh" CS193V_DIR="$TMP/consent"; }
 out="$(run_consent)"
 assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
 assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
@@ -158,7 +173,7 @@ assert_says_not "consent:declining-skips-the-download" "Getting the course files
 # With podman already present and a subuid range already there, nothing needs consent at
 # all and the installer should say so rather than asking a pointless question.
 shim_new
-out="$(PATH="$SHIM:$PATH" CS193V_DIR="$TMP/noconsent" bash $PRIVATE/install-cs193v.sh </dev/null 2>&1 || true)"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_DIR="$TMP/noconsent" || true)"
 assert_says "consent:nothing-to-change-when-already-set-up" \
             "Nothing on your computer needs to change" "$out"
 assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
@@ -181,9 +196,7 @@ assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
 
 DEST="$TMP/dest"
 shim_new
-run_installer() {
-    PATH="$SHIM:$PATH" CS193V_DIR="$DEST" bash "$TMP/installer.sh" </dev/null 2>&1
-}
+run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST"; }
 out1="$(run_installer)"
 assert_says "install:first-run-finishes"     "Setup finished"  "$out1"
 assert_says "install:first-run-fetched"      "course files"    "$out1"
@@ -226,16 +239,178 @@ assert_eq "install:student-work-survives-a-rerun" "my work" \
 # Re-running must report already-satisfied steps rather than redoing them.
 assert_says "install:reports-already-done" "already done" "$out2"
 
+# ─── check_disk, which no mechanism could reach before ─────────────────────────
+# check_disk asks podman for two Store fields (installer's check_disk), and podman-fake's
+# info arm answered only Rootless and MemTotal — every other --format fell through to
+# `echo ''`. The installer's own guard then swallowed it:
+#
+#     case "$alloc" in ''|*[!0-9]*) return 0 ;; esac
+#
+# so the low-disk warning was unreachable, and a test asserting it would have been
+# asserting against the empty-output early return instead. The #79 shape exactly: the
+# happy answer and the never-ran answer were the same answer.
+#
+# Extracted rather than driven, like version_lt and mac_vm_target_mb above, because all
+# six branches are decided by two numbers and a full install per case would cost five
+# tarball extractions to prove arithmetic. ONE end-to-end run follows, whose whole job is
+# to prove the new fake keys really feed it — an extracted function cannot tell us that.
+cat > "$TMP/cd.sh" <<'EOF'
+note() { printf 'NOTE %s\n' "$*"; }
+ok()   { printf 'OK %s\n' "$*"; }
+# check_disk's `out="$(podman info ...)" || return 0` reads BOTH the status and the text,
+# so the stub has to be able to fail as well as answer.
+podman() { [ "${FAKE_RC:-0}" -eq 0 ] || return "${FAKE_RC:-0}"; printf '%s\n' "$FAKE_OUT"; }
+EOF
+sed -n '/^check_disk()/,/^}$/p' $PRIVATE/install-cs193v.sh >> "$TMP/cd.sh"
+if [ "$(grep -c '.' "$TMP/cd.sh")" -gt 8 ]; then pass "extract:check_disk"
+else fail "extract:check_disk" "could not extract check_disk"; fi
+
+cd_for() {                            # cd_for ALLOC USED [RC] -> its note/ok lines
+    ( . "$TMP/cd.sh"; FAKE_OUT="$1 $2" FAKE_RC="${3:-0}" check_disk )
+}
+#  10 GiB allocated, 6 used -> 4 GiB free, under the 8 GiB floor check_disk names.
+assert_says "check-disk:warns-under-the-floor" \
+            "Only about 4 GB is free" "$(cd_for 10737418240 6442450944)"
+assert_says "check-disk:says-it-can-be-resumed" \
+            "pick up where it stopped" "$(cd_for 10737418240 6442450944)"
+# 100 GiB allocated, 10 used -> 90 free, comfortably over.
+assert_says "check-disk:reports-ample-room" \
+            "90 GB free for the container" "$(cd_for 107374182400 10737418240)"
+assert_says_not "check-disk:ample-room-does-not-warn" \
+            "Only about" "$(cd_for 107374182400 10737418240)"
+# The three silent early returns. Advisory by design: a wrong guess must not block an
+# install that would have worked, so each of these says NOTHING rather than guessing.
+assert_eq "check-disk:silent-when-podman-says-nothing"   "" "$(cd_for '' '')"
+assert_eq "check-disk:silent-when-the-value-is-not-a-number" "" "$(cd_for bad 0)"
+assert_eq "check-disk:silent-when-allocated-is-zero"     "" "$(cd_for 0 0)"
+assert_eq "check-disk:silent-when-podman-info-fails"     "" "$(cd_for 1 1 1)"
+
+# ...and the end-to-end run that proves the fake really answers the query the installer
+# sends. Without this the six assertions above pass against a stub and the new keys could
+# be misspelled forever.
+shim_new
+shim_set graph_alloc 10737418240
+shim_set graph_used   6442450944
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/lowdisk")"
+assert_says "check-disk:the-fake-really-feeds-it" "Only about 4 GB is free" "$out"
+assert_says "check-disk:low-disk-is-not-fatal"    "Setup finished"          "$out"
+
+# ─── the macOS virtual machine, which no mechanism could reach before ──────────
+# `machine) echo ''; exit 0` was podman-fake's whole answer, so `podman machine list |
+# grep -q .` was unconditionally false: DO_MACHINE_RESIZE could not be set, and neither
+# grow_machine_disk nor grow_machine_disk_when_stopped could run at all. Four survey arms
+# and eight lines of setup_machine were dead to every test.
+#
+# Driven end to end rather than extracted, because what was missing was the FAKE, and an
+# extracted setup_machine with a stubbed podman would prove nothing about it.
+#
+# NOT reached here: setup_machine's resize EXECUTION. A resize is the one machine change
+# that calls need(), so it waits on consent, and with no tty ask_consent takes the safe
+# default and exits. The survey half -- that the resize is offered, and in what words --
+# is asserted below; the execution half needs a pty.
+mac_run() {                           # mac_run [KEY VALUE]... -> the installer's output
+    shim_new
+    shim_fake_mac                     # 16 GiB arm64 -> mac_vm_target_mb wants 12288 MB
+    while [ "$#" -gt 1 ]; do shim_set "$1" "$2"; shift 2; done
+    # The destination lives under the shim rather than a counter, because a counter
+    # incremented in this subshell would be 1 for every case -- so all of them would share
+    # one directory and every case after the first would take "already done" paths.
+    installer_host "$TMP/installer.sh" CS193V_DIR="$SHIM/dest"
+}
+mac_rc() { mac_run "$@" >/dev/null 2>&1; printf '%s' "$?"; }
+
+# The gate on everything below: if this fails, every other assertion here is failing
+# because the run is still on Linux, not because of anything to do with a machine.
+out="$(mac_run)"
+assert_says "mac:platform-is-detected" "macos on arm64" "$out"
+
+# ─── nothing exists yet -> init  (survey's machine-list-empty arm) ─────────────
+# init is announced with ok(), not need(), so it is the one machine change that needs no
+# consent -- which is what makes this reachable with no tty at all.
+assert_says "mac-init:announced-in-the-survey" "virtual machine will be created" "$out"
+assert_says "mac-init:names-the-size-it-will-use" "12288 MB, 64 GB disk" "$out"
+assert_says "mac-init:reports-success" "created and started" "$out"
+# The flags, not just the prose: --now matters (without it the machine is created stopped
+# and every later podman call fails), and the two values must be the computed ones.
+assert_says "mac-init:asks-for-the-computed-size" \
+            'machine init --memory 12288 --disk-size 64 --now' "$(installer_log)"
+assert_says_not "mac-init:does-not-also-resize" "Resizing" "$out"
+
+out="$(mac_run machine_init_rc 1)"
+assert_says "mac-init:failure-is-fatal" "Could not create the podman virtual machine" "$out"
+assert_says_not "mac-init:failure-does-not-claim-success" "Setup finished" "$out"
+assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
+
+# ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
+# 80% of 12288 is 9830, so 4096 is under it and 16384 is over.
+out="$(mac_run machine_list podman-machine-default machine_mem 4096)"
+assert_says "mac-resize:offered-when-the-vm-is-small" \
+            "more memory (4096 MB -> 12288 MB)" "$out"
+assert_says "mac-resize:explains-why-a-mac-needs-it" "fixed amount of memory" "$out"
+# EVERY NEGATIVE BELOW IS PAIRED WITH A POSITIVE OFF THE SAME VALUE. An empty argv.log --
+# a wrong path, a run that never started -- satisfies `machine set is absent` perfectly,
+# and VERIFICATION.md records assert_not_contains as a measured vacuity blind spot: ten of
+# them passed in the sabotage run. The companion asserts a line that can only be there if
+# the installer really asked podman about a machine.
+# It needs permission, so with no tty it must change NOTHING -- including no init.
+assert_says "mac-resize:no-tty-declines"  "Nothing was changed" "$out"
+assert_says     "mac-resize:the-log-was-really-read" 'machine list' "$(installer_log)"
+assert_says_not "mac-resize:declining-touches-no-machine" 'machine set' "$(installer_log)"
+
+# ─── a machine that is big enough -> skip  (survey's else arm) ─────────────────
+out="$(mac_run machine_list podman-machine-default machine_mem 16384)"
+assert_says "mac-ok:reasonable-size-is-left-alone" "reasonable size" "$out"
+assert_says_not "mac-ok:does-not-offer-a-resize" "more memory" "$out"
+assert_says "mac-ok:still-finishes" "Setup finished" "$out"
+
+# inspect returning nothing must land in the SAME arm, not in the resize one: an empty
+# value would make `[ "$vm_mb" -lt ... ]` an error, so the installer guards with -n first.
+out="$(mac_run machine_list podman-machine-default machine_mem '')"
+assert_says "mac-inspect-empty:treated-as-reasonable" "reasonable size" "$out"
+assert_says_not "mac-inspect-empty:does-not-offer-a-resize" "more memory" "$out"
+
+# ─── growing the disk, on the path where nothing else stopped the machine ──────
+# grow_machine_disk_when_stopped, reached only through the skip arm above.
+out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32)"
+assert_says "mac-disk:grows-a-disk-that-is-too-small" "from 32 GB to 64 GB" "$out"
+assert_says "mac-disk:says-it-costs-nothing-up-front" "does not use the space up front" "$out"
+assert_says "mac-disk:asks-podman-to-grow-it" 'machine set --disk-size 64' "$(installer_log)"
+
+out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 64)"
+assert_says_not "mac-disk:a-big-enough-disk-is-left-alone" "Growing" "$out"
+assert_says     "mac-disk:the-log-was-really-read" 'machine inspect' "$(installer_log)"
+assert_says_not "mac-disk:no-set-when-there-is-nothing-to-do" 'machine set' "$(installer_log)"
+
+# podman refuses to SHRINK a machine disk, so a refusal here is expected rather than
+# exceptional -- it must be a note and the install must go on.
+out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32 machine_set_rc 1)"
+assert_says "mac-disk:a-refused-grow-is-not-fatal" "Could not grow it; continuing" "$out"
+assert_says "mac-disk:still-finishes-after-a-refused-grow" "Setup finished" "$out"
+
+# A non-numeric DiskSize is podman's output changing shape, and the installer's own comment
+# says the harmless direction is to stop growing rather than to guess.
+out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
+assert_says_not "mac-disk:non-numeric-size-grows-nothing" "Growing" "$out"
+assert_says "mac-disk:non-numeric-size-still-finishes" "Setup finished" "$out"
+
+# ─── the Intel Mac stop, which is the other thing uname decides ────────────────
+shim_new
+shim_fake_uname Darwin x86_64
+shim_fake_sysctl 17179869184
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/intel")"
+assert_says "intel-mac:refused" "Intel" "$out"
+assert_no_file "intel-mac:changes-nothing" "$TMP/intel"
+
 # ─── a bad download must never report success ──────────────────────────────────
 # Three failure shapes, because they are caught by three different guards.
 # Prints the installer's output; leaves its exit status in $TMP/rc, because the caller
 # reads the output through a command substitution and a variable set in that subshell
 # would never make it back.
 run_with_tarball() {                  # run_with_tarball FILE DEST
-    cp "$TMP/installer.sh" "$TMP/inst-case.sh"
-    edit_sub "$TMP/inst-case.sh" '^TARBALL=.*' "TARBALL=\"file://$1\""
+    cp "$TMP/installer.sh" "$TMP/installer-case.sh"
+    edit_sub "$TMP/installer-case.sh" '^TARBALL=.*' "TARBALL=\"file://$1\""
     shim_new
-    PATH="$SHIM:$PATH" CS193V_DIR="$2" bash "$TMP/inst-case.sh" </dev/null 2>&1
+    installer_host "$TMP/installer-case.sh" CS193V_DIR="$2"
     printf '%s' "$?" > "$TMP/rc"
 }
 last_rc() { cat "$TMP/rc"; }

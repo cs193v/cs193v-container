@@ -17,7 +17,7 @@ SHIM_SNAPSHOT="$SHIM_HOST_TMPDIR/cs193v-snap.$$"
 # Whatever an earlier, KILLED run left here. See sweep_stale_tmpdirs in lib/assert.sh for why it
 # goes by pid rather than by age, and why it is called at suite start and not only on exit.
 shim_sweep_stale() {                  # -> how many directories it removed
-    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap
+    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap cs193v-last
 }
 
 # shim_new [DIR]  -> creates a shim, sets $SHIM, and puts it first on $PATH for `launcher`.
@@ -67,7 +67,8 @@ shim_count() {                        # shim_count ERE
 shim_cleanup() {
     rm -rf "$SHIM_SNAPSHOT" \
            "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".* \
-           "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* 2>/dev/null || true
+           "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* \
+           "$SHIM_HOST_TMPDIR"/cs193v-last."$$" 2>/dev/null || true
 }
 
 # Run the launcher with the fake podman first on PATH. stdin is closed: the real launcher
@@ -191,6 +192,88 @@ case "\$1" in
 esac
 EOF
     chmod +x "$SHIM/id"
+}
+
+# THE ONLY WAY THIS SUITE STARTS install-cs193v.sh. 10-static.sh asserts there is no
+# second one, and asserts this body still does the two things below.
+#
+# HOME, not just CS193V_DIR, and that is the whole point of having a door at all. The
+# installer runs for real here -- a fake podman, but real mkdir, real tar and real chmod in
+# fetch_files -- and none of those three needs privilege. CS193V_DIR looks like it contains
+# them, and it does, right up until a case needs choose_dir's MENU: choose_dir returns
+# immediately when CS193V_DIR is set, so the typed path, the empty-input fallback and the
+# ~/ expansion are only reachable with it UNSET, and DEFAULT_DIR is $HOME/cs193v. Until
+# this function existed the only thing keeping the suite out of the developer's own home
+# directory was that all four call sites happened to spell CS193V_DIR out by hand.
+#
+# The naming convention is load-bearing for the static rule: an installer copy must be
+# named install* so that a call site written without this helper is greppable.
+#
+# THE SHIM PATH GOES TO A FILE. Every call site is `out="$(installer_host ...)"`, which is a
+# subshell, so $SHIM set by a shim_new in there never reaches the assertion that wants to
+# read argv.log -- it would silently read the PREVIOUS case's log, which is a pass. #76's
+# mechanism, and the same one that cost repo_copy its memo.
+SHIM_LAST="$SHIM_HOST_TMPDIR/cs193v-last.$$"
+
+installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> output
+    local script="$1"; shift
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
+}
+
+installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] -> rc
+    installer_host "$@" >/dev/null 2>&1
+    printf '%s' "$?"
+}
+
+# argv.log from the most recent installer_host run, whichever subshell it happened in.
+installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
+
+# Fake `uname` and `sysctl`, which is what makes the macOS arm executable on Linux.
+#
+# platform() reads `uname -s` and survey() reads `uname -m` (the Intel-Mac stop), so between
+# them these two flags decide four of the installer's branches. host_ram_mb then reads
+# `sysctl -n hw.memsize` -- BYTES on a Mac, where /proc/meminfo is kB on Linux -- and
+# mac_vm_target_mb does arithmetic on the result, so a missing sysctl fake does not fail
+# cleanly: it makes `$(( $(host_ram_mb) / 1024 ))` a bash arithmetic error that reads like
+# an installer bug. Set them together or not at all.
+#
+# The EFFECTS of the macOS arm cannot be faked honestly and are not faked here: `sudo
+# installer -pkg -target /` and a real `podman machine` need a Mac. What these reach is
+# every macOS DECISION, which is the part that drifts.
+shim_fake_uname() {                   # shim_fake_uname SYSNAME [MACHINE]
+    cat > "$SHIM/uname" <<EOF
+#!/bin/sh
+case "\$1" in
+    -s)  echo $1 ;;
+    -m)  echo ${2:-arm64} ;;
+    -sm) echo "$1 ${2:-arm64}" ;;
+    *)   echo $1 ;;
+esac
+EOF
+    chmod +x "$SHIM/uname"
+}
+
+# Only hw.memsize is answered, and anything else is an error rather than an empty line: a
+# sysctl that silently returns nothing would put an empty string into the installer's
+# arithmetic, which is the failure this fake exists to avoid.
+shim_fake_sysctl() {                  # shim_fake_sysctl TOTAL_BYTES
+    cat > "$SHIM/sysctl" <<EOF
+#!/bin/sh
+[ "\$1" = -n ] && shift
+case "\$1" in
+    hw.memsize) echo $1 ;;
+    *)          echo "sysctl: unknown oid '\$1'" >&2; exit 1 ;;
+esac
+EOF
+    chmod +x "$SHIM/sysctl"
+}
+
+# A Mac the installer will accept: arm64, and enough RAM to want a 12 GB VM.
+shim_fake_mac() {                     # shim_fake_mac [TOTAL_BYTES]
+    shim_fake_uname Darwin arm64
+    shim_fake_sysctl "${1:-17179869184}"
 }
 
 # Fake `ssh`, so a launch can reach open_shell having warned about NOTHING.
