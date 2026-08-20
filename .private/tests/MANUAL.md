@@ -587,6 +587,17 @@ output really is in the 50,000-line scrollback and copy mode is the right way to
 **Known, filed separately as #83:** `CTRL+T` is bound to "new tab", so Codex's own *"ctrl + t to
 view transcript"* never reaches it. Do not report that as a failure of this section.
 
+*Linux baseline (Ubuntu 26.04 native, rootless podman 5.7.0):* **no flicker**, and **no "copied …
+to tmux buffer" toast** on a plain drag. Those were the two rows that were reasons to doubt the
+change at all — the toast is the one `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` exists to suppress, and
+the flicker was the open question about running an alt-screen renderer under this tmux — and both
+are clear.
+
+**The other five rows are not yet recorded on any platform, and the wheel is the one that
+matters.** Everything automatable about it is: `alt=1 mouse=1` off the shipped image proves tmux
+forwards the event. What no test reaches is "…and Claude Code then scrolls its own transcript".
+Do not read the two results above as covering it.
+
 ### §9.3 — WSL teardown
 `wsl --unregister CS193V`
 *Expect:* removes the distro without touching any other. Confirm a pre-existing distro
