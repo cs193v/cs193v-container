@@ -39,7 +39,7 @@ case "$-" in *i*) ;; *) return 0 ;; esac
 # Commands whose FIRST WORD ALONE does not tell a student what is happening. For these, and
 # only these, the tab shows two words instead of one. Everything else is left to tmux.
 #
-# Two groups, for two different reasons:
+# Three groups, for three different reasons:
 #
 #   WRAPPERS -- the process really is the wrapper, and it hides the command underneath.
 #               `sudo apt install nginx` genuinely runs as `sudo`, so tmux can only say "sudo".
@@ -48,28 +48,51 @@ case "$-" in *i*) ;; *) return 0 ;; esac
 #               unrelated jobs. "git" could be a commit, a clone, or a 20-minute rebase; "npm"
 #               could be an install or a dev server. The subcommand is the informative part.
 #
+#   SCRIPTS -- the name is not reported AT ALL. A shebang makes argv[0] the interpreter, and
+#               `automatic-rename-format` is `#{pane_current_command}`, which tmux resolves from
+#               argv[0] in /proc -- so an interpreted script is labelled `bash`, `sh`, `node` or
+#               `python3` no matter what it is called. For this group the second word is beside
+#               the point: what the hook recovers is the FIRST one.
+#
 # FORK: `claude`, `codex`, `gh` and `vercel` added -- the four course tools, none of which the
-# prototype's machine had installed the way this image installs them.
+# prototype's machine had installed the way this image installs them -- plus `setup-git`, which
+# this image writes itself.
 #
-# `claude` is not a nicety, it is the reason the hook ships at all. Claude Code is installed
-# here with `npm install -g`, so /usr/local/bin/claude is a script with a
-# `#!/usr/bin/env node` shebang, and /proc reports the INTERPRETER. Without this line every
-# Claude Code tab in the course -- which is most of them -- would be labelled `node`. The
-# prototype recorded this as a known gap because its own `claude` happened to be a native
-# binary; here it is the common case. The alternative fix, an
-# `automatic-rename-format` conditional mapping `node` to `claude`, was rejected: it would
-# also relabel a student's own `node server.js`, which is a thing this course expects them
-# to run.
+# WHICH OF THOSE FIVE ARE LOAD-BEARING, measured in this image rather than reasoned about:
 #
-# `codex` is on the list for the SAME reason and not by analogy: `npm install -g @openai/codex`
-# installs a three-file wrapper whose bin is a `#!/usr/bin/env node` script, and the 251 MB
-# native binary it spawns is a CHILD process, so the pane's foreground command is `node` there
-# too. It also earns its place as a multi-tool -- `codex resume` and `codex exec` are different
-# enough jobs to be worth a second word.
+# `setup-git` is the SCRIPTS case, and the one a student SITS AND WATCHES (#88). It is a bash
+# script, so its tab read `bash` for the whole of a walkthrough that asks five questions, runs six
+# commands and then verifies the token against GitHub. Changing the shebang does not fix it, and
+# that was measured rather than assumed: `#!/bin/bash` and
+# `#!/usr/bin/env bash` both label `bash`, because argv[0] is the interpreter either way -- the
+# shebang moves /proc/PID/comm, which is not the variable tmux reads. Its siblings in that class
+# (`open-url` -> `sh`, `shortlink` -> `python3`, `tldr` -> `python`) are left alone only because
+# they are sub-second. The pinning noted above is a FEATURE here rather than a cost: setup-git
+# shells out to `git` and `gh` in the pane's own process group, so an unpinned label would read
+# `bash` for the whole run anyway. Its only arguments are `--dev-*` flags, which the flag arm
+# below skips, so the label stays exactly "setup-git".
+#
+# `codex` and `vercel` are the same case one interpreter along, and still measure `node`:
+# `npm install -g @openai/codex` installs a three-file wrapper whose bin is a
+# `#!/usr/bin/env node` script (the native binary it spawns is a CHILD process, so it never
+# reaches the pane's foreground), and `vercel`'s bin is `dist/vc.js` with the same shebang.
+# The alternative fix for those, an `automatic-rename-format` conditional mapping `node` to
+# `claude`, was rejected: it would also relabel a student's own `node server.js`, which is a
+# thing this course expects them to run. `codex` earns its place as a multi-tool too -- `codex
+# resume` and `codex exec` are different enough jobs to be worth a second word.
+#
+# `claude` and `gh` are NOT load-bearing any more, and the comment here used to claim the
+# opposite for `claude` ("/usr/local/bin/claude is a script with a `#!/usr/bin/env node`
+# shebang ... every Claude Code tab would be labelled `node`"). Measured 2026-08: the npm
+# package's bin is a 297 MB native ELF (`claude.exe`, hardlinked over the `linux-x64` payload),
+# /proc/PID/exe points at it, and a running `claude` reports `claude` with no help from this
+# hook; `gh` is a native ELF too. Both stay on the list -- `gh` as a genuine multi-tool
+# (`gh auth`, `gh repo`), `claude` because a repackaging back to a node shim would otherwise
+# relabel every tab in the course with nothing pointing at why.
 _CS193V_SHOW_ARG="sudo doas env time nice ionice nohup stdbuf xargs setsid
                   git python python3 pip pip3 npm npx node yarn pnpm deno
                   make cargo go docker podman apt apt-get gem bundle poetry uv pytest
-                  claude codex gh vercel"
+                  claude codex gh vercel setup-git"
 
 # A CAVEAT ABOUT `time`, which is worth knowing before you extend this list: `time` is a bash
 # KEYWORD, not a command, and bash reports only the *inner* command to the DEBUG trap. Typing

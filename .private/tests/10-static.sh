@@ -455,14 +455,21 @@ tmux_conf="$(cat $PRIVATE/files/tmux/tmux.conf)"
 assert_ok  "tmux:conf-exists"    test -f $PRIVATE/files/tmux/tmux.conf
 assert_ok  "tmux:tabname-exists" test -f $PRIVATE/files/tmux/tabname.bash
 assert_ok  "tmux:tabname-syntax" bash -n $PRIVATE/files/tmux/tabname.bash
-# Every course tool must be ON the two-word label list, and this is a grep rather than a
-# behavioural test on purpose: the MECHANISM is already proven behaviourally for `claude` in the
-# tmux harness ("claude is labeled 'claude', not 'node'"), so what is left to catch is a tool
-# quietly dropping off the list. `claude` and `codex` are the load-bearing pair -- both install
-# via `npm install -g` as a `#!/usr/bin/env node` script, so /proc reports the INTERPRETER and
-# every tab of the course's two agents would otherwise read `node`.
+# Every course tool must be ON the label list, and this is a grep rather than a behavioural test
+# on purpose: the MECHANISM is already proven behaviourally in the tmux harness ("claude is
+# labeled 'claude', not 'node'", "setup-git is labeled 'setup-git', not 'bash'"), so what is
+# left to catch is a tool quietly dropping off the list.
+#
+# WHICH ENTRIES ARE LOAD-BEARING, measured in the image rather than assumed: `codex` and
+# `vercel` install as `#!/usr/bin/env node` scripts and `setup-git` is a bash script, so /proc
+# reports the INTERPRETER for all three, so without their entries those tabs would read `node`,
+# `node` and `bash`. This
+# comment used to name `claude` and `codex` as that pair; `claude`'s bin is a 297 MB native ELF
+# now and reports `claude` on its own, and `gh` is a native ELF too. Both stay listed anyway --
+# `gh` as a genuine multi-tool, `claude` because a repackaging back to a node shim would
+# otherwise relabel every tab in the course. See the rationale in tabname.bash.
 tabname_list="$(sed -n '/^_CS193V_SHOW_ARG=/,/"$/p' $PRIVATE/files/tmux/tabname.bash)"
-for tool in claude codex gh vercel; do
+for tool in claude codex gh vercel setup-git; do
     assert_match "tmux:tabname-lists-$tool" "(^|[[:space:]])$tool([[:space:]]|\"|$)" "$tabname_list"
 done
 assert_ok  "tmux:shell-exists"   test -f $PRIVATE/files/cs193v-shell

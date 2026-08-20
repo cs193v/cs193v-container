@@ -1117,6 +1117,12 @@ for _fake in git npm npx docker make cargo pytest apt apt-get pip3; do
   printf '#!/bin/sh\nsleep 45\n' > "$FAKESUDO/$_fake"
   chmod +x "$FAKESUDO/$_fake"
 done
+# setup-git gets its own stand-in because its SHEBANG is the point (#88). It is a bash script,
+# so /proc -- and therefore tmux's native rename -- reports `bash`, which is exactly what the
+# student reported seeing. A `#!/bin/sh` stand-in from the loop above would fail the assertion
+# below with `sh` instead, and the regression would read like some other bug.
+printf '#!/usr/bin/env bash\nsleep 45\n' > "$FAKESUDO/setup-git"
+chmod +x "$FAKESUDO/setup-git"
 
 # No default-command: /etc/bash.bashrc carries the hook, so a plain session gets it.
 hx_start "$S2" "env PATH=$FAKESUDO:\$PATH tmux -L $SOCK2H -f $CONF new-session -s cs193v"
@@ -1200,6 +1206,27 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   label_check "git -c user.name=x commit"              "git commit"
   # An argument keeps only its basename, so labels stay short.
   label_check "python3 -m http.server 8080"            "python3 http.server"
+
+  # #88, and it is the same failure as the `claude` case below arriving by a third route:
+  # `setup-git` is neither a wrapper hiding a command nor a multi-tool whose subcommand is the
+  # informative half -- it is simply a SCRIPT, so argv[0] is always its interpreter and the tab
+  # reads `bash`. It is also the one command in that class a student sits and watches, which is
+  # why it is the one that got reported.
+  #
+  # DELIBERATELY NOT AN ASSERTION ON /proc/PID/comm. A `#!/bin/bash` shebang changes comm and
+  # would take a comm-based test green while the student still reads `bash`:
+  # automatic-rename-format is `#{pane_current_command}`, which tmux resolves from
+  # /proc/<pid>/cmdline -- argv[0] -- and a shebang always makes that the interpreter.
+  #
+  # No `if ... hx_skip` wrapper, so this cannot pass by not running (#79).
+  hx_cmd "$S2" "setup-git"
+  hx_until 'probe_name2' 'setup-git' 8
+  hx_expect_eq "setup-git is labeled 'setup-git', not 'bash' (#88)" "$(probe_name2)" "setup-git"
+  hx_hex "$S2" "03"; hx_until 'probe_name2' bash 8
+  hx_expect_eq "setup-git's label reverts at the prompt" "$(probe_name2)" "bash"
+  hx_expect_eq "automatic-rename is restored after setup-git" \
+    "$(it2 display-message -p -t cs193v '#{automatic-rename}' 2>/dev/null)" "1"
+
   # REGRESSION (reported from real use): a command that finishes while the student is looking at a
   # DIFFERENT tab must still revert its label. This used to fail permanently. precmd's
   # `set-window-option automatic-rename on` had no -t target, and a tmux command run inside a pane
