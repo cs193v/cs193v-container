@@ -125,6 +125,41 @@ bare="$(grep -Hn 'podman run' $real_podman | grep -vE '^[^:]*:[0-9]+:[[:space:]]
         | grep -v -- '--label' || true)"
 assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 
+# ─── one door for running the installer on the host ────────────────────────────
+# install-cs193v.sh is the one script in this repo that changes a machine, and the suite
+# runs it FOR REAL -- against a fake podman, but with real mkdir, real tar and real chmod.
+# Those three need no privilege, so the only thing standing between a case and the
+# developer's own home directory is where $DIR comes from.
+#
+# CS193V_DIR IS NOT ENOUGH, and that is why this rule exists rather than a comment.
+# choose_dir returns immediately when CS193V_DIR is set, so any case that wants to reach
+# its MENU -- the typed path, the empty-input fallback, the ~/ expansion -- has to leave it
+# unset, and DEFAULT_DIR is then $HOME/cs193v. Until installer_host existed, the only
+# reason no case had ever written there was that all four of them happened to spell
+# CS193V_DIR out by hand: a habit, one new call site away from being broken.
+#
+# So: exactly one helper may start the installer, and it sets HOME as well. `bash -n` is
+# excluded because it parses without executing, which is a syntax check and not a run.
+# THE NEEDLE IS ASSEMBLED TAIL-FIRST, and that is not style: written out in one piece it
+# would match this very line and the rule would fail on its own definition forever. With
+# the two halves in this order the line contains "install" BEFORE "bash ", which the
+# pattern -- bash first -- cannot match. The bash 3.2 ban list above has the same problem
+# and solves it by naming its files rather than globbing them.
+door_tail='install'; door_head='bash '
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+        | grep -v 'bash -n' | grep -v installer_host || true)"
+assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
+
+# And the door has to do the thing it exists for. Extraction asserted first: an empty
+# function body would satisfy every grep below it forever.
+door="$(sed -n '/^installer_host()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$door" | grep -c '.')" -ge 4 ]; then pass "installer-door:extractable"
+else fail "installer-door:extractable" "could not find installer_host in lib/podman-shim.sh"; fi
+assert_contains "installer-door:redirects-HOME"        'HOME=' "$door"
+assert_contains "installer-door:puts-the-shim-first"   'PATH="$SHIM' "$door"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \
