@@ -166,7 +166,7 @@ sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, 
 # WIDTHS IN CODE POINTS, via python3, for the reason 20-messages.sh records: these rows carry box
 # art, and mawk counts bytes, so `━` would score three columns and every box would look overwide.
 sg_rows_over() {                      # sg_rows_over LIMIT TEXT -> "COLUMNS: row" per row too wide
-    sg_rows "$2" | LIMIT="$1" python3 -c '
+    sg_rows "$2" | LIMIT="$1" run_checker python3 -c '
 import os, sys
 limit = int(os.environ["LIMIT"])
 for row in sys.stdin.read().splitlines():
@@ -179,7 +179,7 @@ for row in sys.stdin.read().splitlines():
 # The widest row there was, for the results file. A number that moves is worth seeing even on a
 # run where nothing failed.
 sg_widest_row() {                     # sg_widest_row TEXT -> the column count of the widest row
-    sg_rows "$1" | python3 -c '
+    sg_rows "$1" | run_checker python3 -c '
 import sys
 rows = [r.rstrip() for r in sys.stdin.read().splitlines()]
 print(max([len(r) for r in rows]) if rows else 0)

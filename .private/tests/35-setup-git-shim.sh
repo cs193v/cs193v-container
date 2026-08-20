@@ -26,6 +26,10 @@ set -u
 cd "$REPO" || exit 1
 
 require_cmd script "needed to drive the arrow-key menus through a pty"
+# sg_rows_over, sg_widest_row and box_problems all measure with python3, and two of the
+# assertions they feed read the empty string as their happy answer -- so this suite had five of
+# #79's twenty-six vacuous passes and asked nothing of the interpreter at all.
+require_python3
 
 # THIS SUITE HAD NO TRAP AT ALL, so sg_cleanup_all was never called and every shim directory it
 # made survived the run — 241 of them were in /tmp when #76 was measured. Both ends, the way

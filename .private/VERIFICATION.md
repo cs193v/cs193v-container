@@ -619,6 +619,102 @@ rm -f "$DIR"/projects/.vt-*
 echo "A-battery: PASS=$PASS FAIL=$FAIL"
 ```
 
+## A.15 Vacuity audit — differential sabotage (run by hand; deliberately not a tier)
+
+**What it answers:** which assertions PASS when the thing that computes their verdict never ran.
+Reading for them does not work — three sweeps plus #78 missed the twenty-six this found in two
+runs — because at the call site there is nothing to see. `assert_eq NAME "" "$(... |
+box_problems)"` is correct code whose happy answer is the empty string, and a checker that dies
+prints exactly that.
+
+Put a fake `python3` first on `$PATH` and run the cheap lane twice, against a baseline:
+
+* **death** — traceback to stderr, exit 1. What a crash looks like.
+* **poison** — prints `SABOTAGEPOISON` to stdout, exit 0. What "the checker ran and disagreed"
+  looks like.
+
+`pass(death) ∩ fail(poison)` is then exactly the vacuous set: verdicts that *depend* on the
+checker's output yet *pass* when it dies.
+
+```sh
+S=$(mktemp -d); mkdir -p "$S/death" "$S/poison"
+printf '#!/bin/sh\nprintf "Traceback\\n" >&2\nexit 1\n' > "$S/death/python3"
+printf '#!/bin/sh\necho SABOTAGEPOISON\nexit 0\n'         > "$S/poison/python3"
+chmod 755 "$S"/*/python3
+
+leg() {                               # leg NAME [DIR-TO-PREPEND-TO-PATH]
+  export CS193V_RESULTS="$S/res-$1.tsv"; : > "$CS193V_RESULTS"
+  for f in .private/tests/[0-9][0-9]-*.sh; do
+    case "$(sed -n 's/^#[[:space:]]*TIER:[[:space:]]*\([a-z]*\).*/\1/p' "$f" | head -1)" in
+      static|unit|shim) CS193V_SUITE="$(basename "$f")" PATH="${2:+$2:}$PATH" bash "$f" \
+                            > "$S/log-$1-$(basename "$f" .sh).txt" 2>&1 ;;
+    esac
+  done
+  printf '%-9s pass %-5s fail %s\n' "$1" \
+         "$(grep -c '^PASS	' "$CS193V_RESULTS")" "$(grep -c '^FAIL	' "$CS193V_RESULTS")"
+}
+leg baseline; leg death "$S/death"; leg poison "$S/poison"
+
+sel() { awk -F'	' -v s="$1" '$1 == s { print $2 "	" $3 }' "$S/res-$2.tsv" | LC_ALL=C sort -u; }
+LC_ALL=C comm -12 <(sel PASS death) <(sel FAIL poison)      # THE VACUOUS SET — must be empty
+```
+
+**Measured on `740a14f`, before the fix (#79):**
+
+| run | pass | fail |
+| --- | --- | --- |
+| baseline | 1167 | 0 |
+| death | 1106 | 61 |
+| poison | 1094 | 73 |
+
+16 assertions in the difference, all confirmed by reading, across `20-messages.sh`,
+`30-launcher-shim.sh` and `35-setup-git-shim.sh`. The classifier has a **measured blind spot**:
+`assert_not_contains` never appears in `fail(poison)`, because no generic marker contains an
+arbitrary needle — but 10 such assertions in `30-launcher-shim.sh` are fed by `render_pty` and
+all 10 passed in the death run. **≥26 live vacuous passes in the cheap lane, from python3 alone.**
+
+**Measured after the fix, same recipe:**
+
+| run | pass | fail |
+| --- | --- | --- |
+| baseline | 1186 | 0 |
+| death | 577 | 8 |
+| poison | 577 | 8 |
+
+Vacuous set: **empty**. The pass counts drop because `require_python3` now stops
+`10-static.sh`, `20-messages.sh`, `30-launcher-shim.sh` and `35-setup-git-shim.sh` at the door
+rather than letting them run on an interpreter that cannot answer.
+
+**RUN IT WITH THE DOOR TAKEN OFF AS WELL, and this is the leg that answers the question.** Stub
+`require_python3` to `return 0` in a copy of the tree and repeat: what is then measured is whether
+each ASSERTION is protected, rather than whether the suite aborted before reaching it. This is the
+number to compare against the 1106/61 above, since `require_python3` did not exist then.
+
+| run | pass | fail |
+| --- | --- | --- |
+| death, no door | 1055 | 131 |
+| poison, no door | 1081 | 105 |
+
+Vacuous set with the door removed: **empty**.
+
+**Some of the failures in each sabotage leg are the FIXTURE, not a checker**, and knowing which saves the
+next person the hunt. `lib/podman-shim.sh` builds the launcher's control socket with python3, so
+`ack:a-quiet-launch-*` in `30-launcher-shim.sh` cannot pass without one; and two assertions in
+`14-test-harness.sh` — the control run and `python3:a-real-interpreter-passes-the-guard` — exist
+precisely to check that a REAL interpreter still works, so a sabotaged `$PATH` is supposed to
+redden them.
+
+**Why it is not a tier.** `lane_of` in `run-tests.sh` routes any unrecognised tier to the
+**podman** lane, so a `sabotage` tier would serialise behind a container it has nothing to do
+with; `DEFAULT_TIERS` would have to exclude it, and an unrun gate is the same defect as
+`60-container.sh`'s inotify assertion that had never once executed. The durable half is
+`14-test-harness.sh`'s checker fixture — both shapes plus the poisoned interpreter, in
+milliseconds, in the cheap lane, on every run.
+
+**Do not extend the sabotage past python3.** `sed` poisons `tier_of`, so the two legs stop
+containing the same suites; `grep` backs `count()`, which then reports `0 pass` and exits 0;
+`awk` is the subject under test in three suites; and `jq` appears nowhere outside `gh --jq`.
+
 ---
 
 ## 1. Install and preflight
