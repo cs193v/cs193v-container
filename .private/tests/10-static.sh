@@ -84,10 +84,15 @@ assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 #
 # `--label` rather than `$VT_RUN` is the thing looked for, so that the one line which spells the
 # label out passes on its own terms and a future second runner can too.
-real_podman="$PRIVATE/tests/lib/assert.sh"
+# lib/sandbox.sh IS ON THIS LIST, and it has to be: the install tier's `podman run` lives in
+# the library rather than in the suite, so a list built only from suite files checked nothing
+# at all for that tier. `install` joins the case arm for the same reason -- a new tier is
+# silently exempt from this rule otherwise, which is how the hole reopens without anyone
+# editing the rule.
+real_podman="$PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/sandbox.sh"
 for f in $PRIVATE/tests/[0-9][0-9]-*.sh; do
     case "$(sed -n 's/^#[[:space:]]*TIER:[[:space:]]*\([a-z]*\).*/\1/p' "$f" | head -1)" in
-        image|container|live) real_podman="$real_podman $f" ;;
+        image|container|live|install) real_podman="$real_podman $f" ;;
     esac
 done
 # -H so the failure names the file even when the list is one entry long, and the comment filter
