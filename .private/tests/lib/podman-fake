@@ -38,6 +38,18 @@
 #   build_delay      seconds to pause between output lines   [0] (0 = all at once)
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
 #   memory_max       what the in-container cgroup read prints [4294967296]
+#   graph_alloc      .Store.GraphRootAllocated              [107374182400 = 100 GiB]
+#   graph_used       .Store.GraphRootUsed                   [10737418240  = 10 GiB]
+#                    Together these decide check_disk's low-disk warning. Set alloc to ''
+#                    or a non-number to drive its silent early returns.
+#   machine_list     `podman machine list --format {{.Name}}`  [] (no machine exists)
+#   machine_mem      .Resources.Memory, MB                  [16384]
+#   machine_disk     .Resources.DiskSize, GB                [64 = MAC_VM_DISK_GB, so
+#                    nothing needs growing unless a test says so]
+#   machine_init_rc  exit code for `machine init`           [0]
+#   machine_set_rc   exit code for `machine set`            [0]
+#   machine_start_rc exit code for `machine start`          [0]
+#   machine_stop_rc  exit code for `machine stop`           [0]
 #   exec_out         what `podman exec ... --attach` prints  []
 #   claim_out        what `podman exec ... --claim` prints   []
 #   top_out          what `podman top` prints               []
@@ -125,6 +137,12 @@ case "${1:-}" in
             # alone and does arithmetic on it, so the two must not be conflated.
             *MemTotal*CPUs*)  printf '%s 4 pasta\n' "$(get mem_total 8589934592)" ;;
             *MemTotal*)       get mem_total 8589934592; echo ;;
+            # check_disk's two Store fields, asked for together in one --format. Nothing
+            # else in the repo reads Store, so this arm cannot reach the launcher suites.
+            # The defaults describe a machine with room, which is the ordinary case and
+            # makes every installer run here exercise check_disk's ok branch for free.
+            *GraphRoot*)      printf '%s %s\n' "$(get graph_alloc 107374182400)" \
+                                                "$(get graph_used 10737418240)" ;;
             *)                echo '' ;;
         esac
         exit 0
@@ -256,7 +274,55 @@ level=error msg="cannot set up pasta"' >&2
         fi
         exit "$(get build_rc 0)"
         ;;
-    machine) echo ''; exit 0 ;;
+    # The macOS virtual machine. `machine` used to answer every subcommand with an empty
+    # line, which read as "no machine exists" -- so DO_MACHINE_RESIZE could not be set and
+    # neither grow_machine_disk nor grow_machine_disk_when_stopped could run at all.
+    #
+    # The DEFAULTS keep that same starting position: machine_list empty means nothing exists,
+    # which is what every test written before this arm assumed. machine_mem and machine_disk
+    # are only read once a list has been arranged, and default to a machine that needs
+    # nothing done to it, so arranging a list does not silently also arrange a resize.
+    #
+    # `.Resources.Memory` is MB and `.Resources.DiskSize` is GB -- podman's own inconsistency,
+    # which the installer's comment at grow_machine_disk records. Answered in those units here
+    # so a test reads the same numbers a Mac would show.
+    machine)
+        shift
+        MSUB="${1:-}"
+        MFMT=''
+        for a in "$@"; do
+            case "$a" in --format=*) MFMT="${a#--format=}" ;; esac
+        done
+        [ "$MFMT" = '' ] && { PREV=''
+            for a in "$@"; do [ "$PREV" = --format ] && MFMT="$a"; PREV="$a"; done; }
+        case "$MSUB" in
+            list)
+                # Nothing, not an empty line: the installer asks `| grep -q .`, and while a
+                # bare newline does not match `.` either, printing nothing is what "no
+                # machines" actually looks like.
+                V="$(get machine_list '')"
+                [ -n "$V" ] && printf '%s\n' "$V"
+                exit 0 ;;
+            inspect)
+                case "$MFMT" in
+                    *DiskSize*) printf '%s\n' "$(get machine_disk 64)" ;;
+                    *Memory*)   printf '%s\n' "$(get machine_mem 16384)" ;;
+                    *)          printf '\n' ;;
+                esac
+                exit 0 ;;
+            init)
+                RC="$(get machine_init_rc 0)"
+                [ "$RC" -ne 0 ] && echo "Error: machine init failed" >&2
+                exit "$RC" ;;
+            set)
+                RC="$(get machine_set_rc 0)"
+                [ "$RC" -ne 0 ] && echo "Error: cannot change a running machine" >&2
+                exit "$RC" ;;
+            start) exit "$(get machine_start_rc 0)" ;;
+            stop)  exit "$(get machine_stop_rc 0)" ;;
+            *)     echo ''; exit 0 ;;
+        esac
+        ;;
     exec)
         # The launcher's doctor/check_clock use `podman exec NAME sh -c '...'`. Answer the
         # handful of probes it makes; anything else is empty.
