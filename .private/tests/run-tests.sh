@@ -17,6 +17,8 @@
 #   static     no podman, no image, no network. Milliseconds.
 #   unit       language-level unit tests (the Containerfile parser).
 #   shim       the launcher's state machine against a fake podman on PATH. No containers.
+#   install    install-cs193v.sh against machines that really lack podman, ssh or a subuid
+#              range, in throwaway containers. Seconds, and cached after the first build.
 #   image      assertions about the built image, via throwaway containers.
 #   container  assertions about a live cs193v container: flags, kernel, ports, files.
 #   live       the launcher driving real podman: idempotency, drift, cleanup.
@@ -33,7 +35,11 @@
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
 #
 #   cheap    static, unit, shim        a fake podman on PATH. No container, no ports.
-#   podman   image, container, live    one container, one tunnel, the forwarded ports.
+#   podman   install, image, container, live
+#                                       one container, one tunnel, the forwarded ports.
+#            install is in this lane because an unrecognised tier lands here, which is the
+#            right default -- but it shares nothing with the others, so it is a candidate
+#            for a third lane once its cost is worth splitting.
 #
 # So they run at the same time. IMAGE, CONTAINER AND LIVE MUST STAY IN ONE LANE, and in file
 # order: they share the container, and CS193V_INSTANCE does not namespace the forwarded
@@ -52,7 +58,7 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
-DEFAULT_TIERS="static unit shim image container live"
+DEFAULT_TIERS="static unit shim install image container live"
 TIERS=""
 FILTER=""
 PARALLEL=yes
