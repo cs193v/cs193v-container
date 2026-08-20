@@ -76,13 +76,25 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     mkdir -p "$SB_WORK"
     copy_course_tree "$SB_TMP/pkg/cs193v-main"
     ( cd "$SB_TMP/pkg" && tar czf "$SB_WORK/course.tar.gz" cs193v-main )
+    # What platform() greps. Bound over /proc/version at run time, which is the entire cost
+    # of making the WSL arm executable on Linux.
+    printf 'Linux version 6.6.0-microsoft-standard-WSL2 (x86_64) #1 SMP\n' > "$SB_WORK/proc-version"
     cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer.sh"
     edit_sub "$SB_WORK/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
     edit_sub "$SB_WORK/installer.sh" '^TARBALL=.*'    'TARBALL="file:///work/course.tar.gz"'
     cat > "$SB_WORK/run.sh" <<'RUN'
 #!/bin/sh
-# Run the installer, then report what changed. The exit status is carried across the report
-# so a case can still assert on it.
+# Arrange any boot-time state this case asked for, THEN run the installer, then report what
+# changed. Arranging it here rather than in the image means one image serves every state --
+# at the cost that a file this touches shows up in `podman diff` whichever way the installer
+# went, so the content report below is what distinguishes the cases and the path list only
+# ever says "and nothing else".
+case "${SB_WSLCONF:-}" in
+    absent)  sudo rm -f /etc/wsl.conf ;;
+    noboot)  printf '[automount]\nenabled=true\n' | sudo tee /etc/wsl.conf >/dev/null ;;
+    boot)    printf '[boot]\n'                        | sudo tee /etc/wsl.conf >/dev/null ;;
+    systemd) printf '[boot]\nsystemd=true\n'         | sudo tee /etc/wsl.conf >/dev/null ;;
+esac
 bash /work/installer.sh
 printf '\n===INSTALLER-RC=%s===\n' "$?"
 printf '===ETC-SUBUID===\n';  cat /etc/subuid  2>/dev/null
@@ -118,7 +130,7 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     # grep and a continuation line does not satisfy it. That is deliberate on its part: the
     # label is what tells this container from a colleague's (#74), and a rule that had to
     # parse shell continuations would be a worse rule.
-    printf '%b' "$keys" | timeout 300 podman run --label "$VT_LABEL" -i --name "$SB_NAME" \
+    printf '%b' "$keys" | timeout 120 podman run --label "$VT_LABEL" -i --name "$SB_NAME" \
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
         -v "$SB_WORK:/work:ro" "$@" \
@@ -146,6 +158,24 @@ sb_section() {                        # sb_section TRANSCRIPT NAME
 # Every fixture container and image this suite could have left behind, and NOTHING else.
 # By exact tag and by our own label -- never a `reference=cs193v*` glob, which on this
 # machine matches localhost/cs193v:local and two colleagues' instance images.
+# Fixture containers an EARLIER, KILLED run left behind, by pid and not by age -- the same
+# reasoning sweep_stale_tmpdirs gives, and for a sharper reason here: these carry
+# cs193v.test=$NAME, so one survivor reddens cleanup:no-stray-containers in the live tier
+# (80-launcher-live.sh:842) as though a colleague's run had leaked it. Measured, not
+# imagined: a probe of mine that I killed mid-run left exactly that.
+#
+# At suite START as well as on EXIT, because a killed suite cannot run its own trap.
+sandbox_sweep_stale() {               # -> how many it removed
+    local c pid n=0
+    for c in $(podman ps -aq --filter "name=^cs193v-fixture-" --format '{{.Names}}' 2>/dev/null); do
+        pid="${c##*-}"
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$pid" 2>/dev/null && continue
+        podman rm -f "$c" >/dev/null 2>&1 && n=$((n + 1))
+    done
+    printf '%s' "$n"
+}
+
 sandbox_cleanup() {
     local c
     for c in $SB_CASES; do
@@ -169,18 +199,18 @@ sandbox_system_diff() {               # sandbox_system_diff DIR -> diff lines ou
 
 # assert_system_diff CASE DIR -- both halves, and the guard that stops empty-vs-empty from
 # passing forever (the trap 25-installer.sh:34-37 records for version_lt).
-assert_system_diff() {                # assert_system_diff CASE DIR
-    local exp="$FIXTURE_DIR/expected-system-paths.$1" got extra want
+assert_system_diff() {                # assert_system_diff CASE DIR [LABEL]
+    local lbl="${3:-$1}" exp="$FIXTURE_DIR/expected-system-paths.$1" got extra want
     want="$SB_TMP/expected.$1"
     grep -v '^#' "$exp" 2>/dev/null | grep -v '^[[:space:]]*$' > "$want" || true
-    if [ -s "$want" ]; then pass "sb-$1:expected-path-set-is-not-empty"
-    else fail "sb-$1:expected-path-set-is-not-empty" "$exp is missing, empty or all comments"; return; fi
+    if [ -s "$want" ]; then pass "sb-$lbl:expected-path-set-is-not-empty"
+    else fail "sb-$lbl:expected-path-set-is-not-empty" "$exp is missing, empty or all comments"; return; fi
     got="$(sandbox_system_diff "$2")"
-    if [ -n "$got" ]; then pass "sb-$1:the-diff-was-really-read"
-    else fail "sb-$1:the-diff-was-really-read" "podman diff produced nothing"; return; fi
+    if [ -n "$got" ]; then pass "sb-$lbl:the-diff-was-really-read"
+    else fail "sb-$lbl:the-diff-was-really-read" "podman diff produced nothing"; return; fi
     extra="$(printf '%s\n' "$got" | grep -vxF -f "$want" || true)"
-    assert_eq "sb-$1:changed-nothing-it-did-not-claim" "" "$extra"
+    assert_eq "sb-$lbl:changed-nothing-it-did-not-claim" "" "$extra"
     local missing
     missing="$(grep -vxF -f <(printf '%s\n' "$got") "$want" || true)"
-    assert_eq "sb-$1:changed-everything-it-claimed" "" "$missing"
+    assert_eq "sb-$lbl:changed-everything-it-claimed" "" "$missing"
 }
