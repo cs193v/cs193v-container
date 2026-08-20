@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+#
+# The link box: what a student actually sees when a program in here wants a browser.
+#
+# Installed as /usr/local/bin/cs193v-linkbox and run INSIDE A TMUX POPUP by open-url. It is
+# not for students to run, and nothing else calls it.
+#
+# WHY A POPUP AND NOT A PRINTED BOX. open-url used to print its box to stdout, which was fine
+# while every caller inherited stdio. Claude Code consults $BROWSER correctly, runs the stub,
+# and CAPTURES ITS STDOUT -- so the box was discarded and the student saw Claude's own
+# 400-character URL instead. That is issue #85. Writing to /dev/tty escapes the pipe (verified)
+# but lands inside a full-screen TUI that repaints over it a quarter-second later. A tmux popup
+# is the one surface that survives: `display-popup` is "drawn over the top of any panes", and
+# panes are not updated while one is present. Both measured.
+#
+# THE BOX IS DRAWN BY box() FROM /etc/cs193v/ui.sh. There is exactly one box renderer in this
+# project and this is not a second one -- see the note in cs193v-ui.sh about issue #21.
+#
+# EVERY CONSTRAINT BELOW IS A BUG THAT HAPPENED. This file was prototyped against a real popup
+# and each of the four comments marked MEASURED cost a debugging round.
+
+set -uo pipefail
+
+URL=""
+EXPIRES_IN=""
+PIDFILE=""
+SERVED_FILE=""
+ROWS_ONLY=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --url)         URL="${2:-}"; shift ;;
+        --expires-in)  EXPIRES_IN="${2:-}"; shift ;;
+        --pidfile)     PIDFILE="${2:-}"; shift ;;
+        --served-file) SERVED_FILE="${2:-}"; shift ;;
+        # How open-url sizes the popup: the box's height, asked of the thing that draws it, so
+        # the two cannot disagree. A popup one row taller shows a dead row under the bottom
+        # border; one row shorter scrolls the title off the top. Both were seen while
+        # prototyping, which is why this is not a number written down in open-url.
+        --rows)        ROWS_ONLY=1 ;;
+        *) printf 'cs193v-linkbox: unknown option: %s\n' "$1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+[ -n "$URL" ] || { printf 'usage: cs193v-linkbox --url URL --expires-in SECONDS\n' >&2; exit 2; }
+case "$EXPIRES_IN" in
+    ''|*[!0-9]*) printf 'cs193v-linkbox: --expires-in needs a number of seconds\n' >&2; exit 2 ;;
+esac
+
+# box(), BOX_W, and the colour variables. Sourcing this is inert by contract -- its own header
+# promises "assignments and function definitions only, no traps, no output, no reads" -- which
+# is the only reason it is safe to pull in from a script that installs traps of its own.
+# shellcheck source=/dev/null
+. /etc/cs193v/ui.sh
+FIELD=$(( BOX_W - 4 ))                # box()'s own usable text width
+
+# ─── the palette ───────────────────────────────────────────────────────────────
+# Sandstone on a deep blue. tmux.conf's chrome is xterm-256 indices, but its note at
+# `terminal-features "*:RGB"` records that this terminal is truecolour, which these need --
+# the 256-cube has nothing within useful distance of either.
+#
+# THE BLUE IS STANFORD CARDINAL, HUE-ROTATED 240 DEGREES. Same saturation, same value, pointed
+# somewhere else. Cardinal itself was tried and rejected: every other red box this project
+# draws IS an error -- box()'s default title is literally STOP, and die() draws it -- so a red
+# box for "here is your login link" borrows the wrong vocabulary entirely.
+#
+# Contrast against the background, by the WCAG formula:
+#   sandstone      #F5F2E1 on #15158C .... 12.30:1   body text and border  (AAA)
+#   sandstone dark #D2C295 on #15158C ....  7.83:1   the countdown, bold   (AAA)
+BG='48;2;21;21;140'
+SAND='38;2;245;242;225'
+SAND_DARK='38;2;210;194;149'
+
+esc() { printf '\033%s' "$1"; }
+
+# "Back to the popup's default cell": sandstone on blue. box() is handed this as its $C_OFF so
+# that every reset it emits inside the box lands on the popup's background rather than the
+# terminal's. open-url creates the popup with `-s fg=...,bg=...`, which makes a bare \033[0m do
+# this by itself; spelling it out costs nothing and keeps the box identical if it is ever drawn
+# somewhere without that style.
+DEFAULT="$(printf '\033[0;%s;%sm' "$SAND" "$BG")"
+BORDER="$(printf '\033[%s;%sm' "$SAND" "$BG")"
+COUNT="$(printf '\033[1;%s;%sm' "$SAND_DARK" "$BG")"
+BOLD="$(printf '\033[1;%s;%sm' "$SAND" "$BG")"
+
+CHIP='[x]'
+# U+25C2 points back at the chip it is telling you about, and the prose names the KEY rather
+# than the click because the key is the one that needs no mouse.
+CHIP_LEAD="  $CHIP ◂ click x to close"
+# Same width discipline, so the hint cannot move the right wall. It keeps the chip drawn: the
+# click target's position is derived from a rendered frame, and a frame without [x] would leave
+# a live target sitting where nothing is drawn.
+HINT_LEAD="  $CHIP ◂ typing goes nowhere; press x to close"
+
+# ─── the link line ─────────────────────────────────────────────────────────────
+# Centred between U+25B8 at the very start of the field and U+25C2 at the very end, so the two
+# markers point inward at the one thing on screen the student is meant to act on.
+#
+# THE PAIR IS ▸ ◂, THE *SMALL* TRIANGLES, and every part of that is deliberate:
+#
+#   MATCHED -- they are the same glyph mirrored. The obvious partner for ▸ is U+25C0 ◀, which
+#   is the FULL-SIZE triangle and visibly heavier than the small one it would sit opposite.
+#
+#   ONE COLUMN IN EVERY LOCALE -- both are East-Asian-Width NEUTRAL. U+25C0 is AMBIGUOUS: one
+#   column here, TWO under a CJK locale, and a marker that silently doubles pushes the right
+#   wall out and breaches the box.
+#
+#   NOT EMOJI -- U+25C0 and U+25B6 are in Unicode's emoji data (they are the ◀ ▶ media
+#   buttons), so a terminal preferring emoji presentation may draw them as double-width colour
+#   glyphs with no variation selector needed. Neither small triangle appears in emoji data.
+#
+# The same reasoning rules out U+2190 ← for the chip line, which is also Ambiguous.
+link_line() {
+    local inner=$(( FIELD - 2 )) l r
+    l=$(( (inner - ${#URL}) / 2 )); [ "$l" -lt 0 ] && l=0
+    r=$(( inner - ${#URL} - l ));   [ "$r" -lt 0 ] && r=0
+    printf '▸%*s%s%*s◂\n' "$l" '' "$URL" "$r" ''
+}
+
+# ─── one frame ─────────────────────────────────────────────────────────────────
+# COLOUR AND HYPERLINKS ARE APPLIED TO box()'s OUTPUT, NOT ITS INPUT, and that is forced.
+# box() strips ANSI from stdin on purpose -- its comment: dw() measures a colour sequence as
+# the columns its BYTES would occupy, "so a line carrying one comes out 11 columns short and
+# takes the right wall in with it" -- and its `gsub(esc ".", "", t)` would eat the \033] of an
+# OSC 8 hyperlink and leave `8;;http://...` sitting in the box as literal text. So the tokens
+# go in plain, at fixed width, and sed decorates them afterwards.
+#
+# THE CLOCK IS mm:ss. It was NNs while the box had its own 60-second life; now it counts the
+# LINK down, so it has to hold minutes. Fixed width either way, so box()'s padding never moves.
+render_box() {
+    local left="$1" hint="$2" lead clock gap
+    clock="$(printf '%d:%02d' $(( left / 60 )) $(( left % 60 )))"
+    if [ "$hint" = yes ]; then lead="$HINT_LEAD"; else lead="$CHIP_LEAD"; fi
+    gap=$(( FIELD - ${#lead} - ${#clock} - 11 ))
+    [ "$gap" -lt 1 ] && gap=1
+
+    export C_OFF="$DEFAULT"
+    {
+        printf '\n'
+        printf '  This program asks you to open this link in your browser.\n'
+        printf '\n'
+        link_line
+        printf '\n'
+        printf '  CTRL+Click the link to open it (Command+Click on macOS).\n'
+        printf '\n'
+        printf '%s%*sexpires in %s\n' "$lead" "$gap" '' "$clock"
+    } | box 'Continue in Browser' "$BORDER" |
+        sed -e "s/expires in ${clock}/${COUNT}expires in ${clock}${DEFAULT}/" \
+            -e "s/\\[x\\]/${BOLD}[x]${DEFAULT}/" \
+            -e "s|${URL}|$(printf '\033]8;;%s\033\\\\' "$URL")${URL}$(printf '\033]8;;\033\\\\')|"
+}
+
+# Where the chip is, in this popup's own rows and columns. Derived from a rendered frame and
+# from CHIP_LEAD rather than counted by hand, so editing the prose above cannot silently move
+# the click target off the thing it is drawn on.
+chip_geometry() {
+    local prefix
+    CHIP_ROW="$(render_box "$EXPIRES_IN" no | grep -n -F -- "$CHIP" | head -1 | cut -d: -f1)"
+    : "${CHIP_ROW:=9}"
+    # box() lays every row out as `┃ <FIELD columns> ┃`, so column 1 is the wall, column 2 a
+    # space, and the text field starts at column 3.
+    prefix="${CHIP_LEAD%%"$CHIP"*}"
+    CHIP_COL1=$(( 3 + ${#prefix} ))
+    CHIP_COL2=$(( CHIP_COL1 + ${#CHIP} - 1 ))
+}
+
+box_rows() { render_box "$EXPIRES_IN" no | wc -l; }
+
+# ─── the loop ──────────────────────────────────────────────────────────────────
+# FOUR WAYS OUT AND NO FIFTH: the student presses x or clicks the chip; shortlink reports that
+# it served the redirect; shortlink's server goes away; or Ctrl+C.
+#
+# CTRL+C IS NOT HANDLED HERE, AND THAT IS THE IMPLEMENTATION. tmux forwards it into the popup
+# as a real SIGINT (measured), `stty -icanon` leaves ISIG on, the default disposition kills
+# this process, bash still runs the EXIT trap, and open-url's `-E` closes the popup on a
+# non-zero exit (measured: rc=130). So the box goes and the student's SECOND Ctrl+C reaches
+# their program exactly as it would have with no popup in the way. Adding a `trap ... INT`
+# would break that; the harness asserts it, which is why.
+#
+# NO KEY BUT x DISMISSES. A tmux popup captures the keyboard, so anything typed while this is
+# up cannot reach the pane behind. If any key closed the box, a student returning from the
+# browser and pasting an auth code would lose its FIRST CHARACTER to the dismissal and deliver
+# the rest to the tool -- a truncated paste, which is issue #67's failure arriving by a new
+# road. Swallowing the whole paste is strictly better: nothing happened, visibly.
+#
+# WHICH IS WHY A DROPPED KEY SAYS SO. Over a fifteen-minute box, silence reads as a hung
+# terminal.
+main() {
+    chip_geometry
+    local left drawn=-1 hint=no drawn_hint=x b rest body col row tty_save
+
+    # ECHO OFF FOR THE WHOLE LIFETIME. MEASURED. `read -rsn1` suppresses echo only WHILE IT IS
+    # READING and restores the terminal's settings afterwards, so bytes arriving BETWEEN reads
+    # are echoed by the tty driver. With the cursor parked on the last row of a popup sized to
+    # the box, those echoed characters scroll the popup and the top border -- title and all --
+    # goes off the screen. Ten keys at once was enough to do it.
+    tty_save="$(stty -g 2>/dev/null || true)"
+    stty -echo -icanon 2>/dev/null || true
+
+    esc '[?25l'                       # the cursor would rest on the countdown and strobe
+    esc '[?1000h'; esc '[?1006h'      # SGR mouse reporting, so the [x] can be clicked
+    # shellcheck disable=SC2064
+    trap "esc '[?1006l'; esc '[?1000l'; esc '[?25h'; printf '\033[0m'
+          [ -n '$tty_save' ] && stty '$tty_save' 2>/dev/null" EXIT
+
+    SECONDS=0
+    while :; do
+        # THE CLOCK IS WALL-CLOCK, not a count of read timeouts. MEASURED. Every keystroke
+        # satisfies `read -t 1` early, so counting timeouts let a student drumming their
+        # fingers hold the box open indefinitely. $SECONDS cannot be stalled, which is also
+        # why the countdown variable is not called SECONDS.
+        left=$(( EXPIRES_IN - SECONDS ))
+        [ "$left" -le 0 ] && return 0
+
+        # The two things shortlink tells us, both free: the loop was already ticking.
+        [ -n "$SERVED_FILE" ] && [ -e "$SERVED_FILE" ] && return 0
+        [ -n "$PIDFILE" ] && [ ! -e "$PIDFILE" ] && return 0
+
+        if [ "$left" != "$drawn" ] || [ "$hint" != "$drawn_hint" ]; then
+            esc '[H'
+            # NO TRAILING NEWLINE. MEASURED. The box is exactly as tall as the popup, so a
+            # newline after the bottom border scrolls the whole thing and takes the title row
+            # off the top. $( ) strips it; there is exactly one to strip.
+            printf '%s' "$(render_box "$left" "$hint")"
+            drawn="$left"; drawn_hint="$hint"
+        fi
+
+        IFS= read -rsn1 -t 1 b || { hint=no; continue; }
+        case "$b" in x|X) return 0 ;; esac
+        if [ "$b" != "$(printf '\033')" ]; then hint=yes; continue; fi
+
+        # An escape: a mouse report, or a bare Escape. Drain the rest of the sequence.
+        rest=''
+        while IFS= read -rsn1 -t 0.05 b; do
+            rest="$rest$b"
+            case "$b" in [Mm]) break ;; esac
+        done
+        case "$rest" in
+            '[<'*M)                   # SGR press: [<button;col;row M
+                body="${rest#[<}"
+                col="$(printf '%s' "$body" | cut -d';' -f2)"
+                row="$(printf '%s' "$body" | cut -d';' -f3 | tr -dc '0-9')"
+                if [ "${row:-0}" = "$CHIP_ROW" ] &&
+                   [ "${col:-0}" -ge "$CHIP_COL1" ] && [ "${col:-0}" -le "$CHIP_COL2" ]; then
+                    return 0
+                fi ;;
+            *) hint=yes ;;
+        esac
+    done
+}
+
+if [ -n "$ROWS_ONLY" ]; then box_rows; exit 0; fi
+main
