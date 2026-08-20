@@ -596,7 +596,8 @@ COPY files/ /tmp/cs193v-files/
 #
 # What it does, in order:
 #
-#  1. Installs the helper commands: the $BROWSER stub, `shortlink` behind it, the entrypoint,
+#  1. Installs the helper commands: the $BROWSER stub, `shortlink` behind it, `cs193v-linkbox`
+#     in front of it, the entrypoint,
 #     and the three that
 #     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
 #     last two are commands rather than inline shell because they now have two callers
@@ -761,6 +762,8 @@ COPY files/ /tmp/cs193v-files/
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
     install -m 0755 /tmp/cs193v-files/shortlink       /usr/local/bin/shortlink; \
+    install -m 0755 /tmp/cs193v-files/cs193v-linkbox /usr/local/bin/cs193v-linkbox; \
+    bash -n /usr/local/bin/cs193v-linkbox; \
     python3 -c "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" /usr/local/bin/shortlink; \
     /usr/local/bin/shortlink --help > /dev/null; \
     sl_out="$(/usr/local/bin/shortlink https://example.com/build-check || true)"; \
@@ -800,6 +803,8 @@ RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/setup-git             /usr/local/bin/setup-git; \
     bash -n /etc/cs193v/ui.sh; \
     bash -n /usr/local/bin/setup-git; \
+    lb_rows="$(/usr/local/bin/cs193v-linkbox --url http://localhost:1/x --expires-in 900 --rows)"; \
+    test "$lb_rows" = 10; \
     test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \

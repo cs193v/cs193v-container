@@ -1286,4 +1286,265 @@ fi
 it2 kill-server 2>/dev/null
 hx_stop "$S2"
 
+# ============================================================================
+hx_section "the link box  (issue #85)"
+# ============================================================================
+#
+# WHAT THIS TIER IS FOR, restated for this section: open-url's box is drawn in a tmux POPUP,
+# and a popup exists nowhere in the pane's own grid -- `capture-pane` on the session under
+# test cannot see it. Only the rendered screen can, which is what the outer tmux gives us. So
+# this is the only place in the project where the box under test is the box a student sees.
+#
+# ITS OWN SERVER, and that is not tidiness. The R7 section above deliberately kills both the
+# first inner server and $S, so anything appended after it starts from nothing -- which is
+# exactly the mistake this section was written with the first time round: every assertion
+# failed with an empty screen because it was capturing a session that had been shut down two
+# hundred lines earlier.
+S3=tmuxlinkbox
+SOCK3="cs193vlb$$"
+it3() { tmux -L "$SOCK3" "$@"; }
+
+LB=/usr/local/bin/cs193v-linkbox
+# A FIVE-DIGIT PORT, and that is fidelity rather than an arbitrary number. 3002 was the top of
+# the old declared range; the kernel hands out an ephemeral port now, so every URL a student
+# actually sees is a digit longer than that fixture was. The assertion below is that the link
+# fits on ONE unwrapped line, so testing it a character short of the real thing is testing the
+# easier case. Nothing binds this -- the box only ever renders it.
+LBURL=http://localhost:38657/magic-token-link
+LBTMP="$(mktemp -d)"
+
+# The box is raised the way open-url raises it, and `display-popup` BLOCKS its caller
+# (measured), so every invocation here is backgrounded. That is not a test artifact -- it is
+# the reason open-url detaches.
+lb_open() {
+  it3 display-popup -B -E -w 71 -h 10 -s 'fg=#F5F2E1,bg=#15158C' \
+     "$LB --url $LBURL --expires-in 900 --pidfile $LBTMP/pid --served-file $LBTMP/served" \
+     >/dev/null 2>&1 &
+}
+lb_arm() { : > "$LBTMP/pid"; rm -f "$LBTMP/served"; }
+lb_close() { it3 display-popup -C 2>/dev/null; hx_gone "$S3" 'Continue in Browser' 4; }
+
+if [ ! -x "$LB" ]; then
+  hx_fail "the link box is installed" "$LB is not executable"
+else
+  hx_pass "the link box is installed"
+  hx_start "$S3" "tmux -L $SOCK3 -f $CONF new-session -s cs193v"
+fi
+
+if hx_wait "$S3" '\+ NEW TAB' 12; then
+  probe_name3() { it3 display-message -p -t cs193v '#{window_name}' 2>/dev/null; }
+
+  # --- it appears, and it is the right shape -------------------------------
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    hx_pass "the box appears over the pane"
+
+    # The whole point of issue #67, and of this box: the link must be on ONE line. A URL that
+    # wrapped is a URL the terminal hands back with a newline in the middle of it.
+    hx_expect_contains "the link is on one unwrapped line" "$(hx_cap "$S3")" "$LBURL"
+
+    # Every row exactly 71 columns. box() computes its own padding, so a short row has had its
+    # right wall pulled in by something -- a colour sequence measured as bytes, or a glyph the
+    # terminal scored as two columns. Counted the way box() counts, by ignoring UTF-8
+    # continuation bytes, so this agrees with dw() rather than with `wc -c`.
+    hx_expect_eq "every row of the box is 71 columns" \
+      "$(hx_cap "$S3" | grep -E '^[┏┃┗]' | awk '{ n = 0
+           for (i = 1; i <= length($0); i++) { c = substr($0, i, 1); if (c !~ /[\200-\277]/) n++ }
+           if (n != 71) bad++ } END { print bad + 0 }')" "0"
+
+    # --- a dropped key explains itself -------------------------------------
+    # No key but x closes the box, because a popup captures the keyboard: if any key closed it,
+    # a student returning from the browser and pasting an auth code would lose its first
+    # character to the dismissal and deliver the rest to the tool. Over a fifteen-minute box,
+    # silently swallowing what they type reads as a hung terminal -- hence the hint.
+    hx_str "$S3" "a"
+    if hx_wait "$S3" 'typing goes nowhere' 4; then
+      hx_pass "a dropped key explains itself"
+      # The chip must still be drawn in the hint frame. The click target's position is derived
+      # from a rendered frame once; a frame without [x] would leave a live target sitting where
+      # nothing is drawn.
+      hx_expect_contains "the [x] chip survives the hint frame" "$(hx_cap "$S3")" "[x]"
+    else
+      hx_fail "a dropped key explains itself" "chip line: $(hx_cap "$S3" | grep -F '[x]')"
+    fi
+    hx_expect_contains "a dropped key does not close the box" "$(hx_cap "$S3")" "Continue in Browser"
+
+    # --- clicking the chip --------------------------------------------------
+    # Located rather than hardcoded, so editing the prose cannot quietly move the target off
+    # the glyph.
+    set -- $(hx_find "$S3" '[x]')
+    if [ -n "${1:-}" ]; then
+      hx_click "$S3" "$1" "$2"
+      if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "clicking the [x] closes the box"
+      else hx_fail "clicking the [x] closes the box" "still up"; fi
+    else
+      hx_fail "clicking the [x] closes the box" "could not find [x] on screen"
+    fi
+  else
+    hx_fail "the box appears over the pane" "screen: $(hx_cap "$S3" | head -4)"
+  fi
+  lb_close
+
+  # --- an off-target click must NOT close it -------------------------------
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    set -- $(hx_find "$S3" 'CTRL+Click')
+    hx_click "$S3" "$1" "$2"
+    hx_settle 1
+    hx_expect_contains "an off-target click leaves the box up" "$(hx_cap "$S3")" "Continue in Browser"
+  else
+    hx_fail "an off-target click leaves the box up" "box never appeared"
+  fi
+  lb_close
+
+  # --- the x key ------------------------------------------------------------
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    hx_str "$S3" "x"
+    if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "the x key closes the box"
+    else hx_fail "the x key closes the box" "still up"; fi
+  else
+    hx_fail "the x key closes the box" "box never appeared"
+  fi
+  lb_close
+
+  # --- shortlink says the link was clicked ---------------------------------
+  # The signal open-url actually relies on. Touching the file stands in for the browser having
+  # followed the link; that shortlink really touches it on a redirect, and NOT on a 404, is
+  # asserted in 50-image.sh where a curl can reach the server.
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    : > "$LBTMP/served"
+    if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "the box closes when the link is clicked"
+    else hx_fail "the box closes when the link is clicked" "still up after --served-file appeared"; fi
+  else
+    hx_fail "the box closes when the link is clicked" "box never appeared"
+  fi
+  lb_close
+
+  # --- shortlink is gone, so the link is dead ------------------------------
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    rm -f "$LBTMP/pid"
+    if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "the box closes when the server is gone"
+    else hx_fail "the box closes when the server is gone" "still up after the pidfile vanished"; fi
+  else
+    hx_fail "the box closes when the server is gone" "box never appeared"
+  fi
+  lb_close
+
+  # --- Ctrl+C: closes the box, and the SECOND one reaches the program ------
+  # A REGRESSION TEST FOR BEHAVIOUR THAT COSTS NO CODE, which is exactly the kind that stops
+  # holding without anyone noticing. tmux forwards C-c into the popup, the default disposition
+  # kills the renderer, and -E closes the box on its non-zero exit. Adding a `trap ... INT` to
+  # cs193v-linkbox would break this, and breaking it is the point.
+  lb_arm
+  hx_cmd "$S3" "sleep 200"
+  hx_until 'probe_name3' sleep 8
+  lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    hx_hex "$S3" "03"
+    if hx_gone "$S3" 'Continue in Browser' 5; then
+      hx_pass "the first Ctrl+C closes the box"
+      # ...and the sleep behind it is untouched: the box ate that first one.
+      hx_expect_eq "the first Ctrl+C does not reach the program" "$(probe_name3)" "sleep"
+      hx_hex "$S3" "03"
+      hx_until 'probe_name3' bash 8
+      hx_expect_eq "the second Ctrl+C reaches the program" "$(probe_name3)" "bash"
+    else
+      hx_fail "the first Ctrl+C closes the box" "still up"
+    fi
+  else
+    hx_fail "the first Ctrl+C closes the box" "box never appeared"
+  fi
+  lb_close
+  hx_hex "$S3" "03"; hx_until 'probe_name3' bash 8
+
+  # --- legible, measured rather than eyeballed -----------------------------
+  lb_arm; lb_open
+  if hx_wait "$S3" 'Continue in Browser' 10; then
+    # SCOPED TO THE BOX'S OWN ROWS, by its border glyphs. Unscoped this analyses the whole
+    # screen, which here includes the pane behind the popup -- and the student's shell prompt
+    # is Ubuntu's, whose colours this project does not set and cannot vouch for. The first
+    # version of this check failed on `virtual-keith@virtual-linux`.
+    #
+    # --require-explicit because every colour in this box is truecolour and hard-coded: none of
+    # it resolves through the terminal's own palette, so it looks the same on Terminal.app
+    # "Basic" as on a dark theme. That is a stronger claim than the contrast floor alone and
+    # this is the flag that holds it.
+    hx_check_colors "$S3" "the link box" --grep '┃' --grep '┏' --grep '┗' --require-explicit
+  else
+    hx_fail "legible: the link box" "box never appeared"
+  fi
+  lb_close
+
+  # --- open-url: the whole path a student actually takes -------------------
+  # EVERYTHING ABOVE DRIVES cs193v-linkbox DIRECTLY, which leaves the interesting half
+  # untested: open-url has to shorten, size the popup, quote the command and detach. This is
+  # the case issue #85 is actually about -- a tool consults $BROWSER and the student sees the
+  # link without open-url having printed anything a caller could swallow.
+  OUOUT=/tmp/cs193v-openurl-out
+  hx_cmd "$S3" "rm -f $OUOUT; open-url 'https://example.com/verify?code=ABCD' > $OUOUT 2>&1"
+  # THIRTY SECONDS, AND THE BUDGET IS NOT ABOUT DRAWING. Every wait above raises the box
+  # directly, but this one goes through the real shortlink, which no longer returns at once: it
+  # binds an ephemeral port and then WAITS to be told the tunnel carried it, up to
+  # CONFIRM_TIMEOUT (10 s in files/shortlink) on a loaded machine. The old 15 s was chosen when
+  # that call was instant, and it left the box perhaps four seconds to appear after a worst-case
+  # confirm. This is the same assertion with that overlap taken out.
+  if hx_wait "$S3" 'Continue in Browser' 30; then
+    hx_pass "open-url raises the box itself"
+
+    # It shortened: the box names a localhost link, not the URL it was handed. The long one
+    # must be absent -- that is issue #67, and box() would have broken it across four rows.
+    #
+    # SCOPED TO THE BOX'S OWN ROWS, and the first version of this was not. The command that
+    # raised the box was TYPED into the pane, so `example.com` is sitting on the screen behind
+    # it either way and the whole-screen version failed on the echo of its own input.
+    LBBOX="$(hx_cap "$S3" | grep -E '[┏┃┗]')"
+    hx_expect_contains "open-url's box shows the shortened link" "$LBBOX" "http://localhost:"
+    hx_expect_absent   "open-url's box hides the long URL"      "$LBBOX" "example.com"
+
+    # AND IT ALREADY RETURNED, which is the whole reason it detaches. `display-popup` blocks
+    # its caller, so an open-url that waited would sit there for the full fifteen minutes --
+    # and Claude Code would not reach its "paste the code" prompt until the student dismissed
+    # a box telling them to go and fetch that code.
+    #
+    # WAITED FOR RATHER THAN SAMPLED. The label goes bash -> sh -> bash as open-url runs and
+    # exits, and the box can finish rendering before that last transition lands -- sampling the
+    # instant hx_wait returned caught `sh` on one run and `bash` on the next. A blocked
+    # open-url would never reach bash at all, so a bounded wait is the same assertion with the
+    # flake taken out.
+    hx_until 'probe_name3' bash 8
+    hx_expect_eq "open-url returns without waiting for the box" "$(probe_name3)" "bash"
+    # ...and it returned while the box was still up, which is the half that matters.
+    hx_expect_contains "the box is still up after open-url returned" \
+      "$(hx_cap "$S3")" "Continue in Browser"
+
+    hx_str "$S3" "x"
+    hx_gone "$S3" 'Continue in Browser' 5
+
+    # AND IT PRINTED NOTHING. This is the assertion that would have caught #85 in the first
+    # place, inverted: with a popup up, stdout is silent, so there is nothing left for a
+    # caller to swallow and nothing shown twice.
+    hx_expect_eq "open-url prints nothing when the box is shown" \
+      "$(wc -c < "$OUOUT" 2>/dev/null | tr -d ' ')" "0"
+  else
+    hx_fail "open-url raises the box itself" "screen: $(hx_cap "$S3" | head -4)"
+  fi
+  # The server open-url started would otherwise hold a host port for fifteen minutes: the
+  # tunnel forwards whatever it is listening on, and that forward outlives this section.
+  hx_cmd "$S3" "pkill -f '[s]hortlink' ; rm -f $OUOUT"
+  hx_until 'probe_name3' bash 8
+
+  # --- and still no key may summon one ------------------------------------
+  # The packaging section's danger list already forbids display-popup in any binding. open-url
+  # invokes it as a program; a student must still have no key that does.
+  hx_expect_absent "no keybinding summons a popup" "$(it3 list-keys 2>/dev/null)" "display-popup"
+else
+  hx_fail "the link box session starts" "screen: $(hx_cap "$S3" | head -3)"
+fi
+it3 kill-server 2>/dev/null
+hx_stop "$S3"
+rm -rf "$LBTMP"
+
 hx_summary "tmux prototype"
