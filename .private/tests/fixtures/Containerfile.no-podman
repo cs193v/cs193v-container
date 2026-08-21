@@ -1,0 +1,45 @@
+# A machine with no podman and no ssh client: what a student actually starts from.
+#
+# THE ONLY FIXTURE THAT RUNS apt FOR REAL, and it does it with the network OFF. A local
+# file:// repository is built at image-build time from the download-only closure of the three
+# packages the installer asks for, and the network sources are removed -- so `sudo apt-get
+# update` (installer:511) succeeds against the local repo alone and `sudo apt-get install`
+# (installer:513) installs from it. Without that the case would either need the network on
+# every run, making it as reliable as the Ubuntu archive, or it would fail at `apt-get
+# update` before reaching the step it exists to test.
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+
+# curl is needed by fetch_files even for a file:// URL; sudo carries every privileged call.
+# podman, uidmap and openssh-client are deliberately NOT installed -- their absence is the
+# fixture.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo curl dpkg-dev \
+ && apt-get install -y --download-only --no-install-recommends podman uidmap openssh-client \
+ && mkdir -p /opt/localrepo \
+ && cp /var/cache/apt/archives/*.deb /opt/localrepo/ \
+ && ( cd /opt/localrepo && dpkg-scanpackages -m . /dev/null | gzip -9c > Packages.gz ) \
+ && printf 'deb [trusted=yes] file:///opt/localrepo ./\n' > /etc/apt/sources.list.d/local.sources.list \
+ && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get update
+
+# The packages must NOT be installed, only downloadable. Asserted in the image rather than
+# trusted, because --no-install-recommends is one flag away from pulling podman in as a
+# recommendation of something else -- and then `apt-get install podman` at run time would
+# print "already the newest version", exit 0, and the case would be green forever having
+# installed nothing.
+RUN ! command -v podman && ! command -v ssh && test -s /opt/localrepo/Packages.gz
+
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \
+ && useradd -m -u 1000 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# A range, so podman and ssh are the only things needing permission.
+RUN printf 'student:200000:65536\n' > /etc/subuid \
+ && printf 'student:200000:65536\n' > /etc/subgid
+
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

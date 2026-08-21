@@ -1,0 +1,23 @@
+# Everything outside the course tree that changes when the installer REFUSES a machine whose
+# podman is too old. It dies in survey, before choose_dir, so nothing it does is deliberate --
+# every line here is a side effect of something else, which is exactly why it is worth pinning.
+#
+#   /tmp/containers-user-1000, /tmp/podman-run-1000
+#                   REAL podman's runtime directories, created by the single
+#                   `podman --version` that survey runs. This is the one fixture with a
+#                   genuine podman, so it is the only place they appear -- and they are a real
+#                   part of the blast radius on any machine that already has podman.
+#   /work           the read-only mount this harness adds, not the installer
+#   C /etc          podman bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf into
+#                   every container, which moves the directory's mtime. Present in every case.
+#   C /tmp          mtime, from the two directories above
+#
+# Notably ABSENT: no /etc/passwd, no /etc/subuid, no packages, no course tree. A refusal must
+# cost nothing, and this is the assertion that says so in both directions.
+A /tmp/containers-user-1000
+A /tmp/containers-user-1000/containers
+A /tmp/podman-run-1000
+A /tmp/podman-run-1000/libpod
+A /work
+C /etc
+C /tmp
