@@ -350,6 +350,111 @@ assert_says "subuid-fails:names-the-account" "Could not add a subuid range for n
 assert_says "subuid-fails:says-what-to-send" "cat /etc/subuid" "$out"
 assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out"
 
+# ─── and the same usermod, EXECUTED, against a synthetic root ──────────────────
+#
+# WHY THIS IS HERE RATHER THAN IN A CONTAINER. `--no-prereqs=subuid` and "the install succeeded"
+# are mutually exclusive inside a container and no flag design fixes it: setup_subuid writes a
+# fixed 200000-265535 (installer:560), which lies outside the outer container's 1..65536 userns
+# window, so podman cannot work afterwards THERE while it would on a student's laptop. A case
+# that can only ever claim half a run is the shape that produced the no-podman conflation, so the
+# container case was dropped -- and this is where the coverage it gave up went.
+#
+# WHAT IT ADDS over the argv assertion above: that one proves the installer ASKS for the right
+# command. This one runs the real /usr/sbin/usermod and proves the command DOES what the
+# installer needs -- which nothing had ever checked.
+#
+# --prefix, NOT --root, and measured both ways: --root chroots, which is Operation-not-permitted
+# even under `bwrap --unshare-user --uid 0 --cap-add ALL`. --prefix edits the shadow files under a
+# directory with no chroot at all -- and then needs NO privilege either, so this needs no bwrap,
+# no sudo and no container. It writes only inside $TMP.
+if ! command -v usermod >/dev/null 2>&1; then
+    # A NAMED SKIP, not a silent pass: a TA's Mac has no shadow suite at all, and a skip that
+    # says so is the difference between "not applicable here" and "quietly stopped testing".
+    skip "usermod:really-adds-the-range" "no usermod on this machine (macOS has no shadow suite); tests/MANUAL.md covers it there"
+else
+UM="$TMP/fakeroot"
+# SYNTHETIC, not a copy of this machine's /etc: the case then depends on nothing about the host
+# and copies none of its accounts. uid 4242 so it cannot collide with anything real either.
+mkdir -p "$UM/etc"
+printf 'root:x:0:0:root:/root:/bin/sh\nstudent:x:4242:4242:,,,:/home/student:/bin/bash\n' > "$UM/etc/passwd"
+printf 'root:x:0:\nstudent:x:4242:\n' > "$UM/etc/group"
+printf 'root:!:20000:0:99999:7:::\nstudent:!:20000:0:99999:7:::\n' > "$UM/etc/shadow"
+printf 'root:*::\nstudent:!::\n' > "$UM/etc/gshadow"
+: > "$UM/etc/subuid"; : > "$UM/etc/subgid"
+
+# THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing installer:560 reddens
+# this instead of leaving a test that agrees with a number nobody uses any more.
+UM_RANGE="$(sed -n 's/.*--add-subuids \([0-9]*-[0-9]*\).*/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
+assert_match "usermod:the-range-came-from-the-installer" '^[0-9]+-[0-9]+$' "$UM_RANGE"
+UM_START="${UM_RANGE%-*}"; UM_END="${UM_RANGE#*-}"
+UM_COUNT=$(( UM_END - UM_START + 1 ))
+
+# THE VACUITY GUARD, FIRST AND EXPLICITLY. Every assertion below reads a file that this case
+# also writes, so "the range is in there" would pass on a run where usermod never executed and
+# the fixture had simply been seeded with the answer. Asserted empty before, and a CONTROL root
+# that usermod is never pointed at is asserted still empty after -- so a pass needs the command
+# to have done it.
+assert_eq "usermod:the-synthetic-root-starts-with-no-range" "" "$(cat "$UM/etc/subuid")"
+mkdir -p "$TMP/control/etc"; : > "$TMP/control/etc/subuid"
+
+if usermod --prefix "$UM" --add-subuids "$UM_RANGE" --add-subgids "$UM_RANGE" student \
+       > "$TMP/usermod.out" 2>&1; then
+    pass "usermod:exits-0"
+else
+    fail "usermod:exits-0" "$(cat "$TMP/usermod.out")"
+fi
+
+# 1. THE EFFECT the installer needs, in both files, as an exact value. A wrong range is a silent
+#    failure much later, inside podman.
+assert_eq "usermod:writes-the-range-into-subuid" "student:$UM_START:$UM_COUNT" "$(cat "$UM/etc/subuid")"
+assert_eq "usermod:writes-the-range-into-subgid" "student:$UM_START:$UM_COUNT" "$(cat "$UM/etc/subgid")"
+assert_eq "usermod:left-the-control-root-alone"  "" "$(cat "$TMP/control/etc/subuid")"
+
+# 2. THE WRITTEN FORM IS WHAT THE LAUNCHER LATER GREPS FOR, and this is the one place both halves
+#    are visible at once. setup_subuid writes the file; cs193v:1073 reads it back with
+#    `grep -q "^$(id -un):"` and dies if it does not match. Nothing had ever checked that those
+#    two agree -- a usermod that wrote "student 200000 65536" would satisfy every assertion above
+#    and refuse every launch. THE PATTERN IS BUILT THE WAY THE LAUNCHER BUILDS IT, from a
+#    checked-in grep rather than a copy of it, so a change to either side reddens here.
+# THE LAUNCHER'S SIDE IS PINNED BY ITS EXACT TEXT rather than extracted with a regex, which is
+# both simpler and stronger: if cs193v starts reading the file some other way, this reddens and
+# somebody re-checks that the two still agree instead of the check silently passing on a pattern
+# that no longer exists.
+um_grep='grep -q "^$(id -un):" /etc/subuid'
+if grep -qF "$um_grep" "$REPO/cs193v"; then
+    pass "usermod:the-launcher-still-reads-it-back-this-way"
+else
+    fail "usermod:the-launcher-still-reads-it-back-this-way" \
+         "cs193v no longer contains: $um_grep -- re-check that what usermod writes is what it accepts"
+fi
+if grep -q "^student:" "$UM/etc/subuid"; then
+    pass "usermod:the-form-it-writes-is-the-form-the-launcher-accepts"
+else
+    fail "usermod:the-form-it-writes-is-the-form-the-launcher-accepts" \
+         "the launcher greps ^USER: and this would not match: $(cat "$UM/etc/subuid")"
+fi
+
+# 3. THE BLAST RADIUS, which is what the dropped container case's expected-path set was the only
+#    thing pinning. Measured rather than assumed: --add-subuids touches subuid and subgid and
+#    their `-` backups, and NOT passwd, shadow, group or gshadow -- so a future usermod that
+#    started rewriting the password database would redden here.
+# BY THE FILE SET, not by mtime: usermod's `-` backups are copies that keep the original's
+# timestamp, so `find -newer` reported neither of them and the audit missed two files it exists
+# to notice.
+um_files="$( cd "$UM" && find . -type f | LC_ALL=C sort | tr '\n' ' ' )"
+assert_eq "usermod:created-only-the-two-backups" \
+          "./etc/group ./etc/gshadow ./etc/passwd ./etc/shadow ./etc/subgid ./etc/subgid- ./etc/subuid ./etc/subuid- " \
+          "$um_files"
+# ...and the password database really is byte-identical, which is the half a file list cannot say
+# and the half that would matter if a future usermod started rewriting more than it was asked to.
+assert_eq "usermod:left-etc-passwd-byte-identical" \
+          "root:x:0:0:root:/root:/bin/sh
+student:x:4242:4242:,,,:/home/student:/bin/bash" "$(cat "$UM/etc/passwd")"
+assert_eq "usermod:left-etc-shadow-byte-identical" \
+          "root:!:20000:0:99999:7:::
+student:!:20000:0:99999:7:::" "$(cat "$UM/etc/shadow")"
+fi
+
 # ─── choose_dir, which only exists on a tty ────────────────────────────────────
 # CS193V_DIR IS DELIBERATELY UNSET for these four, which is the whole reason installer_host
 # and installer_tty redirect HOME: with it unset, DEFAULT_DIR is $HOME/cs193v and the
