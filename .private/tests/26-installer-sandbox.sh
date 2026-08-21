@@ -71,8 +71,9 @@ sandbox_reap
 fixture_build wsl || exit 1
 
 wsl_run() {                           # wsl_run STATE KEYS -> transcript
-    sandbox_run wsl "$2" -e "SB_WSLCONF=$1" -e CS193V_DIR=/home/student/cs193v \
-                -v "$SB_WORK/proc-version:/proc/version:ro"
+    # No -v for /proc/version here: fixture_flags declares it for the wsl machine, so this
+    # call site cannot forget it or spell it differently.
+    sandbox_run wsl "$2" -e "SB_WSLCONF=$1" -e CS193V_DIR=/home/student/cs193v
 }
 
 # The bind mount is what everything below rests on, so it is asserted on its own terms first.
@@ -158,7 +159,10 @@ sandbox_reap
 # TWO consent items -- podman+uidmap and openssh-client, gated independently on purpose
 # (installer:486-488) -- and one menu, because CS193V_DIR is set. So one keystroke.
 fixture_build no-podman || exit 1
-out="$(sandbox_run no-podman '2' -e CS193V_DIR=/home/student/cs193v)"
+# SB_PROBE_PODMAN only here: this is the one case that installs podman, so it is the only one
+# where "did the thing apt installed actually work" is a question worth the store that asking
+# it creates.
+out="$(sandbox_run no-podman '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
 assert_says "sb-apt:asks-for-both-independently" "permission for 2 thing" "$out"
 assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "$out"
 assert_says "sb-apt:names-openssh-client"        "Install openssh-client" "$out"
@@ -170,6 +174,21 @@ assert_says "sb-apt:podman-is-installed-afterwards" "podman version" \
             "$(sb_section "$out" PODMAN-AFTER)"
 assert_eq   "sb-apt:ssh-is-installed-afterwards" "present" "$(sb_section "$out" SSH-AFTER)"
 assert_says "sb-apt:the-post-install-check-passed" "podman 5.7.0" "$out"
+# INSTALLED IS NOT WORKING, and this case cannot yet show the difference -- recorded so the
+# gap is visible rather than implied by silence.
+#
+# Reported by a person driving this by hand: the run reaches write_local_args and stops with
+# "Could not ask podman how much memory is available", because the podman apt just installed
+# cannot create a user namespace in a container with podman's default capabilities. Every
+# assertion above still passes, because `podman --version` never touches the runtime -- so the
+# suite calls this case green while the installer stops two steps later.
+#
+# Giving this fixture the capabilities that would let podman run was tried and made it worse:
+# the container then hangs at the consent menu, or dies after 69 bytes with a trailing newline,
+# at the ceiling every time. Unexplained, and reverted rather than left half-landed. So the
+# honest state is a record: apt genuinely installs podman here, and what the installer does
+# with a podman that cannot answer is NOT covered.
+record "sb-apt:the-installed-podman-runs" "$(sb_section "$out" PODMAN-WORKS)"
 
 # Asserted in PACKAGES, not paths: the path-level diff here is several hundred lines of /usr
 # and /var/lib/dpkg, which is the wrong unit for the claim and too long to be read by anyone.

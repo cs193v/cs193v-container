@@ -23,6 +23,60 @@ FIXTURE_DIR="$TESTS_DIR/fixtures"
 # where eleven checkouts of this repo build at once. So they are suffixed exactly the way
 # the launcher suffixes its own image (cs193v:869-881) -- CLAUDE.md §1 records what happens
 # when two people write the same tag, and it is not a clean collision.
+# ─── what each machine REQUIRES, declared once ─────────────────────────────────
+#
+# THE ONE PLACE. Before this there were three: install-sandbox.sh had its own nested and wsl
+# cases, sandbox_run grew a no-podman case, and nest_build hardcoded its own -- and they
+# disagreed. That is not a hypothetical: the no-podman fixture installs a real podman, the
+# installer's next step asks it for MemTotal, and it failed with "cannot set up namespace using
+# /usr/bin/newuidmap" because only the nested path had been given SYS_ADMIN. A person driving
+# it by hand found it; the suite had called the case green.
+#
+# So a machine's requirements live here and every caller reads them from here. 10-static.sh
+# asserts this is the only place that names these flags, which is what stops the paths drifting
+# apart again rather than trusting whoever edits next to remember.
+#
+# AN ARRAY, not a string: `unmask=/proc/*` contains a glob, and a word-split string would let
+# the shell expand it against the filesystem. Callers use the ${arr[@]+"${arr[@]}"} idiom that
+# 10-static.sh requires, because expanding an empty array under `set -u` is fatal on bash 3.2.
+FIXTURE_FLAGS=()
+# The optional second argument DROPS one requirement, which is how the nested case's two
+# differential controls express themselves without re-declaring the flag list. Removing a flag
+# by filtering an array would have to know that --security-opt and its value are two elements;
+# saying "without sysadmin" is data, and it cannot drift from the declaration because it IS the
+# declaration.
+fixture_flags() {                     # fixture_flags CASE [without: sysadmin|unmask]
+    FIXTURE_FLAGS=()
+    local drop="${2:-}"
+    case "$1" in
+        nested)
+            # The one machine that runs a real rootless podman. Increment 5 measured what that
+            # needs -- SYS_ADMIN for newuidmap's uid_map write, unmask so crun can set
+            # ping_group_range, /dev/fuse for the store and /dev/net/tun for pasta.
+            #
+            # NOT no-podman, though it also ends up with a real podman installed. Giving it
+            # these flags was tried and broke it: the container hangs at the consent menu, or
+            # with a trailing newline dies after 69 bytes, at a 60 s ceiling every time. Not
+            # explained, and not worth blocking on -- so that machine keeps podman's defaults,
+            # the podman it installs genuinely cannot run there, and the case asserts the
+            # installer's own behaviour when podman cannot answer. Which is a real product
+            # property, and this is the only place it is reachable.
+            [ "$drop" = sysadmin ] || FIXTURE_FLAGS=("${FIXTURE_FLAGS[@]}" --cap-add=SYS_ADMIN)
+            [ "$drop" = unmask ]   || FIXTURE_FLAGS=("${FIXTURE_FLAGS[@]}" --security-opt 'unmask=/proc/*')
+            FIXTURE_FLAGS=("${FIXTURE_FLAGS[@]}" --device /dev/fuse --device /dev/net/tun) ;;
+        podman-old)
+            # A real podman, but the installer only ever asks its VERSION before refusing, and
+            # that needs no namespace. Deliberately bare, so the refusal is measured on a
+            # machine with no special privilege.
+            : ;;
+    esac
+    # The wsl fixture's whole premise is a bind mount, so it belongs here too rather than at
+    # each call site -- which is where it used to be, repeated.
+    case "$1" in
+        wsl) FIXTURE_FLAGS=("${FIXTURE_FLAGS[@]}" -v "$SB_WORK/proc-version:/proc/version:ro") ;;
+    esac
+}
+
 fixture_tag() {                       # fixture_tag CASE -> the tag for this instance
     printf 'localhost/cs193v-fixture-%s:local%s' "$1" "${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
 }
@@ -200,6 +254,22 @@ printf '===WSL-CONF===\n';    cat /etc/wsl.conf 2>/dev/null
 printf '===DPKG-ADDED===\n';  cat /var/tmp/report/dpkg-added 2>/dev/null
 printf '===PODMAN-AFTER===\n'
 if command -v podman >/dev/null 2>&1; then podman --version; else echo absent; fi
+# INSTALLED IS NOT THE SAME AS WORKING, and asserting the former let a broken podman read as a
+# success. `podman --version` never touches the runtime, so it answers happily from a podman
+# that cannot create a user namespace -- while the installer's very next step asks it for
+# MemTotal, gets nothing, and stops. This is the question the installer actually asks.
+# ASKED ONLY WHERE IT IS WANTED. `podman info` creates a store, an events log and lock files,
+# and their exact set differs between runs -- so probing unconditionally gave the podman-old
+# case a non-deterministic blast radius and its exact-set audit chased new paths every run.
+# That audit is worth more than a probe on a machine whose claim is that the installer REFUSES.
+printf '===PODMAN-WORKS===\n'
+if [ -z "${SB_PROBE_PODMAN:-}" ]; then
+    echo not-probed
+elif command -v podman >/dev/null 2>&1; then
+    podman info --format '{{.Host.MemTotal}}' 2>&1 | tail -1
+else
+    echo no-podman
+fi
 printf '===SSH-AFTER===\n'
 if command -v ssh >/dev/null 2>&1; then echo present; else echo absent; fi
 printf '===TRACE===\n'
@@ -223,9 +293,9 @@ RUN
 # POSITIVE token, never an absence -- a probe that never ran must fail, not look happy.
 nest_probe() {                        # nest_probe [PODMAN_ARGS...] -> KEY=value lines
     # shellcheck disable=SC2086
-    timeout 180 podman run --label "$VT_LABEL" --rm --cap-add=SYS_ADMIN \
-        --security-opt 'unmask=/proc/*' \
-        --device /dev/fuse --device /dev/net/tun \
+    fixture_flags nested
+    timeout 180 podman run --label "$VT_LABEL" --rm \
+        ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" "$@" \
         "$(fixture_tag nested)" sh /probe.sh 2>&1
 }
@@ -241,16 +311,17 @@ nest_probe() {                        # nest_probe [PODMAN_ARGS...] -> KEY=value
 # unmask=/proc/* IS NARROWER THAN THE FORBIDDEN FORM. container.args bans `unmask=ALL` for the
 # course container; this is the fixture, one level out, and it names one subtree.
 nest_probe_nocap() {                  # SYS_ADMIN removed, unmask kept
+    fixture_flags nested sysadmin
     timeout 180 podman run --label "$VT_LABEL" --rm \
-        --security-opt 'unmask=/proc/*' \
-        --device /dev/fuse --device /dev/net/tun \
+        ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
         "$(fixture_tag nested)" sh /probe.sh 2>&1
 }
 
 nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
-    timeout 180 podman run --label "$VT_LABEL" --rm --cap-add=SYS_ADMIN \
-        --device /dev/fuse --device /dev/net/tun \
+    fixture_flags nested unmask
+    timeout 180 podman run --label "$VT_LABEL" --rm \
+        ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
         "$(fixture_tag nested)" sh /probe.sh 2>&1
 }
@@ -277,12 +348,12 @@ nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
 # launcher's staleness check is unaffected.
 nest_build() {                        # nest_build -> the transcript
     local name="cs193v-fixture-nested-$$"
+    fixture_flags nested
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
     timeout --kill-after=30 1000 \
-        podman run --timeout 900 --label "$VT_LABEL" -i --name "$name" --cap-add=SYS_ADMIN \
-        --security-opt 'unmask=/proc/*' \
-        --device /dev/fuse --device /dev/net/tun \
+        podman run --timeout 900 --label "$VT_LABEL" -i --name "$name" \
+        ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"} \
         --mount type=tmpfs,destination=/var/tmp/report \
         -e CS193V_DIR=/home/student/cs193v \
         -e BUILDAH_LAYERS=false \
@@ -367,6 +438,8 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     # the coverage union and say so, rather than let one unexplained case either block the gate
     # or silently shrink what the number claims to cover. 95-installer-coverage.sh records it.
     case "$case" in no-podman) cov='' ;; esac
+    fixture_flags "$case"
+    set -- ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"} "$@"
     printf '%b' "$keys" | timeout --kill-after=15 "$outer" \
         podman run --timeout "$cap" --label "$VT_LABEL" -i --name "$SB_NAME" \
         --network=none \
