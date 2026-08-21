@@ -918,7 +918,19 @@ new_tmpdir() {
 #                     repo_copy was making two 58 MB copies of it per call into a tmpfs (#76).
 #
 # Anything else that needs leaving out belongs on this line, not in a caller.
-COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects"
+#
+# ./.config IS EXCLUDED WHOLESALE and its one tracked file put back below, exactly the way
+# projects/ is handled -- not because .config is unwanted but because six of its seven files
+# are git-ignored, so GitHub's archive endpoint holds none of them and a checkout that has
+# been launched once was injecting its own into every copy. That mattered most for the five
+# tunnel-* files: tunnel_keys() guards each keygen with `[ -f ] ||`, so a copy arriving with a
+# private key means the launcher's first-run keygen never executes in any test -- and
+# cs193v:1415 says a key must be generated per machine precisely so one is never shipped.
+# local.args came too, carrying a --memory= cap computed for the developer's machine.
+#
+# EXCLUDING THE DIRECTORY rather than naming the six: this list takes plain paths and no glob
+# (see below), so a name-them-all rule leaks the seventh file silently the day it appears.
+COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects ./.config"
 
 # copy_course_tree DST  -> a fixture copy of $REPO at DST, minus the above.
 #
@@ -926,8 +938,8 @@ COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects"
 # the libs run under BSD tar on the TAs' Macs as well as GNU tar here and the two-command form
 # below needs no assumption about whether a `*` crosses a `/`.
 #
-# projects/ IS PUT BACK, holding .gitkeep and nothing else, so a copy is what a FRESH CHECKOUT
-# looks like. The launcher would create it (`[ -d "$WORKSPACE" ] || mkdir -p`) and so would the
+# projects/ AND .config/ ARE PUT BACK, holding only what a fresh checkout has -- .gitkeep and
+# container.args -- so a copy is what a FRESH CHECKOUT looks like. The launcher would create it (`[ -d "$WORKSPACE" ] || mkdir -p`) and so would the
 # installer, but a fixture that differs from a checkout is a fixture that can lie.
 copy_course_tree() {                  # copy_course_tree DST -> 0 on success
     local d="$1" x opts=''
@@ -935,7 +947,8 @@ copy_course_tree() {                  # copy_course_tree DST -> 0 on success
     mkdir -p "$d" || return 1
     # shellcheck disable=SC2086   # deliberately word-split: it is a list of tar options
     ( cd "$REPO" && tar cf - $opts . ) | ( cd "$d" && tar xf - ) || return 1
-    mkdir -p "$d/projects" && cp "$REPO/projects/.gitkeep" "$d/projects/.gitkeep"
+    mkdir -p "$d/projects" && cp "$REPO/projects/.gitkeep" "$d/projects/.gitkeep" || return 1
+    mkdir -p "$d/.config"  && cp "$REPO/.config/container.args" "$d/.config/container.args"
 }
 
 # What an EARLIER, KILLED run left in a scratch directory. Called at suite START as well as from
