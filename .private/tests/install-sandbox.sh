@@ -61,6 +61,11 @@ MACHINES  (--machine, default subuid)
 
 OPTIONS
   --machine NAME       one of the above
+  --sudo STATE         nopasswd (default) | password[:PW] | deny | absent
+                       password makes sudo really prompt, which is what a student sees -- the
+                       installer says "needs your password" in its consent text and this is
+                       the only way to watch that land.  Default password is 'student'.
+                       deny: sudo exists, you may not use it.  absent: no sudo at all
   --wslconf STATE      absent | noboot | boot | systemd   (only with --machine wsl)
                        'boot' is the state nothing else reaches: a [boot] section with no
                        systemd=true, which is the only input that takes setup_wslconf's sed
@@ -79,11 +84,13 @@ EXAMPLES
   tests/install-sandbox.sh --machine wsl --wslconf boot
   tests/install-sandbox.sh --machine nested         # can really build the image
   tests/install-sandbox.sh --ask                    # drive choose_dir's menu yourself
+  tests/install-sandbox.sh --sudo password          # what a student actually sees
 EOF
 }
 
 MACHINE=subuid
 WSLCONF=''
+SUDOK=''
 SBDIR='/home/student/cs193v'
 NET=no
 KEEP=no
@@ -96,6 +103,8 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --machine)  shift; MACHINE="${1:-}"; known "$MACHINE" || die_usage "unknown machine: ${MACHINE:-<empty>}" ;;
         --machine=*) MACHINE="${1#--machine=}"; known "$MACHINE" || die_usage "unknown machine: $MACHINE" ;;
+        --sudo)     shift; SUDOK="${1:-}" ;;
+        --sudo=*)   SUDOK="${1#--sudo=}" ;;
         --wslconf)  shift; WSLCONF="${1:-}" ;;
         --wslconf=*) WSLCONF="${1#--wslconf=}" ;;
         --dir)      shift; SBDIR="${1:-}" ;;
@@ -114,6 +123,12 @@ done
 # STRICT, and refused rather than warned about. CLAUDE.md §2 records what a silently-skipped
 # malformed value costs -- a set that quietly shrank and a developer who could not see why.
 # Here the cost is worse: you would conclude the installer took a branch it never took.
+# Strict, like every other value here. A silently-accepted sudo state would be the worst of
+# them: you would watch a run with no prompt and conclude the installer never asks for one.
+case "${SUDOK%%:*}" in
+    ''|nopasswd|password|deny|absent) : ;;
+    *) die_usage "unknown --sudo: $SUDOK (nopasswd|password[:PW]|deny|absent)" ;;
+esac
 case "$WSLCONF" in
     ''|absent|noboot|boot|systemd) : ;;
     *) die_usage "unknown --wslconf: $WSLCONF (absent|noboot|boot|systemd)" ;;
@@ -153,6 +168,7 @@ set -- "$@" -v "$SB_WORK:/work:ro"
 set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"
+[ -n "$SUDOK" ] && set -- "$@" -e "SB_SUDO=$SUDOK"
 if [ "$MACHINE" = wsl ]; then
     set -- "$@" -v "$SB_WORK/proc-version:/proc/version:ro"
 fi
@@ -166,7 +182,12 @@ fi
 # an instance in here would test something no student runs. Isolation is the container.
 set -- "$@" "$(fixture_tag "$MACHINE")"
 
-printf 'Machine: %s   dir: %s   net: %s\n' "$MACHINE" "${SBDIR:-<unset, choose_dir will ask>}" "$NET"
+printf 'Machine: %s   dir: %s   net: %s   sudo: %s\n' "$MACHINE" \
+       "${SBDIR:-<unset, choose_dir will ask>}" "$NET" "${SUDOK:-nopasswd}"
+case "${SUDOK%%:*}" in
+    password) pw="${SUDOK#password:}"; [ "$pw" = "$SUDOK" ] && pw=student
+              printf 'sudo will PROMPT. The password is: %s\n' "$pw" ;;
+esac
 # SPELLED OUT, because "type sandbox" was not enough: you land in $HOME and the installer is
 # bind-mounted at /work, so someone reasonably looks for it in the directory they are in and
 # finds nothing. ~/install-cs193v.sh is a symlink to it, named the way a student's copy is.
