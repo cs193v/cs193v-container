@@ -129,6 +129,11 @@ printf '===INNER-CAPS===\n'
 podman inspect cs193v --format '{{.EffectiveCaps}}' 2>/dev/null || echo NO-CONTAINER
 printf '===INNER-STORE-BYTES===\n'
 du -sb "$(podman info --format '{{.Store.GraphRoot}}')" 2>/dev/null | cut -f1
+# THE LAUNCHER'S OWN BUILD LOG. The meter deliberately shows only podman's last eight lines
+# on failure, so the transcript cannot carry the error -- but BUILD_LOG has all of it, which
+# is what cs193v:908-910 says it is for on a build that fails rather than hangs.
+printf '===BUILD-LOG===\n'
+for f in /tmp/cs193v-build-*.log; do [ -f "$f" ] && tail -60 "$f"; done
 printf '===DOCTOR===\n'
 "$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
 printf '===END-REPORT===\n'
@@ -229,6 +234,17 @@ nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
 #
 # 900 s rather than sandbox_run's 120: the installer's own measurement is a 242 s cold build
 # (installer:730), and a first run also pulls the base image.
+#
+# BUILDAH_LAYERS=false, WHICH IS WHAT MAKES vfs AFFORDABLE. The nested store has to be vfs --
+# overlay breaks the locales postinst, measured both ways -- and vfs copies a full parent tree
+# per layer, so 25 committed layers cost 37 GB and still had not finished before the disk
+# watchdog killed it. With layers off, buildah keeps ONE working container, so vfs copies one
+# tree. The launcher passes neither --layers nor --squash, and podman documents this variable
+# as the override, so it reaches the inner build without the launcher knowing.
+#
+# The departure to record: the image produced is single-layer rather than 25. Its CONTENTS are
+# what the Containerfile says either way, and the buildhash label is still applied, so the
+# launcher's staleness check is unaffected.
 nest_build() {                        # nest_build -> the transcript
     local name="cs193v-fixture-nested-$$"
     printf '%s' "$name" > "$SB_TMP/last-name"
@@ -238,6 +254,7 @@ nest_build() {                        # nest_build -> the transcript
         --device /dev/fuse --device /dev/net/tun \
         --mount type=tmpfs,destination=/var/tmp/report \
         -e CS193V_DIR=/home/student/cs193v \
+        -e BUILDAH_LAYERS=false \
         -v "$SB_WORK:/work:ro" \
         "$(fixture_tag nested)" \
         sh /work/nest-run.sh 2>&1 </dev/null | strip_ansi
