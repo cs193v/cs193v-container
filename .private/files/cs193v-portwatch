@@ -1,0 +1,156 @@
+#!/bin/bash
+#
+# cs193v-portwatch — tells the host which ports are listening in here.
+#
+# Runs INSIDE the container, as the student, started by the launcher as one long-lived
+# `podman exec`. Its stdout is the host supervisor's input; see the frame parser in
+# /etc/cs193v/ui.sh (dynports_line) for the other end of the protocol.
+#
+# WHAT THIS IS FOR. The host cannot see what is listening in here: /proc/net/tcp is per network
+# namespace and the container has its own. There is also no kernel notification for a socket
+# entering LISTEN -- inotify does not cover sockets, sock_diag netlink is dump-only, and the eBPF
+# hook that would work needs capabilities this container deliberately does not have. So: poll in
+# here, ship the answer out, and let the host decide what to do about it.
+#
+# IT REPORTS, IT DOES NOT DECIDE. Everything below emits observations -- a port and the class of
+# address it is bound to. Whether any of them get forwarded is the host's business, and the host
+# has facts this side cannot know (which host ports are free, and how low a port an unprivileged
+# ssh client may bind). That split is the whole security story: what leaves here is a list of
+# integers and a word from a five-item vocabulary.
+#
+# BASH 3.2 PARSEABLE, even though the image ships bash 5. 18-portwatch-fuzz.sh sources this file
+# to drive pw_scan_text directly, and the TAs run the unit tier on Macs. So: no `declare -A`, no
+# `mapfile`, no `${var,,}`.
+
+set -u
+
+PW_STATE_DIR=/tmp/cs193v
+PW_STATE="$PW_STATE_DIR/ports"
+PW_PROTO='cs193v-portwatch 1'
+PW_MAX=128
+PW_INTERVAL_DEFAULT=1
+
+# ─── the address classifier ────────────────────────────────────────────────────
+# /proc/net/tcp gives the local address as little-endian hex, so 127.0.0.1 is 0100007F: the LAST
+# byte pair is the FIRST octet. That is what makes the 127.x test a suffix match.
+#
+# FIVE CLASSES, NOT FOUR, and the fifth was found by reading real kernel output rather than by
+# reasoning. This machine had systemd-resolved listening on 127.0.0.53 and 127.0.0.54. A
+# four-class table sends those to `eth`, and the host would then tell a student their server was
+# "bound to the container's network interface, not its loopback" -- which is FALSE; 127.0.0.53 is
+# loopback. It is simply not the address the tunnel connects to, which is literally 127.0.0.1.
+# The outcome was right by accident and the diagnosis was a lie, which this project treats as the
+# worse of the two.
+pw_v4class() {                        # 8 hex chars, little-endian -> PW_C
+    case "$1" in
+        0100007F|0100007f) PW_C=lo ;;
+        00000000)          PW_C=any ;;
+        *7F|*7f)           PW_C=loalt ;;
+        *)                 PW_C=eth ;;
+    esac
+}
+
+# A v6 address is four 32-bit words, each little-endian, printed as 32 hex characters.
+pw_v6class() {                        # 32 hex chars -> PW_C
+    case "$1" in
+        00000000000000000000000000000000)                   PW_C=any ;;
+        00000000000000000000000001000000)                   PW_C=v6lo ;;
+        0000000000000000FFFF0000*|0000000000000000ffff0000*) pw_v4class "${1:24:8}" ;;
+        *)                                                  PW_C=eth ;;
+    esac
+}
+
+# Reachability order, used to merge a port that appears more than once -- dual-stack,
+# SO_REUSEPORT, or one process on lo and another on eth0. The host's only question is "can the
+# tunnel reach it", so the most reachable binding wins. Observed live: cups on 631 as both
+# 127.0.0.1 and ::1, which must report as `lo`.
+pw_rank() { case "$1" in any) PW_R=4 ;; lo) PW_R=3 ;; loalt) PW_R=2 ;; eth) PW_R=1 ;; *) PW_R=0 ;; esac; }
+
+# ─── the scan ──────────────────────────────────────────────────────────────────
+# TAKES TEXT, does not read /proc itself, so the fuzzer can drive it with synthetic kernel output
+# from a host that has no container.
+#
+# SLURPED BY THE CALLER, not streamed. Measured, 1000 ticks: `ss -Hltn` 9.6ms, `while read` on the
+# procfs file 2.8ms, `raw=$(</proc/net/tcp)` 0.86ms. `ss` is 11x and is out of the hot loop -- it
+# stays installed because agent-notes.md teaches it for diagnosis. `while read` is 3x because bash
+# reads SPECIAL files a byte at a time to avoid over-consuming; the sys-time column shows it.
+PW_SET=''
+PW_RAW_LAST=''
+PW_SORTED_LAST=''
+pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
+    local v4="$1" v6="$2" which raw line addr hexport port cur curr newr best
+
+    best=' '
+    for which in 4 6; do
+        if [ "$which" = 4 ]; then raw="$v4"; else raw="$v6"; fi
+        while [ -n "$raw" ]; do
+            line="${raw%%$'\n'*}"
+            if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
+            # shellcheck disable=SC2086
+            set -- $line
+            [ "$#" -ge 4 ] || continue
+            [ "${4:-}" = 0A ] || continue          # 0A = TCP_LISTEN, and nothing else counts:
+                                                   # an ESTABLISHED socket's local port is a
+                                                   # connection, not a server.
+            case "$2" in *:*) ;; *) continue ;; esac
+            addr="${2%%:*}"; hexport="${2#*:}"
+            case "$hexport" in ''|*[!0-9A-Fa-f]*) continue ;; esac
+            [ "${#hexport}" -eq 4 ] || continue
+            port=$(( 16#$hexport ))
+            [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
+            case "${#addr}" in
+                8)  case "$addr" in *[!0-9A-Fa-f]*) continue ;; esac; pw_v4class "$addr" ;;
+                32) case "$addr" in *[!0-9A-Fa-f]*) continue ;; esac; pw_v6class "$addr" ;;
+                *)  continue ;;
+            esac
+            case "$best" in
+                *" $port:"*)
+                    cur="${best#* $port:}"; cur="${cur%% *}"
+                    pw_rank "$cur"; curr=$PW_R
+                    pw_rank "$PW_C"; newr=$PW_R
+                    if [ "$newr" -gt "$curr" ]; then
+                        best="${best/ $port:$cur / }"
+                        best="$best$port:$PW_C "
+                    fi ;;
+                *)  best="$best$port:$PW_C " ;;
+            esac
+        done
+    done
+
+    best="${best# }"; best="${best% }"
+
+    # SORTED, BUT ONLY WHEN THE SET CHANGES. Ascending numeric order makes a frame byte-stable
+    # tick to tick, so "did anything change" is a string compare and a log diffs cleanly --
+    # /proc's own order is by hash bucket and relying on it would be accidental correctness. The
+    # sort is a fork, though, and the tick budget is ~2ms, so it runs only when the merged set
+    # differs from last tick's. A steady container pays for it once.
+    if [ "$best" = "$PW_RAW_LAST" ]; then
+        PW_SET="$PW_SORTED_LAST"
+        return 0
+    fi
+    PW_RAW_LAST="$best"
+    if [ -z "$best" ]; then
+        PW_SORTED_LAST=''
+    else
+        PW_SORTED_LAST="$(printf '%s\n' $best | sort -t: -k1,1n | tr '\n' ' ')"
+        PW_SORTED_LAST="${PW_SORTED_LAST% }"
+    fi
+    PW_SET="$PW_SORTED_LAST"
+    return 0
+}
+
+# ─── modes ─────────────────────────────────────────────────────────────────────
+pw_scan_now() { pw_scan_text "$(</proc/net/tcp)" "$(</proc/net/tcp6)"; }
+
+pw_once() { pw_scan_now; printf '%s\n' "$PW_SET"; }
+
+pw_main() {
+    case "${1:---once}" in
+        --once) pw_once ;;
+        *) printf 'cs193v-portwatch: unknown argument %s\n' "$1" >&2; return 2 ;;
+    esac
+}
+
+case "${CS193V_PORTWATCH_SOURCED:-}" in
+    '') pw_main "$@" ;;
+esac
