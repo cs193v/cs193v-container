@@ -174,21 +174,17 @@ assert_says "sb-apt:podman-is-installed-afterwards" "podman version" \
             "$(sb_section "$out" PODMAN-AFTER)"
 assert_eq   "sb-apt:ssh-is-installed-afterwards" "present" "$(sb_section "$out" SSH-AFTER)"
 assert_says "sb-apt:the-post-install-check-passed" "podman 5.7.0" "$out"
-# INSTALLED IS NOT WORKING, and this case cannot yet show the difference -- recorded so the
-# gap is visible rather than implied by silence.
+# WHERE THIS CASE'S CLAIM ENDS, said plainly because it used to be overstated. What this
+# fixture proves is that apt really installs podman offline -- nothing more. The run then stops
+# at write_local_args, because a container with podman's default capabilities cannot run the
+# podman it just installed, and that is an environmental limit of the fixture rather than a
+# property worth asserting.
 #
-# Reported by a person driving this by hand: the run reaches write_local_args and stops with
-# "Could not ask podman how much memory is available", because the podman apt just installed
-# cannot create a user namespace in a container with podman's default capabilities. Every
-# assertion above still passes, because `podman --version` never touches the runtime -- so the
-# suite calls this case green while the installer stops two steps later.
-#
-# Giving this fixture the capabilities that would let podman run was tried and made it worse:
-# the container then hangs at the consent menu, or dies after 69 bytes with a trailing newline,
-# at the ceiling every time. Unexplained, and reverted rather than left half-landed. So the
-# honest state is a record: apt genuinely installs podman here, and what the installer does
-# with a podman that cannot answer is NOT covered.
-record "sb-apt:the-installed-podman-runs" "$(sb_section "$out" PODMAN-WORKS)"
+# The branch it stops on is NOT untested: "podman is installed but cannot answer" is its own
+# scenario and now has its own case in 25-installer.sh, driven deliberately with podman-fake's
+# info_rc in a millisecond. Two scenarios, two homes -- rather than one machine named for its
+# starting state quietly standing in for both.
+record "sb-apt:what-the-installed-podman-says" "$(sb_section "$out" PODMAN-WORKS)"
 
 # Asserted in PACKAGES, not paths: the path-level diff here is several hundred lines of /usr
 # and /var/lib/dpkg, which is the wrong unit for the claim and too long to be read by anyone.
