@@ -92,15 +92,31 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
 case "${SB_WSLCONF:-}" in
     absent)  sudo rm -f /etc/wsl.conf ;;
     noboot)  printf '[automount]\nenabled=true\n' | sudo tee /etc/wsl.conf >/dev/null ;;
-    boot)    printf '[boot]\n'                        | sudo tee /etc/wsl.conf >/dev/null ;;
-    systemd) printf '[boot]\nsystemd=true\n'         | sudo tee /etc/wsl.conf >/dev/null ;;
+    boot)    printf '[boot]\n'                     | sudo tee /etc/wsl.conf >/dev/null ;;
+    systemd) printf '[boot]\nsystemd=true\n'       | sudo tee /etc/wsl.conf >/dev/null ;;
 esac
+
+# The package set before and after. For the one fixture that really runs apt, the path-level
+# diff is several hundred lines of /usr and /var/lib/dpkg -- unreadable, and the wrong unit
+# anyway: what that case claims is that three PACKAGES arrived, so packages are what it is
+# asserted in.
+dpkg-query -W -f='${Package}\n' 2>/dev/null | LC_ALL=C sort > /var/tmp/report/dpkg-before
+
 bash /work/installer.sh
-printf '\n===INSTALLER-RC=%s===\n' "$?"
+rc=$?
+
+dpkg-query -W -f='${Package}\n' 2>/dev/null | LC_ALL=C sort > /var/tmp/report/dpkg-now
+comm -13 /var/tmp/report/dpkg-before /var/tmp/report/dpkg-now > /var/tmp/report/dpkg-added
+
+printf '\n===INSTALLER-RC=%s===\n' "$rc"
 printf '===ETC-SUBUID===\n';  cat /etc/subuid  2>/dev/null
 printf '===ETC-SUBGID===\n';  cat /etc/subgid  2>/dev/null
 printf '===WSL-CONF===\n';    cat /etc/wsl.conf 2>/dev/null
-printf '===DPKG-ADDED===\n';  cat /tmp/dpkg-after 2>/dev/null
+printf '===DPKG-ADDED===\n';  cat /var/tmp/report/dpkg-added 2>/dev/null
+printf '===PODMAN-AFTER===\n'
+if command -v podman >/dev/null 2>&1; then podman --version; else echo absent; fi
+printf '===SSH-AFTER===\n'
+if command -v ssh >/dev/null 2>&1; then echo present; else echo absent; fi
 printf '===END-REPORT===\n'
 RUN
     chmod +x "$SB_WORK/run.sh"
@@ -122,10 +138,11 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     # NOT --rm: the container has to survive for `podman diff`. Removed by sandbox_reap the
     # moment its diff is taken, so at most one writable layer is live at a time.
     # shellcheck disable=SC2086
-    # The fake podman's own state dir is a tmpfs, so its bookkeeping stays out of the
-    # writable layer and therefore out of `podman diff`. Without this the audit below carries
-    # six lines that belong to the fixture rather than to the installer, and an audit nobody
-    # can read in one glance is one that stops being read.
+    # TWO tmpfs mounts, so that neither the fake podman's state nor this harness's own dpkg
+    # snapshots can appear in `podman diff`. Measured the hard way: adding the package report
+    # put /tmp/dpkg-{before,now,added} into the writable layer and reddened the audit for two
+    # cases that had nothing to do with it. An audit that reports on the harness is an audit
+    # that grows an allowlist and stops being read.
     # --label ON THE SAME LINE as `podman run`, because 10-static.sh's rule is a per-line
     # grep and a continuation line does not satisfy it. That is deliberate on its part: the
     # label is what tells this container from a colleague's (#74), and a rule that had to
@@ -133,6 +150,7 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     printf '%b' "$keys" | timeout 120 podman run --label "$VT_LABEL" -i --name "$SB_NAME" \
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
+        --mount type=tmpfs,destination=/var/tmp/report \
         -v "$SB_WORK:/work:ro" "$@" \
         "$(fixture_tag "$case")" \
         script -q -c /work/run.sh /dev/null 2>&1 | strip_ansi
