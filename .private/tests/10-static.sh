@@ -202,7 +202,7 @@ rm -rf "$cov_tmp"
 # /usr/bin/newuidmap" because only the nested path had SYS_ADMIN. The suite called that case
 # green, because it only ever asked `podman --version`, which never touches the runtime.
 #
-# So the requirements live in fixture_flags and this asserts nothing else names them. A rule,
+# So the requirements live in machine_flags and this asserts nothing else names them. A rule,
 # not a convention: the next person to add a machine cannot reintroduce the split by forgetting
 # a convention they never read.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
@@ -218,7 +218,7 @@ naming="$(grep -Hn -- "$sa_head$sa_tail" $flagfiles \
           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq "fixture-flags:only-one-place-names-SYS_ADMIN" "1" \
           "$(printf '%s\n' "$naming" | grep -c . )"
-assert_says "fixture-flags:and-that-place-is-fixture_flags" 'lib/sandbox.sh' "$naming"
+assert_says "fixture-flags:and-that-place-is-machine_flags" 'lib/sandbox.sh' "$naming"
 # The same for the unmask, which is the other departure and the one container.args forbids in
 # its wider form -- so a second copy appearing anywhere is worth failing over.
 # shellcheck disable=SC2086
@@ -227,6 +227,31 @@ naming2="$(grep -Hn -- "$um_head$um_tail" $flagfiles \
            | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq "fixture-flags:only-one-place-names-the-unmask" "1" \
           "$(printf '%s\n' "$naming2" | grep -c . )"
+# ...and the two devices, which are the other half of what a machine gets. They were demoted from
+# the --no-caps flag surface to unconditional constants precisely BECAUSE denying them models
+# nothing a student has -- so the risk is no longer that a case disagrees about them, it is that
+# a second place starts naming them and the demotion silently becomes a per-case choice again.
+# shellcheck disable=SC2086
+dv_tail='/dev/fuse'; dv_head='--device '
+naming3="$(grep -Hn -- "$dv_head$dv_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-dev-fuse" "1" \
+          "$(printf '%s\n' "$naming3" | grep -c . )"
+
+# ─── one place removes software from a fixture ─────────────────────────────────
+# The OTHER axis, and the more destructive one. --no-prereqs subtracts packages at boot, and the
+# suite's run.sh, the nested case's own script and the hand-driven tool all need it -- so all
+# three call `sandbox arrange` and the removal itself is written once, in lib/sandbox-guest.sh.
+# This is the same rule as above for the same reason: the wsl.conf arrangement WAS duplicated
+# between run.sh and that file, and the copies disagreed for long enough that --wslconf silently
+# did nothing in one of them.
+# shellcheck disable=SC2086
+rm_tail='remove -y'; rm_head='apt-get '
+naming4="$(grep -Hn -- "$rm_head$rm_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-prereqs:only-one-place-removes-a-package" "1" \
+          "$(printf '%s\n' "$naming4" | grep -c . )"
+assert_says "fixture-prereqs:and-that-place-is-sandbox-guest" 'lib/sandbox-guest.sh' "$naming4"
 
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.

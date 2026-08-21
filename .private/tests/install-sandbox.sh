@@ -9,14 +9,21 @@
 # NOT A TEST. It asserts nothing and reports no results. Its whole job is to put you in front
 # of the installer on a machine with a chosen shape, and get out of the way.
 #
-# It reuses the install tier's fixture images rather than inventing a second set, so the
-# machine you poke at by hand is the same machine 26-installer-sandbox.sh asserts against, and
-# they cannot drift. `--machine` IS the knob set: each fixture is a different starting shape.
+# It reuses the install tier's fixture image rather than inventing a second one, so the machine
+# you poke at by hand is the same machine 26-installer-sandbox.sh asserts against, and they
+# cannot drift.
+#
+# EVERYTHING IS PRESENT BY DEFAULT, and the knobs SUBTRACT. Two axes, because there are two
+# separate questions: --no-prereqs says what software the machine lacks, which decides WHICH
+# INSTALL PATH runs; --no-caps says what the container is denied, which decides WHICH ERROR PATH
+# runs. So with no flags at all you get the end-to-end success case, and asking for a failure is
+# something you do on purpose rather than something a machine name does to you. The previous
+# `--machine NAME` bundled both with the platform, which is how one name came to mean both
+# "podman is absent" and "podman is installed but cannot run".
 #
 # NOTHING IT DOES REACHES THIS COMPUTER. No writable mount, no podman socket, and the course
-# files arrive as a local tarball. The one exception is deliberate: --machine nested asks for
-# the capabilities a nested podman needs, which is the only shape that can really build the
-# course image. See fixtures/Containerfile.nested for what that costs and why.
+# files arrive as a local tarball. The capabilities the default machine takes are what a nested
+# podman needs; see fixtures/Containerfile.machine for what they cost and why.
 #
 # MUST STAY BASH 3.2 COMPATIBLE -- see lib/assert.sh for why.
 
@@ -37,7 +44,6 @@ CS193V_STANDALONE=1; export CS193V_STANDALONE
 # rather than left to be replaced by the real trap further down, which those paths never reach.
 trap - EXIT
 
-MACHINES="subuid wsl podman-old no-podman nested"
 
 usage() {
     cat <<EOF
@@ -46,49 +52,75 @@ Usage: tests/install-sandbox.sh [OPTIONS] [-- COMMAND]
   Puts you on a throwaway machine holding install-cs193v.sh and a local copy of the course
   files, and nothing else. Type \`sandbox\` once you are in for what you can do there.
 
-MACHINES  (--machine, default subuid)
-  subuid       podman and ssh present; the account has NO subuid range, so the installer
-               asks permission for exactly one thing and \`usermod\` really runs
-  wsl          looks like WSL (a bind-mounted /proc/version), everything else in place, so
-               /etc/wsl.conf is the only thing to change.  Pair with --wslconf
-  podman-old   ubuntu:24.04, whose real podman is 4.9.3 against MIN_PODMAN 5.7.0, so the
-               installer refuses.  Nothing to accept; it stops in the survey
-  no-podman    no podman and no ssh client, with a local apt repository baked in, so
-               \`apt-get install\` really runs with the network off
-  nested       podman present AND able to build: the only machine where \`--rebuild\` can
-               really assemble the course image.  Needs the capabilities in
-               fixtures/Containerfile.nested; costs ~6 GB and several minutes
+  With NO OPTIONS you get a machine with everything present and every capability granted --
+  the case where the install is expected to run all the way through. The options below take
+  things away.
+
+WHAT THE MACHINE IS MISSING
+  --no-prereqs LIST    comma-separated, from: $MACHINE_PREREQ_NAMES
+      podman   removed for real with apt, so the installer's own \`apt-get install\` runs
+               against the machine's baked-in offline repository
+      ssh      openssh-client removed; gated independently of podman (installer:486-488)
+      subuid   your account's range emptied.  HAND-DRIVEN ONLY, and the reason is worth
+               knowing: setup_subuid writes a fixed 200000-265535, which is outside this
+               container's own ID window, so podman cannot work afterwards HERE even though
+               it would on a student's machine.  Good for watching the step; no suite case
+               can claim both halves
+
+WHAT THE CONTAINER IS DENIED
+  --no-caps LIST       comma-separated, from: $MACHINE_CAP_NAMES
+      sysadmin SYS_ADMIN withheld, so newuidmap cannot write uid_map: podman is installed
+               and cannot run.  The installer stops at "Could not ask podman how much memory
+               is available", which is a real student failure -- a restrictive apparmor
+               profile or a missing uidmap does the same thing on a laptop
 
 OPTIONS
-  --machine NAME       one of the above
+  --platform linux|wsl looks like WSL via a bind-mounted /proc/version (default linux)
+  --wslconf STATE      absent | noboot | boot | systemd   (only with --platform wsl)
+                       'boot' is the state nothing else reaches: a [boot] section with no
+                       systemd=true, which is the only input that takes setup_wslconf's sed
   --sudo STATE         nopasswd (default) | password[:PW] | deny | absent
                        password makes sudo really prompt, which is what a student sees -- the
                        installer says "needs your password" in its consent text and this is
                        the only way to watch that land.  Default password is 'student'.
                        deny: sudo exists, you may not use it.  absent: no sudo at all
-  --wslconf STATE      absent | noboot | boot | systemd   (only with --machine wsl)
-                       'boot' is the state nothing else reaches: a [boot] section with no
-                       systemd=true, which is the only input that takes setup_wslconf's sed
+  --fake-podman        substitute lib/podman-fake, so nothing real is built.  A TEST
+                       CONVENIENCE and neither axis: it is not an absence, not a capability,
+                       and not a machine any student could have.  Makes a run take a second
+  --base IMAGE         machine (default) | podman-old
+                       podman-old is ubuntu:24.04, whose real podman is 4.9.3 against
+                       MIN_PODMAN 5.7.0, so the installer refuses in the survey.  A VERSION
+                       cannot be produced by subtracting from a 26.04 base, which is why this
+                       one machine stays separate
   --dir PATH           set CS193V_DIR, so the installer does not ask where to put things
   --ask                leave CS193V_DIR unset, so choose_dir prompts.  Its typed-path,
                        empty-input and ~/ branches are only reachable this way
-  --net                allow outbound network.  Off by default
+  --net                allow outbound network.  Off by default; the real \`--rebuild\` build
+                       cannot work without it
   --keep               leave the container behind on exit instead of removing it
-  --list               print the machines and exit
+  --list               print the two vocabularies and exit
   -h, --help           this
 
   Anything after -- is run instead of an interactive shell.
 
 EXAMPLES
-  tests/install-sandbox.sh                          # the one-consent-item machine
-  tests/install-sandbox.sh --machine wsl --wslconf boot
-  tests/install-sandbox.sh --machine nested         # can really build the image
-  tests/install-sandbox.sh --ask                    # drive choose_dir's menu yourself
-  tests/install-sandbox.sh --sudo password          # what a student actually sees
+  tests/install-sandbox.sh                                  # everything present: the success case
+  tests/install-sandbox.sh --no-prereqs=podman --net        # apt really installs it, then builds
+  tests/install-sandbox.sh --no-prereqs=podman,ssh          # two consent items
+  tests/install-sandbox.sh --no-caps=sysadmin               # podman installed, cannot run
+  tests/install-sandbox.sh --no-prereqs=subuid              # watch usermod by hand
+  tests/install-sandbox.sh --platform wsl --wslconf boot --fake-podman
+  tests/install-sandbox.sh --base podman-old                # the version refusal
+  tests/install-sandbox.sh --ask                            # drive choose_dir's menu yourself
+  tests/install-sandbox.sh --sudo password                  # what a student actually sees
 EOF
 }
 
-MACHINE=subuid
+BASE=machine
+NOCAPS=''
+NOPREREQS=''
+PLATFORM=linux
+FAKE=no
 WSLCONF=''
 SUDOK=''
 SBDIR='/home/student/cs193v'
@@ -97,25 +129,32 @@ KEEP=no
 CMD=''
 
 die_usage() { printf '%s\n\n' "$1" >&2; usage >&2; exit 2; }
-known() { case " $MACHINES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --machine)  shift; MACHINE="${1:-}"; known "$MACHINE" || die_usage "unknown machine: ${MACHINE:-<empty>}" ;;
-        --machine=*) MACHINE="${1#--machine=}"; known "$MACHINE" || die_usage "unknown machine: $MACHINE" ;;
-        --sudo)     shift; SUDOK="${1:-}" ;;
-        --sudo=*)   SUDOK="${1#--sudo=}" ;;
-        --wslconf)  shift; WSLCONF="${1:-}" ;;
-        --wslconf=*) WSLCONF="${1#--wslconf=}" ;;
-        --dir)      shift; SBDIR="${1:-}" ;;
-        --dir=*)    SBDIR="${1#--dir=}" ;;
-        --ask)      SBDIR='' ;;
-        --net)      NET=yes ;;
-        --keep)     KEEP=yes ;;
-        --list)     printf 'machines: %s\n' "$MACHINES"; exit 0 ;;
-        -h|--help)  usage; exit 0 ;;
-        --)         shift; CMD="$*"; break ;;
-        *)          die_usage "unknown option: $1" ;;
+        --no-caps)      shift; NOCAPS="${1:-}" ;;
+        --no-caps=*)    NOCAPS="${1#--no-caps=}" ;;
+        --no-prereqs)   shift; NOPREREQS="${1:-}" ;;
+        --no-prereqs=*) NOPREREQS="${1#--no-prereqs=}" ;;
+        --platform)     shift; PLATFORM="${1:-}" ;;
+        --platform=*)   PLATFORM="${1#--platform=}" ;;
+        --fake-podman)  FAKE=yes ;;
+        --base)         shift; BASE="${1:-}" ;;
+        --base=*)       BASE="${1#--base=}" ;;
+        --sudo)         shift; SUDOK="${1:-}" ;;
+        --sudo=*)       SUDOK="${1#--sudo=}" ;;
+        --wslconf)      shift; WSLCONF="${1:-}" ;;
+        --wslconf=*)    WSLCONF="${1#--wslconf=}" ;;
+        --dir)          shift; SBDIR="${1:-}" ;;
+        --dir=*)        SBDIR="${1#--dir=}" ;;
+        --ask)          SBDIR='' ;;
+        --net)          NET=yes ;;
+        --keep)         KEEP=yes ;;
+        --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : machine podman-old\n' \
+                               "$MACHINE_PREREQ_NAMES" "$MACHINE_CAP_NAMES"; exit 0 ;;
+        -h|--help)      usage; exit 0 ;;
+        --)             shift; CMD="$*"; break ;;
+        *)              die_usage "unknown option: $1" ;;
     esac
     shift
 done
@@ -123,6 +162,24 @@ done
 # STRICT, and refused rather than warned about. CLAUDE.md §2 records what a silently-skipped
 # malformed value costs -- a set that quietly shrank and a developer who could not see why.
 # Here the cost is worse: you would conclude the installer took a branch it never took.
+#
+# VALIDATED BY THE SUITE'S OWN machine_valid, so the vocabulary cannot differ between the tool
+# you drive by hand and the tier that asserts. `--no-prereqs=pod man` has to be a hard failure
+# in both, not a machine with podman still on it and a transcript you then misread.
+if ! bad="$(machine_valid prereqs "$NOPREREQS")"; then
+    die_usage "unknown --no-prereqs entry: $bad   (want: $MACHINE_PREREQ_NAMES)"
+fi
+if ! bad="$(machine_valid caps "$NOCAPS")"; then
+    die_usage "unknown --no-caps entry: $bad   (want: $MACHINE_CAP_NAMES)"
+fi
+case "$PLATFORM" in
+    linux|wsl) : ;;
+    *) die_usage "unknown --platform: $PLATFORM (linux|wsl)" ;;
+esac
+case "$BASE" in
+    machine|podman-old) : ;;
+    *) die_usage "unknown --base: $BASE (machine|podman-old)" ;;
+esac
 # Strict, like every other value here. A silently-accepted sudo state would be the worst of
 # them: you would watch a run with no prompt and conclude the installer never asks for one.
 case "${SUDOK%%:*}" in
@@ -133,27 +190,36 @@ case "$WSLCONF" in
     ''|absent|noboot|boot|systemd) : ;;
     *) die_usage "unknown --wslconf: $WSLCONF (absent|noboot|boot|systemd)" ;;
 esac
-if [ -n "$WSLCONF" ] && [ "$MACHINE" != wsl ]; then
-    die_usage "--wslconf only means anything with --machine wsl; the state would be arranged and never read"
+if [ -n "$WSLCONF" ] && [ "$PLATFORM" != wsl ]; then
+    die_usage "--wslconf only means anything with --platform wsl; the state would be arranged and never read"
 fi
-if [ "$MACHINE" = wsl ] && [ -z "$WSLCONF" ]; then WSLCONF=noboot; fi
+if [ "$PLATFORM" = wsl ] && [ -z "$WSLCONF" ]; then WSLCONF=noboot; fi
+# REFUSED RATHER THAN QUIETLY IGNORED, for the same reason as the rest: podman-old is ubuntu:24.04
+# with no local repository and no ID window of its own, so a --no-prereqs there would remove a
+# package that cannot be put back and leave you debugging the fixture.
+case ",$NOPREREQS," in
+    *,podman,*) [ "$FAKE" = yes ] && die_usage "--fake-podman cannot combine with --no-prereqs=podman: the fake is bind-mounted over /usr/bin/podman, so apt cannot remove the file. Pick one" ;;
+esac
+if [ "$BASE" = podman-old ] && { [ -n "$NOPREREQS" ] || [ "$FAKE" = yes ]; }; then
+    die_usage "--base podman-old takes neither --no-prereqs nor --fake-podman: its whole job is one refusal off a REAL podman 4.9.3, before anything is installed"
+fi
 
 SB_TMP="$(new_tmpdir)"
 # Read by sandbox_cleanup in lib/sandbox.sh, which shellcheck cannot see from here.
 # shellcheck disable=SC2034
-SB_CASES="$MACHINE"
+SB_CASES="$BASE"
 trap 'rm -rf "$SB_TMP"; rm -f "${CS193V_RESULTS:-}"' EXIT
 
-printf 'Building the %s machine (cached unless its recipe moved)...\n' "$MACHINE"
+printf 'Building the %s machine (cached unless its recipe moved)...\n' "$BASE"
+# sb_work_init ships lib/sandbox-guest.sh as $SB_WORK/sandbox, which is what the suite's run.sh
+# calls too -- so there is nothing to copy here any more, and no second copy to drift.
 sb_work_init
-cp "$DIR0/lib/sandbox-guest.sh" "$SB_WORK/sandbox"
-chmod +x "$SB_WORK/sandbox"
-fixture_build "$MACHINE" >/dev/null || { printf 'could not build the %s machine\n' "$MACHINE" >&2; exit 1; }
+fixture_build "$BASE" >/dev/null || { printf 'could not build the %s machine\n' "$BASE" >&2; exit 1; }
 
 # cs193v.sandbox, NOT cs193v.test, and that matters rather than being tidy: the live tier's
 # cleanup:no-stray-containers filters on label=cs193v.test=$NAME, so a --keep sandbox carrying
 # that label would redden somebody's test run with nothing wrong in their change (#74's shape).
-NAME_SB="cs193v-sandbox-$MACHINE-$$"
+NAME_SB="cs193v-sandbox-$BASE-$$"
 RM=--rm; [ "$KEEP" = yes ] && RM=''
 
 # -t only when there IS a terminal. Asking podman for a pty with none attached is how a
@@ -169,20 +235,32 @@ set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"
 [ -n "$SUDOK" ] && set -- "$@" -e "SB_SUDO=$SUDOK"
+set -- "$@" -e "SB_NO_PREREQS=$NOPREREQS" -e "SB_NO_CAPS=$NOCAPS"
 # THE SAME DECLARATION THE SUITE USES. This file used to carry its own copies of the nested
 # machine's capabilities and the wsl bind mount, which is how they came to disagree with the
-# suite's -- see fixture_flags in lib/sandbox.sh.
-fixture_flags "$MACHINE"
-set -- "$@" ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"}
-if [ "$MACHINE" = nested ]; then
+# suite's -- see machine_flags in lib/sandbox.sh.
+if [ "$BASE" = podman-old ]; then
+    # No capabilities and no bind mounts: its whole job is one refusal in the survey, which
+    # needs no namespace at all. Deliberately bare, so the refusal is measured on a machine
+    # with no special privilege.
+    :
+else
+    machine_flags "$NOCAPS" "$PLATFORM" "$FAKE"
+    set -- "$@" ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"}
+    set -- "$@" --mount type=tmpfs,destination=/var/tmp/shim
     set -- "$@" -e BUILDAH_LAYERS=false
-    [ "$NET" = no ] && printf 'note: --machine nested cannot build without --net\n'
+    if [ "$NET" = no ] && [ "$FAKE" = no ]; then
+        printf 'note: the real `--rebuild` build needs --net; without it the run stops there\n'
+    fi
 fi
 # NOT exported: CS193V_INSTANCE. installer:775-777 names the unsuffixed image on purpose, and
 # an instance in here would test something no student runs. Isolation is the container.
-set -- "$@" "$(fixture_tag "$MACHINE")"
+set -- "$@" "$(fixture_tag "$BASE")"
 
-printf 'Machine: %s   dir: %s   net: %s   sudo: %s\n' "$MACHINE" \
+printf 'Machine: %s   platform: %s   podman: %s\n' "$BASE" "$PLATFORM" \
+       "$( [ "$FAKE" = yes ] && printf 'FAKE (lib/podman-fake)' || printf real )"
+printf 'Missing: %s   Denied: %s\n' "${NOPREREQS:-nothing}" "${NOCAPS:-nothing}"
+printf 'dir: %s   net: %s   sudo: %s\n' \
        "${SBDIR:-<unset, choose_dir will ask>}" "$NET" "${SUDOK:-nopasswd}"
 case "${SUDOK%%:*}" in
     password) pw="${SUDOK#password:}"; [ "$pw" = "$SUDOK" ] && pw=student
