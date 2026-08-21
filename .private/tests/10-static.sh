@@ -67,7 +67,7 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # on it, and holding it to one would mean rewriting vendored code for a platform it will
 # never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
 # is the part that matters.
-hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/*.sh \
+hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/*.sh \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
@@ -1470,7 +1470,10 @@ assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC10
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
                                            $PRIVATE/tests/14-test-harness.sh \
-                                           $PRIVATE/tests/16-args-parse.sh
+                                           $PRIVATE/tests/16-args-parse.sh \
+                                           $PRIVATE/tests/install-sandbox.sh \
+                                           $PRIVATE/tests/lib/sandbox.sh \
+                                           $PRIVATE/tests/lib/sandbox-guest.sh
 # setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
 # set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot
 # resolve a path built from $0.
