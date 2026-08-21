@@ -16,7 +16,7 @@ set -u
 require_podman
 
 SB_TMP="$(new_tmpdir)"
-SB_CASES="subuid wsl podman-old no-podman"
+SB_CASES="subuid wsl podman-old no-podman nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -187,3 +187,146 @@ record "sb-apt:packages-added" "$(printf '%s' "$added" | grep -c . ) packages"
 # job and it is env-gated. Everything above happens before it.
 record "sb-apt:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 sandbox_reap
+
+# ─── nested: the launcher really building, inside a container ───────────────────
+# The one case that needs podman-in-podman, so the one case that is opt-in. Everything above
+# runs on every full run; this does not, because it costs a ~240 s build and ~4.3 GB.
+#
+# THE SKIP IS ANNOUNCED, not silent. VERIFICATION.md §A.15 records that a gate outside the
+# default run is the same defect as an assertion that never executed, so the way to have both
+# is a skip that names the variable and shows up in the results.
+if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
+    skip "nested:the-real-build" "set CS193V_INSTALL_NESTED=1 -- costs a 240s build and 4.3GB"
+else
+fixture_build nested || exit 1
+
+# ─── the prerequisites, before anything rests on them ──────────────────────────
+np="$(nest_probe)"
+record "nest:podman-inside" "$(nest_get "$np" PODMAN_VERSION)"
+record "nest:cgroups"       "$(nest_get "$np" CGROUP)"
+
+# THE STAMP FIRST. Every measurement below is taken through a container boundary, and if the
+# boundary is not there they all come out green about the HOST instead. A build-time id baked
+# into the image is the one answer no host-side execution can forge.
+assert_match "nest:the-probe-ran-inside-the-fixture" '^nested-fixture-[0-9]+$' \
+             "$(nest_get "$np" FIXTURE_ID)"
+assert_eq "nest:runs-as-the-unprivileged-student" "2:student" "$(nest_get "$np" ID)"
+
+# A nested user namespace really was created, and it is not the host's.
+assert_match "nest:nested-userns-created" '^user:\[[0-9]+\]$' "$(nest_get "$np" INNER_USERNS)"
+assert_ne   "nest:that-userns-is-not-the-host-s" "$(readlink /proc/self/ns/user)" \
+            "$(nest_get "$np" INNER_USERNS)"
+# 32768 pre-seeded ids plus the user's own. The range has to lie INSIDE the outer container's
+# 1..65536 window -- the installer's own 200000-265535 is entirely outside it -- so this
+# number is the one that says the pre-seeded range is what got mapped.
+assert_eq "nest:the-preseeded-range-is-what-got-mapped" "65535" "$(nest_get "$np" MAPPED_IDS)"
+assert_eq "nest:subuid-range-is-inside-the-outer-window" "student:3:65534" \
+          "$(nest_get "$np" SUBUID)"
+# ...and it has to COVER gid 65534, because apt's sandbox user drops to nogroup and calls
+# setgroups(). An unmapped gid there kills the course build three steps in.
+# THE COUNT, not the span, and the difference is what a whole afternoon turned on. Mapping
+# container gid 65534 needs at least 65534 ids in the range; a range of 55536 ids whose numbers
+# happen to include the value 65534 does NOT map it, and the course build dies at apt three
+# steps in with "Failed to setgroups". Computed from the range so a future narrowing reddens
+# here rather than in a four-minute build.
+nsub="$(nest_get "$np" SUBUID)"
+ncount="$(printf '%s' "$nsub" | cut -d: -f3)"
+if [ -n "$ncount" ] && [ "$ncount" -ge 65534 ]; then
+    pass "nest:the-range-maps-nogroup-65534"
+else
+    fail "nest:the-range-maps-nogroup-65534" "range '$nsub' has ${ncount:-no} ids; gid 65534 needs 65534"
+fi
+
+# SYS_ADMIN is the difference, measured both ways. Without it newuidmap cannot write uid_map,
+# so the probe reports an error instead of a namespace -- which is what makes the fixture's
+# one privilege departure a tested fact rather than a comment.
+assert_eq "nest:setuid-is-live-and-the-rootfs-is-not-nosuid" "overlay suid-ok" \
+          "$(nest_get "$np" ROOTFS)"
+nn="$(nest_probe_nocap)"
+assert_says_not "nest:without-SYS_ADMIN-there-is-no-namespace" 'user:[' \
+                "$(nest_get "$nn" INNER_USERNS)"
+assert_says "nest:without-SYS_ADMIN-newuidmap-is-what-fails" 'newuidmap' \
+            "$(nest_get "$nn" INNER_USERNS)"
+assert_match "nest:the-nocap-probe-also-really-ran" '^nested-fixture-[0-9]+$' \
+             "$(nest_get "$nn" FIXTURE_ID)"
+
+# The second departure, with its own control. Without the unmask the outer container's /proc/sys
+# is read-only, so crun cannot set ping_group_range and the inner network never comes up --
+# which is a different failure from the SYS_ADMIN one and has to be told apart from it.
+assert_eq "nest:proc-sys-is-unmasked-with-the-flag" "not-masked" "$(nest_get "$np" PROC_SYS)"
+nu="$(nest_probe_nounmask)"
+assert_eq "nest:without-the-unmask-proc-sys-is-masked" "masked-ro" "$(nest_get "$nu" PROC_SYS)"
+assert_match "nest:the-nounmask-probe-also-really-ran" '^nested-fixture-[0-9]+$' \
+             "$(nest_get "$nu" FIXTURE_ID)"
+# ...and that control must still create its namespace, or it would be failing for the OTHER
+# reason and proving nothing about the unmask.
+assert_match "nest:the-nounmask-control-isolates-one-flag" '^user:\[[0-9]+\]$' \
+             "$(nest_get "$nu" INNER_USERNS)"
+
+# The devices, and that fuse-overlayfs can really mount rather than merely being installed.
+assert_eq "nest:dev-fuse-is-present"   "char-device" "$(nest_get "$np" DEVFUSE)"
+assert_eq "nest:dev-net-tun-is-present" "char-device" "$(nest_get "$np" DEVNETTUN)"
+assert_eq "nest:fuse-overlayfs-can-mount" "fuse.fuse-overlayfs" "$(nest_get "$np" FUSE_MOUNT)"
+# Recorded, not asserted: podman accepts the systemd cgroup manager here even with no session,
+# so "cgroupfs is required" is not something this probe showed. The config is still right --
+# SESSION proves there is no session to use -- but the claim would be bigger than the evidence.
+assert_eq "nest:there-is-no-systemd-user-session" "no-bus unset" "$(nest_get "$np" SESSION)"
+record "nest:store" "$(nest_get "$np" STORE)"
+
+# ─── and now the build, for real ───────────────────────────────────────────────
+# A SECOND GATE, because these two answer different questions and only one of them is settled.
+# Everything above proves nesting WORKS here and pins exactly what it costs. The build below
+# asks whether the 25-step course image can be assembled inside a doubly-nested userns, and
+# as of this writing it cannot: it now gets through apt and dies configuring the `locales`
+# package. Every failure on the way to that point was an artefact of the extra nesting level
+# rather than a defect in the installer or the launcher -- masked /proc, a missing passt, an
+# unmappable gid -- and the remaining tail is unbounded.
+#
+# So it is opt-in separately, and the skip says where it stops rather than pretending the
+# question is open. VERIFICATION.md §A.15's rule still holds: the gate is announced.
+if [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
+    skip "nested:the-course-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- known to stop at the locales postinst"
+else
+# THE HOST CANARY, taken around it. Everything else here is measured through a container
+# boundary; this is the assertion that the boundary held. Paired with the inner store growing,
+# because "nothing changed anywhere" is exactly what a case that ran nothing would report --
+# the vacuous pass 25-installer.sh:7-13 records for A.12's own idempotency check.
+imgs_before="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+vols_before="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
+subuid_before="$(cksum < /etc/subuid)"
+
+out="$(nest_build)"
+record "nest:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
+record "nest:inner-caps"        "$(sb_section "$out" INNER-CAPS)"
+
+assert_says "nest:the-installer-finished"   "Setup finished"       "$out"
+assert_says "nest:it-exited-0"              "===INSTALLER-RC=0===" "$out"
+assert_eq   "nest:the-course-image-was-really-built" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
+# PAIRED, because `doctor` returned ok on a run with no image and no container at all -- it
+# does not fail on an unbuilt installation, so on its own this assertion says less than its
+# name claims.
+assert_eq   "nest:doctor-runs-in-there"     "ok"   "$(sb_section "$out" DOCTOR)"
+assert_eq   "nest:and-there-was-something-for-doctor-to-look-at" "yes" \
+            "$(sb_section "$out" IMAGE-EXISTS)"
+# The inner store really grew, which is what stops the three canaries below from passing on a
+# run that did nothing at all.
+istore="$(sb_section "$out" INNER-STORE-BYTES)"
+if [ -n "$istore" ] && [ "$istore" -gt 1000000000 ]; then pass "nest:the-inner-store-really-grew"
+else fail "nest:the-inner-store-really-grew" "inner graph root is ${istore:-empty} bytes"; fi
+
+# THE BOUNDARY THIS FIXTURE SITS ON THE WRONG SIDE OF. The outer container has SYS_ADMIN; the
+# course container must not, and its flags come from $DIR/.config/container.args, which this
+# fixture never edits. Nowhere else in the suite is that separation meaningful -- 60-container.sh
+# asserts no-SYS_ADMIN too, but always where nothing nearby had it.
+assert_says_not "nest:SYS_ADMIN-did-not-reach-the-course-container" "SYS_ADMIN" \
+                "$(sb_section "$out" INNER-CAPS)"
+assert_says "nest:the-inner-caps-were-really-read" "cap_" "$(sb_section "$out" INNER-CAPS)"
+
+assert_eq "nest:host-image-list-untouched"  "$imgs_before" \
+          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+assert_eq "nest:host-volume-list-untouched" "$vols_before" \
+          "$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
+assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
+sandbox_reap
+fi
+fi
