@@ -421,6 +421,24 @@ isolation model, exit non-zero, and create nothing.
 that nothing is created, and that podman is not even contacted. Only the real `sudo`
 invocation is unverified.
 
+### `sudo usermod --add-subuids` against a real `/etc`
+*Expect:* on a machine whose account has no subuid range, the installer's one privileged
+`usermod` call adds `200000-265535` to `/etc/subuid` and `/etc/subgid`, and `./cs193v doctor`
+then passes where it previously refused with "your account has no subuid range".
+
+*Automated equivalent:* two halves, neither of which is this.
+`25-installer.sh :: subuid:asks-root-for-the-right-range` proves the installer **asks** for
+exactly that command — `sudo-fake` records argv and executes nothing.
+`25-installer.sh :: usermod:*` runs the real `usermod --prefix` against a **synthetic** root and
+proves the command **does** what the installer needs: the range lands in both files, in the form
+`cs193v:1073` greps for, and nothing outside those two files and their backups is touched.
+
+What is left for a person is only the composition of the two — the real binary, invoked through a
+real `sudo`, against the real `/etc`. It cannot be automated in a container at all: `setup_subuid`
+writes a fixed `200000-265535`, which is outside a container's own ID window, so podman stops
+working there afterwards while it works fine on a laptop. That is why the container case for this
+was removed rather than left making half a claim.
+
 ### §2.4 / §9.2 — `--rebuild --logout` really deletes the volumes
 Destructive: it logs you out of claude, codex, gh and vercel, and takes the git identity `setup-git`
 configured with them — the credential helper line lives in that volume, so leaving it behind would
