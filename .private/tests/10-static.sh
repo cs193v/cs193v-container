@@ -202,6 +202,25 @@ bare="$(grep -Hn "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq "installer-door:never-runs-the-unedited-installer" "" "$bare"
 
+# ─── the traced line numbers have to mean something ────────────────────────────
+# THE PURE HALF OF THE COVERAGE GATE. 95-installer-coverage.sh unions line numbers recorded
+# while the installer ran, and every one of those runs is of an EDITED COPY -- edit_sub
+# rewrites REPO_OWNER and TARBALL so the tarball comes from file:// instead of GitHub. That is
+# only safe because both are same-line substitutions. If either ever became multi-line, the
+# copy's line numbers would drift from the original's and the gate would score the wrong file
+# while reporting a confident percentage. Checked here because it is repo-versus-repo and
+# costs milliseconds; the union itself cannot live here, since this suite runs FIRST and the
+# producers all run later.
+cov_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-cov.XXXXXX")"
+cp "$PRIVATE/install-cs193v.sh" "$cov_tmp/copy.sh"
+sed -E 's|^REPO_OWNER=.*|REPO_OWNER="test"|' "$cov_tmp/copy.sh" > "$cov_tmp/a" && mv "$cov_tmp/a" "$cov_tmp/copy.sh"
+sed -E 's|^TARBALL=.*|TARBALL="file:///work/course.tar.gz"|' "$cov_tmp/copy.sh" > "$cov_tmp/a" && mv "$cov_tmp/a" "$cov_tmp/copy.sh"
+assert_eq "coverage:the-edited-copy-keeps-the-original-s-line-numbers" \
+          "$(grep -c '' "$PRIVATE/install-cs193v.sh")" "$(grep -c '' "$cov_tmp/copy.sh")"
+# ...and the edits really landed, or the assertion above is comparing a file to itself.
+assert_ok "coverage:the-edits-really-applied" grep -q '^REPO_OWNER="test"' "$cov_tmp/copy.sh"
+rm -rf "$cov_tmp"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \

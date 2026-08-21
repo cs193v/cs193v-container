@@ -224,11 +224,34 @@ EOF
 # mechanism, and the same one that cost repo_copy its memo.
 SHIM_LAST="$SHIM_HOST_TMPDIR/cs193v-last.$$"
 
+# TRACED WHEN THERE IS SOMEWHERE TO PUT IT. With CS193V_RUN_DIR set -- which run-tests.sh
+# exports -- every run records which of the installer's lines executed, so a later suite can
+# union them and say what the whole suite reached. PS4 carries $LINENO and the trace goes to
+# fd 9, so the installer's own output is untouched: verified, not assumed, because a trace
+# leaking into stdout would corrupt every assert_says in this file.
+#
+# The line numbers are the ORIGINAL's, because edit_sub substitutes in place and 10-static.sh
+# asserts the copy and the original have the same length. Without that the numbers would drift
+# silently and the gate would measure nothing.
+installer_trace_file() {
+    [ -n "${CS193V_RUN_DIR:-}" ] || return 1
+    mkdir -p "$CS193V_RUN_DIR/trace" 2>/dev/null || return 1
+    # NAMED BY SUITE, not just by pid: the gate has to know WHICH producers reported, so that a
+    # missing one is a named skip rather than a quietly smaller union. run-tests.sh exports
+    # CS193V_SUITE per suite; a direct run of a suite has none, which is itself informative.
+    printf '%s/trace/%s.%s' "$CS193V_RUN_DIR" "${CS193V_SUITE:-standalone}" "$$"
+}
+
 installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> output
-    local script="$1"; shift
+    local script="$1" tf; shift
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
+    if tf="$(installer_trace_file)"; then
+        env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${LINENO} ' BASH_XTRACEFD=9 "$@" \
+            bash -x "$script" </dev/null 2>&1 9>>"$tf"
+    else
+        env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
+    fi
 }
 
 installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] -> rc
@@ -254,12 +277,16 @@ installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
 # launcher and the installer: assert the agreement rather than pretend there is one copy.
 installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     local keys="$1" script="$2"; shift 2
-    local cmd a
+    local cmd a tf
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
     cmd="env HOME=$SHIM/home PATH=$SHIM:$PATH"
     for a in "$@"; do cmd="$cmd $a"; done
-    cmd="$cmd bash $script"
+    if tf="$(installer_trace_file)"; then
+        cmd="$cmd PS4='+\${LINENO} ' BASH_XTRACEFD=9 bash -x $script 9>>$tf"
+    else
+        cmd="$cmd bash $script"
+    fi
     if script --version 2>&1 | grep -qi util-linux; then
         printf '%b' "$keys" | timeout 120 script -q -c "$cmd" /dev/null 2>&1
     else
