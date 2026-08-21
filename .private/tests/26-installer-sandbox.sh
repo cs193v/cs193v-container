@@ -292,6 +292,17 @@ else
 # boundary; this is the assertion that the boundary held. Paired with the inner store growing,
 # because "nothing changed anywhere" is exactly what a case that ran nothing would report --
 # the vacuous pass 25-installer.sh:7-13 records for A.12's own idempotency check.
+# A DISK PRECONDITION, because this is the one case here that can hurt the machine rather than
+# just fail. Measured: 6.2 GB of inner store and about 8 GB of host disk while it runs, all
+# reclaimed on reap. Eleven checkouts share this filesystem, and #76 records what a full one
+# does -- $CS193V_RESULTS became unwritable and the run reported "0 fail" having lost its
+# results. So it refuses rather than risks it, and says the number either way.
+sb_free_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "nest:free-disk-gb-before" "${sb_free_gb:-unknown}"
+if [ -z "$sb_free_gb" ] || [ "$sb_free_gb" -lt 15 ]; then
+    skip "nested:the-course-build" "only ${sb_free_gb:-?}GB free; this build wants ~8GB and a margin"
+else
+
 imgs_before="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 vols_before="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
 subuid_before="$(cksum < /etc/subuid)"
@@ -319,9 +330,17 @@ else fail "nest:the-inner-store-really-grew" "inner graph root is ${istore:-empt
 # course container must not, and its flags come from $DIR/.config/container.args, which this
 # fixture never edits. Nowhere else in the suite is that separation meaningful -- 60-container.sh
 # asserts no-SYS_ADMIN too, but always where nothing nearby had it.
-assert_says_not "nest:SYS_ADMIN-did-not-reach-the-course-container" "SYS_ADMIN" \
-                "$(sb_section "$out" INNER-CAPS)"
-assert_says "nest:the-inner-caps-were-really-read" "cap_" "$(sb_section "$out" INNER-CAPS)"
+# AN EXACT VALUE, which proves the field was read AND that nothing leaked, in one assertion.
+# The first attempt paired the SYS_ADMIN check with `assert_says cap_` as its positive token --
+# and that can never match, because the course container has NO capabilities at all: podman
+# reports the empty set as "[]". So the "proof it was read" was looking for something that
+# cannot be there, and only a real run showed it. `[]` is both halves: an empty value or
+# NO-CONTAINER fails it, and so would any capability, SYS_ADMIN included.
+ncaps="$(sb_section "$out" INNER-CAPS)"
+assert_eq "nest:the-course-container-has-no-capabilities-at-all" "[]" "$ncaps"
+# Named separately because it is the property the fixture's own privilege makes worth stating:
+# the outer container has SYS_ADMIN and this one must never see it.
+assert_says_not "nest:SYS_ADMIN-did-not-reach-the-course-container" "SYS_ADMIN" "$ncaps"
 
 assert_eq "nest:host-image-list-untouched"  "$imgs_before" \
           "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
@@ -329,5 +348,8 @@ assert_eq "nest:host-volume-list-untouched" "$vols_before" \
           "$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
 assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
 sandbox_reap
+# ...and the space really came back, which is the half a precondition cannot promise.
+record "nest:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+fi
 fi
 fi
