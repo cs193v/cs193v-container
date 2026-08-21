@@ -190,13 +190,14 @@ sandbox_reap
 
 # ─── nested: the launcher really building, inside a container ───────────────────
 # The one case that needs podman-in-podman, so the one case that is opt-in. Everything above
-# runs on every full run; this does not, because it costs a ~240 s build and ~4.3 GB.
+# runs on every full run; this does not, because it builds fixture images and drives a real
+# nested podman. The build itself is gated again below -- these prerequisites take seconds.
 #
 # THE SKIP IS ANNOUNCED, not silent. VERIFICATION.md §A.15 records that a gate outside the
 # default run is the same defect as an assertion that never executed, so the way to have both
 # is a skip that names the variable and shows up in the results.
 if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
-    skip "nested:the-real-build" "set CS193V_INSTALL_NESTED=1 -- costs a 240s build and 4.3GB"
+    skip "nested:the-prerequisites" "set CS193V_INSTALL_NESTED=1 -- seconds; the build itself is a second gate"
 else
 fixture_build nested || exit 1
 
@@ -274,18 +275,18 @@ assert_eq "nest:there-is-no-systemd-user-session" "no-bus unset" "$(nest_get "$n
 record "nest:store" "$(nest_get "$np" STORE)"
 
 # ─── and now the build, for real ───────────────────────────────────────────────
-# A SECOND GATE, because these two answer different questions and only one of them is settled.
-# Everything above proves nesting WORKS here and pins exactly what it costs. The build below
-# asks whether the 25-step course image can be assembled inside a doubly-nested userns, and
-# as of this writing it cannot: it now gets through apt and dies configuring the `locales`
-# package. Every failure on the way to that point was an artefact of the extra nesting level
-# rather than a defect in the installer or the launcher -- masked /proc, a missing passt, an
-# unmappable gid -- and the remaining tail is unbounded.
+# A SECOND GATE, because the two answer different questions and cost wildly different amounts.
+# Everything above proves nesting works here and pins what it costs, in seconds. This assembles
+# the whole 25-step course image inside the fixture: measured at 6.2 GB of inner store, 8 GB of
+# host disk while it runs, and several minutes.
 #
-# So it is opt-in separately, and the skip says where it stops rather than pretending the
-# question is open. VERIFICATION.md §A.15's rule still holds: the gate is announced.
+# IT WORKS, and every step of getting there was an artefact of the extra nesting level rather
+# than a defect in the installer or the launcher -- podman's masked /proc, a missing passt, a
+# subuid range that could not map nogroup, and overlay-on-overlay corrupting a symlink replace.
+# The host control matters most: the identical package list installs cleanly unnested, so the
+# Containerfile was never at fault.
 if [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
-    skip "nested:the-course-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- known to stop at the locales postinst"
+    skip "nested:the-course-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real 25-step build, ~6GB and several minutes"
 else
 # THE HOST CANARY, taken around it. Everything else here is measured through a container
 # boundary; this is the assertion that the boundary held. Paired with the inner store growing,
