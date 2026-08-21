@@ -57,11 +57,14 @@ if [ -z "$heard" ]; then
 fi
 COMPLETE=yes; [ -n "$missing" ] && COMPLETE=no
 record "coverage:union-is-complete" "$COMPLETE"
-# A KNOWN, NAMED HOLE, recorded on every run so it cannot quietly become the status quo. The
-# no-podman fixture is the only place install_podman's real apt arms execute, and it is excluded
-# from tracing because `bash -x` hangs it at the consent menu -- see lib/sandbox.sh. So those
-# lines will always appear unreached here even though a case really does exercise them.
-record "coverage:known-untraced-case" "no-podman -- bash -x hangs it; its apt branches read as unreached"
+# THE HOLE THAT USED TO BE HERE IS GONE, and it is worth saying so rather than deleting the note:
+# the apt case was excluded from tracing because `bash -x` hung it at the consent menu, so
+# install_podman's real apt arms always read as unreached. That was never about tracing. Ubuntu's
+# sudo defaults use_pty ON, the in-container `script` stopped draining its pty master once sudo
+# ran, and output past the kernel's buffer blocked in write() forever -- tracing merely multiplied
+# output enough to cross it every time. The tty now comes from `podman run -t`, conmon drains it,
+# and every case is traceable. lib/sandbox.sh records the bisection.
+record "coverage:known-untraced-case" "none -- the apt case's bash -x hang was the pty transport, since replaced"
 
 # ─── what ran ──────────────────────────────────────────────────────────────────
 SEEN="$CS193V_RUN_DIR/seen.lines"

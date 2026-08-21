@@ -16,46 +16,98 @@ set -u
 require_podman
 
 SB_TMP="$(new_tmpdir)"
-SB_CASES="subuid wsl podman-old no-podman nested"
+# LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
+# just the container names to sweep on the way out.
+SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
 
 sb_work_init
-fixture_build subuid || exit 1
+fixture_build machine || exit 1
 
-# ─── the subuid range, added for real ──────────────────────────────────────────
-# TWO MENUS, SO TWO KEYSTROKES. CS193V_DIR is deliberately not set, so choose_dir prompts
-# first (its default is $HOME/cs193v, which here is /home/student/cs193v) and ask_consent
-# prompts second. Digits, not arrows: menu()'s `[1-9]` arm selects and breaks in one key, so
-# "1" takes choose_dir's default and "2" is consent's "Go ahead".
+# ─── apt really installing podman, with the network off ────────────────────────
+# THE MACHINE IS DESCRIBED, NOT NAMED, and that is the change this suite exists to make. What
+# this case is about is "podman and ssh are absent", so that is what it says -- rather than a
+# fixture called `no-podman` that also happened to lack SYS_ADMIN and therefore also stood for
+# "podman is installed but cannot run". Those are two scenarios and they now have two cases.
 #
-# The count has to be exact. A pty never delivers EOF (ERRORS.md B13), so a spare "\n" is
-# read by the NEXT menu as Enter -- which on the consent menu means the default, which means
-# declining -- and a missing key makes this hang until sandbox_run's timeout.
-out="$(sandbox_run subuid '12')"
-record "subuid:transcript-bytes" "$(printf '%s' "$out" | wc -c | tr -d ' ')"
+# The two branches no PATH shim can decide, because they are properties of the machine: podman
+# absent and ssh absent. Taking the fake podman off PATH only exposes the real /usr/bin/podman,
+# so 25-installer.sh cannot reach either.
+#
+# REMOVED FOR REAL, then reinstalled OFFLINE from the machine's baked-in file:// repository.
+# --network=none is still in force, and lib/sandbox-guest.sh records why concealment would not
+# do: apt would say "already the newest version" and the path under test would never run.
+#
+# TWO consent items -- podman+uidmap and openssh-client, gated independently on purpose
+# (installer:486-488) -- and one menu, because CS193V_DIR is set. So one keystroke.
+sb_machine no-prereqs=podman,ssh
+# SB_PROBE_PODMAN only here: this is the one non-building case that installs podman, so it is
+# the only one where "did the thing apt installed actually work" is worth the store that asking
+# it creates.
+out="$(sandbox_run apt '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
+record "apt:transcript-bytes" "$(printf '%s' "$out" | wc -c | tr -d ' ')"
+assert_says "sb-apt:the-machine-was-really-arranged" "prereqs=podman,ssh" "$(sb_section "$out" ARRANGED)"
+assert_says "sb-apt:asks-for-both-independently" "permission for 2 thing" "$out"
+assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "$out"
+assert_says "sb-apt:names-openssh-client"        "Install openssh-client" "$out"
+assert_says "sb-apt:says-what-it-is-installing"  "Installing podman uidmap openssh-client" "$out"
 
-assert_says "sb-subuid:only-the-subuid-needs-permission" "permission for 1 thing" "$out"
-assert_says "sb-subuid:names-what-it-wants"              'Give your account a "subuid range"' "$out"
-assert_says "sb-subuid:reports-success"                  "subuid range added for student" "$out"
-assert_says "sb-subuid:finishes"                         "Setup finished" "$out"
-assert_says "sb-subuid:exited-0"                         "===INSTALLER-RC=0===" "$out"
+# THE EFFECT. podman was absent before -- the consent item above only exists when it is -- and
+# it is present after, which the two together can only both satisfy if apt really worked.
+assert_says "sb-apt:podman-is-installed-afterwards" "podman version" \
+            "$(sb_section "$out" PODMAN-AFTER)"
+assert_eq   "sb-apt:ssh-is-installed-afterwards" "present" "$(sb_section "$out" SSH-AFTER)"
+assert_says "sb-apt:the-post-install-check-passed" "podman 5.7.0" "$out"
 
-# THE EFFECT, read out of the container itself. `podman diff` can only say that /etc/subuid
-# was opened for write; the claim under test is what ended up in it, and a wrong range is a
-# silent failure much later, inside podman.
-assert_eq "sb-subuid:etc-subuid-has-the-range" "student:200000:65536" \
-          "$(sb_section "$out" ETC-SUBUID)"
-assert_eq "sb-subuid:etc-subgid-has-the-range" "student:200000:65536" \
-          "$(sb_section "$out" ETC-SUBGID)"
+# INSTALLED IS NOT THE SAME AS WORKING, and this is now asserted rather than recorded. The old
+# fixture could only record what its podman said, because it lacked the capability to run one;
+# this machine has everything, so the podman apt installed really answers -- which is what makes
+# the --no-caps=sysadmin case below a deliberate DIFFERENTIAL rather than an environmental limit
+# dressed up as a property.
+mem="$(sb_section "$out" PODMAN-WORKS)"
+assert_match "sb-apt:the-podman-apt-installed-really-works" '^[0-9]{6,}$' "$mem"
 
-# ...AND NOTHING ELSE, which is the half no prose assertion can reach. The expected set is
-# checked in at fixtures/expected-system-paths.subuid and asserted in BOTH directions, so an
-# installer that grows a host write reddens here, and one that stops making a change it used
-# to make reddens too. Twelve lines, deliberately short enough to read rather than skim.
-assert_says "sb-subuid:diff-shows-etc-subuid" '/etc/subuid' "$(sandbox_diff)"
-assert_system_diff subuid /home/student/cs193v
+# Asserted in PACKAGES, not paths: the path-level diff here is several hundred lines of /usr
+# and /var/lib/dpkg, which is the wrong unit for the claim and too long to be read by anyone.
+added="$(sb_section "$out" DPKG-ADDED)"
+if [ -n "$added" ]; then pass "sb-apt:the-package-list-was-really-read"
+else fail "sb-apt:the-package-list-was-really-read" "dpkg reported no new packages"; fi
+for pkg in podman uidmap openssh-client; do
+    assert_says "sb-apt:installed-$pkg" "$pkg" "$added"
+done
+record "sb-apt:packages-added" "$(printf '%s' "$added" | grep -c . ) packages"
+# WHERE THIS RUN STOPS, recorded rather than asserted green: podman works now, so build_image
+# hands off to the launcher, which needs the network this case does not have. The end-to-end
+# case below is the one that gives it a network.
+record "sb-apt:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
+# ─── podman installed, and unable to run ───────────────────────────────────────
+# THE FAILURE FROM THE BUG REPORT, asked for on purpose. It used to be an accident: the
+# no-podman fixture lacked SYS_ADMIN, so the podman it installed could not create a user
+# namespace, and the run stopped at write_local_args. That was recorded as an environmental
+# limit -- and then assertions were written treating it as a property, and a claim was made that
+# the branch was "only reachable there". It was reachable in the shim tier all along.
+#
+# What makes it worth a case here is the DIFFERENTIAL: the case above is the same machine with
+# the capability, and its podman answers with a real number. So this one is measuring the
+# capability rather than measuring the fixture's limits.
+#
+# It is also a real student failure. Ubuntu ships kernel.apparmor_restrict_unprivileged_userns=1
+# and relies on newuidmap being setuid-root; a restrictive profile, a nosuid mount or a missing
+# uidmap all give a student the same observable.
+sb_machine no-prereqs=podman no-caps=sysadmin
+out="$(sandbox_run cannot-answer '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
+assert_says "sb-noans:apt-still-installed-it" "podman version" "$(sb_section "$out" PODMAN-AFTER)"
+assert_says "sb-noans:but-it-cannot-answer" "newuidmap" "$(sb_section "$out" PODMAN-WORKS)"
+assert_says "sb-noans:the-installer-says-so" "Could not ask podman how much memory" "$out"
+assert_says "sb-noans:exits-nonzero"         "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-noans:does-not-claim-success" "Setup finished" "$out"
+# ...and it got far enough to have done the install first, which is what tells this apart from
+# a run that failed before reaching the question.
+assert_says "sb-noans:it-had-already-installed-podman" "Installing podman uidmap" "$out"
 sandbox_reap
 
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
@@ -68,12 +120,14 @@ sandbox_reap
 # (installer:398) while setup_wslconf looks for `[boot]` (installer:534), so a file that has
 # [boot] and not systemd=true is the only input that reaches the `sed` at installer:535 --
 # and nothing had ever reached it.
-fixture_build wsl || exit 1
-
+#
+# --fake-podman, NAMED. These four used to be fast because their fixture baked in
+# lib/podman-fake, which the machine name said nothing about. This case is about /etc/wsl.conf;
+# building a real image would take minutes and prove nothing extra, so the fake is asked for
+# out loud.
 wsl_run() {                           # wsl_run STATE KEYS -> transcript
-    # No -v for /proc/version here: fixture_flags declares it for the wsl machine, so this
-    # call site cannot forget it or spell it differently.
-    sandbox_run wsl "$2" -e "SB_WSLCONF=$1" -e CS193V_DIR=/home/student/cs193v
+    sb_machine platform=wsl fake-podman=yes
+    sandbox_run "wsl-$1" "$2" -e "SB_WSLCONF=$1" -e CS193V_DIR=/home/student/cs193v
 }
 
 # The bind mount is what everything below rests on, so it is asserted on its own terms first.
@@ -127,6 +181,11 @@ sandbox_reap
 #
 # NO KEYSTROKES: survey dies before choose_dir, so no menu is ever drawn.
 fixture_build podman-old || exit 1
+# THE ONE MACHINE THAT IS NOT THE MACHINE, stated rather than forced. A VERSION cannot be
+# produced by subtracting from a 26.04 base -- 26.04's archive has no podman 4.9.3 to install --
+# so this stays a second small image, and `base=` is how a case asks for it. Neither axis
+# applies: its whole job is one refusal in the survey, which needs no capability and no repo.
+sb_machine base=podman-old
 out="$(sandbox_run podman-old '' -e CS193V_DIR=/home/student/cs193v)"
 record "sb-old:the-version-24.04-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
 assert_says "sb-old:refused"                 "needs 5.7.0 or newer" "$out"
@@ -146,63 +205,6 @@ assert_eq "sb-old:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
 assert_system_diff podman-old /home/student/cs193v
 sandbox_reap
 
-# ─── apt really installing podman, with the network off ────────────────────────
-# The three branches no PATH shim can decide, because they are properties of the machine:
-# podman absent, ssh absent, and what `apt-get install` then does about it. Taking the fake
-# podman off PATH only exposes the real /usr/bin/podman, so 25-installer.sh cannot reach any
-# of them -- see the note where it declines to try.
-#
-# Offline: the fixture carries a file:// apt repository holding the download-only closure of
-# the three packages, and the network sources are gone, so `apt-get update` succeeds against
-# the local repo and the install comes out of it. --network=none is still in force.
-#
-# TWO consent items -- podman+uidmap and openssh-client, gated independently on purpose
-# (installer:486-488) -- and one menu, because CS193V_DIR is set. So one keystroke.
-fixture_build no-podman || exit 1
-# SB_PROBE_PODMAN only here: this is the one case that installs podman, so it is the only one
-# where "did the thing apt installed actually work" is a question worth the store that asking
-# it creates.
-out="$(sandbox_run no-podman '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
-assert_says "sb-apt:asks-for-both-independently" "permission for 2 thing" "$out"
-assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "$out"
-assert_says "sb-apt:names-openssh-client"        "Install openssh-client" "$out"
-assert_says "sb-apt:says-what-it-is-installing"  "Installing podman uidmap openssh-client" "$out"
-
-# THE EFFECT. podman was absent before -- the consent item above only exists when it is --
-# and it is present after, which the two together can only both satisfy if apt really worked.
-assert_says "sb-apt:podman-is-installed-afterwards" "podman version" \
-            "$(sb_section "$out" PODMAN-AFTER)"
-assert_eq   "sb-apt:ssh-is-installed-afterwards" "present" "$(sb_section "$out" SSH-AFTER)"
-assert_says "sb-apt:the-post-install-check-passed" "podman 5.7.0" "$out"
-# WHERE THIS CASE'S CLAIM ENDS, said plainly because it used to be overstated. What this
-# fixture proves is that apt really installs podman offline -- nothing more. The run then stops
-# at write_local_args, because a container with podman's default capabilities cannot run the
-# podman it just installed, and that is an environmental limit of the fixture rather than a
-# property worth asserting.
-#
-# The branch it stops on is NOT untested: "podman is installed but cannot answer" is its own
-# scenario and now has its own case in 25-installer.sh, driven deliberately with podman-fake's
-# info_rc in a millisecond. Two scenarios, two homes -- rather than one machine named for its
-# starting state quietly standing in for both.
-record "sb-apt:what-the-installed-podman-says" "$(sb_section "$out" PODMAN-WORKS)"
-
-# Asserted in PACKAGES, not paths: the path-level diff here is several hundred lines of /usr
-# and /var/lib/dpkg, which is the wrong unit for the claim and too long to be read by anyone.
-added="$(sb_section "$out" DPKG-ADDED)"
-if [ -n "$added" ]; then pass "sb-apt:the-package-list-was-really-read"
-else fail "sb-apt:the-package-list-was-really-read" "dpkg reported no new packages"; fi
-for pkg in podman uidmap openssh-client; do
-    assert_says "sb-apt:installed-$pkg" "$pkg" "$added"
-done
-record "sb-apt:packages-added" "$(printf '%s' "$added" | grep -c . ) packages"
-
-# WHERE THIS RUN STOPS, recorded rather than asserted green. podman is real now, so
-# build_image hands off to the launcher, which asks a real podman to build inside a container
-# -- podman-in-podman, which this tier deliberately does not set up. That is increment C's
-# job and it is env-gated. Everything above happens before it.
-record "sb-apt:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
-sandbox_reap
-
 # ─── nested: the launcher really building, inside a container ───────────────────
 # The one case that needs podman-in-podman, so the one case that is opt-in. Everything above
 # runs on every full run; this does not, because it builds fixture images and drives a real
@@ -214,7 +216,7 @@ sandbox_reap
 if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
     skip "nested:the-prerequisites" "set CS193V_INSTALL_NESTED=1 -- seconds; the build itself is a second gate"
 else
-fixture_build nested || exit 1
+fixture_build machine || exit 1   # already built above; a cached no-op, kept so this block reads on its own
 
 # ─── the prerequisites, before anything rests on them ──────────────────────────
 np="$(nest_probe)"
@@ -224,7 +226,7 @@ record "nest:cgroups"       "$(nest_get "$np" CGROUP)"
 # THE STAMP FIRST. Every measurement below is taken through a container boundary, and if the
 # boundary is not there they all come out green about the HOST instead. A build-time id baked
 # into the image is the one answer no host-side execution can forge.
-assert_match "nest:the-probe-ran-inside-the-fixture" '^nested-fixture-[0-9]+$' \
+assert_match "nest:the-probe-ran-inside-the-fixture" '^machine-fixture-[0-9]+$' \
              "$(nest_get "$np" FIXTURE_ID)"
 assert_eq "nest:runs-as-the-unprivileged-student" "2:student" "$(nest_get "$np" ID)"
 
@@ -263,7 +265,7 @@ assert_says_not "nest:without-SYS_ADMIN-there-is-no-namespace" 'user:[' \
                 "$(nest_get "$nn" INNER_USERNS)"
 assert_says "nest:without-SYS_ADMIN-newuidmap-is-what-fails" 'newuidmap' \
             "$(nest_get "$nn" INNER_USERNS)"
-assert_match "nest:the-nocap-probe-also-really-ran" '^nested-fixture-[0-9]+$' \
+assert_match "nest:the-nocap-probe-also-really-ran" '^machine-fixture-[0-9]+$' \
              "$(nest_get "$nn" FIXTURE_ID)"
 
 # The second departure, with its own control. Without the unmask the outer container's /proc/sys
@@ -272,7 +274,7 @@ assert_match "nest:the-nocap-probe-also-really-ran" '^nested-fixture-[0-9]+$' \
 assert_eq "nest:proc-sys-is-unmasked-with-the-flag" "not-masked" "$(nest_get "$np" PROC_SYS)"
 nu="$(nest_probe_nounmask)"
 assert_eq "nest:without-the-unmask-proc-sys-is-masked" "masked-ro" "$(nest_get "$nu" PROC_SYS)"
-assert_match "nest:the-nounmask-probe-also-really-ran" '^nested-fixture-[0-9]+$' \
+assert_match "nest:the-nounmask-probe-also-really-ran" '^machine-fixture-[0-9]+$' \
              "$(nest_get "$nu" FIXTURE_ID)"
 # ...and that control must still create its namespace, or it would be failing for the OTHER
 # reason and proving nothing about the unmask.
@@ -322,7 +324,16 @@ imgs_before="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_AL
 vols_before="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
 subuid_before="$(cksum < /etc/subuid)"
 
-out="$(nest_build)"
+# ─── THE CASE THAT DID NOT EXIST: no podman, install succeeds, image builds ─────
+# nest_build takes the prereq list, so this is the whole point of one machine with everything
+# on it: apt installs podman for real, the installer then asks THAT podman for MemTotal and gets
+# an answer, writes the args, and the launcher assembles the course image with it. Before this,
+# `no-podman` proved apt installs podman and `nested` proved the build works, and nothing joined
+# them -- so the one path every student actually takes was the one path nothing ran.
+out="$(nest_build podman,ssh "2")"
+assert_says "nest:the-machine-was-really-arranged" "prereqs=podman,ssh" "$(sb_section "$out" ARRANGED)"
+assert_says "nest:apt-really-put-podman-back" "install ok installed" "$(sb_section "$out" DPKG-PODMAN)"
+assert_says "nest:it-installed-before-it-built" "Installing podman uidmap openssh-client" "$out"
 record "nest:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
 record "nest:inner-caps"        "$(sb_section "$out" INNER-CAPS)"
 

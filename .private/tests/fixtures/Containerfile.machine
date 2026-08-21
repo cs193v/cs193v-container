@@ -1,0 +1,133 @@
+# THE machine. One image for every case that is not about a podman VERSION, because the two
+# things a case actually varies -- what software is installed, and what the container is
+# allowed to do -- are both cheaper to subtract at run time than to bake.
+#
+# WHY ONE IMAGE AND NOT FIVE. Five baked machines each bundled three unrelated decisions
+# (installed software, capabilities, platform), and bundling them produced two real defects
+# rather than untidiness: `no-podman` silently stood for BOTH "podman is absent" and "podman is
+# installed but cannot run", and adding a capability to it could never work because
+# capabilities were not the only thing that differed from `nested`. So the axes are separate
+# now -- --no-prereqs subtracts software at boot, --no-caps omits a run-time flag -- and
+# EVERYTHING IS PRESENT HERE by default. The default machine is therefore the end-to-end
+# success case, which is the case that did not exist before.
+#
+# It is Containerfile.nested generalised. The five adaptations below are what it takes to run
+# a real rootless podman inside a container; they are properties of THE machine, not of one
+# variant, so every case gets them and the ones that do not care pay nothing.
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+
+# ─── everything installed, AND reinstallable with the network off ───────────────
+#
+# A file:// repository holding the download-only closure of everything --no-prereqs can
+# remove, so `apt-get remove -y podman` at boot and the installer's own `apt-get install`
+# (installer:513) both work under --network=none. Generalised from Containerfile.no-podman,
+# which proved the mechanism; the difference is that here the packages are ALSO installed.
+#
+# DOWNLOADED BEFORE THEY ARE INSTALLED, which is not an ordering preference: --download-only
+# against an already-installed package says "0 to download", so the repo would come out empty
+# and the first `--no-prereqs=podman` run would fail at the step it exists to test.
+#
+# WITH RECOMMENDS, unlike the fixture this grew out of. The installer does NOT pass
+# --no-install-recommends (installer:513), so a student's `apt-get install podman` pulls passt
+# -- and pasta is what rootless podman configures its network with. A repo holding only the
+# strict closure would let apt silently skip the unavailable recommendation and hand the next
+# case a podman with no network backend, which is exactly how "could not find pasta" was
+# discovered the first time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo curl ca-certificates dpkg-dev \
+ && apt-get install -y --download-only podman uidmap openssh-client fuse-overlayfs \
+ && mkdir -p /opt/localrepo \
+ && cp /var/cache/apt/archives/*.deb /opt/localrepo/ \
+ && ( cd /opt/localrepo && dpkg-scanpackages -m . /dev/null | gzip -9c > Packages.gz ) \
+ && printf 'deb [trusted=yes] file:///opt/localrepo ./\n' > /etc/apt/sources.list.d/local.sources.list \
+ && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get update \
+ && apt-get install -y podman uidmap openssh-client fuse-overlayfs
+
+# INSTALLING FROM THE LOCAL REPO IS THE ASSERTION, not the comment above it. The line before
+# this one deliberately installs with the network sources already gone, so if the repo were
+# incomplete the BUILD fails here rather than a case failing later for a reason that looks like
+# the installer's fault. Then: the things a student's machine has, present.
+RUN command -v podman && command -v ssh && command -v ssh-keygen && command -v newuidmap \
+ && test -s /opt/localrepo/Packages.gz \
+ && command -v pasta
+
+# ─── (1) cgroupfs IN CONFIG, NOT ON A FLAG ─────────────────────────────────────
+# There is no systemd user session in here, so the systemd cgroup manager cannot work -- and
+# the launcher never passes --cgroup-manager, so a flag the harness adds would not reach the
+# podman the launcher actually runs. Configuration is the only channel.
+RUN mkdir -p /etc/containers \
+ && printf '[engine]\ncgroup_manager = "cgroupfs"\n' > /etc/containers/containers.conf
+
+# ─── (2) uid AND gid 2, NOT 1000 ───────────────────────────────────────────────
+# Every link in this chain was measured rather than reasoned:
+#
+#   apt's http method drops to the _apt user, whose group is nogroup = 65534, and calls
+#   setgroups(). To MAP container gid 65534 the subgid range needs at least 65534 ids -- it is
+#   not enough for the range's numbers to span 65534. The outer container's userns window is
+#   65536 ids (container 1..65536). And podman refuses outright a range containing the user's
+#   own uid or gid. So the largest usable block is 65536 minus wherever the user sits, and only
+#   uid/gid <= 2 leaves 65534 of them. Measured: at uid 1000 the course build dies three steps
+#   in with "Failed to setgroups"; at uid/gid 2 with 3:65534 it gets through apt.
+#
+# It costs nothing in fidelity. The launcher only refuses uid 0 (cs193v:1043); every other uid
+# is equivalent to it, and the course container's own student is uid 1000 whatever this is,
+# because --userns=keep-id:uid=1000 maps the INVOKING uid to 1000 inside.
+RUN oldu="$(getent passwd 2 | cut -d: -f1)"; [ -n "$oldu" ] && userdel "$oldu" >/dev/null 2>&1; \
+    oldg="$(getent group 2 | cut -d: -f1)";  [ -n "$oldg" ] && groupdel "$oldg" >/dev/null 2>&1; \
+    groupadd -g 2 student \
+ && useradd -m -u 2 -g 2 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# ─── (3) a subuid range INSIDE the outer container's mapping ────────────────────
+# The outer rootless podman maps container uid 0 -> host 1000 and container uids 1..65536 ->
+# host 100000..165535, so an inner range has to fit in 1..65536. The installer's own
+# `usermod --add-subuids 200000-265535` (installer:560) is entirely OUTSIDE that window and
+# could never work here whatever the totals add up to -- which is why --no-prereqs=subuid is a
+# hand-driven knob and not an automated case, and why the real `usermod` is covered against a
+# synthetic root in 25-installer.sh instead.
+#
+# AND IT MUST COVER gid 65534, per (2).
+RUN printf 'student:3:65534\n' > /etc/subuid \
+ && printf 'student:3:65534\n' > /etc/subgid
+
+# Rootless podman wants a runtime dir of its own; without one it warns and falls back.
+RUN mkdir -p /run/user/2 && chown student:student /run/user/2 && chmod 700 /run/user/2
+ENV XDG_RUNTIME_DIR=/run/user/2
+
+# A build-time stamp the probes echo back, so an assertion can prove it ran INSIDE the fixture
+# and not on the host -- a probe that answers about the host answers happily.
+RUN printf 'machine-fixture-%s\n' "$(date -u +%s)" > /etc/cs193v-fixture-id
+
+# ─── (4) vfs, NOT overlay, AND AT THE USER LEVEL ───────────────────────────────
+# Established by differential rather than assumed: on the host the course image's package step
+# installs cleanly, but nested it dies configuring `locales` with "ln: Already exists" from
+# `ln -sfr /etc/locale.conf /etc/default/locale` -- under kernel overlay AND under
+# fuse-overlayfs alike, and not at all under vfs. So overlay semantics are the cause, not the
+# package. Ubuntu 26.04 ships uutils coreutils rather than GNU, which is where that wording
+# comes from and is likely why nobody has reported it: it needs the new ln and the extra
+# nesting level together.
+#
+# IN THE USER'S CONFIG, because rootless podman prefers ~/.config/containers/storage.conf and
+# an /etc-level file was measurably ignored. CHOWNED, because this RUN executes as root long
+# before the USER line and rootless podman refuses a config directory it does not own.
+RUN mkdir -p /home/student/.config/containers \
+ && printf '[storage]\ndriver = "vfs"\n' > /home/student/.config/containers/storage.conf \
+ && chown -R student:student /home/student/.config
+
+# THE GRAPH ROOT'S MOUNT TARGET, pre-created and student-owned. podman copies the image's
+# ownership onto an empty named volume at first mount, so a target that does not exist (or is
+# root-owned) gives the inner podman a store it cannot write.
+RUN mkdir -p /home/student/.local/share/containers \
+ && chown -R student:student /home/student/.local
+
+# ─── (5) passt ─────────────────────────────────────────────────────────────────
+# Installed above rather than here, because it arrives as a RECOMMENDS of podman and that is
+# the whole point -- see the download step. Asserted by `command -v pasta` there.
+
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

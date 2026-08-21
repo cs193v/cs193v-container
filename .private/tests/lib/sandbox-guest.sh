@@ -20,16 +20,25 @@ LINES="$REP/lines"
 have() { command -v "$1" >/dev/null 2>&1; }
 hr() { printf '%s\n' '---------------------------------------------------------------'; }
 
-# BEFORE the baseline, and once. The suite arranges wsl.conf in its own run.sh, which the
-# interactive path never executes -- so --wslconf did nothing here until this existed, and
-# `sandbox state` said "absent" while the flag said otherwise. That is precisely the
-# mistyped-flag-looks-like-a-branch failure this tool is supposed to prevent, so it is arranged
-# first and the baseline is taken over the arranged state: `diff` then shows what the INSTALLER
-# did, not what the fixture was set up to be.
+# ─── arranging the machine: the ONE implementation ─────────────────────────────
+#
+# BEFORE the baseline, and once. The suite used to arrange wsl.conf in its own run.sh while this
+# file arranged it again -- so --wslconf did nothing here until this existed, and `sandbox state`
+# said "absent" while the flag said otherwise. That is precisely the mistyped-flag-looks-like-an
+# -installer-branch failure this tool exists to prevent, and --no-prereqs would have made it two
+# copies of `apt-get remove`. So run.sh and nest-run.sh both call `sandbox arrange`, and the
+# baseline is taken over the arranged state: `diff` then shows what the INSTALLER did, not what
+# the machine was set up to be.
 arrange() {
-    [ -n "${SB_WSLCONF:-}" ] || return 0
     [ -f "$REP/arranged" ] && return 0
     mkdir -p "$REP"
+    arrange_wslconf || return 1
+    arrange_prereqs || return 1
+    printf 'wslconf=%s prereqs=%s\n' "${SB_WSLCONF:-none}" "${SB_NO_PREREQS:-none}" > "$REP/arranged"
+}
+
+arrange_wslconf() {
+    [ -n "${SB_WSLCONF:-}" ] || return 0
     case "$SB_WSLCONF" in
         absent)  sudo -n rm -f /etc/wsl.conf ;;
         noboot)  printf '[automount]\nenabled=true\n' | sudo -n tee /etc/wsl.conf >/dev/null ;;
@@ -37,7 +46,59 @@ arrange() {
         systemd) printf '[boot]\nsystemd=true\n'       | sudo -n tee /etc/wsl.conf >/dev/null ;;
         *) printf 'sandbox: unknown SB_WSLCONF=%s\n' "$SB_WSLCONF" >&2; return 1 ;;
     esac
-    printf '%s\n' "$SB_WSLCONF" > "$REP/arranged"
+}
+
+# ─── --no-prereqs: removal, NOT concealment ────────────────────────────────────
+#
+# THE DISTINCTION IS LOAD-BEARING, not fastidiousness. Moving a binary aside would make
+# `command -v podman` fail while leaving the package installed, so the installer's own
+# `apt-get install` (installer:513) would answer "podman is already the newest version", exit 0,
+# and the install path this exists to test would never run -- while every assertion about the
+# consent menu passed. Real removal is what makes the reinstall real.
+#
+# OFFLINE, against the file:// repository the machine image bakes in. Every case here runs with
+# --network=none, so a reinstall has to come from somewhere local; fixtures/Containerfile.machine
+# holds the download-only closure for exactly this.
+#
+# STDIN IS THE CALLER'S PROBLEM, and run.sh closes it: the keystrokes on stdin belong to the
+# installer's menus, and apt is entitled to read the terminal it was given.
+arrange_prereqs() {
+    [ -n "${SB_NO_PREREQS:-}" ] || return 0
+    mkdir -p "$REP"
+    p_rc=0
+    for p in $(printf '%s' "$SB_NO_PREREQS" | tr ',' ' '); do
+        case "$p" in
+            # uidmap TOO, because the installer's consent item is "Install podman (and uidmap)"
+            # and it asks apt for both (installer:505). Removing podman alone leaves its own
+            # dependency behind, so apt answered "uidmap is already the newest version" and the
+            # machine did not lack what the case said it lacked -- a case that half-arranges its
+            # machine is the shape this whole design exists to remove.
+            podman) sb_remove podman uidmap  || p_rc=1 ;;
+            ssh)    sb_remove openssh-client || p_rc=1 ;;
+            # NO PACKAGE OWNS A SUBUID RANGE, so this one is a file rather than a removal. It is
+            # a hand-driven knob only: setup_subuid writes a fixed 200000-265535 (installer:560),
+            # which is outside the outer container's 1..65536 userns window, so podman cannot work
+            # afterwards HERE while it would on a student's machine. A case claiming "the install
+            # succeeded" and a case claiming "the range was added" cannot both be true in a
+            # container, and pretending otherwise is what produced the no-podman conflation. The
+            # real `usermod` is covered against a synthetic root in 25-installer.sh instead.
+            subuid) sudo -n cp /dev/null /etc/subuid && sudo -n cp /dev/null /etc/subgid || p_rc=1 ;;
+            *) printf 'sandbox: unknown SB_NO_PREREQS entry %s\n' "$p" >&2; return 1 ;;
+        esac
+    done
+    return "$p_rc"
+}
+
+sb_remove() {                         # sb_remove PACKAGE... -> 0, logging to $REP
+    # shellcheck disable=SC2024   # the redirect is THIS shell's, and student owns $REP (a 1777
+    # tmpfs the harness mounts). Nothing privileged writes the log, which is what SC2024 warns
+    # about; routing it through `sudo tee` would put a root-owned file in a report directory the
+    # rest of this script reads as the student.
+    if sudo -n apt-get remove -y "$@" >>"$REP/apt-remove.log" 2>&1; then
+        return 0
+    fi
+    printf 'sandbox: could not remove %s (see apt-remove.log)\n' "$*" >&2
+    return 1
 }
 
 # The sudo policy, which is the difference between watching the installer and watching what a
@@ -139,7 +200,15 @@ cmd_state() {
     printf '  %-22s %s\n' 'platform()'    "$(grep -qi microsoft /proc/version 2>/dev/null && echo wsl || echo linux)"
     printf '  %-22s %s\n' 'your subuid'   "$(grep "^$(id -un):" /etc/subuid 2>/dev/null || echo 'NONE -- so DO_SUBUID is yes')"
     printf '  %-22s %s\n' 'CS193V_DIR'    "${CS193V_DIR:-<unset -- choose_dir will ask>}"
-    [ -f "$REP/arranged" ] && printf '  %-22s %s\n' 'wsl.conf arranged as' "$(cat "$REP/arranged")"
+    # BOTH AXES, SAID BACK TO YOU. This is the whole reason `state` exists: with two subtractive
+    # flags it is easy to type --no-prereqs=pod man or forget a comma, and then read the
+    # installer's behaviour as a branch when it was really your flag. So what was ASKED FOR and
+    # what is ACTUALLY TRUE are printed next to each other.
+    printf '  %-22s %s\n' '--no-caps asked for'    "${SB_NO_CAPS:-<none>}"
+    printf '  %-22s %s\n' '--no-prereqs asked for' "${SB_NO_PREREQS:-<none>}"
+    [ -f "$REP/arranged" ] && printf '  %-22s %s\n' 'arranged'     "$(cat "$REP/arranged")"
+    [ -s "$REP/apt-remove.log" ] && printf '  %-22s %s\n' 'apt removed' \
+        "$(grep -c '^Removing ' "$REP/apt-remove.log" 2>/dev/null) package(s); see $REP/apt-remove.log"
     printf '  %-22s %s\n' 'stdin is a tty' "$( [ -t 0 ] && echo yes || echo 'no -- menus take the safe default')"
     if [ -f /etc/wsl.conf ]; then
         printf '  %-22s\n' '/etc/wsl.conf:'
@@ -279,6 +348,11 @@ sandbox -- driving install-cs193v.sh by hand
   sandbox reset              put /etc back, remove the course directory, clear the trace
   sandbox knobs              this
 
+This machine was built with everything present and then had things taken away:
+  --no-prereqs   ${SB_NO_PREREQS:-<nothing removed>}   (software, so an install path runs)
+  --no-caps      ${SB_NO_CAPS:-<nothing denied>}   (a container capability, so an error path runs)
+`reset` puts /etc back but CANNOT put a removed package back. Leave and come back for that.
+
 The installer is at $INST and the course files come from a local tarball, so editing
 .private/install-cs193v.sh on your own machine and re-running needs no rebuild.
 
@@ -289,9 +363,12 @@ Two things worth knowing before you start:
 EOF
 }
 
-arrange || exit 1
-link_installer
-
+# NOTHING UNCONDITIONAL HERE ANY MORE. This file used to arrange and link on every invocation,
+# which was harmless when only a person ran it and wrong the moment the SUITE started calling
+# `sandbox arrange`: link_installer put ~/install-cs193v.sh into every case's `podman diff`, and
+# an exact-set audit that reports on the harness is an audit that grows an allowlist and stops
+# being read. Each subcommand now does what it needs and nothing else.
+#
 # init IS RUN BEFORE YOU LAND, by install-sandbox.sh. Doing this lazily on the first `sandbox`
 # call was wrong twice over: the installer symlink was not there when you arrived and looked
 # for it, and the wsl.conf arrangement plus the baseline could be taken AFTER you had already
@@ -305,6 +382,10 @@ if [ "${1:-}" = init ]; then
 fi
 
 case "${1:-knobs}" in
+    # CALLED BY THE SUITE, not just by a person: run.sh and nest-run.sh invoke this so there is
+    # one arrangement implementation rather than two that drift. It arranges and NOTHING else --
+    # no symlink, no baseline -- because everything it touches shows up in the case's audit.
+    arrange) arrange || exit 1 ;;
     state) cmd_state ;;
     run)   shift; cmd_run "$@" ;;
     lines) shift; cmd_lines "${1:-}" ;;
