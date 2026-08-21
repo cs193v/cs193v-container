@@ -139,6 +139,134 @@ pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
     return 0
 }
 
+# ─── the writeback: argv in, state file out ────────────────────────────────────
+# The host runs `cs193v-portwatch --publish state=... up=... refused=...` whenever what it decided
+# changes, and this side writes the file. THE HOST DECIDES, THIS SIDE RECORDS: nothing here asks
+# for a port, and the argv carries only outcomes the host has already committed to.
+#
+# STATE IS PASSED AS ARGUMENTS, never on stdin, and the values are validated even though the host
+# built them. Not because the host is untrusted, but because a bug there would otherwise write
+# nonsense into a file that three readers believe -- --show, doctor over podman exec, and
+# shortlink, which consults it before printing a URL a student is about to click.
+PW_CLASSES='lo any v6lo eth loalt'
+PW_REASONS='busy v6lo loalt eth below-floor capped'
+PW_STATES='healthy master-unresponsive no-frames broken'
+PW_TAB="$(printf '\t')"
+
+PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
+PW_PAIRS=''
+
+# A comma-separated list of port:word, checked against a vocabulary. The port rules are the same
+# ones the host's own gate applies, and for the same reason: digits first, length before any
+# arithmetic, 10# to force base ten, then a canonicality compare so a non-canonical spelling is
+# refused rather than quietly normalised.
+pw_pairs() {                          # pw_pairs VALUE VOCAB -> PW_PAIRS, or 1 with PWP_ERR
+    local v="$1" vocab="$2" item port word out=''
+    PW_PAIRS=''
+    [ -n "$v" ] || return 0
+    while [ -n "$v" ]; do
+        item="${v%%,*}"
+        if [ "$item" = "$v" ]; then v=''; else v="${v#*,}"; fi
+        case "$item" in *:*) ;; *) PWP_ERR="no colon in '$item'"; return 1 ;; esac
+        port="${item%%:*}"; word="${item#*:}"
+        case " $vocab " in *" $word "*) ;; *) PWP_ERR="unknown value '$word'"; return 1 ;; esac
+        case "$port" in ''|*[!0-9]*) PWP_ERR="non-decimal port '$port'"; return 1 ;; esac
+        [ "${#port}" -le 5 ] || { PWP_ERR="over-long port '$port'"; return 1; }
+        [ "$(( 10#$port ))" = "$port" ] || { PWP_ERR="non-canonical port '$port'"; return 1; }
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { PWP_ERR="port out of range '$port'"; return 1; }
+        out="$out $port:$word"
+    done
+    PW_PAIRS="${out# }"
+    return 0
+}
+
+# WHAT KEEPS THE FILE WELL-FORMED IS THE VOCABULARIES, not an escaping pass. Every value below is
+# matched against a closed set or a digits-only pattern, so a tab or newline cannot survive to
+# reach the tab-separated, line-oriented file -- it fails the vocabulary first. This was measured:
+# a dedicated control-character check sat here and mutation testing could not make it fire, because
+# the vocabulary always got there first. It was removed rather than kept as decoration.
+#
+# THE COROLLARY IS THE THING TO REMEMBER: a future key whose value is free text would have no such
+# protection, and would need its own escaping before it is written.
+pw_publish_parse() {                  # key=value ... -> PWP_*, or 2 with PWP_ERR
+    local a k v seen_state='' seen_floor='' seen_up='' seen_ref=''
+    PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
+    for a in "$@"; do
+        case "$a" in *=*) ;; *) PWP_ERR="not key=value: '$a'"; return 2 ;; esac
+        k="${a%%=*}"; v="${a#*=}"
+        case "$k" in
+            state)
+                [ -z "$seen_state" ] || { PWP_ERR="duplicate state"; return 2; }; seen_state=1
+                case " $PW_STATES " in *" $v "*) ;; *) PWP_ERR="unknown state '$v'"; return 2 ;; esac
+                PWP_STATE="$v" ;;
+            floor)
+                [ -z "$seen_floor" ] || { PWP_ERR="duplicate floor"; return 2; }; seen_floor=1
+                case "$v" in ''|*[!0-9]*) PWP_ERR="non-decimal floor '$v'"; return 2 ;; esac
+                [ "${#v}" -le 5 ] || { PWP_ERR="over-long floor"; return 2; }
+                [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || { PWP_ERR="floor out of range '$v'"; return 2; }
+                PWP_FLOOR="$v" ;;
+            up)
+                [ -z "$seen_up" ] || { PWP_ERR="duplicate up"; return 2; }; seen_up=1
+                pw_pairs "$v" "$PW_CLASSES" || return 2
+                PWP_UP="$PW_PAIRS" ;;
+            refused)
+                [ -z "$seen_ref" ] || { PWP_ERR="duplicate refused"; return 2; }; seen_ref=1
+                pw_pairs "$v" "$PW_REASONS" || return 2
+                PWP_REFUSED="$PW_PAIRS" ;;
+            *)  PWP_ERR="unknown key '$k'"; return 2 ;;
+        esac
+    done
+    [ -n "$PWP_STATE" ] || { PWP_ERR="no state given"; return 2; }
+    return 0
+}
+
+# Tab-separated, one record per line, repeated keys rather than comma-joined lists -- the same
+# idiom verb_dev_tunnel uses, so the suite parses it with the awk one-liner it already has and no
+# second format enters the project.
+pw_state_render() {
+    local e
+    printf 'state\t%s\n' "$PWP_STATE"
+    [ -n "$PWP_FLOOR" ] && printf 'floor\t%s\n' "$PWP_FLOOR"
+    for e in $PWP_UP;      do printf 'up\t%s\t%s\n'      "${e%%:*}" "${e#*:}"; done
+    for e in $PWP_REFUSED; do printf 'refused\t%s\t%s\n' "${e%%:*}" "${e#*:}"; done
+    return 0
+}
+
+PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
+# THE READER REFUSES A MALFORMED FILE RATHER THAN HALF-READING IT. This file is written by us, so
+# a bad one means our own writer is broken -- and the readers act on it: shortlink decides whether
+# to print a short URL, doctor tells a student what is reachable. Half of a broken file is worse
+# than none of it.
+pw_state_parse() {                    # pw_state_parse TEXT -> PWS_*, or 2 with PWS_ERR
+    local raw="$1" line k a b
+    PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
+    [ -n "$raw" ] || { PWS_ERR="empty state file"; return 2; }
+    while [ -n "$raw" ]; do
+        line="${raw%%$'\n'*}"
+        if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
+        [ -n "$line" ] || continue
+        k=''; a=''; b=''
+        IFS="$PW_TAB" read -r k a b <<<"$line"
+        case "$k" in
+            state)
+                case " $PW_STATES " in *" $a "*) ;; *) PWS_ERR="unknown state '$a'"; return 2 ;; esac
+                PWS_STATE="$a" ;;
+            floor)
+                case "$a" in ''|*[!0-9]*) PWS_ERR="non-decimal floor"; return 2 ;; esac
+                PWS_FLOOR="$a" ;;
+            up|refused)
+                [ -n "$a" ] && [ -n "$b" ] || { PWS_ERR="$k needs a port and a word"; return 2; }
+                if [ "$k" = up ]; then pw_pairs "$a:$b" "$PW_CLASSES"; else pw_pairs "$a:$b" "$PW_REASONS"; fi \
+                    || { PWS_ERR="${PWP_ERR:-bad $k record}"; return 2; }
+                if [ "$k" = up ]; then PWS_UP="$PWS_UP $PW_PAIRS"; else PWS_REFUSED="$PWS_REFUSED $PW_PAIRS"; fi ;;
+            *)  PWS_ERR="unknown key '$k'"; return 2 ;;
+        esac
+    done
+    [ -n "$PWS_STATE" ] || { PWS_ERR="no state line"; return 2; }
+    PWS_UP="${PWS_UP# }"; PWS_REFUSED="${PWS_REFUSED# }"
+    return 0
+}
+
 # ─── modes ─────────────────────────────────────────────────────────────────────
 pw_scan_now() { pw_scan_text "$(</proc/net/tcp)" "$(</proc/net/tcp6)"; }
 
