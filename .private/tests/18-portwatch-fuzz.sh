@@ -142,3 +142,104 @@ feed "$HDR
    0: 0100007F:0BB8 00000000:0000 0a" "" "lowercase-state"
 assert_eq "pw:garbage-never-yields-a-bad-port" "" "$BAD"
 rm -f /tmp/pw.err
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  THE WRITEBACK: the argv the host sends in, and the file the container writes out
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# These are the third and fourth parsers that take real input. The argv is host-constructed and
+# therefore trusted-ish -- but "trusted-ish" is how the wrong thing gets written to a file three
+# other readers depend on, so it is validated like anything else. The file is written by us and
+# read by --show, by doctor over podman exec, and by shortlink before it prints a URL a student
+# will click; a malformed one must be REPORTED, never silently half-read.
+
+for fn in pw_publish_parse pw_state_parse; do
+    command -v "$fn" >/dev/null 2>&1 || { fail "pw:$fn-exists" "$fn is not defined in files/cs193v-portwatch."; exit 1; }
+    pass "pw:$fn-exists"
+done
+
+# ─── argv in ───────────────────────────────────────────────────────────────────
+pub_ok() {                            # pub_ok NAME EXPECT_UP ARGS...
+    local name="$1" want="$2"; shift 2
+    if pw_publish_parse "$@" 2>/dev/null && [ "$PWP_UP" = "$want" ]; then
+        pass "pw:publish:$name"
+    else
+        fail "pw:publish:$name" "rc=$? up='${PWP_UP:-}' err='${PWP_ERR:-}'"
+    fi
+}
+pub_bad() {                           # pub_bad NAME ARGS...
+    local name="$1"; shift
+    if pw_publish_parse "$@" 2>/dev/null; then
+        fail "pw:publish-rejects:$name" "accepted it; up='${PWP_UP:-}'"
+    else
+        [ -n "${PWP_ERR:-}" ] && pass "pw:publish-rejects:$name" \
+                              || fail "pw:publish-rejects:$name" "rejected but set no reason"
+    fi
+    PUB_BAD_RAN=$(( PUB_BAD_RAN + 1 ))
+}
+PUB_BAD_RAN=0
+
+pub_ok "simple"    "3000:lo"          "state=healthy" "up=3000:lo"
+pub_ok "several"   "3000:lo 41573:any" "state=healthy" "up=3000:lo,41573:any"
+pub_ok "empty-up"  ""                 "state=healthy" "up="
+pub_ok "no-up-key" ""                 "state=healthy"
+pub_ok "with-all"  "3000:lo"          "state=healthy" "floor=1024" "up=3000:lo" "refused=8080:busy"
+
+pub_bad "no-state"          "up=3000:lo"
+pub_bad "unknown-state"     "state=confused" "up="
+pub_bad "unknown-key"       "state=healthy" "colour=blue"
+pub_bad "bare-word"         "state=healthy" "hello"
+pub_bad "duplicate-key"     "state=healthy" "up=3000:lo" "up=5173:lo"
+pub_bad "bad-class"         "state=healthy" "up=3000:wat"
+pub_bad "bad-port"          "state=healthy" "up=0:lo"
+pub_bad "octal-port"        "state=healthy" "up=03000:lo"
+pub_bad "port-no-class"     "state=healthy" "up=3000"
+pub_bad "bad-reason"        "state=healthy" "refused=8080:whatever"
+pub_bad "floor-not-a-port"  "state=healthy" "floor=0" "up="
+pub_bad "floor-nondecimal"  "state=healthy" "floor=x" "up="
+pub_bad "embedded-tab"      "state=healthy" "up=3000:lo$(printf '\t')"
+pub_bad "embedded-newline"  "state=healthy" "up=$(printf '3000:lo\nup=9:lo')"
+assert_eq "pw:publish-every-rejection-ran" "14" "$PUB_BAD_RAN"
+
+# The two control-character cases matter because the file below is tab-separated and
+# line-oriented: a value carrying either would inject a column or a whole record. What actually
+# stops them is the VOCABULARY check -- `lo<TAB>` is not in the class list -- rather than any
+# dedicated escaping pass. Verified by removing the vocabulary check, at which point
+# publish-rejects:embedded-tab is one of the four that go red.
+
+# ─── file out, and back in ─────────────────────────────────────────────────────
+# ROUND TRIP. Whatever the writer emits, the reader must read back identically -- that is the
+# only property that matters across the two, and it is the one a format change would break.
+pw_publish_parse "state=healthy" "floor=1024" "up=3000:lo,41573:any" "refused=8080:busy,9000:v6lo"
+pw_state_render > /tmp/pwstate.txt
+pw_state_parse "$(cat /tmp/pwstate.txt)"
+assert_eq "pw:roundtrip-state"   "healthy"              "$PWS_STATE"
+assert_eq "pw:roundtrip-floor"   "1024"                 "$PWS_FLOOR"
+assert_eq "pw:roundtrip-up"      "3000:lo 41573:any"    "$PWS_UP"
+assert_eq "pw:roundtrip-refused" "8080:busy 9000:v6lo"  "$PWS_REFUSED"
+
+# ─── the reader, against files it should refuse ────────────────────────────────
+rd_bad() {                            # rd_bad NAME TEXT
+    if pw_state_parse "$2" 2>/dev/null; then
+        fail "pw:state-rejects:$1" "accepted it"
+    else
+        pass "pw:state-rejects:$1"
+    fi
+    RD_BAD_RAN=$(( RD_BAD_RAN + 1 ))
+}
+RD_BAD_RAN=0
+rd_bad "empty"            ""
+rd_bad "no-state-line"    "floor$(printf '\t')1024"
+rd_bad "unknown-key"      "state${T:=$(printf '\t')}healthy
+colour${T}blue"
+rd_bad "bad-state"        "state${T}sideways"
+rd_bad "up-without-class" "state${T}healthy
+up${T}3000"
+rd_bad "bad-class"        "state${T}healthy
+up${T}3000${T}wat"
+rd_bad "bad-port"         "state${T}healthy
+up${T}0${T}lo"
+rd_bad "space-separated"  "state healthy"
+assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
+rm -f /tmp/pwstate.txt
