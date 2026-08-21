@@ -249,7 +249,8 @@ nest_build() {                        # nest_build -> the transcript
     local name="cs193v-fixture-nested-$$"
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
-    timeout 900 podman run --label "$VT_LABEL" -i --name "$name" --cap-add=SYS_ADMIN \
+    timeout --kill-after=30 1000 \
+        podman run --timeout 900 --label "$VT_LABEL" -i --name "$name" --cap-add=SYS_ADMIN \
         --security-opt 'unmask=/proc/*' \
         --device /dev/fuse --device /dev/net/tun \
         --mount type=tmpfs,destination=/var/tmp/report \
@@ -289,14 +290,66 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     # grep and a continuation line does not satisfy it. That is deliberate on its part: the
     # label is what tells this container from a colleague's (#74), and a rule that had to
     # parse shell continuations would be a worse rule.
-    printf '%b' "$keys" | timeout 120 podman run --label "$VT_LABEL" -i --name "$SB_NAME" \
+    # A TIMEOUT HAS TO ANNOUNCE ITSELF. Piping podman straight into strip_ansi threw away its
+    # exit status, so a container killed at the ceiling produced an EMPTY transcript and every
+    # assertion then failed with "expected X, flattened output:" and nothing after it -- which
+    # says the installer did not print something, not that it never ran. Measured: a run where
+    # three cases each burned the ceiling looked like three unrelated content failures.
+    #
+    # PODMAN'S OWN --timeout IS THE CEILING, not the outer `timeout`, and that distinction is
+    # the whole reason a hang here ran for 400 s instead of 60. Measured:
+    #
+    #   `timeout 60 podman run ...` does NOT bound an attached container. --sig-proxy defaults
+    #   to true, so timeout's SIGTERM is forwarded to the container's process instead of ending
+    #   podman -- and that process is bash blocked in `read -rsn1` on a pty, which defers trap
+    #   handling until the builtin returns. Nothing dies, and plain `timeout` never escalates
+    #   to SIGKILL. Confirmed on a bare case too: `timeout 10 podman run --rm ubuntu sleep 300`
+    #   was still running minutes later.
+    #
+    #   `podman run --timeout 60` has conmon kill the container, so podman returns (rc 255) and
+    #   --rm/reap collects it. Measured at 6 s for a 5 s ceiling.
+    #
+    # THE OUTER TIMEOUT COVERS WHAT --timeout STRUCTURALLY CANNOT: a podman that hangs BEFORE
+    # the container exists -- a storage lock, a stalled pull -- where a container runtime limit
+    # never engages. No container means no debris in that case. In the odd case where one does
+    # exist and conmon's ceiling did not fire, the 124 arm below removes it by name rather than
+    # leaving it for the next sweep.
+    #
+    # It is worth having even though a podman this broken sinks the run either way: a hang that
+    # never returns is strictly worse than one that fails in 120 s and says why. That is what
+    # this cost before -- 400 s of budget and three assertions failing as if their content were
+    # wrong.
+    #
+    # 60 s because these cases take about a second; nest_build keeps 900, a real build takes
+    # minutes.
+    printf '%b' "$keys" | timeout --kill-after=15 120 \
+        podman run --timeout 60 --label "$VT_LABEL" -i --name "$SB_NAME" \
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
         --mount type=tmpfs,destination=/var/tmp/report \
         -v "$SB_WORK:/work:ro" "$@" \
         "$(fixture_tag "$case")" \
-        script -q -c /work/run.sh /dev/null 2>&1 | strip_ansi
+        script -q -c /work/run.sh /dev/null > "$SB_TMP/raw" 2>&1
+    rc=$?
+    printf '%s' "$rc" > "$SB_TMP/last-rc"
+    # 255 is podman's own --timeout firing; 124 is the outer backstop, which should never be
+    # reached and means a stray container may be left for the next sweep.
+    case "$rc" in
+        255) printf '\n===SANDBOX-TIMEOUT=== podman killed the container at its 60s ceiling\n' \
+                 >> "$SB_TMP/raw" ;;
+        124) # The outer backstop fired, which means SIGKILL reached podman and abandoned the
+             # container. The name is known, so clean up rather than leaving it for the sweep:
+             # a ceiling that creates debris is a bad ceiling, and this is the one case where
+             # it can.
+             podman rm -f "$SB_NAME" >/dev/null 2>&1 || true
+             printf '\n===SANDBOX-TIMEOUT=== the OUTER backstop fired at 120s and podman did not\n'  >> "$SB_TMP/raw"
+             printf 'honour its own ceiling; the container was force-removed here\n' >> "$SB_TMP/raw" ;;
+    esac
+    strip_ansi < "$SB_TMP/raw"
 }
+
+# The exit status of the last sandbox_run, which the pipeline above would otherwise hide.
+sandbox_rc() { cat "$SB_TMP/last-rc" 2>/dev/null; }
 
 # What the installer changed, relative to the image. Paths only -- `C` means "opened for
 # write", not "contents differ", so this answers "and nothing else" and the report above
