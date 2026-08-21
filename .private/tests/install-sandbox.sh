@@ -167,13 +167,27 @@ fi
 set -- "$@" "$(fixture_tag "$MACHINE")"
 
 printf 'Machine: %s   dir: %s   net: %s\n' "$MACHINE" "${SBDIR:-<unset, choose_dir will ask>}" "$NET"
-printf 'Type `sandbox` inside for what you can do. Ctrl-D leaves%s.\n\n' \
+# SPELLED OUT, because "type sandbox" was not enough: you land in $HOME and the installer is
+# bind-mounted at /work, so someone reasonably looks for it in the directory they are in and
+# finds nothing. ~/install-cs193v.sh is a symlink to it, named the way a student's copy is.
+cat <<'BANNER'
+
+  sandbox state     what the installer is about to see -- read this first
+  sandbox run       run it, or: bash ~/install-cs193v.sh
+  sandbox diff      what changed since boot
+  sandbox knobs     everything else
+
+BANNER
+printf 'Ctrl-D leaves%s.\n\n' \
        "$( [ "$KEEP" = yes ] && printf ' (container kept: %s)' "$NAME_SB" )"
 
+# `sandbox init` FIRST, in both paths. It arranges any boot-time state, links the installer
+# where a student would have it, and takes the baseline `sandbox diff` compares against -- all
+# of which have to happen before you get a prompt, not on your first `sandbox` command.
 if [ -n "$CMD" ]; then
-    podman run "$@" sh -lc "$CMD"
+    podman run "$@" sh -lc "sandbox init; $CMD"
 else
-    podman run "$@" bash -l
+    podman run "$@" bash -lc 'sandbox init; exec bash -l'
 fi
 rc=$?
 
