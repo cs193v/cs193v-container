@@ -1,0 +1,23 @@
+# Lines of install-cs193v.sh that NO test on this platform can execute, one per entry, each
+# with the reason. Anything not covered and not here fails the coverage gate.
+#
+# Format: LINE-or-RANGE  reason
+# Lines beginning # are comments. The reason is not decoration -- it is the thing a reader
+# checks when they wonder whether an entry still earns its place.
+#
+# THE MACOS EFFECTS. Every macOS DECISION is executable here with fake uname/sysctl/installer
+# and podman-fake's machine arm, and 25-installer.sh drives all of them. These two are the
+# ones that change a machine in a way no Linux mechanism can reproduce.
+528  sudo installer -pkg -- needs a Mac; the pkg install itself
+562  podman machine init --now -- needs a Mac; creates a real VM
+568  podman machine set --memory -- needs a Mac
+570  podman machine start -- needs a Mac
+596  podman machine set --disk-size -- needs a Mac
+607  podman machine stop -- needs a Mac
+608  grow_machine_disk from the stopped path -- needs a Mac
+609  podman machine start after growing -- needs a Mac
+#
+# curl's retry loop (installer:631) is NOT here: it is not reachable from a file:// tarball and
+# would need an HTTP server in the fixture, so it is RECORDED as uncovered by the gate rather
+# than excused. An allowlist entry would say "cannot be tested"; the honest statement is
+# "not tested yet, and here is what it would take".

@@ -19,6 +19,9 @@
 #   shim       the launcher's state machine against a fake podman on PATH. No containers.
 #   install    install-cs193v.sh against machines that really lack podman, ssh or a subuid
 #              range, in throwaway containers. Seconds, and cached after the first build.
+#   coverage   did the suite really execute every line of install-cs193v.sh it claims to?
+#              Reads the traces the installer runs leave in $CS193V_RUN_DIR, so it has to run
+#              after them -- which is why it is numbered last rather than living in 10-static.
 #   image      assertions about the built image, via throwaway containers.
 #   container  assertions about a live cs193v container: flags, kernel, ports, files.
 #   live       the launcher driving real podman: idempotency, drift, cleanup.
@@ -58,7 +61,7 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
-DEFAULT_TIERS="static unit shim install image container live"
+DEFAULT_TIERS="static unit shim install image container live coverage"
 TIERS=""
 FILTER=""
 PARALLEL=yes
