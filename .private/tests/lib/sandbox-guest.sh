@@ -40,6 +40,52 @@ arrange() {
     printf '%s\n' "$SB_WSLCONF" > "$REP/arranged"
 }
 
+# The sudo policy, which is the difference between watching the installer and watching what a
+# STUDENT watches. The fixture ships passwordless sudo so the suite can run unattended; a real
+# machine prompts, and the installer announces that in its consent text ("needs your password")
+# before it happens. Whether that announcement lands before the prompt, and reads sensibly when
+# it does, is a judgement only a person can make -- so it has to be reachable.
+#
+# APPLIED LAST in init, after arrange, link_installer and snapshot: every one of those needs
+# sudo, and deny/absent take it away.
+SUDOERS=/etc/sudoers.d/student
+apply_sudo() {
+    [ -n "${SB_SUDO:-}" ] || return 0
+    [ -f "$REP/sudo-applied" ] && return 0
+    mkdir -p "$REP"
+    pw="${SB_SUDO#password:}"
+    [ "$pw" = "${SB_SUDO}" ] && pw=student      # bare `password` -> a default worth printing
+    case "${SB_SUDO%%:*}" in
+        nopasswd) : ;;
+        password)
+            printf 'student:%s\n' "$pw" | sudo -n chpasswd
+            printf 'student ALL=(ALL) ALL\n' | sudo -n tee "$SUDOERS" >/dev/null
+            sudo -n chmod 0440 "$SUDOERS"
+            sudo -n -K 2>/dev/null || true      # drop any cached credential, or the first
+            sudo -K  2>/dev/null || true        # sudo would sail through without prompting
+            printf '%s\n' "password:$pw" > "$REP/sudo-applied" ;;
+        deny)
+            # sudo exists, student is not allowed to use it: a different transcript from absent,
+            # above the same installer failure.
+            sudo -n rm -f "$SUDOERS"
+            printf 'deny\n' > "$REP/sudo-applied" ;;
+        absent)
+            # /usr/bin/sudo is an alternatives symlink to sudo.ws; moving it is enough for
+            # `command -v sudo` to fail, which is what the installer's own checks look at.
+            sudo -n mv /usr/bin/sudo /usr/bin/sudo.hidden-by-sandbox 2>/dev/null || true
+            printf 'absent\n' > "$REP/sudo-applied" ;;
+        *) printf 'sandbox: unknown SB_SUDO=%s\n' "$SB_SUDO" >&2; return 1 ;;
+    esac
+}
+
+sudo_state() {
+    if [ -f "$REP/sudo-applied" ]; then cat "$REP/sudo-applied"
+    elif ! command -v sudo >/dev/null 2>&1; then printf 'absent'
+    elif sudo -n true 2>/dev/null; then printf 'passwordless'
+    else printf 'needs a password'
+    fi
+}
+
 # THE INSTALLER WHERE A STUDENT WOULD HAVE IT. It is bind-mounted read-only at
 # /work/installer.sh, and landing in $HOME with nothing visible is both unhelpful and
 # unfaithful: a student downloads install-cs193v.sh into a directory and runs
@@ -82,7 +128,7 @@ cmd_state() {
     printf '  %-22s %s\n' 'podman'        "$(podman_kind)"
     printf '  %-22s %s\n' 'ssh'           "$(have ssh && echo present || echo ABSENT)"
     printf '  %-22s %s\n' 'ssh-keygen'    "$(have ssh-keygen && echo present || echo ABSENT)"
-    printf '  %-22s %s\n' 'sudo'          "$(have sudo && echo present || echo ABSENT)"
+    printf '  %-22s %s\n' 'sudo'          "$(sudo_state)"
     printf '  %-22s %s\n' 'curl'          "$(have curl && echo present || echo ABSENT)"
     printf '  %-22s %s:%s\n' 'you are'    "$(id -u)" "$(id -un)"
     printf '  %-22s %s\n' 'uname -s -m'   "$(uname -s) $(uname -m)"
@@ -198,6 +244,13 @@ cmd_diff() {
 
 cmd_reset() {
     if [ ! -d "$BASE" ]; then printf 'No baseline to restore.\n'; return 1; fi
+    # SAID UP FRONT, because a reset that could not write /etc and did not mention it would be
+    # the same lie as one that claimed to undo packages.
+    if ! sudo -n true 2>/dev/null; then
+        printf 'sudo is %s here, so /etc cannot be restored.\n' "$(sudo_state)"
+        printf 'Leave and come back for a clean machine.\n'
+        return 1
+    fi
     for f in subuid subgid passwd shadow group wsl.conf locale.conf; do
         if [ -f "$BASE/etc/$f" ]; then sudo cp "$BASE/etc/$f" "/etc/$f"
         elif [ -f "/etc/$f" ]; then sudo rm -f "/etc/$f"; fi
@@ -243,6 +296,7 @@ if [ "${1:-}" = init ]; then
     arrange || exit 1
     link_installer
     snapshot
+    apply_sudo || exit 1
     exit 0
 fi
 
