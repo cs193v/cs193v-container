@@ -95,8 +95,12 @@ OPTIONS
   --dir PATH           set CS193V_DIR, so the installer does not ask where to put things
   --ask                leave CS193V_DIR unset, so choose_dir prompts.  Its typed-path,
                        empty-input and ~/ branches are only reachable this way
-  --net                allow outbound network.  Off by default; the real \`--rebuild\` build
-                       cannot work without it
+  --no-net             cut the container off from the network (--network=none).  ON by default
+                       for a REAL podman, because the default machine's whole point is that the
+                       install runs all the way through and the launcher's build reaches seven
+                       origins -- offline it always stops at STEP 1/25 with a DNS error.  Off
+                       by default with --fake-podman or --base podman-old, which build nothing
+  --net                explicit form of the default; accepted so a habit does not break
   --keep               leave the container behind on exit instead of removing it
   --list               print the two vocabularies and exit
   -h, --help           this
@@ -105,7 +109,7 @@ OPTIONS
 
 EXAMPLES
   tests/install-sandbox.sh                                  # everything present: the success case
-  tests/install-sandbox.sh --no-prereqs=podman --net        # apt really installs it, then builds
+  tests/install-sandbox.sh --no-prereqs=podman              # apt really installs it, then builds
   tests/install-sandbox.sh --no-prereqs=podman,ssh          # two consent items
   tests/install-sandbox.sh --no-caps=sysadmin               # podman installed, cannot run
   tests/install-sandbox.sh --no-prereqs=subuid              # watch usermod by hand
@@ -124,7 +128,9 @@ FAKE=no
 WSLCONF=''
 SUDOK=''
 SBDIR='/home/student/cs193v'
-NET=no
+# EMPTY MEANS "NOT SAID", so the default can depend on the other flags rather than being a
+# constant. Resolved below once --fake-podman and --base are known.
+NET=''
 KEEP=no
 CMD=''
 
@@ -149,6 +155,7 @@ while [ "$#" -gt 0 ]; do
         --dir=*)        SBDIR="${1#--dir=}" ;;
         --ask)          SBDIR='' ;;
         --net)          NET=yes ;;
+        --no-net)       NET=no ;;
         --keep)         KEEP=yes ;;
         --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : machine podman-old\n' \
                                "$MACHINE_PREREQ_NAMES" "$MACHINE_CAP_NAMES"; exit 0 ;;
@@ -194,6 +201,17 @@ if [ -n "$WSLCONF" ] && [ "$PLATFORM" != wsl ]; then
     die_usage "--wslconf only means anything with --platform wsl; the state would be arranged and never read"
 fi
 if [ "$PLATFORM" = wsl ] && [ -z "$WSLCONF" ]; then WSLCONF=noboot; fi
+
+# THE NETWORK DEFAULT FOLLOWS FROM WHETHER ANYTHING REAL WILL BE BUILT, which is the same
+# principle as the two axes: the default is the case that SUCCEEDS, and a failure is something
+# you ask for. It used to be off always, and that made the default machine -- everything present,
+# nothing denied -- guaranteed to fail at its very last step, in the launcher's build, with a DNS
+# error from STEP 1/25. The tool printed a note about it before you had a prompt, which is
+# minutes and a screenful before you type `sandbox run`; a warning nobody can see when it matters
+# is the same as no warning.
+if [ -z "$NET" ]; then
+    if [ "$FAKE" = yes ] || [ "$BASE" = podman-old ]; then NET=no; else NET=yes; fi
+fi
 # REFUSED RATHER THAN QUIETLY IGNORED, for the same reason as the rest: podman-old is ubuntu:24.04
 # with no local repository and no ID window of its own, so a --no-prereqs there would remove a
 # package that cannot be put back and leave you debugging the fixture.
@@ -232,6 +250,7 @@ set -- --label "cs193v.sandbox=${USER:-unknown}" -i --name "$NAME_SB"
 set -- "$@" --mount type=tmpfs,destination=/var/tmp/report
 set -- "$@" -v "$SB_WORK:/work:ro"
 set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro"
+set -- "$@" -e "SB_NET=$NET"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"
 [ -n "$SUDOK" ] && set -- "$@" -e "SB_SUDO=$SUDOK"
@@ -249,9 +268,7 @@ else
     set -- "$@" ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"}
     set -- "$@" --mount type=tmpfs,destination=/var/tmp/shim
     set -- "$@" -e BUILDAH_LAYERS=false
-    if [ "$NET" = no ] && [ "$FAKE" = no ]; then
-        printf 'note: the real `--rebuild` build needs --net; without it the run stops there\n'
-    fi
+    :
 fi
 # NOT exported: CS193V_INSTANCE. installer:775-777 names the unsuffixed image on purpose, and
 # an instance in here would test something no student runs. Isolation is the container.
