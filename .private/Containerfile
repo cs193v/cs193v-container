@@ -735,6 +735,19 @@ COPY files/ /tmp/cs193v-files/
 #     nothing to find at build time. The catalogue gets a grep for one known key instead,
 #     because it has no syntax to check and an empty or truncated copy would otherwise show up
 #     as "(missing message: intro)" on the student's first screen.
+#
+#     `cs193v-portwatch` gets a BEHAVIOURAL check and not just `bash -n`, by the same argument
+#     the shortlink one rests on: its whole job is reading /proc/net/tcp and classifying what it
+#     finds there, and every way that goes wrong is silent -- it does not crash, it reports the
+#     wrong port or quietly reports nothing, and the symptom reaches a student as "my browser
+#     cannot see my server" three layers away. Binding a socket in-process and asserting the
+#     scanner sees it costs milliseconds here and settles the parse end to end. In-process
+#     rather than a background server so there is no race to lose.
+#
+#     AND IT COMPARES A TOKEN, NOT A SUBSTRING. `'8099:lo' in out` reads fine and is useless:
+#     a misclassification prints `8099:loalt`, which CONTAINS `8099:lo`, so the check passes on
+#     exactly the regression it exists to catch. Measured -- the first version did. `.split()`
+#     makes it an equality against a whole field.
 RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/open-url        /usr/local/bin/open-url; \
     install -m 0755 /tmp/cs193v-files/shortlink       /usr/local/bin/shortlink; \
@@ -742,6 +755,9 @@ RUN set -eux; \
     /usr/local/bin/shortlink --help > /dev/null; \
     sl_out="$(/usr/local/bin/shortlink https://example.com/build-check || true)"; \
     test "$sl_out" = https://example.com/build-check; \
+    install -m 0755 /tmp/cs193v-files/cs193v-portwatch /usr/local/bin/cs193v-portwatch; \
+    bash -n /usr/local/bin/cs193v-portwatch; \
+    python3 -c "import socket, subprocess, sys; s = socket.socket(); s.bind(('127.0.0.1', 8099)); s.listen(1); out = subprocess.run(['/usr/local/bin/cs193v-portwatch', '--once'], capture_output=True, text=True).stdout; sys.exit(0 if '8099:lo' in out.split() else 'portwatch --once did not classify 127.0.0.1:8099 as 8099:lo, said: ' + out.strip())"; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
     install -m 0755 /tmp/cs193v-files/cs193v-shell    /usr/local/bin/cs193v-shell; \
     install -m 0755 /tmp/cs193v-files/cs193v-welcome  /usr/local/bin/cs193v-welcome; \
