@@ -58,9 +58,13 @@ apply_sudo() {
     case "${SB_SUDO%%:*}" in
         nopasswd) : ;;
         password)
+            # ONE privileged call for the policy change, because the moment $SUDOERS is
+            # rewritten sudo starts demanding a password -- so a follow-up `sudo chmod` printed
+            # "sudo: a password is required" before the user had done anything, which reads
+            # like the tool is already broken. install does the write and the mode together.
             printf 'student:%s\n' "$pw" | sudo -n chpasswd
-            printf 'student ALL=(ALL) ALL\n' | sudo -n tee "$SUDOERS" >/dev/null
-            sudo -n chmod 0440 "$SUDOERS"
+            printf 'student ALL=(ALL) ALL\n' > "$REP/sudoers.new"
+            sudo -n install -m 0440 -o root -g root "$REP/sudoers.new" "$SUDOERS"
             sudo -n -K 2>/dev/null || true      # drop any cached credential, or the first
             sudo -K  2>/dev/null || true        # sudo would sail through without prompting
             printf '%s\n' "password:$pw" > "$REP/sudo-applied" ;;
