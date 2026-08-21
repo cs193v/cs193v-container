@@ -82,6 +82,58 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer.sh"
     edit_sub "$SB_WORK/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
     edit_sub "$SB_WORK/installer.sh" '^TARBALL=.*'    'TARBALL="file:///work/course.tar.gz"'
+    cat > "$SB_WORK/nest-probe.sh" <<'PROBE'
+set -u
+# Every answer is a positive token. An empty value means the probe did not run, and the
+# assertion that reads it must fail rather than see what it hoped for.
+echo "FIXTURE_ID=$(cat /etc/cs193v-fixture-id 2>/dev/null)"
+echo "ID=$(id -u):$(id -un)"
+echo "PODMAN_VERSION=$(podman --version 2>&1 | tail -1)"
+echo "SUBUID=$(cat /etc/subuid 2>/dev/null)"
+echo "INNER_USERNS=$(podman unshare readlink /proc/self/ns/user 2>&1 | tail -1)"
+echo "MAPPED_IDS=$(podman unshare awk '{s+=$3} END{print s}' /proc/self/uid_map 2>&1 | tail -1)"
+echo "ROOTFS=$(findmnt -no FSTYPE,OPTIONS --target /usr/bin/newuidmap 2>/dev/null | awk '{print $1, ($2 ~ /nosuid/) ? "nosuid" : "suid-ok"}')"
+# THE MOUNT, not the file mode. `test -w` on a root-owned file is false for this user however
+# the mount is configured, so it measured the wrong thing entirely: podman masks /proc/sys with
+# a read-only bind mount, and the unmask removes that mount rather than changing a permission.
+# Both answers are positive tokens, so an empty value fails either assertion.
+if findmnt -no OPTIONS /proc/sys 2>/dev/null | grep -qE '(^|,)ro(,|$)'; then
+    echo "PROC_SYS=masked-ro"
+else
+    echo "PROC_SYS=not-masked"
+fi
+echo "DEVFUSE=$(test -c /dev/fuse && echo char-device || echo MISSING)"
+echo "DEVNETTUN=$(test -c /dev/net/tun && echo char-device || echo MISSING)"
+mkdir -p /tmp/l /tmp/u /tmp/w /tmp/m
+fuse-overlayfs -o lowerdir=/tmp/l,upperdir=/tmp/u,workdir=/tmp/w /tmp/m >/dev/null 2>&1
+echo "FUSE_MOUNT=$(findmnt -no FSTYPE /tmp/m 2>/dev/null || echo FAILED)"
+fusermount3 -u /tmp/m >/dev/null 2>&1 || true
+echo "STORE=$(podman info --format '{{.Store.GraphRoot}} {{.Store.GraphDriverName}}' 2>&1 | tail -1)"
+echo "CGROUP=$(podman info --format '{{.Host.CgroupManager}} {{.Host.CgroupsVersion}}' 2>&1 | tail -1)"
+if [ -S "/run/user/$(id -u)/bus" ]; then bus=bus; else bus=no-bus; fi
+echo "SESSION=$bus ${DBUS_SESSION_BUS_ADDRESS:-unset}"
+PROBE
+    chmod +x "$SB_WORK/nest-probe.sh"
+    # The nested case's own command: the installer end to end, then the two questions only
+    # answerable from inside once it has finished -- is the image really there, and did this
+    # fixture's SYS_ADMIN reach the container the launcher created. That second one is the
+    # boundary the fixture exists on the wrong side of, so it is asserted rather than trusted.
+    cat > "$SB_WORK/nest-run.sh" <<'NEST'
+set -u
+bash /work/installer.sh
+rc=$?
+printf '\n===INSTALLER-RC=%s===\n' "$rc"
+printf '===IMAGE-EXISTS===\n'
+podman image exists localhost/cs193v:local && echo yes || echo no
+printf '===INNER-CAPS===\n'
+podman inspect cs193v --format '{{.EffectiveCaps}}' 2>/dev/null || echo NO-CONTAINER
+printf '===INNER-STORE-BYTES===\n'
+du -sb "$(podman info --format '{{.Store.GraphRoot}}')" 2>/dev/null | cut -f1
+printf '===DOCTOR===\n'
+"$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
+printf '===END-REPORT===\n'
+NEST
+    chmod +x "$SB_WORK/nest-run.sh"
     cat > "$SB_WORK/run.sh" <<'RUN'
 #!/bin/sh
 # Arrange any boot-time state this case asked for, THEN run the installer, then report what
@@ -120,6 +172,79 @@ if command -v ssh >/dev/null 2>&1; then echo present; else echo absent; fi
 printf '===END-REPORT===\n'
 RUN
     chmod +x "$SB_WORK/run.sh"
+}
+
+# ─── the nested case's prerequisites, measured before anything rests on them ────
+#
+# THE GRAPH ROOT IS NOT ON A VOLUME, and that is a measured decision rather than the one this
+# was designed with. The plan assumed podman refuses overlay-on-overlay and that a named
+# volume was therefore required; it does not -- the outer overlay is mounted `userxattr`, so a
+# graph root on the container's own writable layer gets driver=overlay and works. With no
+# correctness reason left, the layer is strictly better than a volume: it is discarded with
+# the container, so there is nothing to reap, nothing to leak onto a shared machine, and no
+# pid-named volume for a killed run to strand.
+#
+# ONE CONTAINER RUN, many answers. Every probe reports KEY=value and every assertion reads a
+# POSITIVE token, never an absence -- a probe that never ran must fail, not look happy.
+nest_probe() {                        # nest_probe [PODMAN_ARGS...] -> KEY=value lines
+    # shellcheck disable=SC2086
+    timeout 180 podman run --label "$VT_LABEL" --rm --cap-add=SYS_ADMIN \
+        --security-opt 'unmask=/proc/*' \
+        --device /dev/fuse --device /dev/net/tun \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" "$@" \
+        "$(fixture_tag nested)" sh /probe.sh 2>&1
+}
+
+# TWO DEPARTURES, ONE CONTROL EACH. This fixture needs SYS_ADMIN and unmask=/proc/*, and
+# asserting only that the privileged run works would leave both requirements untested -- a
+# later podman needing less, or more, would go unnoticed either way. So each control removes
+# exactly one flag and the assertion says which symptom appears.
+#
+# Measured symptoms: without SYS_ADMIN, newuidmap cannot write uid_map. Without the unmask,
+# /proc/sys is read-only and crun cannot set ping_group_range for the inner network.
+#
+# unmask=/proc/* IS NARROWER THAN THE FORBIDDEN FORM. container.args bans `unmask=ALL` for the
+# course container; this is the fixture, one level out, and it names one subtree.
+nest_probe_nocap() {                  # SYS_ADMIN removed, unmask kept
+    timeout 180 podman run --label "$VT_LABEL" --rm \
+        --security-opt 'unmask=/proc/*' \
+        --device /dev/fuse --device /dev/net/tun \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
+        "$(fixture_tag nested)" sh /probe.sh 2>&1
+}
+
+nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
+    timeout 180 podman run --label "$VT_LABEL" --rm --cap-add=SYS_ADMIN \
+        --device /dev/fuse --device /dev/net/tun \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
+        "$(fixture_tag nested)" sh /probe.sh 2>&1
+}
+
+# The real thing: the installer end to end with a genuine `podman build` inside.
+#
+# NETWORK ON, unlike every other case here, and it has to be: the course image is assembled
+# from seven separate origins (cs193v:1209-1213 names them), so this is the one case whose
+# reliability is the internet's. It is also why --network=none and --network=pasta cannot both
+# hold in one run -- pasta needs a template interface, and there is none with no network.
+#
+# 900 s rather than sandbox_run's 120: the installer's own measurement is a 242 s cold build
+# (installer:730), and a first run also pulls the base image.
+nest_build() {                        # nest_build -> the transcript
+    local name="cs193v-fixture-nested-$$"
+    printf '%s' "$name" > "$SB_TMP/last-name"
+    podman rm -f "$name" >/dev/null 2>&1 || true
+    timeout 900 podman run --label "$VT_LABEL" -i --name "$name" --cap-add=SYS_ADMIN \
+        --security-opt 'unmask=/proc/*' \
+        --device /dev/fuse --device /dev/net/tun \
+        --mount type=tmpfs,destination=/var/tmp/report \
+        -e CS193V_DIR=/home/student/cs193v \
+        -v "$SB_WORK:/work:ro" \
+        "$(fixture_tag nested)" \
+        sh /work/nest-run.sh 2>&1 </dev/null | strip_ansi
+}
+
+nest_get() {                          # nest_get OUTPUT KEY -> the value
+    printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1
 }
 
 # ONE keystroke per menu, and a case that gets the count wrong HANGS rather than fails: a
