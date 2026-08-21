@@ -100,23 +100,33 @@ command -v tmux >/dev/null 2>&1 \
 # repeats it inside the pane, which is a harmless no-op on a fresh tab and is what the non-tmux
 # path needs.
 #
-# AFTER the claim below rather than before it, which matters since #41 gave this script a path that
-# does NOT go on to open a shell. Clearing first would mean a launch that loses the session race --
-# a student's second window -- wipes the scrollback of the terminal they typed in, and then shows
-# them a refusal in an empty screen. Only clear once we know we are actually going in.
+# IN --attach, NOT --claim, for the same reason it used to sit after the claim rather than before
+# it: a launch that loses the race must not wipe the scrollback of the terminal the student typed
+# in and then show them a refusal in an empty screen. Only clear once we know we are going in.
+# It would be a no-op in --claim anyway -- that exec has no tty, so `[ -t 1 ]` is false.
 clean_break() { [ -t 1 ] && printf '\033[2J\033[3J\033[H'; return 0; }
 
 # ─── claim the session ─────────────────────────────────────────────────────────
-errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
-
-# Created DETACHED and then attached, rather than in one blocking call. `new-session` without
-# -d never returns, so this is the only shape in which its failure can be inspected -- and its
-# failure is the whole point here, because that is how a lost race announces itself.
+# SPLIT FROM THE ATTACH, and run by the launcher as its own `podman exec` BEFORE it raises the
+# tunnel. The launcher's `state` check is a check-then-act and `podman start` is idempotent, so
+# this claim is the only thing that actually decides who owns the session. Doing it first is the
+# point: a launch that is going to lose no longer binds host ports and starts a port supervisor
+# it will then abandon.
+#
+# The two halves were ALREADY two tmux commands -- see the -d note below -- so the split only
+# moves them into separate execs. `new-session` without -d never returns, so this is the only
+# shape in which its failure can be inspected, and its failure is the whole point here: it is
+# how a lost race announces itself.
 #
 # -x/-y are not optional with -d. A detached session is created at tmux's default 80x24 and only
 # resized when a client attaches, so anything the first window prints before then is laid out for
-# 80 columns and does not reflow afterwards. Passing the real terminal size means what a student
-# sees on entry was written for the terminal they are actually sitting at.
+# 80 columns and does not reflow afterwards. That matters MORE after the split than before it:
+# the gap between claim and attach is no longer microseconds but however long raising the tunnel
+# takes, and `cs193v-welcome` prints its banner into the detached session during it.
+#
+# CS193V_COLS / CS193V_LINES COME FROM THE LAUNCHER, and must: `tput` reads the terminal, the
+# claim exec has no tty, and without them every session would be created at 80x24 -- exactly what
+# -x/-y exist to prevent. The tput fallback is for a hand-run with no launcher in front of it.
 #
 # The first window runs the banner and then becomes the login shell. This is what confines the
 # banner to tab one: every LATER tab is created by tmux itself from the default command, which
@@ -124,22 +134,21 @@ errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
 #
 # No -n flag. Passing -n would set the window name AND switch automatic-rename off, pinning the
 # label forever so the tab could never track the running process.
-if tm new-session -d -s "$SESSION" \
-      -x "$(tput cols 2>/dev/null || echo 80)" \
-      -y "$(tput lines 2>/dev/null || echo 24)" \
-      'cs193v-welcome; exec bash -l' 2>"$errfile"; then
-    clean_break
-    # `=` is tmux's exact-match prefix, kept even with a single fixed name so that a session a
-    # student made by hand called `cs193v-notes` can never be captured by a prefix match.
-    tm attach-session -t "=$SESSION" 2>>"$errfile"
-    rc=$?
-else
-    rc=1
+do_claim() {
+    local errfile said
+    errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
+    if tm new-session -d -s "$SESSION" \
+          -x "${CS193V_COLS:-$(tput cols 2>/dev/null || echo 80)}" \
+          -y "${CS193V_LINES:-$(tput lines 2>/dev/null || echo 24)}" \
+          'cs193v-welcome; exec bash -l' 2>"$errfile"; then
+        rm -f "$errfile"
+        return 0
+    fi
     # LOST THE RACE, which is not a fault and must not be reported as one.
     #
-    # Checked BEFORE the fail box below, which says "this is a fault in the container image,
-    # not something you did" -- true for a missing terminfo, alarming nonsense for a student
-    # who opened a second window. Measured against tmux 3.6: rc=1, and the message on stderr is
+    # Checked BEFORE the fail box, which says "this is a fault in the container image, not
+    # something you did" -- true for a missing terminfo, alarming nonsense for a student who
+    # opened a second window. Measured against tmux 3.6: rc=1, and the message on stderr is
     # exactly `duplicate session: cs193v`.
     #
     # Silent on purpose. The launcher owns this message, because host-facing prose lives in
@@ -148,14 +157,35 @@ else
         rm -f "$errfile"
         exit "$RACE_LOST_STATUS"
     fi
-fi
+    said="$(cat "$errfile" 2>/dev/null)"
+    rm -f "$errfile"
+    fail "tmux could not create your session." "$said"
+}
 
-if [ "$rc" -ne 0 ]; then
-    fail "tmux exited with status $rc without giving you a shell." "$(cat "$errfile" 2>/dev/null)"
-fi
+# ─── attach to it ──────────────────────────────────────────────────────────────
+do_attach() {
+    local errfile rc
+    errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
+    clean_break
+    # `=` is tmux's exact-match prefix, kept even with a single fixed name so that a session a
+    # student made by hand called `cs193v-notes` can never be captured by a prefix match.
+    tm attach-session -t "=$SESSION" 2>>"$errfile"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "tmux exited with status $rc without giving you a shell." "$(cat "$errfile" 2>/dev/null)"
+    fi
+    rm -f "$errfile"
+    # tmux has restored the host terminal from the alternate screen by now, so this lands on
+    # the student's own shell rather than in a pane that is disappearing.
+    cs193v-goodbye
+}
 
-rm -f "$errfile"
-
-# tmux has restored the host terminal from the alternate screen by now, so this lands on
-# the student's own shell rather than in a pane that is disappearing.
-cs193v-goodbye
+# ─── dispatch ──────────────────────────────────────────────────────────────────
+# A bare invocation composes both halves rather than being a third code path: 60-container.sh
+# drives this script directly, and a staff member debugging by hand should keep working.
+case "${1:-}" in
+    --claim)  do_claim ;;
+    --attach) do_attach ;;
+    '')       do_claim; do_attach ;;
+    *)        fail "cs193v-shell: unknown argument '$1'." ;;
+esac

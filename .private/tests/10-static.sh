@@ -621,6 +621,37 @@ for sig in EXIT HUP INT TERM; do
     assert_match "launcher:teardown-traps-$sig" "trap shell_teardown.*$sig" "$open_shell_body"
 done
 
+# ─── nothing shared is touched before the session is WON ───────────────────────
+# open_shell claims the tmux session, THEN installs the trap, THEN raises the tunnel. That order
+# has no runtime symptom, which is why it is asserted here: a launch that will lose the race still
+# gets a shell either way, so moving ensure_tunnel back above the claim would leave every test
+# green while a losing launch bound host ports it then abandoned. `podman start` is idempotent and
+# the launcher's own state check is a check-then-act, so the claim is the only thing that decides
+# ownership -- see files/cs193v-shell and 80-launcher-live.sh's four-way race.
+# COMMENTS STRIPPED FIRST, and that is not tidiness: the prose here mentions ensure_tunnel by
+# name several times, so searching the raw body finds a comment and reports the wrong line. The
+# first version of this check passed with the regression in place for exactly that reason.
+open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
+line_of() { printf '%s\n' "$open_shell_code" | grep -n -- "$1" | head -1 | cut -d: -f1; }
+claim_at="$(line_of 'cs193v-shell --claim')"
+trap_at="$(line_of 'trap shell_teardown')"
+tun_at="$(line_of 'ensure_tunnel')"
+att_at="$(line_of 'cs193v-shell --attach')"
+if [ -n "$claim_at" ] && [ -n "$trap_at" ] && [ -n "$tun_at" ] && [ -n "$att_at" ] \
+   && [ "$claim_at" -lt "$trap_at" ] && [ "$trap_at" -lt "$tun_at" ] && [ "$tun_at" -lt "$att_at" ]; then
+    pass "launcher:no-setup-work-before-the-session-claim"
+else
+    fail "launcher:no-setup-work-before-the-session-claim" \
+"open_shell must run: claim -> trap -> ensure_tunnel -> attach.
+Got line numbers within the function: claim=$claim_at trap=$trap_at tunnel=$tun_at attach=$att_at
+A launch that loses the claim race must not have bound host ports first."
+fi
+# The launcher raises the tunnel INSIDE open_shell now, not on the dispatch arm, for the same
+# reason. Asserting its absence there stops it drifting back.
+assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
+                    "ensure_tunnel || true
+                         open_shell" "$launcher_src"
+
 # The tunnel goes down BEFORE the container, always. remove_container documents why in full:
 # an ssh client outliving its container holds every forwarded host port against a dead pipe, so the
 # next tunnel can bind none of them. Asserted as an ORDER, because both lines being present
