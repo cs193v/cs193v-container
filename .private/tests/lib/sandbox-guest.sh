@@ -143,6 +143,23 @@ apply_sudo() {
     esac
 }
 
+# MEASURED, not just reported: `--network=none` leaves a resolv.conf pointing at ::1, so a lookup
+# fails immediately rather than hanging -- but a machine WITH a network and a broken resolver looks
+# the same to the flag and different to the build, and it is the build that matters.
+net_state() {
+    asked="${SB_NET:-unknown}"
+    if timeout 3 getent hosts registry-1.docker.io >/dev/null 2>&1; then
+        printf 'on (asked: %s) -- a real build can reach its origins' "$asked"
+    elif [ "$(podman_kind)" = 'FAKE (lib/podman-fake)' ] || ! have podman; then
+        # NOT A WARNING HERE, because nothing in this machine will build anything: saying "a real
+        # build stops at STEP 1/25" on a machine with a fake podman is a true sentence about a
+        # thing that cannot happen, which is how a reader learns to skip these lines.
+        printf 'off (asked: %s) -- nothing here builds for real, so nothing needs it' "$asked"
+    else
+        printf 'NO DNS (asked: %s) -- a real build stops at STEP 1/25' "$asked"
+    fi
+}
+
 sudo_state() {
     if [ -f "$REP/sudo-applied" ]; then cat "$REP/sudo-applied"
     elif ! command -v sudo >/dev/null 2>&1; then printf 'absent'
@@ -204,6 +221,11 @@ cmd_state() {
     # flags it is easy to type --no-prereqs=pod man or forget a comma, and then read the
     # installer's behaviour as a branch when it was really your flag. So what was ASKED FOR and
     # what is ACTUALLY TRUE are printed next to each other.
+    # THE NETWORK, ASKED-FOR AND MEASURED, because the two can differ and only one of them
+    # explains a failed build. `sandbox run` on a machine with everything present ends in the
+    # launcher's build, which reaches seven origins -- so "no DNS" here is the whole reason a run
+    # stops at STEP 1/25, and it belongs next to the other things the installer is about to see.
+    printf '  %-22s %s\n' 'network' "$(net_state)"
     printf '  %-22s %s\n' '--no-caps asked for'    "${SB_NO_CAPS:-<none>}"
     printf '  %-22s %s\n' '--no-prereqs asked for' "${SB_NO_PREREQS:-<none>}"
     [ -f "$REP/arranged" ] && printf '  %-22s %s\n' 'arranged'     "$(cat "$REP/arranged")"
@@ -228,6 +250,14 @@ cmd_state() {
 
 cmd_run() {
     snapshot
+    # SAID HERE, where it can be acted on. install-sandbox.sh used to print this before you had a
+    # prompt; by the time you type `sandbox run` it is off the top of the screen, and what you see
+    # instead is the launcher's build failing on a DNS error that looks like a product bug.
+    if [ "$(podman_kind)" != "absent" ] && ! grep -ql 'CS193V_SHIM' "$(command -v podman)" 2>/dev/null \
+       && ! timeout 3 getent hosts registry-1.docker.io >/dev/null 2>&1; then
+        printf '[sandbox] no DNS in here, so the launcher'"'"'s build will stop at STEP 1/25.\n'
+        printf '[sandbox] leave, and start again without --no-net, to watch it build for real.\n\n'
+    fi
     trace=no
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -351,6 +381,7 @@ sandbox -- driving install-cs193v.sh by hand
 This machine was built with everything present and then had things taken away:
   --no-prereqs   ${SB_NO_PREREQS:-<nothing removed>}   (software, so an install path runs)
   --no-caps      ${SB_NO_CAPS:-<nothing denied>}   (a container capability, so an error path runs)
+  network        ${SB_NET:-unknown}   (the launcher's build needs it; --no-net takes it away)
 `reset` puts /etc back but CANNOT put a removed package back. Leave and come back for that.
 
 The installer is at $INST and the course files come from a local tarball, so editing
