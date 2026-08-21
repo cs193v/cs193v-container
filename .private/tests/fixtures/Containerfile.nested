@@ -83,6 +83,28 @@ ENV XDG_RUNTIME_DIR=/run/user/2
 # and not on the host -- a probe that answers about the host answers happily.
 RUN printf 'nested-fixture-%s\n' "$(date -u +%s)" > /etc/cs193v-fixture-id
 
+# vfs, NOT overlay, AND AT THE USER LEVEL. Established by differential rather than assumed:
+# on the host the course image's package step installs cleanly, but nested it dies configuring
+# `locales` with "ln: Already exists" from `ln -sfr /etc/locale.conf /etc/default/locale` --
+# under kernel overlay AND under fuse-overlayfs alike, and not at all under vfs. So overlay
+# semantics are the cause, not the package. Ubuntu 26.04 ships uutils coreutils rather than
+# GNU, which is where that wording comes from and is likely why nobody has reported it: it
+# needs the new ln and the extra nesting level together.
+#
+# vfs is the documented podman-in-podman fallback for exactly this, and it trades disk for
+# correctness -- it copies a full parent tree per layer, so the inner store is far larger than
+# the 2.48 GB image it produces. The harness watches free space while it runs.
+#
+# IN THE USER'S CONFIG, because rootless podman prefers ~/.config/containers/storage.conf and
+# an /etc-level file was measurably ignored -- the first fuse-overlayfs attempt looked like a
+# failed hypothesis when it was really a config that never applied.
+# CHOWNED, because this RUN executes as root long before the USER line and rootless podman
+# refuses a config directory it does not own: "path /home/student/.config exists and it is not
+# owned by the current user".
+RUN mkdir -p /home/student/.config/containers \
+ && printf '[storage]\ndriver = "vfs"\n' > /home/student/.config/containers/storage.conf \
+ && chown -R student:student /home/student/.config
+
 # THE GRAPH ROOT'S MOUNT TARGET, pre-created and student-owned. podman copies the image's
 # ownership onto an empty named volume at first mount, so a target that does not exist (or is
 # root-owned) gives the inner podman a store it cannot write. Same reasoning container.args
