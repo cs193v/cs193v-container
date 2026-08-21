@@ -169,13 +169,13 @@ set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"
 [ -n "$SUDOK" ] && set -- "$@" -e "SB_SUDO=$SUDOK"
-if [ "$MACHINE" = wsl ]; then
-    set -- "$@" -v "$SB_WORK/proc-version:/proc/version:ro"
-fi
-# The nested machine's departures, which are its whole point. Documented in its Containerfile.
+# THE SAME DECLARATION THE SUITE USES. This file used to carry its own copies of the nested
+# machine's capabilities and the wsl bind mount, which is how they came to disagree with the
+# suite's -- see fixture_flags in lib/sandbox.sh.
+fixture_flags "$MACHINE"
+set -- "$@" ${FIXTURE_FLAGS[@]+"${FIXTURE_FLAGS[@]}"}
 if [ "$MACHINE" = nested ]; then
-    set -- "$@" --cap-add=SYS_ADMIN --security-opt 'unmask=/proc/*' \
-                --device /dev/fuse --device /dev/net/tun -e BUILDAH_LAYERS=false
+    set -- "$@" -e BUILDAH_LAYERS=false
     [ "$NET" = no ] && printf 'note: --machine nested cannot build without --net\n'
 fi
 # NOT exported: CS193V_INSTANCE. installer:775-777 names the unsuffixed image on purpose, and

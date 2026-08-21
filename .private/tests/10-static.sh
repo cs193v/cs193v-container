@@ -221,6 +221,41 @@ assert_eq "coverage:the-edited-copy-keeps-the-original-s-line-numbers" \
 assert_ok "coverage:the-edits-really-applied" grep -q '^REPO_OWNER="test"' "$cov_tmp/copy.sh"
 rm -rf "$cov_tmp"
 
+# ─── one place decides what a fixture machine needs ────────────────────────────
+# The install tier and the hand-driven sandbox both run the same fixture images, and each used
+# to decide a machine's podman flags for itself -- install-sandbox.sh had the nested caps and
+# the wsl bind mount, sandbox_run grew a no-podman case, nest_build hardcoded its own. They
+# disagreed, and the failure was not subtle: the no-podman fixture installs a real podman, the
+# installer asked it for MemTotal, and it died with "cannot set up namespace using
+# /usr/bin/newuidmap" because only the nested path had SYS_ADMIN. The suite called that case
+# green, because it only ever asked `podman --version`, which never touches the runtime.
+#
+# So the requirements live in fixture_flags and this asserts nothing else names them. A rule,
+# not a convention: the next person to add a machine cannot reintroduce the split by forgetting
+# a convention they never read.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+# NOT this file: 10-static.sh names --cap-add=SYS_ADMIN in its own container.args invariant
+# list, which is a different job entirely. The rule is about the files that DECIDE what a
+# fixture machine gets.
+flagfiles="$PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/install-sandbox.sh $PRIVATE/tests/2[0-9]-*.sh"
+# shellcheck disable=SC2086
+# ASSEMBLED TAIL-FIRST, or this line matches itself and the rule fails on its own definition --
+# the third time that has happened in this file, hence the shared idiom.
+sa_tail='SYS_ADMIN'; sa_head='--cap-add='
+naming="$(grep -Hn -- "$sa_head$sa_tail" $flagfiles \
+          | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-SYS_ADMIN" "1" \
+          "$(printf '%s\n' "$naming" | grep -c . )"
+assert_says "fixture-flags:and-that-place-is-fixture_flags" 'lib/sandbox.sh' "$naming"
+# The same for the unmask, which is the other departure and the one container.args forbids in
+# its wider form -- so a second copy appearing anywhere is worth failing over.
+# shellcheck disable=SC2086
+um_tail='=/proc'; um_head='unmask'
+naming2="$(grep -Hn -- "$um_head$um_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-the-unmask" "1" \
+          "$(printf '%s\n' "$naming2" | grep -c . )"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \
