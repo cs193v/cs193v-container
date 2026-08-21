@@ -26,6 +26,11 @@ RUN printf 'student:200000:65536\n' > /etc/subuid \
 
 # The two tmpfs mount points the harness adds, created here so mounting over them does not
 # itself show up as a change -- the same reason the other fixtures create them.
+# The graph root's parent, pre-created student-owned. Any `podman info` creates it, so without
+# this it shows up as an ADDED path and the exact-set audit reports it as a change the installer
+# made -- which it did not. Same treatment Containerfile.nested gives it.
+RUN mkdir -p /home/student/.local/share/containers && chown -R student:student /home/student/.local
+
 RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
 
 USER student
