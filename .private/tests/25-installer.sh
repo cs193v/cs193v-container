@@ -248,6 +248,25 @@ assert_eq "unwritable-dest:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
 chmod 755 "$TMP/ro"
 
+# podman INSTALLED BUT NOT WORKING, which is a different machine from podman absent and wants
+# its own case rather than emerging from another one by accident. A person driving the install
+# tier's no-podman fixture by hand hit this: apt installs podman, the installer asks it for
+# MemTotal, and it cannot answer -- and I described that as the only place the branch was
+# reachable. It is not. podman-fake has had an info_rc knob all along, so the branch costs a
+# millisecond here, deliberately, on any machine.
+shim_new
+shim_set info_rc 1
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nomem")"
+assert_says "podman-mute:refuses-to-guess"      "Could not ask podman how much memory" "$out"
+assert_says "podman-mute:suggests-the-mac-fix"  "podman machine start" "$out"
+assert_says "podman-mute:changed-nothing-more"  "Nothing further has been changed" "$out"
+assert_says_not "podman-mute:does-not-claim-success" "Setup finished" "$out"
+assert_eq "podman-mute:exits-1" "1" \
+          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nomem2")"
+# It must fail BEFORE writing local.args, or a student would be left with a memory cap computed
+# from nothing.
+assert_no_file "podman-mute:wrote-no-local-args" "$TMP/nomem/.config/local.args"
+
 # THE WORST POSSIBLE LIE, and the one smoke_test exists to prevent: a build that produced
 # no image, reported over the words "Setup finished". The installer's own comment calls this
 # ERRORS.md A6's shape -- a truncated download that passed.
