@@ -120,7 +120,20 @@ PROBE
     # boundary the fixture exists on the wrong side of, so it is asserted rather than trusted.
     cat > "$SB_WORK/nest-run.sh" <<'NEST'
 set -u
-bash /work/installer.sh
+# TRACED, so both the fixture cases and the nested build are coverage producers. They reach
+# branches no host case can decide -- the real apt install, the real usermod, both wsl.conf
+# writes -- and a gate blind to them would score the installer as far less covered than it is.
+# fd 9 keeps the trace off stdout; the numbers come back out in the report below.
+# TRACED ONLY WHEN ASKED. Measured: `bash -x` took this tier from 6.4 s to 69 s and pushed the
+# apt case past its ceiling, because tracing multiplies the cost of every command in a run that
+# installs 31 packages. Coverage is a periodic question, not something every run should pay 10x
+# for -- so the container half is opt-in and the gate reports which producers it heard from
+# rather than pretending a host-only number is the whole picture.
+if [ -n "${CS193V_COVERAGE:-}" ]; then
+    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x /work/installer.sh 9>>/var/tmp/report/trace
+else
+    bash /work/installer.sh
+fi
 rc=$?
 printf '\n===INSTALLER-RC=%s===\n' "$rc"
 printf '===IMAGE-EXISTS===\n'
@@ -136,7 +149,9 @@ printf '===BUILD-LOG===\n'
 for f in /tmp/cs193v-build-*.log; do [ -f "$f" ] && tail -60 "$f"; done
 printf '===DOCTOR===\n'
 "$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
-printf '===END-REPORT===\n'
+printf '===TRACE===\n'
+sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
+printf '\n===END-REPORT===\n'
 NEST
     chmod +x "$SB_WORK/nest-run.sh"
     cat > "$SB_WORK/run.sh" <<'RUN'
@@ -159,7 +174,20 @@ esac
 # asserted in.
 dpkg-query -W -f='${Package}\n' 2>/dev/null | LC_ALL=C sort > /var/tmp/report/dpkg-before
 
-bash /work/installer.sh
+# TRACED, so both the fixture cases and the nested build are coverage producers. They reach
+# branches no host case can decide -- the real apt install, the real usermod, both wsl.conf
+# writes -- and a gate blind to them would score the installer as far less covered than it is.
+# fd 9 keeps the trace off stdout; the numbers come back out in the report below.
+# TRACED ONLY WHEN ASKED. Measured: `bash -x` took this tier from 6.4 s to 69 s and pushed the
+# apt case past its ceiling, because tracing multiplies the cost of every command in a run that
+# installs 31 packages. Coverage is a periodic question, not something every run should pay 10x
+# for -- so the container half is opt-in and the gate reports which producers it heard from
+# rather than pretending a host-only number is the whole picture.
+if [ -n "${CS193V_COVERAGE:-}" ]; then
+    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x /work/installer.sh 9>>/var/tmp/report/trace
+else
+    bash /work/installer.sh
+fi
 rc=$?
 
 dpkg-query -W -f='${Package}\n' 2>/dev/null | LC_ALL=C sort > /var/tmp/report/dpkg-now
@@ -174,7 +202,9 @@ printf '===PODMAN-AFTER===\n'
 if command -v podman >/dev/null 2>&1; then podman --version; else echo absent; fi
 printf '===SSH-AFTER===\n'
 if command -v ssh >/dev/null 2>&1; then echo present; else echo absent; fi
-printf '===END-REPORT===\n'
+printf '===TRACE===\n'
+sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
+printf '\n===END-REPORT===\n'
 RUN
     chmod +x "$SB_WORK/run.sh"
 }
@@ -256,9 +286,12 @@ nest_build() {                        # nest_build -> the transcript
         --mount type=tmpfs,destination=/var/tmp/report \
         -e CS193V_DIR=/home/student/cs193v \
         -e BUILDAH_LAYERS=false \
+        -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
         -v "$SB_WORK:/work:ro" \
         "$(fixture_tag nested)" \
-        sh /work/nest-run.sh 2>&1 </dev/null | strip_ansi
+        sh /work/nest-run.sh 2>&1 </dev/null > "$SB_TMP/nraw"
+    sb_collect_trace < "$SB_TMP/nraw"
+    strip_ansi < "$SB_TMP/nraw"
 }
 
 nest_get() {                          # nest_get OUTPUT KEY -> the value
@@ -322,11 +355,24 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     #
     # 60 s because these cases take about a second; nest_build keeps 900, a real build takes
     # minutes.
-    printf '%b' "$keys" | timeout --kill-after=15 120 \
-        podman run --timeout 60 --label "$VT_LABEL" -i --name "$SB_NAME" \
+    # The ceiling has to know about tracing. Measured: `bash -x` took the apt case from ~15 s
+    # to 61 s, so a 60 s limit turned a coverage run into a timeout that looked like the
+    # installer failing to print things. One number cannot serve both modes.
+    local cap=60 outer=120 cov="${CS193V_COVERAGE:-}"
+    if [ -n "$cov" ]; then cap=240; outer=300; fi
+    # THE apt CASE IS NOT TRACED, and this is a known gap rather than a preference. Under
+    # `bash -x` it hangs deterministically at the consent menu -- transcript frozen at 1750
+    # bytes, identical at a 240 s cap and a 600 s one, so it is a hang and not slow work. I
+    # have not explained the interaction, and the honest thing is to leave its branches OUT of
+    # the coverage union and say so, rather than let one unexplained case either block the gate
+    # or silently shrink what the number claims to cover. 95-installer-coverage.sh records it.
+    case "$case" in no-podman) cov='' ;; esac
+    printf '%b' "$keys" | timeout --kill-after=15 "$outer" \
+        podman run --timeout "$cap" --label "$VT_LABEL" -i --name "$SB_NAME" \
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
         --mount type=tmpfs,destination=/var/tmp/report \
+        -e "CS193V_COVERAGE=$cov" \
         -v "$SB_WORK:/work:ro" "$@" \
         "$(fixture_tag "$case")" \
         script -q -c /work/run.sh /dev/null > "$SB_TMP/raw" 2>&1
@@ -335,17 +381,34 @@ sandbox_run() {                       # sandbox_run CASE KEYS [PODMAN_ARGS...] -
     # 255 is podman's own --timeout firing; 124 is the outer backstop, which should never be
     # reached and means a stray container may be left for the next sweep.
     case "$rc" in
-        255) printf '\n===SANDBOX-TIMEOUT=== podman killed the container at its 60s ceiling\n' \
+        255) printf '\n===SANDBOX-TIMEOUT=== podman killed the container at its %ss ceiling\n' "$cap" \
                  >> "$SB_TMP/raw" ;;
         124) # The outer backstop fired, which means SIGKILL reached podman and abandoned the
              # container. The name is known, so clean up rather than leaving it for the sweep:
              # a ceiling that creates debris is a bad ceiling, and this is the one case where
              # it can.
              podman rm -f "$SB_NAME" >/dev/null 2>&1 || true
-             printf '\n===SANDBOX-TIMEOUT=== the OUTER backstop fired at 120s and podman did not\n'  >> "$SB_TMP/raw"
+             printf '\n===SANDBOX-TIMEOUT=== the OUTER backstop fired at %ss and podman did not\n' "$outer"  >> "$SB_TMP/raw"
              printf 'honour its own ceiling; the container was force-removed here\n' >> "$SB_TMP/raw" ;;
     esac
+    sb_collect_trace < "$SB_TMP/raw"
     strip_ansi < "$SB_TMP/raw"
+}
+
+# The line numbers a container run reported, appended to this run's trace directory so
+# 95-installer-coverage.sh can union them with the host cases'. Rewritten into the same
+# "+NNN text" shape the host traces use, so the gate has one parser rather than two.
+sb_collect_trace() {
+    [ -n "${CS193V_RUN_DIR:-}" ] || return 0
+    mkdir -p "$CS193V_RUN_DIR/trace" 2>/dev/null || return 0
+    # tr -d '\r' FIRST. This reads the RAW transcript, which came through a pty, so every line
+    # ends in a carriage return and /^===TRACE===$/ matched nothing -- the collected file was
+    # zero bytes while the section was plainly there in the stripped output I was reading. The
+    # gate then reported the producer silent, which was true and completely misleading.
+    tr -d '\r' \
+        | sed -n '/^===TRACE===$/,/^===/p' | sed '1d;$d' | tr ' ' '\n' | grep -E '^[0-9]+$' \
+        | sed 's/^/+/;s/$/ traced-in-container/' \
+        >> "$CS193V_RUN_DIR/trace/${CS193V_SUITE:-standalone}.$$" || true
 }
 
 # The exit status of the last sandbox_run, which the pipeline above would otherwise hide.
