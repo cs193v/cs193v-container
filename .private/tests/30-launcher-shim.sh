@@ -774,6 +774,24 @@ assert_contains "noterm:with-a-terminal-it-opens-a-shell" "cs193v-shell" "$(shim
 # the launcher knows the container's name -- CS193V_INSTANCE may have suffixed it.
 assert_contains "noterm:passes-the-container-name-in" "CS193V_CONTAINER=" "$(shim_log)"
 
+# ─── the claim's terminal size is never degenerate  ────────────────────────────
+# `tmux new-session -d` takes the size as -x/-y and the claim exec has no tty to read it from, so
+# the launcher passes it in. A DIGITS-ONLY guard is not enough: a pty with nothing behind it --
+# `script -q -c ... /dev/null`, which is exactly how this suite and 70-sighup.sh drive a launch --
+# reports `0 0` from `stty size`. Both are numeric, so they pass a digit check, and tmux then
+# refuses with "width too small": no session, cs193v-shell prints its fault box, the launch dies.
+# Measured. Caught by the live tier, which costs five minutes; this costs none.
+sz_bad=''
+for kv in $(shim_log | tr ' ' '\n' | grep -E '^CS193V_(COLS|LINES)=' | sort -u); do
+    sz_v="${kv#*=}"
+    case "$sz_v" in ''|*[!0-9]*) sz_bad="$sz_bad $kv(non-numeric)" ; continue ;; esac
+    case "${kv%%=*}" in
+        CS193V_COLS)  [ "$sz_v" -ge 20 ] || sz_bad="$sz_bad $kv" ;;
+        CS193V_LINES) [ "$sz_v" -ge 5 ]  || sz_bad="$sz_bad $kv" ;;
+    esac
+done
+assert_eq "noterm:claim-never-passes-a-degenerate-size" "" "$sz_bad"
+
 # The scriptable verbs must NOT be caught by the refusal — they are what the message tells
 # people to use, so they have to work with a redirected stdin.
 for v in --dev-print-command doctor --rebuild; do

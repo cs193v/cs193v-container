@@ -1887,55 +1887,108 @@ open_shell() {
         die "$(msg err.needs-a-terminal)"
     fi
 
-    # LAST, so it covers everything printed on the way here and the warnings are still the
-    # newest thing on screen while the student reads them. One line further down the student is
-    # inside tmux, whose alternate screen erases all of it. See warn().
-    acknowledge_warnings
-
-    # THE TRAP, AND NOT `exec`. This is the line the whole of #41 rests on.
+    # ─── 1. CLAIM THE SESSION, BEFORE ANY SETUP WORK ───────────────────────────
+    # The launcher's `state` check is a check-then-act and `podman start` is idempotent and
+    # silent, so this is the FIRST point at which we know we own the session. Everything that
+    # touches a shared resource -- the tunnel and its host ports -- happens after it.
     #
-    # `exec` replaced this process with podman, so no process survived the shell to stop
-    # anything and the container simply stayed up forever. The launcher now stays resident for
-    # the length of the session and tears it down afterwards.
+    # `podman run --name` uniqueness is atomic too, but it only covers absent -> running, which
+    # happens once in a container's lifetime. Since #41 `exited` is the resting state, so every
+    # launch after the first takes `podman start` and tmux's session namespace is the only claim
+    # that fires. See files/cs193v-shell.
+    #
+    # NO -it AND NO TRAP YET. This exec needs no pty, and a launch that loses here must not tear
+    # anything down -- the winner owns the container. Not installing the trap until after we win
+    # is what makes that true by construction; it used to need TEARDOWN_DONE and an explicit
+    # `trap -` on the losing path.
+    #
+    # CS193V_COLS / CS193V_LINES: `tmux new-session -d` takes the size as arguments and cannot
+    # read it from a tty it does not have. Without these every session would be created 80x24
+    # and the banner would be laid out for it -- which matters more here than it did when claim
+    # and attach were one exec, because cs193v-welcome now prints during the tunnel setup below.
+    # CLAMPED, NOT JUST CHECKED FOR DIGITS, and 0 is the case that matters. A pty with no real
+    # terminal behind it -- `script -q -c ... /dev/null`, which is how the suite drives a launch --
+    # reports `0 0` from `stty size`. Both are numeric, so a digits-only guard passes them through,
+    # and `tmux new-session -x 0` then fails with "width too small": the session is never created,
+    # cs193v-shell prints its fault box, and the launch dies. Measured; it is what 70-sighup.sh and
+    # 80-launcher-live.sh caught. The floor is below any usable terminal and above tmux's minimum.
+    local cols lines
+    cols=''; lines=''
+    read -r lines cols < <(stty size 2>/dev/null) || true
+    case "${cols:-}" in ''|*[!0-9]*) cols=0 ;; esac
+    case "${lines:-}" in ''|*[!0-9]*) lines=0 ;; esac
+    [ "$cols" -ge 20 ] || cols=80
+    [ "$lines" -ge 5 ] || lines=24
+
+    podman exec \
+        -w "$MOUNT_DST" \
+        -e "CS193V_CONTAINER=$NAME" \
+        -e "CS193V_COLS=$cols" \
+        -e "CS193V_LINES=$lines" \
+        "$NAME" cs193v-shell --claim
+    rc=$?
+
+    # A lost claim race is not a fault -- it is the refusal arriving one layer down. Two launches
+    # both found a stopped container, both started it, and tmux handed the single session to
+    # whichever asked first. The loser reports it with the SAME message as the state check, so a
+    # student never has to care which layer caught them.
+    if [ "$rc" = "$RACE_LOST_STATUS" ]; then
+        die "$(msg err.session-in-use)"
+    fi
+    # ANY OTHER FAILURE TEARS DOWN, and that is not symmetric with the line above. A lost race
+    # must NOT stop the container -- the winner is in it. A broken claim (tmux missing, terminfo
+    # gone; cs193v-shell has already printed its own box) leaves a container running with nobody
+    # attached, which is the state #41 exists to prevent, and no trap is installed yet to catch
+    # it. Same reasoning as the no-terminal path above.
+    if [ "$rc" -ne 0 ]; then
+        shell_teardown
+        return "$rc"
+    fi
+
+    # ─── 2. NOW THE TRAP, AND NOT `exec` ───────────────────────────────────────
+    # This is the line the whole of #41 rests on. `exec` replaced this process with podman, so no
+    # process survived the shell to stop anything and the container simply stayed up forever. The
+    # launcher now stays resident for the length of the session and tears it down afterwards.
     #
     # HUP IS TRAPPED EXPLICITLY, and that is not redundant with EXIT: bash's default action for
     # SIGHUP is to die WITHOUT running the EXIT trap, so closing the window -- the one case this
     # exists for -- would leave the container up.
     #
+    # INSTALLED HERE rather than before the claim: from this point on we own a session, so dying
+    # for any reason must take the container down with us.
+    trap shell_teardown EXIT HUP INT TERM
+
+    # ─── 3. SETUP WORK, now that it is provably ours ───────────────────────────
+    # The tunnel lives here rather than in the dispatcher because it must come after the claim,
+    # and the claim is here. `|| true` for the reason it always had: a container with no
+    # browser-facing ports is perfectly usable, and ensure_tunnel has already said so.
+    ensure_tunnel || true
+
+    # LAST BEFORE THE ATTACH, so it covers everything printed on the way here -- including
+    # anything the tunnel warned about -- and the warnings are still the newest thing on screen
+    # while the student reads them. One line further down the student is inside tmux, whose
+    # alternate screen erases all of it. See warn().
+    acknowledge_warnings
+
+    # ─── 4. ATTACH ─────────────────────────────────────────────────────────────
     # FOREGROUND, not backgrounded-and-waited. Backgrounding raises the question of whether
     # `podman exec -it` takes SIGTTIN on its first read from the tty; it should not, because job
     # control is off in a non-interactive shell so the child stays in the terminal's foreground
     # process group -- but that is an assumption worth not needing. Foregrounded, the same
     # SIGHUP that closes the window kills the child AND is pending for us, so bash runs the
     # handler as soon as it reaps it.
-    trap shell_teardown EXIT HUP INT TERM
-
-    # cs193v-shell puts the student inside tmux; see files/cs193v-shell. CS193V_CONTAINER is
-    # passed because its failure path has to tell a student the exact `podman exec` line to
-    # run, and nothing inside the container can work out the container's name --
-    # CS193V_INSTANCE may have suffixed it, and the hostname is cs193v-development either way.
+    #
+    # CS193V_CONTAINER is passed because cs193v-shell's failure path has to tell a student the
+    # exact `podman exec` line to run, and nothing inside the container can work out the
+    # container's name -- CS193V_INSTANCE may have suffixed it, and the hostname is
+    # cs193v-development either way.
     podman exec -it \
         -w "$MOUNT_DST" \
         -e "TERM=$(safe_term)" \
         -e "COLORTERM=${COLORTERM:-}" \
         -e "CS193V_CONTAINER=$NAME" \
-        "$NAME" cs193v-shell
+        "$NAME" cs193v-shell --attach
     rc=$?
-
-    # A lost claim race is not a fault -- it is the refusal arriving one layer down. Two
-    # launches both found a stopped container, both started it (podman start is idempotent and
-    # says nothing), and tmux handed the single session to whichever asked first. The loser
-    # reports it with the SAME message as the state check, so a student never has to care which
-    # layer caught them.
-    #
-    # The trap is cleared FIRST. The winner owns this container, and letting our teardown run
-    # would stop it out from under their session -- turning a harmless race into the one
-    # failure this whole mechanism exists to prevent.
-    if [ "$rc" = "$RACE_LOST_STATUS" ]; then
-        TEARDOWN_DONE=1
-        trap - EXIT HUP INT TERM
-        die "$(msg err.session-in-use)"
-    fi
     return "$rc"
 }
 
@@ -2358,14 +2411,19 @@ usage() {
 # doctor and --reset-tunnel take no reference and stop nothing. --reset-tunnel especially:
 # its whole purpose is fixing the tunnel WHILE a session is live.
 #
-# The same invariant decides where the TUNNEL is raised, and it is raised here, once. It used to
-# be raised in create_container and again at the end of ensure_container -- two sites, both
-# spelling "a container exists", which is the wrong predicate: --rebuild made one and stopped it
-# on the next line, so its tunnel held all 46 host ports (which CS193V_INSTANCE does NOT
-# namespace, see CLAUDE.md) for a container nobody could be in. This arm is the only place a
-# session begins, and ensure_container is called from nowhere else, so one call covers every path
-# the two used to. Failure is deliberately NOT fatal: the container and the shell are still
-# perfectly usable, only the browser-facing ports are missing, and ensure_tunnel has said so.
+# The same invariant decides where the TUNNEL is raised, and it is NOT raised here. It is raised
+# inside open_shell, after the session claim -- see the numbered blocks there. The predicate that
+# matters is "we own the session", not "a container exists", and only the claim establishes it: a
+# launch that is going to lose the race would otherwise bind host ports it then abandons. That was
+# already wasteful and became worse once a port supervisor rode alongside the tunnel.
+#
+# The predicate has been wrong twice before, each time by being too weak. It used to be raised in
+# create_container and again at the end of ensure_container -- two sites both spelling "a container
+# exists", so --rebuild made one, stopped it on the next line, and left a tunnel holding all its
+# host ports (which CS193V_INSTANCE does NOT namespace, see CLAUDE.md) for a container nobody could
+# be in. Moving it to this arm fixed that and left the weaker half: this arm is where a session
+# BEGINS, but not where one is WON. Failure is still deliberately not fatal: the container and the
+# shell are perfectly usable, only the browser-facing ports are missing, and ensure_tunnel says so.
 case "${1:-}" in
     # ANNOUNCED BEFORE THE FIRST PROBE, and the order is the whole of issue #57. Everything on this
     # arm is silent when it succeeds, and it is not quick: preflight's single `podman info` measures
@@ -2382,7 +2440,6 @@ case "${1:-}" in
     '')                  info "$(msg status.entering)"
                          preflight; refuse_if_foreign_dir; refuse_if_session_live
                          load_args; require_image; ensure_container
-                         ensure_tunnel || true
                          open_shell ;;
     doctor)              verb_doctor ;;
     --stop)              verb_stop ;;
