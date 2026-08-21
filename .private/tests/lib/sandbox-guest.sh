@@ -40,6 +40,16 @@ arrange() {
     printf '%s\n' "$SB_WSLCONF" > "$REP/arranged"
 }
 
+# THE INSTALLER WHERE A STUDENT WOULD HAVE IT. It is bind-mounted read-only at
+# /work/installer.sh, and landing in $HOME with nothing visible is both unhelpful and
+# unfaithful: a student downloads install-cs193v.sh into a directory and runs
+# `bash install-cs193v.sh` from there. A SYMLINK rather than a copy, so editing
+# .private/install-cs193v.sh on the host still reaches this run with no rebuild.
+link_installer() {
+    [ -e "$HOME/install-cs193v.sh" ] && return 0
+    ln -sf /work/installer.sh "$HOME/install-cs193v.sh" 2>/dev/null || true
+}
+
 # Taken once, on the first command that needs it, so `state` before anything is still a true
 # before-picture. Copies rather than checksums: `reset` has to be able to put them back.
 snapshot() {
@@ -223,6 +233,18 @@ EOF
 }
 
 arrange || exit 1
+link_installer
+
+# init IS RUN BEFORE YOU LAND, by install-sandbox.sh. Doing this lazily on the first `sandbox`
+# call was wrong twice over: the installer symlink was not there when you arrived and looked
+# for it, and the wsl.conf arrangement plus the baseline could be taken AFTER you had already
+# run the installer by hand -- so `diff` would have shown nothing and been believed.
+if [ "${1:-}" = init ]; then
+    arrange || exit 1
+    link_installer
+    snapshot
+    exit 0
+fi
 
 case "${1:-knobs}" in
     state) cmd_state ;;
