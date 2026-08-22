@@ -652,6 +652,28 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
                     "ensure_tunnel || true
                          open_shell" "$launcher_src"
 
+# THE SUPERVISOR'S PID MUST BE THE LOOP'S PID, and that is a claim about one shell metacharacter.
+# `podman exec ... | sup_loop` puts the loop in a SUBSHELL, so the $$ written to the pidfile names
+# the PARENT -- killing it leaves the loop and the exec running. Measured before this assertion
+# existed: one supervisor survived every single stop. `sup_loop < <(podman exec ...)` makes the loop
+# this very process, so the tracked pid is the one whose death cascades.
+# Comments stripped first: verb_supervise's own comment QUOTES the pipeline it warns against, so
+# an unstripped grep matches the warning and passes with the bug in place. That exact trap already
+# cost this suite one vacuous assertion.
+sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
+assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
+assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"
+
+# AND THE WATCHER IS REAPED ON BOTH SIDES OF THE LIFECYCLE. The cascade the comment above describes
+# stops at the host: the container-side watcher's writes land in a pipe buffer conmon holds open, so
+# the EPIPE that should end it may never arrive. Teardown handles this by stopping the container --
+# but --reset-tunnel never calls tunnel_down, so without an explicit reap each reset would strand one
+# watcher and start another beside it. Measured: four accumulated across one testing session.
+for f in tunnel_sup_start tunnel_sup_stop; do
+    assert_contains "supervisor:$f-reaps-the-watcher" \
+                    'pkill -f "cs193v-portwatch --watch"' "$(fn_body $f $REPO/cs193v)"
+done
+
 # The tunnel goes down BEFORE the container, always. remove_container documents why in full:
 # an ssh client outliving its container holds every forwarded host port against a dead pipe, so the
 # next tunnel can bind none of them. Asserted as an ORDER, because both lines being present

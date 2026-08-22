@@ -320,11 +320,19 @@ three_refused() { [ "$(refused_count)" = 3 ]; }
 # Wait for the losers to have given up rather than for the sleeps to expire. A timeout here is not
 # the assertion -- the count is read and asserted below either way.
 wait_until 90 three_refused || true
-refused="$(refused_count)"
 # THE HARNESS REALLY IS HOLDING THE SESSION, asserted rather than assumed, and this is what makes
 # the count below mean what it claims. container_pgrep rather than E(), for the reason its own
 # header gives: asked through a shell, the pattern matches that shell and the answer is always yes.
-if container_pgrep 'sleep 600'; then
+#
+# WAITED FOR, not sampled, and the two are no longer the same thing. The losers refuse at the
+# session claim, which is now the FIRST thing a launch does -- while the winner still has to raise
+# a tunnel, start a supervisor and attach before the `sleep 600` it was fed can run. So three
+# refusals no longer imply the winner has reached a prompt, and a single sample here caught it
+# mid-startup and called a correctly-run race a harness fault. Measured: refused was 3 of 4, one
+# winner, and this was the only assertion that failed.
+wait_until 30 container_pgrep 'sleep 600' && held=yes || held=no
+refused="$(refused_count)"
+if [ "$held" = yes ]; then
     pass "live:the-race-really-held-its-session"
 else
     fail "live:the-race-really-held-its-session" \
