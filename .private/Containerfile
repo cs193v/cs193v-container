@@ -607,11 +607,21 @@ COPY files/ /tmp/cs193v-files/
 #     and which socat and netcat are not here for. It gets a syntax check by the same
 #     argument as `sh -n /usr/bin/man` below -- `compile()` rather than `py_compile`, which
 #     would drop a .pyc into /usr/local/bin -- then two behavioural checks that cost
-#     nothing at build time: `--help` answers, and with no $CS193V_PORTS in the environment
-#     it degrades to printing the URL it was handed. That degradation is the contract every
-#     caller relies on to need no conditional, and the build is the cheapest place to
-#     notice it broken. What it does when a port IS forwarded needs a container with the
-#     tunnel behind it, and that is 50-image.sh and 60-container.sh.
+#     nothing at build time: `--help` answers, and with no /tmp/cs193v/ports -- no tunnel,
+#     so nothing it binds can be reached -- it degrades to printing the URL it was handed.
+#     That degradation is the contract every caller relies on to need no conditional, and
+#     the build is the cheapest place to notice it broken.
+#
+#     KEYED ON THE STATE FILE, NOT ON AN ENVIRONMENT VARIABLE, and the difference is whether
+#     this check means anything. It used to assert the degradation that follows from an unset
+#     $CS193V_PORTS; nothing sets that variable at build time either, so the assertion held
+#     no matter what shortlink did with it. The state file is absent here for a REASON that
+#     goes away in a real container, so the check can fail.
+#
+#     The third check reads a state file that is handed in rather than found, which is the
+#     positive half: degradation alone is satisfied by a shortlink that degrades always.
+#     What it does when a port is genuinely forwarded needs a container with the tunnel
+#     behind it, and that is 50-image.sh and 60-container.sh.
 #
 #     `man` is the odd one out and goes to /usr/bin, not /usr/local/bin, because it
 #     REPLACES something rather than adding it. Ubuntu's minimized base leaves a
@@ -755,6 +765,7 @@ RUN set -eux; \
     /usr/local/bin/shortlink --help > /dev/null; \
     sl_out="$(/usr/local/bin/shortlink https://example.com/build-check || true)"; \
     test "$sl_out" = https://example.com/build-check; \
+    python3 -c "import importlib.machinery as m, importlib.util as u, sys; l = m.SourceFileLoader('sl', '/usr/local/bin/shortlink'); s = u.module_from_spec(u.spec_from_loader('sl', l)); l.exec_module(s); t = 'state\thealthy\nup\t3000\tlo\nrefused\t8080\tbusy\n'; got = [s.port_verdict(t, 3000), s.port_verdict(t, 8080), s.port_verdict(t, 9999), s.port_verdict(t, '03000')]; sys.exit(0 if got == ['up', 'busy', None, None] else 'shortlink port_verdict misread the state file: ' + repr(got))"; \
     install -m 0755 /tmp/cs193v-files/cs193v-portwatch /usr/local/bin/cs193v-portwatch; \
     bash -n /usr/local/bin/cs193v-portwatch; \
     python3 -c "import socket, subprocess, sys; s = socket.socket(); s.bind(('127.0.0.1', 8099)); s.listen(1); out = subprocess.run(['/usr/local/bin/cs193v-portwatch', '--once'], capture_output=True, text=True).stdout; sys.exit(0 if '8099:lo' in out.split() else 'portwatch --once did not classify 127.0.0.1:8099 as 8099:lo, said: ' + out.strip())"; \
