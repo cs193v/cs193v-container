@@ -125,10 +125,9 @@ if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
     # never deletes them. Same fix as #46 -- one derivation, from the launcher, via --dev-tunnel.
     #
     # Through fwd_init rather than a second call to the seam, so there is still only one place that
-    # parses it. What that inherits, and it is worth knowing: fwd_init HARD-FAILS when fewer than two
-    # ports are declared, which this check does not care about. That is the right trade -- a checkout
-    # whose CS193V_PORTS cannot be read is not one to certify a release from -- but it means a
-    # release build can now stop here for a reason that is about ports.
+    # parses it. It used to inherit a hard-fail from fwd_init -- fewer than two declared ports and
+    # the whole release gate stopped for a reason that was about ports and not about this check.
+    # fwd_init reads no ports at all now, so that coupling is gone.
     fwd_init
     log="$FWD_BUILDLOG"
     [ -n "$log" ] && [ -f "$log" ] || log=''
