@@ -121,7 +121,35 @@ record "coverage:lines-traced-in-total" "$seen_n"
 record "coverage:percent-executed"      "$pct"
 record "coverage:allowlisted"           "$allow_n"
 record "coverage:unreached-and-unexcused" "$missed_n"
-record "coverage:where-to-look"         "$MISSED"
+# ─── kept where the next run cannot delete it ──────────────────────────────────
+#
+# $CS193V_RUN_DIR IS PID-NAMED AND SWEPT: run-tests.sh removes every finished run's directory at
+# startup (run-tests.sh:152-159), and this gate runs LAST -- so "go and read missed.lines" was a
+# promise that expired the moment you ran the suite again, which is exactly when you would go
+# looking. Measured the obvious way: the path this recorded after a full run did not exist a run
+# later. The numbers are still printed inline below, so nothing was ever truly lost, but a
+# 125-entry list is not something to re-read off a terminal.
+#
+# ANNOTATED, because a bare list of line numbers means opening the installer 125 times. With the
+# source text beside each number it is a to-do list you can skim -- and that is the difference
+# between an artefact worth keeping and one worth deleting.
+COV_KEEP="${TMPDIR:-/tmp}/cs193v-coverage${CS193V_INSTANCE:+-$CS193V_INSTANCE}"
+mkdir -p "$COV_KEEP" 2>/dev/null || true
+if [ -d "$COV_KEEP" ]; then
+    cp "$MISSED" "$COV_KEEP/missed.lines" 2>/dev/null || true
+    cp "$HIT"    "$COV_KEEP/hit.lines"     2>/dev/null || true
+    { printf '# install-cs193v.sh lines that no producer executed and the allowlist does not excuse.\n'
+      printf '# %s of %s executable lines; %s%% executed. Regenerate: CS193V_COVERAGE=1 run-tests.sh\n' \
+             "$missed_n" "$exec_n" "$pct"
+      while IFS= read -r ln; do
+          [ -n "$ln" ] || continue
+          printf '%5s  %s\n' "$ln" "$(sed -n "${ln}p" "$INST")"
+      done < "$MISSED"
+    } > "$COV_KEEP/missed.annotated" 2>/dev/null || true
+    record "coverage:where-to-look" "$COV_KEEP/missed.annotated"
+else
+    record "coverage:where-to-look" "$MISSED"
+fi
 # NOT YET AN ASSERTION, and doubly so while the union can be partial: with CS193V_COVERAGE
 # unset the container producers are silent, so `missed` includes branches that ARE tested and
 # simply were not traced. Asserting on that would be measuring the flag, not the installer.
