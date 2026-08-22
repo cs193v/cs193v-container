@@ -549,3 +549,148 @@ version_lt() {                        # version_lt A B -> prints yes if A < B
         }
         print "no" }'
 }
+
+# ─── the dynamic-port frame parser ─────────────────────────────────────────────
+# THE ONLY PLACE BYTES THE CONTAINER CONTROLS REACH THE HOST, and the only container-derived
+# value that ever lands in an ssh argument comes out of it. Everything about the shape below is
+# about that: it is a function rather than an inline loop so 17-portparse-fuzz.sh can drive it
+# thousands of times a second, and it validates before it computes, in that order, always.
+#
+# THE WIRE FORMAT, one record per line, one token per record:
+#
+#     cs193v-portwatch 1      handshake, exactly once, first
+#     BEGIN 3                 opens a frame, declares how many records follow
+#     3000:lo                 port:addressclass
+#     5173:any
+#     END                     closes it -- the count is checked and the frame is APPLIED here
+#     WARN too-many-listeners 214     degraded but continuing
+#     ERR  cannot-create-tick-fifo    the watcher cannot continue
+#
+# One token per line is what lets this parse with NO word splitting anywhere -- no `set -f`, no
+# IFS juggling, no whitespace-collapse detector. A stray space simply fails the digit or class
+# test. The earlier single-line format needed all three.
+#
+# FRAMES ARE ATOMIC. Records accumulate in DYNPORTS_FRAME and nothing is handed back until a
+# well-formed END. Found in testing: without the `seen -lt n` guard below, a `BEGIN 1` followed by
+# two records handed the second one out before the count mismatch was noticed at END -- it still
+# failed loudly, but it had already published a port from a frame that turned out to be malformed.
+# It also makes EOF mid-frame free: a partial frame is simply never applied.
+#
+# WHY `case` FIRST, ALWAYS. Measured on bash 5.3: `$(( ))`, `(( ))`, `[[ -eq ]]`, `${v:x:y}` and
+# `${a[x]}` all EXECUTE a command substitution found in their operand. `[ -eq ]` rejected it, but
+# that is bash-5 behaviour and macOS ships 3.2, so nothing may depend on it. `case` evaluates
+# nothing. It is the only safe first move.
+DYNPORTS_FRAME=''
+DYNPORTS_FATAL=''
+DYNPORTS_WARN=''
+DYNPORTS_STATE=''
+DYNPORTS_N=0
+DYNPORTS_SEEN=0
+DYNPORTS_MAX=128
+DYNPORTS_PROTO='cs193v-portwatch 1'
+
+dynports_reset() {
+    DYNPORTS_STATE=handshake
+    DYNPORTS_FRAME=''; DYNPORTS_FATAL=''; DYNPORTS_WARN=''
+    DYNPORTS_N=0; DYNPORTS_SEEN=0
+}
+
+# Rendering a rejected value for a human. NOT a security boundary -- it runs AFTER a value has
+# already been refused and gates nothing. `printf %q` because it is a builtin (no fork), it
+# neutralises the ESC byte so a hostile value cannot repaint a terminal or a log, and it keeps
+# \r distinguishable from \t -- which `tr -c '[:print:]' '?'` does not, defeating the whole point.
+# `printf -v`, never $(quoted ...): command substitution forks even for a builtin, and measured
+# over 5000 calls that fork is the entire cost -- 3.61s versus 0.03s.
+quoted() { printf -v QUOTED '%q' "$1"; }
+
+dynports_fatal() {                    # dynports_fatal REASON [VALUE]
+    if [ "$#" -gt 1 ]; then
+        quoted "$2"; DYNPORTS_FATAL="$1: $QUOTED"
+    else
+        DYNPORTS_FATAL="$1"
+    fi
+    return 2
+}
+
+# A decimal port, validated without ever letting the value reach an arithmetic context first.
+# Each line earns its place, all three found by adversarial review:
+#   * the length bound comes BEFORE any arithmetic -- 99999999999999999999 passes a digit test
+#     and $(( )) wraps it silently to 7766279631452241919.
+#   * 10# forces base 10 -- `[ 03000 -ge 1024 ]` is true because test reads it as OCTAL 1536,
+#     while ssh would parse the string as decimal 3000. Validate one port, forward another.
+#   * the canonicality compare makes a non-canonical spelling fatal rather than quietly fixed.
+#
+# AND THE GUARDS ARE NOT BELT-AND-BRACES. A bash arithmetic error does not return a status you can
+# branch on -- it unwinds the ENTIRE function call stack to top level, skipping every caller's
+# remaining statements. Measured: with 10# removed, `08` made this function, its caller, and its
+# caller's caller all vanish mid-body. So reaching $(( )) with anything that can error is not "a
+# wrong answer", it is "the program silently stops doing what it was doing". Validate first.
+dynports_port() {                     # dynports_port STR -> sets DYNPORTS_PORT, or returns 2
+    case "$1" in ''|*[!0-9]*) dynports_fatal "non-decimal port" "$1"; return 2 ;; esac
+    [ "${#1}" -le 5 ] || { dynports_fatal "over-long port" "$1"; return 2; }
+    DYNPORTS_PORT=$(( 10#$1 ))
+    if [ "$DYNPORTS_PORT" -lt 1 ] || [ "$DYNPORTS_PORT" -gt 65535 ]; then
+        dynports_fatal "port out of range" "$1"; return 2
+    fi
+    [ "$DYNPORTS_PORT" = "$1" ] || { dynports_fatal "non-canonical port" "$1"; return 2; }
+    return 0
+}
+
+dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
+    local line="$1" cnt rec p c
+    [ -n "${DYNPORTS_STATE:-}" ] || dynports_reset
+
+    if [ "$DYNPORTS_STATE" = handshake ]; then
+        # A fixed-string compare, so there is no parsing at all. Forward compatibility lives in
+        # the version token: a format we do not speak makes the host refuse to start rather than
+        # misread a frame.
+        [ "$line" = "$DYNPORTS_PROTO" ] || { dynports_fatal "bad handshake" "$line"; return 2; }
+        DYNPORTS_STATE=outside
+        return 0
+    fi
+
+    case "$line" in
+        "BEGIN "*)
+            [ "$DYNPORTS_STATE" = outside ] || { dynports_fatal "BEGIN inside a frame"; return 2; }
+            [ "${#line}" -le 9 ] || { dynports_fatal "BEGIN line too long"; return 2; }
+            cnt="${line#BEGIN }"
+            case "$cnt" in ''|*[!0-9]*) dynports_fatal "non-decimal count" "$cnt"; return 2 ;; esac
+            [ "${#cnt}" -le 3 ] || { dynports_fatal "count too long"; return 2; }
+            DYNPORTS_N=$(( 10#$cnt ))
+            [ "$DYNPORTS_N" = "$cnt" ] || { dynports_fatal "non-canonical count" "$cnt"; return 2; }
+            [ "$DYNPORTS_N" -le "$DYNPORTS_MAX" ] || { dynports_fatal "count over $DYNPORTS_MAX"; return 2; }
+            DYNPORTS_STATE=inside; DYNPORTS_SEEN=0; DYNPORTS_FRAME=''
+            return 0 ;;
+        END)
+            [ "$DYNPORTS_STATE" = inside ] || { dynports_fatal "END outside a frame"; return 2; }
+            if [ "$DYNPORTS_SEEN" -ne "$DYNPORTS_N" ]; then
+                dynports_fatal "declared $DYNPORTS_N, saw $DYNPORTS_SEEN"; return 2
+            fi
+            DYNPORTS_STATE=outside
+            DYNPORTS_FRAME="${DYNPORTS_FRAME# }"
+            return 1 ;;
+        "WARN "*)
+            # Degraded but continuing -- currently only `too-many-listeners <total>`, sent
+            # alongside a truncated frame. Recorded and shown; deliberately NOT fatal, because a
+            # container with more listeners than we will report is the world being unusual, not
+            # our code being wrong, and it clears itself when the count drops.
+            [ "${#line}" -le 64 ] || { dynports_fatal "WARN line too long"; return 2; }
+            quoted "${line#WARN }"; DYNPORTS_WARN="$QUOTED"
+            return 0 ;;
+        "ERR "*)
+            [ "${#line}" -le 64 ] || { dynports_fatal "ERR line too long"; return 2; }
+            dynports_fatal "the watcher stopped" "${line#ERR }"; return 2 ;;
+    esac
+
+    # Anything else must be a record, and a record is only legal inside a frame.
+    [ "$DYNPORTS_STATE" = inside ] || { dynports_fatal "line outside a frame" "$line"; return 2; }
+    [ "$DYNPORTS_SEEN" -lt "$DYNPORTS_N" ] || { dynports_fatal "more records than declared"; return 2; }
+    [ "${#line}" -le 10 ] || { dynports_fatal "record too long"; return 2; }
+    case "$line" in *:*) ;; *) dynports_fatal "malformed record" "$line"; return 2 ;; esac
+    rec="$line"; p="${rec%%:*}"; c="${rec#*:}"
+    case "$c" in lo|any|v6lo|eth|loalt) ;; *) dynports_fatal "unknown class" "$c"; return 2 ;; esac
+    dynports_port "$p" || return 2
+    DYNPORTS_FRAME="$DYNPORTS_FRAME $DYNPORTS_PORT:$c"
+    DYNPORTS_SEEN=$(( DYNPORTS_SEEN + 1 ))
+    return 0
+}

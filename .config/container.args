@@ -120,17 +120,15 @@
 #
 # Two properties that came free, and one that did not:
 #
-#   * Ports are no longer frozen at container-create time. podman cannot add a mapping to a
-#     running container, but `ssh -O forward` can add one to a running TUNNEL -- so a port
-#     could be opened on demand with no recreate.
+#   * Ports are not frozen at container-create time. podman cannot add a mapping to a running
+#     container, but `ssh -O forward` can add one to a running TUNNEL -- which is what the
+#     launcher's supervisor does: it watches what the container is listening on and opens the
+#     matching host port as it appears. Nothing here declares a port, and nothing needs to.
 #   * The host side is still loopback-only, and now for a structural reason rather than a
 #     flag: the ssh client binds 127.0.0.1 itself. Nothing is exposed to dorm wifi.
-#   * NOT free: a host port that is already busy. `podman run` used to fail loudly (and
-#     take the whole container down with it); the launcher now probes each port first and
-#     reports the ones it could not take. See ensure_tunnel in the launcher.
-#
-# The port LIST itself lives in CS193V_PORTS below -- one declaration, used both to build the
-# forwards and to tell the container which ones they are, so the two cannot disagree.
+#   * NOT free: a host port that is already busy. `podman run` used to fail loudly (and take
+#     the whole container down with it); a forward that cannot bind now fails on its own,
+#     mid-session, and is reported per-port through /tmp/cs193v/ports and `cs193v doctor`.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
 # Six volumes holding logins and settings, and ONE holding a package cache. That last one is
@@ -181,46 +179,12 @@
 -v cs193v-playwright:/home/student/.cache/ms-playwright
 
 # ─── Environment ───────────────────────────────────────────────────────────────
-# THE port list, and the only one. The launcher parses this line to build its ssh -L
-# forwards, and passes the same value into the container so a student -- or the agent
-# answering their question -- can see which ports reach their browser.
-#
-# It used to have to stay in step with a parallel set of -p lines, and tests/10-static.sh
-# asserted that agreement, because a list that disagreed with the forwards gives confidently
-# wrong advice -- worse than no advice. Deriving the forwards from this line instead makes that
-# drift STRUCTURALLY IMPOSSIBLE, so the test was deleted rather than rewritten. The remaining
-# drift risk is the ranges quoted in the managed CLAUDE.md, which is still checked at edit time.
-#
-# All >= 1024 (rootless podman refused privileged host ports, and an unprivileged ssh client
-# cannot bind them either) and avoiding 5000 and 7000, which macOS AirPlay Receiver occupies.
-#
-# Taught as "the 173 family": 4173 preview, 5173 vite, 6173 spare.
-#   3000-3009  next, express, bare node, serve, docusaurus
-#   4173-4176  vite preview
-#   5173-5179  vite dev -- the range vite's auto-increment lands in
-#   6173-6182  SPARE / assign-on-demand
-#   8000-8009  python http.server, django, uvicorn
-#   8080-8084  webpack-dev-server, http-server, misc
-#
-# Still hashed into cs193v.confighash, so changing it still prompts a recreate. It NEED not
-# be -- forwards are negotiated per session now -- but this value reaches the container
-# through -e at create time, so decoupling them would leave the container naming a set that is
-# no longer forwarded. A deliberate non-goal, not an oversight.
-#
-# 1455 IS NOT A DEV-SERVER PORT, and it is in this list anyway. `codex login` runs its OAuth
-# callback server on 1455 INSIDE the container and the student's own browser connects to it --
-# the same direction this tunnel already carries for every other port, so it needs nothing new:
-# the launcher builds its ssh -L flags from this line, and adding the port here is the whole
-# change. Without it `codex login` hangs, having printed a URL whose callback goes nowhere.
-#
-# It belongs HERE rather than in a second list beside it, and that was decided rather than
-# defaulted to. A launcher-side constant would keep 1455 out of the value the container is told,
-# but this value has never meant "ports for your servers": it is the list of ports that reach the
-# student's browser, and 1455 does reach it. A second source would also give up the property this
-# section rests on -- one declaration, so what is forwarded and what the container is told cannot
-# disagree -- and every port count in the suite would have to know which of the two it meant.
-# What it costs instead is one line in the shared agent notes telling an agent not to bind it.
--e CS193V_PORTS=1455,3000-3009,4173-4176,5173-5179,6173-6182,8000-8009,8080-8084
+# NOTHING IS DECLARED HERE, and the absence is the design. Which ports reach the student's
+# browser is decided at runtime by the launcher's supervisor from what is actually listening
+# inside the container, so there is no list for this file to hold and no value to hand in
+# through -e. A port opened by a dev server, an OAuth callback, or anything else becomes
+# reachable within about a second of the bind, and `cs193v-portwatch --show` inside the container
+# says which ones did and why any did not.
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Deliberately ABSENT — each of these was considered and rejected

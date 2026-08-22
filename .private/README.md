@@ -200,7 +200,8 @@ lab section does.
 
 ### `shortlink`, and the one failure it can produce that looks like nothing
 
-`files/shortlink` binds the highest free port in `$CS193V_PORTS`, serves a 302 to the real URL, and
+`files/shortlink` asks the kernel for a free port, waits for the tunnel to confirm it carried that
+exact port, serves a 302 to the real URL, and
 prints `http://localhost:PORT/magic-link` — or `/magic-token-link` when `setup-git` asks. Both
 that and the `$BROWSER` stub go through it.
 Two things about it are worth knowing before a student's report makes no sense.
@@ -499,40 +500,31 @@ partial suffixing would be worse than none, since `--rebuild --logout` would sti
 instances. `MOUNT_DST`, the workspace path and the `cs193v.dir` label are deliberately not
 suffixed: those are already per-directory.
 
-**Host ports are not namespaced by it, but you can move them.** Two instances still compete
-for the same 46 host ports, because the ports themselves are a fixed list rather than
-something derived from the instance name. What changed with the tunnel is that this is now
-survivable rather than fatal: the losing instance no longer fails to *start*, it starts
-normally and reports which ports it could not forward.
+**Host ports are not namespaced by it, and no longer need to be.** Two instances used to compete
+for the same 46 host ports whether or not anything was listening on them — overlap was total by
+construction, and the documented workaround was to give each checkout its own band in
+`local.args`. There is no band and no list: a host port is taken only when something inside that
+instance's container is actually serving on it, so two instances collide only if they are both
+running the same software on its default port at the same moment. The loser gets
+`refused <port> busy`, reported per-port by `cs193v doctor` and by `cs193v-portwatch --show`.
 
-To get out of the way entirely, override `CS193V_PORTS` in `.config/local.args` (git-ignored,
-and read **after** `container.args`, with the last occurrence winning — the same rule podman
-applies to a repeated `-e`):
+**The test suite gets the same property for free**, and it is worth being precise about why,
+because this was the sharper half of the problem. `free_unforwarded_ports()` needed a port that
+was "not ours", and under a fixed list what *another* instance forwarded was uncomputable — it
+depended on a config file this checkout could not see, so a port a colleague was carrying
+answered from the host and came back 200 with nothing wrong here. Now a port another instance is
+using is a port something is **listening** on, so one `ss` check covers it exactly. Test ports are
+picked from what is free at that moment (`dyn_free_port`), and two suites running side by side
+step over each other with nothing told to either.
 
-```
--e CS193V_PORTS=13000-13009,14173-14176,15173-15179,16173-16182,18000-18009,18080-18084
-```
-
-The launcher derives its `ssh -L` forwards from that value, so one line moves both the
-forwards and the list the container is told about. This only works because there are no `-p`
-lines left: `local.args` is *appended*, so a second set of `-p` flags used to add mappings
-rather than replace them, and moving ports this way was impossible.
-
-**The test suite follows the override too** (issue #46). It reads the expanded list out of
-`cs193v --dev-tunnel`, which prints `tunnel_ports()`' own answer plus the tunnel's control
-socket, pidfile and log paths — so no test names a port, and the suite exercises whatever this
-instance really forwards. Recreate the container after moving them (`./cs193v --rebuild`): the
-container's `CS193V_PORTS` is set with `-e` at create time and `podman start` reuses the stored
-value, so an edit with no recreate leaves the container naming one set while the tunnel forwards
-another. `60-container.sh` asserts those two agree and says which is which if they do not.
-
-That verb is also how the suite tells *its own* forwards from a colleague's. `count_forwards()`
-used to count any listener on the default ports, so with a second checkout holding all 46 the
-container tier greenlit itself on somebody else's ssh process and `70-sighup.sh` recorded
-"46 of 46" for a run that held none — the same shape as #34. It now reads the pidfile, checks
-that our control socket really is on that pid's command line (`tunnel_kill_pid`'s own identity
-test, for the same reason: pids are reused and the file outlives the process), and counts only
-the sockets that pid holds.
+`cs193v --dev-tunnel` is still how the suite tells *its own* tunnel from a colleague's — it prints
+the control socket, pidfile, log and supervisor paths, all keyed by a hash of the course directory
+and the instance. `count_forwards()` used to count any listener on the default ports, so with a
+second checkout holding all 46 the container tier greenlit itself on somebody else's ssh process
+and `70-sighup.sh` recorded "46 of 46" for a run that held none — the same shape as #34. It reads
+the pidfile, checks that our control socket really is on that pid's command line
+(`tunnel_kill_pid`'s own identity test, for the same reason: pids are reused and the file outlives
+the process), and counts only the sockets that pid holds.
 
 **And its own containers from a colleague's** (issue #74). The live tier counts containers to
 decide whether the launcher was idempotent and whether anything leaked, and it used to count
@@ -682,13 +674,14 @@ measurements in `ERRORS.md` §D):
 - does host-side `inotify` fire? — **Yes on Linux**, as predicted. Expect not on macOS/WSL.
 - is a loopback-bound server reachable from the host? — **Yes now, and that is the point.**
   It used to be No, which was the course's central ports lesson and the reason for
-  `--host 0.0.0.0`. The launcher forwards the course ports into the container's own loopback
-  over ssh, so all 46 reach a `127.0.0.1`-bound server, a `0.0.0.0`-bound one still works,
-  and ports outside the set are still refused. `::1`-only is the one address left out.
+  `--host 0.0.0.0`. The launcher forwards into the container's own loopback over ssh, so a
+  `127.0.0.1`-bound server is reached and a `0.0.0.0`-bound one still works. A port nothing is
+  listening on inside is still refused. `::1`-only, other `127.x` addresses and eth0-only are
+  the addresses left out.
 - how much does the tunnel cost? — **latency, nothing** (12.1 ms per connection vs 12.6 ms
   for a published port), **throughput, about 8×** (322 MB/s vs pasta's 2.53 GB/s, so a 5 MB
-  bundle costs ~15 ms). One ssh process carries all 46 forwards, which is why a new
-  connection costs a channel rather than a 158 ms `podman exec`.
+  bundle costs ~15 ms). One ssh process carries every forward, however many there are, which is
+  why a new connection costs a channel rather than a 158 ms `podman exec`.
 - does `podman start` really ignore new flags? — **Yes**, so the `cs193v.confighash`
   machinery is load-bearing rather than defensive.
 - how much of a launch was the launcher waiting for itself? — **about a third of it**, and #38
@@ -799,12 +792,24 @@ enters a modal copy mode with a dead keyboard and no key that exits, which is th
 failure available to a beginner. `.private/files/tmux/tmux.conf` documents each trap where
 it sits.
 
-**No longer on this list: a VS Code-style port relay.** It was rejected, and that decision
-was reversed deliberately — see the ports chapter of `CONTAINER-DESIGN.md`. Two of the three
-original objections were addressed rather than overruled: the container is never asked which
-ports to open (the forward list is fixed and comes from `CS193V_PORTS`), and the relay is one
-ssh process rather than a supervised fleet. The third objection — that it hides the
-bind-address distinction — was accepted as true and judged worth the cost.
+**No longer on this list: a VS Code-style port relay.** It was rejected, and that decision was
+reversed deliberately — see the ports chapter of `CONTAINER-DESIGN.md`. Two of the three original
+objections were addressed rather than overruled, and the first of them needs restating now that
+the forward list is gone, because the sentence that used to justify it is void.
+
+The objection was that the container would be telling your computer what to open. It still does
+not. The container **reports** what it is listening on; the host classifies every entry against
+facts only it has — its own unprivileged-port floor, whether the port is already taken — and
+decides alone. The container can never name a host port, an address, a direction or a far end;
+the only container-derived value that reaches an ssh argument is the port number, and it lands in
+a fixed `-L 127.0.0.1:%d:127.0.0.1:%d` template after being validated as a canonical decimal in
+1–65535. What changed is that the container's listening set became an *input* to that decision
+instead of the decision being frozen at create time.
+
+The second objection was answered the same way it always was: the relay is one ssh process rather
+than a supervised fleet. The third — that it hides the bind-address distinction — was accepted as
+true and judged worth the cost, and it is less true now than it was: `cs193v-portwatch --show`
+names the bind address as the reason a port is unreachable.
 
 **No longer on this list: stopping the container when the terminal closes.** The original design
 deliberately did the opposite, and issue #41 reversed it. Four alternatives were considered and
@@ -866,6 +871,25 @@ nothing left to push they would be an unexplained environment variable silently 
 a student's server binds to — the kind of thing that survives for years and then puzzles
 whoever finds it. `50-image.sh` now asserts their absence, so re-adding one breaks a test.
 
+### A dead transport is invisible for ~45 s — known, bounded, and not ours to fix here
+
+A master whose transport has died still answers `ssh -O forward` **successfully**, because `-L`
+binds the host port locally and never contacts the container. So for a window after the transport
+dies, ports report as forwarded and silently are not, until `ServerAliveInterval=15
+ServerAliveCountMax=3` fires and the master exits, taking `$TUNNEL_CTL` with it. Bounded at about
+45 seconds, self-healing, and detectable from outside only by noticing the tunnel has gone.
+
+This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
+carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
+one acknowledged exception to "a failure must be loud", and because both obvious fixes are worse:
+
+- **Tightening ServerAlive** trades a silent failure for a noisy false positive on a loaded
+  laptop, which is the more common condition of the two.
+- **Cross-checking the watcher's stream against the master's health** couples two channels that
+  are deliberately independent — a merely-slow watcher would then read as a dead transport.
+
+`cs193v --reset-tunnel` fixes it immediately if a student happens to ask before the timeout does.
+
 ### Python's library set — deferred, not refused (issue #44)
 
 The image installs no Python library. On demand costs **11 s and 56 MB** for pandas, matplotlib,
@@ -895,8 +919,8 @@ a nicety. The menu, measured in the student's user site so it is re-decidable wi
 | + ipython + jupyterlab/notebook | 652 MB | 38 s |
 
 scipy is +139 MB of that third row on its own (it bundles its own OpenBLAS, as numpy does), seaborn
-is +2 MB once matplotlib is there, and Jupyter's default port 8888 is **not** in `CS193V_PORTS` — so
-notebooks need `jupyter lab --port 8000` or a change to the port list.
+is +2 MB once matplotlib is there. Jupyter's default port 8888 needs nothing done to it: any port
+a notebook binds is forwarded as soon as it is listening.
 
 **Where the layer goes if it comes back:** between the Vercel layer and the Claude Code layer,
 installed as `su student -s /bin/sh -c "pip3 install --user --no-cache-dir ..."` with `==` pins. That

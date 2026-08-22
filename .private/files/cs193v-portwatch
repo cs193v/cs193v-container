@@ -1,0 +1,455 @@
+#!/bin/bash
+#
+# cs193v-portwatch — tells the host which ports are listening in here.
+#
+# Runs INSIDE the container, as the student, started by the launcher as one long-lived
+# `podman exec`. Its stdout is the host supervisor's input; see the frame parser in
+# /etc/cs193v/ui.sh (dynports_line) for the other end of the protocol.
+#
+# WHAT THIS IS FOR. The host cannot see what is listening in here: /proc/net/tcp is per network
+# namespace and the container has its own. There is also no kernel notification for a socket
+# entering LISTEN -- inotify does not cover sockets, sock_diag netlink is dump-only, and the eBPF
+# hook that would work needs capabilities this container deliberately does not have. So: poll in
+# here, ship the answer out, and let the host decide what to do about it.
+#
+# IT REPORTS, IT DOES NOT DECIDE. Everything below emits observations -- a port and the class of
+# address it is bound to. Whether any of them get forwarded is the host's business, and the host
+# has facts this side cannot know (which host ports are free, and how low a port an unprivileged
+# ssh client may bind). That split is the whole security story: what leaves here is a list of
+# integers and a word from a five-item vocabulary.
+#
+# BASH 3.2 PARSEABLE, even though the image ships bash 5. 18-portwatch-fuzz.sh sources this file
+# to drive pw_scan_text directly, and the TAs run the unit tier on Macs. So: no `declare -A`, no
+# `mapfile`, no `${var,,}`.
+
+set -u
+
+PW_STATE_DIR=/tmp/cs193v
+PW_STATE="$PW_STATE_DIR/ports"
+PW_PROTO='cs193v-portwatch 1'
+PW_MAX=128
+PW_INTERVAL_DEFAULT=1
+
+# ─── the address classifier ────────────────────────────────────────────────────
+# /proc/net/tcp gives the local address as little-endian hex, so 127.0.0.1 is 0100007F: the LAST
+# byte pair is the FIRST octet. That is what makes the 127.x test a suffix match.
+#
+# FIVE CLASSES, NOT FOUR, and the fifth was found by reading real kernel output rather than by
+# reasoning. This machine had systemd-resolved listening on 127.0.0.53 and 127.0.0.54. A
+# four-class table sends those to `eth`, and the host would then tell a student their server was
+# "bound to the container's network interface, not its loopback" -- which is FALSE; 127.0.0.53 is
+# loopback. It is simply not the address the tunnel connects to, which is literally 127.0.0.1.
+# The outcome was right by accident and the diagnosis was a lie, which this project treats as the
+# worse of the two.
+pw_v4class() {                        # 8 hex chars, little-endian -> PW_C
+    case "$1" in
+        0100007F|0100007f) PW_C=lo ;;
+        00000000)          PW_C=any ;;
+        *7F|*7f)           PW_C=loalt ;;
+        *)                 PW_C=eth ;;
+    esac
+}
+
+# A v6 address is four 32-bit words, each little-endian, printed as 32 hex characters.
+#
+# THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
+# checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
+# `0000000000000000FFFF00000100007F`, so the last eight characters are the IPv4 address in the
+# same little-endian form /proc/net/tcp uses and handing them to pw_v4class is right. Verified end
+# to end -- classified `lo`, forwarded, HTTP 200 from the host. 60-container.sh keeps it that way.
+#
+# THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
+# checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
+# `0000000000000000FFFF00000100007F`, so the last eight characters are the IPv4 address in the
+# same little-endian form /proc/net/tcp uses and handing them to pw_v4class is right. Verified end
+# to end -- classified `lo`, forwarded, HTTP 200 from the host. 60-container.sh keeps it that way.
+pw_v6class() {                        # 32 hex chars -> PW_C
+    case "$1" in
+        00000000000000000000000000000000)                   PW_C=any ;;
+        00000000000000000000000001000000)                   PW_C=v6lo ;;
+        0000000000000000FFFF0000*|0000000000000000ffff0000*) pw_v4class "${1:24:8}" ;;
+        *)                                                  PW_C=eth ;;
+    esac
+}
+
+# Reachability order, used to merge a port that appears more than once -- dual-stack,
+# SO_REUSEPORT, or one process on lo and another on eth0. The host's only question is "can the
+# tunnel reach it", so the most reachable binding wins. Observed live: cups on 631 as both
+# 127.0.0.1 and ::1, which must report as `lo`.
+pw_rank() { case "$1" in any) PW_R=4 ;; lo) PW_R=3 ;; loalt) PW_R=2 ;; eth) PW_R=1 ;; *) PW_R=0 ;; esac; }
+
+# ─── the scan ──────────────────────────────────────────────────────────────────
+# TAKES TEXT, does not read /proc itself, so the fuzzer can drive it with synthetic kernel output
+# from a host that has no container.
+#
+# SLURPED BY THE CALLER, not streamed. Measured, 1000 ticks: `ss -Hltn` 9.6ms, `while read` on the
+# procfs file 2.8ms, `raw=$(</proc/net/tcp)` 0.86ms. `ss` is 11x and is out of the hot loop -- it
+# stays installed because agent-notes.md teaches it for diagnosis. `while read` is 3x because bash
+# reads SPECIAL files a byte at a time to avoid over-consuming; the sys-time column shows it.
+PW_SET=''
+PW_RAW_LAST=''
+PW_SORTED_LAST=''
+pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
+    local v4="$1" v6="$2" which raw line addr hexport port cur curr newr best
+
+    best=' '
+    for which in 4 6; do
+        if [ "$which" = 4 ]; then raw="$v4"; else raw="$v6"; fi
+        while [ -n "$raw" ]; do
+            line="${raw%%$'\n'*}"
+            if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
+            # shellcheck disable=SC2086
+            set -- $line
+            [ "$#" -ge 4 ] || continue
+            [ "${4:-}" = 0A ] || continue          # 0A = TCP_LISTEN, and nothing else counts:
+                                                   # an ESTABLISHED socket's local port is a
+                                                   # connection, not a server.
+            case "$2" in *:*) ;; *) continue ;; esac
+            addr="${2%%:*}"; hexport="${2#*:}"
+            case "$hexport" in ''|*[!0-9A-Fa-f]*) continue ;; esac
+            [ "${#hexport}" -eq 4 ] || continue
+            port=$(( 16#$hexport ))
+            [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
+            case "${#addr}" in
+                8)  case "$addr" in *[!0-9A-Fa-f]*) continue ;; esac; pw_v4class "$addr" ;;
+                32) case "$addr" in *[!0-9A-Fa-f]*) continue ;; esac; pw_v6class "$addr" ;;
+                *)  continue ;;
+            esac
+            case "$best" in
+                *" $port:"*)
+                    cur="${best#* $port:}"; cur="${cur%% *}"
+                    pw_rank "$cur"; curr=$PW_R
+                    pw_rank "$PW_C"; newr=$PW_R
+                    if [ "$newr" -gt "$curr" ]; then
+                        best="${best/ $port:$cur / }"
+                        best="$best$port:$PW_C "
+                    fi ;;
+                *)  best="$best$port:$PW_C " ;;
+            esac
+        done
+    done
+
+    best="${best# }"; best="${best% }"
+
+    # SORTED, BUT ONLY WHEN THE SET CHANGES. Ascending numeric order makes a frame byte-stable
+    # tick to tick, so "did anything change" is a string compare and a log diffs cleanly --
+    # /proc's own order is by hash bucket and relying on it would be accidental correctness. The
+    # sort is a fork, though, and the tick budget is ~2ms, so it runs only when the merged set
+    # differs from last tick's. A steady container pays for it once.
+    if [ "$best" = "$PW_RAW_LAST" ]; then
+        PW_SET="$PW_SORTED_LAST"
+        return 0
+    fi
+    PW_RAW_LAST="$best"
+    if [ -z "$best" ]; then
+        PW_SORTED_LAST=''
+    else
+        PW_SORTED_LAST="$(printf '%s\n' $best | sort -t: -k1,1n | tr '\n' ' ')"
+        PW_SORTED_LAST="${PW_SORTED_LAST% }"
+    fi
+    PW_SET="$PW_SORTED_LAST"
+    return 0
+}
+
+# ─── the writeback: argv in, state file out ────────────────────────────────────
+# The host runs `cs193v-portwatch --publish state=... up=... refused=...` whenever what it decided
+# changes, and this side writes the file. THE HOST DECIDES, THIS SIDE RECORDS: nothing here asks
+# for a port, and the argv carries only outcomes the host has already committed to.
+#
+# STATE IS PASSED AS ARGUMENTS, never on stdin, and the values are validated even though the host
+# built them. Not because the host is untrusted, but because a bug there would otherwise write
+# nonsense into a file that three readers believe -- --show, doctor over podman exec, and
+# shortlink, which consults it before printing a URL a student is about to click.
+PW_CLASSES='lo any v6lo eth loalt'
+PW_REASONS='busy v6lo loalt eth below-floor capped'
+PW_STATES='healthy master-unresponsive no-frames broken'
+PW_TAB="$(printf '\t')"
+
+PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
+PW_PAIRS=''
+
+# A comma-separated list of port:word, checked against a vocabulary. The port rules are the same
+# ones the host's own gate applies, and for the same reason: digits first, length before any
+# arithmetic, 10# to force base ten, then a canonicality compare so a non-canonical spelling is
+# refused rather than quietly normalised.
+pw_pairs() {                          # pw_pairs VALUE VOCAB -> PW_PAIRS, or 1 with PWP_ERR
+    local v="$1" vocab="$2" item port word out=''
+    PW_PAIRS=''
+    [ -n "$v" ] || return 0
+    while [ -n "$v" ]; do
+        item="${v%%,*}"
+        if [ "$item" = "$v" ]; then v=''; else v="${v#*,}"; fi
+        case "$item" in *:*) ;; *) PWP_ERR="no colon in '$item'"; return 1 ;; esac
+        port="${item%%:*}"; word="${item#*:}"
+        case " $vocab " in *" $word "*) ;; *) PWP_ERR="unknown value '$word'"; return 1 ;; esac
+        case "$port" in ''|*[!0-9]*) PWP_ERR="non-decimal port '$port'"; return 1 ;; esac
+        [ "${#port}" -le 5 ] || { PWP_ERR="over-long port '$port'"; return 1; }
+        [ "$(( 10#$port ))" = "$port" ] || { PWP_ERR="non-canonical port '$port'"; return 1; }
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { PWP_ERR="port out of range '$port'"; return 1; }
+        out="$out $port:$word"
+    done
+    PW_PAIRS="${out# }"
+    return 0
+}
+
+# WHAT KEEPS THE FILE WELL-FORMED IS THE VOCABULARIES, not an escaping pass. Every value below is
+# matched against a closed set or a digits-only pattern, so a tab or newline cannot survive to
+# reach the tab-separated, line-oriented file -- it fails the vocabulary first. This was measured:
+# a dedicated control-character check sat here and mutation testing could not make it fire, because
+# the vocabulary always got there first. It was removed rather than kept as decoration.
+#
+# THE COROLLARY IS THE THING TO REMEMBER: a future key whose value is free text would have no such
+# protection, and would need its own escaping before it is written.
+pw_publish_parse() {                  # key=value ... -> PWP_*, or 2 with PWP_ERR
+    local a k v seen_state='' seen_floor='' seen_up='' seen_ref=''
+    PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
+    for a in "$@"; do
+        case "$a" in *=*) ;; *) PWP_ERR="not key=value: '$a'"; return 2 ;; esac
+        k="${a%%=*}"; v="${a#*=}"
+        case "$k" in
+            state)
+                [ -z "$seen_state" ] || { PWP_ERR="duplicate state"; return 2; }; seen_state=1
+                case " $PW_STATES " in *" $v "*) ;; *) PWP_ERR="unknown state '$v'"; return 2 ;; esac
+                PWP_STATE="$v" ;;
+            floor)
+                [ -z "$seen_floor" ] || { PWP_ERR="duplicate floor"; return 2; }; seen_floor=1
+                case "$v" in ''|*[!0-9]*) PWP_ERR="non-decimal floor '$v'"; return 2 ;; esac
+                [ "${#v}" -le 5 ] || { PWP_ERR="over-long floor"; return 2; }
+                [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || { PWP_ERR="floor out of range '$v'"; return 2; }
+                PWP_FLOOR="$v" ;;
+            up)
+                [ -z "$seen_up" ] || { PWP_ERR="duplicate up"; return 2; }; seen_up=1
+                pw_pairs "$v" "$PW_CLASSES" || return 2
+                PWP_UP="$PW_PAIRS" ;;
+            refused)
+                [ -z "$seen_ref" ] || { PWP_ERR="duplicate refused"; return 2; }; seen_ref=1
+                pw_pairs "$v" "$PW_REASONS" || return 2
+                PWP_REFUSED="$PW_PAIRS" ;;
+            *)  PWP_ERR="unknown key '$k'"; return 2 ;;
+        esac
+    done
+    [ -n "$PWP_STATE" ] || { PWP_ERR="no state given"; return 2; }
+    return 0
+}
+
+# Tab-separated, one record per line, repeated keys rather than comma-joined lists -- the same
+# idiom verb_dev_tunnel uses, so the suite parses it with the awk one-liner it already has and no
+# second format enters the project.
+pw_state_render() {
+    local e
+    printf 'state\t%s\n' "$PWP_STATE"
+    [ -n "$PWP_FLOOR" ] && printf 'floor\t%s\n' "$PWP_FLOOR"
+    for e in $PWP_UP;      do printf 'up\t%s\t%s\n'      "${e%%:*}" "${e#*:}"; done
+    for e in $PWP_REFUSED; do printf 'refused\t%s\t%s\n' "${e%%:*}" "${e#*:}"; done
+    return 0
+}
+
+PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
+# THE READER REFUSES A MALFORMED FILE RATHER THAN HALF-READING IT. This file is written by us, so
+# a bad one means our own writer is broken -- and the readers act on it: shortlink decides whether
+# to print a short URL, doctor tells a student what is reachable. Half of a broken file is worse
+# than none of it.
+pw_state_parse() {                    # pw_state_parse TEXT -> PWS_*, or 2 with PWS_ERR
+    local raw="$1" line k a b
+    PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
+    [ -n "$raw" ] || { PWS_ERR="empty state file"; return 2; }
+    while [ -n "$raw" ]; do
+        line="${raw%%$'\n'*}"
+        if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
+        [ -n "$line" ] || continue
+        k=''; a=''; b=''
+        IFS="$PW_TAB" read -r k a b <<<"$line"
+        case "$k" in
+            state)
+                case " $PW_STATES " in *" $a "*) ;; *) PWS_ERR="unknown state '$a'"; return 2 ;; esac
+                PWS_STATE="$a" ;;
+            floor)
+                case "$a" in ''|*[!0-9]*) PWS_ERR="non-decimal floor"; return 2 ;; esac
+                PWS_FLOOR="$a" ;;
+            up|refused)
+                [ -n "$a" ] && [ -n "$b" ] || { PWS_ERR="$k needs a port and a word"; return 2; }
+                if [ "$k" = up ]; then pw_pairs "$a:$b" "$PW_CLASSES"; else pw_pairs "$a:$b" "$PW_REASONS"; fi \
+                    || { PWS_ERR="${PWP_ERR:-bad $k record}"; return 2; }
+                if [ "$k" = up ]; then PWS_UP="$PWS_UP $PW_PAIRS"; else PWS_REFUSED="$PWS_REFUSED $PW_PAIRS"; fi ;;
+            *)  PWS_ERR="unknown key '$k'"; return 2 ;;
+        esac
+    done
+    [ -n "$PWS_STATE" ] || { PWS_ERR="no state line"; return 2; }
+    PWS_UP="${PWS_UP# }"; PWS_REFUSED="${PWS_REFUSED# }"
+    return 0
+}
+
+# ─── modes ─────────────────────────────────────────────────────────────────────
+pw_scan_now() { pw_scan_text "$(</proc/net/tcp)" "$(</proc/net/tcp6)"; }
+
+pw_once() { pw_scan_now; printf '%s\n' "$PW_SET"; }
+
+# --watch: the long-lived loop the supervisor reads. One frame per tick, always the full set --
+# no deltas and no separate heartbeat, because the report IS the heartbeat. That is what lets the
+# supervisor drop all its state when the ssh master is replaced and simply rebuild from the next
+# frame; under on-change reporting it would wait for a container-side change that might never come
+# and silently lose a server that was already running.
+#
+# EVERY WRITE IS `|| exit 0`. When the host end goes away the write fails, or SIGPIPE ends us --
+# either is a clean exit, and because there is a write every tick it happens within one interval.
+# That is what makes killing the supervisor enough to take this down too.
+pw_emit() { printf '%s\n' "$1" || exit 0; }
+
+# THE TICK TIMER IS A FIFO, NOT `sleep`. Measured: a sleep fork is 4.9ms against 0.2ms for a
+# read that times out -- five times the entire rest of the tick, which is ~1.9ms. At 1 Hz for ten
+# weeks on a laptop that is worth three lines. Holding BOTH ends open means no EOF, so the read
+# blocks the whole interval instead of returning immediately.
+#
+# AND THERE IS NO `sleep` FALLBACK. An earlier draft carried one, copying run_timeout's mkfifo
+# degradation in cs193v-ui.sh -- but that guards the HOST's TMPDIR, which on WSL can be a DrvFs
+# mount with no fifo support. This fifo is in the container's /tmp, an overlayfs layer that does
+# mknod like any Linux filesystem. The constraint does not transfer, and the fallback would have
+# added the one failure shape this loop otherwise cannot have: `sleep` inherits stdout, so a
+# watcher killed mid-sleep leaves a child holding the pipe open -- silence at the supervisor
+# rather than EOF. Failing loudly here is better than degrading into that.
+pw_watch() {
+    local iv="${1:-$PW_INTERVAL_DEFAULT}" fifo="$PW_STATE_DIR/tick" n e
+    case "$iv" in ''|*[!0-9]*) iv=$PW_INTERVAL_DEFAULT ;; esac
+    [ "$iv" -ge 1 ] || iv=$PW_INTERVAL_DEFAULT
+
+    mkdir -p "$PW_STATE_DIR" 2>/dev/null
+    # TRUNCATED BEFORE THE HANDSHAKE, so a container that was stopped and started again cannot
+    # serve the previous session's answer to shortlink or --show.
+    : > "$PW_STATE" 2>/dev/null
+
+    rm -f "$fifo" 2>/dev/null
+    if ! mkfifo "$fifo" 2>/dev/null; then
+        pw_emit "ERR cannot-create-tick-fifo"
+        return 1
+    fi
+    exec 3<>"$fifo" || { pw_emit "ERR cannot-open-tick-fifo"; return 1; }
+    rm -f "$fifo" 2>/dev/null
+
+    pw_emit "$PW_PROTO"
+    while :; do
+        pw_scan_now
+        n=0
+        for _ in $PW_SET; do n=$(( n + 1 )); done
+        # OVER THE CAP: truncate and warn, do NOT stop. A container with more listeners than we
+        # will report is the world being unusual, not our code being wrong, so by the failure
+        # classes this is a WARN and not an ERR -- and it clears itself when the count drops.
+        # Sorted already, so the 128 we keep are the lowest and the choice is deterministic:
+        # an unstable pick would make the host cancel and re-forward a set that had not changed.
+        if [ "$n" -gt "$PW_MAX" ]; then
+            pw_emit "WARN too-many-listeners $n"
+            PW_SET="$(printf '%s\n' $PW_SET | head -n "$PW_MAX" | tr '\n' ' ')"
+            PW_SET="${PW_SET% }"
+            n=$PW_MAX
+        fi
+        pw_emit "BEGIN $n"
+        for e in $PW_SET; do pw_emit "$e"; done
+        pw_emit "END"
+        read -t "$iv" -u 3 _ 2>/dev/null || true
+    done
+}
+
+# --publish: the host telling us what it decided. Arguments, never stdin, and never a request --
+# the container does not ask for ports, it is told what happened to the ones it reported.
+pw_publish() {
+    if ! pw_publish_parse "$@"; then
+        printf 'cs193v-portwatch: %s\n' "${PWP_ERR:-bad arguments}" >&2
+        return 2
+    fi
+    mkdir -p "$PW_STATE_DIR" 2>/dev/null
+    # Written .tmp then moved, so a reader never sees half a file. shortlink polls this while
+    # deciding whether the URL it is about to print is reachable.
+    pw_state_render > "$PW_STATE.tmp" 2>/dev/null || return 1
+    mv -f "$PW_STATE.tmp" "$PW_STATE" 2>/dev/null || return 1
+    return 0
+}
+
+# --show: for a student, or for an agent answering "why can't my browser reach this?". This is
+# the thing that used to be impossible: before the writeback, nothing inside the container could
+# see whether a port was forwarded on the host at all.
+pw_show() {
+    local text e port why
+    text="$(cat "$PW_STATE" 2>/dev/null)"
+    if [ -z "$text" ]; then
+        printf 'No forwarding information yet.\n'
+        printf 'The launcher publishes it a moment after your container starts.\n'
+        return 0
+    fi
+    if ! pw_state_parse "$text"; then
+        printf 'The forwarding information is unreadable (%s).\n' "${PWS_ERR:-malformed}"
+        printf 'Tell course staff; run ./cs193v doctor on your own computer.\n'
+        return 1
+    fi
+    case "$PWS_STATE" in
+        healthy) : ;;
+        *) printf 'Port forwarding is not healthy right now: %s\n\n' "$PWS_STATE" ;;
+    esac
+    if [ -n "$PWS_UP" ]; then
+        printf 'Reachable from your browser at http://localhost:PORT\n'
+        for e in $PWS_UP; do printf '  %s\n' "${e%%:*}"; done
+    else
+        printf 'Nothing of yours is reachable from your browser right now.\n'
+    fi
+    if [ -n "$PWS_REFUSED" ]; then
+        printf '\nNot reachable, and why:\n'
+        for e in $PWS_REFUSED; do
+            port="${e%%:*}"; why="${e#*:}"
+            case "$why" in
+                busy)        printf '  %-6s another program on your own computer is using that port\n' "$port" ;;
+                v6lo)        printf '  %-6s bound to ::1 only; bind 127.0.0.1 or 0.0.0.0 instead\n' "$port" ;;
+                loalt)       printf '  %-6s bound to another 127.x address; bind 127.0.0.1 instead\n' "$port" ;;
+                eth)         printf '  %-6s bound to this container network only, not its loopback\n' "$port" ;;
+                below-floor) printf '  %-6s below the lowest port your computer will open\n' "$port" ;;
+                capped)      printf '  %-6s too many ports open at once; close one\n' "$port" ;;
+                *)           printf '  %-6s %s\n' "$port" "$why" ;;
+            esac
+        done
+    fi
+    return 0
+}
+
+# --fault: deliberately malformed output, so the supervisor's fatal path can be exercised. The
+# never-fail-silently rule is only worth anything if something proves the loud failure happens,
+# and nothing else can make a correct watcher emit a bad frame.
+pw_fault() {
+    case "${1:-}" in
+        handshake)    pw_emit "cs193v-portwatch 99" ;;
+        nested-begin) pw_emit "$PW_PROTO"; pw_emit "BEGIN 1"; pw_emit "BEGIN 1" ;;
+        bad-count)    pw_emit "$PW_PROTO"; pw_emit "BEGIN 3"; pw_emit "3000:lo"; pw_emit "END" ;;
+        bad-record)   pw_emit "$PW_PROTO"; pw_emit "BEGIN 1"; pw_emit "3000:wat"; pw_emit "END" ;;
+        octal)        pw_emit "$PW_PROTO"; pw_emit "BEGIN 1"; pw_emit "03000:lo"; pw_emit "END" ;;
+        stray)        pw_emit "$PW_PROTO"; pw_emit "3000:lo" ;;
+        err)          pw_emit "$PW_PROTO"; pw_emit "ERR deliberate-fault" ;;
+        *) printf 'cs193v-portwatch: unknown fault %s\n' "${1:-}" >&2; return 2 ;;
+    esac
+    return 0
+}
+
+pw_usage() {
+    cat <<'USAGE'
+usage: cs193v-portwatch [--once | --watch [SECONDS] | --publish KEY=VALUE... | --show]
+
+Reports which ports are listening in this container so the launcher on your own
+computer can make them reachable from your browser.
+
+  --once      print the current set and exit
+  --watch     stream it, one frame per second, until the reader goes away
+  --publish   record what the launcher decided (the launcher calls this)
+  --show      what is reachable from your browser, and why anything is not
+USAGE
+}
+
+pw_main() {
+    case "${1:---show}" in
+        --once)    pw_once ;;
+        --watch)   shift; pw_watch "${1:-}" ;;
+        --publish) shift; pw_publish "$@" ;;
+        --show)    pw_show ;;
+        --fault)   shift; pw_fault "${1:-}" ;;
+        -h|--help) pw_usage ;;
+        *) printf 'cs193v-portwatch: unknown argument %s\n\n' "$1" >&2; pw_usage >&2; return 2 ;;
+    esac
+}
+
+case "${CS193V_PORTWATCH_SOURCED:-}" in
+    '') pw_main "$@" ;;
+esac

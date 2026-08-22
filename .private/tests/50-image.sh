@@ -298,6 +298,14 @@ assert_eq "npm-prefix-is-in-home" "/home/student/.local" "$(R 'npm config get pr
 assert_ok "npm-install-g-needs-no-sudo" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
 
+# THE STATE FILE THE TUNNEL WOULD HAVE WRITTEN, faked. Defined here rather than beside the
+# shortlink cases below because open-url reaches shortlink too and needs it first.
+#
+# EVERY PORT MARKED UP, because shortlink asks the KERNEL for a port and no test can predict which
+# one it gets. Marking the whole range means whatever it picks is confirmed, which is what these
+# cases are about; the case where a port is NOT confirmed is asserted separately below.
+FAKE_UP='mkdir -p /tmp/cs193v; { printf "state\thealthy\nfloor\t1024\n"; seq 1 65535 | awk "{print \"up\\t\" \$1 \"\\tlo\"}"; } > /tmp/cs193v/ports'
+
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
 # staring at a prompt that never returns.
@@ -306,16 +314,88 @@ assert_contains "helper:open-url-prints-the-url" "https://example.com/verify?cod
 assert_contains "helper:open-url-explains-why"   "no browser" "$out"
 assert_fail "helper:open-url-needs-an-argument" \
             sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
-# THE STUB'S TWO ASSERTIONS ABOVE RUN WITH NO $CS193V_PORTS, and that is load-bearing rather
-# than incidental: $VT_RUN is a bare `podman run` with no -e flags, so shortlink finds no
-# forwarded port, degrades to printing its argument, and open-url prints exactly what it always
-# did. That is the contract every caller of shortlink leans on to need no conditional of its own.
-out="$(R 'CS193V_PORTS=3000-3002 /usr/local/bin/open-url https://example.com/verify?code=ABCD')"
+# THE STUB'S TWO ASSERTIONS ABOVE RUN WITH NO STATE FILE, and that is load-bearing rather than
+# incidental: $VT_RUN is a bare `podman run` with no tunnel behind it, so /tmp/cs193v/ports does
+# not exist, shortlink has nothing to tell it a port is reachable, degrades to printing its
+# argument, and open-url prints exactly what it always did. That is the contract every caller of
+# shortlink leans on to need no conditional of its own.
+out="$(R "$FAKE_UP"' && /usr/local/bin/open-url https://example.com/verify?code=ABCD')"
 assert_match "helper:open-url-shortens-when-a-port-is-forwarded" \
-             "http://localhost:300[0-2]/magic-link" "$out"
+             "http://localhost:[0-9]+/magic-link" "$out"
 assert_not_contains "helper:open-url-shortened-hides-the-long-url" \
                     "example.com/verify" "$out"
 assert_contains "helper:open-url-shortened-says-it-expires" "15 minutes" "$out"
+
+# ─── the watcher's fault modes, against the host's own gate ───────────────────
+# WHY THIS EXISTS AT ALL. The project rule is that malformed data from the container is FATAL and
+# never silently ignored, and `cs193v-portwatch --fault` was built so that rule could be asserted
+# rather than asserted-about. Until this suite existed, nothing drove it: the gate had a fuzzer
+# (17-portparse-fuzz.sh) and the watcher had a fault mode, and the two had never been introduced.
+# A rule nothing exercises is a rule that quietly stops being true.
+#
+# THE REAL WATCHER AND THE REAL GATE, joined. The fuzzer feeds the gate strings this file's author
+# made up; this feeds it bytes the SHIPPED binary actually emits, which is the half that catches
+# the two of them drifting apart -- a fault renamed, a frame shape changed, an emit that stopped
+# emitting. The gate is sourced the way the launcher sources it, so no behaviour is reimplemented.
+# shellcheck source=.private/files/cs193v-ui.sh
+. "$PRIVATE/files/cs193v-ui.sh"
+
+# gate_verdict TEXT -> "fatal: REASON" | "accepted: PORTS" | "silent"
+# "silent" is the outcome that must never happen: the stream ended with nothing accepted and
+# nothing rejected, which is the failure mode the whole rule is against.
+gate_verdict() {
+    local line rc out="silent"
+    dynports_reset
+    while IFS= read -r line; do
+        dynports_line "$line"; rc=$?
+        [ "$rc" = 2 ] && { printf 'fatal: %s' "$DYNPORTS_FATAL"; return 0; }
+        [ "$rc" = 1 ] && out="accepted: $DYNPORTS_FRAME"
+    done <<EOF
+$1
+EOF
+    printf '%s' "$out"
+}
+fault_out() { R "cs193v-portwatch --fault $1"; }
+
+# ONE CASE PER FAULT, and each asserts the REASON rather than just that something failed. A fatal
+# with the wrong diagnosis is how a TA spends an afternoon on the wrong subsystem -- the same
+# argument quoted() was added for.
+assert_eq "fault:a-wrong-protocol-version-is-fatal" \
+          "fatal: bad handshake: cs193v-portwatch\\ 99" "$(gate_verdict "$(fault_out handshake)")"
+assert_eq "fault:a-nested-BEGIN-is-fatal" \
+          "fatal: BEGIN inside a frame" "$(gate_verdict "$(fault_out nested-begin)")"
+assert_eq "fault:a-count-that-does-not-match-is-fatal" \
+          "fatal: declared 3, saw 1" "$(gate_verdict "$(fault_out bad-count)")"
+assert_eq "fault:an-unknown-address-class-is-fatal" \
+          "fatal: unknown class: wat" "$(gate_verdict "$(fault_out bad-record)")"
+# THE OCTAL ONE IS THE SECURITY CASE, not a formatting nicety: `03000` passes a digits-only test
+# and `[ 03000 -ge 1024 ]` evaluates it as OCTAL 1536, while ssh would parse the string as decimal
+# 3000 -- validate one port, forward another.
+assert_eq "fault:a-non-canonical-port-is-fatal" \
+          "fatal: non-canonical port: 03000" "$(gate_verdict "$(fault_out octal)")"
+assert_eq "fault:a-record-outside-a-frame-is-fatal" \
+          "fatal: line outside a frame: 3000:lo" "$(gate_verdict "$(fault_out stray)")"
+assert_eq "fault:an-ERR-line-stops-the-supervisor" \
+          "fatal: the watcher stopped: deliberate-fault" "$(gate_verdict "$(fault_out err)")"
+
+# AND A GOOD FRAME IS STILL ACCEPTED, or every assertion above is satisfied by a gate that rejects
+# everything -- the property a fault suite most easily forgets to state.
+assert_eq "fault:a-well-formed-frame-is-still-accepted" "accepted: 3000:lo 5173:any" \
+          "$(gate_verdict "$(printf '%s\n' 'cs193v-portwatch 1' 'BEGIN 2' '3000:lo' '5173:any' 'END')")"
+
+# THE REAL WATCHER'S OWN OUTPUT IS ACCEPTED TOO. Everything above drives a deliberately broken
+# emitter; this drives the one that ships, so a change to the frame shape fails here rather than
+# on a student's machine.
+#
+# `--watch`, NOT `--once`, and the difference is the whole point of the assertion: --once prints
+# the raw set for a human and for the Containerfile's build check, while --watch is the only mode
+# that speaks the protocol. Written against --once first, this failed -- correctly -- because a
+# bare `8099:lo` is not a frame. Three seconds is three frames; `timeout` then cuts the stream,
+# possibly mid-frame, which is exactly the EOF-inside-a-frame case the gate must shrug off.
+watch_out="$(R 'timeout 3 cs193v-portwatch --watch 1')"
+record "fault:the-shipped-watcher-frame" "$(printf '%s' "$watch_out" | tr '\n' '|')"
+assert_match "fault:the-shipped-watcher-emits-a-frame-the-gate-accepts" "^accepted:" \
+             "$(gate_verdict "$watch_out")"
 
 # ─── shortlink  (issue #67) ────────────────────────────────────────────────────
 # ENTIRELY INSIDE ONE THROWAWAY CONTAINER, and that is not a shortcut: a fresh container has its
@@ -324,38 +404,41 @@ assert_contains "helper:open-url-shortened-says-it-expires" "15 minutes" "$out"
 # is for -- the half only a real container and a real host can answer is whether the port is
 # reachable from OUTSIDE, and it is the only shortlink assertion that lives there.
 #
-# `sl` runs a whole shell line with a port list in the environment. Every case sets its own, so
-# one case cannot leave a port bound for the next -- the container is discarded either way.
+# `sl` runs a whole shell line with the state file the TUNNEL would have written already in place.
+# There is no tunnel in a throwaway container and no way to raise one, but shortlink does not need
+# a tunnel -- it needs to be told a port is forwarded, and that is a file. Faking the file is a
+# great deal easier than faking the tunnel, and it is exactly the input the real thing supplies.
 #
-# `export`, AND NOT the `VAR=value command` prefix this first used. The prefix only exports to a
-# COMMAND, and most cases here start with `l=$(shortlink ...)` -- an assignment, not a command, so
-# `CS193V_PORTS=3000-3002 l=$(...)` is simply two assignments and shortlink saw neither. It then
-# did exactly what it promises with no port list: printed its argument unchanged, so `$l` was the
-# real URL and every curl below went to github.com and came back 302 from THERE. Two assertions
-# passed on that, one of them because the pidfile it looked for was never created. Same family as
-# issue #79 -- an assertion that passes without the thing under test having run.
-sl() { R "export CS193V_PORTS=$1; $2"; }
+# EVERY PORT MARKED UP, because shortlink asks the KERNEL for a port and no test can predict which
+# one it gets. Marking the whole range means whatever it picks is confirmed, which is what these
+# cases are about; the case where a port is NOT confirmed is asserted separately below.
+#
+# THE ASSERTIONS THIS REPLACED WERE ABOUT A LIST -- highest-first, comma-separated, malformed
+# chunk skipped. There is no list to parse any more, so they are gone rather than adapted; what
+# took their place is the property they were standing in for, which is that the port shortlink
+# prints is one it has been told is reachable.
+sl() { R "$FAKE_UP; $1"; }
 
 assert_ok "shortlink:help-answers" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/shortlink --help > /dev/null'"
 
-# THE PORT COMES FROM THE LIST, HIGHEST FIRST. "Any free port" would be a bug rather than a
-# simplification: only the forwarded ones are reachable, and a server on any other looks exactly
-# like a broken link.
-assert_eq "shortlink:takes-the-highest-port-in-the-list" \
-          "http://localhost:3009/token" \
-          "$(sl 3000-3009 '/usr/local/bin/shortlink https://example.com/a token')"
-assert_eq "shortlink:parses-a-comma-separated-list" \
-          "http://localhost:8084/token" \
-          "$(sl 3000,8084,5173 '/usr/local/bin/shortlink https://example.com/a token')"
-# A malformed chunk is SKIPPED rather than fatal, the same way the launcher's tunnel_ports treats
-# one: container.args is a file people edit, and the launcher has already warned by now.
-assert_eq "shortlink:skips-a-malformed-chunk" \
-          "http://localhost:3001/token" \
-          "$(sl 3000-3001,not-a-port '/usr/local/bin/shortlink https://example.com/a token')"
+# THE PORT IT PRINTS IS ONE IT WAS TOLD IS REACHABLE. "Any free port" on its own would be a bug
+# rather than a simplification: a server on a port the tunnel did not carry looks exactly like a
+# broken link. So the port is the kernel's choice, but printing it is the state file's decision.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; grep -c "^up	${p%%/*}	" /tmp/cs193v/ports')"
+assert_match "shortlink:prints-a-short-url" "http://localhost:[0-9]+/token" "$out"
+assert_contains "shortlink:the-port-it-printed-was-confirmed" "1" "$out"
 
-# THE DEGRADATION, asserted in both of its shapes: no list at all, and a list with nothing free.
-# Both print the input and exit 3, because a caller must be able to print the answer unconditionally.
+# AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
+# the group above passing for a shortlink that ignores the file entirely: with a state file that
+# is present, healthy and simply never mentions the port, it must degrade rather than guess.
+out="$(R 'mkdir -p /tmp/cs193v; printf "state\thealthy\nfloor\t1024\n" > /tmp/cs193v/ports; /usr/local/bin/shortlink https://example.com/unconfirmed; echo rc=$?')"
+assert_contains "shortlink:an-unconfirmed-port-degrades"  "https://example.com/unconfirmed" "$out"
+assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
+
+# THE DEGRADATION, asserted in both of its shapes: no state file at all, and one that never
+# confirms. Both print the input and exit 3, because a caller must be able to print the answer
+# unconditionally.
 out="$(R '/usr/local/bin/shortlink https://example.com/plain; echo rc=$?')"
 assert_contains "shortlink:no-ports-prints-the-input" "https://example.com/plain" "$out"
 assert_contains "shortlink:no-ports-exits-3" "rc=3" "$out"
@@ -363,7 +446,7 @@ assert_contains "shortlink:no-ports-exits-3" "rc=3" "$out"
 # ─── the redirect itself ───────────────────────────────────────────────────────
 # ONE SHELL LINE PER CASE because the server has to still be running when curl asks. -D- keeps the
 # headers, which is where everything worth asserting is.
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink "https://github.com/settings/personal-access-tokens/new?name=CS193V&contents=write" token); curl -sD- -o /dev/null --max-time 5 "$l"')"
+out="$(sl 'l=$(/usr/local/bin/shortlink "https://github.com/settings/personal-access-tokens/new?name=CS193V&contents=write" token); curl -sD- -o /dev/null --max-time 5 "$l"')"
 assert_match "shortlink:answers-302"   "^HTTP/1[.]. 302" "$out"
 assert_contains "shortlink:sends-the-location" \
                 "Location: https://github.com/settings/personal-access-tokens/new?name=CS193V&contents=write" "$out"
@@ -377,24 +460,26 @@ assert_contains  "shortlink:forbids-caching" "Cache-Control: no-store" "$out"
 # SERVES REPEATEDLY, which is the whole reason it is not a one-shot. A browser opening one URL
 # preconnects speculatively and asks for /favicon.ico, and a student double-clicks and presses
 # Back -- a server that closed after its first response would spend it on none of those.
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a token); for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} " --max-time 5 "$l"; done')"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} " --max-time 5 "$l"; done')"
 assert_eq "shortlink:redirects-every-time" "302 302 302" "$(printf '%s' "$out" | tr -s ' ' | sed 's/ *$//')"
 
 # THE SLUG IS NEVER EMPTY, and `/` is the path it must never serve: the browser keys its cache and
 # any service worker on the ORIGIN, which outlives whatever used to listen there, so the one path a
 # student's own project is likely to have served is the one we stay off. Nothing routes /magic-link.
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a); echo "$l"; curl -s -o /dev/null -w " root=%{http_code}" --max-time 5 http://localhost:3002/; curl -s -o /dev/null -w " slug=%{http_code}" --max-time 5 "$l"')"
-assert_contains "shortlink:default-slug-is-magic-link" "http://localhost:3002/magic-link" "$out"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a); echo "$l"; curl -s -o /dev/null -w " root=%{http_code}" --max-time 5 "${l%/*}/"; curl -s -o /dev/null -w " slug=%{http_code}" --max-time 5 "$l"')"
+assert_match "shortlink:default-slug-is-magic-link" "http://localhost:[0-9]+/magic-link" "$out"
 assert_contains "shortlink:bare-root-is-not-served"    "root=404" "$out"
 assert_contains "shortlink:default-slug-redirects"     "slug=302" "$out"
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a token); curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:3002/nope')"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${l%/*}/nope"')"
 assert_eq "shortlink:unknown-path-is-404" "404" "$out"
 
 # LOOPBACK ONLY. The tunnel's far end is the container's IPv4 loopback, so that is all that is
 # needed; the wildcard would additionally publish the redirect on the container's eth0.
-out="$(sl 3000-3002 '/usr/local/bin/shortlink https://example.com/a token > /dev/null; ss -ltn')"
-assert_match     "shortlink:binds-loopback"   "127[.]0[.]0[.]1:3002" "$out"
-assert_not_match "shortlink:binds-no-wildcard" "(0[.]0[.]0[.]0|\[::\]):3002" "$out"
+# The port is the kernel's, so the listening line is found by asking which port shortlink took
+# rather than by naming one.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); p=${l##*:}; ss -ltn | grep ":${p%%/*} "')"
+assert_match     "shortlink:binds-loopback"    "127[.]0[.]0[.]1:[0-9]+" "$out"
+assert_not_match "shortlink:binds-no-wildcard" "(0[.]0[.]0[.]0|\[::\]):[0-9]+" "$out"
 
 # ─── what a caller needs to be true ───────────────────────────────────────────
 # THE ONE BUG THAT PASSES EVERY CHECK MADE BY HAND. `link=$(shortlink ...)` reads the pipe until
@@ -402,13 +487,13 @@ assert_not_match "shortlink:binds-no-wildcard" "(0[.]0[.]0[.]0|\[::\]):3002" "$o
 # closes -- so a server that inherited fd 1 hangs the caller forever, whatever its parent does.
 # Run at a prompt, stdout is a tty, nobody reads to EOF, and it returns instantly. This is the
 # only place that difference is visible, so `timeout` is the assertion.
-out="$(sl 3000-3002 'timeout 10 sh -c "l=\$(/usr/local/bin/shortlink https://example.com/a token); echo returned=\$l"')"
-assert_contains "shortlink:command-substitution-returns" "returned=http://localhost:3002/token" "$out"
+out="$(sl 'timeout 10 sh -c "l=\$(/usr/local/bin/shortlink https://example.com/a token); echo returned=\$l"')"
+assert_match "shortlink:command-substitution-returns" "returned=http://localhost:[0-9]+/token" "$out"
 
 # ITS OWN SESSION, so a Ctrl-C in the caller's foreground process group does not take the link
 # down at the moment the student is about to click it. Compared against the shell that started it
 # rather than to a literal: what matters is that they differ.
-out="$(sl 3000-3002 '/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token > /dev/null; sleep 1; echo "daemon=$(ps -o sid= -p "$(cat /tmp/sl.pid)" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
+out="$(sl '/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token > /dev/null; sleep 1; echo "daemon=$(ps -o sid= -p "$(cat /tmp/sl.pid)" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
 record "shortlink:sessions" "$out"
 # The two numbers have to DIFFER, so the assertion is that the "they are equal" pattern matched
 # nothing. Comparing them any other way would need the values in the suite, and they only exist
@@ -420,20 +505,20 @@ assert_eq "shortlink:runs-in-its-own-session" "" \
 # sg_cleanup does rather than leaving a forwarded port held for the rest of the fifteen minutes.
 # The file goes away with the process: a pidfile that outlives what it names is the trap the
 # launcher documents at tunnel_kill_pid, since pids get reused.
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token); sleep 1; kill "$(cat /tmp/sl.pid)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"; test -e /tmp/sl.pid && echo pidfile=left || echo pidfile=removed')"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token); sleep 1; kill "$(cat /tmp/sl.pid)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"; test -e /tmp/sl.pid && echo pidfile=left || echo pidfile=removed')"
 assert_contains "shortlink:pidfile-kill-stops-it"   "gone=000" "$out"
 assert_contains "shortlink:pidfile-is-removed"      "pidfile=removed" "$out"
 
 # AND IT LETS GO ON ITS OWN, so nothing depends on a caller remembering. --timeout 1 rather than
 # waiting out the real 900s default.
-out="$(sl 3000-3002 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
 assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
 
 # CONCURRENT CALLS CANNOT COLLIDE, because binding IS the free-port test -- never check and then
 # bind, which two racing callers would both pass.
-out="$(sl 3000-3002 'for s in one two three; do /usr/local/bin/shortlink https://example.com/$s $s; done')"
+out="$(sl 'for s in one two three; do /usr/local/bin/shortlink https://example.com/$s $s; done')"
 assert_eq "shortlink:three-callers-get-three-ports" "3" \
-          "$(printf '%s' "$out" | grep -c 'http://localhost:300[0-2]/')"
+          "$(printf '%s' "$out" | grep -cE 'http://localhost:[0-9]+/')"
 assert_eq "shortlink:those-ports-are-distinct" "3" \
           "$(printf '%s' "$out" | sed 's|.*localhost:||;s|/.*||' | sort -u | grep -c .)"
 
@@ -443,12 +528,12 @@ assert_eq "shortlink:those-ports-are-distinct" "3" \
 # which would end the Location header and let the rest of the argument write headers of its own.
 for bad in 'file:///etc/passwd' 'javascript:alert(1)' 'notaurl'; do
     assert_eq "shortlink:refuses-$bad" "2" \
-              "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink '$bad' > /dev/null 2>&1; echo \$?")"
+              "$(R "/usr/local/bin/shortlink '$bad' > /dev/null 2>&1; echo \$?")"
 done
 assert_eq "shortlink:refuses-a-newline-in-the-url" "2" \
-          "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink \"\$(printf 'https://x.example/a\\r\\nX-Evil: 1')\" > /dev/null 2>&1; echo \$?")"
+          "$(R "/usr/local/bin/shortlink \"\$(printf 'https://x.example/a\\r\\nX-Evil: 1')\" > /dev/null 2>&1; echo \$?")"
 assert_eq "shortlink:refuses-a-slug-with-a-slash" "2" \
-          "$(R "CS193V_PORTS=3000-3002 /usr/local/bin/shortlink https://example.com/a 'has/slash' > /dev/null 2>&1; echo \$?")"
+          "$(R "/usr/local/bin/shortlink https://example.com/a 'has/slash' > /dev/null 2>&1; echo \$?")"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather

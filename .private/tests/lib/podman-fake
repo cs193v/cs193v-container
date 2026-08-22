@@ -38,7 +38,8 @@
 #   build_delay      seconds to pause between output lines   [0] (0 = all at once)
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
 #   memory_max       what the in-container cgroup read prints [4294967296]
-#   exec_out         what `podman exec ... sh -c` prints    []
+#   exec_out         what `podman exec ... --attach` prints  []
+#   claim_out        what `podman exec ... --claim` prints   []
 #   top_out          what `podman top` prints               []
 #   port_out         what `podman port` prints              []
 
@@ -260,10 +261,35 @@ level=error msg="cannot set up pasta"' >&2
         # The launcher's doctor/check_clock use `podman exec NAME sh -c '...'`. Answer the
         # handful of probes it makes; anything else is empty.
         for a in "$@"; do LASTARG="$a"; done
+        # THESE TWO MATCH THE WHOLE COMMAND LINE, not LASTARG, and that is not a style choice:
+        # the watcher is run as `cs193v-portwatch --watch 1`, so its last argument is `1` and a
+        # LASTARG arm below can never fire. Keyed there, the watcher fell through to exec_out,
+        # answered the handshake with whatever a test had staged, and every shim launch warned
+        # about a protocol violation. Measured: it did.
+        case "$*" in
+            # PKILL FIRST. tunnel_sup_stop reaps the watcher with
+            # `pkill -f "cs193v-portwatch --watch"`, whose ARGUMENT contains the very string the
+            # next arm matches on, so without this the reap is answered with a frame instead.
+            *pkill*)
+                echo -n ''; exit 0 ;;
+            # THE WATCHER SPEAKS ITS OWN PROTOCOL. ONE FRAME, THEN EOF -- deliberately not a loop:
+            # a streaming fake leaves a supervisor alive per launch and this suite launches twenty
+            # times in a row, which hung the run until the timeout killed it. EOF is safe because
+            # tunnel_sup_start tests the READY file before liveness, so a supervisor that
+            # handshakes and then exits still counts as started and warns about nothing.
+            *cs193v-portwatch*--watch*)
+                echo 'cs193v-portwatch 1'; echo 'BEGIN 0'; echo 'END'; exit 0 ;;
+        esac
         case "${LASTARG:-}" in
             *'id -u'*)        echo "1000:1000" ;;
             *memory.max*)     get memory_max '4294967296'; echo ;;
             *'grep -c Z'*)    echo 0 ;;
+            # THE CLAIM IS NOT THE SHELL. open_shell now runs cs193v-shell twice: --claim, which
+            # takes the tmux session and needs no tty, and --attach, which is the one that puts a
+            # student in front of something. Only the second gets exec_out, or a test asserting
+            # "the ENTER prompt comes before the container is opened" sees the claim and fails on
+            # an ordering that is actually correct. Measured: it did.
+            *--claim)         get claim_out ''; echo -n '' ;;
             *)                case "$*" in
                                   *'date +%s'*) get container_date "$(date +%s)"; echo ;;
                                   *) get exec_out ''; echo ;;

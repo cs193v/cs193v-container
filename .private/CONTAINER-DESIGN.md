@@ -113,17 +113,7 @@ are different claims and it is worth keeping them separate in your head.
 This is the part most worth understanding, because it is the difference between a
 five-second fix and a lost afternoon.
 
-### Only these ports reach your browser
-
-```
-3000-3009    4173-4176    5173-5179    6173-6182    8000-8009    8080-8084
-```
-
-Easy to remember as "the 173 family": **4173** vite preview, **5173** vite dev, **6173**
-spare. A server on any other port is unreachable, full stop. Podman cannot add a port to
-a container that is already running, so this set is fixed when the container is created.
-
-### The bind address does not matter. The port does.
+### Any port reaches your browser. The bind address is what decides.
 
 A server does not listen on a *port*. It listens on an **(address, port) pair**, and the
 address decides which network interfaces it will accept connections on:
@@ -150,7 +140,8 @@ other. That is `cs193v`'s job, and it does it with an **ssh tunnel**:
    ┌────▼──── YOUR COMPUTER ─────────────────────────┐
    │  127.0.0.1:3000   ◀ only you can connect        │
    │        │                                         │
-   │        │  one ssh client, all 46 ports           │
+   │        │  one ssh client, opening each port      │
+   │        │  as you start listening on it           │
    └────────┼─────────────────────────────────────────┘
             ▼  (not a network connection — see below)
    ┌── THE CONTAINER (its own network stack) ────────┐
@@ -159,9 +150,11 @@ other. That is `cs193v`'s job, and it does it with an **ssh tunnel**:
    │  lo:3000     ◀ the tunnel arrives HERE  ✓        │
    │  eth0:3000   ◀ and 0.0.0.0 covers lo too  ✓      │
    │                                                  │
-   │  bound 127.0.0.1  ✓ works                        │
-   │  bound 0.0.0.0    ✓ works                        │
-   │  bound ::1 only   ✗ refused (see below)          │
+   │  bound 127.0.0.1     ✓ works                     │
+   │  bound 0.0.0.0       ✓ works                     │
+   │  bound ::1 only      ✗ refused (see below)       │
+   │  bound 127.0.0.53    ✗ refused (see below)       │
+   │  bound eth0 only     ✗ refused (see below)       │
    └──────────────────────────────────────────────────┘
 ```
 
@@ -170,34 +163,36 @@ Because the tunnel's far end is the container's *own loopback*, a server bound t
 **So there is no `--host` flag to remember.** `vite`, `next dev`, `flask run` and
 `python3 -m http.server` all work as they come.
 
-What still bites is the **port**. A server on anything outside the six ranges has nothing
-carrying it out of the container, and the failure looks identical to a broken app: a
-connection refused, **while the server's log cheerfully prints
-`Local: http://localhost:5173/`.** That log line is not a lie any more, but it is not a
-promise either — it describes a door that only exists inside.
+**And there is no port to remember either.** Start a server on whatever port you like — 3000,
+5173, 8080, 49221 — and about a second later your computer opens the matching port on its own
+loopback. Nothing is declared in advance and nothing needs restarting. If vite finds 5173 busy
+and walks to 5174, that just works too.
 
-For vite, set `strictPort: true`. Without it a busy port silently walks 5173 → 5174 → 5175,
-which can wander out of the forwarded range — and then you get a connection refused with
-nothing anywhere explaining why.
+### The addresses that don't work
 
-### The one address that still doesn't work: `::1`
+All three are the same rule seen from three angles: the tunnel's far end is `127.0.0.1`
+specifically, over IPv4.
 
-The tunnel's far end is `127.0.0.1`, which is IPv4. A server bound **only** to `::1`, the
-IPv6 loopback, is therefore still refused.
+- **`::1` only.** The IPv6 loopback. You are unlikely to hit this by accident: in this
+  container `localhost` resolves to `127.0.0.1` and nothing else — there is no `::1 localhost`
+  line in `/etc/hosts` — so both `python3 -m http.server --bind localhost` and node's
+  `listen(port, "localhost")` bind IPv4. Reaching `::1` takes asking for it by name.
+- **Another loopback address**, such as `127.0.0.53`. Still loopback, still not the one the
+  tunnel connects to.
+- **The container's `eth0` address only.** That interface is not where the tunnel arrives.
 
-You are unlikely to hit this by accident. In this container `localhost` resolves to
-`127.0.0.1` and nothing else — there is no `::1 localhost` line in `/etc/hosts` — so both
-`python3 -m http.server --bind localhost` and node's `listen(port, "localhost")` bind IPv4.
-Reaching `::1` takes asking for it by name.
+In every case the fix is the same: bind `127.0.0.1` or `0.0.0.0`. And you will be told which
+one you did — see below.
 
 ### Is my server exposed to the dorm network?
 
-No, and for a structurally better reason than before.
+No, and for a structurally better reason than a flag.
 
 Your computer's end of the tunnel is a listening socket bound to `127.0.0.1` — the ssh
-client binds it that way, so "only this machine" is not a flag anyone can forget or a
-setting that could drift. It is what the tunnel *is*. Nothing on the network can reach it,
-which was verified by trying from this machine's own LAN address and getting nothing.
+client binds it that way, so "only this machine" is not a setting anyone can forget or that
+could drift. It is what the tunnel *is*. Nothing on the network can reach it, which was
+verified by trying from this machine's own LAN address and getting nothing. That holds for
+every port it opens, however many there turn out to be.
 
 And the useful lesson survives intact: **the app declares what it serves, the boundary
 declares who may reach it.** The genuinely dangerous thing is exposing the *host* side to
@@ -205,62 +200,54 @@ the network, which is exactly what most tutorials on the internet will show you.
 
 ### When something isn't reachable
 
-There are two halves to this, and they are checked in different places. Start inside the
-container, with what your server is actually doing:
+Ask inside the container first, because the answer is usually there and it comes with a
+reason attached:
 
 ```
-ss -ltn
+cs193v-portwatch --show
 ```
 
-That lists every port something is listening on, and — the column that matters — the address
-each one is bound to. Check it against two things: that the port is one of the forwarded ones
-(`echo $CS193V_PORTS`), and that the address is not `::1`, which is the one bind address the
-tunnel cannot reach. `127.0.0.1`, `0.0.0.0` and `*` are all fine.
+That splits every port something is listening on into the ones your browser can reach and the
+ones it cannot, with a reason for each of the latter:
 
-Claude is in here with you and can do this for you — "nothing can reach my dev server, what's
-it bound to?" is a reasonable thing to ask it. `lsof -i` is also installed, if what you need
-is *which process* has a port rather than what it is bound to.
+```
+Reachable from your browser at http://localhost:PORT
+  3000
 
-If your server is listening on a forwarded port at a workable address and your browser still
-cannot connect, the problem is on your own computer — most often another program already
-holding that port. Nothing inside the container can see that. Run this **there**, not in the
-container:
+Not reachable, and why:
+  4200   bound to ::1 only; bind 127.0.0.1 or 0.0.0.0 instead
+  8080   another program on your own computer is using that port
+```
+
+Most of those reasons you fix in here, by changing what you bind. One — `another program on your
+own computer` — you fix out there, by quitting whatever has it or by using a different port.
+
+`ss -ltn` shows the raw picture if you want it: every listening port and the address each is
+bound to. `lsof -i` names the process holding one. Claude is in here with you and can read
+either — "nothing can reach my dev server, what's it bound to?" is a reasonable thing to ask.
+
+If `--show` says a port is up and your browser still cannot connect, run this on **your own
+computer**, not in the container:
 
 ```
 cs193v doctor
 ```
 
-It reports whether the tunnel is up and names any port it could not forward.
-
-If it says the tunnel is down, or things stop working after your computer sleeps:
+It reports whether the tunnel is up and lists what it is currently forwarding. If it says the
+tunnel is down, or things stop working after your computer sleeps:
 
 ```
 cs193v --reset-tunnel
 ```
 
-### Why this is an ssh tunnel, and not what came before
+### How the tunnel knows
 
-VS Code's extension ran a relay **inside** the container, connecting over the container's
-own loopback, and watched for new listening sockets to forward automatically. That is why
-nobody using it ever had to think about bind addresses.
-
-This is the same idea, deliberately reintroduced, with two of its properties kept and one
-dropped:
-
-- **Kept:** a loopback-bound server just works, which is what made the old setup feel easy.
-- **Kept:** your computer decides what it opens. The tunnel forwards a fixed list; the
-  container is never asked which ports it would like.
-- **Dropped:** automatic forwarding of *new* ports. That is the part that required the
-  container to tell your computer what to open, and the fixed list is the reason it does
-  not.
-
-The earlier design fixed this at the network layer instead, and it is worth recording why
-that failed: `podman`'s own `--host-lo-to-ns-lo` option does exactly the right thing on
-Linux and is silently inert on macOS, where podman runs inside a virtual machine. That would
-have made identical code work on Ubuntu and fail on Macs. The tunnel avoids the whole class
-of problem by not touching the network at all — it runs over the same `podman exec` channel
-that `cs193v` already uses to give you a shell, which necessarily works everywhere a shell
-does.
+Your computer watches what the container is listening on — once a second, over the same
+`podman exec` channel that gives you your shell — and opens or closes the matching port on its
+own loopback to match. The container reports; **your computer decides.** It is never asked to
+open a port, and it can never name an address, a direction, or anywhere to connect to other
+than the container's own loopback. That is what keeps the boundary one-way while still letting
+a port you invent a minute from now just work.
 
 ---
 
@@ -314,7 +301,7 @@ That stops the container so the next `cs193v` starts cleanly.
 The port forwarding column needs a word of explanation. The tunnel is a program running on *your*
 computer, not inside the container, so it is a separate thing that can be up or down. It is started
 when you open a session with `cs193v`, and taken down whenever the container stops — including when
-you close your window, which hands all 46 ports back. Maintenance commands like `cs193v --rebuild`
+you close your window, which hands back every port it had opened. Maintenance commands like `cs193v --rebuild`
 never raise one: they end with the container stopped, so a tunnel for it could serve nobody. That is deliberate: a tunnel left holding ports for a
 container that is gone would stop the *next* one from working, and the symptom ("my browser cannot
 reach my server") would point nowhere near the cause.

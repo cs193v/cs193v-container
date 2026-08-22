@@ -38,12 +38,19 @@ require_image
 require_cmd script "needed to give the launcher a pty, as a real terminal would"
 require_cmd curl "needed to read a server through a forwarded port"
 
-# THE PORT IS DERIVED, not written out: $FWD1 is the first port `cs193v --dev-tunnel` reports, so
-# a developer who has moved CS193V_PORTS in local.args gets a server on a port their tunnel really
-# forwards. Written out, this file curl'd a port nothing was listening on and read the resulting
-# 000 as "the server died with the window" -- an assertion that passes for the wrong reason (#46).
-fwd_init
-SRV="python3 -m http.server $FWD1 --bind 0.0.0.0"
+# THE PORT IS PICKED, not written out: any port nothing on this host is listening on will do,
+# because there is no declared set to belong to -- the tunnel forwards it because the server binds
+# it. Written out, this file curl'd a port nothing was listening on and read the resulting 000 as
+# "the server died with the window", an assertion that passed for the wrong reason (#46), and a
+# fixed number is also how two developers' runs collide.
+#
+# CHOSEN BEFORE ANY CONTAINER EXISTS, which is why it is free_unforwarded_ports and not dyn_ports:
+# this is the one suite that must start from a STOPPED container, so there is no tunnel yet to ask
+# for a forwarded port. The wait on srv_up below is what establishes it, and that wait is now doing
+# more work than it used to -- it covers the supervisor noticing the bind and opening the host port.
+SRV_PORT="$(free_unforwarded_ports 1)"
+[ -n "$SRV_PORT" ] || { fail "require:port" "no free host port to put a test server on"; exit 1; }
+SRV="python3 -m http.server $SRV_PORT --bind 0.0.0.0"
 TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
 LOG="$(mktemp "${TMPDIR:-/tmp}/cs193v-sighup.XXXXXX")"
 
@@ -52,7 +59,7 @@ st() { podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null; }
 container_running() { [ "$(st)" = running ]; }
 container_stopped() { case "$(st)" in running) return 1 ;; *) return 0 ;; esac; }
 session_up() { podman exec "$NAME" $TM has-session -t '=cs193v' >/dev/null 2>&1; }
-srv_up()     { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$FWD1/"; }
+srv_up()     { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$SRV_PORT/"; }
 
 # THIS IS THE ONE SUITE THAT MUST NOT HAVE THE CONTAINER HELD UP.
 #
@@ -68,7 +75,7 @@ cleanup() {
     # shellcheck disable=SC2086
     [ -n "$PTY_PIDS" ] && kill -9 $PTY_PIDS 2>/dev/null
     rm -f "$LOG"
-    container_running && container_pkill "http.server $FWD1"
+    container_running && container_pkill "http.server $SRV_PORT"
     return 0
 }
 trap cleanup EXIT
@@ -101,11 +108,11 @@ pass "sighup:the-probe-got-a-session"
 # this. It must now die with the window.
 podman exec "$NAME" sh -c "$TM new-window -d '$SRV'" >/dev/null 2>&1
 wait_until 20 srv_up || true
-BEFORE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD1/")"
+BEFORE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SRV_PORT/")"
 FWD_BEFORE="$(count_forwards)"
 # OURS, not anybody's: count_forwards is ownership-scoped now, so this records what this
 # instance's own tunnel holds. It recorded "46 of 46" for a run that held none of them (#46).
-record "sighup:forwards-while-a-session-is-open" "$FWD_BEFORE of $FWD_N"
+record "sighup:forwards-while-a-session-is-open" "$FWD_BEFORE"
 
 # THE WINDOW CLOSING. Killing script closes the pty master, and the kernel HUPs the foreground
 # process group -- the launcher and its podman exec child.
@@ -122,16 +129,17 @@ working. First thing to check: that open_shell traps HUP and not only EXIT. bash
 for SIGHUP is to die WITHOUT running an EXIT trap, which would look exactly like this."
 fi
 
-# The tunnel is a HOST process holding 46 loopback ports, so it does not die with the container --
+# The tunnel is a HOST process holding loopback ports, so it does not die with the container --
 # it has to be taken down deliberately. Forgetting would mean the next launch could bind none of
 # its ports, which is the failure remove_container documents; this is its test on the teardown path.
 if wait_until 30 no_forwards; then
     pass "sighup:closing-the-window-releases-the-forwarded-ports"
 else
     fail "sighup:closing-the-window-releases-the-forwarded-ports" \
-         "$(count_forwards) of the $FWD_N forwards are still bound (there were $FWD_BEFORE while the
-session was open). An ssh client outliving its container holds every course port against a pipe
-with nothing on the far end, so the next launch gets no forwarding at all."
+         "$(count_forwards) forwards are still bound (there were $FWD_BEFORE while the session
+was open). An ssh client outliving its container holds its host ports against a pipe with nothing
+on the far end, so nothing it forwards can be reached and the ports are not free for anything else
+either."
 fi
 
 # ...and the server in the tab went with it. If it was never reachable the assertion below is
@@ -245,18 +253,18 @@ MATRIX=""
 # The pattern follows $SRV's port for the same reason $SRV does: this asks whether the process
 # survived, and a pattern naming a port the server was never started on answers no every time.
 probe() {                             # probe LABEL COMMAND
-    container_pkill "http.server $FWD1"
+    container_pkill "http.server $SRV_PORT"
     script -q -c "podman exec -it ${NAME} sh -c '$2'" /dev/null >/dev/null 2>&1 &
     local client=$!
-    wait_until 15 container_pgrep "http.server $FWD1" || true
+    wait_until 15 container_pgrep "http.server $SRV_PORT" || true
     kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
     sleep 2                           # A DURATION, deliberately: "still alive" is a non-event.
     local alive
-    container_pgrep "http.server $FWD1" && alive=yes || alive=no
+    container_pgrep "http.server $SRV_PORT" && alive=yes || alive=no
     record "sighup:tab-matrix-$1" "alive=$alive"
     MATRIX="$MATRIX
   $(printf '%-12s alive=%s' "$1" "$alive")"
-    container_pkill "http.server $FWD1"
+    container_pkill "http.server $SRV_PORT"
 }
 probe foreground "$SRV"
 probe background "$SRV & sleep 60"

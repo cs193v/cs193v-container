@@ -251,11 +251,10 @@ tests the font files rather than their discoverability.
 *Expect:* a login completes. Whether you SEE the `$BROWSER` stub's box depends on the caller —
 see the known limitation below.
 
-**1455 IS FORWARDED NOW (#71), so try codex's browser flow before reaching for
-`--device-auth`.** Its callback wants `localhost:1455`, and that port is first in the
-`CS193V_PORTS` line in `container.args`; the text here used to say nothing forwarded it, which
-stopped being true when it was added. If the redirect flow works, say so — the same question is
-open for the other three, and issue #82 is where it gets measured.
+**TRY CODEX'S BROWSER FLOW BEFORE REACHING FOR `--device-auth`.** Its callback wants
+`localhost:1455`, and any port a program binds inside the container is forwarded within about a
+second of the bind, so nothing has to be arranged for it. If the redirect flow works, say so —
+the same question is open for the other three, and issue #82 is where it gets measured.
 
 **KNOWN LIMITATION, MEASURED — `claude` `/login` does not show the short link.** Claude Code
 does consult `$BROWSER` and does run our stub (verified: 2.1.225 spawns `process.env.BROWSER` on
@@ -507,6 +506,34 @@ after a Mac wakes (`podman#21675`). Clocks within a couple of seconds; if minute
 confirm `cs193v doctor` detects it and the offered VM restart fixes it. Also record whether
 podman **self-corrected** on resume — if it does, the check may be unnecessary.
 Then check `gvproxy` CPU: there are reports of ~400% after sleep (`podman#27279`).
+
+**AND THE PORT SUPERVISOR, WHICH THIS IS THE ONLY PLACE TO TEST.** It calls `read -t 5` on the
+watcher's stream and treats **six consecutive timeouts** as a fatal protocol violation, on the
+reasoning that a timeout is something a *running* process generates — so an hour asleep should
+produce at most one, not twelve hundred. That reasoning rests on an assumption about bash that
+only a real sleeping laptop can settle, and a Mac is the case that matters because the podman
+machine VM's resume behaviour is the variable:
+
+```sh
+podman exec cs193v cs193v-portwatch --show    # must work, not report a dead supervisor
+./cs193v doctor | grep dynamic                # must not say "not running"
+podman exec -d cs193v python3 -m http.server 21500 --bind 127.0.0.1; sleep 5
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:21500/    # expect 200
+```
+*Expect:* no spurious `no-frames` state after the wake, and a port bound after it still becomes
+reachable. If it did fire, the supervisor's log (`cs193v --dev-tunnel` names it as `suplog`) says
+so, and the threshold in `TUNNEL_SUP_SILENCE_MAX` is what needs raising.
+
+Separately, and it is the underlying question rather than a symptom: block a `read -t 30` on an
+empty fifo across a real lid close and record whether it fires on wake.
+```sh
+mkfifo /tmp/f; exec 3<>/tmp/f
+time read -t 30 -u 3     # sleep the laptop NOW, wake it after an hour
+```
+*Expect, if the assumption holds:* it is still waiting on wake, or has just timed out once —
+**not** that it timed out an hour ago. That settles whether bash's `read -t` charges suspended
+time, which is what the six-timeout threshold rests on.
+
 *Automated:* that every probe is timeout-wrapped and a hanging podman returns in ~14s with a
 "not responding" message rather than looking frozen (`30-launcher-shim.sh :: hang:*`).
 

@@ -250,7 +250,7 @@ I '{{json .Mounts}}' | grep -c 'authorized_keys'                     # expect 1,
 ck  tunnel-up      "up"    sh -c '"$DIR/cs193v" doctor | sed -n "s/^  tunnel  *\(up\).*/\1/p"'
 rec mounts                 I '{{json .Mounts}}'                  # 6 volumes + 1 bind at <DIR>/projects
 ckx config-hash-label      sh -c 'podman inspect cs193v --format "{{index .Config.Labels \"cs193v.confighash\"}}" | grep -q .'
-rec container-env          I '{{json .Config.Env}}'              # CS193V_PORTS, TERM, COLORTERM
+rec container-env          I '{{json .Config.Env}}'              # TERM, COLORTERM; NO port list
 rec pid1                   I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'
 ```
 
@@ -277,99 +277,113 @@ rec free-vs-cgroup         E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB
 # (containers/podman#25683), so without this the probe reports 8 and FAILS on a correctly
 # working system. The launcher forwards TERM in open_shell; so must this.
 ck  colors  256            sh -c 'podman exec -it -e TERM=xterm-256color cs193v tput colors | tr -d "\r"'
-rec env-persists           E 'printenv CS193V_PORTS'   # proves -e reaches exec sessions
+rec env-in-exec            E 'printenv | sort'          # what an exec session actually inherits
 ckx dns                    E 'getent hosts registry.npmjs.org'
 ```
 
-## A.6 The full port matrix — all 46, no browser
+## A.6 The port matrix, by bind address — no browser
 
-Bound to `127.0.0.1` on purpose throughout, not `0.0.0.0`: that is the case the tunnel
-exists to make work, so testing the easy one would prove nothing about the change.
+There is no set of ports to walk any more: a port is forwarded because something inside the
+container is listening on it, so what there is to verify is which KINDS of listener are carried
+and which are refused, plus both ends of the lifecycle.
+
+Bound to `127.0.0.1` on purpose wherever the address is not the subject: that is the case the
+tunnel exists to make work, so testing the easy one would prove nothing about the change.
+
+`sleep 3` after each bind rather than `sleep 1`: the forward does not exist when the server
+starts. The supervisor has to see the new listener on its next tick and ask the master to open
+the host port, so readiness is two events rather than one.
 
 ```sh
-ALL="$(seq 3000 3009) $(seq 4173 4176) $(seq 5173 5179) $(seq 6173 6182) $(seq 8000 8009) $(seq 8080 8084)"
-for p in $ALL; do
-  podman exec -d cs193v python3 -m http.server "$p" --bind 127.0.0.1 >/dev/null 2>&1
-done
-sleep 2
-for p in $ALL; do
-  c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$p/")
-  [ "$c" = 200 ] && echo "PASS port $p" || echo "FAIL port $p (http=$c)"
-done
-podman exec cs193v pkill -f http.server
-
-# ports outside the forwarded set must be refused
-for p in 4000 7000 8500 9100 3100; do
-  podman exec -d cs193v python3 -m http.server "$p" --bind 0.0.0.0 >/dev/null 2>&1; sleep 0.5
-  c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$p/")
-  [ "$c" = 000 ] && echo "PASS unforwarded $p refused" || echo "FAIL unforwarded $p reachable ($c)"
-done
-podman exec cs193v pkill -f http.server
-
-# the direction invariant, tested rather than asserted: a remote forward must be REFUSED by
-# the server, and must create no listener
-CTL="$(ls "${TMPDIR:-/tmp}"/cs193v-*.ctl 2>/dev/null | head -1)"
-ssh -S "$CTL" -O forward -R 127.0.0.1:19999:127.0.0.1:3000 student@cs193v-tunnel 2>&1 \
-  | grep -q 'forwarding request failed' && echo "PASS -R refused" || echo "FAIL -R was ACCEPTED"
-[ "$(ss -ltn | grep -c ':19999')" = 0 ] && echo "PASS no listener created" \
-                                        || echo "FAIL something is listening on 19999"
-
-# and the tunnel must not be usable as a proxy past the container's own loopback
-ssh -S "$CTL" -O forward -L 127.0.0.1:13999:1.1.1.1:80 student@cs193v-tunnel 2>/dev/null
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:13999/)
-[ "$c" = 000 ] && echo "PASS PermitOpen blocks off-box destinations" \
-              || echo "FAIL the tunnel proxied to 1.1.1.1 ($c)"
-
-# a busy host port must cost THAT port only, not the container
-python3 -c 'import socket,time
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("127.0.0.1",3005)); s.listen(1); time.sleep(60)' &
-sleep 1; "$DIR/cs193v" --reset-tunnel 2>&1 | grep -q 3005 \
-  && echo "PASS busy port is named" || echo "FAIL busy port not reported"
-"$DIR/cs193v" doctor | grep -q 'NOT: 3005' \
-  && echo "PASS doctor names it too" || echo "FAIL doctor missed it"
-kill %1 2>/dev/null; "$DIR/cs193v" --reset-tunnel >/dev/null 2>&1
-
 # a loopback-bound server inside MUST be reachable  (this expectation is deliberately
-# inverted from what it was: the ssh tunnel's far end is the container's own loopback, and
-# reaching it is the entire point of the change)
-podman exec -d cs193v python3 -m http.server 3000 --bind 127.0.0.1; sleep 1
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/)
+# inverted from what podman did: the ssh tunnel's far end is the container's own loopback, and
+# reaching it is the entire point)
+podman exec -d cs193v python3 -m http.server 21000 --bind 127.0.0.1; sleep 3
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:21000/)
 [ "$c" = 200 ] && echo "PASS loopback-bound reachable" \
               || echo "FAIL loopback-bound UNREACHABLE ($c) — the tunnel is not working here"
 
 # ...and a 0.0.0.0-bound one must STILL be reachable. The tunnel is a superset, so this is
 # the no-regression half: it is what worked before the change.
-podman exec -d cs193v python3 -m http.server 8080 --bind 0.0.0.0; sleep 1
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/)
+podman exec -d cs193v python3 -m http.server 21001 --bind 0.0.0.0; sleep 3
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:21001/)
 [ "$c" = 200 ] && echo "PASS wildcard-bound still reachable" \
               || echo "FAIL wildcard-bound REGRESSED ($c)"
 
-# ::1 alone is the one bind address the tunnel cannot reach, since the far end is IPv4.
+# AND IT GOES AWAY AGAIN. The other half of the lifecycle, and the one a fixed list could not
+# have: kill the server and the host port must be handed back. A few ticks, deliberately, so a
+# restarting dev server does not flap.
+podman exec cs193v pkill -f 'http.server 21000'; sleep 8
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:21000/)
+[ "$c" = 000 ] && echo "PASS the host port was released" \
+              || echo "FAIL 21000 still answers ($c) — a forward outlived its server"
+
+# a port with NOTHING listening inside must be refused. Note this is the case that inverted:
+# it used to be tested by binding a port OUTSIDE the declared set, which would now simply get
+# it forwarded. Bind nothing.
+for p in 21100 21101 21102; do
+  c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$p/")
+  [ "$c" = 000 ] && echo "PASS nothing-listening $p refused" || echo "FAIL $p reachable ($c)"
+done
+
+# ::1 alone is the one loopback address the tunnel cannot reach, since the far end is IPv4 --
+# and the REASON must reach the student, which is the half that used to be missing.
 podman exec -d cs193v python3 -c 'import http.server,socket,socketserver
 class S(socketserver.TCPServer): address_family=socket.AF_INET6; allow_reuse_address=True
-S(("::1",5177),http.server.SimpleHTTPRequestHandler).serve_forever()'; sleep 1
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:5177/)
+S(("::1",21002),http.server.SimpleHTTPRequestHandler).serve_forever()'; sleep 3
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:21002/)
 [ "$c" = 000 ] && echo "PASS ::1-only is refused, as documented" \
               || echo "NOTE ::1-only is reachable ($c) — better than documented, update the docs"
+podman exec cs193v grep -q '^refused	21002	v6lo' /tmp/cs193v/ports \
+  && echo "PASS and the reason is recorded" || echo "FAIL no v6lo reason for 21002"
+podman exec cs193v cs193v-portwatch --show      # expect 21002 under "Not reachable, and why"
+
+# the direction invariant, tested rather than asserted: a remote forward must be REFUSED by
+# the server, and must create no listener
+CTL="$(ls "${TMPDIR:-/tmp}"/cs193v-*.ctl 2>/dev/null | head -1)"
+ssh -S "$CTL" -O forward -R 127.0.0.1:21900:127.0.0.1:21001 student@cs193v-tunnel 2>&1 \
+  | grep -q 'forwarding request failed' && echo "PASS -R refused" || echo "FAIL -R was ACCEPTED"
+[ "$(ss -ltn | grep -c ':21900')" = 0 ] && echo "PASS no listener created" \
+                                        || echo "FAIL something is listening on 21900"
+
+# and the tunnel must not be usable as a proxy past the container's own loopback
+ssh -S "$CTL" -O forward -L 127.0.0.1:21901:1.1.1.1:80 student@cs193v-tunnel 2>/dev/null
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:21901/)
+[ "$c" = 000 ] && echo "PASS PermitOpen blocks off-box destinations" \
+              || echo "FAIL the tunnel proxied to 1.1.1.1 ($c)"
+ssh -S "$CTL" -O cancel -L 127.0.0.1:21901:1.1.1.1:80 student@cs193v-tunnel 2>/dev/null
+
+# a busy HOST port must cost that port only, and must say so. Hold it out here first, then ask
+# for it in there -- the refusal now arrives mid-session, per port, rather than at launch.
+python3 -c 'import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",21200)); s.listen(1); time.sleep(60)' &
+sleep 1; podman exec -d cs193v python3 -m http.server 21200 --bind 127.0.0.1; sleep 5
+podman exec cs193v grep -q '^refused	21200	busy' /tmp/cs193v/ports \
+  && echo "PASS the busy port is named, with a reason" || echo "FAIL busy port not reported"
+"$DIR/cs193v" doctor | grep -q 'busy: 21200' \
+  && echo "PASS doctor names it too" || echo "FAIL doctor missed it"
+kill %1 2>/dev/null
+podman exec cs193v pkill -f http.server
 
 # `ss` inside the container must name the bind address, which is what a student has to be able
 # to read to tell a reachable server from an unreachable one.
-podman exec -d cs193v python3 -m http.server 4000 --bind 0.0.0.0     # not forwarded
+podman exec -d cs193v python3 -m http.server 21300 --bind 127.0.0.1
+podman exec -d cs193v python3 -m http.server 21301 --bind 0.0.0.0
 podman exec cs193v ss -ltn
-   # expect: 127.0.0.1:3000  a forwarded port, loopback-bound  -> reachable
-   #         0.0.0.0:8080    a forwarded port, wildcard-bound  -> reachable
-   #         [::1]:5177      the one address the tunnel cannot reach
-   #         0.0.0.0:4000    listening but outside CS193V_PORTS -> not forwarded
-   # whether a forward exists at all is host-side: `cs193v doctor`, not this.
+   # expect: 127.0.0.1:21300  loopback-bound  -> reachable
+   #         0.0.0.0:21301    wildcard-bound  -> reachable
+   #         [::1]:PORT       the one address the tunnel cannot reach
+   # what is forwarded is host-side, but the container can now see the verdict:
+podman exec cs193v cs193v-portwatch --show
 podman exec cs193v pkill -f http.server
 podman exec cs193v pkill -f SimpleHTTP
 
 # host side must be loopback-only, not LAN-exposed
-podman exec -d cs193v python3 -m http.server 3000 --bind 0.0.0.0; sleep 1
-(ss -ltn 2>/dev/null || netstat -an) | grep ':3000'    # expect 127.0.0.1:3000, NOT 0.0.0.0:3000 or *:3000
+podman exec -d cs193v python3 -m http.server 21400 --bind 0.0.0.0; sleep 3
+(ss -ltn 2>/dev/null || netstat -an) | grep ':21400'   # expect 127.0.0.1:21400, NOT 0.0.0.0 or *
 LANIP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LANIP:3000/")
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LANIP:21400/")
 [ "$c" = 000 ] && echo "PASS not LAN-reachable" \
               || echo "FAIL reachable on LAN ($LANIP) — student servers are exposed"
 podman exec cs193v pkill -f http.server
@@ -962,19 +976,18 @@ Mostly automated in §A.11. What still needs a person:
 
 **8.1 — Login with no host browser.** `claude` then `/login` inside the container.
 *Expect:* a URL is **printed** and a device/paste code flow completes. Nothing is *published* with
-`-p`, deliberately, but the ssh tunnel forwards every port in `CS193V_PORTS` from host loopback to
-container loopback, so a callback landing on one of those ports **is** reachable — the claim that
-used to sit here, that a redirect-only flow must fail, stopped being true when the tunnel landed
-(#82). Known and measured, so do not re-diagnose it from a 298 MB binary: Claude Code consults
+`-p`, deliberately, but the ssh tunnel forwards any port a program binds inside the container to
+the same port on host loopback, so an OAuth callback on a random ephemeral port **is** reachable —
+the claim that used to sit here, that a redirect-only flow must fail, stopped being true when the
+tunnel landed (#82), and it is no longer limited to a declared set either. Known and measured, so do not re-diagnose it from a 298 MB binary: Claude Code consults
 `$BROWSER` and really does run the stub, but captures its stdout, so the box is discarded and what
 you see is Claude's own full-length URL. `podman exec <container> pgrep -af '[s]hortlink'` confirms
 the stub ran. `tests/MANUAL.md` §8.1 is the fuller account.
 
 **8.2 — `gh`, `vercel` and `codex` login.** `gh auth login`, then `vercel login`, then
-`codex login`. **1455 is forwarded now (#71)**, first in the `CS193V_PORTS` line in
-`.config/container.args`, so try codex's browser flow before reaching for `--device-auth`. If the
-redirect flow completes, say so — that is the measurement #82 asks for, and the same question is
-open for the other two.
+`codex login`. Codex's callback on `localhost:1455` needs nothing arranged for it, so try its
+browser flow before reaching for `--device-auth`. If the redirect flow completes, say so — that is
+the measurement #82 asks for, and the same question is open for the other two.
 *Expect:* all three complete with a printed URL or emailed code. During `gh auth login`, answer
 **yes** to "Authenticate Git with your GitHub credentials?" and then confirm `git push` works from
 a test repo.

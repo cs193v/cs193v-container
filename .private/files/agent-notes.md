@@ -4,26 +4,28 @@
 
 ## Ports — read this before starting any server
 
-Only the ports in the $CS193V_PORTS variable are available.
+Any port works. Start a server on whatever port you like and it becomes reachable from the
+student's browser about a second later — nothing has to be declared, reserved or restarted.
 
-If available, ports in the range 6173-6182 are intended as spares in case a tool's default
-is already taken.
+**The bind address is what matters, and it is the one thing that can go wrong.** The student's
+localhost is SSH forwarded to this container's localhost over IPv4, so:
 
-One port in that list is not for your servers: 1455 is where `codex login` receives its
-browser callback. Do not start anything on it.
+- `127.0.0.1` — works.
+- `0.0.0.0` — works.
+- `::1` — does **not** work. Forwarding is IPv4, so an IPv6-only listener is unreachable.
+- another loopback address such as `127.0.0.53` — does not work either. The far end is
+  `127.0.0.1` specifically.
+- the container's eth0 address — does not work. Bind loopback or the wildcard instead.
 
-Host's localhost is SSH forwarded to the container localhost, so servers can bind
-to localhost. Binding ::1 does not work because forwarding is done over IPv4.
+**`cs193v-portwatch --show` answers "is my port reachable, and if not why"** from in here, which
+is the first thing to run when the student says their browser cannot get to their server. It
+lists each port with either `up` or the reason it was refused. `ss -ltn` shows what is actually
+listening and at which address; `lsof -i` names the process holding a port. All are installed;
+do not install network tools.
 
-To find out what is actually listening and where it is bound, use `ss -ltn` — that is the
-question to answer first when the student says their browser cannot reach their server, and
-the bind address is the half that decides it. `lsof -i` names the process holding a port.
-Both are installed; do not install network tools.
-
-Whether a port is forwarded on the student's own computer is not visible from in here at all.
-If the server is listening on a port in $CS193V_PORTS at an address other than ::1 and the
-browser still cannot reach it, the answer is `./cs193v doctor`, which the student runs on
-their own computer, not in this container.
+If `--show` says a port is `busy`, another program on the student's own computer is holding that
+number — pick a different one, or have them quit it. For anything `--show` cannot explain, the
+student runs `./cs193v doctor` on their own computer, not in this container.
 
 ## Browser tests
 
@@ -35,9 +37,9 @@ first run (about 114 MB), which works but is slow and is not what the image was 
 - Do not run `playwright install` for that version. The browser is already here.
 - Headless only. There is no display and only the headless shell is installed, so
   `headless: false` and `channel: 'chromium'` will not work.
-- A spec and the dev server it drives both run inside this container, so `$CS193V_PORTS`
-  does not limit what a test can reach. That list limits what the student's own browser can
-  reach from outside. A test hitting `http://localhost:9999` is fine.
+- A spec and the dev server it drives both run inside this container, so a test reaches its
+  server directly and none of the bind-address rules above apply to it. A test hitting
+  `http://localhost:9999`, or `http://[::1]:9999`, is fine.
 
 ## Nothing here outlives the terminal
 

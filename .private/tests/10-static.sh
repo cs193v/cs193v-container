@@ -47,10 +47,38 @@ assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 assert_exec "exec:cs193v"             "$REPO/cs193v"
 assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
 
+# ─── the tunnel may only ever bind loopback ────────────────────────────────────
+# EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
+# security property the whole design rests on: the host side of the tunnel is loopback-only
+# because the ssh client binds it that way, not because of a flag anyone remembers. There is one
+# -L left -- the template in tunnel_dyn_forward, whose port comes from the container -- and the
+# address either side of it is a literal. A `-L $something:` or a `-L *:` reaching this file would
+# expose a student's dev server to the dorm network, and no runtime test would necessarily catch
+# the case that mattered.
+#
+# 60-container.sh asserts the same property from the other end, against a running tunnel; this one
+# fails at edit time, before anything is built.
+# `[ -L` FILTERED FIRST, and it is not a nicety: -L is also test(1)'s "is a symlink", which the
+# launcher uses to resolve $SELF. And the address is QUOTED at the call site, so the allowed
+# pattern has to admit the quote -- without that this matched the two correct lines and reported
+# them as violations.
+# TWO OTHER MEANINGS OF -L ARE FILTERED FIRST, and both were false positives on the real file:
+# test(1)'s "is a symlink", which the launcher uses to resolve $SELF, and `tmux -L`, which names a
+# socket. And the address is QUOTED at the call site, so the allowed pattern has to admit the
+# quote -- without that this matched the two correct lines and called them violations.
+hits="$(sed 's/#.*//' cs193v | grep -nE '(^|[^[:alnum:]_])-L ' \
+        | grep -vE '\[ *!? *-L ' | grep -vE 'tmux[^|]*-L ' \
+        | grep -vE '[-]L "?127[.]0[.]0[.]1:' || true)"
+assert_eq "ports:every-forward-binds-loopback" "" "$hits"
+
 # ─── bash 3.2 compatibility ────────────────────────────────────────────────────
 # macOS ships bash 3.2 and the launcher is the same script on every platform, so a bash 4
 # construct is a Mac-only breakage that no Linux test run would ever surface.
-BASH4='declare -A|mapfile|readarray|\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
+# `coproc` joined the list while the supervisor was being written: it is bash 4, it is exactly
+# what someone reaches for when wiring a long-lived reader to a long-lived writer, and the
+# supervisor is that shape -- so this is the one place a Mac-only breakage would have been most
+# tempting to introduce. verb_supervise uses `< <(...)` instead.
+BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
 hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
@@ -621,6 +649,80 @@ for sig in EXIT HUP INT TERM; do
     assert_match "launcher:teardown-traps-$sig" "trap shell_teardown.*$sig" "$open_shell_body"
 done
 
+# ─── nothing shared is touched before the session is WON ───────────────────────
+# open_shell claims the tmux session, THEN installs the trap, THEN raises the tunnel. That order
+# has no runtime symptom, which is why it is asserted here: a launch that will lose the race still
+# gets a shell either way, so moving ensure_tunnel back above the claim would leave every test
+# green while a losing launch bound host ports it then abandoned. `podman start` is idempotent and
+# the launcher's own state check is a check-then-act, so the claim is the only thing that decides
+# ownership -- see files/cs193v-shell and 80-launcher-live.sh's four-way race.
+# COMMENTS STRIPPED FIRST, and that is not tidiness: the prose here mentions ensure_tunnel by
+# name several times, so searching the raw body finds a comment and reports the wrong line. The
+# first version of this check passed with the regression in place for exactly that reason.
+open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
+line_of() { printf '%s\n' "$open_shell_code" | grep -n -- "$1" | head -1 | cut -d: -f1; }
+claim_at="$(line_of 'cs193v-shell --claim')"
+trap_at="$(line_of 'trap shell_teardown')"
+tun_at="$(line_of 'ensure_tunnel')"
+att_at="$(line_of 'cs193v-shell --attach')"
+if [ -n "$claim_at" ] && [ -n "$trap_at" ] && [ -n "$tun_at" ] && [ -n "$att_at" ] \
+   && [ "$claim_at" -lt "$trap_at" ] && [ "$trap_at" -lt "$tun_at" ] && [ "$tun_at" -lt "$att_at" ]; then
+    pass "launcher:no-setup-work-before-the-session-claim"
+else
+    fail "launcher:no-setup-work-before-the-session-claim" \
+"open_shell must run: claim -> trap -> ensure_tunnel -> attach.
+Got line numbers within the function: claim=$claim_at trap=$trap_at tunnel=$tun_at attach=$att_at
+A launch that loses the claim race must not have bound host ports first."
+fi
+# The launcher raises the tunnel INSIDE open_shell now, not on the dispatch arm, for the same
+# reason. Asserting its absence there stops it drifting back.
+assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
+                    "ensure_tunnel || true
+                         open_shell" "$launcher_src"
+
+# THE SUPERVISOR'S PID MUST BE THE LOOP'S PID, and that is a claim about one shell metacharacter.
+# `podman exec ... | sup_loop` puts the loop in a SUBSHELL, so the $$ written to the pidfile names
+# the PARENT -- killing it leaves the loop and the exec running. Measured before this assertion
+# existed: one supervisor survived every single stop. `sup_loop < <(podman exec ...)` makes the loop
+# this very process, so the tracked pid is the one whose death cascades.
+# Comments stripped first: verb_supervise's own comment QUOTES the pipeline it warns against, so
+# an unstripped grep matches the warning and passes with the bug in place. That exact trap already
+# cost this suite one vacuous assertion.
+# NOTHING IN THE SUPERVISOR'S PARSE PATH MAY EVALUATE WHAT THE CONTAINER SENT. Measured on bash
+# 5.3.9 with `a[$(cmd)]` injected: $(( )), (( )), [[ -eq ]], ${v:x:y} and ${a[x]} ALL execute it.
+# `case` evaluates nothing, which is why the gate is case-first -- but the gate lives in
+# cs193v-ui.sh and the functions that CONSUME its output live in the launcher, so this checks the
+# consumers. It has to sit down here rather than beside the other port lints: fn_body is defined
+# further up this file, and placed earlier the whole block errored out with "fn_body: command not
+# found" while assert_eq compared two empty strings and passed. Measured -- it did.
+sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_cancel \
+                      tunnel_dyn_classify sup_log sup_publish sup_tick sup_loop; do
+                 fn_body "$f" "$REPO/cs193v"
+             done | sed 's/^[[:space:]]*#.*//')"
+if [ -z "$sup_parse" ]; then
+    fail "supervisor:the-parse-path-was-found" "fn_body returned nothing for the supervisor's
+functions, so the two assertions below would compare empty strings and pass."
+else
+    pass "supervisor:the-parse-path-was-found"
+fi
+assert_not_contains "supervisor:no-double-bracket-in-the-parse-path" "[[" "$sup_parse"
+assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
+          "$(printf '%s\n' "$sup_parse" | grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*\[' || true)"
+
+sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
+assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
+assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"
+
+# AND THE WATCHER IS REAPED ON BOTH SIDES OF THE LIFECYCLE. The cascade the comment above describes
+# stops at the host: the container-side watcher's writes land in a pipe buffer conmon holds open, so
+# the EPIPE that should end it may never arrive. Teardown handles this by stopping the container --
+# but --reset-tunnel never calls tunnel_down, so without an explicit reap each reset would strand one
+# watcher and start another beside it. Measured: four accumulated across one testing session.
+for f in tunnel_sup_start tunnel_sup_stop; do
+    assert_contains "supervisor:$f-reaps-the-watcher" \
+                    'pkill -f "cs193v-portwatch --watch"' "$(fn_body $f $REPO/cs193v)"
+done
+
 # The tunnel goes down BEFORE the container, always. remove_container documents why in full:
 # an ssh client outliving its container holds every forwarded host port against a dead pipe, so the
 # next tunnel can bind none of them. Asserted as an ORDER, because both lines being present
@@ -883,53 +985,17 @@ assert_not_match "load_args:guard-is-not-an-emptiness-test" \
 published="$(printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
 assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 
-# The port set now comes from ONE declaration, CS193V_PORTS, which the launcher parses to
-# build its ssh -L flags and also passes into the container to be read there. Host and
-# container side are therefore the same number by construction, so the old
-# "host range != container range" check has no failure left to catch and is gone.
-port_report="$(printf '%s\n' "$args_live" | python3 -c '
-import re, sys
-spec = ""
-for line in sys.stdin:
-    m = re.search(r"CS193V_PORTS=([0-9,\-]+)", line)
-    if m:
-        spec = m.group(1)      # last wins, exactly as tunnel_ports() in the launcher does
-problems = []
-total = 0
-if not spec:
-    problems.append("no CS193V_PORTS= line at all, so nothing would be forwarded")
-for chunk in spec.split(","):
-    if not chunk:
-        continue
-    if "-" in chunk:
-        a, b = (int(x) for x in chunk.split("-", 1))
-    else:
-        a = b = int(chunk)
-    if b < a:
-        problems.append("range %s is backwards" % chunk)
-        continue
-    total += b - a + 1
-    if a < 1024:
-        problems.append("privileged port %d (an unprivileged ssh client cannot bind these)" % a)
-    for reserved in (5000, 7000):
-        if a <= reserved <= b:
-            problems.append("port %d collides with macOS AirPlay Receiver" % reserved)
-print("total=%d" % total)
-print("\n".join(problems))
-')"
-# 47, not 46, since codex's login callback joined the list. A LITERAL here on purpose, unlike the
-# forward counts in the port-aware suites, which #46 derived from `--dev-tunnel` because they must
-# follow a local.args override: this one checks the DEFAULT set the repo ships, so a number is the
-# canary -- change the shipped list and you are made to look at it.
-assert_contains "ports:count-is-47" "total=47" "$port_report"
-assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=47" "$(printf '%s' "$port_report" | sed '/^$/d')"
-
-# The one member of the default list that is not a dev-server port. `codex login` runs a server on
-# 1455 inside the container and the student's browser connects to it, which is exactly what the
-# tunnel already does for every other port. Asserted because without it `codex login` hangs,
-# having printed a URL whose callback goes nowhere.
-assert_match "ports:codex-login-callback-is-forwarded" '(^|,)1455(,|-|$)' \
-             "$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
+# THE ARGS FILE DECLARES NO PORTS AT ALL, and that is now the invariant rather than a property of
+# whatever it declared. There is no list to count, no privileged entry to reject and no AirPlay
+# collision to avoid, because nothing here chooses ports: the launcher's supervisor forwards what
+# the container turns out to be listening on. ports:count-is-47, its no-privileged-no-airplay
+# sibling and ports:codex-login-callback-is-forwarded all went with the list they were about.
+#
+# WHAT REPLACES THEM IS THE ABSENCE, asserted, because a -e CS193V_PORTS line coming back would
+# not fail anything on its own -- nothing reads it -- and would quietly reintroduce the second
+# source of truth this change exists to remove. Someone re-adding one is made to come here.
+assert_eq "ports:no-port-list-is-declared" "" \
+          "$(printf '%s\n' "$args_live" | grep -E 'CS193V_PORTS' || true)"
 
 # ports:CS193V_PORTS-matches--p-lines is DELETED, not rewritten. It guarded the agreement
 # between CS193V_PORTS and a parallel set of -p lines; deriving the forwards from
@@ -1011,13 +1077,12 @@ assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
 
 # ─── documented claims must be true  (#11, #12, #14) ───────────────────────────
 # A comment that promises behaviour which does not exist is worse than no comment: the next
-# person to edit the port list will rely on it. container.args claimed `cs193v doctor` warns
-# when CS193V_PORTS and the -p lines disagree. verb_doctor never compared them.
+# person to edit this section will rely on it. container.args claimed `cs193v doctor` warns when
+# the port list and the -p lines disagree. verb_doctor never compared them, and there is no list
+# to disagree with now -- but the section is still the natural place for someone to write a claim
+# about what doctor does, so the guard stays and is retargeted at the section as it now stands.
 assert_not_contains "claims:no-phantom-doctor-ports-warning" "doctor" \
-                    "$(sed -n '/Environment/,/CS193V_PORTS=/p' $REPO/.config/container.args)"
-# The invariant itself is enforced statically instead, which is strictly better than a
-# runtime warning -- it fails at edit time rather than after a student is already misled.
-# (ports:CS193V_PORTS-matches--p-lines, above.)
+                    "$(sed -n '/─── Environment/,/^# ═══/p' $REPO/.config/container.args)"
 
 # CONTAINER-DESIGN.md said "macOS and Windows are case-insensitive". On Windows this design
 # puts projects/ inside the WSL distro's ext4 home, which IS case-sensitive -- and the doc

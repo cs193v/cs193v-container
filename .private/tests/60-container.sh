@@ -21,12 +21,12 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
 require_running
-# WHICH PORTS, asked of the launcher rather than assumed. Every port assertion in this file used
-# to carry its own copy of the default list, so the CS193V_PORTS override CLAUDE.md documents
-# reddened five of them (#46). fwd_init reads `cs193v --dev-tunnel` once; $FWD_PORTS, $FWD_N,
-# $FWD1 and $FWD2 come from there. Recorded, not asserted, so a results file says which set ran.
+# WHICH PORTS: none, until this file makes some. There is no declared set to read any more, so
+# every port assertion below runs against ports THIS RUN binds inside the container and waits for
+# the tunnel to carry -- dyn_ports, which hard-fails if it never does. Established rather than
+# read, which is strictly stronger: the old version could pass on a well-formed list while nothing
+# was forwarded at all. Recorded, not asserted, so a results file says which ports ran.
 fwd_init
-record "ports:the-forwarded-set-under-test" "$FWD_SPEC"
 # The port matrix below reaches the container's own loopback through the tunnel, and a
 # back-to-back run arrives with the container up and the tunnel gone -- 80-launcher-live.sh
 # releases it on purpose so a finished run does not sit on those ports. See require_tunnel.
@@ -121,28 +121,23 @@ assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | tr -d 
 # The forwards live on the HOST instead, in one ssh process. Loopback-only is now structural
 # rather than a flag that could be forgotten -- the ssh client binds 127.0.0.1 itself -- but it
 # is asserted anyway, because it is what keeps a dev server off dorm wifi.
-nfwd="$(count_forwards)"
-# Spelled out rather than assert_eq, because "expected 46, actual 0" names neither of the two
-# things that actually cause it, and both are ordinary rather than exotic. 80-launcher-live.sh
-# now RELEASES the tunnel when it finishes, so a container left running by an earlier session
-# has no forwards until somebody launches again; and the ports are not namespaced by
-# CS193V_INSTANCE, so a colleague's instance may simply be holding them.
-#
-# count_forwards counts what OUR OWN tunnel holds, which is the fix for the second half of #46:
-# it used to count any listener on those ports, so this assertion passed on a colleague's tunnel
-# while this instance forwarded nothing at all.
-if [ "${nfwd:-0}" = "$FWD_N" ]; then
-    pass "ports:every-forward-is-on-the-host"
-else
-    fail "ports:every-forward-is-on-the-host" "${nfwd:-0} of $FWD_N are forwarded by this instance.
-The container is running but its tunnel is not: the live tier hands the ports back when it
-finishes, so a container from an earlier run has none until the next launch.
-Run:  ./cs193v          (and ./cs193v doctor if they do not come back -- another instance on
-                         this machine may be holding them; see CLAUDE.md)
-$(fwd_squatters 3)"
-fi
-wild="$(ss -ltn 2>/dev/null | awk '{print $4}' \
-        | grep -E "$FWD_ANY_RE" \
+# ESTABLISH TWO, and this line is where the whole port section gets its subject. dyn_ports binds
+# them inside the container and waits for our master to carry them, so by the time it returns the
+# feature has already been proved end to end once; everything below asks narrower questions about
+# ports that are known to be up.
+DYN2="$(dyn_ports 2)"
+DYN1="$(printf '%s' "$DYN2" | awk '{print $1}')"
+DYN2ND="$(printf '%s' "$DYN2" | awk '{print $2}')"
+record "ports:the-ports-under-test" "$DYN2"
+pass "ports:a-port-bound-inside-reaches-the-host"
+
+# NOT LAN-EXPOSED, asked of everything our master holds rather than of a declared set. This is one
+# of the three security properties the whole design rests on, and it got STRONGER with the change:
+# there is no list to be checked against, so the question is now "is every port this tunnel has
+# opened, whatever it is, on 127.0.0.1" -- and fwd_owned_ports only matches loopback binds, so the
+# check is that our master holds nothing anywhere else.
+mpid="$(tunnel_owner_pid)"
+wild="$(ss -ltn 2>/dev/null | awk -v p="pid=$mpid," '$0 ~ p { print $4 }' \
         | grep -v '^127\.0\.0\.1:' || true)"
 assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
 
@@ -151,7 +146,8 @@ assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
 # NOT ownership-filtered, deliberately: filtering by our own pid first would make the answer 1
 # by construction and the assertion vacuous. require_tunnel has already established that every
 # one of these ports is ours, so a second pid here means ssh stopped multiplexing.
-nproc_fwd="$(ss -ltnp 2>/dev/null | awk -v re="$FWD_RE" '$4 ~ re && /pid=/ { print }' \
+nproc_fwd="$(ss -ltnp 2>/dev/null | awk -v re="^127[.]0[.]0[.]1:($(printf '%s' "$DYN2" | tr ' ' '|'))\$" \
+                 '$4 ~ re && /pid=/ { print }' \
              | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | grep -c . || true)"
 assert_eq "ports:one-ssh-process-carries-them-all" "1" "${nproc_fwd:-0}"
 
@@ -180,8 +176,11 @@ assert_eq "mount:exactly-seven-volumes" "7" "$nvol"
 
 assert_match "label:confighash-is-set" '.' "$(I '{{index .Config.Labels "cs193v.confighash"}}')"
 assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.dir"}}')"
-assert_contains "env:CS193V_PORTS-reaches-the-container" "CS193V_PORTS=$FWD_SPEC" \
-                "$(I '{{json .Config.Env}}')"
+# NOTHING NAMES A PORT IN THE CONTAINER'S ENVIRONMENT, which is the create-time half of the
+# no-declared-list invariant. 10-static.sh asserts the args file declares none; this asserts none
+# reached the container, so a -e line added by any other route is caught too.
+assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
+                    "$(I '{{json .Config.Env}}')"
 record "pid1" "$(I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}')"
 
 # ─── identity: hostname, banner, goodbye  (#3, #4) ─────────────────────────────
@@ -498,23 +497,13 @@ assert_eq "term:256-colours-with-forwarded-TERM" "256" \
 record "term:colours-without-forwarding" \
        "$(podman exec -it "$NAME" tput colors 2>/dev/null | tr -d '\r')"
 
-# -e at create time must reach every later exec session, not just the first process.
-#
-# ASSERTED AGAINST THE LAUNCHER'S OWN DECLARATION, and as equality rather than a substring: what
-# the container reports has to be the value this launcher would pass today, or every port
-# assertion below is measuring a container that predates the current CS193V_PORTS. `podman start`
-# reuses the stored environment, and the suite raises the container with podman start (see
-# hold_container), so that disagreement is reachable without anything being broken -- an edit to
-# local.args and no relaunch. The needle used to be the literal "3000-3009", which could not see
-# it at all (#46).
-env_ports="$(E 'printenv CS193V_PORTS')"
-if [ "$env_ports" = "$FWD_SPEC" ]; then
-    pass "env:CS193V_PORTS-visible-in-exec"
-else
-    fail "env:CS193V_PORTS-visible-in-exec" "the container says CS193V_PORTS=$env_ports
-but this launcher forwards $FWD_SPEC. The container was created with an older port list, so it
-needs recreating before the port matrix below means anything:  ./cs193v --rebuild"
-fi
+# env:CS193V_PORTS-visible-in-exec IS DELETED, and nothing replaced it. It asserted that a value
+# passed with -e at create time reaches every later exec session and not just the first process --
+# a real property of `podman start` reusing a stored environment, and worth a test. It has no
+# subject any more: container.args passes no -e flags at all, because the one it used to pass was
+# the port list. Retargeting it at an ENV baked into the image would test a different mechanism
+# and quietly claim to test this one. If an -e line is ever added back, this is the test to
+# restore with it.
 assert_ok "net:dns-resolves" sh -c "podman exec ${NAME} getent hosts registry.npmjs.org"
 assert_ok "net:https-egress-works" sh -c "podman exec ${NAME} curl -fsS -o /dev/null --max-time 20 https://registry.npmjs.org/"
 
@@ -589,10 +578,6 @@ while True:
             pass
 PY
 podman cp "$TMP/portprobe.py" "$NAME":/tmp/cs193v-portprobe.py
-# From the LAUNCHER, via fwd_init at the top of this file, not from a second parse of
-# container.args. This is the site issue #46 was reported against: reading container.args alone
-# ignores the CS193V_PORTS override in local.args, so the probe bound -- and the loop below
-# curl'd -- 46 ports this instance was not forwarding, and every one came back 000.
 
 # Start a probe and WAIT FOR ITS REPORT rather than for a fixed number of seconds. The report
 # is printed after the last listen(), so its arrival is the readiness signal -- 0.24 s
@@ -633,91 +618,96 @@ so this is either a real in-container conflict or a process that appeared during
 
 probe_stop() { container_pkill cs193v-portprobe; }
 
-# Bound to 127.0.0.1, NOT 0.0.0.0. This is the whole point of the change: the container's own
-# loopback used to be the one place the forwarder never reached, so testing the wildcard case
-# here would pass just as well before the tunnel existed and prove nothing.
-assert_probe "ports:probe-bound-every-forwarded-port-on-loopback" "$FWD_LIST" 127.0.0.1
+# ─── what reaches the host, and what does not ──────────────────────────────────
+# THE WHOLE MATRIX CHANGED SHAPE. It used to bind all 46 declared ports and curl each one, which
+# asked "is the list forwarded". There is no list: a port is forwarded because something inside
+# the container is listening on it, so the questions worth asking are per BIND ADDRESS -- which
+# kinds of listener the tunnel carries and which it refuses -- plus the two directions of the
+# lifecycle, a server appearing and a server going away.
+#
+# EVERY PROBE GETS A FRESH PORT, picked from what is free on the host at that moment. Reusing one
+# across cases would mean the previous case's forward is still lingering when the next begins, and
+# the supervisor holds a vanished port for five ticks before cancelling it -- so a "refused" case
+# would read as reachable through the corpse of the one before it.
+host_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$1/"; }
+host_gets_200() { [ "$(host_code "$1")" = 200 ]; }
+host_gets_000() { [ "$(host_code "$1")" = 000 ]; }
+# What the container itself says about a port, which is the reason half of every refusal. Asserting
+# on it turns "unreachable" from an absence into a diagnosis -- the difference between "the tunnel
+# is broken" and "you bound ::1", which is the whole reason the state file carries a reason at all.
+dyn_reason() {
+    podman exec "$NAME" awk -F'\t' -v p="$1" \
+        '$1 == "refused" && $2 == p { print $3; exit }' /tmp/cs193v/ports 2>/dev/null
+}
 
-# The expansion used to happen here, in a python one-liner over the range spec. The launcher
-# already does it -- tunnel_ports() is what turns the spec into ssh -L flags -- so $FWD_PORTS is
-# that same list, and the two cannot disagree about what "all 46" means.
-ALL="$FWD_PORTS"
-nports="$(printf '%s\n' $ALL | wc -l | tr -d ' ')"
-assert_eq "ports:probe-covers-every-forwarded-port" "$FWD_N" "$nports"
-
-badports=""
-for p in $ALL; do
-    c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$p/")"
-    [ "$c" = 200 ] || badports="$badports $p($c)"
-done
-if [ -z "$badports" ]; then
-    pass "ports:every-forwarded-port-reaches-a-loopback-bound-server"
-else
-    fail "ports:every-forwarded-port-reaches-a-loopback-bound-server" "unreachable:$badports"
-fi
-
-# Ports outside the forwarded set must be refused, whatever they are bound to. With the bind
-# address no longer mattering, this is the ONLY failure mode left that is invisible from
-# inside the container.
-probe_stop
-# WHICH PORTS COUNT AS UNFORWARDED IS DERIVED, by free_unforwarded_ports in lib/assert.sh --
-# candidates minus this instance's own set, minus anything already listening on the host. The five
-# that used to be written out here (4000 7000 8500 9100 3100) are the head of its pool, so with the
-# shipped port list this probes exactly what it always did; with 4000 forwarded it silently moves on.
-UNFWD="$(free_unforwarded_ports 5)"
-nunfwd=0
-for p in $UNFWD; do nunfwd=$((nunfwd + 1)); done
-record "ports:the-unforwarded-ports-under-test" "$UNFWD"
-if [ "$nunfwd" -lt 3 ]; then
-    # BOTH names still reported, so the results file has the same lines whichever way this went.
-    # A missing result reads as a suite that got shorter, which is indistinguishable from one that
-    # was edited -- and this branch is the one nobody will be watching for.
-    fail "ports:probe-bound-the-unforwarded-ports" "only $nunfwd candidate ports are both outside
-this instance's forwarded set and free on the host, so there is nothing to test with. See
-free_unforwarded_ports in lib/assert.sh for the pool it tried."
-    fail "ports:unforwarded-ports-are-refused" "see above: no unforwarded port to probe"
-else
-    assert_probe "ports:probe-bound-the-unforwarded-ports" "$(printf '%s' "$UNFWD" | tr ' ' ',')" 0.0.0.0
-    reachable=""
-    for p in $UNFWD; do
-        c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$p/")"
-        [ "$c" = 000 ] || reachable="$reachable $p($c)"
-    done
-    if [ -z "$reachable" ]; then
-        pass "ports:unforwarded-ports-are-refused"
-    else
-        fail "ports:unforwarded-ports-are-refused" "unexpectedly reachable:$reachable"
-    fi
-fi
-probe_stop
-
-# THE assertion this change exists for, and it is deliberately the inverse of what it used to
-# be. A 127.0.0.1-bound server inside was unreachable, because podman's forwarder delivers to
-# the container's eth0 and never its lo; the tunnel's far end IS that lo, so it must now
-# answer. The whole-set loop above already covers this, but it is asserted alone as well so a
-# failure here is unambiguous rather than one line in a list of forty-six.
-assert_probe "ports:probe-bound-the-first-port-on-loopback" "$FWD1" 127.0.0.1
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD1/")"
-if [ "$c" = 200 ]; then
+# THE assertion this design exists for, and it is deliberately the inverse of what podman did. A
+# 127.0.0.1-bound server inside was unreachable, because podman's forwarder delivers to the
+# container's eth0 and never its lo; the tunnel's far end IS that lo, so it must answer.
+PL="$(dyn_free_port)"
+assert_probe "ports:probe-bound-a-port-on-loopback" "$PL" 127.0.0.1
+if wait_until 30 host_gets_200 "$PL"; then
     pass "ports:loopback-bound-server-IS-reachable"
 else
     fail "ports:loopback-bound-server-IS-reachable" \
-         "got HTTP $c — the ssh tunnel is not reaching the container's own loopback on this
-platform, which is the entire premise of the current design. Check: cs193v doctor"
+         "got HTTP $(host_code "$PL") from 127.0.0.1:$PL — a server on the container's own
+loopback did not become reachable from this host, which is the entire premise of the design.
+  the container says: $(podman exec "$NAME" grep "	$PL	" /tmp/cs193v/ports 2>&1)
+Check: cs193v doctor"
 fi
-probe_stop
 
-# ::1 alone is the one bind address still out of reach, since the forward's far end is IPv4.
-# Recorded rather than asserted as a pass/fail of the design: if a future ssh reaches it, that
-# is an improvement, and the docs are then what is wrong.
+# AND IT GOES AWAY AGAIN. The other half of the lifecycle, and the one nothing tested before,
+# because with a fixed list a forward never went away while the tunnel lived. The supervisor holds
+# a vanished port for a few ticks before cancelling -- deliberately, so a dev server restarting
+# does not flap -- so this waits rather than samples.
+probe_stop
+if wait_until 30 host_gets_000 "$PL"; then
+    pass "ports:a-server-that-stops-releases-the-host-port"
+else
+    fail "ports:a-server-that-stops-releases-the-host-port" \
+         "127.0.0.1:$PL still answers HTTP $(host_code "$PL") after the server inside was killed.
+A forward outliving its server holds a host port nothing can use and answers connections that
+reach nothing, which is indistinguishable from a broken tunnel."
+fi
+
+# A PORT NOTHING IS LISTENING ON INSIDE MUST BE REFUSED. This used to read "a port outside the
+# forwarded set", which no longer names anything -- and note the case INVERTED: the old version
+# BOUND these ports inside the container to prove they were refused anyway, which under dynamic
+# forwarding is precisely how you get them forwarded. Nothing is bound now, on purpose.
+UNFWD="$(free_unforwarded_ports 3)"
+nunfwd=0
+for p in $UNFWD; do nunfwd=$((nunfwd + 1)); done
+record "ports:the-unbound-ports-under-test" "$UNFWD"
+if [ "$nunfwd" -lt 3 ]; then
+    fail "ports:ports-with-nothing-listening-are-refused" "only $nunfwd free host ports were
+available, so there is nothing to test with. See dyn_free_port in lib/assert.sh."
+else
+    reachable=""
+    for p in $UNFWD; do
+        c="$(host_code "$p")"
+        [ "$c" = 000 ] || reachable="$reachable $p($c)"
+    done
+    if [ -z "$reachable" ]; then
+        pass "ports:ports-with-nothing-listening-are-refused"
+    else
+        fail "ports:ports-with-nothing-listening-are-refused" "unexpectedly reachable:$reachable"
+    fi
+fi
+
+# ::1 alone is the one loopback address still out of reach, since the forward's far end is IPv4.
+# The probe binds it rather than nothing being there: "refused" is a `000` that looks identical
+# whether ::1 is unreachable or nothing ever listened, and the bind report is the positive control
+# that tells those apart. (Verified from inside, where `curl http://[::1]:PORT/` answers 200 while
+# the host gets nothing.)
 #
-# The probe binds it, rather than a second inline python of its own: "refused" is a `000` that
-# looks identical whether ::1 is unreachable or nothing ever listened on it, and the bind
-# report is the positive control that tells those apart. (Verified from inside the container,
-# where `curl http://[::1]:3001/` answers 200 while the host's 127.0.0.1:3001 gets nothing.)
-assert_probe "ports:probe-bound-the-second-port-on-ipv6-loopback" "$FWD2" "::1"
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD2/")"
+# AND THE REASON IS ASSERTED, which is new and is the point of the state file. Unreachable-with-
+# no-explanation is what sent a student to office hours; unreachable-because-v6lo is a fix they
+# can apply themselves.
+PV="$(dyn_free_port)"
+assert_probe "ports:probe-bound-a-port-on-ipv6-loopback" "$PV" "::1"
+wait_until 15 sh -c "[ -n \"$(dyn_reason "$PV")\" ]" >/dev/null 2>&1 || true
+c="$(host_code "$PV")"
 record "ports:ipv6-only-server-http" "$c"
+record "ports:ipv6-only-server-reason" "$(dyn_reason "$PV")"
 if [ "$c" = 000 ]; then
     pass "ports:ipv6-only-is-refused-as-documented"
 else
@@ -725,40 +715,81 @@ else
          "got HTTP $c — ::1-only IS reachable, which is better than documented. Update
 CONTAINER-DESIGN.md and ERRORS.md D4 rather than leaving them pessimistic."
 fi
+assert_eq "ports:ipv6-only-is-refused-with-a-reason" "v6lo" "$(dyn_reason "$PV")"
 probe_stop
 
-# The host side must be loopback-only in reality, not just in the flag. Both checks below are
-# only worth anything if something really is bound to 0.0.0.0 INSIDE: with nothing bound they
-# pass on an absence, which is what a leftover loopback probe used to arrange (#34).
-assert_probe "ports:probe-bound-the-first-port-on-the-wildcard" "$FWD1" 0.0.0.0
-listen="$( (ss -ltn 2>/dev/null || netstat -an) | grep ":$FWD1" || true)"
+# The wildcard is carried -- 0.0.0.0 includes the loopback the forward's far end resolves to --
+# and the host side must STILL be loopback-only. Both checks below are only worth anything if
+# something really is bound to 0.0.0.0 INSIDE: with nothing bound they pass on an absence, which
+# is what a leftover loopback probe used to arrange (#34).
+PW="$(dyn_free_port)"
+assert_probe "ports:probe-bound-a-port-on-the-wildcard" "$PW" 0.0.0.0
+if wait_until 30 host_gets_200 "$PW"; then
+    pass "ports:wildcard-bound-server-IS-reachable"
+else
+    fail "ports:wildcard-bound-server-IS-reachable" "got HTTP $(host_code "$PW") — a server on
+0.0.0.0 inside the container must be reachable too, since that includes its loopback."
+fi
+listen="$( (ss -ltn 2>/dev/null || netstat -an) | grep ":$PW" || true)"
 record "ports:host-listen-line" "$listen"
 assert_not_match "ports:host-does-not-listen-on-0.0.0.0" \
-                 "0\.0\.0\.0:$FWD1|\*:$FWD1|\[::\]:$FWD1" "$listen"
+                 "0\.0\.0\.0:$PW|\*:$PW|\[::\]:$PW" "$listen"
 
 LANIP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [ -n "$LANIP" ] && [ "$LANIP" != "127.0.0.1" ]; then
-    c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LANIP:$FWD1/")"
+    c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LANIP:$PW/")"
     if [ "$c" = 000 ]; then pass "ports:not-reachable-from-the-LAN"
     else fail "ports:not-reachable-from-the-LAN" \
               "reachable on $LANIP (HTTP $c) — student dev servers are exposed to the network"; fi
 else
     record "ports:not-reachable-from-the-LAN" "no non-loopback address on this host"
 fi
+probe_stop
+
+# THE DUAL-STACK CASE, which is here because it is the one classifier branch that was written
+# from reasoning about byte layout rather than from a kernel that had ever produced the bytes. A
+# listener on ::ffff:127.0.0.1 appears in /proc/net/tcp6 as `0000000000000000FFFF00000100007F` --
+# an IPv4 address in the last eight characters -- and getting it wrong means classifying a
+# perfectly reachable server as `eth` and refusing it with a reason that is a lie, which is the
+# exact failure the loalt class was added to prevent elsewhere.
+#
+# NOT THE PROBE, which binds AF_INET: this needs an AF_INET6 socket with IPV6_V6ONLY cleared, so
+# it is its own one-liner.
+PM="$(dyn_free_port)"
+podman exec -d "$NAME" python3 -c 'import http.server, socket, socketserver
+class S(socketserver.TCPServer):
+    address_family = socket.AF_INET6; allow_reuse_address = True
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        socketserver.TCPServer.server_bind(self)
+S(("::ffff:127.0.0.1", '"$PM"'), http.server.SimpleHTTPRequestHandler).serve_forever()' \
+    >/dev/null 2>&1
+record "ports:v4-mapped-port-under-test" "$PM"
+if wait_until 30 host_gets_200 "$PM"; then
+    pass "ports:a-v4-mapped-dual-stack-server-is-reachable"
+else
+    fail "ports:a-v4-mapped-dual-stack-server-is-reachable" \
+         "got HTTP $(host_code "$PM") — a listener on ::ffff:127.0.0.1 is reachable IPv4 traffic
+and must be carried like any other loopback bind. The classifier reads it out of /proc/net/tcp6:
+  $(podman exec "$NAME" grep -i "$(printf '%04X' "$PM")" /proc/net/tcp6 2>&1 | head -2)
+  cs193v-portwatch says: $(podman exec "$NAME" cs193v-portwatch --once 2>&1 | tr ' ' '\n' | grep "^$PM:")"
+fi
+assert_eq "ports:a-v4-mapped-bind-classifies-as-loopback" "$PM:lo" \
+          "$(podman exec "$NAME" cs193v-portwatch --once 2>/dev/null | tr ' ' '\n' | grep "^$PM:")"
+container_pkill "SimpleHTTPRequestHandler"
 
 # `ss` is how a student -- or the agent answering their question -- finds out what a server is
-# actually bound to, so it has to report real sockets from inside, not just exist. Kill the
-# 0.0.0.0 probe from the LAN check first, and probe_stop waits for it to be GONE, so the
-# loopback bind below cannot race its death.
-probe_stop
-assert_probe "ports:probe-bound-the-first-port-loopback-for-the-listing" "$FWD1" 127.0.0.1
-assert_probe "ports:probe-bound-the-second-port-wildcard-for-the-listing" "$FWD2" 0.0.0.0
+# actually bound to, so it has to report real sockets from inside, not just exist. Two probes at
+# once, on fresh ports, because the two lines are what a student has to be able to tell apart:
+# one of them is why their browser cannot connect and the other is not.
+PA="$(dyn_free_port)"
+PB="$(dyn_free_port "$PA")"
+assert_probe "ports:probe-bound-loopback-for-the-listing" "$PA" 127.0.0.1
+assert_probe "ports:probe-bound-wildcard-for-the-listing" "$PB" 0.0.0.0
 sout="$(E 'ss -ltn || true')"
 record "ports:in-container-listener-listing" "$(printf '%s' "$sout" | tr '\n' '|')"
-# The bind address is the whole point: these two lines are what a student has to be able to
-# tell apart, because one of them is why their browser cannot connect and the other is not.
-assert_match "ports:ss-shows-a-loopback-bind"  "127\.0\.0\.1:$FWD1" "$sout"
-assert_match "ports:ss-shows-a-wildcard-bind"  "(0\.0\.0\.0|\*):$FWD2" "$sout"
+assert_match "ports:ss-shows-a-loopback-bind"  "127\.0\.0\.1:$PA" "$sout"
+assert_match "ports:ss-shows-a-wildcard-bind"  "(0\.0\.0\.0|\*):$PB" "$sout"
 probe_stop
 
 # ─── shortlink, from the browser's side  (issue #67) ──────────────────────────
@@ -768,27 +799,45 @@ probe_stop
 # curl on the host, and it is the whole premise of the feature: the short URL is worth nothing if
 # the port it names is not carried out of the container.
 #
-# Derived from $FWD_PORTS rather than named, like every other port in this suite: shortlink walks
-# $CS193V_PORTS from the top, so the port it must have taken is the highest one this instance
-# forwards. With no override in play that is 8084; here it is whatever local.args says.
-FWD_HIGH="$(printf '%s\n' $FWD_PORTS | sort -n | tail -1)"
-FWD_NEXT="$(printf '%s\n' $FWD_PORTS | sort -n | tail -2 | head -1)"
-record "shortlink:ports-under-test" "highest $FWD_HIGH, next $FWD_NEXT"
-
+# THE PORT IS NOT PREDICTABLE ANY MORE, and that is the change this group had to absorb.
+# shortlink asks the kernel for a free port -- bind(0) -- so there is no highest-forwarded port to
+# derive and nothing to compare against a declared list. What replaces the old equality is
+# strictly stronger: read the port back out of the URL it printed, and prove the TUNNEL agrees
+# that exact port is forwarded, from both sides of it.
 container_pkill shortlink
 sl_url="$(E 'shortlink https://example.com/e2e?a=1 token')"
-assert_eq "shortlink:takes-the-highest-forwarded-port" \
-          "http://localhost:$FWD_HIGH/token" "$sl_url"
+sl_port="$(printf '%s' "$sl_url" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+record "shortlink:port-under-test" "${sl_port:-none} (from $sl_url)"
+if [ -n "$sl_port" ]; then
+    pass "shortlink:prints-a-short-url-on-a-real-port"
+else
+    fail "shortlink:prints-a-short-url-on-a-real-port" \
+         "shortlink printed \"$sl_url\", which is not http://localhost:PORT/token.
+Exit 3 prints the long URL unchanged, so this is what a degradation looks like from here: it
+could not get a port the tunnel would carry. Check:  cs193v doctor"
+fi
+
+# THE CONTAINER'S OWN VIEW AGREES. shortlink only prints a short URL after the state file says its
+# port is up, so this is close to a tautology -- but it is the one assertion that would catch it
+# printing on the strength of a stale or misread file, which is the failure the fuzzer cannot see
+# because the fuzzer never touches a real one.
+if [ -n "$sl_port" ] && E "grep -q '^up	$sl_port	' /tmp/cs193v/ports"; then
+    pass "shortlink:the-tunnel-says-that-port-is-up"
+else
+    fail "shortlink:the-tunnel-says-that-port-is-up" \
+         "/tmp/cs193v/ports does not list $sl_port as up:
+$(E 'cat /tmp/cs193v/ports' 2>&1)"
+fi
 
 # THE END TO END. Headers kept, because the two things worth asserting are both in them, and
 # curl'd from the HOST -- the same side of the tunnel a student's browser is on.
-sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$FWD_HIGH/token")"
+sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$sl_port/token")"
 record "shortlink:host-side-headers" "$(printf '%s' "$sl_head" | tr -d '\r' | tr '\n' '|')"
 if printf '%s' "$sl_head" | grep -qE '^HTTP/1[.]. 302'; then
     pass "shortlink:the-browser-gets-a-redirect"
 else
     fail "shortlink:the-browser-gets-a-redirect" \
-         "no 302 from http://127.0.0.1:$FWD_HIGH/token — the short link a student is told to
+         "no 302 from http://127.0.0.1:$sl_port/token — the short link a student is told to
 click does not reach the container. That is the premise of the feature, not a detail of it.
 Check:  cs193v doctor"
 fi
@@ -797,24 +846,43 @@ assert_match "shortlink:the-redirect-names-the-real-url" \
 # The path is not incidental: a student's own project may have served this origin before, and the
 # browser keys its cache and any service worker on the origin rather than on what is listening.
 # So the slug has to be the one thing nothing else routes, and `/` has to stay unserved.
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_HIGH/")"
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$sl_port/")"
 assert_eq "shortlink:bare-root-is-not-served-through-the-tunnel" "404" "$c"
 
-# AND IT GETS OUT OF THE WAY of a port that is already taken -- which is the case that decides
-# whether a student's dev server and this can coexist. The probe holds the top port; shortlink
-# must come down one rather than fail or, worse, print a port it does not hold.
+# AND IT STAYS OUT OF THE WAY of a dev server -- the case that decides whether a student's own
+# work and this can coexist. It used to be proved by holding the top of the list and asserting
+# shortlink came down one; there is no list to walk now, and the property is met a layer lower:
+# the kernel does not hand out a port something is already listening on, so a collision inside the
+# container is not merely unlikely, it cannot be expressed. What is still worth asserting is the
+# consequence -- both servers up at once, on different ports, both reachable from the host.
 #
 # THE FIRST SERVER GOES FIRST, and leaving that out is how this was written wrong once: the
-# shortlink from the assertions above was still holding $FWD_HIGH, so the probe could not bind it
-# and reported 0/1 -- which reads as a mysterious in-container conflict rather than as the suite
+# shortlink from the assertions above was still holding its port, so the probe could not bind and
+# reported 0/1 -- which reads as a mysterious in-container conflict rather than as the suite
 # competing with itself.
 container_pkill shortlink
-assert_probe "shortlink:probe-holds-the-highest-port" "$FWD_HIGH" 127.0.0.1
+# A FIXED PORT, and deliberately not one derived from $FWD_PORTS: nothing about this case depends
+# on a declared list any more, so naming one would only re-couple the test to something being
+# removed. Chosen from 1024-32767, outside ip_local_port_range, so the probe cannot lose a race
+# with an outbound socket that already holds it.
+SL_BUSY=20777
+assert_probe "shortlink:a-dev-server-holds-a-port" "$SL_BUSY" 127.0.0.1
 sl_url2="$(E 'shortlink https://example.com/second token')"
-assert_eq "shortlink:steps-down-past-a-busy-port" \
-          "http://localhost:$FWD_NEXT/token" "$sl_url2"
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_NEXT/token")"
-assert_eq "shortlink:the-second-choice-is-reachable-too" "302" "$c"
+sl_port2="$(printf '%s' "$sl_url2" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+record "shortlink:coexists-on" "${sl_port2:-none} beside $SL_BUSY"
+if [ -n "$sl_port2" ] && [ "$sl_port2" != "$SL_BUSY" ]; then
+    pass "shortlink:coexists-with-a-dev-server"
+else
+    fail "shortlink:coexists-with-a-dev-server" \
+         "with a server on $SL_BUSY, shortlink printed \"$sl_url2\" — it must take some other
+port and still work, not fail and not take the one already in use."
+fi
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$sl_port2/token")"
+assert_eq "shortlink:the-coexisting-link-is-reachable-too" "302" "$c"
+# AND THE DEV SERVER IS STILL REACHABLE, which is the half a student actually cares about: their
+# own work must not have been displaced by ours.
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SL_BUSY/")"
+assert_eq "shortlink:the-dev-server-is-reachable-too" "200" "$c"
 probe_stop
 container_pkill shortlink
 
