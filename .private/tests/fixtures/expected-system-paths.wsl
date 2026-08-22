@@ -1,0 +1,22 @@
+# Everything outside the course tree that changes on a WSL-looking machine whose only
+# missing piece is systemd in wsl.conf.
+#
+#   /etc/wsl.conf   the change -- but see below, `sandbox arrange` sets the starting state at
+#                   boot, so the path appears whichever way the installer went and it is the
+#                   CONTENT report that distinguishes the four states
+#   /work           the read-only mount this harness adds, not the installer
+#   the bare dirs   mtimes
+#
+# Notably ABSENT and worth noticing: no /etc/passwd, no /etc/shadow, no /etc/subuid, and no
+# podman store -- setup_wslconf is two file writes and touches nothing else, and this case asks
+# for --fake-podman so nothing real runs. That is the claim.
+#
+# ALSO ABSENT, and it is a fixture property rather than luck: the fake podman is bind-mounted
+# over /usr/bin/podman, which already exists in the image, so it adds no path here. Mounting it
+# at /usr/local/bin/podman instead put it in this list as a change the installer had made.
+A /etc/wsl.conf
+A /work
+C /etc
+C /home
+C /home/student
+C /tmp

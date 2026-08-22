@@ -17,6 +17,11 @@
 #   static     no podman, no image, no network. Milliseconds.
 #   unit       language-level unit tests (the Containerfile parser).
 #   shim       the launcher's state machine against a fake podman on PATH. No containers.
+#   install    install-cs193v.sh against machines that really lack podman, ssh or a subuid
+#              range, in throwaway containers. Seconds, and cached after the first build.
+#   coverage   did the suite really execute every line of install-cs193v.sh it claims to?
+#              Reads the traces the installer runs leave in $CS193V_RUN_DIR, so it has to run
+#              after them -- which is why it is numbered last rather than living in 10-static.
 #   image      assertions about the built image, via throwaway containers.
 #   container  assertions about a live cs193v container: flags, kernel, ports, files.
 #   live       the launcher driving real podman: idempotency, drift, cleanup.
@@ -33,7 +38,11 @@
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
 #
 #   cheap    static, unit, shim        a fake podman on PATH. No container, no ports.
-#   podman   image, container, live    one container, one tunnel, the forwarded ports.
+#   podman   install, image, container, live
+#                                       one container, one tunnel, the forwarded ports.
+#            install is in this lane because an unrecognised tier lands here, which is the
+#            right default -- but it shares nothing with the others, so it is a candidate
+#            for a third lane once its cost is worth splitting.
 #
 # So they run at the same time. IMAGE, CONTAINER AND LIVE MUST STAY IN ONE LANE, and in file
 # order: they share the container, and CS193V_INSTANCE does not namespace the forwarded
@@ -52,7 +61,7 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
-DEFAULT_TIERS="static unit shim image container live"
+DEFAULT_TIERS="static unit shim install image container live coverage"
 TIERS=""
 FILTER=""
 PARALLEL=yes
@@ -128,13 +137,33 @@ fi
 
 # ─── run ───────────────────────────────────────────────────────────────────────
 WALL_T0=$SECONDS
-RESULTS="$(mktemp "${TMPDIR:-/tmp}/cs193v-run.XXXXXX")"
+# ONE DIRECTORY PER RUN, AND IT IS KEPT. These files used to be loose mktemps deleted by the
+# cleanup trap, so a run that hung and was killed destroyed the only evidence of where it got
+# to -- which is the opposite of what assert.sh prints per assertion for. Named by pid so the
+# sweep below can tell a finished run's leftovers from a concurrent run's live ones, the same
+# reasoning lib/assert.sh gives for sweeping scratch directories by pid rather than by age.
+#
+# Exported, because it is also the channel a suite can leave artefacts in for a later suite to
+# read -- which is what a coverage gate spanning both lanes needs and had nowhere to put.
+CS193V_RUN_DIR="${TMPDIR:-/tmp}/cs193v-runlog.$$"
+mkdir -p "$CS193V_RUN_DIR"
+export CS193V_RUN_DIR
+# An earlier run's directory, only if the process that made it is gone.
+for _d in "${TMPDIR:-/tmp}"/cs193v-runlog.*; do
+    [ -d "$_d" ] || continue
+    _p="${_d##*.}"
+    case "$_p" in ''|*[!0-9]*) continue ;; esac
+    [ "$_p" = "$$" ] && continue
+    kill -0 "$_p" 2>/dev/null && continue
+    rm -rf "$_d" 2>/dev/null || true
+done
+RESULTS="$CS193V_RUN_DIR/results.tsv"; : > "$RESULTS"
 export CS193V_RESULTS="$RESULTS"
-TIMINGS="$(mktemp "${TMPDIR:-/tmp}/cs193v-time.XXXXXX")"
+TIMINGS="$CS193V_RUN_DIR/timings.tsv"; : > "$TIMINGS"
 # Suites that exited without finishing, one per line. A FILE rather than a variable because the
 # cheap lane runs inside a subshell, so a counter set there would never come back — the same
 # thing that made repo_copy leak (#76).
-CRASHES="$(mktemp "${TMPDIR:-/tmp}/cs193v-crash.XXXXXX")"
+CRASHES="$CS193V_RUN_DIR/crashes.tsv"; : > "$CRASHES"
 CHEAPLOG=""
 CHEAP_PID=""
 CHEAP_FLUSHED=no
@@ -166,8 +195,9 @@ kill_tree() {                         # kill_tree PID
 cleanup() {
     [ -n "$CHEAP_PID" ] && kill_tree "$CHEAP_PID"
     flush_cheap
-    rm -f "$RESULTS" "$TIMINGS" "$CRASHES"
-    [ -n "$CHEAPLOG" ] && rm -f "$CHEAPLOG"
+    # DELIBERATELY NOT REMOVED. The run directory is the record of what happened, and it is
+    # most wanted exactly when the run did not finish. Its path is printed below; the next run
+    # sweeps it once this pid is gone.
     return 0
 }
 trap 'cleanup' EXIT
@@ -243,7 +273,7 @@ printf '%sCS193V container tests%s  %s(tiers: %s)%s\n' "$C_BOLD" "$C_OFF" "$C_DI
 printf '%s\n' "-------------------------------------------------------------------"
 
 if [ "$LANES" = two ]; then
-    CHEAPLOG="$(mktemp "${TMPDIR:-/tmp}/cs193v-lane.XXXXXX")"
+    CHEAPLOG="$CS193V_RUN_DIR/cheap-lane.log"; : > "$CHEAPLOG"
     # Everything the lane emits goes to its log, fd 3 and 4 included — those are where
     # run_suite sends each suite's own output, and in this lane the log IS the terminal.
     # shellcheck disable=SC2086
@@ -308,6 +338,10 @@ fi
 printf '%s%s pass%s   ' "$C_GRN" "$P" "$C_OFF"
 [ "$F" -gt 0 ] && printf '%s%s fail%s   ' "$C_RED" "$F" "$C_OFF" || printf '0 fail   '
 printf '%s%s skip   %s recorded%s\n' "$C_DIM" "$S" "$R" "$C_OFF"
+# Where the record of this run is, said on every run rather than only on a bad one -- a path
+# you only learn about when things went wrong is a path you have to go looking for at the worst
+# moment. Holds results.tsv, timings.tsv, crashes.tsv and the no-podman lane's full output.
+printf '%slog: %s%s\n' "$C_DIM" "$CS193V_RUN_DIR" "$C_OFF"
 
 # A dead suite fails the run even with no FAIL line to its name: the point of the count is that
 # it can be trusted, and it cannot be when a suite stopped early.

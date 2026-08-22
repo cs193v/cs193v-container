@@ -1,0 +1,37 @@
+# A machine whose podman is real, from a real distro archive, and too old.
+#
+# UBUNTU 24.04 ON PURPOSE, and it is the whole fixture: its archive ships podman 4.9.3
+# against MIN_PODMAN=5.7.0, so the refusal is driven by a genuine `podman --version` rather
+# than by a string a fake was told to print. 25-installer.sh already covers the branch with
+# a faked version; what this adds is that the PARSE still works -- survey reads the version
+# with `awk '{print $NF}'`, and a change in podman's own output format would slip past a
+# fake that prints what the test expects.
+FROM ubuntu:24.04
+
+# podman is the point; sudo, curl and openssh-client are here so that nothing ELSE needs
+# doing and the refusal is the only thing the run can be about.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo openssh-client curl podman \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \
+ && useradd -m -u 1000 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# A range, so the subuid item cannot appear and confuse a refusal that should be the only
+# thing the transcript contains.
+RUN printf 'student:200000:65536\n' > /etc/subuid \
+ && printf 'student:200000:65536\n' > /etc/subgid
+
+# The two tmpfs mount points the harness adds, created here so mounting over them does not
+# itself show up as a change -- the same reason the other fixtures create them.
+# The graph root's parent, pre-created student-owned. Any `podman info` creates it, so without
+# this it shows up as an ADDED path and the exact-set audit reports it as a change the installer
+# made -- which it did not. Same treatment Containerfile.nested gives it.
+RUN mkdir -p /home/student/.local/share/containers && chown -R student:student /home/student/.local
+
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

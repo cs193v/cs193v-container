@@ -37,8 +37,8 @@ set -u
 #  gathered in one place. Everything below this block is logic.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-REPO_OWNER="CHANGEME"                     # e.g. htiek
-REPO_NAME="cs193v"                        # the public course container repo
+REPO_OWNER="cs193v"
+REPO_NAME="cs193v-container"
 REPO_BRANCH="main"
 
 MIN_PODMAN="5.7.0"
@@ -325,7 +325,13 @@ NEEDS=()
 NEEDS_WHY=()
 need() { NEEDS[${#NEEDS[@]}]="$1"; NEEDS_WHY[${#NEEDS_WHY[@]}]="$2"; }
 
-PLAT="$(platform)"
+# `|| exit 1`, and it is load-bearing. platform() ends in a die() for an OS this script does
+# not support, and die() exits -- but a command substitution is a SUBSHELL, so that exit
+# ended the subshell and nothing else: the STOP box was printed, PLAT was set to the empty
+# string, and the script carried on to install as though this were Linux, having just told
+# the student "Nothing further has been changed". Exit status propagates out of an
+# assignment, so this is the whole fix.
+PLAT="$(platform)" || exit 1
 DIR=""
 DO_PODMAN_INSTALL=no
 DO_SSH_INSTALL=no
@@ -468,7 +474,13 @@ choose_dir() {
         printf '    path: '; IFS= read -r DIR
         case "$DIR" in
             '')  DIR="$DEFAULT_DIR" ;;
-            "~"/*) DIR="$HOME/${DIR#~/}" ;;
+            # ${DIR#"~"/} WITH THE TILDE QUOTED. The pattern half of a #-expansion is
+            # tilde-EXPANDED, so the unquoted form asked to strip a literal "/home/you/"
+            # from a string beginning "~/" -- which matches nothing, strips nothing, and
+            # built $HOME/~/whatever: the course installed into a directory named "~"
+            # inside the student's home. The case pattern above was always right; only the
+            # strip was wrong, which is why it looked correct.
+            "~"/*) DIR="$HOME/${DIR#"~"/}" ;;
         esac
     fi
     ok "$DIR"

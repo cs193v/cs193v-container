@@ -67,7 +67,7 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # on it, and holding it to one would mean rewriting vendored code for a platform it will
 # never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
 # is the part that matters.
-hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/*.sh \
+hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/*.sh \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
@@ -84,10 +84,15 @@ assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 #
 # `--label` rather than `$VT_RUN` is the thing looked for, so that the one line which spells the
 # label out passes on its own terms and a future second runner can too.
-real_podman="$PRIVATE/tests/lib/assert.sh"
+# lib/sandbox.sh IS ON THIS LIST, and it has to be: the install tier's `podman run` lives in
+# the library rather than in the suite, so a list built only from suite files checked nothing
+# at all for that tier. `install` joins the case arm for the same reason -- a new tier is
+# silently exempt from this rule otherwise, which is how the hole reopens without anyone
+# editing the rule.
+real_podman="$PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/sandbox.sh"
 for f in $PRIVATE/tests/[0-9][0-9]-*.sh; do
     case "$(sed -n 's/^#[[:space:]]*TIER:[[:space:]]*\([a-z]*\).*/\1/p' "$f" | head -1)" in
-        image|container|live) real_podman="$real_podman $f" ;;
+        image|container|live|install) real_podman="$real_podman $f" ;;
     esac
 done
 # -H so the failure names the file even when the list is one entry long, and the comment filter
@@ -96,6 +101,157 @@ done
 bare="$(grep -Hn 'podman run' $real_podman | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
         | grep -v -- '--label' || true)"
 assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
+
+# ─── one door for running the installer on the host ────────────────────────────
+# install-cs193v.sh is the one script in this repo that changes a machine, and the suite
+# runs it FOR REAL -- against a fake podman, but with real mkdir, real tar and real chmod.
+# Those three need no privilege, so the only thing standing between a case and the
+# developer's own home directory is where $DIR comes from.
+#
+# CS193V_DIR IS NOT ENOUGH, and that is why this rule exists rather than a comment.
+# choose_dir returns immediately when CS193V_DIR is set, so any case that wants to reach
+# its MENU -- the typed path, the empty-input fallback, the ~/ expansion -- has to leave it
+# unset, and DEFAULT_DIR is then $HOME/cs193v. Until installer_host existed, the only
+# reason no case had ever written there was that all four of them happened to spell
+# CS193V_DIR out by hand: a habit, one new call site away from being broken.
+#
+# So: exactly one helper may start the installer, and it sets HOME as well. `bash -n` is
+# excluded because it parses without executing, which is a syntax check and not a run.
+# THE NEEDLE IS ASSEMBLED TAIL-FIRST, and that is not style: written out in one piece it
+# would match this very line and the rule would fail on its own definition forever. With
+# the two halves in this order the line contains "install" BEFORE "bash ", which the
+# pattern -- bash first -- cannot match. The bash 3.2 ban list above has the same problem
+# and solves it by naming its files rather than globbing them.
+door_tail='install'; door_head='bash '
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+        | grep -v 'bash -n' | grep -vE 'installer_host|installer_tty' || true)"
+assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
+
+# And the door has to do the thing it exists for. Extraction asserted first: an empty
+# function body would satisfy every grep below it forever.
+door="$(sed -n '/^installer_host()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$door" | grep -c '.')" -ge 4 ]; then pass "installer-door:extractable"
+else fail "installer-door:extractable" "could not find installer_host in lib/podman-shim.sh"; fi
+assert_contains "installer-door:redirects-HOME"        'HOME=' "$door"
+assert_contains "installer-door:puts-the-shim-first"   'PATH="$SHIM' "$door"
+
+# The pty door is a second copy of the same rule, for the reason its own comment gives, so
+# the agreement is asserted rather than assumed.
+ttydoor="$(sed -n '/^installer_tty()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$ttydoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:tty-extractable"
+else fail "installer-door:tty-extractable" "could not find installer_tty"; fi
+assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
+assert_contains "installer-door:tty-puts-the-shim-first" 'PATH=$SHIM' "$ttydoor"
+
+# ─── the fake sudo cannot execute anything ─────────────────────────────────────
+# All four of the installer's privileged calls go through one name, so a sudo that never
+# execs makes the whole shim tier structurally unable to change this machine. That is worth
+# more than any assertion about what a case happened to do -- and it is one negated test
+# away from being false if an exec branch is ever added, so the absence is checked here.
+sudofake="$PRIVATE/tests/lib/sudo-fake"
+assert_ok "sudo-fake:exists" test -x "$sudofake"
+bare="$(grep -nE '(^|[^-[:alnum:]_])(exec|eval)([^[:alnum:]_]|$)' "$sudofake" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+assert_eq "sudo-fake:never-executes-anything" "" "$bare"
+# ...and it is on PATH for EVERY shim run, not only the cases that assert on it, so a case
+# written later cannot reach the real sudo by forgetting to ask for the fake.
+assert_contains "sudo-fake:installed-by-shim_new" 'lib/sudo-fake' \
+                "$(sed -n '/^shim_new()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+
+# ...and no run in the cheap lane may use the UNEDITED installer, whose TARBALL is the real
+# GitHub URL. That is how the shim tier came to make a live network request on every run,
+# in a tier whose own header says "no podman, no image, no network", with `|| true` hiding
+# what came back. Every case now runs a copy whose TARBALL is a file:// path, so the rule
+# is simply that the original is never handed to the door.
+#
+# Assembled second-literal-first for the same reason as the needle above: written in one
+# piece this line would match itself.
+net_arg='install-cs193v.sh'; net_fn='installer_host'
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+bare="$(grep -Hn "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "installer-door:never-runs-the-unedited-installer" "" "$bare"
+
+# ─── the traced line numbers have to mean something ────────────────────────────
+# THE PURE HALF OF THE COVERAGE GATE. 95-installer-coverage.sh unions line numbers recorded
+# while the installer ran, and every one of those runs is of an EDITED COPY -- edit_sub
+# rewrites REPO_OWNER and TARBALL so the tarball comes from file:// instead of GitHub. That is
+# only safe because both are same-line substitutions. If either ever became multi-line, the
+# copy's line numbers would drift from the original's and the gate would score the wrong file
+# while reporting a confident percentage. Checked here because it is repo-versus-repo and
+# costs milliseconds; the union itself cannot live here, since this suite runs FIRST and the
+# producers all run later.
+cov_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-cov.XXXXXX")"
+cp "$PRIVATE/install-cs193v.sh" "$cov_tmp/copy.sh"
+sed -E 's|^REPO_OWNER=.*|REPO_OWNER="test"|' "$cov_tmp/copy.sh" > "$cov_tmp/a" && mv "$cov_tmp/a" "$cov_tmp/copy.sh"
+sed -E 's|^TARBALL=.*|TARBALL="file:///work/course.tar.gz"|' "$cov_tmp/copy.sh" > "$cov_tmp/a" && mv "$cov_tmp/a" "$cov_tmp/copy.sh"
+assert_eq "coverage:the-edited-copy-keeps-the-original-s-line-numbers" \
+          "$(grep -c '' "$PRIVATE/install-cs193v.sh")" "$(grep -c '' "$cov_tmp/copy.sh")"
+# ...and the edits really landed, or the assertion above is comparing a file to itself.
+assert_ok "coverage:the-edits-really-applied" grep -q '^REPO_OWNER="test"' "$cov_tmp/copy.sh"
+rm -rf "$cov_tmp"
+
+# ─── one place decides what a fixture machine needs ────────────────────────────
+# The install tier and the hand-driven sandbox both run the same fixture images, and each used
+# to decide a machine's podman flags for itself -- install-sandbox.sh had the nested caps and
+# the wsl bind mount, sandbox_run grew a no-podman case, nest_build hardcoded its own. They
+# disagreed, and the failure was not subtle: the no-podman fixture installs a real podman, the
+# installer asked it for MemTotal, and it died with "cannot set up namespace using
+# /usr/bin/newuidmap" because only the nested path had SYS_ADMIN. The suite called that case
+# green, because it only ever asked `podman --version`, which never touches the runtime.
+#
+# So the requirements live in machine_flags and this asserts nothing else names them. A rule,
+# not a convention: the next person to add a machine cannot reintroduce the split by forgetting
+# a convention they never read.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+# NOT this file: 10-static.sh names --cap-add=SYS_ADMIN in its own container.args invariant
+# list, which is a different job entirely. The rule is about the files that DECIDE what a
+# fixture machine gets.
+flagfiles="$PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/install-sandbox.sh $PRIVATE/tests/2[0-9]-*.sh"
+# shellcheck disable=SC2086
+# ASSEMBLED TAIL-FIRST, or this line matches itself and the rule fails on its own definition --
+# the third time that has happened in this file, hence the shared idiom.
+sa_tail='SYS_ADMIN'; sa_head='--cap-add='
+naming="$(grep -Hn -- "$sa_head$sa_tail" $flagfiles \
+          | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-SYS_ADMIN" "1" \
+          "$(printf '%s\n' "$naming" | grep -c . )"
+assert_says "fixture-flags:and-that-place-is-machine_flags" 'lib/sandbox.sh' "$naming"
+# The same for the unmask, which is the other departure and the one container.args forbids in
+# its wider form -- so a second copy appearing anywhere is worth failing over.
+# shellcheck disable=SC2086
+um_tail='=/proc'; um_head='unmask'
+naming2="$(grep -Hn -- "$um_head$um_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-the-unmask" "1" \
+          "$(printf '%s\n' "$naming2" | grep -c . )"
+# ...and the two devices, which are the other half of what a machine gets. They were demoted from
+# the --no-caps flag surface to unconditional constants precisely BECAUSE denying them models
+# nothing a student has -- so the risk is no longer that a case disagrees about them, it is that
+# a second place starts naming them and the demotion silently becomes a per-case choice again.
+# shellcheck disable=SC2086
+dv_tail='/dev/fuse'; dv_head='--device '
+naming3="$(grep -Hn -- "$dv_head$dv_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-names-dev-fuse" "1" \
+          "$(printf '%s\n' "$naming3" | grep -c . )"
+
+# ─── one place removes software from a fixture ─────────────────────────────────
+# The OTHER axis, and the more destructive one. --no-prereqs subtracts packages at boot, and the
+# suite's run.sh, the nested case's own script and the hand-driven tool all need it -- so all
+# three call `sandbox arrange` and the removal itself is written once, in lib/sandbox-guest.sh.
+# This is the same rule as above for the same reason: the wsl.conf arrangement WAS duplicated
+# between run.sh and that file, and the copies disagreed for long enough that --wslconf silently
+# did nothing in one of them.
+# shellcheck disable=SC2086
+rm_tail='remove -y'; rm_head='apt-get '
+naming4="$(grep -Hn -- "$rm_head$rm_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-prereqs:only-one-place-removes-a-package" "1" \
+          "$(printf '%s\n' "$naming4" | grep -c . )"
+assert_says "fixture-prereqs:and-that-place-is-sandbox-guest" 'lib/sandbox-guest.sh' "$naming4"
 
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
@@ -1393,7 +1549,10 @@ assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC10
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
                                            $PRIVATE/tests/14-test-harness.sh \
-                                           $PRIVATE/tests/16-args-parse.sh
+                                           $PRIVATE/tests/16-args-parse.sh \
+                                           $PRIVATE/tests/install-sandbox.sh \
+                                           $PRIVATE/tests/lib/sandbox.sh \
+                                           $PRIVATE/tests/lib/sandbox-guest.sh
 # setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
 # set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot
 # resolve a path built from $0.
