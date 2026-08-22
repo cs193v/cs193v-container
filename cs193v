@@ -918,6 +918,23 @@ METER_PID=''
 TUNNEL_CTL="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.ctl"
 TUNNEL_PID="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.pid"
 TUNNEL_LOG="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.log"
+# The port supervisor: the bash loop that reads frames from the watcher inside the container and
+# asks the master to open and close forwards. Keyed by the same TUNNEL_ID as everything above, so
+# two instances on one machine never touch each other's.
+#
+# PIDFILE, not PID: the variable holds a PATH. ($TUNNEL_PID above is the same shape and the older
+# name; the test suite already spells its own copy FWD_PIDFILE.)
+TUNNEL_SUP_PIDFILE="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.sup.pid"
+TUNNEL_SUP_LOG="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.sup.log"
+# Written by the supervisor once the watcher's handshake has been ACCEPTED, which is a different
+# moment from "the process started" -- the pidfile is written on entry so a stop always has
+# something to kill, so it cannot also mean "this thing works".
+TUNNEL_SUP_READY="${TMPDIR:-/tmp}/cs193v-$TUNNEL_ID.sup.ready"
+# Ticks, not seconds, for everything the supervisor counts -- see the loop for why.
+TUNNEL_SUP_LINGER=5
+TUNNEL_SUP_COOLDOWN=30
+TUNNEL_SUP_SILENCE=5
+TUNNEL_SUP_SILENCE_MAX=6
 
 # ─── argument files ────────────────────────────────────────────────────────────
 ARGS=()
@@ -1613,10 +1630,332 @@ tunnel_report_busy_ports() {
     return 0
 }
 
+# ─── dynamic port forwarding: the supervisor ───────────────────────────────────
+# WHAT THIS IS. cs193v-portwatch inside the container reports, once a second, every port something
+# is listening on and what kind of address it is bound to. This loop reads those frames, decides
+# which of them this computer can actually make reachable, and asks the ssh master to open or
+# close the corresponding forward. The container never asks for a port; it says what it sees, and
+# every decision is taken here.
+#
+# `ssh -O forward` IS A CONTROL CLIENT, NOT A TUNNEL. It hands the running master a message over
+# $TUNNEL_CTL and exits -- no new connection, no new authentication, no new podman exec. A port
+# costs one fork and one listening socket, and a browser connection to it costs a channel on the
+# connection that already exists.
+
+# The lowest port an unprivileged process on THIS machine may bind. Read once: it is a host fact
+# the container cannot know, which is why the container reports low ports rather than filtering
+# them and this side decides. Linux exposes it; macOS has no equivalent and is fixed at 1024.
+TUNNEL_DYN_FLOOR=1024
+tunnel_dyn_read_floor() {
+    local v
+    [ -r /proc/sys/net/ipv4/ip_unprivileged_port_start ] || return 0
+    read -r v < /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || return 0
+    case "$v" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#v}" -le 5 ] || return 0
+    [ "$v" -ge 1 ] && [ "$v" -le 65535 ] && TUNNEL_DYN_FLOOR="$v"
+    return 0
+}
+
+# 0 bound | 1 the host port is busy | 2 the master is gone | 3 the master is not answering
+#
+# </dev/null IS LOAD-BEARING: this runs inside the supervisor's `while read` loop, and without it
+# ssh inherits that stdin and eats the watcher's stream.
+#
+# run_timeout 5 is a BACKSTOP, not a mechanism. A healthy -O forward is a fork plus a unix-socket
+# round trip -- 15-40ms. Ten seconds was copied from tunnel_alive, which runs once at startup;
+# here it would cost that per port per tick.
+#
+# THE SECOND [ -S ] IS THE ONE DOING WORK. The first is a cheap racy pre-check; the second is what
+# separates "the host port is taken" from "the master went away while we were asking".
+tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
+    [ -S "$TUNNEL_CTL" ] || return 2
+    run_timeout 5 ssh -S "$TUNNEL_CTL" -O forward \
+        -L "127.0.0.1:$1:127.0.0.1:$1" "$TUNNEL_USER@$TUNNEL_HOST" </dev/null
+    case "$?" in
+        0)   return 0 ;;
+        124) return 3 ;;              # run_timeout's timeout convention
+    esac
+    [ -S "$TUNNEL_CTL" ] || return 2
+    return 1
+}
+
+tunnel_dyn_cancel() {                 # tunnel_dyn_cancel PORT
+    [ -S "$TUNNEL_CTL" ] || return 0
+    run_timeout 5 ssh -S "$TUNNEL_CTL" -O cancel \
+        -L "127.0.0.1:$1:127.0.0.1:$1" "$TUNNEL_USER@$TUNNEL_HOST" </dev/null || true
+    return 0
+}
+
+# Pure and local: the validated record plus one host fact. Nothing refused is ever handed to
+# tunnel_dyn_forward -- we already know port 80 cannot be bound and a ::1 bind cannot be reached,
+# so asking ssh would cost a fork to learn what we knew and would blur "the host cannot" into
+# "the host is contended".
+tunnel_dyn_classify() {               # tunnel_dyn_classify PORT CLASS -> DYN_WHY ('' = forward it)
+    DYN_WHY=''
+    case "$2" in
+        v6lo|loalt|eth) DYN_WHY="$2"; return 0 ;;
+    esac
+    [ "$1" -ge "$TUNNEL_DYN_FLOOR" ] || { DYN_WHY=below-floor; return 0; }
+    return 0
+}
+
+# ─── the supervisor loop ───────────────────────────────────────────────────────
+# Runs as its own process (see tunnel_sup_start) reading the watcher's stdout. State is four plain
+# strings; the supervisor is a forked child, so these are private to it and there is nothing to be
+# gained by scoping them.
+#
+#   SUP_UP    ' 41573 8123 '   forwarded right now
+#   SUP_BUSY  ' 3005:27 '      the host port was refused, with a cooldown in TICKS
+#   SUP_GONE  ' 8123:3 '       forwarded but absent from this frame, with a linger in TICKS
+#   SUP_MASTER                 the master pid we believe we are talking to
+#
+# TICKS, NOT SECONDS, for everything counted here: no `date` fork and no dependence on a clock.
+# The single exception is the frame-arrival timeout, and it has to be -- ticks are DEFINED by
+# frames arriving, so "frames stopped" is the one thing that cannot be measured in them.
+#
+# SUP_BUSY IS THE ONLY RETRYABLE OUTCOME and therefore the only one that needs state. Every
+# refusal reason is a pure function of the frame plus the floor, so it is recomputed each tick and
+# stored nowhere -- which means a `v6lo` clears itself the moment the student changes their bind
+# address, with no invalidation logic at all.
+SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '; SUP_MASTER=''; SUP_STATE=healthy; SUP_SILENT=0
+
+sup_log() { printf '%s\n' "$*" >&2; }
+
+# The publish is the only path state takes out of the supervisor. On change only -- per-tick would
+# be ~28,800 lines and ~28,800 podman execs a session, and the linger already absorbs the churn
+# that would otherwise cause: a crash-looping dev server rebinds the SAME port, which never leaves
+# SUP_UP, so nothing publishes at all.
+SUP_PUBLISHED=''
+sup_publish() {                       # sup_publish REFUSED_LIST
+    local up refused sig e
+    up=''; refused=''
+    for e in $SUP_UP;   do up="$up,$e:lo"; done
+    for e in $1;        do refused="$refused,$e"; done
+    up="${up#,}"; refused="${refused#,}"
+    sig="$SUP_STATE|$up|$refused"
+    [ "$sig" = "$SUP_PUBLISHED" ] && return 0
+    SUP_PUBLISHED="$sig"
+    pmq exec "$NAME" cs193v-portwatch --publish \
+        "state=$SUP_STATE" "floor=$TUNNEL_DYN_FLOOR" "up=$up" "refused=$refused" || true
+    return 0
+}
+
+sup_tick() {                          # sup_tick "port:class port:class ..."
+    local frame="$1" e port cls now seen refused='' out c n
+    # RE-READ THE MASTER EVERY TICK. One builtin file read, and it is the whole self-heal: a
+    # --reset-tunnel in another window replaces the master, every forward it held died with it,
+    # but the container's ports are all still listening so the watcher reports no change. Dropping
+    # our own state is what makes the next frame rebuild everything. Treating a MISSING pidfile as
+    # a change is deliberate -- verb_reset_tunnel removes it before writing the new one, and the
+    # obvious "only drop when non-empty" optimisation would leave us believing in forwards held by
+    # a master that no longer exists.
+    now=''
+    [ -r "$TUNNEL_PID" ] && read -r now < "$TUNNEL_PID" 2>/dev/null
+    if [ "$now" != "$SUP_MASTER" ]; then
+        SUP_MASTER="$now"; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '
+        SUP_STATE=healthy
+    fi
+
+    # age the cooldowns
+    out=' '
+    for e in $SUP_BUSY; do
+        port="${e%%:*}"; n=$(( ${e#*:} - 1 ))
+        [ "$n" -gt 0 ] && out="$out$port:$n "
+    done
+    SUP_BUSY="$out"
+
+    seen=' '
+    for e in $frame; do
+        port="${e%%:*}"; cls="${e#*:}"
+        seen="$seen$port "
+        tunnel_dyn_classify "$port" "$cls"
+        if [ -n "$DYN_WHY" ]; then
+            refused="$refused $port:$DYN_WHY"
+            continue
+        fi
+        case "$SUP_UP" in *" $port "*) continue ;; esac      # already ours; nothing to do
+        case "$SUP_BUSY" in *" $port:"*) refused="$refused $port:busy"; continue ;; esac
+        n=0; for c in $SUP_UP; do n=$(( n + 1 )); done
+        if [ "$n" -ge "$DYNPORTS_MAX" ]; then
+            refused="$refused $port:capped"; continue
+        fi
+        tunnel_dyn_forward "$port"
+        case "$?" in
+            0) SUP_UP="$SUP_UP$port " ;;
+            1) SUP_BUSY="$SUP_BUSY$port:$TUNNEL_SUP_COOLDOWN "; refused="$refused $port:busy" ;;
+            2) SUP_MASTER=''; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '; return 0 ;;
+            3) SUP_STATE=master-unresponsive; sup_log "master not answering; not attempting more"; return 0 ;;
+        esac
+    done
+    [ "$SUP_STATE" = master-unresponsive ] && SUP_STATE=healthy
+
+    # LINGER before cancelling. A port that vanishes for a moment is a vite restart, and
+    # cancel-then-reforward is visible: the host port is briefly unbound, so a reload racing it
+    # gets connection refused on a port that worked a second ago.
+    out=' '
+    for e in $SUP_GONE; do
+        port="${e%%:*}"
+        case "$seen" in *" $port "*) continue ;; esac        # came back
+        n=$(( ${e#*:} + 1 ))
+        if [ "$n" -ge "$TUNNEL_SUP_LINGER" ]; then
+            tunnel_dyn_cancel "$port"
+            SUP_UP="${SUP_UP/ $port / }"
+        else
+            out="$out$port:$n "
+        fi
+    done
+    SUP_GONE="$out"
+    for e in $SUP_UP; do
+        case "$seen" in *" $e "*) continue ;; esac
+        case "$SUP_GONE" in *" $e:"*) continue ;; esac
+        SUP_GONE="$SUP_GONE$e:1 "
+    done
+
+    sup_publish "$refused"
+    return 0
+}
+
+# The loop itself. Reads the watcher's frames through the host-side gate in cs193v-ui.sh, which is
+# the only place bytes the container controls are parsed.
+sup_loop() {
+    local line rc
+    tunnel_dyn_read_floor
+    dynports_reset
+    # -t: the ONE wall-clock measurement in the design. Six consecutive timeouts is thirty seconds
+    # of silence -- thirty missed frames -- and only a deadlocked watcher can produce that, since
+    # a dead one closes the pipe and a lid close contributes at most ONE timeout (a frozen read
+    # returns once; the next call starts a fresh timer on a woken machine).
+    local ready=''
+    while :; do
+        IFS= read -r -t "$TUNNEL_SUP_SILENCE" -n 64 line
+        rc=$?
+        if [ "$rc" -gt 128 ]; then
+            SUP_SILENT=$(( SUP_SILENT + 1 ))
+            if [ "$SUP_SILENT" -ge "$TUNNEL_SUP_SILENCE_MAX" ]; then
+                SUP_STATE=broken
+                sup_log "no frames for $(( TUNNEL_SUP_SILENCE * TUNNEL_SUP_SILENCE_MAX ))s -- the watcher has stopped"
+                sup_publish ''
+                return 1
+            fi
+            continue
+        fi
+        [ "$rc" -ne 0 ] && { sup_log "the watcher's stream ended"; return 0; }
+        SUP_SILENT=0
+        dynports_line "$line"
+        case "$?" in
+            0) [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
+            1) sup_tick "$DYNPORTS_FRAME" ;;
+            2) SUP_STATE=broken
+               sup_log "protocol violation: $DYNPORTS_FATAL"
+               sup_publish ''
+               return 1 ;;
+        esac
+        [ -n "${DYNPORTS_WARN:-}" ] && { sup_log "watcher warning: $DYNPORTS_WARN"; DYNPORTS_WARN=''; }
+    done
+}
+
+# The hidden verb the supervisor process runs as. Its own verb rather than an inline subshell so
+# it can be driven directly, and so `ps` shows something a human can recognise.
+verb_supervise() {
+    load_args
+    printf '%s\n' "$$" > "$TUNNEL_SUP_PIDFILE"
+    # PROCESS SUBSTITUTION, NOT A PIPELINE, and the difference is the whole of tunnel_sup_stop.
+    # `podman exec ... | sup_loop` runs the loop in a SUBSHELL, so $$ above names the parent and
+    # killing it leaves the loop running -- measured: one process survived every stop. Read from
+    # `< <(...)` instead and the loop IS this process, so the pid in the file is the pid that
+    # matters. The reader dying then closes the substitution's pipe, and podman exec exits on its
+    # next write.
+    sup_loop < <(podman exec "$NAME" cs193v-portwatch --watch 1 2>/dev/null)
+}
+
+# Is a supervisor running for THIS instance? Pidfile plus the same argv identity test
+# tunnel_kill_pid uses, and for the same reason: pids are reused, the file outlives the process it
+# names, and killing a stranger costs whatever that stranger was doing.
+tunnel_sup_alive() {
+    local pid
+    pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
+    case "${pid:-}" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+        *--dev-supervise*) return 0 ;;
+    esac
+    return 1
+}
+
+# IDEMPOTENT, mirroring ensure_tunnel's own `tunnel_alive && return 0`. Two supervisors would both
+# drive -O forward and both publish. A plain check-then-act is enough because setup work now
+# happens behind the session claim (see open_shell), so the path that used to reach here twice at
+# once -- two launchers racing before either had won -- no longer exists.
+#
+# IT WAITS FOR THE HANDSHAKE rather than forking and hoping. Without the wait a watcher that could
+# not start is unreportable: the supervisor would log, mark itself broken and exit with nothing
+# said, and the popup cannot help because at this moment we are between the claim and the attach
+# with no tmux client attached. With it, the failure goes through warn(), which
+# acknowledge_warnings then blocks on before tmux takes the screen.
+#
+# AND IT DOES NOT ABORT THE LAUNCH. Same posture as `ensure_tunnel || true`: a container whose
+# ports are not reachable is still perfectly usable, as long as something said so.
+tunnel_sup_start() {
+    local i
+    tunnel_sup_alive && return 0
+    # REAP FIRST. Reaching here means no supervisor of ours is running, so any watcher still
+    # looping inside the container is orphaned -- its reader is gone. It does not always notice:
+    # its writes go into a pipe buffer that conmon holds open, so the EPIPE that should end it may
+    # never arrive. --reset-tunnel is the path that matters, because it never calls tunnel_down
+    # and so never reaches tunnel_sup_stop; without this, every reset would leave one behind and
+    # start another beside it. Measured: four accumulated across one testing session.
+    pmq exec "$NAME" pkill -f "cs193v-portwatch --watch" || true
+    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY" "$TUNNEL_SUP_LOG"
+    nohup "$SELF" --dev-supervise >>"$TUNNEL_SUP_LOG" 2>&1 </dev/null &
+    i=0
+    while [ "$i" -lt 50 ]; do
+        [ -f "$TUNNEL_SUP_READY" ] && return 0
+        # GIVING UP EARLY NEEDS THE PIDFILE TO EXIST FIRST. "Not alive" means two different things
+        # here -- "has not started yet" and "started and died" -- and only the second is a reason
+        # to stop waiting. Checking liveness alone fires on the first poll, before the child has
+        # written anything, so the launch warns about a supervisor that then comes up and works.
+        # Measured: it did exactly that, and the warning was the only sign anything was wrong.
+        if [ -s "$TUNNEL_SUP_PIDFILE" ] && ! tunnel_sup_alive; then break; fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    warn "$(msg warn.dynports-failed LOG="$TUNNEL_SUP_LOG" OUT="$(tail -3 "$TUNNEL_SUP_LOG" 2>/dev/null)")"
+    tunnel_sup_stop
+    return 1
+}
+
+tunnel_sup_stop() {
+    local pid
+    pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
+    case "${pid:-}" in
+        ''|*[!0-9]*) ;;
+        *)  case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+                *--dev-supervise*)
+                    # This pid is the LOOP (see verb_supervise), so killing it takes the host
+                    # side down whole: podman exec's next write fails within one tick, because
+                    # there is a write every tick. It does NOT reach the watcher inside the
+                    # container -- measured -- which is what the reap below is for.
+                    kill "$pid" 2>/dev/null || true
+                    sleep 1
+                    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null ;;
+            esac ;;
+    esac
+    # AND REAP THE WATCHER INSIDE THE CONTAINER. In the ordinary case this is unnecessary --
+    # every path that reaches tunnel_down stops the container a moment later and cgroup teardown
+    # takes everything with it. --reset-tunnel is the exception: it never calls tunnel_down, so
+    # without this a stale watcher would survive each reset and the next one would start another
+    # beside it. Measured: four accumulated across a testing session. Cheap, bounded, and only
+    # ever kills a process this launcher started.
+    pmq exec "$NAME" pkill -f "cs193v-portwatch --watch" || true
+    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY"
+    return 0
+}
+
 ensure_tunnel() {
-    tunnel_alive && return 0
+    tunnel_alive && { tunnel_sup_start || true; return 0; }
     tunnel_keys
     tunnel_start || return 1
+    tunnel_sup_start || true
 }
 
 # SIGTERM, a moment to land, then SIGKILL. Shared with --reset-tunnel, which is where this
@@ -1657,6 +1996,10 @@ tunnel_kill_pid() {
 # with a master stopped by SIGSTOP: --rebuild took 14s, reported `0 of 46 forwarded`, and told
 # the student to go looking for another program on their computer.
 tunnel_down() {
+    # THE SUPERVISOR GOES FIRST, before the master is asked to exit. The other way round it sees
+    # the control socket vanish, concludes the master is gone, drops its state and publishes the
+    # churn on the way out -- all of it pointless during a teardown.
+    tunnel_sup_stop
     # Time-boxed, because a wedged ssh may never answer -O exit -- and the box expiring is
     # itself the signal that asking did not work.
     if [ -S "$TUNNEL_CTL" ] && run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit \
@@ -2455,6 +2798,10 @@ case "${1:-}" in
     # what the test suite derives the forwarded port list from, so it must be answerable on a
     # machine with no podman at all -- the unit tier's whole promise.
     --dev-tunnel)        verb_dev_tunnel ;;
+    # The port supervisor's own process. Not for people: tunnel_sup_start runs it, and it is a
+    # verb rather than an inline subshell so `ps` shows something recognisable and so the suite
+    # can drive it directly.
+    --dev-supervise)     verb_supervise ;;
     # No preflight: this one reads the Containerfile and nothing else, which is what lets the
     # unit tier drive it with no podman on PATH at all.
     --dev-steps)         shift; verb_dev_steps "${1:-}" ;;
