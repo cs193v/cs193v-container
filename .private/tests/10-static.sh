@@ -47,10 +47,38 @@ assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 assert_exec "exec:cs193v"             "$REPO/cs193v"
 assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
 
+# ─── the tunnel may only ever bind loopback ────────────────────────────────────
+# EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
+# security property the whole design rests on: the host side of the tunnel is loopback-only
+# because the ssh client binds it that way, not because of a flag anyone remembers. There is one
+# -L left -- the template in tunnel_dyn_forward, whose port comes from the container -- and the
+# address either side of it is a literal. A `-L $something:` or a `-L *:` reaching this file would
+# expose a student's dev server to the dorm network, and no runtime test would necessarily catch
+# the case that mattered.
+#
+# 60-container.sh asserts the same property from the other end, against a running tunnel; this one
+# fails at edit time, before anything is built.
+# `[ -L` FILTERED FIRST, and it is not a nicety: -L is also test(1)'s "is a symlink", which the
+# launcher uses to resolve $SELF. And the address is QUOTED at the call site, so the allowed
+# pattern has to admit the quote -- without that this matched the two correct lines and reported
+# them as violations.
+# TWO OTHER MEANINGS OF -L ARE FILTERED FIRST, and both were false positives on the real file:
+# test(1)'s "is a symlink", which the launcher uses to resolve $SELF, and `tmux -L`, which names a
+# socket. And the address is QUOTED at the call site, so the allowed pattern has to admit the
+# quote -- without that this matched the two correct lines and called them violations.
+hits="$(sed 's/#.*//' cs193v | grep -nE '(^|[^[:alnum:]_])-L ' \
+        | grep -vE '\[ *!? *-L ' | grep -vE 'tmux[^|]*-L ' \
+        | grep -vE '[-]L "?127[.]0[.]0[.]1:' || true)"
+assert_eq "ports:every-forward-binds-loopback" "" "$hits"
+
 # ─── bash 3.2 compatibility ────────────────────────────────────────────────────
 # macOS ships bash 3.2 and the launcher is the same script on every platform, so a bash 4
 # construct is a Mac-only breakage that no Linux test run would ever surface.
-BASH4='declare -A|mapfile|readarray|\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
+# `coproc` joined the list while the supervisor was being written: it is bash 4, it is exactly
+# what someone reaches for when wiring a long-lived reader to a long-lived writer, and the
+# supervisor is that shape -- so this is the one place a Mac-only breakage would have been most
+# tempting to introduce. verb_supervise uses `< <(...)` instead.
+BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
 hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
@@ -660,6 +688,27 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
 # Comments stripped first: verb_supervise's own comment QUOTES the pipeline it warns against, so
 # an unstripped grep matches the warning and passes with the bug in place. That exact trap already
 # cost this suite one vacuous assertion.
+# NOTHING IN THE SUPERVISOR'S PARSE PATH MAY EVALUATE WHAT THE CONTAINER SENT. Measured on bash
+# 5.3.9 with `a[$(cmd)]` injected: $(( )), (( )), [[ -eq ]], ${v:x:y} and ${a[x]} ALL execute it.
+# `case` evaluates nothing, which is why the gate is case-first -- but the gate lives in
+# cs193v-ui.sh and the functions that CONSUME its output live in the launcher, so this checks the
+# consumers. It has to sit down here rather than beside the other port lints: fn_body is defined
+# further up this file, and placed earlier the whole block errored out with "fn_body: command not
+# found" while assert_eq compared two empty strings and passed. Measured -- it did.
+sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_cancel \
+                      tunnel_dyn_classify sup_log sup_publish sup_tick sup_loop; do
+                 fn_body "$f" "$REPO/cs193v"
+             done | sed 's/^[[:space:]]*#.*//')"
+if [ -z "$sup_parse" ]; then
+    fail "supervisor:the-parse-path-was-found" "fn_body returned nothing for the supervisor's
+functions, so the two assertions below would compare empty strings and pass."
+else
+    pass "supervisor:the-parse-path-was-found"
+fi
+assert_not_contains "supervisor:no-double-bracket-in-the-parse-path" "[[" "$sup_parse"
+assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
+          "$(printf '%s\n' "$sup_parse" | grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*\[' || true)"
+
 sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
 assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"

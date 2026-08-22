@@ -51,6 +51,18 @@ pw_v4class() {                        # 8 hex chars, little-endian -> PW_C
 }
 
 # A v6 address is four 32-bit words, each little-endian, printed as 32 hex characters.
+#
+# THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
+# checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
+# `0000000000000000FFFF00000100007F`, so the last eight characters are the IPv4 address in the
+# same little-endian form /proc/net/tcp uses and handing them to pw_v4class is right. Verified end
+# to end -- classified `lo`, forwarded, HTTP 200 from the host. 60-container.sh keeps it that way.
+#
+# THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
+# checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
+# `0000000000000000FFFF00000100007F`, so the last eight characters are the IPv4 address in the
+# same little-endian form /proc/net/tcp uses and handing them to pw_v4class is right. Verified end
+# to end -- classified `lo`, forwarded, HTTP 200 from the host. 60-container.sh keeps it that way.
 pw_v6class() {                        # 32 hex chars -> PW_C
     case "$1" in
         00000000000000000000000000000000)                   PW_C=any ;;
