@@ -936,53 +936,17 @@ assert_not_match "load_args:guard-is-not-an-emptiness-test" \
 published="$(printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
 assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 
-# The port set now comes from ONE declaration, CS193V_PORTS, which the launcher parses to
-# build its ssh -L flags and also passes into the container to be read there. Host and
-# container side are therefore the same number by construction, so the old
-# "host range != container range" check has no failure left to catch and is gone.
-port_report="$(printf '%s\n' "$args_live" | python3 -c '
-import re, sys
-spec = ""
-for line in sys.stdin:
-    m = re.search(r"CS193V_PORTS=([0-9,\-]+)", line)
-    if m:
-        spec = m.group(1)      # last wins, exactly as tunnel_ports() in the launcher does
-problems = []
-total = 0
-if not spec:
-    problems.append("no CS193V_PORTS= line at all, so nothing would be forwarded")
-for chunk in spec.split(","):
-    if not chunk:
-        continue
-    if "-" in chunk:
-        a, b = (int(x) for x in chunk.split("-", 1))
-    else:
-        a = b = int(chunk)
-    if b < a:
-        problems.append("range %s is backwards" % chunk)
-        continue
-    total += b - a + 1
-    if a < 1024:
-        problems.append("privileged port %d (an unprivileged ssh client cannot bind these)" % a)
-    for reserved in (5000, 7000):
-        if a <= reserved <= b:
-            problems.append("port %d collides with macOS AirPlay Receiver" % reserved)
-print("total=%d" % total)
-print("\n".join(problems))
-')"
-# 47, not 46, since codex's login callback joined the list. A LITERAL here on purpose, unlike the
-# forward counts in the port-aware suites, which #46 derived from `--dev-tunnel` because they must
-# follow a local.args override: this one checks the DEFAULT set the repo ships, so a number is the
-# canary -- change the shipped list and you are made to look at it.
-assert_contains "ports:count-is-47" "total=47" "$port_report"
-assert_eq  "ports:no-privileged-no-airplay-no-mismatch" "total=47" "$(printf '%s' "$port_report" | sed '/^$/d')"
-
-# The one member of the default list that is not a dev-server port. `codex login` runs a server on
-# 1455 inside the container and the student's browser connects to it, which is exactly what the
-# tunnel already does for every other port. Asserted because without it `codex login` hangs,
-# having printed a URL whose callback goes nowhere.
-assert_match "ports:codex-login-callback-is-forwarded" '(^|,)1455(,|-|$)' \
-             "$(printf '%s\n' "$args_live" | sed -n 's/.*CS193V_PORTS=\([0-9,-]*\).*/\1/p' | tail -1)"
+# THE ARGS FILE DECLARES NO PORTS AT ALL, and that is now the invariant rather than a property of
+# whatever it declared. There is no list to count, no privileged entry to reject and no AirPlay
+# collision to avoid, because nothing here chooses ports: the launcher's supervisor forwards what
+# the container turns out to be listening on. ports:count-is-47, its no-privileged-no-airplay
+# sibling and ports:codex-login-callback-is-forwarded all went with the list they were about.
+#
+# WHAT REPLACES THEM IS THE ABSENCE, asserted, because a -e CS193V_PORTS line coming back would
+# not fail anything on its own -- nothing reads it -- and would quietly reintroduce the second
+# source of truth this change exists to remove. Someone re-adding one is made to come here.
+assert_eq "ports:no-port-list-is-declared" "" \
+          "$(printf '%s\n' "$args_live" | grep -E 'CS193V_PORTS' || true)"
 
 # ports:CS193V_PORTS-matches--p-lines is DELETED, not rewritten. It guarded the agreement
 # between CS193V_PORTS and a parallel set of -p lines; deriving the forwards from
@@ -1064,13 +1028,12 @@ assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
 
 # ─── documented claims must be true  (#11, #12, #14) ───────────────────────────
 # A comment that promises behaviour which does not exist is worse than no comment: the next
-# person to edit the port list will rely on it. container.args claimed `cs193v doctor` warns
-# when CS193V_PORTS and the -p lines disagree. verb_doctor never compared them.
+# person to edit this section will rely on it. container.args claimed `cs193v doctor` warns when
+# the port list and the -p lines disagree. verb_doctor never compared them, and there is no list
+# to disagree with now -- but the section is still the natural place for someone to write a claim
+# about what doctor does, so the guard stays and is retargeted at the section as it now stands.
 assert_not_contains "claims:no-phantom-doctor-ports-warning" "doctor" \
-                    "$(sed -n '/Environment/,/CS193V_PORTS=/p' $REPO/.config/container.args)"
-# The invariant itself is enforced statically instead, which is strictly better than a
-# runtime warning -- it fails at edit time rather than after a student is already misled.
-# (ports:CS193V_PORTS-matches--p-lines, above.)
+                    "$(sed -n '/─── Environment/,/^# ═══/p' $REPO/.config/container.args)"
 
 # CONTAINER-DESIGN.md said "macOS and Windows are case-insensitive". On Windows this design
 # puts projects/ inside the WSL distro's ext4 home, which IS case-sensitive -- and the doc

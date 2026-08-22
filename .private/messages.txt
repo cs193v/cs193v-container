@@ -333,30 +333,6 @@ If that does not help, send course staff the output of `cs193v doctor` and this 
 
 {{OUT}}
 
-[[warn.tunnel-ports-busy]]
-These ports were already in use by another program on your computer, so servers you
-run inside the container on them will NOT be reachable:
-
-    {{PORTS}}
-
-Use a different port from the published list, or quit whatever else is using these
-and run `cs193v --reset-tunnel`. To find the culprit on a Mac or Linux machine:
-
-    lsof -nP -iTCP:PORT -sTCP:LISTEN
-
-[[warn.tunnel-no-ports]]
-No ports are listed in your settings file, so nothing you run inside the container
-will be reachable from your browser. That file should contain a CS193V_PORTS line:
-
-    {{FILE}}
-
-If you have not edited it, contact course staff — this line should not appear.
-
-[[warn.tunnel-bad-port]]
-Skipping "{{CHUNK}}" in the CS193V_PORTS setting: it is not a port or a port range,
-so it was ignored. Everything else still works. If you did not edit that setting
-yourself, contact course staff.
-
 [[warn.dynports-failed]]
 Your container started, but ports you open inside it will not become reachable
 from your browser on their own. Everything else works normally.

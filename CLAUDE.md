@@ -1,7 +1,8 @@
 # Working on the CS193V container
 
-Read this before running `./cs193v` or the test suite. Both hazards below cost real
-debugging time and neither is visible from the code.
+Read this before running `./cs193v` or the test suite. The first item is a hazard that costs
+real debugging time and is not visible from the code. The second is here because it used to be
+one, and the instructions it replaced are still in people's heads.
 
 ## 1. Set `CS193V_INSTANCE` first
 
@@ -29,33 +30,34 @@ deletes the other's logins.
   build when they do not. Force one with `--rebuild --no-cache`; watch podman's raw output
   instead of the progress bar with `CS193V_BUILD_RAW=1`.
 
-## 2. Move your ports in `.config/local.args`
+## 2. You no longer have to move your ports
 
-`CS193V_PORTS` is **not** a shell variable — exporting it does nothing. It is a `-e` line in
-the args files, and `.config/local.args` (git-ignored) is read after `container.args`, last
-occurrence winning:
+Nothing declares ports. The launcher watches what your container is listening on and opens the
+matching port on your own loopback about a second later, so there is no list in `container.args`,
+nothing to override in `.config/local.args`, and no recreate to remember.
+
+**Two instances cannot collide the way they used to.** Overlap used to be total by construction —
+every instance forwarded the same 46 ports whether or not anything was listening on them. Now a
+port is only taken when something inside your container is actually serving on it, and the test
+suite picks its ports from what is free at that moment (`dyn_free_port` in `tests/lib/assert.sh`),
+so two suites running side by side step over each other automatically.
+
+**What can still collide is software with a popular default.** If both of you run vite, you both
+want 5173, and the second one to bind loses the host port. That failure is now per-port and
+mid-session rather than at launch, and it is reported rather than silent:
 
 ```
--e CS193V_PORTS=13000-13002,13005
+$ cs193v doctor
+  dynamic ports    1 forwarded: 3000
+  dynamic ports    1 busy: 5173 — another program on this computer holds those
 ```
 
-`CS193V_INSTANCE` does not namespace host ports, so without this every instance competes for
-the same set. Pick a small set that overlaps nobody — comma-separated ports and ranges, **at
-least two**: `fwd_init` in `tests/lib/assert.sh` hard-fails the port-aware suites below that,
-because assertions need a second port to hold while the first is bound. A malformed chunk is
-warned about and skipped rather than fatal, so a typo silently shrinks your set.
+`busy` is the one refusal that clears itself: quit the other program, or start yours on a
+different port, and the next tick picks it up. From inside the container, `cs193v-portwatch --show`
+answers the same question.
 
-**Recreate the container after moving them** (`./cs193v --rebuild`). `-e` is applied at create
-time and `podman start` reuses the stored value, so an edit with no recreate leaves the
-container naming one set while the tunnel forwards another. `60-container.sh` asserts they agree.
-
-The tests follow the override automatically — they read the expanded list out of
-`cs193v --dev-tunnel`, so no test names a port. If a port or ssh-forwarding test fails, check
-what else is running on this machine before assuming the fault is yours.
-
-Closing your terminal window stops your container *and* takes its tunnel down, handing its
-ports back — so the usual cause of a phantom conflict, a tunnel from a session somebody
-finished with hours ago, largely stops happening.
+Closing your terminal window stops your container *and* takes its tunnel down, handing its ports
+back — so a tunnel left over from a session somebody finished with hours ago is not the cause.
 
 ## Where things live
 
