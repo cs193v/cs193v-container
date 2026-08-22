@@ -14,16 +14,21 @@
 # with permissions the course cannot use. The symptom arrives three screens later as a bare 404.
 # That is issue #67.
 #
-# So this binds one of the forwarded ports, serves a redirect on it, and prints the short URL:
+# So this binds a port, serves a redirect on it, and prints the short URL:
 #
 #     $ shortlink 'https://github.com/settings/personal-access-tokens/new?name=...' token
 #     http://localhost:8084/token
 #
 # WHY THIS WORKS AT ALL, since the container has no browser and no route to the host's: the ssh
-# tunnel `cs193v` raises at launch forwards host 127.0.0.1:PORT to the container's OWN loopback
-# for every port in $CS193V_PORTS, and it binds all of them before the student's shell starts. So
-# a server here on one of those ports is reachable from the browser over there, with nothing new
-# built. See CONTAINER-DESIGN.md, "Ports, and the one thing that will bite you".
+# tunnel `cs193v` raises at launch forwards host 127.0.0.1:PORT to the container's OWN loopback,
+# and it opens a port there as soon as something in here starts listening on one. So a server on
+# this container's loopback is reachable from the browser over there, with nothing new built.
+# See CONTAINER-DESIGN.md, "Ports, and the one thing that will bite you".
+#
+# WHICH MEANS THIS HAS TO WAIT TO BE TOLD. Binding a port no longer implies being reachable on it
+# -- the tunnel decides that, a moment later, and says so in /tmp/cs193v/ports. Hence the poll in
+# acquire_forwarded_port, and hence the ~1 s this costs on a path that ends with a human reading
+# a URL and switching to a browser.
 #
 # THIS IS NOT A URL SHORTENER in the bit.ly sense and nothing leaves the machine: no service is
 # called, and the long URL is never sent anywhere except to the student's own browser, by the
@@ -56,16 +61,16 @@ DEFAULT_SLUG = "magic-link"
 
 USAGE = """usage: shortlink [--timeout SECONDS] [--pidfile PATH] URL [SLUG]
 
-Serves a redirect to URL on one of this container's forwarded ports and prints the short
-URL to standard output. The server runs in the background and exits after SECONDS
+Serves a redirect to URL on a port your browser can reach and prints the short URL to
+standard output. The server runs in the background and exits after SECONDS
 (default %d).
 
   SLUG        the path to serve it on (default %s)
   --timeout   how long to keep serving; 0 waits forever
   --pidfile   where to write the server's pid, so a caller can end it early
 
-Exit status: 0 shortened, 3 no forwarded port was free (the URL is printed unchanged),
-2 bad arguments.
+Exit status: 0 shortened, 3 the port could not be made reachable (the URL is printed
+unchanged), 2 bad arguments.
 """ % (DEFAULT_TIMEOUT, DEFAULT_SLUG)
 
 SLUG_RE = re.compile(r"\A[A-Za-z0-9._-]{1,32}\Z")
@@ -92,43 +97,98 @@ def check_url(url):
 
 
 # ─── which port ────────────────────────────────────────────────────────────────
-# THE PORT MUST COME FROM $CS193V_PORTS, and "any free port" would be a bug rather than a
-# simplification: only these ports are forwarded, so a server on any other one is reachable from
-# nothing, and the failure looks exactly like a broken link — a connection refused, from a URL
-# that reads as perfectly ordinary.
+# ANY FREE PORT, AND THEN ASK WHETHER IT WAS FORWARDED. The kernel picks -- bind(0) -- which is
+# strictly better than walking a declared list: the port is guaranteed free, there is no candidate
+# machinery and no walk order to justify, and it sidesteps the choose-then-bind race the comment
+# below is about. What it costs is that being bound no longer implies being REACHABLE, so this now
+# has to wait and be told.
 #
-# The same range syntax the launcher's tunnel_ports() expands, and a malformed chunk is skipped
-# rather than fatal, for the same reason: container.args is a file people edit, and the launcher
-# has already warned about it by the time anything in here runs.
-def candidate_ports():
-    spec = os.environ.get("CS193V_PORTS", "")
-    ports = []
-    for chunk in spec.split(","):
-        chunk = chunk.strip()
-        if not chunk:
+# The tunnel forwards a port once it sees something listening on the container's loopback, and it
+# publishes what it did to /tmp/cs193v/ports. So the sequence is bind, wait for our port to appear
+# as `up`, and only then print a short URL. Printing optimistically and letting the student's click
+# race the forward would remove the pause, but a dead link is far worse than a wait.
+PORTS_FILE = "/tmp/cs193v/ports"
+
+# THE FILE'S WHOLE VOCABULARY, as a closed set, because that is what makes an unrecognised word
+# detectable rather than invisible. `up` is a state; the rest are reasons a port was refused.
+VERDICTS = ("up", "busy", "capped", "v6lo", "loalt", "eth", "below-floor", "unknown")
+
+# Canonical decimal only. `03000` is not 3000: the file's writer never emits it, so a row that
+# says it is not a row about our port, and quietly treating it as one is how a reader ends up
+# confidently answering about a port nobody forwarded.
+#
+# NO LEADING ZERO, and the first draft of this got it wrong -- `[0-9]+` means "all digits", which
+# `03000` satisfies. A real port is 1-65535, so a leading zero is never canonical and neither is a
+# bare `0`. Caught by mutation-testing the fuzzer rather than by reading the code.
+_PORT_RE = re.compile(r"\A[1-9][0-9]*\Z")
+
+# How long to wait for the forward, and how often to look. Ten seconds is many times the ~0.75 s
+# this normally takes -- one tick of the watcher plus a podman exec -- and is a backstop for a
+# loaded machine rather than an expected wait.
+CONFIRM_TIMEOUT = 10.0
+CONFIRM_POLL = 0.1
+
+# How many times to accept "some other program on the host holds that port" and try another. The
+# kernel hands out a different ephemeral port each time, so this converges immediately in practice;
+# the bound is here because a retry loop with no ceiling is a hang waiting for an unusual host.
+BUSY_RETRIES = 5
+
+
+# PURE AND TOTAL, and both words are load-bearing. It takes the file's CONTENTS rather than its
+# path so 19-shortlink-fuzz.sh can drive it thousands of times a second without a filesystem, and
+# it answers for ANY input without raising -- a half-written file is reachable in ordinary
+# operation, not just under attack, because the writer can be killed mid-rewrite.
+def port_verdict(text, port):
+    """The state file's verdict on one port: "up", a refusal reason, or None if unmentioned."""
+    if not isinstance(text, str):
+        return None
+    want = str(port)
+    if not _PORT_RE.match(want):
+        return None
+    for line in text.split("\n"):
+        fields = line.split("\t")
+        if len(fields) < 2 or fields[1] != want:
             continue
-        lo, _, hi = chunk.partition("-")
-        if not hi:
-            hi = lo
-        if not (lo.isdigit() and hi.isdigit()):
-            continue
-        lo, hi = int(lo), int(hi)
-        if lo > hi or lo < 1 or hi > 65535:
-            continue
-        ports.extend(range(lo, hi + 1))
-    # HIGH TO LOW, which is a choice about the student rather than about us. The low end of the
-    # default list is where dev servers live -- 3000, 5173 -- so taking a port from the top both
-    # keeps us out of the way of `npm run dev` and lands on a port least likely to have hosted a
-    # real app, which is the other half of the stale-origin problem below.
-    #
-    # IT IS ALSO WHAT KEEPS US OFF 1455, and that is worth knowing rather than rediscovering.
-    # `codex login` receives its browser callback there (#71), and agent-notes.md tells anything
-    # running in here not to bind it. 1455 is the LOWEST port in the shipped list, so walking down
-    # from the top reaches it only when every other forwarded port is already taken. It is not
-    # excluded by name on purpose: container.args is the single declaration of what reaches the
-    # student's browser, and a copy of the number here would be the second source #71 refused.
-    # If the walk direction is ever reversed, this becomes a real conflict -- start there.
-    return sorted(set(ports), reverse=True)
+        if fields[0] == "up":
+            return "up"
+        if fields[0] == "refused":
+            reason = fields[2] if len(fields) > 2 else ""
+            # NEVER "up" FROM A REASON FIELD. A refusal row cannot be evidence of a forward, and
+            # without this guard a `refused<TAB>P<TAB>up` row would say the port is reachable.
+            if reason in VERDICTS and reason != "up":
+                return reason
+            return "unknown"
+    return None
+
+
+def read_ports_file():
+    try:
+        with open(PORTS_FILE, "r") as fh:
+            return fh.read()
+    except OSError:
+        # No tunnel, no supervisor, or a bare `podman run` of this image with nothing outside it.
+        # Indistinguishable from here and treated the same: we will not be forwarded.
+        return None
+
+
+def await_verdict(port):
+    """Poll until the tunnel has said something about `port`, or we give up. None on timeout."""
+    deadline = time.monotonic() + CONFIRM_TIMEOUT
+    while True:
+        text = read_ports_file()
+        # NO FILE MEANS NO WAIT. The watcher truncates this file before it says anything else, so
+        # while a tunnel is up the file EXISTS even when it is empty -- and its absence therefore
+        # means there is no supervisor to ever write it. Polling that for ten seconds would hang
+        # every `$BROWSER` call in a container launched without a tunnel, and the build check
+        # below is exactly that case.
+        if text is None:
+            return None
+        verdict = port_verdict(text, port)
+        if verdict is not None:
+            return verdict
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(CONFIRM_POLL)
 
 
 # BIND, THEN REPORT -- never check whether a port is free and then bind it. Two shortlinks racing
@@ -137,19 +197,29 @@ def candidate_ports():
 #
 # 127.0.0.1 AND NOT 0.0.0.0. The tunnel's far end is the container's IPv4 loopback, so loopback is
 # all that is needed; the wildcard would additionally publish the redirect on the container's
-# eth0, which buys nothing and is one more thing to explain.
-def bind_forwarded_port():
-    for port in candidate_ports():
+# eth0, which buys nothing and is one more thing to explain. It is also the only bind address the
+# tunnel will forward, so the wildcard would now be actively wrong rather than merely untidy.
+def acquire_forwarded_port():
+    for _ in range(BUSY_RETRIES):
         server = None
         try:
-            server = HTTPServer(("127.0.0.1", port), None, bind_and_activate=False)
+            server = HTTPServer(("127.0.0.1", 0), None, bind_and_activate=False)
             server.server_bind()
             server.server_activate()
-            return server
         except OSError:
             if server is not None:
                 server.server_close()
-            continue
+            return None
+        verdict = await_verdict(server.server_address[1])
+        if verdict == "up":
+            return server
+        server.server_close()
+        # ONLY `busy` IS WORTH ANOTHER GO: it means something on the STUDENT'S computer holds that
+        # one port, and the kernel will hand us a different one. Everything else -- the cap, a
+        # refusal we do not recognise, or no answer at all -- says nothing about which port we
+        # picked, so retrying would just spend ten more seconds arriving at the same place.
+        if verdict != "busy":
+            return None
     return None
 
 
@@ -321,14 +391,14 @@ def main(argv):
         die("slug must be 1-32 characters of letters, digits, dot, dash or underscore "
             "(got: %.40s)" % slug)
 
-    server = bind_forwarded_port()
+    server = acquire_forwarded_port()
     # THE DEGRADATION IS THE INPUT, UNCHANGED, and it is what makes this safe to call from
-    # anywhere. With no $CS193V_PORTS there is no forwarded port to be reachable on -- a bare
-    # `podman run` of this image, which is how 50-image.sh reaches in -- and with every candidate
-    # busy there is none free. Either way the caller gets a URL that works, printed exactly as it
-    # was handed in, and its screen is merely as long as it was before this existed. The distinct
-    # exit status is for the tests and for a caller that wants to say something about it; nothing
-    # is written to stderr, because stderr is somebody's screen.
+    # anywhere. With no tunnel there is nothing to be reachable through -- a bare `podman run` of
+    # this image, which is how 50-image.sh reaches in -- and the port we bound may be one the
+    # student's own computer already holds. Either way the caller gets a URL that works, printed
+    # exactly as it was handed in, and its screen is merely as long as it was before this existed.
+    # The distinct exit status is for the tests and for a caller that wants to say something about
+    # it; nothing is written to stderr, because stderr is somebody's screen.
     if server is None:
         sys.stdout.write("%s\n" % url)
         return 3

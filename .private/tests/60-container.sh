@@ -768,27 +768,45 @@ probe_stop
 # curl on the host, and it is the whole premise of the feature: the short URL is worth nothing if
 # the port it names is not carried out of the container.
 #
-# Derived from $FWD_PORTS rather than named, like every other port in this suite: shortlink walks
-# $CS193V_PORTS from the top, so the port it must have taken is the highest one this instance
-# forwards. With no override in play that is 8084; here it is whatever local.args says.
-FWD_HIGH="$(printf '%s\n' $FWD_PORTS | sort -n | tail -1)"
-FWD_NEXT="$(printf '%s\n' $FWD_PORTS | sort -n | tail -2 | head -1)"
-record "shortlink:ports-under-test" "highest $FWD_HIGH, next $FWD_NEXT"
-
+# THE PORT IS NOT PREDICTABLE ANY MORE, and that is the change this group had to absorb.
+# shortlink asks the kernel for a free port -- bind(0) -- so there is no highest-forwarded port to
+# derive and nothing to compare against a declared list. What replaces the old equality is
+# strictly stronger: read the port back out of the URL it printed, and prove the TUNNEL agrees
+# that exact port is forwarded, from both sides of it.
 container_pkill shortlink
 sl_url="$(E 'shortlink https://example.com/e2e?a=1 token')"
-assert_eq "shortlink:takes-the-highest-forwarded-port" \
-          "http://localhost:$FWD_HIGH/token" "$sl_url"
+sl_port="$(printf '%s' "$sl_url" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+record "shortlink:port-under-test" "${sl_port:-none} (from $sl_url)"
+if [ -n "$sl_port" ]; then
+    pass "shortlink:prints-a-short-url-on-a-real-port"
+else
+    fail "shortlink:prints-a-short-url-on-a-real-port" \
+         "shortlink printed \"$sl_url\", which is not http://localhost:PORT/token.
+Exit 3 prints the long URL unchanged, so this is what a degradation looks like from here: it
+could not get a port the tunnel would carry. Check:  cs193v doctor"
+fi
+
+# THE CONTAINER'S OWN VIEW AGREES. shortlink only prints a short URL after the state file says its
+# port is up, so this is close to a tautology -- but it is the one assertion that would catch it
+# printing on the strength of a stale or misread file, which is the failure the fuzzer cannot see
+# because the fuzzer never touches a real one.
+if [ -n "$sl_port" ] && E "grep -q '^up	$sl_port	' /tmp/cs193v/ports"; then
+    pass "shortlink:the-tunnel-says-that-port-is-up"
+else
+    fail "shortlink:the-tunnel-says-that-port-is-up" \
+         "/tmp/cs193v/ports does not list $sl_port as up:
+$(E 'cat /tmp/cs193v/ports' 2>&1)"
+fi
 
 # THE END TO END. Headers kept, because the two things worth asserting are both in them, and
 # curl'd from the HOST -- the same side of the tunnel a student's browser is on.
-sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$FWD_HIGH/token")"
+sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$sl_port/token")"
 record "shortlink:host-side-headers" "$(printf '%s' "$sl_head" | tr -d '\r' | tr '\n' '|')"
 if printf '%s' "$sl_head" | grep -qE '^HTTP/1[.]. 302'; then
     pass "shortlink:the-browser-gets-a-redirect"
 else
     fail "shortlink:the-browser-gets-a-redirect" \
-         "no 302 from http://127.0.0.1:$FWD_HIGH/token — the short link a student is told to
+         "no 302 from http://127.0.0.1:$sl_port/token — the short link a student is told to
 click does not reach the container. That is the premise of the feature, not a detail of it.
 Check:  cs193v doctor"
 fi
@@ -797,24 +815,43 @@ assert_match "shortlink:the-redirect-names-the-real-url" \
 # The path is not incidental: a student's own project may have served this origin before, and the
 # browser keys its cache and any service worker on the origin rather than on what is listening.
 # So the slug has to be the one thing nothing else routes, and `/` has to stay unserved.
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_HIGH/")"
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$sl_port/")"
 assert_eq "shortlink:bare-root-is-not-served-through-the-tunnel" "404" "$c"
 
-# AND IT GETS OUT OF THE WAY of a port that is already taken -- which is the case that decides
-# whether a student's dev server and this can coexist. The probe holds the top port; shortlink
-# must come down one rather than fail or, worse, print a port it does not hold.
+# AND IT STAYS OUT OF THE WAY of a dev server -- the case that decides whether a student's own
+# work and this can coexist. It used to be proved by holding the top of the list and asserting
+# shortlink came down one; there is no list to walk now, and the property is met a layer lower:
+# the kernel does not hand out a port something is already listening on, so a collision inside the
+# container is not merely unlikely, it cannot be expressed. What is still worth asserting is the
+# consequence -- both servers up at once, on different ports, both reachable from the host.
 #
 # THE FIRST SERVER GOES FIRST, and leaving that out is how this was written wrong once: the
-# shortlink from the assertions above was still holding $FWD_HIGH, so the probe could not bind it
-# and reported 0/1 -- which reads as a mysterious in-container conflict rather than as the suite
+# shortlink from the assertions above was still holding its port, so the probe could not bind and
+# reported 0/1 -- which reads as a mysterious in-container conflict rather than as the suite
 # competing with itself.
 container_pkill shortlink
-assert_probe "shortlink:probe-holds-the-highest-port" "$FWD_HIGH" 127.0.0.1
+# A FIXED PORT, and deliberately not one derived from $FWD_PORTS: nothing about this case depends
+# on a declared list any more, so naming one would only re-couple the test to something being
+# removed. Chosen from 1024-32767, outside ip_local_port_range, so the probe cannot lose a race
+# with an outbound socket that already holds it.
+SL_BUSY=20777
+assert_probe "shortlink:a-dev-server-holds-a-port" "$SL_BUSY" 127.0.0.1
 sl_url2="$(E 'shortlink https://example.com/second token')"
-assert_eq "shortlink:steps-down-past-a-busy-port" \
-          "http://localhost:$FWD_NEXT/token" "$sl_url2"
-c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FWD_NEXT/token")"
-assert_eq "shortlink:the-second-choice-is-reachable-too" "302" "$c"
+sl_port2="$(printf '%s' "$sl_url2" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+record "shortlink:coexists-on" "${sl_port2:-none} beside $SL_BUSY"
+if [ -n "$sl_port2" ] && [ "$sl_port2" != "$SL_BUSY" ]; then
+    pass "shortlink:coexists-with-a-dev-server"
+else
+    fail "shortlink:coexists-with-a-dev-server" \
+         "with a server on $SL_BUSY, shortlink printed \"$sl_url2\" — it must take some other
+port and still work, not fail and not take the one already in use."
+fi
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$sl_port2/token")"
+assert_eq "shortlink:the-coexisting-link-is-reachable-too" "302" "$c"
+# AND THE DEV SERVER IS STILL REACHABLE, which is the half a student actually cares about: their
+# own work must not have been displaced by ours.
+c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SL_BUSY/")"
+assert_eq "shortlink:the-dev-server-is-reachable-too" "200" "$c"
 probe_stop
 container_pkill shortlink
 

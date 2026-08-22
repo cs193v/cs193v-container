@@ -20,15 +20,15 @@
 # back with a newline in the middle of it. That is issue #67, and it costs a student a
 # working login.
 #
-# So the URL goes through `shortlink`, which serves a redirect on one of the forwarded ports
-# and hands back something around 32 characters. The direction is still browser-to-container
+# So the URL goes through `shortlink`, which serves a redirect on a port the tunnel makes
+# reachable and hands back something around 32 characters. The direction is still browser-to-container
 # — the student's own browser asking the container for a redirect over the ssh tunnel that
 # `cs193v` already raises — rather than container-to-browser. Nothing new is exposed: any
 # process in here could already bind those ports and serve that browser anything at all.
 #
 # NO BRANCH ON WHETHER IT WORKED, beyond the one line of prose below: shortlink prints its
-# argument unchanged and exits 3 when no port is forwarded, so the fallback is the URL this
-# script has always printed.
+# argument unchanged and exits 3 when it could not get a reachable port, so the fallback is the
+# URL this script has always printed.
 #
 # Limitation worth knowing: this only helps tools that honour $BROWSER. Anything calling
 # xdg-open directly is unaffected unless we also ship a command by that name.
