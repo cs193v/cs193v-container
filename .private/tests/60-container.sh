@@ -746,6 +746,38 @@ else
 fi
 probe_stop
 
+# THE DUAL-STACK CASE, which is here because it is the one classifier branch that was written
+# from reasoning about byte layout rather than from a kernel that had ever produced the bytes. A
+# listener on ::ffff:127.0.0.1 appears in /proc/net/tcp6 as `0000000000000000FFFF00000100007F` --
+# an IPv4 address in the last eight characters -- and getting it wrong means classifying a
+# perfectly reachable server as `eth` and refusing it with a reason that is a lie, which is the
+# exact failure the loalt class was added to prevent elsewhere.
+#
+# NOT THE PROBE, which binds AF_INET: this needs an AF_INET6 socket with IPV6_V6ONLY cleared, so
+# it is its own one-liner.
+PM="$(dyn_free_port)"
+podman exec -d "$NAME" python3 -c 'import http.server, socket, socketserver
+class S(socketserver.TCPServer):
+    address_family = socket.AF_INET6; allow_reuse_address = True
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        socketserver.TCPServer.server_bind(self)
+S(("::ffff:127.0.0.1", '"$PM"'), http.server.SimpleHTTPRequestHandler).serve_forever()' \
+    >/dev/null 2>&1
+record "ports:v4-mapped-port-under-test" "$PM"
+if wait_until 30 host_gets_200 "$PM"; then
+    pass "ports:a-v4-mapped-dual-stack-server-is-reachable"
+else
+    fail "ports:a-v4-mapped-dual-stack-server-is-reachable" \
+         "got HTTP $(host_code "$PM") — a listener on ::ffff:127.0.0.1 is reachable IPv4 traffic
+and must be carried like any other loopback bind. The classifier reads it out of /proc/net/tcp6:
+  $(podman exec "$NAME" grep -i "$(printf '%04X' "$PM")" /proc/net/tcp6 2>&1 | head -2)
+  cs193v-portwatch says: $(podman exec "$NAME" cs193v-portwatch --once 2>&1 | tr ' ' '\n' | grep "^$PM:")"
+fi
+assert_eq "ports:a-v4-mapped-bind-classifies-as-loopback" "$PM:lo" \
+          "$(podman exec "$NAME" cs193v-portwatch --once 2>/dev/null | tr ' ' '\n' | grep "^$PM:")"
+container_pkill "SimpleHTTPRequestHandler"
+
 # `ss` is how a student -- or the agent answering their question -- finds out what a server is
 # actually bound to, so it has to report real sockets from inside, not just exist. Two probes at
 # once, on fresh ports, because the two lines are what a student has to be able to tell apart:

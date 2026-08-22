@@ -187,11 +187,12 @@ Nine problems in the checklist itself. Several mean the checklist would have pro
 
 ### ~~B2~~. `container.args` claimed a warning that does not exist — **FIXED**
 
-The comment promised `cs193v doctor` warns when `CS193V_PORTS` drifts from the `-p` lines.
-`verb_doctor` never compared them. Replaced with a pointer to
-`tests/10-static.sh :: ports:CS193V_PORTS-matches--p-lines`, which enforces the invariant at
-edit time — strictly better than a runtime warning, since it fails before a mismatch can
-ship. Guarded by `claims:no-phantom-doctor-ports-warning`. GitHub issue #11.
+The comment promised `cs193v doctor` warns when the declared port list drifts from the `-p`
+lines. `verb_doctor` never compared them. Replaced with a static check that enforced the
+invariant at edit time — strictly better than a runtime warning, since it fails before a
+mismatch can ship. Both the `-p` lines and the port list have since gone, so the invariant has
+no failure left to catch and the check went with them; the guard against the *claim* coming
+back is still there, as `claims:no-phantom-doctor-ports-warning`. GitHub issue #11.
 
 ### B2 (original diagnosis)
 
