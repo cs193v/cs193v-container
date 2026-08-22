@@ -326,6 +326,77 @@ assert_not_contains "helper:open-url-shortened-hides-the-long-url" \
                     "example.com/verify" "$out"
 assert_contains "helper:open-url-shortened-says-it-expires" "15 minutes" "$out"
 
+# ─── the watcher's fault modes, against the host's own gate ───────────────────
+# WHY THIS EXISTS AT ALL. The project rule is that malformed data from the container is FATAL and
+# never silently ignored, and `cs193v-portwatch --fault` was built so that rule could be asserted
+# rather than asserted-about. Until this suite existed, nothing drove it: the gate had a fuzzer
+# (17-portparse-fuzz.sh) and the watcher had a fault mode, and the two had never been introduced.
+# A rule nothing exercises is a rule that quietly stops being true.
+#
+# THE REAL WATCHER AND THE REAL GATE, joined. The fuzzer feeds the gate strings this file's author
+# made up; this feeds it bytes the SHIPPED binary actually emits, which is the half that catches
+# the two of them drifting apart -- a fault renamed, a frame shape changed, an emit that stopped
+# emitting. The gate is sourced the way the launcher sources it, so no behaviour is reimplemented.
+# shellcheck source=.private/files/cs193v-ui.sh
+. "$PRIVATE/files/cs193v-ui.sh"
+
+# gate_verdict TEXT -> "fatal: REASON" | "accepted: PORTS" | "silent"
+# "silent" is the outcome that must never happen: the stream ended with nothing accepted and
+# nothing rejected, which is the failure mode the whole rule is against.
+gate_verdict() {
+    local line rc out="silent"
+    dynports_reset
+    while IFS= read -r line; do
+        dynports_line "$line"; rc=$?
+        [ "$rc" = 2 ] && { printf 'fatal: %s' "$DYNPORTS_FATAL"; return 0; }
+        [ "$rc" = 1 ] && out="accepted: $DYNPORTS_FRAME"
+    done <<EOF
+$1
+EOF
+    printf '%s' "$out"
+}
+fault_out() { R "cs193v-portwatch --fault $1"; }
+
+# ONE CASE PER FAULT, and each asserts the REASON rather than just that something failed. A fatal
+# with the wrong diagnosis is how a TA spends an afternoon on the wrong subsystem -- the same
+# argument quoted() was added for.
+assert_eq "fault:a-wrong-protocol-version-is-fatal" \
+          "fatal: bad handshake: cs193v-portwatch\\ 99" "$(gate_verdict "$(fault_out handshake)")"
+assert_eq "fault:a-nested-BEGIN-is-fatal" \
+          "fatal: BEGIN inside a frame" "$(gate_verdict "$(fault_out nested-begin)")"
+assert_eq "fault:a-count-that-does-not-match-is-fatal" \
+          "fatal: declared 3, saw 1" "$(gate_verdict "$(fault_out bad-count)")"
+assert_eq "fault:an-unknown-address-class-is-fatal" \
+          "fatal: unknown class: wat" "$(gate_verdict "$(fault_out bad-record)")"
+# THE OCTAL ONE IS THE SECURITY CASE, not a formatting nicety: `03000` passes a digits-only test
+# and `[ 03000 -ge 1024 ]` evaluates it as OCTAL 1536, while ssh would parse the string as decimal
+# 3000 -- validate one port, forward another.
+assert_eq "fault:a-non-canonical-port-is-fatal" \
+          "fatal: non-canonical port: 03000" "$(gate_verdict "$(fault_out octal)")"
+assert_eq "fault:a-record-outside-a-frame-is-fatal" \
+          "fatal: line outside a frame: 3000:lo" "$(gate_verdict "$(fault_out stray)")"
+assert_eq "fault:an-ERR-line-stops-the-supervisor" \
+          "fatal: the watcher stopped: deliberate-fault" "$(gate_verdict "$(fault_out err)")"
+
+# AND A GOOD FRAME IS STILL ACCEPTED, or every assertion above is satisfied by a gate that rejects
+# everything -- the property a fault suite most easily forgets to state.
+assert_eq "fault:a-well-formed-frame-is-still-accepted" "accepted: 3000:lo 5173:any" \
+          "$(gate_verdict "$(printf '%s\n' 'cs193v-portwatch 1' 'BEGIN 2' '3000:lo' '5173:any' 'END')")"
+
+# THE REAL WATCHER'S OWN OUTPUT IS ACCEPTED TOO. Everything above drives a deliberately broken
+# emitter; this drives the one that ships, so a change to the frame shape fails here rather than
+# on a student's machine.
+#
+# `--watch`, NOT `--once`, and the difference is the whole point of the assertion: --once prints
+# the raw set for a human and for the Containerfile's build check, while --watch is the only mode
+# that speaks the protocol. Written against --once first, this failed -- correctly -- because a
+# bare `8099:lo` is not a frame. Three seconds is three frames; `timeout` then cuts the stream,
+# possibly mid-frame, which is exactly the EOF-inside-a-frame case the gate must shrug off.
+watch_out="$(R 'timeout 3 cs193v-portwatch --watch 1')"
+record "fault:the-shipped-watcher-frame" "$(printf '%s' "$watch_out" | tr '\n' '|')"
+assert_match "fault:the-shipped-watcher-emits-a-frame-the-gate-accepts" "^accepted:" \
+             "$(gate_verdict "$watch_out")"
+
 # ─── shortlink  (issue #67) ────────────────────────────────────────────────────
 # ENTIRELY INSIDE ONE THROWAWAY CONTAINER, and that is not a shortcut: a fresh container has its
 # own network namespace, so every port in it is free and the curl that proves the redirect can run
