@@ -41,7 +41,7 @@ fixture_build machine || exit 1
 # do: apt would say "already the newest version" and the path under test would never run.
 #
 # TWO consent items -- podman+uidmap and openssh-client, gated independently on purpose
-# (installer:486-488) -- and one menu, because CS193V_DIR is set. So one keystroke.
+# (installer:562) -- and one menu, because CS193V_DIR is set. So one keystroke.
 sb_machine no-prereqs=podman,ssh
 # SB_PROBE_PODMAN only here: this is the one non-building case that installs podman, so it is
 # the only one where "did the thing apt installed actually work" is worth the store that asking
@@ -110,6 +110,67 @@ assert_says_not "sb-noans:does-not-claim-success" "Setup finished" "$out"
 assert_says "sb-noans:it-had-already-installed-podman" "Installing podman uidmap" "$out"
 sandbox_reap
 
+# ─── curl absent, which is a stock Ubuntu Desktop ──────────────────────────────
+# THE PLATFORM DIFFERENCE NO TEST COULD SEE, and the fixtures are why: both of them installed
+# curl, so the machine every case ran on was not the machine a student has. curl is NOT in the
+# Ubuntu desktop image -- the 26.04 and 24.04 manifests carry wget and libcurl4t64 and no curl
+# -- while the WSL image and macOS both ship it. So fetch_files' unguarded curl (installer:736)
+# failed for a whole platform, and said "This is usually a network problem" about a machine that
+# simply had no curl, after consent, apt and usermod had already run.
+#
+# ONE CONSENT ITEM, which is the shape worth a case of its own: podman and ssh are present, so
+# curl is the ONLY reason apt runs at all. The both-missing shape is the apt case above.
+sb_machine no-prereqs=curl
+out="$(sandbox_run curl '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-curl:the-machine-was-really-arranged" "prereqs=curl" "$(sb_section "$out" ARRANGED)"
+assert_says "sb-curl:asks-for-one-thing"         "permission for 1 thing" "$out"
+assert_says "sb-curl:names-curl"                 "Install curl" "$out"
+assert_says "sb-curl:says-what-it-is-installing" "Installing curl" "$out"
+added="$(sb_section "$out" DPKG-ADDED)"
+assert_says "sb-curl:installed-curl" "curl" "$added"
+# THE NEGATIVE IS HALF THE CLAIM. Without it this case could be passing on a machine that
+# lacked podman too, i.e. a second copy of the apt case wearing a different name.
+assert_says_not "sb-curl:did-not-reinstall-podman" "podman" "$added"
+# THE EFFECT, and the one assertion here that could not pass before: the tarball is fetched
+# with the curl this run installed. `dir-only` is the failure -- fetch_files creates $DIR
+# (installer:719) before curl runs, so the directory exists either way and only the launcher
+# inside it distinguishes a download that happened from one that died.
+assert_eq "sb-curl:the-course-files-arrived" "launcher-is-executable" "$(sb_section "$out" COURSE-DIR)"
+# WHERE THIS RUN STOPS, recorded not asserted, for the apt case's reason: the download works
+# now, so build_image hands off to the launcher, which wants the network this case has not got.
+record "sb-curl:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
+# ─── podman installed, its setuid helpers not ──────────────────────────────────
+# THE THIRD CAUSE OF THE OBSERVABLE THE CASE ABOVE MEASURES, and the only one of the three the
+# installer can do anything about. lib/sandbox.sh names them where MACHINE_CAP_NAMES is defined:
+# a restrictive apparmor profile, a nosuid mount, or a missing uidmap all hand a student a podman
+# that cannot create a user namespace, and the run dead-ends at write_local_args (installer:757).
+#
+# uidmap is a RECOMMENDS of podman rather than a Depends, so the two come apart on a real machine
+# -- `--no-install-recommends`, a hand-rolled podman, an image built with recommends off. And the
+# installer's uidmap only ever rode along with podman's own install (installer:579), so on this
+# machine it did nothing whatsoever: it skipped, then hit the dead end.
+sb_machine no-prereqs=uidmap
+out="$(sandbox_run uidmap '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
+assert_says "sb-uidmap:the-machine-was-really-arranged" "prereqs=uidmap" "$(sb_section "$out" ARRANGED)"
+assert_says "sb-uidmap:asks-for-one-thing"         "permission for 1 thing" "$out"
+assert_says "sb-uidmap:names-uidmap"               "Install uidmap" "$out"
+assert_says "sb-uidmap:says-what-it-is-installing" "Installing uidmap" "$out"
+added="$(sb_section "$out" DPKG-ADDED)"
+assert_says "sb-uidmap:installed-uidmap" "uidmap" "$added"
+# PODMAN WAS NEVER GONE, which is the difference between this case and the apt one, and the whole
+# reason the installer's podman-gated uidmap could not save it.
+assert_says_not "sb-uidmap:did-not-reinstall-podman" "podman" "$added"
+# INSTALLED IS NOT WORKING, and here that is the entire claim: before the helpers came back this
+# machine's podman answered with the newuidmap failure the case above asserts, and after them it
+# answers a real number. SB_PROBE_PODMAN earns its store for the apt case's reason -- the probe IS
+# the assertion -- and this case takes no path-level audit for that store to disturb.
+assert_match "sb-uidmap:podman-answers-once-the-helpers-are-back" '^[0-9]{6,}$' \
+             "$(sb_section "$out" PODMAN-WORKS)"
+record "sb-uidmap:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
@@ -117,8 +178,8 @@ sandbox_reap
 # "wsl on x86_64".
 #
 # FOUR STATES, NOT THREE, and the fourth is the point: survey looks for `systemd=true`
-# (installer:398) while setup_wslconf looks for `[boot]` (installer:534), so a file that has
-# [boot] and not systemd=true is the only input that reaches the `sed` at installer:535 --
+# (installer:463) while setup_wslconf looks for `[boot]` (installer:639), so a file that has
+# [boot] and not systemd=true is the only input that reaches the `sed` at installer:640 --
 # and nothing had ever reached it.
 #
 # --fake-podman, NAMED. These four used to be fast because their fixture baked in

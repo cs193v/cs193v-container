@@ -58,7 +58,7 @@ FIXTURE_DIR="$TESTS_DIR/fixtures"
 # kernel.apparmor_restrict_unprivileged_userns=1 and relies on newuidmap being setuid-root, so
 # a restrictive profile, a nosuid mount or a missing uidmap all give a student podman that is
 # installed and cannot create a user namespace. Same observable, and the installer stops at
-# write_local_args (installer:664).
+# write_local_args (installer:757).
 MACHINE_CAP_NAMES='sysadmin'
 # THE OTHER THREE ARE FIXTURE SCAFFOLDING, measured rather than assumed:
 #   * fuse -- this host's podman reports driver=overlay with no options and never touches
@@ -72,7 +72,7 @@ MACHINE_CAP_NAMES='sysadmin'
 # about the harness, which is why it is not on the flag surface.
 MACHINE_CAP_INTERNAL='unmask fuse tun'
 # Subtracted at boot by lib/sandbox-guest.sh, which is where the removal commands live.
-MACHINE_PREREQ_NAMES='podman ssh subuid'
+MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
 
 # STRICT, and shared, so a typo cannot read as an installer branch in either half. CLAUDE.md §2
 # records what a silently-skipped malformed value costs; here it is worse than a shrunken set,
@@ -506,7 +506,7 @@ nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
 # hold in one run -- pasta needs a template interface, and there is none with no network.
 #
 # 900 s rather than sandbox_run's 120: the installer's own measurement is a 242 s cold build
-# (installer:730), and a first run also pulls the base image.
+# (installer:823), and a first run also pulls the base image.
 #
 # BUILDAH_LAYERS=false, WHICH IS WHAT MAKES vfs AFFORDABLE. The nested store has to be vfs --
 # overlay breaks the locales postinst, measured both ways -- and vfs copies a full parent tree

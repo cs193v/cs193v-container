@@ -60,7 +60,11 @@ WHAT THE MACHINE IS MISSING
   --no-prereqs LIST    comma-separated, from: $MACHINE_PREREQ_NAMES
       podman   removed for real with apt, so the installer's own \`apt-get install\` runs
                against the machine's baked-in offline repository
-      ssh      openssh-client removed; gated independently of podman (installer:486-488)
+      ssh      openssh-client removed; gated independently of podman (installer:562)
+      curl     removed for real.  The Ubuntu DESKTOP image has no curl and the WSL image
+               does, so this is the machine where curl is the only reason apt runs
+      uidmap   the setuid newuidmap/newgidmap helpers removed, podman left installed --
+               a Recommends, not a Depends, so the two really do come apart
       subuid   your account's range emptied.  HAND-DRIVEN ONLY, and the reason is worth
                knowing: setup_subuid writes a fixed 200000-265535, which is outside this
                container's own ID window, so podman cannot work afterwards HERE even though
@@ -111,7 +115,9 @@ EXAMPLES
   tests/install-sandbox.sh                                  # everything present: the success case
   tests/install-sandbox.sh --no-prereqs=podman              # apt really installs it, then builds
   tests/install-sandbox.sh --no-prereqs=podman,ssh          # two consent items
-  tests/install-sandbox.sh --no-caps=sysadmin               # podman installed, cannot run
+  tests/install-sandbox.sh --no-prereqs=curl                # the Ubuntu desktop machine
+  tests/install-sandbox.sh --no-prereqs=uidmap             # podman present, its helpers gone
+  tests/install-sandbox.sh --no-caps=sysadmin              # podman installed, cannot run
   tests/install-sandbox.sh --no-prereqs=subuid              # watch usermod by hand
   tests/install-sandbox.sh --platform wsl --wslconf boot --fake-podman
   tests/install-sandbox.sh --base podman-old                # the version refusal
@@ -270,7 +276,7 @@ else
     set -- "$@" -e BUILDAH_LAYERS=false
     :
 fi
-# NOT exported: CS193V_INSTANCE. installer:775-777 names the unsuffixed image on purpose, and
+# NOT exported: CS193V_INSTANCE. installer:880-882 names the unsuffixed image on purpose, and
 # an instance in here would test something no student runs. Isolation is the container.
 set -- "$@" "$(fixture_tag "$BASE")"
 

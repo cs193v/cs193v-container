@@ -96,11 +96,46 @@ sed -e 's/#.*//' -e 's/[[:space:]].*$//' "$ALLOW" | grep -E '^[0-9]+$' | sort -u
 allow_n="$(grep -c . "$ALLOWED" || true)"
 if [ "${allow_n:-0}" -gt 0 ]; then pass "coverage:allowlist-parses-to-line-numbers"
 else fail "coverage:allowlist-parses-to-line-numbers" "no line numbers parsed out of $ALLOW"; fi
-# Every excused line must still BE a line, or the allowlist is excusing nothing and quietly
-# shrinking as the file moves under it.
-lastline="$(grep -c '' "$INST")"
-bad="$(awk -v n="$lastline" '$1 > n' "$ALLOWED" | tr '\n' ' ')"
-assert_eq "coverage:every-allowlisted-line-exists" "" "$(printf '%s' "$bad" | sed 's/ *$//')"
+# Every excused line must still be an EXECUTABLE line -- in $EXEC, the same set the verdict
+# below scores against. INSIDE THE FILE IS NOT ENOUGH, and the difference is the whole point:
+# the entries are line numbers, the file moves under them, and a drifted entry lands on a blank
+# line or a comment -- which the denominator already excludes. So it excuses NOTHING while still
+# reading as an excuse, and the line it was written for goes back to counting as unreached.
+# Measured rather than imagined: five of the eight entries had drifted exactly that way, and the
+# old check (line <= the last line of the file) was true for every one of them.
+#
+# The offending line's own text is reported beside its number, because "570" is not a thing
+# anybody can act on and "570:[ \"$PLAT\" = macos ] || return 0" is.
+drifted="$(grep -vxF -f "$EXEC" "$ALLOWED" 2>/dev/null || true)"
+bad=''
+for ln in $drifted; do
+    txt="$(sed -n "${ln}p" "$INST" | sed 's/^[[:space:]]*//' | cut -c1-32)"
+    bad="$bad ${ln}:${txt:-<blank>}"
+done
+assert_eq "coverage:every-allowlisted-line-is-executable" "" "$(printf '%s' "$bad" | sed 's/^ //')"
+
+# ...AND IT MUST BE THE LINE THE ENTRY MEANT, which the check above cannot ask. Measured on the
+# drift that prompted this: of five stale entries, three had landed on a blank line or a comment
+# and were caught above -- but 570 and 607 had landed on OTHER EXECUTABLE LINES, excusing a
+# `return 0` and a `note` while reading as excuses for `podman machine start` and `machine stop`.
+# An entry that excuses the wrong statement is worse than one that excuses nothing: the line it
+# was written for counts as unreached, and some other line is silently forgiven.
+#
+# So every entry carries an ANCHOR -- the literal text that must appear on its line -- and the
+# file's own header documents the format. Renumbering is then mechanical and checkable: move the
+# number, and this says whether it landed.
+anchor_bad=''
+while IFS= read -r entry; do
+    case "$entry" in ''|'#'*) continue ;; esac
+    ln="${entry%%[[:space:]]*}"
+    case "$ln" in ''|*[!0-9]*) continue ;; esac
+    anchor="$(printf '%s' "${entry#"$ln"}" | sed 's/ -- .*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -z "$anchor" ]; then anchor_bad="$anchor_bad ${ln}:NO-ANCHOR"; continue; fi
+    sed -n "${ln}p" "$INST" | grep -qF -- "$anchor" \
+        || anchor_bad="$anchor_bad ${ln}:${anchor}"
+done < "$ALLOW"
+assert_eq "coverage:every-allowlisted-line-matches-its-anchor" "" \
+          "$(printf '%s' "$anchor_bad" | sed 's/^ //')"
 
 # ─── the verdict, recorded first ───────────────────────────────────────────────
 MISSED="$CS193V_RUN_DIR/missed.lines"
