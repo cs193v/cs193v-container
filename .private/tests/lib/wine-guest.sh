@@ -80,6 +80,14 @@ cmd_run() {
     # command capture at all -- it shells out via a nested `CMD.EXE /C` that never launches -- so
     # any version of the .cmd that uses a backtick capture dies here for a reason that has
     # nothing to do with Windows. You will see this with --rev on anything before the rewrite.
+    if grep -q "Create a default Unix user account" /tmp/last-run.txt 2>/dev/null; then
+        hr
+        printf 'NOTE: Ubuntu first-run setup above was REPLAYED, not answered -- the prompts are\n'
+        printf '      shown with answers already filled in. On a real machine those three\n'
+        printf '      questions wait for the student. Knobs: wsl.oobe 0 to skip it,\n'
+        printf '      wsl.oobe.insights 0 for the 24.04 shape (two questions, not three),\n'
+        printf '      wsl.oobe.user NAME to change the pre-filled username.\n'
+    fi
     if grep -q "CMD.EXE /C" /tmp/last-run.txt 2>/dev/null; then
         hr
         printf 'NOTE: the "Can not recognize CMD.EXE /C ..." lines above are WINE, not the\n'
@@ -121,6 +129,14 @@ Everything you can change, by writing a file into /tmp/case
                           9009 = powershell missing, which is "cannot tell",
                           NOT "absent" -- the installer has a separate arm for it
   wsl.list                one distro name per line. Empty = a fresh WSL
+
+  wsl.oobe 0              skip Ubuntu's first-run setup entirely
+  wsl.oobe.insights 0     drop the telemetry question, i.e. the 24.04 shape.
+                          The installer's text promises THREE questions on 26.04
+                          and two here -- this is how you check that claim
+  wsl.oobe.user NAME      the pre-filled username (real WSL fills in the Windows
+                          account name, lowercased and sanitised)
+  wsl.stage2.quiet 1      drop the "install-cs193v.sh runs here" boundary line
 
   e.g.   echo -1 > /tmp/case/wsl.status.rc && wincmd run
 

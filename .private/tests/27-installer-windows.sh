@@ -41,7 +41,7 @@ assert_file "windows:message-table-exists" "$MSGFILE"
 assert_eq "windows:every-message-has-a-provenance-tier" "" \
     "$(awk -F'\t' '!/^#/ && NF && NF!=3 {print "malformed: " $0}' "$MSGFILE")"
 assert_eq "windows:no-unknown-provenance-tier" "" \
-    "$(awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABC]$/ {print $1 " has tier " $2}' "$MSGFILE")"
+    "$(awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABCD]$/ {print $1 " has tier " $2}' "$MSGFILE")"
 # The fakes must hold no prose of their own -- that is what makes the table auditable.
 assert_eq "windows:fakes-hold-no-prose" "" \
     "$(grep -nE '(printf|fputs)\s*\(\s*"[A-Z][a-z]+ [a-z]' "$FIXTURE_DIR"/win-fakes/fake-*.c || true)"
@@ -93,6 +93,27 @@ for rc in -1 1 2 9009; do
     assert_says_not "win-status-$rc:does-not-claim-wsl-is-installed" "WSL is installed" "$WINE_OUT"
     assert_says     "win-status-$rc:offers-to-install-wsl"           "Installing WSL" "$WINE_OUT"
 done
+
+# Creating the environment, and the on-screen promise it makes while doing so. The warning text
+# is the installer's OWN words, so it is fair to pin: it tells the student how many questions to
+# expect and that they must type `exit` to carry on, and both were wrong or missing before --
+# `wsl --install` LAUNCHES the distro and leaves them at a Linux prompt with no instruction.
+#
+# Canonical's actual OOBE wording is NOT asserted anywhere. The fake replays it so a person can
+# see it in win-sandbox.sh, but it belongs to another project and moves with wsl-setup, so
+# pinning it here would punish the wrong change.
+wine_new
+wine_list                              # nothing registered yet
+wine_run
+assert_eq   "win-create:succeeds"                  "0" "$WINE_RC"
+assert_says "win-create:says-it-is-creating"       "Creating the CS193V Linux environment" "$WINE_OUT"
+assert_says "win-create:warns-about-the-username"  "a username" "$WINE_OUT"
+assert_says "win-create:warns-about-the-password"  "a password to go with it" "$WINE_OUT"
+assert_says "win-create:warns-about-the-third-question" "anonymous usage reports" "$WINE_OUT"
+assert_says "win-create:tells-them-to-type-exit"   "TYPE exit AND PRESS ENTER" "$WINE_OUT"
+assert_says "win-create:then-reports-it-ready"     "environment is ready" "$WINE_OUT"
+assert_eq   "win-create:creates-it-once"           "1" "$(wine_argv_count '\-\-install -d')"
+assert_says "win-create:says-it-is-done"           "Done. From now on" "$WINE_OUT"
 
 # The same class at the distro-creation call, which is the one that mattered most: its exit code
 # is the LAUNCHED SHELL'S, not the install's, so it cannot be trusted in either direction. The

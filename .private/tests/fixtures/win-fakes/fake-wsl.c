@@ -69,6 +69,31 @@ int main(int argc, char **argv) {
         if (!fake_knob_int("wsl.install.fails", 0)) {
             fake_say(stdout, "MessageDistributionInstalled", distro, NULL);
             fake_say(stdout, "MessageLaunchingDistro", distro, NULL);
+            /* `--install` LAUNCHES the distro, and what a student then sees is Canonical's
+             * first-run setup -- three questions on 26.04, not two. Replayed rather than
+             * skipped because the installer's own on-screen text promises exactly this, and a
+             * promise about output that never appears cannot be checked. Non-interactive: the
+             * prompts are shown with the answers already filled in, which is why wincmd says so
+             * afterwards rather than leaving you to think the harness took your input. */
+            if (fake_knob_int("wsl.oobe", 1)) {
+                char user[128];
+                if (!fake_knob("wsl.oobe.user", user, sizeof user) || !user[0])
+                    snprintf(user, sizeof user, "student");
+                fake_say(stdout, "OobeProvisioning", distro, NULL);
+                fake_say(stdout, "OobeWait", NULL, NULL);
+                fake_say(stdout, "OobeCreateUser", user, NULL);
+                fake_say(stdout, "OobeNewPassword", NULL, NULL);
+                fake_say(stdout, "OobeRetypePassword", NULL, NULL);
+                fake_say(stdout, "OobePasswdOk", NULL, NULL);
+                /* 26.04 only. Gated so the 24.04 shape can be driven too, because the
+                 * difference is exactly one question and the installer's text counts them. */
+                if (fake_knob_int("wsl.oobe.insights", 1)) {
+                    fake_say(stdout, "OobeInsightsTitle", NULL, NULL);
+                    fake_say(stdout, "OobeInsightsBody", NULL, NULL);
+                    fake_say(stdout, "OobeInsightsPrompt", NULL, NULL);
+                    fake_say(stdout, "OobeInsightsChoice", NULL, NULL);
+                }
+            }
             /* registered now: later probes must see it */
             char p[1024]; FILE *f;
             fake_path(p, sizeof p, "wsl.list");
@@ -120,8 +145,15 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (has(argc, argv, "bash"))
+    if (has(argc, argv, "bash")) {
+        /* A VISIBLE boundary, not install-cs193v.sh's transcript. That script is this repo's own
+         * and has its own coverage; reproducing its output here would be inventing prose and
+         * duplicating tests. Printing nothing was worse: the handoff looked like it had not
+         * happened at all. */
+        if (fake_knob_int("wsl.stage2.quiet", 0) == 0)
+            fake_say(stdout, "Stage2Boundary", NULL, NULL);
         return (int)fake_knob_int("wsl.bash.rc", 0);
+    }
 
     fake_say(stdout, "MessageInvalidCommandLine", argc > 1 ? argv[1] : "", "wsl.exe");
     return WSL_FAIL;
