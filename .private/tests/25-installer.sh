@@ -237,6 +237,12 @@ assert_no_file "podman-old:changes-nothing" "$TMP/old"
 # a fixture container, so both consent wordings (the macOS "installs system-wide" fork and
 # the Ubuntu "needs your password" one) wait for the install tier rather than being faked
 # badly here.
+#
+# THE SAME SENTENCE NOW COVERS THREE MORE PREREQUISITES, and it is written out so nobody spends
+# an afternoon trying to fake one here. curl, and the setuid newuidmap/newgidmap helpers, are
+# probed with `command -v` exactly as podman is, so prepending a shim cannot hide the real ones
+# either. Their cases are `no-prereqs=curl` and `no-prereqs=uidmap` in 26-installer-sandbox.sh,
+# where apt really removes the package and the installer really puts it back.
 
 # A destination it cannot create. Not a fake: a directory mode 555 is a real unwritable
 # parent, which is what a student hits when they point this at somewhere they do not own.
@@ -354,7 +360,7 @@ assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out
 #
 # WHY THIS IS HERE RATHER THAN IN A CONTAINER. `--no-prereqs=subuid` and "the install succeeded"
 # are mutually exclusive inside a container and no flag design fixes it: setup_subuid writes a
-# fixed 200000-265535 (installer:560), which lies outside the outer container's 1..65536 userns
+# fixed 200000-265535 (installer:653), which lies outside the outer container's 1..65536 userns
 # window, so podman cannot work afterwards THERE while it would on a student's laptop. A case
 # that can only ever claim half a run is the shape that produced the no-podman conflation, so the
 # container case was dropped -- and this is where the coverage it gave up went.
@@ -382,7 +388,7 @@ printf 'root:!:20000:0:99999:7:::\nstudent:!:20000:0:99999:7:::\n' > "$UM/etc/sh
 printf 'root:*::\nstudent:!::\n' > "$UM/etc/gshadow"
 : > "$UM/etc/subuid"; : > "$UM/etc/subgid"
 
-# THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing installer:560 reddens
+# THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing installer:653 reddens
 # this instead of leaving a test that agrees with a number nobody uses any more.
 UM_RANGE="$(sed -n 's/.*--add-subuids \([0-9]*-[0-9]*\).*/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
 assert_match "usermod:the-range-came-from-the-installer" '^[0-9]+-[0-9]+$' "$UM_RANGE"

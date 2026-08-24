@@ -52,7 +52,7 @@ arrange_wslconf() {
 #
 # THE DISTINCTION IS LOAD-BEARING, not fastidiousness. Moving a binary aside would make
 # `command -v podman` fail while leaving the package installed, so the installer's own
-# `apt-get install` (installer:513) would answer "podman is already the newest version", exit 0,
+# `apt-get install` (installer:593) would answer "podman is already the newest version", exit 0,
 # and the install path this exists to test would never run -- while every assertion about the
 # consent menu passed. Real removal is what makes the reinstall real.
 #
@@ -69,14 +69,26 @@ arrange_prereqs() {
     for p in $(printf '%s' "$SB_NO_PREREQS" | tr ',' ' '); do
         case "$p" in
             # uidmap TOO, because the installer's consent item is "Install podman (and uidmap)"
-            # and it asks apt for both (installer:505). Removing podman alone leaves its own
+            # and it asks apt for both (installer:579). Removing podman alone leaves its own
             # dependency behind, so apt answered "uidmap is already the newest version" and the
             # machine did not lack what the case said it lacked -- a case that half-arranges its
             # machine is the shape this whole design exists to remove.
             podman) sb_remove podman uidmap  || p_rc=1 ;;
             ssh)    sb_remove openssh-client || p_rc=1 ;;
+            # UNREACHABLE FROM THE SHIM TIER for the same reason podman is: taking curl off PATH
+            # only exposes the real /usr/bin/curl. And it is a student's machine rather than a
+            # synthetic one -- curl is absent from the Ubuntu DESKTOP image (the 26.04 and 24.04
+            # manifests both carry wget and libcurl4t64 and no curl) while the WSL image has it,
+            # so this is the one platform difference the installer could not see.
+            curl)   sb_remove curl || p_rc=1 ;;
+            # PODMAN STAYS, and that is the state under test. uidmap is a Recommends of podman
+            # rather than a Depends, so apt takes the setuid helpers and leaves podman installed
+            # -- which is exactly the machine the installer cannot fix today, because its uidmap
+            # only ever rides along with podman (installer:579). /etc/subuid survives too, so
+            # DO_SUBUID stays no and nothing but the helpers is missing.
+            uidmap) sb_remove uidmap || p_rc=1 ;;
             # NO PACKAGE OWNS A SUBUID RANGE, so this one is a file rather than a removal. It is
-            # a hand-driven knob only: setup_subuid writes a fixed 200000-265535 (installer:560),
+            # a hand-driven knob only: setup_subuid writes a fixed 200000-265535 (installer:653),
             # which is outside the outer container's 1..65536 userns window, so podman cannot work
             # afterwards HERE while it would on a student's machine. A case claiming "the install
             # succeeded" and a case claiming "the range was added" cannot both be true in a
@@ -212,6 +224,10 @@ cmd_state() {
     printf '  %-22s %s\n' 'ssh-keygen'    "$(have ssh-keygen && echo present || echo ABSENT)"
     printf '  %-22s %s\n' 'sudo'          "$(sudo_state)"
     printf '  %-22s %s\n' 'curl'          "$(have curl && echo present || echo ABSENT)"
+    # BOTH HELPERS, because the installer asks for both and either one missing is the same
+    # observable: podman answering `exec: "newuidmap": executable file not found`.
+    printf '  %-22s %s\n' 'newuidmap/newgidmap' \
+           "$(have newuidmap && have newgidmap && echo present || echo ABSENT)"
     printf '  %-22s %s:%s\n' 'you are'    "$(id -u)" "$(id -un)"
     printf '  %-22s %s\n' 'uname -s -m'   "$(uname -s) $(uname -m)"
     printf '  %-22s %s\n' 'platform()'    "$(grep -qi microsoft /proc/version 2>/dev/null && echo wsl || echo linux)"

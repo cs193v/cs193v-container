@@ -20,22 +20,27 @@ FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914
 #
 # A file:// repository holding the download-only closure of everything --no-prereqs can
 # remove, so `apt-get remove -y podman` at boot and the installer's own `apt-get install`
-# (installer:513) both work under --network=none. Generalised from Containerfile.no-podman,
+# (installer:593) both work under --network=none. Generalised from Containerfile.no-podman,
 # which proved the mechanism; the difference is that here the packages are ALSO installed.
 #
 # DOWNLOADED BEFORE THEY ARE INSTALLED, which is not an ordering preference: --download-only
 # against an already-installed package says "0 to download", so the repo would come out empty
 # and the first `--no-prereqs=podman` run would fail at the step it exists to test.
 #
+# WHICH IS WHY curl IS NOT ON THE LINE BELOW IT. curl used to be part of the build-time
+# --no-install-recommends install, and putting it in the download list while leaving it there
+# would have downloaded nothing at all -- the exact trap the paragraph above describes. It is a
+# --no-prereqs name now, so it goes through the same door as everything else removable.
+#
 # WITH RECOMMENDS, unlike the fixture this grew out of. The installer does NOT pass
-# --no-install-recommends (installer:513), so a student's `apt-get install podman` pulls passt
+# --no-install-recommends (installer:593), so a student's `apt-get install podman` pulls passt
 # -- and pasta is what rootless podman configures its network with. A repo holding only the
 # strict closure would let apt silently skip the unavailable recommendation and hand the next
 # case a podman with no network backend, which is exactly how "could not find pasta" was
 # discovered the first time.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends sudo curl ca-certificates dpkg-dev \
- && apt-get install -y --download-only podman uidmap openssh-client fuse-overlayfs \
+ && apt-get install -y --no-install-recommends sudo ca-certificates dpkg-dev \
+ && apt-get install -y --download-only podman uidmap openssh-client fuse-overlayfs curl \
  && mkdir -p /opt/localrepo \
  && cp /var/cache/apt/archives/*.deb /opt/localrepo/ \
  && ( cd /opt/localrepo && dpkg-scanpackages -m . /dev/null | gzip -9c > Packages.gz ) \
@@ -43,13 +48,14 @@ RUN apt-get update \
  && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get update \
- && apt-get install -y podman uidmap openssh-client fuse-overlayfs
+ && apt-get install -y podman uidmap openssh-client fuse-overlayfs curl
 
 # INSTALLING FROM THE LOCAL REPO IS THE ASSERTION, not the comment above it. The line before
 # this one deliberately installs with the network sources already gone, so if the repo were
 # incomplete the BUILD fails here rather than a case failing later for a reason that looks like
 # the installer's fault. Then: the things a student's machine has, present.
 RUN command -v podman && command -v ssh && command -v ssh-keygen && command -v newuidmap \
+ && command -v curl \
  && test -s /opt/localrepo/Packages.gz \
  && command -v pasta
 
@@ -84,7 +90,7 @@ RUN oldu="$(getent passwd 2 | cut -d: -f1)"; [ -n "$oldu" ] && userdel "$oldu" >
 # ─── (3) a subuid range INSIDE the outer container's mapping ────────────────────
 # The outer rootless podman maps container uid 0 -> host 1000 and container uids 1..65536 ->
 # host 100000..165535, so an inner range has to fit in 1..65536. The installer's own
-# `usermod --add-subuids 200000-265535` (installer:560) is entirely OUTSIDE that window and
+# `usermod --add-subuids 200000-265535` (installer:653) is entirely OUTSIDE that window and
 # could never work here whatever the totals add up to -- which is why --no-prereqs=subuid is a
 # hand-driven knob and not an automated case, and why the real `usermod` is covered against a
 # synthetic root in 25-installer.sh instead.

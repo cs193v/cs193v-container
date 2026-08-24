@@ -1,23 +1,29 @@
-# Lines of install-cs193v.sh that NO test on this platform can execute, one per entry, each
-# with the reason. Anything not covered and not here fails the coverage gate.
+# Lines of install-cs193v.sh that NO test on this platform can execute, one per entry, each with
+# the text that must be on that line and the reason it cannot run.
 #
-# Format: LINE-or-RANGE  reason
-# Lines beginning # are comments. The reason is not decoration -- it is the thing a reader
-# checks when they wonder whether an entry still earns its place.
+# Format: LINE  ANCHOR -- reason
 #
-# THE MACOS EFFECTS. Every macOS DECISION is executable here with fake uname/sysctl/installer
-# and podman-fake's machine arm, and 25-installer.sh drives all of them. These two are the
-# ones that change a machine in a way no Linux mechanism can reproduce.
-528  sudo installer -pkg -- needs a Mac; the pkg install itself
-562  podman machine init --now -- needs a Mac; creates a real VM
-568  podman machine set --memory -- needs a Mac
-570  podman machine start -- needs a Mac
-596  podman machine set --disk-size -- needs a Mac
-607  podman machine stop -- needs a Mac
-608  grow_machine_disk from the stopped path -- needs a Mac
-609  podman machine start after growing -- needs a Mac
+#   LINE    the line number in install-cs193v.sh. The gate checks it is an EXECUTABLE line --
+#           non-blank and not a comment -- because the denominator excludes the others, so an
+#           entry that drifts onto one excuses nothing while still reading as an excuse.
+#   ANCHOR  literal text that must appear ON that line, checked with grep -F. This is what makes
+#           renumbering verifiable, and it exists because it had to: seven of the eight entries
+#           this file used to hold had gone stale, three of them onto blank lines, and nothing
+#           noticed for as long as the numbers stayed inside the file.
+#   reason  why no test on this platform can execute it. The reason is not decoration -- it is
+#           the thing a reader checks when they wonder whether an entry still earns its place.
 #
-# curl's retry loop (installer:631) is NOT here: it is not reachable from a file:// tarball and
+# TWO ENTRIES, AND IT USED TO CLAIM EIGHT. The six `podman machine` lines that were here are
+# gone because the gate's own hit list says they RUN: podman-fake answers machine init, set,
+# start and stop, and 25-installer.sh drives every one of them through a pty. They were excusing
+# lines that no longer needed excusing -- which costs nothing directly and is exactly how an
+# allowlist stops being read. Checked against hit.lines rather than reasoned about.
+#
+# So what is left is the pair that no fake can stand in for.
+411  curl is missing from this Mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken
+608  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
+#
+# curl's retry loop (installer:736) is NOT here: it is not reachable from a file:// tarball and
 # would need an HTTP server in the fixture, so it is RECORDED as uncovered by the gate rather
 # than excused. An allowlist entry would say "cannot be tested"; the honest statement is
 # "not tested yet, and here is what it would take".

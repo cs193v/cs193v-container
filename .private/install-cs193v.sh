@@ -335,6 +335,8 @@ PLAT="$(platform)" || exit 1
 DIR=""
 DO_PODMAN_INSTALL=no
 DO_SSH_INSTALL=no
+DO_CURL_INSTALL=no
+DO_UIDMAP_INSTALL=no
 DO_MACHINE_INIT=no
 DO_MACHINE_RESIZE=no
 DO_WSLCONF=no
@@ -381,6 +383,63 @@ Please contact course staff rather than working around it."
         DO_SSH_INSTALL=yes
         need "Install openssh-client" \
              "cs193v uses ssh on your own computer to connect your browser to servers you run inside the container. Without it the container still works, but nothing in it would be reachable at http://localhost. Installing software needs your password."
+    fi
+
+    # THE DOWNLOAD TOOL, and the one thing this script assumed it could run and could not. curl
+    # ships with macOS and is in the Ubuntu WSL image, but it is NOT in the Ubuntu DESKTOP image:
+    # the 26.04 and 24.04 manifests both carry wget and libcurl4t64 and no curl. So fetch_files'
+    # unguarded curl failed for an entire platform, and told the student "This is usually a
+    # network problem" about a machine that had no curl -- after consent, apt and usermod had
+    # already run.
+    #
+    # THE WINDOWS PATH ALREADY SOLVED ITS HALF, and this is the other half rather than a second
+    # copy of it. install-cs193v-windows.cmd installs curl inside the CS193V environment before
+    # this script exists, because it needs curl to DOWNLOAD it -- so on that path the probe below
+    # finds curl and says so. Nothing does that for a student on an Ubuntu desktop, which is the
+    # gap this closes.
+    #
+    # A PREREQUISITE, NOT A FALLBACK. A wget path would double the one pipeline whose
+    # pipefail-and-sentinel reasoning is load-bearing, and it would never run on a Mac or on a
+    # staff machine, which is the definition of a path that rots. Installing it costs the student
+    # nothing extra either: podman and uidmap are absent from that same desktop image, so apt is
+    # already running and the password has already been asked for.
+    if command -v curl >/dev/null 2>&1; then
+        ok "curl"
+    elif [ "$PLAT" = macos ]; then
+        # Every supported macOS ships /usr/bin/curl, so this is the ssh case again -- something
+        # unusual about the machine, and guessing at a fix would be worse than saying so.
+        die "curl is missing from this Mac, which should not be possible.
+Please contact course staff rather than working around it."
+    else
+        DO_CURL_INSTALL=yes
+        need "Install curl" \
+             "This script downloads the course files with curl. The Ubuntu desktop install does not include it — the WSL environment does — so it has to be installed here. Installing software needs your password."
+    fi
+
+    # THE SETUID HELPERS, PROBED SEPARATELY FROM PODMAN, which is the entire point. uidmap is
+    # already in the package list, but only in the arm that installs podman (install_podman
+    # below) -- and on Ubuntu uidmap is a RECOMMENDS of podman rather than a Depends, so the two
+    # really do come apart: --no-install-recommends, a podman installed by hand, an image built
+    # with recommends off. On a machine like that nothing installed them and nothing noticed.
+    #
+    # NOT THE SAME QUESTION AS THE SUBUID RANGE BELOW. That is /etc/subuid, the block of id
+    # numbers; these are the setuid programs that consume it, and a machine can have either
+    # without the other. Without them podman answers everything with `exec: "newuidmap":
+    # executable file not found`, and this script stops two steps later in write_local_args --
+    # with a message suggesting `podman machine start`, which is a Mac command.
+    if [ "$PLAT" != macos ]; then
+        if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
+            ok "uidmap"
+        else
+            DO_UIDMAP_INSTALL=yes
+            # ONE ITEM PER APT CALL. When podman is being installed, its own consent item already
+            # says "(and uidmap)" and its package list already carries it, so a second item here
+            # would describe one change twice.
+            if [ "$DO_PODMAN_INSTALL" = no ]; then
+                need "Install uidmap" \
+                     "Podman needs two small helper programs, newuidmap and newgidmap, to keep the container separated from the rest of your computer. Podman is on this computer but they are not. Installing software needs your password."
+            fi
+        fi
     fi
 
     if [ "$PLAT" = macos ]; then
@@ -486,7 +545,8 @@ choose_dir() {
     ok "$DIR"
 }
 
-# Installs podman and, on apt platforms, the ssh CLIENT alongside it.
+# Installs podman and, on apt platforms, whichever of the ssh client, curl and the uidmap
+# helpers this machine turns out to be missing.
 #
 # openssh-client belongs here rather than in an error message the launcher prints: it is a
 # machine prerequisite exactly like podman and uidmap, and this script is what provisions the
@@ -495,16 +555,36 @@ choose_dir() {
 # browser. Macs ship it, and it is not apt-installable there, so DO_SSH_INSTALL is only ever
 # set on linux/wsl.
 #
-# The two are gated INDEPENDENTLY. A machine that already has podman but no ssh is a real
-# case — a minimal WSL distro is the likely one — and folding ssh into the podman flag would
-# skip it there for no reason.
+# curl is here for the same reason and on the same terms: this script cannot fetch the course
+# files without it, the Ubuntu desktop image does not have it, and macOS and the WSL image both
+# do -- so DO_CURL_INSTALL, like DO_SSH_INSTALL, is only ever set on linux/wsl.
+#
+# ALL FOUR ARE GATED INDEPENDENTLY, and each of the three extras exists because folding it into
+# podman's flag skipped it on a machine that really needed it. A machine with podman and no ssh
+# is a real case (a minimal WSL distro); a machine with podman and no curl is a real case (any
+# Ubuntu desktop where podman was installed by hand); and a machine with podman and no
+# newuidmap is a real case, because apt lists uidmap as a RECOMMENDS of podman rather than a
+# Depends. uidmap is the one that has to be asked for twice over -- once as part of podman's own
+# package list, once on its own -- which is why the two arms below look asymmetric.
 install_podman() {
-    if [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_SSH_INSTALL" = no ]; then
-        skip "podman and openssh-client"; return
+    if [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_SSH_INSTALL" = no ] \
+       && [ "$DO_CURL_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = no ]; then
+        skip "podman, uidmap, ssh and curl"; return
     fi
+    # ${pkgs:+$pkgs } RATHER THAN "$pkgs name", so an empty list does not open with a space.
+    # It never showed while the only way in was a machine missing podman as well: `Installing
+    # podman uidmap openssh-client` reads the same either way. A machine missing nothing but
+    # curl printed `Installing  curl`, with two spaces, the first time one existed.
     local pkgs=""
     [ "$DO_PODMAN_INSTALL" = yes ] && pkgs="podman uidmap"
-    [ "$DO_SSH_INSTALL" = yes ]    && pkgs="$pkgs openssh-client"
+    [ "$DO_SSH_INSTALL" = yes ]    && pkgs="${pkgs:+$pkgs }openssh-client"
+    # ca-certificates WITH IT, for the reason install-cs193v-windows.cmd gives where it installs
+    # the same pair: without them curl exits 60, and an SSL failure reads as a network problem
+    # just like a missing curl did. Present in every image we checked, so this is usually a no-op
+    # -- but a machine minimal enough to lack curl is exactly the one that might lack these too.
+    [ "$DO_CURL_INSTALL" = yes ]   && pkgs="${pkgs:+$pkgs }curl ca-certificates"
+    # ONLY WHEN PODMAN IS NOT ALREADY BRINGING IT, or apt would be handed the same name twice.
+    [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = yes ] && pkgs="${pkgs:+$pkgs }uidmap"
     step "Installing ${pkgs:-podman}"
     case "$PLAT" in
         linux|wsl)
@@ -537,6 +617,19 @@ Try opening a new terminal window and running this script again."
         command -v ssh >/dev/null 2>&1 || die "ssh still is not on your PATH after installing.
 Try opening a new terminal window and running this script again."
         ok "ssh installed"
+    fi
+    # ASKED FOR AGAIN AFTER INSTALLING, per prerequisite, for the reason the podman check above
+    # gives: apt can exit 0 having put something somewhere this shell's PATH does not look, and
+    # the next step to notice would be a download that fails like a network problem.
+    if [ "$DO_CURL_INSTALL" = yes ]; then
+        command -v curl >/dev/null 2>&1 || die "curl still is not on your PATH after installing.
+Try opening a new terminal window and running this script again."
+        ok "curl installed"
+    fi
+    if [ "$DO_UIDMAP_INSTALL" = yes ]; then
+        command -v newuidmap >/dev/null 2>&1 || die "newuidmap still is not on your PATH after installing.
+Try opening a new terminal window and running this script again."
+        ok "uidmap installed"
     fi
 }
 

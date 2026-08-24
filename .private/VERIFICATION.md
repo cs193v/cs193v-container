@@ -937,6 +937,16 @@ enforced** and the protection is illusory.
 **5.6 — What an OOM looks like to a student.** Run §A.9's allocation loop from an interactive shell.
 *Expect:* record exactly what appears on screen. This becomes the troubleshooting entry for exit 137.
 
+**5.7 — The curl probe, on a Mac.** `survey` now probes curl the way it probes ssh, because curl is
+absent from the Ubuntu **desktop** image (the 26.04 and 24.04 manifests carry `wget` and `libcurl4t64`
+and no `curl`) while the WSL image and macOS both ship it. Only half of that is checkable off a Mac.
+*Expect:* `✓ curl` in the survey, before the consent screen, and no consent item for it.
+*Unmeasured, and it stays that way:* the refusal arm — "curl is missing from this Mac, which should not
+be possible" — is the one installer line no tier can execute. The shim tier prepends to `PATH` and
+cannot hide a real `/usr/bin/curl`; the machine where curl CAN be removed is Linux, where that arm is
+not taken. It is in `tests/fixtures/coverage-allowlist` with that as its reason. If a Mac ever does
+reach it, that is the interesting result and staff want to hear about the machine.
+
 ---
 
 ## 6. Sleep, wake and drift (macOS and Windows)
