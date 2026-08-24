@@ -15,7 +15,26 @@ setlocal
 :: restart when it says to, then run it AGAIN. It is safe to run any number of times.
 ::
 :: Stage 1 (here) : install WSL and the CS193V Linux environment
-:: Stage 2 (auto) : run install-cs193v.sh inside it -- the same script macOS and Linux use
+:: Stage 2 (auto) : DOWNLOAD install-cs193v.sh into it and run it -- the same script macOS
+::                  and Linux use
+::
+:: ---------------------------------------------------------------------------------
+:: THE ONLY THING THIS FILE FETCHES is stage 2, from INSTALLER_URL below:
+::
+::   https://raw.githubusercontent.com/cs193v/cs193v-container/main/.private/install-cs193v.sh
+::
+:: Reading this file therefore tells you everything that will run on your computer. Stage 2 is
+:: fetched over HTTPS INSIDE the CS193V environment, checked for a sentinel line before it is
+:: run, and left at /tmp/install-cs193v.sh in there so you can read it afterwards.
+::
+:: It used to be a file you had to download YOURSELF and leave next to this one. That is gone:
+:: two downloads meant two things to get right, and the one that went wrong silently was a
+:: stale copy from an earlier quarter, which looks like a working install and is not.
+::
+:: Nothing is downloaded onto Windows itself. One consequence worth knowing, since the note
+:: above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS alternate
+:: data stream, and stage 2 lands on the environment's own Linux filesystem, so it can never
+:: carry one. THIS file still does, and still just runs, which is the whole point.
 ::
 :: ---------------------------------------------------------------------------------
 :: THE BATCH SUBSET THIS FILE KEEPS TO, AND WHY
@@ -44,13 +63,34 @@ setlocal
 ::     a stage it cannot launch aborts the whole script with exit 255. Measured. Nothing
 ::     here needs one, so nothing here has one.
 ::
-:: %HERE% IS QUOTED AT EVERY USE. A student can download into "cs193v (1)" -- which is
-:: what a browser names a second copy -- and an unquoted %HERE% makes that a syntax error.
+:: NOTHING PASSED TO wsl.exe NEEDS QUOTING, and that is asserted rather than hoped for.
+:: %~dp0 used to be read into %HERE% and handed to wslpath, so a student downloading into
+:: "cs193v (1)" -- what a browser names a second copy -- made an unquoted use a syntax error.
+:: Stage 2 no longer comes from that folder, so the only values crossing into Linux are the
+:: staff constants below, and 25-installer.sh pins them to characters that need no quotes at
+:: all. That is strictly stronger than quoting: a quote has to survive cmd AND wsl.exe.
 :: ---------------------------------------------------------------------------------
 
 set "DISTRO=CS193V"
 set "IMAGE_NAME=Ubuntu-26.04"
-set "HERE=%~dp0"
+
+:: Where stage 2 comes from. These three MUST match install-cs193v.sh's own REPO_OWNER,
+:: REPO_NAME and REPO_BRANCH; 25-installer.sh asserts that they do, because a mismatch would
+:: quietly fetch the wrong course's installer and nothing would notice until it ran. A TA
+:: testing a branch edits REPO_BRANCH here and nothing else.
+set "REPO_OWNER=cs193v"
+set "REPO_NAME=cs193v-container"
+set "REPO_BRANCH=main"
+set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%REPO_BRANCH%/.private/install-cs193v.sh"
+
+:: A LINUX path, not a Windows one: everything it names happens inside %DISTRO%. Left in place
+:: on purpose after the install, so a student who wanted to read what ran still can.
+set "STAGE2=/tmp/install-cs193v.sh"
+
+:: The last line of install-cs193v.sh. A single token ON PURPOSE, so it needs no quoting on
+:: either side of the Windows/Linux boundary. 25-installer.sh pins both halves of the contract:
+:: that the .sh ends with it, and that it occurs there exactly once.
+set "SENTINEL=CS193V-INSTALLER-COMPLETE"
 
 :: One probe, used twice: before creating the environment and again afterwards. Batch cannot
 :: read `wsl --list` directly -- its output is UTF-16, which breaks findstr and for /f alike --
@@ -149,42 +189,78 @@ goto distrofailed
 :havedistro
 echo   [2/3] The %DISTRO% environment is ready.
 
-:: ---- hand over to the real installer ----------------------------------------
-if not exist "%HERE%install-cs193v.sh" goto nosibling
-
-echo   [3/3] Setting up the container inside %DISTRO%.
+:: ---- fetch stage two, and run it inside the environment ----------------------
+:: DOWNLOADED INSIDE WSL, NOT ON WINDOWS. That is why there is no path translation, no scratch
+:: file and no `for /f` capture here any more: curl runs in the environment, writes a Linux
+:: path, and bash reads that same path. `-e` runs NO SHELL, so nothing on either side of the
+:: boundary re-quotes anything and no pipe is needed -- which matters, because a pipe in this
+:: file aborts the whole script under wine with exit 255.
+::
+:: It also means the download and the install both run as the student's LINUX user. This file
+:: runs as Administrator; nothing it fetches is fetched with those rights.
+echo   [3/3] Downloading the setup script and setting up the container inside %DISTRO%.
+echo         %INSTALLER_URL%
 echo.
 
-:: Translate the Windows path to the Linux path WSL sees.
+:: Is curl there at all? The environment is Ubuntu's image, and a base Ubuntu is not entitled
+:: to have curl -- .private/Containerfile installs it explicitly for exactly that reason.
+:: Without this probe a missing program is reported as a network problem, which is the same
+:: mistake as treating a failed question as a negative answer. Output discarded: only the exit
+:: code is being asked for.
+wsl.exe -d %DISTRO% -e curl --version >nul 2>&1
+if %errorlevel% neq 0 goto installcurl
+goto havecurl
+
+:installcurl
+:: INSTALLED, not refused. Rule one of install-cs193v.sh is that it freely sets up things it
+:: created itself and never changes what was already on the computer without asking -- and this
+:: environment was created by THIS FILE, minutes ago. So no consent question is owed.
 ::
-:: VIA A FILE, not a `for /f` backtick, and the reason is a defect rather than a preference:
-:: a backtick runs the command through a nested cmd /c and keeps only its STDOUT, DISCARDING
-:: the exit code. And wsl.exe writes its errors to stdout, not stderr -- so a failure arrives
-:: looking exactly like an answer, and "There is no distribution with the supplied name."
-:: gets handed to bash as a filename. Redirecting instead means %errorlevel% is still there
-:: to be asked, which is the actual question. It also avoids the double parsing a nested
-:: cmd /c imposes on every caret and quote in the command line.
-set "PATHFILE=%TEMP%\cs193v-linuxpath.txt"
+:: `-u root`, not sudo: it needs no password, so the student is not asked for the Linux one they
+:: set thirty seconds ago. ca-certificates goes in the same call because without it curl exits
+:: 60, which reads as a network problem too. `env DEBIAN_FRONTEND=noninteractive` keeps apt from
+:: ever waiting on a terminal, and env is a real program, so it costs no shell.
+::
+:: Only reached when the probe said no. `apt-get update` is a slow round trip, and this file
+:: promises it is safe to run any number of times.
+echo         Installing curl in %DISTRO% first, which the download needs.
+echo.
+wsl.exe -d %DISTRO% -u root -e apt-get update
+if %errorlevel% neq 0 goto curlfailed
+wsl.exe -d %DISTRO% -u root -e env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+if %errorlevel% neq 0 goto curlfailed
 
-:: Prove the scratch file can be written BEFORE using it. Otherwise an unset or unwritable
-:: %TEMP% surfaces as "could not work out where CS193V sees this folder", which blames WSL
-:: for something WSL had no part in -- the same mistake as treating a failed probe as a
-:: negative answer.
-break > "%PATHFILE%" 2>nul
-if not exist "%PATHFILE%" goto noscratch
+:: apt exiting 0 is not the same claim as "curl is on the PATH now" -- the same distinction the
+:: distro probe above makes about `wsl --install`. Ask the question again rather than assume.
+wsl.exe -d %DISTRO% -e curl --version >nul 2>&1
+if %errorlevel% neq 0 goto curlfailed
 
-wsl.exe -d %DISTRO% -e wslpath -a "%HERE%install-cs193v.sh" > "%PATHFILE%"
-if %errorlevel% neq 0 goto nopath
-set "LINUXPATH="
-for /f "usebackq delims=" %%i in ("%PATHFILE%") do set "LINUXPATH=%%i"
-del "%PATHFILE%" >nul 2>&1
-if not defined LINUXPATH goto nopath
+:havecurl
+:: The same flags install-cs193v.sh's own download uses, for the same reason it uses them: the
+:: single likeliest thing to go wrong here is a dropped connection on dorm wifi.
+::
+:: NOT redirected. curl's own `curl: (6) Could not resolve host ...` belongs in the window the
+:: student pastes to course staff.
+wsl.exe -d %DISTRO% -e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%
+if %errorlevel% neq 0 goto downloadfailed
 
-:: Belt and braces. A real answer is an absolute Linux path, so if wsl.exe ever exits 0
-:: while printing prose, this still refuses to hand it to bash.
-if not "%LINUXPATH:~0,1%"=="/" goto nopath
+:: THE CHECK CURL CANNOT DO. `curl -f` catches a 404, and a cut-off transfer against a served
+:: Content-Length, but not a captive portal answering 200 OK with its own login page: the bytes
+:: arrived, they are simply not the installer, and it is bash that would run the HTML.
+:: install-cs193v.sh's own download step carries the same guard for the same reason -- there it
+:: is four files that must exist, here it is the token on that script's last line, which makes
+:: this a completeness check as well as an identity one.
+wsl.exe -d %DISTRO% -e grep -q %SENTINEL% %STAGE2%
+if %errorlevel% neq 0 goto downloadincomplete
 
-wsl.exe -d %DISTRO% -e bash "%LINUXPATH%"
+:: %STAGE2% is left behind deliberately -- see the success message below.
+::
+:: One rough edge, recorded rather than coded around: if a root-owned /tmp/install-cs193v.sh is
+:: already there, from someone having run `wsl -u root` by hand, curl cannot overwrite it and
+:: exits 23. The download message says the file can be run again, which is true once that copy
+:: is gone. `--cd ~ -e curl -O` would avoid it, at the price of another WSL flag nothing here
+:: has verified.
+wsl.exe -d %DISTRO% -e bash %STAGE2%
 set "RC=%errorlevel%"
 
 echo.
@@ -202,6 +278,9 @@ echo.
 echo   You can also open %DISTRO% from the Windows Terminal dropdown.
 echo   Your project files are reachable from Windows at:
 echo       \\wsl.localhost\%DISTRO%\home\[your-linux-username]\cs193v\projects
+echo.
+echo   The setup script this downloaded is still in %DISTRO%, at
+echo       %STAGE2%
 echo   ------------------------------------------------------------------
 echo.
 pause
@@ -260,32 +339,41 @@ echo.
 pause
 exit /b 1
 
-:nosibling
+:curlfailed
 echo.
-echo   Could not find install-cs193v.sh next to this file.
+echo   Could not install curl in the %DISTRO% environment, which setup
+echo   needs in order to download the rest of itself.
 echo.
-echo   Both files need to be in the same folder - download install-cs193v.sh
-echo   into this one and run this again:
-echo       "%HERE%"
+echo   The usual cause is that the network is not up yet inside the new
+echo   environment. It is safe to run this file again.
 echo.
-pause
-exit /b 1
-
-:noscratch
-echo.
-echo   Could not create a temporary file, so setup cannot continue.
-echo.
-echo   Windows normally provides one; if TEMP is unset or points somewhere
-echo   unwritable this is what happens. Please send course staff this whole
-echo   window and the output of:   echo %%TEMP%%
+echo   If it keeps happening, please send course staff this whole window
+echo   and the output of:   wsl -d %DISTRO% -u root -e apt-get install curl
 echo.
 pause
 exit /b 1
 
-:nopath
+:downloadfailed
 echo.
-echo   Could not work out where %DISTRO% sees this folder.
-echo   Please send this whole window to course staff.
+echo   Could not download the setup script from:
+echo       %INSTALLER_URL%
+echo.
+echo   This is usually a network problem, and it is safe to run this file
+echo   again. Some campus and company networks block
+echo   raw.githubusercontent.com outright; if yours does, tell course staff
+echo   rather than spending time on it.
+echo.
+pause
+exit /b 1
+
+:downloadincomplete
+echo.
+echo   The setup script downloaded, but it is not the whole file, so setup
+echo   is stopping rather than running part of it.
+echo.
+echo   That means the transfer was cut short, or something on the network
+echo   answered instead of the real thing - a wifi sign-in page, typically.
+echo   Get properly connected and run this file again.
 echo.
 pause
 exit /b 1

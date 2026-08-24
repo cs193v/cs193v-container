@@ -523,8 +523,10 @@ on an old WSL would fail here too.
 
 ### install-cs193v-windows.cmd — what wine cannot answer
 `.private/tests/run-tests.sh --tier windows` executes the whole file under wine's cmd.exe and
-reaches all thirteen branch targets. Three things it structurally cannot settle, and one it
-should not be trusted on:
+reaches all fifteen branch targets. Read the count off
+`record "windows:branch-targets-in-the-file"` rather than trusting this sentence: the suite
+derives it by parsing the file, and this line is a copy. Three things it structurally cannot
+settle, and one it should not be trusted on:
 
 1. **LF vs CRLF.** cmd.exe reads batch in 512-byte chunks with a label scanner that assumes
    `\r\n`, so LF-only endings break `goto`/`call :label` *non-deterministically by byte offset*.
@@ -535,7 +537,22 @@ should not be trusted on:
    errors. Measured. Also a static rule, for the same reason.
 3. **Every EFFECT.** Whether `wsl --install` really installs, whether the feature really needs a
    reboot, whether `--name` really works on the student's build. The suite fakes `wsl.exe`
-   entirely, so it reaches every decision and no consequence.
+   entirely, so it reaches every decision and no consequence. Since stage one now *downloads*
+   stage two, three of those consequences are new and each one breaks every Windows student at
+   once, so verify all three on a real box:
+   - `wsl -d CS193V -e curl --version` — is curl in a fresh `Ubuntu-26.04` distro at all? If it
+     is not, stage one installs it, so also check that
+     `wsl -d CS193V -u root -e env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates`
+     completes **without a password prompt and without any debconf question**. `-u root` is the
+     whole reason no password is asked for; confirm that, do not assume it.
+   - **`wsl.exe` passes the long `-e` command line through unmangled.** `fake-wsl.c` matches argv
+     by `strcmp` and never parses it, so a green tier proves nothing about whether the real
+     `wsl.exe` forwards `--retry 10 --retry-delay 3` to curl or eats `--retry` as its own. Check
+     `wsl -d CS193V -e curl -fsSL --retry 10 --retry-delay 3 -o /tmp/x <url>` by hand.
+   - **`raw.githubusercontent.com` resolves and is not blocked.** This is a NEW host: stage two's
+     own tarball URL 302s to `codeload.github.com` instead. Try it from campus wifi and from a
+     dorm room, not just from a staff machine. `00-release-gates.sh` fetches the URL, but only
+     from wherever the release run happens.
 4. **The Tier C strings** in `fixtures/wsl-messages.2.9.8` — `net.exe` and `where.exe` are closed
    components with no published exit-code contract, so their wording is third-party-attested only.
    The suite gates on their exit codes and matches prose loosely. *Verify once:* run

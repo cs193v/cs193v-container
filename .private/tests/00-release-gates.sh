@@ -26,6 +26,97 @@ assert_ne "installer:REPO_OWNER-is-set" "CHANGEME" "$owner"
 record    "installer:REPO_OWNER" "$owner"
 assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 
+# ...and the URL the WINDOWS installer fetches stage two from, ACTUALLY FETCHED.
+#
+# THIS IS THE ONLY TEST IN THE SUITE THAT CAN CATCH A WRONG URL. install-cs193v-windows.cmd
+# carries its own REPO_OWNER/REPO_NAME/REPO_BRANCH and composes a raw.githubusercontent.com URL
+# from them; 25-installer.sh checks that those three agree with the .sh's and that the result
+# needs no quoting, and the windows tier drives the whole download against a fake with
+# --network=none. None of that can notice that the URL is a 404 -- a typo in the host, a renamed
+# branch, or `.private/` moving -- and the consequence is that EVERY Windows student stops dead
+# at stage two with a network error that is not a network error.
+#
+# It belongs in the release tier for the same reason the token expiry in §6 does: it depends on
+# publication rather than on code, so it goes stale on someone else's schedule and a failure
+# here would be unactionable noise in the everyday suite.
+#
+# DELIBERATELY WEAK, AND NOTHING BELOW LOOKS AT THE WORKING TREE. This gate answers one question
+# -- "is something installer-shaped at that URL" -- and stops there. It used to also assert that
+# the URL served THIS TREE's bytes, and that the published copy carried the sentinel. Both had to
+# go, and the reason is worth keeping because the second version of this file will be tempted by
+# them again:
+#
+#   * The bytes comparison was red for anyone with an uncommitted edit to install-cs193v.sh, and
+#     could only be made green by committing AND pushing to the student branch. That is the exact
+#     failure §6 warns about -- "failing for everybody with no change to blame" -- committed
+#     inside the tier that was supposed to be immune to it. A red you can only clear by
+#     publishing is not a test of the code.
+#   * The sentinel check could not catch the thing it was aimed at. The .cmd and the .sh are
+#     published by the SAME PUSH of the SAME BRANCH, so they cannot disagree about the token in
+#     the repo. The one way they really can diverge is the course website's hand-uploaded .cmd
+#     going stale against raw's .sh -- and this suite does not know the website's URL, so no
+#     assertion here can see it. That is a line in README's release list, not a test.
+#
+# THE STRICT HALF IS ALREADY COVERED, OFFLINE, AGAINST THE WORKING TREE, which is why weakening
+# this costs nothing:
+#
+#   * `--tier windows` drives the whole download -> sentinel -> bash sequence against the tree as
+#     it stands. lib/wine.sh copies install-cs193v.sh in as stage2.src and fake-wsl.c's curl arm
+#     serves it, so an edit to that script is exercised by the next run rather than by the next
+#     push. Both directions: win-ok:* on a full body, win-portal on a cut-short one.
+#   * 25-installer.sh asserts the contract a developer can actually act on -- that the token the
+#     .cmd greps for is the .sh's last line and occurs there exactly once.
+#
+# The .cmd is parsed rather than the URL retyped, or this would assert that a constant equals
+# itself. \r is stripped first: the file is CRLF, and a trailing carriage return in a URL is a
+# 400 from a server and a mystery in a log.
+cmdfile=$PRIVATE/install-cs193v-windows.cmd
+cget() { sed 's/\r$//' "$cmdfile" | sed -n "s/^set \"$1=\(.*\)\"\$/\1/p" | head -1; }
+stage2_url="$(cget INSTALLER_URL \
+              | sed -e "s|%REPO_OWNER%|$(cget REPO_OWNER)|" \
+                    -e "s|%REPO_NAME%|$(cget REPO_NAME)|" \
+                    -e "s|%REPO_BRANCH%|$(cget REPO_BRANCH)|")"
+record "installer:stage2-url" "$stage2_url"
+rel_tmp="$(new_tmpdir)"
+if curl -fsS --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.err"; then
+    pass "installer:stage2-url-is-fetchable"
+    record "installer:stage2-url-bytes" "$(wc -c < "$rel_tmp/stage2.sh")"
+
+    # `curl -f` has already done most of the work: measured, it exits 22 for a wrong owner, a
+    # wrong repo, a wrong branch AND a wrong path, so the assertion above covers the whole typo
+    # class on its own. What it cannot see is a 200 carrying something else, which is the shape a
+    # captive portal or an intercepting proxy has -- the same failure the .cmd's own sentinel
+    # check exists to refuse at run time, here caught one layer earlier.
+    #
+    # `bash -n` and not a token search, on purpose. It asks "is this a shell script at all",
+    # which is a property of every version of install-cs193v.sh past and future, so this cannot
+    # go red because somebody edited the script. Measured: it accepts the real installer and
+    # rejects an HTML sign-in page with exit 2.
+    assert_ok "installer:stage2-url-serves-a-shell-script" \
+              sh -c "head -1 '$rel_tmp/stage2.sh' | grep -qE '^#!.*bash' \
+                     && bash -n '$rel_tmp/stage2.sh'"
+
+    # ...and that it is THIS course's installer rather than some other shell script that happens
+    # to live at that path. Constant NAMES, never their values: `REPO_OWNER=cs193v` changing to
+    # anything else must not fail here, because that is a staff edit and 25-installer.sh is what
+    # keeps it honest. Both names are load-bearing in the .sh and pinned by other assertions, so
+    # neither can be renamed quietly.
+    assert_ok "installer:stage2-url-serves-the-course-installer" \
+              sh -c "grep -q '^REPO_OWNER=' '$rel_tmp/stage2.sh' \
+                     && grep -q '^WSL_DISTRO=' '$rel_tmp/stage2.sh'"
+else
+    fail "installer:stage2-url-is-fetchable" \
+         "the Windows installer would fetch stage two from:
+    $stage2_url
+and that failed. Every Windows student stops here.
+$(cat "$rel_tmp/curl.err")"
+    # Named rather than dropped: a check that quietly disappears is the same defect as one that
+    # never ran (VERIFICATION.md §A.15).
+    skip "installer:stage2-url-serves-a-shell-script"      "the URL could not be fetched"
+    skip "installer:stage2-url-serves-the-course-installer" "the URL could not be fetched"
+fi
+rm -rf "$rel_tmp"
+
 # ─── 2. the recipe is the distribution, so its pins are the release gate ───────
 # THIS SECTION REPLACED A REGISTRY CHECK, and it is stricter than the one it replaced.
 #

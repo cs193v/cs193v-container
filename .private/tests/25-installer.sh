@@ -757,6 +757,21 @@ assert_says     "incomplete:names-the-missing-file"    "cs193v is missing" "$out
 assert_says     "incomplete:blames-the-transfer"       "cut short" "$out"
 assert_says     "incomplete:says-it-is-safe-to-retry"  "safe to run this script again" "$out"
 
+# ─── the sentinel the Windows installer checks for ─────────────────────────────
+# Stage one downloads install-cs193v.sh over HTTPS and greps it for this token BEFORE running
+# it. `curl -f` catches a 404 and a cut-off transfer, but not the case that matters on campus
+# wifi: a captive portal answering 200 with its own login page. The bytes arrive, curl is
+# happy, and `bash` would run the HTML. The token is what makes "these bytes are the installer"
+# a checkable claim.
+#
+# TWO halves, and the second is the one that is easy to lose. Last-line-ness is what makes the
+# token a completeness check as well as an identity one; without the occurs-once half, a token
+# that also appeared near the TOP of the file would let a truncated download pass.
+assert_ok "installer:sentinel-is-the-last-line" \
+          sh -c "tail -1 '$PRIVATE/install-cs193v.sh' | grep -q 'CS193V-INSTALLER-COMPLETE'"
+assert_eq "installer:sentinel-appears-once" "1" \
+          "$(grep -c 'CS193V-INSTALLER-COMPLETE' "$PRIVATE/install-cs193v.sh")"
+
 # ─── the Windows stage-one script ──────────────────────────────────────────────
 # The .cmd cannot be EXECUTED here -- that is 27-installer-windows.sh, which drives it under
 # wine in a container. What is checked here is the half wine structurally cannot check, because
@@ -769,9 +784,75 @@ assert_says     "incomplete:says-it-is-safe-to-retry"  "safe to run this script 
 # covered the day it lands rather than when someone remembers to extend a list.
 W=$PRIVATE/install-cs193v-windows.cmd
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
-# Bare filename on purpose: the .cmd and the .sh are downloaded side by side, before any
-# .private/ directory exists, so stage one must reference its sibling.
-assert_ok "windows:hands-off-to-the-shared-installer" grep -q 'install-cs193v.sh' "$W"
+# ─── stage one fetches stage two, and the contract that makes that safe ────────
+#
+# The old check here was `grep -q 'install-cs193v.sh' "$W"`, with a comment saying the two files
+# are downloaded side by side. Both are now wrong, and the check is worse than wrong: the name
+# still appears in the .cmd -- inside %INSTALLER_URL% and %STAGE2% -- so that grep CANNOT FAIL
+# any more. It is deleted rather than kept, because a gate that cannot go red is an assertion
+# only in appearance.
+#
+# CRLF: every read of the .cmd below strips \r first. Without that, a value extracted from it
+# ends with a carriage return and compares unequal to the .sh's for a reason nothing prints.
+cmd_get() {                           # cmd_get REGEX -> the \1 of the first match, \r stripped
+    sed 's/\r$//' "$W" | sed -n "s/^$1\$/\1/p" | head -1
+}
+cmd_owner="$(cmd_get 'set "REPO_OWNER=\(.*\)"')"
+cmd_name="$(cmd_get 'set "REPO_NAME=\(.*\)"')"
+cmd_branch="$(cmd_get 'set "REPO_BRANCH=\(.*\)"')"
+cmd_url="$(cmd_get 'set "INSTALLER_URL=\(.*\)"')"
+cmd_sentinel="$(cmd_get 'set "SENTINEL=\(.*\)"')"
+
+# The .cmd carries its own copy of the three repo values, so a mismatch with the .sh would fetch
+# a DIFFERENT course's installer and nothing would notice until it ran. Compared as sorted
+# triples rather than one at a time, so the failure message names which one drifted.
+# Same shape as windows:names-the-same-distro-as-the-sh below.
+triple_of_sh="$(sed -n 's/^REPO_\([A-Z]*\)="\(.*\)"$/\1=\2/p' "$PRIVATE/install-cs193v.sh" \
+                | LC_ALL=C sort | tr '\n' ' ')"
+triple_of_cmd="$(printf 'BRANCH=%s\nNAME=%s\nOWNER=%s\n' "$cmd_branch" "$cmd_name" "$cmd_owner" \
+                 | LC_ALL=C sort | tr '\n' ' ')"
+assert_eq "windows:names-the-same-repo-as-the-sh" "$triple_of_sh" "$triple_of_cmd"
+
+# The URL, with the three values substituted in the way cmd.exe substitutes them. Two claims:
+# it really points at this repo's copy of the script, and -- the load-bearing one -- every
+# character in it is one that needs no quoting on either side of the Windows/Linux boundary.
+# That is what lets the .cmd pass it to wsl.exe bare. A `&` here would break the line silently.
+cmd_url_x="$(printf '%s' "$cmd_url" \
+             | sed -e "s|%REPO_OWNER%|$cmd_owner|" -e "s|%REPO_NAME%|$cmd_name|" \
+                   -e "s|%REPO_BRANCH%|$cmd_branch|")"
+assert_match "windows:the-stage2-url-is-this-repo-s-installer" \
+             "^https://raw\.githubusercontent\.com/.*/\.private/install-cs193v\.sh$" "$cmd_url_x"
+assert_match "windows:the-stage2-url-needs-no-quoting" \
+             '^https://[A-Za-z0-9._~/-]+$' "$cmd_url_x"
+
+# ...and the same for the sentinel, which crosses the same boundary as a grep argument.
+assert_match "windows:the-sentinel-needs-no-quoting" '^[A-Za-z0-9._-]+$' "$cmd_sentinel"
+
+# The token the .cmd looks for must be the one the .sh actually ends with. Asserted against the
+# .sh's LAST LINE rather than the whole file, so this cannot be satisfied by a passing mention
+# somewhere in the middle. `test -n` first, or an empty extraction would grep for nothing and
+# match every line.
+assert_ok "windows:uses-the-same-sentinel-as-the-sh" \
+          sh -c "test -n '$cmd_sentinel' \
+                 && tail -1 '$PRIVATE/install-cs193v.sh' | grep -qF -- '$cmd_sentinel'"
+
+# The download line itself, and that curl's own diagnostics are NOT redirected away: the
+# `curl: (6) Could not resolve host ...` line belongs in the window a student pastes to staff.
+# The first assertion is what keeps the second honest -- on a file with no download line at all,
+# a "no redirection found" check would pass for free.
+curl_line="$(sed 's/\r$//' "$W" | grep -n 'curl -fsSL' || true)"
+assert_match "windows:downloads-the-shared-installer" \
+             '\-e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%$' "$curl_line"
+assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
+
+# ORDER, which no wine run can prove absent: the downloaded script must be checked BEFORE it is
+# handed to bash. Both line numbers must exist, so a rename on either side goes red rather than
+# quiet.
+sentinel_ln="$(sed 's/\r$//' "$W" | grep -n 'grep -q %SENTINEL%' | head -1 | cut -d: -f1)"
+bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e bash %STAGE2%' | head -1 | cut -d: -f1)"
+assert_ok "windows:checks-the-download-before-running-it" \
+          sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
+
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
           sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/install-cs193v.sh"
 # A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click
@@ -815,3 +896,23 @@ assert_eq "windows:failures-are-detected" "" "$(run_checker cmdlint_unchecked_ca
 # A `for /f` capture must be initialised before and validated after. On empty output the loop
 # body never runs, so the variable silently keeps whatever it held.
 assert_eq "windows:captures-are-guarded" "" "$(run_checker cmdlint_captures "$W")"
+
+# ─── two rules the file's own PROSE must not be able to trip or satisfy ────────
+#
+# Both of these ban a construct that the header also NAMES, in order to explain why it is
+# banned. A grep over the raw file therefore flags the explanation -- measured twice while
+# writing this, once for each rule. _cmdlint_commands drops comments, labels and blank lines and
+# keeps the real line number in field 2, so the work list is the code and only the code.
+
+# The sibling, the path translation and the scratch file are gone, not merely unused. Left in
+# place they would be a second route to stage two that nothing drives.
+assert_eq "windows:does-not-look-for-a-sibling" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' '$4 ~ /%HERE%|wslpath|%TEMP%/ { print "line " $2 ": " $4 }')"
+
+# %HERE% was the only thing DEMONSTRATING the header's delayed-expansion ban: `Down!loads`
+# silently became `Downloads` when %~dp0 was expanded under it. With %HERE% gone the rule needs
+# its own keeper, or the ban becomes documentation with nothing behind it.
+assert_eq "windows:never-enables-delayed-expansion" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' 'tolower($4) ~ /enabledelayedexpansion|\/v:on/ { print "line " $2 ": " $4 }')"

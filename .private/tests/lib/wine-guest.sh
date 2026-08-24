@@ -43,8 +43,9 @@ cmd_state() {
     arrange
     printf 'What the installer is about to see\n'; hr
     printf '  download folder      %s\n' "${SB_DL:-Downloads}"
-    printf '  install-cs193v.sh    %s\n' \
-        "$( [ -f "$DL/install-cs193v.sh" ] && printf 'present (the sibling it hands off to)' || printf 'ABSENT -- it will refuse' )"
+    printf '  curl in the distro   %s\n' \
+        "$( [ "$(knob wsl.curl.missing 0)" = 0 ] && printf 'present' \
+            || printf 'MISSING -- stage one will apt-get install it' )"
     printf '  elevated             %s\n' \
         "$( [ "$(knob reg.query.rc 0)" = 0 ] && printf 'yes' || printf "no  -- reg query exits $(knob reg.query.rc 0)" )"
     printf '  wsl.exe on PATH      %s\n' \
@@ -54,8 +55,14 @@ cmd_state() {
         "$( [ -s "$CASE/wsl.list" ] && tr '\n' ' ' < "$CASE/wsl.list" || printf '(none)' )"
     printf '  --name supported     %s\n' \
         "$( [ "$(knob wsl.name.unsupported 0)" = 0 ] && printf 'yes' || printf 'NO -- WSL older than 2.5.8' )"
-    printf '  wslpath              %s\n' \
-        "$( [ "$(knob wsl.wslpath.rc 0)" = 0 ] && printf "answers: $(knob wsl.wslpath.out '/mnt/c/Users/student/Downloads/install-cs193v.sh')" || printf "FAILS, exit $(knob wsl.wslpath.rc 0)" )"
+    printf '  apt-get              update exits %s, install exits %s%s\n' \
+        "$(knob wsl.apt.update.rc 0)" "$(knob wsl.apt.install.rc 0)" \
+        "$( [ "$(knob wsl.apt.nomarker 0)" = 0 ] && printf '' \
+            || printf ' -- and leaves curl STILL missing' )"
+    printf '  the download         exits %s%s\n' \
+        "$(knob wsl.curl.rc 0)" \
+        "$( [ "$(knob wsl.curl.truncated 0)" = 0 ] && printf ', serving the whole script' \
+            || printf ', serving a CUT-SHORT body: the sentinel check must refuse it' )"
     printf '  stage 2 (the .sh)    exits %s\n' "$(knob wsl.bash.rc 0)"
     printf '  distro probe         %s\n' \
         "$( [ "$(knob ps.rc -1)" = -1 ] && printf 'answers honestly from the distro list' || printf "FORCED to exit $(knob ps.rc -1)" )"
@@ -122,8 +129,19 @@ Everything you can change, by writing a file into /tmp/case
   wsl.install.fails 1     creation refused (name already in use)
   wsl.install.rc N        the exit code of the LAUNCHED SHELL, which is what
                           `wsl --install` actually returns -- not the install's
-  wsl.wslpath.rc N        wslpath fails. Its error goes to STDOUT, like the real one
-  wsl.wslpath.out TEXT    what wslpath answers. Try a non-path to watch the guard
+  wsl.curl.missing 1      curl is not in the distro. Stage one installs it rather
+                          than refusing -- the distro is one it created itself
+  wsl.apt.update.rc N     `apt-get update` inside the distro
+  wsl.apt.install.rc N    `apt-get install -y curl ca-certificates`
+  wsl.apt.nomarker 1      apt exits 0 and curl is STILL absent. The nastiest shape,
+                          and only the re-probe after installing catches it
+  wsl.curl.rc N           the download. curl's real codes: 6 no such host, 22 an
+                          HTTP error under -f, 23 could not write the file,
+                          28 timed out, 56 the transfer died mid-flight
+  wsl.curl.truncated 1    the download exits 0 but the body is CUT SHORT -- which is
+                          what a wifi sign-in page answering 200 OK looks like from
+                          the outside. install-cs193v.sh's last line is missing from
+                          it, and the sentinel check is what refuses
   wsl.bash.rc N           what stage 2 (install-cs193v.sh) exits with
   ps.rc N                 force the distro probe. -1 = answer honestly.
                           9009 = powershell missing, which is "cannot tell",
@@ -143,6 +161,10 @@ Everything you can change, by writing a file into /tmp/case
 The messages every fake prints come from /tmp/case/messages, which is
 fixtures/wsl-messages.<version> -- each line tagged with how its wording was
 sourced. Nothing is invented in the fakes themselves.
+
+What the download SERVES is /tmp/case/stage2.src, which is the real
+install-cs193v.sh. The fake copies it to stage2.sh and greps that, so the
+sentinel check runs against the actual script's actual last line.
 EOF
 }
 

@@ -59,7 +59,7 @@ WHAT THE MACHINE IS LIKE
                        The interesting ones are the ones batch chokes on:
                        'cs193v (1)' is what a browser names a second copy, and it used
                        to kill the block outright with "Syntax error: unexpected ("
-  --no-sibling         install-cs193v.sh is not next to the .cmd, so stage one refuses
+  --no-curl            curl is not in the distro, so watch stage one install it
   --not-admin          the elevation probe says no
   --no-wsl             no wsl.exe on PATH: the install-WSL-and-reboot arm
   --wsl-broken [RC]    wsl.exe is there but --status fails (default -1, which is what it
@@ -68,8 +68,11 @@ WHAT THE MACHINE IS LIKE
   --old-wsl            WSL older than 2.5.8: no --name, so creation fails
   --shell-rc N         the exit code of the shell \`wsl --install\` LAUNCHES. Not the
                        install's own, which is the point: N=1 must NOT read as a failure
-  --wslpath-fails [RC] wslpath fails (default -1). Its error goes to stdout, like the real one
-  --wslpath-says TEXT  what wslpath answers. A non-path exercises the guard
+  --apt-fails [RC]     \`apt-get install\` fails (default -1) while installing curl
+  --apt-lies           apt exits 0 and curl is still absent, which only the re-probe catches
+  --download-fails [RC] the download fails (default 22, an HTTP error under curl -f)
+  --truncated          the download exits 0 but serves a cut-short body, the way a wifi
+                       sign-in page does. The sentinel check is what has to refuse it
   --probe-fails [RC]   the distro probe cannot run (default 9009, powershell missing).
                        "cannot tell" is not "absent" and must not become "create it"
   --stage2-rc N        what install-cs193v.sh exits with
@@ -94,13 +97,15 @@ EXAMPLES
   tests/win-sandbox.sh --dir 'cs193v (1)'           # the folder name that used to break it
   tests/win-sandbox.sh --old-wsl --no-distro        # the --name refusal
   tests/win-sandbox.sh --probe-fails                # "cannot tell" vs "absent"
+  tests/win-sandbox.sh --no-curl                    # watch it install curl first
+  tests/win-sandbox.sh --truncated                  # a wifi sign-in page instead of the script
+  tests/win-sandbox.sh --download-fails 6           # no such host
   tests/win-sandbox.sh --rev dd01f28^ --wsl-broken  # see the old errorlevel bug bite
   tests/win-sandbox.sh -- wincmd run                # non-interactive, just the transcript
 EOF
 }
 
 DLNAME=Downloads
-SIBLING=yes
 REV=''
 KEEP=no
 CMD=''
@@ -144,7 +149,14 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --dir)            needval --dir "${2:-}"; shift; DLNAME="$1" ;;
         --dir=*)          DLNAME="${1#--dir=}" ;;
-        --no-sibling)     SIBLING=no ;;
+        --no-curl)        setk wsl.curl.missing 1 ;;
+        --apt-fails)      setk wsl.curl.missing 1
+                          optval -1 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
+                          setk wsl.apt.install.rc "$OPTVAL" ;;
+        --apt-lies)       setk wsl.curl.missing 1; setk wsl.apt.nomarker 1 ;;
+        --download-fails) optval 22 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
+                          setk wsl.curl.rc "$OPTVAL" ;;
+        --truncated)      setk wsl.curl.truncated 1 ;;
         --not-admin)      setk reg.query.rc 1 ;;
         --no-wsl)         setk where.wsl.exe 0; DISTROS='' ;;
         --wsl-broken)     optval -1 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
@@ -154,10 +166,6 @@ while [ "$#" -gt 0 ]; do
         --old-wsl)        setk wsl.name.unsupported 1; DISTROS='' ;;
         --shell-rc)       needval --shell-rc "${2:-}"; shift; setk wsl.install.rc "$1" ;;
         --shell-rc=*)     setk wsl.install.rc "${1#--shell-rc=}" ;;
-        --wslpath-fails)  optval -1 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
-                          setk wsl.wslpath.rc "$OPTVAL" ;;
-        --wslpath-says)   needval --wslpath-says "${2:-}"; shift; setk wsl.wslpath.out "$1" ;;
-        --wslpath-says=*) setk wsl.wslpath.out "${1#--wslpath-says=}" ;;
         --probe-fails)  optval 9009 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
                           setk ps.rc "$OPTVAL" ;;
         --stage2-rc)      needval --stage2-rc "${2:-}"; shift; setk wsl.bash.rc "$1" ;;
@@ -204,7 +212,8 @@ else
     cp "$PRIVATE/install-cs193v-windows.cmd" "$DL/"
 fi
 cp "$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION" "$CASE/messages"
-[ "$SIBLING" = yes ] && : > "$DL/install-cs193v.sh"
+# What the fake's curl arm serves: the real install-cs193v.sh, exactly as lib/wine.sh does it.
+cp "$PRIVATE/install-cs193v.sh" "$CASE/stage2.src"
 : > "$CASE/wsl.list"
 for d in $DISTROS; do printf '%s\n' "$d" >> "$CASE/wsl.list"; done
 for kv in $KNOBS; do printf '%s\n' "${kv#*=}" > "$CASE/${kv%%=*}"; done
@@ -226,8 +235,7 @@ set -- "$@" "$(fixture_tag wine)"
 
 printf 'Download folder: %s   installer: %s\n' "$DLNAME" \
        "$( [ -n "$REV" ] && printf 'from %s' "$REV" || printf 'working tree' )"
-printf 'Sibling .sh: %s   registered distros: %s\n' \
-       "$SIBLING" "${DISTROS:-none}"
+printf 'Registered distros: %s\n' "${DISTROS:-none}"
 printf 'Knobs: %s\n' "${KNOBS:- none (everything works)}"
 cat <<'BANNER'
 
