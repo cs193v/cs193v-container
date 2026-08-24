@@ -22,3 +22,26 @@
 #     git archive HEAD | tar -t | grep -c 'claude-code/CLAUDE.md'     # expect 1
 #
 /CLAUDE.md export-ignore
+
+# CRLF ON THE BATCH FILE IS LOAD-BEARING, and this is the only thing that keeps it.
+#
+# cmd.exe does not read a batch file line by line. It reads it in 512-BYTE CHUNKS, and its label
+# scanner assumes a two-byte \r\n terminator. Under LF-only endings that scanner drifts, so
+# `goto` and `call :label` fail depending on the BYTE OFFSET of the label -- inserting or deleting
+# a byte anywhere earlier in the file makes the bug appear or vanish, and duplicating labels does
+# not fix it. install-cs193v-windows.cmd is entirely `goto`-structured, so it is maximally
+# exposed. It shipped LF-only until this rule existed.
+#
+# `text eol=crlf` and not `-text`: both produce CRLF today, but this one is self-healing. The repo
+# stores LF, and checkout AND `git archive` both convert -- so a TA who commits from an editor
+# that saved LF still ships a working file, where `-text` would preserve the mistake verbatim.
+#
+# Wine CANNOT catch a regression here: its cmd reads bare \n natively (batch.c:259-266), so the
+# --tier windows run passes either way. 25-installer.sh asserts it statically instead.
+#
+# Verify after changing this -- the archive is what a student actually downloads:
+#
+#     git archive HEAD .private/install-cs193v-windows.cmd | tar -xO | file -
+#         # expect: ... with CRLF line terminators
+#
+*.cmd text eol=crlf

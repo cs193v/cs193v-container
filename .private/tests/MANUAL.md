@@ -506,6 +506,62 @@ Confirm or refute that podman 6 cannot run there; the support policy depends on 
 `wsl --install -d Ubuntu-26.04 --name CS193V`
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is
 `wsl --import` from a hosted rootfs, which changes the installer.
+**The floor is WSL 2.5.8**, established by diffing `WSL_INSTALL_ARG_NAME_LONG` in
+`src/windows/inc/wsl.h` across tags 2.4.13 (absent), 2.5.7 (absent) and 2.5.8 (present). A
+maintainer comment saying 2.4.4 is wrong. `--name` also rejects **legacy** Store distributions
+(`'--name' is not supported when installing legacy distributions.`), so a fallback to `-d Ubuntu`
+on an old WSL would fail here too.
+
+### install-cs193v-windows.cmd — what wine cannot answer
+`.private/tests/run-tests.sh --tier windows` executes the whole file under wine's cmd.exe and
+reaches all thirteen branch targets. Three things it structurally cannot settle, and one it
+should not be trusted on:
+
+1. **LF vs CRLF.** cmd.exe reads batch in 512-byte chunks with a label scanner that assumes
+   `\r\n`, so LF-only endings break `goto`/`call :label` *non-deterministically by byte offset*.
+   Wine reads bare `\n` natively (`batch.c:259-266`), so a green wine run proves nothing.
+   `25-installer.sh` asserts CRLF statically instead. *Verify once on a real box:* the file runs
+   start to finish and every `goto` lands.
+2. **`::` inside a parenthesized block.** Wine accepts it; real cmd.exe treats it as a label and
+   errors. Measured. Also a static rule, for the same reason.
+3. **Every EFFECT.** Whether `wsl --install` really installs, whether the feature really needs a
+   reboot, whether `--name` really works on the student's build. The suite fakes `wsl.exe`
+   entirely, so it reaches every decision and no consequence.
+4. **The Tier C strings** in `fixtures/wsl-messages.2.9.8` — `net.exe` and `where.exe` are closed
+   components with no published exit-code contract, so their wording is third-party-attested only.
+   The suite gates on their exit codes and matches prose loosely. *Verify once:* run
+   `net session` elevated, unelevated, and with the Server service stopped, and compare.
+
+### Ubuntu's first-run setup, which the installer warns about but cannot control
+`wsl --install -d Ubuntu-26.04 --name CS193V` **launches** the new distribution and returns *the
+launched shell's* exit code, not the install's (`WslClient.cpp:592-614`). That is why the
+installer no longer tests that exit code and re-runs its distro probe instead.
+
+The first-run experience is Canonical's `/usr/lib/wsl/wsl-setup` (package `wsl-setup`, named by
+`oobe.command` in the image's `/etc/wsl-distribution.conf`), **not** the old Store-era
+`Enter new UNIX username:` prompt. Expected sequence on 26.04:
+
+```
+Provisioning the new WSL instance CS193V
+This might take a while...
+                                       <- a silent cloud-init pause, can be many seconds
+Create a default Unix user account: <windows username, pre-filled and editable>
+New password:
+Retype new password:
+passwd: password updated successfully
+Help improve Ubuntu! ... [Y/n/e]:     <- 26.04 ONLY; absent on 24.04 (wsl-setup 0.6.1)
+```
+
+*Verify:* three questions, not two — the installer's on-screen warning says so, and that wording
+only matters if it is true. Then confirm the student is left at a `$` prompt and that **typing
+`exit` returns to the setup**, which is the one instruction nothing used to give.
+
+*And the nasty one:* abort the OOBE at the password prompt, then re-run. If the abort lands after
+`adduser` created the account but before `passwd` set a password, `wsl-setup`'s
+`get_first_interactive_uid` finds that uid, **skips user creation entirely**, and makes it the
+default — leaving an account with no usable password, so `sudo` never works and the student is
+never re-prompted. Recovery is `wsl --unregister CS193V` (§9.3), which is destructive. Confirm or
+refute; if it reproduces, the installer needs to detect it.
 
 ### §5.5 — cgroup delegation in WSL
 With `systemd=true` in `/etc/wsl.conf`: `.private/tests/run-tests.sh --tier container -k 60`

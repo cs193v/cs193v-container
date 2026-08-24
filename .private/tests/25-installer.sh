@@ -758,12 +758,17 @@ assert_says     "incomplete:blames-the-transfer"       "cut short" "$out"
 assert_says     "incomplete:says-it-is-safe-to-retry"  "safe to run this script again" "$out"
 
 # ─── the Windows stage-one script ──────────────────────────────────────────────
-# Not executable here, but its structure is checkable, and it is the one file no
-# Linux or macOS test run would otherwise look at.
+# The .cmd cannot be EXECUTED here -- that is 27-installer-windows.sh, which drives it under
+# wine in a container. What is checked here is the half wine structurally cannot check, because
+# wine's cmd.exe is deliberately MORE PERMISSIVE than the real one in two measured places: it
+# accepts `::` inside a parenthesized block, and it parses LF-only files that real cmd.exe
+# misparses by byte offset. A passing wine run therefore proves nothing about either, so both
+# are asserted statically instead.
+#
+# Every rule derives its work list by PARSING the file, so a call site or message added later is
+# covered the day it lands rather than when someone remembers to extend a list.
 W=$PRIVATE/install-cs193v-windows.cmd
-assert_ok "windows:requires-administrator"   grep -q 'net session' "$W"
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
-assert_ok "windows:translates-path-with-wslpath" grep -q 'wslpath' "$W"
 # Bare filename on purpose: the .cmd and the .sh are downloaded side by side, before any
 # .private/ directory exists, so stage one must reference its sibling.
 assert_ok "windows:hands-off-to-the-shared-installer" grep -q 'install-cs193v.sh' "$W"
@@ -771,10 +776,42 @@ assert_ok "windows:names-the-same-distro-as-the-sh"  \
           sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/install-cs193v.sh"
 # A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click
 # past security warnings in a course about not trusting code.
-assert_ok "windows:is-cmd-not-ps1" test ! -f install-cs193v-windows.ps1
-# CRLF matters: a .cmd with bare LF endings can misparse under cmd.exe.
-if grep -qU $'\r' "$W" 2>/dev/null || file "$W" | grep -q CRLF; then
-    pass "windows:has-crlf-line-endings"
-else
-    record "windows:line-endings" "LF only — verify cmd.exe parses it on a real Windows box"
-fi
+#
+# $PRIVATE, not a bare name: this file does `cd "$REPO"` at the top, so the relative form this
+# check used to have looked in the repo root while the .cmd lives one directory down -- a
+# .private/install-cs193v-windows.ps1 passed it.
+assert_no_file "windows:is-cmd-not-ps1" "$PRIVATE/install-cs193v-windows.ps1"
+
+. "$(dirname -- "$0")/lib/cmdlint.sh"
+
+# CRLF is not a tidiness preference. cmd.exe reads a batch file in 512-byte chunks and its label
+# scanner assumes a two-byte \r\n terminator, so under LF-only endings `goto`/`call :label` fails
+# NON-DETERMINISTICALLY by byte offset -- inserting a byte anywhere earlier can make it appear or
+# vanish, and duplicating labels does not fix it. Wine reads bare \n natively (batch.c:259-266),
+# so no execution test can ever see this.
+assert_eq "windows:has-crlf-line-endings" "" "$(run_checker cmdlint_line_endings "$W")"
+
+# 7-bit ASCII only. Wine and real cmd.exe both decode batch as OEM with no BOM or UTF-8 support,
+# and `chcp` cannot change it (batch.c:245), so a non-ASCII byte is mojibake on some machine.
+assert_eq "windows:is-ascii-only" "" "$(run_checker cmdlint_non_ascii "$W")"
+
+assert_eq "windows:every-goto-resolves" "" "$(run_checker cmdlint_labels "$W")"
+
+# `echo` arguments must not contain cmd metacharacters. Redirection characters are extracted
+# BEFORE echo runs, so the message is silently lost rather than mangled; and inside a block a
+# bare `)` closes it early, which breaks even a balanced pair.
+assert_eq "windows:messages-reach-the-student" "" "$(run_checker cmdlint_echo_specials "$W")"
+
+# `::` inside a parenthesized block. Wine accepts it, real cmd.exe treats it as a label and
+# errors, so this rule exists precisely because the wine tier would pass either way.
+assert_eq "windows:no-comments-inside-blocks" "" "$(run_checker cmdlint_comments_in_blocks "$W")"
+
+# Every external command must have its exit code checked, in a form that survives a NEGATIVE
+# code. `if errorlevel N` is a >= test, so it is false for -1 -- which is exactly what wsl.exe
+# returns for every failure (WslClient.cpp: `exitCode = -1`). Measured under wine: a program
+# exiting -1 leaves `if errorlevel 1` unfired and `if %errorlevel% neq 0` fired.
+assert_eq "windows:failures-are-detected" "" "$(run_checker cmdlint_unchecked_calls "$W")"
+
+# A `for /f` capture must be initialised before and validated after. On empty output the loop
+# body never runs, so the variable silently keeps whatever it held.
+assert_eq "windows:captures-are-guarded" "" "$(run_checker cmdlint_captures "$W")"
