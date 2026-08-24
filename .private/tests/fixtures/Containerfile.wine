@@ -71,7 +71,12 @@ RUN mkdir -p /tmp/xdg && chmod 700 /tmp/xdg \
  && wineserver -k 2>/dev/null; sleep 1 \
  && test -d /home/ubuntu/.wine/drive_c/windows/system32
 
-# %TEMP% MUST EXIST AND BE WRITABLE, because the installer writes one scratch file there.
+# %TEMP% MUST EXIST AND BE WRITABLE. The installer no longer writes a scratch file there --
+# stage two is downloaded inside the distro now, so the %TEMP%\cs193v-linuxpath.txt hop and its
+# :noscratch arm are both gone -- and this layer is KEPT anyway, deliberately. A real Windows
+# machine always has TEMP; a harness without it tests a machine no student has, and the next
+# line of batch that reaches for it would fail here for a reason belonging to the harness.
+# Removing it would buy nothing and cost the debugging session below all over again.
 #
 # wine does NOT inherit TEMP from the Unix environment -- it reads it from the registry, and a
 # bare prefix leaves it EMPTY, which made `> "%TEMP%\file"` expand to the drive root and fail

@@ -34,8 +34,15 @@ wine_new() {                          # wine_new [DOWNLOAD_DIR_NAME]
     mkdir -p "$WINE_DL"
     cp "$PRIVATE/install-cs193v-windows.cmd" "$WINE_DL/"
     cp "$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION" "$WINE_CASE/messages"
-    # The sibling .sh exists by default: its ABSENCE is one specific case, not the baseline.
-    : > "$WINE_DL/install-cs193v.sh"
+    # WHAT THE FAKE SERVES, and it is the real thing rather than a stand-in. fake-wsl's curl arm
+    # copies this to stage2.sh and its grep arm searches that, so the .cmd's sentinel check runs
+    # against install-cs193v.sh's ACTUAL last line. A token invented here instead would make the
+    # check tautological: the fixture would be agreeing with itself.
+    #
+    # There is deliberately no sibling install-cs193v.sh in the download folder any more. Stage
+    # one fetches stage two by URL and never looks beside itself, and 25-installer.sh asserts
+    # that %HERE%, wslpath and %TEMP% are all gone from the .cmd.
+    cp "$PRIVATE/install-cs193v.sh" "$WINE_CASE/stage2.src"
     WINE_OUT=''; WINE_ERR=''; WINE_RC=''; WINE_ARGV=''; WINE_DIED=''
 }
 
@@ -50,8 +57,6 @@ wine_list() {                         # wine_list [DISTRO...]
     : > "$WINE_CASE/wsl.list"
     for d in "$@"; do printf '%s\n' "$d" >> "$WINE_CASE/wsl.list"; done
 }
-
-wine_no_sibling() { rm -f "$WINE_DL/install-cs193v.sh"; }
 
 # ─── running it ────────────────────────────────────────────────────────────────
 wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ERR / WINE_RC / WINE_ARGV

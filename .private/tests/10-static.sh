@@ -152,9 +152,17 @@ assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 # and solves it by naming its files rather than globbing them.
 door_tail='install'; door_head='bash '
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+#
+# `wine_argv_count` is excluded for the same reason as `bash -n`: it is not a way to start
+# anything. It greps the argv log the Windows fakes wrote, and since issue #93 the handoff line
+# in that log IS `wsl.exe -d CS193V -e bash /tmp/install-cs193v.sh` -- so any assertion pinning
+# that call contains "bash " before "install" and matches this needle exactly. Narrowing the
+# needle instead would weaken the rule for the case it exists for; a case that really did start
+# the installer would not be doing it inside a count of logged arguments.
 bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
-        | grep -v 'bash -n' | grep -vE 'installer_host|installer_tty' || true)"
+        | grep -v 'bash -n' | grep -v 'wine_argv_count' \
+        | grep -vE 'installer_host|installer_tty' || true)"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
 # And the door has to do the thing it exists for. Extraction asserted first: an empty

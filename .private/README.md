@@ -46,7 +46,8 @@ projects/                      the student's work; the only directory shared wit
     claude-code/               managed-settings.json (the notes moved out — see above)
   messages.txt                 all student-facing launcher strings (script config, not reading)
   install-cs193v.sh            macOS / Ubuntu / WSL setup
-  install-cs193v-windows.cmd   Windows stage one, then hands off to the above
+  install-cs193v-windows.cmd   Windows stage one: installs WSL, then DOWNLOADS the above
+                               from GitHub and runs it (issue #93)
   CONTAINER-DESIGN.md          threat model, ports and the tunnel, rough edges — publish this
   VERIFICATION.md              release gates — hand to a Claude Code instance per platform
   ERRORS.md                    what the first verification pass found, and what is still open
@@ -116,10 +117,32 @@ What it costs, so nobody rediscovers it the hard way:
 Two things need real values:
 
 1. **`install-cs193v.sh`** — set `REPO_OWNER` (and `REPO_NAME` if you rename it). This is
-   the only remaining blank that is engineering rather than website work, and
-   `run-tests.sh --release` fails on exactly this one thing until it is filled in.
+   the only remaining blank that is engineering rather than website work. Set the same three
+   values in `install-cs193v-windows.cmd`, which composes the URL it downloads stage two from
+   out of its own copy of them; `25-installer.sh` fails if the two files disagree.
 2. **The course website** — host `install-cs193v.sh` and `install-cs193v-windows.cmd`
    with their SHA-256 published next to the links.
+
+   **A Windows student needs only the `.cmd` now** (issue #93). Stage one used to require the
+   `.sh` downloaded into the same folder and refused without it; it fetches it from
+   `raw.githubusercontent.com` instead, so the Windows instructions are one file, not two.
+   Keep hosting the `.sh` for macOS and Linux, where "download it, read it, check the SHA-256,
+   run it" is still the whole story.
+
+   **The consequence to watch: the `.sh` now has TWO publication points** — the website copy
+   students verify by hand, and the raw URL the `.cmd` fetches unattended. Update one and not
+   the other and the platforms silently diverge. The cheap fix is to point the website's
+   macOS/Linux link at the same raw URL so there is one source of truth.
+
+   **And the one thing no test can see:** the `.cmd` on the website is a hand-uploaded copy, so
+   it is the only artefact that can drift out of step with the repo. **Re-upload it whenever
+   `install-cs193v.sh`'s last line changes** — that line is the sentinel stage one greps for
+   before running stage two, and a stale `.cmd` looking for a token the published `.sh` no longer
+   ends with refuses the download for every Windows student at once. Inside the repo the pair
+   cannot disagree, because both files travel in the same commit on the same branch;
+   `run-tests.sh --release` therefore checks only that the URL serves *an* installer, and
+   deliberately does not compare it against your working tree — a check that goes red until you
+   push is one nobody can develop against.
 
 There is no third blank. `.config/container.args` used to carry an empty `IMAGE=` line that
 looked like one; it is gone, along with the rest of the pull path — see "How the image

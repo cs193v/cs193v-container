@@ -811,3 +811,14 @@ check_disk
 build_image
 smoke_test
 say_done
+
+# ─── the last line, and why the Windows installer needs one ────────────────────
+# install-cs193v-windows.cmd downloads this script into the CS193V environment and greps it for
+# the token below BEFORE running it. `curl -f` catches a 404 and a cut-off transfer; what it
+# cannot catch is a captive portal answering 200 with its own login page, and it is bash that
+# would then run the HTML. The token being LAST is what makes finding it prove that the whole
+# file arrived, so this is an identity check and a completeness check at once.
+#
+# KEEP IT LAST, and keep it the only occurrence in this file. 25-installer.sh asserts both, and
+# 00-release-gates.sh fetches the published URL and looks for it there.
+# CS193V-INSTALLER-COMPLETE

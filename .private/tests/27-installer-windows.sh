@@ -73,8 +73,30 @@ assert_says "win-ok:tells-them-where-projects-are" "wsl.localhost" "$WINE_OUT"
 assert_match "win-ok:the-projects-path-survives-echo" \
              'wsl\.localhost.CS193V.home.\[your-linux-username\].cs193v.projects' "$WINE_OUT"
 assert_eq   "win-ok:no-stderr-noise"              "" "$WINE_ERR"
-assert_eq   "win-ok:hands-off-to-bash-once"       "1" "$(wine_argv_count 'wsl.exe .*-e bash')"
+# Pinned to the exact path now, not just `-e bash`: the handoff argument is a constant this file
+# owns, so there is no reason to accept any other one.
+assert_eq   "win-ok:hands-off-to-bash-once"       "1" "$(wine_argv_count '\-e bash /tmp/install-cs193v.sh')"
 assert_eq   "win-ok:never-creates-an-existing-distro" "0" "$(wine_argv_count '\-\-install -d')"
+
+# ─── stage two is FETCHED, and the machine it is fetched into is checked first ──
+#
+# The four calls of the handoff, each asserted once so an extra or missing one is a failure
+# rather than a detail. The apt count is the one that is easy to leave out: without it, a .cmd
+# that ran `apt-get update` on every single launch -- on a file whose own header promises it is
+# safe to run any number of times -- would pass everything else here.
+assert_eq   "win-ok:probes-for-curl-once"         "1" "$(wine_argv_count '\-e curl --version')"
+assert_eq   "win-ok:does-not-apt-when-curl-is-there" "0" "$(wine_argv_count 'apt-get')"
+assert_eq   "win-ok:downloads-once"               "1" "$(wine_argv_count '\-e curl -fsSL')"
+assert_eq   "win-ok:checks-the-download-once"     "1" "$(wine_argv_count '\-e grep ')"
+assert_says "win-ok:names-the-url-it-fetches"     "raw.githubusercontent.com/cs193v/cs193v-container/main" "$WINE_OUT"
+assert_says "win-ok:says-where-it-left-the-script" "/tmp/install-cs193v.sh" "$WINE_OUT"
+
+# ORDER, from argv.log rather than from reading the file: whichever of the two calls appears
+# FIRST must be the download. 25-installer.sh pins the same thing statically; this pins that the
+# static claim describes what actually ran. An empty argv leaves this empty and fails, so it
+# cannot pass by finding nothing.
+assert_match "win-ok:downloads-before-it-runs-bash" 'curl' \
+             "$(printf '%s\n' "$WINE_ARGV" | grep -oE '\-e (curl -fsSL|bash)' | head -1)"
 
 # ─── CLASS: a nonzero exit from any external command must be detected ──────────
 #
@@ -136,30 +158,91 @@ assert_eq   "win-shellrc:still-succeeds"          "0" "$WINE_RC"
 assert_says "win-shellrc:says-it-is-done"         "Done. From now on" "$WINE_OUT"
 assert_says_not "win-shellrc:does-not-blame-the-wsl-version" "may not support" "$WINE_OUT"
 
-# ─── CLASS: a captured value must be validated before use ─────────────────────
+# ─── CLASS: a machine that cannot fetch must be fixed, or refused ─────────────
 #
-# Defect 3. wsl.exe writes its ERRORS TO STDOUT, and a `for /f` backtick discards the exit code,
-# so "There is no distribution with the supplied name." arrived looking exactly like an answer and
-# was handed to bash as a filename.
+# What used to be here was the wslpath capture: stage two came from a Windows path, wsl.exe
+# wrote its errors to STDOUT, and a `for /f` backtick handed "There is no distribution with the
+# supplied name." to bash as a filename. Stage two is downloaded now, so there is no captured
+# value left in the file to validate -- 25-installer.sh asserts that %HERE%, wslpath and %TEMP%
+# are all gone, which is what stops that class coming back by the front door.
+#
+# The class that replaces it: the environment is Ubuntu's image, and a base Ubuntu is not
+# entitled to have curl. Stage one installs it rather than refusing -- the environment is one
+# this same file created minutes earlier -- and every step of that has to be checked.
 wine_new
 wine_list CS193V
-wine_knob wsl.wslpath.rc -1
+wine_knob wsl.curl.missing 1
 wine_run
-assert_ne   "win-wslpath:does-not-exit-zero"      "0" "$WINE_RC"
-assert_says "win-wslpath:admits-it-cannot-locate-the-folder" "Could not work out where" "$WINE_OUT"
-assert_eq   "win-wslpath:never-runs-bash"         "0" "$(wine_argv_count 'wsl.exe .*-e bash')"
-assert_says_not "win-wslpath:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+assert_eq   "win-nocurl:succeeds"                  "0" "$WINE_RC"
+assert_says "win-nocurl:says-it-is-installing-curl" "Installing curl in CS193V" "$WINE_OUT"
+assert_eq   "win-nocurl:updates-apt-first"         "1" "$(wine_argv_count 'apt-get update')"
+assert_eq   "win-nocurl:installs-curl-and-the-ca-bundle" "1" \
+            "$(wine_argv_count 'apt-get install -y curl ca-certificates')"
+# TWICE: once to find out, once to confirm. apt exiting 0 is not the same claim as "curl is on
+# the PATH now", which is the distinction the distro probe already makes about `wsl --install`.
+assert_eq   "win-nocurl:re-probes-after-installing" "2" "$(wine_argv_count '\-e curl --version')"
+assert_eq   "win-nocurl:then-downloads"            "1" "$(wine_argv_count '\-e curl -fsSL')"
+assert_eq   "win-nocurl:then-hands-off-to-bash"    "1" "$(wine_argv_count '\-e bash ')"
+assert_says "win-nocurl:says-it-is-done"           "Done. From now on" "$WINE_OUT"
 
-# The subtler half: exit 0 with prose on stdout. The exit-code check cannot catch that, so the
-# absolute-path check has to.
-for bogus in "There is no distribution with the supplied name." "" "C:\\not\\a\\linux\\path"; do
+# Either apt step failing. -1 because that is what wsl.exe returns for its own failures, and it
+# is the code `if errorlevel 1` cannot see.
+for knob in wsl.apt.update.rc wsl.apt.install.rc; do
     wine_new
     wine_list CS193V
-    wine_knob wsl.wslpath.out "$bogus"
+    wine_knob wsl.curl.missing 1
+    wine_knob "$knob" -1
     wine_run
-    assert_eq "win-bogus:never-hands-a-non-path-to-bash" "0" "$(wine_argv_count 'wsl.exe .*-e bash')"
-    assert_says_not "win-bogus:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+    assert_ne   "win-$knob:does-not-exit-zero"     "0" "$WINE_RC"
+    assert_says "win-$knob:admits-what-failed"     "Could not install curl" "$WINE_OUT"
+    assert_says "win-$knob:says-it-is-safe-to-retry" "safe to run this file again" "$WINE_OUT"
+    assert_eq   "win-$knob:never-downloads"        "0" "$(wine_argv_count '\-e curl -fsSL')"
+    assert_eq   "win-$knob:never-runs-bash"        "0" "$(wine_argv_count '\-e bash ')"
+    assert_says_not "win-$knob:does-not-claim-success" "Done. From now on" "$WINE_OUT"
 done
+
+# THE CASE THE RE-PROBE EXISTS FOR: apt exits 0 and curl still is not there. Without the second
+# probe this reaches the download, fails there, and blames the network for a missing program.
+wine_new
+wine_list CS193V
+wine_knob wsl.curl.missing 1
+wine_knob wsl.apt.nomarker 1
+wine_run
+assert_ne   "win-aptlied:does-not-exit-zero"       "0" "$WINE_RC"
+assert_says "win-aptlied:admits-what-failed"       "Could not install curl" "$WINE_OUT"
+assert_eq   "win-aptlied:never-downloads"          "0" "$(wine_argv_count '\-e curl -fsSL')"
+assert_eq   "win-aptlied:never-runs-bash"          "0" "$(wine_argv_count '\-e bash ')"
+assert_says_not "win-aptlied:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+
+# ─── CLASS: bytes that are not the installer must never reach bash ────────────
+#
+# -1 is wsl.exe failing on its own account; the rest are curl's: 6 no such host, 22 an HTTP
+# error under -f, 23 could not write the file, 28 timed out, 56 the transfer died mid-flight.
+for rc in -1 6 22 23 28 56; do
+    wine_new
+    wine_list CS193V
+    wine_knob wsl.curl.rc "$rc"
+    wine_run
+    assert_ne   "win-dl-$rc:does-not-exit-zero"    "0" "$WINE_RC"
+    assert_says "win-dl-$rc:names-the-url"         "raw.githubusercontent.com" "$WINE_OUT"
+    assert_says "win-dl-$rc:says-it-is-safe-to-retry" "safe to run this file again" "$WINE_OUT"
+    assert_eq   "win-dl-$rc:never-runs-bash"       "0" "$(wine_argv_count '\-e bash ')"
+    assert_says_not "win-dl-$rc:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+done
+
+# AND THE ONE curl CANNOT REPORT. The fake writes a body with no sentinel in it and exits ZERO,
+# which is what a captive portal answering 200 with its own sign-in page looks like from the
+# outside: the bytes arrived, they are simply not the installer. Without the sentinel check this
+# is the case that ends with bash running a login page and the .cmd printing "Done".
+wine_new
+wine_list CS193V
+wine_knob wsl.curl.truncated 1
+wine_run
+assert_ne   "win-portal:does-not-exit-zero"        "0" "$WINE_RC"
+assert_says "win-portal:says-it-is-not-the-whole-file" "not the whole file" "$WINE_OUT"
+assert_says "win-portal:names-the-likely-cause"    "sign-in page" "$WINE_OUT"
+assert_eq   "win-portal:never-runs-bash"           "0" "$(wine_argv_count '\-e bash ')"
+assert_says_not "win-portal:does-not-claim-success" "Done. From now on" "$WINE_OUT"
 
 # ─── CLASS: a probe must not conflate "no" with "cannot tell" ─────────────────
 #
@@ -193,6 +276,14 @@ assert_eq   "win-admin:touches-nothing-else"      "0" "$(wine_argv_count 'wsl.ex
 # `Downloads` (delayed expansion eats `!`), `Down&loads` truncated the message and emitted a
 # spurious "Can not recognize" error, and `cs193v (1)` -- what a browser names a second download
 # -- died with "Syntax error: unexpected (".
+#
+# WEAKER THAN IT LOOKS NOW, and worth saying so rather than letting it read as full cover. Those
+# three defects were all about %~dp0, which no longer exists in the file: stage two is fetched
+# by URL, so the folder name is not read, expanded or printed anywhere. What this still proves
+# is that cmd.exe RUNS the file from such a folder at all -- which is not nothing, since the
+# harness itself had to work around `wine64 cmd /c` refusing a path containing parentheses --
+# and that no future line reintroduces the class. The keeper for the delayed-expansion rule
+# itself is now windows:never-enables-delayed-expansion in 25-installer.sh.
 for dir in "Downloads" "My Downloads" "Down!loads" "Down&loads" "cs193v (1)" "a(b)c" "it's mine"; do
     wine_new "$dir"
     wine_list CS193V
@@ -201,19 +292,6 @@ for dir in "Downloads" "My Downloads" "Down!loads" "Down&loads" "cs193v (1)" "a(
     assert_says "win-path[$dir]:says-it-is-done"   "Done. From now on" "$WINE_OUT"
     assert_says_not "win-path[$dir]:no-syntax-error"   "unexpected" "$WINE_OUT$WINE_ERR"
     assert_says_not "win-path[$dir]:no-unrecognised-command" "recognize" "$WINE_OUT$WINE_ERR"
-done
-
-# And the same folders on the path that PRINTS the folder name, which is where the original broke:
-# `echo   into %HERE% and run this again.` inside a parenthesized block.
-for dir in "cs193v (1)" "Down&loads" "Down!loads"; do
-    wine_new "$dir"
-    wine_list CS193V
-    wine_no_sibling
-    wine_run
-    assert_ne   "win-missing[$dir]:refuses"        "0" "$WINE_RC"
-    assert_says "win-missing[$dir]:names-the-missing-file" "Could not find install-cs193v.sh" "$WINE_OUT"
-    assert_says "win-missing[$dir]:says-both-must-be-together" "same folder" "$WINE_OUT"
-    assert_says_not "win-missing[$dir]:no-syntax-error" "unexpected" "$WINE_OUT$WINE_ERR"
 done
 
 # ─── the reboot arm, and the two calls whose codes used to be ignored ─────────

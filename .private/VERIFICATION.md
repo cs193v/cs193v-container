@@ -913,6 +913,22 @@ or refute — the support policy depends on it.
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is `wsl --import` from a
 hosted rootfs, which changes the installer.
 
+**5.4b — Windows stage one, from one downloaded file (issue #93).** On a Windows box with **no
+`install-cs193v.sh` anywhere on it**, download only `install-cs193v-windows.cmd`, right-click, Run
+as administrator.
+*Expect:* it prints the `raw.githubusercontent.com` URL, fetches stage two into the environment,
+and hands off — no "could not find install-cs193v.sh next to this file", because that arm no
+longer exists. Then check all four of these, because the whole suite fakes `wsl.exe` and can
+reach none of them:
+- `wsl -d CS193V -e curl --version` answers. If curl is absent, stage one apt-installs it: confirm
+  that runs **without a password prompt and without a debconf question**.
+- `wsl -d CS193V -e ls -l /tmp/install-cs193v.sh` — the script it ran is still there, and is the
+  published one. `shasum -a 256` it against the course website's value.
+- The long `-e` line is forwarded intact: `wsl -d CS193V -e curl -fsSL --retry 10 --retry-delay 3
+  -o /tmp/x <url>` must fetch, not have `--retry` eaten by `wsl.exe` itself.
+- `raw.githubusercontent.com` resolves **from campus wifi and from a dorm room**, not only from a
+  staff machine. It is a different host from the `codeload.github.com` stage two itself uses.
+
 **5.5 — cgroup delegation in WSL.** With `systemd=true` in `/etc/wsl.conf`, run §A.5's
 `cgroup-memory-max` check.
 *Expect:* the value passed as `--memory`, not `max`. If it reads `max`, the memory cap is **not being
