@@ -31,18 +31,42 @@
 #
 # Writing to /dev/tty escapes the pipe — verified — and is still no good: it lands inside a
 # full-screen TUI which repaints over it a quarter of a second later. The one surface that
-# survives is a tmux popup, which tmux draws OVER the panes and keeps drawing. So when there is
-# a tmux to ask, the link goes in a popup (see cs193v-linkbox) and NOT to stdout, and the box
-# below is what a caller gets when there is not.
+# survives is a tmux popup, which tmux draws OVER the panes and keeps drawing.
 #
-# TWO CASES STILL PRINT, and both are the old behaviour unchanged:
+# ─── THE POPUP IS RAISED BEFORE THERE IS A LINK TO PUT IN IT ───────────────────
+#
+# And that is the shape of this file. `shortlink` cannot answer straight away: it binds an
+# ephemeral port and then WAITS to be told the tunnel carried that exact port — ~0.75-1.5s
+# normally, several seconds when a host port on the student's own computer is contended, ten if
+# the supervisor has gone quiet. Raising the box afterwards meant a student who had just asked
+# to log in saw nothing for all of it, and whatever their tool printed in the meantime reached
+# the screen first.
+#
+# So the box goes up FIRST, showing a spinner, and the link arrives into a box that is already
+# there. cs193v-linkbox has three states for it; everything they need is a file in $statedir,
+# and the whole protocol is:
+#
+#   url      this stub, once shortlink has answered      -> the box shows the link
+#   error    this stub, when it could not                -> the box shows why
+#   served   shortlink, when the redirect was served     -> the box has done its job
+#   cancel   THE BOX, if it was dismissed while waiting  -> shortlink gives up, port comes back
+#
+# `cancel` is the only one that points inward, and it is why shortlink has a --cancel-file at
+# all: at the moment a student can dismiss a spinner, the port is held by a shortlink that has
+# not detached yet, so there is no daemon and no pid for anyone to kill. A file is the only
+# handle that exists.
+#
+# WHAT STILL PRINTS, and it is not a fallback so much as a second audience:
 #
 #   * NO TMUX. podman exec, a plain ssh, a bare `podman run` — nowhere to put a popup. Printing
 #     is all there is, and it is what this always did.
-#   * SHORTENING FAILED (exit 3: the port could not be made reachable). The long URL must not
-#     go in the box, because box() breaks an unbreakable token rather than breaching its own
-#     wall — a real OAuth URL splits across four rows — which would recreate #67 inside the
-#     thing meant to cure it. And with no server there is nothing to report a click either.
+#   * SHORTENING FAILED. The box says so, AND this prints, because the two reach different
+#     people: a caller that shows stdout (`gh`, `codex`, a plain shell) leaves a usable long URL
+#     in the scrollback, and it is the only report left if `display-popup` itself declined —
+#     a window under 71 columns, or no attached client. The long URL must not go in the BOX,
+#     because box() breaks an unbreakable token rather than breaching its own wall and a real
+#     OAuth URL splits across four rows, which would recreate #67 inside the thing meant to
+#     cure it.
 #
 # Limitation worth knowing: this only helps tools that honour $BROWSER. Anything calling
 # xdg-open directly is unaffected unless we also ship a command by that name.
@@ -59,26 +83,17 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
-# The two files shortlink reports through. A directory rather than two loose paths so one
-# `rmdir` can tidy the pair, and mktemp -d rather than a fixed name because two tools can want
-# a browser at the same moment.
+# Where the four files above live. A directory rather than loose paths so one name reaches the
+# box, and mktemp -d rather than a fixed one because two tools can want a browser at the same
+# moment.
 statedir="$(mktemp -d 2>/dev/null)" || statedir=""
 
-if [ -n "$statedir" ]; then
-    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" \
-                          --pidfile "$statedir/pid" \
-                          --served-file "$statedir/served" 2>/dev/null)"
-    rc=$?
-else
-    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" 2>/dev/null)"
-    rc=$?
-fi
-[ -n "$url" ] || url="$1"
-[ "$url" = "$1" ] && rc=3          # shortlink degraded: it printed its argument back
-
 # ─── the popup, when there is a tmux to put it in ──────────────────────────────
-if [ "$rc" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux > /dev/null 2>&1; then
-    rows="$(cs193v-linkbox --url "$url" --expires-in "$LINK_TIMEOUT" --rows 2>/dev/null)"
+popup=''
+if [ -n "$statedir" ] && [ -n "${TMUX:-}" ] && command -v tmux > /dev/null 2>&1; then
+    popup=1
+
+    rows="$(cs193v-linkbox --expires-in "$LINK_TIMEOUT" --rows 2>/dev/null)"
     case "$rows" in ''|*[!0-9]*) rows=10 ;; esac
 
     # -B because cs193v-linkbox draws its own border, and -s so that a bare reset inside the
@@ -90,20 +105,83 @@ if [ "$rc" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux > /dev/null 2>&1; th
     # student dismissed a box telling them to go and get that code. setsid rather than a bare
     # `&` so the popup survives this script exiting and takes no SIGHUP with it, the same shape
     # shortlink's own detach() uses.
+    #
+    # THE COMMAND STRING CARRIES NOTHING FROM OUR CALLER. It is hand-quoted, and a URL may
+    # contain a single quote; $statedir is mktemp's own output. That is the reason the box takes
+    # one --state rather than being handed the URL.
     setsid tmux display-popup -B -E -w 71 -h "$rows" \
         -s 'fg=#F5F2E1,bg=#15158C' \
         ${TMUX_PANE:+-t "$TMUX_PANE"} \
-        "cs193v-linkbox --url '$url' --expires-in $LINK_TIMEOUT \
-                        --pidfile '$statedir/pid' --served-file '$statedir/served'" \
+        "cs193v-linkbox --state '$statedir' --expires-in $LINK_TIMEOUT" \
         < /dev/null > /dev/null 2>&1 &
+
+    # A BOX WITH NO PUBLISHER LEFT would spin until its own cap, so anything that ends this
+    # script early has to say so first. SIGINT is the one that really happens: it goes to the
+    # foreground process group, which contains this stub because it is a child of the tool that
+    # ran it — a student who types `claude /login`, sees nothing for a second and hits Ctrl+C
+    # lands exactly here. shortlink's detach() reasons about the same hazard one layer down.
+    # SIGKILL runs no trap, and cs193v-linkbox's INIT_TIMEOUT is the backstop for that.
+    give_up() {
+        : > "$statedir/error" 2>/dev/null
+        exit "$1"
+    }
+    trap 'give_up 130' INT
+    trap 'give_up 143' TERM
+    trap 'give_up 129' HUP
+fi
+
+# ─── the link itself ──────────────────────────────────────────────────────────
+# FOREGROUND, exactly as it always was. Nothing here is backgrounded and nothing is killed: the
+# box cancels through shortlink's own poll, so this stub needs no job control, no pid and no
+# second loop. What it needs is the answer, and $( ) is how it gets it.
+if [ -n "$statedir" ]; then
+    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" \
+                          --served-file "$statedir/served" \
+                          --cancel-file "$statedir/cancel" 2>/dev/null)"
+    rc=$?
+else
+    url="$(shortlink "$1" --timeout "$LINK_TIMEOUT" 2>/dev/null)"
+    rc=$?
+fi
+
+# 4 IS "THE STUDENT DISMISSED THE BOX", and it is the one outcome with nothing to report. They
+# asked for a browser and changed their mind before it was ready; printing a URL they closed the
+# window on would be answering a question nobody is still asking. Checked before the
+# normalisation below, which cannot tell a cancel from a failure.
+if [ "$rc" -eq 4 ]; then
     exit 0
 fi
 
-# ─── otherwise, the box this always printed ────────────────────────────────────
-# Nothing owns $statedir now: no popup is going to watch those files, and shortlink removes its
-# own on the way out. rmdir rather than rm -r, so this can only ever remove an empty directory.
-[ -n "$statedir" ] && rmdir "$statedir" 2>/dev/null
+[ -n "$url" ] || url="$1"
+[ "$url" = "$1" ] && rc=3          # shortlink degraded: it printed its argument back
 
+# ─── it worked: hand the link to the box and get out of the way ───────────────
+# WRITTEN THEN RENAMED. rename(2) within one directory is atomic, so the box cannot read half a
+# URL — it polls for this file every tenth of a second and acts on the first thing it sees.
+if [ -n "$popup" ] && [ "$rc" -eq 0 ]; then
+    # AND IF EVEN THAT FAILS, say so rather than let the box wait out its cap. A full /tmp is
+    # the only way here, and a minute of spinner ending in an error frame is a worse account of
+    # it than the error frame straight away.
+    if printf '%s\n' "$url" > "$statedir/url.new" 2>/dev/null &&
+       mv "$statedir/url.new" "$statedir/url" 2>/dev/null; then
+        exit 0
+    fi
+    : > "$statedir/error" 2>/dev/null
+    exit 0
+fi
+
+if [ -n "$popup" ]; then
+    # It failed, and the box is still showing a spinner. Tell it, then print — see the header on
+    # why both. $statedir is deliberately NOT removed: the box is still reading out of it.
+    : > "$statedir/error" 2>/dev/null
+else
+    # Nothing owns $statedir now: no popup is going to watch those files, and shortlink removes
+    # its own on the way out. rmdir rather than rm -r, so this can only ever remove an empty
+    # directory.
+    [ -n "$statedir" ] && rmdir "$statedir" 2>/dev/null
+fi
+
+# ─── and the box this always printed ──────────────────────────────────────────
 printf '\n'
 printf '  ┌─────────────────────────────────────────────────────────────────┐\n'
 printf '  │  Open this URL in your browser:                                 │\n'

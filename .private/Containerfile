@@ -624,6 +624,14 @@ COPY files/ /tmp/cs193v-files/
 #     What it does when a port is genuinely forwarded needs a container with the tunnel
 #     behind it, and that is 50-image.sh and 60-container.sh.
 #
+#     `cs193v-linkbox` is asked its own height rather than told one, because open-url sizes the
+#     popup with it and a number written down in two files is a number that drifts. It is now
+#     asked THREE TIMES, once per modal state, and that is the check worth having: the popup is
+#     created before any state is known, so a frame one row taller than the others shows a dead
+#     row under the border and one row shorter scrolls the title off the top. The frames are
+#     eight body rows each by construction; this is what notices when an edit to the prose makes
+#     box() wrap a line and quietly adds a ninth.
+#
 #     `man` is the odd one out and goes to /usr/bin, not /usr/local/bin, because it
 #     REPLACES something rather than adding it. Ubuntu's minimized base leaves a
 #     /usr/bin/man of its own that exits 0 and tells the reader to run `unminimize` — an
@@ -803,8 +811,12 @@ RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/setup-git             /usr/local/bin/setup-git; \
     bash -n /etc/cs193v/ui.sh; \
     bash -n /usr/local/bin/setup-git; \
-    lb_rows="$(/usr/local/bin/cs193v-linkbox --url http://localhost:1/x --expires-in 900 --rows)"; \
+    lb_rows="$(/usr/local/bin/cs193v-linkbox --expires-in 900 --rows)"; \
     test "$lb_rows" = 10; \
+    for lb_f in initializing ready error; do \
+        test "$(/usr/local/bin/cs193v-linkbox --expires-in 900 --frame "$lb_f" | wc -l)" = 10 \
+            || { echo "cs193v-linkbox --frame $lb_f is not 10 rows" >&2; exit 1; }; \
+    done; \
     test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \

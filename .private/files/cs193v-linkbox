@@ -13,40 +13,94 @@
 # is the one surface that survives: `display-popup` is "drawn over the top of any panes", and
 # panes are not updated while one is present. Both measured.
 #
+# ─── AND THEN IT AROSE TOO LATE, WHICH IS THIS ─────────────────────────────────
+#
+# The box used to be raised only once open-url had a link to put in it, and getting one means
+# waiting: shortlink binds an ephemeral port and then waits to be TOLD the tunnel carried that
+# exact port. Normally ~0.75-1.5s, several seconds when a host port is contended. For all of it
+# a student who just asked to log in saw nothing at all, and whatever their tool printed in the
+# meantime got to the screen first.
+#
+# So the popup is raised FIRST and the link arrives into a box that is already on screen, which
+# turns one box into THREE MODAL STATES:
+#
+#   initializing   a spinner where the link will go. Nothing is known yet.
+#   ready          today's box, unchanged: the link, and a countdown to the moment it dies.
+#   error          the link could not be made. No clock, no timeout; it waits for the student.
+#
+# WHAT THE STATES BUY IS NOT COSMETIC. Two bugs in the old single-state code were only
+# reachable once a box could exist before its content did, and both are now structurally absent
+# rather than guarded:
+#
+#   * The old box closed itself when shortlink's pidfile was missing, meaning "the server went
+#     away". Before the link exists that file has never been born, so the box would have closed
+#     on its first tick, every time, looking exactly like a failure. (That signal is gone
+#     entirely now -- see open-url for why nothing needs a pidfile any more.)
+#   * The OSC 8 hyperlink is applied by a `sed` with the URL spliced into it. With no URL that
+#     expression is `s||...|`, and an EMPTY REGEX IN SED REUSES THE PREVIOUS ONE. Measured: it
+#     matched `[x]` from the expression above it and replaced the chip with escape bytes, after
+#     which chip_geometry -- which finds the click target by grepping a rendered frame -- found
+#     no chip and silently fell back to a hardcoded row. Decorating a link is now part of
+#     drawing the `ready` frame and exists nowhere else, so there is nothing to guard.
+#
+# ALL THREE FRAMES ARE THE SAME HEIGHT, and that is a hard requirement rather than a
+# preference: `display-popup -h` is chosen by open-url before any state is known, one row too
+# tall shows a dead row under the bottom border, and one row short scrolls the title off the
+# top. 50-image.sh asserts it, and the Containerfile asserts the number is 10.
+#
 # THE BOX IS DRAWN BY box() FROM /etc/cs193v/ui.sh. There is exactly one box renderer in this
 # project and this is not a second one -- see the note in cs193v-ui.sh about issue #21.
 #
 # EVERY CONSTRAINT BELOW IS A BUG THAT HAPPENED. This file was prototyped against a real popup
-# and each of the four comments marked MEASURED cost a debugging round.
+# and each of the comments marked MEASURED cost a debugging round.
 
 set -uo pipefail
 
-URL=""
+STATE_DIR=""
 EXPIRES_IN=""
-PIDFILE=""
-SERVED_FILE=""
 ROWS_ONLY=""
+FRAME_ONLY=""
+
+# HOW LONG THE SPINNER IS ALLOWED TO SPIN. Not a guess: shortlink's own ceiling is
+# CONFIRM_TIMEOUT seconds per attempt times BUSY_RETRIES attempts, and a cap below that product
+# would take the box to its error frame while a working link was still on its way.
+# 10-static.sh :: linkbox:the-initializing-cap-covers-shortlink is what notices if either
+# number moves.
+#
+# IT EXISTS FOR THE CASE WITH NOBODY LEFT TO REPORT. open-url writes `error` when shortening
+# fails, so the ordinary failure needs no timer at all; this is the backstop for an open-url
+# that was SIGKILLed mid-negotiation, where no trap runs and nothing will ever write anything.
+# Without it that box spins for the link's full fifteen minutes.
+INIT_TIMEOUT=60
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --url)         URL="${2:-}"; shift ;;
+        # ONE ARGUMENT, NOT SIX. Everything the box learns and the one thing it says are files
+        # in here, so this replaced --url/--pidfile/--served-file. Two things fall out: --rows
+        # no longer needs a fake URL handed to it, and the shell command string open-url passes
+        # to `display-popup` no longer carries anything that came from open-url's caller -- a
+        # URL may contain a single quote, and that string is hand-quoted.
+        --state)       STATE_DIR="${2:-}"; shift ;;
         --expires-in)  EXPIRES_IN="${2:-}"; shift ;;
-        --pidfile)     PIDFILE="${2:-}"; shift ;;
-        --served-file) SERVED_FILE="${2:-}"; shift ;;
         # How open-url sizes the popup: the box's height, asked of the thing that draws it, so
-        # the two cannot disagree. A popup one row taller shows a dead row under the bottom
-        # border; one row shorter scrolls the title off the top. Both were seen while
-        # prototyping, which is why this is not a number written down in open-url.
+        # the two cannot disagree. See the note above about all three frames agreeing.
         --rows)        ROWS_ONLY=1 ;;
+        # One frame to stdout and exit, for the tests. The frames are where this file's real
+        # invariants live -- ten rows, seventy-one columns, a chip on a known row, no hyperlink
+        # debris -- and without this they would only be assertable through a live popup in the
+        # tmux tier. With it, a throwaway container settles all four.
+        --frame)       FRAME_ONLY="${2:-}"; shift ;;
         *) printf 'cs193v-linkbox: unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
 done
 
-[ -n "$URL" ] || { printf 'usage: cs193v-linkbox --url URL --expires-in SECONDS\n' >&2; exit 2; }
 case "$EXPIRES_IN" in
     ''|*[!0-9]*) printf 'cs193v-linkbox: --expires-in needs a number of seconds\n' >&2; exit 2 ;;
 esac
+if [ -z "$ROWS_ONLY" ] && [ -z "$FRAME_ONLY" ] && [ -z "$STATE_DIR" ]; then
+    printf 'usage: cs193v-linkbox --state DIR --expires-in SECONDS\n' >&2; exit 2
+fi
 
 # box(), BOX_W, and the colour variables. Sourcing this is inert by contract -- its own header
 # promises "assignments and function definitions only, no traps, no output, no reads" -- which
@@ -54,6 +108,25 @@ esac
 # shellcheck source=/dev/null
 . /etc/cs193v/ui.sh
 FIELD=$(( BOX_W - 4 ))                # box()'s own usable text width
+
+# ─── measuring text ────────────────────────────────────────────────────────────
+# Display COLUMNS, which is not how many characters or bytes a string has. THE RULE AND THE
+# REASONING ARE box()'s, stated above dw() in cs193v-ui.sh: strip UTF-8 continuation bytes
+# (0x80-0xBF) and count what is left, which turns a byte count into a character count with no
+# locale involved at all. `${#s}` alone cannot do this job -- it counts characters in a UTF-8
+# locale and BYTES under LC_ALL=C, measured there at 32 vs 34 for one string.
+#
+# A SECOND IMPLEMENTATION AND NOT A SHARED ONE, deliberately. dw() lives inside box()'s awk
+# program because box() IS an awk program -- a stream filter that reads arbitrary lines, strips
+# ANSI, and word-wraps -- and dw() is called seven-plus times per box, so it has to be
+# in-program or every call is a fork. box() pays one fork per box, which is free at human
+# speed. This is one width, several times a second, in a loop that must not fork. Same rule,
+# opposite cost profile; what is worth sharing is the reasoning, and that lives with box().
+#
+# THIS FILE ALREADY HAD THE BUG IT PREVENTS: render_box measured its chip row with ${#}, and
+# that row contains U+25C2, so under LC_ALL=C the countdown sat two columns left of where it
+# belonged.
+cols() { local LC_ALL=C t="${1//[$'\x80'-$'\xbf']/}"; COLS=${#t}; }
 
 # ─── the palette ───────────────────────────────────────────────────────────────
 # Sandstone on a deep blue. tmux.conf's chrome is xterm-256 indices, but its note at
@@ -64,6 +137,11 @@ FIELD=$(( BOX_W - 4 ))                # box()'s own usable text width
 # somewhere else. Cardinal itself was tried and rejected: every other red box this project
 # draws IS an error -- box()'s default title is literally STOP, and die() draws it -- so a red
 # box for "here is your login link" borrows the wrong vocabulary entirely.
+#
+# AND THE ERROR FRAME DOES NOT TURN IT RED EITHER, for the same reason read backwards: the
+# palette is this box's identity across all three of its states, and a student who has just
+# watched a spinner in a blue box should not have to work out whether a red one is the same
+# box or a different program.
 #
 # Contrast against the background, by the WCAG formula:
 #   sandstone      #F5F2E1 on #15158C .... 12.30:1   body text and border  (AAA)
@@ -93,7 +171,52 @@ CHIP_LEAD="  $CHIP ◂ click x to close"
 # a live target sitting where nothing is drawn.
 HINT_LEAD="  $CHIP ◂ typing goes nowhere; press x to close"
 
-# ─── the link line ─────────────────────────────────────────────────────────────
+# What sits where the link will be, while there is no link. The parentheses are doing work: a
+# bare "creating link..." reads as a label for the thing above it, and this is a status.
+SPIN_TEXT='(creating link...)'
+
+# HOW LONG A DROPPED-KEY NOTICE STAYS UP, in seconds, and it has to be a duration rather than
+# "until the next tick". While the spinner is moving the loop ticks ten times a second, so a
+# notice cleared on the next tick would show for a tenth of a second and be invisible -- and the
+# whole reason it exists is that silence, in a box a student is waiting on, reads as a hung
+# terminal. Wall-clock for the same reason the countdown is.
+HINT_HOLD=2
+
+# For --frame ready, which has to draw a link without one having been made. A five-digit port,
+# which is fidelity rather than an arbitrary number: the kernel hands out an ephemeral port, so
+# every URL a student really sees is a digit longer than a four-digit fixture would be.
+FRAME_URL='http://localhost:38657/magic-link'
+
+STATE=initializing
+URL=''
+SPIN_FRAME=0
+DRAWN_SPIN=-1
+TTY_SAVE=''
+
+# ─── the moving cell ───────────────────────────────────────────────────────────
+# FROM THE WALL CLOCK, not from a count of loop iterations, and for the reason the countdown
+# below is: every keystroke satisfies `read -t` early, so a student drumming their fingers
+# would make the spinner accelerate. EPOCHREALTIME is microseconds; the separator is stripped
+# with a character class because its decimal point is the LOCALE's, and a comma is a real
+# possibility.
+#
+# ONE FIFTH OF A SECOND PER FRAME. Chosen here rather than inherited: this project has two
+# other animations and they do not agree with each other -- run_timeout advances every 200ms,
+# meter_animate every 100ms -- so there is no house cadence to point at. Five frames a second
+# reads as motion, and over a sixty-second ceiling it is three hundred repaints of one cell.
+spin_now() {
+    local us="${EPOCHREALTIME/[.,]/}"
+    SPIN_FRAME=$(( (us / 200000) % 8 ))
+}
+
+# THE GLYPHS ARE meter_glyph's, and that is the one thing shared with the animations above.
+# Its own note in cs193v-ui.sh says why: "Same braille frames as the meter, so the two never
+# look like different programs. meter_glyph is the single definition of them." Frames 0-7 carry
+# no colour, which matters here because box() strips ANSI from its input.
+
+# ─── the rows ──────────────────────────────────────────────────────────────────
+clock_of() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+
 # Centred between U+25B8 at the very start of the field and U+25C2 at the very end, so the two
 # markers point inward at the one thing on screen the student is meant to act on.
 #
@@ -113,9 +236,82 @@ HINT_LEAD="  $CHIP ◂ typing goes nowhere; press x to close"
 # The same reasoning rules out U+2190 ← for the chip line, which is also Ambiguous.
 link_line() {
     local inner=$(( FIELD - 2 )) l r
-    l=$(( (inner - ${#URL}) / 2 )); [ "$l" -lt 0 ] && l=0
-    r=$(( inner - ${#URL} - l ));   [ "$r" -lt 0 ] && r=0
+    cols "$URL"
+    l=$(( (inner - COLS) / 2 )); [ "$l" -lt 0 ] && l=0
+    r=$(( inner - COLS - l ));   [ "$r" -lt 0 ] && r=0
     printf '▸%*s%s%*s◂\n' "$l" '' "$URL" "$r" ''
+}
+
+# NO ▸ ◂ HERE, and it is the same reasoning as putting them on the link: they point at the one
+# thing the student is meant to act on, and while this is drawn there is nothing to act on. The
+# spinner sits in exactly the cell the link will occupy, so the link appears where the student
+# was already looking.
+spin_line() {
+    local w l r
+    cols "$SPIN_TEXT"; w=$(( COLS + 2 ))      # the glyph, a space, and the text
+    l=$(( (FIELD - w) / 2 )); [ "$l" -lt 0 ] && l=0
+    r=$(( FIELD - w - l ));   [ "$r" -lt 0 ] && r=0
+    printf '%*s%s %s%*s\n' "$l" '' "$(meter_glyph "$SPIN_FRAME")" "$SPIN_TEXT" "$r" ''
+}
+
+# ─── one frame's worth of body ─────────────────────────────────────────────────
+# EIGHT ROWS IN EVERY STATE. Not arithmetic that happens to agree -- the same eight slots, with
+# different things in them, so the height cannot drift when the prose does.
+#
+# THE ERROR FRAME'S PROSE IS THREE LINES AND EACH FITS ONE ROW at BOX_W=71 (the longest is 51
+# columns including its indent), so box()'s wrapper never engages on it. If a line ever grows
+# past the field, box() will wrap it and the frame will be eleven rows -- which is what the
+# ten-row assertion is there to catch.
+frame_body() {                        # frame_body STATE LEFT LEAD  -> eight rows
+    local state="$1" left="$2" lead="$3" clock gap
+    case "$state" in
+        initializing)
+            printf '\n'
+            printf '  This program asks you to open this link in your browser.\n'
+            printf '\n'
+            spin_line
+            printf '\n'
+            printf '\n'
+            printf '\n'
+            printf '%s\n' "$lead"
+            ;;
+        ready)
+            # THE CLOCK IS mm:ss. It was NNs while the box had its own 60-second life; now it
+            # counts the LINK down, so it has to hold minutes. Fixed width either way, so
+            # box()'s padding never moves.
+            clock="$(clock_of "$left")"
+            cols "$lead";  gap=$(( FIELD - COLS ))
+            cols "$clock"; gap=$(( gap - COLS - 11 ))
+            [ "$gap" -lt 1 ] && gap=1
+            printf '\n'
+            printf '  This program asks you to open this link in your browser.\n'
+            printf '\n'
+            link_line
+            printf '\n'
+            printf '  CTRL+Click the link to open it (Command+Click on macOS).\n'
+            printf '\n'
+            printf '%s%*sexpires in %s\n' "$lead" "$gap" '' "$clock"
+            ;;
+        error)
+            # NO URL IN HERE, and that is the same decision open-url makes about its printed
+            # box: box() breaks an unbreakable token rather than breaching its own wall, so a
+            # real OAuth URL splits across four rows -- issue #67 reappearing inside the thing
+            # built to cure it.
+            #
+            # IT NAMES A COMMAND RATHER THAN A CAUSE. Why a port could not be made reachable is
+            # a fact the state file holds and this process would have to re-read and re-word;
+            # cs193v-portwatch --show exists to answer exactly that question and is the one
+            # answer that stays right when the reasons change.
+            printf '\n'
+            printf '  Unable to create a link your browser can reach.\n'
+            printf '\n'
+            printf '  Run  cs193v-portwatch --show  to see why.\n'
+            printf '\n'
+            printf '  If this error persists, contact the course staff.\n'
+            printf '\n'
+            printf '%s\n' "$lead"
+            ;;
+    esac
 }
 
 # ─── one frame ─────────────────────────────────────────────────────────────────
@@ -126,50 +322,97 @@ link_line() {
 # OSC 8 hyperlink and leave `8;;http://...` sitting in the box as literal text. So the tokens
 # go in plain, at fixed width, and sed decorates them afterwards.
 #
-# THE CLOCK IS mm:ss. It was NNs while the box had its own 60-second life; now it counts the
-# LINK down, so it has to hold minutes. Fixed width either way, so box()'s padding never moves.
-render_box() {
-    local left="$1" hint="$2" lead clock gap
-    clock="$(printf '%d:%02d' $(( left / 60 )) $(( left % 60 )))"
+# THE HYPERLINK EXPRESSION IS BUILT ONLY FOR `ready`. See the header: with no URL to splice in
+# it becomes `s||...|`, sed reuses the previous expression, and the chip is replaced by escape
+# bytes. Keeping it inside this branch is what makes that unreachable rather than guarded.
+render_frame() {                      # render_frame STATE LEFT HINT
+    local state="$1" left="$2" hint="$3" lead clock
+    local sed_args=(-e "s/\\[x\\]/${BOLD}[x]${DEFAULT}/")
     if [ "$hint" = yes ]; then lead="$HINT_LEAD"; else lead="$CHIP_LEAD"; fi
-    gap=$(( FIELD - ${#lead} - ${#clock} - 11 ))
-    [ "$gap" -lt 1 ] && gap=1
-
+    if [ "$state" = ready ]; then
+        clock="$(clock_of "$left")"
+        sed_args+=(-e "s/expires in ${clock}/${COUNT}expires in ${clock}${DEFAULT}/")
+        [ -n "$URL" ] && sed_args+=(
+            -e "s|${URL}|$(printf '\033]8;;%s\033\\\\' "$URL")${URL}$(printf '\033]8;;\033\\\\')|")
+    fi
     export C_OFF="$DEFAULT"
-    {
-        printf '\n'
-        printf '  This program asks you to open this link in your browser.\n'
-        printf '\n'
-        link_line
-        printf '\n'
-        printf '  CTRL+Click the link to open it (Command+Click on macOS).\n'
-        printf '\n'
-        printf '%s%*sexpires in %s\n' "$lead" "$gap" '' "$clock"
-    } | box 'Continue in Browser' "$BORDER" |
-        sed -e "s/expires in ${clock}/${COUNT}expires in ${clock}${DEFAULT}/" \
-            -e "s/\\[x\\]/${BOLD}[x]${DEFAULT}/" \
-            -e "s|${URL}|$(printf '\033]8;;%s\033\\\\' "$URL")${URL}$(printf '\033]8;;\033\\\\')|"
+    frame_body "$state" "$left" "$lead" \
+        | box 'Continue in Browser' "$BORDER" \
+        | sed "${sed_args[@]}"
 }
 
-# Where the chip is, in this popup's own rows and columns. Derived from a rendered frame and
-# from CHIP_LEAD rather than counted by hand, so editing the prose above cannot silently move
-# the click target off the thing it is drawn on.
-chip_geometry() {
-    local prefix
-    CHIP_ROW="$(render_box "$EXPIRES_IN" no | grep -n -F -- "$CHIP" | head -1 | cut -d: -f1)"
+# Where the two live cells are, in this popup's own rows and columns: the chip a student can
+# click, and the single cell the spinner repaints. Both DERIVED FROM A RENDERED FRAME rather
+# than counted by hand, so editing the prose above cannot silently move a click target off the
+# thing it is drawn on, or leave the spinner painting over a border.
+#
+# ONE RENDER FOR BOTH. Each costs an awk, and this runs before the first frame reaches the
+# screen -- which is the very latency the three states exist to remove. Any state would do for
+# the chip: it is on the same row in all three, and 50-image.sh asserts that.
+#
+# Repainting one cell rather than the frame is worth the arithmetic: a frame costs an awk and a
+# sed, and at five frames a second against a sixty-second ceiling that would be nine hundred
+# processes for a cell three bytes wide.
+geometry() {
+    local frame prefix w l
+    frame="$(render_frame initializing 0 no)"
+
+    CHIP_ROW="$(printf '%s\n' "$frame" | grep -n -F -- "$CHIP" | head -1 | cut -d: -f1)"
     : "${CHIP_ROW:=9}"
     # box() lays every row out as `┃ <FIELD columns> ┃`, so column 1 is the wall, column 2 a
     # space, and the text field starts at column 3.
     prefix="${CHIP_LEAD%%"$CHIP"*}"
-    CHIP_COL1=$(( 3 + ${#prefix} ))
-    CHIP_COL2=$(( CHIP_COL1 + ${#CHIP} - 1 ))
+    cols "$prefix"; CHIP_COL1=$(( 3 + COLS ))
+    cols "$CHIP";   CHIP_COL2=$(( CHIP_COL1 + COLS - 1 ))
+
+    SPIN_ROW="$(printf '%s\n' "$frame" | grep -n -F -- "$SPIN_TEXT" | head -1 | cut -d: -f1)"
+    : "${SPIN_ROW:=5}"
+    cols "$SPIN_TEXT"; w=$(( COLS + 2 ))
+    l=$(( (FIELD - w) / 2 )); [ "$l" -lt 0 ] && l=0
+    SPIN_COL=$(( 3 + l ))
 }
 
-box_rows() { render_box "$EXPIRES_IN" no | wc -l; }
+box_rows() { render_frame initializing 0 no | wc -l; }
+
+# ─── the one thing this box tells anyone ───────────────────────────────────────
+# Dismissed before the link arrived, so whoever is still negotiating should stop and hand the
+# port back. shortlink polls for this file inside the wait it is already doing, so the port
+# comes back within a tick of the keypress and nothing has to know a pid.
+#
+# ONLY WHILE INITIALIZING, and that asymmetry is deliberate: dismissing a box that is SHOWING a
+# link must not kill the server behind it. A student may have already followed it, and a login
+# comes back to that origin -- shortlink serves repeatedly for exactly that reason. What they
+# dismissed in that case is the reminder, not the link.
+signal_cancel() {
+    [ -n "$STATE_DIR" ] || return 0
+    : > "$STATE_DIR/cancel" 2>/dev/null || true
+    return 0
+}
+
+# Ctrl+C reaches here too -- see the note above main() -- which is why the cancel lives in the
+# EXIT trap rather than beside each `return 0`. A function rather than the string the trap used
+# to be, which also retires a shellcheck disable for SC2064.
+on_exit() {
+    [ "$STATE" = initializing ] && signal_cancel
+    esc '[?1006l'; esc '[?1000l'; esc '[?25h'; printf '\033[0m'
+    [ -n "$TTY_SAVE" ] && stty "$TTY_SAVE" 2>/dev/null
+    return 0
+}
 
 # ─── the loop ──────────────────────────────────────────────────────────────────
-# FOUR WAYS OUT AND NO FIFTH: the student presses x or clicks the chip; shortlink reports that
-# it served the redirect; shortlink's server goes away; or Ctrl+C.
+# HOW IT ENDS, by state. `initializing` never ends by itself except at its cap; `ready` keeps
+# every one of the exits it had before; `error` has no clock and nothing to wait for, so it
+# ends only when the student says so.
+#
+#   initializing   x or the chip; Ctrl+C; `url` appears -> ready; `error` appears -> error;
+#                  INIT_TIMEOUT -> error
+#   ready          x or the chip; Ctrl+C; shortlink reports it served the redirect; the
+#                  countdown reaches zero
+#   error          x or the chip; Ctrl+C
+#
+# THE CAP GOES TO `error`, NOT TO A CLOSE, and that is the whole shape of this change in one
+# decision: a box that vanishes silently is indistinguishable from a box that was never there,
+# which is the failure the popup exists to fix.
 #
 # CTRL+C IS NOT HANDLED HERE, AND THAT IS THE IMPLEMENTATION. tmux forwards it into the popup
 # as a real SIGINT (measured), `stty -icanon` leaves ISIG on, the default disposition kills
@@ -187,48 +430,94 @@ box_rows() { render_box "$EXPIRES_IN" no | wc -l; }
 # WHICH IS WHY A DROPPED KEY SAYS SO. Over a fifteen-minute box, silence reads as a hung
 # terminal.
 main() {
-    chip_geometry
-    local left drawn=-1 hint=no drawn_hint=x b rest body col row tty_save
+    local left=0 drawn_key='' key hint=no hint_until=0 b rest body col row tick
+
+    geometry
 
     # ECHO OFF FOR THE WHOLE LIFETIME. MEASURED. `read -rsn1` suppresses echo only WHILE IT IS
     # READING and restores the terminal's settings afterwards, so bytes arriving BETWEEN reads
     # are echoed by the tty driver. With the cursor parked on the last row of a popup sized to
     # the box, those echoed characters scroll the popup and the top border -- title and all --
     # goes off the screen. Ten keys at once was enough to do it.
-    tty_save="$(stty -g 2>/dev/null || true)"
+    TTY_SAVE="$(stty -g 2>/dev/null || true)"
     stty -echo -icanon 2>/dev/null || true
 
     esc '[?25l'                       # the cursor would rest on the countdown and strobe
     esc '[?1000h'; esc '[?1006h'      # SGR mouse reporting, so the [x] can be clicked
-    # shellcheck disable=SC2064
-    trap "esc '[?1006l'; esc '[?1000l'; esc '[?25h'; printf '\033[0m'
-          [ -n '$tty_save' ] && stty '$tty_save' 2>/dev/null" EXIT
+    trap on_exit EXIT
 
     SECONDS=0
     while :; do
+        # ─── where are we ──────────────────────────────────────────────────────
+        if [ "$STATE" = initializing ]; then
+            if [ -e "$STATE_DIR/error" ]; then
+                STATE=error
+            elif [ -s "$STATE_DIR/url" ]; then
+                URL="$(head -n1 "$STATE_DIR/url" 2>/dev/null)"
+                # RE-BASED HERE, NOT AT LAUNCH. shortlink's fifteen minutes start when its
+                # server does, which is after the negotiation -- so a countdown started
+                # when the popup opened would be ahead of the server's real deadline by
+                # however long the wait took. The two numbers have to be the same number;
+                # that is what linkbox:the-two-timeouts-agree is about.
+                [ -n "$URL" ] && { STATE=ready; SECONDS=0; hint_until=0; }
+            elif [ "$SECONDS" -ge "$INIT_TIMEOUT" ]; then
+                # Nobody is coming. Cancel on the way, because the reason we are here may
+                # be an open-url that died holding a shortlink that is still negotiating,
+                # and a port acquired for a box nobody is watching is a port held for
+                # fifteen minutes for nothing.
+                signal_cancel
+                STATE=error
+            fi
+        fi
+
+        # READY'S TWO EXITS AND THE CLOCK ITS FRAME IS DRAWN FROM, resolved AFTER the transition
+        # above rather than as a branch of it. As a branch, the tick that ENTERED `ready` never
+        # ran this -- so it drew the first frame from the initial zero and painted "expires in
+        # 0:00" for a whole second before correcting itself. The harness asserts its absence.
+        #
         # THE CLOCK IS WALL-CLOCK, not a count of read timeouts. MEASURED. Every keystroke
-        # satisfies `read -t 1` early, so counting timeouts let a student drumming their
-        # fingers hold the box open indefinitely. $SECONDS cannot be stalled, which is also
-        # why the countdown variable is not called SECONDS.
-        left=$(( EXPIRES_IN - SECONDS ))
-        [ "$left" -le 0 ] && return 0
+        # satisfies `read -t 1` early, so counting timeouts let a student drumming their fingers
+        # hold the box open indefinitely. $SECONDS cannot be stalled, which is also why the
+        # countdown variable is not called SECONDS.
+        if [ "$STATE" = ready ]; then
+            # The one thing shortlink tells us, free: the loop was already ticking.
+            [ -e "$STATE_DIR/served" ] && return 0
+            left=$(( EXPIRES_IN - SECONDS ))
+            [ "$left" -le 0 ] && return 0
+        fi
 
-        # The two things shortlink tells us, both free: the loop was already ticking.
-        [ -n "$SERVED_FILE" ] && [ -e "$SERVED_FILE" ] && return 0
-        [ -n "$PIDFILE" ] && [ ! -e "$PIDFILE" ] && return 0
+        # ─── draw only what moved ──────────────────────────────────────────────
+        # DERIVED FROM THE CLOCK, not stored, so every state clears it the same way and no tick
+        # rate can turn it into a flash.
+        if [ "$SECONDS" -lt "$hint_until" ]; then hint=yes; else hint=no; fi
 
-        if [ "$left" != "$drawn" ] || [ "$hint" != "$drawn_hint" ]; then
+        spin_now
+        case "$STATE" in
+            initializing) key="i:$hint" ;;
+            ready)        key="r:$left:$hint" ;;
+            *)            key="e:$hint" ;;
+        esac
+        if [ "$key" != "$drawn_key" ]; then
             esc '[H'
             # NO TRAILING NEWLINE. MEASURED. The box is exactly as tall as the popup, so a
             # newline after the bottom border scrolls the whole thing and takes the title row
             # off the top. $( ) strips it; there is exactly one to strip.
-            printf '%s' "$(render_box "$left" "$hint")"
-            drawn="$left"; drawn_hint="$hint"
+            printf '%s' "$(render_frame "$STATE" "$left" "$hint")"
+            drawn_key="$key"; DRAWN_SPIN="$SPIN_FRAME"
+        elif [ "$STATE" = initializing ] && [ "$SPIN_FRAME" != "$DRAWN_SPIN" ]; then
+            esc "[${SPIN_ROW};${SPIN_COL}H"
+            printf '%s' "$(meter_glyph "$SPIN_FRAME")"
+            DRAWN_SPIN="$SPIN_FRAME"
         fi
 
-        IFS= read -rsn1 -t 1 b || { hint=no; continue; }
+        # ─── and listen ────────────────────────────────────────────────────────
+        # A TENTH OF A SECOND WHILE THE CELL IS MOVING, a whole one once it is not. The read is
+        # both the input and the frame clock, so a spinning box needs no sleep and no second
+        # process; `ready` keeps exactly the once-a-second tick it always had.
+        if [ "$STATE" = initializing ]; then tick=0.1; else tick=1; fi
+        IFS= read -rsn1 -t "$tick" b || continue
         case "$b" in x|X) return 0 ;; esac
-        if [ "$b" != "$(printf '\033')" ]; then hint=yes; continue; fi
+        if [ "$b" != "$(printf '\033')" ]; then hint_until=$(( SECONDS + HINT_HOLD )); continue; fi
 
         # An escape: a mouse report, or a bare Escape. Drain the rest of the sequence.
         rest=''
@@ -245,10 +534,18 @@ main() {
                    [ "${col:-0}" -ge "$CHIP_COL1" ] && [ "${col:-0}" -le "$CHIP_COL2" ]; then
                     return 0
                 fi ;;
-            *) hint=yes ;;
+            *) hint_until=$(( SECONDS + HINT_HOLD )) ;;
         esac
     done
 }
 
 if [ -n "$ROWS_ONLY" ]; then box_rows; exit 0; fi
+if [ -n "$FRAME_ONLY" ]; then
+    case "$FRAME_ONLY" in
+        initializing|error) render_frame "$FRAME_ONLY" 0 no ;;
+        ready)              URL="$FRAME_URL"; render_frame ready "$EXPIRES_IN" no ;;
+        *) printf 'cs193v-linkbox: --frame wants initializing, ready or error\n' >&2; exit 2 ;;
+    esac
+    exit 0
+fi
 main

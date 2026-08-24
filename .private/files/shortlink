@@ -41,15 +41,17 @@
 import html
 import os
 import re
-import signal
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # How long the server lives when nobody tells it otherwise. Fifteen minutes is sized to the
 # slowest real path: a student who follows setup-git's link, discovers they have not accepted
-# their organization invitation, accepts it, and comes back. A caller that knows when it is
-# finished should pass --pidfile and kill it instead of shortening this.
+# their organization invitation, accepts it, and comes back. Nothing shortens it: a caller that
+# knows it is finished simply stops caring, and the server lets go by itself. This used to advise
+# passing --pidfile and killing the server early; that flag is gone, and the reason it existed --
+# a port held for the remaining thirteen minutes was a port a dev server wanted -- went with the
+# declared port list. The kernel hands out an ephemeral port now, which nothing else asks for.
 DEFAULT_TIMEOUT = 900
 
 # THE SLUG IS NEVER EMPTY, and this default is chosen rather than obvious. See "the stale origin"
@@ -59,7 +61,8 @@ DEFAULT_TIMEOUT = 900
 # nothing routes `/magic-link`.
 DEFAULT_SLUG = "magic-link"
 
-USAGE = """usage: shortlink [--timeout SECONDS] [--pidfile PATH] [--served-file PATH] URL [SLUG]
+USAGE = """usage: shortlink [--timeout SECONDS] [--served-file PATH] [--cancel-file PATH]
+                 URL [SLUG]
 
 Serves a redirect to URL on a port your browser can reach and prints the short URL to
 standard output. The server runs in the background and exits after SECONDS
@@ -67,11 +70,11 @@ standard output. The server runs in the background and exits after SECONDS
 
   SLUG           the path to serve it on (default %s)
   --timeout      how long to keep serving; 0 waits forever
-  --pidfile      where to write the server's pid, so a caller can end it early
   --served-file  a path to touch once the redirect has actually been served
+  --cancel-file  a path to watch while waiting; if it appears, give up
 
 Exit status: 0 shortened, 3 the port could not be made reachable (the URL is printed
-unchanged), 2 bad arguments.
+unchanged), 4 a --cancel-file appeared and nothing was printed, 2 bad arguments.
 """ % (DEFAULT_TIMEOUT, DEFAULT_SLUG)
 
 SLUG_RE = re.compile(r"\A[A-Za-z0-9._-]{1,32}\Z")
@@ -172,10 +175,35 @@ def read_ports_file():
         return None
 
 
-def await_verdict(port):
+# WHY THIS PROCESS IS THE ONE THAT HAS TO NOTICE. open-url now raises its box BEFORE the link
+# exists, so a student can dismiss it while this is still waiting -- and at that moment the port
+# is held by THIS process, in the loop below, with no daemon and no pid anywhere for anyone to
+# kill. A file is the only handle that exists, and the poll to read it is one we are already
+# doing. The port comes back within a tick of the keypress.
+#
+# NAMED FOR WHAT THIS DOES, not for what a popup wants: "watch this path while waiting, and give
+# up if it appears" is a fact about this server. Same discipline as --served-file, whose own note
+# says it "keeps shortlink knowing nothing about popups. It reports; the caller decides what it
+# means."
+#
+# NOT WATCHED ONCE SERVING. setup-git's caller wants a link that outlives the thing that asked
+# for it, and a box showing a live link must not take the server down when it is dismissed -- a
+# student may have already followed it, and an OAuth round trip comes back to that origin. So
+# this is a channel for "never mind" and not for "stop now".
+class Cancelled(Exception):
+    """The caller's --cancel-file appeared. Nothing has been printed and nothing should be."""
+
+
+def cancel_seen(cancel_file):
+    return bool(cancel_file) and os.path.exists(cancel_file)
+
+
+def await_verdict(port, cancel_file=""):
     """Poll until the tunnel has said something about `port`, or we give up. None on timeout."""
     deadline = time.monotonic() + CONFIRM_TIMEOUT
     while True:
+        if cancel_seen(cancel_file):
+            raise Cancelled()
         text = read_ports_file()
         # NO FILE MEANS NO WAIT. The watcher truncates this file before it says anything else, so
         # while a tunnel is up the file EXISTS even when it is empty -- and its absence therefore
@@ -200,7 +228,7 @@ def await_verdict(port):
 # all that is needed; the wildcard would additionally publish the redirect on the container's
 # eth0, which buys nothing and is one more thing to explain. It is also the only bind address the
 # tunnel will forward, so the wildcard would now be actively wrong rather than merely untidy.
-def acquire_forwarded_port():
+def acquire_forwarded_port(cancel_file=""):
     for _ in range(BUSY_RETRIES):
         server = None
         try:
@@ -211,7 +239,13 @@ def acquire_forwarded_port():
             if server is not None:
                 server.server_close()
             return None
-        verdict = await_verdict(server.server_address[1])
+        try:
+            verdict = await_verdict(server.server_address[1], cancel_file)
+        except Cancelled:
+            # Explicitly, rather than leaving it to the exit: this is the whole point of the
+            # channel, and a port handed back on the way out is a port handed back later.
+            server.server_close()
+            raise
         if verdict == "up":
             return server
         server.server_close()
@@ -343,19 +377,13 @@ def detach():                         # -> True in the daemon, False in the orig
     return True
 
 
-def serve(server, timeout, pidfile, served_file=""):
-    if pidfile:
-        try:
-            with open(pidfile, "w") as fh:
-                fh.write("%d\n" % os.getpid())
-        except OSError:
-            pass
-    # SIGTERM HAS TO BECOME AN EXCEPTION for the cleanup below to happen at all: the default
-    # action terminates the process outright, so a caller that ends us early through --pidfile
-    # would leave the pidfile behind naming a pid that no longer exists. setup-git's own scratch
-    # directory would have taken that away with it, but a pidfile that outlives its process is
-    # exactly the trap the launcher documents at tunnel_kill_pid -- pids get reused.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+# NO SIGTERM HANDLER, AND NOTHING TO REPORT TO. There was one, and its only job was to turn an
+# early kill into an unwound `finally` so a --pidfile could not outlive the process it named.
+# With that flag gone nobody kills this on purpose, and the handler had no remaining effect:
+# the default disposition ends the process, the kernel closes the listener, cs193v-portwatch
+# stops reporting the port on its next tick, and the host cancels the forward after its linger.
+# Identical outcome, one less thing to explain.
+def serve(server, timeout, served_file=""):
     try:
         # A one-second poll so the deadline is honoured whether or not anyone connects. Serving
         # REPEATEDLY rather than once is deliberate: a browser opening one URL does not make one
@@ -368,21 +396,19 @@ def serve(server, timeout, pidfile, served_file=""):
             server.handle_request()
     finally:
         server.server_close()
-        # Both go, for the same reason: a file that outlives the server it describes is a lie a
-        # caller will act on. The pidfile names a pid that can be reused; the served-file says
-        # "they clicked" about a link that no longer resolves.
-        for path in (pidfile, served_file):
-            if path:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+        # It goes because a file that outlives the server it describes is a lie a caller will act
+        # on: the served-file says "they clicked" about a link that no longer resolves.
+        if served_file:
+            try:
+                os.unlink(served_file)
+            except OSError:
+                pass
 
 
 def main(argv):
     timeout = DEFAULT_TIMEOUT
-    pidfile = ""
     served_file = ""
+    cancel_file = ""
     args = []
     i = 0
     while i < len(argv):
@@ -395,16 +421,16 @@ def main(argv):
             if i >= len(argv) or not argv[i].isdigit():
                 die("--timeout needs a number of seconds")
             timeout = int(argv[i])
-        elif a == "--pidfile":
-            i += 1
-            if i >= len(argv) or not argv[i]:
-                die("--pidfile needs a path")
-            pidfile = argv[i]
         elif a == "--served-file":
             i += 1
             if i >= len(argv) or not argv[i]:
                 die("--served-file needs a path")
             served_file = argv[i]
+        elif a == "--cancel-file":
+            i += 1
+            if i >= len(argv) or not argv[i]:
+                die("--cancel-file needs a path")
+            cancel_file = argv[i]
         elif a.startswith("-") and a != "-":
             die("unknown option: %s\n\n%s" % (a, USAGE))
         else:
@@ -420,7 +446,13 @@ def main(argv):
         die("slug must be 1-32 characters of letters, digits, dot, dash or underscore "
             "(got: %.40s)" % slug)
 
-    server = acquire_forwarded_port()
+    try:
+        server = acquire_forwarded_port(cancel_file)
+    except Cancelled:
+        # NOTHING ON STDOUT, which is the whole difference between this and the degradation
+        # below. The caller asked for a browser, changed its mind, and does not want a URL it
+        # never showed anyone; its own exit path knows what to do with the 4.
+        return 4
     # THE DEGRADATION IS THE INPUT, UNCHANGED, and it is what makes this safe to call from
     # anywhere. With no tunnel there is nothing to be reachable through -- a bare `podman run` of
     # this image, which is how 50-image.sh reaches in -- and the port we bound may be one the
@@ -438,8 +470,16 @@ def main(argv):
     server.RequestHandlerClass = Redirector
     port = server.server_address[1]
 
+    # ONE LAST LOOK, AND IT HAS TO BE HERE RATHER THAN IN THE DAEMON. A cancel that lands
+    # between the verdict and this line would otherwise be missed for the server's whole life.
+    # The daemon cannot be the one to notice it: by the time it is running, this process is about
+    # to print a URL, and a daemon that quietly exited would leave that URL naming nothing.
+    if cancel_seen(cancel_file):
+        server.server_close()
+        return 4
+
     if detach():
-        serve(server, timeout, pidfile, served_file)
+        serve(server, timeout, served_file)
         os._exit(0)
 
     # The parent's copy of the listening socket goes now rather than at exit: the daemon is

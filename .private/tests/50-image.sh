@@ -493,32 +493,39 @@ assert_match "shortlink:command-substitution-returns" "returned=http://localhost
 # ITS OWN SESSION, so a Ctrl-C in the caller's foreground process group does not take the link
 # down at the moment the student is about to click it. Compared against the shell that started it
 # rather than to a literal: what matters is that they differ.
-out="$(sl '/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token > /dev/null; sleep 1; echo "daemon=$(ps -o sid= -p "$(cat /tmp/sl.pid)" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
+# THE PID COMES FROM pgrep NOW, because --pidfile is gone -- and finding it takes more than the
+# usual `[s]hortlink` bracket trick. That trick stops the PATTERN matching itself; it does nothing
+# about the fact that sl() runs its argument through `sh -c`, so the shell's OWN command line
+# contains the literal `/usr/local/bin/shortlink https://...` it is about to run. Measured: pgrep
+# returns pid 1 (that shell) and pid 7 (the daemon), in that order, so `head -1` picked the shell
+# and compared it against itself. Excluding $$ is what leaves the daemon.
+out="$(sl 'dpid=""; /usr/local/bin/shortlink https://example.com/a token > /dev/null; sleep 1; dpid=$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1); echo "dpid=${dpid:-none} daemon=$(ps -o sid= -p "${dpid:-1}" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
 record "shortlink:sessions" "$out"
+# FOUND FIRST, or the comparison below is vacuous: with no pid, `daemon=` is empty, the "they are
+# equal" pattern cannot match, and the assertion reports green having measured nothing. Issue #79.
+assert_match "shortlink:the-daemon-is-findable" "dpid=[0-9]+" "$out"
 # The two numbers have to DIFFER, so the assertion is that the "they are equal" pattern matched
 # nothing. Comparing them any other way would need the values in the suite, and they only exist
 # inside the container.
 assert_eq "shortlink:runs-in-its-own-session" "" \
           "$(printf '%s' "$out" | sed -n 's/.*daemon=\([0-9]*\) caller=\1$/SAME/p')"
 
-# --pidfile, and the pid in it is one a caller can actually end -- which is what setup-git's
-# sg_cleanup does rather than leaving a forwarded port held for the rest of the fifteen minutes.
-# The file goes away with the process: a pidfile that outlives what it names is the trap the
-# launcher documents at tunnel_kill_pid, since pids get reused.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --pidfile /tmp/sl.pid token); sleep 1; kill "$(cat /tmp/sl.pid)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"; test -e /tmp/sl.pid && echo pidfile=left || echo pidfile=removed')"
-assert_contains "shortlink:pidfile-kill-stops-it"   "gone=000" "$out"
-assert_contains "shortlink:pidfile-is-removed"      "pidfile=removed" "$out"
+# A SIGNAL STOPS IT AND THE LINK STOPS ANSWERING. This used to be asserted through --pidfile;
+# the flag is gone but the property is not, and it is the one the test suite's own cleanup leans
+# on -- clean_vt_processes pkills shortlink between suites precisely so a detached server cannot
+# hold a forwarded port into the next one. There is no signal handler behind this any more, and
+# that is the point: the default disposition ends the process, the kernel closes the listener.
+# KILLED BY PID, not by pattern, for the reason above: `pkill -f "[s]hortlink"` would also signal
+# the shell running this, whose command line carries the same string. That happens to be harmless
+# -- the kernel drops signals to a PID namespace's init unless it has installed a handler, and sh
+# has not -- but depending on that is depending on something this test is not about.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); sleep 1; kill "$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"')"
+assert_contains "shortlink:a-signal-stops-it" "gone=000" "$out"
 
 # AND IT LETS GO ON ITS OWN, so nothing depends on a caller remembering. --timeout 1 rather than
 # waiting out the real 900s default.
 out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
 assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
-
-# ...and the pidfile goes with it, which is what makes its ABSENCE a usable "the link is dead"
-# signal rather than only a kill handle. open-url's popup polls for exactly this (issue #85):
-# a box counting down against a server that already gave up would be advertising a dead link.
-out="$(sl '/usr/local/bin/shortlink https://example.com/a --timeout 1 --pidfile /tmp/t.pid token > /dev/null; sleep 3; test -e /tmp/t.pid && echo pidfile=left || echo pidfile=removed')"
-assert_contains "shortlink:timeout-removes-the-pidfile" "pidfile=removed" "$out"
 
 # ─── --served-file, the "they clicked it" signal  (issue #85) ──────────────────
 # open-url puts a box on screen naming the link and needs to take it down again the moment the
@@ -568,6 +575,88 @@ assert_eq "shortlink:refuses-a-newline-in-the-url" "2" \
           "$(R "/usr/local/bin/shortlink \"\$(printf 'https://x.example/a\\r\\nX-Evil: 1')\" > /dev/null 2>&1; echo \$?")"
 assert_eq "shortlink:refuses-a-slug-with-a-slash" "2" \
           "$(R "/usr/local/bin/shortlink https://example.com/a 'has/slash' > /dev/null 2>&1; echo \$?")"
+
+# ─── --cancel-file, the "never mind" signal ───────────────────────────────────
+# WHY THIS EXISTS AT ALL. open-url raises its box BEFORE the link exists, so a student can
+# dismiss it while shortlink is still waiting to be told the tunnel carried its port -- and at
+# that moment the port is held by THIS process, pre-detach, with no daemon and no pid anywhere
+# for anyone to kill. A file is the only handle there is, and shortlink is already polling.
+#
+# THE PORT COMING BACK IS THE ASSERTION, not the exit status. A cancel that returned 4 and left a
+# listener behind would satisfy the obvious check and still hold a forwarded host port for the
+# full fifteen minutes, which is the entire thing this is for.
+out="$(sl 'touch /tmp/c1; /usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c1 token; echo "rc=$?"')"
+record "shortlink:cancel-before" "$(printf '%s' "$out" | tr '\n' '|')"
+assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
+
+# A cancel that arrives DURING the wait, which is the shape a keypress really has. The state
+# file says the tunnel is healthy but says nothing about any port, so await_verdict polls for its
+# full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_UP: with
+# every port confirmed there is no wait to interrupt.
+out="$(R 'mkdir -p /tmp/cs193v; printf "state\thealthy\nfloor\t1024\n" > /tmp/cs193v/ports
+          ( sleep 1; touch /tmp/c2 ) &
+          t0=$(date +%s)
+          o=$(/usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c2 token); rc=$?
+          echo "rc=$rc took=$(( $(date +%s) - t0 ))s out=[$o]"
+          echo "listeners=$(ss -Hltn 2>/dev/null | grep -c 127.0.0.1)"')"
+record "shortlink:cancel-during" "$(printf '%s' "$out" | tr '\n' '|')"
+assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
+# NOTHING ON STDOUT is the difference between a cancel and a degradation, and it is what lets
+# open-url stay silent rather than printing a URL the student closed the window on.
+assert_contains "shortlink:a-cancel-file-prints-nothing"      "out=[]" "$out"
+assert_contains "shortlink:a-cancel-file-hands-the-port-back" "listeners=0" "$out"
+
+# ─── the link box's three frames  (the modal states) ──────────────────────────
+# WHY THE FRAMES ARE ASSERTED HERE and not only in the tmux tier: the popup is created with a
+# fixed height before any state is known, so the three frames agreeing is a property of the
+# RENDERER, and --frame lets a throwaway container settle it without a terminal. The tmux tier
+# still owns everything about the box being a box a student can see and click.
+#
+# Measured the way box() measures, because every other way is wrong somewhere we ship: strip the
+# OSC 8 hyperlink and the colour, strip UTF-8 continuation bytes, count what is left. See the
+# note above dw() in cs193v-ui.sh, which is where that rule is stated.
+lb_widths() {                         # lb_widths TEXT -> the distinct display widths, sorted
+    printf '%s\n' "$1" | LC_ALL=C awk '
+        { t = $0
+          gsub(/\033\]8;;[^\033]*\033\\/, "", t)
+          gsub(/\033\[[0-9;?]*[A-Za-z]/, "", t)
+          gsub(/[\200-\277]/, "", t)
+          print length(t) }' | sort -un | tr '\n' ' '
+}
+lb_chip_row() { printf '%s\n' "$1" | grep -n -F -- '[x]' | head -1 | cut -d: -f1; }
+
+LB_ROWS=''; LB_CHIPS=''
+for lbf in initializing ready error; do
+    lbtext="$(R "cs193v-linkbox --expires-in 900 --frame $lbf")"
+    LB_ROWS="$LB_ROWS $(printf '%s\n' "$lbtext" | grep -c .)"
+    LB_CHIPS="$LB_CHIPS $(lb_chip_row "$lbtext")"
+    record "linkbox:$lbf-widths" "$(lb_widths "$lbtext")"
+    # EVERY ROW EXACTLY 71 COLUMNS, in every state. A frame that breaches the wall by two is
+    # what ${#s} produces for a row containing U+25C2 under LC_ALL=C, which this file's own
+    # chip row did before cols() replaced it.
+    assert_eq "linkbox:$lbf-is-71-columns-wide" "71 " "$(lb_widths "$lbtext")"
+    # THE HYPERLINK BELONGS TO ONE FRAME. Applied by a sed with the URL spliced into it; with no
+    # URL that expression becomes s||...| and an empty regex in sed REUSES THE PREVIOUS ONE,
+    # which measured as the [x] chip being replaced by escape bytes and chip_geometry then
+    # failing to find its own click target. This is the check that it never happens again.
+    if [ "$lbf" = ready ]; then
+        assert_contains "linkbox:ready-carries-the-hyperlink" ']8;;' "$lbtext"
+    else
+        assert_not_contains "linkbox:$lbf-carries-no-hyperlink" ']8;;' "$lbtext"
+    fi
+done
+record "linkbox:frame-heights" "$LB_ROWS"
+# TEN ROWS EACH, AND THE SAME TEN. open-url passes -h before it knows which frame will be drawn:
+# one row taller shows a dead row under the bottom border, one row shorter scrolls the title off
+# the top. Both seen while prototyping.
+assert_eq "linkbox:all-three-frames-are-ten-rows" " 10 10 10" "$LB_ROWS"
+# AND THE CHIP IS ON THE SAME ROW IN ALL THREE, because chip_geometry derives the mouse target
+# from ONE rendered frame and the box then keeps that target for its whole life. Frames that
+# disagreed would leave a live click target sitting where nothing is drawn.
+record "linkbox:chip-rows" "$LB_CHIPS"
+assert_eq "linkbox:the-chip-is-on-one-row-in-every-frame" " 9 9 9" "$LB_CHIPS"
+# The height open-url actually asks for, which has to be that same number.
+assert_eq "linkbox:--rows-agrees-with-the-frames" "10" "$(R 'cs193v-linkbox --expires-in 900 --rows')"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather

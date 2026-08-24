@@ -256,15 +256,24 @@ see the known limitation below.
 second of the bind, so nothing has to be arranged for it. If the redirect flow works, say so —
 the same question is open for the other three, and issue #82 is where it gets measured.
 
-**KNOWN LIMITATION, MEASURED — `claude` `/login` does not show the short link.** Claude Code
-does consult `$BROWSER` and does run our stub (verified: 2.1.225 spawns `process.env.BROWSER` on
-Linux, and a `shortlink` server really does appear on a forwarded port). But it spawns it with
-its **stdout captured**, so the stub's box goes into a pipe and is discarded, and what you see is
-Claude's own full-length URL. Nothing is broken and nothing needs doing about it during a release
-check — it is recorded so nobody re-diagnoses it from a 298 MB binary.
-`podman exec <container> pgrep -af '[s]hortlink'` is how to confirm the stub ran. Fixing it means
-writing to `/dev/tty` instead of stdout, which is deliberately NOT done yet: the box would land
-in the middle of a full-screen TUI that repaints.
+**FIXED, AND WORTH LOOKING AT ON PURPOSE — `claude` `/login` now shows the link in a popup.**
+Claude Code spawns `$BROWSER` with its **stdout captured** (verified: 2.1.225 spawns
+`process.env.BROWSER` on Linux), so the stub's printed box went into a pipe and was discarded and
+what you saw was Claude's own full-length URL. That was issue #85. The box is now a tmux popup,
+which tmux draws over the panes and keeps drawing, so a captured stdout no longer hides it.
+
+*Expect:* the box appears **immediately**, with a spinner reading `(creating link...)` where the
+link will be, and the link replaces it a beat later — around a second, longer if a host port is
+contended. Watch for that order specifically: the box arriving before the link is the whole point
+of it, and a box that only turns up once the link is ready is the regression.
+`podman exec <container> pgrep -af '[s]hortlink'` still confirms the stub ran.
+
+**AND THE FAILURE, WHICH IS THE HARD ONE TO SEE ON PURPOSE.** With no reachable port the box
+shows `Unable to create a link your browser can reach`, waits (no countdown, no self-close), and
+the long URL is printed to stdout as well. The cheap way to provoke it is a wrapper first on
+`$PATH` that exits 3 after echoing its argument; the honest way is `./cs193v --reset-tunnel` on
+the host mid-session. Neither is a release gate — the tmux tier drives both — but if you have
+never seen the error frame, see it once.
 
 **THE ONE THING NO SUITE CAN CHECK, and the feature rests on it (issue #67).** Use a caller that
 does NOT capture — `setup-git` is the one that matters, and `gh auth login`, `vercel login` and
