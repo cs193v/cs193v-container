@@ -200,7 +200,30 @@ sb_sha() {
 # COPYed it; none do, since --fake-podman bind-mounts it at run time instead. Hashing a file no
 # image contains would rebuild every machine whenever the fake changed, which is a slow no-op.
 fixture_hash() {                      # fixture_hash BASE -> a hex digest
-    sb_sha < "$FIXTURE_DIR/Containerfile.$1"
+    # THE RECIPE IS NOT ONLY THE CONTAINERFILE. Anything it COPYs into the image is part of the
+    # recipe too, and hashing only the Containerfile meant editing a COPYed file left the image
+    # CACHED -- so every case kept running against the previous build, silently. Found the hard
+    # way: a fake was edited, rebuilt "successfully", and the run showed the old behaviour with
+    # nothing anywhere saying why.
+    #
+    # Paths are printed RELATIVE to $FIXTURE_DIR, so the digest does not depend on where the
+    # repository happens to be checked out.
+    {
+        cat "$FIXTURE_DIR/Containerfile.$1"
+        sed -n 's/^COPY[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' \
+            "$FIXTURE_DIR/Containerfile.$1" \
+        | while IFS= read -r src; do
+            [ -n "$src" ] || continue
+            ( cd "$FIXTURE_DIR" || exit 0
+              if [ -d "$src" ]; then
+                  find "$src" -type f | LC_ALL=C sort | while IFS= read -r one; do
+                      printf '%s\n' "$one"; cat "$one"
+                  done
+              elif [ -f "$src" ]; then
+                  printf '%s\n' "$src"; cat "$src"
+              fi )
+        done
+    } | sb_sha
 }
 
 fixture_build() {                     # fixture_build CASE -> builds only if the recipe moved

@@ -15,6 +15,13 @@
 # TIER B -- Win32 system text. The MECHANISM is from source (PrintSystemError -> FormatMessageW
 #           with FORMAT_MESSAGE_MAX_WIDTH_MASK), the prose is the OS's own for that error code.
 #
+# TIER D -- extracted from the shipped Ubuntu image, not from microsoft/WSL. The first-run
+#           experience is CANONICAL's: /usr/lib/wsl/wsl-setup from the wsl-setup package, named
+#           by oobe.command in the image's /etc/wsl-distribution.conf, plus the prompts adduser,
+#           passwd and libpam contribute. Taken from ubuntu-26.04-wsl-amd64.wsl itself. NOTE the
+#           old Store-era "Enter new UNIX username:" is NOT this path -- that was
+#           WSL-DistroLauncher, which `wsl --install -d` does not use.
+#
 # TIER C -- well attested, NOT first-party. net.exe and where.exe are closed Windows components
 #           with no published exit-code contract, so these come from ss64 and consistent
 #           third-party reports. The suite gates on their EXIT CODES, which are agreed on; the
@@ -60,3 +67,26 @@ NetSessionNotElevated	C	System error 5 has occurred.\n\nAccess is denied.
 NetSessionNoServer	C	The Server service is not started.\nMore help is available by typing NET HELPMSG 2114.
 NetSessionElevated	C	There are no entries in the list.
 WhereNotFound	C	INFO: Could not find files for the given pattern(s).
+
+# ---- Ubuntu first-run (OOBE), Canonical's wsl-setup ---------------------------
+# Replayed by the fake so a person can see what a student sees. NOT asserted on by the suite:
+# it is another project's text and it changes with wsl-setup, so pinning its wording here would
+# punish the wrong change. The telemetry question is 26.04-ONLY (new in wsl-setup 0.6.1); the
+# installer's on-screen warning says "three questions", and this is what makes that checkable.
+OobeProvisioning	D	Provisioning the new WSL instance {}
+OobeWait	D	This might take a while...
+OobeCreateUser	D	Create a default Unix user account: {}
+OobeNewPassword	D	New password:
+OobeRetypePassword	D	Retype new password:
+OobePasswdOk	D	passwd: password updated successfully
+OobeInsightsTitle	D	Help improve Ubuntu!
+OobeInsightsBody	D	Help us improve Ubuntu features and compatibility by sharing system reports with Canonical.\nReports are sent anonymously and do not contain any personal data.
+OobeInsightsPrompt	D	Would you like to opt-in to platform metrics collection (Y/n)? To see an example of the data collected, enter 'e'.
+OobeInsightsChoice	D	[Y/n/e]: y
+
+# ---- the stage-2 boundary ----------------------------------------------------
+# NOT install-cs193v.sh's output. That script is this repo's own and has its own coverage; a fake
+# reproducing its transcript would be inventing prose and duplicating tests. What the fake owes
+# you instead is a VISIBLE boundary, so silence here reads as "faked" rather than "nothing
+# happened", and points at the tool that does drive the real thing.
+Stage2Boundary	D	[ install-cs193v.sh runs here. This harness fakes WSL, so its output is not\n  replayed -- drive the real script with tests/install-sandbox.sh ]
