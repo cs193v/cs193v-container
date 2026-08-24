@@ -1,0 +1,93 @@
+# A machine that can EXECUTE install-cs193v-windows.cmd, on Linux, with no Windows anywhere.
+#
+# WHAT THIS BUYS. The .cmd consumes only exit codes and two single lines of stdout, so every one
+# of its decisions is reachable with fakes -- wine supplies a real cmd.exe to take them. That is
+# the same split lib/sandbox.sh draws for the .sh installer: this reaches every DECISION and no
+# EFFECT. Whether WSL really installs stays in MANUAL.md, where it already was.
+#
+# WHY WINE IS TRUSTWORTHY ENOUGH. wine's own programs/cmd/tests/*.cmd.exp files hold
+# Windows-VERIFIED expected output, with @todo_wine@ marking every line wine knowingly gets
+# wrong. All 29 markers in test_builtins.cmd.exp were enumerated, and none touches delayed
+# expansion, !errorlevel!, `if errorlevel N` (including negatives), goto/labels, %~dp0, `for /f`
+# backticks, or redirection parsing. Debian's 10.0~repack-12 patch series touches nothing under
+# programs/cmd, so Ubuntu ships upstream 10.0 verbatim.
+#
+# WHERE IT IS NOT, and what covers that instead: wine reads LF-only batch natively
+# (batch.c:259-266) and accepts `::` inside a parenthesized block, both of which real cmd.exe
+# gets WRONG. Those are false negatives no run here can catch, so 25-installer.sh asserts them
+# statically. See lib/cmdlint.sh.
+#
+# COST. libwine is ~1.15 GB installed and pulls gstreamer/avcodec/X11/wayland, so this image is
+# ~2.2 GB. It is content-hash cached by fixture_build like every other fixture, and the tier it
+# serves is not in DEFAULT_TIERS, so a normal run never builds it.
+FROM docker.io/library/ubuntu:26.04
+
+# --no-install-recommends is load-bearing, not tidiness: it keeps i386 multiarch out entirely.
+# wine32 is only a Suggests of wine64, and cmd.exe has a 64-bit build, so nothing here needs it.
+#
+# gcc-mingw-w64-x86-64 is a BUILD-TIME dependency only -- the fakes are compiled below and the
+# compiler is then dead weight, but removing it would invalidate nothing and save little against
+# libwine, so it stays rather than adding an apt-get remove nobody can verify.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      wine64 gcc-mingw-w64-x86-64 \
+ && rm -rf /var/lib/apt/lists/*
+
+# ubuntu:26.04 already ships a uid-1000 user named "ubuntu". Reusing it avoids a second home
+# directory, and wine needs a writable $HOME for its prefix.
+USER ubuntu
+ENV WINEPREFIX=/home/ubuntu/.wine \
+    WINEDEBUG=-all \
+    WINEDLLOVERRIDES=mscoree,mshtml=d \
+    XDG_RUNTIME_DIR=/tmp/xdg \
+    DISPLAY=
+
+# THE FAKES, compiled here rather than at run time.
+#
+# They must be real PE executables and not batch shims for two measured reasons: the .cmd names
+# `wsl.exe` WITH the suffix (so a wsl.cmd is never found), and wine ships its own net.exe and
+# where.exe -- wine's `net session` answers with a usage banner and EXIT 0, i.e. it reports every
+# user as an Administrator. C:\shim therefore has to precede system32 on the Windows PATH, which
+# lib/wine.sh arranges.
+#
+# The sources live under fixtures/ and not lib/ because fixture_build's build context IS the
+# fixtures directory; putting them in lib/ would put them outside it.
+COPY win-fakes/ /tmp/win-fakes/
+RUN mkdir -p /home/ubuntu/shim \
+ && cd /tmp/win-fakes \
+ && for f in wsl net where powershell reg; do \
+      x86_64-w64-mingw32-gcc -O1 -Wall -Wextra -o "/home/ubuntu/shim/$f.exe" "fake-$f.c"; \
+    done \
+ && ls -1 /home/ubuntu/shim
+
+# Boot the prefix ONCE, here. Measured on this machine: creating a prefix costs 10.6 s and a warm
+# `wine64 cmd /c` costs 127 ms. Debian patches wineserver's idle timeout to 0
+# (debianization/wineserver-persistence.patch), so every invocation re-boots -- baking the prefix
+# is what keeps that 127 ms instead of 10.6 s, and it also means each throwaway container starts
+# from an IDENTICAL C:\, which is what makes wine's statefulness harmless here.
+RUN mkdir -p /tmp/xdg && chmod 700 /tmp/xdg \
+ && wine64 wineboot --init >/dev/null 2>&1 || true \
+ && wine64 cmd /c "exit /b 0" </dev/null >/dev/null 2>&1 || true \
+ && wineserver -k 2>/dev/null; sleep 1 \
+ && test -d /home/ubuntu/.wine/drive_c/windows/system32
+
+# %TEMP% MUST EXIST AND BE WRITABLE, because the installer writes one scratch file there.
+#
+# wine does NOT inherit TEMP from the Unix environment -- it reads it from the registry, and a
+# bare prefix leaves it EMPTY, which made `> "%TEMP%\file"` expand to the drive root and fail
+# with "Access denied". A real Windows machine always has both the variable and the directory, so
+# a harness without them tests a machine no student has: the first run of this suite reported the
+# installer could not find the WSL path when the truth was that the harness had no temp directory.
+# Both halves are needed -- the variable alone gives "Invalid name" if the directory is absent.
+# `wineserver -k` IS LOAD-BEARING, not hygiene. wine keeps the registry in the wineserver
+# process and only writes it to disk when that server exits, so a regedit import in one build
+# step is simply lost when the layer commits -- the import appeared to work, and TEMP was still
+# empty in the next step. Killing the server forces the flush, and the check on the last line
+# then reads it back from disk the way a test run will.
+RUN mkdir -p /home/ubuntu/.wine/drive_c/users/ubuntu/Temp \
+ && wine64 regedit /S /tmp/win-fakes/wine-temp.reg >/dev/null 2>&1 \
+ && wineserver -k 2>/dev/null; sleep 1 \
+ && test -d /home/ubuntu/.wine/drive_c/users/ubuntu/Temp \
+ && grep -q 'users..ubuntu..Temp' /home/ubuntu/.wine/user.reg
+
+WORKDIR /work

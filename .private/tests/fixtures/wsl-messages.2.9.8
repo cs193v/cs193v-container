@@ -1,0 +1,62 @@
+# What wsl.exe, net.exe, where.exe and powershell.exe actually say.
+#
+# The fakes hold NO prose of their own; they read it from here. A WSL version bump is then a
+# fixture edit rather than a code edit, and -- the reason this file exists rather than string
+# literals in C -- the PROVENANCE of every line is auditable, because it is not uniform.
+#
+# Format:  KEY <TAB> TIER <TAB> TEXT      (\n in TEXT is a real newline; {} is a substitution)
+#
+# TIER A -- read off shipping source. microsoft/WSL has been open source since 2025-05, so these
+#           are verbatim from localization/strings/en-US/Resources.resw AT THE PINNED TAG 2.9.8,
+#           re-extracted and diffed by hand rather than taken from master. Message ids are the
+#           resw <data name=> keys, so any of these can be re-checked in one command:
+#             curl -sSL https://raw.githubusercontent.com/microsoft/WSL/2.9.8/localization/strings/en-US/Resources.resw
+#
+# TIER B -- Win32 system text. The MECHANISM is from source (PrintSystemError -> FormatMessageW
+#           with FORMAT_MESSAGE_MAX_WIDTH_MASK), the prose is the OS's own for that error code.
+#
+# TIER C -- well attested, NOT first-party. net.exe and where.exe are closed Windows components
+#           with no published exit-code contract, so these come from ss64 and consistent
+#           third-party reports. The suite gates on their EXIT CODES, which are agreed on; the
+#           wording is asserted loosely and confirmed on a real box (MANUAL.md).
+#
+# Anything that could not be confirmed is absent rather than guessed. Two known gaps:
+#   * the inbox/App-Execution-Alias stub's --status output. Reported variants disagree; all are
+#     non-zero. The fake models "non-zero with arbitrary text" and no case asserts the text.
+#   * Ubuntu's first-run OOBE transcript. That is Canonical's wsl-setup, not microsoft/WSL, and
+#     is modelled opaquely -- see MANUAL.md.
+
+# ---- wsl.exe, success ----------------------------------------------------------
+MessageStatusDefaultDistro	A	Default Distribution: {}
+MessageStatusDefaultVersion	A	Default Version: {}
+MessageDistributionInstalled	A	Distribution successfully installed. It can be launched via 'wsl.exe -d {}'
+MessageLaunchingDistro	A	Launching {}...
+MessageDownloading	A	Downloading: {}
+MessageInstalling	A	Installing: {}
+MessageRegisteredDistrosHeader	A	Windows Subsystem for Linux Distributions:
+
+# ---- wsl.exe, failure ----------------------------------------------------------
+# MessageErrorCode is the envelope every thrown error is wrapped in. Two errors are printed
+# WITHOUT it: WSL_E_DEFAULT_DISTRO_NOT_FOUND and WSL_E_INVALID_USAGE.
+MessageErrorCode	A	{}\nError code: {}
+MessageWslOptionalComponentRequired	A	This application requires the Windows Subsystem for Linux Optional Component.\nInstall it by running: wsl.exe --install --no-distribution\nThe system may need to be restarted so the changes can take effect.
+MessageNoDefaultDistro	A	Windows Subsystem for Linux has no installed distributions.\nYou can resolve this by installing a distribution with the instructions below:\n\nUse 'wsl.exe --list --online' to list available distributions\nand 'wsl.exe --install <Distro>' to install.
+MessageInvalidCommandLine	A	Invalid command line argument: {}\nPlease use '{} --help' to get a list of supported arguments.
+MessageDistroNameAlreadyExists	A	A distribution with the supplied name already exists. Use --name to choose a different name.
+MessageDistroNotFound	A	There is no distribution with the supplied name.
+MessageNotSupportedOnLegacyDistros	A	'{}' is not supported when installing legacy distributions.
+MessageWsl1NotSupported	A	WSL1 is not supported with your current machine configuration.\nPlease enable the "Windows Subsystem for Linux" optional component to use WSL1.
+MessageEnableVirtualization	A	WSL2 is unable to start since virtualization is not enabled on this machine.\nPlease ensure the "Virtual Machine Platform" optional component is enabled and virtualization is turned on in your computer's firmware settings.\n\nEnable "Virtual Machine Platform" by running: wsl.exe --install --no-distribution\n\nFor information please visit https://aka.ms/enablevirtualization
+
+# ---- Win32 system text ---------------------------------------------------------
+SystemErrorSuccess	B	The operation completed successfully.
+SystemErrorRebootRequired	B	The requested operation is successful. Changes will not be effective until the system is rebooted.
+
+# ---- net.exe / where.exe -------------------------------------------------------
+# The exit codes are the load-bearing part: 0 elevated, 5 not elevated, and 2 when the Server
+# service is stopped -- which is the whole reason `net session` is an unsafe admin probe, since
+# a real Administrator is then reported as not one.
+NetSessionNotElevated	C	System error 5 has occurred.\n\nAccess is denied.
+NetSessionNoServer	C	The Server service is not started.\nMore help is available by typing NET HELPMSG 2114.
+NetSessionElevated	C	There are no entries in the list.
+WhereNotFound	C	INFO: Could not find files for the given pattern(s).

@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+; wine does not inherit TEMP from the Unix environment; it reads it from here. A bare prefix
+; leaves it empty, which makes `> "%TEMP%\file"` resolve to the drive root and fail. Real Windows
+; always has this, so a harness without it tests a machine no student has.
+[HKEY_CURRENT_USER\Environment]
+"TEMP"="C:\\users\\ubuntu\\Temp"
+"TMP"="C:\\users\\ubuntu\\Temp"
