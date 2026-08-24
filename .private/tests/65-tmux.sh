@@ -31,6 +31,15 @@ set -u
 
 require_running
 require_cmd podman
+# AND A TUNNEL, because the open-url case at the end of the harness goes through the real
+# shortlink -- which binds a port and then waits to be told the tunnel carried it, and degrades
+# when nothing ever does. Without this that case failed with "the box shows an error rather than
+# a link", which is a true statement about a container with no tunnel and a wholly misleading one
+# about the box. The dependency used to be met by accident: 60-container.sh runs first in the
+# same lane and raises the tunnel on its way past. This file's own header offers `-k tmux` as a
+# way to run it alone, so accident is not good enough. require_tunnel RAISES one rather than
+# only checking for it, so declaring it here is what makes running alone actually work.
+require_tunnel
 
 # Scratch for the harness's own output, removed on any exit. A `$(new_tmpdir)` inline at the
 # podman exec below is what this was, and nothing ever deleted it: 16 KB in /tmp per run of the

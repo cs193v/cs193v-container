@@ -81,11 +81,19 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # what someone reaches for when wiring a long-lived reader to a long-lived writer, and the
 # supervisor is that shape -- so this is the one place a Mac-only breakage would have been most
 # tempting to introduce. verb_supervise uses `< <(...)` instead.
+#
+# AND files/cs193v-ui.sh IS SCANNED TOO, because the launcher SOURCES it -- so a bash 4
+# construct in there is a Mac-only breakage by exactly the same route as one in the launcher
+# itself. It was missing from this list for a while, and the file had already noticed: the note
+# above run_timeout's poll branch explains that it ticks with `sleep 0.1` rather than
+# `read -t 0.1` because "bash 3.2 cannot read -t 0.1 -- fractional timeouts are bash 4, and a
+# static test forbids them, which makes that ban load-bearing rather than hygienic." The ban was
+# real; the test was not reading the file obeying it. Now it is.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh | grep -nE "$BASH4" || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -1628,6 +1636,31 @@ ou_timeout="$(sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' $PRIVATE/files/open
 assert_match "linkbox:shortlink-declares-a-timeout" "^[0-9]+$" "$sl_timeout"
 assert_match "linkbox:open-url-declares-a-timeout"  "^[0-9]+$" "$ou_timeout"
 assert_eq    "linkbox:the-two-timeouts-agree" "$sl_timeout" "$ou_timeout"
+
+# AND THE SPINNER CANNOT GIVE UP BEFORE THE SERVER DOES. The box now opens BEFORE the link
+# exists, so it needs its own ceiling on the "creating link..." state -- and that ceiling has
+# to outlast the longest wait shortlink can legitimately impose, or a box would go to its
+# error frame while the thing it is waiting for was still coming. shortlink's own bound is
+# CONFIRM_TIMEOUT per attempt times BUSY_RETRIES attempts; anything less than that product is
+# a box that gives up on a working link. Three literals in two files, so it is a grep.
+sl_confirm="$(sed -n 's/^CONFIRM_TIMEOUT = \([0-9][0-9]*\)\.0$/\1/p' $PRIVATE/files/shortlink)"
+sl_retries="$(sed -n 's/^BUSY_RETRIES = \([0-9][0-9]*\)$/\1/p' $PRIVATE/files/shortlink)"
+lb_cap="$(sed -n 's/^INIT_TIMEOUT=\([0-9][0-9]*\)$/\1/p' $PRIVATE/files/cs193v-linkbox)"
+# Each asserted to BE a number before anything is computed from it, for the reason above: a
+# renamed declaration would otherwise make the comparison compare nothing and report green.
+assert_match "linkbox:shortlink-declares-a-confirm-timeout" "^[0-9]+$" "$sl_confirm"
+assert_match "linkbox:shortlink-declares-its-retries"       "^[0-9]+$" "$sl_retries"
+assert_match "linkbox:linkbox-declares-an-init-cap"         "^[0-9]+$" "$lb_cap"
+if [ -n "$sl_confirm" ] && [ -n "$sl_retries" ] && [ -n "$lb_cap" ]; then
+    if [ "$lb_cap" -ge "$(( sl_confirm * sl_retries ))" ]; then
+        pass "linkbox:the-initializing-cap-covers-shortlink"
+    else
+        fail "linkbox:the-initializing-cap-covers-shortlink" \
+"cs193v-linkbox gives up on the link after ${lb_cap}s, but shortlink can spend
+${sl_confirm} x ${sl_retries} = $(( sl_confirm * sl_retries ))s before it gives up itself.
+The box would show its error frame while a working link was still on its way."
+    fi
+fi
 # tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
 # meant to stay diffable against it, so local style fixes would cost more than they buy.
 # Its host-side driver is ours and is checked.

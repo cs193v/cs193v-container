@@ -209,16 +209,9 @@ sg_says "prefill:the-link-path-still-works" status.all-set "$out"
 record "prefill:widest-row" "$(sg_widest_row "$out") columns"
 assert_eq "prefill:the-link-fits-an-80-column-terminal" "" "$(sg_rows_over 80 "$out")"
 
-# THE SERVER IS ENDED WHEN THE SCREEN IS DONE. It would go on its own after fifteen minutes, but a
-# student who finished in two should not be holding a forwarded port for the other thirteen -- that
-# is a port their own dev server wants. The pid comes out of the log rather than the pidfile
-# because sg_cleanup deletes the directory the pidfile was in.
-slpid="$(sg_log | sed -n 's/^shortlink-pid //p' | tail -1)"
-if [ -n "$slpid" ]; then
-    assert_fail "prefill:the-redirect-server-was-ended" kill -0 "$slpid"
-else
-    fail "prefill:the-redirect-server-was-ended" "the fake never recorded a pid"
-fi
+# NOTHING ASSERTS THE SERVER WAS ENDED, because nothing ends it any more. setup-git used to kill it
+# through --pidfile, on the grounds that a forwarded port was scarce; ports are ephemeral and
+# per-listener now, so the flag and the kill are both gone. See the note in sg_cleanup.
 
 # ─── with no shortlink at all: the long URL, and nothing broken ────────────────
 # A TA's Mac has no /usr/local/bin/shortlink, and 45-setup-git.sh drives this script there. The

@@ -206,6 +206,16 @@ prints `http://localhost:PORT/magic-link` — or `/magic-token-link` when `setup
 that and the `$BROWSER` stub go through it.
 Two things about it are worth knowing before a student's report makes no sense.
 
+It no longer has a `--pidfile`. It had one so a caller could end the server early, and
+`setup-git` did — on the grounds that "a student who finished in two minutes should not hold a
+forwarded port for the other thirteen; that is a port their own dev server wants." That sentence
+described the *declared port list*: forty-six shared ports, one of which `shortlink` took. There
+is no list. It asks the kernel for an **ephemeral** port that no dev server ever asks for, against
+a host ceiling of 128 concurrent forwards, so the cost the early kill bought off went to roughly
+nothing. The flag went, `setup-git`'s cleanup branch went, the box's "the server went away" signal
+went (it only ever fired on the clean expiry, which lands when the countdown does), and so did
+`serve()`'s SIGTERM handler, whose only job had been making that flag's cleanup run.
+
 **The link is shown in a tmux popup, and stdout is now the fallback rather than the plan.**
 `open-url` used to print its box to stdout, which was fine while every caller inherited stdio.
 Claude Code (measured on 2.1.225) consults `$BROWSER` correctly, runs the stub, and *captures
@@ -218,13 +228,27 @@ Writing to `/dev/tty` does escape the pipe — verified — and was still no goo
 lands inside a full-screen TUI that repaints over it. What survives is a tmux popup: tmux draws
 one *over* the panes and keeps drawing it, and does not update panes while one is present. Both
 measured. So `files/cs193v-linkbox` draws the box, `open-url` raises it with `display-popup`, and
-stdout is printed only in the two cases where a popup is impossible or wrong — no tmux at all
-(`podman exec`, a plain ssh, a bare `podman run`), or `shortlink` exiting 3 because it could not
-get a port the browser can reach. That second one is not squeamishness: `box()` breaks an
-unbreakable token rather than breaching its own wall, so a real OAuth URL splits across four rows
-inside the box — issue #67 reappearing inside the thing built to cure it.
+stdout is printed whenever a popup is impossible — no tmux at all (`podman exec`, a plain ssh, a
+bare `podman run`) — and *also* alongside the box when shortening failed, because the two reach
+different people: a caller that shows stdout leaves a usable long URL in the scrollback, and it is
+the only report left if `display-popup` itself declined a window narrower than the box. The long
+URL never goes *in* the box: `box()` breaks an unbreakable token rather than breaching its own
+wall, so a real OAuth URL splits across four rows inside it — issue #67 reappearing inside the
+thing built to cure it.
 
-Three details that will not be obvious from the code, each of which cost a debugging round:
+**The box is raised before there is a link to put in it, and that is why it has three states.**
+`shortlink` cannot answer straight away — it binds an ephemeral port and then waits to be *told*
+the tunnel carried that exact port, ~0.75–1.5 s normally and up to ten if the supervisor has gone
+quiet. Raising the box afterwards meant a student who had just asked to log in saw nothing for all
+of it, and whatever their tool printed in the meantime got to the screen first. So the popup goes
+up immediately with a spinner, and the link arrives into a box that is already there:
+`initializing`, `ready` (today's box, unchanged), and `error`.
+
+Everything the box learns is a file in one `mktemp -d`, and the whole protocol is four names:
+`url` and `error` written by `open-url`, `served` by `shortlink`, and `cancel` written by *the
+box* — the only one pointing inward.
+
+Five details that will not be obvious from the code, each of which cost a debugging round:
 
 - **`display-popup` blocks its caller.** So `open-url` detaches with `setsid`, the same shape as
   `shortlink`'s own `detach()`. A foreground call would hold `$BROWSER` open for the full fifteen
@@ -238,6 +262,19 @@ Three details that will not be obvious from the code, each of which cost a debug
   popup as a real SIGINT, the default disposition kills the renderer, and `-E` closes the popup on
   a non-zero exit — so the box goes and the student's *second* Ctrl+C reaches their program as it
   always would. Adding a `trap ... INT` would break that; the tmux harness asserts it.
+- **A dismissed spinner has to reach `shortlink`, and a file is the only handle that exists.** At
+  the moment a student can dismiss a spinner, the port is held by a `shortlink` that has not
+  detached yet — no daemon, no pid, nothing to kill. So the box writes `cancel`, `shortlink`
+  watches for it inside the poll it is already doing, and the port comes back within a tick of the
+  keypress. It is checked once more just before detaching, which closes the case where the verdict
+  and the keypress land together. Deliberately *not* watched once the server is up: dismissing a
+  box that is **showing** a link must not kill it, because the student may have already followed
+  it and an OAuth round trip comes back to that origin.
+- **Every failure is a frame, never a silent close.** A box that vanishes is indistinguishable
+  from a box that never came, which is the failure the popup exists to fix — so shortening failing
+  shows the `error` frame, and so does the `initializing` cap, which is the backstop for an
+  `open-url` that was SIGKILLed with no trap left to run. The error frame has no clock and no
+  timeout: it waits for the student.
 
 Whether `gh` and `vercel` capture stdout too is still not established, and no longer matters
 much: in tmux they all get the popup regardless.

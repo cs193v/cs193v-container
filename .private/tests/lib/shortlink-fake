@@ -13,9 +13,6 @@
 # what else that machine happens to be doing. What is under test here is setup-git's side of the
 # seam: that it asks, and that it prints the answer. The redirect itself is 50-image.sh's.
 #
-# IT REALLY DOES LEAVE A PROCESS BEHIND when given --pidfile, so that sg_cleanup killing it is a
-# behaviour a test can observe rather than a line of code it can grep for.
-#
 # Configuration files, both optional:
 #   sl_url        what to print instead of the built-in short URL
 #   sl_rc         exit non-zero without printing, to stand in for a missing port  [absent]
@@ -23,12 +20,10 @@
 SHIM="${CS193V_SGSHIM:?shortlink-fake needs CS193V_SGSHIM}"
 printf '%s\n' "shortlink $*" >> "$SHIM/argv.log"
 
-pidfile=''
 url=''
 slug='magic-link'
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --pidfile) pidfile="$2"; shift ;;
         --timeout) shift ;;
         -*)        : ;;
         *)         if [ -z "$url" ]; then url="$1"; else slug="$1"; fi ;;
@@ -39,18 +34,6 @@ done
 if [ -f "$SHIM/sl_rc" ]; then
     printf '%s\n' "$url"
     exit "$(cat "$SHIM/sl_rc")"
-fi
-
-if [ -n "$pidfile" ]; then
-    # >/dev/null 2>&1 IS REQUIRED, not tidiness, and it is the same trap the real shortlink spends
-    # a paragraph on: setup-git calls this inside `$(...)`, so a background child that inherits fd
-    # 1 holds the pipe's write end open and the command substitution blocks until the child exits.
-    # Without the redirect this fake hangs setup-git for the full 600 seconds.
-    sleep 600 >/dev/null 2>&1 &
-    printf '%s\n' "$!" > "$pidfile"
-    # In the log as well as the pidfile: sg_cleanup deletes SG_TMP, pidfile and all, so the log is
-    # the only place a test can still learn which pid should now be gone.
-    printf '%s\n' "shortlink-pid $!" >> "$SHIM/argv.log"
 fi
 
 if [ -f "$SHIM/sl_url" ]; then

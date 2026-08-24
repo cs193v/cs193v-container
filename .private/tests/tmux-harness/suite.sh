@@ -1318,10 +1318,19 @@ LBTMP="$(mktemp -d)"
 # the reason open-url detaches.
 lb_open() {
   it3 display-popup -B -E -w 71 -h 10 -s 'fg=#F5F2E1,bg=#15158C' \
-     "$LB --url $LBURL --expires-in 900 --pidfile $LBTMP/pid --served-file $LBTMP/served" \
+     "$LB --state $LBTMP --expires-in 900" \
      >/dev/null 2>&1 &
 }
-lb_arm() { : > "$LBTMP/pid"; rm -f "$LBTMP/served"; }
+# ARMED READY, and it needs no settling to get there: the box resolves its state at the TOP of
+# its loop and draws afterwards, so a url that is already in place means the first frame ever
+# drawn is the link. Every case below that predates the modal states therefore reads exactly as
+# it did, with no race against a spinner it never sees.
+lb_arm() {
+  printf '%s\n' "$LBURL" > "$LBTMP/url"
+  rm -f "$LBTMP/served" "$LBTMP/error" "$LBTMP/cancel"
+}
+# ARMED WAITING: nothing known yet, which is what open-url raises before shortlink has answered.
+lb_arm_init() { rm -f "$LBTMP/url" "$LBTMP/served" "$LBTMP/error" "$LBTMP/cancel"; }
 lb_close() { it3 display-popup -C 2>/dev/null; hx_gone "$S3" 'Continue in Browser' 4; }
 
 if [ ! -x "$LB" ]; then
@@ -1422,16 +1431,11 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   fi
   lb_close
 
-  # --- shortlink is gone, so the link is dead ------------------------------
-  lb_arm; lb_open
-  if hx_wait "$S3" 'Continue in Browser' 10; then
-    rm -f "$LBTMP/pid"
-    if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "the box closes when the server is gone"
-    else hx_fail "the box closes when the server is gone" "still up after the pidfile vanished"; fi
-  else
-    hx_fail "the box closes when the server is gone" "box never appeared"
-  fi
-  lb_close
+  # NO "THE SERVER WENT AWAY" CASE ANY MORE. The box used to close when shortlink's pidfile
+  # vanished; --pidfile is gone, and with it the only signal that ever fired. What it caught was
+  # the daemon's own clean expiry, which lands at the same instant the countdown reaches zero
+  # anyway -- and never a SIGKILL or an OOM, both of which leave the file behind because the
+  # cleanup never runs.
 
   # --- Ctrl+C: closes the box, and the SECOND one reaches the program ------
   # A REGRESSION TEST FOR BEHAVIOUR THAT COSTS NO CODE, which is exactly the kind that stops
@@ -1460,6 +1464,127 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   lb_close
   hx_hex "$S3" "03"; hx_until 'probe_name3' bash 8
 
+  # --- initializing: the box is up before the link is ---------------------
+  # THE POINT OF THE WHOLE CHANGE. open-url raises this before shortlink has answered, so a
+  # student who asked to log in sees something immediately instead of ~1.5s of nothing followed
+  # by their own tool's output.
+  lb_arm_init; lb_open
+  if hx_wait "$S3" 'creating link' 10; then
+    hx_pass "the box appears before the link exists"
+    hx_expect_absent "the waiting box shows no link"      "$(hx_cap "$S3")" "localhost:"
+    hx_expect_absent "the waiting box shows no countdown" "$(hx_cap "$S3")" "expires in"
+    # THE CELL HAS TO MOVE. A still frame is worse than no box: it reads as a hung terminal,
+    # which is the thing the spinner exists to rule out. Compared against a first sample rather
+    # than to a literal glyph, because which frame is showing depends on when we looked.
+    lb_glyph() { hx_cap "$S3" | grep -o '[⣾⣽⣻⢿⡿⣟⣯⣷]' | head -1; }
+    g1="$(lb_glyph)"
+    if [ -n "$g1" ] && hx_until_ne 'lb_glyph' "$g1" 4; then
+      hx_pass "the spinner is animating"
+    else
+      hx_fail "the spinner is animating" "stuck on '${g1:-nothing}'"
+    fi
+    # A DROPPED KEY HAS TO SAY SO HERE TOO, and this state is where that is hard: the loop ticks
+    # ten times a second to move the spinner, so a notice cleared on the next tick would flash
+    # for a tenth of a second and be invisible. It is held on a wall clock instead of a tick.
+    hx_str "$S3" "a"
+    hx_settle 1
+    hx_expect_contains "a dropped key's notice outlives one spinner tick" \
+      "$(hx_cap "$S3")" "typing goes nowhere"
+    # AND THE LINK ARRIVES INTO A BOX THAT IS ALREADY THERE, in the cell the spinner was using.
+    printf '%s\n' "$LBURL" > "$LBTMP/url"
+    # NEVER A ZERO COUNTDOWN ON THE WAY IN. The clock is re-based when the link arrives, and the
+    # frame that arrives with it has to be drawn from the re-based value: computing it only on
+    # iterations that BEGAN in `ready` left the transition tick holding the initial zero and
+    # painting "expires in 0:00" for a whole second before correcting itself.
+    if hx_wait "$S3" 'expires in 0:00' 2; then
+      hx_fail "the arriving link never shows a zero countdown" "drew 0:00 on the transition tick"
+    else
+      hx_pass "the arriving link never shows a zero countdown"
+    fi
+    if hx_wait "$S3" 'expires in' 5; then
+      hx_pass "the link replaces the spinner in place"
+      hx_expect_contains "the arrived link is the short one" "$(hx_cap "$S3")" "$LBURL"
+      hx_expect_absent   "the spinner goes when the link comes" "$(hx_cap "$S3")" "creating link"
+    else
+      hx_fail "the link replaces the spinner in place" "screen: $(hx_cap "$S3" | grep -F '|')"
+    fi
+  else
+    hx_fail "the box appears before the link exists" "screen: $(hx_cap "$S3" | head -4)"
+  fi
+  lb_close
+
+  # --- dismissed while waiting: shortlink is told to give up ---------------
+  # The only thing this box ever says to anyone. At the moment a spinner can be dismissed the
+  # port is held by a shortlink that has not detached, so there is no daemon and no pid for
+  # anyone to kill -- a file is the whole handle, and shortlink is already polling for it.
+  lb_arm_init; lb_open
+  if hx_wait "$S3" 'creating link' 10; then
+    hx_str "$S3" "x"
+    if hx_gone "$S3" 'Continue in Browser' 5; then
+      hx_pass "x closes a waiting box"
+      if [ -e "$LBTMP/cancel" ]; then hx_pass "a dismissed spinner writes cancel"
+      else hx_fail "a dismissed spinner writes cancel" "no cancel file in $LBTMP"; fi
+    else
+      hx_fail "x closes a waiting box" "still up"
+    fi
+  else
+    hx_fail "x closes a waiting box" "box never appeared"
+  fi
+  lb_close
+
+  # Ctrl+C is the same exit by a different road, and the cancel rides the EXIT trap rather than
+  # each `return`, which is what makes the two agree. tmux forwards it as a real SIGINT and the
+  # default disposition kills the renderer -- bash still runs the trap.
+  lb_arm_init; lb_open
+  if hx_wait "$S3" 'creating link' 10; then
+    hx_hex "$S3" "03"
+    if hx_gone "$S3" 'Continue in Browser' 5; then
+      if [ -e "$LBTMP/cancel" ]; then hx_pass "Ctrl+C on a waiting box writes cancel too"
+      else hx_fail "Ctrl+C on a waiting box writes cancel too" "no cancel file"; fi
+    else
+      hx_fail "Ctrl+C on a waiting box writes cancel too" "still up"
+    fi
+  else
+    hx_fail "Ctrl+C on a waiting box writes cancel too" "box never appeared"
+  fi
+  lb_close
+  hx_hex "$S3" "03"; hx_until 'probe_name3' bash 8
+
+  # --- the error frame: it says so, and it waits --------------------------
+  # A BOX THAT VANISHES IS INDISTINGUISHABLE FROM ONE THAT NEVER CAME, which is the failure the
+  # popup exists to fix -- so the state that used to be "close silently" is a frame.
+  lb_arm_init; lb_open
+  if hx_wait "$S3" 'creating link' 10; then
+    : > "$LBTMP/error"
+    if hx_wait "$S3" 'Unable to create a link' 5; then
+      hx_pass "a failure becomes a frame rather than a disappearance"
+      hx_expect_contains "the error names the command that explains it" \
+        "$(hx_cap "$S3")" "cs193v-portwatch --show"
+      hx_expect_contains "the error points at the staff" "$(hx_cap "$S3")" "contact the course staff"
+      # NO LONG URL IN HERE: box() breaks an unbreakable token rather than breach its own wall,
+      # so a real OAuth URL splits across four rows -- #67 inside the thing built to cure it.
+      hx_expect_absent   "the error frame carries no URL"    "$(hx_cap "$S3")" "http"
+      hx_expect_absent   "the error frame has no countdown"  "$(hx_cap "$S3")" "expires in"
+      # AND IT WAITS. No clock and no cap: a student who looked away has to be able to look back.
+      hx_settle 3
+      hx_expect_contains "the error frame does not close itself" \
+        "$(hx_cap "$S3")" "Unable to create a link"
+      hx_str "$S3" "x"
+      if hx_gone "$S3" 'Continue in Browser' 5; then hx_pass "x closes an error box"
+      else hx_fail "x closes an error box" "still up"; fi
+      # A dismissed error is not a cancel -- there is nothing left to cancel, and open-url is
+      # already printing.
+      if [ -e "$LBTMP/cancel" ]; then hx_fail "an error box writes no cancel" "wrote one anyway"
+      else hx_pass "an error box writes no cancel"; fi
+    else
+      hx_fail "a failure becomes a frame rather than a disappearance" \
+        "screen: $(hx_cap "$S3" | head -4)"
+    fi
+  else
+    hx_fail "a failure becomes a frame rather than a disappearance" "box never appeared"
+  fi
+  lb_close
+
   # --- legible, measured rather than eyeballed -----------------------------
   lb_arm; lb_open
   if hx_wait "$S3" 'Continue in Browser' 10; then
@@ -1485,14 +1610,22 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   # link without open-url having printed anything a caller could swallow.
   OUOUT=/tmp/cs193v-openurl-out
   hx_cmd "$S3" "rm -f $OUOUT; open-url 'https://example.com/verify?code=ABCD' > $OUOUT 2>&1"
-  # THIRTY SECONDS, AND THE BUDGET IS NOT ABOUT DRAWING. Every wait above raises the box
-  # directly, but this one goes through the real shortlink, which no longer returns at once: it
-  # binds an ephemeral port and then WAITS to be told the tunnel carried it, up to
-  # CONFIRM_TIMEOUT (10 s in files/shortlink) on a loaded machine. The old 15 s was chosen when
-  # that call was instant, and it left the box perhaps four seconds to appear after a worst-case
-  # confirm. This is the same assertion with that overlap taken out.
-  if hx_wait "$S3" 'Continue in Browser' 30; then
-    hx_pass "open-url raises the box itself"
+  # FIVE SECONDS, AND THE TIGHTNESS IS THE ASSERTION. This budget used to be thirty, because
+  # the box was raised only once shortlink had answered and that call waits to be told the
+  # tunnel carried its port -- up to CONFIRM_TIMEOUT, ten seconds, on a loaded machine. The box
+  # no longer waits for any of that: it is raised first and the link arrives into it. So a
+  # generous budget here would stop measuring the thing that changed.
+  if hx_wait "$S3" 'Continue in Browser' 5; then
+    hx_pass "open-url raises the box before it has a link"
+
+    # AND THE LINK STILL TURNS UP IN IT. Separate wait, because the first one deliberately
+    # cannot tell a spinner from a link -- both frames carry the title.
+    if hx_wait "$S3" 'expires in' 30; then
+      hx_pass "open-url's link arrives into the box it already raised"
+    else
+      hx_fail "open-url's link arrives into the box it already raised" \
+        "screen: $(hx_cap "$S3" | grep -E '[┏┃┗]')"
+    fi
 
     # It shortened: the box names a localhost link, not the URL it was handed. The long one
     # must be absent -- that is issue #67, and box() would have broken it across four rows.
@@ -1534,6 +1667,46 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   # The server open-url started would otherwise hold a host port for fifteen minutes: the
   # tunnel forwards whatever it is listening on, and that forward outlives this section.
   hx_cmd "$S3" "pkill -f '[s]hortlink' ; rm -f $OUOUT"
+  hx_until 'probe_name3' bash 8
+
+  # --- open-url when there is no link to be had ---------------------------
+  # THE PATH THAT USED TO SHOW NOTHING. shortlink degrades to printing its argument when it
+  # cannot get a port the browser can reach, and open-url's box used never to be raised at all
+  # in that case -- so a caller that captured stdout (which is issue #85's whole finding) left
+  # the student with no report of any kind. Now the box says so and stdout is printed as well:
+  # the two reach different people, and the printed one is also all that is left if
+  # `display-popup` itself declines a window narrower than the box.
+  #
+  # A STAND-IN SHORTLINK, first on PATH, because a real failure needs a broken tunnel and this
+  # suite runs beside a working one. It degrades exactly as the real one does: the argument back
+  # on stdout, exit 3, nothing on stderr.
+  mkdir -p /tmp/slfail
+  cat > /tmp/slfail/shortlink <<'SLFAIL'
+#!/bin/sh
+for a in "$@"; do
+    case "$a" in http*) printf '%s\n' "$a"; exit 3 ;; esac
+done
+exit 3
+SLFAIL
+  chmod +x /tmp/slfail/shortlink
+  OUFAIL=/tmp/cs193v-openurl-fail
+  hx_cmd "$S3" "rm -f $OUFAIL; PATH=/tmp/slfail:\$PATH open-url 'https://example.com/nope?code=ZZ' > $OUFAIL 2>&1"
+  if hx_wait "$S3" 'Unable to create a link' 10; then
+    hx_pass "a failed shortening reaches the student as a box"
+    hx_expect_absent "the error box still hides the long URL" \
+      "$(hx_cap "$S3" | grep -E '[┏┃┗]')" "example.com"
+    hx_str "$S3" "x"
+    hx_gone "$S3" 'Continue in Browser' 5
+    # AND STDOUT GOT THE LONG URL, which is the inverse of the success case above and the pair
+    # of assertions that stops either report being quietly dropped.
+    hx_until_ok "grep -q 'example.com/nope' $OUFAIL" 8
+    hx_expect_contains "and stdout still carries the long URL" \
+      "$(cat "$OUFAIL" 2>/dev/null)" "example.com/nope"
+  else
+    hx_fail "a failed shortening reaches the student as a box" \
+      "screen: $(hx_cap "$S3" | head -6)"
+  fi
+  hx_cmd "$S3" "rm -rf /tmp/slfail $OUFAIL"
   hx_until 'probe_name3' bash 8
 
   # --- and still no key may summon one ------------------------------------

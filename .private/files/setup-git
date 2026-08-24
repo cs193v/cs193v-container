@@ -343,7 +343,7 @@ token_url() {
 # What the student sees is this function; what GitHub is asked for is that one.
 token_link() {
     if command -v shortlink > /dev/null 2>&1; then
-        shortlink "$(token_url)" --pidfile "$SG_TMP/link.pid" magic-token-link
+        shortlink "$(token_url)" magic-token-link
     else
         token_url
     fi
@@ -961,13 +961,14 @@ sg_cleanup() {
         n="$(cat "$SG_TMP/issue")"
         [ -n "$n" ] && gh issue close --repo "$CS193V_GH_SANDBOX" "$n" >/dev/null 2>&1
     fi
-    # The redirect server, if token_link started one. It would go on its own after fifteen
-    # minutes, but a student who finished in two should not be holding a forwarded port for the
-    # other thirteen -- that is a port their own dev server wants. Best-effort and silent: the
-    # pidfile is absent on every path that never reached the token screen.
-    if [ -n "${SG_TMP:-}" ] && [ -f "$SG_TMP/link.pid" ]; then
-        kill "$(cat "$SG_TMP/link.pid")" 2>/dev/null || true
-    fi
+    # NOTHING KILLS THE REDIRECT SERVER ANY MORE, and that is a deletion rather than a move.
+    # This used to end it early through --pidfile, because "a student who finished in two minutes
+    # should not hold a forwarded port for the other thirteen -- that is a port their own dev
+    # server wants". That sentence described the declared port list: forty-six ports, shared, and
+    # shortlink took one of them. There is no list now. shortlink asks the kernel for an EPHEMERAL
+    # port, which no dev server ever asks for, against a host-side ceiling of a hundred and
+    # twenty-eight concurrent forwards -- so the cost the early kill was buying off has gone to
+    # roughly nothing, and the flag went with it.
     [ -n "${SG_TMP:-}" ] && rm -rf "$SG_TMP"
     # run_step is run_timeout, and run_timeout leaves a scratch file behind when a signal stops
     # it mid-row. Only it can name them, so the sweep lives beside it in ui.sh.
