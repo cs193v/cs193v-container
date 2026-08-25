@@ -167,23 +167,43 @@ each one breaks *every* student at once if it is wrong. `run-tests.sh --release`
    cannot even *name* the organization as a token's resource owner. Worth knowing because GitHub
    Classroom's default for individual assignments adds students as outside collaborators, which
    would break the whole design silently.
-3. **`cs193v-students/install-sandbox`** — private, with a default branch and at least one commit.
-   An empty repository has no default branch, so `git clone` "succeeds" with
-   `warning: You appear to have cloned an empty repository`, `git pull` fails for a reason that has
-   nothing to do with permissions, and the first student to run `setup-git` would create the
-   default branch with their own push. Everybody needs write access to it. Protecting that branch
-   against force-push and deletion is worth doing: every student can write to it and no probe ever
-   needs to. Leave **"Allow merge commits"** on, which is the default: the probes merge one pull
-   request — into a branch of their own rather than the default one — and a repository configured
-   to permit only squashing would fail that row for every student.
+3. **One sandbox per student, `cs193v-students/sandbox-<sunetid>`** — released by the homework
+   deploy script at the start of the quarter (issue #92), private, each with a default branch and
+   **at least one commit, which is not optional**. An empty repository has no default branch, so
+   `git clone` "succeeds" with `warning: You appear to have cloned an empty repository` and
+   `git pull` then fails for a reason that has nothing to do with permissions. That used to be one
+   repository's problem, findable once; it is now a per-student one, invisible until that student
+   runs `setup-git`. Leave **"Allow merge commits"** on, which is the default: the probes merge one
+   pull request — into a branch of their own rather than the default one — and a repository
+   configured to permit only squashing would fail that row for every student.
+
+   `setup-git` derives the name from the SUNetID it asks for —
+   `$CS193V_GH_ORG/$CS193V_GH_SANDBOX_PREFIX<sunetid>` — and `run-tests.sh --release` records the
+   pattern it is compiled with. **It also refuses a pinned `CS193V_GH_SANDBOX`.** That variable is
+   the override a staff dry run and the tests use; a value left in `files/setup-git` would send the
+   whole class at one repository, which is precisely the arrangement this replaced.
+
+   **What did not have to change, and why it still reads right.** The probes still stay off the
+   default branch, and still name their branches with 64 random hex characters. Neither is needed
+   for concurrency any more — one student, one repository — but the default branch now holds that
+   student's own work, which is a better reason than the old one, and the `cs193v-setup/` prefix is
+   still what lets staff see what the churn in a sandbox is. Branch protection is no longer worth
+   setting up: it would be one rule per student repository, buying what a probe list that never
+   touches the ref already buys.
+
+   **And one repository staff keep by hand: `cs193v-students/sandbox-cs193v`.** `cs193v` is a
+   structurally valid SUNetID that is nobody's, so this is what the `github` tier and the token
+   ablations in `tests/MANUAL.md` write into instead of a real student's sandbox. Private, one
+   commit, everybody's write access, same settings as the rest.
 4. **The token expiry in `files/setup-git`** (`CS193V_TOKEN_EXPIRY`) — a date, past the end of the
    quarter. Students are told to choose it, and GitHub's prefilled link wants a lifetime in *days*,
    so `setup-git` converts it on every run. A stale date is clamped to a 30-day floor rather than
    emitted as a negative lifetime, so the symptom is tokens expiring in week 8 rather than a broken
    link — which is why the release gate reads it and nothing in the everyday suite does.
 
-The sandbox accumulates closed issues, and that is expected rather than a fault: deleting an issue
-needs admin permission on the repository, which no student has, so `setup-git` closes them.
+A sandbox accumulates closed issues, and that is expected rather than a fault: deleting an issue
+needs admin permission on the repository, which a student does not have on their own sandbox
+either, so `setup-git` closes them.
 Branches it creates are deleted, on the failure path as well as the success one.
 
 ### The prose is hard-wrapped at 76 columns, and that is load-bearing
@@ -198,9 +218,11 @@ by-hand steps to everybody, in a file wrapped at 94, and came to **53 rows**: a 
 followed the link reached `Your token:` with the link scrolled off the top. The fix was both
 halves — the by-hand steps moved behind a menu, and the file rewrapped — and the screens are now
 19, 21 and 22 rows. `20-messages.sh :: sgkeys:every-line-fits-an-80-column-terminal` holds the
-width, substituting `{{ORG}}` and `{{EXPIRY}}` from `setup-git`'s own defaults. It used to exempt
-the one line carrying the prefilled link — 157 characters of GitHub's making — and issue #67 closed
-that by not printing GitHub's URL at all: `shortlink` serves a redirect and the line is now about 28
+width, substituting `{{ORG}}` and `{{EXPIRY}}` from `setup-git`'s own defaults — and `{{ID}}`,
+`{{EMAIL}}` and `{{SANDBOX}}` at the widest an eight-character SUNetID makes them, since issue #92
+put a derived repository name in `err.clone`. It used to exempt the one line carrying the prefilled
+link — 157 characters of GitHub's making — and issue #67 closed that by not printing GitHub's URL
+at all: `shortlink` serves a redirect and the line is now about 28
 characters. The lint substitutes the widest short URL that could appear rather than a real one,
 because the port is chosen at runtime; the assertion that the URL a *run* produces fits is
 `35-setup-git-shim.sh :: prefill:the-link-fits-an-80-column-terminal`, which measures the rows that

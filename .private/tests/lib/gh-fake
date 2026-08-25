@@ -61,9 +61,9 @@ case "$ALL" in
     *"api user"*)
         get login janedoe; echo ;;
     "gh issue create"*)
-        printf 'https://github.com/cs193v-students/install-sandbox/issues/%s\n' "$(get issue_no 7)" ;;
+        printf 'https://github.com/cs193v-students/sandbox-jdoe/issues/%s\n' "$(get issue_no 7)" ;;
     "gh pr create"*)
-        printf 'https://github.com/cs193v-students/install-sandbox/pull/%s\n' "$(get pr_no 9)" ;;
+        printf 'https://github.com/cs193v-students/sandbox-jdoe/pull/%s\n' "$(get pr_no 9)" ;;
     *)  : ;;
 esac
 exit 0

@@ -36,14 +36,14 @@ This script will help configure your system so that you can manage your
 code through the git utility and the website GitHub. We will describe these
 tools more later in the quarter. For now, we need some information from you.
 
-[[prompt.email]]
-*What is your @stanford.edu email address?*
+[[prompt.sunetid]]
+*What is your SUNetID (e.g. htiek, szum)?*
 
-[[err.email-invalid]]
-That is not a valid @stanford.edu email address.
+[[err.sunetid-invalid]]
+A SUNetID is 3 to 8 letters and numbers, like *htiek* or *szum*.
 
-[[err.email-subdomain]]
-Please use your regular @stanford.edu email address.
+[[err.sunetid-is-an-email]]
+Please enter just your SUNetID, not your email address.
 
 [[prompt.name]]
 *What is your full name?*
@@ -75,8 +75,9 @@ No, I want to retype that.
    If you already have a GitHub account, you can use it. You do not need a
    new one for this course.
 
-2. *Your @stanford.edu address is on that account.*
-   Add it here — you can keep your personal address on the account too:
+2. *Your Stanford address is on that account.*
+   That address is *{{EMAIL}}*. Add it here — you can keep
+   your personal address on the account too:
 
        https://github.com/settings/emails
 
@@ -193,24 +194,27 @@ Command output:
 {{OUT}}
 
 [[err.clone]]
-*Oh no, we can't reach the course's practice repository!*
+*Oh no, we can't reach your practice repository!*
 
-Your access token was accepted by GitHub, so this is almost certainly about
-what the token is allowed to do. Please check these, in this order:
+    {{SANDBOX}}
 
-1. *Resource owner.* Open https://github.com/settings/personal-access-tokens
+Your access token was accepted by GitHub, so this is either the wrong
+repository or something the token cannot do. Check these in order:
+
+1. *Your SUNetID.* That repository is named after it. If it is not yours,
+   run *setup-git* again and choose *Start over*.
+
+2. *Resource owner.* Open https://github.com/settings/personal-access-tokens
    and click your CS193V token. *Resource owner* must read *{{ORG}}*,
-   not your own username. If it reads your username, that token cannot see
-   any course repository, and you will need to make a new one — resource
-   owner cannot be changed after a token has been created.
+   not your username. It cannot be changed later, so a wrong one means
+   making a new token.
 
-2. *Repository access.* On the same page, this must be *All repositories*.
+3. *Repository access.* On the same page, this must be *All repositories*.
 
-3. *Contents.* Under *Permissions*, *Contents* must be *Read and write*. If
-   you change it, click *Update token* at the bottom.
+4. *Contents.* Under *Permissions*, *Contents* must be *Read and write*.
+   If you change this or the one above, click *Update token* at the bottom.
 
-4. *Your invitation.* If you have not accepted your invitation to
-   {{ORG}} yet, do that first, then come back:
+5. *Your invitation.* Accept your {{ORG}} invitation if you have not:
    https://github.com/orgs/{{ORG}}/invitation
 
 [[err.clone-wrong-owner]]
@@ -300,6 +304,7 @@ I'm stuck! I'll need some help.
 *Git and GitHub are already set up on this computer.*
 
   Your name:       {{NAME}}
+  Your SUNetID:    {{ID}}
   Your email:      {{EMAIL}}
   GitHub account:  @{{LOGIN}}
 

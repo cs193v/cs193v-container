@@ -5,11 +5,12 @@
 #
 # WHY A UNIT SUITE AND NOT JUST THE SHIM ONE. Three of the four things this covers are decisions
 # made about a student's typing, and the cost of getting one wrong is not a crash — it is a
-# student being told their real @stanford.edu address is invalid, or being handed a token link
-# with an expiry a year in the past. Those are cheap to enumerate and expensive to notice, which
-# is exactly what a table is for. The fourth, the probe plan, is a regression guard: GitHub does
-# not permit three of the operations the original design asked for, and "somebody puts one back"
-# is a realistic future.
+# student being told their real SUNetID is invalid, or being handed a token link with an expiry a
+# year in the past. Those are cheap to enumerate and expensive to notice, which is exactly what a
+# table is for. The fourth, the probe plan, is a regression guard: GitHub does not permit three of
+# the operations the original design asked for, and "somebody puts one back" is a realistic future.
+# The fifth is newer — the repository is derived from the SUNetID now (issue #92), so the name the
+# probes work in is a decision rather than a constant, and a wrong one is a 404 on every student.
 #
 # Driven through `setup-git --dev-*`, the same kind of seam `cs193v --dev-steps` is. Those
 # handlers run before the terminal check for exactly this reason.
@@ -26,69 +27,86 @@ SG="$PRIVATE/files/setup-git"
 export CS193V_UI="$PRIVATE/files/cs193v-ui.sh"
 export CS193V_MESSAGES="$PRIVATE/files/setup-git-messages.txt"
 # The org is pinned rather than inherited, so a staff member with the variables exported in
-# their shell does not get a different answer from this suite than CI does.
+# their shell does not get a different answer from this suite than CI does. CS193V_GH_SANDBOX is
+# pinned EMPTY on purpose: the repository is derived from the SUNetID now, the derivation is one of
+# the things this suite checks, and a staff member with an override exported would check something
+# else instead.
 export CS193V_GH_ORG=cs193v-students
-export CS193V_GH_SANDBOX=cs193v-students/install-sandbox
+export CS193V_GH_SANDBOX=
 export CS193V_TOKEN_EXPIRY=2026-12-31
 
 assert_file "setup-git:exists" "$SG"
 assert_ok   "setup-git:parses" bash -n "$SG"
 
-# ─── the email validator ───────────────────────────────────────────────────────
+# ─── the SUNetID validator ─────────────────────────────────────────────────────
 # THREE OUTCOMES, and the table asserts which one, not merely pass or fail. That is the whole
-# point of it: `me@cs.stanford.edu` and `me@gmail.com` are both rejected, and telling a student
-# with a real Stanford subdomain address that it "is not a valid @stanford.edu email address"
-# would be a lie they cannot act on. Two of these rows exist because they are the ones a
-# careless regex gets wrong: stanford.edu.evil.com ends with neither, and stanford.education
-# starts with the right thing.
-email_verdict() { bash "$SG" --dev-validate-email "$1" | awk '{print $1}'; }
-email_value()   { bash "$SG" --dev-validate-email "$1" | awk '{print $2}'; }
+# point of it: `jane.doe` and `me@cs.stanford.edu` are both rejected and they are different
+# mistakes — the first is a real alias of theirs that is not the primary ID the sandbox is named
+# after, the second is an answer to a question nobody asked. Two of these rows exist because they
+# are the ones a careless pattern gets wrong: jane.doe@stanford.edu has the right domain and a
+# local part that is not an ID, and jdoe@stanford.edu.evil.com ends with neither.
+#
+# THE PATTERN IS SOURCED, AND SO IS WHAT IS ABSENT FROM IT. Three to eight alphanumerics, read
+# 2026-08-25 from Stanford UIT's Authentication Developer Information ("currently limited to
+# between 3 and 8 alphanumeric characters" for primary SUNet IDs) and Administrative Guide 6.4.1
+# ("SUNet IDs consist of alphabetic characters and digits ... Personal SUNet IDs are from three to
+# eight characters in length"). NEITHER documents a must-begin-with-a-letter rule or a refusal of
+# uppercase, which is why `1abc` is accepted below and `HTIEK` is lower-cased rather than turned
+# away: an invented rule here stops a student on the first screen with nothing they can do about it.
+id_verdict() { bash "$SG" --dev-validate-sunetid "$1" | awk '{print $1}'; }
+id_value()   { bash "$SG" --dev-validate-sunetid "$1" | awk '{print $2}'; }
 
 for row in \
+    'ok|htiek' \
+    'ok|szum' \
+    'ok|abc' \
+    'ok|a1b2c3d4' \
+    'ok|1abc' \
     'ok|jdoe@stanford.edu' \
-    'ok|jane.doe+cs193v@stanford.edu' \
-    'ok|a_b%c@stanford.edu' \
-    'ok|x@stanford.edu' \
-    'subdomain|me@alumni.stanford.edu' \
-    'subdomain|me@cs.stanford.edu' \
-    'subdomain|me@nested.deeply.stanford.edu' \
-    'invalid|not an email' \
-    'invalid|my.personal.gmail@gmail.com' \
-    'invalid|me@notstanford.edu' \
-    'invalid|me@stanford.education' \
-    'invalid|me@stanford.edu.evil.com' \
-    'invalid|a@b@stanford.edu' \
+    'ok|JDoe@Stanford.EDU' \
+    'email|me@cs.stanford.edu' \
+    'email|me@alumni.stanford.edu' \
+    'email|me@gmail.com' \
+    'email|a@b@stanford.edu' \
+    'email|jdoe@stanford.edu.evil.com' \
+    'email|me@stanford.education' \
+    'invalid|ab' \
+    'invalid|abcdefghi' \
+    'invalid|jane.doe' \
+    'invalid|jane-doe' \
+    'invalid|jane_doe' \
+    'invalid|jane.doe@stanford.edu' \
     'invalid|@stanford.edu' \
-    'invalid|jdoe@' \
-    'invalid|jdoe' \
-    'invalid|.jdoe@stanford.edu' \
-    'invalid|jdoe.@stanford.edu' \
-    'invalid|j..doe@stanford.edu' \
+    'invalid|jdoe!' \
+    'invalid|not an id' \
     'invalid|' ; do
     want="${row%%|*}"; input="${row#*|}"
-    assert_eq "email:$want($input)" "$want" "$(email_verdict "$input")"
+    assert_eq "sunetid:$want($input)" "$want" "$(id_verdict "$input")"
 done
 
-# Whitespace either side is stripped rather than rejected: a pasted address very often carries
+# Whitespace either side is stripped rather than rejected: a pasted answer very often carries
 # some, and refusing it would be refusing a correct answer.
-assert_eq "email:leading-and-trailing-space-accepted" "ok" \
-          "$(email_verdict '     me@stanford.edu     ')"
-assert_eq "email:space-is-stripped-from-the-value" "me@stanford.edu" \
-          "$(email_value '     me@stanford.edu     ')"
-# A tab inside is a different matter — it cannot be a real address, and it must not reach the
-# terminal echoed back at the student.
-assert_eq "email:internal-tab-rejected" "invalid" "$(email_verdict "$(printf 'a\tb@stanford.edu')")"
+assert_eq "sunetid:leading-and-trailing-space-accepted" "ok" "$(id_verdict '     jdoe     ')"
+assert_eq "sunetid:space-is-stripped-from-the-value" "jdoe" "$(id_value '     jdoe     ')"
+# A tab INSIDE is a different matter — it cannot be an ID, and it must not reach the terminal
+# echoed back at the student.
+assert_eq "sunetid:internal-tab-rejected" "invalid" "$(id_verdict "$(printf 'jd\toe')")"
 
-# The domain is normalised and the local part is not. Both halves matter: git config should not
-# carry STANFORD.EDU, and echoing back a local part the student did not type invites an argument
-# about what they typed.
-assert_eq "email:domain-is-lowercased" "JDoe@stanford.edu" "$(email_value 'JDoe@Stanford.EDU')"
+# NORMALISED, NOT MERELY ACCEPTED, and this is the half that matters more than the verdict: the
+# value is what gets @stanford.edu appended to it and what names the repository the probes clone.
+# A capslocked answer that came back unchanged would send a student's clone at sandbox-HTIEK and
+# put HTIEK@stanford.edu in every commit they make this quarter.
+assert_eq "sunetid:uppercase-is-lowercased" "htiek" "$(id_value 'HTIEK')"
+assert_eq "sunetid:a-typed-address-yields-the-id" "jdoe" "$(id_value 'jdoe@stanford.edu')"
+assert_eq "sunetid:a-typed-address-is-lowercased" "jdoe" "$(id_value 'JDoe@Stanford.EDU')"
 
-# 64 characters is the standard's limit for a local part, so 64 passes and 65 does not.
-LP64="$(printf 'a%.0s' $(seq 1 64))"
-LP65="$(printf 'a%.0s' $(seq 1 65))"
-assert_eq "email:64-char-local-part-accepted" "ok"      "$(email_verdict "$LP64@stanford.edu")"
-assert_eq "email:65-char-local-part-rejected" "invalid" "$(email_verdict "$LP65@stanford.edu")"
+# The documented range, at both ends: 3 and 8 pass, 2 and 9 do not.
+ID8="$(printf 'a%.0s' $(seq 1 8))"
+ID9="$(printf 'a%.0s' $(seq 1 9))"
+assert_eq "sunetid:3-characters-accepted" "ok"      "$(id_verdict 'abc')"
+assert_eq "sunetid:2-characters-rejected" "invalid" "$(id_verdict 'ab')"
+assert_eq "sunetid:8-characters-accepted" "ok"      "$(id_verdict "$ID8")"
+assert_eq "sunetid:9-characters-rejected" "invalid" "$(id_verdict "$ID9")"
 
 # ─── the name validator ────────────────────────────────────────────────────────
 # ONE FAILURE MESSAGE, so this table only has two outcomes — but the accepted VALUE is where the
@@ -199,11 +217,40 @@ assert_not_contains "url:not-the-classic-page" "settings/tokens/new" "$(url 2026
 assert_contains "url:past-expiry-clamps-to-a-floor" "expires_in=30" "$(url 2027-06-01)"
 assert_contains "url:expiry-today-clamps-too"       "expires_in=30" "$(url 2026-12-31)"
 
+# ─── the repository the probes work in ─────────────────────────────────────────
+# DERIVED FROM THE ID, which is the whole of issue #92: there is no fixed sandbox any more. Four
+# things, because each one breaks differently — the derivation itself, that a different student
+# gets a different repository, that the value is normalised on the way in, and that an override
+# still wins, which is what lets a staff dry run point somewhere that is not a student's homework.
+repo() { bash "$SG" --dev-sandbox-repo "$1"; }
+assert_eq "sandbox:derived-from-the-id"  "cs193v-students/sandbox-jdoe"  "$(repo jdoe)"
+assert_eq "sandbox:another-id-moves-it"  "cs193v-students/sandbox-htiek" "$(repo htiek)"
+assert_eq "sandbox:the-id-is-lowercased" "cs193v-students/sandbox-jdoe"  "$(repo JDOE)"
+assert_eq "sandbox:an-override-wins" "someone/scratch" \
+          "$(CS193V_GH_SANDBOX=someone/scratch bash "$SG" --dev-sandbox-repo jdoe)"
+
+# AND THE OLD SHARED REPOSITORY IS GONE FOR GOOD. install-sandbox was one repository every student
+# could write to; nothing in this project may name it again, by default or by accident.
+assert_not_contains "sandbox:never-the-old-shared-one" "install-sandbox" "$(repo jdoe)"
+
+# AND A SEAM THAT ANSWERS A MALFORMED QUESTION REFUSES RATHER THAN GUESSING. A bad ID leaves
+# VALID_ID empty, so without this both seams would name `cs193v-students/sandbox-` and print it
+# like a repository — a whole probe plan working somewhere that does not exist, in the two seams
+# staff read BY HAND, which is the only reason either of them exists.
+out="$(bash "$SG" --dev-sandbox-repo jane.doe 2>&1; printf '[rc=%s]' "$?")"
+assert_contains "sandbox:a-bad-id-is-refused" "not a SUNetID" "$out"
+assert_contains "sandbox:a-bad-id-exits-2"    "[rc=2]"        "$out"
+assert_not_contains "sandbox:a-bad-id-names-no-repository" "sandbox-" "$out"
+out="$(bash "$SG" --dev-probe-plan jane.doe 2>&1; printf '[rc=%s]' "$?")"
+assert_contains "plan:a-bad-id-is-refused" "not a SUNetID" "$out"
+assert_contains "plan:a-bad-id-exits-2"    "[rc=2]"        "$out"
+assert_not_contains "plan:a-bad-id-plans-nothing" "gh issue" "$out"
+
 # ─── the probe plan ────────────────────────────────────────────────────────────
 # --dev-probe-plan runs the REAL probe functions with the commands recorded instead of executed,
 # so this cannot go stale against what a student's machine actually does. That is also what makes
 # the three negative assertions below meaningful rather than decorative.
-PLAN="$(bash "$SG" --dev-probe-plan)"
+PLAN="$(bash "$SG" --dev-probe-plan jdoe)"
 assert_ne "plan:not-empty" "" "$PLAN"
 
 # THE THREE OPERATIONS GITHUB DOES NOT PERMIT, which the original design asked for and which
@@ -221,7 +268,7 @@ assert_match     "plan:closes-the-issue"          'issue close'          "$PLAN"
 
 # Every operation the course will ask of the token, in the order that lets a failure name one
 # permission: reading before writing, and pushing before anything that needs a pushed branch.
-assert_match "plan:clones"        'git clone .*install-sandbox'  "$PLAN"
+assert_match "plan:clones"        'git clone .*sandbox-jdoe'     "$PLAN"
 assert_match "plan:pulls"         'pull --quiet'                 "$PLAN"
 assert_match "plan:pushes"        'push -q origin cs193v-setup/' "$PLAN"
 assert_match "plan:lists-issues"  'issue list'                   "$PLAN"
@@ -255,9 +302,15 @@ assert_match "plan:pr-links-the-issue" 'Closes #1"$' "$PLAN"
 assert_not_match "plan:never-pushes-to-the-default-branch" 'push -q origin main' "$PLAN"
 assert_not_match "plan:never-deletes-the-default-branch" 'origin --delete main' "$PLAN"
 
-# THREE DISTINCT BRANCHES, each a readable prefix plus 64 hex characters. The randomness is what
-# lets a whole lab section run this at once against one repository; the prefix is what lets staff
-# see what the churn in it is.
+# AND NOTHING NAMES THE OLD SHARED SANDBOX. Every command in this plan carries the repository, so
+# a derivation that quietly fell back to install-sandbox would show up here and nowhere else.
+assert_not_match "plan:never-names-the-old-shared-sandbox" 'install-sandbox' "$PLAN"
+assert_match     "plan:every-gh-call-names-the-students-sandbox" \
+                 'issue list --repo cs193v-students/sandbox-jdoe' "$PLAN"
+
+# THREE DISTINCT BRANCHES, each a readable prefix plus 64 hex characters. The randomness kept a
+# whole lab section off each other's refs when the sandbox was shared; with one repository per
+# student it keeps a repeat run off its own. The prefix is what lets staff see the churn.
 branches="$(printf '%s\n' "$PLAN" | grep -oE 'cs193v-setup/[0-9a-f]+' | LC_ALL=C sort -u)"
 assert_eq "plan:three-branches" "3" "$(printf '%s\n' "$branches" | grep -c .)"
 assert_eq "plan:branch-names-are-64-hex" "" \
@@ -265,7 +318,7 @@ assert_eq "plan:branch-names-are-64-hex" "" \
 assert_match "plan:issue-title-carries-64-hex" 'cs193v setup check [0-9a-f]{64}' "$PLAN"
 
 # Two runs must not collide, or two students setting up at the same moment would.
-other="$(bash "$SG" --dev-probe-plan | grep -oE 'cs193v-setup/[0-9a-f]+' | LC_ALL=C sort -u)"
+other="$(bash "$SG" --dev-probe-plan jdoe | grep -oE 'cs193v-setup/[0-9a-f]+' | LC_ALL=C sort -u)"
 assert_ne "plan:names-differ-between-runs" "$branches" "$other"
 
 # ─── the terminal requirement ──────────────────────────────────────────────────
