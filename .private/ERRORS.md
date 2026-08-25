@@ -1195,10 +1195,14 @@ port already held by another program costs **that port only**, named in the outp
 `podman run -p` used to fail outright and take the whole container with it.
 
 **Zombies: exactly 1 while a tunnel is up, 0 with none, and 8 tunnel cycles accumulated
-none.** It is sshd's own re-exec'd process, and `ps -o ppid` shows its parent is sshd's
-privsep monitor *inside* the container, alive for the tunnel's lifetime — so it is never
-reparented to PID 1 and no PID 1 could reap it. `doctor` reports a zombie count, so **1 is
-expected** now rather than a fault. See `README.md`'s open item on `--init`.
+none.** `ps -o ppid` shows its parent is sshd's privsep monitor *inside* the container, alive
+for the tunnel's lifetime — so it is never reparented to PID 1 and no PID 1 could reap it.
+(It is a child that monitor forked, not the monitor itself: re-measured on OpenSSH 10.2p1, the
+zombie carries `comm sshd` while its parent carries `comm sshd-session`, so the process that
+re-exec'd is the parent. `README.md`'s `--init` item had this the wrong way round and now has
+the tree.) **The ppid is the discriminator, not the count**: `doctor` reports
+`0 unreaped, 1 held by a live parent`, and asking for a bare `grep -c Z` instead is what made
+`pid1:no-zombies-right-now` fail on healthy containers (#102).
 
 **Not verified, no hardware:** macOS (the gvproxy leg, where `--host-lo-to-ns-lo` silently
 failed) and WSL2 (whether Windows' localhost forwarding reaches an ssh-bound `127.0.0.1`
@@ -1251,7 +1255,7 @@ recreate prompt does apply it.
 | case sensitivity | case-sensitive |
 | `tput colors` with `-e TERM` forwarded | 256 |
 | `tput colors` without forwarding | **8** — proves §A.5's original probe was broken |
-| zombies after 5 killed exec clients | 0 |
+| zombies after 5 killed exec clients | 0 beyond the baseline |
 | image size | 1.74 GB |
 
 ### D10. Where the launcher's 511 ms of "overhead" actually went

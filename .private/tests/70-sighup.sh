@@ -250,6 +250,12 @@ release_container
 podman start "$NAME" >/dev/null 2>&1
 wait_until 20 container_running || true
 MATRIX=""
+# THE ZOMBIES ALREADY HERE, by pid, so the check below can tell what this matrix caused from what
+# was already true. Empty in practice -- release_container took the tunnel with it, and sshd's
+# unreapable one went too -- but read rather than assumed, because a suite run against a container
+# somebody left a tunnel on must not read that as a leak.
+ZBASE="$(zombie_pids | tr '\n' ' ')"
+record "sighup:zombies-before-the-matrix" "${ZBASE:-none}"
 # The pattern follows $SRV's port for the same reason $SRV does: this asks whether the process
 # survived, and a pattern naming a port the server was never started on answers no every time.
 probe() {                             # probe LABEL COMMAND
@@ -264,6 +270,11 @@ probe() {                             # probe LABEL COMMAND
     record "sighup:tab-matrix-$1" "alive=$alive"
     MATRIX="$MATRIX
   $(printf '%-12s alive=%s' "$1" "$alive")"
+    # THIS TAKES THE WRAPPER SHELL WITH IT, which is not obvious and is why nothing else is
+    # needed here. `pgrep -f` matches a full command line, and the three backgrounding shapes
+    # run as `sh -c 'python3 -m http.server PORT ... & sleep 60'` -- the pattern is inside the
+    # SHELL's argv too, so the whole exec session goes rather than just the server. Same
+    # mechanism as the pgrep trap documented in lib/assert.sh, working in our favour for once.
     container_pkill "http.server $SRV_PORT"
 }
 probe foreground "$SRV"
@@ -275,18 +286,39 @@ printf '\n  the tab-close matrix, for $PRIVATE/ERRORS.md D1:%s\n\n' "$MATRIX"
 
 # Killing exec clients is still routine -- every closed tab is one -- so their leftovers must be
 # reaped rather than pile up against pids.max (2048), which wedges the container beyond
-# `podman exec`'s reach and does not self-heal. A DURATION, deliberately: the count is already low
-# before the reaping being tested has had to happen, so wait_until would return on the first poll
-# and prove nothing. Same vacuity trap as pid1:reaps-orphans in 60-container.sh.
-sleep 2
-z="$(podman exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z || true' 2>/dev/null)"
-z="$(printf '%s' "$z" | head -1 | tr -d ' \r')"
-record "sighup:zombies-after-the-matrix" "$z"
-if [ "${z:-0}" -le 2 ]; then
+# `podman exec`'s reach and does not self-heal.
+#
+# GROWTH, NOT A COUNT, and that is what the `<= 2` used to stand in for. A bare `grep -c Z` counts
+# sshd's unreapable one and whatever `podman exec` payload happens to be mid-exit at that instant,
+# so the tolerance was absorbing two things that are not leaks -- and hiding any leak smaller than
+# three (#102). Asking instead which zombies are here that were NOT here before the matrix needs
+# no tolerance at all: the number to beat is zero, whatever the ambient population is.
+#
+# MEASURED, because the obvious guess about what this matrix leaves is wrong. It leaves NOTHING:
+# 20 samples across one probe's teardown found no zombie at any point. The wrapper shell reaps its
+# own backgrounded server -- dash's wait for the foreground `sleep` is a waitpid(-1) and collects
+# whatever comes back -- and `container_pkill` kills that shell along with the server anyway.
+#
+# AND NOT THE ppid == 1 RULE 60-container.sh uses, which follows from the same measurement: with
+# nothing here ever reparented onto PID 1, that filter would have nothing to look at and would
+# pass by finding none. This asks the wider question the check's name asks -- did anything at all
+# survive four killed exec clients -- which keeps a conmon that fails to reap an exec payload in
+# scope. Where PID 1's own reaping is PROVED is 60-container.sh, on orphans it creates itself.
+#
+# BOUNDED, NOT A FIXED `sleep 2`: the claim is that nothing SURVIVES, and a leaked pid never
+# leaves the table however long you wait, so a timeout here is the failure and not a slow machine.
+# shellcheck disable=SC2086
+if wait_until 10 no_new_zombies $ZBASE; then
     pass "sighup:killed-clients-do-not-leak-zombies"
+    record "sighup:zombies-after-the-matrix" "none beyond the baseline"
 else
+    # shellcheck disable=SC2086
+    record "sighup:zombies-after-the-matrix" "$(zombies_outside_baseline $ZBASE | tr '\n' ';')"
+    # shellcheck disable=SC2086
     fail "sighup:killed-clients-do-not-leak-zombies" \
-         "$z zombies after four killed exec clients -- these hold pid slots against pids.max."
+         "these are still here 10 s after four killed exec clients, and were not before the
+matrix -- each holds a pid slot against pids.max (ppid pid comm):
+$(zombies_outside_baseline $ZBASE)"
 fi
 
 # ─── 7. the docs must describe the behaviour, not its opposite ────────────────
