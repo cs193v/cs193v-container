@@ -8,8 +8,8 @@
 # holds a credential that can reach the student's homework repository. Every step of that has a
 # failure mode whose symptom is a bare 404 or "Permission denied" with nothing in it naming the
 # cause: a token owned by the wrong account, a permission left on Read-only, an organization
-# invitation never accepted. So this asks five questions, runs six commands, and then PROVES the
-# token works by doing everything the course will ask of it against a sandbox repository —
+# invitation never accepted. So this asks five questions, runs seven commands, and then PROVES the
+# token works by doing everything the course will ask of it against the student's own sandbox —
 # because `gh auth login --with-token` accepts a token that can do nothing at all. cli/cli's
 # HeaderHasMinimumScopes returns nil on an empty X-Oauth-Scopes header ("assume that it is an
 # integration token and give up on detecting its capabilities"), which every fine-grained token
@@ -27,12 +27,20 @@
 set -u
 
 # ─── configuration ─────────────────────────────────────────────────────────────
-# The four values a future quarter has to move, and nothing else. Overridable from the
+# The five values a future quarter has to move, and nothing else. Overridable from the
 # environment so the test suite and a staff dry run can point at a scratch organization
 # instead of the real one — a student never sets any of them.
 CS193V_GH_ORG="${CS193V_GH_ORG:-cs193v-students}"
-# Derived from the org by default, so overriding the org alone moves both.
-CS193V_GH_SANDBOX="${CS193V_GH_SANDBOX:-$CS193V_GH_ORG/install-sandbox}"
+# THE SANDBOX IS PER-STUDENT (issue #92). The homework deploy script releases one repository per
+# student at the start of the quarter, named for their SUNetID, so the name cannot be a constant
+# here — it is $CS193V_GH_ORG/$CS193V_GH_SANDBOX_PREFIX$SG_ID, worked out by set_sandbox once the
+# student has answered the first question. What used to be here was one repository the whole class
+# shared, install-sandbox, and nothing in this project may name that again.
+CS193V_GH_SANDBOX_PREFIX="${CS193V_GH_SANDBOX_PREFIX:-sandbox-}"
+# AND EMPTY MEANS DERIVE IT, which is every student. Set to owner/name to send a staff dry run or a
+# test at one fixed repository instead. A value left in this file would point the whole class at one
+# repo, which is why 00-release-gates.sh refuses one.
+CS193V_GH_SANDBOX="${CS193V_GH_SANDBOX:-}"
 # The expiration students are told to choose, as a date. GitHub's prefill parameter wants a
 # number of DAYS, so the date is converted at runtime — see expiry_days.
 CS193V_TOKEN_EXPIRY="${CS193V_TOKEN_EXPIRY:-2026-12-31}"
@@ -165,56 +173,61 @@ last_cmd() { cat "$SG_CMD" 2>/dev/null || printf '(unknown)'; }
 #
 # THE VERDICT IS A VARIABLE, NOT STDOUT, and that is not a style choice. The first two also have
 # to hand back the NORMALISED value, and a function that prints its verdict has to be called as
-# `v="$(validate_email "$x")"` — a subshell, where the assignment to VALID_EMAIL is discarded on
+# `v="$(validate_sunetid "$x")"` — a subshell, where the assignment to VALID_ID is discarded on
 # return. That bug was live for exactly as long as it took to run the validator table: every
-# verdict was right and every accepted address came back empty.
+# verdict was right and every accepted value came back empty.
 
 trim() {                              # trim TEXT -> the same, outer whitespace removed
     printf '%s' "$1" | awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print }'
 }
 
-# validate_email INPUT -> `ok`, `invalid` or `subdomain`; VALID_EMAIL set on ok.
+# validate_sunetid INPUT -> `ok`, `email` or `invalid`; VALID_ID set on ok.
 #
-# THREE OUTCOMES, NOT TWO, because a Stanford student typing me@cs.stanford.edu has not made a
-# typo — they have given a real address of theirs that is not the one the course roster knows.
-# "That is not a valid @stanford.edu email address" would be a lie to their face; the subdomain
-# verdict gets its own message.
+# THREE OUTCOMES, NOT TWO, for the same reason the email validator this replaces had three: a
+# student who types me@cs.stanford.edu has not made a typo, they have answered a question nobody
+# asked, and "that is not a SUNetID" would be a lie to their face. A whole @stanford.edu address is
+# the right answer in the wrong FORM and is accepted with the domain taken off — it is what
+# somebody who has filled in six Stanford forms this week will type. Any other domain, subdomain
+# included, gets the `email` verdict and a message that asks for the ID instead.
 #
-# NOT RFC 5322, deliberately. That grammar permits quoted local parts with spaces and embedded
-# comments — `"my name"@stanford.edu` is legal mail and is not anybody's SUNet address — so
-# implementing it would accept typos while costing a hundred lines. The local part accepted here
-# is the practical one: what Stanford issues, plus the plus-addressing and dots people use.
-VALID_EMAIL=''
-EMAIL_VERDICT=''
-validate_email() {
-    local raw lp domain lower
-    VALID_EMAIL=''; EMAIL_VERDICT=invalid
+# THE SHAPE IS SOURCED. Three to eight alphanumerics, read 2026-08-25 off Stanford UIT's
+# Authentication Developer Information ("currently limited to between 3 and 8 alphanumeric
+# characters" for primary SUNet IDs; alternates may be longer and may carry periods or dashes) and
+# Administrative Guide 6.4.1 ("SUNet IDs consist of alphabetic characters and digits ... Personal
+# SUNet IDs are from three to eight characters in length").
+#
+# AND SO IS WHAT IS MISSING FROM IT. No must-begin-with-a-letter rule and no refusal of uppercase:
+# neither appears on any current Stanford page, and this is the FIRST screen a student sees. An
+# invented rule here stops them on it with nothing they can do about it — a worse failure than
+# accepting something Stanford would never issue, because nothing downstream cares. Uppercase is
+# lower-cased rather than turned away, because the value is not merely echoed back: it becomes
+# their commit address and the name of the repository the probes clone, and sandbox-HTIEK is not
+# anybody's repository.
+#
+# WHAT IT REJECTS THAT LOOKS RIGHT: jane.doe, which is an email ALIAS. Aliases carry dots and run
+# past eight characters, and the sandbox is named after the primary ID, so one cannot stand in for
+# the other — the message says so by showing what an ID looks like.
+VALID_ID=''
+ID_VERDICT=''
+validate_sunetid() {
+    local raw cand lower
+    VALID_ID=''; ID_VERDICT=invalid
     raw="$(trim "$1")"
-    # Exactly one @, with something on each side. Checked with globs rather than a regex so the
-    # two-@ case is rejected before anything tries to split on it.
+    # Split on the FIRST @, so a two-@ answer leaves an @ inside the domain and fails the
+    # comparison below rather than being taken apart twice.
     case "$raw" in
-        *@*@*|@*|*@) return 0 ;;
-        *@*)         : ;;
-        *)           return 0 ;;
+        *@*) lower="$(printf '%s' "${raw#*@}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+             if [ "$lower" != stanford.edu ]; then ID_VERDICT=email; return 0; fi
+             cand="${raw%%@*}" ;;
+        *)   cand="$raw" ;;
     esac
-    lp="${raw%@*}"
-    domain="${raw#*@}"
-    # This also rejects every space, tab and control character, which is why nothing below has
-    # to worry about echoing a control character back at the terminal.
-    if ! printf '%s' "$lp" | LC_ALL=C grep -qE '^[A-Za-z0-9._%+-]{1,64}$'; then
-        return 0
+    cand="$(printf '%s' "$cand" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    # ONE PATTERN, and it is also what keeps every space, tab and control character out of the value
+    # that gets echoed back at the terminal three lines later.
+    if printf '%s' "$cand" | LC_ALL=C grep -qE '^[a-z0-9]{3,8}$'; then
+        VALID_ID="$cand"; ID_VERDICT=ok
     fi
-    # A leading, trailing or doubled dot is invalid in a local part and is always a typo.
-    case "$lp" in .*|*.|*..*) return 0 ;; esac
-    # The domain is compared case-insensitively and stored lower-cased. The local part is NOT
-    # touched: local parts are case-sensitive in the standard even though Stanford's are not,
-    # and echoing back something a student did not type invites "that's not what I typed".
-    lower="$(printf '%s' "$domain" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-    case "$lower" in
-        stanford.edu)   VALID_EMAIL="$lp@stanford.edu"; EMAIL_VERDICT=ok ;;
-        *.stanford.edu) EMAIL_VERDICT=subdomain ;;
-        *)              EMAIL_VERDICT=invalid ;;
-    esac
+    return 0
 }
 
 # validate_name INPUT -> `ok` or `empty`; VALID_NAME set on ok.
@@ -349,13 +362,27 @@ token_link() {
     fi
 }
 
-# The signup link carries the address they just gave us, so the first field is filled in. Only
-# @ needs escaping in what validate_email lets through.
+# The signup link carries the derived address, so the first field is filled in. Only @ needs
+# escaping: the address is a SUNetID and a literal domain, and validate_sunetid has already
+# refused every other byte.
 email_encoded() {
     printf '%s' "$1" | sed 's/@/%40/'
 }
 
-sandbox_url() { printf 'https://github.com/%s.git' "$CS193V_GH_SANDBOX"; }
+# ─── the repository the probes work in ─────────────────────────────────────────
+# NAMED AFTER THE STUDENT, so it is not known until they have answered the first question — which
+# is why this is a function and a global rather than one more line in the configuration block at
+# the top. Three callers, and they are exactly the three ways an ID becomes known: the prompt, the
+# config a second run reads, and the dry-run seam.
+set_sandbox() {                       # SG_ID -> SG_SANDBOX
+    if [ -n "$CS193V_GH_SANDBOX" ]; then
+        SG_SANDBOX="$CS193V_GH_SANDBOX"
+    else
+        SG_SANDBOX="$CS193V_GH_ORG/$CS193V_GH_SANDBOX_PREFIX$SG_ID"
+    fi
+}
+
+sandbox_url() { printf 'https://github.com/%s.git' "$SG_SANDBOX"; }
 
 # ─── reading what the student types ────────────────────────────────────────────
 # TWO READERS, AND BOTH GIVE THE CURSOR BACK. main() hides the cursor for the whole run, because the
@@ -501,26 +528,39 @@ read_secret() {                       # read_secret PROMPT -> SECRET_INPUT
 # the highlighted option is always the safe one. Nothing here is destructive — the cost of
 # getting it wrong is one more trip round a loop that is already free — and defaulting to "no"
 # on a question a student has just answered correctly makes the common path the slow one.
-ask_email() {
+#
+# THE MESSAGES IT PRINTS ON A REJECTION HAVE TO FIT ON ONE LINE, because prompt.retry is printed
+# after them on the SAME line — a two-line rejection reads as a paragraph with the prompt buried in
+# it, and a line long enough to wrap cannot be retried in place at all.
+ask_sunetid() {
     local input first=yes
     while :; do
         if [ "$first" = yes ]; then
-            printf '\n%s ' "$(render prompt.email)"
+            printf '\n%s ' "$(render prompt.sunetid)"
             first=no
         fi
         read_line; input="$LINE_INPUT"
-        validate_email "$input"
-        case "$EMAIL_VERDICT" in
+        validate_sunetid "$input"
+        case "$ID_VERDICT" in
             ok) : ;;
-            subdomain) printf '  %s %s ' "$(emph "$(msg err.email-subdomain)")" \
-                                         "$(emph "$(msg prompt.retry)")"; continue ;;
-            *)         printf '  %s %s ' "$(emph "$(msg err.email-invalid)")" \
-                                         "$(emph "$(msg prompt.retry)")"; continue ;;
+            email) printf '  %s %s ' "$(emph "$(msg err.sunetid-is-an-email)")" \
+                                     "$(emph "$(msg prompt.retry)")"; continue ;;
+            *)     printf '  %s %s ' "$(emph "$(msg err.sunetid-invalid)")" \
+                                     "$(emph "$(msg prompt.retry)")"; continue ;;
         esac
-        say confirm.entered "VALUE=$VALID_EMAIL"
+        say confirm.entered "VALUE=$VALID_ID"
         printf '\n'
         menu 0 "$(msg opt.correct)" "$(msg opt.retype)"
-        if [ "$MENU_CHOICE" -eq 0 ]; then SG_EMAIL="$VALID_EMAIL"; return 0; fi
+        if [ "$MENU_CHOICE" -eq 0 ]; then
+            SG_ID="$VALID_ID"
+            # THE ADDRESS IS DERIVED, NOT ASKED (issue #92). Every SUNetID has exactly one
+            # @stanford.edu address and the course roster knows the student by it, so asking was a
+            # question with one right answer and several plausible wrong ones.
+            SG_EMAIL="$SG_ID@stanford.edu"
+            # And the repository, which is the other half of the same answer.
+            set_sandbox
+            return 0
+        fi
         first=yes
     done
 }
@@ -551,7 +591,8 @@ ask_name() {
 # until the invitation is accepted, and the symptom of skipping it is a 404 three screens later
 # with four possible causes. Asking here turns that into a checklist.
 github_checkpoint() {
-    say github.checkpoint "EMAIL_ENC=$(email_encoded "$SG_EMAIL")" "ORG=$CS193V_GH_ORG"
+    say github.checkpoint "EMAIL_ENC=$(email_encoded "$SG_EMAIL")" "EMAIL=$SG_EMAIL" \
+                          "ORG=$CS193V_GH_ORG"
     printf '\n'
     menu 0 "$(msg opt.all-done)" "$(msg opt.need-help)"
     [ "$MENU_CHOICE" -eq 0 ] && return 0
@@ -581,7 +622,7 @@ github_checkpoint() {
 # and the by-hand steps are read only by the student who asked for them.
 #
 # THE DEFAULT IS "YES, I SEE MY TOKEN", which is the same departure from the launcher's
-# safe-default rule that ask_email makes, for the same reason: nothing here is destructive, and
+# safe-default rule that ask_sunetid makes, for the same reason: nothing here is destructive, and
 # the cost of arrowing down is one keystroke on the path almost nobody takes.
 ask_token() {
     local kind prompt byhand=yes
@@ -646,6 +687,14 @@ apply_config() {
     lbl="$(printf 'git config --global user.name "%s"' "$SG_NAME")"
     config_step "$lbl" git config --global user.name "$SG_NAME" || fail_to_staff $?
 
+    # NOT IN THE ISSUE'S LIST EITHER, and it is what makes a second run possible: the repository
+    # the probes work in is named after the student, so something has to remember WHICH student
+    # this is. user.email would very nearly do — and does not, because a student may set a
+    # different commit address afterwards for reasons of their own, and would then be told they
+    # had never been set up.
+    lbl="$(printf 'git config --global cs193v.sunetid "%s"' "$SG_ID")"
+    config_step "$lbl" git config --global cs193v.sunetid "$SG_ID" || fail_to_staff $?
+
     config_step 'git config --global pull.rebase true' \
                 git config --global pull.rebase true || fail_to_staff $?
 
@@ -667,7 +716,7 @@ apply_config() {
 # `SG_LOGIN="$(whoami_login)"` — is a subshell, and the two things the failure path needs are both
 # set inside it: RT_OUT, which is what the staff box quotes, and the recorded command, which is
 # what it names. A failed `gh api user` drew an empty box under the words "(unknown)" until this
-# stopped being a command substitution. Same trap as validate_email's, one function along.
+# stopped being a command substitution. Same trap as validate_sunetid's, one function along.
 whoami_login() {                      # -> 0 and SG_LOGIN set, or the call's own rc
     RT_ROW='' RT_SPIN=''
     note_cmd 'gh api user'
@@ -680,9 +729,10 @@ whoami_login() {                      # -> 0 and SG_LOGIN set, or the call's own
 # granularity of the token's permission set, so a row that fails names one permission rather
 # than a list. Fifteen rows would be more honest about the work and less useful about the cause.
 #
-# Names are a readable prefix plus 64 random hex characters. The randomness is what lets a whole
-# lab section run this at once against one repository; the prefix is what lets staff see what
-# the churn in that repository is, and clean it up.
+# Names are a readable prefix plus 64 random hex characters. The randomness used to be what let a
+# whole lab section run this at once against ONE repository; since issue #92 each student has their
+# own, so it buys a repeat run of this script not colliding with itself. The prefix is what still
+# earns its keep: it is how staff see what the churn in a sandbox is, and clean it up.
 hexname() {
     LC_ALL=C od -An -tx1 -N32 /dev/urandom | LC_ALL=C tr -d ' \n'
 }
@@ -725,7 +775,7 @@ run_noted() {
     note_cmd "$shown"
     if [ -n "${SG_DRY:-}" ]; then
         plan_add "$shown"
-        printf 'https://github.com/%s/1\n' "$CS193V_GH_SANDBOX"
+        printf 'https://github.com/%s/1\n' "$SG_SANDBOX"
         return 0
     fi
     "$@"
@@ -742,8 +792,10 @@ probe_pull() { git_c pull --quiet; }
 
 # Three branches, because the pull request stage needs a base that is not the default branch
 # (branch A), a head to merge into it (branch B), and a head for a pull request that gets closed
-# rather than merged (branch C). Nothing is ever pushed to the default branch: every student has
-# write access to this repository, so the probes stay off the one ref that matters.
+# rather than merged (branch C). NOTHING IS EVER PUSHED TO THE DEFAULT BRANCH, and the reason for
+# that got better with issue #92 rather than going away: it used to be one shared repository every
+# student could write to, and it is now the student's own homework sandbox. Either way it is the
+# one ref a setup check has no business touching.
 probe_push() {
     local base=main
     [ -n "${SG_DRY:-}" ] || base="$(git -C "$SG_CLONE" rev-parse --abbrev-ref HEAD)"
@@ -800,11 +852,11 @@ forget_branch() {
 # on a merge into the DEFAULT branch and this design deliberately never merges into that.
 probe_issue() {
     local url
-    run_noted gh issue list --repo "$CS193V_GH_SANDBOX" --state open --limit 5 || return $?
-    url="$(run_noted gh issue create --repo "$CS193V_GH_SANDBOX" \
+    run_noted gh issue list --repo "$SG_SANDBOX" --state open --limit 5 || return $?
+    url="$(run_noted gh issue create --repo "$SG_SANDBOX" \
                      --title "cs193v setup check $SG_HEX" --body 'Opened by setup-git.')" || return $?
     printf '%s\n' "${url##*/}" > "$SG_TMP/issue"
-    run_noted gh issue close --repo "$CS193V_GH_SANDBOX" "${url##*/}"
+    run_noted gh issue close --repo "$SG_SANDBOX" "${url##*/}"
     # THE NUMBER STAYS ON DISK, unlike a deleted branch name: probe_pr reads it to link the issue
     # from the pull request. Removing it here to spare the teardown a second close made the pull
     # request body say "Closes #0" -- caught by reading --dev-probe-plan, which is the whole
@@ -820,16 +872,16 @@ probe_pr() {
     local base issue url1 url2
     base="$(cat "$SG_TMP/base")"
     issue="$(cat "$SG_TMP/issue" 2>/dev/null || printf '0')"
-    url1="$(run_noted gh pr create --repo "$CS193V_GH_SANDBOX" --base "$SG_BR_A" --head "$SG_BR_B" \
+    url1="$(run_noted gh pr create --repo "$SG_SANDBOX" --base "$SG_BR_A" --head "$SG_BR_B" \
                       --title "cs193v setup check $SG_HEX" \
                       --body "Opened by setup-git. Closes #$issue")" || return $?
-    run_noted gh pr review --repo "$CS193V_GH_SANDBOX" "${url1##*/}" \
+    run_noted gh pr review --repo "$SG_SANDBOX" "${url1##*/}" \
               --comment --body 'Reviewed by setup-git.'          || return $?
-    run_noted gh pr merge --repo "$CS193V_GH_SANDBOX" "${url1##*/}" --merge || return $?
-    url2="$(run_noted gh pr create --repo "$CS193V_GH_SANDBOX" --base "$base" --head "$SG_BR_C" \
+    run_noted gh pr merge --repo "$SG_SANDBOX" "${url1##*/}" --merge || return $?
+    url2="$(run_noted gh pr create --repo "$SG_SANDBOX" --base "$base" --head "$SG_BR_C" \
                       --title "cs193v setup check $SG_HEX" \
                       --body 'Opened by setup-git.')"            || return $?
-    run_noted gh pr close --repo "$CS193V_GH_SANDBOX" "${url2##*/}" || return $?
+    run_noted gh pr close --repo "$SG_SANDBOX" "${url2##*/}" || return $?
     git_c push -q origin --delete "$SG_BR_B"                       || return $?
     forget_branch "$SG_BR_B"
     git_c push -q origin --delete "$SG_BR_C"                       || return $?
@@ -920,7 +972,7 @@ verify() {
         if [ "$SG_FAIL_KEY" = err.clone ] && token_owner_wrong; then
             say err.clone-wrong-owner "LOGIN=$SG_LOGIN" "ORG=$CS193V_GH_ORG"
         else
-            say "$SG_FAIL_KEY" "ORG=$CS193V_GH_ORG"
+            say "$SG_FAIL_KEY" "ORG=$CS193V_GH_ORG" "SANDBOX=$SG_SANDBOX"
         fi
         # Restored at the join rather than inside token_owner_wrong: that function has four ways
         # out, and this is the one place every one of them arrives at.
@@ -959,7 +1011,7 @@ sg_cleanup() {
     fi
     if [ -f "$SG_TMP/issue" ]; then
         n="$(cat "$SG_TMP/issue")"
-        [ -n "$n" ] && gh issue close --repo "$CS193V_GH_SANDBOX" "$n" >/dev/null 2>&1
+        [ -n "$n" ] && gh issue close --repo "$SG_SANDBOX" "$n" >/dev/null 2>&1
     fi
     # NOTHING KILLS THE REDIRECT SERVER ANY MORE, and that is a deletion rather than a move.
     # This used to end it early through --pidfile, because "a student who finished in two minutes
@@ -985,14 +1037,27 @@ sg_cleanup() {
 # not say who it belongs to, then setup is not finished whatever the git config says, and the
 # ordinary flow is the right place to be.
 already_configured() {
-    local n e
+    local n e i
     n="$(git config --global user.name 2>/dev/null || true)"
     e="$(git config --global user.email 2>/dev/null || true)"
-    [ -n "$n" ] && [ -n "$e" ] || return 1
+    # AND THE SUNETID, which is part of being set up since issue #92: without it there is no way to
+    # know which repository to check. A config written before that has none, so every returning
+    # student takes the full flow exactly once — which is right rather than unfortunate, because the
+    # repository those earlier runs proved the token against was a different one.
+    i="$(git config --global cs193v.sunetid 2>/dev/null || true)"
+    [ -n "$n" ] && [ -n "$e" ] && [ -n "$i" ] || return 1
+    # Validated rather than trusted. Nothing a student does puts a bad value here; a hand-edited
+    # config does, and half a repository name is worse than no repository name.
+    validate_sunetid "$i"
+    [ "$ID_VERDICT" = ok ]          || return 1
     gh auth token >/dev/null 2>&1   || return 1
     whoami_login                    || return 1
     [ -n "$SG_LOGIN" ]              || return 1
-    SG_NAME="$n"; SG_EMAIL="$e"
+    # DELIBERATELY NOT CHECKED: whether $e is still $i@stanford.edu. A student who set a different
+    # commit address on purpose has not broken their setup, and dragging them through it again for
+    # that would be punishing a choice that is theirs to make.
+    SG_NAME="$n"; SG_EMAIL="$e"; SG_ID="$VALID_ID"
+    set_sandbox
     return 0
 }
 
@@ -1000,11 +1065,24 @@ already_configured() {
 # The pure functions and the two generated artefacts, exposed so 45-setup-git.sh can drive them
 # as tables with no container, no terminal and no network — the same seam --dev-steps is for the
 # launcher. Handled before the terminal check, because none of them needs one.
+# The ID both dry seams need, validated the way the two real callers validate it. REFUSING IS THE
+# POINT: a bad ID leaves VALID_ID empty, so without this the seams would name `<org>/sandbox-` and
+# print it like a repository — a whole probe plan working somewhere that does not exist, in the two
+# seams staff read BY HAND.
+dev_id() {                            # dev_id INPUT -> 0 and SG_ID set, or 2 having said why
+    validate_sunetid "$1"
+    if [ "$ID_VERDICT" != ok ]; then
+        printf 'setup-git: %s is not a SUNetID\n' "$1" >&2
+        return 2
+    fi
+    SG_ID="$VALID_ID"
+}
+
 dev_seam() {
     local line
     case "$1" in
-        --dev-validate-email)
-            validate_email "${2-}"; printf '%s %s\n' "$EMAIL_VERDICT" "$VALID_EMAIL" ;;
+        --dev-validate-sunetid)
+            validate_sunetid "${2-}"; printf '%s %s\n' "$ID_VERDICT" "$VALID_ID" ;;
         --dev-validate-name)
             validate_name "${2-}"; printf '%s %s\n' "$NAME_VERDICT" "$VALID_NAME" ;;
         --dev-token-kind)
@@ -1021,8 +1099,17 @@ dev_seam() {
             else line=''; IFS= read -r line || true; token_kind "$line"; fi ;;
         --dev-print-token-url)
             token_url; printf '\n' ;;
+        --dev-sandbox-repo)
+            # THROUGH THE VALIDATOR, because that is the only way SG_ID is ever set: the repository
+            # is named from the NORMALISED value, and a seam that skipped it would answer a question
+            # this script never asks.
+            dev_id "${2-sunetid}" || return 2
+            set_sandbox; printf '%s\n' "$SG_SANDBOX" ;;
         --dev-probe-plan)
             SG_DRY=1
+            # The plan names a repository on every line, so the dry run needs an ID like any other.
+            dev_id "${2-sunetid}" || return 2
+            set_sandbox
             SG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-git-dry.XXXXXX")"
             SG_CMD="$SG_TMP/cmd"; SG_CLONE="$SG_TMP/sandbox"; SG_PLAN="$SG_TMP/plan"
             : > "$SG_PLAN"
@@ -1034,11 +1121,11 @@ dev_seam() {
 }
 
 # ─── main ──────────────────────────────────────────────────────────────────────
-SG_EMAIL=''; SG_NAME=''; SG_TOKEN=''; SG_LOGIN=''
+SG_EMAIL=''; SG_NAME=''; SG_TOKEN=''; SG_LOGIN=''; SG_ID=''; SG_SANDBOX=''
 SG_TMP=''; SG_CLONE=''; SG_CMD=''; SG_FAIL_KEY=''
 SG_HEX=''; SG_BR_A=''; SG_BR_B=''; SG_BR_C=''; SG_PLAN=''; SG_FAIL_RC=1
 # What the two readers hand back, and the terminal settings read_secret borrows. Globals for the
-# reason VALID_EMAIL is one: a value handed back on stdout has to be read in a subshell, where an
+# reason VALID_ID is one: a value handed back on stdout has to be read in a subshell, where an
 # assignment made on the way is discarded on return.
 LINE_INPUT=''; SECRET_INPUT=''; SG_STTY=''
 
@@ -1068,7 +1155,8 @@ main() {
     cursor_hide
 
     if already_configured; then
-        say already.configured "NAME=$SG_NAME" "EMAIL=$SG_EMAIL" "LOGIN=$SG_LOGIN"
+        say already.configured "NAME=$SG_NAME" "EMAIL=$SG_EMAIL" "ID=$SG_ID" \
+                               "LOGIN=$SG_LOGIN"
         say prompt.what-now
         printf '\n'
         menu 0 "$(msg opt.just-check)" "$(msg opt.start-over)" "$(msg opt.quit)"
@@ -1077,13 +1165,13 @@ main() {
                 [ "$rc" -eq 0 ] && { msg status.all-set | celebrate "$(msg title.all-set)"; exit 0; }
                 [ "$rc" -eq 2 ] && exit 1
                 ;;                    # 1 = they want to re-enter the token: fall through
-            1)  SG_NAME=''; SG_EMAIL='' ;;
+            1)  SG_NAME=''; SG_EMAIL=''; SG_ID='' ;;
             *)  exit 0 ;;
         esac
     fi
 
     say intro
-    [ -n "$SG_EMAIL" ] || ask_email
+    [ -n "$SG_ID" ]    || ask_sunetid
     [ -n "$SG_NAME" ]  || ask_name
     github_checkpoint
 

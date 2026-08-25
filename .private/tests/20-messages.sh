@@ -120,7 +120,9 @@ assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')
 #
 # {{ORG}} AND {{EXPIRY}} ARE SUBSTITUTED, from setup-git's own defaults rather than from a copy
 # here, because "cs193v-students" is eight columns longer than the placeholder it replaces and a
-# line that fits in the file can overflow on a student's screen.
+# line that fits in the file can overflow on a student's screen. {{ID}}, {{EMAIL}} and {{SANDBOX}}
+# are substituted for the same reason and at their widest, an eight-character SUNetID being the
+# longest Stanford issues.
 #
 # {{URL}} IS SUBSTITUTED TOO, AND USED TO BE EXEMPT. The exemption was honest while it lasted --
 # the prefilled link was 157 characters of GitHub's making and could not be wrapped without
@@ -144,9 +146,18 @@ src = open(script).read()
 def default(var, fallback):
     m = re.search(r'^%s="\$\{%s:-([^}]*)\}"' % (var, var), src, re.M)
     return m.group(1) if m else fallback
-subs = {"ORG": default("CS193V_GH_ORG", "cs193v-students"),
+org = default("CS193V_GH_ORG", "cs193v-students")
+prefix = default("CS193V_GH_SANDBOX_PREFIX", "sandbox-")
+subs = {"ORG": org,
         "EXPIRY": default("CS193V_TOKEN_EXPIRY", "2026-12-31"),
-        "URL": "http://localhost:65535/magic-token-link"}
+        "URL": "http://localhost:65535/magic-token-link",
+        # WORST CASES, NOT EXAMPLES, and all three are eight characters of SUNetID: the ID itself,
+        # the address derived from it, and the repository named after it (issue #92). err.clone
+        # carries the last, and measuring that line at the width of the PLACEHOLDER scores it 21
+        # columns short -- which is exactly how a line goes out two columns too wide.
+        "ID": "x" * 8,
+        "EMAIL": "x" * 8 + "@stanford.edu",
+        "SANDBOX": "%s/%s%s" % (org, prefix, "x" * 8)}
 key = None
 for n, line in enumerate(open(cat).read().splitlines(), 1):
     m = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
@@ -196,6 +207,19 @@ CATALOGUES = (
      r'\b(?:msg|render|say)\s+'),
 )
 
+def joined_lines(path):               # the file as bash reads it: continuations spliced
+    out, acc = [], ""
+    for line in open(path):
+        line = line.rstrip("\n")
+        if line.endswith("\\"):
+            acc += line[:-1]
+            continue
+        out.append(acc + line)
+        acc = ""
+    if acc:
+        out.append(acc)
+    return out
+
 unsupplied, unused = [], []
 for catalogue, scripts, callform in CATALOGUES:
     bodies = {}
@@ -222,9 +246,15 @@ for catalogue, scripts, callform in CATALOGUES:
     # pooled and credited to any key that has no direct call site of its own, and the dead-weight
     # check is skipped for exactly those keys — an indirect site says nothing about which of the
     # four its arguments were meant for.
+    # A CALL MAY SPAN TWO LINES, so continuations are joined before anything is matched. Reading
+    # to end of line is what makes the nested-substitution case above work, and it is also what
+    # makes a `say` broken across a backslash invisible: the arguments on the second line are not
+    # on the line the key is on. That reported github.checkpoint as missing {{ORG}} when the call
+    # right there supplies it — a false alarm, which is the kind of failure that gets a check
+    # weakened rather than fixed.
     calls, indirect = {}, set()
     for path in scripts:
-        for line in open(path):
+        for line in joined_lines(path):
             if line.lstrip().startswith("#"):
                 continue
             for m in re.finditer(callform + r'"?\$', line):

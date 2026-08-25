@@ -110,7 +110,23 @@ skips the link and the menu with it and prints the by-hand steps as the only rou
 
 **2. Which permission does each failing row actually report?** This is the measurement the failure
 messages are built on. Make four tokens, each like a student's but with one permission held back,
-and run one per token:
+and run one per token.
+
+*Before any of them:* the sandbox is per-student since issue #92, so these write into
+`cs193v-students/sandbox-cs193v` — the repository staff keep by hand for exactly this, `cs193v`
+being a structurally valid SUNetID that is nobody's. The suite types that ID and derives the
+repository from it, refusing up front if the repository is missing or has no commits rather than
+reporting its absence as a permission finding. `CS193V_GH_TEST_ID=<your sunetid>` points a run at
+your own sandbox instead; `CS193V_GH_SANDBOX=owner/name` pins one that does not follow the pattern.
+
+**The commit is the half that is easy to get wrong, and `.default_branch` will not tell you.**
+Measured 2026-08-25: GitHub answers `"default_branch": "main"` for a repository with nothing in it
+— the name it *will* use, not a ref that exists — so an empty sandbox passed a pre-flight written
+against that field, cloned "successfully", and failed at `git pull` with `no such ref was fetched`,
+which reads like a token problem and is not one. The check asks for the **branch list** instead: an
+empty repository has no branches. Either answer GitHub could give there (`200 []` or an error) stops
+the run, so the refusal does not depend on which.
+
 ```sh
 CS193V_GH_TEST_TOKEN=<contents: read only>  CS193V_GH_EXPECT_ROW='git push' \
   CS193V_GH_EXPECT_KEY=err.push    .private/tests/run-tests.sh --tier github
@@ -133,6 +149,12 @@ than from the docs** if the two disagree.
 | Issues → No access | `gh issue` | `err.issues` | fails at `gh issue **create**`, not `list` |
 | Pull requests → No access | `gh pr` | `err.prs` | as designed |
 | Resource owner → yourself | — | — | **NOT MEASURED**, see below |
+
+**The clean-pass case re-measured 2026-08-25**, against a per-student sandbox for the first time
+(`cs193v-students/sandbox-cs193v`, typed as SUNetID `cs193v`, gh 2.97): a correctly configured token
+passes all **twelve** rows — seven config commands now that `cs193v.sunetid` is one of them, then
+the five probes — and leaves no branches and no open issues behind. That is the run worth repeating
+whenever the probe list or the repository's shape changes, which is what issue #92 changed.
 
 The Issues row is the interesting one. `gh issue list` **succeeds** with the Issues permission at No
 access — listing is covered by repository read — so the failure lands on `create`, and gh reports it
@@ -175,6 +197,25 @@ Reproduce each once against a token awaiting approval and against an account tha
 its invitation, and check that the checklist covers what you see. Same second-account requirement as
 §3 for the non-member half.
 
+**5. What does a student see whose sandbox is not there yet?** **NOT MEASURED**, and it is now the
+most likely 404 of the five: a mistyped SUNetID and a repository the deploy script has not created
+are the same answer from outside, because the repository is private — GitHub cannot say "it exists
+but is not yours" without saying whether it exists. So no probe can tell them apart, and `err.clone`
+does not try: it names the repository it looked for and puts *Your SUNetID* first in the checklist,
+ahead of the four token causes. What is unmeasured is whether that reads as actionable to a student
+who has typed their ID correctly and simply arrived early.
+
+*To measure:* **not through this tier** — its pre-flight refuses a missing sandbox on purpose, which
+is the opposite of what you want here. Drive the installed script by hand instead, with a throwaway
+HOME so it cannot touch your own login, and type a valid SUNetID nobody has a sandbox for:
+```sh
+podman exec -it -e HOME=/tmp/sgx -e TMPDIR=/tmp/sgx -e GH_CONFIG_DIR=/tmp/sgx/gh \
+  -e GIT_CONFIG_GLOBAL=/tmp/sgx/gitconfig "cs193v-$CS193V_INSTANCE" setup-git   # type: zzz9
+podman exec "cs193v-$CS193V_INSTANCE" rm -rf /tmp/sgx
+```
+*Expect* the `git clone` row to fail with `err.clone`, its first item naming the SUNetID and the
+repository it looked for. Read it as a first-year would: is that enough to act on?
+
 ### `setup-git` — the display, which no transcript can show
 Run it for real in an 80×24 terminal, with a working token. **The container's tmux takes the top
 row for its status line, so the budget is 23, not 24** — which is the arithmetic issue #58 turned
@@ -193,7 +234,8 @@ on.
   green `✓` — no flicker, and no row drawn twice or left half-erased.
 - A failing row's `✗` in red, in the same column, with the rows above it untouched.
 - **The cursor blinking at `Your token:` before you type anything.** Issue #53: it was hidden for
-  the whole run, and a prompt with no cursor in it reads as a program that has stopped.
+  the whole run, and a prompt with no cursor in it reads as a program that has stopped. Same at
+  `What is your SUNetID (e.g. htiek, szum)?`, which is the first thing on the screen.
 - The token itself never on the screen as you paste it — what appears instead is
   `••• ... 87 more characters ... •••`, growing as the paste lands, on one line that does *not*
   wrap. Backspace over it and the count comes down cleanly with no smear.
@@ -202,6 +244,15 @@ on.
 - **Ctrl-C while `Your token:` is waiting: the cursor comes back *and typing echoes*.** That prompt
   turns echo off at the terminal for the length of the paste, so this is the same failure mode in a
   third place, and the worse one — a student who loses echo loses it for the whole session.
+- **The clone-failure screen scrolls, and it did before issue #92 too.** Measured 2026-08-25:
+  `err.clone` is 22 rows, and the prompt and menu under it add seven, so 29 against the 23 a tmux
+  pane leaves — the title, the repository name and the two-line intro go off the top. It was 26
+  before this issue added the SUNetID as a fifth cause. Recorded rather than fixed because the
+  alternative is deleting one of the five things to check, and the path a student needs is
+  self-contained without the scrolled part: item 1 says to re-run `setup-git` and choose *Start
+  over*, and the screen that lands on prints `Your SUNetID:` where they can check it. **Worth a
+  human's eyes on whether that is enough**, and worth knowing that shortening any of the five
+  messages is the lever if it is not.
 - The green ALL SET box closed and square on the right.
 
 *Automated:* the glyphs, the messages, the ordering, the redaction, the tally's count and width,

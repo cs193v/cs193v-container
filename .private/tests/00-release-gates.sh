@@ -314,12 +314,27 @@ Set it past the end of the quarter — students are told to choose it, and the p
 link carries it as a lifetime in days."
 fi
 
-# The organization and the sandbox repository are the other two values a new quarter moves, and
-# a placeholder left in either would fail on every student at once. Recorded rather than asserted
+# The organization and the sandbox NAME are the other values a new quarter moves, and a
+# placeholder left in either would fail on every student at once. Recorded rather than asserted
 # against a literal: the point is that a human reads them before the quarter starts.
-for v in CS193V_GH_ORG CS193V_GH_SANDBOX; do
-    val="$(sed -n "s/^$v=\"\${$v:-\([^}]*\)}\".*/\1/p" $PRIVATE/files/setup-git | head -1)"
+sgval() {                             # sgval VAR -> the default compiled into files/setup-git
+    sed -n "s/^$1=\"\${$1:-\([^}]*\)}\".*/\1/p" $PRIVATE/files/setup-git | head -1
+}
+for v in CS193V_GH_ORG CS193V_GH_SANDBOX_PREFIX; do
+    val="$(sgval "$v")"
     record "setup-git:$v" "$val"
     assert_ne "setup-git:$v-is-set" "" "$val"
     assert_says_not "setup-git:$v-is-not-a-placeholder" "CHANGEME" "$val"
 done
+
+# WHICH REPOSITORY A STUDENT ACTUALLY GETS, spelled out, because since issue #92 the two values
+# above only mean anything together — and the homework deploy script has to agree with the answer.
+record "setup-git:sandbox-pattern" \
+       "$(sgval CS193V_GH_ORG)/$(sgval CS193V_GH_SANDBOX_PREFIX)<sunetid>"
+
+# AND NOTHING PINNED. CS193V_GH_SANDBOX is the override that sends a staff dry run or a test at one
+# fixed repository, and it has to ship EMPTY: a value left in this file points the whole class at
+# that repo, which is the pre-#92 behaviour and would put every student's clone, push and pull into
+# one repository they can all write to. The only assertion here that fails on a value being present
+# rather than absent, which is why it is spelled out rather than folded into the loop above.
+assert_eq "setup-git:CS193V_GH_SANDBOX-is-not-pinned" "" "$(sgval CS193V_GH_SANDBOX)"

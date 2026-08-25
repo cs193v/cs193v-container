@@ -58,16 +58,16 @@ TOKEN="github_pat_11ABCDEFG0aaaaaaaaaaaa_$TOKEN_B"
 # 87 = 93 - the three dots drawn at each end. What the tally says while the token is being pasted.
 TOKEN_MID=87
 
-# The keystrokes for a clean first run: email, Enter to confirm, name, Enter to confirm, Enter at
-# the checkpoint, Enter at "Yes, I see my token" (issue #58's menu), the token, Enter at "is that
-# your account?".
+# The keystrokes for a clean first run: SUNetID, Enter to confirm, name, Enter to confirm, Enter
+# at the checkpoint, Enter at "Yes, I see my token" (issue #58's menu), the token, Enter at "is
+# that your account?".
 #
 # THAT SIXTH ENTER IS THE NEW ONE, and every sequence below that reaches the token prompt needs
 # one -- including the ones that come BACK to it, because re-entering ask_token draws the menu
 # again. A sequence one keystroke short does not fail where the keystroke is missing: menu() eats
 # the token's first line as its answer and the run fails somewhere further on, for a reason the
 # assertion cannot name.
-HAPPY="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n"
+HAPPY="jdoe\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n"
 
 # ─── the happy path ────────────────────────────────────────────────────────────
 sg_new
@@ -77,19 +77,26 @@ sg_says "happy:greets"          intro             "$out"
 sg_says "happy:asks-the-three-github-things" github.checkpoint "$out"
 sg_says "happy:explains-the-token" token.intro    "$out"
 sg_says "happy:succeeds"        status.all-set    "$out"
-sg_has     "happy:confirms-the-address" "jdoe@stanford.edu" "$out"
+sg_has     "happy:confirms-the-sunetid"  "You entered jdoe"  "$out"
 sg_has     "happy:confirms-the-name"    "Jane Doe"          "$out"
+# THE ADDRESS IS DERIVED NOW (issue #92) and nobody types it, so the screen that names it is the
+# GitHub checkpoint. A student never shown it anywhere cannot check it is on their account.
+sg_has     "happy:names-the-derived-address" "jdoe@stanford.edu" "$out"
 # The account check, which is the cheap catch for a token pasted from the wrong browser profile.
 sg_has     "happy:names-the-account"    "@janedoe"          "$out"
 
-# EVERY ROW ENDS IN A CHECK AND NONE IN A CROSS. Eleven of them: five config commands plus
-# init.defaultBranch, then the five verification rows.
-assert_eq "happy:eleven-rows-succeeded" "11" "$(printf '%s' "$out" | grep -c '✓' || true)"
+# EVERY ROW ENDS IN A CHECK AND NONE IN A CROSS. Twelve of them: five config commands plus
+# init.defaultBranch and cs193v.sunetid, then the five verification rows.
+assert_eq "happy:twelve-rows-succeeded" "12" "$(printf '%s' "$out" | grep -c '✓' || true)"
 assert_not_contains "happy:no-row-failed" "✗" "$out"
 
 # The commands, in the order a student watches them go by. Named individually, so a deleted one
 # says which.
 assert_match "happy:sets-the-email"   'git config --global user.email jdoe@stanford.edu' "$(sg_log)"
+# THE ONE ROW THAT MAKES A SECOND RUN POSSIBLE. The repository is named after the student now, so
+# something has to remember which student this is. The address above would very nearly do it, and
+# does not, because a student may legitimately set a different commit address afterwards.
+assert_match "happy:sets-the-sunetid" 'git config --global cs193v.sunetid jdoe'          "$(sg_log)"
 assert_match "happy:sets-the-name"    'git config --global user.name Jane Doe'           "$(sg_log)"
 assert_match "happy:sets-pull-rebase" 'git config --global pull.rebase true'             "$(sg_log)"
 assert_match "happy:sets-default-branch" 'git config --global init.defaultBranch main'   "$(sg_log)"
@@ -97,12 +104,12 @@ assert_match "happy:logs-in"          'gh auth login --with-token'              
 assert_match "happy:sets-up-git-auth" 'gh auth setup-git'                                "$(sg_log)"
 
 # And the probes, all five rows' worth.
-assert_match "happy:clones"      'git clone --quiet https://github.com/cs193v-students/install-sandbox.git' "$(sg_log)"
+assert_match "happy:clones"      'git clone --quiet https://github.com/cs193v-students/sandbox-jdoe.git' "$(sg_log)"
 assert_match "happy:pulls"       'git -C .* pull --quiet'  "$(sg_log)"
 assert_match "happy:pushes"      'git -C .* push -q origin cs193v-setup/' "$(sg_log)"
 assert_match "happy:lists-issues" 'gh issue list'    "$(sg_log)"
 assert_match "happy:creates-an-issue" 'gh issue create' "$(sg_log)"
-assert_match "happy:closes-the-issue"  'gh issue close --repo cs193v-students/install-sandbox 7' "$(sg_log)"
+assert_match "happy:closes-the-issue"  'gh issue close --repo cs193v-students/sandbox-jdoe 7' "$(sg_log)"
 assert_match "happy:opens-a-pr"  'gh pr create'      "$(sg_log)"
 # The NUMBER the pull request links, not just the word: a tidy-up once deleted the file the issue
 # number is read out of, and every body said "Closes #0" while a check for `Closes #` passed. The
@@ -165,9 +172,12 @@ assert_eq "tally:fits-an-80-column-terminal" "yes" \
 # "[?25h appears somewhere" would pass on the one the EXIT trap emits at the end of every run.
 assert_match "cursor:shown-at-the-token-prompt" "$SG_ESC\[\?25h.{0,60}Your token" \
              "$(printf '%s' "$out" | tr -d '\r')"
-# And the same for the two prompts that echo normally, which were just as cursorless.
-assert_match "cursor:shown-at-the-email-prompt" "$SG_ESC\[\?25h" \
-             "$(printf '%s' "$out" | tr -d '\r' | sed -n '/email address/,$p' | head -1)"
+# And the same for the two prompts that echo normally, which were just as cursorless. The needle is
+# the PROMPT rather than the words "email address": those now appear first in the GitHub
+# checkpoint's signup link, three screens later, where the cursor is hidden and the assertion was
+# passing on nothing.
+assert_match "cursor:shown-at-the-sunetid-prompt" "$SG_ESC\[\?25h" \
+             "$(printf '%s' "$out" | tr -d '\r' | sed -n '/What is your SUNetID/,$p' | head -1)"
 
 # ─── the two ways to get a token (issue #58) ───────────────────────────────────
 # The link screen ends in a choice, and the by-hand steps sit behind it. Printing both to
@@ -230,7 +240,7 @@ sg_says "noshortlink:the-flow-still-completes" status.all-set "$out"
 record "noshortlink:widest-row" "$(sg_widest_row "$out") columns"
 
 # Arrowing down is the only way to the by-hand steps, and it has to end at the same prompt.
-BYHAND="jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\033[B|\n|$TOKEN\n|\n"
+BYHAND="jdoe\n|\n|Jane Doe\n|\n|\n|\033[B|\n|$TOKEN\n|\n"
 sg_new
 out="$(sg_tty "$BYHAND")"
 sg_says "byhand:shows-the-steps"      token.byhand   "$out"
@@ -261,7 +271,13 @@ sg_new
 sg_set fail_at 'clone'
 out="$(sg_tty "$HAPPY$STUCK")"
 sg_says "fail-clone:says-which-repo-it-cannot-reach" err.clone "$out"
-sg_has     "fail-clone:names-the-resource-owner-first"  "Resource owner" "$out"
+# THE REPOSITORY BY NAME, and the SUNetID as item 1 (issue #92). The sandbox is per-student and
+# private, so a mistyped SUNetID 404s exactly like a repository that does not exist -- nothing can
+# tell those apart from outside. What the checklist can do is stop omitting the likeliest cause,
+# and name the repository it actually looked for so a student can see the ID inside it.
+sg_has     "fail-clone:names-the-repository-it-looked-for" "cs193v-students/sandbox-jdoe" "$out"
+sg_has     "fail-clone:the-first-item-is-the-sunetid"      "1. Your SUNetID"              "$out"
+sg_has     "fail-clone:still-names-the-resource-owner"     "Resource owner"               "$out"
 assert_contains "fail-clone:the-row-failed" "✗" "$out"
 assert_eq       "fail-clone:nothing-after-it-ran" "0" "$(sg_count 'git pull')"
 sg_says "fail-clone:ends-with-the-staff-box" err.setup-failed "$out"
@@ -357,8 +373,8 @@ sg_set fail_at 'issue create'
 out="$(sg_tty "$HAPPY|\033[B|\n|\n|$TOKEN\n|\n$STUCK")"
 assert_eq "retoken:asks-for-the-token-twice" "2" \
           "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
-assert_eq "retoken:asks-for-the-email-once" "1" \
-          "$(printf '%s' "$out" | grep -c 'What is your @stanford.edu' || true)"
+assert_eq "retoken:asks-for-the-sunetid-once" "1" \
+          "$(printf '%s' "$out" | grep -c 'What is your SUNetID' || true)"
 assert_eq "retoken:asks-for-the-name-once" "1" \
           "$(printf '%s' "$out" | grep -c 'What is your full name' || true)"
 
@@ -382,7 +398,7 @@ assert_eq "stuck:the-box-is-closed" "" "$(printf '%s\n' "$sgbox" | box_problems)
 # Answering "no, that's not my account" goes back to the token prompt without running a single
 # probe: there is nothing to learn from probing a token that belongs to somebody else.
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\033[B|\n|\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\033[B|\n|\n|$TOKEN\n|\n")"
 assert_eq "wrong-account:asks-for-the-token-twice" "2" \
           "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
 sg_says "wrong-account:eventually-succeeds" status.all-set "$out"
@@ -408,36 +424,65 @@ sg_says_not "ratelimit:does-not-blame-the-token" err.issues "$out"
 # ─── validation, as the student meets it ───────────────────────────────────────
 # The unit suite covers the verdicts exhaustively; what this covers is the loop around them —
 # that a rejection re-prompts on the spot rather than starting the screen over, and that the two
-# email messages are actually different where the transcript in issue #49 says they are.
+# messages are actually different where the transcript in issue #49 says they are.
+#
+# FOUR ANSWERS, THREE OF THEM WRONG IN TWO DIFFERENT WAYS. `jane.doe` is an email alias rather
+# than a SUNetID and `ab` is too short, which are the same mistake and share a message;
+# `me@cs.stanford.edu` is an email address, which is its own. The fourth is right but capslocked
+# and padded — the case that proves what reaches git config is the NORMALISED value rather than
+# what was typed, which matters because it also names the repository.
 sg_new
-out="$(sg_tty "not an email\n|me@gmail.com\n|me@nested.stanford.edu\n|   jdoe@stanford.edu   \n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
-assert_eq "retry-email:complains-twice-about-the-shape" "2" \
-          "$(printf '%s' "$out" | grep -c 'not a valid @stanford.edu' || true)"
-assert_says "retry-email:has-a-separate-message-for-a-subdomain" \
-            "Please use your regular @stanford.edu email address" "$out"
-sg_has "retry-email:confirms-the-trimmed-address" "You entered jdoe@stanford.edu" "$out"
-sg_says "retry-email:still-gets-there" status.all-set "$out"
-
-# "No, I want to retype that" asks the same question again rather than moving on.
-sg_new
-out="$(sg_tty "typo@stanford.edu\n|\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
-assert_eq "retype-email:asks-again" "2" \
-          "$(printf '%s' "$out" | grep -c 'What is your @stanford.edu' || true)"
-assert_match "retype-email:configures-the-second-answer" \
+out="$(sg_tty "jane.doe\n|ab\n|me@cs.stanford.edu\n|   JDoe   \n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
+assert_eq "retry-sunetid:complains-twice-about-the-shape" "2" \
+          "$(printf '%s' "$out" | grep -c '3 to 8 letters and numbers' || true)"
+sg_says "retry-sunetid:has-a-separate-message-for-an-address" err.sunetid-is-an-email "$out"
+sg_has "retry-sunetid:confirms-the-normalised-id" "You entered jdoe" "$out"
+assert_match "retry-sunetid:configures-the-normalised-address" \
              'user.email jdoe@stanford.edu' "$(sg_log)"
-assert_not_match "retype-email:never-configures-the-first" \
-                 'user.email typo@stanford.edu' "$(sg_log)"
+assert_match "retry-sunetid:clones-the-normalised-sandbox" 'clone .*sandbox-jdoe' "$(sg_log)"
+sg_says "retry-sunetid:still-gets-there" status.all-set "$out"
+
+# A WHOLE ADDRESS TYPED AT THE PROMPT IS THE RIGHT ANSWER IN THE WRONG FORM, and it is what a
+# student who has typed jdoe@stanford.edu into every other form this week will type here. The
+# domain has to be exactly stanford.edu — an alumni or department address is a real address of
+# theirs that is not what the roster or the repository is named after, and gets the other message,
+# which the run above covers.
+sg_new
+out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
+sg_has "typed-address:confirms-just-the-id" "You entered jdoe" "$out"
+assert_match "typed-address:configures-the-derived-address" \
+             'user.email jdoe@stanford.edu' "$(sg_log)"
+assert_match "typed-address:records-the-id-alone" 'cs193v.sunetid jdoe' "$(sg_log)"
+sg_says "typed-address:still-gets-there" status.all-set "$out"
+
+# "No, I want to retype that" asks the same question again rather than moving on. `wrong` is a
+# structurally valid SUNetID, which is the point: this is the path for a student who typed
+# somebody else's, and nothing but the confirmation can catch that.
+sg_new
+out="$(sg_tty "wrong\n|\033[B|\n|jdoe\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
+assert_eq "retype-sunetid:asks-again" "2" \
+          "$(printf '%s' "$out" | grep -c 'What is your SUNetID' || true)"
+assert_match "retype-sunetid:configures-the-second-answer" \
+             'cs193v.sunetid jdoe' "$(sg_log)"
+assert_not_match "retype-sunetid:never-configures-the-first" \
+                 'cs193v.sunetid wrong' "$(sg_log)"
+assert_match "retype-sunetid:derives-the-second-answers-address" \
+             'user.email jdoe@stanford.edu' "$(sg_log)"
+# AND THE REPOSITORY FOLLOWED IT. A first answer left behind in SG_SANDBOX would send the probes
+# at a repository belonging to whoever `wrong` turns out to be.
+assert_not_match "retype-sunetid:never-touches-the-first-answers-sandbox" \
+                 'sandbox-wrong' "$(sg_log)"
 
 # A classic token is turned away before anything runs, with its own message: one with the `repo`
 # scope would very nearly work, so "that is not a token" would be both wrong and unhelpful.
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|ghp_16C7e42F292c6912E7710c838347Ae178B4a\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\n|\n|ghp_16C7e42F292c6912E7710c838347Ae178B4a\n|$TOKEN\n|\n")"
 sg_says "classic-token:says-which-kind-it-is" err.token-classic "$out"
 assert_eq "classic-token:nothing-ran-with-it" "0" "$(sg_count 'gh auth login.*ghp_')"
 sg_says "classic-token:then-accepts-the-right-one" status.all-set "$out"
 
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|hello\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\n|\n|hello\n|$TOKEN\n|\n")"
 sg_says "junk-token:says-what-one-looks-like" err.token-shape "$out"
 # FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
 # because "... -1 more characters ..." is what a short typo would otherwise render as.
@@ -451,7 +496,7 @@ sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
 # in the sense that the good one pasted after it does.
 sg_new
 HALF="$(printf '%s' "$TOKEN" | cut -c1-50)"
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$HALF\n|$TOKEN\n|\n")"
+out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\n|\n|$HALF\n|$TOKEN\n|\n")"
 sg_says "partial-token:says-it-is-only-part-of-one" err.token-partial "$out"
 sg_says_not "partial-token:does-not-say-it-is-not-a-token" err.token-shape "$out"
 # 44 = 50 - the six dots. The number a student compares against the one a whole token shows.
@@ -463,7 +508,7 @@ sg_says "partial-token:then-accepts-the-right-one" status.all-set "$out"
 # "Uh oh, something's wrong" at the GitHub checkpoint has to stop, not carry on into a token
 # prompt the student cannot answer.
 sg_new
-out="$(sg_tty "jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\033[B|\n")"
+out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\033[B|\n")"
 sg_says "checkpoint-help:ends-in-the-staff-box" err.setup-failed "$out"
 sg_says_not "checkpoint-help:never-asks-for-a-token" token.paste "$out"
 assert_eq "checkpoint-help:configures-nothing" "0" \
@@ -492,14 +537,18 @@ assert_eq "config-fails:never-reached-the-login" "0" "$(sg_count 'gh auth login'
 # right is the wrong answer to any of those.
 sg_new
 sg_touch auth_token
-printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\n' > "$SGSHIM/gitconfig"
+printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
 out="$(sg_tty '\n')"
 sg_says "second-run:says-it-is-already-set-up" already.configured "$out"
 sg_has "second-run:shows-the-name"    "Jane Doe"          "$out"
 sg_has "second-run:shows-the-address" "jdoe@stanford.edu" "$out"
+sg_has "second-run:shows-the-sunetid" "Your SUNetID: jdoe" "$out"
 sg_has "second-run:shows-the-account" "@janedoe"          "$out"
-sg_says_not "second-run:does-not-ask-again" prompt.email "$out"
+sg_says_not "second-run:does-not-ask-again" prompt.sunetid "$out"
 sg_says "second-run:just-checks-and-passes" status.all-set "$out"
+# AND IT PROBED THE RIGHT REPOSITORY, which is the whole reason the SUNetID is stored at all: the
+# second run never asks a question, so the only place sandbox-jdoe can come from is the config.
+assert_match "second-run:probes-the-students-own-sandbox" 'clone .*sandbox-jdoe' "$(sg_log)"
 assert_eq "second-run:configures-nothing" "0" \
           "$(sg_count 'git config --global [a-z.]+ .')"
 
@@ -507,15 +556,19 @@ assert_eq "second-run:configures-nothing" "0" \
 # address was wrong.
 sg_new
 sg_touch auth_token
-printf 'user.name=Wrong Name\nuser.email=wrong@stanford.edu\n' > "$SGSHIM/gitconfig"
-out="$(sg_tty "\033[B|\n|jdoe@stanford.edu\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
-sg_has "start-over:asks-for-the-address-again" "What is your @stanford.edu" "$out"
+printf 'user.name=Wrong Name\nuser.email=wrong@stanford.edu\ncs193v.sunetid=wrong\n' > "$SGSHIM/gitconfig"
+out="$(sg_tty "\033[B|\n|jdoe\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
+sg_has "start-over:asks-for-the-sunetid-again" "What is your SUNetID" "$out"
 assert_match "start-over:configures-the-new-answer" 'user.email jdoe@stanford.edu' "$(sg_log)"
+assert_match "start-over:records-the-new-sunetid" 'cs193v.sunetid jdoe' "$(sg_log)"
+# THE STALE ANSWER IS CLEARED, ALL OF IT. `wrong` was in the config when this started, so a
+# start-over that reset the name and the address but not the ID would clone somebody else's repo.
+assert_not_match "start-over:does-not-probe-the-old-sandbox" 'sandbox-wrong' "$(sg_log)"
 
 # And "nothing, thanks" changes nothing at all.
 sg_new
 sg_touch auth_token
-printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\n' > "$SGSHIM/gitconfig"
+printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
 out="$(sg_tty '\033[B|\033[B|\n')"
 assert_eq "quit:runs-no-probes" "0" "$(sg_count 'git clone')"
 sg_says_not "quit:does-not-claim-success" status.all-set "$out"
@@ -523,14 +576,37 @@ sg_says_not "quit:does-not-claim-success" status.all-set "$out"
 # An unfinished setup must NOT take the second-run screen. A git config with no working token is
 # not "already set up" whatever the config says, and the ordinary flow is the right place to be.
 sg_new
-printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\n' > "$SGSHIM/gitconfig"
+printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
 out="$(sg_tty "$HAPPY")"
 sg_says_not "no-token:is-not-already-configured" already.configured "$out"
-sg_says "no-token:asks-from-the-start" prompt.email "$out"
+sg_says "no-token:asks-from-the-start" prompt.sunetid "$out"
+
+# NEITHER IS A CONFIG FROM BEFORE ISSUE #92, and this is the case every returning student meets
+# exactly once. Their name and address are right and their token works, but nothing recorded which
+# repository is theirs — and the shared sandbox those three were verified against is gone. Asking
+# again is the only thing that can produce the answer, so this must not take the short path.
+sg_new
+sg_touch auth_token
+printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\n' > "$SGSHIM/gitconfig"
+out="$(sg_tty "$HAPPY")"
+sg_says_not "no-sunetid:is-not-already-configured" already.configured "$out"
+sg_says "no-sunetid:asks-from-the-start" prompt.sunetid "$out"
+sg_says "no-sunetid:then-gets-there" status.all-set "$out"
+
+# And a stored value that is not a SUNetID is the same answer rather than half a repository name.
+# Nothing a student does produces this; a hand-edited config does.
+sg_new
+sg_touch auth_token
+printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jane.doe\n' > "$SGSHIM/gitconfig"
+out="$(sg_tty "$HAPPY")"
+sg_says_not "bad-sunetid:is-not-already-configured" already.configured "$out"
+sg_says "bad-sunetid:asks-from-the-start" prompt.sunetid "$out"
+assert_not_match "bad-sunetid:never-clones-a-mangled-name" 'sandbox-jane.doe' "$(sg_log)"
 
 # ─── tidying up after itself ───────────────────────────────────────────────────
-# A student who gives up halfway should not leave a branch and an open issue behind in a
-# repository the whole class can see. Best-effort and silent: none of it is their business.
+# A student who gives up halfway should not leave a branch and an open issue behind in the
+# repository they are about to do their homework in. Best-effort and silent: none of it is their
+# business.
 sg_new
 sg_set fail_at 'gh pr create'
 out="$(sg_tty "$HAPPY$STUCK")"

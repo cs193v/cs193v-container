@@ -31,7 +31,7 @@ if [ -f "$SHIM/fail_at" ]; then
     pat="$(cat "$SHIM/fail_at")"
     case "$ALL" in
         *"$pat"*)
-            printf '%s\n' "$(get fail_err 'remote: Permission to cs193v-students/install-sandbox.git denied.')" >&2
+            printf '%s\n' "$(get fail_err 'remote: Permission to cs193v-students/sandbox-jdoe.git denied.')" >&2
             exit "$(get fail_rc 128)" ;;
     esac
 fi
