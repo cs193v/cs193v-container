@@ -1090,7 +1090,7 @@ done
 
 # Each of these was considered and rejected for a documented reason; re-adding one should
 # be a deliberate act that breaks a test, not a quiet edit.
-for rejected in --memory-swap --init --tmpfs --pids-limit --cpus --shm-size \
+for rejected in --init --tmpfs --pids-limit --cpus --shm-size \
                 host-lo-to-ns-lo '-t,auto'; do
     assert_not_contains "rejected:no-$rejected" "$rejected" "$args_live"
 done

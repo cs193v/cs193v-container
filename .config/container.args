@@ -194,11 +194,6 @@
 #      no-new-privileges makes execve ignore setuid bits. They would also buy nothing,
 #      since root owns the tamper targets and needs no capability to modify them.
 #
-#  --memory-swap
-#      The "equal to --memory" idiom is DOCKER's semantics. podman-run(1) requires the
-#      swap value to be strictly larger, so shipping it may make the container refuse
-#      to start — every student seeing an opaque failure on the flag meant to help.
-#
 #  --pids-limit (tighter than podman's 2048 default)
 #      Exhaustion does not kill the container, it WEDGES it: `podman exec` must fork
 #      into the same cgroup, so the launcher cannot get back in. It does not self-heal.

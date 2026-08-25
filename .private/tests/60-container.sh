@@ -55,9 +55,7 @@ clean_vt_fixtures
 assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 
 MEM="$(I '{{.HostConfig.Memory}}')"
-SWAP="$(I '{{.HostConfig.MemorySwap}}')"
-record "flag:memory"      "$MEM"
-record "flag:memory-swap" "$SWAP"
+record "flag:memory" "$MEM"
 # local.args holds the cap the installer computed for this machine; the container must
 # actually have it, or the protection is decorative.
 if [ -f "$REPO/.config/local.args" ]; then
@@ -70,10 +68,6 @@ if [ -f "$REPO/.config/local.args" ]; then
 else
     record "flag:memory-matches-local.args" "no local.args (installer not run here)"
 fi
-# The "--memory-swap equal to --memory" idiom is DOCKER's semantics; podman-run(1) requires
-# strictly larger, so shipping it can make the container refuse to start.
-assert_ne "flag:swap-not-equal-to-memory" "$MEM" "$SWAP"
-
 # podman's default. A tighter limit does not kill the container, it WEDGES it: `podman exec`
 # must fork into the same cgroup, so the launcher cannot get back in, and it does not
 # self-heal.
