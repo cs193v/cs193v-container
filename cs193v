@@ -2354,8 +2354,21 @@ verb_doctor() {
         printf '  %-16s %s (host is %s:%s)\n' "in-container uid" "$RT_OUT" "$(id -u)" "$(id -g)"
         pm exec "$NAME" sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null'
         printf '  %-16s %s\n' "memory limit" "${RT_OUT:-unknown}"
-        pm exec "$NAME" sh -c 'ps -eo stat --no-headers | grep -c Z'
-        printf '  %-16s %s\n' "zombies" "${RT_OUT:-0}"
+        # SPLIT BY PARENT, because the bare count this replaced needed a footnote in three
+        # documents. A zombie is its PARENT's business: PID 1 collects the ones reparented onto
+        # it, and one whose parent is alive and is not PID 1 -- sshd holds exactly one for the
+        # tunnel's whole life -- is not reachable by any init, ours or catatonit's. So the number
+        # a TA should read is the first one, and "0 unreaped" means healthy with nothing to
+        # remember. Growth in the second is worth mentioning to staff; a steady 1 is not.
+        #
+        # The ps runs bare and the split happens HERE, so there is no awk quoted inside an
+        # `sh -c` inside a `podman exec` to get wrong.
+        pm exec "$NAME" ps -eo ppid,stat --no-headers
+        printf '  %-16s %s\n' "zombies" "$(printf '%s\n' "${RT_OUT}" \
+            | awk 'NF >= 2 { seen++ }
+                   $2 ~ /Z/ { t++; if ($1 == 1) n++ }
+                   END { if (seen == 0) print "unknown"
+                         else printf "%d unreaped, %d held by a live parent", n+0, t-n+0 }')"
         tmux_doctor
         tunnel_doctor
         check_clock

@@ -666,12 +666,17 @@ assert_match "doctor:reports-the-tunnel-is-up" 'tunnel +up \(pid [0-9]+\)' "$out
 assert_match "doctor:reports-the-dynamic-ports" \
              "dynamic ports +([0-9]+ forwarded|nothing is listening)" "$out"
 assert_match "doctor:reports-clock-skew" 'clock skew' "$out"
-assert_match "doctor:reports-zombies" 'zombies' "$out"
-# Exactly one zombie is EXPECTED while a tunnel is up: sshd's own re-exec'd process, whose
-# parent is sshd's privsep monitor inside the container, so it is never reparented to PID 1 and
-# no PID 1 could reap it. Recorded rather than asserted because the count is 0 with no tunnel
-# and this file must not turn a documented fact into a flaky test. See README.md's --init item.
-record "doctor:zombie-count-with-a-tunnel-up" "$(printf '%s' "$out" | sed -n 's/.*zombies *\([0-9]*\).*/\1/p')"
+# THE SHAPE, NOT THE NUMBERS. doctor splits its zombie count by parent -- the ones reparented
+# onto PID 1, which it must reap, and the ones held by a live parent it cannot reach -- so the
+# line a TA reads is "0 unreaped" rather than a bare count needing a footnote. Both numbers are
+# recorded and neither is asserted: "unreaped" is legitimately non-zero for the moment between an
+# orphan's _exit() and PID 1's wait(), and "held" is 1 with a tunnel up and 0 without. Asserting
+# either would be #102 again, one file over. 60-container.sh is where the reaping is proved, on
+# orphans it makes itself.
+assert_match "doctor:reports-zombies" \
+             'zombies +[0-9]+ unreaped, [0-9]+ held by a live parent' "$out"
+record "doctor:zombie-counts-with-a-tunnel-up" \
+       "$(printf '%s' "$out" | sed -n 's/.*zombies *\(.*\)/\1/p')"
 record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
 
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────

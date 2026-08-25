@@ -1080,22 +1080,32 @@ steady-state, for the tunnel's whole lifetime, dropping to zero when the tunnel 
 tunnel cycles accumulated nothing, so there is no `pids.max` risk and nothing is broken.
 
 One persistent zombie is a smell, so the process tree was measured against a live tunnel
-rather than reasoned about:
+rather than reasoned about. `COMM` is in the listing because it is the column that settles
+which process this is — `ps` renders a zombie's `COMMAND` as `[comm] <defunct>`, so the
+process title sshd sets on the living ones is not available here:
 
 ```
-  PID  PPID STAT  COMMAND
-    1     0 Ss    /bin/bash /usr/local/bin/cs193v-entrypoint
-    4     0 Ss    sshd-session: student [priv]
-    5     4 Z     [sshd] <defunct>          <-- the zombie
-    7     4 S     sshd-session: student
+  PID  PPID STAT  COMM             COMMAND
+    1     0 Ss    cs193v-entrypoi  /bin/bash /usr/local/bin/cs193v-entrypoint
+  266     0 Ss    sshd-session     sshd-session: student [priv]
+  267   266 Z     sshd             [sshd] <defunct>          <-- the zombie
+  269   266 S     sshd-session     sshd-session: student
 ```
 
-The zombie is pid 5, the original `sshd -i` that re-exec'd into `sshd-session`, and **its
-parent is pid 4, which is alive** — sshd's own privilege-separation monitor, running inside
-the container for as long as the tunnel does. A process is only reparented to PID 1 when its
-parent *dies*, so while pid 4 lives nothing PID 1 does can reap pid 5. Bash and catatonit
-would be equally powerless, and the zombie clears the moment the tunnel exits and pid 4 goes
-with it — which is exactly the 1-while-up / 0-while-down measurement.
+**This entry used to say the zombie was "the original `sshd -i` that re-exec'd into
+`sshd-session`". That is backwards, and re-measuring on OpenSSH 10.2p1 is what caught it.**
+A re-exec keeps the same pid, so the process that re-exec'd cannot be a *child* of anything;
+and pid 266 has `ppid 0`, which makes it the `podman exec` payload itself — the process the
+launcher started as `/usr/sbin/sshd -i`, now carrying `comm sshd-session`. So **pid 266 is the
+one that re-exec'd**, and it is alive. The zombie, pid 267, still carries `comm sshd`: it
+never ran the `sshd-session` image at all, so it is a child pid 266 forked during connection
+setup while it was still `sshd`, and never waited for.
+
+What has always been right is the conclusion, and it is the part that matters: **its parent is
+alive**. A process is only reparented to PID 1 when its parent *dies*, so while pid 266 lives
+nothing PID 1 does can reap pid 267. Bash and catatonit would be equally powerless, and the
+zombie clears the moment the tunnel exits and pid 266 goes with it — which is exactly the
+1-while-up / 0-while-down measurement.
 
 So this zombie is **not** evidence for or against `--init` in either direction; it is sshd's
 internal business. The `--init` question stands on its own merits, and the more interesting
@@ -1103,5 +1113,12 @@ version of it is whether the rejection was aimed at the wrong target: the object
 specifically to bind-mounting the *host's* catatonit, which shipping our own init binary in
 the image would sidestep entirely while still giving PID 1 a real init.
 
-`doctor` reports a zombie count, so the docs must say that **1 is expected while a tunnel is
-up**, or a TA reads a healthy container as a faulty one.
+**The ppid is the rule, and nothing keys on the name any more.** `doctor` splits its count —
+`zombies  0 unreaped, 1 held by a live parent` — so a healthy container reads as healthy with
+no footnote for a TA to remember. The suites ask by parentage instead of by name:
+`60-container.sh` counts only `ppid == 1`, and `70-sighup.sh`, where nothing is ever reparented
+onto PID 1, takes a pid baseline first and asks what is here that was not. That name-exclusion
+was what made `pid1:no-zombies-right-now` a coin flip (#102): it named the one unreapable
+process anybody had met, and every *other* process in the container is a zombie for the interval
+between `_exit()` and its parent's `wait()` too. `zombie_inventory` in `tests/lib/assert.sh` is
+where the three classes are written down.

@@ -405,17 +405,21 @@ survives and `podman exec` still works (all asserted). Record the exact on-scree
 it becomes the troubleshooting entry for 137.
 
 ### §2.8 — zombies after real use
-After a few hours of normal work: `podman exec cs193v ps -eo stat --no-headers | grep -c Z`
-*Expect:* **1** while the port forwarding is up, and 0 with it down. That one is `[sshd]
-<defunct>` and it is expected, not a leak: it is the original `sshd -i` that re-exec'd into
-`sshd-session`, and its parent is sshd's own privsep monitor, which stays alive as long as the
-tunnel does — so it is never reparented to PID 1 and no PID 1 could reap it. It clears when
-the tunnel exits, and eight tunnel restarts accumulated none. `cs193v doctor` reports this
-count, so a TA reading "zombies 1" should not treat it as a fault.
-What matters is that it does not **grow**, and that anything other than sshd is reaped.
-*Automated:* zero non-sshd zombies right now, zero after an orphan is deliberately created,
-and ≤2 after five killed exec clients (`60-container.sh`, `70-sighup.sh`). The sshd one is
-recorded rather than asserted.
+After a few hours of normal work: `cs193v doctor`, and read the `zombies` line.
+*Expect:* **`0 unreaped`**, always. The second number is `1 held by a live parent` while the
+port forwarding is up and `0` with it down — that one is `[sshd] <defunct>`, and it is
+expected rather than a leak: its parent is sshd's own privsep monitor, which stays alive as
+long as the tunnel does, so it is never reparented to PID 1 and no PID 1 could reap it. It
+clears when the tunnel exits, and eight tunnel restarts accumulated none.
+**`unreaped` is the number that means anything** — those are PID 1's to collect, and a
+non-zero one that persists is the leak that eventually wedges the container. A count that does
+not split the two is what made the automated check a coin flip (#102); `.private/README.md`'s
+`--init` item has the measured process tree.
+*Automated:* PID 1 adopts eight deliberately orphaned processes and reaps all eight when they
+are killed together; no zombie of PID 1's survives a bounded wait; and the tab-close matrix
+adds none beyond the ones present before it ran (`60-container.sh`, `70-sighup.sh`). Both of
+doctor's numbers are recorded rather than asserted, because both are legitimately non-zero
+for a moment.
 
 ---
 

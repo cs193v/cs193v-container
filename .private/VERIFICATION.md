@@ -820,11 +820,13 @@ because podman mints a new one on every build including a no-op rebuild.
 
 **2.7 — Two copies refused.** See §A.10.
 
-**2.8 — PID 1 reaps.** After a few hours of normal use:
-`podman exec cs193v ps -eo stat --no-headers | grep -c Z`
-*Expect:* 0, or a small number that does not grow. The shell keep-alive loop is PID 1; if zombies
-accumulate they will eventually exhaust `pids.max` (2048) and **wedge** the container so `podman exec`
-cannot get in.
+**2.8 — PID 1 reaps.** After a few hours of normal use: `cs193v doctor`, `zombies` line.
+*Expect:* `0 unreaped`. Ask the question by PARENT, not by count: a zombie reparented onto PID 1
+is PID 1's to collect, and one whose parent is alive and is not PID 1 — sshd holds exactly one
+while the tunnel is up — is not reachable by any init. The shell keep-alive loop is PID 1; if the
+ones it owns accumulate they will eventually exhaust `pids.max` (2048) and **wedge** the container
+so `podman exec` cannot get in. A bare `grep -c Z` cannot see that difference and reports a
+healthy container as a faulty one.
 
 ---
 

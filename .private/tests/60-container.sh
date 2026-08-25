@@ -506,27 +506,73 @@ assert_ok "net:https-egress-works" sh -c "podman exec ${NAME} curl -fsS -o /dev/
 record "pid1:cmdline" "$(E 'cat /proc/1/cmdline | tr "\0" " "')"
 assert_not_contains "pid1:is-not-bare-sleep" "sleep infinity" "$(E 'cat /proc/1/cmdline | tr "\0" " "')"
 
-# sshd's OWN zombie is excluded, and this is not a fudge -- it is a process PID 1 provably
-# cannot reap. While the tunnel is up the container holds exactly one `[sshd] <defunct>`: the
-# original `sshd -i` that re-exec'd into sshd-session. Measured `ps -o ppid`, its parent is
-# sshd's privilege-separation monitor, which stays ALIVE for the tunnel's lifetime -- and a
-# process is only reparented to PID 1 when its parent dies, so no PID 1, bash or catatonit,
-# could collect it. It clears when the tunnel exits. Counting it here would make a healthy
-# container fail, and asserting "at most 1" would let a real leak hide behind it; naming the
-# exclusion keeps the test meaning what it says. See README.md's open item on --init.
-zcount() { E 'ps -eo stat,comm --no-headers | awk "\$1 ~ /Z/ && \$2 != \"sshd\" {n++} END {print n+0}"'; }
-record "pid1:zombie-count-including-sshd" "$(E 'ps -eo stat --no-headers | grep -c Z || true')"
-assert_eq "pid1:no-zombies-right-now" "0" "$(zcount)"
+# WHAT THIS GROUP IS FOR, restated because the check it replaces had drifted from it. Orphans are
+# the NORMAL case here -- every `podman exec` session is parented by conmon outside the container,
+# so anything outliving a session lands on PID 1 -- and if PID 1 does not call wait() each one
+# becomes a PERMANENT zombie holding a pid slot against pids.max (2048). Exhausting that WEDGES
+# the container beyond `podman exec`'s reach, and it does not self-heal. So the property is
+# ACCUMULATION, which is what VERIFICATION.md §2.8 asks for in prose.
+#
+# `pid1:no-zombies-right-now` IS DELETED, and it is worth saying why rather than just replacing
+# it. It asserted that the container held zero non-sshd zombies at one instant. No healthy
+# container can promise that: every process is a zombie for the interval between _exit() and its
+# parent's wait(), so the assertion was a coin flip on what else happened to be mid-exit -- the
+# tunnel, the port supervisor, or one of this suite's own several hundred `podman exec`s (#102).
+# It also read its number from a SECOND `podman exec` than the record beside it, so the two
+# described different instants and a failure named neither. Reproduced deliberately:
+#
+#     podman exec -d $NAME sh -c 'sh -c "exit 0" & exec sleep 30'
+#
+# -- fork a child and then exec, so the parent can never wait() -- reddens it on demand, on a
+# container where nothing whatsoever is wrong.
+#
+# What replaces it is below: one record and three assertions, none of which counts a table this
+# suite shares with anything else. zombie_inventory and make_orphans are in lib/assert.sh,
+# together with the ppid rule they rest on.
 
-# The reaping claim, tested rather than assumed: orphan a process and check PID 1 collects
-# it instead of leaving a zombie.
-E 'setsid sh -c "sleep 0.2 & exit" >/dev/null 2>&1' >/dev/null 2>&1
-# A FIXED SLEEP ON PURPOSE, and one of the few left. The zombie count was already 0 one
-# assertion ago, so `wait_until 10 <count is 0>` would return instantly -- before the orphan
-# had even been created, let alone reaped -- and pass without testing anything. The wait has to
-# outlast the thing appearing as well as the thing being collected, which only a duration can.
-sleep 2
-assert_eq "pid1:reaps-orphans" "0" "$(zcount)"
+# ONE `ps` PER LOOK, so a record -- or the failure message below it -- is internally consistent
+# rather than stitched from two instants. sshd's `[sshd] <defunct>` is in here while the tunnel is
+# up and is SUPPOSED to be: it is named by its parent rather than excused by its name. Measured on
+# OpenSSH 10.2p1 -- see README.md's --init item.
+record "pid1:zombies-and-their-parents" "$(zombie_inventory | tr '\n' ';')"
+
+# THE LEAK CHECK, and ppid 1 is the whole of it: a zombie whose parent is alive and is not PID 1
+# is that parent's business and no init could collect it. Bounded rather than sampled, because
+# the claim is that nothing PID 1 owns SURVIVES -- one that clears is the reaper working.
+if wait_until 10 no_pid1_zombies; then
+    pass "pid1:no-zombie-of-its-own-survives"
+else
+    fail "pid1:no-zombie-of-its-own-survives" "still PID 1's after 10 s (ppid pid comm):
+$(zombie_inventory)"
+fi
+
+# ─── the reaping claim, on processes this suite made and can name ──────────────
+# EIGHT, AND KILLED TOGETHER, because SIGCHLD DOES NOT QUEUE. Eight simultaneous deaths can
+# deliver PID 1 exactly one signal, so a handler that calls waitpid() once per signal leaks seven
+# -- permanently, against pids.max, which is the wedge above. bash's waitchld() loops
+# waitpid(-1, WNOHANG) until it drains, so this passes; the single orphan and fixed `sleep 2` this
+# replaces could not tell a draining reaper from a one-shot one.
+ORPHANS="$(make_orphans 8)"
+
+# POSITIVE, AND IT IS WHAT MAKES THE WAIT BELOW SAFE. make_orphans returns only once the shell
+# that forked these has exited, so the kernel has already reparented them and this is asserted
+# rather than waited for. Its own name because it is its own claim -- measured against a
+# container whose PID 1 is `sleep infinity`, this still PASSES while the reap below fails, so it
+# is a precondition and not a second copy of the same test.
+assert_eq "pid1:adopts-orphaned-processes" "8" "$(orphan_ppids "$ORPHANS" | grep -c '^1$' || true)"
+
+E "kill $ORPHANS"
+# AN ABSENCE, AND ONLY REACHABLE THROUGH A REAP. `ps -p` lists a zombie, and an unreaped one stays
+# in the table for the container's whole life -- so these eight pids leaving it cannot happen any
+# other way. Presence was established one line above, so this is the absence of things that were
+# definitely there, not the vacuous wait wait_until warns about. Pid reuse inside the window is
+# not defended against: ~12 processes against a pids.max of 2048 puts it out of reach.
+if wait_until 10 orphans_gone "$ORPHANS"; then
+    pass "pid1:reaps-orphans"
+else
+    fail "pid1:reaps-orphans" "10 s after kill, PID 1 has not collected these:
+$(E "ps -o pid,ppid,stat,comm -p $(_orphan_csv "$ORPHANS")")"
+fi
 
 # ─── §A.6 the full port matrix, all 46 ─────────────────────────────────────────
 # One process binding every forwarded port, rather than 46 http.servers: faster, and it

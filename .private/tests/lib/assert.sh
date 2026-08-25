@@ -1021,6 +1021,102 @@ container_pkill() {                   # container_pkill PATTERN -> returns when 
     wait_until 10 _container_gone "$1"
 }
 
+# ─── zombies, and whose they are ────────────────────────────────────────────────
+# A ZOMBIE IS ITS PARENT'S BUSINESS, and that is the whole rule. The container holds three
+# classes and only the ppid tells them apart:
+#
+#   ppid 1    PID 1's own. The reaping files/entrypoint.sh promises, and the only class a
+#             `pid1:` assertion may count.
+#   ppid >1   a live parent that is not PID 1 -- sshd's privsep monitor holds one for the
+#             tunnel's whole life, and a payload shell holds its background children until it
+#             exits. A process is reparented to PID 1 only when its parent DIES, so nothing
+#             PID 1 could do would collect these. Neither could catatonit.
+#   ppid 0    the parent is outside this PID namespace, i.e. conmon. EVERY `podman exec`
+#             payload is one of these for the moment between _exit() and the host's wait(),
+#             including the ones this suite is making while it looks.
+#
+# THIS REPLACES A `comm != "sshd"` EXCLUSION, which was a NAME standing in for the ppid rule
+# and covered only the one member of the middle class anybody had met (#102). Under it a
+# healthy container failed whenever the sample landed on somebody else's transient, which is a
+# coin flip rather than a verdict -- and every process is a zombie for the interval between
+# _exit() and its parent's wait(), so there is no sampling rate at which that stops.
+#
+# ONE `ps`, FILTERED ON THE HOST. #102's record and its assertion were two separate `podman
+# exec`s that disagreed, so the number in the results described a different instant from the
+# number in the failure and neither was legible. Everything below reads this one function.
+zombie_inventory() {                  # one line per zombie: PPID PID COMM
+    podman exec "$NAME" ps -eo ppid,pid,stat,comm --no-headers 2>/dev/null \
+        | awk '$3 ~ /Z/ { print $1, $2, $4 }'
+}
+
+# `grep -c` prints 0 AND exits 1 when nothing matches, the trap documented all over this file.
+count_pid1_zombies() {                # -> how many zombies PID 1 is answerable for
+    local n
+    n="$(zombie_inventory | awk '$1 == 1' | grep -c .)" || true
+    printf '%s' "${n:-0}"
+}
+
+# WAITING FOR AN ABSENCE, WHICH wait_until OTHERWISE FORBIDS -- see its "WHAT IT MUST NOT BE
+# USED FOR". That rule guards proofs that something HAPPENED, and neither predicate here is
+# one: a leak is by definition a zombie that does NOT clear, so "already none" is the correct
+# answer and there is nothing an early return could skip. What proves that reaping happens is
+# positive, and it lives in 60-container.sh on orphans that suite makes and can name.
+no_pid1_zombies() { [ "$(count_pid1_zombies)" = 0 ]; }
+
+# Every zombie that was not already there. THE BASELINE IS WHAT MAKES THIS USABLE WHILE A
+# TUNNEL IS UP: sshd's unreapable one is in it by pid, so it cannot be mistaken for something
+# the caller caused, and no name has to be spelled out to excuse it.
+zombie_pids() { zombie_inventory | awk '{ print $2 }' | LC_ALL=C sort -n; }
+zombies_outside_baseline() {          # zombies_outside_baseline PID...  -> the newcomers
+    local keep=" $* "
+    zombie_inventory | while read -r zppid zpid zcomm; do
+        case "$keep" in *" $zpid "*) continue ;; esac
+        printf '%s %s %s\n' "$zppid" "$zpid" "$zcomm"
+    done
+}
+no_new_zombies() { [ -z "$(zombies_outside_baseline "$@")" ]; }
+
+# ─── orphans with names, for testing the reaper ─────────────────────────────────
+# THE POINT IS OWNERSHIP. A count of the container's zombies asks about the tunnel, the port
+# supervisor and this suite's own execs as much as about PID 1. Making the orphans means every
+# check that follows names its own subject and cannot be perturbed by anything else.
+#
+# THE PAYLOAD SHELL IS THE PARENT, and that is the synchronisation. `podman exec` returns only
+# once it has exited, so by the time this returns the kernel has already reparented every
+# `sleep` onto PID 1 -- there is no window to poll for and no duration to guess at.
+#
+# EACH SLEEP GETS ITS OWN /dev/null. They would otherwise inherit the exec's stdout and hold
+# that pipe open for the whole duration, which is the failure cs193v-portwatch's "no `sleep`
+# fallback" note describes: the reader sees silence rather than EOF.
+CS193V_ORPHAN_SLEEP=1793              # unmistakable in a `ps`, and narrow enough to pkill for
+make_orphans() {                      # make_orphans N -> N pids, space separated
+    podman exec "$NAME" sh -c \
+        "i=0; while [ \$i -lt $1 ]; do sleep $CS193V_ORPHAN_SLEEP >/dev/null 2>&1 & \
+         printf '%s ' \$!; i=\$((i + 1)); done" 2>/dev/null
+}
+
+# A comma list for `ps -p`, built with an UNQUOTED expansion so word splitting collapses the
+# trailing space make_orphans leaves: `ps -p 1,2,` is an error.
+# shellcheck disable=SC2086
+_orphan_csv() { echo $1 | tr ' ' ','; }
+
+orphan_ppids() {                      # orphan_ppids "PID PID ..." -> one ppid per line
+    [ -n "${1:-}" ] || return 0
+    podman exec "$NAME" ps -o ppid= -p "$(_orphan_csv "$1")" 2>/dev/null | tr -d ' '
+}
+
+# `ps -p` LISTS A ZOMBIE, which is what makes this mean "reaped" rather than "exited": an
+# unreaped zombie stays in the table for the container's whole life, so these pids leaving it
+# cannot happen any other way.
+#
+# AN EMPTY LIST IS NOT "GONE". `ps -p ""` prints nothing, and a caller whose make_orphans
+# returned nothing would otherwise read that as success -- vacuous green through the one gap
+# an absence check has.
+orphans_gone() {                      # orphans_gone "PID PID ..."
+    [ -n "${1:-}" ] || return 1
+    [ -z "$(podman exec "$NAME" ps -o pid= -p "$(_orphan_csv "$1")" 2>/dev/null)" ]
+}
+
 # The process half of clean_vt_fixtures, and it exists for the same reason: an EXIT trap does
 # not run on KILL, so a killed run leaves its servers listening and only start-up cleanup can
 # get rid of them. What that costs is worse than a stray process -- a leftover listener on a
@@ -1044,6 +1140,9 @@ clean_vt_processes() {
     container_pkill inotifywait
     container_pkill shortlink
     container_pkill "http.server .*--bind 127.0.0.1"
+    # make_orphans' sleeps, which the reaper checks kill themselves in the happy case. The
+    # duration is the marker: nothing else in this project or a student's work sleeps 1793 s.
+    container_pkill "sleep $CS193V_ORPHAN_SLEEP"
 }
 
 # How many of them a previous run left behind. Recorded rather than swept silently, so a run
@@ -1058,7 +1157,7 @@ clean_vt_processes() {
 count_vt_processes() {
     local n
     fwd_init
-    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|shortlink|http\.server .*--bind 127[.]0[.]0[.]1" 2>/dev/null | head -1)"
+    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|shortlink|http\.server .*--bind 127[.]0[.]0[.]1|sleep $CS193V_ORPHAN_SLEEP" 2>/dev/null | head -1)"
     printf '%s' "${n:-0}"
 }
 
