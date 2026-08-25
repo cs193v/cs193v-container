@@ -194,20 +194,19 @@ Command output:
 {{OUT}}
 
 [[err.clone]]
-*Oh no, we can't reach your practice repository!*
+*Oh no, we can't reach your sandbox repository!*
 
     {{SANDBOX}}
 
 Your access token was accepted by GitHub, so this is either the wrong
-repository or something the token cannot do. Check these in order:
+repository or something the token cannot reach. Check these in order:
 
-1. *Your SUNetID.* That repository is named after it. If it is not yours,
-   run *setup-git* again and choose *Start over*.
+1. *Your SUNetID.* Did you enter your SUNetID incorrectly? If so, run
+   the *setup-git* command again and choose *start over.*
 
 2. *Resource owner.* Open https://github.com/settings/personal-access-tokens
    and click your CS193V token. *Resource owner* must read *{{ORG}}*,
-   not your username. It cannot be changed later, so a wrong one means
-   making a new token.
+   not your username. That cannot be changed, so make a new token instead.
 
 3. *Repository access.* On the same page, this must be *All repositories*.
 
