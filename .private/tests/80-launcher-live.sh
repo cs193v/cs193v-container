@@ -103,6 +103,37 @@ LV() { release_container; L "$@"; }
 # session is refused, and this suite holds the container up between groups.
 LB() { release_container; launcher_tty_repo '\nexit\n' "$@"; }
 
+# UP HERE WITH THE OTHER HELPERS, not beside the tunnel group that reads it three times. The
+# suite is one script run top to bottom, and its first caller is the drift group two hundred
+# lines above that group -- so defined down there it was `command not found`, and a call that
+# is not a command reports NOTHING: no pass, no fail, no line in the results file (#99).
+#
+# "IS FORWARDING WORKING", ESTABLISHED RATHER THAN COUNTED. Every assertion that used to read
+# `count_forwards == $FWD_N` was asking whether the tunnel had come back with its declared list;
+# there is no list, and zero forwards is the correct state for a container with nothing listening
+# in it. So the question becomes: bind something inside, and does this host get it? A fresh port
+# each time, because a previous case's forward lingers for a few ticks after its server dies and
+# would otherwise answer for the next one.
+a_port_is_carried() {                 # 0 if a port bound inside becomes reachable from the host
+    local p
+    p="$(dyn_free_port)" || return 1
+    dyn_serve "$p" || return 1
+    CARRIED_PORT="$p"
+    wait_until 30 dyn_is_forwarded "$p"
+}
+assert_carried() {                    # assert_carried NAME
+    if a_port_is_carried; then
+        pass "$1"
+    else
+        fail "$1" "bound 127.0.0.1:$CARRIED_PORT inside the container and the tunnel never carried
+it to this host, so nothing a student runs in there would be reachable.
+  the tunnel holds: $(fwd_owned_ports | tr '\n' ' ')
+  the container says:
+$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
+    fi
+    dyn_serve_stop
+}
+
 # ─── a bare launch with no terminal refuses instead of hanging  (ERRORS.md B13) ─
 # This used to hang forever against real podman: -t allocates a pty and a pty never
 # delivers EOF, so the container's `bash -l` waited for input that could not arrive. Asserted
@@ -648,32 +679,6 @@ record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
 # healthy and a browser that cannot reach anything.
 # The port list itself is derived once in lib/assert.sh, for all three tiers.
 count_fwd() { count_forwards; }
-
-# "IS FORWARDING WORKING", ESTABLISHED RATHER THAN COUNTED. Every assertion that used to read
-# `count_forwards == $FWD_N` was asking whether the tunnel had come back with its declared list;
-# there is no list, and zero forwards is the correct state for a container with nothing listening
-# in it. So the question becomes: bind something inside, and does this host get it? A fresh port
-# each time, because a previous case's forward lingers for a few ticks after its server dies and
-# would otherwise answer for the next one.
-a_port_is_carried() {                 # 0 if a port bound inside becomes reachable from the host
-    local p
-    p="$(dyn_free_port)" || return 1
-    dyn_serve "$p" || return 1
-    CARRIED_PORT="$p"
-    wait_until 30 dyn_is_forwarded "$p"
-}
-assert_carried() {                    # assert_carried NAME
-    if a_port_is_carried; then
-        pass "$1"
-    else
-        fail "$1" "bound 127.0.0.1:$CARRIED_PORT inside the container and the tunnel never carried
-it to this host, so nothing a student runs in there would be reachable.
-  the tunnel holds: $(fwd_owned_ports | tr '\n' ' ')
-  the container says:
-$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
-    fi
-    dyn_serve_stop
-}
 
 # Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
 # pidfile are named by a hash of (course directory, instance), so a glob picks up every other
