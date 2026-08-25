@@ -226,7 +226,6 @@ ignored with a startup warning** — a security control that does nothing is wor
 ```sh
 ck  net-pasta      pasta   I '{{.HostConfig.NetworkMode}}'
 rec memory-cap             I '{{.HostConfig.Memory}}'          # compare to local.args
-rec memory-swap            I '{{.HostConfig.MemorySwap}}'      # must NOT equal Memory
 ck  pids-default   2048    I '{{.HostConfig.PidsLimit}}'
 ck  no-cap-add     "[] []" I '{{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}}'
 rec security-opt           I '{{json .HostConfig.SecurityOpt}}'  # no no-new-privileges, no label=disable

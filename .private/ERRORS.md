@@ -1216,8 +1216,7 @@ the first attempt to run a derived image.
 **The cap, exactly.** `--memory=1024m` yields `memory.max = 1073741824`. The `pids` cap is
 podman's default 2048 and is enforced (`sh: 0: Cannot fork` at `--pids-limit 64`). An OOM is
 clean: the process is `Killed` with **exit 137**, the container stays `running`, and
-`podman exec` still works. `--memory-swap` is set by podman to **2× memory** when unspecified,
-so it is never equal to `--memory` — the thing `container.args` warns about.
+`podman exec` still works.
 
 This answers §5.5 for **Linux only**. WSL with `systemd=true` is the case that still needs
 checking, and it is the one where the answer might be `max`.
