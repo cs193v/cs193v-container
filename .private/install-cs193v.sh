@@ -41,7 +41,28 @@ REPO_OWNER="cs193v"
 REPO_NAME="cs193v-container"
 REPO_BRANCH="main"
 
-MIN_PODMAN="5.7.0"
+# ─── the oldest podman the course works with, per platform ─────────────────────
+#
+# TWO FLOORS, NOT ONE, and the asymmetry is the point. On LINUX the floor decides which distros
+# a student can use, because a distro ships whatever podman it ships: 4.9.0 admits Ubuntu 24.04
+# LTS (4.9.3) and everything built on it -- Linux Mint 22.x, Pop!_OS 24.04 -- plus Debian 13
+# stable (5.4.2), Ubuntu 25.04/25.10 and Fedora 42/43 from GA media. Measured rather than
+# assumed: podman 4.9.3, 5.4.2 and 5.7.0 each ran the whole install and built the entire course
+# image, with inner stores within 22 KB of each other (26-installer-sandbox.sh, oldest-supported).
+#
+# ON A MAC THE FLOOR DECIDES NOTHING ABOUT DISTROS, so it buys nothing to lower it, and lowering
+# it would cost something real: `podman machine` was rewritten completely in podman 5.0, and this
+# script leans on it hard -- machine init --memory --disk-size --now, machine set --memory,
+# machine set --disk-size, machine inspect --format {{.Resources.*}}. None of that is reachable
+# by any test we can run, because macOS is not container-testable. When podman is ABSENT on a Mac
+# this script installs PODMAN_MACOS_VERSION below, so the floor only ever applies to a Mac that
+# already had one -- and for that Mac, refusing with clear instructions beats proceeding into an
+# implementation nobody has exercised.
+#
+# So the two move on their own schedules. tests/25-installer.sh asserts that each floor agrees
+# with the launcher's copy of it, and that the macOS floor is never below the Linux one.
+MIN_PODMAN_LINUX="4.9.0"
+MIN_PODMAN_MACOS="5.7.0"
 PODMAN_MACOS_VERSION="6.0.2"              # bump when you re-test; used only on macOS
 
 DEFAULT_DIR="$HOME/cs193v"
@@ -332,6 +353,10 @@ need() { NEEDS[${#NEEDS[@]}]="$1"; NEEDS_WHY[${#NEEDS_WHY[@]}]="$2"; }
 # the student "Nothing further has been changed". Exit status propagates out of an
 # assignment, so this is the whole fix.
 PLAT="$(platform)" || exit 1
+# RESOLVED HERE, not at the top, because it depends on PLAT -- and PLAT cannot be known until
+# platform() has run and had its chance to refuse an unsupported OS. Everything downstream reads
+# MIN_PODMAN and does not care which floor it came from.
+if [ "$PLAT" = macos ]; then MIN_PODMAN="$MIN_PODMAN_MACOS"; else MIN_PODMAN="$MIN_PODMAN_LINUX"; fi
 DIR=""
 DO_PODMAN_INSTALL=no
 DO_SSH_INSTALL=no
@@ -353,11 +378,71 @@ survey() {
     if command -v podman >/dev/null 2>&1; then
         local v; v="$(podman --version 2>/dev/null | awk '{print $NF}')"
         if [ "$(version_lt "${v:-0}" "$MIN_PODMAN")" = yes ]; then
-            die "Podman $v is installed, but the course needs $MIN_PODMAN or newer.
+            # ─── platform-specific, because the right answer differs completely ────────
+            #
+            # ON LINUX the answer is upgrade: apt has a newer podman or it does not, and if it
+            # does not the student is on a release older than the floor admits, which is a
+            # conversation with staff rather than a command.
+            #
+            # ON A MAC the answer is UNINSTALL, and the old message got this wrong in a way worth
+            # spelling out. It said "open Podman Desktop and let it update itself" -- but THIS
+            # SCRIPT does not install Podman Desktop. It installs the .pkg from podman's GitHub
+            # releases into /opt/podman (install_podman below). So a student who ran this script a
+            # year ago and now has an old podman was being told to open an application they have
+            # never had. Homebrew users likewise.
+            #
+            # AND UNINSTALL IS BETTER THAN UPGRADE HERE even when Podman Desktop IS present:
+            # re-running this script installs PODMAN_MACOS_VERSION, which is the one version the
+            # macOS path is tested against, rather than whatever Podman Desktop ships this week.
+            #
+            # WHICH uninstall depends on how it got there, and `command -v podman` says. Only two
+            # cases are possible on a machine this script supports, because Intel Macs are refused
+            # outright above: /opt/podman/bin (the .pkg, ours or Podman Desktop's) and
+            # /opt/homebrew/bin (Homebrew).
+            #
+            # NOTHING IS DONE FOR THEM, deliberately. Removing somebody's podman can destroy a
+            # `podman machine` VM and every container in it, and this script's whole contract is
+            # that it changes nothing without asking (ask_consent). A destructive step the student
+            # takes knowingly is right; one this script takes on their behalf, while reporting a
+            # version problem, is not.
+            if [ "$PLAT" = macos ]; then
+                local where how
+                where="$(command -v podman 2>/dev/null)"
+                case "$where" in
+                    /opt/homebrew/*) how="You installed it with Homebrew, so:
+
+    brew uninstall podman" ;;
+                    *)               how="It came from a package installer, at
+${where:-/opt/podman/bin/podman}. Remove it with:
+
+    sudo rm -rf /opt/podman
+    sudo rm -f /usr/local/bin/podman
+
+If you also have Podman Desktop, drag that to the Trash too." ;;
+                esac
+                die "Podman $v is on this Mac; the course needs
+$MIN_PODMAN or newer.
+
+The simplest fix is to remove the podman you have and run this
+script again -- it installs a version the course is tested
+against.
+
+$how
+
+WORTH KNOWING FIRST: if you have used podman on this Mac for
+anything else, removing it can lose the virtual machine it kept
+your containers in. If that matters, talk to course staff first."
+            fi
+            die "Podman $v is installed; the course needs $MIN_PODMAN
+or newer.
 
 Please upgrade podman and run this again:
-  Ubuntu / WSL :  sudo apt update && sudo apt install --only-upgrade podman
-  macOS        :  open Podman Desktop and let it update itself"
+
+    sudo apt update && sudo apt install --only-upgrade podman
+
+If apt says podman is already the newest version, your Linux
+release is older than the course supports. Send course staff
+the output of:  podman --version"
         fi
         ok "podman $v"
     else

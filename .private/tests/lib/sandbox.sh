@@ -74,14 +74,42 @@ MACHINE_CAP_INTERNAL='unmask fuse tun'
 # Subtracted at boot by lib/sandbox-guest.sh, which is where the removal commands live.
 MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
 
+# ─── the bases, and which of them nest ─────────────────────────────────────────
+#
+# A DISTRO IS A BASE, NOT A THIRD AXIS. The two axes above are subtractive -- everything is
+# present and a flag takes something away -- and a distro is neither an absence nor a capability.
+# It is a SUBSTITUTION, which is exactly what `base=` already means: Containerfile.podman-old is
+# "the one machine that is not the machine" because a podman VERSION cannot be produced by
+# subtracting from a 26.04 base. A package MANAGER cannot either.
+MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora'
+
+# WHICH BASES RUN A PODMAN INSIDE THEMSELVES, and it is only one of them. SYS_ADMIN, the unmask
+# and the two devices are what a NESTED podman costs; podman-old and debian both die in survey
+# off a single `podman --version`, which never touches the runtime, so handing them a capability
+# was privilege nothing had asked for.
+#
+# IT WAS ALSO INCONSISTENT, which is the sharper reason this is a list rather than a comment:
+# install-sandbox.sh special-cased podman-old and withheld every flag, while sandbox_run handed
+# it the full set. So the machine you drove BY HAND and the machine the suite ASSERTED against
+# differed -- the exact drift 10-static.sh's one-place rules exist to stop, which had opened up
+# anyway because the two paths disagreed about a CASE rather than about a flag. One list, read by
+# both.
+MACHINE_NESTED_BASES='machine podman-old-nested'
+
+machine_is_nested() {                 # machine_is_nested BASE -> 0 if it runs a podman inside
+    case " $MACHINE_NESTED_BASES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
 # STRICT, and shared, so a typo cannot read as an installer branch in either half. CLAUDE.md §2
 # records what a silently-skipped malformed value costs; here it is worse than a shrunken set,
 # because you would conclude the installer took a path it never took.
-machine_valid() {                     # machine_valid caps|prereqs LIST -> 0, or the bad entry
+machine_valid() {                     # machine_valid caps|prereqs|bases LIST -> 0, or the bad entry
     local kind="$1" list="${2:-}" known e
     case "$kind" in
         caps)    known="$MACHINE_CAP_NAMES" ;;
         prereqs) known="$MACHINE_PREREQ_NAMES" ;;
+        bases)   known="$MACHINE_BASE_NAMES" ;;
         *) printf 'machine_valid: unknown kind %s\n' "$kind" >&2; return 2 ;;
     esac
     [ -n "$list" ] || return 0
@@ -94,11 +122,11 @@ machine_valid() {                     # machine_valid caps|prereqs LIST -> 0, or
 MACHINE_FLAGS=()
 # The run-time half of both axes. Every flag a fixture container gets beyond the constants
 # sandbox_run applies itself.
-machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE_PODMAN]
+machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE_PODMAN] [BASE]
     MACHINE_FLAGS=()
-    local drop platform fake
+    local drop platform fake base
     drop=",$(printf '%s' "${1:-}" | tr -d '[:space:]'),"
-    platform="${2:-linux}"; fake="${3:-no}"
+    platform="${2:-linux}"; fake="${3:-no}"; base="${4:-machine}"
     # VALIDATED HERE TOO, against both vocabularies, so a typo in one of the nested case's
     # differential controls -- which pass names this function accepts but the flag surface does
     # not -- fails instead of silently granting the flag it meant to remove. A control that
@@ -110,10 +138,17 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
             *) printf 'machine_flags: unknown capability %s\n' "$d" >&2; return 2 ;;
         esac
     done
+    # GATED ON THE BASE, because these four are what a NESTED podman costs and nothing else here
+    # wants them. A base that dies in survey gets none of them -- see MACHINE_NESTED_BASES. The
+    # --no-caps vocabulary is still validated above for every base, so `--no-caps=sysadmin` on a
+    # base that was never going to get it fails as a nonsense combination rather than passing
+    # vacuously.
+    if machine_is_nested "$base"; then
     case "$drop" in *,sysadmin,*) : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --cap-add=SYS_ADMIN) ;; esac
     case "$drop" in *,unmask,*)   : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt 'unmask=/proc/*') ;; esac
     case "$drop" in *,fuse,*)     : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/fuse) ;; esac
     case "$drop" in *,tun,*)      : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/net/tun) ;; esac
+    fi
     # A BIND MOUNT IS THE WHOLE WSL ARM. platform() decides by `grep -qi microsoft
     # /proc/version` (installer:306) and the effect is two file writes, so it is executable on
     # Linux with no Windows anywhere.
@@ -162,6 +197,12 @@ sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prer
             *) printf 'sb_machine: unknown key %s\n' "$a" >&2; return 2 ;;
         esac
     done
+    # STRICTLY, like the other two vocabularies, and this was the one that was missing: `base=`
+    # was assigned unvalidated, so `sb_machine base=fedroa` reached fixture_build and failed there
+    # with "the specified Containerfile does not exist" -- a typo reported as a missing fixture.
+    if ! bad="$(machine_valid bases "$SB_BASE")"; then
+        printf 'sb_machine: unknown base %s (want: %s)\n' "$bad" "$MACHINE_BASE_NAMES" >&2; return 2
+    fi
     if ! bad="$(machine_valid caps "$SB_NO_CAPS")"; then
         printf 'sb_machine: unknown capability %s (want: %s)\n' "$bad" "$MACHINE_CAP_NAMES" >&2; return 2
     fi
@@ -322,10 +363,14 @@ set -u
 # installs 31 packages. Coverage is a periodic question, not something every run should pay 10x
 # for -- so the container half is opt-in and the gate reports which producers it heard from
 # rather than pretending a host-only number is the whole picture.
+# WHICH INSTALLER, because one case runs the lowered-floor copy sb_work_init writes beside the
+# real one. Defaulted, so every existing case is unchanged and only the case that means it says so.
+INST="${SB_INSTALLER:-/work/installer.sh}"
+printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x /work/installer.sh 9>>/var/tmp/report/trace
+    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x "$INST" 9>>/var/tmp/report/trace
 else
-    bash /work/installer.sh
+    bash "$INST"
 fi
 rc=$?
 # Without this the container cannot exit: podman's rootless pause process outlives the run and
@@ -385,10 +430,15 @@ sb_installed > /var/tmp/report/dpkg-before
 # periodic question, not something every run should pay 10x for -- so the container half is
 # opt-in and the gate reports which producers it heard from rather than pretending a host-only
 # number is the whole picture. fd 9 keeps the trace off stdout.
+# WHICH INSTALLER, defaulted, so every existing case is unchanged and only a case that means it
+# says so. nest-run.sh honours the same variable; the floor-skew case is a Tier A case and runs
+# through this file.
+INST="${SB_INSTALLER:-/work/installer.sh}"
+printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x /work/installer.sh 9>>/var/tmp/report/trace
+    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x "$INST" 9>>/var/tmp/report/trace
 else
-    bash /work/installer.sh
+    bash "$INST"
 fi
 rc=$?
 
@@ -446,6 +496,45 @@ RUN
     chmod +x "$SB_WORK/run.sh"
 }
 
+# ─── a course tree whose LAUNCHER floor disagrees with the installer's ─────────
+#
+# BUILT ON DEMAND, for one case, and that case exists to prove a defect rather than to measure
+# anything. The podman floor is declared TWICE -- MIN_PODMAN_LINUX in install-cs193v.sh and again
+# in cs193v -- because the installer is curl-piped and cannot source the launcher. Nothing but
+# 25-installer.sh's static check stops them drifting, and this is the behavioural half: what a
+# student actually SEES when they do.
+#
+# RAISING THE LAUNCHER'S, NOT LOWERING THE INSTALLER'S, and the direction matters. Lowering the
+# installer's floor would need a fixture whose podman is below it, and the only such fixture
+# (podman-old, 3.4.4) has no nesting adaptations -- so the run would die at write_local_args, on
+# `podman info`, long before build_image handed off to the launcher. Raising the launcher's floor
+# instead reproduces the same disagreement on podman-old-nested, whose 4.9.3 the real installer
+# accepts, and gets all the way to the hand-off.
+#
+# 5.7.0 because it is what the macOS floor is, so the number is one somebody might plausibly type
+# into the wrong copy.
+sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its tarball
+    [ -f "$SB_WORK/installer-skew.sh" ] && return 0
+    mkdir -p "$SB_TMP/pkg-skew"
+    cp -a "$SB_TMP/pkg/cs193v-main" "$SB_TMP/pkg-skew/cs193v-main" || return 1
+    edit_sub "$SB_TMP/pkg-skew/cs193v-main/cs193v" '^MIN_PODMAN_LINUX=.*' 'MIN_PODMAN_LINUX="5.7.0"'
+    # ASSERTED, NOT TRUSTED. An edit_sub whose ERE matches nothing is a silent no-op, and the two
+    # copies would then AGREE -- so the case would assert a refusal that never came and read as the
+    # launcher having stopped checking versions. Measured the hard way once already: the constant
+    # was renamed from MIN_PODMAN when the floors split per platform.
+    grep -q '^MIN_PODMAN_LINUX="5.7.0"' "$SB_TMP/pkg-skew/cs193v-main/cs193v" || {
+        printf 'sb_work_skew: the launcher floor was not raised -- was the constant renamed?\n' >&2
+        return 1; }
+    ( cd "$SB_TMP/pkg-skew" && tar czf "$SB_WORK/course-skew.tar.gz" cs193v-main ) || return 1
+    # THE INSTALLER IS UNMODIFIED except for where it fetches from, which is the point: the skew is
+    # entirely in the launcher's copy of the number.
+    cp "$SB_WORK/installer.sh" "$SB_WORK/installer-skew.sh"
+    edit_sub "$SB_WORK/installer-skew.sh" '^TARBALL=.*' 'TARBALL="file:///work/course-skew.tar.gz"'
+    grep -q 'course-skew.tar.gz' "$SB_WORK/installer-skew.sh" || {
+        printf 'sb_work_skew: the tarball URL was not repointed\n' >&2; return 1; }
+    return 0
+}
+
 # ─── the nested case's prerequisites, measured before anything rests on them ────
 #
 # THE GRAPH ROOT IS NOT ON A VOLUME, and that is a measured decision rather than the one this
@@ -458,13 +547,19 @@ RUN
 #
 # ONE CONTAINER RUN, many answers. Every probe reports KEY=value and every assertion reads a
 # POSITIVE token, never an absence -- a probe that never ran must fail, not look happy.
-nest_probe() {                        # nest_probe [PODMAN_ARGS...] -> KEY=value lines
+# THE BASE IS AN ARGUMENT TO ALL FOUR OF THESE, defaulting to `machine`, so every existing call
+# is unchanged. It exists because the flag set is per-base: Debian's shadow ships newuidmap with
+# only a setuid bit, which does not survive nesting, while Fedora's ships file capabilities, which
+# do -- so whether a base needs SYS_ADMIN is a property of its packaging and has to be measured
+# per base rather than copied.
+nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KEY=value lines
+    local base="${1:-machine}"; shift 2>/dev/null || true
     # shellcheck disable=SC2086
-    machine_flags
+    machine_flags '' linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" "$@" \
-        "$(fixture_tag machine)" sh /probe.sh 2>&1
+        "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
 # TWO DEPARTURES, ONE CONTROL EACH. Running a real podman in here needs SYS_ADMIN and
@@ -482,20 +577,22 @@ nest_probe() {                        # nest_probe [PODMAN_ARGS...] -> KEY=value
 #
 # unmask=/proc/* IS NARROWER THAN THE FORBIDDEN FORM. container.args bans `unmask=ALL` for the
 # course container; this is the fixture, one level out, and it names one subtree.
-nest_probe_nocap() {                  # SYS_ADMIN removed, unmask kept
-    machine_flags sysadmin
+nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN removed, unmask kept
+    local base="${1:-machine}"
+    machine_flags sysadmin linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
-        "$(fixture_tag machine)" sh /probe.sh 2>&1
+        "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
-nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
-    machine_flags unmask
+nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask removed, SYS_ADMIN kept
+    local base="${1:-machine}"
+    machine_flags unmask linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
-        "$(fixture_tag machine)" sh /probe.sh 2>&1
+        "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
 # The real thing: the installer end to end with a genuine `podman build` inside.
@@ -524,9 +621,13 @@ nest_probe_nounmask() {               # unmask removed, SYS_ADMIN kept
 # consent items, and the safe default for consent is DECLINING: the run would exit 0 having
 # changed nothing, and "the installer finished" would fail for a reason that looks nothing like
 # the cause.
-nest_build() {                        # nest_build [PREREQS] [KEYS] -> the transcript
-    local name="cs193v-fixture-nested-$$"
-    machine_flags
+# ONE NESTED BUILD AT A TIME, and the container name says nothing about the base on purpose: they
+# run strictly in sequence, each one reaped before the next begins, and `podman rm -f` at the top
+# collects a previous one either way. A per-base name would only matter if two ran at once, and
+# two of these at once would not fit on the disk.
+nest_build() {                        # nest_build [PREREQS] [KEYS] [BASE] [INSTALLER] -> transcript
+    local name="cs193v-fixture-nested-$$" base="${3:-machine}" inst="${4:-/work/installer.sh}"
+    machine_flags '' linux no "$base"
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
     printf '%b' "${2:-}" | timeout --kill-after=30 1000 \
@@ -536,9 +637,10 @@ nest_build() {                        # nest_build [PREREQS] [KEYS] -> the trans
         -e CS193V_DIR=/home/student/cs193v \
         -e BUILDAH_LAYERS=false \
         -e "SB_NO_PREREQS=${1:-}" \
+        -e "SB_INSTALLER=$inst" \
         -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
         -v "$SB_WORK:/work:ro" \
-        "$(fixture_tag machine)" \
+        "$(fixture_tag "$base")" \
         sh /work/nest-run.sh > "$SB_TMP/nraw" 2>&1
     grep -v 'The input device is not a TTY' "$SB_TMP/nraw" > "$SB_TMP/nraw.clean" 2>/dev/null || true
     mv -f "$SB_TMP/nraw.clean" "$SB_TMP/nraw" 2>/dev/null || true
@@ -662,7 +764,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     # time. Bisected: 400 lines after `true` come through, the same 400 after `sudo true` stall
     # at 11 bytes, and `Defaults !use_pty` in the fixture restores both. So the gate no longer
     # has a case whose branches it must leave out.
-    machine_flags "$SB_NO_CAPS" "$SB_PLATFORM" "$SB_FAKE_PODMAN"
+    machine_flags "$SB_NO_CAPS" "$SB_PLATFORM" "$SB_FAKE_PODMAN" "$SB_BASE"
     set -- ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} "$@"
     printf '%b' "$keys" | timeout --kill-after=15 "$outer" \
         podman run --timeout "$cap" --label "$VT_LABEL" -it --name "$SB_NAME" \

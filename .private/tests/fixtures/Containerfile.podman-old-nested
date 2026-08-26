@@ -1,0 +1,64 @@
+# Ubuntu 24.04 LTS, with everything a nested rootless podman needs. The second measurement
+# fixture, and the one whose answer is worth the most.
+#
+# WHY THIS MACHINE SPECIFICALLY. Containerfile.debian-nested settled that podman 5.4.2 does
+# everything this course needs, which makes a 5.4 floor supportable -- and that reaches Debian 13
+# stable, Ubuntu 25.04/25.10, Fedora 42/43 from GA media and NixOS 25.05. It does NOT reach the
+# machine most likely to be under a student: Ubuntu 24.04 LTS ships podman 4.9.3, and Linux Mint
+# 22.x and Pop!_OS 24.04 are both built on it. Three of the most common desktop Linuxes sit on one
+# version, two majors below the floor, and no measurement had ever been taken there.
+#
+# So this asks the same question one rung lower. 4.9.3 is genuinely old -- podman 5.0 reworked
+# networking defaults and the database backend -- so a failure here is expected and would be the
+# floor's real justification. An unexpected pass would mean the LTS family is supportable too.
+#
+# THE FIVE NESTING ADAPTATIONS ARE Containerfile.machine's, documented there. This differs from
+# Containerfile.podman-old -- its Tier A sibling, which exists to be REFUSED and therefore keeps a
+# student's uid 1000 and a real 200000-65536 range -- in exactly those five, for exactly the
+# reason that fixture's header gives: a refusal needs no namespace, and a build needs one.
+FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+
+# WITH RECOMMENDS, for the reason Containerfile.debian-nested gives: measured in this image,
+# podman Recommends passt, slirp4netns, uidmap and catatonit and Depends on none of them, so
+# --no-install-recommends yields a podman with no network backend and no way to map ids.
+#
+# 4.9.3 IS WHAT THIS ARCHIVE SHIPS, and it is the entire point of the fixture -- so there is no
+# version to pin beyond the base digest above. If Ubuntu ever backports a newer podman to 24.04,
+# the measurement case's own assertion on the version it found fails loudly and says so.
+RUN apt-get update \
+ && apt-get install -y sudo ca-certificates podman uidmap openssh-client fuse-overlayfs curl \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN command -v podman && command -v ssh && command -v ssh-keygen && command -v newuidmap \
+ && command -v curl && command -v pasta
+
+# ─── the five nesting adaptations, per Containerfile.machine ────────────────────
+RUN mkdir -p /etc/containers \
+ && printf '[engine]\ncgroup_manager = "cgroupfs"\n' > /etc/containers/containers.conf
+
+RUN oldu="$(getent passwd 2 | cut -d: -f1)"; [ -n "$oldu" ] && userdel "$oldu" >/dev/null 2>&1; \
+    oldg="$(getent group 2 | cut -d: -f1)";  [ -n "$oldg" ] && groupdel "$oldg" >/dev/null 2>&1; \
+    groupadd -g 2 student \
+ && useradd -m -u 2 -g 2 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+RUN printf 'student:3:65534\n' > /etc/subuid \
+ && printf 'student:3:65534\n' > /etc/subgid
+
+RUN mkdir -p /run/user/2 && chown student:student /run/user/2 && chmod 700 /run/user/2
+ENV XDG_RUNTIME_DIR=/run/user/2
+
+RUN printf 'podman-old-nested-fixture-%s\n' "$(date -u +%s)" > /etc/cs193v-fixture-id
+
+RUN mkdir -p /home/student/.config/containers \
+ && printf '[storage]\ndriver = "vfs"\n' > /home/student/.config/containers/storage.conf \
+ && chown -R student:student /home/student/.config
+
+RUN mkdir -p /home/student/.local/share/containers \
+ && chown -R student:student /home/student/.local
+
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

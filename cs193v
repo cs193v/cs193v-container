@@ -85,7 +85,15 @@ MOUNT_DST="/home/student/projects"
 # .private/Containerfile is the distribution and every student builds it; see
 # .config/container.args and README.md's "How the image reaches a student".
 IMAGE="localhost/cs193v:local"
-MIN_PODMAN="5.7.0"
+# ─── the oldest podman the course works with, per platform ─────────────────────
+# TWO FLOORS, and install-cs193v.sh carries the same pair for the same reasons -- the long form
+# of the argument lives there. In brief: on Linux the floor decides which DISTROS work, and 4.9.0
+# is measured (Ubuntu 24.04 LTS and everything on it, Debian 13 stable, Ubuntu 25.x, Fedora GA);
+# on a Mac it decides nothing about distros and lowering it would admit the pre-5.0 `podman
+# machine`, which nothing can test. 25-installer.sh asserts both copies agree and that the macOS
+# floor is never the lower of the two.
+MIN_PODMAN_LINUX="4.9.0"
+MIN_PODMAN_MACOS="5.7.0"
 
 # ─── the shared presentation layer ─────────────────────────────────────────────
 # Colours, box(), die(), the arrow-key menu, msg(), run_timeout() and the spinner glyphs live
@@ -848,6 +856,13 @@ platform() {
     esac
 }
 
+min_podman() {                        # min_podman -> the floor for THIS platform
+    case "$(platform)" in
+        macos) printf '%s' "$MIN_PODMAN_MACOS" ;;
+        *)     printf '%s' "$MIN_PODMAN_LINUX" ;;
+    esac
+}
+
 has_machine() {                       # is a podman machine in play (macOS)?
     [ "$(platform)" = macos ] || return 1
     pmq machine list --format '{{.Name}}'
@@ -1077,10 +1092,11 @@ preflight() {
     if ! run_timeout 10 podman --version; then
         die "$(msg err.podman-hangs)"
     fi
-    local ver
+    local ver floor
     ver="$(printf '%s' "$RT_OUT" | awk '{print $NF}')"
-    if [ "$(version_lt "$ver" "$MIN_PODMAN")" = yes ]; then
-        die "$(msg err.podman-too-old FOUND="$ver" NEED="$MIN_PODMAN")"
+    floor="$(min_podman)"
+    if [ "$(version_lt "$ver" "$floor")" = yes ]; then
+        die "$(msg err.podman-too-old FOUND="$ver" NEED="$floor")"
     fi
 
     if ! pm info --format '{{.Host.Security.Rootless}}'; then
@@ -2288,8 +2304,18 @@ verb_doctor() {
         printf '  %-16s %s\n' "machine" "${RT_OUT:-none}"
     fi
 
-    if pm info --format '{{.Host.MemTotal}} {{.Host.CPUs}} {{.Host.RootlessNetworkCmd}}'; then
-        printf '  %-16s %s\n' "podman sees" "$RT_OUT"
+    # TWO CALLS, AND THE SPLIT IS LOAD-BEARING. .Host.RootlessNetworkCmd does not exist before
+    # podman 5.x -- measured: podman 4.9.3 answers `can't evaluate field RootlessNetworkCmd in
+    # type *define.HostInfo` -- and a Go template that names a missing STRUCT field fails the
+    # whole call rather than substituting an empty string. So on any 4.9.x machine, which the
+    # Linux floor now admits, this printed "TIMED OUT (a Mac that has slept can do this)" on a
+    # Linux box that had not timed out and was not a Mac. The fields that exist everywhere are
+    # asked for together; the one that does not is asked for on its own and simply omitted when
+    # podman has never heard of it.
+    if pm info --format '{{.Host.MemTotal}} {{.Host.CPUs}}'; then
+        local seen="$RT_OUT"
+        if pm info --format '{{.Host.RootlessNetworkCmd}}'; then seen="$seen $RT_OUT"; fi
+        printf '  %-16s %s\n' "podman sees" "$seen"
     else
         printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
     fi

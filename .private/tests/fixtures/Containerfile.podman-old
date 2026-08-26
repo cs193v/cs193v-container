@@ -1,17 +1,31 @@
 # A machine whose podman is real, from a real distro archive, and too old.
 #
-# UBUNTU 24.04 ON PURPOSE, and it is the whole fixture: its archive ships podman 4.9.3
-# against MIN_PODMAN=5.7.0, so the refusal is driven by a genuine `podman --version` rather
-# than by a string a fake was told to print. 25-installer.sh already covers the branch with
-# a faked version; what this adds is that the PARSE still works -- survey reads the version
-# with `awk '{print $NF}'`, and a change in podman's own output format would slip past a
-# fake that prints what the test expects.
-FROM ubuntu:24.04
+# UBUNTU 22.04 ON PURPOSE, and the base changed with the floor. This fixture was ubuntu:24.04 at
+# podman 4.9.3 while MIN_PODMAN was 5.7.0 -- but 24.04's podman is now ACCEPTED
+# (MIN_PODMAN_LINUX=4.9.0, measured: 4.9.3 builds the whole course image), so it can no longer be
+# the refusal case. 22.04 LTS ships podman 3.4.4, is supported until 2027, and is a machine a
+# student could plausibly still be on.
+#
+# WHAT IT ADDS OVER A FAKED VERSION: the refusal is driven by a genuine `podman --version` rather
+# than by a string a fake was told to print. 25-installer.sh already covers the branch with a fake
+# at 4.3.1; what this adds is that the PARSE still works -- survey reads the version with
+# `awk '{print $NF}'`, and a change in podman's own output format would slip past a fake printing
+# exactly what the test expects. podman 3.4.4 is two majors back, so it is also the oldest output
+# format we check against.
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
-# podman is the point; sudo, curl and openssh-client are here so that nothing ELSE needs
+# podman is the point; sudo, curl, openssh-client and uidmap are here so that nothing ELSE needs
 # doing and the refusal is the only thing the run can be about.
+#
+# uidmap JOINED THAT LIST WITH THE FLOOR CHANGE, and the reason is worth recording. It was absent
+# while this fixture was refused in the survey, which happens before the setuid helpers are ever
+# probed -- so it cost nothing. But the floor-skew case runs the SAME machine with the installer's
+# floor accepting 3.4.4, and that run carries on to the uidmap check (installer:431), finds them
+# missing, and asks to install them. With no local repository and --network=none that install
+# cannot succeed, so the case would have been about a missing package rather than about two floors
+# disagreeing. Present here, nothing to ask about, and both cases stay about what they claim.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends sudo openssh-client curl podman \
+ && apt-get install -y --no-install-recommends sudo openssh-client curl podman uidmap \
  && rm -rf /var/lib/apt/lists/*
 
 RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \

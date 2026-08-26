@@ -85,10 +85,14 @@ On Ubuntu or inside the WSL CS193V environment:
 
     sudo apt update && sudo apt install --only-upgrade podman
 
-On a Mac: open Podman Desktop and let it update itself.
+On a Mac: remove the podman you already have, then run the
+course installer again -- it installs a version the course is
+tested against. Podman Desktop's own updater may leave you on
+a different one.
 
-Nothing has been changed on your computer. Contact course staff if
-the upgrade does not work.
+Nothing has been changed on your computer. Contact course
+staff if that does not work, or before removing podman if you
+use it for anything outside this course.
 
 [[err.podman-unreachable]]
 Podman is installed but the course container cannot reach it.

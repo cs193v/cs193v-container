@@ -1,0 +1,61 @@
+# Fedora: the machine issue #94 is actually about.
+#
+# WHAT IT PROVES, and it is one line of the installer: install_podman's `sudo apt-get update`
+# (installer:591) on a machine with no apt. Everything before that point works -- platform()
+# reports linux, the survey finds podman missing and asks permission for exactly one thing -- and
+# then the install dies with "apt-get update failed", which is a true sentence about a machine
+# that has never had apt and never will.
+#
+# PODMAN IS ABSENT BY OMISSION, NOT BY REMOVAL, which is why this fixture is small. The
+# --no-prereqs axis removes software at boot and needs a file:// repository to put it back
+# offline; here podman was simply never installed, so DO_PODMAN_INSTALL is yes on a machine that
+# needs no local repo, no createrepo_c and no removal verb. When a Fedora case wants
+# --no-prereqs, that machinery can be added then -- building the download closure for a case that
+# does not exist yet is 300 MB of nothing.
+#
+# EXACTLY ONE CONSENT ITEM, which is the shape that makes the transcript readable, and it is the
+# BASE IMAGE that gives it rather than anything below. Measured in fedora:43:
+#
+#   bash, sudo, curl, dnf         present     -- so none of them is a consent item
+#   newuidmap, newgidmap, usermod present     -- shadow-utils is in the base image
+#   ssh, ssh-keygen               ABSENT      -- installed below, or it would be a second item
+#   /etc/subuid                   EMPTY       -- seeded below, or it would be a third item
+#
+# THE newuidmap LINE IS A FINDING, not a convenience. On Debian and Ubuntu the setuid helpers
+# come from `uidmap`, a RECOMMENDS of podman, so "podman installed, helpers missing" is a real
+# machine and the tier has a case for it. On Fedora they come from shadow-utils, which also owns
+# usermod -- which setup_subuid needs -- so that state cannot be arranged here without breaking
+# the machine, and it cannot occur on a student's Fedora box either. The case does not exist on
+# this distro, and --no-prereqs=uidmap should be refused for this base rather than silently
+# arranging nothing.
+#
+# TIER A -- NO NESTING ADAPTATIONS. uid 1000, a real subuid range, no vfs or cgroupfs override,
+# and machine_flags hands this base no capabilities. Nothing here runs a podman, because the
+# install dies before one exists to run.
+FROM fedora:43@sha256:129a31741db676a9f99e58d9cf468cd8e86cf0336d9f9eea85ed9e729558a12d
+
+# openssh-clients, NOT openssh-client -- Fedora's name for it, and the plural is exactly the kind
+# of thing a fix for #94 has to get right per family. Deliberately NOT podman.
+RUN dnf install -y openssh-clients \
+ && dnf clean all
+
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \
+ && useradd -m -u 1000 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# A range, so the subuid consent item cannot appear. fedora:43 ships an EMPTY /etc/subuid --
+# Fedora's useradd populates it for users it creates, and the base image's file has no entries --
+# so without this the survey would ask for two things and the transcript would be about the wrong
+# one.
+RUN printf 'student:200000:65536\n' > /etc/subuid \
+ && printf 'student:200000:65536\n' > /etc/subgid
+
+# The graph root's parent and the two tmpfs mount points, so mounting over them is not itself a
+# change. Nothing here creates the first -- no podman ever runs -- but a fixture whose audit
+# depends on that staying true is a fixture waiting to surprise somebody.
+RUN mkdir -p /home/student/.local/share/containers && chown -R student:student /home/student/.local
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student
