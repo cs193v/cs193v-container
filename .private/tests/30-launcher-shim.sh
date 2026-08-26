@@ -131,22 +131,34 @@ assert_eq       "root:asks-podman-nothing"  "0"             "$(shim_count '.')"
 
 # ─── version floor  (§1.4) ─────────────────────────────────────────────────────
 # version_lt compares numerically, field by field. A lexical compare would call 10.0.0
-# older than 5.7.0 and refuse every future podman.
-for v in 5.6.0 5.6.9 4.9.3 0.1.0; do
+# older than the floor and refuse every future podman.
+#
+# THE NUMBERS HERE ARE MIN_PODMAN_LINUX's NEIGHBOURS, not arbitrary. This suite runs on Linux, so
+# the floor it is testing is 4.9.0 — see the two-floor rationale in cs193v. Every version below is
+# one a real distro actually ships, which is what makes an off-by-one here mean something:
+#
+#   refused   4.8.3  Alpine 3.19        4.3.1  Debian 12 bookworm   3.4.4  Ubuntu 22.04 LTS
+#   accepted  4.9.0  the floor itself   4.9.3  Ubuntu 24.04 LTS     5.4.2  Debian 13 trixie
+#
+# 4.9.3 IS THE ONE THAT MATTERS MOST. It is what Ubuntu 24.04 LTS ships, and Linux Mint 22.x and
+# Pop!_OS 24.04 are built on it — so an off-by-one that refused it would refuse the three most
+# common desktop Linuxes at once. It is accepted on measurement, not on faith:
+# 26-installer-sandbox.sh builds the entire course image on a real 4.9.3.
+for v in 4.8.3 4.3.1 3.4.4 0.1.0; do
     shim_new; shim_set version "podman version $v"
     assert_eq "version:$v-refused" "1" "$(launcher_rc)"
     assert_eq "version:$v-creates-nothing" "0" "$(shim_count '^run ')"
 done
-shim_new; shim_set version "podman version 5.6.0"
+shim_new; shim_set version "podman version 4.3.1"
 out="$(launcher)"
-assert_contains "version:refusal-shows-found"  "5.6.0" "$out"
-assert_contains "version:refusal-shows-needed" "5.7.0" "$out"
+assert_contains "version:refusal-shows-found"  "4.3.1" "$out"
+assert_contains "version:refusal-shows-needed" "4.9.0" "$out"
 assert_says "version:refusal-names-the-fix" "apt install" "$out"
 
-# 5.7.0 is exactly MIN_PODMAN and is what Ubuntu 26.04 ships, so the boundary is the case
-# that actually matters — an off-by-one here refuses every student on a stock Ubuntu.
-# 10.0.0 guards against a lexical compare, which would call it older than 5.7.0.
-for v in 5.7.0 5.7.1 5.8.0 6.0.2 10.0.0; do
+# 4.9.0 is exactly MIN_PODMAN_LINUX, so "equal" must mean "acceptable" — an off-by-one here
+# refuses a machine sitting precisely on the floor. 10.0.0 guards against a lexical compare, which
+# would call it older than 4.9.0.
+for v in 4.9.0 4.9.3 5.4.2 5.7.0 6.0.2 10.0.0; do
     shim_new; shim_set version "podman version $v"
     launcher >/dev/null 2>&1
     assert_eq "version:$v-accepted" "1" "$(shim_count '^run ')"

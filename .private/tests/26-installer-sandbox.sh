@@ -18,7 +18,7 @@ require_podman
 SB_TMP="$(new_tmpdir)"
 # LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
 # just the container names to sweep on the way out.
-SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old nested"
+SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -234,7 +234,7 @@ systemd=true" "$(sb_section "$out" WSL-CONF)"
 sandbox_reap
 
 # ─── a podman that is really too old ───────────────────────────────────────────
-# ubuntu:24.04 ships podman 4.9.3 against MIN_PODMAN=5.7.0, so the refusal comes off a real
+# ubuntu:22.04 ships podman 3.4.4 against MIN_PODMAN_LINUX=4.9.0, so the refusal comes off a real
 # `podman --version` rather than a string a fake was told to print. 25-installer.sh already
 # covers the branch that way; what this adds is that the PARSE holds -- survey reads the
 # version with `awk '{print $NF}'`, and a change in podman's own output format would slip
@@ -243,27 +243,117 @@ sandbox_reap
 # NO KEYSTROKES: survey dies before choose_dir, so no menu is ever drawn.
 fixture_build podman-old || exit 1
 # THE ONE MACHINE THAT IS NOT THE MACHINE, stated rather than forced. A VERSION cannot be
-# produced by subtracting from a 26.04 base -- 26.04's archive has no podman 4.9.3 to install --
+# produced by subtracting from a 26.04 base -- 26.04's archive has no podman 3.4.4 to install --
 # so this stays a second small image, and `base=` is how a case asks for it. Neither axis
 # applies: its whole job is one refusal in the survey, which needs no capability and no repo.
 sb_machine base=podman-old
 out="$(sandbox_run podman-old '' -e CS193V_DIR=/home/student/cs193v)"
-record "sb-old:the-version-24.04-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
-assert_says "sb-old:refused"                 "needs 5.7.0 or newer" "$out"
-assert_says "sb-old:names-what-it-found"     "Podman 4.9.3"         "$out"
+record "sb-old:the-version-22.04-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
+assert_says "sb-old:refused"                 "needs 4.9.0 or newer" "$out"
+assert_says "sb-old:names-what-it-found"     "Podman 3.4.4"         "$out"
 assert_says "sb-old:says-how-to-upgrade"     "only-upgrade podman"  "$out"
 assert_says "sb-old:exits-nonzero"           "===INSTALLER-RC=1===" "$out"
 assert_says_not "sb-old:does-not-claim-success" "Setup finished"    "$out"
 # The version really came from a binary, not from a fake: podman is present in this fixture
-# and reports it. If Ubuntu ever raises 24.04's podman past the floor, `sb-old:refused` above
+# and reports it. If Ubuntu ever raises 22.04's podman past the floor, `sb-old:refused` above
 # fails loudly and the record says why -- which is the behaviour wanted, not a nuisance.
-assert_says "sb-old:the-version-is-a-real-binary-s" "podman version 4.9.3" \
+assert_says "sb-old:the-version-is-a-real-binary-s" "podman version 3.4.4" \
             "$(sb_section "$out" PODMAN-AFTER)"
 # Refusing must cost nothing at all -- not a package, not a directory.
 assert_eq "sb-old:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
 # ...which the exact-set audit says in both directions. Worth having here more than anywhere:
 # a refusal that quietly left something behind is the failure nobody would look for.
 assert_system_diff podman-old /home/student/cs193v
+sandbox_reap
+
+# ─── Debian stable, which the floor used to turn away and now does not ─────────
+# THE CASE THAT INVERTED, and the inversion is the change. While MIN_PODMAN was 5.7.0 this case
+# asserted a REFUSAL: Debian 13 (trixie, current stable) ships podman 5.4.2, and the survey died
+# before apt was ever reached. #94 is about package managers, and apt is already the right answer
+# on Debian -- so the largest excluded population was being excluded by a NUMBER rather than by
+# the defect the issue describes. That is what made the floor worth measuring.
+#
+# It was measured, and 5.4.2 builds the entire course image (see oldest-supported below, which
+# does the same on 4.9.3). So MIN_PODMAN_LINUX is 4.9.0 and this machine is SUPPORTED. What the
+# case asserts now is that the survey accepts it and the install carries on -- which also covers
+# Mint, Pop!_OS, elementary, Zorin, Kali, Raspberry Pi OS and the non-Ubuntu WSL distros, all of
+# which are Debian underneath.
+#
+# NO KEYSTROKES, and that is itself an assertion. This fixture has podman, ssh, curl, uidmap and a
+# subuid range, so there is nothing for ask_consent to ask about and no menu is drawn. A machine
+# that needs nothing is the shape a supported machine has.
+#
+# WHERE IT STOPS is write_local_args, and that is a property of Tier A rather than of Debian: no
+# nesting flags, so the podman it just accepted cannot create a user namespace and cannot answer
+# `podman info`. Same dead end the cannot-answer case asserts deliberately. The end-to-end proof
+# for Debian is the nested build in oldest-supported; here the claim is only that the survey no
+# longer refuses it.
+fixture_build debian || exit 1
+sb_machine base=debian
+out="$(sandbox_run debian '' -e CS193V_DIR=/home/student/cs193v)"
+record "sb-deb:the-version-debian-13-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
+assert_says "sb-deb:accepted"                  "podman 5.4.2" "$out"
+assert_says_not "sb-deb:not-refused-any-more"  "or newer"     "$out"
+assert_says "sb-deb:needs-nothing-installed"   "Nothing on your computer needs to change" "$out"
+assert_says_not "sb-deb:asks-no-permission"    "permission for" "$out"
+# IT GOT THE COURSE FILES, which is further than this machine had ever got: fetch_files runs after
+# consent and before write_local_args, so `launcher-is-executable` can only be true on a run that
+# passed the survey.
+assert_eq "sb-deb:the-course-files-arrived" "launcher-is-executable" \
+          "$(sb_section "$out" COURSE-DIR)"
+# ...and then stops for the Tier A reason, not a Debian one. Asserted rather than recorded, because
+# a run that got FURTHER would mean this fixture had grown nesting flags nobody declared.
+assert_says "sb-deb:stops-where-tier-a-always-stops" "Could not ask podman how much memory" "$out"
+record "sb-deb:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+# NO EXACT-SET AUDIT, deliberately, and lib/sandbox.sh gives the reason where SB_PROBE_PODMAN is
+# defined: any podman command that touches the runtime creates a store, an events log and lock
+# files whose exact set differs between runs. This case reaches `podman info`, so an audit here
+# would chase new paths every run. The refusal cases keep theirs, because a refusal touches nothing.
+sandbox_reap
+
+# ─── Fedora: the machine #94 is actually about ─────────────────────────────────
+# THE DEFECT, EXECUTED. Everything up to install_podman works on Fedora -- platform() reports
+# linux, the survey finds podman missing and asks permission for exactly one thing -- and then
+# install_podman runs `sudo apt-get update` (installer:591) on a machine that has never had apt.
+#
+# THIS CASE ASSERTS TODAY'S BEHAVIOUR AND IS GREEN, which is deliberate and worth being explicit
+# about. A permanently-red assertion in this tier would fail every run and teach people to ignore
+# the suite; 00-release-gates.sh is where "must work before students touch this" lives, and the
+# gate that demands a COMPLETED install on Fedora belongs there. What belongs here is the record
+# of exactly how the installer fails today, so that a fix has something to move.
+#
+# WHAT MAKES IT MORE THAN "IT FAILED": the two package names. The consent text says
+# "Install podman (and uidmap)" and the step says "Installing podman uidmap" -- and `uidmap` is a
+# Debian package name that does not exist on Fedora, where the same binaries come from
+# shadow-utils. So the transcript already contains two distinct things a fix has to change, and
+# pinning both means a partial fix cannot look complete.
+#
+# ONE CONSENT ITEM, AND THE BASE IMAGE IS WHY. fedora:43 ships bash, sudo, curl, dnf, newuidmap,
+# newgidmap and usermod; the fixture adds openssh-clients and a subuid range. So podman is the
+# only thing missing, which keeps the transcript about the package manager rather than about a
+# machine that happened to be bare. Containerfile.fedora records the measurements.
+fixture_build fedora || exit 1
+sb_machine base=fedora
+out="$(sandbox_run fedora '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-fed:detected-as-plain-linux"       "linux on x86_64" "$out"
+assert_says "sb-fed:asks-for-one-thing"            "permission for 1 thing" "$out"
+# The Debian package name, on a machine that has no such package. Asserted as the CURRENT
+# behaviour; the release gate is what says it must change.
+assert_says "sb-fed:names-the-debian-package-in-its-consent-text" "Install podman (and uidmap)" "$out"
+assert_says "sb-fed:and-again-in-the-install-step"  "Installing podman uidmap" "$out"
+# THE DEFECT ITSELF, in the installer's own words. Recorded alongside is what the shell actually
+# said, because "apt-get update failed" on a machine with no apt reads as a network problem to
+# anybody who has not seen this issue.
+assert_says "sb-fed:dies-in-apt-get"               "apt-get update failed" "$out"
+record "sb-fed:what-the-shell-said" \
+       "$(printf '%s' "$out" | grep -iE 'apt-get.*(not found|No such file)' | head -1)"
+assert_says "sb-fed:exits-nonzero"                 "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-fed:does-not-claim-success"     "Setup finished" "$out"
+# IT GOT PAST CONSENT, which is what tells this apart from a run that fell over earlier for some
+# unrelated reason. Without it the case could pass on a fixture that was simply broken.
+assert_says "sb-fed:it-had-consent-before-it-failed" "Installing podman uidmap" "$out"
+# ...and nothing was installed, because nothing could be. dnf is the query here, not dpkg.
+assert_eq "sb-fed:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
 sandbox_reap
 
 # ─── nested: the launcher really building, inside a container ───────────────────
@@ -437,6 +527,106 @@ assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
 sandbox_reap
 # ...and the space really came back, which is the half a precondition cannot promise.
 record "nest:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+fi
+fi
+fi
+
+# ─── the oldest podman the floor admits, built end to end ──────────────────────
+# THE FLOOR'S OWN REGRESSION CHECK. MIN_PODMAN_LINUX is 4.9.0, and the reason it is that low is
+# that Ubuntu 24.04 LTS ships podman 4.9.3 -- along with Linux Mint 22.x and Pop!_OS 24.04, so
+# three of the most common desktop Linuxes ride on that one version. The floor was set from
+# measurement: 4.9.3, 5.4.2 and 5.7.0 each ran the whole install and built the entire 25-step
+# course image, with inner stores within 22 KB of one another.
+#
+# THIS IS THE HALF THAT HAS TO KEEP BEING TRUE. A floor is a promise about the oldest thing that
+# works, and nothing else in the suite would notice if a Containerfile change or a new launcher
+# flag quietly needed podman 5.x. So this builds the course image on a real 4.9.3, with the real
+# installer and no floors patched -- the version is admitted now, so nothing needs lowering.
+#
+# ASSERTED, not recorded, and that changed with the floor. While 4.9.3 was below the floor this was
+# an exploratory measurement whose answer nobody knew, and recording was right. Now it is a
+# supported configuration, and a supported configuration that stops working should turn the suite
+# red.
+if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
+    skip "oldest-supported:the-prerequisites" "set CS193V_INSTALL_NESTED=1 -- seconds; the build itself is a second gate"
+else
+fixture_build podman-old-nested || exit 1
+osp="$(nest_probe podman-old-nested)"
+record "oldest-supported:podman-inside" "$(nest_get "$osp" PODMAN_VERSION)"
+record "oldest-supported:store"         "$(nest_get "$osp" STORE)"
+assert_match "oldest-supported:the-probe-ran-inside-the-2204-fixture" '^podman-old-nested-fixture-[0-9]+$' \
+             "$(nest_get "$osp" FIXTURE_ID)"
+# THE VERSION IS THE WHOLE POINT of this fixture, so it is pinned. If Ubuntu ever backports a newer
+# podman to 24.04 this fails and says so, rather than quietly testing something else.
+assert_says  "oldest-supported:the-podman-inside-is-4.9.3" "4.9.3" "$(nest_get "$osp" PODMAN_VERSION)"
+assert_match "oldest-supported:4.9.3-creates-a-nested-userns" '^user:\[[0-9]+\]$' \
+             "$(nest_get "$osp" INNER_USERNS)"
+# The packaging claim, on Ubuntu's shadow as well as Debian's: setuid newuidmap does not survive
+# nesting, so SYS_ADMIN is required here and its absence fails in one specific way.
+ospn="$(nest_probe_nocap podman-old-nested)"
+assert_says_not "oldest-supported:without-SYS_ADMIN-there-is-no-namespace" 'user:[' \
+                "$(nest_get "$ospn" INNER_USERNS)"
+assert_says "oldest-supported:newuidmap-is-what-fails" 'newuidmap' "$(nest_get "$ospn" INNER_USERNS)"
+
+if [ "${CS193V_MINPODMAN_BUILD:-}" != 1 ]; then
+    skip "oldest-supported:the-build" "set CS193V_MINPODMAN_BUILD=1 -- a real 25-step build on podman 4.9.3, ~6GB and several minutes"
+else
+osp_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "oldest-supported:free-disk-gb-before" "${osp_free:-unknown}"
+if [ -z "$osp_free" ] || [ "$osp_free" -lt 15 ]; then
+    skip "oldest-supported:the-build" "only ${osp_free:-?}GB free; this build wants ~8GB and a margin"
+else
+osp_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+# THE REAL INSTALLER, unpatched, which is what makes this a regression check rather than a
+# measurement -- and is itself an assertion that 4.9.3 is admitted by the shipped floors.
+out="$(nest_build "" "" podman-old-nested)"
+assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/installer.sh" \
+            "$(sb_section "$out" INSTALLER-USED)"
+assert_says_not "oldest-supported:no-version-refusal-anywhere" "or newer" "$out"
+record "oldest-supported:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+record "oldest-supported:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
+assert_says "oldest-supported:4.9.3-finished-the-install"  "Setup finished"       "$out"
+assert_says "oldest-supported:4.9.3-exited-0"             "===INSTALLER-RC=0===" "$out"
+assert_eq   "oldest-supported:4.9.3-built-the-course-image" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
+# PAIRED WITH THE IMAGE, because doctor returns ok on an installation with no image at all --
+# measured, on a run where nothing had been built and doctor said ok anyway.
+assert_eq   "oldest-supported:doctor-runs-on-4.9.3"        "ok"  "$(sb_section "$out" DOCTOR)"
+osp_store="$(sb_section "$out" INNER-STORE-BYTES)"
+if [ -n "$osp_store" ] && [ "$osp_store" -gt 1000000000 ]; then pass "oldest-supported:the-inner-store-really-grew"
+else fail "oldest-supported:the-inner-store-really-grew" "inner graph root is ${osp_store:-empty} bytes"; fi
+record "oldest-supported:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | tr '\n' '|')"
+assert_eq "oldest-supported:host-image-list-untouched" "$osp_imgs" \
+          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+sandbox_reap
+record "oldest-supported:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+
+# ─── and what happens when the two declarations disagree ───────────────────────
+# TWO DECLARATIONS, ONE NUMBER, AND NOTHING BEHAVIOURAL CHECKED THAT THEY MATCH.
+# MIN_PODMAN_LINUX lives in install-cs193v.sh and again in cs193v, because the installer is
+# curl-piped and cannot source the launcher. 25-installer.sh checks the two statically; this is
+# what a student SEES when they drift.
+#
+# sb_work_skew raises the LAUNCHER's floor to 5.7.0 and leaves the installer's at 4.9.0, on a
+# machine with 4.9.3. So the installer accepts, and the launcher does not.
+#
+# THE SHAPE IS THE POINT: survey passes, the course files download, the memory cap is computed, the
+# disk is confirmed -- and only then does build_image hand off to a launcher that refuses. Every
+# reassuring step first, the refusal last, on a machine the installer just declared fit. A student
+# would read that as the install breaking at the very end.
+#
+# CHEAP, because it dies before building anything.
+sb_work_skew || { fail "floor-skew:the-skew-could-be-built" "sb_work_skew failed"; exit 1; }
+pass "floor-skew:the-skew-could-be-built"
+out="$(nest_build "" "" podman-old-nested /work/installer-skew.sh)"
+assert_says "floor-skew:the-skewed-copy-is-what-ran" "installer-skew.sh" \
+            "$(sb_section "$out" INSTALLER-USED)"
+assert_says "floor-skew:the-installer-accepted-4.9.3"   "podman 4.9.3" "$out"
+assert_says "floor-skew:it-got-all-the-way-to-the-build" "Building the course container" "$out"
+# ...and then the launcher refused, in the launcher's own words (messages.txt err.podman-too-old).
+assert_says "floor-skew:but-the-launcher-refuses"  "we need:" "$out"
+assert_says "floor-skew:exits-nonzero"             "===INSTALLER-RC=1===" "$out"
+assert_eq   "floor-skew:and-nothing-was-built" "no" "$(sb_section "$out" IMAGE-EXISTS)"
+sandbox_reap
 fi
 fi
 fi

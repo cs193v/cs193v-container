@@ -91,11 +91,22 @@ OPTIONS
   --fake-podman        substitute lib/podman-fake, so nothing real is built.  A TEST
                        CONVENIENCE and neither axis: it is not an absence, not a capability,
                        and not a machine any student could have.  Makes a run take a second
-  --base IMAGE         machine (default) | podman-old
-                       podman-old is ubuntu:24.04, whose real podman is 4.9.3 against
-                       MIN_PODMAN 5.7.0, so the installer refuses in the survey.  A VERSION
-                       cannot be produced by subtracting from a 26.04 base, which is why this
-                       one machine stays separate
+  --base IMAGE         machine (default) | podman-old | podman-old-nested | debian | fedora
+                       Run with --list to print the vocabulary and which of them nest.
+                       podman-old is ubuntu:22.04 at podman 3.4.4, below
+                       MIN_PODMAN_LINUX (4.9.0), so the installer refuses it in the
+                       survey.  A VERSION cannot be produced by subtracting from a
+                       26.04 base, which is why it is a separate machine.  It does
+                       not nest, so it is given no capability -- the refusal happens
+                       off one podman --version, which never touches the runtime.
+                       podman-old-nested is ubuntu:24.04 at podman 4.9.3 WITH the five
+                       nesting adaptations.  4.9.3 is the oldest podman the floor
+                       admits, and Ubuntu 24.04 LTS, Mint 22.x and Pop!_OS 24.04 all
+                       ship it, so this is the machine the floor is a promise about.
+                       debian is debian:13 at podman 5.4.2 -- an apt distro that the
+                       floor used to turn away and now accepts.
+                       fedora is fedora:43 with NO podman, so install_podman runs and
+                       dies in apt-get.  That is issue #94, executed
   --dir PATH           set CS193V_DIR, so the installer does not ask where to put things
   --ask                leave CS193V_DIR unset, so choose_dir prompts.  Its typed-path,
                        empty-input and ~/ branches are only reachable this way
@@ -121,6 +132,8 @@ EXAMPLES
   tests/install-sandbox.sh --no-prereqs=subuid              # watch usermod by hand
   tests/install-sandbox.sh --platform wsl --wslconf boot --fake-podman
   tests/install-sandbox.sh --base podman-old                # the version refusal
+  tests/install-sandbox.sh --base debian                    # apt distro, now supported
+  tests/install-sandbox.sh --base fedora                     # issue #94, live
   tests/install-sandbox.sh --ask                            # drive choose_dir's menu yourself
   tests/install-sandbox.sh --sudo password                  # what a student actually sees
 EOF
@@ -163,8 +176,9 @@ while [ "$#" -gt 0 ]; do
         --net)          NET=yes ;;
         --no-net)       NET=no ;;
         --keep)         KEEP=yes ;;
-        --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : machine podman-old\n' \
-                               "$MACHINE_PREREQ_NAMES" "$MACHINE_CAP_NAMES"; exit 0 ;;
+        --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : %s\nof those, nested (get the caps)  : %s\n' \
+                               "$MACHINE_PREREQ_NAMES" "$MACHINE_CAP_NAMES" \
+                               "$MACHINE_BASE_NAMES" "$MACHINE_NESTED_BASES"; exit 0 ;;
         -h|--help)      usage; exit 0 ;;
         --)             shift; CMD="$*"; break ;;
         *)              die_usage "unknown option: $1" ;;
@@ -189,10 +203,13 @@ case "$PLATFORM" in
     linux|wsl) : ;;
     *) die_usage "unknown --platform: $PLATFORM (linux|wsl)" ;;
 esac
-case "$BASE" in
-    machine|podman-old) : ;;
-    *) die_usage "unknown --base: $BASE (machine|podman-old)" ;;
-esac
+# THROUGH THE SUITE'S OWN machine_valid, like --no-prereqs and --no-caps above, so the base
+# vocabulary cannot differ between the tool you drive by hand and the tier that asserts. It used
+# to be a local `case` listing two names, which is how a third base would have been accepted here
+# and rejected there, or the reverse.
+if ! bad="$(machine_valid bases "$BASE")"; then
+    die_usage "unknown --base: $bad   (want: $MACHINE_BASE_NAMES)"
+fi
 # Strict, like every other value here. A silently-accepted sudo state would be the worst of
 # them: you would watch a run with no prompt and conclude the installer never asks for one.
 case "${SUDOK%%:*}" in
@@ -216,16 +233,19 @@ if [ "$PLATFORM" = wsl ] && [ -z "$WSLCONF" ]; then WSLCONF=noboot; fi
 # minutes and a screenful before you type `sandbox run`; a warning nobody can see when it matters
 # is the same as no warning.
 if [ -z "$NET" ]; then
-    if [ "$FAKE" = yes ] || [ "$BASE" = podman-old ]; then NET=no; else NET=yes; fi
+    if [ "$FAKE" = yes ] || ! machine_is_nested "$BASE"; then NET=no; else NET=yes; fi
 fi
-# REFUSED RATHER THAN QUIETLY IGNORED, for the same reason as the rest: podman-old is ubuntu:24.04
-# with no local repository and no ID window of its own, so a --no-prereqs there would remove a
-# package that cannot be put back and leave you debugging the fixture.
+# REFUSED RATHER THAN QUIETLY IGNORED, like every other value here. This one is about the fake
+# specifically; the base-level refusal is the block below it.
 case ",$NOPREREQS," in
     *,podman,*) [ "$FAKE" = yes ] && die_usage "--fake-podman cannot combine with --no-prereqs=podman: the fake is bind-mounted over /usr/bin/podman, so apt cannot remove the file. Pick one" ;;
 esac
-if [ "$BASE" = podman-old ] && { [ -n "$NOPREREQS" ] || [ "$FAKE" = yes ]; }; then
-    die_usage "--base podman-old takes neither --no-prereqs nor --fake-podman: its whole job is one refusal off a REAL podman 4.9.3, before anything is installed"
+# NEITHER AXIS ON A BASE THAT CANNOT NEST, and it is the same reason for each of them: these
+# bases carry no local repository, so a --no-prereqs would remove a package that cannot be put
+# back and leave you debugging the fixture. Their whole job is one refusal off a REAL podman --
+# 4.9.3 on podman-old, 5.4.2 on debian -- before anything is installed.
+if ! machine_is_nested "$BASE" && { [ -n "$NOPREREQS" ] || [ "$FAKE" = yes ]; }; then
+    die_usage "--base $BASE takes neither --no-prereqs nor --fake-podman: its whole job is one refusal off a REAL podman, before anything is installed"
 fi
 
 SB_TMP="$(new_tmpdir)"
@@ -264,17 +284,17 @@ set -- "$@" -e "SB_NO_PREREQS=$NOPREREQS" -e "SB_NO_CAPS=$NOCAPS"
 # THE SAME DECLARATION THE SUITE USES. This file used to carry its own copies of the nested
 # machine's capabilities and the wsl bind mount, which is how they came to disagree with the
 # suite's -- see machine_flags in lib/sandbox.sh.
-if [ "$BASE" = podman-old ]; then
-    # No capabilities and no bind mounts: its whole job is one refusal in the survey, which
-    # needs no namespace at all. Deliberately bare, so the refusal is measured on a machine
-    # with no special privilege.
-    :
-else
-    machine_flags "$NOCAPS" "$PLATFORM" "$FAKE"
-    set -- "$@" ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"}
+# ONE CALL, FOR EVERY BASE, and the base is now an argument to it. This used to be an `if
+# [ "$BASE" = podman-old ]` that skipped machine_flags entirely and left the flags bare -- while
+# sandbox_run called machine_flags unconditionally and gave that same case the full nesting set.
+# Two paths, one case, opposite answers. machine_flags gates the capabilities on
+# MACHINE_NESTED_BASES now, so both paths ask the same question and get the same answer.
+machine_flags "$NOCAPS" "$PLATFORM" "$FAKE" "$BASE"
+set -- "$@" ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"}
+# The shim tmpfs and the layers override only mean anything where something is built inside.
+if machine_is_nested "$BASE"; then
     set -- "$@" --mount type=tmpfs,destination=/var/tmp/shim
     set -- "$@" -e BUILDAH_LAYERS=false
-    :
 fi
 # NOT exported: CS193V_INSTANCE. installer:880-882 names the unsuffixed image on purpose, and
 # an instance in here would test something no student runs. Isolation is the container.

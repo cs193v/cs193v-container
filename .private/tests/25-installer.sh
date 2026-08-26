@@ -65,6 +65,54 @@ for pair in "5.7.0 5.7.0 no" "5.6.0 5.7.0 yes" "5.6.9 5.7.0 yes" "5.7.1 5.7.0 no
 done
 # 5.10 vs 5.9 is the classic numeric-vs-lexical trap; asserted above for both copies.
 
+# ─── and the two floors it is compared against ─────────────────────────────────
+# THE FUNCTION IS DUPLICATED AND SO ARE THE NUMBERS. version_lt is checked above; the floors are
+# declared separately in install-cs193v.sh and in cs193v, for the reason the duplication exists at
+# all -- the installer is curl-piped and cannot source the launcher.
+#
+# TWO FLOORS EACH, SINCE THE PLATFORMS DIVERGED. On Linux the floor decides which distros work, so
+# it is 4.9.0 (measured: 4.9.3, 5.4.2 and 5.7.0 all build the whole course image). On a Mac it
+# decides nothing about distros and lowering it would admit the pre-5.0 `podman machine`, which no
+# test can reach -- so it stays at 5.7.0. Four constants in two files.
+#
+# NOTHING CHECKED THAT THEY AGREE, and the consequence is worse than the version_lt one because
+# the installer runs FIRST and the launcher runs LAST. Measured, not imagined: lowering only the
+# installer's copy produces an install that passes its survey, downloads the course files,
+# computes the memory cap, confirms the disk -- and then hands off to build_image, where the
+# LAUNCHER draws a STOP box saying the podman is too old. Every reassuring step first, the refusal
+# last, on a machine the installer just declared fit. A student would read that as the install
+# having broken at the end.
+#
+# So this is the check that a fix to one floor cannot silently be half a fix.
+# 26-installer-sandbox.sh's floor-skew case is the behavioural half of the same claim.
+for plat in LINUX MACOS; do
+    mp_inst="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/install-cs193v.sh)"
+    mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" "$REPO/cs193v")"
+    # NON-EMPTY FIRST, both of them, and this is the guard rather than pedantry: an empty-vs-empty
+    # comparison passes forever, which is the exact trap this file records at its top for
+    # version_lt. A renamed constant or a changed quoting style would make the sed match nothing.
+    assert_ne "min-podman:installer-declares-$plat" "" "$mp_inst"
+    assert_ne "min-podman:launcher-declares-$plat"  "" "$mp_lnch"
+    assert_eq "min-podman:the-two-$plat-floors-agree" "$mp_inst" "$mp_lnch"
+    record    "min-podman:$plat-floor" "$mp_inst"
+    # EXACTLY ONE DECLARATION IN EACH, because a second one later in either file would shadow the
+    # first and the check above would read the wrong number. Counted rather than assumed: the sed
+    # takes every match, so two lines would give "4.9.0\n5.7.0" and compare unequal by luck
+    # rather than by design -- and two IDENTICAL extra lines would compare equal and hide it.
+    assert_eq "min-podman:installer-declares-$plat-once" "1" \
+              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/install-cs193v.sh)"
+    assert_eq "min-podman:launcher-declares-$plat-once"  "1" \
+              "$(grep -c "^MIN_PODMAN_$plat=" "$REPO/cs193v")"
+done
+# AND THE MAC FLOOR IS NEVER THE LOWER OF THE TWO, which is the whole point of splitting them: the
+# Linux floor exists to be lowered as distros are measured, and the macOS one exists to stay put.
+# Someone lowering "the floor" and touching only the pair they noticed would invert that silently.
+# Checked with the installer's own version_lt, already extracted above.
+mp_lin="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
+          "$(run_vl vl_installer "$mp_mac" "$mp_lin")"
+
 # ─── the menu answers the same keys in both copies ─────────────────────────────
 # menu() is the second function the installer has to carry rather than source, and it had no
 # check at all until setup-git made cs193v-ui.sh the third consumer.
@@ -222,11 +270,15 @@ assert_eq "unsupported-os:exits-1" "1" \
 # A podman older than MIN_PODMAN. version_lt is unit-tested above over twelve pairs; what
 # this adds is that the comparison is WIRED to a refusal, and that the refusal tells a
 # student how to fix it on their own platform.
+# 4.3.1 rather than 4.9.3, and the change of number IS the change of floor. MIN_PODMAN_LINUX is
+# 4.9.0 now, so 4.9.3 -- Ubuntu 24.04 LTS's podman -- is an ACCEPTED machine and cannot be the
+# refusal case any more. 4.3.1 is Debian 12 bookworm's, which is the oldest thing still plausibly
+# under a student and is genuinely below the floor.
 shim_new
-shim_set version "podman version 4.9.3"
+shim_set version "podman version 4.3.1"
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
-assert_says "podman-old:refused"            "needs 5.7.0 or newer" "$out"
-assert_says "podman-old:names-what-it-found" "Podman 4.9.3"        "$out"
+assert_says "podman-old:refused"            "needs 4.9.0 or newer" "$out"
+assert_says "podman-old:names-what-it-found" "Podman 4.3.1"        "$out"
 assert_says "podman-old:says-how-to-upgrade" "only-upgrade podman" "$out"
 assert_no_file "podman-old:changes-nothing" "$TMP/old"
 

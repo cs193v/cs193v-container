@@ -515,6 +515,39 @@ CS193V_DESTRUCTIVE=1 .private/tests/run-tests.sh --tier live
 
 ## Needs another platform
 
+### The macOS podman floor, and the `podman machine` nobody has exercised
+The podman floors diverged when the Linux one dropped to 4.9.0: `MIN_PODMAN_LINUX="4.9.0"` and
+`MIN_PODMAN_MACOS="5.7.0"`, declared in both `install-cs193v.sh` and `cs193v`. The Linux floor is
+measured — `26-installer-sandbox.sh :: oldest-supported` builds the whole course image on a real
+podman 4.9.3. **The macOS one cannot be**, and that is why it did not move.
+
+`podman machine` was rewritten completely in podman 5.0, and `setup_machine` leans on it hard:
+`machine init --memory --disk-size --now`, `machine set --memory`, `machine set --disk-size`,
+`machine inspect --format '{{.Resources.Memory}}'` and `'{{.Resources.DiskSize}}'`. macOS is not
+container-testable, so no fixture reaches any of it. Holding the macOS floor at 5.7.0 keeps the
+pre-5.0 implementation out of reach rather than trusting it.
+
+*What a person on a Mac should check, in order of how likely it is to matter:*
+
+1. **A Mac with no podman at all** — the ordinary path. The installer downloads
+   `PODMAN_MACOS_VERSION` (6.0.2) and never consults the floor. *Expect:* unchanged behaviour.
+2. **A Mac already carrying podman 5.7.0 or newer** — accepted, `setup_machine` runs against it.
+   *Expect:* unchanged behaviour. This is the case the floor is chosen to guarantee.
+3. **A Mac carrying podman older than 5.7.0** — refused, with the message rewritten for this
+   change. Check that the *right branch* fires: `command -v podman` under `/opt/homebrew/` should
+   offer `brew uninstall podman`, anything else should name the path and offer
+   `sudo rm -rf /opt/podman`. *Expect:* the advice matches how podman actually got there. The old
+   message said "open Podman Desktop and let it update itself", which was wrong for the `.pkg`
+   this installer itself uses.
+4. **Nothing is removed for them.** The message tells the student what to run; the script must not
+   run it. Removing podman can destroy a `podman machine` VM and everything in it, and the message
+   says so. *Expect:* after a refusal, `/opt/podman` and any existing machine are untouched.
+
+*Not automatable, and not worth faking:* the shim tier can fake `uname -s` and a podman version,
+so the refusal branch and its two-way message split **are** reachable there — what is not is
+whether `podman machine` on a pre-5.0 podman would actually have worked. Nobody needs to find out
+while the floor holds.
+
 ### §1.3 — bash 3.2 on macOS
 `bash --version` (expect 3.2.x), then run the installer with `/bin/bash` explicitly, and run
 `.private/tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose

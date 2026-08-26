@@ -1,0 +1,79 @@
+# Debian stable: a machine where `apt` is already the right answer and the installer refuses it
+# anyway.
+#
+# THE POINT OF THIS FIXTURE IS THAT DEBIAN NOW WORKS, and it used to be the opposite. Debian 13
+# (trixie, current stable) is an apt distro, so install_podman's `apt-get` (installer:591) was
+# always correct here -- what turned it away was the version floor, since trixie ships podman
+# 5.4.2 and MIN_PODMAN was 5.7.0. That was the whole argument for measuring the floor: #94 is
+# about package managers, and the largest excluded population was being excluded by a number
+# instead. The floor is 4.9.0 now, so this machine is SUPPORTED, and the case asserts that the
+# survey accepts it and the install proceeds.
+#
+# A SECOND RUNG ON THE VERSION LADDER, and that is the other reason it comes first.
+# Containerfile.podman-old is ubuntu:24.04 at 4.9.3, which is two majors back and could
+# plausibly be missing anything. 5.4.2 is three MINORS back, which is much harder to wave away,
+# so it is the version the floor has to justify itself against. Whether it can is measured
+# separately; see the MIN_PODMAN ladder in 26-installer-sandbox.sh.
+#
+# TIER A -- NO NESTING ADAPTATIONS, deliberately, and it is Containerfile.machine's five
+# departures that are absent rather than anything added here:
+#
+#   * uid 1000, not 2. The uid-2 dance exists only so an inner subuid range can cover gid 65534
+#     (Containerfile.machine:69-82); nothing here runs a nested podman, so the student is the
+#     uid a student actually has.
+#   * a real 200000-65536 subuid range, which is what the installer itself would write
+#     (installer:653) rather than the 3:65534 an outer userns window forces.
+#   * no vfs override, no cgroupfs override, no XDG_RUNTIME_DIR, no local repository.
+#
+# So this machine is MORE faithful than the one the rest of the tier runs on, and it is cheaper.
+# machine_flags hands this base no capabilities and no devices at all.
+#
+# PINNED BY DIGEST, like Containerfile.machine, so `podman --version` inside cannot drift under
+# the assertions that name 5.4.2. Measured before pinning: apt-cache policy in this image reports
+# candidate 5.4.2+ds1-2+b2.
+FROM debian:13@sha256:6788062a1b42ac281f053ac876170b79a3eaed5d61383b8ed7eaca6c6965f3b1
+
+# podman is the point; sudo, curl and openssh-client are here so that nothing ELSE needs doing and
+# the refusal is the only thing the run can be about -- the same reasoning, and the same package
+# line, as Containerfile.podman-old.
+#
+# uidmap IS ON THE LINE, and it has to be now. While MIN_PODMAN was 5.7.0 this machine was refused
+# in the survey before the setuid helpers were ever probed, so leaving them out cost nothing. At
+# MIN_PODMAN_LINUX=4.9.0 Debian's 5.4.2 is ACCEPTED, the survey carries on to the uidmap check
+# (installer:431), finds them missing and asks to install them -- and this fixture has no local
+# repository and runs with --network=none, so that install could not succeed. The case would have
+# been about a missing package instead of about Debian being supported.
+#
+# --no-install-recommends otherwise, which is what keeps this fixture at a third of the machine's
+# size: it leaves out buildah, criu, catatonit and dbus-user-session, none of which the survey
+# looks for.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo openssh-client curl podman uidmap \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \
+ && useradd -m -u 1000 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# A range, so the subuid consent item cannot appear and confuse a refusal that should be the only
+# thing in the transcript. Unreachable in practice for the reason above -- survey dies first --
+# but a fixture whose state depends on the order of two checks is a fixture waiting to surprise
+# somebody.
+RUN printf 'student:200000:65536\n' > /etc/subuid \
+ && printf 'student:200000:65536\n' > /etc/subgid
+
+# The graph root's parent, pre-created student-owned. The single `podman --version` survey runs
+# does not create it, but any podman command that touches the runtime does, and an ADDED path
+# there reads as a change the installer made when it did not. Same treatment as podman-old.
+RUN mkdir -p /home/student/.local/share/containers && chown -R student:student /home/student/.local
+
+# The two tmpfs mount points the harness adds, so mounting over them is not itself a change.
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+# NO /etc/cs193v-fixture-id, unlike Containerfile.machine, and it is not an omission. That stamp
+# exists so a nest probe can prove it ran inside the fixture rather than on the host; every
+# assertion here reads the installer's transcript, which only the container produces, and
+# `podman version 5.4.2` is itself proof of the boundary -- the host runs 5.7.0 or newer.
+USER student
+WORKDIR /home/student

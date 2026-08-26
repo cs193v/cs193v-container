@@ -4,9 +4,16 @@
 #
 #   /tmp/containers-user-1000, /tmp/podman-run-1000
 #                   REAL podman's runtime directories, created by the single
-#                   `podman --version` that survey runs. This is the one fixture with a
-#                   genuine podman, so it is the only place they appear -- and they are a real
-#                   part of the blast radius on any machine that already has podman.
+#                   `podman --version` that survey runs. They are a real part of the blast
+#                   radius on any machine that already has podman.
+#
+# THE EXACT SET IS PODMAN-VERSION-SPECIFIC, and this file has now caught that twice. The fixture
+# moved from ubuntu:24.04 (podman 4.9.3) to ubuntu:22.04 (3.4.4) when the floor dropped to 4.9.0
+# and 24.04's podman became a SUPPORTED machine rather than a refused one -- and 3.4.4 creates
+# `/tmp/podman-run-1000/containers`, which 4.9.3 did not. podman 5.x is different again: it drops
+# /tmp/containers-user-1000 entirely, consolidates into /tmp/storage-run-1000, and adds
+# ~/.config. So this audit tracks podman's own behaviour as much as the installer's, which is
+# worth knowing before assuming a red line here is a bug in the installer.
 #   /work           the read-only mount this harness adds, not the installer
 #   C /etc          podman bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf into
 #                   every container, which moves the directory's mtime. Present in every case.
@@ -17,6 +24,7 @@
 A /tmp/containers-user-1000
 A /tmp/containers-user-1000/containers
 A /tmp/podman-run-1000
+A /tmp/podman-run-1000/containers
 A /tmp/podman-run-1000/libpod
 A /work
 C /etc
