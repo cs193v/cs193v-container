@@ -50,7 +50,23 @@ cmd_state() {
         "$( [ "$(knob reg.query.rc 0)" = 0 ] && printf 'yes' || printf "no  -- reg query exits $(knob reg.query.rc 0)" )"
     printf '  wsl.exe on PATH      %s\n' \
         "$( [ "$(knob where.wsl.exe 1)" = 0 ] && printf 'NO -- it will try to install WSL' || printf 'yes' )"
-    printf '  wsl --status         exits %s\n' "$(knob wsl.status.rc 0)"
+    printf '  wsl --status         exits %s%s\n' "$(knob wsl.status.rc 0)" \
+        "$( [ "$(knob wsl.status.novirt 0)" = 0 ] && printf '' \
+            || printf ', and PRINTS that virtualisation is off -- on stdout, still exiting 0' )"
+    printf '  a hypervisor         %s\n' \
+        "$( [ "$(knob ps.novirt 0)" = 0 ] && printf 'is loaded' \
+            || printf 'is NOT loaded -- so WSL2 cannot start a VM' )"
+    printf '  VM Platform          %s\n' \
+        "$( [ "$(knob ps.vmp.disabled 0)" = 0 ] && printf 'enabled' \
+            || printf 'OFF -- the one cause setup can fix, with a restart' )"
+    printf '  hypervisorlaunchtype %s\n' \
+        "$( [ "$(knob ps.launchtype.off 0)" = 0 ] && printf 'not Off' \
+            || printf 'Off -- setup hands over bcdedit and will not run it' )"
+    printf '  creating the distro  %s\n' \
+        "$( [ "$(knob wsl.install.novirt 0)" != 0 ] && printf 'fails at CreateVm, AFTER downloading' \
+            || { [ "$(knob wsl.install.rebootrequired 0)" != 0 ] \
+                 && printf 'enables a component, installs nothing, exits 0' \
+                 || printf 'works'; } )"
     printf '  registered distros   %s\n' \
         "$( [ -s "$CASE/wsl.list" ] && tr '\n' ' ' < "$CASE/wsl.list" || printf '(none)' )"
     printf '  --name supported     %s\n' \
@@ -125,8 +141,36 @@ Everything you can change, by writing a file into /tmp/case
   wsl.status.msg KEY      a message key from ./messages to print with it
   wsl.update.rc N         `wsl --update`
   wsl.feature.rc N        `wsl --install --no-distribution`
+  wsl.status.novirt 1     --status PRINTS that the Virtual Machine Platform is missing and
+                          STILL EXITS 0. Status() ends in an unconditional `return 0`, so the
+                          diagnosis is on stdout and the exit code cannot carry it -- issue
+                          #112, where the .cmd sent that stdout to nul
+  wsl.status.nowsl1 1     --status also prints the WSL1-unsupported line
+  ps.novirt 1             no hypervisor is loaded. The OUTCOME every cause of
+                          HCS_E_HYPERV_NOT_INSTALLED shares, and what the pre-flight asks
+  ps.vmp.disabled 1       ...because the Virtual Machine Platform is off. The one cause setup
+                          can fix, on the restart it already asks for
+  ps.launchtype.off 1     ...because hypervisorlaunchtype is Off. Setup hands over the
+                          bcdedit command and refuses to run it -- a boot-config change can
+                          ask for a BitLocker recovery key at the next restart
+  ps.virt.rc N            force the hypervisor probe alone. Anything but 0 or 1 is
+                          "the question failed", which is NOT "no"
+  ps.vmp.rc N             same, for the Virtual Machine Platform probe
+  ps.launchtype.rc N      same, for the boot-configuration probe
+  ps.distro.rc N          same, for the distro probe. Use this rather than ps.rc when you
+                          want ONLY that probe to fail
   wsl.name.unsupported 1  WSL older than 2.5.8: no --name, exits -1
   wsl.install.fails 1     creation refused (name already in use)
+  wsl.install.novirt 1    `--install -d` downloads, installs, then fails at CreateVm with
+                          HCS_E_HYPERV_NOT_INSTALLED -- the transcript in issue #112,
+                          including the two lines proving the download already happened
+  wsl.install.rebootrequired 1
+                          `--install -d` enables a component, prints the reboot notice,
+                          installs NOTHING and exits ZERO. So "it exited 0" and "the distro
+                          is there" are unrelated claims
+  wsl.feature.nothingmissing 1
+                          `--install --no-distribution` had nothing to enable, so it reports
+                          plain success rather than reboot-required
   wsl.install.rc N        the exit code of the LAUNCHED SHELL, which is what
                           `wsl --install` actually returns -- not the install's
   wsl.curl.missing 1      curl is not in the distro. Stage one installs it rather
@@ -143,9 +187,10 @@ Everything you can change, by writing a file into /tmp/case
                           the outside. install-cs193v.sh's last line is missing from
                           it, and the sentinel check is what refuses
   wsl.bash.rc N           what stage 2 (install-cs193v.sh) exits with
-  ps.rc N                 force the distro probe. -1 = answer honestly.
-                          9009 = powershell missing, which is "cannot tell",
-                          NOT "absent" -- the installer has a separate arm for it
+  ps.rc N                 force EVERY probe -- which is what powershell being missing looks
+                          like, and 9009 is cmd's own not-found code. -1 = answer honestly.
+                          "cannot tell" is NOT "no", and the installer has a separate arm
+                          for it at each probe. To break one probe only, use ps.<name>.rc
   wsl.list                one distro name per line. Empty = a fresh WSL
 
   wsl.oobe 0              skip Ubuntu's first-run setup entirely

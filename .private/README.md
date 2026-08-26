@@ -834,6 +834,25 @@ unlaunchable browser fails the build instead of the student.
 to be "Chrome is not installed", and now the honest reason is that Playwright puts
 `--disable-dev-shm-usage` in its own default chromium arguments.
 
+**`bcdedit /set hypervisorlaunchtype Auto`, rejected — and it is the tempting one (issue #112).**
+`hypervisorlaunchtype Off` is the likeliest *fixable* reason a Windows machine cannot start WSL2:
+"disable VBS to gain FPS" guides leave it that way, as do some third-party hypervisor installers.
+One elevated command fixes it, and it would take effect on the restart `install-cs193v-windows.cmd`
+already asks for — so there is no extra restart to argue about, which is exactly what makes it
+tempting. What it also does is change how the computer starts up, and **a boot-configuration change
+can trigger a BitLocker recovery prompt at the next restart**, because the TPM measures boot
+configuration. Device encryption is on by default on a lot of Windows 11 hardware. A student without
+their recovery key written down is then locked out of their own laptop by a course installer, which
+is not a failure mode this project gets to have. So `:hypervisoroff` prints the command, says why it
+will not run it, and tells them to ask staff first if they do not have the key.
+
+The two Windows *features* are a different question and are enabled freely: `wsl --install -d` runs
+the same `dism /enable-feature` for itself, so the installer calling
+`wsl --install --no-distribution` first takes no authority it did not already take — it only asks
+before spending 600 MB, and then asks for the restart it already needed. `lib/cmdlint.sh`'s
+`cmdlint_bcdedit_writes` rule is what keeps the boot-configuration half of this decision true; the
+BitLocker claim itself is a MANUAL.md item, still unverified on real hardware.
+
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open
 item below for the set that was deferred. These are the branches that were measured and dropped, so

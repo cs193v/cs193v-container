@@ -182,6 +182,30 @@ cmdlint_unchecked_calls() {           # cmdlint_unchecked_calls FILE -> violatio
     }'
 }
 
+# The installer may ASK about the boot configuration and may not CHANGE it. `bcdedit /enum` is a
+# read; `/set`, `/deletevalue`, `/import` and `/export` are not.
+#
+# WHY A RULE AND NOT A COMMENT. `bcdedit /set hypervisorlaunchtype Auto` is the one-line fix for
+# the likeliest cause of issue #112, it would ride the restart the installer already asks for, and
+# it is therefore a genuinely tempting thing for the next person to add. What it also does is
+# change how the computer starts up -- and on a machine with BitLocker on, a boot-configuration
+# change can ask for the recovery key at the next restart. A student without that key written down
+# is locked out of their laptop by a course installer. So the file hands the command over and
+# explains why it will not run it, and this is what keeps that true.
+cmdlint_bcdedit_writes() {            # cmdlint_bcdedit_writes FILE -> violations
+    [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
+    # `echo` IS EXEMPT, and that exemption is the whole reason this needs care rather than a grep:
+    # the file HANDS THE STUDENT `bcdedit /set hypervisorlaunchtype Auto` to run themselves, so the
+    # exact string this rule bans has to be printable. Measured -- the first version of the rule
+    # flagged its own message. Everything else is in scope, including a `set` that builds a
+    # PowerShell probe and the `powershell` call that runs one, which is how a write would most
+    # plausibly arrive here now that three probes already go that way.
+    _cmdlint_commands "$1" | awk -F'\t' '
+    $3 != "echo" && tolower($4) ~ /bcdedit/ && tolower($4) ~ /\/(set|deletevalue|import|export)/ {
+        printf "line %d: bcdedit WRITES the boot configuration, which can trigger a BitLocker recovery prompt on the next restart: %s\n", $2, $4
+    }'
+}
+
 cmdlint_captures() {                  # cmdlint_captures FILE -> violations
     [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
     _cmdlint_commands "$1" | awk -F'\t' '

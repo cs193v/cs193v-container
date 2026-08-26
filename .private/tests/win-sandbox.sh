@@ -66,6 +66,23 @@ WHAT THE MACHINE IS LIKE
                        really returns -- and what \`if errorlevel 1\` could not see)
   --no-distro          nothing registered yet, so it creates the environment
   --old-wsl            WSL older than 2.5.8: no --name, so creation fails
+
+  THE FOUR SHAPES OF ISSUE #112 -- a machine that cannot run a virtual machine. All four
+  reached the SAME wrong message before the pre-flight existed: "Naming a new environment
+  needs WSL 2.5.8 or newer", after downloading Ubuntu. Use --rev to watch that.
+  --no-virt            no hypervisor loaded, component on, boot config fine: the cause is
+                       below Windows and setup can only name it
+  --vmp-off            no hypervisor because the Virtual Machine Platform is off. THE CLEAN
+                       WINDOWS 11 CASE: wsl.exe is there inbox, the feature is not, and this
+                       is the one setup can fix on the restart it already asks for
+  --launchtype-off     hypervisorlaunchtype Off. Setup hands over the one command and
+                       explains why it will not run it for you
+  --createvm-fails     the probes all say the machine is fine and \`wsl --install -d\` still
+                       fails at CreateVm, which is a real box (WSL#12894). Watch that the
+                       refusal does not pretend to know why
+  --reboot-required    \`wsl --install -d\` enables a component, prints the reboot notice,
+                       installs NOTHING and exits ZERO. The shape that made "it exited 0"
+                       and "the environment is there" look like the same claim
   --shell-rc N         the exit code of the shell \`wsl --install\` LAUNCHES. Not the
                        install's own, which is the point: N=1 must NOT read as a failure
   --apt-fails [RC]     \`apt-get install\` fails (default -1) while installing curl
@@ -97,6 +114,10 @@ EXAMPLES
   tests/win-sandbox.sh --dir 'cs193v (1)'           # the folder name that used to break it
   tests/win-sandbox.sh --old-wsl --no-distro        # the --name refusal
   tests/win-sandbox.sh --probe-fails                # "cannot tell" vs "absent"
+  tests/win-sandbox.sh --no-virt                    # issue #112, refused before the download
+  tests/win-sandbox.sh --vmp-off                    # the clean Windows 11 box: enable + restart
+  tests/win-sandbox.sh --launchtype-off             # the one command, handed over not run
+  tests/win-sandbox.sh --rev accfb1b --createvm-fails   # the wrong message, as it shipped
   tests/win-sandbox.sh --no-curl                    # watch it install curl first
   tests/win-sandbox.sh --truncated                  # a wifi sign-in page instead of the script
   tests/win-sandbox.sh --download-fails 6           # no such host
@@ -163,6 +184,13 @@ while [ "$#" -gt 0 ]; do
                           setk wsl.status.rc "$OPTVAL"
                           setk wsl.status.msg MessageWslOptionalComponentRequired ;;
         --no-distro)      DISTROS='' ;;
+        # ps.novirt is set by all three, because "no hypervisor" is the OUTCOME every cause
+        # shares -- the second knob is which cause, which is what the installer branches on.
+        --no-virt)        setk ps.novirt 1; setk wsl.status.novirt 1; DISTROS='' ;;
+        --vmp-off)        setk ps.novirt 1; setk ps.vmp.disabled 1; DISTROS='' ;;
+        --launchtype-off) setk ps.novirt 1; setk ps.launchtype.off 1; DISTROS='' ;;
+        --createvm-fails) setk wsl.install.novirt 1; DISTROS='' ;;
+        --reboot-required) setk wsl.install.rebootrequired 1; DISTROS='' ;;
         --old-wsl)        setk wsl.name.unsupported 1; DISTROS='' ;;
         --shell-rc)       needval --shell-rc "${2:-}"; shift; setk wsl.install.rc "$1" ;;
         --shell-rc=*)     setk wsl.install.rc "${1#--shell-rc=}" ;;

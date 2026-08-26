@@ -690,6 +690,40 @@ settle, and one it should not be trusted on:
    components with no published exit-code contract, so their wording is third-party-attested only.
    The suite gates on their exit codes and matches prose loosely. *Verify once:* run
    `net session` elevated, unelevated, and with the Server service stopped, and compare.
+5. **Whether this computer can run a virtual machine at all** — the prerequisite this list did not
+   have, and issue #112 is what its absence cost: the installer said "WSL is installed", downloaded
+   Ubuntu, failed at `CreateVm` with `HCS_E_HYPERV_NOT_INSTALLED`, and told the student their WSL
+   was too old. The suite now drives all four shapes under wine, but every probe it drives is faked,
+   so **what the probes really answer on real hardware is unverified.** Three things to check, each
+   on a box in that state:
+   - **Firmware virtualization off.** Confirm the installer refuses **before** downloading Ubuntu
+     and names the firmware — `wincmd log`'s equivalent is that `wsl --install -d` never runs.
+     Confirm `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` really is `False` here, and
+     that it is `True` on a working box with only Virtual Machine Platform on and no Hyper-V role.
+     That property is the load-bearing one: everything else branches off it.
+   - **Virtual Machine Platform off, on a clean Windows 11 box** where `wsl.exe` is present inbox.
+     Confirm the installer enables it and asks for a restart rather than mentioning `wsl --version`,
+     and that the restart is the *only* one — `wsl --install --no-distribution` should leave nothing
+     for a second pass to enable. Time `Get-WindowsOptionalFeature -Online -FeatureName
+     VirtualMachinePlatform`: it goes through DISM, and if it takes long enough to look like a hang
+     the probe needs a "checking..." line in front of it.
+   - **`hypervisorlaunchtype Off`.** Confirm `bcdedit /enum '{current}'` prints the line when set and
+     omits it when not, and that the probe's empty-output arm really fires when bcdedit cannot read
+     the store — that arm exists so a failed question does not read as "not Off".
+
+   **What stays unmeasured, and should be recorded rather than assumed:** which of the three states
+   the machine in #112 actually had. The transcript proves only that the prerequisite check passed
+   and `CreateVm` failed, which is consistent with all three. If it turns out to have been a guest
+   VM without nested virtualization, that becomes the leading cause in `:nohypervisor`'s wording
+   *and* the one prerequisite here that a suite could regression-test cheaply, since a guest VM is
+   something staff can create on demand.
+
+   **And the decision not to fix it automatically**, which is a policy question a real box cannot
+   settle: `bcdedit /set hypervisorlaunchtype Auto` would fix the third state on the restart the
+   installer already asks for, and it is refused because a boot-configuration change can trigger a
+   BitLocker recovery prompt at the next restart. *Verify that claim once*, on a box with device
+   encryption on — it is the entire argument for handing the command over instead of running it, and
+   `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` rule exists to hold the line either way.
 
 ### Ubuntu's first-run setup, which the installer warns about but cannot control
 `wsl --install -d Ubuntu-26.04 --name CS193V` **launches** the new distribution and returns *the
