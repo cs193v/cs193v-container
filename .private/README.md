@@ -957,6 +957,40 @@ TERMing the container's own processes before the stop would fix that; it is a se
 Each rejection is documented where it would otherwise be tempting — the invariants block
 in `.config/container.args`, and the comments in the `Containerfile`.
 
+### Distros deliberately not in the install tier
+
+Three families are covered (`--base debian`, `fedora`, `arch`), which is the smallest set that
+makes the *shape* of a fix for #94 visible rather than a coincidence: three package managers,
+three spellings of the ssh client, and a `uidmap` package that exists on exactly one of them. What
+is left out, and why:
+
+- **openSUSE Tumbleweed (zypper).** Cheap once three families exist, and skipped for that reason
+  rather than despite it: it is a fourth `case` arm over machinery that is already proven, on a
+  small population, and Tumbleweed's podman 6.0.2 clears the floor comfortably. It is the base
+  least likely to teach us anything the other three did not. Leap is a different matter — 15.6
+  ships podman 4.9.5, which the 4.9.0 floor now admits.
+- **NixOS, and the atomic distros** — Silverblue, Kinoite, Bazzite, SteamOS, MicroOS. These need
+  *detect-and-refuse*, not an install path. `rpm-ostree` and `transactional-update` stage a package
+  layer that needs a **reboot**, which no installer can perform and no container can model; NixOS
+  has no imperative install at all, only an edit to `configuration.nix`. A clear refusal naming the
+  distro beats an install arm that can only ever half-work and would rot unread.
+- **ChromeOS / Crostini.** Worth naming separately because it looks supported and may not be: it is
+  Debian underneath, so apt is already correct, but it is *already a VM containing a container*,
+  and whether rootless podman nests a third level inside Crostini is unmeasured. Not refused, not
+  claimed.
+- **Alpine and musl generally.** A plausible fixture and an implausible student laptop. It also
+  cannot run the installer at all: there is no `bash` in a stock Alpine, and the installer is bash
+  (`menu()` needs `read -rsn1`, and `lib/assert.sh` explains why the suite is bash 3.2-compatible
+  rather than POSIX).
+
+**And one thing that is not a distro difference, though it was planned as one.** The Arch fixture
+was built believing Arch leaves `/etc/subuid` empty, which would have made it the one case in the
+tier that reaches `setup_subuid`. Measured: `archlinux:base` ships no such file, but `useradd`
+creates one — the fixture's own student came out with `student:100000:65536` unasked. An empty
+range is a property of an account that **predates** the file, not of any distro; upstream shadow
+has populated it for useradd-created users since 4.11.1-3. `--no-prereqs=subuid` is the knob for
+that state on any base, and `lib/sandbox-guest.sh` records why it stays hand-driven.
+
 ## Open items
 
 ### ~~Enforcing the bind rule~~ — resolved by the tunnel
