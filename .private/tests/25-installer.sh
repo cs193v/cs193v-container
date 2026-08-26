@@ -968,6 +968,52 @@ assert_eq "windows:does-not-look-for-a-sibling" "" \
           "$(_cmdlint_commands "$W" \
              | awk -F'\t' '$4 ~ /%HERE%|wslpath|%TEMP%/ { print "line " $2 ": " $4 }')"
 
+# ─── the virtualisation pre-flight, and the line it must come before ──────────
+#
+# ORDER, which no wine run can prove: asking whether the computer can run a virtual machine is
+# only worth anything BEFORE the call that needs one. Issue #112 is what "after" costs -- the
+# refusal arrived once Ubuntu had already been downloaded, and it named the wrong cause.
+#
+# Both line numbers must exist, so removing the probe or renaming the create goes RED rather than
+# quiet. Against the file as it shipped, the first of them is empty and this fails.
+virt_ln="$(sed 's/\r$//' "$W" | grep -n '%VIRTPROBE%' | head -1 | cut -d: -f1)"
+create_ln="$(sed 's/\r$//' "$W" | grep -n -- '-d %IMAGE_NAME%' | head -1 | cut -d: -f1)"
+assert_ok "windows:asks-about-virtualisation-before-creating" \
+          sh -c "test -n '$virt_ln' && test -n '$create_ln' && test '$virt_ln' -lt '$create_ln'"
+
+# ...and each of the three probes must keep its third state. `if %errorlevel% equ 0` alone would
+# make "the question failed" mean "yes", which is the class :probefailed already exists for.
+for probe in VIRTPROBE VMPPROBE BCDPROBE; do
+    assert_ok "windows:the-$probe-answer-has-three-states" \
+              sh -c "sed 's/\r\$//' '$W' | grep -A4 -F 'Command \"%$probe%\"' | grep -q 'neq 1 goto\|neq 0 goto'"
+done
+
+# The installer ASKS about the boot configuration and does not CHANGE it -- see the rule's own
+# header in lib/cmdlint.sh for why that is a decision and not an omission.
+assert_eq "windows:never-writes-the-boot-configuration" "" \
+          "$(run_checker cmdlint_bcdedit_writes "$W")"
+
+# ...AND THE RULE CAN GO RED, demonstrated rather than trusted. Every other rule in this section
+# has a real violation in the file's history to point at. This one guards a decision that was
+# never coded, so a typo in its regex would be indistinguishable from a clean file -- which is
+# the same "a gate that cannot go red is an assertion only in appearance" the deleted
+# install-cs193v.sh grep above was killed for.
+# BOTH ROUTES, because the rule claims to reach both and a demonstration of one would leave the
+# other as an assertion about a regex nobody ran. The direct call is the obvious way in; the
+# PowerShell one is the likely way in, since three probes already go that way.
+for route in 'bcdedit /set hypervisorlaunchtype Auto' \
+             'powershell -NoProfile -Command "bcdedit /set hypervisorlaunchtype Auto"'; do
+    violating="$TMP/bcdedit-violation.cmd"
+    { sed 's/\r$//' "$W"; printf '%s\n' "$route"; } | sed 's/$/\r/' > "$violating"
+    assert_ne "windows:the-boot-configuration-rule-catches-[$route]" "" \
+              "$(run_checker cmdlint_bcdedit_writes "$violating")"
+done
+
+# ...and it must NOT catch the file handing that command over as text, which is what the file
+# actually does. Measured: the first version of this rule flagged its own message.
+assert_ok "windows:the-file-may-still-print-that-command" \
+          sh -c "sed 's/\r\$//' '$W' | grep -q 'echo .*bcdedit /set hypervisorlaunchtype Auto'"
+
 # %HERE% was the only thing DEMONSTRATING the header's delayed-expansion ban: `Down!loads`
 # silently became `Downloads` when %~dp0 was expanded under it. With %HERE% gone the rule needs
 # its own keeper, or the ban becomes documentation with nothing behind it.

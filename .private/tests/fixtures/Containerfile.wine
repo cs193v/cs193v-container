@@ -18,8 +18,11 @@
 # statically. See lib/cmdlint.sh.
 #
 # COST. libwine is ~1.15 GB installed and pulls gstreamer/avcodec/X11/wayland, so this image is
-# ~2.2 GB. It is content-hash cached by fixture_build like every other fixture, and the tier it
-# serves is not in DEFAULT_TIERS, so a normal run never builds it.
+# LARGE: 3.45 GB, measured with `podman images` on 2026-08-26. The comment here used to say
+# ~2.2 GB, which had drifted -- the base image and wine's dependency closure both move under it,
+# so this number is worth re-reading rather than trusting. It is content-hash cached by
+# fixture_build like every other fixture, and the tier it serves is not in DEFAULT_TIERS, so a
+# normal run never builds it.
 FROM docker.io/library/ubuntu:26.04
 
 # --no-install-recommends is load-bearing, not tidiness: it keeps i386 multiarch out entirely.

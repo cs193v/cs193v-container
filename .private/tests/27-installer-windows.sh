@@ -5,7 +5,8 @@
 #
 # `windows` is not in DEFAULT_TIERS (run-tests.sh:64) and lane_of() sends an unrecognised tier to
 # the serialised podman lane, so this needs no change to the runner and never runs on a default
-# invocation. That is deliberate: the fixture carries wine, which is ~2.2 GB.
+# invocation. That is deliberate: the fixture carries wine, and the image is 3.45 GB -- see
+# fixtures/Containerfile.wine, which holds the measurement and the date it was taken.
 #
 #     .private/tests/run-tests.sh --tier windows
 #
@@ -41,10 +42,38 @@ assert_file "windows:message-table-exists" "$MSGFILE"
 assert_eq "windows:every-message-has-a-provenance-tier" "" \
     "$(awk -F'\t' '!/^#/ && NF && NF!=3 {print "malformed: " $0}' "$MSGFILE")"
 assert_eq "windows:no-unknown-provenance-tier" "" \
-    "$(awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABCD]$/ {print $1 " has tier " $2}' "$MSGFILE")"
+    "$(awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABCDE]$/ {print $1 " has tier " $2}' "$MSGFILE")"
 # The fakes must hold no prose of their own -- that is what makes the table auditable.
 assert_eq "windows:fakes-hold-no-prose" "" \
     "$(grep -nE '(printf|fputs)\s*\(\s*"[A-Z][a-z]+ [a-z]' "$FIXTURE_DIR"/win-fakes/fake-*.c || true)"
+
+# ─── AND EVERY MESSAGE IN IT MUST BE REACHABLE ────────────────────────────────
+#
+# THE GATE THAT WOULD HAVE CAUGHT #112, and it is worth saying exactly how it failed to. The
+# table was transcribed off microsoft/WSL's own source, tier-tagged, and correct -- including
+# MessageEnableVirtualization and SystemErrorRebootRequired, which are the verbatim prose of the
+# two defects in that issue. TEN of its thirty-three keys were wired to nothing: no fake named
+# them, no case named them, no win-sandbox.sh flag reached them. So the file read as coverage of
+# a failure the suite could not produce, and the installer shipped a message blaming the WSL
+# version for it.
+#
+# WHAT THIS ASSERTS IS REACHABILITY, NOT EXECUTION, and the difference matters enough to write
+# down: a key named only by a fake arm that no case drives still passes here. That is deliberate
+# -- the thing worth banning outright is a string with no mechanism at all -- but it means a
+# green run here is not a claim that every message was printed. `record` below reports which
+# keys are named ONLY by a fake, so that weaker half is visible rather than implied.
+mt_keys="$(awk -F'\t' '!/^#/ && NF==3 {print $1}' "$MSGFILE")"
+mt_dead=''; mt_fake_only=''
+for k in $mt_keys; do
+    if grep -qF "$k" "$FIXTURE_DIR"/win-fakes/*.c 2>/dev/null; then
+        grep -qF "$k" "$0" "$TESTS_DIR/win-sandbox.sh" "$TESTS_DIR/lib/wine-guest.sh" 2>/dev/null \
+            || mt_fake_only="$mt_fake_only $k"
+    elif ! grep -qF "$k" "$0" "$TESTS_DIR/win-sandbox.sh" "$TESTS_DIR/lib/wine-guest.sh" 2>/dev/null; then
+        mt_dead="$mt_dead $k"
+    fi
+done
+assert_eq "windows:every-message-is-reachable" "" "$(printf '%s' "$mt_dead" | sed 's/^ //')"
+record "windows:messages-named-only-by-a-fake" "$(printf '%s' "${mt_fake_only:-none}" | sed 's/^ //')"
 
 # ─── the end-to-end success path ───────────────────────────────────────────────
 #
@@ -116,6 +145,123 @@ for rc in -1 1 2 9009; do
     assert_says     "win-status-$rc:offers-to-install-wsl"           "Installing WSL" "$WINE_OUT"
 done
 
+# ─── CLASS: a machine that cannot run a VM must be refused, and refused ACCURATELY ─────────────
+#
+# Issue #112. The gate above is about `wsl --status` FAILING; this class is about the machine
+# where it SUCCEEDS and is still unusable, which is the one that shipped broken.
+#
+# Status() prints the default distro, the default version, a line if the WSL optional component
+# is missing and a line if vmcompute is missing -- then `return 0` UNCONDITIONALLY
+# (WslClient.cpp:1179-1209). So the diagnosis arrives on STDOUT with a zero exit code, and the
+# .cmd sent stdout to nul and branched on the code. It then spent 600 MB downloading Ubuntu,
+# failed at CreateVm, and told the student their WSL was too old.
+#
+# THE FOUR STATES ARE ASSERTED SEPARATELY because the installer owes a different answer to each,
+# and collapsing them is precisely the defect: two are things it can fix, one is a refusal, and
+# one is "the question failed", which is not an answer at all.
+
+# 1. THE MACHINE IN THE ISSUE. --status says so and exits 0; no hypervisor is loaded; the
+#    optional component is on and the boot config is fine -- so the cause is below Windows.
+wine_new
+wine_list                                   # nothing registered yet: this is a first install
+wine_knob wsl.status.novirt 1                # --status PRINTS the warning...
+wine_knob ps.novirt 1                        # ...and no hypervisor is actually running
+wine_run
+assert_ne   "win-novirt:refuses"                    "0" "$WINE_RC"
+assert_says "win-novirt:says-what-is-wrong"         "virtualization is switched off below Windows" "$WINE_OUT"
+assert_says "win-novirt:names-the-firmware"         "firmware" "$WINE_OUT"
+assert_says "win-novirt:names-the-other-cause"      "running inside a virtual machine" "$WINE_OUT"
+assert_says "win-novirt:points-at-the-instructions" "aka.ms/enablevirtualization" "$WINE_OUT"
+# THE ASSERTION THIS WHOLE CLASS EXISTS FOR. The shipped file sent this machine to `wsl --version`,
+# which answers "2.9.8" and helps nobody.
+#
+# PINNED TO THE INSTRUCTION, NOT THE SENTENCE. `wsl --version` is what makes the old message
+# actively misleading, and it survives rewording of the prose around it -- so a future edit that
+# softens the wording while still sending this machine to the wrong command still goes red.
+assert_says_not "win-novirt:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
+assert_says_not "win-novirt:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
+# BEFORE the download, not after it. This is the difference the pre-flight buys, and the only
+# way to state it is over what was CALLED -- the prose would read the same either way.
+assert_eq   "win-novirt:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+assert_says_not "win-novirt:does-not-claim-success"    "Done. From now on" "$WINE_OUT"
+
+# 2. THE ONE IT CAN FIX. No hypervisor because the optional component is off -- which is a clean
+#    Windows 11 box, where wsl.exe is present inbox and the feature is not enabled. It must enable
+#    it and use the restart it already asks for, NOT mention the WSL version.
+wine_new
+wine_list
+wine_knob ps.novirt 1
+wine_knob ps.vmp.disabled 1
+wine_run
+assert_eq   "win-vmp-off:exits-zero-because-nothing-failed" "0" "$WINE_RC"
+assert_says "win-vmp-off:says-what-it-is-doing"     "Turning on the Virtual Machine Platform" "$WINE_OUT"
+assert_eq   "win-vmp-off:enables-the-feature-once"  "1" "$(wine_argv_count '\-\-install --no-distribution')"
+assert_says "win-vmp-off:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
+assert_says "win-vmp-off:tells-them-to-rerun"       "run this same file again" "$WINE_OUT"
+assert_eq   "win-vmp-off:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+assert_says_not "win-vmp-off:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
+assert_says_not "win-vmp-off:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
+
+# 3. THE BOOT CONFIGURATION. Features on, firmware on, and Windows told not to start its
+#    hypervisor -- which is what "disable VBS to gain FPS" advice and some third-party hypervisor
+#    installers leave behind. The installer NAMES it and hands over the one command.
+#
+# It deliberately does not RUN that command: a boot-configuration change can ask for a BitLocker
+# recovery key at the next restart, and device encryption is on by default on a lot of Windows 11
+# hardware. Locking a student out of their laptop is not a failure mode a course installer gets to
+# have. The negative assertion is the keeper for that decision here; 25-installer.sh holds the
+# static one, which is the stronger of the two.
+wine_new
+wine_list
+wine_knob ps.novirt 1
+wine_knob ps.launchtype.off 1
+wine_run
+assert_ne   "win-launchtype:refuses"                "0" "$WINE_RC"
+assert_says "win-launchtype:names-the-cause"        "set not to start its hypervisor" "$WINE_OUT"
+assert_says "win-launchtype:gives-the-one-command"  "bcdedit /set hypervisorlaunchtype Auto" "$WINE_OUT"
+assert_says "win-launchtype:says-why-it-will-not-run-it" "BitLocker" "$WINE_OUT"
+assert_eq   "win-launchtype:does-not-run-it"        "0" "$(wine_argv_count 'bcdedit /set')"
+assert_eq   "win-launchtype:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+assert_says_not "win-launchtype:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
+assert_says_not "win-launchtype:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
+
+# 4. AND THE STATE THAT IS NOT AN ANSWER. ps.rc forces every probe, which is what a machine with
+#    no powershell looks like. The same class as win-probe below, at the new site: "the question
+#    failed" must not silently become "the answer is yes" and carry on into a 600 MB download.
+wine_new
+wine_list
+wine_knob ps.rc 9009
+wine_run
+assert_ne   "win-virtprobe:does-not-exit-zero"      "0" "$WINE_RC"
+assert_says "win-virtprobe:says-the-question-failed" "Could not ask Windows whether this computer can run" "$WINE_OUT"
+assert_says "win-virtprobe:distinguishes-it-from-no" "not the same as the answer being no" "$WINE_OUT"
+assert_eq   "win-virtprobe:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+
+# 5. THE OTHER HALF OF #112, and the one that hits a genuinely clean Windows 11 machine. When a
+#    component had to be enabled, `wsl --install -d` enables it, prints the reboot notice,
+#    installs NOTHING and exits ZERO (WslClient.cpp:544-611). The pre-flight above should mean
+#    this is unreachable -- these two cases pin that if some future machine gets past it anyway,
+#    neither shape is reported as a WSL-version problem.
+for knob in wsl.install.rebootrequired wsl.install.novirt; do
+    wine_new
+    wine_list
+    wine_knob "$knob" 1
+    wine_run
+    assert_ne "win-$knob:does-not-exit-zero"        "0" "$WINE_RC"
+    assert_says_not "win-$knob:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+    # NOT "must never mention wsl --version". The pre-flight has already said this machine can
+    # run a VM, so :distrofailed genuinely does not know why the create failed -- WSL#12894 is a
+    # real box with the component on, the firmware on, and CreateVm failing anyway. Demanding a
+    # specific diagnosis there would be demanding a guess, which is the defect.
+    #
+    # What it IS held to is the two things the shipped message got wrong: it stated one cause as
+    # the diagnosis, and it asked for `wsl --version` INSTEAD of the window that carries wsl.exe's
+    # own error code. Both of these are red against the original file.
+    assert_says "win-$knob:offers-the-cause-as-a-guess"  "a guess" "$WINE_OUT"
+    assert_says "win-$knob:asks-for-the-whole-window"    "this whole window" "$WINE_OUT"
+    assert_eq "win-$knob:never-runs-bash"           "0" "$(wine_argv_count '\-e bash ')"
+done
+
 # Creating the environment, and the on-screen promise it makes while doing so. The warning text
 # is the installer's OWN words, so it is fair to pin: it tells the student how many questions to
 # expect and that they must type `exit` to carry on, and both were wrong or missing before --
@@ -145,8 +291,16 @@ wine_list                              # nothing registered
 wine_knob wsl.name.unsupported 1       # WSL < 2.5.8: no --name at all, exits -1
 wine_run
 assert_ne   "win-name:does-not-exit-zero"        "0" "$WINE_RC"
-assert_says "win-name:blames-the-wsl-version"    "Naming a new environment needs WSL" "$WINE_OUT"
+assert_says "win-name:offers-the-wsl-version-as-a-cause" "older than 2.5.8" "$WINE_OUT"
 assert_says "win-name:asks-for-wsl-version"      "wsl --version" "$WINE_OUT"
+# AND IT MUST NOT ASSERT IT. The message names one likely cause out of several, which is the whole
+# defect in issue #112 -- a machine that could not run a VM at all was told this and only this.
+assert_says "win-name:says-it-is-a-guess"        "a guess" "$WINE_OUT"
+# AND IT MUST HAVE TRIED. This is the one cause :distrofailed names, and the file used to name it
+# without ever running the command that fixes it -- `wsl --update` was on the no-WSL-at-all arm
+# only, so a student with an old-but-working WSL was told to check a version nobody had offered
+# to raise. Counted rather than asserted as prose: the message could say anything.
+assert_eq   "win-name:tried-to-update-first"     "1" "$(wine_argv_count '\-\-update')"
 assert_says_not "win-name:does-not-claim-success" "Done. From now on" "$WINE_OUT"
 
 # A shell that exits nonzero after a SUCCESSFUL install must not be reported as a failed install.
@@ -249,9 +403,14 @@ assert_says_not "win-portal:does-not-claim-success" "Done. From now on" "$WINE_O
 # Defect 6's class. The distro probe answers with an exit code: 0 present, 1 absent, anything
 # else means the question itself failed -- which is NOT the same as "absent", and must not silently
 # become "create it".
+#
+# ps.distro.rc, NOT ps.rc. `ps.rc` forces EVERY probe, which is what a machine with no powershell
+# looks like -- and since the virtualisation pre-flight now runs first, that case trips there
+# instead and is covered by win-virtprobe above. Forcing this one probe is what keeps the
+# assertion about THIS arm, rather than about whichever probe happens to run earliest.
 wine_new
 wine_list CS193V
-wine_knob ps.rc 9009                   # powershell missing: cmd's own not-found code
+wine_knob ps.distro.rc 9009            # this probe alone cannot answer: cmd's not-found code
 wine_run
 assert_ne   "win-probe:does-not-exit-zero"        "0" "$WINE_RC"
 assert_says "win-probe:says-the-question-failed"  "Could not ask WSL which environments exist" "$WINE_OUT"

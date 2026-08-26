@@ -3,10 +3,14 @@
  *   - generic failure is -1 (0xFFFFFFFF), NOT 1. `if errorlevel 1` is a >= test and so cannot
  *     see it. This is the single most important thing this fake reproduces.
  *   - errors go to STDOUT, so an unguarded `for /f` capture takes an error message as a value.
- *   - `--status` exits 0 even with zero distributions registered.
+ *   - `--status` exits 0 even with zero distributions registered. It also exits 0 while PRINTING
+ *     that the Virtual Machine Platform is missing -- Status() ends in an unconditional
+ *     `return 0` -- which is issue #112: the .cmd read the code and discarded the message.
  *   - `-l -q` exits 0 with EMPTY output when there are none.
  *   - default output is UTF-16LE with no BOM unless WSL_UTF8=1.
  *   - `--install` LAUNCHES the distro and returns the launched shell's code, not the install's.
+ *   - `--install -d` can enable a Windows component, print a reboot notice, install NOTHING and
+ *     exit ZERO -- so "it exited 0" and "the distro is there" are unrelated claims.
  *
  * Source for all of the above: microsoft/WSL @ 2.9.8, src/windows/common/WslClient.cpp.
  *
@@ -54,6 +58,30 @@ static int answer(const char *rcknob, const char *msgknob, long dfltrc, const ch
         }
     }
     return (int)rc;
+}
+
+/* The value of `-d`, which is an IMAGE name under --install and a REGISTERED DISTRO name
+ * everywhere else. Returns NULL when the flag is absent. */
+static const char *dashd(int argc, char **argv) {
+    for (int i = 1; i + 1 < argc; i++)
+        if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--distribution") == 0)
+            return argv[i+1];
+    return NULL;
+}
+
+static int registered(const char *name) {
+    char p[1024], line[512];
+    FILE *f;
+    if (!name) return 0;
+    fake_path(p, sizeof p, "wsl.list");
+    if (!(f = fopen(p, "rb"))) return 0;
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+        if (n && strcmp(line, name) == 0) { fclose(f); return 1; }
+    }
+    fclose(f);
+    return 0;
 }
 
 static int exists(const char *leaf) {
@@ -111,14 +139,52 @@ int main(int argc, char **argv) {
     const char *distro = getenv("CS193V_FAKE_DISTRO");
     if (!distro) distro = "CS193V";
 
-    if (has(argc, argv, "--status"))
+    /* `--status`, MODELLED LINE FOR LINE off Status() (WslClient.cpp:1179-1209), because the
+     * shape of that function IS issue #112: it prints the default distro, the default version,
+     * then a line if the WSL optional component is missing and a line if vmcompute is missing --
+     * and then `return 0` UNCONDITIONALLY. So a machine with no Virtual Machine Platform says so
+     * on STDOUT and still exits zero. A fake that answered only from a knob could not express
+     * that, which is why no case ever did.
+     *
+     * wsl.status.msg is kept alongside: it is the INBOX STUB's shape, where wsl.exe is a
+     * placeholder that prints one thing and exits non-zero, and that is a different machine. */
+    if (has(argc, argv, "--status")) {
+        /* The DEFAULT distribution, which is the first registered one here. Real WSL picks it by
+         * a flag; the .cmd never reads this line, so modelling the flag would be detail for its
+         * own sake. What matters is that --status prints something and still exits 0. */
+        char list[1024], line[512];
+        FILE *lf;
+        fake_path(list, sizeof list, "wsl.list");
+        if ((lf = fopen(list, "rb"))) {
+            while (fgets(line, sizeof line, lf)) {
+                size_t n = strlen(line);
+                while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+                if (n) { fake_say(stdout, "MessageStatusDefaultDistro", line, NULL); break; }
+            }
+            fclose(lf);
+        }
+        fake_say(stdout, "MessageStatusDefaultVersion", "2", NULL);
+        if (fake_knob_int("wsl.status.nowsl1", 0))
+            fake_say(stdout, "MessageWsl1NotSupported", NULL, NULL);
+        /* THE LINE THE .cmd USED TO SEND TO nul. */
+        if (fake_knob_int("wsl.status.novirt", 0))
+            fake_say(stdout, "MessageEnableVirtualization", NULL, NULL);
         return answer("wsl.status.rc", "wsl.status.msg", 0, NULL);
+    }
 
     if (has(argc, argv, "--update"))
         return answer("wsl.update.rc", "wsl.update.msg", 0, NULL);
 
-    if (has(argc, argv, "--install") && has(argc, argv, "--no-distribution"))
-        return answer("wsl.feature.rc", "wsl.feature.msg", 0, NULL);
+    /* `--install --no-distribution`: enable the Windows components and nothing else. It closes
+     * with PrintSystemError -- ERROR_SUCCESS_REBOOT_REQUIRED when it enabled something (which is
+     * the only reason the .cmd ever calls it), NO_ERROR when there was nothing to do. */
+    if (has(argc, argv, "--install") && has(argc, argv, "--no-distribution")) {
+        int rc = answer("wsl.feature.rc", "wsl.feature.msg", 0, NULL);
+        if (rc == 0)
+            fake_say(stdout, fake_knob_int("wsl.feature.nothingmissing", 0)
+                             ? "SystemErrorSuccess" : "SystemErrorRebootRequired", NULL, NULL);
+        return rc;
+    }
 
     /* `--install -d X --name Y`. The real one downloads, registers, prints two lines, then
      * LAUNCHES -- so the code it returns belongs to the launched shell. wsl.install.rc is
@@ -130,7 +196,53 @@ int main(int argc, char **argv) {
             fake_say(stdout, "MessageInvalidCommandLine", "--name", "wsl.exe");
             return WSL_FAIL;
         }
+        /* THE PREREQUISITE ARM, AND IT RUNS BEFORE ANY DOWNLOAD. Install() calls
+         * InstallPrerequisites FIRST (WslClient.cpp:544), and when a component had to be enabled
+         * it sets rebootRequired -- which makes the `legacy || !rebootRequired` guard on
+         * InstallDistribution FALSE. So wsl.exe enables the feature, prints the reboot notice,
+         * installs NOTHING, and exits ZERO. That combination is the shape no knob here could
+         * express before, and it is the one that tells a student with a clean Windows 11 box
+         * that they need a newer WSL when all they needed was a restart (issue #112).
+         *
+         * MessageInstallingWindowsComponent is what the real one also prints here, and it is
+         * NOT in the fixture table -- absent rather than guessed, per that file's own rule -- so
+         * it is not replayed. The observables the .cmd consumes are the exit code and the fact
+         * that nothing got registered, and both are faithful. */
+        if (fake_knob_int("wsl.install.rebootrequired", 0)) {
+            fake_say(stdout, "SystemErrorRebootRequired", NULL, NULL);
+            return 0;
+        }
+        /* THE #112 SHAPE. Prerequisites pass -- the component is on, the services exist -- so
+         * the download really happens, and it is CreateVm that throws, at which point the .wsl
+         * has already been fetched. That ordering is the whole reason a pre-flight is worth
+         * having: without one the refusal arrives after 600 MB.
+         *
+         * The name printed is the `-d` argument rather than the manifest's friendly name
+         * ("Ubuntu 26.04 LTS" in the issue transcript). The friendly name belongs to Microsoft's
+         * distribution manifest, moves without notice, and nothing may assert on it. */
+        if (fake_knob_int("wsl.install.novirt", 0)) {
+            const char *image = dashd(argc, argv);
+            fake_say(stdout, "MessageDownloading", image ? image : distro, NULL);
+            fake_say(stdout, "MessageInstalling", image ? image : distro, NULL);
+            /* Wrapped in MessageErrorCode, which is the envelope EVERY thrown error gets --
+             * `{}\nError code: {}`. Both halves come from the table: the prose, and the scope
+             * chain ExecutionContext assembles at run time. Nothing here invents either. */
+            char body[4096], code[512];
+            if (!fake_msg("MessageEnableVirtualization", body, sizeof body)
+                || !fake_msg("ErrorCodeCreateVmNoHyperv", code, sizeof code)) {
+                fprintf(stderr, "win-fake: the virtualisation failure needs both "
+                                "MessageEnableVirtualization and ErrorCodeCreateVmNoHyperv\n");
+                return 120;
+            }
+            fake_say(stdout, "MessageErrorCode", body, code);
+            return WSL_FAIL;
+        }
         if (!fake_knob_int("wsl.install.fails", 0)) {
+            /* The two lines that precede every real install, and the reason the novirt arm above
+             * is worth having: they are what tells you the download had already happened. */
+            const char *image = dashd(argc, argv);
+            fake_say(stdout, "MessageDownloading", image ? image : distro, NULL);
+            fake_say(stdout, "MessageInstalling", image ? image : distro, NULL);
             fake_say(stdout, "MessageDistributionInstalled", distro, NULL);
             fake_say(stdout, "MessageLaunchingDistro", distro, NULL);
             /* `--install` LAUNCHES the distro, and what a student then sees is Canonical's
@@ -192,6 +304,16 @@ int main(int argc, char **argv) {
          * WSL_E_DEFAULT_DISTRO_NOT_FOUND and prints the four-line block with no Error code:. */
         if (!any && !quiet) { fake_say(stdout, "MessageNoDefaultDistro", NULL, NULL); return WSL_FAIL; }
         return 0;
+    }
+
+    /* EVERY ARM BELOW RUNS INSIDE A DISTRO, so the one named by `-d` has to be there. The real
+     * wsl.exe throws WSL_E_DISTRO_NOT_FOUND here and prints it -- to STDOUT, like all its errors.
+     * No case reaches this today, because the .cmd probes before it uses the distro; the guard
+     * exists so that a version which stops probing fails HERE rather than somewhere downstream
+     * with a message about the network. */
+    if (dashd(argc, argv) && !registered(dashd(argc, argv))) {
+        fake_say(stdout, "MessageDistroNotFound", NULL, NULL);
+        return WSL_FAIL;
     }
 
     /* `-e curl --version`: is curl in the distro at all? Checked BEFORE the download, so a

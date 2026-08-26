@@ -22,6 +22,12 @@
 #           old Store-era "Enter new UNIX username:" is NOT this path -- that was
 #           WSL-DistroLauncher, which `wsl --install -d` does not use.
 #
+# TIER E -- NOT a resource string at all. wsl.exe assembles the `Error code:` chain at run time
+#           from the ExecutionContext scopes an error passed through, so there is nothing in
+#           Resources.resw to read it off. Provenance is a REAL TRANSCRIPT -- issue #112 -- and
+#           the component names are checkable against the scope names in src/windows/common.
+#           Treated like tier C: the suite gates on behaviour, and matches this text loosely.
+#
 # TIER C -- well attested, NOT first-party. net.exe and where.exe are closed Windows components
 #           with no published exit-code contract, so these come from ss64 and consistent
 #           third-party reports. The suite gates on their EXIT CODES, which are agreed on; the
@@ -32,6 +38,17 @@
 #     non-zero. The fake models "non-zero with arbitrary text" and no case asserts the text.
 #   * Ubuntu's first-run OOBE transcript. That is Canonical's wsl-setup, not microsoft/WSL, and
 #     is modelled opaquely -- see MANUAL.md.
+#
+# EVERY KEY HERE MUST BE REACHABLE, and 27-installer-windows.sh asserts it: named by a fake, by a
+# case, or by a win-sandbox.sh flag. That gate was added because ten keys -- including the two
+# that describe issue #112 verbatim -- had been transcribed off the source and wired to nothing,
+# so the table read as coverage of a failure no test could produce.
+#
+# MessageNotSupportedOnLegacyDistros was DELETED rather than wired, and the reason belongs here
+# rather than in a commit message: `--name` rejecting a legacy Store distribution is a real WSL
+# behaviour, but the .cmd installs `Ubuntu-26.04` and can never reach it, so nothing could print
+# it without inventing a machine. The constraint it recorded -- that falling back to `-d Ubuntu`
+# on an old WSL would fail too -- is prose, and lives in MANUAL.md §5.4 where prose belongs.
 
 # ---- wsl.exe, success ----------------------------------------------------------
 MessageStatusDefaultDistro	A	Default Distribution: {}
@@ -51,9 +68,12 @@ MessageNoDefaultDistro	A	Windows Subsystem for Linux has no installed distributi
 MessageInvalidCommandLine	A	Invalid command line argument: {}\nPlease use '{} --help' to get a list of supported arguments.
 MessageDistroNameAlreadyExists	A	A distribution with the supplied name already exists. Use --name to choose a different name.
 MessageDistroNotFound	A	There is no distribution with the supplied name.
-MessageNotSupportedOnLegacyDistros	A	'{}' is not supported when installing legacy distributions.
 MessageWsl1NotSupported	A	WSL1 is not supported with your current machine configuration.\nPlease enable the "Windows Subsystem for Linux" optional component to use WSL1.
 MessageEnableVirtualization	A	WSL2 is unable to start since virtualization is not enabled on this machine.\nPlease ensure the "Virtual Machine Platform" optional component is enabled and virtualization is turned on in your computer's firmware settings.\n\nEnable "Virtual Machine Platform" by running: wsl.exe --install --no-distribution\n\nFor information please visit https://aka.ms/enablevirtualization
+# The scope chain that arrives with the message above when it is `wsl --install -d` that hits it,
+# rather than a later launch. InstallDistro is the outermost scope, which is what says the
+# download had already happened -- and therefore what makes a pre-flight worth having.
+ErrorCodeCreateVmNoHyperv	E	Wsl/InstallDistro/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
 
 # ---- Win32 system text ---------------------------------------------------------
 SystemErrorSuccess	B	The operation completed successfully.
