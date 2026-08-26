@@ -299,6 +299,17 @@ naming4="$(grep -Hn -- "$rm_head$rm_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests
 assert_eq "fixture-prereqs:only-one-place-removes-a-package" "1" \
           "$(printf '%s\n' "$naming4" | grep -c . )"
 assert_says "fixture-prereqs:and-that-place-is-sandbox-guest" 'lib/sandbox-guest.sh' "$naming4"
+# AND THE SAME FOR dnf, which joined the harness when the installer learned Fedora. A rule that
+# only knew about apt would let the very split it exists to prevent reappear through a second
+# package manager -- which is exactly how this would go wrong, since the natural place to put a
+# dnf removal is next to the case that needs it rather than in the one table.
+# shellcheck disable=SC2086
+rmd_tail='remove -y'; rmd_head='dnf '
+naming5="$(grep -Hn -- "$rmd_head$rmd_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-prereqs:only-one-place-removes-with-dnf" "1" \
+          "$(printf '%s\n' "$naming5" | grep -c . )"
+assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-guest.sh' "$naming5"
 
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.

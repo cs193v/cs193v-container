@@ -311,93 +311,82 @@ record "sb-deb:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC
 # would chase new paths every run. The refusal cases keep theirs, because a refusal touches nothing.
 sandbox_reap
 
-# ─── Fedora: the machine #94 is actually about ─────────────────────────────────
-# THE DEFECT, EXECUTED. Everything up to install_podman works on Fedora -- platform() reports
-# linux, the survey finds podman missing and asks permission for exactly one thing -- and then
-# install_podman runs `sudo apt-get update` (installer:591) on a machine that has never had apt.
+# ─── Fedora: reaches its own package manager ───────────────────────────────────
+# THE CASE THAT INVERTED. It used to assert the defect #94 describes: install_podman ran
+# `sudo apt-get update` on a machine that has never had apt and died with "apt-get update failed",
+# a message that reads like a network problem. It now runs dnf, with Fedora's package names.
 #
-# THIS CASE ASSERTS TODAY'S BEHAVIOUR AND IS GREEN, which is deliberate and worth being explicit
-# about. A permanently-red assertion in this tier would fail every run and teach people to ignore
-# the suite; 00-release-gates.sh is where "must work before students touch this" lives, and the
-# gate that demands a COMPLETED install on Fedora belongs there. What belongs here is the record
-# of exactly how the installer fails today, so that a fix has something to move.
+# WHAT IT PROVES, AND WHAT IT CANNOT. Everything up to and including the package manager's own
+# network access: the family is detected, the consent screen names Fedora's packages, and dnf
+# really runs and really tries Fedora's mirrors. What it cannot prove is that the install SUCCEEDS
+# -- sandbox_run always passes --network=none, so there is nothing for dnf to reach. That proof is
+# the nested end-to-end case below, which has a network.
 #
-# WHAT MAKES IT MORE THAN "IT FAILED": the two package names. The consent text says
-# "Install podman (and uidmap)" and the step says "Installing podman uidmap" -- and `uidmap` is a
-# Debian package name that does not exist on Fedora, where the same binaries come from
-# shadow-utils. So the transcript already contains two distinct things a fix has to change, and
-# pinning both means a partial fix cannot look complete.
-#
-# ONE CONSENT ITEM, AND THE BASE IMAGE IS WHY. fedora:43 ships bash, sudo, curl, dnf, newuidmap,
-# newgidmap and usermod; the fixture adds openssh-clients and a subuid range. So podman is the
-# only thing missing, which keeps the transcript about the package manager rather than about a
-# machine that happened to be bare. Containerfile.fedora records the measurements.
+# ONE CONSENT ITEM, AND IT SAYS "Install podman" WITH NO "(and uidmap)", which is the visible half
+# of PKG_UIDMAP being empty on this family. On Debian the setuid helpers are a Recommends of podman
+# and have to be named; on Fedora they come with shadow-utils, which also owns usermod and cannot be
+# absent. The negative assertions below are what stop that regressing to the Debian spelling.
 fixture_build fedora || exit 1
 sb_machine base=fedora
 out="$(sandbox_run fedora '2' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-fed:detected-as-plain-linux"       "linux on x86_64" "$out"
-assert_says "sb-fed:asks-for-one-thing"            "permission for 1 thing" "$out"
-# The Debian package name, on a machine that has no such package. Asserted as the CURRENT
-# behaviour; the release gate is what says it must change.
-assert_says "sb-fed:names-the-debian-package-in-its-consent-text" "Install podman (and uidmap)" "$out"
-assert_says "sb-fed:and-again-in-the-install-step"  "Installing podman uidmap" "$out"
-# THE DEFECT ITSELF, in the installer's own words. Recorded alongside is what the shell actually
-# said, because "apt-get update failed" on a machine with no apt reads as a network problem to
-# anybody who has not seen this issue.
-assert_says "sb-fed:dies-in-apt-get"               "apt-get update failed" "$out"
-record "sb-fed:what-the-shell-said" \
-       "$(printf '%s' "$out" | grep -iE 'apt-get.*(not found|No such file)' | head -1)"
-assert_says "sb-fed:exits-nonzero"                 "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-fed:does-not-claim-success"     "Setup finished" "$out"
-# IT GOT PAST CONSENT, which is what tells this apart from a run that fell over earlier for some
-# unrelated reason. Without it the case could pass on a fixture that was simply broken.
-assert_says "sb-fed:it-had-consent-before-it-failed" "Installing podman uidmap" "$out"
-# ...and nothing was installed, because nothing could be. dnf is the query here, not dpkg.
+assert_says "sb-fed:detected-as-plain-linux"  "linux on x86_64" "$out"
+assert_says "sb-fed:asks-for-one-thing"       "permission for 1 thing" "$out"
+assert_says "sb-fed:names-podman-alone"       "Install podman" "$out"
+assert_says_not "sb-fed:does-not-name-the-debian-uidmap" "(and uidmap)" "$out"
+assert_says "sb-fed:says-what-it-is-installing" "Installing podman" "$out"
+assert_says_not "sb-fed:does-not-ask-for-uidmap" "Installing podman uidmap" "$out"
+# NO apt ANYWHERE, which is the whole issue in one assertion.
+assert_says_not "sb-fed:never-mentions-apt"   "apt-get" "$out"
+# IT REALLY RAN dnf, and the witness is Fedora's own mirror host rather than dnf's progress wording
+# -- that wording is dnf5's and could be reworded upstream, while a machine that reached
+# mirrors.fedoraproject.org can only have got there through dnf.
+assert_says "sb-fed:really-reached-fedoras-repos" "mirrors.fedoraproject.org" "$out"
+# ...and stops for the reason Tier A always stops: no network. Asserted rather than recorded,
+# because a run that got FURTHER would mean this fixture had grown a network nobody declared.
+assert_says "sb-fed:stops-because-there-is-no-network" "Could not install podman" "$out"
+assert_says "sb-fed:exits-nonzero"            "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-fed:does-not-claim-success" "Setup finished" "$out"
 assert_eq "sb-fed:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
+assert_eq "sb-fed:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
 sandbox_reap
 
-# ─── Arch: the same defect, plus the one machine with no subuid range ──────────
-# THE SECOND RED DISTRO, and it is not a copy of the Fedora case. Two things are true here and on
-# no other base:
+# ─── Arch: detected and refused, before anything is asked ──────────────────────
+# A DECISION, NOT A DEFECT, which is why this case is here and green rather than in the release
+# tier and red. Arch is a rolling release, so pacman resolves a new package against its sync
+# database -- and if that database is ahead of what is installed, installing one package upgrades
+# some libraries and not others. That is the partial upgrade Arch does not support, and a student
+# can already be in that state (the ArchWiki notes a `pacman -Syu` that dies has already completed
+# its `-Sy` half). It is guardable, but on a rolling system the guard usually refuses anyway, and
+# an Arch user is better served by a conversation. .private/README.md keeps the full analysis.
 #
-# THE PACKAGE NAMES ARE A THIRD SPELLING, and that is what it adds. Debian wants openssh-client,
-# Fedora openssh-clients, Arch openssh -- and `uidmap`, which the consent text names, exists on
-# none of Fedora or Arch, where the same binaries come from shadow-utils and shadow. A fix that
-# only dispatched the right COMMAND would still fail on the names, and three families is the
-# smallest set that makes that a pattern rather than a coincidence.
+# NO ARCH-SPECIFIC CODE PRODUCES THIS. distro_family() returns `unsupported` for everything that is
+# not Debian- or Fedora-family, and say_unsupported_distro names the machine from os-release's
+# PRETTY_NAME -- so NixOS, openSUSE, Alpine and Gentoo all get the same box with their own name in
+# it, and nothing has to be added for them. This case is that whole class, tested once.
 #
-# THE FIXTURE'S OTHER PREMISE WAS FALSE, and Containerfile.arch records it: Arch was supposed to
-# leave /etc/subuid empty, making this the one case that reaches setup_subuid. Measured, it does
-# not -- useradd creates a range, so an empty one is a legacy account rather than an Arch trait,
-# and --no-prereqs=subuid is already the knob for that. So this case asserts the survey SKIPS the
-# subuid check, which is what a normal Arch machine does.
-#
-# GREEN, LIKE THE FEDORA CASE, and for the same reason: this records what the installer does today
-# so a fix has something to move. 05-release-distros.sh holds the requirement.
+# BEFORE CONSENT, deliberately, and that is the strongest assertion here. survey() refuses at
+# "Looking at your computer", the same place say_intel_mac refuses an Intel Mac -- so the student is
+# never asked permission to install things this script has no way to install.
 fixture_build arch || exit 1
 sb_machine base=arch
-out="$(sandbox_run arch '2' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-arch:detected-as-plain-linux" "linux on x86_64" "$out"
-assert_says "sb-arch:asks-for-one-thing"      "permission for 1 thing" "$out"
-assert_says "sb-arch:names-podman-and-the-debian-uidmap" "Install podman (and uidmap)" "$out"
-# THE SUBUID CHECK IS SKIPPED, because useradd gave this account a range. Asserted rather than
-# assumed, because the fixture was built believing the opposite.
-assert_says "sb-arch:the-account-already-has-a-range" "has the ID range podman needs" "$out"
-# THE DEFECT, in the installer's own words, with what the shell actually said recorded beside it --
-# "apt-get update failed" reads as a network problem to anyone who has not seen this issue.
-assert_says "sb-arch:dies-in-apt-get" "apt-get update failed" "$out"
-record "sb-arch:what-the-shell-said" \
-       "$(printf '%s' "$out" | grep -iE 'apt-get.*(not found|No such file)' | head -1)"
-assert_says "sb-arch:exits-nonzero"            "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-arch:does-not-claim-success" "Setup finished" "$out"
-# IT GOT PAST CONSENT, which tells this apart from a run that fell over earlier for an unrelated
-# reason -- without it the case could pass on a fixture that simply failed to boot.
-assert_says "sb-arch:it-had-consent-before-it-failed" "Installing podman uidmap" "$out"
-# ...and the range useradd made is untouched, which is the other half of the skip: nothing was
-# offered, so nothing was changed.
-assert_eq "sb-arch:the-useradd-range-is-untouched" "student:100000:65536" \
-          "$(sb_section "$out" ETC-SUBUID)"
+out="$(sandbox_run arch '' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-arch:looked-at-the-computer-first" "linux on x86_64" "$out"
+assert_says "sb-arch:names-the-distro-from-os-release" "running Arch Linux" "$out"
+assert_says "sb-arch:points-at-course-staff"      "contact course staff" "$out"
+assert_says "sb-arch:exits-nonzero"               "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-arch:does-not-claim-success"   "Setup finished" "$out"
+# IT NEVER ASKED FOR ANYTHING, which is the point of refusing in survey rather than in
+# install_podman. A consent screen here would be asking to do something we cannot do.
+assert_says_not "sb-arch:asked-no-permission"     "permission for" "$out"
+# AND IT NEVER REACHED A PACKAGE MANAGER -- neither the wrong one nor the right one.
+assert_says_not "sb-arch:never-mentions-apt"      "apt-get" "$out"
+assert_says_not "sb-arch:never-mentions-pacman"   "pacman"  "$out"
 assert_eq "sb-arch:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
+assert_eq "sb-arch:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
+# A REFUSAL MUST COST NOTHING, in both directions, and this is the assertion that says so -- the
+# same exact-set audit the podman-old version refusal takes. It should be the shortest set in the
+# fixtures directory: survey refuses before it even probes podman.
+assert_system_diff arch /home/student/cs193v
 sandbox_reap
 
 # ─── nested: the launcher really building, inside a container ───────────────────
@@ -704,24 +693,22 @@ if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
 else
 fixture_build fedora-nested || exit 1
 
-# THE FLAG SET ITSELF, before anything runs on it. This is the assertion that the narrowing
-# actually took: machine_flags must hand this base the devices and the unmask and no capability.
+# THE FLAG SET IS THE SAME FOR BOTH BASES, and that is the corrected position rather than the
+# original one. This case briefly asserted that fedora-nested was handed no capability, on the
+# strength of the userns differential below -- and fedora-e2e then failed at STEP 2/25 with
+# `sethostname: Operation not permitted`, because crun needs CAP_SYS_ADMIN to create the container
+# for a RUN step whatever the base's packaging. So the differential below is a true statement about
+# USER NAMESPACES and not about what a base needs overall; lib/sandbox.sh records both reasons.
 machine_flags '' linux no fedora-nested
-fcaps="$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
-record "fedora-caps:the-flags-fedora-gets" "$fcaps"
-assert_says_not "fedora-caps:fedora-is-given-no-capability" "cap-add" "$fcaps"
-assert_says     "fedora-caps:but-still-gets-dev-fuse"       "/dev/fuse" "$fcaps"
-machine_flags '' linux no podman-old-nested
-ucaps="$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
-record "fedora-caps:the-flags-ubuntu-gets" "$ucaps"
-assert_says "fedora-caps:ubuntu-still-is-given-one" "cap-add" "$ucaps"
+record "fedora-caps:the-flags-fedora-gets" "$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
 
-# AND IT REALLY NESTS ON THAT REDUCED SET, which is the whole claim.
-fnp="$(nest_probe fedora-nested)"
+# THE DIFFERENTIAL, which is what this case is really for: with the capability WITHHELD from each
+# base in turn, Fedora still makes a namespace and Ubuntu cannot.
+fnp="$(nest_probe_nocap fedora-nested)"
 record "fedora-caps:podman-inside" "$(nest_get "$fnp" PODMAN_VERSION)"
 assert_match "fedora-caps:the-probe-ran-inside-the-fedora-fixture" '^fedora-nested-fixture-[0-9]+$' \
              "$(nest_get "$fnp" FIXTURE_ID)"
-assert_match "fedora-caps:fedora-nests-with-no-SYS_ADMIN-at-all" '^user:\[[0-9]+\]$' \
+assert_match "fedora-caps:fedora-nests-with-SYS_ADMIN-withheld" '^user:\[[0-9]+\]$' \
              "$(nest_get "$fnp" INNER_USERNS)"
 assert_ne "fedora-caps:that-userns-is-not-the-host-s" "$(readlink /proc/self/ns/user)" \
           "$(nest_get "$fnp" INNER_USERNS)"
@@ -735,4 +722,63 @@ assert_says_not "fedora-caps:ubuntu-cannot-do-what-fedora-just-did" 'user:[' \
                 "$(nest_get "$uctl" INNER_USERNS)"
 assert_says "fedora-caps:and-newuidmap-is-what-fails-there" 'newuidmap' \
             "$(nest_get "$uctl" INNER_USERNS)"
+fi
+
+# ─── Fedora, end to end: dnf really installs, and that podman really builds ────
+# THE PROOF THE TIER A CASE CANNOT GIVE. sb-fed above shows the installer reaches dnf with Fedora's
+# package names, and stops there because sandbox_run always passes --network=none. This is the other
+# half: nest_build runs WITH a network, so `dnf install -y podman` reaches Fedora's mirrors for real,
+# and then the podman it produced assembles the whole 25-step course image.
+#
+# --no-prereqs=podman ON A FIXTURE THAT HAS IT, rather than a second fixture without it. The
+# alternative was a near-duplicate of Containerfile.fedora-nested minus one package -- 600 MB and a
+# drift risk -- and the removal axis already exists for exactly this. lib/sandbox-guest.sh's table
+# supplies `dnf remove -y`; SB_DISTRO comes from the base name via machine_distro, not from the
+# guest's own os-release, so a bug in the installer's detection cannot be masked by the same bug in
+# the harness's.
+#
+# NO SYS_ADMIN, and that is worth watching rather than assuming. fedora-caps measured that this base
+# creates a nested user namespace without it, because Fedora's newuidmap carries file capabilities
+# where Debian's carries a setuid bit -- but a 25-step build does more than `podman info`. If this
+# case needs the capability after all, the narrowing in MACHINE_SYSADMIN_BASES was right for probing
+# and wrong for building, and this is where that shows up.
+if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
+    skip "fedora-e2e:the-prerequisites" "set CS193V_INSTALL_NESTED=1"
+elif [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
+    skip "fedora-e2e:the-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real dnf install and 25-step build, ~6GB"
+else
+fixture_build fedora-nested || exit 1
+fe2e_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "fedora-e2e:free-disk-gb-before" "${fe2e_free:-unknown}"
+if [ -z "$fe2e_free" ] || [ "$fe2e_free" -lt 15 ]; then
+    skip "fedora-e2e:the-build" "only ${fe2e_free:-?}GB free; this build wants ~8GB and a margin"
+else
+fe2e_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+out="$(nest_build podman "2" fedora-nested)"
+assert_says "fedora-e2e:the-machine-was-really-arranged" "prereqs=podman" "$(sb_section "$out" ARRANGED)"
+# THE CONSENT SHAPE, on the family where it differs: one item, and no "(and uidmap)".
+assert_says "fedora-e2e:asks-for-one-thing"   "permission for 1 thing" "$out"
+assert_says "fedora-e2e:names-podman-alone"   "Installing podman" "$out"
+# NO "never mentions apt" ASSERTION HERE, and the reason is the distinction issue #94 itself draws:
+# the installer runs on the HOST, but the image it builds is Ubuntu. So this transcript carries the
+# course Containerfile's own `apt-get install` lines in its build log, and asserting their absence
+# would be asserting the course image is not Ubuntu. The Tier A sb-fed case makes that assertion
+# instead, where there is no build log to confuse it.
+record "fedora-e2e:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+record "fedora-e2e:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
+# THE VERDICT: dnf installed a working podman, and that podman built the course image.
+assert_says "fedora-e2e:dnf-installed-and-the-install-finished" "Setup finished" "$out"
+assert_says "fedora-e2e:exited-0"             "===INSTALLER-RC=0===" "$out"
+assert_eq   "fedora-e2e:built-the-course-image" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
+# PAIRED WITH THE IMAGE, because doctor returns ok on an installation with no image at all.
+assert_eq   "fedora-e2e:doctor-runs"          "ok"  "$(sb_section "$out" DOCTOR)"
+fe2e_store="$(sb_section "$out" INNER-STORE-BYTES)"
+if [ -n "$fe2e_store" ] && [ "$fe2e_store" -gt 1000000000 ]; then pass "fedora-e2e:the-inner-store-really-grew"
+else fail "fedora-e2e:the-inner-store-really-grew" "inner graph root is ${fe2e_store:-empty} bytes"; fi
+record "fedora-e2e:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | tr '\n' '|')"
+assert_eq "fedora-e2e:host-image-list-untouched" "$fe2e_imgs" \
+          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+sandbox_reap
+record "fedora-e2e:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+fi
 fi

@@ -515,6 +515,43 @@ CS193V_DESTRUCTIVE=1 .private/tests/run-tests.sh --tier live
 
 ## Needs another platform
 
+### A real Fedora machine — what it would tell us that no fixture can
+The installer supports Fedora as of the dnf work, and the fixtures cover a lot: `--base fedora`
+proves the family is detected and Fedora's package names are used, and `fedora-e2e` proves
+`dnf install -y podman` really reaches Fedora's mirrors and that the podman it installs builds the
+entire 25-step course image (`installer-rc = 0`, ~6.2 GB of inner store, matching Ubuntu and Debian
+to within 23 KB). **All of that runs in a Fedora container on an Ubuntu host**, which is the limit:
+the userland is Fedora's, the kernel is this machine's.
+
+So what a real Fedora box adds is exactly the kernel-level things, and there are three:
+
+- **SELinux enforcing.** SELinux is a kernel feature with one policy per machine and it is not
+  namespaced, so a Fedora container on an Ubuntu host reports it disabled however Fedora is
+  configured. This is where **issue #107** lives: the launcher adds `,z` to the workspace bind mount
+  when `getenforce` says `Enforcing` (`cs193v:998-1012`) but never relabels the two tunnel-key
+  mounts, and all three sources are under `$DIR`. If that matters, the symptom is that the container
+  starts, the workspace works, and the **tunnel does not** — nothing reachable at `http://localhost`.
+- **systemd cgroup delegation.** The nesting fixtures pin `cgroup_manager = "cgroupfs"` because
+  there is no systemd user session inside one, so nothing here exercises the `--memory` cap
+  `write_local_args` computes. That gap is not Fedora-specific — it is true of every fixture — but a
+  real machine is the only place to check it.
+- **Fedora's own kernel**, for anything version-gated.
+
+*What to run there, in descending order of value:*
+
+1. **Run the installer for real** — `bash install-cs193v.sh`. This is the end-to-end test. The
+   fixtures already cover its *logic*; what a real machine adds is the real kernel, real SELinux and
+   real systemd. Watch that `cs193v doctor` reports sensibly afterwards.
+2. **Then `run-tests.sh --tier container,live`.** These drive the real launcher against the real
+   course container with **no nesting**, so they are where the `,z` decision and the tunnel are
+   exercised for real. `require_tunnel` and the port-forwarding assertions are what would catch
+   #107. This is the most informative thing a Fedora machine can do.
+3. **Do not expect `--tier install` to be informative there, and expect it may fail.** Those
+   fixtures nest podman inside podman, and `machine_flags` passes no
+   `--security-opt label=disable` — which every upstream nesting recipe passes on an SELinux host.
+   A failure there would be about our harness, not about the product, and `.private/README.md`
+   records that deliberately-unguarded gap. Judge Fedora by (1) and (2).
+
 ### The macOS podman floor, and the `podman machine` nobody has exercised
 The podman floors diverged when the Linux one dropped to 4.9.0: `MIN_PODMAN_LINUX="4.9.0"` and
 `MIN_PODMAN_MACOS="5.7.0"`, declared in both `install-cs193v.sh` and `cs193v`. The Linux floor is

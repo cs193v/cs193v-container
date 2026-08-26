@@ -120,6 +120,42 @@ EOF
     printf '\n'
 }
 
+# The same shape as say_intel_mac above, and for the same reason: a machine this script cannot
+# support is told so at the "Looking at your computer" step, before it has asked permission for
+# anything. Asking to install things we have no way to install would be worse than refusing.
+#
+# NAMED FROM PRETTY_NAME rather than from a list of distros we know about. That is what keeps this
+# to one branch: there is no `case` enumerating Arch, NixOS, openSUSE and Alpine, so nothing has to
+# be added here when the next one turns up -- os-release supplies the name and the box reads
+# correctly for any of them.
+#
+# WHY ARCH IS HERE and not in the install path: Arch is a rolling release, so pacman can only
+# resolve a new package against its sync database, and if that database is ahead of what is
+# installed -- which the ArchWiki notes happens whenever a `pacman -Syu` dies after its `-Sy` half
+# succeeded -- installing one package upgrades some libraries and not others. That is the "partial
+# upgrade" Arch does not support. It is guardable (refuse unless `pacman -Qu` is empty), but on a
+# rolling system that usually means refusing anyway, and an Arch user is better served by a
+# conversation than by a script guessing. .private/README.md records the full analysis.
+say_unsupported_distro() {            # say_unsupported_distro PRETTY_NAME
+    printf '\n'
+    box STOP "$C_RED" '  ' <<EOF
+
+This computer is running ${1:-a Linux we do not recognise}.
+
+The course container works on Ubuntu and Debian, on Fedora, on
+a Mac with Apple Silicon, and on Windows through WSL. It very
+likely works here too -- but this script installs software for
+you, and it does not know the right way to do that on this
+system.
+
+Please contact course staff. Setting this up with you by hand
+is quick, and we would rather do that than have this script
+guess and change something it should not.
+
+EOF
+    printf '\n'
+}
+
 say_done() {
 cat <<EOF
 
@@ -331,6 +367,78 @@ Your system reports: $(uname -s)" ;;
     esac
 }
 
+# ─── which family of Linux this is, and what it calls things ───────────────────
+#
+# PARSED, NOT SOURCED, and that is a deliberate refusal to use the obvious one-liner.
+# `. /etc/os-release` would let that file set ANY variable in this script -- $DIR, $PLAT, $PATH --
+# and this script runs sudo. It is shell syntax by specification, which is exactly what makes
+# sourcing it the wrong tool.
+os_release_field() {                  # os_release_field NAME -> its value, unquoted
+    sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | head -1 | tr -d '"' | tr -d "'"
+}
+
+# ID FIRST, THEN EACH WORD OF ID_LIKE, which is what makes the derivatives free: Linux Mint says
+# ID_LIKE=ubuntu, Pop!_OS says "ubuntu debian", Nobara and Bazzite say fedora, Rocky and AlmaLinux
+# say "rhel centos fedora". None of them needs naming here.
+#
+# `rhel` and `centos` are patterns on the fedora arm rather than an arm of their own -- RHEL itself
+# is ID=rhel ID_LIKE=fedora and would match anyway, so they are belt-and-braces for a rebuild that
+# omits ID_LIKE, not a second code path.
+#
+# EVERYTHING ELSE IS `unsupported`, INCLUDING ARCH, and survey() refuses it by name. There is no
+# list of unsupported distros to keep up to date; see say_unsupported_distro.
+distro_family() {                     # distro_family -> debian | fedora | unsupported
+    local id like w
+    id="$(os_release_field ID)"
+    like="$(os_release_field ID_LIKE)"
+    # shellcheck disable=SC2086   # deliberately word-split: ID_LIKE is a space-separated list
+    for w in $id $like; do
+        case "$w" in
+            debian|ubuntu)      printf 'debian'; return 0 ;;
+            fedora|rhel|centos) printf 'fedora'; return 0 ;;
+        esac
+    done
+    printf 'unsupported'
+}
+
+# ─── one table, read by BOTH the consent screen and the install ────────────────
+#
+# THE POINT IS THAT THERE IS ONE COPY. Before this, every package name appeared twice: once in a
+# need() string on the consent screen and again in install_podman's package list. Two places, one
+# name, nothing checking they agreed -- and a fix for one family that missed the other would have
+# shown a student "Install openssh-client" and then installed something else.
+#
+# EMPTY IS MEANINGFUL, and only Debian fills these two in:
+#   PKG_UIDMAP  the setuid helpers are a RECOMMENDS of podman on Debian, so apt may not pull them
+#               and they have to be asked for by name. On Fedora they are in shadow-utils, which
+#               also owns usermod and cannot be absent.
+#   PKG_CA      ca-certificates is a Recommends there too (installer notes elsewhere that without
+#               it curl exits 60 and reads as a network problem). On Fedora it is a dependency of
+#               curl and arrives with it.
+# So on Fedora both are empty, which is also why the consent text has to tolerate emptiness -- see
+# the ${PKG_UIDMAP:+...} expansions in survey().
+DISTRO=""
+PM_REFRESH=""; PM_INSTALL=""; PM_UPGRADE=""
+PKG_PODMAN=""; PKG_UIDMAP=""; PKG_SSH=""; PKG_CURL=""; PKG_CA=""
+distro_packages() {                   # distro_packages FAMILY -> sets the PM_/PKG_ globals
+    case "$1" in
+        debian) PM_REFRESH="apt-get update"; PM_INSTALL="apt-get install -y"
+                PM_UPGRADE="sudo apt update && sudo apt install --only-upgrade podman"
+                PKG_PODMAN="podman"; PKG_UIDMAP="uidmap"
+                PKG_SSH="openssh-client"; PKG_CURL="curl"; PKG_CA="ca-certificates" ;;
+        # NO REFRESH STEP, and that is dnf being simpler rather than something omitted: dnf
+        # refreshes its own metadata when stale, so there is no `apt-get update` equivalent to get
+        # wrong. Measured: `dnf install -y curl` on an already-installed package exits 0 with
+        # "Nothing to do.", and `dnf install -y podman <bogus-name>` exits 1 having installed
+        # NOTHING -- the transaction is atomic, so a package name we get wrong fails loudly rather
+        # than half-installing.
+        fedora) PM_REFRESH=""; PM_INSTALL="dnf install -y"
+                PM_UPGRADE="sudo dnf upgrade podman"
+                PKG_PODMAN="podman"; PKG_UIDMAP=""
+                PKG_SSH="openssh-clients"; PKG_CURL="curl"; PKG_CA="" ;;
+    esac
+}
+
 host_ram_mb() {
     case "$(platform)" in
         macos) printf '%s' "$(( $(sysctl -n hw.memsize) / 1048576 ))" ;;
@@ -356,7 +464,15 @@ PLAT="$(platform)" || exit 1
 # RESOLVED HERE, not at the top, because it depends on PLAT -- and PLAT cannot be known until
 # platform() has run and had its chance to refuse an unsupported OS. Everything downstream reads
 # MIN_PODMAN and does not care which floor it came from.
-if [ "$PLAT" = macos ]; then MIN_PODMAN="$MIN_PODMAN_MACOS"; else MIN_PODMAN="$MIN_PODMAN_LINUX"; fi
+if [ "$PLAT" = macos ]; then
+    MIN_PODMAN="$MIN_PODMAN_MACOS"
+else
+    MIN_PODMAN="$MIN_PODMAN_LINUX"
+    # THE SAME SEAM, for the same reason: this depends on PLAT, and macOS has no /etc/os-release to
+    # read. survey() is what refuses an unsupported family -- see say_unsupported_distro.
+    DISTRO="$(distro_family)"
+    distro_packages "$DISTRO"
+fi
 DIR=""
 DO_PODMAN_INSTALL=no
 DO_SSH_INSTALL=no
@@ -374,6 +490,15 @@ survey() {
         say_intel_mac; exit 1
     fi
     ok "$PLAT on $(uname -m)"
+
+    # THE SECOND UNSUPPORTED-MACHINE REFUSAL, beside the Intel Mac one above and for the same
+    # reason: stop at "Looking at your computer", before ask_consent has offered to change
+    # anything. distro_family() returns `unsupported` for everything that is not Debian- or
+    # Fedora-family, so Arch, NixOS, openSUSE and Alpine all arrive here without being named
+    # anywhere in this script.
+    if [ "$PLAT" != macos ] && [ "$DISTRO" = unsupported ]; then
+        say_unsupported_distro "$(os_release_field PRETTY_NAME)"; exit 1
+    fi
 
     if command -v podman >/dev/null 2>&1; then
         local v; v="$(podman --version 2>/dev/null | awk '{print $NF}')"
@@ -433,14 +558,17 @@ WORTH KNOWING FIRST: if you have used podman on this Mac for
 anything else, removing it can lose the virtual machine it kept
 your containers in. If that matters, talk to course staff first."
             fi
+            # THE COMMAND COMES FROM THE TABLE, so there is one source for it and a family added
+            # later cannot be told to run apt. On Debian this renders exactly the string it always
+            # did, which is what keeps 25-installer.sh's podman-old:says-how-to-upgrade green.
             die "Podman $v is installed; the course needs $MIN_PODMAN
 or newer.
 
 Please upgrade podman and run this again:
 
-    sudo apt update && sudo apt install --only-upgrade podman
+    $PM_UPGRADE
 
-If apt says podman is already the newest version, your Linux
+If that says podman is already the newest version, your Linux
 release is older than the course supports. Send course staff
 the output of:  podman --version"
         fi
@@ -450,7 +578,7 @@ the output of:  podman --version"
         case "$PLAT" in
             macos) need "Install Podman" \
                         "Podman runs the course container. On a Mac it installs system-wide, so macOS will ask for your password once." ;;
-            *)     need "Install podman (and uidmap)" \
+            *)     need "Install $PKG_PODMAN${PKG_UIDMAP:+ (and $PKG_UIDMAP)}" \
                         "Podman runs the course container. Installing software needs your password." ;;
         esac
     fi
@@ -466,7 +594,7 @@ the output of:  podman --version"
 Please contact course staff rather than working around it."
     else
         DO_SSH_INSTALL=yes
-        need "Install openssh-client" \
+        need "Install $PKG_SSH" \
              "cs193v uses ssh on your own computer to connect your browser to servers you run inside the container. Without it the container still works, but nothing in it would be reachable at http://localhost. Installing software needs your password."
     fi
 
@@ -497,7 +625,7 @@ Please contact course staff rather than working around it."
 Please contact course staff rather than working around it."
     else
         DO_CURL_INSTALL=yes
-        need "Install curl" \
+        need "Install $PKG_CURL" \
              "This script downloads the course files with curl. The Ubuntu desktop install does not include it — the WSL environment does — so it has to be installed here. Installing software needs your password."
     fi
 
@@ -516,12 +644,24 @@ Please contact course staff rather than working around it."
         if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
             ok "uidmap"
         else
+            # AN IMPOSSIBLE STATE ON SOME FAMILIES, refused rather than half-handled. PKG_UIDMAP
+            # is empty wherever the setuid helpers are not a separable package -- on Fedora they
+            # come with shadow-utils, which also owns usermod, so a machine cannot have podman and
+            # lack them. If it somehow does, there is no package to name: the consent line would
+            # read "Install " and the install would ask for nothing. Same treatment as the missing
+            # ssh on a Mac below -- say so and stop, rather than guess.
+            if [ -z "$PKG_UIDMAP" ]; then
+                die "newuidmap and newgidmap are missing, which should not be possible on this
+system -- they are part of the same package as usermod.
+
+Please contact course staff rather than working around it."
+            fi
             DO_UIDMAP_INSTALL=yes
             # ONE ITEM PER APT CALL. When podman is being installed, its own consent item already
             # says "(and uidmap)" and its package list already carries it, so a second item here
             # would describe one change twice.
             if [ "$DO_PODMAN_INSTALL" = no ]; then
-                need "Install uidmap" \
+                need "Install $PKG_UIDMAP" \
                      "Podman needs two small helper programs, newuidmap and newgidmap, to keep the container separated from the rest of your computer. Podman is on this computer but they are not. Installing software needs your password."
             fi
         fi
@@ -661,21 +801,27 @@ install_podman() {
     # podman uidmap openssh-client` reads the same either way. A machine missing nothing but
     # curl printed `Installing  curl`, with two spaces, the first time one existed.
     local pkgs=""
-    [ "$DO_PODMAN_INSTALL" = yes ] && pkgs="podman uidmap"
-    [ "$DO_SSH_INSTALL" = yes ]    && pkgs="${pkgs:+$pkgs }openssh-client"
+    [ "$DO_PODMAN_INSTALL" = yes ] && pkgs="$PKG_PODMAN${PKG_UIDMAP:+ $PKG_UIDMAP}"
+    [ "$DO_SSH_INSTALL" = yes ]    && pkgs="${pkgs:+$pkgs }$PKG_SSH"
     # ca-certificates WITH IT, for the reason install-cs193v-windows.cmd gives where it installs
     # the same pair: without them curl exits 60, and an SSL failure reads as a network problem
     # just like a missing curl did. Present in every image we checked, so this is usually a no-op
     # -- but a machine minimal enough to lack curl is exactly the one that might lack these too.
-    [ "$DO_CURL_INSTALL" = yes ]   && pkgs="${pkgs:+$pkgs }curl ca-certificates"
+    [ "$DO_CURL_INSTALL" = yes ]   && pkgs="${pkgs:+$pkgs }$PKG_CURL${PKG_CA:+ $PKG_CA}"
     # ONLY WHEN PODMAN IS NOT ALREADY BRINGING IT, or apt would be handed the same name twice.
-    [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = yes ] && pkgs="${pkgs:+$pkgs }uidmap"
+    [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = yes ] && pkgs="${pkgs:+$pkgs }$PKG_UIDMAP"
     step "Installing ${pkgs:-podman}"
     case "$PLAT" in
         linux|wsl)
-            sudo apt-get update || die "apt-get update failed."
-            # shellcheck disable=SC2086
-            sudo apt-get install -y $pkgs || die "Could not install $pkgs."
+            # ONE REFRESH STEP, AND ONLY WHERE THERE IS ONE. apt needs its index refreshed
+            # before installing or it can 404 on a version the mirror has moved past; dnf
+            # refreshes its own metadata when stale, so PM_REFRESH is empty there and this line
+            # does nothing. Not a special case for Fedora -- an absent step rather than a
+            # different one.
+            # shellcheck disable=SC2086   # deliberately word-split: PM_REFRESH is a command line
+            [ -n "$PM_REFRESH" ] && { sudo $PM_REFRESH || die "$PM_REFRESH failed."; }
+            # shellcheck disable=SC2086   # deliberately word-split: both are lists of words
+            sudo $PM_INSTALL $pkgs || die "Could not install $pkgs."
             ;;
         macos)
             local arch pkg url
