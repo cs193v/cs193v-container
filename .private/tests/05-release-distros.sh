@@ -45,11 +45,12 @@ require_podman
 SB_TMP="$(new_tmpdir)"
 # Read by sandbox_cleanup in lib/sandbox.sh, which shellcheck cannot see from here.
 # shellcheck disable=SC2034
-SB_CASES="rel-fedora"
+SB_CASES="rel-fedora rel-arch"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 
 sb_work_init
 fixture_build fedora || exit 1
+fixture_build arch   || exit 1
 
 # ─── Fedora ────────────────────────────────────────────────────────────────────
 sb_machine base=fedora
@@ -79,3 +80,36 @@ assert_says "release:fedora-still-reaches-the-install-step" "permission for 1 th
 record "release:fedora-installer-rc" \
        "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 sandbox_reap
+
+# ─── Arch ──────────────────────────────────────────────────────────────────────
+# THE THIRD FAMILY, and the reason there is a third: two distros can be a coincidence, three make
+# the shape of the fix visible. pacman is a third command, and `openssh` is a third spelling of a
+# package Debian calls openssh-client and Fedora calls openssh-clients.
+sb_machine base=arch
+out="$(sandbox_run rel-arch '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says_not "release:arch-does-not-die-in-apt-get" "apt-get update failed" "$out"
+# `uidmap` is a Debian package. Arch's setuid helpers come from `shadow`, which the base image
+# already has -- so a fix that ran `pacman -S podman uidmap` would fail on the name alone.
+assert_says_not "release:arch-does-not-name-the-debian-uidmap-package" \
+                "Install podman (and uidmap)" "$out"
+assert_says_not "release:arch-does-not-ask-its-package-manager-for-uidmap" \
+                "Installing podman uidmap" "$out"
+# ...and it must still get as far as trying, so the three above cannot pass on a fixture that
+# simply failed to boot. GREEN today, and must stay green.
+assert_says "release:arch-still-reaches-the-install-step" "permission for 1 thing" "$out"
+record "release:arch-installer-rc" \
+       "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
+# ─── AND THE ONE ARCH-SPECIFIC THING NO GATE HERE CAN YET ASSERT ───────────────
+# `pacman -S podman` is NOT ENOUGH. netavark, aardvark-dns, fuse-overlayfs and passt/slirp4netns
+# are OPTIONAL deps on Arch rather than hard ones, so the right command still leaves a podman with
+# no network backend -- "installed" and "working" come apart for a reason that has nothing to do
+# with uidmap, and on no other family here.
+#
+# It is not asserted because it is not yet reachable: proving it needs an installer that can run
+# pacman at all, then a nested Arch fixture to run the podman it produced. Recorded rather than
+# silently omitted, because a green run of this file should not be read as "Arch works" -- only as
+# "Arch reaches its package manager with the right names".
+record "release:arch-optional-deps-are-not-covered-here" \
+       "pacman -S podman omits netavark/aardvark-dns/fuse-overlayfs/passt; needs the fix, then a nested arch fixture"

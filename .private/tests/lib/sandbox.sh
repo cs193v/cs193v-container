@@ -81,7 +81,7 @@ MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
 # It is a SUBSTITUTION, which is exactly what `base=` already means: Containerfile.podman-old is
 # "the one machine that is not the machine" because a podman VERSION cannot be produced by
 # subtracting from a 26.04 base. A package MANAGER cannot either.
-MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora'
+MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora arch'
 
 # WHICH BASES RUN A PODMAN INSIDE THEMSELVES, and it is only one of them. SYS_ADMIN, the unmask
 # and the two devices are what a NESTED podman costs; podman-old and debian both die in survey

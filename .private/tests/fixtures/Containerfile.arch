@@ -1,0 +1,72 @@
+# Arch: the same defect as Fedora, and one property no other base has.
+#
+# WHY IT EARNS A FIXTURE OF ITS OWN when Containerfile.fedora already executes #94's defect:
+# THE PACKAGE NAMES ARE A THIRD SPELLING, and pacman is a third command. Debian wants
+# openssh-client, Fedora openssh-clients, Arch openssh -- and `uidmap`, which the consent text
+# names, exists on none of Fedora or Arch, where the same binaries come from shadow-utils and
+# shadow. A fix for #94 that only dispatched the right COMMAND would still fail on the names, and
+# three families is the smallest set that makes that visible rather than a coincidence.
+#
+# AND ONE THING THAT IS ONLY VISIBLE ONCE AN INSTALLER CAN RUN pacman: `pacman -S podman` is not
+# enough. netavark, aardvark-dns, fuse-overlayfs and passt/slirp4netns are OPTIONAL deps on Arch,
+# not hard ones, so the right command still yields a podman with no network backend. That is
+# asserted by 05-release-distros.sh rather than here, because reaching it needs the fix.
+#
+# ─── A CLAIM THIS FIXTURE WAS BUILT ON, AND WHICH TURNED OUT TO BE FALSE ────────
+#
+# The plan for this fixture said Arch leaves /etc/subuid EMPTY, so setup_subuid would be reached
+# here and nowhere else in the tier, and the consent screen would have two items. Measured: it does
+# not. archlinux:base ships no /etc/subuid at all, but `useradd` CREATES one -- this fixture's
+# student came out with `student:100000:65536` without anything asking for it.
+#
+# So an empty range is a property of a user who PREDATES the file, not of Arch: upstream shadow
+# populates it for users useradd creates, and has since 4.11.1-3. Any normal Arch install has a
+# range. Modelling one here would have been modelling a legacy account and calling it a distro
+# difference -- and --no-prereqs=subuid is already the knob for that state, on any base, which is
+# why lib/sandbox-guest.sh documents it as hand-driven-only.
+#
+# Left as useradd made it, therefore, and the case asserts the survey SKIPS the subuid check.
+# PODMAN IS ABSENT BY OMISSION, as in Containerfile.fedora: DO_PODMAN_INSTALL is yes on a machine
+# that needs no local repo and no removal verb. install_podman then runs `sudo apt-get update`
+# (installer:591) on a machine that has never had apt, which is the defect.
+#
+# WHAT THE BASE IMAGE ALREADY GIVES, measured in archlinux:base, because it decides the consent
+# count and therefore what the transcript is about:
+#
+#   bash, curl, pacman            present  -- so none of them is a consent item
+#   newuidmap, newgidmap, usermod present  -- all from `shadow`, which is in the base
+#   sudo, ssh, ssh-keygen         ABSENT   -- installed below, or ssh would be a second item
+#   /etc/subuid                   ABSENT   -- but useradd creates one; see the note below
+#
+# THE newuidmap LINE IS THE SAME FINDING AS FEDORA'S. On Debian and Ubuntu the setuid helpers come
+# from `uidmap`, a RECOMMENDS of podman, so "podman installed, helpers missing" is a real machine
+# and the tier has a case for it. On Arch they come from `shadow`, which also owns usermod -- which
+# setup_subuid needs -- so that state cannot be arranged here and cannot occur on a student's Arch
+# box either. --no-prereqs=uidmap should be refused for this base rather than silently arranging
+# nothing.
+#
+# ROLLING, SO THE PIN WILL GO STALE. Arch has no releases, so this digest is a moment rather than a
+# version, and bumping it is ordinary maintenance. A bump rehashes the recipe and rebuilds, which is
+# what fixture_hash is for; an UNPINNED `pacman -Syu` would not, and the fixture would drift
+# silently. The pin is the point even though it needs feeding.
+FROM archlinux:base@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309
+
+# openssh, NOT openssh-client or openssh-clients -- Arch's name for it, and a third distinct
+# spelling of the same package across three distros. Getting that per-family is a large part of
+# what a fix for #94 has to do, which is why the release gate asserts on the names and not just on
+# the command. Deliberately NOT podman.
+RUN pacman -Sy --noconfirm --needed sudo openssh \
+ && rm -rf /var/cache/pacman/pkg/*
+
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" >/dev/null 2>&1 || true; fi \
+ && useradd -m -u 1000 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# The graph root's parent and the two tmpfs mount points, so mounting over them is not itself a
+# change. Nothing here runs a podman -- the install dies before one exists.
+RUN mkdir -p /home/student/.local/share/containers && chown -R student:student /home/student/.local
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

@@ -18,7 +18,7 @@ require_podman
 SB_TMP="$(new_tmpdir)"
 # LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
 # just the container names to sweep on the way out.
-SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora nested"
+SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -354,6 +354,50 @@ assert_says_not "sb-fed:does-not-claim-success"     "Setup finished" "$out"
 assert_says "sb-fed:it-had-consent-before-it-failed" "Installing podman uidmap" "$out"
 # ...and nothing was installed, because nothing could be. dnf is the query here, not dpkg.
 assert_eq "sb-fed:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
+sandbox_reap
+
+# ─── Arch: the same defect, plus the one machine with no subuid range ──────────
+# THE SECOND RED DISTRO, and it is not a copy of the Fedora case. Two things are true here and on
+# no other base:
+#
+# THE PACKAGE NAMES ARE A THIRD SPELLING, and that is what it adds. Debian wants openssh-client,
+# Fedora openssh-clients, Arch openssh -- and `uidmap`, which the consent text names, exists on
+# none of Fedora or Arch, where the same binaries come from shadow-utils and shadow. A fix that
+# only dispatched the right COMMAND would still fail on the names, and three families is the
+# smallest set that makes that a pattern rather than a coincidence.
+#
+# THE FIXTURE'S OTHER PREMISE WAS FALSE, and Containerfile.arch records it: Arch was supposed to
+# leave /etc/subuid empty, making this the one case that reaches setup_subuid. Measured, it does
+# not -- useradd creates a range, so an empty one is a legacy account rather than an Arch trait,
+# and --no-prereqs=subuid is already the knob for that. So this case asserts the survey SKIPS the
+# subuid check, which is what a normal Arch machine does.
+#
+# GREEN, LIKE THE FEDORA CASE, and for the same reason: this records what the installer does today
+# so a fix has something to move. 05-release-distros.sh holds the requirement.
+fixture_build arch || exit 1
+sb_machine base=arch
+out="$(sandbox_run arch '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-arch:detected-as-plain-linux" "linux on x86_64" "$out"
+assert_says "sb-arch:asks-for-one-thing"      "permission for 1 thing" "$out"
+assert_says "sb-arch:names-podman-and-the-debian-uidmap" "Install podman (and uidmap)" "$out"
+# THE SUBUID CHECK IS SKIPPED, because useradd gave this account a range. Asserted rather than
+# assumed, because the fixture was built believing the opposite.
+assert_says "sb-arch:the-account-already-has-a-range" "has the ID range podman needs" "$out"
+# THE DEFECT, in the installer's own words, with what the shell actually said recorded beside it --
+# "apt-get update failed" reads as a network problem to anyone who has not seen this issue.
+assert_says "sb-arch:dies-in-apt-get" "apt-get update failed" "$out"
+record "sb-arch:what-the-shell-said" \
+       "$(printf '%s' "$out" | grep -iE 'apt-get.*(not found|No such file)' | head -1)"
+assert_says "sb-arch:exits-nonzero"            "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-arch:does-not-claim-success" "Setup finished" "$out"
+# IT GOT PAST CONSENT, which tells this apart from a run that fell over earlier for an unrelated
+# reason -- without it the case could pass on a fixture that simply failed to boot.
+assert_says "sb-arch:it-had-consent-before-it-failed" "Installing podman uidmap" "$out"
+# ...and the range useradd made is untouched, which is the other half of the skip: nothing was
+# offered, so nothing was changed.
+assert_eq "sb-arch:the-useradd-range-is-untouched" "student:100000:65536" \
+          "$(sb_section "$out" ETC-SUBUID)"
+assert_eq "sb-arch:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
 sandbox_reap
 
 # ─── nested: the launcher really building, inside a container ───────────────────
