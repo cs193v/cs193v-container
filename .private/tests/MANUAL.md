@@ -542,10 +542,18 @@ So what a real Fedora box adds is exactly the kernel-level things, and there are
 1. **Run the installer for real** — `bash install-cs193v.sh`. This is the end-to-end test. The
    fixtures already cover its *logic*; what a real machine adds is the real kernel, real SELinux and
    real systemd. Watch that `cs193v doctor` reports sensibly afterwards.
-2. **Then `run-tests.sh --tier container,live`.** These drive the real launcher against the real
-   course container with **no nesting**, so they are where the `,z` decision and the tunnel are
-   exercised for real. `require_tunnel` and the port-forwarding assertions are what would catch
-   #107. This is the most informative thing a Fedora machine can do.
+2. **Then `run-tests.sh --tier image,container,live`.** All three, and this is the most
+   informative thing a Fedora machine can do — because it would be the **first time any of them
+   ran against an installer-produced container**, on any host. They drive the real launcher against
+   the real course container with no nesting, so this is where the `,z` decision and the tunnel are
+   exercised for real; `require_tunnel` and the port-forwarding assertions are what would catch
+   #107.
+
+   Worth knowing why the nested fixtures cannot substitute: they assert thin things about their
+   output (`IMAGE-EXISTS`, inner-store bytes, `inner-caps`) because the image they build lives
+   inside a container that is reaped on the way out. There is nothing left for the image tier to
+   inspect. So "is the image right?" has a thorough home — §A.2/§A.3 in `50-image.sh` — that has
+   simply never been pointed at an image an installer made.
 3. **Do not expect `--tier install` to be informative there, and expect it may fail.** Those
    fixtures nest podman inside podman, and `machine_flags` passes no
    `--security-opt label=disable` — which every upstream nesting recipe passes on an SELinux host.
