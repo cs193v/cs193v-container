@@ -674,3 +674,65 @@ sandbox_reap
 fi
 fi
 fi
+
+# ─── SYS_ADMIN is Debian-family packaging, not the price of nesting ────────────
+# MEASURED, AND ACTED ON. Every nested base used to be handed --cap-add=SYS_ADMIN with a comment
+# saying nesting costs one. It does not: Debian's shadow is compiled without sys/capability.h, so
+# newuidmap carries only a setuid bit -- which does not preserve CAP_SETUID inside an unprivileged
+# nested user namespace -- while Fedora's shadow-utils ships FILE CAPABILITIES, which do survive.
+#
+# Visible in one `ls` across the Tier A fixtures, which is what prompted the experiment:
+#
+#   fedora:43     -rwxr-xr-x  /usr/bin/newuidmap   <- no setuid bit at all
+#   debian:13     -rwsr-xr-x  /usr/bin/newuidmap
+#   ubuntu:24.04  -rwsr-xr-x  /usr/bin/newuidmap
+#
+# So MACHINE_SYSADMIN_BASES grants it to the two Debian-family bases and NOT to fedora-nested, and
+# these assertions are what keep that split honest. It is no longer a differential in the
+# nest_probe_nocap sense -- fedora-nested has no SYS_ADMIN to remove -- and that is the point: its
+# DEFAULT flag set is the claim, and the Ubuntu control is what makes the contrast a measurement
+# rather than an assumption.
+#
+# ONE TRAP THIS RESTS ON: the Fedora base image LOSES those capabilities (RHBZ 1995337), so a stock
+# fedora:43 has neither a setuid bit nor caps -- strictly worse than Debian.
+# Containerfile.fedora-nested restores them with `rpm --setcaps shadow-utils`, exactly as
+# quay.io/podman/stable does, and asserts at BUILD time that they are present. Without that line
+# this case would grant no capability to a base that could not nest, and fail in a way that looks
+# like the harness rather than the image.
+if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
+    skip "fedora-caps:the-packaging-claim" "set CS193V_INSTALL_NESTED=1 -- seconds"
+else
+fixture_build fedora-nested || exit 1
+
+# THE FLAG SET ITSELF, before anything runs on it. This is the assertion that the narrowing
+# actually took: machine_flags must hand this base the devices and the unmask and no capability.
+machine_flags '' linux no fedora-nested
+fcaps="$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
+record "fedora-caps:the-flags-fedora-gets" "$fcaps"
+assert_says_not "fedora-caps:fedora-is-given-no-capability" "cap-add" "$fcaps"
+assert_says     "fedora-caps:but-still-gets-dev-fuse"       "/dev/fuse" "$fcaps"
+machine_flags '' linux no podman-old-nested
+ucaps="$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
+record "fedora-caps:the-flags-ubuntu-gets" "$ucaps"
+assert_says "fedora-caps:ubuntu-still-is-given-one" "cap-add" "$ucaps"
+
+# AND IT REALLY NESTS ON THAT REDUCED SET, which is the whole claim.
+fnp="$(nest_probe fedora-nested)"
+record "fedora-caps:podman-inside" "$(nest_get "$fnp" PODMAN_VERSION)"
+assert_match "fedora-caps:the-probe-ran-inside-the-fedora-fixture" '^fedora-nested-fixture-[0-9]+$' \
+             "$(nest_get "$fnp" FIXTURE_ID)"
+assert_match "fedora-caps:fedora-nests-with-no-SYS_ADMIN-at-all" '^user:\[[0-9]+\]$' \
+             "$(nest_get "$fnp" INNER_USERNS)"
+assert_ne "fedora-caps:that-userns-is-not-the-host-s" "$(readlink /proc/self/ns/user)" \
+          "$(nest_get "$fnp" INNER_USERNS)"
+
+# THE CONTROL, and without it the line above is just a fact about Fedora rather than a comparison.
+# podman-old-nested is Ubuntu 24.04 with a setuid newuidmap; denied the same capability, it cannot
+# create a namespace at all, and says exactly why.
+uctl="$(nest_probe_nocap podman-old-nested)"
+record "fedora-caps:ubuntu-control-WITHOUT-sys-admin" "$(nest_get "$uctl" INNER_USERNS)"
+assert_says_not "fedora-caps:ubuntu-cannot-do-what-fedora-just-did" 'user:[' \
+                "$(nest_get "$uctl" INNER_USERNS)"
+assert_says "fedora-caps:and-newuidmap-is-what-fails-there" 'newuidmap' \
+            "$(nest_get "$uctl" INNER_USERNS)"
+fi
