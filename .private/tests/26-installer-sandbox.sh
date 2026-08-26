@@ -766,6 +766,19 @@ assert_says "fedora-e2e:names-podman-alone"   "Installing podman" "$out"
 # instead, where there is no build log to confuse it.
 record "fedora-e2e:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 record "fedora-e2e:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
+# THE CONTAINER, NOT JUST THE IMAGE. build_image runs `cs193v --rebuild`, which builds the image
+# AND recreates the container, so a run that exits 0 has created one -- but that was INFERRED here
+# rather than observed, and inference is not evidence. `podman inspect cs193v` answers directly,
+# and its fallback is NO-CONTAINER, so an absent container fails rather than reads as empty.
+#
+# AN EXACT VALUE, for the reason the nested case gives: the course container has NO capabilities at
+# all and podman reports the empty set as "[]". That is both halves in one assertion -- an empty
+# value or NO-CONTAINER fails it, and so would any capability leaking in from the outer container,
+# which on this base has SYS_ADMIN.
+fe2e_caps="$(sb_section "$out" INNER-CAPS)"
+record "fedora-e2e:inner-caps" "$fe2e_caps"
+assert_eq "fedora-e2e:the-container-was-really-created" "[]" "$fe2e_caps"
+assert_says_not "fedora-e2e:SYS_ADMIN-did-not-reach-it" "SYS_ADMIN" "$fe2e_caps"
 # THE VERDICT: dnf installed a working podman, and that podman built the course image.
 assert_says "fedora-e2e:dnf-installed-and-the-install-finished" "Setup finished" "$out"
 assert_says "fedora-e2e:exited-0"             "===INSTALLER-RC=0===" "$out"
