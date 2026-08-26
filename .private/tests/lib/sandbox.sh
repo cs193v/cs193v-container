@@ -81,7 +81,7 @@ MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
 # It is a SUBSTITUTION, which is exactly what `base=` already means: Containerfile.podman-old is
 # "the one machine that is not the machine" because a podman VERSION cannot be produced by
 # subtracting from a 26.04 base. A package MANAGER cannot either.
-MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora arch'
+MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora fedora-nested arch'
 
 # WHICH BASES RUN A PODMAN INSIDE THEMSELVES, and it is only one of them. SYS_ADMIN, the unmask
 # and the two devices are what a NESTED podman costs; podman-old and debian both die in survey
@@ -94,10 +94,37 @@ MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora arch'
 # differed -- the exact drift 10-static.sh's one-place rules exist to stop, which had opened up
 # anyway because the two paths disagreed about a CASE rather than about a flag. One list, read by
 # both.
-MACHINE_NESTED_BASES='machine podman-old-nested'
+MACHINE_NESTED_BASES='machine podman-old-nested fedora-nested'
+
+# AND WHICH OF THOSE NEED SYS_ADMIN, which is a narrower question and a MEASURED one. It is not
+# the cost of nesting -- it is the cost of Debian-family PACKAGING. Debian's shadow is compiled
+# without sys/capability.h, so newuidmap carries only a setuid bit, and a setuid bit does not
+# preserve CAP_SETUID inside an unprivileged nested user namespace. Fedora's shadow-utils ships
+# FILE CAPABILITIES, which do survive.
+#
+# Measured, in one run, by 26-installer-sandbox.sh's fedora-caps differential:
+#
+#   fedora-nested      without SYS_ADMIN -> user:[4026533148]
+#   podman-old-nested  without SYS_ADMIN -> cannot set up namespace using "/usr/bin/newuidmap"
+#
+# So the Fedora base is given no capability at all, and the two Debian-family ones are. The
+# fixture's own `ls` shows the difference: fedora:43 has -rwxr-xr-x on newuidmap, while debian:13
+# and ubuntu:24.04 have -rwsr-xr-x.
+#
+# ONE TRAP THIS RESTS ON: the Fedora BASE IMAGE loses those capabilities (RHBZ 1995337), so
+# Containerfile.fedora-nested restores them with `rpm --setcaps shadow-utils` -- exactly as
+# quay.io/podman/stable does -- and asserts at build time that they are there. Without that line
+# this list would be wrong in the dangerous direction: a base granted no capability and unable to
+# nest, failing in a way that looks like the harness rather than the image.
+MACHINE_SYSADMIN_BASES='machine podman-old-nested'
 
 machine_is_nested() {                 # machine_is_nested BASE -> 0 if it runs a podman inside
     case " $MACHINE_NESTED_BASES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+machine_needs_sysadmin() {            # machine_needs_sysadmin BASE -> 0 if its newuidmap is setuid
+    case " $MACHINE_SYSADMIN_BASES " in *" $1 "*) return 0 ;; esac
     return 1
 }
 
@@ -144,7 +171,12 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # base that was never going to get it fails as a nonsense combination rather than passing
     # vacuously.
     if machine_is_nested "$base"; then
+    # SYS_ADMIN IS NARROWER THAN THE OTHER THREE, and measured rather than assumed -- see
+    # MACHINE_SYSADMIN_BASES. A Fedora base nests without it because its newuidmap carries file
+    # capabilities; a Debian-family one cannot, because a setuid bit does not survive the nesting.
+    if machine_needs_sysadmin "$base"; then
     case "$drop" in *,sysadmin,*) : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --cap-add=SYS_ADMIN) ;; esac
+    fi
     case "$drop" in *,unmask,*)   : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt 'unmask=/proc/*') ;; esac
     case "$drop" in *,fuse,*)     : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/fuse) ;; esac
     case "$drop" in *,tun,*)      : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/net/tun) ;; esac

@@ -1,0 +1,89 @@
+# Fedora, with everything a nested rootless podman needs. The fixture that tests a claim about
+# PACKAGING rather than about the installer.
+#
+# THE CLAIM: --cap-add=SYS_ADMIN is a Debian-family artifact, not the cost of nesting. Debian's
+# shadow is compiled without sys/capability.h, so newuidmap carries only a setuid bit -- and setuid
+# does not preserve CAP_SETUID inside an unprivileged nested user namespace. Fedora's shadow-utils
+# ships FILE CAPABILITIES instead, which do. Measured on the Tier A fixtures, and the difference is
+# visible in one `ls`:
+#
+#   fedora:43         -rwxr-xr-x  /usr/bin/newuidmap   <- no setuid bit at all
+#   debian:13         -rwsr-xr-x  /usr/bin/newuidmap
+#   ubuntu:24.04      -rwsr-xr-x  /usr/bin/newuidmap
+#
+# IF THAT IS THE WHOLE STORY, this fixture needs no SYS_ADMIN where podman-old-nested and the
+# ubuntu machine both do -- and MACHINE_NESTED_BASES could stop handing it one. The case in
+# 26-installer-sandbox.sh runs the same nest_probe / nest_probe_nocap differential the other nested
+# bases run and lets the answer decide, rather than this comment deciding it.
+#
+# ─── AND THE PART THAT IS NOT OBVIOUS: THE CAPABILITIES ARE MISSING HERE ────────
+#
+# `getcap /usr/bin/newuidmap` in a stock fedora:43 prints nothing. The capabilities are in the RPM;
+# the Fedora BASE IMAGE loses them, which is a known bug --
+# https://bugzilla.redhat.com/show_bug.cgi?id=1995337#c3 -- so a Fedora container gets a newuidmap
+# with neither a setuid bit NOR capabilities, which is strictly worse than Debian's.
+#
+# The official quay.io/podman/stable image restores them, and names the same bug where it does:
+#
+#     rpm --setcaps shadow-utils 2>/dev/null
+#
+# So that line is here for the same reason, and it is the fixture's whole premise: without it the
+# differential below would measure a broken image rather than Fedora's packaging, and would
+# "disprove" the claim by testing something Fedora does not ship.
+FROM fedora:43@sha256:129a31741db676a9f99e58d9cf468cd8e86cf0336d9f9eea85ed9e729558a12d
+
+# ─── restore what the base image dropped, then install ─────────────────────────
+# BEFORE the assertion below and before anything else needs newuidmap. shadow-utils is already in
+# the base image, so this re-applies capabilities to a package that is present rather than
+# installing one.
+RUN rpm --setcaps shadow-utils 2>/dev/null || true
+
+# container-selinux EXCLUDED, as the official image excludes it: this host is Ubuntu/AppArmor, so
+# the policy would be inert, and it drags in a dependency tree that buys nothing here.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        podman fuse-overlayfs openssh-clients curl ca-certificates passt shadow-utils libcap \
+        --exclude container-selinux \
+ && dnf clean all
+
+# THE CAPABILITIES ARE THE POINT, so the build fails if they are not there. Without this the case
+# below would report "Fedora needs SYS_ADMIN after all" on an image whose newuidmap was simply
+# unprivileged -- a fixture artefact wearing the costume of a distro difference, which is the exact
+# shape of mistake lib/sandbox.sh's own comments keep warning about.
+RUN getcap /usr/bin/newuidmap | grep -q cap_setuid \
+ && getcap /usr/bin/newgidmap | grep -q cap_setgid \
+ && test ! -u /usr/bin/newuidmap \
+ && command -v podman && command -v ssh && command -v ssh-keygen && command -v curl \
+ && command -v pasta
+
+# ─── the five nesting adaptations, per Containerfile.machine ────────────────────
+RUN mkdir -p /etc/containers \
+ && printf '[engine]\ncgroup_manager = "cgroupfs"\n' > /etc/containers/containers.conf
+
+RUN oldu="$(getent passwd 2 | cut -d: -f1)"; [ -n "$oldu" ] && userdel "$oldu" >/dev/null 2>&1; \
+    oldg="$(getent group 2 | cut -d: -f1)";  [ -n "$oldg" ] && groupdel "$oldg" >/dev/null 2>&1; \
+    groupadd -g 2 student \
+ && useradd -m -u 2 -g 2 -s /bin/bash student \
+ && printf 'student ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/student \
+ && chmod 0440 /etc/sudoers.d/student
+
+# OVERWRITTEN, not appended: Fedora's useradd populates /etc/subuid itself, and the range it picks
+# is outside the outer container's 1..65536 userns window.
+RUN printf 'student:3:65534\n' > /etc/subuid \
+ && printf 'student:3:65534\n' > /etc/subgid
+
+RUN mkdir -p /run/user/2 && chown student:student /run/user/2 && chmod 700 /run/user/2
+ENV XDG_RUNTIME_DIR=/run/user/2
+
+RUN printf 'fedora-nested-fixture-%s\n' "$(date -u +%s)" > /etc/cs193v-fixture-id
+
+RUN mkdir -p /home/student/.config/containers \
+ && printf '[storage]\ndriver = "vfs"\n' > /home/student/.config/containers/storage.conf \
+ && chown -R student:student /home/student/.config
+
+RUN mkdir -p /home/student/.local/share/containers \
+ && chown -R student:student /home/student/.local
+
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+
+USER student
+WORKDIR /home/student

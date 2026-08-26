@@ -176,9 +176,10 @@ while [ "$#" -gt 0 ]; do
         --net)          NET=yes ;;
         --no-net)       NET=no ;;
         --keep)         KEEP=yes ;;
-        --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : %s\nof those, nested (get the caps)  : %s\n' \
+        --list)         printf 'missing software  (--no-prereqs) : %s\nmissing capabilities (--no-caps) : %s\nbases (--base)                   : %s\nof those, nested                 : %s\nof those, needing SYS_ADMIN      : %s\n' \
                                "$MACHINE_PREREQ_NAMES" "$MACHINE_CAP_NAMES" \
-                               "$MACHINE_BASE_NAMES" "$MACHINE_NESTED_BASES"; exit 0 ;;
+                               "$MACHINE_BASE_NAMES" "$MACHINE_NESTED_BASES" \
+                               "$MACHINE_SYSADMIN_BASES"; exit 0 ;;
         -h|--help)      usage; exit 0 ;;
         --)             shift; CMD="$*"; break ;;
         *)              die_usage "unknown option: $1" ;;
