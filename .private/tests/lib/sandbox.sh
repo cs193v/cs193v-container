@@ -96,31 +96,53 @@ MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora fedora-ne
 # both.
 MACHINE_NESTED_BASES='machine podman-old-nested fedora-nested'
 
-# AND WHICH OF THOSE NEED SYS_ADMIN, which is a narrower question and a MEASURED one. It is not
-# the cost of nesting -- it is the cost of Debian-family PACKAGING. Debian's shadow is compiled
-# without sys/capability.h, so newuidmap carries only a setuid bit, and a setuid bit does not
-# preserve CAP_SETUID inside an unprivileged nested user namespace. Fedora's shadow-utils ships
-# FILE CAPABILITIES, which do survive.
+# AND WHICH OF THOSE NEED SYS_ADMIN. Every nesting base does, and the interesting part is that
+# they need it for TWO SEPARATE REASONS -- which is worth writing down, because trying to narrow
+# this list on the strength of only the first reason was measurably wrong.
 #
-# Measured, in one run, by 26-installer-sandbox.sh's fedora-caps differential:
+# REASON ONE, creating the nested user namespace, is Debian-family PACKAGING and not nesting per
+# se. Debian's shadow is compiled without sys/capability.h, so newuidmap carries only a setuid bit,
+# and a setuid bit does not preserve CAP_SETUID inside an unprivileged nested userns. Fedora's
+# shadow-utils ships FILE CAPABILITIES, which do survive. Measured by 26-installer-sandbox.sh's
+# fedora-caps differential, and visible in one `ls`: fedora:43 has -rwxr-xr-x on newuidmap while
+# debian:13 and ubuntu:24.04 have -rwsr-xr-x.
 #
-#   fedora-nested      without SYS_ADMIN -> user:[4026533148]
+#   fedora-nested      without SYS_ADMIN -> user:[4026533148]        (a namespace!)
 #   podman-old-nested  without SYS_ADMIN -> cannot set up namespace using "/usr/bin/newuidmap"
 #
-# So the Fedora base is given no capability at all, and the two Debian-family ones are. The
-# fixture's own `ls` shows the difference: fedora:43 has -rwxr-xr-x on newuidmap, while debian:13
-# and ubuntu:24.04 have -rwsr-xr-x.
+# REASON TWO, BUILDING, applies to every base regardless of packaging, and is what makes this list
+# all of them. crun calls sethostname(2) when it creates the container for a RUN step, and that
+# needs CAP_SYS_ADMIN. Measured the hard way: fedora-nested was briefly removed from this list on
+# the strength of reason one alone, and the Fedora end-to-end case then failed at STEP 2/25 with
 #
-# ONE TRAP THIS RESTS ON: the Fedora BASE IMAGE loses those capabilities (RHBZ 1995337), so
+#   error running container: from /usr/bin/crun creating container for [/bin/sh -c apt-get ...]:
+#   sethostname: Operation not permitted
+#
+# So reason one is a true and useful distinction that says nothing about whether a base can BUILD.
+# Nothing covered building on a reduced flag set until fedora-e2e existed, which is the test bed
+# catching an over-generalisation rather than a product bug.
+#
+# ONE TRAP REASON ONE RESTS ON: the Fedora BASE IMAGE loses those capabilities (RHBZ 1995337), so
 # Containerfile.fedora-nested restores them with `rpm --setcaps shadow-utils` -- exactly as
 # quay.io/podman/stable does -- and asserts at build time that they are there. Without that line
-# this list would be wrong in the dangerous direction: a base granted no capability and unable to
-# nest, failing in a way that looks like the harness rather than the image.
-MACHINE_SYSADMIN_BASES='machine podman-old-nested'
+# the differential would measure a broken image rather than Fedora's packaging.
+MACHINE_SYSADMIN_BASES='machine podman-old-nested fedora-nested'
 
 machine_is_nested() {                 # machine_is_nested BASE -> 0 if it runs a podman inside
     case " $MACHINE_NESTED_BASES " in *" $1 "*) return 0 ;; esac
     return 1
+}
+
+# WHICH PACKAGE MANAGER THE GUEST HAS, which lib/sandbox-guest.sh needs in order to REMOVE
+# something for --no-prereqs. Passed IN from the base name rather than read from the guest's own
+# /etc/os-release, and that is deliberate: install-cs193v.sh detects its family from os-release, so
+# a harness that read the same file could be wrong in exactly the same way and mask it.
+machine_distro() {                    # machine_distro BASE -> debian | fedora | arch
+    case "$1" in
+        fedora|fedora-nested) printf 'fedora' ;;
+        arch)                 printf 'arch' ;;
+        *)                    printf 'debian' ;;
+    esac
 }
 
 machine_needs_sysadmin() {            # machine_needs_sysadmin BASE -> 0 if its newuidmap is setuid
@@ -669,6 +691,7 @@ nest_build() {                        # nest_build [PREREQS] [KEYS] [BASE] [INST
         -e CS193V_DIR=/home/student/cs193v \
         -e BUILDAH_LAYERS=false \
         -e "SB_NO_PREREQS=${1:-}" \
+        -e "SB_DISTRO=$(machine_distro "$base")" \
         -e "SB_INSTALLER=$inst" \
         -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
         -v "$SB_WORK:/work:ro" \
@@ -805,6 +828,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
         --mount type=tmpfs,destination=/var/tmp/report \
         -e "CS193V_COVERAGE=$cov" \
         -e "SB_NO_PREREQS=$SB_NO_PREREQS" \
+        -e "SB_DISTRO=$(machine_distro "$SB_BASE")" \
         -v "$SB_WORK:/work:ro" "$@" \
         "$(fixture_tag "$SB_BASE")" \
         /work/run.sh > "$SB_TMP/raw" 2>&1

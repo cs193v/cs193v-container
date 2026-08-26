@@ -959,12 +959,45 @@ in `.config/container.args`, and the comments in the `Containerfile`.
 
 ### Distros deliberately not in the install tier
 
-Three families are covered (`--base debian`, `fedora`, `arch`), which is the smallest set that
-makes the *shape* of a fix for #94 visible rather than a coincidence: three package managers,
-three spellings of the ssh client, and a `uidmap` package that exists on exactly one of them. What
-is left out, and why:
+**Two families install: Debian/Ubuntu and Fedora.** Everything else is detected and refused by
+name, at the "Looking at your computer" step, before consent is asked — `say_unsupported_distro`,
+which is `say_intel_mac`'s sibling. There is no list of unsupported distros anywhere in the
+installer: `distro_family()` returns `unsupported` for anything that is not Debian- or
+Fedora-family, and the refusal box names the machine from os-release's `PRETTY_NAME`. So NixOS,
+openSUSE, Alpine and Gentoo all get a correct message with their own name in it and nothing has to
+be added for them. `--base arch` in the install tier is that whole class, tested once.
 
-- **openSUSE Tumbleweed (zypper).** Cheap once three families exist, and skipped for that reason
+**Arch was going to be the third installing family, and is deliberately not.** Recorded here
+because the analysis cost real work and a future revisit should start from it rather than repeat it.
+
+Arch is a rolling release, so there is no within-release ABI guarantee. pacman can only resolve a
+new package against its *sync database* — so if that database is ahead of what is installed,
+installing one package pulls in whatever library versions the database names, upgrading some
+libraries and not others. That is the "partial upgrade" the ArchWiki says is unsupported, and its
+own sentence describes the damage: "upgrading only one package might also upgrade the library (as a
+dependency), which might then break the other package which depends on an older version".
+
+The subtlety that killed it: *System maintenance § Partial upgrades are unsupported* condemns
+`pacman -Sy package` **and** "`pacman -Sy` followed by `pacman -S package`" — two separate commands,
+with no requirement that they be adjacent in time. A student whose database was refreshed days ago
+(by a `-Sy`, or by the `-Sy` half of a `-Syu` that then died, which the wiki notes succeeds first)
+is already inside that condemned pattern, and a plain `pacman -S podman` from us supplies its second
+half. Plain `-S` is safe *only* when the database matches what is installed — which is exactly why
+`checkupdates -d` downloads "without synchronizing the database, thus avoiding partial upgrade
+issues when later attempting to use `pacman -S package`".
+
+It *was* guardable: refuse unless `pacman -Qu` is empty, since that is a direct test of
+database-ahead-of-system. But rolling systems usually have pending updates, so the guard sends most
+Arch machines to an instruction anyway — and an instruction is something a conversation gives
+better than a script. An Arch user is by construction someone who manages their own updates.
+
+(Two measurements preserved so a revisit starts further on: `man pacman` on `--needed` is "Do not
+reinstall the targets that are already up-to-date", so it is idempotent; and `pacman -Qu` exits **1**
+with empty output when nothing is pending, so any guard must test output rather than status.)
+
+What else is left out, and why:
+
+- **openSUSE Tumbleweed (zypper).** Cheap once two families exist, and skipped for that reason
   rather than despite it: it is a fourth `case` arm over machinery that is already proven, on a
   small population, and Tumbleweed's podman 6.0.2 clears the floor comfortably. It is the base
   least likely to teach us anything the other three did not. Leap is a different matter — 15.6

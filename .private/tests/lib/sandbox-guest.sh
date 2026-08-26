@@ -67,13 +67,15 @@ arrange_prereqs() {
     mkdir -p "$REP"
     p_rc=0
     for p in $(printf '%s' "$SB_NO_PREREQS" | tr ',' ' '); do
+        # shellcheck disable=SC2086   # PKG_RM_PODMAN is deliberately word-split below: it is one
+        # package name on Fedora and two on Debian, which is the whole reason it is a variable
         case "$p" in
             # uidmap TOO, because the installer's consent item is "Install podman (and uidmap)"
             # and it asks apt for both (installer:579). Removing podman alone leaves its own
             # dependency behind, so apt answered "uidmap is already the newest version" and the
             # machine did not lack what the case said it lacked -- a case that half-arranges its
             # machine is the shape this whole design exists to remove.
-            podman) sb_remove podman uidmap  || p_rc=1 ;;
+            podman) sb_remove $PKG_RM_PODMAN || p_rc=1 ;;
             ssh)    sb_remove openssh-client || p_rc=1 ;;
             # UNREACHABLE FROM THE SHIM TIER for the same reason podman is: taking curl off PATH
             # only exposes the real /usr/bin/curl. And it is a student's machine rather than a
@@ -101,15 +103,39 @@ arrange_prereqs() {
     return "$p_rc"
 }
 
+# ─── one table: what removes a package here, and what the package is called ────
+#
+# SB_DISTRO IS PASSED IN by lib/sandbox.sh's machine_distro, not read from this machine's
+# /etc/os-release. That is the point: install-cs193v.sh detects its family FROM os-release, so a
+# harness reading the same file could be wrong in exactly the same way and hide it. The base name
+# is an independent source of truth.
+#
+# ONLY WHAT IS EXERCISED. There is a dnf arm because a Fedora case removes podman so the installer
+# can put it back; there is no pacman arm, because the Arch fixture is refused in survey before any
+# package operation and nothing there is ever removed. An unexercised arm here would be the
+# `wget` fallback install-cs193v.sh rejected -- a path that rots.
+case "${SB_DISTRO:-debian}" in
+    fedora) PM_RM='dnf remove -y'
+            # podman ALONE, unlike Debian. There the setuid helpers are a separate `uidmap`
+            # package that has to be removed with it, or apt answers "uidmap is already the newest
+            # version" and the machine does not lack what the case says it lacks. On Fedora they
+            # are in shadow-utils, which also owns usermod -- removing it would break the machine
+            # rather than model a student's, and that state cannot occur on Fedora anyway.
+            PKG_RM_PODMAN='podman' ;;
+    *)      PM_RM='apt-get remove -y'
+            PKG_RM_PODMAN='podman uidmap' ;;
+esac
+
 sb_remove() {                         # sb_remove PACKAGE... -> 0, logging to $REP
     # shellcheck disable=SC2024   # the redirect is THIS shell's, and student owns $REP (a 1777
     # tmpfs the harness mounts). Nothing privileged writes the log, which is what SC2024 warns
     # about; routing it through `sudo tee` would put a root-owned file in a report directory the
     # rest of this script reads as the student.
-    if sudo -n apt-get remove -y "$@" >>"$REP/apt-remove.log" 2>&1; then
+    # shellcheck disable=SC2086   # deliberately word-split: PM_RM is a command line
+    if sudo -n $PM_RM "$@" >>"$REP/pkg-remove.log" 2>&1; then
         return 0
     fi
-    printf 'sandbox: could not remove %s (see apt-remove.log)\n' "$*" >&2
+    printf 'sandbox: could not remove %s (see pkg-remove.log)\n' "$*" >&2
     return 1
 }
 
@@ -245,8 +271,8 @@ cmd_state() {
     printf '  %-22s %s\n' '--no-caps asked for'    "${SB_NO_CAPS:-<none>}"
     printf '  %-22s %s\n' '--no-prereqs asked for' "${SB_NO_PREREQS:-<none>}"
     [ -f "$REP/arranged" ] && printf '  %-22s %s\n' 'arranged'     "$(cat "$REP/arranged")"
-    [ -s "$REP/apt-remove.log" ] && printf '  %-22s %s\n' 'apt removed' \
-        "$(grep -c '^Removing ' "$REP/apt-remove.log" 2>/dev/null) package(s); see $REP/apt-remove.log"
+    [ -s "$REP/pkg-remove.log" ] && printf '  %-22s %s\n' 'packages removed' \
+        "see $REP/pkg-remove.log"
     printf '  %-22s %s\n' 'stdin is a tty' "$( [ -t 0 ] && echo yes || echo 'no -- menus take the safe default')"
     if [ -f /etc/wsl.conf ]; then
         printf '  %-22s\n' '/etc/wsl.conf:'

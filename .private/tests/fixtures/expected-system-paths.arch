@@ -1,0 +1,19 @@
+# Everything outside the course tree that changes when the installer REFUSES an unsupported
+# distribution. This is the shortest expected set in this directory, and that is the claim.
+#
+#   /work   the read-only mount this harness adds, not the installer
+#   C /etc  podman bind-mounts hosts/hostname/resolv.conf into every container, which moves the
+#           directory's mtime. Present in every case here.
+#
+# NOTHING ELSE AT ALL -- and compare that with expected-system-paths.podman-old and
+# expected-system-paths.debian, which both carry /tmp runtime directories and (on podman 5.x) a
+# ~/.config, all created by the single `podman --version` their survey runs. This refusal never
+# reaches that probe: distro_family() returns `unsupported`, survey says so at "Looking at your
+# computer" and exits, so podman is never executed and no runtime state is created.
+#
+# THAT ORDERING IS THE POINT, not a coincidence. A machine this script cannot support should be
+# told before it is asked for permission and before anything is inspected on its behalf, which is
+# the same order say_intel_mac refuses an Intel Mac in. If a future change moved the refusal later
+# -- into install_podman, say -- this file would grow podman's runtime directories and say so.
+A /work
+C /etc

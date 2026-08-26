@@ -81,9 +81,13 @@ Your version of podman is too old for the course container.
     you have:  {{FOUND}}
     we need:   {{NEED}} or newer
 
-On Ubuntu or inside the WSL CS193V environment:
+Inside the WSL CS193V environment, run:
 
     sudo apt update && sudo apt install --only-upgrade podman
+
+On any other Linux, use your distribution's package manager to
+upgrade podman -- or run the course installer again and it will
+name the exact command for your system.
 
 On a Mac: remove the podman you already have, then run the
 course installer again -- it installs a version the course is
