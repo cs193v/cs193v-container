@@ -836,6 +836,18 @@ export TESTS_DIR PRIVATE REPO
 [ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
 export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
 
+# ─── definitions more than one place needs ─────────────────────────────────────
+# NOT guarded with `[ -r ] &&` the way the strings above are, and the difference is deliberate:
+# a missing strings file costs three assertions their needle, while a missing shared.sh leaves
+# CS193V_TRACE_FD unset -- and podman-shim.sh builds an installer run around it. Sourced
+# unconditionally so the failure is a loud one here rather than a `set -u` abort three files
+# away with nothing saying which file was absent.
+# shellcheck source=shared.sh
+. "$TESTS_DIR/lib/shared.sh" || {
+    printf 'assert.sh: cannot read %s\n' "$TESTS_DIR/lib/shared.sh" >&2
+    exit 1
+}
+
 # ─── OUR OWN THROWAWAY CONTAINERS ──────────────────────────────────────────────
 # `podman run --rm` with no --name gets a podman-generated one (`nervous_bohr`), and a generated
 # name is indistinguishable from a colleague's. 80-launcher-live.sh counted every container on the

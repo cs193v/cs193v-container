@@ -1093,7 +1093,7 @@ preflight() {
         die "$(msg err.podman-hangs)"
     fi
     local ver floor
-    ver="$(printf '%s' "$RT_OUT" | awk '{print $NF}')"
+    ver="$(podman_version_of "$RT_OUT")"
     floor="$(min_podman)"
     if [ "$(version_lt "$ver" "$floor")" = yes ]; then
         die "$(msg err.podman-too-old FOUND="$ver" NEED="$floor")"
@@ -2293,7 +2293,7 @@ verb_doctor() {
     printf '  %-16s %s\n' "course dir" "$DIR"
 
     if command -v podman >/dev/null 2>&1 && run_timeout 10 podman --version; then
-        printf '  %-16s %s\n' "podman" "$(printf '%s' "$RT_OUT" | awk '{print $NF}')"
+        printf '  %-16s %s\n' "podman" "$(podman_version_of "$RT_OUT")"
     else
         printf '  %-16s %s\n' "podman" "NOT FOUND or not responding"
         return 1
