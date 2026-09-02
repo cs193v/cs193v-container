@@ -70,6 +70,50 @@
 CS193V_TRACE_FD=8
 export CS193V_TRACE_FD
 
+# ─── the SELinux label every bind mount needs ──────────────────────────────────
+#
+# WHAT BREAKS WITHOUT IT. Fedora ships SELinux enforcing. A host directory bind-mounted into a
+# container keeps its host label -- podman's own manual says so: "By default, Podman does not
+# change the labels set by the OS" -- and a temp dir under $HOME is cache_home_t, which
+# container_t may neither execute nor read. So the fixture containers could not run the script
+# the suite had just written for them:
+#
+#     exec container process `/work/run.sh`: Permission denied
+#
+# MEASURED, both halves, on this machine: exec is refused, and so is a plain `cat` of a mounted
+# FILE -- which is the quieter of the two, because a test that reads an empty string usually
+# reports a missing feature rather than a missing permission. That is exactly how it surfaced:
+# 66 assertions in 26-installer-sandbox.sh blamed the installer, and
+# 50-image.sh's codex:the-managed-policy-is-really-read reported that /etc/codex was not being
+# read, when the truth was that the file behind it could not be opened.
+#
+# `,z` NOT `,Z`. Both relabel; the difference is that Z assigns a PRIVATE label per container and
+# z a shared one. $SB_WORK is mounted into more than one container -- the tier A run and the
+# nested cases -- and podman's manual names that as z's case exactly ("two or more containers
+# share the volume content"). Z would hand the second container a label the first cannot use.
+#
+# CONDITIONAL, AND THAT IS THE POINT. Relabelling MODIFIES THE HOST FILESYSTEM (podman's manual
+# carries that as a warning), so it is not something to do unasked on a machine that has no
+# SELinux to satisfy. Off SELinux this expands to nothing and every mount is byte-identical to
+# what it was, which is the property that matters: this has to fix Fedora WITHOUT changing what
+# Ubuntu, Debian, WSL or macOS do. Relying on podman to ignore a `,z` it cannot act on would be
+# the same fix resting on an assumption instead of a measurement.
+#
+# THE `selinuxenabled` DOOR, rather than testing for /sys/fs/selinux: that directory is visible
+# INSIDE a container on an SELinux host (measured -- the ubuntu fixture can see this machine's),
+# so it answers a question about the kernel rather than about the policy. `command -v` first,
+# because libselinux-utils is not installed on a stock Ubuntu and an absent tool means no SELinux
+# to satisfy.
+#
+# EVERY bind mount carries it, not only the ones that were seen to fail: 10-static.sh's
+# selinux:every-bind-mount-carries-the-label asserts that, because a mount written without it
+# fails only on SELinux hosts and only sometimes -- which is the shape of bug that gets committed.
+VT_MOUNT_Z=''
+if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
+    VT_MOUNT_Z=',z'
+fi
+export VT_MOUNT_Z
+
 # ─── reading one function out of a script that cannot be sourced ───────────────
 #
 # install-cs193v.sh SOURCES NOTHING AND CANNOT BE SOURCED, by design rather than by accident:

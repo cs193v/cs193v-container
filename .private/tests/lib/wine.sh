@@ -71,7 +71,7 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
     podman run --rm --network=none --label "$VT_LABEL" \
         -e XDG_RUNTIME_DIR=/tmp/xdg \
         -e "CS193V_FAKE_DIR=Z:\\tmp\\case" \
-        -v "$WINE_CASE:/work:ro" \
+        -v "$WINE_CASE:/work:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$WINE_FIXTURE")" \
         bash -c '
             set -u
