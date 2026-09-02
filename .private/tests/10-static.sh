@@ -265,6 +265,36 @@ mounts_missing_z="$(grep -rnoE -- '-v "[^"]*:[^"]*"' \
                     | grep -v 'VT_MOUNT_Z' || true)"
 assert_eq "selinux:every-bind-mount-carries-the-label" "" "$mounts_missing_z"
 
+# ─── and so does every bind mount the LAUNCHER makes  (#107) ───────────────────
+# THE STUDENT-FACING HALF OF THE SAME BUG, and much the worse of the two. build_run_args works
+# out `$relabel` from getenforce and then put it on the workspace mount only, so on Fedora sshd
+# could not read the two files the tunnel is built out of:
+#
+#     cat: /home/student/.ssh/authorized_keys: Permission denied
+#     cat: /etc/ssh/cs193v_host_ed25519_key: Permission denied
+#
+# What a student saw was not a permission error but the tunnel simply never coming up -- "your
+# browser will not be able to reach servers running inside it" -- with `Connection closed by
+# UNKNOWN port 65535` in the log, sshd giving up because it could not load a host key. Measured
+# on a checkout carrying the ordinary user_home_t, which is what a fresh clone has.
+#
+# STATIC RATHER THAN BEHAVIOURAL, deliberately. The obvious test is to launch and look at the
+# tunnel, but that can only fail on an SELinux host -- on Debian and macOS $relabel is empty and
+# every mount is correct by default, so a behavioural test would be green on the machines this is
+# usually developed on. Reading the source asserts the RULE on every platform.
+#
+# WHY IT CANNOT BE CAUGHT BY EYE ON THIS MACHINE EITHER: relabelling with `,z` is recursive and
+# permanent, so any past `podman run -v <the checkout>:...:z` leaves the whole tree
+# container_file_t and the tunnel then works whether or not this is fixed. That is exactly how it
+# hid here. `restorecon -F -R .` puts a checkout back.
+launcher_binds="$(grep -n 'type=bind' "$REPO/cs193v" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+record "selinux:launcher-bind-mount-count" "$(printf '%s\n' "$launcher_binds" | grep -c . )"
+# Non-empty first: a renamed variable or a reshaped RUN_ARGS would make the check below vacuous.
+if [ -n "$launcher_binds" ]; then pass "selinux:the-launcher-mounts-were-found"
+else fail "selinux:the-launcher-mounts-were-found" "no type=bind in cs193v -- did build_run_args change?"; fi
+assert_eq "selinux:launcher-bind-mounts-carry-the-relabel" "" \
+          "$(printf '%s\n' "$launcher_binds" | grep -v 'relabel' || true)"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # All four of the installer's privileged calls go through one name, so a sudo that never
 # execs makes the whole shim tier structurally unable to change this machine. That is worth
