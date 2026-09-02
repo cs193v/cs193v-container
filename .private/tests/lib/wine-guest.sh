@@ -53,15 +53,12 @@ cmd_state() {
     printf '  wsl --status         exits %s%s\n' "$(knob wsl.status.rc 0)" \
         "$( [ "$(knob wsl.status.novirt 0)" = 0 ] && printf '' \
             || printf ', and PRINTS that virtualisation is off -- on stdout, still exiting 0' )"
-    printf '  a hypervisor         %s\n' \
-        "$( [ "$(knob ps.novirt 0)" = 0 ] && printf 'is loaded' \
-            || printf 'is NOT loaded -- so WSL2 cannot start a VM' )"
-    printf '  VM Platform          %s\n' \
-        "$( [ "$(knob ps.vmp.disabled 0)" = 0 ] && printf 'enabled' \
-            || printf 'OFF -- the one cause setup can fix, with a restart' )"
-    printf '  hypervisorlaunchtype %s\n' \
-        "$( [ "$(knob ps.launchtype.off 0)" = 0 ] && printf 'not Off' \
-            || printf 'Off -- setup hands over bcdedit and will not run it' )"
+    printf '  starting a VM        %s\n' \
+        "$( [ "$(knob wsl.vm.cannotstart 0)" = 0 ] && printf 'works -- wsl --import gets past CreateVm' \
+            || printf 'FAILS at CreateVm -- every cause looks like this from here' )"
+    printf '  the VM check itself  %s\n' \
+        "$( [ "$(knob where.tar.exe 1)" = 0 ] && printf 'CANNOT RUN -- no tar.exe, so no payload' \
+            || printf 'can run' )"
     printf '  creating the distro  %s\n' \
         "$( [ "$(knob wsl.install.novirt 0)" != 0 ] && printf 'fails at CreateVm, AFTER downloading' \
             || { [ "$(knob wsl.install.rebootrequired 0)" != 0 ] \
@@ -146,17 +143,16 @@ Everything you can change, by writing a file into /tmp/case
                           diagnosis is on stdout and the exit code cannot carry it -- issue
                           #112, where the .cmd sent that stdout to nul
   wsl.status.nowsl1 1     --status also prints the WSL1-unsupported line
-  ps.novirt 1             no hypervisor is loaded. The OUTCOME every cause of
-                          HCS_E_HYPERV_NOT_INSTALLED shares, and what the pre-flight asks
-  ps.vmp.disabled 1       ...because the Virtual Machine Platform is off. The one cause setup
-                          can fix, on the restart it already asks for
-  ps.launchtype.off 1     ...because hypervisorlaunchtype is Off. Setup hands over the
-                          bcdedit command and refuses to run it -- a boot-config change can
-                          ask for a BitLocker recovery key at the next restart
-  ps.virt.rc N            force the hypervisor probe alone. Anything but 0 or 1 is
-                          "the question failed", which is NOT "no"
-  ps.vmp.rc N             same, for the Virtual Machine Platform probe
-  ps.launchtype.rc N      same, for the boot-configuration probe
+  wsl.vm.cannotstart 1    `wsl --import` fails at CreateVm with HCS_E_HYPERV_NOT_INSTALLED, which
+                          is what EVERY cause looks like once the gate observes a real VM start
+                          instead of asking Windows which cause it was -- firmware off, the
+                          Virtual Machine Platform off, hypervisorlaunchtype Off, or a nested
+                          guest. Issue #114 is the last of those, where the old probe read
+                          HypervisorPresent as True and waved the machine through
+  where.tar.exe 0         no tar.exe, so the check cannot build its payload. The PRECONDITION
+                          failing, which is not the machine answering no -- a separate arm
+  ps.vmcheck.rc N         force the gate's probe alone. Anything but 0 or 1 is "the question
+                          failed", which is NOT "no"
   ps.distro.rc N          same, for the distro probe. Use this rather than ps.rc when you
                           want ONLY that probe to fail
   wsl.name.unsupported 1  WSL older than 2.5.8: no --name, exits -1

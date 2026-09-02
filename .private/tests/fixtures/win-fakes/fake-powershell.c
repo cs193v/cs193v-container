@@ -1,26 +1,35 @@
-/* powershell.exe, for the -Command probes the installer runs. FOUR of them now, not one.
+/* powershell.exe, for the -Command probes the installer runs. TWO of them, not four.
  *
- * WHY IT DISPATCHES ON THE COMMAND TEXT. This fake used to answer the only question the
- * installer asked -- does the CS193V distro exist -- so it needed no idea which question it was
- * being asked. Issue #112 added three more, and a fake that answered them all from one knob
- * would let a case arrange a self-contradictory machine: a hypervisor that is absent and a
- * distro that exists because the same `ps.rc` said 0 to both. So the marker is read off the
- * -Command text, which is the .cmd's OWN string -- an installer that stops asking one of these
- * stops matching here, rather than silently getting the previous answer.
+ * WHY IT DISPATCHES ON THE COMMAND TEXT. This fake once answered the only question the installer
+ * asked -- does the CS193V distro exist -- so it needed no idea which question it was being asked.
+ * Issue #112 added three more, and a fake that answered them all from one knob would let a case
+ * arrange a self-contradictory machine. So the marker is read off the -Command text, which is the
+ * .cmd's OWN string -- an installer that stops asking one of these stops matching here, rather
+ * than silently getting the previous answer.
  *
- * AN UNRECOGNISED PROBE IS A HARNESS FAILURE, not a "no". exit 120 is the same code fake_say
- * uses for a missing message key, and for the same reason: a fake that guessed 1 would report
- * every new probe as a negative answer, and the case asserting on that negative would pass.
+ * THREE OF THOSE FOUR ARE GONE, and issue #114 is why. They asked WHICH cause stopped a VM from
+ * starting -- HypervisorPresent, then VirtualMachinePlatform, then hypervisorlaunchtype -- and
+ * the first was WRONG on a VirtualBox guest, where a hypervisor is present but not one WSL2 can
+ * build a VM with. The installer no longer asks about the machine at all: it makes WSL start a VM
+ * and looks. So the probes here are both the same shape now, `wsl -l -q` against a name.
  *
- * THE DISTRO PROBE STILL EVALUATES rather than answering from a knob. It reads the same
- * wsl.list state fake-wsl.c writes to, so the real sequence -- probe, create, probe again --
- * behaves the way it would on a machine.
+ * THE COMMENT THAT USED TO BE HERE claimed HypervisorPresent was "false for every cause" of
+ * HCS_E_HYPERV_NOT_INSTALLED. It was not, and this fake asserting it in prose is part of why no
+ * test caught the defect: the fixture agreed with the installer's mistake.
+ *
+ * AN UNRECOGNISED PROBE IS A HARNESS FAILURE, not a "no". exit 120 is the same code fake_say uses
+ * for a missing message key, and for the same reason: a fake that guessed 1 would report every new
+ * probe as a negative answer, and the case asserting on that negative would pass.
+ *
+ * BOTH PROBES STILL EVALUATE rather than answering from a knob. They read the same wsl.list state
+ * fake-wsl.c writes to, so the real sequences -- probe, create, probe again; import, probe,
+ * unregister -- behave the way they would on a machine.
  *
  * Exit codes follow the real -Command contract: the answer arrives AS a code, 0 or 1. Anything
  * else means the probe itself could not run (powershell absent gives cmd's 9009), which is a
- * different thing from "absent" -- the installer has a separate arm for each, so the fake needs
- * a way to produce it. `ps.rc` forces EVERY probe, which is what "powershell is missing" looks
- * like; the per-probe `ps.*.rc` knobs force one at a time.
+ * different thing from "absent" -- the installer has a separate arm for each, so the fake needs a
+ * way to produce it. `ps.rc` forces EVERY probe, which is what "powershell is missing" looks like;
+ * the per-probe `ps.*.rc` knobs force one at a time.
  */
 #include "win-fake.h"
 
@@ -42,11 +51,10 @@ static int answer(const char *rcknob, int value) {
     return value;
 }
 
-/* The distro probe, evaluated against the list fake-wsl.c maintains. */
-static int distro_present(void) {
-    const char *distro = getenv("CS193V_FAKE_DISTRO");
-    if (!distro) distro = "CS193V";
-
+/* Is NAME in the list fake-wsl.c maintains? Both probes are this question about different names,
+ * which is the point: the gate's answer is "did the throwaway environment register", in exactly
+ * the terms the distro probe already used. */
+static int listed(const char *name) {
     char p[1024], line[512];
     fake_path(p, sizeof p, "wsl.list");
     FILE *f = fopen(p, "rb");
@@ -55,8 +63,8 @@ static int distro_present(void) {
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
-        /* the real probe anchors with -match '^CS193V$', so CS193V-old must not match */
-        if (n && strcmp(line, distro) == 0) { found = 1; break; }
+        /* the real probes anchor with -match '^NAME$', so CS193V-old must not match CS193V */
+        if (n && strcmp(line, name) == 0) { found = 1; break; }
     }
     fclose(f);
     return found;
@@ -65,26 +73,22 @@ static int distro_present(void) {
 int main(int argc, char **argv) {
     fake_log_argv(argc, argv);
 
-    /* Is a hypervisor actually loaded? The OUTCOME question, and false for every cause of
-     * HCS_E_HYPERV_NOT_INSTALLED -- firmware off, a guest VM without nested virtualisation, or
-     * hypervisorlaunchtype Off. */
-    if (mentions(argc, argv, "HypervisorPresent"))
-        return answer("ps.virt.rc", fake_knob_int("ps.novirt", 0) ? 1 : 0);
+    const char *distro = getenv("CS193V_FAKE_DISTRO");
+    if (!distro) distro = "CS193V";
+    const char *vmcheck = getenv("CS193V_FAKE_VMCHECK");
+    if (!vmcheck) vmcheck = "CS193V-vmcheck";
 
-    /* Is the Virtual Machine Platform optional component on? This is the one the installer can
-     * fix, so it is the question that splits "enable it and restart" from "refuse". */
-    if (mentions(argc, argv, "VirtualMachinePlatform"))
-        return answer("ps.vmp.rc", fake_knob_int("ps.vmp.disabled", 0) ? 1 : 0);
-
-    /* Is the hypervisor switched off in the boot configuration? 1 means Off, i.e. the problem is
-     * present -- the same polarity as the other two, where 0 is "nothing wrong here". */
-    if (mentions(argc, argv, "hypervisorlaunchtype"))
-        return answer("ps.launchtype.rc", fake_knob_int("ps.launchtype.off", 0) ? 1 : 0);
+    /* THE GATE, and it must be tested BEFORE the distro probe: both commands set WSL_UTF8 and
+     * both run `wsl -l -q`, so the only thing telling them apart is the name each anchors on.
+     * Matching on the distro marker first would answer the gate with the student's environment,
+     * which is the one confusion that would make the whole gate meaningless. */
+    if (mentions(argc, argv, vmcheck))
+        return answer("ps.vmcheck.rc", listed(vmcheck) ? 0 : 1);
 
     /* Does the CS193V distro exist? WSL_UTF8 is the marker because batch cannot read wsl.exe's
      * UTF-16, which is the whole reason this probe goes through PowerShell at all. */
     if (mentions(argc, argv, "WSL_UTF8"))
-        return answer("ps.distro.rc", distro_present() ? 0 : 1);
+        return answer("ps.distro.rc", listed(distro) ? 0 : 1);
 
     fprintf(stderr, "win-fake: powershell asked an unrecognised question: %s\n",
             argc > 1 ? argv[argc-1] : "(no arguments)");

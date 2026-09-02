@@ -145,10 +145,10 @@ for rc in -1 1 2 9009; do
     assert_says     "win-status-$rc:offers-to-install-wsl"           "Installing WSL" "$WINE_OUT"
 done
 
-# ─── CLASS: a machine that cannot run a VM must be refused, and refused ACCURATELY ─────────────
+# ─── CLASS: a machine that cannot start a VM must be refused, ONCE and ACCURATELY ──────────────
 #
-# Issue #112. The gate above is about `wsl --status` FAILING; this class is about the machine
-# where it SUCCEEDS and is still unusable, which is the one that shipped broken.
+# Issues #112 and #114. The gate above is about `wsl --status` FAILING; this class is about the
+# machine where it SUCCEEDS and is still unusable, which is the one that shipped broken twice.
 #
 # Status() prints the default distro, the default version, a line if the WSL optional component
 # is missing and a line if vmcompute is missing -- then `return 0` UNCONDITIONALLY
@@ -156,86 +156,84 @@ done
 # .cmd sent stdout to nul and branched on the code. It then spent 600 MB downloading Ubuntu,
 # failed at CreateVm, and told the student their WSL was too old.
 #
-# THE FOUR STATES ARE ASSERTED SEPARATELY because the installer owes a different answer to each,
-# and collapsing them is precisely the defect: two are things it can fix, one is a refusal, and
-# one is "the question failed", which is not an answer at all.
+# THE FOUR STATES USED TO BE ASSERTED SEPARATELY, and the comment here used to say collapsing them
+# was "precisely the defect", because two were things the installer could fix, one was a refusal
+# and one was "the question failed". Issue #114 retired that argument. The probe deciding WHICH of
+# them applied read Win32_ComputerSystem.HypervisorPresent, and on a VirtualBox guest that reads
+# TRUE -- a hypervisor IS present, just not one WSL2 can build a VM with -- so the installer
+# waved the machine through into the 600 MB download and then blamed its WSL version. Replacing a
+# proxy with an OBSERVATION removes the need to know which cause it was: WSL is asked to start a
+# VM, and every reason it cannot needs the same thing to happen next. So there is ONE refusal
+# here, and what is asserted separately is the thing that is still genuinely different -- a check
+# that could not RUN, which is not the machine answering no.
 
-# 1. THE MACHINE IN THE ISSUE. --status says so and exits 0; no hypervisor is loaded; the
-#    optional component is on and the boot config is fine -- so the cause is below Windows.
+# 1. THE MACHINE IN #114, at the site where #112 struck: no environment yet, so the gate stands
+#    between the student and the download. wsl.vm.cannotstart makes --import fail the way that box
+#    really failed, in 209 ms with a 1.5 KB payload instead of after 600 MB.
 wine_new
 wine_list                                   # nothing registered yet: this is a first install
-wine_knob wsl.status.novirt 1                # --status PRINTS the warning...
-wine_knob ps.novirt 1                        # ...and no hypervisor is actually running
+wine_knob wsl.status.novirt 1                # --status PRINTS the warning and still exits 0...
+wine_knob wsl.vm.cannotstart 1               # ...and a VM genuinely cannot be started
 wine_run
-assert_ne   "win-novirt:refuses"                    "0" "$WINE_RC"
-assert_says "win-novirt:says-what-is-wrong"         "virtualization is switched off below Windows" "$WINE_OUT"
-assert_says "win-novirt:names-the-firmware"         "firmware" "$WINE_OUT"
-assert_says "win-novirt:names-the-other-cause"      "running inside a virtual machine" "$WINE_OUT"
-assert_says "win-novirt:points-at-the-instructions" "aka.ms/enablevirtualization" "$WINE_OUT"
-# THE ASSERTION THIS WHOLE CLASS EXISTS FOR. The shipped file sent this machine to `wsl --version`,
-# which answers "2.9.8" and helps nobody.
-#
-# PINNED TO THE INSTRUCTION, NOT THE SENTENCE. `wsl --version` is what makes the old message
+assert_ne   "win-novm:refuses"                        "0" "$WINE_RC"
+assert_says "win-novm:says-what-it-observed"          "could not start a" "$WINE_OUT"
+assert_says "win-novm:names-the-firmware"             "firmware" "$WINE_OUT"
+assert_says "win-novm:names-the-nested-case"          "running inside a virtual machine" "$WINE_OUT"
+assert_says "win-novm:sends-them-to-staff"            "this whole window" "$WINE_OUT"
+# PINNED TO THE INSTRUCTION, NOT THE SENTENCE. `wsl --version` is what made the old message
 # actively misleading, and it survives rewording of the prose around it -- so a future edit that
 # softens the wording while still sending this machine to the wrong command still goes red.
-assert_says_not "win-novirt:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
-assert_says_not "win-novirt:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
-# BEFORE the download, not after it. This is the difference the pre-flight buys, and the only
-# way to state it is over what was CALLED -- the prose would read the same either way.
-assert_eq   "win-novirt:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
-assert_says_not "win-novirt:does-not-claim-success"    "Done. From now on" "$WINE_OUT"
+assert_says_not "win-novm:does-not-send-them-to-the-wrong-command" "wsl --version" "$WINE_OUT"
+assert_says_not "win-novm:does-not-mention-the-wsl-floor"          "2.5.8" "$WINE_OUT"
+# AND IT HANDS OVER NOTHING, which is a decision and not an omission: enabling the Virtual
+# Machine Platform and setting hypervisorlaunchtype were both offered from here once.
+assert_says_not "win-novm:hands-over-no-boot-command"              "bcdedit" "$WINE_OUT"
+assert_says_not "win-novm:hands-over-no-feature-command"           "--no-distribution" "$WINE_OUT"
+# THE WHOLE POINT: it costs nothing. Not one byte is downloaded.
+assert_eq   "win-novm:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+# ...and it leaves nothing behind. The throwaway environment is unregistered on the way IN, so a
+# run killed halfway through the last attempt cannot make this one refuse.
+assert_ne   "win-novm:cleans-up-after-itself"         "0" "$(wine_argv_count '\-\-unregister')"
 
-# 2. THE ONE IT CAN FIX. No hypervisor because the optional component is off -- which is a clean
-#    Windows 11 box, where wsl.exe is present inbox and the feature is not enabled. It must enable
-#    it and use the restart it already asks for, NOT mention the WSL version.
+# 2. THE SECOND SITE, AND THE REASON THERE IS ONE GATE RATHER THAN ONE CHECK PER CALL. The same
+#    broken machine, except the environment ALREADY EXISTS -- so :makedistro is skipped entirely
+#    and #112's fix never applied here. Against the file as it shipped this case printed "[2/3]
+#    The CS193V environment is ready", then blamed a missing curl, then told the student the
+#    network was not up yet inside the environment, then said it was safe to run again -- a loop
+#    with no exit, and three wrong claims on the way into it. It must now produce the SAME single
+#    refusal as case 1, which is what "every arm below may assume a VM can start" buys.
 wine_new
-wine_list
-wine_knob ps.novirt 1
-wine_knob ps.vmp.disabled 1
+wine_list CS193V                            # the environment is there; the VM still is not
+wine_knob wsl.vm.cannotstart 1
 wine_run
-assert_eq   "win-vmp-off:exits-zero-because-nothing-failed" "0" "$WINE_RC"
-assert_says "win-vmp-off:says-what-it-is-doing"     "Turning on the Virtual Machine Platform" "$WINE_OUT"
-assert_eq   "win-vmp-off:enables-the-feature-once"  "1" "$(wine_argv_count '\-\-install --no-distribution')"
-assert_says "win-vmp-off:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
-assert_says "win-vmp-off:tells-them-to-rerun"       "run this same file again" "$WINE_OUT"
-assert_eq   "win-vmp-off:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
-assert_says_not "win-vmp-off:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
-assert_says_not "win-vmp-off:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
+assert_ne   "win-novm-existing:refuses"                   "0" "$WINE_RC"
+assert_says "win-novm-existing:gives-the-same-refusal"    "could not start a" "$WINE_OUT"
+assert_says_not "win-novm-existing:does-not-blame-the-network" "network is not up" "$WINE_OUT"
+assert_says_not "win-novm-existing:does-not-blame-curl"        "Installing curl" "$WINE_OUT"
+assert_says_not "win-novm-existing:does-not-call-it-ready"     "environment is ready" "$WINE_OUT"
+assert_says_not "win-novm-existing:does-not-invite-a-retry"    "safe to run this file again" "$WINE_OUT"
+assert_eq   "win-novm-existing:never-runs-bash"           "0" "$(wine_argv_count '\-e bash ')"
 
-# 3. THE BOOT CONFIGURATION. Features on, firmware on, and Windows told not to start its
-#    hypervisor -- which is what "disable VBS to gain FPS" advice and some third-party hypervisor
-#    installers leave behind. The installer NAMES it and hands over the one command.
-#
-# It deliberately does not RUN that command: a boot-configuration change can ask for a BitLocker
-# recovery key at the next restart, and device encryption is on by default on a lot of Windows 11
-# hardware. Locking a student out of their laptop is not a failure mode a course installer gets to
-# have. The negative assertion is the keeper for that decision here; 25-installer.sh holds the
-# static one, which is the stronger of the two.
-wine_new
-wine_list
-wine_knob ps.novirt 1
-wine_knob ps.launchtype.off 1
-wine_run
-assert_ne   "win-launchtype:refuses"                "0" "$WINE_RC"
-assert_says "win-launchtype:names-the-cause"        "set not to start its hypervisor" "$WINE_OUT"
-assert_says "win-launchtype:gives-the-one-command"  "bcdedit /set hypervisorlaunchtype Auto" "$WINE_OUT"
-assert_says "win-launchtype:says-why-it-will-not-run-it" "BitLocker" "$WINE_OUT"
-assert_eq   "win-launchtype:does-not-run-it"        "0" "$(wine_argv_count 'bcdedit /set')"
-assert_eq   "win-launchtype:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
-assert_says_not "win-launchtype:does-not-send-them-to-wsl-version" "wsl --version" "$WINE_OUT"
-assert_says_not "win-launchtype:does-not-mention-the-wsl-floor"    "2.5.8" "$WINE_OUT"
-
-# 4. AND THE STATE THAT IS NOT AN ANSWER. ps.rc forces every probe, which is what a machine with
-#    no powershell looks like. The same class as win-probe below, at the new site: "the question
-#    failed" must not silently become "the answer is yes" and carry on into a 600 MB download.
-wine_new
-wine_list
-wine_knob ps.rc 9009
-wine_run
-assert_ne   "win-virtprobe:does-not-exit-zero"      "0" "$WINE_RC"
-assert_says "win-virtprobe:says-the-question-failed" "Could not ask Windows whether this computer can run" "$WINE_OUT"
-assert_says "win-virtprobe:distinguishes-it-from-no" "not the same as the answer being no" "$WINE_OUT"
-assert_eq   "win-virtprobe:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+# 3. AND THE STATE THAT IS NOT AN ANSWER, which is the one thing the collapse deliberately keeps
+#    separate. Two shapes reach it, and both must: the check's PRECONDITIONS failing (no tar.exe,
+#    so no payload can be built) and the probe itself failing to run (ps.rc 9009 is what a machine
+#    with no powershell looks like). Neither is a machine that cannot start a VM -- reading them as
+#    one would refuse a student whose computer is fine, which is #114's mistake pointing the other
+#    way -- and neither may become "the answer is yes" and carry on into a 600 MB download.
+for knob in where.tar.exe ps.rc; do
+    case "$knob" in where.tar.exe) val=0 ;; *) val=9009 ;; esac
+    wine_new
+    wine_list
+    wine_knob "$knob" "$val"
+    wine_run
+    assert_ne   "win-vmcheck[$knob]:does-not-exit-zero"       "0" "$WINE_RC"
+    assert_says "win-vmcheck[$knob]:says-the-check-failed"    "Could not check whether this computer can start" "$WINE_OUT"
+    assert_says "win-vmcheck[$knob]:distinguishes-it-from-no" "not the same as the answer being no" "$WINE_OUT"
+    # AND IT MUST NOT BE THE VM REFUSAL. A check that could not run has no business naming
+    # firmware or a nested guest, which is exactly the guess :distrofailed was rewritten to stop.
+    assert_says_not "win-vmcheck[$knob]:does-not-diagnose-a-cause" "firmware" "$WINE_OUT"
+    assert_eq   "win-vmcheck[$knob]:never-tries-to-create-anything" "0" "$(wine_argv_count '\-\-install -d')"
+done
 
 # 5. THE OTHER HALF OF #112, and the one that hits a genuinely clean Windows 11 machine. When a
 #    component had to be enabled, `wsl --install -d` enables it, prints the reboot notice,

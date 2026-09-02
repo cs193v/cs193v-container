@@ -84,6 +84,37 @@ static int registered(const char *name) {
     return 0;
 }
 
+/* The token after a flag, e.g. `--unregister CS193V-vmcheck`. NULL when the flag is last or
+ * absent; callers treat that as a usage error rather than guessing a name. */
+static const char *argv_after(int argc, char **argv, const char *flag) {
+    for (int i = 1; i + 1 < argc; i++)
+        if (strcmp(argv[i], flag) == 0) return argv[i+1];
+    return NULL;
+}
+
+/* Rewrite wsl.list WITHOUT name. The gate imports a throwaway environment and removes it again,
+ * so the list has to really shrink: a fake that only ever appended would let the gate's cleanup
+ * pass while leaving a machine carrying a distro nobody asked for. */
+static void unregister_name(const char *name) {
+    char p[1024], line[512], keep[8192];
+    FILE *f;
+    size_t used = 0;
+    fake_path(p, sizeof p, "wsl.list");
+    if (!(f = fopen(p, "rb"))) return;
+    keep[0] = '\0';
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+        if (!n || strcmp(line, name) == 0) continue;
+        if (used + n + 2 > sizeof keep) break;
+        used += (size_t)snprintf(keep + used, sizeof keep - used, "%s\n", line);
+    }
+    fclose(f);
+    if (!(f = fopen(p, "wb"))) return;
+    fputs(keep, f);
+    fclose(f);
+}
+
 static int exists(const char *leaf) {
     char p[1024]; FILE *f;
     fake_path(p, sizeof p, leaf);
@@ -280,6 +311,60 @@ int main(int argc, char **argv) {
             return WSL_FAIL;
         }
         return (int)fake_knob_int("wsl.install.rc", 0);
+    }
+
+    /* `--unregister <Name>`. THE GATE CALLS THIS TWICE AND EXPECTS THE FIRST TO FAIL: on a clean
+     * machine nothing is registered yet, and wsl.exe answers WSL_E_DISTRO_NOT_FOUND with exit -1.
+     * That is measured, not assumed -- it is what the #114 box did -- and it is the reason the
+     * .cmd waives this exit code instead of checking it. A fake that returned 0 here would let a
+     * .cmd that DID check it pass, and then break on every real machine. */
+    if (has(argc, argv, "--unregister")) {
+        const char *name = argv_after(argc, argv, "--unregister");
+        if (!name || !registered(name)) {
+            char body[4096], code[512];
+            if (!fake_msg("MessageDistroNotFound", body, sizeof body)
+                || !fake_msg("ErrorCodeDistroNotFound", code, sizeof code)) {
+                fprintf(stderr, "win-fake: --unregister needs both MessageDistroNotFound "
+                                "and ErrorCodeDistroNotFound\n");
+                return 120;
+            }
+            fake_say(stdout, "MessageErrorCode", body, code);
+            return WSL_FAIL;
+        }
+        unregister_name(name);
+        return 0;
+    }
+
+    /* `--import <Name> <Location> <File>`, which is how the gate makes WSL start a VM without
+     * downloading anything. wsl.vm.cannotstart is the knob for a machine that cannot: measured on
+     * the #114 box at 209 ms with a 1.5 KB tarball, failing with the SAME HCS error the 600 MB
+     * `--install -d` path produces, only through a shorter scope chain.
+     *
+     * NOTHING IS REGISTERED ON THAT PATH, which is also measured: three failed imports left
+     * `wsl -l -q` empty. That is what makes the .cmd's question -- is it registered now? -- a
+     * sound answer rather than a guess, and it is why this arm must not append to wsl.list. */
+    if (has(argc, argv, "--import")) {
+        const char *name = argv_after(argc, argv, "--import");
+        if (!name) return WSL_FAIL;
+        if (fake_knob_int("wsl.vm.cannotstart", 0)) {
+            char body[4096], code[512];
+            if (!fake_msg("MessageEnableVirtualization", body, sizeof body)
+                || !fake_msg("ErrorCodeImportCreateVmNoHyperv", code, sizeof code)) {
+                fprintf(stderr, "win-fake: the import virtualisation failure needs both "
+                                "MessageEnableVirtualization and "
+                                "ErrorCodeImportCreateVmNoHyperv\n");
+                return 120;
+            }
+            fake_say(stdout, "MessageErrorCode", body, code);
+            return WSL_FAIL;
+        }
+        /* registered now, so the gate's probe can see it */
+        char p[1024]; FILE *f;
+        fake_path(p, sizeof p, "wsl.list");
+        if ((f = fopen(p, "a"))) { fprintf(f, "%s\n", name); fclose(f); }
+        /* No rc knob here: the .cmd deliberately ignores this exit code, so a knob to vary it
+         * would be a documented-but-undriven dial, which this fixture already has too many of. */
+        return 0;
     }
 
     if (has(argc, argv, "-l") || has(argc, argv, "--list")) {

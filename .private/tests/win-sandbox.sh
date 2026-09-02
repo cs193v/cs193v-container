@@ -67,16 +67,17 @@ WHAT THE MACHINE IS LIKE
   --no-distro          nothing registered yet, so it creates the environment
   --old-wsl            WSL older than 2.5.8: no --name, so creation fails
 
-  THE FOUR SHAPES OF ISSUE #112 -- a machine that cannot run a virtual machine. All four
-  reached the SAME wrong message before the pre-flight existed: "Naming a new environment
-  needs WSL 2.5.8 or newer", after downloading Ubuntu. Use --rev to watch that.
-  --no-virt            no hypervisor loaded, component on, boot config fine: the cause is
-                       below Windows and setup can only name it
-  --vmp-off            no hypervisor because the Virtual Machine Platform is off. THE CLEAN
-                       WINDOWS 11 CASE: wsl.exe is there inbox, the feature is not, and this
-                       is the one setup can fix on the restart it already asks for
-  --launchtype-off     hypervisorlaunchtype Off. Setup hands over the one command and
-                       explains why it will not run it for you
+
+  A MACHINE THAT CANNOT START A VIRTUAL MACHINE -- issues #112 and #114, and ONE shape now
+  rather than four. Which cause it was used to matter, because a probe branched on it and one
+  cause was fixable; #114 is a VirtualBox guest where that probe read backwards, because
+  VirtualBox sets the hypervisor-present bit. The gate observes a real VM start instead, so
+  every cause takes the same path. Use --rev to watch the old wrong message.
+  --no-vm              `wsl --import` fails at CreateVm, which is what every cause looks like
+                       from here: firmware off, the Virtual Machine Platform off, the boot
+                       configuration told not to start a hypervisor, or a nested guest
+  --vmcheck-fails      the CHECK cannot run -- no tar.exe, so no payload can be built. NOT the
+                       machine answering no, and it must not be reported as one
   --createvm-fails     the probes all say the machine is fine and \`wsl --install -d\` still
                        fails at CreateVm, which is a real box (WSL#12894). Watch that the
                        refusal does not pretend to know why
@@ -114,9 +115,9 @@ EXAMPLES
   tests/win-sandbox.sh --dir 'cs193v (1)'           # the folder name that used to break it
   tests/win-sandbox.sh --old-wsl --no-distro        # the --name refusal
   tests/win-sandbox.sh --probe-fails                # "cannot tell" vs "absent"
-  tests/win-sandbox.sh --no-virt                    # issue #112, refused before the download
-  tests/win-sandbox.sh --vmp-off                    # the clean Windows 11 box: enable + restart
-  tests/win-sandbox.sh --launchtype-off             # the one command, handed over not run
+  tests/win-sandbox.sh --no-vm                      # issues #112 and #114, refused before the download
+  tests/win-sandbox.sh --no-vm --distro CS193V      # ...and at the second site, where one exists already
+  tests/win-sandbox.sh --vmcheck-fails              # "cannot check" vs "cannot start one"
   tests/win-sandbox.sh --rev accfb1b --createvm-fails   # the wrong message, as it shipped
   tests/win-sandbox.sh --no-curl                    # watch it install curl first
   tests/win-sandbox.sh --truncated                  # a wifi sign-in page instead of the script
@@ -184,11 +185,11 @@ while [ "$#" -gt 0 ]; do
                           setk wsl.status.rc "$OPTVAL"
                           setk wsl.status.msg MessageWslOptionalComponentRequired ;;
         --no-distro)      DISTROS='' ;;
-        # ps.novirt is set by all three, because "no hypervisor" is the OUTCOME every cause
-        # shares -- the second knob is which cause, which is what the installer branches on.
-        --no-virt)        setk ps.novirt 1; setk wsl.status.novirt 1; DISTROS='' ;;
-        --vmp-off)        setk ps.novirt 1; setk ps.vmp.disabled 1; DISTROS='' ;;
-        --launchtype-off) setk ps.novirt 1; setk ps.launchtype.off 1; DISTROS='' ;;
+        # ONE FLAG, because the installer no longer branches on which cause it was. The
+        # wsl.status.novirt knob rides along because a machine in this state really does print
+        # that line on stdout and still exit 0, which is the trap #112 fell into.
+        --no-vm)          setk wsl.vm.cannotstart 1; setk wsl.status.novirt 1 ;;
+        --vmcheck-fails)  setk where.tar.exe 0 ;;
         --createvm-fails) setk wsl.install.novirt 1; DISTROS='' ;;
         --reboot-required) setk wsl.install.rebootrequired 1; DISTROS='' ;;
         --old-wsl)        setk wsl.name.unsupported 1; DISTROS='' ;;

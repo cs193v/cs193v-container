@@ -690,40 +690,43 @@ settle, and one it should not be trusted on:
    components with no published exit-code contract, so their wording is third-party-attested only.
    The suite gates on their exit codes and matches prose loosely. *Verify once:* run
    `net session` elevated, unelevated, and with the Server service stopped, and compare.
-5. **Whether this computer can run a virtual machine at all** — the prerequisite this list did not
-   have, and issue #112 is what its absence cost: the installer said "WSL is installed", downloaded
-   Ubuntu, failed at `CreateVm` with `HCS_E_HYPERV_NOT_INSTALLED`, and told the student their WSL
-   was too old. The suite now drives all four shapes under wine, but every probe it drives is faked,
-   so **what the probes really answer on real hardware is unverified.** Three things to check, each
-   on a box in that state:
-   - **Firmware virtualization off.** Confirm the installer refuses **before** downloading Ubuntu
-     and names the firmware — `wincmd log`'s equivalent is that `wsl --install -d` never runs.
-     Confirm `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` really is `False` here, and
-     that it is `True` on a working box with only Virtual Machine Platform on and no Hyper-V role.
-     That property is the load-bearing one: everything else branches off it.
-   - **Virtual Machine Platform off, on a clean Windows 11 box** where `wsl.exe` is present inbox.
-     Confirm the installer enables it and asks for a restart rather than mentioning `wsl --version`,
-     and that the restart is the *only* one — `wsl --install --no-distribution` should leave nothing
-     for a second pass to enable. Time `Get-WindowsOptionalFeature -Online -FeatureName
-     VirtualMachinePlatform`: it goes through DISM, and if it takes long enough to look like a hang
-     the probe needs a "checking..." line in front of it.
-   - **`hypervisorlaunchtype Off`.** Confirm `bcdedit /enum '{current}'` prints the line when set and
-     omits it when not, and that the probe's empty-output arm really fires when bcdedit cannot read
-     the store — that arm exists so a failed question does not read as "not Off".
+5. **Whether this computer can start a virtual machine at all** — the prerequisite this list did
+   not have, and issues #112 and #114 are what its absence cost. #112: the installer said "WSL is
+   installed", downloaded Ubuntu, failed at `CreateVm` with `HCS_E_HYPERV_NOT_INSTALLED`, and told
+   the student their WSL was too old. #114: the pre-flight added to prevent that read
+   `Win32_ComputerSystem.HypervisorPresent`, which on a VirtualBox guest reads **True** — measured,
+   on `innotek GmbH / VirtualBox` with WSL 2.7.12 — so the same machine was waved through into the
+   same download and given the same wrong diagnosis.
 
-   **What stays unmeasured, and should be recorded rather than assumed:** which of the three states
-   the machine in #112 actually had. The transcript proves only that the prerequisite check passed
-   and `CreateVm` failed, which is consistent with all three. If it turns out to have been a guest
-   VM without nested virtualization, that becomes the leading cause in `:nohypervisor`'s wording
-   *and* the one prerequisite here that a suite could regression-test cheaply, since a guest VM is
-   something staff can create on demand.
+   **The question this list used to ask is gone.** There is no property to verify any more: the
+   gate imports a throwaway environment and asks whether it registered. What replaces it is
+   shorter, but the one item on it is load-bearing enough to block a release.
 
-   **And the decision not to fix it automatically**, which is a policy question a real box cannot
-   settle: `bcdedit /set hypervisorlaunchtype Auto` would fix the third state on the restart the
-   installer already asks for, and it is refused because a boot-configuration change can trigger a
-   BitLocker recovery prompt at the next restart. *Verify that claim once*, on a box with device
-   encryption on — it is the entire argument for handing the command over instead of running it, and
-   `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` rule exists to hold the line either way.
+   - **THE POSITIVE PATH, and it is the only thing here that can break every student at once.**
+     Confirm on a box that CAN start a VM that `wsl --import CS193V-vmcheck <dir> <tar>` of a
+     tarball of an empty directory **succeeds**, that `wsl -l -q` then lists it, and that
+     `wsl --unregister CS193V-vmcheck` removes it. The gate reads "did it register" as "a VM
+     started", so if an empty rootfs is *rejected* on a working machine the installer refuses
+     everybody. This cannot be checked on the #114 box — nothing there can start a VM at all, so
+     the import never gets past `CreateVm` — which is precisely the #112 shape: a gate never
+     exercised in the state that mattered. **Check this before shipping.**
+   - **The negative path is measured** and needs no real-hardware pass: on the #114 box,
+     `wsl --import` failed at `Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED`
+     in 209 ms with a 1536-byte tarball, left nothing registered across three attempts, and
+     `wsl --unregister` of an absent name answered `WSL_E_DISTRO_NOT_FOUND` with exit -1. Those
+     three facts are what `fake-wsl.c`'s `--import`/`--unregister` arms model.
+   - **The cost on the happy path**, which the #114 box also cannot answer: time the gate on a
+     working machine. It runs on EVERY invocation, including the common re-run where a working
+     environment already exists. If it is slow enough to look like a hang it needs a line printed
+     in front of it, the way the DISM probe it replaced would have.
+
+   **What is no longer worth verifying, recorded so nobody re-adds it:** whether
+   `HypervisorPresent` is `False` for each cause (#114 is the counter-example), whether
+   `Get-WindowsOptionalFeature` is slow enough to need a "checking..." line, and whether
+   `bcdedit /enum '{current}'` prints the line when set. All three probes are gone. The
+   **BitLocker claim** — that `bcdedit /set hypervisorlaunchtype Auto` can trigger a recovery
+   prompt — is still unverified and is now only historical: nothing offers that command, so
+   `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` holds the line whether or not the claim is true.
 
 ### Ubuntu's first-run setup, which the installer warns about but cannot control
 `wsl --install -d Ubuntu-26.04 --name CS193V` **launches** the new distribution and returns *the
