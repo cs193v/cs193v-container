@@ -1057,7 +1057,7 @@ assert_contains "codex:doctor-reports-the-shipped-approval-policy" "OnRequest" \
 codex_probe="$(new_tmpdir)"
 printf 'approval_policy = "untrusted"\n' > "$codex_probe/managed_config.toml"
 assert_contains "codex:the-managed-policy-is-really-read" "UnlessTrusted" \
-    "$($VT_RUN --rm --network=none -v "$codex_probe/managed_config.toml:/etc/codex/managed_config.toml:ro" \
+    "$($VT_RUN --rm --network=none -v "$codex_probe/managed_config.toml:/etc/codex/managed_config.toml:ro$VT_MOUNT_Z" \
        --entrypoint sh "$TEST_IMAGE" -c 'codex doctor 2>&1 | grep -E "approval policy"' 2>&1)"
 rm -rf "$codex_probe"
 

@@ -242,6 +242,13 @@ else
     cp "$PRIVATE/install-cs193v-windows.cmd" "$DL/"
 fi
 cp "$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION" "$CASE/messages"
+# COPIED INTO THE CASE TREE RATHER THAN MOUNTED OUT OF THE CHECKOUT, the way lib/sandbox.sh
+# already does with lib/sandbox-guest.sh. Not a style preference: on an SELinux host a bind mount
+# needs $VT_MOUNT_Z to be readable inside the container, and `,z` RELABELS WHAT IT MOUNTS -- so
+# mounting straight from lib/ would leave a tracked file carrying container_file_t on the
+# developer's disk after a sandbox run, which is a lasting change to the checkout for the sake of
+# a throwaway container. Everything else mounted here is already under $WINE_TMP.
+cp "$DIR0/lib/wine-guest.sh" "$CASE/wincmd"
 # What the fake's curl arm serves: the real install-cs193v.sh, exactly as lib/wine.sh does it.
 cp "$PRIVATE/install-cs193v.sh" "$CASE/stage2.src"
 : > "$CASE/wsl.list"
@@ -259,8 +266,8 @@ set -- --label "cs193v.sandbox=${USER:-unknown}" -i --name "$NAME_SB" --network=
 [ -t 0 ] && set -- "$@" -t
 [ "$KEEP" = no ] && set -- "$@" --rm
 set -- "$@" -e XDG_RUNTIME_DIR=/tmp/xdg -e "SB_DL=$DLNAME"
-set -- "$@" -v "$CASE:/work:ro"
-set -- "$@" -v "$DIR0/lib/wine-guest.sh:/usr/local/bin/wincmd:ro"
+set -- "$@" -v "$CASE:/work:ro$VT_MOUNT_Z"
+set -- "$@" -v "$CASE/wincmd:/usr/local/bin/wincmd:ro$VT_MOUNT_Z"
 set -- "$@" "$(fixture_tag wine)"
 
 printf 'Download folder: %s   installer: %s\n' "$DLNAME" \

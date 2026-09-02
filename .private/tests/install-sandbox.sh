@@ -275,8 +275,8 @@ set -- --label "cs193v.sandbox=${USER:-unknown}" -i --name "$NAME_SB"
 [ -n "$RM" ] && set -- "$@" "$RM"
 [ "$NET" = no ] && set -- "$@" --network=none
 set -- "$@" --mount type=tmpfs,destination=/var/tmp/report
-set -- "$@" -v "$SB_WORK:/work:ro"
-set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro"
+set -- "$@" -v "$SB_WORK:/work:ro$VT_MOUNT_Z"
+set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro$VT_MOUNT_Z"
 set -- "$@" -e "SB_NET=$NET"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"

@@ -207,7 +207,7 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # /proc/version` (installer:306) and the effect is two file writes, so it is executable on
     # Linux with no Windows anywhere.
     case "$platform" in
-        wsl) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/proc-version:/proc/version:ro") ;;
+        wsl) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/proc-version:/proc/version:ro$VT_MOUNT_Z") ;;
     esac
     # A TEST CONVENIENCE, NAMED AS ONE, and deliberately on neither axis: a fake podman is
     # not an absence and not a capability, and it is not a machine any student could have.
@@ -224,7 +224,7 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # installed, but the course needs 5.7.0 or newer" -- a fixture artefact wearing the costume
     # of a product refusal. Mounting over the real path shadows it exactly and adds no path.
     if [ "$fake" = yes ]; then
-        MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/podman-fake:/usr/bin/podman:ro" \
+        MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/podman-fake:/usr/bin/podman:ro$VT_MOUNT_Z" \
                        -e CS193V_SHIM=/var/tmp/shim)
     fi
     return 0
@@ -612,7 +612,7 @@ nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KE
     machine_flags '' linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
-        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" "$@" \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" "$@" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
@@ -636,7 +636,7 @@ nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN rem
     machine_flags sysadmin linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
-        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
@@ -645,7 +645,7 @@ nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask rem
     machine_flags unmask linux no "$base"
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
-        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro" \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
@@ -694,7 +694,7 @@ nest_build() {                        # nest_build [PREREQS] [KEYS] [BASE] [INST
         -e "SB_DISTRO=$(machine_distro "$base")" \
         -e "SB_INSTALLER=$inst" \
         -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
-        -v "$SB_WORK:/work:ro" \
+        -v "$SB_WORK:/work:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" \
         sh /work/nest-run.sh > "$SB_TMP/nraw" 2>&1
     grep -v 'The input device is not a TTY' "$SB_TMP/nraw" > "$SB_TMP/nraw.clean" 2>/dev/null || true
@@ -829,7 +829,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
         -e "CS193V_COVERAGE=$cov" \
         -e "SB_NO_PREREQS=$SB_NO_PREREQS" \
         -e "SB_DISTRO=$(machine_distro "$SB_BASE")" \
-        -v "$SB_WORK:/work:ro" "$@" \
+        -v "$SB_WORK:/work:ro$VT_MOUNT_Z" "$@" \
         "$(fixture_tag "$SB_BASE")" \
         /work/run.sh > "$SB_TMP/raw" 2>&1
     rc=$?

@@ -249,6 +249,22 @@ else fail "trace-fd:container-side-copies-were-found" \
           "no BASH_XTRACEFD in lib/sandbox.sh or lib/sandbox-guest.sh -- did tracing move?"; fi
 assert_eq "trace-fd:container-side-copies-agree" "BASH_XTRACEFD=$CS193V_TRACE_FD" "$xt_copies"
 
+# ─── every bind mount carries the SELinux label ────────────────────────────────
+# THE SAME SHAPE AS THE --label RULE BELOW, and for the same reason. On an SELinux host a mount
+# written without `$VT_MOUNT_Z` hands the container content it may neither read nor exec, and the
+# failure does not look like a permission problem: 66 assertions in 26-installer-sandbox.sh
+# blamed the installer, and 50-image.sh's codex probe reported that /etc/codex was not being read
+# when the file simply could not be opened. It also cannot fail on a Debian-family machine at all,
+# so review is not going to catch it. See VT_MOUNT_Z in lib/shared.sh.
+#
+# A COLON IS WHAT MAKES IT A MOUNT. `-v "$1"` is `command -v`, which appears all over the suite and
+# is not a mount; every real bind mount is HOST:CONTAINER and so contains one. That is the whole
+# discriminator, which is why it is spelled out rather than being a list of files to keep updated.
+mounts_missing_z="$(grep -rnoE -- '-v "[^"]*:[^"]*"' \
+                    $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh 2>/dev/null \
+                    | grep -v 'VT_MOUNT_Z' || true)"
+assert_eq "selinux:every-bind-mount-carries-the-label" "" "$mounts_missing_z"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # All four of the installer's privileged calls go through one name, so a sudo that never
 # execs makes the whole shim tier structurally unable to change this machine. That is worth
