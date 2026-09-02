@@ -834,24 +834,35 @@ unlaunchable browser fails the build instead of the student.
 to be "Chrome is not installed", and now the honest reason is that Playwright puts
 `--disable-dev-shm-usage` in its own default chromium arguments.
 
-**`bcdedit /set hypervisorlaunchtype Auto`, rejected — and it is the tempting one (issue #112).**
-`hypervisorlaunchtype Off` is the likeliest *fixable* reason a Windows machine cannot start WSL2:
-"disable VBS to gain FPS" guides leave it that way, as do some third-party hypervisor installers.
-One elevated command fixes it, and it would take effect on the restart `install-cs193v-windows.cmd`
-already asks for — so there is no extra restart to argue about, which is exactly what makes it
-tempting. What it also does is change how the computer starts up, and **a boot-configuration change
-can trigger a BitLocker recovery prompt at the next restart**, because the TPM measures boot
-configuration. Device encryption is on by default on a lot of Windows 11 hardware. A student without
-their recovery key written down is then locked out of their own laptop by a course installer, which
-is not a failure mode this project gets to have. So `:hypervisoroff` prints the command, says why it
-will not run it, and tells them to ask staff first if they do not have the key.
+**Every remediation the Windows installer used to offer, now rejected (issues #112 and #114).**
+The original argument was about one command. `hypervisorlaunchtype Off` is the likeliest *fixable*
+reason a Windows machine cannot start WSL2 — "disable VBS to gain FPS" guides leave it that way, as
+do some third-party hypervisor installers — and one elevated command fixes it on the restart
+`install-cs193v-windows.cmd` already asks for. It was rejected anyway, because a boot-configuration
+change **can trigger a BitLocker recovery prompt at the next restart** (the TPM measures boot
+configuration, and device encryption is on by default on a lot of Windows 11 hardware). A student
+without their recovery key written down would be locked out of their own laptop by a course
+installer, which is not a failure mode this project gets to have. So `:hypervisoroff` printed the
+command and explained why it would not run it.
 
-The two Windows *features* are a different question and are enabled freely: `wsl --install -d` runs
-the same `dism /enable-feature` for itself, so the installer calling
-`wsl --install --no-distribution` first takes no authority it did not already take — it only asks
-before spending 600 MB, and then asks for the restart it already needed. `lib/cmdlint.sh`'s
-`cmdlint_bcdedit_writes` rule is what keeps the boot-configuration half of this decision true; the
-BitLocker claim itself is a MANUAL.md item, still unverified on real hardware.
+**The two Windows *features* were then enabled freely**, on the argument that `wsl --install -d`
+runs the same `dism /enable-feature` for itself, so calling `wsl --install --no-distribution` first
+took no authority the installer did not already have.
+
+**Issue #114 retired all of it, and the reason is worth keeping.** Both decisions depended on
+knowing *which* cause stopped a VM from starting, and the probe that decided read
+`Win32_ComputerSystem.HypervisorPresent`. On a VirtualBox guest that reads **True** — VirtualBox
+sets the hypervisor-present CPUID bit, so a hypervisor genuinely is present, just not one WSL2 can
+build a VM with. The machine was waved through into 600 MB and then told its WSL was too old. Any
+replacement property is another proxy with another blind spot, so the installer stopped asking
+about the machine and now *observes*: `wsl --import` of a 1.5 KB tarball, which reaches the same
+`HCS_E_HYPERV_NOT_INSTALLED` in 209 ms (measured on the #114 box). Once the cause is unknown *and
+does not need to be known*, there is one refusal for the class and nothing to hand over — so
+`:enablevmp`, `:hypervisoroff` and `:nohypervisor` collapsed into `:novm`, which hands over no
+commands and directs the student to course staff. `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` rule
+still holds the boot-configuration line, and `windows:hands-over-no-boot-configuration-command` in
+`25-installer.sh` now holds the wider one. The BitLocker claim is still a MANUAL.md item and still
+unverified; it is no longer load-bearing, since nothing offers the command either way.
 
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open

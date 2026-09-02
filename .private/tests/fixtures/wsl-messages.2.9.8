@@ -74,6 +74,13 @@ MessageEnableVirtualization	A	WSL2 is unable to start since virtualization is no
 # rather than a later launch. InstallDistro is the outermost scope, which is what says the
 # download had already happened -- and therefore what makes a pre-flight worth having.
 ErrorCodeCreateVmNoHyperv	E	Wsl/InstallDistro/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+#
+# THE GATE'S OWN TWO, and their provenance is a transcript from the issue #114 machine (a
+# VirtualBox guest, WSL 2.7.12) rather than #112's. Recorded separately because the scope chain
+# for --import is SHORTER than --install's: no InstallDistro, because nothing is being installed
+# from a manifest. A fake that reused the --install chain would be inventing this one.
+ErrorCodeImportCreateVmNoHyperv	E	Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+ErrorCodeDistroNotFound	E	Wsl/Service/WSL_E_DISTRO_NOT_FOUND
 
 # ---- Win32 system text ---------------------------------------------------------
 SystemErrorSuccess	B	The operation completed successfully.

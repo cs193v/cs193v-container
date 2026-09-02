@@ -58,7 +58,7 @@ ENV WINEPREFIX=/home/ubuntu/.wine \
 COPY win-fakes/ /tmp/win-fakes/
 RUN mkdir -p /home/ubuntu/shim \
  && cd /tmp/win-fakes \
- && for f in wsl net where powershell reg; do \
+ && for f in wsl net where powershell reg tar; do \
       x86_64-w64-mingw32-gcc -O1 -Wall -Wextra -o "/home/ubuntu/shim/$f.exe" "fake-$f.c"; \
     done \
  && ls -1 /home/ubuntu/shim
