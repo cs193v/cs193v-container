@@ -7,23 +7,32 @@
  * .cmd's OWN string -- an installer that stops asking one of these stops matching here, rather
  * than silently getting the previous answer.
  *
- * THREE OF THOSE FOUR ARE GONE, and issue #114 is why. They asked WHICH cause stopped a VM from
- * starting -- HypervisorPresent, then VirtualMachinePlatform, then hypervisorlaunchtype -- and
- * the first was WRONG on a VirtualBox guest, where a hypervisor is present but not one WSL2 can
- * build a VM with. The installer no longer asks about the machine at all: it makes WSL start a VM
- * and looks. So the probes here are both the same shape now, `wsl -l -q` against a name.
+ * THE FOUR THAT WERE HERE ARE ALL GONE, over two issues, and the reason is worth keeping because
+ * this file is part of how the second one got shipped. Three of them asked WHICH cause stopped a
+ * VM from starting -- HypervisorPresent, then VirtualMachinePlatform, then hypervisorlaunchtype.
+ * #114 is a VirtualBox guest where the first reads TRUE, because a hypervisor genuinely is
+ * present, just not one WSL2 can build a VM with. The fourth replaced all three by importing a
+ * throwaway distro and asking whether it registered -- and that could never answer yes, because
+ * `wsl --import` validates the rootfs before registering and the payload was an empty directory.
  *
- * THE COMMENT THAT USED TO BE HERE claimed HypervisorPresent was "false for every cause" of
- * HCS_E_HYPERV_NOT_INSTALLED. It was not, and this fake asserting it in prose is part of why no
- * test caught the defect: the fixture agreed with the installer's mistake.
+ * A COMMENT HERE ASSERTED THE FIRST OF THOSE MISTAKES IN PROSE: it said HypervisorPresent was
+ * "false for every cause" of HCS_E_HYPERV_NOT_INSTALLED. It was not. A fixture that agrees with
+ * the installer's reasoning cannot contradict it, which is why neither defect went red -- and the
+ * import gate then repeated the pattern one commit later, with an --import arm that accepted any
+ * payload it was handed. Both are recorded in .private/README.md.
+ *
+ * WHAT IS LEFT ASKS ABOUT WSL, NOT ABOUT THE MACHINE. One probe reads the distro list; the other
+ * reads what `wsl --status` SAID, and only after something has already failed. Neither infers a
+ * capability from a property.
  *
  * AN UNRECOGNISED PROBE IS A HARNESS FAILURE, not a "no". exit 120 is the same code fake_say uses
  * for a missing message key, and for the same reason: a fake that guessed 1 would report every new
  * probe as a negative answer, and the case asserting on that negative would pass.
  *
- * BOTH PROBES STILL EVALUATE rather than answering from a knob. They read the same wsl.list state
- * fake-wsl.c writes to, so the real sequences -- probe, create, probe again; import, probe,
- * unregister -- behave the way they would on a machine.
+ * BOTH PROBES ANSWER FROM SHARED STATE rather than from a knob of their own -- the distro list
+ * fake-wsl.c maintains, and the same wsl.status.novirt knob its --status arm prints from. So a
+ * case cannot arrange a machine that contradicts itself, which is what a per-probe knob would let
+ * it do.
  *
  * Exit codes follow the real -Command contract: the answer arrives AS a code, 0 or 1. Anything
  * else means the probe itself could not run (powershell absent gives cmd's 9009), which is a
@@ -51,9 +60,8 @@ static int answer(const char *rcknob, int value) {
     return value;
 }
 
-/* Is NAME in the list fake-wsl.c maintains? Both probes are this question about different names,
- * which is the point: the gate's answer is "did the throwaway environment register", in exactly
- * the terms the distro probe already used. */
+/* Is NAME in the list fake-wsl.c maintains? Reading the same file the --install arm appends to is
+ * what makes the .cmd's probe/create/re-probe sequence behave the way it would on a machine. */
 static int listed(const char *name) {
     char p[1024], line[512];
     fake_path(p, sizeof p, "wsl.list");
@@ -75,15 +83,18 @@ int main(int argc, char **argv) {
 
     const char *distro = getenv("CS193V_FAKE_DISTRO");
     if (!distro) distro = "CS193V";
-    const char *vmcheck = getenv("CS193V_FAKE_VMCHECK");
-    if (!vmcheck) vmcheck = "CS193V-vmcheck";
 
-    /* THE GATE, and it must be tested BEFORE the distro probe: both commands set WSL_UTF8 and
-     * both run `wsl -l -q`, so the only thing telling them apart is the name each anchors on.
-     * Matching on the distro marker first would answer the gate with the student's environment,
-     * which is the one confusion that would make the whole gate meaningless. */
-    if (mentions(argc, argv, vmcheck))
-        return answer("ps.vmcheck.rc", listed(vmcheck) ? 0 : 1);
+    /* DID WINDOWS BLAME VIRTUALISATION? The .cmd asks this only after a create or a `-d` call has
+     * already failed, to choose between :novm and a refusal that names no cause. It answers from
+     * the same wsl.status.novirt knob fake-wsl.c's --status arm prints from, so a case cannot
+     * arrange a machine whose --status says one thing and whose classifier says another.
+     *
+     * TESTED BEFORE THE DISTRO PROBE, because both commands set WSL_UTF8 and that substring would
+     * match either. The distinctive token is the URL the .cmd greps for, which is the same reason
+     * the retired gate's probe had to be ordered first: two probes that differ only in their
+     * needle must be dispatched on the needle. */
+    if (mentions(argc, argv, "aka.ms/enablevirtualization"))
+        return answer("ps.vmfail.rc", fake_knob_int("wsl.status.novirt", 0) ? 0 : 1);
 
     /* Does the CS193V distro exist? WSL_UTF8 is the marker because batch cannot read wsl.exe's
      * UTF-16, which is the whole reason this probe goes through PowerShell at all. */

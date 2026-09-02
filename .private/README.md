@@ -854,15 +854,58 @@ knowing *which* cause stopped a VM from starting, and the probe that decided rea
 `Win32_ComputerSystem.HypervisorPresent`. On a VirtualBox guest that reads **True** — VirtualBox
 sets the hypervisor-present CPUID bit, so a hypervisor genuinely is present, just not one WSL2 can
 build a VM with. The machine was waved through into 600 MB and then told its WSL was too old. Any
-replacement property is another proxy with another blind spot, so the installer stopped asking
-about the machine and now *observes*: `wsl --import` of a 1.5 KB tarball, which reaches the same
-`HCS_E_HYPERV_NOT_INSTALLED` in 209 ms (measured on the #114 box). Once the cause is unknown *and
-does not need to be known*, there is one refusal for the class and nothing to hand over — so
-`:enablevmp`, `:hypervisoroff` and `:nohypervisor` collapsed into `:novm`, which hands over no
-commands and directs the student to course staff. `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` rule
-still holds the boot-configuration line, and `windows:hands-over-no-boot-configuration-command` in
-`25-installer.sh` now holds the wider one. The BitLocker claim is still a MANUAL.md item and still
-unverified; it is no longer load-bearing, since nothing offers the command either way.
+replacement property is another proxy with another blind spot, so `:enablevmp`, `:hypervisoroff`
+and `:nohypervisor` collapsed into one refusal that hands over no commands.
+
+**Then the replacement pre-flight was retired too, and that is the part to read before adding a
+third.** #114's fix stopped asking Windows anything and *observed* instead: `wsl --import` a 1.5 KB
+tarball of an empty directory, then ask whether it registered. On the #114 box that reached
+`HCS_E_HYPERV_NOT_INSTALLED` in 209 ms, which looked like exactly the cheap pre-flight the problem
+called for. **It was measured on a machine that could start a VM only after it shipped**, and it
+answered *no* there too: `wsl --import` validates the rootfs at `RegisterDistro`, so an empty
+directory is refused as `WSL_E_NOT_A_LINUX_DISTRO` on **every** machine on earth. Measured on a
+VMware guest with nested virtualisation, WSL 2.7.12: the empty tarball is refused, a 2.3 MB
+minimal rootfs imports in 2.05 s and registers. The gate reported "this computer cannot run a
+virtual machine" to the entire class, and **both test tiers were green while it did** — 228 static
+assertions and 188 under wine — because `fake-wsl.c`'s `--import` arm accepted any payload handed
+to it. The reasoning in the code was inverted as well: it argued registration was a *weaker* claim
+than extraction, when extraction is a precondition of registration.
+
+**Two further repairs were considered and rejected**, both worth naming because they are the
+obvious next moves:
+
+- *Classify the import's error chain* — refuse on `CreateVm`/`HCS_E_HYPERV_NOT_INSTALLED`, proceed
+  otherwise. Rejected because the negative arm keys on text no working machine can produce, so the
+  only branch that matters would be verified against a string in our own fixture — #114's mistake
+  exactly. It also inverts the burden: "proceed unless the failure is recognised" sends an
+  *unrecognised* failure into the 600 MB download, which is #112.
+- *Give the gate a payload WSL accepts* — synthesise a rootfs skeleton, or fetch Alpine's ~3 MB
+  minirootfs (`wsl --list --online` has nothing smaller than ~270 MB, so the catalogue is no help).
+  Rejected as a lot of machinery, plus a network fetch and a third-party CDN ahead of the gate, to
+  answer a question reality answers for free thirty seconds later.
+
+**So there is no pre-flight, and the diagnosis moved to the two sites that fail.** `wsl --install
+-d` is not redirected, so a machine that cannot start a VM already has Microsoft's own message and
+its `Wsl/InstallDistro/.../HCS_E_HYPERV_NOT_INSTALLED` chain on screen — naming the firmware and
+the optional component, handing over `wsl.exe --install --no-distribution`, and linking
+`aka.ms/enablevirtualization`. **#112 was never a missing observation; it was `:distrofailed`
+printing a different cause over the top of a correct one**, opening with "this computer can run
+virtual machines" on the authority of a pre-flight that was wrong. That sentence is gone. Both
+`:distrofailed` and `:curlfailed` now ask `%VMFAILPROBE%` — does `wsl --status` say virtualisation
+is unavailable? — and route to a shared `:novm` that explains nothing and points at the error
+above it. Reading a message is safe there and would not be as a gate: both callers have already
+failed, so a wrong answer costs a less specific refusal rather than a dead end. The remediation
+comes back for free as WSL's own advice, which is what `:enablevmp` was for, with no probe to keep
+in step.
+
+Guardrails, since three of these decisions are now absences: `lib/cmdlint.sh`'s
+`cmdlint_bcdedit_writes` holds the boot-configuration line;
+`windows:hands-over-no-boot-configuration-command` holds the wider one;
+`windows:asks-nothing-about-virtualisation-in-advance` bans the constructs both pre-flights used;
+and `windows:diagnoses-virtualisation-only-after-the-create` pins the ordering that makes reading
+wsl.exe's message sound. All four are in `25-installer.sh`, and the last two go red against
+`2f14c85`. The BitLocker claim is still a MANUAL.md item and still unverified; it is no longer
+load-bearing, since nothing offers the command either way.
 
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open

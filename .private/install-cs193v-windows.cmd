@@ -74,12 +74,6 @@ setlocal
 set "DISTRO=CS193V"
 set "IMAGE_NAME=Ubuntu-26.04"
 
-:: The throwaway environment the virtualisation gate imports and deletes, and the folder it does
-:: that in. The name is deliberately not %DISTRO% with a suffix: %PROBE% anchors on ^%DISTRO%$,
-:: and nothing that calls --unregister must ever be able to name a student's own environment.
-set "VMCHECK=CS193V-vmcheck"
-set "VMDIR=%TEMP%\cs193v-vmcheck"
-
 :: Where stage 2 comes from. These three MUST match install-cs193v.sh's own REPO_OWNER,
 :: REPO_NAME and REPO_BRANCH; 25-installer.sh asserts that they do, because a mismatch would
 :: quietly fetch the wrong course's installer and nothing would notice until it ran. A TA
@@ -105,35 +99,44 @@ set "SENTINEL=CS193V-INSTALLER-COMPLETE"
 :: itself could not run, which is a different thing from "absent" and is handled separately.
 set "PROBE=$env:WSL_UTF8=1; if ((wsl.exe -l -q) -match '^%DISTRO%$') { exit 0 } else { exit 1 }"
 
-:: ONE MORE PROBE, AND IT OBSERVES RATHER THAN PREDICTS: can this computer start a VM at all?
+:: A SECOND PROBE, ASKED ONLY AFTER SOMETHING HAS ALREADY FAILED: does Windows itself say the
+:: problem is virtualisation? `wsl --status` prints a line saying so and then returns 0
+:: UNCONDITIONALLY (WslClient.cpp:1179-1209) -- which IS issue #112, because this file used to
+:: send that stdout to nul and branch on the exit code. So the line is read instead of the code.
 ::
-:: WHY ASKING IS NECESSARY, and why `wsl --status` above cannot answer it. Status() prints the
-:: default distro, the default version, a line if the WSL optional component is missing and a line
-:: if vmcompute is missing -- then `return 0` UNCONDITIONALLY (WslClient.cpp:1179-1209). So a
-:: machine with no Virtual Machine Platform SAYS SO on stdout and still exits zero, and the
-:: `wsl.exe --status >nul` above throws that stdout away. Issue #112: the .cmd said "WSL is
-:: installed", spent 600 MB downloading Ubuntu, failed at CreateVm, and blamed the WSL version.
+:: IT DECIDES WHICH REFUSAL TO PRINT, NOT WHETHER TO CONTINUE, and that is the whole reason
+:: reading a message is sound here when it would not be as a pre-flight. Both callers have already
+:: failed by the time they ask; a wrong answer costs a less specific refusal, not a 600 MB
+:: download and not a dead end for a machine that is fine.
 ::
-:: WHY IT IS NO LONGER A WINDOWS PROPERTY. It used to read Win32_ComputerSystem.HypervisorPresent,
-:: with two more probes behind it, on the claim that the first was false for every cause. Issue
-:: #114 is a VirtualBox guest where it reads TRUE: VirtualBox sets the hypervisor-present CPUID
-:: bit, so a hypervisor IS present -- just not one WSL2 can build a VM with. Every property like
-:: it is a proxy with its own blind spot, and naming VirtualBox would only move the spot to VMware
-:: or to a cloud image. So nothing is asked ABOUT the machine any more. WSL is made to start a VM,
-:: and the answer is what happened.
+:: MATCHED ON THE URL AND NOT THE PROSE, because the prose is localised and the URL is not. It is
+:: part of Microsoft's own MessageEnableVirtualization, which is also what makes this a question
+:: about what wsl.exe SAID rather than another guess at a property of the machine.
 ::
-:: WHAT IT COSTS, measured on the #114 machine: 209 ms and a 1.5 KB tarball, against 600 MB for
-:: the identical HCS_E_HYPERV_NOT_INSTALLED out of `--install -d`. wsl.exe checks the destination
-:: BEFORE the VM (Wsl/ERROR_PATH_NOT_FOUND, with no CreateVm in the scope), which is why creating
-:: %VMDIR% first is a real precondition and not ceremony.
+:: TWO STATES, DELIBERATELY, where %PROBE% has three: 0 means Windows blamed virtualisation, and
+:: everything else -- "it did not" and "the probe itself could not run" -- reaches the same honest
+:: refusal, so splitting them would be a branch with no different behaviour behind it.
+set "VMFAILPROBE=$env:WSL_UTF8=1; if ((wsl.exe --status 2>&1) -match 'aka.ms/enablevirtualization') { exit 0 } else { exit 1 }"
+
+:: THERE IS NO VIRTUALISATION PRE-FLIGHT, AND TWO OF THEM HAVE NOW BEEN REMOVED FROM HERE.
+:: Anyone about to add a third should read .private/README.md first; both are recorded there with
+:: the measurement that killed them. In short:
 ::
-:: THE ANSWER IS "IS IT REGISTERED NOW" rather than the import's exit code -- the same distinction
-:: the create below makes, for a stronger reason. --import returns -1 both for a VM it could not
-:: build and for a payload it did not like, and no exit code separates those. Registration
-:: surviving is also a WEAKER claim than extraction succeeding, which matters because the #114 box
-:: cannot be asked what a machine that CAN start a VM does with an empty rootfs. MANUAL.md carries
-:: that as a check to run on real hardware; it is the one thing here no fixture can settle.
-set "VMPROBE=$env:WSL_UTF8=1; if ((wsl.exe -l -q) -match '^%VMCHECK%$') { exit 0 } else { exit 1 }"
+::   * ASKING WINDOWS A PROPERTY (issue #112's fix). Win32_ComputerSystem.HypervisorPresent, with
+::     Get-WindowsOptionalFeature and bcdedit behind it to say which cause it was. #114 is a
+::     VirtualBox guest where HypervisorPresent reads TRUE -- VirtualBox sets the hypervisor-
+::     present CPUID bit, so a hypervisor IS there, just not one WSL2 can build a VM with. Every
+::     property like it is a proxy with its own blind spot.
+::   * OBSERVING A THROWAWAY IMPORT (issue #114's fix). `wsl --import` of a 1.5 KB tarball of an
+::     empty directory, then "is it registered now". Measured: `--import` validates the rootfs at
+::     RegisterDistro, so an empty one is refused as WSL_E_NOT_A_LINUX_DISTRO on EVERY machine --
+::     including one with a VM running. It answered "no VM" for the entire class.
+::
+:: WHAT REPLACES THEM IS NOTHING, because the failure already announces itself. `wsl --install -d`
+:: below is not redirected, so on a machine that cannot start a VM the student's window already
+:: holds wsl.exe's own words and its HCS_E_HYPERV_NOT_INSTALLED scope chain. #112 was never a
+:: missing observation; it was this file printing a DIFFERENT cause over the top of a correct one.
+:: So the diagnosis moved to the two places that fail, and neither of them guesses any more.
 
 echo.
 echo   CS193V setup for Windows
@@ -175,51 +178,8 @@ wsl.exe --install --no-distribution
 if %errorlevel% neq 0 goto wslfeaturefailed
 goto restartneeded
 
-:havewsl
-echo   [1/3] WSL is installed.
-
-:: ---- can this computer start a virtual machine? ------------------------------
-:: BEFORE THE DISTRO PROBE, not inside :makedistro, and that ordering IS the invariant. Creating
-:: the environment is what needed a VM in #112 -- but a machine that ALREADY has the environment
-:: and has since lost virtualisation skips the create entirely, reaches the curl probe, and is
-:: told the network is not up yet inside its new environment. Same wrong diagnosis, second site.
-:: One gate here lets every arm below ASSUME a VM can start instead of re-asking, and a call site
-:: added later inherits that for free rather than having to remember.
-::
-:: PRECONDITIONS FIRST, and only then is the observation trusted. A scratch folder that cannot be
-:: created, or a missing tar.exe, is not a machine that cannot start a VM -- and #114 is precisely
-:: what conflating two different answers costs. Both folders are made in one go: if the first is
-:: not writable the second is not either, so one check covers the pair.
-rd /s /q "%VMDIR%" >nul 2>&1
-md "%VMDIR%\src" >nul 2>&1
-md "%VMDIR%\dest" >nul 2>&1
-if %errorlevel% neq 0 goto vmcheckfailed
-where tar.exe >nul 2>&1
-if %errorlevel% neq 0 goto vmcheckfailed
-tar.exe -cf "%VMDIR%\probe.tar" -C "%VMDIR%\src" . >nul 2>&1
-if %errorlevel% neq 0 goto vmcheckfailed
-
-:: cmdlint-allow: unchecked-exit -- runs FIRST so a run killed halfway through last time cannot
-:: make this one refuse, and answers WSL_E_DISTRO_NOT_FOUND when nothing is registered, which is
-:: the normal case here rather than a failure.
-wsl.exe --unregister %VMCHECK% >nul 2>&1
-
-:: cmdlint-allow: unchecked-exit -- -1 here does not distinguish a VM it could not build from a
-:: payload it did not like, and %VMPROBE% below asks the only question that separates them.
-wsl.exe --import %VMCHECK% "%VMDIR%\dest" "%VMDIR%\probe.tar" >nul 2>&1
-
-:: THREE STATES, like %PROBE%: 0 a VM started, 1 it did not, anything else means the question
-:: itself failed -- which is NOT the same as the answer being no, and must not become "carry on".
-powershell -NoProfile -NonInteractive -Command "%VMPROBE%" >nul 2>&1
-if %errorlevel% equ 0 goto havevirt
-if %errorlevel% neq 1 goto vmcheckfailed
-goto novm
-
 :restartneeded
-:: ONE CALLER now -- WSL absent entirely. The Virtual Machine Platform arm used to fall through
-:: into this block as well; issue #114 replaced it, and the two refusals beside it, with a single
-:: arm that hands over nothing. The words still carry the block: the file only works if it is run
-:: again, so saying so is the whole job.
+:: ONE CALLER -- WSL absent entirely.
 ::
 :: PLACED so that caller reaches it going FORWARD. A backward `goto` would work; cmd rescans from
 :: the top of the file for a label. But this file keeps to a subset of batch that the test suite
@@ -236,12 +196,9 @@ echo.
 pause
 exit /b 0
 
-:havevirt
-:: cmdlint-allow: unchecked-exit -- tidying up after the gate, and nothing below depends on it. A
-:: failure to remove the throwaway environment must not become a failure to install, and the gate
-:: deletes %VMDIR% again on its way in, so anything left behind is cleared by the next run.
-wsl.exe --unregister %VMCHECK% >nul 2>&1
-rd /s /q "%VMDIR%" >nul 2>&1
+:havewsl
+echo   [1/3] WSL is installed.
+
 :: ---- does the CS193V environment exist? --------------------------------------
 powershell -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
 if %errorlevel% equ 0 goto havedistro
@@ -430,63 +387,29 @@ echo.
 pause
 exit /b 1
 
-:vmcheckfailed
-:: The same distinction :probefailed makes, about a different question. The gate could not run its
-:: check -- no scratch folder, or no tar.exe -- and that is NOT the machine answering no. Reading
-:: it as one would refuse a student whose computer is fine; reading it as yes would put a machine
-:: that cannot run a VM into a 600 MB download. It is neither, so setup stops and says which.
-echo.
-echo   Could not check whether this computer can start a virtual
-echo   machine.
-echo.
-echo   This is not the same as the answer being no -- the check itself
-echo   could not run, so setup is stopping rather than guessing.
-echo   Please send course staff this whole window.
-echo.
-pause
-exit /b 1
-
-:novm
-:: ONE REFUSAL FOR THE WHOLE CLASS, which is the point of it. This used to be three arms -- the
-:: firmware or a nested guest, the Virtual Machine Platform switched off, and the boot
-:: configuration told not to start a hypervisor -- each with a probe deciding which. Issue #114 is
-:: a machine the first of those probes got WRONG, and its lesson is that which cause it is was
-:: never the installer's to determine. The gate above says a VM did not start; every cause of that
-:: needs the same thing to happen next. One message, one path, and no probe to keep it in step.
-::
-:: IT HANDS OVER NO COMMANDS. Enabling the Virtual Machine Platform, and setting
-:: hypervisorlaunchtype back to Auto, were both offered from here once -- the first run for the
-:: student, the second printed for them to run. Neither is now: a student who reaches this talks
-:: to course staff, which is in any case the only answer that fits the causes below Windows.
-echo.
-echo   Setup cannot continue, because Windows could not start a
-echo   virtual machine on this computer, which is what WSL2 needs.
-echo.
-echo   The usual causes are virtualization being switched off in
-echo   the computer's firmware settings, or this Windows itself
-echo   running inside a virtual machine that does not pass
-echo   virtualization through. Setup cannot change either one.
-echo.
-echo   Please send course staff this whole window. Do not spend
-echo   time troubleshooting this. Once it is sorted out, restart
-echo   and run this file again.
-echo.
-pause
-exit /b 1
-
 :distrofailed
-:: ONE LIKELY CAUSE, NAMED AS A GUESS. It used to be stated as the diagnosis, and issue #112 is
-:: what that cost: a machine that could not run a virtual machine at all was sent to
-:: `wsl --version`, which answered 2.9.8 and helped nobody. The pre-flight above now rules out
-:: every cause it can, and `wsl --update` has already run, so what is left really is likeliest --
-:: but likeliest is not the same claim, and the window is what staff actually need.
+:: ASK WINDOWS WHY BEFORE SAYING ANYTHING OF OUR OWN. See %VMFAILPROBE% above for why reading
+:: wsl.exe's message is sound at this point and would not be as a pre-flight; a miss falls through
+:: to the honest refusal below.
+powershell -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
+if %errorlevel% equ 0 goto novm
+
+:: ONE LIKELY CAUSE, NAMED AS A GUESS -- and reached only when nothing said otherwise. It used to
+:: be stated as the diagnosis, and issue #112 is what that cost: a machine that could not run a
+:: virtual machine at all was sent to `wsl --version`, which answered 2.9.8 and helped nobody.
+::
+:: WHAT THIS NO LONGER CLAIMS. It used to open by asserting that this computer can run virtual
+:: machines, on the strength of a pre-flight that had just said so. Both pre-flights this file has
+:: had were wrong about that -- see the header -- and the sentence was doing real damage in the
+:: meantime, because it contradicted an accurate error printed a few lines above it. Setup asserts
+:: only what it actually did: WSL is present, and `wsl --update` has run.
 echo.
 echo   Could not create the %DISTRO% environment.
 echo.
-echo   Setup has already checked what it can: WSL is installed, this
-echo   computer can run virtual machines, and WSL has just been updated.
-echo   The likeliest cause left is a WSL older than 2.5.8, which cannot
-echo   name a new environment -- but that is a guess, not a diagnosis.
+echo   Setup has checked what it can: WSL is installed, and WSL has
+echo   just been updated. The likeliest cause left is a WSL older than
+echo   2.5.8, which cannot name a new environment -- but that is a
+echo   guess, not a diagnosis, and any error above is worth more.
 echo.
 echo   Please send course staff this whole window, including any
 echo   "Error code:" line above, and the output of:   wsl --version
@@ -496,15 +419,28 @@ pause
 exit /b 1
 
 :curlfailed
+:: THE SECOND SITE THAT NEEDS A VM, and the one #112's fix never reached. Every `wsl -d` call
+:: needs the utility VM, so a machine that has the environment but has lost virtualisation fails
+:: here rather than at the create -- and this block used to state the network as the cause and
+:: then invite a re-run, which on that machine is a loop with no exit. Same classifier, same
+:: shared refusal.
+powershell -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
+if %errorlevel% equ 0 goto novm
+
+:: NOT STATED AS THE CAUSE ANY MORE. The network really is the likeliest thing when the
+:: environment is otherwise healthy, so it is still named -- as a possibility, with the retry
+:: attached to it rather than to every reason this block can be reached.
 echo.
 echo   Could not install curl in the %DISTRO% environment, which setup
 echo   needs in order to download the rest of itself.
 echo.
-echo   The usual cause is that the network is not up yet inside the new
-echo   environment. It is safe to run this file again.
+echo   If the network was not up yet inside the environment, running
+echo   this file again is enough. If it happens twice, it is something
+echo   else and running it a third time will not help.
 echo.
-echo   If it keeps happening, please send course staff this whole window
-echo   and the output of:   wsl -d %DISTRO% -u root -e apt-get install curl
+echo   Please send course staff this whole window, including any
+echo   "Error code:" line above, and the output of:
+echo       wsl -d %DISTRO% -u root -e apt-get install curl
 echo.
 pause
 exit /b 1
@@ -540,3 +476,30 @@ echo   It is safe to run this file again once the problem is fixed.
 echo.
 pause
 exit /b %RC%
+
+:novm
+:: ONE REFUSAL, SHARED BY BOTH SITES THAT NEED A VM -- the create above and using an environment
+:: that already exists. Reached only when wsl.exe has ALREADY SAID virtualisation is the problem,
+:: so this block deliberately explains nothing: repeating the cause in our own words is what
+:: turned #112 from a clear error into a wrong one.
+::
+:: IT HANDS OVER NO COMMANDS OF ITS OWN, and it no longer needs to. Enabling the Virtual Machine
+:: Platform used to be offered from an arm here, decided by a probe that had to be kept in step
+:: with reality -- and #114 is that probe being wrong. wsl.exe's own message names the firmware
+:: and the optional component, hands over `wsl.exe --install --no-distribution`, and links
+:: aka.ms/enablevirtualization, all of it a few lines above this one. Microsoft maintains that
+:: text; we do not have to.
+echo.
+echo   Setup cannot continue: Windows could not start a virtual
+echo   machine, which is what WSL2 needs.
+echo.
+echo   The messages above are from Windows itself and say what is
+echo   wrong with this computer. Setup is not going to guess at a
+echo   different reason.
+echo.
+echo   Please send course staff this whole window. Do not spend time
+echo   troubleshooting this yourself, and do not run this file again
+echo   until it has been sorted out.
+echo.
+pause
+exit /b 1

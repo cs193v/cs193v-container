@@ -962,49 +962,48 @@ assert_eq "windows:captures-are-guarded" "" "$(run_checker cmdlint_captures "$W"
 # writing this, once for each rule. _cmdlint_commands drops comments, labels and blank lines and
 # keeps the real line number in field 2, so the work list is the code and only the code.
 
-# The sibling and the path translation are gone, not merely unused. Left in place they would be a
-# second route to stage two that nothing drives.
+# The sibling, the path translation and the scratch file are gone, not merely unused. Left in
+# place they would be a second route to stage two that nothing drives.
 #
-# %TEMP% WAS BANNED HERE TOO, as the third leg of that route: stage two was downloaded on Windows,
-# into a scratch file, and handed across by wslpath. Stage two is fetched by curl INSIDE the
-# environment now, so a scratch file is no longer evidence of a second route -- and issue #114
-# gave the file a legitimate need for scratch space, which is exactly what %TEMP% is for. The ban
-# was overbroad; %HERE% and wslpath are the two constructs that must stay gone.
+# %TEMP% IS BANNED AGAIN, having been allowed for one commit. It was lifted when the virtualisation
+# gate needed scratch space for a tarball; that gate is gone (see the .cmd's own header) and its
+# replacement writes no files at all, so the third leg of the old route goes back under the ban.
+# The point of banning it is not that %TEMP% is dangerous -- it is that stage two must have exactly
+# one route, and a scratch file on Windows is how the second one grew last time.
 assert_eq "windows:does-not-look-for-a-sibling" "" \
           "$(_cmdlint_commands "$W" \
-             | awk -F'\t' '$4 ~ /%HERE%|wslpath/ { print "line " $2 ": " $4 }')"
+             | awk -F'\t' '$4 ~ /%HERE%|wslpath|%TEMP%/ { print "line " $2 ": " $4 }')"
 
-# ─── the virtualisation gate, and the two lines it must come before ──────────
+# ─── there is NO virtualisation pre-flight, and that is now the assertion ─────
 #
-# ORDER, which no wine run can prove: observing whether this computer can start a virtual machine
-# is only worth anything BEFORE the calls that need one. Issue #112 is what "after" costs -- the
-# refusal arrived once Ubuntu had already been downloaded, and it named the wrong cause.
+# TWO OF THEM HAVE BEEN REMOVED FROM THIS FILE, and this rule is what stops a third arriving by
+# habit. #112's fix asked Windows for a property (HypervisorPresent, with two more probes behind
+# it to say which cause it was); #114's fix imported a throwaway distribution and asked whether it
+# registered. The first was wrong on a VirtualBox guest, where a hypervisor is present but not one
+# WSL2 can use. The second could never say yes at all -- `wsl --import` validates the rootfs before
+# registering, and the payload was a tar of an empty directory -- so it refused every machine on
+# earth, including one with a VM running, and both test tiers stayed green while it did.
 #
-# THREE line numbers now, not two, and the third is the invariant issue #114 bought. The gate must
-# precede the CREATE, which is all #112 needed -- and ALSO the distro probe, because a machine that
-# already has the environment skips the create entirely, and used to be told at :curlfailed that
-# the network was not up yet inside it. Gating both is what lets every later arm assume a VM can
-# start rather than re-ask, and it is why there is one gate instead of one check per site.
+# WHAT REPLACES THEM IS ASSERTED IN 27, not here: the create's own failure already carries
+# Microsoft's message and its HCS scope chain, and the refusals now print that instead of talking
+# over it. What is left for a STATIC rule is the absence -- nothing may ask about virtualisation
+# before the work that needs it, because the answer is not knowable in advance and two attempts
+# have now proved it the expensive way.
 #
-# All three must exist, so deleting the gate or renaming the create goes RED rather than quiet.
-vm_ln="$(sed 's/\r$//' "$W" | grep -n 'Command "%VMPROBE%"' | head -1 | cut -d: -f1)"
-probe_ln="$(sed 's/\r$//' "$W" | grep -n 'Command "%PROBE%"' | head -1 | cut -d: -f1)"
+# Matched on the constructs, not on a label: a third attempt would not reuse these names, but it
+# would have to interrogate the machine somehow, and these are the four ways tried so far.
+assert_eq "windows:asks-nothing-about-virtualisation-in-advance" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' '$4 ~ /HypervisorPresent|VirtualizationFirmwareEnabled|VirtualMachinePlatform|--import/ { print "line " $2 ": " $4 }')"
+
+# ...and the diagnosis must come AFTER the thing it explains, which is the ordering that replaces
+# the old "gate must precede the create" pair. Reading wsl.exe's message is only sound once
+# something has already failed: as a pre-flight the same read would be a gate, and a wrong answer
+# would refuse a working machine. Both line numbers must exist, so deleting either goes red.
 create_ln="$(sed 's/\r$//' "$W" | grep -n -- '-d %IMAGE_NAME%' | head -1 | cut -d: -f1)"
-assert_ok "windows:observes-a-vm-start-before-creating" \
-          sh -c "test -n '$vm_ln' && test -n '$create_ln' && test '$vm_ln' -lt '$create_ln'"
-assert_ok "windows:observes-a-vm-start-before-using-what-is-there" \
-          sh -c "test -n '$vm_ln' && test -n '$probe_ln' && test '$vm_ln' -lt '$probe_ln'"
-
-# ...and the gate's answer must keep its third state. `if %errorlevel% equ 0` alone would make
-# "the question failed" mean "yes", which is the class :probefailed already exists for -- and for
-# an OBSERVATION rather than a proxy that matters more, not less. A probe that could not run is
-# not a machine that cannot start a VM, and conflating the two is the whole lesson of #114.
-#
-# Only the gate, not %PROBE% as well: %PROBE% keeps its third state in the other idiom the file
-# uses -- explicit `equ 0` and `equ 1` with a bare `goto probefailed` falling out the bottom --
-# and a pattern loose enough to accept both would stop proving much about either.
-assert_ok "windows:the-VMPROBE-answer-has-three-states" \
-          sh -c "sed 's/\r\$//' '$W' | grep -A4 -F 'Command \"%VMPROBE%\"' | grep -q 'neq 1 goto\|neq 0 goto'"
+vmfail_ln="$(sed 's/\r$//' "$W" | grep -n 'Command "%VMFAILPROBE%"' | head -1 | cut -d: -f1)"
+assert_ok "windows:diagnoses-virtualisation-only-after-the-create" \
+          sh -c "test -n '$create_ln' && test -n '$vmfail_ln' && test '$create_ln' -lt '$vmfail_ln'"
 
 # The installer ASKS about the boot configuration and does not CHANGE it -- see the rule's own
 # header in lib/cmdlint.sh for why that is a decision and not an omission.
@@ -1035,9 +1034,17 @@ done
 # describes intended behaviour, and this behaviour is no longer intended.
 #
 # Asserted rather than merely deleted, because "hands over no commands" is a DECISION and needs a
-# keeper. The read-only `bcdedit /enum` probe is gone too, so the name should be absent entirely.
+# keeper. The read-only `bcdedit /enum` probe is gone too, so the name should appear in no COMMAND.
+#
+# COMMANDS, NOT THE RAW FILE, and that distinction was measured the hard way twice. The first
+# version of the rule in lib/cmdlint.sh flagged the message that handed the command over; the
+# first version of THIS assertion flagged the .cmd's own header comment explaining which probes
+# were removed and why. Both times the file was correct and the grep was too wide. A comment that
+# records a retired approach is exactly what keeps the next person from re-adding it, so banning
+# the word outright would delete the documentation to protect the decision it documents.
 assert_eq "windows:hands-over-no-boot-configuration-command" "" \
-          "$(sed 's/\r$//' "$W" | grep -n 'bcdedit' || true)"
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' 'tolower($4) ~ /bcdedit/ { print "line " $2 ": " $4 }')"
 
 # %HERE% was the only thing DEMONSTRATING the header's delayed-expansion ban: `Down!loads`
 # silently became `Downloads` when %~dp0 was expanded under it. With %HERE% gone the rule needs
