@@ -422,7 +422,7 @@ set -u
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x "$INST" 9>>/var/tmp/report/trace
+    PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
 else
     bash "$INST"
 fi
@@ -490,7 +490,7 @@ sb_installed > /var/tmp/report/dpkg-before
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x "$INST" 9>>/var/tmp/report/trace
+    PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
 else
     bash "$INST"
 fi

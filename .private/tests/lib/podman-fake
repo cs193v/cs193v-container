@@ -15,6 +15,8 @@
 #
 # Configuration files, all optional (defaults in get()):
 #   version          what `podman --version` prints        [podman version 5.7.0]
+#   version_stderr   a line `podman --version` writes to STDERR before the version, for
+#                    the case where the version has to be read out of noisy output  []
 #   hang             if present, every call sleeps forever  (the woken-Mac case)
 #   rootless         .Host.Security.Rootless                [true]
 #   info_rc          exit code for `podman info`            [0]
@@ -66,8 +68,16 @@ get() {                               # get KEY DEFAULT
 [ -f "$SHIM/hang" ] && { while :; do sleep 5; done; }
 
 # `podman --version` is checked before anything else and must stay cheap.
+#
+# version_stderr GOES TO STDERR, WHICH IS THE ENTIRE POINT OF IT. The launcher reads the version
+# out of run_timeout's RT_OUT, and run_timeout captures the command's stderr along with its
+# stdout -- so anything a real podman says on stderr becomes part of the text the version is
+# parsed from. A stub that could only write to stdout could not pose that question.
 case "${1:-}" in
-    --version) get version "podman version 5.7.0"; echo; exit 0 ;;
+    --version)
+        vse="$(get version_stderr '')"
+        [ -n "$vse" ] && printf '%s\n' "$vse" >&2
+        get version "podman version 5.7.0"; echo; exit 0 ;;
 esac
 
 STATE="$(get state absent)"

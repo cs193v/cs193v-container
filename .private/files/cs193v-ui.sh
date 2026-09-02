@@ -550,6 +550,39 @@ version_lt() {                        # version_lt A B -> prints yes if A < B
         print "no" }'
 }
 
+# podman_version_of TEXT -> just the version, or empty
+#
+# ANCHORED TO THE LINE THAT ACTUALLY CARRIES A VERSION, which is the whole point. This used to be
+# `awk '{print $NF}'` at two call sites, and awk runs that per LINE -- so it printed the last field
+# of EVERY line it was given. The text handed in is run_timeout's RT_OUT, and run_timeout captures
+# the command's stderr along with its stdout, so any second line podman writes turns a version
+# into two words.
+#
+# MEASURED (Fedora, and it cost a day): a `#!/bin/sh` child inheriting the test harness's
+# BASH_XTRACEFD wrote "invalid value for trace file descriptor" to stderr, and the version came
+# back as "descriptor 5.7.0". version_lt read that as older than 4.9.0 and a current podman was
+# refused as too old. The fd collision behind that is fixed on the test side, but the parse should
+# not have depended on it: a real podman is free to warn on stderr, and this is the one number the
+# launcher refuses to start over.
+#
+# ONE DEFINITION FOR TWO CALLERS -- the version gate and doctor -- because they were byte-identical
+# and a drifted copy is exactly how this survived. `[0-9][^ ]*` rather than something stricter so
+# that a version this does not anticipate (a 5.7.0-rc1, a distro's 4:5.7.0+ds1) is still returned
+# whole for version_lt to judge, rather than silently truncated to something that compares wrong.
+#
+# AND THERE IS A FALLBACK, because anchoring on podman's exact wording is a NEW assumption and
+# this is the one number the launcher refuses to start over. If no line says "podman version N",
+# the old reading is used -- but on the FIRST LINE ONLY, which is the whole bug fixed and none of
+# the robustness given up. 26-installer-sandbox.sh keeps a real 3.4.4 binary around precisely
+# because it expects podman's output format to be able to change; this way a change costs the
+# anchor, not the launcher.
+podman_version_of() {                 # podman_version_of TEXT -> the version, or empty
+    local v
+    v="$(printf '%s' "$1" | sed -n 's/^podman version \([0-9][^ ]*\).*/\1/p' | head -1)"
+    [ -n "$v" ] || v="$(printf '%s' "$1" | awk 'NR==1{print $NF}')"
+    printf '%s' "$v"
+}
+
 # ─── the dynamic-port frame parser ─────────────────────────────────────────────
 # THE ONLY PLACE BYTES THE CONTAINER CONTROLS REACH THE HOST, and the only container-derived
 # value that ever lands in an ssh argument comes out of it. Everything about the shape below is

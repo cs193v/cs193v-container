@@ -106,7 +106,7 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # on it, and holding it to one would mean rewriting vendored code for a platform it will
 # never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
 # is the part that matters.
-hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/*.sh \
+hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/shared.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/*.sh \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
@@ -191,6 +191,63 @@ if [ "$(printf '%s' "$ttydoor" | grep -c '.')" -ge 4 ]; then pass "installer-doo
 else fail "installer-door:tty-extractable" "could not find installer_tty"; fi
 assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
 assert_contains "installer-door:tty-puts-the-shim-first" 'PATH=$SHIM' "$ttydoor"
+
+# ─── the trace fd must not be one somebody else is already using ───────────────
+# BOTH DOORS DIVERT `bash -x` TO A FILE DESCRIPTOR, so that the trace lands in a coverage file
+# instead of in the transcript they capture. BASH_XTRACEFD is how, and it is EXPORTED -- which
+# means every descendant of the traced installer inherits it, including programs the launcher
+# starts. So the fd is not the harness's private business: it is shared with every process in
+# the tree, and it has to be one that nobody in that tree closes or reuses.
+#
+# IT WAS 9, AND SO IS run_timeout's. cs193v-ui.sh uses fd 9 for its death-certificate fifo and
+# deliberately CLOSES it for the command it runs (`9>&-`). A child therefore arrived with
+# BASH_XTRACEFD naming a closed fd, bash validated it at startup and wrote "invalid value for
+# trace file descriptor" to stderr, run_timeout captured stderr into RT_OUT, and the launcher
+# parsed a podman version out of RT_OUT. podman 5.7.0 was refused as too old.
+#
+# WHY IT SURVIVED: it needs /bin/sh to be bash. On Debian and Ubuntu /bin/sh is dash, which
+# ignores BASH_XTRACEFD entirely; on Fedora and macOS it is bash. Latent, not absent.
+#
+# THREE FILES, not just the launcher. run-tests.sh holds the real stdout and stderr on fds 3
+# and 4 (`exec 3>&1 4>&2`) and every suite runs inside that, so 3 and 4 are as taken as 9 is.
+# 12-run-timeout.sh holds the other half of this: the FUNCTIONAL check that a run leaves no
+# diagnostic in RT_OUT. This one is the structural rule, so that a future fd choice is refused
+# at the cheapest tier rather than by a puzzling failure four suites later.
+fds_used_by() {                       # fds_used_by FILE... -> the fds they redirect, sorted
+    sed 's/#.*//' "$@" \
+        | grep -oE '([0-9][<>]|[<>]&[0-9])' \
+        | grep -oE '[0-9]' | sort -un | tr '\n' ' ' | sed 's/ *$//'
+}
+taken_fds="$(fds_used_by "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/tests/run-tests.sh")"
+record "trace-fd:fds-already-taken" "$taken_fds"
+record "trace-fd:the-harness-traces-on" "$CS193V_TRACE_FD"
+# Extraction asserted first, by the same rule as the doors above: an empty set would make the
+# disjointness below true forever and mean nothing.
+if [ -n "$taken_fds" ]; then pass "trace-fd:the-taken-set-is-not-empty"
+else fail "trace-fd:the-taken-set-is-not-empty" "found no redirections at all -- fds_used_by is broken"; fi
+clash=''
+for _fd in $taken_fds; do
+    [ "$_fd" = "$CS193V_TRACE_FD" ] && clash="$_fd"
+done
+assert_eq "trace-fd:is-not-one-somebody-else-uses" "" "$clash"
+
+# THE CONTAINER SIDE CANNOT READ THE VARIABLE, so its copies are asserted to agree with it. That
+# is not laziness: lib/sandbox.sh writes its guest scripts out of QUOTED heredocs (<<'RUN',
+# <<'NEST') and lib/sandbox-guest.sh is copied into the fixture verbatim, both on purpose, so
+# nothing on the host expands inside them. Unquoting a heredoc to reach one number would expand
+# every other `$` in it too. This is the answer version_lt, box() and the two MIN_PODMAN floors
+# already get -- assert the agreement rather than pretend there is one copy.
+#
+# EVERY BASH_XTRACEFD IN THE TEST TREE IS LISTED, not just the ones remembered: the grep finds
+# them, so a fourth copy added later is caught rather than missed.
+xt_copies="$(grep -rhoE 'BASH_XTRACEFD=[0-9$][A-Za-z_]*' \
+             "$PRIVATE/tests/lib/sandbox.sh" "$PRIVATE/tests/lib/sandbox-guest.sh" \
+             | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+record "trace-fd:container-side-copies" "$xt_copies"
+if [ -n "$xt_copies" ]; then pass "trace-fd:container-side-copies-were-found"
+else fail "trace-fd:container-side-copies-were-found" \
+          "no BASH_XTRACEFD in lib/sandbox.sh or lib/sandbox-guest.sh -- did tracing move?"; fi
+assert_eq "trace-fd:container-side-copies-agree" "BASH_XTRACEFD=$CS193V_TRACE_FD" "$xt_copies"
 
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # All four of the installer's privileged calls go through one name, so a sudo that never
@@ -1690,6 +1747,7 @@ assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,S
                                            $PRIVATE/tests/14-test-harness.sh \
                                            $PRIVATE/tests/16-args-parse.sh \
                                            $PRIVATE/tests/install-sandbox.sh \
+                                           $PRIVATE/tests/lib/shared.sh \
                                            $PRIVATE/tests/lib/sandbox.sh \
                                            $PRIVATE/tests/lib/sandbox-guest.sh
 # setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are

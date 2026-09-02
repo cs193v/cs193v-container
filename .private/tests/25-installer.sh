@@ -43,9 +43,10 @@ record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 # ─── the two pure functions, extracted and unit-tested ─────────────────────────
 # version_lt is duplicated in cs193v-ui.sh and the installer. If they ever disagree, a
 # student is told to upgrade by one and accepted by the other.
-# Not /^version_lt() {$/ — the helper's copy carries a trailing comment on the same line.
-sed -n '/^version_lt()/,/^}$/p' $PRIVATE/files/cs193v-ui.sh > "$TMP/vl_launcher.sh"
-sed -n '/^version_lt()/,/^}$/p' $PRIVATE/install-cs193v.sh  > "$TMP/vl_installer.sh"
+# carve_func (lib/shared.sh) is this sed, lifted out because three other places now need it;
+# the reason it anchors on /^name()/ rather than the brace is recorded there.
+carve_func $PRIVATE/files/cs193v-ui.sh version_lt "$TMP/vl_launcher.sh"
+carve_func $PRIVATE/install-cs193v.sh  version_lt "$TMP/vl_installer.sh"
 for f in vl_launcher vl_installer; do
     if [ "$(wc -l < "$TMP/$f.sh" | tr -d ' ')" -gt 3 ]; then pass "extract:$f"
     else fail "extract:$f" "could not extract version_lt"; exit 1; fi
@@ -274,12 +275,65 @@ assert_eq "unsupported-os:exits-1" "1" \
 # 4.9.0 now, so 4.9.3 -- Ubuntu 24.04 LTS's podman -- is an ACCEPTED machine and cannot be the
 # refusal case any more. 4.3.1 is Debian 12 bookworm's, which is the oldest thing still plausibly
 # under a student and is genuinely below the floor.
+#
+# THE REFUSAL IS FORKED THREE WAYS AND THIS RUNS ON THE REAL HOST, which is what the first
+# version of these three assertions missed. installer_host runs the shipped installer here, on
+# this machine: the podman VERSION is faked, but the PLATFORM and the DISTRO FAMILY are not, and
+# both change what the refusal says.
+#
+#   debian family   the floor is MIN_PODMAN_LINUX and the fix is apt's --only-upgrade
+#   fedora family   the same floor, and the fix is `sudo dnf upgrade podman`
+#   macOS           a DIFFERENT floor (MIN_PODMAN_MACOS), and the answer is not upgrade at all --
+#                   it is remove-and-rerun, because this script installs a pinned .pkg rather
+#                   than whatever Podman Desktop ships this week
+#
+# So a literal `only-upgrade podman` was only ever green on a Debian-family Linux. It was red on
+# Fedora, and red on a Mac -- the platform the suite exists to settle VERIFICATION.md §5.2/§5.3 on.
+#
+# THE EXPECTATIONS COME OUT OF THE INSTALLER, not out of this file. install-cs193v.sh sources
+# nothing and cannot be sourced -- a student downloads that one file and checks its published
+# SHA-256 -- so carve_func is how a test reads its values without keeping a second copy of them
+# that can drift. Three functions rather than one, because distro_family needs os_release_field.
+carve_func $PRIVATE/install-cs193v.sh os_release_field "$TMP/orf.sh"
+carve_func $PRIVATE/install-cs193v.sh distro_family    "$TMP/df.sh"
+carve_func $PRIVATE/install-cs193v.sh distro_packages  "$TMP/dp.sh"
+for f in orf df dp; do
+    if [ -s "$TMP/$f.sh" ]; then pass "extract:$f"
+    else fail "extract:$f" "could not carve the distro helpers out of install-cs193v.sh"; fi
+done
+# The PM_/PKG_ globals are pre-set to empty because distro_packages leaves them untouched for a
+# family it does not know, and this suite runs under `set -u`.
+host_upgrade_cmd() {                  # host_upgrade_cmd -> $PM_UPGRADE for THIS machine
+    (
+        . "$TMP/orf.sh"; . "$TMP/df.sh"; . "$TMP/dp.sh"
+        PM_REFRESH=''; PM_INSTALL=''; PM_UPGRADE=''
+        PKG_PODMAN=''; PKG_UIDMAP=''; PKG_SSH=''; PKG_CURL=''; PKG_CA=''
+        distro_packages "$(distro_family)"
+        printf '%s' "$PM_UPGRADE"
+    )
+}
+
 shim_new
 shim_set version "podman version 4.3.1"
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
-assert_says "podman-old:refused"            "needs 4.9.0 or newer" "$out"
-assert_says "podman-old:names-what-it-found" "Podman 4.3.1"        "$out"
-assert_says "podman-old:says-how-to-upgrade" "only-upgrade podman" "$out"
+# Darwin is the same thing platform() keys its macos arm off, so this forks where it forks.
+if [ "$(uname -s)" = Darwin ]; then
+    po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+    # The one needle here that is a literal rather than a value read back from the installer:
+    # the Mac branch's advice is inline prose, not a table entry, so there is nothing to carve.
+    po_fix="remove the podman you have"
+else
+    po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+    po_fix="$(host_upgrade_cmd)"
+fi
+record "podman-old:the-branch-measured-here" "$(uname -s) / ${po_fix}"
+# Both non-empty first. An empty needle would make assert_says pass against any output at all,
+# which is the trap this file's own header records for version_lt.
+assert_ne "podman-old:the-floor-was-readable" "" "$po_floor"
+assert_ne "podman-old:the-fix-was-readable"   "" "$po_fix"
+assert_says "podman-old:refused"            "needs $po_floor or newer" "$out"
+assert_says "podman-old:names-what-it-found" "Podman 4.3.1"            "$out"
+assert_says "podman-old:says-how-to-upgrade" "$po_fix"                 "$out"
 assert_no_file "podman-old:changes-nothing" "$TMP/old"
 
 # podman missing entirely is NOT here, and the reason is worth writing down rather than

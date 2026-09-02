@@ -309,13 +309,21 @@ cmd_run() {
         shift
     done
     if [ "$trace" = yes ]; then
-        # PS4 carries the line number and the trace goes to fd 9, so the installer's own
+        # PS4 carries the line number and the trace goes to fd 8, so the installer's own
         # output stays readable. Accumulated across runs, which is what makes `lines --missing`
         # a to-do list rather than one run's snapshot.
-        exec 9>>"$REP/trace"
-        PS4='+${LINENO} ' BASH_XTRACEFD=9 bash -x "$INST"
+        #
+        # FD 8, NOT 9, AND THE NUMBER MATTERS. BASH_XTRACEFD is exported, so every descendant of
+        # the traced installer inherits it -- including the launcher, whose run_timeout owns fd 9
+        # and CLOSES it for the command it runs. Bash validates BASH_XTRACEFD at startup, so on any
+        # distro where /bin/sh is bash (Fedora, macOS -- not Debian, where it is dash) a child then
+        # wrote "invalid value for trace file descriptor" into output the launcher was parsing a
+        # podman version out of. This file is COPIED into the fixture verbatim, so it cannot read
+        # lib/shared.sh's CS193V_TRACE_FD; 10-static.sh asserts this number still agrees with it.
+        exec 8>>"$REP/trace"
+        PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST"
         rc=$?
-        exec 9>&-
+        exec 8>&-
         sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' "$REP/trace" | sort -un >> "$LINES.raw" 2>/dev/null
         sort -un "$LINES.raw" > "$LINES" 2>/dev/null
         printf '\n[sandbox] traced; %s of the installer'"'"'s lines seen so far. `sandbox lines --missing`\n' \

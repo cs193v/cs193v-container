@@ -208,3 +208,99 @@ RT_ROW=''
 assert_eq       "rt:row-mode-passes-the-status-through" "7" "$RC"
 assert_contains "rt:row-mode-captures-output" "row-output" "$RT_OUT"
 assert_eq       "rt:row-mode-leaves-no-scratch-file" "" "$(litter)"
+
+# ─── it must not leak the harness's trace fd into what it runs ─────────────────
+# THE BUG THIS EXISTS FOR, and it cost a day on Fedora. run_timeout's fifo branch owns fd 9 and
+# CLOSES it for the command (`9>&-`, so conmon cannot hold the pipe open). The test harness
+# exports BASH_XTRACEFD to divert `bash -x` away from the transcript it captures, and exported
+# means every descendant inherits it -- so a child arrived naming an fd that had just been closed
+# under it. Bash validates BASH_XTRACEFD at startup and writes
+#
+#     /bin/sh: BASH_XTRACEFD: N: invalid value for trace file descriptor
+#
+# to stderr; run_timeout captures stderr into RT_OUT; and the launcher read a podman version out
+# of RT_OUT. A diagnostic became part of a version number and podman 5.7.0 was refused as too old.
+#
+# ASSERTED HERE RATHER THAN AT THE PARSE, because the parse is only the first place it surfaced.
+# Anything at all that reads RT_OUT is wrong by the same amount, so the property worth holding is
+# that RT_OUT contains what the command said and nothing else.
+#
+# /bin/sh IS THE PROBE ON PURPOSE. This needs a child that VALIDATES the variable, and that means
+# bash: on Debian and Ubuntu /bin/sh is dash, which ignores BASH_XTRACEFD and says nothing, while
+# on Fedora and macOS it is bash. Naming /bin/sh rather than bash keeps the probe honest about
+# which platforms can see the fault -- it reproduces exactly where the suite reproduced it.
+#
+# THE FD IS THE HARNESS'S OWN, read from lib/shared.sh rather than written down again. That is the
+# point of the constant: this assertion follows the harness if the harness ever moves.
+#
+# eval, because `exec $fd>>` is not a redirection -- bash needs the number as a literal, and this
+# suite cannot use bash 4's `exec {fd}>` (see the file header).
+xtrace_leak() {                       # xtrace_leak -> RT_OUT from a run under an exported trace fd
+    (
+        # THE FD IS OPENED BEFORE THE VARIABLE IS SET, and the order is not cosmetic: bash
+        # validates BASH_XTRACEFD on assignment, so setting it first makes THIS shell emit the
+        # very diagnostic the probe is trying to attribute to the child. That noise lands on the
+        # suite's stderr, where it looks like a failing suite rather than a fixture arranging
+        # itself. The harness has the same order for the same reason -- its `N>>"$tf"` redirection
+        # is applied before the child reads its environment.
+        eval "exec $CS193V_TRACE_FD>>/dev/null"
+        export BASH_XTRACEFD="$CS193V_TRACE_FD"
+        run_timeout 5 /bin/sh -c 'echo probe-output'
+        printf '%s' "$RT_OUT"
+    )
+}
+# SKIPPED, NOT PASSED, below bash 4.1. BASH_XTRACEFD is a bash 4.1 feature; on the 3.2 macOS
+# ships it is an ordinary variable that nothing validates, so this assertion would pass by
+# measuring nothing -- and a vacuous pass is what #79's sabotage run was written to find.
+if [ "${BASH_VERSINFO[0]}" -gt 4 ] || \
+   { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then
+    leaked="$(xtrace_leak)"
+    assert_contains     "rt:the-command-still-spoke"          "probe-output"   "$leaked"
+    assert_not_contains "rt:no-trace-fd-diagnostic-in-RT_OUT" "BASH_XTRACEFD"  "$leaked"
+else
+    skip "rt:no-trace-fd-diagnostic-in-RT_OUT" \
+         "BASH_XTRACEFD is bash 4.1+; this bash is ${BASH_VERSION} and does not validate it,
+so the check would pass without measuring anything"
+fi
+
+# ─── and reading a version out of what it captured ─────────────────────────────
+# HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces: the launcher reads the
+# podman version out of it, and this function's whole difficulty is that RT_OUT can hold more than
+# one line. Testing the parse next to the thing that fills it keeps the two facts together.
+#
+# WRITTEN OUT ONE CALL PER CASE rather than packed into a table, because half these inputs contain
+# a NEWLINE -- that is the entire point of them -- and every table encoding of a multi-line value
+# needs a delimiter that the values then cannot contain. The first attempt here used pipe-separated
+# specs split with sed, which reads line by line and so mangled exactly the cases that mattered.
+xt="/bin/sh: BASH_XTRACEFD: 8: invalid value for trace file descriptor"
+
+# THE MEASURED BUG, both orders. `awk '{print $NF}'` printed the last field of EVERY line, so it
+# returned two words whichever side the noise arrived on.
+assert_eq "ver:plain"       "5.7.0" "$(podman_version_of 'podman version 5.7.0')"
+assert_eq "ver:noise-first" "5.7.0" "$(podman_version_of "$xt
+podman version 5.7.0")"
+assert_eq "ver:noise-after" "5.7.0" "$(podman_version_of "podman version 5.7.0
+$xt")"
+
+# A version this does not anticipate must come back WHOLE for version_lt to judge, not truncated
+# into something that compares wrong.
+assert_eq "ver:another-version" "4.9.3" "$(podman_version_of 'podman version 4.9.3')"
+assert_eq "ver:a-prerelease-is-returned-whole" "5.7.0-rc1" \
+          "$(podman_version_of 'podman version 5.7.0-rc1')"
+assert_eq "ver:a-distro-epoch-is-not-truncated" "4:5.7.0+ds1" \
+          "$(podman_version_of 'podman version 4:5.7.0+ds1')"
+# ...and returning it whole is only useful if the comparison then survives it.
+assert_eq "ver:a-prerelease-still-compares" "no" \
+          "$(version_lt "$(podman_version_of 'podman version 5.7.0-rc1')" 4.9.0)"
+
+# THE FALLBACK, which exists so that anchoring on podman's wording cannot become a NEW way to
+# fail. If podman ever stops saying "podman version N", the old reading is used -- but on the
+# first line only, which is the bug fixed and none of the robustness given up.
+assert_eq "ver:fallback-reads-the-last-field" "9.9.9" \
+          "$(podman_version_of 'some other wording 9.9.9')"
+assert_eq "ver:fallback-reads-only-the-first-line" "9.9.9" \
+          "$(podman_version_of "some other wording 9.9.9
+$xt")"
+# Nothing at all is empty rather than a wrong guess: version_lt reads empty as below any floor, so
+# an unreadable podman is refused rather than waved through.
+assert_eq "ver:nothing-parseable-is-empty" "" "$(podman_version_of '')"

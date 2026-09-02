@@ -247,8 +247,26 @@ installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> 
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
     if tf="$(installer_trace_file)"; then
-        env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${LINENO} ' BASH_XTRACEFD=9 "$@" \
-            bash -x "$script" </dev/null 2>&1 9>>"$tf"
+        # THE TRACE FD COMES FROM lib/shared.sh, and it is NOT 9 -- see the reasoning there. In
+        # short: this variable is EXPORTED, so every descendant of the traced installer inherits
+        # it, including programs the launcher runs; run_timeout owns fd 9 and closes it for its
+        # command; and bash validates BASH_XTRACEFD at startup, so a child arrived naming a closed
+        # fd and wrote a diagnostic into the output this captures.
+        #
+        # A SUBSHELL WITH AN `exec`, rather than a redirection on the env line, because
+        # `exec $fd>>file` is not a redirection -- bash wants the number as a literal, so the open
+        # has to go through eval. Only the OPEN does: the command stays a real argv, which is what
+        # keeps "$@" and $script safe from a second round of word splitting.
+        #
+        # OPENED BEFORE BASH_XTRACEFD EXISTS, and the order is load-bearing: bash validates the
+        # variable on assignment, so setting it first would make THIS shell print the very
+        # diagnostic being avoided. Setting it through `env` keeps it out of this shell entirely.
+        (
+            eval "exec $CS193V_TRACE_FD>>\"\$tf\""
+            env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${LINENO} ' \
+                BASH_XTRACEFD="$CS193V_TRACE_FD" "$@" \
+                bash -x "$script" </dev/null 2>&1
+        )
     else
         env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
     fi
@@ -283,7 +301,11 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     cmd="env HOME=$SHIM/home PATH=$SHIM:$PATH"
     for a in "$@"; do cmd="$cmd $a"; done
     if tf="$(installer_trace_file)"; then
-        cmd="$cmd PS4='+\${LINENO} ' BASH_XTRACEFD=9 bash -x $script 9>>$tf"
+        # No eval needed on this door: it is BUILDING a command string for `script -c`, so the fd
+        # number interpolates like any other word. `$CS193V_TRACE_FD>>$tf` has to stay unspaced --
+        # `8 >>file` is the number as an argument, not a redirection.
+        cmd="$cmd PS4='+\${LINENO} ' BASH_XTRACEFD=$CS193V_TRACE_FD"
+        cmd="$cmd bash -x $script $CS193V_TRACE_FD>>$tf"
     else
         cmd="$cmd bash $script"
     fi
