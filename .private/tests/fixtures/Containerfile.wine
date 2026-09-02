@@ -39,11 +39,25 @@ RUN apt-get update \
 # ubuntu:26.04 already ships a uid-1000 user named "ubuntu". Reusing it avoids a second home
 # directory, and wine needs a writable $HOME for its prefix.
 USER ubuntu
+# PATH CARRIES WINE'S OWN BINDIR, and that is a fix rather than tidiness. Ubuntu installs
+# `wineserver` to /usr/lib/x86_64-linux-gnu/wine/ and puts only `wine64` on the default PATH, so
+# the two `wineserver -k` calls below were resolving to NOTHING -- exit 127, swallowed by their
+# own `2>/dev/null` and by the `;` that follows them. The step whose comment calls that call
+# LOAD-BEARING has therefore never once run: the registry import it exists to flush was landing
+# only because regedit writes on its own and the `sleep 1` after it usually won the race. Under
+# load it stops winning, which is how this was found. The guard step below is what stops it going
+# quiet again.
 ENV WINEPREFIX=/home/ubuntu/.wine \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES=mscoree,mshtml=d \
     XDG_RUNTIME_DIR=/tmp/xdg \
-    DISPLAY=
+    DISPLAY= \
+    PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ...and it must STAY resolvable, asserted here rather than hoped for. A silent 127 is exactly
+# what made the layer below look like it worked for as long as it did, so this fails the build
+# the day the path moves instead of leaving a race to lose later.
+RUN command -v wineserver
 
 # THE FAKES, compiled here rather than at run time.
 #
@@ -58,7 +72,7 @@ ENV WINEPREFIX=/home/ubuntu/.wine \
 COPY win-fakes/ /tmp/win-fakes/
 RUN mkdir -p /home/ubuntu/shim \
  && cd /tmp/win-fakes \
- && for f in wsl net where powershell reg tar; do \
+ && for f in wsl net where powershell reg; do \
       x86_64-w64-mingw32-gcc -O1 -Wall -Wextra -o "/home/ubuntu/shim/$f.exe" "fake-$f.c"; \
     done \
  && ls -1 /home/ubuntu/shim

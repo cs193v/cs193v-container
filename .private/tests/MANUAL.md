@@ -698,32 +698,44 @@ settle, and one it should not be trusted on:
    on `innotek GmbH / VirtualBox` with WSL 2.7.12 — so the same machine was waved through into the
    same download and given the same wrong diagnosis.
 
-   **The question this list used to ask is gone.** There is no property to verify any more: the
-   gate imports a throwaway environment and asks whether it registered. What replaces it is
-   shorter, but the one item on it is load-bearing enough to block a release.
+   **This item used to ask you to verify a pre-flight. There is no pre-flight.** A second one was
+   added after #114 — import a throwaway distribution, ask whether it registered — and the check
+   this list demanded is what killed it. Recorded because the measurement is the whole argument:
 
-   - **THE POSITIVE PATH, and it is the only thing here that can break every student at once.**
-     Confirm on a box that CAN start a VM that `wsl --import CS193V-vmcheck <dir> <tar>` of a
-     tarball of an empty directory **succeeds**, that `wsl -l -q` then lists it, and that
-     `wsl --unregister CS193V-vmcheck` removes it. The gate reads "did it register" as "a VM
-     started", so if an empty rootfs is *rejected* on a working machine the installer refuses
-     everybody. This cannot be checked on the #114 box — nothing there can start a VM at all, so
-     the import never gets past `CreateVm` — which is precisely the #112 shape: a gate never
-     exercised in the state that mattered. **Check this before shipping.**
-   - **The negative path is measured** and needs no real-hardware pass: on the #114 box,
-     `wsl --import` failed at `Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED`
-     in 209 ms with a 1536-byte tarball, left nothing registered across three attempts, and
-     `wsl --unregister` of an absent name answered `WSL_E_DISTRO_NOT_FOUND` with exit -1. Those
-     three facts are what `fake-wsl.c`'s `--import`/`--unregister` arms model.
-   - **The cost on the happy path**, which the #114 box also cannot answer: time the gate on a
-     working machine. It runs on EVERY invocation, including the common re-run where a working
-     environment already exists. If it is slow enough to look like a hang it needs a line printed
-     in front of it, the way the DISM probe it replaced would have.
+   > On a VMware guest with nested virtualisation (WSL 2.7.12, a working `CS193V` running as
+   > version 2), `wsl --import` of a tarball of an empty directory is **refused** —
+   > `Wsl/Service/RegisterDistro/WSL_E_NOT_A_LINUX_DISTRO`, nothing registered. A 2.3 MB minimal
+   > rootfs on the same box imports in 2.05 s and registers. `wsl --import` validates the rootfs
+   > at `RegisterDistro`, so an empty one is refused on **every** machine, and the gate answered
+   > "cannot run a virtual machine" for the entire class. Both tiers were green throughout.
+
+   That is exactly the shape this list warned about — "a gate never exercised in the state that
+   mattered" — arriving a second time, one commit later. The diagnosis now lives at the two sites
+   that actually fail, out of what `wsl.exe` itself printed. What is left to check by hand is
+   smaller, and none of it can break every student at once:
+
+   - **The refusal on a real no-VM box.** On a machine that genuinely cannot start a VM, confirm
+     the create fails with Microsoft's own message and an `Error code:` line, that the installer
+     prints `:novm` rather than `:distrofailed`, and that it does **not** claim the computer can
+     run virtual machines or name `wsl --version`. The wine tier asserts all of this against a
+     fake; what it cannot know is whether real `wsl --status` on such a box actually contains
+     `aka.ms/enablevirtualization`, which is the token `%VMFAILPROBE%` matches. **If it does not,
+     the refusal degrades to the generic one rather than breaking — but the specific message is
+     the point, so verify it.**
+   - **The second site.** Same box, but with the environment already present, so the create is
+     skipped: confirm it still reaches `:novm` and never says the network is not up yet. This is
+     the site #112's fix never reached.
+   - **The `-d` scope chain, which is not transcribed.** `fake-wsl.c` prints
+     `MessageEnableVirtualization` for a failing `wsl -d` call but deliberately no `Error code:`
+     line, because nobody has captured one — reusing `--install`'s would be inventing it. Capture
+     the real one on a no-VM box. If it carries `HCS_E_HYPERV_NOT_INSTALLED` too, that is worth
+     recording in `wsl-messages` and the fake can then print the envelope.
 
    **What is no longer worth verifying, recorded so nobody re-adds it:** whether
    `HypervisorPresent` is `False` for each cause (#114 is the counter-example), whether
-   `Get-WindowsOptionalFeature` is slow enough to need a "checking..." line, and whether
-   `bcdedit /enum '{current}'` prints the line when set. All three probes are gone. The
+   `Get-WindowsOptionalFeature` is slow enough to need a "checking..." line, whether
+   `bcdedit /enum '{current}'` prints the line when set, and what a working machine does with an
+   empty rootfs (measured above — it refuses it). All of those probes are gone. The
    **BitLocker claim** — that `bcdedit /set hypervisorlaunchtype Auto` can trigger a recovery
    prompt — is still unverified and is now only historical: nothing offers that command, so
    `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` holds the line whether or not the claim is true.

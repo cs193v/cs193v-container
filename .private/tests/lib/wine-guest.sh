@@ -53,12 +53,9 @@ cmd_state() {
     printf '  wsl --status         exits %s%s\n' "$(knob wsl.status.rc 0)" \
         "$( [ "$(knob wsl.status.novirt 0)" = 0 ] && printf '' \
             || printf ', and PRINTS that virtualisation is off -- on stdout, still exiting 0' )"
-    printf '  starting a VM        %s\n' \
-        "$( [ "$(knob wsl.vm.cannotstart 0)" = 0 ] && printf 'works -- wsl --import gets past CreateVm' \
-            || printf 'FAILS at CreateVm -- every cause looks like this from here' )"
-    printf '  the VM check itself  %s\n' \
-        "$( [ "$(knob where.tar.exe 1)" = 0 ] && printf 'CANNOT RUN -- no tar.exe, so no payload' \
-            || printf 'can run' )"
+    printf '  using the distro     %s\n' \
+        "$( [ "$(knob wsl.vm.cannotstart 0)" = 0 ] && printf 'works' \
+            || printf 'EVERY `wsl -d` call fails -- no utility VM' )"
     printf '  creating the distro  %s\n' \
         "$( [ "$(knob wsl.install.novirt 0)" != 0 ] && printf 'fails at CreateVm, AFTER downloading' \
             || { [ "$(knob wsl.install.rebootrequired 0)" != 0 ] \
@@ -143,16 +140,16 @@ Everything you can change, by writing a file into /tmp/case
                           diagnosis is on stdout and the exit code cannot carry it -- issue
                           #112, where the .cmd sent that stdout to nul
   wsl.status.nowsl1 1     --status also prints the WSL1-unsupported line
-  wsl.vm.cannotstart 1    `wsl --import` fails at CreateVm with HCS_E_HYPERV_NOT_INSTALLED, which
-                          is what EVERY cause looks like once the gate observes a real VM start
-                          instead of asking Windows which cause it was -- firmware off, the
-                          Virtual Machine Platform off, hypervisorlaunchtype Off, or a nested
-                          guest. Issue #114 is the last of those, where the old probe read
-                          HypervisorPresent as True and waved the machine through
-  where.tar.exe 0         no tar.exe, so the check cannot build its payload. The PRECONDITION
-                          failing, which is not the machine answering no -- a separate arm
-  ps.vmcheck.rc N         force the gate's probe alone. Anything but 0 or 1 is "the question
-                          failed", which is NOT "no"
+  wsl.vm.cannotstart 1    every `wsl -d <distro>` call fails, because each one needs the utility
+                          VM. This is the SECOND site issue #114 is about and the one #112's fix
+                          never reached: the environment already exists, so the create is skipped
+                          and the run used to arrive at :curlfailed blaming the network. Pair it
+                          with wsl.status.novirt so the refusal can say virtualisation is why;
+                          leave that off to see the machine whose cause is unreadable
+  ps.vmfail.rc N          force the "did Windows blame virtualisation?" probe alone. It normally
+                          answers from wsl.status.novirt, so use this only to make the probe
+                          itself fail -- which must produce a refusal naming no cause, not a
+                          refusal naming the wrong one
   ps.distro.rc N          same, for the distro probe. Use this rather than ps.rc when you
                           want ONLY that probe to fail
   wsl.name.unsupported 1  WSL older than 2.5.8: no --name, exits -1

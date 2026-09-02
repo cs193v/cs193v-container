@@ -71,15 +71,22 @@ MessageDistroNotFound	A	There is no distribution with the supplied name.
 MessageWsl1NotSupported	A	WSL1 is not supported with your current machine configuration.\nPlease enable the "Windows Subsystem for Linux" optional component to use WSL1.
 MessageEnableVirtualization	A	WSL2 is unable to start since virtualization is not enabled on this machine.\nPlease ensure the "Virtual Machine Platform" optional component is enabled and virtualization is turned on in your computer's firmware settings.\n\nEnable "Virtual Machine Platform" by running: wsl.exe --install --no-distribution\n\nFor information please visit https://aka.ms/enablevirtualization
 # The scope chain that arrives with the message above when it is `wsl --install -d` that hits it,
-# rather than a later launch. InstallDistro is the outermost scope, which is what says the
-# download had already happened -- and therefore what makes a pre-flight worth having.
+# rather than a later launch. InstallDistro is the outermost scope, which is what says the download
+# had already happened. That once read as the argument FOR a pre-flight; it is now the argument
+# that none is needed, because this pair -- Microsoft's prose plus this chain -- is already on the
+# student's screen when the create fails, and it says more than any check of ours could.
 ErrorCodeCreateVmNoHyperv	E	Wsl/InstallDistro/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
 #
-# THE GATE'S OWN TWO, and their provenance is a transcript from the issue #114 machine (a
-# VirtualBox guest, WSL 2.7.12) rather than #112's. Recorded separately because the scope chain
-# for --import is SHORTER than --install's: no InstallDistro, because nothing is being installed
-# from a manifest. A fake that reused the --install chain would be inventing this one.
-ErrorCodeImportCreateVmNoHyperv	E	Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED
+# TRANSCRIBED FROM WSL 2.7.12 rather than from #112's machine, which is why it sits apart. It is
+# what `wsl -d <name>` answers for a distribution that is not registered, envelope included --
+# the fake printed the body without the `Error code:` line until this was measured, and that line
+# is precisely what the refusals ask students to send staff.
+#
+# A THIRD CHAIN WAS HERE AND HAS BEEN REMOVED: ErrorCodeImportCreateVmNoHyperv, the shorter
+# `--import` form of the one above, recorded when the virtualisation gate imported a throwaway
+# distribution. That gate is gone -- .private/README.md has why -- and with it the only arm that
+# could print this. Deleted rather than left, because a key no mechanism can reach is what the
+# reachability gate in 27-installer-windows.sh exists to forbid.
 ErrorCodeDistroNotFound	E	Wsl/Service/WSL_E_DISTRO_NOT_FOUND
 
 # ---- Win32 system text ---------------------------------------------------------

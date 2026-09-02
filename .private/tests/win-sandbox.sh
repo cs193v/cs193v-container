@@ -67,17 +67,18 @@ WHAT THE MACHINE IS LIKE
   --no-distro          nothing registered yet, so it creates the environment
   --old-wsl            WSL older than 2.5.8: no --name, so creation fails
 
-
-  A MACHINE THAT CANNOT START A VIRTUAL MACHINE -- issues #112 and #114, and ONE shape now
-  rather than four. Which cause it was used to matter, because a probe branched on it and one
-  cause was fixable; #114 is a VirtualBox guest where that probe read backwards, because
-  VirtualBox sets the hypervisor-present bit. The gate observes a real VM start instead, so
-  every cause takes the same path. Use --rev to watch the old wrong message.
-  --no-vm              `wsl --import` fails at CreateVm, which is what every cause looks like
-                       from here: firmware off, the Virtual Machine Platform off, the boot
-                       configuration told not to start a hypervisor, or a nested guest
-  --vmcheck-fails      the CHECK cannot run -- no tar.exe, so no payload can be built. NOT the
-                       machine answering no, and it must not be reported as one
+  A MACHINE THAT CANNOT START A VIRTUAL MACHINE -- issues #112 and #114. There is no pre-flight
+  any more; two were tried and removed, and .private/README.md has why. The failure is diagnosed
+  where it happens, out of what wsl.exe itself said, so what these flags arrange is a real
+  failure rather than a probe's answer. Use --rev to watch the old wrong messages.
+  --no-vm              every call needing the utility VM fails, and \`wsl --status\` says
+                       virtualisation is why -- firmware off, the Virtual Machine Platform off,
+                       hypervisorlaunchtype Off and a nested guest all look like this. Add
+                       --no-distro for the first-install site; leave the environment in place
+                       for the second one, where #112's fix never reached
+  --no-vm-quiet        the same machine with \`wsl --status\` saying nothing useful, which is what
+                       firmware-disabled looks like. The diagnosis MISSES, deliberately, and the
+                       refusal has to fall back to naming no cause rather than guessing one
   --createvm-fails     the probes all say the machine is fine and \`wsl --install -d\` still
                        fails at CreateVm, which is a real box (WSL#12894). Watch that the
                        refusal does not pretend to know why
@@ -115,9 +116,9 @@ EXAMPLES
   tests/win-sandbox.sh --dir 'cs193v (1)'           # the folder name that used to break it
   tests/win-sandbox.sh --old-wsl --no-distro        # the --name refusal
   tests/win-sandbox.sh --probe-fails                # "cannot tell" vs "absent"
-  tests/win-sandbox.sh --no-vm                      # issues #112 and #114, refused before the download
-  tests/win-sandbox.sh --no-vm --distro CS193V      # ...and at the second site, where one exists already
-  tests/win-sandbox.sh --vmcheck-fails              # "cannot check" vs "cannot start one"
+  tests/win-sandbox.sh --no-vm --no-distro          # issues #112 and #114, at the create
+  tests/win-sandbox.sh --no-vm                      # ...and at the second site, where the environment exists
+  tests/win-sandbox.sh --no-vm-quiet                # nothing to read: it must not guess a cause
   tests/win-sandbox.sh --rev accfb1b --createvm-fails   # the wrong message, as it shipped
   tests/win-sandbox.sh --no-curl                    # watch it install curl first
   tests/win-sandbox.sh --truncated                  # a wifi sign-in page instead of the script
@@ -188,8 +189,8 @@ while [ "$#" -gt 0 ]; do
         # ONE FLAG, because the installer no longer branches on which cause it was. The
         # wsl.status.novirt knob rides along because a machine in this state really does print
         # that line on stdout and still exit 0, which is the trap #112 fell into.
-        --no-vm)          setk wsl.vm.cannotstart 1; setk wsl.status.novirt 1 ;;
-        --vmcheck-fails)  setk where.tar.exe 0 ;;
+        --no-vm)          setk wsl.vm.cannotstart 1; setk wsl.install.novirt 1; setk wsl.status.novirt 1 ;;
+        --no-vm-quiet)    setk wsl.vm.cannotstart 1; setk wsl.install.novirt 1 ;;
         --createvm-fails) setk wsl.install.novirt 1; DISTROS='' ;;
         --reboot-required) setk wsl.install.rebootrequired 1; DISTROS='' ;;
         --old-wsl)        setk wsl.name.unsupported 1; DISTROS='' ;;
@@ -226,7 +227,7 @@ WINE_TMP="$(new_tmpdir)"
 SB_TMP="$WINE_TMP"                    # fixture_build logs its build output here
 trap 'rm -rf "$WINE_TMP"; rm -f "${CS193V_RESULTS:-}"' EXIT
 
-printf 'Building the wine machine (cached unless its recipe moved; ~2.2 GB the first time)...\n'
+printf 'Building the wine machine (cached unless its recipe moved; ~3.45 GB the first time)...\n'
 fixture_build wine >/dev/null || { printf 'could not build the wine machine\n' >&2; exit 1; }
 
 # The case tree, built the same way lib/wine.sh builds one, so what you drive by hand and what

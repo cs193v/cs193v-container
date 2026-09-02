@@ -1,4 +1,5 @@
-/* wsl.exe. Ten invocation shapes, and the behaviours that make the real one hard to use:
+/* wsl.exe. Every invocation shape the .cmd uses, and the behaviours that make the real one hard
+ * to use:
  *
  *   - generic failure is -1 (0xFFFFFFFF), NOT 1. `if errorlevel 1` is a >= test and so cannot
  *     see it. This is the single most important thing this fake reproduces.
@@ -82,37 +83,6 @@ static int registered(const char *name) {
     }
     fclose(f);
     return 0;
-}
-
-/* The token after a flag, e.g. `--unregister CS193V-vmcheck`. NULL when the flag is last or
- * absent; callers treat that as a usage error rather than guessing a name. */
-static const char *argv_after(int argc, char **argv, const char *flag) {
-    for (int i = 1; i + 1 < argc; i++)
-        if (strcmp(argv[i], flag) == 0) return argv[i+1];
-    return NULL;
-}
-
-/* Rewrite wsl.list WITHOUT name. The gate imports a throwaway environment and removes it again,
- * so the list has to really shrink: a fake that only ever appended would let the gate's cleanup
- * pass while leaving a machine carrying a distro nobody asked for. */
-static void unregister_name(const char *name) {
-    char p[1024], line[512], keep[8192];
-    FILE *f;
-    size_t used = 0;
-    fake_path(p, sizeof p, "wsl.list");
-    if (!(f = fopen(p, "rb"))) return;
-    keep[0] = '\0';
-    while (fgets(line, sizeof line, f)) {
-        size_t n = strlen(line);
-        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
-        if (!n || strcmp(line, name) == 0) continue;
-        if (used + n + 2 > sizeof keep) break;
-        used += (size_t)snprintf(keep + used, sizeof keep - used, "%s\n", line);
-    }
-    fclose(f);
-    if (!(f = fopen(p, "wb"))) return;
-    fputs(keep, f);
-    fclose(f);
 }
 
 static int exists(const char *leaf) {
@@ -312,61 +282,6 @@ int main(int argc, char **argv) {
         }
         return (int)fake_knob_int("wsl.install.rc", 0);
     }
-
-    /* `--unregister <Name>`. THE GATE CALLS THIS TWICE AND EXPECTS THE FIRST TO FAIL: on a clean
-     * machine nothing is registered yet, and wsl.exe answers WSL_E_DISTRO_NOT_FOUND with exit -1.
-     * That is measured, not assumed -- it is what the #114 box did -- and it is the reason the
-     * .cmd waives this exit code instead of checking it. A fake that returned 0 here would let a
-     * .cmd that DID check it pass, and then break on every real machine. */
-    if (has(argc, argv, "--unregister")) {
-        const char *name = argv_after(argc, argv, "--unregister");
-        if (!name || !registered(name)) {
-            char body[4096], code[512];
-            if (!fake_msg("MessageDistroNotFound", body, sizeof body)
-                || !fake_msg("ErrorCodeDistroNotFound", code, sizeof code)) {
-                fprintf(stderr, "win-fake: --unregister needs both MessageDistroNotFound "
-                                "and ErrorCodeDistroNotFound\n");
-                return 120;
-            }
-            fake_say(stdout, "MessageErrorCode", body, code);
-            return WSL_FAIL;
-        }
-        unregister_name(name);
-        return 0;
-    }
-
-    /* `--import <Name> <Location> <File>`, which is how the gate makes WSL start a VM without
-     * downloading anything. wsl.vm.cannotstart is the knob for a machine that cannot: measured on
-     * the #114 box at 209 ms with a 1.5 KB tarball, failing with the SAME HCS error the 600 MB
-     * `--install -d` path produces, only through a shorter scope chain.
-     *
-     * NOTHING IS REGISTERED ON THAT PATH, which is also measured: three failed imports left
-     * `wsl -l -q` empty. That is what makes the .cmd's question -- is it registered now? -- a
-     * sound answer rather than a guess, and it is why this arm must not append to wsl.list. */
-    if (has(argc, argv, "--import")) {
-        const char *name = argv_after(argc, argv, "--import");
-        if (!name) return WSL_FAIL;
-        if (fake_knob_int("wsl.vm.cannotstart", 0)) {
-            char body[4096], code[512];
-            if (!fake_msg("MessageEnableVirtualization", body, sizeof body)
-                || !fake_msg("ErrorCodeImportCreateVmNoHyperv", code, sizeof code)) {
-                fprintf(stderr, "win-fake: the import virtualisation failure needs both "
-                                "MessageEnableVirtualization and "
-                                "ErrorCodeImportCreateVmNoHyperv\n");
-                return 120;
-            }
-            fake_say(stdout, "MessageErrorCode", body, code);
-            return WSL_FAIL;
-        }
-        /* registered now, so the gate's probe can see it */
-        char p[1024]; FILE *f;
-        fake_path(p, sizeof p, "wsl.list");
-        if ((f = fopen(p, "a"))) { fprintf(f, "%s\n", name); fclose(f); }
-        /* No rc knob here: the .cmd deliberately ignores this exit code, so a knob to vary it
-         * would be a documented-but-undriven dial, which this fixture already has too many of. */
-        return 0;
-    }
-
     if (has(argc, argv, "-l") || has(argc, argv, "--list")) {
         char p[1024], line[512];
         FILE *f;
@@ -396,8 +311,42 @@ int main(int argc, char **argv) {
      * No case reaches this today, because the .cmd probes before it uses the distro; the guard
      * exists so that a version which stops probing fails HERE rather than somewhere downstream
      * with a message about the network. */
+    /* WITH THE ENVELOPE, because that is what the real one does -- transcribed from WSL 2.7.12:
+     *
+     *     There is no distribution with the supplied name.
+     *     Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND
+     *
+     * It printed the body alone until that was measured. The difference matters because the
+     * `Error code:` line is exactly what the refusals now ask students to send staff, so a fake
+     * that omitted it would let a message claiming to carry one pass without one. */
     if (dashd(argc, argv) && !registered(dashd(argc, argv))) {
-        fake_say(stdout, "MessageDistroNotFound", NULL, NULL);
+        char body[4096], code[512];
+        if (!fake_msg("MessageDistroNotFound", body, sizeof body)
+            || !fake_msg("ErrorCodeDistroNotFound", code, sizeof code)) {
+            fprintf(stderr, "win-fake: -d on an absent distro needs both MessageDistroNotFound "
+                            "and ErrorCodeDistroNotFound\n");
+            return 120;
+        }
+        fake_say(stdout, "MessageErrorCode", body, code);
+        return WSL_FAIL;
+    }
+
+    /* ...AND EVERY ARM BELOW NEEDS THE UTILITY VM, so on a machine that cannot start one they all
+     * fail. That is the SECOND site issue #114 is about, and the one #112's fix never reached: the
+     * environment already exists, so the create is skipped entirely, and the .cmd used to arrive
+     * at :curlfailed and tell the student the network was not up yet inside it.
+     *
+     * THE PROSE IS ATTESTED AND THE SCOPE CHAIN IS NOT, which is why this prints one and not the
+     * other. MessageEnableVirtualization is the resource string wsl.exe emits whenever it cannot
+     * start a VM, whatever the operation asked for, so printing it here is transcription. The
+     * `Error code:` chain for `-d` on such a machine has never been captured -- reusing
+     * --install's would be inventing it, and a chain invented for one operation out of another's
+     * is a mistake this fixture has made before. MANUAL.md carries the transcription as a
+     * hardware item,
+     * and if it turns out to carry HCS_E_HYPERV_NOT_INSTALLED too then the .cmd's classifier
+     * starts routing this site to :novm with no change here. */
+    if (fake_knob_int("wsl.vm.cannotstart", 0)) {
+        fake_say(stdout, "MessageEnableVirtualization", NULL, NULL);
         return WSL_FAIL;
     }
 
