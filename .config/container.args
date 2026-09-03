@@ -47,8 +47,11 @@
 #
 #  Host isolation comes from rootless podman's user namespace. It does NOT come from
 #  the capability set: root owns /usr/bin and /etc, so euid 0 inside the container can
-#  tamper with the toolchain using no capability at all. Nor from AppArmor, which is
-#  not confining this container — /proc/self/attr/current reads "crun (unconfined)".
+#  tamper with the toolchain using no capability at all. Nor from the kernel's security
+#  module, and NOT from AppArmor specifically: /proc/self/attr/current is whichever LSM the
+#  HOST has, so it reads "crun (unconfined)" on a Debian-family machine and an SELinux
+#  container_t context on Fedora or RHEL. A rule resting on that value would hold on one
+#  student's computer and not on another's. The user namespace holds on both.
 #
 #  Also do NOT copy the devcontainer CLI's automatic --security-opt label=disable. It
 #  silently strips SELinux type enforcement for anyone on Fedora or RHEL. The launcher

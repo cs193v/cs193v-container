@@ -54,6 +54,7 @@ mattered most:
 | §A.4 | expected `TERM`/`COLORTERM` in `.Config.Env` | impossible; they are per-`exec` |
 | §A.5 | `tput colors` with no `-e TERM` reported 8 — it **failed on a working system** | forward `TERM` as the launcher does |
 | §A.5 | `findmnt -no FSTYPE /tmp` returns **empty** — /tmp is not a mountpoint | `stat -f -c %T /tmp` |
+| §A.5 | `ck apparmor "crun (unconfined)"` — that file is the **host's** LSM, so it is red on Fedora on a *better* value | `rec`, not `ck` |
 | §A.10 | the verb loop **hangs** on the empty verb, and `</dev/null` does not fix it — a pty never delivers EOF | feed it `exit` |
 | §A.12 | installer idempotency was **vacuous** — the consent menu declines with no tty and exits 0 first | drive it with a local tarball |
 | §1.2 | expected a numbered-selection fallback with no tty | there is none; it picks the safe default, which is better |
@@ -259,7 +260,17 @@ rec pid1                   I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}'
 rec uid-map                E 'cat /proc/self/uid_map'       # a line mapping container 1000 -> host uid
 rec capbnd                 E 'grep CapBnd /proc/self/status'  # decodes to podman's default 11
 ck  capeff-zero  "CapEff:	0000000000000000"  E 'grep CapEff /proc/self/status'
-ck  apparmor  "crun (unconfined)"  E 'cat /proc/self/attr/current'   # AppArmor is NOT a layer here
+# RECORDED, not asserted. This file is whichever LSM the HOST has, not a property of the image,
+# so no fixed expectation survives both platforms. It is AppArmor's on a Debian-family host,
+# where it reads `crun (unconfined)` because an unprivileged user cannot load a profile; it is an
+# SELinux context on Fedora/RHEL, measured `system_u:system_r:container_t:s0:c483,c562` on
+# Fedora 44. In NEITHER case is it what isolates the container — that is the user namespace.
+# NOT NAMED FOR EITHER LSM, deliberately: a token called `apparmor` reporting an SELinux context
+# would be describing a different mechanism under a name nobody would question. lib/sandbox.sh's
+# PROC_ATTR_CURRENT is the same value, recorded for the same reason.
+# `tr -d "\0"` because the SELinux read carries a trailing NUL, which bash strips out of a
+# command substitution with a warning on stderr.
+rec lsm-label              E 'cat /proc/self/attr/current | tr -d "\0"'
 rec cgroup-memory-max      E 'cat /sys/fs/cgroup/memory.max'   # MUST equal --memory, not "max"
 ck  cgroup-pids  2048      E 'cat /sys/fs/cgroup/pids.max'
 # NOT `findmnt -no FSTYPE /tmp`: /tmp is not a mountpoint (just a directory on the root
@@ -267,7 +278,11 @@ ck  cgroup-pids  2048      E 'cat /sys/fs/cgroup/pids.max'
 ck  tmp-not-tmpfs overlayfs E 'stat -f -c %T /tmp'             # NOT tmpfs
 rec shm-mount              E 'findmnt -no SIZE,OPTIONS /dev/shm'
 # corrects a claim in the design docs: seccomp does NOT block mount()
-ck  mount-allowed mount-allowed  E 'unshare -U --map-root-user -m -- mount -t tmpfs none /mnt && echo mount-allowed'
+# RECORDED rather than asserted, as 60-container.sh's kernel:mount-in-nested-userns is: the
+# answer is the point, and #119 measured that a nested mount is exactly the kind of thing an
+# SELinux host adjudicates for itself. Both arms are positive tokens, so an empty value reads as
+# neither one. Measured ALLOWED on Fedora 44 as well as on Ubuntu.
+rec mount-in-nested-userns E 'unshare -U --map-root-user -m -- mount -t tmpfs none /mnt >/dev/null 2>&1 && echo ALLOWED || echo blocked'
 ckfail setns-blocked       E 'unshare -U --map-root-user -- nsenter --target 1 --mount true'
 rec inotify-watches        E 'cat /proc/sys/fs/inotify/max_user_watches'
 # /proc is NOT cgroup-aware — `free` in here reports the host's RAM, not the cap

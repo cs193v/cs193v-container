@@ -364,11 +364,16 @@ So if you ever see `error: externally-managed-environment`, the fix is to drop t
 
 For the same reason, the capability set is left at podman's defaults rather than
 tightened. Tightening it would look reassuring and achieve nothing: `root` **owns**
-`/usr/bin` and `/etc`, so it needs no special permission to modify them. And AppArmor is
-not confining this container either — inside it, `/proc/self/attr/current` reads
-`crun (unconfined)`, because an unprivileged user cannot load a profile. The protection
-is the user namespace. It is worth knowing which of the things that *sound* protective
-actually are.
+`/usr/bin` and `/etc`, so it needs no special permission to modify them. Nor is your
+kernel's security module what confines this container — and what it reports depends on which
+computer you read it from. Inside the container, `/proc/self/attr/current` says
+`crun (unconfined)` on Ubuntu and Debian, where an unprivileged user cannot load an AppArmor
+profile, and an SELinux context like `system_u:system_r:container_t:s0:c483,c562` on Fedora and
+RHEL, where the policy is enforced and this design leaves it enforced rather than switching it
+off. The second of those is real confinement and the first is the absence of it — so if either
+were the protection, the same container would be protected on one computer and not on the
+other. The protection is the user namespace, on both. It is worth knowing which of the things
+that *sound* protective actually are.
 
 ---
 
