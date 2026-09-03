@@ -539,6 +539,12 @@ assert_eq   "win-hijack:the-planted-binaries-never-run" "0" "$(wine_argv_count '
 # all -- produces exactly the same zero. So the same case asserts that the real programs DID run
 # and that the install went all the way through. Together those say the installer did its whole
 # job while never reaching any of the planted copies; either one alone says much less.
+#
+# MEASURED AGAINST THE UNFIXED INSTALLER, which is what makes the split above worth the words: 8
+# planted binaries ran and 0 real ones did -- the hostile copies displaced them completely -- and
+# `says-it-is-done` and `hands-off-to-bash-once` BOTH STILL PASSED, because a hostile wsl.exe is
+# handed the same arguments and the transcript looks like a clean install. So the two counts are
+# the only assertions here that can see the defect, and neither is redundant.
 assert_ne   "win-hijack:the-real-programs-did-run"      "0" "$(wine_argv_count '^wsl\.exe ')"
 assert_eq   "win-hijack:exits-zero"                     "0" "$WINE_RC"
 assert_says "win-hijack:says-it-is-done"                "Done. From now on you work inside" "$WINE_OUT"
