@@ -182,6 +182,64 @@ cmdlint_unchecked_calls() {           # cmdlint_unchecked_calls FILE -> violatio
     }'
 }
 
+# EVERY EXTERNAL PROGRAM MUST CARRY ITS OWN PATH, and this is issue #125.
+#
+# install-cs193v-windows.cmd runs elevated -- its own instructions are "right-click and Run as
+# administrator" -- so its working directory is the folder the student downloaded it into, normally
+# Downloads. cmd.exe resolves an unqualified program name against the CURRENT DIRECTORY BEFORE
+# %PATH%, so a wsl.exe, reg.exe or powershell.exe already sitting in that folder is what runs, with
+# Administrator rights. Downloads is the likeliest place on the machine for an untrusted file to
+# already be, and wsl.exe had twelve call sites including the handoff to stage two.
+#
+# MEASURED on Windows 11 26200: a copy of csc.exe in the working directory ran in preference to the
+# one %PATH% would have found. That needs NoDefaultCurrentDirectoryInExePath UNSET, which is the
+# state a student double-clicking the file is in -- Git Bash and several dev shells set it to 1 and
+# therefore cannot reproduce it at all. Check the variable before concluding the hole is closed.
+#
+# TWO HALVES, because this file reaches an external program two ways. The first word of a command is
+# the obvious one. The other is a program named INSIDE a PowerShell string that `set` builds and a
+# later `powershell` call runs -- there the first word is `set`, and no amount of looking at first
+# words would ever see it. One rule and not two, because it is one property.
+#
+# `echo` IS EXEMPT, the same carve-out cmdlint_bcdedit_writes needs and for the same reason: the
+# closing messages name `wsl` commands for the STUDENT to type, so the strings this rule looks for
+# have to stay printable. Programs handed to `wsl -e` are Linux ones -- they carry no .exe and are
+# never the first word -- so they are out of scope without needing an exemption.
+#
+# WHAT COUNTS AS QUALIFIED is a system-directory reference ahead of the name and a backslash
+# immediately before it. That deliberately still flags `"%SYS32%\where.exe" wsl.exe`: the program
+# is qualified there, but its ARGUMENT is the name being resolved, and where.exe searches the
+# current directory itself and does not consult NoDefaultCurrentDirectoryInExePath.
+cmdlint_unqualified_programs() {      # cmdlint_unqualified_programs FILE -> violations
+    [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
+    _cmdlint_commands "$1" | awk -F'\t' -v builtins="$CMDLINT_BUILTINS" '
+    BEGIN { split(builtins, b, "|"); for (i in b) isb[b[i]] = 1 }
+    # ─── half one: the program a command starts with ───
+    {
+        w = $3
+        bare = w; sub(/\.exe$/, "", bare)
+        if (!isb[bare]) {
+            q = w; sub(/^"/, "", q)
+            if (q !~ /^(%sys32%|%systemroot%)\\/)
+                printf "line %d: external command `%s` is not fully qualified -- cmd.exe searches the current directory before PATH, so a copy planted in the download folder runs instead. Use \"%%SYS32%%\\<name>\".\n", $2, $3
+        }
+    }
+    # ─── half two: a program named anywhere in the text, e.g. inside a PowerShell probe ───
+    $3 != "echo" {
+        s = $4
+        while (match(s, /[A-Za-z_][A-Za-z0-9_.+-]*\.[Ee][Xx][Ee]/)) {
+            tok = substr(s, RSTART, RLENGTH)
+            pre = substr(s, 1, RSTART - 1)
+            # The command own program is half one report; saying it twice would make a
+            # single unqualified call look like two separate ones.
+            if (pre ~ /^[ \t]*@?"?$/) { s = substr(s, RSTART + RLENGTH); continue }
+            if (pre !~ /(%SYS32%|%SystemRoot%|\$env:SystemRoot)/ || pre !~ /\\$/)
+                printf "line %d: `%s` is named without a path -- qualify it with %%SYS32%%\\ in cmd, or $env:SystemRoot\\System32\\ inside a PowerShell probe\n", $2, tok
+            s = substr(s, RSTART + RLENGTH)
+        }
+    }'
+}
+
 # The installer may ASK about the boot configuration and may not CHANGE it. `bcdedit /enum` is a
 # read; `/set`, `/deletevalue`, `/import` and `/export` are not.
 #
