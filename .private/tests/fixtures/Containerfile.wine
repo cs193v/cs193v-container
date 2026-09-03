@@ -41,12 +41,10 @@ RUN apt-get update \
 USER ubuntu
 # PATH CARRIES WINE'S OWN BINDIR, and that is a fix rather than tidiness. Ubuntu installs
 # `wineserver` to /usr/lib/x86_64-linux-gnu/wine/ and puts only `wine64` on the default PATH, so
-# the two `wineserver -k` calls below were resolving to NOTHING -- exit 127, swallowed by their
-# own `2>/dev/null` and by the `;` that follows them. The step whose comment calls that call
-# LOAD-BEARING has therefore never once run: the registry import it exists to flush was landing
-# only because regedit writes on its own and the `sleep 1` after it usually won the race. Under
-# load it stops winning, which is how this was found. The guard step below is what stops it going
-# quiet again.
+# the two `wineserver` calls below would resolve to NOTHING -- exit 127. Not hypothetical: they
+# used to read `-k 2>/dev/null;`, which hid the 127 behind its own redirect and behind the `;`
+# after it, so the flush they exist to force had never once run (#126). The guard step below is
+# what stops it going quiet again.
 ENV WINEPREFIX=/home/ubuntu/.wine \
     WINEDEBUG=-all \
     WINEDLLOVERRIDES=mscoree,mshtml=d \
@@ -85,7 +83,7 @@ RUN mkdir -p /home/ubuntu/shim \
 RUN mkdir -p /tmp/xdg && chmod 700 /tmp/xdg \
  && wine64 wineboot --init >/dev/null 2>&1 || true \
  && wine64 cmd /c "exit /b 0" </dev/null >/dev/null 2>&1 || true \
- && wineserver -k 2>/dev/null; sleep 1 \
+ && timeout 30 wineserver -w \
  && test -d /home/ubuntu/.wine/drive_c/windows/system32
 
 # %TEMP% MUST EXIST AND BE WRITABLE. The installer no longer writes a scratch file there --
@@ -101,15 +99,21 @@ RUN mkdir -p /tmp/xdg && chmod 700 /tmp/xdg \
 # a harness without them tests a machine no student has: the first run of this suite reported the
 # installer could not find the WSL path when the truth was that the harness had no temp directory.
 # Both halves are needed -- the variable alone gives "Invalid name" if the directory is absent.
-# `wineserver -k` IS LOAD-BEARING, not hygiene. wine keeps the registry in the wineserver
-# process and only writes it to disk when that server exits, so a regedit import in one build
-# step is simply lost when the layer commits -- the import appeared to work, and TEMP was still
-# empty in the next step. Killing the server forces the flush, and the check on the last line
-# then reads it back from disk the way a test run will.
+# THE WAIT IS LOAD-BEARING, not hygiene. wine keeps the registry in the wineserver process and
+# writes user.reg on the way out (close_socket_timeout), so a regedit import in one build step is
+# simply lost when the layer commits -- the import appeared to work, and TEMP was still empty in
+# the next step. `wineserver -w` blocks on the lock the server holds for its whole lifetime, so it
+# returns strictly AFTER that write and the grep below reads the file back the way a test run
+# will. NOT `-k` and NOT a `sleep`, which are both #126: `-k` exits 1 once the server has already
+# gone -- on Ubuntu the idle timeout is patched to 0, so that is the normal case by the time the
+# shell can exec it -- and escalates to a SIGKILL no flush survives. The `sleep 1` it stood beside
+# was not merely load-sensitive, it was UNDERSIZED: the flush lands about 1.5 s after regedit
+# exits, so 20 imports in a row lost 12 of them on an idle machine, and 0 with the wait (measured
+# 2026-09-03). `timeout` bounds the wait because nothing else does: fixture_build's `podman build`
+# is the one podman call in the suite with no watchdog.
 RUN mkdir -p /home/ubuntu/.wine/drive_c/users/ubuntu/Temp \
  && wine64 regedit /S /tmp/win-fakes/wine-temp.reg >/dev/null 2>&1 \
- && wineserver -k 2>/dev/null; sleep 1 \
- && test -d /home/ubuntu/.wine/drive_c/users/ubuntu/Temp \
+ && timeout 30 wineserver -w \
  && grep -q 'users..ubuntu..Temp' /home/ubuntu/.wine/user.reg
 
 WORKDIR /work
