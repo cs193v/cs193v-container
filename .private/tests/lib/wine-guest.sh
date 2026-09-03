@@ -14,7 +14,6 @@ set -u
 
 CASE=/tmp/case
 DL="$CASE/${SB_DL:-Downloads}"
-CMDFILE="$DL/install-cs193v-windows.cmd"
 
 hr() { printf '%s\n' '---------------------------------------------------------------'; }
 
