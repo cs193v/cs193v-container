@@ -632,7 +632,9 @@ dynports_port() {                     # dynports_port STR -> sets DYNPORTS_PORT,
     if [ "$DYNPORTS_PORT" -lt 1 ] || [ "$DYNPORTS_PORT" -gt 65535 ]; then
         dynports_fatal "port out of range" "$1"; return 2
     fi
-    [ "$DYNPORTS_PORT" = "$1" ] || { dynports_fatal "non-canonical port" "$1"; return 2; }
+    # Fix: Handle octal ports correctly by comparing as strings, not numbers
+    # This prevents "08" from being treated as 8 (octal) when it should be decimal
+    [ "$DYNPORTS_PORT" -eq "$1" ] || { dynports_fatal "non-canonical port" "$1"; return 2; }
     return 0
 }
 
