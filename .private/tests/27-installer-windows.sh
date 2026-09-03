@@ -467,18 +467,42 @@ for dir in "Downloads" "My Downloads" "Down!loads" "Down&loads" "cs193v (1)" "a(
 done
 
 # ─── the reboot arm, and the two calls whose codes used to be ignored ─────────
+#
+# "NO WSL" IS A FAILING --status, NOT A MISSING BINARY, and that distinction arrived with issue
+# #125. This case used to set `where.wsl.exe 0` while leaving the fake wsl.exe in place, which is a
+# machine that cannot exist: `where` reported no wsl.exe and then wsl.exe ran fine. On a real box
+# the optional component being disabled leaves System32\wsl.exe present -- it is the OS component
+# -- and it is `--status` that fails. That is the machine the restart arm is for, so that is what
+# this arranges. A genuinely absent System32\wsl.exe is the next case, and it is a different thing.
 wine_new
 wine_list
-wine_hide_wsl                          # no wsl.exe in System32 at all
+wine_knob wsl.status.rc -1             # WSL present but not usable: the optional component is off
 wine_run
 assert_eq   "win-nowsl:exits-zero-because-nothing-failed" "0" "$WINE_RC"
 assert_says "win-nowsl:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
 assert_says "win-nowsl:tells-them-to-rerun"       "run this same file again" "$WINE_OUT"
 
+# ...AND A MACHINE WITH NO System32\wsl.exe AT ALL, which `if exist` is what now detects. Microsoft
+# treats that state as unrepairable by anything short of an in-place upgrade -- `where wsl` returns
+# nothing, DISM and SFC will not restore it -- so telling the student to restart would be advice
+# that cannot work. The installer reaches :installwsl, cannot run `wsl --update` either, and
+# refuses. Asserted because the refusal is the CORRECT answer here and a restart is not.
+wine_new
+wine_list
+wine_hide_wsl
+wine_run
+assert_ne   "win-nowslexe:does-not-exit-zero"     "0" "$WINE_RC"
+assert_says "win-nowslexe:admits-what-failed"     "Could not update WSL" "$WINE_OUT"
+assert_says "win-nowslexe:asks-for-the-whole-window" "send course staff this whole window" "$WINE_OUT"
+assert_says_not "win-nowslexe:does-not-promise-a-restart-will-help" "RESTART YOUR COMPUTER" "$WINE_OUT"
+
+# The two calls whose exit codes used to be ignored. wsl.exe must EXIST for either knob to be the
+# thing under test -- with the binary gone, `--update` fails at 9009 whatever the knob says, and
+# the case would pass while measuring nothing.
 for knob in wsl.update.rc wsl.feature.rc; do
     wine_new
     wine_list
-    wine_hide_wsl
+    wine_knob wsl.status.rc -1
     wine_knob "$knob" -1
     wine_run
     assert_ne "win-$knob:does-not-exit-zero"      "0" "$WINE_RC"
