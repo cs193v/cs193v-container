@@ -1,13 +1,19 @@
 /* Shared plumbing for the Windows-side fakes.
  *
- * WHY FOUR PROGRAMS AND NOT ONE. wsl.exe, net.exe, where.exe and powershell.exe have genuinely
- * different observable contracts: wsl emits UTF-16LE by default, routes its ERRORS TO STDOUT and
- * fails with -1; where splits stdout/stderr and uses 0/1; net has three codes with distinct
- * text; powershell derives its code from $? and collapses native codes to 1. Multiplexing those
- * on argv[0] would make encoding, stream routing and exit convention all conditional on a
- * string, leaving one fake structurally ABLE to apply wsl's -1 convention to where -- the
- * opposite of what lib/sudo-fake buys by having no exec branch at all. So: one source per tool,
- * and only the mechanism below is shared.
+ * WHY ONE PROGRAM PER TOOL AND NOT ONE FOR ALL OF THEM. wsl.exe, net.exe and powershell.exe have
+ * genuinely different observable contracts: wsl emits UTF-16LE by default, routes its ERRORS TO
+ * STDOUT and fails with -1; net has three codes with distinct text; powershell derives its code
+ * from $? and collapses native codes to 1. Multiplexing those on argv[0] would make encoding,
+ * stream routing and exit convention all conditional on a string, leaving one fake structurally
+ * ABLE to apply wsl's -1 convention to another tool -- the opposite of what lib/sudo-fake buys by
+ * having no exec branch at all. So: one source per tool, and only the mechanism below is shared.
+ * hostile.exe obeys the same rule for the same reason, even though it stands in for a program the
+ * installer must never reach.
+ *
+ * where.exe USED TO BE HERE and is retired with issue #125. The installer asks
+ * `if not exist "%SYS32%\wsl.exe"` now, because where.exe searches the current directory itself --
+ * so its ANSWER was plantable even once the calls were qualified -- and it was answering a
+ * question about %PATH% rather than about the file the qualified calls use.
  *
  * NO PROSE LIVES IN THESE PROGRAMS. Every student-visible string is looked up by key from
  * fixtures/wsl-messages.<version>, so the provenance of each one stays auditable and a WSL

@@ -469,7 +469,7 @@ done
 # ─── the reboot arm, and the two calls whose codes used to be ignored ─────────
 wine_new
 wine_list
-wine_knob where.wsl.exe 0              # no wsl.exe on PATH at all
+wine_hide_wsl                          # no wsl.exe in System32 at all
 wine_run
 assert_eq   "win-nowsl:exits-zero-because-nothing-failed" "0" "$WINE_RC"
 assert_says "win-nowsl:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
@@ -478,12 +478,48 @@ assert_says "win-nowsl:tells-them-to-rerun"       "run this same file again" "$W
 for knob in wsl.update.rc wsl.feature.rc; do
     wine_new
     wine_list
-    wine_knob where.wsl.exe 0
+    wine_hide_wsl
     wine_knob "$knob" -1
     wine_run
     assert_ne "win-$knob:does-not-exit-zero"      "0" "$WINE_RC"
     assert_says_not "win-$knob:does-not-tell-them-to-restart" "RESTART YOUR COMPUTER" "$WINE_OUT"
 done
+
+# ─── CLASS: a download folder that already holds hostile executables ──────────
+#
+# ISSUE #125, and the only case in this file that asserts a security property by EXECUTING rather
+# than by reading the source. The installer runs elevated with the download folder as its working
+# directory, and cmd.exe searches that directory BEFORE %PATH% -- so a wsl.exe, reg.exe, where.exe
+# or powershell.exe already sitting in Downloads was what ran, with Administrator rights. Downloads
+# is the likeliest place on a real machine for an untrusted file to already be, and wsl.exe had
+# twelve call sites, one of them the handoff to stage two.
+#
+# IT WAS RED BEFORE THE FIX AND IS GREEN AFTER IT, which is the whole reason it exists rather than
+# leaving the property to 25-installer.sh's static rule. It also inverts what this harness used to
+# do: lib/wine.sh copied the fakes into this very folder and relied on being found first, so the
+# tier DEPENDED on the defect -- and once the calls were qualified it would have gone on reporting
+# green while executing none of the installer's real decisions.
+#
+# WHAT IT DOES NOT PROVE. wine is not Windows, and it appears to ignore
+# NoDefaultCurrentDirectoryInExePath -- which is precisely what makes this case worth having,
+# because it means the green below measures the QUALIFICATION and not that guard. Were it the other
+# way round the case could not go red at all. MANUAL.md carries the check on a real machine.
+wine_new
+wine_list CS193V
+wine_plant_hijack
+wine_run
+# THE NEGATIVE, which is the point of the case.
+assert_eq   "win-hijack:the-planted-binaries-never-run" "0" "$(wine_argv_count 'HIJACKED')"
+# ...AND THE POSITIVES THAT STOP IT PASSING VACUOUSLY. A count of zero is an ABSENCE, and a run
+# where the installer died on its first line -- or where the fakes were never found in system32 at
+# all -- produces exactly the same zero. So the same case asserts that the real programs DID run
+# and that the install went all the way through. Together those say the installer did its whole
+# job while never reaching any of the planted copies; either one alone says much less.
+assert_ne   "win-hijack:the-real-programs-did-run"      "0" "$(wine_argv_count '^wsl\.exe ')"
+assert_eq   "win-hijack:exits-zero"                     "0" "$WINE_RC"
+assert_says "win-hijack:says-it-is-done"                "Done. From now on you work inside" "$WINE_OUT"
+assert_eq   "win-hijack:hands-off-to-bash-once"         "1" "$(wine_argv_count '\-e bash /tmp/install-cs193v.sh')"
+assert_says_not "win-hijack:no-unrecognised-command"    "recognize" "$WINE_OUT$WINE_ERR"
 
 # ─── decision coverage, reported rather than assumed ──────────────────────────
 #

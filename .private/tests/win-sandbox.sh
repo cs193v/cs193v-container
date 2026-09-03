@@ -48,8 +48,9 @@ usage() {
 Usage: tests/win-sandbox.sh [OPTIONS] [-- COMMAND]
 
   Puts you on a throwaway machine where install-cs193v-windows.cmd runs under wine, with
-  wsl.exe / net.exe / where.exe / powershell.exe / reg.exe faked. Type \`wincmd\` once you
-  are in for what you can do there.
+  wsl.exe / net.exe / powershell.exe / reg.exe faked, in the prefix's own System32 where
+  the installer's %SYS32% paths resolve. Type \`wincmd\` once you are in for what you can
+  do there.
 
   With NO OPTIONS everything works and the installer runs to "Done." The options below
   break one thing each.
@@ -61,7 +62,9 @@ WHAT THE MACHINE IS LIKE
                        to kill the block outright with "Syntax error: unexpected ("
   --no-curl            curl is not in the distro, so watch stage one install it
   --not-admin          the elevation probe says no
-  --no-wsl             no wsl.exe on PATH: the install-WSL-and-reboot arm
+  --no-wsl             no wsl.exe in System32: the install-WSL-and-reboot arm
+  --hijacked           the download folder already holds hostile copies of every program the
+                       installer calls; nothing should ever reach them
   --wsl-broken [RC]    wsl.exe is there but --status fails (default -1, which is what it
                        really returns -- and what \`if errorlevel 1\` could not see)
   --no-distro          nothing registered yet, so it creates the environment
@@ -181,7 +184,11 @@ while [ "$#" -gt 0 ]; do
                           setk wsl.curl.rc "$OPTVAL" ;;
         --truncated)      setk wsl.curl.truncated 1 ;;
         --not-admin)      setk reg.query.rc 1 ;;
-        --no-wsl)         setk where.wsl.exe 0; DISTROS='' ;;
+        --no-wsl)         setk harness.no-wsl-exe 1; DISTROS='' ;;
+        # The download folder already holds hostile copies of every program the installer calls.
+        # On the unfixed installer they ran, elevated, because cmd.exe searches the current
+        # directory before %PATH% (issue #125). Expect `wincmd log` to show no HIJACKED line.
+        --hijacked)       setk harness.plant-hijack 1 ;;
         --wsl-broken)     optval -1 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
                           setk wsl.status.rc "$OPTVAL"
                           setk wsl.status.msg MessageWslOptionalComponentRequired ;;
