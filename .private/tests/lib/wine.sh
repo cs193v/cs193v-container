@@ -58,6 +58,29 @@ wine_list() {                         # wine_list [DISTRO...]
     for d in "$@"; do printf '%s\n' "$d" >> "$WINE_CASE/wsl.list"; done
 }
 
+# ─── arranging a hostile download folder ──────────────────────────────────────
+#
+# Plant a copy of hostile.exe under every name the installer calls, in the folder the .cmd sits in.
+# That is the shape issue #125 reports: the installer runs elevated with the download folder as its
+# working directory, so anything already sitting there is a candidate for execution -- and
+# Downloads is the likeliest place on a real machine for an untrusted file to already be.
+#
+# THESE ARE HARNESS ARRANGEMENTS, NOT FAKE KNOBS, and the `harness.` prefix says so. A knob
+# configures how a program the installer means to call ANSWERS; these two change what exists on the
+# machine before it starts, which no fake can express.
+wine_plant_hijack() {                 # wine_plant_hijack
+    : > "$WINE_CASE/harness.plant-hijack"
+}
+
+# "WSL is not installed at all". The fixture bakes system32\wsl.exe, and the installer asks
+# `if not exist "%SYS32%\wsl.exe"`, so removing that file is the honest way to arrange it. This
+# replaces the where.wsl.exe knob and fake-where.c, both retired: where.exe searched the current
+# directory itself -- so its ANSWER was plantable even once the calls were qualified -- and it was
+# answering a question about %PATH% that the installer no longer asks.
+wine_hide_wsl() {                     # wine_hide_wsl
+    : > "$WINE_CASE/harness.no-wsl-exe"
+}
+
 # ─── running it ────────────────────────────────────────────────────────────────
 wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ERR / WINE_RC / WINE_ARGV
     local raw="$WINE_CASE/.report"
@@ -77,11 +100,26 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
             set -u
             mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
             mkdir -p /tmp/case && cp -r /work/. /tmp/case/ && chmod -R u+w /tmp/case
-            # The fakes go in the SAME directory as the .cmd. cmd.exe searches the current
-            # directory before PATH -- on wine and on Windows alike -- so this shadows wine own
-            # net.exe and where.exe, which is not optional: wine `net session` answers with a
-            # usage banner and EXIT 0, i.e. it reports every user as an Administrator.
-            cp /home/ubuntu/shim/*.exe "/tmp/case/'"$WINE_DL_NAME"'/"
+            # THE FAKES ARE ALREADY IN system32, baked into the fixture, because the installer
+            # names %SYS32%\wsl.exe now. They used to be copied in HERE, beside the .cmd, and be
+            # found because cmd.exe searches the current directory before PATH -- so this harness
+            # depended on the very defect issue #125 reports, and qualifying the calls would have
+            # left the tier executing nothing while still reporting green. NOTHING is copied
+            # beside the .cmd any more, which is what makes the hijack case below mean something.
+            #
+            # "WSL IS NOT INSTALLED" IS NOW A MISSING FILE rather than a where.exe knob, because
+            # `if not exist "%SYS32%\wsl.exe"` is the question the installer actually asks.
+            if [ -f /tmp/case/harness.no-wsl-exe ]; then
+                rm -f /home/ubuntu/.wine/drive_c/windows/system32/wsl.exe
+            fi
+            # A HOSTILE COPY IN THE DOWNLOAD FOLDER, under every name the installer calls. On the
+            # unfixed installer each of these ran, as Administrator; on the fixed one nothing ever
+            # looks at them. hostile.exe is never in system32, so this is the only way it can run.
+            if [ -f /tmp/case/harness.plant-hijack ]; then
+                for n in wsl reg where powershell; do
+                    cp /home/ubuntu/shim/hostile.exe "/tmp/case/'"$WINE_DL_NAME"'/$n.exe"
+                done
+            fi
             # cd first and invoke by RELATIVE name. `wine64 cmd /c <path with ( or )>` fails with
             # "Can not recognize ... as an internal or external command" (WineHQ 37789), so a
             # case testing a download folder called "cs193v (1)" would fail in the HARNESS and

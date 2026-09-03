@@ -59,18 +59,27 @@ RUN command -v wineserver
 
 # THE FAKES, compiled here rather than at run time.
 #
-# They must be real PE executables and not batch shims for two measured reasons: the .cmd names
-# `wsl.exe` WITH the suffix (so a wsl.cmd is never found), and wine ships its own net.exe and
-# where.exe -- wine's `net session` answers with a usage banner and EXIT 0, i.e. it reports every
-# user as an Administrator. C:\shim therefore has to precede system32 on the Windows PATH, which
-# lib/wine.sh arranges.
+# They must be real PE executables and not batch shims for one measured reason: the .cmd names
+# `wsl.exe` WITH the suffix, so a wsl.cmd is never found.
+#
+# THEY ARE STAGED HERE AND INSTALLED INTO system32 FURTHER DOWN, not left for lib/wine.sh to drop
+# beside the .cmd. That is issue #125: the installer used to name every program without a path, so
+# a copy in the download folder was what cmd.exe found -- and this harness RELIED on exactly that
+# to be found itself. Now that the installer names %SYS32%\wsl.exe, the fakes have to live where
+# that resolves, or --tier windows tests nothing. Overwriting wine's own net.exe and where.exe on
+# the way is a bonus rather than the mechanism: wine's `net session` answers with a usage banner
+# and EXIT 0, i.e. it reports every user as an Administrator.
+#
+# hostile.exe IS DELIBERATELY NOT INSTALLED INTO system32. It is the planted binary for the case
+# that asserts a copy in the download folder never runs, so it must only ever appear where
+# lib/wine.sh puts it.
 #
 # The sources live under fixtures/ and not lib/ because fixture_build's build context IS the
 # fixtures directory; putting them in lib/ would put them outside it.
 COPY win-fakes/ /tmp/win-fakes/
 RUN mkdir -p /home/ubuntu/shim \
  && cd /tmp/win-fakes \
- && for f in wsl net where powershell reg; do \
+ && for f in wsl net powershell reg hostile; do \
       x86_64-w64-mingw32-gcc -O1 -Wall -Wextra -o "/home/ubuntu/shim/$f.exe" "fake-$f.c"; \
     done \
  && ls -1 /home/ubuntu/shim
@@ -115,5 +124,25 @@ RUN mkdir -p /home/ubuntu/.wine/drive_c/users/ubuntu/Temp \
  && wine64 regedit /S /tmp/win-fakes/wine-temp.reg >/dev/null 2>&1 \
  && timeout 30 wineserver -w \
  && grep -q 'users..ubuntu..Temp' /home/ubuntu/.wine/user.reg
+
+# THE FAKES GO WHERE %SYS32% RESOLVES, and this layer is LAST on purpose. Every wine invocation
+# above -- wineboot, the warm cmd, regedit -- runs against an untouched system32; doing this
+# earlier would mean wine's own tooling booting a prefix whose reg.exe had already been replaced by
+# a fake that answers one question and exit 120 to everything else.
+#
+# WindowsPowerShell\v1.0 DOES NOT EXIST IN A WINE PREFIX and has to be created, which is the one
+# piece of real-Windows layout the installer now depends on that wineboot does not provide.
+#
+# The `test -s` lines are the guard. A `cp` that silently landed nowhere would leave the whole
+# tier resolving to wine's own builtins, and since those answer plausibly rather than failing --
+# `net session` exits 0 for everyone -- the suite would go green having tested nothing.
+RUN sys32=/home/ubuntu/.wine/drive_c/windows/system32 \
+ && mkdir -p "$sys32/WindowsPowerShell/v1.0" \
+ && cp /home/ubuntu/shim/powershell.exe "$sys32/WindowsPowerShell/v1.0/powershell.exe" \
+ && for f in wsl net reg; do cp "/home/ubuntu/shim/$f.exe" "$sys32/$f.exe"; done \
+ && test -s "$sys32/wsl.exe" \
+ && test -s "$sys32/reg.exe" \
+ && test -s "$sys32/WindowsPowerShell/v1.0/powershell.exe" \
+ && test ! -e "$sys32/hostile.exe"
 
 WORKDIR /work

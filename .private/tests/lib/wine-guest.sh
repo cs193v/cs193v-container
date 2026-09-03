@@ -27,11 +27,18 @@ arrange() {
     [ -d "$CASE" ] && return 0
     mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
     mkdir -p "$CASE" && cp -r /work/. "$CASE/" && chmod -R u+w "$CASE"
-    # The fakes go in the SAME directory as the .cmd. cmd.exe searches the current directory
-    # before PATH -- on wine and on Windows alike -- and that is not a convenience: wine ships
-    # its own net.exe, which answers `net session` with a usage banner and EXIT 0, i.e. it
-    # reports every user as an Administrator. Being found first is the whole point.
-    cp /home/ubuntu/shim/*.exe "$DL/" 2>/dev/null || true
+    # The fakes are ALREADY in system32, baked into the fixture, because the installer names
+    # %SYS32%\wsl.exe now. They used to be copied in here, beside the .cmd, and found because
+    # cmd.exe searches the current directory before PATH -- see lib/wine.sh for why that had to
+    # stop, and for why nothing is dropped beside the .cmd any more (issue #125).
+    if [ -f "$CASE/harness.no-wsl-exe" ]; then
+        rm -f /home/ubuntu/.wine/drive_c/windows/system32/wsl.exe
+    fi
+    if [ -f "$CASE/harness.plant-hijack" ]; then
+        for n in wsl reg where powershell; do
+            cp /home/ubuntu/shim/hostile.exe "$DL/$n.exe"
+        done
+    fi
 }
 
 # What each fake will answer, read off the knobs rather than described from memory.
@@ -48,8 +55,10 @@ cmd_state() {
             || printf 'MISSING -- stage one will apt-get install it' )"
     printf '  elevated             %s\n' \
         "$( [ "$(knob reg.query.rc 0)" = 0 ] && printf 'yes' || printf "no  -- reg query exits $(knob reg.query.rc 0)" )"
-    printf '  wsl.exe on PATH      %s\n' \
-        "$( [ "$(knob where.wsl.exe 1)" = 0 ] && printf 'NO -- it will try to install WSL' || printf 'yes' )"
+    printf '  wsl.exe in System32  %s\n' \
+        "$( [ -f "$CASE/harness.no-wsl-exe" ] && printf 'NO -- it will try to install WSL' || printf 'yes' )"
+    printf '  planted binaries     %s\n' \
+        "$( [ -f "$CASE/harness.plant-hijack" ] && printf 'YES -- hostile.exe as wsl/reg/where/powershell.exe in the download folder' || printf 'none' )"
     printf '  wsl --status         exits %s%s\n' "$(knob wsl.status.rc 0)" \
         "$( [ "$(knob wsl.status.novirt 0)" = 0 ] && printf '' \
             || printf ', and PRINTS that virtualisation is off -- on stdout, still exiting 0' )"
@@ -129,7 +138,18 @@ cmd_knobs() {
 Everything you can change, by writing a file into /tmp/case
 ---------------------------------------------------------------
   reg.query.rc N          elevation probe exit code. 0 = Administrator
-  where.wsl.exe 0         make `where wsl.exe` fail, i.e. no WSL at all
+
+  harness.no-wsl-exe 1    delete system32\wsl.exe, i.e. no WSL at all. A FILE and not a knob:
+                          the installer asks `if not exist "%SYS32%\wsl.exe"`, so this is the
+                          same question it asks. Replaces the old where.wsl.exe knob, retired
+                          with fake-where.c -- `where` searched the current directory itself, so
+                          its answer was plantable, and it asked about %PATH% rather than about
+                          the file the qualified calls actually use
+  harness.plant-hijack 1  put hostile.exe in the download folder as wsl.exe, reg.exe, where.exe
+                          and powershell.exe. On the unfixed installer these RAN, elevated,
+                          because cmd.exe searches the current directory before %PATH% (issue
+                          #125). It logs HIJACKED to argv.log, so `wincmd log` shows whether any
+                          of them was reached
   wsl.status.rc N         `wsl --status`. Real failures are -1, NOT 1 --
                           which is the whole reason `if errorlevel 1` was wrong
   wsl.status.msg KEY      a message key from ./messages to print with it
