@@ -1106,3 +1106,81 @@ assert_eq "windows:hands-over-no-boot-configuration-command" "" \
 assert_eq "windows:never-enables-delayed-expansion" "" \
           "$(_cmdlint_commands "$W" \
              | awk -F'\t' 'tolower($4) ~ /enabledelayedexpansion|\/v:on/ { print "line " $2 ": " $4 }')"
+
+# ─── the current-directory hole, and the three lines that close it (issue #125) ───
+#
+# install-cs193v-windows.cmd runs elevated -- its own instructions are "right-click and Run as
+# administrator" -- so its working directory is the folder the student downloaded it into, normally
+# Downloads. cmd.exe resolves an unqualified program name against THAT DIRECTORY BEFORE %PATH%, so
+# a bare `wsl.exe` ran whatever copy was sitting there, with Administrator rights. Twelve call
+# sites, one of them the handoff to stage two. lib/cmdlint.sh's own header carries the measurement.
+#
+# QUALIFYING THE CALLS IS THE FIX; the other two lines are ADDITIVE. That distinction is the whole
+# reason each gets its own keeper. The environment variable protects only what FOLLOWS it and is
+# invisible at the eighteen call sites relying on it, so a reader who finds it must not conclude a
+# bare `wsl.exe` would now be safe, and a refactor that moves it must not quietly un-protect the
+# file. Deleting a `%SYS32%\` is a visible change at the line; deleting the `set` is not.
+assert_eq "windows:every-program-is-fully-qualified" "" \
+          "$(run_checker cmdlint_unqualified_programs "$W")"
+
+# The system directory must come FROM the system. A rule that only checks for the %SYS32%\ prefix
+# is satisfied by `set "SYS32=."`, which would pass every check above while pointing the whole file
+# back at the download folder. Matched anywhere in the command and not anchored, because the second
+# definition sits behind `if defined PROCESSOR_ARCHITEW6432` and an anchored pattern would see one.
+sys32_defs="$(_cmdlint_commands "$W" | awk -F'\t' 'tolower($4) ~ /set[ \t]*"?sys32=/ { print $4 }')"
+assert_eq "windows:the-system-directory-is-defined-twice" "2" \
+          "$(printf '%s\n' "$sys32_defs" | grep -c 'SYS32=' || true)"
+assert_eq "windows:the-system-directory-comes-from-the-system" "" \
+          "$(printf '%s\n' "$sys32_defs" | grep -vF -e '%SystemRoot%\System32' -e '%SystemRoot%\Sysnative' || true)"
+
+# 32-BIT HOSTS ARE WHY Sysnative is there, and it is not theoretical. Measured from the real
+# C:\Windows\SysWOW64\cmd.exe on Windows 11 26200: %SystemRoot%\System32\wsl.exe is MISSING there,
+# because WOW64 redirects System32 to SysWOW64 and wsl.exe exists only in the native one, while
+# %SystemRoot%\Sysnative\wsl.exe is found and launches. Without this arm the fix would not be
+# insecure, it would be broken -- which is a worse failure and a harder one to attribute.
+assert_eq "windows:a-32-bit-host-reaches-the-native-system-directory" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' 'tolower($4) ~ /sysnative/ { found = 1 }
+                           END { if (!found) print "no Sysnative arm: a 32-bit cmd.exe resolves %SystemRoot%\\System32 to SysWOW64, where wsl.exe does not exist" }')"
+
+# THE TWO ADDITIVE LINES, each pinned so it cannot be dropped silently. `cd /d` is the only one of
+# the three that also closes DLL planting: with SafeDllSearchMode on the current directory is
+# searched AFTER the system directories, so a DLL named like a system one cannot win -- but one that
+# is in no system directory can, and leaving Downloads is what removes that.
+assert_ne "windows:the-current-directory-search-is-off" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' '$1 == 0 && $4 ~ /NoDefaultCurrentDirectoryInExePath=1/ { print "line " $2 }')"
+assert_ne "windows:leaves-the-download-folder" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' '$1 == 0 && tolower($4) ~ /^[ \t]*cd[ \t]+\/d[ \t]+"?%systemroot%"?[ \t]*$/ { print "line " $2 }')"
+
+# ...AND THE GUARD MUST COME FIRST, which is the half of it that is genuinely load-bearing.
+# Measured in a real .cmd on Windows 11 26200: a bare exe invoked BEFORE the `set` still resolved
+# from the current directory, the same call after it did not, and clearing the variable re-enabled
+# the search. So cmd re-reads it per command in batch mode and ORDER is the whole contract -- note
+# that this is NOT true of `cmd /c "a & b"`, where the search path is fixed once for the line, which
+# is why the same measurement taken that way looks like the variable does nothing.
+# Both numbers must exist, so renaming either side goes red rather than quietly comparing nothing.
+guard_ln="$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /NoDefaultCurrentDirectoryInExePath=1/ { print $2; exit }')"
+firstext_ln="$(_cmdlint_commands "$W" \
+               | awk -F'\t' -v builtins="$CMDLINT_BUILTINS" '
+                 BEGIN { split(builtins, b, "|"); for (i in b) isb[b[i]] = 1 }
+                 { w = $3; sub(/\.exe$/, "", w); if (!isb[w]) { print $2; exit } }')"
+assert_ok "windows:the-guard-precedes-every-external-call" \
+          sh -c "test -n '$guard_ln' && test -n '$firstext_ln' && test '$guard_ln' -lt '$firstext_ln'"
+
+# ...AND THE RULE CAN GO RED, demonstrated per route rather than trusted. Same reason as the
+# boot-configuration rule above: this one now guards a property the file has EVERYWHERE, so a typo
+# in its regex would be indistinguishable from a clean file. THREE ROUTES, because the rule has two
+# halves and the third case is the only thing the second half exists for -- a program named inside a
+# string `set` builds and a later `powershell` call runs, where the first word is `set` and looking
+# at first words is structurally blind. The middle route is the one that matters most for `where`:
+# the PROGRAM is qualified and its ARGUMENT is the name actually being resolved.
+for route in 'wsl.exe --status' \
+             '"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "wsl.exe -l -q"' \
+             'set "P2=$env:WSL_UTF8=1; wsl.exe -l -q"'; do
+    violating="$TMP/unqualified-violation.cmd"
+    { sed 's/\r$//' "$W"; printf '%s\n' "$route"; } | sed 's/$/\r/' > "$violating"
+    assert_ne "windows:the-qualification-rule-catches-[$route]" "" \
+              "$(run_checker cmdlint_unqualified_programs "$violating")"
+done
