@@ -439,3 +439,104 @@ assert_eq "door:an-selinux-host-relabels-and-drops-the-label" "yes|,z" "$(sel_do
 # so a disagreement between them is what this pair exists to catch.
 assert_eq "door:selinux-installed-but-off-decides-neither" "|" "$(sel_door no)"
 assert_eq "door:no-selinuxenabled-at-all-decides-neither" "|" "$(sel_door absent)"
+
+# ─── a ceiling that fires says so, in the results file as well (#130) ──────────
+#
+# WHY THIS IS A UNIT TEST. The thing under test decides which of podman's exit statuses mean "a
+# ceiling killed this run", and the host decides which of them a real run produces -- so a
+# behavioural case can only ever exercise the one answer this machine happens to give. 26's
+# ceiling case drives the real pipeline and sees 255; the two backstop arms are reachable there
+# only by breaking podman on purpose. These four calls exercise all of them on any machine, which
+# is the same argument the machine_flags block above makes.
+#
+# THE 137 ARM IS THE POINT. `timeout --kill-after` returns 137, not 124, whenever it has to
+# escalate to SIGKILL -- `timeout --help` says so, and measured against a real attached podman
+# that is what the outer backstop ALWAYS returns, because podman does not exit on TERM while it is
+# attached. So sandbox_run's original 124 arm was dead in exactly the case its comment said it
+# existed for, and the container it was supposed to force-remove was left running.
+#
+# ITS OWN RESULTS FILE, the same trick the assert_fail and record blocks above use: the call being
+# tested is one whose whole job is to FAIL, so it has to fail somewhere this suite is not counting.
+cat > "$WORK/ceil.sh" <<'CHILD'
+set -u
+. "$1"
+# shellcheck source=lib/sandbox.sh
+. "$2"
+sb_ceiling_note ceil "$4" 900 1000 cs193v-fixture-ceiling "$3"
+printf 'RETURNED=%s\n' "$?"
+CHILD
+
+# A PARTIAL TRANSCRIPT TO APPEND TO, not an empty file: the marker is added to a run that printed
+# something before it was killed, and `>` instead of `>>` would throw away the very output the
+# marker exists to explain. Asserted below rather than trusted.
+ceil_run() {                          # ceil_run RC -> RETURNED=n, and fills $WORK/ceil.{txt,tsv,podman}
+    rm -rf "$WORK/ceilbin"; mkdir -p "$WORK/ceilbin"
+    # THE DOOR IS FORCED: sb_ceiling_note's 124|137 arm removes the container by name, and a unit
+    # test must see that call without a podman anywhere near it. A stub first on PATH logs the
+    # arguments; its own output is discarded by the caller, so the log is the only witness.
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$WORK/ceil.podman" > "$WORK/ceilbin/podman"
+    chmod +x "$WORK/ceilbin/podman"
+    printf 'STEP 3/25: RUN apt-get update\n' > "$WORK/ceil.txt"
+    : > "$WORK/ceil.tsv"; : > "$WORK/ceil.podman"
+    ( PATH="$WORK/ceilbin:$PATH"; export PATH
+      CS193V_RESULTS="$WORK/ceil.tsv" CS193V_SUITE=ceil \
+          bash "$WORK/ceil.sh" "$TESTS_DIR/lib/assert.sh" "$TESTS_DIR/lib/sandbox.sh" \
+               "$WORK/ceil.txt" "$1" 2>/dev/null )
+}
+ceil_said() {                         # ceil_said -> the transcript, one line
+    tr '\n' ' ' < "$WORK/ceil.txt" | sed 's/ *$//'
+}
+ceil_results() {                      # ceil_results -> "STATUS name" per result
+    awk -F'\t' '{ print $1, $3 }' "$WORK/ceil.tsv" | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# ─── rc 0: nothing happened, and nothing is said about it ──────────────────────
+# THE ARM THAT MUST STAY SILENT. Every sandbox_run in the suite passes through here, so an
+# announcement on a healthy run would put a result on every one of them -- and a `podman rm -f`
+# would destroy the container `podman diff` is about to read.
+assert_eq "ceiling:a-run-that-finished-returns-0"        "RETURNED=0" "$(ceil_run 0)"
+assert_eq "ceiling:a-run-that-finished-says-nothing"     "STEP 3/25: RUN apt-get update" "$(ceil_said)"
+assert_eq "ceiling:a-run-that-finished-records-nothing"  "" "$(ceil_results)"
+assert_eq "ceiling:a-run-that-finished-touches-no-container" "" "$(cat "$WORK/ceil.podman")"
+
+# ─── rc 255: podman's own --timeout, which is the one a real hang produces ─────
+assert_eq "ceiling:podmans-own-ceiling-returns-1" "RETURNED=1" "$(ceil_run 255)"
+assert_says "ceiling:podmans-own-ceiling-names-itself" \
+            "===SANDBOX-TIMEOUT=== podman killed the container at its 900s ceiling" "$(ceil_said)"
+# APPENDED, not written over: the output the run managed before it died is the diagnosis.
+assert_says "ceiling:podmans-own-ceiling-keeps-what-the-run-printed" \
+            "STEP 3/25: RUN apt-get update" "$(ceil_said)"
+# THE HALF A TRANSCRIPT MARKER CANNOT REACH (#130). _detail goes to stdout only, and half the
+# assertions downstream read sb_section rather than the transcript -- so the results file is the
+# only place a reader is guaranteed to see this.
+assert_eq "ceiling:podmans-own-ceiling-is-a-named-result" \
+          "FAIL ceil:the-run-stayed-inside-its-ceiling" "$(ceil_results)"
+# NOT REMOVED HERE. sandbox_run is deliberately not --rm so `podman diff` can read the container;
+# conmon has already stopped it, and sandbox_reap collects it.
+assert_eq "ceiling:podmans-own-ceiling-leaves-the-container-for-diff" "" "$(cat "$WORK/ceil.podman")"
+
+# ─── rc 124: the outer backstop, where no container ever existed ───────────────
+# Measured: a podman that hangs BEFORE the container exists -- a stalled pull, a storage lock --
+# dies on the backstop's TERM and returns 124. There is nothing to remove, and asking costs
+# nothing, so both backstop arms are spelt the same way.
+assert_eq "ceiling:the-outer-backstop-returns-1" "RETURNED=1" "$(ceil_run 124)"
+assert_says "ceiling:the-outer-backstop-names-itself-and-its-rc" \
+            "===SANDBOX-TIMEOUT=== the OUTER backstop fired at 1000s (rc 124)" "$(ceil_said)"
+assert_eq "ceiling:the-outer-backstop-is-a-named-result" \
+          "FAIL ceil:the-run-stayed-inside-its-ceiling" "$(ceil_results)"
+assert_eq "ceiling:the-outer-backstop-removes-the-container-by-name" \
+          "rm -f cs193v-fixture-ceiling" "$(cat "$WORK/ceil.podman")"
+
+# ─── rc 137: the SAME backstop, escalated to SIGKILL -- and what it really returns ──
+# THIS IS THE ARM THAT WAS MISSING, from nest_build and from sandbox_run alike. Measured against a
+# real attached podman: the backstop's TERM is forwarded to the container's process instead of
+# ending podman, --kill-after then escalates, and `timeout` reports 137 (128+9) rather than 124.
+# The container survives its dead podman -- conmon keeps it -- so this is the arm where the
+# removal is not a formality but the whole reason the arm exists.
+assert_eq "ceiling:a-SIGKILLed-backstop-returns-1" "RETURNED=1" "$(ceil_run 137)"
+assert_says "ceiling:a-SIGKILLed-backstop-names-itself-and-its-rc" \
+            "===SANDBOX-TIMEOUT=== the OUTER backstop fired at 1000s (rc 137)" "$(ceil_said)"
+assert_eq "ceiling:a-SIGKILLed-backstop-is-a-named-result" \
+          "FAIL ceil:the-run-stayed-inside-its-ceiling" "$(ceil_results)"
+assert_eq "ceiling:a-SIGKILLed-backstop-removes-the-abandoned-container" \
+          "rm -f cs193v-fixture-ceiling" "$(cat "$WORK/ceil.podman")"

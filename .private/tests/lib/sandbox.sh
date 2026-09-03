@@ -719,6 +719,34 @@ sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its t
     return 0
 }
 
+# An installer that never finishes, so the ceiling machinery can be exercised for the price of a
+# container start rather than the price of a 25-step build (#130).
+#
+# WHY A FIXTURE INSTALLER RATHER THAN A FIXTURE GUEST. nest_build's entry command is fixed --
+# `sh /work/nest-run.sh` -- and the one thing a case may substitute is which installer that script
+# runs. So the hang goes where the case already has a hook, and everything before it is the real
+# path: the real arrange, the real report scaffolding, the real pipeline and the real ceiling.
+#
+# IT PRINTS BEFORE IT SLEEPS, and that is the half the marker exists to preserve. A killed run's
+# value is whatever it managed to say first, so the case can assert that the marker was APPENDED
+# to a partial transcript rather than written over it.
+#
+# AND IT READS A KEYSTROKE FIRST, which is not decoration. nest_build's keys are argument 3 now
+# that the label is argument 1, and an off-by-one there does not fail -- it feeds the installer
+# nothing, menu()'s `read` waits on a pty that never delivers EOF (ERRORS.md B13), and the run
+# burns its whole ceiling looking exactly like the hang this file is about. `read -rsn1` is what
+# menu() itself uses, and nest-run.sh runs the installer under bash, so this reads the real path.
+sb_work_hang() {                      # -> $SB_WORK/installer-hang.sh
+    [ -f "$SB_WORK/installer-hang.sh" ] && return 0
+    cat > "$SB_WORK/installer-hang.sh" <<'HANG'
+printf 'pretending to build the course image\n'
+read -rsn1 k || true
+printf 'keystroke=[%s]\n' "$k"
+sleep 3600
+HANG
+    return 0
+}
+
 # ─── the nested case's prerequisites, measured before anything rests on them ────
 #
 # THE GRAPH ROOT IS NOT ON A VOLUME, and that is a measured decision rather than the one this
@@ -802,6 +830,76 @@ nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask rem
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
 }
 
+# ─── what a ceiling says when it fires, in ONE place (#130) ────────────────────
+#
+# A TIMEOUT HAS TO ANNOUNCE ITSELF, and this is the whole of that. Piping podman straight into
+# strip_ansi threw away its exit status, so a container killed at the ceiling produced a
+# transcript truncated at the hang and every assertion then failed with "expected X, flattened
+# output:" -- which says the installer did not print something, not that it never ran. Measured:
+# a run where three cases each burned the ceiling looked like three unrelated content failures.
+#
+# ONE PLACE, FOR THE REASON 10-static.sh:349 GIVES ABOUT THE FIXTURE FLAGS. sandbox_run grew this
+# and nest_build never got it, so the expensive half of the suite -- a 25-step course build,
+# 6.2 GB of inner store, several minutes -- was the half that explained itself least. Two copies
+# of a classifier is how that happens, so there is one.
+#
+# THE RESULTS FILE, NOT ONLY THE TRANSCRIPT, and that is what #130 is actually about. _detail goes
+# to stdout only, and half the assertions downstream read `sb_section "$out" NAME` rather than the
+# transcript -- so on a killed run they compare "yes" against an empty string and the marker they
+# would have carried is nowhere near them. A named result reaches run-tests.sh's FAILURES block.
+#
+# ON STDERR, because every call site is `out="$(sandbox_run ...)"`. A `fail` on stdout is captured
+# into the transcript instead of printed, which is where sandbox_run's `record` line has been going
+# all along; fd 2 is untouched by the substitution, so the line lands on the terminal in place AND
+# the transcript stays exactly what the container said.
+#
+# FAILURE-ONLY, no paired pass. This is a harness self-check, like the two above it in
+# sandbox_run, and a `pass` here would put a green line on every one of the suite's twenty-odd
+# sandbox_run calls for a condition that essentially never fires.
+#
+# ─── WHY THE ARMS ARE SPELT 124|137, WHICH IS NOT OBVIOUS AND WAS WRONG HERE ────
+#
+# `timeout --kill-after` returns 137, NOT 124, whenever it has to escalate to SIGKILL. That is
+# documented -- `timeout --help` lists "137 if COMMAND (or timeout itself) is sent the KILL (9)
+# signal" -- and against an ATTACHED podman it is what the outer backstop always returns, because
+# podman does not exit on TERM while attached: --sig-proxy forwards it to the container's process
+# instead. Measured, with a real container and a 5 s backstop:
+#
+#   container process ignores TERM      -> rc 137, container left `Up`
+#   container process would die on TERM -> rc 137, container left `Up`  <-- the surprise
+#   podman hung BEFORE a container existed (a stalled pull, a storage lock) -> rc 124, no debris
+#
+# So the arm that was spelt 124 alone covered only the case with nothing to clean up, and the case
+# its own comment was written for -- "the odd case where one does exist and conmon's ceiling did
+# not fire" -- fell through silently and left the container running. conmon outlives its dead
+# podman, which is what keeps it alive. Both statuses mean the same thing to a reader, so they
+# share an arm, and the rc is printed rather than inferred.
+#
+# 255 IS PODMAN'S OWN --timeout, and it does NOT remove the container: conmon has already stopped
+# it, sandbox_run is deliberately not --rm so `podman diff` can read it, and sandbox_reap collects
+# it. A rm here would destroy the evidence the next assertion is about.
+sb_ceiling_note() {                   # sb_ceiling_note LABEL RC CAP OUTER NAME FILE -> 1 if a ceiling fired
+    case "$2" in
+        255) printf '\n===SANDBOX-TIMEOUT=== podman killed the container at its %ss ceiling\n' \
+                    "$3" >> "$6"
+             fail "$1:the-run-stayed-inside-its-ceiling" \
+                  "podman killed the container at its $3s ceiling, so the transcript stops where the run was killed" >&2
+             return 1 ;;
+        124|137)
+             # ASKED UNCONDITIONALLY, both statuses alike. On 137 the container is live and this is
+             # the only thing that ends it; on 124 there is nothing to remove and asking costs a
+             # process. A ceiling that creates debris is a bad ceiling, and this is where it can.
+             podman rm -f "$5" >/dev/null 2>&1 || true
+             printf '\n===SANDBOX-TIMEOUT=== the OUTER backstop fired at %ss (rc %s) and podman did not\n' \
+                    "$4" "$2" >> "$6"
+             printf 'honour its own ceiling; any container it left was force-removed here\n' >> "$6"
+             fail "$1:the-run-stayed-inside-its-ceiling" \
+                  "the outer backstop fired at $4s (rc $2); any container podman left was force-removed" >&2
+             return 1 ;;
+    esac
+    return 0
+}
+
 # The real thing: the installer end to end with a genuine `podman build` inside.
 #
 # NETWORK ON, unlike every other case here, and it has to be: the course image is assembled
@@ -832,26 +930,50 @@ nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask rem
 # run strictly in sequence, each one reaped before the next begins, and `podman rm -f` at the top
 # collects a previous one either way. A per-base name would only matter if two ran at once, and
 # two of these at once would not fit on the disk.
-nest_build() {                        # nest_build [PREREQS] [KEYS] [BASE] [INSTALLER] -> transcript
-    local name="cs193v-fixture-nested-$$" base="${3:-machine}" inst="${4:-/work/installer.sh}"
+# A LABEL, LIKE sandbox_run'S, and it is here because the ceiling has to be able to name itself.
+# Four call sites, one per block, each spelt as that block's assertion prefix -- so a killed build
+# reads as `nest:the-run-stayed-inside-its-ceiling` rather than as an anonymous harness complaint
+# next to eleven statements about install-cs193v.sh.
+#
+# THE CAP IS OVERRIDABLE, FOR THE TEST AND NOTHING ELSE. 26's ceiling case needs a ceiling it can
+# actually reach without assembling the course image, and the only alternative is a case that
+# costs 900 s to prove a printf. One knob drives both numbers, keeping today's 900/1000 relation
+# exactly, because the pair has to stay ordered: the inner ceiling is the one a real hang should
+# hit, and the outer only exists for a podman that will not honour it.
+nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE] [INSTALLER] -> transcript
+    local name="cs193v-fixture-nested-$$" base="${4:-machine}" inst="${5:-/work/installer.sh}"
+    local cap="${CS193V_NEST_CAP:-900}" outer rc
+    outer=$((cap + 100))
     machine_flags '' linux no "$base" || return 1
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
-    printf '%b' "${2:-}" | timeout --kill-after=30 1000 \
-        podman run --timeout 900 --label "$VT_LABEL" -it --name "$name" \
+    printf '%b' "${3:-}" | timeout --kill-after=30 "$outer" \
+        podman run --timeout "$cap" --label "$VT_LABEL" -it --name "$name" \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         --mount type=tmpfs,destination=/var/tmp/report \
         -e CS193V_DIR=/home/student/cs193v \
         -e BUILDAH_LAYERS=false \
-        -e "SB_NO_PREREQS=${1:-}" \
+        -e "SB_NO_PREREQS=${2:-}" \
         -e "SB_DISTRO=$(machine_distro "$base")" \
         -e "SB_INSTALLER=$inst" \
         -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" \
         sh /work/nest-run.sh > "$SB_TMP/nraw" 2>&1
+    # THE PIPELINE'S STATUS, READ IMMEDIATELY, and it is the whole of #130. `$?` after a pipeline
+    # is the LAST member's, which is `timeout` -- what we want. There is no `set -e` and no
+    # `pipefail` anywhere in the host-side tree, so the nonzero status neither aborts nor gets
+    # substituted from the `printf` on the left.
+    rc=$?
     grep -v 'The input device is not a TTY' "$SB_TMP/nraw" > "$SB_TMP/nraw.clean" 2>/dev/null || true
     mv -f "$SB_TMP/nraw.clean" "$SB_TMP/nraw" 2>/dev/null || true
+    # WRITTEN HERE TOO, so sandbox_rc means something after a nest_build. It used to return
+    # whatever the previous sandbox_run had left in the file -- a stale value that looked measured,
+    # which is the same shape as the SB_SPEC inheritance sandbox_run refuses below.
+    printf '%s' "$rc" > "$SB_TMP/last-rc"
+    # AFTER the TTY-warning filter, so the marker cannot be caught by it, and before the trace
+    # collector, so the transcript this returns is the one the marker is in.
+    sb_ceiling_note "$1" "$rc" "$cap" "$outer" "$name" "$SB_TMP/nraw"
     sb_collect_trace < "$SB_TMP/nraw"
     strip_ansi < "$SB_TMP/nraw"
 }
@@ -919,11 +1041,10 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     # grep and a continuation line does not satisfy it. That is deliberate on its part: the
     # label is what tells this container from a colleague's (#74), and a rule that had to
     # parse shell continuations would be a worse rule.
-    # A TIMEOUT HAS TO ANNOUNCE ITSELF. Piping podman straight into strip_ansi threw away its
-    # exit status, so a container killed at the ceiling produced an EMPTY transcript and every
-    # assertion then failed with "expected X, flattened output:" and nothing after it -- which
-    # says the installer did not print something, not that it never ran. Measured: a run where
-    # three cases each burned the ceiling looked like three unrelated content failures.
+    # A TIMEOUT HAS TO ANNOUNCE ITSELF, and sb_ceiling_note above does the announcing for this
+    # function and for nest_build alike -- including WHICH statuses count as a ceiling, which was
+    # wrong here until #130. What stays below is the part that is this function's own: how big the
+    # two ceilings are, and why there are two.
     #
     # PODMAN'S OWN --timeout IS THE CEILING, not the outer `timeout`, and that distinction is
     # the whole reason a hang here ran for 400 s instead of 60. Measured:
@@ -961,7 +1082,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     #     a killed run loses whatever `script` had buffered.
     #   * tracing. `bash -x` multiplies the cost of every command in a run that installs 31
     #     packages; measured at 15 s -> 61 s back when the case was smaller.
-    local cap=60 outer=120 cov="${CS193V_COVERAGE:-}"
+    local cap=60 outer=120 rc cov="${CS193V_COVERAGE:-}"
     [ "$SB_FAKE_PODMAN" = yes ] || { cap=300; outer=360; }
     if [ -n "$cov" ]; then cap=$((cap * 2)); outer=$((cap + 60)); fi
     # EVERY CASE IS TRACEABLE NOW, and the exclusion that used to live here is gone with its
@@ -1016,19 +1137,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     grep -v 'The input device is not a TTY' "$SB_TMP/raw" > "$SB_TMP/raw.clean" 2>/dev/null || true
     mv -f "$SB_TMP/raw.clean" "$SB_TMP/raw" 2>/dev/null || true
     printf '%s' "$rc" > "$SB_TMP/last-rc"
-    # 255 is podman's own --timeout firing; 124 is the outer backstop, which should never be
-    # reached and means a stray container may be left for the next sweep.
-    case "$rc" in
-        255) printf '\n===SANDBOX-TIMEOUT=== podman killed the container at its %ss ceiling\n' "$cap" \
-                 >> "$SB_TMP/raw" ;;
-        124) # The outer backstop fired, which means SIGKILL reached podman and abandoned the
-             # container. The name is known, so clean up rather than leaving it for the sweep:
-             # a ceiling that creates debris is a bad ceiling, and this is the one case where
-             # it can.
-             podman rm -f "$SB_NAME" >/dev/null 2>&1 || true
-             printf '\n===SANDBOX-TIMEOUT=== the OUTER backstop fired at %ss and podman did not\n' "$outer"  >> "$SB_TMP/raw"
-             printf 'honour its own ceiling; the container was force-removed here\n' >> "$SB_TMP/raw" ;;
-    esac
+    sb_ceiling_note "sb-$case" "$rc" "$cap" "$outer" "$SB_NAME" "$SB_TMP/raw"
     sb_collect_trace < "$SB_TMP/raw"
     strip_ansi < "$SB_TMP/raw"
 }
