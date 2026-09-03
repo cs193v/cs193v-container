@@ -26,6 +26,70 @@ record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)
 sb_work_init
 fixture_build machine || exit 1
 
+# ─── a ceiling that fires announces itself, on the real pipeline (#130) ────────
+#
+# WHAT THIS COSTS AND WHY IT IS NOT BEHIND A GATE. Every other case that drives nest_build is
+# gated behind CS193V_INSTALL_NESTED_BUILD because it assembles the 25-step course image -- 6.2 GB
+# of inner store and several minutes. This one substitutes an installer that prints and then
+# sleeps, so it costs a container start and the ceiling it is asserting about. That is the whole
+# point: the machinery that explains a killed build was covered by nothing at all, and a check
+# which only runs when somebody opts into a six-minute build is a check that runs when the build
+# is already the thing going wrong.
+#
+# THE CEILING IS LOWERED, NOT THE ONLY THING TESTED. 14-test-harness.sh drives sb_ceiling_note's
+# arms directly, because which rc a ceiling produces is the HOST's answer and a real run here can
+# only ever show one of them. What this case adds is the half a unit test cannot reach: that the
+# real pipeline's $? really is the ceiling's, through the pty, the printf on stdin and the
+# TTY-warning filter.
+#
+# ITS OWN RESULTS FILE AND ITS OWN STDERR. nest_build's whole job here is to FAIL, so the failure
+# has to land somewhere this suite is not counting -- and its screen line has to be caught rather
+# than printed, or a green run shows a red FAIL that appears in no summary.
+sb_work_hang || { fail "ceiling-live:the-hanging-installer-could-be-built" "sb_work_hang failed"; exit 1; }
+ceil_tsv="$SB_TMP/ceiling.tsv"; : > "$ceil_tsv"
+ceil_t0=$SECONDS
+ceil_out="$(CS193V_RESULTS="$ceil_tsv" CS193V_NEST_CAP=10 \
+            nest_build ceiling-live "" "7" machine /work/installer-hang.sh 2>"$SB_TMP/ceiling.err")"
+record "ceiling-live:seconds" "$((SECONDS - ceil_t0))"
+# THE POSITIVE TOKEN FIRST, and it is load-bearing rather than decorative. nest-run.sh arranges
+# the machine before it runs the installer, so a cap below what `sandbox arrange` costs would kill
+# the run before the installer existed -- and every assertion below would still pass, about a
+# ceiling that fired for the wrong reason. This is the installer's own first line.
+assert_says "ceiling-live:the-run-really-got-as-far-as-the-installer" \
+            "pretending to build the course image" "$ceil_out"
+# THE KEYSTROKE ARGUMENT, WHICH MOVED. It is argument 3 now that the label is argument 1, and
+# getting that wrong is silent: the installer is fed nothing, menu()'s `read` waits on a pty that
+# never delivers EOF, and the run burns its ceiling looking precisely like the hang this case is
+# about. The four gated call sites all pass keys and none of them can be run without a 6 GB build,
+# so this is where that argument is checked.
+assert_says "ceiling-live:the-keystrokes-reached-the-installer" "keystroke=[7]" "$ceil_out"
+# THE DEFECT ITSELF: $? was never read, so this was the previous sandbox_run's status or nothing.
+assert_eq   "ceiling-live:the-real-pipeline-reports-its-real-rc" "255" "$(sandbox_rc)"
+assert_says "ceiling-live:podman-killed-it-and-the-transcript-says-so" \
+            "===SANDBOX-TIMEOUT=== podman killed the container at its 10s ceiling" "$ceil_out"
+# APPENDED to what the run managed to print, not written over it -- asserted here as well as in
+# the unit cases, because this is the transcript that came through a real pty.
+assert_says "ceiling-live:the-marker-did-not-replace-the-transcript" \
+            "===INSTALLER-USED=== /work/installer-hang.sh" "$ceil_out"
+# THE HALF #130 IS ACTUALLY ABOUT: "nothing in the results says the container was killed". A
+# marker in a transcript reaches whoever reads the transcript to the end; this reaches the summary.
+assert_eq "ceiling-live:the-ceiling-is-a-named-result" \
+          "FAIL ceiling-live:the-run-stayed-inside-its-ceiling" \
+          "$(awk -F'\t' '{ print $1, $3 }' "$ceil_tsv" | tr '\n' ' ' | sed 's/ *$//')"
+assert_contains "ceiling-live:and-it-is-said-on-the-screen-too" \
+                "FAIL  ceiling-live:the-run-stayed-inside-its-ceiling" "$(cat "$SB_TMP/ceiling.err")"
+# NOTHING LEFT RUNNING. conmon stops the container at its own ceiling, so the 255 arm has nothing
+# to remove and deliberately removes nothing -- but "stopped" is the claim, and an audit of the
+# ceiling that did not check it would miss the leak the 137 arm exists for.
+# PAIRED, because "no container is running under that name" is exactly what a case that never
+# started one would report -- the vacuous pass lib/assert.sh hard-fails on elsewhere. The first
+# half says a container really was created; the second says it is not still going.
+assert_eq "ceiling-live:there-really-was-a-container" "$(sb_name)" \
+          "$(podman ps -a --filter "name=$(sb_name)" --format '{{.Names}}')"
+assert_eq "ceiling-live:and-it-is-not-still-running" "" \
+          "$(podman ps --filter "name=$(sb_name)" --format '{{.Names}}')"
+sandbox_reap
+
 # ─── apt really installing podman, with the network off ────────────────────────
 # THE MACHINE IS DESCRIBED, NOT NAMED, and that is the change this suite exists to make. What
 # this case is about is "podman and ssh are absent", so that is what it says -- rather than a
@@ -594,7 +658,7 @@ subuid_before="$(cksum < /etc/subuid)"
 # an answer, writes the args, and the launcher assembles the course image with it. Before this,
 # `no-podman` proved apt installs podman and `nested` proved the build works, and nothing joined
 # them -- so the one path every student actually takes was the one path nothing ran.
-out="$(nest_build podman,ssh "2")"
+out="$(nest_build nest podman,ssh "2")"
 assert_says "nest:the-machine-was-really-arranged" "prereqs=podman,ssh" "$(sb_section "$out" ARRANGED)"
 assert_says "nest:apt-really-put-podman-back" "install ok installed" "$(sb_section "$out" DPKG-PODMAN)"
 assert_says "nest:it-installed-before-it-built" "Installing podman uidmap openssh-client" "$out"
@@ -707,7 +771,7 @@ else
 osp_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 # THE REAL INSTALLER, unpatched, which is what makes this a regression check rather than a
 # measurement -- and is itself an assertion that 4.9.3 is admitted by the shipped floors.
-out="$(nest_build "" "" podman-old-nested)"
+out="$(nest_build oldest-supported "" "" podman-old-nested)"
 assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/installer.sh" \
             "$(sb_section "$out" INSTALLER-USED)"
 assert_says_not "oldest-supported:no-version-refusal-anywhere" "or newer" "$out"
@@ -745,7 +809,7 @@ record "oldest-supported:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/n
 # CHEAP, because it dies before building anything.
 sb_work_skew || { fail "floor-skew:the-skew-could-be-built" "sb_work_skew failed"; exit 1; }
 pass "floor-skew:the-skew-could-be-built"
-out="$(nest_build "" "" podman-old-nested /work/installer-skew.sh)"
+out="$(nest_build floor-skew "" "" podman-old-nested /work/installer-skew.sh)"
 assert_says "floor-skew:the-skewed-copy-is-what-ran" "installer-skew.sh" \
             "$(sb_section "$out" INSTALLER-USED)"
 assert_says "floor-skew:the-installer-accepted-4.9.3"   "podman 4.9.3" "$out"
@@ -879,7 +943,7 @@ if [ -z "$fe2e_free" ] || [ "$fe2e_free" -lt 15 ]; then
     skip "fedora-e2e:the-build" "only ${fe2e_free:-?}GB free; this build wants ~8GB and a margin"
 else
 fe2e_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
-out="$(nest_build podman "2" fedora-nested)"
+out="$(nest_build fedora-e2e podman "2" fedora-nested)"
 assert_says "fedora-e2e:the-machine-was-really-arranged" "prereqs=podman" "$(sb_section "$out" ARRANGED)"
 # THE CONSENT SHAPE, on the family where it differs: one item, and no "(and uidmap)".
 assert_says "fedora-e2e:asks-for-one-thing"   "permission for 1 thing" "$out"
