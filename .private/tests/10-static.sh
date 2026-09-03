@@ -1863,3 +1863,22 @@ assert_ok  "shellcheck:setup-git-tests" shellcheck --severity=warning \
 # The two fakes are /bin/sh, like lib/podman-fake, and are run as commands by the suites above.
 assert_ok  "shellcheck:setup-git-fakes" shellcheck --severity=warning \
                                         $PRIVATE/tests/lib/gh-fake $PRIVATE/tests/lib/git-fake
+# The Windows installer's suites, its linter and its wine harness. Not covered until issue #125
+# touched all four, which is exactly the gap lib/shared.sh:17-21 warns about: a file added under
+# lib/ without being NAMED somewhere is silently exempt from the rules it is supposed to obey.
+#
+# SC2034 for the same reason as setup-git-tests above, and it is worth being specific because the
+# exclusion is otherwise the kind that hides a dead variable. lib/wine.sh sets WINE_OUT, WINE_ERR,
+# WINE_RC, WINE_ARGV and WINE_DIED for its CALLER to read -- 27-installer-windows.sh reads them a
+# hundred times -- and SB_TMP is set by both drivers for lib/sandbox.sh's fixture_build to find.
+# All of that is invisible without -x, and -x cannot resolve a path built from $0.
+# Verified rather than assumed: the one genuinely dead variable this turned up, wine-guest.sh's
+# CMDFILE, was deleted instead of excluded.
+assert_ok  "shellcheck:windows-tests" shellcheck --severity=warning \
+                                      --exclude=SC1090,SC1091,SC2034 \
+                                      $PRIVATE/tests/lib/cmdlint.sh \
+                                      $PRIVATE/tests/lib/wine.sh \
+                                      $PRIVATE/tests/lib/wine-guest.sh \
+                                      $PRIVATE/tests/25-installer.sh \
+                                      $PRIVATE/tests/27-installer-windows.sh \
+                                      $PRIVATE/tests/win-sandbox.sh
