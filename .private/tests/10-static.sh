@@ -388,6 +388,61 @@ naming3="$(grep -Hn -- "$dv_head$dv_tail" $flagfiles \
 assert_eq "fixture-flags:only-one-place-names-dev-fuse" "1" \
           "$(printf '%s\n' "$naming3" | grep -c . )"
 
+# ─── and one place turns the SELinux label off, on the hosts that have one (#119) ──
+#
+# WHY THIS FLAG NEEDS A RULE MORE THAN THE OTHER THREE DO, and it is not because it is more
+# dangerous. It is because DELETING it is invisible on the machines this suite is usually
+# developed on. Take away SYS_ADMIN and every host fails the nested tier; take away
+# `label=disable` and only an SELinux host notices, because off SELinux the flag is not passed at
+# all and its absence changes nothing. So a behavioural test cannot defend it here, and
+# `selinux:launcher-bind-mounts-carry-the-relabel` above makes the identical argument for the
+# launcher's `,z`: reading the source asserts the rule on every platform.
+#
+# TWO DIRECTIONS, because both are silent failures. A SECOND copy is the drift these one-place
+# rules exist to stop. ZERO copies is the fix being reverted -- and on a Fedora host that reopens
+# #119's twelve red assertions, while on Ubuntu it reopens nothing and reddens nothing.
+# shellcheck disable=SC2086
+# ASSEMBLED TAIL-FIRST like its neighbours. $flagfiles cannot reach this file today (its glob is
+# 2[0-9]-*.sh), so this cannot match its own definition -- but the neighbours' comment records
+# three occasions when a rule here did, and the day the list widens is not the day to find out.
+ld_tail='=disable'; ld_head='label'
+naming6="$(grep -Hn -- "$ld_head$ld_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixture-flags:only-one-place-disables-the-label" "1" \
+          "$(printf '%s\n' "$naming6" | grep -c . )"
+assert_says "fixture-flags:and-that-place-is-machine_flags-too" 'lib/sandbox.sh' "$naming6"
+# ...and no OTHER file may name a --security-opt at all, which is the wider half: the unmask and
+# this flag are both spelled that way, and the next fixture privilege probably will be too. A
+# count would have to be bumped every time machine_flags legitimately grows one; this does not.
+# shellcheck disable=SC2086
+so_tail='-opt'; so_head='--security'
+naming7="$(grep -Hn -- "$so_head$so_tail" $flagfiles \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+if [ -n "$naming7" ]; then pass "fixture-flags:the-security-opts-were-found"
+else fail "fixture-flags:the-security-opts-were-found" "no --security-opt in $flagfiles -- did machine_flags change?"; fi
+assert_eq "fixture-flags:no-other-file-names-a-security-opt" "" \
+          "$(printf '%s\n' "$naming7" | grep -v 'lib/sandbox.sh' || true)"
+
+# ─── ...and Tier A is denied it, because nothing starts inside Tier A (#119) ────
+#
+# THE SCOPING THAT IS EASY TO GET WRONG, AND WAS. SB_BASE defaults to `machine`, which IS a nested
+# base, and five of 26-installer-sandbox.sh's sb_machine calls name no base at all -- so eight
+# Tier A cases run on a nested base and receive the whole nesting flag set. They start no container
+# inside (the installer dead-ends at write_local_args, or has no network), so they have no use for
+# the label being off, and one of them carries an exact-set `podman diff` audit that has no
+# business changing because of a flag it does not need.
+#
+# So sandbox_run appends the drop name, and this is the assertion that it still does. Stated as
+# the OLD spelling being gone AND the new one being present, because a half-applied edit -- the
+# drop name deleted, the four-argument call restored -- is exactly what this must catch, and only
+# the second half would notice.
+sr_deny='"${SB_NO_CAPS:+$SB_NO_CAPS,}label"'
+sr_bare='"$SB_NO_CAPS" "$SB_PLATFORM"'
+assert_eq "fixture-flags:tier-a-asks-for-the-label-to-be-dropped" "1" \
+          "$(grep -c -F -- "$sr_deny" "$PRIVATE/tests/lib/sandbox.sh" || true)"
+assert_eq "fixture-flags:and-no-longer-passes-the-bare-drop-list" "0" \
+          "$(grep -c -F -- "$sr_bare" "$PRIVATE/tests/lib/sandbox.sh" || true)"
+
 # ─── one place removes software from a fixture ─────────────────────────────────
 # The OTHER axis, and the more destructive one. --no-prereqs subtracts packages at boot, and the
 # suite's run.sh, the nested case's own script and the hand-driven tool all need it -- so all

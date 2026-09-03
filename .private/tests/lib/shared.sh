@@ -108,11 +108,39 @@ export CS193V_TRACE_FD
 # EVERY bind mount carries it, not only the ones that were seen to fail: 10-static.sh's
 # selinux:every-bind-mount-carries-the-label asserts that, because a mount written without it
 # fails only on SELinux hosts and only sometimes -- which is the shape of bug that gets committed.
-VT_MOUNT_Z=''
+# ─── ONE DOOR, TWO CONSUMERS (#119) ────────────────────────────────────────────
+#
+# The answer is hoisted into $VT_SELINUX because a SECOND thing now needs it: machine_flags turns
+# the SELinux label off for the fixtures that run a podman inside themselves, and that arm must be
+# decided the same way this mount label is. Two copies of one probe is this file's whole subject
+# -- and the failure would be the quiet kind, a machine where the mount is relabelled and the flag
+# is withheld, or the reverse.
+#
+# THE PROBE ITSELF IS UNCHANGED, deliberately, so no host's answer moves. A tri-state
+# (enforcing / permissive / none) was written and dropped: `getenforce` would answer it, and the
+# case that motivated it -- a machine that is enforcing but has no `selinuxenabled` -- DOES NOT
+# EXIST. Fedora's selinux-policy-targeted depends on policycoreutils, which depends on
+# libselinux-utils, which owns BOTH binaries; a host that can be enforcing has both or neither.
+# So the refinement bought precision in a dimension with no hosts in it.
+#
+# AND THE /sys/fs/selinux DOOR STAYS REJECTED, for the reason above -- with one measurement worth
+# recording against the day somebody re-proposes it. Inside a container that directory is not
+# merely visible, it is visible AND EMPTY: podman does not mount selinuxfs there unless
+# --security-opt label=nested is passed, which podman-run(1) states as "without nested, containers
+# view SELinux as disabled, even when it is enabled on the host". So the objection above is right
+# about the directory existing and the emptiness would in fact distinguish host from container.
+# It is still not worth having: it would make this door disagree with `selinuxenabled` on hosts
+# where the tool is absent, and switch on an unasked recursive host relabel there.
+VT_SELINUX=''
 if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
-    VT_MOUNT_Z=',z'
+    VT_SELINUX=yes
 fi
-export VT_MOUNT_Z
+VT_MOUNT_Z=''
+# AN `if`, NOT `&&`, so this file ENDS on the export and returns 0. `.` propagates the last
+# command's status, and a bare `[ -n "$VT_SELINUX" ] && ...` returns 1 off SELinux -- which is
+# every machine this suite is usually developed on, and would sink any caller under `set -e`.
+if [ -n "$VT_SELINUX" ]; then VT_MOUNT_Z=',z'; fi
+export VT_SELINUX VT_MOUNT_Z
 
 # ─── reading one function out of a script that cannot be sourced ───────────────
 #

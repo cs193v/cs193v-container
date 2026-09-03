@@ -554,11 +554,23 @@ So what a real Fedora box adds is exactly the kernel-level things, and there are
    inside a container that is reaped on the way out. There is nothing left for the image tier to
    inspect. So "is the image right?" has a thorough home — §A.2/§A.3 in `50-image.sh` — that has
    simply never been pointed at an image an installer made.
-3. **Do not expect `--tier install` to be informative there, and expect it may fail.** Those
-   fixtures nest podman inside podman, and `machine_flags` passes no
-   `--security-opt label=disable` — which every upstream nesting recipe passes on an SELinux host.
-   A failure there would be about our harness, not about the product, and `.private/README.md`
-   records that deliberately-unguarded gap. Judge Fedora by (1) and (2).
+3. **`--tier install` now runs there — this item was a prediction and it came true (issue #119).**
+   It used to say that the nested fixtures pass no `--security-opt label=disable`, that every
+   upstream nesting recipe does on an SELinux host, and that a failure there would be about our
+   harness rather than the product. That is exactly what happened: twelve assertions failed on
+   Fedora 44, eleven of them inside the two nested builds, and every one of them read as a
+   statement about `install-cs193v.sh`. `machine_flags` passes the flag now, on a host with
+   SELinux and to a base that nests, and the tier is green there.
+
+   Two things to know if you are the next person on a Fedora box. `nest:a-container-really-starts-inside`
+   is the assertion that answers "can this machine nest at all", and it costs seconds — if it is
+   red, the three build blocks report named skips carrying crun's own words rather than a dozen
+   reds about the installer. And `nest:without-the-label-off-nothing-starts-inside` is its
+   converse: it is the control that proves the flag is still load-bearing, and it **skips off
+   SELinux**, so on Ubuntu you will see it named as skipped rather than silently absent. If it ever
+   fails on an SELinux host, `container_t` has become sufficient and the flag should come out.
+   `.private/README.md` carries the measurement, the two narrower postures that were tried, and
+   what the flag costs.
 
 ### The macOS podman floor, and the `podman machine` nobody has exercised
 The podman floors diverged when the Linux one dropped to 4.9.0: `MIN_PODMAN_LINUX="4.9.0"` and
@@ -598,6 +610,21 @@ while the floor holds.
 `.private/tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose
 so it can run here.
 *Expect:* no `mapfile`, associative-array or `${x,,}` errors.
+
+### §1.4 — the install tier on a Mac, where the SELinux door asks the wrong kernel (issue #119)
+Predicted, not measured, and cheap to check if anyone runs `--tier install` on a Mac. Both
+`VT_SELINUX` in `lib/shared.sh` and the `label=disable` arm in `machine_flags` interrogate **the
+machine the suite runs on** — and on macOS that is Darwin, where `selinuxenabled` does not exist,
+so the flag is withheld. But the containers do not run on Darwin: they run in the `podman machine`
+VM, which is Fedora CoreOS and ships SELinux **enforcing**. So a Mac should reproduce #119's
+original failure exactly, with the door confidently reporting no SELinux to satisfy.
+
+*Expect:* `nest:a-container-really-starts-inside` red, carrying crun's
+``mount `proc` to `proc`: Permission denied``, and the three build blocks reporting named skips.
+If that is what happens, the door needs to ask the VM rather than the host on this platform, and
+`nest:lsm-label-applied` is the recorded value that shows which kernel answered. Nothing else in
+the suite is affected, because `VT_MOUNT_Z` is only wanted where a bind mount's host label matters
+and on macOS the mount comes out of the VM either way.
 *Automated on Linux:* the ban-list greps, plus a check that every empty-array expansion uses
 the `${arr[@]+...}` guard — which is a **bash 3.2-only** failure that no Linux run can
 surface (ERRORS.md A5). Running the suite on a Mac is what actually proves it.

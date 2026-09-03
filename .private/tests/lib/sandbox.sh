@@ -70,7 +70,10 @@ MACHINE_CAP_NAMES='sysadmin'
 # constants of every machine. They stay reachable here, and only here, because the nested
 # preflight's differential controls need them to prove the HARNESS requires them -- a claim
 # about the harness, which is why it is not on the flag surface.
-MACHINE_CAP_INTERNAL='unmask fuse tun'
+#   * label -- the SELinux type the fixture runs under. Only ever passed on a host that HAS
+#     SELinux, and then only to a base that runs a podman inside itself; see the arm in
+#     machine_flags for the measurement and for the two narrower postures that were tried first.
+MACHINE_CAP_INTERNAL='unmask fuse tun label'
 # Subtracted at boot by lib/sandbox-guest.sh, which is where the removal commands live.
 MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
 
@@ -202,6 +205,62 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     case "$drop" in *,unmask,*)   : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt 'unmask=/proc/*') ;; esac
     case "$drop" in *,fuse,*)     : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/fuse) ;; esac
     case "$drop" in *,tun,*)      : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/net/tun) ;; esac
+    # ─── AND ON AN SELinux HOST, THE LABEL COMES OFF (#119) ────────────────────
+    #
+    # WHAT IT FIXES, which is BOTH of the two limits #119 reports as independent. They are one
+    # cause: the host's policy adjudicating what the OUTER fixture may do. Without this flag, on
+    # Fedora 44 / podman 5.8.4 / crun 1.28:
+    #
+    #   * crun cannot create a container for a RUN step -- `mount `proc` to `proc`: Permission
+    #     denied` -- so both nested builds die at STEP 3/25 of the course image, and
+    #   * /dev/net/tun is passed but cannot be stat()ed, so the inner network never comes up
+    #     (`Failed to set up tap device in namespace`, or on podman 4.9.3
+    #     `slirp4netns: open("/dev/net/tun"): Permission denied`).
+    #
+    # #119 concluded the second needed `setsebool -P container_use_devices 1` -- a root,
+    # machine-wide change. It does not: that boolean gates container_t, and this changes the type.
+    #
+    # NOT THE KERNEL, MEASURED: `--security-opt unmask=ALL` does not help, so this is not
+    # mount_too_revealing() refusing a procfs whose parent has hidden submounts.
+    #
+    # THE TWO NARROWER POSTURES THAT WERE TRIED, so they are not tried again:
+    #
+    #   label=type:container_engine_t   the type container-selinux ships FOR a container engine
+    #                                   inside a container. Gets past `mount proc` and is then
+    #                                   refused every masked sysfs path in turn -- `mount `tmpfs`
+    #                                   to `sys/firmware``, and with that unmasked, `sys/fs/selinux`
+    #                                   next. Nothing here can stop the INNER engine masking them:
+    #                                   containers.conf(5) has no key for masked paths, and those
+    #                                   runs are buildah's, inside the launcher's own podman build.
+    #   label=type:container_runtime_t  works -- because it transitions to spc_t. It KEEPS the MCS
+    #                                   categories, which reads like least privilege and is not:
+    #                                   a container at s0:c103,c851 read a file labelled
+    #                                   container_file_t:s0:c1,c2 that a properly-labelled
+    #                                   container_t container was denied. The categories are
+    #                                   decorative on spc_t, so this is label=disable wearing a
+    #                                   narrower name, which is worse than saying it plainly.
+    #
+    # WHAT IT COSTS, stated rather than apologised for. lib/sandbox.sh's header lists what makes
+    # these fixtures safe -- no host state inside, no podman socket, no writable mount,
+    # --network=none -- and SELinux is not on that list. The outer container is a clean room for
+    # system-wide changes, not the boundary: that is the user namespace (the fixture is uid 2,
+    # which lands on a subuid), DAC, and there being nothing mounted worth reading. Upstream's own
+    # podman-in-podman recipe passes this same flag.
+    #
+    # AND IT COSTS NO FIDELITY, which is the claim worth checking rather than assuming. The inner
+    # engine ALREADY sees SELinux as disabled -- /sys/fs/selinux is empty inside a container
+    # (podman-run(1) on label=nested) -- so the course container it builds gets no label either
+    # way. What these fixtures cannot test about the course container's own labelling, they could
+    # not test before this flag; MANUAL.md records it as a real-Fedora-machine item.
+    #
+    # THE BAN ELSEWHERE IS NOT THIS. 10-static.sh's container.args invariants and
+    # 60-container.sh's flag check both forbid label=disable for the COURSE container, one level
+    # in, where host isolation really is the user namespace's job and this would punch through it.
+    # Same distinction this function already relies on for unmask=/proc/* against container.args'
+    # ban on unmask=ALL: a fixture, one level out, naming one thing.
+    if [ -n "${VT_SELINUX:-}" ]; then
+    case "$drop" in *,label,*)    : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt label=disable) ;; esac
+    fi
     fi
     # A BIND MOUNT IS THE WHOLE WSL ARM. platform() decides by `grep -qi microsoft
     # /proc/version` (installer:306) and the effect is two file writes, so it is executable on
@@ -371,6 +430,15 @@ set -u
 # assertion that reads it must fail rather than see what it hoped for.
 echo "FIXTURE_ID=$(cat /etc/cs193v-fixture-id 2>/dev/null)"
 echo "ID=$(id -u):$(id -un)"
+# WHAT THE HOST'S LSM ACTUALLY APPLIED to this fixture, read from inside, which is the only place
+# it can be read: the probes are --rm and gone before anything host-side could inspect them.
+# NOT NAMED FOR SELinux, deliberately -- on the machine this suite is usually developed on this
+# file is AppArmor's (.config/container.args records the same distinction), so a token called
+# SELINUX_CTX would be reporting a different LSM under a name nobody would question.
+# DEFAULTED WITH ${x:-}, NOT `|| echo`: `tr` exits 0 on empty input, so a `|| echo none` arm can
+# never fire and the token would go out empty on a host with no label at all.
+pac="$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+echo "PROC_ATTR_CURRENT=${pac:-no-lsm-label}"
 echo "PODMAN_VERSION=$(podman --version 2>&1 | tail -1)"
 echo "SUBUID=$(cat /etc/subuid 2>/dev/null)"
 echo "INNER_USERNS=$(podman unshare readlink /proc/self/ns/user 2>&1 | tail -1)"
@@ -391,6 +459,68 @@ mkdir -p /tmp/l /tmp/u /tmp/w /tmp/m
 fuse-overlayfs -o lowerdir=/tmp/l,upperdir=/tmp/u,workdir=/tmp/w /tmp/m >/dev/null 2>&1
 echo "FUSE_MOUNT=$(findmnt -no FSTYPE /tmp/m 2>/dev/null || echo FAILED)"
 fusermount3 -u /tmp/m >/dev/null 2>&1 || true
+# ─── AND CAN A CONTAINER ACTUALLY START IN HERE? (#119) ─────────────────────────
+#
+# THE ONE THING THIS PROBE DID NOT DO, and the omission cost #119 twelve red assertions. Every
+# other token above is answered by `podman unshare` or `podman info`, and NEITHER CREATES A
+# CONTAINER -- so the first thing in the whole suite to ask crun for one was a 25-step build,
+# several minutes and 6 GB in. On a Fedora host that build dies at STEP 3/25 with
+#
+#     crun: mount `proc` to `proc`: Permission denied
+#
+# and eleven assertions about the installer fail because of it. This asks in the seconds tier.
+#
+# A HAND-BUILT ROOTFS, WHICH IS WHAT MAKES IT AFFORDABLE. Creating a container normally needs an
+# image, and there is none in here, so the obvious probe pulls one -- measured at 3 s per probe
+# invocation against a tier that costs about six seconds in total, and it puts the INTERNET on the
+# path of a preflight. `--rootfs` takes an exploded directory instead (podman-run(1)), and
+# /bin/true plus what ldd says it links against is three files and no network at all.
+#
+# WHAT IT COSTS, measured rather than asserted to be cheap: interleaved against the previous probe,
+# n=5, this adds 130 ms per invocation (527 ms -> 658 ms). There are nine invocations across the
+# tier, so about a second and a quarter, which is why this is on the default path of the
+# prerequisites gate rather than behind a variable of its own.
+#
+# NOT `--rootfs /`, WHICH CANNOT WORK -- measured, so it is not tried again. crun pivot_root()s
+# onto the rootfs it is given, and pivot_root onto the root you are already standing on is EINVAL:
+#
+#     crun: pivot_root: Invalid argument
+#
+# `--rootfs /:O` fails differently, inside the overlay driver, on all three nested bases. A copied
+# directory has neither problem.
+#
+# THE WHOLE crun PATH, deliberately, rather than the single mount that fails first. `mount proc`
+# is not the only thing the policy denies: under --security-opt label=type:container_engine_t proc
+# SUCCEEDS and the masked sysfs paths are refused next (`mount tmpfs to sys/firmware`), so a probe
+# that tested only proc would report that posture as working. An
+# `unshare --user --map-root-user --mount --pid --fork mount -t proc` probe was measured, works,
+# and was rejected for exactly that reason -- it answers a narrower question than its name would.
+#
+# --network=none, SO THIS MEASURES ONE THING. Without it the failure without the flag is the inner
+# network's ("Failed to set up tap device in namespace", or on podman 4.9.3
+# `slirp4netns: open("/dev/net/tun"): Permission denied`) -- a REAL failure, and the same policy's
+# doing, but a different one from the mount, and a probe that cannot tell them apart is a probe
+# whose value has to be read rather than asserted on. DEVNETTUN above is the token for that half.
+#
+# --label IS INERT HERE and is present anyway: this container is created by the podman INSIDE the
+# fixture, so no host-side sweep can see it, and it is --rm besides. 10-static.sh's
+# throwaways:every-podman-run-is-labelled-as-ours is a per-line grep over this file, and its
+# neighbour records why a rule that parsed shell continuations would be a worse rule -- so the
+# label goes on the line rather than the rule learning about heredocs.
+rf=/tmp/rootfs; rm -rf "$rf"; mkdir -p "$rf/bin"
+cp /usr/bin/true "$rf/bin/true" 2>/dev/null || cp /bin/true "$rf/bin/true" 2>/dev/null || true
+for lib in $(ldd /usr/bin/true 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i}'); do
+    mkdir -p "$rf$(dirname "$lib")" && cp "$lib" "$rf$lib" 2>/dev/null || true
+done
+inner="$(podman run --label cs193v.test=nested-probe --rm --network=none --rootfs "$rf" /bin/true 2>&1)"
+# A POSITIVE TOKEN EITHER WAY, per this file's contract above: `ok` when the container ran and
+# said nothing, and crun's own words when it did not -- which is the diagnosis, carried out of the
+# container verbatim, with no classifier anywhere deciding what the words mean.
+# FLATTENED, because nest_get takes only the first line of a token (`head -1`) and podman can
+# print a warning ahead of the error -- on podman 4.9.3 the network failure arrives under two
+# lines of "Support for seccomp is experimental". Collapsing keeps the cause in the value.
+if [ -z "$inner" ]; then echo "INNER_RUN=ok"
+else echo "INNER_RUN=FAILED: $(printf '%s' "$inner" | tr '\n' ' ')"; fi
 echo "STORE=$(podman info --format '{{.Store.GraphRoot}} {{.Store.GraphDriverName}}' 2>&1 | tail -1)"
 echo "CGROUP=$(podman info --format '{{.Host.CgroupManager}} {{.Host.CgroupsVersion}}' 2>&1 | tail -1)"
 if [ -S "/run/user/$(id -u)/bus" ]; then bus=bus; else bus=no-bus; fi
@@ -606,10 +736,16 @@ sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its t
 # only a setuid bit, which does not survive nesting, while Fedora's ships file capabilities, which
 # do -- so whether a base needs SYS_ADMIN is a property of its packaging and has to be measured
 # per base rather than copied.
+# `|| return 1` ON ALL FOUR OF THESE, and it is not defensive tidying. machine_flags clears
+# MACHINE_FLAGS before it validates the drop list, so a refused call does not fail loudly -- it
+# succeeds at running the fixture with NO nesting flags at all, and what you then read is a probe
+# whose every token is wrong for reasons that look nothing like a typo. Returning instead leaves
+# the transcript empty, and an empty transcript makes every positive token above empty, which is
+# the contract this file's probe was written to.
 nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KEY=value lines
     local base="${1:-machine}"; shift 2>/dev/null || true
     # shellcheck disable=SC2086
-    machine_flags '' linux no "$base"
+    machine_flags '' linux no "$base" || return 1
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" "$@" \
@@ -633,7 +769,24 @@ nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KE
 # course container; this is the fixture, one level out, and it names one subtree.
 nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN removed, unmask kept
     local base="${1:-machine}"
-    machine_flags sysadmin linux no "$base"
+    machine_flags sysadmin linux no "$base" || return 1
+    timeout 180 podman run --label "$VT_LABEL" --rm \
+        ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
+        -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
+        "$(fixture_tag "$base")" sh /probe.sh 2>&1
+}
+
+# THE THIRD DEPARTURE'S CONTROL (#119), and the one that will eventually make the flag go away.
+# `label=type:container_engine_t` gets further than container_t and is refused the masked sysfs
+# paths, which looks like a gap in container-selinux rather than a decision. If it is ever closed,
+# or podman stops masking those paths, container_t becomes sufficient and this control STOPS
+# FAILING -- which reddens the assertion that reads it, and that red means "delete the flag".
+# Nothing else would notice: the flag would simply keep being passed, unexamined, for years.
+# MACHINE_SYSADMIN_BASES above records what happened the last time this project narrowed a fixture
+# privilege without a measurement standing behind it.
+nest_probe_nolabel() {                # nest_probe_nolabel [BASE] -- the SELinux label left ON
+    local base="${1:-machine}"
+    machine_flags label linux no "$base" || return 1
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
@@ -642,7 +795,7 @@ nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN rem
 
 nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask removed, SYS_ADMIN kept
     local base="${1:-machine}"
-    machine_flags unmask linux no "$base"
+    machine_flags unmask linux no "$base" || return 1
     timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
@@ -681,7 +834,7 @@ nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask rem
 # two of these at once would not fit on the disk.
 nest_build() {                        # nest_build [PREREQS] [KEYS] [BASE] [INSTALLER] -> transcript
     local name="cs193v-fixture-nested-$$" base="${3:-machine}" inst="${4:-/work/installer.sh}"
-    machine_flags '' linux no "$base"
+    machine_flags '' linux no "$base" || return 1
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
     printf '%b' "${2:-}" | timeout --kill-after=30 1000 \
@@ -819,7 +972,29 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     # time. Bisected: 400 lines after `true` come through, the same 400 after `sudo true` stall
     # at 11 bytes, and `Defaults !use_pty` in the fixture restores both. So the gate no longer
     # has a case whose branches it must leave out.
-    machine_flags "$SB_NO_CAPS" "$SB_PLATFORM" "$SB_FAKE_PODMAN" "$SB_BASE"
+    # THE LABEL STAYS ON FOR TIER A, AND THIS IS THE WHOLE OF THE SCOPING (#119). Turning it off
+    # is what a NESTED podman costs, and nothing sandbox_run runs is nested: the installer either
+    # dead-ends at write_local_args or reaches build_image with --network=none, where the launcher's
+    # podman build dies pulling the base image -- before any RUN step, so crun is never asked to
+    # create a container.
+    #
+    # IT IS NOT ENOUGH TO GATE ON THE BASE, which is the trap here and the reason this is a
+    # separate drop rather than a condition in machine_flags. SB_BASE defaults to `machine`, which
+    # IS in MACHINE_NESTED_BASES, and five of 26-installer-sandbox.sh's sb_machine calls name no
+    # base at all -- so eight Tier A cases are on a nested base and would take the flag along with
+    # the rest of the nesting set. One of them takes an exact-set `podman diff` audit, which has no
+    # business moving because of a posture it has no use for.
+    #
+    # APPENDED to whatever the case asked for, not replacing it: `no-caps=sysadmin` is a real case
+    # (sb-noans), and it must keep its own denial as well as this one.
+    # ANNOUNCED, for the reason the timeout arms below are announced. machine_flags returns 2 on a
+    # name it does not know, and it clears MACHINE_FLAGS before it validates -- so an ignored
+    # refusal does not run nothing, it runs the container with NO nesting flags, and every
+    # assertion then fails about the installer's output. sb_machine validates $SB_NO_CAPS long
+    # before this, so this cannot fire today; it exists so that a future call site that mistypes a
+    # drop name is told which of the two things went wrong.
+    machine_flags "${SB_NO_CAPS:+$SB_NO_CAPS,}label" "$SB_PLATFORM" "$SB_FAKE_PODMAN" "$SB_BASE" \
+        || { fail "sb-$case:the-machine-flags-were-accepted" "machine_flags refused the drop list"; return 1; }
     set -- ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} "$@"
     printf '%b' "$keys" | timeout --kill-after=15 "$outer" \
         podman run --timeout "$cap" --label "$VT_LABEL" -it --name "$SB_NAME" \

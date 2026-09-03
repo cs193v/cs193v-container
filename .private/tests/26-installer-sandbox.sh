@@ -469,6 +469,68 @@ assert_match "nest:the-nounmask-control-isolates-one-flag" '^user:\[[0-9]+\]$' \
 assert_eq "nest:dev-fuse-is-present"   "char-device" "$(nest_get "$np" DEVFUSE)"
 assert_eq "nest:dev-net-tun-is-present" "char-device" "$(nest_get "$np" DEVNETTUN)"
 assert_eq "nest:fuse-overlayfs-can-mount" "fuse.fuse-overlayfs" "$(nest_get "$np" FUSE_MOUNT)"
+
+# ─── and a container really starts in here, which is the question #119 was (#119) ──
+# THE ASSERTION THIS TIER WAS MISSING, and its absence is the whole of #119. Everything above is
+# answered by `podman unshare` or `podman info`; neither creates a container. So on a host whose
+# policy refuses the mounts crun makes, this tier reported nesting as WORKING and the refusal
+# surfaced eleven assertions and several minutes later, inside a 25-step build, as eleven
+# statements about the installer -- which is not what was wrong.
+#
+# THE VALUE CARRIES ITS OWN DIAGNOSIS, so nothing here classifies an error message. `ok` or
+# crun's verbatim words: on this host, before the flag existed,
+#
+#     crun: mount `proc` to `proc`: Permission denied: OCI permission denied
+#
+# which is a sentence about the machine and not about install-cs193v.sh. lib/sandbox.sh records
+# how the probe manages a container with no image and no network to pull one with.
+assert_eq "nest:a-container-really-starts-inside" "ok" "$(nest_get "$np" INNER_RUN)"
+# WHAT THE HOST APPLIED, and WHAT WE ASKED FOR, recorded rather than asserted -- both are
+# platform-dependent by nature, which is record()'s stated case. Together they are what a reader
+# of a future red assertion needs: the posture the fixture actually ran under, and whether the
+# flag set contained what this host needs. Neither claims a cause.
+record "nest:lsm-label-applied"   "$(nest_get "$np" PROC_ATTR_CURRENT)"
+machine_flags '' linux no machine
+record "nest:the-flags-this-base-gets" "$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
+
+# ─── THE THIRD DEPARTURE, WITH ITS OWN CONTROL (#119) ──────────────────────────
+# The same doctrine as the two controls above, on the flag they did not cover: asserting only that
+# the privileged run works would leave the requirement untested, and a later podman or policy
+# needing less -- or more -- would go unnoticed either way.
+#
+# SKIPPED WHERE IT CANNOT BE MEASURED, rather than branched. Off SELinux machine_flags passes no
+# label flag at all, so removing it changes nothing and the control would be asserting that an
+# unchanged machine behaves differently. A named skip says that in the results; a conditional
+# expectation would bury a whole platform's worth of "this proved nothing" inside a green pass.
+#
+# THIS IS NOT THE CLASSIFIER THIS SUITE REFUSES ELSEWHERE, and the difference is worth stating
+# because the shapes look alike. The precondition skips below read a token to decide CONTROL FLOW,
+# so they must never be keyed on the words in an error message. This is an assertion about the
+# symptom of a deprivation we chose -- exactly what `without-SYS_ADMIN-newuidmap-is-what-fails`
+# does one screen up. Nothing branches on it.
+if [ -z "${VT_SELINUX:-}" ]; then
+    skip "nest:without-the-label-off-nothing-starts-inside" \
+         "this host has no SELinux, so machine_flags passes no label flag and there is none to remove"
+else
+nlp="$(nest_probe_nolabel)"
+assert_match "nest:the-nolabel-probe-also-really-ran" '^machine-fixture-[0-9]+$' \
+             "$(nest_get "$nlp" FIXTURE_ID)"
+assert_says "nest:without-the-label-off-nothing-starts-inside" 'Permission denied' \
+            "$(nest_get "$nlp" INNER_RUN)"
+assert_says "nest:and-a-mount-is-what-crun-is-refused" 'mount' "$(nest_get "$nlp" INNER_RUN)"
+# ...and the control must still create its NAMESPACE, or it is failing for one of the other two
+# departures' reasons and proving nothing about this one -- the same guard the nounmask control
+# carries above.
+assert_match "nest:the-nolabel-control-isolates-one-flag" '^user:\[[0-9]+\]$' \
+             "$(nest_get "$nlp" INNER_USERNS)"
+# THE SECOND LIMIT, IN THE SAME CONTROL, and this is the assertion that retires #119's
+# prerequisite. The issue concluded /dev/net/tun needed `setsebool -P container_use_devices 1` --
+# a root, machine-wide change. It does not: that boolean gates container_t, and with the label off
+# the device arrives while the boolean stays exactly as the distro shipped it. Here the device is
+# MISSING with the label on and char-device with it off, on one host, with nothing else varying.
+assert_eq "nest:and-dev-net-tun-is-what-the-label-was-hiding" "MISSING" \
+          "$(nest_get "$nlp" DEVNETTUN)"
+fi
 # Recorded, not asserted: podman accepts the systemd cgroup manager here even with no session,
 # so "cgroupfs is required" is not something this probe showed. The config is still right --
 # SESSION proves there is no session to use -- but the claim would be bigger than the evidence.
@@ -498,6 +560,24 @@ else
 # reclaimed on reap. Eleven checkouts share this filesystem, and #76 records what a full one
 # does -- $CS193V_RESULTS became unwritable and the run reported "0 fail" having lost its
 # results. So it refuses rather than risks it, and says the number either way.
+# ─── A SECOND HOST PRECONDITION, IN THE DISK CHECK'S SHAPE (#119) ──────────────
+# THE SAME ARGUMENT AS THE DISK, one line down: this build cannot succeed on a machine whose
+# policy will not let crun create a container, and spending six minutes and 6 GB to discover that
+# -- then reporting it as eleven statements about install-cs193v.sh -- is the defect #119 filed.
+#
+# IT SKIPS ONLY WHAT IT MUST, AND ONLY BEHIND A RED ASSERTION. nest:a-container-really-starts-inside
+# above has already FAILED by the time this is reached, carrying crun's own words, so the machine's
+# refusal is reported once, loudly, in the tier that costs seconds. What this suppresses is the
+# eleven consequences -- and it cannot suppress a regression, because anything that breaks the
+# nesting flags reddens that assertion first.
+#
+# NOT A CLASSIFIER. This reads a token the probe wrote, exactly as the disk check reads df; nothing
+# here parses crun's message to decide what it meant. A gate keyed on the words "Permission denied"
+# would fire on precisely the symptom of the fixture losing its nesting flags, which would turn a
+# regression into a calm named skip.
+if [ "$(nest_get "$np" INNER_RUN)" != ok ]; then
+    skip "nested:the-course-build" "no container starts inside this fixture on this host, so a 25-step build cannot: $(nest_get "$np" INNER_RUN)"
+else
 sb_free_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
 record "nest:free-disk-gb-before" "${sb_free_gb:-unknown}"
 if [ -z "$sb_free_gb" ] || [ "$sb_free_gb" -lt 15 ]; then
@@ -563,6 +643,7 @@ record "nest:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -
 fi
 fi
 fi
+fi
 
 # ─── the oldest podman the floor admits, built end to end ──────────────────────
 # THE FLOOR'S OWN REGRESSION CHECK. MIN_PODMAN_LINUX is 4.9.0, and the reason it is that low is
@@ -604,10 +685,24 @@ assert_says "oldest-supported:newuidmap-is-what-fails" 'newuidmap' "$(nest_get "
 if [ "${CS193V_MINPODMAN_BUILD:-}" != 1 ]; then
     skip "oldest-supported:the-build" "set CS193V_MINPODMAN_BUILD=1 -- a real 25-step build on podman 4.9.3, ~6GB and several minutes"
 else
+# THE HOST PRECONDITION AGAIN (#119), and here it has to name TWO cases. Everything from here to
+# the `fi` below is inside one else-block: the 4.9.3 build AND the floor-skew case, which needs a
+# build of its own to reach the hand-off it is about. So a single skip would suppress seven
+# assertions under one name that mentions neither -- which is the shape VERIFICATION.md's own
+# doctrine calls an assertion that never executed. Both get named.
+#
+# THE DISK BRANCH BELOW HAS THE SAME GAP and it predates this: it skips only
+# oldest-supported:the-build while floor-skew's seven assertions vanish with it. Fixed here too,
+# since it is one line and the alternative is a results file that quietly stops mentioning a case.
+if [ "$(nest_get "$osp" INNER_RUN)" != ok ]; then
+    skip "oldest-supported:the-build"  "no container starts inside the 22.04 fixture on this host: $(nest_get "$osp" INNER_RUN)"
+    skip "floor-skew:the-skewed-build" "same host limit; this case needs a real build to reach the launcher hand-off"
+else
 osp_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
 record "oldest-supported:free-disk-gb-before" "${osp_free:-unknown}"
 if [ -z "$osp_free" ] || [ "$osp_free" -lt 15 ]; then
-    skip "oldest-supported:the-build" "only ${osp_free:-?}GB free; this build wants ~8GB and a margin"
+    skip "oldest-supported:the-build"  "only ${osp_free:-?}GB free; this build wants ~8GB and a margin"
+    skip "floor-skew:the-skewed-build" "only ${osp_free:-?}GB free; this case needs a build of its own"
 else
 osp_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 # THE REAL INSTALLER, unpatched, which is what makes this a regression check rather than a
@@ -663,6 +758,7 @@ sandbox_reap
 fi
 fi
 fi
+fi
 
 # ─── SYS_ADMIN is Debian-family packaging, not the price of nesting ────────────
 # MEASURED, AND ACTED ON. Every nested base used to be handed --cap-add=SYS_ADMIN with a comment
@@ -676,11 +772,21 @@ fi
 #   debian:13     -rwsr-xr-x  /usr/bin/newuidmap
 #   ubuntu:24.04  -rwsr-xr-x  /usr/bin/newuidmap
 #
-# So MACHINE_SYSADMIN_BASES grants it to the two Debian-family bases and NOT to fedora-nested, and
-# these assertions are what keep that split honest. It is no longer a differential in the
-# nest_probe_nocap sense -- fedora-nested has no SYS_ADMIN to remove -- and that is the point: its
-# DEFAULT flag set is the claim, and the Ubuntu control is what makes the contrast a measurement
-# rather than an assumption.
+# WHAT THAT DOES AND DOES NOT SETTLE, and this paragraph used to say the opposite. It claimed
+# MACHINE_SYSADMIN_BASES "grants it to the two Debian-family bases and NOT to fedora-nested". It
+# grants it to ALL THREE (lib/sandbox.sh), and the block below already records why: crun calls
+# sethostname(2) to create the container for a RUN step, which needs CAP_SYS_ADMIN whatever the
+# base's packaging, and fedora-e2e failed at STEP 2/25 when the capability was withheld on the
+# strength of the userns differential alone.
+#
+# LEFT STALE, IT SENDS THE NEXT READER THE WRONG WAY, which is not hypothetical: issue #119 spent
+# its SYS_ADMIN paragraph disproving this sentence before it could get to the actual cause, which
+# was the host's SELinux policy and had nothing to do with capabilities.
+#
+# So what these assertions keep honest is narrower than the old wording: Fedora's newuidmap makes
+# a USER NAMESPACE without the capability where a Debian-family one cannot. That is a true claim
+# about packaging and says nothing about whether a base can BUILD. The differential below withholds
+# the capability from each base in turn to show it.
 #
 # ONE TRAP THIS RESTS ON: the Fedora base image LOSES those capabilities (RHBZ 1995337), so a stock
 # fedora:43 has neither a setuid bit nor caps -- strictly worse than Debian.
@@ -737,17 +843,36 @@ fi
 # guest's own os-release, so a bug in the installer's detection cannot be masked by the same bug in
 # the harness's.
 #
-# NO SYS_ADMIN, and that is worth watching rather than assuming. fedora-caps measured that this base
-# creates a nested user namespace without it, because Fedora's newuidmap carries file capabilities
-# where Debian's carries a setuid bit -- but a 25-step build does more than `podman info`. If this
-# case needs the capability after all, the narrowing in MACHINE_SYSADMIN_BASES was right for probing
-# and wrong for building, and this is where that shows up.
+# THIS CASE DOES GET SYS_ADMIN, and the paragraph here used to say it did not -- "NO SYS_ADMIN, and
+# that is worth watching rather than assuming". That was written while fedora-nested was briefly out
+# of MACHINE_SYSADMIN_BASES; it went back in when this very case failed at STEP 2/25 with
+# `sethostname: Operation not permitted`, and the note above the differential records why. The
+# question it posed was answered -- the narrowing WAS right for probing and wrong for building -- so
+# what is left to say is the answer rather than the question.
+#
+# WHAT IS STILL WORTH WATCHING IS ONE LEVEL IN, and it is asserted below rather than described:
+# fedora-e2e:SYS_ADMIN-did-not-reach-it. The outer fixture holds SYS_ADMIN and, on an SELinux host,
+# runs with its label off as well; the course container it builds must have neither. `inner-caps`
+# comes back `[]` on both counts.
 if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
     skip "fedora-e2e:the-prerequisites" "set CS193V_INSTALL_NESTED=1"
 elif [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
     skip "fedora-e2e:the-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real dnf install and 25-step build, ~6GB"
 else
 fixture_build fedora-nested || exit 1
+# THE HOST PRECONDITION (#119), ON THIS BASE'S OWN PROBE. There was no nest_probe for
+# fedora-nested at all -- fedora-caps runs only the nocap variant, whose whole point is a reduced
+# flag set -- so this asks the question about the machine that is about to build.
+#
+# NO SECOND RED ASSERTION HERE, deliberately. nest:a-container-really-starts-inside announces the
+# host's refusal once, in the seconds tier; repeating it per base would report one machine's
+# property three times and say nothing new. What each block needs is a precondition keyed on ITS
+# OWN base, which is what this is -- so the skip is never inferred from another base's result.
+fe2e_np="$(nest_probe fedora-nested)"
+record "fedora-e2e:lsm-label-applied" "$(nest_get "$fe2e_np" PROC_ATTR_CURRENT)"
+if [ "$(nest_get "$fe2e_np" INNER_RUN)" != ok ]; then
+    skip "fedora-e2e:the-build" "no container starts inside the fedora fixture on this host: $(nest_get "$fe2e_np" INNER_RUN)"
+else
 fe2e_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
 record "fedora-e2e:free-disk-gb-before" "${fe2e_free:-unknown}"
 if [ -z "$fe2e_free" ] || [ "$fe2e_free" -lt 15 ]; then
@@ -793,5 +918,6 @@ assert_eq "fedora-e2e:host-image-list-untouched" "$fe2e_imgs" \
           "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 sandbox_reap
 record "fedora-e2e:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+fi
 fi
 fi

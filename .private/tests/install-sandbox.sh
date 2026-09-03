@@ -290,7 +290,16 @@ set -- "$@" -e "SB_NO_PREREQS=$NOPREREQS" -e "SB_NO_CAPS=$NOCAPS"
 # sandbox_run called machine_flags unconditionally and gave that same case the full nesting set.
 # Two paths, one case, opposite answers. machine_flags gates the capabilities on
 # MACHINE_NESTED_BASES now, so both paths ask the same question and get the same answer.
-machine_flags "$NOCAPS" "$PLATFORM" "$FAKE" "$BASE"
+# ONE EXCEPTION, AND IT IS THERE TO KEEP THE TWO PATHS AGREEING (#119). machine_flags turns the
+# SELinux label off for a nested base on an SELinux host, which is right for this file's nested
+# runs -- they are the hand-driven twin of nest_build, network on and BUILDAH_LAYERS=false below,
+# and they really do build. But --fake-podman starts nothing inside, and the suite's equivalent
+# cases (the four wsl ones) go through sandbox_run, which denies it. Without this line the machine
+# you drive BY HAND and the machine the suite ASSERTS against would differ for the same case --
+# which is the exact drift the comment above records this file having paid for once already.
+SB_DROP="$NOCAPS"
+[ "$FAKE" = yes ] && SB_DROP="${NOCAPS:+$NOCAPS,}label"
+machine_flags "$SB_DROP" "$PLATFORM" "$FAKE" "$BASE"
 set -- "$@" ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"}
 # The shim tmpfs and the layers override only mean anything where something is built inside.
 if machine_is_nested "$BASE"; then
