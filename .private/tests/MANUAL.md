@@ -713,10 +713,11 @@ settle, and one it should not be trusted on:
      own tarball URL 302s to `codeload.github.com` instead. Try it from campus wifi and from a
      dorm room, not just from a staff machine. `00-release-gates.sh` fetches the URL, but only
      from wherever the release run happens.
-4. **The Tier C strings** in `fixtures/wsl-messages.2.9.8` — `net.exe` and `where.exe` are closed
-   components with no published exit-code contract, so their wording is third-party-attested only.
-   The suite gates on their exit codes and matches prose loosely. *Verify once:* run
-   `net session` elevated, unelevated, and with the Server service stopped, and compare.
+4. **The Tier C strings** in `fixtures/wsl-messages.2.9.8` — `net.exe` is a closed component with
+   no published exit-code contract, so its wording is third-party-attested only. The suite gates on
+   its exit codes and matches prose loosely. *Verify once:* run `net session` elevated, unelevated,
+   and with the Server service stopped, and compare. (`where.exe` was here too; the installer no
+   longer calls it — see item 6 — so `fake-where.c` and its `WhereNotFound` row are retired.)
 5. **Whether this computer can start a virtual machine at all** — the prerequisite this list did
    not have, and issues #112 and #114 are what its absence cost. #112: the installer said "WSL is
    installed", downloaded Ubuntu, failed at `CreateVm` with `HCS_E_HYPERV_NOT_INSTALLED`, and told
@@ -766,6 +767,37 @@ settle, and one it should not be trusted on:
    **BitLocker claim** — that `bcdedit /set hypervisorlaunchtype Auto` can trigger a recovery
    prompt — is still unverified and is now only historical: nothing offers that command, so
    `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` holds the line whether or not the claim is true.
+
+6. **The resolution itself — that a binary planted in the download folder is not what runs.**
+   Issue #125. The installer runs elevated with the download folder as its working directory, and
+   cmd.exe searches that directory *before* `%PATH%`, so a `wsl.exe` sitting in `Downloads` was
+   what ran, as Administrator. The `--tier windows` case `win-hijack:*` plants `hostile.exe` there
+   under every name the installer calls and asserts none of them ran. That is a real gate — revert
+   the `%SYS32%\` qualification and it goes red — but **wine is not Windows**: it appears to ignore
+   `NoDefaultCurrentDirectoryInExePath`, which is precisely *why* the case can go red, and it says
+   nothing about whether `%SystemRoot%\System32\wsl.exe` is the right path on a student's machine.
+
+   *Verify once on a real box:* copy `C:\Windows\System32\hostname.exe` to `wsl.exe` beside the
+   `.cmd`; **confirm `NoDefaultCurrentDirectoryInExePath` is unset in that shell first** — Git Bash
+   and several dev shells set it to 1, and with it set the test looks clean whether or not the fix
+   is there, which is how the first attempt at reproducing #125 came back negative — then
+   right-click → Run as administrator and confirm the planted copy never executes and the install
+   still completes.
+
+   Measured while writing the fix, so the layout claims below are not guesses. On Windows 11 26200,
+   `System32\wsl.exe` is the OS component (hardlinked into `WinSxS`) and is what a bare `wsl.exe`
+   resolves to; `C:\Program Files\WSL\wsl.exe`, the MSI's copy, is **not** on `PATH`; and the Store
+   app-execution alias under `%LOCALAPPDATA%\Microsoft\WindowsApps` sits *after* System32 and is
+   per-user, so an elevated run may not see it at all. From the real `SysWOW64\cmd.exe`,
+   `%SystemRoot%\System32\wsl.exe` is **missing** — WOW64 redirects System32 to SysWOW64, which has
+   no `wsl.exe` — while `%SystemRoot%\Sysnative\wsl.exe` is found by `if exist`, launches, and
+   accepts `cd /d`. That is what the `PROCESSOR_ARCHITEW6432` arm is for, and without it the fix
+   would not be insecure, it would be broken.
+
+   *Still unverified:* ARM64, where the same WOW64 reasoning should hold (`PROCESSOR_ARCHITEW6432`
+   reads `ARM64` in an x86 process and `Sysnative` reaches the native System32) but no machine was
+   available; and a machine where the WSL OS component is genuinely absent, which Microsoft treats
+   as unrepairable by anything short of an in-place upgrade.
 
 ### Ubuntu's first-run setup, which the installer warns about but cannot control
 `wsl --install -d Ubuntu-26.04 --name CS193V` **launches** the new distribution and returns *the

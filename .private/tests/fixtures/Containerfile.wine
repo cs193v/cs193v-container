@@ -45,9 +45,19 @@ USER ubuntu
 # used to read `-k 2>/dev/null;`, which hid the 127 behind its own redirect and behind the `;`
 # after it, so the flush they exist to force had never once run (#126). The guard step below is
 # what stops it going quiet again.
+#
+# `=n` ON THE FOUR FAKED PROGRAMS IS LOAD-BEARING, and it is not obvious. wine ships BUILTIN
+# implementations of reg and net, and its loader prefers a builtin over a real PE sitting in
+# system32 -- so copying the fakes there was not enough on its own. Measured: with the fakes in
+# place but no override, `%SystemRoot%\System32\reg.exe query "HKU\S-1-5-19"` ran WINE'S reg,
+# answered `reg: Invalid system key`, exited 1, and never touched argv.log. The whole tier read as
+# "the installer is not Administrator" -- 97 failures whose cause was entirely in the harness.
+# `n` means native, i.e. the file on disk. wsl.exe and powershell.exe are listed for the same
+# reason even though wine has no builtin for them today; a future wine that gained one would
+# reintroduce exactly this, silently.
 ENV WINEPREFIX=/home/ubuntu/.wine \
     WINEDEBUG=-all \
-    WINEDLLOVERRIDES=mscoree,mshtml=d \
+    WINEDLLOVERRIDES="mscoree,mshtml=d;reg.exe,net.exe,wsl.exe,powershell.exe=n" \
     XDG_RUNTIME_DIR=/tmp/xdg \
     DISPLAY= \
     PATH=/usr/lib/x86_64-linux-gnu/wine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -144,5 +154,19 @@ RUN sys32=/home/ubuntu/.wine/drive_c/windows/system32 \
  && test -s "$sys32/reg.exe" \
  && test -s "$sys32/WindowsPowerShell/v1.0/powershell.exe" \
  && test ! -e "$sys32/hostile.exe"
+
+# ...AND THE FAKE MUST BE WHAT ACTUALLY RUNS, asserted here rather than discovered as 97 failures
+# in 27-installer-windows.sh. Being ON DISK in system32 is not sufficient: wine prefers its own
+# builtin reg over the file, so this is the guard for the WINEDLLOVERRIDES `=n` above. It asks the
+# question the installer asks, by the path the installer uses, and reads argv.log back -- if wine's
+# builtin answered instead, the log is empty and the build fails here, where the cause is legible.
+# `wineserver -w` for the same reason as the layer above: the fake writes through wine, and this
+# needs to read it back after the server has flushed.
+RUN mkdir -p /tmp/bcheck \
+ && CS193V_FAKE_DIR='Z:\tmp\bcheck' \
+    wine64 cmd /c '%SystemRoot%\System32\reg.exe query "HKU\S-1-5-19"' </dev/null >/dev/null 2>&1 \
+ ; timeout 30 wineserver -w \
+ && grep -q 'reg.exe query' /tmp/bcheck/argv.log \
+ && rm -rf /tmp/bcheck
 
 WORKDIR /work
