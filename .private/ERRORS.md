@@ -1225,10 +1225,19 @@ clean: the process is `Killed` with **exit 137**, the container stays `running`,
 This answers §5.5 for **Linux only**. WSL with `systemd=true` is the case that still needs
 checking, and it is the one where the answer might be `max`.
 
-### D6. AppArmor
+### D6. The LSM label — AppArmor on this machine, SELinux on the next one
 
 `/proc/self/attr/current` reads exactly **`crun (unconfined)`**, confirming the design doc's
 claim verbatim. AppArmor is not confining this container.
+
+**Second platform, measured later — issue #131.** Fedora 44, podman 5.8.4, crun 1.28, SELinux
+`Enforcing`, 2026-09-02: the same read returns **`system_u:system_r:container_t:s0:c483,c562`**,
+with a trailing NUL after it. That file is whichever LSM the **host** has and not a property of
+the image, so neither value is a measurement of the container — the claim above was true of the
+machine this pass ran on. And `container_t` with MCS categories is real type enforcement, which
+is *more* than the Ubuntu answer rather than less, so a check expecting the Ubuntu string went
+red on the better value. Nothing asserts either string now: `60-container.sh` records
+`kernel:lsm-label-applied` and `VERIFICATION.md` §A.5 records `lsm-label`.
 
 ### D7. `/proc` is not cgroup-aware
 

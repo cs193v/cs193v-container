@@ -440,10 +440,20 @@ record "kernel:CapBnd" "$(E 'grep CapBnd /proc/self/status')"
 # the user namespace, not a capability list.
 assert_match "kernel:CapEff-is-empty" "CapEff:[[:space:]]*0+$" "$(E 'grep CapEff /proc/self/status')"
 
-# RECORDED, not asserted. The design docs claim this reads "crun (unconfined)", but the
-# exact string depends on the runtime and on whether AppArmor is even loaded, and the claim
-# being made is only "AppArmor is not confining this container".
-record "kernel:apparmor-attr" "$(E 'cat /proc/self/attr/current 2>/dev/null || echo unavailable')"
+# RECORDED, not asserted, and NOT NAMED FOR EITHER LSM -- which is the whole of issue #131.
+# /proc/self/attr/current is whichever security module the HOST has: AppArmor's on Ubuntu, where
+# it reads "crun (unconfined)" because an unprivileged user cannot load a profile, and an SELinux
+# container_t context with MCS categories on Fedora. A token called apparmor-attr reported the
+# second under the name of the first, which is the mistake lib/sandbox.sh's PROC_ATTR_CURRENT was
+# named to avoid; the two now read alike, along with nest:lsm-label-applied next door.
+# The claim being made is only that the LSM is not what confines this container, on either host.
+#
+# DEFAULTED WITH ${x:-}, NOT `|| echo`, and `tr -d` INSIDE the container, for the two reasons
+# sandbox.sh gives: tr exits 0 on empty input so a `|| echo unavailable` arm could never fire,
+# and the SELinux read carries a trailing NUL that bash strips out of a command substitution
+# with a "warning: ignored null byte in input" on stderr -- noise in every run on an SELinux host.
+record "kernel:lsm-label-applied" \
+       "$(E 'pac="$(cat /proc/self/attr/current 2>/dev/null | tr -d "\0")"; echo "${pac:-unavailable}"')"
 
 # The memory cap must be real. If this reads "max", the cap is not being enforced and the
 # protection is illusory — which is exactly what §5.5 suspects can happen in WSL without
