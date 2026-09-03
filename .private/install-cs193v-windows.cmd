@@ -63,6 +63,11 @@ setlocal
 ::     a stage it cannot launch aborts the whole script with exit 255. Measured. Nothing
 ::     here needs one, so nothing here has one.
 ::
+::   * AN UNQUALIFIED PROGRAM NAME. cmd.exe searches the current directory BEFORE %PATH%, and
+::     this file runs elevated from the student's download folder, so a bare `wsl.exe` would run
+::     a copy planted there with Administrator rights. Every external program is named through
+::     %SYS32%; the block just below this header holds the three lines that close it. Issue #125.
+::
 :: NOTHING PASSED TO wsl.exe NEEDS QUOTING, and that is asserted rather than hoped for.
 :: %~dp0 used to be read into %HERE% and handed to wslpath, so a student downloading into
 :: "cs193v (1)" -- what a browser names a second copy -- made an unquoted use a syntax error.
@@ -70,6 +75,55 @@ setlocal
 :: staff constants below, and 25-installer.sh pins them to characters that need no quotes at
 :: all. That is strictly stronger than quoting: a quote has to survive cmd AND wsl.exe.
 :: ---------------------------------------------------------------------------------
+
+:: ---- where the system's own programs live ------------------------------------
+:: EVERY EXTERNAL PROGRAM BELOW IS NAMED THROUGH %SYS32%, and that is issue #125 rather than a
+:: style choice. This file runs elevated with the DOWNLOAD FOLDER as its working directory, and
+:: cmd.exe searches the current directory BEFORE %PATH% -- so a wsl.exe sitting in Downloads is
+:: what a bare `wsl.exe` runs, as Administrator. Downloads is the likeliest place on the machine
+:: for an untrusted file to already be, and wsl.exe has twelve call sites here, one of them the
+:: handoff to stage two.
+::
+:: %SystemRoot% RATHER THAN A HARD-CODED C:\Windows, because Windows need not be installed on C:
+:: and the directory need not be called Windows. System32 is never localised, so no translation
+:: enters into it either.
+::
+:: SYSNATIVE IS FOR A 32-BIT HOST, and it is not theoretical. Measured from
+:: C:\Windows\SysWOW64\cmd.exe on Windows 11 26200: %SystemRoot%\System32\wsl.exe is MISSING,
+:: because WOW64 redirects System32 to SysWOW64 and wsl.exe exists only in the native one.
+:: %SystemRoot%\Sysnative reaches it, and `if exist`, launching and `cd /d` all work through it.
+:: PROCESSOR_ARCHITEW6432 is defined ONLY in a 32-bit process on 64-bit Windows, which is exactly
+:: when that redirection applies. Without this arm the fix would not be insecure, it would be
+:: broken -- a worse failure, and a harder one to attribute.
+set "SYS32=%SystemRoot%\System32"
+if defined PROCESSOR_ARCHITEW6432 set "SYS32=%SystemRoot%\Sysnative"
+
+:: ---- two additive guards, and NEITHER replaces the qualification above --------
+:: TURN THE CURRENT-DIRECTORY SEARCH OFF ALTOGETHER. cmd.exe consults
+:: NoDefaultCurrentDirectoryInExePath -- documented since Vista -- and its EXISTENCE, not its
+:: value, is what gets checked. This covers what naming a path cannot: a program name that arrives
+:: through a variable, or a call site added before anyone next runs the test suite.
+::
+:: ORDER IS THE WHOLE CONTRACT, because it protects the commands that FOLLOW it. Measured in a
+:: real .cmd on Windows 11 26200: a bare exe called before this line still resolved from the
+:: current directory, the same call after it did not, and clearing the variable re-enabled the
+:: search -- so cmd re-reads it per command while running a batch file. NOT so for
+:: `cmd /c "a & b"`, where the search path is fixed once for the whole line; a measurement taken
+:: that way makes this line look as though it does nothing. 25-installer.sh pins that it sits
+:: ahead of every external call.
+set "NoDefaultCurrentDirectoryInExePath=1"
+
+:: AND LEAVE THE DOWNLOAD FOLDER. This is the only one of the three that also closes DLL planting:
+:: with SafeDllSearchMode on, the current directory is searched AFTER the system directories, so a
+:: DLL named like a system one cannot win -- but one that is in no system directory at all can.
+::
+:: %SystemRoot% AND NOT %SYS32%: C:\Windows is a real directory under both the native and the
+:: WOW64 view, so it needs no reasoning about the redirector. Nothing here depends on the working
+:: directory -- %~dp0, wslpath and %TEMP% are all banned, and 25-installer.sh asserts they are
+:: gone -- and every value crossing into Linux is an absolute path, so the distro starting in
+:: /mnt/c/windows is inert. Deliberately unchecked: `cd` is a builtin, and if it somehow failed
+:: the qualification above still carries the property on its own.
+cd /d "%SystemRoot%"
 
 set "DISTRO=CS193V"
 set "IMAGE_NAME=Ubuntu-26.04"
@@ -97,7 +151,7 @@ set "SENTINEL=CS193V-INSTALLER-COMPLETE"
 :: so WSL_UTF8 makes it plain text and PowerShell does the comparison. The answer comes back
 :: as an EXIT CODE rather than on stdout: 0 = present, 1 = absent, anything else = the probe
 :: itself could not run, which is a different thing from "absent" and is handled separately.
-set "PROBE=$env:WSL_UTF8=1; if ((wsl.exe -l -q) -match '^%DISTRO%$') { exit 0 } else { exit 1 }"
+set "PROBE=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; if ((& $w -l -q) -match '^%DISTRO%$') { exit 0 } else { exit 1 }"
 
 :: A SECOND PROBE, ASKED ONLY AFTER SOMETHING HAS ALREADY FAILED: does Windows itself say the
 :: problem is virtualisation? `wsl --status` prints a line saying so and then returns 0
@@ -116,7 +170,7 @@ set "PROBE=$env:WSL_UTF8=1; if ((wsl.exe -l -q) -match '^%DISTRO%$') { exit 0 } 
 :: TWO STATES, DELIBERATELY, where %PROBE% has three: 0 means Windows blamed virtualisation, and
 :: everything else -- "it did not" and "the probe itself could not run" -- reaches the same honest
 :: refusal, so splitting them would be a branch with no different behaviour behind it.
-set "VMFAILPROBE=$env:WSL_UTF8=1; if ((wsl.exe --status 2>&1) -match 'aka.ms/enablevirtualization') { exit 0 } else { exit 1 }"
+set "VMFAILPROBE=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; if ((& $w --status 2>&1) -match 'aka.ms/enablevirtualization') { exit 0 } else { exit 1 }"
 
 :: THERE IS NO VIRTUALISATION PRE-FLIGHT, AND TWO OF THEM HAVE NOW BEEN REMOVED FROM HERE.
 :: Anyone about to add a third should read .private/README.md first; both are recorded there with
@@ -149,9 +203,9 @@ echo.
 ::
 :: HKU\S-1-5-19 is the LOCAL SERVICE hive, which only an elevated process can read. One
 :: command, one exit code: no dependency on a service being started, none on the console
-:: language, and it works from a 32-bit process because reg.exe exists in both System32 and
-:: SysWOW64. It also succeeds for SYSTEM, so a management agent running this is not locked
-:: out.
+:: language, and it works from a 32-bit process: reg.exe exists in both System32 and SysWOW64,
+:: and %SYS32% names whichever of the two is the native one. It also succeeds for SYSTEM, so a
+:: management agent running this is not locked out.
 ::
 :: The `whoami /groups | findstr S-1-16-12288` form reads the integrity level directly and is
 :: the more precise test, but it needs a PIPE. In batch a pipe runs each side in a child cmd,
@@ -159,22 +213,21 @@ echo.
 :: so avoiding one for a question a single command can answer is the better trade regardless.
 :: Corroborated the hard way: under wine that pipe does not merely misbehave, it aborts the
 :: whole script with exit 255, which is also why no test could have covered it.
-reg query "HKU\S-1-5-19" >nul 2>&1
+"%SYS32%\reg.exe" query "HKU\S-1-5-19" >nul 2>&1
 if %errorlevel% neq 0 goto notadmin
 
 :: ---- is WSL present at all? ---------------------------------------------------
-where wsl.exe >nul 2>&1
-if %errorlevel% neq 0 goto installwsl
-wsl.exe --status >nul 2>&1
+if not exist "%SYS32%\wsl.exe" goto installwsl
+"%SYS32%\wsl.exe" --status >nul 2>&1
 if %errorlevel% neq 0 goto installwsl
 goto havewsl
 
 :installwsl
 echo   [1/3] Installing WSL. This is a Windows feature, so it needs a restart.
 echo.
-wsl.exe --update
+"%SYS32%\wsl.exe" --update
 if %errorlevel% neq 0 goto wslupdatefailed
-wsl.exe --install --no-distribution
+"%SYS32%\wsl.exe" --install --no-distribution
 if %errorlevel% neq 0 goto wslfeaturefailed
 goto restartneeded
 
@@ -200,7 +253,7 @@ exit /b 0
 echo   [1/3] WSL is installed.
 
 :: ---- does the CS193V environment exist? --------------------------------------
-powershell -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
 if %errorlevel% equ 0 goto havedistro
 if %errorlevel% equ 1 goto makedistro
 goto probefailed
@@ -226,11 +279,11 @@ echo.
 :: load-bearing. `wsl --update` on an already-current WSL is not contractually zero, and a
 :: refusal from an optimisation would turn a working install into a failed one. If it mattered,
 :: the install below fails and says so.
-wsl.exe --update
+"%SYS32%\wsl.exe" --update
 
 :: cmdlint-allow: unchecked-exit -- the exit code here is the launched shell's, not
 :: the install's, so it is meaningless. The probe below is the real check.
-wsl.exe --install -d %IMAGE_NAME% --name %DISTRO%
+"%SYS32%\wsl.exe" --install -d %IMAGE_NAME% --name %DISTRO%
 
 :: Deliberately NOT `if errorlevel` here. `wsl --install` launches the new environment
 :: unless given --no-launch, and then returns THE LAUNCHED SHELL'S exit code -- so a
@@ -241,7 +294,7 @@ wsl.exe --install -d %IMAGE_NAME% --name %DISTRO%
 :: --no-launch is not the fix. It skips Ubuntu's first-run setup, which leaves the default
 :: user as root, so stage 2 would install into /root and the student's own account would be
 :: created later with none of it.
-powershell -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
 if %errorlevel% equ 0 goto havedistro
 goto distrofailed
 
@@ -266,7 +319,7 @@ echo.
 :: Without this probe a missing program is reported as a network problem, which is the same
 :: mistake as treating a failed question as a negative answer. Output discarded: only the exit
 :: code is being asked for.
-wsl.exe -d %DISTRO% -e curl --version >nul 2>&1
+"%SYS32%\wsl.exe" -d %DISTRO% -e curl --version >nul 2>&1
 if %errorlevel% neq 0 goto installcurl
 goto havecurl
 
@@ -284,14 +337,14 @@ goto havecurl
 :: promises it is safe to run any number of times.
 echo         Installing curl in %DISTRO% first, which the download needs.
 echo.
-wsl.exe -d %DISTRO% -u root -e apt-get update
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e apt-get update
 if %errorlevel% neq 0 goto curlfailed
-wsl.exe -d %DISTRO% -u root -e env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
 if %errorlevel% neq 0 goto curlfailed
 
 :: apt exiting 0 is not the same claim as "curl is on the PATH now" -- the same distinction the
 :: distro probe above makes about `wsl --install`. Ask the question again rather than assume.
-wsl.exe -d %DISTRO% -e curl --version >nul 2>&1
+"%SYS32%\wsl.exe" -d %DISTRO% -e curl --version >nul 2>&1
 if %errorlevel% neq 0 goto curlfailed
 
 :havecurl
@@ -300,7 +353,7 @@ if %errorlevel% neq 0 goto curlfailed
 ::
 :: NOT redirected. curl's own `curl: (6) Could not resolve host ...` belongs in the window the
 :: student pastes to course staff.
-wsl.exe -d %DISTRO% -e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%
+"%SYS32%\wsl.exe" -d %DISTRO% -e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%
 if %errorlevel% neq 0 goto downloadfailed
 
 :: THE CHECK CURL CANNOT DO. `curl -f` catches a 404, and a cut-off transfer against a served
@@ -309,7 +362,7 @@ if %errorlevel% neq 0 goto downloadfailed
 :: install-cs193v.sh's own download step carries the same guard for the same reason -- there it
 :: is four files that must exist, here it is the token on that script's last line, which makes
 :: this a completeness check as well as an identity one.
-wsl.exe -d %DISTRO% -e grep -q %SENTINEL% %STAGE2%
+"%SYS32%\wsl.exe" -d %DISTRO% -e grep -q %SENTINEL% %STAGE2%
 if %errorlevel% neq 0 goto downloadincomplete
 
 :: %STAGE2% is left behind deliberately -- see the success message below.
@@ -319,7 +372,7 @@ if %errorlevel% neq 0 goto downloadincomplete
 :: exits 23. The download message says the file can be run again, which is true once that copy
 :: is gone. `--cd ~ -e curl -O` would avoid it, at the price of another WSL flag nothing here
 :: has verified.
-wsl.exe -d %DISTRO% -e bash %STAGE2%
+"%SYS32%\wsl.exe" -d %DISTRO% -e bash %STAGE2%
 set "RC=%errorlevel%"
 
 echo.
@@ -391,7 +444,7 @@ exit /b 1
 :: ASK WINDOWS WHY BEFORE SAYING ANYTHING OF OUR OWN. See %VMFAILPROBE% above for why reading
 :: wsl.exe's message is sound at this point and would not be as a pre-flight; a miss falls through
 :: to the honest refusal below.
-powershell -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
 if %errorlevel% equ 0 goto novm
 
 :: ONE LIKELY CAUSE, NAMED AS A GUESS -- and reached only when nothing said otherwise. It used to
@@ -424,7 +477,7 @@ exit /b 1
 :: here rather than at the create -- and this block used to state the network as the cause and
 :: then invite a re-run, which on that machine is a loop with no exit. Same classifier, same
 :: shared refusal.
-powershell -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
 if %errorlevel% equ 0 goto novm
 
 :: NOT STATED AS THE CAUSE ANY MORE. The network really is the likeliest thing when the
