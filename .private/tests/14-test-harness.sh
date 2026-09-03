@@ -369,3 +369,73 @@ assert_eq "record:the-file-is-still-one-line-per-result" "3" "$(wc -l < "$WORK/r
 # field, which is the whole point of putting it on the wire.
 assert_eq "record:an-empty-value-is-still-a-field" "4" \
           "$(awk -F'\t' '$3 == "rec:nothing" { print NF }' "$WORK/rec.tsv")"
+
+# ─── machine_flags, and the SELinux label it takes off a nested fixture (#119) ──
+#
+# WHY THIS IS A UNIT TEST AND NOT ONLY A BEHAVIOURAL ONE. The arm it covers is decided by whether
+# the HOST has SELinux, so on the machines this suite is usually developed on the interesting
+# branch is the one that never runs. A fixture case can only ever exercise the local answer;
+# these four calls exercise both answers on any machine, which is the same argument
+# 10-static.sh's `,z` rules make for reading the source instead of launching a container.
+#
+# THE DOOR IS FORCED, NOT OBSERVED. $VT_SELINUX is read at call time, so setting it here reaches
+# the arm without touching lib/shared.sh's probe or this host's real posture.
+#
+# EXACT LISTS, NOT `does it contain`, and that is the whole design of this block. The obvious
+# spelling -- assert the withheld case does NOT contain label=disable -- passes when machine_flags
+# REFUSES the call, because it clears MACHINE_FLAGS before it validates and an absence assertion
+# is satisfied by an empty array. That is lib/assert.sh's vacuous-green shape exactly, and it was
+# green against a deliberately broken call while this block was being written. An equality says
+# both halves at once: the flag went, and nothing else moved.
+mf() {                                # mf VT_SELINUX DROP BASE -> the flag list, or REFUSED-N
+    ( set -u
+      # shellcheck source=lib/sandbox.sh
+      . "$TESTS_DIR/lib/sandbox.sh"
+      VT_SELINUX="$1"
+      machine_flags "$2" linux no "$3" || { printf 'REFUSED-%s' "$?"; exit 0; }
+      printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} | sed 's/ $//' )
+}
+MF_NEST='--cap-add=SYS_ADMIN --security-opt unmask=/proc/* --device /dev/fuse --device /dev/net/tun'
+
+assert_eq "flags:on-selinux-a-nested-base-runs-with-the-label-off" \
+          "$MF_NEST --security-opt label=disable" "$(mf yes '' machine)"
+# THE OTHER HALF OF lib/shared.sh's RULE -- fix Fedora without changing anything else. Off
+# SELinux this must be byte-identical to what every machine got before #119, which is what makes
+# the comparison with $MF_NEST alone the assertion rather than a spot check.
+assert_eq "flags:off-selinux-the-flag-set-is-unchanged" "$MF_NEST" "$(mf '' '' machine)"
+assert_eq "flags:the-drop-name-takes-only-the-label-away" "$MF_NEST" "$(mf yes label machine)"
+# TWO DROPS AT ONCE, because sandbox_run appends `label` to whatever a case already asked for and
+# sb-noans really does ask for `sysadmin`. If the append clobbered instead of adding, this is
+# where it shows.
+assert_eq "flags:two-drops-compose" \
+          "--security-opt unmask=/proc/* --device /dev/fuse --device /dev/net/tun" \
+          "$(mf yes sysadmin,label machine)"
+# A BASE THAT DIES IN SURVEY GETS NONE OF IT, label included -- the arm is inside the nesting gate.
+assert_eq "flags:a-base-that-does-not-nest-gets-nothing-at-all" "" "$(mf yes '' debian)"
+# ...and a typo is refused rather than silently granting the thing it meant to remove.
+assert_eq "flags:an-unknown-drop-name-is-refused" "REFUSED-2" "$(mf yes labl machine)"
+
+# ─── ...and lib/shared.sh's one door answers both of its consumers ─────────────
+#
+# STUBBED, so both branches run on every machine. The door is `command -v selinuxenabled &&
+# selinuxenabled`, so a directory at the front of PATH holding an executable of that name decides
+# it either way -- and its ABSENCE from a PATH with nothing else on it decides the other.
+sel_door() {                          # sel_door yes|no|absent -> "$VT_SELINUX|$VT_MOUNT_Z"
+    ( set -u
+      d="$WORK/seldoor"; rm -rf "$d"; mkdir -p "$d"
+      case "$1" in
+          absent) : ;;
+          *)      printf '#!/bin/sh\n[ "%s" = yes ]\n' "$1" > "$d/selinuxenabled"
+                  chmod +x "$d/selinuxenabled" ;;
+      esac
+      PATH="$d"; export PATH
+      # shellcheck source=lib/shared.sh
+      . "$TESTS_DIR/lib/shared.sh"
+      printf '%s|%s' "$VT_SELINUX" "$VT_MOUNT_Z" )
+}
+assert_eq "door:an-selinux-host-relabels-and-drops-the-label" "yes|,z" "$(sel_door yes)"
+# INSTALLED BUT DISABLED is its own case: the tool is there and says no, which must answer the
+# same as no tool at all. Both were one expression before #119 and are now read by two consumers,
+# so a disagreement between them is what this pair exists to catch.
+assert_eq "door:selinux-installed-but-off-decides-neither" "|" "$(sel_door no)"
+assert_eq "door:no-selinuxenabled-at-all-decides-neither" "|" "$(sel_door absent)"

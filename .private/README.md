@@ -1097,6 +1097,68 @@ range is a property of an account that **predates** the file, not of any distro;
 has populated it for useradd-created users since 4.11.1-3. `--no-prereqs=subuid` is the knob for
 that state on any base, and `lib/sandbox-guest.sh` records why it stays hand-driven.
 
+### SELinux, and why the nested fixtures run with their label off (issue #119)
+
+On a host with SELinux enforcing, `machine_flags` passes `--security-opt label=disable` to the
+bases that run a podman inside themselves. Nowhere else — not Tier A, not the course container.
+This is the decision behind that, because it is the sort of line a reader deletes on sight.
+
+**It fixes both of the things #119 reports as independent limits, and they were one cause.** On
+Fedora 44 / podman 5.8.4 / crun 1.28, without it: both nested builds die at STEP 3/25 with
+``mount `proc` to `proc`: Permission denied``, and `/dev/net/tun` is passed but cannot be
+`stat()`ed. Twelve assertions failed, eleven of them inside the builds, and every one read as a
+statement about `install-cs193v.sh`. The cause is the host's policy adjudicating what the **outer**
+fixture may do; the base image is irrelevant, which is why the Ubuntu and Fedora bases failed
+identically. `--security-opt unmask=ALL` does not help, so this is not the kernel's
+`mount_too_revealing()` refusing a procfs whose parent has hidden submounts.
+
+**#119's prerequisite is retired.** It concluded the device needed `setsebool -P
+container_use_devices 1`, a root and machine-wide change. It does not: that boolean gates
+`container_t`, and this changes the type. The boolean is still `off` on the machine where the tier
+is green, and `nest:and-dev-net-tun-is-what-the-label-was-hiding` is the assertion that keeps that
+true.
+
+**Two narrower postures were measured and neither works.** `label=type:container_engine_t` is the
+type container-selinux ships *for* a container engine inside a container, and it is the obvious
+answer: it gets past `mount proc` and is then refused every masked sysfs path in turn — `mount
+tmpfs to sys/firmware`, and with that unmasked, `sys/fs/selinux` next. Nothing on our side sets the
+**inner** engine's masked paths: `containers.conf(5)` has no key for them and those runs are
+buildah's, inside the launcher's own `podman build`. `label=type:container_runtime_t` does work,
+because it transitions to `spc_t` — and it keeps the MCS categories, which reads like least
+privilege and is not. Measured: a container carrying `spc_t:s0:c103,c851` read a file labelled
+`container_file_t:s0:c1,c2` that a properly-labelled `container_t` container was denied. The
+categories are decorative on `spc_t`, so that spelling is `label=disable` under a name that
+suggests otherwise, which is worse than saying it plainly. `--security-opt label=nested` changes
+nothing here.
+
+**What it costs, and why that is acceptable.** `lib/sandbox.sh`'s header lists what makes these
+fixtures safe — no host state inside, no podman socket, no writable mount, `--network=none` — and
+SELinux is not on that list. The outer container is a clean room for system-wide changes, not the
+host boundary: that is the user namespace (the fixture is uid 2, which lands on a subuid), DAC, and
+there being nothing mounted worth reading. Upstream's own podman-in-podman recipe passes the same
+flag. The course container is a different question with a different answer, and both
+`10-static.sh`'s `container.args` invariants and `60-container.sh` still forbid the flag there.
+
+**And it costs no fidelity, which is the claim worth checking.** The inner engine already sees
+SELinux as *disabled* — `/sys/fs/selinux` is visible but empty inside a container, which
+`podman-run(1)` states as the effect of not passing `label=nested` — so the course container it
+builds carries no label either way. What these fixtures cannot say about the course container's own
+labelling, they could not say before this flag; `tests/MANUAL.md` keeps that as a real-machine item.
+
+**How it is defended.** Deleting the flag is invisible on a machine without SELinux, because there
+the flag is not passed and its absence changes nothing — so a behavioural test cannot guard it.
+`10-static.sh`'s `fixture-flags:only-one-place-disables-the-label` and the two `tier-a` rules do,
+by reading the source on every platform, which is the same argument the launcher's `,z` rules
+make. `nest_probe_nolabel` is the behavioural half where it can run: it is the control that proves
+the flag is still necessary, and if it ever *passes* on an SELinux host then `container_t` has
+become sufficient and the flag should come out. That is the signal
+`MACHINE_SYSADMIN_BASES` did not have the last time a fixture privilege was narrowed.
+
+**Still open:** the exact denied permission behind the `container_engine_t` gap. `seinfo` and
+`sesearch` are not installed here and `ausearch` needs root, so nothing was read from the audit
+log; `sudo ausearch -m avc -ts recent` while the unflagged control runs would name it and make it
+reportable upstream.
+
 ## Open items
 
 ### ~~Enforcing the bind rule~~ — resolved by the tunnel
