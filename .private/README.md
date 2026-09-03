@@ -907,6 +907,65 @@ wsl.exe's message sound. All four are in `25-installer.sh`, and the last two go 
 `2f14c85`. The BitLocker claim is still a MANUAL.md item and still unverified; it is no longer
 load-bearing, since nothing offers the command either way.
 
+**An unqualified program name, run as Administrator out of `Downloads` (issue #125).** The
+installer's own instructions are "right-click and Run as administrator", which makes the download
+folder its working directory — and `cmd.exe` resolves an unqualified program name against the
+current directory **before `%PATH%`**. Every external program it named was unqualified: `reg`,
+`where`, `powershell` ×4, and `wsl.exe` ×12, the last including the handoff to stage two. So a file
+called `wsl.exe` sitting in `Downloads` was what ran, elevated, and `Downloads` is the likeliest
+place on the machine for an untrusted file to already be.
+
+Three layers now, and which one is the fix matters, because a reader who finds the second must not
+conclude the first is redundant:
+
+| Layer | What it closes | What it does not |
+| --- | --- | --- |
+| `%SYS32%\<name>` at every call site — **the fix** | current-directory and `%PATH%` planting, visibly, at each site | nothing else on its own |
+| `set "NoDefaultCurrentDirectoryInExePath=1"` | what no linter can see: a name arriving through a variable, or a call site added before the suite next runs | `where.exe`'s own answer, DLL search, and anything ABOVE the line |
+| `cd /d "%SystemRoot%"` | DLL planting — the only layer that does | executable resolution, which the first two already own |
+
+Measured, because two of these behave differently than they look. On Windows 11 26200 a copy of
+`csc.exe` in the working directory ran in preference to the one `%PATH%` names — but only with
+`NoDefaultCurrentDirectoryInExePath` **unset**, and Git Bash and several dev shells set it to 1, so
+the first attempt to reproduce the bug came back clean for that reason alone. And in a real `.cmd`,
+cmd re-reads that variable **per command**: a call above the `set` is still exposed and one below
+is not, so ordering is the whole contract. That is *not* true of `cmd /c "a & b"`, where the search
+path is fixed once for the line — a measurement taken that way makes the line look inert, which is
+how it first read here.
+
+`Sysnative` is not optional. From the real `C:\Windows\SysWOW64\cmd.exe`,
+`%SystemRoot%\System32\wsl.exe` is **missing** — WOW64 redirects System32 to SysWOW64, which has no
+`wsl.exe` — while `%SystemRoot%\Sysnative\wsl.exe` is found, launches, and takes `cd /d`. Without
+the `PROCESSOR_ARCHITEW6432` arm the fix would not be insecure, it would be broken on a 32-bit
+host, which is a worse failure and a harder one to attribute. Qualification is otherwise
+behaviour-preserving: on a current machine `System32\wsl.exe` is the OS component and is already
+what a bare `wsl.exe` resolves to, while the MSI's `C:\Program Files\WSL\wsl.exe` is not on `PATH`
+and the Store alias under `%LOCALAPPDATA%` sorts after System32 and is per-user.
+
+Guardrails: `cmdlint_unqualified_programs` checks both the first word of every command and any
+`*.exe` named inside the PowerShell strings `set` builds — where the first word is `set`, so
+looking at first words is structurally blind;
+`windows:the-system-directory-comes-from-the-system` stops `set "SYS32=."` satisfying it;
+`windows:the-guard-precedes-every-external-call` holds the ordering; and the rule's redness is
+demonstrated over all three routes rather than trusted. `27-installer-windows.sh`'s `win-hijack:*`
+is the only case in the suite that asserts a security property by *executing*: it plants
+`hostile.exe` in the download folder under every name the installer calls and asserts none of them
+ran, paired with positive assertions because a count of zero is an absence and a harness that died
+on line one produces the same zero.
+
+**And the harness depended on the defect.** `lib/wine.sh` copied the fakes in beside the `.cmd` and
+relied on being found first, its comment calling that "not optional" — so qualifying the calls
+would have left `--tier windows` reporting green while executing none of the installer's decisions.
+The fakes are baked into the prefix's own `system32` now, with the `WindowsPowerShell\v1.0`
+directory wine does not provide. Being on disk there was still not enough: **wine prefers its
+builtin `reg` and `net` over a real PE**, so the qualified `reg.exe` call ran wine's, answered
+`Invalid system key`, and the tier read as "not Administrator" — 97 failures whose cause was
+entirely in the fixture. `WINEDLLOVERRIDES` pins those names to native, and a build step reads
+`argv.log` back so the next regression fails where the cause is legible. `fake-where.c` and its
+`WhereNotFound` row are retired with the `where` call site: `where` searched the current directory
+itself, so its *answer* stayed plantable even after the calls were qualified, and it was answering
+a question about `%PATH%` that the installer no longer asks.
+
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open
 item below for the set that was deferred. These are the branches that were measured and dropped, so
