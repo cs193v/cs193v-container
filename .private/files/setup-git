@@ -444,7 +444,13 @@ tally_prepare() {
 secret_draw() {                       # secret_draw PROMPT N
     local dots='' i=0
     if [ "$2" -le "$SG_DOTS_MAX" ]; then
-        while [ "$i" -lt "$2" ]; do dots="$dots•"; i=$((i + 1)); done
+        # BRACED, and that is load-bearing rather than style. Bash 3.2 -- every Mac -- is not
+        # multibyte-aware when it decides where a variable name ends, so under a UTF-8 locale
+        # `"$dots•"` parses the leading byte of the bullet as part of the NAME and dies with
+        # `dots<byte>: unbound variable` under set -u. Measured: it works under LC_ALL=C and
+        # fails under en_US.UTF-8, which is the default. setup-git runs in the container on
+        # bash 5 where this is fine, but the shim tier drives it with the HOST's bash.
+        while [ "$i" -lt "$2" ]; do dots="${dots}•"; i=$((i + 1)); done
         printf '\r%s%s%s[K' "$1" "$dots" "$ESC"
     else
         printf '\r%s••• %s%s%s%s%s •••%s[K' \

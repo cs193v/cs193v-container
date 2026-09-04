@@ -142,6 +142,15 @@ fi
 # called from four places now and there is no rule stopping a fifth from being inside `$( )`,
 # where the failure would be silent and would look like the warning simply not mattering. $$ stays
 # the parent shell's pid inside a subshell, so both halves agree on the path either way.
+# macOS sets TMPDIR WITH A TRAILING SLASH, and eleven paths below are built as
+# "${TMPDIR:-/tmp}/name" -- so every one of them printed a doubled slash there. POSIX treats
+# /a//b as /a/b so nothing broke, but the paths are printed to STUDENTS: `cs193v doctor` and the
+# tunnel diagnostic both name the supervisor log, which read
+#   /var/folders/zx/ryk5x1bj42v547kwj7shw4k00000gn/T//cs193v-ba58b5c99df0.sup.log
+# in the very output a student is told to paste when asking for help. Stripped once, here, rather
+# than at each use. Safe by specification: POSIX requires consumers to accept TMPDIR either way.
+TMPDIR="${TMPDIR%/}"
+
 WARN_ACK="${TMPDIR:-/tmp}/cs193v-warned.$$"
 # Pids are reused, so a file left behind by a crash could otherwise make a launch with
 # nothing to say stop and ask to be acknowledged.
@@ -409,8 +418,14 @@ meter_bar() {                         # meter_bar CUR TOTAL -> [████░�
     filled=$(( METER_W * cur / tot ))
     [ "$filled" -gt "$METER_W" ] && filled="$METER_W"
     [ "$filled" -lt 0 ] && filled=0
-    n="$filled";                  while [ "$n" -gt 0 ]; do bar="$bar█"; n=$((n - 1)); done
-    n=$(( METER_W - filled ));    while [ "$n" -gt 0 ]; do pad="$pad░"; n=$((n - 1)); done
+    # BRACED, and load-bearing rather than style -- this is issue #120. Bash 3.2, which is every
+    # Mac, is not multibyte-aware when it decides where a variable name ends, so under a UTF-8
+    # locale `"$bar█"` parses the block's leading byte as part of the NAME and dies with
+    # `bar<byte>: unbound variable` under set -u. The student sees that line once per frame of the
+    # build meter and no progress bar at all. Measured: fine under LC_ALL=C, fatal under
+    # en_US.UTF-8, which is the default.
+    n="$filled";                  while [ "$n" -gt 0 ]; do bar="${bar}█"; n=$((n - 1)); done
+    n=$(( METER_W - filled ));    while [ "$n" -gt 0 ]; do pad="${pad}░"; n=$((n - 1)); done
     printf '[%s%s]' "$bar" "$pad"
 }
 
@@ -989,7 +1004,13 @@ load_args() {
             # return empty and the test could never fire.
             case "$line" in *[![:space:]]*) ;; *) continue ;; esac
             # trim both ends without bash 4 features
-            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            # LC_ALL=C, like the four awk calls elsewhere in this file. container.args is the
+            # one file a STUDENT edits, and BSD sed under a UTF-8 locale rejects a non-UTF-8
+            # byte with "RE error: illegal byte sequence" and emits NOTHING for that line -- so
+            # `--label caf<e9>=1` written by a Latin-1 editor vanished silently, which is the
+            # exact failure 16-args-parse.sh:163 says must not happen. Per-invocation, not
+            # exported: forcing the locale run-wide would break the box-art comparisons.
+            line="$(printf '%s' "$line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
             for word in $line; do
                 # The volume names live in container.args, not up here, so the instance
                 # suffix has to be applied as they are read. `cs193v-claude:/path` becomes
@@ -1211,7 +1232,9 @@ require_image() {
 # running on a terminal and the number is wanted either way.
 build_last_step() {                   # -> step number reached, or 0
     local n
-    n="$(sed -n 's/^STEP \([0-9]*\)\/.*/\1/p' "$BUILD_LOG" 2>/dev/null | tail -n 1)"
+    # LC_ALL=C: $BUILD_LOG is podman's output, so it can carry any byte, and a locale error
+    # here would silently stop the step counter advancing mid-build.
+    n="$(LC_ALL=C sed -n 's/^STEP \([0-9]*\)\/.*/\1/p' "$BUILD_LOG" 2>/dev/null | tail -n 1)"
     case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
 }
 
@@ -1586,7 +1609,7 @@ tunnel_start() {
 # is a signal sent to whatever now owns it.
 tunnel_record_pid() {
     local pid
-    pid="$(printf '%s' "$RT_OUT" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    pid="$(printf '%s' "$RT_OUT" | LC_ALL=C sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
     if [ -z "$pid" ]; then
         pid="$(ps -Ao pid=,args= 2>/dev/null | grep -F "$TUNNEL_CTL" | grep -v ' grep ' \
                | awk 'NR == 1 { print $1 }')"
