@@ -802,6 +802,126 @@ out="$(launcher doctor)"
 assert_says "doctor:says-when-nothing-is-built" "NOT BUILT" "$out"
 assert_says "doctor:says-how-to-build"          "--rebuild" "$out"
 
+# ─── podman installed but not on PATH  (issue #121) ────────────────────────────
+# The machine this describes is the ordinary state of the terminal window a macOS student
+# ran the installer in: podman is installed, and PATH does not name it, because the .pkg
+# announces /opt/podman/bin only in /etc/paths.d and nothing has read that in this shell.
+#
+# ITS OWN REPO COPY. $COPY is suite-wide and every case after this one uses it; these cases
+# rewrite the launcher's PODMAN_PKG_ID, so mutating $COPY would hand a doctored launcher to
+# the rest of the file.
+#
+# TMPDIR IS SPELLED OUT on every run below, because they bypass `launcher` and so do not get
+# shim_new's redirection. Without it the tunnel's control socket and pidfile are named from
+# the developer's REAL TMPDIR, and a --stop here reaches through the fake podman and takes
+# down the developer's actual tunnel. See lib/podman-shim.sh's header.
+PCOPY="$(repo_copy)"
+# A package identifier that cannot possibly be installed on the machine running the suite. The
+# shipped one is REAL on a maintainer's Mac, so a case that forgot to rewrite the launcher's copy
+# would silently interrogate /opt/podman/bin and pass for the wrong reason.
+PROBE_PKG_ID="com.example.cs193v-not-a-real-package"
+# The needle for every refusal below, asserted before it is used: an empty one would make each
+# of those assert_says vacuous forever. Same guard, and same reason, as
+# version:the-refusal-wording-was-readable above.
+PROBE_REFUSAL="$(msg_of err.no-podman | sed -n '1p')"
+if [ -n "$PROBE_REFUSAL" ]; then pass "probe:the-refusal-wording-was-readable"
+else fail "probe:the-refusal-wording-was-readable" "msg_of err.no-podman came back empty"; fi
+probe_launcher()    { PATH="$SHIM:$PFARM" TMPDIR="$SHIM/tmp" "$PCOPY/cs193v" "$@" 2>&1 </dev/null; }
+probe_launcher_rc() { PATH="$SHIM:$PFARM" TMPDIR="$SHIM/tmp" "$PCOPY/cs193v" "$@" >/dev/null 2>&1 </dev/null; printf '%s' "$?"; }
+
+# ── present, off PATH, and on a Mac: the launcher must find it ──
+shim_new
+shim_set version 5.7.0
+shim_fake_uname Darwin arm64
+POFF="$(shim_offpath_podman)"
+PFARM="$(shim_toolfarm)"
+shim_fake_pkgutil "$PROBE_PKG_ID" "$POFF"
+edit_sub "$PCOPY/cs193v" '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$PROBE_PKG_ID\""
+# THE REWRITE IS ASSERTED, not assumed. edit_sub whose ERE matches nothing is a silent no-op
+# (lib/sandbox.sh:721 records the same trap), and the consequence here is specific and nasty:
+# on the maintainer's own Mac the shipped identifier is REAL, so a forgotten rewrite would
+# quietly test /opt/podman/bin and pass for the wrong reason.
+assert_eq "probe:the-launcher-copy-names-the-fake-package" "1" \
+          "$(grep -c "^PODMAN_PKG_ID=\"$PROBE_PKG_ID\"\$" "$PCOPY/cs193v")"
+# AND IT IS STILL RUNNABLE. edit_sub rewrites through a temporary and used to drop the execute
+# bit, which made every probe_launcher below exit 126 with "Permission denied" -- eighteen
+# assertions failing for a reason that had nothing to do with what they test. lib/podman-shim.sh
+# now seeds the temporary with `cp -p`; this is the tripwire for that.
+assert_exec "probe:the-launcher-copy-is-still-executable" "$PCOPY/cs193v"
+# BOTH HALVES OF THE FIXTURE, because either alone passes vacuously: a PATH with no podman is
+# worthless if it also has no awk, and a PATH with a toolbox is worthless if podman is still on it.
+assert_eq "probe:the-fixture-really-hides-podman" "" \
+          "$(PATH="$SHIM:$PFARM" command -v podman)"
+assert_ne "probe:the-fixture-still-has-a-toolbox" "" \
+          "$(PATH="$SHIM:$PFARM" command -v awk)"
+
+out="$(probe_launcher doctor)"
+assert_contains "probe:doctor-finds-a-podman-that-is-not-on-PATH" "5.7.0"        "$out"
+assert_contains "probe:doctor-names-the-podman-it-resolved"       "$POFF/podman" "$out"
+assert_says     "probe:doctor-says-it-was-not-on-the-path"        "NOT on your PATH" "$out"
+assert_says     "probe:doctor-explains-why"                       "/etc/paths.d"  "$out"
+assert_eq       "probe:doctor-still-exits-0" "0" "$(probe_launcher_rc doctor)"
+# THE ANTI-VACUITY HALF. Everything above could be satisfied by a launcher that merely
+# LOCATED podman; this asserts it EXECUTED it through the appended directory. --stop reaches
+# `podman inspect` only after preflight has passed in full.
+shim_clear_log
+assert_says_not "probe:a-launch-does-not-die-with-no-podman" \
+                "$PROBE_REFUSAL" "$(probe_launcher --stop)"
+assert_ne "probe:the-repair-reaches-podmans-own-argv" "0" "$(shim_count '^inspect')"
+
+# ── the same machine, but Linux: the launcher must NOT repair PATH ──
+# The gate is the point. pkgutil on a Linux box is an unrelated tool, so a receipt-shaped
+# answer from something of that name must not put a directory on a student's PATH. Note the
+# fake pkgutil is left in place and WORKING -- what changes is only `uname`.
+shim_new
+shim_set version 5.7.0
+shim_fake_uname Linux x86_64
+POFF="$(shim_offpath_podman)"
+PFARM="$(shim_toolfarm)"
+shim_fake_pkgutil "$PROBE_PKG_ID" "$POFF"
+assert_ne "probe:the-linux-fixture-still-answers-pkgutil" "" \
+          "$(PATH="$SHIM:$PFARM" pkgutil --pkg-info "$PROBE_PKG_ID" 2>/dev/null)"
+assert_says "probe:linux-does-not-repair-the-path" \
+            "$PROBE_REFUSAL" "$(probe_launcher --stop)"
+assert_eq   "probe:linux-refusal-exits-1" "1" "$(probe_launcher_rc --stop)"
+
+# ── a normal PATH is left alone ──
+# The control. It passes before the fix as well as after, and it is what proves the note above
+# is reported because the repair FIRED rather than because doctor always prints it.
+shim_new
+shim_set version 5.7.0
+shim_fake_uname Darwin arm64
+PFARM="$(shim_toolfarm)"
+out="$(probe_launcher doctor)"
+assert_contains "probe:a-normal-PATH-still-reports-a-version" "5.7.0"         "$out"
+assert_contains "probe:a-normal-PATH-names-the-shim-podman"   "$SHIM/podman"  "$out"
+assert_says_not "probe:a-normal-PATH-is-left-alone" "NOT on your PATH" "$out"
+
+# ── genuinely absent: the refusal must survive ──
+# The second control. The receipt names a directory that exists and holds no podman, which is
+# also the stale-receipt case: podman removed by hand leaves its receipt behind, and the
+# probe's -f/-x tests are what refuse it.
+shim_new
+shim_set version 5.7.0
+shim_fake_uname Darwin arm64
+shim_offpath_podman >/dev/null
+rm -f "$SHIM/offpath/podman"
+PFARM="$(shim_toolfarm)"
+shim_fake_pkgutil "$PROBE_PKG_ID" "$SHIM/offpath"
+assert_eq "probe:the-absent-fixture-really-has-no-podman" "" \
+          "$(PATH="$SHIM:$PFARM" command -v podman)"
+assert_says "probe:an-absent-podman-still-refuses" \
+            "$PROBE_REFUSAL" "$(probe_launcher --stop)"
+assert_eq   "probe:that-refusal-exits-1" "1" "$(probe_launcher_rc --stop)"
+assert_says "probe:doctor-says-podman-is-not-found" "NOT FOUND" "$(probe_launcher doctor)"
+assert_eq   "probe:doctor-with-no-podman-exits-1" "1" "$(probe_launcher_rc doctor)"
+# AND THE --dev- VERBS STILL ANSWER. This is the behavioural half of the promise the dispatch
+# comments make and 10-static.sh's assert_not_contains block states: these three read files and
+# do string arithmetic, and must work on a machine with no podman anywhere.
+for v in --dev-args --dev-tunnel --dev-print-command; do
+    assert_eq "probe:$v-answers-with-no-podman-anywhere" "0" "$(probe_launcher_rc $v)"
+done
+
 # ─── terminal handling ─────────────────────────────────────────────────────────
 # podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), costing 256-colour support. But the image ships a limited

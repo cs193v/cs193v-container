@@ -566,6 +566,65 @@ So what a real Fedora box adds is exactly the kernel-level things, and there are
    `.private/README.md` carries the measurement, the two narrower postures that were tried, and
    what the flag costs.
 
+### podman installed but not on PATH  (issue #121)
+
+The launcher repairs its own PATH when podman is installed somewhere PATH does not name, by
+asking `pkgutil` where the `.pkg`'s receipt says the payload went. The shim tier drives every
+*decision* in that repair against a fabricated receipt (`25-installer.sh :: probe:*`,
+`30-launcher-shim.sh :: probe:*`). **What no fixture can answer is whether the real `.pkg` still
+behaves the way the repair assumes**, and that is three facts about a Mac.
+
+*In order of how likely each is to break:*
+
+1. **The window the installer ran in.** Run the installer, and WITHOUT CLOSING THAT WINDOW:
+   ```sh
+   cd ~/cs193v && ./cs193v doctor
+   ```
+   *Expect:* the podman version, a `podman path` line naming `/opt/podman/bin/podman`, and the
+   two notes — `NOT on your PATH — cs193v added its directory itself` and the `/etc/paths.d`
+   explanation. Then `./cs193v` itself must start normally. **This is the case that shipped the
+   bug**, and before the fix it was the STOP box.
+2. **A new window.** Open a fresh terminal and run the same `doctor`.
+   *Expect:* the same version and `podman path`, and **no** notes — `path_helper` has run at
+   login, so PATH already named the directory and the repair was a no-op. If the notes appear
+   here, the guard on `command -v podman` is not firing and every launch is paying for a
+   pkgutil it does not need.
+3. **A non-login shell**, which is the case a new window never fixes and the reason the
+   launcher has to self-heal at all:
+   ```sh
+   env PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" zsh -c "$HOME/cs193v/cs193v doctor"
+   ```
+   *Expect:* the notes are back. `/etc/zprofile` does not run for a non-login shell, so
+   `/etc/paths.d` is never read — this is the student with an IDE terminal profile that omits
+   `-l`, and reopening a window does nothing for them.
+
+   **`env PATH=...` IS NOT OPTIONAL AND A BARE `zsh -c` PROVES NOTHING.** A child shell
+   inherits its parent's PATH, and the terminal you are typing in is a login shell whose PATH
+   `path_helper` has already repaired — so a bare `zsh -c` would report no notes and look like
+   a pass. The value above is what launchd actually hands a process. For the same reason, a
+   *login* `zsh -lc` from that same stripped environment should show **no** notes, and running
+   both is what distinguishes "the repair works" from "PATH was fine all along".
+4. **The receipt exists by the time `installer -pkg` returns.** This is the one ordering
+   assumption in the change: `install_podman` calls `ensure_podman_path` immediately after the
+   pkg install, and that reads the receipt the installer just wrote. It has held on every Mac
+   tried, and a failure is loud (`podman was installed, but this script cannot run it`), but
+   nothing asserts it. Check it whenever `PODMAN_MACOS_VERSION` moves:
+   ```sh
+   pkgutil --pkg-info com.redhat.podman            # expect a location: line
+   pkgutil --only-files --files com.redhat.podman | grep -E '(^|/)podman$'
+   ```
+   *Expect:* exactly one match, and composing the two to yield the directory holding `podman`.
+   **Also confirm the identifier itself** — it is the one constant the repair hardcodes, and the
+   `.pkg` declares it: `pkgutil --expand-full <the pkg> /tmp/x && grep -o 'identifier="[^"]*"'
+   /tmp/x/*.pkg/PackageInfo`. If it ever changes, `PODMAN_PKG_ID` in **both** `cs193v` and
+   `install-cs193v.sh` needs it, and `25-installer.sh` will fail if only one is updated.
+
+*Also worth doing once, and destructive, so do it on a machine you can rebuild:* remove
+`/opt/podman` by hand and leave the receipt in place, which is the stale-receipt case.
+*Expect:* the ordinary `err.no-podman` STOP box rather than a dead directory appended to PATH —
+the repair's `-f`/`-x` tests are what refuse it. `26-installer-sandbox.sh` names this claim as a
+skip because a Linux container cannot hold a macOS package receipt.
+
 ### The macOS podman floor, and the `podman machine` nobody has exercised
 The podman floors diverged when the Linux one dropped to 4.9.0: `MIN_PODMAN_LINUX="4.9.0"` and
 `MIN_PODMAN_MACOS="5.7.0"`, declared in both `install-cs193v.sh` and `cs193v`. The Linux floor is

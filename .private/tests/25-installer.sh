@@ -114,6 +114,148 @@ mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193
 assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
           "$(run_vl vl_installer "$mp_mac" "$mp_lin")"
 
+# ─── the PATH repair is the same code in both copies  (issue #121) ─────────────
+# ensure_podman_path is the third function the installer has to carry rather than source, and
+# it is the one where a disagreement is worst: this script runs FIRST, reports success, and
+# hands the student a launcher that runs LAST. If the two ever answer differently about where
+# podman is, the student sees "Setup finished" followed by "Podman is not installed" -- which
+# IS issue #121, and is what it looked like the first time.
+pkg_inst="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' "$REPO/cs193v")"
+# NON-EMPTY FIRST, both of them, for the reason the floors above give: empty-vs-empty passes
+# forever, and a renamed constant makes the sed match nothing.
+assert_ne "probe:installer-declares-the-package-id" "" "$pkg_inst"
+assert_ne "probe:launcher-declares-the-package-id"  "" "$pkg_lnch"
+assert_eq "probe:the-two-package-ids-agree" "$pkg_inst" "$pkg_lnch"
+record    "probe:package-id" "$pkg_inst"
+assert_eq "probe:installer-declares-the-package-id-once" "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/install-cs193v.sh)"
+assert_eq "probe:launcher-declares-the-package-id-once"  "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' "$REPO/cs193v")"
+
+# AND THE BODIES, not just the constant. carve_func's own header explains why an empty carving
+# is the trap here: sourced, it asserts nothing and passes.
+carve_func "$PRIVATE/install-cs193v.sh" ensure_podman_path "$TMP/probe_installer.sh"
+assert_ok "extract:probe_installer" test -s "$TMP/probe_installer.sh"
+carve_func "$REPO/cs193v"              ensure_podman_path "$TMP/probe_launcher.sh"
+assert_ok "extract:probe_launcher"  test -s "$TMP/probe_launcher.sh"
+assert_eq "probe:the-two-copies-are-byte-identical" "" \
+          "$(diff "$TMP/probe_installer.sh" "$TMP/probe_launcher.sh")"
+
+# ─── and what that code actually decides  (issue #121) ─────────────────────────
+# Driven against BOTH carvings, so a divergence that somehow survived the diff above still
+# fails here, and against a fabricated receipt rather than this machine's -- see PROBE_PKG_ID.
+#
+# THE CARVINGS NEED THREE NAMES FROM THEIR HOME SCRIPT: PODMAN_PKG_ID, PODMAN_PATH_ADDED and
+# platform(). platform() is supplied here rather than carved, because the two files' copies of
+# it DIFFER in the unsupported-OS arm (the installer dies, the launcher prints "other") while
+# both answer "macos" on Darwin -- which is the whole reason the gate could be spelled
+# identically in both. Substituting it also makes the platform axis a parameter of the test
+# instead of a fake uname.
+IPROBE_PKG_ID="com.example.cs193v-not-a-real-package"
+
+# run_probe CARVING PLATFORM -> "rc|PODMAN_PATH_ADDED|PATH"
+#
+# PLATFORM IS A PARAMETER rather than a faked uname, because that is the axis under test and
+# because platform() itself cannot be carved: the two files' copies differ in the
+# unsupported-OS arm (the installer dies, the launcher prints "other") while both answer
+# "macos" on Darwin -- which is exactly why the gate could be spelled identically in both.
+#
+# THE CARVING GETS ITS THREE NAMES EXPLICITLY: the two globals it reads, and platform(). A
+# subshell, so nothing it exports reaches the next case.
+run_probe() {
+    local carving="$1" plat="$2"
+    (
+        PODMAN_PKG_ID="$IPROBE_PKG_ID"
+        PODMAN_PATH_ADDED=""
+        PROBE_PLAT="$plat"
+        platform() { printf '%s' "$PROBE_PLAT"; }
+        PATH="$SHIM:$IFARM"
+        # shellcheck source=/dev/null
+        . "$carving" || { printf 'CARVING-DID-NOT-SOURCE'; exit; }
+        ensure_podman_path; rc=$?
+        printf '%s|%s|%s' "$rc" "$PODMAN_PATH_ADDED" "$PATH"
+    )
+}
+p_rc()    { printf '%s' "${1%%|*}"; }
+p_added() { local t="${1#*|}"; printf '%s' "${t%%|*}"; }
+p_path()  { printf '%s' "${1##*|}"; }
+
+for f in installer launcher; do
+    CARV="$TMP/probe_$f.sh"
+
+    # ── present, off PATH, on a Mac ──
+    shim_new
+    shim_set version 5.7.0
+    IOFF="$(shim_offpath_podman)"
+    IFARM="$(shim_toolfarm)"
+    shim_fake_pkgutil "$IPROBE_PKG_ID" "$IOFF"
+    # BOTH HALVES OF THE FIXTURE, because either alone passes vacuously.
+    assert_eq "probe:$f-fixture-hides-podman"      "" "$(PATH="$SHIM:$IFARM" command -v podman)"
+    assert_ne "probe:$f-fixture-keeps-a-toolbox"   "" "$(PATH="$SHIM:$IFARM" command -v awk)"
+    before="$SHIM:$IFARM"
+    r="$(run_probe "$CARV" macos)"
+    assert_eq "probe:$f-finds-a-podman-off-PATH"    "0"     "$(p_rc "$r")"
+    assert_eq "probe:$f-records-which-directory"    "$IOFF" "$(p_added "$r")"
+    # APPENDED: the directory is the LAST element, and deliberately not the first.
+    assert_eq "probe:$f-appends-that-one-directory" "$IOFF" "$(p_path "$r" | sed 's/.*://')"
+    assert_ne "probe:$f-does-not-prepend-it"        "$IOFF" "$(p_path "$r" | sed 's/:.*//')"
+    # AND NOTHING ELSE. The whole PATH is the old one plus exactly one entry, so a copy that
+    # helpfully added /usr/local/bin as well would fail here rather than pass the two above.
+    assert_eq "probe:$f-adds-nothing-but-that"      "$before:$IOFF" "$(p_path "$r")"
+
+    # ── the same machine, but not a Mac ──
+    # THE CROSS-PLATFORM REQUIREMENT. The receipt still answers -- pkgutil is a real name on
+    # some Linuxes -- and the repair must still not fire.
+    r="$(run_probe "$CARV" linux)"
+    assert_eq "probe:$f-does-nothing-on-linux"        "1"      "$(p_rc "$r")"
+    assert_eq "probe:$f-records-nothing-on-linux"     ""       "$(p_added "$r")"
+    assert_eq "probe:$f-leaves-linux-PATH-untouched"  "$before" "$(p_path "$r")"
+    r="$(run_probe "$CARV" wsl)"
+    assert_eq "probe:$f-does-nothing-on-wsl"          "1"      "$(p_rc "$r")"
+
+    # ── no receipt at all ──
+    shim_fake_pkgutil com.example.some-other-package "$IOFF"
+    r="$(run_probe "$CARV" macos)"
+    assert_eq "probe:$f-refuses-with-no-receipt"       "1"       "$(p_rc "$r")"
+    assert_eq "probe:$f-leaves-PATH-alone-with-no-receipt" "$before" "$(p_path "$r")"
+
+    # ── a receipt naming a directory that holds no podman ──
+    # ALSO THE STALE-RECEIPT CASE: podman removed by hand leaves its receipt behind, and the
+    # probe's -f test is what refuses it rather than appending a dead directory.
+    mkdir -p "$SHIM/empty"
+    shim_fake_pkgutil "$IPROBE_PKG_ID" "$SHIM/empty"
+    r="$(run_probe "$CARV" macos)"
+    assert_eq "probe:$f-refuses-a-receipt-with-no-podman" "1" "$(p_rc "$r")"
+
+    # ── a podman that is there but not executable ──
+    # The -x half. A half-extracted .pkg leaves a mode-644 binary, and `[ -x somedir ]` being
+    # true for a directory is why -f alone would not answer this either.
+    mkdir -p "$SHIM/notexec"
+    cp "$IOFF/podman" "$SHIM/notexec/podman"
+    chmod 644 "$SHIM/notexec/podman"
+    assert_ok  "probe:$f-the-unrunnable-fixture-is-a-file" test -f "$SHIM/notexec/podman"
+    assert_fail "probe:$f-the-unrunnable-fixture-is-not-runnable" test -x "$SHIM/notexec/podman"
+    shim_fake_pkgutil "$IPROBE_PKG_ID" "$SHIM/notexec"
+    r="$(run_probe "$CARV" macos)"
+    assert_eq "probe:$f-refuses-a-non-executable-podman" "1" "$(p_rc "$r")"
+
+    # ── a healthy PATH is left completely alone ──
+    # THE CONTROL, and the cheapest guard against the whole thing firing when it should not:
+    # podman is on PATH here, so the receipt is never consulted at all.
+    shim_new
+    shim_set version 5.7.0
+    IFARM="$(shim_toolfarm)"
+    shim_fake_pkgutil "$IPROBE_PKG_ID" "$SHIM"
+    before="$SHIM:$IFARM"
+    assert_ne "probe:$f-healthy-fixture-really-has-podman" "" \
+              "$(PATH="$SHIM:$IFARM" command -v podman)"
+    r="$(run_probe "$CARV" macos)"
+    assert_eq "probe:$f-accepts-a-healthy-PATH"        "0"       "$(p_rc "$r")"
+    assert_eq "probe:$f-records-nothing-when-healthy"  ""        "$(p_added "$r")"
+    assert_eq "probe:$f-leaves-a-healthy-PATH-alone"   "$before" "$(p_path "$r")"
+done
+
 # ─── the menu answers the same keys in both copies ─────────────────────────────
 # menu() is the second function the installer has to carry rather than source, and it had no
 # check at all until setup-git made cs193v-ui.sh the third consumer.
@@ -834,6 +976,90 @@ assert_says "mac-disk:still-finishes-after-a-refused-grow" "Setup finished" "$ou
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
 assert_says_not "mac-disk:non-numeric-size-grows-nothing" "Growing" "$out"
 assert_says "mac-disk:non-numeric-size-still-finishes" "Setup finished" "$out"
+
+# ─── survey does not reinstall a podman it cannot see  (issue #121) ────────────
+# The second bug #121 caused, and the one that costs a student real money: re-running this
+# script in the window that ran it the first time saw NO podman -- so it re-downloaded 75 MB,
+# asked for the password again, and re-ran `sudo installer`, whose preinstall does
+# `rm -rf /opt/podman` and takes the virtual machine and every container in it with it.
+#
+# A REWRITTEN COPY OF THE INSTALLER, so the receipt consulted is a fabricated one. The shipped
+# identifier is REAL on a maintainer's Mac, which would make these pass for the wrong reason.
+cp "$PRIVATE/install-cs193v.sh" "$TMP/install-probe.sh"
+edit_sub "$TMP/install-probe.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
+edit_sub "$TMP/install-probe.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
+edit_sub "$TMP/install-probe.sh" '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$IPROBE_PKG_ID\""
+# EVERY REWRITE ASSERTED. edit_sub whose ERE matches nothing is a silent no-op -- lib/sandbox.sh
+# records the same trap -- and here the consequence is a case that interrogates the developer's
+# real /opt/podman and passes without testing anything.
+assert_eq "probe:the-installer-copy-names-the-fake-package" "1" \
+          "$(grep -c "^PODMAN_PKG_ID=\"$IPROBE_PKG_ID\"\$" "$TMP/install-probe.sh")"
+assert_ok "probe:the-installer-copy-is-valid-bash" bash -n "$TMP/install-probe.sh"
+
+# THE PATH OVERRIDE RIDES ON THE DOOR'S OWN env LINE. installer_host runs
+# `env HOME=... PATH="$SHIM:$PATH" "$@" bash "$script"`, and a duplicate assignment later in an
+# env argv wins -- measured: `env A=1 A=2 sh -c 'echo $A'` prints 2. So no surgery on the door,
+# and 10-static.sh's installer-door rules stay satisfied.
+# TWO FUNCTIONS, AND THE SPLIT IS NOT STYLE. Every call site is `out="$(probe_survey ...)"`,
+# which is a subshell -- so a fixture built inside it would set $SHIM, $IOFF and $IFARM in that
+# subshell and NONE of them would reach the assertions, which would then compare against
+# whatever an earlier case left behind. That is the "#76 shape" repo_copy's own comment
+# records, and it cost this block one green-looking failure before it was split: the needle
+# named one shim directory and the installer had run in another.
+probe_setup() {                       # probe_setup present|absent   (in the CALLER's shell)
+    shim_new
+    shim_fake_mac
+    shim_set version 5.7.0
+    IOFF="$(shim_offpath_podman)"
+    IFARM="$(shim_toolfarm)"
+    case "$1" in
+        present) shim_fake_pkgutil "$IPROBE_PKG_ID" "$IOFF" ;;
+        # A receipt for a directory with no podman in it: podman genuinely absent, which is
+        # what a first-time student's Mac looks like.
+        absent)  mkdir -p "$SHIM/empty"
+                 shim_fake_pkgutil "$IPROBE_PKG_ID" "$SHIM/empty" ;;
+    esac
+}
+probe_survey() {                      # probe_survey -> the installer's output
+    installer_host "$TMP/install-probe.sh" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM"
+}
+
+# ── podman installed, invisible: found, reported, and NOT reinstalled ──
+probe_setup present
+out="$(probe_survey)"
+# The gate: if this fails, everything below is failing because the run never got past survey.
+assert_says "probe:the-survey-run-reached-macos"    "macos on arm64" "$out"
+assert_says "probe:the-installer-reports-the-podman-it-found" "podman 5.7.0" "$out"
+assert_says "probe:the-installer-says-where-it-found-it" \
+            "podman is installed in $IOFF" "$out"
+assert_says "probe:the-installer-explains-the-path"  "does not name yet" "$out"
+# THE NEGATIVE, and its positive is the pair above. "Podman runs the course container" is the
+# opening of the need() body on BOTH the macOS and the Linux arm, so this needs no platform gate.
+assert_says_not "probe:the-installer-does-not-reinstall-a-podman-it-cannot-see" \
+                "Podman runs the course container" "$out"
+assert_says_not "probe:it-downloads-no-pkg" "podman-installer-macos" "$out"
+assert_says_not "probe:it-runs-no-installer" "installer -pkg" "$(sudo_log)"
+# AND IT REALLY RAN THAT PODMAN, rather than merely finding the file. This is what separates
+# "the repair located it" from "the repair put it somewhere PATH can reach".
+assert_says "probe:the-installer-really-ran-that-podman" "--version" "$(installer_log)"
+
+# ── podman genuinely absent: the offer must survive ──
+# THE CONTROL. It passed before the fix and must keep passing: a repair that swallowed this
+# would leave a student with no podman and no offer to install one.
+probe_setup absent
+out="$(probe_survey)"
+assert_says "probe:the-survey-absent-run-reached-macos" "macos on arm64" "$out"
+assert_says "probe:the-installer-offers-to-install-a-podman-that-really-is-absent" \
+            "Podman runs the course container" "$out"
+assert_says_not "probe:it-claims-no-directory-when-there-is-none" \
+                "podman is installed in" "$out"
+
+# A CLEAN SHIM LEFT BEHIND, DELIBERATELY. probe_setup runs in THIS shell rather than a subshell
+# (it has to -- see its own comment), so it leaves $SHIM with podman moved out of it. Anything
+# added after this block that reused that shim would see a machine with no podman and take
+# install paths it did not ask for, which is a confusing way to inherit a bug. This block owns
+# its mess.
+shim_new
 
 # ─── the Intel Mac stop, which is the other thing uname decides ────────────────
 shim_new

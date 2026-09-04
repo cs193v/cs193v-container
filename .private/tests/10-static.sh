@@ -1160,6 +1160,98 @@ assert_contains "launcher:bare-launch-announces-itself" "status.entering" "$bare
 assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
                     "refuse_if_session_live" "$(fn_body verb_reset_tunnel $REPO/cs193v)"
 
+# ─── podman that is installed but not on PATH: issue #121 ──────────────────────
+#
+# The launcher repairs its own PATH when podman is installed somewhere PATH does not name,
+# which on macOS is the ordinary state of the terminal the installer ran in -- the .pkg
+# announces /opt/podman/bin only in /etc/paths.d, and nothing reads that but path_helper,
+# from /etc/zprofile, at login. These lints pin the four properties of that repair that a
+# behavioural test cannot see, and the two that it would only see on a Mac.
+probe_body="$(fn_body ensure_podman_path $REPO/cs193v)"
+# THE GUARD FOR EVERYTHING BELOW. fn_body anchors on /^name() {/, so a rename or a reflow
+# yields an EMPTY body -- and every assert_contains against an empty string fails while every
+# assert_not_contains passes, which is half a suite going quietly vacuous.
+assert_ne "probe:the-probe-is-extractable" "" "$probe_body"
+
+assert_eq "probe:launcher-declares-the-package-id-once" "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' $REPO/cs193v)"
+assert_eq "probe:launcher-declares-the-marker-once" "1" \
+          "$(grep -c '^PODMAN_PATH_ADDED=' $REPO/cs193v)"
+
+# A NO-OP ON A HEALTHY MACHINE, and this is the line that makes it one: without it every
+# launch on every platform pays three forks and a pkgutil to rediscover what PATH already
+# knew. It is also what makes "append" safe -- see below.
+assert_contains "probe:it-only-fires-when-podman-is-missing" \
+                'command -v podman >/dev/null 2>&1 && return 0' "$probe_body"
+# MACOS ONLY, IN THE BODY. pkgutil on a Linux box is an unrelated tool, and the launcher is
+# cross-platform; gating inside the function is one guarantee where gating at each of the two
+# call sites would be two chances to get it wrong. 30-launcher-shim.sh drives the Linux case.
+assert_contains "probe:it-is-macos-only" \
+                '[ "$(platform)" = macos ] || return 1' "$probe_body"
+# APPENDED, NOT PREPENDED. The guard above means podman is absent from PATH entirely, so
+# prepending could not shadow a podman -- but it WOULD put a directory ahead of the student's
+# own PATH for every other name the launcher runs. Appended, the only lookup whose answer
+# changes is `podman`.
+assert_contains "probe:it-appends-rather-than-prepends" \
+                'export PATH="$PATH:$d"' "$probe_body"
+# AND THE ASSERTION ABOVE IS WHAT KEEPS THIS ONE HONEST -- an assert_not_contains for a
+# spelling that appears nowhere passes forever. See reset-tunnel-is-exempt above.
+assert_not_contains "probe:it-does-not-prepend" '$d:$PATH' "$probe_body"
+
+# BOTH PROBERS REPAIR, and neither inherits the other's repair: verb_doctor deliberately does
+# not call preflight, because its job is reporting on a machine preflight would refuse.
+preflight_body="$(fn_body preflight $REPO/cs193v)"
+doctor_body="$(fn_body verb_doctor $REPO/cs193v)"
+assert_ne "probe:preflight-is-extractable" "" "$preflight_body"
+assert_ne "probe:doctor-is-extractable"    "" "$doctor_body"
+assert_contains "probe:preflight-repairs-the-path" "ensure_podman_path" "$preflight_body"
+assert_contains "probe:doctor-repairs-the-path"    "ensure_podman_path" "$doctor_body"
+# BEFORE IT REFUSES, not after. Asserted as an ordering rather than a presence, because a
+# repair that ran after the die is a repair that never runs.
+assert_eq "probe:preflight-repairs-before-it-refuses" "yes" \
+          "$(printf '%s\n' "$preflight_body" \
+             | awk '/ensure_podman_path/{p=NR} /err\.no-podman/{d=NR}
+                    END{print (p && d && p < d) ? "yes" : "no"}')"
+
+# EXACTLY TWO CALLERS, AND THIS IS THE TRIPWIRE. The whole of issue #121 was one prober with
+# no repair; the shape that brings it back is a THIRD prober added later whose author did not
+# know to repair first. Comments blanked, so the reasoning above -- which names the function
+# repeatedly -- does not count as a call.
+probe_code="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
+assert_eq "probe:exactly-two-callers" "2" \
+          "$(printf '%s\n' "$probe_code" | grep -c '^ *ensure_podman_path$')"
+# And exactly four places TEST for podman: the probe's own guard, preflight, and doctor's two
+# branches. A fifth is a new place that decides podman is absent, and every such place has to
+# sit after a repair or it is #121 again.
+#
+# `>/dev/null` IS THE DISCRIMINATOR, and it is doing real work rather than tightening a grep:
+# doctor also uses `$(command -v podman)` twice to REPORT which podman it resolved, and those
+# are values rather than decisions. A bare count of `command -v podman` conflates the two and
+# would have to be bumped every time the report gains a line.
+assert_eq "probe:podman-is-tested-in-exactly-four-places" "4" \
+          "$(printf '%s\n' "$probe_code" | grep -c 'command -v podman >/dev/null')"
+
+# NOT AT DISPATCH, and not in any --dev- verb. The repair exports PATH, and a pre-dispatch
+# call would export it into every child of every verb including the long-lived
+# --dev-supervise. The four below are the verbs the unit tier drives on a machine with no
+# podman at all; keeping the repair out of them keeps that promise literally true.
+dispatch_arm="$(sed -n '/^case "${1:-}" in/,/^esac/p' $REPO/cs193v)"
+assert_ne "probe:the-dispatch-case-is-extractable" "" "$dispatch_arm"
+assert_not_contains "probe:dispatch-does-not-repair" "ensure_podman_path" "$dispatch_arm"
+for v in verb_dev_args verb_dev_tunnel verb_dev_steps verb_print_command; do
+    assert_ne           "probe:$v-is-extractable" "" "$(fn_body $v $REPO/cs193v)"
+    assert_not_contains "probe:$v-does-not-repair" \
+                        "ensure_podman_path" "$(fn_body $v $REPO/cs193v)"
+done
+
+# The installer carries its own copy, for the reason version_lt and box() are duplicated: it is
+# curl-piped and standalone. That the two copies AGREE is 25-installer.sh's business; that the
+# installer has one at all is here, so a launcher-only fix cannot pass.
+assert_eq "probe:installer-declares-the-package-id-once" "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/install-cs193v.sh)"
+assert_ne "probe:the-installer-has-a-probe-too" "" \
+          "$(fn_body ensure_podman_path $PRIVATE/install-cs193v.sh)"
+
 # The deletions. Each of these strings is the whole of a mechanism that #41 removes, so its
 # survival means the old design is still half-wired underneath the new one.
 #

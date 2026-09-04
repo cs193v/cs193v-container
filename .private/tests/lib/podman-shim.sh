@@ -23,7 +23,7 @@ SHIM_SNAPSHOT="$SHIM_HOST_TMPDIR/cs193v-snap.$$"
 # Whatever an earlier, KILLED run left here. See sweep_stale_tmpdirs in lib/assert.sh for why it
 # goes by pid rather than by age, and why it is called at suite start and not only on exit.
 shim_sweep_stale() {                  # -> how many directories it removed
-    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap cs193v-last
+    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap cs193v-last cs193v-farm
 }
 
 # shim_new [DIR]  -> creates a shim, sets $SHIM, and puts it first on $PATH for `launcher`.
@@ -80,7 +80,7 @@ shim_count() {                        # shim_count ERE
 # shims per installer run (#76). The pid in every name is what lets one glob find exactly
 # ours and leave a concurrent run's alone.
 shim_cleanup() {
-    rm -rf "$SHIM_SNAPSHOT" \
+    rm -rf "$SHIM_SNAPSHOT" "$SHIM_FARM" \
            "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".* \
            "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* \
            "$SHIM_HOST_TMPDIR"/cs193v-last."$$" 2>/dev/null || true
@@ -365,6 +365,101 @@ shim_fake_mac() {                     # shim_fake_mac [TOTAL_BYTES]
     shim_fake_sysctl "${1:-17179869184}"
 }
 
+# ─── podman that is installed and invisible: issue #121 ────────────────────────
+#
+# THE ONE THING A SHIM CANNOT DO BY PREPENDING. Every other helper in this file works by
+# putting something FIRST on PATH. These three need the opposite -- a PATH with no podman on
+# it at all -- because that is the machine issue #121 describes: the .pkg put podman in a
+# directory only /etc/paths.d names, and nothing has read /etc/paths.d in this shell.
+#
+# IT CANNOT BE SPELLED BY FILTERING THE REAL PATH. On Linux podman lives in /usr/bin, next to
+# awk, sed, id, find, xargs, sha256sum and ssh, so dropping the directory that holds podman
+# drops the launcher's whole toolbox with it. (On a Mac the filter WOULD work -- /opt/podman/bin
+# holds only podman and its helpers -- and a fixture that behaved differently on the two
+# platforms is how a case comes to pass for a reason nobody chose.)
+#
+# NOR CAN PODMAN BE HIDDEN IN PLACE. Measured on bash 3.2.57: `command -v` skips a
+# non-executable file AND a directory of the same name and keeps searching, so no entry
+# prepended to PATH can make a later executable invisible.
+#
+# So the PATH is BUILT rather than edited: one directory of symlinks to everything the real
+# PATH offers, minus podman. Complete by construction, which is what a hand-maintained tool
+# list would not have been -- a farm silently missing `sed` makes the launcher fail in a way
+# that reads as a launcher bug rather than as a broken fixture.
+SHIM_FARM="$SHIM_HOST_TMPDIR/cs193v-farm.$$"
+
+# ONE `ln -s` PER PATH DIRECTORY, not one per file: 1387 links in 0.15s where the per-file
+# loop took 2.46s, which is real money in the cheap lane. Collisions are the point rather
+# than a problem -- without -f, an earlier PATH directory wins, which is exactly PATH
+# precedence -- so ln's complaints about them go to /dev/null.
+#
+# MEMOISED like SHIM_SNAPSHOT and named from $$ for the same reasons: every case in a suite
+# then gets the same farm, and shim_cleanup can tell ours from a concurrent run's.
+shim_toolfarm() {                     # shim_toolfarm -> a directory of tools, minus podman
+    local d old
+    if [ ! -d "$SHIM_FARM" ]; then
+        mkdir -p "$SHIM_FARM" || return 1
+        old="$IFS"; IFS=:
+        for d in $PATH; do
+            IFS="$old"
+            [ -d "$d" ] || continue
+            ln -s "$d"/* "$SHIM_FARM/" 2>/dev/null
+            IFS=:
+        done
+        IFS="$old"
+        # AFTER the loop, not by skipping it: either of these could be reachable from more than
+        # one PATH directory, and this way the farm cannot end up with whichever copy came second.
+        #
+        # TWO NAMES, AND pkgutil IS THE SECOND ON PURPOSE. It is the other binary these cases
+        # control, through shim_fake_pkgutil. A real /usr/sbin/pkgutil left in the farm would be
+        # shadowed by the fake whenever a case installs one -- and would silently answer from
+        # the DEVELOPER'S OWN MACHINE for any case that forgot to. Nothing here wants the real
+        # one, so the farm does not carry it.
+        rm -f "$SHIM_FARM/podman" "$SHIM_FARM/pkgutil"
+    fi
+    printf '%s' "$SHIM_FARM"
+}
+
+# The fake podman, moved somewhere PATH does not name. $SHIM ITSELF STAYS FIRST ON PATH, so
+# sudo-fake, argv.log and every other case's expectations are undisturbed -- what changes is
+# that $SHIM no longer holds a podman. podman-fake reads its state out of $CS193V_SHIM, which
+# shim_new exports, so it goes on answering `state`, `version` and the rest from where it is.
+shim_offpath_podman() {               # shim_offpath_podman -> the directory it moved it to
+    mkdir -p "$SHIM/offpath" || return 1
+    mv "$SHIM/podman" "$SHIM/offpath/podman" || return 1
+    printf '%s' "$SHIM/offpath"
+}
+
+# Fake `pkgutil`, which is how ensure_podman_path asks macOS where the .pkg put podman.
+#
+# ANSWERS ONLY THE IDENTIFIER IT WAS GIVEN, and exits 1 for any other -- the doctrine
+# shim_fake_sysctl states above and for the same reason: a fake that returned an empty line
+# for an unknown package would feed an empty string into the composition this exists to
+# exercise, and the case would pass for the wrong reason.
+#
+# THE TWO-CALL SHAPE IS THE REAL ONE. `--pkg-info` answers a `location:` relative to the
+# volume root with no leading slash (`opt`), and `--only-files --files` answers paths relative
+# to THAT (`podman/bin/podman`); the caller composes them. BINDIR is split the same way so the
+# composition under test is the same arithmetic on a fabricated pair as on a real receipt.
+shim_fake_pkgutil() {                 # shim_fake_pkgutil ID BINDIR
+    local loc rel
+    # The leading slash comes back in the caller's "/$loc/...", so it is stripped here.
+    loc="${2#/}"; loc="${loc%/*}"
+    rel="${2##*/}/podman"
+    cat > "$SHIM/pkgutil" <<EOF
+#!/bin/sh
+id=""
+for a in "\$@"; do case "\$a" in --*) ;; *) id="\$a" ;; esac; done
+[ "\$id" = "$1" ] || { echo "No receipt for '\$id' found at '/'." >&2; exit 1; }
+case "\$1" in
+    --pkg-info)   printf 'package-id: %s\nversion: 0.0.0\nvolume: /\nlocation: %s\n' "$1" "$loc" ;;
+    --only-files) printf '%s\n%s\n' "$rel" "${rel%podman}podman-mac-helper" ;;
+    *)            echo "pkgutil: unsupported in this fake: \$1" >&2; exit 1 ;;
+esac
+EOF
+    chmod +x "$SHIM/pkgutil"
+}
+
 # Fake `ssh`, so a launch can reach open_shell having warned about NOTHING.
 #
 # Against the fake podman the tunnel can never come up — its ProxyCommand is
@@ -412,10 +507,22 @@ EOF
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
 # BSD/macOS requires one, so `sed -i '/x/d' f` works on Linux and fails on a Mac.
+# THE TEMPORARY IS SEEDED WITH `cp -p`, WHICH IS THE WHOLE POINT OF THE LINE. Both of these
+# write a new file and mv it over the original, so without this the result carries the default
+# umask -- 644 -- and the original's mode is GONE. That was harmless for years because every
+# caller edited container.args or an installer copy that is run as `bash "$script"`, and a mode
+# is invisible to both. The first caller to edit a file that is then EXECUTED (the launcher, in
+# 30-launcher-shim.sh's issue-#121 section) got `Permission denied` and exit 126 from every run
+# afterwards, which reads as a launcher bug and is not one.
+#
+# `cp -p` RATHER THAN chmod --reference, which is GNU-only and would fail on the Macs this suite
+# has to run on. The redirection truncates the copy without changing its mode.
 edit_remove() {                       # edit_remove FILE ERE   — drop matching lines
+    cp -p "$1" "$1.tmp" || return 1
     grep -vE "$2" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 edit_sub() {                          # edit_sub FILE ERE REPLACEMENT
+    cp -p "$1" "$1.tmp" || return 1
     sed -E "s|$2|$3|" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 

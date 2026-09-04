@@ -786,6 +786,25 @@ itself is what you changed.
 
 ## 2. Container lifecycle
 
+**1.8 — podman installed but not on PATH (macOS only; issue #121).** In the terminal window the
+installer ran in, without closing it: `./cs193v doctor`, then `./cs193v`
+*Expect:* the podman version, a `podman path` line naming the binary, and the two notes
+(`NOT on your PATH — cs193v added its directory itself`, and the `/etc/paths.d` explanation);
+then a normal launch. **This is the case that shipped the bug** — before the fix it was the
+`err.no-podman` STOP box, over an installation that had just reported success.
+
+Then, in a *new* window, the same `doctor`: *expect* the same version and **no** notes, since
+`path_helper` has run at login. And `zsh -c "$PWD/cs193v doctor"`: *expect* the notes back — a
+non-login shell never reads `/etc/paths.d`, which is the student a new terminal never helps and
+the reason the launcher repairs its own PATH rather than the installer printing advice.
+
+Automated as far as it can be: `25-installer.sh :: probe:*` drives the repair's whole truth
+table against both copies of `ensure_podman_path`, and `30-launcher-shim.sh :: probe:*` drives
+`doctor` and a launch against a fabricated receipt, including the Linux case where the repair
+must NOT fire. What no fixture can answer is whether the real `.pkg` still puts things where its
+own receipt says — `tests/MANUAL.md` has that check, and it belongs to a
+`PODMAN_MACOS_VERSION` bump.
+
 **2.1 — First launch.** `./cs193v`
 *Expect:* container created and a shell opens. Note wall-clock time to first prompt — and that
 `Entering the CS193V development environment...` appears *immediately*, before that wait rather
@@ -1047,7 +1066,7 @@ DATE:
     A.6 ports __    A.7 files __   A.8 sighup __    A.9 limits __  A.10 launcher __
     A.11 claude __  A.12 install __  A.13 perf (record)  A.14 cleanup __
 
-§1  install/preflight   1.1 __  1.2 __  1.3 __  1.4 __  1.5 __  1.6 __  1.7 __
+§1  install/preflight   1.1 __  1.2 __  1.3 __  1.4 __  1.5 __  1.6 __  1.7 __  1.8 __
 §2  lifecycle           2.1 __  2.2 __  2.3 __  2.4 __  2.5 __  2.6 __  2.7 __  2.8 __
 §3  files               3.4 __  3.5 __
 §4  ports               4.5 __  4.7 __

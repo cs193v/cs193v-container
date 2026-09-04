@@ -53,12 +53,16 @@ has a different cause — please contact course staff rather than
 working around it.
 
 [[err.no-podman]]
-Podman is not installed, or it is not on your PATH.
+Podman is not installed on this computer.
 
 Podman is the program that runs the course container. If you have
-not installed it yet, run the course installer script. If you
-believe you did install it, contact course staff and include the
-output of:
+not installed it yet, run the course installer script -- that is
+the fix in almost every case.
+
+cs193v has already looked in the place a Mac installs podman, so
+if you believe it IS installed, this is worth asking about rather
+than working around. Contact course staff and include the output
+of:
 
     cs193v doctor
 
