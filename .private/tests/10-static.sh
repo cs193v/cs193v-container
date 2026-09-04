@@ -227,7 +227,7 @@ assert_contains "installer-door:tty-puts-the-shim-first" 'PATH=$SHIM' "$ttydoor"
 fds_used_by() {                       # fds_used_by FILE... -> the fds they redirect, sorted
     sed 's/#.*//' "$@" \
         | grep -oE '([0-9][<>]|[<>]&[0-9])' \
-        | grep -oE '[0-9]' | sort -un | tr '\n' ' ' | sed 's/ *$//'
+        | grep -oE '[0-9]' | sort -un | do_tr '\n' ' ' | sed 's/ *$//'
 }
 taken_fds="$(fds_used_by "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/tests/run-tests.sh")"
 record "trace-fd:fds-already-taken" "$taken_fds"
@@ -253,7 +253,7 @@ assert_eq "trace-fd:is-not-one-somebody-else-uses" "" "$clash"
 # them, so a fourth copy added later is caught rather than missed.
 xt_copies="$(grep -rhoE 'BASH_XTRACEFD=[0-9$][A-Za-z_]*' \
              "$PRIVATE/tests/lib/sandbox.sh" "$PRIVATE/tests/lib/sandbox-guest.sh" \
-             | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+             | sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
 record "trace-fd:container-side-copies" "$xt_copies"
 if [ -n "$xt_copies" ]; then pass "trace-fd:container-side-copies-were-found"
 else fail "trace-fd:container-side-copies-were-found" \

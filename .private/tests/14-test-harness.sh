@@ -488,10 +488,10 @@ ceil_run() {                          # ceil_run RC -> RETURNED=n, and fills $WO
                "$WORK/ceil.txt" "$1" 2>/dev/null )
 }
 ceil_said() {                         # ceil_said -> the transcript, one line
-    tr '\n' ' ' < "$WORK/ceil.txt" | sed 's/ *$//'
+    do_tr '\n' ' ' < "$WORK/ceil.txt" | sed 's/ *$//'
 }
 ceil_results() {                      # ceil_results -> "STATUS name" per result
-    awk -F'\t' '{ print $1, $3 }' "$WORK/ceil.tsv" | tr '\n' ' ' | sed 's/ *$//'
+    awk -F'\t' '{ print $1, $3 }' "$WORK/ceil.tsv" | do_tr '\n' ' ' | sed 's/ *$//'
 }
 
 # ─── rc 0: nothing happened, and nothing is said about it ──────────────────────

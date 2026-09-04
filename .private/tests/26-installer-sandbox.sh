@@ -95,7 +95,7 @@ assert_says "ceiling-live:the-marker-did-not-replace-the-transcript" \
 # marker in a transcript reaches whoever reads the transcript to the end; this reaches the summary.
 assert_eq "ceiling-live:the-ceiling-is-a-named-result" \
           "FAIL ceiling-live:the-run-stayed-inside-its-ceiling" \
-          "$(awk -F'\t' '{ print $1, $3 }' "$ceil_tsv" | tr '\n' ' ' | sed 's/ *$//')"
+          "$(awk -F'\t' '{ print $1, $3 }' "$ceil_tsv" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_contains "ceiling-live:and-it-is-said-on-the-screen-too" \
                 "FAIL  ceiling-live:the-run-stayed-inside-its-ceiling" "$(cat "$SB_TMP/ceiling.err")"
 # NOTHING LEFT RUNNING. conmon stops the container at its own ceiling, so the 255 arm has nothing
