@@ -64,6 +64,25 @@ REPO_BRANCH="main"
 MIN_PODMAN_LINUX="4.9.0"
 MIN_PODMAN_MACOS="5.7.0"
 PODMAN_MACOS_VERSION="6.0.2"              # bump when you re-test; used only on macOS
+                                          # -- and when you do, check the .pkg still declares
+                                          # PODMAN_PKG_ID below in its PackageInfo.
+
+# ─── where podman is when it is not on PATH ────────────────────────────────────
+# ISSUE #121, whose mechanism is written up in full beside the launcher's copy of this. In
+# brief: the macOS .pkg announces its binaries with one line in /etc/paths.d, nothing reads
+# /etc/paths.d but path_helper, and path_helper runs from /etc/zprofile -- so THIS SCRIPT'S OWN
+# TERMINAL cannot see podman after installing it, and neither can the ./cs193v the student runs
+# next. THAT HALF IS THE LAUNCHER'S TO FIX and it does; what is fixed here is this script's own
+# two needs -- finding a podman it installed a moment ago, and not offering to install one that
+# is already there but invisible.
+#
+# DUPLICATED VERBATIM FROM cs193v, the way version_lt and box() are: this script is curl-piped
+# and standalone, so it cannot source anything. 25-installer.sh diffs the two copies, for the
+# reason it asserts the podman floors agree -- this script runs FIRST and the launcher runs
+# LAST, so a disagreement between them IS issue #121 over again.
+PODMAN_PKG_ID="com.redhat.podman"
+# Which directory the repair had to add. Empty means PATH was already right; survey() reports it.
+PODMAN_PATH_ADDED=""
 
 DEFAULT_DIR="$HOME/cs193v"
 WSL_DISTRO="CS193V"
@@ -375,6 +394,33 @@ version_lt() {
         print "no"}'
 }
 
+# Byte-identical to the launcher's copy -- see PODMAN_PKG_ID above, and do not "tidy" one of
+# them. 25-installer.sh :: probe:the-two-copies-are-byte-identical carves both and diffs them.
+ensure_podman_path() {
+    command -v podman >/dev/null 2>&1 && return 0
+    [ "$(platform)" = macos ] || return 1
+    command -v pkgutil >/dev/null 2>&1 || return 1
+    local loc rel d
+    loc="$(pkgutil --pkg-info "$PODMAN_PKG_ID" 2>/dev/null | awk '/^location:/{print $2}')"
+    [ -n "$loc" ] || return 1
+    rel="$(pkgutil --only-files --files "$PODMAN_PKG_ID" 2>/dev/null \
+           | grep -E '(^|/)podman$' | head -1)"
+    [ -n "$rel" ] || return 1
+    # The payload path's directory, and the volume-relative case where there isn't one. Spelled
+    # as a case rather than ${rel%/*}, which returns its input unchanged when there is no slash
+    # and would compose a directory one level too deep.
+    case "$rel" in
+        */*) d="/$loc/${rel%/*}" ;;
+        *)   d="/$loc" ;;
+    esac
+    # -f AS WELL AS -x, because `[ -x somedir ]` is TRUE for a directory (measured on bash
+    # 3.2.57), so -x alone would accept a receipt naming a directory called podman. -x as well
+    # as -f, because a half-extracted .pkg leaves a mode-644 binary that PATH cannot run.
+    [ -f "$d/podman" ] && [ -x "$d/podman" ] || return 1
+    export PATH="$PATH:$d"
+    PODMAN_PATH_ADDED="$d"
+}
+
 platform() {
     case "$(uname -s)" in
         Darwin) printf 'macos' ;;
@@ -518,6 +564,23 @@ survey() {
         say_unsupported_distro "$(os_release_field PRETTY_NAME)"; exit 1
     fi
 
+    # ISSUE #121, AND THE SECOND BUG IT CAUSED. Without this, a student re-running this script
+    # in the window that ran it the first time is seen as having NO podman -- so it re-downloads
+    # 75 MB, asks for the password again, and re-runs `sudo installer`, whose preinstall does
+    # `rm -rf /opt/podman` and takes the virtual machine and every container in it. All to
+    # reinstall what is already sitting there.
+    #
+    # IT ALSO CHANGES A REFUSAL, and the next reader will ask, so: a Mac carrying a podman OLDER
+    # than MIN_PODMAN_MACOS in a directory PATH does not name is now refused below, where before
+    # it was invisible and got silently replaced. That is not a regression. The same refusal
+    # already fired for that student in any login shell; what this removes is a refusal that
+    # depended on which KIND of shell they happened to type in, which is not a property anybody
+    # can report or act on.
+    ensure_podman_path
+    if [ -n "$PODMAN_PATH_ADDED" ]; then
+        note "podman is installed in $PODMAN_PATH_ADDED, which this terminal's PATH"
+        note "does not name yet. That is normal on a Mac, and cs193v handles it."
+    fi
     if command -v podman >/dev/null 2>&1; then
         local v; v="$(podman --version 2>/dev/null | awk '{print $NF}')"
         if [ "$(version_lt "${v:-0}" "$MIN_PODMAN")" = yes ]; then
@@ -855,11 +918,27 @@ You can install Podman Desktop by hand instead — https://podman-desktop.io/dow
             note "macOS will now ask for your password, to install podman system-wide"
             sudo installer -pkg "$pkg" -target / || die "The podman installer did not finish."
             rm -f "$pkg"
-            export PATH="/opt/podman/bin:/usr/local/bin:$PATH"
+            # NOT `export PATH="/opt/podman/bin:/usr/local/bin:$PATH"`. Where the .pkg puts
+            # things is now asked of the receipt it just wrote rather than assumed here, so this
+            # script and the launcher cannot disagree about it -- which was #121's mechanism.
+            #
+            # THE ONE ORDERING ASSUMPTION IN THE CHANGE: `installer -pkg` must have registered
+            # its receipt by the time it returns. It has on every Mac this was tried on, and it
+            # is what pkgutil reads. No fixture can stand in for it, so it is a by-hand check in
+            # tests/MANUAL.md rather than an assertion here.
+            ensure_podman_path
             ;;
     esac
-    command -v podman >/dev/null 2>&1 || die "podman still is not on your PATH after installing.
-Try opening a new terminal window and running this script again."
+    # NOT "try opening a new terminal window" any more, which is what the other three below
+    # still say. For podman on a Mac that advice is now known-insufficient: a non-login shell
+    # never runs /etc/zprofile, so it never reads /etc/paths.d, so a new window fixes this for
+    # some students and not others (issue #121). Reaching here means the receipt did not answer
+    # either, which is a changed .pkg rather than anything the student can do.
+    command -v podman >/dev/null 2>&1 || die "podman was installed, but this script cannot run it.
+
+Please send this to course staff. The podman installer may have
+changed where it puts things, in which case the course files need
+a one-line update."
     ok "podman $(podman --version | awk '{print $NF}')"
     if [ "$DO_SSH_INSTALL" = yes ]; then
         command -v ssh >/dev/null 2>&1 || die "ssh still is not on your PATH after installing.

@@ -94,6 +94,42 @@ IMAGE="localhost/cs193v:local"
 MIN_PODMAN_LINUX="4.9.0"
 MIN_PODMAN_MACOS="5.7.0"
 
+# ─── where podman is when it is not on PATH ────────────────────────────────────
+# ISSUE #121, AND IT IS NOT A PATH THE STUDENT BROKE. The macOS .pkg this course installs
+# announces its binaries with one line -- `echo /opt/podman/bin > /etc/paths.d/podman-pkg` --
+# and nothing reads /etc/paths.d but /usr/libexec/path_helper, which runs from /etc/zprofile,
+# i.e. only when a LOGIN shell starts. So the terminal window that ran the installer never
+# sees podman, and neither does any `zsh -c`: measured from a bare PATH, `bash -l` and `zsh -l`
+# pick /opt/podman/bin up and every non-login shell does not, which is why "open a new
+# terminal" is a workaround for some students and not others.
+#
+# THE INSTALLER CANNOT FIX THIS. A child process cannot write into its parent's environment,
+# so its own `export PATH` -- which is why machine init, --rebuild and the smoke test all pass
+# -- dies with it, and the student is handed back a shell that was never told. Only the
+# launcher can repair the launcher's PATH.
+#
+# NOTHING UPSTREAM IS COMING. containers/podman#15831 WAS a podman bug: the postinstall used to
+# append to ~/.bash_profile, ~/.zshenv, ~/.zshrc and fish's config, and skipped every branch on
+# a fresh Mac that has none of them. PR #15854 deleted all of it in favour of the /etc/paths.d
+# line above and was closed as fixed; #15542, #17910 and #27669 are the same report again and
+# are closed too, the last of them ("command not found: podman" under oh-my-zsh, which skips
+# /etc/zprofile entirely) as not a podman bug. Their contract is "the next login shell sees
+# podman", and they are entitled to it -- no .pkg can do better. It is OUR say_done that tells
+# a student to run ./cs193v in the window that cannot.
+#
+# THE IDENTIFIER RATHER THAN THE DIRECTORY, so nothing here guesses: ensure_podman_path asks
+# macOS's own receipt where the payload went, and a future .pkg that moves it is still found.
+# The .pkg declares this string itself, in its PackageInfo -- `identifier="com.redhat.podman"`
+# -- so when install-cs193v.sh's PODMAN_MACOS_VERSION is bumped, check it there.
+#
+# DUPLICATED VERBATIM IN install-cs193v.sh, the way version_lt and box() are: that script is
+# curl-piped and standalone, so it cannot source this one. 25-installer.sh diffs the two copies
+# for the reason it asserts the podman floors agree -- the installer runs FIRST and the launcher
+# runs LAST, so a disagreement between them IS issue #121 over again.
+PODMAN_PKG_ID="com.redhat.podman"
+# Which directory the repair had to add, so `doctor` can say so. Empty means PATH was fine.
+PODMAN_PATH_ADDED=""
+
 # ─── the shared presentation layer ─────────────────────────────────────────────
 # Colours, box(), die(), the arrow-key menu, msg(), run_timeout() and the spinner glyphs live
 # in .private/files/cs193v-ui.sh, because the CONTAINER needs them too: setup-git, and any
@@ -856,6 +892,64 @@ build_progress() {                    # build_progress [RETRY] [FLOOR]
 pm()  { run_timeout 20 podman "$@"; }     # a podman call that should be quick
 pmq() { run_timeout 20 podman "$@" >/dev/null 2>&1; }
 
+# podman that is INSTALLED AND INVISIBLE: issue #121, whose whole mechanism is written up at
+# PODMAN_PKG_ID above. Repairs THIS process's PATH, and every child's, when podman is installed
+# somewhere PATH does not name; a no-op on every machine whose PATH is already right.
+#
+# THE GUARD IS THE FIRST LINE, so a healthy launch pays nothing -- no pkgutil, no forks. It is
+# also what makes appending safe: reaching the loop means PATH holds no podman at all, so
+# nothing can be shadowed by adding a directory, and appending rather than prepending keeps the
+# new directory from taking precedence for every OTHER name the launcher runs.
+#
+# PATH RATHER THAN A $PODMAN VARIABLE, deliberately. ensure_tunnel builds
+# `-o ProxyCommand=podman exec -i $NAME ...`, which ssh hands to its own /bin/sh child; and
+# `podman build`, `podman exec` and the supervisor's `podman exec` are bare calls in four more
+# places. A variable would have to be threaded into a string ssh parses and into processes we
+# do not start. An exported PATH reaches all of them by inheritance, with nothing to remember.
+#
+# ONE DIRECTORY IS ENOUGH. podman finds gvproxy, vfkit and krunkit through its own built-in
+# helper_binaries_dir and not through PATH -- measured on a Mac with only /opt/podman/bin
+# appended: doctor reported podman 6.0.2, the machine, and `podman sees`.
+#
+# ASKED OF pkgutil RATHER THAN GUESSED. `--pkg-info` gives a location relative to the volume
+# root and `--only-files --files` gives paths relative to that, so composing them is how macOS
+# itself would answer "where did that package put things". A hardcoded /opt/podman/bin would
+# need re-checking on every version bump; this does not.
+#
+# MATCHED ON THE BASENAME, not on `bin/podman`: the payload's layout is podman's business, and
+# `(^|/)podman$` names the file we want without asserting which directory holds it. Verified
+# against the real receipt -- it matches exactly one entry, and does NOT match
+# podman/bin/podman-mac-helper.
+#
+# A LOCATION TEST AND NOTHING ELSE. Whether the podman it finds ANSWERS is preflight's next
+# three checks -- --version, the floor, and info -- each with its own message. That is also
+# what makes a stale receipt harmless: podman removed by hand still has a receipt, the file
+# tests below refuse it, and preflight goes on to die exactly as it would have.
+ensure_podman_path() {
+    command -v podman >/dev/null 2>&1 && return 0
+    [ "$(platform)" = macos ] || return 1
+    command -v pkgutil >/dev/null 2>&1 || return 1
+    local loc rel d
+    loc="$(pkgutil --pkg-info "$PODMAN_PKG_ID" 2>/dev/null | awk '/^location:/{print $2}')"
+    [ -n "$loc" ] || return 1
+    rel="$(pkgutil --only-files --files "$PODMAN_PKG_ID" 2>/dev/null \
+           | grep -E '(^|/)podman$' | head -1)"
+    [ -n "$rel" ] || return 1
+    # The payload path's directory, and the volume-relative case where there isn't one. Spelled
+    # as a case rather than ${rel%/*}, which returns its input unchanged when there is no slash
+    # and would compose a directory one level too deep.
+    case "$rel" in
+        */*) d="/$loc/${rel%/*}" ;;
+        *)   d="/$loc" ;;
+    esac
+    # -f AS WELL AS -x, because `[ -x somedir ]` is TRUE for a directory (measured on bash
+    # 3.2.57), so -x alone would accept a receipt naming a directory called podman. -x as well
+    # as -f, because a half-extracted .pkg leaves a mode-644 binary that PATH cannot run.
+    [ -f "$d/podman" ] && [ -x "$d/podman" ] || return 1
+    export PATH="$PATH:$d"
+    PODMAN_PATH_ADDED="$d"
+}
+
 # ─── small utilities ───────────────────────────────────────────────────────────
 sha_stdin() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
@@ -1128,6 +1222,11 @@ config_hash() {
 preflight() {
     if [ "$(id -u)" -eq 0 ]; then die "$(msg err.running-as-root)"; fi
 
+    # ISSUE #121, see ensure_podman_path. AFTER the root refusal and BEFORE every podman probe:
+    # err.running-as-root stays preflight's first act, and sudo's own secure_path would strip
+    # the directory anyway, so repairing PATH for a run about to be refused is work for nobody.
+    # Silent, so nothing already printed on this path moves.
+    ensure_podman_path
     if ! command -v podman >/dev/null 2>&1; then
         die "$(msg err.no-podman)"
     fi
@@ -2340,15 +2439,38 @@ open_shell() {
 
 # ─── verbs ─────────────────────────────────────────────────────────────────────
 verb_doctor() {
+    # THE SECOND AND LAST PROBER, and it repairs for itself rather than inheriting preflight's:
+    # doctor deliberately does not call preflight, because its whole job is reporting on a
+    # machine preflight would refuse. Without this the report a student is told to paste says
+    # "NOT FOUND" about a podman every other path finds perfectly, which is how issue #121
+    # arrived as a screenshot and a guess rather than as a diagnosis.
+    ensure_podman_path
     printf '%sCS193V container report%s\n' "$C_CYAN" "$C_OFF"
     printf '%s\n' "-------------------------------------------------------------"
     printf '  %-16s %s\n' "platform" "$(platform) / $(uname -m)"
     printf '  %-16s %s\n' "course dir" "$DIR"
 
+    # THREE BRANCHES WHERE THERE WAS ONE. "NOT FOUND or not responding" conflated the two
+    # faults a student is likeliest to hit -- podman absent, and a Mac that has slept -- so the
+    # first thing staff had to ask was which of the two it was.
     if command -v podman >/dev/null 2>&1 && run_timeout 10 podman --version; then
         printf '  %-16s %s\n' "podman" "$(podman_version_of "$RT_OUT")"
+        # WHICH podman, which no report has ever said. It is the first thing to ask on a Mac
+        # carrying both a Homebrew podman and a .pkg one.
+        printf '  %-16s %s\n' "podman path" "$(command -v podman)"
+        # AND WHEN WE HAD TO FIND IT OURSELVES -- issue #121's signature in a pasted report.
+        # $PATH itself is deliberately NOT printed: it wraps, and it carries the names of a
+        # student's own directories into a paste. The resolved path is the actionable part.
+        if [ -n "$PODMAN_PATH_ADDED" ]; then
+            printf '  %-16s %s\n' "" "NOT on your PATH — cs193v added its directory itself"
+            printf '  %-16s %s\n' "" "(/etc/paths.d is read only when a login shell starts)"
+        fi
+    elif command -v podman >/dev/null 2>&1; then
+        printf '  %-16s %s\n' "podman" "NOT RESPONDING (a Mac that has slept can do this)"
+        printf '  %-16s %s\n' "podman path" "$(command -v podman)"
+        return 1
     else
-        printf '  %-16s %s\n' "podman" "NOT FOUND or not responding"
+        printf '  %-16s %s\n' "podman" "NOT FOUND"
         return 1
     fi
 

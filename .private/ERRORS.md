@@ -923,6 +923,86 @@ base-image download — the longest phase of a cold install and the one with not
 
 ---
 
+### ~~B20~~. podman installed by the installer was invisible to the shell that ran it — **FIXED**
+
+GitHub issue #121, and a macOS release blocker: the installer finished, printed "Setup
+finished", told the student to `cd ~/cs193v && ./cs193v`, and that command died with
+`err.no-podman`. `./cs193v doctor` said `podman  NOT FOUND or not responding`. Opening a new
+terminal window appeared to fix it.
+
+**The mechanism.** The pinned macOS `.pkg` announces its binaries in exactly one way. Extracted
+from `podman-installer-macos-arm64.pkg` v6.0.2, the whole of its `postinstall` PATH handling is:
+
+```sh
+echo "/opt/podman/bin" > /etc/paths.d/podman-pkg
+```
+
+`/etc/paths.d` is read only by `/usr/libexec/path_helper`, which is invoked from `/etc/zprofile`
+— so only when a **login** shell starts. The window that ran the installer began before that
+file existed and can never see it.
+
+**Why every installer step passed anyway.** `install_podman` already exported
+`PATH="/opt/podman/bin:/usr/local/bin:$PATH"` for itself, which is why `podman machine init`,
+`./cs193v --rebuild` and `smoke_test` — which runs `cs193v doctor` — all succeeded. A child
+process cannot write into its parent's environment, so that export died with the installer and
+the student was handed back a shell that was never told. **The installer structurally could not
+fix this**; only the launcher can repair the launcher's PATH.
+
+**Measured.**
+
+* Stripping `/opt/podman/bin` from `PATH` and running `./cs193v doctor` reproduces the reported
+  screenshot exactly, down to the `NOT FOUND or not responding` line.
+* Appending only `/opt/podman/bin` is a complete fix — `doctor` then reports `podman 6.0.2`, the
+  machine, and `podman sees`. No sibling directory is needed: podman locates `gvproxy`, `vfkit`
+  and `krunkit` through its own built-in `helper_binaries_dir`, not through `PATH`.
+* From a bare `PATH=/usr/bin:/bin` on this Mac: `bash -l` and `zsh -l` pick the directory up;
+  `zsh -c` and every other **non-login** shell never do. So "open a new terminal" is a
+  workaround for some students and not others — an IDE terminal profile without `-l`, a launcher
+  started from a script, or `ssh host ./cs193v` stays broken permanently.
+* `[ -x somedir ]` is **true** for a directory on bash 3.2.57, and `command -v` skips both
+  non-executable files and directories and keeps searching. The first fact is why the repair
+  tests `-f` as well as `-x`; the second is why a test fixture cannot hide podman by shadowing
+  it and has to build a PATH instead.
+
+**Nothing upstream is coming.** containers/podman#15831 *was* a podman bug — the postinstall used
+to append to `~/.bash_profile`, `~/.zshenv`, `~/.zshrc` and fish's config, and skipped every
+branch on a fresh Mac that has none of them. PR #15854 ("pkginstaller: use path_helper to add
+podman and helpers to path", merged 2022-09-22) deleted all of it in favour of the `/etc/paths.d`
+line above, and was closed as fixed. #15542, #17910 and #27669 are the same report again and are
+closed too — the last of them, "command not found: podman" under oh-my-zsh, which skips
+`/etc/zprofile` entirely, was closed and converted to a discussion with "this doesn't sound like
+a bug on podman side". Their contract is "the next login shell sees podman", and they are
+entitled to it. It is `say_done` that tells a student to use the one window that cannot.
+
+**The fix.** `ensure_podman_path` in the launcher, called from the only two places that probe
+podman — `preflight` and `verb_doctor`, which does not inherit preflight's repair because its
+job is reporting on a machine preflight would refuse. When `PATH` holds no podman at all, and
+only on macOS, it asks `pkgutil` where the receipt says the payload went and appends that one
+directory. Nothing hardcodes `/opt/podman/bin`, so a future `.pkg` that moves is still found.
+Appended rather than prepended: the guard means nothing can be shadowed, and appending keeps the
+directory from taking precedence for every *other* name the launcher runs.
+
+`doctor` now reports the resolved path, and says so explicitly when it had to find podman
+itself — the signature this bug had none of, which is why it arrived as a screenshot and a guess
+rather than as a diagnosis. `$PATH` itself is deliberately still not printed: it wraps, and it
+carries a student's own directory names into a paste.
+
+The installer carries a byte-identical copy of the repair, diffed by
+`25-installer.sh :: probe:the-two-copies-are-byte-identical`, and uses it for its own two needs:
+finding the podman it installed a moment ago (replacing the hardcoded export), and not offering
+to reinstall one that is already there but invisible. That second one was a real second bug — a
+re-run in the stale window re-downloaded 75 MB, asked for the password again, and re-ran
+`sudo installer`, whose `preinstall` does `rm -rf /opt/podman` and takes the virtual machine and
+every container in it.
+
+One deliberate behaviour change, recorded so nobody later reads it as a slip: a Mac carrying a
+podman **older** than `MIN_PODMAN_MACOS` in a directory `PATH` does not name is now refused,
+where before it was invisible and got silently replaced. The same refusal already fired for that
+student in any login shell; what this removes is a refusal that depended on which *kind* of
+shell they happened to type in.
+
+---
+
 ## C. Not run, and why
 
 - **Anything needing `sudo`** — the instructor was away and could not authenticate. Nothing

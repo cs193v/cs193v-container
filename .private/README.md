@@ -823,6 +823,53 @@ measurements in `ERRORS.md` §D):
 Still needing other hardware: libkrun vs applehv on Apple Silicon, whether podman 6 runs on
 an Intel Mac, and WSL's `--name` support.
 
+### The launcher repairs its own PATH, and four ways of doing it that were rejected (issue #121)
+
+A macOS student's installer finished, said so, told them to run `./cs193v` in that window, and
+that command reported podman was not installed. The mechanism is in `ERRORS.md` B20; the short
+form is that the `.pkg` announces `/opt/podman/bin` only in `/etc/paths.d`, which nothing reads
+but `path_helper`, which runs from `/etc/zprofile` — at **login**. So the window that ran the
+installer never sees it, and neither does any non-login shell, which is why "open a new terminal"
+helps some students and not others.
+
+`ensure_podman_path` is the fix, in `cs193v` and duplicated verbatim into `install-cs193v.sh`.
+The four obvious alternatives, each rejected for a reason worth keeping:
+
+- *Have the installer fix the shell it was run from.* *Impossible*, not merely awkward: a child
+  process cannot write into its parent's environment. `install_podman` already exported the
+  directory for itself — which is why every step after it passed, up to and including
+  `smoke_test` running `cs193v doctor` — and that export dies with the script. This is the whole
+  reason the repair has to live in the launcher.
+- *Write to the student's `~/.zprofile`.* This is what podman's own postinstall used to do, for
+  bash, zsh and fish, and containers/podman#15831 is the bug it caused: it checked whether each
+  file existed first, so on a fresh Mac it did nothing at all. PR #15854 deleted it in favour of
+  `/etc/paths.d`. Adopting a design upstream removed, in a project whose contract is that it
+  changes nothing without asking, to fix a window it *still* would not fix, is three bad trades.
+- *Resolve podman into a `$PODMAN` variable instead of exporting PATH.* Rejected on call sites,
+  not on taste. `ensure_tunnel` builds `-o ProxyCommand=podman exec -i $NAME ...`, a string ssh
+  hands to its own `/bin/sh` child; `podman build`, `podman exec` and the supervisor's
+  `podman exec` are bare calls in four more places. A variable would have to be threaded into a
+  string ssh parses and into processes we do not start. An exported PATH reaches all of them by
+  inheritance and leaves nothing to remember at the next call site added.
+- *Hardcode a candidate directory list* — `/opt/podman/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin`. This was the first design and it is the one to argue against hardest,
+  because it looks simpler than what replaced it. It guesses; it needs re-checking whenever
+  `PODMAN_MACOS_VERSION` moves; and it puts a maintenance obligation in a file nobody edits for
+  years. Asking `pkgutil` where the receipt says the payload went is the same three forks and
+  needs no list, so a future `.pkg` that relocates is still found. What survived from that
+  design is the *identifier* — one constant, which the `.pkg` declares in its own `PackageInfo`.
+
+Two smaller decisions, both asserted rather than commented:
+
+- **The macOS gate is inside the function, not at the call sites.** One guarantee rather than two
+  chances to get it wrong, and it can be spelled identically in both copies: the two scripts'
+  `platform()` differ in the unsupported-OS arm (the installer dies, the launcher prints
+  `other`) but agree on Darwin, which is what keeps the byte-identical diff possible.
+- **Two callers, and `10-static.sh` counts them.** #121 *was* one prober with no repair; the
+  shape that brings it back is a third prober added later by someone who did not know to repair
+  first. `probe:exactly-two-callers` is the tripwire.
+
+
 ## Deliberately not here
 
 So it isn't re-proposed: changing the terminal's background colour (Ptyxis, the Ubuntu 26.04

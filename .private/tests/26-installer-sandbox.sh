@@ -1079,3 +1079,24 @@ record "fedora-e2e:free-disk-gb-after" "$(do_df_avail /)"
 fi
 fi
 fi
+
+# ─── podman installed but not on PATH  (issue #121) ────────────────────────────
+# NAMED RATHER THAN ABSENT, per VERIFICATION.md §A.15: a gate outside the default run is an
+# assertion that never executed, and so is a claim nobody wrote down.
+#
+# THE CLAIM THIS TIER CANNOT MAKE is "the repair finds a podman the real .pkg really installed".
+# Not for want of a machine arrangement -- a container could `mv /usr/bin/podman /opt/podman/bin`
+# easily enough -- but because that is not what the repair reads. ensure_podman_path asks
+# `pkgutil` for a macOS PACKAGE RECEIPT, and a Linux container cannot hold one; a fixture that
+# faked pkgutil here would be re-proving exactly what 25-installer.sh's probe:* truth table
+# already proves against both copies of the function, on this machine, in milliseconds.
+#
+# IT IS ALSO NOT THE no-prereqs AXIS. That axis is ABSENCE, and its doctrine is removal rather
+# than concealment (see machine_flags in lib/sandbox.sh); what #121 needs is a RELOCATION, which
+# is a third kind of thing and would cost a new sb_machine key, a sibling of arrange_prereqs in
+# lib/sandbox-guest.sh, a line in install-sandbox.sh's help, and an amendment to 10-static.sh's
+# "only one place names these flags" rule -- for a claim the cheap lane already makes.
+#
+# So what the real .pkg does is checked by hand on a Mac, and tests/MANUAL.md says how.
+skip "sb-offpath:a-really-relocated-podman" \
+     "needs a macOS package receipt, which no Linux container has -- ensure_podman_path reads pkgutil, not the filesystem. The decisions are covered in 25-installer.sh (probe:*) and 30-launcher-shim.sh (probe:*); what the real .pkg does is a by-hand Mac check (tests/MANUAL.md)"
