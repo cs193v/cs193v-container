@@ -194,6 +194,6 @@ fi
 # cycle of reading this number, then it becomes `assert_eq ... "" "$missed"`.
 if [ "$missed_n" -gt 0 ]; then
     printf '  %sunreached, unexcused installer lines (%s):%s\n' "$A_DIM" "$missed_n" "$A_OFF"
-    tr '\n' ' ' < "$MISSED" | fold -s -w 68 | sed 's/^/      /'
+    do_tr '\n' ' ' < "$MISSED" | fold -s -w 68 | sed 's/^/      /'
     printf '\n'
 fi

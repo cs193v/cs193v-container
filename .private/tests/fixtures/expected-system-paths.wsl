@@ -14,9 +14,15 @@
 # ALSO ABSENT, and it is a fixture property rather than luck: the fake podman is bind-mounted
 # over /usr/bin/podman, which already exists in the image, so it adds no path here. Mounting it
 # at /usr/local/bin/podman instead put it in this list as a change the installer had made.
+#
+# AND /tmp IS ABSENT FOR THE SAME REASON, which is worth stating because it used to be listed.
+# A REAL podman writes /tmp/containers-user-$UID and /tmp/podman-run-$UID the first time it runs
+# -- measured, and it is why expected-system-paths.podman-old does claim `C /tmp`. This case asks
+# for --fake-podman, so the only podman on PATH is a shell script and nothing goes near /tmp.
+# The line was inherited from a fixture that had a real podman and survived the move to
+# base=machine unexamined: 48a54d0 rewrote every comment in this file and touched no path.
 A /etc/wsl.conf
 A /work
 C /etc
 C /home
 C /home/student
-C /tmp

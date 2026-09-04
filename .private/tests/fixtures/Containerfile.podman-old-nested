@@ -16,7 +16,12 @@
 # Containerfile.podman-old -- its Tier A sibling, which exists to be REFUSED and therefore keeps a
 # student's uid 1000 and a real 200000-65536 range -- in exactly those five, for exactly the
 # reason that fixture's header gives: a refusal needs no namespace, and a build needs one.
-FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+# PINNED BY MANIFEST-LIST DIGEST, not a per-architecture one -- the same rule
+# 00-release-gates.sh:143 states and asserts for the course image. An earlier pin here named
+# the amd64 LEG of this index, which meant the fixture ran emulated on Apple Silicon; the
+# emulated amd64 podman then SIGSEGVd inside the Go runtime's netpoll and the survey read a
+# register dump where it expected a version. One digest, both legs, native on each.
+FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
 # WITH RECOMMENDS, for the reason Containerfile.debian-nested gives: measured in this image,
 # podman Recommends passt, slirp4netns, uidmap and catatonit and Depends on none of them, so

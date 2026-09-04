@@ -34,6 +34,19 @@
 # image/container/live HARD-FAIL rather than skip when their prerequisite is missing, by
 # project decision: a green run must mean the whole thing really ran.
 #
+# ARCHITECTURE IS THE ONE EXCEPTION to that, and it is not an erosion of it: a missing dependency
+# is something the operator can install, an instruction set is not. The wine fixture and the Arch
+# fixture SKIP on arm64 rather than failing -- see lib/wine.sh and 26-installer-sandbox.sh.
+#
+# ─── exit codes ────────────────────────────────────────────────────────────────
+#   0   green
+#   1   a test failed, or a suite died
+#   2   you asked for something that does not exist (bad option, no suite matched)
+#  78   THIS MACHINE CANNOT RUN THE TESTS -- the preflight refused. EX_CONFIG from sysexits.h,
+#       chosen over an arbitrary number because a CI author can look it up (#124)
+#  97   results were lost mid-run: see _emit in lib/assert.sh
+# 130   interrupted
+#
 # ─── the two lanes ─────────────────────────────────────────────────────────────
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
 #
@@ -73,6 +86,19 @@ else
     C_BOLD=''; C_GRN=''; C_RED=''; C_YEL=''; C_DIM=''; C_OFF=''
 fi
 
+# SOURCED HERE, above the option loop, and NOT beside the gate call below. The loop uses do_tr to
+# split `--tier a,b,c`, and those are the only wrapped-tool calls anywhere above the gate -- so
+# placing this line at the gate would leave them unable to reach it. Sourcing and calling are
+# independent: this file is inert at source time by its own rule, so it loads early and the GATE
+# still runs where it has to.
+#
+# Two consequences worth knowing. `-h` and `--list` exit from inside that same loop, so they now
+# pay the capability probes -- two or three `command -v` calls, and _pt_pick can neither print nor
+# exit. And run-tests.sh now depends on lib/portable.sh staying inert, which is a stated rule that
+# nothing enforces.
+# shellcheck source=lib/portable.sh
+. "$DIR/lib/portable.sh"
+
 usage() {
     sed -n '3,30p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
     exit "${1:-0}"
@@ -81,8 +107,8 @@ usage() {
 LIST_ONLY=no
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --tier)    shift; TIERS="$(printf '%s' "${1:-}" | tr ',' ' ')" ;;
-        --tier=*)  TIERS="$(printf '%s' "${1#--tier=}" | tr ',' ' ')" ;;
+        --tier)    shift; TIERS="$(printf '%s' "${1:-}" | do_tr ',' ' ')" ;;
+        --tier=*)  TIERS="$(printf '%s' "${1#--tier=}" | do_tr ',' ' ')" ;;
         --release) TIERS="release" ;;
         --all)     TIERS="$DEFAULT_TIERS release" ;;
         -k)        shift; FILTER="${1:-}" ;;
@@ -134,6 +160,66 @@ if [ "$LIST_ONLY" = yes ]; then
     done
     exit 0
 fi
+
+# ─── the preflight, and why it is not a test (#124) ───────────────────────────
+# PLACED HERE FOR EVERYTHING IT GETS FOR FREE. Nothing has forked yet, so this runs once in the
+# parent on the real terminal with the colours above already set. It is above the tier and lane
+# selection, so it is unconditional by construction. And it is above CS193V_RUN_DIR, the mkdir,
+# the traps and the results file below -- so a refusal LEAVES NO RUN DIRECTORY AND NO RESULTS
+# FILE, which is the cleanest available proof that it is not a test.
+#
+# `-h` and `--list` exit above it and stay ungated, deliberately: they answer questions about the
+# repo, not about the machine, and a machine that fails the gate must still be able to read the
+# help that explains the gate.
+#
+# NOT A TEST, and that is the whole point. It records no PASS/FAIL/SKIP, adds nothing to the
+# tally, and is not a suite that died. A missing dependency does not mean an assertion was wrong,
+# it means the suite cannot ask its questions -- so it aborts with a diagnosis and exit 78 rather
+# than contributing to a 344-line failure list in which "your machine is wrong" and "the code is
+# wrong" look identical.
+preflight() {
+    local missing name why mac deb plat pkgs fix seen=''
+    missing="$(pt_missing)" && ! pt_bash_too_old && return 0
+
+    printf '\n%sTHIS MACHINE CANNOT RUN THE TEST SUITE%s%*s(#124)\n\n' \
+           "$C_RED$C_BOLD" "$C_OFF" 32 ''
+    if pt_bash_too_old; then
+        printf '  %-12s %s\n' bash "reports ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}, and 3.2 or newer is needed"
+        printf '  %-12s %s\n\n' '' 'This is a FLOOR and never a ceiling -- see the note above.'
+    fi
+
+    # COLLECTED, then printed once. A fresh machine is missing several things at once, and a gate
+    # that makes you fix them one run at a time is worse than the disease.
+    case "$(uname -s)" in Darwin) plat=mac ;; *) plat=deb ;; esac
+    pkgs=''
+    while IFS='|' read -r name why mac deb; do
+        [ -n "${name:-}" ] || continue
+        case "$plat" in mac) fix="$mac" ;; *) fix="$deb" ;; esac
+        printf '  %-12s %s\n' "$name" 'is missing, or is not the build this suite needs'
+        printf '  %-12s why  %s\n' '' "$why"
+        case "$fix" in
+            '('*) printf '  %-12s note %s\n\n' '' "$fix" ;;
+            *)    case "$plat" in
+                      mac) printf '  %-12s fix  brew install %s\n\n' '' "$fix" ;;
+                      *)   printf '  %-12s fix  sudo apt install -y %s\n\n' '' "$fix" ;;
+                  esac
+                  # De-duplicated with the no-associative-array idiom this project uses
+                  # elsewhere, because one package satisfies several rows.
+                  case " $seen " in *" $fix "*) ;; *) seen="$seen $fix"; pkgs="$pkgs $fix" ;; esac ;;
+        esac
+    done <<PREFLIGHT_EOF
+$missing
+PREFLIGHT_EOF
+
+    [ -z "$pkgs" ] || case "$plat" in
+        mac) printf '  all of them:  brew install%s\n\n' "$pkgs" ;;
+        *)   printf '  all of them:  sudo apt install -y%s\n\n' "$pkgs" ;;
+    esac
+    printf 'Nothing was run and nothing was recorded: this is not a test failure, it is a\n'
+    printf 'machine that cannot ask the question.\n\n'
+    exit 78
+}
+preflight
 
 # ─── run ───────────────────────────────────────────────────────────────────────
 WALL_T0=$SECONDS

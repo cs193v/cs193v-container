@@ -16,9 +16,29 @@
 
 WINE_FIXTURE=wine
 
+WINE_SKIP_WHY=''                      # why the tier declined, for the caller's skip message
 wine_require() {                      # wine_require -> 0 if this machine can run the tier
-    require_podman || return 1
-    fixture_build "$WINE_FIXTURE" || return 1
+    require_podman || { WINE_SKIP_WHY="podman is unavailable"; return 1; }
+    # ARCHITECTURE FIRST, BEFORE THE 2.53 GB BUILD. This used to ask only "is podman here and did
+    # the fixture build" -- both true on an Apple Silicon Mac -- and then 97 of 189 assertions
+    # failed inside wine rather than the tier declining. Ubuntu's wine cannot load its own PE
+    # loader on aarch64:
+    #
+    #   wine: failed to load /usr/lib/aarch64-linux-gnu/wine/aarch64-windows/ntdll.dll
+    #         error c00000bb                        (c00000bb is STATUS_NOT_SUPPORTED)
+    #
+    # An instruction set is not a missing dependency: nothing the operator installs fixes it, so
+    # this is the one place a skip is right where the rest of the suite hard-fails. Checked here
+    # rather than after the build, because building 2.53 GB to then decline is a four-minute
+    # apology.
+    case "$(uname -m)" in
+        x86_64|amd64) ;;
+        *) WINE_SKIP_WHY="wine cannot run on $(uname -m)"; return 1 ;;
+    esac
+    fixture_build "$WINE_FIXTURE" || {
+        WINE_SKIP_WHY="the wine fixture could not be built"
+        return 1
+    }
 }
 
 # ─── building a case ───────────────────────────────────────────────────────────

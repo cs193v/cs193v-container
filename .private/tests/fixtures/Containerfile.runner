@@ -1,0 +1,48 @@
+# A machine that can RUN this test suite, for cross-checking a macOS result against Linux.
+#
+# WHY THIS IS NOT LIKE THE OTHER FIXTURES HERE. Every other Containerfile in this directory models
+# a machine that LACKS something -- Containerfile.machine has no podman, no ssh and no subuid range,
+# because the installer's job is to notice. This one is the opposite: it is a machine that satisfies
+# the whole dependency list, so the suite itself can run inside it.
+#
+# WHAT IT IS FOR, AND WHAT IT IS NOT FOR. It answers one question: "does this failure also happen on
+# Linux?" A macOS run and a Linux run of the cheap tiers should agree, and where they do not, the
+# difference is the finding. It is NOT a substitute for running natively on a Mac -- that is the
+# whole point of running there, since `cs193v` and `install-cs193v.sh` have to meet the same BSD
+# sed/awk/stat and bash 3.2 a student's Mac has. F7 was found only because a real 3.2 ran.
+#
+# NOT DERIVED FROM localhost/cs193v:local, deliberately. That image carries node 24, the playwright
+# browsers, claude-code, codex and vercel -- 2.53 GB, none of which the static, unit or shim tiers
+# need. Independent also means a change to the course image cannot silently change the runner.
+#
+# WHICH TIERS IT COVERS: static, unit, shim. The shim tier needs no real podman -- it puts a fake
+# one on PATH. image/container/live cannot move here in either direction: they need real podman and
+# this host's own loopback.
+#
+# THE TOOL LIST IS DUPLICATED with the preflight's registry, and that is self-detecting rather than
+# a maintenance risk: if this file drifts, the runner fails the gate on its next run.
+FROM ubuntu:26.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash \
+        shellcheck \
+        python3 \
+        coreutils \
+        util-linux \
+        iproute2 \
+        lsof \
+        curl \
+        git \
+        procps \
+        openssh-client \
+        sed \
+        gawk \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The suite writes to $TMPDIR and copies the repo out of a read-only bind mount, so it needs a
+# writable home and a non-root user whose uid can own the copies.
+# ubuntu:26.04 already ships a uid-1000 account, so reuse it rather than colliding with it.
+RUN id -u ubuntu >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash ubuntu
+USER ubuntu
+WORKDIR /home/ubuntu

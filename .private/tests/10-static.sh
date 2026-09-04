@@ -106,7 +106,18 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # on it, and holding it to one would mean rewriting vendored code for a platform it will
 # never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
 # is the part that matters.
-hits="$(sed 's/#.*//' $PRIVATE/tests/run-tests.sh $PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/shared.sh $PRIVATE/tests/lib/podman-shim.sh $PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/*.sh \
+# A GLOB MINUS A CONVENTION, not a named list. This used to name four libs explicitly, and that
+# is exactly why lib/setup-git-shim.sh went unscanned for years and lib/portable.sh would have
+# joined it: a list has to be remembered, whereas `lib/*.sh` covers whatever is added next.
+#
+# THE `-guest.sh` SUFFIX IS LOAD-BEARING. lib/sandbox-guest.sh and lib/wine-guest.sh execute
+# INSIDE a container, on its bash 5, and holding them to 3.2 would be holding them to a platform
+# they never see -- the same argument as tmux-harness/ above. Anything new that runs in-container
+# must carry that suffix or it will be scanned and will trip on legitimate bash 5.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+b32files="$(printf '%s\n' $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh | grep -v -- '-guest\.sh$' | do_tr '\n' ' ')"
+# shellcheck disable=SC2086
+hits="$(sed 's/#.*//' $b32files \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
@@ -471,8 +482,25 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-g
 
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
-bare="$(grep -nE '"\$\{(ARGS|RUN_ARGS|NEEDS|NEEDS_WHY|opts)\[@\]\}"' cs193v $PRIVATE/install-cs193v.sh \
-        | grep -vE '\+"\$\{' || true)"
+#
+# WIDENED TWICE OVER, because the narrow form could not have caught the bug it exists for. It
+# scanned two files for five hardcoded names, and F2 was `MACHINE_FLAGS` in lib/sandbox.sh: wrong
+# file, wrong name. It is now ANY array name, over the same glob-minus-convention as the rule
+# above, so a sixth array in a seventh file is covered without anyone remembering to add it.
+#
+# KEEP -vE. Written as `grep -v '+"\$\{'` the filter is a BRE with an unescaped `+`, which BSD
+# grep rejects outright -- "braces not balanced", rc 2, no output -- and inside the house
+# `$(... || true)` idiom the whole rule would then go silently green on the one platform it
+# exists for.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh $b32files"
+# shellcheck disable=SC2086
+# COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
+# quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version
+# of this widening failed on that comment.
+bare="$(grep -HnE '"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' $eafiles \
+        | grep -vE '\+"\$\{' \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 
 # ─── Containerfile ─────────────────────────────────────────────────────────────
@@ -708,7 +736,7 @@ assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELC
 sgkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/files/setup-git-messages.txt | LC_ALL=C sort -u)"
 lkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort -u)"
 assert_ne "setup-git:catalogue-has-keys" "" "$sgkeys"
-both="$(printf '%s\n' "$sgkeys" | grep -xF -f <(printf '%s\n' "$lkeys") | tr '\n' ' ')"
+both="$(printf '%s\n' "$sgkeys" | grep -xF -f <(printf '%s\n' "$lkeys") | do_tr '\n' ' ')"
 if [ -z "$both" ]; then
     pass "setup-git:catalogues-do-not-overlap"
 else
@@ -1282,9 +1310,9 @@ assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=10
 # check and it is deliberately human, because the honest automated version would delete a
 # developer's real logins. That gap is what this grep covers.
 args_vols="$(printf '%s\n' "$args_live" \
-    | sed -n 's/.*-v cs193v-\([A-Za-z0-9_-]*\):.*/\1/p' | LC_ALL=C sort | tr '\n' ' ')"
+    | sed -n 's/.*-v cs193v-\([A-Za-z0-9_-]*\):.*/\1/p' | LC_ALL=C sort | do_tr '\n' ' ')"
 launcher_vols="$(sed -n 's/^[[:space:]]*for v in \(.*\); do$/\1/p' cs193v \
-    | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ')"
+    | do_tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "volumes:launcher-removes-every-volume-args-creates" "$args_vols" "$launcher_vols"
 assert_contains "args:network-pasta"           "--network=pasta"                    "$args_live"
 
@@ -1623,7 +1651,7 @@ print(' '.join(re.findall(r'(?:^|\s)(@[A-Za-z0-9._/-]+)', t, flags=re.M)))
 " 2>&1)" || at_imports="the check itself failed: $at_imports"
 assert_eq  "notes:no-unbackticked-at-import" "" "$at_imports"
 
-lines="$(wc -l < $NOTES | tr -d ' ')"
+lines="$(wc -l < $NOTES | do_tr -d ' ')"
 if [ "$lines" -lt 200 ]; then pass "notes:under-200-lines"
 else fail "notes:under-200-lines" "$lines lines"; fi
 
@@ -1650,36 +1678,17 @@ else fail "notes:under-200-lines" "$lines lines"; fi
 # once and never refreshed, and the student can edit it.
 CODEX_POLICY="$PRIVATE/files/codex/managed_config.toml"
 assert_file "codex:managed-config-exists" "$CODEX_POLICY"
-assert_ok   "codex:managed-config-is-valid-toml" \
-            python3 -c "import tomllib;tomllib.load(open('$CODEX_POLICY','rb'))"
-
-# THE EXACT KEY SET, not a subset, and the values with it. Two reasons this is asserted rather
-# than recorded. First, codex SILENTLY IGNORES a key it does not recognise -- verified against the
-# real binary: a bogus key leaves `codex doctor` reporting "config loaded" with no warning at all
-# -- so a typo is a policy that does nothing and says nothing, the same failure mode as a
-# Write(...) rule in managed-settings.json. Second, the reference says not to combine sandbox_mode
-# with `default_permissions` or `[sandbox_workspace_write]`, and an exact key set is what keeps
-# either from arriving later without anyone noticing. Asserted on the PARSED keys rather than by
-# grepping the file, because the file's own comments name both of those.
-codex_keys="$(python3 -c "
-import tomllib
-print(' '.join(sorted(tomllib.load(open('$CODEX_POLICY','rb')))))" 2>&1)" \
-    || codex_keys="the check itself failed: $codex_keys"
-assert_eq "codex:policy-has-exactly-the-three-keys" \
-          "approval_policy approvals_reviewer sandbox_mode" "$codex_keys"
-
-codex_values="$(python3 -c "
-import tomllib
-d = tomllib.load(open('$CODEX_POLICY','rb'))
-print('%s %s %s' % (d['sandbox_mode'], d['approval_policy'], d['approvals_reviewer']))" 2>&1)" \
-    || codex_values="the check itself failed: $codex_values"
-# approvals_reviewer = auto_review is a DELIBERATE DIVERGENCE from the Claude Code policy, which
-# keeps its prompts in front of the student on the grounds that answering them is the course's core
-# skill. Course staff chose the reviewer subagent for codex anyway; it is asserted here so the
-# divergence stays a decision on the record rather than drifting back by accident in either
-# direction. See the staff README.
-assert_eq "codex:policy-is-workspace-write-on-request-auto-review" \
-          "workspace-write on-request auto_review" "$codex_values"
+# THE PARSE AND THE KEY SET MOVED INTO THE IMAGE TIER, and the move made them stronger rather
+# than weaker. They needed `tomllib`, which is python 3.11+, and macOS ships 3.9 -- so on a Mac
+# they died with a raw ModuleNotFoundError. The obvious fix, `brew install python@3.13`, is the
+# wrong one: it links /opt/homebrew/bin/python3 ahead of /usr/bin, so from then on the PRODUCT
+# under test runs a python no student has, which is the same objection that keeps coreutils'
+# gnubin off PATH.
+#
+# 50-image.sh already parsed this file inside the container, where python is modern by
+# construction, so the key-set and value assertions joined it there. They now read
+# /etc/codex/managed_config.toml -- the INSTALLED copy -- so they cover the Containerfile's
+# install step as well as the source. See `codex:policy-*` in 50-image.sh.
 
 assert_ok "codex:containerfile-installs-the-managed-policy" \
           grep -q 'install -m 0644 /tmp/cs193v-files/codex/managed_config.toml /etc/codex/managed_config.toml' \
@@ -1843,6 +1852,16 @@ fi
 # Its host-side driver is ours and is checked.
 assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                     $PRIVATE/tests/65-tmux.sh
+# lib/portable.sh is in this list rather than a group of its own: it is sourced by assert.sh and
+# by run-tests.sh, so it is as load-bearing as either. SC2034 is excluded for it because the DO_*
+# variables it sets are read by other files, which shellcheck cannot see across a `.`.
+assert_ok  "shellcheck:portable" shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034 \
+                                           $PRIVATE/tests/lib/portable.sh
+assert_ok  "syntax:portable"     bash -n $PRIVATE/tests/lib/portable.sh
+# ptyrun.py is python, so shellcheck cannot read it -- compiled instead, which is the equivalent
+# "does it parse" check and the only one that matters before a suite depends on it.
+assert_ok  "syntax:ptyrun"       python3 -m py_compile $PRIVATE/tests/lib/ptyrun.py
+
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
                                            $PRIVATE/tests/14-test-harness.sh \

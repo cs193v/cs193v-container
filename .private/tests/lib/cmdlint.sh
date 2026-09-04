@@ -77,7 +77,7 @@ cmdlint_line_endings() {              # cmdlint_line_endings FILE -> violations
     [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
     local total cr
     total=$(wc -l < "$1")
-    cr=$(tr -dc '\r' < "$1" | wc -c)
+    cr=$(do_tr -dc '\r' < "$1" | wc -c)
     [ "$cr" -ge "$total" ] || printf 'LF-only line endings (%s lines, %s CR bytes): cmd.exe reads batch in 512-byte chunks and its label scanner assumes CRLF, so goto/call fails by byte offset\n' "$total" "$cr"
 }
 
@@ -89,11 +89,17 @@ cmdlint_non_ascii() {                 # cmdlint_non_ascii FILE -> violations
 cmdlint_labels() {                    # cmdlint_labels FILE -> violations
     [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
     local labels
-    labels=$(sed 's/\r$//' "$1" | sed -n 's/^[ \t]*:\([A-Za-z0-9_][A-Za-z0-9_]*\).*/\1/p' | tr 'A-Z' 'a-z' | sort -u)
+    # [[:space:]] NOT [ \t], and do_tr NOT tr. POSIX bracket expressions have no \t escape and
+    # BSD sed does not expand one, so on a Mac `[ \t]` is the set {space, backslash, t}: it MISSES
+    # a real tab and wrongly eats a leading literal `t`. Measured. awk and grep -E do expand it,
+    # which is why only the two sed lines in this file needed changing -- the ~20 awk uses below
+    # are correct as they stand. Latent today (this .cmd has no tabs and no line starting with t)
+    # and fixed before it stops being latent.
+    labels=$(sed 's/\r$//' "$1" | sed -n 's/^[[:space:]]*:\([A-Za-z0-9_][A-Za-z0-9_]*\).*/\1/p' | do_tr 'A-Z' 'a-z' | sort -u)
     sed 's/\r$//' "$1" | grep -niE '^[ \t]*@?goto[ \t]+:?[A-Za-z0-9_]+' | while IFS= read -r hit; do
         local n t
         n=${hit%%:*}; t=${hit#*:}
-        t=$(printf '%s' "$t" | sed -E 's/^[ \t]*@?[Gg][Oo][Tt][Oo][ \t]+:?([A-Za-z0-9_]+).*/\1/' | tr 'A-Z' 'a-z')
+        t=$(printf '%s' "$t" | sed -E 's/^[[:space:]]*@?[Gg][Oo][Tt][Oo][[:space:]]+:?([A-Za-z0-9_]+).*/\1/' | do_tr 'A-Z' 'a-z')
         [ "$t" = eof ] && continue
         printf '%s\n' "$labels" | grep -qxF "$t" || printf 'line %s: goto %s has no matching label\n' "$n" "$t"
     done
@@ -147,7 +153,7 @@ _cmdlint_waivers() {                  # _cmdlint_waivers FILE RULE -> waived lin
 cmdlint_unchecked_calls() {           # cmdlint_unchecked_calls FILE -> violations
     [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
     local waived
-    waived="$(_cmdlint_waivers "$1" unchecked-exit | tr '\n' ' ')"
+    waived="$(_cmdlint_waivers "$1" unchecked-exit | do_tr '\n' ' ')"
     _cmdlint_commands "$1" | awk -F'\t' -v builtins="$CMDLINT_BUILTINS" -v waived=" $waived " '
     BEGIN { split(builtins, b, "|"); for (i in b) isb[b[i]] = 1 }
     {

@@ -16,7 +16,10 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 . "$(dirname -- "$0")/lib/podman-shim.sh"
 
-require_cmd script "needed to drive the arrow-key menu through a pty"
+# NO require_cmd script: nothing here uses script(1) any more. lib/ptyrun.py replaced it because
+# BSD script cannot deliver keystrokes and macOS has no GNU one to install -- so demanding it would
+# refuse a machine over a tool the suite does not touch. ptyrun needs python3, which the preflight
+# in run-tests.sh checks for every tier.
 trap 'shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
 # ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
@@ -65,9 +68,9 @@ assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/st
 # --mount, so a plain diff would fail spuriously. What must be empty is the set of flags
 # present in the args files but missing from the run line.
 missing="$(LC_ALL=C comm -13 \
-    <(printf '%s\n' "$line" | tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$line" | do_tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) \
     <(sed 's/#.*//' "$COPY/.config/container.args" "$COPY/.config/local.args" 2>/dev/null \
-        | tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) | tr '\n' ' ')"
+        | do_tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) | do_tr '\n' ' ')"
 assert_eq "print:contains-every-args-file-flag" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
 # local.args is machine-specific and absent from a fresh clone; the memory cap must reach
@@ -106,7 +109,7 @@ assert_contains "print:resolves-through-symlink" "src=$COPY/projects" \
 # JOINED WITH SPACES AND MATCHED AS ONE STRING, not word by word: that is what makes this
 # sensitive to ORDER, which is the half a set comparison would throw away -- and order is what
 # decides which of two conflicting flags podman honours.
-dev_args_joined="$(launcher --dev-args | tr '\n' ' ' | sed 's/ *$//')"
+dev_args_joined="$(launcher --dev-args | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_ne       "dev-args:prints-something"            ""                  "$dev_args_joined"
 assert_contains "dev-args:every-word-reaches-run-line" "$dev_args_joined" \
                 "$(launcher --dev-print-command)"
@@ -133,9 +136,22 @@ assert_eq       "root:asks-podman-nothing"  "0"             "$(shim_count '.')"
 # version_lt compares numerically, field by field. A lexical compare would call 10.0.0
 # older than the floor and refuse every future podman.
 #
-# THE NUMBERS HERE ARE MIN_PODMAN_LINUX's NEIGHBOURS, not arbitrary. This suite runs on Linux, so
-# the floor it is testing is 4.9.0 — see the two-floor rationale in cs193v. Every version below is
-# one a real distro actually ships, which is what makes an off-by-one here mean something:
+# THE PLATFORM IS FAKED, NOT INHERITED, and that is the fix for a hole this group had. min_podman
+# (cs193v:874) picks 4.9.0 or 5.7.0 from `platform()`, which is nothing but `uname -s` — so this
+# group used to test whichever floor the HOST happened to have, while its comments claimed to test
+# the Linux one. On a Mac that silently became the 5.7.0 floor and four assertions went red
+# (4.9.0/4.9.3/5.4.2-accepted, and the "needed" needle) against a launcher behaving correctly.
+#
+# `uname` IS A COMMAND, so $PATH reaches it -- unlike install-cs193v.sh, whose Linux arm reads
+# /proc/version, /etc/os-release and /proc/meminfo and therefore cannot be faked this way. That
+# asymmetry is why the installer's Linux-only cases need a container and these do not.
+#
+# The refusal TEXT is platform-independent (messages.txt err.podman-too-old names WSL, other Linux
+# and macOS in one block), so only the floor moves -- which is why refusal-names-the-fix passed on
+# a Mac while refusal-shows-needed did not.
+#
+# THE NUMBERS HERE ARE MIN_PODMAN_LINUX's NEIGHBOURS, not arbitrary. Every version below is one a
+# real distro actually ships, which is what makes an off-by-one here mean something:
 #
 #   refused   4.8.3  Alpine 3.19        4.3.1  Debian 12 bookworm   3.4.4  Ubuntu 22.04 LTS
 #   accepted  4.9.0  the floor itself   4.9.3  Ubuntu 24.04 LTS     5.4.2  Debian 13 trixie
@@ -145,11 +161,11 @@ assert_eq       "root:asks-podman-nothing"  "0"             "$(shim_count '.')"
 # common desktop Linuxes at once. It is accepted on measurement, not on faith:
 # 26-installer-sandbox.sh builds the entire course image on a real 4.9.3.
 for v in 4.8.3 4.3.1 3.4.4 0.1.0; do
-    shim_new; shim_set version "podman version $v"
+    shim_new; shim_fake_uname Linux x86_64; shim_set version "podman version $v"
     assert_eq "version:$v-refused" "1" "$(launcher_rc)"
     assert_eq "version:$v-creates-nothing" "0" "$(shim_count '^run ')"
 done
-shim_new; shim_set version "podman version 4.3.1"
+shim_new; shim_fake_uname Linux x86_64; shim_set version "podman version 4.3.1"
 out="$(launcher)"
 assert_contains "version:refusal-shows-found"  "4.3.1" "$out"
 assert_contains "version:refusal-shows-needed" "4.9.0" "$out"
@@ -158,11 +174,40 @@ assert_says "version:refusal-names-the-fix" "apt install" "$out"
 # 4.9.0 is exactly MIN_PODMAN_LINUX, so "equal" must mean "acceptable" — an off-by-one here
 # refuses a machine sitting precisely on the floor. 10.0.0 guards against a lexical compare, which
 # would call it older than 4.9.0.
-for v in 4.9.0 4.9.3 5.4.2 5.7.0 6.0.2 10.0.0; do
-    shim_new; shim_set version "podman version $v"
+# ACCEPTANCE IS MEASURED AT `podman info`, NOT AT `podman run`, and the difference is the whole
+# reason this group can fake its platform. `pm info` (cs193v:1122) is the FIRST call the launcher
+# makes after the version gate, so its presence in the shim log says exactly one thing: the
+# version was accepted. Waiting for `podman run` instead drags in every later gate -- and the
+# very next one, cs193v:1130, reads /etc/subuid, a FILE. No $PATH shim can put that on a Mac, so
+# an end-to-end check simply cannot run the Linux arm here. Measured: faking Linux and asserting
+# on `^run ` failed all six, including the three that used to pass, with the launcher dying on
+# err.no-subuid long after it had accepted the version.
+floor_verdict() {                     # floor_verdict SYSNAME MACHINE VERSION -> accepted|refused
+    shim_new; shim_fake_uname "$1" "$2"; shim_set version "podman version $3"
     launcher >/dev/null 2>&1
-    assert_eq "version:$v-accepted" "1" "$(shim_count '^run ')"
+    if [ "$(shim_count '^info')" -gt 0 ]; then printf accepted; else printf refused; fi
+}
+for v in 4.9.0 4.9.3 5.4.2 5.7.0 6.0.2 10.0.0; do
+    assert_eq "version:$v-accepted" "accepted" "$(floor_verdict Linux x86_64 "$v")"
 done
+
+# THE OTHER ARM OF min_podman, which nothing tested before: on macOS the floor is 5.7.0, so three
+# versions a Linux machine is happily accepted on must be REFUSED here. Until the platform was
+# faked, the `macos)` branch at cs193v:876 was reachable only by running the suite on a Mac --
+# which is the accident that made this group red rather than anything anyone designed.
+for v in 4.9.0 5.4.2 5.6.9; do
+    assert_eq "version:macos-$v-refused" "refused" "$(floor_verdict Darwin arm64 "$v")"
+done
+for v in 5.7.0 6.0.2 10.0.0; do
+    assert_eq "version:macos-$v-accepted" "accepted" "$(floor_verdict Darwin arm64 "$v")"
+done
+
+# ...and one END-TO-END launch on whatever platform the suite is actually running on, so that
+# "accepted" is still tied to a real `podman run` somewhere. 10.0.0 clears both floors, so this
+# case is valid on a Mac and on Linux alike.
+shim_new; shim_set version "podman version 10.0.0"
+launcher >/dev/null 2>&1
+assert_eq "version:an-accepted-version-reaches-podman-run" "1" "$(shim_count '^run ')"
 
 # ─── and noise on podman's stderr is not part of the version ───────────────────
 # THE VERSION IS READ OUT OF run_timeout's RT_OUT, which merges the command's stderr into its
@@ -354,7 +399,7 @@ else fail "lifecycle:the-launcher-stops-the-container" \
 # waiting on a PID 1 that traps TERM and exits in milliseconds. -i so an already-removed
 # container (a --rebuild from elsewhere) is not an error.
 assert_says "lifecycle:the-stop-is-bounded-and-forgiving" "stop -t 3 -i" \
-            "$(shim_log | tr '\n' ' ')"
+            "$(shim_log | do_tr '\n' ' ')"
 
 # The refusal. Piped rather than through a pty on purpose: refuse_if_session_live runs BEFORE
 # open_shell's tty check, so this is reachable without one -- and that ordering is what makes
@@ -517,7 +562,14 @@ shim_set label_dir /somewhere/else/cs193v
 out="$(launcher)"
 assert_says "foreign-dir:refused"        "different folder" "$out"
 assert_contains "foreign-dir:names-theirs"   "/somewhere/else/cs193v" "$out"
-assert_contains "foreign-dir:names-yours"    "$COPY" "$out"
+# COMPARED WITH THE BOX'S DECORATION AND WHITESPACE REMOVED, because box() WRAPS a long path
+# rather than truncating it -- the student still sees all of it, across two rows. On macOS a shim
+# repo path cannot fit one row at all: the `/private/var/folders/.../T/` prefix alone is 57 of the
+# box's ~64 usable columns, so this assertion could never pass there while asking for the path as
+# one contiguous string. Squeezing whitespace out of BOTH sides is safe for a needle that is a
+# path, which contains none.
+squash() { printf '%s' "$1" | do_tr -d '[:space:]┃┏┓┗┛━'; }
+assert_contains "foreign-dir:names-yours" "$(squash "$COPY")" "$(squash "$out")"
 assert_contains "foreign-dir:offers-rebuild" "--rebuild" "$out"
 assert_eq       "foreign-dir:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq       "foreign-dir:opens-no-shell"  "0" "$(shim_count '^exec ')"
@@ -687,7 +739,7 @@ shim_new
 out="$(launcher --rebuild)"
 assert_eq "rebuild:raises-no-tunnel" "0" \
     "$(ls "$SHIM"/tmp/cs193v-*.ctl "$SHIM"/tmp/cs193v-*.pid "$SHIM"/tmp/cs193v-*.log 2>/dev/null \
-       | grep -v 'cs193v-build-' | wc -l | tr -d ' ')"
+       | grep -v 'cs193v-build-' | wc -l | do_tr -d ' ')"
 # ...and says nothing about one either. By KEY, so rewording the message cannot break this.
 assert_says_not_key "rebuild:says-nothing-about-the-tunnel" warn.tunnel-failed "$out"
 
@@ -821,7 +873,7 @@ assert_contains "noterm:passes-the-container-name-in" "CS193V_CONTAINER=" "$(shi
 # refuses with "width too small": no session, cs193v-shell prints its fault box, the launch dies.
 # Measured. Caught by the live tier, which costs five minutes; this costs none.
 sz_bad=''
-for kv in $(shim_log | tr ' ' '\n' | grep -E '^CS193V_(COLS|LINES)=' | sort -u); do
+for kv in $(shim_log | do_tr ' ' '\n' | grep -E '^CS193V_(COLS|LINES)=' | sort -u); do
     sz_v="${kv#*=}"
     case "$sz_v" in ''|*[!0-9]*) sz_bad="$sz_bad $kv(non-numeric)" ; continue ;; esac
     case "${kv%%=*}" in

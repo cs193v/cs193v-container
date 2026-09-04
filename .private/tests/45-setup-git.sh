@@ -314,7 +314,7 @@ assert_match     "plan:every-gh-call-names-the-students-sandbox" \
 branches="$(printf '%s\n' "$PLAN" | grep -oE 'cs193v-setup/[0-9a-f]+' | LC_ALL=C sort -u)"
 assert_eq "plan:three-branches" "3" "$(printf '%s\n' "$branches" | grep -c .)"
 assert_eq "plan:branch-names-are-64-hex" "" \
-          "$(printf '%s\n' "$branches" | grep -vE '^cs193v-setup/[0-9a-f]{64}$' | tr '\n' ' ')"
+          "$(printf '%s\n' "$branches" | grep -vE '^cs193v-setup/[0-9a-f]{64}$' | do_tr '\n' ' ')"
 assert_match "plan:issue-title-carries-64-hex" 'cs193v setup check [0-9a-f]{64}' "$PLAN"
 
 # Two runs must not collide, or two students setting up at the same moment would.

@@ -165,26 +165,37 @@ machine_valid() {                     # machine_valid caps|prereqs|bases LIST ->
         *) printf 'machine_valid: unknown kind %s\n' "$kind" >&2; return 2 ;;
     esac
     [ -n "$list" ] || return 0
-    for e in $(printf '%s' "$list" | tr ',' ' '); do
+    for e in $(printf '%s' "$list" | do_tr ',' ' '); do
         case " $known " in *" $e "*) ;; *) printf '%s' "$e"; return 1 ;; esac
     done
     return 0
 }
 
 MACHINE_FLAGS=()
+# APPENDED WITH `+=`, NOT `MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" ...)`. That form READS the array in
+# order to rebuild it, and reading an EMPTY array under `set -u` is fatal on bash < 4.4 -- every
+# Mac. It killed machine_flags at its FIRST append, so every fixture container launched with no
+# --cap-add, no unmask, no --device and no WSL bind mount: 62 install-tier failures that looked
+# like podman misbehaving. `+=` is bash 3.1+, so it predates the 3.2 macOS ships, and it never
+# reads the array at all -- the hazard is absent rather than guarded against.
+#
+# DO NOT "fix" this with ERRORS.md A5's ${arr[@]+"${arr[@]}"} idiom. That is for READS of a
+# possibly-empty array, which is what every A5 site in the launcher is (cs193v:1366 passes to
+# podman, :2702 iterates). The five genuine reads in this file -- :614, :638, :647, :689, :823 --
+# are already correctly guarded that way; leave them alone.
 # The run-time half of both axes. Every flag a fixture container gets beyond the constants
 # sandbox_run applies itself.
 machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE_PODMAN] [BASE]
     MACHINE_FLAGS=()
     local drop platform fake base
-    drop=",$(printf '%s' "${1:-}" | tr -d '[:space:]'),"
+    drop=",$(printf '%s' "${1:-}" | do_tr -d '[:space:]'),"
     platform="${2:-linux}"; fake="${3:-no}"; base="${4:-machine}"
     # VALIDATED HERE TOO, against both vocabularies, so a typo in one of the nested case's
     # differential controls -- which pass names this function accepts but the flag surface does
     # not -- fails instead of silently granting the flag it meant to remove. A control that
     # removes nothing passes for the wrong reason, which is the worst outcome available.
     local d
-    for d in $(printf '%s' "$drop" | tr ',' ' '); do
+    for d in $(printf '%s' "$drop" | do_tr ',' ' '); do
         case " $MACHINE_CAP_NAMES $MACHINE_CAP_INTERNAL " in
             *" $d "*) ;;
             *) printf 'machine_flags: unknown capability %s\n' "$d" >&2; return 2 ;;
@@ -200,11 +211,11 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # MACHINE_SYSADMIN_BASES. A Fedora base nests without it because its newuidmap carries file
     # capabilities; a Debian-family one cannot, because a setuid bit does not survive the nesting.
     if machine_needs_sysadmin "$base"; then
-    case "$drop" in *,sysadmin,*) : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --cap-add=SYS_ADMIN) ;; esac
+    case "$drop" in *,sysadmin,*) : ;; *) MACHINE_FLAGS+=(--cap-add=SYS_ADMIN) ;; esac
     fi
-    case "$drop" in *,unmask,*)   : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt 'unmask=/proc/*') ;; esac
-    case "$drop" in *,fuse,*)     : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/fuse) ;; esac
-    case "$drop" in *,tun,*)      : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --device /dev/net/tun) ;; esac
+    case "$drop" in *,unmask,*)   : ;; *) MACHINE_FLAGS+=(--security-opt 'unmask=/proc/*') ;; esac
+    case "$drop" in *,fuse,*)     : ;; *) MACHINE_FLAGS+=(--device /dev/fuse) ;; esac
+    case "$drop" in *,tun,*)      : ;; *) MACHINE_FLAGS+=(--device /dev/net/tun) ;; esac
     # ─── AND ON AN SELinux HOST, THE LABEL COMES OFF (#119) ────────────────────
     #
     # WHAT IT FIXES, which is BOTH of the two limits #119 reports as independent. They are one
@@ -259,14 +270,14 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # Same distinction this function already relies on for unmask=/proc/* against container.args'
     # ban on unmask=ALL: a fixture, one level out, naming one thing.
     if [ -n "${VT_SELINUX:-}" ]; then
-    case "$drop" in *,label,*)    : ;; *) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" --security-opt label=disable) ;; esac
+    case "$drop" in *,label,*)    : ;; *) MACHINE_FLAGS+=(--security-opt label=disable) ;; esac
     fi
     fi
     # A BIND MOUNT IS THE WHOLE WSL ARM. platform() decides by `grep -qi microsoft
     # /proc/version` (installer:306) and the effect is two file writes, so it is executable on
     # Linux with no Windows anywhere.
     case "$platform" in
-        wsl) MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/proc-version:/proc/version:ro$VT_MOUNT_Z") ;;
+        wsl) MACHINE_FLAGS+=(-v "$SB_WORK/proc-version:/proc/version:ro$VT_MOUNT_Z") ;;
     esac
     # A TEST CONVENIENCE, NAMED AS ONE, and deliberately on neither axis: a fake podman is
     # not an absence and not a capability, and it is not a machine any student could have.
@@ -283,7 +294,7 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # installed, but the course needs 5.7.0 or newer" -- a fixture artefact wearing the costume
     # of a product refusal. Mounting over the real path shadows it exactly and adds no path.
     if [ "$fake" = yes ]; then
-        MACHINE_FLAGS=("${MACHINE_FLAGS[@]}" -v "$SB_WORK/podman-fake:/usr/bin/podman:ro$VT_MOUNT_Z" \
+        MACHINE_FLAGS+=(-v "$SB_WORK/podman-fake:/usr/bin/podman:ro$VT_MOUNT_Z" \
                        -e CS193V_SHIM=/var/tmp/shim)
     fi
     return 0
@@ -643,6 +654,11 @@ comm -13 /var/tmp/report/dpkg-before /var/tmp/report/dpkg-now > /var/tmp/report/
 
 printf '\n===INSTALLER-RC=%s===\n' "$rc"
 printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
+# THE FIXTURE'S OWN ARCHITECTURE, so an assertion on the survey's "PLAT on ARCH" line can
+# check that it told the truth rather than that this image happens to be amd64. Three cases
+# used to hardcode x86_64 and so passed or failed on whether their base image was pinned to a
+# per-architecture digest -- which is a fact about the pin, not about the installer.
+printf '===ARCH===\n';      uname -m
 printf '===ETC-SUBUID===\n'; cat /etc/subuid  2>/dev/null
 printf '===ETC-SUBGID===\n'; cat /etc/subgid  2>/dev/null
 printf '===WSL-CONF===\n';   cat /etc/wsl.conf 2>/dev/null
@@ -774,7 +790,7 @@ nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KE
     local base="${1:-machine}"; shift 2>/dev/null || true
     # shellcheck disable=SC2086
     machine_flags '' linux no "$base" || return 1
-    timeout 180 podman run --label "$VT_LABEL" --rm \
+    do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" "$@" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
@@ -798,7 +814,7 @@ nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KE
 nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN removed, unmask kept
     local base="${1:-machine}"
     machine_flags sysadmin linux no "$base" || return 1
-    timeout 180 podman run --label "$VT_LABEL" --rm \
+    do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
@@ -815,7 +831,7 @@ nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN rem
 nest_probe_nolabel() {                # nest_probe_nolabel [BASE] -- the SELinux label left ON
     local base="${1:-machine}"
     machine_flags label linux no "$base" || return 1
-    timeout 180 podman run --label "$VT_LABEL" --rm \
+    do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
@@ -824,7 +840,7 @@ nest_probe_nolabel() {                # nest_probe_nolabel [BASE] -- the SELinux
 nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask removed, SYS_ADMIN kept
     local base="${1:-machine}"
     machine_flags unmask linux no "$base" || return 1
-    timeout 180 podman run --label "$VT_LABEL" --rm \
+    do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" sh /probe.sh 2>&1
@@ -1117,7 +1133,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     machine_flags "${SB_NO_CAPS:+$SB_NO_CAPS,}label" "$SB_PLATFORM" "$SB_FAKE_PODMAN" "$SB_BASE" \
         || { fail "sb-$case:the-machine-flags-were-accepted" "machine_flags refused the drop list"; return 1; }
     set -- ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} "$@"
-    printf '%b' "$keys" | timeout --kill-after=15 "$outer" \
+    printf '%b' "$keys" | do_timeout --kill-after=15 "$outer" \
         podman run --timeout "$cap" --label "$VT_LABEL" -it --name "$SB_NAME" \
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
@@ -1152,8 +1168,8 @@ sb_collect_trace() {
     # ends in a carriage return and /^===TRACE===$/ matched nothing -- the collected file was
     # zero bytes while the section was plainly there in the stripped output I was reading. The
     # gate then reported the producer silent, which was true and completely misleading.
-    tr -d '\r' \
-        | sed -n '/^===TRACE===$/,/^===/p' | sed '1d;$d' | tr ' ' '\n' | grep -E '^[0-9]+$' \
+    do_tr -d '\r' \
+        | sed -n '/^===TRACE===$/,/^===/p' | sed '1d;$d' | do_tr ' ' '\n' | grep -E '^[0-9]+$' \
         | sed 's/^/+/;s/$/ traced-in-container/' \
         >> "$CS193V_RUN_DIR/trace/${CS193V_SUITE:-standalone}.$$" || true
 }

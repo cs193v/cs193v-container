@@ -31,7 +31,12 @@
 # PINNED BY DIGEST, like Containerfile.machine, so `podman --version` inside cannot drift under
 # the assertions that name 5.4.2. Measured before pinning: apt-cache policy in this image reports
 # candidate 5.4.2+ds1-2+b2.
-FROM debian:13@sha256:6788062a1b42ac281f053ac876170b79a3eaed5d61383b8ed7eaca6c6965f3b1
+# PINNED BY MANIFEST-LIST DIGEST, not a per-architecture one -- the same rule
+# 00-release-gates.sh:143 states and asserts for the course image. An earlier pin here named
+# the amd64 LEG of this index, which meant the fixture ran emulated on Apple Silicon; the
+# emulated amd64 podman then SIGSEGVd inside the Go runtime's netpoll and the survey read a
+# register dump where it expected a version. One digest, both legs, native on each.
+FROM debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
 
 # podman is the point; sudo, curl and openssh-client are here so that nothing ELSE needs doing and
 # the refusal is the only thing the run can be about -- the same reasoning, and the same package

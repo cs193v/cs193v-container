@@ -25,7 +25,10 @@ set -u
 
 cd "$REPO" || exit 1
 
-require_cmd script "needed to drive the arrow-key menus through a pty"
+# NO require_cmd script: nothing here uses script(1) any more. lib/ptyrun.py replaced it because
+# BSD script cannot deliver keystrokes and macOS has no GNU one to install -- so demanding it would
+# refuse a machine over a tool the suite does not touch. ptyrun needs python3, which the preflight
+# in run-tests.sh checks for every tier.
 # sg_rows_over, sg_widest_row and box_problems all measure with python3, and two of the
 # assertions they feed read the empty string as their happy answer -- so this suite had five of
 # #79's twenty-six vacuous passes and asked nothing of the interpreter at all.
@@ -157,7 +160,7 @@ sg_has "tally:counts-the-hidden-characters" "$TOKEN_MID more characters" "$out"
 
 tally="$(sg_final "$out" "$TOKEN_MID more characters")"
 assert_eq "tally:draws-six-dots-not-ninety-three" "6" \
-          "$(printf '%s' "$tally" | grep -o '•' | wc -l | tr -d ' ')"
+          "$(printf '%s' "$tally" | grep -o '•' | wc -l | do_tr -d ' ')"
 
 # NO WRAPPED LINE AT THAT PROMPT. Measured in display columns rather than bytes, because a • is
 # three bytes and mawk's length() would score this at 3× and pass vacuously — the same trap box()
@@ -171,13 +174,13 @@ assert_eq "tally:fits-an-80-column-terminal" "yes" \
 # Asserted as an ORDERING — the show sequence immediately ahead of the prompt — because a bare
 # "[?25h appears somewhere" would pass on the one the EXIT trap emits at the end of every run.
 assert_match "cursor:shown-at-the-token-prompt" "$SG_ESC\[\?25h.{0,60}Your token" \
-             "$(printf '%s' "$out" | tr -d '\r')"
+             "$(printf '%s' "$out" | do_tr -d '\r')"
 # And the same for the two prompts that echo normally, which were just as cursorless. The needle is
 # the PROMPT rather than the words "email address": those now appear first in the GitHub
 # checkpoint's signup link, three screens later, where the cursor is hidden and the assertion was
 # passing on nothing.
 assert_match "cursor:shown-at-the-sunetid-prompt" "$SG_ESC\[\?25h" \
-             "$(printf '%s' "$out" | tr -d '\r' | sed -n '/What is your SUNetID/,$p' | head -1)"
+             "$(printf '%s' "$out" | do_tr -d '\r' | sed -n '/What is your SUNetID/,$p' | head -1)"
 
 # ─── the two ways to get a token (issue #58) ───────────────────────────────────
 # The link screen ends in a choice, and the by-hand steps sit behind it. Printing both to
@@ -487,7 +490,7 @@ sg_says "junk-token:says-what-one-looks-like" err.token-shape "$out"
 # FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
 # because "... -1 more characters ..." is what a short typo would otherwise render as.
 assert_eq "junk-token:draws-one-dot-per-character" "5" \
-          "$(sg_final "$out" "Your token:" | grep -o '•' | wc -l | tr -d ' ')"
+          "$(sg_final "$out" "Your token:" | grep -o '•' | wc -l | do_tr -d ' ')"
 sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
            "$(sg_final "$out" "Your token:")"
 
@@ -624,7 +627,7 @@ sg_has_not "cleanup:says-nothing-about-it" "--delete" "$out"
 sg_new
 out="$(sg_tty "$HAPPY")"
 assert_eq "copy:no-line-is-invisible-whitespace" "" \
-          "$(sg_rows "$out" | grep -nE '^[[:space:]]+$' | head -3 | tr '\n' ' ')"
+          "$(sg_rows "$out" | grep -nE '^[[:space:]]+$' | head -3 | do_tr '\n' ' ')"
 
 # ─── the cursor comes back ─────────────────────────────────────────────────────
 # run_step hides the cursor for the duration of a row. A script that exits with it hidden leaves

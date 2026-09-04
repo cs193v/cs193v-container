@@ -32,7 +32,12 @@
 # TIER A -- NO NESTING ADAPTATIONS. uid 1000, a real subuid range, no vfs or cgroupfs override,
 # and machine_flags hands this base no capabilities. Nothing here runs a podman, because the
 # install dies before one exists to run.
-FROM fedora:43@sha256:129a31741db676a9f99e58d9cf468cd8e86cf0336d9f9eea85ed9e729558a12d
+# PINNED BY MANIFEST-LIST DIGEST, not a per-architecture one -- the same rule
+# 00-release-gates.sh:143 states and asserts for the course image. An earlier pin here named
+# the amd64 LEG of this index, which meant the fixture ran emulated on Apple Silicon; the
+# emulated amd64 podman then SIGSEGVd inside the Go runtime's netpoll and the survey read a
+# register dump where it expected a version. One digest, both legs, native on each.
+FROM fedora:43@sha256:5025e03937bb59c0e69ecdbf2b7a94050add3aff0dbdbed1da5cd6aba62a6af0
 
 # openssh-clients, NOT openssh-client -- Fedora's name for it, and the plural is exactly the kind
 # of thing a fix for #94 has to get right per family. Deliberately NOT podman.

@@ -34,7 +34,7 @@ record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 # ─── extract msg() so it can be unit-tested ────────────────────────────────────
 UI="$PRIVATE/files/cs193v-ui.sh"
 sed -n '/^msg() {$/,/^}$/p' "$UI" > "$TMP/msg.sh"
-if [ "$(wc -l < "$TMP/msg.sh" | tr -d ' ')" -gt 5 ]; then
+if [ "$(wc -l < "$TMP/msg.sh" | do_tr -d ' ')" -gt 5 ]; then
     pass "msg:extractable-for-unit-test"
 else
     fail "msg:extractable-for-unit-test" \
@@ -49,16 +49,16 @@ MESSAGES="$PRIVATE/messages.txt"
 # LC_ALL=C throughout: under en_US.UTF-8, sort and comm disagree about how to order
 # punctuation and comm aborts with "file 1 is not in sorted order" — which VERIFICATION.md
 # §A.1 does today, so its cross-reference has never actually run.
-grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
+grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
 grep -ohE 'msg +[a-z0-9._-]+' cs193v $PRIVATE/install-cs193v.sh | awk '{print $2}' \
     | LC_ALL=C sort -u > "$TMP/used"
 
-orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | tr '\n' ' ')"
-missing="$(LC_ALL=C comm -13 "$TMP/defined" "$TMP/used" | tr '\n' ' ')"
+orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
+missing="$(LC_ALL=C comm -13 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
 assert_eq "keys:no-orphans" "" "$(printf '%s' "$orphans" | sed 's/ *$//')"
 assert_eq "keys:none-missing" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
-dupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort | uniq -d | tr '\n' ' ')"
+dupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
 assert_eq "keys:no-duplicates" "" "$(printf '%s' "$dupes" | sed 's/ *$//')"
 
 # A key defined with an empty body makes msg() return "(missing message: k)" at runtime,
@@ -73,7 +73,7 @@ assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 # 10-static.sh asserts that container-side prose stays out of it.
 SGM="$PRIVATE/files/setup-git-messages.txt"
 SGS="$PRIVATE/files/setup-git"
-grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | tr -d '[]' | LC_ALL=C sort -u > "$TMP/sg_defined"
+grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/sg_defined"
 assert_ne "sgkeys:catalogue-found" "" "$(cat "$TMP/sg_defined")"
 
 # ORPHANS ARE FOUND BY SEARCHING FOR THE KEY, not by matching a call form, and that difference
@@ -101,9 +101,9 @@ grep -v '^[[:space:]]*#' "$SGS" \
     | grep -ohE '(^|[;&|(]|\$\()[[:space:]]*(msg|render|say) +[a-z0-9._-]+' \
     | awk '{print $NF}' | LC_ALL=C sort -u > "$TMP/sg_used"
 assert_eq "sgkeys:none-missing" "" \
-          "$(LC_ALL=C comm -13 "$TMP/sg_defined" "$TMP/sg_used" | tr '\n' ' ' | sed 's/ *$//')"
+          "$(LC_ALL=C comm -13 "$TMP/sg_defined" "$TMP/sg_used" | do_tr '\n' ' ' | sed 's/ *$//')"
 
-sgdupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | LC_ALL=C sort | uniq -d | tr '\n' ' ')"
+sgdupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
 assert_eq "sgkeys:no-duplicates" "" "$(printf '%s' "$sgdupes" | sed 's/ *$//')"
 
 sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
@@ -420,7 +420,7 @@ else
 fi
 
 record "box:messages-drawn-in-a-box" \
-       "$(sed -n 's/^BOXED://p' "$TMP/width" | tr ',' ' ')"
+       "$(sed -n 's/^BOXED://p' "$TMP/width" | do_tr ',' ' ')"
 
 # ─── setup-git's boxed messages ────────────────────────────────────────────────
 # NO EMPHASIS MARKUP IN ANYTHING THAT GOES IN A BOX. setup-git renders *asterisks* as colour AFTER
@@ -465,7 +465,7 @@ if [ -z "$long" ]; then
     pass "box:no-message-line-overflows"
 else
     fail "box:no-message-line-overflows" "$(printf '%s\n' "$long" | head -14)
-$(printf '%s\n' "$long" | wc -l | tr -d ' ') line(s) overflow the box"
+$(printf '%s\n' "$long" | wc -l | do_tr -d ' ') line(s) overflow the box"
 fi
 
 wide="$(grep -c '^WIDE:' "$TMP/width")" || true
@@ -528,7 +528,7 @@ done
 for f in "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/install-cs193v.sh"; do
     sed -n '/^box() {$/,/^}$/p' "$f" > "$TMP/box.$(basename "$f")"
 done
-if [ "$(wc -l < "$TMP/box.cs193v-ui.sh" | tr -d ' ')" -gt 20 ]; then
+if [ "$(wc -l < "$TMP/box.cs193v-ui.sh" | do_tr -d ' ')" -gt 20 ]; then
     pass "box:extractable"
 else
     fail "box:extractable" "could not extract box() from cs193v-ui.sh"

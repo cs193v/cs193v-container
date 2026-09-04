@@ -68,10 +68,41 @@ if [ -f "$REPO/.config/local.args" ]; then
 else
     record "flag:memory-matches-local.args" "no local.args (installer not run here)"
 fi
-# podman's default. A tighter limit does not kill the container, it WEDGES it: `podman exec`
-# must fork into the same cgroup, so the launcher cannot get back in, and it does not
-# self-heal.
-assert_eq "flag:pids-limit-is-podman-default" "2048" "$(I '{{.HostConfig.PidsLimit}}')"
+# NOTHING IN THIS PROJECT SETS A PIDS LIMIT -- .config/container.args:196-198 names
+# `--pids-limit` only as something deliberately NOT set -- so this was never a test of ours. It
+# was a CANARY ON PODMAN'S DEFAULT, and the direction that matters is only one of the two: a
+# TIGHTER limit does not kill the container, it WEDGES it, because `podman exec` must fork into
+# the same cgroup, so the launcher cannot get back in and it does not self-heal.
+#
+# PODMAN 6 MOVED THE DEFAULT THE OTHER WAY, to unlimited: HostConfig.PidsLimit is 0 and
+# pids.max is `max` (podman 6.0.2, measured on two independent probes). Asserting `2048`
+# therefore reddened on a container that is in no danger at all.
+#
+# DO NOT "FIX" THIS BY PINNING --pids-limit=2048. It would hand back the exact wedge hazard
+# podman 6 removed by accident, and it collides with three things that would all have to be
+# rewritten to lie: 10-static.sh:1104 lists --pids-limit among flags "considered and rejected"
+# and says re-adding one "should be a deliberate act that breaks a test"; container.args:190-199
+# documents the rejection; and both assertions here name a provenance that would stop being true.
+#
+# SO: RECORD THE VALUE, AND ASSERT ONLY AGAINST A DANGEROUSLY TIGHT ONE. Green on podman 5.7
+# (2048) and 6.x (0/max) alike, red only on a value low enough to hurt. This is NOT green-for-free:
+# the unreadable arm below is a real failure, and it is the one that fires if the probe breaks.
+#
+# THE MECHANISM ITSELF IS STILL TESTED, and by a case that does not depend on any default:
+# limits:pids-limit-is-enforced (:1177 below) runs a disposable container with --pids-limit 64 and
+# proves podman still applies a limit when it is asked to. Only the default moved.
+assert_pids_floor() {                 # assert_pids_floor NAME VALUE -- `0` (podman) and `max` (cgroup) both mean unlimited
+    case "$2" in
+        0|max)       pass "$1" ;;
+        ''|*[!0-9]*) fail "$1" "could not read a pids limit at all: got '$2'" ;;
+        *) if [ "$2" -ge 512 ]; then pass "$1"
+           else fail "$1" "a limit of $2 is tight enough to wedge podman exec, which has to fork into this cgroup"
+           fi ;;
+    esac
+}
+PIDS="$(I '{{.HostConfig.PidsLimit}}')"
+record "flag:pids-limit" "$PIDS"
+assert_pids_floor "flag:pids-limit-is-not-dangerously-low" "$PIDS"
 
 # Host isolation comes from the user namespace, not the capability set — root owns
 # /usr/bin and /etc, so euid 0 inside needs no capability to tamper with the toolchain.
@@ -110,7 +141,7 @@ assert_contains "flag:userns-keep-id-explicit" "--userns=keep-id:uid=1000,gid=10
 # that race, because the container is created before the tunnel starts, so a stray -p line
 # would silently take the port away from the student rather than double-serve it.
 assert_eq "ports:container-publishes-nothing" "{}" "$(I '{{json .HostConfig.PortBindings}}')"
-assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | do_tr -d ' ')"
 
 # The forwards live on the HOST instead, in one ssh process. Loopback-only is now structural
 # rather than a flag that could be forgotten -- the ssh client binds 127.0.0.1 itself -- but it
@@ -131,7 +162,11 @@ pass "ports:a-port-bound-inside-reaches-the-host"
 # opened, whatever it is, on 127.0.0.1" -- and fwd_owned_ports only matches loopback binds, so the
 # check is that our master holds nothing anywhere else.
 mpid="$(tunnel_owner_pid)"
-wild="$(ss -ltn 2>/dev/null | awk -v p="pid=$mpid," '$0 ~ p { print $4 }' \
+# THIS WAS GREEN-FOR-FREE UNTIL NOW. It filtered on `pid=` but asked `ss -ltn`, which only emits
+# a pid with -p -- so the awk pattern never matched, `wild` was unconditionally empty, and the
+# security property above was asserted against nothing on every platform. do_listeners always
+# carries the pid, so the question is finally being put.
+wild="$(do_listeners | do_awk -F'\t' -v p="pid=$mpid" '$2 == p { print $1 }' \
         | grep -v '^127\.0\.0\.1:' || true)"
 assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
 
@@ -140,9 +175,13 @@ assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
 # NOT ownership-filtered, deliberately: filtering by our own pid first would make the answer 1
 # by construction and the assertion vacuous. require_tunnel has already established that every
 # one of these ports is ours, so a second pid here means ssh stopped multiplexing.
-nproc_fwd="$(ss -ltnp 2>/dev/null | awk -v re="^127[.]0[.]0[.]1:($(printf '%s' "$DYN2" | tr ' ' '|'))\$" \
-                 '$4 ~ re && /pid=/ { print }' \
-             | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | grep -c . || true)"
+# THE ALTERNATION IS BUILT WITH awk, not `tr ' ' '|'`. awk splits on any run of whitespace, so
+# this cannot produce an empty branch like `(||)` however $DYN2 happens to be separated -- which
+# is what made BSD awk reject the whole pattern with "newline in string".
+re_ports="$(printf '%s' "$DYN2" | do_awk '{ for (i = 1; i <= NF; i++) printf "%s%s", (n++ ? "|" : ""), $i }')"
+nproc_fwd="$(do_listeners | do_awk -F'\t' -v re="^127[.]0[.]0[.]1:($re_ports)\$" \
+                 '$1 ~ re && $2 ~ /pid=[0-9]/ { print $2 }' \
+             | sort -u | grep -c . || true)"
 assert_eq "ports:one-ssh-process-carries-them-all" "1" "${nproc_fwd:-0}"
 
 mounts="$(I '{{json .Mounts}}')"
@@ -184,7 +223,7 @@ assert_eq "identity:hostname" "cs193v-development" "$(E 'hostname')"
 # The banner needs a pty: it is guarded to interactive shells so that `podman exec <cmd>`
 # and this suite's own non-interactive calls do not get a greeting mixed into their output.
 pty_login() {                     # pty_login KEYS -> everything the session printed
-    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it ${NAME} bash -l" /dev/null 2>&1
+    printf '%b' "$1" | do_script 45 "podman exec -it ${NAME} bash -l" 2>&1
 }
 
 out="$(pty_login 'exit\n')"
@@ -223,7 +262,7 @@ assert_not_contains "identity:non-interactive-has-no-goodbye" "$CS193V_GOODBYE" 
 TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
 
 pty_shell() {                     # pty_shell KEYS -> everything the session printed
-    printf '%b' "$1" | timeout 45 script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" /dev/null 2>&1
+    printf '%b' "$1" | do_script 45 "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" 2>&1
 }
 tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 
@@ -243,7 +282,7 @@ tmux_client_attached() { [ "$(E "$TM list-clients -F 1" | head -1)" = 1 ]; }
 tmux_windows_are()     { [ "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)" = "$1" ]; }
 # A pane that has printed nothing yet is indistinguishable from one whose banner is missing,
 # so the two absence assertions below have to wait for the pane to have drawn SOMETHING.
-tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | tr -d '[:space:]')" ]; }
+tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | do_tr -d '[:space:]')" ]; }
 
 # A terminal window that stays open, for the tests that then close it.
 #
@@ -253,7 +292,9 @@ tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | tr -d '[:space:
 # nothing. In `printf ... | script ... &`, `$!` is the last element of the pipeline, which is
 # script itself. Defined once so no call site can get that wrong again.
 start_client() {                  # start_client -> sets CLIENT_JOB (script's pid)
-    printf 'sleep 600\n' | script -q -c "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" /dev/null >/dev/null 2>&1 &
+    # ptyrun.py DIRECTLY -- no do_script, no timeout layer -- because $! must be the pty OWNER.
+    # See lib/portable.sh's do_script comment and the note above.
+    printf 'sleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" >/dev/null 2>&1 &
     CLIENT_JOB=$!
 }
 
@@ -465,7 +506,11 @@ if [ -n "$MEM" ] && [ "$MEM" != 0 ]; then
 else
     record "kernel:cgroup-enforces-the-memory-cap" "no cap configured on this machine"
 fi
-assert_eq "kernel:cgroup-pids-max" "2048" "$(E 'cat /sys/fs/cgroup/pids.max')"
+# The kernel's own view of the same thing, and the same reasoning -- see assert_pids_floor
+# above. `max` here is the cgroup spelling of podman's `0`.
+CG_PIDS="$(E 'cat /sys/fs/cgroup/pids.max')"
+record "kernel:cgroup-pids-max" "$CG_PIDS"
+assert_pids_floor "kernel:cgroup-pids-max-is-not-dangerously-low" "$CG_PIDS"
 
 # /tmp on the writable layer, not a tmpfs: no RAM pressure, no size to tune, and --rebuild
 # clears it anyway.
@@ -497,9 +542,9 @@ record "kernel:free-vs-cgroup" \
 # The corrected colour check. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so the launcher forwards it explicitly — and so must this.
 assert_eq "term:256-colours-with-forwarded-TERM" "256" \
-          "$(podman exec -it -e TERM=xterm-256color "$NAME" tput colors 2>/dev/null | tr -d '\r')"
+          "$(podman exec -it -e TERM=xterm-256color "$NAME" tput colors 2>/dev/null | do_tr -d '\r')"
 record "term:colours-without-forwarding" \
-       "$(podman exec -it "$NAME" tput colors 2>/dev/null | tr -d '\r')"
+       "$(podman exec -it "$NAME" tput colors 2>/dev/null | do_tr -d '\r')"
 
 # env:CS193V_PORTS-visible-in-exec IS DELETED, and nothing replaced it. It asserted that a value
 # passed with -e at create time reaches every later exec session and not just the first process --
@@ -519,7 +564,7 @@ assert_not_contains "pid1:is-not-bare-sleep" "sleep infinity" "$(E 'cat /proc/1/
 # WHAT THIS GROUP IS FOR, restated because the check it replaces had drifted from it. Orphans are
 # the NORMAL case here -- every `podman exec` session is parented by conmon outside the container,
 # so anything outliving a session lands on PID 1 -- and if PID 1 does not call wait() each one
-# becomes a PERMANENT zombie holding a pid slot against pids.max (2048). Exhausting that WEDGES
+# becomes a PERMANENT zombie holding a pid slot against pids.max. Exhausting that WEDGES
 # the container beyond `podman exec`'s reach, and it does not self-heal. So the property is
 # ACCUMULATION, which is what VERIFICATION.md §2.8 asks for in prose.
 #
@@ -544,7 +589,7 @@ assert_not_contains "pid1:is-not-bare-sleep" "sleep infinity" "$(E 'cat /proc/1/
 # rather than stitched from two instants. sshd's `[sshd] <defunct>` is in here while the tunnel is
 # up and is SUPPOSED to be: it is named by its parent rather than excused by its name. Measured on
 # OpenSSH 10.2p1 -- see README.md's --init item.
-record "pid1:zombies-and-their-parents" "$(zombie_inventory | tr '\n' ';')"
+record "pid1:zombies-and-their-parents" "$(zombie_inventory | do_tr '\n' ';')"
 
 # THE LEAK CHECK, and ppid 1 is the whole of it: a zombie whose parent is alive and is not PID 1
 # is that parent's business and no init could collect it. Bounded rather than sampled, because
@@ -576,7 +621,8 @@ E "kill $ORPHANS"
 # in the table for the container's whole life -- so these eight pids leaving it cannot happen any
 # other way. Presence was established one line above, so this is the absence of things that were
 # definitely there, not the vacuous wait wait_until warns about. Pid reuse inside the window is
-# not defended against: ~12 processes against a pids.max of 2048 puts it out of reach.
+# not defended against: ~12 processes puts it out of reach of any pids.max this container has
+# run under -- 2048 under podman 5.7, unlimited under 6.x. See assert_pids_floor above.
 if wait_until 10 orphans_gone "$ORPHANS"; then
     pass "pid1:reaps-orphans"
 else
@@ -780,7 +826,9 @@ else
     fail "ports:wildcard-bound-server-IS-reachable" "got HTTP $(host_code "$PW") — a server on
 0.0.0.0 inside the container must be reachable too, since that includes its loopback."
 fi
-listen="$( (ss -ltn 2>/dev/null || netstat -an) | grep ":$PW" || true)"
+# do_listeners rather than `ss || netstat`: that fallback could never match, because macOS
+# netstat prints 127.0.0.1.PORT and this greps for :PORT.
+listen="$(do_listeners | grep ":$PW" || true)"
 record "ports:host-listen-line" "$listen"
 assert_not_match "ports:host-does-not-listen-on-0.0.0.0" \
                  "0\.0\.0\.0:$PW|\*:$PW|\[::\]:$PW" "$listen"
@@ -822,10 +870,10 @@ else
          "got HTTP $(host_code "$PM") — a listener on ::ffff:127.0.0.1 is reachable IPv4 traffic
 and must be carried like any other loopback bind. The classifier reads it out of /proc/net/tcp6:
   $(podman exec "$NAME" grep -i "$(printf '%04X' "$PM")" /proc/net/tcp6 2>&1 | head -2)
-  cs193v-portwatch says: $(podman exec "$NAME" cs193v-portwatch --once 2>&1 | tr ' ' '\n' | grep "^$PM:")"
+  cs193v-portwatch says: $(podman exec "$NAME" cs193v-portwatch --once 2>&1 | do_tr ' ' '\n' | grep "^$PM:")"
 fi
 assert_eq "ports:a-v4-mapped-bind-classifies-as-loopback" "$PM:lo" \
-          "$(podman exec "$NAME" cs193v-portwatch --once 2>/dev/null | tr ' ' '\n' | grep "^$PM:")"
+          "$(podman exec "$NAME" cs193v-portwatch --once 2>/dev/null | do_tr ' ' '\n' | grep "^$PM:")"
 container_pkill "SimpleHTTPRequestHandler"
 
 # `ss` is how a student -- or the agent answering their question -- finds out what a server is
@@ -837,7 +885,7 @@ PB="$(dyn_free_port "$PA")"
 assert_probe "ports:probe-bound-loopback-for-the-listing" "$PA" 127.0.0.1
 assert_probe "ports:probe-bound-wildcard-for-the-listing" "$PB" 0.0.0.0
 sout="$(E 'ss -ltn || true')"
-record "ports:in-container-listener-listing" "$(printf '%s' "$sout" | tr '\n' '|')"
+record "ports:in-container-listener-listing" "$(printf '%s' "$sout" | do_tr '\n' '|')"
 assert_match "ports:ss-shows-a-loopback-bind"  "127\.0\.0\.1:$PA" "$sout"
 assert_match "ports:ss-shows-a-wildcard-bind"  "(0\.0\.0\.0|\*):$PB" "$sout"
 probe_stop
@@ -882,7 +930,7 @@ fi
 # THE END TO END. Headers kept, because the two things worth asserting are both in them, and
 # curl'd from the HOST -- the same side of the tunnel a student's browser is on.
 sl_head="$(curl -sD- -o /dev/null --max-time 5 "http://127.0.0.1:$sl_port/token")"
-record "shortlink:host-side-headers" "$(printf '%s' "$sl_head" | tr -d '\r' | tr '\n' '|')"
+record "shortlink:host-side-headers" "$(printf '%s' "$sl_head" | do_tr -d '\r' | do_tr '\n' '|')"
 if printf '%s' "$sl_head" | grep -qE '^HTTP/1[.]. 302'; then
     pass "shortlink:the-browser-gets-a-redirect"
 else
@@ -944,7 +992,7 @@ container_pkill shortlink
 # matched it. The count was 1 whatever was or was not running. The bracket makes the pattern match
 # the string "shortlink" while the command line containing it does not.
 assert_eq "shortlink:leaves-nothing-behind" "0" \
-          "$(E 'pgrep -cf "[s]hortlink" || true' | tr -d ' \n')"
+          "$(E 'pgrep -cf "[s]hortlink" || true' | do_tr -d ' \n')"
 
 # ─── §A.7 files, ownership and watching ────────────────────────────────────────
 # The ownership round trip is what makes the bind mount usable at all: a file the container
@@ -966,7 +1014,7 @@ assert_eq "shortlink:leaves-nothing-behind" "0" \
 printf 'stale\n' > "$REPO/projects/.vt-c" && chmod 600 "$REPO/projects/.vt-c"
 E 'rm -f /home/student/projects/.vt-c; umask 022; echo hi > /home/student/projects/.vt-c'
 assert_eq "files:container-write-is-host-owned" "$(id -u) $(id -g) 644" \
-          "$(stat -c '%u %g %a' "$REPO/projects/.vt-c")"
+          "$(do_stat -c '%u %g %a' "$REPO/projects/.vt-c")"
 assert_eq "files:container-write-readable-on-host" "hi" "$(cat "$REPO/projects/.vt-c")"
 
 echo "from-host" > "$REPO/projects/.vt-h"
@@ -976,7 +1024,7 @@ assert_eq "files:container-sees-host-content" "from-host" "$(E 'head -1 /home/st
 assert_eq "files:host-sees-container-append" "more" "$(tail -1 "$REPO/projects/.vt-h")"
 
 E 'chmod 600 /home/student/projects/.vt-c'
-assert_eq "files:mode-changes-propagate" "600" "$(stat -c %a "$REPO/projects/.vt-c")"
+assert_eq "files:mode-changes-propagate" "600" "$(do_stat -c %a "$REPO/projects/.vt-c")"
 
 # -f, or a leftover link makes `ln` fail silently -- its error is not checked -- and the
 # record below then reports the PREVIOUS run's target as if it were this run's (#30).
@@ -1099,7 +1147,7 @@ assert_ok "playwright:volume-is-student-writable" \
 
 # Second: the memory cap. The build runs uncapped, so a browser that only fits without
 # --memory would ship green and die on the student's first `npm test`.
-shot="$(E 'cd /tmp && timeout 180 playwright screenshot -b chromium about:blank /tmp/live.png >/dev/null 2>&1; wc -c < /tmp/live.png 2>/dev/null || echo 0' | tr -d ' \n')"
+shot="$(E 'cd /tmp && timeout 180 playwright screenshot -b chromium about:blank /tmp/live.png >/dev/null 2>&1; wc -c < /tmp/live.png 2>/dev/null || echo 0' | do_tr -d ' \n')"
 E 'rm -f /tmp/live.png' >/dev/null 2>&1
 record "playwright:screenshot-bytes-under-the-memory-cap" "$shot"
 if [ "${shot:-0}" -gt 1000 ]; then
@@ -1113,7 +1161,7 @@ fi
 # The round trip that matters, because it is the one the course sells: a project-local
 # @playwright/test, matching the image's playwright, driving the volume's browser through
 # `npm test`. Nothing above exercises the project-local resolution path at all.
-PW_V="$(E 'playwright --version' | tr -dc '0-9.')"
+PW_V="$(E 'playwright --version' | do_tr -dc '0-9.')"
 E "rm -rf /home/student/projects/.vt-pw && mkdir -p /home/student/projects/.vt-pw" >/dev/null 2>&1
 # package.json is written directly rather than with `npm init -y`, which refuses a directory
 # whose name begins with a dot ("Invalid name: .vt-pw") — and the .vt- prefix is what this
@@ -1124,7 +1172,7 @@ E "printf '%s' '{\"name\":\"cs193v-pw-probe\",\"version\":\"1.0.0\",\"private\":
 E "cd /home/student/projects/.vt-pw && printf '%s\n' \"import { test, expect } from '@playwright/test';\" \"test('renders', async ({ page }) => { await page.setContent('<h1>cs193v</h1>'); await expect(page.locator('h1')).toHaveText('cs193v'); });\" > probe.spec.ts" >/dev/null 2>&1
 pwinst="$(E "cd /home/student/projects/.vt-pw && timeout 300 npm install --no-audit --no-fund -D @playwright/test@$PW_V 2>&1 | tail -4")"
 npmout="$(E "cd /home/student/projects/.vt-pw && timeout 300 npm test 2>&1 | tail -15")"
-record "playwright:npm-test-output" "$(printf '%s' "$npmout" | tr '\n' ' ' | cut -c1-300)"
+record "playwright:npm-test-output" "$(printf '%s' "$npmout" | do_tr '\n' ' ' | cut -c1-300)"
 case "$npmout" in
     *"1 passed"*) pass "playwright:npm-test-round-trip-with-a-project-local-runner" ;;
     *) fail "playwright:npm-test-round-trip-with-a-project-local-runner" \
@@ -1151,7 +1199,7 @@ try:
     while True: b.append(bytearray(64*1024*1024))
 except MemoryError:
     print(\"MemoryError\")" 2>&1; echo "rc=$?"')"
-    record "limits:oom-behaviour" "$(printf '%s' "$oom" | tr '\n' ' ')"
+    record "limits:oom-behaviour" "$(printf '%s' "$oom" | do_tr '\n' ' ')"
     assert_match "limits:allocation-loop-is-stopped" 'MemoryError|rc=(137|1|139)' "$oom"
     assert_eq "limits:container-survives-an-oom" "running" "$(I '{{.State.Status}}')"
     assert_ok "limits:launcher-can-still-get-in-after-an-oom" sh -c "podman exec ${NAME} true"
@@ -1171,7 +1219,7 @@ fi
 # out of processes was never going to work.
 forks="$($VT_RUN --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" sh -c \
     'i=0; while sleep 30 & do i=$((i+1)); [ $i -gt 200 ] && break; done; echo "forks=$i"' 2>&1 | tail -2)"
-record "limits:pids-limit-outcome" "$(printf '%s' "$forks" | tr '\n' ' ')"
+record "limits:pids-limit-outcome" "$(printf '%s' "$forks" | do_tr '\n' ' ')"
 assert_match "limits:pids-limit-is-enforced" 'Cannot fork|forks=[0-9]+' "$forks"
 n="$(printf '%s' "$forks" | sed -n 's/.*forks=\([0-9]*\).*/\1/p')"
 case "$forks" in
