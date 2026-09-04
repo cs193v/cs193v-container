@@ -963,7 +963,7 @@ nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE]
     machine_flags '' linux no "$base" || return 1
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
-    printf '%b' "${3:-}" | timeout --kill-after=30 "$outer" \
+    printf '%b' "${3:-}" | do_timeout --kill-after=30 "$outer" \
         podman run --timeout "$cap" --label "$VT_LABEL" -it --name "$name" \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         --mount type=tmpfs,destination=/var/tmp/report \
