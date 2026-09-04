@@ -48,7 +48,7 @@ record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 carve_func $PRIVATE/files/cs193v-ui.sh version_lt "$TMP/vl_launcher.sh"
 carve_func $PRIVATE/install-cs193v.sh  version_lt "$TMP/vl_installer.sh"
 for f in vl_launcher vl_installer; do
-    if [ "$(wc -l < "$TMP/$f.sh" | tr -d ' ')" -gt 3 ]; then pass "extract:$f"
+    if [ "$(wc -l < "$TMP/$f.sh" | do_tr -d ' ')" -gt 3 ]; then pass "extract:$f"
     else fail "extract:$f" "could not extract version_lt"; exit 1; fi
 done
 
@@ -217,6 +217,34 @@ edit_sub "$TMP/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
 edit_sub "$TMP/installer.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
 assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
 
+# ─── the cases that need the installer's LINUX arm ─────────────────────────────
+# platform() (install-cs193v.sh:361) reads the real `uname -s`, and the Linux arm it selects then
+# reads FILES: /etc/os-release to name the package manager, /etc/subuid for DO_SUBUID,
+# /proc/version for WSL. $PATH can fake a command; it cannot fake a file. Faking `uname` alone was
+# measured and is not enough -- the installer reaches "linux on x86_64" and then STOPs with "a
+# Linux we do not recognise", because macOS has no /etc/os-release.
+#
+# So on a Mac these cases have nothing to measure: the installer correctly takes its macOS arm,
+# where DO_SUBUID is never set and there is no subuid range to ask permission for. They used to
+# FAIL there, which said "the code is wrong" about a machine behaving perfectly.
+#
+# THE SAME GROUND IS COVERED ON A REAL LINUX, in 26-installer-sandbox.sh: sb-consent:* and
+# sb-subuid:* run this exact arm in a container with --no-prereqs=subuid, and are STRONGER than
+# what is skipped here -- that fixture has real passwordless sudo, so `usermod` actually runs and
+# the resulting /etc/subuid is asserted, where the synthetic root below can only check the command
+# string. sb-old:* likewise covers podman-old:* against a real podman 3.4.4.
+#
+# NAMED SKIPS, NOT A SILENT BRANCH. VERIFICATION.md §A.15 records that a gate outside the default
+# run is the same defect as an assertion that never executed, so every name still appears in the
+# results with its reason.
+linux_arm() { [ "$(uname -s)" = Linux ]; }
+skip_linux_arm() {                    # skip_linux_arm NAME...
+    local n
+    for n in "$@"; do
+        skip "$n" "needs the installer's Linux arm (files, not commands) -- covered on a real Linux in 26-installer-sandbox.sh"
+    done
+}
+
 # ─── consent: nothing changes without a yes  (§1.2) ────────────────────────────
 # menu() with no tty picks the DEFAULT, which for consent is "Stop, do not change
 # anything". VERIFICATION.md §1.2 claims it falls back to numbered selection; it does not,
@@ -225,12 +253,15 @@ assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
 # has podman and a subuid range, nothing does — so fake a username with no /etc/subuid
 # entry. That drives the real DO_SUBUID branch and works on any machine, whereas assuming
 # podman is absent only worked on a machine that happened not to have it.
+if linux_arm; then
 shim_new
 shim_fake_id 1000 nosuchuser-cs193v
 run_consent() { installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent"; }
 out="$(run_consent)"
 assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
 assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
+# NOTE: this one PASSED on macOS, and vacuously -- with nothing needing consent the installer
+# runs to the end and exits 0 for an unrelated reason. It belongs inside the guard.
 assert_eq   "consent:non-tty-exits-0"       "0" \
             "$(run_consent >/dev/null 2>&1; printf '%s' "$?")"
 assert_no_file "consent:declining-creates-no-directory" "$TMP/consent"
@@ -239,6 +270,11 @@ assert_says "consent:names-what-it-wants" "subuid range" "$out"
 assert_says "consent:explains-why"        "needs your password" "$out"
 # And it must never reach the download when consent was refused.
 assert_says_not "consent:declining-skips-the-download" "Getting the course files" "$out"
+else
+skip_linux_arm "consent:non-tty-declines" "consent:offers-a-way-forward" "consent:non-tty-exits-0" \
+               "consent:declining-creates-no-directory" "consent:names-what-it-wants" \
+               "consent:explains-why" "consent:declining-skips-the-download"
+fi
 
 # With podman already present and a subuid range already there, nothing needs consent at
 # all and the installer should say so rather than asking a pointless question.
@@ -442,6 +478,7 @@ assert_says "consent-digit:selects-and-accepts" "resized and restarted" "$out"
 # The one privileged call reachable from here. sudo-fake records it and runs nothing, so what
 # is asserted is the command the installer WOULD have run as root -- the range included,
 # because a wrong range is a silent failure much later, inside podman.
+if linux_arm; then
 shim_new; shim_fake_id 1000 nosuchuser-cs193v
 out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says "subuid:step-announced" "Setting up your account's ID range" "$out"
@@ -461,6 +498,14 @@ out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ans
 assert_says "subuid-fails:names-the-account" "Could not add a subuid range for nosuchuser-cs193v" "$out"
 assert_says "subuid-fails:says-what-to-send" "cat /etc/subuid" "$out"
 assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out"
+else
+# subuid-fails:* is the one pair with NO container equivalent yet: it needs a sudo that works for
+# everything except `usermod`, and SB_SUDO offers only nopasswd/password/deny/absent -- `deny`
+# takes sudo away entirely and the installer would fail earlier for a different reason.
+skip_linux_arm "subuid:step-announced" "subuid:reports-success" "subuid:asks-root-for-the-right-range" \
+               "subuid-fails:names-the-account" "subuid-fails:says-what-to-send" \
+               "subuid-fails:does-not-claim-success"
+fi
 
 # ─── and the same usermod, EXECUTED, against a synthetic root ──────────────────
 #
@@ -553,7 +598,7 @@ fi
 # BY THE FILE SET, not by mtime: usermod's `-` backups are copies that keep the original's
 # timestamp, so `find -newer` reported neither of them and the audit missed two files it exists
 # to notice.
-um_files="$( cd "$UM" && find . -type f | LC_ALL=C sort | tr '\n' ' ' )"
+um_files="$( cd "$UM" && find . -type f | LC_ALL=C sort | do_tr '\n' ' ' )"
 assert_eq "usermod:created-only-the-two-backups" \
           "./etc/group ./etc/gshadow ./etc/passwd ./etc/shadow ./etc/subgid ./etc/subgid- ./etc/subuid ./etc/subuid- " \
           "$um_files"
@@ -638,8 +683,17 @@ assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 # /proc -- which inside a container reports the host's RAM, not the cgroup limit.
 assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/.config/local.args"
 cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/.config/local.args")"
-# The fake podman reports 8 GiB; the linux formula reserves 35% (min 3072) -> 5120.
-assert_eq "install:cap-matches-the-formula" "5120" "$cap"
+# The fake podman reports 8 GiB; the LINUX formula reserves 35% (min 3072) -> 5120. The macOS
+# formula is a different one and gives 7373 from the same input -- memcap:macos-8GB above unit-
+# tests that arm directly, so what is skipped here is the wiring, not the arithmetic. No container
+# equivalent: write_local_args needs `podman info` to answer for memory, and a Tier A fixture
+# cannot, which is why every default install-tier case stops at "Could not ask podman how much
+# memory". Only the opt-in nested block gets that far.
+if linux_arm; then
+    assert_eq "install:cap-matches-the-formula" "5120" "$cap"
+else
+    skip_linux_arm "install:cap-matches-the-formula"
+fi
 assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/.config/local.args"
 
 # Now the actual §A.12 property. Everything except local.args and projects/ must be
@@ -920,9 +974,9 @@ cmd_sentinel="$(cmd_get 'set "SENTINEL=\(.*\)"')"
 # triples rather than one at a time, so the failure message names which one drifted.
 # Same shape as windows:names-the-same-distro-as-the-sh below.
 triple_of_sh="$(sed -n 's/^REPO_\([A-Z]*\)="\(.*\)"$/\1=\2/p' "$PRIVATE/install-cs193v.sh" \
-                | LC_ALL=C sort | tr '\n' ' ')"
+                | LC_ALL=C sort | do_tr '\n' ' ')"
 triple_of_cmd="$(printf 'BRANCH=%s\nNAME=%s\nOWNER=%s\n' "$cmd_branch" "$cmd_name" "$cmd_owner" \
-                 | LC_ALL=C sort | tr '\n' ' ')"
+                 | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "windows:names-the-same-repo-as-the-sh" "$triple_of_sh" "$triple_of_cmd"
 
 # The URL, with the three values substituted in the way cmd.exe substitutes them. Two claims:

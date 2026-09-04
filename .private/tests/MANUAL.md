@@ -608,7 +608,13 @@ while the floor holds.
 ### §1.3 — bash 3.2 on macOS
 `bash --version` (expect 3.2.x), then run the installer with `/bin/bash` explicitly, and run
 `.private/tests/run-tests.sh --tier static,unit,shim` — the suite is bash 3.2-compatible on purpose
-so it can run here.
+so it can run here. Install `brew install coreutils shellcheck` first, or the preflight will refuse
+with exit 78 and tell you the same thing.
+
+*Do NOT set `LC_ALL=C` while doing this, and do not `brew install bash`.* Both make the run look
+healthier than it is: bash 5 hides every 3.2 defect in the product, and `LC_ALL=C` hides every
+locale-dependent one — the launcher dropping a `container.args` line with a non-UTF-8 byte, and
+`"$var█"` parsing as `var<byte>` under `set -u` (GitHub #120), were both invisible under it.
 *Expect:* no `mapfile`, associative-array or `${x,,}` errors.
 
 ### §1.4 — the install tier on a Mac, where the SELinux door asks the wrong kernel (issue #119)

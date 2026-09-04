@@ -18,10 +18,30 @@ require_podman
 SB_TMP="$(new_tmpdir)"
 # LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
 # just the container names to sweep on the way out.
-SB_CASES="apt cannot-answer wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
+SB_CASES="apt cannot-answer subuid-no subuid-yes wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
+
+# ─── the survey's first line, checked against the machine rather than a constant ───────────
+# install-cs193v.sh:492 prints `ok "$PLAT on $(uname -m)"`, so the property worth asserting is
+# that BOTH HALVES ARE TRUE -- not that this fixture's base image happens to be amd64. Three
+# cases used to hardcode x86_64, and that made them pass or fail on a fact about their PIN
+# rather than about the installer: sb-fed passed because fedora was pinned to a
+# per-architecture amd64 leg, while sb-wsl failed because `machine` was pinned to a manifest
+# list and so built native arm64. Both pins now name manifest lists, so every fixture is
+# native and the expected arch is whatever the fixture reports.
+#
+# THE EMPTY-ARCH GUARD IS THE WHOLE REASON THIS IS A FUNCTION. Without it, a missing or renamed
+# ===ARCH=== section would reduce the needle to "wsl on ", which every WSL transcript already
+# contains -- so the assertion would pass forever having measured nothing. That is the shape
+# assert_system_diff guards against with the-diff-was-really-read, for the same reason.
+assert_survey_platform() {            # assert_survey_platform NAME PLAT TRANSCRIPT
+    local a; a="$(sb_section "$3" ARCH)"
+    if [ -n "$a" ]; then pass "${1%%:*}:the-arch-was-reported"
+    else fail "${1%%:*}:the-arch-was-reported" "no ===ARCH=== section, so '$2 on ...' would be vacuous"; return; fi
+    assert_says "$1" "$2 on $a" "$3"
+}
 
 sb_work_init
 fixture_build machine || exit 1
@@ -111,7 +131,7 @@ sb_machine no-prereqs=podman,ssh
 # the only one where "did the thing apt installed actually work" is worth the store that asking
 # it creates.
 out="$(sandbox_run apt '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
-record "apt:transcript-bytes" "$(printf '%s' "$out" | wc -c | tr -d ' ')"
+record "apt:transcript-bytes" "$(printf '%s' "$out" | wc -c | do_tr -d ' ')"
 assert_says "sb-apt:the-machine-was-really-arranged" "prereqs=podman,ssh" "$(sb_section "$out" ARRANGED)"
 assert_says "sb-apt:asks-for-both-independently" "permission for 2 thing" "$out"
 assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "$out"
@@ -235,11 +255,72 @@ assert_match "sb-uidmap:podman-answers-once-the-helpers-are-back" '^[0-9]{6,}$' 
 record "sb-uidmap:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 sandbox_reap
 
+# ─── setup_subuid, on an account that predates /etc/subuid ─────────────────────
+# THE ONE BRANCH THE FIXTURES COULD NOT REACH BEFORE. Every base here ships a subuid range --
+# `useradd` has populated one since shadow 4.11.1-3, which is what the Arch fixture disproved the
+# hard way (.private/README.md) -- so an EMPTY range is a property of an account that predates the
+# file rather than of any distro. `--no-prereqs=subuid` is the knob for exactly that state, and
+# until now nothing drove it.
+#
+# WHY THESE MOVED HERE FROM 25-installer.sh. They were written against a synthetic root in the
+# shim tier, which works on Linux and cannot work on a Mac: platform() reads the real `uname -s`,
+# so the installer takes its macOS arm and DO_SUBUID is never set. Eleven assertions therefore
+# measured nothing on half the machines this project is developed on. Here the arm under test is
+# genuinely Linux and nothing is faked.
+#
+# AND IT IS A STRONGER TEST, not merely a portable one. The shim could only assert the COMMAND
+# STRING a fake sudo recorded. This fixture gives student real passwordless sudo
+# (Containerfile.machine:87), so `usermod` really runs as root and the resulting /etc/subuid is
+# readable -- the range itself becomes assertable for the first time.
+#
+# WHERE IT STOPS, and why that is correct rather than a gap: setup_subuid writes 200000-265535
+# (installer:653), which is entirely OUTSIDE this outer container's 1..65536 userns window, so
+# podman cannot work here afterwards while it would on a student's machine. lib/sandbox-guest.sh
+# states that outright. So no case below claims the install SUCCEEDED -- they claim the range was
+# asked for and written, which is a different thing and the thing these tests were always about.
+fixture_build machine || exit 1
+
+# (1) CONSENT REFUSED. Something has to NEED consent or there is no prompt to test, and an empty
+# subuid range is the one need that does not require taking podman away too.
+#
+# `1` IS SENT, RATHER THAN RELYING ON THE NON-TTY DEFAULT, and the difference is worth stating
+# because the shim-tier original did the opposite. ask_consent calls
+# `menu 0 "Stop, do not change anything" "Go ahead"`, so with no tty menu() picks index 0 and
+# declines -- which is what 25-installer.sh asserts. That cannot be reproduced here: sandbox_run
+# uses `podman run -it`, and measured, an EMPTY key string makes menu() block until the
+# container hits its 60s ceiling (===SANDBOX-TIMEOUT===) rather than reading EOF. So this case
+# tests what DECLINING DOES, and the safe-default-without-a-tty property stays in the shim tier
+# where it belongs -- it is a property of menu(), not of the Linux arm.
+sb_machine no-prereqs=subuid
+out="$(sandbox_run subuid-no '1' -e CS193V_DIR=/home/student/cs193v)"
+record "sb-consent:the-range-it-started-with" "$(sb_section "$out" ETC-SUBUID)"
+assert_says "sb-consent:names-what-it-wants" "subuid range" "$out"
+assert_says "sb-consent:explains-why"        "needs your password" "$out"
+assert_says "sb-consent:declining-says-nothing-changed" "Nothing was changed" "$out"
+assert_says "sb-consent:offers-a-way-forward" "contact course staff" "$out"
+# A refusal must not reach the download, and must leave no course tree behind.
+assert_says_not "sb-consent:declining-skips-the-download" "Getting the course files" "$out"
+assert_eq   "sb-consent:declining-creates-no-directory" "absent" "$(sb_section "$out" COURSE-DIR)"
+sandbox_reap
+
+# (2) CONSENT GIVEN, and the range really written. `2` is the accept key, the same one the wsl
+# cases above use.
+sb_machine no-prereqs=subuid
+out="$(sandbox_run subuid-yes '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-subuid:step-announced"  "Setting up your account's ID range" "$out"
+assert_says "sb-subuid:reports-success" "subuid range added for student" "$out"
+# THE FILE, not the announcement -- this is what the shim tier could never check.
+assert_eq   "sb-subuid:the-range-really-landed" "student:200000:65536" "$(sb_section "$out" ETC-SUBUID)"
+assert_eq   "sb-subuid:and-the-matching-subgid" "student:200000:65536" "$(sb_section "$out" ETC-SUBGID)"
+record "sb-subuid:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
 # than assumed: podman will bind a file over /proc/version, and the survey then reports
-# "wsl on x86_64".
+# "wsl on <arch>" -- the platform word is the claim, and the arch half is checked against what
+# the fixture itself reports rather than against a constant. See assert_survey_platform.
 #
 # FOUR STATES, NOT THREE, and the fourth is the point: survey looks for `systemd=true`
 # (installer:463) while setup_wslconf looks for `[boot]` (installer:639), so a file that has
@@ -257,7 +338,7 @@ wsl_run() {                           # wsl_run STATE KEYS -> transcript
 
 # The bind mount is what everything below rests on, so it is asserted on its own terms first.
 out="$(wsl_run absent '')"
-assert_says "sb-wsl:detected-as-wsl-on-linux" "wsl on x86_64" "$out"
+assert_survey_platform "sb-wsl:detected-as-wsl-on-linux" wsl "$out"
 
 # No wsl.conf at all: announced with ok(), not need(), so this one needs no permission -- the
 # only host-changing step in the whole installer that does not ask.
@@ -393,7 +474,7 @@ sandbox_reap
 fixture_build fedora || exit 1
 sb_machine base=fedora
 out="$(sandbox_run fedora '2' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-fed:detected-as-plain-linux"  "linux on x86_64" "$out"
+assert_survey_platform "sb-fed:detected-as-plain-linux" linux "$out"
 assert_says "sb-fed:asks-for-one-thing"       "permission for 1 thing" "$out"
 assert_says "sb-fed:names-podman-alone"       "Install podman" "$out"
 assert_says_not "sb-fed:does-not-name-the-debian-uidmap" "(and uidmap)" "$out"
@@ -431,10 +512,22 @@ sandbox_reap
 # BEFORE CONSENT, deliberately, and that is the strongest assertion here. survey() refuses at
 # "Looking at your computer", the same place say_intel_mac refuses an Intel Mac -- so the student is
 # never asked permission to install things this script has no way to install.
+# ARCH IS x86_64-ONLY, and that is a property of Arch rather than of this suite: the project
+# publishes no arm64 image at all (Arch Linux ARM is a separate project), so on an Apple Silicon
+# Mac podman spends 185 s pulling and retrying before
+#   no image found in image index for architecture "arm64", variant "v8", OS "linux"
+#
+# SKIPPED RATHER THAN HARD-FAILED, which is the one exception to this suite's rule that a missing
+# prerequisite fails. That rule exists so nobody quietly opts out of something they could have
+# installed; an instruction set is not that. The whole class this case stands for -- NixOS,
+# openSUSE, Alpine, Gentoo, per the comment above -- is still covered on any x86_64 host.
+if [ "$(uname -m)" != x86_64 ] && [ "$(uname -m)" != amd64 ]; then
+    skip "fixture:arch" "Arch publishes no arm64 image"
+else
 fixture_build arch || exit 1
 sb_machine base=arch
 out="$(sandbox_run arch '' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-arch:looked-at-the-computer-first" "linux on x86_64" "$out"
+assert_survey_platform "sb-arch:looked-at-the-computer-first" linux "$out"
 assert_says "sb-arch:names-the-distro-from-os-release" "running Arch Linux" "$out"
 assert_says "sb-arch:points-at-course-staff"      "contact course staff" "$out"
 assert_says "sb-arch:exits-nonzero"               "===INSTALLER-RC=1===" "$out"
@@ -452,6 +545,7 @@ assert_eq "sb-arch:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
 # fixtures directory: survey refuses before it even probes podman.
 assert_system_diff arch /home/student/cs193v
 sandbox_reap
+fi
 
 # ─── nested: the launcher really building, inside a container ───────────────────
 # The one case that needs podman-in-podman, so the one case that is opt-in. Everything above
@@ -642,7 +736,7 @@ else
 if [ "$(nest_get "$np" INNER_RUN)" != ok ]; then
     skip "nested:the-course-build" "no container starts inside this fixture on this host, so a 25-step build cannot: $(nest_get "$np" INNER_RUN)"
 else
-sb_free_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+sb_free_gb="$(do_df_avail /)"
 record "nest:free-disk-gb-before" "${sb_free_gb:-unknown}"
 if [ -z "$sb_free_gb" ] || [ "$sb_free_gb" -lt 15 ]; then
     skip "nested:the-course-build" "only ${sb_free_gb:-?}GB free; this build wants ~8GB and a margin"
@@ -703,7 +797,7 @@ assert_eq "nest:host-volume-list-untouched" "$vols_before" \
 assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
 sandbox_reap
 # ...and the space really came back, which is the half a precondition cannot promise.
-record "nest:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "nest:free-disk-gb-after" "$(do_df_avail /)"
 fi
 fi
 fi
@@ -762,7 +856,7 @@ if [ "$(nest_get "$osp" INNER_RUN)" != ok ]; then
     skip "oldest-supported:the-build"  "no container starts inside the 22.04 fixture on this host: $(nest_get "$osp" INNER_RUN)"
     skip "floor-skew:the-skewed-build" "same host limit; this case needs a real build to reach the launcher hand-off"
 else
-osp_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+osp_free="$(do_df_avail /)"
 record "oldest-supported:free-disk-gb-before" "${osp_free:-unknown}"
 if [ -z "$osp_free" ] || [ "$osp_free" -lt 15 ]; then
     skip "oldest-supported:the-build"  "only ${osp_free:-?}GB free; this build wants ~8GB and a margin"
@@ -786,11 +880,11 @@ assert_eq   "oldest-supported:doctor-runs-on-4.9.3"        "ok"  "$(sb_section "
 osp_store="$(sb_section "$out" INNER-STORE-BYTES)"
 if [ -n "$osp_store" ] && [ "$osp_store" -gt 1000000000 ]; then pass "oldest-supported:the-inner-store-really-grew"
 else fail "oldest-supported:the-inner-store-really-grew" "inner graph root is ${osp_store:-empty} bytes"; fi
-record "oldest-supported:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | tr '\n' '|')"
+record "oldest-supported:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | do_tr '\n' '|')"
 assert_eq "oldest-supported:host-image-list-untouched" "$osp_imgs" \
           "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 sandbox_reap
-record "oldest-supported:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "oldest-supported:free-disk-gb-after" "$(do_df_avail /)"
 
 # ─── and what happens when the two declarations disagree ───────────────────────
 # TWO DECLARATIONS, ONE NUMBER, AND NOTHING BEHAVIOURAL CHECKED THAT THEY MATCH.
@@ -937,7 +1031,7 @@ record "fedora-e2e:lsm-label-applied" "$(nest_get "$fe2e_np" PROC_ATTR_CURRENT)"
 if [ "$(nest_get "$fe2e_np" INNER_RUN)" != ok ]; then
     skip "fedora-e2e:the-build" "no container starts inside the fedora fixture on this host: $(nest_get "$fe2e_np" INNER_RUN)"
 else
-fe2e_free="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+fe2e_free="$(do_df_avail /)"
 record "fedora-e2e:free-disk-gb-before" "${fe2e_free:-unknown}"
 if [ -z "$fe2e_free" ] || [ "$fe2e_free" -lt 15 ]; then
     skip "fedora-e2e:the-build" "only ${fe2e_free:-?}GB free; this build wants ~8GB and a margin"
@@ -977,11 +1071,11 @@ assert_eq   "fedora-e2e:doctor-runs"          "ok"  "$(sb_section "$out" DOCTOR)
 fe2e_store="$(sb_section "$out" INNER-STORE-BYTES)"
 if [ -n "$fe2e_store" ] && [ "$fe2e_store" -gt 1000000000 ]; then pass "fedora-e2e:the-inner-store-really-grew"
 else fail "fedora-e2e:the-inner-store-really-grew" "inner graph root is ${fe2e_store:-empty} bytes"; fi
-record "fedora-e2e:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | tr '\n' '|')"
+record "fedora-e2e:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | do_tr '\n' '|')"
 assert_eq "fedora-e2e:host-image-list-untouched" "$fe2e_imgs" \
           "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
 sandbox_reap
-record "fedora-e2e:free-disk-gb-after" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+record "fedora-e2e:free-disk-gb-after" "$(do_df_avail /)"
 fi
 fi
 fi

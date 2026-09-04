@@ -31,7 +31,10 @@ WINE_MSG_VERSION=2.9.8
 SB_TMP="$WINE_TMP"                    # fixture_build logs its build output here
 trap 'rm -rf "$WINE_TMP"' EXIT
 
-wine_require || { skip "windows:fixture" "podman or the wine fixture is unavailable"; exit 0; }
+# THE REASON IS THE FACT AND NOTHING MORE. wine_require sets it, because "this machine is the
+# wrong architecture" and "the fixture would not build" want different words and the old message
+# guessed at both.
+wine_require || { skip "windows:wine" "$WINE_SKIP_WHY"; exit 0; }
 
 # ─── the message table is the only source of prose ─────────────────────────────
 #
@@ -559,4 +562,4 @@ assert_says_not "win-hijack:no-unrecognised-command"    "recognize" "$WINE_OUT$W
 # the count is derived from the .cmd rather than from a number typed here.
 LABELS="$(sed 's/\r$//' "$PRIVATE/install-cs193v-windows.cmd" \
           | sed -n 's/^:\([a-z][a-z0-9]*\)[[:space:]]*$/\1/p' | sort -u)"
-record "windows:branch-targets-in-the-file" "$(printf '%s' "$LABELS" | tr '\n' ' ')"
+record "windows:branch-targets-in-the-file" "$(printf '%s' "$LABELS" | do_tr '\n' ' ')"

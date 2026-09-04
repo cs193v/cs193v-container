@@ -7,6 +7,12 @@
 # The real temporary directory, captured before shim_new starts redirecting TMPDIR at the
 # launcher. Every mktemp in this file uses it, or the second shim would be created inside the
 # first and shim_cleanup would delete a repo copy still in use.
+# DELIBERATELY THE LOGICAL PATH, not `pwd -P`. Resolving it here was tried and reverted: $SHIM
+# feeds the TMPDIR handed to the launcher under test, and TUNNEL_CTL is a UNIX SOCKET under that
+# TMPDIR whose path is capped near 104 bytes on macOS (cs193v:903 says so). Measured: the logical
+# form of a shim control socket is 101 bytes and binds; adding `/private` makes it 109 and fails
+# with "AF_UNIX path too long", so the tunnel never came up and every launch warned. Only
+# repo_copy's own directory is resolved -- see there.
 SHIM_HOST_TMPDIR="${SHIM_HOST_TMPDIR:-${TMPDIR:-/tmp}}"
 
 # The single snapshot repo_copy serves every copy from. A PATH rather than a variable, for the
@@ -99,13 +105,13 @@ launcher_tty() {                      # launcher_tty KEYS [ARGS...]
     local keys="$1"; shift
     local cmd="${LAUNCHER_DIR:-$REPO}/cs193v" a
     for a in "$@"; do cmd="$cmd $a"; done
-    # util-linux script takes -c CMD; BSD/macOS script takes the command as trailing words.
-    if script --version 2>&1 | grep -qi util-linux; then
-        printf '%b' "$keys" | PATH="$SHIM:$PATH" timeout 120 script -q -c "$cmd" /dev/null 2>&1
-    else
-        # shellcheck disable=SC2086
-        printf '%b' "$keys" | PATH="$SHIM:$PATH" timeout 120 script -q /dev/null $cmd 2>&1
-    fi
+    # THE PTY COMES FROM lib/ptyrun.py, NOT script(1). This used to fork on
+    # `script --version | grep util-linux`, and the BSD arm was wrong in a way no Linux run
+    # could surface: `script -q /dev/null $cmd` unquoted word-splits $cmd and never invokes a
+    # shell, so every quote in it survived as a literal and the run died at
+    # `env: ': No such file or directory'`. BSD script cannot do this job at all -- it writes a
+    # VEOF before forwarding piped stdin, so keystrokes arrive shifted by one. See ptyrun.py.
+    printf '%b' "$keys" | PATH="$SHIM:$PATH" do_script 120 "$cmd" 2>&1
 }
 
 # A bare launch (no verb) through a pty. Needed because open_shell now REFUSES when stdin
@@ -133,12 +139,18 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
     : > "$PTY_OUT"
     sleep 120 > "$PTY_FIFO" &
     PTY_HOLDER=$!
-    if script --version 2>&1 | grep -qi util-linux; then
-        PATH="$SHIM:$PATH" script -q -c "$cmd" /dev/null < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
-    else
-        # shellcheck disable=SC2086
-        PATH="$SHIM:$PATH" script -q /dev/null $cmd < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
-    fi
+    # NO do_script AND NO TIMEOUT LAYER HERE, deliberately. $PTY_PID must be the pty OWNER so
+    # launcher_pty_silent_stop can kill the session: a shell function backgrounded gives the
+    # pid of the subshell running it, and `timeout` in front would insert a process level
+    # exactly where 70-sighup.sh:213 and 60-container.sh:275 walk the tree with `pgrep -P`.
+    # 60-container.sh:250 records the cost of getting this wrong -- "killing that leaves
+    # script, podman and the tmux client happily alive, so the window was never really closed
+    # and every assertion after it measures nothing."
+    #
+    # ptyrun.py also ACCEPTS THE FIFO, which BSD script refuses outright with
+    # `tcgetattr/ioctl: Operation not supported on socket` -- and the fifo is the whole point
+    # of this helper, per the comment above.
+    PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
     PTY_PID=$!
 }
 
@@ -171,12 +183,7 @@ launcher_tty_repo() {                 # launcher_tty_repo KEYS [ARGS...]
     local keys="$1"; shift
     local cmd="$REPO/cs193v" a
     for a in "$@"; do cmd="$cmd $a"; done
-    if script --version 2>&1 | grep -qi util-linux; then
-        printf '%b' "$keys" | timeout 120 script -q -c "$cmd" /dev/null 2>&1
-    else
-        # shellcheck disable=SC2086
-        printf '%b' "$keys" | timeout 120 script -q /dev/null $cmd 2>&1
-    fi
+    printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
 # A pty makes the launcher turn colour on, so assertions need the escapes gone. The `?` in the
@@ -309,12 +316,7 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     else
         cmd="$cmd bash $script"
     fi
-    if script --version 2>&1 | grep -qi util-linux; then
-        printf '%b' "$keys" | timeout 120 script -q -c "$cmd" /dev/null 2>&1
-    else
-        # shellcheck disable=SC2086
-        printf '%b' "$keys" | timeout 120 script -q /dev/null $cmd 2>&1
-    fi
+    printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
 # Fake `uname` and `sysctl`, which is what makes the macOS arm executable on Linux.
@@ -421,7 +423,7 @@ edit_sub() {                          # edit_sub FILE ERE REPLACEMENT
 # run line rather than recomputed here — so a test cannot disagree with the launcher about
 # what the hash is.
 current_hash() {
-    launcher --dev-print-command | tr ' ' '\n' \
+    launcher --dev-print-command | do_tr ' ' '\n' \
         | sed -n 's/^cs193v\.confighash=\(.*\)/\1/p' | head -1
 }
 
@@ -452,6 +454,12 @@ repo_copy() {                         # repo_copy -> prints the new directory
     # in the image tier; the live tier cannot start until image, container and tmux are done.
     [ -d "$SHIM_SNAPSHOT" ] || copy_course_tree "$SHIM_SNAPSHOT" || return 1
     d="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-repo.$$.XXXXXX")"
+    # PHYSICAL, because the launcher resolves its own directory with `pwd -P` and prints that in
+    # cs193v.dir and in the foreign-directory refusal -- so a $COPY in /var/... could never match
+    # a label in /private/var/... . Resolved HERE and not at SHIM_HOST_TMPDIR: this path is only
+    # ever compared as a string, whereas $SHIM carries the tunnel's unix socket and cannot afford
+    # the extra 8 bytes (see the note on SHIM_HOST_TMPDIR above).
+    d="$(cd -- "$d" && pwd -P)"
     cp -a "$SHIM_SNAPSHOT/." "$d/"
     printf '%s' "$d"
 }

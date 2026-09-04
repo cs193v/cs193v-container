@@ -5,10 +5,17 @@
 #
 #     tests/run-tests.sh --release
 #
-# These are not regressions and they are not bugs. They are the placeholders that must be
-# filled in before students touch this, and they fail today by design: the repo is
-# scaffolding with four deliberate blanks in it. Keeping them out of the everyday suite is
-# the point — a suite that is permanently red teaches you to ignore it.
+# These are not regressions and they are not bugs. They are the checks that depend on
+# PUBLICATION rather than on code, so they go stale on someone else's schedule -- which is why
+# they are kept out of the everyday suite. A suite that is permanently red teaches you to ignore
+# it.
+#
+# THEY ARE GREEN NOW. This header used to say they "fail today by design: the repo is scaffolding
+# with four deliberate blanks in it", and that stopped being true once the blanks were filled --
+# REPO_OWNER is cs193v, the stage-two URL serves the installer, the token expiry is set, and the
+# GitHub org and sandbox prefix are both real. Measured 2026-09-03: 24 pass, 0 fail, 3 skip. The
+# three skips are opt-in rather than broken: two need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
+# build), and the third needs a PUBLISHED-CHECKSUMS.txt to compare against.
 #
 # Run this before the quarter starts, and again after any change to the publishing setup.
 
@@ -235,7 +242,7 @@ ${FWD_BUILDLOG:-<nothing>}, and there is no file there after a build."
                                         sub(/^ /, "", t); sub(/ $/, "", t); print $1"\t"t }')"
         n_podman="$(sed -n 's/^STEP [0-9]*\/\([0-9]*\):.*/\1/p' "$log" | head -1)"
         ours="$("$REPO/cs193v" --dev-steps | cut -f1,3)"
-        n_ours="$(printf '%s\n' "$ours" | wc -l | tr -d ' ')"
+        n_ours="$(printf '%s\n' "$ours" | wc -l | do_tr -d ' ')"
 
         # podman adds one step of its own: the LABEL it synthesizes from the launcher's
         # --label cs193v.buildhash flag, which has no line in the Containerfile. It lands
@@ -265,14 +272,14 @@ fi
 # ─── 5. the published checksums the install docs promise ───────────────────────
 # Both installers say their SHA-256 is published next to the download link, which is the
 # only thing making "read it before you run it" checkable for a student.
-record "checksum:$PRIVATE/install-cs193v.sh"          "$(sha256sum $PRIVATE/install-cs193v.sh | awk '{print $1}')"
-record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(sha256sum $PRIVATE/install-cs193v-windows.cmd | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v.sh"          "$(do_sha256 $PRIVATE/install-cs193v.sh | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(do_sha256 $PRIVATE/install-cs193v-windows.cmd | awk '{print $1}')"
 note_file="$REPO/PUBLISHED-CHECKSUMS.txt"
 if [ -f "$note_file" ]; then
     for f in $PRIVATE/install-cs193v.sh $PRIVATE/install-cs193v-windows.cmd; do
         want="$(grep -F "$f" "$note_file" | awk '{print $1}' | head -1)"
         assert_eq "checksum:$f-matches-published" \
-                  "$(sha256sum "$f" | awk '{print $1}')" "$want"
+                  "$(do_sha256 "$f" | awk '{print $1}')" "$want"
     done
 else
     skip "checksum:matches-published" "no PUBLISHED-CHECKSUMS.txt to compare against"

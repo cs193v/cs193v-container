@@ -30,7 +30,12 @@
 # So that line is here for the same reason, and it is the fixture's whole premise: without it the
 # differential below would measure a broken image rather than Fedora's packaging, and would
 # "disprove" the claim by testing something Fedora does not ship.
-FROM fedora:43@sha256:129a31741db676a9f99e58d9cf468cd8e86cf0336d9f9eea85ed9e729558a12d
+# PINNED BY MANIFEST-LIST DIGEST, not a per-architecture one -- the same rule
+# 00-release-gates.sh:143 states and asserts for the course image. An earlier pin here named
+# the amd64 LEG of this index, which meant the fixture ran emulated on Apple Silicon; the
+# emulated amd64 podman then SIGSEGVd inside the Go runtime's netpoll and the survey read a
+# register dump where it expected a version. One digest, both legs, native on each.
+FROM fedora:43@sha256:5025e03937bb59c0e69ecdbf2b7a94050add3aff0dbdbed1da5cd6aba62a6af0
 
 # ─── restore what the base image dropped, then install ─────────────────────────
 # BEFORE the assertion below and before anything else needs newuidmap. shadow-utils is already in

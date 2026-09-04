@@ -65,7 +65,10 @@ if [ -z "${CS193V_GH_TEST_TOKEN:-}" ]; then
     skip "github:probes-against-the-real-sandbox" "set CS193V_GH_TEST_TOKEN to run this"
     exit 0
 fi
-require_cmd script "needed to drive the arrow-key menus through a pty"
+# NO require_cmd script: nothing here uses script(1) any more. lib/ptyrun.py replaced it because
+# BSD script cannot deliver keystrokes and macOS has no GNU one to install -- so demanding it would
+# refuse a machine over a tool the suite does not touch. ptyrun needs python3, which the preflight
+# in run-tests.sh checks for every tier.
 require_running
 
 # The shim directories go on a trap rather than only on the last line of the file: this suite

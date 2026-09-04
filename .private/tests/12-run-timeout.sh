@@ -50,7 +50,7 @@ faster_than() {                       # faster_than LIMIT ELAPSED
 }
 # What run_timeout leaves in TMPDIR. Named on the pid the way rt_cleanup sweeps them, so the
 # suite's own scratch files are not counted.
-litter() { ls -A "$WORK" 2>/dev/null | grep '^cs193v-' | tr '\n' ' ' | sed 's/ *$//'; }
+litter() { ls -A "$WORK" 2>/dev/null | grep '^cs193v-' | do_tr '\n' ' ' | sed 's/ *$//'; }
 
 # ─── the status it returns ─────────────────────────────────────────────────────
 # Half the launcher's control flow is `if pm inspect ...`, so a status that does not survive the
@@ -138,7 +138,7 @@ fi
 # yet is a race with how loaded the machine is: standalone it had, so the check went red; inside a
 # full run it had not, so the same code went green. A check that reports "left alone" for a
 # process this suite just killed is worse than no check.
-case "$(ps -p "$DECOY" -o state= 2>/dev/null | tr -d ' \n')" in
+case "$(ps -p "$DECOY" -o state= 2>/dev/null | do_tr -d ' \n')" in
     ''|Z*) fail "rt:a-neighbours-sleep-is-left-alone" \
                 "the decoy standing in for another checkout's run was killed by this suite" ;;
     *)     pass "rt:a-neighbours-sleep-is-left-alone" ;;

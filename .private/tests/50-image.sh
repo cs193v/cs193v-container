@@ -86,7 +86,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
-record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | tr '\n' ' ')"
+record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | do_tr '\n' ' ')"
 
 # ─── ssh, scp and telnet really work  (issue #2) ───────────────────────────────
 # Not just "the binary is on PATH". The course reason for each of these is a round trip:
@@ -126,7 +126,7 @@ assert_ok "net:lsof-is-on-PATH" \
 # The Subsystem line is not optional either. OpenSSH 9 and later carry scp over SFTP, so
 # without it `ssh` succeeds and `scp` fails with a bare "Connection closed" — which looks
 # like a broken scp rather than a missing subsystem.
-sshout="$(timeout 240 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+sshout="$(do_timeout 240 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 set -e
 cd /tmp
 ssh-keygen -q -t ed25519 -N "" -f hostkey && chmod 600 hostkey
@@ -170,7 +170,7 @@ assert_contains "net:scp-can-copy-a-file-across"        "SCP-GOT:scp-payload" "$
 #  * Hold stdin open afterwards. telnet exits as soon as its input reaches EOF, and with a
 #    plain `printf | telnet` that happens before the server's reply comes back, so the
 #    output is the three connection lines and nothing else.
-telout="$(timeout 120 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
+telout="$(do_timeout 120 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &
 i=0
 while [ "$i" -lt 20 ]; do
@@ -393,7 +393,7 @@ assert_eq "fault:a-well-formed-frame-is-still-accepted" "accepted: 3000:lo 5173:
 # bare `8099:lo` is not a frame. Three seconds is three frames; `timeout` then cuts the stream,
 # possibly mid-frame, which is exactly the EOF-inside-a-frame case the gate must shrug off.
 watch_out="$(R 'timeout 3 cs193v-portwatch --watch 1')"
-record "fault:the-shipped-watcher-frame" "$(printf '%s' "$watch_out" | tr '\n' '|')"
+record "fault:the-shipped-watcher-frame" "$(printf '%s' "$watch_out" | do_tr '\n' '|')"
 assert_match "fault:the-shipped-watcher-emits-a-frame-the-gate-accepts" "^accepted:" \
              "$(gate_verdict "$watch_out")"
 
@@ -461,7 +461,7 @@ assert_contains  "shortlink:forbids-caching" "Cache-Control: no-store" "$out"
 # preconnects speculatively and asks for /favicon.ico, and a student double-clicks and presses
 # Back -- a server that closed after its first response would spend it on none of those.
 out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} " --max-time 5 "$l"; done')"
-assert_eq "shortlink:redirects-every-time" "302 302 302" "$(printf '%s' "$out" | tr -s ' ' | sed 's/ *$//')"
+assert_eq "shortlink:redirects-every-time" "302 302 302" "$(printf '%s' "$out" | do_tr -s ' ' | sed 's/ *$//')"
 
 # THE SLUG IS NEVER EMPTY, and `/` is the path it must never serve: the browser keys its cache and
 # any service worker on the ORIGIN, which outlives whatever used to listen there, so the one path a
@@ -586,7 +586,7 @@ assert_eq "shortlink:refuses-a-slug-with-a-slash" "2" \
 # listener behind would satisfy the obvious check and still hold a forwarded host port for the
 # full fifteen minutes, which is the entire thing this is for.
 out="$(sl 'touch /tmp/c1; /usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c1 token; echo "rc=$?"')"
-record "shortlink:cancel-before" "$(printf '%s' "$out" | tr '\n' '|')"
+record "shortlink:cancel-before" "$(printf '%s' "$out" | do_tr '\n' '|')"
 assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
 
 # A cancel that arrives DURING the wait, which is the shape a keypress really has. The state
@@ -599,7 +599,7 @@ out="$(R 'mkdir -p /tmp/cs193v; printf "state\thealthy\nfloor\t1024\n" > /tmp/cs
           o=$(/usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c2 token); rc=$?
           echo "rc=$rc took=$(( $(date +%s) - t0 ))s out=[$o]"
           echo "listeners=$(ss -Hltn 2>/dev/null | grep -c 127.0.0.1)"')"
-record "shortlink:cancel-during" "$(printf '%s' "$out" | tr '\n' '|')"
+record "shortlink:cancel-during" "$(printf '%s' "$out" | do_tr '\n' '|')"
 assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
 # NOTHING ON STDOUT is the difference between a cancel and a degradation, and it is what lets
 # open-url stay silent rather than printing a URL the student closed the window on.
@@ -621,7 +621,7 @@ lb_widths() {                         # lb_widths TEXT -> the distinct display w
           gsub(/\033\]8;;[^\033]*\033\\/, "", t)
           gsub(/\033\[[0-9;?]*[A-Za-z]/, "", t)
           gsub(/[\200-\277]/, "", t)
-          print length(t) }' | sort -un | tr '\n' ' '
+          print length(t) }' | sort -un | do_tr '\n' ' '
 }
 lb_chip_row() { printf '%s\n' "$1" | grep -n -F -- '[x]' | head -1 | cut -d: -f1; }
 
@@ -673,7 +673,7 @@ assert_ok "playwright:cli-is-installed" \
 # browser for a distribution this is not. The exact version is recorded rather than asserted
 # because CI is expected to pin versions with --build-arg, and a test that fails on a
 # deliberate pin is a test people learn to ignore.
-pw_floor="$(R 'playwright --version 2>&1' | tr -dc "0-9.\n" | awk -F. '
+pw_floor="$(R 'playwright --version 2>&1' | do_tr -dc "0-9.\n" | awk -F. '
     {maj=$1+0; min=$2+0}
     END {print (maj > 1 || (maj == 1 && min >= 61)) ? "ok" : "TOO OLD for ubuntu26.04"}')"
 assert_eq "playwright:version-is-at-least-1.61-for-ubuntu26.04" "ok" "$pw_floor"
@@ -700,7 +700,7 @@ assert_eq "playwright:browser-arch-matches-the-image" "match" "$arch_ok"
 # be IN the image, so nothing here may quietly download it.
 shot="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c \
         'timeout 120 playwright screenshot -b chromium about:blank /tmp/probe.png >/dev/null 2>&1; wc -c < /tmp/probe.png 2>/dev/null || echo 0' \
-        2>/dev/null | tr -d ' \n')"
+        2>/dev/null | do_tr -d ' \n')"
 record "playwright:offline-screenshot-bytes" "$shot"
 if [ "${shot:-0}" -gt 1000 ]; then
     pass "playwright:drives-chromium-offline"
@@ -720,7 +720,7 @@ assert_eq "absent:no-extra-tools" "none" \
     "$(R 'for t in rg fzf delta bat fd chromium google-chrome chrome code; do command -v $t >/dev/null && echo $t; done; echo none')"
 # man pages are stripped by the base image and deliberately not restored; tldr stands in.
 manout="$(R 'man git 2>&1; echo "rc=$?"')"
-record "absent:man-behaviour" "$(printf '%s' "$manout" | tr '\n' ' ')"
+record "absent:man-behaviour" "$(printf '%s' "$manout" | do_tr '\n' ' ')"
 assert_not_contains "absent:no-real-man-page-for-git" "GIT(1)" "$manout"
 assert_not_contains "absent:man-db-not-installed"     "GITHUB" "$manout"
 assert_ok "absent:tldr-stands-in-for-man" \
@@ -768,7 +768,7 @@ assert_contains "man:the-suggested-page-really-exists" "Commit files to the repo
 # does that at build time — but the Containerfile ends that line with `|| true`, so a
 # network hiccup during CI would ship an image with no cache and nothing would say so.
 # These assertions are what make that failure visible.
-ncache="$(R 'find /home/student/.cache/tldr -type f 2>/dev/null | wc -l' | tr -d ' ')"
+ncache="$(R 'find /home/student/.cache/tldr -type f 2>/dev/null | wc -l' | do_tr -d ' ')"
 record "tldr:cached-page-count" "$ncache"
 if [ "${ncache:-0}" -gt 1000 ]; then
     pass "tldr:cache-is-populated-at-build-time"
@@ -798,7 +798,7 @@ assert_eq "absent:global-node-modules-root-owned" "root" \
 assert_ok "node:is-an-apt-package" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'dpkg -s nodejs >/dev/null'"
 record "node:apt-package-version" "$(R 'dpkg-query -Wf "\${Version}" nodejs')"
-assert_eq "node:not-apt-mark-held" "" "$(R 'apt-mark showhold' | tr -d ' \n')"
+assert_eq "node:not-apt-mark-held" "" "$(R 'apt-mark showhold' | do_tr -d ' \n')"
 assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/lib')"
 # ─── the student's global npm prefix  (issue #13) ──────────────────────────────
 # playwright, vercel and Claude Code are installed AS THE STUDENT, into the student's own
@@ -817,7 +817,7 @@ assert_eq "absent:usr-local-lib-root-owned" "root" "$(R 'stat -c %U /usr/local/l
 assert_ok "npm:ls-g-succeeds" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'npm ls -g --depth=0 >/dev/null'"
 globals="$(R 'npm ls -g --depth=0')"
-record "npm-globals" "$(printf '%s' "$globals" | tr '\n' ' ')"
+record "npm-globals" "$(printf '%s' "$globals" | do_tr '\n' ' ')"
 for pkg in "@anthropic-ai/claude-code" "@openai/codex" vercel playwright; do
     assert_contains "npm:ls-g-lists-$pkg" "$pkg" "$globals"
 done
@@ -828,7 +828,7 @@ assert_eq "npm:globals-are-student-owned" "student student student student" \
     "$(R 'stat -c %U /home/student/.local/lib/node_modules/@anthropic-ai/claude-code \
                      /home/student/.local/lib/node_modules/@openai/codex \
                      /home/student/.local/lib/node_modules/vercel \
-                     /home/student/.local/lib/node_modules/playwright' | tr '\n' ' ' | sed 's/ *$//')"
+                     /home/student/.local/lib/node_modules/playwright' | do_tr '\n' ' ' | sed 's/ *$//')"
 # And the prefix must be writable with no sudo — that is what the whole arrangement buys.
 assert_ok "npm:student-prefix-is-writable-without-sudo" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/lib/node_modules && test -w /home/student/.local/bin'"
@@ -850,7 +850,7 @@ for who in root student; do
         root) dir=/root/.npm ;;
         *)    dir=/home/student/.npm ;;
     esac
-    cache_mb="$(R "sudo du -sm $dir 2>/dev/null | cut -f1" | tr -d ' \n')"
+    cache_mb="$(R "sudo du -sm $dir 2>/dev/null | cut -f1" | do_tr -d ' \n')"
     record "img:$who-npm-cache-mb" "${cache_mb:-0}"
     if [ "${cache_mb:-0}" -lt 20 ]; then
         pass "img:npm-cache-not-baked-into-the-image:$who"
@@ -869,7 +869,7 @@ done
 # present, and them being DISCOVERABLE. fonts-noto-core only Recommends fontconfig, and the
 # apt line uses --no-install-recommends, so the image currently has 271 Noto files and no
 # way to enumerate them. See ERRORS.md B7.
-nfonts="$(R 'find /usr/share/fonts -type f \( -name "*.ttf" -o -name "*.otf" \) 2>/dev/null | wc -l' | tr -d ' ')"
+nfonts="$(R 'find /usr/share/fonts -type f \( -name "*.ttf" -o -name "*.otf" \) 2>/dev/null | wc -l' | do_tr -d ' ')"
 record "fonts:file-count" "$nfonts"
 if [ "${nfonts:-0}" -gt 0 ]; then pass "fonts:files-are-installed"
 else fail "fonts:files-are-installed" "no font files — anything rendering text yields boxes"; fi
@@ -926,7 +926,7 @@ assert_not_contains "identity:ubuntu-title-escape-removed" 'u@\h: \w\a' \
 # Ubuntu ships two visible PS1 assignments (a colour one and a plain fallback), neither of
 # which we touch. Counting them is robust where matching the exact string is a quoting trap.
 assert_eq "identity:both-visible-PS1-assignments-intact" "2" \
-    "$(R 'grep -c "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc' | tr -d ' ')"
+    "$(R 'grep -c "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc' | do_tr -d ' ')"
 assert_contains "identity:visible-prompt-still-shows-user-at-host" 'u@' \
     "$(R 'grep "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc | head -1')"
 
@@ -1031,6 +1031,35 @@ assert_ok "codex:managed-policy-present" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/codex/managed_config.toml'"
 assert_ok "codex:managed-policy-parses-in-the-image" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'python3 -c \"import tomllib;tomllib.load(open(1 and \\\"/etc/codex/managed_config.toml\\\",\\\"rb\\\"))\"'"
+# THE EXACT KEY SET, not a subset, and the values with it -- moved here from 10-static.sh because
+# tomllib is python 3.11+ and macOS ships 3.9. Asserted against the INSTALLED file rather than the
+# source, which is strictly more than the static version could see: it covers the Containerfile's
+# install step too.
+#
+# Two reasons this is asserted rather than recorded. First, codex SILENTLY IGNORES a key it does
+# not recognise -- verified against the real binary: a bogus key leaves `codex doctor` reporting
+# "config loaded" with no warning at all -- so a typo is a policy that does nothing and says
+# nothing. Second, the reference says not to combine sandbox_mode with `default_permissions` or
+# `[sandbox_workspace_write]`, and an exact key set is what keeps either from arriving later
+# without anyone noticing. On the PARSED keys rather than by grepping, because the file's own
+# comments name both of those.
+#
+# SORTED IN THE SHELL, so the python stays a one-liner with one level of quoting inside R's.
+CODEX_IMG_POLICY=/etc/codex/managed_config.toml
+codex_keys="$(R "python3 -c 'import tomllib;[print(k) for k in tomllib.load(open(\"$CODEX_IMG_POLICY\",\"rb\"))]'" \
+              | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ $//')"
+assert_eq "codex:policy-has-exactly-the-three-keys" \
+          "approval_policy approvals_reviewer sandbox_mode" "$codex_keys"
+
+# approvals_reviewer = auto_review is a DELIBERATE DIVERGENCE from the Claude Code policy, which
+# keeps its prompts in front of the student on the grounds that answering them is the course's core
+# skill. Course staff chose the reviewer subagent for codex anyway; it is asserted here so the
+# divergence stays a decision on the record rather than drifting back by accident in either
+# direction. See the staff README.
+codex_values="$(R "python3 -c 'import tomllib;d=tomllib.load(open(\"$CODEX_IMG_POLICY\",\"rb\"));print(d[\"sandbox_mode\"],d[\"approval_policy\"],d[\"approvals_reviewer\"])'")"
+assert_eq "codex:policy-is-workspace-write-on-request-auto-review" \
+          "workspace-write on-request auto_review" "$codex_values"
+
 # Readable by the student, since codex runs as the student; not writable, or the policy is
 # advisory. (sudo can still change it -- inherent to the sudo decision, and documented as such.)
 assert_eq "codex:managed-policy-is-readable-by-student" "ok" \
@@ -1047,7 +1076,7 @@ assert_eq "codex:managed-policy-not-student-writable" "ok" \
 # policy" arrives as two arguments and grep reads the second as a filename. `-e` twice, and a dot
 # for the space, keeps the pattern a single shell word.
 record    "codex:doctor-sandbox-line" \
-          "$(R 'codex doctor 2>&1 | grep -e approval.policy -e filesystem.sandbox | tr -s " "' | tr '\n' ' ')"
+          "$(R 'codex doctor 2>&1 | grep -e approval.policy -e filesystem.sandbox | tr -s " "' | do_tr '\n' ' ')"
 assert_contains "codex:doctor-reports-the-shipped-approval-policy" "OnRequest" \
                 "$(R 'codex doctor 2>&1 | grep -e approval.policy')"
 

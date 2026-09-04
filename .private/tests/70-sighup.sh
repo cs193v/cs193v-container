@@ -35,7 +35,10 @@ set -u
 . "$(dirname -- "$0")/lib/podman-shim.sh"
 
 require_image
-require_cmd script "needed to give the launcher a pty, as a real terminal would"
+# NO require_cmd script: nothing here uses script(1) any more. lib/ptyrun.py replaced it because
+# BSD script cannot deliver keystrokes and macOS has no GNU one to install -- so demanding it would
+# refuse a machine over a tool the suite does not touch. ptyrun needs python3, which the preflight
+# in run-tests.sh checks for every tier.
 require_cmd curl "needed to read a server through a forwarded port"
 
 # THE PORT IS PICKED, not written out: any port nothing on this host is listening on will do,
@@ -88,7 +91,9 @@ clean_vt_processes
 # container nobody was in. `$!` after a pipeline is its LAST element, which is script, and that is
 # exactly the pid whose death has to look like a window closing.
 launch_in_pty() {                     # launch_in_pty -> sets PTY_PID
-    printf 'sleep 600\n' | script -q -c "$REPO/cs193v" /dev/null >"$LOG" 2>&1 &
+    # ptyrun.py DIRECTLY -- no do_script, no timeout layer -- because $! must be the pty OWNER.
+    # See lib/portable.sh's do_script comment and the note above.
+    printf 'sleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "$REPO/cs193v" >"$LOG" 2>&1 &
     PTY_PID=$!
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
@@ -254,13 +259,13 @@ MATRIX=""
 # was already true. Empty in practice -- release_container took the tunnel with it, and sshd's
 # unreapable one went too -- but read rather than assumed, because a suite run against a container
 # somebody left a tunnel on must not read that as a leak.
-ZBASE="$(zombie_pids | tr '\n' ' ')"
+ZBASE="$(zombie_pids | do_tr '\n' ' ')"
 record "sighup:zombies-before-the-matrix" "${ZBASE:-none}"
 # The pattern follows $SRV's port for the same reason $SRV does: this asks whether the process
 # survived, and a pattern naming a port the server was never started on answers no every time.
 probe() {                             # probe LABEL COMMAND
     container_pkill "http.server $SRV_PORT"
-    script -q -c "podman exec -it ${NAME} sh -c '$2'" /dev/null >/dev/null 2>&1 &
+    "$DO_PY" "$PT_LIB/ptyrun.py" "podman exec -it ${NAME} sh -c '$2'" >/dev/null 2>&1 &
     local client=$!
     wait_until 15 container_pgrep "http.server $SRV_PORT" || true
     kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
@@ -281,7 +286,7 @@ probe foreground "$SRV"
 probe background "$SRV & sleep 60"
 probe nohup      "nohup $SRV >/tmp/s.log 2>&1 & sleep 60"
 probe setsid     "setsid $SRV >/tmp/s.log 2>&1 & sleep 60"
-record "sighup:MATRIX" "$(printf '%s' "$MATRIX" | tr '\n' '|')"
+record "sighup:MATRIX" "$(printf '%s' "$MATRIX" | do_tr '\n' '|')"
 printf '\n  the tab-close matrix, for $PRIVATE/ERRORS.md D1:%s\n\n' "$MATRIX"
 
 # Killing exec clients is still routine -- every closed tab is one -- so their leftovers must be
@@ -313,7 +318,7 @@ if wait_until 10 no_new_zombies $ZBASE; then
     record "sighup:zombies-after-the-matrix" "none beyond the baseline"
 else
     # shellcheck disable=SC2086
-    record "sighup:zombies-after-the-matrix" "$(zombies_outside_baseline $ZBASE | tr '\n' ';')"
+    record "sighup:zombies-after-the-matrix" "$(zombies_outside_baseline $ZBASE | do_tr '\n' ';')"
     # shellcheck disable=SC2086
     fail "sighup:killed-clients-do-not-leak-zombies" \
          "these are still here 10 s after four killed exec clients, and were not before the
@@ -325,7 +330,7 @@ fi
 # Loose about wording, strict about the CLAIM. The old version checked only that
 # CONTAINER-DESIGN.md mentioned "terminal window", which stayed green through a total reversal of
 # what the doc said about it -- a check that survives the thing it exists to catch.
-design="$(tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
+design="$(do_tr 'A-Z' 'a-z' < "$PRIVATE/CONTAINER-DESIGN.md")"
 assert_contains "sighup:CONTAINER-DESIGN-addresses-closing-the-window" "terminal window" "$design"
 assert_match "sighup:CONTAINER-DESIGN-says-it-STOPS-things" \
              'clos[a-z]*( your| the)? terminal[^.]*stop|stop[^.]*clos[a-z]*( your| the)? terminal' \

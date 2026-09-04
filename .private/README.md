@@ -747,14 +747,28 @@ Rollback is `git revert` on the Containerfile. There is no dated-tag safety net 
 ```
 .private/tests/run-tests.sh                  # every automatable check
 .private/tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
-.private/tests/run-tests.sh --release        # the publishing blanks; fails until filled
+.private/tests/run-tests.sh --release        # the publishing checks; green as of 2026-09-03
 CS193V_GH_TEST_TOKEN=github_pat_... \
   .private/tests/run-tests.sh --tier github  # setup-git against the real GitHub; skips without
 .private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
 
-Zero dependencies beyond podman, python3 and shellcheck, and bash 3.2-compatible so it runs
-on a Mac. Then work through **`.private/tests/MANUAL.md`** (what genuinely needs a human or another
+**On a Mac, install the dependencies once first:**
+
+```
+brew install coreutils shellcheck
+```
+
+`coreutils` is not optional there: macOS ships no `timeout(1)` at all, and its `stat` has no GNU
+`-c`. The suite refuses to run rather than failing obscurely if anything is missing — the
+preflight names what is absent and the command that fixes it, and exits **78** (#124). Otherwise
+the dependencies are podman, python3 and shellcheck, and the suite is bash 3.2-compatible so it
+runs on a Mac. Note `python3` needs no particular version: macOS's own 3.9 is fine, and installing
+a newer one would shadow the interpreter the *product* under test uses.
+
+Two tiers cannot run on Apple Silicon and skip themselves rather than failing: `--tier windows`
+(wine cannot execute on aarch64) and the Arch fixture inside the install tier (Arch publishes no
+arm64 image). Both are covered on any x86_64 host. Then work through **`.private/tests/MANUAL.md`** (what genuinely needs a human or another
 platform) and read **`.private/ERRORS.md`** (what the first pass found, and what is still open).
 
 `VERIFICATION.md` keeps the prose, because the reasoning per check is worth having — but ten

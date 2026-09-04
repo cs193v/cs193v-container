@@ -45,6 +45,13 @@ trap 'rm -rf "$WORK"' EXIT
 #
 # Lighter than 30-launcher-shim.sh's repo_copy() on purpose: that lives in podman-shim.sh and
 # brings the shim's TMPDIR machinery with it, and the unit tier is meant to need none of it.
+# PHYSICAL, because the launcher resolves its own directory with `pwd -P` and names it in the
+# missing-args refusal -- so a $FIX under a raw $TMPDIR could never match: on macOS that is
+# /var/... against the launcher's /private/var/..., and $TMPDIR's trailing slash doubles the
+# separator as well. Resolved HERE rather than in new_tmpdir, which becomes the launcher's own
+# TMPDIR in 14-test-harness.sh and so carries the tunnel's unix socket -- and that path is capped
+# near 104 bytes (cs193v:903). This one is only ever compared as a string.
+WORK="$(cd -- "$WORK" && pwd -P)"
 FIX="$WORK/course"
 mkdir -p "$FIX/.config"
 cp "$REPO/cs193v" "$FIX/cs193v"
@@ -68,7 +75,11 @@ ref_parse() {                         # ref_parse FILE... -> one word per line
         [ -f "$f" ] || continue
         while IFS= read -r line || [ -n "$line" ]; do
             line="${line%%#*}"
-            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            # LC_ALL=C, tracking the same change in load_args. The oracle is "load_args' loop
+            # exactly as it stood", so it has to move with it -- and note that when only the
+            # launcher was fixed, `agrees` went RED. That is the differential test working: it
+            # cannot see a bug both sides share, but it does see them diverge.
+            line="$(printf '%s' "$line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
             [ -z "$line" ] && continue
             for word in $line; do
                 case "$word" in
@@ -167,6 +178,17 @@ fix_reset
 printf -- '--label caf\xe9=1\n-e OK=2\n' | fix_args container.args
 agrees "corpus:invalid-utf8-byte"
 assert_contains "invalid-utf8:line-not-dropped" "-e" "$(parsed)"
+# THE FLAG ITSELF, not just the line after it. `agrees` cannot see this bug and neither could the
+# assertion above: the oracle is load_args' own former loop, so BOTH sides shell out to sed, both
+# lose the same line, and empty compares equal to empty. `line-not-dropped` then passes on the
+# strength of `-e` from the NEXT line surviving.
+#
+# Measured on macOS under the default LANG=en_US.UTF-8: BSD sed rejects the \xe9 with
+# "RE error: illegal byte sequence" and emits nothing for that line, so `--label caf<e9>=1`
+# vanished -- exactly the "silently missing one" the comment above says must not happen. Under
+# LC_ALL=C the same sed passes the byte through untouched, which is why load_args now sets it
+# per-invocation.
+assert_contains "invalid-utf8:the-flag-is-not-silently-dropped" "--label" "$(parsed)"
 
 # Everything at once, in one file, so an interaction between two rules cannot hide behind two
 # separate green cases.
@@ -284,7 +306,7 @@ assert_says_key "missing:no-container-args-says-so" err.no-args-file "$missing_e
 # TMPDIR=/tmp, where the fixture path is short enough to fit, and red the moment the suite is run
 # with $TMPDIR somewhere longer -- which is exactly what #76 forces a developer to do. An assertion
 # that depends on the length of a temp path is one nobody would think to distrust.
-squash_ws() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | tr -d '[:space:]'; }
+squash_ws() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | do_tr -d '[:space:]'; }
 assert_contains "missing:the-error-names-the-file" \
                 "$(squash_ws "$FIX/.config/container.args")" "$(squash_ws "$missing_err")"
 # ON STDERR, WITH STDOUT EMPTY. --dev-args is read by a machine; box art on stdout would arrive

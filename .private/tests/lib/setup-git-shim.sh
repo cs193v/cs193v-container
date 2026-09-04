@@ -98,15 +98,12 @@ sg_tty() {                            # sg_tty KEYS [VAR=VAL ...]
         for a in "$@"; do cmd="$cmd $a"; done
         cmd="$cmd bash $SG_SETUP_GIT"
     fi
-    # util-linux script takes -c CMD; BSD/macOS script takes the command as trailing words.
-    if script --version 2>&1 | grep -qi util-linux; then
-        sg_feed "$keys" | PATH="$SGSHIM:$PATH" timeout "${SG_TIMEOUT:-120}" \
-            script -q -c "$cmd" /dev/null 2>&1
-    else
-        # shellcheck disable=SC2086
-        sg_feed "$keys" | PATH="$SGSHIM:$PATH" timeout "${SG_TIMEOUT:-120}" \
-            script -q /dev/null $cmd 2>&1
-    fi
+    # THE PTY COMES FROM lib/ptyrun.py -- see its header, and launcher_tty in podman-shim.sh,
+    # for why script(1) cannot do this on a Mac. $SG_TIMEOUT is passed THROUGH rather than
+    # flattened to a literal: 90-setup-git-github.sh:178 raises it to 600 for the real-GitHub
+    # tier, and a hardcoded 120 there would truncate the transcript 5x early -- on which every
+    # sg_says_not would then pass vacuously.
+    sg_feed "$keys" | PATH="$SGSHIM:$PATH" do_script "${SG_TIMEOUT:-120}" "$cmd" 2>&1
 }
 
 # ─── reading the transcript ────────────────────────────────────────────────────
@@ -125,12 +122,22 @@ sg_tty() {                            # sg_tty KEYS [VAR=VAL ...]
 # quoted prose, for the reason assert_says_key exists: a test that hardcodes wording fails the day
 # somebody rewords the catalogue, which punishes the wrong change.
 SG_ESC="$(printf '\033')"
+# LC_ALL=C ON EVERY sed THAT READS A TRANSCRIPT. BSD sed decodes its input to evaluate a
+# character class, so ONE non-UTF-8 byte anywhere in a pty transcript aborts it with
+# "RE error: illegal byte sequence" and the flattened text comes back TRUNCATED -- on which
+# assert_says fails confusingly and every assert_says_not passes vacuously. Under LC_ALL=C the
+# same sed treats input as bytes and passes the offending one straight through. Measured.
+#
+# SAFE HERE ONLY BECAUSE THESE PATTERNS ARE ASCII. Do not copy this to a sed whose pattern
+# contains a multibyte bracket expression -- see _flatten in lib/assert.sh, where LC_ALL=C would
+# turn [┃┏┓┗┛━] into a set of BYTES and strip E2 out of every other box-drawing and bullet
+# character in the text.
 sg_plain() {                          # sg_plain TEXT -> the words, with the terminal removed
-    printf '%s' "$1" | tr -d '\r' | sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" \
-        | tr '\n' ' ' | sed -e 's/[[:space:]][[:space:]]*/ /g'
+    printf '%s' "$1" | do_tr -d '\r' | LC_ALL=C sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" \
+        | do_tr '\n' ' ' | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g'
 }
 sg_phrase() {                         # sg_phrase KEY -> its prose, markup removed
-    msg_text "$1" "$SGM" | tr -d '*' | sed -e 's/[[:space:]][[:space:]]*/ /g'
+    msg_text "$1" "$SGM" | do_tr -d '*' | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g'
 }
 # An unknown or all-placeholder key fails rather than passing vacuously — the same trap
 # assert_says_key records, and worse in the negative form, where an empty needle passes always.
@@ -152,7 +159,7 @@ sg_says_not() {                       # sg_says_not NAME KEY TEXT
 # self-overwriting output, and for the same reason. Colour comes off here too, so neither reader
 # below has to know about it.
 sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, colour removed
-    printf '%s' "$1" | tr '\r' '\n' | sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
+    printf '%s' "$1" | do_tr '\r' '\n' | LC_ALL=C sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
 }
 
 # EVERY ROW THAT DID NOT FIT, which is the shape issue #67 needed and nothing here had. The
@@ -219,6 +226,6 @@ sg_has_not() { assert_not_contains "$1" "$2" "$(sg_plain "$3")"; }
 # The two-column indent comes off too. setup-git draws its box indented to match the rest of the
 # screen; box_problems, shared with the launcher's unindented boxes, wants the border in column 1.
 sg_box() {                            # sg_box TEXT -> just the box, ready for box_problems
-    printf '%s' "$1" | tr -d '\r' | sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" -e 's/^  //' \
-        | sed -n '/[┏]/,/[┗]/p'
+    printf '%s' "$1" | do_tr -d '\r' | LC_ALL=C sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" -e 's/^  //' \
+        | sed -n '/[┏]/,/[┗]/p'   # NO LC_ALL=C: [┏] and [┗] are multibyte brackets
 }

@@ -48,7 +48,7 @@ scratch_dirs() {                      # scratch_dirs PREFIX... -> matching names
         for d in "$WORK/$p".*; do
             [ -d "$d" ] && printf '%s\n' "${d##*/}"
         done
-    done | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//'
+    done | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//'
 }
 count_dirs() {                        # count_dirs PREFIX -> how many $WORK/PREFIX.* exist
     local d n=0
@@ -98,7 +98,7 @@ want="$want ./cs193v ./projects ./projects/.gitkeep"
 # .config/container.args IS in that list and the five tunnel files and local.args are NOT,
 # which is the whole point: .config is excluded wholesale and its one TRACKED file put back,
 # the same treatment projects/ gets. Naming the six to exclude instead would leak the seventh.
-got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//' )"
+got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
 assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$got"
 
 # THE SIZE, not just the names. The listing above is the leak we know about; this is the one that
@@ -201,6 +201,10 @@ fi
 RUN="$WORK/runner"
 mkdir -p "$RUN"
 cp "$TESTS_DIR/run-tests.sh" "$RUN/run-tests.sh"
+# run-tests.sh sources lib/portable.sh from its OWN directory -- above the option loop, because
+# that loop uses do_tr -- so a copy of the script alone cannot start. Symlinked rather than
+# copied: this fixture is about the runner's behaviour, not the libraries'.
+ln -s "$TESTS_DIR/lib" "$RUN/lib"
 cat > "$RUN/01-fine.sh" <<'EOF'
 # TIER: static
 printf 'PASS\t01-fine.sh\tfake:finished\n' >> "$CS193V_RESULTS"
@@ -364,7 +368,7 @@ assert_eq "record:the-value-is-the-fourth-field" "46 of 46" \
 # are flattened rather than carried through.
 assert_eq "record:a-multiline-value-stays-one-line" "first second third" \
           "$(awk -F'\t' '$3 == "rec:two-lines" { print $4 }' "$WORK/rec.tsv")"
-assert_eq "record:the-file-is-still-one-line-per-result" "3" "$(wc -l < "$WORK/rec.tsv" | tr -d ' ')"
+assert_eq "record:the-file-is-still-one-line-per-result" "3" "$(wc -l < "$WORK/rec.tsv" | do_tr -d ' ')"
 # An EMPTY value is still four fields: "the value went away" has to be visible as an empty
 # field, which is the whole point of putting it on the wire.
 assert_eq "record:an-empty-value-is-still-a-field" "4" \
@@ -540,3 +544,207 @@ assert_eq "ceiling:a-SIGKILLed-backstop-is-a-named-result" \
           "FAIL ceil:the-run-stayed-inside-its-ceiling" "$(ceil_results)"
 assert_eq "ceiling:a-SIGKILLed-backstop-removes-the-abandoned-container" \
           "rm -f cs193v-fixture-ceiling" "$(cat "$WORK/ceil.podman")"
+
+# ─── lib/ptyrun.py delivers keystrokes to a real pty ──────────────────────────
+# WHY THIS IS THE HARNESS'S BUSINESS. Eleven sites drive an interactive program by piping
+# keystrokes into a pty, and every one of them exists ONLY to deliver those keystrokes: the
+# arrow keys menu() reads, the consent digits, the `exit\n` that ends a shell, the leading bare
+# ENTER 80-launcher-live.sh:336 calls load-bearing. If the bytes arrive shifted, or one is
+# eaten, the program takes its EOF/safe-default path instead — which is LOUD for a positive
+# assertion and SILENT for the ~125 assert_says_not / assert_not_contains ones behind these
+# helpers. So the delivery itself has to be measured, not assumed.
+#
+# MEASURED, NOT IMAGINED. This replaced script(1), which cannot do the job on a Mac:
+# BSD script writes a VEOF to the master before forwarding piped stdin, so
+#   printf 'one\ntwo\n' | script -q /dev/null sh -c 'read a; read b; ...'
+# yields a=[] b=[one] -- every read shifted by one and the last keystroke never consumed.
+# Unchanged by -k and -F. It also hard-errors on a fifo stdin ("tcgetattr/ioctl: Operation not
+# supported on socket"), which is exactly what launcher_pty_silent_start feeds it.
+PTYRUN="$TESTS_DIR/lib/ptyrun.py"
+
+cat > "$WORK/reader.sh" <<'CHILD'
+read a
+read b
+printf 'A=[%s] B=[%s]\n' "$a" "$b"
+CHILD
+
+# THE ASSERTION THAT CAUGHT script(1). Two lines in, both out, in order, neither shifted.
+pr_out="$(printf 'one\ntwo\n' | python3 "$PTYRUN" "sh $WORK/reader.sh" 2>&1 | do_tr -d '\r')"
+assert_says "ptyrun:both-lines-arrive-in-order" "A=[one] B=[two]" "$pr_out"
+assert_says_not "ptyrun:no-eof-is-injected-first" "A=[]" "$pr_out"
+
+# The child must be on a TERMINAL, or menu() takes its no-tty branch and reads nothing.
+assert_says "ptyrun:the-child-sees-a-tty" "ISTTY" \
+            "$(printf '\n' | python3 "$PTYRUN" 'test -t 0 && echo ISTTY' 2>&1 | do_tr -d '\r')"
+
+# The child's status must survive. util-linux script needs -e for this and BSD script does it
+# by default; a replacement that swallowed it would make every rc assertion behind these
+# helpers meaningless.
+assert_exit "ptyrun:propagates-the-child-status" 7 \
+            sh -c "printf '\n' | python3 '$PTYRUN' 'exit 7' >/dev/null 2>&1"
+
+# IT MUST BE A FILE, NOT A SHELL FUNCTION, because do_script hands it to `timeout`, which
+# execvp()s its argument and cannot see a function. rc 127 with output on stderr is
+# indistinguishable from a program that printed an error, so this is asserted rather than
+# assumed.
+assert_says "ptyrun:composes-with-timeout" "COMPOSED" \
+            "$(printf '\n' | timeout 20 python3 "$PTYRUN" 'echo COMPOSED' 2>&1 | do_tr -d '\r')"
+
+# A FIFO STDIN MUST WORK. launcher_pty_silent_start is built entirely on mkfifo, because a fifo
+# held open by a non-writing writer is the only way to distinguish "the launcher is waiting for
+# input" from "the launcher read EOF and carried on" (lib/podman-shim.sh:120-127). BSD script
+# refuses one outright -- `script: tcgetattr/ioctl: Operation not supported on socket`, rc 1,
+# nothing run -- so the flagship backgrounded site could not work on it at all.
+mkfifo "$WORK/pf"
+( exec 3>"$WORK/pf"; sleep 5 ) & PR_HOLDER=$!
+assert_says "ptyrun:accepts-a-fifo-stdin" "FIFO-OK" \
+            "$(timeout 10 python3 "$PTYRUN" 'echo FIFO-OK' < "$WORK/pf" 2>&1 | do_tr -d '\r')"
+kill "$PR_HOLDER" 2>/dev/null || true
+
+# BACKGROUNDED, $! MUST BE THE PTY OWNER AND ITS CHILD MUST BE THE COMMAND. Five sites background
+# this and read $! to kill the session; 60-container.sh:250 records what getting it wrong costs:
+# "killing that leaves script, podman and the tmux client happily alive -- so the window was
+# never really closed and every assertion after it measures nothing." A shell FUNCTION
+# backgrounded would give the subshell's pid, which is why ptyrun is a file.
+#
+# `sh -c 'sleep 30'` exec-optimises, so the pty owner's direct child is the command itself with
+# no interposed shell -- which is what pgrep -P at 70-sighup.sh:213 depends on.
+printf 'x\n' | python3 "$PTYRUN" 'sleep 30' >/dev/null 2>&1 &
+PR_OWNER=$!
+wait_until 10 sh -c "pgrep -P $PR_OWNER >/dev/null 2>&1" || true
+PR_KID="$(pgrep -P "$PR_OWNER" 2>/dev/null | head -1)"
+assert_eq "ptyrun:backgrounded-child-is-the-command" "sleep" \
+          "$(ps -o comm= -p "${PR_KID:-0}" 2>/dev/null | sed 's#.*/##' | do_tr -d ' ')"
+kill "$PR_OWNER" "$PR_KID" 2>/dev/null || true
+
+# ─── lib/portable.sh: the wrappers, and the properties they exist for ─────────
+# Each of these guards a MEASURED macOS failure, not a hypothetical one. The tools divide three
+# ways and only the middle group is a mere flag: `timeout` and `ss` are ABSENT on a Mac, `script`
+# and `stat` have DIFFERENT SIGNATURES, and `tr` is the same signature with a locale-dependent
+# behaviour. So the wrappers are not one pattern applied five times.
+
+# do_tr -- 88 of the 91 locale errors in an un-normalised macOS run were this. BSD tr aborts with
+# "Illegal byte sequence" on a non-UTF-8 byte under a UTF-8 locale and TRUNCATES its output, so an
+# assertion downstream compares against a short string and fails for a confusing reason.
+# LC_ALL=C is the entire cure -- measured byte-identical to gtr on every form this tree uses -- and
+# it must be per-invocation, because forcing it run-wide breaks 9 multibyte comparisons against
+# messages.txt.
+assert_eq "portable:do_tr-survives-an-invalid-utf8-byte" "X-Y" \
+          "$(printf 'X\xe9Y' | do_tr '\350\351' '--')"
+assert_eq "portable:do_tr-does-the-ordinary-thing-too" "a b" "$(printf 'a\tb' | do_tr '\t' ' ')"
+
+# do_stat -- BSD stat has no -c at all; it spells the same question `-f %Lp`. Callers keep writing
+# GNU -c and the wrapper resolves a binary that accepts it.
+chmod 640 "$WORK/reader.sh"
+assert_eq "portable:do_stat-reads-a-mode-with-gnu--c" "640" "$(do_stat -c %a "$WORK/reader.sh")"
+
+# do_listeners -- THE SELF-CHECK THAT MAKES F15 IMPOSSIBLE TO REPEAT. macOS has no `ss`, and the
+# twelve call sites all swallowed its absence with `2>/dev/null` and `|| true`, so a missing tool
+# yielded EMPTY and every consumer reported a confident zero: fwd_owned_ports found nothing,
+# no_forwards() was unconditionally true, and every "the forwards were released" assertion passed
+# having measured nothing. netstat cannot fix it either -- macOS netstat has no pid option under
+# any flag. So this asserts the one property every consumer needs: A PID, for a port we hold.
+python3 -c '
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(1)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+time.sleep(60)
+' "$WORK/port" &
+PL_PID=$!
+wait_until 10 sh -c "[ -s '$WORK/port' ]" || true
+PL_PORT="$(cat "$WORK/port" 2>/dev/null)"
+PL_LINE="$(do_listeners 2>/dev/null | grep ":${PL_PORT}	" | head -1)"
+assert_says "portable:do_listeners-reports-the-address" "127.0.0.1:$PL_PORT" "$PL_LINE"
+assert_says "portable:do_listeners-reports-a-pid"       "pid=$PL_PID"        "$PL_LINE"
+kill "$PL_PID" 2>/dev/null || true
+wait "$PL_PID" 2>/dev/null || true
+
+# do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
+# the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.
+# NOT via `sh -c`: a child shell does not inherit a function, so that would assert 127 and pass
+# for the wrong reason -- the same trap that made `do_timeout 120 do_script` unrunnable.
+assert_exit "portable:do_timeout-returns-124-on-a-timeout" 124 do_timeout 1 sleep 5
+assert_eq "portable:do_timeout-passes-stdout-through" "THROUGH" "$(do_timeout 10 echo THROUGH)"
+
+# do_script SECS CMD -- the timeout goes INSIDE, so each caller keeps its own value. An earlier
+# draft wrote `do_timeout 120 do_script "$cmd"`, which cannot run: timeout execvp()s and cannot
+# see a shell function (rc 127), and the literal 120 discarded ${SG_TIMEOUT:-120} and the 600 at
+# 90-setup-git-github.sh:178 -- a silent 5x truncation.
+assert_says "portable:do_script-drives-a-pty-with-its-own-timeout" "A=[one] B=[two]" \
+            "$(printf 'one\ntwo\n' | do_script 20 "sh $WORK/reader.sh" 2>&1 | do_tr -d '\r')"
+
+# do_sha256 -- exposed as a VARIABLE too, because 25-installer.sh:595 calls it as
+# `find ... -exec sha256sum {} +` and find needs a binary, not a function.
+assert_eq "portable:do_sha256-hashes-stdin" \
+          "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" \
+          "$(printf 'hello\n' | do_sha256 | cut -d' ' -f1)"
+assert_ok "portable:DO_SHA256-is-a-usable-binary-path" sh -c '[ -x "$DO_SHA256" ]'
+
+# ─── the preflight dependency gate (#124) ─────────────────────────────────────
+# WHY A GATE AND NOT ASSERTIONS. A missing tool used to surface as ordinary failures scattered
+# through the list -- 139 `timeout: command not found` in one macOS run -- so "your machine is
+# wrong" was indistinguishable from "the code is wrong". 10-static.sh is even ORDERED around it
+# (`:1602`: shellcheck checked last "because require_cmd aborts the suite"). These are not test
+# cases: a missing dependency means the suite cannot ask its questions at all, so the gate
+# refuses the run rather than recording a result.
+#
+# DRIVEN AGAINST A COPY of the runner, with a MINIMAL PATH built from symlinks. Absence cannot be
+# faked by prepending something, so the fixture builds a PATH containing exactly the tools the
+# gate wants and then removes one.
+GATE="$WORK/gate"
+mkdir -p "$GATE/bin"
+cp "$TESTS_DIR/run-tests.sh" "$GATE/run-tests.sh"
+# The copied runner sources lib/portable.sh from its own directory, so the libs have to be
+# reachable. Symlinked rather than copied: this fixture is about the runner, not the libs.
+ln -s "$TESTS_DIR/lib" "$GATE/lib"
+cat > "$GATE/01-fine.sh" <<'EOF'
+# TIER: static
+printf 'PASS\t01-fine.sh\tfake:the-gate-let-me-run\n' >> "$CS193V_RESULTS"
+EOF
+for _t in bash sh env python3 shellcheck podman curl sed awk tr mktemp pgrep grep cat printf \
+          timeout gtimeout stat gstat sha256sum gsha256sum ss lsof cut sort head tail wc \
+          basename dirname rm mkdir ln chmod date sleep id od paste tee expr; do
+    _p="$(command -v "$_t" 2>/dev/null)" && ln -s "$_p" "$GATE/bin/$_t" 2>/dev/null
+done
+unset _t _p
+
+gate_run() {                          # gate_run [REMOVE_TOOL...] -> output with [rc=N]
+    local t
+    mkdir -p "$GATE/bin.save"
+    for t in "$@"; do mv "$GATE/bin/$t" "$GATE/bin.save/$t" 2>/dev/null || true; done
+    ( cd "$GATE" && env -i PATH="$GATE/bin" HOME="$WORK" TMPDIR="$WORK" NO_COLOR=1 \
+        bash ./run-tests.sh --tier static 2>&1; printf '[rc=%s]' "$?" )
+    for t in "$@"; do mv "$GATE/bin.save/$t" "$GATE/bin/$t" 2>/dev/null || true; done
+}
+
+# A MISSING TOOL MUST BE NAMED, AND FIXABLE. The name alone is a diagnosis without a remedy; the
+# whole point of the gate over a bare failure is that it says what to type. Matched loosely
+# enough to hold on both platforms -- `brew install shellcheck` and `apt install -y shellcheck`
+# both satisfy it -- so this does not silently become a macOS-only assertion.
+out="$(gate_run shellcheck)"
+assert_contains "preflight:names-the-missing-tool"        "shellcheck" "$out"
+assert_match    "preflight:offers-a-command-that-fixes-it" 'install .*shellcheck' "$out"
+# ITS OWN EXIT CODE, so CI can tell a broken machine from a broken commit. 78 is EX_CONFIG from
+# sysexits.h; 0/1/2/97/130 are all taken already -- see the table in run-tests.sh's header.
+assert_contains "preflight:has-its-own-exit-code"         "[rc=78]"    "$out"
+# NOTHING RAN, and nothing was recorded. Both halves matter: a gate that let one suite through
+# before refusing would leave a results file that the summary would then under-report from.
+assert_not_contains "preflight:no-suite-ran"              "01-fine.sh" "$out"
+assert_not_contains "preflight:records-no-result"         "PASS"       "$out"
+assert_not_contains "preflight:prints-no-tally"           "0 fail"     "$out"
+# AND NO RUN DIRECTORY, which is the cheapest possible proof that it refused ABOVE the setup at
+# run-tests.sh:145 rather than tearing down afterwards.
+assert_not_contains "preflight:makes-no-run-directory"    "log:"       "$out"
+
+# EVERY FAULT IN ONE REPORT. A fresh Mac is missing several things at once, and a gate that makes
+# you fix them one run at a time is worse than the disease.
+out="$(gate_run shellcheck podman)"
+assert_contains "preflight:names-every-fault-at-once-1"   "shellcheck" "$out"
+assert_contains "preflight:names-every-fault-at-once-2"   "podman"     "$out"
+
+# THE CONTROL, and it is not optional: without it every assertion above passes forever the day
+# the gate is accidentally made unreachable.
+out="$(gate_run)"
+assert_contains     "preflight:a-sound-machine-runs"      "01-fine.sh" "$out"
+assert_not_contains "preflight:a-sound-machine-is-not-refused" "CANNOT RUN" "$out"

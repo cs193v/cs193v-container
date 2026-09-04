@@ -92,7 +92,7 @@ skip() { _emit SKIP "$1"; printf '  %sSKIP%s  %s %s\n' "$A_YEL" "$A_OFF" "$1" "$
 # a second result out of nothing.
 record() {
     local v
-    v="$(printf '%s' "${2:-}" | tr '\n\t' '  ')"
+    v="$(printf '%s' "${2:-}" | do_tr '\n\t' '  ')"
     _emit REC "$1" "$v"
     printf '  %sREC %s  %s = %s\n' "$A_DIM" "$A_OFF" "$1" "$v"
 }
@@ -186,7 +186,7 @@ actual:                    $3" ;;
 # line happens to break.
 _flatten() {
     printf '%s' "$1" \
-        | tr '\n' ' ' \
+        | do_tr '\n' ' ' \
         | sed -e 's/[┃┏┓┗┛━]//g' -e 's/[[:space:]][[:space:]]*/ /g'
 }
 
@@ -542,7 +542,7 @@ dyn_free_port() {                     # dyn_free_port [AVOID...] -> one port, or
         p="$lo"
         while [ "$p" -le "$hi" ]; do
             case "$avoid" in *" $p "*) p=$((p + 1)); continue ;; esac
-            if ! ss -Hltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p\$"; then
+            if ! do_listeners 2>/dev/null | grep -qE "[:.]$p	"; then
                 printf '%s' "$p"; return 0
             fi
             p=$((p + 1))
@@ -583,7 +583,7 @@ dyn_ports() {                         # dyn_ports [N] -> N forwarded ports, spac
         fail "require:dynports" "bound 127.0.0.1:$p inside the container, and the tunnel never
 carried it to this host. Every port assertion in this suite establishes its ports this way, so
 there is nothing left to test.
-  the tunnel holds: $(fwd_owned_ports | tr '\n' ' ')
+  the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
   the container says:
 $(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')
 Check:  ./cs193v doctor
@@ -669,8 +669,13 @@ fwd_owned_ports() {
     local pid
     pid="$(tunnel_owner_pid)"
     [ -n "$pid" ] || return 0
-    ss -ltnp 2>/dev/null \
-        | awk -v p="pid=$pid," '$0 ~ p && $4 ~ /^127[.]0[.]0[.]1:[0-9]+$/ { sub(/.*:/, "", $4); print $4 }' \
+    # do_listeners, not ss: macOS has neither ss nor any netstat that can report a pid, and the
+    # old `ss ... 2>/dev/null` yielded EMPTY there -- so count_forwards was 0, no_forwards() was
+    # unconditionally TRUE, and every "the forwards were released" assertion passed having
+    # measured nothing. A missing backend is now fatal rather than silent. Its format is
+    # ADDR:PORT<TAB>pid=NNN; see lib/portable.sh.
+    do_listeners \
+        | do_awk -F'\t' -v p="pid=$pid" '$2 == p && $1 ~ /^127[.]0[.]0[.]1:[0-9]+$/ { sub(/.*:/, "", $1); print $1 }' \
         | LC_ALL=C sort -u
 }
 
@@ -698,7 +703,7 @@ no_forwards() { [ "$(count_forwards)" = 0 ]; }
 fwd_squatters() {                     # fwd_squatters PORT...  -> one line per port
     local n=0 p line pid who
     for p in "$@"; do
-        line="$(ss -ltnp 2>/dev/null | awk -v a=":$p\$" '$4 ~ a { print; exit }')"
+        line="$(do_listeners | do_awk -F'\t' -v a=":$p\$" '$1 ~ a { print; exit }')"
         if [ -z "$line" ]; then
             who='nothing is listening on it -- our own tunnel never bound it'
         else
@@ -709,7 +714,7 @@ fwd_squatters() {                     # fwd_squatters PORT...  -> one line per p
                 # FIRST -i, not with a `.*-i ` sed: the tunnel's own ProxyCommand ends in
                 # `sshd -i -f <config>`, so a greedy match reports "-f" and names nothing.
                 who="$(ps -p "$pid" -o args= 2>/dev/null \
-                       | tr ' ' '\n' | awk '$0 == "-i" { getline; print; exit }')"
+                       | do_tr ' ' '\n' | awk '$0 == "-i" { getline; print; exit }')"
                 who="pid $pid  ${who:-$(ps -p "$pid" -o comm= 2>/dev/null)}"
             else
                 who="another user's process (no pid visible to us)"
@@ -747,7 +752,7 @@ require_tunnel() {
     # entirely the wrong cause. Since #41 a stopped container is the NORMAL resting state, so
     # this is the common path here rather than an edge case. See hold_container.
     hold_container
-    ( cd "$REPO" && printf 'exit\n' | timeout 90 ./cs193v --reset-tunnel ) >/dev/null 2>&1 || true
+    ( cd "$REPO" && printf 'exit\n' | do_timeout 90 ./cs193v --reset-tunnel ) >/dev/null 2>&1 || true
     tunnel_ready && return 0
     local mpid; mpid="$(tunnel_owner_pid)"
     fail "require:tunnel" "this instance has no working tunnel, and --reset-tunnel did not fix it.
@@ -835,6 +840,14 @@ export TESTS_DIR PRIVATE REPO
 # shellcheck source=../../files/cs193v-strings.sh
 [ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
 export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
+
+# ─── userland portability ──────────────────────────────────────────────────────
+# UNCONDITIONALLY, unlike the strings file above: that one is a convenience and degrades to a
+# weaker assertion if absent, whereas every tier here calls do_tr, do_timeout or do_stat and a
+# missing portable.sh would be `command not found` in the middle of a suite rather than a
+# diagnosis. See that file's header for why PATH is not simply changed instead.
+# shellcheck source=portable.sh
+. "$TESTS_DIR/lib/portable.sh"
 
 # ─── definitions more than one place needs ─────────────────────────────────────
 # NOT guarded with `[ -r ] &&` the way the strings above are, and the difference is deliberate:
@@ -1110,11 +1123,11 @@ make_orphans() {                      # make_orphans N -> N pids, space separate
 # A comma list for `ps -p`, built with an UNQUOTED expansion so word splitting collapses the
 # trailing space make_orphans leaves: `ps -p 1,2,` is an error.
 # shellcheck disable=SC2086
-_orphan_csv() { echo $1 | tr ' ' ','; }
+_orphan_csv() { echo $1 | do_tr ' ' ','; }
 
 orphan_ppids() {                      # orphan_ppids "PID PID ..." -> one ppid per line
     [ -n "${1:-}" ] || return 0
-    podman exec "$NAME" ps -o ppid= -p "$(_orphan_csv "$1")" 2>/dev/null | tr -d ' '
+    podman exec "$NAME" ps -o ppid= -p "$(_orphan_csv "$1")" 2>/dev/null | do_tr -d ' '
 }
 
 # `ps -p` LISTS A ZOMBIE, which is what makes this mean "reaped" rather than "exited": an

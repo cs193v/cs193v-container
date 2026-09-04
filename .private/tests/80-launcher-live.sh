@@ -73,8 +73,8 @@ VOLS_AT_START="$(podman volume ls --format '{{.Name}}' 2>/dev/null)"
 # L() drives the VERBS, which never open a shell and so work fine with a redirected stdin —
 # they are exactly what the refusal message tells scripts to use. Timeout-wrapped so a
 # regression fails the suite instead of wedging it.
-L() { printf 'exit\n' | timeout 90 ./cs193v "$@" 2>&1; }
-L_rc() { printf 'exit\n' | timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
+L() { printf 'exit\n' | do_timeout 90 ./cs193v "$@" 2>&1; }
+L_rc() { printf 'exit\n' | do_timeout 90 ./cs193v "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
 # LV() is L() for the verb that CHANGES something — --rebuild, with or without its modifiers. Since #41
 # those refuse while a session is live, and this suite raises the container repeatedly so it can
@@ -127,7 +127,7 @@ assert_carried() {                    # assert_carried NAME
     else
         fail "$1" "bound 127.0.0.1:$CARRIED_PORT inside the container and the tunnel never carried
 it to this host, so nothing a student runs in there would be reachable.
-  the tunnel holds: $(fwd_owned_ports | tr '\n' ' ')
+  the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
   the container says:
 $(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
     fi
@@ -280,7 +280,7 @@ assert_eq "live:workspace-is-the-sibling-projects-dir" "$REPO/projects" \
 hold_container
 rm -f "$REPO/projects/.vt-live"
 podman exec "$NAME" sh -c 'echo live > /home/student/projects/.vt-live'
-assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(stat -c %u "$REPO/projects/.vt-live")"
+assert_eq "live:keep-id-maps-the-host-user" "$(id -u)" "$(do_stat -c %u "$REPO/projects/.vt-live")"
 rm -f "$REPO/projects/.vt-live"
 
 # ─── idempotency and concurrency  (§2.2, §A.10) ────────────────────────────────
@@ -344,7 +344,10 @@ mkdir -p "$RACE_OUT"
 # ENTER since #19 and for this same reason; this group was written without it.
 RACE_PIDS=''
 for i in 1 2 3 4; do
-    printf '\nsleep 600\n' | timeout 120 script -q -c "$REPO/cs193v" /dev/null >"$RACE_OUT/$i" 2>&1 &
+    # ptyrun.py DIRECTLY, with no do_script and no timeout layer: $! has to be the pty owner
+    # so the winner's session can be killed, and `timeout` in front would make it the pid of
+    # timeout instead. See lib/portable.sh's do_script comment and 60-container.sh:250.
+    printf '\nsleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "$REPO/cs193v" >"$RACE_OUT/$i" 2>&1 &
     RACE_PIDS="$RACE_PIDS $!"
 done
 refused_count() { grep -l 'already have a CS193V session' "$RACE_OUT"/* 2>/dev/null | grep -c . || true; }
@@ -472,7 +475,7 @@ else
 fi
 LV --rebuild >/dev/null 2>&1
 # The container publishes nothing; the 46 forwards live on the host, in one ssh process.
-assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | tr -d ' ')"
+assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | do_tr -d ' ')"
 
 # INVERTED BY #41. This used to assert 46 forwards immediately after --rebuild, because a rebuild
 # left the container running with a fresh tunnel. Maintenance verbs now stop what they built --
@@ -643,7 +646,29 @@ skip "build:rebuilds-and-recreates" "would trigger a real image build; covered i
 hold_container
 require_tunnel
 out="$(L doctor)"
-assert_contains "doctor:reports-the-real-podman-version" "5." "$out"
+# THE VERSION IS NOT A CONSTANT. This read "5." until podman 6.0.2 arrived and a completely
+# correct doctor went red -- the same defect as the three x86_64 needles in
+# 26-installer-sandbox.sh: an environment fact frozen into an assertion, when the property worth
+# asserting is that doctor AGREES WITH THIS MACHINE. doctor prints the last field of
+# `podman --version` (cs193v:2318-2319), or "NOT FOUND or not responding".
+#
+# TWO ASSERTIONS, AND THE PAIR IS THE POINT. The differential half compares against this host's
+# own `podman --version` -- but doctor runs that very command, so oracle and subject share a
+# source and are blind to any fault they share. That is exactly the shape 16-args-parse.sh's
+# agrees() has. The shape half needs no oracle and cannot pass on an empty or garbage answer,
+# which is what keeps the differential half honest. Two components, not three, so a two-part or
+# suffixed version still reads as a version; `podman +[0-9]` cannot collide with the
+# `machine podman-machine-default*` row, which has a hyphen rather than spaces then a digit.
+assert_match "doctor:reports-a-version-shaped-number" 'podman +[0-9]+\.[0-9]+' "$out"
+# THE EMPTY-ORACLE GUARD IS NOT DECORATION: assert_contains NAME "" "$out" passes on ANY
+# haystack, so a podman that stopped answering would turn the assertion below green.
+pv="$(podman --version 2>/dev/null | awk '{print $NF}')"
+if [ -z "$pv" ]; then
+    fail "doctor:reports-the-real-podman-version" \
+         "podman --version gave nothing, so there is no needle -- assert_contains would pass on anything"
+else
+    assert_contains "doctor:reports-the-real-podman-version" "$pv" "$out"
+fi
 # ERRORS.md B14, fixed, kept as the regression test for it. verb_doctor called load_args but
 # never resolved the image, so it hashed IMAGE="" while every other path hashed the resolved
 # one — and doctor then reported "config STALE" for a container that matched perfectly, telling
@@ -677,7 +702,7 @@ assert_match "doctor:reports-zombies" \
              'zombies +[0-9]+ unreaped, [0-9]+ held by a live parent' "$out"
 record "doctor:zombie-counts-with-a-tunnel-up" \
        "$(printf '%s' "$out" | sed -n 's/.*zombies *\(.*\)/\1/p')"
-record "doctor:full-output" "$(printf '%s' "$out" | tr '\n' '|')"
+record "doctor:full-output" "$(printf '%s' "$out" | do_tr '\n' '|')"
 
 # ─── the tunnel's own lifecycle ────────────────────────────────────────────────
 # Each of these is a way the tunnel can strand a student with a container that looks perfectly
@@ -880,7 +905,7 @@ else
 fi
 
 # ─── §A.14 cleanup assertions ──────────────────────────────────────────────────
-containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | tr '\n' ' ')"
+containers="$(podman ps -a --format '{{.Names}}' | LC_ALL=C sort | do_tr '\n' ' ')"
 record "cleanup:containers" "$containers"
 # This used to assert that the ONLY container on the machine was cs193v, which is how it caught a
 # leak: every throwaway the suite starts uses --rm and gets a podman-generated name, so one that
@@ -893,16 +918,16 @@ record "cleanup:containers" "$containers"
 # that survived carries the label and is named here. Anyone else's is now invisible, which is the
 # honest answer: a container this suite did not start is not this suite's to report.
 strays="$(podman ps -a --filter "label=$VT_LABEL" --format '{{.Names}}' \
-          | LC_ALL=C sort | tr '\n' ' ')"
+          | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "cleanup:no-stray-containers" "" "$(printf '%s' "$strays" | sed 's/ *$//')"
 assert_ok "cleanup:the-container-under-test-exists" sh -c "podman container exists '$NAME'"
 
-vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | tr '\n' ' ')"
+vols="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | do_tr '\n' ' ')"
 record "cleanup:volumes" "$vols"
 # Same scoping. The seven are asserted by exact name so a MISSING one still fails, and the
 # instance suffix comes from $NAME so the expectation tracks whichever instance is running.
 mine="$(podman volume ls --format '{{.Name}}' \
-        | grep -xE "$NAME-(claude|claude-json|codex|gh|vercel|playwright|git)" | LC_ALL=C sort | tr '\n' ' ')"
+        | grep -xE "$NAME-(claude|claude-json|codex|gh|vercel|playwright|git)" | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "cleanup:exactly-the-seven-cs193v-volumes" \
           "$NAME-claude $NAME-claude-json $NAME-codex $NAME-gh $NAME-git $NAME-playwright $NAME-vercel" \
           "$(printf '%s' "$mine" | sed 's/ *$//')"
@@ -919,7 +944,7 @@ assert_eq "cleanup:exactly-the-seven-cs193v-volumes" \
 # creates one, so that is a hole with nothing behind it rather than the measured failure the
 # container half was.
 stray_vols="$(podman volume ls --format '{{.Name}}' | grep -vE '^cs193v($|-)' \
-              | grep -vxF "$VOLS_AT_START" | LC_ALL=C sort | tr '\n' ' ')"
+              | grep -vxF "$VOLS_AT_START" | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "cleanup:no-stray-volumes" "" "$(printf '%s' "$stray_vols" | sed 's/ *$//')"
 
 # ─── §A.13 performance baselines — recorded, never asserted ────────────────────
