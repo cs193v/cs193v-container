@@ -683,17 +683,27 @@ assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 # /proc -- which inside a container reports the host's RAM, not the cgroup limit.
 assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/.config/local.args"
 cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/.config/local.args")"
-# The fake podman reports 8 GiB; the LINUX formula reserves 35% (min 3072) -> 5120. The macOS
-# formula is a different one and gives 7373 from the same input -- memcap:macos-8GB above unit-
-# tests that arm directly, so what is skipped here is the wiring, not the arithmetic. No container
-# equivalent: write_local_args needs `podman info` to answer for memory, and a Tier A fixture
-# cannot, which is why every default install-tier case stops at "Could not ask podman how much
-# memory". Only the opt-in nested block gets that far.
-if linux_arm; then
-    assert_eq "install:cap-matches-the-formula" "5120" "$cap"
-else
-    skip_linux_arm "install:cap-matches-the-formula"
-fi
+# DELIBERATELY UNGATED, AND CURRENTLY RED ON macOS AND WSL -- that is issue #127, and the fix
+# belongs to the assertion rather than to this gate. The fake podman reports 8 GiB; the LINUX
+# formula reserves 35% (min 3072) -> 5120, while the macos|wsl arm reserves 10% (min 768) and
+# gives 7373 from the same input. So the expectation below is one platform's constant.
+#
+# WHY THIS IS NOT A `linux_arm` CASE, unlike consent:* and subuid:* above. Those need the
+# installer's Linux arm to really run -- /etc/subuid, usermod, a shadow suite -- which a PATH
+# shim cannot fake and a real Linux container therefore has to cover (sb-consent:*, sb-subuid:*
+# in 26-installer-sandbox.sh, name for name). NOTHING HERE NEEDS A PLATFORM: no real memory is
+# involved, the total is faked, and write_local_args runs the same arithmetic on this Mac as on
+# Linux. It reaches the macos arm and computes 7373 correctly; only the number on this line is
+# wrong. Skipping it therefore bought a green run by giving up the assertion, and gave up more
+# than it looked: there is no cap-value assertion anywhere in 26-installer-sandbox.sh, so the
+# skip_linux_arm wording ("covered on a real Linux") was false for this one name alone.
+#
+# AND IT IS THE ONLY THING TYING THE TABLE TO THE FORMULA. cap_for at :170 is a REIMPLEMENTATION
+# of the installer's case, so the seven memcap:* assertions prove the copy agrees with itself and
+# would stay green if the installer's reserve changed. This line is the sole end-to-end check --
+# so a gate here leaves the formula unverified in both directions on exactly the two platforms
+# whose arm it covers, and would silently skip whatever #127's fix replaces it with.
+assert_eq "install:cap-matches-the-formula" "5120" "$cap"
 assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/.config/local.args"
 
 # Now the actual §A.12 property. Everything except local.args and projects/ must be
