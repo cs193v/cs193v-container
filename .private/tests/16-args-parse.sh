@@ -528,6 +528,34 @@ tid="${ctl##*/cs193v-}"; tid="${tid%.ctl}"
 assert_eq "tunnel:buildlog-shares-the-tunnel-id" \
           "$(dirname "$ctl")/cs193v-build-$tid.log" "$buildf"
 
+# 5c. AND THE PATHS MUST SURVIVE AN UNSET TMPDIR, which is the environment most machines
+#     actually hand the launcher: TMPDIR is set on macOS and in a login shell, and unset in
+#     most Linux logins and in every cron job and systemd unit. The launcher strips a
+#     trailing slash off it -- macOS supplies one, and every path below is built as
+#     "${TMPDIR:-/tmp}/name", so a doubled slash reached the STUDENT in `cs193v doctor` --
+#     and the first version of that strip was unguarded, so `set -u` made an unset TMPDIR a
+#     fatal at line one of the launcher. Every verb died, including a bare `./cs193v`.
+#
+#     ASSERTED AGAINST THE TMPDIR=/tmp RUN rather than a hardcoded path, because that is the
+#     claim: an unset TMPDIR must land exactly where /tmp does. TUNNEL_ID hashes the course
+#     directory and the instance, not TMPDIR, so the two runs must agree file for file.
+#
+#     `unset` in a SUBSHELL, not `env -u`: this suite has to run on BSD userland too, and a
+#     subshell needs nothing of either.
+tmp_default="$(TMPDIR=/tmp "$FIX/cs193v" --dev-tunnel 2>/dev/null \
+               | awk -F'\t' '$1 == "ctl" { print $2 }')"
+tmp_unset="$( (unset TMPDIR; "$FIX/cs193v" --dev-tunnel 2>/dev/null) \
+               | awk -F'\t' '$1 == "ctl" { print $2 }')"
+assert_eq "tunnel:paths-survive-an-unset-TMPDIR" "$tmp_default" "$tmp_unset"
+
+#     The other half, and the reason the strip exists at all. This one passes on its own
+#     terms today; it is here because NOTHING pinned it, which is exactly how the guard
+#     above came to be missing -- the trailing-slash fix shipped green on the one platform
+#     that sets TMPDIR, and took the launcher out on every platform that does not.
+tmp_slash="$(TMPDIR=/tmp/ "$FIX/cs193v" --dev-tunnel 2>/dev/null \
+             | awk -F'\t' '$1 == "ctl" { print $2 }')"
+assert_eq "tunnel:no-doubled-slash-when-TMPDIR-ends-in-one" "$tmp_default" "$tmp_slash"
+
 # 6. And the id MOVES WITH CS193V_INSTANCE, which is the whole basis of the ownership test in
 #    lib/assert.sh: two instances of the same checkout must not be able to mistake each other's
 #    tunnel for their own.

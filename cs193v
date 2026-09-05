@@ -149,7 +149,22 @@ fi
 #   /var/folders/zx/ryk5x1bj42v547kwj7shw4k00000gn/T//cs193v-ba58b5c99df0.sup.log
 # in the very output a student is told to paste when asking for help. Stripped once, here, rather
 # than at each use. Safe by specification: POSIX requires consumers to accept TMPDIR either way.
-TMPDIR="${TMPDIR%/}"
+#
+# GUARDED, AND THE GUARD IS THE WHOLE POINT OF THIS LINE EXISTING TWICE. `${TMPDIR%/}` on its
+# own is an unbound-variable FATAL under `set -u` on any machine that does not set TMPDIR --
+# which is most Linux logins, every cron job and every systemd unit. It killed the launcher at
+# line one, so every verb and a bare `./cs193v` died with `TMPDIR: unbound variable` before
+# printing anything a student could act on. macOS and WSL both set it, so the fix for the
+# doubled slash above shipped green on the two platforms it was written for and took out the
+# third. See 16-args-parse.sh :: tunnel:paths-survive-an-unset-TMPDIR.
+#
+# `:-` RATHER THAN `:=`, deliberately: this leaves an unset TMPDIR as the empty string, so the
+# eleven `${TMPDIR:-/tmp}` sites below keep falling back to /tmp exactly as they always have.
+# Defaulting it to /tmp here instead would work and would make all eleven of those fallbacks
+# dead code -- an invitation to delete them and reopen this hole from the other side. Nothing
+# in this file reads $TMPDIR bare, so defined-but-empty and unset are indistinguishable to
+# every consumer.
+TMPDIR="${TMPDIR:-}"; TMPDIR="${TMPDIR%/}"
 
 WARN_ACK="${TMPDIR:-/tmp}/cs193v-warned.$$"
 # Pids are reused, so a file left behind by a crash could otherwise make a launch with
