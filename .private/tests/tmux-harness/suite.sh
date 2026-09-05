@@ -740,6 +740,39 @@ hx_check_colors "$S" "SHIFT+drag hint" --grep "hold SHIFT" --require-explicit
 hx_gone "$S" 'hold SHIFT' 8 || true
 hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold SHIFT"
 
+# THE SHIFTED DRAG AT A LIVE PROMPT ANSWERS, WHERE IT USED TO BE SILENT. This is #123 as the
+# student reported it: the hint above says "hold SHIFT", and on a terminal that forwards Shift
+# rather than intercepting it, doing so produced nothing whatsoever. The correction is a separate
+# option from @copy-hint because it answers a separate question -- and it must not repeat the
+# advice that just failed, which is why it is asserted for what it does NOT say as well.
+hx_drag "$S" "$lr" 3 "$lr" 12 4
+hx_settle 0.8
+shift_msg="$(hx_cap "$S" | head -2)"
+hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than dropped" \
+                   "$shift_msg" "reached the container"
+hx_expect_absent "and the correction does not tell you to hold SHIFT again" \
+                 "$shift_msg" "hold SHIFT"
+hx_expect_eq "a SHIFTED drag still copies nothing" "$(ccopy)" ""
+hx_gone "$S" 'reached the container' 8 || true
+
+# The shifted multi-clicks answer too. Same reasoning, and they fire once each so they can carry
+# the message themselves.
+hx_multiclick "$S" "$lr" 3 2 4
+hx_settle 0.6
+hx_expect_contains "a SHIFTED double-click is answered too" \
+                   "$(hx_cap "$S" | head -2)" "reached the container"
+hx_gone "$S" 'reached the container' 8 || true
+
+# THE SHIFTED TRIPLE-CLICK IS BOUND AND CANNOT BE PROVED FROM HERE, which is worth recording so
+# nobody spends the measurement again. tmux promotes a third click to TripleClick off its own
+# click timer, and at the 0.06s gaps hx_multiclick uses it does NOT promote: measured against
+# tmux 3.6, three clicks resolve to `MouseUp1Pane`, and three SHIFTED clicks to
+# `S-MouseUp1Pane` -- so an assertion here would be green because the double-click's message was
+# still on screen, not because the triple-click binding ran. That is the failure mode
+# hx_multiclick's own header warns about. The binding stays in tmux.conf because a real terminal
+# delivering a real triple click does reach it; tests/MANUAL.md 7.10 is where it gets confirmed.
+hx_skip "a SHIFTED triple-click is answered too" "hx_multiclick cannot promote to TripleClick"
+
 it delete-buffer 2>/dev/null || true
 hx_multiclick "$S" "$lr" 3 2
 hx_settle 0.6
@@ -768,6 +801,29 @@ app_saw="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a drag inside a mouse-aware app still reaches the app" \
                    "$app_saw" "[<0;5;$((drag_row - 3))M"
 hx_expect_absent "and does NOT get the SHIFT+drag hint" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+
+# --- and the SHIFTED gestures, which two terminals actually deliver here (#123) --------------
+# WHY THESE BYTES ARE NOT HYPOTHETICAL. The whole selection design assumes holding the bypass
+# modifier keeps the gesture inside the terminal, so tmux never sees it. macOS Terminal.app and
+# VS Code on macOS have NO bypass modifier: they encode Shift into the mouse report (Cb=4) and
+# forward it. Before #123 that landed on a key with no binding and was DROPPED -- the student was
+# told to hold SHIFT, did so, and got nothing at all, not even the hint back, because the shifted
+# release is a different key from the unshifted one. These send exactly what those terminals send.
+#
+# STILL INSIDE THE MOUSE-AWARE APP, because the guard is the half that can regress silently and
+# it is measured rather than assumed: tmux forwards mouse keys it has no binding for to a pane
+# that asked for reporting, so an UNGUARDED S- binding STEALS the event. Measured with this same
+# `cat -v` fixture -- the unguarded form delivered the press and swallowed the RELEASE, leaving
+# the app with a button held down forever.
+hx_drag "$S" "$drag_row" 5 "$drag_row" 9 4
+hx_settle 0.8
+app_saw_shift="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
+hx_expect_contains "a SHIFTED drag inside a mouse-aware app still reaches the app" \
+                   "$app_saw_shift" "[<4;5;$((drag_row - 3))M"
+hx_expect_contains "and the app gets the shifted RELEASE, not just the press" \
+                   "$app_saw_shift" "[<4;9;$((drag_row - 3))m"
+hx_expect_absent "and the correction does NOT interrupt the app" \
+                 "$(hx_cap "$S" | head -2)" "reached the container"
 hx_hex "$S" "03"
 hx_settle 0.4
 # TURN MOUSE REPORTING BACK OFF, or everything after this section measures the wrong thing. Killing

@@ -198,26 +198,33 @@ hx_click() { # session row col [button]
 # copies columns 18 to 26. That is a property of where the cursor ends up, not a defect to
 # correct here, but it does mean that "tidying" the sequence silently rewrites what those tests
 # assert. Re-measure them if you touch it.
-hx_drag() { # session row1 col1 row2 col2
-  local name="$1" r1="$2" c1="$3" r2="$4" c2="$5" c step
-  hx_press "$name" "$r1" "$c1"
+#
+# THE OPTIONAL 6TH ARGUMENT IS THE SGR MODIFIER BITS -- 4 is Shift, 8 Meta, 16 Control -- added
+# to both the button code and the motion code. It exists for #123: macOS Terminal.app and VS Code
+# have no bypass modifier, so they ENCODE Shift into the report and forward it here, and the only
+# way to test what tmux does with that is to send the bytes those terminals really send. The
+# default of 0 leaves every existing caller byte-identical, which matters because the scrollback
+# selection expectations were measured against this exact sequence.
+hx_drag() { # session row1 col1 row2 col2 [mods]
+  local name="$1" r1="$2" c1="$3" r2="$4" c2="$5" mods="${6:-0}" c step
+  hx_press "$name" "$r1" "$c1" "$(( 0 + mods ))"
   if [ "$c1" -le "$c2" ]; then step=1; else step=-1; fi
   for c in $(seq "$c1" "$step" "$c2"); do
-    hx_str "$name" "$(printf '\033[<32;%d;%dM' "$c" "$r1")"
+    hx_str "$name" "$(printf '\033[<%d;%d;%dM' "$(( 32 + mods ))" "$c" "$r1")"
   done
-  hx_str "$name" "$(printf '\033[<32;%d;%dM' "$c2" "$r2")"
-  hx_release "$name" "$r2" "$c2"
+  hx_str "$name" "$(printf '\033[<%d;%d;%dM' "$(( 32 + mods ))" "$c2" "$r2")"
+  hx_release "$name" "$r2" "$c2" "$(( 0 + mods ))"
 }
 
 # n clicks in the same cell. THE GAP BETWEEN THEM IS REQUIRED, not padding: tmux promotes a
 # press to SecondClick/DoubleClick/TripleClick off its own click timer, and pairs delivered
 # with no gap at all are not reliably promoted -- the test then silently exercises n ordinary
 # single clicks, which is a green run that proves nothing about double-clicking.
-hx_multiclick() { # session row col n
-  local name="$1" r="$2" c="$3" n="$4" i
+hx_multiclick() { # session row col n [mods]
+  local name="$1" r="$2" c="$3" n="$4" mods="${5:-0}" i
   for i in $(seq "$n"); do
-    hx_press "$name" "$r" "$c"
-    hx_release "$name" "$r" "$c"
+    hx_press "$name" "$r" "$c" "$(( 0 + mods ))"
+    hx_release "$name" "$r" "$c" "$(( 0 + mods ))"
     sleep 0.06
   done
   sleep 0.4
