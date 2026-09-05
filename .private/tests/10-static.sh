@@ -36,6 +36,9 @@ assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
 # bash, not sh, and deliberately: the link box needs $SECONDS for a countdown that a
 # keystroke cannot stall, and `read -rsn1 -t` to poll for one. Neither is POSIX.
 assert_ok  "syntax:linkbox"           bash -n $PRIVATE/files/cs193v-linkbox
+# /bin/sh, unlike the box it feeds: it is a case statement over two variables with no output but
+# one line, and it is called from a tmux command substitution at session-claim time.
+assert_ok  "syntax:gesture"           sh -n $PRIVATE/files/cs193v-gesture
 # THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS, and `compile()` rather than py_compile for the
 # reason the Containerfile records: py_compile would drop a .pyc beside it.
 assert_ok  "syntax:shortlink"         python3 -c \
@@ -949,7 +952,34 @@ assert_not_contains "tmux:no-mouse-copy-path" "copy-pipe" "$conf_code"
 assert_not_contains "tmux:no-mouse-selection" "begin-selection" "$conf_code"
 # ...and the gesture that used to copy has to say what does work instead. One user option, because
 # six bindings display it and a student-facing string repeated six times drifts.
+#
+# STILL PINNED TO SHIFT, AND THAT IS NOT STALE. Since #122/#123 the live value is set per launch
+# by cs193v-shell's set_terminal_facts from files/cs193v-gesture, because the terminal a student
+# is using cannot be known when this file is parsed. What stays here is the FALLBACK, and its job
+# is to be right on every terminal that bypasses with Shift -- which is every terminal except
+# Terminal.app, macOS VS Code and iTerm2. So this assertion is about the default staying the
+# conservative one, and 50-image.sh asserts cs193v-gesture's own default arm matches it byte for
+# byte, which is what keeps the two definitions from drifting apart.
 assert_contains "tmux:copy-hint-names-shift" 'set -g @copy-hint "TO COPY: hold SHIFT' "$tmux_conf"
+# The correction a SHIFT+drag displays. It can only be reached on a terminal that FORWARDS Shift
+# rather than intercepting it -- i.e. one where the line above has just failed the student -- so
+# the thing worth asserting is that it exists at all and does not repeat the advice.
+assert_contains "tmux:has-a-shift-correction" 'set -g @select-correction' "$tmux_conf"
+assert_not_contains "tmux:the-correction-does-not-repeat-shift-drag" \
+                    'set -g @select-correction "TO COPY: hold SHIFT' "$tmux_conf"
+# THE SHIFTED GESTURES ARE BOUND, in both tables. Their absence is #123 as reported: the student
+# holds SHIFT, the terminal forwards it, tmux finds no binding and drops it, and nothing at all
+# happens -- not even the hint, because the shifted release is a different key.
+assert_contains "tmux:binds-the-shifted-drag"         'S-MouseDragEnd1Pane' "$conf_code"
+assert_contains "tmux:binds-the-shifted-double-click" 'S-DoubleClick1Pane'  "$conf_code"
+assert_contains "tmux:binds-the-shifted-triple-click" 'S-TripleClick1Pane'  "$conf_code"
+# AND THE ROOT-TABLE ONE KEEPS THE APP GUARD. Measured: tmux forwards mouse keys it has no
+# binding for to a pane that asked for mouse reporting, so an UNGUARDED binding here steals the
+# event from claude and nano -- it delivered the press and swallowed the release, leaving the app
+# with a button held down forever. Asserted as a count of guarded forms rather than by reading
+# the block, because the guard is the whole difference between the two versions.
+assert_eq "tmux:the-shifted-root-bindings-are-guarded" "3" \
+    "$(printf '%s\n' "$conf_code" | grep -c 'S-\(MouseDragEnd1Pane\|DoubleClick1Pane\|TripleClick1Pane\) *\\$')"
 # The clipboard override stays, and it is worth being clear about what it is FOR now that tmux copies
 # nothing: an APPLICATION in a tab writing its own OSC 52 (claude, vim, a student's program). tmux's
 # unaided write carries an EMPTY target, which xterm's ctlseqs defines as `s0` -- PRIMARY plus cut
@@ -1798,6 +1828,7 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
 # `man something` into a shell error on top of the missing manual page.
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
+                                $PRIVATE/files/cs193v-gesture \
                                 $PRIVATE/files/man
 # -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
 # inside the image. shellcheck reports the unresolvable source at info level, which

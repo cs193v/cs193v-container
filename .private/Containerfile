@@ -772,6 +772,8 @@ RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/shortlink       /usr/local/bin/shortlink; \
     install -m 0755 /tmp/cs193v-files/cs193v-linkbox /usr/local/bin/cs193v-linkbox; \
     bash -n /usr/local/bin/cs193v-linkbox; \
+    install -m 0755 /tmp/cs193v-files/cs193v-gesture /usr/local/bin/cs193v-gesture; \
+    sh -n /usr/local/bin/cs193v-gesture; \
     python3 -c "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" /usr/local/bin/shortlink; \
     /usr/local/bin/shortlink --help > /dev/null; \
     sl_out="$(/usr/local/bin/shortlink https://example.com/build-check || true)"; \
@@ -816,6 +818,24 @@ RUN set -eux; \
     for lb_f in initializing ready error; do \
         test "$(/usr/local/bin/cs193v-linkbox --expires-in 900 --frame "$lb_f" | wc -l)" = 10 \
             || { echo "cs193v-linkbox --frame $lb_f is not 10 rows" >&2; exit 1; }; \
+    done; \
+    for g_tok in apple-terminal iterm2 vscode windows-terminal vte unknown; do \
+        for g_m in copy link correct; do \
+            g_out="$(CS193V_TERM_CLASS="$g_tok" CS193V_HOST_OS=macos /usr/local/bin/cs193v-gesture "$g_m")"; \
+            test -n "$g_out" \
+                || { echo "cs193v-gesture $g_m gave nothing for $g_tok" >&2; exit 1; }; \
+            test "$(printf '%s\n' "$g_out" | grep -c .)" = 1 \
+                || { echo "cs193v-gesture $g_m is not one line for $g_tok" >&2; exit 1; }; \
+        done; \
+        g_cols="$(CS193V_TERM_CLASS="$g_tok" CS193V_HOST_OS=macos /usr/local/bin/cs193v-gesture link \
+                  | LC_ALL=C awk '{ t=$0; gsub(/[\200-\277]/,"",t); print length(t) }')"; \
+        test "$g_cols" -le 65 \
+            || { echo "cs193v-gesture link is $g_cols columns for $g_tok; box() wraps over 65" >&2; exit 1; }; \
+        for g_f in initializing ready error; do \
+            test "$(CS193V_TERM_CLASS="$g_tok" CS193V_HOST_OS=macos \
+                    /usr/local/bin/cs193v-linkbox --expires-in 900 --frame "$g_f" | wc -l)" = 10 \
+                || { echo "cs193v-linkbox --frame $g_f is not 10 rows for $g_tok" >&2; exit 1; }; \
+        done; \
     done; \
     test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \

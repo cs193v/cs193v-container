@@ -331,14 +331,37 @@ does NOT capture — `setup-git` is the one that matters, and `gh auth login`, `
 `codex login` are worth checking since nobody has established whether they capture. The stub
 prints a short `http://localhost:PORT/magic-link` served by `shortlink` (setup-git's is
 `/magic-token-link`) inside the container.
-**Click it, from the terminal, inside tmux** — CMD+click on Terminal.app and iTerm2, CTRL+click
-on Windows Terminal and GNOME Terminal. `mouse on` means tmux sees ordinary clicks, so whether
-the terminal still intercepts a click on a URL is a per-terminal question, and this is the only
-place it gets answered. Do it on every platform.
+**Click it, from the terminal, inside tmux.** `mouse on` means tmux sees ordinary clicks, so
+whether the terminal still intercepts a click on a URL is a per-terminal question, and this is
+the only place it gets answered. Do it on every platform.
+
+The gesture the box NAMES is per-terminal now (#122), and the box is the thing to read: whatever
+`cs193v-gesture link` says for your terminal is what should work. Only one row has ever been
+measured, and the others are **rows to fill in, not claims**:
+
+| Terminal | The box says | Measured? |
+|---|---|---|
+| **Terminal.app** | `FN+COMMAND+double-click` | **yes** — a local HTTP server received the request |
+| iTerm2 | select-and-paste | no. `Option+⌘+click` is plausible; Option bypasses, ⌘+click opens |
+| GNOME Terminal, Ptyxis, Windows Terminal, VS Code | select-and-paste | no. `SHIFT+CTRL+click` is plausible — VTE tests `state & GDK_CONTROL_MASK`, a bitwise test extra Shift would not break |
+| kitty | select-and-paste | no, but its `click_url_or_select_grabbed shift+left click grabbed` map says `Shift+click` should work. **Best candidate to measure next** |
+| Alacritty | select-and-paste | no, and **expected to fail**: its URL hint matches on *no* modifier, so Shift may bypass reporting and still not open |
+| xterm, foot, legacy conhost | select-and-paste | **impossible** — no URL detection at all (foot: `CTRL+SHIFT+O` URL mode) |
+
+The old wording, `CTRL+Click ... (Command+Click on macOS)`, was **wrong twice**: CMD+single-click
+has never opened a URL in Terminal.app — Apple documents CMD+**double**-click — and under mouse
+reporting even that is dead, because the click reaches tmux rather than the terminal.
+
+Also check the **OSC 8 hyperlink**, which is a separate mechanism from the plain-text URL and
+needs no code from us: tmux grants its `hyperlinks` feature from the XTVERSION reply to exactly
+iTerm2, foot, WezTerm, Ghostty and Rio, so the link should be clickable *as a hyperlink* on
+iTerm2 and inert everywhere else in the target set. Do **not** add `terminal-features
+"*:hyperlinks"` to make it appear elsewhere — that tells tmux a lie and emits OSC 8 to terminals
+that cannot render it. Terminal.app is absent from the OSC 8 adoption tracker entirely.
 
 If clicking does not work somewhere, that is worth recording but is **not** a blocker: 39
-characters can be retyped, and SHIFT+drag copies them in one piece, which is the whole of what
-#67 was about. What WOULD be a blocker is the link not resolving at all — check `cs193v doctor`
+characters can be retyped, and the modifier+drag in §7.10 copies them in one piece, which is the
+whole of what #67 was about. What WOULD be a blocker is the link not resolving at all — check `cs193v doctor`
 on the host for a port the tunnel could not bind.
 
 Also worth one look: open the same link **twice**, and open it again after a few minutes. It is
@@ -945,12 +968,48 @@ Terminal/Ptyxis:
 | plain drag inside `claude`, and inside `nano` | reaches the app; no hint appears |
 | the `printf` above | record whether this terminal implements OSC 52 at all |
 
-**The modifier is the risk, and it is a real one.** The hint says `SHIFT`, which is what xterm, VTE,
-kitty, Alacritty, WezTerm and Ghostty use to bypass mouse reporting — but `Fn` and `Option` are both
-used in the wild, and this list was compiled from documentation rather than from hardware. If any
-mainstream terminal needs a different modifier, that is not a degraded case to note and move on
-from: the hint is now the *primary* instruction for copying text, so either `@copy-hint` in
-`files/tmux/tmux.conf` or the student paragraph in `CONTAINER-DESIGN.md` has to carry the exception.
+**THE MODIFIER RISK THIS SECTION WARNED ABOUT HAS FIRED, TWICE (#122, #123).** What it said —
+"`Fn` and `Option` are both used in the wild, and this list was compiled from documentation
+rather than from hardware" — turned out to understate it. There is no single modifier:
+
+| Terminal | Bypass modifier | How we know |
+|---|---|---|
+| **Terminal.app** | **none.** `Fn` works and is undocumented | measured, Terminal.app 470.2 |
+| **VS Code, macOS** | **none** until `terminal.integrated.macOptionClickForcesSelection` | xterm.js source |
+| **iTerm2** | **Option**, hard-coded. Shift *extends* a selection instead | docs + `PTYMouseHandler.m` |
+| Windows Terminal, GNOME Terminal, Ptyxis, Konsole, kitty, Alacritty, WezTerm, Ghostty, foot, Warp, xterm | **Shift** | each project's docs or source |
+
+Terminal.app and macOS VS Code do not merely ignore Shift — they **encode it into the mouse
+report (`Cb=4`) and forward it to tmux**, which is why the failure was silent rather than merely
+useless. So the hint is now per-terminal: `files/cs193v-gesture` holds the table, `term_class()`
+in `./cs193v` picks the row, and `cs193v-shell` applies it at claim time. The automated coverage
+is `13-term-class.sh` (which row), `50-image.sh` (what each row says) and `60-container.sh` (that
+it reaches the tmux server).
+
+**What is still un-automatable is whether the modifier works on real hardware**, which is this
+section's actual job. Per terminal, expect:
+
+| | Expect |
+|---|---|
+| plain drag in the pane | nothing selected, and the hint names **your** terminal's modifier |
+| that modifier + drag | the terminal's own selection appears |
+| ...then the terminal's copy key | the text pastes into another app |
+| wheel back, then modifier + drag | selects the scrolled-back text — **the gesture the design rests on** |
+| **SHIFT+drag on Terminal.app or macOS VS Code** | an amber correction naming FN, **not silence** |
+| SHIFT+drag anywhere else | the terminal selects; nothing reaches tmux, so no message |
+| plain drag inside `claude` and inside `nano` | reaches the app; no hint |
+| **SHIFT+drag inside `claude`** | still reaches the app; **no correction interrupts it** |
+| `cs193v doctor` | the `terminal` line names the terminal you are actually in |
+
+**Two rows the suite cannot reach at all**, both worth confirming by hand:
+
+- **A real triple-click.** `hx_multiclick` cannot promote to `TripleClick1Pane` — measured
+  against tmux 3.6, three injected clicks resolve to `MouseUp1Pane`, shifted or not — so
+  `S-TripleClick1Pane` is bound and unproven. A real triple-drag on Terminal.app is the check.
+- **Keyboards with no `fn` key.** Common on third-party and desktop Mac keyboards, where macOS
+  gates `Fn` on Apple vendor/product IDs. Those students get **View → Allow Mouse Reporting
+  (⌘R)**, which is documented and keyboard-independent. Confirm the menu item is where
+  `CONTAINER-DESIGN.md` says, and that toggling it restores selection mid-session.
 
 Also worth recording per terminal: a selection made by the terminal returns a soft-wrapped line
 **with** a newline at the wrap, because the terminal copies what it drew. tmux's own copy used to

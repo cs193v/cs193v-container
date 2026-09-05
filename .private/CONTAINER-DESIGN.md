@@ -429,11 +429,36 @@ that *sound* protective actually are.
   wheel scrolls the tab. The two agents behaving differently is a property of the agents
   rather than a choice made here — see issue #77.
 
-  **To copy text, hold SHIFT while you drag**, then copy the way you always do in this
-  terminal (`CTRL+SHIFT+C`, or `⌘C` on a Mac). Dragging without SHIFT does nothing on
-  purpose: the container cannot reach your computer's clipboard, and holding SHIFT hands the
-  selection to your terminal, which can. It works the same way when you have scrolled back,
-  because your terminal is selecting what is on the screen in front of you.
+  **To copy text, hold a key while you drag** — and which key depends on your terminal.
+  Dragging without it does nothing on purpose: the container cannot reach your computer's
+  clipboard, and holding the key hands the selection to your terminal, which can. It works
+  the same way when you have scrolled back, because your terminal is selecting what is on
+  the screen in front of you.
+
+  The environment works out which terminal you are in and shows you the right key when you
+  drag, so you should not need this table — it is here for when you want to know why.
+
+  | Your terminal | Hold | Then copy with |
+  |---|---|---|
+  | **Terminal.app** (macOS default) | **fn** (the 🌐 Globe key) | `⌘C` |
+  | **iTerm2** | **Option** | `⌘C` |
+  | **VS Code**, on a Mac | **Option**, after one setting — see below | `⌘C` |
+  | **VS Code**, on Windows or Linux | **SHIFT** | `CTRL+SHIFT+C` |
+  | **Windows Terminal** | **SHIFT** | `CTRL+SHIFT+C` |
+  | **GNOME Terminal**, **Ptyxis**, and most Linux terminals | **SHIFT** | `CTRL+SHIFT+C` |
+
+  `CTRL+C` is not a copy key on Linux or in the container, and cannot be: it is how you
+  interrupt a running program. That is why Linux terminals use `CTRL+SHIFT+C` instead.
+
+  **If your Mac keyboard has no fn key**, which is common with third-party keyboards, use
+  Terminal.app's own switch instead: **View → Allow Mouse Reporting** (`⌘R`) turns the
+  mouse over to the terminal, so you can drag and copy normally, and `⌘R` again turns it
+  back. Turning it off also means clicking a tab and scrolling with the wheel stop working
+  until you turn it back on.
+
+  **VS Code on a Mac needs one setting**, and until you change it dragging cannot select at
+  all: open Settings and turn on `terminal.integrated.macOptionClickForcesSelection`. Then
+  Option+drag selects.
 - **Closing your terminal window stops everything in it.** A dev server running in a tab stops
   when the window closes, and so does anything else you had going. This is the one thing worth
   knowing that is different from a plain shell: closing the window is not just leaving the room,
