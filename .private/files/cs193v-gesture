@@ -1,0 +1,149 @@
+#!/bin/sh
+#
+# The gesture a student is told to make, for the terminal they are actually using.
+#
+# Installed as /usr/local/bin/cs193v-gesture. Three callers: cs193v-shell sets @copy-hint from
+# it at claim time, cs193v-linkbox prints its `link` line, and tmux.conf's shifted-drag bindings
+# show its `correct` line. Not for students to run, though running it is harmless.
+#
+# ─── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────
+#
+# tmux takes the mouse (`set -g mouse on`, tmux.conf Part 3) because it needs it for
+# wheel-scrollback, tab clicks and the NEW TAB chip. A terminal in mouse-reporting mode has by
+# definition given up its own click-drag selection: the modes say "stop interpreting gestures
+# locally, send them as bytes". So selection has to come back some other way, and the only way
+# any terminal offers is a BYPASS MODIFIER -- hold a designated key and the terminal keeps the
+# gesture for itself.
+#
+# That modifier is in no standard. There is no capability, no terminfo entry and no query, so
+# tmux cannot discover it. This file is the table tmux cannot have.
+#
+# Part 3 used to assert one answer for every terminal -- "SHIFT+drag is the route that works,
+# everywhere, because it never reaches tmux" -- and that was measured false on the terminal this
+# course is taught from. Terminal.app has no bypass at all: it ENCODES Shift into the mouse
+# report (Cb=4) and forwards it, so the drag is swallowed by tmux and nothing is selected. Issue
+# #123. The same capture eats CMD+double-click, so the login link cannot be opened either: #122.
+#
+# ─── WHY ONLY THESE FIVE TERMINALS ─────────────────────────────────────────────
+#
+# Every terminal NOT named here bypasses with SHIFT -- kitty, Alacritty, WezTerm, Ghostty, foot,
+# Warp, Konsole, xterm, Terminator, xfce4-terminal, Tilix, each read from its own source or
+# documentation -- and SHIFT is exactly what the default arm says. So the list is short because
+# paring it COST NOTHING, not because the rest were overlooked. Specialisation is spent only
+# where the generic answer is wrong:
+#
+#   Terminal.app     no bypass modifier at all. Shift is forwarded.
+#   VS Code, macOS   no bypass either: macOptionClickForcesSelection defaults false, and
+#                    xterm.js then returns `event.altKey && false` on a Mac while forwarding
+#                    Shift. Same failure as Terminal.app, from the source rather than measured.
+#   iTerm2           Option, hard-coded in PTYMouseHandler.m. SHIFT there EXTENDS an existing
+#                    selection, so the generic advice is not merely useless but wrong.
+#
+# Windows Terminal and VTE earn a row for their copy key, not their modifier.
+#
+# THE DEFAULT ARM IS THE HISTORICAL WORDING, BYTE FOR BYTE, and 50-image.sh asserts that. It is
+# what makes this change a no-op for every terminal the launcher cannot identify.
+#
+# ─── WHY THE TOKEN COMES FROM THE HOST ─────────────────────────────────────────
+#
+# Because nothing in here can work it out. tmux overwrites TERM_PROGRAM with "tmux" for every
+# pane it spawns -- environ.c, unconditionally, since 3.2 -- so a pane cannot see the terminal
+# that is really attached. The launcher's term_class() resolves it and forwards the token on the
+# CLAIM exec, which is the exec that starts the tmux server and so the only one whose
+# environment reaches a pane. See term_class in ./cs193v and 13-term-class.sh.
+#
+# A CLOSED SET OF TOKENS RATHER THAN THE RAW $TERM_PROGRAM, so no string a student controls ever
+# reaches a tmux option or a display-message argument, and there is nothing here to escape.
+#
+# ─── WHY `link` NAMES A CLICK ON EXACTLY ONE TERMINAL ──────────────────────────
+#
+# Opening a link needs the bypass modifier AND the terminal's own URL gesture, and the second
+# half is not derivable from the first. Apple documents plain CMD+DOUBLE-click ("Hold down the
+# Command key and double-click the URL" -- and CMD+single-click has never opened anything, which
+# is what the old wording got wrong). Under reporting that is dead, and FN+CMD+double-click is
+# what actually opened a link, confirmed by a local HTTP server receiving the request.
+#
+# Nowhere else is measured, and there is reason to expect the composition to FAIL: xterm, foot
+# and legacy conhost have no URL detection at all, and Alacritty's URL hint matches on NO
+# modifier, so holding Shift may bypass reporting and still not open the link. So every other
+# terminal gets a gesture-free instruction, which tests/MANUAL.md 8.2 already sanctions -- "39
+# characters can be retyped". Add a row here only from hardware, never from documentation.
+#
+# ─── SHELL ─────────────────────────────────────────────────────────────────────
+# /bin/sh and a case statement, like open-url: no bashisms, nothing to source, no output but the
+# one line. Called from a tmux command substitution at session-claim time, so it must be fast
+# and it must never write to stderr.
+
+set -u
+
+TOKEN="${CS193V_TERM_CLASS:-unknown}"
+HOST_OS="${CS193V_HOST_OS:-}"
+
+# THE DEFAULT WORDING, defined once because three arms fall back to it and 50-image.sh pins the
+# first one against a literal. Keep them in this order: what to hold, then what to press.
+D_COPY='TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C (CMD+C on a Mac).'
+D_LINK='Select the link and paste it into your browser.'
+D_CORRECT='SHIFT+drag reached the container instead of selecting -- see the guide.'
+
+# SHIFT+drag that gets HERE means the terminal forwarded it rather than intercepting it, which is
+# the definition of a terminal without a Shift bypass. So no `correct` string may answer with
+# "hold SHIFT" -- that is the advice that just failed. 50-image.sh asserts it for every token.
+
+usage() {
+    printf 'usage: cs193v-gesture copy|link|correct\n' >&2
+    exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+
+case "$1" in
+copy)
+    case "$TOKEN" in
+    apple-terminal)   printf 'TO COPY: hold FN and drag, then CMD+C.\n' ;;
+    iterm2)           printf 'TO COPY: hold OPTION and drag, then CMD+C.\n' ;;
+    vscode)
+        # The only token that splits on the OS, which is why the host forwards the platform too.
+        # On macOS there is no bypass until the student sets
+        # terminal.integrated.macOptionClickForcesSelection; on Windows and Linux xterm.js falls
+        # through to plain Shift. (VS Code's own docs say Alt there and are wrong.)
+        case "$HOST_OS" in
+        macos)        printf 'TO COPY: OPTION+drag -- VS Code needs one setting; see the guide.\n' ;;
+        *)            printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
+        esac ;;
+    # SHIFT is right on both of these; they are named for the copy key. CTRL+SHIFT+C and not
+    # CTRL+C on Windows Terminal on purpose: its immutable defaults.json binds only
+    # ctrl+shift+c, and ctrl+c comes from userDefaults.json written into the student's own
+    # settings on first launch -- so anyone who upgraded or ever reset their settings does not
+    # have it. CTRL+SHIFT+C is correct either way. On Unix CTRL+C cannot be taken at all: it is
+    # the POSIX INTR character, and a terminal that stole it would remove the only way to
+    # interrupt a runaway program.
+    windows-terminal) printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
+    vte)              printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
+    *)                printf '%s\n' "$D_COPY" ;;
+    esac ;;
+link)
+    case "$TOKEN" in
+    apple-terminal)   printf 'FN+COMMAND+double-click the link to open it.\n' ;;
+    iterm2)           printf 'Hold OPTION to select the link, then paste it in your browser.\n' ;;
+    vscode)
+        case "$HOST_OS" in
+        macos)        printf '%s\n' "$D_LINK" ;;
+        *)            printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
+        esac ;;
+    windows-terminal) printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
+    vte)              printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
+    *)                printf '%s\n' "$D_LINK" ;;
+    esac ;;
+correct)
+    case "$TOKEN" in
+    apple-terminal)   printf 'SHIFT does not select in Terminal.app -- hold FN and drag instead.\n' ;;
+    iterm2)           printf 'Hold OPTION, not SHIFT, to select text here.\n' ;;
+    vscode)
+        case "$HOST_OS" in
+        macos)        printf 'SHIFT does not select in VS Code -- see the course guide.\n' ;;
+        *)            printf '%s\n' "$D_CORRECT" ;;
+        esac ;;
+    *)                printf '%s\n' "$D_CORRECT" ;;
+    esac ;;
+*)  usage ;;
+esac

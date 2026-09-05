@@ -462,6 +462,52 @@ assert_eq "tmux:destroy-unattached-did-not-take-the-windows" "2" \
           "$(E "$TM list-sessions -F '#{session_windows}'" | head -1)"
 tmux_kill_all
 
+# ─── the claim carries the terminal's identity in with it  (#122, #123) ───────
+# WHAT THIS OWNS. The per-terminal copy hint is chosen on the HOST -- nothing in here can choose
+# it, because tmux overwrites TERM_PROGRAM with "tmux" for every pane it spawns -- and the
+# launcher forwards a token on the claim exec. cs193v-shell's set_terminal_facts is what turns
+# that token into the live @copy-hint. This is the seam between the two halves, and it is only
+# reachable with a real container: 13-term-class.sh owns the host side and 50-image.sh owns the
+# table, but neither can prove the value actually lands on the tmux server.
+tmux_kill_all
+podman exec -e CS193V_TERM_CLASS=apple-terminal -e CS193V_HOST_OS=macos \
+            -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+claim_hint="$(E "$TM show-options -gqv @copy-hint")"
+record "tmux:claimed-copy-hint" "$claim_hint"
+assert_contains "tmux:the-claim-sets-the-terminals-own-hint" "FN" "$claim_hint"
+# ...and the correction too, which is a separate option because it answers a separate gesture.
+assert_contains "tmux:the-claim-sets-the-shift-correction" "FN" \
+                "$(E "$TM show-options -gqv @select-correction")"
+# THE TOKEN REACHES A PANE, not just the server's options, because cs193v-linkbox reads it out of
+# the environment rather than out of tmux. set-environment -g is what makes that true for tabs
+# opened later; the launcher's -e covers tab one.
+assert_eq "tmux:the-token-is-in-the-session-environment" "CS193V_TERM_CLASS=apple-terminal" \
+          "$(E "$TM show-environment -g CS193V_TERM_CLASS")"
+
+# A REUSED SERVER MUST NOT SERVE A STALE HINT, and this is the case that decided where
+# set_terminal_facts lives. A tmux server keeps the environment of whichever process started it
+# and never refreshes it on re-attach, and this file is parsed only at server start -- so an
+# if-shell branch in tmux.conf would answer for the FIRST launch's terminal forever. Closing the
+# window is supposed to take the server with it, but issue #140 is exactly the case where it does
+# not on macOS. So: claim again, from a different terminal, onto the same live server.
+E "$TM kill-session -t cs193v" >/dev/null 2>&1
+podman exec -e CS193V_TERM_CLASS=vte -e CS193V_HOST_OS=linux \
+            -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+reclaim_hint="$(E "$TM show-options -gqv @copy-hint")"
+record "tmux:reclaimed-copy-hint" "$reclaim_hint"
+assert_contains "tmux:a-second-claim-updates-the-hint"  "SHIFT" "$reclaim_hint"
+assert_not_contains "tmux:a-second-claim-drops-the-old-hint" "FN" "$reclaim_hint"
+
+# AN UNSET TOKEN STILL GIVES A HINT, because the fallback is the whole safety story: an old
+# launcher against a new image forwards nothing, and a blank @copy-hint would leave six bindings
+# displaying an empty status line.
+tmux_kill_all
+podman exec -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+assert_contains "tmux:no-token-falls-back-to-the-shift-wording" "hold SHIFT" \
+                "$(E "$TM show-options -gqv @copy-hint")"
+tmux_kill_all
+
+
 # ─── §A.5 kernel and namespaces ────────────────────────────────────────────────
 record "kernel:uid-map" "$(E 'cat /proc/self/uid_map')"
 # --userns=keep-id:uid=1000,gid=1000 must map the HOST user to container 1000, so files the

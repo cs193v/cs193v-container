@@ -134,6 +134,50 @@ clean_break() { [ -t 1 ] && printf '\033[2J\033[3J\033[H'; return 0; }
 #
 # No -n flag. Passing -n would set the window name AND switch automatic-rename off, pinning the
 # label forever so the tab could never track the running process.
+# ─── which terminal the student is in ──────────────────────────────────────────
+# The per-terminal copy hint, set on the server we have just started. Issues #122, #123, #133.
+#
+# WHY THIS IS DONE HERE RATHER THAN IN tmux.conf. Two reasons, and the second is the one that
+# forced it.
+#
+#   1. tmux.conf cannot source a shell file, so the table cannot live in it -- the same
+#      constraint that made /etc/cs193v/strings.sh exist. An `if-shell` chain in the config
+#      could read the environment, but then the table exists twice.
+#
+#   2. THE CONFIG IS PARSED ONLY AT SERVER START, AND THE SERVER CAN OUTLIVE A SESSION. A tmux
+#      server keeps the environment of whichever `tmux` process started it -- global_environ,
+#      copied into every later session -- and never refreshes it on re-attach. Closing the
+#      window is supposed to stop the container and take the server with it, but issue #140 is
+#      exactly the case where it does not on macOS. So a second launch can land on a server
+#      built by the FIRST launch's terminal, and an `if-shell` in the config would already have
+#      run with that terminal's environment. Setting the option explicitly, after every claim,
+#      is what makes the hint follow the student rather than the server.
+#
+# SET-ENVIRONMENT TOO, for the same reason and for a different consumer: cs193v-linkbox reads
+# CS193V_TERM_CLASS in a pane, and a pane inherits the SESSION environment. Window 1 has already
+# been created by the time this runs, so its shell has the claim exec's copy -- correct on a
+# fresh server, stale on a reused one. These two lines fix the session environment for every tab
+# opened afterwards; the launcher's own -e flags cover tab one.
+#
+# NEVER FATAL. A missing helper or an old image must not turn a working launch into the "fault
+# in the container image" box: the fallback is tmux.conf's own @copy-hint, which is the historical
+# wording and is correct on every terminal that bypasses with SHIFT.
+set_terminal_facts() {
+    local mode opt text
+    tm set-environment -g CS193V_TERM_CLASS "${CS193V_TERM_CLASS:-unknown}" 2>/dev/null || true
+    tm set-environment -g CS193V_HOST_OS    "${CS193V_HOST_OS:-}"           2>/dev/null || true
+    # TWO OPTIONS, ONE PER GESTURE. @copy-hint is what a plain drag displays; @select-correction
+    # is what a SHIFT+drag displays, and it only ever fires on a terminal that forwards Shift
+    # instead of intercepting it -- which is precisely a terminal where @copy-hint's SHIFT advice
+    # would have been wrong. See tmux.conf Part 3.
+    for mode in copy:@copy-hint correct:@select-correction; do
+        text="$(cs193v-gesture "${mode%%:*}" 2>/dev/null)" || text=''
+        opt="${mode#*:}"
+        [ -n "$text" ] && { tm set-option -g "$opt" "$text" 2>/dev/null || true; }
+    done
+    return 0
+}
+
 do_claim() {
     local errfile said
     errfile="$(mktemp "${TMPDIR:-/tmp}/cs193v-shell.XXXXXX")" || errfile=/dev/null
@@ -142,6 +186,7 @@ do_claim() {
           -y "${CS193V_LINES:-$(tput lines 2>/dev/null || echo 24)}" \
           'cs193v-welcome; exec bash -l' 2>"$errfile"; then
         rm -f "$errfile"
+        set_terminal_facts
         return 0
     fi
     # LOST THE RACE, which is not a fault and must not be reported as one.

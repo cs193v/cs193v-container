@@ -862,6 +862,77 @@ safe_term() {
     esac
 }
 
+# WHICH TERMINAL THE STUDENT IS SITTING IN, as one of six tokens. Issues #122, #123 and #133.
+#
+# WHY THE HOST HAS TO ANSWER THIS. tmux overwrites TERM_PROGRAM with "tmux" for every pane it
+# spawns -- environ.c's environ_for_session(), unconditionally, since tmux 3.2 -- so nothing
+# inside the container can see which terminal is really attached. The launcher resolves it once
+# and forwards the token on the CLAIM exec, which is the exec that starts the tmux server and
+# therefore the only one whose environment reaches a pane; see open_shell. The image maps the
+# token to prose, because student-facing container prose lives in the image (files/cs193v-gesture).
+#
+# A TOKEN AND NOT THE RAW STRING, and that is what makes this safe rather than merely guarded.
+# The value ends up in a tmux option and in a display-message argument. Forwarding
+# $TERM_PROGRAM verbatim would put a string the student controls there and leave us escaping it;
+# a closed set of six literals has nothing to escape. Same whitelist-and-fall-back shape as
+# safe_term above, and for the same reason.
+#
+# WHY ONLY FIVE TERMINALS ARE NAMED. Every terminal NOT named here uses SHIFT to bypass mouse
+# reporting -- kitty, Alacritty, WezTerm, Ghostty, foot, Warp, Konsole, xterm, Terminator,
+# xfce4-terminal, Tilix, all read from their own source or documentation -- and SHIFT is exactly
+# what `unknown` tells the student. So the list is short because paring it costs nothing, not
+# because the rest were forgotten. Specialisation is spent only where the generic answer is
+# WRONG: Terminal.app and macOS VS Code have no bypass modifier at all, and iTerm2 uses Option
+# while SHIFT there extends an existing selection instead.
+#
+# TWO GUARDS WERE CONSIDERED AND REJECTED; 13-term-class.sh pins both as test cases because both
+# look like oversights.
+#
+#   * A $TMUX/$STY bail-out. Redundant inside tmux, which has already overwritten TERM_PROGRAM
+#     so the fall-through does the work. ACTIVELY WRONG inside screen: screen sets no
+#     TERM_PROGRAM and scrubs nothing, so Apple_Terminal survives -- and it is the right answer,
+#     because screen requests no mouse reporting and the outermost terminal is still
+#     Terminal.app, where FN still bypasses.
+#   * A stale-TERM_PROGRAM sentinel (KITTY_PID etc. set -> unknown). TERM_PROGRAM only goes
+#     stale when one terminal is launched as a CHILD PROCESS of another's shell. A terminal
+#     opened from the Dock, Finder or Spotlight is started by LaunchServices and inherits no
+#     TERM_PROGRAM at all, so no path a student takes reaches it. `cs193v doctor` prints the
+#     token, which covers the enthusiast case without a row here.
+#
+# NEVER TEST TERM_PROGRAM_VERSION, TERM_SESSION_ID or COLORTERM for identity: Apple, iTerm2 and
+# JetBrains all set TERM_SESSION_ID in three different formats, and some fourteen terminals set
+# COLORTERM=truecolor.
+term_class() {
+    # iTerm2 first. It is the only terminal whose marker survives an ssh hop -- LC_TERMINAL was
+    # given that prefix deliberately, because ssh's default SendEnv/AcceptEnv pass LC_* for
+    # locale purposes -- so it can arrive with no TERM_PROGRAM beside it.
+    if [ -n "${ITERM_SESSION_ID:-}" ] \
+    || [ "${LC_TERMINAL:-}" = iTerm2 ] \
+    || [ "${TERM_PROGRAM:-}" = iTerm.app ]; then
+        printf 'iterm2'; return 0
+    fi
+    case "${TERM_PROGRAM:-}" in
+        Apple_Terminal) printf 'apple-terminal'; return 0 ;;
+        # Cursor, Windsurf, VSCodium and Antigravity all inherit this value from upstream and
+        # none of them changes it. They are all xterm.js embeddings, so they all want the same
+        # instruction and the collision is harmless.
+        vscode)         printf 'vscode';         return 0 ;;
+    esac
+    # Windows Terminal sets no TERM_PROGRAM at all. WT_SESSION reaches a WSL shell because
+    # Windows Terminal adds it to WSLENV itself.
+    [ -n "${WT_SESSION:-}" ] && { printf 'windows-terminal'; return 0; }
+    # GNOME Terminal and Ptyxis are one token: both are VTE embedders, so VTE's own Shift
+    # interception (vte.cc, before any report is encoded) is what actually answers, and the
+    # copy key is the same. VTE_VERSION is the backstop for the other VTE terminals, which land
+    # on the same advice.
+    if [ -n "${GNOME_TERMINAL_SERVICE:-}" ] \
+    || [ -n "${PTYXIS_VERSION:-}" ] \
+    || [ -n "${VTE_VERSION:-}" ]; then
+        printf 'vte'; return 0
+    fi
+    printf 'unknown'
+}
+
 platform() {
     case "$(uname -s)" in
         Darwin) printf 'macos' ;;
@@ -2254,11 +2325,26 @@ open_shell() {
     [ "$cols" -ge 20 ] || cols=80
     [ "$lines" -ge 5 ] || lines=24
 
+    # CS193V_TERM_CLASS / CS193V_HOST_OS: which terminal the student is sitting in, and on which
+    # OS, for the per-terminal copy and link hints. Issues #122, #123, #133.
+    #
+    # ON THIS EXEC AND NOT THE ATTACH, and that is forced rather than tidy. This is the exec that
+    # starts the tmux server, so its environment becomes the server's global_environ and is
+    # copied into every session and every pane -- which is the only channel that reaches
+    # cs193v-linkbox and cs193v-shell's set_terminal_facts. The attach exec below runs
+    # `tmux attach-session`, i.e. a CLIENT: a client's environment reaches panes only through
+    # `update-environment`, whose default list names neither of these, and which CLEARS rather
+    # than copies anything not listed. So a -e here is load-bearing and a -e there would be inert.
+    #
+    # And it has to be resolved out here at all because nothing in the container can do it: tmux
+    # overwrites TERM_PROGRAM with "tmux" for every pane it spawns. See term_class.
     podman exec \
         -w "$MOUNT_DST" \
         -e "CS193V_CONTAINER=$NAME" \
         -e "CS193V_COLS=$cols" \
         -e "CS193V_LINES=$lines" \
+        -e "CS193V_TERM_CLASS=$(term_class)" \
+        -e "CS193V_HOST_OS=$(platform)" \
         "$NAME" cs193v-shell --claim
     rc=$?
 
@@ -2322,6 +2408,10 @@ open_shell() {
         -e "COLORTERM=${COLORTERM:-}" \
         -e "CS193V_CONTAINER=$NAME" \
         "$NAME" cs193v-shell --attach
+    # NO CS193V_TERM_CLASS HERE, deliberately: this exec is a tmux CLIENT, and a client's
+    # environment does not reach panes -- `update-environment` names neither variable and clears
+    # what it does not copy. The claim exec above is where they have to go. Adding them here
+    # would look like belt-and-braces and be inert.
     rc=$?
     return "$rc"
 }
@@ -2331,6 +2421,12 @@ verb_doctor() {
     printf '%sCS193V container report%s\n' "$C_CYAN" "$C_OFF"
     printf '%s\n' "-------------------------------------------------------------"
     printf '  %-16s %s\n' "platform" "$(platform) / $(uname -m)"
+    # THE TERMINAL TOKEN, because a wrong hint is otherwise undiagnosable from a support paste.
+    # It is also the only place the resolver's answer is visible to a person: the hints it drives
+    # are inside the container, and a student who is being told to hold the wrong key cannot see
+    # why. Issue #134 will make this matter more -- a double-clickable launcher has no
+    # TERM_PROGRAM to read, so it will report `unknown` and this line is how anyone finds out.
+    printf '  %-16s %s\n' "terminal" "$(term_class)"
     printf '  %-16s %s\n' "course dir" "$DIR"
 
     if command -v podman >/dev/null 2>&1 && run_timeout 10 podman --version; then
@@ -2764,6 +2860,14 @@ verb_dev_args() {
 #
 # Plain strings rather than messages.txt keys, like the other --dev verbs: that catalogue is
 # for students.
+# The terminal token, for 13-term-class.sh. Prints term_class() and nothing else.
+#
+# A VERB RATHER THAN A SOURCED FUNCTION, like --dev-args and --dev-steps: sourcing the launcher
+# runs its whole prologue, and the thing under test here is a pure function of the environment,
+# so the test needs to control the environment exactly and see nothing else. Plain string, not a
+# messages.txt key -- that catalogue is for students.
+verb_dev_term_class() { term_class; printf '\n'; }
+
 verb_dev_tunnel() {
     load_args
     printf 'ctl\t%s\n'  "$TUNNEL_CTL"
@@ -2863,6 +2967,9 @@ case "${1:-}" in
     # No preflight: this one reads the Containerfile and nothing else, which is what lets the
     # unit tier drive it with no podman on PATH at all.
     --dev-steps)         shift; verb_dev_steps "${1:-}" ;;
+    # No preflight: term_class reads the environment and nothing else -- no podman, no tty, no
+    # args files -- which is what lets 13-term-class.sh drive it at the unit tier.
+    --dev-term-class)    verb_dev_term_class ;;
     -h|--help|help)      usage ;;
     *)                   usage; exit 2 ;;
 esac

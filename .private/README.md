@@ -1033,10 +1033,46 @@ difference to anyone on such a terminal — the copy had nowhere to go, while th
 `COPIED to the clipboard`.
 
 So mouse selection is gone from tmux entirely (see Part 3 of `files/tmux/tmux.conf`): a drag
-selects nothing and displays the gesture that does work. Shift+drag is not the escape hatch,
-it is **the route**, and the cost the prototype named is the cost we pay. What is kept is the
-half that was never in doubt: an application's own OSC 52 still passes through, so a program
-that copies to the clipboard still can — on a terminal that implements it.
+selects nothing and displays the gesture that does work. What is kept is the half that was
+never in doubt: an application's own OSC 52 still passes through, so a program that copies to
+the clipboard still can — on a terminal that implements it.
+
+**And this file then said "Shift+drag is not the escape hatch, it is the route" — which needed
+correcting a second time.** Issues #122 and #123. The claim was still one sentence too
+confident: Shift is the route only on a terminal that implements a *Shift bypass*, and a
+terminal is as free not to do that as it is free not to implement OSC 52. Three separate things
+were being run together, and only the first two are ours:
+
+1. `mouse on` puts the terminal into reporting mode for the whole attach, and a terminal in that
+   mode has by definition given up its own click-drag selection. tmux has no per-gesture release.
+2. tmux declining to implement a selection path is a *separate* decision, and it stands.
+3. Getting selection back needs a **bypass modifier** — a terminal-side courtesy, in no
+   standard, with no capability and no query, so tmux cannot discover it.
+
+xterm chose Shift and VTE, kitty, Alacritty, WezTerm, Ghostty, foot, Warp, Konsole and Windows
+Terminal followed, which is why "everywhere" survived as long as it did. But **iTerm2 uses
+Option**, and **macOS Terminal.app and VS Code on macOS have no bypass at all**: they encode
+Shift into the mouse report (`Cb=4`) and forward it to tmux, where before #123 it landed on an
+unbound key and was dropped. The student was told to hold SHIFT, did so, and got nothing —
+not even the hint back, because the shifted release is a different key from the unshifted one.
+`tests/MANUAL.md` §7.10 called this risk when the hint was written; it fired twice.
+
+**So the per-terminal branch this project twice refused is now the design.** `files/cs193v-gesture`
+holds the table, `term_class()` in `./cs193v` resolves which row applies, and the token rides in
+on the claim exec. Two things about that are worth knowing before touching it:
+
+- **It has to be resolved on the host.** tmux overwrites `TERM_PROGRAM` with `tmux` for every
+  pane it spawns — `environ.c`, unconditionally, since 3.2 — so nothing inside the container can
+  see the terminal that is really attached.
+- **It has to be applied per launch, not at config-parse time.** A tmux server keeps the
+  environment of whichever process started it and never refreshes it on re-attach, and
+  `tmux.conf` is read only at server start. An `if-shell` chain in the config would answer for
+  the *first* launch's terminal forever, and issue #140 is exactly the case where a server
+  outlives the window that made it. `cs193v-shell`'s `set_terminal_facts` is why.
+
+The shipped table names five terminals, and the reason it is five rather than fifteen is that
+**paring it cost nothing**: every terminal left out bypasses with Shift, which is exactly what
+the default arm says. Specialisation is spent only where the generic answer is *wrong*.
 
 What did *not* get overruled is the rest of that prototype's cost, and it is worth knowing
 what was paid. The configuration runs to several hundred lines because all four key tables are
