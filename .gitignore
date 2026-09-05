@@ -1,7 +1,3 @@
-# Machine-specific, written by install-cs193v.sh. Never commit: it holds the memory cap
-# computed for one particular computer. Re-running the installer recomputes it.
-.config/local.args
-
 # The loopback tunnel's key material, generated per machine by the launcher.
 #
 # PRIVATE KEYS. Committing tunnel-key or tunnel-host-key would publish one keypair to every

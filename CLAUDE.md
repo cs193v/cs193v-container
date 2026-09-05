@@ -34,7 +34,7 @@ deletes the other's logins.
 
 Nothing declares ports. The launcher watches what your container is listening on and opens the
 matching port on your own loopback about a second later, so there is no list in `container.args`,
-nothing to override in `.config/local.args`, and no recreate to remember.
+nothing to override anywhere, and no recreate to remember.
 
 **Two instances cannot collide the way they used to.** Overlap used to be total by construction —
 every instance forwarded the same 46 ports whether or not anything was listening on them. Now a

@@ -638,8 +638,9 @@ Please contact course staff rather than working around it."
     # NOT THE SAME QUESTION AS THE SUBUID RANGE BELOW. That is /etc/subuid, the block of id
     # numbers; these are the setuid programs that consume it, and a machine can have either
     # without the other. Without them podman answers everything with `exec: "newuidmap":
-    # executable file not found`, and this script stops two steps later in write_local_args --
-    # with a message suggesting `podman machine start`, which is a Mac command.
+    # executable file not found`, and this script stops later in check_podman -- with a message
+    # suggesting `podman machine start`, which is a Mac command. Caught here so the diagnosis
+    # names the missing package instead.
     if [ "$PLAT" != macos ]; then
         if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
             ok "uidmap"
@@ -690,7 +691,7 @@ Please contact course staff rather than working around it."
         elif [ -f /etc/wsl.conf ]; then
             DO_WSLCONF=yes
             need "Turn on systemd in this Linux environment" \
-                 "Without it, the limit on how much memory the container may use is not actually enforced. /etc/wsl.conf already exists, so this changes a file that is already here."
+                 "Podman needs it to manage the container's resources at all. /etc/wsl.conf already exists, so this changes a file that is already here."
         else
             DO_WSLCONF=yes
             ok "systemd will be enabled (creating /etc/wsl.conf)"
@@ -948,8 +949,8 @@ grow_machine_disk_when_stopped() {
 fetch_files() {
     step "Getting the course files"
     mkdir -p "$DIR" || die "Could not create $DIR"
-    # Overwrites the course files and leaves projects/ and local.args alone, so this is
-    # also how updates arrive.
+    # Overwrites the course files and leaves projects/ alone, so this is also how updates
+    # arrive.
     #
     # Two independent guards, because a dropped connection on dorm wifi is the single most
     # likely thing to go wrong here and a half-installed course directory is worse than an
@@ -982,41 +983,25 @@ That means the transfer was cut short. It is safe to run this script again."
     ok "$DIR"
 }
 
-write_local_args() {
-    step "Working out how much memory the container may use"
-    local total_b total_mb reserve_mb cap_mb
-    if ! total_b="$(podman info --format '{{.Host.MemTotal}}' 2>/dev/null)"; then
-        die "Could not ask podman how much memory is available.
+# INSTALLED IS NOT THE SAME AS WORKING, and the difference is worth a step of its own.
+# `podman --version` never touches the runtime, so it answers happily from a podman that
+# cannot create a user namespace: a missing uidmap, a restrictive AppArmor profile, a nosuid
+# mount, or a Mac whose virtual machine is not running. `podman info` is the cheapest question
+# that needs the runtime, so all of those surface here, with a message that names the fix.
+#
+# BEFORE build_image, so the diagnosis arrives ahead of the long step rather than out of the
+# launcher part-way through a build a student has already waited on.
+#
+# `{{.Host.Arch}}` rather than a field podman grew recently: a Go template naming a missing
+# STRUCT field fails the whole call, so a field that has always existed keeps this a test of
+# the runtime rather than of the podman version.
+check_podman() {
+    step "Checking that podman is working"
+    if ! podman info --format '{{.Host.Arch}}' >/dev/null 2>&1; then
+        die "Podman is installed but is not answering.
 On a Mac, try:  podman machine start"
     fi
-    total_mb=$(( total_b / 1048576 ))
-
-    # The reserve is what actually matters, not a percentage: whatever hosts the
-    # container needs a working floor. A VM running nothing but podman needs little; a
-    # Linux laptop has the student's whole desktop on the same RAM.
-    case "$PLAT" in
-        macos|wsl) reserve_mb=$(( total_mb / 10 )); [ "$reserve_mb" -lt 768 ] && reserve_mb=768 ;;
-        *)         reserve_mb=$(( total_mb * 35 / 100 )); [ "$reserve_mb" -lt 3072 ] && reserve_mb=3072 ;;
-    esac
-    cap_mb=$(( total_mb - reserve_mb ))
-
-    {
-        printf '# Written by install-cs193v.sh — machine-specific, and git-ignored.\n'
-        printf '# Re-run the installer to recompute it; there is no separate command.\n#\n'
-        printf '# podman reported %s MB available; reserving %s MB for %s.\n' \
-               "$total_mb" "$reserve_mb" \
-               "$( [ "$PLAT" = linux ] && printf 'your desktop' || printf 'the virtual machine' )"
-    } > "$DIR/.config/local.args"
-
-    if [ "$cap_mb" -lt 1536 ]; then
-        printf '# No memory cap set: only %s MB was available, and a cap that low\n' "$cap_mb" >> "$DIR/.config/local.args"
-        printf '# would break ordinary work more often than it would help.\n' >> "$DIR/.config/local.args"
-        note "Only ${cap_mb} MB would be available to the container — not setting a limit."
-        note "Tell course staff if builds fail; this machine is tight on memory."
-    else
-        printf -- '--memory=%sm\n' "$cap_mb" >> "$DIR/.config/local.args"
-        ok "container may use up to ${cap_mb} MB (of ${total_mb} MB)"
-    fi
+    ok "podman is working"
 }
 
 # Build the course container, rather than download one.
@@ -1130,7 +1115,7 @@ setup_subuid
 setup_wslconf
 setup_machine
 fetch_files
-write_local_args
+check_podman
 check_disk
 build_image
 smoke_test

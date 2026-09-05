@@ -79,7 +79,7 @@ done
 # NOTHING CHECKED THAT THEY AGREE, and the consequence is worse than the version_lt one because
 # the installer runs FIRST and the launcher runs LAST. Measured, not imagined: lowering only the
 # installer's copy produces an install that passes its survey, downloads the course files,
-# computes the memory cap, confirms the disk -- and then hands off to build_image, where the
+# confirms podman works and the disk is big enough -- and then hands off to build_image, where the
 # LAUNCHER draws a STOP box saying the podman is too old. Every reassuring step first, the refusal
 # last, on a machine the installer just declared fit. A student would read that as the install
 # having broken at the end.
@@ -164,37 +164,6 @@ assert_eq "mac-vm:16GB-host" "12288" "$(vm_for 16384)"
 assert_eq "mac-vm:32GB-host" "16384" "$(vm_for 32768)"
 assert_eq "mac-vm:64GB-host" "16384" "$(vm_for 65536)"
 assert_eq "mac-vm:never-exceeds-the-cap" "16384" "$(vm_for 131072)"
-
-# ─── the memory-cap formula that lands in local.args ───────────────────────────
-# A VM running nothing but podman needs a small floor; a Linux laptop has the student's
-# whole desktop on the same RAM, so the reserve is much larger there.
-cap_for() {                           # cap_for PLAT TOTAL_MB -> "--memory=Nm" or "none"
-    ( PLAT="$1"; total_mb="$2"
-      case "$PLAT" in
-          macos|wsl) reserve_mb=$(( total_mb / 10 )); [ "$reserve_mb" -lt 768 ] && reserve_mb=768 ;;
-          *)         reserve_mb=$(( total_mb * 35 / 100 )); [ "$reserve_mb" -lt 3072 ] && reserve_mb=3072 ;;
-      esac
-      cap_mb=$(( total_mb - reserve_mb ))
-      if [ "$cap_mb" -lt 1536 ]; then printf 'none'; else printf -- '--memory=%sm' "$cap_mb"; fi )
-}
-assert_eq "memcap:linux-16GB" "--memory=10650m" "$(cap_for linux 16384)"
-assert_eq "memcap:linux-8GB"  "--memory=5120m"  "$(cap_for linux 8192)"
-assert_eq "memcap:macos-8GB"  "--memory=7373m"  "$(cap_for macos 8192)"
-assert_eq "memcap:wsl-16GB"   "--memory=14746m" "$(cap_for wsl 16384)"
-# A machine too small to cap usefully gets no cap at all, rather than one that breaks
-# ordinary work more often than it helps.
-assert_eq "memcap:linux-4GB-declines-to-cap" "none" "$(cap_for linux 4096)"
-assert_eq "memcap:tiny-machine-declines"     "none" "$(cap_for macos 2048)"
-# Whatever the formula, it must never hand out more than the machine has.
-for t in 2048 4096 8192 16384 32768; do
-    got="$(cap_for linux "$t")"
-    case "$got" in
-        none) : ;;
-        *) n="${got#--memory=}"; n="${n%m}"
-           if [ "$n" -lt "$t" ]; then pass "memcap:linux-${t}MB-leaves-headroom"
-           else fail "memcap:linux-${t}MB-leaves-headroom" "cap $n >= total $t"; fi ;;
-    esac
-done
 
 # ─── the course files, served from a local tarball  (§A.12 needs this too) ─────
 # BUILT BEFORE THE CONSENT CASES, not beside the idempotency ones it was written for, and
@@ -398,22 +367,19 @@ chmod 755 "$TMP/ro"
 
 # podman INSTALLED BUT NOT WORKING, which is a different machine from podman absent and wants
 # its own case rather than emerging from another one by accident. A person driving the install
-# tier's no-podman fixture by hand hit this: apt installs podman, the installer asks it for
-# MemTotal, and it cannot answer -- and I described that as the only place the branch was
+# tier's no-podman fixture by hand hit this: apt installs podman, check_podman asks it a
+# question, and it cannot answer -- and I described that as the only place the branch was
 # reachable. It is not. podman-fake has had an info_rc knob all along, so the branch costs a
 # millisecond here, deliberately, on any machine.
 shim_new
 shim_set info_rc 1
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nomem")"
-assert_says "podman-mute:refuses-to-guess"      "Could not ask podman how much memory" "$out"
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman")"
+assert_says "podman-mute:refuses-to-continue"   "Podman is installed but is not answering" "$out"
 assert_says "podman-mute:suggests-the-mac-fix"  "podman machine start" "$out"
 assert_says "podman-mute:changed-nothing-more"  "Nothing further has been changed" "$out"
 assert_says_not "podman-mute:does-not-claim-success" "Setup finished" "$out"
 assert_eq "podman-mute:exits-1" "1" \
-          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nomem2")"
-# It must fail BEFORE writing local.args, or a student would be left with a memory cap computed
-# from nothing.
-assert_no_file "podman-mute:wrote-no-local-args" "$TMP/nomem/.config/local.args"
+          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman2")"
 
 # THE WORST POSSIBLE LIE, and the one smoke_test exists to prevent: a build that produced
 # no image, reported over the words "Setup finished". The installer's own comment calls this
@@ -675,39 +641,11 @@ assert_file "install:launcher-installed"     "$DEST/cs193v"
 assert_exec "install:launcher-executable"    "$DEST/cs193v"
 assert_file "install:args-installed"         "$DEST/.config/container.args"
 assert_file "install:messages-installed"     "$DEST/.private/messages.txt"
-assert_file "install:local-args-written"     "$DEST/.config/local.args"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 
-# local.args must carry the memory cap, computed from what podman reports rather than from
-# /proc -- which inside a container reports the host's RAM, not the cgroup limit.
-assert_ok "install:local-args-has-memory-cap" grep -q '^--memory=' "$DEST/.config/local.args"
-cap="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$DEST/.config/local.args")"
-# DELIBERATELY UNGATED, AND CURRENTLY RED ON macOS AND WSL -- that is issue #127, and the fix
-# belongs to the assertion rather than to this gate. The fake podman reports 8 GiB; the LINUX
-# formula reserves 35% (min 3072) -> 5120, while the macos|wsl arm reserves 10% (min 768) and
-# gives 7373 from the same input. So the expectation below is one platform's constant.
-#
-# WHY THIS IS NOT A `linux_arm` CASE, unlike consent:* and subuid:* above. Those need the
-# installer's Linux arm to really run -- /etc/subuid, usermod, a shadow suite -- which a PATH
-# shim cannot fake and a real Linux container therefore has to cover (sb-consent:*, sb-subuid:*
-# in 26-installer-sandbox.sh, name for name). NOTHING HERE NEEDS A PLATFORM: no real memory is
-# involved, the total is faked, and write_local_args runs the same arithmetic on this Mac as on
-# Linux. It reaches the macos arm and computes 7373 correctly; only the number on this line is
-# wrong. Skipping it therefore bought a green run by giving up the assertion, and gave up more
-# than it looked: there is no cap-value assertion anywhere in 26-installer-sandbox.sh, so the
-# skip_linux_arm wording ("covered on a real Linux") was false for this one name alone.
-#
-# AND IT IS THE ONLY THING TYING THE TABLE TO THE FORMULA. cap_for at :170 is a REIMPLEMENTATION
-# of the installer's case, so the seven memcap:* assertions prove the copy agrees with itself and
-# would stay green if the installer's reserve changed. This line is the sole end-to-end check --
-# so a gate here leaves the formula unverified in both directions on exactly the two platforms
-# whose arm it covers, and would silently skip whatever #127's fix replaces it with.
-assert_eq "install:cap-matches-the-formula" "5120" "$cap"
-assert_ok "install:local-args-explains-itself" grep -q 'reserving' "$DEST/.config/local.args"
-
-# Now the actual §A.12 property. Everything except local.args and projects/ must be
-# byte-identical, and local.args must be identical too since the machine has not changed.
+# Now the actual §A.12 property. Everything except projects/ must be byte-identical: the
+# second run recomputes nothing and rewrites nothing.
 state_hash() {
     ( cd "$DEST" && find . -type f -not -path './projects/*' -not -name '*.log' \
         -exec sha256sum {} + 2>/dev/null | LC_ALL=C sort )
@@ -731,7 +669,7 @@ assert_says "install:reports-already-done" "already done" "$out2"
 
 # ─── check_disk, which no mechanism could reach before ─────────────────────────
 # check_disk asks podman for two Store fields (installer's check_disk), and podman-fake's
-# info arm answered only Rootless and MemTotal — every other --format fell through to
+# info arm answered only Rootless and the host figures — every other --format fell through to
 # `echo ''`. The installer's own guard then swallowed it:
 #
 #     case "$alloc" in ''|*[!0-9]*) return 0 ;; esac

@@ -28,7 +28,7 @@ FIXTURE_DIR="$TESTS_DIR/fixtures"
 # THE ONE PLACE. Before this there were three: install-sandbox.sh had its own nested and wsl
 # cases, sandbox_run grew a no-podman case, and nest_build hardcoded its own -- and they
 # disagreed. That is not a hypothetical: the no-podman fixture installs a real podman, the
-# installer's next step asks it for MemTotal, and it failed with "cannot set up namespace using
+# installer's check_podman step asks it a question, and it failed with "cannot set up namespace using
 # /usr/bin/newuidmap" because only the nested path had been given SYS_ADMIN. A person driving
 # it by hand found it; the suite had called the case green.
 #
@@ -58,7 +58,7 @@ FIXTURE_DIR="$TESTS_DIR/fixtures"
 # kernel.apparmor_restrict_unprivileged_userns=1 and relies on newuidmap being setuid-root, so
 # a restrictive profile, a nosuid mount or a missing uidmap all give a student podman that is
 # installed and cannot create a user namespace. Same observable, and the installer stops at
-# write_local_args (installer:757).
+# check_podman.
 MACHINE_CAP_NAMES='sysadmin'
 # THE OTHER THREE ARE FIXTURE SCAFFOLDING, measured rather than assumed:
 #   * fuse -- this host's podman reports driver=overlay with no options and never touches
@@ -667,8 +667,8 @@ printf '===PODMAN-AFTER===\n'
 if command -v podman >/dev/null 2>&1; then podman --version; else echo absent; fi
 # INSTALLED IS NOT THE SAME AS WORKING, and asserting the former let a broken podman read as a
 # success. `podman --version` never touches the runtime, so it answers happily from a podman
-# that cannot create a user namespace -- while the installer's very next step asks it for
-# MemTotal, gets nothing, and stops. This is the question the installer actually asks.
+# that cannot create a user namespace -- while the installer's check_podman step asks `podman
+# info` and stops when it cannot answer. This is the question the installer actually asks.
 # ASKED ONLY WHERE IT IS WANTED. `podman info` creates a store, an events log and lock files,
 # and their exact set differs between runs -- so probing unconditionally gave the podman-old
 # case a non-deterministic blast radius and its exact-set audit chased new paths every run.
@@ -676,7 +676,7 @@ printf '===PODMAN-WORKS===\n'
 if [ -z "${SB_PROBE_PODMAN:-}" ]; then
     echo not-probed
 elif command -v podman >/dev/null 2>&1; then
-    podman info --format '{{.Host.MemTotal}}' 2>&1 | tail -1
+    podman info --format '{{.Host.Arch}}' 2>&1 | tail -1
 else
     echo no-podman
 fi
@@ -706,7 +706,7 @@ RUN
 #
 # RAISING THE LAUNCHER'S, NOT LOWERING THE INSTALLER'S, and the direction matters. Lowering the
 # installer's floor would need a fixture whose podman is below it, and the only such fixture
-# (podman-old, 3.4.4) has no nesting adaptations -- so the run would die at write_local_args, on
+# (podman-old, 3.4.4) has no nesting adaptations -- so the run would die at check_podman, on
 # `podman info`, long before build_image handed off to the launcher. Raising the launcher's floor
 # instead reproduces the same disagreement on podman-old-nested, whose 4.9.3 the real installer
 # accepts, and gets all the way to the hand-off.
@@ -1093,7 +1093,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     #
     #   * a real podman rather than --fake-podman. A fake case is about a second; the default
     #     machine removes packages, runs a real offline apt install, asks a real podman for
-    #     MemTotal and then lets the launcher try to build -- measured at ~100 s with the network
+    #     its arch and then lets the launcher try to build -- measured at ~100 s with the network
     #     off. At the old 60 s ceiling that looked like the transcript freezing mid-apt, because
     #     a killed run loses whatever `script` had buffered.
     #   * tracing. `bash -x` multiplies the cost of every command in a run that installs 31
@@ -1111,7 +1111,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     # has a case whose branches it must leave out.
     # THE LABEL STAYS ON FOR TIER A, AND THIS IS THE WHOLE OF THE SCOPING (#119). Turning it off
     # is what a NESTED podman costs, and nothing sandbox_run runs is nested: the installer either
-    # dead-ends at write_local_args or reaches build_image with --network=none, where the launcher's
+    # dead-ends at check_podman or reaches build_image with --network=none, where the launcher's
     # podman build dies pulling the base image -- before any RUN step, so crun is never asked to
     # create a container.
     #

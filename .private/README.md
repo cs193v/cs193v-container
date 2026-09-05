@@ -16,7 +16,6 @@ projects/                      the student's work; the only directory shared wit
 
 .config/                       flag files the launcher reads
   container.args               every podman flag, heavily commented
-  local.args                   machine-specific (memory cap); written by the installer, gitignored
 
 .private/                      everything needed to BUILD or MAINTAIN the image
   Containerfile                the image
@@ -609,8 +608,8 @@ suffixed: those are already per-directory.
 
 **Host ports are not namespaced by it, and no longer need to be.** Two instances used to compete
 for the same 46 host ports whether or not anything was listening on them — overlap was total by
-construction, and the documented workaround was to give each checkout its own band in
-`local.args`. There is no band and no list: a host port is taken only when something inside that
+construction, and the documented workaround was to give each checkout its own band of them.
+There is no band and no list: a host port is taken only when something inside that
 instance's container is actually serving on it, so two instances collide only if they are both
 running the same software on its default port at the same moment. The loser gets
 `refused <port> busy`, reported per-port by `cs193v doctor` and by `cs193v-portwatch --show`.
@@ -790,8 +789,8 @@ measurements in `ERRORS.md` §D):
   traps SIGHUP and stops the container. The measurement is now the *reason the host has to do
   it*: nothing inside the container can detect a closed window, since the client never dies.
 - does `systemd=true` in WSL deliver cgroup delegation? — **still open**, but on native
-  Linux the cap is enforced exactly (`memory.max` == `--memory`), an OOM is clean at exit
-  137, and the container survives it.
+  Linux the controllers really do reach uid 1000: `limits:pids-limit-is-enforced` shows podman
+  applying `--pids-limit 64` to a disposable container.
 - does host-side `inotify` fire? — **Yes on Linux**, as predicted. Expect not on macOS/WSL.
 - is a loopback-bound server reachable from the host? — **Yes now, and that is the point.**
   It used to be No, which was the course's central ports lesson and the reason for

@@ -20,10 +20,9 @@ Playwright with a headless Chromium installed, inside a tabbed terminal that tel
 you are. You can run `./cs193v` in as many terminal windows as you like; each gets its own
 set of tabs in the **same** container. There is only ever one container.
 
-Everything about how it starts is in two plain text files you can read, in the `.config`
-folder next to the launcher: `container.args` holds every flag, heavily commented, and
-`local.args` holds the one value that depends on your particular machine. They are tucked
-out of the way so your course folder stays uncluttered, not to hide them. To see exactly
+Everything about how it starts is in one plain text file you can read, in the `.config`
+folder next to the launcher: `container.args` holds every flag, heavily commented. It is
+tucked out of the way so your course folder stays uncluttered, not to hide it. To see exactly
 what runs:
 
 ```

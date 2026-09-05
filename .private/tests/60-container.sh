@@ -54,21 +54,7 @@ clean_vt_fixtures
 # ─── §A.4 the flags the container was actually created with ────────────────────
 assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 
-MEM="$(I '{{.HostConfig.Memory}}')"
-record "flag:memory" "$MEM"
-# local.args holds the cap the installer computed for this machine; the container must
-# actually have it, or the protection is decorative.
-if [ -f "$REPO/.config/local.args" ]; then
-    want_mb="$(sed -n 's/^--memory=\([0-9]*\)m/\1/p' "$REPO/.config/local.args" | head -1)"
-    if [ -n "$want_mb" ]; then
-        assert_eq "flag:memory-matches-local.args" "$((want_mb * 1048576))" "$MEM"
-    else
-        record "flag:memory-matches-$REPO/.config/local.args" "local.args sets no cap on this machine"
-    fi
-else
-    record "flag:memory-matches-local.args" "no local.args (installer not run here)"
-fi
-# NOTHING IN THIS PROJECT SETS A PIDS LIMIT -- .config/container.args:196-198 names
+# NOTHING IN THIS PROJECT SETS A PIDS LIMIT -- .config/container.args:197-199 names
 # `--pids-limit` only as something deliberately NOT set -- so this was never a test of ours. It
 # was a CANARY ON PODMAN'S DEFAULT, and the direction that matters is only one of the two: a
 # TIGHTER limit does not kill the container, it WEDGES it, because `podman exec` must fork into
@@ -81,7 +67,7 @@ fi
 # DO NOT "FIX" THIS BY PINNING --pids-limit=2048. It would hand back the exact wedge hazard
 # podman 6 removed by accident, and it collides with three things that would all have to be
 # rewritten to lie: 10-static.sh:1104 lists --pids-limit among flags "considered and rejected"
-# and says re-adding one "should be a deliberate act that breaks a test"; container.args:190-199
+# and says re-adding one "should be a deliberate act that breaks a test"; container.args:197-199
 # documents the rejection; and both assertions here name a provenance that would stop being true.
 #
 # SO: RECORD THE VALUE, AND ASSERT ONLY AGAINST A DANGEROUSLY TIGHT ONE. Green on podman 5.7
@@ -496,18 +482,8 @@ assert_match "kernel:CapEff-is-empty" "CapEff:[[:space:]]*0+$" "$(E 'grep CapEff
 record "kernel:lsm-label-applied" \
        "$(E 'pac="$(cat /proc/self/attr/current 2>/dev/null | tr -d "\0")"; echo "${pac:-unavailable}"')"
 
-# The memory cap must be real. If this reads "max", the cap is not being enforced and the
-# protection is illusory — which is exactly what §5.5 suspects can happen in WSL without
-# cgroup delegation.
-cg_mem="$(E 'cat /sys/fs/cgroup/memory.max')"
-record "kernel:cgroup-memory-max" "$cg_mem"
-if [ -n "$MEM" ] && [ "$MEM" != 0 ]; then
-    assert_eq "kernel:cgroup-enforces-the-memory-cap" "$MEM" "$cg_mem"
-else
-    record "kernel:cgroup-enforces-the-memory-cap" "no cap configured on this machine"
-fi
-# The kernel's own view of the same thing, and the same reasoning -- see assert_pids_floor
-# above. `max` here is the cgroup spelling of podman's `0`.
+# The kernel's own view of the pids limit, and the same reasoning as assert_pids_floor above.
+# `max` here is the cgroup spelling of podman's `0`.
 CG_PIDS="$(E 'cat /sys/fs/cgroup/pids.max')"
 record "kernel:cgroup-pids-max" "$CG_PIDS"
 assert_pids_floor "kernel:cgroup-pids-max-is-not-dangerously-low" "$CG_PIDS"
@@ -534,10 +510,6 @@ assert_eq "kernel:setns-into-pid1-is-blocked" "blocked" \
           "$(E 'unshare -U --map-root-user -- nsenter --target 1 --mount true >/dev/null 2>&1 && echo ALLOWED || echo blocked')"
 
 record "kernel:inotify-max-user-watches" "$(E 'cat /proc/sys/fs/inotify/max_user_watches')"
-# /proc is NOT cgroup-aware: a student running `free` inside the container sees the host's
-# RAM, not their cap. Recorded because the discrepancy is the point.
-record "kernel:free-vs-cgroup" \
-       "$(E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"')"
 
 # The corrected colour check. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so the launcher forwards it explicitly — and so must this.
@@ -1145,17 +1117,19 @@ assert_eq "playwright:volume-is-student-owned" "student" \
 assert_ok "playwright:volume-is-student-writable" \
           sh -c "podman exec ${NAME} sh -c 'touch /home/student/.cache/ms-playwright/.wtest && rm /home/student/.cache/ms-playwright/.wtest'"
 
-# Second: the memory cap. The build runs uncapped, so a browser that only fits without
-# --memory would ship green and die on the student's first `npm test`.
+# Second: in the LIVE container, which is a different question from the image tier. Here the
+# browser comes from the cs193v-playwright volume rather than the image's own copy, and it runs
+# under --userns=keep-id -- so a volume seeded wrong, or a browser the mapped uid cannot
+# execute, shows up here and nowhere else.
 shot="$(E 'cd /tmp && timeout 180 playwright screenshot -b chromium about:blank /tmp/live.png >/dev/null 2>&1; wc -c < /tmp/live.png 2>/dev/null || echo 0' | do_tr -d ' \n')"
 E 'rm -f /tmp/live.png' >/dev/null 2>&1
-record "playwright:screenshot-bytes-under-the-memory-cap" "$shot"
+record "playwright:screenshot-bytes-in-the-live-container" "$shot"
 if [ "${shot:-0}" -gt 1000 ]; then
-    pass "playwright:chromium-runs-under-the-memory-cap"
+    pass "playwright:chromium-renders-in-the-live-container"
 else
-    fail "playwright:chromium-runs-under-the-memory-cap" \
+    fail "playwright:chromium-renders-in-the-live-container" \
          "rendered $shot bytes inside the live container. The image tier renders fine, so
-suspect the cgroup limit: cat /sys/fs/cgroup/memory.max in the container."
+suspect the volume or the uid mapping: ls -l /home/student/.cache/ms-playwright in the container."
 fi
 
 # The round trip that matters, because it is the one the course sells: a project-local
@@ -1185,32 +1159,6 @@ esac
 E 'rm -rf /home/student/projects/.vt-pw' >/dev/null 2>&1
 
 # ─── §A.9 resource limits ──────────────────────────────────────────────────────
-# A clean OOM: the greedy process dies, the container survives, and the launcher can still
-# get in. What a student sees here becomes the troubleshooting entry for exit 137.
-#
-# HARD-GATED on a cap actually being in force. With no --memory, this loop does not stop at
-# a cgroup boundary — it eats the whole host until the kernel OOM killer picks a victim,
-# which on a small machine may well be something the user cares about. An unguarded version
-# of this test is a hazard, not a test.
-if [ -n "$MEM" ] && [ "$MEM" != 0 ] && [ "$cg_mem" != max ]; then
-    oom="$(E 'python3 -c "
-b = []
-try:
-    while True: b.append(bytearray(64*1024*1024))
-except MemoryError:
-    print(\"MemoryError\")" 2>&1; echo "rc=$?"')"
-    record "limits:oom-behaviour" "$(printf '%s' "$oom" | do_tr '\n' ' ')"
-    assert_match "limits:allocation-loop-is-stopped" 'MemoryError|rc=(137|1|139)' "$oom"
-    assert_eq "limits:container-survives-an-oom" "running" "$(I '{{.State.Status}}')"
-    assert_ok "limits:launcher-can-still-get-in-after-an-oom" sh -c "podman exec ${NAME} true"
-else
-    skip "limits:allocation-loop-is-stopped" \
-         "no memory cap in force (cgroup memory.max=$cg_mem) — running an unbounded
-allocation loop would exhaust the HOST, not the container"
-    skip "limits:container-survives-an-oom" "no memory cap in force"
-    skip "limits:launcher-can-still-get-in-after-an-oom" "no memory cap in force"
-fi
-
 # The pids limit, on a DISPOSABLE container. NEVER fork-bomb the live one: pids exhaustion wedges
 # it beyond `podman exec`'s reach and does not self-heal, so this would take the rest of
 # the suite down with it.

@@ -69,19 +69,24 @@ assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/st
 # present in the args files but missing from the run line.
 missing="$(LC_ALL=C comm -13 \
     <(printf '%s\n' "$line" | do_tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) \
-    <(sed 's/#.*//' "$COPY/.config/container.args" "$COPY/.config/local.args" 2>/dev/null \
+    <(sed 's/#.*//' "$COPY/.config/container.args" 2>/dev/null \
         | do_tr ' ' '\n' | grep -E '^--?[a-z]' | LC_ALL=C sort -u) | do_tr '\n' ' ')"
 assert_eq "print:contains-every-args-file-flag" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
-# local.args is machine-specific and absent from a fresh clone; the memory cap must reach
-# the run line once the installer has written it.
-printf -- '--memory=2048m\n' > "$COPY/.config/local.args"
+# AN EDIT TO THE ARGS FILE HAS TO DO BOTH THINGS: reach the run line, and move the hash. The
+# second is the one that is easy to lose, and losing it is silent -- `podman start` reuses a
+# container's STORED config, so a flag added to container.args would never reach anyone who
+# already has a container until something told them to recreate it.
+#
+# Mutating the COPY, which is what repo_copy exists for; put back afterwards so everything
+# below still sees a fresh checkout's flags.
+cp "$COPY/.config/container.args" "$COPY/.config/container.args.orig"
+h_before="$(current_hash)"
+printf -- '--hostname=drift-probe\n' >> "$COPY/.config/container.args"
 line="$(launcher --dev-print-command)"
-assert_contains "print:includes-memory-cap"    "--memory=2048m"        "$line"
-# local.args changing must change the hash, or the cap never reaches an existing container.
-h_with="$(current_hash)"
-rm -f "$COPY/.config/local.args"
-assert_ne "print:memory-cap-changes-confighash" "$h_with" "$(current_hash)"
+assert_contains "print:an-args-file-edit-reaches-the-run-line" "--hostname=drift-probe" "$line"
+assert_ne "print:an-args-file-edit-changes-confighash" "$h_before" "$(current_hash)"
+mv "$COPY/.config/container.args.orig" "$COPY/.config/container.args"
 
 # A comment on the same line as a flag must not leak into the run line.
 assert_not_contains "print:strips-trailing-comments" "#" "$(launcher --dev-print-command)"
@@ -116,11 +121,6 @@ assert_contains "dev-args:every-word-reaches-run-line" "$dev_args_joined" \
 # One word per line is the contract 16-args-parse.sh relies on to see a word boundary at all.
 assert_eq "dev-args:one-word-per-line" "0" \
     "$(launcher --dev-args | grep -c '[[:space:]]' || true)"
-# local.args must reach it too, or the unit tier is only ever testing one of the two files.
-printf -- '--memory=2048m\n' > "$COPY/.config/local.args"
-assert_contains "dev-args:includes-local-args" "--memory=2048m" "$(launcher --dev-args)"
-rm -f "$COPY/.config/local.args"
-
 # ─── refuses to run as root  (§1.5) ────────────────────────────────────────────
 shim_new
 shim_fake_id 0 root
@@ -576,7 +576,7 @@ assert_eq       "foreign-dir:opens-no-shell"  "0" "$(shim_count '^exec ')"
 
 # ─── config drift  (§2.5) ──────────────────────────────────────────────────────
 # `podman start` reuses the container's STORED config and ignores the image digest, the
-# port list, keep-id and --memory alike. Without this check, every student's flags would be
+# port list and keep-id alike. Without this check, every student's flags would be
 # frozen at first run and edits to container.args would never reach anyone.
 shim_new
 launcher >/dev/null 2>&1                       # one container, hash recorded

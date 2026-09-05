@@ -2,9 +2,6 @@
 #  CS193V container flags.  One flag (or flag + value) per line; # starts a comment.
 #  Read by ./cs193v — see `cs193v --dev-print-command` for the exact resulting line.
 #
-#  Machine-specific values (the memory cap) live in local.args, which the installer
-#  writes and git ignores.
-#
 #  EVERY LINE HERE IS A PODMAN FLAG. There is no line that names the image, and adding one
 #  would not work: the launcher always runs what .private/Containerfile builds on the
 #  student's own machine. There is no registry to point at — see README.md's "How the image
