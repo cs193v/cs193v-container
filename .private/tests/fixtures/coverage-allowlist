@@ -20,8 +20,8 @@
 # allowlist stops being read. Checked against hit.lines rather than reasoned about.
 #
 # So what is left is the pair that no fake can stand in for.
-624  curl is missing from this Mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken
-839  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
+642  curl is missing from this Mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken
+856  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
 #
 # curl's retry loop (installer:736) is NOT here: it is not reachable from a file:// tarball and
 # would need an HTTP server in the fixture, so it is RECORDED as uncovered by the gate rather
