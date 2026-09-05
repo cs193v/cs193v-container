@@ -300,21 +300,43 @@ installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
 # a command STRING and the other needs an argv. 10-static.sh asserts both doors set it --
 # the same way this project handles version_lt and box() being duplicated between the
 # launcher and the installer: assert the agreement rather than pretend there is one copy.
+#
+# AND EVERY VALUE INTERPOLATED INTO THAT STRING IS SINGLE-QUOTED (#141), because the string is
+# parsed a SECOND time before `env` ever sees it: do_script hands it to ptyrun.py, whose child
+# execs `/bin/sh -c "$cmd"`. Unquoted, a value containing a space word-splits there -- `env`
+# takes the first fragment as its assignment and the NEXT one as the program to run:
+#
+#     env: 'Keith/bin:/mnt/c/Program': No such file or directory
+#
+# WHICH IS NOT AN EXOTIC PATH. WSL's interop.appendWindowsPath defaults to true, so every WSL
+# host with interop enabled carries the Windows PATH into $PATH, and `/mnt/c/Program Files` is
+# on every Windows machine. So this was all seven pty cases in 25-installer.sh red on any WSL
+# machine and green on every Linux and Mac one. 14-test-harness.sh injects a spaced entry and
+# drives this door through it, because a machine with no space in $PATH cannot ask the question.
+#
+# SINGLE quotes, not double: this shell has already expanded these values, and they have to reach
+# `env` literally rather than exposing a `$` in a path to a second round of expansion.
+#
+# QUOTING IS ENOUGH, AND IT ONCE WAS NOT. This used to fork on `script --version`, and the BSD arm
+# word-split $cmd into argv with no shell in between, so quotes would have arrived literally.
+# That arm is gone -- ptyrun.py replaced script(1) on every platform, so there is exactly one
+# shell re-parsing this string. See launcher_tty above and lib/ptyrun.py.
 installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     local keys="$1" script="$2"; shift 2
     local cmd a tf
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env HOME=$SHIM/home PATH=$SHIM:$PATH"
-    for a in "$@"; do cmd="$cmd $a"; done
+    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
+    for a in "$@"; do cmd="$cmd '$a'"; done
     if tf="$(installer_trace_file)"; then
-        # No eval needed on this door: it is BUILDING a command string for `script -c`, so the fd
+        # No eval needed on this door: it is BUILDING a command string for ptyrun.py, so the fd
         # number interpolates like any other word. `$CS193V_TRACE_FD>>$tf` has to stay unspaced --
-        # `8 >>file` is the number as an argument, not a redirection.
+        # `8 >>file` is the number as an argument, not a redirection. The NUMBER stays bare for
+        # that reason; its target is quoted like every other path here.
         cmd="$cmd PS4='+\${LINENO} ' BASH_XTRACEFD=$CS193V_TRACE_FD"
-        cmd="$cmd bash -x $script $CS193V_TRACE_FD>>$tf"
+        cmd="$cmd bash -x '$script' $CS193V_TRACE_FD>>'$tf'"
     else
-        cmd="$cmd bash $script"
+        cmd="$cmd bash '$script'"
     fi
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
