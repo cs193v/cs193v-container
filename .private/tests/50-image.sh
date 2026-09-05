@@ -83,7 +83,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox setsid; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox cs193v-gesture setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | do_tr '\n' ' ')"
@@ -606,6 +606,118 @@ assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
 assert_contains "shortlink:a-cancel-file-prints-nothing"      "out=[]" "$out"
 assert_contains "shortlink:a-cancel-file-hands-the-port-back" "listeners=0" "$out"
 
+# ─── the per-terminal gesture strings  (#122, #123, #133) ─────────────────────
+# WHAT THIS OWNS. cs193v-gesture is the whole per-terminal hint system on the container side: a
+# token in, one line of student-facing prose out. The launcher chooses the token (13-term-class.sh
+# owns that half), and everything here is about the lookup being total -- because the failure mode
+# is not a wrong hint, it is a BLANK one. The linkbox draws its gesture line into a box whose
+# height contract counts rows rather than content, so an empty answer ships a box with a hole in
+# it and every existing frame assertion still passes.
+GESTURE_TOKENS='apple-terminal iterm2 vscode windows-terminal vte unknown'
+
+# EVERY TOKEN x EVERY MODE IS ONE NON-EMPTY LINE, and the widths come back in the same pass.
+# ONE CONTAINER, not one per combination: this is 18 lookups plus 6 width measurements, and at a
+# throwaway container each that is half a minute of `podman run` to answer a question about a
+# case statement. The loop runs INSIDE the image and prints `token mode columns text`, which is
+# also the form the width assertion below needs.
+#
+# Columns, not bytes, measured the way box() measures -- strip UTF-8 continuation bytes and count
+# what is left. See the note above dw() in cs193v-ui.sh.
+g_dump="$(R 'for tok in apple-terminal iterm2 vscode windows-terminal vte unknown; do
+              for mode in copy link correct; do
+                out="$(CS193V_TERM_CLASS=$tok CS193V_HOST_OS=macos cs193v-gesture $mode)"
+                n="$(printf "%s\n" "$out" | grep -c .)"
+                cols="$(printf "%s" "$out" | LC_ALL=C awk "{ t=\$0; gsub(/[\200-\277]/,\"\",t); print length(t) }")"
+                printf "%s\t%s\t%s\t%s\t%s\n" "$tok" "$mode" "${n:-0}" "${cols:-0}" "$out"
+              done
+            done')"
+record "gesture:dump" "$(printf '%s' "$g_dump" | do_tr '\n' '|')"
+
+g_bad=''
+g_wide=''
+while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
+    [ -n "$gt" ] || continue
+    [ -n "$gtext" ]  || g_bad="$g_bad [$gt/$gm empty]"
+    [ "$gn" = 1 ]    || g_bad="$g_bad [$gt/$gm is $gn lines]"
+    # THE LINK LINE HAS TO FIT THE BOX. cs193v-linkbox prints it as `  %s` inside box()'s FIELD,
+    # which is BOX_W - 4 = 67 columns, so the string itself gets 65. One column over and box()
+    # wraps it, the frame grows a row, and the popup -- whose height open-url chose before any of
+    # this was known -- shows a dead row or scrolls its title off the top.
+    if [ "$gm" = link ] && [ "${gc:-999}" -gt 65 ]; then g_wide="$g_wide [$gt=$gc]"; fi
+done <<GDUMP
+$g_dump
+GDUMP
+assert_eq "gesture:every-token-and-mode-is-one-non-empty-line" "" "$g_bad"
+assert_eq "gesture:every-link-line-fits-the-box" "" "$g_wide"
+
+# THE DEFAULT BRANCH IS THE OLD STRING, BYTE FOR BYTE. This is the assertion that makes the
+# change provably a no-op for anyone the resolver cannot identify -- which, since SHIFT is the
+# bypass modifier on every terminal deliberately left out of the token list, is the majority of
+# terminals in existence. If this drifts, a student on kitty or Ghostty starts being told
+# something new, and that was never the intent of #122 or #123.
+assert_eq "gesture:unknown-is-the-historical-wording" \
+    "TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C (CMD+C on a Mac)." \
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')"
+
+# AN UNRECOGNISED TOKEN MUST BEHAVE LIKE `unknown`, not like nothing. The launcher only ever
+# emits the six, but the image and the launcher are versioned separately -- a student running an
+# old image against a new launcher is exactly the case that produces a token this file has never
+# heard of, and a blank hint is the one outcome that must not happen.
+assert_eq "gesture:an-unknown-token-degrades-to-the-default" \
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')" \
+    "$(R 'CS193V_TERM_CLASS=some-future-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+assert_eq "gesture:an-empty-token-degrades-to-the-default" \
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')" \
+    "$(R 'cs193v-gesture copy')"
+
+# ─── the rows where the generic answer is WRONG ────────────────────────────────
+# These three are the entire reason the feature exists, so they are asserted by content and not
+# just by shape. Terminal.app and macOS VS Code have NO bypass modifier -- SHIFT is encoded into
+# the mouse report and forwarded to tmux, measured on Terminal.app 470.2 -- and iTerm2 uses
+# Option, where SHIFT extends an existing selection instead of bypassing. Everywhere else SHIFT
+# is right and `unknown` already says so.
+assert_contains "gesture:apple-terminal-names-fn" "FN" \
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+assert_not_contains "gesture:apple-terminal-does-not-name-shift" "SHIFT" \
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+assert_contains "gesture:iterm2-names-option" "OPTION" \
+    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-gesture copy')"
+assert_not_contains "gesture:iterm2-does-not-name-shift" "SHIFT" \
+    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-gesture copy')"
+
+# VS CODE IS THE ONE TOKEN THAT SPLITS ON THE OS, which is why the host forwards the platform as
+# well as the terminal. On macOS it has no bypass at all until the student changes a setting; on
+# Windows and Linux xterm.js falls through to plain Shift. (VS Code's own documentation says Alt
+# for Windows and Linux and is wrong -- the source returns event.shiftKey.)
+assert_ne "gesture:vscode-differs-by-os" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=macos cs193v-gesture copy')" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
+assert_contains "gesture:vscode-on-linux-names-shift" "SHIFT" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
+
+# THE ONE COMPOSED CLICK GESTURE WE MEASURED. Apple documents plain CMD+double-click to open a
+# URL ("Hold down the Command key and double-click the URL"); under mouse reporting that is dead,
+# and FN+CMD+double-click is what actually opened a link -- confirmed by a local HTTP server
+# receiving the request, not by eye. Every other terminal gets a gesture-free fallback, because
+# the composition is not derivable: xterm, foot and conhost have no URL detection at all, and
+# Alacritty's URL hint matches on NO modifier so holding Shift may suppress it.
+assert_contains "gesture:apple-terminal-link-names-the-measured-gesture" "FN+COMMAND+double-click" \
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture link')"
+g_fallback="$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture link')"
+assert_not_contains "gesture:no-unmeasured-token-invents-a-click" "click" "$g_fallback"
+
+# The correction shown when a SHIFT+drag actually reaches tmux -- which only happens on a
+# terminal that forwards Shift rather than intercepting it, i.e. exactly where "hold SHIFT" was
+# the wrong advice. It must not itself tell the student to hold SHIFT.
+g_corr_bad=''
+while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
+    [ "$gm" = correct ] || continue
+    case "$gtext" in *"hold SHIFT"*) g_corr_bad="$g_corr_bad [$gt]" ;; esac
+done <<GDUMP
+$g_dump
+GDUMP
+assert_eq "gesture:no-correction-tells-you-to-hold-shift-again" "" "$g_corr_bad"
+
 # ─── the link box's three frames  (the modal states) ──────────────────────────
 # WHY THE FRAMES ARE ASSERTED HERE and not only in the tmux tier: the popup is created with a
 # fixed height before any state is known, so the three frames agreeing is a property of the
@@ -657,6 +769,22 @@ record "linkbox:chip-rows" "$LB_CHIPS"
 assert_eq "linkbox:the-chip-is-on-one-row-in-every-frame" " 9 9 9" "$LB_CHIPS"
 # The height open-url actually asks for, which has to be that same number.
 assert_eq "linkbox:--rows-agrees-with-the-frames" "10" "$(R 'cs193v-linkbox --expires-in 900 --rows')"
+
+# AND THE HEIGHT SURVIVES EVERY TERMINAL TOKEN, which is the assertion #122 needs and the frame
+# loop above cannot make: it renders with whatever token the throwaway container inherits, so it
+# proves the box is ten rows for exactly one of the six gesture strings. The gesture line is the
+# only per-terminal content in the box, and a string one column too long grows the frame by a row
+# -- silently, because open-url picked the popup height before any of this was known. So the
+# height contract is re-checked once per token, in one container.
+LB_TOK="$(R 'for tok in apple-terminal iterm2 vscode windows-terminal vte unknown; do
+               for f in initializing ready error; do
+                 n="$(CS193V_TERM_CLASS=$tok CS193V_HOST_OS=macos \
+                      cs193v-linkbox --expires-in 900 --frame $f | grep -c .)"
+                 printf "%s/%s=%s " "$tok" "$f" "$n"
+               done
+             done')"
+record "linkbox:frame-heights-per-token" "$LB_TOK"
+assert_not_match "linkbox:ten-rows-for-every-terminal-token" '=(9|11|12|[0-8])( |$)' "$LB_TOK"
 
 # ─── Playwright and its browser ────────────────────────────────────────────────
 # The course's test harnesses are browser tests, so the browser is part of the image rather

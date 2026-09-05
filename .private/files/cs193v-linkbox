@@ -171,6 +171,24 @@ CHIP_LEAD="  $CHIP ◂ click x to close"
 # a live target sitting where nothing is drawn.
 HINT_LEAD="  $CHIP ◂ typing goes nowhere; press x to close"
 
+# HOW TO OPEN THE LINK, for the terminal the student is actually using. Issue #122.
+#
+# RESOLVED ONCE, HERE, AND NOT INSIDE frame_body(). That function is called on every redraw, and
+# while the spinner is moving the loop ticks ten times a second -- so a command substitution in
+# there would fork cs193v-gesture ten times a second for the life of the box, to re-read a
+# constant. The token cannot change while the popup is up.
+#
+# THE OLD LINE SAID `CTRL+Click ... (Command+Click on macOS)` AND WAS WRONG TWICE. CMD+SINGLE-
+# click has never opened a URL in Terminal.app -- Apple documents CMD+DOUBLE-click -- and under
+# tmux's mouse reporting even that is dead, because the click reaches tmux instead of the
+# terminal. See cs193v-gesture for the whole table and for why only one terminal names a click.
+#
+# FALLS BACK RATHER THAN FAILING. An image whose PATH has lost cs193v-gesture would otherwise
+# print a blank row here, and every height assertion would still pass -- the frames are counted
+# by rows, not by content. So the fallback is a real instruction, not an empty string.
+LINK_GESTURE="$(cs193v-gesture link 2>/dev/null)"
+[ -n "$LINK_GESTURE" ] || LINK_GESTURE='Select the link and paste it into your browser.'
+
 # What sits where the link will be, while there is no link. The parentheses are doing work: a
 # bare "creating link..." reads as a label for the thing above it, and this is a status.
 SPIN_TEXT='(creating link...)'
@@ -288,7 +306,7 @@ frame_body() {                        # frame_body STATE LEFT LEAD  -> eight row
             printf '\n'
             link_line
             printf '\n'
-            printf '  CTRL+Click the link to open it (Command+Click on macOS).\n'
+            printf '  %s\n' "$LINK_GESTURE"
             printf '\n'
             printf '%s%*sexpires in %s\n' "$lead" "$gap" '' "$clock"
             ;;
