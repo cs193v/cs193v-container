@@ -201,7 +201,10 @@ ttydoor="$(sed -n '/^installer_tty()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh
 if [ "$(printf '%s' "$ttydoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:tty-extractable"
 else fail "installer-door:tty-extractable" "could not find installer_tty"; fi
 assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
-assert_contains "installer-door:tty-puts-the-shim-first" 'PATH=$SHIM' "$ttydoor"
+# QUOTED, and the needle says so (#141): this string is re-parsed by `sh -c` inside ptyrun.py,
+# so an unquoted $PATH word-splits on any host whose PATH has a space in it. The behavioural
+# half of this lives in 14-test-harness.sh, which injects one and drives the door through it.
+assert_contains "installer-door:tty-puts-the-shim-first" "PATH='\$SHIM" "$ttydoor"
 
 # ─── the trace fd must not be one somebody else is already using ───────────────
 # BOTH DOORS DIVERT `bash -x` TO A FILE DESCRIPTOR, so that the trace lands in a coverage file

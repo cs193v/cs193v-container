@@ -616,6 +616,50 @@ assert_eq "ptyrun:backgrounded-child-is-the-command" "sleep" \
           "$(ps -o comm= -p "${PR_KID:-0}" 2>/dev/null | sed 's#.*/##' | do_tr -d ' ')"
 kill "$PR_OWNER" "$PR_KID" 2>/dev/null || true
 
+# ─── the installer's pty door survives a space in $PATH (#141) ────────────────
+# installer_tty BUILDS A COMMAND STRING, for the reason its own comment gives, and that string is
+# parsed a SECOND time before `env` ever sees it: do_script hands it to ptyrun.py, whose child
+# execs `/bin/sh -c "$cmd"`. So an unquoted value containing a space word-splits there -- `env`
+# takes the first fragment as its assignment and the NEXT one as the program to run:
+#
+#     env: 'Keith/bin:/mnt/c/Program': No such file or directory
+#
+# AND THAT IS NOT AN EXOTIC PATH. WSL's interop.appendWindowsPath defaults to true, so every WSL
+# host with interop enabled carries the Windows PATH into $PATH -- and `/mnt/c/Program Files` is
+# on every Windows machine. #141 was all seven pty cases in 25-installer.sh red on any WSL machine
+# and green on every Linux and Mac one, which is why no run here had ever seen it.
+#
+# THE SPACE IS INJECTED, NOT BORROWED FROM THE AMBIENT $PATH. A Mac, a CI runner and a plain
+# Linux box have no space to find, so a check that read the real PATH would pass on all three
+# having measured nothing -- and those are the machines this suite normally runs on.
+#
+# CS193V_RUN_DIR IS EMPTIED FOR THE PROBE, and that is not tidiness. With it set, installer_tty
+# takes its `bash -x` arm and appends a trace to $CS193V_RUN_DIR/trace/14-test-harness.sh.$$ --
+# and 95-installer-coverage.sh globs that whole directory, scoring the union against
+# install-cs193v.sh. A probe script's line numbers in there is a wrong coverage number, from a
+# producer that gate has no name for. The defect is in the `env HOME=... PATH=...` prefix BOTH
+# arms share, so the plain arm reaches it.
+PATH_SP="$WORK/dir with spaces"
+mkdir -p "$PATH_SP"
+shim_new
+# The probe echoes what ARRIVED, rather than only proving something ran: a "fix" that stripped the
+# offending entry out of PATH, or dropped the shim off the front of it, would satisfy a bare "the
+# installer started" and quietly break every other case in 25-installer.sh.
+cat > "$SHIM/probe.sh" <<'PROBE'
+printf 'PROBE-RAN home=[%s]\nPROBE-PATH=[%s]\n' "$HOME" "$PATH"
+PROBE
+door_out="$(PATH="$PATH_SP:$PATH" CS193V_RUN_DIR='' installer_tty '\n' "$SHIM/probe.sh" | strip_ansi)"
+assert_says     "installer-door:tty-runs-with-a-space-in-PATH" "PROBE-RAN" "$door_out"
+assert_says_not "installer-door:tty-does-not-word-split-PATH" "No such file or directory" "$door_out"
+# The two properties 10-static.sh asserts of the door's TEXT, measured on the door's BEHAVIOUR.
+assert_says "installer-door:tty-really-put-the-shim-first" "PROBE-PATH=[$SHIM:" "$door_out"
+assert_says "installer-door:tty-kept-the-spaced-entry"     "$PATH_SP"          "$door_out"
+assert_says "installer-door:tty-really-redirected-HOME"    "home=[$SHIM/home]" "$door_out"
+shim_cleanup
+# shim_new redirected TMPDIR into the shim shim_cleanup has just deleted, for the reason the
+# cleanup section above gives where it does the same thing.
+export TMPDIR="$WORK"
+
 # ─── lib/portable.sh: the wrappers, and the properties they exist for ─────────
 # Each of these guards a MEASURED macOS failure, not a hypothetical one. The tools divide three
 # ways and only the middle group is a mere flag: `timeout` and `ss` are ABSENT on a Mac, `script`
