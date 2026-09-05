@@ -74,8 +74,8 @@ WHAT THE MACHINE IS MISSING
 WHAT THE CONTAINER IS DENIED
   --no-caps LIST       comma-separated, from: $MACHINE_CAP_NAMES
       sysadmin SYS_ADMIN withheld, so newuidmap cannot write uid_map: podman is installed
-               and cannot run.  The installer stops at "Could not ask podman how much memory
-               is available", which is a real student failure -- a restrictive apparmor
+               and cannot run.  The installer stops at "Podman is installed but is not
+               answering", which is a real student failure -- a restrictive apparmor
                profile or a missing uidmap does the same thing on a laptop
 
 OPTIONS

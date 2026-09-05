@@ -150,8 +150,8 @@ assert_says "sb-apt:the-post-install-check-passed" "podman 5.7.0" "$out"
 # this machine has everything, so the podman apt installed really answers -- which is what makes
 # the --no-caps=sysadmin case below a deliberate DIFFERENTIAL rather than an environmental limit
 # dressed up as a property.
-mem="$(sb_section "$out" PODMAN-WORKS)"
-assert_match "sb-apt:the-podman-apt-installed-really-works" '^[0-9]{6,}$' "$mem"
+arch="$(sb_section "$out" PODMAN-WORKS)"
+assert_match "sb-apt:the-podman-apt-installed-really-works" '^(arm64|amd64|aarch64|x86_64)$' "$arch"
 
 # Asserted in PACKAGES, not paths: the path-level diff here is several hundred lines of /usr
 # and /var/lib/dpkg, which is the wrong unit for the claim and too long to be read by anyone.
@@ -171,7 +171,7 @@ sandbox_reap
 # ─── podman installed, and unable to run ───────────────────────────────────────
 # THE FAILURE FROM THE BUG REPORT, asked for on purpose. It used to be an accident: the
 # no-podman fixture lacked SYS_ADMIN, so the podman it installed could not create a user
-# namespace, and the run stopped at write_local_args. That was recorded as an environmental
+# namespace, and the run stopped at check_podman. That was recorded as an environmental
 # limit -- and then assertions were written treating it as a property, and a claim was made that
 # the branch was "only reachable there". It was reachable in the shim tier all along.
 #
@@ -186,7 +186,7 @@ sb_machine no-prereqs=podman no-caps=sysadmin
 out="$(sandbox_run cannot-answer '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
 assert_says "sb-noans:apt-still-installed-it" "podman version" "$(sb_section "$out" PODMAN-AFTER)"
 assert_says "sb-noans:but-it-cannot-answer" "newuidmap" "$(sb_section "$out" PODMAN-WORKS)"
-assert_says "sb-noans:the-installer-says-so" "Could not ask podman how much memory" "$out"
+assert_says "sb-noans:the-installer-says-so" "Podman is installed but is not answering" "$out"
 assert_says "sb-noans:exits-nonzero"         "===INSTALLER-RC=1===" "$out"
 assert_says_not "sb-noans:does-not-claim-success" "Setup finished" "$out"
 # ...and it got far enough to have done the install first, which is what tells this apart from
@@ -229,7 +229,7 @@ sandbox_reap
 # THE THIRD CAUSE OF THE OBSERVABLE THE CASE ABOVE MEASURES, and the only one of the three the
 # installer can do anything about. lib/sandbox.sh names them where MACHINE_CAP_NAMES is defined:
 # a restrictive apparmor profile, a nosuid mount, or a missing uidmap all hand a student a podman
-# that cannot create a user namespace, and the run dead-ends at write_local_args (installer:757).
+# that cannot create a user namespace, and the run dead-ends at check_podman.
 #
 # uidmap is a RECOMMENDS of podman rather than a Depends, so the two come apart on a real machine
 # -- `--no-install-recommends`, a hand-rolled podman, an image built with recommends off. And the
@@ -248,9 +248,9 @@ assert_says "sb-uidmap:installed-uidmap" "uidmap" "$added"
 assert_says_not "sb-uidmap:did-not-reinstall-podman" "podman" "$added"
 # INSTALLED IS NOT WORKING, and here that is the entire claim: before the helpers came back this
 # machine's podman answered with the newuidmap failure the case above asserts, and after them it
-# answers a real number. SB_PROBE_PODMAN earns its store for the apt case's reason -- the probe IS
+# answers its own arch. SB_PROBE_PODMAN earns its store for the apt case's reason -- the probe IS
 # the assertion -- and this case takes no path-level audit for that store to disturb.
-assert_match "sb-uidmap:podman-answers-once-the-helpers-are-back" '^[0-9]{6,}$' \
+assert_match "sb-uidmap:podman-answers-once-the-helpers-are-back" '^(arm64|amd64|aarch64|x86_64)$' \
              "$(sb_section "$out" PODMAN-WORKS)"
 record "sb-uidmap:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 sandbox_reap
@@ -428,7 +428,7 @@ sandbox_reap
 # subuid range, so there is nothing for ask_consent to ask about and no menu is drawn. A machine
 # that needs nothing is the shape a supported machine has.
 #
-# WHERE IT STOPS is write_local_args, and that is a property of Tier A rather than of Debian: no
+# WHERE IT STOPS is check_podman, and that is a property of Tier A rather than of Debian: no
 # nesting flags, so the podman it just accepted cannot create a user namespace and cannot answer
 # `podman info`. Same dead end the cannot-answer case asserts deliberately. The end-to-end proof
 # for Debian is the nested build in oldest-supported; here the claim is only that the survey no
@@ -442,13 +442,13 @@ assert_says_not "sb-deb:not-refused-any-more"  "or newer"     "$out"
 assert_says "sb-deb:needs-nothing-installed"   "Nothing on your computer needs to change" "$out"
 assert_says_not "sb-deb:asks-no-permission"    "permission for" "$out"
 # IT GOT THE COURSE FILES, which is further than this machine had ever got: fetch_files runs after
-# consent and before write_local_args, so `launcher-is-executable` can only be true on a run that
+# consent and before check_podman, so `launcher-is-executable` can only be true on a run that
 # passed the survey.
 assert_eq "sb-deb:the-course-files-arrived" "launcher-is-executable" \
           "$(sb_section "$out" COURSE-DIR)"
 # ...and then stops for the Tier A reason, not a Debian one. Asserted rather than recorded, because
 # a run that got FURTHER would mean this fixture had grown nesting flags nobody declared.
-assert_says "sb-deb:stops-where-tier-a-always-stops" "Could not ask podman how much memory" "$out"
+assert_says "sb-deb:stops-where-tier-a-always-stops" "Podman is installed but is not answering" "$out"
 record "sb-deb:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 # NO EXACT-SET AUDIT, deliberately, and lib/sandbox.sh gives the reason where SB_PROBE_PODMAN is
 # defined: any podman command that touches the runtime creates a store, an events log and lock
@@ -748,7 +748,7 @@ subuid_before="$(cksum < /etc/subuid)"
 
 # ─── THE CASE THAT DID NOT EXIST: no podman, install succeeds, image builds ─────
 # nest_build takes the prereq list, so this is the whole point of one machine with everything
-# on it: apt installs podman for real, the installer then asks THAT podman for MemTotal and gets
+# on it: apt installs podman for real, the installer then asks THAT podman for its arch and gets
 # an answer, writes the args, and the launcher assembles the course image with it. Before this,
 # `no-podman` proved apt installs podman and `nested` proved the build works, and nothing joined
 # them -- so the one path every student actually takes was the one path nothing ran.
@@ -895,7 +895,7 @@ record "oldest-supported:free-disk-gb-after" "$(do_df_avail /)"
 # sb_work_skew raises the LAUNCHER's floor to 5.7.0 and leaves the installer's at 4.9.0, on a
 # machine with 4.9.3. So the installer accepts, and the launcher does not.
 #
-# THE SHAPE IS THE POINT: survey passes, the course files download, the memory cap is computed, the
+# THE SHAPE IS THE POINT: survey passes, the course files download, podman is confirmed working, the
 # disk is confirmed -- and only then does build_image hand off to a launcher that refuses. Every
 # reassuring step first, the refusal last, on a machine the installer just declared fit. A student
 # would read that as the install breaking at the very end.

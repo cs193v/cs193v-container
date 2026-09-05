@@ -359,7 +359,7 @@ rm -rf "$cov_tmp"
 # to decide a machine's podman flags for itself -- install-sandbox.sh had the nested caps and
 # the wsl bind mount, sandbox_run grew a no-podman case, nest_build hardcoded its own. They
 # disagreed, and the failure was not subtle: the no-podman fixture installs a real podman, the
-# installer asked it for MemTotal, and it died with "cannot set up namespace using
+# installer asked it a question, and it died with "cannot set up namespace using
 # /usr/bin/newuidmap" because only the nested path had SYS_ADMIN. The suite called that case
 # green, because it only ever asked `podman --version`, which never touches the runtime.
 #
@@ -439,7 +439,7 @@ assert_eq "fixture-flags:no-other-file-names-a-security-opt" "" \
 # THE SCOPING THAT IS EASY TO GET WRONG, AND WAS. SB_BASE defaults to `machine`, which IS a nested
 # base, and five of 26-installer-sandbox.sh's sb_machine calls name no base at all -- so eight
 # Tier A cases run on a nested base and receive the whole nesting flag set. They start no container
-# inside (the installer dead-ends at write_local_args, or has no network), so they have no use for
+# inside (the installer dead-ends at check_podman, or has no network), so they have no use for
 # the label being off, and one of them carries an exact-set `podman diff` audit that has no
 # business changing because of a flag it does not need.
 #
@@ -1489,15 +1489,11 @@ assert_contains "claims:the-stop-verb-is-documented" "cs193v --stop" "$design_md
 
 # ─── .gitignore ────────────────────────────────────────────────────────────────
 # -F, not -x alone: `projects/*` as a BRE is "project" + "s" + zero-or-more "/".
-assert_ok  "gitignore:local.args-is-ignored" grep -qxF '.config/local.args' .gitignore
 assert_ok  "gitignore:projects-contents" grep -qxF 'projects/*' .gitignore
 assert_ok  "gitignore:keeps-gitkeep"     grep -qxF '!projects/.gitkeep' .gitignore
 assert_file "gitignore:gitkeep-exists"   "$REPO/projects/.gitkeep"
 # The bind-mount target must exist in a fresh clone or the mount creates a root-owned dir.
 assert_ok  "gitignore:gitkeep-is-tracked" git -C "$REPO" ls-files --error-unmatch projects/.gitkeep
-# local.args holds one machine's memory cap; committing it would ship it to everyone.
-assert_ok  "gitignore:local.args-not-tracked" \
-           sh -c "! git -C '$REPO' ls-files --error-unmatch $REPO/.config/local.args >/dev/null 2>&1"
 
 # The tunnel's PRIVATE KEYS. These are generated per machine precisely so that no keypair is
 # shared, and committing one would hand it to every student and every reader of the repo --

@@ -128,7 +128,7 @@ command -v shellcheck && shellcheck "$DIR/cs193v" "$DIR/install-cs193v.sh"
 LC_ALL=C comm -3 \
   <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$DIR/messages.txt" | tr -d '[]' | LC_ALL=C sort -u) \
   <(grep -ohE 'msg +[a-z0-9._-]+' "$DIR"/cs193v "$DIR"/install-cs193v.sh | awk '{print $2}' | LC_ALL=C sort -u)
-grep -qxF 'local.args' "$DIR/.gitignore" && grep -qxF 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
+grep -qxF 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
 #   -F, not bare -x: `projects/*` as a BRE is "project"+"s"+zero-or-more-"/", so it matched
 #   "projects", "projects/", "projects//" — never the literal line. The check never fired.
 # Containerfile layer order: node < gh < vercel < codex < claude-code, most volatile LAST.
@@ -226,7 +226,6 @@ ignored with a startup warning** — a security control that does nothing is wor
 
 ```sh
 ck  net-pasta      pasta   I '{{.HostConfig.NetworkMode}}'
-rec memory-cap             I '{{.HostConfig.Memory}}'          # compare to local.args
 ck  pids-default   2048    I '{{.HostConfig.PidsLimit}}'
 ck  no-cap-add     "[] []" I '{{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}}'
 rec security-opt           I '{{json .HostConfig.SecurityOpt}}'  # no no-new-privileges, no label=disable
@@ -271,7 +270,6 @@ ck  capeff-zero  "CapEff:	0000000000000000"  E 'grep CapEff /proc/self/status'
 # `tr -d "\0"` because the SELinux read carries a trailing NUL, which bash strips out of a
 # command substitution with a warning on stderr.
 rec lsm-label              E 'cat /proc/self/attr/current | tr -d "\0"'
-rec cgroup-memory-max      E 'cat /sys/fs/cgroup/memory.max'   # MUST equal --memory, not "max"
 ck  cgroup-pids  2048      E 'cat /sys/fs/cgroup/pids.max'
 # NOT `findmnt -no FSTYPE /tmp`: /tmp is not a mountpoint (just a directory on the root
 # overlay), and findmnt without -T only reports real mountpoints, so it printed NOTHING.
@@ -285,8 +283,6 @@ rec shm-mount              E 'findmnt -no SIZE,OPTIONS /dev/shm'
 rec mount-in-nested-userns E 'unshare -U --map-root-user -m -- mount -t tmpfs none /mnt >/dev/null 2>&1 && echo ALLOWED || echo blocked'
 ckfail setns-blocked       E 'unshare -U --map-root-user -- nsenter --target 1 --mount true'
 rec inotify-watches        E 'cat /proc/sys/fs/inotify/max_user_watches'
-# /proc is NOT cgroup-aware — `free` in here reports the host's RAM, not the cap
-rec free-vs-cgroup         E 'echo "free=$(free -m | awk "/^Mem:/{print \$2}")MB cgroup=$(($(cat /sys/fs/cgroup/memory.max)/1048576))MB"'
 # -e TERM is REQUIRED. podman forces TERM=xterm and does not copy the client's value
 # (containers/podman#25683), so without this the probe reports 8 and FAILS on a correctly
 # working system. The launcher forwards TERM in open_shell; so must this.
@@ -500,17 +496,6 @@ name or points at a deleted or unpredictable path.
 ## A.9 Resource limits
 
 ```sh
-# a clean container OOM: one process dies, the container survives, the host stays responsive
-( while :; do s=$(date +%s%N 2>/dev/null || echo 0); sleep 1; done ) >/dev/null &
-LAT=$!
-E 'python3 -c "
-b=[]
-try:
-  while True: b.append(bytearray(64*1024*1024))
-except MemoryError: print(\"MemoryError\")"' ; echo "exit=$?"      # expect 137 or MemoryError
-kill $LAT 2>/dev/null
-ck  container-survived-oom running  I '{{.State.Status}}'
-
 # pids limit: use a DISPOSABLE container. NEVER fork-bomb cs193v —
 # pids exhaustion wedges it beyond podman exec's reach and does not self-heal.
 podman run --rm --pids-limit 64 "$IMAGE" sh -c \
@@ -544,7 +529,7 @@ ck still-one-container 1 sh -c 'podman ps -q | wc -l | tr -d " "'
 # plain diff would fail spuriously. comm -13 shows only flags present in the args files
 # but MISSING from the run line, which must be empty.
 MISSING=$(comm -13 <("$DIR/cs193v" --dev-print-command | tr ' ' '\n' | grep -E '^--?[a-z]' | sort -u) \
-                   <(sed 's/#.*//' "$DIR/container.args" "$DIR/local.args" 2>/dev/null \
+                   <(sed 's/#.*//' "$DIR/container.args" 2>/dev/null \
                        | tr ' ' '\n' | grep -E '^--?[a-z]' | sort -u))
 if [ -z "$MISSING" ]; then echo "PASS print-command contains every args-file flag"
 else echo "FAIL these args-file flags are missing from the run line:"; echo "$MISSING"; fi
@@ -610,9 +595,6 @@ STATE > /tmp/vt-s2
 diff /tmp/vt-s1 /tmp/vt-s2 && echo "PASS installer is idempotent"
 # published checksum must match
 shasum -a 256 install-cs193v.sh   # compare against the value on the course website
-# local.args must match the formula for THIS machine
-rec podman-memtotal podman info -f '{{.Host.MemTotal}}'
-cat "$DIR/local.args"             # recompute by the documented formula and compare
 ```
 
 ## A.13 Performance baseline — record, do not assert
@@ -788,9 +770,9 @@ lines. The class *semantics* were verified equivalent to `sed`'s on Linux (all 2
 consent — confirm it did rather than failing with a raw podman error.
 
 **1.7 — Flag parsing is faithful.** `./cs193v --dev-print-command`
-*Expect:* every flag in `container.args` appears in the printed `podman run` line, with the memory cap
-from `local.args` and no flag mangled by quoting. This is the first thing to ask a student for in any
-support thread, so it must be trustworthy.
+*Expect:* every flag in `container.args` appears in the printed `podman run` line, with no flag
+mangled by quoting. This is the first thing to ask a student for in any support thread, so it must
+be trustworthy.
 
 `./cs193v --dev-args` prints the same parse one word per line, which is what makes a word BOUNDARY
 visible — `--dev-print-command` joins the words with spaces, so it cannot distinguish one word holding
@@ -798,8 +780,7 @@ a space from two words, and a word that is a bare `\r` does not show in it at al
 `16-args-parse.sh` drives; it is automated there against a corpus of CRLF, whitespace-only, indented
 comment and no-trailing-newline files, so the by-hand version is only worth running when the parse
 itself is what you changed.
-*Expect:* one word per line, no blank lines, and the words in `container.args` order with
-`local.args`' after them.
+*Expect:* one word per line, no blank lines, and the words in `container.args` order.
 
 ---
 
@@ -823,8 +804,8 @@ than after it (issue #57). What is being timed is the gap between that line and 
 still untouched.
 
 **2.5 — Config-drift detection.** See §A.10. **This is a known podman behaviour trap** — `podman start`
-reuses the container's stored config and ignores the image digest, ports, `keep-id` and `--memory`
-alike. If this fails, every student's flags are frozen at first run and edits to `container.args` never
+reuses the container's stored config and ignores the image digest, ports and `keep-id` alike.
+If this fails, every student's flags are frozen at first run and edits to `container.args` never
 reach them.
 
 **2.6 — Stale-image detection.** Touch the recipe — add a comment line to
@@ -946,12 +927,9 @@ reach none of them:
   staff machine. It is a different host from the `codeload.github.com` stage two itself uses.
 
 **5.5 — cgroup delegation in WSL.** With `systemd=true` in `/etc/wsl.conf`, run §A.5's
-`cgroup-memory-max` check.
-*Expect:* the value passed as `--memory`, not `max`. If it reads `max`, the memory cap is **not being
-enforced** and the protection is illusory.
-
-**5.6 — What an OOM looks like to a student.** Run §A.9's allocation loop from an interactive shell.
-*Expect:* record exactly what appears on screen. This becomes the troubleshooting entry for exit 137.
+`cgroup-pids` check.
+*Expect:* a number, or `max`. An unreadable value means the rootless user got no delegated cgroup,
+so podman is managing no resources at all and `--pids-limit` would be accepted and ignored.
 
 **5.7 — The curl probe, on a Mac.** `survey` now probes curl the way it probes ssh, because curl is
 absent from the Ubuntu **desktop** image (the 26.04 and 24.04 manifests carry `wget` and `libcurl4t64`
@@ -1088,7 +1066,7 @@ ANSWERS TO THE DISPUTED QUESTIONS — quote actual output verbatim:
   A.6 loopback-bound server reachable from the host?
   5.2 macOS provider (libkrun vs applehv):
   5.3 Intel Mac — does podman run at all?
-  5.5 cgroup delegation — is memory.max the cap, or "max"?
+  5.5 cgroup delegation — is a rootless cgroup delegated at all?
 
 SURPRISES (passed, but not as expected):
 

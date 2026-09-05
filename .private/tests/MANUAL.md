@@ -449,12 +449,6 @@ outside the VM and nothing in the Linux suite can answer for them. Also try **fo
 terminal on each: expect the container left running, and `./cs193v` to explain it and point at
 `--stop`.
 
-### §5.6 — what an OOM looks like to a student
-Run the allocation loop from an interactive shell.
-*Linux baseline:* the process is `Killed` and the shell reports **exit 137**; the container
-survives and `podman exec` still works (all asserted). Record the exact on-screen text —
-it becomes the troubleshooting entry for 137.
-
 ### §2.8 — zombies after real use
 After a few hours of normal work: `cs193v doctor`, and read the `zombies` line.
 *Expect:* **`0 unreaped`**, always. The second number is `1 held by a live parent` while the
@@ -532,9 +526,9 @@ So what a real Fedora box adds is exactly the kernel-level things, and there are
   mounts, and all three sources are under `$DIR`. If that matters, the symptom is that the container
   starts, the workspace works, and the **tunnel does not** — nothing reachable at `http://localhost`.
 - **systemd cgroup delegation.** The nesting fixtures pin `cgroup_manager = "cgroupfs"` because
-  there is no systemd user session inside one, so nothing here exercises the `--memory` cap
-  `write_local_args` computes. That gap is not Fedora-specific — it is true of every fixture — but a
-  real machine is the only place to check it.
+  there is no systemd user session inside one, so nothing here exercises a delegated cgroup —
+  which is what `kernel:cgroup-pids-max` reads. That gap is not Fedora-specific — it is true of
+  every fixture — but a real machine is the only place to check it.
 - **Fedora's own kernel**, for anything version-gated.
 
 *What to run there, in descending order of value:*
@@ -838,9 +832,10 @@ refute; if it reproduces, the installer needs to detect it.
 
 ### §5.5 — cgroup delegation in WSL
 With `systemd=true` in `/etc/wsl.conf`: `.private/tests/run-tests.sh --tier container -k 60`
-*Expect:* `kernel:cgroup-memory-max` equals `--memory`, not `max`. If it reads `max` the
-memory cap is **not enforced** and the protection is illusory.
-*Linux baseline:* enforced exactly — `memory.max` = 1073741824 for `--memory=1024m`.
+*Expect:* `kernel:cgroup-pids-max` reads a number or `max`, not an error. An unreadable value
+means the rootless user got no delegated cgroup, so podman is managing no resources at all.
+*Linux baseline:* readable, and `limits:pids-limit-is-enforced` proves a limit still applies
+when podman is asked for one.
 
 ### §6.1 / §6.2 / §6.3 — sleep, wake and clock drift (macOS, Windows)
 Sleep the laptop for hours — ideally two days — then:

@@ -38,7 +38,6 @@ DIR="$(cd -- "$(dirname -- "$SELF")" && pwd -P)"
 # reads -- lives in .private/. See issue #16.
 CONFIG="$DIR/.config"
 ARGS_FILE="$CONFIG/container.args"
-LOCAL_ARGS_FILE="$CONFIG/local.args"
 MESSAGES="$DIR/.private/messages.txt"
 WORKSPACE="$DIR/projects"
 # Build and maintenance files live in .private/, so a student's course directory holds only
@@ -48,7 +47,7 @@ PRIVATE="$DIR/.private"
 CONTAINERFILE="$PRIVATE/Containerfile"
 
 # ─── the tunnel's files ────────────────────────────────────────────────────────
-# Key material lives beside local.args in .config/, git-ignored, generated once per machine.
+# Key material lives in .config/, git-ignored, generated once per machine.
 # The private halves NEVER enter the container; the public half and the host key are
 # bind-mounted read-only, so a compromised container cannot alter who may log in.
 TUNNEL_KEY="$CONFIG/tunnel-key"
@@ -987,59 +986,56 @@ TUNNEL_SUP_SILENCE_MAX=6
 # ─── argument files ────────────────────────────────────────────────────────────
 ARGS=()
 load_args() {
-    local f line word
+    local line word
     ARGS=()
     [ -f "$ARGS_FILE" ] || die "$(msg err.no-args-file FILE="$ARGS_FILE")"
-    for f in "$ARGS_FILE" "$LOCAL_ARGS_FILE"; do
-        [ -f "$f" ] || continue
-        while IFS= read -r line || [ -n "$line" ]; do
-            line="${line%%#*}"
-            # NOTHING LEFT BUT WHITESPACE -> there is no argument on this line. Asked HERE,
-            # ahead of the trim, because the trim is a subshell and a sed: container.args is
-            # 239 lines of which 228 are a comment or blank, and paying that for each of them
-            # cost ~700ms of the launcher's ~1.8s startup. Issue #57, measured with
-            # `strace -e trace=execve` -- 239 sed execs per launch, now 11.
-            #
-            # A WHITESPACE TEST RATHER THAN `[ -z ]`, and the difference is not style. `[ -z ]`
-            # moved up here skips only the already-empty lines, so it holds only while the
-            # comments start in column 1: indent that 228-line block and every line is
-            # whitespace-rather-than-empty and all 239 seds come back. This asks the question
-            # the code actually means, so the answer does not depend on how the file is laid out.
-            #
-            # THE TRIM STAYS, and here is the trap for whoever next tries to replace it with
-            # parameter expansion. Default IFS is space, tab and newline ONLY, so \r, \v and \f
-            # are NOT field separators -- the sed is what takes the \r off every line of a CRLF
-            # local.args, and an untrimmed "\r" line splits into ONE field, a bare \r, which
-            # then reaches the podman run line. A bash trim has to cover [[:space:]], not just
-            # space and tab. See VERIFICATION.md §1.3: a POSIX class in a `case` bracket has to be
-            # cleared on a real bash 3.2 by hand, because A.1's grep cannot see it.
-            #
-            # This also retires the `[ -z "$line" ] && continue` that used to sit below the trim:
-            # every line reaching it now holds a non-whitespace character, so the trim cannot
-            # return empty and the test could never fire.
-            case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-            # trim both ends without bash 4 features
-            # LC_ALL=C, like the four awk calls elsewhere in this file. container.args is the
-            # one file a STUDENT edits, and BSD sed under a UTF-8 locale rejects a non-UTF-8
-            # byte with "RE error: illegal byte sequence" and emits NOTHING for that line -- so
-            # `--label caf<e9>=1` written by a Latin-1 editor vanished silently, which is the
-            # exact failure 16-args-parse.sh:163 says must not happen. Per-invocation, not
-            # exported: forcing the locale run-wide would break the box-art comparisons.
-            line="$(printf '%s' "$line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            for word in $line; do
-                # The volume names live in container.args, not up here, so the instance
-                # suffix has to be applied as they are read. `cs193v-claude:/path` becomes
-                # `$NAME-claude:/path`, and since NAME is plain "cs193v" when no instance
-                # is set, this is a no-op for a student. Matching on the trailing colon is
-                # what keeps it off `--hostname cs193v-development`, the only other word
-                # here that starts with the same eight characters.
-                case "$word" in
-                    cs193v-*:*) word="$NAME-${word#cs193v-}" ;;
-                esac
-                ARGS[${#ARGS[@]}]="$word"
-            done
-        done < "$f"
-    done
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        # NOTHING LEFT BUT WHITESPACE -> there is no argument on this line. Asked HERE,
+        # ahead of the trim, because the trim is a subshell and a sed: container.args is
+        # 239 lines of which 228 are a comment or blank, and paying that for each of them
+        # cost ~700ms of the launcher's ~1.8s startup. Issue #57, measured with
+        # `strace -e trace=execve` -- 239 sed execs per launch, now 11.
+        #
+        # A WHITESPACE TEST RATHER THAN `[ -z ]`, and the difference is not style. `[ -z ]`
+        # moved up here skips only the already-empty lines, so it holds only while the
+        # comments start in column 1: indent that 228-line block and every line is
+        # whitespace-rather-than-empty and all 239 seds come back. This asks the question
+        # the code actually means, so the answer does not depend on how the file is laid out.
+        #
+        # THE TRIM STAYS, and here is the trap for whoever next tries to replace it with
+        # parameter expansion. Default IFS is space, tab and newline ONLY, so \r, \v and \f
+        # are NOT field separators -- the sed is what takes the \r off every line of a CRLF
+        # container.args, and an untrimmed "\r" line splits into ONE field, a bare \r, which
+        # then reaches the podman run line. A bash trim has to cover [[:space:]], not just
+        # space and tab. See VERIFICATION.md §1.3: a POSIX class in a `case` bracket has to be
+        # cleared on a real bash 3.2 by hand, because A.1's grep cannot see it.
+        #
+        # This also retires the `[ -z "$line" ] && continue` that used to sit below the trim:
+        # every line reaching it now holds a non-whitespace character, so the trim cannot
+        # return empty and the test could never fire.
+        case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+        # trim both ends without bash 4 features
+        # LC_ALL=C, like the four awk calls elsewhere in this file. container.args is the
+        # one file a STUDENT edits, and BSD sed under a UTF-8 locale rejects a non-UTF-8
+        # byte with "RE error: illegal byte sequence" and emits NOTHING for that line -- so
+        # `--label caf<e9>=1` written by a Latin-1 editor vanished silently, which is the
+        # exact failure 16-args-parse.sh:163 says must not happen. Per-invocation, not
+        # exported: forcing the locale run-wide would break the box-art comparisons.
+        line="$(printf '%s' "$line" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        for word in $line; do
+            # The volume names live in container.args, not up here, so the instance
+            # suffix has to be applied as they are read. `cs193v-claude:/path` becomes
+            # `$NAME-claude:/path`, and since NAME is plain "cs193v" when no instance
+            # is set, this is a no-op for a student. Matching on the trailing colon is
+            # what keeps it off `--hostname cs193v-development`, the only other word
+            # here that starts with the same eight characters.
+            case "$word" in
+                cs193v-*:*) word="$NAME-${word#cs193v-}" ;;
+            esac
+            ARGS[${#ARGS[@]}]="$word"
+        done
+    done < "$ARGS_FILE"
 }
 
 # The flags the launcher itself contributes: identity, the workspace mount, and the
@@ -1062,7 +1058,8 @@ build_run_args() {
     RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
     RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$WORKSPACE,dst=$MOUNT_DST,rw$relabel"
     # The tunnel's key material, read-only. Added here rather than in container.args because
-    # the paths are absolute and machine-specific -- the same reason local.args exists.
+    # the paths are absolute and machine-specific, so there is nothing to write in a file that
+    # ships to every student unchanged.
     #
     # Appended one element at a time, NOT via $(some_function) with word splitting: the
     # course directory is allowed to contain spaces (see the cs193v.dir label) and a split
@@ -1100,8 +1097,8 @@ build_run_args() {
 }
 
 # Everything that would require a different container if it changed. `podman start`
-# reuses the container's STORED config and ignores the image digest, the port list,
-# keep-id and --memory alike — so without this, "exists -> start" would permanently
+# reuses the container's STORED config and ignores the image digest, the port list and
+# keep-id alike — so without this, "exists -> start" would permanently
 # freeze each student's flags at whatever they were on first run, and edits to
 # container.args would never reach anyone.
 config_hash() {
@@ -2434,8 +2431,6 @@ verb_doctor() {
     if [ "$st" = running ]; then
         pm exec "$NAME" sh -c 'echo "$(id -u):$(id -g)"'
         printf '  %-16s %s (host is %s:%s)\n' "in-container uid" "$RT_OUT" "$(id -u)" "$(id -g)"
-        pm exec "$NAME" sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null'
-        printf '  %-16s %s\n' "memory limit" "${RT_OUT:-unknown}"
         # SPLIT BY PARENT, because the bare count this replaced needed a footnote in three
         # documents. A zombie is its PARENT's business: PID 1 collects the ones reparented onto
         # it, and one whose parent is alive and is not PID 1 -- sshd holds exactly one for the

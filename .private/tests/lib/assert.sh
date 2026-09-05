@@ -945,16 +945,15 @@ new_tmpdir() {
 # Anything else that needs leaving out belongs on this line, not in a caller.
 #
 # ./.config IS EXCLUDED WHOLESALE and its one tracked file put back below, exactly the way
-# projects/ is handled -- not because .config is unwanted but because six of its seven files
+# projects/ is handled -- not because .config is unwanted but because five of its six files
 # are git-ignored, so GitHub's archive endpoint holds none of them and a checkout that has
 # been launched once was injecting its own into every copy. That mattered most for the five
 # tunnel-* files: tunnel_keys() guards each keygen with `[ -f ] ||`, so a copy arriving with a
 # private key means the launcher's first-run keygen never executes in any test -- and
 # cs193v:1415 says a key must be generated per machine precisely so one is never shipped.
-# local.args came too, carrying a --memory= cap computed for the developer's machine.
 #
-# EXCLUDING THE DIRECTORY rather than naming the six: this list takes plain paths and no glob
-# (see below), so a name-them-all rule leaks the seventh file silently the day it appears.
+# EXCLUDING THE DIRECTORY rather than naming the five: this list takes plain paths and no glob
+# (see below), so a name-them-all rule leaks the sixth file silently the day it appears.
 COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects ./.config"
 
 # copy_course_tree DST  -> a fixture copy of $REPO at DST, minus the above.

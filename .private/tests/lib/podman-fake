@@ -39,7 +39,8 @@
 #                    on the FIRST build only                [0] (0 = never)
 #   build_delay      seconds to pause between output lines   [0] (0 = all at once)
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
-#   memory_max       what the in-container cgroup read prints [4294967296]
+#   mem_total        .Host.MemTotal, bytes                  [8589934592 = 8 GiB]
+#   host_arch        .Host.Arch                             [arm64]
 #   graph_alloc      .Store.GraphRootAllocated              [107374182400 = 100 GiB]
 #   graph_used       .Store.GraphRootUsed                   [10737418240  = 10 GiB]
 #                    Together these decide check_disk's low-disk warning. Set alloc to ''
@@ -143,10 +144,11 @@ case "${1:-}" in
         done
         case "$FMT" in
             *Rootless*)       get rootless true; echo ;;
-            # doctor asks for three values at once; write_local_args asks for MemTotal
-            # alone and does arithmetic on it, so the two must not be conflated.
+            # SEPARATE ARMS, because the two callers ask different questions. doctor asks for
+            # three values at once and prints them; check_podman asks only whether podman can
+            # answer at all, so its arm must not depend on doctor's template still matching.
             *MemTotal*CPUs*)  printf '%s 4 pasta\n' "$(get mem_total 8589934592)" ;;
-            *MemTotal*)       get mem_total 8589934592; echo ;;
+            *Arch*)           get host_arch arm64; echo ;;
             # check_disk's two Store fields, asked for together in one --format. Nothing
             # else in the repo reads Store, so this arm cannot reach the launcher suites.
             # The defaults describe a machine with room, which is the ordinary case and
@@ -358,7 +360,6 @@ level=error msg="cannot set up pasta"' >&2
         esac
         case "${LASTARG:-}" in
             *'id -u'*)        echo "1000:1000" ;;
-            *memory.max*)     get memory_max '4294967296'; echo ;;
             *'grep -c Z'*)    echo 0 ;;
             # THE CLAIM IS NOT THE SHELL. open_shell now runs cs193v-shell twice: --claim, which
             # takes the tmux session and needs no tty, and --attach, which is the one that puts a

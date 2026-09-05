@@ -60,7 +60,7 @@ count_dirs() {                        # count_dirs PREFIX -> how many $WORK/PREF
 FIX="$WORK/course"
 mkdir -p "$FIX/.config" "$FIX/.private/tests/lib" "$FIX/.git/objects" "$FIX/projects/bulk"
 cp "$REAL_REPO/cs193v" "$FIX/cs193v"
-printf -- '--memory=2048m\n'                            > "$FIX/.config/container.args"
+printf -- '--hostname=probe\n'                          > "$FIX/.config/container.args"
 printf 'a fresh checkout has this and nothing else\n'   > "$FIX/projects/.gitkeep"
 printf 'FROM debian\n'                                  > "$FIX/.private/Containerfile"
 : > "$FIX/.private/tests/lib/assert.sh"
@@ -69,10 +69,10 @@ printf 'FROM debian\n'                                  > "$FIX/.private/Contain
 # that "the copy is small" means something, and free in a tmpfs.
 dd if=/dev/zero of="$FIX/projects/bulk/node_modules.bin" bs=1024 count=8192 2>/dev/null
 
-# THE SIX FILES A CHECKOUT ACQUIRES THE FIRST TIME IT IS LAUNCHED. A fresh checkout has none
+# THE FIVE FILES A CHECKOUT ACQUIRES THE FIRST TIME IT IS LAUNCHED. A fresh checkout has none
 # of them, GitHub's archive endpoint holds none of them (they are git-ignored), and until they
 # were in this fixture the assertion below could not have noticed a copy carrying them: it was
-# measuring a tree with nothing to leak. The five keys are the load-bearing ones -- cs193v:1415
+# measuring a tree with nothing to leak. They are all key material -- cs193v:1415
 # says a private key must be generated per machine and never shipped, and a copy that arrives
 # with one means tunnel_keys()'s `[ -f ] ||` guard skips the keygen in every test that follows.
 printf 'PRIVATE KEY\n'          > "$FIX/.config/tunnel-key"
@@ -80,7 +80,6 @@ printf 'ssh-ed25519 pub\n'       > "$FIX/.config/tunnel-key.pub"
 printf 'PRIVATE HOST KEY\n'     > "$FIX/.config/tunnel-host-key"
 printf 'ssh-ed25519 hostpub\n'   > "$FIX/.config/tunnel-host-key.pub"
 printf 'cs193v-tunnel ssh-ed25519 hostpub\n' > "$FIX/.config/tunnel-known-hosts"
-printf -- '--memory=9999m\n'     > "$FIX/.config/local.args"
 
 REPO="$FIX"
 
@@ -95,9 +94,9 @@ assert_ok "copy:succeeds" copy_course_tree "$D"
 # would the installer, but a fixture that differs from a checkout is a fixture that can lie.
 want="./.config ./.config/container.args ./.private ./.private/Containerfile"
 want="$want ./cs193v ./projects ./projects/.gitkeep"
-# .config/container.args IS in that list and the five tunnel files and local.args are NOT,
-# which is the whole point: .config is excluded wholesale and its one TRACKED file put back,
-# the same treatment projects/ gets. Naming the six to exclude instead would leak the seventh.
+# .config/container.args IS in that list and the five tunnel files are NOT, which is the whole
+# point: .config is excluded wholesale and its one TRACKED file put back, the same treatment
+# projects/ gets. Naming the five to exclude instead would leak the sixth.
 got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
 assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$got"
 

@@ -638,7 +638,7 @@ fi
 skip "build:rebuilds-and-recreates" "would trigger a real image build; covered in 30-launcher-shim.sh"
 
 # ─── doctor against a real container ───────────────────────────────────────────
-# Most of what doctor prints -- the in-container uid, the memory limit, zombies, the tmux and
+# Most of what doctor prints -- the in-container uid, zombies, the tmux and
 # tunnel sections, the clock skew -- is guarded on the container actually RUNNING, because none of
 # it can be read from a stopped one. Since #41 the preceding groups leave it stopped, so the report
 # has to be given something to report on. Without both of these, five assertions below fail against

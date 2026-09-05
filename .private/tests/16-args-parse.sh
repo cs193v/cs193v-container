@@ -24,7 +24,7 @@
 # for the Containerfile parser.
 #
 # THE REST OF load_args' CONTRACT lands in its own section at the bottom -- the missing-file
-# paths, the container.args-then-local.args read order, the cs193v-*:* volume rewrite, globbing
+# paths, the cs193v-*:* volume rewrite, globbing
 # through the unquoted `for word in $line`, quotes staying literal. None of it is touched by
 # #57's change, which is why it is kept apart from the corpus above rather than folded into it.
 # It was issue #63.
@@ -57,9 +57,9 @@ mkdir -p "$FIX/.config"
 cp "$REPO/cs193v" "$FIX/cs193v"
 ln -s "$PRIVATE" "$FIX/.private"
 
-# fix_args FILE  <- body on stdin.  FILE is container.args or local.args.
+# fix_args FILE  <- body on stdin.
 fix_args() { cat > "$FIX/.config/$1"; }
-fix_reset() { rm -f "$FIX/.config/container.args" "$FIX/.config/local.args"; }
+fix_reset() { rm -f "$FIX/.config/container.args"; }
 
 # The parse, one word per line, from the launcher under test.
 parsed() { "$FIX/cs193v" --dev-args; }
@@ -96,7 +96,7 @@ ref_parse() {                         # ref_parse FILE... -> one word per line
 # invisible in the failure message, which is the whole class of bug this file is about.
 agrees() {
     local want got
-    want="$(ref_parse "$FIX/.config/container.args" "$FIX/.config/local.args" | od -c)"
+    want="$(ref_parse "$FIX/.config/container.args" | od -c)"
     got="$(parsed | od -c)"
     assert_eq "$1" "$want" "$got"
 }
@@ -104,13 +104,13 @@ agrees() {
 # ─── the corpus, case by case ──────────────────────────────────────────────────
 # Each block is one shape an args file can take. Numbers match the plan's edge-case list.
 
-# 1. CRLF throughout -- what editing local.args on Windows produces. The trim is the only thing
+# 1. CRLF throughout -- what editing container.args on Windows produces. The trim is the only thing
 #    taking the \r off, and \r is NOT an IFS character, so a line the trim missed would put a
 #    bare \r on the podman run line.
 fix_reset
-printf -- '--memory=2048m\r\n\r\n   \r\n# c\r\n   # indented\r\n-e X=1\r\n' | fix_args container.args
+printf -- '--hostname=probe\r\n\r\n   \r\n# c\r\n   # indented\r\n-e X=1\r\n' | fix_args container.args
 agrees "corpus:crlf-throughout"
-assert_eq "crlf:parses-to-three-clean-words" "--memory=2048m
+assert_eq "crlf:parses-to-three-clean-words" "--hostname=probe
 -e
 X=1" "$(parsed)"
 assert_not_contains "crlf:no-carriage-return-survives" "$(printf '\r')" "$(parsed)"
@@ -118,34 +118,34 @@ assert_not_contains "crlf:no-carriage-return-survives" "$(printf '\r')" "$(parse
 # 2. Whitespace-only lines, every class the trim covers. \v and \f are in [[:space:]] and are
 #    the two a hand-rolled trim forgets.
 fix_reset
-printf -- '--memory=1g\n \n\t\n\v\n\f\n \t \v \f \r \n-e Y=2\n' | fix_args container.args
+printf -- '--hostname=probe\n \n\t\n\v\n\f\n \t \v \f \r \n-e Y=2\n' | fix_args container.args
 agrees "corpus:whitespace-only-lines"
-assert_eq "whitespace:contributes-no-words" "--memory=1g
+assert_eq "whitespace:contributes-no-words" "--hostname=probe
 -e
 Y=2" "$(parsed)"
 
 # 3. Indented comments. Non-empty after ${line%%#*}, so this is the case that separates a
 #    whitespace guard from a plain `[ -z ]` -- and the shape a reflowed comment block takes.
 fix_reset
-printf -- '    # indented one\n\t# indented two\n--memory=1g\n' | fix_args container.args
+printf -- '    # indented one\n\t# indented two\n--hostname=probe\n' | fix_args container.args
 agrees "corpus:indented-comments"
-assert_eq "indented-comments:contribute-no-words" "--memory=1g" "$(parsed)"
+assert_eq "indented-comments:contribute-no-words" "--hostname=probe" "$(parsed)"
 
 # 4/5/6. The comment marker in every position that matters. `#` inside an apparently quoted
 #    value truncates the line -- existing behaviour, pinned rather than fixed.
 fix_reset
-printf -- '#col1\n#\n-m 8g#glued\n-m 1024g   # cap\n--label a="x # y"\n' | fix_args container.args
+printf -- '#col1\n#\n-e A=1#glued\n-e B=2   # trailing\n--label a="x # y"\n' | fix_args container.args
 agrees "corpus:comment-shapes"
-assert_eq "comments:glued-and-quoted" '-m
-8g
--m
-1024g
+assert_eq "comments:glued-and-quoted" '-e
+A=1
+-e
+B=2
 --label
 a="x' "$(parsed)"
 
 # 7. A last line with no trailing newline -- the `|| [ -n "$line" ]` clause exists for it.
 fix_reset
-printf -- '--memory=1g\n--no-trailing-newline' | fix_args container.args
+printf -- '--hostname=probe\n--no-trailing-newline' | fix_args container.args
 agrees "corpus:no-trailing-newline"
 assert_contains "no-trailing-newline:last-word-survives" "--no-trailing-newline" "$(parsed)"
 
@@ -193,14 +193,9 @@ assert_contains "invalid-utf8:the-flag-is-not-silently-dropped" "--label" "$(par
 # Everything at once, in one file, so an interaction between two rules cannot hide behind two
 # separate green cases.
 fix_reset
-printf -- '--memory=2048m\r\n \n\t\n\v\n\f\n    # indented\r\n#col1\n-m 8g#glued\n \t \r \n-m 1024g   # cap\n--label a="x # y"\n\t-e A=1\t-e B=2\t\n--last' \
+printf -- '--hostname=probe\r\n \n\t\n\v\n\f\n    # indented\r\n#col1\n-e C=3#glued\n \t \r \n-e D=4   # trailing\n--label a="x # y"\n\t-e A=1\t-e B=2\t\n--last' \
     | fix_args container.args
 agrees "corpus:all-cases-in-one-file"
-
-# And with local.args in play as well, since that is the file a person hand-edits.
-printf -- '   --cpus 2   \r\n\r\n# tail comment\n' | fix_args local.args
-agrees "corpus:both-files-together"
-assert_contains "both-files:local-args-reaches-the-parse" "--cpus" "$(parsed)"
 
 # ─── the cost, which is the point of the change ────────────────────────────────
 # COUNTED WITH A SHIM ON PATH, not with strace: the TAs run this tier on Macs, where there is no
@@ -232,7 +227,7 @@ sed_calls() {
 } > "$WORK/bin/podman"
 chmod +x "$WORK/bin/podman"
 fix_reset
-printf -- '--memory=1g\n' | fix_args container.args
+printf -- '--hostname=probe\n' | fix_args container.args
 : > "$WORK/podman.count"
 PATH="$WORK/bin:$PATH" "$FIX/cs193v" --dev-args >/dev/null 2>&1
 assert_eq "cost:asks-podman-nothing" "0" "$(awk 'END { print NR }' "$WORK/podman.count")"
@@ -267,19 +262,16 @@ assert_eq "cost:no-content-no-forks" "0" "$(sed_calls)"
 # the rest of load_args' contract  (#63)
 #
 # Everything above is about ONE line of the loop -- the trim, and #57's reordering of it. The
-# rest of the function was unasserted anywhere in the suite: the two missing-file paths, the
-# read order CLAUDE.md's "local.args is read after container.args, last occurrence winning"
-# rests on, the instance rewrite that renames six volumes, and what the unquoted expansion does
-# to a word full of shell metacharacters. Every flag the container is created with comes out of
-# here, so none of it was cheap to leave unmeasured.
+# rest of the function was unasserted anywhere in the suite: the missing-file paths, the
+# instance rewrite that renames six volumes, and what the unquoted expansion does to a word full
+# of shell metacharacters. Every flag the container is created with comes out of here, so none of
+# it was cheap to leave unmeasured.
 #
 # RED-FIRST BY MUTATION, since coverage of correct code has no failing behaviour to start from.
-# Eight mutants of load_args were run against the assertions below: the required-file die
-# dropped, each of the two `[ -f ]` guards weakened to `[ -e ]`, the read order swapped, the
-# volume rewrite removed, its trailing colon dropped, the expansion quoted, and `set -f` wrapped
-# round the loop. Each is caught by the assertion naming the property it broke -- the `[ -e ]`
-# one only after it survived the first draft of this section, which is what the silent-skip
-# assertion below exists for and why its comment is the longest one here.
+# Mutants of load_args were run against the assertions below: the required-file die dropped, the
+# `[ -f ]` guard weakened to `[ -e ]`, the volume rewrite removed, its trailing colon dropped, the
+# expansion quoted, and `set -f` wrapped round the loop. Each is caught by the assertion naming
+# the property it broke.
 #
 # NO `agrees` IN THIS SECTION, which is not an omission. The oracle answers a #57 question --
 # "do the two trim orders agree" -- and it cannot answer these: it does not die on a missing
@@ -323,57 +315,15 @@ assert_says_key "missing:a-directory-says-the-same-thing" err.no-args-file \
                 "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
 rmdir "$FIX/.config/container.args"
 
-# local.args is git-ignored and optional, so NOT existing is its ordinary state -- the `[ -f ]`
-# continue is the only thing that makes that ordinary rather than fatal.
+# The ordinary case, for contrast with both refusals above: a readable file parses, exits 0 and
+# says nothing at all. The silence is the half worth asserting -- --dev-args is read by a machine,
+# so a stray warning on stderr is a caller's problem rather than a cosmetic one.
 fix_reset
-printf -- '-m 1g\n' | fix_args container.args
-assert_eq "missing:absent-local-args-is-skipped" "-m
-1g" "$(parsed)"
-assert_exit "missing:absent-local-args-still-exits-0" 0 "$FIX/cs193v" --dev-args
-assert_eq "missing:absent-local-args-is-silent" "" "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
-
-# ...and a DIRECTORY named local.args is skipped rather than fatal, which is the asymmetry with
-# container.args above: one file is required and one is not, and the same `[ -f ]` produces both
-# answers.
-#
-# THE ASSERTION THAT HOLDS THE GUARD IS THE SILENT ONE, and that is a measurement rather than a
-# preference. Replacing this `[ -f ]` with `[ -e ]` changes NEITHER the word list NOR the exit
-# status: bash opens the directory, the `read` fails with EISDIR before the body runs once, and
-# the parse comes out byte-identical at status 0. What it does produce is
-# `read: 0: read error: Is a directory` on stderr -- so stdout and the status cannot tell the two
-# spellings apart and only silence can. Found by mutating the guard and watching the obvious
-# assertions stay green.
-mkdir -p "$FIX/.config/local.args"
-assert_eq "missing:a-local-args-directory-is-skipped" "-m
-1g" "$(parsed)"
-assert_exit "missing:a-local-args-directory-still-exits-0" 0 "$FIX/cs193v" --dev-args
-assert_eq "missing:a-local-args-directory-is-skipped-silently" "" \
-          "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
-rmdir "$FIX/.config/local.args"
-
-# ─── the read order CLAUDE.md makes a promise about ───────────────────────────
-# "local.args is read AFTER container.args, last occurrence winning" is CLAUDE.md section 2, and
-# it is the entire mechanism behind the documented CS193V_PORTS override. It is true only
-# because of the order of the `for f in` list, and a swap would be invisible to every assertion
-# above: both files' words still reach the run line, just the other way round. So the fixture
-# uses values that can be told apart, and the assertion is the whole list in order -- "both
-# files got there" is exactly the weaker claim that would survive the swap.
-fix_reset
-printf -- '-m 1g\n--cpus 1\n' | fix_args container.args
-printf -- '-m 8g\n--cpus 4\n' | fix_args local.args
-assert_eq "order:container-args-is-read-first" "-m
-1g
---cpus
-1
--m
-8g
---cpus
-4" "$(parsed)"
-# And the consequence, read off the run line rather than restated: the LAST -m podman sees is
-# local.args'. This is the sentence the documentation makes, and podman's own
-# last-occurrence-wins is what turns it into an override.
-assert_eq "order:the-last-occurrence-is-local-args" "8g" \
-          "$(parsed | awk '$0 == "-m" { want = 1; next } want { v = $0; want = 0 } END { print v }')"
+printf -- '-e A=1\n' | fix_args container.args
+assert_eq "parse:a-readable-args-file-parses" "-e
+A=1" "$(parsed)"
+assert_exit "parse:a-readable-args-file-exits-0" 0 "$FIX/cs193v" --dev-args
+assert_eq "parse:a-readable-args-file-is-silent" "" "$("$FIX/cs193v" --dev-args 2>&1 >/dev/null)"
 
 # ─── the instance rewrite, which renames six volumes ──────────────────────────
 # The volume names live in container.args, so the CS193V_INSTANCE suffix has to be applied as
@@ -447,7 +397,7 @@ Q=?
 BRACKET=[abc]" "$(globbed)"
 
 # THE CASE THAT IS NOT INERT, pinned so it is on the record rather than in someone's memory: a
-# word that is a bare pattern expands, so one local.args produces different podman flags
+# word that is a bare pattern expands, so one container.args produces different podman flags
 # depending on where the launcher was started. Nothing in the shipped container.args is this
 # shape, which is the only reason it has never bitten.
 fix_reset
@@ -485,7 +435,7 @@ assert_eq "literal:quotes-and-backslashes-are-not-interpreted" \
 # live tiers at another checkout's processes. That is issue #46 in the other direction.
 #
 # THE PORT HALF OF THIS GROUP IS GONE, and it is worth saying why rather than leaving a gap: the
-# spec, the range expansion, the local.args override and the backwards-range warning were all
+# spec, the range expansion, the per-machine override and the backwards-range warning were all
 # about a declared list, and nothing declares ports now. They were not weakened or moved; the
 # behaviour they described does not exist. What a suite needs from this seam is identity, which
 # is everything below.
@@ -495,7 +445,7 @@ tun()        { "$FIX/cs193v" --dev-tunnel 2>/dev/null; }
 tun_field()  { tun | awk -F'\t' -v k="$1" '$1 == k { print $2 }'; }
 
 fix_reset
-printf -- '--memory=1g\n' | fix_args container.args
+printf -- '--hostname=probe\n' | fix_args container.args
 # NO PORT LINES AT ALL, asserted rather than assumed. A `port` line coming back would mean someone
 # reintroduced a declared list, and lib/assert.sh would not notice -- it stopped reading them.
 assert_eq "tunnel:no-port-lines-are-printed" "" \

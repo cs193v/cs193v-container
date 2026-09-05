@@ -3,8 +3,7 @@
 Written by a Claude Code instance working through `VERIFICATION.md` on **native Ubuntu
 26.04**, 2026-08-05. This machine is the ideal native-Linux rig: Ubuntu 26.04 LTS,
 rootless podman 5.7.0 (exactly `MIN_PODMAN`), pasta, crun, cgroup v2 with `cpu memory pids`
-delegated to uid 1000, `/etc/subuid` populated, systemd as PID 1. **3.4 GB RAM**, which is
-worth knowing because the installer's own formula declines to set a memory cap that low.
+delegated to uid 1000, `/etc/subuid` populated, systemd as PID 1, **3.4 GB RAM**.
 
 Every item below is reproducible with `tests/run-tests.sh`. Sections:
 
@@ -1215,15 +1214,13 @@ those between image tags that share layers. Each new tag therefore costs roughly
 image (~1.5 GB), not a thin layer. This machine hit "no space left on device" at 95% full on
 the first attempt to run a derived image.
 
-### D5. cgroup delegation — is `memory.max` the cap, or `max`?
+### D5. cgroup delegation — is a rootless cgroup delegated at all?
 
-**The cap, exactly.** `--memory=1024m` yields `memory.max = 1073741824`. The `pids` cap is
-podman's default 2048 and is enforced (`sh: 0: Cannot fork` at `--pids-limit 64`). An OOM is
-clean: the process is `Killed` with **exit 137**, the container stays `running`, and
-`podman exec` still works.
+**Yes, here.** The `pids` cap is podman's default 2048 and is enforced (`sh: 0: Cannot fork`
+at `--pids-limit 64`), so the controllers really do reach uid 1000.
 
 This answers §5.5 for **Linux only**. WSL with `systemd=true` is the case that still needs
-checking, and it is the one where the answer might be `max`.
+checking, and it is the one where the answer might be that nothing is delegated.
 
 ### D6. The LSM label — AppArmor on this machine, SELinux on the next one
 
@@ -1238,11 +1235,6 @@ machine this pass ran on. And `container_t` with MCS categories is real type enf
 is *more* than the Ubuntu answer rather than less, so a check expecting the Ubuntu string went
 red on the better value. Nothing asserts either string now: `60-container.sh` records
 `kernel:lsm-label-applied` and `VERIFICATION.md` §A.5 records `lsm-label`.
-
-### D7. `/proc` is not cgroup-aware
-
-`free=3398MB cgroup=1024MB`. A student running `free` inside sees the host's RAM, not their
-limit, so nothing in `/proc` can tell them what their cap actually is.
 
 ### D8. Does `podman start` really ignore new flags?
 
@@ -1319,13 +1311,13 @@ An *untrimmed* `"\r"` splits into ONE field — a bare `\r` — where `"   "` sp
 
 Nothing depends on that today, because the trim always runs first. It is the trap waiting for whoever
 replaces the `sed` with parameter expansion: a bash trim covering only space and tab would put a bare
-`\r` on the `podman run` line for every blank line of a CRLF `local.args`, which is what a person
-editing that git-ignored file on Windows produces. The replacement measured 18–20 ms and was rejected
+`\r` on the `podman run` line for every blank line of a CRLF `container.args`, which is what a
+person editing that file on Windows produces. The replacement measured 18–20 ms and was rejected
 for exactly this reason — ~30 ms is not worth owning `[[:space:]]`'s definition while `preflight` still
 carries ~570 ms (D11).
 
 **Also found, not fixed:** if `sed` is missing or broken, `load_args` yields an empty `ARGS` and the
-container is created with no volumes, ports or memory cap, reporting nothing. Verified identical before
+container is created with no volumes and no ports, reporting nothing. Verified identical before
 and after this change, so it is neither caused nor fixed here.
 
 ### D11. `podman info` costs ~570 ms, and 48 `dpkg` processes are why
