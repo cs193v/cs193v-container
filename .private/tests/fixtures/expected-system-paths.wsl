@@ -15,14 +15,23 @@
 # over /usr/bin/podman, which already exists in the image, so it adds no path here. Mounting it
 # at /usr/local/bin/podman instead put it in this list as a change the installer had made.
 #
-# AND /tmp IS ABSENT FOR THE SAME REASON, which is worth stating because it used to be listed.
-# A REAL podman writes /tmp/containers-user-$UID and /tmp/podman-run-$UID the first time it runs
-# -- measured, and it is why expected-system-paths.podman-old does claim `C /tmp`. This case asks
-# for --fake-podman, so the only podman on PATH is a shell script and nothing goes near /tmp.
-# The line was inherited from a fixture that had a real podman and survived the move to
-# base=machine unexamined: 48a54d0 rewrote every comment in this file and touched no path.
+# AND /tmp IS LISTED, WHICH IS NOT ABOUT PODMAN AT ALL. This line was briefly removed on the
+# macOS branch with the reasoning that a REAL podman writes /tmp/containers-user-$UID and
+# /tmp/podman-run-$UID on first run -- true, and it is why expected-system-paths.podman-old
+# claims it -- so a --fake-podman case could not reach /tmp. That reasoning was sound and the
+# measurement behind it was not: this case runs the installer to completion, which calls the
+# LAUNCHER three times (installer:1044 --rebuild, :1101 --dev-print-command, :1120 doctor),
+# and --rebuild writes METER_STATE, BUILD_LOG and run_timeout's scratch into ${TMPDIR:-/tmp}
+# whichever podman is on PATH. TMPDIR is not forwarded into these containers, so it is unset
+# in here -- and at the time it was measured, an unguarded `${TMPDIR%/}` under `set -u` killed
+# the launcher on its 152nd line before it could write any of them. /tmp stayed clean because
+# the launcher was dead, so removing the line recorded the bug as the expectation.
+#
+# The lesson is the one the fixture is for: a path DISAPPEARING from a diff is evidence about
+# the code, and "we no longer touch it" and "we no longer get that far" look identical here.
 A /etc/wsl.conf
 A /work
 C /etc
 C /home
 C /home/student
+C /tmp
