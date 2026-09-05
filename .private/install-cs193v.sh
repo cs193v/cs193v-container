@@ -68,11 +68,29 @@ PODMAN_MACOS_VERSION="6.0.2"              # bump when you re-test; used only on 
 DEFAULT_DIR="$HOME/cs193v"
 WSL_DISTRO="CS193V"
 
-# How much RAM to hand the macOS virtual machine: a share of the Mac's RAM, never so
-# much that macOS itself is starved, and capped because a VM does not benefit from more.
-MAC_VM_SHARE_PCT=75
-MAC_VM_LEAVE_GB=4
-MAC_VM_MAX_GB=16
+# How much RAM to hand the macOS virtual machine. podman's own default is 2048 MB, which is
+# too small to build this image, so the size is chosen here rather than left to it.
+#
+# THE POLICY IS WSL2's, deliberately, because Windows answers the same question for the same
+# kind of guest: half the host, capped at 8 GB. Borrowed rather than invented, so the number
+# has a reference point outside this project rather than being one person's taste.
+#
+# WHY A CEILING AT ALL, since two tempting reasons are both false and were measured to be.
+# It is NOT that a big VM costs the host that memory up front: on an 8 GB Mac with a 4 GiB
+# machine running a container, krunkit's RSS was 0.89 GB, so libkrun demand-pages. And it is
+# NOT that the figure is unrevisable: `podman machine set --memory` works on libkrun -- 4096 ->
+# 4608 -> 4096, applied and reverted, on podman 6.0.2 -- whatever podman-machine-set(1) says
+# about QEMU.
+#
+# It is that this workload does not benefit from more. The image is 2.48 GB and a cold build
+# is 242 s; nothing here scales with a bigger VM, so the ceiling costs a student nothing they
+# would have used, and a smaller ceiling leaves more of a laptop for the laptop. Raising it
+# for a machine that really needs more is one `machine set --memory` away.
+#
+# The floor is ours: 4 GB is the smallest VM this build has been seen to work in (ERRORS.md's
+# rig had 3.4 GB).
+MAC_VM_SHARE_PCT=50
+MAC_VM_MAX_GB=8
 MAC_VM_MIN_GB=4
 
 # And how much DISK to give it. Sized for a build rather than a download: a measured cold
@@ -710,11 +728,9 @@ Please contact course staff rather than working around it."
 }
 
 mac_vm_target_mb() {
-    local host_gb share leave
+    local host_gb share
     host_gb=$(( $(host_ram_mb) / 1024 ))
     share=$(( host_gb * MAC_VM_SHARE_PCT / 100 ))
-    leave=$(( host_gb - MAC_VM_LEAVE_GB ))
-    [ "$share" -gt "$leave" ] && share="$leave"
     [ "$share" -gt "$MAC_VM_MAX_GB" ] && share="$MAC_VM_MAX_GB"
     [ "$share" -lt "$MAC_VM_MIN_GB" ] && share="$MAC_VM_MIN_GB"
     printf '%d' $(( share * 1024 ))

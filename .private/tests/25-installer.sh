@@ -144,26 +144,40 @@ assert_contains "menu:arrow-down-works" '${ESC}[B' "$(cat "$TMP/keys.ui")"
 assert_contains "menu:enter-selects"    'break'    "$(cat "$TMP/keys.ui")"
 assert_contains "menu:digits-select"    '[1-9]'    "$(cat "$TMP/keys.ui")"
 
-# The macOS VM sizing formula. A Mac's containers run in a fixed-size VM that does not
-# scale with the host, and podman's default is too small for this course.
+# The macOS VM sizing formula. A Mac's containers run in a fixed-size VM that does not scale
+# with the host, and podman's default of 2048 MB is too small for this course.
 cat > "$TMP/vm.sh" <<'EOF'
-MAC_VM_SHARE_PCT=75
-MAC_VM_LEAVE_GB=4
-MAC_VM_MAX_GB=16
+MAC_VM_SHARE_PCT=50
+MAC_VM_MAX_GB=8
 MAC_VM_MIN_GB=4
 host_ram_mb() { printf '%s' "$FAKE_RAM_MB"; }
 EOF
 sed -n '/^mac_vm_target_mb()/,/^}$/p' $PRIVATE/install-cs193v.sh >> "$TMP/vm.sh"
 vm_for() { ( . "$TMP/vm.sh"; FAKE_RAM_MB="$1" mac_vm_target_mb ); }
-#  8 GB: 75% = 6, but leave 4 for macOS -> 4 GB
-# 16 GB: 75% = 12, leave 12 -> 12 GB
-# 32 GB: 75% = 24, capped at 16 -> 16 GB
-# 64 GB: capped at 16 GB — a VM gains nothing from more
+#  4 GB: 50% = 2, floored at 4 -> 4 GB (the whole Mac; a machine this small is out of scope)
+#  8 GB: 50% = 4 -> 4 GB
+# 12 GB: 50% = 6 -> 6 GB
+# 16 GB: 50% = 8 -> 8 GB
+# 32 GB: 50% = 16, capped at 8 -> 8 GB
+# 64 GB and up: capped at 8 GB
+#
+# THE 12 GB CASE IS THE ONLY ONE THE SHARE DECIDES ON ITS OWN, which is why it is here even
+# though Apple ships no 12 GB Mac. Every other row is pinned by a clamp -- 4 and 8 by the floor,
+# 32 and up by the ceiling, and 16 by both at once, since 50% of 16 is exactly MAC_VM_MAX_GB.
+#
+# WHAT IT ACTUALLY CATCHES, measured by mutating MAC_VM_SHARE_PCT rather than guessed: a share
+# of 60% is caught by this row and by NOTHING else in the table. 66% is also caught by the 8 GB
+# row, and dropping the share arithmetic entirely is caught by the floor rows -- so the gap this
+# closes is a percentage drifting a little above 50, which is exactly the edit someone would
+# make by hand. Integer division sets the floor of the gap: 55% of 12 is still 6, so a change
+# that small is invisible to every row here and would need a 24 GB one to see.
+assert_eq "mac-vm:4GB-host"  "4096"  "$(vm_for 4096)"
 assert_eq "mac-vm:8GB-host"  "4096"  "$(vm_for 8192)"
-assert_eq "mac-vm:16GB-host" "12288" "$(vm_for 16384)"
-assert_eq "mac-vm:32GB-host" "16384" "$(vm_for 32768)"
-assert_eq "mac-vm:64GB-host" "16384" "$(vm_for 65536)"
-assert_eq "mac-vm:never-exceeds-the-cap" "16384" "$(vm_for 131072)"
+assert_eq "mac-vm:12GB-host" "6144"  "$(vm_for 12288)"
+assert_eq "mac-vm:16GB-host" "8192"  "$(vm_for 16384)"
+assert_eq "mac-vm:32GB-host" "8192"  "$(vm_for 32768)"
+assert_eq "mac-vm:64GB-host" "8192"  "$(vm_for 65536)"
+assert_eq "mac-vm:never-exceeds-the-cap" "8192" "$(vm_for 131072)"
 
 # ─── the course files, served from a local tarball  (§A.12 needs this too) ─────
 # BUILT BEFORE THE CONSENT CASES, not beside the idempotency ones it was written for, and
@@ -413,13 +427,13 @@ shim_new; shim_fake_mac
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
 out="$(installer_tty '\033[B\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says "consent-yes:the-arrow-moved-the-selection" "Go ahead" "$out"
-assert_says "consent-yes:the-resize-ran"     "Resizing podman's virtual machine to 12288 MB" "$out"
+assert_says "consent-yes:the-resize-ran"     "Resizing podman's virtual machine to 8192 MB" "$out"
 assert_says "consent-yes:reports-the-resize" "resized and restarted" "$out"
 assert_says "consent-yes:finishes"           "Setup finished" "$out"
 # The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
 # before setting memory -- podman refuses to change a running one -- and start it again.
 assert_says "consent-yes:stopped-before-setting" "machine stop"              "$(installer_log)"
-assert_says "consent-yes:set-the-memory"         "machine set --memory 12288" "$(installer_log)"
+assert_says "consent-yes:set-the-memory"         "machine set --memory 8192" "$(installer_log)"
 assert_says "consent-yes:started-again"          "machine start"              "$(installer_log)"
 # Nothing on this path needs root, so the fake sudo must have been left alone entirely.
 assert_eq "consent-yes:needed-no-privilege" "" "$(sudo_log)"
@@ -738,7 +752,7 @@ assert_says "check-disk:low-disk-is-not-fatal"    "Setup finished"          "$ou
 # is asserted below; the execution half needs a pty.
 mac_run() {                           # mac_run [KEY VALUE]... -> the installer's output
     shim_new
-    shim_fake_mac                     # 16 GiB arm64 -> mac_vm_target_mb wants 12288 MB
+    shim_fake_mac                     # 16 GiB arm64 -> mac_vm_target_mb wants 8192 MB
     while [ "$#" -gt 1 ]; do shim_set "$1" "$2"; shift 2; done
     # The destination lives under the shim rather than a counter, because a counter
     # incremented in this subshell would be 1 for every case -- so all of them would share
@@ -756,12 +770,12 @@ assert_says "mac:platform-is-detected" "macos on arm64" "$out"
 # init is announced with ok(), not need(), so it is the one machine change that needs no
 # consent -- which is what makes this reachable with no tty at all.
 assert_says "mac-init:announced-in-the-survey" "virtual machine will be created" "$out"
-assert_says "mac-init:names-the-size-it-will-use" "12288 MB, 64 GB disk" "$out"
+assert_says "mac-init:names-the-size-it-will-use" "8192 MB, 64 GB disk" "$out"
 assert_says "mac-init:reports-success" "created and started" "$out"
 # The flags, not just the prose: --now matters (without it the machine is created stopped
 # and every later podman call fails), and the two values must be the computed ones.
 assert_says "mac-init:asks-for-the-computed-size" \
-            'machine init --memory 12288 --disk-size 64 --now' "$(installer_log)"
+            'machine init --memory 8192 --disk-size 64 --now' "$(installer_log)"
 assert_says_not "mac-init:does-not-also-resize" "Resizing" "$out"
 
 out="$(mac_run machine_init_rc 1)"
@@ -770,10 +784,10 @@ assert_says_not "mac-init:failure-does-not-claim-success" "Setup finished" "$out
 assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
 
 # ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
-# 80% of 12288 is 9830, so 4096 is under it and 16384 is over.
+# 80% of 8192 is 6553, so 4096 is under it and 16384 is over.
 out="$(mac_run machine_list podman-machine-default machine_mem 4096)"
 assert_says "mac-resize:offered-when-the-vm-is-small" \
-            "more memory (4096 MB -> 12288 MB)" "$out"
+            "more memory (4096 MB -> 8192 MB)" "$out"
 assert_says "mac-resize:explains-why-a-mac-needs-it" "fixed amount of memory" "$out"
 # EVERY NEGATIVE BELOW IS PAIRED WITH A POSITIVE OFF THE SAME VALUE. An empty argv.log --
 # a wrong path, a run that never started -- satisfies `machine set is absent` perfectly,
