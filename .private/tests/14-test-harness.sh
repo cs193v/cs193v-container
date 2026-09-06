@@ -281,6 +281,73 @@ assert_contains "runner:still-counts-what-ran"      "2 pass"                "$ou
 assert_match    "runner:names-the-one-that-could-not-record" '03-cannot-record\.sh +exited 97' "$out"
 assert_contains "runner:says-results-were-lost"    "results were LOST"     "$out"
 
+# ─── the ports fixture HARD-FAILS, and hands its ports back in a variable ──────
+# #164, and the third time the subshell boundary has eaten something load-bearing here (#76 was
+# repo_copy's memo, #79 the checkers). dyn_ports is the fixture every port assertion in
+# 60-container.sh rests on, and it is the ONE library function that both emits a result and
+# exits -- so the shape of its call site is the whole of whether that exit means anything.
+# Wrapped in a `$( )` the exit ended the subshell, the suite carried on, and it recorded `PASS
+# ports:a-port-bound-inside-reaches-the-host` with nothing forwarded and `PASS
+# ports:no-forward-is-lan-exposed` -- the security property -- with an empty pid to filter on.
+#
+# SO THE PORTS COME BACK IN $DYN_PORTS AND NOT ON STDOUT. That is the half of the fix a test can
+# hold: a fixture with no value to substitute cannot be wrapped in a `$( )` that looks like it
+# works, and 10-static.sh's harness:no-exiting-helper-runs-in-a-subshell covers the call sites.
+# The `> file` is a redirect and not a substitution, deliberately -- it isolates what dyn_ports
+# printed without putting the banned shape in this file.
+#
+# THE TUNNEL IS FAKED AT THE SEAM dyn_ports READS IT THROUGH, because this suite is the unit tier:
+# no podman, no container, and the real version of this needs a broken one. The carrying case
+# keeps the REAL wait_until, which returns on its first poll; the failing case stubs it, because
+# the real one would spend its full 30-second budget per port to tell us what we already set up.
+# The port stub counts the AVOID list it is handed rather than incrementing a counter, for the
+# reason this whole section exists: dyn_ports calls it as `p="$(dyn_free_port $got)"`, so a
+# variable it bumped would be bumped in the subshell and both ports would come back 20000.
+cat > "$WORK/dyn-carries.sh" <<'CHILD'
+set -u
+. "$1"
+fwd_init()         { FWD_READY=1; }
+dyn_free_port()    { printf '%s' "$((20000 + $#))"; }
+dyn_serve()        { :; }
+dyn_is_forwarded() { return 0; }
+dyn_ports 2 > "$2"
+printf 'DYN_PORTS=[%s]\n' "$DYN_PORTS"
+printf 'REACHED-THE-END\n'
+CHILD
+out="$(CS193V_RESULTS="$WORK/dyn-carries.tsv" CS193V_SUITE=child NO_COLOR=1 \
+       bash "$WORK/dyn-carries.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dyn-stdout" 2>&1)"
+assert_contains "dynports:the-ports-come-back-in-a-variable" "DYN_PORTS=[20000 20001]" "$out"
+# The one that was red. Its ports on stdout are what made `DYN2="$(dyn_ports 2)"` the natural
+# thing to write, and $DYN_PORTS dead: set in the subshell, lost with it.
+assert_eq       "dynports:and-not-on-stdout" "" "$(cat "$WORK/dyn-stdout")"
+assert_contains "dynports:a-carried-port-does-not-stop-the-suite" "REACHED-THE-END" "$out"
+
+cat > "$WORK/dyn-carries-nothing.sh" <<'CHILD'
+set -u
+. "$1"
+fwd_init()         { FWD_READY=1; }
+dyn_free_port()    { printf '%s' "$((20000 + $#))"; }
+dyn_serve()        { :; }
+fwd_owned_ports()  { :; }
+podman()           { return 1; }
+wait_until()       { return 1; }
+dyn_ports 2
+printf 'REACHED-THE-END\n'
+CHILD
+out="$(CS193V_RESULTS="$WORK/dyn-nothing.tsv" CS193V_SUITE=child NO_COLOR=1 \
+       bash "$WORK/dyn-carries-nothing.sh" "$TESTS_DIR/lib/assert.sh" 2>&1; printf '[rc=%s]' "$?")"
+assert_contains "dynports:a-tunnel-carrying-nothing-fails"      "require:dynports" "$out"
+assert_contains "dynports:it-ends-the-suite"                    "[rc=1]"           "$out"
+assert_not_contains "dynports:nothing-downstream-of-it-runs"    "REACHED-THE-END"  "$out"
+# The DIAGNOSTIC has to reach the developer, and this is the half the `$( )` also swallowed:
+# fail's detail goes to stdout, so the two commands that fix a dead tunnel were captured into
+# $DYN2 and flattened into a REC line instead of being printed.
+assert_contains "dynports:it-says-how-to-fix-the-tunnel"        "cs193v --reset-tunnel" "$out"
+# And the results file carries the FAIL and NOTHING ELSE: a vacuous PASS beside it is the whole
+# harm, and it is what run-tests.sh would have counted.
+assert_eq "dynports:it-records-one-fail-and-no-pass" "FAIL require:dynports" \
+          "$(do_awk -F'\t' '{print $1, $3}' "$WORK/dyn-nothing.tsv" | do_tr '\n' '|' | sed 's/|$//')"
+
 # ─── a CHECKER that could not run must fail, not pass ──────────────────────────
 # THE SAME DEFECT AS #76, one layer in. box_problems and render_pty both pipe their input
 # through `python3 -c`, and both are read by assertions whose HAPPY answer is the empty string:
