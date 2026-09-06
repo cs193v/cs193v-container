@@ -273,11 +273,41 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     case "$drop" in *,label,*)    : ;; *) MACHINE_FLAGS+=(--security-opt label=disable) ;; esac
     fi
     fi
-    # A BIND MOUNT IS THE WHOLE WSL ARM. platform() decides by `grep -qi microsoft
-    # /proc/version` (installer:306) and the effect is two file writes, so it is executable on
-    # Linux with no Windows anywhere.
+    # ─── A BIND MOUNT IS THE WHOLE PLATFORM AXIS -- BOTH ARMS OF IT (#152) ─────
+    #
+    # platform() decides by `grep -qi microsoft /proc/version` (install-cs193v.sh:427) and the
+    # effect is two file writes, so the wsl arm is executable on Linux with no Windows anywhere.
+    # That much was always true and is why the mount was here at all.
+    #
+    # WHAT WAS MISSING IS THE OTHER ARM, and its absence was not neutral. `linux` had no case, so
+    # it mounted nothing and the fixture read the HOST's /proc/version -- and there is no namespace
+    # that can change that answer, because a container shares the host's kernel. So the fixture's
+    # platform axis meant whatever the developer's own machine meant, and on a WSL host it went
+    # wrong in both directions at once:
+    #
+    #   * every platform=linux fixture detected as wsl. sb-fed:detected-as-plain-linux and
+    #     sb-arch:looked-at-the-computer-first went red against an installer behaving perfectly,
+    #     and the two cases that exist to exercise the NON-WSL Linux paths could not.
+    #   * the wsl case's own guard stopped measuring anything. sb-wsl:detected-as-wsl-on-linux is
+    #     asserted first precisely because everything below rests on this mount -- and on a WSL
+    #     host it passed whether or not the mount worked, because the host already says microsoft.
+    #     Green having measured nothing, on the check guarding the other four.
+    #
+    # SO BOTH ARMS ARE FAKED, AND THE FILE IS PICKED BY NAME. sb_work_init writes one string per
+    # platform and records why the builder field in them is load-bearing; this only has to choose.
+    #
+    # OUTSIDE THE NESTING GATE ABOVE, deliberately: the fake is not a privilege, it is what the
+    # platform axis IS, and the three bases that do not nest -- debian, fedora, arch -- are exactly
+    # the cases #152 was reported from.
+    #
+    # AND A PLATFORM THIS FUNCTION DOES NOT KNOW IS REFUSED, like an unknown drop name above. It
+    # has to be now that the arm builds a PATH out of the value: an unvalidated typo would mount a
+    # file that does not exist, and podman would fail with a sentence about this harness's temp
+    # directory rather than about the typo. sb_machine validates linux|wsl as well; nest_probe and
+    # nest_build bypass sb_machine entirely and reach this directly, which is why both gates exist.
     case "$platform" in
-        wsl) MACHINE_FLAGS+=(-v "$SB_WORK/proc-version:/proc/version:ro$VT_MOUNT_Z") ;;
+        linux|wsl) MACHINE_FLAGS+=(-v "$SB_WORK/proc-version.$platform:/proc/version:ro$VT_MOUNT_Z") ;;
+        *) printf 'machine_flags: unknown platform %s\n' "$platform" >&2; return 2 ;;
     esac
     # A TEST CONVENIENCE, NAMED AS ONE, and deliberately on neither axis: a fake podman is
     # not an absence and not a capability, and it is not a machine any student could have.
@@ -422,9 +452,39 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     mkdir -p "$SB_WORK"
     copy_course_tree "$SB_TMP/pkg/cs193v-main"
     ( cd "$SB_TMP/pkg" && tar czf "$SB_WORK/course.tar.gz" cs193v-main )
-    # What platform() greps. Bound over /proc/version at run time, which is the entire cost
-    # of making the WSL arm executable on Linux.
-    printf 'Linux version 6.6.0-microsoft-standard-WSL2 (x86_64) #1 SMP\n' > "$SB_WORK/proc-version"
+    # ─── what platform() greps, for BOTH answers (#152) ───────────────────────────
+    #
+    # TWO FILES, ONE PER PLATFORM, and the second one is the fix. Only the wsl string used to be
+    # written, so `platform=linux` -- the default, and every non-WSL fixture -- read the HOST's
+    # /proc/version. There is no namespace that can present a different one: a container shares
+    # the host's kernel and therefore its /proc/version, so an arm with no bind mount inherits
+    # whatever the developer's own machine says. On a WSL host that made the linux fixtures detect
+    # as wsl AND made the wsl assertion unable to fail. Bound over /proc/version by machine_flags.
+    #
+    # `(cs193v-fixture@sandbox)` IS THE BUILDER FIELD, AND IT IS LOAD-BEARING. A real /proc/version
+    # names the user@host that COMPILED the kernel -- `(root@f1bbfb02316b)` on a WSL2 kernel,
+    # `(buildd@lcy02-amd64-078)` on a stock Ubuntu -- and no kernel anywhere was built by this one.
+    # So these two strings are ones no host can be reporting, which is what lets a case assert the
+    # mount LANDED by equality rather than by `grep -qi microsoft`. That distinction is the whole
+    # of #152's second half: a microsoft-or-not check is satisfied on a WSL host by the host's own
+    # string, so it would pass whether or not podman bound anything.
+    printf 'Linux version 6.6.0-microsoft-standard-WSL2 (cs193v-fixture@sandbox) #1 SMP PREEMPT_DYNAMIC\n' \
+        > "$SB_WORK/proc-version.wsl"
+    printf 'Linux version 6.8.0-51-generic (cs193v-fixture@sandbox) #52-Ubuntu SMP PREEMPT_DYNAMIC\n' \
+        > "$SB_WORK/proc-version.linux"
+    # AND MEASURED RATHER THAN TRUSTED, because "no host can report this" is exactly the kind of
+    # claim this file asks to be measured everywhere else. A fixture string that equalled the
+    # host's would make the mount unmeasurable -- the equality assertion downstream would pass
+    # having proved nothing -- and that is the vacuous green #152 is about, reappearing in the fix.
+    # `cmp -s` is FALSE where /proc/version does not exist, which is macOS and the right answer.
+    local pv
+    for pv in "$SB_WORK/proc-version.wsl" "$SB_WORK/proc-version.linux"; do
+        if cmp -s "$pv" /proc/version; then
+            fail "sandbox:the-fake-proc-version-differs-from-this-host-s" \
+                 "$pv is byte-identical to this host's /proc/version, so the bind mount cannot be measured"
+            return 1
+        fi
+    done
     # THE SAME `sandbox` COMMAND THE HAND-DRIVEN TOOL GETS, so the arrangement of a machine has
     # ONE implementation. run.sh used to carry its own copy of the wsl.conf cases while
     # lib/sandbox-guest.sh carried another, which is the drift this whole change exists to stop
@@ -659,6 +719,12 @@ printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
 # used to hardcode x86_64 and so passed or failed on whether their base image was pinned to a
 # per-architecture digest -- which is a fact about the pin, not about the installer.
 printf '===ARCH===\n';      uname -m
+# WHAT platform() ACTUALLY READ (#152), so the platform axis is measured rather than assumed. A
+# container shares the host's kernel, so this is the host's string unless machine_flags bound one
+# over it -- and the two are told apart by the builder field sb_work_init writes, not by whether
+# the word microsoft is in them. That matters most on a WSL host, where microsoft-or-not is
+# satisfied by the host either way and the wsl case's own guard could not fail.
+printf '===PROC-VERSION===\n'; cat /proc/version 2>/dev/null
 printf '===ETC-SUBUID===\n'; cat /etc/subuid  2>/dev/null
 printf '===ETC-SUBGID===\n'; cat /etc/subgid  2>/dev/null
 printf '===WSL-CONF===\n';   cat /etc/wsl.conf 2>/dev/null

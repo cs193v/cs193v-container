@@ -390,33 +390,73 @@ assert_eq "record:an-empty-value-is-still-a-field" "4" \
 # is satisfied by an empty array. That is lib/assert.sh's vacuous-green shape exactly, and it was
 # green against a deliberately broken call while this block was being written. An equality says
 # both halves at once: the flag went, and nothing else moved.
-mf() {                                # mf VT_SELINUX DROP BASE -> the flag list, or REFUSED-N
+#
+# ─── ...AND THE PLATFORM ARM, WHICH IS A UNIT TEST FOR THE SAME REASON (#152) ───
+#
+# The fixture's /proc/version is faked by a bind mount, and only the wsl arm had one -- so the
+# linux arm read the HOST's, and the fixture's platform axis meant whatever the developer's own
+# machine meant. That is decided by the host exactly the way the SELinux arm above is, so the
+# behavioural half can only ever exercise one answer: on a WSL host the linux fixtures detect as
+# wsl, and on every other host the defect is invisible. These calls exercise both arms anywhere.
+#
+# $SB_WORK IS SET HERE, and it has to be: the mount is built from it, and this subshell sources
+# lib/sandbox.sh WITHOUT running sb_work_init. A literal keeps the expected lists readable and
+# keeps them from depending on where new_tmpdir happened to put things.
+mf() {                                # mf VT_SELINUX DROP BASE [PLATFORM] -> the flag list, or REFUSED-N
     ( set -u
       # shellcheck source=lib/sandbox.sh
       . "$TESTS_DIR/lib/sandbox.sh"
       VT_SELINUX="$1"
-      machine_flags "$2" linux no "$3" || { printf 'REFUSED-%s' "$?"; exit 0; }
+      # ON ITS OWN LINE, and that is not formatting. A `disable` directive attaches to the next
+      # COMMAND, so written after `VT_SELINUX="$1";` on one line it covers that assignment and the
+      # warning still fires on this one.
+      # shellcheck disable=SC2034   # read by machine_flags in the sourced lib/sandbox.sh
+      SB_WORK=/w
+      machine_flags "$2" "${4:-linux}" no "$3" || { printf 'REFUSED-%s' "$?"; exit 0; }
       printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} | sed 's/ $//' )
 }
 MF_NEST='--cap-add=SYS_ADMIN --security-opt unmask=/proc/* --device /dev/fuse --device /dev/net/tun'
+# INTERPOLATED, NOT HARDCODED: $VT_MOUNT_Z is `,z` on an SELinux host and empty everywhere else,
+# and 10-static.sh requires the mount to carry it. A literal would make every expectation below
+# wrong on exactly the hosts #119 was filed from.
+MF_PROC="-v /w/proc-version.linux:/proc/version:ro$VT_MOUNT_Z"
 
 assert_eq "flags:on-selinux-a-nested-base-runs-with-the-label-off" \
-          "$MF_NEST --security-opt label=disable" "$(mf yes '' machine)"
+          "$MF_NEST --security-opt label=disable $MF_PROC" "$(mf yes '' machine)"
 # THE OTHER HALF OF lib/shared.sh's RULE -- fix Fedora without changing anything else. Off
 # SELinux this must be byte-identical to what every machine got before #119, which is what makes
 # the comparison with $MF_NEST alone the assertion rather than a spot check.
-assert_eq "flags:off-selinux-the-flag-set-is-unchanged" "$MF_NEST" "$(mf '' '' machine)"
-assert_eq "flags:the-drop-name-takes-only-the-label-away" "$MF_NEST" "$(mf yes label machine)"
+assert_eq "flags:off-selinux-the-flag-set-is-unchanged" "$MF_NEST $MF_PROC" "$(mf '' '' machine)"
+assert_eq "flags:the-drop-name-takes-only-the-label-away" "$MF_NEST $MF_PROC" "$(mf yes label machine)"
 # TWO DROPS AT ONCE, because sandbox_run appends `label` to whatever a case already asked for and
 # sb-noans really does ask for `sysadmin`. If the append clobbered instead of adding, this is
 # where it shows.
 assert_eq "flags:two-drops-compose" \
-          "--security-opt unmask=/proc/* --device /dev/fuse --device /dev/net/tun" \
+          "--security-opt unmask=/proc/* --device /dev/fuse --device /dev/net/tun $MF_PROC" \
           "$(mf yes sysadmin,label machine)"
-# A BASE THAT DIES IN SURVEY GETS NONE OF IT, label included -- the arm is inside the nesting gate.
-assert_eq "flags:a-base-that-does-not-nest-gets-nothing-at-all" "" "$(mf yes '' debian)"
+# A BASE THAT DIES IN SURVEY GETS NONE OF THE NESTING SET, label included -- that arm is inside the
+# nesting gate. IT STILL GETS ITS /proc/version, and that is not an inconsistency: the fake is not
+# a privilege, it is what the fixture's platform axis IS, and the three bases that do not nest --
+# debian, fedora, arch -- are exactly the cases #152 was reported from. So the mount sits OUTSIDE
+# the gate, which is what this expectation says.
+assert_eq "flags:a-base-that-does-not-nest-gets-nothing-at-all" "$MF_PROC" "$(mf yes '' debian)"
 # ...and a typo is refused rather than silently granting the thing it meant to remove.
 assert_eq "flags:an-unknown-drop-name-is-refused" "REFUSED-2" "$(mf yes labl machine)"
+
+# ─── the platform arm itself (#152) ────────────────────────────────────────────
+# THE DEFECT, IN ONE ASSERTION, and it is red on every host rather than only on a WSL one. Before
+# this, `linux` produced no mount at all and the fixture read the host's /proc/version.
+assert_eq "flags:the-linux-arm-fakes-proc-version-too" "$MF_NEST $MF_PROC" "$(mf '' '' machine linux)"
+# ...and the arm that always worked still picks its OWN file, not the linux one. Written as an
+# exact list for the reason the block above gives: an assertion that the wsl file is "in there"
+# would be satisfied by a refusal, which clears MACHINE_FLAGS before it validates.
+assert_eq "flags:the-wsl-arm-still-fakes-its-own" \
+          "$MF_NEST -v /w/proc-version.wsl:/proc/version:ro$VT_MOUNT_Z" "$(mf '' '' machine wsl)"
+# A PLATFORM THIS FUNCTION DOES NOT KNOW IS REFUSED, like an unknown drop name. It has to be: the
+# arm builds a path out of the value, so an unvalidated typo would mount a file that does not
+# exist and podman would fail with something about the harness's temp directory. sb_machine
+# validates linux|wsl too; nest_probe and nest_build bypass it and reach this directly.
+assert_eq "flags:an-unknown-platform-is-refused" "REFUSED-2" "$(mf yes '' machine wsel)"
 
 # ─── ...and lib/shared.sh's one door answers both of its consumers ─────────────
 #

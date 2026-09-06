@@ -36,14 +36,34 @@ record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)
 # ===ARCH=== section would reduce the needle to "wsl on ", which every WSL transcript already
 # contains -- so the assertion would pass forever having measured nothing. That is the shape
 # assert_system_diff guards against with the-diff-was-really-read, for the same reason.
+#
+# ─── AND THE INPUT, NOT ONLY THE VERDICT (#152) ────────────────────────────────
+#
+# THE HALF THAT WAS MISSING, and it is the same vacuity one paragraph up wearing a different
+# costume. platform() is `grep -qi microsoft /proc/version`, and a container shares the host's
+# kernel -- so before #152 the linux arm read the HOST's /proc/version and the platform axis meant
+# whatever the developer's machine meant. On a WSL host that is red in one direction and VACUOUS in
+# the other: sb-fed and sb-arch detected as wsl, while sb-wsl passed whether or not its bind mount
+# worked, because the host's own string already says microsoft.
+#
+# SO THE INPUT IS ASSERTED FIRST, BY EQUALITY. Against the file sb_work_init wrote, so the string
+# lives in one place; and by equality rather than "does it say microsoft", because that weaker
+# check is precisely the one a WSL host satisfies for free. The fixture's builder field
+# (cs193v-fixture@sandbox) is one no kernel can carry, so this passes only when podman really
+# bound the file -- which restores the ability to fail that the wsl case's guard is here for.
 assert_survey_platform() {            # assert_survey_platform NAME PLAT TRANSCRIPT
     local a; a="$(sb_section "$3" ARCH)"
     if [ -n "$a" ]; then pass "${1%%:*}:the-arch-was-reported"
     else fail "${1%%:*}:the-arch-was-reported" "no ===ARCH=== section, so '$2 on ...' would be vacuous"; return; fi
+    assert_eq "${1%%:*}:the-fixture-supplied-its-own-proc-version" \
+              "$(cat "$SB_WORK/proc-version.$2" 2>/dev/null)" "$(sb_section "$3" PROC-VERSION)"
     assert_says "$1" "$2 on $a" "$3"
 }
 
-sb_work_init
+# `|| exit 1`, LIKE fixture_build BELOW IT. sb_work_init can now refuse -- it checks that the
+# /proc/version strings it just wrote are not this host's -- and a refusal that only set a status
+# nobody read would leave every case below running against a half-built $SB_WORK.
+sb_work_init || exit 1
 fixture_build machine || exit 1
 
 # ─── a ceiling that fires announces itself, on the real pipeline (#130) ────────
@@ -321,6 +341,13 @@ sandbox_reap
 # than assumed: podman will bind a file over /proc/version, and the survey then reports
 # "wsl on <arch>" -- the platform word is the claim, and the arch half is checked against what
 # the fixture itself reports rather than against a constant. See assert_survey_platform.
+#
+# THE MOUNT IS NOT WHAT MAKES THIS THE WSL CASE (#152), and reading it that way is how the
+# fixture's platform axis came to mean two different things on two different hosts. EVERY case
+# here gets a /proc/version bound over it; what makes this one wsl is WHICH string. Before that
+# was true the linux arm had no mount and inherited the host's -- so on a WSL host these four
+# cases were the only ones whose platform was what they said it was, and even they could not
+# prove it, because the host's own string satisfied the check as well as the fixture's.
 #
 # FOUR STATES, NOT THREE, and the fourth is the point: survey looks for `systemd=true`
 # (installer:463) while setup_wslconf looks for `[boot]` (installer:639), so a file that has
