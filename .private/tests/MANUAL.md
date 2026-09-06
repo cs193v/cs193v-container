@@ -343,16 +343,18 @@ facts and only the pair of them means the gesture is intercepted.
 
 The gesture the box NAMES is per-terminal now (#122), and the box is the thing to read: whatever
 `cs193v-gesture link` says for your terminal is what should work. **Two rows have been measured**
-— Terminal.app and Ptyxis — and one more is extended from source to a terminal nobody has run
-(GNOME Terminal, which shares Ptyxis's token). The rest are still **rows to fill in, not claims**:
+— Terminal.app, Ptyxis and Windows Terminal — and one more is extended from source to a terminal
+nobody has run (GNOME Terminal, which shares Ptyxis's token). The rest are still **rows to fill
+in, not claims**:
 
 | Terminal | The box says | Measured? |
 |---|---|---|
 | **Terminal.app** | `FN+COMMAND+double-click` | **yes** — a local HTTP server received the request |
 | iTerm2 | select-and-paste | no. `Option+⌘+click` is plausible; Option bypasses, ⌘+click opens |
 | **GNOME Terminal, Ptyxis** (token `vte`) | `CTRL+click` | **yes on Ptyxis 50.1** — the click opened the browser. GNOME Terminal is the same token but **source only** (`terminal-screen.cc:1991` handles CTRL+button 1/2 and returns before chaining to VTE). Ptyxis takes it in a capture-phase `GtkGestureClick` (`ptyxis-terminal.ui:113`), ahead of the mouse report, so no SHIFT is involved |
-| Windows Terminal, VS Code | select-and-paste | no — and **the source says the box is under-selling**. WT puts its ctrl+click hyperlink branch *before* `_canSendVTMouseInput` ("GH#9396: we prioritize hyper-link over VT mouse events"); xterm.js activates links from a listener on the screen element that the mouse-report path never stops. Neither has been run. **Measure these next** — see PR #146 |
-| kitty | select-and-paste | no, but its `click_url_or_select_grabbed shift+left click grabbed` map says `Shift+click` should work — a guess from a keymap, where the two rows above now have source |
+| **Windows Terminal** | `CTRL+click` | **yes on 1.24.11911**, Windows 11 26200, 2026-09-05 — the click opened the browser with modes 1000 and 1006 both active, which is what settles it: had the hyperlink branch run after the report was encoded, the bytes would have gone to the pane instead. Source agrees and predicted it — the ctrl+click branch sits *before* `_canSendVTMouseInput` ("GH#9396: we prioritize hyper-link over VT mouse events"). Measured on WSL2, so the click is handled Windows-side and the browser is the Windows default |
+| VS Code | select-and-paste | no — and **the source says the box is under-selling**: xterm.js activates links from a listener on the screen element that the mouse-report path never stops, the same shape of argument Windows Terminal's row now rests on. **Still the one to measure next** — see PR #146. Source alone does not earn a row here; GNOME Terminal is not a counter-example, since it shares a token with a terminal that *was* run |
+| kitty | select-and-paste | no, but its `click_url_or_select_grabbed shift+left click grabbed` map says `Shift+click` should work — a guess from a keymap, where the measured rows above have source *and* hardware |
 | Alacritty | select-and-paste | no, and **expected to fail**: its URL hint matches on *no* modifier, so Shift may bypass reporting and still not open |
 | xterm, foot, legacy conhost | select-and-paste | **impossible** — no URL detection at all (foot: `CTRL+SHIFT+O` URL mode) |
 
@@ -1045,7 +1047,8 @@ rather than from hardware" — turned out to understate it. There is no single m
 | **Terminal.app** | **none.** `Fn` works and is undocumented | measured, Terminal.app 470.2 |
 | **VS Code, macOS** | **none** until `terminal.integrated.macOptionClickForcesSelection` | xterm.js source |
 | **iTerm2** | **Option**, hard-coded. Shift *extends* a selection instead | docs + `PTYMouseHandler.m` |
-| Windows Terminal, GNOME Terminal, Ptyxis, Konsole, kitty, Alacritty, WezTerm, Ghostty, foot, Warp, xterm | **Shift** | each project's docs or source |
+| **Windows Terminal** | **Shift** | **measured, 1.24.11911 on Windows 11 26200** — under modes 1000/1006 a Shift+drag printed nothing and highlighted text, so the bypass is real and the hint's advice is right |
+| GNOME Terminal, Ptyxis, Konsole, kitty, Alacritty, WezTerm, Ghostty, foot, Warp, xterm | **Shift** | each project's docs or source |
 
 Terminal.app and macOS VS Code do not merely ignore Shift — they **encode it into the mouse
 report (`Cb=4`) and forward it to tmux**, which is why the failure was silent rather than merely

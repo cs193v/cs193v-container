@@ -38,9 +38,13 @@
 #   iTerm2           Option, hard-coded in PTYMouseHandler.m. SHIFT there EXTENDS an existing
 #                    selection, so the generic advice is not merely useless but wrong.
 #
-# Windows Terminal earns a row for its copy key rather than its modifier; VTE earns one for its
-# copy key AND for its link click, and neither of those is its bypass modifier, which is SHIFT
-# like the default arm's.
+# Windows Terminal and VTE each earn a row for their COPY KEY and their LINK CLICK, and neither
+# of those is the bypass modifier -- which on both is SHIFT, exactly like the default arm's. That
+# is the distinction to keep hold of when reading these two rows: `copy` says SHIFT and `link`
+# says CTRL not through inconsistency but because they are two different mechanisms, a bypass
+# modifier and an intercepted URL handler. Measured on Windows Terminal 1.24.11911 on 2026-09-05:
+# SHIFT+drag under modes 1000/1006 printed nothing and highlighted text, and CTRL+click opened
+# the browser. 50-image.sh asserts the pair together so a tidy-up cannot collapse them.
 #
 # THE DEFAULT ARM IS THE HISTORICAL WORDING, BYTE FOR BYTE, and 50-image.sh asserts that. It is
 # what makes this change a no-op for every terminal the launcher cannot identify.
@@ -56,7 +60,7 @@
 # A CLOSED SET OF TOKENS RATHER THAN THE RAW $TERM_PROGRAM, so no string a student controls ever
 # reaches a tmux option or a display-message argument, and there is nothing here to escape.
 #
-# ─── WHY `link` NAMES A CLICK ON TWO ROWS AND NOT THE REST ─────────────────────
+# ─── WHY `link` NAMES A CLICK ON SOME ROWS AND NOT THE REST ────────────────────
 #
 # THE RULE IS NOT "hardware or nothing", it is that a row may name a click only when the
 # terminal's own URL handler is known to run BEFORE the mouse report is encoded. Hardware settles
@@ -92,12 +96,27 @@
 # an "or hold SHIFT" clause would put the longer route first for everyone to protect terminals
 # nobody in the course uses. Do not add one back.
 #
+# WINDOWS TERMINAL, FROM HARDWARE AND FROM SOURCE, AND THE SOURCE PREDICTED IT. Its ctrl+click
+# hyperlink branch sits AHEAD of the VT-mouse test, with the reason in the code: "GH#9396: we
+# prioritize hyper-link over VT mouse events". So the same ordering the two VTE embedders get
+# structurally, Windows Terminal gets by an explicit decision -- which is the strongest form the
+# rule above asks for. Confirmed on Windows Terminal 1.24.11911 (Windows 11 26200, 2026-09-05):
+# CTRL+click opened the browser WITH MODES 1000 AND 1006 ACTIVE, which is the condition that
+# settles it -- had the branch run after the report was encoded, the bytes would have gone to the
+# pane and nothing would have opened. This row was gesture-free until that measurement and PR
+# #146 is where the source argument was made.
+#
 # EVERYWHERE ELSE STAYS GESTURE-FREE, and there is reason to expect the composition to FAIL:
 # xterm, foot and legacy conhost have no URL detection at all, and Alacritty's URL hint matches
-# on NO modifier, so holding Shift may bypass reporting and still not open the link. Windows
-# Terminal and VS Code look from source like they belong with vte -- see PR #146 -- but neither
-# has been run, so both keep the instruction tests/MANUAL.md 8.2 sanctions: "39 characters can be
-# retyped".
+# on NO modifier, so holding Shift may bypass reporting and still not open the link.
+#
+# VS CODE IS THE ROW THE SAME ARGUMENT WOULD FIT AND STILL DOES NOT GET, and the asymmetry is
+# deliberate. xterm.js activates links from a listener the mouse-report path does not stop, which
+# reads exactly like Windows Terminal's case -- but SOURCE ALONE HAS NEVER BEEN ENOUGH here for a
+# terminal nobody has run, and GNOME Terminal is not the counter-example it looks like: it shares
+# a token with a terminal that WAS run, so leaving it on the old wording would have meant
+# splitting the token. VS Code shares with nothing. It keeps the instruction tests/MANUAL.md 8.2
+# sanctions -- "39 characters can be retyped" -- until someone runs it. See PR #146.
 #
 # ─── SHELL ─────────────────────────────────────────────────────────────────────
 # /bin/sh and a case statement, like open-url: no bashisms, nothing to source, no output but the
@@ -144,9 +163,16 @@ copy)
     # CTRL+C on Windows Terminal on purpose: its immutable defaults.json binds only
     # ctrl+shift+c, and ctrl+c comes from userDefaults.json written into the student's own
     # settings on first launch -- so anyone who upgraded or ever reset their settings does not
-    # have it. CTRL+SHIFT+C is correct either way. On Unix CTRL+C cannot be taken at all: it is
-    # the POSIX INTR character, and a terminal that stole it would remove the only way to
-    # interrupt a runaway program.
+    # have it. CTRL+SHIFT+C is correct either way.
+    #
+    # VERIFIED ON A REAL INSTALL rather than from the docs, 2026-09-05, WT 1.24.11911: the
+    # package's defaults.json binds `ctrl+shift+c`, `ctrl+insert` and `enter` to
+    # Terminal.CopyToClipboard and does NOT bind ctrl+c -- while that machine's own
+    # LocalState/settings.json DID carry a user-level ctrl+c, which is the userDefaults.json
+    # mechanism above caught in the act. Both halves of the claim, from one machine.
+    #
+    # On Unix CTRL+C cannot be taken at all: it is the POSIX INTR character, and a terminal that
+    # stole it would remove the only way to interrupt a runaway program.
     windows-terminal) printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
     vte)              printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
     *)                printf '%s\n' "$D_COPY" ;;
@@ -160,7 +186,7 @@ link)
         macos)        printf '%s\n' "$D_LINK" ;;
         *)            printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
         esac ;;
-    windows-terminal) printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
+    windows-terminal) printf 'CTRL+click the link to open it.\n' ;;
     vte)              printf 'CTRL+click the link to open it.\n' ;;
     *)                printf '%s\n' "$D_LINK" ;;
     esac ;;
