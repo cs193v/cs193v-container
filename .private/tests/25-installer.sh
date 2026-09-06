@@ -330,11 +330,13 @@ assert_eq "mac-vm:never-exceeds-the-cap" "8192" "$(vm_for 131072)"
 # files" and prints the "Could not download" box in about a second, because a 404 is not a
 # --retry condition. It becomes thirty seconds the day GitHub is unreachable.
 #
-# Shaped the way GitHub's archive endpoint shapes it -- a single top-level directory, which
-# is why the installer strips one component -- AND HOLDING WHAT THAT ENDPOINT HOLDS, which
-# is tracked files: projects/.gitkeep and no node_modules. Its own excludes carried the
-# developer's projects/ into the fixture instead, so this gzipped 58 MB (#76).
-copy_course_tree "$TMP/pkg/cs193v-main"
+# Shaped the way GitHub's archive endpoint shapes it -- a single top-level directory, which is
+# why the installer strips one component -- AND HOLDING WHAT THAT ENDPOINT HOLDS, which is now
+# true by construction rather than by maintenance: export_tree IS `git archive`, so this fixture
+# is the 29 files a student really downloads (#115), tests and staff documents included out. The
+# hand-written excludes it replaced carried the developer's projects/ in, so this gzipped 58 MB
+# (#76), and they had already drifted from the archive in the other direction too.
+export_tree "$TMP/pkg/cs193v-main"
 ( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
 assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
 cp $PRIVATE/install-cs193v.sh "$TMP/installer.sh"

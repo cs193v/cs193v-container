@@ -402,8 +402,8 @@ fixture_build() {                     # fixture_build CASE -> builds only if the
         return 0
     fi
     # The CONTEXT is the fixtures directory, not $REPO. There is no .containerignore here,
-    # so a context of the repo would tar projects/ and .git into every build -- which is
-    # what COURSE_COPY_EXCLUDES exists to prevent (#76).
+    # so a context of the repo would tar projects/ and .git into every build -- the same 69 MB
+    # mistake #76 was, and the one the fixture copies now avoid by being `git archive`.
     if podman build --label "cs193v.fixturehash=$want" --label "$VT_LABEL" \
                     -f "$FIXTURE_DIR/Containerfile.$case" -t "$tag" "$FIXTURE_DIR" \
                     > "$SB_TMP/build.$case.log" 2>&1; then
@@ -420,7 +420,7 @@ fixture_build() {                     # fixture_build CASE -> builds only if the
 sb_work_init() {                      # sb_work_init -> $SB_WORK holding installer + tarball
     SB_WORK="$SB_TMP/work"
     mkdir -p "$SB_WORK"
-    copy_course_tree "$SB_TMP/pkg/cs193v-main"
+    export_tree "$SB_TMP/pkg/cs193v-main"
     ( cd "$SB_TMP/pkg" && tar czf "$SB_WORK/course.tar.gz" cs193v-main )
     # What platform() greps. Bound over /proc/version at run time, which is the entire cost
     # of making the WSL arm executable on Linux.

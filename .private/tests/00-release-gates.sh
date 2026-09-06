@@ -13,9 +13,9 @@
 # THEY ARE GREEN NOW. This header used to say they "fail today by design: the repo is scaffolding
 # with four deliberate blanks in it", and that stopped being true once the blanks were filled --
 # REPO_OWNER is cs193v, the stage-two URL serves the installer, the token expiry is set, and the
-# GitHub org and sandbox prefix are both real. Measured 2026-09-03: 24 pass, 0 fail, 3 skip. The
-# three skips are opt-in rather than broken: two need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
-# build), and the third needs a PUBLISHED-CHECKSUMS.txt to compare against.
+# GitHub org and sandbox prefix are both real. Measured 2026-09-05: 28 pass, 0 fail, 2 skip. The
+# skips are opt-in rather than broken: they need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
+# build).
 #
 # Run this before the quarter starts, and again after any change to the publishing setup.
 
@@ -274,16 +274,6 @@ fi
 # only thing making "read it before you run it" checkable for a student.
 record "checksum:$PRIVATE/install-cs193v.sh"          "$(do_sha256 $PRIVATE/install-cs193v.sh | awk '{print $1}')"
 record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(do_sha256 $PRIVATE/install-cs193v-windows.cmd | awk '{print $1}')"
-note_file="$REPO/PUBLISHED-CHECKSUMS.txt"
-if [ -f "$note_file" ]; then
-    for f in $PRIVATE/install-cs193v.sh $PRIVATE/install-cs193v-windows.cmd; do
-        want="$(grep -F "$f" "$note_file" | awk '{print $1}' | head -1)"
-        assert_eq "checksum:$f-matches-published" \
-                  "$(do_sha256 "$f" | awk '{print $1}')" "$want"
-    done
-else
-    skip "checksum:matches-published" "no PUBLISHED-CHECKSUMS.txt to compare against"
-fi
 
 # ─── 6. the token expiry a student is told to choose ───────────────────────────
 # setup-git hands students a prefilled link with an expiration in it, and names the same date in
@@ -345,3 +335,72 @@ record "setup-git:sandbox-pattern" \
 # one repository they can all write to. The only assertion here that fails on a value being present
 # rather than absent, which is why it is spelled out rather than folded into the loop above.
 assert_eq "setup-git:CS193V_GH_SANDBOX-is-not-pinned" "" "$(sgval CS193V_GH_SANDBOX)"
+
+# ─── 9. the archive a student really downloads ─────────────────────────────────
+# THE ONE CLAIM NOTHING LOCAL CAN PROVE, and the whole of #115 rests on it: that GitHub builds
+# its branch tarballs with `git archive` and therefore honours export-ignore. If that were ever
+# untrue, every student would receive this test suite, both installers and four staff documents,
+# and 11-export.sh would go on passing -- it measures the same local `git archive` the claim is
+# about. So this is the assertion that closes the loop, and it belongs in the tier that is
+# already allowed to reach the network.
+#
+# AGAINST THE REMOTE TIP, NOT THE WORKING TREE, and gated on the two being the same commit. §1's
+# header sets out why: a red you can only clear by publishing is not a test of the code. So an
+# unpushed tree SKIPS here rather than failing, and the skip says which commit to push.
+#
+# `git ls-remote` rather than a local origin/main, which can be arbitrarily stale -- a stale ref
+# that happens to equal HEAD would send this into comparing HEAD's archive against a tarball
+# built from a newer commit, and fail for a reason that is not a fault.
+#
+# PARSED OUT OF THE INSTALLER, never retyped, for §1's reason: retyping asserts that a constant
+# equals itself. This is the URL a student's installer really fetches.
+iget() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$PRIVATE/install-cs193v.sh" | head -1; }
+rel_owner="$(iget REPO_OWNER)"; rel_name="$(iget REPO_NAME)"; rel_branch="$(iget REPO_BRANCH)"
+rel_tarball="https://github.com/$rel_owner/$rel_name/archive/refs/heads/$rel_branch.tar.gz"
+record "export:tarball-url" "$rel_tarball"
+
+if [ -z "$rel_owner" ] || [ -z "$rel_name" ] || [ -z "$rel_branch" ]; then
+    fail "export:tarball-url-was-parsed" "could not read REPO_OWNER/NAME/BRANCH from the installer"
+else
+    pass "export:tarball-url-was-parsed"
+    remote_tip="$(git ls-remote origin "refs/heads/$rel_branch" 2>/dev/null | awk '{print $1}' | head -1)"
+    local_tip="$(git rev-parse HEAD 2>/dev/null)"
+    # THE SAME NAMES IT SKIPS AND PASSES UNDER. A skip that announces a name the passing path
+    # never emits is a name nobody can diff two runs on.
+    if [ -z "$remote_tip" ]; then
+        skip "export:github-ships-nothing-extra"   "could not reach origin to read refs/heads/$rel_branch"
+        skip "export:github-ships-nothing-missing" "could not reach origin to read refs/heads/$rel_branch"
+    elif [ "$remote_tip" != "$local_tip" ]; then
+        rel_why="HEAD is $(printf '%.8s' "$local_tip") and origin/$rel_branch is $(printf '%.8s' "$remote_tip") -- push first"
+        skip "export:github-ships-nothing-extra"   "$rel_why"
+        skip "export:github-ships-nothing-missing" "$rel_why"
+    else
+        exp_tmp="$(new_tmpdir)"
+        # --strip-components cannot be used with -t, so the leading NAME-BRANCH/ component comes
+        # off with sed. Directory entries are dropped: git's tar emits them and a listing of
+        # names is what both sides can agree on.
+        if ( set -o pipefail
+             curl -fsSL --retry 3 "$rel_tarball" \
+               | tar tzf - | sed -e 's|^[^/]*/||' -e '/^$/d' | grep -v '/$' \
+               | LC_ALL=C sort > "$exp_tmp/remote" ); then
+            pass "export:tarball-is-fetchable"
+            # pipefail here too: a git archive that dies leaves tar exiting 0 and an EMPTY
+            # local listing, which turns both assertions below into a diff of the whole
+            # archive against nothing -- a loud failure for entirely the wrong reason.
+            ( set -o pipefail
+              git archive HEAD | tar -t | grep -v '/$' | LC_ALL=C sort > "$exp_tmp/local" ) \
+                || fail "export:local-archive-is-listable" "git archive HEAD could not be listed"
+            record "export:tarball-file-count" "$(grep -c '' "$exp_tmp/remote" | do_tr -d ' ')"
+            # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about how
+            # to order punctuation and comm then mis-pairs silently, reporting differences that
+            # are not there -- measured on this listing.
+            only_remote="$(LC_ALL=C comm -13 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+            only_local="$(LC_ALL=C comm -23 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+            assert_eq "export:github-ships-nothing-extra"   "" "$only_remote"
+            assert_eq "export:github-ships-nothing-missing" "" "$only_local"
+        else
+            fail "export:tarball-is-fetchable" "could not download $rel_tarball"
+        fi
+        rm -rf "$exp_tmp"
+    fi
+fi

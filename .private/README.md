@@ -47,7 +47,7 @@ projects/                      the student's work; the only directory shared wit
   install-cs193v.sh            macOS / Ubuntu / WSL setup
   install-cs193v-windows.cmd   Windows stage one: installs WSL, then DOWNLOADS the above
                                from GitHub and runs it (issue #93)
-  CONTAINER-DESIGN.md          threat model, ports and the tunnel, rough edges — publish this
+  CONTAINER-DESIGN.md          threat model, ports and the tunnel, rough edges
   VERIFICATION.md              release gates — hand to a Claude Code instance per platform
   ERRORS.md                    what the first verification pass found, and what is still open
   tests/                       the regression suite
@@ -57,8 +57,17 @@ projects/                      the student's work; the only directory shared wit
 There is no `.github/` directory, and that is the design rather than an omission — see
 "How the image reaches a student" below.
 
-Note `CONTAINER-DESIGN.md` is course *reading* but lives in `.private/` — publish it on the
-course website rather than expecting students to find it in a hidden directory.
+**Most of the above never reaches a student.** Six things ship: the launcher,
+`.config/container.args`, `.private/messages.txt`, `.private/Containerfile`, everything under
+`.private/files/`, and `projects/.gitkeep`. Everything else is `export-ignore`d, so GitHub's
+branch tarball — which is what the installer downloads — holds 29 files rather than 108 (issue
+#115): no test suite, no installers, and no documentation except `files/agent-notes.md`, which
+ships because the image installs it as `/etc/cs193v/agent-notes.md`.
+
+`.private/tests/11-export.sh` asserts that file set on every run of the suite, and
+`00-release-gates.sh` checks it against the real GitHub endpoint. Note the rule for `.private/`
+is an **allowlist**: anything added there is excluded by default, so a new file a student *does*
+need has to be named in `.gitattributes` to ship at all.
 
 ## How the image reaches a student
 
