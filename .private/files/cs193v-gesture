@@ -27,10 +27,9 @@
 # ─── WHY ONLY THESE FIVE TERMINALS ─────────────────────────────────────────────
 #
 # Every terminal NOT named here bypasses with SHIFT -- kitty, Alacritty, WezTerm, Ghostty, foot,
-# Warp, Konsole, xterm, Terminator, xfce4-terminal, Tilix, each read from its own source or
-# documentation -- and SHIFT is exactly what the default arm says. So the list is short because
-# paring it COST NOTHING, not because the rest were overlooked. Specialisation is spent only
-# where the generic answer is wrong:
+# Warp, Konsole, xterm, each read from its own source or documentation -- and SHIFT is exactly
+# what the default arm says. So the list is short because paring it COST NOTHING, not because the
+# rest were overlooked. Specialisation is spent only where the generic answer is wrong:
 #
 #   Terminal.app     no bypass modifier at all. Shift is forwarded.
 #   VS Code, macOS   no bypass either: macOptionClickForcesSelection defaults false, and
@@ -39,7 +38,9 @@
 #   iTerm2           Option, hard-coded in PTYMouseHandler.m. SHIFT there EXTENDS an existing
 #                    selection, so the generic advice is not merely useless but wrong.
 #
-# Windows Terminal and VTE earn a row for their copy key, not their modifier.
+# Windows Terminal earns a row for its copy key rather than its modifier; VTE earns one for its
+# copy key AND for its link click, and neither of those is its bypass modifier, which is SHIFT
+# like the default arm's.
 #
 # THE DEFAULT ARM IS THE HISTORICAL WORDING, BYTE FOR BYTE, and 50-image.sh asserts that. It is
 # what makes this change a no-op for every terminal the launcher cannot identify.
@@ -55,19 +56,48 @@
 # A CLOSED SET OF TOKENS RATHER THAN THE RAW $TERM_PROGRAM, so no string a student controls ever
 # reaches a tmux option or a display-message argument, and there is nothing here to escape.
 #
-# ─── WHY `link` NAMES A CLICK ON EXACTLY ONE TERMINAL ──────────────────────────
+# ─── WHY `link` NAMES A CLICK ON TWO ROWS AND NOT THE REST ─────────────────────
 #
-# Opening a link needs the bypass modifier AND the terminal's own URL gesture, and the second
-# half is not derivable from the first. Apple documents plain CMD+DOUBLE-click ("Hold down the
-# Command key and double-click the URL" -- and CMD+single-click has never opened anything, which
-# is what the old wording got wrong). Under reporting that is dead, and FN+CMD+double-click is
-# what actually opened a link, confirmed by a local HTTP server receiving the request.
+# THE RULE IS NOT "hardware or nothing", it is that a row may name a click only when the
+# terminal's own URL handler is known to run BEFORE the mouse report is encoded. Hardware settles
+# that; so does source that shows the handler ahead of the terminal's own reporting path. Nothing
+# else does, and a click named on any other basis is a gesture that reaches tmux instead.
 #
-# Nowhere else is measured, and there is reason to expect the composition to FAIL: xterm, foot
-# and legacy conhost have no URL detection at all, and Alacritty's URL hint matches on NO
-# modifier, so holding Shift may bypass reporting and still not open the link. So every other
-# terminal gets a gesture-free instruction, which tests/MANUAL.md 8.2 already sanctions -- "39
-# characters can be retyped". Add a row here only from hardware, never from documentation.
+# Terminal.app, from hardware. Apple documents plain CMD+DOUBLE-click ("Hold down the Command key
+# and double-click the URL" -- and CMD+single-click has never opened anything, which is what the
+# old wording got wrong). Under reporting that is dead, and FN+CMD+double-click is what actually
+# opened a link, confirmed by a local HTTP server receiving the request.
+#
+# vte, from hardware on ONE of the two terminals it covers. CTRL+click opened the link on Ptyxis
+# 50.1. Ptyxis registers a CAPTURE-phase GtkGestureClick on the terminal widget
+# (ptyxis-terminal.ui, click_capture) and its handler takes button 1 or 2 with GDK_CONTROL_MASK,
+# resolves the URL through vte_terminal_check_hyperlink_at then check_match_at, and CLAIMS the
+# gesture only if opening it succeeds -- otherwise it is set DENIED and the click goes on to tmux
+# exactly as before. VTE's own click gesture is added with no phase set, and GTK defaults a
+# controller to BUBBLE while running CAPTURE first, so Ptyxis is ahead of the report by
+# construction rather than by luck. That is why the row names ONE modifier and not SHIFT+CTRL:
+# there is no reporting left to bypass.
+#
+# GNOME TERMINAL IS THE HALF NOBODY HAS RUN, and the extension to it is knowing. Its
+# terminal_screen_button_press overrides button_press_event, handles CTRL + button 1 or 2 on a
+# hyperlink or a matched URL, and returns TRUE without ever chaining to VTE's parent handler --
+# the same ordering, reached a different way. It shares Ptyxis's token, so it could not have been
+# left on the old wording without splitting the token. tests/MANUAL.md 8.2 records which half is
+# which.
+#
+# TILIX, XFCE4-TERMINAL AND TERMINATOR REACH THIS ROW TOO, through the bare-VTE_VERSION backstop
+# in term_class -- VTE exports VTE_VERSION into every child it spawns, so every embedder lands
+# here. Each implements its own CTRL+click rather than inheriting one from VTE, and none has been
+# run. They are outside this course's target set and THE ROW IS DELIBERATELY NOT HEDGED FOR THEM:
+# an "or hold SHIFT" clause would put the longer route first for everyone to protect terminals
+# nobody in the course uses. Do not add one back.
+#
+# EVERYWHERE ELSE STAYS GESTURE-FREE, and there is reason to expect the composition to FAIL:
+# xterm, foot and legacy conhost have no URL detection at all, and Alacritty's URL hint matches
+# on NO modifier, so holding Shift may bypass reporting and still not open the link. Windows
+# Terminal and VS Code look from source like they belong with vte -- see PR #146 -- but neither
+# has been run, so both keep the instruction tests/MANUAL.md 8.2 sanctions: "39 characters can be
+# retyped".
 #
 # ─── SHELL ─────────────────────────────────────────────────────────────────────
 # /bin/sh and a case statement, like open-url: no bashisms, nothing to source, no output but the
@@ -131,7 +161,7 @@ link)
         *)            printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
         esac ;;
     windows-terminal) printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
-    vte)              printf 'Hold SHIFT to select the link, then paste it in your browser.\n' ;;
+    vte)              printf 'CTRL+click the link to open it.\n' ;;
     *)                printf '%s\n' "$D_LINK" ;;
     esac ;;
 correct)
