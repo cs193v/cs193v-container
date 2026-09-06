@@ -32,7 +32,8 @@ podman machine list 2>/dev/null || echo "no podman machine (native Linux or WSL)
 instead of pasting shell by hand:
 
 ```sh
-.private/tests/run-tests.sh                  # every automatable check, all tiers
+.private/tests/run-tests.sh                  # the default tiers
+.private/tests/run-tests.sh --everything-but-github   # every tier but that one. Slow; logs you out
 .private/tests/run-tests.sh --tier static    # no podman, no image needed — milliseconds
 .private/tests/run-tests.sh --release        # the publishing blanks (expected to fail until filled)
 .private/tests/run-tests.sh --list           # what exists, and in which tier

@@ -2,10 +2,13 @@
 #
 # CS193V container test runner.
 #
-#   tests/run-tests.sh                    everything except the release gates
+#   tests/run-tests.sh                    the default tiers: not release, github or windows
 #   tests/run-tests.sh --tier static      one tier (comma-separated for several)
 #   tests/run-tests.sh -k tmux            only suites whose filename matches
 #   tests/run-tests.sh --release          the "not shippable yet" gates
+#   tests/run-tests.sh --everything-but-github
+#                                         every tier but that one, with every cost gate set
+#                                         and the image built first. Slow, and it logs you out.
 #   tests/run-tests.sh --serial           one suite at a time, in file order
 #   tests/run-tests.sh --list             what exists, in which tier, and in which lane
 #
@@ -19,6 +22,8 @@
 #   shim       the launcher's state machine against a fake podman on PATH. No containers.
 #   install    install-cs193v.sh against machines that really lack podman, ssh or a subuid
 #              range, in throwaway containers. Seconds, and cached after the first build.
+#   windows    install-cs193v-windows.cmd under wine. NOT run by default: the fixture image
+#              is 3.45 GB. Skips itself on arm64, where wine cannot execute.
 #   coverage   did the suite really execute every line of install-cs193v.sh it claims to?
 #              Reads the traces the installer runs leave in $CS193V_RUN_DIR, so it has to run
 #              after them -- which is why it is numbered last rather than living in 10-static.
@@ -30,6 +35,15 @@
 #   github     setup-git against the real GitHub API — NOT run by default, and skipped even
 #              when asked for unless CS193V_GH_TEST_TOKEN is set. It needs a real credential
 #              and it writes to a repository the whole class can see.
+#
+# --everything-but-github DERIVES that list from the suites rather than holding one, because a
+# written-down list is how `--all` came to omit `windows` without anything going red. It also
+# sets every gate the tiers above skip by default -- CS193V_INSTALL_NESTED,
+# CS193V_INSTALL_NESTED_BUILD, CS193V_MINPODMAN_BUILD, CS193V_RELEASE_BUILD, CS193V_COVERAGE and
+# CS193V_DESTRUCTIVE -- and runs ./cs193v --rebuild first, because require_image and
+# require_running hard-fail without one. It leaves CS193V_GH_TEST_TOKEN alone, which is the
+# github tier's own gate. It is the slow, destructive answer and it says so before it starts.
+#:end-of-help
 #
 # image/container/live HARD-FAIL rather than skip when their prerequisite is missing, by
 # project decision: a green run must mean the whole thing really ran.
@@ -78,6 +92,7 @@ DEFAULT_TIERS="static unit shim install image container live coverage"
 TIERS=""
 FILTER=""
 PARALLEL=yes
+EVERYTHING=no
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     C_BOLD=$(printf '\033[1m'); C_GRN=$(printf '\033[32m'); C_RED=$(printf '\033[1;31m')
@@ -99,18 +114,27 @@ fi
 # shellcheck source=lib/portable.sh
 . "$DIR/lib/portable.sh"
 
+# READ TO A SENTINEL, not to a line number. This was `sed -n '3,30p'`, and 30 was the last line
+# of the tier catalogue on the day it was written -- so the catalogue had already outgrown it and
+# `--help` cut the github tier off mid-sentence. A range that has to be updated by hand every time
+# the header grows is a range that will be wrong again.
 usage() {
-    sed -n '3,30p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
+    do_awk 'NR >= 3 { if ($0 == "#:end-of-help") exit; sub(/^#? ?/, ""); print }' "$0"
     exit "${1:-0}"
 }
 
 LIST_ONLY=no
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --tier)    shift; TIERS="$(printf '%s' "${1:-}" | do_tr ',' ' ')" ;;
-        --tier=*)  TIERS="$(printf '%s' "${1#--tier=}" | do_tr ',' ' ')" ;;
-        --release) TIERS="release" ;;
-        --all)     TIERS="$DEFAULT_TIERS release" ;;
+        --tier)    shift; TIERS="$(printf '%s' "${1:-}" | do_tr ',' ' ')"; EVERYTHING=no ;;
+        --tier=*)  TIERS="$(printf '%s' "${1#--tier=}" | do_tr ',' ' ')"; EVERYTHING=no ;;
+        --release) TIERS="release"; EVERYTHING=no ;;
+        --all)     TIERS="$DEFAULT_TIERS release"; EVERYTHING=no ;;
+        # EVERY tier the suites declare except one, plus the gates and the build those tiers
+        # need -- see the header. EVERYTHING=no above rather than a precedence rule here: the
+        # arms are assignments and the last one wins, and an exception for this flag would be a
+        # special case to remember at exactly the wrong moment.
+        --everything-but-github) EVERYTHING=yes; TIERS="" ;;
         -k)        shift; FILTER="${1:-}" ;;
         -k*)       FILTER="${1#-k}" ;;
         --serial)  PARALLEL=no ;;
@@ -151,6 +175,49 @@ for f in "$DIR"/[0-9][0-9]-*.sh; do
     [ -f "$f" ] || continue
     SUITES="$SUITES $f"
 done
+
+# ─── --everything-but-github, part one: the tier list (#160) ───────────────────
+# DERIVED FROM THE SUITES, and that is the whole reason this is not one more string beside
+# DEFAULT_TIERS. `--all` IS such a string, written when there were eight tiers, and it has
+# silently omitted `windows` ever since that tier was added -- no suite ran, nothing went red,
+# and the only way to find out was to read --list and compare by eye. The header's standing
+# promise is that "adding a suite needs no edit here"; a hand-maintained list is how that
+# promise gets broken, so this asks the files instead.
+#
+# HERE rather than in the option loop, because it needs $SUITES, and above --list because that
+# path exits. --list does not read $TIERS, so ordering between them is free either way.
+#
+# The de-duplication is the no-associative-array idiom this project uses elsewhere -- see
+# preflight below, which needs it for the same reason: bash 3.2 has no associative arrays.
+if [ "$EVERYTHING" = yes ]; then
+    TIERS=""
+    for f in $SUITES; do
+        t="$(tier_of "$f")"
+        [ "$t" = github ] && continue
+        case " $TIERS " in *" $t "*) ;; *) TIERS="$TIERS $t" ;; esac
+    done
+    TIERS="${TIERS# }"
+fi
+
+# ─── ...and part two: the gates those tiers skip by default ────────────────────
+# THE SECOND WAY TO RUN LESS THAN YOU ASKED FOR. Selecting a tier is not the same as running it:
+# six blocks inside the tiers above skip unless a variable is set, each for a good reason (cost,
+# or destruction), and each announced as a named SKIP rather than silently. Getting the set
+# right by hand means knowing all six in advance, which is #160's first complaint.
+#
+# PLAIN ASSIGNMENT, not `${VAR:=}`: this flag has one meaning and it overrides. The nesting is
+# why they go together -- CS193V_INSTALL_NESTED_BUILD and CS193V_MINPODMAN_BUILD live INSIDE the
+# CS193V_INSTALL_NESTED blocks (26-installer-sandbox.sh:558, :709, :843), so setting either one
+# alone does nothing at all.
+#
+# CS193V_GH_TEST_TOKEN IS DELIBERATELY NOT HERE. It is the github tier's own gate, and a flag
+# whose name promises to leave GitHub alone must not be the thing that supplies a credential.
+if [ "$EVERYTHING" = yes ]; then
+    CS193V_INSTALL_NESTED=1 CS193V_INSTALL_NESTED_BUILD=1 CS193V_MINPODMAN_BUILD=1
+    CS193V_RELEASE_BUILD=yes CS193V_COVERAGE=1 CS193V_DESTRUCTIVE=1
+    export CS193V_INSTALL_NESTED CS193V_INSTALL_NESTED_BUILD CS193V_MINPODMAN_BUILD
+    export CS193V_RELEASE_BUILD CS193V_COVERAGE CS193V_DESTRUCTIVE
+fi
 
 if [ "$LIST_ONLY" = yes ]; then
     printf '%slane    tier       suite%s\n' "$C_BOLD" "$C_OFF"
@@ -357,6 +424,53 @@ printf '%sCS193V container tests%s  %s(tiers: %s)%s\n' "$C_BOLD" "$C_OFF" "$C_DI
 [ "$LANES" = two ] && printf '%stwo lanes: the podman tiers below, and static/unit/shim alongside them%s\n' \
                              "$C_DIM" "$C_OFF"
 printf '%s\n' "-------------------------------------------------------------------"
+
+# ─── ...and part three: say what this is, then build what it needs ─────────────
+# SAID, NOT ASKED. A prompt would break the one thing #160 wanted -- "I just run that one
+# command and everything goes" -- but this flag deletes the volumes five logins live in and
+# runs three multi-GB builds, and a flag that does that without a word is worse than one that
+# asks. So it is announced, on screen, above the run it is about to start.
+if [ "$EVERYTHING" = yes ]; then
+    printf '%severything but github%s\n' "$C_BOLD" "$C_OFF"
+    printf '  %-13s %s\n' builds \
+           './cs193v --rebuild first, then the nested, oldest-podman and no-cache builds'
+    printf '  %-13s %s\n' destructive \
+           'CS193V_DESTRUCTIVE=1 -- deletes the claude/codex/gh/vercel/git volumes'
+    printf '  %-13s %s\n' needs 'about 15 GB free, and a long wall clock'
+    # CLAUDE.md's hazard, and it earns a line HERE specifically because of the line above it:
+    # with the volumes about to be deleted, an unset instance takes a colleague's logins too.
+    [ -n "${CS193V_INSTANCE:-}" ] || printf '  %-13s %s\n' instance \
+           'CS193V_INSTANCE is unset, so this is the SHARED container and volumes'
+    printf '%s\n' "-------------------------------------------------------------------"
+fi
+
+# THE THIRD WAY TO RUN LESS THAN YOU ASKED FOR, and the loudest: require_image and
+# require_running HARD-FAIL rather than skip when the image or the container is missing
+# (lib/assert.sh), by a project decision stated at the top of this file. That decision is right
+# and stays -- but it made "run everything on a machine you have just brought up" a two-command
+# operation whose first command you had to already know about. So this runs it.
+#
+# CHEAP WHEN IT CAN BE. --rebuild compares cs193v.buildhash against the recipe on disk, so it is
+# a two-second recreate when nothing moved and a full build when it did -- which is exactly the
+# state a new platform is in. See CLAUDE.md.
+#
+# AFTER THE LANE SORT, so `[ -n "$PODMAN" ]` can skip it: --everything-but-github with a `-k`
+# that lands entirely in the cheap lane must not pay for an image nothing is going to look at.
+#
+# ABORTS ON FAILURE rather than carrying on. verb_rebuild is safe to drive from here -- no
+# confirm, no handover to a shell, it returns -- but it does refuse while a session is live, and
+# letting that through would mean six podman-tier suites each rediscovering it as require:image,
+# with the one line that explained it scrolled off the top.
+if [ "$EVERYTHING" = yes ] && [ -n "$PODMAN" ]; then
+    if ! ( cd "$DIR/../.." && ./cs193v --rebuild ); then
+        printf '\n%s./cs193v --rebuild failed%s, so the image and container the image, container\n' \
+               "$C_RED" "$C_OFF"
+        printf 'and live tiers test against do not exist. Nothing below could measure anything,\n'
+        printf 'so nothing below was run.\n'
+        exit 1
+    fi
+    printf '%s\n' "-------------------------------------------------------------------"
+fi
 
 if [ "$LANES" = two ]; then
     CHEAPLOG="$CS193V_RUN_DIR/cheap-lane.log"; : > "$CHEAPLOG"

@@ -7,7 +7,8 @@ through this on one machine of each platform and fill in §10's report template.
 Run the automated suite first — if it is red, fix that before spending human time here:
 
 ```sh
-.private/tests/run-tests.sh                    # everything automatable
+.private/tests/run-tests.sh                    # the default tiers
+.private/tests/run-tests.sh --everything-but-github    # every tier but that one. Slow; logs you out
 .private/tests/run-tests.sh --release          # the four publishing blanks
 ```
 
