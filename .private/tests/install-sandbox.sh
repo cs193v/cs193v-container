@@ -84,6 +84,10 @@ OPTIONS
                        container shares the host's kernel, so an arm with no mount reads
                        YOUR /proc/version -- and on a WSL host --platform linux would then
                        give you a machine the installer treats as WSL (#152)
+                       `host` is the third answer and the one to reach for when you want to
+                       NEST by hand: it mounts nothing, because anything mounted inside /proc
+                       stops a container starting inside this one (#156). It is what the five
+                       nest_* helpers pass, so it reproduces what they arrange
   --wslconf STATE      absent | noboot | boot | systemd   (only with --platform wsl)
                        'boot' is the state nothing else reaches: a [boot] section with no
                        systemd=true, which is the only input that takes setup_wslconf's sed
@@ -205,8 +209,8 @@ if ! bad="$(machine_valid caps "$NOCAPS")"; then
     die_usage "unknown --no-caps entry: $bad   (want: $MACHINE_CAP_NAMES)"
 fi
 case "$PLATFORM" in
-    linux|wsl) : ;;
-    *) die_usage "unknown --platform: $PLATFORM (linux|wsl)" ;;
+    linux|wsl|host) : ;;
+    *) die_usage "unknown --platform: $PLATFORM (linux|wsl|host)" ;;
 esac
 # THROUGH THE SUITE'S OWN machine_valid, like --no-prereqs and --no-caps above, so the base
 # vocabulary cannot differ between the tool you drive by hand and the tier that asserts. It used

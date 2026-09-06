@@ -300,6 +300,33 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # platform axis IS, and the three bases that do not nest -- debian, fedora, arch -- are exactly
     # the cases #152 was reported from.
     #
+    # ─── BUT NOT UNCONDITIONAL, AND THAT WAS #156's OWN REGRESSION ────────────
+    #
+    # A FAKED /proc/version AND AN INNER CONTAINER CANNOT BOTH BE HAD. Mounting anything inside
+    # /proc leaves it partially covered, and mount_too_revealing() then refuses a fresh procfs in a
+    # nested user namespace -- `crun: mount `proc` to `proc`: Operation not permitted`. #152's
+    # first cut put this mount on every arm, so the five nest_* helpers got it too and every
+    # podman-in-podman case died: one red assertion, and behind it the three 25-step builds
+    # SKIPPED for "no container starts inside this fixture on this host". Measured both ways on one
+    # host -- the mount is the only variable.
+    #
+    # A DIFFERENT CAUSE FROM THE ONE THE SELINUX BLOCK ABOVE RULES OUT, and the two are easy to
+    # confuse because crun says the same sentence. That measurement -- `unmask=ALL` does not help,
+    # so it is not mount_too_revealing() -- still holds for #119's symptom: `unmask` clears
+    # podman's OWN default masks and cannot remove a caller's -v mount, so it was never going to
+    # answer this one.
+    #
+    # SO `host` IS THE THIRD ANSWER: read the real kernel string, because this case needs nesting
+    # more than it needs the axis. What it costs is #152's defect for those cases and nothing
+    # wider -- `wsl` differs from `linux` in exactly one place, install-cs193v.sh's /etc/wsl.conf
+    # block -- and it is now named at the call site instead of being a silent absence.
+    #
+    # IT CANNOT BE INFERRED, which is why it is a value and not a rule. sb-wsl runs platform=wsl on
+    # `machine`, which IS in MACHINE_NESTED_BASES, and five sb_machine calls use that base with a
+    # real podman and never nest -- so neither the base nor fake-podman says whether an inner
+    # container has to start. Only the call site knows. sb_machine still refuses `host` (:366),
+    # because every survey case is one where the axis is under test.
+    #
     # AND A PLATFORM THIS FUNCTION DOES NOT KNOW IS REFUSED, like an unknown drop name above. It
     # has to be now that the arm builds a PATH out of the value: an unvalidated typo would mount a
     # file that does not exist, and podman would fail with a sentence about this harness's temp
@@ -307,6 +334,7 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # nest_build bypass sb_machine entirely and reach this directly, which is why both gates exist.
     case "$platform" in
         linux|wsl) MACHINE_FLAGS+=(-v "$SB_WORK/proc-version.$platform:/proc/version:ro$VT_MOUNT_Z") ;;
+        host)      : ;;
         *) printf 'machine_flags: unknown platform %s\n' "$platform" >&2; return 2 ;;
     esac
     # A TEST CONVENIENCE, NAMED AS ONE, and deliberately on neither axis: a fake podman is
@@ -855,7 +883,7 @@ HANG
 nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KEY=value lines
     local base="${1:-machine}"; shift 2>/dev/null || true
     # shellcheck disable=SC2086
-    machine_flags '' linux no "$base" || return 1
+    machine_flags '' host no "$base" || return 1
     do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" "$@" \
@@ -879,7 +907,7 @@ nest_probe() {                        # nest_probe [BASE] [PODMAN_ARGS...] -> KE
 # course container; this is the fixture, one level out, and it names one subtree.
 nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN removed, unmask kept
     local base="${1:-machine}"
-    machine_flags sysadmin linux no "$base" || return 1
+    machine_flags sysadmin host no "$base" || return 1
     do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
@@ -896,7 +924,7 @@ nest_probe_nocap() {                  # nest_probe_nocap [BASE] -- SYS_ADMIN rem
 # privilege without a measurement standing behind it.
 nest_probe_nolabel() {                # nest_probe_nolabel [BASE] -- the SELinux label left ON
     local base="${1:-machine}"
-    machine_flags label linux no "$base" || return 1
+    machine_flags label host no "$base" || return 1
     do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
@@ -905,7 +933,7 @@ nest_probe_nolabel() {                # nest_probe_nolabel [BASE] -- the SELinux
 
 nest_probe_nounmask() {               # nest_probe_nounmask [BASE] -- unmask removed, SYS_ADMIN kept
     local base="${1:-machine}"
-    machine_flags unmask linux no "$base" || return 1
+    machine_flags unmask host no "$base" || return 1
     do_timeout 180 podman run --label "$VT_LABEL" --rm \
         ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} \
         -v "$SB_WORK/nest-probe.sh:/probe.sh:ro$VT_MOUNT_Z" \
@@ -1026,7 +1054,7 @@ nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE]
     local name="cs193v-fixture-nested-$$" base="${4:-machine}" inst="${5:-/work/installer.sh}"
     local cap="${CS193V_NEST_CAP:-900}" outer rc
     outer=$((cap + 100))
-    machine_flags '' linux no "$base" || return 1
+    machine_flags '' host no "$base" || return 1
     printf '%s' "$name" > "$SB_TMP/last-name"
     podman rm -f "$name" >/dev/null 2>&1 || true
     printf '%b' "${3:-}" | do_timeout --kill-after=30 "$outer" \

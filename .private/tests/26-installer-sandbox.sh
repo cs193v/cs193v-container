@@ -675,7 +675,7 @@ assert_eq "nest:a-container-really-starts-inside" "ok" "$(nest_get "$np" INNER_R
 # of a future red assertion needs: the posture the fixture actually ran under, and whether the
 # flag set contained what this host needs. Neither claims a cause.
 record "nest:lsm-label-applied"   "$(nest_get "$np" PROC_ATTR_CURRENT)"
-machine_flags '' linux no machine
+machine_flags '' host no machine
 record "nest:the-flags-this-base-gets" "$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
 
 # ─── THE THIRD DEPARTURE, WITH ITS OWN CONTROL (#119) ──────────────────────────
@@ -990,7 +990,7 @@ fixture_build fedora-nested || exit 1
 # `sethostname: Operation not permitted`, because crun needs CAP_SYS_ADMIN to create the container
 # for a RUN step whatever the base's packaging. So the differential below is a true statement about
 # USER NAMESPACES and not about what a base needs overall; lib/sandbox.sh records both reasons.
-machine_flags '' linux no fedora-nested
+machine_flags '' host no fedora-nested
 record "fedora-caps:the-flags-fedora-gets" "$(printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"})"
 
 # THE DIFFERENTIAL, which is what this case is really for: with the capability WITHHELD from each
