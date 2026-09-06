@@ -108,13 +108,17 @@ export CS193V_TRACE_FD
 # EVERY bind mount carries it, not only the ones that were seen to fail: 10-static.sh's
 # selinux:every-bind-mount-carries-the-label asserts that, because a mount written without it
 # fails only on SELinux hosts and only sometimes -- which is the shape of bug that gets committed.
-# ─── ONE DOOR, TWO CONSUMERS (#119) ────────────────────────────────────────────
+# ─── ONE DOOR, TWO CONSUMERS (#119) -- AND THEN TWO DOORS (#163) ───────────────
 #
-# The answer is hoisted into $VT_SELINUX because a SECOND thing now needs it: machine_flags turns
-# the SELinux label off for the fixtures that run a podman inside themselves, and that arm must be
-# decided the same way this mount label is. Two copies of one probe is this file's whole subject
-# -- and the failure would be the quiet kind, a machine where the mount is relabelled and the flag
-# is withheld, or the reverse.
+# The answer was hoisted here because a SECOND thing needed it: machine_flags turns the SELinux
+# label off for the fixtures that run a podman inside themselves. #119 decided that arm must be
+# decided the same way this mount label is -- two copies of one probe being this file's whole
+# subject -- and warned that the failure would be the quiet kind, a machine where the mount is
+# relabelled and the flag is withheld, or the reverse.
+#
+# THAT WARNING CAME TRUE AND THE RULE DID NOT SURVIVE IT. #163 is below: with a remote podman the
+# two consumers are asking about two different machines, so they now have two doors. Read this
+# paragraph as the history of the coupling, not as the rule in force.
 #
 # THE PROBE ITSELF IS UNCHANGED, deliberately, so no host's answer moves. A tri-state
 # (enforcing / permissive / none) was written and dropped: `getenforce` would answer it, and the
@@ -131,16 +135,76 @@ export CS193V_TRACE_FD
 # about the directory existing and the emptiness would in fact distinguish host from container.
 # It is still not worth having: it would make this door disagree with `selinuxenabled` on hosts
 # where the tool is absent, and switch on an unasked recursive host relabel there.
-VT_SELINUX=''
+# ─── AND THE MACHINE THAT RUNS THE CONTAINERS IS NOT ALWAYS THIS ONE (#163) ────
+#
+# `selinuxenabled` answers for the machine the suite runs ON, and on macOS and Windows that is
+# not the machine the containers run on: podman is a client there and the containers live in a
+# Fedora VM. So the door said "no SELinux" about a laptop while every fixture ran on an enforcing
+# Fedora 44 host -- machine_flags withheld `label=disable`, the nested fixture ran as container_t,
+# and #119's two symptoms came back verbatim. Measured on macOS 15 / podman 5: `command -v
+# selinuxenabled` finds nothing, `podman info` reports SELinuxEnabled true and Fedora 44.
+#
+# That is the "quiet kind" of failure the paragraph above predicts, arriving by a route it did not
+# anticipate: not two consumers disagreeing, but the probe and the container host on opposite
+# sides of a VM boundary.
+#
+# ONLY OFF LINUX, and both halves of that gate are load-bearing. Correctness: on native Linux --
+# WSL included, where uname says Linux and podman really is local -- the client and the container
+# host are one machine, so the probe above is already authoritative, and the paragraph above
+# argues a host that CAN be enforcing always ships the tool. Cost: `podman info` measures 0.23 s,
+# lib/assert.sh sources this file, and every suite sources lib/assert.sh -- so asking
+# unconditionally would bill the whole cheap lane for an answer it already had.
+#
+# EVERY INPUT IS AN EXTERNAL COMMAND, which is why this is `uname -s` and not bash's own $OSTYPE:
+# it keeps the whole door decidable by PATH, which is what lets 14-test-harness.sh run both
+# answers on any machine.
+#
+# SO THE ONE DOOR BECOMES TWO, and the paragraph above is now the reason rather than the rule:
+# its two consumers ask genuinely different questions the moment a VM sits between them.
+#
+#   vt_selinux    does the machine the CONTAINERS run on enforce? -> the label flag on a fixture.
+#   VT_MOUNT_Z    can THESE HOST PATHS be relabelled? -> the `,z` on a bind mount.
+#
+# On macOS the bind sources are macOS paths arriving over virtiofs, which have no per-file labels
+# to set, so `,z` stays off there and every one of its ~15 sites is byte-identical to before. That
+# is the conservative half AND the correct one: the suite already passes on macOS with `,z` off.
+#
+# AND THE PODMAN HALF IS LAZY, which is not a nicety -- an eager probe is measurably wrong twice
+# over. It bills the cheap lane 0.23 s per suite for an answer it never reads; and worse, several
+# suites audit the EXACT LIST of podman commands a fixture issues against a recording fake, so a
+# probe at source time inserts `info --format ...` into somebody else's evidence. Measured: it
+# broke four ceiling:* assertions in 14-test-harness.sh, whose expected value is a podman
+# command log. So the answer is computed when it is first READ and memoised in $VT_SELINUX.
+#
+# MEMOISED ON `+set`, NOT on emptiness: empty is a real answer here, and re-probing every read
+# would put the fork back. It also means a caller may pre-set $VT_SELINUX to force the arm --
+# which is exactly how 14-test-harness.sh's flags:* block reaches both branches on any machine.
+#
+# A STOPPED podman machine answers nothing, and that is deliberately not special-cased: the
+# fallback is the behaviour this file had before, and a run whose containers cannot start is
+# about to say so loudly on its own.
+VT_SELINUX_LOCAL=''
 if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
-    VT_SELINUX=yes
+    VT_SELINUX_LOCAL=yes
 fi
 VT_MOUNT_Z=''
 # AN `if`, NOT `&&`, so this file ENDS on the export and returns 0. `.` propagates the last
-# command's status, and a bare `[ -n "$VT_SELINUX" ] && ...` returns 1 off SELinux -- which is
-# every machine this suite is usually developed on, and would sink any caller under `set -e`.
-if [ -n "$VT_SELINUX" ]; then VT_MOUNT_Z=',z'; fi
-export VT_SELINUX VT_MOUNT_Z
+# command's status, and a bare `[ -n "$VT_SELINUX_LOCAL" ] && ...` returns 1 off SELinux -- which
+# is every machine this suite is usually developed on, and would sink any caller under `set -e`.
+if [ -n "$VT_SELINUX_LOCAL" ]; then VT_MOUNT_Z=',z'; fi
+
+vt_selinux() {                        # -> 'yes' if the machine the CONTAINERS run on enforces
+    if [ -z "${VT_SELINUX+set}" ]; then
+        VT_SELINUX="$VT_SELINUX_LOCAL"
+        if [ -z "$VT_SELINUX" ] && [ "$(uname -s 2>/dev/null)" != Linux ] &&
+           [ "$(podman info --format '{{.Host.Security.SELinuxEnabled}}' 2>/dev/null)" = true ]
+        then
+            VT_SELINUX=yes
+        fi
+    fi
+    printf '%s' "$VT_SELINUX"
+}
+export VT_SELINUX_LOCAL VT_MOUNT_Z
 
 # ─── reading one function out of a script that cannot be sourced ───────────────
 #

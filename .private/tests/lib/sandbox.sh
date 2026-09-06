@@ -269,7 +269,7 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
     # in, where host isolation really is the user namespace's job and this would punch through it.
     # Same distinction this function already relies on for unmask=/proc/* against container.args'
     # ban on unmask=ALL: a fixture, one level out, naming one thing.
-    if [ -n "${VT_SELINUX:-}" ]; then
+    if [ -n "$(vt_selinux)" ]; then
     case "$drop" in *,label,*)    : ;; *) MACHINE_FLAGS+=(--security-opt label=disable) ;; esac
     fi
     fi

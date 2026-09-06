@@ -701,7 +701,7 @@ record "nest:the-flags-this-base-gets" "$(printf '%s ' ${MACHINE_FLAGS[@]+"${MAC
 # so they must never be keyed on the words in an error message. This is an assertion about the
 # symptom of a deprivation we chose -- exactly what `without-SYS_ADMIN-newuidmap-is-what-fails`
 # does one screen up. Nothing branches on it.
-if [ -z "${VT_SELINUX:-}" ]; then
+if [ -z "$(vt_selinux)" ]; then
     skip "nest:without-the-label-off-nothing-starts-inside" \
          "this host has no SELinux, so machine_flags passes no label flag and there is none to remove"
 else
