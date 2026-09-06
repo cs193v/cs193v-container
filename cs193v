@@ -1722,7 +1722,7 @@ tunnel_record_pid() {
     local pid
     pid="$(printf '%s' "$RT_OUT" | LC_ALL=C sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
     if [ -z "$pid" ]; then
-        pid="$(ps -Ao pid=,args= 2>/dev/null | grep -F "$TUNNEL_CTL" | grep -v ' grep ' \
+        pid="$(ps -Awwo pid=,args= 2>/dev/null | grep -F "$TUNNEL_CTL" | grep -v ' grep ' \
                | awk 'NR == 1 { print $1 }')"
     fi
     case "${pid:-}" in
@@ -1978,7 +1978,7 @@ tunnel_sup_alive() {
     pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
     case "${pid:-}" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$pid" 2>/dev/null || return 1
-    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+    case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
         *--dev-supervise*) return 0 ;;
     esac
     return 1
@@ -2031,7 +2031,7 @@ tunnel_sup_stop() {
     pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
     case "${pid:-}" in
         ''|*[!0-9]*) ;;
-        *)  case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+        *)  case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
                 *--dev-supervise*)
                     # This pid is the LOOP (see verb_supervise), so killing it takes the host
                     # side down whole: podman exec's next write fails within one tick, because
@@ -2070,13 +2070,20 @@ tunnel_kill_pid() {
         ''|*[!0-9]*) return 0 ;;
     esac
     kill -0 "$pid" 2>/dev/null || return 0
+    # -ww, WITHOUT WHICH THIS TEST CAN SILENTLY FAIL AND THE KILL BE SKIPPED. procps truncates a
+    # PIPED `ps -o args=` to $COLUMNS -- 80 by default -- so on a Linux host whose TMPDIR pushes
+    # $TUNNEL_CTL past that column, the socket is simply not in the string we match against and
+    # every master looks like a stranger. Measured, procps-ng 4.0.6: 0 hits at COLUMNS=80 against
+    # 3 with -ww. macOS BSD ps does not truncate at any width, so this is invisible from a Mac.
+    # The same two characters are owed at tunnel_record_pid, tunnel_sup_alive and tunnel_sup_stop.
+    #
     # IDENTIFIED BEFORE KILLED. Pids are reused, and this file outlives the process it names --
     # a machine that lost power mid-session leaves one behind, and the number is handed out
     # again within days. So kill only something that still looks like our own tunnel: the
     # control socket being torn down is on its command line, and on nothing else's. Skipping
     # the kill costs 46 ports until --reset-tunnel; killing a stranger's process costs whatever
     # that process was doing.
-    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+    case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
         *"$TUNNEL_CTL"*) : ;;
         *) return 0 ;;
     esac

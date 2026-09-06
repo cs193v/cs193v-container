@@ -627,10 +627,36 @@ step over each other with nothing told to either.
 the control socket, pidfile, log and supervisor paths, all keyed by a hash of the course directory
 and the instance. `count_forwards()` used to count any listener on the default ports, so with a
 second checkout holding all 46 the container tier greenlit itself on somebody else's ssh process
-and `70-sighup.sh` recorded "46 of 46" for a run that held none — the same shape as #34. It reads
-the pidfile, checks that our control socket really is on that pid's command line
-(`tunnel_kill_pid`'s own identity test, for the same reason: pids are reused and the file outlives
-the process), and counts only the sockets that pid holds.
+and `70-sighup.sh` recorded "46 of 46" for a run that held none — the same shape as #34. It now
+scans the process table for every live pid carrying our control socket on its command line
+(`tunnel_record_pid`'s own recipe, `tunnel_kill_pid`'s own identity test) and counts only the
+loopback sockets those pids hold.
+
+**The process table and not the pidfile, which is the second half of that story** (issue #159).
+Reading ownership out of `$FWD_PIDFILE` was the obvious thing and was wrong for one reason:
+`tunnel_down`'s last statement is `rm -f "$TUNNEL_CTL" "$TUNNEL_PID"`, so *every* "the forwards
+were released" assertion runs after the file its verdict depends on has been deleted. The lookup
+then returned nothing, `fwd_owned_ports` returned before it ever called `do_listeners`, and
+`no_forwards()` was unconditionally true — whatever master was still bound. Measured against a live
+master holding `127.0.0.1:49954`: pidfile present → 1 forward, pidfile removed → 0 and
+`wait_until 30 no_forwards` passing in 0 s with the port still in `do_listeners`. It answered the
+same 0 for an empty pidfile, a dead pid and a reused pid: four ways to say "released" without
+looking. Six assertions polled that predicate, and the one it was most read through —
+`sighup:closing-the-window-releases-the-forwarded-ports` — was being used as the discriminator
+between #140 and #150 while it was incapable of failing.
+
+Two things follow that are easy to undo by accident:
+
+- **`ps` needs `-ww` wherever an argv is matched, in the launcher as much as here.** procps
+  truncates a *piped* `ps -o args=` to `$COLUMNS`, 80 by default, so a `TMPDIR` long enough to push
+  the control socket past that column makes every master look like a stranger — 0 hits at
+  `COLUMNS=80` against 3 with `-ww`, procps-ng 4.0.6. macOS BSD `ps` does not truncate at any
+  width, which is why this is invisible from a Mac; and the launcher gets it wrong in the direction
+  that matters, declining to kill a wedged master it can no longer identify.
+- **`tunnel_owner_pid` still reads the pidfile, on purpose.** "Which master does the launcher think
+  it owns" is the right question for anything that *signals* one — you may not kill a pid you only
+  inferred — and the wrong question for a measurement taken after a teardown. The two are separate
+  functions rather than one clever one.
 
 **And its own containers from a colleague's** (issue #74). The live tier counts containers to
 decide whether the launcher was idempotent and whether anything leaked, and it used to count
