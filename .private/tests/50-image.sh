@@ -694,43 +694,77 @@ assert_ne "gesture:vscode-differs-by-os" \
     "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
 assert_contains "gesture:vscode-on-linux-names-shift" "SHIFT" \
     "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
+# AND `wsl` LANDS WHERE `linux` DOES, which is worth its own line because `wsl` is the value that
+# actually OCCURS on the platform this arm exists for. platform() returns `wsl` and not `linux`
+# on every Windows machine -- containers share the WSL kernel and /proc/version says microsoft --
+# so a student on Windows never produces the string tested above. The arm is written `macos` vs
+# `*`, so the two agree today; asserting it is what stops a future third arm from being added for
+# `linux` alone and silently dropping every Windows student onto the macOS wording.
+assert_eq "gesture:vscode-on-wsl-matches-linux" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=wsl   cs193v-gesture copy')"
 # AND THE LINK ARM ON THE SAME OS, because the dump below runs macos only. `link` is one of the
 # two arms that split on the platform, so the vscode/linux string is in no other assertion here
 # and the set check cannot see it. VS Code may well open a link on CTRL+click -- xterm.js
-# activates links from a listener the mouse-report path does not stop -- but nobody has run it,
-# so the row must stay gesture-free until someone does. See PR #146.
+# activates links from a listener the mouse-report path does not stop, the same shape of argument
+# that Windows Terminal's row now rests on -- but VS CODE HAS STILL NOT BEEN RUN, and source
+# alone has never been enough for a row that names a gesture on a terminal nobody has tried. So
+# it stays gesture-free. See PR #146 and tests/MANUAL.md 8.2, which records what is left.
 assert_not_contains "gesture:vscode-on-linux-link-names-no-click" "click" \
     "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture link')"
 
-# THE TWO ROWS THAT NAME A CLICK, AND THE TWO KINDS OF EVIDENCE UNDER THEM. Terminal.app came
-# from hardware: Apple documents plain CMD+double-click ("Hold down the Command key and
-# double-click the URL"), under mouse reporting that is dead, and FN+CMD+double-click is what
-# actually opened a link -- confirmed by a local HTTP server receiving the request, not by eye.
-# The vte row came from hardware on Ptyxis 50.1 and from SOURCE for GNOME Terminal, which is the
-# weaker half; cs193v-gesture labels it as such rather than letting one token hide the difference.
+# THE ROWS THAT NAME A CLICK, AND THE KINDS OF EVIDENCE UNDER THEM -- which are not all the same
+# strength, and the file says which is which rather than letting one token hide the difference.
 #
-# WHY A CLICK IS DERIVABLE THERE AND NOT ELSEWHERE. On both VTE embedders the terminal's own URL
-# handler runs BEFORE the mouse report is encoded -- Ptyxis takes the click in a capture-phase
-# GtkGestureClick, GNOME Terminal in a button_press override that returns without chaining to VTE
-# -- so this is not the bypass-modifier story at all, which is why the row names one modifier and
-# not SHIFT+CTRL. Nothing of the sort holds for the terminals still on the gesture-free arm:
-# xterm, foot and conhost have no URL detection at all, and Alacritty's URL hint matches on NO
-# modifier so holding Shift may suppress it.
+#   apple-terminal   HARDWARE. Apple documents plain CMD+double-click ("Hold down the Command key
+#                    and double-click the URL"); under mouse reporting that is dead, and
+#                    FN+CMD+double-click is what actually opened a link -- confirmed by a local
+#                    HTTP server receiving the request, not by eye.
+#   vte              HARDWARE on Ptyxis 50.1, SOURCE for GNOME Terminal. The weaker half is
+#                    labelled as such in cs193v-gesture.
+#   windows-terminal HARDWARE on Windows Terminal 1.24.11911, Windows 11 26200, measured
+#                    2026-09-05 -- CTRL+click opened the browser with modes 1000 and 1006 both
+#                    active, which is the condition that matters: if the hyperlink branch ran
+#                    after the report was encoded, the bytes would have gone to the pane and no
+#                    browser would have opened. SOURCE agrees and predicted it -- the ctrl+click
+#                    hyperlink branch sits ahead of _canSendVTMouseInput ("GH#9396: we prioritize
+#                    hyper-link over VT mouse events"). See PR #146 and tests/MANUAL.md 8.2.
+#
+# WHY A CLICK IS DERIVABLE ON THESE AND NOT ELSEWHERE. On all three the terminal's own URL handler
+# runs BEFORE the mouse report is encoded -- Ptyxis takes the click in a capture-phase
+# GtkGestureClick, GNOME Terminal in a button_press override that returns without chaining to VTE,
+# Windows Terminal in a branch that precedes its VT-mouse test -- so this is not the
+# bypass-modifier story at all, which is why these rows name ONE modifier and not SHIFT+CTRL.
+# Nothing of the sort holds for the terminals still on the gesture-free arm: xterm, foot and
+# conhost have no URL detection at all, and Alacritty's URL hint matches on NO modifier so
+# holding Shift may suppress it.
 assert_contains "gesture:apple-terminal-link-names-the-measured-gesture" "FN+COMMAND+double-click" \
     "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture link')"
 assert_contains "gesture:vte-link-names-ctrl-click" "CTRL+click" \
     "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-gesture link')"
-# AND IT MUST NOT NAME SHIFT IN THE SAME BREATH. This row used to read "Hold SHIFT to select the
-# link, then paste it in your browser", which is true but is the longer way round; naming both
-# would put the harder route first in the one line a student reads.
+assert_contains "gesture:windows-terminal-link-names-ctrl-click" "CTRL+click" \
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture link')"
+# AND THEY MUST NOT NAME SHIFT IN THE SAME BREATH. Both rows used to read "Hold SHIFT to select
+# the link, then paste it in your browser", which is true but is the longer way round; naming
+# both would put the harder route first in the one line a student reads.
 assert_not_contains "gesture:vte-link-does-not-name-shift" "SHIFT" \
     "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-gesture link')"
+assert_not_contains "gesture:windows-terminal-link-does-not-name-shift" "SHIFT" \
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture link')"
+# ...AND THE COPY ROW STILL DOES, which is the pair worth asserting together: on Windows Terminal
+# the link is a CTRL+click and the SELECTION is still a SHIFT+drag, because those are two
+# different mechanisms -- an intercepted URL handler and a bypass modifier. Measured in the same
+# sitting: SHIFT+drag under modes 1000/1006 printed nothing and highlighted text, so the bypass
+# is real. A future reader tidying the two rows into one would break exactly this.
+assert_contains "gesture:windows-terminal-copy-still-names-shift" "SHIFT" \
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture copy')"
 
 # NO OTHER TOKEN MAY INVENT A CLICK, which replaces a check that only ever read `unknown`. The
-# SET and not the count: a name with a number in it goes stale exactly the way this file's
-# "EXACTLY ONE TERMINAL" heading did. It also catches the opposite drift -- a row quietly LOSING
-# its click -- which an assert_not_contains against one token never could. [Cc]lick because a
-# re-worded row capitalising the word is the slip most likely to get through.
+# SET and not the count -- and not a list of names in the ASSERTION NAME either, which goes stale
+# exactly the way this file's "EXACTLY ONE TERMINAL" heading and this check's own former
+# "only-apple-terminal-and-vte" name did. It also catches the opposite drift -- a row quietly
+# LOSING its click -- which an assert_not_contains against one token never could. [Cc]lick
+# because a re-worded row capitalising the word is the slip most likely to get through.
 g_clicks=''
 while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
     [ "$gm" = link ] || continue
@@ -738,7 +772,8 @@ while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
 done <<GDUMP
 $g_dump
 GDUMP
-assert_eq "gesture:only-apple-terminal-and-vte-name-a-click" " apple-terminal vte" "$g_clicks"
+assert_eq "gesture:exactly-the-measured-rows-name-a-click" \
+          " apple-terminal windows-terminal vte" "$g_clicks"
 
 # The correction shown when a SHIFT+drag actually reaches tmux -- which only happens on a
 # terminal that forwards Shift rather than intercepting it, i.e. exactly where "hold SHIFT" was

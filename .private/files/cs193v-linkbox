@@ -181,7 +181,8 @@ HINT_LEAD="  $CHIP ◂ typing goes nowhere; press x to close"
 # THE OLD LINE SAID `CTRL+Click ... (Command+Click on macOS)` AND WAS WRONG TWICE. CMD+SINGLE-
 # click has never opened a URL in Terminal.app -- Apple documents CMD+DOUBLE-click -- and under
 # tmux's mouse reporting even that is dead, because the click reaches tmux instead of the
-# terminal. See cs193v-gesture for the whole table and for why only two rows name a click.
+# terminal. See cs193v-gesture for the whole table and for which rows may name a click at all --
+# a count does not belong here, because it changes as terminals get measured.
 #
 # FALLS BACK RATHER THAN FAILING. An image whose PATH has lost cs193v-gesture would otherwise
 # print a blank row here, and every height assertion would still pass -- the frames are counted
