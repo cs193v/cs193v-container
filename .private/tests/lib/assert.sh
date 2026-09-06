@@ -687,14 +687,28 @@ dyn_serve_stop() { container_pkill "http.server" >/dev/null 2>&1 || true; }
 # Is OUR master holding this host port?
 dyn_is_forwarded() { fwd_owned_ports | grep -qx "$1"; }
 
-# THE FIXTURE. Bind N ports inside the container, wait for the tunnel to carry them, and print
-# them. This is what replaced reading a declared list, and the hard-fail is the same project
-# decision as require_image and the old require:ports: a suite that quietly carried on with no
-# forwarded port would test nothing and say so nowhere -- the failure 1937a30 (#79) was about.
+# THE FIXTURE. Bind N ports inside the container, wait for the tunnel to carry them, and leave
+# them in $DYN_PORTS. This is what replaced reading a declared list, and the hard-fail is the same
+# project decision as require_image and the old require:ports: a suite that quietly carried on
+# with no forwarded port would test nothing and say so nowhere -- the failure 1937a30 (#79) was
+# about.
+#
+# A STATEMENT, AND THE PORTS COME BACK IN A VARIABLE. That is not a style choice: it is what the
+# `exit` below depends on, and the reason it is spelled this way is #164. The one call site used
+# to be `DYN2="$(dyn_ports 2)"`, so the exit ended the SUBSHELL, 60-container.sh carried on past
+# a tunnel carrying nothing, and it recorded `PASS ports:a-port-bound-inside-reaches-the-host`
+# and `PASS ports:no-forward-is-lan-exposed` -- the security property, filtering on an empty pid
+# that matched nothing. fail's detail goes to stdout, so the `$( )` swallowed the two commands
+# that fix a dead tunnel as well and flattened them into a REC line.
+#
+# So there is deliberately NOTHING ON STDOUT to substitute: a fixture with no value cannot be
+# wrapped in a `$( )` that looks like it works. 10-static.sh's
+# harness:no-exiting-helper-runs-in-a-subshell keeps every other call site honest, and
+# lib/assert.sh:57-58 is the invariant both of them serve.
 DYN_PORTS=''
-dyn_ports() {                         # dyn_ports [N] -> N forwarded ports, space separated
+dyn_ports() {                         # dyn_ports [N] -> $DYN_PORTS, N forwarded ports, spaced
     local want="${1:-1}" got='' p i=0
-    [ -n "$DYN_PORTS" ] && { printf '%s' "$DYN_PORTS"; return 0; }
+    [ -n "$DYN_PORTS" ] && return 0
     fwd_init
     while [ "$i" -lt "$want" ]; do
         p="$(dyn_free_port $got)" || break
@@ -717,7 +731,6 @@ Check:  ./cs193v doctor
     done
     DYN_PORTS="$got"
     export DYN_PORTS
-    printf '%s' "$got"
 }
 
 # A host port that nothing is listening on RIGHT NOW. Two suites need one and neither can name it:

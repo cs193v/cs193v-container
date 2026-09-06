@@ -631,6 +631,31 @@ assert_eq "fixture-prereqs:only-one-place-removes-with-dnf" "1" \
           "$(printf '%s\n' "$naming5" | grep -c . )"
 assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-guest.sh' "$naming5"
 
+# ─── nothing that can EXIT is called from a command substitution ───────────────
+# lib/assert.sh:57-58 states the invariant this rule enforces -- "`exit` really does end the
+# suite: no assertion in this suite is called from a subshell" -- and #164 is what it cost when
+# one call site stopped obeying it. `DYN2="$(dyn_ports 2)"` put the fixture every port assertion
+# rests on inside a `$( )`, so its `exit 1` ended the subshell, 60-container.sh carried on, and
+# the run recorded `PASS ports:no-forward-is-lan-exposed` -- one of the three security properties
+# -- against an empty pid filter that matched nothing.
+#
+# EVERY ASSERTION IS ON THE LIST, not just the four require_* and dyn_ports: pass, fail, record
+# and skip all reach _emit, whose `exit 97` is the full-disk guard #76 bought, and it would be
+# swallowed exactly the same way. Third time the subshell boundary has eaten something
+# load-bearing here, so it is a rule rather than a fix.
+#
+# THE SINGLE-LINE `$( )` FORM ONLY, which is worth being honest about: a substitution spanning
+# lines, or an assertion on the right of a pipe, is invisible to a grep. Both were measured at
+# zero across the suites when this landed, and every guard in them is the statement form
+# `... || { fail ...; exit 1; }`.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+exitful='dyn_ports|require_cmd|require_image|require_running|require_tunnel'
+exitful="$exitful|pass|fail|skip|record|assert_[a-z_]+"
+subshelled="$(grep -HnE '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
+              $PRIVATE/tests/[0-9][0-9]-*.sh $PRIVATE/tests/lib/*.sh \
+              | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 #

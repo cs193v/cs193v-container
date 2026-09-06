@@ -139,9 +139,11 @@ assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | do_tr 
 # them inside the container and waits for our master to carry them, so by the time it returns the
 # feature has already been proved end to end once; everything below asks narrower questions about
 # ports that are known to be up.
-DYN2="$(dyn_ports 2)"
-DYN1="$(printf '%s' "$DYN2" | awk '{print $1}')"
-DYN2ND="$(printf '%s' "$DYN2" | awk '{print $2}')"
+#
+# A STATEMENT, so the hard-fail inside it is THIS SUITE'S. Written `DYN2="$(dyn_ports 2)"` the
+# exit ended the subshell and everything below ran against a tunnel carrying nothing -- #164.
+dyn_ports 2
+DYN2="$DYN_PORTS"
 record "ports:the-ports-under-test" "$DYN2"
 pass "ports:a-port-bound-inside-reaches-the-host"
 
