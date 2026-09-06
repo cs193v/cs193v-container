@@ -1011,6 +1011,94 @@ assert_says "portable:do_listeners-reports-a-pid"       "pid=$PL_PID"        "$P
 kill "$PL_PID" 2>/dev/null || true
 wait "$PL_PID" 2>/dev/null || true
 
+# ─── the ownership instrument, which must outlive the teardown it measures (#159) ──────────────
+# THE SAME FAILURE AS F15 ABOVE, ONE LAYER UP, and the third time this count has answered without
+# measuring. `count_forwards` asks WHOSE a listener is by reading the pid out of $FWD_PIDFILE --
+# which is the launcher's own $TUNNEL_PID, and `tunnel_down`'s final statement is
+# `rm -f "$TUNNEL_CTL" "$TUNNEL_PID"` (cs193v:2113). So every "the forwards were released"
+# assertion runs AFTER the file its verdict depends on has been deleted, `tunnel_owner_pid` prints
+# nothing, `fwd_owned_ports` returns before it ever calls do_listeners, and `no_forwards()` is
+# unconditionally TRUE -- whatever master is still bound. Six assertions poll that predicate.
+#
+# NO PODMAN, NO LAUNCHER, NO TUNNEL. The stand-in below is a process that holds a 127.0.0.1
+# listener AND carries our control socket on its command line, which is the whole of the identity
+# test (cs193v:2079, copied at assert.sh:643) -- so this reproduces #159 in the cheap lane, in
+# milliseconds, on a machine with no container. That matters twice: the container tier cannot
+# produce this state without a fixture anyway (a healthy master answers `ssh -O exit` and the ports
+# genuinely come back), and §A.15's sabotage audit only ever runs static|unit|shim, which is why a
+# documented audit for exactly this class did not see it.
+#
+# AND THE SECOND HALF IS WHAT STOPS THE FIX FROM PASSING BY HAVING QUIETLY STOPPED COUNTING, the
+# discipline live:a-neighbours-throwaway-is-not-counted established: it is not enough that a leaked
+# master is seen, the count must still go back to zero when the master really dies, and must still
+# refuse a colleague's (#46).
+FWD_READY=1
+FWD_CTL="$WORK/cs193v-selftest.ctl"
+FWD_PIDFILE="$WORK/cs193v-selftest.pid"
+
+# The stand-in, as a program in a variable and STARTED INLINE -- deliberately not wrapped in a
+# `standin() { ...& printf %s "$!"; }` helper called as `P="$(standin)"`, which is how this was
+# first written and does not work: a background job started inside a command substitution does not
+# survive the subshell. Measured -- `f() { sleep 20 & printf "%s" "$!"; }; P="$(f)"` leaves nothing
+# alive, while the same two lines outside a `$( )` do. It is the trap #76 hit with repo_copy's
+# memoisation and the one assert.sh:57-59 declares an invariant against, arriving here as a dead
+# fixture that reported a confident zero -- the very shape being tested for. Both launches below
+# are therefore statements, and $! is read in this shell, which also makes `wait` below work.
+MSTANDIN_PY='
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(1)
+open(sys.argv[2], "w").write(str(s.getsockname()[1]))
+time.sleep(60)
+'
+# The ctl path is an ARGUMENT, so it lands in argv where `ps` shows it; python never opens it and
+# no socket file is created.
+python3 -c "$MSTANDIN_PY" "$FWD_CTL" "$WORK/mport" &
+FM_PID=$!
+wait_until 10 sh -c "[ -s '$WORK/mport' ]" || true
+printf '%s\n' "$FM_PID" > "$FWD_PIDFILE"
+record "harness:the-stand-in-master" "pid=$FM_PID port=$(cat "$WORK/mport" 2>/dev/null)"
+
+# A. the state during a session: the pidfile names our master and it holds one loopback port.
+assert_eq "harness:count_forwards-sees-our-master" "1" "$(count_forwards)"
+
+# B. THE #159 CASE. Nothing about the master changed -- only the file the lookup reads through.
+rm -f "$FWD_PIDFILE"
+assert_eq "harness:count_forwards-still-sees-it-with-no-pidfile" "1" "$(count_forwards)"
+# ...and the predicate those six assertions actually poll must say so.
+assert_fail "harness:no_forwards-is-false-while-a-master-still-holds-one" no_forwards
+
+# C. AND BACK TO ZERO WHEN THE MASTER REALLY DIES, which is the half a fix could cheat. `wait`
+# rather than a kill -0 poll: the stand-in is this shell's child, so it is a zombie until reaped
+# and kill -0 succeeds on a zombie (the trap 12-run-timeout.sh:135 records).
+kill "$FM_PID" 2>/dev/null || true
+wait "$FM_PID" 2>/dev/null || true
+assert_eq "harness:count_forwards-goes-to-zero-when-the-master-dies" "0" "$(count_forwards)"
+
+# D. A COLLEAGUE'S TUNNEL IS NOT OURS (#46). TUNNEL_ID hashes the course directory and the
+# instance, so another checkout's master carries a different control socket. Without this the
+# scan is "count every ssh on the machine", which is how `forwards-while-a-session-is-open` once
+# recorded 46 of 46 for a run holding none.
+python3 -c "$MSTANDIN_PY" "$WORK/cs193v-somebody-elses.ctl" "$WORK/coport" &
+CO_PID=$!
+wait_until 10 sh -c "[ -s '$WORK/coport' ]" || true
+assert_eq "harness:count_forwards-ignores-another-checkouts-tunnel" "0" "$(count_forwards)"
+kill "$CO_PID" 2>/dev/null || true
+wait "$CO_PID" 2>/dev/null || true
+
+# E. AN UNIDENTIFIABLE TUNNEL IS FATAL, NEVER EMPTY, and this one is a precondition of the scan
+# rather than a nicety: an empty needle matches every process, and taken as the launcher's own
+# `awk 'NR == 1'` would resolve to pid 1 -- which holds no loopback listener, so the count would
+# read 0 and the assertion would pass. That is #159 reintroduced by its own fix, silently. Same
+# discipline as do_listeners' missing backend: exit 96 rather than answer.
+ctl_unidentified() { ( FWD_READY=1; FWD_CTL=''; fwd_master_pids >/dev/null 2>&1 ); }
+assert_fail "harness:an-unidentifiable-tunnel-is-fatal-rather-than-empty" ctl_unidentified
+# PUT THE SEAM BACK, so nothing later in this file inherits a fixture path -- and FWD_READY with
+# it, or a later fwd_init would short-circuit onto an empty FWD_CTL and fwd_require_ctl would
+# (correctly) kill the suite.
+# shellcheck disable=SC2034   # read by fwd_init in lib/assert.sh, which shellcheck cannot see
+FWD_READY='' FWD_CTL='' FWD_PIDFILE=''
+
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.
 # NOT via `sh -c`: a child shell does not inherit a function, so that would assert 127 and pass

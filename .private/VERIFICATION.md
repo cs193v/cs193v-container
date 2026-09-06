@@ -730,6 +730,32 @@ milliseconds, in the cheap lane, on every run.
 containing the same suites; `grep` backs `count()`, which then reports `0 pass` and exits 0;
 `awk` is the subject under test in three suites; and `jq` appears nowhere outside `gh --jq`.
 
+**AND THE BLIND SPOT THIS AUDIT HAS, named because #159 walked straight into it.** The recipe above
+runs the **cheap lane only** — `static|unit|shim` — because that is where a fake `$PATH` entry is
+affordable and where a differential of two full legs is meaningful. So it cannot see a vacuous pass
+whose subject is a container, a tunnel or a host port, and the whole of #159 was in that half:
+`no_forwards()` read the ownership of every listener through `$FWD_PIDFILE`, `tunnel_down`'s last
+statement deletes that file, and six assertions across `70-sighup.sh` and `80-launcher-live.sh`
+therefore polled a predicate that could not fail. It answered the same 0 for a deleted pidfile, an
+empty one, a dead pid and a reused pid. Found by reading, not by sabotage, two audits after this
+section was written — and the same shape as #34, #46 and the `ss` backend that returned empty on
+macOS, which is three times one count has answered without measuring.
+
+What was done about it is the pattern worth copying rather than the fix itself: the measurement
+moved off the file the teardown deletes and onto the process table, and then **the instrument got a
+fixture in the cheap lane** so the next regression is caught by the audit's own tier rather than by
+somebody re-reading `lib/assert.sh`. `harness:count_forwards-*` in `14-test-harness.sh` stands up a
+stand-in master — a process holding a loopback port with our control socket in its argv — and
+asserts all four halves: that it is counted, that it is **still** counted with no pidfile (#159),
+that the count returns to zero when the master really dies, and that a colleague's tunnel is never
+counted (#46). The last two are what stop a future fix from passing by having quietly stopped
+counting, which is the failure mode `live:a-neighbours-throwaway-is-not-counted` was written for.
+
+The general rule, which is the third time it has been paid for: **an assertion whose subject is
+established by another process needs a fixture that can make it fail, in a lane cheap enough to run
+every time.** Reading for these does not work — that is the first sentence of this section, and it
+was as true of the podman lanes as of the cheap one.
+
 ---
 
 ## 1. Install and preflight

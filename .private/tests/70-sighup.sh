@@ -161,6 +161,14 @@ FWD_BEFORE="$(count_forwards)"
 # OURS, not anybody's: count_forwards is ownership-scoped now, so this records what this
 # instance's own tunnel holds. It recorded "46 of 46" for a run that held none of them (#46).
 record "sighup:forwards-while-a-session-is-open" "$FWD_BEFORE"
+# THE MASTER ITSELF, read WHILE the launcher's record of it still exists -- tunnel_down's last
+# statement deletes that record (cs193v:2113), so this is the only moment it can be had. It is what
+# lets the teardown assertions below name a survivor instead of merely counting to zero, and it is
+# the snapshot #159 asked for. What a snapshot could not fix is the five sibling assertions whose
+# tunnel is born and dies inside a single launcher invocation, so they have no such moment; those
+# are fixed one layer down, in fwd_owned_ports.
+FWD_OWNER="$(tunnel_owner_pid)"
+record "sighup:the-master-holding-them" "${FWD_OWNER:-none}"
 
 # THE WINDOW CLOSING -- the polite ordering, which is what every macOS terminal measured so far
 # actually does. The rude one gets its own group below; it used to be the only one here, and that
@@ -182,14 +190,60 @@ fi
 # The tunnel is a HOST process holding loopback ports, so it does not die with the container --
 # it has to be taken down deliberately. Forgetting would mean the next launch could bind none of
 # its ports, which is the failure remove_container documents; this is its test on the teardown path.
-if wait_until 30 no_forwards; then
-    pass "sighup:closing-the-window-releases-the-forwarded-ports"
+#
+# THE SUBJECT IS ESTABLISHED BEFORE IT IS ASKED ABOUT, which is the whole of #159. With nothing
+# forwarded while the session was open there is nothing to release, and both assertions below would
+# pass whatever the teardown did -- the shape #34 and #46 taught this file to fear, and the shape
+# the "was-not-reachable-first" record below covers for the server in the tab. Said out loud rather
+# than banked: a pass with no subject is worth less than a red.
+if [ -z "$FWD_OWNER" ] || [ "$FWD_BEFORE" = 0 ]; then
+    fail "sighup:the-probe-had-a-tunnel-to-release" \
+         "forwards=$FWD_BEFORE, master=${FWD_OWNER:-none of ours was identifiable}, with a session
+open and a server in a tab answering $BEFORE_HTTP. Neither assertion below has a subject, so both
+would pass however the teardown behaved.
+Check:  ./cs193v doctor
+        $FWD_SUPLOG"
+    skip "sighup:closing-the-window-releases-the-forwarded-ports" "nothing was forwarded to release"
+    skip "sighup:closing-the-window-kills-the-ssh-master" "no master of ours was identified"
 else
-    fail "sighup:closing-the-window-releases-the-forwarded-ports" \
-         "$(count_forwards) forwards are still bound (there were $FWD_BEFORE while the session
+    pass "sighup:the-probe-had-a-tunnel-to-release"
+    if wait_until 30 no_forwards; then
+        pass "sighup:closing-the-window-releases-the-forwarded-ports"
+    else
+        still="$(fwd_owned_ports | do_tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        fail "sighup:closing-the-window-releases-the-forwarded-ports" \
+             "$(count_forwards) forwards are still bound (there were $FWD_BEFORE while the session
 was open). An ssh client outliving its container holds its host ports against a pipe with nothing
 on the far end, so nothing it forwards can be reached and the ports are not free for anything else
-either."
+either. Still held, and by whom:
+$(fwd_squatters $still)"
+    fi
+    # ...AND THE MASTER IS GONE, which is the claim tunnel_down actually makes: it asks the master
+    # to exit and escalates to tunnel_kill_pid when that is not answered, then deletes the pidfile
+    # either way. Asserted separately from the ports because the two can part company in both
+    # directions -- a master can drop its forwards and live, and the ports can come back with
+    # nothing having killed it deliberately, since a container that stops EOFs the transport and
+    # the master then exits on its own in about a second.
+    #
+    # NOT `kill -0`: it succeeds on a zombie, the trap 12-run-timeout.sh:135 records. The argv test
+    # is the launcher's own (cs193v:2079) and survives pid reuse, which kill -0 does not.
+    #
+    # A TRANSITION, NOT AN ABSENCE, so wait_until is the right instrument here despite its own
+    # prohibition: FWD_OWNER was identified as our live master a moment ago, above.
+    master_gone() {
+        case "$(ps -p "$FWD_OWNER" -wwo args= 2>/dev/null)" in *"$FWD_CTL"*) return 1 ;; esac
+        return 0
+    }
+    if wait_until 30 master_gone; then
+        pass "sighup:closing-the-window-kills-the-ssh-master"
+    else
+        fail "sighup:closing-the-window-kills-the-ssh-master" \
+             "pid $FWD_OWNER is still running as this instance's ssh master 30s after the window
+closed, holding: $(fwd_owned_ports | do_tr '\n' ' ')
+tunnel_down deletes the pidfile whether or not the kill worked, so a master that survives this is
+one nothing can find again except --reset-tunnel -- and every host port it holds stays bound."
+    fi
 fi
 
 # ...and the server in the tab went with it. If it was never reachable the assertion below is

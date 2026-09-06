@@ -631,18 +631,37 @@ free_unforwarded_ports() {            # free_unforwarded_ports N -> up to N port
 # another checkout's -- both are `ssh` run by this user with 46 -L flags.
 #
 # THE PIDFILE RATHER THAN `cs193v doctor`, which also knows: doctor costs a `podman info`, 536-1222
-# ms of it (ERRORS.md D11), and count_forwards is called from `wait_until 30 no_forwards`, which
-# polls at 20 Hz. Two cheap forks per poll is affordable; a podman probe per poll is not. It is
-# also strictly more capable -- doctor's line is gated on tunnel_alive, so it goes quiet exactly
-# when a master is wedged, which is the case two live-tier assertions deliberately create.
-tunnel_owner_pid() {                  # -> the pid of THIS instance's ssh master, or nothing
+# ms of it (ERRORS.md D11). It is also strictly more capable -- doctor's line is gated on
+# tunnel_alive, so it goes quiet exactly when a master is wedged, which is the case two live-tier
+# assertions deliberately create.
+#
+# WHAT THIS ANSWERS, AND WHAT IT DOES NOT (#159). "Which master does the launcher think it owns" is
+# the right question for the things that KILL one -- release_tunnel, the two `kill -STOP` wedges,
+# require_tunnel -- because you may not signal a pid you merely inferred. It is the WRONG question
+# for a measurement taken AFTER a teardown, because `tunnel_down` ends by deleting the very file it
+# reads (cs193v:2113). Measuring is fwd_master_pids' job, below.
+tunnel_owner_pid() {                  # -> the pid the LAUNCHER records as its master, or nothing
     fwd_init
+    fwd_require_ctl
     local pid
     pid="$(cat "$FWD_PIDFILE" 2>/dev/null)"
     case "${pid:-}" in ''|*[!0-9]*) return 0 ;; esac
-    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+    case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
         *"$FWD_CTL"*) printf '%s' "$pid" ;;
     esac
+}
+
+# AN UNIDENTIFIABLE TUNNEL IS FATAL, NEVER EMPTY, and the two readers above and below need it for
+# opposite reasons. `case ... in *""*)` matches EVERY argv, so an empty needle makes the pidfile
+# reader believe any live pid it finds; `index($0, "")` matches every LINE, so it makes the process
+# scanner claim strangers -- or, taken as the launcher's own `awk 'NR == 1'`, exactly pid 1, which
+# holds no loopback listener and so answers a silent ZERO. Measured, both directions. fwd_init
+# cannot be relied on to have succeeded: it sets FWD_READY before the launcher call and swallows
+# the rc, so one failed `--dev-tunnel` caches empty paths for the whole suite process. Same
+# discipline as do_listeners' missing backend: refuse to answer rather than answer wrongly.
+fwd_require_ctl() {
+    [ -n "$FWD_CTL" ] || _pt_fatal dev-tunnel \
+        'cs193v --dev-tunnel named no control socket, so no listener can be identified as ours'
 }
 
 # IS OUR SUPERVISOR RUNNING? Same identity discipline as tunnel_owner_pid and for the same reason:
@@ -653,30 +672,83 @@ sup_owner_alive() {
     local pid
     pid="$(cat "$FWD_SUPPID" 2>/dev/null)"
     case "${pid:-}" in ''|*[!0-9]*) return 1 ;; esac
-    case "$(ps -p "$pid" -o args= 2>/dev/null)" in *--dev-supervise*) return 0 ;; esac
+    case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in *--dev-supervise*) return 0 ;; esac
     return 1
 }
 
-# Every host port OUR master is listening on, one per line. `ss -ltnp` yields the listening pid
-# for this user's own sockets, which is what makes the ownership filter possible at all --
-# ports:one-ssh-process-carries-them-all has relied on that since the tunnel landed.
+# WHICH OF OUR MASTERS EXIST, asked of the process table rather than the pidfile (#159).
 #
-# NO EXPECTED SET TO MATCH AGAINST any more, so the address pattern is the invariant instead: every
-# forward this launcher makes binds 127.0.0.1 and nothing else, which is the security property
-# three assertions rest on. A master listening anywhere else would show up here rather than be
-# filtered out of view, which is the right way round.
+# THE PIDFILE IS THE WRONG SUBJECT FOR THIS QUESTION, and it took three goes to see it. Read that
+# way, "have the forwards been released" answered 0 -- and therefore TRUE -- once `tunnel_down`
+# reached its final `rm -f "$TUNNEL_CTL" "$TUNNEL_PID"` (cs193v:2113), whatever was still bound.
+# Six assertions poll that predicate, and one of them, sighup:closing-the-window-releases-the-
+# forwarded-ports, was being read as the discriminator between #140 and #150 while it was
+# incapable of failing. Measured with a live master holding 127.0.0.1:49954: pidfile present -> 1,
+# pidfile removed -> 0 and `wait_until 30 no_forwards` passing in 0 s with the port still in
+# do_listeners. Read that way it also answered 0 for an EMPTY pidfile, a DEAD pid and a REUSED
+# pid -- four ways to say "released" without looking.
+#
+# THE SCAN IS THE LAUNCHER'S OWN, copied rather than approximated, exactly as the identity test
+# above is: tunnel_record_pid finds its master with `ps -Ao pid=,args= | grep -F "$TUNNEL_CTL"`
+# (cs193v:1725), under a comment calling that "THE IDENTITY TEST tunnel_kill_pid ALREADY TRUSTS".
+# A colleague's checkout hashes a different TUNNEL_ID and so a different control socket, which is
+# what keeps #46 fixed; harness:count_forwards-ignores-another-checkouts-tunnel is its fixture.
+#
+# -ww IS LOAD-BEARING, NOT TIDINESS. procps truncates a PIPED `ps -o args=` to $COLUMNS -- 80 by
+# default -- and drops the ctl path off the end of the line. Measured, procps-ng 4.0.6:
+#   COLUMNS=80 ps -Ao pid=,args= -> 0 hits        ps -Awwo pid=,args= -> 3 hits
+# macOS BSD ps does not truncate at any width (530 bytes of real ssh argv verified), so this is
+# invisible from a Mac and would have reintroduced the silent zero on Linux -- the fix reproducing
+# the bug. The same two characters are owed at cs193v:1725, :1981, :2034 and :2079, where the
+# launcher can otherwise fail to find, and therefore fail to KILL, its own wedged master.
+#
+# THE NEEDLE TRAVELS IN THE ENVIRONMENT, not in argv, so this pipeline cannot match itself and
+# needs no equivalent of the launcher's `grep -v ' grep '`.
+fwd_master_pids() {                   # -> every live pid whose argv names OUR control socket
+    fwd_init
+    fwd_require_ctl
+    # AND A ps THAT LISTED NOTHING IS FATAL TOO, for the reason this whole function exists: an
+    # empty answer here is indistinguishable from "no master of ours is running", which is the
+    # happy answer. `ps` is not a tool that can be missing the way `ss` was, so this is insurance
+    # rather than a scenario -- but an unguarded silent zero is what #159 was.
+    ps -Awwo pid=,args= 2>/dev/null \
+        | FWD_CTL="$FWD_CTL" do_awk 'BEGIN { c = ENVIRON["FWD_CTL"] }
+                                     index($0, c) { print $1 }
+                                     END { if (NR == 0) exit 3 }' \
+      || _pt_fatal ps 'ps -A listed no processes, so no tunnel of ours can be identified'
+}
+
+# Every host port one of OUR masters is listening on, one per line. `ss -ltnp` and `lsof` yield the
+# listening pid for this user's own sockets, which is what makes the ownership filter possible at
+# all -- ports:one-ssh-process-carries-them-all has relied on that since the tunnel landed.
+#
+# NO EXPECTED SET TO MATCH AGAINST, so the address pattern is the invariant instead: every forward
+# this launcher makes binds 127.0.0.1 and nothing else, which is the security property three
+# assertions rest on. A master listening anywhere else shows up here rather than being filtered out
+# of view, which is the right way round -- 60-container.sh:150 inverts this filter deliberately.
 fwd_owned_ports() {
-    local pid
-    pid="$(tunnel_owner_pid)"
-    [ -n "$pid" ] || return 0
+    local pids
+    pids="$(fwd_master_pids)"
+    # No process of ours exists, so it holds no ports. A zero DERIVED from a measurement, unlike
+    # the zero this returned when it could not work out whom to ask.
+    [ -n "$pids" ] || return 0
     # do_listeners, not ss: macOS has neither ss nor any netstat that can report a pid, and the
     # old `ss ... 2>/dev/null` yielded EMPTY there -- so count_forwards was 0, no_forwards() was
     # unconditionally TRUE, and every "the forwards were released" assertion passed having
     # measured nothing. A missing backend is now fatal rather than silent. Its format is
     # ADDR:PORT<TAB>pid=NNN; see lib/portable.sh.
-    do_listeners \
-        | do_awk -F'\t' -v p="pid=$pid" '$2 == p && $1 ~ /^127[.]0[.]0[.]1:[0-9]+$/ { sub(/.*:/, "", $1); print $1 }' \
-        | LC_ALL=C sort -u
+    #
+    # AN AWK SET, and `p != ""` is not belt-and-braces. do_listeners emits `pid=` with an EMPTY
+    # field for a socket owned by another account (portable.sh:151), and a substring membership
+    # test -- index(" $pids ", " " p " ") -- matches the empty string against it and so reports
+    # ANOTHER USER'S loopback listeners as forwards of ours. Measured.
+    do_listeners | FWD_PIDS="$pids" do_awk -F'\t' '
+        BEGIN { n = split(ENVIRON["FWD_PIDS"], a, "\n")
+                for (i = 1; i <= n; i++) if (a[i] != "") ours[a[i]] }
+        $1 ~ /^127[.]0[.]0[.]1:[0-9]+$/ {
+            p = $2; sub(/^pid=/, "", p)
+            if (p != "" && (p in ours)) { sub(/.*:/, "", $1); print $1 }
+        }' | LC_ALL=C sort -u
 }
 
 # grep -c prints 0 AND exits 1 on no match, the trap documented for it elsewhere in this file.
@@ -713,7 +785,7 @@ fwd_squatters() {                     # fwd_squatters PORT...  -> one line per p
                 # tells a human to go and read off this line by hand. Taken as the word after the
                 # FIRST -i, not with a `.*-i ` sed: the tunnel's own ProxyCommand ends in
                 # `sshd -i -f <config>`, so a greedy match reports "-f" and names nothing.
-                who="$(ps -p "$pid" -o args= 2>/dev/null \
+                who="$(ps -p "$pid" -wwo args= 2>/dev/null \
                        | do_tr ' ' '\n' | awk '$0 == "-i" { getline; print; exit }')"
                 who="pid $pid  ${who:-$(ps -p "$pid" -o comm= 2>/dev/null)}"
             else
