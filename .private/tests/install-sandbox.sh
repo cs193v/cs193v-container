@@ -79,7 +79,11 @@ WHAT THE CONTAINER IS DENIED
                profile or a missing uidmap does the same thing on a laptop
 
 OPTIONS
-  --platform linux|wsl looks like WSL via a bind-mounted /proc/version (default linux)
+  --platform linux|wsl what /proc/version says, bind-mounted either way (default linux).
+                       BOTH arms are faked, and that is not symmetry for its own sake: a
+                       container shares the host's kernel, so an arm with no mount reads
+                       YOUR /proc/version -- and on a WSL host --platform linux would then
+                       give you a machine the installer treats as WSL (#152)
   --wslconf STATE      absent | noboot | boot | systemd   (only with --platform wsl)
                        'boot' is the state nothing else reaches: a [boot] section with no
                        systemd=true, which is the only input that takes setup_wslconf's sed
@@ -258,7 +262,10 @@ trap 'rm -rf "$SB_TMP"; rm -f "${CS193V_RESULTS:-}"' EXIT
 printf 'Building the %s machine (cached unless its recipe moved)...\n' "$BASE"
 # sb_work_init ships lib/sandbox-guest.sh as $SB_WORK/sandbox, which is what the suite's run.sh
 # calls too -- so there is nothing to copy here any more, and no second copy to drift.
-sb_work_init
+# `|| exit 1` FOR THE REASON fixture_build BELOW HAS IT: sb_work_init can refuse now, because it
+# checks that the /proc/version strings it writes are not this host's own (#152), and a machine
+# arranged from a half-built $SB_WORK is a machine you would misread rather than one that fails.
+sb_work_init || exit 1
 fixture_build "$BASE" >/dev/null || { printf 'could not build the %s machine\n' "$BASE" >&2; exit 1; }
 
 # cs193v.sandbox, NOT cs193v.test, and that matters rather than being tidy: the live tier's
