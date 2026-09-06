@@ -336,22 +336,35 @@ prints a short `http://localhost:PORT/magic-link` served by `shortlink` (setup-g
 whether the terminal still intercepts a click on a URL is a per-terminal question, and this is
 the only place it gets answered. Do it on every platform.
 
+**The observation has two halves where the box names a click.** The browser must open *and* the
+pane must not react — on Ptyxis an unhandled click is explicitly handed back to the application
+(the gesture is set DENIED), so "the link opened" and "tmux never saw it" are two different
+facts and only the pair of them means the gesture is intercepted.
+
 The gesture the box NAMES is per-terminal now (#122), and the box is the thing to read: whatever
-`cs193v-gesture link` says for your terminal is what should work. Only one row has ever been
-measured, and the others are **rows to fill in, not claims**:
+`cs193v-gesture link` says for your terminal is what should work. **Two rows have been measured**
+— Terminal.app and Ptyxis — and one more is extended from source to a terminal nobody has run
+(GNOME Terminal, which shares Ptyxis's token). The rest are still **rows to fill in, not claims**:
 
 | Terminal | The box says | Measured? |
 |---|---|---|
 | **Terminal.app** | `FN+COMMAND+double-click` | **yes** — a local HTTP server received the request |
 | iTerm2 | select-and-paste | no. `Option+⌘+click` is plausible; Option bypasses, ⌘+click opens |
-| GNOME Terminal, Ptyxis, Windows Terminal, VS Code | select-and-paste | no. `SHIFT+CTRL+click` is plausible — VTE tests `state & GDK_CONTROL_MASK`, a bitwise test extra Shift would not break |
-| kitty | select-and-paste | no, but its `click_url_or_select_grabbed shift+left click grabbed` map says `Shift+click` should work. **Best candidate to measure next** |
+| **GNOME Terminal, Ptyxis** (token `vte`) | `CTRL+click` | **yes on Ptyxis 50.1** — the click opened the browser. GNOME Terminal is the same token but **source only** (`terminal-screen.cc:1991` handles CTRL+button 1/2 and returns before chaining to VTE). Ptyxis takes it in a capture-phase `GtkGestureClick` (`ptyxis-terminal.ui:113`), ahead of the mouse report, so no SHIFT is involved |
+| Windows Terminal, VS Code | select-and-paste | no — and **the source says the box is under-selling**. WT puts its ctrl+click hyperlink branch *before* `_canSendVTMouseInput` ("GH#9396: we prioritize hyper-link over VT mouse events"); xterm.js activates links from a listener on the screen element that the mouse-report path never stops. Neither has been run. **Measure these next** — see PR #146 |
+| kitty | select-and-paste | no, but its `click_url_or_select_grabbed shift+left click grabbed` map says `Shift+click` should work — a guess from a keymap, where the two rows above now have source |
 | Alacritty | select-and-paste | no, and **expected to fail**: its URL hint matches on *no* modifier, so Shift may bypass reporting and still not open |
 | xterm, foot, legacy conhost | select-and-paste | **impossible** — no URL detection at all (foot: `CTRL+SHIFT+O` URL mode) |
 
 The old wording, `CTRL+Click ... (Command+Click on macOS)`, was **wrong twice**: CMD+single-click
 has never opened a URL in Terminal.app — Apple documents CMD+**double**-click — and under mouse
 reporting even that is dead, because the click reaches tmux rather than the terminal.
+
+**That verdict was about `CTRL+Click` as a universal claim, and it stands.** Where a CTRL+click is
+named now it rests on something the old line had no idea about: not a bypass modifier applied
+before the report, but the terminal's own URL handler running *ahead* of the report being encoded
+at all. That is also why the row names one modifier rather than the `SHIFT+CTRL+click` this table
+used to call plausible — the Shift has nothing left to bypass.
 
 Also check the **OSC 8 hyperlink**, which is a separate mechanism from the plain-text URL and
 needs no code from us: tmux grants its `hyperlinks` feature from the XTVERSION reply to exactly

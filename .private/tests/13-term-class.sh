@@ -82,9 +82,16 @@ expect "term-class:vte-bare-vte-version"     vte VTE_VERSION=7803
 # ─── the fall-through ──────────────────────────────────────────────────────────
 # EVERY TERMINAL WE DELIBERATELY DID NOT ENUMERATE LANDS HERE, and that is the whole reason the
 # shipped list is five terminals rather than fifteen: kitty, Alacritty, WezTerm, Ghostty, foot,
-# Warp, Konsole, xterm, Terminator and Tilix all use SHIFT to bypass mouse reporting, which is
-# exactly what the `unknown` wording says. Paring the list cost nothing because the default is
-# already correct for everything dropped from it.
+# Warp, Konsole and xterm all use SHIFT to bypass mouse reporting, which is exactly what the
+# `unknown` wording says. Paring the list cost nothing because the default is already correct
+# for everything dropped from it.
+#
+# TERMINATOR, TILIX AND XFCE4-TERMINAL ARE NOT IN THAT SENTENCE, and it would be wrong to add
+# them: they are VTE embedders, and VTE puts VTE_VERSION into every child environment it spawns
+# (vte/src/spawn.cc), so the backstop above catches them and they land on `vte` rather than here.
+# That was invisible while the vte row only restated the default's advice in different words. It
+# is visible now that the row names CTRL+click, so it is written down rather than left for the
+# next reader to trip over. See the same note in files/cs193v-gesture.
 expect "term-class:empty-environment"        unknown
 expect "term-class:kitty-falls-through"      unknown KITTY_PID=99 TERM=xterm-kitty
 expect "term-class:ghostty-falls-through"    unknown GHOSTTY_BIN_DIR=/x TERM_PROGRAM=ghostty
