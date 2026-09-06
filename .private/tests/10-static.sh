@@ -2221,8 +2221,11 @@ assert_ok  "syntax:ptyrun"       python3 -m py_compile $PRIVATE/tests/lib/ptyrun
 # lib/assert.sh and lib/podman-shim.sh joined this list in #115, which edited both. Until then
 # neither was named anywhere and both were therefore exempt from a rule they are supposed to obey
 # -- the gap the windows-tests note below describes, in the two files every suite in the tree
-# sources. Issue #158 is the remaining 17. The only finding adding them turned up was a genuinely
+# sources. Issue #158 is the remaining 16. The only finding adding them turned up was a genuinely
 # dead variable in dyn_free_port, which was deleted rather than excused.
+# 60-container.sh joined with #164, and the two findings that got it here are the argument for the
+# list being longer still: DYN1 and DYN2ND were split off $DYN2 and never read by anything, born
+# dead in the commit that added them, and SC2034 would have said so on the day.
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
                                            $PRIVATE/tests/11-export.sh \
@@ -2230,6 +2233,7 @@ assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,S
                                            $PRIVATE/tests/lib/assert.sh \
                                            $PRIVATE/tests/lib/podman-shim.sh \
                                            $PRIVATE/tests/16-args-parse.sh \
+                                           $PRIVATE/tests/60-container.sh \
                                            $PRIVATE/tests/install-sandbox.sh \
                                            $PRIVATE/tests/lib/shared.sh \
                                            $PRIVATE/tests/lib/sandbox.sh \
