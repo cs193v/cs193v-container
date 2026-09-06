@@ -479,9 +479,14 @@ Start a server in a tab (`python3 -m http.server 3000`), confirm you can reach
 is left running with nothing attached, which is survivable — `./cs193v` refuses and names
 `--stop` — but the feature is silently not working on that platform.
 
-*Linux baseline:* automated, and green. `70-sighup.sh` destroys the pty rather than pressing the
-button, which is the same mechanism (closing the master HUPs the foreground process group). This
-check exists to confirm that equivalence on a real terminal.
+*Linux baseline:* automated, and green. `70-sighup.sh` cannot press the button, so it models the
+same **event**: it signals the pty's foreground process group and closes the master only after the
+launcher has gone, which is what Terminal.app was measured to do (#169). A second group destroys
+the pty instead, which is the force-quit ordering — there the kernel HUPs the **session leader
+only** and it is the leader's exit that HUPs the group. The suite used to do only the second and
+call it a window close, which is why `sighup:closing-the-window-stops-the-container` was red on
+macOS against a launcher that was not at fault. This check exists to confirm the equivalence on a
+real terminal.
 
 **Worth doing on macOS (Terminal.app and iTerm2) and on WSL**, where the `podman exec` client lives
 outside the VM and nothing in the Linux suite can answer for them. Also try **force-quitting** the

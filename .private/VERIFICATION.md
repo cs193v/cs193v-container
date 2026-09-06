@@ -457,10 +457,14 @@ time E 'rm -rf /home/student/projects/.vt-many'
 >
 > So the probes below now measure what happens when a **tab** closes, inside a container that stays
 > up, and they are recorded rather than asserted (`sighup:tab-matrix-*`). The window-closing question
-> is answered by destroying the pty, which HUPs the foreground process group exactly as a terminal
-> does; `70-sighup.sh` does that and asserts the container stops, the 46 forwards come back, and a
-> server in a tab dies with it. The one thing still not automatable is the actual close button — see
-> §5.1, which is now the most important manual check in `tests/MANUAL.md`.
+> is answered by signalling the pty's foreground process group and closing the master only once the
+> launcher has gone, which is what a terminal was **measured** to do (#169); `70-sighup.sh` does that
+> and asserts the container stops, the 46 forwards come back, and a server in a tab dies with it.
+> A second group destroys the pty instead — the force-quit ordering, where the kernel HUPs the
+> **session leader only** and it is the leader's exit that HUPs the group. Those are different
+> events and the launcher does not handle them identically, which is why both are probed. The one
+> thing still not automatable is the actual close button — see §5.1, which is now the most important
+> manual check in `tests/MANUAL.md`.
 
 "Closing the terminal window" is simulatable: kill the local `podman exec` **client** process. This turns
 the single most important open question into a repeatable matrix.

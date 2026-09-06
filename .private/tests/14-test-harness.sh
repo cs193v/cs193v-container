@@ -844,6 +844,86 @@ assert_ok "ptyrun:an-unannounced-pid-is-an-error-not-a-fallback" pr_inner_refuse
 assert_eq "ptyrun:an-unannounced-pid-yields-nothing-to-kill" "" \
           "$(PTY_PIDFILE="$WORK/never-announced" PTY_INNER_WAIT=1 pty_inner_pid || true)"
 
+# ─── the two ways to close the window are not the same event (#169) ───────────
+# WHY THIS IS HERE AND NOT IN 70-sighup.sh. That file needs a container and two minutes to ask
+# whether the LAUNCHER survives a close; this asks whether ptyrun delivers the close it claims to,
+# which needs neither. `syntax:ptyrun` above is py_compile, i.e. parse-only -- it cannot catch a
+# SIGUSR1 handler that never fires (PEP 475 retries the select, so a handler that only sets a flag
+# is invisible until the next byte of I/O, and for a sleeping child there is none), a killpg aimed
+# at the wrong group, or a leader that hangs up the terminal on its way out.
+#
+# BOTH SHELLS, PINNED, for the reason #151 gives above: on this Mac /bin/sh optimises itself away
+# for this command shape, so a single-arm version of this group is green here and red on Ubuntu --
+# which is exactly how it shipped once already.
+#
+# THE SUBJECT REPORTS THROUGH A FILE, not stdout, because whether stdout still WORKS is the
+# question. It writes a line to fd 1 inside its own HUP handler and records whether that succeeded.
+#
+# WITH /bin/echo AND NOT `echo`: `echo x > FILE` is a BUILTIN with an fd-1 redirection, and on
+# bash 3.2 the bytes a failed write left in the stdout buffer drain into that file too. An earlier
+# version of this control reported `Xwrite=fail` -- its own probe poisoned by the defect it was
+# measuring (#170). An external command forks and execve's, so it inherits nothing.
+#
+# A FULL LINE, NOT ONE BYTE: stdout on a tty is line-buffered, so `printf X` with no newline may
+# never reach write(2) and returns 0 either way -- a pass that measures nothing.
+#
+# AND THE HANDLER TAKES A SECOND BEFORE IT WRITES, which is the difference between a test and a
+# decoration. MEASURED: with a handler that writes instantly, this group passes in the BROKEN
+# shape too -- the launcher's real teardown is 4.6-4.9s, and the bug is only visible to a subject
+# that is still working when the terminal is taken away. The sleep slices below are separate, and
+# are there because a rude close signals only the session leader while `sleep` runs on untouched.
+cat > "$WORK/politeclose.sh" <<'EOS'
+#!/bin/sh
+trap 'sleep 1; if printf "X\n" 2>/dev/null; then R=ok; else R=fail; fi; /bin/echo "write=$R" > "$1"; exit 42' HUP
+/bin/echo up > "$1.up"
+i=0
+while [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done
+EOS
+
+# pc_close CLOSE SHELL -> runs the subject under SHELL, closes the window that way, and sets
+# PC_REPORT and PC_INNER.
+#
+# IT SETS GLOBALS RATHER THAN PRINTING, and that is forced rather than stylistic: `$(pc_close ...)`
+# would run it in a SUBSHELL, so the pid pty_start published would never reach the caller. That is
+# the same trap lib/portable.sh's pty_start comment describes for a pipe, and 60-container.sh's
+# close_client for `f &` -- and this function fell into it on the first attempt.
+#
+# NOTHING HERE ASSERTS ptyrun's EXIT STATUS: it propagates its DIRECT child's, and whether that is
+# the command or an interposed shell is the thing #151 established is unknowable. Measured on this
+# Mac: 42 under /bin/sh, 129 under lib/sh-fake, same code, same close.
+PC_REPORT=''; PC_INNER=''
+pc_close() {                          # pc_close usr1|kill9 SHELL -> sets PC_REPORT, PC_INNER
+    rm -f "$WORK/pc.out" "$WORK/pc.out.up"
+    CS193V_PTY_JOB=1 CS193V_PTY_SHELL="$2" pty_start 'x\n' \
+        sh "$WORK/politeclose.sh" "$WORK/pc.out" >"$WORK/pc.log" 2>&1
+    PC_OWNER="$PTY_OWNER"
+    PC_INNER="$(pty_inner_pid)" || PC_INNER=''
+    wait_until 15 sh -c "[ -f '$WORK/pc.out.up' ]" || true
+    if [ "$1" = usr1 ]; then kill -USR1 "$PC_OWNER" 2>/dev/null; else kill -9 "$PC_OWNER" 2>/dev/null; fi
+    wait "$PC_OWNER" 2>/dev/null || true
+    wait_until 15 sh -c "[ -s '$WORK/pc.out' ]" || true
+    PC_REPORT="$(do_tr -d ' \r\n' < "$WORK/pc.out" 2>/dev/null)"
+}
+
+for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
+    pc_sh="${pc_arm%%:*}"; pc_name="${pc_arm##*:}"
+    # THE POLITE CLOSE: the foreground group is signalled and the terminal survives, so the
+    # subject's handler -- still running a second later -- can still write to it.
+    pc_close usr1 "$pc_sh"
+    assert_eq "ptyrun:a-polite-close-leaves-the-master-open-under-$pc_name" "write=ok" "$PC_REPORT"
+    assert_ok "ptyrun:a-polite-close-really-ended-the-command-under-$pc_name" \
+              pid_is_gone "${PC_INNER:-0}"
+    pty_stop "${PC_INNER:-}"
+
+    # THE CONTROL, and it is the point of the whole exercise: same subject, same shell, and the
+    # write goes the other way -- because destroying the pty owner closes the master FIRST. A
+    # terminal does not do that when a window is closed; a force quit does. Without this arm the
+    # group above would pass just as well against a ptyrun that had no polite close at all.
+    pc_close kill9 "$pc_sh"
+    assert_eq "ptyrun:a-force-quit-does-not-under-$pc_name" "write=fail" "$PC_REPORT"
+    pty_stop "${PC_INNER:-}"
+done
+
 # ─── the installer's pty door survives a space in $PATH (#141) ────────────────
 # installer_tty BUILDS A COMMAND STRING, for the reason its own comment gives, and that string is
 # parsed a SECOND time before `env` ever sees it: do_script hands it to ptyrun.py, whose child

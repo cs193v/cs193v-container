@@ -14,13 +14,21 @@
 # THE SIMULATION ALSO HAD TO CHANGE, and this is the subtle part. The old file killed the
 # `podman exec` CLIENT, on the grounds that that is what closing a window does. Under the new
 # design that models nothing: the launcher no longer `exec`s into podman, so a closing window
-# signals the LAUNCHER, and the launcher is what stops the container. So the probe here kills the
-# `script` process owning the pty, which closes the master side and makes the kernel deliver
-# SIGHUP to the foreground process group -- the actual mechanism rather than a stand-in for it.
+# signals the LAUNCHER, and the launcher is what stops the container. So the probe here acts on the
+# process owning the pty -- the actual mechanism rather than a stand-in for it.
 #
 # That is why this could not be a sed of the old file. Killing the exec client now leaves the
-# launcher alive and the container up, which is a real state -- see the force-quit group -- but
+# launcher alive and the container up, which is a real state -- see the tab-close matrix -- but
 # not the one a closed window produces.
+#
+# AND THERE ARE TWO WAYS TO ACT ON IT, which cost weeks to learn (#169). Destroying the pty owner
+# closes the MASTER FIRST; the kernel then HUPs the SESSION LEADER ONLY, and it is the leader's
+# exit that HUPs the foreground group and revokes the terminal. A real terminal does the opposite:
+# measured in a Terminal.app window, it signals the FOREGROUND GROUP and keeps the master open
+# until the child has gone, so the teardown's writes succeed. Those two orderings put fd 1 into
+# different states and a launcher can pass one and fail the other. Group 1 uses close_window for
+# the ordering students get; group 1b keeps force_quit_terminal for the one they get from a force
+# quit, a crashed emulator, or a Mac losing power.
 #
 # ERRORS.md D1's measurements are NOT deleted. They are still true about conmon and about
 # processes inside a live container, and the four-shape matrix is still recorded at the end,
@@ -98,9 +106,39 @@ launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_P
     # function call in a subshell would not), quotes the interpolated path against a spacey
     # $HOME (#141), and runs the launcher through lib/pty-announce so §5 can learn the
     # launcher's OWN pid instead of guessing at the process tree. See lib/portable.sh.
-    pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    # CS193V_PTY_JOB, so that close_window below is actually polite. Without it ptyrun execs the
+    # shell in the pty's SESSION LEADER, the leader is therefore in the foreground process group,
+    # and signalling that group kills it -- whereupon the kernel revokes the controlling terminal
+    # and the launcher's teardown writes to a terminal that is already gone. That is the RUDE
+    # outcome arriving by the polite route, and it happens on exactly the hosts where /bin/sh
+    # interposes (#151): green here, wrong on Ubuntu. Job mode gives the pty a leader that is not
+    # in the job's group -- which is also, for the first time, the shape a student's terminal
+    # builds: a login shell that stays, and the launcher as a foreground job beneath it.
+    CS193V_PTY_JOB=1 pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
     PTY_PID="$PTY_OWNER"
     PTY_PIDS="$PTY_PIDS $PTY_PID"
+}
+
+# ─── the two ways a window can go, and they are NOT the same event ─────────────
+# MEASURED, single variable, unpatched launcher, three runs each: a polite close leaves the
+# container `exited` and a rude one leaves it `running` (#169). Nothing else moved. So which of
+# these a test calls decides what it is testing, and neither is a stand-in for the other.
+#
+# close_window is what a terminal does when you click the close button. Measured in a real
+# Terminal.app window: it signals the FOREGROUND PROCESS GROUP and never touches the login shell,
+# so the shell does not exit, the controlling terminal is never revoked, the master stays open, and
+# every write the teardown makes succeeds. ptyrun.py does that on SIGUSR1; see _close_politely.
+close_window() {                      # close_window PID
+    kill -USR1 "$1" 2>/dev/null
+    wait "$1" 2>/dev/null || true
+}
+
+# force_quit_terminal is the other ordering: the master goes first and nobody is signalled, so the
+# kernel HUPs the session leader, and its exit HUPs the group and revokes the terminal. A force
+# quit, a crashed emulator, a Mac losing power. This is what this file used to do for BOTH.
+force_quit_terminal() {               # force_quit_terminal PID
+    kill -9 "$1" 2>/dev/null
+    wait "$1" 2>/dev/null || true
 }
 
 # ─── 1. closing the window stops the container ─────────────────────────────────
@@ -124,19 +162,21 @@ FWD_BEFORE="$(count_forwards)"
 # instance's own tunnel holds. It recorded "46 of 46" for a run that held none of them (#46).
 record "sighup:forwards-while-a-session-is-open" "$FWD_BEFORE"
 
-# THE WINDOW CLOSING. Killing script closes the pty master, and the kernel HUPs the foreground
-# process group -- the launcher and its podman exec child.
-kill -9 "$PTY_PID" 2>/dev/null
-wait "$PTY_PID" 2>/dev/null || true
+# THE WINDOW CLOSING -- the polite ordering, which is what every macOS terminal measured so far
+# actually does. The rude one gets its own group below; it used to be the only one here, and that
+# is why this assertion was red on macOS for weeks against a launcher that was not at fault (#169).
+close_window "$PTY_PID"
 
 if wait_until 45 container_stopped; then
     pass "sighup:closing-the-window-stops-the-container"
 else
     fail "sighup:closing-the-window-stops-the-container" \
-         "the container is still $(st) 45s after the pty was destroyed. Either the launcher never
+         "the container is still $(st) 45s after the window closed. Either the launcher never
 received SIGHUP, or its trap did not run -- and on this platform that is the whole of #41 not
 working. First thing to check: that open_shell traps HUP and not only EXIT. bash's default action
-for SIGHUP is to die WITHOUT running an EXIT trap, which would look exactly like this."
+for SIGHUP is to die WITHOUT running an EXIT trap, which would look exactly like this.
+If the force-quit group below is ALSO red, suspect the teardown itself (#170) rather than the trap;
+if only this one is, the polite close is not reaching the launcher at all."
 fi
 
 # The tunnel is a HOST process holding loopback ports, so it does not die with the container --
@@ -160,6 +200,45 @@ if [ "$BEFORE_HTTP" != 200 ]; then
            "http=$BEFORE_HTTP before the kill, so a-server-in-a-tab-dies proves less than it reads"
 fi
 assert_fail "sighup:a-server-in-a-tab-dies-with-the-window" srv_up
+
+# ─── 1b. force-quitting the terminal: the other ordering ───────────────────────
+# THE SAME SHAPE AS GROUP 1, DELIBERATELY -- launch_in_pty is job mode, so the launcher is a
+# foreground job under a leader that survives, which is a student's tree. Only the CLOSE differs:
+# the pty owner is destroyed, so the master goes first, nobody is signalled, and the kernel HUPs
+# the leader whose exit then revokes the terminal. That is a force quit, a crashed emulator, or a
+# Mac losing power.
+#
+# AN ASSERTION IS NOT AVAILABLE HERE YET, AND THE HONEST REASON IS NOT #170. Measured end to end in
+# this shape, a rude close tears everything down correctly anyway -- container exited, ssh master
+# dead, supervisor dead, no ports held, 4/4 -- because the launcher is a job, so its exit signals
+# nobody and the `podman stop` that run_timeout disowns runs to completion. #170's buffer poison is
+# real on this path and has no visible outcome on it. So a green here says the OUTCOME is right; it
+# is not evidence about #170 in either direction, and it must not be read as any.
+#
+# WHAT WOULD MAKE IT ONE is an assertion about the thing #170 actually breaks -- the ssh master and
+# the forwarded ports, measured from the process table rather than through the pidfile tunnel_down
+# unlinks (#159). Until that exists this stays a record, because a record that cannot fail is
+# better than an assertion that passes for a reason nobody checked.
+#
+# ITS OWN SETUP, and that is not tidiness. Group 1 leaves BEFORE_HTTP, FWD_BEFORE and its tab
+# server behind, and reusing any of them would make this group's record describe group 1's session.
+release_container
+launch_in_pty
+if ! wait_until 90 session_up; then
+    fail "sighup:the-force-quit-probe-got-a-session" \
+         "the launcher never reached a tmux session in 90s, so the force-quit ordering was not
+measured at all. Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
+else
+    pass "sighup:the-force-quit-probe-got-a-session"
+    force_quit_terminal "$PTY_PID"
+    if wait_until 45 container_stopped; then
+        record "sighup:force-quitting-the-terminal-stops-the-container" "yes"
+    else
+        record "sighup:force-quitting-the-terminal-stops-the-container" \
+               "no, still $(st) after 45s -- and that IS worth chasing, because in this shape it
+tore down 4/4 when measured. Check the ssh master and the forwarded ports before the launcher."
+    fi
+fi
 
 # ─── 2. `exit` stops it too, by the same path ──────────────────────────────────
 # One teardown, not two: `exit` and a closed window both arrive as the podman exec child ending.
