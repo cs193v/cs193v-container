@@ -744,13 +744,29 @@ Rollback is `git revert` on the Containerfile. There is no dated-tag safety net 
 **§A is now a test suite.** Run it rather than pasting shell:
 
 ```
-.private/tests/run-tests.sh                  # every automatable check
+.private/tests/run-tests.sh                  # the default tiers: not release, github or windows
 .private/tests/run-tests.sh --tier static    # no podman or image needed — milliseconds
 .private/tests/run-tests.sh --release        # the publishing checks; green as of 2026-09-03
 CS193V_GH_TEST_TOKEN=github_pat_... \
   .private/tests/run-tests.sh --tier github  # setup-git against the real GitHub; skips without
 .private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
+
+**Bringing the container up on a new platform is one command** (#160):
+
+```
+.private/tests/run-tests.sh --everything-but-github
+```
+
+Every tier the suites declare except `github`, which is the only one that writes to somebody's
+GitHub account. It runs `./cs193v --rebuild` first, because the image, container and live tiers
+hard-fail without one, and it sets the six cost gates those tiers otherwise skip —
+`CS193V_INSTALL_NESTED`, `CS193V_INSTALL_NESTED_BUILD`, `CS193V_MINPODMAN_BUILD`,
+`CS193V_RELEASE_BUILD`, `CS193V_COVERAGE` and `CS193V_DESTRUCTIVE`. **Budget about 15 GB and a
+long wall clock, and expect to be logged out of claude, codex, gh and vercel**: the last of those
+gates is what unskips the `--rebuild --logout` test, which deletes the volumes those logins live
+in. It says all of this on screen before it starts. Set `CS193V_INSTANCE` first or it is the
+*shared* volumes it deletes.
 
 **On a Mac, install the dependencies once first:**
 

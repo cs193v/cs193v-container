@@ -791,3 +791,147 @@ assert_contains "preflight:names-every-fault-at-once-2"   "podman"     "$out"
 out="$(gate_run)"
 assert_contains     "preflight:a-sound-machine-runs"      "01-fine.sh" "$out"
 assert_not_contains "preflight:a-sound-machine-is-not-refused" "CANNOT RUN" "$out"
+
+# ─── --everything-but-github: one command, every tier but that one (#160) ──────
+# THREE THINGS HAD TO BE RIGHT AT ONCE and each was a separate way to run less than you asked
+# for, which is what #160 is about: the tier had to be opted into, the cost gates inside the
+# tiers had to be exported by hand, and the image the podman tiers hard-fail without had to
+# already exist. Getting any one wrong left a run that looked green and had not run.
+#
+# THE TIER LIST IS DERIVED, and the assertion that matters most below is the invented tier: a
+# written-down list is exactly how `--all` came to omit `windows` entirely -- that tier is in
+# neither DEFAULT_TIERS nor --all, and nothing went red when it was added. So the fixture
+# carries a tier this suite made up, and it must run without anyone having edited the runner.
+#
+# A REPO-SHAPED FIXTURE, unlike the two runner fixtures above: the flag runs the launcher at
+# $DIR/../.., so the copied runner has to sit two levels down from a directory holding a
+# `cs193v` we can watch. The launcher is a fake that logs its arguments -- driving the real one
+# would mean a 6 GB build inside a unit-tier suite.
+EBG="$WORK/ebg"
+EBG_TESTS="$EBG/.private/tests"
+EBG_LOG="$WORK/ebg-launcher.log"
+export EBG_LOG
+mkdir -p "$EBG_TESTS"
+cp "$TESTS_DIR/run-tests.sh" "$EBG_TESTS/run-tests.sh"
+ln -s "$TESTS_DIR/lib" "$EBG_TESTS/lib"
+cat > "$EBG/cs193v" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$EBG_LOG"
+exit "${EBG_RC:-0}"
+EOF
+chmod 755 "$EBG/cs193v"
+
+# EVERY SUITE ANSWERS WITH A LINE ON STDOUT, not with an absence. `assert_not_contains` on a run
+# that never started passes, and so does every gate assertion below if the suites are silent --
+# both were green against the unimplemented flag the first time this block ran. So each fake
+# reports its own name, whether the build had already happened when it started, and what the six
+# cost gates were set to; the assertions are then equalities and presences.
+ebg_fake() {                          # ebg_fake FILE TIER
+    { printf '# TIER: %s\n' "$2"
+      printf 'printf "EBG-RAN %s build=%%s gates=%%s,%%s,%%s,%%s,%%s,%%s\\n" \\\n' "${1%.sh}"
+      printf '  "$([ -s "$EBG_LOG" ] && echo yes || echo no)" \\\n'
+      printf '  "${CS193V_INSTALL_NESTED:-unset}" "${CS193V_INSTALL_NESTED_BUILD:-unset}" \\\n'
+      printf '  "${CS193V_MINPODMAN_BUILD:-unset}" "${CS193V_RELEASE_BUILD:-unset}" \\\n'
+      printf '  "${CS193V_COVERAGE:-unset}" "${CS193V_DESTRUCTIVE:-unset}"\n'
+      printf 'printf "PASS\\t%s\\tfake:ran\\n" >> "$CS193V_RESULTS"\n' "$1"
+    } > "$EBG_TESTS/$1"
+}
+ebg_fake 01-cheap.sh  static
+ebg_fake 50-podman.sh container
+ebg_fake 60-win.sh    windows
+ebg_fake 70-rel.sh    release
+ebg_fake 80-quux.sh   quux
+ebg_fake 90-gh.sh     github
+
+# THE SIX GATES ARE UNSET INSIDE, and that is not tidiness. A developer running the real suite
+# WITH this flag would otherwise hand them down to the fixture, and every gate assertion below
+# would pass while measuring the parent's environment instead of the flag.
+ebg_run() {                           # ebg_run [ARG...] -> output with [rc=N]
+    : > "$EBG_LOG"
+    ( cd "$EBG_TESTS" || exit 1
+      unset CS193V_INSTALL_NESTED CS193V_INSTALL_NESTED_BUILD CS193V_MINPODMAN_BUILD
+      unset CS193V_RELEASE_BUILD CS193V_COVERAGE CS193V_DESTRUCTIVE
+      NO_COLOR=1 bash ./run-tests.sh "$@" 2>&1; printf '[rc=%s]' "$?" )
+}
+
+# ─── the control: a bare run is exactly what it was ────────────────────────────
+# NOT OPTIONAL. Without it every assertion below passes forever the day the flag is made
+# unconditional, and the default invocation is what students and CI actually run.
+out="$(ebg_run)"
+assert_contains "ebg:a-bare-run-still-runs-the-default-tiers" \
+                "EBG-RAN 01-cheap build=no gates=unset,unset,unset,unset,unset,unset" "$out"
+assert_not_contains "ebg:a-bare-run-does-not-build"          "--rebuild" "$(cat "$EBG_LOG")"
+# The three tiers a bare run leaves out, one of which is the bug this flag exists to stop
+# repeating -- `windows` is in neither DEFAULT_TIERS nor --all.
+assert_not_contains "ebg:a-bare-run-skips-windows"           "EBG-RAN 60-win" "$out"
+assert_not_contains "ebg:a-bare-run-skips-release"           "EBG-RAN 70-rel" "$out"
+assert_not_contains "ebg:a-bare-run-skips-github"            "EBG-RAN 90-gh"  "$out"
+
+# ─── the flag ──────────────────────────────────────────────────────────────────
+# --serial deliberately: with two lanes the cheap one is buffered and flushed in a block, so
+# every assertion here would depend on which lane finished first.
+out="$(ebg_run --everything-but-github --serial)"
+assert_contains "ebg:runs-the-windows-tier"  "EBG-RAN 60-win"   "$out"
+assert_contains "ebg:runs-the-release-tier"  "EBG-RAN 70-rel"   "$out"
+assert_contains "ebg:runs-the-default-tiers" "EBG-RAN 50-podman" "$out"
+# THE ONE THAT KEEPS THE LIST HONEST. `quux` is a tier this fixture invented; nothing in the
+# runner names it. If it runs, the list is derived from what the suites declare, and the next
+# tier somebody adds is covered without an edit here.
+assert_contains "ebg:a-new-tier-needs-no-edit-to-the-runner" "EBG-RAN 80-quux" "$out"
+# And the one exclusion, which is the whole name of the flag.
+assert_not_contains "ebg:does-not-run-the-github-tier" "EBG-RAN 90-gh" "$out"
+
+# EVERY COST GATE, read back from inside a suite rather than from the runner's own banner: what
+# matters is what the suites see, and the install-tier gates are nested inside one another
+# (26-installer-sandbox.sh:558, :709, :843) so a partial set silently runs less than it says.
+assert_contains "ebg:sets-every-cost-gate" "gates=1,1,1,yes,1,1" "$out"
+
+# THE BUILD, AND THAT IT CAME FIRST. require_image and require_running HARD-FAIL rather than skip
+# (lib/assert.sh:468, :807), so a flag that built afterwards would be a flag that changed nothing.
+# `build=yes` on the FIRST suite of the run is the strongest available form of "before".
+assert_contains "ebg:builds-before-the-first-suite" "EBG-RAN 01-cheap build=yes" "$out"
+assert_eq       "ebg:builds-with-the-launchers-own-verb" "--rebuild" "$(cat "$EBG_LOG")"
+
+# ─── a build that fails aborts, rather than being rediscovered six times ───────
+# Without this the run continues into image/container/live and each one reports require:image --
+# six failures whose cause is one line of output scrolled far off the top.
+# `export` inside the substitution rather than an `EBG_RC=1 ebg_run` prefix: bash applies an
+# assignment prefixed to a FUNCTION call to the shell itself and leaves it there, so the
+# prefix form works by a quirk and reads like it should not.
+out="$(export EBG_RC=1; ebg_run --everything-but-github --serial)"
+assert_contains     "ebg:a-failed-build-fails-the-run"   "[rc=1]"          "$out"
+assert_contains     "ebg:a-failed-build-names-the-command" "./cs193v --rebuild" "$out"
+assert_not_contains "ebg:a-failed-build-runs-no-suite"   "EBG-RAN"         "$out"
+
+# ─── nothing to test against means nothing to build ───────────────────────────
+# A `-k` that lands entirely in the cheap lane must not pay a build, or `--everything-but-github
+# -k static` becomes the slowest way to run milliseconds of assertions.
+out="$(ebg_run --everything-but-github --serial -k 01-cheap)"
+assert_contains "ebg:a-cheap-only-run-still-runs"        "EBG-RAN 01-cheap" "$out"
+assert_eq       "ebg:a-cheap-only-run-does-not-build"    ""                 "$(cat "$EBG_LOG")"
+# AND IT STILL SAYS WHAT IT IS, off the same run. It deletes the claude/codex/gh/vercel/git
+# volumes and runs three multi-GB builds. There is no prompt, because "one command and
+# everything goes" is the request -- so this announcement is the only thing standing between
+# the flag and somebody discovering it from a logged-out gh.
+assert_contains "ebg:announces-that-it-logs-you-out"   "CS193V_DESTRUCTIVE" "$out"
+assert_match    "ebg:announces-the-volumes-it-deletes" 'claude/codex/gh/vercel/git' "$out"
+
+# ─── it composes the way every other tier flag does ───────────────────────────
+# The parser's standing contract is that tier flags are assignments and the last one wins. An
+# exception for this one would be a special case to remember at exactly the wrong moment.
+out="$(ebg_run --everything-but-github --tier windows)"
+assert_contains     "ebg:a-later-tier-flag-wins"      "EBG-RAN 60-win" "$out"
+assert_not_contains "ebg:a-later-tier-flag-wins-alone" "EBG-RAN 70-rel" "$out"
+
+# ─── and --help mentions it ───────────────────────────────────────────────────
+# usage() prints the runner's own header, and it USED TO print a hardcoded line range -- so
+# every line added to the usage block pushed the tier catalogue's tail off the end, and the
+# github tier's description really was cut mid-sentence. The needle is the catalogue's LAST
+# words, because that is the end a range gets wrong.
+out="$(ebg_run --help)"
+assert_contains "ebg:help-mentions-the-flag"    "--everything-but-github" "$out"
+assert_contains "ebg:help-is-not-truncated"     "the whole class can see" "$out"
+assert_contains "ebg:help-documents-every-tier" "windows"                 "$out"
+# AND IT STILL STOPS. Reading to a sentinel trades one failure for another: delete the sentinel
+# and `--help` prints the whole script. `set -u` is the first line of code below the header.
+assert_not_contains "ebg:help-stops-at-the-sentinel" "set -u" "$out"
