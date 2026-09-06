@@ -381,8 +381,9 @@ assert_eq "record:an-empty-value-is-still-a-field" "4" \
 # these four calls exercise both answers on any machine, which is the same argument
 # 10-static.sh's `,z` rules make for reading the source instead of launching a container.
 #
-# THE DOOR IS FORCED, NOT OBSERVED. $VT_SELINUX is read at call time, so setting it here reaches
-# the arm without touching lib/shared.sh's probe or this host's real posture.
+# THE DOOR IS FORCED, NOT OBSERVED. vt_selinux memoises into $VT_SELINUX and probes only when
+# that name is UNSET, so pre-setting it here reaches the arm without touching lib/shared.sh's
+# probe, this host's real posture, or -- since #163 made the podman half lazy -- podman itself.
 #
 # EXACT LISTS, NOT `does it contain`, and that is the whole design of this block. The obvious
 # spelling -- assert the withheld case does NOT contain label=disable -- passes when machine_flags
@@ -394,6 +395,10 @@ mf() {                                # mf VT_SELINUX DROP BASE -> the flag list
     ( set -u
       # shellcheck source=lib/sandbox.sh
       . "$TESTS_DIR/lib/sandbox.sh"
+      # Read by vt_selinux, which lib/shared.sh defines and shellcheck cannot follow from
+      # here -- the same blind spot lib/portable.sh and lib/setup-git-shim.sh get a
+      # file-wide SC2034 exclusion for in 10-static.sh. Narrower than one of those.
+      # shellcheck disable=SC2034
       VT_SELINUX="$1"
       machine_flags "$2" linux no "$3" || { printf 'REFUSED-%s' "$?"; exit 0; }
       printf '%s ' ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} | sed 's/ $//' )
@@ -423,7 +428,7 @@ assert_eq "flags:an-unknown-drop-name-is-refused" "REFUSED-2" "$(mf yes labl mac
 # STUBBED, so both branches run on every machine. The door is `command -v selinuxenabled &&
 # selinuxenabled`, so a directory at the front of PATH holding an executable of that name decides
 # it either way -- and its ABSENCE from a PATH with nothing else on it decides the other.
-sel_door() {                          # sel_door yes|no|absent -> "$VT_SELINUX|$VT_MOUNT_Z"
+sel_door() {                          # sel_door yes|no|absent -> "$(vt_selinux)|$VT_MOUNT_Z"
     ( set -u
       d="$WORK/seldoor"; rm -rf "$d"; mkdir -p "$d"
       case "$1" in
@@ -434,7 +439,7 @@ sel_door() {                          # sel_door yes|no|absent -> "$VT_SELINUX|$
       PATH="$d"; export PATH
       # shellcheck source=lib/shared.sh
       . "$TESTS_DIR/lib/shared.sh"
-      printf '%s|%s' "$VT_SELINUX" "$VT_MOUNT_Z" )
+      printf '%s|%s' "$(vt_selinux)" "$VT_MOUNT_Z" )
 }
 assert_eq "door:an-selinux-host-relabels-and-drops-the-label" "yes|,z" "$(sel_door yes)"
 # INSTALLED BUT DISABLED is its own case: the tool is there and says no, which must answer the
@@ -442,6 +447,44 @@ assert_eq "door:an-selinux-host-relabels-and-drops-the-label" "yes|,z" "$(sel_do
 # so a disagreement between them is what this pair exists to catch.
 assert_eq "door:selinux-installed-but-off-decides-neither" "|" "$(sel_door no)"
 assert_eq "door:no-selinuxenabled-at-all-decides-neither" "|" "$(sel_door absent)"
+
+# ─── ...and on a REMOTE podman it has to ask the other machine (#163) ──────────
+# THE DOOR WAS ASKING THE WRONG MACHINE. On macOS and Windows podman is a client and the
+# containers run in a Fedora VM, so `selinuxenabled` on the laptop answers a question about the
+# laptop -- which has no SELinux and no containers on it. Measured on macOS 15 / podman 5:
+# `command -v selinuxenabled` finds nothing while `podman info` reports SELinuxEnabled true and
+# Fedora 44, which is #119's platform exactly. The nested fixture therefore ran as container_t on
+# an enforcing host with `label=disable` withheld, and produced #119's two symptoms verbatim.
+#
+# STUBBED THROUGH PATH like sel_door above, and for the same reason: every input to this arm is
+# an external command -- `uname`, `podman` -- so a directory at the front of PATH decides all of
+# them and both answers run on every machine. That property is why the arm is written with
+# `uname -s` rather than a bash `$OSTYPE`.
+sel_door_remote() {                   # sel_door_remote UNAME PODMAN_SAYS -> the two answers
+    ( set -u
+      d="$WORK/seldoor-remote"; rm -rf "$d"; mkdir -p "$d"
+      printf '#!/bin/sh\nprintf %%s %s\n' "$1" > "$d/uname"
+      printf '#!/bin/sh\nprintf %%s %s\n' "$2" > "$d/podman"
+      chmod +x "$d/uname" "$d/podman"
+      PATH="$d"; export PATH
+      # shellcheck source=lib/shared.sh
+      . "$TESTS_DIR/lib/shared.sh"
+      printf '%s|%s' "$(vt_selinux)" "$VT_MOUNT_Z" )
+}
+# THE TWO ANSWERS DIVERGE HERE, and that divergence is the whole of #163: the container host
+# enforces, so the label comes off the fixture -- and the bind sources are macOS paths with no
+# labels to set, so `,z` stays off. `yes|,z` would be the tell that the old coupling survived.
+assert_eq "door:a-remote-podman-drops-the-label-and-relabels-nothing" \
+          "yes|" "$(sel_door_remote Darwin true)"
+assert_eq "door:a-remote-podman-on-a-plain-host-decides-neither" \
+          "|" "$(sel_door_remote Darwin false)"
+# A LOCAL LINUX PODMAN IS NOT ASKED, and both halves of that matter. Correctness: on native Linux
+# the client and the container host are one machine, so `selinuxenabled` is already the
+# authoritative answer -- and the paragraph above this probe argues a host that can be enforcing
+# always has that tool. Cost: `podman info` measures 0.23 s, lib/assert.sh sources this file, and
+# every suite sources lib/assert.sh -- so an unconditional probe would bill the whole cheap lane
+# for an answer it already had. The stub says `true` and must still be ignored.
+assert_eq "door:a-local-linux-podman-is-not-asked" "|" "$(sel_door_remote Linux true)"
 
 # ─── a ceiling that fires says so, in the results file as well (#130) ──────────
 #
