@@ -1453,10 +1453,25 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   # --- an off-target click must NOT close it -------------------------------
   lb_arm; lb_open
   if hx_wait "$S3" 'Continue in Browser' 10; then
-    set -- $(hx_find "$S3" 'CTRL+Click')
-    hx_click "$S3" "$1" "$2"
-    hx_settle 1
-    hx_expect_contains "an off-target click leaves the box up" "$(hx_cap "$S3")" "Continue in Browser"
+    # THE NEEDLE MUST NOT BE THE GESTURE LINE, and it used to be `CTRL+Click`. #122 took that
+    # string out of every frame, so hx_find matched nothing, `set --` cleared the positionals,
+    # and `"$1"` was an unbound variable under this file's `set -u` -- which killed the suite
+    # here rather than failing one check. 65-tmux.sh only replays the TSV the suite has written
+    # by then and records the count, so every check below this line went silently missing while
+    # the container tier stayed green.
+    #
+    # AND IT MUST NOT BE PER-TERMINAL EITHER. The gesture line is chosen from the terminal token
+    # now (files/cs193v-gesture), and this harness renders inside a container that inherits none,
+    # so it draws the `unknown` row. The prose above the link is in every frame of every state
+    # and is the same for every token, which is what an off-target row has to be.
+    set -- $(hx_find "$S3" 'asks you to open')
+    if [ -n "${1:-}" ]; then
+      hx_click "$S3" "$1" "$2"
+      hx_settle 1
+      hx_expect_contains "an off-target click leaves the box up" "$(hx_cap "$S3")" "Continue in Browser"
+    else
+      hx_fail "an off-target click leaves the box up" "could not find an off-target row on screen"
+    fi
   else
     hx_fail "an off-target click leaves the box up" "box never appeared"
   fi
