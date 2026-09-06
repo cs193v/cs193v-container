@@ -23,7 +23,7 @@ SHIM_SNAPSHOT="$SHIM_HOST_TMPDIR/cs193v-snap.$$"
 # Whatever an earlier, KILLED run left here. See sweep_stale_tmpdirs in lib/assert.sh for why it
 # goes by pid rather than by age, and why it is called at suite start and not only on exit.
 shim_sweep_stale() {                  # -> how many directories it removed
-    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap cs193v-last cs193v-farm
+    sweep_stale_tmpdirs "$SHIM_HOST_TMPDIR" cs193v-shim cs193v-repo cs193v-snap cs193v-last cs193v-farm cs193v-exp
 }
 
 # shim_new [DIR]  -> creates a shim, sets $SHIM, and puts it first on $PATH for `launcher`.
@@ -581,7 +581,7 @@ repo_copy() {                         # repo_copy -> prints the new directory
     #
     # The first call happens in this suite's first half-minute, while the other lane is still
     # in the image tier; the live tier cannot start until image, container and tmux are done.
-    [ -d "$SHIM_SNAPSHOT" ] || copy_course_tree "$SHIM_SNAPSHOT" || return 1
+    [ -d "$SHIM_SNAPSHOT" ] || export_tree "$SHIM_SNAPSHOT" || return 1
     d="$(mktemp -d "$SHIM_HOST_TMPDIR/cs193v-repo.$$.XXXXXX")"
     # PHYSICAL, because the launcher resolves its own directory with `pwd -P` and prints that in
     # cs193v.dir and in the foreign-directory refusal -- so a $COPY in /var/... could never match

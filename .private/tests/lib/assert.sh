@@ -523,10 +523,10 @@ fwd_init() {
 # enough to be mystifying. Purely a test concern: the classifier forwards ephemeral ports fine,
 # and shortlink deliberately uses them.
 dyn_free_port() {                     # dyn_free_port [AVOID...] -> one port, or nothing
-    local lo hi p elo ehi avoid=" $* "
+    local lo hi p elo avoid=" $* "
     lo=1024; hi=32767
     if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
-        read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || elo=32768
+        read -r elo _ < /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || elo=32768
         [ "${elo:-32768}" -gt 1024 ] && hi=$((elo - 1))
     fi
     # TWO PASSES, STARTING HIGH. Scanning up from 1024 handed out 1024, 1025, 1026 -- legal, and a
@@ -928,52 +928,116 @@ new_tmpdir() {
     printf '%s' "$d"
 }
 
-# ─── fixture copies of the course tree ─────────────────────────────────────────
-# ONE EXCLUSION LIST, because three places make such a copy and each carried its own set:
-# repo_copy in lib/podman-shim.sh, the fake GitHub archive in 25-installer.sh, and the §2.7
-# second-copy group in 80-launcher-live.sh. Every one of them was missing something another had.
+# ─── what a student actually unpacks ───────────────────────────────────────────
+# export_tree DST      -> the file set a student downloads, materialised at DST.
+# would_ship_paths     -> the same, plus untracked files, as a sorted list of names.
 #
-# Paths are tar's, relative to $REPO:
+# THIS IS `git archive`, NOT A COPY WITH EXCLUSIONS, and that is the whole point. GitHub builds
+# its tarballs with `git archive`, which honours .gitattributes' export-ignore -- so the only
+# fixture that cannot disagree with what a student receives is one git builds. The hand-written
+# exclusion list this replaced had already drifted: it carried CLAUDE.md, which is export-ignored
+# and has never been in the archive, and nothing noticed (#115).
 #
-#   .git              11 MB of history no fixture reads.
-#   ./.private/tests  the suite itself. 80-launcher-live.sh used to copy it and delete it again.
-#   ./projects        THE DEVELOPER'S OWN WORK, and the one that mattered: 57 MB here, a
-#                     node_modules tree the live tier leaves behind, against a 780 KB course
-#                     tree. It is a bind-mount target no fixture ever reads through, and
-#                     repo_copy was making two 58 MB copies of it per call into a tmpfs (#76).
+# It also subsumes three things that list did by hand. .git, projects/* and .config/tunnel-* are
+# all git-IGNORED, so the archive omits them by construction and the "exclude the directory, put
+# its one tracked file back" dance goes away with them.
 #
-# Anything else that needs leaving out belongs on this line, not in a caller.
+# FROM THE WORKING TREE, NOT HEAD. `git archive HEAD` would test committed code, so a red-first
+# loop -- edit the launcher, run the suite, watch it fail -- would silently run the OLD launcher
+# until you committed. Verified: an UNCOMMITTED .gitattributes edit is honoured here.
 #
-# ./.config IS EXCLUDED WHOLESALE and its one tracked file put back below, exactly the way
-# projects/ is handled -- not because .config is unwanted but because five of its six files
-# are git-ignored, so GitHub's archive endpoint holds none of them and a checkout that has
-# been launched once was injecting its own into every copy. That mattered most for the five
-# tunnel-* files: tunnel_keys() guards each keygen with `[ -f ] ||`, so a copy arriving with a
-# private key means the launcher's first-run keygen never executes in any test -- and
-# cs193v:1415 says a key must be generated per machine precisely so one is never shipped.
+# ─── the two modes, and why they share one function ───────────────────────────
 #
-# EXCLUDING THE DIRECTORY rather than naming the five: this list takes plain paths and no glob
-# (see below), so a name-them-all rule leaks the sixth file silently the day it appears.
-COURSE_COPY_EXCLUDES=".git ./.private/tests ./projects ./.config"
-
-# copy_course_tree DST  -> a fixture copy of $REPO at DST, minus the above.
+# `add -u` is the FIXTURE. An untracked file never reaches GitHub's archive, so putting one in a
+# fixture would make it lie about what ships. Seeded from the REAL index rather than HEAD so a
+# file you have `git add`ed is included.
 #
-# tar rather than cp -a: it is the form that can exclude. PLAIN PATHS ONLY, no `*` glob, because
-# the libs run under BSD tar on the TAs' Macs as well as GNU tar here and the two-command form
-# below needs no assumption about whether a `*` crosses a `/`.
+# `add -A` is the GATE's second opinion: the same tree with untracked files folded in, i.e. what
+# would ship if everything visible were committed. 11-export.sh subtracts the first from the
+# second, and the difference is exactly the set of untracked paths that WOULD reach a student.
 #
-# projects/ AND .config/ ARE PUT BACK, holding only what a fresh checkout has -- .gitkeep and
-# container.args -- so a copy is what a FRESH CHECKOUT looks like. The launcher would create it (`[ -d "$WORKSPACE" ] || mkdir -p`) and so would the
-# installer, but a fixture that differs from a checkout is a fixture that can lie.
-copy_course_tree() {                  # copy_course_tree DST -> 0 on success
-    local d="$1" x opts=''
-    for x in $COURSE_COPY_EXCLUDES; do opts="$opts --exclude=$x"; done
-    mkdir -p "$d" || return 1
-    # shellcheck disable=SC2086   # deliberately word-split: it is a list of tar options
-    ( cd "$REPO" && tar cf - $opts . ) | ( cd "$d" && tar xf - ) || return 1
-    mkdir -p "$d/projects" && cp "$REPO/projects/.gitkeep" "$d/projects/.gitkeep" || return 1
-    mkdir -p "$d/.config"  && cp "$REPO/.config/container.args" "$d/.config/container.args"
+# ONE FUNCTION, TWO MODES, rather than two functions: the git plumbing below has three separate
+# ways to be silently wrong (see the list) and two copies of it would eventually disagree about
+# one of them -- which would make the gate's subtraction report a difference that is an artefact
+# of the staging rather than a fact about the tree.
+#
+# THE SEED IS THE SAME FOR BOTH, deliberately, and that is why the gate checks ONE direction.
+# With a HEAD seed for `add -A` the subtraction could invert -- a force-added ignored file is in
+# the index but invisible to `add -A` -- so there would be a second, exotic difference to explain.
+# Seeding both from the real index makes that direction structurally empty, so an assertion on it
+# could not fail and has no business existing (#79).
+#
+# Four things that are easy to get wrong here, each measured rather than reasoned about:
+#
+#   * PIPEFAIL IS LOAD-BEARING. A failing `git archive` piped into `tar xf -` leaves rc 0 and an
+#     empty destination -- measured, and the same trap install-cs193v.sh:1063 documents for its
+#     own download. In a subshell, so it stays local to this one pipeline.
+#   * `cd "$REPO"` FIRST, then use --git-path's answer verbatim. It is relative to the current
+#     directory in an ordinary checkout (.git/index) and ABSOLUTE inside a linked worktree
+#     (/.../.git/worktrees/NAME/index) -- both measured -- so "$REPO/$(...)" is wrong in a
+#     worktree. The alternates path is made absolute for the same reason.
+#   * THE ALTERNATES PATH IS READ BEFORE GIT_OBJECT_DIRECTORY IS EXPORTED. `--git-path objects`
+#     answers with GIT_OBJECT_DIRECTORY when it is set, so asking afterwards would point the
+#     alternates at themselves and lose every object the repo already has.
+#   * ANYTHING THAT READS THE REAL INDEX must run with GIT_INDEX_FILE unset, or it reads the
+#     empty temp one and the archive comes out empty. Copying the index file rather than
+#     rebuilding it with plumbing avoids that class entirely.
+#
+# core.excludesFile=/dev/null on the `add -A` arm: it is the only arm that consults ignore rules
+# for untracked paths, and a developer's GLOBAL excludes would otherwise shrink the gate's second
+# opinion and make it more permissive on their machine than on anyone else's.
+#
+# The temp index and object store are a throwaway directory, so nothing here writes to the
+# developer's repository -- verified: .git/objects and .git/index are byte-unchanged, and the new
+# blobs land in $work/odb. It is named with the suite's pid and swept by shim_sweep_stale,
+# because a trap does not run when the process is KILLED and that is ordinary here.
+_stage_tree() {                       # _stage_tree u|A DST -> 0 on success
+    local mode="$1" d="$2" work rc=0
+    work="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-exp.$$.XXXXXX")" || return 1
+    mkdir -p "$d" "$work/odb" || { rm -rf "$work"; return 1; }
+    (
+        cd "$REPO" || exit 1
+        alt="$(git rev-parse --git-path objects)" || exit 1
+        case "$alt" in /*) ;; *) alt="$(pwd -P)/$alt" ;; esac
+        cp "$(git rev-parse --git-path index)" "$work/index" || exit 1
+        export GIT_INDEX_FILE="$work/index" \
+               GIT_OBJECT_DIRECTORY="$work/odb" \
+               GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt"
+        case "$mode" in
+            u) git add -u || exit 1 ;;
+            A) git -c core.excludesFile=/dev/null add -A . || exit 1 ;;
+            *) exit 1 ;;
+        esac
+        tree="$(git write-tree)" || exit 1
+        set -o pipefail
+        git archive "$tree" | ( cd "$d" && tar xf - )
+    ) || rc=1
+    rm -rf "$work"
+    return "$rc"
 }
+
+# The listing form, so an assertion can be an equality on names rather than a walk of a
+# materialised copy. Same staging, so a listing and a fixture can never disagree.
+_stage_paths() {                      # _stage_paths u|A -> one path per line, LC_ALL=C sorted
+    local d rc=0
+    d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-exp.$$.XXXXXX")" || return 1
+    _stage_tree "$1" "$d" || rc=1
+    [ "$rc" = 0 ] && ( cd "$d" && find . -type f | sed 's|^\./||' | LC_ALL=C sort )
+    rm -rf "$d"
+    return "$rc"
+}
+
+export_tree()      { _stage_tree  u "$1"; }
+would_ship_paths() { _stage_paths A; }
+
+# THE THREE FIXTURE-MAKING CALL SITES all use export_tree: repo_copy in lib/podman-shim.sh, the
+# fake GitHub archive in 25-installer.sh, and the §2.7 second-copy group in 80-launcher-live.sh.
+# They used to share a hand-written tar exclusion list, and the reason it is gone is worth
+# keeping: it existed to leave out .git, .private/tests, the developer's own 57 MB projects/
+# (#76) and the five .config/tunnel-* private keys -- and `git archive` leaves out all of them
+# by construction, because every one is either untracked, git-ignored or export-ignored. The
+# tunnel keys mattered most: tunnel_keys() guards each keygen with `[ -f ] ||`, so a copy
+# arriving with a private key means the launcher's first-run keygen never runs in any test.
 
 # What an EARLIER, KILLED run left in a scratch directory. Called at suite START as well as from
 # an EXIT trap, for the reason 60-container.sh gives for its own two-ended cleanup (#34): a trap

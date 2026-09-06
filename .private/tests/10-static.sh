@@ -1953,9 +1953,17 @@ assert_ok  "syntax:portable"     bash -n $PRIVATE/tests/lib/portable.sh
 # "does it parse" check and the only one that matters before a suite depends on it.
 assert_ok  "syntax:ptyrun"       python3 -m py_compile $PRIVATE/tests/lib/ptyrun.py
 
+# lib/assert.sh and lib/podman-shim.sh joined this list in #115, which edited both. Until then
+# neither was named anywhere and both were therefore exempt from a rule they are supposed to obey
+# -- the gap the windows-tests note below describes, in the two files every suite in the tree
+# sources. Issue #158 is the remaining 17. The only finding adding them turned up was a genuinely
+# dead variable in dyn_free_port, which was deleted rather than excused.
 assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
                                            $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
+                                           $PRIVATE/tests/11-export.sh \
                                            $PRIVATE/tests/14-test-harness.sh \
+                                           $PRIVATE/tests/lib/assert.sh \
+                                           $PRIVATE/tests/lib/podman-shim.sh \
                                            $PRIVATE/tests/16-args-parse.sh \
                                            $PRIVATE/tests/install-sandbox.sh \
                                            $PRIVATE/tests/lib/shared.sh \

@@ -222,6 +222,7 @@ do_host_ips() {                       # do_host_ips -> space-separated IPv4 addr
 PT_REGISTRY='cmd|shellcheck|10-static.sh lints every shipped script with it|shellcheck|shellcheck
 cmd|podman|the install, image, container and live tiers drive it|podman|podman passt uidmap crun
 cmd|curl|reads a server inside the container back through a forwarded port|(ships with macOS)|curl
+cmd|git|the fixture copies of the course tree are built with git archive, the way GitHub builds them|(ships with Xcode CLT)|git
 gnu|timeout|every pty drive and every long podman call is bounded by it|coreutils|coreutils
 gnu|stat|the file mode and ownership assertions read `stat -c`|coreutils|coreutils
 gnu|sha256sum|the release gates and the installer idempotency check hash with it|coreutils|coreutils

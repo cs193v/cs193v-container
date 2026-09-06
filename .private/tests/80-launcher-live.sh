@@ -522,11 +522,11 @@ case "$VT_COPY" in
                    "the copy is at $VT_COPY, which every checkout on this machine shares" ;;
 esac
 rm -rf "$VT_COPY"
-# copy_course_tree, not `cp -a "$REPO"`: all this group needs is a working launcher at a path
+# export_tree, not `cp -a "$REPO"`: all this group needs is a working launcher at a path
 # that is not $REPO, and the wholesale copy carried .git AND the developer's projects/ — 69 MB
 # for a refusal that reads one label (#76). It leaves the test tree out as well, which is what
 # the `rm -rf "$VT_COPY/.private/tests"` under this line used to be for.
-copy_course_tree "$VT_COPY"
+export_tree "$VT_COPY"
 assert_eq "live:second-copy-is-refused" "1" \
           "$("$VT_COPY/cs193v" >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
 assert_says "live:second-copy-explains-both-paths" "different folder" \

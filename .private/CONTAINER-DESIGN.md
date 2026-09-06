@@ -1,8 +1,9 @@
 # The CS193V container: what it is, what it protects, and what it doesn't
 
-This is course reading, not just documentation. A large part of what CS193V is about is
-being able to reason accurately about the tools you are pointing at your own machine —
-so this file tries to be precise, including where the news is bad.
+Staff documentation, and it does not ship to students (`export-ignore`, issue #115). A large
+part of what CS193V is about is being able to reason accurately about the tools you are pointing
+at your own machine — so this file tries to be precise, including where the news is bad. Lift
+from it freely when writing anything students do read.
 
 ---
 

@@ -1,27 +1,71 @@
-# Keep CLAUDE.md out of what a student unpacks.
+# WHAT A STUDENT DOWNLOADS, and the only thing that decides it (issue #115).
 #
-# This repo IS the ~/cs193v layout — the installer downloads
-# https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.tar.gz and unpacks it into
-# the student's course directory. That directory is deliberately kept to TWO visible items,
-# the launcher and projects/ (issue #16), so a developer-facing CLAUDE.md sitting next to
-# them would undo that.
+# This repo IS the ~/cs193v layout. install-cs193v.sh downloads
+# https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.tar.gz and unpacks it into the
+# student's course directory. GitHub builds those archives with `git archive`, which honours
+# export-ignore -- so every rule below is present for anyone working in the repo and absent from
+# every student download. There is no other filter: no release step, no packaging script, no CI.
 #
-# GitHub builds those archives with `git archive`, which honours export-ignore, so the file
-# is present for anyone working in the repo and absent from every student download.
+# .private/tests/11-export.sh asserts the result on every run of the suite, so this file and the
+# file set it produces cannot drift apart. 00-release-gates.sh checks the same thing against the
+# real GitHub endpoint, which is the one claim nothing local can prove.
+
+# ─── the root: three files a student has no use for ────────────────────────────
 #
-# THE LEADING SLASH IS LOAD-BEARING. Patterns here match like .gitignore ones: without it,
-# `CLAUDE.md` matches that basename at ANY depth, which also strips
-# files/claude-code/CLAUDE.md -- the managed Claude Code policy the image installs into
-# /etc/claude-code. Verified: unanchored, that file was in the tree and absent from the
-# archive, so building the image from a downloaded tarball would have failed. Anchored, only
-# the root file goes.
+# The course directory is deliberately kept to TWO visible items, the launcher and projects/
+# (issue #16), so a developer-facing file sitting next to them would undo that.
 #
-# Verify both halves after changing this:
+# THE LEADING SLASH IS LOAD-BEARING on CLAUDE.md. Patterns here match like .gitignore ones:
+# without it, `CLAUDE.md` matches that basename at ANY depth. There is no second CLAUDE.md in
+# the tree today -- the agent notes live at .private/files/agent-notes.md and the Containerfile
+# symlinks /etc/claude-code/CLAUDE.md at them during the build -- but an unanchored rule would
+# silently strip one the day somebody adds it back under files/, and the build installs whatever
+# is there. Anchored, only the root file goes.
 #
-#     git archive HEAD | tar -t | grep -c '^CLAUDE.md'                # expect 0
-#     git archive HEAD | tar -t | grep -c 'claude-code/CLAUDE.md'     # expect 1
+# .gitattributes and .gitignore are inert in ~/cs193v, which is not a git repository: this file
+# is distribution mechanics, and .gitignore exists to keep the launcher's per-machine tunnel keys
+# out of commits. Neither has a reader on a student's machine.
+/CLAUDE.md      export-ignore
+/.gitattributes export-ignore
+/.gitignore     export-ignore
+
+# ─── .private/: an ALLOWLIST, not a list of exclusions ─────────────────────────
 #
-/CLAUDE.md export-ignore
+# Deny the directory and name the four things that ship. This is the direction that fails safe:
+# the next staff document, test fixture or scratch note is excluded automatically, where a
+# list-the-exclusions rule would ship it until somebody remembered. It is the same argument
+# lib/assert.sh makes for excluding .config wholesale -- "a name-them-all rule leaks the sixth
+# file silently the day it appears."
+#
+# What ships, and why each one has to:
+#
+#   Containerfile   IS the distribution. There is no registry and no published image; the
+#                   installer runs `./cs193v --rebuild` and the image is assembled on the
+#                   student's own machine. See README.md, "How the image reaches a student".
+#   messages.txt    every student-facing string the launcher prints.
+#   files/          the whole of the rest of the build context. `COPY files/` is the only COPY
+#                   in the Containerfile, and files/cs193v-ui.sh is a HARD requirement of every
+#                   single ./cs193v invocation -- the launcher sources it before its dispatch
+#                   case and exits 1 if it cannot be read.
+#
+# Containerfile, messages.txt and container.args are also the three files fetch_files checks for
+# after untarring, alongside the launcher itself.
+#
+# BOTH files LINES ARE REQUIRED AND THIS IS THE EASIEST THING HERE TO BREAK. Measured, all three
+# forms: with only `/.private/files/** -export-ignore` the archive holds NO files/ at all, and
+# with only `/.private/files -export-ignore` it holds no files/ at all either. `/.private/**`
+# matches the files DIRECTORY as well as its contents, and a pruned tree walk never reaches the
+# children -- so the /** negation alone has nothing to act on, and the directory negation alone
+# un-prunes a directory whose children are still ignored. Together they restore the subtree
+# recursively, subdirectories included. Deleting either line ships a course directory whose
+# ./cs193v cannot start.
+#
+#     git archive HEAD | tar -t | grep -c '^\.private/files/'     # expect 24
+/.private/**              export-ignore
+/.private/Containerfile  -export-ignore
+/.private/messages.txt   -export-ignore
+/.private/files          -export-ignore
+/.private/files/**       -export-ignore
 
 # CRLF ON THE BATCH FILE IS LOAD-BEARING, and this is the only thing that keeps it.
 #
@@ -33,15 +77,19 @@
 # exposed. It shipped LF-only until this rule existed.
 #
 # `text eol=crlf` and not `-text`: both produce CRLF today, but this one is self-healing. The repo
-# stores LF, and checkout AND `git archive` both convert -- so a TA who commits from an editor
-# that saved LF still ships a working file, where `-text` would preserve the mistake verbatim.
+# stores LF, and CHECKOUT converts -- so a TA who commits from an editor that saved LF still
+# publishes a working file, where `-text` would preserve the mistake verbatim.
+#
+# THE CHECKOUT IS THE ONLY PATH THAT MATTERS NOW. Neither installer reaches a student through the
+# archive any more (both are hosted on the course website, and the .cmd fetches stage two from
+# raw.githubusercontent.com, which serves the stored blob and honours no attribute), so the copy
+# a TA uploads comes from a working tree. Do not verify this through `git archive`: the .cmd is
+# export-ignored, so the archive holds nothing to look at.
 #
 # Wine CANNOT catch a regression here: its cmd reads bare \n natively (batch.c:259-266), so the
-# --tier windows run passes either way. 25-installer.sh asserts it statically instead.
+# --tier windows run passes either way. 25-installer.sh asserts it statically instead, against
+# the working-tree file, via cmdlint_line_endings.
 #
-# Verify after changing this -- the archive is what a student actually downloads:
-#
-#     git archive HEAD .private/install-cs193v-windows.cmd | tar -xO | file -
+#     file .private/install-cs193v-windows.cmd
 #         # expect: ... with CRLF line terminators
-#
 *.cmd text eol=crlf

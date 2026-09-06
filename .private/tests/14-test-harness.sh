@@ -57,14 +57,49 @@ count_dirs() {                        # count_dirs PREFIX -> how many $WORK/PREF
 }
 
 # ─── the fixture ───────────────────────────────────────────────────────────────
+# A REAL GIT REPOSITORY, because export_tree is `git archive` now (#115) and there is
+# nothing for it to archive otherwise. It carries its own .gitattributes and .gitignore,
+# mirroring the shapes the real repo uses, so what this suite proves is that the COPY HONOURS
+# THE REPOSITORY'S OWN RULES -- which is a stronger statement than the hand-written exclusion
+# list it replaced, and it is checked against a tree whose rules this file controls.
+#
+# NO COMMIT. `git add -A` populates an index, and write-tree/archive work from an index with no
+# HEAD at all -- verified. A commit would need a user.name and user.email this fixture has no
+# business caring about.
+#
+# core.excludesFile=/dev/null ON BOTH CALLS. `git add -A` consults the developer's GLOBAL
+# excludes, so without this the fixture's contents -- and therefore this suite's verdict --
+# depend on whose machine is running it.
 FIX="$WORK/course"
-mkdir -p "$FIX/.config" "$FIX/.private/tests/lib" "$FIX/.git/objects" "$FIX/projects/bulk"
+mkdir -p "$FIX/.config" "$FIX/.private/tests/lib" "$FIX/.private/files" "$FIX/projects/bulk"
 cp "$REAL_REPO/cs193v" "$FIX/cs193v"
 printf -- '--hostname=probe\n'                          > "$FIX/.config/container.args"
 printf 'a fresh checkout has this and nothing else\n'   > "$FIX/projects/.gitkeep"
 printf 'FROM debian\n'                                  > "$FIX/.private/Containerfile"
+printf '# the shared presentation layer\n'               > "$FIX/.private/files/ui.sh"
 : > "$FIX/.private/tests/lib/assert.sh"
-: > "$FIX/.git/objects/pack"
+# A PLANTED STAFF DOCUMENT. Nothing names it in the fixture's .gitattributes, so the allowlist
+# below is the only reason it does not reach the copy -- which is the property that matters when
+# somebody adds the next one.
+printf 'staff only\n'                                   > "$FIX/.private/README.md"
+# The fixture's own rules, in the same shapes .gitattributes uses. BOTH files LINES: with either
+# one alone the archive holds no files/ at all, so this fixture would pass a copy that shipped a
+# course directory whose launcher cannot start. See .gitattributes for the measurement.
+cat > "$FIX/.gitattributes" <<'FIXATTR'
+/CLAUDE.md      export-ignore
+/.gitattributes export-ignore
+/.gitignore     export-ignore
+/.private/**              export-ignore
+/.private/Containerfile  -export-ignore
+/.private/messages.txt   -export-ignore
+/.private/files          -export-ignore
+/.private/files/**       -export-ignore
+FIXATTR
+cat > "$FIX/.gitignore" <<'FIXIGNORE'
+.config/tunnel-*
+projects/*
+!projects/.gitkeep
+FIXIGNORE
 # 8 MB, standing in for the node_modules tree the live tier leaves in projects/. Big enough
 # that "the copy is small" means something, and free in a tmpfs.
 dd if=/dev/zero of="$FIX/projects/bulk/node_modules.bin" bs=1024 count=8192 2>/dev/null
@@ -81,22 +116,35 @@ printf 'PRIVATE HOST KEY\n'     > "$FIX/.config/tunnel-host-key"
 printf 'ssh-ed25519 hostpub\n'   > "$FIX/.config/tunnel-host-key.pub"
 printf 'cs193v-tunnel ssh-ed25519 hostpub\n' > "$FIX/.config/tunnel-known-hosts"
 
+git -c core.excludesFile=/dev/null init -q "$FIX"
+( cd "$FIX" && git -c core.excludesFile=/dev/null add -A ) >/dev/null 2>&1
+# BOTH, because `git add` is silenced above and a repository with an empty index archives to
+# nothing -- which would satisfy several of the absences below by having staged no files at all.
+assert_ok "fixture:is-a-git-repository" git -C "$FIX" rev-parse --git-dir
+assert_ne "fixture:the-index-was-populated" "" "$(git -C "$FIX" ls-files | head -1)"
+
 REPO="$FIX"
 
 # ─── what a fixture copy of the course tree contains ───────────────────────────
 D="$WORK/copy"
-assert_ok "copy:succeeds" copy_course_tree "$D"
+assert_ok "copy:succeeds" export_tree "$D"
 
-# ONE EQUALITY FOR THE WHOLE TREE. Every property #76 is about is in this line: the launcher and
-# the args file are there, .private survives but .private/tests does not, .git is gone, and
-# projects/ holds .gitkeep and NOT the payload — which is what a fresh checkout looks like. The
+# ONE EQUALITY FOR THE WHOLE TREE. Every property #76 is about is in this line, and every
+# property #115 is about too: the launcher and the args file are there, .private/Containerfile
+# and the whole of .private/files survive, .private/tests and .private/README.md do not, .git is
+# gone, and projects/ holds .gitkeep and NOT the payload — which is what a student unpacks. The
 # launcher would create projects/ if it were missing (`[ -d "$WORKSPACE" ] || mkdir -p`) and so
-# would the installer, but a fixture that differs from a checkout is a fixture that can lie.
+# would the installer, but a fixture that differs from a download is a fixture that can lie.
 want="./.config ./.config/container.args ./.private ./.private/Containerfile"
-want="$want ./cs193v ./projects ./projects/.gitkeep"
-# .config/container.args IS in that list and the five tunnel files are NOT, which is the whole
-# point: .config is excluded wholesale and its one TRACKED file put back, the same treatment
-# projects/ gets. Naming the five to exclude instead would leak the sixth.
+want="$want ./.private/files ./.private/files/ui.sh ./cs193v ./projects ./projects/.gitkeep"
+# .config/container.args IS in that list and the five tunnel files are NOT, and neither is the
+# 8 MB payload under projects/ — all three because the fixture's .gitignore says so and
+# `git archive` cannot see an ignored, untracked file. Nothing here names them to exclude, which
+# is the point: the sixth one added is handled the day it appears.
+#
+# .gitattributes and .gitignore are absent from the copy as well, which is worth noticing —
+# they are export-ignored in the fixture exactly as they are in the real repo, so this line
+# also proves a rule can hide the file that declares it.
 got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
 assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$got"
 
@@ -745,7 +793,10 @@ cat > "$GATE/01-fine.sh" <<'EOF'
 # TIER: static
 printf 'PASS\t01-fine.sh\tfake:the-gate-let-me-run\n' >> "$CS193V_RESULTS"
 EOF
-for _t in bash sh env python3 shellcheck podman curl sed awk tr mktemp pgrep grep cat printf \
+# git IS ON THIS LIST BECAUSE PT_REGISTRY NAMES IT (#115): the fixture's PATH has to hold
+# everything the gate demands, or the CONTROL below refuses a machine that is in fact sound and
+# every assertion above it goes green against the wrong reason.
+for _t in bash sh env python3 shellcheck podman curl git sed awk tr mktemp pgrep grep cat printf \
           timeout gtimeout stat gstat sha256sum gsha256sum ss lsof cut sort head tail wc \
           basename dirname rm mkdir ln chmod date sleep id od paste tee expr; do
     _p="$(command -v "$_t" 2>/dev/null)" && ln -s "$_p" "$GATE/bin/$_t" 2>/dev/null
@@ -785,6 +836,14 @@ assert_not_contains "preflight:makes-no-run-directory"    "log:"       "$out"
 out="$(gate_run shellcheck podman)"
 assert_contains "preflight:names-every-fault-at-once-1"   "shellcheck" "$out"
 assert_contains "preflight:names-every-fault-at-once-2"   "podman"     "$out"
+
+# git BY NAME, because otherwise its PT_REGISTRY row is unasserted: deleting it would fail
+# nothing, and the first person to run the suite without git would get five tiers of obscure
+# breakage instead of a refusal that names the fix. Every fixture copy of the course tree is a
+# `git archive` since #115, so this is now as load-bearing as podman.
+out="$(gate_run git)"
+assert_contains "preflight:refuses-without-git"           "git"        "$out"
+assert_contains "preflight:refuses-without-git-cleanly"   "[rc=78]"    "$out"
 
 # THE CONTROL, and it is not optional: without it every assertion above passes forever the day
 # the gate is accidentally made unreachable.

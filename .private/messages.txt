@@ -134,12 +134,9 @@ Specifically: the account {{USER}} has no entry in /etc/subuid.
 Podman uses that range of ID numbers to keep the container
 separated from the rest of your system.
 
-Run the course installer again — it can set this up, and it will
-ask your permission before changing anything:
-
-    bash .private/install-cs193v.sh
-
-If that does not work, contact course staff with the output of:
+Contact course staff — this needs one command run with
+administrator rights, and they will tell you which. Include the
+output of:
 
     id
     cat /etc/subuid /etc/subgid
