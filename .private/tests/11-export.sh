@@ -55,7 +55,7 @@ record "export:file-count" "$n_paths"
 # ─── 1. the whole listing, as one equality ─────────────────────────────────────
 # .private/files/ IS EXCLUDED FROM THIS LINE and covered by §3 instead. Everything under files/
 # ships by definition -- it is the only COPY in the Containerfile and build_hash hashes the whole
-# tree -- so listing its 24 names here would mean editing this suite every time somebody adds an
+# tree -- so listing its 25 names here would mean editing this suite every time somebody adds an
 # image file, for an edit that carries no decision. What is left is the five paths where adding
 # or removing one IS a decision.
 want=".config/container.args .private/Containerfile .private/messages.txt cs193v projects/.gitkeep"
