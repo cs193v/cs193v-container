@@ -458,6 +458,34 @@ assert_eq "flags:the-wsl-arm-still-fakes-its-own" \
 # validates linux|wsl too; nest_probe and nest_build bypass it and reach this directly.
 assert_eq "flags:an-unknown-platform-is-refused" "REFUSED-2" "$(mf yes '' machine wsel)"
 
+# ─── AND THE RULE THAT KEEPS A FAKE AND A NESTED CONTAINER APART (#156) ────────
+#
+# THE KERNEL'S RULE, NOT THIS HARNESS'S. Mounting anything inside /proc leaves it partially
+# covered, and mount_too_revealing() then refuses a fresh procfs in a nested user namespace --
+# `crun: mount `proc` to `proc`: Operation not permitted`. So a faked /proc/version and an inner
+# container cannot both be had, and `host` is how a call site says "read the real kernel string,
+# I need nesting to work". The cost is #152's defect for those cases and nothing more: `wsl`
+# differs from `linux` in one place, install-cs193v.sh's /etc/wsl.conf block.
+#
+# NOT INFERRED FROM THE BASE, and that is the trap worth naming. sb-wsl runs platform=wsl on
+# `machine`, which IS in MACHINE_NESTED_BASES, and five sb_machine calls use that base with a real
+# podman and never nest -- so neither the base nor fake-podman tells you whether an inner container
+# has to start. Only the call site knows, so the call site declares it.
+assert_eq "flags:the-host-arm-fakes-nothing" "$MF_NEST" "$(mf '' '' machine host)"
+assert_eq "flags:the-host-arm-leaves-a-non-nesting-base-with-nothing" "" "$(mf '' '' debian host)"
+# STATIC, because the behavioural half cannot prove this negative without an inner container --
+# and on a host whose policy blocks nesting outright it would prove it vacuously. Reading the call
+# sites answers it everywhere. EVERY nest_* HELPER, BY PATTERN RATHER THAN BY NAME: there are
+# five of them, the four controls start an inner container too, and one added later would
+# otherwise reintroduce this silently. Red against the first cut of #156, where all five asked
+# for `linux` and the three nested builds were skipped for it.
+mf_nest_platforms="$(awk '
+    /^nest_[a-z_]*\(\)/ { inside = 1 }
+    inside && /machine_flags/ { for (i = 1; i <= NF; i++) if ($i ~ /^(linux|wsl|host)$/) print $i }
+    inside && /^}/ { inside = 0 }
+' "$TESTS_DIR/lib/sandbox.sh" | LC_ALL=C sort -u | do_tr '\n' ' ' | sed 's/ $//')"
+assert_eq "flags:every-nesting-entry-point-asks-for-host" "host" "$mf_nest_platforms"
+
 # ─── ...and lib/shared.sh's one door answers both of its consumers ─────────────
 #
 # STUBBED, so both branches run on every machine. The door is `command -v selinuxenabled &&
