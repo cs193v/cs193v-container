@@ -60,7 +60,7 @@ There is no `.github/` directory, and that is the design rather than an omission
 **Most of the above never reaches a student.** Six things ship: the launcher,
 `.config/container.args`, `.private/messages.txt`, `.private/Containerfile`, everything under
 `.private/files/`, and `projects/.gitkeep`. Everything else is `export-ignore`d, so GitHub's
-branch tarball — which is what the installer downloads — holds 29 files rather than 108 (issue
+branch tarball — which is what the installer downloads — holds 30 files rather than 108 (issue
 #115): no test suite, no installers, and no documentation except `files/agent-notes.md`, which
 ships because the image installs it as `/etc/cs193v/agent-notes.md`.
 
