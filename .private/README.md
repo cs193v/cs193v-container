@@ -842,10 +842,17 @@ brew install coreutils shellcheck
 
 `coreutils` is not optional there: macOS ships no `timeout(1)` at all, and its `stat` has no GNU
 `-c`. The suite refuses to run rather than failing obscurely if anything is missing — the
-preflight names what is absent and the command that fixes it, and exits **78** (#124). Otherwise
-the dependencies are podman, python3 and shellcheck, and the suite is bash 3.2-compatible so it
-runs on a Mac. Note `python3` needs no particular version: macOS's own 3.9 is fine, and installing
-a newer one would shadow the interpreter the *product* under test uses.
+preflight names what is absent and the command that fixes it, and exits **78** (#124).
+
+**The full list lives in `PT_REGISTRY` (`tests/lib/portable.sh`) and is not repeated here.** This
+sentence used to enumerate it, and was wrong at every one of its edits — it still said "podman,
+python3 and shellcheck" two rows after `curl` and `git` had joined, in the very commit that added
+one of them. The registry is the list, the preflight prints it with a fix per row, and everything
+above is only what a Mac has to `brew install` to satisfy it.
+
+The suite is bash 3.2-compatible so it runs on a Mac. Note `python3` needs no particular version:
+macOS's own 3.9 is fine, and installing a newer one would shadow the interpreter the *product*
+under test uses.
 
 Two tiers cannot run on Apple Silicon and skip themselves rather than failing: `--tier windows`
 (wine cannot execute on aarch64) and the Arch fixture inside the install tier (Arch publishes no

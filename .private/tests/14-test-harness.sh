@@ -1238,21 +1238,51 @@ cat > "$GATE/01-fine.sh" <<'EOF'
 # TIER: static
 printf 'PASS\t01-fine.sh\tfake:the-gate-let-me-run\n' >> "$CS193V_RESULTS"
 EOF
-# git IS ON THIS LIST BECAUSE PT_REGISTRY NAMES IT (#115): the fixture's PATH has to hold
-# everything the gate demands, or the CONTROL below refuses a machine that is in fact sound and
-# every assertion above it goes green against the wrong reason.
-for _t in bash sh env python3 shellcheck podman curl git sed awk tr mktemp pgrep grep cat printf \
+# git, ssh AND ssh-keygen ARE ON THIS LIST BECAUSE PT_REGISTRY NAMES THEM (#115, #185): the
+# fixture's PATH has to hold everything the gate demands, or the CONTROL below refuses a machine
+# that is in fact sound and every assertion above it goes green against the wrong reason.
+# Measured for #185: adding the two ssh rows without adding them here reds exactly the two
+# CONTROL assertions and nothing else, which is this comment being right rather than lucky.
+for _t in bash sh env python3 shellcheck podman curl git ssh ssh-keygen \
+          sed awk tr mktemp pgrep grep cat printf \
           timeout gtimeout stat gstat sha256sum gsha256sum ss lsof cut sort head tail wc \
           basename dirname rm mkdir ln chmod date sleep id od paste tee expr; do
     _p="$(command -v "$_t" 2>/dev/null)" && ln -s "$_p" "$GATE/bin/$_t" 2>/dev/null
 done
 unset _t _p
 
+# A FAKE uname, AND THE FIXTURE HAD NO uname AT ALL UNTIL THIS (#185). The copied runner reads
+# `uname -s` to choose which COLUMN of a missing row to print, so without one it printed
+# `uname: command not found` and picked the Debian column on every machine, a Mac included --
+# which means preflight:offers-a-command-that-fixes-it below, whose comment claims it holds on
+# both platforms, had in fact only ever asserted one of them, and no row's macOS column was
+# asserted anywhere in this tree.
+#
+# FAKED RATHER THAN SYMLINKED TO THE REAL ONE, because a real uname trades that defect for its
+# mirror image: the fixture would then read the mac column on a Mac and the Debian column on
+# Linux, and NEITHER machine would check both -- "a fixture that behaved differently on the two
+# platforms is how a case comes to pass for a reason nobody chose" (lib/podman-shim.sh's
+# shim_toolfarm note). Pinned to Linux by default, which is byte-identical to what the missing
+# uname produced, so no assertion above this line moves; the arms below drive both columns from
+# whichever machine is running.
+#
+# ONLY -s, AND ANYTHING ELSE IS AN ERROR -- the doctrine shim_fake_sysctl states, for the reason
+# it gives: a fake that answered an unknown question with an empty line would feed the empty
+# string into the very composition this exists to exercise. `uname` appears exactly once in the
+# runner and nowhere in lib/portable.sh, so -s is the whole surface.
+cat > "$GATE/bin/uname" <<'GATEUNAME'
+#!/bin/sh
+[ "$1" = -s ] || { echo "uname: unsupported in this fake: $*" >&2; exit 1; }
+printf '%s\n' "${GATE_UNAME_S:-Linux}"
+GATEUNAME
+chmod +x "$GATE/bin/uname"
+
 gate_run() {                          # gate_run [REMOVE_TOOL...] -> output with [rc=N]
     local t
     mkdir -p "$GATE/bin.save"
     for t in "$@"; do mv "$GATE/bin/$t" "$GATE/bin.save/$t" 2>/dev/null || true; done
     ( cd "$GATE" && env -i PATH="$GATE/bin" HOME="$WORK" TMPDIR="$WORK" NO_COLOR=1 \
+        GATE_UNAME_S="${GATE_UNAME_S:-Linux}" \
         bash ./run-tests.sh --tier static 2>&1; printf '[rc=%s]' "$?" )
     for t in "$@"; do mv "$GATE/bin.save/$t" "$GATE/bin/$t" 2>/dev/null || true; done
 }
@@ -1287,8 +1317,51 @@ assert_contains "preflight:names-every-fault-at-once-2"   "podman"     "$out"
 # breakage instead of a refusal that names the fix. Every fixture copy of the course tree is a
 # `git archive` since #115, so this is now as load-bearing as podman.
 out="$(gate_run git)"
-assert_contains "preflight:refuses-without-git"           "git"        "$out"
-assert_contains "preflight:refuses-without-git-cleanly"   "[rc=78]"    "$out"
+# ON `is missing` RATHER THAN THE BARE NAME, matching the ssh arm below. Not vacuous as it stood
+# -- measured, with the row and the binary both gone no "git" survives the report -- but it
+# becomes vacuous the day any other row's WHY mentions git, and two adjacent arms on two idioms
+# for no stated reason is the asymmetry the rest of this file exists to prevent.
+assert_match    "preflight:refuses-without-git"           'git +is missing' "$out"
+assert_contains "preflight:refuses-without-git-cleanly"   "[rc=78]"        "$out"
+
+# ssh AND ssh-keygen BY NAME, for the reason git got its own arm above. Measured for #185: on a
+# machine with neither, `--tier shim` alone recorded 215 failures across two suites -- 159 in
+# 30-launcher-shim.sh and 56 in 25-installer.sh -- every one of them carrying the launcher's
+# err.no-ssh STOP box as its actual value under an assertion name about something else entirely.
+#
+# ON `is missing` RATHER THAN THE BARE NAME, because "ssh" is a SUBSTRING of "ssh-keygen":
+# measured, an assert_contains "ssh" still PASSES with the ssh row deleted, matching off the
+# ssh-keygen row's own report line. So each needle is one only its own row can satisfy, and
+# deleting either row reds exactly its own assertion.
+out="$(gate_run ssh ssh-keygen)"
+assert_match    "preflight:refuses-without-ssh"          'ssh +is missing'        "$out"
+assert_match    "preflight:refuses-without-ssh-keygen"   'ssh-keygen +is missing' "$out"
+assert_contains "preflight:refuses-without-ssh-cleanly"  "[rc=78]"                "$out"
+# THE PACKAGE, not just the name: the Debian column is the whole actionable payload of these two
+# rows on the platform where they can fire, and a typo in it would otherwise fail nothing.
+# ANCHORED, and the anchor is the assertion -- unanchored, mutating the column to
+# `openssh-clientt` still passed.
+#
+# ONE apt LINE FOR BOTH ROWS is the `all of them:` summary doing its job, and it is the ONLY
+# de-duplication run-tests.sh does: the per-row `fix` lines are printed once each regardless, as
+# the coreutils triple already shows. So two rows sharing one package is an established shape
+# here rather than something these two introduce.
+assert_match    "preflight:names-the-ssh-package"  'apt install -y openssh-client$' "$out"
+
+# ...AND THE macOS COLUMN, from the same machine, which nothing asserted before the fake uname
+# above existed. `(ships with macOS)` has to reach the report as a NOTE -- advice, no remedy --
+# rather than as a package name inside a `brew install` line, and that is true of every
+# `(`-prefixed column in the registry.
+#
+# SET INSIDE THE SUBSTITUTION, not as `GATE_UNAME_S=Darwin gate_run`: bash leaves an assignment
+# that prefixes a FUNCTION call set after the function returns, so the prefix form would silently
+# move the platform under every arm added below this one.
+out="$( GATE_UNAME_S=Darwin; gate_run ssh ssh-keygen )"
+assert_contains  "preflight:ssh-on-a-mac-is-a-note"      "(ships with macOS)"       "$out"
+assert_not_match "preflight:ssh-on-a-mac-has-no-package" 'install .*openssh-client' "$out"
+# AND THE POSITIVE ASSERTION ABOVE IS WHAT KEEPS THAT LAST ONE HONEST -- an assert_not_match for
+# a spelling that appears nowhere passes forever. Same pairing 10-static.sh states for
+# probe:it-does-not-prepend.
 
 # THE CONTROL, and it is not optional: without it every assertion above passes forever the day
 # the gate is accidentally made unreachable.
