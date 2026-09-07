@@ -346,8 +346,15 @@ RACE_PIDS=''
 for i in 1 2 3 4; do
     # ptyrun.py DIRECTLY, with no do_script and no timeout layer: $! has to be the pty owner
     # so the winner's session can be killed, and `timeout` in front would make it the pid of
-    # timeout instead. See lib/portable.sh's do_script comment and 60-container.sh:250.
-    printf '\nsleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "$REPO/cs193v" >"$RACE_OUT/$i" 2>&1 &
+    # timeout instead. See lib/portable.sh's do_script comment and 60-container.sh's close_client.
+    #
+    # NOT pty_start, which the two sites that need the pid INSIDE the pty use: this group only
+    # ever kills the owner, and four of these run at once, so it wants nothing that a shared
+    # PTY_PIDFILE would have to be untangled from.
+    #
+    # $REPO IS SINGLE-QUOTED (#141): ptyrun's own `/bin/sh -c` parses this string a second time,
+    # so an unquoted path with a space in it word-splits there.
+    printf '\nsleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "'$REPO/cs193v'" >"$RACE_OUT/$i" 2>&1 &
     RACE_PIDS="$RACE_PIDS $!"
 done
 refused_count() { grep -l 'already have a CS193V session' "$RACE_OUT"/* 2>/dev/null | grep -c . || true; }

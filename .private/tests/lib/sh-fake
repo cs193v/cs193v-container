@@ -1,0 +1,39 @@
+#!/bin/sh
+# A /bin/sh THAT ALWAYS INTERPOSES: it forks the command and stays resident, instead of
+# exec-optimising itself away.
+#
+# WHY THIS EXISTS (#151). lib/ptyrun.py used to claim that `sh -c 'simple command'`
+# exec-optimises, so the pty owner's direct child is the command and `pgrep -P` names it. That
+# claim is not specifiable. Measured on macOS 26:
+#
+#   sh -c '…'              /bin/sh (bash 3.2)  /bin/dash (Apple dash-16)  /bin/ksh   /bin/zsh
+#   sleep 5                replaces            replaces                   INTERPOSES replaces
+#   sleep 5 >/dev/null     INTERPOSES          replaces                   INTERPOSES replaces
+#   true && sleep 5        INTERPOSES          replaces                   INTERPOSES replaces
+#
+# It varies by shell, by BUILD of the same shell -- Ubuntu's dash 0.5.12 interposes where Apple's
+# dash-16 does not, which is #151's whole report -- and by command shape.
+#
+# SO THE CONDITION IS INJECTED, NOT BORROWED FROM THE HOST. That is the rule #141 states in
+# 14-test-harness.sh: a check that read the real environment would pass on a Mac, a CI runner and
+# a plain Linux box "having measured nothing", and those are the machines this suite runs on. Do
+# NOT reach for the host's own dash instead: on macOS /bin/dash EXISTS and OPTIMISES, so it proves
+# the opposite of what a reader would expect. /bin/ksh there does interpose, and is recorded as a
+# real-shell control beside the assertions that use this file.
+#
+# STDIN IS SAVED AND RESTORED EXPLICITLY, and that is the whole difficulty of these five lines.
+# POSIX assigns /dev/null to an asynchronous list's stdin BEFORE any explicit redirection, so a
+# bare `cmd &` hands the command NO TERMINAL -- measured, `test -t 0` false. That is not what dash
+# does when it forks, and it would put every tty-dependent assertion behind this fixture against a
+# launcher taking its no-terminal refusal: green for the wrong reason, or red for a reason that is
+# this file's fault rather than the product's.
+#
+# AND FD 3 IS CLOSED IN THE CHILD. Left open it leaks into the command -- measured -- and
+# lib/shared.sh's fd convention has 3 and 4 held by run-tests.sh, 8 the trace fd and 9
+# run_timeout's. 10-static.sh asserts both of these properties are still here, for the same
+# reason it asserts lib/sudo-fake has no exec branch: a "simplification" that deleted either one
+# would leave the assertions that use this file passing while measuring nothing.
+[ "$1" = "-c" ] || { echo "sh-fake: only -c is supported (got: ${1:-nothing})" >&2; exit 2; }
+exec 3<&0
+/bin/sh -c "$2" <&3 3<&- & kid=$!
+wait "$kid"; exit $?

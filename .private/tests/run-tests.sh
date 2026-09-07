@@ -425,6 +425,20 @@ printf '%sCS193V container tests%s  %s(tiers: %s)%s\n' "$C_BOLD" "$C_OFF" "$C_DI
                              "$C_DIM" "$C_OFF"
 printf '%s\n' "-------------------------------------------------------------------"
 
+# ─── ...and part two-and-a-half: which shell drove the ptys ───────────────────
+# SAID, BECAUSE THE TWO RUNS LOOK IDENTICAL OTHERWISE. CS193V_PTY_SHELL makes every pty in the
+# run interpose a shell between the pty owner and the command, which is how a Mac or a Fedora box
+# reproduces the configuration #151 was reported from -- and a results file that did not mention
+# it would leave "1750 pass" meaning two different things on two different days. Silent in the
+# ordinary case, so it cannot become noise nobody reads.
+if [ -n "${CS193V_PTY_SHELL:-}" ]; then
+    printf '%spty shell%s\n' "$C_BOLD" "$C_OFF"
+    printf '  %-13s %s\n' shell "$CS193V_PTY_SHELL"
+    printf '  %-13s %s\n' means \
+           'every pty runs its command under this instead of /bin/sh (#151)'
+    printf '%s\n' "-------------------------------------------------------------------"
+fi
+
 # ─── ...and part three: say what this is, then build what it needs ─────────────
 # SAID, NOT ASKED. A prompt would break the one thing #160 wanted -- "I just run that one
 # command and everything goes" -- but this flag deletes the volumes five logins live in and

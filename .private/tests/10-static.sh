@@ -45,8 +45,16 @@ assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
 assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
 assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
+# The two pty fixtures are /bin/sh for the same reason podman-fake is: they are run as COMMANDS,
+# by ptyrun.py's child and by ptyrun.py itself, so neither can be a shell function and neither
+# may assume bash. lib/shared.sh's warning applies -- a file under lib/ that is not NAMED here is
+# silently exempt from the rules it is meant to obey.
+assert_ok  "syntax:pty-announce"      sh -n $PRIVATE/tests/lib/pty-announce
+assert_ok  "syntax:sh-fake"           sh -n $PRIVATE/tests/lib/sh-fake
 assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 
+assert_exec "exec:pty-announce"       "$PRIVATE/tests/lib/pty-announce"
+assert_exec "exec:sh-fake"            "$PRIVATE/tests/lib/sh-fake"
 assert_exec "exec:cs193v"             "$REPO/cs193v"
 assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
 
@@ -205,6 +213,78 @@ assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
 # so an unquoted $PATH word-splits on any host whose PATH has a space in it. The behavioural
 # half of this lives in 14-test-harness.sh, which injects one and drives the door through it.
 assert_contains "installer-door:tty-puts-the-shim-first" "PATH='\$SHIM" "$ttydoor"
+
+# ─── nothing may infer a pty child's pid from the process tree again (#151) ────
+# THE PREMISE THAT MADE THIS NECESSARY. lib/ptyrun.py used to claim that `sh -c 'simple command'`
+# exec-optimises, so `pgrep -P` on the pty owner names the command. It is not a property any
+# shell specifies: bash-as-sh drops it on any redirection, Ubuntu's dash 0.5.12 never had it,
+# Apple's dash-16 does, and ksh93 turns `sleep 30` into a builtin with no process at all. Three
+# sites walked the tree on that basis; one went red on Ubuntu and one went SILENTLY GREEN.
+#
+# So the rule is now structural: a line that backgrounds ptyrun.py may not be followed by a
+# `pgrep -P` on the pid it captured. The pid comes from lib/pty-announce, through
+# lib/portable.sh's pty_inner_pid. The behavioural half is in 14-test-harness.sh, which asserts
+# the announce channel under the host's own shell AND under lib/sh-fake.
+# TWO EXEMPTIONS, AND BOTH ARE NAMED RATHER THAN GLOBBED AWAY. run-tests.sh's kill_tree walks
+# parentage RECURSIVELY to reap a whole run, which is structurally immune -- it does not care what
+# any level is. And 14-test-harness.sh is where the tree's shape is the SUBJECT: it reads the
+# owner's direct child on purpose, to record what this host's shell did and to prove lib/sh-fake
+# really interposed. Excluding the file that tests the rule is the point, not a loophole.
+#
+# COMMENTS ARE STRIPPED BY CONTENT, not by a `:#` that an indented comment would slip past. And
+# THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, because the pattern is in the search's own source
+# line -- the same self-match lib/assert.sh warns about for `pgrep -f` through E(), where a check
+# "reports the thing it is looking for as present because it is looking for it" (#34).
+#
+# SHELL FILES ONLY. Only shell code can capture `$(pgrep -P ...)` into a pid; the other two hits
+# are prose in lib/ptyrun.py's docstring, describing the premise this change deleted. That ptyrun
+# itself cannot grow a tree walk is asserted separately, below.
+pty_pgrep="$(grep -rn --include='*.sh' 'pgrep -P' "$PRIVATE/tests" \
+             | grep -vE ':[[:space:]]*#' \
+             | grep -vE '/(run-tests|14-test-harness|10-static)\.sh:')"
+assert_eq "ptyrun-pid:nothing-walks-the-tree-for-a-pty-child" "" "$pty_pgrep"
+# AND ptyrun ITSELF STAYS OUT OF THE PROCESS TABLE. It knows the pid it forked and has no business
+# inferring any other; a tree reader in here would need a per-platform backend (/proc on Linux,
+# `ps` or libproc on macOS) and would have to decide WHEN to look, which is the unanswerable half
+# of #151 -- between fork and exec, "a shell with no children" means either "about to exec" or
+# "about to fork", and telling them apart is waiting for a non-event.
+# THE DOCSTRING IS STRIPPED FIRST, because it names `pgrep` and `/proc` on purpose -- it is where
+# the premise this change deleted is written down, and a rule that could not survive its own
+# explanation would just get the explanation deleted instead.
+ptyrun_src="$(sed '1,/^"""$/d' "$PRIVATE/tests/lib/ptyrun.py")"
+assert_not_match "ptyrun-pid:ptyrun-does-not-read-the-process-table" \
+                 '(import subprocess|/proc/|pgrep|Popen)' "$ptyrun_src"
+
+# AND THE FIXTURE'S TWO LOAD-BEARING LINES STAY. lib/sh-fake exists to interpose a shell, and two
+# details make it a faithful one rather than a misleading one: POSIX gives an asynchronous list's
+# stdin /dev/null BEFORE explicit redirections, so without the `<&3` the command gets NO TERMINAL
+# and every tty-dependent assertion behind the fixture measures a launcher refusing for want of
+# one; and fd 3 left open leaks into the command, where lib/shared.sh's convention has 3 and 4
+# held by run-tests.sh. Asserted for the same reason lib/sudo-fake's missing exec branch is: a
+# plausible simplification would leave the assertions that use this file green and empty.
+shfake="$(cat "$PRIVATE/tests/lib/sh-fake")"
+assert_contains "sh-fake:saves-stdin"        'exec 3<&0' "$shfake"
+assert_contains "sh-fake:restores-stdin"     '<&3' "$shfake"
+assert_contains "sh-fake:closes-fd3-in-the-child" '3<&-' "$shfake"
+assert_contains "sh-fake:really-forks"       '& kid=$!' "$shfake"
+# AND IT MUST NOT EXEC, which is the one edit that would silently turn it into a passthrough --
+# mutation-tested: with it reduced to `exec /bin/sh -c "$2"` both announce assertions in
+# 14-test-harness.sh still PASS, and only the interposition control there goes red.
+assert_not_match "sh-fake:has-no-exec-of-the-command" '(^|[[:space:]])exec[[:space:]]+/bin/sh' "$shfake"
+
+# pty_start BUILDS A STRING FOR ptyrun, so it is a third copy of the #141 rule: every argument it
+# interpolates is single-quoted, because ptyrun's own `/bin/sh -c` parses that string again.
+# Measured: unquoted, a $REPO containing a space dies with `/bin/sh: /.../Keith: No such file or
+# directory` -- and WSL's interop.appendWindowsPath plus a spacey $HOME make that ordinary.
+ptystart="$(sed -n "/^pty_start()/,/^}$/p" "$PRIVATE/tests/lib/portable.sh")"
+if [ "$(printf '%s' "$ptystart" | grep -c '.')" -ge 4 ]; then pass "pty-start:extractable"
+else fail "pty-start:extractable" "could not find pty_start in lib/portable.sh"; fi
+assert_contains "pty-start:single-quotes-what-it-interpolates" "'\$a'" "$ptystart"
+assert_contains "pty-start:hands-the-pidfile-through-the-environment" 'CS193V_PTY_PIDFILE=' "$ptystart"
+# AND IT PREPENDS THE WRAPPER ITSELF. This was a caller's job for one revision and two of the
+# three callers forgot it; the point of the fix is a pid channel guaranteed by the interface
+# rather than remembered at each site.
+assert_contains "pty-start:runs-the-command-through-pty-announce" 'pty-announce' "$ptystart"
 
 # ─── the trace fd must not be one somebody else is already using ───────────────
 # BOTH DOORS DIVERT `bash -x` TO A FILE DESCRIPTOR, so that the trace lands in a coverage file
@@ -1981,6 +2061,9 @@ assert_ok  "shellcheck:setup-git-tests" shellcheck --severity=warning \
 # The two fakes are /bin/sh, like lib/podman-fake, and are run as commands by the suites above.
 assert_ok  "shellcheck:setup-git-fakes" shellcheck --severity=warning \
                                         $PRIVATE/tests/lib/gh-fake $PRIVATE/tests/lib/git-fake
+# The pty fixtures, for the same reason and with the same severity.
+assert_ok  "shellcheck:pty-fixtures"    shellcheck --severity=warning \
+                                        $PRIVATE/tests/lib/pty-announce $PRIVATE/tests/lib/sh-fake
 # The Windows installer's suites, its linter and its wine harness. Not covered until issue #125
 # touched all four, which is exactly the gap lib/shared.sh:17-21 warns about: a file added under
 # lib/ without being NAMED somewhere is silently exempt from the rules it is supposed to obey.

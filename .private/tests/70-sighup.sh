@@ -78,6 +78,9 @@ cleanup() {
     # shellcheck disable=SC2086
     [ -n "$PTY_PIDS" ] && kill -9 $PTY_PIDS 2>/dev/null
     rm -f "$LOG"
+    # pty_start makes a fresh pidfile and keystroke feed per launch, and this file launches three
+    # times. They are named with our pid so this glob cannot reach another run's.
+    rm -f "${TMPDIR:-/tmp}"/cs193v-ptypid."$$".* "${TMPDIR:-/tmp}"/cs193v-ptyfeed."$$".* 2>/dev/null
     container_running && container_pkill "http.server $SRV_PORT"
     return 0
 }
@@ -90,11 +93,13 @@ clean_vt_processes
 # immediately, which closes the tab, which ends the session -- so the probe would be measuring a
 # container nobody was in. `$!` after a pipeline is its LAST element, which is script, and that is
 # exactly the pid whose death has to look like a window closing.
-launch_in_pty() {                     # launch_in_pty -> sets PTY_PID
-    # ptyrun.py DIRECTLY -- no do_script, no timeout layer -- because $! must be the pty OWNER.
-    # See lib/portable.sh's do_script comment and the note above.
-    printf 'sleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "$REPO/cs193v" >"$LOG" 2>&1 &
-    PTY_PID=$!
+launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_PIDFILE for §5
+    # pty_start, NOT ptyrun.py by hand: it is what keeps $! the pty OWNER (a pipeline or a
+    # function call in a subshell would not), quotes the interpolated path against a spacey
+    # $HOME (#141), and runs the launcher through lib/pty-announce so §5 can learn the
+    # launcher's OWN pid instead of guessing at the process tree. See lib/portable.sh.
+    pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    PTY_PID="$PTY_OWNER"
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
 
@@ -215,10 +220,25 @@ release_container
 launch_in_pty
 if wait_until 90 session_up; then
     # The LAUNCHER, not the pty: no HUP, so no trap and no teardown.
-    LAUNCHER_PID="$(pgrep -P "$PTY_PID" | head -1)"
-    if [ -n "$LAUNCHER_PID" ]; then
+    #
+    # ASKED, NOT INFERRED (#151). This was `pgrep -P "$PTY_PID" | head -1`, which names the
+    # command only when the `/bin/sh` inside ptyrun exec-optimises itself away. On Ubuntu, where
+    # /bin/sh is dash 0.5.12, it does not -- and the pid then belonged to the interposed shell,
+    # which pty.fork() had made the SESSION LEADER. `kill -9` on that did not run this experiment
+    # at all: the kernel HUPed the launcher, its trap RAN, the container came down, and every
+    # assertion in this group inverted. lib/pty-announce is how the launcher's own pid gets here.
+    LAUNCHER_PID="$(pty_inner_pid)" || LAUNCHER_PID=''
+    if [ -n "$LAUNCHER_PID" ] && ! pid_is_gone "$LAUNCHER_PID"; then
         kill -9 "$LAUNCHER_PID" 2>/dev/null
         sleep 2                        # A DURATION, deliberately: this asserts a NON-event.
+        # THE CONTROL COMES FIRST, because everything after it is an assertion a BROKEN
+        # INSTRUMENT PASSES. Kill a stale or wrong pid and nothing dies: the container is still
+        # up, so `a-force-quit-leaves-the-container-up-as-designed` is green for precisely the
+        # wrong reason, and the two assertions after it are green too because they only need SOME
+        # running container to refuse and then stop. So this says the pid was alive before the
+        # kill -- checked in the `if` above -- and is gone after it.
+        assert_ok "sighup:the-force-quit-really-killed-the-launcher" \
+                  pid_is_gone "$LAUNCHER_PID"
         if container_running; then
             pass "sighup:a-force-quit-leaves-the-container-up-as-designed"
         else
@@ -238,7 +258,11 @@ launcher should do. Worth understanding before trusting the teardown path."
             fail "sighup:stop-recovers-a-force-quit-leftover" "still $(st) -- the student is stuck"
         fi
     else
-        record "sighup:force-quit" "could not find the launcher under the pty in order to kill it"
+        # A `fail`, where this used to `record`. With the announce channel there is no host on
+        # which the launcher legitimately declines to say what pid it is: no pid means the
+        # instrument broke, and the four assertions this group would have made are lost.
+        fail "sighup:force-quit" "the launcher never announced a pid through lib/pty-announce,
+so there was nothing to force-quit and this whole group measured nothing."
     fi
 fi
 kill -9 "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null || true
@@ -265,7 +289,11 @@ record "sighup:zombies-before-the-matrix" "${ZBASE:-none}"
 # survived, and a pattern naming a port the server was never started on answers no every time.
 probe() {                             # probe LABEL COMMAND
     container_pkill "http.server $SRV_PORT"
-    "$DO_PY" "$PT_LIB/ptyrun.py" "podman exec -it ${NAME} sh -c '$2'" >/dev/null 2>&1 &
+    # ${NAME} SINGLE-QUOTED (#141), like every other value interpolated into a string ptyrun
+    # will have `/bin/sh -c` parse a second time. This site kills only the pty owner, so it wants
+    # nothing from lib/pty-announce -- and it deliberately KEEPS its inner `sh -c`, because
+    # 70-sighup's own note below relies on that shell's argv carrying the pattern.
+    "$DO_PY" "$PT_LIB/ptyrun.py" "podman exec -it '${NAME}' sh -c '$2'" >/dev/null 2>&1 &
     local client=$!
     wait_until 15 container_pgrep "http.server $SRV_PORT" || true
     kill -9 "$client" 2>/dev/null; wait "$client" 2>/dev/null || true
