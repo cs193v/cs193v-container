@@ -319,6 +319,15 @@ do_host_ips() {                       # do_host_ips -> space-separated IPv4 addr
 #   any   one of several will do
 #   run   present AND able to run a program
 #
+# ssh AND ssh-keygen ARE `cmd` DELIBERATELY, and this is the row-kind decision somebody will try
+# to improve. Presence CAN lie here -- a dropbear `ssh` answers none of -M, -S or -O -- but the
+# gate's job for these two is to predict what the LAUNCHER will refuse, and its preflight asks
+# exactly `command -v`. A deeper probe would refuse machines the launcher accepts, and refusing a
+# sound machine costs the whole run -- exit 78, no results file -- where under-refusing costs a
+# diagnosis. podman is the same split for the same reason: lib/sandbox.sh's PODMAN-WORKS note
+# records that `command -v podman` lies, and that row is still `cmd`, because the version and
+# rootless checks live in the product.
+#
 # NOT IN HERE, deliberately:
 #   script(1)  nothing uses it any more -- lib/ptyrun.py replaced it, because BSD script cannot
 #              deliver keystrokes and there is no GNU one to install on macOS.
@@ -327,10 +336,16 @@ do_host_ips() {                       # do_host_ips -> space-separated IPv4 addr
 #   awk, sed, tr, mktemp, pgrep, grep
 #              present and adequate on every platform this runs on; a row that cannot fail is
 #              noise in a report whose whole value is that every line in it is actionable.
+#   uname      UNREPRESENTABLE, which is a different reason from the group above rather than one
+#              more member of it: run-tests.sh reads `uname -s` to choose WHICH COLUMN of a row
+#              to print, so a row for uname would need a uname in order to report itself
+#              missing. 14-test-harness.sh's gate fixture fakes one instead.
 PT_REGISTRY='cmd|shellcheck|10-static.sh lints every shipped script with it|shellcheck|shellcheck
 cmd|podman|the install, image, container and live tiers drive it|podman|podman passt uidmap crun
 cmd|curl|reads a server inside the container back through a forwarded port|(ships with macOS)|curl
 cmd|git|the fixture copies of the course tree are built with git archive, the way GitHub builds them|(ships with Xcode CLT)|git
+cmd|ssh|the shim, container and live tiers all drive a launcher that refuses to start without it|(ships with macOS)|openssh-client
+cmd|ssh-keygen|named separately by that same refusal, and the tunnel keypair is generated with it|(ships with macOS)|openssh-client
 gnu|timeout|every pty drive and every long podman call is bounded by it|coreutils|coreutils
 gnu|stat|the file mode and ownership assertions read `stat -c`|coreutils|coreutils
 gnu|sha256sum|the release gates and the installer idempotency check hash with it|coreutils|coreutils
