@@ -144,11 +144,15 @@ assert_match "parse:pr-number-comes-from-gh"    'pr merge --repo [^ ]* 9999'    
 # keeps 50,000 lines of scrollback per tab while students screenshot their terminals for help.
 sg_new
 out="$(sg_tty "$HAPPY")"
-assert_not_contains "secret:not-in-the-transcript" "$TOKEN" "$out"
-assert_not_contains "secret:not-in-the-command-log" "$TOKEN" "$(sg_log)"
+# THROUGH sg_unwrap, since #155: these compared against the RAW transcript, so a token that
+# reached the screen inside anything box() had wrapped -- which is every error box -- would have
+# been split across two rows and matched neither needle. No leak was found by adding it; the
+# assertion simply now covers the shape it always claimed to.
+assert_not_contains "secret:not-in-the-transcript" "$TOKEN" "$(sg_unwrap "$out")"
+assert_not_contains "secret:not-in-the-command-log" "$TOKEN" "$(sg_unwrap "$(sg_log)")"
 # Not even a recognisable chunk of it: a partial echo would be as good as the whole thing to
 # anyone reading over a shoulder.
-assert_not_contains "secret:no-fragment-in-the-transcript" "$TOKEN_B" "$out"
+assert_not_contains "secret:no-fragment-in-the-transcript" "$TOKEN_B" "$(sg_unwrap "$out")"
 sg_has "secret:login-row-is-redacted" "gh auth login --with-token < your-token" "$out"
 
 # ─── what IS shown while it is pasted ──────────────────────────────────────────
@@ -291,6 +295,31 @@ sg_says "fail-clone:ends-with-the-staff-box" err.setup-failed "$out"
 sgbox="$(sg_box "$out")"
 assert_says "fail-clone:box-names-the-command"  "Failed command: git clone --quiet" "$sgbox"
 assert_says "fail-clone:box-quotes-the-failure" "remote: Permission to"             "$sgbox"
+
+# AND THE TOKEN IS IN NONE OF IT. The three secret:* assertions above run on the HAPPY path only,
+# and this file drives fifteen failure paths -- every one of which reaches fail_to_staff, which
+# renders $RT_OUT (the failing command's combined stdout AND stderr) into a box captioned for the
+# student to send to course staff. That is a wider surface than the transcript, not a narrower
+# one: a student pastes the box deliberately, and staff archive it. Nothing looked at it until
+# the #155 audit, which found the token asserted on one of sixteen code paths.
+# sg_unwrap, NOT the raw text and NOT _flatten -- see the note on sg_unwrap in
+# lib/setup-git-shim.sh. A 93-character token wrapped across two rows of a 69-column box matches
+# neither needle otherwise, which is how the first draft of these three assertions passed against
+# a box that visibly contained the token.
+sgflat="$(sg_unwrap "$sgbox")"
+assert_not_contains "fail-clone:the-token-is-not-in-the-staff-box"  "$TOKEN"   "$sgflat"
+assert_not_contains "fail-clone:no-token-fragment-in-the-staff-box" "$TOKEN_B" "$sgflat"
+assert_not_contains "fail-clone:the-token-is-not-in-the-transcript" "$TOKEN"   "$(sg_unwrap "$out")"
+# ...and nothing this run left on disk holds it either. TMPDIR is $SGSHIM for the whole run
+# (lib/setup-git-shim.sh:97), so setup-git's own $SG_TMP, the sandbox clone, and run_timeout's
+# captured-output scratch files all land under it -- and a failure path is exactly when those
+# hold a command's output rather than being cleaned up on the way past.
+#
+# GUARDED, because "grep found nothing" and "there was nothing to search" produce the same
+# empty string, and this whole audit exists because that distinction kept being missed.
+assert_file "fail-clone:the-shim-really-has-files-to-search" "$SGSHIM/argv.log"
+assert_eq   "fail-clone:the-token-is-on-no-file-this-run-left" "" \
+            "$(grep -rl -- "$TOKEN" "$SGSHIM" 2>/dev/null || true)"
 
 sg_new
 sg_set fail_at 'push -q origin cs193v-setup'

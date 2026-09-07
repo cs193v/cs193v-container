@@ -99,14 +99,73 @@ run_case() {                          # run_case LINE...
 # substitutions found in their operands -- measured -- so a parser that reaches any of them with
 # unvalidated input is a shell injection. `case` is the only construct that evaluates nothing,
 # which is why it has to come first in the parser.
+#
+# THE PAYLOADS HAVE TO FIT THE PARSER'S OWN LENGTH CAPS, and until the #155 audit they did not.
+# A canary path is long, so all five were 123-126 characters -- while dynports_line rejects a
+# record over 10 characters and a BEGIN line over 9. Every one of them therefore died at the
+# length check and never reached the port parser, the class allowlist, or any arithmetic. The
+# assertion was checking that a 125-character string is rejected by a 10-character cap, and it
+# would have passed just as happily against a parser that eval'd its input. Measured: with
+# `: $(( p ))` inserted into the parse path, it stayed green across the whole static+unit tier.
+#
+# So there are two groups now, and the split is the point.
 INJECT='$('"'"'touch '"$CANARY"''"'"')'
 rm -f "$CANARY"
+
+# GROUP 1 -- the long payloads. Kept, because they do test something real: that the length caps
+# hold and reject before anything else looks at the bytes. They cannot test execution, and the
+# name now says which of the two it is rather than claiming the stronger one.
 run_case "cs193v-portwatch 1" "BEGIN 1" "3000:$INJECT" "END"
 run_case "cs193v-portwatch 1" "BEGIN 1" "$INJECT:lo" "END"
 run_case "cs193v-portwatch 1" "BEGIN $INJECT" "END"
 run_case "cs193v-portwatch 1" "a[\$(touch $CANARY)]"
 run_case "cs193v-portwatch 1" "BEGIN 1" "3000:lo\`touch $CANARY\`" "END"
-assert_no_file "fuzz:nothing-is-executed" "$CANARY"
+assert_no_file "fuzz:an-over-long-record-is-rejected-before-anything-evaluates" "$CANARY"
+
+# GROUP 2 -- payloads that FIT, so they reach the code this property is actually about.
+#
+# Three facts, all measured on bash 3.2.57 while fixing this, because the note above is right in
+# substance and easy to read too loosely:
+#
+#   * A redirection with no command still runs. `>c` creates the file `c` in the current
+#     directory, and it is the shortest useful payload there is.
+#   * A BARE `$(...)` is INERT as an arithmetic operand. Bash does not command-substitute a
+#     variable's VALUE, it parses it, and `$(>c)` is answered with "syntax error: operand
+#     expected". What executes under arithmetic is a value shaped like an ARRAY SUBSCRIPT,
+#     because bash evaluates a subscript arithmetically and expands it on the way.
+#   * ...and under `set -u`, which this suite and the launcher both run under, even that only
+#     fires if the array name is ALREADY DECLARED. `a[$(>x)]` with `a` unset dies on "a: unbound
+#     variable" first, and `c[$(>x)]` where c holds a non-numeric string dies on the recursive
+#     lookup of that string. So `set -u` plus a parse path with no arrays in it is a real second
+#     line of defence, and supervisor:no-array-subscripts-in-the-parse-path is what keeps it.
+#
+# Hence two short payloads, aimed at the two mutation shapes that would defeat different
+# defences: `$(>c):lo` (8 chars) is what an eval-shaped mutation executes, and `c[`>k`]:lo`
+# (exactly 10, which is why the class is `lo` -- the shortest the allowlist admits) is what an
+# arithmetic-shaped one executes. Run from inside $WORK so the relative names land there.
+#
+# BEGIN cannot be covered this way, and that is a limit rather than an omission: `BEGIN ` is six
+# of its nine characters. The BEGIN line is covered by the count validator and by group 1.
+rm -f "$WORK/c" "$WORK/k"
+( cd "$WORK" || exit 1
+  run_case "cs193v-portwatch 1" "BEGIN 1" '$(>c):lo'   "END"   # eval-shaped, PORT field
+  run_case "cs193v-portwatch 1" "BEGIN 1" '1:$(>c)'    "END"   # eval-shaped, CLASS field
+  run_case "cs193v-portwatch 1" "BEGIN 1" 'c[`>k`]:lo' "END"   # arithmetic-shaped, PORT field
+) >/dev/null 2>&1
+assert_no_file "fuzz:nothing-is-executed" "$WORK/c"
+assert_no_file "fuzz:nothing-is-executed-by-a-subscript" "$WORK/k"
+
+# AND A POSITIVE CONTROL, for the reason 27-installer-windows.sh's win-hijack:* has one: the
+# absence of a file is also what a harness that died on its first line produces, so a green
+# assert_no_file means nothing until the detector is known to be live. This declares the array
+# the bullet above says is required and then feeds it the same shape, so the canary MUST appear.
+# If this ever fails, every assert_no_file above is vacuous and should be treated as unproven.
+( cd "$WORK" || exit 1
+  # shellcheck disable=SC2034   # read only by the arithmetic below
+  declare -a canary_arr=(0)
+  inj='canary_arr[$(>positive)]'
+  : $(( inj )) 2>/dev/null || true )
+assert_file "fuzz:the-canary-mechanism-really-fires" "$WORK/positive"
 
 # ─── property 7 (checked early, so the rest is not vacuous) ────────────────────
 # A parser that rejects EVERYTHING satisfies every "must not" below. This is the assertion that
