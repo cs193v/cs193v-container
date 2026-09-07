@@ -1988,3 +1988,135 @@ assert_match        "tailbox:bar-survives-a-very-short-terminal" '\] +[0-9]+/[0-
 mid="$(tailbox_at 24 46)"
 assert_not_contains "tailbox:absent-on-a-narrow-terminal" "$TAILBOX_LID" "$mid"
 assert_match        "tailbox:bar-survives-a-narrow-terminal" '\] +[0-9]+/[0-9]+' "$mid"
+
+# ─── a podman that WARNS and still succeeds  (#171) ────────────────────────────
+# run_timeout merges the command's stderr into RT_OUT, so a podman that warns and exits 0 puts
+# a warning line AHEAD of the answer every read is looking for. This is not exotic: one
+# unrecognised key in storage.conf does it to every call, measured on podman 5.8.4, and
+# `--log-level=error` does NOT suppress it -- the line comes from the storage-config loader.
+#
+# The worst manifestation is not one of the eleven sites the issue lists. preflight compares the
+# rootless answer to the string `true`, so a warning ahead of it refuses the machine as
+# "rootful" -- a message that says it is "not something to work around" and names no fix.
+WARNLINE='time="2026-09-06T23:18:58-07:00" level=warning msg="Failed to decode the keys [\"storage.bogus\"] from \"/etc/containers/storage.conf\""'
+
+shim_new
+shim_set state exited
+shim_set label_dir "$COPY"
+shim_set info_stderr "$WARNLINE"
+out="$(launcher --stop)"
+assert_says_not_key "warned-podman:not-refused-as-rootful" err.rootful "$out"
+assert_says_key     "warned-podman:gets-on-with-the-job"   status.already-stopped "$out"
+
+# The whole way through a launch, with both reads noisy. It ends at err.needs-a-terminal because
+# `launcher` has no tty -- and reaching THAT refusal is the assertion: it is the last thing
+# open_shell does, so nothing on the way there refused first.
+shim_new
+launcher >/dev/null 2>&1                # let it create the container, so the labels are real
+HASH="$(current_hash)"
+shim_set state exited
+shim_set label_dir "$COPY"
+shim_set label_hash "$HASH"
+shim_set info_stderr "$WARNLINE"
+shim_set inspect_stderr "$WARNLINE"
+shim_clear_log
+out="$(launcher)"
+assert_says_not_key "warned-podman:not-refused-as-rootful-on-a-launch" err.rootful "$out"
+assert_says_not_key "warned-podman:not-a-foreign-directory" err.other-directory "$out"
+assert_says_not_key "warned-podman:no-spurious-recreate-prompt" prompt.config-changed "$out"
+assert_says_key     "warned-podman:reaches-the-shell"       err.needs-a-terminal "$out"
+assert_eq           "warned-podman:recreates-nothing" "0" "$(shim_count '^rm ')"
+
+# doctor is the report a student is told to paste, so a warning reaching it is a warning reaching
+# staff -- in six fields at once, measured. And its config line read the same label as
+# ensure_container and drew the OPPOSITE conclusion: "STALE -- accept the recreate prompt", for a
+# prompt the launch path does not show. That is ERRORS.md B14 arriving a second way.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state exited
+shim_set label_dir "$COPY"
+shim_set label_hash "$(current_hash)"
+shim_set info_stderr "$WARNLINE"
+shim_set inspect_stderr "$WARNLINE"
+out="$(launcher doctor)"
+assert_not_contains "warned-podman:doctor-does-not-quote-the-warning" "level=warning" "$out"
+assert_not_contains "warned-podman:doctor-does-not-cry-stale" "accept the recreate prompt" "$out"
+
+# ─── a read that FAILED, told apart from an answer  (#171) ─────────────────────
+# `podman inspect` exits 125 for BOTH "no such container" and "cannot reach podman", so a failed
+# read used to mean `absent` -- and six sites gated an action on it. `podman container exists`
+# breaks the tie in a status alone: 0 present, 1 absent, 125 podman itself.
+#
+# The container here IS running and the query fails, which is #140's macOS observation. Believing
+# it absent, the launcher tries to create one, and podman's answer to that is the message a
+# student reads as "you already have a session open in another window".
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set label_dir "$COPY"
+shim_set inspect_rc 125
+shim_set run_rc 125
+shim_set run_err 'Error: creating container storage: the container name "cs193v" is already in use by 15bb56cdbb36.'
+shim_clear_log
+out="$(launcher)"
+assert_says_key     "query-failed:says-podman-could-not-be-reached" err.podman-unreachable "$out"
+assert_says_not_key "query-failed:not-reported-as-a-live-session"   err.session-in-use "$out"
+assert_eq "query-failed:creates-nothing" "0" "$(shim_count '^run ')"
+# THE ONE WITH TEETH. Believing the container absent, ensure_container's tail runs `podman start`,
+# and on failure removes and recreates -- `podman rm -f` on a container that may be perfectly
+# fine, and which somebody may be working in.
+assert_eq "query-failed:removes-nothing" "0" "$(shim_count '^rm ')"
+
+# --stop is the escape hatch the refusals name, and it must not answer "there is nothing to stop"
+# when what it means is "I could not tell". This is the case a slept Mac produces, which is the
+# case --stop exists for.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set inspect_rc 125
+shim_clear_log
+out="$(launcher --stop)"
+assert_says_not_key "query-failed:stop-does-not-claim-there-is-nothing-to-stop" \
+                    status.already-stopped "$out"
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set inspect_rc 125
+shim_clear_log
+launcher_tty '\033[B\n' --stop >/dev/null 2>&1
+assert_eq "query-failed:stop-accepted-still-stops" "exited" "$(shim_state)"
+
+# --reset-tunnel has already torn the tunnel down by the time it reads the state, so bailing out
+# leaves the student with no tunnel at all and a message about a container.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set inspect_rc 125
+shim_clear_log
+out="$(launcher --reset-tunnel)"
+assert_says_not_key "query-failed:reset-tunnel-does-not-claim-no-container" \
+                    warn.tunnel-reset-not-running "$out"
+
+# doctor must report what it does not know rather than reporting health.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set label_dir "$COPY"
+shim_set inspect_rc 125
+out="$(launcher doctor)"
+assert_not_match "query-failed:doctor-does-not-report-absent" 'container +absent' "$out"
+assert_contains  "query-failed:doctor-says-it-could-not-tell" "podman did not answer" "$out"
+
+# --rebuild ACTS on an unreadable read rather than refusing, and that is deliberate. The state
+# that makes `inspect` fail while the container is there is a damaged entry, and remove-and-
+# recreate is its cure; refusing here would close the last exit, because --stop reports success
+# either way and the bare launch refuses. A GUARD, green before this change and after it.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set inspect_rc 125
+shim_clear_log
+out="$(launcher --rebuild)"
+assert_says_not_key "query-failed:rebuild-is-not-refused" err.session-in-use "$out"
+if [ "$(shim_count '^rm ')" -ge 1 ]; then pass "query-failed:rebuild-still-recreates"
+else fail "query-failed:rebuild-still-recreates" "no 'rm' in the log: $(shim_log | do_tr '\n' '|')"; fi

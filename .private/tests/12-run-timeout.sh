@@ -57,8 +57,12 @@ litter() { ls -A "$WORK" 2>/dev/null | grep '^cs193v-' | do_tr '\n' ' ' | sed 's
 # wrapper turns "no such container" into "podman is broken" and vice versa.
 assert_exit "rt:zero-passes-through"      0   run_timeout 5 true
 assert_exit "rt:nonzero-passes-through"   3   run_timeout 5 sh -c 'exit 3'
-# 125 is what `podman inspect` returns for a container that does not exist, which is exactly how
-# state() tells absent from present -- the one status in this list with a caller depending on it.
+# 125 is what `podman inspect` returns for a container that does not exist -- AND what it returns
+# when it cannot reach podman at all, which is why state() no longer reads it as "absent" on its
+# own (#171). It still has a caller depending on it: 125 is now the one status that makes state()
+# ask `podman container exists` a second question, so a 125 that does not survive the wrapper
+# would stop that tiebreak ever running. Note run_timeout ALSO returns 125 from its own failed
+# mktemp, which lands in the same "could not answer" bucket rather than in "absent".
 assert_exit "rt:125-passes-through"       125 run_timeout 5 sh -c 'exit 125'
 assert_exit "rt:signal-death-passes-through" 137 run_timeout 5 sh -c 'kill -9 $$'
 # 124 IS THE CEILING'S NUMBER AND A COMMAND MAY RETURN IT TOO. Nothing distinguishes them, before
@@ -72,6 +76,34 @@ assert_exit "rt:a-command-may-also-exit-124" 124 run_timeout 5 sh -c 'exit 124'
 run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' || true
 assert_contains "rt:captures-stdout" "to-stdout" "$RT_OUT"
 assert_contains "rt:captures-stderr" "to-stderr" "$RT_OUT"
+
+# ─── RT_BARE: the mode that does NOT merge them  (#171) ────────────────────────
+# A read whose answer is used as a value cannot afford stderr in it: podman warns and exits 0
+# -- one unrecognised key in storage.conf does it to every call -- and merged, the warning
+# becomes part of the value. preflight compared such an answer against the string `true` and
+# refused the machine as "rootful". pmv sets this; nothing else does.
+#
+# THE TWO ASSERTIONS ABOVE ARE THIS ONE'S GUARD. They run with RT_BARE unset, so if it ever
+# became the default they go red rather than this going quietly unused.
+RT_BARE=1
+run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' || true
+assert_contains     "rt:bare-keeps-stdout"  "to-stdout" "$RT_OUT"
+assert_not_contains "rt:bare-drops-stderr"  "to-stderr" "$RT_OUT"
+# BOTH BRANCHES, because run_timeout has two ways of waiting and they redirect separately: no
+# label takes the fifo branch, a label forces the 10 Hz poll loop. A fix applied to one of them
+# would leave the other merging, and which branch a call gets is not visible from the call.
+RT_SPIN='working'
+run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' >/dev/null 2>&1 || true
+assert_contains     "rt:bare-keeps-stdout-on-the-poll-branch" "to-stdout" "$RT_OUT"
+assert_not_contains "rt:bare-drops-stderr-on-the-poll-branch" "to-stderr" "$RT_OUT"
+RT_SPIN=''
+# The ceiling still fires, and the status still comes back, with stderr going nowhere.
+assert_exit "rt:bare-still-times-out"        124 run_timeout 1 sleep 5
+assert_exit "rt:bare-still-passes-a-status"  3   run_timeout 5 sh -c 'echo x >&2; exit 3'
+RT_BARE=''
+# ...and cleared, the default is back, so nothing below this line inherits the bare mode.
+run_timeout 5 sh -c 'echo to-stderr >&2' || true
+assert_contains "rt:bare-is-per-call-not-sticky" "to-stderr" "$RT_OUT"
 
 # ─── A COLLEAGUE'S RUN, STANDING RIGHT HERE  (#74) ─────────────────────────────
 # `pgrep` and `pkill` are machine-wide and `sleep 30` is not ours: it is what EVERY run of this

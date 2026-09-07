@@ -317,6 +317,19 @@ RT_SPIN=''
 # The second mode, added for setup-git's lists of commands. See run_step below for what it is
 # for; the only differences from RT_SPIN are the indent and the ending.
 RT_ROW=''
+# The command's stderr is DISCARDED rather than merged into RT_OUT. Set by pmv, for the reads
+# whose ANSWER is used as a value -- and it is a fix rather than tidying (#171). podman writes
+# warnings to stderr and exits 0, so merged, a warning line becomes part of the value: one
+# unrecognised key in storage.conf does it to every call, and preflight's rootless check then
+# compares `level=warning ...\ntrue` against `true` and refuses the machine as "rootful", a
+# message that says it is not something to work around. `--log-level=error` does not suppress
+# it; the line comes from the storage-config loader, outside the log-level filter.
+#
+# DEFAULT OFF, AND THAT IS LOAD-BEARING. The readers that WANT stderr are the ones that report a
+# failure rather than using an answer -- podman_version_of, create_container's ENOSPC and
+# "already in use" matching, err.create-failed's OUT=, run_step's transcript -- and
+# 12-run-timeout.sh's rt:captures-stderr is the assertion that it stays that way.
+RT_BARE=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
     local tmp fifo pid cpid i rc frame lbl pad end line
@@ -340,7 +353,12 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # Only reachable with a name mktemp just proved unique, so anything under it is our
         # own litter from a run that was killed between the mkfifo and the unlink below.
         rm -f "$fifo"
-        ( "$@" >"$tmp" 2>&1 ) & pid=$!
+        # SPELLED TWICE RATHER THAN PARAMETERISED. `2>&"$efd"` is a bash extension and this file
+        # has to run on the 3.2 macOS ships, which 10-static.sh polices; and an `exec 7>` to
+        # redirect through would add an fd to the set 10-static.sh's trace-fd rule reasons about.
+        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>/dev/null ) & pid=$!
+        else                       ( "$@" >"$tmp" 2>&1 ) & pid=$!
+        fi
         if [ -n "$lbl" ]; then
             # Drawn once up front rather than only from inside the loop, so a command that
             # returns immediately still announces itself instead of flashing nothing.
@@ -381,8 +399,17 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # holding one command in place, which is why the poll branch's $! is podman, and this
         # one's is not. Killing only what $! names at the ceiling would leave the hung
         # `podman info` this whole function exists to time out running as an orphan.
-        ( "$@" >"$tmp" 2>&1 9>&- & c=$!; printf '%s\n' "$c" >&9
-          wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+        # The two arms differ in ONE redirection and are otherwise identical. Deliberately not
+        # factored into a helper called from both: that would put a shell between $c and the
+        # command, and the ceiling's `kill -9 "$cpid"` below would then kill the wrapper and
+        # leave the hung podman running -- which is the disowning the comment above warns about.
+        if [ -n "$RT_BARE" ]; then
+          ( "$@" >"$tmp" 2>/dev/null 9>&- & c=$!; printf '%s\n' "$c" >&9
+            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+        else
+          ( "$@" >"$tmp" 2>&1 9>&- & c=$!; printf '%s\n' "$c" >&9
+            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+        fi
         exec 9<"$fifo"
         # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
         # signal arriving during the wait leaves nothing behind in TMPDIR.
