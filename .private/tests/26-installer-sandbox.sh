@@ -116,8 +116,16 @@ assert_says "ceiling-live:the-marker-did-not-replace-the-transcript" \
 assert_eq "ceiling-live:the-ceiling-is-a-named-result" \
           "FAIL ceiling-live:the-run-stayed-inside-its-ceiling" \
           "$(awk -F'\t' '{ print $1, $3 }' "$ceil_tsv" | do_tr '\n' ' ' | sed 's/ *$//')"
+# THE ESCAPES COME OFF FIRST (#179), and this is the one assertion in the tree that still needed it.
+# This suite is TIER: install, so run_suite hands it fd 3 on the real terminal (run-tests.sh:379-382)
+# -- `[ -t 1 ]` is true, lib/assert.sh:28 turns colour on, and fail() writes `FAIL` + A_OFF + two
+# spaces, so the two spaces this needle wants are on the far side of an escape. That made this line
+# GREEN piped and RED on a terminal, which is the worst way round: every redirected run agrees it is
+# fine and only somebody watching sees it break. strip_ansi is what nest_build already does to the
+# transcript (lib/sandbox.sh:1088); the stderr half of the very same call never got it.
 assert_contains "ceiling-live:and-it-is-said-on-the-screen-too" \
-                "FAIL  ceiling-live:the-run-stayed-inside-its-ceiling" "$(cat "$SB_TMP/ceiling.err")"
+                "FAIL  ceiling-live:the-run-stayed-inside-its-ceiling" \
+                "$(strip_ansi < "$SB_TMP/ceiling.err")"
 # NOTHING LEFT RUNNING. conmon stops the container at its own ceiling, so the 255 arm has nothing
 # to remove and deliberately removes nothing -- but "stopped" is the claim, and an audit of the
 # ceiling that did not check it would miss the leak the 137 arm exists for.
