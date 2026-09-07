@@ -777,9 +777,16 @@ if [ -z "$sb_free_gb" ] || [ "$sb_free_gb" -lt 15 ]; then
     skip "nested:the-course-build" "only ${sb_free_gb:-?}GB free; this build wants ~8GB and a margin"
 else
 
-imgs_before="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
-vols_before="$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
-subuid_before="$(cksum < /etc/subuid)"
+# WHAT THIS MACHINE HELD BEFORE, narrowed to the rows this run could be responsible for --
+# see assert_host_state in lib/sandbox.sh, and #199 for the cksum of the whole computer that
+# used to be here.
+imgs_before="$SB_TMP/host-imgs.before.nest"; host_images  > "$imgs_before"
+vols_before="$SB_TMP/host-vols.before.nest"; host_volumes > "$vols_before"
+# GUARDED, because /etc/subuid does not exist on macOS: `cksum < /etc/subuid` fails there, both
+# sides come back the empty string, and the assertion reported PASS on every Mac run without
+# ever having read anything. A skip says so instead (#155's rule, one assertion over).
+subuid_before=''
+[ -r /etc/subuid ] && subuid_before="$(cksum < /etc/subuid)"
 
 # ─── THE CASE THAT DID NOT EXIST: no podman, install succeeds, image builds ─────
 # nest_build takes the prereq list, so this is the whole point of one machine with everything
@@ -825,11 +832,12 @@ assert_eq "nest:the-course-container-has-no-capabilities-at-all" "[]" "$ncaps"
 # the outer container has SYS_ADMIN and this one must never see it.
 assert_says_not "nest:SYS_ADMIN-did-not-reach-the-course-container" "SYS_ADMIN" "$ncaps"
 
-assert_eq "nest:host-image-list-untouched"  "$imgs_before" \
-          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
-assert_eq "nest:host-volume-list-untouched" "$vols_before" \
-          "$(podman volume ls --format '{{.Name}}' | LC_ALL=C sort | cksum)"
-assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
+assert_host_state nest machine "$imgs_before" "$vols_before"
+if [ -n "$subuid_before" ]; then
+    assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
+else
+    skip "nest:host-subuid-untouched" "no /etc/subuid on this host"
+fi
 sandbox_reap
 # ...and the space really came back, which is the half a precondition cannot promise.
 record "nest:free-disk-gb-after" "$(do_df_avail /)"
@@ -897,7 +905,7 @@ if [ -z "$osp_free" ] || [ "$osp_free" -lt 15 ]; then
     skip "oldest-supported:the-build"  "only ${osp_free:-?}GB free; this build wants ~8GB and a margin"
     skip "floor-skew:the-skewed-build" "only ${osp_free:-?}GB free; this case needs a build of its own"
 else
-osp_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+osp_imgs="$SB_TMP/host-imgs.before.oldest-supported"; host_images > "$osp_imgs"
 # THE REAL INSTALLER, unpatched, which is what makes this a regression check rather than a
 # measurement -- and is itself an assertion that 4.9.3 is admitted by the shipped floors.
 out="$(nest_build oldest-supported "" "" podman-old-nested)"
@@ -916,8 +924,7 @@ osp_store="$(sb_section "$out" INNER-STORE-BYTES)"
 if [ -n "$osp_store" ] && [ "$osp_store" -gt 1000000000 ]; then pass "oldest-supported:the-inner-store-really-grew"
 else fail "oldest-supported:the-inner-store-really-grew" "inner graph root is ${osp_store:-empty} bytes"; fi
 record "oldest-supported:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | do_tr '\n' '|')"
-assert_eq "oldest-supported:host-image-list-untouched" "$osp_imgs" \
-          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+assert_host_state oldest-supported podman-old-nested "$osp_imgs"
 sandbox_reap
 record "oldest-supported:free-disk-gb-after" "$(do_df_avail /)"
 
@@ -1071,7 +1078,7 @@ record "fedora-e2e:free-disk-gb-before" "${fe2e_free:-unknown}"
 if [ -z "$fe2e_free" ] || [ "$fe2e_free" -lt 15 ]; then
     skip "fedora-e2e:the-build" "only ${fe2e_free:-?}GB free; this build wants ~8GB and a margin"
 else
-fe2e_imgs="$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+fe2e_imgs="$SB_TMP/host-imgs.before.fedora-e2e"; host_images > "$fe2e_imgs"
 out="$(nest_build fedora-e2e podman "2" fedora-nested)"
 assert_says "fedora-e2e:the-machine-was-really-arranged" "prereqs=podman" "$(sb_section "$out" ARRANGED)"
 # THE CONSENT SHAPE, on the family where it differs: one item, and no "(and uidmap)".
@@ -1107,8 +1114,7 @@ fe2e_store="$(sb_section "$out" INNER-STORE-BYTES)"
 if [ -n "$fe2e_store" ] && [ "$fe2e_store" -gt 1000000000 ]; then pass "fedora-e2e:the-inner-store-really-grew"
 else fail "fedora-e2e:the-inner-store-really-grew" "inner graph root is ${fe2e_store:-empty} bytes"; fi
 record "fedora-e2e:build-log-tail" "$(sb_section "$out" BUILD-LOG | tail -6 | do_tr '\n' '|')"
-assert_eq "fedora-e2e:host-image-list-untouched" "$fe2e_imgs" \
-          "$(podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | LC_ALL=C sort | cksum)"
+assert_host_state fedora-e2e fedora-nested "$fe2e_imgs"
 sandbox_reap
 record "fedora-e2e:free-disk-gb-after" "$(do_df_avail /)"
 fi

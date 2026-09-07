@@ -1347,3 +1347,69 @@ assert_system_diff() {                # assert_system_diff CASE DIR [LABEL]
     missing="$(grep -vxF -f <(printf '%s\n' "$got") "$want" || true)"
     assert_eq "sb-$lbl:changed-everything-it-claimed" "" "$missing"
 }
+
+# ─── the host state a nested build must not touch (#199) ───────────────────────
+# Captured before the nested build and compared after it. The filters live in lib/assert.sh
+# (host_image_rows, host_volume_rows) and are unit-tested against synthetic rows in
+# 14-test-harness.sh; what is here is the podman half and the comparison.
+#
+# NO run_checker WRAPPER, because a pipeline's status is awk's rather than podman's. A podman
+# that failed to answer leaves an empty snapshot, and the instrument check below is what turns
+# that into a failure instead of a silent pass.
+host_images() {                       # -> this run's view of the host image list, sorted
+    podman images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{index .Labels "cs193v.test"}}' \
+        | host_image_rows | LC_ALL=C sort
+}
+host_volumes() {                      # -> this run's view of the host volume list, sorted
+    podman volume ls --format '{{.Name}}' | host_volume_rows | LC_ALL=C sort
+}
+
+# FILES, not strings: comm needs both sides on disk, and it is what makes the failure name the
+# image instead of two cksums. Reading `expected: 342996219 3208 / actual: 3210639529 3255` off
+# #199 meant reconstructing the byte count from candidate lines one at a time.
+assert_host_state() {                 # assert_host_state CASE BASE BEFORE_IMGS [BEFORE_VOLS]
+    local case="$1" base="$2" bimgs="$3" bvols="${4:-}" now added removed
+    now="$SB_TMP/host-imgs.now.$case"
+    host_images > "$now"
+
+    # THE INSTRUMENT BEFORE ANYTHING IS READ THROUGH IT, the same discipline
+    # live:a-neighbours-throwaway-is-not-counted keeps for #74. Every rule in the filter DROPS
+    # rows, so one that dropped them all would leave both snapshots empty and everything below
+    # passing forever. The case's own fixture image is built before the snapshot, carries our
+    # label, and so has to be in it -- which also catches a `--format` an older podman refused.
+    # pass/fail/return rather than assert_contains, matching assert_system_diff above: with the
+    # instrument broken the comparisons below are meaningless, and letting them run reports a
+    # nineteen-row delta whose cause is the line above it.
+    local refs want
+    want="$(fixture_tag "$base")"
+    refs="$(cut -d' ' -f1 "$bimgs" | LC_ALL=C sort -u | do_tr '\n' ' ')"
+    case "$refs" in
+        *"$want"*) pass "$case:the-host-image-list-was-really-read" ;;
+        *) fail "$case:the-host-image-list-was-really-read" \
+                "$want is not in the snapshot, so podman or the filter answered nothing:
+$refs"
+           return ;;
+    esac
+
+    # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about how to order
+    # punctuation and comm then mis-pairs silently, which 00-release-gates.sh measured.
+    added="$(LC_ALL=C comm -13 "$bimgs" "$now" | do_tr '\n' ' ' | sed 's/ *$//')"
+    assert_eq "$case:host-image-list-untouched" "" "$added"
+    # A VANISHED UNTAGGED ROW PROVES NOTHING: an untagged image is exactly what
+    # `podman image prune` removes, and anyone on this machine can run it. Tagged rows keep both
+    # directions, so an image of ours the fixture deleted still fails -- and an OVERWRITE fails
+    # either way, because the ID is part of the row and a new one arrives as an addition.
+    removed="$(LC_ALL=C comm -23 "$bimgs" "$now" | grep -v ':<none> ' \
+               | do_tr '\n' ' ' | sed 's/ *$//')"
+    assert_eq "$case:host-image-list-lost-nothing" "" "$removed"
+
+    [ -n "$bvols" ] || return 0
+    now="$SB_TMP/host-vols.now.$case"
+    host_volumes > "$now"
+    added="$(LC_ALL=C comm -13 "$bvols" "$now" | do_tr '\n' ' ' | sed 's/ *$//')"
+    assert_eq "$case:host-volume-list-untouched" "" "$added"
+    # Both directions with no carve-out here: nothing in this project prunes volumes, and a
+    # colleague's `--rebuild --logout` deleting seven of THEIRS is already filtered out by name.
+    removed="$(LC_ALL=C comm -23 "$bvols" "$now" | do_tr '\n' ' ' | sed 's/ *$//')"
+    assert_eq "$case:host-volume-list-lost-nothing" "" "$removed"
+}

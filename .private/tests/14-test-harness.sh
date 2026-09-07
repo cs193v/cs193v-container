@@ -1342,3 +1342,180 @@ assert_contains "ebg:help-documents-every-tier" "windows"                 "$out"
 # AND IT STILL STOPS. Reading to a sentinel trades one failure for another: delete the sentinel
 # and `--help` prints the whole script. `set -u` is the first line of code below the header.
 assert_not_contains "ebg:help-stops-at-the-sentinel" "set -u" "$out"
+
+# ─── telling this run's podman images from a colleague's (#199) ────────────────
+# THE INSTRUMENT THE INSTALL TIER'S THREE HOST CANARIES ARE READ THROUGH. They used to cksum the
+# whole of `podman images`, which is machine-global: a colleague's `./cs193v --rebuild` landing
+# inside the 575 s fedora-e2e window added a line and reddened a case that behaved perfectly
+# (#199 measured exactly that on main). CS193V_INSTANCE suffixes the container, the image tag and
+# the volumes; it cannot suffix the LIST.
+#
+# So the filters below place each row, and a broken filter looks exactly like a clean run: it
+# drops everything, before and after come back equally empty, and the canary passes forever. That
+# is why this is checked here rather than trusted -- the same reasoning as
+# live:a-neighbours-throwaway-is-not-counted (#74), and the same two arms. Dropping a neighbour's
+# row is only half the property; the other half is that a leak-shaped row is still KEPT, which is
+# the detection the canaries exist for.
+#
+# IN THE UNIT TIER, AGAINST SYNTHETIC ROWS, so it needs no podman, no second checkout and no
+# second developer -- #199's failure was a race between two people and this turns it into a
+# fixture. The rows are the real shapes, taken from a 66-row listing on a machine with nine
+# instances on it.
+#
+# THE INSTANCE IS FORCED, NOT INHERITED, for the reason 16-args-parse.sh:328 gives about the
+# rewrite it tests: with CS193V_INSTANCE unset -- a TA's machine -- an assertion written against
+# whatever the environment happens to hold would hold while saying nothing at all.
+IMGS_IN='localhost/cs193v:local 02e6aaaa
+localhost/cs193v:local-dev3 e6ba6666
+localhost/cs193v:local-other ffff1111
+localhost/cs193v:local-htiek 1111aaaa
+localhost/cs193v:local-htiek-dev3 2222bbbb
+localhost/cs193v-fixture-machine:local-dev3 77b77777 cs193v-dev3
+localhost/cs193v-fixture-fedora:local-other cccc2222 cs193v-other
+localhost/cs193v-fixture-machine:local-newperson bbbb3333 cs193v-newperson
+localhost/cs193v-fixture-fedora:local-dev3-nested 77779999
+localhost/cs193v-installer-scratch:latest 11118888
+registry.fedoraproject.org/fedora:<none> 76a1aaaa
+docker.io/library/node:22 abcdbbbb
+<none>:<none> dddd4444
+<none>:<none> eeee5555 cs193v-other'
+
+hi()  { printf '%s\n' "$IMGS_IN" | host_image_rows "$1" | LC_ALL=C sort; }
+# -qxF: a row is a whole line, and the refs are full of regex metacharacters.
+kept() { printf '%s\n' "$1" | grep -qxF "$2" && printf 'kept' || printf 'dropped'; }
+
+img3="$(hi dev3)"
+
+# THE WHOLE SET AT ONCE, which is the "and nothing else" half: a rule that started keeping a
+# tenth row would pass every targeted assertion below and fail here.
+assert_eq "imgfilt:keeps-exactly-the-rows-that-could-be-ours" \
+"docker.io/library/node:22 abcdbbbb
+localhost/cs193v-fixture-fedora:local-dev3-nested 77779999
+localhost/cs193v-fixture-machine:local-dev3 77b77777 cs193v-dev3
+localhost/cs193v-installer-scratch:latest 11118888
+localhost/cs193v:local 02e6aaaa
+localhost/cs193v:local-dev3 e6ba6666
+registry.fedoraproject.org/fedora:<none> 76a1aaaa" "$img3"
+
+# ─── the rows that are not this run's business ─────────────────────────────────
+assert_eq "imgfilt:a-neighbours-dev-image-is-dropped" "dropped" \
+          "$(kept "$img3" 'localhost/cs193v:local-other ffff1111')"
+# BY LABEL, not by tag. fixture_build stamps cs193v.test=$NAME on every fixture image
+# (lib/sandbox.sh:465), so this needs no guess about how a colleague spells their instance.
+assert_eq "imgfilt:a-neighbours-fixture-image-is-dropped-by-label" "dropped" \
+          "$(kept "$img3" 'localhost/cs193v-fixture-fedora:local-other cccc2222 cs193v-other')"
+assert_eq "imgfilt:a-brand-new-colleagues-first-build-is-dropped" "dropped" \
+          "$(kept "$img3" 'localhost/cs193v-fixture-machine:local-newperson bbbb3333 cs193v-newperson')"
+# A layer with no repository AND no tag is the byproduct of any concurrent build and names
+# nothing that could be attributed to anybody.
+assert_eq "imgfilt:a-dangling-layer-is-dropped" "dropped" \
+          "$(kept "$img3" '<none>:<none> dddd4444')"
+
+# ─── and the rows a leak would arrive as, which have to survive ────────────────
+# THE ONE THAT MATTERS MOST. The nested build tags localhost/cs193v:local, bare and unsuffixed
+# (lib/sandbox.sh:669) -- the shared dev image. An escape overwrites it, so the row has to be
+# kept AND has to carry its ID, or the overwrite is invisible.
+assert_eq "imgfilt:the-shared-dev-image-IS-kept" "kept" \
+          "$(kept "$img3" 'localhost/cs193v:local 02e6aaaa')"
+assert_eq "imgfilt:our-own-dev-image-IS-kept" "kept" \
+          "$(kept "$img3" 'localhost/cs193v:local-dev3 e6ba6666')"
+assert_eq "imgfilt:an-unexpected-local-tag-IS-kept" "kept" \
+          "$(kept "$img3" 'localhost/cs193v-installer-scratch:latest 11118888')"
+# UNLABELLED, and fixture-SHAPED: without the label rule this reads as an instance called
+# "dev3-nested" and is thrown away. It is the hole a tag-only filter cannot close.
+assert_eq "imgfilt:a-stray-fixture-tag-of-ours-IS-kept" "kept" \
+          "$(kept "$img3" 'localhost/cs193v-fixture-fedora:local-dev3-nested 77779999')"
+# A digest-pinned FROM records no tag, so THIS is how a base image pulled onto the host would
+# show up. Dropping every untagged row would take it with the dangling layers.
+assert_eq "imgfilt:a-pinned-base-pull-IS-kept" "kept" \
+          "$(kept "$img3" 'registry.fedoraproject.org/fedora:<none> 76a1aaaa')"
+assert_eq "imgfilt:a-new-registry-image-IS-kept" "kept" \
+          "$(kept "$img3" 'docker.io/library/node:22 abcdbbbb')"
+
+# ─── an instance is a whole tag, not a prefix ──────────────────────────────────
+# local-htiek is a prefix of local-htiek-dev3 and both are real instances on the machine this
+# was measured on. A prefix test adopts a colleague's image as our own in one direction and
+# discards our own in the other, and either way the canary stops meaning what it says.
+imgh="$(hi htiek)"
+assert_eq "imgfilt:our-own-exact-instance-IS-kept" "kept" \
+          "$(kept "$imgh" 'localhost/cs193v:local-htiek 1111aaaa')"
+assert_eq "imgfilt:a-longer-instance-is-not-a-prefix-match" "dropped" \
+          "$(kept "$imgh" 'localhost/cs193v:local-htiek-dev3 2222bbbb')"
+
+# ─── the same question for volumes, which cannot be labelled ───────────────────
+# The launcher creates them implicitly with `-v name:path`, so there is no flag of ours to hang a
+# label on -- 80-launcher-live.sh:959 records the same constraint. The seven names are known, so
+# a name is placed by the instance sitting between the family prefix and one of them.
+VOLS_IN='cs193v-claude
+cs193v-claude-json
+cs193v-git
+cs193v-dev3-claude
+cs193v-dev3-claude-json
+cs193v-dev3-playwright
+cs193v-other-claude
+cs193v-other-claude-json
+cs193v-newperson-git
+cs193v-htiek-claude
+cs193v-htiek-dev3-claude
+cs193v-weird
+some-unrelated-project-cache'
+
+hv() { printf '%s\n' "$VOLS_IN" | host_volume_rows "$1" | LC_ALL=C sort; }
+vol3="$(hv dev3)"
+
+assert_eq "volfilt:keeps-exactly-the-volumes-that-could-be-ours" \
+"cs193v-claude
+cs193v-claude-json
+cs193v-dev3-claude
+cs193v-dev3-claude-json
+cs193v-dev3-playwright
+cs193v-git
+cs193v-weird
+some-unrelated-project-cache" "$vol3"
+
+assert_eq "volfilt:a-neighbours-volume-is-dropped"      "dropped" "$(kept "$vol3" 'cs193v-other-claude')"
+assert_eq "volfilt:a-neighbours-two-word-volume-is-dropped" "dropped" "$(kept "$vol3" 'cs193v-other-claude-json')"
+assert_eq "volfilt:a-brand-new-colleagues-volume-is-dropped" "dropped" "$(kept "$vol3" 'cs193v-newperson-git')"
+# THE BARE FAMILY IS KEPT, and that is the leak target rather than an oversight: the launcher
+# inside the fixture is running with no instance set, so an escape creates cs193v-claude.
+assert_eq "volfilt:the-shared-bare-family-IS-kept"      "kept" "$(kept "$vol3" 'cs193v-claude')"
+assert_eq "volfilt:a-bare-two-word-volume-IS-kept"      "kept" "$(kept "$vol3" 'cs193v-claude-json')"
+assert_eq "volfilt:our-own-volume-IS-kept"              "kept" "$(kept "$vol3" 'cs193v-dev3-claude')"
+# In the family but not one of the seven, so there is no instance to read out of it and nothing
+# to attribute it to a colleague. A leak is exactly what that would be.
+assert_eq "volfilt:an-unexpected-family-volume-IS-kept" "kept" "$(kept "$vol3" 'cs193v-weird')"
+assert_eq "volfilt:a-volume-outside-the-family-IS-kept" "kept" "$(kept "$vol3" 'some-unrelated-project-cache')"
+
+volh="$(hv htiek)"
+assert_eq "volfilt:our-own-exact-instance-IS-kept"        "kept"    "$(kept "$volh" 'cs193v-htiek-claude')"
+assert_eq "volfilt:a-longer-instance-is-not-a-prefix-match" "dropped" "$(kept "$volh" 'cs193v-htiek-dev3-claude')"
+
+# ─── and with no instance set at all, which is what a TA's machine runs ────────
+# The suffix is empty for everyone who has not exported CS193V_INSTANCE, and then OUR image is
+# the bare localhost/cs193v:local that every suffixed row is a colleague's. Worth its own arm
+# because it inverts the rule the arms above exercise: the row kept there by having our suffix
+# is kept here by having NO suffix, and a filter that special-cased the empty string wrongly
+# would pass everything above and drop this developer's only image.
+img0="$(hi '')"
+assert_eq "imgfilt:with-no-instance-keeps-exactly-the-bare-rows" \
+"docker.io/library/node:22 abcdbbbb
+localhost/cs193v-fixture-fedora:local-dev3-nested 77779999
+localhost/cs193v-installer-scratch:latest 11118888
+localhost/cs193v:local 02e6aaaa
+registry.fedoraproject.org/fedora:<none> 76a1aaaa" "$img0"
+assert_eq "imgfilt:with-no-instance-the-bare-dev-image-IS-ours" "kept" \
+          "$(kept "$img0" 'localhost/cs193v:local 02e6aaaa')"
+assert_eq "imgfilt:with-no-instance-every-suffixed-image-is-a-colleagues" "dropped" \
+          "$(kept "$img0" 'localhost/cs193v:local-dev3 e6ba6666')"
+
+vol0="$(hv '')"
+assert_eq "volfilt:with-no-instance-keeps-exactly-the-bare-names" \
+"cs193v-claude
+cs193v-claude-json
+cs193v-git
+cs193v-weird
+some-unrelated-project-cache" "$vol0"
+assert_eq "volfilt:with-no-instance-the-bare-family-IS-ours" "kept" \
+          "$(kept "$vol0" 'cs193v-claude')"
+assert_eq "volfilt:with-no-instance-a-suffixed-volume-is-a-colleagues" "dropped" \
+          "$(kept "$vol0" 'cs193v-dev3-claude')"

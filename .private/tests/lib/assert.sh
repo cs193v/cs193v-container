@@ -431,6 +431,74 @@ for r in rows:
 '
 }
 
+# ─── machine-global podman state, narrowed to this run (#199) ──────────────────
+# `podman images` and `podman volume ls` answer for the whole COMPUTER, and several people
+# develop this container on one machine (CLAUDE.md). CS193V_INSTANCE suffixes the container
+# name, the dev image tag and the seven volumes; it cannot suffix the list. So the install
+# tier's host canaries used to cksum a 66-row listing spread across nine instances, and a
+# colleague's `./cs193v --rebuild` landing inside the 575 s fedora-e2e window reddened a case
+# that behaved perfectly (#199). Same bug as #74, one resource over: an assertion's verdict
+# may not depend on another checkout's activity.
+#
+# HERE RATHER THAN IN lib/sandbox.sh, although only the install tier reads them: they are pure
+# text filters, and this is where the other pure checkers live (box_problems, render_pty). It
+# is also what lets 14-test-harness.sh test them against synthetic rows in the unit tier, with
+# no podman and no second developer -- which is the whole point, since a filter that quietly
+# dropped everything would leave the canaries passing forever.
+#
+# THE INSTANCE IS AN ARGUMENT, defaulting to the environment. The suites call it bare; the
+# self-test forces it, because with CS193V_INSTANCE unset -- a TA's machine -- a test written
+# against whatever the environment holds would hold while saying nothing (16-args-parse.sh:328).
+
+# Rows of `{{.Repository}}:{{.Tag}} {{.ID}} {{index .Labels "cs193v.test"}}` on stdin.
+host_image_rows() {                   # host_image_rows [INSTANCE] -> the rows that could be ours
+    local inst="${1-${CS193V_INSTANCE:-}}"
+    awk -v inst="$inst" -v name="cs193v${inst:+-$inst}" '
+        { ref = $1; owner = $3
+          tag = ref; sub(/^.*:/, "", tag)
+
+          # NO REPOSITORY AND NO TAG: a dangling layer, which every concurrent build and every
+          # `podman image prune` on this machine adds or removes. There is nothing in it to
+          # attribute to anybody. A row that is merely UNTAGGED is kept, deliberately -- a
+          # digest-pinned FROM records no tag, so repo:<none> is how a base image pulled onto
+          # the HOST would arrive, and that is a leak worth catching.
+          if (ref == "<none>:<none>") next
+
+          # A FIXTURE IMAGE LABELLED FOR ANOTHER INSTANCE, whatever it is tagged. fixture_build
+          # stamps cs193v.test=$NAME on every one (lib/sandbox.sh), so this needs no guess about
+          # how a colleague spells their instance -- and, the half a tag test cannot do, a stray
+          # tag of OURS that merely looks like a colleague carries no such label and stays.
+          if (owner != "" && owner != name) next
+
+          # Dev images carry cs193v.buildhash and no test label, so they are placed by tag.
+          # EXACT EQUALITY, NOT A PREFIX: local-htiek and local-htiek-dev3 are both real
+          # instances, and a prefix test adopts one as the other.
+          if (ref ~ /^localhost\/cs193v:local-/ && tag != "local-" inst) next
+
+          # $0, not "$1 $2": the label field is part of the row, so a fixture image that changed
+          # hands would show up, and reprinting two fields would silently normalise it away.
+          # The trailing space podman leaves where the label is empty is stripped, so the rows a
+          # failure names are the rows 14-test-harness.sh tests against.
+          sub(/[[:space:]]+$/, ""); print }'
+}
+
+# Volume names on stdin. Volumes cannot be labelled -- the launcher creates them implicitly with
+# `-v name:path`, so there is no flag of ours to hang one on, the same constraint
+# 80-launcher-live.sh records for its stray check. The seven names are known, so the instance is
+# whatever sits between the family prefix and one of them; a family name with no instance in it
+# (the bare cs193v-claude the launcher makes with no instance set) is the LEAK target and stays.
+host_volume_rows() {                  # host_volume_rows [INSTANCE] -> the names that could be ours
+    local inst="${1-${CS193V_INSTANCE:-}}"
+    awk -v inst="$inst" -v v7='claude|claude-json|codex|gh|git|playwright|vercel' '
+        { mid = $0
+          if (match(mid, "^cs193v-.+-(" v7 ")$")) {
+              sub(/^cs193v-/, "", mid)
+              sub("-(" v7 ")$", "", mid)
+              if (mid != inst) next
+          }
+          print }'
+}
+
 # ─── requirements ──────────────────────────────────────────────────────────────
 # By project decision these HARD-FAIL rather than skip: a green run must mean the whole
 # thing was exercised, not that half of it quietly opted out. The message names the exact
