@@ -121,6 +121,11 @@ while IFS="$(printf '\t')" read -r status name detail; do
     # below would report each one as a failure — and they must not be counted as checks either,
     # or "checks-replayed" would say something different depending on CS193V_TIMING.
     if [ "$status" = TIME ]; then record "$name" "${detail:-}"; continue; fi
+    # REC rows are the same shape for the same two reasons, and they are what hx_record emits:
+    # a value the harness measured that is genuinely platform- and load-dependent, so record()
+    # rather than an assertion. #145's stale-label count is the first one — a green run that
+    # recorded zero of them proved nothing, and this is what makes that visible.
+    if [ "$status" = REC ]; then record "$name" "${detail:-}"; continue; fi
     n=$((n + 1))
     case "$status" in
         PASS) pass "$name" ;;

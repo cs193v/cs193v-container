@@ -87,6 +87,17 @@ hx_fail() {
 hx_skip() { HX_SKIP=$((HX_SKIP + 1)); hx_emit SKIP "$1" "${2:-}"; printf '  %sSKIP%s %s\n' "$C_Y" "$C_0" "$1"; }
 hx_note() { printf '       %s\n' "$1"; }
 
+# A VALUE, NOT A VERDICT -- the project's own record() one level out, reachable from in here.
+#
+# hx_note is not this. A note goes to the suite's stdout, which 65-tmux.sh writes to a temp file
+# and throws away, so a number worth reading later is not readable at all: #145 was diagnosed by
+# instrumenting a copy of this harness, because the one note that would have explained it had
+# already been deleted. A REC row survives into the project's results the way TIME rows do.
+#
+# NOT COUNTED AS A CHECK, and 65-tmux.sh's replay is where that is enforced -- same arm as TIME,
+# for the same reason: "checks-replayed" must not depend on how many values a run recorded.
+hx_record() { hx_emit REC "$1" "${2:-}"; printf '       %s = %s\n' "$1" "${2:-}"; }
+
 # Section timing, silent unless HX_TIMING is set. This is the only visibility the project has
 # into where its slowest suite spends its time -- the suite's own stdout is written to a temp
 # file by 65-tmux.sh and thrown away, so a number printed here would never be read. The rows

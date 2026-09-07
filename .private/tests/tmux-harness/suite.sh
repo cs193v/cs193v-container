@@ -1049,13 +1049,86 @@ narrow="$(hx_cap "$S" | sed -n 2p)"
 hx_note "at 40 columns: [$narrow]"
 hx_expect_contains "at 40 columns the tab count still shows" "$narrow" "TAB"
 hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TAB"
-if printf '%s' "$narrow" | grep -q "bash"; then
-  hx_pass "at 40 columns tab names are still visible"
-else
-  hx_fail "at 40 columns tab names are still visible" "the chrome is crowding out the tabs"
-fi
+
+# ─── THE LABELS, ASKED OF tmux RATHER THAN GREPPED FOR (#145) ──────────────────
+#
+# THIS WAS `grep -q "bash"`, WHICH MADE IT A COIN FLIP AND NOT A WIDTH MEASUREMENT. Three
+# things compose. Only two ` #I #W ` blocks fit in 40 columns beside the 9-column count badge
+# and the 11-column chip. `list=focus` in status-format[1] scrolls the list to keep the current
+# window visible, so the survivors are always the NEWEST tabs -- the ten ALT+T presses above,
+# never window 1. And a fresh tab's label has not necessarily caught up: tmux re-samples a
+# window name only when its pane has produced output since the last sample, so a name sampled
+# while /etc/cs193v/tabname.bash's _cs193v_precmd runs `tmux set-window-option` reads `tmux`,
+# and a pane that then sits idle at a prompt keeps it for a few seconds.
+#
+# Measured over nine runs of this suite: 0, 2, 2, 3, 3, 4, 4, 5 and 9 of the ten new tabs
+# stale, `automatic-rename` still ON in every case, and one outright FAIL -- which reported
+# "the chrome is crowding out the tabs" about chrome that was behaving perfectly.
+#
+# SO ASK tmux WHAT THE LABEL IS. The bar renders window-status-format, which is `#I #W`, and
+# probe_name reads that same #{window_name}. The two agree whether the name is stale or fresh,
+# so the race cannot reach the verdict, and what is left being measured is width and layout --
+# which is what this section is for. It is also STRONGER than the literal for the regression
+# this section exists to catch: tmux guarantees the focused window is in the visible slice, so
+# there is always exactly one label the chrome must not squeeze out. Confirmed still able to
+# fail -- with the prototype's 90-column ungated hint restored through CS193V_TMUX_CONF, every
+# label is pushed off the bar and this goes red.
+#
+# NOT AN hx_until THAT WAITS FOR THE NAMES TO SETTLE, which is the obvious wrong fix. That
+# would make the check depend on the transient rather than removing the dependency, and the
+# transient is SECONDS: measured stale at capture and clear 15 s later with no input at all.
+# The largest hx_settle in this file is 3 s, and this is the slowest suite in the project.
+#
+# THE FOCUSED TAB IS A FRESH SHELL HERE, so its label is a few columns wide. A focused tab
+# carrying a long pinned label (tabname.bash caps at 24 characters) could not fit in 40 columns
+# whatever the chrome did, and this check would then be a statement about the label instead of
+# about the layout. Nothing arranges that today; it is written down because it would look like
+# a chrome regression.
+want="$(probe_win) $(probe_name)"
+case "$narrow" in
+  *"$want"*) hx_pass "at 40 columns the focused tab's label is still on the bar" ;;
+  *) hx_fail "at 40 columns the focused tab's label is still on the bar" \
+             "expected to find: $want   bar was: [$narrow]" ;;
+esac
+
+# RECORDED, NOT ASSERTED, because zero is not guaranteed and non-zero is not a defect -- it is
+# load-dependent, which is what record() is for. It is also the number that tells a reader
+# whether a green run here proved anything: a run with no stale labels never exercised the case
+# #145 was about. A TAB separator so a label containing a colon cannot split the wrong field.
+hx_sep="$(printf '\t')"
+hx_record "stale tab labels at capture" \
+  "$(it list-windows -t cs193v -F "#{window_name}${hx_sep}#{pane_current_command}" 2>/dev/null \
+     | awk -F"$hx_sep" '$1 != $2' | wc -l | tr -d ' ') of $(probe_wincount)"
+
+# ─── ...AND THE VERDICT MUST NOT CARE WHAT THE TAB IS CALLED (#145) ────────────
+#
+# THE ASSERTION THAT STOPS THE LITERAL COMING BACK, and the reason the fix for #145 is not just
+# a rewritten expression. A deliberate label that is no process's name reproduces on demand
+# exactly what the race produced by accident, so if this check ever again needs the tab to be
+# running a particular program, this is what goes red. Short on purpose: ` 18 HX-PROBE ` is 13
+# of the 40 columns, which leaves the margin the real labels have.
+it rename-window -t cs193v HX-PROBE
+narrow="$(hx_cap "$S" | sed -n 2p)"
+want="$(probe_win) HX-PROBE"
+case "$narrow" in
+  *"$want"*) hx_pass "at 40 columns the check does not depend on what the tab is called" ;;
+  *) hx_fail "at 40 columns the check does not depend on what the tab is called" \
+             "expected to find: $want   bar was: [$narrow]" ;;
+esac
+
 hx_tmux resize-window -t "$S" -x "$HX_W" -y "$HX_H" 2>/dev/null || true
 hx_until 'it display-message -p -t cs193v "#{window_width}"' "$HX_W" 6
+# AND THE LABEL IS HANDED BACK, because rename-window switched automatic-rename OFF for this
+# window -- tabname.bash's header records that as the mechanism that pins a label for as long as
+# a command runs. Without this, R7 below inherits a tab pinned to HX-PROBE.
+#
+# AFTER THE RESIZE, NOT BEFORE, and that ordering is the measurement: re-sampling needs the pane
+# to produce output, and the resize back is a SIGWINCH that makes bash redraw its prompt. The
+# hx_until is what proves the revert happened rather than assuming it -- measured
+# HX-PROBE/ar=0 -> bash/ar=1 with it returning 0.
+it set-window-option -t cs193v automatic-rename on
+hx_until 'probe_name' bash 8 \
+  || hx_note "the HX-PROBE label did not revert; sections below see a pinned tab"
 
 # ============================================================================
 hx_section "R7  exit closes the tab; last exit ends the session"
