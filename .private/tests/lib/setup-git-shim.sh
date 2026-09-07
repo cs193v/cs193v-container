@@ -225,6 +225,22 @@ sg_has_not() { assert_not_contains "$1" "$2" "$(sg_plain "$3")"; }
 #
 # The two-column indent comes off too. setup-git draws its box indented to match the rest of the
 # screen; box_problems, shared with the launcher's unindented boxes, wants the border in column 1.
+# A SECRET NEEDS ITS OWN FLATTENER, and finding out why cost a round during the #155 audit.
+#
+# _flatten in lib/assert.sh joins wrapped lines with a SPACE, which is exactly right for prose --
+# it asserts on what the student reads rather than on where the line happened to break. It is
+# wrong for a credential. box() wraps at 69 columns and a fine-grained token is 93 characters, so
+# a leaked token lands across two rows and the joining space falls INSIDE it. Measured: with the
+# token deliberately interpolated into the staff box, assert_not_contains against the raw box AND
+# assert_says_not against the flattened one BOTH passed, while the token sat there on screen
+# split 33 + 26 characters across two rows.
+#
+# A token contains no whitespace, so deleting all of it is lossless for this one question and
+# cannot manufacture a false negative. Use this, not _flatten, whenever the needle is a secret.
+sg_unwrap() {                         # sg_unwrap TEXT -> box art and ALL whitespace removed
+    printf '%s' "$1" | do_tr -d '\n' | sed -e 's/[┃┏┓┗┛━]//g' -e 's/[[:space:]]//g'
+}
+
 sg_box() {                            # sg_box TEXT -> just the box, ready for box_problems
     printf '%s' "$1" | do_tr -d '\r' | LC_ALL=C sed -e "s/${SG_ESC}\\[[0-9;?]*[A-Za-z]//g" -e 's/^  //' \
         | sed -n '/[┏]/,/[┗]/p'   # NO LC_ALL=C: [┏] and [┗] are multibyte brackets

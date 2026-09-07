@@ -196,6 +196,24 @@ nvol="$(podman inspect "$NAME" --format '{{json .Mounts}}' \
         | python3 -c 'import json,sys; print(sum(1 for m in json.load(sys.stdin) if m["Type"]=="volume"))')"
 assert_eq "mount:exactly-seven-volumes" "7" "$nvol"
 
+# EXACTLY THESE THREE BINDS AND NO OTHERS. This is the closed-set half of the mount check, and
+# until the #155 audit it was the missing half: the volume COUNT above is closed, but the binds
+# were only ever checked positively -- workspace present, key mounts read-only -- so a FOURTH
+# bind naming any host path satisfied every assertion in this block.
+#
+# Measured, which is why it is here rather than argued for: with `-v $HOME:/home/student/hostfs`
+# appended to container.args, the student's whole home directory came up mounted READ-WRITE
+# inside the container and all 116 assertions in this file were byte-identical to the control.
+# That is the plainest possible breach of CONTAINER-DESIGN.md's "only projects/ is mounted", so
+# the destinations are asserted as a SET rather than as a list of things that must be present.
+#
+# SORTED, so the assertion does not depend on the order build_run_args happens to append them in.
+binds="$(podman inspect "$NAME" --format '{{json .Mounts}}' | python3 -c 'import json, sys
+print(" ".join(sorted(m["Destination"] for m in json.load(sys.stdin) if m["Type"] == "bind")))')"
+assert_eq "mount:binds-are-exactly-the-three-expected" \
+          "/etc/ssh/cs193v_host_ed25519_key /home/student/.ssh/authorized_keys /home/student/projects" \
+          "$binds"
+
 assert_match "label:confighash-is-set" '.' "$(I '{{index .Config.Labels "cs193v.confighash"}}')"
 assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.dir"}}')"
 # NOTHING NAMES A PORT IN THE CONTAINER'S ENVIRONMENT, which is the create-time half of the
@@ -879,14 +897,27 @@ record "ports:host-listen-line" "$listen"
 assert_not_match "ports:host-does-not-listen-on-0.0.0.0" \
                  "0\.0\.0\.0:$PW|\*:$PW|\[::\]:$PW" "$listen"
 
-LANIP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# do_host_ips, NOT `hostname -I`. The -I flag is GNU-only and BSD hostname does not have it, so
+# on macOS this was always empty -- the assertion never ran, and the else arm RECORDED "no
+# non-loopback address on this host", which is false on any laptop with wifi. A reader of the
+# results file was told something about the machine rather than that the check could not run.
+# lib/portable.sh has carried do_host_ips (with an `ipconfig getifaddr en0` fallback) and the
+# comment explaining exactly this since it was written; these lines predate its use.
+#
+# It matters more than a portability nit: this and tunnel:refused-forward-creates-no-listener in
+# 80-launcher-live.sh were the only two automated checks that would notice a student's dev server
+# exposed to the network, and on macOS BOTH were inert -- while ERRORS.md D4a already records the
+# macOS leg as never measured. Found by the #155 audit.
+LANIP="$(do_host_ips 2>/dev/null | do_awk '{print $1}')"
 if [ -n "$LANIP" ] && [ "$LANIP" != "127.0.0.1" ]; then
     c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LANIP:$PW/")"
     if [ "$c" = 000 ]; then pass "ports:not-reachable-from-the-LAN"
     else fail "ports:not-reachable-from-the-LAN" \
               "reachable on $LANIP (HTTP $c) — student dev servers are exposed to the network"; fi
 else
-    record "ports:not-reachable-from-the-LAN" "no non-loopback address on this host"
+    # SKIP, not record. "The check did not run" and "the machine has no LAN address" are
+    # different statements, and only the first one is knowable here.
+    skip "ports:not-reachable-from-the-LAN" "no non-loopback address could be determined"
 fi
 probe_stop
 

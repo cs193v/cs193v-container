@@ -821,8 +821,22 @@ nothing to ask for a forward on."
 elif [ -n "$CTL" ]; then
     out_r="$(ssh -S "$CTL" -O forward -R "127.0.0.1:$RFWD_PORT:127.0.0.1:$SRV_PORT" student@cs193v-tunnel 2>&1 || true)"
     assert_contains "tunnel:remote-forward-is-refused" "forwarding request failed" "$out_r"
+    # ASKED OF THE CONTAINER, NOT THE HOST, and with do_listeners rather than a bare `ss`.
+    # Both halves of that were wrong until the #155 audit, and either one alone made this
+    # assertion incapable of failing:
+    #
+    #   * `-R` makes the CONTAINER's sshd listen. The ssh client binds nothing locally, so a
+    #     host-side listener count reads 0 whether the request was refused or granted. Measured:
+    #     with AllowTcpForwarding mutated to `yes`, the request succeeded silently, the container
+    #     was listening on the port, the host was not -- and this assertion passed.
+    #   * `ss` is Linux-only. On macOS `ss -ltn 2>/dev/null` prints nothing, so the pipeline
+    #     yields "0" and the assertion compares "0" to "0" for any port at all. 60-container.sh
+    #     already carries a comment about a fallback that "could never match"; the same lesson
+    #     had not reached these two lines. `ss` inside the container is fine -- the image
+    #     installs iproute2 -- and that is the copy this now uses.
     assert_eq "tunnel:refused-forward-creates-no-listener" "0" \
-              "$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE ":$RFWD_PORT\$" || true)"
+              "$(podman exec "$NAME" ss -ltn 2>/dev/null \
+                 | do_awk '{print $4}' | grep -cE ":$RFWD_PORT\$" || true)"
     # ...and it must not be usable as a proxy to anywhere but the container's own loopback.
     ssh -S "$CTL" -O forward -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
     assert_eq "tunnel:cannot-proxy-off-box" "000" \
@@ -833,8 +847,12 @@ elif [ -n "$CTL" ]; then
     # tunnel:refused-forward-creates-no-listener above, and the same courtesy as
     # cleanup:the-forwards-are-released: what this suite borrows, it hands back.
     ssh -S "$CTL" -O cancel -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
+    # do_listeners, not a bare `ss`: this one IS about a host bind -- `-O forward -L` binds
+    # locally the moment it is asked -- but `ss` does not exist on macOS, so the check was
+    # answering "0" there without looking. See the note on the -R check above.
     assert_eq "tunnel:the-borrowed-port-is-handed-back" "0" \
-              "$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -cE ":$OFFBOX_PORT\$" || true)"
+              "$(do_listeners | do_awk -F'\t' '{print $1}' \
+                 | grep -cE "[.:]$OFFBOX_PORT\$" || true)"
 else
     # All three, not just the first. The results file must have the same lines whichever branch
     # ran: a result that vanishes reads as a suite someone shortened, and this is the arm nobody

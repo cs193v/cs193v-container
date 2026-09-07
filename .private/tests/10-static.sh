@@ -80,9 +80,21 @@ assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
 # test(1)'s "is a symlink", which the launcher uses to resolve $SELF, and `tmux -L`, which names a
 # socket. And the address is QUOTED at the call site, so the allowed pattern has to admit the
 # quote -- without that this matched the two correct lines and called them violations.
-hits="$(sed 's/#.*//' cs193v | grep -nE '(^|[^[:alnum:]_])-L ' \
+# THE SPACE AFTER -L IS OPTIONAL, and leaving it mandatory was a hole rather than a nit.
+# `ssh -L0.0.0.0:3000:127.0.0.1:3000` is the attached-argument form and OpenSSH accepts it --
+# verified, not assumed: it reaches the control-socket error, where a malformed spec instead
+# gives "Bad local forwarding specification". The old pattern required `-L ` with a space, so
+# the attached form did not match at all and the whole static tier stayed green on it. Found by
+# mutation during the #155 audit: the spaced literal and the spaced variable were both caught,
+# the attached one was not.
+#
+# AND cs193v-ui.sh IS SCANNED TOO, because the launcher SOURCES it -- so a forward added there
+# reaches ssh by exactly the same route as one added here. Same omission, and the same fix, as
+# the bash-3.2 scan two blocks down already had to make for this file.
+hits="$(sed 's/#.*//' cs193v $PRIVATE/files/cs193v-ui.sh \
+        | grep -nE '(^|[^[:alnum:]_])-L[[:space:]]*[^[:space:]]' \
         | grep -vE '\[ *!? *-L ' | grep -vE 'tmux[^|]*-L ' \
-        | grep -vE '[-]L "?127[.]0[.]0[.]1:' || true)"
+        | grep -vE '[-]L[[:space:]]*"?127[.]0[.]0[.]1:' || true)"
 assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 
 # ─── bash 3.2 compatibility ────────────────────────────────────────────────────
@@ -1194,6 +1206,40 @@ assert_not_contains "supervisor:no-double-bracket-in-the-parse-path" "[[" "$sup_
 assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
           "$(printf '%s\n' "$sup_parse" | grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*\[' || true)"
 
+# AND THE GATE ITSELF, which the block above does not reach. dynports_line and dynports_port
+# live in cs193v-ui.sh, and they are the functions that actually touch the container's bytes;
+# the list above covers only the launcher-side CONSUMERS of their output.
+#
+# A blanket ban on arithmetic is impossible here -- converting an already-digit-checked string
+# with `$(( 10#$1 ))` is the whole design -- so what is pinned is the SET of arithmetic
+# expressions, which is three. Adding `$(( p ))` anywhere in the gate changes the set.
+#
+# THIS IS THE STATIC HALF of 17-portparse-fuzz.sh :: fuzz:nothing-is-executed, and the #155
+# audit needed both halves. The dynamic canary could not see an injection at all, because its
+# payloads were twelve times the parser's own length cap; and the ban list above named `[[` and
+# `${a[x]}` but not `$(( ))` -- the first construct its own comment lists. So a mutation that
+# evaluated the raw port arithmetically passed the entire static+unit tier, 912 assertions, with
+# only an unrelated counter noticing.
+gate="$(for f in dynports_reset dynports_fatal dynports_port dynports_line; do
+            fn_body "$f" "$PRIVATE/files/cs193v-ui.sh"
+        done | sed 's/^[[:space:]]*#.*//')"
+if [ -z "$gate" ]; then
+    fail "gate:the-parse-gate-was-found" "fn_body returned nothing for the dynports_* functions,
+so every assertion below would compare empty strings and pass."
+else
+    pass "gate:the-parse-gate-was-found"
+fi
+assert_eq "gate:arithmetic-is-only-the-three-safe-forms" \
+          '$(( 10#$1 )) $(( 10#$cnt )) $(( DYNPORTS_SEEN + 1 ))' \
+          "$(printf '%s\n' "$gate" | grep -oE '[$]\(\([^)]*\)\)' \
+             | LC_ALL=C sort -u | do_tr '\n' ' ' | sed 's/ $//')"
+assert_not_contains "gate:no-double-bracket" "[[" "$gate"
+assert_not_contains "gate:no-eval" "eval " "$gate"
+assert_eq "gate:no-array-subscripts" "" \
+          "$(printf '%s\n' "$gate" | grep -nE '[$]\{[A-Za-z_][A-Za-z_0-9]*\[' || true)"
+assert_eq "gate:no-substring-expansion" "" \
+          "$(printf '%s\n' "$gate" | grep -nE '[$]\{[A-Za-z_][A-Za-z_0-9]*:[0-9$]' || true)"
+
 sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
 assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"
@@ -1502,6 +1548,21 @@ done
 assert_not_match "invariant:no-Z-relabel" ',Z' "$args_live"
 
 assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=1000" "$args_live"
+
+# NO HOST PATH MAY BE MOUNTED FROM THIS FILE. The three binds the design has are added by the
+# LAUNCHER (build_run_args), where they are visible next to the code that computes them; a bind
+# added here would be the one place a host path could appear without anybody reading cs193v.
+#
+# The seven legitimate lines are `-v NAME:/container/path`, where NAME is a podman VOLUME name --
+# so the test is whether the left-hand side looks like a path. Anything starting with /, ~ or .
+# is one. `--mount type=bind` is the other spelling and is rejected outright.
+#
+# 60-container.sh :: mount:binds-are-exactly-the-three-expected asserts the same property from
+# the other end, against a live container. This one fails at edit time, before anything is built.
+hostmounts="$(printf '%s\n' "$args_live" \
+              | grep -nE '(^|[[:space:]])(-v|--volume)[[:space:]]+[/~.]' || true)"
+assert_eq "invariant:no-host-path-is-mounted" "" "$hostmounts"
+assert_not_contains "invariant:no-bind-mount-syntax" "type=bind" "$args_live"
 
 # Every volume container.args CREATES must be one `--rebuild --logout` REMOVES. Two lists in two
 # files -- the `-v cs193v-NAME:` lines here, and the `for v in ...` inside remove_volumes --
@@ -2001,6 +2062,21 @@ assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
                                 $PRIVATE/files/cs193v-gesture \
                                 $PRIVATE/files/man
+# cs193v-portwatch, which was in NO list at all until the #155 audit -- 455 lines of bash that
+# classifies /proc/net/tcp, emits the frames the host parses, and parses the host's replies.
+# It is the container half of the only trust boundary in the design, and its only build-time
+# gate is `bash -n` plus a behavioural probe (Containerfile:786). Issue #158 records the same
+# name-a-file mechanism leaving 17 test files unlinted; this was the product-side instance of it,
+# which #158 does not cover.
+#
+# --exclude=SC2034 for exactly one variable: pw_state_parse validates `floor=` and stores it in
+# PWS_FLOOR, which nothing reads. Every other PWS_* is consumed by pw_show. The key has to be
+# ACCEPTED -- the parser is a closed vocabulary and an unknown key is fatal, so the host's
+# `floor=` would otherwise make the whole state file unreadable -- but storing the value is
+# consistency rather than use. Excluded rather than fixed here: this change is about making the
+# lint cover the file at all, and dropping or using a variable is a change to the product.
+assert_ok  "shellcheck:portwatch" shellcheck --severity=warning --exclude=SC2034 \
+                                $PRIVATE/files/cs193v-portwatch
 # -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
 # inside the image. shellcheck reports the unresolvable source at info level, which
 # --severity=warning drops, so this stays quiet without hiding a real finding.
