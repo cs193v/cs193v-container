@@ -381,7 +381,8 @@ echo.
 if not "%RC%"=="0" goto stage2failed
 
 echo   ------------------------------------------------------------------
-echo   Done. From now on you work inside the %DISTRO% environment:
+echo   Installation complete! To access the development environment, run
+echo   the following commands from the terminal:
 echo.
 echo       wsl -d %DISTRO%
 echo       cd ~/cs193v
@@ -402,8 +403,8 @@ exit /b 0
 echo   This needs to run as Administrator, because installing WSL is a
 echo   Windows feature change.
 echo.
-echo   Close this window, then RIGHT-CLICK install-cs193v-windows.cmd and
-echo   choose "Run as administrator".
+echo   Close this window, then right-click the install-cs193v-windows.cmd
+echo   file and and choose "Run as administrator".
 echo.
 pause
 exit /b 1
@@ -504,9 +505,7 @@ echo   Could not download the setup script from:
 echo       %INSTALLER_URL%
 echo.
 echo   This is usually a network problem, and it is safe to run this file
-echo   again. Some campus and company networks block
-echo   raw.githubusercontent.com outright; if yours does, tell course staff
-echo   rather than spending time on it.
+echo   again. If this fails a second time, contact the course staff.
 echo.
 pause
 exit /b 1
