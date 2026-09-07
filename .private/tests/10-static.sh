@@ -144,6 +144,59 @@ hits="$(sed 's/#.*//' $b32files \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
+# ─── the harness's scratch stays where the driver can see it ───────────────────
+# EVERY SCRATCH PATH tmux-harness/ CREATES MUST BE UNDER $(hx_tmproot), because that root is
+# what 65-tmux.sh cleans at both ends and what tmux:harness-left-no-scratch-in-the-container
+# asserts on. A bare `mktemp` lands in /tmp/tmp.XXXXXX instead, which no hx-* glob ever sees --
+# so it leaks into the container's writable layer and the runtime assertion stays green with it.
+#
+# MEASURED, and it is why this is a rule rather than a comment (#190): hx_teardown removed
+# nothing at all, and three of the four leaks were exactly this shape -- suite.sh's GATED,
+# FAKESUDO and LBTMP, 15 MB of fixture beside them, 230 MB accumulated across sixteen runs.
+# The directory is deliberately not shellchecked (see shellcheck:tmux-driver) so review is
+# the only other thing that would catch a fourth, and review did not catch the first three.
+#
+# NOT A BAN ON mktemp -- a line that names the root is fine, helper or not. What is forbidden
+# is scratch the driver cannot find.
+hits="$(grep -Hn 'mktemp' $PRIVATE/tests/tmux-harness/suite.sh $PRIVATE/tests/tmux-harness/selftest.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' | grep -v 'hx_tmproot' || true)"
+assert_eq  "tmux:harness-scratch-stays-under-the-root" "" "$hits"
+
+# ─── every inner tmux server is reachable from the harness's trap ──────────────
+# suite.sh's cleanup() walks $INNER_SOCKS. A server started without being appended to that list
+# is one nothing kills on a crash -- which is the state #190 found the file in: cleanup() killed
+# the FIRST inner server and three more were started twelve hundred lines further down, shut
+# down inline on the happy path only. A crash in one of those sections therefore left a live
+# fixture process at the moment the scratch root was being removed.
+#
+# THE RUNTIME ASSERTIONS CANNOT CATCH THIS and that is why it is a rule. A fifth server added
+# without registering it only leaks on a CRASH, so tmux:harness-left-no-scratch-in-the-container
+# and tmux:no-fixture-process-outlived-the-harness are both green on every ordinary run with the
+# hole wide open. The failure it produces is a survivor in someone else's suite, arriving as a
+# flake -- the shape #34 describes at length.
+#
+# SET EQUALITY, NOT A SUBSTRING TEST, and deliberately: `case $registered in *"$SOCK"*)` is
+# satisfied by "$SOCK2", so a check written that way would pass with the FIRST socket
+# unregistered. Comparing both sides as sorted sets also catches the other direction, a name
+# left on the list after its server was removed.
+sock_vars="$(grep -hoE '^[A-Za-z_][A-Za-z0-9_]*="cs193v[^"]*\$\$"' \
+             "$PRIVATE/tests/tmux-harness/suite.sh" \
+             | sed 's/=.*//' | sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
+# Extraction asserted first, by the same rule as the trace-fd cross-check above: an empty set
+# would make the equality below true forever and mean nothing.
+record "tmux:inner-sockets-found" "$sock_vars"
+if [ -n "$sock_vars" ]; then pass "tmux:inner-sockets-were-found"
+else fail "tmux:inner-sockets-were-found" \
+          'no cs193v...$$ socket assignment in suite.sh -- did they move, or change shape?'; fi
+registered="$(grep -h 'INNER_SOCKS=' "$PRIVATE/tests/tmux-harness/suite.sh" \
+              | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | sed 's/^\$//' \
+              | grep -v '^INNER_SOCKS$' | sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
+assert_eq  "tmux:every-inner-socket-is-registered-for-cleanup" "$sock_vars" "$registered"
+# ...and the list has to still be the thing cleanup() walks, or registering into it proves
+# nothing. Cheap, and it is the half a rename would otherwise slip past.
+assert_contains "tmux:cleanup-walks-the-socket-list" 'in $INNER_SOCKS' \
+                "$(cat "$PRIVATE/tests/tmux-harness/suite.sh")"
+
 # ─── every throwaway container the suite starts is labelled as ours ────────────
 # The live tier tells its own containers from a colleague's by a label, because a `podman run --rm`
 # with no --name gets a name podman chose and there is nothing else to go on (#74, and VT_LABEL in

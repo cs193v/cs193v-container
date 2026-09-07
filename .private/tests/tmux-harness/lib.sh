@@ -43,6 +43,32 @@ HX_SOCK="${HX_SOCK:-hx-$$}"
 HX_W="${HX_W:-100}"
 HX_H="${HX_H:-30}"
 
+# FORK: ONE SCRATCH ROOT FOR EVERYTHING THIS HARNESS WRITES, so one rm owns the lot and one
+# glob finds whatever a killed run left. There used to be no root and no rm at all: the fixture
+# directory alone put 15 MB of copied python3 into the container's /tmp per run -- on the GREEN
+# path, not only on a crash -- and /tmp in here is the writable layer
+# (.config/container.args:205-208), so nothing short of `--rebuild` ever took it back. 230 MB
+# had accumulated across sixteen runs of this suite when #190 measured it.
+#
+# THE DRIVER PICKS THE PATH, not this file. 65-tmux.sh passes HX_TMPROOT because it is the thing
+# that has to clean up after a harness it cannot signal (ERRORS.md D1a) and the only place where
+# every inner server is provably dead. It also leaves ONE spelling of the path rather than one
+# here and a second literal in the driver's own /proc filter -- those two used to agree only
+# because the image happens to set no TMPDIR.
+#
+# DERIVED, NOT STORED, and the fallback for a hand-run in the container keeps that property.
+# Suites call FAKEBIN="$(hx_fake_binary claude)" inside a command substitution, so a variable
+# this file assigned would be lost to the caller; $$ and the environment are both identical in
+# the parent and in any subshell, and a plain assignment is not.
+hx_tmproot() { printf '%s' "${HX_TMPROOT:-${TMPDIR:-/tmp}/hx-run.$$}"; }
+
+# A scratch file or directory under the root. Everything here goes through one of these two or
+# names the root itself, and tmux:harness-scratch-stays-under-the-root in 10-static.sh is what
+# keeps that true: a bare `mktemp` lands in /tmp/tmp.XXXXXX, where the driver's sweep cannot see
+# it and the leak is invisible again. Three of #190's four leaks were exactly that.
+hx_scratch()     { local d; d="$(hx_tmproot)"; mkdir -p "$d" && mktemp    "$d/s.XXXXXX"; }
+hx_scratch_dir() { local d; d="$(hx_tmproot)"; mkdir -p "$d" && mktemp -d "$d/d.XXXXXX"; }
+
 HX_PASS=0
 HX_FAIL=0
 HX_SKIP=0
@@ -156,7 +182,32 @@ hx_start() { # session command...
 }
 
 hx_stop() { hx_tmux kill-session -t "$1" 2>/dev/null; return 0; }
-hx_teardown() { hx_tmux kill-server 2>/dev/null; return 0; }
+
+# FORK: kills the instrument, then removes the scratch root -- and the ORDER IS THE ASSERTION.
+#
+# While a pane is alive its fixture process is executing a binary inside the root, and both of
+# the things that name it come apart the moment that binary is unlinked: `readlink -f
+# /proc/PID/exe` returns nothing at all, so the process cannot be told from a real Claude Code;
+# and the space is not reclaimed either, because the inode survives until the last reference
+# closes. An rm before the kill would therefore leave a live fixture nobody can attribute AND a
+# leak nobody can see. Killing first is what keeps both questions answerable.
+#
+# 65-tmux.sh asks the second one out loud rather than trusting this comment --
+# tmux:no-fixture-process-outlived-the-harness -- because a comment cannot fail.
+#
+# BEST-EFFORT, NOT THE OWNER. kill-server returns as soon as the server is told, so a pane can
+# still be on its way out; and none of this file runs at all when the run is killed outright.
+# The driver cleans at both ends for that reason. What this covers is the ordinary exit, which
+# is where #190 actually leaked, plus a harness run by hand in the container.
+#
+# GUARDED ON THE BASENAME, because HX_TMPROOT arrives from the environment and an `rm -rf` over
+# an unchecked variable is not something to leave to a caller's good manners.
+hx_teardown() {
+  hx_tmux kill-server 2>/dev/null
+  local d; d="$(hx_tmproot)"
+  case "${d##*/}" in hx-run.*) rm -rf "$d" 2>/dev/null ;; esac
+  return 0
+}
 
 hx_alive() { hx_tmux has-session -t "$1" 2>/dev/null; }
 
@@ -386,13 +437,11 @@ hx_find() { # session needle
 # So the fixture must be a real ELF binary whose filename is the name we want to see.
 # A copy of the python3 interpreter fits: it is a plain executable, and `-c` makes it sit
 # still for as long as we like.
-# The fixture directory is DERIVED, not stored in a variable. Test suites idiomatically call
-# this as FAKEBIN="$(hx_fake_binary claude)", which runs in a command-substitution subshell --
-# so any variable the function set would be lost to the caller, and hx_fake_run would then fail
-# (or worse, fall back to a bare name). Deriving the path from $$ makes it identical in the
-# parent and in any subshell.
-hx_fakebin_dir() { printf '%s/hx-fakebin-%s' "${TMPDIR:-/tmp}" "$$"; }
-HX_FAKEBIN="$(hx_fakebin_dir)"
+# FORK: a subdirectory of the run's scratch root rather than a directory of its own, so the one
+# rm in hx_teardown reaches it. See hx_tmproot for why the path is derived on every call instead
+# of being stored -- the idiom FAKEBIN="$(hx_fake_binary claude)" is what makes that necessary.
+# The variable this used to also export was read by nothing and contradicted that reasoning.
+hx_fakebin_dir() { printf '%s/fakebin' "$(hx_tmproot)"; }
 
 hx_fake_binary() { # name -> prints the dir to prepend to PATH
   local d; d="$(hx_fakebin_dir)"
@@ -427,7 +476,12 @@ hx_assert_no_real_claude() { # desc
   local p exe bad=0 d
   d="$(hx_fakebin_dir)"
   for p in $(pgrep -x claude 2>/dev/null); do
-    exe="$(readlink -f "/proc/$p/exe" 2>/dev/null)"
+    # `readlink -f` FIRST, plain `readlink` as the fallback, and the fallback is the whole
+    # point: -f resolves through the link and so returns NOTHING once the fixture binary has
+    # been unlinked, which maps "our fixture" and "unreadable" onto the same empty string.
+    # Plain readlink still answers "<root>/fakebin/claude (deleted)", which the case below
+    # matches. See hx_teardown.
+    exe="$(readlink -f "/proc/$p/exe" 2>/dev/null || readlink "/proc/$p/exe" 2>/dev/null)"
     case "$exe" in
       "$d"/*) ;;                                # our fixture, fine
       */claude/versions/*|*/.local/share/claude/*) bad=1 ;;
@@ -435,7 +489,7 @@ hx_assert_no_real_claude() { # desc
   done
   if [ "$bad" -eq 1 ]; then
     hx_note "NOTE: a real Claude Code process is running. If this test started it, the fixture"
-    hx_note "      is resolving 'claude' from PATH instead of \$HX_FAKEBIN -- see hx_fake_run."
+    hx_note "      is resolving 'claude' from PATH instead of the fixture dir -- see hx_fake_run."
   fi
   return 0
 }

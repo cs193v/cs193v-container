@@ -28,6 +28,25 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 S=tmuxtest
 SOCK="cs193v-t$$"
+# FORK: EVERY INNER SOCKET THIS FILE CREATES, appended at each creation site so cleanup() can
+# reach all of them. It used to kill only the first, while three more servers were started
+# further down and shut down inline on the happy path -- so a crash in the hook or link-box
+# section left a live fixture behind at the moment the scratch root was being removed.
+#
+# ALWAYS BOUND, AND THAT IS THE LOAD-BEARING PART. This file is `set -u` and the trap is
+# installed a few lines below, twelve hundred lines before SOCK3 exists. A bare "$SOCK3" in the
+# trap ABORTS THE TRAP WHERE IT STANDS -- measured:
+#
+#   $ bash -c 'set -u; c(){ echo A; echo "$NOPE"; echo B; }; trap c EXIT; echo main'
+#   main / A / bash: NOPE: unbound variable        # "B" never printed
+#
+# so hx_teardown would not run and every crash before the gate section would lose both the
+# outer kill-server and the rm. A list appended to is the form that cannot do that.
+#
+# A LIST RATHER THAN A GLOB over /tmp/tmux-*/cs193v*$$: with $$ = 23 that also matches another
+# harness's cs193vgate123, and it would duplicate 65-tmux.sh's socket sweep with a second
+# pattern to keep in step.
+INNER_SOCKS="$SOCK"
 # FORK: the installed path, not a file in the source tree.
 CONF="${CS193V_TMUX_CONF:-/etc/cs193v/tmux.conf}"
 # Read from the image's own definition rather than repeated here, so rewording the title
@@ -37,8 +56,20 @@ CONF="${CS193V_TMUX_CONF:-/etc/cs193v/tmux.conf}"
 TITLE="${CS193V_TITLE:?/etc/cs193v/strings.sh did not define CS193V_TITLE}"
 it() { tmux -L "$SOCK" "$@"; }     # "inner tmux": the instance under test
 
-cleanup() { it kill-server 2>/dev/null; hx_teardown; }
+# FORK: every inner server, then the instrument and the scratch root (hx_teardown, which
+# removes the root LAST for the reason given there). Idempotent, which the signal arms below
+# require: bash falls through to the EXIT trap after the handler returns, so this runs twice on
+# a signal, and both kill-server and rm -rf are happy to be told twice.
+cleanup() {
+  for _s in $INNER_SOCKS; do [ -n "$_s" ] && tmux -L "$_s" kill-server 2>/dev/null; done
+  hx_teardown
+}
 trap cleanup EXIT
+# HUP/INT/TERM as well, the rule 10-static.sh holds the launcher to and run-tests.sh follows:
+# without an explicit exit the script would carry on running sections after a Ctrl+C. These are
+# cheap consistency and NOT what covers a killed run -- per ERRORS.md D1a, killing the host-side
+# `podman exec` client does not signal this process at all, which is why 65-tmux.sh sweeps.
+trap 'cleanup; exit 130' HUP INT TERM
 
 # --- structure probes -------------------------------------------------------
 # Fingerprint of the session's shape plus whether any pane has entered a mode. If a keystroke
@@ -210,9 +241,9 @@ fi
 # The target is Ubuntu 26.04 (tmux 3.6). The %if gate is belt-and-braces so the file still loads
 # cleanly on 3.4, where copy-mode-position-format does not exist. Prove the gate works in BOTH
 # directions by loading a copy whose gate can never be true and checking it is still error-free.
-GATED="$(mktemp)"
+GATED="$(hx_scratch)"
 sed 's/#{>=:#{version},3.6}/#{>=:#{version},99.0}/' "$CONF" > "$GATED"
-SOCK2="cs193vgate$$"
+SOCK2="cs193vgate$$"; INNER_SOCKS="$INNER_SOCKS $SOCK2"
 tmux -L "$SOCK2" -f "$GATED" new-session -d -s gate 2>/dev/null
 gmsg="$(tmux -L "$SOCK2" show-messages 2>/dev/null)"
 gkeys="$(tmux -L "$SOCK2" list-keys 2>/dev/null | grep -c 'bind-key')"
@@ -1229,9 +1260,9 @@ else
 fi
 
 S2=tmuxhook
-SOCK2H="cs193vhook$$"
+SOCK2H="cs193vhook$$"; INNER_SOCKS="$INNER_SOCKS $SOCK2H"
 it2() { tmux -L "$SOCK2H" "$@"; }
-FAKESUDO="$(mktemp -d)"
+FAKESUDO="$(hx_scratch_dir)"
 # Real sudo would demand a password; this stand-in parses flags the way sudo does, then execs.
 cat > "$FAKESUDO/sudo" <<'FAKE'
 #!/bin/sh
@@ -1430,7 +1461,7 @@ hx_section "the link box  (issue #85)"
 # failed with an empty screen because it was capturing a session that had been shut down two
 # hundred lines earlier.
 S3=tmuxlinkbox
-SOCK3="cs193vlb$$"
+SOCK3="cs193vlb$$"; INNER_SOCKS="$INNER_SOCKS $SOCK3"
 it3() { tmux -L "$SOCK3" "$@"; }
 
 LB=/usr/local/bin/cs193v-linkbox
@@ -1440,7 +1471,7 @@ LB=/usr/local/bin/cs193v-linkbox
 # fits on ONE unwrapped line, so testing it a character short of the real thing is testing the
 # easier case. Nothing binds this -- the box only ever renders it.
 LBURL=http://localhost:38657/magic-token-link
-LBTMP="$(mktemp -d)"
+LBTMP="$(hx_scratch_dir)"
 
 # The box is raised the way open-url raises it, and `display-popup` BLOCKS its caller
 # (measured), so every invocation here is backgrounded. That is not a test artifact -- it is
@@ -1752,7 +1783,10 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   # untested: open-url has to shorten, size the popup, quote the command and detach. This is
   # the case issue #85 is actually about -- a tool consults $BROWSER and the student sees the
   # link without open-url having printed anything a caller could swallow.
-  OUOUT=/tmp/cs193v-openurl-out
+  # FORK: under the scratch root, not a fixed /tmp name. It is written by the PANE and was
+  # removed by a keystroke typed into the pane, so a wedged pane -- what most failures in this
+  # section look like -- leaked it; and being a fixed name, two runs would have fought over it.
+  OUOUT="$(hx_scratch)"
   hx_cmd "$S3" "rm -f $OUOUT; open-url 'https://example.com/verify?code=ABCD' > $OUOUT 2>&1"
   # FIVE SECONDS, AND THE TIGHTNESS IS THE ASSERTION. This budget used to be thirty, because
   # the box was raised only once shortlink had answered and that call waits to be told the
@@ -1810,7 +1844,10 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   fi
   # The server open-url started would otherwise hold a host port for fifteen minutes: the
   # tunnel forwards whatever it is listening on, and that forward outlives this section.
-  hx_cmd "$S3" "pkill -f '[s]hortlink' ; rm -f $OUOUT"
+  # FORK: the pkill stays and the `rm -f $OUOUT` that used to ride along with it is gone -- the
+  # scratch root owns the file now. 65-tmux.sh calls clean_vt_processes at both ends for the
+  # survivor a keystroke into a wedged pane could never reach.
+  hx_cmd "$S3" "pkill -f '[s]hortlink'"
   hx_until 'probe_name3' bash 8
 
   # --- open-url when there is no link to be had ---------------------------
@@ -1824,17 +1861,17 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
   # A STAND-IN SHORTLINK, first on PATH, because a real failure needs a broken tunnel and this
   # suite runs beside a working one. It degrades exactly as the real one does: the argument back
   # on stdout, exit 3, nothing on stderr.
-  mkdir -p /tmp/slfail
-  cat > /tmp/slfail/shortlink <<'SLFAIL'
+  SLFAIL="$(hx_scratch_dir)"
+  cat > "$SLFAIL/shortlink" <<'SLFAIL'
 #!/bin/sh
 for a in "$@"; do
     case "$a" in http*) printf '%s\n' "$a"; exit 3 ;; esac
 done
 exit 3
 SLFAIL
-  chmod +x /tmp/slfail/shortlink
-  OUFAIL=/tmp/cs193v-openurl-fail
-  hx_cmd "$S3" "rm -f $OUFAIL; PATH=/tmp/slfail:\$PATH open-url 'https://example.com/nope?code=ZZ' > $OUFAIL 2>&1"
+  chmod +x "$SLFAIL/shortlink"
+  OUFAIL="$(hx_scratch)"
+  hx_cmd "$S3" "rm -f $OUFAIL; PATH=$SLFAIL:\$PATH open-url 'https://example.com/nope?code=ZZ' > $OUFAIL 2>&1"
   if hx_wait "$S3" 'Unable to create a link' 10; then
     hx_pass "a failed shortening reaches the student as a box"
     hx_expect_absent "the error box still hides the long URL" \
@@ -1850,8 +1887,10 @@ SLFAIL
     hx_fail "a failed shortening reaches the student as a box" \
       "screen: $(hx_cap "$S3" | head -6)"
   fi
-  hx_cmd "$S3" "rm -rf /tmp/slfail $OUFAIL"
-  hx_until 'probe_name3' bash 8
+  # FORK: the `rm -rf /tmp/slfail $OUFAIL` typed in here is gone -- both live under the scratch
+  # root now -- and so is the `hx_until probe_name3 bash` that waited for it. With no command
+  # sent there is nothing to wait for, and a wait on an absence that was never a presence is
+  # exactly what the note on hx_gone in lib.sh says not to write.
 
   # --- and still no key may summon one ------------------------------------
   # The packaging section's danger list already forbids display-popup in any binding. open-url
@@ -1862,6 +1901,5 @@ else
 fi
 it3 kill-server 2>/dev/null
 hx_stop "$S3"
-rm -rf "$LBTMP"
 
 hx_summary "tmux prototype"
