@@ -317,22 +317,40 @@ RT_SPIN=''
 # The second mode, added for setup-git's lists of commands. See run_step below for what it is
 # for; the only differences from RT_SPIN are the indent and the ending.
 RT_ROW=''
-# The command's stderr is DISCARDED rather than merged into RT_OUT. Set by pmv, for the reads
-# whose ANSWER is used as a value -- and it is a fix rather than tidying (#171). podman writes
-# warnings to stderr and exits 0, so merged, a warning line becomes part of the value: one
-# unrecognised key in storage.conf does it to every call, and preflight's rootless check then
-# compares `level=warning ...\ntrue` against `true` and refuses the machine as "rootful", a
-# message that says it is not something to work around. `--log-level=error` does not suppress
-# it; the line comes from the storage-config loader, outside the log-level filter.
+# The command's stderr is KEPT SEPARATE from RT_OUT rather than merged into it. Set by pmv, for
+# the reads whose ANSWER is used as a value -- and it is a fix rather than tidying (#171).
+# podman writes warnings to stderr and exits 0, so merged, a warning line becomes part of the
+# value: preflight's rootless check compares `level=warning ...\ntrue` against `true` and
+# refuses the machine as "rootful", a message that says it is not something to work around.
+#
+# NO MISCONFIGURATION IS NEEDED, AND THAT IS THE POINT OF THE MODE. The reproduction is one
+# unrecognised key in storage.conf, which is where this was found -- but the population case is
+# the FIRST podman call after a boot, on a stock machine with nothing wrong with it: podman does
+# its post-boot store fix-ups then and says so on stderr. Measured in the field on WSL2 with
+# podman 5.7.0 and a fresh clone -- the distro booted at 09:16:47, /run/user/1000/libpod was
+# created at 09:18, and by 09:26 the same read answered a bare `true` again. So the reach is
+# every platform, and the evidence is GONE by the time anyone looks, which is why RT_ERR below
+# exists rather than a `2>/dev/null`. `--log-level=error` does not suppress the storage line
+# either; it comes from the storage-config loader, outside the log-level filter.
 #
 # DEFAULT OFF, AND THAT IS LOAD-BEARING. The readers that WANT stderr are the ones that report a
 # failure rather than using an answer -- podman_version_of, create_container's ENOSPC and
 # "already in use" matching, err.create-failed's OUT=, run_step's transcript -- and
 # 12-run-timeout.sh's rt:captures-stderr is the assertion that it stays that way.
 RT_BARE=''
+# What RT_BARE took out of the answer, for the caller that has to explain a refusal. The first
+# cut of RT_BARE sent stderr to /dev/null, which fixed the value and threw away the only record
+# of why it had needed fixing -- and on a trigger that erases itself (see above) that leaves the
+# student a dead end and staff nothing to read. err.create-failed's `OUT=` is the house
+# precedent for quoting podman into a refusal; this is the same idea for a read.
+#
+# ONLY IN BARE MODE, and empty otherwise: the merging default has stderr in RT_OUT already, and
+# a second copy would be a second thing to keep in step. Cleared on every call either way, so a
+# caller testing it cannot be handed the PREVIOUS call's stderr.
+RT_ERR=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
-    local tmp fifo pid cpid i rc frame lbl pad end line
+    local tmp fifo eout pid cpid i rc frame lbl pad end line
     # $$ IN THE NAME so that rt_cleanup can sweep what a signal interrupted. A remembered path
     # cannot: half these calls are made from inside a command substitution, and a variable
     # assigned in that subshell never reaches the parent's trap. See rt_cleanup.
@@ -349,6 +367,10 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     # TMPDIR. And mkfifo REFUSES a name that exists, so the worst a collision could do is send
     # the call down the poll branch.
     fifo="$tmp.fifo"
+    # A SIBLING OF $tmp, for the reason the fifo is one: mktemp created $tmp with O_EXCL, so
+    # nothing else on this machine holds the name these are derived from, and rt_cleanup's
+    # `cs193v-$$.*` glob sweeps them both without being told about either.
+    eout="$tmp.err"
     if [ -n "$lbl" ] || ! mkfifo "$fifo" 2>/dev/null; then
         # Only reachable with a name mktemp just proved unique, so anything under it is our
         # own litter from a run that was killed between the mkfifo and the unlink below.
@@ -356,7 +378,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # SPELLED TWICE RATHER THAN PARAMETERISED. `2>&"$efd"` is a bash extension and this file
         # has to run on the 3.2 macOS ships, which 10-static.sh polices; and an `exec 7>` to
         # redirect through would add an fd to the set 10-static.sh's trace-fd rule reasons about.
-        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>/dev/null ) & pid=$!
+        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" ) & pid=$!
         else                       ( "$@" >"$tmp" 2>&1 ) & pid=$!
         fi
         if [ -n "$lbl" ]; then
@@ -404,7 +426,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # command, and the ceiling's `kill -9 "$cpid"` below would then kill the wrapper and
         # leave the hung podman running -- which is the disowning the comment above warns about.
         if [ -n "$RT_BARE" ]; then
-          ( "$@" >"$tmp" 2>/dev/null 9>&- & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>"$eout" 9>&- & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
         else
           ( "$@" >"$tmp" 2>&1 9>&- & c=$!; printf '%s\n' "$c" >&9
@@ -455,7 +477,19 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         wait "$pid" 2>/dev/null
     fi
     RT_OUT="$(cat "$tmp")"
-    rm -f "$tmp"
+    # AFTER THE CEILING'S kill, not before: a command killed at $secs has usually said why on
+    # its way out, and that line is the most useful one there is. Cleared unconditionally so
+    # the bare mode's answer never carries over into a merging call, or the other way round.
+    #
+    # `[ -s ]` GUARDS THE FORK. The common case is a podman that says nothing, and a command
+    # substitution costs a process; `-s` is a builtin, so the quiet path pays a stat instead.
+    RT_ERR=''
+    [ -n "$RT_BARE" ] && [ -s "$eout" ] && RT_ERR="$(cat "$eout")"
+    # ONE rm FOR BOTH FILES, and that is measured rather than tidy: `rm` is an external command,
+    # so removing the stderr file separately cost bare mode a SECOND fork+exec on every read --
+    # 10.6-13.1 ms per call became 12.5-16.7 ms, on a path a launch takes about fourteen times.
+    # `-f` on a name that was never created (every non-bare call) is silent and free.
+    rm -f "$tmp" "$eout"
     return "$rc"
 }
 

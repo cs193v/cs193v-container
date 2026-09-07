@@ -116,6 +116,28 @@ On Ubuntu or WSL, try:
 
 and send the output to course staff along with `cs193v doctor`.
 
+[[err.rootless-unreadable]]
+Podman answered the "are you rootless?" question with something
+the course container could not read.
+
+That is probably not a misconfiguration. The likeliest cause is
+podman still finishing its first start-up after your computer
+booted — waiting a minute and running cs193v again often works.
+
+Podman answered:
+
+{{OUT}}
+
+If it keeps happening, send all of the text above to course staff
+along with the output of:
+
+    cs193v doctor
+
+[[detail.podman-said]]
+Podman also said:
+
+{{TEXT}}
+
 [[err.rootful]]
 Podman is running in "rootful" mode, and the course container
 needs "rootless" mode.
