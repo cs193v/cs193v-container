@@ -138,13 +138,121 @@ do_sha256() {
 # assertions behind these helpers then pass on an empty transcript). The literal 120 also
 # discarded ${SG_TIMEOUT:-120} and the 600 at 90-setup-git-github.sh:178.
 #
-# BACKGROUNDED CALLERS DO NOT USE THIS. Five sites read $! to kill the session and must have the
-# pty owner's pid, so they invoke "$DO_PY" "$PT_LIB/ptyrun.py" directly with no timeout layer --
-# see §2 of the plan and 60-container.sh:250.
+# BACKGROUNDED CALLERS DO NOT USE THIS. Six sites read $! to kill the session and must have the
+# pty owner's pid, and `timeout` in front would insert a process level of its own. Three of them
+# also need the pid of the command INSIDE the pty; they all use pty_start below. See
+# 60-container.sh's close_client for what the pid being wrong costs.
 do_script() {                         # do_script SECS CMD
     [ -n "$DO_PY" ] || _pt_fatal python3 'no python3 on PATH; lib/ptyrun.py needs it'
     [ -n "$DO_TIMEOUT" ] || _pt_fatal timeout 'no GNU timeout(1) (brew install coreutils)'
     "$DO_TIMEOUT" "$1" "$DO_PY" "$PT_LIB/ptyrun.py" "$2"
+}
+
+# ─── pty_start / pty_inner_pid: a backgrounded pty, and the pid of what is IN it ──────────────
+#
+# THE SIX BACKGROUNDED SITES USED TO HAND-ROLL THIS, and three of them then inferred the
+# command's pid with `pgrep -P "$!" | head -1`. That inference is only correct when the `/bin/sh`
+# ptyrun execs optimises itself away, which is not a property any shell specifies -- see the
+# matrix in lib/ptyrun.py's header. #151 is what it costs when it is wrong: 70-sighup.sh killed
+# the pty session leader instead of the launcher, so the kernel HUPed the launcher, its trap ran,
+# and the assertion inverted; 60-container.sh's close_client killed the wrong pid and the three
+# non-event assertions after it passed anyway.
+#
+# So the command announces its own pid through lib/pty-announce and nothing here reads the
+# process table. See that file for why `$$` and `exec` are safe where the optimisation is not.
+#
+# KEYS, NOT A PIPE, and that is forced rather than stylistic. `printf ... | pty_start ...` would
+# run this function in a SUBSHELL, so $! would never reach the caller -- the same trap
+# 60-container.sh's close_client comment describes for `f &`. The keystrokes go to a file and
+# ptyrun reads that; a regular file hits EOF exactly as the pipe did, and ptyrun's documented
+# response to EOF on its stdin is to stop watching it without closing the master.
+#
+# CALLERS REDIRECT THE FUNCTION, e.g. `pty_start 'x\n' cmd >"$LOG" 2>&1`. A redirection on a
+# function call does not create a subshell, so $! still propagates.
+#
+# A FRESH PIDFILE EVERY TIME, removed before the background starts. 70-sighup.sh launches three
+# times and 60-container.sh twice; measured with one reused path, the second launch reads the
+# FIRST launch's pid, which is dead or -- because pids are reused -- somebody else's. Then
+# `kill -9` hits a stranger and every assertion after it measures nothing. `cs193v`'s
+# tunnel_kill_pid states the same rule: "IDENTIFIED BEFORE KILLED. Pids are reused".
+pty_start() {                         # pty_start KEYS CMD... -> sets PTY_OWNER, PTY_PIDFILE
+    [ -n "$DO_PY" ] || _pt_fatal python3 'no python3 on PATH; lib/ptyrun.py needs it'
+    local keys="$1"; shift
+    local dir cmd a
+    dir="${TMPDIR:-/tmp}"
+    PTY_PIDFILE="$(mktemp "$dir/cs193v-ptypid.$$.XXXXXX")"
+    PTY_FEED="$(mktemp "$dir/cs193v-ptyfeed.$$.XXXXXX")"
+    rm -f "$PTY_PIDFILE" "$PTY_PIDFILE.tmp"
+    printf '%b' "$keys" > "$PTY_FEED"
+    # THE WRAPPER IS PREPENDED HERE, NOT ASKED OF THE CALLER. It was a caller's job for one
+    # revision of this function and two of the three callers promptly forgot it -- reported by the
+    # container tier as `the-client-announced-a-live-pid`, LOUDLY, because the silent
+    # `else kill -9 "$1"` fallback it replaced is gone. The point of #151's fix is a pid channel
+    # guaranteed by the interface rather than remembered at each site, so the interface guarantees
+    # it. 10-static.sh asserts this line is still here.
+    cmd="'$PT_LIB/pty-announce'"
+    # EVERY INTERPOLATED ARGUMENT SINGLE-QUOTED (#141). This string is parsed a SECOND time, by
+    # the `/bin/sh -c` inside ptyrun.py, so an unquoted path containing a space word-splits there.
+    # Measured: an unquoted $REPO with a space dies with `/bin/sh: /.../Keith: No such file or
+    # directory`, and that was true of all three of these call sites as they stood. Not exotic --
+    # WSL's interop.appendWindowsPath is on by default and a spacey $HOME is ordinary.
+    for a in "$@"; do cmd="$cmd '$a'"; done
+    CS193V_PTY_PIDFILE="$PTY_PIDFILE" \
+        "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_FEED" &
+    PTY_OWNER=$!
+}
+
+# pty_inner_pid -> prints the pid the COMMAND itself runs as; rc 1 and prints nothing if it never
+# announced one. THE CALLER MUST TREAT THAT AS A FAILURE, not fall back to a pid it can guess:
+# close_client's old `else kill -9 "$1"` arm is precisely how #151 stayed invisible there.
+pty_inner_pid() {                     # pty_inner_pid -> PID on stdout, rc 0; else rc 1
+    local i=0 max=$(( ${PTY_INNER_WAIT:-10} * 20 )) pid
+    while [ "$i" -lt "$max" ]; do
+        if [ -s "${PTY_PIDFILE:-/nonexistent}" ]; then
+            pid="$(cat "$PTY_PIDFILE" 2>/dev/null | do_tr -d ' \n')"
+            # ALL DIGITS, not merely non-empty. lib/podman-shim.sh's fake-sysctl comment states
+            # the rule: a fixture that returns something unparseable must be an error, never a
+            # value -- "an empty string into the installer's arithmetic".
+            case "$pid" in
+                ''|*[!0-9]*) : ;;
+                *) printf '%s\n' "$pid"; return 0 ;;
+            esac
+        fi
+        sleep 0.05
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# pid_is_gone PID -> 0 when that pid is no longer a running process.
+#
+# STATE, NOT `kill -0`, and 12-run-timeout.sh already paid for this lesson: "kill -0 succeeds on
+# a zombie". A pid we have just killed is reaped by its parent, and until that happens it is still
+# in the process table -- so a check built on `kill -0` would report the thing we killed as alive
+# for as long as the reap took, which is a race whose failures look like real ones. `ps -o state=`
+# is empty when the pid is gone and `Z` while it is a zombie, and both mean gone for our purposes.
+# Portable as written: macOS and Linux both accept `-p PID -o state=`.
+pid_is_gone() {                       # pid_is_gone PID
+    case "$(ps -p "${1:-0}" -o state= 2>/dev/null | do_tr -d ' \n')" in
+        ''|Z*) return 0 ;;
+        *)     return 1 ;;
+    esac
+}
+
+# pty_stop -> take the session down and collect the scratch files pty_start made.
+#
+# IT READS THE GLOBALS pty_start SET, so it belongs to the MOST RECENT pty_start and must be
+# called before the next one. A caller that keeps two ptys alive at once -- 60-container.sh's
+# start_client/close_client pair, which spans dozens of assertions -- saves $PTY_OWNER and
+# $PTY_PIDFILE for itself and does its own teardown instead. 80-launcher-live.sh's race group,
+# which runs four at once, does the same.
+pty_stop() {                          # pty_stop [INNER_PID...]
+    local p
+    for p in "$@"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
+    [ -n "${PTY_OWNER:-}" ] && kill -9 "$PTY_OWNER" 2>/dev/null
+    [ -n "${PTY_OWNER:-}" ] && wait "$PTY_OWNER" 2>/dev/null
+    rm -f "${PTY_PIDFILE:-}" "${PTY_PIDFILE:-}.tmp" "${PTY_FEED:-}"
+    return 0
 }
 
 # ─── do_listeners: the one format every consumer parses ───────────────────────

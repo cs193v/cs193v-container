@@ -1,0 +1,25 @@
+#!/bin/sh
+# Announce the pid the command will run as, then BECOME it.
+#
+# WHY (#151). lib/ptyrun.py hands its command to `/bin/sh -c`, and whether that shell then
+# exec-optimises itself away is not specifiable: it varies by shell, by build of the same shell,
+# and by the shape of the command -- see the matrix in ptyrun.py's header. Three sites used to
+# infer the command's pid with `pgrep -P` on the pty owner, which is right only when the shell
+# vanishes. On Ubuntu it does not, and the wrong pid got killed.
+#
+# So the command is asked instead of the process table. `$$` is the shell's own pid and `exec`
+# replaces the shell without changing it; both are POSIX-MANDATED, unlike the optimisation this
+# replaces. Measured identical under bash 3.2-as-sh, dash, ksh93, zsh and bash 5, in `-c` and in
+# script form, and with one or two shells interposed above.
+#
+# NOT `${CS193V_PTY_PIDFILE:?...}`: measured, ksh93 writes the message and exits ZERO, so the
+# guard has to be its own test.
+[ -n "${CS193V_PTY_PIDFILE:-}" ] || { echo "pty-announce: no CS193V_PTY_PIDFILE" >&2; exit 2; }
+# NOT a bare `exec "$@"` either: with no arguments `exec` merely applies redirections and returns
+# 0 SILENTLY on sh, dash and ksh alike -- measured -- which would publish a pid and then run
+# nothing, leaving a pidfile that names a process which never existed.
+[ "$#" -gt 0 ] || { echo "pty-announce: no command to run" >&2; exit 2; }
+# WRITTEN THEN RENAMED. The reader checks the pid is all digits, and that check cannot tell 812
+# from a truncated 81234 -- so the file only ever appears complete.
+printf '%s\n' "$$" > "$CS193V_PTY_PIDFILE.tmp" && mv "$CS193V_PTY_PIDFILE.tmp" "$CS193V_PTY_PIDFILE"
+exec "$@"

@@ -716,21 +716,90 @@ assert_says "ptyrun:accepts-a-fifo-stdin" "FIFO-OK" \
             "$(timeout 10 python3 "$PTYRUN" 'echo FIFO-OK' < "$WORK/pf" 2>&1 | do_tr -d '\r')"
 kill "$PR_HOLDER" 2>/dev/null || true
 
-# BACKGROUNDED, $! MUST BE THE PTY OWNER AND ITS CHILD MUST BE THE COMMAND. Five sites background
-# this and read $! to kill the session; 60-container.sh:250 records what getting it wrong costs:
-# "killing that leaves script, podman and the tmux client happily alive -- so the window was
-# never really closed and every assertion after it measures nothing." A shell FUNCTION
-# backgrounded would give the subshell's pid, which is why ptyrun is a file.
+# BACKGROUNDED, $! MUST BE THE PTY OWNER, AND A CALLER MUST BE ABLE TO LEARN THE PID OF THE
+# COMMAND ITSELF. Six sites background this and read $! to kill the session; three then need the
+# command's own pid -- 70-sighup.sh's force-quit group, to SIGKILL the launcher without the kernel
+# HUPing it, and 60-container.sh's close_client, to kill the bottom of the reap chain so `wait` is
+# synchronous (#32). close_client records what getting it wrong costs: "killing that leaves
+# script, podman and the tmux client happily alive -- so the window was never really closed and
+# every assertion after it measures nothing." A shell FUNCTION backgrounded would give the
+# subshell's pid, which is why ptyrun is a file.
 #
-# `sh -c 'sleep 30'` exec-optimises, so the pty owner's direct child is the command itself with
-# no interposed shell -- which is what pgrep -P at 70-sighup.sh:213 depends on.
-printf 'x\n' | python3 "$PTYRUN" 'sleep 30' >/dev/null 2>&1 &
-PR_OWNER=$!
-wait_until 10 sh -c "pgrep -P $PR_OWNER >/dev/null 2>&1" || true
-PR_KID="$(pgrep -P "$PR_OWNER" 2>/dev/null | head -1)"
-assert_eq "ptyrun:backgrounded-child-is-the-command" "sleep" \
-          "$(ps -o comm= -p "${PR_KID:-0}" 2>/dev/null | sed 's#.*/##' | do_tr -d ' ')"
-kill "$PR_OWNER" "$PR_KID" 2>/dev/null || true
+# THIS USED TO ASSERT WHAT /bin/sh DOES, AND THAT IS WHY #151 SHIPPED. The old assertion ran
+# `sh -c 'sleep 30'` and expected the pty owner's direct child to be `sleep`, on the stated
+# grounds that a simple command exec-optimises. Measured, that is true of bash-as-sh for exactly
+# that shape and false the moment a redirection appears; true of Apple's dash-16 and false of
+# Ubuntu's dash 0.5.12; and false of ksh always, which does not even produce a `sleep` process
+# because ksh93 has it as a builtin. So the old check tested the ONE shape the development Mac
+# optimises, which no real caller uses, and could not go red on the machine it was written on.
+#
+# THE SUBJECT IS NOW THE ANNOUNCE CHANNEL, which is ours to guarantee: lib/pty-announce prints the
+# pid it is about to become and then execs, and `$$` and `exec` are POSIX-mandated where the
+# optimisation is not. Asserted TWICE -- under the host's own /bin/sh, and under lib/sh-fake, a
+# shell that always interposes -- because either arm alone can pass while measuring nothing.
+pr_comm() { ps -o comm= -p "${1:-0}" 2>/dev/null | sed 's#.*/##' | do_tr -d ' '; }
+# WAIT FOR THE EXEC, NOT FOR THE ANNOUNCE. lib/pty-announce publishes the pid BEFORE it execs, so
+# for a moment it names the wrapper shell -- and the form this replaced sampled `comm` the instant
+# `pgrep` succeeded, which could legitimately read `python3`. 12-run-timeout.sh states the same
+# rule for the same reason: "until the exec has happened the decoy is still a `sh`".
+pr_is_cmd() { [ "$(pr_comm "$1")" = sleep ]; }
+
+# ARM 1: the host's own /bin/sh, whatever this machine has.
+#
+# PINNED, not left to the ambient knob. A whole-lane run with CS193V_PTY_SHELL set -- which is how
+# the container tier gets driven in the interposing configuration on a Mac -- would otherwise make
+# this arm a duplicate of arm 2, and make the `record` below claim the host's shell did something
+# the fixture did. Two arms should mean what their names say in every run.
+CS193V_PTY_SHELL=/bin/sh pty_start 'x\n' sleep 30 >/dev/null 2>&1
+PR_OWNER="$PTY_OWNER"
+PR_INNER="$(pty_inner_pid)" || true
+wait_until 10 pr_is_cmd "$PR_INNER" || true
+assert_eq "ptyrun:the-announced-pid-is-the-command" "sleep" "$(pr_comm "$PR_INNER")"
+# $! MUST STILL BE THE OWNER, not the command: five sites kill the session by it, and killing the
+# thing inside the session instead is the mistake close_client's comment was written about.
+assert_eq "ptyrun:the-backgrounded-pid-is-the-owner-not-the-command" "owner-alive-and-distinct" \
+          "$( { [ -n "$PR_OWNER" ] && [ "$PR_OWNER" != "$PR_INNER" ] && ! pid_is_gone "$PR_OWNER"; } \
+              && echo owner-alive-and-distinct || echo "owner=$PR_OWNER inner=$PR_INNER")"
+# RECORDED, NOT ASSERTED: what this host's shell did with a simple command. No fixed expectation
+# survives it -- that is the finding of #151 -- but a human reading a results file wants it.
+record "ptyrun:what-this-hosts-sh-did-with-a-simple-command" \
+       "$(pr_comm "$(pgrep -P "$PR_OWNER" 2>/dev/null | head -1)")"
+pty_stop "$PR_INNER"
+
+# ARM 2: a shell that ALWAYS interposes -- what Ubuntu, and #151, actually have.
+CS193V_PTY_SHELL="$PT_LIB/sh-fake" pty_start 'x\n' sleep 30 >/dev/null 2>&1
+PR_OWNER2="$PTY_OWNER"
+PR_INNER2="$(pty_inner_pid)" || true
+wait_until 10 pr_is_cmd "$PR_INNER2" || true
+assert_eq "ptyrun:the-announced-pid-is-the-command-under-an-interposing-shell" "sleep" \
+          "$(pr_comm "$PR_INNER2")"
+# THE CONTROL, AND IT IS NOT DECORATION. Mutation-tested: with lib/sh-fake reduced to a
+# passthrough, BOTH announce assertions above still pass -- so this arm would sit here proving
+# nothing, which is #34's and #46's failure mode exactly. This is the assertion that goes red if
+# the fixture ever stops reproducing the condition it exists to reproduce.
+assert_eq "ptyrun:the-interposing-fixture-really-interposed" "a-shell-sits-between" \
+          "$([ "$(pr_comm "$(pgrep -P "$PR_OWNER2" 2>/dev/null | head -1)")" = sleep ] \
+             && echo "nothing-interposed -- the fixture is not doing its job" || echo a-shell-sits-between)"
+pty_stop "$PR_INNER2"
+# AND THE FIXTURE MUST STILL HAND THE COMMAND A TERMINAL. Mutation-tested, and this is the
+# assertion that was missing: with lib/sh-fake reduced to a bare `cmd &`, POSIX gives the
+# asynchronous list's stdin /dev/null before any explicit redirection, so the command gets NO
+# tty -- and every assertion in the tiers this fixture is meant to let us re-run would be
+# measuring a launcher taking its no-terminal refusal, not the thing under test. 10-static.sh
+# lints for the two lines that keep that true; this asserts the PROPERTY, which a correct
+# rewrite of those lines would still satisfy and a broken one would not.
+assert_says "ptyrun:the-interposing-fixture-still-gives-the-command-a-tty" "ISTTY" \
+            "$(printf '\n' | CS193V_PTY_SHELL="$PT_LIB/sh-fake" timeout 20 python3 "$PTYRUN" \
+                 'test -t 0 && echo ISTTY' 2>&1 | do_tr -d '\r')"
+
+# AND IT MUST FAIL WHEN NOTHING ANNOUNCES, rather than falling back to a pid it can guess.
+# close_client used to kill the pty owner when it found no child, which is how #151 stayed silent
+# there: the wrong pid died, the three non-event assertions after it passed, and nothing said so.
+pr_inner_refuses() { PTY_PIDFILE="$WORK/never-announced" PTY_INNER_WAIT=1 pty_inner_pid && return 1; return 0; }
+rm -f "$WORK/never-announced"
+assert_ok "ptyrun:an-unannounced-pid-is-an-error-not-a-fallback" pr_inner_refuses
+assert_eq "ptyrun:an-unannounced-pid-yields-nothing-to-kill" "" \
+          "$(PTY_PIDFILE="$WORK/never-announced" PTY_INNER_WAIT=1 pty_inner_pid || true)"
 
 # ─── the installer's pty door survives a space in $PATH (#141) ────────────────
 # installer_tty BUILDS A COMMAND STRING, for the reason its own comment gives, and that string is

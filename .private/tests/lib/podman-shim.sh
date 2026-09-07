@@ -141,16 +141,24 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
     PTY_HOLDER=$!
     # NO do_script AND NO TIMEOUT LAYER HERE, deliberately. $PTY_PID must be the pty OWNER so
     # launcher_pty_silent_stop can kill the session: a shell function backgrounded gives the
-    # pid of the subshell running it, and `timeout` in front would insert a process level
-    # exactly where 70-sighup.sh:213 and 60-container.sh:275 walk the tree with `pgrep -P`.
-    # 60-container.sh:250 records the cost of getting this wrong -- "killing that leaves
-    # script, podman and the tmux client happily alive, so the window was never really closed
-    # and every assertion after it measures nothing."
+    # pid of the subshell running it, and `timeout` in front would insert a process level of its
+    # own. 60-container.sh's close_client records the cost of getting this wrong -- "killing that
+    # leaves script, podman and the tmux client happily alive, so the window was never really
+    # closed and every assertion after it measures nothing."
+    #
+    # NOR pty_start, which is what 70-sighup.sh's launch_in_pty and 60-container.sh's
+    # start_client now use: pty_start feeds its keystrokes from a FILE, and the whole point of
+    # this helper is a fifo held open by a writer that never writes. This site only ever kills
+    # the pty owner, so it needs nothing from lib/pty-announce.
+    #
+    # THE INTERPOLATED PATH IS SINGLE-QUOTED (#141). The string is parsed a second time by the
+    # `/bin/sh -c` inside ptyrun.py, so an unquoted $LAUNCHER_DIR containing a space word-splits
+    # there -- which is ordinary on WSL, where interop.appendWindowsPath is on by default.
     #
     # ptyrun.py also ACCEPTS THE FIFO, which BSD script refuses outright with
     # `tcgetattr/ioctl: Operation not supported on socket` -- and the fifo is the whole point
     # of this helper, per the comment above.
-    PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
+    PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "'$cmd'" < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
     PTY_PID=$!
 }
 

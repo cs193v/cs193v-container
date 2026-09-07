@@ -39,6 +39,9 @@ cleanup() {
     clean_vt_processes
     rm -rf "$TMP" 2>/dev/null || true
     clean_vt_fixtures
+    # pty_start makes a keystroke feed and a pidfile per launch, and start_client runs twice.
+    # Named with our pid, so this glob cannot reach another run's.
+    rm -f "${TMPDIR:-/tmp}"/cs193v-ptypid."$$".* "${TMPDIR:-/tmp}"/cs193v-ptyfeed."$$".* 2>/dev/null
 }
 trap cleanup EXIT
 # ...and again at START, because the trap above cannot run if this process is killed. Both
@@ -277,11 +280,14 @@ tmux_pane_drawn()      { [ -n "$(E "$TM capture-pane -p -t $1" | do_tr -d '[:spa
 # alive -- so the window was never really closed and every assertion after it measures
 # nothing. In `printf ... | script ... &`, `$!` is the last element of the pipeline, which is
 # script itself. Defined once so no call site can get that wrong again.
-start_client() {                  # start_client -> sets CLIENT_JOB (script's pid)
-    # ptyrun.py DIRECTLY -- no do_script, no timeout layer -- because $! must be the pty OWNER.
-    # See lib/portable.sh's do_script comment and the note above.
-    printf 'sleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" >/dev/null 2>&1 &
-    CLIENT_JOB=$!
+start_client() {                  # start_client -> sets CLIENT_JOB and CLIENT_PIDFILE
+    # pty_start, NOT ptyrun.py by hand: it is what keeps $! the pty OWNER for the reason the
+    # comment above gives, and it runs the client through lib/pty-announce so close_client can
+    # be told the client's pid rather than inferring it from the process tree (#151).
+    pty_start 'sleep 600\n' podman exec -it -e "CS193V_CONTAINER=${NAME}" "${NAME}" cs193v-shell \
+        >/dev/null 2>&1
+    CLIENT_JOB="$PTY_OWNER"
+    CLIENT_PIDFILE="$PTY_PIDFILE"
 }
 
 # Close it, and do not come back until it is REALLY gone (issue #32).
@@ -298,16 +304,38 @@ start_client() {                  # start_client -> sets CLIENT_JOB (script's pi
 # Done this way round the kernel does the synchronising for us -- script reaps the client
 # before exiting, and `wait` returns only once script itself is reaped, so by the time this
 # returns the client is out of the process table. No sleep, no polling, nothing to tune.
-close_client() {                  # close_client SCRIPT_PID -> sets CLOSED_PID
-    CLOSED_PID="$(pgrep -P "$1" | head -1)"
-    if [ -n "$CLOSED_PID" ]; then
-        kill -9 "$CLOSED_PID" 2>/dev/null
-    else
-        # No child to find. Fall back to the old behaviour rather than `wait` on a script
-        # whose client is still running -- that would block for the full `sleep 600`.
-        kill -9 "$1" 2>/dev/null
+# ASKED, NOT INFERRED, AND NO FALLBACK (#151). This used to read `pgrep -P "$1" | head -1`, which
+# is the client only when the `/bin/sh` inside ptyrun exec-optimises itself away -- false under
+# Ubuntu's dash, under ksh, and under bash-as-sh the moment the command grows a redirection. When
+# it was wrong the interposed SHELL was killed instead of the client, and this function went on
+# to `wait` and return as if it had worked. Nothing downstream could notice: all three assertions
+# after the second call assert NON-events, so they pass whether the client died or not.
+#
+# The old `else kill -9 "$1"` arm is why that was silent rather than red, so it is gone. A client
+# that never announced a pid is an instrument failure and says so.
+close_client() {                  # close_client LABEL OWNER_PID PIDFILE -> sets CLOSED_PID
+    local label="$1" owner="$2"
+    PTY_PIDFILE="$3"
+    CLOSED_PID="$(pty_inner_pid)" || CLOSED_PID=''
+    if [ -z "$CLOSED_PID" ] || pid_is_gone "$CLOSED_PID"; then
+        fail "$label:the-client-announced-a-live-pid" \
+             "no pid came back through lib/pty-announce, so there was no window to close and
+every assertion after this one is measuring a session whose client is still attached."
+        return 1
     fi
-    wait "$1" 2>/dev/null || true
+    kill -9 "$CLOSED_PID" 2>/dev/null
+    wait "$owner" 2>/dev/null || true
+    # THE CONTROL FOR #32's PROPERTY, not decoration. The three assertions after the second call
+    # assert non-events, so a close that killed the wrong pid leaves them all green. This is the
+    # one thing that goes red instead -- and it is also the property this function CLAIMS: that
+    # by the time it returns the client is out of the process table. Measured to hold with a
+    # shell interposed too, because killing the bottom of the chain lets each parent reap in turn.
+    assert_ok "$label:closing-the-window-really-removed-the-client" \
+              pid_is_gone "$CLOSED_PID"
+    # ONLY THE PIDFILE IT WAS HANDED. pty_start's PTY_FEED is a global that a later launch would
+    # have moved on from, so reaching for it here would delete somebody else's; cleanup collects
+    # the feeds by a glob scoped to our own pid.
+    rm -f "$3" "$3.tmp"
 }
 
 tmux_kill_all
@@ -341,7 +369,7 @@ assert_ok "tmux:no-server-survives-the-last-exit" \
 # the $TMUX guard went into /etc/profile.d/20-cs193v-welcome.sh, pressing CTRL+T cleared the
 # pane and greeted again every time. Read from rendered panes, which is redraw-independent.
 tmux_kill_all
-start_client; bclient=$CLIENT_JOB
+start_client; bclient=$CLIENT_JOB; bclient_pf=$CLIENT_PIDFILE
 wait_until 30 tmux_client_attached
 w1="$(E "$TM list-windows -F '#{window_id}'" | head -1)"
 wait_until 20 tmux_pane_drawn "$w1"
@@ -355,7 +383,7 @@ assert_not_contains "tmux:a-new-tab-does-not-repeat-the-banner" "$CS193V_WELCOME
 # ...and closing a tab must not say goodbye, for the same reason: .bash_logout runs per tab.
 assert_not_contains "tmux:a-new-tab-does-not-say-goodbye" "$CS193V_GOODBYE" \
                     "$(E "$TM capture-pane -p -t $w2")"
-close_client "$bclient"
+close_client "tmux:tab-banner-window" "$bclient" "$bclient_pf"
 tmux_kill_all
 
 # The lockdown, read from the live server rather than from the file.
@@ -390,7 +418,7 @@ tmux_kill_all
 # What replaces it is the claim. cs193v-shell creates ONE session called `cs193v`, and a second
 # attempt fails on the duplicate name rather than adopting anything.
 tmux_kill_all
-start_client; client=$CLIENT_JOB
+start_client; client=$CLIENT_JOB; client_pf=$CLIENT_PIDFILE
 wait_until 30 tmux_client_attached
 E "$TM new-window -d" >/dev/null 2>&1
 wait_until 10 tmux_windows_are 2
@@ -417,7 +445,7 @@ assert_eq "tmux:a-refused-launch-leaves-the-first-session-intact" "2" \
 
 # close_client returns only once the client is out of the process table, so everything below is
 # reasoning about a window that is definitively closed rather than probably closed by now (#32).
-close_client "$client"
+close_client "tmux:the-claim-window" "$client" "$client_pf"
 
 # THE CLIENT DOES NOT DIE WITH THE WINDOW. This is still true, still counter-intuitive, and now
 # load-bearing for a different reason than before.

@@ -49,6 +49,32 @@ at its first link, and left fifteen meter and tailbox assertions unable to see t
 just set.
 
 Set CS193V_PTY_ROWS / CS193V_PTY_COLS when a caller genuinely wants a sized pty.
+
+WHAT SHELL RUNS THE COMMAND, AND WHAT IS *NOT* CLAIMED ABOUT IT (#151). The command string is
+handed to `/bin/sh -c`, and whether that shell then exec-optimises itself away is NOT a property
+this file asserts, relies on, or can know. It varies by shell, by build of the same shell, and by
+the shape of the command -- measured on macOS 26:
+
+    sh -c '...'            /bin/sh (bash 3.2)  /bin/dash (Apple dash-16)  /bin/ksh    /bin/zsh
+    sleep 5                replaces            replaces                   INTERPOSES  replaces
+    sleep 5 >/dev/null     INTERPOSES          replaces                   INTERPOSES  replaces
+    true && sleep 5        INTERPOSES          replaces                   INTERPOSES  replaces
+
+An earlier version of this file DID claim it ("`sh -c` with a single simple command exec-optimises
+and replaces itself, so `pgrep -P` on our pid names the command directly"), and three sites walked
+the tree on that basis. On Ubuntu, where /bin/sh is dash 0.5.12, the shell stays and `pgrep -P`
+returns IT -- so 70-sighup.sh killed the pty session leader instead of the launcher, the kernel
+HUPed the launcher, its trap ran, and the assertion inverted; while 60-container.sh's close_client
+killed the wrong pid and the three non-event assertions after it passed anyway. That is #151.
+
+SO A CALLER THAT NEEDS THE PID OF THE COMMAND ASKS THE COMMAND, NOT THE PROCESS TABLE. It runs it
+through lib/pty-announce, which announces the pid it is about to become and then execs. `$$` and
+`exec` are POSIX-MANDATED, unlike the optimisation, and lib/portable.sh's pty_start wraps the whole
+arrangement. 14-test-harness.sh asserts that channel under the host's own /bin/sh AND under
+lib/sh-fake, a shell that always interposes, so the property cannot go green by accident on a
+machine whose shell happens to optimise.
+
+CS193V_PTY_SHELL overrides /bin/sh, and exists only so that fixture is reachable.
 """
 
 import fcntl
@@ -89,17 +115,25 @@ def main(argv):
 
     rows = os.environ.get("CS193V_PTY_ROWS")
     cols = os.environ.get("CS193V_PTY_COLS")
+    shell = os.environ.get("CS193V_PTY_SHELL") or "/bin/sh"
 
     pid, master = pty.fork()
     if pid == 0:
         # Child: pty.fork() has already made this the session leader with the slave as its
-        # controlling terminal. `sh -c` with a single simple command exec-optimises and
-        # replaces itself, so `pgrep -P` on our pid names the command directly -- which is
-        # what 70-sighup.sh:213 and 60-container.sh:275 walk the tree expecting.
+        # controlling terminal. WHETHER A SHELL SURVIVES BELOW THIS POINT IS NOT THIS FILE'S
+        # CLAIM TO MAKE -- see the header, and lib/pty-announce for how a caller that needs the
+        # command's pid gets it.
         try:
-            os.execv("/bin/sh", ["/bin/sh", "-c", cmd])
-        except OSError:
-            pass
+            os.execv(shell, [shell, "-c", cmd])
+        except OSError as exc:
+            # LOUD, AND os.write RATHER THAN sys.stderr. This used to _exit(127) in silence, so an
+            # unreachable shell produced rc 127 with an EMPTY transcript -- and the ~125
+            # assert_says_not / assert_not_contains / assert_eq-to-empty assertions behind these
+            # helpers all pass on an empty string. lib/portable.sh's do_listeners comment records
+            # what that class of failure cost this suite once already: "every consumer reported a
+            # confident zero". A buffered write would not survive _exit, and pty.fork() has put
+            # the slave on fd 2, so this lands in the transcript where a reader will see it.
+            os.write(2, ("ptyrun: cannot exec %s: %s\r\n" % (shell, exc)).encode())
         os._exit(127)
 
     # Only when asked -- see the header on why 0x0 is the right default here.
