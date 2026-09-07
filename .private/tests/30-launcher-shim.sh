@@ -2120,3 +2120,108 @@ out="$(launcher --rebuild)"
 assert_says_not_key "query-failed:rebuild-is-not-refused" err.session-in-use "$out"
 if [ "$(shim_count '^rm ')" -ge 1 ]; then pass "query-failed:rebuild-still-recreates"
 else fail "query-failed:rebuild-still-recreates" "no 'rm' in the log: $(shim_log | do_tr '\n' '|')"; fi
+
+# ─── the rootless read is a THREE-WAY  (#171 review) ───────────────────────────
+# `[ "$RT_OUT" != "true" ]` calls every answer that is not the literal `true` "rootful", and
+# err.rootful is the one refusal in the catalogue that names no fix -- "not something to work
+# around", contact staff. RT_BARE removed one way for that line to be wrong; it did not change
+# what the line MEANS, so the failure was narrowed rather than closed. Read three ways it says
+# only what it knows.
+#
+# THROUGH A LAUNCH, NOT THROUGH doctor: doctor deliberately does not call preflight, so
+# err.rootful is unreachable that way whatever the read answers, and a guard asserting its
+# absence there would pass with this whole block deleted.
+shim_new
+shim_set rootless true
+assert_says_not_key "rootless:true-still-passes" err.rootful "$(launcher)"
+
+shim_new
+shim_set rootless false
+assert_says_key "rootless:false-is-still-rootful" err.rootful "$(launcher)"
+
+# NEITHER OF THE TWO, which is every answer the old line silently reported as rootful.
+shim_new
+shim_set rootless 'not-a-boolean'
+out="$(launcher)"
+assert_says_not_key "rootless:unreadable-is-not-called-rootful" err.rootful "$out"
+assert_says_key     "rootless:unreadable-says-so" err.rootless-unreadable "$out"
+
+# EMPTY GETS ITS OWN LINE, because it is the value likeliest to arrive by accident -- a template
+# that resolved to nothing, a wrapper on PATH that answers nothing -- and the one the reviewer
+# named. It must not read as "rootful" either.
+shim_new
+shim_set rootless ''
+out="$(launcher)"
+assert_says_not_key "rootless:empty-is-not-called-rootful" err.rootful "$out"
+assert_says_key     "rootless:empty-says-so" err.rootless-unreadable "$out"
+
+# ─── the refusal keeps the evidence  (#171 review) ─────────────────────────────
+# RT_BARE's `2>/dev/null` discarded the one line that explains a residual refusal, and the
+# trigger erases itself: the population case is the boot's first podman call, and the machine
+# answers cleanly again minutes later. So the student gets a dead end and staff get nothing.
+# err.create-failed's `OUT=` is the house precedent for quoting podman into a refusal.
+shim_new
+shim_set rootless 'not-a-boolean'
+shim_set info_stderr "$WARNLINE"
+out="$(launcher)"
+assert_contains "rootless:unreadable-refusal-quotes-podman" "level=warning" "$out"
+
+# THE SAME READ FAILING OUTRIGHT, which is the other half of it and the likelier half: a podman
+# still doing its post-boot store fix-ups can exit non-zero, and the stderr saying why is the
+# whole diagnosis.
+shim_new
+shim_set info_rc 125
+shim_set info_stderr "$WARNLINE"
+out="$(launcher)"
+assert_says_key "rootless:unreachable-still-refuses"    err.podman-unreachable "$out"
+assert_contains "rootless:unreachable-quotes-podman"    "level=warning" "$out"
+
+# AND SAYS NOTHING EXTRA WHEN THERE IS NOTHING TO SAY. An empty stanza would appear in the
+# refusal of every student whose podman is merely silent, which is a cost paid by everyone to
+# help the few -- and it reads as a bug in the refusal rather than as an absence of evidence.
+#
+# ARRANGED WITH A SILENT podman, NOT A FAILING ONE, and getting that wrong is how this
+# assertion was first written: a read that FAILS always explains itself on stderr -- podman-fake
+# prints "cannot connect to podman" there and so does the real client -- so `info_rc` cannot
+# pose this question at all. An odd ANSWER with no warning behind it can.
+shim_new
+shim_set rootless 'not-a-boolean'
+out="$(launcher)"
+assert_says_key     "rootless:refuses-without-evidence-too" err.rootless-unreadable "$out"
+assert_says_not_key "rootless:quotes-nothing-when-podman-said-nothing" detail.podman-said "$out"
+
+# ─── doctor reports rootless  (#171 review) ────────────────────────────────────
+# err.rootful tells the student to include the output of `cs193v doctor`, and doctor asked podman
+# for MemTotal, CPUs and RootlessNetworkCmd -- never Security.Rootless. So the one command the
+# refusal names could neither confirm nor deny the refusal's claim. Before #171 the merge at
+# least smeared the warning into `podman sees`; after it, noisy and clean output are identical by
+# design, so the report was guaranteed not to show the cause either.
+#
+# doctor DELIBERATELY DOES NOT CALL PREFLIGHT -- its job is reporting on a machine preflight
+# would refuse -- which is what makes all three of these reachable in one report.
+shim_new
+launcher >/dev/null 2>&1
+shim_set state exited
+shim_set label_dir "$COPY"
+shim_set rootless true
+out="$(launcher doctor)"
+assert_match "doctor:reports-rootless" 'rootless +yes' "$out"
+# The host figures that call was already carrying are still in the report.
+assert_contains "doctor:still-reports-what-podman-sees" "8589934592" "$out"
+
+shim_new
+shim_set rootless false
+assert_match "doctor:names-rootful-as-the-problem" 'rootless +NO' "$(launcher doctor)"
+
+shim_new
+shim_set rootless 'not-a-boolean'
+assert_contains "doctor:reports-an-unreadable-rootless-answer" \
+                "podman gave no usable answer" "$(launcher doctor)"
+
+# FOLDED INTO A TEMPLATE THAT WAS ALREADY BEING SENT, so the new field costs no additional
+# `podman info` -- ERRORS.md D11 measures one at 536-1222 ms, and doctor is what a stuck student
+# is waiting on. A GUARD: green before this change and after it.
+shim_new
+shim_set rootless true
+launcher doctor >/dev/null 2>&1
+assert_eq "doctor:asks-podman-info-no-more-often-than-before" "2" "$(shim_count '^info ')"

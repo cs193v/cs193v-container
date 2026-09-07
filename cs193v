@@ -904,6 +904,25 @@ pmq() { run_timeout 20 podman "$@" >/dev/null 2>&1; }
 #   * `local`, so both reach run_timeout by dynamic scoping and neither escapes the read.
 pmv() { local RT_SPIN='' RT_ROW='' RT_BARE=1; pm "$@"; }
 
+# What the LAST pmv read said on stderr, as a stanza to append to a refusal -- and NOTHING when
+# it said nothing (#171 review). RT_BARE takes podman's warnings out of the answer, which is the
+# fix; sending them to /dev/null as well would have closed the bug and the evidence with it, on a
+# trigger that erases itself. See RT_ERR in cs193v-ui.sh for the measurement.
+#
+# EMPTY MEANS EMPTY, which is the whole reason this is a function rather than an extra {{ }} in
+# the messages: err.podman-unreachable is read far more often by a student whose podman machine
+# is simply stopped, and a blank stanza in their refusal would be a cost paid by everyone to
+# help the few. Composed by concatenation at the call site, so `$( )` strips no leading newline.
+#
+# ONLY REACHABLE WHERE THE READ WAS NOT IN A `$( )`. state and label_of are called inside command
+# substitutions, so their RT_ERR never reaches the parent -- the same channel problem rt_cleanup
+# documents. Their refusals name `podman info` instead, and there that is enough: podman is
+# unreachable rather than transiently noisy, so running it again reproduces the fault.
+podman_said() {                       # -> a stanza quoting RT_ERR, or nothing at all
+    [ -n "$RT_ERR" ] || return 0
+    printf '\n\n%s' "$(msg detail.podman-said TEXT="$RT_ERR")"
+}
+
 # podman that is INSTALLED AND INVISIBLE: issue #121, whose whole mechanism is written up at
 # PODMAN_PKG_ID above. Repairs THIS process's PATH, and every child's, when podman is installed
 # somewhere PATH does not name; a no-op on every machine whose PATH is already right.
@@ -1332,18 +1351,33 @@ preflight() {
         die "$(msg err.podman-too-old FOUND="$ver" NEED="$floor")"
     fi
 
-    # pmv, NOT pm, and it is the most consequential word in #171. The next line compares this
-    # answer to a STRING, so a podman that warns on stderr and exits 0 -- one unrecognised key in
-    # storage.conf is enough -- answers `level=warning ...\ntrue`, and this refuses the machine
-    # with err.rootful: "not something to work around", contact staff, no fix named. Measured
-    # against podman 5.8.4 on a machine that was working perfectly. It is also ahead of every
-    # other site #171 lists, so grading those would have left this student stuck regardless.
+    # pmv, NOT pm, and it is the most consequential word in #171. The case below compares this
+    # answer to a STRING, so a podman that warns on stderr and exits 0 answers
+    # `level=warning ...\ntrue`, and this refused the machine with err.rootful: "not something to
+    # work around", contact staff, no fix named. It is also ahead of every other site #171 lists,
+    # so grading those would have left that student stuck regardless.
+    #
+    # THE TRIGGER IS A BOOT, NOT A MISCONFIGURATION, and the whole shape of this block follows
+    # from that. An unrecognised key in storage.conf is the reproduction; the population case is
+    # the FIRST podman call after the machine came up, which is when podman does its post-boot
+    # store fix-ups and says so. Measured in the field on stock WSL2 with podman 5.7.0 and
+    # nothing misconfigured -- and clean again nine minutes later, which is why the refusals
+    # below quote what podman said instead of leaving a student to reproduce it.
     if ! pmv info --format '{{.Host.Security.Rootless}}'; then
-        die "$(msg err.podman-unreachable)"
+        die "$(msg err.podman-unreachable)$(podman_said)"
     fi
-    if [ "$RT_OUT" != "true" ]; then
-        die "$(msg err.rootful)"
-    fi
+    # THREE ANSWERS WHERE THERE WERE TWO. `!= "true"` inferred "rootful" from every answer that
+    # was not the literal `true` -- including the empty string -- and err.rootful is the one
+    # refusal in the catalogue that names no fix at all. Separating the streams removed one way
+    # for that inference to be wrong without changing what it MEANS, so the failure was narrowed
+    # rather than closed. Read three ways it says only what it knows.
+    case "$RT_OUT" in
+        true)  : ;;
+        false) die "$(msg err.rootful)" ;;
+        # `(nothing)` RATHER THAN A BLANK, because a refusal whose evidence section is empty
+        # reads as a bug in the refusal, and "podman answered nothing" is itself the diagnosis.
+        *)     die "$(msg err.rootless-unreadable OUT="${RT_OUT:-(nothing)}")$(podman_said)" ;;
+    esac
 
     if ! grep -q "^$(id -un):" /etc/subuid 2>/dev/null; then
         case "$(platform)" in
@@ -2685,10 +2719,38 @@ verb_doctor() {
     # Linux box that had not timed out and was not a Mac. The fields that exist everywhere are
     # asked for together; the one that does not is asked for on its own and simply omitted when
     # podman has never heard of it.
-    if pmv info --format '{{.Host.MemTotal}} {{.Host.CPUs}}'; then
-        local seen="$RT_OUT"
+    #
+    # .Host.Security.Rootless RIDES THE FIRST TEMPLATE, and that is the point of putting it there
+    # (#171 review). err.rootful tells the student to include the output of THIS report, and this
+    # report asked podman for MemTotal, CPUs and RootlessNetworkCmd -- never whether it was
+    # rootless. So the one command that refusal names could neither confirm nor deny the
+    # refusal's claim. Before #171 the merged stderr at least smeared the warning into
+    # `podman sees`; after it, noisy and clean output are identical by design, so the report was
+    # guaranteed not to show the cause either. Folded in rather than asked for separately because
+    # a third `podman info` costs 536-1222 ms (ERRORS.md D11) and this field exists on every
+    # podman the floor admits, unlike RootlessNetworkCmd.
+    if pmv info --format '{{.Host.MemTotal}} {{.Host.CPUs}} {{.Host.Security.Rootless}}'; then
+        local seen="$RT_OUT" rootless
+        # SPLIT ONLY IF THERE IS SOMETHING TO SPLIT. A Go template that names a missing field
+        # fails the whole call rather than answering short, so a one-field answer here means
+        # something we do not understand -- and taking the last word of it regardless would
+        # print that same word twice, once as a host figure and once as a verdict.
+        case "$seen" in
+            *' '*) rootless="${seen##* }"; seen="${seen% *}" ;;
+            *)     rootless='' ;;
+        esac
         if pmv info --format '{{.Host.RootlessNetworkCmd}}'; then seen="$seen $RT_OUT"; fi
         printf '  %-16s %s\n' "podman sees" "$seen"
+        # THE SAME THREE ANSWERS PREFLIGHT READS, and worded rather than echoed: this is the
+        # line staff read first in a pasted report, and a bare `false` is a fact about podman
+        # where what is wanted is a diagnosis. The third branch is here because preflight's is:
+        # a report that cannot show the state preflight refused on is no more use than the one
+        # that never asked.
+        case "$rootless" in
+            true)  printf '  %-16s %s\n' "rootless" "yes" ;;
+            false) printf '  %-16s %s\n' "rootless" "NO — cs193v needs rootless mode" ;;
+            *)     printf '  %-16s %s\n' "rootless" "podman gave no usable answer" ;;
+        esac
     else
         printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
     fi

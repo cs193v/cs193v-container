@@ -18,7 +18,10 @@
 #   version_stderr   a line `podman --version` writes to STDERR before the version, for
 #                    the case where the version has to be read out of noisy output  []
 #   hang             if present, every call sleeps forever  (the woken-Mac case)
-#   rootless         .Host.Security.Rootless                [true]
+#   rootless         .Host.Security.Rootless                [true]. NOT normalised to a
+#                    boolean: preflight reads this three ways, so `true`, `false` and anything
+#                    else -- including empty -- are all separately expressible here.
+#   rootless_net     .Host.RootlessNetworkCmd                [pasta]
 #   info_rc          exit code for `podman info`            [0]
 #   state            absent | created | running | exited    [absent]
 #   inspect_rc       exit code for `podman inspect` ON A CONTAINER THAT EXISTS  [0].
@@ -176,12 +179,24 @@ case "${1:-}" in
             case "$1" in --format) shift; FMT="${1:-}" ;; --format=*) FMT="${1#--format=}" ;; esac
             shift
         done
+        # ORDER MATTERS, AND MOST SPECIFIC WINS. Five templates exist in the whole repo, and
+        # three of them contain the string "Rootless": preflight's `{{.Host.Security.Rootless}}`,
+        # doctor's `{{.Host.RootlessNetworkCmd}}`, and doctor's combined probe, which carries
+        # Security.Rootless alongside the host figures. A single `*Rootless*` arm at the top
+        # answered all three with one boolean -- so doctor reported the rootless flag as its
+        # network command, and folding the flag into the combined probe would have lost the host
+        # figures entirely. Each template now matches exactly one arm.
         case "$FMT" in
-            *Rootless*)       get rootless true; echo ;;
-            # SEPARATE ARMS, because the two callers ask different questions. doctor asks for
-            # three values at once and prints them; check_podman asks only whether podman can
-            # answer at all, so its arm must not depend on doctor's template still matching.
-            *MemTotal*CPUs*)  printf '%s 4 pasta\n' "$(get mem_total 8589934592)" ;;
+            # doctor's combined probe. Three values, because it asks for three.
+            *MemTotal*CPUs*)  printf '%s 4 %s\n' "$(get mem_total 8589934592)" \
+                                                  "$(get rootless true)" ;;
+            # A COMMAND NAME, not a boolean: this is what podman puts in that field, and reading
+            # the rootless flag back out of it made the two indistinguishable in the report.
+            *RootlessNetworkCmd*) get rootless_net pasta; echo ;;
+            # preflight's read, whose answer it compares against `true` and `false`. Any other
+            # value is the third case it now has to handle, so this deliberately passes whatever
+            # a test staged rather than normalising it to a boolean.
+            *Security.Rootless*)  get rootless true; echo ;;
             *Arch*)           get host_arch arm64; echo ;;
             # check_disk's two Store fields, asked for together in one --format. Nothing
             # else in the repo reads Store, so this arm cannot reach the launcher suites.

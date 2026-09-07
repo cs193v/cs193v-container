@@ -1450,6 +1450,10 @@ read in the launcher that uses an answer as a **value** was therefore one podman
 being wrong — and podman does not need to be broken to warn. One unrecognised key in
 `storage.conf` is enough, on podman 5.8.4:
 
+> **Read D14 with this entry.** The `storage.conf` key below is the *reproduction*. The population
+> case is the first podman call after a boot, on a stock machine, and it is gone from that machine
+> minutes later — which is why the refusals now quote `RT_ERR` rather than discarding it.
+
 ```
 $ printf '[storage]\ndriver = "overlay"\nbogus_key_here = "x"\n' > st.conf
 $ CONTAINERS_STORAGE_CONF=./st.conf podman inspect cs193v --format '{{.State.Status}}' 2>&1
@@ -1537,3 +1541,87 @@ failure path runs `podman rm -f`, and **acts** in the maintenance verbs (`--stop
 entry that produces this). `refuse_if_session_live` needed no change at all: proceeding on an
 unknown is already that rule. Refusing in `--rebuild` would have closed the last exit, because
 `--stop` reports success either way.
+
+### D14. The trigger for D12 is a **boot**, not a misconfiguration — and it erases itself (#171 review)
+
+D12 attributed the contaminated read to "one unrecognised key in `storage.conf`", in three places:
+`RT_BARE`'s comment, `preflight`'s, and D12 itself. That is the **reproduction**, not the
+population case, and the difference decides how much evidence the refusals need to carry.
+
+Measured in the field, on a machine with nothing misconfigured: stock WSL2 `CS193V` distro, podman
+5.7.0, a fresh `git clone`, `CS193V_INSTANCE` unset. The distro booted at 09:16:47 and
+`/run/user/1000/libpod` was created at 09:18, so the failing call was the boot's **first** podman
+call — which is when podman does its post-reboot refresh and store fix-ups, and says so on stderr.
+By 09:26 the same read answered a bare `true` again, and has ever since. So:
+
+* **The reach is every platform**, not the machines somebody has edited `storage.conf` on.
+* **The evidence is gone by the time anyone looks**, which is the part that shapes the fix.
+* It took out a whole `--everything-but-github`: `run-tests.sh:465` `exit 1`s when
+  `./cs193v --rebuild` fails, so the banner printed, the rebuild refused with `err.rootful`, and
+  no tier below it measured anything.
+
+Three consequences, all now closed.
+
+**The exact-string compare survived D12.** `RT_BARE` removed one way for `[ "$RT_OUT" != "true" ]`
+to be wrong without changing what the line *means*: every answer that is not the literal `true`,
+**including the empty string**, was still reported as `err.rootful` — the one refusal in the
+catalogue that names no fix ("not something to work around", contact staff). `preflight` now reads
+it three ways: `true` passes, `false` is `err.rootful`, anything else is `err.rootless-unreadable`,
+which says the answer could not be read and quotes it.
+
+Worth recording that we went looking for a reachable empty answer and **did not find one** on
+podman 6.0.2 — `.Host.Security.Rootless` is a Go bool, so it renders `true` or `false` and never
+empty, and every other route lands on a non-zero status that `err.podman-unreachable` catches
+first: a template naming a missing field exits **125** (not empty-with-0), an unreachable socket
+125, the ceiling 124. So the third branch is **hardening, not a live bug** — kept because it costs
+three lines and converts the harshest message in the file from a wrong diagnosis into an honest
+one.
+
+**`2>/dev/null` discarded the only evidence, and D12 counted that as success.** "Noisy and clean
+`doctor` output are byte-identical" was verified as a *property* of the fix — but before it, the
+merge at least smeared the warning into `podman sees`, so there was something in a pasted report to
+notice. After it there was nothing, on a trigger that is unreproducible ten minutes later: a dead
+end for the student and nothing to read for staff. `RT_BARE` now redirects to a **second temp
+file** (`$tmp.err`, a sibling of the fifo, swept by `rt_cleanup`'s existing `cs193v-$$.*` glob)
+and exposes it as `RT_ERR`; `podman_said` renders it as a stanza and appends it to `preflight`'s
+two refusals. `rt:captures-stderr`'s guarantee for `RT_OUT` is untouched — that is what the mode is
+for, and reversing it is how #171 comes back.
+
+`RT_ERR` is deliberately **empty except in bare mode**: the merging default has stderr in `RT_OUT`
+already, and a second copy would be a second thing to keep in step. It is also cleared on every
+call, so a caller cannot quote the *previous* command's stderr into this command's refusal.
+
+**Not every site can quote it, and that is a channel limit rather than a decision.** `state` and
+`label_of` are called inside command substitutions, so their `RT_ERR` never reaches the parent —
+the same thing that makes `rt_cleanup` sweep by glob rather than by remembered path. Their
+`err.podman-unreachable` refusals name `podman info` instead, and there that is enough: podman is
+unreachable rather than transiently noisy, so running it again reproduces the fault. `preflight`'s
+read is the one that fires on the boot's first call, and it is not in a `$( )`.
+
+**`doctor` never reported rootless, and after D12 was guaranteed not to show the cause either.**
+`err.rootful` tells the student to include the output of `cs193v doctor`; doctor asked for
+`{{.Host.MemTotal}} {{.Host.CPUs}}` and `{{.Host.RootlessNetworkCmd}}` and never
+`{{.Host.Security.Rootless}}`, so the one command that refusal names could neither confirm nor deny
+its claim. Folded into the first template rather than asked for separately — **no additional
+`podman info`**, which D11 measures at 536–1222 ms each, and `.Host.Security.Rootless` exists on
+every podman the floor admits, unlike `RootlessNetworkCmd`. Verified against real podman 6.0.2:
+
+```
+$ podman info --format '{{.Host.MemTotal}} {{.Host.CPUs}} {{.Host.Security.Rootless}}'
+4074921984 4 true
+
+  podman sees      4074921984 4 pasta
+  rootless         yes
+```
+
+The report reads the same three answers `preflight` does, worded rather than echoed: a bare `false`
+is a fact about podman where a pasted report wants a diagnosis.
+
+**A fake that hid the fold.** `podman-fake`'s `info` arm matched `*Rootless*` **first**, which
+caught all three of the repo's Rootless-bearing templates: it answered
+`{{.Host.RootlessNetworkCmd}}` with the rootless *boolean* (so doctor reported the flag as its
+network command), and it would have answered doctor's folded probe with a single boolean, losing
+the host figures. The arms are now ordered most-specific-first — `*MemTotal*CPUs*`,
+`*RootlessNetworkCmd*`, `*Security.Rootless*` — so each of the five templates in the repo matches
+exactly one, and `rootless` is passed through un-normalised because `preflight` now reads it three
+ways.

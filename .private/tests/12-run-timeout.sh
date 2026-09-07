@@ -105,6 +105,48 @@ RT_BARE=''
 run_timeout 5 sh -c 'echo to-stderr >&2' || true
 assert_contains "rt:bare-is-per-call-not-sticky" "to-stderr" "$RT_OUT"
 
+# ─── RT_ERR: what RT_BARE takes out of the answer is KEPT  (#171 review) ──────
+# RT_BARE's first cut sent stderr to /dev/null, which fixed the value and threw away the only
+# evidence of why it had needed fixing. That matters here more than it usually would, because
+# the trigger is TRANSIENT: the population case is the first podman call after a boot, and the
+# machine is clean again minutes later, so a refusal that quotes nothing leaves the student a
+# dead end and staff nothing to read. err.create-failed's `OUT=` is the house precedent.
+#
+# THE FOUR ASSERTIONS ABOVE ARE THIS ONE'S GUARD: RT_OUT must stay clean, or the refusal gets
+# its evidence back by putting it in the value again, which is what #171 was.
+RT_BARE=1
+run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' || true
+assert_eq           "rt:bare-keeps-stderr-in-rt-err"   "to-stderr" "$RT_ERR"
+assert_not_contains "rt:bare-keeps-rt-out-clean-anyway" "to-stderr" "$RT_OUT"
+# BOTH BRANCHES, for the reason the assertions above give: no label takes the fifo branch, a
+# label forces the 10 Hz poll loop, and the two redirect separately.
+RT_SPIN='working'
+run_timeout 5 sh -c 'echo to-stdout; echo to-stderr >&2' >/dev/null 2>&1 || true
+assert_eq "rt:bare-keeps-stderr-in-rt-err-on-the-poll-branch" "to-stderr" "$RT_ERR"
+RT_SPIN=''
+# EMPTY RATHER THAN STALE. A caller that tests RT_ERR to decide whether it has anything to quote
+# must not be handed the PREVIOUS call's stderr -- that would attach one command's warning to a
+# different command's refusal, which is a worse diagnosis than none.
+run_timeout 5 sh -c 'echo only-stdout' || true
+assert_eq "rt:bare-clears-rt-err-when-there-was-no-stderr" "" "$RT_ERR"
+# The ceiling still fires, and what the command managed to say on its way out is still readable
+# afterwards -- which is the case that matters most, a hung podman being what this whole wrapper
+# is for (#157).
+#
+# NOT THROUGH assert_exit, and that is not a style preference: it runs its command inside a
+# `$( )`, so RT_ERR would be assigned in a subshell and the assertion below would read the
+# parent's stale copy. Same channel problem rt_cleanup documents, arriving in a test.
+run_timeout 1 sh -c 'echo dying >&2; sleep 5'; rc_bare=$?
+assert_eq "rt:bare-still-times-out-with-stderr-kept" 124     "$rc_bare"
+assert_eq "rt:bare-keeps-stderr-from-a-timed-out-command" "dying" "$RT_ERR"
+RT_BARE=''
+# THE MERGING DEFAULT LEAVES RT_ERR EMPTY, deliberately: stderr is already in RT_OUT there, and
+# a second copy of it would be a second thing for a caller to keep in step with the first.
+run_timeout 5 sh -c 'echo to-stderr >&2' || true
+assert_contains "rt:merged-mode-still-merges"        "to-stderr" "$RT_OUT"
+assert_eq       "rt:merged-mode-leaves-rt-err-empty" ""          "$RT_ERR"
+
+
 # ─── A COLLEAGUE'S RUN, STANDING RIGHT HERE  (#74) ─────────────────────────────
 # `pgrep` and `pkill` are machine-wide and `sleep 30` is not ours: it is what EVERY run of this
 # file spawns, and what 60-container.sh backgrounds ~63 of inside a container to reach
