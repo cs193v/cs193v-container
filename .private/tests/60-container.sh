@@ -69,17 +69,28 @@ assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 #
 # DO NOT "FIX" THIS BY PINNING --pids-limit=2048. It would hand back the exact wedge hazard
 # podman 6 removed by accident, and it collides with three things that would all have to be
-# rewritten to lie: 10-static.sh:1104 lists --pids-limit among flags "considered and rejected"
-# and says re-adding one "should be a deliberate act that breaks a test"; container.args:197-199
-# documents the rejection; and both assertions here name a provenance that would stop being true.
+# rewritten to lie: 10-static.sh's rejected:no---pids-limit holds --pids-limit absent from
+# container.args, among flags "considered and rejected" that it says re-adding "should be a
+# deliberate act that breaks a test"; container.args:197-199 documents the rejection; and both
+# assertions here name a provenance that would stop being true. (By name, not by line: the number
+# that used to sit here, :1104, had drifted onto the #41 lifecycle block.)
 #
 # SO: RECORD THE VALUE, AND ASSERT ONLY AGAINST A DANGEROUSLY TIGHT ONE. Green on podman 5.7
 # (2048) and 6.x (0/max) alike, red only on a value low enough to hurt. This is NOT green-for-free:
 # the unreadable arm below is a real failure, and it is the one that fires if the probe breaks.
 #
 # THE MECHANISM ITSELF IS STILL TESTED, and by a case that does not depend on any default:
-# limits:pids-limit-is-enforced (:1177 below) runs a disposable container with --pids-limit 64 and
-# proves podman still applies a limit when it is asked to. Only the default moved.
+# limits:pids-limit-actually-stops-forking, below in §A.9, runs a disposable container with
+# --pids-limit 64 and proves podman still applies a limit when it is asked to. Only the default
+# moved. (Cited by NAME rather than by line number on purpose: the reference that used to sit here
+# pointed at :1177, which had drifted onto the browser tests. fixtures/coverage-allowlist records
+# what that costs -- "seven of the eight entries this file used to hold had gone stale, three of
+# them onto blank lines, and nothing noticed for as long as the numbers stayed inside the file.")
+#
+# ON A HOST THAT DELEGATES NO pids CONTROLLER THAT CASE SKIPS, and §A.9 says why at length. So the
+# honest form of the claim is conditional: the mechanism is tested wherever it CAN be, and where it
+# cannot, limits:pids-controller-is-delegated records NO and nothing here is green for free. The
+# two assertions in this section read a value; only §A.9 provokes one.
 assert_pids_floor() {                 # assert_pids_floor NAME VALUE -- `0` (podman) and `max` (cgroup) both mean unlimited
     case "$2" in
         0|max)       pass "$1" ;;
@@ -1269,25 +1280,184 @@ E 'rm -rf /home/student/projects/.vt-pw' >/dev/null 2>&1
 # The pids limit, on a DISPOSABLE container. NEVER fork-bomb the live one: pids exhaustion wedges
 # it beyond `podman exec`'s reach and does not self-heal, so this would take the rest of
 # the suite down with it.
-# Once the limit bites, the shell cannot fork to run `echo` either — so "Cannot fork" IS
-# the success signal, and expecting a tidy "forks=N" report back from a shell that has run
-# out of processes was never going to work.
-forks="$($VT_RUN --rm --pids-limit 64 "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" sh -c \
-    'i=0; while sleep 30 & do i=$((i+1)); [ $i -gt 200 ] && break; done; echo "forks=$i"' 2>&1 | tail -2)"
-record "limits:pids-limit-outcome" "$(printf '%s' "$forks" | do_tr '\n' ' ')"
-assert_match "limits:pids-limit-is-enforced" 'Cannot fork|forks=[0-9]+' "$forks"
-n="$(printf '%s' "$forks" | sed -n 's/.*forks=\([0-9]*\).*/\1/p')"
-case "$forks" in
-    *"Cannot fork"*)
+#
+# IT MEASURES BEFORE IT PROVOKES, and that ordering is the whole of #184. This block used to read
+# its verdict out of dash's fatal message -- "Cannot fork" meant enforced, "forks=201" meant not --
+# and three separate things were wrong with that.
+#   * THE GUARD'S ERE LISTED BOTH OF THEM. Those are the probe's only two non-error outputs, so
+#     limits:pids-limit-is-enforced passed on `forks=201`, which is exactly what a limit that was
+#     never applied produces. MEASURED by stripping --pids-limit from this very line: the verdict
+#     went red and the guard stayed GREEN. All it ever asserted was that the container started,
+#     under a name that claimed enforcement. RENAMING IT WOULD NOT HAVE BEEN ENOUGH -- a guard that
+#     says only "an outcome appeared" still passes that sabotage, which is why the precondition
+#     below asks for a token this file planted instead.
+#   * IT WAS A MESSAGE CLASSIFIER, and $CS193V_TEST_IMAGE is a supported knob (assert.sh's
+#     require_image): busybox's sh says "can't fork" and bash says "fork: retry: Resource
+#     temporarily unavailable", so an image whose /bin/sh is not dash made a host where the limit
+#     WORKED report two reds and a fork count it never counted. Same rule as
+#     nest:the-probe-ran-inside-the-fixture -- read a token the probe wrote, never words from
+#     somebody else's error.
+#   * ON A HOST WITH NO DELEGATED pids CONTROLLER it forked 201 host-visible `sleep 30`s to measure
+#     nothing at all -- triple the exposure README.md records for the 12-run-timeout.sh collision.
+#     Measuring first forks NONE there, and none without the flag either. Measured: 0.39s and 0.48s.
+#
+# pids.max INSIDE THE CONTAINER UNDER TEST IS THE DISCRIMINATOR, not a diagnostic: `64` when podman
+# applied the flag, `max` when the controller is delegated and nothing was written, and absent when
+# this rootless user got no pids controller at all. All three measured. That one reading separates
+# four faults the old code reported as one, and it is the same file assert_pids_floor and
+# kernel:cgroup-pids-max read -- the test VERIFICATION.md §5.5 and ERRORS.md D5 already designate
+# for delegation.
+#
+# BOTH CGROUP PATHS, because pids.max moved between v1 and v2 and MANUAL.md §5.5 aims this at WSL.
+# On a v1 layout the v2 path is simply absent, which would read as "no controller" and then be
+# DIAGNOSED as one -- the same species of fabricated finding this block is being fixed for.
+#
+# THE EXACT-MATCH GATE BEFORE THE LOOP IS LOAD-BEARING. A cap derived from whatever pids.max
+# happens to say would fork 2064 processes against an inherited 2048. It forks only when the cgroup
+# reads back the number we asked for, so there is a limit there to provoke.
+#
+# $0 IS THE PROBE'S OWN NAME, so dash's message reads `vt-pids: 0: Cannot fork` and the record says
+# which probe spoke -- the `exec -a vt-nap-$$` idea from 12-run-timeout.sh, applied to the
+# diagnostic rather than to the process.
+ASKED=64
+pids_probe='m=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max 2>/dev/null || echo absent)
+echo "vt-pids-max=$m"
+[ "$m" = "$1" ] || exit 0
+i=0; cap=$(($1 + 16))
+while [ "$i" -lt "$cap" ]; do sleep 30 & i=$((i+1)); done
+echo "vt-forked-past-the-limit=$i"'
+
+# tail -5, not -2: the reading is now the line BEFORE the outcome, and rootless podman on a host
+# where it is about to ignore the flag is free to warn ahead of both.
+pids_run() {                          # pids_run [PODMAN_FLAGS...] -> the probe's raw output
+    $VT_RUN --rm "$@" "${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}" \
+        sh -c "$pids_probe" vt-pids "$ASKED" 2>&1 | tail -5
+}
+
+# THE ADJUDICATION IS A PURE FUNCTION OF THE PROBE'S TOKENS, in the shape of 30-launcher-shim.sh's
+# floor_verdict: a token, a table of inputs below it, and live cases so the token stays tied to a
+# real container. That shape is what turns #184 from a naming convention into a test -- the table
+# holds the output of a limit that was never applied, and it cannot be green and `enforced` at the
+# same time.
+pids_verdict() {                      # pids_verdict RAW ASKED -> enforced|written-not-enforced|not-applied|undelegated|no-outcome
+    local m
+    m="$(printf '%s\n' "$1" | sed -n 's/.*vt-pids-max=\([^ ]*\).*/\1/p' | head -1)"
+    [ -n "$m" ] || { printf no-outcome; return; }
+    if [ "$m" = "$2" ]; then
+        case "$1" in
+            *vt-forked-past-the-limit=*) printf written-not-enforced ;;
+            *)                           printf enforced ;;
+        esac
+        return
+    fi
+    case "$m" in
+        max)         printf not-applied ;;   # delegated, and nothing was written
+        ''|*[!0-9]*) printf undelegated ;;   # absent/unreadable: no pids controller here at all
+        *)           printf not-applied ;;   # a number, but not the one we asked for
+    esac
+}
+
+# THE TABLE. Every string here was MEASURED off a real probe run (podman 6.0.2, the course image,
+# /bin/sh = dash) rather than composed, and the second and third rows ARE #184: the output of a
+# limit that was never applied must not read as enforced, and under the old guard it did.
+assert_eq "limits:a-limit-that-bites-reads-as-enforced" "enforced" \
+          "$(pids_verdict 'vt-pids-max=64
+vt-pids: 0: Cannot fork' "$ASKED")"
+assert_eq "limits:an-unlimited-cgroup-does-not-read-as-enforced" "not-applied" \
+          "$(pids_verdict 'vt-pids-max=max' "$ASKED")"
+assert_eq "limits:some-other-limit-does-not-read-as-enforced" "not-applied" \
+          "$(pids_verdict 'vt-pids-max=2048' "$ASKED")"
+# WRITTEN AND NOT ENFORCED IS ITS OWN ANSWER, and nothing here could see it before: a kernel that
+# ignores a limit podman really did write read identically to a flag podman dropped, and those have
+# different causes and different fixes.
+assert_eq "limits:a-limit-written-but-not-enforced-is-its-own-answer" "written-not-enforced" \
+          "$(pids_verdict 'vt-pids-max=64
+vt-forked-past-the-limit=80' "$ASKED")"
+assert_eq "limits:no-pids-controller-reads-as-undelegated" "undelegated" \
+          "$(pids_verdict 'vt-pids-max=absent' "$ASKED")"
+assert_eq "limits:a-probe-that-never-ran-reads-as-no-outcome" "no-outcome" \
+          "$(pids_verdict 'Error: unable to copy from source docker://localhost/cs193v:nope' "$ASKED")"
+
+# ...and the same function on a real container.
+raw="$(pids_run --pids-limit "$ASKED")"
+record "limits:pids-limit-outcome" "asked=$ASKED $(printf '%s' "$raw" | do_tr '\n' ' ')"
+verdict="$(pids_verdict "$raw" "$ASKED")"
+
+# THE PRECONDITION IS ITS OWN ASSERTION, and it is not a restatement of the verdict below: the
+# probe can report its cgroup and the kernel still fail to enforce what is in it, which is the
+# written-not-enforced arm. Satisfied only by a token this file put IN the probe, so podman
+# refusing, a missing image, or an `sh` that cannot read /sys lands HERE -- rather than arriving as
+# a fork count for forks that never happened, which is what it used to do.
+if [ "$verdict" = no-outcome ]; then
+    fail "limits:pids-limit-probe-read-its-own-cgroup" \
+         "the disposable container never printed vt-pids-max=, so this run measured nothing about
+--pids-limit and makes no claim either way. It tried to run
+${CS193V_TEST_IMAGE:-$TEST_IMAGE_DEFAULT}; if that tag is gone, ./cs193v --rebuild. podman said:
+$raw"
+else
+    pass "limits:pids-limit-probe-read-its-own-cgroup"
+fi
+
+case "$verdict" in
+    enforced)
+        record "limits:pids-controller-is-delegated" "YES"
         pass "limits:pids-limit-actually-stops-forking" ;;
+    written-not-enforced)
+        record "limits:pids-controller-is-delegated" "YES"
+        fail "limits:pids-limit-actually-stops-forking" \
+             "podman wrote pids.max=$ASKED into this container's own cgroup and the kernel let it
+fork past the limit anyway. Written-and-not-enforced is the one shape neither
+flag:pids-limit-is-not-dangerously-low nor kernel:cgroup-pids-max-is-not-dangerously-low can see,
+because both of those read a value and this one provokes it. The probe said:
+$raw" ;;
+    not-applied)
+        # READABLE, AND NOT THE NUMBER WE ASKED FOR. On the cgroup v2 layout this is unambiguous
+        # and it is podman's bug: the flag was accepted and dropped. It is stated as two
+        # possibilities rather than one because of the v1 fallback in the probe -- v1 has no
+        # cgroup namespace to make the container's view its own, so a readable v1 pids.max is
+        # not guaranteed to be the cgroup podman limited. Naming only the first would be the
+        # same over-confident diagnosis #184 was filed about, one layer along.
+        record "limits:pids-controller-is-delegated" "YES"
+        fail "limits:pids-limit-actually-stops-forking" \
+             "podman was asked for --pids-limit $ASKED and this container's own cgroup reads back
+something else, so nothing stopped it forking. The controller is delegated -- the file IS
+readable -- so either podman accepted the flag and dropped it, which is a podman regression and
+not a property of this host, or this is a cgroup v1 layout and the file read is not the cgroup
+podman limited. Cross-check flag:pids-limit and kernel:cgroup-pids-max above, which read the
+same value in the live container. The probe said:
+$raw" ;;
+    undelegated)
+        # A FACT ABOUT THE HOST, NOT A DEFECT OF OURS, and the reason this SKIPs rather than
+        # reddens: a red you can only clear by reconfiguring the machine is not a test of the code.
+        # 00-release-gates.sh says that of an unpushed tree and it generalises. Nothing a student
+        # uses is affected either -- this project sets no pids limit at all, and container.args
+        # rejects --cpus for exactly this reason ("frequently not delegated to rootless users, so
+        # this is silently ignored"). #131 is the same species one platform earlier:
+        # kernel:apparmor-attr pinned one host's answer, went red on Fedora's better one, and was
+        # resolved to record-not-assert.
+        #
+        # NAMED AND RECORDED RATHER THAN DROPPED, because a check that quietly disappears is the
+        # same defect as one that never ran -- and because the §A.4 note above now depends on this
+        # arm existing to keep its claim honest.
+        record "limits:pids-controller-is-delegated" "NO"
+        skip "limits:pids-limit-actually-stops-forking" \
+             "podman accepted --pids-limit $ASKED and this container's cgroup has no pids.max to read, so this rootless user got no delegated pids controller -- VERIFICATION.md §5.5 and ERRORS.md D5 name this host, and kernel:cgroup-pids-max above reads the same file in the live container" ;;
     *)
-        if [ -n "$n" ] && [ "$n" -lt 200 ]; then
-            pass "limits:pids-limit-actually-stops-forking"
-        else
-            fail "limits:pids-limit-actually-stops-forking" \
-                 "reached ${n:-200+} forks with --pids-limit 64 — the limit is not being applied"
-        fi ;;
+        record "limits:pids-controller-is-delegated" "UNKNOWN -- the probe did not run"
+        # TWO REDS FOR ONE CAUSE IS THE DESIGN, not a smell: it is what assert.sh's CHECKER_DIED
+        # does for a dead instrument, and the container tier hard-fails on a missing prerequisite
+        # rather than skipping. What it must NOT do is name a number it never measured.
+        fail "limits:pids-limit-actually-stops-forking" \
+             "nothing forked and nothing was reported, so the limit was never measured. See
+limits:pids-limit-probe-read-its-own-cgroup above for what the probe said instead." ;;
 esac
+
+# THE CONTROL LEG, and it is the one assertion that makes #184 unable to come back: the SAME probe
+# with no --pids-limit at all must not read as enforced. Under the old guard this case was GREEN,
+# which was the whole complaint. It costs one container and NO forks -- the measurement stops at
+# pids.max, which reads `max` here.
+assert_ne "limits:pids-limit-without-the-flag-is-not-enforced" "enforced" \
+          "$(pids_verdict "$(pids_run)" "$ASKED")"
 # And the real container must NOT be the one that hit the limit: pids exhaustion wedges a
 # container beyond `podman exec`'s reach and does not self-heal.
 assert_ok "limits:cs193v-itself-is-still-reachable" sh -c "podman exec ${NAME} true"

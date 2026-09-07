@@ -1296,8 +1296,10 @@ the first attempt to run a derived image.
 
 ### D5. cgroup delegation — is a rootless cgroup delegated at all?
 
-**Yes, here.** The `pids` cap is podman's default 2048 and is enforced (`sh: 0: Cannot fork`
-at `--pids-limit 64`), so the controllers really do reach uid 1000.
+**Yes, here.** The `pids` cap is podman's default 2048 and is enforced (`vt-pids: 0: Cannot fork`
+at `--pids-limit 64`, and the probe container's own `pids.max` reads back `64`), so the
+controllers really do reach uid 1000. Since #184 the probe reads `pids.max` before it forks, so
+this answer no longer rests on a shell's choice of error wording.
 
 This answers §5.5 for **Linux only**. WSL with `systemd=true` is the case that still needs
 checking, and it is the one where the answer might be that nothing is delegated.

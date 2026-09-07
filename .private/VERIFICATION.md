@@ -503,9 +503,27 @@ name or points at a deleted or unpredictable path.
 ```sh
 # pids limit: use a DISPOSABLE container. NEVER fork-bomb cs193v —
 # pids exhaustion wedges it beyond podman exec's reach and does not self-heal.
+#
+# MEASURE BEFORE YOU PROVOKE. The recipe that used to be here read its answer out of dash's
+# fatal message, and #184 is what that cost: "Cannot fork" and "forks=201" are the probe's only
+# two non-error outputs, so a check accepting either accepted the limit having been ignored.
+# The container's own pids.max is the discriminator — 64 when podman applied the flag, `max`
+# when the controller is delegated and nothing was written, absent when this rootless user got
+# no pids controller at all — and reading it first means an undelegated host forks nothing.
+# Fork ONLY on an exact match: a cap derived from whatever pids.max says would fork 2064
+# processes against an inherited 2048.
 podman run --rm --pids-limit 64 "$IMAGE" sh -c \
-  'i=0; while sleep 30 & do i=$((i+1)); [ $i -gt 200 ] && break; done; echo "forks=$i"' 2>&1 | tail -2
+  'm=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max 2>/dev/null || echo absent)
+   echo "vt-pids-max=$m"
+   [ "$m" = "$1" ] || exit 0
+   i=0; cap=$(($1 + 16)); while [ "$i" -lt "$cap" ]; do sleep 30 & i=$((i+1)); done
+   echo "vt-forked-past-the-limit=$i"' vt-pids 64 2>&1 | tail -5
 ```
+
+*Expect:* `vt-pids-max=64` and then `vt-pids: 0: Cannot fork`, and no `vt-forked-past-the-limit`
+line. `vt-pids-max=max` or a different number means podman accepted the flag and dropped it;
+`absent` means no delegated `pids` controller, which is §5.5's answer for this host and not a
+defect of ours. `60-container.sh` §A.9 adjudicates exactly these cases, and skips on the last one.
 
 ## A.10 Launcher verbs and failure paths, using shims
 

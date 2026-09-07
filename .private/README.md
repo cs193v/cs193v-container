@@ -871,8 +871,13 @@ measurements in `ERRORS.md` §D):
   traps SIGHUP and stops the container. The measurement is now the *reason the host has to do
   it*: nothing inside the container can detect a closed window, since the client never dies.
 - does `systemd=true` in WSL deliver cgroup delegation? — **still open**, but on native
-  Linux the controllers really do reach uid 1000: `limits:pids-limit-is-enforced` shows podman
-  applying `--pids-limit 64` to a disposable container.
+  Linux the controllers really do reach uid 1000: `limits:pids-limit-actually-stops-forking`
+  shows podman applying `--pids-limit 64` to a disposable container *and the kernel enforcing
+  it*, and `limits:pids-controller-is-delegated` records `YES`. On a host that delegates no
+  `pids` controller — GitHub-hosted runners are the case that matters, since they run no
+  `systemd --user` — that record says `NO` and the assertion skips rather than reddening: a red
+  you can only clear by reconfiguring the machine is not a test of this code. Until #184 the
+  assertion cited here was `limits:pids-limit-is-enforced`, which passed either way.
 - does host-side `inotify` fire? — **Yes on Linux**, as predicted. Expect not on macOS/WSL.
 - is a loopback-bound server reachable from the host? — **Yes now, and that is the point.**
   It used to be No, which was the course's central ports lesson and the reason for

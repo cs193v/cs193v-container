@@ -937,8 +937,14 @@ refute; if it reproduces, the installer needs to detect it.
 With `systemd=true` in `/etc/wsl.conf`: `.private/tests/run-tests.sh --tier container -k 60`
 *Expect:* `kernel:cgroup-pids-max` reads a number or `max`, not an error. An unreadable value
 means the rootless user got no delegated cgroup, so podman is managing no resources at all.
-*Linux baseline:* readable, and `limits:pids-limit-is-enforced` proves a limit still applies
-when podman is asked for one.
+*Read this too:* `limits:pids-controller-is-delegated` answers §5.5 directly — `YES`, `NO`, or
+`UNKNOWN` if the probe never ran — and it is measured from the disposable container's own
+`pids.max` rather than inferred from an error message.
+*Linux baseline:* readable, and `limits:pids-limit-actually-stops-forking` proves a limit still
+applies when podman is asked for one. Where nothing is delegated that assertion SKIPs with its
+reason and the record says `NO`, so a WSL run that cannot deliver delegation reports the fact
+instead of a failure. (Before #184 the assertion named here was `limits:pids-limit-is-enforced`,
+which passed whether or not the limit worked.)
 
 ### §6.1 / §6.2 / §6.3 — sleep, wake and clock drift (macOS, Windows)
 Sleep the laptop for hours — ideally two days — then:
