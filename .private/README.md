@@ -653,6 +653,37 @@ be labelled the same way — the launcher creates them implicitly with `-v name:
 stray-volume check compares against a snapshot taken when the suite started instead of sweeping
 the whole machine.
 
+**And its own images from a colleague's** (issue #199). The install tier's three host canaries
+assert that a nested build left no image on the host, and they used to `cksum` the whole of
+`podman images` — 66 rows across nine instances, on the machine this was measured on. A
+colleague's `./cs193v --rebuild` landing inside the 575-second `fedora-e2e` window added one line
+and reddened a case that behaved perfectly; the other two carry identical exposure and passed on
+that run by timing alone, which is why all three moved rather than the one that was red. Images
+have the attribution containers have and volumes do not: `fixture_build` already stamps
+`cs193v.test=$NAME` on every fixture image, so a colleague's is placed by **label** rather than by
+guessing how they spell their instance — and that is the half a tag test cannot do, because a
+stray tag of *ours* that merely looks like `local-dev3-nested` carries no such label and stays.
+Dev images carry `cs193v.buildhash` and no test label, so they are placed by exact tag and not by
+prefix: `local-htiek` and `local-htiek-dev3` are both real instances here. `host_image_rows` and
+`host_volume_rows` in `tests/lib/assert.sh` do the placing, `assert_host_state` in
+`tests/lib/sandbox.sh` does the comparing, and it compares with `comm` rather than a cksum so the
+failure names the image. Reading `expected: 342996219 3208` off #199 meant reconstructing the byte
+count from candidate lines one at a time.
+
+Because every rule in those filters *drops* rows, one that dropped them all would leave both
+snapshots empty and the canaries passing forever — so the filters are unit-tested against
+synthetic rows in `14-test-harness.sh`, both arms, in the tier that needs no podman and no second
+developer. That turns #199 from a race between two people into a fixture, the same move the
+container half made. Three limits are deliberate and worth not re-deriving. An untagged row that
+*vanished* is not reported, since that is precisely what `podman image prune` removes and anyone
+on this machine can run it; one that vanished under a tag still is, and an overwrite fails either
+way because the ID is part of the row and a new one arrives as an addition. A colleague *editing*
+a `FROM` pin mid-window still reddens it: a digest-pinned pull records no tag, so keeping
+`repo:<none>` rows is what catches a base image pulled onto the host, and the price is that a
+recipe edit next door looks the same. And `nest:host-subuid-untouched` now skips where
+`/etc/subuid` does not exist — on macOS it read nothing, compared two empty strings, and reported
+PASS on every run.
+
 The instrument is checked before anything is read through it: `live:a-neighbours-throwaway-is-not-
 counted` starts decoy containers with a *colleague's* label and an unrelated one, asserts the count
 ignores both, and then starts one with *our* label and asserts it is counted. That turns #74 into a
