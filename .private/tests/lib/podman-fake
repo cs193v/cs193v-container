@@ -21,6 +21,18 @@
 #   rootless         .Host.Security.Rootless                [true]
 #   info_rc          exit code for `podman info`            [0]
 #   state            absent | created | running | exited    [absent]
+#   inspect_rc       exit code for `podman inspect` ON A CONTAINER THAT EXISTS  [0].
+#                    Checked AFTER the state=absent arm, so `absent` keeps meaning 125 and
+#                    "the container is there but the query failed" -- issue #171's case --
+#                    becomes separately expressible. Before this knob it was not.
+#   inspect_stderr   a line `podman inspect` writes to STDERR before its answer, exiting 0.
+#                    The container twin of version_stderr, and there for the same reason:
+#                    podman warns on stderr and succeeds, and run_timeout merges the two.
+#   info_stderr      the same for `podman info`. preflight compares that answer to `true`,
+#                    so a warning there refuses the machine as "rootful" (#171).
+#   container_exists_rc  exit code for `podman container exists` [derived from state: 0 when
+#                    the container is there, 1 when it is absent]. Set it to 125 for the
+#                    "podman itself could not answer" case.
 #   label_hash       the cs193v.confighash label            [] (empty until a run)
 #   label_dir        the cs193v.dir label                   [] (empty until a run)
 #   image_exists     yes | no, for `podman image exists`    [yes]
@@ -101,6 +113,12 @@ case "${1:-}" in
         # A container that does not exist must make inspect FAIL — that is precisely how
         # the launcher's state() distinguishes absent from present.
         [ "$STATE" = absent ] && { echo "Error: no such object: \"${2:-}\"" >&2; exit 125; }
+        # The container IS there. Two ways it can still not give a usable answer, and neither
+        # was reachable before: the query fails outright, or it succeeds with noise on stderr.
+        IRC="$(get inspect_rc 0)"
+        [ "$IRC" -ne 0 ] && { echo "Error: cannot connect to podman" >&2; exit "$IRC"; }
+        ise="$(get inspect_stderr '')"
+        [ -n "$ise" ] && printf '%s\n' "$ise" >&2
         shift
         FMT=''
         while [ "$#" -gt 0 ]; do
@@ -108,6 +126,20 @@ case "${1:-}" in
             shift
         done
         fmt_container "$FMT"
+        exit 0
+        ;;
+
+    # `podman container exists` is a THREE-WAY and the launcher depends on all three: 0 present,
+    # 1 absent, 125 podman could not answer. Without this arm the top-level fall-through at the
+    # bottom of this file exits 0, which would report every absent container as present.
+    container)
+        case "${2:-}" in
+            exists)
+                RC="$(get container_exists_rc '')"
+                if [ -n "$RC" ]; then exit "$RC"; fi
+                [ "$STATE" = absent ] && exit 1
+                exit 0 ;;
+        esac
         exit 0
         ;;
 
@@ -135,6 +167,8 @@ case "${1:-}" in
 
     info)
         RC="$(get info_rc 0)"
+        ise="$(get info_stderr '')"
+        [ -n "$ise" ] && printf '%s\n' "$ise" >&2
         [ "$RC" -ne 0 ] && { echo "Error: cannot connect to podman" >&2; exit "$RC"; }
         FMT=''
         shift

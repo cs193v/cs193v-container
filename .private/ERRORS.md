@@ -1441,3 +1441,99 @@ Two smaller ones measured alongside it, also not done: `run_timeout` costs **21 
 both dispatch and `ensure_container`, `state()` likewise, and `podman image exists` from both
 `require_image` and `recipe_moved`. One `podman inspect` returning state and both labels together
 measures **34–37 ms** against **84–106 ms** for the three separate calls.
+
+### D12. podman exits **0** and warns on stderr, and `RT_OUT` merged the two (issue #171)
+
+`run_timeout` captured the command's stdout and stderr into one file (`( "$@" >"$tmp" 2>&1 )`, both
+branches), so `RT_OUT` was "what the command said" rather than "what the command answered". Every
+read in the launcher that uses an answer as a **value** was therefore one podman warning away from
+being wrong — and podman does not need to be broken to warn. One unrecognised key in
+`storage.conf` is enough, on podman 5.8.4:
+
+```
+$ printf '[storage]\ndriver = "overlay"\nbogus_key_here = "x"\n' > st.conf
+$ CONTAINERS_STORAGE_CONF=./st.conf podman inspect cs193v --format '{{.State.Status}}' 2>&1
+rc=0
+time="..." level=warning msg="Failed to decode the keys [\"storage.bogus_key_here\"] from \"./st.conf\""
+exited
+```
+
+**The worst manifestation was not one of the eleven sites issue #171 lists.** `preflight` compares
+that answer to the string `true`:
+
+```sh
+if ! pm info --format '{{.Host.Security.Rootless}}'; then die "$(msg err.podman-unreachable)"; fi
+if [ "$RT_OUT" != "true" ]; then die "$(msg err.rootful)"; fi
+```
+
+so `level=warning …\ntrue` is not `true`, and a bare `./cs193v` on a perfectly healthy rootless
+machine died with `err.rootful` — "Podman is running in rootful mode… **This is not something to
+work around**", contact staff, no fix named. Reproduced on the real launcher; reverting the one word
+below brings it straight back. Being in `preflight`, it fired **ahead of** all eleven sites, so
+grading those would have left that student stuck regardless.
+
+`doctor` quoted the warning in six fields at once (`podman sees`, `image built`, `container`,
+`started`, `config`, `workspace`), which matters more than it looks: doctor is the report a student
+is told to paste, so the first facts staff read were wrong ones. Its `config` line also turned the
+noise into `STALE — run cs193v and accept the recreate prompt`, advice for a prompt the launch path
+does not show — **B14 arriving a second way**, from the label rather than from the image pin.
+
+Ruled out, measured: `podman --log-level=error` does **not** suppress it, and neither does
+`--log-level=fatal`. The line comes from the containers/storage config loader, outside the logrus
+level filter. There is no podman-side quiet flag to reach for.
+
+**Fixed by not merging the streams for those reads**, rather than by detecting contamination:
+`RT_BARE` makes `run_timeout` discard the command's stderr, and `pmv` sets it (along with clearing
+`RT_SPIN`/`RT_ROW`, which is a *separate* channel — `run_timeout` prints its label to its own
+stdout, and every one of these reads is a `$( )`). Default off, because the readers that *want*
+stderr are the ones reporting a failure rather than using an answer — `podman_version_of`,
+`create_container`'s ENOSPC and "already in use" matching, `err.create-failed`'s `OUT=` — and
+`12-run-timeout.sh`'s `rt:captures-stderr` is the assertion that it stays that way.
+
+A rejected alternative worth recording: making `pmv` reject any answer longer than one line. It
+catches the same input, but it *refuses* a machine whose answer is recoverable — with the streams
+separated the value reads simply return `exited` and the launcher works, whereas the line rule
+would have turned one stray config key into a hard refusal. It also would not have covered the
+`RT_SPIN` channel, which contaminates the command substitution rather than `RT_OUT`. And container
+labels can legitimately contain newlines: `org.opencontainers.image.description` on the Ubuntu base
+image does.
+
+### D13. `podman container exists` is a three-way; `podman inspect` is not (issue #171)
+
+`state()` read a failed query as `absent`, so six sites gated an action on a read that failed open —
+#140 layer 2 is one of them. The tie cannot be broken by `inspect`'s status, measured on 5.8.4:
+
+| | present | genuinely absent | query broken (`CONTAINER_HOST` unreachable) |
+| --- | --- | --- | --- |
+| `podman inspect … --format` | 0 | **125** | **125** |
+| `podman container exists` | 0 | **1** | **125** |
+| `podman image exists` | 0 | 1 | 125 |
+
+So `container exists` answers in a status alone, and it is the container twin of the
+`pmq image exists` the launcher already used in three places. `state()` now asks it as a **second**
+question, and **only on 125** — which is not an optimisation. 124 is `run_timeout`'s ceiling, i.e.
+the woken Mac this wrapper exists for (#157), and asking again there spends a second 20-second
+ceiling. Measured with a hung podman: the ungated form doubles a teardown from 20 s to 40 s, and
+`stop_container` runs when the student closes their window. On 125 the second call is instant,
+because a podman that cannot connect says so at once. `run_timeout`'s own failed-`mktemp` 125 lands
+in the same "could not answer" bucket rather than in "absent", which is the right side of it.
+
+Also rejected, having established that it would work:
+`podman ps -a --filter 'name=^X$' --format '{{.State}}'` gives status, labels and a disambiguating
+rc in **one** call — rc 0 with a record present, rc 0 and empty absent, rc 125 on error, and the
+name filter really is a regex (`--filter 'name=cs.93v'` matches, so `^…$` anchors). `cmd/podman/
+containers/ps.go`'s `psReporter` defines no `State()`, so `{{.State}}` is `ListContainer.State`,
+set from the same `define.ContainerStatus.String()` that `inspect`'s `.State.Status` uses — the
+vocabularies agree. Declined anyway: `podman ps` has a `--sync` flag precisely because its state can
+lag the OCI runtime, and a stale `running` feeding `refuse_if_session_live` is the wrong-refusal
+failure `.private/README.md` ranks worst.
+
+**The per-site split, which is the part worth remembering.** `.private/README.md` says a wrong
+refusal ranks below a leak because a refusal can lock a student out. That holds *while podman is
+answering*, and it assumes an exit exists — so an unreadable read refuses in the **bare launch**
+(`ensure_container`, `refuse_if_foreign_dir`), whose alternative is guessing and whose `podman start`
+failure path runs `podman rm -f`, and **acts** in the maintenance verbs (`--stop`,
+`--reset-tunnel`, and `--rebuild`, whose remove-and-recreate is the cure for the damaged container
+entry that produces this). `refuse_if_session_live` needed no change at all: proceeding on an
+unknown is already that rule. Refusing in `--rebuild` would have closed the last exit, because
+`--stop` reports success either way.

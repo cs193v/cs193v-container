@@ -891,6 +891,18 @@ build_progress() {                    # build_progress [RETRY] [FLOOR]
 # launcher look frozen with no output at all.
 pm()  { run_timeout 20 podman "$@"; }     # a podman call that should be quick
 pmq() { run_timeout 20 podman "$@" >/dev/null 2>&1; }
+# A read whose ANSWER IS USED AS A VALUE, as against one whose failure is reported. Three
+# differences from pm, and all three are #171 (see RT_BARE in cs193v-ui.sh for the measurements):
+#
+#   * RT_BARE, so podman's stderr is not merged into the answer. A podman that warns and exits 0
+#     otherwise puts the warning ahead of every value this launcher reads.
+#   * RT_SPIN AND RT_ROW CLEARED, and this is a SEPARATE channel that RT_BARE does not cover:
+#     run_timeout prints its label to its OWN stdout when stdout is not a tty, and every caller
+#     of these reads is a `$( )`, whose stdout is a pipe -- so the label lands in the captured
+#     value rather than in RT_OUT. rebuild_interrupted documents that bug and clears RT_SPIN on
+#     the one path it knew about; doing it here means no path can reintroduce it.
+#   * `local`, so both reach run_timeout by dynamic scoping and neither escapes the read.
+pmv() { local RT_SPIN='' RT_ROW='' RT_BARE=1; pm "$@"; }
 
 # podman that is INSTALLED AND INVISIBLE: issue #121, whose whole mechanism is written up at
 # PODMAN_PKG_ID above. Repairs THIS process's PATH, and every child's, when podman is installed
@@ -1320,7 +1332,13 @@ preflight() {
         die "$(msg err.podman-too-old FOUND="$ver" NEED="$floor")"
     fi
 
-    if ! pm info --format '{{.Host.Security.Rootless}}'; then
+    # pmv, NOT pm, and it is the most consequential word in #171. The next line compares this
+    # answer to a STRING, so a podman that warns on stderr and exits 0 -- one unrecognised key in
+    # storage.conf is enough -- answers `level=warning ...\ntrue`, and this refuses the machine
+    # with err.rootful: "not something to work around", contact staff, no fix named. Measured
+    # against podman 5.8.4 on a machine that was working perfectly. It is also ahead of every
+    # other site #171 lists, so grading those would have left this student stuck regardless.
+    if ! pmv info --format '{{.Host.Security.Rootless}}'; then
         die "$(msg err.podman-unreachable)"
     fi
     if [ "$RT_OUT" != "true" ]; then
@@ -1337,15 +1355,54 @@ preflight() {
 }
 
 # ─── container state ───────────────────────────────────────────────────────────
-state() {                             # -> absent | created | exited | running | ...
-    if pm inspect "$NAME" --format '{{.State.Status}}'; then printf '%s' "$RT_OUT"
-    else printf 'absent'; fi
+# Did a read that exited 125 mean "there is no container", or "podman could not answer"? The read
+# itself cannot say -- `podman inspect` uses 125 for both -- and `podman container exists` can, in
+# a status alone: 0 present, 1 absent, anything else podman itself. The container twin of the
+# `pmq image exists` this file already uses in three places.
+#
+# ONLY EVER ASKED AFTER A READ HAS ALREADY FAILED, so a healthy launch never pays for it.
+container_absent() {                  # -> 0 if there is genuinely no container
+    pmq container exists "$NAME"
+    [ "$?" -eq 1 ]
 }
 
-label_of() { pm inspect "$NAME" --format "{{index .Config.Labels \"$1\"}}" && printf '%s' "$RT_OUT"; }
+# `unreadable` IS NOT A PODMAN STATUS. It means the query did not answer, and it exists because
+# this function used to say `absent` for that -- so six sites gated an action on a read that
+# failed open (#171, and #140 layer 2 is one of them).
+#
+# THE TIE IS BROKEN BY A SECOND QUESTION, because the first one cannot: `podman inspect` exits
+# 125 both for "no such container" and for "cannot reach podman". `podman container exists`
+# answers in a status alone -- 0 present, 1 absent, anything else podman itself -- which is the
+# container twin of the `pmq image exists` this file already uses in three places.
+#
+# ASKED ONLY ON 125, AND THAT IS NOT AN OPTIMISATION. 124 is run_timeout's ceiling, which is the
+# woken Mac this whole wrapper exists for (#157); asking again there spends a SECOND 20-second
+# ceiling, and stop_container runs when the student closes their window. Measured: the ungated
+# form doubles a hung teardown from 20s to 40s. On 125 the second call is instant, because a
+# podman that cannot connect says so at once rather than hanging. Every other code -- 126 from a
+# contaminated read, 128+N from a signal, run_timeout's own 125 from a failed mktemp -- is
+# already unambiguous, and asking twice would buy nothing.
+state() {                             # -> absent | created | exited | running | ... | unreadable
+    local rc
+    pmv inspect "$NAME" --format '{{.State.Status}}'; rc=$?
+    case "$rc" in
+        0)   printf '%s' "$RT_OUT"; return 0 ;;
+        125) : ;;
+        *)   printf 'unreadable'; return 0 ;;
+    esac
+    if container_absent; then printf 'absent'; else printf 'unreadable'; fi
+}
+
+# pmv AND NO THIRD ANSWER, deliberately. All five callers of these two want "unknown -> do not
+# act", which an empty value already gives them, and that is the documented rule -- see
+# recipe_moved below and .private/README.md's "an unlabelled image never nags". What they needed
+# was not a way to say "the query failed" but for a warning on stderr to stop arriving as part of
+# the label: refuse_if_foreign_dir compared `level=warning ...\n/home/me/cs193v` against $DIR and
+# died naming the warning as the folder in use.
+label_of() { pmv inspect "$NAME" --format "{{index .Config.Labels \"$1\"}}" && printf '%s' "$RT_OUT"; }
 # The image's own labels, as against label_of's container labels. Used for
 # cs193v.buildhash; see build_hash.
-image_label_of() { pm image inspect "$1" --format "{{index .Labels \"$2\"}}" && printf '%s' "$RT_OUT"; }
+image_label_of() { pmv image inspect "$1" --format "{{index .Labels \"$2\"}}" && printf '%s' "$RT_OUT"; }
 
 # A fingerprint of the RECIPE: the Containerfile plus every file COPY reaches. Baked into
 # the image as a label at build time and compared against the on-disk files at launch, so
@@ -2195,6 +2252,23 @@ ensure_container() {
         return
     fi
 
+    # THE BRANCH WITH TEETH (#171). Everything below acts on what the container IS, and an
+    # unreadable read used to arrive here as `absent` -- so the launcher created one, podman
+    # refused the name, and the student was told they already had a session open in another
+    # window. Worse, had it got past that, the tail of this function runs `podman start` and
+    # removes and recreates the container when that fails: `podman rm -f` on a container that
+    # may be perfectly fine and that somebody may be working in.
+    #
+    # REFUSING IS RIGHT *HERE* AND WRONG IN THE MAINTENANCE VERBS, which is the whole of the
+    # per-site decision. .private/README.md ranks a wrong refusal below a leak because a refusal
+    # can lock a student out -- but that reasoning is about liveness while podman is answering,
+    # and it assumes an exit exists. It does: --stop acts on an unreadable read, and so does
+    # --rebuild, whose remove-and-recreate is the cure for the damaged entry that produces this.
+    # What must not happen is a bare `./cs193v` guessing.
+    if [ "$st" = unreadable ]; then
+        die "$(msg err.podman-unreachable)"
+    fi
+
     refuse_if_foreign_dir
 
     want_hash="$(config_hash)"
@@ -2294,7 +2368,15 @@ stop_container() {
     # is the failure remove_container documents, and skipping this on the "nothing to do" path
     # is how it would come back.
     tunnel_down
-    [ -n "$was_running" ] && pmq stop -t 3 -i "$NAME"
+    # UNCONDITIONAL, AND THE GUARD ABOVE IS NOW ONLY THE MESSAGE'S (#140 layer 2, #171). This
+    # read fails open: `state` answered `absent` whenever the query failed, so on the macOS
+    # teardown #140 measured, `was_running` was empty, no stop was ever issued, and closing the
+    # window left the container up -- the one promise #41 exists to make. `podman stop -t 3 -i`
+    # is idempotent and `-i` ignores a container that has gone (verified: rc 0, no output), so
+    # there is nothing for the guard to protect. What it was ever for is stated above: nothing
+    # announces that it is stopping a container which is not running. That is a message concern,
+    # and the message is still gated.
+    pmq stop -t 3 -i "$NAME"
     return 0
 }
 
@@ -2372,8 +2454,28 @@ refuse_if_session_live() {
 # Ownership is the more specific diagnosis, so it wins. 30-launcher-shim.sh's foreign-dir group
 # is the regression test.
 refuse_if_foreign_dir() {
-    local owner_dir
-    owner_dir="$(label_of cs193v.dir)"
+    local owner_dir rc
+    # `local` ON ITS OWN LINE, because `local x="$(f)"` returns local's status and not f's --
+    # the gotcha open_shell documents. The rc is free: label_of is a `&&` chain, so a failed
+    # read is already its exit status.
+    owner_dir="$(label_of cs193v.dir)"; rc=$?
+    # AN UNREADABLE LABEL IS NOT "NO LABEL" (#171). Both used to arrive here as the empty string,
+    # and empty means "no container, or one made before the label existed" -- so a failed read
+    # meant this check silently passed, and the student got the old container with the old mount
+    # while believing they were working in this folder. That is the one failure in #171 that can
+    # cost somebody work, which is why this refuses rather than warning.
+    #
+    # SAME KEY AS ensure_container's, deliberately: it is the same fault, and one fault should
+    # not have two voices. And it still leaves an exit -- only the bare launch arm calls this, so
+    # --stop and --rebuild both remain reachable.
+    # 125 IS AMBIGUOUS HERE FOR THE SAME REASON IT IS IN state(), and forgetting that turned the
+    # ordinary first launch -- no container yet, so `inspect` exits 125 -- into this refusal. So
+    # the same second question decides it, and only a 125 that is NOT an absent container is a
+    # failure worth refusing over.
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -eq 125 ] && container_absent && return 0
+        die "$(msg err.podman-unreachable)"
+    fi
     [ -n "$owner_dir" ] || return 0
     [ "$owner_dir" = "$DIR" ] && return 0
     die "$(msg err.other-directory INUSE="$owner_dir" YOURS="$DIR")"
@@ -2571,7 +2673,7 @@ verb_doctor() {
     fi
 
     if has_machine; then
-        pm machine list --format '{{.Name}} {{.Running}}'
+        pmv machine list --format '{{.Name}} {{.Running}}'
         printf '  %-16s %s\n' "machine" "${RT_OUT:-none}"
     fi
 
@@ -2583,9 +2685,9 @@ verb_doctor() {
     # Linux box that had not timed out and was not a Mac. The fields that exist everywhere are
     # asked for together; the one that does not is asked for on its own and simply omitted when
     # podman has never heard of it.
-    if pm info --format '{{.Host.MemTotal}} {{.Host.CPUs}}'; then
+    if pmv info --format '{{.Host.MemTotal}} {{.Host.CPUs}}'; then
         local seen="$RT_OUT"
-        if pm info --format '{{.Host.RootlessNetworkCmd}}'; then seen="$seen $RT_OUT"; fi
+        if pmv info --format '{{.Host.RootlessNetworkCmd}}'; then seen="$seen $RT_OUT"; fi
         printf '  %-16s %s\n' "podman sees" "$seen"
     else
         printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
@@ -2598,7 +2700,7 @@ verb_doctor() {
     load_args
     if pmq image exists "$IMAGE"; then
         printf '  %-16s %s\n' "image" "$IMAGE (built here)"
-        pm image inspect "$IMAGE" --format '{{.Created}}'
+        pmv image inspect "$IMAGE" --format '{{.Created}}'
         printf '  %-16s %s\n' "image built" "${RT_OUT:-?}"
         local hb
         hb="$(image_label_of "$IMAGE" cs193v.buildhash)"
@@ -2635,19 +2737,38 @@ verb_doctor() {
         exited)  printf '  %-16s %s\n' "" "normal — nothing is open right now" ;;
         running) printf '  %-16s %s\n' "" "a terminal window has this open. If you have none"
                  printf '  %-16s %s\n' "" "open, one was force-quit — run: cs193v --stop" ;;
+        # A THIRD ANSWER, matching the three-way this report already draws for podman itself
+        # above. It used to print `absent` for a container that was demonstrably running (#171),
+        # which is the worst thing this particular report can do: doctor is what a student pastes
+        # when asking for help, so the first fact staff read was a wrong one.
+        unreadable)
+                 printf '  %-16s %s\n' "" "podman did not answer — the lines below are missing"
+                 printf '  %-16s %s\n' "" "for that reason, not because nothing is set up." ;;
     esac
-    if [ "$st" != absent ]; then
-        pm inspect "$NAME" --format '{{.State.StartedAt}}'
-        printf '  %-16s %s\n' "started" "$RT_OUT"
-        local hv hw; hv="$(label_of cs193v.confighash)"; hw="$(config_hash)"
-        if [ "$hv" = "$hw" ]; then printf '  %-16s %s\n' "config" "matches container.args"
-        else printf '  %-16s %s\n' "config" "STALE — run cs193v and accept the recreate prompt"; fi
-        pm inspect "$NAME" --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DST\"}}{{.Source}}{{end}}{{end}}"
-        printf '  %-16s %s\n' "workspace" "${RT_OUT:-?}"
-    fi
+    # NEITHER absent NOR unreadable, and the second is why this is a `case`. These lines each
+    # read the container, so on an unreadable state they would each ask again and print whatever
+    # came back -- and the config line in particular used to turn an unanswered read into
+    # "STALE — accept the recreate prompt", advice for a prompt the launch path does not show.
+    case "$st" in
+        absent|unreadable) : ;;
+        *)  pmv inspect "$NAME" --format '{{.State.StartedAt}}'
+            printf '  %-16s %s\n' "started" "$RT_OUT"
+            # THREE BRANCHES, like the image-recipe block above and for the same reason. An
+            # EMPTY label is not a stale one: it is a container made before the label existed,
+            # or by a bare `podman run`, and the launch path treats that as "do not nag" -- so
+            # calling it STALE sent a student to accept a recreate prompt that never appears.
+            # That is ERRORS.md B14 arriving from the other side (#171).
+            local hv hw; hv="$(label_of cs193v.confighash)"; hw="$(config_hash)"
+            if   [ -z "$hv" ];      then printf '  %-16s %s\n' "config" "not recorded (made by hand, or before this was tracked)"
+            elif [ "$hv" = "$hw" ]; then printf '  %-16s %s\n' "config" "matches container.args"
+            else printf '  %-16s %s\n' "config" "STALE — run cs193v and accept the recreate prompt"; fi
+            pmv inspect "$NAME" --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DST\"}}{{.Source}}{{end}}{{end}}"
+            printf '  %-16s %s\n' "workspace" "${RT_OUT:-?}"
+            ;;
+    esac
 
     if [ "$st" = running ]; then
-        pm exec "$NAME" sh -c 'echo "$(id -u):$(id -g)"'
+        pmv exec "$NAME" sh -c 'echo "$(id -u):$(id -g)"'
         printf '  %-16s %s (host is %s:%s)\n' "in-container uid" "$RT_OUT" "$(id -u)" "$(id -g)"
         # SPLIT BY PARENT, because the bare count this replaced needed a footnote in three
         # documents. A zombie is its PARENT's business: PID 1 collects the ones reparented onto
@@ -2658,7 +2779,7 @@ verb_doctor() {
         #
         # The ps runs bare and the split happens HERE, so there is no awk quoted inside an
         # `sh -c` inside a `podman exec` to get wrong.
-        pm exec "$NAME" ps -eo ppid,stat --no-headers
+        pmv exec "$NAME" ps -eo ppid,stat --no-headers
         printf '  %-16s %s\n' "zombies" "$(printf '%s\n' "${RT_OUT}" \
             | awk 'NF >= 2 { seen++ }
                    $2 ~ /Z/ { t++; if ($1 == 1) n++ }
@@ -2683,7 +2804,7 @@ verb_doctor() {
 # container outlived it. Two clients on one session is no longer reachable at all.
 tmux_doctor() {
     local out
-    if pm exec "$NAME" tmux -L cs193v list-sessions \
+    if pmv exec "$NAME" tmux -L cs193v list-sessions \
            -F '#{session_name} #{session_windows}w #{session_attached} attached' 2>/dev/null; then
         out="$RT_OUT"
     else
@@ -2734,7 +2855,7 @@ tunnel_doctor() {
     # dynamic line at all. run_timeout leaves the output in RT_OUT, which is how every other
     # probe in this report reads its answer.
     ports=''
-    pm exec "$NAME" cat /tmp/cs193v/ports && ports="$RT_OUT"
+    pmv exec "$NAME" cat /tmp/cs193v/ports && ports="$RT_OUT"
     # AND IF THAT READ FAILS, SAY NOTHING EXTRA. verb_doctor has already run four probes through
     # this same container by the time it reaches here, each of which renders visibly empty when
     # podman is not answering. A fifth line saying so would be noise on top of a diagnosis the
@@ -2786,7 +2907,7 @@ tunnel_doctor() {
 check_clock() {
     local hs cs skew
     hs="$(date +%s)"
-    pm exec "$NAME" date +%s || return 0
+    pmv exec "$NAME" date +%s || return 0
     cs="$RT_OUT"
     case "$cs" in ''|*[!0-9]*) return 0 ;; esac
     skew=$(( cs - hs )); [ "$skew" -lt 0 ] && skew=$(( -skew ))
@@ -2888,10 +3009,17 @@ verb_rebuild() {
 # keystroke from stopping the session they are actually using.
 verb_stop() {
     preflight; load_args
-    if [ "$(state)" != running ]; then
-        info "$(msg status.already-stopped)"
-        return 0
-    fi
+    # `unreadable` COUNTS AS "MAY BE RUNNING" (#171). "The container is not running, so there is
+    # nothing to stop" is a claim, and on an unreadable read it is a claim we cannot make -- so
+    # this used to answer it in the one situation the verb exists for. The student who needs
+    # --stop is the one whose window was force-quit or whose Mac has slept, and a slept Mac is
+    # exactly what makes `podman inspect` hang rather than fail (#157). Acting is safe: the stop
+    # is prompted first, and stop_container's `-i` makes it a no-op if there is nothing there.
+    case "$(state)" in
+        running|unreadable) : ;;
+        *)  info "$(msg status.already-stopped)"
+            return 0 ;;
+    esac
     printf '\n'; msg prompt.stop
     if ! confirm "$(msg opt.cancel)" "$(msg opt.stop-go)"; then
         info "$(msg status.cancelled)"; return 0
@@ -2931,10 +3059,15 @@ verb_reset_tunnel() {
     # 4. Only now is it meaningful to ask who still holds the ports. Anything left is NOT ours
     #    -- it is another program on the student's computer -- and naming it is the difference
     #    between a fixable problem and a mystery.
-    if [ "$(state)" != running ]; then
-        warn "$(msg warn.tunnel-reset-not-running)"
-        return 0
-    fi
+    # `unreadable` FALLS THROUGH TO THE REBUILD (#171). Steps 1-3 above have already killed the
+    # master and deleted the socket, so returning here leaves the student with no tunnel AND a
+    # message about a container -- from a verb whose entire job is fixing the tunnel. Trying is
+    # cheap and already forgiving: ensure_tunnel's failure is reported by ensure_tunnel.
+    case "$(state)" in
+        running|unreadable) : ;;
+        *)  warn "$(msg warn.tunnel-reset-not-running)"
+            return 0 ;;
+    esac
     ensure_tunnel || return 1
     info "$(msg status.tunnel-reset)"
 }
