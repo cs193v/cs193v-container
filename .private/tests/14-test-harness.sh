@@ -395,6 +395,36 @@ assert_contains "assert-fail:rejects-126" "FAIL  rc126:cannot-be-run" "$out"
 assert_contains "assert-fail:rejects-127" "FAIL  rc127:cannot-be-run" "$out"
 assert_contains "assert-fail:still-rejects-success" "FAIL  rc0:succeeded" "$out"
 
+# ─── ...and a refusal that IS the assertion is read from the message (#149) ────
+# WHY THIS IS A UNIT TEST, for the reason the ceiling block below gives: the thing under test
+# decides which podman answers mean "the container refused", and the HOST decides which of them a
+# real run can produce. A Mac only ever produces 125 and a native Linux only ever 255, so no
+# behavioural case can exercise both arms. These fakes can.
+#
+# THE FOUR NEGATIVE ARMS ARE THE POINT. A message assertion is only worth having if it rejects the
+# other things a 125 can mean, and on a remote client 125 is also an absent container and a podman
+# that cannot be reached. The measured matrix is in assert_fail_saying's header.
+cat > "$WORK/saying.sh" <<'CHILD'
+set -u
+. "$1"
+P='can only create exec sessions on running containers'
+M="Error: $P: container state improper"
+assert_fail_saying "saying:the-refusal-remote-125" "$P" sh -c "echo \"$M\" >&2; exit 125"
+assert_fail_saying "saying:the-refusal-local-255"  "$P" sh -c "echo \"$M\" >&2; exit 255"
+assert_fail_saying "saying:an-unreachable-podman"  "$P" sh -c 'echo "Cannot connect to Podman. Error: unable to connect to Podman socket" >&2; exit 125'
+assert_fail_saying "saying:an-absent-container"    "$P" sh -c 'echo "Error: no container with name or ID \"x\" found: no such container" >&2; exit 125'
+assert_fail_saying "saying:a-podman-that-is-not-installed" "$P" sh -c 'echo "podman: command not found" >&2; exit 127'
+assert_fail_saying "saying:a-container-that-was-running"   "$P" true
+CHILD
+out="$(CS193V_RESULTS="$WORK/saying.tsv" CS193V_SUITE=saying \
+       bash "$WORK/saying.sh" "$TESTS_DIR/lib/assert.sh" 2>&1)"
+assert_contains "assert-saying:accepts-the-remote-clients-125"  "PASS  saying:the-refusal-remote-125" "$out"
+assert_contains "assert-saying:accepts-the-local-clients-255"   "PASS  saying:the-refusal-local-255"  "$out"
+assert_contains "assert-saying:rejects-an-unreachable-podman"   "FAIL  saying:an-unreachable-podman"  "$out"
+assert_contains "assert-saying:rejects-an-absent-container"     "FAIL  saying:an-absent-container"    "$out"
+assert_contains "assert-saying:rejects-a-missing-podman"        "FAIL  saying:a-podman-that-is-not-installed" "$out"
+assert_contains "assert-saying:rejects-a-container-that-ran-it" "FAIL  saying:a-container-that-was-running" "$out"
+
 # ─── a record carries its VALUE into the results file ─────────────────────────
 # WHY THIS IS THE HARNESS'S BUSINESS AND NOT COSMETIC. `record` is how every platform-dependent
 # number reaches a human, and the line it wrote was `REC<TAB>suite<TAB>name` with the value

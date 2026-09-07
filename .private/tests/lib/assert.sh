@@ -287,11 +287,19 @@ $out"; fi
 # refusing before it started a container, a file that is not executable, a binary that is not
 # installed. Six `podman run --rm` sites in 50-image.sh are assert_fails, so a podman that could
 # not start the throwaway made every one of them green with no container created -- and `srv_up`
-# in 70-sighup.sh is a bare curl, which exits 127 if curl is missing.
+# in 70-sighup.sh is a bare curl, which exits 127 if curl is missing. Three more assert_fails exec
+# into the container and assert on the INNER command's exit 1 (80-launcher-live.sh:580 and :607,
+# 90-setup-git-github.sh:256); a real inner failure is 1 on both clients, MEASURED, so an absent
+# container or an unreachable podman is exactly the 125 the band keeps out of them.
+#
+# THE BAND IS NOT THE WHOLE GUARD AT THOSE THREE, and it is worth saying which half it is. It
+# covers the 125s -- no such container, podman unreachable. It does NOT cover a container that is
+# merely STOPPED, because that refusal is 255 from a local client and sails straight through;
+# hold_container is what covers that, and 80-launcher-live.sh:548-551 is where it says so.
 #
 # MEASURED before narrowing the band, because the point is to keep the refusals this suite
-# deliberately provokes: `podman run` on a missing image is 125, and `podman exec` into a stopped
-# container -- which sighup:a-stopped-container-accepts-no-exec exists to provoke -- is 255.
+# deliberately provokes: `podman run` on a missing image is 125 on either client. A refusal that
+# IS the thing under test cannot come through here at all -- see assert_fail_saying below (#149).
 assert_fail() {                       # assert_fail NAME CMD...  (must exit non-zero, having RUN)
     local n="$1"; shift
     local out rc
@@ -304,6 +312,55 @@ $out"
 asserts: $*
 $out"
     else pass "$n"; fi
+}
+
+# A FAILURE THAT HAS TO BE THE RIGHT FAILURE -- for the one kind of assertion the band above
+# cannot carry: a podman refusal that IS the thing under test (#149).
+#
+# `podman exec` into a stopped container answers with the CLIENT's exit code, not the container's.
+# MEASURED on both floors this course supports and the two above them, in this suite's own nesting
+# fixtures, against a genuinely exited container:
+#
+#     podman   local client   remote client
+#      4.9.3        255            125          MIN_PODMAN_LINUX
+#      5.7.0        255            125          MIN_PODMAN_MACOS
+#      5.8.4        255            125
+#      6.0.2        255            125
+#
+# ...with `can only create exec sessions on running containers: container state improper`
+# byte-identical in all eight cells, and unchanged under five locales -- podman is a Go binary with
+# hardcoded error strings. So the axis is remote-vs-local, not macOS-vs-Linux and not version: a
+# Linux developer on a remote socket sees the same 125.
+#
+# WHY THE PHRASE AND NOT THE DIGIT. On a remote client the digit cannot answer at all -- the
+# refusal under test, `podman run` on a missing image, an absent container, and a podman that
+# cannot be reached are ALL 125. Same shape as state()'s second question in the launcher
+# (ERRORS.md D13): the first question cannot break the tie and this one can.
+#
+# PIN THE MOST SPECIFIC PHRASE. `container state improper` is ErrCtrStateInvalid's shared text --
+# `podman kill` and `podman pause` on the same container emit it under different prefixes -- so
+# matching that half, or an alternation of the two, would accept a refusal that is not the one
+# asserted.
+#
+# NOT assert_says, DELIBERATELY. _flatten exists for box art, which podman errors do not have, and
+# folding $rc into the haystack to get it into the diagnostic would let a phrase match the prefix
+# rather than the output. The case below keeps the haystack exactly as the command emitted it.
+assert_fail_saying() {                # assert_fail_saying NAME PHRASE CMD...
+    local n="$1" want="$2"; shift 2
+    local out rc
+    out="$("$@" 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "$n" "expected it to fail saying: $want
+but it succeeded: $*
+$out"
+        return 0
+    fi
+    case "$out" in
+        *"$want"*) pass "$n" ;;
+        *) fail "$n" "exit $rc, but it does not say: $want
+so it failed for some other reason than the one asserted: $*
+$out" ;;
+    esac
 }
 
 assert_exit() {                       # assert_exit NAME WANT_RC CMD...

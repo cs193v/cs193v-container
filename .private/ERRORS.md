@@ -1625,3 +1625,73 @@ the host figures. The arms are now ordered most-specific-first — `*MemTotal*CP
 `*RootlessNetworkCmd*`, `*Security.Rootless*` — so each of the five templates in the repo matches
 exactly one, and `rootless` is passed through un-normalised because `preflight` now reads it three
 ways.
+
+### D15. The exec refusal's exit code is the CLIENT's, not the container's (issue #149)
+
+`assert_fail` fails 125–127 as "the command could not be RUN", and its comment recorded that the
+refusal `sighup:a-stopped-container-accepts-no-exec` exists to provoke is **255**, safely outside
+the band. That measurement was taken on a local client and is true on only half the supported
+configurations. Measured against a genuinely `exited` container, 3/3 each, in this suite's own
+nesting fixtures (`podman-old-nested` 4.9.3, `machine` 5.7.0, `fedora-nested` 5.8.4) and on macOS:
+
+| podman | local client | remote client |
+| --- | --- | --- |
+| 4.9.3 (`MIN_PODMAN_LINUX`) | **255** | **125** |
+| 5.7.0 (`MIN_PODMAN_MACOS`) | **255** | **125** |
+| 5.8.4 | **255** | **125** |
+| 6.0.2 | **255** | **125** |
+
+`Error: can only create exec sessions on running containers: container state improper` is
+byte-identical in all eight cells, and unchanged under `LC_ALL` of `C`, `en_US`, `fr_FR`, `de_DE`
+and `ja_JP` — podman is a Go binary with hardcoded error strings. So the axis is **remote-vs-local,
+not macOS-vs-Linux and not version**: a Linux developer driving a remote socket hits it too. 125 is
+inside the band, so the assertion was red on every Mac against a launcher doing the right thing.
+
+**The band could not simply be widened**, which is the part worth remembering. This is D13's
+collision one level up: on a remote client the refusal under test is indistinguishable *by status*
+from three other things, and one of them is podman being broken.
+
+| remote client, macOS | status |
+| --- | --- |
+| `podman exec` into a stopped container — the refusal under test | **125** |
+| `podman run --rm` on a missing image | **125** |
+| `podman exec` into an absent container | **125** |
+| `podman exec` with `CONTAINER_HOST` unreachable | **125** (`Cannot connect to Podman …`) |
+| `podman exec` into a **running** container, inner command exits 1 | 1 (same locally) |
+| `podman exec` into a running container, inner binary missing | 127 (same locally) |
+
+Admitting 125 as a real failure when the client is remote would therefore have made nine
+`assert_fail` sites pass for free — the six `podman run --rm` ones in `50-image.sh` and the three
+that exec and assert on the inner command (`80-launcher-live.sh:580`, `:607`,
+`90-setup-git-github.sh:256`) — and done it *only on macOS*, the platform the bug showed up on. It
+would also have made this very assertion green against a podman that could not be reached.
+
+So the band is unchanged and the one site that provokes a refusal deliberately asserts on the
+**message**, through `assert_fail_saying` in `lib/assert.sh`. Same reasoning as D13: the tie is
+broken by a second question because the first one cannot answer.
+
+**Which half of the message to pin, also measured.** Both halves are separate literals in the
+podman binary (`grep -a` finds each on its own), joined by Go's `: ` wrapping, so either survives
+further wrapping — but they are not equally specific:
+
+| against the same stopped container | message |
+| --- | --- |
+| `podman exec` | `can only create exec sessions on running containers: container state improper` |
+| `podman kill` | `can only kill running containers. … is in state exited: container state improper` |
+| `podman pause` | `"exited" is not running, can't pause: container state improper` |
+
+`container state improper` is `ErrCtrStateInvalid`'s shared text and appears under at least three
+different prefixes, so pinning it — or an ERE alternation of the two — would accept a refusal that
+is not the one asserted. The exec-specific prefix is what the assertion names.
+
+Also rejected, and recorded because the issue's own note is that the choice matters more than which
+was picked: an exempt-code parameter on `assert_fail` (the code to exempt would have to be 125,
+which is the hole); `assert_exit` with a client-derived code (needs a remoteness predicate *and*
+still cannot tell the refusal from a broken podman); asserting `{{.State.Status}}` instead of the
+exec (`70-sighup.sh:248` already waits on the state — the refusal is what makes "genuinely stopped"
+rather than "reported stopped" true); a `podman container exists` tiebreak as `state()` uses
+(proves podman is reachable and the container present, not that *this* refusal was the state
+refusal, and it fires only on the remote arm, so the assertion would test different things on
+different platforms); and asserting the message inline at the one site (correct, and the smallest
+diff, but the four ways it can pass for the wrong reason are then unreachable by any unit test —
+a Mac only ever produces 125 and a native Linux only ever 255).
