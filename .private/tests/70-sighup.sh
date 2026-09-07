@@ -258,7 +258,13 @@ assert_says "sighup:the-student-is-told-it-is-stopping" "Stopping the container"
 # promises. A teardown that recreated here would silently break that promise, and nothing a
 # student did would reveal it until they lost a package.
 ID_BEFORE="$(podman inspect "$NAME" --format '{{.Id}}' 2>/dev/null)"
-assert_fail "sighup:a-stopped-container-accepts-no-exec" sh -c "podman exec $NAME true"
+# NOT assert_fail, AND THAT IS THE ASSERTION (#149). The refusal carries the CLIENT's exit code --
+# 255 local, 125 remote -- and 125 is inside assert_fail's could-not-be-RUN band, so this was red
+# on every Mac against a launcher that was doing exactly the right thing. The message is the same
+# on both; see assert_fail_saying in lib/assert.sh for the measured matrix.
+assert_fail_saying "sighup:a-stopped-container-accepts-no-exec" \
+                   "can only create exec sessions on running containers" \
+                   podman exec "$NAME" true
 launcher_tty_repo '\nexit\n' >/dev/null 2>&1
 assert_eq "sighup:relaunching-reuses-the-same-container" "$ID_BEFORE" \
           "$(podman inspect "$NAME" --format '{{.Id}}' 2>/dev/null)"
