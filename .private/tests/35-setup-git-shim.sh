@@ -465,8 +465,25 @@ sg_says_not "ratelimit:does-not-blame-the-token" err.issues "$out"
 # what was typed, which matters because it also names the repository.
 sg_new
 out="$(sg_tty "jane.doe\n|ab\n|me@cs.stanford.edu\n|   JDoe   \n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
+# OCCURRENCES, NOT ROWS, and the difference is the whole of issue #200. Each rejection is one
+# `printf '  %s %s '` -- the complaint then prompt.retry, no newline at either end, so the retry
+# lands where the student is already typing; files/setup-git:538-540 records that as a decision
+# about what a student reads rather than one to trade away for an easier count. So NOTHING IN
+# setup-git ENDS THAT ROW: the newline between complaint 1 and complaint 2 was only ever the
+# terminal echoing `ab`, and sg_feed types on a clock instead of waiting for a prompt (see its
+# header). `grep -c` counts ROWS CONTAINING the complaint, so it can only ever undercount, silently.
+#
+# MEASURED. It fails once SG_KEY_DELAY drops below setup-git's startup plus one rejection --
+# 210-319ms on this Mac, 50-90ms on Linux -- so the 0.3s default leaves a Mac a margin of 0 to 1.4x
+# and Linux 3 to 6x. THAT IS WHY LINUX HAS BEEN GREEN AND IS NOT IMMUNE: it failed 3 of 6 runs at
+# the default pacing under 3x CPU oversubscription. As occurrences it is 2 in every one of 40+ runs,
+# five pacings, both platforms, loaded and idle. The message always printed twice.
+#
+# So do not put this back to `grep -c` on the strength of a green run. Reproduce it by forcing
+# read_line's echo off, which deletes the row break outright rather than racing for it: that is
+# 174 pass / 1 fail here, deterministic on both platforms, and 175/0 with this form.
 assert_eq "retry-sunetid:complains-twice-about-the-shape" "2" \
-          "$(printf '%s' "$out" | grep -c '3 to 8 letters and numbers' || true)"
+          "$(printf '%s' "$out" | grep -o '3 to 8 letters and numbers' | grep -c . || true)"
 sg_says "retry-sunetid:has-a-separate-message-for-an-address" err.sunetid-is-an-email "$out"
 sg_has "retry-sunetid:confirms-the-normalised-id" "You entered jdoe" "$out"
 assert_match "retry-sunetid:configures-the-normalised-address" \
