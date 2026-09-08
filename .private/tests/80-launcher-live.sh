@@ -817,7 +817,9 @@ if [ -z "$RFWD_PORT" ] || [ -z "$OFFBOX_PORT" ]; then
     fail "tunnel:remote-forward-is-refused" "no two free host ports right now, so there is
 nothing to ask for a forward on."
     fail "tunnel:refused-forward-creates-no-listener" "see above"
+    fail "tunnel:the-off-box-forward-is-bound" "see above"
     fail "tunnel:cannot-proxy-off-box" "see above"
+    fail "tunnel:the-borrowed-port-is-handed-back" "see above"
 elif [ -n "$CTL" ]; then
     out_r="$(ssh -S "$CTL" -O forward -R "127.0.0.1:$RFWD_PORT:127.0.0.1:$SRV_PORT" student@cs193v-tunnel 2>&1 || true)"
     assert_contains "tunnel:remote-forward-is-refused" "forwarding request failed" "$out_r"
@@ -838,7 +840,44 @@ elif [ -n "$CTL" ]; then
               "$(podman exec "$NAME" ss -ltn 2>/dev/null \
                  | do_awk '{print $4}' | grep -cE ":$RFWD_PORT\$" || true)"
     # ...and it must not be usable as a proxy to anywhere but the container's own loopback.
-    ssh -S "$CTL" -O forward -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
+    #
+    # THE FORWARD IS ESTABLISHED BEFORE ANYTHING MEASURES IT (#194), and the pair it straddles is
+    # why. Both of them read exactly the same value from a port that was never bound as from one
+    # that was bound and refused: curl says 000 for connection-refused and for "ssh took the
+    # connection, then the container's sshd refused the channel", and a listener count says 0 for
+    # "the cancel worked" and for "nothing was ever there". So with the rc swallowed by `|| true`
+    # they were not merely weak but mutually undermining -- cannot-proxy-off-box needs
+    # $OFFBOX_PORT bound and the-borrowed-port-is-handed-back needs it unbound, and "the forward
+    # never happened" is the one state that satisfies both without measuring anything.
+    #
+    # AND IT IS NOT MERELY A VACUOUS PASS. 10-static.sh:1739-1742 deliberately DELETED its
+    # `PermitOpen 127.0.0.1:*` grep in favour of cannot-proxy-off-box "actually forward[ing] to
+    # an off-box address", so a silently failed -O forward leaves that invariant with no guard
+    # anywhere in the suite. The behavioural test covers the static one it replaced only while
+    # this assertion holds.
+    #
+    # BOTH SIGNALS, because they fail differently: a wedged mux or a vanished control socket gives
+    # a non-zero rc with a message worth printing, and a bind that landed elsewhere gives rc 0
+    # with no listener of ours. dyn_is_forwarded rather than a bare listener grep for the second
+    # half -- it filters on OUR master's pid, so a stranger who happens to hold $OFFBOX_PORT
+    # cannot be mistaken for the bind just asked for.
+    #
+    # A POINT MEASUREMENT, AND THAT IS THE SUPERVISOR'S DOING RATHER THAN LUCK. It cancels only
+    # ports it recorded forwarding itself -- SUP_UP -> SUP_GONE -> tunnel_dyn_cancel,
+    # cs193v:2056-2076 -- and nothing inside the container is listening on $OFFBOX_PORT, so this
+    # forward is invisible to it in both directions and stands until the cancel below.
+    out_l="$(ssh -S "$CTL" -O forward -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" \
+                 student@cs193v-tunnel 2>&1)"; rc_l=$?
+    if [ "$rc_l" -eq 0 ] && dyn_is_forwarded "$OFFBOX_PORT"; then
+        pass "tunnel:the-off-box-forward-is-bound"
+    else
+        fail "tunnel:the-off-box-forward-is-bound" \
+             "ssh -O forward exited $rc_l and no master of ours holds $OFFBOX_PORT.
+${out_l:+ssh says: $out_l
+}The two assertions below would then read 000 and 0 from a port nothing ever bound -- which is
+what they read when it IS bound and refused -- so both would pass having measured nothing, and
+nothing else in this suite guards PermitOpen 127.0.0.1:* (10-static.sh:1739-1742)."
+    fi
     assert_eq "tunnel:cannot-proxy-off-box" "000" \
               "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:$OFFBOX_PORT/")"
     # ...AND THE PORT GOES BACK. `-O forward -L` binds locally the moment it is asked, before any
@@ -846,21 +885,44 @@ elif [ -n "$CTL" ]; then
     # release_tunnel -- a port chosen precisely BECAUSE nobody had reserved it. Symmetric with
     # tunnel:refused-forward-creates-no-listener above, and the same courtesy as
     # cleanup:the-forwards-are-released: what this suite borrows, it hands back.
-    ssh -S "$CTL" -O cancel -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" student@cs193v-tunnel >/dev/null 2>&1 || true
+    #
+    # THE CANCEL'S rc IS REPORTED RATHER THAN ASSERTED, which is the one place this asks for less
+    # than #194 proposed. A refused cancel leaves the port bound and the assertion below now says
+    # so by itself: with the bind above established, 0 here means released rather than
+    # never-there. A second assertion whose only job is to restate that would be the brittleness
+    # 10-static.sh:1733-1736 argues against, so the status goes into the diagnostic instead.
+    out_c="$(ssh -S "$CTL" -O cancel -L "127.0.0.1:$OFFBOX_PORT:1.1.1.1:80" \
+                 student@cs193v-tunnel 2>&1)"; rc_c=$?
     # do_listeners, not a bare `ss`: this one IS about a host bind -- `-O forward -L` binds
     # locally the moment it is asked -- but `ss` does not exist on macOS, so the check was
     # answering "0" there without looking. See the note on the -R check above.
-    assert_eq "tunnel:the-borrowed-port-is-handed-back" "0" \
-              "$(do_listeners | do_awk -F'\t' '{print $1}' \
-                 | grep -cE "[.:]$OFFBOX_PORT\$" || true)"
+    #
+    # The `|| true` on grep -c STAYS, and is not the kind #194 is about: that is the documented
+    # "prints 0 AND exits 1 on no match" idiom (lib/assert.sh:891), not a swallowed command.
+    still="$(do_listeners | do_awk -F'\t' '{print $1}' \
+             | grep -cE "[.:]$OFFBOX_PORT\$" || true)"
+    if [ "$still" = 0 ]; then
+        pass "tunnel:the-borrowed-port-is-handed-back"
+    else
+        fail "tunnel:the-borrowed-port-is-handed-back" "$still listener(s) still on $OFFBOX_PORT
+after -O cancel, which exited $rc_c${out_c:+ saying: $out_c}"
+    fi
 else
-    # All three, not just the first. The results file must have the same lines whichever branch
+    # All five, not just the first. The results file must have the same lines whichever branch
     # ran: a result that vanishes reads as a suite someone shortened, and this is the arm nobody
     # is watching. (The pre-existing version reported only one of them.)
+    #
+    # IT SAID "ALL THREE" UNTIL #194, and the count was the tell. That issue added
+    # tunnel:the-off-box-forward-is-bound, and going to add it here turned up
+    # tunnel:the-borrowed-port-is-handed-back missing from BOTH arms since it was written --
+    # exactly the defect the paragraph above is about, in the assertion right below the one it
+    # was written for. Five names in the elif, five in each arm; keep them in that order.
     fail "tunnel:remote-forward-is-refused" "no control socket at $FWD_CTL, which is where this
 instance's tunnel keeps it (cs193v --dev-tunnel), so there was nothing to ask for a forward."
     fail "tunnel:refused-forward-creates-no-listener" "see above"
+    fail "tunnel:the-off-box-forward-is-bound" "see above"
     fail "tunnel:cannot-proxy-off-box" "see above"
+    fail "tunnel:the-borrowed-port-is-handed-back" "see above"
 fi
 
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means

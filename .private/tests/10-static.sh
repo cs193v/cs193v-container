@@ -1900,7 +1900,11 @@ assert_eq "ports:no-port-list-is-declared" "" \
 #          forward and asserts it is refused with zero listeners created.
 #   PermitOpen 127.0.0.1:*
 #       -> tunnel:cannot-proxy-off-box actually forwards to an off-box address and asserts the
-#          connection fails.
+#          connection fails. THAT COVER IS CONDITIONAL, and #194 is why it is worth saying so
+#          here rather than only there: the curl reads 000 from a port nothing bound exactly as
+#          it does from one bound and refused, so it tests PermitOpen only while
+#          tunnel:the-off-box-forward-is-bound establishes the bind first. Weaken that assertion
+#          and this grep has to come back.
 #   ClearAllForwardings
 #       -> ports:every-forward-is-on-the-host would find 0 forwards if they had been cleared.
 #   remove_container calling tunnel_down
