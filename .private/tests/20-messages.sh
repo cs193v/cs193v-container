@@ -67,6 +67,72 @@ empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
               /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' $PRIVATE/messages.txt)"
 assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 
+# ─── the installer's own catalogue ─────────────────────────────────────────────
+# ISSUE #116. install-cs193v.sh carries its text INSIDE itself, in a heredoc at the foot of the
+# file, because it sources nothing and messages.txt does not exist until the download step
+# succeeds. Same [[key]]/{{PLACEHOLDER}} format, same reconciliation, different accessor.
+#
+# THE ACCESSOR IS `txt`, NOT `msg`, and that is not a taste call: the orphan check above greps
+# `msg +<key>` in this very file against messages.txt, so an installer named `msg` would report
+# all of its own keys as missing from a catalogue they were never in.
+INST="$PRIVATE/install-cs193v.sh"
+inst_cat="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" "$INST" | sed '1d;$d')"
+assert_ne "itext:the-catalogue-is-there" "" "$inst_cat"
+
+printf '%s\n' "$inst_cat" | grep -oE '^\[\[[a-z0-9._-]+\]\]' | do_tr -d '[]' \
+    | LC_ALL=C sort -u > "$TMP/idefined"
+# EVERY CALL FORM, and the nested one is why this is a grep for the word rather than a match on
+# the line: need's label composes `$(txt need.podman-linux.and ...)` INSIDE another txt call, so
+# a one-per-line pattern would never see the inner key.
+#
+# THE LEADING [^A-Za-z0-9_.] IS NOT DECORATION. A bare `txt +` also matches the phrase
+# "messages.txt for its early output" in this script's own header -- which registered `for` as a
+# key in use and turned keys:none-missing red for a sentence. Whole-line comments go first for
+# the same class of reason: prose about the catalogue is not a call into it.
+sed 's/^[[:space:]]*#.*//' "$INST" \
+    | grep -ohE '[^A-Za-z0-9_.]txt +[a-z0-9._-]+' | awk '{print $NF}' \
+    | LC_ALL=C sort -u > "$TMP/iused"
+
+iorphans="$(LC_ALL=C comm -23 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
+imissing="$(LC_ALL=C comm -13 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
+assert_eq "itext:no-orphans"   "" "$(printf '%s' "$iorphans" | sed 's/ *$//')"
+assert_eq "itext:none-missing" "" "$(printf '%s' "$imissing" | sed 's/ *$//')"
+
+idupes="$(printf '%s\n' "$inst_cat" | grep -oE '^\[\[[a-z0-9._-]+\]\]' | LC_ALL=C sort | uniq -d \
+          | do_tr '\n' ' ')"
+assert_eq "itext:no-duplicates" "" "$(printf '%s' "$idupes" | sed 's/ *$//')"
+
+iempty="$(printf '%s\n' "$inst_cat" \
+    | awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
+           /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}')"
+assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
+
+# A MISSING KEY MUST BE LOUD. txt() is what die() reaches for, so a typo'd key that returned
+# nothing would draw an EMPTY red STOP box at the moment a student most needs the diagnosis --
+# ERRORS.md records exactly that failure for the launcher's msg(). Run for real, out of the
+# file, rather than reasoned about.
+{
+    sed -n '/^text_catalogue() {$/,/^}$/p' "$INST"
+    sed -n '/^txt() {$/,/^}$/p'           "$INST"
+} > "$TMP/itxt.sh"
+if [ "$(grep -c '^txt() {$' "$TMP/itxt.sh")" = 1 ]; then
+    pass "itext:txt-is-extractable"
+else
+    fail "itext:txt-is-extractable" "could not carve TEXT and txt() out of install-cs193v.sh"
+fi
+imiss="$(bash -c '. "$1"; txt no.such.key' _ "$TMP/itxt.sh" 2>&1)"
+assert_says "itext:a-missing-key-says-which"  "no.such.key" "$imiss"
+assert_fail "itext:a-missing-key-is-an-error" \
+            bash -c '. "$1"; txt no.such.key >/dev/null 2>&1' _ "$TMP/itxt.sh"
+# ...and a real one renders, or the check above would pass against a txt() that always failed.
+ihit="$(bash -c '. "$1"; txt err.podman-mute' _ "$TMP/itxt.sh" 2>&1)"
+assert_says "itext:a-real-key-renders" "is not answering" "$ihit"
+# Placeholders really substitute, including into a multi-line value -- err.podman-old-mac
+# interpolates {{HOW}}, which is itself two catalogue entries deep.
+isub="$(bash -c '. "$1"; txt err.subuid-failed "USER=someone"' _ "$TMP/itxt.sh" 2>&1)"
+assert_says     "itext:a-placeholder-is-filled-in"  "for someone." "$isub"
+assert_says_not "itext:no-placeholder-is-left-over" "{{" "$isub"
+
 # ─── the container's own catalogue ─────────────────────────────────────────────
 # setup-git-messages.txt is the same format read by the same msg(), and gets the same three
 # invariants — but it is a SEPARATE FILE because the container cannot see messages.txt, and
@@ -623,19 +689,27 @@ fi
 # with the launcher to keep them honest — and it is the student's FIRST contact with the
 # course, so a broken box there is the first thing they ever see of it. Extracted and run
 # for real rather than pattern-matched, the same way this suite treats msg().
+# THE CATALOGUE AND txt() COME TOO, since issue #116: die()'s sign-off and the whole of the
+# Intel-Mac refusal are entries in it now, so carving the two functions alone would source a
+# pair that cannot say anything. That is the point of the arrangement rather than a wrinkle in
+# it -- but it does mean this harness has to carry the text with the code.
 {
     printf 'BOX_W=71\nC_RED=""\nC_OFF=""\n'
     cat "$TMP/box.install-cs193v.sh"
-    sed -n '/^die() {$/,/^}$/p'           "$PRIVATE/install-cs193v.sh"
-    sed -n '/^say_intel_mac() {$/,/^}$/p' "$PRIVATE/install-cs193v.sh"
+    sed -n '/^text_catalogue() {$/,/^}$/p' "$PRIVATE/install-cs193v.sh"
+    sed -n '/^txt() {$/,/^}$/p'            "$PRIVATE/install-cs193v.sh"
+    sed -n '/^die() {$/,/^}$/p'            "$PRIVATE/install-cs193v.sh"
+    sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/install-cs193v.sh"
 } > "$TMP/idie.sh"
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
-   [ "$(grep -c '^say_intel_mac() {$' "$TMP/idie.sh")" = 1 ]; then
+   [ "$(grep -c '^say_intel_mac() {$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^txt() {$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^text_catalogue() {$' "$TMP/idie.sh")" = 1 ]; then
     pass "installer:box-users-extractable"
 else
     fail "installer:box-users-extractable" \
-         "could not extract die() and say_intel_mac() from install-cs193v.sh"
+         "could not extract die(), say_intel_mac(), txt() and the catalogue from install-cs193v.sh"
 fi
 
 out="$(bash -c '. "$1"; die "$2"' _ "$TMP/idie.sh" \

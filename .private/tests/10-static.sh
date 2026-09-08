@@ -1464,6 +1464,107 @@ assert_eq "probe:installer-declares-the-package-id-once" "1" \
 assert_ne "probe:the-installer-has-a-probe-too" "" \
           "$(fn_body ensure_podman_path $PRIVATE/install-cs193v.sh)"
 
+# ─── the installer's student-facing text lives in one place ────────────────────
+# ISSUE #116. Every word install-cs193v.sh prints comes from THE TEXT STUDENTS SEE at the foot
+# of the file, reached by `txt <key>`, so the wording can be re-tuned without reading a line of
+# logic -- the arrangement install-cs193v-windows.cmd already has, where its ten refusals are
+# echo-only blocks in one tail section. These are the lints that keep it true.
+#
+# WHY IT NEEDS A LINT AT ALL: the file's own banner has claimed "the wording lives here,
+# gathered in one place" since long before it was true, and ~110 call sites quietly disagreed
+# with it. A banner is a promise; this is the part that keeps it.
+assert_eq "text116:the-catalogue-is-declared-once" "1" \
+          "$(grep -c '^text_catalogue() {$' $PRIVATE/install-cs193v.sh)"
+
+# Everything above the catalogue is logic, and no message-printing helper there may be handed a
+# literal. WHOLE-LINE COMMENTS BLANKED, not `sed 's/#.*//'`, for the reason launcher_code below
+# gives: this script documents its own rules in prose that would otherwise match.
+inst_logic="$(sed -n '1,/^text_catalogue() {$/p' $PRIVATE/install-cs193v.sh \
+              | sed 's/^[[:space:]]*#.*//')"
+assert_ne "text116:the-logic-region-is-readable" "" "$inst_logic"
+
+# THE RULE IS "no letters left once the expansions come out", NOT "the argument starts with $".
+# `ok "$PLAT on $(uname -m)"` starts with an expansion and still carried the word "on", and
+# `die "$PM_REFRESH failed."` the word "failed" -- a first-character test called both clean.
+# Expansions are removed innermost-first so a nested `$(txt ... "$(txt ...)")` collapses whole.
+text_hits="$(printf '%s\n' "$inst_logic" | awk '
+    function strip(s,   prev) {
+        do { prev = s; gsub(/\$\([^()]*\)/, "", s) } while (s != prev)
+        do { prev = s; gsub(/\$\{[^{}]*\}/, "", s) } while (s != prev)
+        gsub(/\$[A-Za-z_][A-Za-z0-9_]*/, "", s)
+        gsub(/\$[0-9*@#?]/, "", s)
+        return s
+    }
+    {
+        line = strip($0)
+        while (match(line, /(^|[^[:alnum:]_.$-])(step|ok|skip|note|die|need|menu)[[:space:]]+/)) {
+            line = substr(line, RSTART + RLENGTH)
+            # Every double-quoted run left on the line after the helper. A clean call site has
+            # collapsed to "" by now; a literal still has its words.
+            rest = line
+            while (match(rest, /"[^"]*"/)) {
+                arg = substr(rest, RSTART + 1, RLENGTH - 2)
+                if (arg ~ /[A-Za-z]/) { printf "%d: %s\n", NR, $0; break }
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+        }
+    }
+')"
+assert_eq "text116:no-message-helper-is-handed-a-literal" "" "$text_hits"
+
+# THE SAME FOR RAW printf, which is how the consent refusal, the menu hint and die()'s trailer
+# used to reach a student.
+#
+# ONLY THE QUOTED ARGUMENTS ARE READ, not the line, and the test is for A SENTENCE rather than
+# for letters. Both narrowings are load-bearing, and the broader forms were tried first:
+#   * reading the whole line matched the word `printf` itself, so `printf '\n'` was a hit;
+#   * "any five letters" matched `printf 'macos'` and `printf 'unsupported'` -- platform() and
+#     distro_family() RETURN VALUES on stdout, which are not prose and must not move.
+# Two consecutive words of three or more letters is what actually separates a sentence from a
+# format string, a machine token, a terminal escape and the `[boot]\nsystemd=true` this script
+# writes into /etc/wsl.conf.
+#
+# txt() ITSELF IS EXEMPT, and has to be: the one message that cannot come out of the catalogue
+# is the one reporting that the catalogue has no such key.
+printf_hits="$(printf '%s\n' "$inst_logic" \
+    | sed '/^txt() {$/,/^}$/d' \
+    | awk '
+    function strip(s,   prev) {
+        do { prev = s; gsub(/\$\(\([^()]*\)\)/, "", s) } while (s != prev)
+        do { prev = s; gsub(/\$\([^()]*\)/, "", s) } while (s != prev)
+        do { prev = s; gsub(/\$\{[^{}]*\}/, "", s) } while (s != prev)
+        gsub(/\$[A-Za-z_][A-Za-z0-9_]*/, "", s)
+        gsub(/%[-0-9.]*[a-zA-Z]/, "", s)
+        gsub(/\\./, "", s)
+        return s
+    }
+    /(^|[^[:alnum:]_])printf[[:space:]]/ {
+        # STRIPPED WHOLE-LINE FIRST, THEN the quoted runs are read out -- the same order the
+        # helper check above uses, and for a reason it hit: `"$(txt k "NAME=$v")"` contains a
+        # quote INSIDE its expansion, so a per-argument matcher run first stops at that inner
+        # quote and hands `$(txt k ` to the sentence test, which reads as two words.
+        rest = strip($0)
+        sub(/^.*printf[[:space:]]+/, "", rest)
+        while (match(rest, /'"'"'[^'"'"']*'"'"'|"[^"]*"/)) {
+            arg = substr(rest, RSTART + 1, RLENGTH - 2)
+            if (arg ~ /[A-Za-z][A-Za-z][A-Za-z]+[[:space:]]+[A-Za-z][A-Za-z][A-Za-z]/) {
+                printf "%d: %s\n", NR, $0; break
+            }
+            rest = substr(rest, RSTART + RLENGTH)
+        }
+    }
+')"
+assert_eq "text116:no-printf-carries-a-sentence" "" "$printf_hits"
+
+# The catalogue is prose and nothing else. A `$`, a backtick or a backslash in there would be
+# inert today -- the heredoc delimiter is quoted -- and a trap for whoever later unquotes it or
+# copies a block somewhere that does expand. {{NAME}} is the only substitution there is.
+inst_text="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" $PRIVATE/install-cs193v.sh \
+             | sed '1d;$d')"
+assert_ne  "text116:the-catalogue-body-is-readable" "" "$inst_text"
+assert_eq  "text116:the-catalogue-holds-no-shell" "" \
+           "$(printf '%s\n' "$inst_text" | grep -nE '[$`\\]' || true)"
+
 # The deletions. Each of these strings is the whole of a mechanism that #41 removes, so its
 # survival means the old design is still half-wired underneath the new one.
 #
