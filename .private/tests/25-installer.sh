@@ -847,7 +847,16 @@ ok()   { printf 'OK %s\n' "$*"; }
 # so the stub has to be able to fail as well as answer.
 podman() { [ "${FAKE_RC:-0}" -eq 0 ] || return "${FAKE_RC:-0}"; printf '%s\n' "$FAKE_OUT"; }
 EOF
-sed -n '/^check_disk()/,/^}$/p' $PRIVATE/install-cs193v.sh >> "$TMP/cd.sh"
+# THE REAL TEXT COMES WITH IT, since issue #116: check_disk's words are catalogue entries now,
+# so the carve needs txt(), the catalogue and notes() -- the multi-line advisory is one entry
+# piped through notes() rather than three note calls. Carrying the real text rather than a stub
+# `txt` is the point: the numbers below are asserted against what a student would actually read.
+{
+    sed -n '/^text_catalogue() {$/,/^}$/p' $PRIVATE/install-cs193v.sh
+    sed -n '/^txt() {$/,/^}$/p'            $PRIVATE/install-cs193v.sh
+    sed -n '/^notes() {/p'                 $PRIVATE/install-cs193v.sh
+    sed -n '/^check_disk()/,/^}$/p'        $PRIVATE/install-cs193v.sh
+} >> "$TMP/cd.sh"
 if [ "$(grep -c '.' "$TMP/cd.sh")" -gt 8 ]; then pass "extract:check_disk"
 else fail "extract:check_disk" "could not extract check_disk"; fi
 

@@ -595,6 +595,35 @@ blocked in `awk` and cannot animate), a state file, a `WINCH` refit and an eight
 Teaching it a "list of independent rows" mode is the trade already rejected for `box()` versus the
 tail box — the requirements are the opposite ones.
 
+#### The installer's own text catalogue
+
+**Since issue #116 `install-cs193v.sh` carries its own message catalogue as well**, for the same
+reason it carries its own `box()`. That makes three. `messages.txt` is the launcher's,
+`files/setup-git-messages.txt` is `setup-git`'s, and the third is a heredoc at the foot of
+`install-cs193v.sh` under a `THE TEXT STUDENTS SEE` banner, read by `txt <key>` — the same
+`[[key]]`/`{{PLACEHOLDER}}` format, because it is `msg()` reading a heredoc instead of a file.
+It cannot be a separate file: the installer is downloaded on its own and `messages.txt` does not
+exist until the download step succeeds, which is well after most of those messages can print.
+
+Four things to know before re-tuning any of that text:
+
+- **The accessor is `txt`, and must not be renamed `msg`.** `20-messages.sh` greps
+  `msg +<key>` in `install-cs193v.sh` against `messages.txt`, so an installer named `msg` would
+  report every one of its own keys as missing from a catalogue they were never in.
+- **A `#` at column 0 inside the catalogue is a note to staff and is never printed** — the one
+  thing `txt()` does that `msg()` does not. Much of what makes those messages right is the note
+  explaining why they say what they say, and without that rule every note would have had to stay
+  behind in the logic beside a call site that no longer holds the words.
+- **`10-static.sh` keeps the arrangement honest**, and it needs to: this file's own banner
+  claimed "the wording lives here, gathered in one place" for a long time while ~110 call sites
+  disagreed with it. `text116:*` fails on a literal handed to `step`/`ok`/`skip`/`note`/`die`/
+  `need`/`menu`, and on a `printf` carrying a sentence.
+- **The catalogue is excluded from the coverage denominator** (`95-installer-coverage.sh`).
+  ~480 lines of prose are non-blank and not comments, so the conservative rule counted every one
+  of them as a statement that never executed: measured, the denominator went 430 → 658 and the
+  percentage would have fallen by a third for a change that removed no coverage at all. Excluded
+  by blanking rather than deleting, because those are line numbers and the allowlist indexes them.
+
 ### Two people on one computer: `CS193V_INSTANCE`
 
 By default every checkout on a machine shares the same container (`cs193v`), the same dev
