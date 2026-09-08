@@ -1689,3 +1689,136 @@ assert_eq "volfilt:with-no-instance-the-bare-family-IS-ours" "kept" \
           "$(kept "$vol0" 'cs193v-claude')"
 assert_eq "volfilt:with-no-instance-a-suffixed-volume-is-a-colleagues" "dropped" \
           "$(kept "$vol0" 'cs193v-dev3-claude')"
+
+# ─── counting OCCURRENCES rather than ROWS (#207) ──────────────────────────────
+# lib/setup-git-shim.sh's sg_times and its two assertion wrappers, one property at a time.
+#
+# WHY THE UNIT TESTS AND NOT JUST THE CALL SITES. Every assertion #207 converted was already
+# GREEN -- the row count and the occurrence count agree on every transcript setup-git produces
+# today, which is the whole reason the issue calls them latent rather than live. So converting
+# them proves nothing on its own: the suite is exactly as green afterwards as before, and a
+# helper that silently answered `grep -c` would ship green too. What the fix is worth is what it
+# does to input the real script does not currently produce, and that is only assertable here.
+#
+# So each case below pins the DIFFERENCE rather than the answer, and every fixture is one of the
+# edits #207 names as the thing that would break a call site quietly.
+#
+# A SUBSHELL WITH pass AND fail REPLACED, which is the one part that is not the mf() precedent
+# above. `fail` writes to $CS193V_RESULTS, and run-tests.sh counts the summary from that file --
+# so a `$( )` around an assertion that is SUPPOSED to fail still reddens the run proving it
+# correct. Overriding both inside the subshell turns the verdict into a value instead.
+sgp() {                               # sgp FN ARGS... -> the FN's value, or PASS / "FAIL: detail"
+    ( set -u
+      # shellcheck source=lib/setup-git-shim.sh
+      . "$TESTS_DIR/lib/setup-git-shim.sh"
+      # Read by sg_phrase in the sourced lib, which shellcheck cannot follow from here.
+      # shellcheck disable=SC2034
+      SGM="$PRIVATE/files/setup-git-messages.txt"
+      pass() { printf 'PASS'; }
+      fail() { printf 'FAIL: %s' "${2:-}"; }
+      "$@" )
+}
+
+# 1. TWO GLYPHS ON ONE ROW, which is `:93` after somebody reformats the meter. The row count and
+#    the occurrence count disagree here and nowhere in a real transcript, so this fixture is the
+#    only place the conversion can be shown to have done anything.
+sgt_rows="$(printf '  \342\234\223  git clone  \342\234\223  git pull\n  \342\234\223  git push\n')"
+assert_eq "sgtimes:counts-two-glyphs-on-one-row-as-two" "3" "$(sgp sg_times '✓' "$sgt_rows")"
+assert_eq "sgtimes:and-grep-c-would-have-said-two"      "2" \
+          "$(printf '%s' "$sgt_rows" | LC_ALL=C grep -c '✓' || true)"
+
+# 2. COLOUR WHERE THE ASTERISKS WERE. emph_stream injects it at every `*` boundary, so a needle
+#    reaching one character past the emphasis matches nothing in the raw bytes. sg_plain is what
+#    takes it back off, and doing that INSIDE the helper is what stops the next call site from
+#    quoting a fragment chosen to dodge an escape sequence.
+sgt_emph="$(printf 'ask: \033[36mWhat is your full name?\033[0m yes\nask: \033[36mWhat is your full name?\033[0m no\n')"
+assert_eq "sgtimes:sees-through-the-emphasis-colour" "2" \
+          "$(sgp sg_times 'ask: What is your full name? ' "$sgt_emph")"
+assert_eq "sgtimes:and-the-raw-bytes-would-have-said-zero" "0" \
+          "$(printf '%s' "$sgt_emph" | LC_ALL=C grep -c 'ask: What is your full name? ' || true)"
+
+# 3. ONE NON-UTF-8 BYTE, and it does not have to be near the needle. `-oF` under `LC_ALL=C` reads
+#    it as two bytes that are not the needle and counts around it; a bare `grep -c` does not, and
+#    HOW it fails to is the one thing in this block that is not the same on both platforms:
+#
+#      BSD grep, ambient locale   0  -- the line will not decode, so the whole LINE is abandoned,
+#                                       and sg_plain has already made the transcript exactly one
+#                                       line, so a single stray byte anywhere zeroes the count.
+#      GNU grep 3.12 / busybox    1  -- decodes past the bad byte and matches, then answers the
+#                                       ROW count, which is #207's original complaint.
+#
+#    So the assertion is that the bare spelling does not answer 2, which is the portable half and
+#    the half worth having: 0 and 1 are different bugs and neither is the occurrence count. The
+#    number itself is RECORDED rather than asserted, for record()'s own reason -- it is a property
+#    of the host's grep, not of this tree, and no fixed expectation survives both platforms. An
+#    earlier draft asserted the 0, was verified on macOS only, and went red on Linux at #213.
+sgt_bad="$(printf 'x\303\050y tick \342\234\223 zz \342\234\223 end\n')"
+assert_eq "sgtimes:a-stray-byte-does-not-zero-the-count" "2" "$(sgp sg_times '✓' "$sgt_bad")"
+sgt_ambient="$(printf '%s' "$sgt_bad" | grep -c '✓' || true)"
+#    AND THAT IT ANSWERED A NUMBER AT ALL, because `|| true` on the line above turns a grep that
+#    died into the empty string, and "" is not 2 either -- the vacuous pass this suite's own
+#    header refuses to accept from any other check here.
+assert_match "sgtimes:and-the-ambient-locale-did-answer-a-number" '^[0-9][0-9]*$' "$sgt_ambient"
+assert_ne "sgtimes:and-the-ambient-locale-would-not-have-said-two" "2" "$sgt_ambient"
+record    "sgtimes:ambient-locale-count" "$sgt_ambient"
+
+# 4. -F AND NOT -E. `What is your SUNetID (e.g. htiek, szum)?` read as an ERE has its trailing `?`
+#    make the parenthetical OPTIONAL, so the bare stem matches too and a decoy row scores. The
+#    needle comes from the catalogue rather than being quoted, which is the point: nobody
+#    choosing a key gets to audit it for regex metacharacters first.
+sgt_decoy="$(printf 'a What is your SUNetID (e.g. htiek, szum)? jdoe\nb What is your SUNetID (e.g. htiek, szum)? jdoe\nc What is your SUNetID somewhere else\n')"
+assert_eq "sgtimes:the-needle-is-a-literal-not-a-pattern" "PASS" \
+          "$(sgp sg_says_times probe 2 prompt.sunetid "$sgt_decoy")"
+# THE NEGATIVE ARM, because "it passed" is also what a helper that never counted anything would
+# report if the expectation happened to match. 3 is the answer the ERE spelling gives, so this is
+# the one wrong number worth naming.
+assert_contains "sgtimes:and-scoring-it-three-would-have-failed" "actual:   2" \
+          "$(sgp sg_says_times probe 3 prompt.sunetid "$sgt_decoy")"
+assert_eq "sgtimes:and-an-ere-would-have-said-three" "3" \
+          "$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE 'What is your SUNetID (e.g. htiek, szum)?' | LC_ALL=C grep -c . || true)"
+
+# 5. NO PADDING ON THE NUMBER, which is why this is `grep -c .` and not `wc -l`. BSD wc pads to a
+#    column, which is why the two call sites this replaced carried a `do_tr -d ' '`. TWO
+#    DIGITS deliberately: the pad width changes with the count, so a one-digit fixture would pass
+#    against a `wc` spelling that a twelve-row assertion still failed on.
+sgt_twelve="$(printf '\342\234\223%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+assert_eq "sgtimes:a-two-digit-count-carries-no-padding" "12" "$(sgp sg_times '✓' "$sgt_twelve")"
+
+# 6. AN EMPTY NEEDLE ANSWERS THE SENTINEL, NOT ZERO. `grep -oF ''` against sg_plain's single line
+#    emits one empty line, which `grep -c .` scores 0 -- so an assertion expecting 0 would pass
+#    with no search having happened. That is #79's vacuous pass in a new place, so it gets #79's
+#    answer: the failure travels in the value, and _checker_ok fails on it at the call site.
+#
+#    ASSERTED THROUGH A MAPPING RATHER THAN WITH assert_contains, and that is the mechanism
+#    working rather than a way around it: _checker_ok scans the HAYSTACK as well as the needle, so
+#    an assertion handed a sentinel-bearing value fails whatever it was asked. Naming the sentinel
+#    is the only way to ask "did it answer that?" without being answered by the guard itself.
+saw_sentinel() {                      # saw_sentinel VALUE -> sentinel, or VALUE unchanged
+    case "$1" in *"$CHECKER_DIED"*) printf 'sentinel' ;; *) printf '%s' "$1" ;; esac
+}
+assert_eq "sgtimes:an-empty-needle-does-not-answer-zero" "sentinel" \
+          "$(saw_sentinel "$(sgp sg_times '' "$sgt_rows")")"
+assert_eq "sgtimes:and-the-assertion-refuses-it" "sentinel" \
+          "$(saw_sentinel "$(sgp sg_has_times probe 0 '' "$sgt_rows")")"
+
+# 7. AN UNKNOWN KEY FAILS LOUDLY, the guard sg_says already carries. A key that resolves to
+#    nothing would otherwise count occurrences of nothing and answer 0.
+#
+#    IT IS sg_says' GUARD AND IT HAS sg_says' HOLE, which is worth knowing rather than widening
+#    here: msg_text truncates a message at its first `{{`, so token.more-characters resolves to
+#    `...` -- not empty, so the guard passes it. Harmless for a COUNTING helper in a way it is not
+#    for sg_says: a `...` needle scores a large number and goes red, where a substring check would
+#    have passed vacuously.
+assert_contains "sgtimes:an-unknown-key-fails-loudly" "no literal prose" \
+                "$(sgp sg_says_times probe 1 no.such.key "$sgt_decoy")"
+
+# 8. AND NOT FOR A PROMPT THE SCRIPT REDRAWS, which is the trap this helper sets for whoever
+#    reads its name next to sg_asks'. read_secret rewrites its tally with \r after every
+#    keystroke, so sg_plain -- which strips \r and keeps every state it separated -- counts the
+#    STATES. On a real transcript that is 94 where the answer is 1. sg_asks is the reader for
+#    that shape, and this pins the difference so nobody deletes the warning as redundant.
+sgt_redraw="$(printf 'Your token: \rYour token: \342\200\242\rYour token: \342\200\242\342\200\242\n')"
+assert_eq "sgtimes:counts-states-on-a-redrawn-prompt" "3" \
+          "$(sgp sg_times 'Your token:' "$sgt_redraw")"
+assert_eq "sgtimes:sg_asks-is-the-reader-for-that-shape" "1" \
+          "$(sgp sg_asks "$sgt_redraw" 'Your token:')"

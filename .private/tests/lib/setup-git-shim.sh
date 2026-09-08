@@ -33,6 +33,10 @@ sg_new() {
 sg_set()   { printf '%s' "$2" > "$SGSHIM/$1"; }
 sg_touch() { : > "$SGSHIM/$1"; }
 sg_log()   { cat "$SGSHIM/argv.log" 2>/dev/null; }
+# A LINE COUNT ON PURPOSE, and the one in this file that should stay one. Each fake writes exactly
+# one `printf '%s\n'` per invocation (lib/gh-fake:28, lib/git-fake:24, lib/shortlink-fake:21), so a
+# row IS a call here and rows and occurrences are the same number. Do not "fix" it into sg_times
+# below: that reads a TRANSCRIPT, where they are not.
 sg_count() { sg_log | grep -cE "$1" || true; }
 sg_cleanup_all() { local d; for d in $SGDIRS; do rm -rf "$d"; done; SGDIRS=''; }
 
@@ -207,8 +211,64 @@ sg_final() {                          # sg_final TEXT NEEDLE -> the last row men
 # The needle is an ERE, and the prose it is given comes from the catalogue rather than being quoted
 # here, for the reason sg_says exists: a test that hardcodes wording fails the day somebody rewords
 # the catalogue, which punishes the wrong change.
+#
+# NOT INTERCHANGEABLE WITH sg_times BELOW, in either direction, and the names are close enough that
+# it is worth saying twice. This one ANCHORS -- `^ prompt $` -- so it answers 0 on any prompt whose
+# answer the terminal echoes onto the same row: measured 0 for prompt.sunetid and prompt.name on
+# real transcripts, where the answers are 1 and 2. sg_times is the reader for those.
 sg_asks() {                           # sg_asks TEXT PROMPT -> times PROMPT was drawn with nothing after it
     sg_rows "$1" | grep -cE "^[[:space:]]*$2[[:space:]]*$" || true
+}
+
+# HOW MANY TIMES A PHRASE IS THERE, which is not how many ROWS carry it -- and the difference is
+# the whole of issue #200 and then #207. `grep -c` counts rows, so two occurrences on one row
+# score 1 and it can only ever UNDERCOUNT, silently. #200 was one row boundary the TERMINAL wrote,
+# which really did go red under load; #207 then found four more written the same way that did NOT.
+# All four agreed with the occurrence count on every transcript setup-git produces today, each for
+# a reason incidental to what it claimed -- a trailing `\n` on every meter row from run_timeout, a
+# leading `\n` on every prompt from ask_sunetid and ask_name -- and nothing enforced either.
+#
+# THREE SPELLING DECISIONS, ALL MEASURED against /usr/bin/grep (BSD grep 2.6.0-FreeBSD), which is
+# what this suite gets on a Mac. Each of them is a wrong answer somebody would otherwise reach:
+#
+#   * `-F`, NOT `-E`. `What is your SUNetID (e.g. htiek, szum)?` read as an ERE has its trailing
+#     `?` make the parenthetical OPTIONAL, so the bare stem matches as well. Against a haystack
+#     holding the prompt twice plus one decoy row: `-oF` -> 2, `-oE` -> 3, `grep -c` -> 1. A
+#     caller naming a KEY cannot audit the prose behind it for metacharacters first, so the
+#     literal flag is the only safe one here.
+#   * `LC_ALL=C` ON THE SEARCHING grep, for the reason sg_plain's header records for its seds:
+#     BSD grep in the ambient locale abandons the whole LINE a non-UTF-8 byte sits on. sg_plain
+#     has already made the transcript exactly ONE line, so a single stray byte anywhere zeroes
+#     the entire count. Measured: 0 ambient against 2 under LC_ALL=C. GNU grep does NOT abandon
+#     the line -- it answers 1, the row count, so the ambient spelling is wrong on both platforms
+#     but wrong differently, and only the BSD half is a zero. Safe because -F takes the needle as
+#     bytes either way -- a multibyte needle still matches.
+#   * `grep -c .`, NOT `wc -l`. BSD wc pads its output to a column, which is why the two `wc`
+#     spellings this replaced carried a `do_tr -d ' '` to scrub it back off.
+#
+# AND NOT FOR A PROMPT THE SCRIPT REDRAWS. sg_plain strips `\r` and keeps every state it
+# separated, so on read_secret's tally this counts the STATES: `Your token:` measures 94 on one
+# real transcript and 188 on another, where the answer is 1 and 2. sg_asks ABOVE is the reader for
+# that shape and this is not a substitute for it. The converse is also true -- see its header.
+sg_times() {                          # sg_times NEEDLE TEXT -> how many times NEEDLE occurs
+    # AN EMPTY NEEDLE ANSWERS THE SENTINEL RATHER THAN 0. `grep -oF ''` against sg_plain's single
+    # line emits one empty line, which `grep -c .` scores 0 -- so an assertion expecting 0 would
+    # pass with no search having happened. #79's trap, so #79's answer: the failure travels in
+    # the value and _checker_ok fails on it wherever it is asserted.
+    case "$1" in '') printf '%s (empty needle)\n' "$CHECKER_DIED"; return 0 ;; esac
+    sg_plain "$2" | LC_ALL=C grep -oF -- "$1" | LC_ALL=C grep -c . || true
+}
+sg_has_times() {                      # sg_has_times NAME COUNT NEEDLE TEXT
+    assert_eq "$1" "$2" "$(sg_times "$3" "$4")"
+}
+# By KEY rather than by quoted prose, for the reason sg_says exists -- and with sg_says' guard,
+# because a key that resolves to nothing would otherwise count occurrences of nothing and answer
+# 0. msg_text returns ONE FLATTENED LINE, so a keyed needle can never be multi-line; that matters
+# because `grep -F` reads a multi-line pattern as SEVERAL alternatives rather than one phrase.
+sg_says_times() {                     # sg_says_times NAME COUNT KEY TEXT
+    local phrase; phrase="$(sg_phrase "$3")"
+    case "$phrase" in ''|' ') fail "$1" "no literal prose for key: $3"; return 0 ;; esac
+    assert_eq "$1" "$2" "$(sg_times "$phrase" "$4")"
 }
 
 # The same, for a phrase rather than a key. Needed more often than it looks: `exit code 42` is

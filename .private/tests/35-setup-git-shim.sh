@@ -90,7 +90,7 @@ sg_has     "happy:names-the-account"    "@janedoe"          "$out"
 
 # EVERY ROW ENDS IN A CHECK AND NONE IN A CROSS. Twelve of them: five config commands plus
 # init.defaultBranch and cs193v.sunetid, then the five verification rows.
-assert_eq "happy:twelve-rows-succeeded" "12" "$(printf '%s' "$out" | grep -c '✓' || true)"
+sg_has_times "happy:twelve-rows-succeeded" 12 "✓" "$out"
 assert_not_contains "happy:no-row-failed" "✗" "$out"
 
 # The commands, in the order a student watches them go by. Named individually, so a deleted one
@@ -163,8 +163,7 @@ sg_has "secret:login-row-is-redacted" "gh auth login --with-token < your-token" 
 sg_has "tally:counts-the-hidden-characters" "$TOKEN_MID more characters" "$out"
 
 tally="$(sg_final "$out" "$TOKEN_MID more characters")"
-assert_eq "tally:draws-six-dots-not-ninety-three" "6" \
-          "$(printf '%s' "$tally" | grep -o '•' | wc -l | do_tr -d ' ')"
+sg_has_times "tally:draws-six-dots-not-ninety-three" 6 "•" "$tally"
 
 # NO WRAPPED LINE AT THAT PROMPT. Measured in display columns rather than bytes, because a • is
 # three bytes and mawk's length() would score this at 3× and pass vacuously — the same trap box()
@@ -327,8 +326,13 @@ out="$(sg_tty "$HAPPY$STUCK")"
 sg_says "fail-push:blames-contents" err.push "$out"
 sg_has     "fail-push:says-read-and-write" "Read and write" "$out"
 sg_has     "fail-push:says-the-token-can-be-kept" "You do not need to make a new token" "$out"
+# THE ONE OCCURRENCE COUNT THAT IS NOT sg_has_times, because its needle is an ALTERNATION and that
+# helper searches for a literal (#207). Same three decisions as its header records -- sg_plain
+# first, `grep -c .` rather than `wc -l` -- spelled out here because one call site cannot borrow
+# them. `grep -oE` and not `grep -c`: both rows are checks on separate lines today, but nothing
+# says a future meter cannot put two on one.
 assert_eq       "fail-push:clone-and-pull-still-passed" "2" \
-                "$(sg_plain "$out" | grep -oE '✓ git (clone|pull)' | grep -c . || true)"
+                "$(sg_plain "$out" | LC_ALL=C grep -oE '✓ git (clone|pull)' | LC_ALL=C grep -c . || true)"
 assert_eq       "fail-push:nothing-after-it-ran" "0" "$(sg_count 'gh issue')"
 
 sg_new
@@ -405,10 +409,8 @@ sg_set fail_at 'issue create'
 out="$(sg_tty "$HAPPY|\033[B|\n|\n|$TOKEN\n|\n$STUCK")"
 assert_eq "retoken:asks-for-the-token-twice" "2" \
           "$(sg_asks "$out" "$(sg_phrase prompt.token)")"
-assert_eq "retoken:asks-for-the-sunetid-once" "1" \
-          "$(printf '%s' "$out" | grep -c 'What is your SUNetID' || true)"
-assert_eq "retoken:asks-for-the-name-once" "1" \
-          "$(printf '%s' "$out" | grep -c 'What is your full name' || true)"
+sg_says_times "retoken:asks-for-the-sunetid-once" 1 prompt.sunetid "$out"
+sg_says_times "retoken:asks-for-the-name-once"    1 prompt.name    "$out"
 
 # "I'm stuck" is the only path that ends in the staff box, and it has to carry the command, the
 # exit code and the command's output — the three things staff cannot diagnose without, all three
@@ -465,13 +467,14 @@ sg_says_not "ratelimit:does-not-blame-the-token" err.issues "$out"
 # what was typed, which matters because it also names the repository.
 sg_new
 out="$(sg_tty "jane.doe\n|ab\n|me@cs.stanford.edu\n|   JDoe   \n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
-# OCCURRENCES, NOT ROWS, and the difference is the whole of issue #200. Each rejection is one
+# THE ONE SITE HERE WHERE ROWS AND OCCURRENCES DIVERGE ON A LIVE RUN, which is the whole of issue
+# #200 and the reason sg_times exists at all. Each rejection is one
 # `printf '  %s %s '` -- the complaint then prompt.retry, no newline at either end, so the retry
 # lands where the student is already typing; files/setup-git:538-540 records that as a decision
 # about what a student reads rather than one to trade away for an easier count. So NOTHING IN
 # setup-git ENDS THAT ROW: the newline between complaint 1 and complaint 2 was only ever the
 # terminal echoing `ab`, and sg_feed types on a clock instead of waiting for a prompt (see its
-# header). `grep -c` counts ROWS CONTAINING the complaint, so it can only ever undercount, silently.
+# header).
 #
 # MEASURED. It fails once SG_KEY_DELAY drops below setup-git's startup plus one rejection --
 # 210-319ms on this Mac, 50-90ms on Linux -- so the 0.3s default leaves a Mac a margin of 0 to 1.4x
@@ -479,11 +482,15 @@ out="$(sg_tty "jane.doe\n|ab\n|me@cs.stanford.edu\n|   JDoe   \n|\n|Jane Doe\n|\
 # the default pacing under 3x CPU oversubscription. As occurrences it is 2 in every one of 40+ runs,
 # five pacings, both platforms, loaded and idle. The message always printed twice.
 #
-# So do not put this back to `grep -c` on the strength of a green run. Reproduce it by forcing
+# So do not put this back to a row count on the strength of a green run. Reproduce it by forcing
 # read_line's echo off, which deletes the row break outright rather than racing for it: that is
 # 174 pass / 1 fail here, deterministic on both platforms, and 175/0 with this form.
-assert_eq "retry-sunetid:complains-twice-about-the-shape" "2" \
-          "$(printf '%s' "$out" | grep -o '3 to 8 letters and numbers' | grep -c . || true)"
+#
+# BY KEY SINCE #207, where it used to quote a fragment. The fragment was picked to sit clear of the
+# colour emph_stream injects at `*htiek*`, so a reword that moved either asterisk would have scored
+# 0 against the raw bytes and read as the message not having printed. sg_says_times takes the whole
+# message, with the colour off.
+sg_says_times "retry-sunetid:complains-twice-about-the-shape" 2 err.sunetid-invalid "$out"
 sg_says "retry-sunetid:has-a-separate-message-for-an-address" err.sunetid-is-an-email "$out"
 sg_has "retry-sunetid:confirms-the-normalised-id" "You entered jdoe" "$out"
 assert_match "retry-sunetid:configures-the-normalised-address" \
@@ -509,8 +516,7 @@ sg_says "typed-address:still-gets-there" status.all-set "$out"
 # somebody else's, and nothing but the confirmation can catch that.
 sg_new
 out="$(sg_tty "wrong\n|\033[B|\n|jdoe\n|\n|Jane Doe\n|\n|\n|\n|$TOKEN\n|\n")"
-assert_eq "retype-sunetid:asks-again" "2" \
-          "$(printf '%s' "$out" | grep -c 'What is your SUNetID' || true)"
+sg_says_times "retype-sunetid:asks-again" 2 prompt.sunetid "$out"
 assert_match "retype-sunetid:configures-the-second-answer" \
              'cs193v.sunetid jdoe' "$(sg_log)"
 assert_not_match "retype-sunetid:never-configures-the-first" \
@@ -535,8 +541,8 @@ out="$(sg_tty "jdoe\n|\n|Jane Doe\n|\n|\n|\n|hello\n|$TOKEN\n|\n")"
 sg_says "junk-token:says-what-one-looks-like" err.token-shape "$out"
 # FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
 # because "... -1 more characters ..." is what a short typo would otherwise render as.
-assert_eq "junk-token:draws-one-dot-per-character" "5" \
-          "$(sg_final "$out" "Your token:" | grep -o '•' | wc -l | do_tr -d ' ')"
+sg_has_times "junk-token:draws-one-dot-per-character" 5 "•" \
+             "$(sg_final "$out" "Your token:")"
 sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
            "$(sg_final "$out" "Your token:")"
 

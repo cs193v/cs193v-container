@@ -215,8 +215,7 @@ else
     assert_not_contains "github:no-row-failed" "✗" "$plain"
     # TWELVE ROWS, the same count the fakes produce. If GitHub ever refuses one of the operations
     # outright — a self-review, a merge into a non-default branch — this is where it shows up.
-    assert_eq "github:twelve-rows-succeeded" "12" \
-              "$(printf '%s' "$plain" | grep -oE '✓' | grep -c . || true)"
+    sg_has_times "github:twelve-rows-succeeded" 12 "✓" "$out"
 fi
 
 # THE SANDBOX IS LEFT AS IT WAS FOUND, on the failing path as well as the passing one. It belongs
