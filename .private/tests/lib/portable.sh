@@ -311,13 +311,35 @@ do_host_ips() {                       # do_host_ips -> space-separated IPv4 addr
 # what this machine has -- an earlier draft had the gate accept BSD `tr` on a presence check while
 # the resolver refused to use it, and the run then died mid-suite.
 #
-# KIND|NAME|WHY|MACOS_PKG|DEBIAN_PKG
+# KIND|NAME|WHY|MACOS_PKG|DEBIAN_PKG|FEDORA_PKG
 #
 #   cmd   present on PATH at all
 #   gnu   a resolver above found a usable one (presence is NOT enough: `command -v stat` succeeds
 #         on a Mac and then answers `illegal option -- c`)
 #   any   one of several will do
 #   run   present AND able to run a program
+#
+# THREE COLUMNS AND NOT TWO (#195). The Debian column used to serve every machine that was not a
+# Mac, so a Fedora developer whose machine failed this gate was told `sudo apt install -y iproute2`
+# -- the wrong package manager, and then a spelling that distro does not have. The installer has
+# had a real two-family table since #94 (install-cs193v.sh:487-504); this was the last place in
+# the tree that guessed. A column whose first character is `(` is advice with no remedy rather
+# than a package name, which is why the macOS column can say `(ships with macOS)`.
+#
+# THE FEDORA COLUMN WAS MEASURED IN fedora:43 -- the fixtures/Containerfile.fedora pin, run
+# natively -- rather than read off a wiki, and none of these four is what a careful guess
+# produces:
+#   listeners       iproute           there is no `iproute2` package on Fedora at all
+#   ssh             openssh-clients   and `openssh-client` singular does not exist. ssh-keygen
+#                                     shares it: that FILE belongs to `openssh`, which
+#                                     openssh-clients Requires by exact version, so one package
+#                                     still covers both rows exactly as on Debian
+#   podman          podman            `dnf install podman` pulls crun and passt as DEPENDENCIES
+#                                     where apt only Recommends them, and the setuid helpers are
+#                                     in shadow-utils, which owns usermod and cannot be absent --
+#                                     install-cs193v.sh:501 sets PKG_UIDMAP="" for that reason
+#   `shellcheck`    ShellCheck        the canonical spelling. dnf5 resolves the lowercase form
+#                                     too, but a column that names a package should name it
 #
 # ssh AND ssh-keygen ARE `cmd` DELIBERATELY, and this is the row-kind decision somebody will try
 # to improve. Presence CAN lie here -- a dropbear `ssh` answers none of -M, -S or -O -- but the
@@ -339,20 +361,69 @@ do_host_ips() {                       # do_host_ips -> space-separated IPv4 addr
 #   uname      UNREPRESENTABLE, which is a different reason from the group above rather than one
 #              more member of it: run-tests.sh reads `uname -s` to choose WHICH COLUMN of a row
 #              to print, so a row for uname would need a uname in order to report itself
-#              missing. 14-test-harness.sh's gate fixture fakes one instead.
-PT_REGISTRY='cmd|shellcheck|10-static.sh lints every shipped script with it|shellcheck|shellcheck
-cmd|podman|the install, image, container and live tiers drive it|podman|podman passt uidmap crun
-cmd|curl|reads a server inside the container back through a forwarded port|(ships with macOS)|curl
-cmd|git|the fixture copies of the course tree are built with git archive, the way GitHub builds them|(ships with Xcode CLT)|git
-cmd|ssh|the shim, container and live tiers all drive a launcher that refuses to start without it|(ships with macOS)|openssh-client
-cmd|ssh-keygen|named separately by that same refusal, and the tunnel keypair is generated with it|(ships with macOS)|openssh-client
-gnu|timeout|every pty drive and every long podman call is bounded by it|coreutils|coreutils
-gnu|stat|the file mode and ownership assertions read `stat -c`|coreutils|coreutils
-gnu|sha256sum|the release gates and the installer idempotency check hash with it|coreutils|coreutils
-any|listeners|answers which host ports the tunnel is really carrying|(lsof ships with macOS)|iproute2
-run|python3|lib/ptyrun.py drives every pty, and the box-art checks parse with it|(ships with macOS)|python3'
+#              missing. 14-test-harness.sh's gate fixture fakes one instead. /etc/os-release
+#              joined it as an input in #195, and is unrepresentable for a second reason as
+#              well: the machine that lacks that file is a Mac, which is not a machine with
+#              something to install.
+PT_REGISTRY='cmd|shellcheck|10-static.sh lints every shipped script with it|shellcheck|shellcheck|ShellCheck
+cmd|podman|the install, image, container and live tiers drive it|podman|podman passt uidmap crun|podman
+cmd|curl|reads a server inside the container back through a forwarded port|(ships with macOS)|curl|curl
+cmd|git|the fixture copies of the course tree are built with git archive, the way GitHub builds them|(ships with Xcode CLT)|git|git
+cmd|ssh|the shim, container and live tiers all drive a launcher that refuses to start without it|(ships with macOS)|openssh-client|openssh-clients
+cmd|ssh-keygen|named separately by that same refusal, and the tunnel keypair is generated with it|(ships with macOS)|openssh-client|openssh-clients
+gnu|timeout|every pty drive and every long podman call is bounded by it|coreutils|coreutils|coreutils
+gnu|stat|the file mode and ownership assertions read `stat -c`|coreutils|coreutils|coreutils
+gnu|sha256sum|the release gates and the installer idempotency check hash with it|coreutils|coreutils|coreutils
+any|listeners|answers which host ports the tunnel is really carrying|(lsof ships with macOS)|iproute2|iproute
+run|python3|lib/ptyrun.py drives every pty, and the box-art checks parse with it|(ships with macOS)|python3|python3'
 
-# pt_missing -> prints one `NAME|WHY|MACOS_PKG|DEBIAN_PKG` line per unsatisfied row; rc 1 if any.
+# ─── which of the three columns this machine reads (#195) ─────────────────────
+#
+# PARSED, NOT SOURCED, and that is a deliberate refusal to use the obvious one-liner -- the same
+# refusal install-cs193v.sh:436-439 states, and for the same reason: `. /etc/os-release` would let
+# that file set ANY variable in the process that read it, and it is shell syntax by specification,
+# which is exactly what makes sourcing it the wrong tool.
+#
+# THE PATH IS AN ARGUMENT, and PT_OS_RELEASE is the same seam one level up. `$PATH` can fake a
+# command; it cannot fake a file (25-installer.sh:348-352), so a family arm reached only through
+# the real /etc/os-release is an arm no Mac can ever test -- and this suite is developed on Macs.
+# The variable has vt_selinux's shape: consulted only when nothing has set it, so the product
+# reads /etc/os-release and 14-test-harness.sh's gate fixture reads the arm under test.
+pt_os_release_field() {               # pt_os_release_field NAME [PATH] -> its value, unquoted
+    sed -n "s/^$1=//p" "${2:-${PT_OS_RELEASE:-/etc/os-release}}" 2>/dev/null \
+        | head -1 | tr -d '"' | tr -d "'"
+}
+
+# ID FIRST, THEN EACH WORD OF ID_LIKE, which is what makes the derivatives free: Linux Mint says
+# ID_LIKE=ubuntu, Pop!_OS says "ubuntu debian", Nobara and Bazzite say fedora, Rocky and AlmaLinux
+# say "rhel centos fedora". None of them needs naming here.
+#
+# NO `unsupported` ANSWER, WHICH IS WHERE THIS AND install-cs193v.sh's distro_family() PART
+# COMPANY ON PURPOSE. The installer refuses an unsupported distro by name, because it is about to
+# change that machine; this is a developer's dependency gate, so it hands over the closest thing
+# it knows rather than refusing to say anything. Arch, NixOS, openSUSE and Alpine are not
+# supported by this project at all, so anyone reading a Debian package name on one is already
+# outside it and translating anyway. An arm of their own would be a column nobody can fill in.
+#
+# ANSWERS ABOUT LINUX ONLY. macOS is decided by `uname -s` in run-tests.sh, exactly where
+# install-cs193v.sh:527-539 keeps the same fork -- platform() first, and the family only on the
+# Linux arm. Reading `uname` here as well would make every unit assertion about this function
+# answer `mac` on a Mac and `fedora` on Fedora, which is a test that measures the developer.
+pt_distro_family() {                  # pt_distro_family [PATH] -> debian | fedora
+    local id like w
+    id="$(pt_os_release_field ID "${1:-}")"
+    like="$(pt_os_release_field ID_LIKE "${1:-}")"
+    # shellcheck disable=SC2086   # deliberately word-split: ID_LIKE is a space-separated list
+    for w in $id $like; do
+        case "$w" in
+            fedora|rhel|centos) printf 'fedora'; return 0 ;;
+        esac
+    done
+    printf 'debian'
+}
+
+# pt_missing -> prints one `NAME|WHY|MACOS_PKG|DEBIAN_PKG|FEDORA_PKG` line per unsatisfied row;
+# rc 1 if any.
 #
 # COLLECTS EVERYTHING rather than stopping at the first fault. A fresh Mac is missing several
 # things at once, and a gate that makes you fix them one run at a time is worse than the disease.
@@ -361,8 +432,8 @@ run|python3|lib/ptyrun.py drives every pty, and the box-art checks parse with it
 # runs in a subshell and anything it accumulates is lost on return -- the same trap
 # run-tests.sh:163 documents for CRASHES.
 pt_missing() {
-    local kind name why mac deb bad='' ok
-    while IFS='|' read -r kind name why mac deb; do
+    local kind name why mac deb fed bad='' ok
+    while IFS='|' read -r kind name why mac deb fed; do
         [ -n "${kind:-}" ] || continue
         ok=yes
         case "$kind" in
@@ -383,7 +454,7 @@ pt_missing() {
                  elif [ "$("$DO_PY" -c 'print(1)' 2>/dev/null)" != 1 ]; then ok=no
                  fi ;;
         esac
-        [ "$ok" = yes ] || bad="$bad$name|$why|$mac|$deb
+        [ "$ok" = yes ] || bad="$bad$name|$why|$mac|$deb|$fed
 "
     done <<PT_REG_EOF
 $PT_REGISTRY

@@ -1217,6 +1217,59 @@ assert_eq "portable:do_sha256-hashes-stdin" \
           "$(printf 'hello\n' | do_sha256 | cut -d' ' -f1)"
 assert_ok "portable:DO_SHA256-is-a-usable-binary-path" sh -c '[ -x "$DO_SHA256" ]'
 
+# ─── pt_distro_family: which package family a Linux is, from any machine (#195) ─
+# A UNIT TEST FOR THE REASON mf() AND sel_door_remote() ARE, and it is the same reason twice: the
+# answer is decided by the machine the suite runs on, so a behavioural test can only ever exercise
+# the local arm. run-tests.sh:260 was `case "$(uname -s)" in Darwin) plat=mac ;; *) plat=deb ;;
+# esac`, which sent every non-Darwin machine to the Debian column and offered a Fedora developer
+# `sudo apt install -y iproute2` -- the wrong package manager, and then a spelling that distro does
+# not have. On a Mac the fedora arm never runs; on a Fedora box the mac arm never does. These calls
+# run every arm anywhere.
+#
+# THE FILE IS A PARAMETER, NOT A FAKE. 25-installer.sh:348-352 records why the installer's own
+# family arm is unreachable from a Mac -- "$PATH can fake a command; it cannot fake a file" -- so
+# this takes the path instead. That is run_probe's doctrine ("PLATFORM IS A PARAMETER rather than a
+# faked uname, because that is the axis under test") applied to the axis one level down.
+#
+# AND IT ANSWERS ABOUT LINUX ONLY, which is what keeps every case below honest on a Mac: if the
+# function consulted `uname` at all they would all answer `mac` here and `fedora` on a Fedora box,
+# and the suite would be measuring the developer instead of the code. The macOS fork stays in
+# run-tests.sh, exactly where install-cs193v.sh:527-539 keeps it -- platform() first, and the
+# family only on the Linux arm.
+osr() {                               # osr TAG LINE... -> path to a fabricated os-release
+    local p="$WORK/os-release.$1"; shift
+    printf '%s\n' "$@" > "$p"
+    printf '%s' "$p"
+}
+assert_eq "portable:family-reads-fedora" fedora "$(pt_distro_family "$(osr fedora 'ID=fedora')")"
+assert_eq "portable:family-reads-debian" debian "$(pt_distro_family "$(osr debian 'ID=debian')")"
+assert_eq "portable:family-reads-ubuntu" debian "$(pt_distro_family "$(osr ubuntu 'ID=ubuntu')")"
+# EACH WORD OF ID_LIKE, which is what makes the derivatives free rather than a list somebody has to
+# keep up to date: Rocky and Alma say "rhel centos fedora", Pop!_OS says "ubuntu debian", Nobara
+# says fedora. install-cs193v.sh:444-450 makes this argument for the table this one mirrors.
+assert_eq "portable:family-reads-a-rebuild-through-ID_LIKE" fedora \
+          "$(pt_distro_family "$(osr rocky 'ID=rocky' 'ID_LIKE="rhel centos fedora"')")"
+assert_eq "portable:family-reads-a-derivative-through-ID_LIKE" debian \
+          "$(pt_distro_family "$(osr mint 'ID=linuxmint' 'ID_LIKE=ubuntu')")"
+# QUOTES COME OFF, and this is not decoration: os-release is shell syntax by specification, so a
+# value MAY be quoted and Debian's ID_LIKE really is. An unstripped quote makes the case arm miss
+# and drops that whole family into the fallback below, which is a wrong answer that looks like a
+# right one.
+assert_eq "portable:family-unquotes-a-value" fedora \
+          "$(pt_distro_family "$(osr quoted 'ID="fedora"')")"
+# AN UNRECOGNISED LINUX IS debian, AND THAT IS A DECISION -- lib/portable.sh states it, and it is
+# asserted here because a decision nothing measures is one the next reader deletes. This is also
+# where this function and the installer's distro_family() deliberately part company: that one has a
+# third answer, `unsupported`, and say_unsupported_distro refuses the machine by name. This gate is
+# advising a developer rather than installing anything, so it hands over the closest thing it knows.
+assert_eq "portable:family-falls-back-to-debian" debian \
+          "$(pt_distro_family "$(osr arch 'ID=arch' 'ID_LIKE=archlinux')")"
+# A MACHINE WITH NO os-release AT ALL, which is every Mac. It has to be an ANSWER and not an error:
+# run-tests.sh calls this under `set -u`, above its own traps and above the results file, so
+# anything that exits non-zero there refuses a sound machine and leaves nothing behind to say why.
+assert_eq "portable:family-with-no-os-release" debian \
+          "$(pt_distro_family "$WORK/no-such-os-release")"
+
 # ─── the preflight dependency gate (#124) ─────────────────────────────────────
 # WHY A GATE AND NOT ASSERTIONS. A missing tool used to surface as ordinary failures scattered
 # through the list -- 139 `timeout: command not found` in one macOS run -- so "your machine is
@@ -1277,12 +1330,29 @@ printf '%s\n' "${GATE_UNAME_S:-Linux}"
 GATEUNAME
 chmod +x "$GATE/bin/uname"
 
+# TWO FABRICATED os-release FILES, AND A DEFAULT THAT PINS THIS FIXTURE TO DEBIAN (#195). The
+# runner now reads a FILE as well as `uname`: os-release names the package FAMILY, which is what
+# tells `iproute2` from `iproute` and apt from dnf. A file is the one thing $PATH cannot fake
+# (25-installer.sh:348-352), so PT_OS_RELEASE is the seam -- and it has vt_selinux's shape,
+# consulted only when nothing has set it, so the product reads /etc/os-release while this fixture
+# reads whichever arm is under test.
+#
+# DEBIAN BY DEFAULT, for the same reason the uname fake above is pinned to Linux: that pairing is
+# byte-identical to what the old two-way split produced on EVERY machine, so no assertion written
+# before #195 moves. Without the default these arms would read the DEVELOPER's own os-release --
+# green on a Mac and on Ubuntu, red on a Fedora box, and green again for the wrong reason once
+# somebody weakened them. That is the fixture behaving differently on different platforms, which
+# lib/podman-shim.sh's shim_toolfarm note calls how a case comes to pass for a reason nobody chose.
+printf 'ID=debian\n' > "$GATE/os-release.debian"
+printf 'ID=fedora\n' > "$GATE/os-release.fedora"
+
 gate_run() {                          # gate_run [REMOVE_TOOL...] -> output with [rc=N]
     local t
     mkdir -p "$GATE/bin.save"
     for t in "$@"; do mv "$GATE/bin/$t" "$GATE/bin.save/$t" 2>/dev/null || true; done
     ( cd "$GATE" && env -i PATH="$GATE/bin" HOME="$WORK" TMPDIR="$WORK" NO_COLOR=1 \
         GATE_UNAME_S="${GATE_UNAME_S:-Linux}" \
+        PT_OS_RELEASE="${PT_OS_RELEASE:-$GATE/os-release.debian}" \
         bash ./run-tests.sh --tier static 2>&1; printf '[rc=%s]' "$?" )
     for t in "$@"; do mv "$GATE/bin.save/$t" "$GATE/bin/$t" 2>/dev/null || true; done
 }
@@ -1362,6 +1432,51 @@ assert_not_match "preflight:ssh-on-a-mac-has-no-package" 'install .*openssh-clie
 # AND THE POSITIVE ASSERTION ABOVE IS WHAT KEEPS THAT LAST ONE HONEST -- an assert_not_match for
 # a spelling that appears nowhere passes forever. Same pairing 10-static.sh states for
 # probe:it-does-not-prepend.
+
+# AND THE brew VERB ITSELF, from a row whose macOS cell IS a package rather than a note. The two
+# assertions above prove the NOTE fork; nothing proved the other one, so `brew install` was a
+# spelling no assertion in this tree had ever read -- not here, and not on a Mac either, because
+# before the fake uname above the fixture read the Debian column on every machine.
+out="$( GATE_UNAME_S=Darwin; gate_run shellcheck )"
+assert_match     "preflight:a-mac-is-offered-brew"        'brew install shellcheck$' "$out"
+assert_not_match "preflight:a-mac-is-never-offered-apt"   'apt install'              "$out"
+
+# ─── ...AND THE FEDORA COLUMN, WHICH IS A THIRD PACKAGE MANAGER (#195) ────────
+# Every arm above this line picks one of two columns from `uname` alone, which is all
+# run-tests.sh:260 ever was: `Darwin) plat=mac ;; *) plat=deb`. So a Fedora developer whose machine
+# failed this gate was told `sudo apt install -y openssh-client` -- a package manager that distro
+# does not have, and then a name it spells differently. install-cs193v.sh:487-504 has had the real
+# two-family table since #94; the gate was the last place in the tree that guessed.
+#
+# WHAT EACH CELL IS AND WHY IS RECORDED IN lib/portable.sh's REGISTRY HEADER, beside the cells it
+# justifies, rather than copied here: a measurement written down in two places is the drift this
+# change exists to stop. The one fact the arms below lean on is that Fedora's two ssh rows share
+# ONE package exactly as Debian's do -- /usr/bin/ssh-keygen belongs to `openssh`, which
+# openssh-clients Requires by exact version -- so the `all of them:` line stays one word.
+out="$( PT_OS_RELEASE="$GATE/os-release.fedora"; gate_run ssh ssh-keygen )"
+assert_match "preflight:fedora-names-the-ssh-package" 'dnf install -y openssh-clients$' "$out"
+# THE NEGATIVE IS THE WHOLE ISSUE IN ONE LINE, and the positive above is what keeps it honest --
+# an assert_not_match for a spelling that appears nowhere passes forever.
+assert_not_match "preflight:fedora-is-never-offered-apt" 'apt install' "$out"
+
+# A ROW WHOSE TWO LINUX SPELLINGS ARE NOT ONE CHARACTER APART. The ssh rows would catch a fedora
+# column that had simply copied the Debian one, but only by the `s` on the end; `iproute2` against
+# `iproute` is the row where the copy is provably not the original, and it is also the row #195
+# leads with.
+out="$( PT_OS_RELEASE="$GATE/os-release.fedora"; gate_run ss lsof )"
+assert_match     "preflight:fedora-spells-the-listeners-package" 'dnf install -y iproute$' "$out"
+assert_not_match "preflight:fedora-does-not-say-iproute2"        'iproute2'                "$out"
+
+# THE `all of them:` LINE IS A THIRD PLACE THE FAMILY HAS TO REACH, and it is asserted on BOTH
+# families here rather than only the new one: run-tests.sh prints the verb once per row and then
+# once more for the whole list, so an arm added to the first two and missed in the third leaves a
+# report that names dnf twice and apt once. Nothing asserted this line before, on either family.
+out="$( gate_run ssh ssh-keygen ss lsof )"
+assert_match "preflight:debian-summarises-with-apt" \
+             'all of them:  sudo apt install -y openssh-client iproute2$' "$out"
+out="$( PT_OS_RELEASE="$GATE/os-release.fedora"; gate_run ssh ssh-keygen ss lsof )"
+assert_match "preflight:fedora-summarises-with-dnf" \
+             'all of them:  sudo dnf install -y openssh-clients iproute$' "$out"
 
 # THE CONTROL, and it is not optional: without it every assertion above passes forever the day
 # the gate is accidentally made unreachable.
