@@ -27,6 +27,13 @@ cd "$REPO" || exit 1
 # shellcheck source=.private/files/cs193v-ui.sh
 . "$PRIVATE/files/cs193v-ui.sh"
 
+# WHICH BASH RAN, recorded rather than asserted, because it decides what half the assertions below
+# can see. `local cpid` leaves the name EMPTY on the 3.2 macOS ships and UNSET from 4.4 on, so
+# #205's crash -- a labelled call reading that name in the 124 arm under `set -u` -- and the
+# assertions that now cover it only exist on the newer shell. A green run on 3.2 is compatibility
+# evidence, not coverage of that arm; this line is what stops it reading as the latter.
+record "rt:bash-version" "$BASH_VERSION"
+
 # A TMPDIR OF OUR OWN, because two of the assertions below are "it left nothing behind" and
 # run_timeout reads TMPDIR on every call. Without this they would be asking a question about
 # whatever else on the machine happens to write there.
@@ -282,6 +289,46 @@ RT_ROW=''
 assert_eq       "rt:row-mode-passes-the-status-through" "7" "$RC"
 assert_contains "rt:row-mode-captures-output" "row-output" "$RT_OUT"
 assert_eq       "rt:row-mode-leaves-no-scratch-file" "" "$(litter)"
+
+# ─── ...AND THE 124 ARM IT SHARES WITH THE FIFO BRANCH  (#205) ────────────────
+# THE CELL NOBODY HAD FILLED IN was (label set) x (rc == 124). The three assertions above hold the
+# labelled path for a command that FINISHES, and the ceiling block above holds 124 on the fifo
+# branch -- so `cpid`, which only the fifo branch assigned, could be read by the epilogue both
+# branches share with nothing here passing through it. From bash 4.4 on, `local cpid` leaves the
+# name unset rather than empty, so that read aborted the shell under `set -u`: a labelled
+# `run_timeout` that reached its ceiling died with `cpid: unbound variable` instead of timing out.
+# Latent since #38, and not cosmetic -- it is the launcher's 180s `podman run` under a spinner, and
+# every one of setup-git's rows, since run_step sets RT_ROW on all of them.
+#
+# BOTH LABELS, because both callers land here: RT_SPIN below is the launcher's shape, which is what
+# the WSL2 report crashed on, and RT_ROW is setup-git's.
+#
+# CONTAINED, NOT MERELY ASSERTED. assert_exit runs its command in a `$( )` and the subshell below
+# is one on purpose, so the abort was reported as a wrong status with the unbound-variable line
+# quoted rather than taking this suite down at line one of the block.
+RT_ROW='a row'
+assert_exit "rt:row-mode-may-also-exit-124" 124 run_timeout 5 sh -c 'exit 124'
+RT_ROW=''
+RT_SPIN='working'
+assert_exit "rt:the-ceiling-returns-124-on-the-poll-branch" 124 run_timeout 1 sleep 5
+RT_SPIN=''
+
+# AND IT KILLS THE COMMAND, the `exec -a` twin of rt:the-ceiling-kills-the-command above and for
+# the same reason: the poll branch's `$!` IS the command, so a ceiling that returns 124 without
+# reaching its kill is a disowning dressed as a timeout. A NAME OF ITS OWN, keyed on this process
+# like $NAP is, so this check and that one cannot answer each other's question.
+#
+# PINNED AWAY FROM THE TTY the way the RT_BARE poll-branch cases do it: with a terminal on stdout
+# the label draws spinner frames into the middle of the results and without one it prints a line,
+# and that difference is what would make `-k run-timeout` behave unlike a full run.
+PNAP="vt-pnap-$$"
+( RT_SPIN='working'; run_timeout 1 bash -c "exec -a $PNAP sleep 30" ) >/dev/null 2>&1
+if pgrep -f "^$PNAP 30\$" >/dev/null 2>&1; then
+    fail "rt:the-poll-branch-ceiling-kills-the-command" "$PNAP 30 outlived the box"
+    pkill -9 -f "^$PNAP 30\$" 2>/dev/null
+else
+    pass "rt:the-poll-branch-ceiling-kills-the-command"
+fi
 
 # ─── it must not leak the harness's trace fd into what it runs ─────────────────
 # THE BUG THIS EXISTS FOR, and it cost a day on Fedora. run_timeout's fifo branch owns fd 9 and
