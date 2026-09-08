@@ -737,6 +737,97 @@ bare="$(grep -HnE '"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' $eafiles \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 
+# ─── the dependency registry: one row shape, one package name per family (#195) ─
+# TWO GATES OVER lib/portable.sh's PT_REGISTRY, and #195 bought both.
+#
+# THE ROW SHAPE FIRST, because the wire between the registry and the report is POSITIONAL and
+# truncates IN SILENCE. pt_missing reads a row with `IFS='|' read -r kind name why mac deb fed`
+# and the preflight reads pt_missing's output the same way -- and `read` puts everything left
+# over into its LAST variable. So a row that grows a column while one of those two readers does
+# not produces `sudo apt install -y iproute2|iproute`: a fix line nobody can type, out of a run
+# that reported no error at all. Nothing checked the shape before, because the only gates on
+# that file are shellcheck and `bash -n` and both are blind to a table.
+ptreg="$(sed -n "/^PT_REGISTRY='/,/'\$/p" "$PRIVATE/tests/lib/portable.sh")"
+ptreg="${ptreg#PT_REGISTRY=\'}"
+ptreg="${ptreg%\'}"
+# THE EXTRACTION IS ASSERTED FIRST, for the reason carve_func's own comment gives: an empty
+# carving sourced is a test that asserts nothing and passes, and an empty $ptreg would make the
+# field count below hold over no rows at all.
+assert_match "preflight:the-registry-was-readable" '^cmd\|shellcheck\|' "$ptreg"
+misshapen="$(printf '%s\n' "$ptreg" | do_awk -F'|' 'NF != 6 { printf "%d fields: %s\n", NF, $0 }')"
+assert_eq "preflight:every-registry-row-has-six-fields" "" "$misshapen"
+
+# AND THE PACKAGE NAMES, AGAINST THE INSTALLER'S OWN TABLE. install-cs193v.sh:470-473 states the
+# invariant this enforces -- "THE POINT IS THAT THERE IS ONE COPY ... a fix for one family that
+# missed the other would have shown a student `Install openssh-client` and then installed
+# something else" -- and #195 is that sentence coming true one level up: the gate had two COLUMNS
+# where the installer has two FAMILIES, so every non-Darwin machine read the Debian one.
+#
+# THE REGISTRY CANNOT BE THAT TABLE, which is why this detects drift instead of preventing it:
+# coreutils, python3 and the linter are the test suite's dependencies and no business of the
+# installer's, and PKG_CA and PM_UPGRADE are no business of the gate's. Only the cells that
+# appear in both are compared. fixtures/Containerfile.runner:22-23 records the same choice for
+# its own duplicated tool list -- "self-detecting rather than a maintenance risk".
+#
+# THE INSTALL VERB IS DELIBERATELY NOT COMPARED. The installer runs `apt-get install -y` because
+# it is a script; the gate prints `sudo apt install -y` because a human is about to type it.
+# Both are right, and an equality here could only be satisfied by making one of them wrong.
+# 14-test-harness.sh asserts the verbs behaviourally instead, one arm per family.
+pt_col() {                            # pt_col ROW_NAME COLUMN -> that cell of PT_REGISTRY
+    printf '%s\n' "$ptreg" | do_awk -F'|' -v n="$1" -v c="$2" '$2 == n { print $c }'
+}
+reg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ptreg.XXXXXX")"
+if carve_func "$PRIVATE/install-cs193v.sh" distro_packages "$reg_tmp/dp.sh"; then
+    pass "preflight:the-installer-s-table-was-carvable"
+    # THE PM_/PKG_ GLOBALS ARE PRE-BLANKED because distro_packages leaves them untouched for a
+    # family it does not know and this suite runs under `set -u` -- 25-installer.sh:467 makes the
+    # same arrangement for the same reason. In full, not only the four cells compared below:
+    # distro_packages sets all eight, and a subset would make the next comparison added here
+    # depend on whether its cell happened to be one of the four.
+    #
+    # The directive is for the ${!2} read, which shellcheck cannot see, and it sits above the
+    # whole function because one above the assignments covers only the first command on the line.
+    # shellcheck disable=SC2034
+    dp_cell() {                       # dp_cell FAMILY VAR -> the installer's value for that cell
+        ( . "$reg_tmp/dp.sh"
+          PM_REFRESH=''; PM_INSTALL=''; PM_UPGRADE=''
+          PKG_PODMAN=''; PKG_UIDMAP=''; PKG_SSH=''; PKG_CURL=''; PKG_CA=''
+          distro_packages "$1"
+          printf '%s' "${!2}" )
+    }
+    # ssh IS THE CELL THE INSTALLER'S HEADER WARNS ABOUT BY NAME, and it is the row #195 lists
+    # third. `openssh-client` and `openssh-clients` differ by one character across two families.
+    assert_eq "preflight:ssh-agrees-with-the-installer-on-debian" \
+              "$(dp_cell debian PKG_SSH)" "$(pt_col ssh 5)"
+    assert_eq "preflight:ssh-agrees-with-the-installer-on-fedora" \
+              "$(dp_cell fedora PKG_SSH)" "$(pt_col ssh 6)"
+    # THE TWO ssh ROWS SHARE ONE PACKAGE, which is why the `all of them:` line carries one word
+    # for both of them. Asserted rather than assumed: on Fedora the FILE /usr/bin/ssh-keygen
+    # belongs to `openssh` rather than to `openssh-clients`, and it is only openssh-clients'
+    # Requires on that exact version that makes the shared cell true there.
+    assert_eq "preflight:ssh-keygen-shares-the-ssh-package-on-debian" \
+              "$(pt_col ssh 5)" "$(pt_col ssh-keygen 5)"
+    assert_eq "preflight:ssh-keygen-shares-the-ssh-package-on-fedora" \
+              "$(pt_col ssh 6)" "$(pt_col ssh-keygen 6)"
+    assert_eq "preflight:curl-agrees-with-the-installer-on-debian" \
+              "$(dp_cell debian PKG_CURL)" "$(pt_col curl 5)"
+    assert_eq "preflight:curl-agrees-with-the-installer-on-fedora" \
+              "$(dp_cell fedora PKG_CURL)" "$(pt_col curl 6)"
+    # THE uidmap CELL, WHICH IS THE ROW #195 LEADS WITH. install-cs193v.sh:501 sets PKG_UIDMAP=""
+    # on the fedora arm precisely because the setuid helpers live in shadow-utils there -- which
+    # also owns usermod and cannot be absent -- so a fedora column that had copied the Debian
+    # one would be asking dnf for a package that does not exist on the distro.
+    assert_eq "preflight:the-installer-still-says-fedora-needs-no-uidmap" \
+              "" "$(dp_cell fedora PKG_UIDMAP)"
+    assert_eq "preflight:fedora-podman-is-the-installer-s-podman" \
+              "$(dp_cell fedora PKG_PODMAN)" "$(pt_col podman 6)"
+    assert_not_match "preflight:fedora-podman-does-not-name-uidmap" 'uidmap' "$(pt_col podman 6)"
+else
+    fail "preflight:the-installer-s-table-was-carvable" \
+         "could not carve distro_packages out of install-cs193v.sh"
+fi
+rm -rf "$reg_tmp"
+
 # ─── Containerfile ─────────────────────────────────────────────────────────────
 # A `#` line inside a line-continued RUN is stripped by the parser today, but if that ever
 # changed the comment would swallow the command after it and silently produce a broken

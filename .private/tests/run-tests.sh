@@ -245,7 +245,7 @@ fi
 # than contributing to a 344-line failure list in which "your machine is wrong" and "the code is
 # wrong" look identical.
 preflight() {
-    local missing name why mac deb plat pkgs fix seen=''
+    local missing name why mac deb fed plat verb pkgs fix seen=''
     missing="$(pt_missing)" && ! pt_bash_too_old && return 0
 
     printf '\n%sTHIS MACHINE CANNOT RUN THE TEST SUITE%s%*s(#124)\n\n' \
@@ -255,21 +255,39 @@ preflight() {
         printf '  %-12s %s\n\n' '' 'This is a FLOOR and never a ceiling -- see the note above.'
     fi
 
+    # THREE FAMILIES, NOT DARWIN-AND-EVERYTHING-ELSE (#195). This was `Darwin) plat=mac ;; *)
+    # plat=deb`, so every machine that was not a Mac read the Debian column and was told to run
+    # apt -- on Fedora that is the wrong package manager, and then the wrong name in three rows.
+    # The family comes from lib/portable.sh's pt_distro_family, which parses /etc/os-release the
+    # way install-cs193v.sh:454-466 does, and the macOS fork stays HERE for the reason that file
+    # keeps it there: platform() first, and the family only on the Linux arm.
+    #
+    # ONE VERB, RESOLVED ONCE. $plat was re-tested in three places -- the column pick, the per-row
+    # `fix` line, and the `all of them:` summary -- and a family added to two of them and missed in
+    # the third prints a report that names dnf twice and apt once. Two of those three were asking
+    # the same question, so they are one $verb now and the column pick is the only other reader.
+    case "$(uname -s)" in Darwin) plat=mac ;; *) plat="$(pt_distro_family)" ;; esac
+    case "$plat" in
+        mac)    verb='brew install' ;;
+        fedora) verb='sudo dnf install -y' ;;
+        *)      verb='sudo apt install -y' ;;
+    esac
+
     # COLLECTED, then printed once. A fresh machine is missing several things at once, and a gate
     # that makes you fix them one run at a time is worse than the disease.
-    case "$(uname -s)" in Darwin) plat=mac ;; *) plat=deb ;; esac
     pkgs=''
-    while IFS='|' read -r name why mac deb; do
+    while IFS='|' read -r name why mac deb fed; do
         [ -n "${name:-}" ] || continue
-        case "$plat" in mac) fix="$mac" ;; *) fix="$deb" ;; esac
+        case "$plat" in
+            mac)    fix="$mac" ;;
+            fedora) fix="$fed" ;;
+            *)      fix="$deb" ;;
+        esac
         printf '  %-12s %s\n' "$name" 'is missing, or is not the build this suite needs'
         printf '  %-12s why  %s\n' '' "$why"
         case "$fix" in
             '('*) printf '  %-12s note %s\n\n' '' "$fix" ;;
-            *)    case "$plat" in
-                      mac) printf '  %-12s fix  brew install %s\n\n' '' "$fix" ;;
-                      *)   printf '  %-12s fix  sudo apt install -y %s\n\n' '' "$fix" ;;
-                  esac
+            *)    printf '  %-12s fix  %s %s\n\n' '' "$verb" "$fix"
                   # De-duplicated with the no-associative-array idiom this project uses
                   # elsewhere, because one package satisfies several rows.
                   case " $seen " in *" $fix "*) ;; *) seen="$seen $fix"; pkgs="$pkgs $fix" ;; esac ;;
@@ -278,10 +296,7 @@ preflight() {
 $missing
 PREFLIGHT_EOF
 
-    [ -z "$pkgs" ] || case "$plat" in
-        mac) printf '  all of them:  brew install%s\n\n' "$pkgs" ;;
-        *)   printf '  all of them:  sudo apt install -y%s\n\n' "$pkgs" ;;
-    esac
+    [ -z "$pkgs" ] || printf '  all of them:  %s%s\n\n' "$verb" "$pkgs"
     printf 'Nothing was run and nothing was recorded: this is not a test failure, it is a\n'
     printf 'machine that cannot ask the question.\n\n'
     exit 78
