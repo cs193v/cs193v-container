@@ -355,7 +355,10 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     # cannot: half these calls are made from inside a command substitution, and a variable
     # assigned in that subshell never reaches the parent's trap. See rt_cleanup.
     tmp="$(mktemp "${TMPDIR:-/tmp}/cs193v-$$.XXXXXX")" || return 125
-    i=0; rc=124; frame=0
+    # cpid WITH THEM, and not in the branch that has a use for it: `local cpid` leaves the name
+    # unset rather than empty from bash 4.4 on, and the 124 arm below reads it whichever branch
+    # ran. See the comment there for what that cost (#205).
+    i=0; rc=124; frame=0; cpid=''
     # One animation, two callers. RT_ROW wins if both are somehow set, because a persistent
     # row is the more specific request. The indent differs because the two live in different
     # output: RT_SPIN covers a wait inside the launcher's own two-space prose, RT_ROW is an
@@ -436,6 +439,9 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
         # signal arriving during the wait leaves nothing behind in TMPDIR.
         rm -f "$fifo"
+        # RESTATED rather than left to the seeding at the top, and the duplicate is deliberate:
+        # $line starts here and nowhere else, so the two read as one pair that the `read` below
+        # is about to fill, with neither half of it eighty lines away.
         cpid=''; line=''
         # ONE CEILING, NOT TWO. The pid arrives the microsecond the wrapper forks, so this read
         # is a formality -- and if it is not, the wrapper never got as far as a command and
@@ -468,9 +474,18 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     elif [ -n "$RT_SPIN" ] && [ -t 1 ]; then
         printf '\r  %s%s[K\n' "$RT_SPIN" "$ESC"
     fi
-    # THE COMMAND FIRST, THEN WHATEVER IS WRAPPING IT. cpid is set only by the branch whose $!
-    # is a subshell rather than the command, and skipping it there would end the wait while
-    # leaving the hung process behind -- which is not a timeout, it is a disowning.
+    # THE COMMAND FIRST, THEN WHATEVER IS WRAPPING IT. Only the fifo branch has the two to tell
+    # apart: there $! is a subshell AROUND the command, so ending the wait without killing $cpid
+    # would leave the hung process behind -- which is not a timeout, it is a disowning. On the
+    # poll branch $! IS the command, bash having exec'd `( cmd ) &` in place, so empty here is
+    # the TRUE answer rather than a convenient one.
+    #
+    # WHICH IS WHY IT IS SEEDED WITH THE RUN-SCOPED STATE at the top rather than beside the read
+    # that fills it. This comment used to state that precondition with nothing enforcing it, and
+    # a bare `local` leaves the name UNSET on bash >= 4.4 -- so under the `set -u` both consumers
+    # of this file set, every labelled call that reached its ceiling died with `cpid: unbound
+    # variable` instead of timing out: the launcher's 180s `podman run` under a spinner, and all
+    # twelve of setup-git's rows, since run_step sets RT_ROW on every one of them (#205).
     if [ "$rc" -eq 124 ]; then
         [ -n "$cpid" ] && kill -9 "$cpid" 2>/dev/null
         kill -9 "$pid" 2>/dev/null
