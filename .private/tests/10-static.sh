@@ -367,8 +367,10 @@ assert_contains "pty-start:runs-the-command-through-pty-announce" 'pty-announce'
 # trace file descriptor" to stderr, run_timeout captured stderr into RT_OUT, and the launcher
 # parsed a podman version out of RT_OUT. podman 5.7.0 was refused as too old.
 #
-# WHY IT SURVIVED: it needs /bin/sh to be bash. On Debian and Ubuntu /bin/sh is dash, which
-# ignores BASH_XTRACEFD entirely; on Fedora and macOS it is bash. Latent, not absent.
+# WHY IT SURVIVED: it needs /bin/sh to be bash 4.1 or newer. On Debian and Ubuntu /bin/sh is
+# dash, which ignores BASH_XTRACEFD entirely; on Fedora it is bash 5, which validates it, and
+# that is where this was measured. macOS /bin/sh is bash too, but 3.2.57 predates the variable
+# and validates nothing, so a Mac cannot fail this way at all (#143, and the gate below).
 #
 # THREE FILES, not just the launcher. run-tests.sh holds the real stdout and stderr on fds 3
 # and 4 (`exec 3>&1 4>&2`) and every suite runs inside that, so 3 and 4 are as taken as 9 is.
@@ -410,6 +412,62 @@ if [ -n "$xt_copies" ]; then pass "trace-fd:container-side-copies-were-found"
 else fail "trace-fd:container-side-copies-were-found" \
           "no BASH_XTRACEFD in lib/sandbox.sh or lib/sandbox-guest.sh -- did tracing move?"; fi
 assert_eq "trace-fd:container-side-copies-agree" "BASH_XTRACEFD=$CS193V_TRACE_FD" "$xt_copies"
+
+# ─── and no comment may put macOS in that story without the fact that settles it ─
+# THE PREMISE IS TRUE AND THE CONCLUSION IS NOT, which is how three comments here came to say
+# the collision was live on a Mac and merely latent (#143). macOS /bin/sh IS bash -- but it is
+# 3.2.57, BASH_XTRACEFD is a bash 4.1 feature, and 3.2 treats it as an ordinary variable it
+# validates nothing about. Measured: `env BASH_XTRACEFD=9 /bin/sh -xc ': traced'` traces to
+# stderr and says nothing of the fd. The collision was a Fedora bug, silent on Debian for the
+# dash reason those comments give, and inapplicable on macOS.
+#
+# WHY A GATE AND NOT JUST A CORRECTION. That reasoning is what the next reader uses to decide
+# whether a platform is affected by an inherited-fd problem, and on a macOS-portability branch
+# they will reason from it and get the wrong answer. 12-run-timeout.sh's version gate had it
+# right all along, forty lines from one of the comments that had it wrong -- so two copies of
+# one argument drifted and nothing noticed, which is the shape this file exists to catch.
+#
+# THE RULE IS THE CHEAPEST ONE THAT CANNOT DRIFT: within ten lines of a BASH_XTRACEFD mention,
+# a line naming macOS beside Fedora, dash or /bin/sh is making a claim about who is affected,
+# so the bash 4.1 floor has to be within reach of it. It does not read the prose -- it makes the
+# one fact that decides the question impossible to leave out of the paragraph that needs it.
+#
+# EVERY FILE THAT TELLS THE STORY, found rather than listed, for the same reason the copies
+# above are: the launcher, the shim library and the guest script each explain this collision in
+# their own words, and a fourth retelling added later is exactly the one that would be missed.
+xt_story="$(grep -rl 'BASH_XTRACEFD' "$REPO/cs193v" "$PRIVATE/files" "$PRIVATE/tests" \
+            2>/dev/null | sort)"
+# THE CLAIMS ARE COUNTED BEFORE THEY ARE JUDGED. A grep that matched nothing -- reworded prose,
+# a moved file -- would make the rule below true forever, which is a vacuous pass and the thing
+# #79 was written to find. The corrected paragraphs still name macOS, so this stays non-zero.
+xt_claims="$(for _f in $xt_story; do
+    awk -v W=10 -v F="${_f#$REPO/}" '
+        { L[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (L[i] !~ /macOS/)                 continue
+                if (L[i] !~ /Fedora|dash|\/bin\/sh/) continue
+                lo = i - W; if (lo < 1)  lo = 1
+                hi = i + W; if (hi > NR) hi = NR
+                near = 0; floored = 0
+                for (j = lo; j <= hi; j++) {
+                    if (L[j] ~ /BASH_XTRACEFD/) near    = 1
+                    if (L[j] ~ /4\.1/)          floored = 1
+                }
+                if (near && !floored) printf "%s:%d\n", F, i
+                else if (near)        printf "ok\n"
+            }
+        }' "$_f"
+done)"
+xt_claim_n=0
+[ -n "$xt_claims" ] && xt_claim_n="$(printf '%s\n' "$xt_claims" | grep -c . )"
+record "trace-fd:macos-claims-checked" "$xt_claim_n"
+if [ "$xt_claim_n" -gt 0 ]; then pass "trace-fd:there-are-macos-claims-to-check"
+else fail "trace-fd:there-are-macos-claims-to-check" \
+          "no comment near a BASH_XTRACEFD names macOS -- did the prose move, or the grep break?"; fi
+xt_unfloored="$(printf '%s\n' "$xt_claims" | grep -v '^ok$' | grep . | do_tr '\n' ' ' \
+                | sed 's/ *$//' || true)"
+assert_eq "trace-fd:a-macos-claim-names-the-version-floor" "" "$xt_unfloored"
 
 # ─── every bind mount carries the SELinux label ────────────────────────────────
 # THE SAME SHAPE AS THE --label RULE BELOW, and for the same reason. On an SELinux host a mount

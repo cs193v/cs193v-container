@@ -347,9 +347,11 @@ fi
 # that RT_OUT contains what the command said and nothing else.
 #
 # /bin/sh IS THE PROBE ON PURPOSE. This needs a child that VALIDATES the variable, and that means
-# bash: on Debian and Ubuntu /bin/sh is dash, which ignores BASH_XTRACEFD and says nothing, while
-# on Fedora and macOS it is bash. Naming /bin/sh rather than bash keeps the probe honest about
-# which platforms can see the fault -- it reproduces exactly where the suite reproduced it.
+# bash 4.1 or newer: on Debian and Ubuntu /bin/sh is dash, which ignores BASH_XTRACEFD and says
+# nothing, while on Fedora it is bash 5. macOS /bin/sh is bash as well, but it is 3.2 and does
+# not know the variable at all -- that is what the version gate below skips on (#143). Naming
+# /bin/sh rather than bash keeps the probe honest about which platforms can see the fault -- it
+# reproduces exactly where the suite reproduced it.
 #
 # THE FD IS THE HARNESS'S OWN, read from lib/shared.sh rather than written down again. That is the
 # point of the constant: this assertion follows the harness if the harness ever moves.
