@@ -39,14 +39,27 @@
 # version out of RT_OUT, so a diagnostic became part of a version number and a current podman
 # was refused as too old.
 #
-# WHY THAT WAS INVISIBLE FOR SO LONG: it needs /bin/sh to BE bash. On Debian and Ubuntu /bin/sh
-# is dash, which ignores BASH_XTRACEFD entirely and says nothing. On Fedora, and on macOS,
-# /bin/sh is bash. The bug was latent on the machines this was developed on, not absent.
+# WHY THAT WAS INVISIBLE FOR SO LONG: it needs /bin/sh to be bash, AND to be bash 4.1 or newer.
+# On Debian and Ubuntu /bin/sh is dash, which ignores BASH_XTRACEFD entirely and says nothing. On
+# Fedora it is bash 5, which validates it -- that is the machine this was measured on. macOS
+# /bin/sh is bash as well, and three comments here reasoned from that alone that a Mac was
+# affected and merely latent (#143). IT IS NOT AFFECTED AT ALL: BASH_XTRACEFD arrived in bash
+# 4.1 and macOS ships 3.2.57, which treats it as an ordinary variable, validates nothing, and
+# cannot emit that diagnostic -- measured, `env BASH_XTRACEFD=9 /bin/sh -xc ': traced'` traces
+# to stderr and says nothing of the fd. So: a Fedora bug, latent on Debian for the dash reason
+# above, inapplicable on macOS. 12-run-timeout.sh says the same floor executably, in the gate
+# that skips rt:no-trace-fd-diagnostic-in-RT_OUT below 4.1, and 10-static.sh's
+# trace-fd:a-macos-claim-names-the-version-floor is what keeps the two from drifting again.
+#
+# WHAT A MAC DOES INSTEAD, because a reader meets it immediately and it is not a defect: 3.2
+# ignores the variable, so `bash -x` writes its trace to stderr, installer_host's `2>&1` folds
+# that into every transcript it captures, and the trace file stays empty -- so on every Mac
+# 95-installer-coverage.sh has no producer to score and says so, `coverage:nothing-to-score`.
 #
 # THREE FIXES THAT DO NOT WORK, so they are not tried again:
 #   * naming a shell. Bash emits the diagnostic whether it was invoked as `bash` or as `sh`;
-#     only the message prefix changes. Only dash is silent, and dash is not on Fedora and does
-#     not ship on macOS.
+#     only the message prefix changes. Only dash is silent, and on Fedora -- the one platform
+#     that needed silencing -- /bin/sh is not dash.
 #   * unsetting it in the child. Bash validates the variable at startup, BEFORE the first line
 #     of the script runs, so `unset BASH_XTRACEFD` on line 1 is already too late.
 #   * not exporting it (`BASH_XTRACEFD=N; set -x; . script`). This does contain the leak, but

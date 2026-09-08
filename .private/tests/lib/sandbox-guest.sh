@@ -315,9 +315,10 @@ cmd_run() {
         #
         # FD 8, NOT 9, AND THE NUMBER MATTERS. BASH_XTRACEFD is exported, so every descendant of
         # the traced installer inherits it -- including the launcher, whose run_timeout owns fd 9
-        # and CLOSES it for the command it runs. Bash validates BASH_XTRACEFD at startup, so on any
-        # distro where /bin/sh is bash (Fedora, macOS -- not Debian, where it is dash) a child then
-        # wrote "invalid value for trace file descriptor" into output the launcher was parsing a
+        # and CLOSES it for the command it runs. Bash 4.1+ validates BASH_XTRACEFD at startup, so
+        # where /bin/sh is such a bash -- Fedora; not Debian, where it is dash, and not macOS,
+        # whose 3.2 predates the variable and validates nothing (#143) -- a child then wrote
+        # "invalid value for trace file descriptor" into output the launcher was parsing a
         # podman version out of. This file is COPIED into the fixture verbatim, so it cannot read
         # lib/shared.sh's CS193V_TRACE_FD; 10-static.sh asserts this number still agrees with it.
         exec 8>>"$REP/trace"
