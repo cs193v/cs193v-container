@@ -41,6 +41,9 @@ else
          "could not extract msg() from cs193v-ui.sh — has it been renamed or reformatted?"
     exit 1
 fi
+# Read by msg() in the carving sourced on the next line, exactly as lib/shared.sh:267-278 sets
+# it for msg_of -- and disabled here for the reason that comment gives rather than for the file.
+# shellcheck disable=SC2034
 MESSAGES="$PRIVATE/messages.txt"
 # shellcheck disable=SC1090
 . "$TMP/msg.sh"
@@ -623,6 +626,8 @@ shim_set run_err 'Error: preparing container failed
 level=error msg="cannot set up pasta: Operation not permitted"
 Error: netavark: iptables chain creation failed'
 COPY="$(repo_copy)"
+# Read by launcher() in lib/podman-shim.sh:93, which runs "${LAUNCHER_DIR:-$REPO}/cs193v".
+# shellcheck disable=SC2034
 LAUNCHER_DIR="$COPY"
 out="$(launcher)"
 assert_contains "die:banner-drawn"          "STOP"                              "$out"

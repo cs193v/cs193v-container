@@ -59,6 +59,8 @@ set -u
 
 cd "$REPO" || exit 1
 
+# Read by msg_text in lib/setup-git-shim.sh:140, which this file sources.
+# shellcheck disable=SC2034
 SGM="$PRIVATE/files/setup-git-messages.txt"
 
 if [ -z "${CS193V_GH_TEST_TOKEN:-}" ]; then
@@ -178,6 +180,8 @@ SG_RUN="$SG_RUN -e CS193V_GH_ORG=$ORG"
     SG_RUN="$SG_RUN -e CS193V_GH_SANDBOX_PREFIX=$CS193V_GH_SANDBOX_PREFIX"
 SG_RUN="$SG_RUN $NAME setup-git"
 # Generous: this one really clones, pushes, and opens two pull requests over the network.
+# Read by sg_script in lib/setup-git-shim.sh:106 (`do_script "${SG_TIMEOUT:-120}"`).
+# shellcheck disable=SC2034
 SG_TIMEOUT=600
 
 # Same clean first run 35-setup-git-shim.sh uses. The trailing arrows pick "I'm stuck" if a probe

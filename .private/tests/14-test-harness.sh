@@ -944,10 +944,10 @@ assert_eq "ptyrun:an-unannounced-pid-yields-nothing-to-kill" "" \
 # ─── the two ways to close the window are not the same event (#169) ───────────
 # WHY THIS IS HERE AND NOT IN 70-sighup.sh. That file needs a container and two minutes to ask
 # whether the LAUNCHER survives a close; this asks whether ptyrun delivers the close it claims to,
-# which needs neither. `syntax:ptyrun` above is py_compile, i.e. parse-only -- it cannot catch a
-# SIGUSR1 handler that never fires (PEP 475 retries the select, so a handler that only sets a flag
-# is invisible until the next byte of I/O, and for a sleeping child there is none), a killpg aimed
-# at the wrong group, or a leader that hangs up the terminal on its way out.
+# which needs neither. `syntax:python` in the static tier only COMPILES it, i.e. parse-only -- it
+# cannot catch a SIGUSR1 handler that never fires (PEP 475 retries the select, so a handler that
+# only sets a flag is invisible until the next byte of I/O, and for a sleeping child there is
+# none), a killpg aimed at the wrong group, or a leader that hangs up the terminal on its way out.
 #
 # BOTH SHELLS, PINNED, for the reason #151 gives above: on this Mac /bin/sh optimises itself away
 # for this command shape, so a single-arm version of this group is green here and red on Ubuntu --

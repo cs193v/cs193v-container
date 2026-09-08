@@ -14,11 +14,18 @@
 # that only exist in a checkout, and msg_of reads .private/messages.txt from the host tree. A
 # test-only fact in a shipped file is a fact a student's container carries for no reason.
 #
-# MUST STAY BASH 3.2 COMPATIBLE, and unlike most of the suite that is ENFORCED here:
-# 10-static.sh's bash32:tests-are-bash32-safe names this file explicitly. It has to, because
-# that list names lib files one at a time and its glob is `tests/*.sh` -- TOP LEVEL ONLY. A
-# file added under lib/ without being named there is silently exempt from the very ban list
-# it is required to obey, which is the failure mode worth more than the rule.
+# MUST STAY BASH 3.2 COMPATIBLE, and unlike most of the suite that is ENFORCED:
+# 10-static.sh's bash32:tests-are-bash32-safe scans this file, along with everything else the
+# host runs out of tests/.
+#
+# THIS PARAGRAPH USED TO BE A WARNING and it is worth recording why it no longer needs to be. It
+# said that the ban list NAMED lib files one at a time, so "a file added under lib/ without being
+# named there is silently exempt from the very ban list it is required to obey, which is the
+# failure mode worth more than the rule". That failure mode was real -- it is what #115 and #125
+# each paid for once, and #158 measured it across the whole tree: seventeen shell files that no
+# lint reached. What replaced the naming is one list derived from the tree
+# (10-static.sh's $testfiles), shared by the linter, the parse gate, the bash-4 ban and the exec
+# check, so a file added under lib/ tomorrow is covered by all four without being remembered.
 
 # ─── the file descriptor the harness traces installer runs on ──────────────────
 #
@@ -257,11 +264,18 @@ carve_func() {                        # carve_func FILE NAME DEST -> 0 if DEST g
 # to be set for msg() to read anything. Nothing leaks out but the text.
 msg_of() {                            # msg_of KEY [NAME=VALUE...] -> the message, expanded
     (
-        # SC2034 disabled HERE rather than for the whole file list: msg() reads $MESSAGES out of
+        # SC2034 disabled HERE rather than for a whole file list: msg() reads $MESSAGES out of
         # the file sourced on the next line, which shellcheck cannot see without -x -- the same
-        # blindness shellcheck:ui and shellcheck:setup-git-tests answer with --exclude=SC2034.
-        # Excluding it for all of shellcheck:tests would stop catching genuinely dead variables
-        # in run-tests.sh and 10-static.sh, which is too much to give up for one line.
+        # blindness shellcheck:ui answers with --exclude=SC2034 on the product side.
+        #
+        # THIS LINE IS NOW THE WHOLE TREE'S IDIOM, and #158 is why. There used to be nine
+        # test-side lists, three of them excluding SC2034 for every file they named; there is now
+        # one shellcheck:tests over a list derived from the tree, with no --exclude at all, and
+        # every excuse sits in the file it excuses the way this one does. The argument that made
+        # that worth doing is the one this comment was already making: a blanket exclusion "would
+        # stop catching genuinely dead variables in run-tests.sh and 10-static.sh". Measured when
+        # the seventeen unlinted files were finally covered -- it turned up one, 50-image.sh's
+        # GESTURE_TOKENS, and #164 had just deleted two more of exactly that shape by hand.
         # shellcheck disable=SC2034
         MESSAGES="$PRIVATE/messages.txt"
         # shellcheck source=../../files/cs193v-ui.sh

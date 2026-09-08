@@ -14,6 +14,16 @@
 #
 # Nothing in here needs sudo, and nothing writes outside its own temp directory.
 
+# SC2034 FOR THE WHOLE FILE, because it is a property of the whole file: this suite carves
+# functions out of install-cs193v.sh (carve_func, lib/shared.sh:247) and sources them in a
+# subshell, so every global those carvings read has to be set HERE, one `.` away from any use a
+# linter can see. (Not spelled with the linter's own name at the start of a line: a comment that
+# opens `# shellcheck <word>` is parsed as a DIRECTIVE, which is SC1072 rather than prose -- the
+# same self-matching hazard 10-static.sh:377 assembles its needles tail-first to avoid.)
+# PODMAN_PKG_ID is read by the podman-path probe, PM_REFRESH/PM_INSTALL and
+# the five PKG_* by distro_packages. lib/shared.sh:267-278 makes this argument for a single line
+# of one file; a suite built entirely out of carvings is the same argument at file scale.
+# shellcheck disable=SC2034
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 . "$(dirname -- "$0")/lib/podman-shim.sh"
@@ -55,6 +65,9 @@ done
 # 5.7.0 vs 5.7.0 is the case that matters most: MIN_PODMAN is 5.7.0 and Ubuntu 26.04 ships
 # exactly that, so "equal" must mean "acceptable" or every stock Ubuntu student is refused.
 # 10.0.0 vs 5.7.0 guards against a lexical compare.
+# source=/dev/null for the reason :187 gives for the same shape: the carving's path is built
+# from an argument, so there is nothing for shellcheck to follow (SC1090).
+# shellcheck source=/dev/null
 run_vl() { ( . "$TMP/$1.sh"; version_lt "$2" "$3" ); }
 for pair in "5.7.0 5.7.0 no" "5.6.0 5.7.0 yes" "5.6.9 5.7.0 yes" "5.7.1 5.7.0 no" \
             "10.0.0 5.7.0 no" "5.7 5.7.0 no" "5.7.0 5.7 no" "6 5.7.0 no" \

@@ -14,6 +14,12 @@
 # `::` inside a block, where it is MORE permissive than cmd.exe; those are asserted statically in
 # 25-installer.sh precisely because a green run here would prove nothing about them.
 
+# SC2034: this library sets WINE_OUT, WINE_ERR, WINE_RC and WINE_SKIP_WHY for its CALLER to read
+# -- 27-installer-windows.sh reads them a hundred times, and WINE_SKIP_WHY is the skip message
+# the caller prints when the tier declines. None of that is visible from inside the file, and
+# each of the four is written at three or four sites, so this is file-level for the same reason
+# 12-run-timeout.sh's is: shellcheck names only the last one.
+# shellcheck disable=SC2034
 WINE_FIXTURE=wine
 
 WINE_SKIP_WHY=''                      # why the tier declined, for the caller's skip message

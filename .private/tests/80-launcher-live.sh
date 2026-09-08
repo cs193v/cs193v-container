@@ -101,6 +101,12 @@ LV() { release_container; L "$@"; }
 #
 # It releases the container first, for the same reason LV() does: a bare launch against a live
 # session is refused, and this suite holds the container up between groups.
+#
+# "$@" IS KEPT THOUGH NOTHING PASSES ONE, which is what SC2120 notices. It mirrors LV() above,
+# and the failure the two shapes protect against is not symmetrical: a caller that grew a flag
+# would have it silently swallowed, and a bare launch that quietly ignored `--rebuild` is a test
+# that measures something other than what it says. Cheaper to keep than to diagnose once.
+# shellcheck disable=SC2120
 LB() { release_container; launcher_tty_repo '\nexit\n' "$@"; }
 
 # UP HERE WITH THE OTHER HELPERS, not beside the tunnel group that reads it three times. The

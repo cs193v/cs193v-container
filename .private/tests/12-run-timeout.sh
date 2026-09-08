@@ -18,6 +18,14 @@
 # the container can use it too -- setup-git's run_step is the same function -- and every property
 # below is about the function rather than about any one caller of it.
 
+# SC2034 FOR THE WHOLE FILE, AND FILE-LEVEL ON PURPOSE -- do not "tidy" this into three per-line
+# directives. RT_BARE, RT_SPIN and RT_ROW are this suite's three modes: it sets them, run_timeout
+# in files/cs193v-ui.sh reads them, and shellcheck cannot see across the `.` without -x. What
+# makes the placement matter is that shellcheck reports only the LAST assignment of each, and
+# each is written at several -- so one more case appended below moves all three findings, and a
+# directive pinned to a line would be excusing a line that had stopped needing it while the new
+# one went unexcused. (No line numbers here on purpose: they are what would rot.)
+# shellcheck disable=SC2034
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
@@ -57,7 +65,18 @@ faster_than() {                       # faster_than LIMIT ELAPSED
 }
 # What run_timeout leaves in TMPDIR. Named on the pid the way rt_cleanup sweeps them, so the
 # suite's own scratch files are not counted.
-litter() { ls -A "$WORK" 2>/dev/null | grep '^cs193v-' | do_tr '\n' ' ' | sed 's/ *$//'; }
+#
+# A GLOB RATHER THAN `ls | grep` (SC2010). The prefix is the whole filter, and a glob applies it
+# without a pipeline -- which also means the empty case is `[ -e ]` saying no rather than ls
+# saying nothing, and every caller below tests this for emptiness.
+litter() {
+    local e l=''
+    for e in "$WORK"/cs193v-*; do
+        [ -e "$e" ] || continue
+        l="$l ${e##*/}"
+    done
+    printf '%s' "${l# }"
+}
 
 # ─── the status it returns ─────────────────────────────────────────────────────
 # Half the launcher's control flow is `if pm inspect ...`, so a status that does not survive the

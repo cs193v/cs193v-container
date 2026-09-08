@@ -24,6 +24,9 @@ set -u
 
 cd "$REPO" || exit 1
 
+# Read by cs193v-portwatch:453, three lines below, which is a `.` shellcheck does not follow
+# without -x -- and -x here would resolve the source and hide every finding this file has.
+# shellcheck disable=SC2034
 CS193V_PORTWATCH_SOURCED=1
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=.private/files/cs193v-portwatch
@@ -121,7 +124,9 @@ feed() {                              # feed LABEL V4 V6
         p="${e%%:*}"; c="${e#*:}"
         case "$p" in ''|*[!0-9]*) BAD="${BAD:-$3 -> non-decimal '$e'}"; continue ;; esac
         [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || BAD="${BAD:-$3 -> range '$e'}"
-        case " lo any v6lo eth loalt " in *" $c "*) ;; *) BAD="${BAD:-$3 -> class '$e'}" ;; esac
+        # ASKED OF $c, not of a padded list (SC2194): a constant case subject is the shape that
+        # reads as a forgotten `$`, and the alternation says the same thing about the same value.
+        case "$c" in lo|any|v6lo|eth|loalt) ;; *) BAD="${BAD:-$3 -> class '$e'}" ;; esac
     done
 }
 feed "" "" "empty"
