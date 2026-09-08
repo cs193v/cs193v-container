@@ -18,6 +18,9 @@ require_podman
 SB_TMP="$(new_tmpdir)"
 # LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
 # just the container names to sweep on the way out.
+# Read by sandbox_cleanup in lib/sandbox.sh:1314 (`for c in $SB_CASES`), which the trap below
+# calls -- so the sweep and this list are the same fact, named once.
+# shellcheck disable=SC2034
 SB_CASES="apt cannot-answer subuid-no subuid-yes wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"

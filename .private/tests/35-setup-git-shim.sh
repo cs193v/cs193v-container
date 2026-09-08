@@ -19,6 +19,10 @@
 # glyphs in it, the messages by key rather than by quoted prose, and — the one that matters most
 # — the absence of the token anywhere in it.
 
+# SC2034: SG_RUN is set here and read by sg_run in lib/setup-git-shim.sh:91, which this file
+# sources -- invisible without -x, and -x cannot resolve a path built from $0. File-level rather
+# than per-line because it is written at two sites and shellcheck names only one of them.
+# shellcheck disable=SC2034
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 . "$(dirname -- "$0")/lib/setup-git-shim.sh"

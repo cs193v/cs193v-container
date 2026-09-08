@@ -231,6 +231,9 @@ esac
 require_podman || { printf 'podman is required.\n' >&2; exit 1; }
 
 WINE_TMP="$(new_tmpdir)"
+# Read by fixture_build and export_tree in lib/sandbox.sh (:467, :481), which this file
+# sources: the driver owns the scratch root and the library writes into it.
+# shellcheck disable=SC2034
 SB_TMP="$WINE_TMP"                    # fixture_build logs its build output here
 trap 'rm -rf "$WINE_TMP"; rm -f "${CS193V_RESULTS:-}"' EXIT
 

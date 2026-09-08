@@ -398,7 +398,7 @@ level=error msg="cannot set up pasta"' >&2
             # `pkill -f "cs193v-portwatch --watch"`, whose ARGUMENT contains the very string the
             # next arm matches on, so without this the reap is answered with a frame instead.
             *pkill*)
-                echo -n ''; exit 0 ;;
+                printf ''; exit 0 ;;
             # THE WATCHER SPEAKS ITS OWN PROTOCOL. ONE FRAME, THEN EOF -- deliberately not a loop:
             # a streaming fake leaves a supervisor alive per launch and this suite launches twenty
             # times in a row, which hung the run until the timeout killed it. EOF is safe because
@@ -415,7 +415,7 @@ level=error msg="cannot set up pasta"' >&2
             # student in front of something. Only the second gets exec_out, or a test asserting
             # "the ENTER prompt comes before the container is opened" sees the claim and fails on
             # an ordering that is actually correct. Measured: it did.
-            *--claim)         get claim_out ''; echo -n '' ;;
+            *--claim)         get claim_out ''; printf '' ;;
             *)                case "$*" in
                                   *'date +%s'*) get container_date "$(date +%s)"; echo ;;
                                   *) get exec_out ''; echo ;;

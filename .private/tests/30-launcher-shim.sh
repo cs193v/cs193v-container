@@ -737,9 +737,15 @@ assert_eq "rebuild:unknown-modifier-changes-nothing" "0" "$(shim_count '^rm ')"
 # exactly what is being ruled out here.
 shim_new
 out="$(launcher --rebuild)"
-assert_eq "rebuild:raises-no-tunnel" "0" \
-    "$(ls "$SHIM"/tmp/cs193v-*.ctl "$SHIM"/tmp/cs193v-*.pid "$SHIM"/tmp/cs193v-*.log 2>/dev/null \
-       | grep -v 'cs193v-build-' | wc -l | do_tr -d ' ')"
+# COUNTED WITH A GLOB, not `ls | grep` (SC2010): three globs, one exclusion, and the build log is
+# the exclusion because --rebuild is supposed to leave exactly that and nothing else.
+tunnel_litter=0
+for e in "$SHIM"/tmp/cs193v-*.ctl "$SHIM"/tmp/cs193v-*.pid "$SHIM"/tmp/cs193v-*.log; do
+    [ -e "$e" ] || continue
+    case "$e" in *cs193v-build-*) continue ;; esac
+    tunnel_litter=$((tunnel_litter + 1))
+done
+assert_eq "rebuild:raises-no-tunnel" "0" "$tunnel_litter"
 # ...and says nothing about one either. By KEY, so rewording the message cannot break this.
 assert_says_not_key "rebuild:says-nothing-about-the-tunnel" warn.tunnel-failed "$out"
 
@@ -1968,7 +1974,10 @@ tailbox_at() {                        # tailbox_at ROWS COLS -> the mid-build sc
     printf '#!/bin/sh\nexit 1\n' > "$SHIM/tput"
     chmod +x "$SHIM/tput"
     export LINES="$1" COLUMNS="$2"
-    local t="$(launcher_tty '' --rebuild --no-cache)"
+    # Declared and assigned separately (SC2155): `local t="$(...)"` makes the local's own status
+    # the command's, so a launcher that died would read as a success with empty output.
+    local t
+    t="$(launcher_tty '' --rebuild --no-cache)"
     unset LINES COLUMNS
     printf '%s' "$t" | render_pty_mid | render_pty
 }

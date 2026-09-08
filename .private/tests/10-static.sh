@@ -18,7 +18,7 @@ set -u
 
 cd "$REPO" || exit 1
 
-# ABOVE THE FIRST CHECK THAT USES IT, which here is syntax:shortlink four lines down. Twelve
+# ABOVE THE FIRST CHECK THAT USES IT, which is syntax:shortlink in the section after next. Twelve
 # checks in this file derive an answer from python3, and two of them -- syntax:shortlink and
 # claude:managed-settings-is-valid-json -- are assert_oks, so their whole verdict IS the
 # interpreter's exit status. Measured (#79): an interpreter that prints something else and exits 0
@@ -26,6 +26,68 @@ cd "$REPO" || exit 1
 # on it, which is why the file cannot go green either way -- but a pass that measured nothing is
 # still a pass that measured nothing.
 require_python3
+
+# ─── every shell file the host runs, derived once ──────────────────────────────
+# FOUR RULES SHARE THIS LIST, and that is the point of #158. Each of them used to NAME its files,
+# and each named a different subset of the same tree: shellcheck reached 28 of the 45, `bash -n`
+# reached 5, the bash-4 ban missed all seven extensionless fakes, and exec: named two of them.
+# A file left out of any one of those is silently exempt from the rule it is meant to obey --
+# which is what lib/shared.sh:17-28 records, what #115 and #125 each paid for once, and what
+# happened twice more while #158 sat open: #164 needed 60-container.sh linted and answered the
+# way #115 and #125 had, by adding one more name, while 13-term-class.sh arrived carrying none.
+# Seventeen unlinted before, seventeen after -- a different seventeen.
+#
+# EXEMPT BY NAME, NOT BY THE GLOB'S REACH. That is the whole difference from the expression this
+# started as, and every clause is a hole that was measured in it:
+#   * tmux-harness/       vendored from the multiplexer prototype and meant to stay diffable
+#                         against it, so local style fixes would cost more than they buy. Its
+#                         host-side driver, 65-tmux.sh, is ours and is IN.
+#   * fixtures/           data: .c fakes, Containerfiles, expected-output files. It was already
+#                         outside a top-level glob -- but by accident rather than by decision.
+#   * *.py                syntax:python above. shellcheck asked to read python reports a syntax
+#                         error on the first line it does not understand.
+#   * *.pyc, __pycache__  not source. Kept even though syntax:python no longer creates any, so
+#                         this list does not depend on that fix staying made.
+#   * *.md                not shell.
+#
+# A GLOB PLUS A SHEBANG TEST WAS THE FIRST TRY AND IT LEAKED FOUR WAYS, all measured: a future
+# tests/lib/shim/ was SILENTLY invisible (awk handed a directory exits 0 saying nothing, so its
+# contents would simply not appear), `#!/bin/bash -e` did not match a `sh$` test, a top-level
+# extensionless command was in neither arm, and fixtures/ was exempt only because the glob did
+# not reach it. Inclusive-by-default with named exemptions inverts all four: a new file of any
+# name, extension, shebang or depth is IN unless this list says otherwise.
+#
+# WHICH MEANS A NEW DATA FILE DROPPED IN HERE GOES RED rather than being quietly linted as shell.
+# That is the intended trade -- data belongs in fixtures/ -- and the answer is to name it above.
+tf_nl="$(find -L $PRIVATE/tests -type f \
+              ! -path '*/tmux-harness/*' ! -path '*/fixtures/*' \
+              ! -name '*.md' ! -name '*.py' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+         | LC_ALL=C sort)"
+testfiles="$(printf '%s' "$tf_nl" | do_tr '\n' ' ')"
+record "tests:shell-files-found" "$(printf '%s\n' "$tf_nl" | grep -c .)"
+
+# ASSERTED BEFORE ANY RULE READS IT, by the rule the socket cross-check states at :316: a set
+# that came back empty makes every check below it pass having measured nothing.
+#
+# AND NOT BY COUNTING, which is the part worth being careful about here. "Not empty" is satisfied
+# by 38 of the 45, and a number to compare against is a number to bump. These three are the three
+# SHAPES the four old lists reached separately -- a top-level .sh, a lib with no shebang at all,
+# and an extensionless command -- so one of them dropping out is precisely the failure a narrowed
+# find produces, and a probe cannot go stale the way a count does.
+for probe in 10-static.sh lib/assert.sh lib/podman-fake; do
+    case " $testfiles " in
+        *" $PRIVATE/tests/$probe "*) pass "tests:the-file-list-reaches-$probe" ;;
+        *) fail "tests:the-file-list-reaches-$probe" \
+                "$probe is not in the derived list -- the find above has stopped reaching it" ;;
+    esac
+done
+# AND NO NAME IN IT CARRIES A SPACE, which is the one thing this idiom cannot hold: the list is
+# word-split at four call sites, under the same `# shellcheck disable=SC2086` the ban list below
+# carries, so a space would silently become two paths -- neither of which exists, and both of
+# which shellcheck and `bash -n` would then refuse in a way that reads as a lint failure rather
+# than as a filename. Counted both ways rather than searched for: that IS the failure.
+assert_eq "tests:no-shell-file-name-carries-a-space" \
+          "$(printf '%s\n' "$tf_nl" | grep -c .)" "$(printf '%s\n' $testfiles | grep -c .)"
 
 # ─── syntax ────────────────────────────────────────────────────────────────────
 assert_ok  "syntax:cs193v"            bash -n cs193v
@@ -39,25 +101,106 @@ assert_ok  "syntax:linkbox"           bash -n $PRIVATE/files/cs193v-linkbox
 # /bin/sh, unlike the box it feeds: it is a case statement over two variables with no output but
 # one line, and it is called from a tmux command substitution at session-claim time.
 assert_ok  "syntax:gesture"           sh -n $PRIVATE/files/cs193v-gesture
-# THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS, and `compile()` rather than py_compile for the
-# reason the Containerfile records: py_compile would drop a .pyc beside it.
+# THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS UNDER A BARE NAME, and `compile()` rather than
+# py_compile for the reason the Containerfile records: py_compile would drop a .pyc beside it.
+# It is named rather than globbed because it has no extension to glob on -- which is exactly what
+# shortlink:is-python-not-shell below asserts, so the two halves of that decision cannot drift.
 assert_ok  "syntax:shortlink"         python3 -c \
            "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" \
            $PRIVATE/files/shortlink
+# EVERY OTHER .py IN THE TREE, DERIVED rather than named -- the same move, and for the same
+# reason, as the shell file list in the section above. This was `syntax:ptyrun`, a list of ONE,
+# and it had already been wrong for longer than lib/ptyrun.py has existed:
+# files/rewrite-window-title.py is SHIPPED, runs at Containerfile:801, and had no parse gate
+# anywhere in this repo. Two named globs would have reached it; a find reaches whatever is added
+# next, in either tree, at any depth.
+#
+# tmux-harness/ IS **NOT** EXEMPT HERE, unlike everywhere else, and the distinction is the point:
+# that directory is exempt from LINTING because it is vendored and meant to stay diffable against
+# the prototype, so a style fix would cost more than it buys. "Does it compile" is not style. A
+# vendored file that does not parse is broken for us too, and the fix for one is not a local
+# divergence. Measured: both files compile today, so this costs nothing and closes a real gap.
+#
+# AND compile() RATHER THAN py_compile, which is what the line this replaces used. py_compile
+# writes lib/__pycache__/ptyrun.cpython-*.pyc into the checkout on every static run --
+# .gitignore:22-25 exists to sweep up after exactly that line, and :103-104 and
+# Containerfile:609 both already record the reason not to. It also matters to the shell file list above, which is
+# inclusive by default: a .pyc dropped beside a source is a binary handed to shellcheck next run.
+pyfiles="$(find -L $PRIVATE/files $PRIVATE/tests -type f -name '*.py' \
+           | LC_ALL=C sort | do_tr '\n' ' ')"
+record "tests:python-files-found" "$(printf '%s\n' $pyfiles | grep -c .)"
+# NON-EMPTY FIRST, and here that guard is load-bearing rather than ceremonial: `for p in
+# sys.argv[1:]` over NO arguments compiles nothing and exits 0. The form this replaces was a
+# literal glob, which python failed to OPEN when it matched nothing -- loud by accident. A
+# derived list that came back empty would pass in silence, which is issue #79's whole family.
+if [ -n "$pyfiles" ]; then pass "syntax:python-files-were-found"
+else fail "syntax:python-files-were-found" \
+          'no .py under files/ or tests/ -- has the find above stopped reaching them?'; fi
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+assert_ok  "syntax:python"            python3 -c \
+           "import sys
+for p in sys.argv[1:]: compile(open(p).read(), p, 'exec')" $pyfiles
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
 assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
-assert_ok  "syntax:podman-fake"       sh -n $PRIVATE/tests/lib/podman-fake
-# The two pty fixtures are /bin/sh for the same reason podman-fake is: they are run as COMMANDS,
-# by ptyrun.py's child and by ptyrun.py itself, so neither can be a shell function and neither
-# may assume bash. lib/shared.sh's warning applies -- a file under lib/ that is not NAMED here is
-# silently exempt from the rules it is meant to obey.
-assert_ok  "syntax:pty-announce"      sh -n $PRIVATE/tests/lib/pty-announce
-assert_ok  "syntax:sh-fake"           sh -n $PRIVATE/tests/lib/sh-fake
-assert_ok  "syntax:run-tests"         bash -n $PRIVATE/tests/run-tests.sh
 
-assert_exec "exec:pty-announce"       "$PRIVATE/tests/lib/pty-announce"
-assert_exec "exec:sh-fake"            "$PRIVATE/tests/lib/sh-fake"
+# ─── every test file, parsed by the shell that will run it ────────────────────
+# THIS REPLACES FIVE NAMED ASSERTIONS -- podman-fake, pty-announce, sh-fake, run-tests and
+# portable -- which between them reached 5 of the 45 files in the list above. The other forty
+# were parsed by nothing but shellcheck's own grammar, and that is a weaker guarantee than it
+# sounds: shellcheck parses what it thinks bash means, and this suite has to run on the bash the
+# TAs actually have. MEASURED, and it is why this is a loop rather than a sixth name:
+#
+#     x="$(case a in a) echo ok;; esac)"
+#
+# on bash 3.2 does not abort. It writes a syntax error to stderr and hands back the STRING
+# " echo ok;; esac)" -- a wrong value, silently, in the one place a Mac-only breakage is most
+# expensive. `bash -n` on that file returns 0, because it does not descend into `$( )`; the
+# linter says nothing about it either; and the bash-4 ban below is a grep for tokens rather than
+# a parse. So the only thing in this tree that can ever catch that class is a real parse by a
+# real shell, and until now it ran over five files.
+#
+# ("the linter" rather than its name, because a comment that OPENS with that name and then a word
+# is read as a DIRECTIVE rather than as prose -- SC1072, twice while this change was written. The
+# gate below is what caught both, in this very file.)
+#
+# THE DIALECT COMES FROM THE FILE, in the order below and not alphabetically: `bash` first, so
+# `#!/usr/bin/env bash` is not taken by the `sh` arm; then `sh`, which also catches
+# `#!/bin/sh -eu` and `#!/usr/bin/env sh`; then bash for anything with no shebang at all, which
+# is the sourced libraries -- and their `# shellcheck shell=bash` first line already answers the
+# same question for the linter, so one declaration serves both.
+#
+# `-guest.sh` IS EXEMPT, on the same suffix and for the same reason as the bash-4 ban below:
+# those two files run inside a container on its bash 5, and parsing them with a TA's bash 3.2
+# would hold them to a platform they never see.
+unparsed=''
+for f in $testfiles; do
+    case "$f" in *-guest.sh) continue ;; esac
+    case "$(head -1 "$f")" in
+        *bash*) err="$(bash -n "$f" 2>&1)" || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
+        *sh*)   err="$(sh -n "$f" 2>&1)"   || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
+        *)      err="$(bash -n "$f" 2>&1)" || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
+    esac
+done
+assert_eq  "syntax:every-test-file-parses" "" "$unparsed"
+
+# ─── and the ones run as commands are executable ──────────────────────────────
+# DERIVED FROM THE SAME LIST BY THE SAME CONVENTION: a file in it with no `.sh` extension is one
+# the suites run as a COMMAND -- podman-fake, sudo-fake and shortlink-fake off the shim PATH,
+# gh-fake and git-fake off setup-git's, pty-announce and sh-fake as ptyrun.py's child and as
+# ptyrun.py itself. None of them can be a shell function, none may assume bash, and one that
+# loses its exec bit fails a whole tier at a distance. This named two of the seven.
+#
+# THE .sh FILES ARE DELIBERATELY NOT ASSERTED, because +x is not how they run: run-tests.sh:380
+# invokes every suite as `bash "$1"`, and 19 of them are not executable at all. A rule that said
+# otherwise would be asserting something this tree does not believe.
+notexec=''
+for f in $testfiles; do
+    case "$f" in *.sh) continue ;; esac
+    [ -x "$f" ] || notexec="$notexec ${f#"$PRIVATE"/tests/}"
+done
+assert_eq  "exec:every-test-command-is-executable" "" "$notexec"
+
 assert_exec "exec:cs193v"             "$REPO/cs193v"
 assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
 
@@ -123,22 +266,26 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # VERIFICATION.md §5.2/§5.3. The BASH4= assignment below is excluded, or the ban list
 # matches its own definition.
 #
-# THE GLOB IS `tests/*.sh`, TOP LEVEL ONLY, AND tests/tmux-harness/ IS EXEMPT ON PURPOSE.
-# Do not widen it. That directory is copied into the container and run there, by the
-# container's own bash 5 -- it never executes on the host, so bash 3.2 is not a constraint
-# on it, and holding it to one would mean rewriting vendored code for a platform it will
-# never see. Its host-side driver, 65-tmux.sh, IS top level and so IS covered here, which
-# is the part that matters.
-# A GLOB MINUS A CONVENTION, not a named list. This used to name four libs explicitly, and that
-# is exactly why lib/setup-git-shim.sh went unscanned for years and lib/portable.sh would have
-# joined it: a list has to be remembered, whereas `lib/*.sh` covers whatever is added next.
+# THE LIST IT SCANS IS THE DERIVED ONE, minus one suffix, and that is the whole convention.
+# It used to be `tests/*.sh` plus `tests/lib/*.sh` -- top level only, .sh only -- which is a glob
+# minus a convention and was already the right shape, but it still missed something: all seven
+# extensionless command fakes under lib/. That is not a technicality on a Mac, where /bin/sh IS
+# bash 3.2, so a bash 4 construct in a `#!/bin/sh` fake is a Mac-only breakage by exactly the
+# route this rule exists to close. Measured when they were added: they trip nothing today.
+# tests/tmux-harness/ stays exempt, now by the exemption list at the top of this file rather than
+# by the glob's depth: that directory is copied into the container and run there, by the
+# container's own bash 5 -- it never executes on the host, so bash 3.2 is not a constraint on it,
+# and holding it to one would mean rewriting vendored code for a platform it will never see. Its
+# host-side driver, 65-tmux.sh, is ours and is scanned.
 #
-# THE `-guest.sh` SUFFIX IS LOAD-BEARING. lib/sandbox-guest.sh and lib/wine-guest.sh execute
-# INSIDE a container, on its bash 5, and holding them to 3.2 would be holding them to a platform
-# they never see -- the same argument as tmux-harness/ above. Anything new that runs in-container
-# must carry that suffix or it will be scanned and will trip on legitimate bash 5.
+# THE `-guest.sh` SUFFIX IS LOAD-BEARING, and it is the one thing still filtered by name here.
+# lib/sandbox-guest.sh and lib/wine-guest.sh execute INSIDE a container, on its bash 5, and
+# holding them to 3.2 would be holding them to a platform they never see -- the same argument as
+# tmux-harness/ above. Anything new that runs in-container must carry that suffix or it will be
+# scanned and will trip on legitimate bash 5. The parse gate above filters on the same suffix
+# for the same reason, so the two rules cannot disagree about what runs where.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-b32files="$(printf '%s\n' $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh | grep -v -- '-guest\.sh$' | do_tr '\n' ' ')"
+b32files="$(printf '%s\n' $testfiles | grep -v -- '-guest\.sh$' | do_tr '\n' ' ')"
 # shellcheck disable=SC2086
 hits="$(sed 's/#.*//' $b32files \
         | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
@@ -153,8 +300,9 @@ assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 # MEASURED, and it is why this is a rule rather than a comment (#190): hx_teardown removed
 # nothing at all, and three of the four leaks were exactly this shape -- suite.sh's GATED,
 # FAKESUDO and LBTMP, 15 MB of fixture beside them, 230 MB accumulated across sixteen runs.
-# The directory is deliberately not shellchecked (see shellcheck:tmux-driver) so review is
-# the only other thing that would catch a fourth, and review did not catch the first three.
+# The directory is deliberately not shellchecked (it is exempt from the file list at the top of
+# this file, and shellcheck:tests says why) so review is the only other thing that would catch a
+# fourth, and review did not catch the first three.
 #
 # NOT A BAN ON mktemp -- a line that names the root is fine, helper or not. What is forbidden
 # is scratch the driver cannot find.
@@ -2366,72 +2514,38 @@ ${sl_confirm} x ${sl_retries} = $(( sl_confirm * sl_retries ))s before it gives 
 The box would show its error frame while a working link was still on its way."
     fi
 fi
-# tmux-harness/ is NOT shellchecked: it is vendored from the multiplexer prototype and is
-# meant to stay diffable against it, so local style fixes would cost more than they buy.
-# Its host-side driver is ours and is checked.
-assert_ok  "shellcheck:tmux-driver" shellcheck --severity=warning --exclude=SC1090,SC1091 \
-                                    $PRIVATE/tests/65-tmux.sh
-# lib/portable.sh is in this list rather than a group of its own: it is sourced by assert.sh and
-# by run-tests.sh, so it is as load-bearing as either. SC2034 is excluded for it because the DO_*
-# variables it sets are read by other files, which shellcheck cannot see across a `.`.
-assert_ok  "shellcheck:portable" shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034 \
-                                           $PRIVATE/tests/lib/portable.sh
-assert_ok  "syntax:portable"     bash -n $PRIVATE/tests/lib/portable.sh
-# ptyrun.py is python, so shellcheck cannot read it -- compiled instead, which is the equivalent
-# "does it parse" check and the only one that matters before a suite depends on it.
-assert_ok  "syntax:ptyrun"       python3 -m py_compile $PRIVATE/tests/lib/ptyrun.py
 
-# lib/assert.sh and lib/podman-shim.sh joined this list in #115, which edited both. Until then
-# neither was named anywhere and both were therefore exempt from a rule they are supposed to obey
-# -- the gap the windows-tests note below describes, in the two files every suite in the tree
-# sources. Issue #158 is the remaining 16. The only finding adding them turned up was a genuinely
-# dead variable in dyn_free_port, which was deleted rather than excused.
-# 60-container.sh joined with #164, and the two findings that got it here are the argument for the
-# list being longer still: DYN1 and DYN2ND were split off $DYN2 and never read by anything, born
-# dead in the commit that added them, and SC2034 would have said so on the day.
-assert_ok  "shellcheck:tests"   shellcheck --severity=warning --exclude=SC1090,SC1091 \
-                                           $PRIVATE/tests/run-tests.sh $PRIVATE/tests/10-static.sh \
-                                           $PRIVATE/tests/11-export.sh \
-                                           $PRIVATE/tests/14-test-harness.sh \
-                                           $PRIVATE/tests/lib/assert.sh \
-                                           $PRIVATE/tests/lib/podman-shim.sh \
-                                           $PRIVATE/tests/16-args-parse.sh \
-                                           $PRIVATE/tests/60-container.sh \
-                                           $PRIVATE/tests/install-sandbox.sh \
-                                           $PRIVATE/tests/lib/shared.sh \
-                                           $PRIVATE/tests/lib/sandbox.sh \
-                                           $PRIVATE/tests/lib/sandbox-guest.sh
-# setup-git's two suites and the pty helpers they share. SC2034 as well: SG_SETUP_GIT and SG_ENV are
-# set by each suite and read by the sourced helper, which is invisible without -x, and -x cannot
-# resolve a path built from $0.
-assert_ok  "shellcheck:setup-git-tests" shellcheck --severity=warning \
-                                        --exclude=SC1090,SC1091,SC2034 \
-                                        $PRIVATE/tests/lib/setup-git-shim.sh \
-                                        $PRIVATE/tests/35-setup-git-shim.sh \
-                                        $PRIVATE/tests/45-setup-git.sh \
-                                        $PRIVATE/tests/90-setup-git-github.sh
-# The two fakes are /bin/sh, like lib/podman-fake, and are run as commands by the suites above.
-assert_ok  "shellcheck:setup-git-fakes" shellcheck --severity=warning \
-                                        $PRIVATE/tests/lib/gh-fake $PRIVATE/tests/lib/git-fake
-# The pty fixtures, for the same reason and with the same severity.
-assert_ok  "shellcheck:pty-fixtures"    shellcheck --severity=warning \
-                                        $PRIVATE/tests/lib/pty-announce $PRIVATE/tests/lib/sh-fake
-# The Windows installer's suites, its linter and its wine harness. Not covered until issue #125
-# touched all four, which is exactly the gap lib/shared.sh:17-21 warns about: a file added under
-# lib/ without being NAMED somewhere is silently exempt from the rules it is supposed to obey.
+# ─── the test suite's own shellcheck, over the list derived at the top ─────────
+# NINE LISTS BECAME THIS ONE CALL, and the property that buys is the one #158 asked for: a file
+# added to this tree tomorrow is linted at the strictest setting without anyone editing anything.
+# What is left to write down is an EXCLUSION -- and an exclusion now lives in the file it excuses,
+# as a `# shellcheck disable=`, where it shows up in the diff that needs it. lib/shared.sh:267-278
+# already made that argument for one line of one file; this is the same move for the whole tree.
 #
-# SC2034 for the same reason as setup-git-tests above, and it is worth being specific because the
-# exclusion is otherwise the kind that hides a dead variable. lib/wine.sh sets WINE_OUT, WINE_ERR,
-# WINE_RC, WINE_ARGV and WINE_DIED for its CALLER to read -- 27-installer-windows.sh reads them a
-# hundred times -- and SB_TMP is set by both drivers for lib/sandbox.sh's fixture_build to find.
-# All of that is invisible without -x, and -x cannot resolve a path built from $0.
-# Verified rather than assumed: the one genuinely dead variable this turned up, wine-guest.sh's
-# CMDFILE, was deleted instead of excluded.
-assert_ok  "shellcheck:windows-tests" shellcheck --severity=warning \
-                                      --exclude=SC1090,SC1091,SC2034 \
-                                      $PRIVATE/tests/lib/cmdlint.sh \
-                                      $PRIVATE/tests/lib/wine.sh \
-                                      $PRIVATE/tests/lib/wine-guest.sh \
-                                      $PRIVATE/tests/25-installer.sh \
-                                      $PRIVATE/tests/27-installer-windows.sh \
-                                      $PRIVATE/tests/win-sandbox.sh
+# NO --exclude AT ALL, which three measurements make affordable rather than brave:
+#   * SC1091 is INFO severity, so --severity=warning has been dropping it in every group that
+#     named it. It was never doing anything.
+#   * SC1090 fires exactly ONCE in these 45 files -- 25-installer.sh:71, where a carving's path
+#     is built from an argument -- and that file already carried the answer for it at :187: a
+#     `source=/dev/null` directive. It now carries a second one, at :70.
+#   * SC2034 is what the three old groups really wanted, and blanket-excluding it for a group is
+#     what lib/shared.sh:275-276 objects to: it "would stop catching genuinely dead variables".
+#     Measured, it was right to worry -- covering the seventeen unlinted files turned up a
+#     genuinely dead variable, 50-image.sh's GESTURE_TOKENS, which was deleted rather than
+#     excused, exactly as dyn_free_port's was in #115 and as 60-container.sh's DYN1 and DYN2ND
+#     were in #164, by hand, once a name for that file had been added to the list this replaces.
+#
+# tmux-harness/ IS STILL NOT SHELLCHECKED, and now for a reason rather than by omission: it is
+# named in the exemption list at the top of this file. It is vendored from the multiplexer
+# prototype and is meant to stay diffable against it, so local style fixes would cost more than
+# they buy. Its host-side driver, 65-tmux.sh, is ours, is in the list, and is checked.
+#
+# THE /bin/sh FAKES ARE IN THIS CALL TOO, and shellcheck picks their dialect off the shebang
+# rather than being told -- which is how lib/podman-fake's two `echo -n` findings surfaced. They
+# had been outside every list since the day they were written. That dialect is not a detail:
+# `echo -n` in a shell whose echo has no -n prints `-n` into a protocol the launcher parses.
+#
+# BELOW THE PRODUCT-SIDE GROUPS, so it inherits their require_cmd rather than repeating it -- and
+# last in the file for the reason that line gives.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+assert_ok  "shellcheck:tests" shellcheck --severity=warning $testfiles

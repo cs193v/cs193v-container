@@ -613,7 +613,11 @@ assert_contains "shortlink:a-cancel-file-hands-the-port-back" "listeners=0" "$ou
 # is not a wrong hint, it is a BLANK one. The linkbox draws its gesture line into a box whose
 # height contract counts rows rather than content, so an empty answer ships a box with a hole in
 # it and every existing frame assertion still passes.
-GESTURE_TOKENS='apple-terminal iterm2 vscode windows-terminal vte unknown'
+#
+# THE SIX TOKENS ARE apple-terminal, iterm2, vscode, windows-terminal, vte and unknown, and they
+# are spelled once -- in the loop below, which is the only thing that reads them. They were also
+# held in a GESTURE_TOKENS variable here, which nothing ever read; it was deleted rather than
+# excused when #158 put this file under shellcheck.
 
 # EVERY TOKEN x EVERY MODE IS ONE NON-EMPTY LINE, and the widths come back in the same pass.
 # ONE CONTAINER, not one per combination: this is 18 lookups plus 6 width measurements, and at a
