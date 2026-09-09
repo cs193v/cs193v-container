@@ -64,8 +64,26 @@ else
     C_RED=''; C_DIM=''; C_CYAN=''; C_YEL=''; C_GRN=''; C_OFF=''
 fi
 
+# ─── the four presentation knobs  (#221) ──────────────────────────────────────
+# THREE CONSUMERS DRAW AT DIFFERENT DEPTHS, and these are the whole of the difference.
+# install-cs193v.sh prints inside an indented step list, so its notes, its menu and its
+# STOP boxes sit two columns deeper than the launcher's, and its refusals carry a
+# sign-off. Those used to be a second copy of note(), die() and menu(); they are four
+# variables now.
+#
+# THE DEFAULTS ARE WHAT THE LAUNCHER AND setup-git PRINTED BEFORE, exactly, so neither
+# had to change and 20-messages.sh asserts each default as well as each override.
+#
+# VALUES, NOT msg() KEYS, deliberately: a key would have to exist in all three
+# catalogues, and this file has no business reading any of them.
+NOTE_INDENT=''
+MENU_INDENT='  '
+MENU_HINT='(use the up and down arrow keys, then press Enter)'
+DIE_INDENT=''
+DIE_TRAILER=''
+
 info() { printf '%s\n' "$*"; }
-note() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+note() { printf '%s%s%s%s\n' "$NOTE_INDENT" "$C_DIM" "$*" "$C_OFF"; }
 
 # THE CURSOR IS HIDDEN WHILE THE METER RUNS, and that is not a cosmetic nicety. The block
 # redraws ten times a second and the cursor comes to rest wherever the last write left it --
@@ -211,8 +229,11 @@ box() {
 # something wrong."
 die() {
     printf '\n' >&2
-    printf '%s\n' "$*" | box STOP "$C_RED" >&2
+    printf '%s\n' "$*" | box STOP "$C_RED" "$DIE_INDENT" >&2
     printf '\n' >&2
+    # THE SIGN-OFF IS THE INSTALLER'S ALONE, and empty everywhere else. It was one of the three
+    # reasons install-cs193v.sh carried its own die(); it is one variable now.
+    [ -n "$DIE_TRAILER" ] && { printf '%s\n\n' "$DIE_TRAILER" >&2; }
     exit 1
 }
 
@@ -249,10 +270,19 @@ meter_glyph() {                       # meter_glyph N|ok|bad  -> one cell
 msg() {
     local key="$1"; shift
     local out kv n v ph head tail
-    [ -f "$MESSAGES" ] || { printf '(messages.txt missing)\n'; return 1; }
+    [ -f "$MESSAGES" ] || { printf '(catalogue missing: %s)\n' "$MESSAGES"; return 1; }
     out="$(awk -v k="[[$key]]" '
         $0 == k { found = 1; next }
         /^\[\[.*\]\]$/ { if (found) exit }
+        # A HASH AT COLUMN 0 IS A NOTE TO STAFF AND IS NEVER PRINTED (#221). This is the one
+        # thing the installer version of this reader did that msg() did not, and the split
+        # hands msg() that catalogue to read: much of what makes those messages right is the
+        # note beside them explaining why they say what they say. Indented is prose, so a
+        # student-facing line beginning with a hash is written with a leading space.
+        #
+        # NO APOSTROPHES IN HERE. This awk program is single-quoted inside a command
+        # substitution, so one would close it and the file would stop parsing.
+        found && /^#/ { next }
         found { print }
     ' "$MESSAGES")"
     if [ -z "$out" ]; then printf '(missing message: %s)\n' "$key"; return 1; fi
@@ -588,7 +618,7 @@ menu() {                              # menu DEFAULT_INDEX opt1 opt2 ...
 
     if [ ! -t 0 ] || [ ! -t 1 ]; then
         MENU_CHOICE="$def"
-        printf '  (not a terminal; choosing "%s")\n' "${opts[$def]}"
+        printf '%s(not a terminal; choosing "%s")\n' "$MENU_INDENT" "${opts[$def]}"
         return 0
     fi
 
@@ -596,13 +626,13 @@ menu() {                              # menu DEFAULT_INDEX opt1 opt2 ...
         i=0
         while [ "$i" -lt "$n" ]; do
             if [ "$i" -eq "$sel" ]; then
-                printf '  %s▸ %s%s\n' "$C_CYAN" "${opts[$i]}" "$C_OFF"
+                printf '%s%s▸ %s%s\n' "$MENU_INDENT" "$C_CYAN" "${opts[$i]}" "$C_OFF"
             else
-                printf '    %s\n' "${opts[$i]}"
+                printf '%s  %s\n' "$MENU_INDENT" "${opts[$i]}"
             fi
             i=$((i + 1))
         done
-        printf '\n  %s(use the up and down arrow keys, then press Enter)%s' "$C_DIM" "$C_OFF"
+        printf '\n%s%s%s%s' "$MENU_INDENT" "$C_DIM" "$MENU_HINT" "$C_OFF"
 
         IFS= read -rsn1 key
         if [ "$key" = "$ESC" ]; then IFS= read -rsn2 rest; key="$key$rest"; fi
@@ -617,7 +647,7 @@ menu() {                              # menu DEFAULT_INDEX opt1 opt2 ...
             [1-9]) if [ "$key" -le "$n" ]; then sel=$((key - 1)); break; fi ;;
         esac
     done
-    printf '  %s▸ %s%s\n\n' "$C_CYAN" "${opts[$sel]}" "$C_OFF"
+    printf '%s%s▸ %s%s\n\n' "$MENU_INDENT" "$C_CYAN" "${opts[$sel]}" "$C_OFF"
     MENU_CHOICE="$sel"
 }
 

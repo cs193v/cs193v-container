@@ -67,6 +67,9 @@ assert_eq "keys:no-duplicates" "" "$(printf '%s' "$dupes" | sed 's/ *$//')"
 # A key defined with an empty body makes msg() return "(missing message: k)" at runtime,
 # which reaches the student verbatim.
 empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
+              # A NOTE-ONLY BODY IS EMPTY (#221): msg() drops column-0 hashes now, so a key
+              # whose body is nothing but staff notes renders as "(missing message: k)".
+              /^#/{next}
               /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' $PRIVATE/messages.txt)"
 assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 
@@ -176,6 +179,7 @@ sgdupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | LC_ALL=C sort | uniq -d | d
 assert_eq "sgkeys:no-duplicates" "" "$(printf '%s' "$sgdupes" | sed 's/ *$//')"
 
 sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
+                /^#/{next}
                 /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$SGM")"
 assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')"
 
@@ -396,6 +400,80 @@ assert_not_contains "msg:empty-value-substitutes" "{{DIR}}" "$out"
 
 assert_fail "msg:unknown-key-fails" msg no.such.key
 assert_contains "msg:unknown-key-says-so" "missing message" "$(msg no.such.key 2>&1)"
+
+# ─── the staff-note rule msg() learned from txt()  (#221) ──────────────────────
+# A `#` AT COLUMN 0 INSIDE A BODY IS A NOTE TO STAFF AND IS NEVER PRINTED. install-cs193v.sh's
+# txt() has done this since #116, and it is the one thing txt() did that msg() did not; the
+# split gives msg() the installer's catalogue to read, so it has to do it too.
+#
+# INDENTED IS DIFFERENT, deliberately, and that is the whole of the rule: a student-facing line
+# beginning with a hash is written with a leading space. Both halves are asserted, because a
+# rule that dropped every hash would silently eat prose.
+msgtmp="$TMP/msg-hash.txt"
+{ printf '[[hash.note]]\n'
+  printf '  visible before\n'
+  printf '# INVISIBLE staff note\n'
+  printf '  visible after\n'
+  printf '[[hash.indented]]\n'
+  printf '   # an indented hash is prose\n'
+  printf '[[hash.only]]\n'
+  printf '# nothing but a note\n'
+} > "$msgtmp"
+out="$(MESSAGES="$msgtmp" msg hash.note)"
+assert_contains     "msg:a-staff-note-keeps-the-prose-before" "visible before" "$out"
+assert_contains     "msg:a-staff-note-keeps-the-prose-after"  "visible after"  "$out"
+assert_not_contains "msg:a-column-0-hash-is-a-staff-note"     "INVISIBLE"      "$out"
+assert_contains     "msg:an-indented-hash-still-prints"       "an indented hash is prose" \
+                    "$(MESSAGES="$msgtmp" msg hash.indented)"
+# AND A BODY THAT IS NOTHING BUT NOTES READS AS MISSING, which is why the reconciliation below
+# has to count it as empty: it renders as "(missing message: k)" in front of a student.
+assert_contains "msg:a-body-of-only-notes-reads-as-missing" "missing message" \
+                "$(MESSAGES="$msgtmp" msg hash.only 2>&1)"
+
+# ─── the presentation knobs  (#221) ───────────────────────────────────────────
+# THE WHOLE SHARED FILE, not just the msg() carving above: these exercise note(), die()
+# and menu(), and sourcing this file is inert by contract (see its header), which is the
+# only reason it is safe to pull in beside a suite that has an EXIT trap of its own.
+# shellcheck disable=SC1090
+. "$UI"
+# The installer draws inside an indented step list, so its note/die/menu sit two columns
+# deeper and its die() carries a sign-off. Those were three hand-maintained differences
+# between two copies of the same functions; they are three variables now, and the defaults
+# are exactly what the launcher and setup-git printed before.
+# SC2034 ON EVERY KNOB ASSIGNMENT BELOW: each is read by note(), die() or menu() in the
+# file sourced above, which shellcheck does not follow from here. Named rather than
+# blanket-disabled, so a genuinely unused variable in this suite still gets flagged.
+# shellcheck disable=SC2034
+# NO OVERRIDE HERE, deliberately: this asserts the value cs193v-ui.sh ships, so setting it
+# first would test the assignment in this file instead. Mutation-tested -- changing the
+# default in the shared file turns this red.
+assert_eq "knob:note-defaults-to-no-indent" "plain" "$(note plain)"
+# shellcheck disable=SC2034
+assert_eq "knob:note-honours-NOTE_INDENT"   "    plain" "$(NOTE_INDENT='    '; note plain)"
+# die() exits, so it is driven in a subshell and its box is read back.
+# shellcheck disable=SC2034
+# AGAIN NO OVERRIDE: the shipped defaults are what is under test.
+dout="$( (die 'a refusal') 2>&1 )"
+assert_contains     "knob:die-draws-its-box"          "a refusal"      "$dout"
+# THE BOX IS THE LAST THING, which is a stronger claim than "one particular sentence is
+# absent" -- mutation-tested: setting the default to any trailer at all turns this red.
+assert_eq "knob:die-trailer-defaults-empty" "yes" "$(printf %s "$dout" | grep -v '^[[:space:]]*$' | tail -1 | grep -qF '┗' && echo yes || echo no)"
+# shellcheck disable=SC2034
+dout="$( (DIE_INDENT='  '; DIE_TRAILER='please ask course staff'; die 'a refusal') 2>&1 )"
+assert_contains "knob:die-honours-DIE_TRAILER" "please ask course staff" "$dout"
+assert_eq "knob:die-honours-DIE_INDENT" "yes" \
+          "$(printf '%s\n' "$dout" | awk '/┏/{print (/^  ┏/) ? "yes" : "no"; exit}')"
+# menu()'s non-tty arm is the one reachable without a pty, and it carries the same indent.
+# THE HINT ONLY PRINTS ON THE TTY PATH, which needs a pty this suite does not have -- so
+# the DECLARED VALUE is asserted instead, the way box:ui-declares-the-same-width pins
+# BOX_W. The behavioural half lives in 25-installer.sh, which drives menu through a pty.
+assert_eq "knob:menu-hint-declares-the-arrow-key-sentence" \
+          "(use the up and down arrow keys, then press Enter)" "$MENU_HINT"
+assert_eq "knob:menu-defaults-to-two-columns" '  (not a terminal; choosing "go")' \
+          "$(menu 0 go stop </dev/null)"
+# shellcheck disable=SC2034
+assert_eq "knob:menu-honours-MENU_INDENT" "    (not a terminal; choosing \"go\")" \
+          "$(MENU_INDENT='    '; menu 0 go stop </dev/null)"
 
 # ─── every message fits the STOP box ───────────────────────────────────────────
 # die() draws a fixed-width box and does not wrap, so a body line wider than the box
