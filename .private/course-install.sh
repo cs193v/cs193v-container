@@ -158,6 +158,22 @@ say_as_root() {
     printf '\n'
 }
 
+# AND A FOURTH, for the one setting this script would otherwise reverse. systemd=false in
+# /etc/wsl.conf is not something Ubuntu writes and not something this course writes, so a student
+# put it there -- and rule 1 at the top of this file is that we never change what was already on
+# the computer without asking. Asking is worse than refusing here: "may I undo what you chose?" is
+# not a question a setup script should be putting to anybody, and the fix is one word in a file
+# they already know how to edit.
+#
+# NOT die(), for the reason none of the three above is die() either: die.trailer ends with "send
+# all of the text above to course staff", and that is the wrong instruction for a line the student
+# can read and correct themselves.
+say_wsl_systemd_off() {               # say_wsl_systemd_off LINE
+    printf '\n'
+    { printf '\n'; msg err.wsl-systemd-off "LINE=$1"; printf '\n'; } | box STOP "$C_RED" '  '
+    printf '\n'
+}
+
 # \\wsl.localhost\CS193V\home\student\cs193v\projects -- $DIR/projects named the way
 # Windows Explorer needs it, and the reason the Windows sign-off cannot live in the .cmd
 # (#218). The .cmd printed this path as a constant ending home\student\cs193v, which is
@@ -471,8 +487,17 @@ survey() {
     fi
 
     if [ "$PLAT" = wsl ]; then
-        if [ -f /etc/wsl.conf ] && grep -q '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true' /etc/wsl.conf; then
+        # SCOPED TO [boot], and the reader is install-utils.sh's -- the same one root_step_wslconf
+        # checks its own write with, so the two cannot disagree about one file (#228).
+        local wsl_line; wsl_line="$(wsl_boot_systemd /etc/wsl.conf)"
+        if wsl_systemd_is_on "$wsl_line"; then
             skip "$(msg skip.wsl-systemd)"
+        elif [ -n "$wsl_line" ]; then
+            # THE [boot] SECTION SETS systemd, AND NOT TO true. Refused here rather than carried
+            # into ask_consent, the way an unsupported distro is: a consent screen at this point
+            # would be asking permission to undo a decision the student had already made, and
+            # nothing after it is right whichever way they answer.
+            say_wsl_systemd_off "$wsl_line"; exit 1
         elif [ -f /etc/wsl.conf ]; then
             DO_WSLCONF=yes
             need_root "$(msg need.wslconf)" "$(msg need.wslconf.why)"

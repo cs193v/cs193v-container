@@ -999,6 +999,7 @@ fi
     printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
     cat "$UI"
     sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/course-install.sh"
+    sed -n '/^say_wsl_systemd_off() {/,/^}$/p' "$PRIVATE/course-install.sh"
     # the four knobs, exactly as course-install.sh sets them after sourcing
     printf 'NOTE_INDENT="    "\nMENU_INDENT="    "\nDIE_INDENT="  "\n'
     printf 'DIE_TRAILER="$(msg die.trailer)"\n'
@@ -1006,6 +1007,7 @@ fi
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^say_intel_mac() {$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^say_wsl_systemd_off() {' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^msg() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^MESSAGES=' "$TMP/idie.sh")" = 1 ]; then
     pass "installer:box-users-extractable"
@@ -1039,3 +1041,20 @@ else
 fi
 assert_says "installer:intel-mac-says-why" "This Mac has an Intel processor." "$out"
 assert_says "installer:intel-mac-says-what-next" "contact course staff BEFORE the first lab" "$out"
+
+# The systemd=false refusal (#228). It is the fourth box this script can draw and the only one
+# that quotes the student's own file back at them. Whether {{LINE}} is a placeholder somebody
+# supplies is settled up in the coverage pass, which since #221 reaches this catalogue too --
+# course-install.sh reads course-install-messages.txt with the same msg(). What is only true HERE
+# is the rendered box: that the substitution survives box()'s wrapping and arrives as the
+# student's own line rather than as literal braces inside a closed box.
+out="$(bash -c '. "$1"; say_wsl_systemd_off "$2"' _ "$TMP/idie.sh" '  systemd = false' 2>&1)"
+probs="$(printf '%s\n' "$out" | box_problems)"
+if [ -z "$probs" ]; then
+    pass "installer:wsl-systemd-off-box-is-closed"
+else
+    fail "installer:wsl-systemd-off-box-is-closed" "$probs"
+fi
+assert_says "installer:wsl-systemd-off-quotes-the-line" "systemd = false" "$out"
+assert_says_not "installer:wsl-systemd-off-leaves-no-placeholder" "{{LINE}}" "$out"
+assert_says "installer:wsl-systemd-off-says-what-to-change" "Change it to say systemd=true" "$out"

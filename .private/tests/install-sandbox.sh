@@ -88,9 +88,17 @@ OPTIONS
                        NEST by hand: it mounts nothing, because anything mounted inside /proc
                        stops a container starting inside this one (#156). It is what the five
                        nest_* helpers pass, so it reproduces what they arrange
-  --wslconf STATE      absent | noboot | boot | systemd   (only with --platform wsl)
-                       'boot' is the state nothing else reaches: a [boot] section with no
-                       systemd=true, which is the only input that takes setup_wslconf's sed
+  --wslconf STATE      absent | noboot | boot | systemd | comment | off | elsewhere |
+                       devnull | dir    (only with --platform wsl)
+                       'boot' is a [boot] section with no systemd=true, which is the input that
+                       takes root_step_wslconf's sed. The last five are the shapes #228 was
+                       about: 'comment' puts something after the section header, which the sed
+                       used to do nothing to; 'off' sets systemd=false, which the installer must
+                       refuse rather than reverse; 'elsewhere' puts systemd=true in a section
+                       that is not [boot], where WSL ignores it; 'devnull' makes the file a
+                       symlink to /dev/null, the one state whose write succeeds and keeps
+                       nothing; 'dir' makes it a directory, the one whose write is refused
+                       outright with sudo working
   --sudo STATE         nopasswd (default) | password[:PW] | deny | absent
                        password makes sudo really prompt, which is what a student sees -- the
                        installer says "needs your password" in its consent text and this is
@@ -242,8 +250,8 @@ case "${SUDOK%%:*}" in
     *) die_usage "unknown --sudo: $SUDOK (nopasswd|password[:PW]|deny|absent)" ;;
 esac
 case "$WSLCONF" in
-    ''|absent|noboot|boot|systemd) : ;;
-    *) die_usage "unknown --wslconf: $WSLCONF (absent|noboot|boot|systemd)" ;;
+    ''|absent|noboot|boot|systemd|comment|off|elsewhere|devnull|dir) : ;;
+    *) die_usage "unknown --wslconf: $WSLCONF (absent|noboot|boot|systemd|comment|off|elsewhere|devnull|dir)" ;;
 esac
 if [ -n "$WSLCONF" ] && [ "$PLATFORM" != wsl ]; then
     die_usage "--wslconf only means anything with --platform wsl; the state would be arranged and never read"
