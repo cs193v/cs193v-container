@@ -797,6 +797,66 @@ established by another process needs a fixture that can make it fail, in a lane 
 every time.** Reading for these does not work — that is the first sentence of this section, and it
 was as true of the podman lanes as of the cheap one.
 
+## A.16 The pty driver is synchronous — determinism matrix (run by hand; deliberately not a tier)
+
+**What it answers:** whether `lib/ptydrive.py` really waits for the child, or merely usually wins a
+race. A tier cannot answer it, because the failure it replaces was *nondeterministic*: a green run
+never meant anything, which is precisely how the defect survived from #53 to #206.
+
+**What it replaced.** `sg_feed` typed on a `sleep 0.3` clock with no knowledge of the child.
+Measured on this Mac before the change: the first answer echoed at byte offset 0 — before the
+program's first byte — 10 runs of 10; the SUNetID complaint collapsed to one transcript row in 9 of
+10 runs idle and 6 of 6 under 3x CPU oversubscription; and the 93-character token reached the
+transcript in clear text whenever the margin went, which was 256–260 ms wide. On Linux/bash 5 the
+same pacing loses keystrokes outright.
+
+**The matrix.** Suite 35 is the subject; `retry-sunetid:the-row-break-is-no-longer-a-race` is the
+canary, because the row structure it counts is exactly what the clock used to decide. Measured:
+
+| platform | load | runs | result |
+|---|---|---|---|
+| macOS 26, arm64, bash 3.2 | idle | 3 | 214 pass / 0 fail, canary green 3/3 |
+| macOS 26, arm64, bash 3.2 | 3x oversubscription (load 32) | 3 | 214 pass / 0 fail, canary green 3/3 |
+| Fedora, bash 5.3.9, in the image | idle | 3 | 214 pass / 0 fail, canary green 3/3 |
+
+Wall clock fell from 2:15.76 to 1:20.04 on an idle Mac — a consequence rather than the point.
+
+**BOTH PLATFORMS ARE REQUIRED, and the reason is written at `lib/ptyrun.py:53-68`:** this project
+has shipped a defect that was green on one shell and red on another (#151), and the keystroke loss
+behind #206 is only reachable on Linux. Reproduce that mechanism directly, on each platform, with
+the child sleeping first so the bytes provably queue:
+
+```sh
+printf 'X\ntwo\n' | python3 lib/ptyrun.py \
+    'bash -c "sleep 0.4; read -rsn1 k; read -r b; printf \"k=[%s] b=[%s]\\n\" \"$k\" \"$b\""'
+```
+
+`b=[]` on both — the bytes queued across a cbreak → canonical transition are **mangled, not
+discarded**: the line discipline marks only the last as a terminator, the queue becomes one "line",
+and the read returns what precedes the first embedded newline. That is why `sg_feed`'s own header
+— deleted by this change — was wrong about its defect for three issues: it blamed a discard, on the
+strength of a measurement taken through `script(1)`, whose injected VEOF was doing the damage.
+
+**The falsification leg, without which none of the above proves anything.** The canary and the
+driver's own group in `14-test-harness.sh` must be able to go red:
+
+* mislabel the token step `line` instead of `secret` in `fixtures/setup-git-flows.txt` → the driver
+  types nothing, the report says *"the terminal was never at a line read"*, and the token is absent
+  from the transcript. This is the credential guarantee, and it is a state test rather than a
+  timing one.
+* insert a screen into a flow that `setup-git` does not draw → one named failure at the step that
+  diverged, in seconds, printing the screen the child is actually parked on. Before this change the
+  same edit gave 94 failures across 30 case prefixes, none naming the cause, in over ten minutes.
+* over-send a step so bytes are left queued across a mode change → `LOST`, with the byte count.
+* drop the screen gate and the cursor arming from `line` steps in `lib/ptydrive.py` — the clock,
+  reconstructed — and suite 35 reports **213 pass / 1 fail**, the canary the only thing red. The
+  occurrence count beside it stayed at 2 throughout, which is why both are asserted: on its own it
+  would have reported the race as fixed.
+
+Re-run **A.15** afterwards. The vacuous set must still be empty: `sg_run` poisons `$SG_OUT` with
+`$CHECKER_DIED` when a conversation diverges, precisely so the hundred-odd assertions downstream of
+a run that stopped early fail loudly instead of passing on a short transcript.
+
 ---
 
 ## 1. Install and preflight
