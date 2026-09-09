@@ -21,7 +21,17 @@
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
-INST="$PRIVATE/install-cs193v.sh"
+# THE INSTALLER PROPER, NOT THE BOOTSTRAP (#221). install-cs193v.sh is ~150 lines that find a
+# download tool, fetch the tree and exec this file; course-install.sh is the 1500 that change a
+# machine, and it is what "did the suite execute what it claims to" is a question about.
+#
+# ONE TRACE, TWO FILES, WHICH IS WHY PS4 NAMES THE FILE. The bootstrap passes -x across the exec
+# when CS193V_COVERAGE is set, and BASH_XTRACEFD and PS4 cross it by themselves -- so a single
+# trace file carries the bootstrap's line numbers AND this file's, plus cs193v-ui.sh's from the
+# source. Scoring that union against one denominator would count someone else's lines as
+# reached. Every extractor therefore anchors on the basename, and the bootstrap's own coverage
+# is a separate question this gate does not pretend to answer.
+INST="$PRIVATE/course-install.sh"
 ALLOW="$TESTS_DIR/fixtures/coverage-allowlist"
 
 if [ -z "${CS193V_RUN_DIR:-}" ]; then
@@ -69,7 +79,7 @@ record "coverage:known-untraced-case" "none -- the apt case's bash -x hang was t
 # ─── what ran ──────────────────────────────────────────────────────────────────
 SEEN="$CS193V_RUN_DIR/seen.lines"
 # shellcheck disable=SC2086
-sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' $TRACES/* 2>/dev/null | sort -un > "$SEEN"
+sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" $TRACES/* 2>/dev/null | sort -un > "$SEEN"
 seen_n="$(grep -c . "$SEEN" || true)"
 if [ "${seen_n:-0}" -gt 0 ]; then pass "coverage:the-traces-were-really-read"
 else fail "coverage:the-traces-were-really-read" "no line numbers in $TRACES"; exit 1; fi

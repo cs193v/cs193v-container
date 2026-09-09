@@ -57,16 +57,22 @@ record "export:file-count" "$n_paths"
 # ships by definition -- it is the only COPY in the Containerfile and build_hash hashes the whole
 # tree -- so listing its 25 names here would mean editing this suite every time somebody adds an
 # image file, for an edit that carries no decision. What is left is the five paths where adding
-# or removing one IS a decision.
-want=".config/container.args .private/Containerfile .private/messages.txt cs193v projects/.gitkeep"
+# or removing one IS a decision. course-install.sh is the fifth since #221: the bootstrap a
+# student downloads fetches this tree and execs it out of the archive, so it has to be here
+# while install-cs193v.sh itself must not be -- see Â§4.
+want=".config/container.args .private/Containerfile .private/course-install.sh .private/messages.txt cs193v projects/.gitkeep"
 got="$(grep -v '^\.private/files/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
 
 # ─── 2. what the installer itself insists on ───────────────────────────────────
-# READ OUT OF THE INSTALLER rather than repeated here: fetch_files checks these four after
-# untarring and dies naming the missing one, so they are its own definition of a usable
-# download. A copy of the list here could drift from the list that actually gates an install.
-sentinels="$(sed -n 's/^ *for f in \(cs193v .*\); do$/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
+# READ OUT OF THE INSTALLER PROPER rather than repeated here: install_files checks these four
+# after unpacking and dies naming the missing one, so they are its own definition of a usable
+# course tree. A copy of the list here could drift from the list that actually gates an install.
+#
+# course-install.sh SINCE #221, not install-cs193v.sh: the bootstrap has a check of its own, but
+# it names the two files IT hands over, which is a different claim from what the student's tree
+# needs. This is the one that gates the tree.
+sentinels="$(sed -n 's/^ *for f in \(cs193v .*\); do$/\1/p' "$PRIVATE/course-install.sh" | head -1)"
 n_sent="$(printf '%s\n' $sentinels | grep -c '' | do_tr -d ' ')"
 assert_eq "export:installer-sentinel-list-was-parsed" "4" "$n_sent"
 missing=''
@@ -94,7 +100,13 @@ assert_eq "export:every-COPY-input-survives" "" "$(printf '%s' "$absent" | sed '
 # ─── 4. and the reasons, so a failure explains itself ──────────────────────────
 # §1 already fails if any of these appear, but it fails as a diff. These name the mistake.
 assert_eq "export:no-test-suite"  "" "$(grep '^\.private/tests/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
-assert_eq "export:no-installers"  "" "$(grep 'install-cs193v'    "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
+# NAMED, NOT MATCHED ON "installer" (#221). One installer ships now -- course-install.sh, which
+# the bootstrap execs out of the archive -- so the claim is about the two files a student is
+# handed by the WEBSITE: the bootstrap and the Windows batch file. Both are downloaded, neither
+# travels in the tarball, and a substring match would now be asserting the opposite of the rule.
+assert_eq "export:no-bootstrap" "" \
+          "$(grep -E '^\.private/install-cs193v\.(sh|cmd)$|install-cs193v-windows' "$TMP/paths" \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
 # agent-notes.md is the one .md that ships: Containerfile:803 installs it as
 # /etc/cs193v/agent-notes.md and /etc/claude-code/CLAUDE.md is a symlink to it, so both agents
 # read the same text. Every other .md in this repo is written for staff.

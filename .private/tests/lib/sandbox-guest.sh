@@ -322,10 +322,10 @@ cmd_run() {
         # podman version out of. This file is COPIED into the fixture verbatim, so it cannot read
         # lib/shared.sh's CS193V_TRACE_FD; 10-static.sh asserts this number still agrees with it.
         exec 8>>"$REP/trace"
-        PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST"
+        PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST"
         rc=$?
         exec 8>&-
-        sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' "$REP/trace" | sort -un >> "$LINES.raw" 2>/dev/null
+        sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" "$REP/trace" | sort -un >> "$LINES.raw" 2>/dev/null
         sort -un "$LINES.raw" > "$LINES" 2>/dev/null
         printf '\n[sandbox] traced; %s of the installer'"'"'s lines seen so far. `sandbox lines --missing`\n' \
                "$(grep -c . "$LINES" 2>/dev/null || echo 0)"
@@ -336,8 +336,13 @@ cmd_run() {
 
 # The executable lines, by the same conservative rule the coverage gate uses: not blank, not a
 # comment, and not a bare block terminator. It is an approximation and says so.
+# OUT OF THE TARBALL, not off the disk (#221). The lines this counts belong to
+# course-install.sh, which the bootstrap unpacks into a mktemp directory that is gone by the
+# time anyone asks for a report -- but /work/course.tar.gz is still there and still holds it.
+# $INST is the bootstrap, which is a different file with a different and much shorter set.
 executable_lines() {
-    grep -n '' "$INST" \
+    tar xzOf /work/course.tar.gz cs193v-main/.private/course-install.sh \
+      | grep -n '' \
       | sed -n 's/^\([0-9]\{1,\}\):[[:space:]]*\([^[:space:]].*\)$/\1 \2/p' \
       | grep -vE ' (#|fi$|esac$|done$|else$|\}$|\{$)' \
       | awk '{print $1}'

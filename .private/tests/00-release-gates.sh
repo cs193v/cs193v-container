@@ -108,9 +108,16 @@ if curl -fsS --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.er
     # anything else must not fail here, because that is a staff edit and 25-installer.sh is what
     # keeps it honest. Both names are load-bearing in the .sh and pinned by other assertions, so
     # neither can be renamed quietly.
+    #
+    # REPO_BRANCH RATHER THAN WSL_DISTRO SINCE #221, and it is a replacement rather than a
+    # retarget: WSL_DISTRO has one reader, setup_wslconf, so it went with the logic into
+    # course-install.sh -- which never appears at this URL, because it travels in the tarball.
+    # REPO_BRANCH is the second name the bootstrap must carry, for the same reason REPO_OWNER is:
+    # they are the coordinates this file exists to fetch from, and 25-installer.sh asserts the
+    # .cmd agrees with all three.
     assert_ok "installer:stage2-url-serves-the-course-installer" \
               sh -c "grep -q '^REPO_OWNER=' '$rel_tmp/stage2.sh' \
-                     && grep -q '^WSL_DISTRO=' '$rel_tmp/stage2.sh'"
+                     && grep -q '^REPO_BRANCH=' '$rel_tmp/stage2.sh'"
 else
     fail "installer:stage2-url-is-fetchable" \
          "the Windows installer would fetch stage two from:

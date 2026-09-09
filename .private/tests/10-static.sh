@@ -91,7 +91,8 @@ assert_eq "tests:no-shell-file-name-carries-a-space" \
 
 # ─── syntax ────────────────────────────────────────────────────────────────────
 assert_ok  "syntax:cs193v"            bash -n cs193v
-assert_ok  "syntax:install"           bash -n $PRIVATE/install-cs193v.sh
+assert_ok  "syntax:bootstrap"         bash -n $PRIVATE/install-cs193v.sh
+assert_ok  "syntax:course-install"    bash -n $PRIVATE/course-install.sh
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
@@ -202,7 +203,26 @@ done
 assert_eq  "exec:every-test-command-is-executable" "" "$notexec"
 
 assert_exec "exec:cs193v"             "$REPO/cs193v"
-assert_exec "exec:install"            "$PRIVATE/install-cs193v.sh"
+assert_exec "exec:bootstrap"          "$PRIVATE/install-cs193v.sh"
+
+# ─── the bootstrap sources nothing and evals nothing  (#221) ───────────────────
+# THE PROPERTY THE WHOLE SPLIT RESTS ON. install-cs193v.sh is the file a student downloads,
+# reads and checks a SHA-256 against, and the only thing that makes reading it worth anything is
+# that it pulls in no behaviour from anywhere else: it finds a download tool, fetches the tree,
+# checks the pieces arrived, and execs course-install.sh. Everything it can refuse happens
+# before there is anything to source.
+#
+# It was true and unguarded before the split too. Asserted now because the split is exactly the
+# change that makes it tempting to break -- the obvious way to share one more helper with the
+# installer proper is to source the file that has it.
+#
+# `exec bash` IS NOT SOURCING and is the point of the file, so the needle is anchored: a leading
+# `.` or `source` as the first word of a line, comments stripped first.
+boot_code="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-cs193v.sh")"
+assert_eq "bootstrap:sources-nothing" "" \
+          "$(printf '%s\n' "$boot_code" | grep -nE '^[[:space:]]*(\.|source)[[:space:]]' || true)"
+assert_eq "bootstrap:evals-nothing" "" \
+          "$(printf '%s\n' "$boot_code" | grep -nE '(^|[^[:alnum:]_])eval[[:space:]]' || true)"
 
 # ─── the tunnel may only ever bind loopback ────────────────────────────────────
 # EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
@@ -256,10 +276,10 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # static test forbids them, which makes that ban load-bearing rather than hygienic." The ban was
 # real; the test was not reading the file obeying it. Now it is.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -875,7 +895,7 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 # `$(... || true)` idiom the whole rule would then go silently green on the one platform it
 # exists for.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/files/cs193v-ui.sh $b32files"
+eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh $b32files"
 # shellcheck disable=SC2086
 # COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
 # quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version
@@ -925,7 +945,7 @@ pt_col() {                            # pt_col ROW_NAME COLUMN -> that cell of P
     printf '%s\n' "$ptreg" | do_awk -F'|' -v n="$1" -v c="$2" '$2 == n { print $c }'
 }
 reg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ptreg.XXXXXX")"
-if carve_func "$PRIVATE/install-cs193v.sh" distro_packages "$reg_tmp/dp.sh"; then
+if carve_func "$PRIVATE/course-install.sh" distro_packages "$reg_tmp/dp.sh"; then
     pass "preflight:the-installer-s-table-was-carvable"
     # THE PM_/PKG_ GLOBALS ARE PRE-BLANKED because distro_packages leaves them untouched for a
     # family it does not know and this suite runs under `set -u` -- 25-installer.sh:467 makes the
@@ -972,7 +992,7 @@ if carve_func "$PRIVATE/install-cs193v.sh" distro_packages "$reg_tmp/dp.sh"; the
     assert_not_match "preflight:fedora-podman-does-not-name-uidmap" 'uidmap' "$(pt_col podman 6)"
 else
     fail "preflight:the-installer-s-table-was-carvable" \
-         "could not carve distro_packages out of install-cs193v.sh"
+         "could not carve distro_packages out of course-install.sh"
 fi
 rm -rf "$reg_tmp"
 
@@ -1785,13 +1805,15 @@ done
 # The installer carries its own copy, for the reason version_lt and box() are duplicated: it is
 # curl-piped and standalone. That the two copies AGREE is 25-installer.sh's business; that the
 # installer has one at all is here, so a launcher-only fix cannot pass.
-assert_eq "probe:installer-declares-the-package-id-once" "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/install-cs193v.sh)"
-assert_ne "probe:the-installer-has-a-probe-too" "" \
-          "$(fn_body ensure_podman_path $PRIVATE/install-cs193v.sh)"
+# RETIRED WITH #221, not weakened. These insisted the installer carried its OWN copy of
+# PODMAN_PKG_ID and of the probe, so a launcher-only fix could not pass. There is one copy now,
+# in files/cs193v-ui.sh, which course-install.sh and cs193v both source -- so "both have one"
+# is not a claim that can be made or broken any more. What replaced them is above:
+# probe:ui-declares-the-package-id-once and probe:the-probe-is-extractable read the shared file,
+# and probe:podman-is-tested-in-exactly-four-places counts across both consumers.
 
 # ─── the installer's student-facing text lives in one place ────────────────────
-# ISSUE #116. Every word install-cs193v.sh prints comes from THE TEXT STUDENTS SEE at the foot
+# ISSUE #116. Every word course-install.sh prints comes from THE TEXT STUDENTS SEE at the foot
 # of the file, reached by `txt <key>`, so the wording can be re-tuned without reading a line of
 # logic -- the arrangement install-cs193v-windows.cmd already has, where its ten refusals are
 # echo-only blocks in one tail section. These are the lints that keep it true.
@@ -1800,12 +1822,12 @@ assert_ne "probe:the-installer-has-a-probe-too" "" \
 # gathered in one place" since long before it was true, and ~110 call sites quietly disagreed
 # with it. A banner is a promise; this is the part that keeps it.
 assert_eq "text116:the-catalogue-is-declared-once" "1" \
-          "$(grep -c '^text_catalogue() {$' $PRIVATE/install-cs193v.sh)"
+          "$(grep -c '^text_catalogue() {$' $PRIVATE/course-install.sh)"
 
 # Everything above the catalogue is logic, and no message-printing helper there may be handed a
 # literal. WHOLE-LINE COMMENTS BLANKED, not `sed 's/#.*//'`, for the reason launcher_code below
 # gives: this script documents its own rules in prose that would otherwise match.
-inst_logic="$(sed -n '1,/^text_catalogue() {$/p' $PRIVATE/install-cs193v.sh \
+inst_logic="$(sed -n '1,/^text_catalogue() {$/p' $PRIVATE/course-install.sh \
               | sed 's/^[[:space:]]*#.*//')"
 assert_ne "text116:the-logic-region-is-readable" "" "$inst_logic"
 
@@ -1885,7 +1907,7 @@ assert_eq "text116:no-printf-carries-a-sentence" "" "$printf_hits"
 # The catalogue is prose and nothing else. A `$`, a backtick or a backslash in there would be
 # inert today -- the heredoc delimiter is quoted -- and a trap for whoever later unquotes it or
 # copies a block somewhere that does expand. {{NAME}} is the only substitution there is.
-inst_text="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" $PRIVATE/install-cs193v.sh \
+inst_text="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" $PRIVATE/course-install.sh \
              | sed '1d;$d')"
 assert_ne  "text116:the-catalogue-body-is-readable" "" "$inst_text"
 assert_eq  "text116:the-catalogue-holds-no-shell" "" \
@@ -2522,7 +2544,13 @@ require_cmd shellcheck "Run: sudo apt install -y shellcheck"
 # dead variable. The `source-path=SCRIPTDIR` directive in cs193v is what makes this work from
 # any working directory rather than only from the repo root.
 assert_ok  "shellcheck:cs193v"  shellcheck -x --severity=warning cs193v
-assert_ok  "shellcheck:install" shellcheck --severity=warning $PRIVATE/install-cs193v.sh
+assert_ok  "shellcheck:bootstrap" shellcheck --severity=warning $PRIVATE/install-cs193v.sh
+# -x, AND REQUIRED RATHER THAN TIDIER (#221): course-install.sh sources cs193v-ui.sh, and without
+# -x every knob it sets for that file reads as unused at WARNING severity. Its runtime path comes
+# from the handover directory, which does not matter -- source= resolves at LINT time against the
+# checked file's own location, the trick cs193v:151-153 already uses and explains.
+assert_ok  "shellcheck:course-install" \
+           shellcheck -x --severity=warning $PRIVATE/course-install.sh
 # The shared presentation layer, checked ALONE as well as through the launcher: the container
 # sources it with no launcher in the picture, so it has to stand up by itself.
 #

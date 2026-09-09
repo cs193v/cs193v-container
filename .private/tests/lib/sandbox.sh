@@ -651,7 +651,7 @@ set -u
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
+    PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
 else
     bash "$INST"
 fi
@@ -679,7 +679,7 @@ for f in /tmp/cs193v-build-*.log; do [ -f "$f" ] && tail -60 "$f"; done
 printf '===DOCTOR===\n'
 "$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
 printf '===TRACE===\n'
-sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
+sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
 printf '\n===END-REPORT===\n'
 NEST
     chmod +x "$SB_WORK/nest-run.sh"
@@ -719,7 +719,7 @@ sb_installed > /var/tmp/report/dpkg-before
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
+    PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
 else
     bash "$INST"
 fi
@@ -784,7 +784,7 @@ if [ -x "$d/cs193v" ]; then echo launcher-is-executable; elif [ -d "$d" ]; then 
 # paths into podman-old's exact-set audit as changes the installer had supposedly made. The one
 # case that really builds asks in its own script (nest-run.sh), where a store already exists.
 printf '===TRACE===\n'
-sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p' /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
+sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
 printf '\n===END-REPORT===\n'
 RUN
     chmod +x "$SB_WORK/run.sh"
