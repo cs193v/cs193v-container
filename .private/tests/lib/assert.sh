@@ -135,11 +135,21 @@ run_checker() {                       # run_checker CMD [ARGS...]
 # The first line of every assertion that compares strings, so no call site has to remember. It
 # covers the negative forms too, which are the ones that cannot be fixed any other way: there is
 # no happy-side sentinel that satisfies "the output does not contain X".
+#
+# IT REPORTS THE MARKER LINE, NOT THE WHOLE VALUE. The value that carries the sentinel is often a
+# whole pty transcript -- sg_run poisons $SG_OUT with it when a conversation diverges, so that the
+# assertions downstream of a run that stopped early fail loudly instead of passing vacuously on a
+# short one. There are about a hundred of those in 35-setup-git-shim.sh, and printing 12KB into
+# each of their detail lines buries the one line that says what actually went wrong. The sentinel
+# and whatever the checker said beside it are the whole of the diagnosis; the transcript is already
+# the subject of every other assertion in the case.
 _checker_ok() {                       # _checker_ok NAME [VALUE...]  -> 1, and FAILs, if one died
-    local v
+    local v why
     for v in "${2-}" "${3-}"; do
         case "$v" in
-            *"$CHECKER_DIED"*) fail "$1" "$v"; return 1 ;;
+            *"$CHECKER_DIED"*)
+                why="$(printf '%s' "$v" | grep -F "$CHECKER_DIED" | head -3)"
+                fail "$1" "$why"; return 1 ;;
         esac
     done
     return 0

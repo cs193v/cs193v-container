@@ -186,6 +186,53 @@ sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; nex
                 /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$SGM")"
 assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')"
 
+# ─── the keys the pty driver waits on (#206) ───────────────────────────────────
+# fixtures/setup-git-flows.txt names, for every keystroke, the catalogue key of the screen that
+# keystroke answers, and lib/setup-git-shim.sh resolves it through msg_text before a step is sent.
+# TWO WAYS THAT CAN GO WRONG SILENTLY, and both are cheaper to catch here than at 3am in a suite
+# that has started timing out.
+SGFLOWS="$TESTS_DIR/fixtures/setup-git-flows.txt"
+assert_file "sgflow:the-fixture-is-there" "$SGFLOWS"
+grep -oE '^(line|secret|menu|\?menu)[[:space:]]+[a-z0-9._ -]+' "$SGFLOWS" \
+    | sed -E 's/^(line|secret|menu|\?menu)[[:space:]]+//' | do_tr ' ' '\n' \
+    | grep -E '^[a-z]' | LC_ALL=C sort -u > "$TMP/sg_gatekeys"
+assert_ne "sgflow:the-fixture-names-keys" "" "$(cat "$TMP/sg_gatekeys")"
+
+# A RENAMED KEY IS A GATE THAT CAN NEVER OPEN. It does not fail where the rename happened; it
+# fails as a step deadline in whichever case reaches that screen first.
+assert_eq "sgflow:every-gate-key-exists" "" \
+          "$(LC_ALL=C comm -13 "$TMP/sg_defined" "$TMP/sg_gatekeys" | do_tr '\n' ' ' | sed 's/ *$//')"
+
+# AND A PLACEHOLDER-LED KEY IS A NEEDLE THAT MATCHES ALMOST ANYTHING. msg_text (lib/assert.sh:242)
+# truncates at the first {{ }}, so `confirm.entered` resolves to "You entered " and
+# `token.more-characters` to "...". Ten keys in this catalogue are cut short that way, and they are
+# exactly the ones somebody annotating the checkpoint or the account screen would reach for first.
+#
+# THE UNIT IS THE STEP, NOT THE KEY, and getting that wrong is instructive. `prompt.retry` is
+# "Try again:" -- ten characters, and setup-git prints it from THREE different loops
+# (files/setup-git:553, 555, 584, 666), so on its own it cannot say which one the child is in. The
+# fixture never uses it on its own: every retry step names the COMPLAINT beside it
+# (`err.sunetid-invalid prompt.retry`), which is unique and is what the case is about anyway. So
+# what has to hold is that no step is gated on weak needles ALONE.
+#
+# ELEVEN CHARACTERS is the threshold because the shortest needle the fixture leans on is
+# `Your token:`. That one is safe only because a step matches against output produced since the
+# PREVIOUS step, so read_secret's 94 tally redraws sit behind the cursor rather than in front of it.
+: > "$TMP/sg_weaksteps"
+grep -nE '^(line|secret|menu)[[:space:]]' "$SGFLOWS" | while IFS= read -r row; do
+    lineno="${row%%:*}"
+    keys="$(printf '%s' "${row#*:}" | sed -E 's/^(line|secret|menu)[[:space:]]+//; s/->.*//')"
+    best=0
+    for k in $keys; do
+        case "$k" in [a-z]*) ;; *) continue ;; esac
+        n="$(msg_text "$k" "$SGM" | do_tr -d '*' | do_tr -d '\n' | wc -c | do_tr -d ' ')"
+        [ "$n" -gt "$best" ] && best="$n"
+    done
+    [ "$best" -ge 11 ] || printf 'line %s(%s) ' "$lineno" "$best" >> "$TMP/sg_weaksteps"
+done
+assert_eq "sgflow:no-step-is-gated-on-weak-needles-alone" "" \
+          "$(sed 's/ *$//' "$TMP/sg_weaksteps" 2>/dev/null)"
+
 # ─── the container's prose fits an 80-column terminal ──────────────────────────
 # WHY 76 AND NOT 80. render() indents every line by two columns, and a line that reaches the
 # right edge SOFT-wraps rather than being refused — so it costs a second row, invisibly, in a

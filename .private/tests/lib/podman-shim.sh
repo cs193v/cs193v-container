@@ -101,6 +101,22 @@ launcher_rc() {                       # launcher_rc [ARGS...] -> prints rc, disc
 # Drive the launcher through a real pty, feeding keystrokes. This is the only way to reach
 # the arrow-key menu — with no tty, menu() deliberately picks the safe default and returns.
 # KEYS is passed through printf %b, so use \033[B for down and \n for Enter.
+#
+# THIS PUSHES EVERY KEY AT ONCE, AND IT IS SAFE BY THE SHAPE OF THESE FLOWS RATHER THAN BY DESIGN.
+# Worth writing down, because the reason is not obvious and the margin is one keystroke wide.
+# Measured while fixing #206: bytes left in the input queue across a cbreak -> canonical transition
+# are not discarded, they are MANGLED -- the line discipline marks only the last queued byte as a
+# terminator, so the whole queue becomes one "line" and the next `read -r` returns whatever
+# precedes the first embedded newline. Every launcher sequence here begins at a `read -rsn1` and
+# any trailing canonical payload ends in a newline (`\033[B\n\nexit\n`), so the reconstruction
+# happens to be exact -- verified 5/5 on macOS and 5/5 on Linux.
+#
+# PUT A BARE ENTER BEFORE A LINE ANSWER AND IT BECOMES THE FAILING SHAPE: the queue then starts
+# with the newline, `read -r` returns empty, and the answer is gone. `launcher_tty_repo '\nexit\n'`
+# at 70-sighup.sh:301 and 80-launcher-live.sh:110 is one screen away from it. setup-git hit exactly
+# this and #206 replaced its feeder with lib/ptydrive.py; these 24 sites were left alone
+# deliberately, because none of them is that shape today. If one becomes it, this is the note that
+# says what happened.
 launcher_tty() {                      # launcher_tty KEYS [ARGS...]
     local keys="$1"; shift
     local cmd="${LAUNCHER_DIR:-$REPO}/cs193v" a

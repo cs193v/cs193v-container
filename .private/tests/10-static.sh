@@ -514,6 +514,16 @@ ptyrun_src="$(sed '1,/^"""$/d' "$PRIVATE/tests/lib/ptyrun.py")"
 assert_not_match "ptyrun-pid:ptyrun-does-not-read-the-process-table" \
                  '(import subprocess|/proc/|pgrep|Popen)' "$ptyrun_src"
 
+# AND ptydrive.py STAYS OFF stdout AND stderr. lib/setup-git-shim.sh's sg_run ends `2>&1`, so that
+# process's stderr IS the transcript under test: one line of ours in it would be read by every
+# assertion in 35-setup-git-shim.sh, counted by its 80-column row lint, and searched for the
+# token. Everything it has to say goes to $CS193V_DRIVE_REPORT. The two `usage:`/`cannot exec`
+# writes are the deliberate exceptions ptyrun.py records -- a transcript that is silent about an
+# unreachable shell is the shape that makes ~125 negative assertions pass vacuously.
+ptydrive_says="$(grep -nE '(sys\.(stdout|stderr)\.write|print\()' \
+                 "$PRIVATE/tests/lib/ptydrive.py" | grep -v 'usage: ptydrive' || true)"
+assert_eq "ptydrive:says-nothing-on-the-transcript" "" "$ptydrive_says"
+
 # AND THE FIXTURE'S TWO LOAD-BEARING LINES STAY. lib/sh-fake exists to interpose a shell, and two
 # details make it a faithful one rather than a misleading one: POSIX gives an asynchronous list's
 # stdin /dev/null BEFORE explicit redirections, so without the `<&3` the command gets NO TERMINAL

@@ -1,0 +1,147 @@
+# THE CONVERSATION setup-git HAS WITH A STUDENT, as a table, in one place.
+#
+# WHY A FILE RATHER THAN A KEYSTROKE STRING AT EACH CALL SITE. 35-setup-git-shim.sh drives
+# setup-git 38 times, and 26 of those runs are the same conversation with one thing changed. As
+# `|`-separated keystrokes that sequence was written out 39 times, so a screen added or removed --
+# which issues #53, #58 and #92 each did -- was a 39-site edit whose failures arrived as
+# assertions about something else entirely, at whatever site noticed first. Here it is one edit.
+#
+# EVERY STEP NAMES THE SCREEN IT ANSWERS, BY CATALOGUE KEY. The harness resolves the key to its
+# prose, so nothing here hardcodes wording -- the same rule assert_says_key exists for. A step is
+# not sent until that prose is on the screen AND the terminal is in the state that read implies,
+# so a reflowed flow fails ONCE, by name, at the step that diverged, instead of typing the right
+# number of keys into the wrong prompts.
+#
+#   line KEY...   -> type TEXT      a prompt read with `read -r`: canonical, the terminal echoing
+#   secret KEY... -> paste TEXT     read_secret: `stty -echo -icanon`, tallied, never echoed
+#   menu  KEY...  -> pick KEY       an arrow-key menu, whose KEYS ARE ITS OPTIONS IN ORDER
+#   include FLOW                    another flow, spliced in here
+#   optional                        everything after it in this flow may go unreached
+#
+# `pick` NAMES THE OPTION AND THE HARNESS COUNTS THE ARROWS. That is the half that makes a
+# reordered menu a one-line change rather than a hunt for `\033[B\033[B\n` at seven call sites --
+# and it puts in the file what the comment this change deletes had to say in prose:
+# "down, down, Enter -- the third option, I'm stuck".
+#
+# {{ID}}, {{NAME}} and {{TOKEN}} are filled in by the caller. THE TOKEN NEVER PASSES THROUGH awk:
+# the expansion below leaves the placeholder alone and lib/setup-git-shim.sh substitutes it in the
+# shell, so it reaches no argv and no environment on its way to the pty. See files/setup-git:680-683.
+
+# ─── the pieces ────────────────────────────────────────────────────────────────
+
+[[identity]]
+line    prompt.sunetid                                  -> type {{ID}}
+menu    opt.correct opt.retype                          -> pick opt.correct
+line    prompt.name                                     -> type {{NAME}}
+menu    opt.correct opt.retype                          -> pick opt.correct
+
+[[checkpoint-ok]]
+menu    opt.all-done opt.need-help                      -> pick opt.all-done
+
+[[checkpoint-help]]
+menu    opt.all-done opt.need-help                      -> pick opt.need-help
+
+# The link screen and the paste behind it. Both ways through the #58 menu are here, so the one
+# that is not the default is exercised by naming it rather than by counting arrows.
+[[get-token]]
+menu    opt.have-token opt.by-hand                      -> pick opt.have-token
+secret  prompt.token                                    -> paste {{TOKEN}}
+
+[[get-token-by-hand]]
+menu    opt.have-token opt.by-hand                      -> pick opt.by-hand
+secret  prompt.token                                    -> paste {{TOKEN}}
+
+[[account-ok]]
+menu    opt.thats-me opt.not-my-account                 -> pick opt.thats-me
+
+[[account-wrong]]
+menu    opt.thats-me opt.not-my-account                 -> pick opt.not-my-account
+
+# ─── the whole clean first run ─────────────────────────────────────────────────
+
+[[happy]]
+include identity
+include checkpoint-ok
+include get-token
+include account-ok
+
+[[happy-by-hand]]
+include identity
+include checkpoint-ok
+include get-token-by-hand
+include account-ok
+
+# EVERYTHING UP TO THE PASTE AND NO FURTHER, which is the run a failing `git config` produces:
+# apply_config gives up before whoami_login, so the account confirmation is never drawn. As a
+# keystroke string that was an eighth key nobody consumed and nothing recorded.
+[[happy-to-token]]
+include identity
+include checkpoint-ok
+include get-token
+
+# ─── the three ways out of a failed probe ──────────────────────────────────────
+
+[[retry-probes]]
+menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.followed-instructions
+
+[[reenter-token]]
+menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.reenter-token
+include get-token
+include account-ok
+
+[[stuck]]
+menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.stuck
+
+# The same, for a run that may or may not reach it: 90-setup-git-github.sh runs against the real
+# GitHub, where the point is to find out WHETHER a probe fails.
+[[stuck-if-a-probe-failed]]
+optional
+menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.stuck
+
+# ─── the second run ────────────────────────────────────────────────────────────
+
+[[second-run-check]]
+menu    opt.just-check opt.start-over opt.quit          -> pick opt.just-check
+
+[[second-run-start-over]]
+menu    opt.just-check opt.start-over opt.quit          -> pick opt.start-over
+
+[[second-run-quit]]
+menu    opt.just-check opt.start-over opt.quit          -> pick opt.quit
+
+# ─── validation, as the student meets it ───────────────────────────────────────
+# EACH REJECTION IS A STEP, AND IT NAMES THE COMPLAINT IT EXPECTS. That is what replaces
+# `grep -o '3 to 8 letters and numbers' | grep -c .`: the count used to be an occurrence count
+# rather than a row count, because the row break between two complaints was the terminal echoing
+# a keystroke and sg_feed raced it (35-setup-git-shim.sh:476-509). Here the complaint is verified
+# where it happened, in order, by key, and there is nothing left to race.
+
+[[bad-sunetids]]
+line    prompt.sunetid                                  -> type jane.doe
+line    err.sunetid-invalid prompt.retry                -> type ab
+line    err.sunetid-invalid prompt.retry                -> type me@cs.stanford.edu
+line    err.sunetid-is-an-email prompt.retry            -> type "   JDoe   "
+menu    opt.correct opt.retype                          -> pick opt.correct
+line    prompt.name                                     -> type {{NAME}}
+menu    opt.correct opt.retype                          -> pick opt.correct
+
+# A structurally valid SUNetID that is somebody else's: nothing but the confirmation can catch it.
+[[retype-sunetid]]
+line    prompt.sunetid                                  -> type wrong
+menu    opt.correct opt.retype                          -> pick opt.retype
+include identity
+
+[[classic-token]]
+menu    opt.have-token opt.by-hand                      -> pick opt.have-token
+secret  prompt.token                                    -> paste ghp_16C7e42F292c6912E7710c838347Ae178B4a
+secret  err.token-classic prompt.retry                  -> paste {{TOKEN}}
+
+[[junk-token]]
+menu    opt.have-token opt.by-hand                      -> pick opt.have-token
+secret  prompt.token                                    -> paste hello
+secret  err.token-shape prompt.retry                    -> paste {{TOKEN}}
+
+[[partial-token]]
+menu    opt.have-token opt.by-hand                      -> pick opt.have-token
+secret  prompt.token                                    -> paste {{HALF}}
+secret  err.token-partial prompt.retry                  -> paste {{TOKEN}}
