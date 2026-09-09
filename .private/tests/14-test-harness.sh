@@ -1021,6 +1021,150 @@ for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
     pty_stop "${PC_INNER:-}"
 done
 
+
+# ─── lib/ptydrive.py drives a pty from a described conversation (#206) ────────
+# THE DIFFERENCE FROM ptyrun ABOVE, and why this is a second file rather than a flag. ptyrun
+# forwards a STREAM: whatever is on its stdin reaches the child as fast as the child will take it,
+# which is right for the eight callers that only want a pty and a few keystrokes. ptydrive answers
+# a different question -- WHEN may the next keystroke go, and IS THE CHILD WHERE THE TEST THINKS IT
+# IS -- so it needs the master fd, the accumulated output and the slave's termios in one loop.
+# Keeping them apart is what leaves the twenty assertions above measuring what they always did.
+#
+# WHAT #206 WAS. lib/setup-git-shim.sh's sg_feed slept 0.3s between keystrokes with no knowledge of
+# the child. Measured at that pacing: the first answer is echoed at byte offset 0 -- before the
+# program's first byte -- 10 runs of 10, and the 93-character token lands in the transcript before
+# `stty -echo` runs, on a margin of 256-260ms. In 90-setup-git-github.sh that is a REAL credential
+# and :235 records the transcript to a file.
+#
+# EVERY FIXTURE HERE IS A `bash -c` SCRIPT, NOT setup-git. What is being measured is the driver's
+# own rules -- the gate, the state test, the divergence report, the exit code -- and a fixture that
+# can be read in six lines is worth more than one that needs the container.
+PTYDRIVE="$TESTS_DIR/lib/ptydrive.py"
+
+# A step on the wire is four tab-separated fields: KIND, NAME, NEEDLES (0x1f-separated), KEYS.
+pd_step() {                           # pd_step KIND NAME NEEDLES KEYS
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+}
+pd_run() {                            # pd_run REPORT CMD  <script on stdin  -> transcript
+    CS193V_DRIVE_REPORT="$1" timeout 30 python3 "$PTYDRIVE" "$2" 2>&1 | do_tr -d '\r'
+}
+
+# EVERY `line` FIXTURE SHOWS THE CURSOR, and that is a property of the driver worth stating here
+# rather than a quirk of these scripts. Canonical+echo is the terminal's RESTING state -- true
+# before the child has even started -- so unlike a keystroke read it is no evidence at all that a
+# read is armed, and `read -r` produces no kernel transition of any kind (measured, both
+# platforms). What setup-git's read_line does instead is show the cursor for exactly as long as it
+# is waiting (files/setup-git:396, cs193v-ui.sh:73), which issue #53 put there so that "a prompt
+# with no cursor cannot be told from a program that has stopped". ptydrive requires that marker,
+# so a fixture standing in for setup-git must emit it too.
+PD_SHOW='\033[?25h'
+
+# THE HAPPY CASE: a line read and a keystroke read, each gated on its own screen.
+cat > "$WORK/pd-two.sh" <<CHILD
+printf 'FIRST SCREEN $PD_SHOW'
+IFS= read -r a
+printf '\nSECOND SCREEN '
+IFS= read -rsn1 k
+printf '\nA=[%s] K=[%s]\n' "\$a" "\$k"
+CHILD
+pd_out="$( { pd_step line one 'FIRST SCREEN' 'hello\n'
+             pd_step menu two 'SECOND SCREEN' 'X'; } | pd_run "$WORK/pd-r1" "bash $WORK/pd-two.sh")"
+assert_says "ptydrive:each-step-waits-for-its-own-screen" "A=[hello] K=[X]" "$pd_out"
+assert_eq "ptydrive:a-clean-run-reports-no-failure" "0" \
+          "$(grep -c '^FAIL' "$WORK/pd-r1" || true)"
+
+# THE STATE TEST, and it is the one that makes a leaked credential unreachable rather than
+# unlikely. This child reads a line with the terminal ECHOING; a `secret` step must refuse to type
+# into it rather than pasting a credential somewhere it will be echoed back.
+cat > "$WORK/pd-echo.sh" <<CHILD
+printf 'TOKEN SCREEN $PD_SHOW'
+IFS= read -r a
+printf '\nGOT=[%s]\n' "\$a"
+CHILD
+pd_out="$(pd_step secret tok 'TOKEN SCREEN' 'github_pat_SECRETVALUE\n' \
+          | pd_run "$WORK/pd-r2" "bash $WORK/pd-echo.sh")"
+# THE GUARD, and it is not decoration: the assertion below is a NEGATIVE one, so it passes on an
+# empty transcript and on a python traceback alike -- which is #79 exactly, and is what this very
+# group looked like before ptydrive.py existed. Prove the child ran before believing the secret
+# stayed out of its output.
+assert_contains "ptydrive:the-echoing-child-really-ran" "TOKEN SCREEN" "$pd_out"
+assert_not_contains "ptydrive:refuses-to-type-a-secret-into-an-echoing-terminal" \
+                    "github_pat_SECRETVALUE" "$pd_out"
+assert_contains "ptydrive:says-the-terminal-was-never-at-a-secret-read" \
+                "never at a secret read" "$(cat "$WORK/pd-r2")"
+
+# A SCREEN THAT IS NEVER DRAWN IS A DIVERGENCE, NAMED, AND NOT A HANG. This is the shape a reflow
+# makes: the child is parked at a read that the step does not describe.
+cat > "$WORK/pd-other.sh" <<CHILD
+printf 'A DIFFERENT SCREEN $PD_SHOW'
+IFS= read -r a
+printf '\ndone\n'
+CHILD
+pd_out="$(CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=6 \
+          pd_step line ghost 'THIS SCREEN DOES NOT EXIST' 'x\n' \
+          | pd_run "$WORK/pd-r3" "bash $WORK/pd-other.sh")"
+assert_contains "ptydrive:names-the-step-that-diverged" "ghost" "$(cat "$WORK/pd-r3")"
+assert_contains "ptydrive:shows-the-screen-the-child-is-parked-on" \
+                "A DIFFERENT SCREEN" "$(cat "$WORK/pd-r3")"
+
+# rc 90 IS THE CONVERSATION GOING WRONG, and it is deliberately not a child status and not 124.
+# A caller reading only the exit code can still tell "the flow diverged" from "the program failed"
+# from "the whole-run ceiling fired".
+assert_exit "ptydrive:a-divergence-exits-90" 90 \
+            sh -c "printf 'line\tghost\tNOPE\tx\\\\n\n' | CS193V_DRIVE_SETTLE_SECS=0.5 \
+                   CS193V_DRIVE_STEP_SECS=4 python3 '$PTYDRIVE' 'bash $WORK/pd-other.sh' >/dev/null 2>&1"
+
+# NOTHING THIS PROCESS SAYS MAY REACH stdout OR stderr. lib/setup-git-shim.sh's runner ends `2>&1`,
+# so a diagnostic of ours would land IN the transcript under test -- read by every assertion in
+# 35-setup-git-shim.sh, counted by its 80-column row lint, and searched for the token. A malformed
+# script is the case that used to break this rule, by raising SystemExit.
+pd_out="$(printf 'line\tonly-three-fields\tNEEDLE\n' \
+          | pd_run "$WORK/pd-r4" "bash $WORK/pd-two.sh")"
+assert_eq "ptydrive:a-malformed-script-says-nothing-on-the-transcript" "" "$pd_out"
+assert_contains "ptydrive:a-malformed-script-is-reported-in-the-report-file" \
+                "want 4" "$(cat "$WORK/pd-r4")"
+
+# THE LOSS DETECTOR: bytes stranded in the input queue across a tty mode change (#206). Gating
+# means nothing is written ahead of a prompt, but a keystroke is still briefly QUEUED between the
+# write and the child's read, and a mode change inside that window destroys it -- silently, because
+# the following read SUCCEEDS and returns the wrong answer. This fixture strands five bytes on
+# purpose by over-sending: the child takes `X` with `read -rsn1`, restores canonical, and `\ntwo\n`
+# does not survive it.
+cat > "$WORK/pd-loss.sh" <<CHILD
+printf 'KEY SCREEN '
+IFS= read -rsn1 k
+sleep 0.4
+printf '\nLINE SCREEN $PD_SHOW'
+IFS= read -r b
+printf '\nK=[%s] B=[%s]\n' "\$k" "\$b"
+CHILD
+{ pd_step menu oversend 'KEY SCREEN' 'X\ntwo\n'
+  pd_step line later 'LINE SCREEN' 'z\n'; } | pd_run "$WORK/pd-r6" "bash $WORK/pd-loss.sh" >/dev/null
+assert_contains "ptydrive:reports-bytes-stranded-by-a-tty-mode-change" \
+                "LOST" "$(cat "$WORK/pd-r6")"
+assert_contains "ptydrive:counts-the-bytes-that-were-stranded" \
+                "5 byte(s) still unread" "$(cat "$WORK/pd-r6")"
+# AND THE CONTROL FOR IT, which is the half that matters: the ordinary end of a `read -rsn1` IS a
+# cbreak -> canonical transition, so a detector comparing a mode change against a stale queue count
+# calls every clean run a loss. An earlier draft did exactly that. Same child, driven one step per
+# read, nothing stranded, nothing reported.
+{ pd_step menu k 'KEY SCREEN' 'X'
+  pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "bash $WORK/pd-loss.sh" >/dev/null
+assert_eq "ptydrive:a-clean-read-restore-is-not-a-loss" "0" \
+          "$(grep -c 'LOST' "$WORK/pd-r7" || true)"
+
+# THE CONTROL, without which every assertion above passes against a driver that merely sleeps:
+# the child does not draw its screen for a full second, and the step must not have been sent
+# before it did. `A=[]` is what an unsynchronised write produces here.
+cat > "$WORK/pd-slow.sh" <<CHILD
+sleep 1
+printf 'LATE SCREEN $PD_SHOW'
+IFS= read -r a
+printf '\nA=[%s]\n' "\$a"
+CHILD
+assert_says "ptydrive:really-waits-rather-than-sleeping" "A=[typed]" \
+            "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "bash $WORK/pd-slow.sh")"
+
 # ─── the installer's pty door survives a space in $PATH (#141) ────────────────
 # installer_tty BUILDS A COMMAND STRING, for the reason its own comment gives, and that string is
 # parsed a SECOND time before `env` ever sees it: do_script hands it to ptyrun.py, whose child
