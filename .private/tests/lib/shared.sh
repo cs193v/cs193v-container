@@ -69,10 +69,18 @@
 #     that needed silencing -- /bin/sh is not dash.
 #   * unsetting it in the child. Bash validates the variable at startup, BEFORE the first line
 #     of the script runs, so `unset BASH_XTRACEFD` on line 1 is already too late.
-#   * not exporting it (`BASH_XTRACEFD=N; set -x; . script`). This does contain the leak, but
-#     sourcing adds a level of trace nesting -- `++1` instead of `+1` -- and
-#     95-installer-coverage.sh reads line numbers with `sed -n 's/^+\([0-9]\{1,\}\) .*/\1/p'`,
-#     anchored to a SINGLE `+`. It would have silently zeroed the coverage gate.
+#   * not exporting it (`BASH_XTRACEFD=N; set -x; . script`). This does contain the leak, and
+#     it is still not taken -- but the reason changed with #221, so read this rather than the
+#     shape of the regex. It used to be trace nesting: sourcing traces at `++1` instead of `+1`
+#     and the extractor was anchored to a SINGLE `+`, so the coverage gate would have silently
+#     zeroed. The extractors now read `s/^+*course-install\.sh:\([0-9]\{1,\}\) .*/\1/p` --
+#     `+*` tolerates any nesting depth -- so that objection is genuinely dead and nobody should
+#     re-derive it. WHAT STILL RULES IT OUT is `exit`: course-install.sh dies through cs193v-ui's
+#     die(), which ends in `exit 1`, and every producer prints its whole report AFTER the
+#     invocation -- `===INSTALLER-RC===` through `===TRACE===` in lib/sandbox.sh's run.sh and
+#     nest-run.sh. Sourced, a refusing installer would take the wrapper with it and there would
+#     be no report to read the trace out of, so the gate would see nothing on exactly the cases
+#     a refusal is about.
 #
 # So the fd moves instead, and 10-static.sh asserts the two sets stay disjoint.
 #

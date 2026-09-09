@@ -408,6 +408,17 @@ survey() {
         DO_CURL_INSTALL=yes
         need "$(txt need.curl "PKG=$PKG_CURL")" "$(txt need.curl.why)"
     fi
+    # BOTH ARMS ABOVE ARE UNREACHABLE UNTIL THE wget ARM LANDS, and it is worth saying so here
+    # rather than leaving a reader to wonder why the coverage allowlist excuses one of them.
+    # install-cs193v.sh needs a downloader before it can fetch anything at all, and today that
+    # means curl -- so a machine with no curl is refused by the bootstrap and never reaches this
+    # line. When wget becomes an accepted downloader, a stock Ubuntu Desktop arrives here with
+    # wget and no curl and this consent item becomes live again.
+    #
+    # WHICH IS WHY IT IS NOT DELETED. curl is still needed for its own sake: install_podman's
+    # macOS arm fetches the .pkg with it, and the launcher uses it afterwards. What changed is
+    # the REASON, so need.curl.why no longer says this script does the downloading -- it did,
+    # until the download moved into the bootstrap ahead of every question this script asks.
 
     # THE SETUID HELPERS, PROBED SEPARATELY FROM PODMAN, which is the entire point. uidmap is
     # already in the package list, but only in the arm that installs podman (install_podman
@@ -1084,7 +1095,7 @@ cs193v uses ssh on your own computer to connect your browser to servers you run 
 Install {{PKG}}
 
 [[need.curl.why]]
-This script downloads the course files with curl. The Ubuntu desktop install does not include it — the WSL environment does — so it has to be installed here. Installing software needs your password.
+The course tools use curl, and the Ubuntu desktop install does not include it — the WSL environment does — so it has to be installed here. Installing software needs your password.
 
 [[need.uidmap]]
 Install {{PKG}}
@@ -1435,6 +1446,35 @@ if [ "$BOOT_PROTOCOL" -lt "$BOOTSTRAP_PROTOCOL_WANTED" ] 2>/dev/null; then
     printf '    https://github.com/%s/%s\n\n' "cs193v" "cs193v-container" >&2
     exit 1
 fi
+
+# ─── and this script now owns the temp tree ────────────────────────────────────
+# THE BOOTSTRAP CANNOT REMOVE IT, and that is not an oversight in either file. It sets
+# `trap ... EXIT` over the tree, which covers every way it can fail -- but the hand-over is
+# `exec`, and exec REPLACES the process and discards its traps. Measured. So from this line on
+# the tree is this script's, and without the trap below every install anyone ever ran would
+# leave a full unpacked copy of the course repository in /tmp. That was live for one commit;
+# install:the-bootstrap-temp-tree-is-removed and half-tree:leaves-no-temp-tree-behind are what
+# keep it from coming back, one per side of the hand-over.
+#
+# THE GUARD IS NOT DEFENSIVE PROGRAMMING. $BOOT_TMP arrives as an ARGUMENT, in the file that
+# goes on to run `sudo $PM_INSTALL`, and the command it reaches is `rm -rf`. So the path has to
+# earn it: a directory, named the way the bootstrap names one, under the temp directory, and
+# holding the tree the bootstrap unpacked. `$2=/` fails the basename test, since ${x##*/} of
+# `/` is empty.
+#
+# AN INTERRUPTED RUN STILL LEAVES ONE, and that is ordinary rather than a hole -- a trap does
+# not run when the process is KILLED. The bootstrap's fixed `cs193v-install.` prefix is what
+# lets a later sweep recognise one; lib/assert.sh's sweep_stale_tmpdirs records the doctrine.
+#
+# ONE EXIT TRAP, because cs193v-ui.sh forbids setting one and every consumer owns its own. #219
+# adds the meter's state file to this same handler rather than a second trap.
+boot_tmp_is_ours() {
+    case "${BOOT_TMP##*/}" in cs193v-install.??????) ;; *) return 1 ;; esac
+    case "$BOOT_TMP" in "${TMPDIR:-/tmp}"/*|/tmp/*) ;; *) return 1 ;; esac
+    [ -d "$BOOT_TMP" ] && [ -f "$BOOT_TMP/.private/course-install.sh" ]
+}
+boot_cleanup() { boot_tmp_is_ours && rm -rf "$BOOT_TMP"; }
+trap boot_cleanup EXIT
 
 # ─── the shared presentation layer ─────────────────────────────────────────────
 # The same file the launcher sources, out of the tree the bootstrap just unpacked. A missing one
