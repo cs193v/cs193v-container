@@ -148,6 +148,18 @@ do_script() {                         # do_script SECS CMD
     "$DO_TIMEOUT" "$1" "$DO_PY" "$PT_LIB/ptyrun.py" "$2"
 }
 
+# do_drive SECS CMD -- the same pty and the same ceiling as do_script, driven from a SESSION
+# SCRIPT on stdin instead of a stream of keystrokes. See lib/ptydrive.py`s header for what the
+# difference buys; do_script is unchanged and still has eight callers.
+#
+# THE TIMEOUT GOES INSIDE, for the reason do_script records: `do_timeout N do_drive ...` cannot
+# run, because timeout execvp()s and cannot see a shell function.
+do_drive() {                          # do_drive SECS CMD
+    [ -n "$DO_PY" ] || _pt_fatal python3 'no python3 on PATH; lib/ptydrive.py needs it'
+    [ -n "$DO_TIMEOUT" ] || _pt_fatal timeout 'no GNU timeout(1) (brew install coreutils)'
+    "$DO_TIMEOUT" "$1" "$DO_PY" "$PT_LIB/ptydrive.py" "$2"
+}
+
 # ─── pty_start / pty_inner_pid: a backgrounded pty, and the pid of what is IN it ──────────────
 #
 # THE SIX BACKGROUNDED SITES USED TO HAND-ROLL THIS, and three of them then inferred the
