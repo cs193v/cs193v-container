@@ -170,16 +170,68 @@ root_step_subuid() {
         || die "$(msg err.subuid-failed "USER=$TARGET_USER")"
 }
 
+# ─── what /etc/wsl.conf says about systemd ─────────────────────────────────────
+# The systemd line in the [boot] section, or nothing, and the one question anybody asks about
+# it. THREE CALLERS: course-install.sh's survey uses both -- once for its skip and once for its
+# refusal -- and root_step_wslconf below uses them to check that its write actually landed.
+#
+# SCOPED TO [boot] BECAUSE [boot] IS THE ONLY SECTION EITHER SCRIPT WRITES. The greps these
+# replace read the whole file, so a `systemd=` under [automount] answered a question about
+# [boot] -- and WSL, which reads its settings per section, did not agree. That made survey skip a
+# machine on which systemd was never enabled and tell nobody, which is #228's defect pointing the
+# other way: two readers of one file, disagreeing, with ok() believing whichever answered first.
+#
+# THE LINE, NOT A YES-OR-NO, because survey's refusal has to quote what it found. The predicate is
+# then a question about that line rather than a second pass over the file.
+wsl_boot_systemd() {                  # wsl_boot_systemd FILE -> the [boot] systemd line, or empty
+    [ -f "$1" ] || return 0
+    awk '/^[[:space:]]*\[/ { boot = ($0 ~ /^[[:space:]]*\[boot\]/); next }
+         boot && /^[[:space:]]*systemd[[:space:]]*=/ { print; exit }' "$1"
+}
+
+wsl_systemd_is_on() {                 # wsl_systemd_is_on LINE -- that line turns systemd on
+    printf '%s\n' "$1" | grep -q '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true'
+}
+
 # THE WSL IMAGE ALREADY SHIPS `[boot] systemd=true`, so this skips on the Windows path too. The
 # sed arm exists for a /etc/wsl.conf carrying a [boot] stanza without it; the tee arm for a file
 # with no [boot] stanza, and for no file at all.
+#
+# NEITHER WRITE WAS CHECKED, AND ok() CLAIMED BOTH (#228). The student was handed a `wsl
+# --terminate` instruction for a setting that was never written, and met podman's failure later
+# with no thread leading back to here. So both arms `|| die`, and then the FILE settles it: a
+# write can exit 0 having stored nothing -- measured, a /etc/wsl.conf symlinked to /dev/null takes
+# tee's 0 and keeps none of it -- which is the same reason err.podman-unrunnable exists.
+#
+# WHICH FAILURES ARE LEFT FOR THE TWO `|| die`s IS NARROWER THAN IT LOOKS, since #226: on the
+# student's path ask_password primes sudo with `sudo -v` before any step runs, so "sudo refused"
+# is a refusal three steps upstream of here rather than a write that fails. What reaches these two
+# is a write root itself cannot make -- a /etc/wsl.conf that is a directory, a sudoers permitting
+# some commands and not others -- and the read-back below catches the same failures a step later
+# with less to say about them. 26-installer-sandbox.sh drives the tee arm (`--wslconf dir`) and
+# records at the sed arm why this tier cannot arrange that one.
+#
+# A [boot] SECTION THAT SETS systemd TO SOMETHING ELSE NEVER REACHES HERE. On the student's path
+# survey refuses it before consent is asked, quoting the line (say_wsl_systemd_off); on the
+# Windows path the instance is a minute old and ships `[boot] systemd=true`, so the skip above
+# fires. Worth naming because the sed is additive and would otherwise write systemd=true above a
+# systemd=false, leaving a file whose two lines disagree.
 root_step_wslconf() {
-    grep -q '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true' /etc/wsl.conf 2>/dev/null && return 0
+    wsl_systemd_is_on "$(wsl_boot_systemd /etc/wsl.conf)" && return 0
     if [ -f /etc/wsl.conf ] && grep -q '^[[:space:]]*\[boot\]' /etc/wsl.conf; then
-        sudo sed -i 's/^[[:space:]]*\[boot\][[:space:]]*$/[boot]\nsystemd=true/' /etc/wsl.conf
+        # ADDITIVE, AND WHOLE-LINE. The substitution this replaces rewrote the header itself, so
+        # it required [boot] ALONE on the line and did nothing at all -- silently, exit 0 -- to
+        # "[boot]  # note", which the grep just above accepts. Measured on a real WSL distro: a
+        # header with a trailing comment still turns systemd on, so the file was right and the sed
+        # was wrong. This leaves the student's line byte for byte, indentation included, and puts
+        # systemd=true on the next one.
+        sudo sed -i '0,/^[[:space:]]*\[boot\]/s/^\([[:space:]]*\[boot\].*\)$/\1\nsystemd=true/' \
+            /etc/wsl.conf || die "$(msg err.wslconf-update)"
     else
-        printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null
+        printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null \
+            || die "$(msg err.wslconf-create)"
     fi
+    wsl_systemd_is_on "$(wsl_boot_systemd /etc/wsl.conf)" || die "$(msg err.wslconf-unchanged)"
 }
 
 # ─── the temp tree the bootstrap hands over ────────────────────────────────────

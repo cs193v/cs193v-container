@@ -197,6 +197,18 @@ systemd is enabled in this WSL environment
 [[ok.wsl-systemd-planned]]
 systemd will be enabled (creating /etc/wsl.conf)
 
+[[err.wsl-systemd-off]]
+This Linux environment has systemd turned off on purpose.
+
+/etc/wsl.conf says:
+    {{LINE}}
+
+Podman cannot manage the container's resources without systemd.
+Nothing in this course sets that line, and Ubuntu does not either,
+so someone chose it. Change it to say systemd=true and run this
+script again -- and if you do not know why it is there, please ask
+course staff before you do.
+
 [[skip.subuid]]
 your account has the ID range podman needs
 
@@ -447,6 +459,31 @@ uidmap installed
 
 [[step.wslconf]]
 Turning on systemd
+
+[[err.wslconf-create]]
+Could not create /etc/wsl.conf.
+
+Nothing should stop this, so something else is going on, and we
+would rather look at it than guess. Please send this to course
+staff along with:
+    ls -l /etc/wsl.conf
+    id
+
+[[err.wslconf-update]]
+Could not add systemd=true to the [boot] section of /etc/wsl.conf.
+
+Nothing should stop this, so something else is going on, and we
+would rather look at it than guess. Please send this to course
+staff along with:
+    ls -l /etc/wsl.conf
+    cat /etc/wsl.conf
+
+[[err.wslconf-unchanged]]
+/etc/wsl.conf was written, and systemd is still not turned on in it.
+
+Please send this to course staff along with:
+    ls -l /etc/wsl.conf
+    cat /etc/wsl.conf
 
 [[ok.wslconf]]
 /etc/wsl.conf updated

@@ -43,6 +43,28 @@ arrange_wslconf() {
         noboot)  printf '[automount]\nenabled=true\n' | sudo -n tee /etc/wsl.conf >/dev/null ;;
         boot)    printf '[boot]\n'                     | sudo -n tee /etc/wsl.conf >/dev/null ;;
         systemd) printf '[boot]\nsystemd=true\n'       | sudo -n tee /etc/wsl.conf >/dev/null ;;
+        # A SECTION HEADER WITH SOMETHING AFTER IT, which the installer's [boot] grep accepts and
+        # its old sed did not. Measured on a real distro: WSL honours this header, so it is a file
+        # that works and an installer that silently did nothing to it (#228).
+        comment) printf '[boot]  # a comment on the section header\n' \
+                     | sudo -n tee /etc/wsl.conf >/dev/null ;;
+        # systemd turned off ON PURPOSE. Ubuntu never writes this line, so it is the student's own
+        # choice, and the installer has to refuse rather than reverse it.
+        off)     printf '[boot]\nsystemd=false\n'      | sudo -n tee /etc/wsl.conf >/dev/null ;;
+        # systemd=true IN A SECTION THAT IS NOT [boot]. WSL ignores it there; a whole-file grep
+        # does not, and skips a machine on which systemd is never enabled.
+        elsewhere) printf '[automount]\nsystemd=true\n[boot]\n' \
+                     | sudo -n tee /etc/wsl.conf >/dev/null ;;
+        # NOT A MACHINE ANYBODY HAS, and named here rather than explained at the call site because
+        # this is where it would mislead. It is the one arrangement whose write SUCCEEDS and keeps
+        # nothing -- tee -a returns 0 against /dev/null -- so it is what lets a test turn the
+        # installer's read-the-file-back check red.
+        devnull) sudo -n ln -sf /dev/null /etc/wsl.conf ;;
+        # NOR IS THIS ONE, and it is here for the arm devnull cannot reach: the write that is
+        # REFUSED rather than silently dropped. `tee -a` exits 1 on a directory ("Is a directory",
+        # measured in this fixture) with sudo working perfectly, which is the only way left to
+        # reach setup_wslconf's `|| die` now that #226 refuses a denied sudo three steps earlier.
+        dir)     sudo -n rm -f /etc/wsl.conf; sudo -n mkdir -p /etc/wsl.conf ;;
         *) printf 'sandbox: unknown SB_WSLCONF=%s\n' "$SB_WSLCONF" >&2; return 1 ;;
     esac
 }

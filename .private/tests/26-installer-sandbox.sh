@@ -25,7 +25,7 @@ SB_TMP="$(new_tmpdir)"
 # Read by sandbox_cleanup in lib/sandbox.sh:1314 (`for c in $SB_CASES`), which the trap below
 # calls -- so the sweep and this list are the same fact, named once.
 # shellcheck disable=SC2034
-SB_CASES="apt wsl-provision cannot-answer subuid-no subuid-yes sudo-absent sudo-deny sudo-password wsl-absent wsl-absent-password wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
+SB_CASES="apt wsl-provision cannot-answer subuid-no subuid-yes sudo-absent sudo-deny sudo-password wsl-absent wsl-absent-password wsl-noboot wsl-boot wsl-systemd wsl-comment wsl-elsewhere wsl-off wsl-devnull wsl-dir podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -619,7 +619,7 @@ assert_eq   "sb-sudo-password:and-the-matching-subgid" "student:200000:65536" \
 assert_says_not "sb-sudo-password:does-not-echo-the-password" "hunter2" "$(sb_transcript "$out")"
 sandbox_reap
 
-# ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
+# ─── /etc/wsl.conf, every state it can be in, with no Windows anywhere ─────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
 # than assumed: podman will bind a file over /proc/version, and the survey then reports
@@ -629,26 +629,38 @@ sandbox_reap
 # THE MOUNT IS NOT WHAT MAKES THIS THE WSL CASE (#152), and reading it that way is how the
 # fixture's platform axis came to mean two different things on two different hosts. EVERY case
 # here gets a /proc/version bound over it; what makes this one wsl is WHICH string. Before that
-# was true the linux arm had no mount and inherited the host's -- so on a WSL host these four
+# was true the linux arm had no mount and inherited the host's -- so on a WSL host these
 # cases were the only ones whose platform was what they said it was, and even they could not
 # prove it, because the host's own string satisfied the check as well as the fixture's.
 #
-# FOUR STATES, NOT THREE, and the fourth is the point: survey looks for `systemd=true`
-# (installer:463) while setup_wslconf looks for `[boot]` (installer:639), so a file that has
-# [boot] and not systemd=true is the only input that reaches the `sed` at installer:640 --
-# and nothing had ever reached it.
+# NINE STATES, AND IT USED TO BE FOUR. The first four ask what the installer DOES; the five added
+# for #228 ask what it does when it CANNOT, which is the half that had never been driven. Each of
+# those five was a real transcript before it was a case: the installer printed "/etc/wsl.conf
+# updated" and handed over the restart instruction with the file untouched, and nothing here
+# noticed, because nothing here had ever arranged a write that fails.
 #
-# --fake-podman, NAMED. These four used to be fast because their fixture baked in
-# lib/podman-fake, which the machine name said nothing about. This case is about /etc/wsl.conf;
-# building a real image would take minutes and prove nothing extra, so the fake is asked for
-# out loud.
-wsl_run() {                           # wsl_run STATE KEYS -> transcript
-    sb_machine platform=wsl fake-podman=yes
-    sandbox_run "wsl-$1" "$2" -e "SB_WSLCONF=$1" -e CS193V_DIR=/home/student/cs193v
+# --fake-podman, NAMED. These used to be fast because their fixture baked in lib/podman-fake,
+# which the machine name said nothing about. This case is about /etc/wsl.conf; building a real
+# image would take minutes and prove nothing extra, so the fake is asked for out loud.
+#
+# NOT WITH sudo=deny, WHICH IS WHERE THIS STARTED AND IS NOW THE WRONG TOOL. #226 gave the
+# installer ask_password, which primes sudo with `sudo -v` between ask_consent and the first
+# privileged step -- so on a machine that denies sudo the run stops there, with err.sudo-refused,
+# and setup_wslconf is never reached. sb-sudo-deny above is that case and it belongs to #226.
+# What is left for a failing write is a file the WRITE cannot take even though sudo works, which
+# is what `dir` is.
+#
+# LABEL AND STATE ARE SEPARATE ARGUMENTS, which they did not need to be while every case was
+# named after its arrangement. It is what lets one arrangement be run twice -- reusing the label
+# would give two runs the same container name and the same `sb-<case>:machine` record.
+wsl_run() {                           # wsl_run LABEL STATE KEYS [MACHINE KEY...] -> transcript
+    local label="$1" state="$2" keys="$3"; shift 3
+    sb_machine platform=wsl fake-podman=yes "$@"
+    sandbox_run "wsl-$label" "$keys" -e "SB_WSLCONF=$state" -e CS193V_DIR=/home/student/cs193v
 }
 
 # The bind mount is what everything below rests on, so it is asserted on its own terms first.
-out="$(wsl_run absent '')"
+out="$(wsl_run absent absent '')"
 assert_survey_platform "sb-wsl:detected-as-wsl-on-linux" wsl "$out"
 
 # No wsl.conf at all: announced with ok(), not need(), so this one needs no permission -- the
@@ -711,7 +723,7 @@ assert_says_not "sb-wsl-pw:does-not-echo-the-password" "hunter2" "$(sb_transcrip
 sandbox_reap
 
 # A wsl.conf with no [boot] section: appended to, and the existing content must survive.
-out="$(wsl_run noboot '2')"
+out="$(wsl_run noboot noboot '2')"
 assert_says "sb-wsl-noboot:asks-permission"  "permission for 1 thing" "$out"
 assert_says "sb-wsl-noboot:says-the-file-exists" "already exists" "$out"
 assert_eq   "sb-wsl-noboot:appends-and-keeps-what-was-there" "[automount]
@@ -720,22 +732,117 @@ enabled=true
 systemd=true" "$(sb_section "$out" WSL-CONF)"
 sandbox_reap
 
-# [boot] present without systemd=true -- the sed arm, which nothing reached before. It must
-# rewrite the section in place rather than appending a SECOND [boot], which is what an append
-# would do here and what WSL would then read inconsistently.
-out="$(wsl_run boot '2')"
-assert_eq "sb-wsl-boot:rewrites-the-section-in-place" "[boot]
+# [boot] present without systemd=true -- the sed arm. It must put systemd=true INTO the section
+# that is already there rather than appending a SECOND [boot], which is what a plain append would
+# do here and what WSL would then read inconsistently.
+out="$(wsl_run boot boot '2')"
+assert_eq "sb-wsl-boot:adds-the-key-to-the-section-that-is-there" "[boot]
 systemd=true" "$(sb_section "$out" WSL-CONF)"
 assert_eq "sb-wsl-boot:did-not-add-a-second-boot-section" "1" \
           "$(sb_section "$out" WSL-CONF | grep -c '^\[boot\]$')"
 sandbox_reap
 
 # Already on: skipped, and nothing touched.
-out="$(wsl_run systemd '')"
+out="$(wsl_run systemd systemd '')"
 assert_says "sb-wsl-systemd:skips"           "systemd is enabled" "$out"
 assert_says_not "sb-wsl-systemd:asks-nothing" "permission for" "$out"
 assert_eq "sb-wsl-systemd:leaves-the-file-alone" "[boot]
 systemd=true" "$(sb_section "$out" WSL-CONF)"
+sandbox_reap
+
+# ─── and the five states in which it goes wrong (#228) ─────────────────────────
+
+# A SECTION HEADER WITH SOMETHING AFTER IT. survey's `[boot]` grep accepts this line, and the sed
+# that used to run here matched only `[boot]` ALONE on a line -- so sed exited 0, changed nothing,
+# and ok() reported the file updated. The header is not the student's mistake: measured on a real
+# WSL distro before this case was written, `[boot]` with a trailing comment plus systemd=true
+# boots PID 1 as systemd, and the same header without it boots init. So the file was right and the
+# sed was wrong, and the student's own line has to come back byte for byte.
+out="$(wsl_run comment comment '2')"
+assert_says "sb-wsl-comment:the-machine-was-arranged" "wslconf=comment" "$(sb_section "$out" ARRANGED)"
+assert_eq "sb-wsl-comment:adds-the-key-under-the-header-it-found" "[boot]  # a comment on the section header
+systemd=true" "$(sb_section "$out" WSL-CONF)"
+assert_eq "sb-wsl-comment:did-not-add-a-second-boot-section" "1" \
+          "$(sb_section "$out" WSL-CONF | grep -c '\[boot\]')"
+sandbox_reap
+
+# systemd=true IN A SECTION THAT IS NOT [boot]. WSL reads settings per section and ignores it
+# there, but the whole-file grep survey used did not -- so this machine was reported as already
+# enabled, skipped, and left with systemd off and nobody told. The reader is scoped to [boot] now,
+# because [boot] is the only section the installer writes.
+out="$(wsl_run elsewhere elsewhere '2')"
+assert_says "sb-wsl-elsewhere:the-machine-was-arranged" "wslconf=elsewhere" "$(sb_section "$out" ARRANGED)"
+assert_says_not "sb-wsl-elsewhere:does-not-call-it-already-enabled" "systemd is enabled" "$out"
+assert_eq "sb-wsl-elsewhere:enables-it-in-the-boot-section" "[automount]
+systemd=true
+[boot]
+systemd=true" "$(sb_section "$out" WSL-CONF)"
+sandbox_reap
+
+# systemd TURNED OFF ON PURPOSE. Nothing in this course writes that line and Ubuntu does not
+# either, so it is the student's own choice -- and consent to ADD a setting is not consent to
+# REVERSE one. Refused in survey, before ask_consent has offered anything, the way an unsupported
+# distro is. The keys are fed anyway and never read: before the refusal existed this state DID
+# reach the menu, and a case that hangs on its own ceiling is a slow red for the wrong reason.
+out="$(wsl_run off off '2')"
+assert_says "sb-wsl-off:the-machine-was-arranged" "wslconf=off" "$(sb_section "$out" ARRANGED)"
+assert_says "sb-wsl-off:says-it-was-deliberate"  "turned off on purpose" "$out"
+# THE BOX'S OWN WORDS AROUND IT, not the line on its own. This case DUMPS /etc/wsl.conf as part
+# of its audit, so `systemd=false` by itself was in the transcript either way -- it stayed green
+# with the refusal deleted, which is a redundant assertion masquerading as the load-bearing one.
+# `assert_says` flattens whitespace, so the catalogue's indent cannot carry the distinction and
+# the neighbouring prose has to.
+assert_says "sb-wsl-off:names-the-line-it-found" "/etc/wsl.conf says: systemd=false" "$out"
+assert_says "sb-wsl-off:exits-nonzero"           "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-wsl-off:does-not-claim-success" "Setup finished" "$out"
+# IT NEVER ASKED FOR ANYTHING, which is the point of refusing in survey: a consent screen here
+# would be asking permission to undo something the student had already decided.
+assert_says_not "sb-wsl-off:asked-no-permission" "permission for" "$out"
+assert_eq "sb-wsl-off:left-the-file-alone" "[boot]
+systemd=false" "$(sb_section "$out" WSL-CONF)"
+sandbox_reap
+
+# THE WRITE THAT SUCCEEDS AND KEEPS NOTHING. /etc/wsl.conf symlinked to /dev/null is not a machine
+# anybody has -- it is the only arrangement in which `sudo tee -a` returns 0 having stored
+# nothing, so it is what makes the installer's read-the-file-back check something a test can turn
+# red. Every other failure here is caught by an exit status; this one is caught only by reading
+# the file, which is what ok() claims to have updated.
+out="$(wsl_run devnull devnull '')"
+assert_says "sb-wsl-devnull:the-machine-was-arranged" "wslconf=devnull" "$(sb_section "$out" ARRANGED)"
+assert_says "sb-wsl-devnull:it-got-as-far-as-trying" "Turning on systemd" "$out"
+assert_says "sb-wsl-devnull:says-the-setting-is-not-there" "systemd is still not turned on" "$out"
+assert_says "sb-wsl-devnull:exits-nonzero" "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-wsl-devnull:does-not-report-the-update" "/etc/wsl.conf updated" "$out"
+assert_says_not "sb-wsl-devnull:does-not-claim-success" "Setup finished" "$out"
+sandbox_reap
+
+# AND THE WRITE THAT IS REFUSED WITH sudo WORKING. /etc/wsl.conf as a DIRECTORY is the arrangement
+# left after #226: `sudo -v` succeeds, ask_password is satisfied, the run reaches setup_wslconf --
+# and then `tee -a` cannot write a directory, so the tee arm's `|| die` is what reports it.
+# Measured in this fixture: tee exits 1 with "Is a directory", and `[ -f ]` is false for one,
+# which is what routes this to the tee arm rather than the sed one.
+#
+# THE RESTART INSTRUCTION IS THE ASSERTION THAT MATTERS. #228's harm was not the unchecked exit
+# status by itself; it was being told to restart for a setting that was never written, and then
+# meeting podman's failure later with no thread leading back to here.
+#
+# ITS SIBLING, THE SED ARM'S `|| die`, IS NOT DRIVEN, and rather than leave that silent: it needs
+# a /etc/wsl.conf that HAS a [boot] stanza and that root cannot rewrite, and this tier has no such
+# file to offer. `chattr +i` is the obvious one and was measured in this fixture -- "Operation not
+# permitted", the overlay having no CAP_LINUX_IMMUTABLE -- and sudo=deny stops the run at
+# ask_password now, three steps earlier. What still covers that arm is the read-back below it,
+# which the devnull case drives; the `|| die` only chooses better words for it.
+out="$(wsl_run dir dir '')"
+assert_says "sb-wsl-dir:the-machine-was-arranged" "wslconf=dir" "$(sb_section "$out" ARRANGED)"
+# THE GATE: this case is worthless if sudo refused, because then the run stopped at #226's
+# ask_password and every assertion below is about that refusal instead of about the write.
+assert_eq "sb-wsl-dir:sudo-was-never-the-problem" "passwordless" "$(sb_section "$out" SUDO)"
+assert_says "sb-wsl-dir:it-got-as-far-as-trying" "Turning on systemd" "$out"
+assert_says "sb-wsl-dir:says-it-could-not-create-it" "Could not create /etc/wsl.conf" "$out"
+assert_says "sb-wsl-dir:exits-nonzero" "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-wsl-dir:does-not-report-the-update" "/etc/wsl.conf updated" "$out"
+assert_says_not "sb-wsl-dir:does-not-hand-over-the-restart" "wsl --terminate" "$out"
+assert_says_not "sb-wsl-dir:does-not-claim-success" "Setup finished" "$out"
 sandbox_reap
 
 # ─── a podman that is really too old ───────────────────────────────────────────
