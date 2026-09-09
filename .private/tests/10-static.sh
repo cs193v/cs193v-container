@@ -1701,16 +1701,16 @@ assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
 # announces /opt/podman/bin only in /etc/paths.d, and nothing reads that but path_helper,
 # from /etc/zprofile, at login. These lints pin the four properties of that repair that a
 # behavioural test cannot see, and the two that it would only see on a Mac.
-probe_body="$(fn_body ensure_podman_path $REPO/cs193v)"
+probe_body="$(fn_body ensure_podman_path $PRIVATE/files/cs193v-ui.sh)"
 # THE GUARD FOR EVERYTHING BELOW. fn_body anchors on /^name() {/, so a rename or a reflow
 # yields an EMPTY body -- and every assert_contains against an empty string fails while every
 # assert_not_contains passes, which is half a suite going quietly vacuous.
 assert_ne "probe:the-probe-is-extractable" "" "$probe_body"
 
-assert_eq "probe:launcher-declares-the-package-id-once" "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' $REPO/cs193v)"
-assert_eq "probe:launcher-declares-the-marker-once" "1" \
-          "$(grep -c '^PODMAN_PATH_ADDED=' $REPO/cs193v)"
+assert_eq "probe:ui-declares-the-package-id-once" "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/files/cs193v-ui.sh)"
+assert_eq "probe:ui-declares-the-marker-once" "1" \
+          "$(grep -c '^PODMAN_PATH_ADDED=' $PRIVATE/files/cs193v-ui.sh)"
 
 # A NO-OP ON A HEALTHY MACHINE, and this is the line that makes it one: without it every
 # launch on every platform pays three forks and a pkgutil to rediscover what PATH already
@@ -1752,6 +1752,10 @@ assert_eq "probe:preflight-repairs-before-it-refuses" "yes" \
 # know to repair first. Comments blanked, so the reasoning above -- which names the function
 # repeatedly -- does not count as a call.
 probe_code="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
+# AND THE DECIDING SITES NOW SPAN TWO FILES, since ensure_podman_path moved into the shared
+# presentation layer. The invariant is the TOTAL, not either file's share: a fifth place that
+# decides podman is absent is issue #121 again wherever it is written, so the count covers both.
+probe_code_all="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v $PRIVATE/files/cs193v-ui.sh)"
 assert_eq "probe:exactly-two-callers" "2" \
           "$(printf '%s\n' "$probe_code" | grep -c '^ *ensure_podman_path$')"
 # And exactly four places TEST for podman: the probe's own guard, preflight, and doctor's two
@@ -1763,7 +1767,7 @@ assert_eq "probe:exactly-two-callers" "2" \
 # are values rather than decisions. A bare count of `command -v podman` conflates the two and
 # would have to be bumped every time the report gains a line.
 assert_eq "probe:podman-is-tested-in-exactly-four-places" "4" \
-          "$(printf '%s\n' "$probe_code" | grep -c 'command -v podman >/dev/null')"
+          "$(printf '%s\n' "$probe_code_all" | grep -c 'command -v podman >/dev/null')"
 
 # NOT AT DISPATCH, and not in any --dev- verb. The repair exports PATH, and a pre-dispatch
 # call would export it into every child of every verb including the long-lived

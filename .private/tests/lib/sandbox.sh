@@ -811,12 +811,12 @@ sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its t
     [ -f "$SB_WORK/installer-skew.sh" ] && return 0
     mkdir -p "$SB_TMP/pkg-skew"
     cp -a "$SB_TMP/pkg/cs193v-main" "$SB_TMP/pkg-skew/cs193v-main" || return 1
-    edit_sub "$SB_TMP/pkg-skew/cs193v-main/cs193v" '^MIN_PODMAN_LINUX=.*' 'MIN_PODMAN_LINUX="5.7.0"'
+    edit_sub "$SB_TMP/pkg-skew/cs193v-main/.private/files/cs193v-ui.sh" '^MIN_PODMAN_LINUX=.*' 'MIN_PODMAN_LINUX="5.7.0"'
     # ASSERTED, NOT TRUSTED. An edit_sub whose ERE matches nothing is a silent no-op, and the two
     # copies would then AGREE -- so the case would assert a refusal that never came and read as the
     # launcher having stopped checking versions. Measured the hard way once already: the constant
     # was renamed from MIN_PODMAN when the floors split per platform.
-    grep -q '^MIN_PODMAN_LINUX="5.7.0"' "$SB_TMP/pkg-skew/cs193v-main/cs193v" || {
+    grep -q '^MIN_PODMAN_LINUX="5.7.0"' "$SB_TMP/pkg-skew/cs193v-main/.private/files/cs193v-ui.sh" || {
         printf 'sb_work_skew: the launcher floor was not raised -- was the constant renamed?\n' >&2
         return 1; }
     ( cd "$SB_TMP/pkg-skew" && tar czf "$SB_WORK/course-skew.tar.gz" cs193v-main ) || return 1
