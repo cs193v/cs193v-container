@@ -1241,7 +1241,13 @@ assert_ok "windows:names-the-same-distro-as-the-sh"  \
 # .private/install-cs193v-windows.ps1 passed it.
 assert_no_file "windows:is-cmd-not-ps1" "$PRIVATE/install-cs193v-windows.ps1"
 
-. "$(dirname -- "$0")/lib/cmdlint.sh"
+# $TESTS_DIR, not `dirname "$0"`, and for the reason the assert_no_file above gives: this file
+# does `cd "$REPO"` at the top. The two sources at the head of the file run BEFORE that cd and
+# so a relative $0 resolves; this one runs after it, and resolved to $REPO/lib/cmdlint.sh --
+# which does not exist. Via run-tests.sh $0 is absolute and it worked anyway, so the breakage
+# only showed when the suite was run by hand from tests/, where it cost 19 windows:* assertions
+# an `exit 127` apiece and read as the .cmd being broken rather than the source line.
+. "$TESTS_DIR/lib/cmdlint.sh"
 
 # CRLF is not a tidiness preference. cmd.exe reads a batch file in 512-byte chunks and its label
 # scanner assumes a two-byte \r\n terminator, so under LF-only endings `goto`/`call :label` fails
