@@ -184,10 +184,11 @@ SG_RUN="$SG_RUN $NAME setup-git"
 # shellcheck disable=SC2034
 SG_TIMEOUT=600
 
-# Same clean first run 35-setup-git-shim.sh uses. The trailing arrows pick "I'm stuck" if a probe
-# fails, which is what produces the staff box and the exact output — the thing worth reading when
-# the point of the run is to find out what GitHub said.
-KEYS="$TEST_ID\n|\n|CS193V Setup Test\n|\n|\n|\n|$CS193V_GH_TEST_TOKEN\n|\n|\033[B|\033[B|\n"
+# Same clean first run 35-setup-git-shim.sh uses, named as flows rather than spelled out as
+# keystrokes. `stuck-if-a-probe-failed` is marked `optional` in the fixture, and that is the whole
+# difference this tier needs: whether a probe fails is the FINDING here rather than the fixture,
+# so those last three keys may legitimately go unreached and a run that never draws that menu is
+# not a failure. Spelled as keystrokes they were three keys nobody consumed and nothing recorded.
 
 # CS193V_GH_EXPECT_ROW IS CHECKED AGAINST THE FIVE REAL LABELS FIRST, because a typo in it reads
 # exactly like the finding this suite exists to produce. Measured the hard way: `git issues` instead
@@ -201,8 +202,26 @@ case "${EXPECT_ROW:-none}" in
         exit 1 ;;
 esac
 
-out="$(sg_tty "$KEYS")"
+# THE FIRST STEP HAS TO ABSORB A COLD `podman exec`, which on this tier means pulling the image
+# layers into the container's page cache before setup-git prints anything. The shim tier's slowest
+# screen is about 1.6s; this one is not comparable, so the per-step ceiling is raised for the whole
+# run rather than the ceiling being guessed at per step.
+CS193V_DRIVE_STEP_SECS="${CS193V_DRIVE_STEP_SECS:-90}"
+export CS193V_DRIVE_STEP_SECS
+sg_run github happy stuck-if-a-probe-failed \
+       "ID=$TEST_ID" "NAME=CS193V Setup Test" "TOKEN=$CS193V_GH_TEST_TOKEN"
+out="$SG_OUT"
 plain="$(sg_plain "$out")"
+
+# THE ASSERTION THIS TIER HAS NEVER HAD, and the one that matters most here: everywhere else the
+# token is a fixture, but $CS193V_GH_TEST_TOKEN is a REAL fine-grained credential, and `record`
+# below writes the flattened transcript to $CS193V_RESULTS. Before #206 the only thing keeping it
+# off that file was a 0.3s clock beating read_secret's `stty -echo` by about 258ms — measured, and
+# lost outright when the machine was busy. sg_unwrap and not sg_plain, for the reason
+# lib/setup-git-shim.sh:457-468 records: box() wraps at 69 columns, a fine-grained token is 93
+# characters, and _flatten would put a joining space INSIDE the leaked secret.
+assert_not_contains "github:the-token-is-not-in-the-transcript" \
+                    "$CS193V_GH_TEST_TOKEN" "$(sg_unwrap "$out")"
 
 if [ -n "$EXPECT_ROW" ]; then
     # A row that failed, and the ROWS BEFORE IT that did not. Both halves matter: a token missing
