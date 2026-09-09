@@ -224,6 +224,29 @@ assert_eq "bootstrap:sources-nothing" "" \
 assert_eq "bootstrap:evals-nothing" "" \
           "$(printf '%s\n' "$boot_code" | grep -nE '(^|[^[:alnum:]_])eval[[:space:]]' || true)"
 
+# ─── the temp tree's name is a contract between the two files  (#221) ──────────
+# ONE FILE MAKES THE DIRECTORY AND THE OTHER RUNS `rm -rf` ON IT. The bootstrap creates it with
+# `mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX"`; course-install.sh will only remove a path
+# whose basename matches `cs193v-install.??????`, because a path that arrives as an argument to a
+# script that also runs sudo has to earn an `rm -rf`. Six X's, six question marks.
+#
+# WHICH MEANS A CHANGE TO THE TEMPLATE FAILS SILENTLY AND IN THE WORSE DIRECTION: the guard stops
+# matching, boot_cleanup declines, and every install leaks a full copy of the repo into /tmp with
+# no error anywhere. Nothing about that is visible in either file on its own, so it is asserted
+# here rather than trusted -- and asserted as the two halves AGREEING, not as either literal, so
+# renaming the prefix on purpose means changing both and this stays true.
+boot_tpl="$(sed -n 's/.*mktemp -d "\${TMPDIR:-\/tmp}\/\([^"]*\)".*/\1/p' \
+                 "$PRIVATE/install-cs193v.sh")"
+assert_eq "tmptree:the-bootstrap-declares-one-template" 1 \
+          "$(printf '%s\n' "$boot_tpl" | grep -c .)"
+boot_guard="$(sed -n 's/.*case "\${BOOT_TMP##\*\/}" in \([^)]*\)).*/\1/p' \
+                   "$PRIVATE/course-install.sh")"
+assert_eq "tmptree:the-installer-declares-one-guard" 1 \
+          "$(printf '%s\n' "$boot_guard" | grep -c .)"
+# The template's X's become the guard's ?'s; everything before them must be identical.
+assert_eq "tmptree:the-guard-matches-the-template" \
+          "$(printf '%s' "$boot_tpl"   | tr 'X' '?')" "$boot_guard"
+
 # ─── the tunnel may only ever bind loopback ────────────────────────────────────
 # EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
 # security property the whole design rests on: the host side of the tunnel is loopback-only

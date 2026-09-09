@@ -409,7 +409,10 @@ skip_linux_arm() {                    # skip_linux_arm NAME...
 if linux_arm; then
 shim_new
 shim_fake_id 1000 nosuchuser-cs193v
-run_consent() { installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent"; }
+rm -rf "$TMP/boot-consent"; mkdir -p "$TMP/boot-consent"
+run_consent() {
+    installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent" TMPDIR="$TMP/boot-consent"
+}
 out="$(run_consent)"
 assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
 assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
@@ -421,12 +424,22 @@ assert_no_file "consent:declining-creates-no-directory" "$TMP/consent"
 # It must say WHAT it wants permission for, and why, before asking.
 assert_says "consent:names-what-it-wants" "subuid range" "$out"
 assert_says "consent:explains-why"        "needs your password" "$out"
-# And it must never reach the download when consent was refused.
-assert_says_not "consent:declining-skips-the-download" "Getting the course files" "$out"
+# AND IT MUST LEAVE NOTHING OF THE COURSE ON A MACHINE WHOSE OWNER SAID NO. That used to be
+# asserted as "it never reaches the download", which the #221 split inverts: the bootstrap now
+# fetches the tree before this script exists to ask anything, so the transcript DOES say
+# "Getting the course files" on a run that changes nothing. The old assertion is retired rather
+# than reworded, and it is worth knowing it would not have caught the leak either way -- it sat
+# inside this linux_arm guard, so on a Mac it never ran at all.
+#
+# The claim that replaces it is stronger, because it looks at the disk rather than the words:
+# no student tree (above) and no temp tree (here). 26-installer-sandbox.sh asserts the same pair
+# on a real Linux machine through ===BOOT-TMP===.
+assert_eq "consent:declining-leaves-no-temp-tree" "" \
+          "$(ls -d "$TMP/boot-consent"/cs193v-install.* 2>/dev/null)"
 else
 skip_linux_arm "consent:non-tty-declines" "consent:offers-a-way-forward" "consent:non-tty-exits-0" \
                "consent:declining-creates-no-directory" "consent:names-what-it-wants" \
-               "consent:explains-why" "consent:declining-skips-the-download"
+               "consent:explains-why" "consent:declining-leaves-no-temp-tree"
 fi
 
 # With podman already present and a subuid range already there, nothing needs consent at
@@ -816,10 +829,32 @@ else pass "colour:NO_COLOR-suppresses-it"; fi
 assert_says "colour:NO_COLOR-run-got-that-far" "Looking at your computer" "$raw"
 
 DEST="$TMP/dest"
+# A TMPDIR OF ITS OWN, so "did the bootstrap clean up after itself" is answerable (#221). The
+# bootstrap unpacks the tree into `mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX"`, and the
+# name is random -- so the only way to ask about it is to own the directory it goes in. The
+# real /tmp cannot answer: any other run's leftovers would read as this run's leak.
+BOOTTMP="$TMP/boot"; mkdir -p "$BOOTTMP"
+boot_leftovers() { ls -d "$BOOTTMP"/cs193v-install.* 2>/dev/null; }
+# AND TMPDIR IS REALLY THE ONE IT USES, proved through the refusal rather than by finding the
+# directory afterwards. That distinction is the whole reason this assertion exists: a successful
+# run is SUPPOSED to leave nothing behind, so "I looked and found no tree" is what a leak-free
+# run and a run that unpacked somewhere else entirely both look like -- and the second would make
+# the removal check below vacuously green. Pointing TMPDIR at something mktemp -d cannot create
+# makes the bootstrap say so, which only a bootstrap that consulted it can do.
 shim_new
-run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST"; }
+assert_says "install:the-bootstrap-unpacks-under-TMPDIR" "temporary directory" \
+            "$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nodest" \
+                              TMPDIR="$TMP/no-such-tmpdir")"
+assert_ok "install:and-that-run-created-no-course-directory" test ! -d "$TMP/nodest"
+
+shim_new
+run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST" TMPDIR="$BOOTTMP"; }
 out1="$(run_installer)"
 assert_says "install:first-run-finishes"     "Setup finished"  "$out1"
+# AND THE TREE IS GONE. `exec` takes the bootstrap's EXIT trap with it, so from the hand-over on
+# the only thing that can remove the unpacked tree is course-install.sh itself. A leak here is a
+# full copy of the repo left in /tmp by every install anyone ever runs.
+assert_eq "install:the-bootstrap-temp-tree-is-removed" "" "$(boot_leftovers)"
 assert_says "install:first-run-fetched"      "course files"    "$out1"
 assert_file "install:launcher-installed"     "$DEST/cs193v"
 assert_exec "install:launcher-executable"    "$DEST/cs193v"
@@ -1122,14 +1157,20 @@ assert_no_file "intel-mac:changes-nothing" "$TMP/intel"
 # Prints the installer's output; leaves its exit status in $TMP/rc, because the caller
 # reads the output through a command substitution and a variable set in that subshell
 # would never make it back.
+# A TMPDIR OF ITS OWN, for the same reason the idempotency block above has one: these cases
+# fail on both sides of the hand-over, and which side cleaned up is a question worth being able
+# to ask. The bootstrap's own EXIT trap owns the tree until `exec`; course-install.sh owns it
+# after. Emptied per case so one case's leftovers cannot be read as the next one's.
 run_with_tarball() {                  # run_with_tarball FILE DEST
     cp "$TMP/installer.sh" "$TMP/installer-case.sh"
     edit_sub "$TMP/installer-case.sh" '^TARBALL=.*' "TARBALL=\"file://$1\""
+    rm -rf "$TMP/boot-fail"; mkdir -p "$TMP/boot-fail"
     shim_new
-    installer_host "$TMP/installer-case.sh" CS193V_DIR="$2"
+    installer_host "$TMP/installer-case.sh" CS193V_DIR="$2" TMPDIR="$TMP/boot-fail"
     printf '%s' "$?" > "$TMP/rc"
 }
 last_rc() { cat "$TMP/rc"; }
+fail_leftovers() { ls -d "$TMP/boot-fail"/cs193v-install.* 2>/dev/null; }
 
 # 1. A truncated gzip stream. GNU tar exits nonzero here of its own accord; pipefail makes
 #    that independent of which tar is installed.
@@ -1138,6 +1179,9 @@ out="$(run_with_tarball "$TMP/truncated.tar.gz" "$TMP/broken-trunc")"
 assert_says_not "truncated:does-not-claim-success"   "Setup finished" "$out"
 assert_eq       "truncated:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "truncated:says-it-is-safe-to-retry" "safe to run this script again" "$out"
+# THE BOOTSTRAP'S OWN TRAP, on the one side of the hand-over where it still runs. This case dies
+# in tar, before the `exec`, so `trap ... EXIT` is live and the unpacked tree is its to remove.
+assert_eq "truncated:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
 # 2. A URL that is not there at all — what a wrong REPO_OWNER produces.
 out="$(run_with_tarball "$TMP/no-such-file.tar.gz" "$TMP/broken-404")"
@@ -1183,6 +1227,11 @@ assert_says_not "half-tree:does-not-claim-success"   "Setup finished" "$out"
 assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "half-tree:names-the-missing-file"   "cs193v is missing" "$out"
 assert_says     "half-tree:blames-the-unpacking"     "unpacking stopped partway" "$out"
+# AND THE OTHER SIDE OF THE HAND-OVER. `exec` replaced the bootstrap and took its EXIT trap with
+# it, so here the tree can only be removed by course-install.sh -- on a path that refuses, not
+# just on the one that finishes. Paired with truncated:leaves-no-temp-tree-behind above so the
+# two owners are asserted separately; one assertion could be satisfied by either.
+assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
 # ─── the sentinel the Windows installer checks for ─────────────────────────────
 # Stage one downloads install-cs193v.sh over HTTPS and greps it for this token BEFORE running

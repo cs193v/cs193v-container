@@ -4,16 +4,42 @@
 #   /work   the read-only mount this harness adds, not the installer
 #   C /etc  podman bind-mounts hosts/hostname/resolv.conf into every container, which moves the
 #           directory's mtime. Present in every case here.
+#   C /tmp  the bootstrap's scratch directory, created and removed. See below -- this line is
+#           the one interesting thing in this file.
 #
-# NOTHING ELSE AT ALL -- and compare that with expected-system-paths.podman-old and
-# expected-system-paths.debian, which both carry /tmp runtime directories and (on podman 5.x) a
-# ~/.config, all created by the single `podman --version` their survey runs. This refusal never
-# reaches that probe: distro_family() returns `unsupported`, survey says so at "Looking at your
-# computer" and exits, so podman is never executed and no runtime state is created.
+# ─── the line that was added, and the principle it does not break  (#221) ──────
 #
-# THAT ORDERING IS THE POINT, not a coincidence. A machine this script cannot support should be
-# told before it is asked for permission and before anything is inspected on its behalf, which is
-# the same order say_intel_mac refuses an Intel Mac in. If a future change moved the refusal later
-# -- into install_podman, say -- this file would grow podman's runtime directories and say so.
+# THIS FILE USED TO SAY "NOTHING ELSE AT ALL", and the sentence was load-bearing rather than
+# decorative: the ordering was the point, because a machine this script cannot support should be
+# told before it is asked for permission and before anything is inspected on its behalf -- the
+# same order say_intel_mac refuses an Intel Mac in.
+#
+# The split changed the order. install-cs193v.sh has to download the course files before there is
+# any course code to run, so `mktemp -d /tmp/cs193v-install.XXXXXX` and an unpack now happen
+# before survey has looked at anything. That is a real reversal and worth being explicit about
+# rather than quietly relisting.
+#
+# WHAT SURVIVES IS THE PROPERTY THAT WAS ALWAYS MEANT: nothing is done TO this machine before it
+# is told it is unsupported. A scratch directory under /tmp that is created, read and removed
+# within one run is not a change to someone's computer -- no package, no /etc file, no course
+# tree, and nothing left behind. The rest of this file is still the assertion that says so, and
+# it is still the shortest set here.
+#
+# MEASURED, so the single line is not an assumption: creating and removing one child of /tmp in
+# a container yields exactly `C /tmp` and nothing else -- the directory's mtime moved, and the
+# child is not in the diff because it no longer exists. If the removal ever regressed, this file
+# would grow the whole unpacked tree under a random name, which is how the leak was found; and
+# course-install.sh's boot_cleanup, 25-installer.sh's install:the-bootstrap-temp-tree-is-removed
+# and 26-installer-sandbox.sh's ===BOOT-TMP=== checks are the three that name it directly.
+#
+# STILL NOTABLY ABSENT, and this is the comparison that used to be drawn against a file that does
+# not exist (expected-system-paths.debian, cited here for a while and never written): the /tmp
+# runtime directories a real podman creates. expected-system-paths.podman-old carries
+# /tmp/containers-user-1000 and /tmp/podman-run-1000, all from the single `podman --version` its
+# survey runs. This refusal never reaches that probe -- distro_family() returns `unsupported`,
+# survey says so at "Looking at your computer" and exits -- so podman is never executed. If a
+# future change moved the refusal later, into install_podman say, this file would grow those
+# directories and say so.
 A /work
 C /etc
+C /tmp

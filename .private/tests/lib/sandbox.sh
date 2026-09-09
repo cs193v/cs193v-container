@@ -779,6 +779,17 @@ if command -v ssh >/dev/null 2>&1; then echo present; else echo absent; fi
 printf '===COURSE-DIR===\n'
 d="${CS193V_DIR:-$HOME/cs193v}"
 if [ -x "$d/cs193v" ]; then echo launcher-is-executable; elif [ -d "$d" ]; then echo dir-only; else echo absent; fi
+# WHAT THE BOOTSTRAP LEFT IN /tmp, asked by name (#221). Since the split the download happens
+# FIRST, into `mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX"`, and course-install.sh removes
+# it on the way out -- the bootstrap cannot, because `exec` discards its traps. So a leak here is
+# a full copy of the repository left behind by every install, and on a refusal it is a full copy
+# left behind by a run that told the student nothing was changed.
+#
+# ASKED DIRECTLY RATHER THAN LEFT TO THE SYSTEM DIFF. The fixture audits below would catch it,
+# but only as a wall of unexpected paths under a random name -- which is how it was found. This
+# names the thing, so the next reader gets `present` instead of forty diff lines.
+printf '===BOOT-TMP===\n'
+if ls -d /tmp/cs193v-install.* >/dev/null 2>&1; then echo present; else echo absent; fi
 # NO `podman image exists` HERE, deliberately, and it was here for one run: any podman command
 # that touches the runtime creates a store, an events log and lock files, so asking put a dozen
 # paths into podman-old's exact-set audit as changes the installer had supposedly made. The one
@@ -1254,7 +1265,15 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
 
 # The line numbers a container run reported, appended to this run's trace directory so
 # 95-installer-coverage.sh can union them with the host cases'. Rewritten into the same
-# "+NNN text" shape the host traces use, so the gate has one parser rather than two.
+# "+FILE:NNN text" shape the host traces use, so the gate has one parser rather than two.
+#
+# AND THE FILENAME IS PUT BACK ON, which is the whole reason this needs saying (#221). The
+# transcript carries BARE NUMBERS: run.sh and nest-run.sh each anchor their own sed on
+# course-install.sh and print what is left as a space-separated list, so by the time the
+# numbers reach this side the name they belonged to is gone. Since the split there are two
+# files in one trace and the gate anchors on the basename to tell them apart -- so a bare
+# number matches nothing, and the whole container half read as unscored while plainly being
+# there. It is course-install.sh by construction: the guest-side seds admit no other file.
 sb_collect_trace() {
     [ -n "${CS193V_RUN_DIR:-}" ] || return 0
     mkdir -p "$CS193V_RUN_DIR/trace" 2>/dev/null || return 0
@@ -1264,7 +1283,7 @@ sb_collect_trace() {
     # gate then reported the producer silent, which was true and completely misleading.
     do_tr -d '\r' \
         | sed -n '/^===TRACE===$/,/^===/p' | sed '1d;$d' | do_tr ' ' '\n' | grep -E '^[0-9]+$' \
-        | sed 's/^/+/;s/$/ traced-in-container/' \
+        | sed 's|^|+course-install.sh:|;s/$/ traced-in-container/' \
         >> "$CS193V_RUN_DIR/trace/${CS193V_SUITE:-standalone}.$$" || true
 }
 

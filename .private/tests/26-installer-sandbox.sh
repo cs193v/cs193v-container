@@ -229,31 +229,59 @@ sandbox_reap
 # THE PLATFORM DIFFERENCE NO TEST COULD SEE, and the fixtures are why: both of them installed
 # curl, so the machine every case ran on was not the machine a student has. curl is NOT in the
 # Ubuntu desktop image -- the 26.04 and 24.04 manifests carry wget and libcurl4t64 and no curl
-# -- while the WSL image and macOS both ship it. So fetch_files' unguarded curl (installer:736)
-# failed for a whole platform, and said "This is usually a network problem" about a machine that
-# simply had no curl, after consent, apt and usermod had already run.
+# -- while the WSL image and macOS both ship it. So the old fetch_files' unguarded curl failed
+# for a whole platform, and said "This is usually a network problem" about a machine that simply
+# had no curl, after consent, apt and usermod had already run.
 #
-# ONE CONSENT ITEM, which is the shape worth a case of its own: podman and ssh are present, so
-# curl is the ONLY reason apt runs at all. The both-missing shape is the apt case above.
+# ─── WHAT THIS CASE MEASURES NOW, AND WHY IT CHANGED  (#221) ───────────────────
+#
+# IT USED TO BE A SUCCESSFUL INSTALL: apt was asked for curl, installed it, and the download
+# then worked. That cannot happen any anymore and the reason is the whole design. The download
+# is now the FIRST thing, because there is no course code to run until the tree is here -- so on
+# a machine with no downloader the bootstrap refuses before survey, before consent, and long
+# before apt could install anything. Asking apt for curl is not available to a script that has
+# not been downloaded yet.
+#
+# SO IT MEASURES THE REFUSAL, which is the behaviour a student on stock Ubuntu Desktop gets
+# today and had no coverage at all: this is the only case anywhere that reaches
+# find_download_tool's failure arm on a real machine. Five assertions inverted with the design
+# and are gone rather than reworded -- asks-for-one-thing, names-curl,
+# says-what-it-is-installing, installed-curl and the-course-files-arrived all asserted that apt
+# ran and the tree arrived, and both are now false by construction.
+#
+# AND IT BECOMES A SUCCESSFUL INSTALL AGAIN, THROUGH wget, when the wget arm lands: the fixture
+# already has no wget either, which is what makes the refusal reachable, so that change is a
+# fixture change and a rewrite of this block together. Until then a stock Ubuntu Desktop student
+# is told to install curl or wget, which is a sentence rather than a mystery but is not the
+# outcome anyone wants.
+#
+# ONE CONSENT ITEM WAS THE OLD SHAPE, and the note is kept because it explains the arrangement:
+# podman and ssh are present, so curl was the ONLY reason apt ran at all. The both-missing shape
+# is the apt case above.
 sb_machine no-prereqs=curl
 out="$(sandbox_run curl '2' -e CS193V_DIR=/home/student/cs193v)"
 assert_says "sb-curl:the-machine-was-really-arranged" "prereqs=curl" "$(sb_section "$out" ARRANGED)"
-assert_says "sb-curl:asks-for-one-thing"         "permission for 1 thing" "$out"
-assert_says "sb-curl:names-curl"                 "Install curl" "$out"
-assert_says "sb-curl:says-what-it-is-installing" "Installing curl" "$out"
-added="$(sb_section "$out" DPKG-ADDED)"
-assert_says "sb-curl:installed-curl" "curl" "$added"
-# THE NEGATIVE IS HALF THE CLAIM. Without it this case could be passing on a machine that
-# lacked podman too, i.e. a second copy of the apt case wearing a different name.
-assert_says_not "sb-curl:did-not-reinstall-podman" "podman" "$added"
-# THE EFFECT, and the one assertion here that could not pass before: the tarball is fetched
-# with the curl this run installed. `dir-only` is the failure -- fetch_files creates $DIR
-# (installer:719) before curl runs, so the directory exists either way and only the launcher
-# inside it distinguishes a download that happened from one that died.
-assert_eq "sb-curl:the-course-files-arrived" "launcher-is-executable" "$(sb_section "$out" COURSE-DIR)"
-# WHERE THIS RUN STOPS, recorded not asserted, for the apt case's reason: the download works
-# now, so build_image hands off to the launcher, which wants the network this case has not got.
-record "sb-curl:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+# ANCHORED ON THE SENTENCE, not on the word "curl". A bare "curl" needle passes on this case's
+# own arrangement echo -- ===ARRANGED=== says `prereqs=curl` -- so it would be green with no
+# refusal in the transcript at all. Checked, and it was, for one commit.
+assert_says "sb-curl:refuses-for-want-of-a-downloader" "needs curl to download" "$out"
+# NAMES THE PACKAGE MANAGER COMMANDS RATHER THAN DETECTING ONE, deliberately: distro_family and
+# distro_packages live in course-install.sh, which has not been downloaded yet, and the bootstrap
+# must not grow a fourth way of answering "what distro is this". So it prints both and lets the
+# student pick -- and ca-certificates is named beside curl, because without it curl exits 60 and
+# an SSL failure reads as a network problem just like a missing curl did.
+assert_says "sb-curl:names-the-apt-command"       "apt install curl ca-certificates" "$out"
+assert_says "sb-curl:names-the-dnf-command"       "dnf install curl" "$out"
+assert_says "sb-curl:exits-nonzero"               "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-curl:does-not-claim-success"  "Setup finished" "$out"
+# IT REFUSES BEFORE IT ASKS FOR ANYTHING, which is the property the ordering is for: nothing is
+# installed and no permission is sought, because there is nothing to ask on behalf of yet.
+assert_eq "sb-curl:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
+assert_says_not "sb-curl:asks-no-permission" "needs your permission" "$out"
+# AND NO COURSE TREE. `dir-only` would be the interesting failure -- it would mean something got
+# far enough to create $DIR before giving up.
+assert_eq "sb-curl:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
+assert_eq "sb-curl:left-no-temp-tree" "absent" "$(sb_section "$out" BOOT-TMP)"
 sandbox_reap
 
 # ─── podman installed, its setuid helpers not ──────────────────────────────────
@@ -329,9 +357,18 @@ assert_says "sb-consent:names-what-it-wants" "subuid range" "$out"
 assert_says "sb-consent:explains-why"        "needs your password" "$out"
 assert_says "sb-consent:declining-says-nothing-changed" "Nothing was changed" "$out"
 assert_says "sb-consent:offers-a-way-forward" "contact course staff" "$out"
-# A refusal must not reach the download, and must leave no course tree behind.
-assert_says_not "sb-consent:declining-skips-the-download" "Getting the course files" "$out"
+# A refusal must leave no course files on the machine. IT NO LONGER SKIPS THE DOWNLOAD, and the
+# assertion that used to say so is retired rather than reworded, because it asserted the opposite
+# of the design (#221): the bootstrap fetches the tree BEFORE this script exists to ask anything,
+# which is the entire reason the installer has one copy of box(), die() and menu() instead of two.
+# So the transcript now DOES say "Getting the course files" on a run that changes nothing.
+#
+# WHAT SURVIVES IS THE PROPERTY THAT WAS ALWAYS THE POINT -- nothing of the course is left on a
+# machine whose owner said no -- and it is now two claims rather than one, because there are two
+# places files can be: the student's tree, and the bootstrap's temp tree. The second is new with
+# the split and is the one that was leaking.
 assert_eq   "sb-consent:declining-creates-no-directory" "absent" "$(sb_section "$out" COURSE-DIR)"
+assert_eq   "sb-consent:declining-leaves-no-temp-tree"  "absent" "$(sb_section "$out" BOOT-TMP)"
 sandbox_reap
 
 # (2) CONSENT GIVEN, and the range really written. `2` is the accept key, the same one the wsl
