@@ -51,16 +51,20 @@ trap 'door_check; rm -rf "$TMP"; shim_cleanup' EXIT
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 
 # ─── the two pure functions, extracted and unit-tested ─────────────────────────
-# version_lt is duplicated in cs193v-ui.sh and the installer. If they ever disagree, a
-# student is told to upgrade by one and accepted by the other.
+# ONE COPY SINCE #221. version_lt used to be duplicated in cs193v-ui.sh and the installer, and
+# the reason this pair was unit-tested twice was that a disagreement meant a student told to
+# upgrade by one and accepted by the other. course-install.sh sources the shared file now, so
+# there is one implementation and the table below drives it once.
+#
 # carve_func (lib/shared.sh) is this sed, lifted out because three other places now need it;
 # the reason it anchors on /^name()/ rather than the brace is recorded there.
-carve_func $PRIVATE/files/cs193v-ui.sh version_lt "$TMP/vl_launcher.sh"
-carve_func $PRIVATE/install-cs193v.sh  version_lt "$TMP/vl_installer.sh"
-for f in vl_launcher vl_installer; do
-    if [ "$(wc -l < "$TMP/$f.sh" | do_tr -d ' ')" -gt 3 ]; then pass "extract:$f"
-    else fail "extract:$f" "could not extract version_lt"; exit 1; fi
-done
+carve_func $PRIVATE/files/cs193v-ui.sh version_lt "$TMP/vl_ui.sh"
+if [ "$(wc -l < "$TMP/vl_ui.sh" | do_tr -d ' ')" -gt 3 ]; then pass "extract:vl_ui"
+else fail "extract:vl_ui" "could not extract version_lt"; exit 1; fi
+# AND NOBODY ELSE CARRIES ONE, which is the half that catches a copy coming back rather than
+# the shared one going wrong.
+assert_eq "version_lt:course-install-has-no-copy" "0" \
+          "$(grep -c '^version_lt() {$' $PRIVATE/course-install.sh)"
 
 # 5.7.0 vs 5.7.0 is the case that matters most: MIN_PODMAN is 5.7.0 and Ubuntu 26.04 ships
 # exactly that, so "equal" must mean "acceptable" or every stock Ubuntu student is refused.
@@ -74,8 +78,7 @@ for pair in "5.7.0 5.7.0 no" "5.6.0 5.7.0 yes" "5.6.9 5.7.0 yes" "5.7.1 5.7.0 no
             "4.9.3 5.7.0 yes" "0.0.1 5.7.0 yes" "5.10.0 5.9.0 no" "5.9.0 5.10.0 yes"; do
     set -- $pair
     a="$1"; b="$2"; want="$3"
-    assert_eq "version_lt:launcher($a<$b)"  "$want" "$(run_vl vl_launcher  "$a" "$b")"
-    assert_eq "version_lt:installer($a<$b)" "$want" "$(run_vl vl_installer "$a" "$b")"
+    assert_eq "version_lt:ui($a<$b)" "$want" "$(run_vl vl_ui "$a" "$b")"
 done
 # 5.10 vs 5.9 is the classic numeric-vs-lexical trap; asserted above for both copies.
 
@@ -99,22 +102,24 @@ done
 #
 # So this is the check that a fix to one floor cannot silently be half a fix.
 # 26-installer-sandbox.sh's floor-skew case is the behavioural half of the same claim.
+# ONE PAIR OF FLOORS SINCE #221, so "the two agree" is not a claim any more -- what is left is
+# that the shared file declares each one exactly once, and that nothing else declares one at all.
+# The consequence the old check existed for is unchanged and worth restating: the installer runs
+# FIRST and the launcher runs LAST, so a floor either of them disagreed about produced an install
+# that passed every reassuring step and then a STOP box from the launcher.
 for plat in LINUX MACOS; do
-    mp_inst="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/install-cs193v.sh)"
     mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/files/cs193v-ui.sh)"
-    # NON-EMPTY FIRST, both of them, and this is the guard rather than pedantry: an empty-vs-empty
-    # comparison passes forever, which is the exact trap this file records at its top for
-    # version_lt. A renamed constant or a changed quoting style would make the sed match nothing.
-    assert_ne "min-podman:installer-declares-$plat" "" "$mp_inst"
+    # NON-EMPTY FIRST, and this is the guard rather than pedantry: a renamed constant or a changed
+    # quoting style would make the sed match nothing, and an empty-vs-empty comparison passes
+    # forever -- the exact trap this file records at its top for version_lt.
     assert_ne "min-podman:ui-declares-$plat"  "" "$mp_lnch"
-    assert_eq "min-podman:the-two-$plat-floors-agree" "$mp_inst" "$mp_lnch"
-    record    "min-podman:$plat-floor" "$mp_inst"
+    assert_eq "min-podman:course-install-declares-no-$plat-floor" "0" \
+              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/course-install.sh)"
+    record    "min-podman:$plat-floor" "$mp_lnch"
     # EXACTLY ONE DECLARATION IN EACH, because a second one later in either file would shadow the
     # first and the check above would read the wrong number. Counted rather than assumed: the sed
     # takes every match, so two lines would give "4.9.0\n5.7.0" and compare unequal by luck
     # rather than by design -- and two IDENTICAL extra lines would compare equal and hide it.
-    assert_eq "min-podman:installer-declares-$plat-once" "1" \
-              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/install-cs193v.sh)"
     assert_eq "min-podman:ui-declares-$plat-once"  "1" \
               "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/files/cs193v-ui.sh)"
 done
@@ -122,10 +127,10 @@ done
 # Linux floor exists to be lowered as distros are measured, and the macOS one exists to stay put.
 # Someone lowering "the floor" and touching only the pair they noticed would invert that silently.
 # Checked with the installer's own version_lt, already extracted above.
-mp_lin="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
-mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+mp_lin="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
 assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
-          "$(run_vl vl_installer "$mp_mac" "$mp_lin")"
+          "$(run_vl vl_ui "$mp_mac" "$mp_lin")"
 
 # ─── the PATH repair is the same code in both copies  (issue #121) ─────────────
 # ensure_podman_path is the third function the installer has to carry rather than source, and
@@ -133,27 +138,29 @@ assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
 # hands the student a launcher that runs LAST. If the two ever answer differently about where
 # podman is, the student sees "Setup finished" followed by "Podman is not installed" -- which
 # IS issue #121, and is what it looked like the first time.
-pkg_inst="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+# ONE COPY SINCE #221. This used to read the installer's own PODMAN_PKG_ID and compare it with
+# the launcher's, because a disagreement between them WAS issue #121 all over again -- the
+# installer runs first and reports success, the launcher runs last and cannot find podman. There
+# is one declaration now and both read it, so the comparison has nothing to compare; what is
+# left is that the shared file declares it exactly once and that nothing else declares one.
 pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
 # NON-EMPTY FIRST, both of them, for the reason the floors above give: empty-vs-empty passes
 # forever, and a renamed constant makes the sed match nothing.
-assert_ne "probe:installer-declares-the-package-id" "" "$pkg_inst"
 assert_ne "probe:ui-declares-the-package-id"  "" "$pkg_lnch"
-assert_eq "probe:the-two-package-ids-agree" "$pkg_inst" "$pkg_lnch"
-record    "probe:package-id" "$pkg_inst"
-assert_eq "probe:installer-declares-the-package-id-once" "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/install-cs193v.sh)"
+record    "probe:package-id" "$pkg_lnch"
+assert_eq "probe:course-install-declares-no-package-id" "0" \
+          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/course-install.sh)"
 assert_eq "probe:ui-declares-the-package-id-once"  "1" \
           "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/files/cs193v-ui.sh)"
 
 # AND THE BODIES, not just the constant. carve_func's own header explains why an empty carving
 # is the trap here: sourced, it asserts nothing and passes.
-carve_func "$PRIVATE/install-cs193v.sh" ensure_podman_path "$TMP/probe_installer.sh"
-assert_ok "extract:probe_installer" test -s "$TMP/probe_installer.sh"
 carve_func $PRIVATE/files/cs193v-ui.sh ensure_podman_path "$TMP/probe_ui.sh"
 assert_ok "extract:probe_ui"  test -s "$TMP/probe_ui.sh"
-assert_eq "probe:the-two-copies-are-byte-identical" "" \
-          "$(diff "$TMP/probe_installer.sh" "$TMP/probe_ui.sh")"
+# AND NOBODY ELSE CARRIES ONE. The byte-for-byte diff that used to live here compared the
+# installer's copy with the launcher's; this is the assertion that catches a copy coming back.
+assert_eq "probe:course-install-has-no-probe" "0" \
+          "$(grep -c '^ensure_podman_path() {$' $PRIVATE/course-install.sh)"
 
 # ─── and what that code actually decides  (issue #121) ─────────────────────────
 # Driven against BOTH carvings, so a divergence that somehow survived the diff above still
@@ -194,7 +201,11 @@ p_rc()    { printf '%s' "${1%%|*}"; }
 p_added() { local t="${1#*|}"; printf '%s' "${t%%|*}"; }
 p_path()  { printf '%s' "${1##*|}"; }
 
-for f in installer ui; do
+# ONE CARVING NOW (#221), and the loop is kept rather than unrolled: every assertion below is
+# named "probe:$f-...", so unrolling would rename twenty of them for no gain, and the shape is
+# what a second consumer would be added back into.
+# shellcheck disable=SC2043   # deliberately a one-element list; see above
+for f in ui; do
     CARV="$TMP/probe_$f.sh"
 
     # ── present, off PATH, on a Mac ──
@@ -284,15 +295,17 @@ done
 # one script and finds them dead in the other has been taught something false, and that is the
 # realistic drift: someone teaches one copy a new key and never touches the other. So this
 # compares the case block alone, indentation stripped.
-for f in ui:$PRIVATE/files/cs193v-ui.sh inst:$PRIVATE/install-cs193v.sh; do
-    sed -n '/^menu() {/,/^}$/p' "${f#*:}" \
-        | sed -n '/case "\$key" in/,/esac/p' | sed 's/^[[:space:]]*//' > "$TMP/keys.${f%%:*}"
-done
+# ONE COPY SINCE #221, so the diff that used to live here has nothing to compare. The key table
+# is still extracted and asserted non-empty, because the pty cases below drive it and an empty
+# carving would let them pass having exercised nothing.
+sed -n '/^menu() {/,/^}$/p' "$PRIVATE/files/cs193v-ui.sh" \
+    | sed -n '/case "\$key" in/,/esac/p' | sed 's/^[[:space:]]*//' > "$TMP/keys.ui"
 # Extraction asserted first, or an empty file would match an empty file and this would pass
 # forever having read nothing — the trap this suite records for version_lt above.
 if [ "$(grep -c '.' "$TMP/keys.ui")" -ge 5 ]; then pass "menu:key-table-extractable"
 else fail "menu:key-table-extractable" "could not find menu()'s case block in cs193v-ui.sh"; fi
-assert_eq "menu:same-keys-in-both-copies" "" "$(diff "$TMP/keys.ui" "$TMP/keys.inst" 2>&1)"
+assert_eq "menu:course-install-has-no-copy" "0" \
+          "$(grep -c '^menu() {$' "$PRIVATE/course-install.sh")"
 # The four things that table has to answer, named individually so a deletion says which.
 assert_contains "menu:arrow-up-works"   '${ESC}[A' "$(cat "$TMP/keys.ui")"
 assert_contains "menu:arrow-down-works" '${ESC}[B' "$(cat "$TMP/keys.ui")"
@@ -307,7 +320,7 @@ MAC_VM_MAX_GB=8
 MAC_VM_MIN_GB=4
 host_ram_mb() { printf '%s' "$FAKE_RAM_MB"; }
 EOF
-sed -n '/^mac_vm_target_mb()/,/^}$/p' $PRIVATE/install-cs193v.sh >> "$TMP/vm.sh"
+sed -n '/^mac_vm_target_mb()/,/^}$/p' $PRIVATE/course-install.sh >> "$TMP/vm.sh"
 vm_for() { ( . "$TMP/vm.sh"; FAKE_RAM_MB="$1" mac_vm_target_mb ); }
 #  4 GB: 50% = 2, floored at 4 -> 4 GB (the whole Mac; a machine this small is out of scope)
 #  8 GB: 50% = 4 -> 4 GB
@@ -470,12 +483,12 @@ assert_eq "unsupported-os:exits-1" "1" \
 # nothing and cannot be sourced -- a student downloads that one file and checks its published
 # SHA-256 -- so carve_func is how a test reads its values without keeping a second copy of them
 # that can drift. Three functions rather than one, because distro_family needs os_release_field.
-carve_func $PRIVATE/install-cs193v.sh os_release_field "$TMP/orf.sh"
-carve_func $PRIVATE/install-cs193v.sh distro_family    "$TMP/df.sh"
-carve_func $PRIVATE/install-cs193v.sh distro_packages  "$TMP/dp.sh"
+carve_func $PRIVATE/course-install.sh os_release_field "$TMP/orf.sh"
+carve_func $PRIVATE/course-install.sh distro_family    "$TMP/df.sh"
+carve_func $PRIVATE/course-install.sh distro_packages  "$TMP/dp.sh"
 for f in orf df dp; do
     if [ -s "$TMP/$f.sh" ]; then pass "extract:$f"
-    else fail "extract:$f" "could not carve the distro helpers out of install-cs193v.sh"; fi
+    else fail "extract:$f" "could not carve the distro helpers out of course-install.sh"; fi
 done
 # The PM_/PKG_ globals are pre-set to empty because distro_packages leaves them untouched for a
 # family it does not know, and this suite runs under `set -u`.
@@ -494,12 +507,12 @@ shim_set version "podman version 4.3.1"
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
 # Darwin is the same thing platform() keys its macos arm off, so this forks where it forks.
 if [ "$(uname -s)" = Darwin ]; then
-    po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+    po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
     # The one needle here that is a literal rather than a value read back from the installer:
     # the Mac branch's advice is inline prose, not a table entry, so there is nothing to carve.
     po_fix="remove the podman you have"
 else
-    po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
+    po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
     po_fix="$(host_upgrade_cmd)"
 fi
 record "podman-old:the-branch-measured-here" "$(uname -s) / ${po_fix}"
@@ -678,7 +691,7 @@ printf 'root:*::\nstudent:!::\n' > "$UM/etc/gshadow"
 
 # THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing installer:653 reddens
 # this instead of leaving a test that agrees with a number nobody uses any more.
-UM_RANGE="$(sed -n 's/.*--add-subuids \([0-9]*-[0-9]*\).*/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
+UM_RANGE="$(sed -n 's/.*--add-subuids \([0-9]*-[0-9]*\).*/\1/p' "$PRIVATE/course-install.sh" | head -1)"
 assert_match "usermod:the-range-came-from-the-installer" '^[0-9]+-[0-9]+$' "$UM_RANGE"
 UM_START="${UM_RANGE%-*}"; UM_END="${UM_RANGE#*-}"
 UM_COUNT=$(( UM_END - UM_START + 1 ))
@@ -865,10 +878,10 @@ EOF
 # piped through notes() rather than three note calls. Carrying the real text rather than a stub
 # `txt` is the point: the numbers below are asserted against what a student would actually read.
 {
-    sed -n '/^text_catalogue() {$/,/^}$/p' $PRIVATE/install-cs193v.sh
-    sed -n '/^txt() {$/,/^}$/p'            $PRIVATE/install-cs193v.sh
-    sed -n '/^notes() {/p'                 $PRIVATE/install-cs193v.sh
-    sed -n '/^check_disk()/,/^}$/p'        $PRIVATE/install-cs193v.sh
+    sed -n '/^text_catalogue() {$/,/^}$/p' $PRIVATE/course-install.sh
+    sed -n '/^txt() {$/,/^}$/p'            $PRIVATE/course-install.sh
+    sed -n '/^notes() {/p'                 $PRIVATE/course-install.sh
+    sed -n '/^check_disk()/,/^}$/p'        $PRIVATE/course-install.sh
 } >> "$TMP/cd.sh"
 if [ "$(grep -c '.' "$TMP/cd.sh")" -gt 8 ]; then pass "extract:check_disk"
 else fail "extract:check_disk" "could not extract check_disk"; fi
@@ -1007,17 +1020,28 @@ assert_says "mac-disk:non-numeric-size-still-finishes" "Setup finished" "$out"
 # asked for the password again, and re-ran `sudo installer`, whose preinstall does
 # `rm -rf /opt/podman` and takes the virtual machine and every container in it with it.
 #
-# A REWRITTEN COPY OF THE INSTALLER, so the receipt consulted is a fabricated one. The shipped
-# identifier is REAL on a maintainer's Mac, which would make these pass for the wrong reason.
+# A FABRICATED RECEIPT, and since #221 it takes a SECOND TARBALL to fabricate. The shipped
+# identifier is REAL on a maintainer's Mac, which would make these pass for the wrong reason --
+# but PODMAN_PKG_ID no longer lives in the file being copied. It lives in cs193v-ui.sh, which
+# the installer proper sources out of the tree it downloads, so the fake has to be baked into a
+# tree of its own. Same shape as lib/sandbox.sh's sb_work_skew, and for the same reason.
+cp -a "$TMP/pkg" "$TMP/pkg-probe"
+edit_sub "$TMP/pkg-probe/cs193v-main/.private/files/cs193v-ui.sh" \
+         '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$IPROBE_PKG_ID\""
+# ASSERTED BEFORE IT IS PACKED. edit_sub whose ERE matches nothing is a silent no-op --
+# lib/sandbox.sh records the same trap -- and here the consequence is a case that interrogates
+# the developer's real /opt/podman and passes without testing anything.
+assert_eq "probe:the-probe-tree-names-the-fake-package" "1" \
+          "$(grep -c "^PODMAN_PKG_ID=\"$IPROBE_PKG_ID\"\$" \
+             "$TMP/pkg-probe/cs193v-main/.private/files/cs193v-ui.sh")"
+( cd "$TMP/pkg-probe" && tar czf "$TMP/course-probe.tar.gz" cs193v-main )
+assert_file "probe:the-probe-tarball-was-built" "$TMP/course-probe.tar.gz"
+
 cp "$PRIVATE/install-cs193v.sh" "$TMP/install-probe.sh"
 edit_sub "$TMP/install-probe.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-edit_sub "$TMP/install-probe.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
-edit_sub "$TMP/install-probe.sh" '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$IPROBE_PKG_ID\""
-# EVERY REWRITE ASSERTED. edit_sub whose ERE matches nothing is a silent no-op -- lib/sandbox.sh
-# records the same trap -- and here the consequence is a case that interrogates the developer's
-# real /opt/podman and passes without testing anything.
-assert_eq "probe:the-installer-copy-names-the-fake-package" "1" \
-          "$(grep -c "^PODMAN_PKG_ID=\"$IPROBE_PKG_ID\"\$" "$TMP/install-probe.sh")"
+edit_sub "$TMP/install-probe.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course-probe.tar.gz\""
+assert_eq "probe:the-installer-copy-names-the-probe-tarball" "1" \
+          "$(grep -c 'course-probe\.tar\.gz' "$TMP/install-probe.sh")"
 assert_ok "probe:the-installer-copy-is-valid-bash" bash -n "$TMP/install-probe.sh"
 
 # THE PATH OVERRIDE RIDES ON THE DOOR'S OWN env LINE. installer_host runs
@@ -1121,9 +1145,16 @@ assert_says_not "missing-tarball:does-not-claim-success" "Setup finished" "$out"
 assert_eq       "missing-tarball:exits-nonzero"         "1" "$(last_rc)"
 
 # 3. The one neither exit status can catch: a well-formed archive that is simply missing
-#    files. tar extracts it happily and exits 0, so without the sentinel check the
-#    installer would print "Setup finished" over a directory with no launcher in it. This
-#    is what the explicit per-file check exists for.
+#    files. tar extracts it happily and exits 0, so without an explicit per-file check the
+#    install would print "Setup finished" over a directory with no launcher in it.
+#
+#    TWO CHECKS SINCE #221, AND THIS CASE SPLITS TO MATCH. The bootstrap checks the two files it
+#    needs in order to hand over at all; the installer proper checks the files the STUDENT'S tree
+#    needs. They are different claims and they fail at different moments, so an archive that
+#    satisfies the first and not the second has to be built on purpose -- otherwise the second
+#    check is never reached and reads as covered while testing nothing.
+
+# 3a. Nothing the bootstrap can hand over to.
 mkdir -p "$TMP/pkg2/cs193v-main"
 cp "$PRIVATE/messages.txt" "$TMP/pkg2/cs193v-main/"
 ( cd "$TMP/pkg2" && tar czf "$TMP/incomplete.tar.gz" cs193v-main )
@@ -1131,9 +1162,27 @@ assert_ok "incomplete:archive-is-well-formed" tar tzf "$TMP/incomplete.tar.gz"
 out="$(run_with_tarball "$TMP/incomplete.tar.gz" "$TMP/broken-partial")"
 assert_says_not "incomplete:does-not-claim-success"    "Setup finished" "$out"
 assert_eq       "incomplete:exits-nonzero"             "1" "$(last_rc)"
-assert_says     "incomplete:names-the-missing-file"    "cs193v is missing" "$out"
+assert_says     "incomplete:names-the-missing-file"    "course-install.sh is missing" "$out"
 assert_says     "incomplete:blames-the-transfer"       "cut short" "$out"
 assert_says     "incomplete:says-it-is-safe-to-retry"  "safe to run this script again" "$out"
+assert_no_file  "incomplete:creates-no-course-tree"    "$TMP/broken-partial"
+
+# 3b. The half the bootstrap cannot see: everything IT needs is present, so it hands over --
+#     and the tree the student was promised still has no launcher in it. Only install_files
+#     catches this, and it catches it after the machine work, which is why the message talks
+#     about unpacking rather than about downloading.
+cp -a "$TMP/pkg" "$TMP/pkg3"
+rm -f "$TMP/pkg3/cs193v-main/cs193v"
+assert_ok "half-tree:the-fixture-really-lacks-the-launcher" \
+          sh -c "! test -e '$TMP/pkg3/cs193v-main/cs193v'"
+assert_ok "half-tree:but-still-has-what-the-bootstrap-needs" \
+          test -s "$TMP/pkg3/cs193v-main/.private/course-install.sh"
+( cd "$TMP/pkg3" && tar czf "$TMP/half-tree.tar.gz" cs193v-main )
+out="$(run_with_tarball "$TMP/half-tree.tar.gz" "$TMP/broken-half")"
+assert_says_not "half-tree:does-not-claim-success"   "Setup finished" "$out"
+assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
+assert_says     "half-tree:names-the-missing-file"   "cs193v is missing" "$out"
+assert_says     "half-tree:blames-the-unpacking"     "unpacking stopped partway" "$out"
 
 # ─── the sentinel the Windows installer checks for ─────────────────────────────
 # Stage one downloads install-cs193v.sh over HTTPS and greps it for this token BEFORE running
@@ -1232,7 +1281,7 @@ assert_ok "windows:checks-the-download-before-running-it" \
           sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
 
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
-          sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/install-cs193v.sh"
+          sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/course-install.sh"
 # A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click
 # past security warnings in a course about not trusting code.
 #

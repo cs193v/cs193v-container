@@ -278,7 +278,7 @@ installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> 
         # diagnostic being avoided. Setting it through `env` keeps it out of this shell entirely.
         (
             eval "exec $CS193V_TRACE_FD>>\"\$tf\""
-            env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${LINENO} ' \
+            env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${BASH_SOURCE##*/}:${LINENO} ' \
                 BASH_XTRACEFD="$CS193V_TRACE_FD" "$@" \
                 bash -x "$script" </dev/null 2>&1
         )
@@ -341,7 +341,7 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
         # number interpolates like any other word. `$CS193V_TRACE_FD>>$tf` has to stay unspaced --
         # `8 >>file` is the number as an argument, not a redirection. The NUMBER stays bare for
         # that reason; its target is quoted like every other path here.
-        cmd="$cmd PS4='+\${LINENO} ' BASH_XTRACEFD=$CS193V_TRACE_FD"
+        cmd="$cmd PS4='+\${BASH_SOURCE##*/}:\${LINENO} ' BASH_XTRACEFD=$CS193V_TRACE_FD"
         cmd="$cmd bash -x '$script' $CS193V_TRACE_FD>>'$tf'"
     else
         cmd="$cmd bash '$script'"

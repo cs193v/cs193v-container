@@ -53,7 +53,12 @@ MESSAGES="$PRIVATE/messages.txt"
 # punctuation and comm aborts with "file 1 is not in sorted order" — which VERIFICATION.md
 # §A.1 does today, so its cross-reference has never actually run.
 grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
-grep -ohE 'msg +[a-z0-9._-]+' cs193v $PRIVATE/install-cs193v.sh | awk '{print $2}' \
+# THE LAUNCHER ALONE (#221). This reconciles msg keys against messages.txt, and the only
+# other file that reads that catalogue is gone: install-cs193v.sh is the bootstrap now and has
+# no catalogue at all, while course-install.sh reads its OWN via txt() -- which is why the
+# accessor must not be renamed msg, and why feeding this its keys would report every one of
+# them as missing from a catalogue they were never in. itext:* below is their reconciliation.
+grep -ohE 'msg +[a-z0-9._-]+' cs193v | awk '{print $2}' \
     | LC_ALL=C sort -u > "$TMP/used"
 
 orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
@@ -81,7 +86,7 @@ assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 # THE ACCESSOR IS `txt`, NOT `msg`, and that is not a taste call: the orphan check above greps
 # `msg +<key>` in this very file against messages.txt, so an installer named `msg` would report
 # all of its own keys as missing from a catalogue they were never in.
-INST="$PRIVATE/install-cs193v.sh"
+INST="$PRIVATE/course-install.sh"
 inst_cat="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" "$INST" | sed '1d;$d')"
 assert_ne "itext:the-catalogue-is-there" "" "$inst_cat"
 
@@ -124,7 +129,7 @@ assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
 if [ "$(grep -c '^txt() {$' "$TMP/itxt.sh")" = 1 ]; then
     pass "itext:txt-is-extractable"
 else
-    fail "itext:txt-is-extractable" "could not carve TEXT and txt() out of install-cs193v.sh"
+    fail "itext:txt-is-extractable" "could not carve TEXT and txt() out of course-install.sh"
 fi
 imiss="$(bash -c '. "$1"; txt no.such.key' _ "$TMP/itxt.sh" 2>&1)"
 assert_says "itext:a-missing-key-says-which"  "no.such.key" "$imiss"
@@ -273,7 +278,7 @@ repo, private = sys.argv[1], sys.argv[2]
 
 CATALOGUES = (
     (os.path.join(private, "messages.txt"),
-     (os.path.join(repo, "cs193v"), os.path.join(private, "install-cs193v.sh")),
+     (os.path.join(repo, "cs193v"), os.path.join(private, "course-install.sh")),
      r'\bmsg\s+'),
     (os.path.join(private, "files", "setup-git-messages.txt"),
      (os.path.join(private, "files", "setup-git"),),
@@ -527,7 +532,7 @@ limit = box - 4
 # which is precisely what this lint exists to prevent. Any new way of reaching box() needs
 # a pattern here.
 boxed = set()
-for name, root in (("cs193v", repo), ("install-cs193v.sh", private)):
+for name, root in (("cs193v", repo), ("course-install.sh", private)):
     for line in open(os.path.join(root, name)):
         boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
         boxed.update(re.findall(r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b', line))
@@ -653,7 +658,7 @@ record "box:unboxed-lines-over-80-cols" "${wide:-0} (informational; these are no
 for boxsrc in "ui:$PRIVATE/files/cs193v-ui.sh" \
               "launcher:$REPO/cs193v" \
               "setup-git:$PRIVATE/files/setup-git" \
-              "installer:$PRIVATE/install-cs193v.sh"; do
+              "course-install:$PRIVATE/course-install.sh"; do
     who="${boxsrc%%:*}"; f="${boxsrc#*:}"
     # box() builds its borders inside an awk printf; anything else is hand-drawn art.
     #
@@ -664,32 +669,30 @@ for boxsrc in "ui:$PRIVATE/files/cs193v-ui.sh" \
     assert_eq "box:$who-draws-the-box-in-one-place" "" "$hand"
 done
 
-# The two copies of box() must not drift. install-cs193v.sh is curl-piped and standalone, so it
-# cannot source cs193v-ui.sh — the same situation version_lt is in, and this is the same check
-# that keeps version_lt honest.
-#
-# TWO COPIES IS NOW THE WHOLE OF IT, where it used to be one per script. The launcher sources
-# the helper rather than carrying box(), and so does setup-git, so this pair is the only place
-# the duplication is left — and it is left because curl-piping is the one case that cannot
-# source anything at all.
-for f in "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/install-cs193v.sh"; do
-    sed -n '/^box() {$/,/^}$/p' "$f" > "$TMP/box.$(basename "$f")"
-done
+# ONE COPY OF box() SINCE #221, so there is nothing left to diff. The check that lived here
+# compared cs193v-ui.sh's copy against install-cs193v.sh's, because a curl-piped file could
+# source nothing; the installer downloads before it draws now, so course-install.sh sources the
+# real one. box:course-install-draws-the-box-in-one-place above is what remains, and it is the
+# assertion that would catch a copy coming back.
+sed -n '/^box() {$/,/^}$/p' "$PRIVATE/files/cs193v-ui.sh" > "$TMP/box.cs193v-ui.sh"
 if [ "$(wc -l < "$TMP/box.cs193v-ui.sh" | do_tr -d ' ')" -gt 20 ]; then
     pass "box:extractable"
 else
     fail "box:extractable" "could not extract box() from cs193v-ui.sh"
 fi
-assert_eq "box:both-copies-identical" "" \
-          "$(diff "$TMP/box.cs193v-ui.sh" "$TMP/box.install-cs193v.sh" 2>&1)"
 # ONE APIECE, not "the two counts agree". This compared `grep -c '^BOX_W=71$'` in one file
 # against the same count in the other, and 0 == 0 is agreement: measured (#79), renaming BOX_W in
 # BOTH files leaves this passing. What each side has to do is declare the width, so that is what
 # is asked -- of each of them, separately.
-for widthsrc in "ui:$PRIVATE/files/cs193v-ui.sh" "installer:$PRIVATE/install-cs193v.sh"; do
-    who="${widthsrc%%:*}"; f="${widthsrc#*:}"
-    assert_eq "box:$who-declares-the-same-width" "1" "$(grep -c '^BOX_W=71$' "$f")"
-done
+# ONE FILE DECLARES IT NOW, and the assertion is still "declares it" rather than "the counts
+# agree", for the reason #79 measured: 0 == 0 is agreement, so renaming BOX_W in both files left
+# the old form passing.
+assert_eq "box:ui-declares-the-width" "1" \
+          "$(grep -c '^BOX_W=71$' "$PRIVATE/files/cs193v-ui.sh")"
+# AND NOBODY ELSE DECLARES ONE, which is the half that catches a copy coming back rather than a
+# rename going wrong.
+assert_eq "box:course-install-declares-no-width" "0" \
+          "$(grep -c '^BOX_W=' "$PRIVATE/course-install.sh")"
 # And the launcher must not have kept a copy of its own on the way out, which a botched
 # extraction would leave behind: two definitions in one file, the second silently winning.
 assert_eq "box:launcher-has-no-copy" "0" "$(grep -c '^box() {$' "$REPO/cs193v")"
@@ -767,22 +770,30 @@ else
     fail "die:unbreakable-word-stays-inside-the-box" "$probs"
 fi
 
-# ─── the installer draws the same box ──────────────────────────────────────────
-# install-cs193v.sh has its own die(), its own copy of the box art, and no shared library
-# with the launcher to keep them honest — and it is the student's FIRST contact with the
-# course, so a broken box there is the first thing they ever see of it. Extracted and run
-# for real rather than pattern-matched, the same way this suite treats msg().
+# ─── the installer proper draws the same box ───────────────────────────────────
+# It is the student's FIRST contact with the course, so a broken box there is the first thing
+# they ever see of it. Run for real rather than pattern-matched, the same way this suite treats
+# msg().
+#
+# THE SHAPE CHANGED WITH #221 AND THE TEST IS STRONGER FOR IT. There used to be a second copy
+# of box() and die() in the installer, and this harness assembled that copy; now it sources the
+# SAME cs193v-ui.sh the launcher does and sets the same four knobs course-install.sh sets. So
+# what this exercises is no longer "the other copy still works" but "the shared box, drawn at
+# the installer's indent, with the installer's sign-off, still closes" -- which is the thing a
+# student actually sees.
+#
 # THE CATALOGUE AND txt() COME TOO, since issue #116: die()'s sign-off and the whole of the
-# Intel-Mac refusal are entries in it now, so carving the two functions alone would source a
-# pair that cannot say anything. That is the point of the arrangement rather than a wrinkle in
-# it -- but it does mean this harness has to carry the text with the code.
+# Intel-Mac refusal are entries in it, so carving the functions alone would source a pair that
+# cannot say anything.
 {
-    printf 'BOX_W=71\nC_RED=""\nC_OFF=""\n'
-    cat "$TMP/box.install-cs193v.sh"
-    sed -n '/^text_catalogue() {$/,/^}$/p' "$PRIVATE/install-cs193v.sh"
-    sed -n '/^txt() {$/,/^}$/p'            "$PRIVATE/install-cs193v.sh"
-    sed -n '/^die() {$/,/^}$/p'            "$PRIVATE/install-cs193v.sh"
-    sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/install-cs193v.sh"
+    printf 'NO_COLOR=1\n'
+    cat "$UI"
+    sed -n '/^text_catalogue() {$/,/^}$/p' "$PRIVATE/course-install.sh"
+    sed -n '/^txt() {$/,/^}$/p'            "$PRIVATE/course-install.sh"
+    sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/course-install.sh"
+    # the four knobs, exactly as course-install.sh sets them after sourcing
+    printf 'NOTE_INDENT="    "\nMENU_INDENT="    "\nDIE_INDENT="  "\n'
+    printf 'DIE_TRAILER="$(txt die.trailer)"\n'
 } > "$TMP/idie.sh"
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
@@ -792,7 +803,7 @@ if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
     pass "installer:box-users-extractable"
 else
     fail "installer:box-users-extractable" \
-         "could not extract die(), say_intel_mac(), txt() and the catalogue from install-cs193v.sh"
+         "could not assemble cs193v-ui.sh with say_intel_mac(), txt() and the catalogue from course-install.sh"
 fi
 
 out="$(bash -c '. "$1"; die "$2"' _ "$TMP/idie.sh" \

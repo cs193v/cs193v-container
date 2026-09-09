@@ -3,7 +3,10 @@
 #
 # Format: LINE  ANCHOR -- reason
 #
-#   LINE    the line number in install-cs193v.sh. The gate checks it is an EXECUTABLE line --
+#   LINE    the line number in course-install.sh -- the installer PROPER, since #221. The
+#           bootstrap (install-cs193v.sh) is scored by nothing: it is ~150 lines of download,
+#           and 95-installer-coverage.sh says so where it sets INST. The gate checks the line
+#           is an EXECUTABLE line --
 #           non-blank and not a comment -- because the denominator excludes the others, so an
 #           entry that drifts onto one excuses nothing while still reading as an excuse.
 #   ANCHOR  literal text that must appear ON that line, checked with grep -F. This is what makes
@@ -20,10 +23,14 @@
 # allowlist stops being read. Checked against hit.lines rather than reasoned about.
 #
 # So what is left is the pair that no fake can stand in for.
-655  txt err.curl-missing-mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken. The anchor is the CALL now rather than the sentence: since issue #116 the words are in the catalogue, which the denominator no longer counts, so the executable line here is the die that fetches them
-858  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
+406  txt err.curl-missing-mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken. The anchor is the CALL now rather than the sentence: since issue #116 the words are in the catalogue, which the denominator no longer counts, so the executable line here is the die that fetches them
+609  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
 #
-# curl's retry loop (installer:989) is NOT here: it is not reachable from a file:// tarball and
+# RENUMBERED BY #221, from 655 and 858, when the logic moved into course-install.sh. The anchors
+# are what made that safe to do by hand: each entry names the text that must be ON its line, so
+# a number that landed somewhere else fails rather than quietly excusing the wrong statement.
+#
+# curl's retry loop is NOT here: it is not reachable from a file:// tarball and
 # would need an HTTP server in the fixture, so it is RECORDED as uncovered by the gate rather
 # than excused. An allowlist entry would say "cannot be tested"; the honest statement is
 # "not tested yet, and here is what it would take".
