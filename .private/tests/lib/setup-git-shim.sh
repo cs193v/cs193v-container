@@ -6,7 +6,7 @@
 #
 # Two suites use these and they want opposite things from PATH: 35-setup-git-shim.sh puts
 # lib/gh-fake and lib/git-fake in front of it, and 90-setup-git-github.sh must not, because it is
-# the one that talks to the real API. So sg_new decides what goes on PATH and sg_tty only prepends
+# the one that talks to the real API. So sg_new decides what goes on PATH and sg_run only prepends
 # $SGSHIM — which holds the fakes in one case and nothing executable in the other.
 
 SGDIRS=''
@@ -49,65 +49,237 @@ sg_sweep_stale() {                    # -> how many directories it removed
     sweep_stale_tmpdirs "${TMPDIR:-/tmp}" cs193v-sg
 }
 
-# ONE KEYSTROKE AT A TIME, separated by |, with a pause between them — and that is a requirement,
-# not politeness. MEASURED: bash's `read -n1` puts the terminal into non-canonical mode and
-# restores it afterwards, and the restore DISCARDS whatever is queued behind it. Push a whole
-# session into the pty up front and the FIRST menu works, the second reads ^D, and everything
-# typed after it is gone. Reproduced outside these suites in six lines, so it is bash and the tty
-# discipline rather than anything in setup-git:
+# ─── the conversation, as a table ──────────────────────────────────────────────
+# WHAT REPLACED THE CLOCK, and why the clock had to go.
 #
-#     read -r a; read -rsn1 k; read -r b; read -rsn1 k; read -r c
-#     printf 'one\n\ntwo\n\nthree\n' | script -q -c ... /dev/null
-#     ->  A=[one] K1=[] B=[two] K2=[04] C=[]        with the input pushed at once
-#     ->  A=[one] K1=[] B=[two] K2=[]  C=[three]    with 0.3s between keystrokes
+# sg_feed used to type a `|`-separated string of keystrokes with `sleep 0.3` between them and no
+# knowledge of the child at all. MEASURED, and every one of these is a way for a green run to mean
+# nothing:
 #
-# 30-launcher-shim.sh never met this because no launcher flow has two menus in it, and a student
-# never will either — a human types one key at a time, which is exactly what this reproduces. Each
-# keystroke is one answer: a whole typed line ending in \n, or one escape sequence.
-SG_KEY_DELAY="${SG_KEY_DELAY:-0.3}"
-sg_feed() {                           # sg_feed KEYS  -> the bytes, paced, on stdout
-    local ks="$1" k
-    while [ -n "$ks" ]; do
-        case "$ks" in
-            *"|"*) k="${ks%%|*}"; ks="${ks#*|}" ;;
-            *)     k="$ks"; ks='' ;;
+#   * the answer is delivered before the question. The tty echoes on ARRIVAL, not on read, so a
+#     keystroke that lands early is echoed into the transcript wherever the program happens to be.
+#   * under CPU oversubscription the row structure of the transcript collapses, and the assertions
+#     that count rows silently undercount -- 35-setup-git-shim.sh:476-509 is a whole essay about
+#     one assertion that had to be rewritten as an occurrence count to survive it.
+#   * on Linux/bash 5 keystrokes are LOST at the default pacing. The run then hangs until the
+#     outer `timeout` fires, which truncates the transcript -- and about 125 assert_says_not /
+#     assert_not_contains / assert_eq-to-empty assertions pass vacuously on a truncated one.
+#   * and when the margin goes, the 93-character token is echoed in clear text. That is a REAL
+#     credential in 90-setup-git-github.sh, whose transcript is `record`ed to a file at :212.
+#
+# A LONGER SLEEP DOES NOT FIX ANY OF THAT; it moves the boundary. What fixes it is knowing where
+# the child is, which is what lib/ptydrive.py does: it holds the pty master, so it can read the
+# program's output AND the slave's terminal settings before it decides to type.
+#
+# THREE KINDS OF READ, EACH WITH A TERMINAL STATE ONLY IT HAS:
+#
+#     line     ICANON and ECHO on   read_line, files/setup-git:395
+#     secret   both off             read_secret, files/setup-git:486, via `stty -echo -icanon`
+#     menu     both off             cs193v-ui.sh:659, via bash's own `read -rsn1`
+#
+# So `paste` IS NOT WRITTEN INTO A TERMINAL THAT IS ECHOING. If read_secret ever lost its stty --
+# the exact defect the tally and the three secret:* assertions exist to catch -- the driver
+# refuses to type the token and names the step, instead of pasting the credential into a
+# transcript. Measured: with the token step declared `line` instead of `secret`, nothing is typed
+# and the report reads "the screen arrived but the terminal was never at a line read".
+#
+# WHERE THE SEQUENCE LIVES: fixtures/setup-git-flows.txt, once, rather than in 39 keystroke
+# strings. See that file's header.
+
+SG_FLOWS="$TESTS_DIR/fixtures/setup-git-flows.txt"
+
+# THE PROSE COMES OUT OF THE CATALOGUE, NOT OUT OF THE FIXTURE, so a reworded message does not
+# break a flow -- the same rule assert_says_key exists for. One awk over both files per case;
+# nothing here is per-keystroke.
+#
+# THE VALUES ARE SUBSTITUTED AFTERWARDS, IN THE SHELL, AND THAT IS LOAD-BEARING. `awk -v
+# TOKEN=github_pat_...` would put a real credential in awk's argv, where `ps` can read it, and the
+# whole point of files/setup-git:680-683 and of 35-setup-git-shim.sh:155-162 is that it reaches no
+# argv, no environment and no file. awk sees `{{TOKEN}}` and nothing else.
+sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire steps on stdout
+    local a names='' n v pat out line
+    local sub_n=''
+    for a in "$@"; do
+        case "$a" in
+            *=*) n="${a%%=*}"; v="${a#*=}"
+                 sub_n="$sub_n $n"
+                 # Held in a parallel string rather than an array of pairs: bash 3.2, and a value
+                 # may contain anything except a newline.
+                 eval "SGV_$n=\$v" ;;
+            *)   names="$names $a" ;;
         esac
-        printf '%b' "$k"
-        sleep "$SG_KEY_DELAY"
+    done
+    for n in ID NAME TOKEN; do eval "[ -n \"\${SGV_$n-}\" ] || SGV_$n=\"\${SG_DEFAULT_$n-}\""; done
+    out="$(awk -v want="$names" -v FLOWFILE="$SG_FLOWS" '
+        function flat(s) {
+            gsub(/\*/, "", s); gsub(/[\t]/, " ", s)
+            while (sub(/  /, " ", s)) ; sub(/^ /, "", s); sub(/ $/, "", s); return s
+        }
+        # msg()`s own block parser, and msg_text`s truncation at the first placeholder: only the
+        # literal prefix is prose a student is guaranteed to read.
+        FILENAME != FLOWFILE {
+            if ($0 ~ /^\[\[.*\]\]$/) { k = substr($0, 3, length($0) - 4); next }
+            if (k != "") { prose[k] = prose[k] " " $0 }
+            next
+        }
+        # The flow file. Bodies are kept whole and expanded at the end, so `include` can name a
+        # flow defined later.
+        /^#/ || /^[ \t]*$/ { next }
+        /^\[\[.*\]\]$/ { f = substr($0, 3, length($0) - 4); order[++nf] = f; next }
+        f != "" { body[f] = body[f] $0 "\n" }
+        function phrase(key,   t) {
+            if (!(key in prose)) { bad = bad " " key; return "" }
+            t = prose[key]; sub(/\{\{.*/, "", t); t = flat(t)
+            if (t == "" || t == " ") { bad = bad " " key }
+            return t
+        }
+        function emit(kind, name, needles, keys) {
+            printf "%s%s\t%s\t%s\t%s\n", (opt ? "?" : ""), kind, name, needles, keys
+        }
+        function expand(name, depth,   lines, i, nl, ln, lhs, rhs, kind, keys, nk, kk,
+                        act, arg, needles, j, idx, d, sname) {
+            if (depth > 8) { print "ptydrive-flow: include loop at " name > "/dev/stderr"; exit 2 }
+            if (!(name in body)) { print "ptydrive-flow: no such flow: " name > "/dev/stderr"; exit 2 }
+            nl = split(body[name], lines, "\n")
+            for (i = 1; i <= nl; i++) {
+                ln = lines[i]; sub(/[ \t]+$/, "", ln)
+                if (ln == "") continue
+                if (ln ~ /^optional[ \t]*$/) { opt = 1; continue }
+                if (ln ~ /^include[ \t]/) { sub(/^include[ \t]+/, "", ln); expand(ln, depth + 1); continue }
+                idx = index(ln, "->")
+                if (idx == 0) { print "ptydrive-flow: no -> in: " ln > "/dev/stderr"; exit 2 }
+                lhs = substr(ln, 1, idx - 1); rhs = substr(ln, idx + 2)
+                sub(/^[ \t]+/, "", lhs); sub(/[ \t]+$/, "", lhs)
+                sub(/^[ \t]+/, "", rhs); sub(/[ \t]+$/, "", rhs)
+                nk = split(lhs, kk, /[ \t]+/); kind = kk[1]
+                needles = ""
+                for (j = 2; j <= nk; j++) needles = needles (j > 2 ? "\037" : "") phrase(kk[j])
+                act = rhs; arg = ""
+                if (match(rhs, /[ \t]/)) { act = substr(rhs, 1, RSTART - 1); arg = substr(rhs, RSTART + 1) }
+                sub(/^[ \t]+/, "", arg)
+                if (arg ~ /^".*"$/) arg = substr(arg, 2, length(arg) - 2)
+                nstep[name]++
+                sname = name "#" nstep[name] " " kk[2]
+                if (act == "type" || act == "paste") { emit(kind, sname, needles, arg "\\n") }
+                else if (act == "pick") {
+                    d = -1
+                    for (j = 2; j <= nk; j++) if (kk[j] == arg) d = j - 2
+                    if (d < 0) { print "ptydrive-flow: " arg " is not an option of " ln > "/dev/stderr"; exit 2 }
+                    # ARROWS, NOT A DIGIT. menu() accepts both, and the arrow path is the one a
+                    # student uses -- the comment this change deletes called reaching the third
+                    # entry by arrow key "deliberate", and this is where that is now written down.
+                    for (j = 1; j <= d; j++)
+                        emit(kind, sname " " act " " arg " (down " j "/" d ")", needles, "\\033[B")
+                    emit(kind, sname " " act " " arg, needles, "\\n")
+                }
+                else if (act == "send") { emit(kind, sname, needles, arg) }
+                else { print "ptydrive-flow: unknown action: " act > "/dev/stderr"; exit 2 }
+            }
+        }
+        END {
+            nw = split(want, w, /[ \t]+/)
+            for (i = 1; i <= nw; i++) if (w[i] != "") expand(w[i], 0)
+            if (bad != "") { print "ptydrive-flow: no literal prose for key(s):" bad > "/dev/stderr"; exit 2 }
+        }
+    ' "$SGM" "$SG_FLOWS")" || { printf 'BROKEN-FLOW\n'; return 1; }
+    # THE VALUES GO IN HERE, in the shell. Not a fork and not an argv: see the note above.
+    printf '%s\n' "$out" | while IFS= read -r line; do
+        for n in $sub_n ID NAME TOKEN; do
+            eval "v=\${SGV_$n-}"
+            pat="{{$n}}"
+            line="${line//$pat/$v}"
+        done
+        printf '%s\n' "$line"
     done
 }
 
-# KEYS goes through printf %b, so \n is Enter and \033[B is a down arrow. Extra arguments are
-# VAR=VALUE settings for this run only, so each case is independent of the last.
+# sg_run CASE FLOW... [VAR=VALUE ...] -- the transcript in $SG_OUT, and one named result for the
+# conversation itself.
 #
-# TWO WAYS TO NAME WHAT RUNS, because the two suites need different binaries under it:
+# A STATEMENT, NOT A SUBSTITUTION, and that is forced rather than stylistic. lib/assert.sh:57
+# states the rule this suite runs on -- "no assertion in this suite is called from a subshell;
+# every pass/fail is a statement, and the $( ) around them are values being handed IN" -- and this
+# function emits one. Inside `out="$(sg_run ...)"` its PASS line would land in the transcript,
+# where every assertion in the file would then read it and the 80-column row lint would count it.
 #
-#   * $SG_SETUP_GIT plus $SG_ENV — the checkout's copy, on this machine, with the fakes ahead of it
-#     on PATH. That is 35-setup-git-shim.sh, and it is the default.
-#   * $SG_RUN, a whole command line, used verbatim. That is 90-setup-git-github.sh, which runs the
-#     INSTALLED copy inside the container via `podman exec`, because the point of that suite is to
-#     record what gh says and the image's gh is fifty versions ahead of a host package. Per-run
-#     VAR=VALUE extras do not apply to it: `env A=B podman exec` sets A on podman, not in the
-#     container, so anything that has to reach the script goes in the exec's own -e flags.
-sg_tty() {                            # sg_tty KEYS [VAR=VAL ...]
-    local keys="$1"; shift
-    local cmd a
+# TWO WAYS TO NAME WHAT RUNS, unchanged from the sg_tty this replaced: $SG_SETUP_GIT plus $SG_ENV
+# for the shim tier, or $SG_RUN verbatim for 90-setup-git-github.sh, which runs the INSTALLED copy
+# inside the container. Per-run VAR=VALUE extras still go to the former only, for the reason that
+# file gives: `env A=B podman exec` sets A on podman, not in the container.
+#
+# THE ENVIRONMENT EXTRAS AND THE FLOW ARGUMENTS SHARE ONE `VAR=VALUE` SPELLING and are told apart
+# by name: a flow placeholder is one of the ones the fixture uses. Anything else is for `env`.
+#
+# THE DEFAULTS THE FIXTURE'S PLACEHOLDERS FALL BACK TO, so a case that does not care who the
+# student is says `sg_run happy happy` and nothing else. Read only through the `eval` in sg_flow,
+# which shellcheck cannot follow -- grouped under ONE directive rather than three, and grouped
+# rather than made file-level, so a fourth variable that really is dead still gets named.
+# shellcheck disable=SC2034
+{ SG_DEFAULT_ID=jdoe; SG_DEFAULT_NAME='Jane Doe'; SG_DEFAULT_TOKEN=''; }
+sg_run() {                            # sg_run CASE FLOW|VAR=VAL...
+    local case_name="$1"; shift
+    local a cmd flowargs='' envargs='' steps rc
+    for a in "$@"; do
+        case "$a" in
+            ID=*|NAME=*|TOKEN=*|HALF=*) flowargs="$flowargs${A_TAB}$a" ;;
+            *=*)                        envargs="$envargs $a" ;;
+            *)                          flowargs="$flowargs${A_TAB}$a" ;;
+        esac
+    done
     if [ -n "${SG_RUN:-}" ]; then
         cmd="$SG_RUN"
     else
-        # TMPDIR points at this case's own shim, so setup-git's scratch directory and clone land
-        # somewhere the suite can inspect afterwards and remove wholesale. Before the extras, so a
-        # case can still override either.
-        cmd="env $SG_ENV TMPDIR=$SGSHIM CS193V_SGSHIM=$SGSHIM"
-        for a in "$@"; do cmd="$cmd $a"; done
-        cmd="$cmd bash $SG_SETUP_GIT"
+        cmd="env $SG_ENV TMPDIR=$SGSHIM CS193V_SGSHIM=$SGSHIM$envargs bash $SG_SETUP_GIT"
     fi
-    # THE PTY COMES FROM lib/ptyrun.py -- see its header, and launcher_tty in podman-shim.sh,
-    # for why script(1) cannot do this on a Mac. $SG_TIMEOUT is passed THROUGH rather than
-    # flattened to a literal: 90-setup-git-github.sh:178 raises it to 600 for the real-GitHub
-    # tier, and a hardcoded 120 there would truncate the transcript 5x early -- on which every
-    # sg_says_not would then pass vacuously.
-    sg_feed "$keys" | PATH="$SGSHIM:$PATH" do_script "${SG_TIMEOUT:-120}" "$cmd" 2>&1
+    SG_REPORT="$SGSHIM/drive.report"
+    rm -f "$SG_REPORT"
+    # SPLIT ON TABS ONLY, so a flow value may contain spaces (`NAME=Jane Doe`).
+    local oldifs="$IFS"
+    IFS="$A_TAB"
+    # shellcheck disable=SC2086
+    set -- $flowargs
+    IFS="$oldifs"
+    steps="$(sg_flow "$@")"
+    SG_OUT="$(printf '%s\n' "$steps" \
+        | CS193V_DRIVE_REPORT="$SG_REPORT" PATH="$SGSHIM:$PATH" \
+          do_drive "${SG_TIMEOUT:-120}" "$cmd" 2>&1)"
+    rc=$?
+    # ONE NAMED RESULT PER RUN, and it is not decoration: it is the only thing that can say a
+    # reflowed flow diverged, and it says WHERE. Recorded through the same pass/fail channel as
+    # everything else, so run-tests.sh counts it.
+    sg_conversation "$case_name" "$rc"
+}
+
+# The verdict on the conversation, from the report file lib/ptydrive.py wrote. NOT from the
+# transcript and NOT from stderr: sg_run ends `2>&1`, so this process`s stderr IS the transcript
+# and a diagnostic there would be read by every assertion in the suite.
+sg_conversation() {                   # sg_conversation CASE RC
+    local name="$1:the-conversation-went-as-described" bad
+    if [ ! -f "${SG_REPORT:-/nonexistent}" ]; then
+        fail "$name" "lib/ptydrive.py wrote no report, so nothing here was measured (rc $2)"
+        return 0
+    fi
+    bad="$(grep -c '^FAIL' "$SG_REPORT" 2>/dev/null || true)"
+    if [ "${bad:-1}" -eq 0 ]; then pass "$name"; return 0; fi
+    fail "$name" "$(sed -n "s/^FAIL\\t/diverged at step: /p;s/^# /  /p" "$SG_REPORT")"
+    # AND THE TRANSCRIPT IS POISONED, which is this file's own doctrine read from the failing
+    # side. A run that stopped at step 6 of 9 did not produce the screens the assertions below it
+    # ask about, so every one of them is a question about a run that never happened -- and about
+    # half of them are NEGATIVE, which means they would pass. $CHECKER_DIED in the value is what
+    # lib/assert.sh:138 already turns into a named failure on both the positive and the negative
+    # forms, and it survives $( ) and a pipe from one checker into another.
+    #
+    # MEASURED: with one screen inserted into ask_token, the suite as it stands reports 94
+    # failures across 30 case prefixes and not one of them names the extra screen. With this, the
+    # 35 conversation results name it and everything downstream says which run it could not read.
+    SG_OUT="$SG_OUT
+$CHECKER_DIED (the conversation diverged before this run finished: $name)"
+}
+
+# How many steps a run actually sent, for a case that wants to assert on the shape of the
+# conversation rather than on its contents.
+sg_steps_sent() {                     # sg_steps_sent -> N
+    grep -c '^OK' "${SG_REPORT:-/nonexistent}" 2>/dev/null || printf '0'
 }
 
 # ─── reading the transcript ────────────────────────────────────────────────────
