@@ -101,12 +101,12 @@ done
 # 26-installer-sandbox.sh's floor-skew case is the behavioural half of the same claim.
 for plat in LINUX MACOS; do
     mp_inst="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/install-cs193v.sh)"
-    mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" "$REPO/cs193v")"
+    mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/files/cs193v-ui.sh)"
     # NON-EMPTY FIRST, both of them, and this is the guard rather than pedantry: an empty-vs-empty
     # comparison passes forever, which is the exact trap this file records at its top for
     # version_lt. A renamed constant or a changed quoting style would make the sed match nothing.
     assert_ne "min-podman:installer-declares-$plat" "" "$mp_inst"
-    assert_ne "min-podman:launcher-declares-$plat"  "" "$mp_lnch"
+    assert_ne "min-podman:ui-declares-$plat"  "" "$mp_lnch"
     assert_eq "min-podman:the-two-$plat-floors-agree" "$mp_inst" "$mp_lnch"
     record    "min-podman:$plat-floor" "$mp_inst"
     # EXACTLY ONE DECLARATION IN EACH, because a second one later in either file would shadow the
@@ -115,8 +115,8 @@ for plat in LINUX MACOS; do
     # rather than by design -- and two IDENTICAL extra lines would compare equal and hide it.
     assert_eq "min-podman:installer-declares-$plat-once" "1" \
               "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/install-cs193v.sh)"
-    assert_eq "min-podman:launcher-declares-$plat-once"  "1" \
-              "$(grep -c "^MIN_PODMAN_$plat=" "$REPO/cs193v")"
+    assert_eq "min-podman:ui-declares-$plat-once"  "1" \
+              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/files/cs193v-ui.sh)"
 done
 # AND THE MAC FLOOR IS NEVER THE LOWER OF THE TWO, which is the whole point of splitting them: the
 # Linux floor exists to be lowered as distros are measured, and the macOS one exists to stay put.
@@ -134,26 +134,26 @@ assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
 # podman is, the student sees "Setup finished" followed by "Podman is not installed" -- which
 # IS issue #121, and is what it looked like the first time.
 pkg_inst="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/install-cs193v.sh)"
-pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' "$REPO/cs193v")"
+pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
 # NON-EMPTY FIRST, both of them, for the reason the floors above give: empty-vs-empty passes
 # forever, and a renamed constant makes the sed match nothing.
 assert_ne "probe:installer-declares-the-package-id" "" "$pkg_inst"
-assert_ne "probe:launcher-declares-the-package-id"  "" "$pkg_lnch"
+assert_ne "probe:ui-declares-the-package-id"  "" "$pkg_lnch"
 assert_eq "probe:the-two-package-ids-agree" "$pkg_inst" "$pkg_lnch"
 record    "probe:package-id" "$pkg_inst"
 assert_eq "probe:installer-declares-the-package-id-once" "1" \
           "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/install-cs193v.sh)"
-assert_eq "probe:launcher-declares-the-package-id-once"  "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' "$REPO/cs193v")"
+assert_eq "probe:ui-declares-the-package-id-once"  "1" \
+          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/files/cs193v-ui.sh)"
 
 # AND THE BODIES, not just the constant. carve_func's own header explains why an empty carving
 # is the trap here: sourced, it asserts nothing and passes.
 carve_func "$PRIVATE/install-cs193v.sh" ensure_podman_path "$TMP/probe_installer.sh"
 assert_ok "extract:probe_installer" test -s "$TMP/probe_installer.sh"
-carve_func "$REPO/cs193v"              ensure_podman_path "$TMP/probe_launcher.sh"
-assert_ok "extract:probe_launcher"  test -s "$TMP/probe_launcher.sh"
+carve_func $PRIVATE/files/cs193v-ui.sh ensure_podman_path "$TMP/probe_ui.sh"
+assert_ok "extract:probe_ui"  test -s "$TMP/probe_ui.sh"
 assert_eq "probe:the-two-copies-are-byte-identical" "" \
-          "$(diff "$TMP/probe_installer.sh" "$TMP/probe_launcher.sh")"
+          "$(diff "$TMP/probe_installer.sh" "$TMP/probe_ui.sh")"
 
 # ─── and what that code actually decides  (issue #121) ─────────────────────────
 # Driven against BOTH carvings, so a divergence that somehow survived the diff above still
@@ -194,7 +194,7 @@ p_rc()    { printf '%s' "${1%%|*}"; }
 p_added() { local t="${1#*|}"; printf '%s' "${t%%|*}"; }
 p_path()  { printf '%s' "${1##*|}"; }
 
-for f in installer launcher; do
+for f in installer ui; do
     CARV="$TMP/probe_$f.sh"
 
     # ── present, off PATH, on a Mac ──

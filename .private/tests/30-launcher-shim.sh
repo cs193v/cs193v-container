@@ -842,13 +842,13 @@ shim_fake_uname Darwin arm64
 POFF="$(shim_offpath_podman)"
 PFARM="$(shim_toolfarm)"
 shim_fake_pkgutil "$PROBE_PKG_ID" "$POFF"
-edit_sub "$PCOPY/cs193v" '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$PROBE_PKG_ID\""
+edit_sub "$PCOPY/.private/files/cs193v-ui.sh" '^PODMAN_PKG_ID=.*' "PODMAN_PKG_ID=\"$PROBE_PKG_ID\""
 # THE REWRITE IS ASSERTED, not assumed. edit_sub whose ERE matches nothing is a silent no-op
 # (lib/sandbox.sh:721 records the same trap), and the consequence here is specific and nasty:
 # on the maintainer's own Mac the shipped identifier is REAL, so a forgotten rewrite would
 # quietly test /opt/podman/bin and pass for the wrong reason.
 assert_eq "probe:the-launcher-copy-names-the-fake-package" "1" \
-          "$(grep -c "^PODMAN_PKG_ID=\"$PROBE_PKG_ID\"\$" "$PCOPY/cs193v")"
+          "$(grep -c "^PODMAN_PKG_ID=\"$PROBE_PKG_ID\"\$" "$PCOPY/.private/files/cs193v-ui.sh")"
 # AND IT IS STILL RUNNABLE. edit_sub rewrites through a temporary and used to drop the execute
 # bit, which made every probe_launcher below exit 126 with "Permission denied" -- eighteen
 # assertions failing for a reason that had nothing to do with what they test. lib/podman-shim.sh
