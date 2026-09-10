@@ -784,7 +784,7 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
 - **Staff can still get the raw output.** Debugging a build needs podman's words as they
   arrive; a bar is the wrong instrument. That split is also what makes hiding the output from
   a student affordable at all. Reached by `--dev-build` at the time; the verb is gone and
-  `CS193V_BUILD_RAW=1` is the switch now.
+  `CS193V_SETUP_RAW_LOG=1` is the switch now.
 - **Not a terminal → no carriage returns.** A `\r`-redrawn bar in a CI log or a
   `| tee build.txt` is one unreadable line thousands of columns long — and that is the
   exact path a student uses when staff ask them to send the output. Piped, it prints one

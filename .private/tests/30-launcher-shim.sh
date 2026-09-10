@@ -1289,7 +1289,7 @@ assert_says "build:creation-step-is-announced" "Setting up the course container"
 assert_says "build:creation-step-reports-done" "Ready"                           "$out"
 
 # --- the staff path keeps the raw output ---------------------------------------
-# CS193V_BUILD_RAW is the staff switch for podman's raw output. A progress bar is the wrong
+# CS193V_SETUP_RAW_LOG is the staff switch for podman's raw output. A progress bar is the wrong
 # instrument for debugging a build that HANGS -- the one failure $BUILD_LOG cannot be read for
 # afterwards -- and having the switch is what makes hiding the output from a student affordable.
 #
@@ -1299,7 +1299,7 @@ assert_says "build:creation-step-reports-done" "Ready"                          
 # output to find, and -- worse -- the negative assertion below would pass VACUOUSLY.
 shim_new
 shim_set state absent
-out="$(CS193V_BUILD_RAW=1 launcher --rebuild --no-cache)"
+out="$(CS193V_SETUP_RAW_LOG=1 launcher --rebuild --no-cache)"
 assert_contains "build-raw:keeps-raw-podman-output" "apt-get install -y package-number" "$out"
 # ...and the default does NOT, which is the half that protects the student. Asserted here
 # rather than trusted, because an env var read at the wrong moment defaults the wrong way
