@@ -929,6 +929,14 @@ student is ever asked for a password); `/etc/wsl.conf` holds `[user] default=stu
 `grep student /etc/subuid /etc/subgid` shows one range each, not two, even after re-running the
 installer; and `/etc/wsl-distribution.conf.cs193v` exists while `/etc/wsl-distribution.conf` does
 not.
+*Then check the one thing that only a real instance can show (#217):* podman needs the student's
+systemd user manager, and `wsl -e` does not create a login session, so
+`wsl -d CS193V -e systemctl --user is-active default.target` must answer **active** and
+`wsl -d CS193V -e podman info --format '{{.Host.CgroupManager}}'` must answer **systemd**. If
+they answer "Failed to connect to user scope bus" and "cgroupfs", lingering is not on and
+`./cs193v --rebuild` will die at step 3 of 25 with crun reporting `sd-bus call: Access denied` --
+measured, and it is why the root pass runs `loginctl enable-linger`. No container can test this:
+`/run/systemd/system` does not exist in one, so the step reports that and skips.
 *Why the re-run matters:* every step of the root pass checks before it acts, and the failure
 mode of getting that wrong is silent — a second `systemd=true` in `/etc/wsl.conf`, or a second id
 range. Run the installer twice and diff both files.
