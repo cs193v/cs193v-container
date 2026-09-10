@@ -173,6 +173,61 @@ assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "
 assert_says "sb-apt:names-openssh-client"        "Install openssh-client" "$out"
 assert_says "sb-apt:says-what-it-is-installing"  "Installing podman uidmap openssh-client" "$out"
 
+# ─── the progress block's anchors, against a REAL apt  (#219) ─────────────────
+# THE ONE CHECK NO FIXTURE OF OURS CAN MAKE. 25-installer.sh drives the same reader against a
+# recorded apt run, which proves the reader matches what that file says -- and nothing about
+# whether apt still says it. This is the other half, and it is the analogue of
+# 00-release-gates.sh diffing the launcher's Containerfile parse against real podman's STEP
+# lines: the anchors are a guess about somebody else's output until a real one confirms them.
+#
+# COUNTED IN THE LOG, NOT LOOKED FOR ON THE SCREEN. The captions are drawn by a 10 Hz animator,
+# so which of them were ever drawn depends on how long each phase took -- and this fixture
+# installs from a baked-in file:// repository, where the download phase can be over inside one
+# frame. What the log holds does not depend on any of that.
+sb_anchors="$(sb_section "$out" SETUP-ANCHORS)"
+record "sb-apt:the-anchor-counts" "$(printf '%s' "$sb_anchors" | do_tr '\n' ' ')"
+# THE LOG EXISTS AT ALL, which is what the three counts below would otherwise pass vacuously
+# against: an absent log greps as nothing, and "nothing" is not "zero".
+assert_says "sb-apt:the-progress-log-was-written" "lines=" "$sb_anchors"
+assert_says_not "sb-apt:the-progress-log-is-not-empty" "lines=0" "$sb_anchors"
+for sb_anchor in unpacking settingup; do
+    if printf '%s\n' "$sb_anchors" | grep -qE "^$sb_anchor=[1-9]"; then
+        pass "sb-apt:real-apt-prints-[$sb_anchor]"
+    else
+        fail "sb-apt:real-apt-prints-[$sb_anchor]" \
+             "the reader keys on this shape and apt printed none: $sb_anchors"
+    fi
+done
+# `Get:` IS RECORDED RATHER THAN ASSERTED, and that is this fixture rather than apt: it installs
+# offline from a file:// repository, and whether apt announces a local .deb with a Get: line is
+# a property of the mirror. The warm-cache case in 25-installer.sh is the same shape -- no Get:
+# at all -- and the bar simply steps twice at once, so a zero here is not a fault. What would be
+# a fault is the two above, which happen on every install apt has ever done.
+record "sb-apt:real-apt-get-lines" "$(printf '%s\n' "$sb_anchors" | sed -n 's/^get=//p')"
+# AND THE BLOCK REALLY DREW, which the counts above say nothing about -- they would be identical
+# if setup_meter_start had never been called. The CAPTIONS are what to assert here: they reach
+# the screen only through meter_label and the animator, and a transcript sampled at 10 Hz over a
+# multi-second apt run catches every one of the four.
+for sb_cap in meter.pm-refreshing meter.pm-downloading meter.pm-unpacking meter.pm-configuring; do
+    assert_says_key "sb-apt:real-apt-reaches-[$sb_cap]" "$sb_cap" "$out" "$ICAT"
+done
+# AND THE BOX AND THE BAR, on a real terminal of podman's making rather than ptyrun.py's. Four
+# bars after the corner is the titleless lid; see 25-installer.sh's aptbox group for why that
+# signature tells it from a message box.
+#
+# assert_contains AND NOT assert_says, which is not a style choice: _flatten DELETES box-drawing
+# characters (assert.sh) so that prose wrapped inside a box can be matched across its borders --
+# so assert_says can never match box art at all, and an assertion written that way fails against
+# a perfectly drawn box. Cost an afternoon here; it is why 30-launcher-shim.sh's tailbox group
+# uses assert_contains throughout.
+assert_contains "sb-apt:a-progress-box-is-drawn" "┏━━━━" "$out"
+assert_contains "sb-apt:the-bar-is-drawn"        "░"     "$out"
+# RECORDED AS WELL, because the two above are the geometry ladder's TOP rung: the block's width
+# comes from `tput cols` inside a pty podman sized from its own stdio, which sandbox_run
+# redirects to a file. A host that reports no size would drop the box below 44 columns -- the
+# ladder working rather than a fault -- and this is what would say so.
+record "sb-apt:the-block-on-this-hosts-pty" "lid=drawn bar=drawn"
+
 # THE EFFECT. podman was absent before -- the consent item above only exists when it is -- and
 # it is present after, which the two together can only both satisfy if apt really worked.
 assert_says "sb-apt:podman-is-installed-afterwards" "podman version" \
@@ -1539,6 +1594,26 @@ assert_says "fedora-e2e:names-podman-alone"   "Installing podman" "$out"
 # course Containerfile's own `apt-get install` lines in its build log, and asserting their absence
 # would be asserting the course image is not Ubuntu. The Tier A sb-fed case makes that assertion
 # instead, where there is no build log to confuse it.
+# ─── and dnf's two anchors, which only this case can confirm  (#219) ─────────
+# sb-fed above cannot: it runs with --network=none, so dnf stops at its metadata fetch and never
+# prints either of the lines the reader keys on. This case has a network and really installs.
+#
+# THIS SUITE ALREADY WARNS THAT DNF'S WORDING IS UNSTABLE -- sb-fed:really-reached-fedoras-repos
+# picks a mirror hostname over dnf's progress words on exactly that ground, and `Downloading
+# Packages` is dnf5's phrasing. So a zero here is a caption that goes stale rather than a wrong
+# one: the block still draws, the bar still finishes, and only the words stop keeping up. That
+# is the degradation apt_phases and dnf_phases are designed for, which is why the transaction
+# anchor is asserted and the download one is recorded.
+fe2e_anchors="$(sb_section "$out" SETUP-ANCHORS)"
+record "fedora-e2e:the-anchor-counts" "$(printf '%s' "$fe2e_anchors" | do_tr '\n' ' ')"
+record "fedora-e2e:dnf-download-lines" "$(printf '%s\n' "$fe2e_anchors" | sed -n 's/^dnfdownload=//p')"
+if printf '%s\n' "$fe2e_anchors" | grep -qE '^dnftrans=[1-9]'; then
+    pass "fedora-e2e:real-dnf-prints-[running-transaction]"
+else
+    fail "fedora-e2e:real-dnf-prints-[running-transaction]" \
+         "the reader keys on this shape and dnf printed none: $fe2e_anchors"
+fi
+assert_says "fedora-e2e:a-progress-box-is-drawn" "┏━━━━" "$out"
 record "fedora-e2e:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 record "fedora-e2e:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
 # THE CONTAINER, NOT JUST THE IMAGE. build_image runs `cs193v --rebuild`, which builds the image

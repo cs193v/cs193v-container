@@ -1162,7 +1162,7 @@ macfail="$(mac_run machine_init_rc 1)"
 assert_says "machinebox:failure-still-refuses" "Could not create the podman virtual machine" \
             "$macfail"
 assert_says "machinebox:failure-carries-podmans-words" "machine init failed" "$macfail"
-assert_says "machinebox:failure-names-the-log" "cs193v-setup-" "$macfail"
+assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 
 # ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
 # 80% of 8192 is 6553, so 4096 is under it and 16384 is over.
