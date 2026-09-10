@@ -487,14 +487,14 @@ didn't work for me"* menu entry, whose by-hand URL is short enough not to need a
 ## Your development loop
 
 ```
-./cs193v --rebuild                     # recreate; builds first IF the recipe moved
-./cs193v --rebuild --no-cache          # force a cold build — prove the network fetches work
-CS193V_BUILD_RAW=1 ./cs193v --rebuild  # podman's raw output instead of the progress bar
-./cs193v --rebuild --logout            # test the cold-start path a student sees
-./cs193v --dev-print-command           # see the exact podman run line
-./cs193v --dev-args                    # the args-file parse, one word per line
-./cs193v --dev-tunnel                  # the forwarded ports, and this instance's tunnel files
-./cs193v --stop                        # stop it by hand — see below, you will need this
+./cs193v --rebuild                         # recreate; builds first IF the recipe moved
+./cs193v --rebuild --no-cache              # force a cold build — prove the network fetches work
+CS193V_SETUP_RAW_LOG=1 ./cs193v --rebuild  # podman's raw output instead of the progress bar
+./cs193v --rebuild --logout                # test the cold-start path a student sees
+./cs193v --dev-print-command               # see the exact podman run line
+./cs193v --dev-args                        # the args-file parse, one word per line
+./cs193v --dev-tunnel                      # the forwarded ports, and this instance's tunnel files
+./cs193v --stop                            # stop it by hand — see below, you will need this
 ```
 
 **There is one verb here where there were four.** `--build`, `--full-rebuild` and `--dev-build`
@@ -524,12 +524,19 @@ student takes on day one, including its retry, its out-of-disk message, and the
 `cs193v.buildhash` label. There is no second implementation to drift, and no second verb
 either.
 
-What you do get that a student does not is `CS193V_BUILD_RAW=1`, which shows you **podman's
-raw output instead of the progress bar** (issue #23). Debugging a build needs podman's words as
-they arrive; a student needs to know it is moving. It replaced `--dev-build`, which had become
-a whole verb for choosing an output format. Leave it unset when you are changing anything about
-how the build *reports itself*, and remember that piping the default (`| tee`, CI) deliberately
-switches the bar to one plain line per step.
+What you do get that a student does not is `CS193V_SETUP_RAW_LOG=1`, which shows you **the raw
+output instead of the progress bar** (issue #23). Debugging a build needs podman's words as they
+arrive; a student needs to know it is moving. It replaced `--dev-build`, which had become a whole
+verb for choosing an output format. Leave it unset when you are changing anything about how the
+build *reports itself*, and remember that piping the default (`| tee`, CI) deliberately switches
+the bar to one plain line per step.
+
+**One switch, two blocks, which is why it is not called `CS193V_BUILD_RAW` any more** (issue
+#219). `course-install.sh` is about to draw the same block around the host package manager and
+read the same variable, so setting it will get you apt's words *and* podman's. Two switches would mean
+picking the wrong one and losing the output you were trying to read — and staff debugging an
+install want both streams anyway. Each script keeps a local name that says what it gates there:
+`BUILD_RAW` in the launcher, `SETUP_RAW` in the installer.
 
 A failed build no longer leaves podman's output on the screen, so `err.build-failed` now
 carries the last lines of `$BUILD_LOG` inside the STOP box. That log is still the thing to

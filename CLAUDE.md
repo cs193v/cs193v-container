@@ -26,7 +26,7 @@ deletes the other's logins.
 - **`--rebuild` builds only when the recipe moved.** It compares `cs193v.buildhash` against the
   Containerfile and `files/` on disk, so it is a two-second recreate when they agree and a full
   build when they do not. Force one with `--rebuild --no-cache`; watch podman's raw output
-  instead of the progress bar with `CS193V_BUILD_RAW=1`.
+  instead of the progress bar with `CS193V_SETUP_RAW_LOG=1`.
 
 ## Port collisions
 
