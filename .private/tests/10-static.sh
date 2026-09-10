@@ -2129,6 +2129,12 @@ then pass "text116:the-handover-block-was-really-excluded"
 else fail "text116:the-handover-block-was-really-excluded" \
           "the sed addresses matched nothing, so the exception is not being applied"; fi
 
+# THE THREE setup_* NAMES ARE #219's, and they belong here for the reason the other seven do:
+# they put a sentence on the screen. A phase caption goes to meter_label, which writes it into a
+# state file an animator redraws at 10 Hz -- so a literal there is prose out of the catalogue's
+# reach in the one place a student stares at for a minute. Every call site already passes
+# "$(msg ...)", which strips to nothing; this is what keeps the next one honest.
+#
 # THE RULE IS "no letters left once the expansions come out", NOT "the argument starts with $".
 # `ok "$PLAT on $(uname -m)"` starts with an expansion and still carried the word "on", and
 # `die "$PM_REFRESH failed."` the word "failed" -- a first-character test called both clean.
@@ -2143,7 +2149,7 @@ text_hits="$(printf '%s\n' "$inst_logic" | awk '
     }
     {
         line = strip($0)
-        while (match(line, /(^|[^[:alnum:]_.$-])(step|ok|skip|note|die|need|menu)[[:space:]]+/)) {
+        while (match(line, /(^|[^[:alnum:]_.$-])(step|ok|skip|note|die|need|menu|setup_meter_start|setup_phase|setup_say_phase)[[:space:]]+/)) {
             line = substr(line, RSTART + RLENGTH)
             # Every double-quoted run left on the line after the helper. A clean call site has
             # collapsed to "" by now; a literal still has its words.

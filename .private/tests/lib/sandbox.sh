@@ -792,6 +792,21 @@ du -sb "$(podman info --format '{{.Store.GraphRoot}}')" 2>/dev/null | cut -f1
 # is what cs193v:908-910 says it is for on a build that fails rather than hangs.
 printf '===BUILD-LOG===\n'
 for f in /tmp/cs193v-build-*.log; do [ -f "$f" ] && tail -60 "$f"; done
+# THE INSTALLER'S OWN LOG, and the anchors its progress block keys on (#219). The same section
+# run.sh emits, and it has to be in both: this script is the only path that reaches a package
+# manager WITH A NETWORK, so dnf's two line shapes can be confirmed here and nowhere else.
+printf '===SETUP-ANCHORS===\n'
+sl="${TMPDIR:-/tmp}/cs193v-setup.log"
+if [ -f "$sl" ]; then
+    printf 'lines=%s\n'       "$(grep -c . "$sl")"
+    printf 'get=%s\n'         "$(grep -c '^Get:' "$sl")"
+    printf 'unpacking=%s\n'   "$(grep -c '^Unpacking ' "$sl")"
+    printf 'settingup=%s\n'   "$(grep -c '^Setting up ' "$sl")"
+    printf 'dnfdownload=%s\n' "$(grep -c '^Downloading Packages' "$sl")"
+    printf 'dnftrans=%s\n'    "$(grep -c '^Running transaction' "$sl")"
+else
+    printf 'lines=no-log\n'
+fi
 printf '===DOCTOR===\n'
 "$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
 printf '===END-REPORT===\n'

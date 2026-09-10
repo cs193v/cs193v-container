@@ -103,6 +103,13 @@ no live box above it, apt's failing lines readable inside it, and the log path n
 anchors against a **real** apt and dnf are `26-installer-sandbox.sh`. What needs a human is
 timing, flicker, and whether the captions read right while they are happening.
 
+**And a third console, which is neither of the two above.** A Windows student reaches this same
+apt block through `install-cs193v-windows.cmd` → `wsl.exe -e bash`, so the block is drawn into a
+conhost or Windows Terminal window rather than a Unix terminal. Nothing in the wine tier can
+answer whether its cursor moves land correctly there, and the build's block already crosses that
+bridge on the same run — so the thing to check is that they look the *same*, one after the other,
+rather than checking this one alone.
+
 **Two arms no fixture reaches.** `sudo installer -pkg` and a real `podman machine init` need a
 Mac. On one, watch that the `.pkg` download shows curl's percentage in the box rather than eight
 blank rows — that is what dropping `-s` buys — and that the VM step reads "Downloading the VM"
