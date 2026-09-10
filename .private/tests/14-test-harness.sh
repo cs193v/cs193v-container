@@ -1073,6 +1073,33 @@ assert_says "ptydrive:each-step-waits-for-its-own-screen" "A=[hello] K=[X]" "$pd
 assert_eq "ptydrive:a-clean-run-reports-no-failure" "0" \
           "$(grep -c '^FAIL' "$WORK/pd-r1" || true)"
 
+# THE FOURTH KIND, WHICH IS SUDO'S SHAPE (#226). Canonical with echo off: neither the resting
+# state nor either keystroke read, and reached by no cursor marker -- so for `password` the level
+# is the arm. The fixture is `stty -echo` with a plain `read`, which is what sudo does; a `secret`
+# step must NOT be satisfied by it, because that would mean a token could be typed into a
+# terminal that is still canonical.
+cat > "$WORK/pd-pw.sh" <<'CHILD'
+printf 'PASSWORD SCREEN '
+stty -echo
+IFS= read -r pw
+stty echo
+printf '\nPW=[%s]\n' "$pw"
+CHILD
+pd_out="$(pd_step password pw 'PASSWORD SCREEN' 'hunter2\n' | pd_run "$WORK/pd-r-pw" "bash $WORK/pd-pw.sh")"
+assert_says "ptydrive:answers-a-canonical-echo-off-read" "PW=[hunter2]" "$pd_out"
+assert_eq "ptydrive:the-password-kind-reports-no-failure" "0" \
+          "$(grep -c '^FAIL' "$WORK/pd-r-pw" || true)"
+# AND IT WAS NOT ECHOED, which is the whole reason the kind checks the level: the driver writes
+# only once the terminal says echo is off, so the secret is not in the transcript.
+assert_not_contains "ptydrive:does-not-echo-the-password" "hunter2
+" "$(printf '%s' "$pd_out" | sed 's/PW=\[hunter2\]//')"
+# THE NEGATIVE THAT KEEPS THE TWO KINDS APART. A `secret` step wants BOTH off; this child leaves
+# ICANON set, so it must refuse rather than type into it.
+pd_out="$(pd_step secret pw 'PASSWORD SCREEN' 'github_pat_NOTTHIS\n' | pd_run "$WORK/pd-r-pw2" "bash $WORK/pd-pw.sh")"
+assert_not_contains "ptydrive:a-secret-step-refuses-a-canonical-read" "github_pat_NOTTHIS" "$pd_out"
+assert_contains "ptydrive:says-which-read-it-was-never-at" "never at a secret read" \
+                "$(cat "$WORK/pd-r-pw2")"
+
 # THE STATE TEST, and it is the one that makes a leaked credential unreachable rather than
 # unlikely. This child reads a line with the terminal ECHOING; a `secret` step must refuse to type
 # into it rather than pasting a credential somewhere it will be echoed back.

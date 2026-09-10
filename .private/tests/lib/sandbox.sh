@@ -384,12 +384,39 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
 SB_BASE=machine; SB_NO_CAPS=''; SB_NO_PREREQS=''; SB_PLATFORM=linux; SB_FAKE_PODMAN=no
 SB_SUDO=''
 SB_SPEC=''
+# ─── the conversation a case wants to have with the installer  (#226) ──────────
+# SB_SESSION IS BUILT BY sb_step AND CONSUMED BY sandbox_run, one step per line in the four-field
+# shape lib/ptydrive.py reads: KIND, NAME, NEEDLES, KEYS. Cleared by sb_machine, so a case that
+# does not build one gets the keystroke door and behaves exactly as it did.
+#
+# THE NEEDLES COME OUT OF THE CATALOGUE, never typed here: every call site passes msg_text keys,
+# so nothing in this file or in a case knows any wording and a reworded message moves the needle
+# with it. That is the same discipline lib/setup-git-shim.sh's sg_phrase keeps for setup-git.
+SB_SESSION=''
+sb_step() {                           # sb_step KIND NAME KEYS NEEDLE...
+    local kind="$1" name="$2" keys="$3"; shift 3
+    local needles='' n
+    for n in "$@"; do
+        # 0x1f BETWEEN NEEDLES, which is what ptydrive splits on, and an empty one is dropped
+        # there rather than here -- so a msg_text that came back empty is a step with fewer
+        # needles and not a step that matches everything. assert_says_key is what catches the
+        # key itself being wrong.
+        needles="${needles:+$needles$(printf '\037')}$n"
+    done
+    SB_SESSION="$SB_SESSION$kind$(printf '\t')$name$(printf '\t')$needles$(printf '\t')$keys
+"
+}
+
 sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prereqs=L] [platform=P] [fake-podman=yes] [sudo=S]
     SB_BASE=machine; SB_NO_CAPS=''; SB_NO_PREREQS=''; SB_PLATFORM=linux; SB_FAKE_PODMAN=no
     # EMPTY IS NOT `nopasswd`, and the difference is what keeps 20-odd existing cases exactly as
     # they were: empty means run.sh does not touch the policy at all, so the fixture's own
     # NOPASSWD line stands and no `sudo -n chpasswd` runs in a case that never asked about sudo.
     SB_SUDO=''
+    # CLEARED HERE, with the other axes, so one case's conversation cannot leak into the next --
+    # the failure that would cause is a step waiting for a screen this case never draws, which
+    # ptydrive reports as a divergence naming somebody else's step.
+    SB_SESSION=''
     local a bad
     for a in "$@"; do
         case "$a" in
@@ -427,7 +454,12 @@ sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prer
                     fi ;;
     esac
     SB_SPEC="base=$SB_BASE no-caps=${SB_NO_CAPS:-none} no-prereqs=${SB_NO_PREREQS:-none}"
-    SB_SPEC="$SB_SPEC platform=$SB_PLATFORM fake-podman=$SB_FAKE_PODMAN sudo=${SB_SUDO:-fixture}"
+    # THE ARM NAME ONLY, never the password with it. The spec is `record`ed for every case, and a
+    # record line carrying `sudo=password:hunter2` is both noise and the reason an assertion that
+    # the password never reached the transcript failed against the harness rather than the
+    # terminal. What the case wants to check is the applied policy, and ===SUDO=== reports that.
+    SB_SPEC="$SB_SPEC platform=$SB_PLATFORM fake-podman=$SB_FAKE_PODMAN"
+    SB_SPEC="$SB_SPEC sudo=${SB_SUDO:+${SB_SUDO%%:*}}${SB_SUDO:-fixture}"
     return 0
 }
 
@@ -546,6 +578,20 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     # -- and --no-prereqs would have made it two copies of something far more destructive.
     cp "$TESTS_DIR/lib/sandbox-guest.sh" "$SB_WORK/sandbox"
     cp "$TESTS_DIR/lib/podman-fake"      "$SB_WORK/podman-fake"
+    # ─── the pty driver, INSIDE the container  (#226) ──────────────────────────
+    # RUN IN THE GUEST, NOT ON THE HOST, and that is measured rather than preferred. ptydrive's
+    # two properties are the KIND check against the slave's line discipline and the arm signal,
+    # and BOTH are blind through `podman run -it`: podman puts the outer terminal into raw mode
+    # for the whole run and does not propagate the container's own mode changes. Measured -- an
+    # inner `stty -echo -icanon` leaves the outer master reading icanon=0 echo=0 before and
+    # after, identically. Driven from the host, every step would see one frozen state and the
+    # gate would degrade to prose plus a timeout, which is the clock #206 deleted.
+    #
+    # From in here the pty it forks is the installer's OWN, so the states are the installer's:
+    # icanon=1 echo=1 at rest, both off inside menu(), and canonical-with-echo-off for exactly
+    # as long as sudo's prompt is waiting. python3 is in every fixture (verified in the machine
+    # base; a fixture without it would fail the door below by name rather than silently).
+    cp "$TESTS_DIR/lib/ptydrive.py"     "$SB_WORK/ptydrive.py"
     chmod +x "$SB_WORK/sandbox" "$SB_WORK/podman-fake"
     cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer.sh"
     edit_sub "$SB_WORK/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
@@ -788,6 +834,24 @@ sb_installed > /var/tmp/report/dpkg-before
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 
+# ─── how the installer is driven: keystrokes, or a described conversation  (#226) ──
+# TWO DOORS, AND THE SECOND IS OPT-IN. Without SB_SESSION_FILE nothing changes: the keystrokes
+# on this container's stdin reach the installer's menus exactly as they always have, which is
+# what every other case in the tier relies on.
+#
+# WITH ONE, the installer runs under lib/ptydrive.py and each keystroke waits for the screen it
+# answers. That is the only way a case can answer a sudo PASSWORD prompt at all: sudo discards
+# whatever is already in the terminal's input queue when it reads one, so a password piped in
+# ahead of the container is echoed and then thrown away -- measured both ways, and the reason
+# apply_sudo sets passwd_timeout for the cases that do not answer.
+#
+# THE TRANSCRIPT IS UNCHANGED. ptydrive writes the child's output to its own stdout, which is
+# this script's stdout, exactly as a bare `bash "$INST"` does. Its own diagnostics never go
+# there -- they go to the report file, which the block at the foot of this script prints as
+# ===DRIVE===, so a conversation that went wrong is readable beside the transcript it produced.
+DRIVEN=no
+if [ -n "${SB_SESSION_FILE:-}" ] && [ -s "${SB_SESSION_FILE:-}" ]; then DRIVEN=yes; fi
+
 # ─── the loopback origin, for the wget arm only (#221) ─────────────────────────
 # STARTED HERE AND WAITED FOR, because wget has no file:// scheme and every other case serves the
 # tarball over one. The wait is on a file the listener writes after bind+listen returns, so the
@@ -808,7 +872,12 @@ fi
 # assertion then compared `listening` against `listening` followed by the whole transcript, and
 # the marker it displaced left INSTALLER-USED empty. Every report marker belongs in the block at
 # the foot of this script, after the last thing that writes to stdout.
-bash "$INST"
+if [ "$DRIVEN" = yes ]; then
+    CS193V_DRIVE_REPORT=/var/tmp/report/drive \
+        python3 /work/ptydrive.py "bash $INST" < "$SB_SESSION_FILE"
+else
+    bash "$INST"
+fi
 rc=$?
 
 # ─── AND, WHEN THE CASE ASKS FOR IT, AGAIN AS THE STUDENT  (#217) ──────────────
@@ -875,6 +944,11 @@ printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
 # policy. Measured, on sb-wsl and sb-fed. This is the rule stated above the origin block:
 # every report marker belongs in this block, after the last thing that writes to stdout.
 printf '\n===SUDO===\n%s\n' "$(/work/sandbox state-sudo 2>/dev/null)"
+printf '===DRIVEN===\n%s\n' "$DRIVEN"
+# THE CONVERSATION'S OWN ACCOUNT, and empty on every case that did not have one. A step that
+# never found its screen is a FAIL line naming the step, which is worth reading beside a
+# transcript that merely stops early.
+printf '===DRIVE===\n';    cat /var/tmp/report/drive 2>/dev/null
 # THE FIXTURE'S OWN ARCHITECTURE, so an assertion on the survey's "PLAT on ARCH" line can
 # check that it told the truth rather than that this image happens to be amd64. Three cases
 # used to hardcode x86_64 and so passed or failed on whether their base image was pinned to a
@@ -1366,6 +1440,15 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     # assertion then fails about the installer's output. sb_machine validates $SB_NO_CAPS long
     # before this, so this cannot fire today; it exists so that a future call site that mistypes a
     # drop name is told which of the two things went wrong.
+    # THE SESSION, WRITTEN PER CASE AND NAMED PER CASE. $SB_WORK is mounted read-only from the
+    # container's side, which does not stop us writing it here -- and the case's own label in the
+    # name is what keeps one case's conversation out of another's run, in a tier that is
+    # serialised but whose leftovers outlive a killed run.
+    local sess_in=''
+    if [ -n "$SB_SESSION" ]; then
+        printf '%s' "$SB_SESSION" > "$SB_WORK/session-$case"
+        sess_in="/work/session-$case"
+    fi
     machine_flags "${SB_NO_CAPS:+$SB_NO_CAPS,}label" "$SB_PLATFORM" "$SB_FAKE_PODMAN" "$SB_BASE" \
         || { fail "sb-$case:the-machine-flags-were-accepted" "machine_flags refused the drop list"; return 1; }
     set -- ${MACHINE_FLAGS[@]+"${MACHINE_FLAGS[@]}"} "$@"
@@ -1377,6 +1460,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
         -e "SB_NO_PREREQS=$SB_NO_PREREQS" \
         -e "SB_DISTRO=$(machine_distro "$SB_BASE")" \
         -e "SB_SUDO=$SB_SUDO" \
+        -e "SB_SESSION_FILE=$sess_in" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" "$@" \
         "$(fixture_tag "$SB_BASE")" \
         /work/run.sh > "$SB_TMP/raw" 2>&1
@@ -1409,6 +1493,21 @@ sandbox_diff() { local n; n="$(sb_name)"; podman diff "${n:?sandbox_diff: no con
 sandbox_reap() { local n; n="$(sb_name)"; podman rm -f "${n:?sandbox_reap: no container}" >/dev/null 2>&1 || true; }
 
 # One section of the in-container report.
+# ─── the installer's own output, without the report blocks  (#226) ─────────────
+# BETWEEN THE TWO MARKERS, because the whole transcript is not the installer's: run.sh prints
+# ===INSTALLER-USED=== before it and a dozen report sections after it, and the suite prints a
+# `record` line for the machine spec before either. An assertion that something never reached
+# the STUDENT has to look at what the student saw -- measured the hard way, when
+# sb-sudo-password's "the password was never echoed" failed against the spec record rather than
+# against the terminal.
+sb_transcript() {                     # sb_transcript TRANSCRIPT -> just the installer's output
+    printf '%s\n' "$1" | awk '
+        /^===INSTALLER-USED===$/ { on = 1; next }
+        /^===INSTALLER-RC=/      { on = 0 }
+        on { print }
+    '
+}
+
 sb_section() {                        # sb_section TRANSCRIPT NAME
     printf '%s\n' "$1" | sed -n "/^===$2===$/,/^===/p" | sed '1d;$d'
 }

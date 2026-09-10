@@ -187,15 +187,28 @@ apply_sudo() {
             # moment sudo reads a password. Scoped to this user and to this arm.
             #
             # AND A PROMPT THAT GIVES UP, which is what makes an UNANSWERED prompt a case the
-            # suite can run rather than a wedged container (#226). sudo flushes the terminal's
-            # input queue before reading a password -- a deliberate defence against typed-ahead
-            # passwords -- so nothing this harness writes in advance can answer it, and sudo's
-            # default patience is five minutes against a 60 s container ceiling. Measured: the
-            # case printed its prompt, every ordering assertion passed, and then the container
-            # was killed with its report block never reached. `passwd_timeout` is in MINUTES and
-            # takes fractions; 0.3 is 18 s, which fits the ceiling and is still long enough for
-            # a person driving install-sandbox.sh to type when they are watching for it.
-            # passwd_tries=1 so an unanswered prompt is one prompt, not three.
+            # suite can run rather than a wedged container (#226). sudo discards whatever is
+            # already in the terminal's input queue when it reads a password -- a deliberate
+            # defence against a typed-ahead one -- so nothing this harness writes in ADVANCE can
+            # answer the prompt, and sudo's default patience is five minutes against a 60 s
+            # container ceiling.
+            #
+            # MEASURED DIRECTLY, BOTH WAYS, and deliberately not inferred from the hang that
+            # first showed it. In this fixture, with this policy: a password piped in ahead of
+            # the container is echoed at offset 0 and then sudo says "timed out reading
+            # password", so nothing reached its read at all; the same password written AFTER the
+            # prompt authenticates, and a following `sudo -n` then succeeds on the timestamp.
+            #
+            # AND IT IS NOT THE DEFECT ptyrun.py AND ptydrive.py RECORD. Those describe a claim
+            # that bash's `read -n1` restore discarded the queue, which was really script(1)
+            # injecting a VEOF -- a harness artefact, and #206 was right to retire it. This is
+            # sudo's own flush at its own password read, under a driver that injects nothing,
+            # which is why it is stated here rather than treated as the same mistake twice.
+            #
+            # `passwd_timeout` is in MINUTES and takes fractions; 0.3 is 18 s, which fits the
+            # ceiling and is still long enough for a person driving install-sandbox.sh to type
+            # when they are watching for it. passwd_tries=1 so an unanswered prompt is one
+            # prompt, not three.
             printf 'Defaults:student !use_pty, passwd_tries=1, passwd_timeout=0.3\nstudent ALL=(ALL) ALL\n' \
                 > "$REP/sudoers.new"
             sudo -n install -m 0440 -o root -g root "$REP/sudoers.new" "$SUDOERS"

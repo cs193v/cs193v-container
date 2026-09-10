@@ -538,11 +538,16 @@ prompt, immediately below the `Asking for your password, once` heading and its n
 nothing further asked for the rest of the run.
 *Also worth watching:* that the heading does **not** appear on a machine with passwordless
 sudo, where no prompt is coming.
-*Automated equivalent:* `26-installer-sandbox.sh :: sb-sudo-password:*` sets a real password on
-the fixture's account, drops `NOPASSWD`, drives the prompt over a pty and counts the prompts;
-`sb-sudo-absent:*` and `sb-sudo-deny:*` cover the two refusals with their effects. What is left
-for a person is the *feel* of it — whether the note reads as an explanation at the moment the
-prompt appears, which is the judgement `lib/sandbox-guest.sh:apply_sudo` was written for.
+*Automated:* `26-installer-sandbox.sh :: sb-sudo-password:*` sets a real password on the
+fixture's account, drops `NOPASSWD`, and **answers the prompt** — `lib/ptydrive.py`'s `password`
+step waits for the terminal to say echo is off, which is the state sudo's prompt puts it in, so
+the whole claim is asserted: one prompt, after the announcement, and the privileged step running
+on the far side of it with the range landing in both files. `sb-wsl-pw:*` does the same for the
+machine that asks for no consent at all, and `sb-sudo-absent:*` / `sb-sudo-deny:*` cover the two
+refusals with their effects.
+*What is left for a person* is the *feel* of it — whether the note reads as an explanation at the
+moment the prompt appears, which is the judgement `lib/sandbox-guest.sh:apply_sudo`'s four arms
+exist for.
 *Not automatable here:* macOS. `sudo installer -pkg` runs inside the primed window, and no
 fixture stands in for a Mac.
 
