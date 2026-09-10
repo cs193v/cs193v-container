@@ -1794,7 +1794,7 @@ assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
 # `${a[x]}` but not `$(( ))` -- the first construct its own comment lists. So a mutation that
 # evaluated the raw port arithmetically passed the entire static+unit tier, 912 assertions, with
 # only an unrelated counter noticing.
-gate="$(for f in dynports_reset dynports_fatal dynports_port dynports_line; do
+gate="$(for f in dynports_read dynports_reset dynports_fatal dynports_port dynports_line; do
             fn_body "$f" "$PRIVATE/files/cs193v-ui.sh"
         done | sed 's/^[[:space:]]*#.*//')"
 if [ -z "$gate" ]; then
@@ -1813,6 +1813,32 @@ assert_eq "gate:no-array-subscripts" "" \
           "$(printf '%s\n' "$gate" | grep -nE '[$]\{[A-Za-z_][A-Za-z_0-9]*\[' || true)"
 assert_eq "gate:no-substring-expansion" "" \
           "$(printf '%s\n' "$gate" | grep -nE '[$]\{[A-Za-z_][A-Za-z_0-9]*:[0-9$]' || true)"
+
+# ─── ...AND THE READ THAT FEEDS IT, WHICH IS PINNED BY SHAPE  (#244) ──────────
+# THE ONE THING A GREP CAN HONESTLY CATCH HERE. `read -t`'s status means two different things:
+# >128 on a timeout from bash 4.0 on, and 1 on the 3.2 macOS ships -- where a closed stream
+# also returns 1. dynports_read therefore asks the status FIRST, which settles it on bash 4+,
+# and falls back to whether `read` ASSIGNED ANYTHING, which is what separates the two on 3.2.
+#
+# BANNING `-gt 128` OUTRIGHT WAS THE FIRST IDEA AND IS WRONG: that arm is correct and still
+# there. What can go missing is the OTHER half, and losing it is invisible on Linux -- every
+# test stays green while every Mac loses its port supervisor at the first five-second gap.
+# That is #244 exactly, so the two lines that cannot go missing are named here.
+#
+# THE ASSERTION THAT SETTLES THE BEHAVIOUR IS NOT THIS ONE. 12-run-timeout.sh drives the real
+# function through all five outcomes on whatever bash is running; this only stops the shape
+# being simplified back. Both are wanted: one proves the claim, the other guards the code.
+gate_read="$(fn_body dynports_read "$PRIVATE/files/cs193v-ui.sh")"
+if [ -z "$gate_read" ]; then
+    fail "gate:the-read-was-found" "fn_body returned nothing for dynports_read,
+so both assertions below would search an empty string and pass."
+else
+    pass "gate:the-read-was-found"
+fi
+assert_contains "gate:the-read-clears-the-line-first" \
+                "unset DYNPORTS_LINE" "$gate_read"
+assert_contains "gate:the-read-does-not-trust-the-status-alone" \
+                '[ -z "${DYNPORTS_LINE+set}" ]' "$gate_read"
 
 sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"

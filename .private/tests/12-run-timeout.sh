@@ -373,3 +373,114 @@ assert_eq "ver:fallback-reads-the-last-field" "9.9.9" \
 # Nothing at all is empty rather than a wrong guess: version_lt reads empty as below any floor, so
 # an unreadable podman is refused rather than waved through.
 assert_eq "ver:nothing-parseable-is-empty" "" "$(podman_version_of '')"
+
+# ─── dynports_read: what read's exit status does and does NOT mean  (#244) ─────
+# THE SAME REFUSAL run_timeout MAKES, ONE NOTCH FINER, AND THIS IS WHERE IT IS SETTLED. The
+# comment at the fifo branch's second read says the status is ">128 on bash 4 and 1 on the 3.2
+# macOS ships, so testing it would mean two behaviours" -- and run_timeout can stop there,
+# because its payload is always a number, so "did a value arrive" answers everything.
+#
+# The supervisor's frame reader cannot stop there. Its payload may legitimately be nothing, and
+# the empty string is exactly what a closed stream produces, so "a value arrived" cannot tell a
+# five-second silence from the watcher having gone away. What CAN is subtler and is not in any
+# man page: bash 3.2 does not touch the variable when `read -t` times out, and does assign when
+# the stream ends. Measured on both shells, all five outcomes:
+#
+#                              bash 3.2.57            bash 5.3.9
+#     timeout                  rc 1,   UNTOUCHED      rc 142, set
+#     timeout, partial input   rc 1,   UNTOUCHED      rc 142, set
+#     EOF                      rc 1,   set ""         rc 1,   set ""
+#     EOF, partial input       rc 1,   set "BEG"      rc 1,   set "BEG"
+#     a line arrives           rc 0,   set            rc 0,   set
+#
+# WHICH IS WHY THESE ASSERTIONS EXIST AT ALL. #244 was that difference going unnoticed: sup_loop
+# branched on `[ "$rc" -gt 128 ]`, which cannot be true on any Mac, so TUNNEL_SUP_SILENCE_MAX was
+# dead code and the first five-second gap in the watcher's stream ended dynamic port forwarding
+# for the rest of the session. The rc test is still there and still authoritative on bash 4+;
+# what is new is the half that runs where it cannot work. An undocumented behaviour load-bearing
+# in the product is a behaviour the suite has to hold down, and this is that hold.
+#
+# IT RUNS UNDER WHATEVER BASH THE DEVELOPER HAS, so a Mac proves the 3.2 half and CI proves the
+# other. rt:bash-version above records which one this run was.
+
+# Asserted first and on its own, the way 17-portparse-fuzz.sh does it for the rest of the gate:
+# every property below is vacuous if the function is missing, and a suite that drives nothing
+# passes everything.
+if command -v dynports_read >/dev/null 2>&1; then
+    pass "read:the-function-under-test-was-sourced"
+else
+    fail "read:the-function-under-test-was-sourced" \
+"dynports_read is not in files/cs193v-ui.sh, so every assertion below is asserting nothing."
+fi
+
+# WORDS, NOT THE THREE RETURN CODES, so a failure says which of the three things happened
+# instead of leaving a reader to look 0/1/2 up.
+verdict() {                           # verdict SECS  <caller redirects stdin>  -> word
+    dynports_read "$1"
+    case "$?" in
+        0) printf 'line:%s' "$DYNPORTS_LINE" ;;
+        1) printf 'timeout' ;;
+        2) printf 'ended' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+# A FIFO OPENED READ-WRITE IS A STREAM THAT CANNOT END: this process is its own writer, so there
+# is never an EOF to find and the only thing the read can do is time out. That is the whole
+# stimulus -- no second process, and nothing to wait for.
+RDF="$WORK/rd.fifo"
+mkfifo "$RDF"
+exec 7<>"$RDF"
+assert_eq "read:silence-is-a-timeout" "timeout" "$(verdict 1 <&7)"
+# ...and with bytes in flight that never became a line. bash 4 hands the partial back and bash
+# 3.2 discards it; both must still call it a timeout rather than an ending.
+printf 'partial' >&7
+assert_eq "read:a-partial-line-that-stops-is-a-timeout" "timeout" "$(verdict 1 <&7)"
+exec 7<&-
+rm -f "$RDF"
+
+assert_eq "read:a-closed-stream-has-ended"  "ended" "$(verdict 1 </dev/null)"
+# THE CASE THE STATUS ALONE GETS WRONG ON EVERY SHELL: a writer that died mid-line. rc is 1 here
+# on bash 5 too, so this is the one outcome both halves of the predicate have to agree on.
+assert_eq "read:a-partial-line-then-a-close-has-ended" "ended" "$(verdict 1 < <(printf 'BEG'))"
+assert_eq "read:a-whole-line-is-a-line" "line:hello" "$(verdict 1 < <(echo hello))"
+
+# ─── ...and the three of them in one stream, which is the shape sup_loop sees ──
+# The cases above each start from a clean variable. This one does not: it is here because the
+# predicate reads a variable that the PREVIOUS call may have set, so "a timeout after a line"
+# is the case where a stale value would be mistaken for a fresh one, and it cannot be caught by
+# testing the outcomes one at a time.
+RDS="$WORK/rd.seq"
+mkfifo "$RDS"
+(
+    exec 3>"$RDS"
+    printf 'alpha\nbeta\n' >&3
+    # A DURATION, DELIBERATELY. This sleep is the stimulus -- the silence itself -- not a wait
+    # for anything to appear. See wait_until in lib/assert.sh for why that distinction decides.
+    sleep 3
+    printf 'gamma\n' >&3
+    exec 3>&-
+) &
+RDS_W=$!
+RD_SAW=''
+rd_drain() {                          # read until the stream ends, or give up
+    local n=0
+    while [ "$n" -lt 12 ]; do
+        RD_SAW="$RD_SAW $(verdict 1)"
+        case "$RD_SAW" in *ended) return 0 ;; esac
+        n=$(( n + 1 ))
+    done
+    return 1
+}
+# A GROUP, NOT A SUBSHELL: `{ ...; } < FILE` redirects without forking, so what rd_drain
+# accumulates is still here to assert on.
+{ rd_drain; } < "$RDS"
+RD_SAW="${RD_SAW# }"
+wait "$RDS_W" 2>/dev/null || true
+rm -f "$RDS"
+record "read:the-sequence-seen" "$RD_SAW"
+assert_match "read:lines-arrive-in-order"                '^line:alpha line:beta' "$RD_SAW"
+assert_match "read:a-gap-after-a-line-is-a-timeout"      'line:beta timeout'     "$RD_SAW"
+# gamma, not beta: had the previous line survived the next call, this would read `line:beta`.
+assert_match "read:a-line-after-a-gap-still-arrives"     'timeout line:gamma'    "$RD_SAW"
+assert_match "read:and-the-end-is-still-found-after-all-that" 'line:gamma ended$' "$RD_SAW"

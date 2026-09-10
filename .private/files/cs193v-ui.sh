@@ -1363,6 +1363,64 @@ DYNPORTS_SEEN=0
 DYNPORTS_MAX=128
 DYNPORTS_PROTO='cs193v-portwatch 1'
 
+# ─── the read that feeds it ───────────────────────────────────────────────────
+# THE INPUT SIDE OF THE GATE, and it lives beside the parse rather than in the launcher for the
+# reason the parse does: 12-run-timeout.sh has to be able to source it and drive it against a
+# real fifo. Nothing in the container calls it -- the file is installed there for setup-git's
+# sake -- and that is the same stretch of "anything at least two consumers need" that
+# dynports_line already makes, with the suite as the second consumer.
+#
+# THREE OUTCOMES, AND read's STATUS ONLY SEPARATES THEM ON BASH 4. `read -t` returns
+# 128+SIGALRM on a timeout from 4.0 on, and 1 on the 3.2 macOS ships -- where a real EOF also
+# returns 1. Measured on both, all five outcomes:
+#
+#                              bash 3.2.57            bash 5.3.9
+#     timeout                  rc 1,   UNTOUCHED      rc 142, set
+#     timeout, partial input   rc 1,   UNTOUCHED      rc 142, set
+#     EOF                      rc 1,   set ""         rc 1,   set ""
+#     EOF, partial input       rc 1,   set "BEG"      rc 1,   set "BEG"
+#     a line arrives           rc 0,   set            rc 0,   set
+#
+# So the status is asked where it means something, and where it does not the question becomes
+# whether `read` ASSIGNED ANYTHING -- which is why the `unset` above it is load-bearing rather
+# than tidy. The rc arm still runs first and still decides on bash 4+, so nothing about this
+# changes what a Linux or WSL host does; the second arm is only ever reached on the shell where
+# the first provably cannot work.
+#
+# SAME DOCTRINE AS run_timeout, ONE NOTCH FINER. Its second read tests "whether a number
+# arrived, deliberately not read's own exit status" and can stop there, because its payload is
+# always a number. Here the payload may legitimately be nothing and the empty string is exactly
+# what a closed stream produces, so the question has to be set-versus-unset instead.
+#
+# WHAT THIS COST WHEN IT WAS INLINE AND WRONG (#244): sup_loop branched on `[ "$rc" -gt 128 ]`
+# alone, which is unreachable on every Mac, so TUNNEL_SUP_SILENCE_MAX was dead code and the
+# first five-second gap in the watcher's stream -- a laptop waking is enough -- was read as the
+# watcher having closed the pipe. The supervisor exited, nothing restarts it mid-session, and
+# no port bound afterwards was ever forwarded again.
+#
+# THE SECOND ARM IS UNDOCUMENTED BEHAVIOUR and is held down by assertion rather than by hope:
+# 12-run-timeout.sh drives this function through all five outcomes on whatever bash is running,
+# so a shell that does not behave this way fails the suite instead of killing the supervisor.
+#
+# -n 64 IS CARRIED OVER UNCHANGED from where this read used to be inline. It is the reader's
+# own backstop, not the gate's rule -- dynports_line checks WARN and ERR against 64 separately
+# -- and what it buys is that a peer which never sends a newline cannot make this grow a
+# buffer while it waits.
+#
+# DYNPORTS_LINE IS TRANSPORT, NOT PARSER STATE. dynports_reset deliberately leaves it alone --
+# it is cleared by the `unset` on every single call, which is stronger than any reset, and
+# adding it there would suggest a frame's worth of meaning it does not have.
+DYNPORTS_LINE=''
+dynports_read() {                     # dynports_read SECS -> 0 DYNPORTS_LINE | 1 timeout | 2 ended
+    local rc
+    unset DYNPORTS_LINE
+    IFS= read -r -t "$1" -n 64 DYNPORTS_LINE
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    { [ "$rc" -gt 128 ] || [ -z "${DYNPORTS_LINE+set}" ]; } && return 1
+    return 2
+}
+
 dynports_reset() {
     DYNPORTS_STATE=handshake
     DYNPORTS_FRAME=''; DYNPORTS_FATAL=''; DYNPORTS_WARN=''

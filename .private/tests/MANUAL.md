@@ -1081,6 +1081,16 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:21500/    # expect 200
 reachable. If it did fire, the supervisor's log (`cs193v --dev-tunnel` names it as `suplog`) says
 so, and the threshold in `TUNNEL_SUP_SILENCE_MAX` is what needs raising.
 
+**A HALF OF THIS WAS NOT A QUESTION FOR A LAPTOP, AND WAS ANSWERED WRONG FOR AS LONG AS IT WENT
+UNASKED (#244).** Until it was fixed, `sup_loop` decided whether a gap was a timeout or a closed
+stream from `read`'s exit status — which is >128 from bash 4.0 on and **1** on the 3.2 macOS
+ships, where a real EOF returns 1 as well. So the tolerance above was unreachable on every Mac,
+`TUNNEL_SUP_SILENCE_MAX` was dead code, and the first five-second gap ended the supervisor for
+the rest of the session. Any run of this step before #244 was measuring something that could not
+have passed. That half is now settled in `12-run-timeout.sh`, which drives `dynports_read`
+through all five read outcomes on whatever bash is running — so what is left for a real sleeping
+laptop is the original question below, and only that.
+
 Separately, and it is the underlying question rather than a symptom: block a `read -t 30` on an
 empty fifo across a real lid close and record whether it fires on wake.
 ```sh
