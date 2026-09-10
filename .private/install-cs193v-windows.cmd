@@ -362,10 +362,11 @@ goto havecurl
 :: created itself and never changes what was already on the computer without asking -- and this
 :: environment was created by THIS FILE, minutes ago. So no consent question is owed.
 ::
-:: `-u root`, not sudo: it needs no password, so the student is not asked for the Linux one they
-:: set thirty seconds ago. ca-certificates goes in the same call because without it curl exits
-:: 60, which reads as a network problem too. `env DEBIAN_FRONTEND=noninteractive` keeps apt from
-:: ever waiting on a terminal, and env is a real program, so it costs no shell.
+:: `-u root`, not sudo: this runs before the account exists at all, and the account it will
+:: create has a locked password (#217), so sudo could never have answered here. ca-certificates
+:: goes in the same call because without it curl exits 60, which reads as a network problem too.
+:: `env DEBIAN_FRONTEND=noninteractive` keeps apt from ever waiting on a terminal, and env is a
+:: real program, so it costs no shell.
 ::
 :: Only reached when the probe said no. `apt-get update` is a slow round trip, and this file
 :: promises it is safe to run any number of times.
