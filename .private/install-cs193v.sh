@@ -72,24 +72,47 @@ BOOTSTRAP_PROTOCOL=1
 refuse() { printf '\n%s\n\n' "$*" >&2; exit 1; }
 
 # ─── something that can download ───────────────────────────────────────────────
-# curl AND NOTHING ELSE, for now. A wget arm is coming, because curl is absent from the Ubuntu
-# DESKTOP image -- the 24.04 and 26.04 manifests both carry wget and libcurl4t64 and no curl --
-# but an arm no test can reach is the "path that rots" this project has refused twice, so it
-# lands with the fixture that exercises it rather than ahead of it.
+# EITHER TOOL, AND NEITHER IS A FALLBACK. curl is absent from the Ubuntu DESKTOP image -- the
+# 24.04 and 26.04 manifests both carry wget and libcurl4t64 and no curl -- while macOS and the
+# WSL image ship curl and no wget. So the two together cover every supported platform and
+# neither one covers it alone. curl is tried first only because it is what the majority of
+# machines have; nothing downstream cares which answered.
+#
+# THE ARM IS TESTED, which is the condition this project put on having it at all: an unexercised
+# fallback is "a path that rots", and that objection is what kept the installer curl-only through
+# two earlier attempts. sb-wget installs end to end through this arm on a machine with wget and
+# no curl, and sb-nodl removes both and asserts the refusal below.
 find_download_tool() {
     command -v curl >/dev/null 2>&1 && { printf 'curl'; return 0; }
+    command -v wget >/dev/null 2>&1 && { printf 'wget'; return 0; }
     return 1
 }
 
-TOOL="$(find_download_tool)" || refuse "  This needs curl to download the course files, and cannot find it.
+# ONE PLACE THAT KNOWS THE FLAGS, because the two tools disagree about every one of them and a
+# second call site would get the mapping subtly wrong. curl -f fails on a 404 (wget does that by
+# default), -sS is quiet-but-say-why (-nv), -L follows redirects (wget follows by default), and
+# --retry/--retry-delay are --tries/--waitretry. -o is -O.
+download_to() {                       # download_to DEST URL -> the tool's own exit status
+    case "$TOOL" in
+        curl) curl -fsSL --retry 10 --retry-delay 3 -o "$1" "$2" ;;
+        wget) wget -nv --tries=10 --waitretry=3 -O "$1" "$2" ;;
+    esac
+}
 
-  Install it and run this again:
+# IT NAMES BOTH PACKAGE MANAGERS RATHER THAN DETECTING ONE, and that is a decision rather than
+# laziness: working out which a machine has means reading /etc/os-release, and the one piece of
+# code that does that -- distro_family/distro_packages -- lives in the course files, which is
+# precisely what has not been downloaded yet. The bootstrap must not grow a fourth answer to
+# "what distro is this", so it prints both and lets the student pick the line that is theirs.
+TOOL="$(find_download_tool)" || refuse "  This needs curl or wget to download the course files, and cannot find either.
+
+  Install one and run this again:
 
       Debian, Ubuntu, Mint, Pop!_OS:  sudo apt install curl ca-certificates
       Fedora:                         sudo dnf install curl
 
-  ca-certificates matters as much as curl does: without it the download fails
-  with a certificate error that reads like a network problem."
+  ca-certificates matters as much as the downloader does: without it the download
+  fails with a certificate error that reads like a network problem."
 
 # ─── fetch, check, hand over ───────────────────────────────────────────────────
 # A PREDICTABLE PREFIX, so that a run killed part-way leaves something a later sweep can
@@ -101,13 +124,34 @@ BOOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX")" \
 trap 'rm -rf "$BOOT_TMP"' EXIT
 
 printf '\n  Getting the course files...\n'
-"$TOOL" -fsSL --retry 10 --retry-delay 3 -o "$BOOT_TMP/course.tar.gz" "$(tarball_url)" \
-    || refuse "  Could not download the course files from:
+# THE EXIT STATUS IS KEPT, because one value of it has its own answer. Both tools have a
+# dedicated code for "the certificate could not be verified" -- curl 60, wget 5 -- and that is
+# the one genuinely new way this can fail since the download moved ahead of everything else:
+# install_podman used to install ca-certificates beside curl, and nothing installs it before the
+# download any more. Left undiagnosed it reads as a network problem, which is the single most
+# misleading thing this script could say about a machine whose network is fine.
+if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)"; then
+    dl_rc=$?
+    case "$TOOL:$dl_rc" in
+        curl:60|wget:5)
+            refuse "  Could not verify the security certificate for:
 
       $TARBALL
 
-  This is usually a network problem. If it says something about certificates,
-  install ca-certificates and try again. It is safe to run this script again."
+  Your network is probably fine. What is usually missing is the list of
+  certificate authorities, which is a package your system may not have:
+
+      Debian, Ubuntu, Mint, Pop!_OS:  sudo apt install ca-certificates
+      Fedora:                         sudo dnf install ca-certificates
+
+  Install it and run this script again." ;;
+    esac
+    refuse "  Could not download the course files from:
+
+      $TARBALL
+
+  This is usually a network problem. It is safe to run this script again."
+fi
 
 # --strip-components=1 because GitHub wraps the archive in a <repo>-<branch>/ directory.
 tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \

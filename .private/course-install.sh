@@ -408,17 +408,16 @@ survey() {
         DO_CURL_INSTALL=yes
         need "$(txt need.curl "PKG=$PKG_CURL")" "$(txt need.curl.why)"
     fi
-    # BOTH ARMS ABOVE ARE UNREACHABLE UNTIL THE wget ARM LANDS, and it is worth saying so here
-    # rather than leaving a reader to wonder why the coverage allowlist excuses one of them.
-    # install-cs193v.sh needs a downloader before it can fetch anything at all, and today that
-    # means curl -- so a machine with no curl is refused by the bootstrap and never reaches this
-    # line. When wget becomes an accepted downloader, a stock Ubuntu Desktop arrives here with
-    # wget and no curl and this consent item becomes live again.
+    # THIS ITEM IS REACHED BY A MACHINE THAT ALREADY DOWNLOADED SUCCESSFULLY, which is the part
+    # worth stating: since #221 install-cs193v.sh needs curl OR wget before it can fetch anything,
+    # so anyone arriving here has one of the two. A stock Ubuntu Desktop arrives with wget and no
+    # curl, and this is where it is offered the curl it is still missing.
     #
-    # WHICH IS WHY IT IS NOT DELETED. curl is still needed for its own sake: install_podman's
-    # macOS arm fetches the .pkg with it, and the launcher uses it afterwards. What changed is
-    # the REASON, so need.curl.why no longer says this script does the downloading -- it did,
-    # until the download moved into the bootstrap ahead of every question this script asks.
+    # SO THE REASON CHANGED WITHOUT THE CODE CHANGING. curl is no longer needed to fetch the
+    # course files -- that already happened, possibly by wget -- but it is still needed for its
+    # own sake: install_podman's macOS arm fetches the .pkg with it, and the launcher uses it
+    # afterwards. need.curl.why says that rather than claiming this script does the downloading.
+    # 26-installer-sandbox.sh's sb-wget is the case that comes through here.
 
     # THE SETUID HELPERS, PROBED SEPARATELY FROM PODMAN, which is the entire point. uidmap is
     # already in the package list, but only in the arm that installs podman (install_podman

@@ -226,62 +226,84 @@ assert_says "sb-noans:it-had-already-installed-podman" "Installing podman uidmap
 sandbox_reap
 
 # ─── curl absent, which is a stock Ubuntu Desktop ──────────────────────────────
-# THE PLATFORM DIFFERENCE NO TEST COULD SEE, and the fixtures are why: both of them installed
+# THE PLATFORM DIFFERENCE NO TEST COULD SEE, and the fixtures were why: both of them installed
 # curl, so the machine every case ran on was not the machine a student has. curl is NOT in the
-# Ubuntu desktop image -- the 26.04 and 24.04 manifests carry wget and libcurl4t64 and no curl
-# -- while the WSL image and macOS both ship it. So the old fetch_files' unguarded curl failed
-# for a whole platform, and said "This is usually a network problem" about a machine that simply
-# had no curl, after consent, apt and usermod had already run.
+# Ubuntu desktop image -- the 26.04 and 24.04 manifests carry wget and libcurl4t64 and no curl --
+# while the WSL image and macOS ship it.
 #
-# ─── WHAT THIS CASE MEASURES NOW, AND WHY IT CHANGED  (#221) ───────────────────
+# IT IS THE FIRST QUESTION NOW, not a late one. Before #221 this machine got as far as consent,
+# apt and usermod and then failed in fetch_files with "this is usually a network problem". After
+# the split the download happens before any course code can run, so the same machine is decided
+# in the bootstrap's first ten lines -- and the wget arm is what decides it in the student's
+# favour rather than refusing a supported platform.
 #
-# IT USED TO BE A SUCCESSFUL INSTALL: apt was asked for curl, installed it, and the download
-# then worked. That cannot happen any anymore and the reason is the whole design. The download
-# is now the FIRST thing, because there is no course code to run until the tree is here -- so on
-# a machine with no downloader the bootstrap refuses before survey, before consent, and long
-# before apt could install anything. Asking apt for curl is not available to a script that has
-# not been downloaded yet.
-#
-# SO IT MEASURES THE REFUSAL, which is the behaviour a student on stock Ubuntu Desktop gets
-# today and had no coverage at all: this is the only case anywhere that reaches
-# find_download_tool's failure arm on a real machine. Five assertions inverted with the design
-# and are gone rather than reworded -- asks-for-one-thing, names-curl,
-# says-what-it-is-installing, installed-curl and the-course-files-arrived all asserted that apt
-# ran and the tree arrived, and both are now false by construction.
-#
-# AND IT BECOMES A SUCCESSFUL INSTALL AGAIN, THROUGH wget, when the wget arm lands: the fixture
-# already has no wget either, which is what makes the refusal reachable, so that change is a
-# fixture change and a rewrite of this block together. Until then a stock Ubuntu Desktop student
-# is told to install curl or wget, which is a sentence rather than a mystery but is not the
-# outcome anyone wants.
-#
-# ONE CONSENT ITEM WAS THE OLD SHAPE, and the note is kept because it explains the arrangement:
-# podman and ssh are present, so curl was the ONLY reason apt ran at all. The both-missing shape
-# is the apt case above.
+# THROUGH A REAL LISTENER, because wget has no file:// scheme -- measured: GNU wget 1.21.4 exits
+# 1 on one and writes nothing. So this case, alone among the fixtures, fetches over loopback from
+# the perl origin run.sh starts. ===HTTP-ORIGIN=== is asserted before anything else, because an
+# origin that never bound makes the download fail and the installer refuse, which looks like
+# half a dozen other refusals.
 sb_machine no-prereqs=curl
-out="$(sandbox_run curl '2' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-curl:the-machine-was-really-arranged" "prereqs=curl" "$(sb_section "$out" ARRANGED)"
-# ANCHORED ON THE SENTENCE, not on the word "curl". A bare "curl" needle passes on this case's
-# own arrangement echo -- ===ARRANGED=== says `prereqs=curl` -- so it would be green with no
-# refusal in the transcript at all. Checked, and it was, for one commit.
-assert_says "sb-curl:refuses-for-want-of-a-downloader" "needs curl to download" "$out"
-# NAMES THE PACKAGE MANAGER COMMANDS RATHER THAN DETECTING ONE, deliberately: distro_family and
-# distro_packages live in course-install.sh, which has not been downloaded yet, and the bootstrap
-# must not grow a fourth way of answering "what distro is this". So it prints both and lets the
-# student pick -- and ca-certificates is named beside curl, because without it curl exits 60 and
-# an SSL failure reads as a network problem just like a missing curl did.
-assert_says "sb-curl:names-the-apt-command"       "apt install curl ca-certificates" "$out"
-assert_says "sb-curl:names-the-dnf-command"       "dnf install curl" "$out"
-assert_says "sb-curl:exits-nonzero"               "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-curl:does-not-claim-success"  "Setup finished" "$out"
+out="$(sandbox_run wget '2' -e CS193V_DIR=/home/student/cs193v \
+                            -e SB_INSTALLER=/work/installer-http.sh -e SB_HTTP_ORIGIN=1)"
+assert_says "sb-wget:the-machine-was-really-arranged" "prereqs=curl" "$(sb_section "$out" ARRANGED)"
+assert_eq   "sb-wget:the-origin-was-listening" "listening" "$(sb_section "$out" HTTP-ORIGIN)"
+# FLATTENED, NOT THROUGH sb_section, and the reason generalises to any marker printed before the
+# installer runs. The keys this case feeds are ECHOED by the pty, and the echo lands on whichever
+# early line is being written when it flushes -- measured here as a literal
+# `2===INSTALLER-USED===` on line 2. sb_section anchors on /^===NAME===$/, so a marker wearing an
+# echoed keystroke matches nothing and the section reads EMPTY rather than wrong, which is the
+# worse failure: an assert_says on an empty haystack simply fails, and an assert_says_not would
+# have passed. The tail-block markers are far past the echo and are safe; this one is not, so it
+# is read the way sb-ceiling reads the same marker -- as marker-and-value in one flattened string.
+assert_says "sb-wget:the-http-copy-is-what-ran" \
+            "===INSTALLER-USED=== /work/installer-http.sh" "$out"
+# THE ARM ITSELF. curl is gone and the tree still arrived, which no curl-only bootstrap could
+# manage -- it would have refused before survey. `dir-only` would be the interesting failure.
+assert_eq "sb-wget:the-course-files-arrived" "launcher-is-executable" "$(sb_section "$out" COURSE-DIR)"
+# AND THEN THE INSTALLER PROPER ASKS FOR curl ANYWAY, which is not redundancy: the bootstrap
+# needed A downloader and found one, while install_podman's macOS arm and the launcher both want
+# curl specifically. This is the consent item that was unreachable for as long as a curl-less
+# machine could not get past the bootstrap at all.
+assert_says "sb-wget:asks-for-one-thing"         "permission for 1 thing" "$out"
+assert_says "sb-wget:names-curl"                 "Install curl" "$out"
+assert_says "sb-wget:says-what-it-is-installing" "Installing curl" "$out"
+added="$(sb_section "$out" DPKG-ADDED)"
+assert_says "sb-wget:installed-curl" "curl" "$added"
+# THE NEGATIVE IS HALF THE CLAIM. Without it this case could be passing on a machine that lacked
+# podman too, i.e. a second copy of the apt case wearing a different name.
+assert_says_not "sb-wget:did-not-reinstall-podman" "podman" "$added"
+assert_eq "sb-wget:left-no-temp-tree" "absent" "$(sb_section "$out" BOOT-TMP)"
+# WHERE THIS RUN STOPS, recorded not asserted, for the apt case's reason: the download works, so
+# build_image hands off to the launcher, which wants the network this case has not got.
+record "sb-wget:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+sandbox_reap
+
+# ─── and the machine with neither, which is a minimal Debian ───────────────────
+# THE ONLY CASE ANYWHERE THAT REACHES find_download_tool's FAILURE ARM. Both tools are taken
+# away, so the bootstrap cannot fetch anything and has to say so -- before survey, before
+# consent, and before anything is touched, because there is nothing yet to touch it with.
+#
+# IT IS A REAL MACHINE, not a synthetic one: debian:13 ships no curl, no wget and no
+# ca-certificates. Rare in this course's audience, which is why the answer is a clear sentence
+# rather than an install path.
+sb_machine no-prereqs=curl,wget
+out="$(sandbox_run nodl '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_says "sb-nodl:the-machine-was-really-arranged" "prereqs=curl,wget" "$(sb_section "$out" ARRANGED)"
+# ANCHORED ON THE SENTENCE, not on the word "curl" or "wget": ===ARRANGED=== says
+# `prereqs=curl,wget`, so either bare needle passes on this case's own arrangement echo with no
+# refusal in the transcript at all. Checked, and it did, for one commit.
+assert_says "sb-nodl:refuses-for-want-of-a-downloader" "cannot find either" "$out"
+assert_says "sb-nodl:names-both-tools"    "curl or wget" "$out"
+assert_says "sb-nodl:names-the-apt-command" "apt install curl ca-certificates" "$out"
+assert_says "sb-nodl:names-the-dnf-command" "dnf install curl" "$out"
+assert_says "sb-nodl:exits-nonzero"         "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-nodl:does-not-claim-success" "Setup finished" "$out"
 # IT REFUSES BEFORE IT ASKS FOR ANYTHING, which is the property the ordering is for: nothing is
 # installed and no permission is sought, because there is nothing to ask on behalf of yet.
-assert_eq "sb-curl:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
-assert_says_not "sb-curl:asks-no-permission" "needs your permission" "$out"
-# AND NO COURSE TREE. `dir-only` would be the interesting failure -- it would mean something got
-# far enough to create $DIR before giving up.
-assert_eq "sb-curl:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
-assert_eq "sb-curl:left-no-temp-tree" "absent" "$(sb_section "$out" BOOT-TMP)"
+assert_eq "sb-nodl:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
+assert_says_not "sb-nodl:asks-no-permission" "needs your permission" "$out"
+assert_eq "sb-nodl:no-course-tree"    "absent" "$(sb_section "$out" COURSE-DIR)"
+assert_eq "sb-nodl:left-no-temp-tree" "absent" "$(sb_section "$out" BOOT-TMP)"
 sandbox_reap
 
 # ─── podman installed, its setuid helpers not ──────────────────────────────────

@@ -553,6 +553,29 @@ CS193V_DESTRUCTIVE=1 .private/tests/run-tests.sh --tier live
 
 ## Needs another platform
 
+### A real Ubuntu Desktop install, through the wget arm (#221)
+The fixtures reproduce this machine and it is worth knowing exactly how far that goes.
+`sb-wget` removes curl from a machine that has wget, and the bootstrap fetches the tree with
+wget and hands over — so the arm itself, the flag mapping, and the curl consent item that
+follows are all covered. `sb-nodl` removes both and pins the refusal.
+
+**What no fixture covers is the download itself over the real internet.** The wget case fetches
+from a perl listener on loopback inside the container, because GNU wget has no `file://` scheme
+(measured: 1.21.4 exits 1 and writes nothing) and the fixtures run under `--network=none`. So
+what a real Ubuntu Desktop box adds is:
+
+- **wget against GitHub over TLS**, including the redirect `codeload.github.com` serves for an
+  archive URL. wget follows redirects by default and the loopback origin never issues one, so
+  nothing here has ever exercised that.
+- **`--tries=10 --waitretry=3` under a real flaky link.** Exercising the retry loop needs fault
+  injection and ≥3 s of wall clock per forced retry; the gate records it as uncovered rather
+  than excusing it, and this is where it would actually be seen.
+- **The certificate refusal, on a machine that really lacks `ca-certificates`.** curl exits 60
+  and wget exits 5, and the bootstrap turns either into a message naming the package. This is
+  the one genuinely new failure mode the #221 split introduced — `install_podman` used to
+  install `ca-certificates` beside curl, and nothing installs it before the download any more.
+  `debian:13` ships without it, which is the cheapest way to see the real thing.
+
 ### A real Fedora machine — what it would tell us that no fixture can
 The installer supports Fedora as of the dnf work, and the fixtures cover a lot: `--base fedora`
 proves the family is detected and Fedora's package names are used, and `fedora-e2e` proves

@@ -83,6 +83,14 @@ arrange_prereqs() {
             # manifests both carry wget and libcurl4t64 and no curl) while the WSL image has it,
             # so this is the one platform difference the installer could not see.
             curl)   sb_remove curl || p_rc=1 ;;
+            # THE OTHER HALF OF THAT PLATFORM DIFFERENCE (#221). Since the installer downloads
+            # before it can run any course code, "which downloader does this machine have" is
+            # now the FIRST question it asks, and there are three answers worth arranging:
+            # curl (`--no-prereqs=` nothing, the default), wget alone (`curl`), and neither
+            # (`curl,wget`). The fixture ships both so that all three are subtractive -- see
+            # Containerfile.machine, which says why installing wget rather than closing over it
+            # is the honest shape.
+            wget)   sb_remove wget || p_rc=1 ;;
             # PODMAN STAYS, and that is the state under test. uidmap is a Recommends of podman
             # rather than a Depends, so apt takes the setuid helpers and leaves podman installed
             # -- which is exactly the machine the installer cannot fix today, because its uidmap
@@ -114,6 +122,15 @@ arrange_prereqs() {
 # can put it back; there is no pacman arm, because the Arch fixture is refused in survey before any
 # package operation and nothing there is ever removed. An unexercised arm here would be the
 # `wget` fallback install-cs193v.sh rejected -- a path that rots.
+#
+# THAT REJECTION IS OVERTURNED, and the measurement that overturns it is worth stating rather
+# than leaving the old sentence to be read as current. It was right about a fallback bolted onto
+# a pipeline nothing exercised. #221 removed the pipeline: the download is the first thing the
+# bootstrap does, wget is a first-class arm beside curl rather than a fallback behind it, and
+# the arm has a fixture that reaches it -- sb-wget installs through it end to end, and sb-nodl
+# takes both tools away and asserts the refusal. Measured while building it: wget 1.21.4 exits 1
+# on a file:// URL and writes nothing, which is why that case needs the loopback origin and why
+# the six file:// sites are left alone.
 case "${SB_DISTRO:-debian}" in
     fedora) PM_RM='dnf remove -y'
             # podman ALONE, unlike Debian. There the setuid helpers are a separate `uidmap`
