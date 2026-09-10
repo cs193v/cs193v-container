@@ -56,8 +56,15 @@
 #                   single ./cs193v invocation -- the launcher sources it before its dispatch
 #                   case and exits 1 if it cannot be read.
 #
-# Containerfile, messages.txt and container.args are also the three files fetch_files checks for
-# after untarring, alongside the launcher itself.
+# Containerfile, messages.txt and container.args are also the three files install_files checks
+# for after untarring, alongside the launcher itself. (fetch_files, as it was called until #221,
+# when the download moved into the bootstrap and this step became extraction only.)
+#
+# course-install-messages.txt IS DELIBERATELY NOT IN THAT LIST. It ships because the archive is
+# what the bootstrap unpacks and the installer reads its prose out of THAT copy -- but nothing in
+# the student's finished tree ever opens it, so a tree missing it is still a working install and
+# install_files must not refuse one. The bootstrap's own sentinel check is where it is required,
+# because that is the copy that matters.
 #
 # BOTH files LINES ARE REQUIRED AND THIS IS THE EASIEST THING HERE TO BREAK. Measured, all three
 # forms: with only `/.private/files/** -export-ignore` the archive holds NO files/ at all, and
@@ -68,7 +75,7 @@
 # recursively, subdirectories included. Deleting either line ships a course directory whose
 # ./cs193v cannot start.
 #
-#     git archive HEAD | tar -t | grep -c '^\.private/files/'     # expect 24
+#     git archive HEAD | tar -t | grep -c '^\.private/files/'     # expect 30
 /.private/**              export-ignore
 /.private/Containerfile  -export-ignore
 /.private/messages.txt   -export-ignore
@@ -90,11 +97,19 @@
 # stores LF, and CHECKOUT converts -- so a TA who commits from an editor that saved LF still
 # publishes a working file, where `-text` would preserve the mistake verbatim.
 #
-# THE CHECKOUT IS THE ONLY PATH THAT MATTERS NOW. Neither installer reaches a student through the
-# archive any more (both are hosted on the course website, and the .cmd fetches stage two from
-# raw.githubusercontent.com, which serves the stored blob and honours no attribute), so the copy
-# a TA uploads comes from a working tree. Do not verify this through `git archive`: the .cmd is
-# export-ignored, so the archive holds nothing to look at.
+# THE CHECKOUT IS THE ONLY PATH THAT MATTERS FOR THE TWO PUBLISHED FILES. install-cs193v.sh and
+# install-cs193v-windows.cmd do not reach a student through the archive: both are hosted on the
+# course website, and the .cmd fetches stage two from raw.githubusercontent.com, which serves the
+# stored blob and honours no attribute. So the copy a TA uploads comes from a working tree. Do not
+# verify this through `git archive`: the .cmd is export-ignored, so the archive holds nothing to
+# look at.
+#
+# THE INSTALLER PROPER IS THE OTHER WAY ROUND, and since #221 that distinction is the whole
+# shape of the thing. course-install.sh reaches a student ONLY through the archive -- the
+# bootstrap downloads the tree and execs it out of there -- so it needs its line-ending
+# attributes to be right in the ARCHIVE, where the two published files need theirs right in the
+# checkout. Two files published by hand, one delivered by tarball, and they are verified in
+# different places.
 #
 # Wine CANNOT catch a regression here: its cmd reads bare \n natively (batch.c:259-266), so the
 # --tier windows run passes either way. 25-installer.sh asserts it statically instead, against

@@ -755,9 +755,9 @@ for boxsrc in "ui:$PRIVATE/files/cs193v-ui.sh" \
 done
 
 # ONE COPY OF box() SINCE #221, so there is nothing left to diff. The check that lived here
-# compared cs193v-ui.sh's copy against install-cs193v.sh's, because a curl-piped file could
-# source nothing; the installer downloads before it draws now, so course-install.sh sources the
-# real one. box:course-install-draws-the-box-in-one-place above is what remains, and it is the
+# compared cs193v-ui.sh's copy against install-cs193v.sh's, because a file downloaded on its own
+# can source nothing; the installer downloads before it draws now, so course-install.sh sources
+# the real one. box:course-install-draws-the-box-in-one-place above is what remains, and it is the
 # assertion that would catch a copy coming back.
 sed -n '/^box() {$/,/^}$/p' "$PRIVATE/files/cs193v-ui.sh" > "$TMP/box.cs193v-ui.sh"
 if [ "$(wc -l < "$TMP/box.cs193v-ui.sh" | do_tr -d ' ')" -gt 20 ]; then

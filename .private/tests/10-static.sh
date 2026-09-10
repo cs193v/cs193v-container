@@ -1859,9 +1859,6 @@ for v in verb_dev_args verb_dev_tunnel verb_dev_steps verb_print_command; do
                         "ensure_podman_path" "$(fn_body $v $REPO/cs193v)"
 done
 
-# The installer carries its own copy, for the reason version_lt and box() are duplicated: it is
-# curl-piped and standalone. That the two copies AGREE is 25-installer.sh's business; that the
-# installer has one at all is here, so a launcher-only fix cannot pass.
 # RETIRED WITH #221, not weakened. These insisted the installer carried its OWN copy of
 # PODMAN_PKG_ID and of the probe, so a launcher-only fix could not pass. There is one copy now,
 # in files/cs193v-ui.sh, which course-install.sh and cs193v both source -- so "both have one"
