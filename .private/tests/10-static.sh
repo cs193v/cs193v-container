@@ -1553,6 +1553,25 @@ open_shell_body="$(fn_body open_shell $REPO/cs193v)"
 teardown_body="$(fn_body stop_container $REPO/cs193v)"
 guard_body="$(fn_body shell_teardown $REPO/cs193v)"
 
+# ─── the teardown stops the animator before it does anything else ─────────────
+# ORDER, NOT PRESENCE, and presence is the easy half. transient_cleanup calls meter_cleanup and
+# rt_cleanup, and the animator redraws ten times a second -- so anything printing while it is
+# alive gets overdrawn, which is what rebuild_interrupted's comment means by "the animator goes
+# FIRST". Before #221 that was true by accident: the body's opening `rm -f` took $METER_STATE
+# with it. Moving the meter's half into cs193v-ui.sh made it the LAST thing instead, and nothing
+# went red, because rt_cleanup happens to be silent. A later cleanup step that prints would have
+# found it the hard way, at a moment nobody watches.
+td_body="$(fn_body transient_cleanup "$REPO/cs193v")"
+assert_ne "teardown:the-body-is-extractable" "" "$td_body"
+# COMMENTS STRIPPED FIRST, and that is not fussiness: the body explains this very ordering and
+# names rt_cleanup while doing so, so a grep over the raw text reads the prose as the first call
+# and fails whichever order the code is in. Caught by mutation -- it failed identically with the
+# calls swapped, which is the tell that an assertion is measuring itself.
+assert_eq "teardown:the-animator-is-stopped-first" "meter_cleanup" \
+          "$(printf '%s\n' "$td_body" | sed 's/#.*//' \
+             | grep -oE 'meter_cleanup|rt_cleanup' | head -1)"
+
+
 # THE load-bearing line. `exec` replaces the launcher with podman, so no process survives the
 # shell to stop anything -- which is precisely why the old design could not have implemented
 # #41 without this changing, and why it is asserted ahead of everything else here.

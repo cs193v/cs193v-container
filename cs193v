@@ -186,12 +186,18 @@ rm -f "$WARN_ACK"
 # -- the two handlers above, either of which can fire with a live animator and a hidden cursor.
 transient_cleanup() {
     rm -f "$WARN_ACK"
+    # THE METER FIRST, AND THE ORDER IS THE ONE THING IN HERE WORTH ASSERTING. It lives in
+    # cs193v-ui.sh now (#221) so that the installer tears the same block down the same way -- but
+    # when it moved it also went from being the FIRST thing this function did to the last, because
+    # the old body happened to remove $METER_STATE on its opening line. That inverts what
+    # rebuild_interrupted's comment relies on: the animator redraws ten times a second, so
+    # anything that prints while it is alive gets painted over. rt_cleanup is silent, so nothing
+    # visibly broke -- which is exactly why this is pinned by
+    # 10-static.sh's teardown:the-animator-is-stopped-first rather than left to a reader.
+    meter_cleanup
     # run_timeout's scratch files, which only it can name. A Ctrl-C inside a probe -- or inside
     # the three minutes of `podman run` -- otherwise leaves one in TMPDIR per call.
     rt_cleanup
-    # AND THE METER'S HALF, which lives in cs193v-ui.sh now (#221) so that the installer tears
-    # the same block down the same way. The trap stays here: bash keeps one EXIT trap.
-    meter_cleanup
 }
 trap transient_cleanup EXIT
 
