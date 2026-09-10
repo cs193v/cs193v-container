@@ -991,7 +991,7 @@ settle, and one it should not be trusted on:
    run is the one that matters — the `.cmd`'s old block hardcoded `cd ~/cs193v` and a UNC path
    ending `home\student\cs193v\projects`, so a student who chose anything else was handed two
    paths that did not exist. Confirm the `cd` line, the `{{UNC}}` line and
-   `Put your projects in …` all name the directory actually chosen, and that pasting the UNC path
+   `{{DIR}}/projects` line all name the directory actually chosen, and that pasting the UNC path
    into Explorer opens it.
 
 ### Ubuntu's first-run setup, which no student meets any more (#217)

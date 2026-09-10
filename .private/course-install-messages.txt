@@ -643,14 +643,18 @@ doctor reported problems — run: {{DIR}}/cs193v doctor
 
   You can also open {{DISTRO}} from the Windows Terminal dropdown.
 
-  Put your projects in {{DIR}}/projects — inside the container they appear
-  at ~/projects. From Windows itself they are at:
+  Your work goes in the projects folder, one folder with three names.
+  Inside the container it is ~/projects. In the {{DISTRO}} environment:
+
+      {{DIR}}/projects
+
+  And from Windows itself, where you can paste it into Explorer:
 
       {{UNC}}
 
   Your account in {{DISTRO}} is called {{USER}} and has no password, so
-  nothing will ever ask you for one. If you ever need to install something
-  in the environment itself, this gets you in as its administrator:
+  nothing will ever ask you for one. To install something in the
+  environment itself, this gets you in as its administrator:
 
       wsl -d {{DISTRO}} -u root
 
