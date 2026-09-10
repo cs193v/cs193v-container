@@ -617,6 +617,51 @@ doctor reported problems — run: {{DIR}}/cs193v doctor
       ./cs193v --stop     stop it if a window was closed unexpectedly
   ────────────────────────────────────────────────────────────────────
 
+# The Windows sign-off, which is the same moment reached down a different road (#218).
+#
+# WHY THERE ARE TWO. install-cs193v-windows.cmd runs the installer inside the CS193V WSL
+# instance it has just made, so a Windows student reaches say_done exactly as a Mac one
+# does -- but `cd` and `./cs193v` are not enough to get back here tomorrow. They need
+# `wsl -d CS193V` first, and that step exists on no other platform. The .cmd used to print
+# it afterwards in a block of its own, which meant a Windows install ended with two
+# closing messages that disagreed; CS193V_WINDOWS is what turned them into one.
+#
+# {{UNC}} IS PASSED IN RATHER THAN WRITTEN HERE, and that is the defect this entry fixes
+# as much as the missing wsl step. The .cmd's version of this path was the constant
+# \\wsl.localhost\CS193V\home\student\cs193v\projects -- but choose_dir's menu runs on the
+# Windows path too, so a student who chose any other directory was handed a path that did
+# not exist. Only course-install.sh knows {{DIR}}, and win_projects_path builds it there.
+[[finished.windows]]
+  ────────────────────────────────────────────────────────────────────
+  Setup finished.
+
+  From now on you work inside the {{DISTRO}} environment. To start:
+
+      wsl -d {{DISTRO}}
+      cd {{DIR}}
+      ./cs193v
+
+  You can also open {{DISTRO}} from the Windows Terminal dropdown.
+
+  Put your projects in {{DIR}}/projects — inside the container they appear
+  at ~/projects. From Windows itself they are at:
+
+      {{UNC}}
+
+  Your account in {{DISTRO}} is called {{USER}} and has no password, so
+  nothing will ever ask you for one. If you ever need to install something
+  in the environment itself, this gets you in as its administrator:
+
+      wsl -d {{DISTRO}} -u root
+
+  Closing the terminal window stops the container and anything running
+  in it. Your files are on your own computer, so they are always safe.
+
+  Useful later:
+      ./cs193v doctor     a report to paste if you ask staff for help
+      ./cs193v --stop     stop it if a window was closed unexpectedly
+  ────────────────────────────────────────────────────────────────────
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  WHAT THE ROOT PASS PRINTS  (#217)
 #

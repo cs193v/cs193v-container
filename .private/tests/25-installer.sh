@@ -912,6 +912,8 @@ assert_file "install:args-installed"         "$DEST/.config/container.args"
 assert_file "install:messages-installed"     "$DEST/.private/messages.txt"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
+# ...and the UNIX run is the UNIX one: the Windows step must not leak into it.
+assert_says_not "install:no-wsl-step-without-the-flag" "wsl -d CS193V" "$out1"
 
 # Now the actual §A.12 property. Everything except projects/ must be byte-identical: the
 # second run recomputes nothing and rewrites nothing.
@@ -935,6 +937,40 @@ assert_eq "install:student-work-survives-a-rerun" "my work" \
           "$(cat "$DEST/projects/my-app/index.js" 2>/dev/null)"
 # Re-running must report already-satisfied steps rather than redoing them.
 assert_says "install:reports-already-done" "already done" "$out2"
+
+# ─── the Windows sign-off, which is the same run with one variable set  (#218) ─
+#
+# THE COVERAGE HAS TO BE HERE, and that is a consequence of what each suite can see rather
+# than a preference. A Windows install ends with ONE closing message now: the .cmd stopped
+# printing instructions of its own, and course-install.sh prints the Windows sign-off in
+# place of the UNIX one when CS193V_WINDOWS is set. 27-installer-windows.sh drives the real
+# .cmd but FAKES wsl.exe, so the installer never runs there and nothing in that file can read
+# this message; this suite runs the real installer and never runs the .cmd. So 27 asserts the
+# variable is PASSED and this asserts what it DOES, and neither can be asked to do both.
+#
+# A DIRECTORY THAT IS NOT THE DEFAULT, AND THAT IS THE ASSERTION RATHER THAN HOUSEKEEPING.
+# The message the .cmd used to print hardcoded `cd ~/cs193v` and a UNC path ending
+# `home\student\cs193v` -- but choose_dir's menu runs on the Windows path too, so a student
+# who picked anything else was handed two paths that did not exist. Only course-install.sh
+# knows $DIR, and pointing this run somewhere else is what makes "the sign-off follows it" a
+# thing a test can fail rather than a coincidence.
+shim_new
+WINDEST="$TMP/windest"
+outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTMP" \
+                       CS193V_WINDOWS=1)"
+assert_says "win-signoff:finishes"                     "Setup finished"  "$outw"
+assert_says "win-signoff:names-the-wsl-step"           "wsl -d CS193V"   "$outw"
+assert_says "win-signoff:the-cd-follows-the-chosen-dir" "cd $WINDEST"    "$outw"
+# The whole UNC path, not its prefix: the prefix is a constant and would still match with the
+# directory half wrong, which is precisely the defect this case exists for.
+assert_says "win-signoff:the-unc-path-follows-it-too" \
+            "$(printf '%s' "\\\\wsl.localhost\\CS193V$WINDEST/projects" | do_tr / '\\')" "$outw"
+# AND THE UNIX ENTRY WAS NOT THE ONE PRINTED, asserted on the one phrase that differs rather
+# than on the advice, because nearly all of the advice is shared: both entries name the same
+# directory, the same ./cs193v and the same reassurance about closing the window. "To start
+# working:" belongs to [[finished]] and "To start:" to [[finished.windows]], so this is the
+# thing that goes red if say_done ever stops choosing between them.
+assert_says_not "win-signoff:is-not-the-unix-sign-off" "To start working:" "$outw"
 
 # ─── check_disk, which no mechanism could reach before ─────────────────────────
 # check_disk asks podman for two Store fields (installer's check_disk), and podman-fake's
