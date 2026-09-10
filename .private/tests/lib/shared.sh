@@ -3,16 +3,16 @@
 # CS193V test-side definitions that more than one place needs.
 #
 # WHY THIS FILE EXISTS. Every entry below was, or was about to become, the same fact written
-# down twice -- and this project has already paid for that shape three times (version_lt and
-# box() duplicated into the installer, the package names duplicated between a consent string
-# and an install list, and the fd below). files/cs193v-ui.sh is the model: one sourced
-# definition of a shared thing, with the reasoning kept next to it.
+# down twice -- and this project has already paid for that shape twice (version_lt and box()
+# duplicated into the installer, and the package names duplicated between a consent string and
+# an install list). files/cs193v-ui.sh is the model: one sourced definition of a shared thing,
+# with the reasoning kept next to it.
 #
 # BUT cs193v-ui.sh IS THE WRONG HOME FOR ANY OF IT. That file ships INTO the image, at
 # /etc/cs193v/ui.sh, because setup-git sources it there. Nothing here is wanted inside the
-# container: the trace fd is a property of the test harness, carve_func exists to read scripts
-# that only exist in a checkout, and msg_of reads .private/messages.txt from the host tree. A
-# test-only fact in a shipped file is a fact a student's container carries for no reason.
+# container: carve_func exists to read scripts that only exist in a checkout, and msg_of
+# reads .private/messages.txt from the host tree. A test-only fact in a shipped file is a
+# fact a student's container carries for no reason.
 #
 # MUST STAY BASH 3.2 COMPATIBLE, and unlike most of the suite that is ENFORCED:
 # 10-static.sh's bash32:tests-are-bash32-safe scans this file, along with everything else the
@@ -26,77 +26,6 @@
 # lint reached. What replaced the naming is one list derived from the tree
 # (10-static.sh's $testfiles), shared by the linter, the parse gate, the bash-4 ban and the exec
 # check, so a file added under lib/ tomorrow is covered by all four without being remembered.
-
-# ─── the file descriptor the harness traces installer runs on ──────────────────
-#
-# THE RULE: this must never be an fd the launcher uses. Not a preference -- it is the whole
-# reason this constant is a constant rather than a literal repeated at five call sites.
-#
-# WHAT GOES WRONG WHEN IT COLLIDES, measured rather than imagined. The harness exports
-# BASH_XTRACEFD to divert `bash -x` output away from the transcript it is capturing. Exported
-# means EVERY DESCENDANT inherits it, including programs the launcher runs. run_timeout in
-# cs193v-ui.sh owns fd 9 for its own death-certificate fifo and deliberately CLOSES it for the
-# command it runs (`9>&-`, and its comment explains why: conmon would otherwise hold the pipe
-# open and turn an EOF into a hang). So a child arrives with BASH_XTRACEFD naming an fd that is
-# closed under it -- and bash, which validates the variable at startup, writes
-#
-#     /bin/sh: BASH_XTRACEFD: 9: invalid value for trace file descriptor
-#
-# to stderr. run_timeout captures stderr into RT_OUT, and the launcher then read a podman
-# version out of RT_OUT, so a diagnostic became part of a version number and a current podman
-# was refused as too old.
-#
-# WHY THAT WAS INVISIBLE FOR SO LONG: it needs /bin/sh to be bash, AND to be bash 4.1 or newer.
-# On Debian and Ubuntu /bin/sh is dash, which ignores BASH_XTRACEFD entirely and says nothing. On
-# Fedora it is bash 5, which validates it -- that is the machine this was measured on. macOS
-# /bin/sh is bash as well, and three comments here reasoned from that alone that a Mac was
-# affected and merely latent (#143). IT IS NOT AFFECTED AT ALL: BASH_XTRACEFD arrived in bash
-# 4.1 and macOS ships 3.2.57, which treats it as an ordinary variable, validates nothing, and
-# cannot emit that diagnostic -- measured, `env BASH_XTRACEFD=9 /bin/sh -xc ': traced'` traces
-# to stderr and says nothing of the fd. So: a Fedora bug, latent on Debian for the dash reason
-# above, inapplicable on macOS. 12-run-timeout.sh says the same floor executably, in the gate
-# that skips rt:no-trace-fd-diagnostic-in-RT_OUT below 4.1, and 10-static.sh's
-# trace-fd:a-macos-claim-names-the-version-floor is what keeps the two from drifting again.
-#
-# WHAT A MAC DOES INSTEAD, because a reader meets it immediately and it is not a defect: 3.2
-# ignores the variable, so `bash -x` writes its trace to stderr, installer_host's `2>&1` folds
-# that into every transcript it captures, and the trace file stays empty -- so on every Mac
-# 95-installer-coverage.sh has no producer to score and says so, `coverage:nothing-to-score`.
-#
-# THREE FIXES THAT DO NOT WORK, so they are not tried again:
-#   * naming a shell. Bash emits the diagnostic whether it was invoked as `bash` or as `sh`;
-#     only the message prefix changes. Only dash is silent, and on Fedora -- the one platform
-#     that needed silencing -- /bin/sh is not dash.
-#   * unsetting it in the child. Bash validates the variable at startup, BEFORE the first line
-#     of the script runs, so `unset BASH_XTRACEFD` on line 1 is already too late.
-#   * not exporting it (`BASH_XTRACEFD=N; set -x; . script`). This does contain the leak, and
-#     it is still not taken -- but the reason changed with #221, so read this rather than the
-#     shape of the regex. It used to be trace nesting: sourcing traces at `++1` instead of `+1`
-#     and the extractor was anchored to a SINGLE `+`, so the coverage gate would have silently
-#     zeroed. The extractors now read `s/^+*course-install\.sh:\([0-9]\{1,\}\) .*/\1/p` --
-#     `+*` tolerates any nesting depth -- so that objection is genuinely dead and nobody should
-#     re-derive it. WHAT STILL RULES IT OUT is `exit`: course-install.sh dies through cs193v-ui's
-#     die(), which ends in `exit 1`, and every producer prints its whole report AFTER the
-#     invocation -- `===INSTALLER-RC===` through `===TRACE===` in lib/sandbox.sh's run.sh and
-#     nest-run.sh. Sourced, a refusing installer would take the wrapper with it and there would
-#     be no report to read the trace out of, so the gate would see nothing on exactly the cases
-#     a refusal is about.
-#
-# So the fd moves instead, and 10-static.sh asserts the two sets stay disjoint.
-#
-# WHY 8. fds 0-2 are the standard three, run-tests.sh holds the real stdout and stderr on 3 and 4
-# (`exec 3>&1 4>&2`) and every suite runs inside that, and 9 is run_timeout's. 5 through 8 are
-# untouched anywhere in cs193v, files/ or tests/; 8 is the top of that range and so the furthest
-# from the next fd anybody is likely to reach for by hand.
-#
-# THE CONTAINER-SIDE COPIES ARE NOT THIS VARIABLE. lib/sandbox.sh writes its guest scripts from
-# QUOTED heredocs (<<'RUN', <<'NEST') and lib/sandbox-guest.sh is copied into the fixture
-# verbatim, both deliberately, so nothing on the host expands inside them. They spell the number
-# out, and 10-static.sh's trace-fd:container-side-copies-agree asserts they still say what this
-# says -- the same answer this project already gives for version_lt, box() and the two podman
-# floors: assert the agreement rather than pretend there is one copy.
-CS193V_TRACE_FD=8
-export CS193V_TRACE_FD
 
 # ─── the SELinux label every bind mount needs ──────────────────────────────────
 #

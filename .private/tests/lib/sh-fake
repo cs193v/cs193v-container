@@ -28,9 +28,9 @@
 # launcher taking its no-terminal refusal: green for the wrong reason, or red for a reason that is
 # this file's fault rather than the product's.
 #
-# AND FD 3 IS CLOSED IN THE CHILD. Left open it leaks into the command -- measured -- and
-# lib/shared.sh's fd convention has 3 and 4 held by run-tests.sh, 8 the trace fd and 9
-# run_timeout's. 10-static.sh asserts both of these properties are still here, for the same
+# AND FD 3 IS CLOSED IN THE CHILD. Left open it leaks into the command -- measured -- and 3 and
+# 4 are run-tests.sh's own stdout and stderr (`exec 3>&1 4>&2`), with 9 held by cs193v-ui.sh's
+# run_timeout. 10-static.sh asserts both of these properties are still here, for the same
 # reason it asserts lib/sudo-fake has no exec branch: a "simplification" that deleted either one
 # would leave the assertions that use this file passing while measuring nothing.
 [ "$1" = "-c" ] || { echo "sh-fake: only -c is supported (got: ${1:-nothing})" >&2; exit 2; }

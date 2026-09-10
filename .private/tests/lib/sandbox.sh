@@ -693,24 +693,11 @@ set -u
 # one nothing covered before: no-podman proved apt installs it, nested proved the build works,
 # and nothing joined them.
 /work/sandbox arrange </dev/null || { printf '===ARRANGE-FAILED===\n'; exit 90; }
-# TRACED, so both the fixture cases and the nested build are coverage producers. They reach
-# branches no host case can decide -- the real apt install, the real usermod, both wsl.conf
-# writes -- and a gate blind to them would score the installer as far less covered than it is.
-# fd 9 keeps the trace off stdout; the numbers come back out in the report below.
-# TRACED ONLY WHEN ASKED. Measured: `bash -x` took this tier from 6.4 s to 69 s and pushed the
-# apt case past its ceiling, because tracing multiplies the cost of every command in a run that
-# installs 31 packages. Coverage is a periodic question, not something every run should pay 10x
-# for -- so the container half is opt-in and the gate reports which producers it heard from
-# rather than pretending a host-only number is the whole picture.
 # WHICH INSTALLER, because one case runs the lowered-floor copy sb_work_init writes beside the
 # real one. Defaulted, so every existing case is unchanged and only the case that means it says so.
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
-if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
-else
-    bash "$INST"
-fi
+bash "$INST"
 rc=$?
 # Without this the container cannot exit: podman's rootless pause process outlives the run and
 # holds this container's stdio open. See run.sh for the measurement.
@@ -734,9 +721,7 @@ printf '===BUILD-LOG===\n'
 for f in /tmp/cs193v-build-*.log; do [ -f "$f" ] && tail -60 "$f"; done
 printf '===DOCTOR===\n'
 "$HOME/cs193v/cs193v" doctor >/dev/null 2>&1 && echo ok || echo problems
-printf '===TRACE===\n'
-sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
-printf '\n===END-REPORT===\n'
+printf '===END-REPORT===\n'
 NEST
     chmod +x "$SB_WORK/nest-run.sh"
     cat > "$SB_WORK/run.sh" <<'RUN'
@@ -764,11 +749,6 @@ sb_installed() { dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null
                    | awk '$1 == "installed" { print $2 }' | LC_ALL=C sort; }
 sb_installed > /var/tmp/report/dpkg-before
 
-# TRACED ONLY WHEN ASKED. Measured: `bash -x` took this tier from 6.4 s to 69 s, because tracing
-# multiplies the cost of every command in a run that installs 31 packages. Coverage is a
-# periodic question, not something every run should pay 10x for -- so the container half is
-# opt-in and the gate reports which producers it heard from rather than pretending a host-only
-# number is the whole picture. fd 9 keeps the trace off stdout.
 # WHICH INSTALLER, defaulted, so every existing case is unchanged and only a case that means it
 # says so. nest-run.sh honours the same variable; the floor-skew case is a Tier A case and runs
 # through this file.
@@ -795,11 +775,7 @@ fi
 # assertion then compared `listening` against `listening` followed by the whole transcript, and
 # the marker it displaced left INSTALLER-USED empty. Every report marker belongs in the block at
 # the foot of this script, after the last thing that writes to stdout.
-if [ -n "${CS193V_COVERAGE:-}" ]; then
-    PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
-else
-    bash "$INST"
-fi
+bash "$INST"
 rc=$?
 
 # ─── release podman's rootless pause process ────────────────────────────────────
@@ -876,9 +852,7 @@ printf '===HTTP-ORIGIN===\n%s\n' "$origin_state"
 # that touches the runtime creates a store, an events log and lock files, so asking put a dozen
 # paths into podman-old's exact-set audit as changes the installer had supposedly made. The one
 # case that really builds asks in its own script (nest-run.sh), where a store already exists.
-printf '===TRACE===\n'
-sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" /var/tmp/report/trace 2>/dev/null | sort -un | tr '\n' ' '
-printf '\n===END-REPORT===\n'
+printf '===END-REPORT===\n'
 RUN
     chmod +x "$SB_WORK/run.sh"
 }
@@ -1168,7 +1142,6 @@ nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE]
         -e "SB_NO_PREREQS=${2:-}" \
         -e "SB_DISTRO=$(machine_distro "$base")" \
         -e "SB_INSTALLER=$inst" \
-        -e "CS193V_COVERAGE=${CS193V_COVERAGE:-}" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" \
         sh /work/nest-run.sh > "$SB_TMP/nraw" 2>&1
@@ -1183,10 +1156,8 @@ nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE]
     # whatever the previous sandbox_run had left in the file -- a stale value that looked measured,
     # which is the same shape as the SB_SPEC inheritance sandbox_run refuses below.
     printf '%s' "$rc" > "$SB_TMP/last-rc"
-    # AFTER the TTY-warning filter, so the marker cannot be caught by it, and before the trace
-    # collector, so the transcript this returns is the one the marker is in.
+    # AFTER the TTY-warning filter, so the marker cannot be caught by it.
     sb_ceiling_note "$1" "$rc" "$cap" "$outer" "$name" "$SB_TMP/nraw"
-    sb_collect_trace < "$SB_TMP/nraw"
     strip_ansi < "$SB_TMP/nraw"
 }
 
@@ -1292,19 +1263,8 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     #     its arch and then lets the launcher try to build -- measured at ~100 s with the network
     #     off. At the old 60 s ceiling that looked like the transcript freezing mid-apt, because
     #     a killed run loses whatever `script` had buffered.
-    #   * tracing. `bash -x` multiplies the cost of every command in a run that installs 31
-    #     packages; measured at 15 s -> 61 s back when the case was smaller.
-    local cap=60 outer=120 rc cov="${CS193V_COVERAGE:-}"
+    local cap=60 outer=120 rc
     [ "$SB_FAKE_PODMAN" = yes ] || { cap=300; outer=360; }
-    if [ -n "$cov" ]; then cap=$((cap * 2)); outer=$((cap + 60)); fi
-    # EVERY CASE IS TRACEABLE NOW, and the exclusion that used to live here is gone with its
-    # cause. The apt case "hung deterministically under bash -x, frozen at 1750 bytes" because
-    # Ubuntu's sudo defaults use_pty ON: sudo takes a pty of its own, `script` stops draining
-    # its master until the child exits, and output past the kernel's pty buffer blocks in
-    # write() forever. Tracing multiplies output about tenfold, so it crossed that buffer every
-    # time. Bisected: 400 lines after `true` come through, the same 400 after `sudo true` stall
-    # at 11 bytes, and `Defaults !use_pty` in the fixture restores both. So the gate no longer
-    # has a case whose branches it must leave out.
     # THE LABEL STAYS ON FOR TIER A, AND THIS IS THE WHOLE OF THE SCOPING (#119). Turning it off
     # is what a NESTED podman costs, and nothing sandbox_run runs is nested: the installer either
     # dead-ends at check_podman or reaches build_image with --network=none, where the launcher's
@@ -1334,7 +1294,6 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
         --network=none \
         --mount type=tmpfs,destination=/var/tmp/shim \
         --mount type=tmpfs,destination=/var/tmp/report \
-        -e "CS193V_COVERAGE=$cov" \
         -e "SB_NO_PREREQS=$SB_NO_PREREQS" \
         -e "SB_DISTRO=$(machine_distro "$SB_BASE")" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" "$@" \
@@ -1350,32 +1309,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
     mv -f "$SB_TMP/raw.clean" "$SB_TMP/raw" 2>/dev/null || true
     printf '%s' "$rc" > "$SB_TMP/last-rc"
     sb_ceiling_note "sb-$case" "$rc" "$cap" "$outer" "$SB_NAME" "$SB_TMP/raw"
-    sb_collect_trace < "$SB_TMP/raw"
     strip_ansi < "$SB_TMP/raw"
-}
-
-# The line numbers a container run reported, appended to this run's trace directory so
-# 95-installer-coverage.sh can union them with the host cases'. Rewritten into the same
-# "+FILE:NNN text" shape the host traces use, so the gate has one parser rather than two.
-#
-# AND THE FILENAME IS PUT BACK ON, which is the whole reason this needs saying (#221). The
-# transcript carries BARE NUMBERS: run.sh and nest-run.sh each anchor their own sed on
-# course-install.sh and print what is left as a space-separated list, so by the time the
-# numbers reach this side the name they belonged to is gone. Since the split there are two
-# files in one trace and the gate anchors on the basename to tell them apart -- so a bare
-# number matches nothing, and the whole container half read as unscored while plainly being
-# there. It is course-install.sh by construction: the guest-side seds admit no other file.
-sb_collect_trace() {
-    [ -n "${CS193V_RUN_DIR:-}" ] || return 0
-    mkdir -p "$CS193V_RUN_DIR/trace" 2>/dev/null || return 0
-    # tr -d '\r' FIRST. This reads the RAW transcript, which came through a pty, so every line
-    # ends in a carriage return and /^===TRACE===$/ matched nothing -- the collected file was
-    # zero bytes while the section was plainly there in the stripped output I was reading. The
-    # gate then reported the producer silent, which was true and completely misleading.
-    do_tr -d '\r' \
-        | sed -n '/^===TRACE===$/,/^===/p' | sed '1d;$d' | do_tr ' ' '\n' | grep -E '^[0-9]+$' \
-        | sed 's|^|+course-install.sh:|;s/$/ traced-in-container/' \
-        >> "$CS193V_RUN_DIR/trace/${CS193V_SUITE:-standalone}.$$" || true
 }
 
 # The exit status of the last sandbox_run, which the pipeline above would otherwise hide.

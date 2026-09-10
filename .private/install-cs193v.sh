@@ -45,10 +45,9 @@ set -u
 #
 # TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and that is load-bearing rather than a style
 # choice. Six places in the test suite repoint the download at a local tarball by rewriting
-# `^TARBALL=.*` with sed -- lib/sandbox.sh, 25-installer.sh and 10-static.sh -- and one of them
-# asserts the rewrite preserves this file's line numbering. A function that composed the URL
-# instead would leave every one of them matching nothing, silently, and the cheap test lane
-# would go back to making live requests to GitHub.
+# `^TARBALL=.*` with sed -- lib/sandbox.sh and 25-installer.sh. A function that composed the URL
+# instead would leave every one of them matching nothing, silently, and the cheap test lane would
+# go back to making live requests to GitHub.
 #
 # tarball_url() reads it so that there is exactly one expression to change if the course ever
 # pins a commit rather than following a branch. See the issue filed against #221.
@@ -169,10 +168,6 @@ for f in .private/course-install.sh .private/course-install-messages.txt .privat
   or campus wifi login page, for instance. It is safe to run this script again."
 done
 
-# THE TRACE FLAG DOES NOT SURVIVE exec, measured -- so pass it on when the harness asked for a
-# trace. CS193V_COVERAGE is the harness's own gate and is already in this environment;
-# BASH_XTRACEFD and PS4 cross the exec by themselves, because both are exported.
-#
 # AND STDIN IS PASSED STRAIGHT THROUGH, deliberately. An earlier draft redirected it from
 # /dev/null here, on the reasoning that `curl | bash` is not a shipped path so nothing downstream
 # reads stdin. That was wrong twice over: the redirect applies to EVERY invocation, not just
@@ -180,10 +175,7 @@ done
 # choose_dir() reads a typed path. Measured: with the redirect in place every pty-driven case
 # saw "(not a terminal; choosing ...)" and the consent menu took its safe default, so a student
 # could not have answered a single question.
-xt=''
-[ -n "${CS193V_COVERAGE:-}" ] && xt=-x
-# shellcheck disable=SC2086   # deliberately word-split: an empty $xt must vanish, not become ''
-exec bash $xt "$BOOT_TMP/.private/course-install.sh" "$BOOTSTRAP_PROTOCOL" "$BOOT_TMP"
+exec bash "$BOOT_TMP/.private/course-install.sh" "$BOOTSTRAP_PROTOCOL" "$BOOT_TMP"
 
 # ─── the last line, and why the Windows installer needs one ────────────────────
 # install-cs193v-windows.cmd downloads this script into the CS193V environment and greps it for

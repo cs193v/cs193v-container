@@ -15,7 +15,6 @@ set -u
 INST=/work/installer.sh
 REP=/var/tmp/report
 BASE="$REP/baseline"
-LINES="$REP/lines"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 hr() { printf '%s\n' '---------------------------------------------------------------'; }
@@ -317,68 +316,7 @@ cmd_run() {
         printf '[sandbox] no DNS in here, so the launcher'"'"'s build will stop at STEP 1/25.\n'
         printf '[sandbox] leave, and start again without --no-net, to watch it build for real.\n\n'
     fi
-    trace=no
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --trace) trace=yes ;;
-            *) printf 'sandbox run: unknown option %s\n' "$1" >&2; return 2 ;;
-        esac
-        shift
-    done
-    if [ "$trace" = yes ]; then
-        # PS4 carries the line number and the trace goes to fd 8, so the installer's own
-        # output stays readable. Accumulated across runs, which is what makes `lines --missing`
-        # a to-do list rather than one run's snapshot.
-        #
-        # FD 8, NOT 9, AND THE NUMBER MATTERS. BASH_XTRACEFD is exported, so every descendant of
-        # the traced installer inherits it -- including the launcher, whose run_timeout owns fd 9
-        # and CLOSES it for the command it runs. Bash 4.1+ validates BASH_XTRACEFD at startup, so
-        # where /bin/sh is such a bash -- Fedora; not Debian, where it is dash, and not macOS,
-        # whose 3.2 predates the variable and validates nothing (#143) -- a child then wrote
-        # "invalid value for trace file descriptor" into output the launcher was parsing a
-        # podman version out of. This file is COPIED into the fixture verbatim, so it cannot read
-        # lib/shared.sh's CS193V_TRACE_FD; 10-static.sh asserts this number still agrees with it.
-        exec 8>>"$REP/trace"
-        PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST"
-        rc=$?
-        exec 8>&-
-        sed -n "s/^+*course-install\\.sh:\\([0-9]\\{1,\\}\\) .*/\\1/p" "$REP/trace" | sort -un >> "$LINES.raw" 2>/dev/null
-        sort -un "$LINES.raw" > "$LINES" 2>/dev/null
-        printf '\n[sandbox] traced; %s of the installer'"'"'s lines seen so far. `sandbox lines --missing`\n' \
-               "$(grep -c . "$LINES" 2>/dev/null || echo 0)"
-        return "$rc"
-    fi
     bash "$INST"
-}
-
-# The executable lines, by the same conservative rule the coverage gate uses: not blank, not a
-# comment, and not a bare block terminator. It is an approximation and says so.
-# OUT OF THE TARBALL, not off the disk (#221). The lines this counts belong to
-# course-install.sh, which the bootstrap unpacks into a mktemp directory that is gone by the
-# time anyone asks for a report -- but /work/course.tar.gz is still there and still holds it.
-# $INST is the bootstrap, which is a different file with a different and much shorter set.
-executable_lines() {
-    tar xzOf /work/course.tar.gz cs193v-main/.private/course-install.sh \
-      | grep -n '' \
-      | sed -n 's/^\([0-9]\{1,\}\):[[:space:]]*\([^[:space:]].*\)$/\1 \2/p' \
-      | grep -vE ' (#|fi$|esac$|done$|else$|\}$|\{$)' \
-      | awk '{print $1}'
-}
-
-cmd_lines() {
-    if [ ! -s "$LINES" ]; then
-        printf 'Nothing traced yet. Run `sandbox run --trace` first.\n'; return 1
-    fi
-    total="$(executable_lines | grep -c .)"
-    seen="$(grep -c . "$LINES")"
-    case "${1:-}" in
-        --missing)
-            printf 'Executable lines of install-cs193v.sh not yet reached (%s of ~%s seen):\n' "$seen" "$total"
-            executable_lines | grep -vxF -f "$LINES" | tr '\n' ' ' | fold -s -w 70
-            printf '\n\nOpen the installer at those lines to see which branch each one is.\n' ;;
-        '') printf 'seen %s of ~%s executable lines. --missing lists the rest.\n' "$seen" "$total" ;;
-        *)  printf 'sandbox lines: unknown option %s\n' "$1" >&2; return 2 ;;
-    esac
 }
 
 cmd_diff() {
@@ -432,8 +370,7 @@ cmd_reset() {
         elif [ -f "/etc/$f" ]; then sudo rm -f "/etc/$f"; fi
     done
     rm -rf "${CS193V_DIR:-$HOME/cs193v}"
-    : > "$REP/trace"; : > "$LINES"; : > "$LINES.raw"
-    printf 'Restored /etc, removed the course directory, cleared the trace.\n'
+    printf 'Restored /etc, removed the course directory.\n'
     # SAID PLAINLY, because a reset that overstated itself would turn every second run into a
     # false first run. Packages are the part this cannot undo.
     printf 'NOT undone: anything apt installed. Leave and come back for a truly clean machine.\n'
@@ -445,10 +382,8 @@ sandbox -- driving install-cs193v.sh by hand
 
   sandbox state              the machine as the installer will see it.  Read this first
   sandbox run                run the installer
-  sandbox run --trace        the same, recording which of its lines executed
-  sandbox lines --missing    which executable lines you have not reached yet
   sandbox diff               what changed since boot, by CONTENT
-  sandbox reset              put /etc back, remove the course directory, clear the trace
+  sandbox reset              put /etc back and remove the course directory
   sandbox knobs              this
 
 This machine was built with everything present and then had things taken away:
@@ -491,8 +426,7 @@ case "${1:-knobs}" in
     # no symlink, no baseline -- because everything it touches shows up in the case's audit.
     arrange) arrange || exit 1 ;;
     state) cmd_state ;;
-    run)   shift; cmd_run "$@" ;;
-    lines) shift; cmd_lines "${1:-}" ;;
+    run)   cmd_run ;;
     diff)  cmd_diff ;;
     reset) cmd_reset ;;
     knobs|-h|--help) cmd_knobs ;;

@@ -443,8 +443,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # own litter from a run that was killed between the mkfifo and the unlink below.
         rm -f "$fifo"
         # SPELLED TWICE RATHER THAN PARAMETERISED. `2>&"$efd"` is a bash extension and this file
-        # has to run on the 3.2 macOS ships, which 10-static.sh polices; and an `exec 7>` to
-        # redirect through would add an fd to the set 10-static.sh's trace-fd rule reasons about.
+        # has to run on the 3.2 macOS ships, which 10-static.sh polices.
         if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" ) & pid=$!
         else                       ( "$@" >"$tmp" 2>&1 ) & pid=$!
         fi
@@ -697,13 +696,6 @@ version_lt() {                        # version_lt A B -> prints yes if A < B
 # of EVERY line it was given. The text handed in is run_timeout's RT_OUT, and run_timeout captures
 # the command's stderr along with its stdout, so any second line podman writes turns a version
 # into two words.
-#
-# MEASURED (Fedora, and it cost a day): a `#!/bin/sh` child inheriting the test harness's
-# BASH_XTRACEFD wrote "invalid value for trace file descriptor" to stderr, and the version came
-# back as "descriptor 5.7.0". version_lt read that as older than 4.9.0 and a current podman was
-# refused as too old. The fd collision behind that is fixed on the test side, but the parse should
-# not have depended on it: a real podman is free to warn on stderr, and this is the one number the
-# launcher refuses to start over.
 #
 # ONE DEFINITION FOR TWO CALLERS -- the version gate and doctor -- because they were byte-identical
 # and a drifted copy is exactly how this survived. `[0-9][^ ]*` rather than something stricter so
