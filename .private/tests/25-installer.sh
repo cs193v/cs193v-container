@@ -30,6 +30,10 @@ set -u
 
 cd "$REPO" || exit 1
 TMP="$(new_tmpdir)"
+# The installer's own catalogue, for the assert_says*_key sites: the default is the launcher's,
+# and 10-static.sh forbids a key appearing in both, so naming it is what makes an assertion say
+# which catalogue it means.
+ICAT="$PRIVATE/course-install-messages.txt"
 
 # The cheapest tripwire for the whole class of accident installer_host exists to prevent.
 # $HOME here is the REAL one -- the door redirects it for the installer's process only --
@@ -862,18 +866,27 @@ assert_ok   "choosedir:tilde-target-created" test -x "$SHIM/home/elsewhere/cs193
 # colour is already off. An assertion there would have passed with NO_COLOR doing nothing.
 shim_new
 # BEFORE "Building the course container", which is where the installer hands over to the
-# launcher -- whose progress meter draws cursor escapes on a tty of its own accord. Asserting
-# over the whole transcript measured the meter, not the colour decision.
+# launcher: what it prints past that point is cs193v's colour decision rather than this
+# script's, and this assertion is about this script's.
+#
+# AND THE NEEDLE IS AN SGR SEQUENCE, not any ESC[ at all, which is what NO_COLOR actually
+# governs. The window used to carry that job as well -- "the launcher's progress meter draws
+# cursor escapes on a tty of its own accord" -- and that stopped working the moment the
+# INSTALLER had a progress block of its own (#219), because cursor_hide and ESC[K fire whatever
+# NO_COLOR says and now fire before the hand-over. Keying on `ESC[...m` says what was meant all
+# along, and it keeps both halves honest: with colour on, step() emits ESC[36m, so the positive
+# arm cannot be satisfied by a cursor move either.
 pre() { sed -n '1,/Building the course container/p'; }
+SGR="$(printf '\033')\[[0-9;]*m"
 raw="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | pre)"
-if printf '%s' "$raw" | grep -q "$(printf '\033')\["; then pass "colour:on-with-a-terminal"
-else fail "colour:on-with-a-terminal" "no escape sequences in a pty transcript"; fi
+if printf '%s' "$raw" | grep -q "$SGR"; then pass "colour:on-with-a-terminal"
+else fail "colour:on-with-a-terminal" "no colour sequences in a pty transcript"; fi
 assert_says "colour:the-coloured-run-got-that-far" "Looking at your computer" "$raw"
 
 shim_new
 raw="$(installer_tty '\n' "$TMP/installer.sh" NO_COLOR=1 CS193V_DIR="$SHIM/dest" | pre)"
-if printf '%s' "$raw" | grep -q "$(printf '\033')\["; then
-    fail "colour:NO_COLOR-suppresses-it" "escape sequences survived NO_COLOR=1"
+if printf '%s' "$raw" | grep -q "$SGR"; then
+    fail "colour:NO_COLOR-suppresses-it" "colour sequences survived NO_COLOR=1"
 else pass "colour:NO_COLOR-suppresses-it"; fi
 # ...and the run really ran, so the check above is not passing on an empty transcript.
 assert_says "colour:NO_COLOR-run-got-that-far" "Looking at your computer" "$raw"
@@ -1064,6 +1077,16 @@ mac_run() {                           # mac_run [KEY VALUE]... -> the installer'
     installer_host "$TMP/installer.sh" CS193V_DIR="$SHIM/dest"
 }
 mac_rc() { mac_run "$@" >/dev/null 2>&1; printf '%s' "$?"; }
+# The same door through a real pty, which is the only way the progress block draws at all --
+# meter_start returns immediately when stdout is not a terminal. No keystrokes: CS193V_DIR is
+# set so choose_dir does not prompt, and a machine that only needs INIT needs no consent, so
+# there is no menu to feed. A case that grew one would hang rather than fail (ERRORS.md B13).
+mac_tty() {                           # mac_tty [KEY VALUE]... -> the raw pty transcript
+    shim_new
+    shim_fake_mac
+    while [ "$#" -gt 1 ]; do shim_set "$1" "$2"; shift 2; done
+    installer_tty '' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest"
+}
 
 # The gate on everything below: if this fails, every other assertion here is failing
 # because the run is still on Linux, not because of anything to do with a machine.
@@ -1086,6 +1109,60 @@ out="$(mac_run machine_init_rc 1)"
 assert_says "mac-init:failure-is-fatal" "Could not create the podman virtual machine" "$out"
 assert_says_not "mac-init:failure-does-not-claim-success" "Setup finished" "$out"
 assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
+
+# ─── the progress block around `machine init`  (#219) ──────────────────────────
+# THE ONE ARM OF setup_machine THAT GETS A BLOCK, and the resize arm deliberately does not:
+# grow_machine_disk prints a notes() block in the middle of that one, and the animator overdraws
+# anything else within 100 ms.
+#
+# REACHABLE HERE, unlike the .pkg install beside it: podman-fake answers `machine init` and now
+# prints what podman really prints, so the anchors have real line shapes to match. The .pkg needs
+# a Mac and is in tests/MANUAL.md.
+#
+# PIPED FIRST, for the same reason the apt cases are: mac_run has no tty, so setup_phase prints
+# one line per phase deterministically rather than being sampled by a 10 Hz animator.
+macbox="$(mac_run)"
+for mackey in meter.vm-downloading meter.vm-initializing; do
+    assert_says_key "machinebox:piped-announces-[$mackey]" "$mackey" "$macbox" "$ICAT"
+done
+# THE SECOND PHASE IS ANCHORED ON PODMAN'S OWN WORDS, so this is the assertion that would catch
+# an anchor aimed at a line podman does not print. Ordering, because both appearing proves
+# nothing about which came first.
+macdown="$(printf '%s\n' "$macbox" | grep -nF "$(msg_text meter.vm-downloading "$ICAT")" \
+           | sed 's/:.*//' | head -1)"
+macinit="$(printf '%s\n' "$macbox" | grep -nF "$(msg_text meter.vm-initializing "$ICAT")" \
+           | sed 's/:.*//' | head -1)"
+record "machinebox:the-phase-rows" "${macdown:-x}/${macinit:-x}"
+assert_ok "machinebox:piped-phases-are-in-order" \
+          sh -c "test -n '$macdown' && test -n '$macinit' && test '$macdown' -lt '$macinit'"
+
+# AND PODMAN'S OUTPUT NO LONGER REACHES THE STEP LIST, which is the whole point of the change:
+# `machine init` prints nine lines of image names and blob digests that a student cannot act on.
+assert_says_not "machinebox:podmans-chatter-is-not-in-the-step-list" \
+                "Copying blob sha256" "$macbox"
+
+# ─── ...and on a terminal, where there is a box ────────────────────────────────
+# FOUR BARS AFTER THE CORNER is the titleless lid; see the aptbox group for why that signature.
+# machine_delay so that a frame is drawn while a phase is in progress -- without it the nine
+# lines arrive inside one 100 ms tick and the animator may never see a mid-run state.
+macraw="$(mac_tty machine_delay 0.08)"
+assert_contains "machinebox:the-block-carries-an-output-box" "┏━━━━" "$macraw"
+# ON A BOX ROW, not merely on the screen. Without the border in the needle this passed
+# before the feature existed, because podman's output was on the terminal anyway. The row
+# format is `┃ <text> ┃` and the dim escape precedes the border, so the two are contiguous.
+assert_contains "machinebox:the-box-shows-what-podman-said" "┃ Copying blob sha256" "$macraw"
+macscreen="$(printf '%s' "$macraw" | render_pty)"
+assert_not_contains "machinebox:the-box-is-gone-at-the-end" "┏━━━━" "$macscreen"
+assert_match "machinebox:the-bar-fills-only-at-the-end" '✓ .*\] +2/2' "$macscreen"
+assert_says "machinebox:the-step-still-reports-success" "created and started" "$macscreen"
+
+# THE FAILURE ARM: the block closes before the STOP box rather than under it, and the refusal
+# carries what podman said -- which it could not point at any more (ERRORS.md B17).
+macfail="$(mac_run machine_init_rc 1)"
+assert_says "machinebox:failure-still-refuses" "Could not create the podman virtual machine" \
+            "$macfail"
+assert_says "machinebox:failure-carries-podmans-words" "machine init failed" "$macfail"
+assert_says "machinebox:failure-names-the-log" "cs193v-setup-" "$macfail"
 
 # ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
 # 80% of 8192 is 6553, so 4096 is under it and 16384 is over.
@@ -1458,7 +1535,6 @@ assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 # and both of its endings are 30-launcher-shim.sh's tailbox:* group, against the same unchanged
 # code. What is new here is that the installer passes a LOG to meter_start, so a box exists.
 APTFIX="$PRIVATE/tests/fixtures/apt-install-podman.txt"
-ICAT="$PRIVATE/course-install-messages.txt"
 APTBOX="$TMP/aptbox.sh"
 APTDRIVE="$TMP/aptdrive.sh"
 APTLOG="$TMP/aptbox-setup.log"
@@ -1469,7 +1545,7 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
     printf 'MESSAGES=%s\n' "'$PRIVATE/course-install-messages.txt'"
     cat "$PRIVATE/files/cs193v-ui.sh"
     for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
-                 setup_tail apt_phases dnf_phases; do
+                 setup_tail apt_phases dnf_phases machine_phases; do
         # NO $ AFTER THE BRACE: every one of these headers carries a signature comment
         # after it, the way the rest of this file does, so an anchored pattern matched
         # none of them and the harness was a copy of cs193v-ui.sh and nothing else.
@@ -1485,7 +1561,7 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
 # five arriving, and the missing one would then be tested by nothing at all.
 aptmissing=''
 for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
-             setup_tail apt_phases dnf_phases; do
+             setup_tail apt_phases dnf_phases machine_phases; do
     [ "$(grep -c "^$aptfn() {" "$APTBOX")" = 1 ] || aptmissing="$aptmissing $aptfn"
 done
 assert_eq "aptbox:the-wrapper-is-extractable" "" "$aptmissing"
