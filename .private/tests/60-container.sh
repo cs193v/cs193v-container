@@ -83,9 +83,7 @@ assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 # limits:pids-limit-actually-stops-forking, below in §A.9, runs a disposable container with
 # --pids-limit 64 and proves podman still applies a limit when it is asked to. Only the default
 # moved. (Cited by NAME rather than by line number on purpose: the reference that used to sit here
-# pointed at :1177, which had drifted onto the browser tests. fixtures/coverage-allowlist records
-# what that costs -- "seven of the eight entries this file used to hold had gone stale, three of
-# them onto blank lines, and nothing noticed for as long as the numbers stayed inside the file.")
+# pointed at :1177, which had drifted onto the browser tests.)
 #
 # ON A HOST THAT DELEGATES NO pids CONTROLLER THAT CASE SKIPS, and §A.9 says why at length. So the
 # honest form of the claim is conditional: the mechanism is tested wherever it CAN be, and where it

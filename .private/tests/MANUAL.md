@@ -568,8 +568,8 @@ what a real Ubuntu Desktop box adds is:
   archive URL. wget follows redirects by default and the loopback origin never issues one, so
   nothing here has ever exercised that.
 - **`--tries=10 --waitretry=3` under a real flaky link.** Exercising the retry loop needs fault
-  injection and ≥3 s of wall clock per forced retry; the gate records it as uncovered rather
-  than excusing it, and this is where it would actually be seen.
+  injection and ≥3 s of wall clock per forced retry; nothing exercises it, and this is where
+  it would actually be seen.
 - **The certificate refusal, on a machine that really lacks `ca-certificates`.** curl exits 60
   and wget exits 5, and the bootstrap turns either into a message naming the package. This is
   the one genuinely new failure mode the #221 split introduced — `install_podman` used to

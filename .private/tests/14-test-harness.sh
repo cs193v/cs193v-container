@@ -1037,13 +1037,6 @@ done
 # THE SPACE IS INJECTED, NOT BORROWED FROM THE AMBIENT $PATH. A Mac, a CI runner and a plain
 # Linux box have no space to find, so a check that read the real PATH would pass on all three
 # having measured nothing -- and those are the machines this suite normally runs on.
-#
-# CS193V_RUN_DIR IS EMPTIED FOR THE PROBE, and that is not tidiness. With it set, installer_tty
-# takes its `bash -x` arm and appends a trace to $CS193V_RUN_DIR/trace/14-test-harness.sh.$$ --
-# and 95-installer-coverage.sh globs that whole directory, scoring the union against
-# install-cs193v.sh. A probe script's line numbers in there is a wrong coverage number, from a
-# producer that gate has no name for. The defect is in the `env HOME=... PATH=...` prefix BOTH
-# arms share, so the plain arm reaches it.
 PATH_SP="$WORK/dir with spaces"
 mkdir -p "$PATH_SP"
 shim_new
@@ -1053,7 +1046,7 @@ shim_new
 cat > "$SHIM/probe.sh" <<'PROBE'
 printf 'PROBE-RAN home=[%s]\nPROBE-PATH=[%s]\n' "$HOME" "$PATH"
 PROBE
-door_out="$(PATH="$PATH_SP:$PATH" CS193V_RUN_DIR='' installer_tty '\n' "$SHIM/probe.sh" | strip_ansi)"
+door_out="$(PATH="$PATH_SP:$PATH" installer_tty '\n' "$SHIM/probe.sh" | strip_ansi)"
 assert_says     "installer-door:tty-runs-with-a-space-in-PATH" "PROBE-RAN" "$door_out"
 assert_says_not "installer-door:tty-does-not-word-split-PATH" "No such file or directory" "$door_out"
 # The two properties 10-static.sh asserts of the door's TEXT, measured on the door's BEHAVIOUR.
@@ -1516,15 +1509,15 @@ chmod 755 "$EBG/cs193v"
 # EVERY SUITE ANSWERS WITH A LINE ON STDOUT, not with an absence. `assert_not_contains` on a run
 # that never started passes, and so does every gate assertion below if the suites are silent --
 # both were green against the unimplemented flag the first time this block ran. So each fake
-# reports its own name, whether the build had already happened when it started, and what the six
+# reports its own name, whether the build had already happened when it started, and what the five
 # cost gates were set to; the assertions are then equalities and presences.
 ebg_fake() {                          # ebg_fake FILE TIER
     { printf '# TIER: %s\n' "$2"
-      printf 'printf "EBG-RAN %s build=%%s gates=%%s,%%s,%%s,%%s,%%s,%%s\\n" \\\n' "${1%.sh}"
+      printf 'printf "EBG-RAN %s build=%%s gates=%%s,%%s,%%s,%%s,%%s\\n" \\\n' "${1%.sh}"
       printf '  "$([ -s "$EBG_LOG" ] && echo yes || echo no)" \\\n'
       printf '  "${CS193V_INSTALL_NESTED:-unset}" "${CS193V_INSTALL_NESTED_BUILD:-unset}" \\\n'
       printf '  "${CS193V_MINPODMAN_BUILD:-unset}" "${CS193V_RELEASE_BUILD:-unset}" \\\n'
-      printf '  "${CS193V_COVERAGE:-unset}" "${CS193V_DESTRUCTIVE:-unset}"\n'
+      printf '  "${CS193V_DESTRUCTIVE:-unset}"\n'
       printf 'printf "PASS\\t%s\\tfake:ran\\n" >> "$CS193V_RESULTS"\n' "$1"
     } > "$EBG_TESTS/$1"
 }
@@ -1535,14 +1528,14 @@ ebg_fake 70-rel.sh    release
 ebg_fake 80-quux.sh   quux
 ebg_fake 90-gh.sh     github
 
-# THE SIX GATES ARE UNSET INSIDE, and that is not tidiness. A developer running the real suite
+# THE FIVE GATES ARE UNSET INSIDE, and that is not tidiness. A developer running the real suite
 # WITH this flag would otherwise hand them down to the fixture, and every gate assertion below
 # would pass while measuring the parent's environment instead of the flag.
 ebg_run() {                           # ebg_run [ARG...] -> output with [rc=N]
     : > "$EBG_LOG"
     ( cd "$EBG_TESTS" || exit 1
       unset CS193V_INSTALL_NESTED CS193V_INSTALL_NESTED_BUILD CS193V_MINPODMAN_BUILD
-      unset CS193V_RELEASE_BUILD CS193V_COVERAGE CS193V_DESTRUCTIVE
+      unset CS193V_RELEASE_BUILD CS193V_DESTRUCTIVE
       NO_COLOR=1 bash ./run-tests.sh "$@" 2>&1; printf '[rc=%s]' "$?" )
 }
 
@@ -1551,7 +1544,7 @@ ebg_run() {                           # ebg_run [ARG...] -> output with [rc=N]
 # unconditional, and the default invocation is what students and CI actually run.
 out="$(ebg_run)"
 assert_contains "ebg:a-bare-run-still-runs-the-default-tiers" \
-                "EBG-RAN 01-cheap build=no gates=unset,unset,unset,unset,unset,unset" "$out"
+                "EBG-RAN 01-cheap build=no gates=unset,unset,unset,unset,unset" "$out"
 assert_not_contains "ebg:a-bare-run-does-not-build"          "--rebuild" "$(cat "$EBG_LOG")"
 # The three tiers a bare run leaves out, one of which is the bug this flag exists to stop
 # repeating -- `windows` is in neither DEFAULT_TIERS nor --all.
@@ -1576,7 +1569,7 @@ assert_not_contains "ebg:does-not-run-the-github-tier" "EBG-RAN 90-gh" "$out"
 # EVERY COST GATE, read back from inside a suite rather than from the runner's own banner: what
 # matters is what the suites see, and the install-tier gates are nested inside one another
 # (26-installer-sandbox.sh:558, :709, :843) so a partial set silently runs less than it says.
-assert_contains "ebg:sets-every-cost-gate" "gates=1,1,1,yes,1,1" "$out"
+assert_contains "ebg:sets-every-cost-gate" "gates=1,1,1,yes,1" "$out"
 
 # THE BUILD, AND THAT IT CAME FIRST. require_image and require_running HARD-FAIL rather than skip
 # (lib/assert.sh:468, :807), so a flag that built afterwards would be a flag that changed nothing.
