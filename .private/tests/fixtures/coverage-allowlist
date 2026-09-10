@@ -24,10 +24,10 @@
 #
 # So what is left is the pair that no fake can stand in for.
 406  txt err.curl-missing-mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken. The anchor is the CALL now rather than the sentence: since issue #116 the words are in the catalogue, which the denominator no longer counts, so the executable line here is the die that fetches them
-620  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
+619  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
 #
 # RENUMBERED BY #221, from 655 and 858, when the logic moved into course-install.sh, and the
-# second entry again from 609 to 620 when survey grew a comment above it. The anchors are what
+# second entry again from 609 to 620 and then to 619, as survey's comments grew and shrank. The anchors are what
 # made both safe: each entry names the text that must be ON its line, so a number that landed
 # somewhere else FAILS rather than quietly excusing the wrong statement -- which is not a
 # hypothetical, it is how the second renumbering was found, in a run whose only other red was

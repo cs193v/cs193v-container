@@ -38,9 +38,18 @@ FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914
 # strict closure would let apt silently skip the unavailable recommendation and hand the next
 # case a podman with no network backend, which is exactly how "could not find pasta" was
 # discovered the first time.
+#
+# wget IS HERE FOR A PLATFORM, NOT FOR COMPLETENESS (#221). curl is absent from the Ubuntu
+# DESKTOP image -- 24.04 and 26.04 both carry wget and libcurl4t64 and no curl -- while the WSL
+# image and macOS ship curl. Since the installer downloads before it can run any course code,
+# that machine has to be reproducible here, and it is reproduced by REMOVING curl from a machine
+# that has both rather than by installing wget into one that has neither: arrange_prereqs is
+# subtractive, and `--no-prereqs=curl,wget` then gives the machine with no downloader at all.
+# Installed for real rather than left in the closure, because these are the tools a student's
+# machine HAS; the closure is what the installer is allowed to install.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends sudo ca-certificates dpkg-dev \
- && apt-get install -y --download-only podman uidmap openssh-client fuse-overlayfs curl \
+ && apt-get install -y --download-only podman uidmap openssh-client fuse-overlayfs curl wget \
  && mkdir -p /opt/localrepo \
  && cp /var/cache/apt/archives/*.deb /opt/localrepo/ \
  && ( cd /opt/localrepo && dpkg-scanpackages -m . /dev/null | gzip -9c > Packages.gz ) \
@@ -48,7 +57,7 @@ RUN apt-get update \
  && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources \
  && rm -rf /var/lib/apt/lists/* \
  && apt-get update \
- && apt-get install -y podman uidmap openssh-client fuse-overlayfs curl
+ && apt-get install -y podman uidmap openssh-client fuse-overlayfs curl wget
 
 # INSTALLING FROM THE LOCAL REPO IS THE ASSERTION, not the comment above it. The line before
 # this one deliberately installs with the network sources already gone, so if the repo were
@@ -56,6 +65,7 @@ RUN apt-get update \
 # the installer's fault. Then: the things a student's machine has, present.
 RUN command -v podman && command -v ssh && command -v ssh-keygen && command -v newuidmap \
  && command -v curl \
+ && command -v wget \
  && test -s /opt/localrepo/Packages.gz \
  && command -v pasta
 

@@ -75,7 +75,7 @@ MACHINE_CAP_NAMES='sysadmin'
 #     machine_flags for the measurement and for the two narrower postures that were tried first.
 MACHINE_CAP_INTERNAL='unmask fuse tun label'
 # Subtracted at boot by lib/sandbox-guest.sh, which is where the removal commands live.
-MACHINE_PREREQ_NAMES='podman ssh subuid curl uidmap'
+MACHINE_PREREQ_NAMES='podman ssh subuid curl wget uidmap'
 
 # ─── the bases, and which of them nest ─────────────────────────────────────────
 #
@@ -523,6 +523,62 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer.sh"
     edit_sub "$SB_WORK/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
     edit_sub "$SB_WORK/installer.sh" '^TARBALL=.*'    'TARBALL="file:///work/course.tar.gz"'
+    # ─── an origin wget can actually fetch from (#221) ────────────────────────────
+    #
+    # BECAUSE wget HAS NO file:// SCHEME. Measured, not inferred from the manual: GNU wget 1.21.4
+    # given file:///tmp/x.txt exits 1 and writes nothing. Every fixture serves the tarball over
+    # file://, which curl is happy with, so the wget arm cannot be exercised by any of them and an
+    # arm no test can reach is the "path that rots" this project has refused twice.
+    #
+    # ONLY FOR THE wget CASES. The six file:// sites are left exactly as they are -- this is a
+    # second installer copy beside the first, the same shape as installer-skew.sh, so no existing
+    # case changes behaviour or pays for a listener it does not use.
+    #
+    # LOOPBACK UNDER --network=none, which podman gives every container: `none` still brings up lo
+    # with 127.0.0.1/8, so nothing here reaches the network or another run. The port is fixed
+    # rather than picked, because each container has a network namespace of its own and two
+    # concurrent runs cannot collide on it.
+    #
+    # perl RATHER THAN python3, because IO::Socket::INET is in perl-base, which is Essential -- so
+    # it is present on every Debian-family fixture regardless of what the closure carries, and the
+    # contingency of dragging python3 into /opt/localrepo is not needed.
+    cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer-http.sh"
+    edit_sub "$SB_WORK/installer-http.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
+    edit_sub "$SB_WORK/installer-http.sh" '^TARBALL=.*' \
+             'TARBALL="http://127.0.0.1:8099/course.tar.gz"'
+    grep -q '127.0.0.1:8099' "$SB_WORK/installer-http.sh" || {
+        fail "sandbox:the-http-installer-was-repointed" "the TARBALL edit matched nothing"
+        return 1; }
+    cat > "$SB_WORK/http-origin.pl" <<'ORIGIN'
+# One file, over loopback, for the wget arm. Serves the same bytes the file:// cases read.
+#
+# THE READY FILE IS THE HANDSHAKE, and it is written AFTER bind+listen returns rather than at
+# the top: run.sh waits for it before starting the installer, so a listener that has not bound
+# yet cannot be raced by the download. Without it the case fails as "network problem", which is
+# indistinguishable from the bug it would be hiding.
+#
+# HTTP/1.0 AND Content-Length, so wget knows when the body ends without chunked encoding. It
+# serves any path -- there is exactly one file here, and a 404 arm would be a branch no case
+# reaches, which is the thing this origin exists to avoid creating.
+use strict; use warnings; use IO::Socket::INET;
+my ($port, $file, $ready) = @ARGV;
+my $sock = IO::Socket::INET->new(LocalAddr => '127.0.0.1', LocalPort => $port,
+                                 Listen => 5, ReuseAddr => 1, Proto => 'tcp')
+    or die "origin: cannot bind $port: $!\n";
+open(my $rf, '>', $ready) or die "origin: cannot write $ready: $!\n"; print $rf "ready\n"; close $rf;
+while (my $c = $sock->accept) {
+    my $line = <$c>;                       # request line
+    while (defined(my $h = <$c>)) { last if $h =~ /^\r?$/; }   # drain headers
+    if (open(my $fh, '<', $file)) {
+        binmode $fh; local $/; my $body = <$fh>; close $fh;
+        print $c "HTTP/1.0 200 OK\r\nContent-Type: application/gzip\r\n",
+                 "Content-Length: ", length($body), "\r\n\r\n", $body;
+    } else {
+        print $c "HTTP/1.0 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+    }
+    close $c;
+}
+ORIGIN
     cat > "$SB_WORK/nest-probe.sh" <<'PROBE'
 set -u
 # Every answer is a positive token. An empty value means the probe did not run, and the
@@ -718,6 +774,27 @@ sb_installed > /var/tmp/report/dpkg-before
 # through this file.
 INST="${SB_INSTALLER:-/work/installer.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
+
+# ─── the loopback origin, for the wget arm only (#221) ─────────────────────────
+# STARTED HERE AND WAITED FOR, because wget has no file:// scheme and every other case serves the
+# tarball over one. The wait is on a file the listener writes after bind+listen returns, so the
+# download cannot race the bind -- which would surface as "this is usually a network problem",
+# the one message that would hide the failure it is reporting.
+origin_state=not-asked
+if [ -n "${SB_HTTP_ORIGIN:-}" ]; then
+    rm -f /var/tmp/report/origin-ready
+    perl /work/http-origin.pl 8099 /work/course.tar.gz /var/tmp/report/origin-ready \
+        >/var/tmp/report/origin.log 2>&1 &
+    i=0
+    while [ ! -f /var/tmp/report/origin-ready ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    if [ -f /var/tmp/report/origin-ready ]; then origin_state=listening; else origin_state=FAILED; fi
+fi
+# NOT REPORTED HERE, and the reason is worth writing down because the first attempt got it
+# wrong. sb_section reads a marker to the NEXT line beginning `===`, so a marker printed before
+# the installer runs takes the installer's entire stdout with it as its value -- the origin
+# assertion then compared `listening` against `listening` followed by the whole transcript, and
+# the marker it displaced left INSTALLER-USED empty. Every report marker belongs in the block at
+# the foot of this script, after the last thing that writes to stdout.
 if [ -n "${CS193V_COVERAGE:-}" ]; then
     PS4='+${BASH_SOURCE##*/}:${LINENO} ' BASH_XTRACEFD=8 bash -x "$INST" 8>>/var/tmp/report/trace
 else
@@ -790,6 +867,11 @@ if [ -x "$d/cs193v" ]; then echo launcher-is-executable; elif [ -d "$d" ]; then 
 # names the thing, so the next reader gets `present` instead of forty diff lines.
 printf '===BOOT-TMP===\n'
 if ls -d /tmp/cs193v-install.* >/dev/null 2>&1; then echo present; else echo absent; fi
+# WHETHER THE LOOPBACK ORIGIN CAME UP, for the wget arm. Reported rather than assumed, because an
+# origin that never bound makes the download fail and the installer refuse -- which is
+# indistinguishable from half a dozen other refusals, and would let the one case that exercises
+# wget pass its remaining assertions while measuring nothing.
+printf '===HTTP-ORIGIN===\n%s\n' "$origin_state"
 # NO `podman image exists` HERE, deliberately, and it was here for one run: any podman command
 # that touches the runtime creates a store, an events log and lock files, so asking put a dozen
 # paths into podman-old's exact-set audit as changes the installer had supposedly made. The one
