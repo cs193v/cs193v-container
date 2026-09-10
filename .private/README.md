@@ -212,6 +212,48 @@ There is no third blank. `.config/container.args` used to carry an empty `IMAGE=
 looked like one; it is gone, along with the rest of the pull path — see "How the image
 reaches a student" above.
 
+#### The installer's two rules, and where each is enforced
+
+`course-install.sh:20-28` opens with two promises to the student, and it is worth knowing which
+part of the code keeps each, because for a long time one of them was kept only by the wording.
+
+**Rule 1 — never change what was already here without asking.** Kept by `survey`, which decides
+nothing and only records: every item it appends to `NEEDS[]` is printed with its reason by
+`ask_consent`, and a `no` there exits before anything runs. The three refusals of a machine this
+script cannot set up all happen inside `survey` too, so a computer that will be refused is
+refused before it is asked for permission for anything.
+
+**Rule 2 — anything needing your password is announced before it happens.** Kept in two places
+since #226, and the split is the point:
+
+- **The announcement** is in the catalogue. Every `need.*.why` for a root-requiring step says so
+  in its own words, and `20-messages.sh` asserts that each of them does — that assertion exists
+  because `need.wslconf.why` did not, while driving `sudo sed -i /etc/wsl.conf`.
+- **The prompt itself** is `ask_password`, one `sudo -v` between `ask_consent` and
+  `install_podman`. Before it, the first prompt arrived inside `install_podman`, after the
+  consent screen had told the student they could walk away — so the promise was true about
+  *what* and silent about *when*. One prime covers all six privileged call sites, because all
+  six run within sudo's timestamp of it.
+
+Two things fall out of that which are easy to get wrong later:
+
+- **`ROOT_WANTS[]` is not `NEEDS[]`.** The WSL arm that *creates* `/etc/wsl.conf` records an
+  `ok()` and no `need()`, because rule 1 is about changing what was already there and that file
+  was not — and it still runs `sudo tee`. So "needs consent" and "needs root" are genuinely
+  different sets, and a machine in exactly that state used to be told "Nothing on your computer
+  needs to change" and then asked for a password. `wants_root` is what the gate counts.
+- **The gate is a list, not a disjunction of the `DO_*` flags.** A six-way `or` would be a
+  second place that has to learn about a seventh privileged step, and a flag missing from it
+  reads exactly like a flag that needs no privilege. Appending to one list means a step that
+  asks for root without registering is also a step with no consent line, which is the thing
+  this script is loudest about.
+
+**And the root refusal.** `survey`'s first act, above the step line, because being root is a
+property of the invocation rather than of the computer. It is deliberately *one condition in one
+place*: #217's WSL provisioning pass runs as root on purpose, and its own first act is the mirror
+of this one, so that work amends the `if` rather than the shape around it. No escape hatch ships
+ahead of it — nothing would exercise one.
+
 ### And four things on GitHub, before `setup-git` works for anybody
 
 `setup-git` (issue #49) configures git and then proves the student's fine-grained access token can

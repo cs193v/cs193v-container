@@ -26,6 +26,21 @@
 #
 # All the consent questions are asked ONCE, up front, so you can walk away during the
 # long build instead of babysitting prompts.
+#
+# ─── and where each of them is actually enforced  (#226) ───────────────────────
+# Both used to be kept by whoever wrote the next line, which for rule 2 was not enough.
+#
+#   Rule 1 is survey() and ask_consent(): survey decides nothing and only records, every
+#   item it appends to NEEDS[] is printed with its reason, and a `no` exits before anything
+#   runs.
+#
+#   Rule 2 is ROOT_WANTS[] and ask_password(). The announcement is every need.*.why, which
+#   20-messages.sh now checks one by one; the PROMPT is one `sudo -v` between ask_consent
+#   and install_podman, so the password is asked at the announced moment and no later call
+#   site prompts. Before that it was first demanded inside install_podman, after the consent
+#   screen had told the student they could walk away -- true about what, silent about when.
+#
+#   And root is refused outright: survey()'s first act, above the step line.
 
 set -u
 
@@ -125,6 +140,24 @@ say_unsupported_distro() {            # say_unsupported_distro PRETTY_NAME
     printf '\n'
 }
 
+# THE THIRD BOX OF THIS SHAPE, and the one that is not about the computer (#226). Same
+# renderer and same reason as the two above -- stop before anything has been changed and say
+# so -- but this one is `say_*` rather than `die` for a reason worth stating: die() signs off
+# with die.trailer, "send all of the text above to course staff", and the remedy here is a
+# command the student types themselves. Telling somebody to email us about their own `sudo` is
+# how a refusal stops being read.
+#
+# WHY THE INSTALLER NEEDS ITS OWN. cs193v:801 refuses root as preflight's first act, so
+# `sudo bash install-cs193v.sh` did eventually stop -- at build_image's `--rebuild`, 200 lines
+# and one apt run later, with $HOME=/root and the subuid range granted to root. That refusal
+# was the LAUNCHER's, which is why 25-installer.sh :: root:* asserts on this key rather than on
+# the word "sudo": before this existed, every prose assertion passed against the wrong message.
+say_as_root() {
+    printf '\n'
+    { printf '\n'; msg err.as-root; printf '\n'; } | box STOP "$C_RED" '  '
+    printf '\n'
+}
+
 say_done() {
     printf '\n'
     msg finished "DIR=$DIR"
@@ -184,8 +217,41 @@ NEEDS=()
 NEEDS_WHY=()
 need() { NEEDS[${#NEEDS[@]}]="$1"; NEEDS_WHY[${#NEEDS_WHY[@]}]="$2"; }
 
+# ─── and which of them need root  (#226) ───────────────────────────────────────
+# ONE LIST, NOT A SECOND COPY OF THE FLAG NAMES. The obvious `needs_root()` is a six-way `or`
+# over the DO_* flags, and it would be a second place that has to learn about a seventh
+# privileged step -- silently, because a flag missing from it reads exactly like a flag that
+# needs no privilege. Appending here instead means the gate cannot fall behind the steps: a
+# step that asks for root without registering is a step with no consent line either, which is
+# the thing this script is loudest about.
+#
+# SEPARATE FROM NEEDS[] rather than a third column of it, for one machine that has neither
+# shape: the WSL arm that CREATES /etc/wsl.conf records an ok() and no need(), because rule 1
+# is about changing what was already here and that file was not. It still runs `sudo tee`. So
+# "needs consent" and "needs root" are genuinely different sets, and this is the second one.
+ROOT_WANTS=()
+wants_root() { ROOT_WANTS[${#ROOT_WANTS[@]}]="$1"; }
+need_root()  { need "$1" "$2"; wants_root "$1"; }
+needs_root() { [ "${#ROOT_WANTS[@]}" -gt 0 ]; }
+# The labels, as the consent screen would have listed them, for a refusal that has to say what
+# it wanted the password FOR. Only ever called when the list is non-empty.
+root_wants() { printf '  - %s\n' ${ROOT_WANTS[@]+"${ROOT_WANTS[@]}"}; }
+
 
 survey() {
+    # ABOVE THE STEP LINE, not under it, and that is the one thing about this gate worth
+    # arguing. The two refusals below report a property of the COMPUTER, so they belong under
+    # "Looking at your computer"; being root is a property of the INVOCATION, and printing a
+    # heading about the machine before refusing the command would misfile it. It also makes
+    # "it refuses before it looks at anything" something a test can assert -- see
+    # 25-installer.sh :: root:refuses-before-it-looks.
+    #
+    # ONE CONDITION IN ONE PLACE, deliberately, because #217 has to carve into it: its WSL
+    # provisioning pass runs as root on purpose and its own first act is the mirror of this
+    # one. That is a change to this `if`, not to the shape around it. No escape hatch ships
+    # now -- nothing would exercise it.
+    if [ "$(id -u)" -eq 0 ]; then say_as_root; exit 1; fi
+
     step "$(msg step.survey)"
 
     if [ "$PLAT" = macos ] && [ "$(uname -m)" != arm64 ]; then
@@ -267,8 +333,8 @@ survey() {
     else
         DO_PODMAN_INSTALL=yes
         case "$PLAT" in
-            macos) need "$(msg need.podman-mac)" "$(msg need.podman-mac.why)" ;;
-            *)     need "$(msg need.podman-linux \
+            macos) need_root "$(msg need.podman-mac)" "$(msg need.podman-mac.why)" ;;
+            *)     need_root "$(msg need.podman-linux \
                             "PKGS=$PKG_PODMAN${PKG_UIDMAP:+ $(msg need.podman-linux.and "PKG=$PKG_UIDMAP")}")" \
                         "$(msg need.podman-linux.why)" ;;
         esac
@@ -284,7 +350,7 @@ survey() {
         die "$(msg err.ssh-missing-mac)"
     else
         DO_SSH_INSTALL=yes
-        need "$(msg need.ssh "PKG=$PKG_SSH")" "$(msg need.ssh.why)"
+        need_root "$(msg need.ssh "PKG=$PKG_SSH")" "$(msg need.ssh.why)"
     fi
 
     # THE DOWNLOAD TOOL, and the one thing this script assumed it could run and could not. curl
@@ -313,7 +379,7 @@ survey() {
         die "$(msg err.curl-missing-mac)"
     else
         DO_CURL_INSTALL=yes
-        need "$(msg need.curl "PKG=$PKG_CURL")" "$(msg need.curl.why)"
+        need_root "$(msg need.curl "PKG=$PKG_CURL")" "$(msg need.curl.why)"
     fi
     # THIS ITEM IS REACHED BY A MACHINE THAT ALREADY DOWNLOADED SUCCESSFULLY, which is the part
     # worth stating: since #221 install-cs193v.sh needs curl OR wget before it can fetch anything,
@@ -356,7 +422,7 @@ survey() {
             # says "(and uidmap)" and its package list already carries it, so a second item here
             # would describe one change twice.
             if [ "$DO_PODMAN_INSTALL" = no ]; then
-                need "$(msg need.uidmap "PKG=$PKG_UIDMAP")" "$(msg need.uidmap.why)"
+                need_root "$(msg need.uidmap "PKG=$PKG_UIDMAP")" "$(msg need.uidmap.why)"
             fi
         fi
     fi
@@ -383,9 +449,16 @@ survey() {
             skip "$(msg skip.wsl-systemd)"
         elif [ -f /etc/wsl.conf ]; then
             DO_WSLCONF=yes
-            need "$(msg need.wslconf)" "$(msg need.wslconf.why)"
+            need_root "$(msg need.wslconf)" "$(msg need.wslconf.why)"
         else
             DO_WSLCONF=yes
+            # NO need(), AND STILL ROOT. Creating a file that was not here is rule 1's
+            # "things it created itself", so nothing is owed a consent question -- but
+            # `sudo tee` is what creates it, so rule 2 is owed the announcement. Before
+            # #226 this was the one machine that got neither: a WSL box with no
+            # /etc/wsl.conf and nothing else pending was told "Nothing on your computer
+            # needs to change" and then asked for a password.
+            wants_root "$(msg need.wslconf)"
             ok "$(msg ok.wsl-systemd-planned)"
         fi
     fi
@@ -395,8 +468,51 @@ survey() {
             skip "$(msg skip.subuid)"
         else
             DO_SUBUID=yes
-            need "$(msg need.subuid)" "$(msg need.subuid.why)"
+            need_root "$(msg need.subuid)" "$(msg need.subuid.why)"
         fi
+    fi
+
+    # ─── and the last question, which is about the password rather than the machine ───
+    # RULE 2 SAYS the password is announced before it happens; it did not say the password
+    # can be GOT. Before this, a machine with no sudo, or a sudo its owner is not allowed to
+    # use, sailed through the consent screen -- which promises they can walk away -- and died
+    # in install_podman with apt's own words, after the download.
+    #
+    # LAST, so every DO_* is settled and root_wants() can name the whole list. Still inside
+    # survey, so it is ahead of choose_dir and ask_consent and nothing has been changed: the
+    # only thing either arm does is ASK sudo a question.
+    #
+    # TWO ARMS AND NOT THREE. `sudo -n true` failing does not say WHY -- "needs a password",
+    # "not in sudoers" and "no matching rule" are one exit status, and telling them apart
+    # means parsing sudo's stderr, which is localised and differs between sudo and the sudo-rs
+    # Ubuntu 26.04 ships. So the only failures refused here are the two that are certain from
+    # the outside: there is no sudo to ask, or there is no terminal to answer it. Everything
+    # else is left to ask_password, which asks and reports what sudo said.
+    #
+    # ONE CASE IN THAT RESIDUE DESERVES BETTER and is #240: an account permitted by sudoers
+    # whose password is LOCKED fails this probe exactly as an ordinary one does, so we prompt
+    # and nothing the student can type will work. `passwd -S` reads it, but no machine a
+    # student owns arrives in that state today -- it comes with #217's automated account -- so
+    # it is filed with the measurements rather than guessed at here.
+    needs_root || return 0
+    if ! command -v sudo >/dev/null 2>&1; then
+        die "$(msg err.no-sudo "WANTS=$(root_wants)")"
+    fi
+    # `</dev/null` AND `2>/dev/null`, and the first one is load-bearing rather than tidy.
+    # MEASURED: sudo defaults to use_pty on Ubuntu, so it takes a pty of its own and RELAYS this
+    # terminal's input to the command -- and a keystroke already sitting in the terminal buffer
+    # goes into that relay and is gone. The suite drives the consent menu by writing its
+    # keystrokes ahead of time, so the `2` meant for ask_consent was eaten HERE and the menu
+    # then waited for input that had already been consumed: 26-installer-sandbox.sh's sb-noans
+    # sat to its 300 s ceiling. A probe has no business reading the terminal, so it does not get
+    # one. The redirect is safe by definition: `-n` means sudo never prompts, so there is
+    # nothing for it to read.
+    #
+    # `2>/dev/null` because a real sudo says "a password is required" on stderr here, and that
+    # is this script's question rather than the student's news -- ask_password delivers it in
+    # words a student can act on.
+    if ! sudo -n true </dev/null 2>/dev/null && [ ! -t 0 ]; then
+        die "$(msg err.sudo-no-terminal "WANTS=$(root_wants)")"
     fi
 }
 
@@ -431,6 +547,39 @@ ask_consent() {
         printf '\n'
         exit 0
     fi
+}
+
+# ─── the password, once, where the consent screen said it would be  (#226, #223) ────
+# THE HALF THAT MAKES RULE 2 TRUE rather than merely worded. Every need.*.why says "needs your
+# password", and that announcement was honest about WHAT and silent about WHEN: the first
+# prompt arrived inside install_podman, after the consent screen had told the student they
+# could walk away. One `sudo -v` here means the password is asked at the announced moment and
+# no later call site prompts at all -- which is what #223 asks for, without a notice bolted to
+# each of the six.
+#
+# AFTER CONSENT, NOT BEFORE. A password demanded before the menu would be one the student had
+# not yet agreed to give, and declining afterwards would leave them having typed it for
+# nothing.
+#
+# SILENT WHEN NOTHING IS NEEDED, and that is a claim about wording as much as about noise: on a
+# machine with passwordless sudo -- the WSL environment #217 builds, every fixture in
+# 26-installer-sandbox.sh -- a step saying "you will be asked for your password" would be
+# describing a prompt that never comes.
+#
+# ONE PRIME COVERS ALL SIX CALL SITES because of where they are: install_podman, setup_subuid
+# and setup_wslconf all run within a couple of minutes of this line, well inside sudo's
+# timestamp. A pathologically slow package manager can still outlast it and prompt again --
+# that is a degradation of this fix, not a return to the bug, and it is the reason the prime is
+# here rather than in survey.
+ask_password() {
+    needs_root || return 0
+    # `</dev/null` for the reason survey's copy of this gives at length: a probe that reads the
+    # terminal eats a keystroke the menus were promised. `sudo -v` below deliberately does NOT
+    # get the redirect -- reading the password from the terminal is its whole job.
+    sudo -n true </dev/null 2>/dev/null && return 0
+    step "$(msg step.password)"
+    msg note.password-why | notes
+    sudo -v || die "$(msg err.sudo-refused "WANTS=$(root_wants)")"
 }
 
 # ─── steps ─────────────────────────────────────────────────────────────────────
@@ -522,7 +671,10 @@ install_podman() {
             if ! curl -fsSL --retry 5 -o "$pkg" "$url"; then
                 die "$(msg err.podman-download)"
             fi
-            note "$(msg note.password)"
+            # note.password WAS HERE, saying "macOS will now ask for your password" (#226).
+            # It will not: ask_password primed sudo before this step ran, so this line is
+            # inside the timestamp and prompts for nothing. A heads-up about a prompt that
+            # does not arrive is worse than none.
             sudo installer -pkg "$pkg" -target / || die "$(msg err.podman-installer)"
             rm -f "$pkg"
             # NOT `export PATH="/opt/podman/bin:/usr/local/bin:$PATH"`. Where the .pkg puts
@@ -971,6 +1123,7 @@ say_welcome
 survey
 choose_dir
 ask_consent
+ask_password
 install_podman
 setup_subuid
 setup_wslconf

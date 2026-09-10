@@ -129,6 +129,34 @@ iempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next
                /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$ICAT")"
 assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
 
+# ─── rule 2, asserted rather than remembered  (#226) ───────────────────────────
+# course-install.sh:20-28 promises "anything needing your password is announced before it
+# happens, with the reason", and the catalogue's own note above the need.* block claims EVERY
+# one of them says so. That claim was FALSE: need.wslconf.why described changing a file that
+# was already there and never mentioned the password, while driving `sudo sed -i /etc/wsl.conf`.
+# A promise kept only by whoever writes the next entry is what this replaces.
+#
+# THE LIST IS DERIVED, NOT WRITTEN DOWN. The root-requiring items are exactly the ones
+# course-install.sh registers with need_root, so the keys come out of the source -- a seventh
+# privileged step gets checked without anybody remembering to add it here. -A3 because the
+# podman-linux label spans three lines.
+#
+# AND NOT EVERY need.*.why: need.vm-memory.why is a `podman machine set`, which needs no
+# privilege, and telling a student it wants their password would be a new false statement
+# rather than a fix for this one.
+root_whys="$(sed 's/^[[:space:]]*#.*//' "$INST" | grep -A3 'need_root' \
+              | grep -ohE 'need\.[a-z0-9.-]+\.why' | LC_ALL=C sort -u)"
+assert_ne "itext:there-are-root-requiring-consent-items" "" "$root_whys"
+record "itext:the-root-requiring-consent-items" "$(printf '%s' "$root_whys" | do_tr '\n' ' ')"
+nopw=''
+for k in $root_whys; do
+    case "$(msg_text "$k" "$ICAT")" in
+        *password*) ;;
+        *) nopw="$nopw $k" ;;
+    esac
+done
+assert_eq "itext:every-root-requiring-why-says-password" "" "$nopw"
+
 # A MISSING KEY MUST BE LOUD. msg() is what die() reaches for, so a typo'd key that returned
 # nothing would draw an EMPTY red STOP box at the moment a student most needs the diagnosis --
 # ERRORS.md records exactly that failure. Run for real, against the real file.

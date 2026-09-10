@@ -21,7 +21,7 @@ SB_TMP="$(new_tmpdir)"
 # Read by sandbox_cleanup in lib/sandbox.sh:1314 (`for c in $SB_CASES`), which the trap below
 # calls -- so the sweep and this list are the same fact, named once.
 # shellcheck disable=SC2034
-SB_CASES="apt wsl-provision cannot-answer subuid-no subuid-yes wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
+SB_CASES="apt wsl-provision cannot-answer subuid-no subuid-yes sudo-absent sudo-deny sudo-password wsl-absent wsl-absent-password wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -500,6 +500,98 @@ assert_says "sb-prov:finishes"  "Setup finished" "$out"
 assert_says_not "sb-prov:never-asks-for-a-password" "password for" "$out"
 assert_says_not "sb-prov:asks-no-consent-question" "needs your permission" "$out"
 sandbox_reap
+
+# ─── the password: what happens when the machine cannot supply one  (#226) ─────
+# THE FIXTURES ALL SHIP `student ALL=(ALL) NOPASSWD:ALL`, so until sudo= existed every case in
+# this file watched an installer on a machine whose sudo never asks for anything. These four ask
+# for the other three policies, and they are the only cases here that can reach the survey's
+# sudo arms or ask_password's prompt at all.
+#
+# no-prereqs=subuid IS THE CHEAPEST WAY IN. Something has to need root or the gate returns
+# early, and the subuid range is the one root-requiring step that needs no package manager --
+# so fake-podman=yes is honest here and takes the ceiling from 300 s to 60 s. What the case is
+# about is sudo, not podman.
+
+# ── no sudo on the machine: refused at the survey, before consent ──
+sb_machine no-prereqs=subuid fake-podman=yes sudo=absent
+out="$(sandbox_run sudo-absent '' -e CS193V_DIR=/home/student/cs193v)"
+# THE GATE. Every assertion below is about a machine with no sudo, so this says it really is
+# one -- sudo_state ASKS the machine rather than echoing back what was requested.
+assert_eq "sb-sudo-absent:the-machine-really-has-no-sudo" "absent" "$(sb_section "$out" SUDO)"
+assert_says_key "sb-sudo-absent:says-why" err.no-sudo "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says "sb-sudo-absent:names-what-wanted-root" "- Give your account" "$out"
+assert_says "sb-sudo-absent:points-at-course-staff" "contact course staff" "$out"
+assert_says "sb-sudo-absent:exits-nonzero" "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-sudo-absent:does-not-claim-success" "Setup finished" "$out"
+# REFUSED BEFORE THE BARGAIN, which is what putting this in survey buys: a machine that cannot
+# produce the password is never offered a deal it could not keep.
+assert_says_not "sb-sudo-absent:asks-no-permission" "needs your permission" "$out"
+assert_eq "sb-sudo-absent:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBUID)"
+assert_eq "sb-sudo-absent:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
+assert_eq "sb-sudo-absent:left-no-temp-tree" "absent" "$(sb_section "$out" BOOT-TMP)"
+sandbox_reap
+
+# ── sudo exists, this account may not use it: refused after consent, before the step ──
+# A DIFFERENT TRANSCRIPT FROM absent, above the same outcome, and that is the distinction
+# survey deliberately does NOT try to make: `sudo -n true` fails identically for "needs a
+# password" and "not allowed", so this one is left to ask_password, which asks and reports.
+sb_machine no-prereqs=subuid fake-podman=yes sudo=deny
+out="$(sandbox_run sudo-deny '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_eq "sb-sudo-deny:the-machine-really-denies-sudo" "deny" "$(sb_section "$out" SUDO)"
+assert_says_key "sb-sudo-deny:announced-before-it-is-asked" note.password-why "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says_key "sb-sudo-deny:says-why-it-failed" err.sudo-refused "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says "sb-sudo-deny:exits-nonzero" "===INSTALLER-RC=1===" "$out"
+assert_says_not "sb-sudo-deny:does-not-claim-success" "Setup finished" "$out"
+# THE EFFECT, which is the half no shim can check: usermod never ran, so the range is still
+# absent on a real /etc.
+assert_eq "sb-sudo-deny:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBUID)"
+assert_says_not "sb-sudo-deny:does-not-claim-the-range" "subuid range added" "$out"
+sandbox_reap
+
+# ── a real password prompt, arriving exactly where it was announced ────────────
+# THE ONLY CASE ANYWHERE THAT DRIVES A REAL sudo PASSWORD PROMPT. apply_sudo sets the account's
+# password and drops NOPASSWD, so sudo behaves the way a student's does -- and what that buys is
+# the ORDER, measured rather than reasoned about: the heading and its note come out before the
+# prompt, and the prompt happens once rather than once per privileged step. That is the claim
+# #226 makes about rule 2 and the claim #223 asks for, and no fake sudo can make it.
+#
+# THE PASSWORD IS NOT SUPPLIED, AND IT CANNOT BE. sudo flushes the terminal's input queue before
+# it reads a password -- TCSAFLUSH when it turns echo off -- which is a deliberate defence
+# against exactly what this harness does: keystrokes written ahead of the prompt are DISCARDED.
+# Measured: `2hunter2\n` got the menu answered, the prompt printed, and then the container sat
+# to its 60 s ceiling with the password already gone. Nothing in this suite can type after a
+# prompt it has not read, so this case asserts everything up to and including the prompt, and
+# what happens when a correct one is typed is tests/MANUAL.md :: §1.5b.
+#
+# WHICH MAKES THE REFUSAL THE OTHER HALF OF THE ASSERTION, and a real one: unanswered, sudo
+# fails, and the installer must refuse with nothing done rather than carry on.
+sb_machine no-prereqs=subuid fake-podman=yes sudo=password:hunter2
+out="$(sandbox_run sudo-password '2' -e CS193V_DIR=/home/student/cs193v)"
+assert_eq "sb-sudo-password:the-machine-really-wants-a-password" "password:hunter2" \
+          "$(sb_section "$out" SUDO)"
+assert_says_key "sb-sudo-password:announced" step.password "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says_key "sb-sudo-password:the-note-explains-why" note.password-why "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# A REAL PROMPT, FROM A REAL sudo, and exactly one of them. `[sudo] password for student:` is
+# sudo's own wording, so its presence proves the prompt was not faked and its count proves the
+# prime is one prompt rather than one per call site.
+assert_says "sb-sudo-password:really-prompted" "password for student" "$out"
+assert_eq   "sb-sudo-password:asked-exactly-once" "1" \
+            "$(printf '%s' "$out" | grep -c 'password for student')"
+# THE ANNOUNCEMENT CAME FIRST, which is the whole of rule 2 reduced to two words in order.
+order="$(printf '%s' "$out" | sed -n 's/.*\(Asking for your password\).*/announced/p; s/.*\(password for student\).*/prompted/p' | tr '\n' ' ')"
+assert_eq "sb-sudo-password:announced-before-prompted" "announced prompted " "$order"
+# Unanswered, so nothing ran and nothing claimed to.
+assert_says_key "sb-sudo-password:refuses-when-unanswered" err.sudo-refused "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_eq   "sb-sudo-password:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBUID)"
+assert_says_not "sb-sudo-password:does-not-claim-the-range" "subuid range added" "$out"
+sandbox_reap
+
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
@@ -540,6 +632,41 @@ assert_eq   "sb-wsl-absent:writes-both-lines" "[boot]
 systemd=true" "$(sb_section "$out" WSL-CONF)"
 assert_says "sb-wsl-absent:names-the-restart-command" "wsl --terminate CS193V" "$out"
 assert_system_diff wsl /home/student/cs193v wsl-absent
+sandbox_reap
+
+
+# ── the machine that asked for NOTHING and still needs a password  (#226) ──────
+# THE GAP THIS ISSUE DID NOT NAME, and the one case in the whole file where "needs consent" and
+# "needs root" come apart. Creating /etc/wsl.conf is rule 1's "things it created itself" -- the
+# file was not here, so no permission is owed -- and it is `sudo tee` that creates it. So survey
+# records an ok() and no need(), NEEDS[] is empty, ask_consent says "Nothing on your computer
+# needs to change" and never draws a menu... and before this the next thing the student saw was
+# a password prompt with nothing whatsoever having announced it.
+#
+# WHICH IS WHY needs_root COUNTS ROOT_WANTS[] AND NOT NEEDS[]. Keyed off the consent list, this
+# machine would still be silent.
+#
+# NO KEYS AT ALL: there is no menu on this path. The prompt goes unanswered for the reason
+# sb-sudo-password gives at length, so the run must also refuse without writing the file.
+sb_machine platform=wsl fake-podman=yes sudo=password:hunter2
+out="$(sandbox_run wsl-absent-password '' -e SB_WSLCONF=absent -e CS193V_DIR=/home/student/cs193v)"
+assert_eq "sb-wsl-pw:the-machine-really-wants-a-password" "password:hunter2" \
+          "$(sb_section "$out" SUDO)"
+# RULE 1 IS UNCHANGED, and this is the control for it: nothing was owed a consent question and
+# nothing asked for one.
+assert_says "sb-wsl-pw:still-asks-no-permission" "Nothing on your computer needs to change" "$out"
+assert_says_not "sb-wsl-pw:draws-no-menu" "permission for" "$out"
+# AND RULE 2 IS KEPT ANYWAY, which is the whole point of the case.
+assert_says_key "sb-wsl-pw:announces-the-password" step.password "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says     "sb-wsl-pw:really-prompted" "password for student" "$out"
+assert_eq "sb-wsl-pw:announced-before-prompted" "announced prompted " \
+          "$(printf '%s' "$out" | sed -n 's/.*\(Asking for your password\).*/announced/p; s/.*\(password for student\).*/prompted/p' | tr '\n' ' ')"
+# THE EFFECT: unanswered, so the file it was about to create does not exist.
+assert_says_key "sb-wsl-pw:refuses-when-unanswered" err.sudo-refused "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_eq "sb-wsl-pw:the-file-was-not-created" "" "$(sb_section "$out" WSL-CONF)"
+assert_says_not "sb-wsl-pw:does-not-claim-it-enabled-systemd" "systemd enabled" "$out"
 sandbox_reap
 
 # A wsl.conf with no [boot] section: appended to, and the existing content must survive.

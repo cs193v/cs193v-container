@@ -897,6 +897,32 @@ lines. The class *semantics* were verified equivalent to `sed`'s on Linux (all 2
 **1.5 — Refuses to run as root.** `sudo ./cs193v`
 *Expect:* a clear refusal explaining that this would run podman rootful and defeat the isolation model.
 
+**1.5a — The installer refuses to run as root.** `sudo bash install-cs193v.sh`
+*Expect:* the STOP box from `err.as-root`, before the "Looking at your computer" step; nothing
+downloaded left behind, no course directory, and nothing asked of root. Before #226 this ran to
+completion and the first objection came from the *launcher* at `build_image`, with `$HOME=/root`
+and the subuid range already granted to root.
+*Automated as far as it can be:* `25-installer.sh :: root:*` fakes `id` the way
+`30-launcher-shim.sh` does for the launcher's own refusal. Only the real `sudo` is unverified.
+
+**1.5b — The password is asked once, up front.** On a machine that needs a package installed,
+with an ordinary (password-protected) sudo:
+*Expect:* one prompt, immediately after the consent menu and immediately after the
+`step.password` heading — not inside `install_podman`, and not once per privileged step. The
+rest of the run completes without asking again.
+*Why:* the consent screen tells the student they can walk away, and every `need.*.why` says the
+step needs their password. Both were true only of the wording until #226.
+*Automated equivalent:* `26-installer-sandbox.sh :: sb-sudo-password:*` drives a real `sudo`
+password prompt in a fixture whose account really has a password, and counts the prompts.
+
+**1.5c — An unusable sudo is refused before anything changes.** Either take `sudo` off the
+machine, or remove the account from `sudoers`:
+*Expect:* `err.no-sudo` from the survey, before the consent menu, for the first; `err.sudo-refused`
+from `ask_password`, after consent but before any package manager runs, for the second. Both name
+what wanted root, and both leave the machine as they found it.
+*Automated equivalent:* `26-installer-sandbox.sh :: sb-sudo-absent:*` and `sb-sudo-deny:*`, which
+assert the effect — `/etc/subuid` untouched — as well as the words.
+
 **1.6 — `/etc/subuid` populated.** `grep "^$(id -un):" /etc/subuid /etc/subgid`
 *Expect:* a range for the current user. If absent, the installer should have offered to add it with
 consent — confirm it did rather than failing with a raw podman error.

@@ -453,6 +453,45 @@ assert_says "consent:nothing-to-change-when-already-set-up" \
             "Nothing on your computer needs to change" "$out"
 assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
 
+
+# ─── run as root: refused before it looks at anything  (#226) ──────────────────
+# THE INSTALLER'S COUNTERPART TO cs193v:801, and 30-launcher-shim.sh :: root:* is the model
+# this copies. `sudo bash install-cs193v.sh` used to run all the way to build_image before
+# anything objected -- and what objected there was the LAUNCHER's refusal, by which point
+# $HOME was /root, the subuid range had been granted to root, and apt had run.
+#
+# FAKED, not real. `shim_fake_id 0 root` is the same instrument the launcher's case uses and
+# for the same reason: nobody can run this suite as root, and the real `sudo bash
+# install-cs193v.sh` stays a by-hand check in tests/MANUAL.md.
+#
+# NO linux_arm GUARD. This refusal reads `id -u` and nothing else, so it is reachable on every
+# platform -- unlike the subuid and apt cases below.
+shim_new
+shim_fake_id 0 root
+out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/asroot")"
+assert_says "root:refused" "STOP" "$out"
+# BY KEY, NOT BY QUOTED PROSE, and that is the difference between this case and a vacuous one.
+# Written as assert_says "sudo", every assertion here PASSED before the gate existed --
+# because the run got all the way to build_image and it was the LAUNCHER's err.running-as-root
+# that said "STOP" and "without sudo" (measured; #226's own anatomy). Only the installer's own
+# key can distinguish the two, and assert_says_key FAILs on a key that does not exist.
+assert_says_key "root:says-why" err.as-root "$out" "$PRIVATE/course-install-messages.txt"
+# BEFORE THE SURVEY PRINTS ITS STEP LINE, which is what makes "before it looks at anything"
+# a claim about the code rather than about this transcript. Being root is a property of the
+# invocation, not of the computer, so it is not something the "Looking at your computer" step
+# has any business reporting.
+assert_says_not "root:refuses-before-it-looks" "Looking at your computer" "$out"
+assert_says_not "root:does-not-claim-success"  "Setup finished" "$out"
+assert_eq "root:exits-1" "1" \
+          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/asroot2")"
+# The three claims the refusal makes implicitly: nothing of the course on the disk, nothing
+# asked of root, and podman never contacted -- the last being what proves it did not get as
+# far as build_image, which is where the objection used to come from. sudo-fake and
+# podman-fake both record without executing, so two empty logs are the whole assertion.
+assert_no_file "root:creates-no-directory" "$TMP/asroot"
+assert_eq "root:asks-root-nothing"   ""  "$(sudo_log)"
+assert_eq "root:asks-podman-nothing" "0" "$(shim_count '.')"
+
 # ─── the refusals, and the one place a lie would be worst ──────────────────────
 # Four `die`s and one guard that nothing reached. All of them are non-tty-reachable
 # because none of them gets as far as needing consent -- survey refuses first.
@@ -1151,6 +1190,122 @@ assert_says "probe:the-installer-offers-to-install-a-podman-that-really-is-absen
             "Podman runs the course container" "$out"
 assert_says_not "probe:it-claims-no-directory-when-there-is-none" \
                 "podman is installed in" "$out"
+
+
+# ─── the password: satisfiable, and asked once  (#226) ─────────────────────────
+# WHY THESE RIDE ON probe_setup absent. Every arm below needs `needs_root` to be TRUE, and on
+# a Mac only one thing makes it so: podman absent. probe_setup gives exactly that -- a receipt
+# for an empty directory, no podman anywhere on the composed PATH -- and its PATH override is
+# what makes the arms reachable in the cheap lane at all: with $IFARM standing in for the real
+# PATH, the only `sudo` the installer can find is sudo-fake, so nothing here can reach the
+# developer's own sudo even by accident.
+#
+# THE ORDERING ASSERTION IS THE LINUX ONE, further down. This block proves the REFUSALS, which
+# is what can be proven without letting install_podman's macOS arm fetch 75 MB from GitHub in
+# the cheap lane -- so every arm here dies before it.
+#
+# sudo-fake exits 0 for anything not in sudo_fail, so the probe SUCCEEDS by default and these
+# are the only cases that see the failure paths. `-n true` is the probe's exact argv and `-v`
+# the prime's, so failing them separately is what separates "cannot answer" from "answered no".
+
+# ── no sudo on the machine at all: refused at the survey, naming what wanted root ──
+# A PRIVATE FARM, not `rm -f "$IFARM/sudo"`: shim_toolfarm builds $SHIM_FARM once and every
+# later case shares it, so taking sudo out of it would silently disarm them all.
+probe_setup absent
+NOSUDO="$SHIM/farm-nosudo"; mkdir -p "$NOSUDO"
+ln -s "$IFARM"/* "$NOSUDO/" 2>/dev/null
+rm -f "$NOSUDO/sudo" "$SHIM/sudo"
+assert_eq "password:the-no-sudo-farm-really-has-no-sudo" "" "$(ls "$NOSUDO/sudo" 2>/dev/null)"
+out="$(installer_host "$TMP/install-probe.sh" CS193V_DIR="$TMP/nosudo" PATH="$SHIM:$NOSUDO")"
+assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# THE RENDERED LIST LINE, not the word "podman". The refusal has to say what it wanted the
+# password FOR, and only root_wants() emits that list -- its "  - " prefix is the one thing
+# nothing else in the transcript has, where a bare "podman" would also match the survey's own
+# report of the machine. Measured red by making root_wants print nothing.
+#
+# IT USED TO MATTER MORE THAN THAT. While these doors ran the installer under `bash -x` for the
+# coverage gate, xtrace put every EXPANDED argument in the transcript -- so the catalogue prose
+# the script hands its helpers was in this output too, and "podman" matched the trace rather
+# than the refusal. #231 deleted the tracing, so that reading is gone; the needle stays because
+# it is the more precise of the two either way.
+assert_says     "password:no-sudo-names-what-wanted-root" "- Install Podman" "$out"
+assert_says_not "password:no-sudo-asks-no-permission" "needs your permission" "$out"
+assert_says_not "password:no-sudo-does-not-claim-success" "Setup finished" "$out"
+assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
+
+# ── sudo needs a password and there is no terminal to type it into ──
+probe_setup absent
+shim_set sudo_fail '-n true'
+out="$(installer_host "$TMP/install-probe.sh" CS193V_DIR="$TMP/notty" PATH="$SHIM:$IFARM")"
+assert_says_key "password:no-terminal-says-why" err.sudo-no-terminal "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# BEFORE THE CONSENT SCREEN, which is the whole point of putting this in survey: a machine that
+# cannot produce the password must be refused before it is offered a bargain it cannot keep.
+assert_says_not "password:no-terminal-refuses-before-consent" "needs your permission" "$out"
+assert_no_file  "password:no-terminal-creates-no-directory" "$TMP/notty"
+# It asked, and it asked non-interactively. `-n` is what makes the probe a question rather
+# than a prompt, so its presence in the log is the assertion.
+assert_says "password:the-probe-never-prompts" "-n true" "$(sudo_log)"
+
+# ── sudo answers no: refused after consent, before the first privileged command ──
+probe_setup absent
+shim_set sudo_fail "$(printf '%s\n%s' '-n true' '-v')"
+out="$(installer_tty '2' "$TMP/install-probe.sh" CS193V_DIR="$TMP/sudono" PATH="$SHIM:$IFARM" | strip_ansi)"
+assert_says_key "password:refused-says-why" err.sudo-refused "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# ANNOUNCED FIRST, which is rule 2 of course-install.sh:20-28 and the thing #223 asks for.
+assert_says_key "password:announced-before-it-is-asked" note.password-why "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# BY KEY. Written with msg_text inline, an unknown key yields an EMPTY needle and assert_says
+# passes on every input -- which is how this assertion passed before step.password existed.
+assert_says_key "password:the-step-is-announced" step.password "$out" \
+                "$PRIVATE/course-install-messages.txt"
+assert_says_not "password:refused-does-not-claim-success" "Setup finished" "$out"
+# AND NOTHING WAS INSTALLED. The prime is the only privileged call in the log: no package
+# manager, no .pkg. sudo-fake records without executing, so this reads what would have run.
+assert_says     "password:the-prime-really-ran" "-v" "$(sudo_log)"
+assert_says_not "password:refused-installs-no-pkg" "installer -pkg" "$(sudo_log)"
+assert_says_not "password:refused-runs-no-package-manager" "install" "$(sudo_log)"
+
+shim_new
+
+# ── the ordering, and the control, both of which need a run that gets PAST ask_password ──
+# NOT REACHABLE ON A MAC, and the reason is worth writing down rather than guarding silently.
+# macOS has exactly one root-requiring step -- installing podman -- so any Mac run that clears
+# ask_password goes straight into install_podman's arm and fetches 75 MB from GitHub, which the
+# cheap lane must not do. On Linux, a faked account with no /etc/subuid entry needs root for
+# setup_subuid alone: sudo-fake records the usermod and executes nothing, so the whole ordering
+# is observable offline. 26-installer-sandbox.sh asserts both of these against a real sudo.
+if linux_arm; then
+# `-n true` fails and `-v` does not, which is the shape of every ordinary machine: a password
+# is needed, and the student supplies it once.
+shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail '-n true'
+out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says_key "password:announced-on-the-linux-arm-too" step.password "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# THE CLAIM #226 IS ABOUT, reduced to two words in order: the password is obtained BEFORE the
+# first privileged command runs, not by that command prompting for it.
+order="$(sudo_log | awk '/^-v$/{print "prime"} /usermod/{print "usermod"}' | tr '\n' ' ')"
+assert_eq "password:asked-before-the-first-privileged-command" "prime usermod " "$order"
+
+# THE CONTROL, and it has to be a run that reaches ask_password and returns from it -- a
+# non-tty run declines at ask_consent and never gets there, which is a control that cannot
+# fail. With sudo answering the probe, the announcement must not print: on a machine with
+# passwordless sudo it would promise a prompt that never comes.
+shim_new; shim_fake_id 1000 nosuchuser-cs193v
+out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+assert_says_not_key "password:silent-when-no-password-is-needed" step.password "$out" \
+                    "$PRIVATE/course-install-messages.txt"
+# ...and it really did get past it, rather than dying before the announcement would have been
+# due. Without this the assertion above passes on any failure at all.
+assert_says "password:the-control-ran-the-privileged-step" "usermod" "$(sudo_log)"
+else
+skip_linux_arm "password:announced-on-the-linux-arm-too" \
+               "password:asked-before-the-first-privileged-command" \
+               "password:silent-when-no-password-is-needed" \
+               "password:the-control-ran-the-privileged-step"
+fi
 
 # A CLEAN SHIM LEFT BEHIND, DELIBERATELY. probe_setup runs in THIS shell rather than a subshell
 # (it has to -- see its own comment), so it leaves $SHIM with podman moved out of it. Anything
