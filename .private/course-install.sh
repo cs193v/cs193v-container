@@ -158,9 +158,33 @@ say_as_root() {
     printf '\n'
 }
 
+# \\wsl.localhost\CS193V\home\student\cs193v\projects -- $DIR/projects named the way
+# Windows Explorer needs it, and the reason the Windows sign-off cannot live in the .cmd
+# (#218). The .cmd printed this path as a constant ending home\student\cs193v, which is
+# right only until a student takes choose_dir's offer of a different directory -- and that
+# menu runs on the Windows path exactly as it does everywhere else. $DIR is known here and
+# nowhere else, which is what decides where this message is built.
+win_projects_path() {
+    printf '\\\\wsl.localhost\\%s%s' "$WSL_DISTRO" "$(printf '%s' "$DIR/projects" | tr / '\\')"
+}
+
+# ONE SIGN-OFF, AND WHICH ONE IS ALL CS193V_WINDOWS DECIDES (#218). A Windows install
+# reaches here down the same road as a Mac one -- the .cmd runs this very script inside the
+# WSL instance it has just made -- so without the branch a Windows student is told to cd and
+# run ./cs193v with no mention of the `wsl -d` step that gets them back into the environment
+# at all. The .cmd used to supply that afterwards in a block of its own, which is how an
+# install came to end with two closing messages that disagreed about how to start.
+#
+# SET BY install-cs193v-windows.cmd AND BY NOTHING ELSE, like CS193V_PROVISION before it.
+# The root pass does not get it: wsl-provision.sh prints no sign-off to choose between.
 say_done() {
     printf '\n'
-    msg finished "DIR=$DIR"
+    if [ -n "${CS193V_WINDOWS:-}" ]; then
+        msg finished.windows "DIR=$DIR" "DISTRO=$WSL_DISTRO" \
+                             "USER=$(id -un)" "UNC=$(win_projects_path)"
+    else
+        msg finished "DIR=$DIR"
+    fi
     printf '\n'
 }
 
