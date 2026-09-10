@@ -558,6 +558,30 @@ The {{USER}} account is already here
 [[prov.skip.default-user]]
 {{USER}} is already who this environment starts you as
 
+
+# LINGERING, WHICH SOUNDS LIKE PLUMBING AND IS THE DIFFERENCE BETWEEN A CONTAINER
+# THAT BUILDS AND ONE THAT DOES NOT. `wsl -e` creates no login session, so the
+# user's systemd manager never starts, and podman then falls back to cgroupfs and
+# crun dies on an sd-bus call part-way through the build. wsl-provision.sh has the
+# measurement.
+
+[[prov.ok.linger]]
+{{USER}}'s services will start with this environment
+
+[[prov.skip.linger-on]]
+{{USER}}'s services already start with this environment
+
+[[prov.skip.linger]]
+This environment does not run systemd, so there is nothing to start
+
+[[err.prov-linger]]
+  Could not arrange for {{USER}}'s services to start with the CS193V
+  environment.
+
+  Setup has stopped, because without that podman cannot build the
+  course container: it would fail part-way through with a message
+  about interactive authentication. Please send course staff this
+  whole window.
 [[prov.skip.packages]]
 Everything this needs is already installed
 
