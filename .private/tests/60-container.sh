@@ -236,8 +236,9 @@ assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
                     "$(I '{{json .Config.Env}}')"
 record "pid1" "$(I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}')"
 
-# ─── identity: hostname, banner, goodbye  (#3, #4) ─────────────────────────────
-# The hostname is what makes Ubuntu's default prompt read student@cs193v-development.
+# ─── identity: hostname, and a raw shell that is plain  (#3, #4, #220) ─────────
+# The hostname is what makes Ubuntu's default prompt read student@cs193v-development, and since
+# #220 it is the ONLY "you are somewhere else" signal on this path.
 assert_eq "identity:hostname" "cs193v-development" "$(E 'hostname')"
 
 # The banner needs a pty: it is guarded to interactive shells so that `podman exec <cmd>`
@@ -247,34 +248,46 @@ pty_login() {                     # pty_login KEYS -> everything the session pri
 }
 
 out="$(pty_login 'exit\n')"
-n="$(printf '%s' "$out" | grep -acF "$CS193V_WELCOME" || true)"
-assert_eq "identity:banner-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
+# THE VACUITY GUARD FOR EVERYTHING BELOW, as well as its own assertion. The three checks after
+# it are all negatives, and a pty_login that produced nothing at all would satisfy every one of
+# them. The prompt is what proves a shell really answered.
 assert_contains "identity:prompt-shows-the-hostname" "cs193v-development" "$out"
-# The clear must come BEFORE the banner, or the banner scrolls away with the old content.
-if printf '%s' "$out" | grep -aq $'\033\[3J'; then
-    pass "identity:clears-scrollback-on-entry"
-else
-    fail "identity:clears-scrollback-on-entry" "no [3J in the session output"
-fi
-assert_contains "identity:goodbye-on-exit" "$CS193V_GOODBYE" "$out"
 
-# A nested shell must NOT repeat the banner. /etc/profile.d only runs for login shells, so
-# this should hold for free -- but it is the difference between a helpful entry banner and
-# noise every time a student or an agent starts a subshell.
-out2="$(pty_login 'bash\nexit\nexit\n')"
-n2="$(printf '%s' "$out2" | grep -acF "$CS193V_WELCOME" || true)"
-assert_eq "identity:nested-shell-does-not-repeat-the-banner" "1" "$(printf '%s' "$n2" | head -1)"
+# A RAW LOGIN SHELL GREETS NOBODY AND SEES NOBODY OFF (#220). This path is
+# `podman exec -it cs193v bash -l`. It used to be greeted by /etc/profile.d and bidden farewell
+# by ~/.bash_logout, both installed on the reasoning that it was "the documented path for
+# scripts and for diagnosis" -- and both are gone with the documentation that said so. Nothing
+# points a student here now: not cs193v-shell's fault box, not any key in messages.txt, and
+# 10-static.sh asserts both. What is left is staff opening a shell to look at a container.
+#
+# COUNTED AGAINST $CS193V_WELCOME rather than asserted absent, because a count cannot pass
+# vacuously: if that variable were ever emptied, `grep -cF ''` matches every line and this goes
+# red instead of quietly agreeing with itself.
+n="$(printf '%s' "$out" | grep -acF "$CS193V_WELCOME" || true)"
+assert_eq "identity:the-raw-shell-does-not-greet" "0" "$(printf '%s' "$n" | head -1)"
+# AND DOES NOT TOUCH THE SCREEN. cs193v-welcome clears scrollback with [3J before greeting, so
+# a hook that came back would take a staff member's scrollback with it -- the exact complaint
+# cs193v-goodbye's own header recorded about wiping a novice's last command output.
+if printf '%s' "$out" | grep -aq $'\033\[3J'; then
+    fail "identity:the-raw-shell-does-not-clear-the-screen" \
+         "found [3J in a plain bash -l session, so something still greets on this path"
+else
+    pass "identity:the-raw-shell-does-not-clear-the-screen"
+fi
+# A LITERAL, because $CS193V_GOODBYE is gone from the project -- and assert_not_contains with an
+# empty needle passes every single time, which is the one shape this must not take.
+assert_not_contains "identity:the-raw-shell-does-not-say-goodbye" "Goodbye" "$out"
 
 # And a non-interactive exec must be completely silent -- this is how the rest of this
 # suite, and any agent, runs commands in the container.
 plain="$(E 'echo hi')"
 assert_eq "identity:non-interactive-exec-is-silent" "hi" "$plain"
 assert_not_contains "identity:non-interactive-has-no-banner" "$CS193V_WELCOME" "$plain"
-assert_not_contains "identity:non-interactive-has-no-goodbye" "$CS193V_GOODBYE" "$plain"
 
 # ─── the tmux landing point ────────────────────────────────────────────────────
-# Everything above drove `bash -l`, which is the path a SCRIPT takes and must keep working
-# unchanged. This drives cs193v-shell, which is what a student gets.
+# Everything above drove `bash -l`, which is the path STAFF take to look at a container and
+# which must keep working -- silently, since #220. This drives cs193v-shell, which is what a
+# student gets, and it is now the only path with any presentation on it at all.
 #
 # What this tier covers is session lifecycle -- create, reattach, stay independent -- which
 # needs a real container and real podman exec clients. What the session LOOKS LIKE is
@@ -282,7 +295,7 @@ assert_not_contains "identity:non-interactive-has-no-goodbye" "$CS193V_GOODBYE" 
 TM="tmux -L cs193v -f /etc/cs193v/tmux.conf"
 
 pty_shell() {                     # pty_shell KEYS -> everything the session printed
-    printf '%b' "$1" | do_script 45 "podman exec -it -e CS193V_CONTAINER=${NAME} ${NAME} cs193v-shell" 2>&1
+    printf '%b' "$1" | do_script 45 "podman exec -it ${NAME} cs193v-shell" 2>&1
 }
 tmux_kill_all() { E "$TM kill-server" >/dev/null 2>&1 || true; }
 
@@ -315,7 +328,7 @@ start_client() {                  # start_client -> sets CLIENT_JOB and CLIENT_P
     # pty_start, NOT ptyrun.py by hand: it is what keeps $! the pty OWNER for the reason the
     # comment above gives, and it runs the client through lib/pty-announce so close_client can
     # be told the client's pid rather than inferring it from the process tree (#151).
-    pty_start 'sleep 600\n' podman exec -it -e "CS193V_CONTAINER=${NAME}" "${NAME}" cs193v-shell \
+    pty_start 'sleep 600\n' podman exec -it "${NAME}" cs193v-shell \
         >/dev/null 2>&1
     CLIENT_JOB="$PTY_OWNER"
     CLIENT_PIDFILE="$PTY_PIDFILE"
@@ -388,17 +401,32 @@ assert_contains "tmux:banner-appears-in-the-first-tab" "$CS193V_WELCOME" "$out"
 # only needs to know the chrome the launcher lands a student in is the quiet one.
 assert_not_contains "tmux:no-tab-count-badge-at-one-tab" "1 TAB" "$out"
 assert_contains "tmux:new-tab-button-is-drawn" "+ NEW TAB" "$out"
-# exit in the last tab ends the session, leaves the container, and says goodbye once.
-assert_contains "tmux:goodbye-on-exit" "$CS193V_GOODBYE" "$out"
-n="$(printf '%s' "$out" | grep -ac 'Goodbye' || true)"
-assert_eq "tmux:goodbye-appears-exactly-once" "1" "$(printf '%s' "$n" | head -1)"
+# THE HOST OWNS THE FAREWELL NOW (#220). cs193v-shell prints nothing at all after tmux exits, so
+# the last thing on this pty is the client's own `[exited]` -- which is the row the launcher
+# erases. THIS DRIVE HAS NO LAUNCHER IN FRONT OF IT, so a bare `[exited]` here is CORRECT, and
+# asserting it is what makes 30-launcher-shim.sh's erase group non-vacuous: that tier stands a
+# fake string in for this line, and this is where the real one is shown to exist.
+#
+# HONEST ABOUT WHAT THE FIRST ONE PINS: it is a claim about tmux, not about this repo, so no edit
+# here can turn it red. Kept as an assertion rather than a record because the launcher counts on
+# it -- a tmux that reworded or dropped that line should stop this suite rather than quietly have
+# the launcher erase a row of something real. Its by-hand check runs the other way: point the
+# erase at a different depth and watch the shim group go red.
+assert_contains "tmux:the-client-prints-its-own-exit-line" "[exited]" "$out"
+# A LITERAL, not $CS193V_GOODBYE, and for a NEGATIVE that is the whole difference: #220 removed
+# the string from the project, so the variable is empty -- and assert_not_contains with an empty
+# needle passes every time. The literal is the only form of this that can still fail.
+assert_not_contains "tmux:the-attach-no-longer-says-goodbye" "Goodbye" "$out"
 # exit-empty on: no server may survive the last session.
 assert_ok "tmux:no-server-survives-the-last-exit" \
           sh -c "! podman exec ${NAME} $TM list-sessions >/dev/null 2>&1"
 
-# THE BANNER MUST NOT FIRE IN EVERY TAB. tmux runs the login shell in each one, so before
-# the $TMUX guard went into /etc/profile.d/20-cs193v-welcome.sh, pressing CTRL+T cleared the
-# pane and greeted again every time. Read from rendered panes, which is redraw-independent.
+# THE BANNER MUST NOT FIRE IN EVERY TAB. tmux runs the login shell in each one, so a banner
+# printed from /etc/profile.d cleared the pane and greeted again every time a student pressed
+# CTRL+T. That was first fixed with a $TMUX guard in the hook and is now fixed by construction:
+# #220 deleted the hook, and the only thing that runs cs193v-welcome is cs193v-shell passing it
+# as the FIRST window's command. Still asserted, because "by construction" is a claim about a
+# file that can be added back. Read from rendered panes, which is redraw-independent.
 tmux_kill_all
 start_client; bclient=$CLIENT_JOB; bclient_pf=$CLIENT_PIDFILE
 wait_until 30 tmux_client_attached
@@ -411,9 +439,11 @@ assert_contains "tmux:first-tab-has-the-banner" "$CS193V_WELCOME" \
                 "$(E "$TM capture-pane -p -t $w1")"
 assert_not_contains "tmux:a-new-tab-does-not-repeat-the-banner" "$CS193V_WELCOME" \
                     "$(E "$TM capture-pane -p -t $w2")"
-# ...and closing a tab must not say goodbye, for the same reason: .bash_logout runs per tab.
-assert_not_contains "tmux:a-new-tab-does-not-say-goodbye" "$CS193V_GOODBYE" \
-                    "$(E "$TM capture-pane -p -t $w2")"
+# The matching per-tab assertion for the goodbye is gone rather than inverted (#220): it existed
+# because ~/.bash_logout ran in every tab and so had to be guarded on $TMUX, and with that file
+# deleted there is no per-tab farewell left to guard. Nothing in the container says goodbye at
+# all now; identity:the-raw-shell-does-not-say-goodbye above is where that is asserted, and
+# reddening it means restoring both deleted files and rebuilding, not editing a line here.
 close_client "tmux:tab-banner-window" "$bclient" "$bclient_pf"
 tmux_kill_all
 
@@ -516,7 +546,7 @@ tmux_kill_all
 # table, but neither can prove the value actually lands on the tmux server.
 tmux_kill_all
 podman exec -e CS193V_TERM_CLASS=apple-terminal -e CS193V_HOST_OS=macos \
-            -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+            "$NAME" cs193v-shell --claim >/dev/null 2>&1
 claim_hint="$(E "$TM show-options -gqv @copy-hint")"
 record "tmux:claimed-copy-hint" "$claim_hint"
 assert_contains "tmux:the-claim-sets-the-terminals-own-hint" "FN" "$claim_hint"
@@ -537,7 +567,7 @@ assert_eq "tmux:the-token-is-in-the-session-environment" "CS193V_TERM_CLASS=appl
 # not on macOS. So: claim again, from a different terminal, onto the same live server.
 E "$TM kill-session -t cs193v" >/dev/null 2>&1
 podman exec -e CS193V_TERM_CLASS=vte -e CS193V_HOST_OS=linux \
-            -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+            "$NAME" cs193v-shell --claim >/dev/null 2>&1
 reclaim_hint="$(E "$TM show-options -gqv @copy-hint")"
 record "tmux:reclaimed-copy-hint" "$reclaim_hint"
 assert_contains "tmux:a-second-claim-updates-the-hint"  "SHIFT" "$reclaim_hint"
@@ -547,7 +577,7 @@ assert_not_contains "tmux:a-second-claim-drops-the-old-hint" "FN" "$reclaim_hint
 # launcher against a new image forwards nothing, and a blank @copy-hint would leave six bindings
 # displaying an empty status line.
 tmux_kill_all
-podman exec -e "CS193V_CONTAINER=$NAME" "$NAME" cs193v-shell --claim >/dev/null 2>&1
+podman exec "$NAME" cs193v-shell --claim >/dev/null 2>&1
 assert_contains "tmux:no-token-falls-back-to-the-shift-wording" "hold SHIFT" \
                 "$(E "$TM show-options -gqv @copy-hint")"
 tmux_kill_all

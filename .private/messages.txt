@@ -246,10 +246,6 @@ a script:
     cs193v --rebuild     make sure a fresh container exists
     cs193v doctor        print the status report
 
-To run a single command inside the container:
-
-    podman exec -it cs193v bash -lc 'your command here'
-
 [[err.session-in-use]]
 You already have a CS193V session open in another terminal window.
 
@@ -425,7 +421,25 @@ Happy vibecoding!
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
 
+[[status.exiting]]
+# THE FIRST HALF OF ONE LINE. The launcher prints this with no newline, leaves it on screen
+# while the tunnel comes down and the container stops, and finishes the row with
+# status.exiting-done. So the trailing ellipsis is load-bearing: it is what tells a student
+# the pause that follows is the work, not a hang.
+Exiting the CS193V development environment...
+
+[[status.exiting-done]]
+# The second half, printed on the same row once the teardown has finished. THE SEPARATING
+# SPACE LIVES IN THE LAUNCHER'S printf, NOT HERE: lib/assert.sh's msg_text trims both ends of
+# an entry, so a leading space here could never be asserted, and nothing in this project lints
+# trailing whitespace in this file -- one tidy-up and `... done.` would silently become
+# `...done.` with no test noticing.
+done.
+
 [[status.stopping]]
+# NOT the clean-exit path, which says status.exiting instead. This is what a closed window,
+# a Ctrl-C and `cs193v --stop` say, and stop_container's --quiet flag is what suppresses it
+# for the one path that has already spoken (#220).
 Stopping the container...
 
 [[status.stopped]]

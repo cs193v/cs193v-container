@@ -1,6 +1,6 @@
 # CS193V — the strings the container prints, defined once.
 #
-# Installed as /etc/cs193v/strings.sh and sourced by cs193v-welcome and cs193v-goodbye.
+# Installed as /etc/cs193v/strings.sh and sourced by cs193v-welcome.
 #
 # WHY THIS FILE EXISTS. These strings had been written out twice: once in the script that
 # prints them, and again as a literal inside each test that checks for them — across
@@ -29,5 +29,7 @@ CS193V_TITLE='CS193V Development Environment'
 # The entry banner's greeting line.
 CS193V_WELCOME='Welcome to the CS193V Development Environment!'
 
-# Printed once, after the whole tmux session ends — not per tab. See cs193v-goodbye.
-CS193V_GOODBYE='You have left the CS193V development environment. Goodbye!'
+# NO GOODBYE HERE ANY MORE (#220). Leaving is announced by the LAUNCHER, from messages.txt,
+# because the exit line has to stay on screen while the host tears the tunnel and the container
+# down and then be finished off on the same row -- which nothing inside a container that is in
+# the act of stopping can do. A container-side copy would be a second definition of one message.

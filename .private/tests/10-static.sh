@@ -1203,10 +1203,18 @@ args_live_early="$(sed 's/#.*//' $REPO/.config/container.args)"
 assert_contains "args:hostname-is-cs193v-development" "--hostname cs193v-development" \
                 "$args_live_early"
 
-assert_ok  "containerfile:installs-the-welcome-banner" \
-           grep -q '20-cs193v-welcome.sh /etc/profile.d/' $PRIVATE/Containerfile
-assert_ok  "containerfile:installs-bash-logout" \
-           grep -qE 'bash_logout .*/home/student/.bash_logout' $PRIVATE/Containerfile
+# NEITHER HOOK IS INSTALLED ANY MORE (#220). Both existed for one path -- a login shell opened
+# outside tmux, `podman exec -it cs193v bash -l` -- and that path is no longer one a student is
+# ever sent down: the fault box used to name it and does not, and no message in the catalogue
+# does either. What is left of it is staff running a raw shell to look at a container, and staff
+# do not need to be greeted or seen off. Asserted as absences so the install lines cannot come
+# back without the prose that justified them.
+assert_ok  "containerfile:installs-no-welcome-hook" \
+           sh -c "! grep -q '20-cs193v-welcome.sh /etc/profile.d/' $PRIVATE/Containerfile"
+assert_ok  "containerfile:installs-no-bash-logout" \
+           sh -c "! grep -qE 'bash_logout .*/home/student/.bash_logout' $PRIVATE/Containerfile"
+assert_ok  "containerfile:installs-no-goodbye" \
+           sh -c "! grep -qE 'cs193v-goodbye +/usr/local/bin' $PRIVATE/Containerfile"
 
 # ~/.bashrc sets the window title THROUGH PS1 and re-emits it every prompt, so a title set
 # once at login is immediately overwritten. The image rewrites that one escape.
@@ -1217,11 +1225,12 @@ assert_ok  "containerfile:rewrites-the-bashrc-window-title" \
 # mounted. So this text has to live in the image, and must not be "tidied" into messages.txt
 # later, which would silently blank the banner.
 #
-# The TEXT lives in files/cs193v-welcome and the DECISION to print it lives in
-# files/profile.d/20-cs193v-welcome.sh. They were split when tmux became the landing point:
-# tmux runs the login shell in every tab, so profile.d fires per-tab, while the banner must
-# appear once. The first tab gets it from cs193v-shell; profile.d now covers only the
-# non-tmux path, `podman exec -it cs193v bash -l`.
+# The TEXT lives in files/cs193v-welcome, and the only thing that runs it is cs193v-shell,
+# which passes it as the first window's command. It was once ALSO run from
+# files/profile.d/20-cs193v-welcome.sh, whose whole job was the one path that is not tmux --
+# `podman exec -it cs193v bash -l`. That hook is gone with the path (#220), so the per-tab
+# problem it was split off to solve cannot arise: tmux runs a login shell in every tab, but
+# nothing in profile.d greets any more.
 # ─── the shared strings ────────────────────────────────────────────────────────
 # The text the container prints is defined once, in files/cs193v-strings.sh, and read by
 # the scripts that print it AND by this suite (lib/assert.sh sources it). So these check the
@@ -1231,7 +1240,13 @@ assert_ok  "strings:file-exists" test -f $PRIVATE/files/cs193v-strings.sh
 assert_ok  "strings:syntax"      sh -n $PRIVATE/files/cs193v-strings.sh
 assert_ne  "strings:title-is-defined"   "" "${CS193V_TITLE:-}"
 assert_ne  "strings:welcome-is-defined" "" "${CS193V_WELCOME:-}"
-assert_ne  "strings:goodbye-is-defined" "" "${CS193V_GOODBYE:-}"
+# AND THE GOODBYE IS NOT AMONG THEM (#220). The host says the farewell now, from
+# messages.txt, where it can be reworded without a rebuild -- so a container-side copy would be
+# a second definition of one message, which is the drift this file exists to catch. Asserted
+# against the FILE rather than against the sourced value: lib/assert.sh no longer exports it, so
+# `${CS193V_GOODBYE:-}` would be empty here whether the definition survived or not.
+assert_not_contains "strings:goodbye-is-gone" 'CS193V_GOODBYE' \
+                    "$(cat $PRIVATE/files/cs193v-strings.sh)"
 assert_ok  "containerfile:installs-the-strings" \
            grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' $PRIVATE/Containerfile
 
@@ -1286,27 +1301,61 @@ assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
                 "$(cat $PRIVATE/files/cs193v-welcome)"
 assert_ok  "welcome:syntax" sh -n $PRIVATE/files/cs193v-welcome
 
-assert_ok  "welcome:hook-exists" test -f $PRIVATE/files/profile.d/20-cs193v-welcome.sh
-# Interactive-only, matching 10-cs193v-shell.sh, so `podman exec cs193v <cmd>` and every
-# non-interactive call in this suite stay silent.
-assert_contains "welcome:guards-on-interactive-shell" 'case $- in' \
-                "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
-# The $TMUX guard is what keeps the banner out of every new tab. Without it, CTRL+T clears
-# the pane and greets again, which is the failure the split above exists to prevent.
-assert_contains "welcome:hook-skips-inside-tmux" 'TMUX' \
-                "$(cat $PRIVATE/files/profile.d/20-cs193v-welcome.sh)"
-assert_ok  "welcome:hook-syntax" sh -n $PRIVATE/files/profile.d/20-cs193v-welcome.sh
+# ─── the raw-shell path is retired, files and all  (#220) ─────────────────────
+# THREE FILES GONE, and the absences are asserted rather than assumed. A deleted file that
+# something still installs is a broken build; a deleted file that nothing installs but which is
+# still SITTING in files/ is worse, because the next person reads it as live and wires it back
+# up. So the tree is checked as well as the recipe.
+assert_ok "logout:no-goodbye-script"      test ! -f $PRIVATE/files/cs193v-goodbye
+assert_ok "logout:no-bash-logout-hook"    test ! -f $PRIVATE/files/bash_logout
+assert_ok "welcome:no-profile-d-hook"     test ! -f $PRIVATE/files/profile.d/20-cs193v-welcome.sh
 
-assert_ok  "logout:script-exists" test -f $PRIVATE/files/cs193v-goodbye
-assert_contains "logout:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
-                "$(cat $PRIVATE/files/cs193v-goodbye)"
-assert_contains "logout:says-goodbye" 'CS193V_GOODBYE' "$(cat $PRIVATE/files/cs193v-goodbye)"
-assert_ok  "logout:syntax" sh -n $PRIVATE/files/cs193v-goodbye
-assert_ok  "logout:hook-exists" test -f $PRIVATE/files/bash_logout
-# Same reason as the banner: .bash_logout fires once per TAB inside tmux, so the farewell
-# would print into a pane that is closing, for something the student has not left.
-assert_contains "logout:hook-skips-inside-tmux" 'TMUX' "$(cat $PRIVATE/files/bash_logout)"
-assert_ok  "logout:hook-syntax" sh -n $PRIVATE/files/bash_logout
+# AND NOTHING SENDS A STUDENT TO A RAW SHELL. This is the reason the three files above could go,
+# so it is the assertion that has to hold for them to stay gone. `podman exec -it cs193v bash -l`
+# is a staff instrument: it has no tmux around it, so no title bar, no tab bar and none of the
+# copy/paste work #122, #123 and #133 paid for -- an environment the course does not document
+# and cannot support. A student whose container will not start needs course staff, not a shell.
+#
+# SCOPED TO THE FAULT BOX, which is the only student-facing prose in cs193v-shell -- and
+# scoping it is not caution, it is correctness: `exec bash -l` is what do_claim gives tmux as
+# the first window's command, so a file-wide ban on that string forbids the shell the whole
+# image exists to provide. Measured: the first version of this assertion was red for exactly
+# that line.
+#
+# `podman exec` IS THE NEEDLE, not `bash -l`. What was removed is a raw podman command handed to
+# a student mid-failure, and the objection is to the handing over rather than to the shell at the
+# end of it -- any other podman incantation in this box would be the same mistake.
+#
+# Extracted inline rather than with fn_body, which is defined further down this file than this
+# block reads. An empty extraction would make the negative pass vacuously, so it is checked.
+fault_box="$(sed -n '/^fail() {/,/^}/p' $PRIVATE/files/cs193v-shell | sed 's/^[[:space:]]*#.*//')"
+assert_ne "shell:the-fault-box-is-extractable" "" "$(printf '%s' "$fault_box" | do_tr -d ' \n')"
+assert_not_contains "shell:the-fault-box-does-not-send-a-student-to-a-raw-shell" \
+                    'podman exec' "$fault_box"
+# The catalogue is checked whole and by the plainer needle: nothing in it is a shell command a
+# student should ever have been given, so there is no legitimate occurrence to scope around.
+assert_not_contains "messages:no-message-sends-a-student-to-a-raw-shell" \
+                    'bash -l' "$(sed 's/^#.*//' $PRIVATE/messages.txt)"
+# THE BOX STILL NAMES A WAY FORWARD, which is the half that deleting a line could lose: a fault
+# box saying only "this is not your fault" leaves a student with nowhere to go. Both survivors
+# are asserted, because either alone is a dead end -- a report with nobody to send it to, or
+# staff with nothing to send them.
+assert_contains "shell:the-fault-box-still-names-the-report" './cs193v doctor' "$fault_box"
+assert_contains "shell:the-fault-box-still-names-the-staff" 'course staff'    "$fault_box"
+
+# AND THE PLUMBING BEHIND THE DELETED LINE IS GONE TOO. CS193V_CONTAINER existed for one
+# purpose: the fault box had to name the container in that `podman exec` line, and nothing
+# inside the container can work the name out -- CS193V_INSTANCE may have suffixed it and the
+# hostname is cs193v-development either way. With the line gone the variable feeds nothing, and
+# a variable the launcher still passes to a container that never reads it is the kind of dead
+# wiring somebody later mistakes for a contract.
+# THE WHOLE SCRIPT for this one, not just the box: a variable can be referenced anywhere, and
+# what is being asserted is that nothing reads it at all. Comments stripped, so the paragraph
+# above -- which names it in order to explain why it went -- does not answer its own question.
+shell_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/files/cs193v-shell)"
+assert_not_contains "shell:no-dead-container-name" 'CS193V_CONTAINER' "$shell_code"
+assert_not_contains "launcher:passes-no-dead-container-name" 'CS193V_CONTAINER' \
+                    "$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
 
 # ─── man  (issue #8) ───────────────────────────────────────────────────────────
 # Manual pages are deliberately absent and tldr stands in, but Ubuntu's minimized base
@@ -1417,7 +1466,7 @@ assert_ok  "tmux:containerfile-installs-conf" \
            grep -q 'tmux/tmux.conf     /etc/cs193v/tmux.conf' $PRIVATE/Containerfile
 assert_ok  "tmux:containerfile-installs-tabname" \
            grep -q 'tmux/tabname.bash  /etc/cs193v/tabname.bash' $PRIVATE/Containerfile
-for cmd in cs193v-shell cs193v-welcome cs193v-goodbye; do
+for cmd in cs193v-shell cs193v-welcome; do
     assert_ok "tmux:containerfile-installs-$cmd" \
               grep -qE "$cmd +/usr/local/bin/$cmd" $PRIVATE/Containerfile
 done
@@ -1727,6 +1776,78 @@ assert_match "launcher:teardown-bounds-podmans-own-grace" 'stop -t [0-9]' "$tear
 # HUP runs the handler and EXIT then runs it again, so without a guard the student gets two
 # "stopping" lines for one stop.
 assert_contains "launcher:teardown-runs-once" "TEARDOWN_DONE" "$guard_body"
+
+# ─── the clean exit says one thing, once (#220) ────────────────────────────────
+# Leaving used to print five rows from three writers: tmux's own [exited], cs193v-goodbye's
+# padded farewell from inside the container, and this launcher's "stopping" line. The student
+# watched them arrive one at a time. Now the clean-exit path erases tmux's line and prints one
+# line that gains " done." when the teardown finishes; every OTHER path keeps the old wording.
+#
+# COMMENTS STRIPPED, for the reason the ensure_tunnel check above states: the prose in this
+# region names both SESSION_LEFT and stop_container, so a search of the raw body finds a comment
+# and reports the wrong answer.
+guard_code="$(printf '%s\n' "$guard_body" | sed 's/^[[:space:]]*#.*//')"
+
+# DECLARED AT TOP LEVEL, and this is not a style rule. `set -u` is on, and shell_teardown reads
+# this flag on paths that never ran open_shell's assignment -- the no-tty refusal and the lost
+# claim both call it directly, before the trap exists. An unbound read there is fatal BEFORE
+# stop_container, which leaves a container up with nothing attached: the one thing #41 exists to
+# prevent. Counted rather than merely found, the way the podman floor is (#221), so a second
+# declaration cannot drift away from the first.
+assert_eq "teardown:the-clean-exit-flag-is-declared-once" "1" \
+          "$(grep -c '^SESSION_LEFT=' $REPO/cs193v)"
+
+# ONE STOP, NOT ONE PER ARM. The clean exit and the signal paths print different things, which
+# invites an `if` with a stop in each branch -- and that shape is one edit away from an arm that
+# prints and leaves the container running. Counted, so the invitation stays declined.
+assert_eq "teardown:the-container-is-stopped-exactly-once" "1" \
+          "$(printf '%s\n' "$guard_code" | grep -c 'stop_container')"
+# A FLAG, NOT A MESSAGE KEY, and 20-messages.sh is why: it reconciles this file against
+# `grep 'msg +KEY'`, so a key reached through a variable makes status.stopping an orphan and
+# reddens keys:no-orphans for a line still printed on four paths. Measured: it did.
+assert_contains "teardown:the-clean-exit-suppresses-the-old-line" "--quiet" "$guard_code"
+# THE LAST STATEMENT, not "a return 0 appears somewhere". The once-guard's own
+# `[ -n "$TEARDOWN_DONE" ] && return 0` is the first line of this body, so a search of the whole
+# function passes no matter how it ends -- which is a test that cannot fail. What matters is the
+# TAIL: the new last command is a test that comes out false on every signal path, and this
+# function is both a signal handler and the EXIT trap, where bash can read a non-zero status back
+# as the script's own. The body used to end in stop_container, which returns 0 unconditionally.
+assert_eq "teardown:the-handler-returns-success" "return 0" \
+          "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' | grep -v '^}' \
+             | tail -1 | sed 's/^[[:space:]]*//')"
+
+# THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
+# rather than merely present: both lines in the wrong sequence would wipe a row of the student's
+# own terminal before tmux had drawn anything on it.
+erase_at="$(line_of 'line_erase_above')"
+if [ -n "$att_at" ] && [ -n "$erase_at" ] && [ "$att_at" -lt "$erase_at" ]; then
+    pass "exit:the-erase-comes-after-the-attach"
+else
+    fail "exit:the-erase-comes-after-the-attach" \
+         "want the attach before the erase; got attach=$att_at erase=$erase_at"
+fi
+
+# AND NOTHING PRINTS BETWEEN tmux's LAST LINE AND PODMAN'S EXIT. This is what makes the erase's
+# hard-coded depth of one row legitimate: [exited] is the last thing on the pty, so one row up is
+# the row to wipe. Re-add anything here -- the goodbye that used to live at the end of do_attach,
+# a stray echo -- and the launcher erases that instead, leaving tmux's line on screen.
+#
+# `fail` is deliberately NOT in this list. It exits 1, so the launcher never erases behind a
+# fault box, and the box's own printfs are inside that function rather than here.
+attach_tail="$(fn_body do_attach $PRIVATE/files/cs193v-shell | sed 's/^[[:space:]]*#.*//' \
+               | sed -n '/tm attach-session/,$p' | sed 1d)"
+assert_ne "exit:the-attach-tail-was-really-found" "" "$attach_tail"
+assert_eq "exit:the-attach-says-nothing-after-tmux" "" \
+          "$(printf '%s\n' "$attach_tail" | grep -nE 'printf|echo|cs193v-goodbye' || true)"
+# AND IT STATES ITS EXIT STATUS, which the assertion above quietly made necessary. With nothing
+# printing at the end of do_attach, its last command became `rm -f "$errfile"` -- and $errfile is
+# /dev/null whenever mktemp failed, which a full or unwritable TMPDIR really does (#76). `rm -f
+# /dev/null` as student cannot succeed, so a flawless session would exit 1, the launcher would
+# read a failed attach, and the student would get the fault box and the old wording. THE LAST
+# STATEMENT, not "a return 0 somewhere", for the same reason as shell_teardown's.
+assert_eq "exit:the-attach-states-its-exit-status" "return 0" \
+          "$(printf '%s\n' "$attach_tail" | grep -vE '^[[:space:]]*$' | grep -v '^}' \
+             | tail -1 | sed 's/^[[:space:]]*//')"
 
 # One session at a time. The refusal is the whole student-facing contract of #41, and its
 # message has to name the way out or a force-quit strands somebody.
@@ -2641,8 +2762,7 @@ assert_ok  "shellcheck:setup-git" shellcheck -x --severity=warning $PRIVATE/file
 # shell, so a quoting bug in it is a container nobody can enter.
 assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
                                       $PRIVATE/files/cs193v-shell \
-                                      $PRIVATE/files/cs193v-welcome \
-                                      $PRIVATE/files/cs193v-goodbye
+                                      $PRIVATE/files/cs193v-welcome
 # The small /bin/sh helpers. `man` is here rather than left to the image tier because it
 # runs as root-owned /usr/bin/man for every student: a quoting bug in it would turn every
 # `man something` into a shell error on top of the missing manual page.

@@ -597,11 +597,15 @@ COPY files/ /tmp/cs193v-files/
 # What it does, in order:
 #
 #  1. Installs the helper commands: the $BROWSER stub, `shortlink` behind it, `cs193v-linkbox`
-#     in front of it, the entrypoint,
-#     and the three that
-#     cs193v-shell (what `./cs193v` runs), plus cs193v-welcome and cs193v-goodbye. Those
-#     last two are commands rather than inline shell because they now have two callers
-#     each: the tmux path and the plain `bash -l` path. See item 9.
+#     in front of it, the entrypoint, cs193v-shell (what `./cs193v` runs), and cs193v-welcome.
+#
+#     cs193v-welcome is a command rather than inline shell for a reason that has outlived its
+#     second caller: it once ran both from cs193v-shell and from /etc/profile.d, for the plain
+#     `bash -l` path. That hook is gone with the path (#220), so the banner now has exactly one
+#     caller -- cs193v-shell, which passes it as the first window's command. It stays a command
+#     because the text belongs beside cs193v-strings.sh rather than inside a tmux argument.
+#     There is no goodbye here at all now; the launcher says that one, from messages.txt.
+#     See item 9.
 #
 #     `shortlink` is the one python3 program this image installs, and it is python3 for a
 #     reason it cannot avoid: it has to LISTEN on a socket, which bash's /dev/tcp cannot do
@@ -667,6 +671,19 @@ COPY files/ /tmp/cs193v-files/
 #     shells) and bash.bashrc (interactive non-login). Ctrl-S is "save" in every GUI
 #     editor; on a terminal it freezes all output with no echo, which looks exactly like
 #     a crash, and the recovery (Ctrl-Q) is unknown to novices.
+#
+#  3a. DELETES ~/.bash_logout, and this needs stating because it is a removal rather than an
+#     install. #220 retired the CS193V farewell from the raw `bash -l` path and deleted the
+#     .bash_logout that printed it -- which UNCOVERED the one Ubuntu ships in /etc/skel and
+#     copies into every new home. That file is not inert: at SHLVL 1 it runs
+#     `/usr/bin/clear_console -q`, which is present in this image, so leaving a raw shell would
+#     wipe the terminal and its scrollback. Ours had been overwriting it by accident all along.
+#
+#     Clearing the screen on the way out is exactly what #220 removed the farewell for, and
+#     cs193v-goodbye's own header had already argued the point: a novice's last command output
+#     is very often the thing they are about to paste to course staff. /etc/skel goes too, so a
+#     user created later cannot reintroduce it. 50-image.sh asserts the absence in the BUILT
+#     image, which is the only place this is visible -- the recipe merely stopped installing.
 #
 #  4. Installs the nanorc.
 #
@@ -785,7 +802,6 @@ RUN set -eux; \
     install -m 0755 /tmp/cs193v-files/entrypoint.sh   /usr/local/bin/cs193v-entrypoint; \
     install -m 0755 /tmp/cs193v-files/cs193v-shell    /usr/local/bin/cs193v-shell; \
     install -m 0755 /tmp/cs193v-files/cs193v-welcome  /usr/local/bin/cs193v-welcome; \
-    install -m 0755 /tmp/cs193v-files/cs193v-goodbye  /usr/local/bin/cs193v-goodbye; \
     install -m 0755 /tmp/cs193v-files/man             /usr/bin/man; \
     sh -n /usr/bin/man; \
     test -z "$(man git 2>&1 | grep -F unminimize || true)"; \
@@ -796,8 +812,8 @@ RUN set -eux; \
     install -m 0644 /tmp/cs193v-files/codex/managed_config.toml /etc/codex/managed_config.toml; \
     python3 -c "import tomllib;tomllib.load(open('/etc/codex/managed_config.toml','rb'))"; \
     install -m 0644 /tmp/cs193v-files/profile.d/10-cs193v-shell.sh /etc/profile.d/10-cs193v-shell.sh; \
-    install -m 0644 /tmp/cs193v-files/profile.d/20-cs193v-welcome.sh /etc/profile.d/20-cs193v-welcome.sh; \
-    install -o student -g student -m 0644 /tmp/cs193v-files/bash_logout /home/student/.bash_logout; \
+    rm -f /home/student/.bash_logout /etc/skel/.bash_logout; \
+    test ! -e /home/student/.bash_logout; \
     python3 /tmp/cs193v-files/rewrite-window-title.py; \
     grep -q 'CS193V Development Environment' /home/student/.bashrc; \
     cat /tmp/cs193v-files/profile.d/10-cs193v-shell.sh >> /etc/bash.bashrc; \

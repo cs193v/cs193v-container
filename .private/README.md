@@ -22,8 +22,8 @@ projects/                      the student's work; the only directory shared wit
   files/                       everything the image installs
     entrypoint.sh              PID 1 — keep-alive + reaps orphans
     cs193v-shell               THE LANDING POINT — picks a tmux session and attaches
-    cs193v-welcome             the entry banner
-    cs193v-goodbye             the goodbye on exit
+    cs193v-welcome             the entry banner, tab one only — the launcher says the
+                               farewell now, from messages.txt (issue #220)
     cs193v-ui.sh               THE SHARED PRESENTATION LAYER — sourced by the launcher AND,
                                as /etc/cs193v/ui.sh, by everything in the image that draws
     setup-git                  guides a student through git and GitHub (issue #49)
@@ -37,8 +37,7 @@ projects/                      the student's work; the only directory shared wit
                                to LISTEN, and /dev/tcp cannot
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
-    bash_logout                runs cs193v-goodbye, outside tmux only
-    profile.d/                 stty -ixon, and the entry banner outside tmux
+    profile.d/                 stty -ixon
     agent-notes.md             THE COURSE NOTES BOTH AGENTS READ — installed once as
                                /etc/cs193v/agent-notes.md; /etc/claude-code/CLAUDE.md is a
                                symlink to it and the entrypoint links ~/.codex/AGENTS.md at it
@@ -596,7 +595,7 @@ Colours, `box()`, `die()`, `celebrate()`, the arrow-key `menu()`, `msg()`, `run_
 `meter_glyph()`, `run_step()` and `version_lt()` live in **one file**, and it is under `files/` so
 that it is installed into the image as `/etc/cs193v/ui.sh`. The launcher sources it out of the
 checkout; `setup-git` and any future `setup-*` source the installed copy, the way `cs193v-welcome`
-and `cs193v-goodbye` already source `/etc/cs193v/strings.sh`.
+already sources `/etc/cs193v/strings.sh`.
 
 That arrangement arrived with `setup-git`, which needed a menu and a box inside the container and
 would otherwise have been a third copy of both. What it replaced was one copy per script.

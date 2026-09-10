@@ -187,6 +187,20 @@ If the force-quit group below is ALSO red, suspect the teardown itself (#170) ra
 if only this one is, the polite close is not reaching the launcher at all."
 fi
 
+# AND IT STILL SAYS "STOPPING", not #220's clean-exit line. A closed window is not a student
+# choosing to leave: nobody is in front of the terminal, and the message that means "you typed
+# exit and I am tidying up" would be addressed to an empty chair. shell_teardown tells them
+# apart by SESSION_LEFT, which only a zero-status attach sets, and this is the assertion that
+# the signal arm did not quietly inherit the other wording.
+#
+# ON THE POLITE CLOSE, DELIBERATELY, and not on the force quit below: the comment on
+# close_window records that this ordering never revokes the controlling terminal, so every
+# write the teardown makes lands in $LOG. After a force quit there may be nothing to read.
+hup_out="$(cat "$LOG" 2>/dev/null)"
+assert_says_key     "sighup:a-closed-window-still-says-stopping" status.stopping "$hup_out"
+assert_says_not_key "sighup:a-closed-window-does-not-claim-a-clean-exit" \
+                    status.exiting "$hup_out"
+
 # The tunnel is a HOST process holding loopback ports, so it does not die with the container --
 # it has to be taken down deliberately. Forgetting would mean the next launch could bind none of
 # its ports, which is the failure remove_container documents; this is its test on the teardown path.
@@ -304,7 +318,15 @@ if wait_until 45 container_stopped; then
 else
     fail "sighup:exiting-the-shell-stops-the-container" "the container is still $(st)"
 fi
-assert_says "sighup:the-student-is-told-it-is-stopping" "Stopping the container" "$out"
+# #220: ONE LINE, and it is the new one. This is the clean exit -- the student typed `exit`, the
+# attach returned 0, and they are watching -- so tmux's `[exited]` is erased, the goodbye is gone,
+# and the older "stopping" wording is suppressed. Asserted by key rather than by quoting prose,
+# and the finished row asserted as a whole: the prefix alone would pass a teardown that printed
+# it and then never came back.
+assert_says_key "sighup:the-student-is-told-it-is-exiting" status.exiting "$out"
+assert_says     "sighup:and-that-the-teardown-finished" \
+                "$(msg_text status.exiting) $(msg_text status.exiting-done)" "$out"
+assert_says_not_key "sighup:the-old-line-is-gone-on-the-clean-path" status.stopping "$out"
 
 # ─── 3. relaunching gets the same container, not a new one ─────────────────────
 # `podman stop` and not `rm`, so the writable layer survives and things installed with sudo still

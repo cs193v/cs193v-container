@@ -1846,10 +1846,26 @@ ensure_container() {
 # would be a lost race printing that script's "fault in the container image" box.
 RACE_LOST_STATUS=3
 TEARDOWN_DONE=''
+# Set once the attach has returned 0 -- the student typed `exit` or pressed Ctrl-D and is sitting
+# there watching. shell_teardown reads it to choose between #220's single "Exiting..." line and
+# the "Stopping the container..." that every other way out of here keeps.
+#
+# DECLARED HERE RATHER THAN ONLY ASSIGNED IN open_shell, and `set -u` is the reason. Two paths
+# call shell_teardown directly, before the attach exists and before the trap is installed: the
+# no-tty refusal and a lost claim. An unbound read in the handler is fatal on the spot, so it
+# would kill the launcher BEFORE stop_container and leave a container up with nothing attached --
+# which is the one promise #41 exists to make. 10-static.sh counts this line for that reason.
+SESSION_LEFT=''
 
 # What ends the session: `exit` from the last tab, the window closing, and Ctrl-C alike. All
 # three arrive here the same way, as the podman exec child terminating with a signal pending
 # that we trapped -- which is why there is one teardown and not three.
+#
+# THEY NO LONGER ALL SAY THE SAME THING, though they still all do the same thing (#220). Only
+# the first is a student who chose to leave and is watching the screen; that path erases tmux's
+# `[exited]` and prints one line. A closed window has nobody in front of it and Ctrl-C arrives
+# before the attach, so both keep the older wording. The teardown is still one function -- the
+# difference is a message, and it is carried by SESSION_LEFT rather than by a second handler.
 #
 # THE TUNNEL GOES FIRST, ALWAYS, for the reason remove_container spells out at length: an ssh
 # client that outlives its container keeps all 46 host ports bound on the host's loopback
@@ -1870,15 +1886,25 @@ TEARDOWN_DONE=''
 # no student process gets a clean shutdown whether -t is 3 or 10, and an unsaved nano buffer is
 # lost either way. Making that work would mean TERMing the container's own processes before the
 # stop; deliberately not done, see .private/README.md.
-stop_container() {
+stop_container() {                     # stop_container [--quiet]
+    # --quiet SUPPRESSES THE ANNOUNCEMENT AND NOTHING ELSE. The clean-exit path has already told
+    # the student it is exiting, and would otherwise say the same thing twice in two wordings.
+    #
+    # A FLAG RATHER THAN THE MESSAGE KEY, which was the first shape tried and is a trap worth
+    # naming: 20-messages.sh reconciles this file against `grep 'msg +KEY'`, so reaching the key
+    # through a variable leaves status.stopping matched by nothing and reddens keys:no-orphans
+    # for a line still printed on four paths. Measured -- it reported exactly that.
+    local was_running quiet
+    quiet=''
+    [ "${1:-}" = --quiet ] && quiet=1
+
     # Sampled ONCE, up front, so the message and the action cannot disagree: nothing announces
     # that it is stopping a container which is not running. shell_teardown reaches here on paths
     # where the container may already have gone -- see the unconditional tunnel_down below.
-    local was_running
     was_running=''
     [ "$(state)" = running ] && was_running=1
 
-    [ -n "$was_running" ] && note "$(msg status.stopping)"
+    [ -n "$was_running" ] && [ -z "$quiet" ] && note "$(msg status.stopping)"
     # UNCONDITIONAL, even when the container has already gone: a --rebuild run from another
     # window can have removed it out from under this shell, and an ssh client that outlives its
     # container still holds all 46 host ports against a pipe with nothing on the far end. That
@@ -1910,7 +1936,30 @@ shell_teardown() {
     [ -n "$TEARDOWN_DONE" ] && return 0
     TEARDOWN_DONE=1
     transient_cleanup
-    stop_container
+    # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different
+    # things, which invites an `if` with a stop in each branch -- and that shape is one edit
+    # away from an arm that prints and leaves the container running, which is the whole of #41.
+    # So the branch is around the MESSAGE and the stop stays on its own line.
+    #
+    # printf RATHER THAN note(), because the first half of this line has no newline on it: the
+    # student reads "Exiting the CS193V development environment..." while the tunnel comes down
+    # and the container stops, and " done." lands on the same row when that finishes. note()
+    # hard-codes both a newline and C_DIM. info()'s plain output is what status.entering uses,
+    # and this is its counterpart.
+    #
+    # " done." IS A CLAIM ABOUT THE TEARDOWN, NOT ABOUT PODMAN. stop_container returns 0
+    # unconditionally and `state` fails open (#140, #171), so there is no evidence here that the
+    # container really stopped -- and gating the marker on a re-read would print the pessimistic
+    # branch for a stop that worked, on exactly the slept Mac #140 measured. Announcing that the
+    # work finished is true and is no weaker than the line it replaces.
+    [ -n "$SESSION_LEFT" ] && printf '%s' "$(msg status.exiting)"
+    stop_container ${SESSION_LEFT:+--quiet}
+    [ -n "$SESSION_LEFT" ] && printf ' %s\n' "$(msg status.exiting-done)"
+    # EXPLICIT, because the line above is a test that comes out FALSE on every path but the
+    # clean exit, and this function is both a signal handler and the EXIT trap -- where bash can
+    # read a non-zero status back as the script's own. The body used to end in stop_container,
+    # which returns 0 whatever happened.
+    return 0
 }
 
 # The same job for verb_rebuild's create window: podman run --detach returns, and until
@@ -2070,7 +2119,6 @@ open_shell() {
     # overwrites TERM_PROGRAM with "tmux" for every pane it spawns. See term_class.
     podman exec \
         -w "$MOUNT_DST" \
-        -e "CS193V_CONTAINER=$NAME" \
         -e "CS193V_COLS=$cols" \
         -e "CS193V_LINES=$lines" \
         -e "CS193V_TERM_CLASS=$(term_class)" \
@@ -2127,22 +2175,30 @@ open_shell() {
     # process group -- but that is an assumption worth not needing. Foregrounded, the same
     # SIGHUP that closes the window kills the child AND is pending for us, so bash runs the
     # handler as soon as it reaps it.
-    #
-    # CS193V_CONTAINER is passed because cs193v-shell's failure path has to tell a student the
-    # exact `podman exec` line to run, and nothing inside the container can work out the
-    # container's name -- CS193V_INSTANCE may have suffixed it, and the hostname is
-    # cs193v-development either way.
     podman exec -it \
         -w "$MOUNT_DST" \
         -e "TERM=$(safe_term)" \
         -e "COLORTERM=${COLORTERM:-}" \
-        -e "CS193V_CONTAINER=$NAME" \
         "$NAME" cs193v-shell --attach
     # NO CS193V_TERM_CLASS HERE, deliberately: this exec is a tmux CLIENT, and a client's
     # environment does not reach panes -- `update-environment` names neither variable and clears
     # what it does not copy. The claim exec above is where they have to go. Adding them here
     # would look like belt-and-braces and be inert.
     rc=$?
+    # THE FLAG BEFORE THE ERASE, and the order is the point rather than the taste. A HUP can
+    # land between any two commands here, and shell_teardown reads this flag. Set first, the
+    # worst a badly timed signal does is leave `[exited]` on screen above the right message; set
+    # second, the handler reads an unset flag and prints the wrong message instead.
+    #
+    # BOTH AFTER `rc=$?`, which is the trap this function's own header warns about one way
+    # round: an assignment is a command, and one placed a line too early clobbers the status
+    # silently.
+    #
+    # rc 0 IS THE WHOLE TEST for "the student left of their own accord", and it is enough on
+    # every other path. A closed window never reaches this line -- the trap runs while the exec
+    # is still in flight -- and cs193v-shell's fault box exits 1, so nothing erases a row of
+    # that box or claims a clean exit behind one.
+    [ "$rc" -eq 0 ] && { SESSION_LEFT=1; line_erase_above; }
     return "$rc"
 }
 

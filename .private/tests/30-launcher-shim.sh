@@ -533,7 +533,10 @@ assert_not_contains "race:lost-create-does-not-leak-podmans-output" \
 shim_new
 shim_set state absent
 shim_set run_hold 1
-PATH="$SHIM:$PATH" "${LAUNCHER_DIR:-$REPO}/cs193v" --rebuild >/dev/null 2>&1 &
+# OUTPUT KEPT rather than discarded (#220). Now that the clean exit has its own wording, this
+# is the cheapest place that still checks the OLDER one is printed at all -- every other
+# assertion on status.stopping lives in the container tier.
+PATH="$SHIM:$PATH" "${LAUNCHER_DIR:-$REPO}/cs193v" --rebuild >"$SHIM/rb.out" 2>&1 &
 rb=$!
 container_is_up() { [ "$(cat "$SHIM/state" 2>/dev/null)" = running ]; }
 if wait_until 30 container_is_up; then
@@ -546,10 +549,20 @@ if wait_until 30 container_is_up; then
     # would tell a script that the rebuild succeeded. Per-signal, so a caller can still tell a
     # Ctrl-C (130) from a closed window (129).
     assert_eq "interrupt:exits-128-plus-the-signal" "143" "$rb_rc"
+    # A SIGNAL IS NOT A CLEAN EXIT. This path is rebuild_interrupted, which calls stop_container
+    # bare, so it keeps the wording it always had -- and must not borrow the line that means
+    # "the student typed exit and is watching", because nobody typed anything here.
+    rb_out="$(cat "$SHIM/rb.out" 2>/dev/null)"
+    assert_says_key     "interrupt:the-signal-path-still-says-stopping" \
+                        status.stopping "$rb_out"
+    assert_says_not_key "interrupt:the-signal-path-does-not-claim-a-clean-exit" \
+                        status.exiting  "$rb_out"
 else
     kill "$rb" 2>/dev/null
     fail "interrupt:stops-the-container-it-created" "podman run never reported a container up"
     fail "interrupt:exits-128-plus-the-signal" "see above"
+    fail "interrupt:the-signal-path-still-says-stopping" "see above"
+    fail "interrupt:the-signal-path-does-not-claim-a-clean-exit" "see above"
 fi
 rm -f "$SHIM/run_hold"
 
@@ -968,7 +981,13 @@ assert_says "noterm:says-it-was-stopped-again"    "has been stopped again" "$out
 # The message has to name what a script SHOULD use, or it is just a dead end.
 assert_says "noterm:points-at-rebuild" "cs193v --rebuild" "$out"
 assert_says "noterm:points-at-doctor"  "cs193v doctor"    "$out"
-assert_says "noterm:points-at-podman-exec" "podman exec -it cs193v bash -lc" "$out"
+# AND NAMES NOTHING ELSE (#220). This used to end with `podman exec -it cs193v bash -lc
+# 'your command here'`, asserted here as a third thing a script could use. Two objections
+# retired it: the form was wrong for its own context -- `-it` asks for a tty inside advice
+# about not having one -- and it was the last student-facing pointer at a raw shell, which is
+# an environment the course neither documents nor supports. What is left is the two cs193v
+# verbs above.
+assert_says_not "noterm:points-at-no-raw-shell" "bash -l" "$out"
 assert_eq   "noterm:exits-nonzero" "1" "$(launcher_rc)"
 # It must refuse, not hang. A wall-clock check, since hanging was the original bug.
 T0="$(date +%s)"; launcher >/dev/null 2>&1; T1="$(date +%s)"
@@ -980,16 +999,16 @@ assert_eq "noterm:container-was-still-created" "1" "$(shim_count '^run ')"
 assert_eq "noterm:no-exec-attempted" "0" "$(shim_count '^exec -it')"
 # With a terminal, the very same invocation must go on to open the shell.
 #
-# The landing point is cs193v-shell, not `bash -l`: it puts the student inside tmux and
-# picks a session to attach to. `bash -l` remains what the refusal message points scripts
-# at, which is asserted separately above -- the two must not be conflated, because the
-# whole point of that message is that it names the path which does NOT go through tmux.
+# The landing point is cs193v-shell, not `bash -l`: it puts the student inside tmux and picks
+# a session to attach to. The refusal message used to point scripts at `bash -l` as the path
+# that does NOT go through tmux, and this comment used to say the two must not be conflated --
+# #220 removed the pointer instead. A raw login shell has no title bar, no tab bar and none of
+# the copy/paste work #122, #123 and #133 paid for, so it is not somewhere to send anybody; the
+# message now names only `cs193v --rebuild` and `cs193v doctor`, and 10-static.sh asserts that
+# no message names a raw shell at all.
 shim_new
 launcher_pty >/dev/null 2>&1
 assert_contains "noterm:with-a-terminal-it-opens-a-shell" "cs193v-shell" "$(shim_log)"
-# The failure path inside the container has to print an exact `podman exec` line, and only
-# the launcher knows the container's name -- CS193V_INSTANCE may have suffixed it.
-assert_contains "noterm:passes-the-container-name-in" "CS193V_CONTAINER=" "$(shim_log)"
 
 # ─── the claim's terminal size is never degenerate  ────────────────────────────
 # `tmux new-session -d` takes the size as -x/-y and the claim exec has no tty to read it from, so
@@ -1105,6 +1124,70 @@ shim_new
 out="$(launcher_tty '\n' --reset-tunnel | strip_ansi)"
 assert_says "ack:a-verb-still-warns" "no container running" "$out"
 assert_says_not "ack:a-verb-does-not-stop-to-be-acknowledged" "Press ENTER to continue" "$out"
+
+# ─── leaving says one thing, once (#220) ───────────────────────────────────────
+# THE FAKE STANDS IN FOR tmux, and that is what makes this testable in the cheap lane at all.
+# exec_out is what podman-fake prints for the final `podman exec -it ... --attach` -- the one
+# exec whose output the launcher neither captures nor discards -- so setting it to `[exited]`
+# reproduces, byte for byte, the only thing a real tmux client writes on its way out. The erase
+# is a host-side row count and does not care who wrote the row, so a fake row is a fair test of
+# it. 60-container.sh holds up the other half: that a real client really does write that line.
+#
+# ARRANGED QUIET, copying the recipe above -- a working ssh and a freshly built image -- so the
+# ENTER gate does not eat the keystroke and no warning shares the screen with the line under test.
+shim_new
+shim_fake_ssh
+shim_set exec_out '[exited]'
+launcher --rebuild --no-cache >/dev/null 2>&1
+raw="$(launcher_tty 'exit\n')"
+screen="$(printf '%s' "$raw" | render_pty)"
+
+# THE VACUITY GUARD, and every negative below leans on it. A shim launch that never reached the
+# attach -- a refusal, a missing args file, a fake that stopped answering -- leaves a transcript
+# with no `[exited]` anywhere in it, and would pass "the line is erased" while proving nothing
+# whatsoever. So establish first that the line really was emitted.
+assert_contains "exit:the-clients-line-was-really-emitted" "[exited]" "$raw"
+# AND THAT IT IS GONE FROM THE SCREEN. Against render_pty, NEVER strip_ansi: strip_ansi deletes
+# the cursor move and the carriage return while keeping the text, so `[exited]` survives it
+# verbatim and this assertion would be red against a launcher doing exactly the right thing.
+assert_not_contains "exit:the-clients-line-is-erased" "[exited]" "$screen"
+# AND TOOK ONLY THAT ONE ROW, which the assertion above cannot tell you. The erase is
+# `ESC[1A \r ESC[J`, and ESC[J clears to the end of the SCREEN -- so an erase aimed one row too
+# HIGH still removes `[exited]` and quietly eats a row of real output instead. The negative
+# above would stay green through that. status.entering is the row immediately above the client's
+# line on a quiet launch, which makes its survival exactly a depth-of-one check.
+#
+# ESC[J is kept over ESC[K deliberately, and this is the assertion that pays for it: clearing to
+# end of screen survives a `[exited]` that wrapped, where end-of-line would leave a fragment.
+# The cost is that depth errors are invisible to the negative, so they are caught here instead.
+assert_says_key "exit:the-erase-takes-only-that-one-row" status.entering "$screen"
+# ONE LINE, and it is the last thing the student sees. Composed from both keys rather than
+# asserted by either: `done.` on its own is four characters that will match a great deal of
+# future prose, and the prefix on its own passes whether or not the row was ever finished.
+assert_eq "exit:the-last-line-a-student-sees" \
+          "$(msg_text status.exiting) $(msg_text status.exiting-done)" \
+          "$(printf '%s\n' "$screen" | grep -vE '^[[:space:]]*$' | tail -1)"
+# Said ONCE. Counted on the raw transcript, where a second print cannot hide underneath the
+# first the way it can on a screen.
+assert_eq "exit:the-exit-line-is-said-once" "1" \
+          "$(printf '%s\n' "$raw" | grep -cF "$(msg_text status.exiting)")"
+# And the older wording is gone from THIS path, which is the whole job of stop_container's
+# --quiet. The signal paths keep it; interrupt:the-signal-path-still-says-stopping covers that.
+assert_says_not_key "exit:the-old-line-is-gone-on-the-clean-path" status.stopping "$screen"
+
+# A TTY ON STDIN BUT NOT ON STDOUT, which is a shape a student reaches by running
+# `./cs193v > log` from their terminal: open_shell's refusal reads stdin, so the attach happens,
+# and the erase then must not write escapes into the file. Same guard and same failure as
+# cursor:no-escape-sequences-when-piped -- a log sent to course staff full of ESC[1A.
+#
+# The redirect is inside the string ptyrun hands to `/bin/sh -c`, which is the only way to get
+# these two fds pointing at different things through a pty. No shim_new: the quiet arrangement
+# above is what this needs too.
+printf 'exit\n' | PATH="$SHIM:$PATH" \
+    do_script 120 "'${LAUNCHER_DIR:-$REPO}/cs193v' > '$SHIM/piped.out' 2>&1" >/dev/null 2>&1
+piped="$(cat "$SHIM/piped.out" 2>/dev/null)"
+assert_says     "exit:the-piped-run-still-exited"   "$(msg_text status.exiting)" "$piped"
+assert_not_contains "exit:no-escapes-when-piped" "$(printf '\033')[1A" "$piped"
 
 # ─── malformed args files ──────────────────────────────────────────────────────
 shim_new

@@ -495,6 +495,25 @@ assert_contains     "msg:an-indented-hash-still-prints"       "an indented hash 
 assert_contains "msg:a-body-of-only-notes-reads-as-missing" "missing message" \
                 "$(MESSAGES="$msgtmp" msg hash.only 2>&1)"
 
+# AND THE TEST HELPER FOLLOWS THE SAME RULE, which is not a tidiness point but the one gap this
+# rule had. lib/assert.sh's msg_text builds the needle that assert_says_key searches an output
+# for, and it did NOT drop column-0 hashes -- so the first key to be given a staff note and
+# asserted by name searched a launcher's output for a paragraph of staff prose and reported the
+# message missing from a launcher that had printed it perfectly. Measured on status.stopping the
+# moment #220 put a note above it, and invisible until then because no commented key had ever
+# been asserted by name.
+#
+# ASSERTED AS AGREEMENT WITH THE RUNTIME rather than against a quoted string: the two are the
+# same rule, and what matters is that they cannot drift. Driven against the synthetic catalogue
+# above, so it holds whatever messages.txt happens to contain today.
+# The two ends are trimmed to match, because msg_text trims and _flatten does not -- that is
+# layout, not the rule under test. What is under test survives it: a msg_text that kept column-0
+# hashes would carry INVISIBLE into its side of this comparison and the runtime would not.
+msg_rt="$(_flatten "$(MESSAGES="$msgtmp" msg hash.note)")"
+msg_rt="${msg_rt# }"; msg_rt="${msg_rt% }"
+assert_eq "msg:the-test-helper-drops-staff-notes-too" \
+          "$msg_rt" "$(msg_text hash.note "$msgtmp")"
+
 # ─── the presentation knobs  (#221) ───────────────────────────────────────────
 # THE WHOLE SHARED FILE, not just the msg() carving above: these exercise note(), die()
 # and menu(), and sourcing this file is inert by contract (see its header), which is the

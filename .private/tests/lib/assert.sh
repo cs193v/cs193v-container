@@ -231,9 +231,18 @@ flattened output:              $hay" ;;
 # because the argument is what makes an assertion say which catalogue it means.
 msg_text() {                          # msg_text KEY [FILE] -> its literal prose, one flattened line
     local t
+    # COLUMN-0 HASHES ARE STAFF NOTES AND ARE NOT PROSE, exactly as msg() decides at runtime
+    # (#221 gave it that rule; keys:no-empty-bodies in 20-messages.sh is built on it). This
+    # helper did not follow, and the gap was invisible for as long as no commented key was
+    # asserted by name: a note above the text was folded INTO the needle, so assert_says_key
+    # searched the output for a paragraph of staff prose and reported the message missing from a
+    # launcher that had printed it perfectly. Measured on status.stopping the moment #220 put a
+    # note on it. Student-facing text that must start with a hash is written with a leading
+    # space, which is the same escape hatch msg() offers.
     t="$(awk -v k="[[$1]]" '
         $0 == k { found = 1; next }
         /^\[\[.*\]\]$/ { if (found) exit }
+        found && /^#/ { next }
         found { print }
     ' "${2:-$PRIVATE/messages.txt}")"
     # Trimmed at both ends: flattening a block that ends in a newline leaves a trailing space,
@@ -1049,7 +1058,7 @@ export TESTS_DIR PRIVATE REPO
 # tier can use them too. That is why the file has no logic in it.
 # shellcheck source=../../files/cs193v-strings.sh
 [ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
-export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
+export CS193V_TITLE CS193V_WELCOME
 
 # ─── userland portability ──────────────────────────────────────────────────────
 # UNCONDITIONALLY, unlike the strings file above: that one is a convenience and degrades to a
