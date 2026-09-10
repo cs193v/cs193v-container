@@ -40,11 +40,6 @@ SESSION=cs193v
 # the "fault in the container image" box below -- alarming, and wrong.
 RACE_LOST_STATUS=3
 
-# The container name, for the diagnostic instructions in the failure path. The launcher
-# passes it because CS193V_INSTANCE can suffix it and nothing inside the container can
-# work it out -- the hostname is `cs193v-development` regardless.
-CONTAINER="${CS193V_CONTAINER:-cs193v}"
-
 # A DEDICATED SOCKET, not tmux's default.
 #
 # It makes "the server cs193v-shell talks to" and "the server started with our locked-down
@@ -81,8 +76,6 @@ fail() {
     fi
     printf '\n  To collect a report to send them, on your own computer:\n'
     printf '\n      ./cs193v doctor\n'
-    printf '\n  And to get a plain shell in the container for a closer look:\n'
-    printf '\n      podman exec -it %s bash -l\n' "$CONTAINER"
     printf '\n'
     exit 1
 }
@@ -220,9 +213,22 @@ do_attach() {
         fail "tmux exited with status $rc without giving you a shell." "$(cat "$errfile" 2>/dev/null)"
     fi
     rm -f "$errfile"
-    # tmux has restored the host terminal from the alternate screen by now, so this lands on
-    # the student's own shell rather than in a pane that is disappearing.
-    cs193v-goodbye
+    # AND NOTHING PRINTS HERE (#220). The goodbye used to, on the reasoning that tmux has
+    # restored the host terminal from the alternate screen by now -- true, but so has tmux's own
+    # `[exited]` a moment earlier, and so does the launcher's stopping line a moment later.
+    # Three writers and three arrival times for one act of leaving, which is what the student
+    # complained about. The launcher says it once instead, and to do that it erases the row
+    # `[exited]` sits on. THAT ERASE COUNTS ROWS: anything printed between tmux's last line and
+    # this exec's exit gets wiped in its place, leaving tmux's line on screen. 10-static.sh
+    # asserts this tail stays empty for exactly that reason.
+    #
+    # WHICH MAKES THE EXIT STATUS `rm`'s, so it is stated instead. With the goodbye gone the last
+    # command in this body is that `rm -f "$errfile"`, and $errfile is /dev/null whenever mktemp
+    # failed -- a full or unwritable TMPDIR, which is #76's territory rather than a hypothetical.
+    # `rm -f /dev/null` as student cannot succeed, so a flawless session would have exited 1, the
+    # launcher would have read that as a failed attach, and the student would get a fault box and
+    # the old wording instead of the one line this issue is about.
+    return 0
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────────────────

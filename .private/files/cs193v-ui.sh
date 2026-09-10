@@ -10,9 +10,9 @@
 #     the launcher cannot degrade around, which is what the guard at the top of cs193v is for:
 #     a launcher with no box() cannot draw the box that would report the problem.
 #   * setup-git, and any future setup-*, source it from INSIDE the image at /etc/cs193v/ui.sh,
-#     the way cs193v-welcome and cs193v-goodbye already source /etc/cs193v/strings.sh. The
-#     container cannot see the checkout, so it has to be installed; the Containerfile does
-#     that and validates it with `bash -n` in the same layer.
+#     the way cs193v-welcome already sources /etc/cs193v/strings.sh. The container cannot see
+#     the checkout, so it has to be installed; the Containerfile does that and validates it
+#     with `bash -n` in the same layer.
 #   * course-install.sh -- the installer proper -- sources it out of the tree the bootstrap
 #     downloaded, at the same .private/files/cs193v-ui.sh the launcher uses, just under a
 #     mktemp directory instead of a checkout. THIS IS WHAT #221 CHANGED. install-cs193v.sh used
@@ -121,6 +121,33 @@ note() { printf '%s%s%s%s\n' "$NOTE_INDENT" "$C_DIM" "$*" "$C_OFF"; }
 # these look like failures to a caller or to `set -e` if this script ever gains it.
 cursor_hide() { [ -t 1 ] && printf '%s[?25l' "$ESC"; return 0; }
 cursor_show() { [ -t 1 ] && printf '%s[?25h' "$ESC"; return 0; }
+
+# ─── taking back the row above ─────────────────────────────────────────────────
+# For the one row this launcher does not write and cannot suppress: tmux's `[exited]`.
+#
+# THERE IS NO tmux OPTION FOR IT. The client's exit message is an unconditional
+# `printf("[%s]\n", client_exit_message())` in tmux's own client.c, guarded on nothing but
+# "was attached" and "has a reason" -- so no line in /etc/cs193v/tmux.conf can reach it, and
+# every reachable reason has a string. Rearranging the session lifetime only changes WHICH
+# string: detaching first says "detached (from session cs193v)", killing the server says
+# "server exited". Erasing it afterwards is the only option that does not rest on tmux's
+# internals, and it fails soft -- a terminal that ignores these leaves a stray line rather
+# than a blank screen.
+#
+# 1A THEN \r THEN 0J, and each of the three is chosen rather than convenient:
+#   * ESC[1A leaves the COLUMN alone, so the \r is what actually gets us to the left margin.
+#     Without it the erase would start wherever the cursor happened to sit.
+#   * ESC[J -- erase to end of SCREEN -- rather than ESC[K's end of line, so a message that
+#     wrapped onto a second row goes too. There is nothing below the cursor to lose: this only
+#     ever runs on the row after the last thing written to the terminal.
+#   * All three are sequences lib/assert.sh's render_pty models, which is what lets a test
+#     assert against the screen a student sees rather than the bytes that produced it. Its own
+#     comment records the hazard: 2J and 3J are deliberately NOT modelled, so an erase built
+#     from clean_break's clear would be asserted by a replayer that silently ignored it.
+#
+# `return 0` and the -t guard for the same reasons as the two above: piped output must carry no
+# escapes, and the test must not look like a failure to a caller.
+line_erase_above() { [ -t 1 ] && printf '%s[1A\r%s[J' "$ESC" "$ESC"; return 0; }
 
 # ─── the box ───────────────────────────────────────────────────────────────────
 # The STOP box, in display columns, corners included. 71 leaves a 67-column text field,

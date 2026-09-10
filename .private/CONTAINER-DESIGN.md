@@ -382,7 +382,15 @@ that *sound* protective actually are.
 - **You always know you are inside.** A title bar across the top of the terminal says
   `CS193V Development Environment` for as long as you are in the container, the window
   title says the same, and the prompt reads `student@cs193v-development`. Entering clears
-  the screen and shows a banner; leaving prints a goodbye.
+  the screen and shows a banner; leaving prints one line and hands the terminal back.
+
+  That last part was three lines until issue #220, arriving one at a time from three
+  different writers: tmux's own `[exited]`, a farewell printed from inside the container,
+  and the launcher's report that it was stopping. The launcher now erases tmux's line and
+  says it once — `Exiting the CS193V development environment...`, finished with ` done.`
+  on the same row when the container is down, so the pause in between is explained rather
+  than silent. Only the clean exit says that; a closed window and a Ctrl-C still report
+  that they are stopping, because nobody chose to leave.
 
   Getting that permanent title bar took a second attempt. Pinning a header with escape
   sequences alone was tried first and abandoned, because the only portable mechanism for it

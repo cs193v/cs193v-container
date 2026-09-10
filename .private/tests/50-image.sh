@@ -1104,15 +1104,28 @@ assert_contains "shell:profile.d-disables-ixon" "stty -ixon" \
                 "$(R 'cat /etc/profile.d/10-cs193v-shell.sh')"
 assert_contains "shell:bashrc-also-disables-ixon" "stty -ixon" "$(R 'cat /etc/bash.bashrc')"
 
-# ─── identity: hostname, banner, window title, goodbye  (#3, #4) ───────────────
-assert_ok "identity:welcome-banner-installed" \
-          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/20-cs193v-welcome.sh'"
-assert_eq "identity:welcome-banner-mode" "644" \
-          "$(R 'stat -c %a /etc/profile.d/20-cs193v-welcome.sh')"
-assert_ok "identity:bash_logout-installed" \
-          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.bash_logout'"
-assert_eq "identity:bash_logout-is-student-owned" "student" \
-          "$(R 'stat -c %U /home/student/.bash_logout')"
+# ─── identity: hostname, banner, window title  (#3, #4) ────────────────────────
+# NEITHER PROFILE.D HOOK NOR .bash_logout IS IN THE IMAGE ANY MORE (#220), and the absences are
+# asserted here rather than left to the static tier: 10-static.sh can only see that the recipe
+# stopped installing them, which is a different claim from the BUILT image not carrying them --
+# a layer cached from before the change would satisfy the first and fail the second.
+assert_ok "identity:no-welcome-banner-hook" \
+          sh -c "! $VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/profile.d/20-cs193v-welcome.sh'"
+# .bash_logout IS DELETED, NOT MERELY NOT-INSTALLED, and the difference is the whole assertion.
+# Ubuntu ships one in /etc/skel and copies it into every new home, so dropping our install line
+# uncovered it rather than removing it -- and it is not inert: at SHLVL 1 it runs
+# `/usr/bin/clear_console -q`, which this image has, so leaving a raw shell would wipe the
+# terminal and its scrollback. Ours had been overwriting it by accident all along. The
+# Containerfile now `rm -f`s both copies; this is the only tier that can see whether it worked.
+assert_ok "identity:no-bash-logout" \
+          sh -c "! $VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.bash_logout'"
+assert_ok "identity:no-skel-bash-logout" \
+          sh -c "! $VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/skel/.bash_logout'"
+# THE REASON THE TWO ABOVE MATTER, asserted rather than asserted-about: if clear_console ever
+# left this image, the uncovered skel file would be harmless and a future reader would be right
+# to wonder what the fuss was. While it is here, they are load-bearing.
+assert_ok "identity:clear_console-is-what-made-that-matter" \
+          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/bin/clear_console'"
 
 # The window title must name the course...
 assert_contains "identity:window-title-names-the-course" "CS193V Development Environment" \
@@ -1132,15 +1145,16 @@ assert_contains "identity:visible-prompt-still-shows-user-at-host" 'u@' \
     "$(R 'grep "^[[:space:]]*PS1=.\\\$.debian_chroot" /home/student/.bashrc | head -1')"
 
 # The banner text cannot come from messages.txt -- the container cannot see it -- so it has
-# to be in the image. Assert it really is. The text lives in the cs193v-welcome COMMAND;
-# /etc/profile.d/20-cs193v-welcome.sh only decides whether to call it.
+# to be in the image. Assert it really is. The text lives in /etc/cs193v/strings.sh and is
+# printed by the cs193v-welcome COMMAND, which cs193v-shell passes as the first window's
+# command. Nothing in /etc/profile.d calls it any more (#220).
 assert_contains "identity:banner-text-is-in-the-image" "$CS193V_WELCOME" \
                 "$(R 'cat /etc/cs193v/strings.sh')"
 
 # ─── tmux: the landing point ───────────────────────────────────────────────────
 # `./cs193v` runs cs193v-shell. Everything here is "is the image actually able to do that",
 # as distinct from 65-tmux.sh, which drives a real session and asserts on what it looks like.
-for cmd in cs193v-shell cs193v-welcome cs193v-goodbye; do
+for cmd in cs193v-shell cs193v-welcome; do
     assert_ok "tmux:$cmd-installed" \
               sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/local/bin/$cmd'"
     assert_eq "tmux:$cmd-mode" "755" "$(R "stat -c %a /usr/local/bin/$cmd")"

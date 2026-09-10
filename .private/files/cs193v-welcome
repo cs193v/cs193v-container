@@ -2,16 +2,21 @@
 #
 # CS193V entry banner: clear the screen, then say where you are.
 #
-# This is a COMMAND rather than inline shell because it has two callers:
+# ONE CALLER: the first tab of a new tmux session, from cs193v-shell. tmux runs the login shell
+# in EVERY tab, so printing this from /etc/profile.d unconditionally would clear the screen and
+# greet again every time a student pressed CTRL+T. cs193v-shell passes it as that window's
+# command instead, so it reaches tab one and nothing else.
 #
-#   1. the first tab of a new tmux session, from cs193v-shell -- the normal path a student
-#      takes. tmux runs the login shell in EVERY tab, so printing this from /etc/profile.d
-#      unconditionally would clear the screen and greet again every time a student pressed
-#      CTRL+T. cs193v-shell passes it as that window's command instead, so it reaches tab one
-#      and nothing else.
-#   2. /etc/profile.d/20-cs193v-welcome.sh, for a shell opened outside tmux -- which is
-#      `podman exec -it cs193v bash -l`, the documented path for scripts and for
-#      diagnosing a container whose tmux will not start.
+# IT HAD A SECOND CALLER UNTIL #220: /etc/profile.d/20-cs193v-welcome.sh, for a shell opened
+# outside tmux -- `podman exec -it cs193v bash -l`, which used to be described here as the
+# documented path for scripts and for diagnosing a container whose tmux will not start. Nothing
+# documents it now. A raw login shell has no title bar, no tab bar and none of the copy/paste
+# work #122, #123 and #133 paid for, so a student sent there is in an environment the course
+# cannot support; a student whose container will not start needs course staff instead. Staff
+# still use it, and staff do not need to be greeted.
+#
+# It stays a COMMAND rather than becoming inline shell in cs193v-shell, even with one caller
+# left: the text belongs next to /etc/cs193v/strings.sh, not inside a tmux argument.
 #
 # WHY THE TEXT IS HARD-CODED HERE and not in messages.txt, unlike every other
 # student-facing string in this project: this runs INSIDE the container, and the container
