@@ -58,6 +58,18 @@ shim_set() {                          # shim_set KEY VALUE
 
 shim_touch() { : > "$SHIM/$1"; }      # for flag-style keys like `hang`
 
+# The staged watcher stream (podman-fake's watch_out). A helper rather than shim_set, which
+# writes with `printf '%s'` and so cannot carry the newlines a stream is made of.
+#
+# watch_alive IS TRUNCATED HERE, not by the fake: the fake appends, and a test that read a
+# heartbeat left by the PREVIOUS scenario would be proving that scenario's writer was alive.
+shim_watch() {                        # shim_watch LINE...
+    local l
+    : > "$SHIM/watch_out"
+    for l in "$@"; do printf '%s\n' "$l" >> "$SHIM/watch_out"; done
+    : > "$SHIM/watch_alive"
+}
+
 shim_log()  { cat "$SHIM/argv.log" 2>/dev/null; }
 # What the installer WOULD have run as root, from the most recent installer_host run.
 sudo_log()  { cat "$(cat "$SHIM_LAST" 2>/dev/null)/sudo.log" 2>/dev/null; }

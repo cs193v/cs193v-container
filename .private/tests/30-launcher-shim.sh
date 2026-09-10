@@ -20,7 +20,20 @@ set -u
 # BSD script cannot deliver keystrokes and macOS has no GNU one to install -- so demanding it would
 # refuse a machine over a tool the suite does not touch. ptyrun needs python3, which the preflight
 # in run-tests.sh checks for every tier.
-trap 'shim_cleanup' EXIT
+# THE SUPERVISOR IS REAPED BEFORE THE DIRECTORIES GO, and shim_cleanup cannot do it: it
+# rm -rf's, it kills nothing, and the supervisor section below backgrounds a real
+# `cs193v --dev-supervise` whose fake watcher would otherwise outlive this run. By recorded
+# pid only -- a `pkill -f` here would be machine-wide, which lib/portable.sh has a scar about.
+SUP_PIDS=''
+sup_reap() {
+    local p
+    for p in $SUP_PIDS; do kill "$p" 2>/dev/null || true; done
+    SUP_PIDS=''
+    # ...and the fake watchers with them. A stalling one is asleep, not writing, so killing
+    # the supervisor gives it no EPIPE to notice; removing the file that armed it does.
+    rm -f "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/watch_out 2>/dev/null || true
+}
+trap 'sup_reap; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
 # ordinary here. See sweep_stale_tmpdirs in lib/assert.sh for the rest of the reasoning.
 record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
@@ -2290,3 +2303,142 @@ shim_new
 shim_set rootless true
 launcher doctor >/dev/null 2>&1
 assert_eq "doctor:asks-podman-info-no-more-often-than-before" "2" "$(shim_count '^info ')"
+
+# ─── the port supervisor's silence tolerance  (#244) ───────────────────────────
+# THE ONE THING NOTHING HERE HAS EVER PRODUCED IS A GAP. podman-fake's watcher answers the
+# handshake, sends one empty frame and closes, deliberately -- so sup_loop's read has never
+# timed out in this suite, TUNNEL_SUP_SILENCE_MAX has never been reached, and a branch that
+# could not execute on macOS at all survived every run. MANUAL.md §6.1 knew: it heads that
+# paragraph "AND THE PORT SUPERVISOR, WHICH THIS IS THE ONLY PLACE TO TEST", and the place in
+# question is a laptop asleep for an hour.
+#
+# DRIVEN AS `--dev-supervise`, NOT THROUGH A LAUNCH, which cs193v's own dispatch comment
+# sanctions ("a verb rather than an inline subshell ... so `ps` shows something a human can
+# recognise"). Three things follow that a launch cannot give: $! IS the supervisor, because
+# verb_supervise reads `< <(...)` and never a pipeline, so the reap needs no walk of the
+# process tree (10-static.sh bans pgrep -P); its stderr is a file we name rather than a log
+# under a hashed TUNNEL_ID; and there is no nohup'd process left over per scenario.
+#
+# THE PORTS ARE CLASS v6lo ON PURPOSE. tunnel_dyn_classify refuses that class before any ssh
+# is run, so sup_tick still runs end to end and still reaches sup_publish -- which is the
+# observable -- without shim_fake_ssh needing to answer `-O forward`, which it does not.
+sup_pidfile() { launcher --dev-tunnel | do_awk -F'\t' '$1 == "suppid" { print $2 }'; }
+sup_up()      { [ -s "$SUP_PIDFILE" ]; }
+sup_start() {                         # sup_start OUTFILE
+    PATH="$SHIM:$PATH" "${LAUNCHER_DIR:-$REPO}/cs193v" --dev-supervise >"$1" 2>&1 </dev/null &
+    SUP_PID=$!
+    SUP_PIDS="$SUP_PIDS $SUP_PID"
+}
+# wait_until runs its command directly, so anything with a redirect wants a function
+# (lib/assert.sh). -F and -- because the needles carry '=' and ':' and one day will carry a dash.
+sup_published() { grep -qF -- "$1" "$SHIM/argv.log" 2>/dev/null; }
+# How many seconds the fake spent saying nothing, one mark per second. Counting it rather than
+# testing it for emptiness is what turns the LENGTH of the gap from an assumption about the
+# fake into an assertion about what the fake actually did.
+sup_heartbeat() { wc -c < "$SHIM/watch_alive" 2>/dev/null | do_tr -d ' '; }
+
+# ─── a gap shorter than the tolerance must not end the loop ────────────────────
+shim_new
+SUP_PIDFILE="$(sup_pidfile)"
+assert_ne "supervisor:the-pidfile-path-was-readable" "" "$SUP_PIDFILE"
+# 7s: longer than TUNNEL_SUP_SILENCE (5) so a timeout is certain, far short of the 30 the
+# tolerance allows. The second frame carries a port the first did not, so a supervisor that
+# merely SURVIVED but stopped parsing cannot pass.
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '21500:v6lo' 'END' \
+           'STALL 7' \
+           'BEGIN 1' '8123:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-gap.out"
+assert_ok "supervisor:the-loop-started" wait_until 10 sup_up
+
+# THE CONTROL, AND IT COMES FIRST. Everything after it is an assertion a BROKEN INSTRUMENT
+# PASSES: a fake that stopped matching the watcher arm, a handshake the gate refused, a
+# supervisor that never reached sup_loop -- all three publish nothing after the gap either,
+# and all three read exactly like the bug. See 70-sighup.sh for the same ordering.
+if wait_until 15 sup_published 'refused=21500:v6lo'; then
+    pass "supervisor:the-frame-before-the-gap-was-published"
+else
+    fail "supervisor:the-frame-before-the-gap-was-published" \
+"the supervisor never published the pre-gap frame, so nothing below is about the gap.
+argv.log:
+$(cat "$SHIM/argv.log" 2>/dev/null)
+its output:
+$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+fi
+
+# THE POSITIVE EVENT, which is what lets this be a wait rather than a fixed sleep: a port that
+# appears only AFTER the gap being published proves the loop read a frame on the far side of it.
+# "the supervisor is still alive" would have been the non-event that keeps its sleep.
+if wait_until 25 sup_published 'refused=8123:v6lo'; then
+    pass "supervisor:a-frame-gap-does-not-end-the-loop"
+else
+    fail "supervisor:a-frame-gap-does-not-end-the-loop" \
+"a 7s gap ended the supervisor, against a documented tolerance of 30s (#244).
+its output:
+$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+fi
+# THE INSTRUMENT'S OWN ALIBI. Silence and a closed stream are identical from the reading end,
+# so a fake that quietly stopped stalling would make the assertion above pass for the wrong
+# reason -- measured: neuter the stall and it passes. The heartbeat is the only thing that
+# says the writer was running throughout, and the count is what says for HOW LONG: five marks
+# is TUNNEL_SUP_SILENCE, below which there was no gap worth the name and nothing was proved.
+GAP_HB="$(sup_heartbeat)"
+record "supervisor:seconds-of-silence-tolerated" "$GAP_HB"
+if [ "${GAP_HB:-0}" -ge 5 ]; then
+    pass "supervisor:the-watcher-was-alive-across-the-whole-gap"
+else
+    fail "supervisor:the-watcher-was-alive-across-the-whole-gap" \
+"the fake stalled for ${GAP_HB:-0}s, not the 5+ that TUNNEL_SUP_SILENCE needs -- so the
+assertion above passed without a gap having happened at all."
+fi
+assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" \
+                    "stream ended" "$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+assert_not_contains "supervisor:a-tolerated-gap-is-not-published-as-broken" \
+                    "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+sup_reap
+
+# ─── ...and a silence past the tolerance must ──────────────────────────────────
+# The other half, and the reason it is worth its ~32s: without it, nothing distinguishes "the
+# tolerance is generous" from "the tolerance is infinite", and TUNNEL_SUP_SILENCE_MAX would
+# still never execute. 32 > TUNNEL_SUP_SILENCE x TUNNEL_SUP_SILENCE_MAX, with the writer alive
+# throughout -- so this is silence, not a stream that ended.
+shim_new
+SUP_PIDFILE="$(sup_pidfile)"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '21500:v6lo' 'END' \
+           'STALL 32'
+sup_start "$SHIM/sup-silent.out"
+assert_ok "supervisor:the-loop-started-again" wait_until 10 sup_up
+if wait_until 15 sup_published 'refused=21500:v6lo'; then
+    pass "supervisor:the-frame-before-the-silence-was-published"
+else
+    fail "supervisor:the-frame-before-the-silence-was-published" \
+"the supervisor never published the pre-silence frame, so nothing below is about the silence."
+fi
+# BOUNDED BY THE STREAM, not by trust: the staged stall is 32s and nothing follows it, so even
+# a supervisor that had stopped honouring the threshold would reach EOF and exit a second later.
+# A wait here cannot become the hang that a suite with no per-suite ceiling could not survive --
+# and the status assertion below is what tells the two endings apart.
+wait "$SUP_PID"; SUP_RC=$?
+SILENT_OUT="$(cat "$SHIM/sup-silent.out" 2>/dev/null)"
+# ...AND FOR LONG ENOUGH TO BE THE SILENCE, not merely present. 20 of the 30 seconds is the
+# floor rather than 30 exactly: the supervisor gives up on its sixth timeout and this is read
+# after it has, so the last mark or two are a race with its exit and worth nothing.
+SILENT_HB="$(sup_heartbeat)"
+record "supervisor:seconds-of-silence-before-it-gave-up" "$SILENT_HB"
+if [ "${SILENT_HB:-0}" -ge 20 ]; then
+    pass "supervisor:the-watcher-was-still-running-when-it-gave-up"
+else
+    fail "supervisor:the-watcher-was-still-running-when-it-gave-up" \
+"the fake stalled for ${SILENT_HB:-0}s, so what ended the supervisor was not 30s of silence."
+fi
+assert_eq  "supervisor:a-silence-past-the-tolerance-exits-nonzero" "1" "$SUP_RC"
+# THE WORDING IS LOAD-BEARING, not decoration. The protocol-violation branch beside this one
+# also sets broken, also publishes and also returns 1 -- so the status and the state word alone
+# are satisfied by a completely different failure, which is exactly what a fake that stopped
+# stalling produces. Only the message says WHICH ending this was.
+assert_says "supervisor:it-names-the-silence-it-measured" "no frames for 30s" "$SILENT_OUT"
+assert_says "supervisor:it-says-the-watcher-has-stopped" "the watcher has stopped" "$SILENT_OUT"
+assert_ok  "supervisor:it-publishes-broken-on-the-way-out" sup_published 'state=broken'
+sup_reap

@@ -1558,30 +1558,36 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
 # The loop itself. Reads the watcher's frames through the host-side gate in cs193v-ui.sh, which is
 # the only place bytes the container controls are parsed.
 sup_loop() {
-    local line rc
     tunnel_dyn_read_floor
     dynports_reset
     # -t: the ONE wall-clock measurement in the design. Six consecutive timeouts is thirty seconds
     # of silence -- thirty missed frames -- and only a deadlocked watcher can produce that, since
     # a dead one closes the pipe and a lid close contributes at most ONE timeout (a frozen read
     # returns once; the next call starts a fresh timer on a woken machine).
+    #
+    # WHICH OF THE THREE IT WAS IS dynports_read's ANSWER, NOT read's, and that distinction is the
+    # whole of #244. Asked directly, `read -t` returns >128 on a timeout from bash 4.0 on and 1
+    # on the 3.2 macOS ships -- where a closed stream returns 1 as well. So the timeout arm below
+    # was unreachable on every Mac, this tolerance was dead code, and the first five-second gap
+    # in the frames was read as the watcher having gone away: one laptop waking ended dynamic
+    # port forwarding for the rest of the session, silently, with nothing to restart it.
+    # cs193v-ui.sh carries the measurement and the reason the read lives beside the gate.
     local ready=''
     while :; do
-        IFS= read -r -t "$TUNNEL_SUP_SILENCE" -n 64 line
-        rc=$?
-        if [ "$rc" -gt 128 ]; then
-            SUP_SILENT=$(( SUP_SILENT + 1 ))
-            if [ "$SUP_SILENT" -ge "$TUNNEL_SUP_SILENCE_MAX" ]; then
-                SUP_STATE=broken
-                sup_log "no frames for $(( TUNNEL_SUP_SILENCE * TUNNEL_SUP_SILENCE_MAX ))s -- the watcher has stopped"
-                sup_publish ''
-                return 1
-            fi
-            continue
-        fi
-        [ "$rc" -ne 0 ] && { sup_log "the watcher's stream ended"; return 0; }
+        dynports_read "$TUNNEL_SUP_SILENCE"
+        case "$?" in
+            1) SUP_SILENT=$(( SUP_SILENT + 1 ))
+               if [ "$SUP_SILENT" -ge "$TUNNEL_SUP_SILENCE_MAX" ]; then
+                   SUP_STATE=broken
+                   sup_log "no frames for $(( TUNNEL_SUP_SILENCE * TUNNEL_SUP_SILENCE_MAX ))s -- the watcher has stopped"
+                   sup_publish ''
+                   return 1
+               fi
+               continue ;;
+            2) sup_log "the watcher's stream ended"; return 0 ;;
+        esac
         SUP_SILENT=0
-        dynports_line "$line"
+        dynports_line "$DYNPORTS_LINE"
         case "$?" in
             0) [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
             1) sup_tick "$DYNPORTS_FRAME" ;;

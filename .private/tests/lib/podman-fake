@@ -70,6 +70,16 @@
 #   claim_out        what `podman exec ... --claim` prints   []
 #   top_out          what `podman top` prints               []
 #   port_out         what `podman port` prints              []
+#   watch_out        the WHOLE `cs193v-portwatch --watch` stream, one line of protocol
+#                    per line [absent = the handshake, one empty frame, then EOF]. `STALL N`
+#                    is the only directive: N seconds of silence with the writer STILL ALIVE,
+#                    which is the gap a woken Mac produces and the one thing the default
+#                    cannot express. End a stream with a long STALL to hold it open, so a
+#                    verdict read afterwards cannot be blamed on the stream having ended.
+#   watch_alive      WRITTEN BY THE FAKE, not read: one byte per second spent in a STALL. It
+#                    is how a test proves the writer was RUNNING while the host saw nothing --
+#                    silence and EOF are identical from the reading end, and this is the only
+#                    witness that says which one a test actually produced.
 
 SHIM="${CS193V_SHIM:?podman-fake needs CS193V_SHIM}"
 
@@ -396,6 +406,38 @@ level=error msg="cannot set up pasta"' >&2
             # tunnel_sup_start tests the READY file before liveness, so a supervisor that
             # handshakes and then exits still counts as started and warns about nothing.
             *cs193v-portwatch*--watch*)
+                # ...AND A STAGED STREAM IS OPT-IN, BEHIND A FILE, for exactly the reason
+                # above: the default has to stay the default. This is the build_out /
+                # build_delay shape -- a file of lines played back one at a time -- with one
+                # directive, because a GAP in the frames is the only thing #244 could be
+                # reproduced with and nothing else here can produce one.
+                if [ -f "$SHIM/watch_out" ]; then
+                    while IFS= read -r wl; do
+                        case "$wl" in
+                            'STALL '*)
+                                # A HEARTBEAT WHILE IT SAYS NOTHING. A test asserting a gap was
+                                # TOLERATED is asserting about silence, and silence is also what
+                                # a fake that quietly stopped stalling produces -- so the writer
+                                # leaves a mark per second to prove it was still here.
+                                #
+                                # AND IT STOPS WHEN watch_out GOES, which is run_hold's
+                                # reasoning: a file the test can remove beats a duration it
+                                # has to guess. Without it a 30-second stall outlives the
+                                # supervisor that was reading it -- nothing writes to the
+                                # pipe during a stall, so there is no EPIPE to end it -- and
+                                # a fake left running per scenario is what the note above
+                                # says hung this suite.
+                                wn=0
+                                while [ "$wn" -lt "${wl#* }" ] && [ -f "$SHIM/watch_out" ]; do
+                                    printf '.' >> "$SHIM/watch_alive"
+                                    sleep 1
+                                    wn=$(( wn + 1 ))
+                                done ;;
+                            *)  printf '%s\n' "$wl" ;;
+                        esac
+                    done < "$SHIM/watch_out"
+                    exit 0
+                fi
                 echo 'cs193v-portwatch 1'; echo 'BEGIN 0'; echo 'END'; exit 0 ;;
         esac
         case "${LASTARG:-}" in
