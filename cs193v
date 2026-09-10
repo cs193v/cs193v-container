@@ -628,8 +628,8 @@ BUILD_NOTE="$BUILD_LOG.note"
 # it earns its keep on a build that HANGS -- the one failure $BUILD_LOG cannot be read for
 # afterwards, because a bar shows nothing and the log is never written.
 #
-# NOT CS193V_BUILD_RAW ANY MORE, because course-install.sh's own progress block is about to read
-# the same variable (#219). One switch turns off every box staff can be shown; two would mean picking the
+# NOT CS193V_BUILD_RAW ANY MORE, because course-install.sh's own progress block reads the same
+# variable (#219). One switch turns off every box staff can be shown; two would mean picking the
 # wrong one and losing the output you were trying to read. The LOCAL name stays BUILD_RAW, since
 # in this file it gates exactly one thing.
 BUILD_RAW="${CS193V_SETUP_RAW_LOG:-}"

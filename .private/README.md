@@ -532,8 +532,8 @@ build *reports itself*, and remember that piping the default (`| tee`, CI) delib
 the bar to one plain line per step.
 
 **One switch, two blocks, which is why it is not called `CS193V_BUILD_RAW` any more** (issue
-#219). `course-install.sh` is about to draw the same block around the host package manager and
-read the same variable, so setting it will get you apt's words *and* podman's. Two switches would mean
+#219). `course-install.sh` draws the same block around the host package manager and reads the
+same variable, so setting it gets you apt's words *and* podman's. Two switches would mean
 picking the wrong one and losing the output you were trying to read — and staff debugging an
 install want both streams anyway. Each script keeps a local name that says what it gates there:
 `BUILD_RAW` in the launcher, `SETUP_RAW` in the installer.
