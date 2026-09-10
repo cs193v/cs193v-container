@@ -464,37 +464,28 @@ if %errorlevel% neq 0 goto provisionfailed
 "%SYS32%\wsl.exe" -d %DISTRO% -e test -O /home/%LINUX_USER%
 if %errorlevel% neq 0 goto provisionfailed
 
-:: %STAGE2% is left behind deliberately -- see the success message below. It is root-owned and
-:: world-readable, which is why this call can read it as %LINUX_USER% without being root itself.
-"%SYS32%\wsl.exe" -d %DISTRO% -e bash %STAGE2%
+:: %STAGE2% IS LEFT BEHIND, and nothing here removes it. The closing message used to name
+:: it; that message moved into the installer's own catalogue (#218) and dropped the line,
+:: because a student has no second use for this copy. It is root-owned and world-readable,
+:: which is why the call below can read it as %LINUX_USER% without being root itself.
+
+:: CS193V_WINDOWS IS WHY THERE IS ONE CLOSING MESSAGE AND NOT TWO (#218). A block of
+:: instructions used to be echoed from here after this call returned -- straight after the
+:: UNIX sign-off course-install.sh had already printed inside WSL. Two closing messages,
+:: disagreeing, and the first of them wrong because it omits the `wsl -d` step entirely.
+:: The variable makes course-install.sh print the Windows sign-off INSTEAD of the UNIX one,
+:: which also fixes the half this file could never have got right: it hardcoded ~/cs193v and
+:: a UNC path under home/%LINUX_USER%, and choose_dir lets a student install anywhere.
+::
+:: env, AND ONE BARE TOKEN, exactly as the root pass above passes CS193V_PROVISION. Nothing
+:: passed to wsl.exe needs quoting and 25-installer.sh asserts that, so the value stays 1.
+"%SYS32%\wsl.exe" -d %DISTRO% -e env CS193V_WINDOWS=1 bash %STAGE2%
 set "RC=%errorlevel%"
 
 echo.
 :: A string compare, not `if errorlevel`: stage 2 can exit -1, which prints as 4294967295
 :: and is a failure, but is NOT caught by a `>=` test.
 if not "%RC%"=="0" goto stage2failed
-
-echo   ------------------------------------------------------------------
-echo   Done. From now on you work inside the %DISTRO% environment:
-echo.
-echo       wsl -d %DISTRO%
-echo       cd ~/cs193v
-echo       ./cs193v
-echo.
-echo   You can also open %DISTRO% from the Windows Terminal dropdown.
-echo   Your project files are reachable from Windows at:
-echo       \\wsl.localhost\%DISTRO%\home\%LINUX_USER%\cs193v\projects
-echo.
-echo   Your Linux account in there is called %LINUX_USER% and has no
-echo   password, so nothing will ever ask you for one. If you ever need
-echo   to install something in the environment itself, this gets you in
-echo   as its administrator:
-echo       wsl -d %DISTRO% -u root
-echo.
-echo   The setup script this downloaded is still in %DISTRO%, at
-echo       %STAGE2%
-echo   ------------------------------------------------------------------
-echo.
 pause
 exit /b 0
 
