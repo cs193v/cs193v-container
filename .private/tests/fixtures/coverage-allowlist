@@ -23,15 +23,23 @@
 # allowlist stops being read. Checked against hit.lines rather than reasoned about.
 #
 # So what is left is the pair that no fake can stand in for.
-406  txt err.curl-missing-mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken. The anchor is the CALL now rather than the sentence: since issue #116 the words are in the catalogue, which the denominator no longer counts, so the executable line here is the die that fetches them
-619  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
+378  msg err.curl-missing-mac -- no tier can reach it. The shim tier PREPENDS to PATH so it cannot hide a real /usr/bin/curl, and the machine that CAN have curl removed is Linux, where this arm is not taken. The anchor is the CALL now rather than the sentence: since issue #116 the words are in the catalogue, which the denominator no longer counts, so the executable line here is the die that fetches them
+591  sudo installer -pkg -- needs a Mac; the pkg install itself, which no fake stands in for
 #
-# RENUMBERED BY #221, from 655 and 858, when the logic moved into course-install.sh, and the
-# second entry again from 609 to 620 and then to 619, as survey's comments grew and shrank. The anchors are what
-# made both safe: each entry names the text that must be ON its line, so a number that landed
-# somewhere else FAILS rather than quietly excusing the wrong statement -- which is not a
-# hypothetical, it is how the second renumbering was found, in a run whose only other red was
-# nothing at all.
+# RENUMBERED FIVE TIMES DURING #221 -- 655/858 when the logic moved into course-install.sh, then
+# twice more as survey's comments grew and shrank, and finally to 378/591 when txt() and the
+# 506-line catalogue left the file. The first entry's ANCHOR TEXT changed too, from
+# `txt err.curl-missing-mac` to `msg`, when the installer stopped carrying its own accessor.
+#
+# EVERY ONE OF THOSE WAS CAUGHT BY THE ANCHOR, which is the point of the format: each entry
+# names the text that must be ON its line, so a number that lands somewhere else FAILS rather
+# than quietly excusing the wrong statement. Not a hypothetical -- it is how all five were
+# found, each time in a run whose only other red was nothing at all.
+#
+# AND FIVE TIMES IS AN ARGUMENT FOR DERIVING THE NUMBER FROM THE ANCHOR rather than checking it
+# against one. The anchor already identifies the statement uniquely; the number is a cache of
+# where it was, and a cache nobody can update automatically. Left as a follow-up rather than
+# done here, because it changes what the gate reads.
 #
 # curl's retry loop is NOT here: it is not reachable from a file:// tarball and
 # would need an HTTP server in the fixture, so it is RECORDED as uncovered by the gate rather

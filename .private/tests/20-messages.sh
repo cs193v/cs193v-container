@@ -79,29 +79,31 @@ empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
 assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 
 # ─── the installer's own catalogue ─────────────────────────────────────────────
-# ISSUE #116. install-cs193v.sh carries its text INSIDE itself, in a heredoc at the foot of the
-# file, because it sources nothing and messages.txt does not exist until the download step
-# succeeds. Same [[key]]/{{PLACEHOLDER}} format, same reconciliation, different accessor.
+# ISSUE #116, FINISHED BY #221. The installer's prose used to live INSIDE the script, in a heredoc
+# at the foot of the file reached by a txt() that was a near-copy of msg() -- because the
+# installer sourced nothing and no catalogue existed until the download succeeded. Downloading
+# first removed both halves of that: the prose is course-install-messages.txt, and the reader is
+# the same msg() the launcher and setup-git use, with MESSAGES pointing at a different file.
 #
-# THE ACCESSOR IS `txt`, NOT `msg`, and that is not a taste call: the orphan check above greps
-# `msg +<key>` in this very file against messages.txt, so an installer named `msg` would report
-# all of its own keys as missing from a catalogue they were never in.
+# SO THIS BLOCK GOT SMALLER RATHER THAN MOVING. There is no heredoc to carve, no second accessor
+# to extract, and the runtime checks below drive THE reader rather than a copy of it -- which is
+# the point: a txt() that had drifted from msg() would have passed its own tests.
 INST="$PRIVATE/course-install.sh"
-inst_cat="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" "$INST" | sed '1d;$d')"
-assert_ne "itext:the-catalogue-is-there" "" "$inst_cat"
+ICAT="$PRIVATE/course-install-messages.txt"
+assert_file "itext:the-catalogue-is-there" "$ICAT"
 
-printf '%s\n' "$inst_cat" | grep -oE '^\[\[[a-z0-9._-]+\]\]' | do_tr -d '[]' \
+grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | do_tr -d '[]' \
     | LC_ALL=C sort -u > "$TMP/idefined"
 # EVERY CALL FORM, and the nested one is why this is a grep for the word rather than a match on
-# the line: need's label composes `$(txt need.podman-linux.and ...)` INSIDE another txt call, so
+# the line: need's label composes `$(msg need.podman-linux.and ...)` INSIDE another msg call, so
 # a one-per-line pattern would never see the inner key.
 #
-# THE LEADING [^A-Za-z0-9_.] IS NOT DECORATION. A bare `txt +` also matches the phrase
-# "messages.txt for its early output" in this script's own header -- which registered `for` as a
-# key in use and turned keys:none-missing red for a sentence. Whole-line comments go first for
-# the same class of reason: prose about the catalogue is not a call into it.
+# THE LEADING [^A-Za-z0-9_.] IS NOT DECORATION. A bare `msg +` also matches prose like
+# "messages.txt for its early output" -- which registered `for` as a key in use and turned a
+# reconciliation red for a sentence. Whole-line comments go first for the same class of reason:
+# prose about the catalogue is not a call into it.
 sed 's/^[[:space:]]*#.*//' "$INST" \
-    | grep -ohE '[^A-Za-z0-9_.]txt +[a-z0-9._-]+' | awk '{print $NF}' \
+    | grep -ohE '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' | awk '{print $NF}' \
     | LC_ALL=C sort -u > "$TMP/iused"
 
 iorphans="$(LC_ALL=C comm -23 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
@@ -109,40 +111,36 @@ imissing="$(LC_ALL=C comm -13 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
 assert_eq "itext:no-orphans"   "" "$(printf '%s' "$iorphans" | sed 's/ *$//')"
 assert_eq "itext:none-missing" "" "$(printf '%s' "$imissing" | sed 's/ *$//')"
 
-idupes="$(printf '%s\n' "$inst_cat" | grep -oE '^\[\[[a-z0-9._-]+\]\]' | LC_ALL=C sort | uniq -d \
-          | do_tr '\n' ' ')"
+idupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
 assert_eq "itext:no-duplicates" "" "$(printf '%s' "$idupes" | sed 's/ *$//')"
 
-iempty="$(printf '%s\n' "$inst_cat" \
-    | awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
-           /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}')"
+iempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
+               /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$ICAT")"
 assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
 
-# A MISSING KEY MUST BE LOUD. txt() is what die() reaches for, so a typo'd key that returned
+# A MISSING KEY MUST BE LOUD. msg() is what die() reaches for, so a typo'd key that returned
 # nothing would draw an EMPTY red STOP box at the moment a student most needs the diagnosis --
-# ERRORS.md records exactly that failure for the launcher's msg(). Run for real, out of the
-# file, rather than reasoned about.
-{
-    sed -n '/^text_catalogue() {$/,/^}$/p' "$INST"
-    sed -n '/^txt() {$/,/^}$/p'           "$INST"
-} > "$TMP/itxt.sh"
-if [ "$(grep -c '^txt() {$' "$TMP/itxt.sh")" = 1 ]; then
-    pass "itext:txt-is-extractable"
-else
-    fail "itext:txt-is-extractable" "could not carve TEXT and txt() out of course-install.sh"
-fi
-imiss="$(bash -c '. "$1"; txt no.such.key' _ "$TMP/itxt.sh" 2>&1)"
+# ERRORS.md records exactly that failure. Run for real, against the real file.
+#
+# THROUGH THE CARVED msg() ABOVE, with MESSAGES repointed in a subshell so this file's own
+# launcher-facing MESSAGES is untouched. One reader, two catalogues, which is what the split
+# bought and what these four cases now demonstrate rather than assume.
+imsg() { bash -c 'MESSAGES="$2"; . "$1"; shift 2; msg "$@"' _ "$TMP/msg.sh" "$ICAT" "$@" 2>&1; }
+imiss="$(imsg no.such.key)"
 assert_says "itext:a-missing-key-says-which"  "no.such.key" "$imiss"
 assert_fail "itext:a-missing-key-is-an-error" \
-            bash -c '. "$1"; txt no.such.key >/dev/null 2>&1' _ "$TMP/itxt.sh"
-# ...and a real one renders, or the check above would pass against a txt() that always failed.
-ihit="$(bash -c '. "$1"; txt err.podman-mute' _ "$TMP/itxt.sh" 2>&1)"
-assert_says "itext:a-real-key-renders" "is not answering" "$ihit"
+            bash -c 'MESSAGES="$2"; . "$1"; msg no.such.key >/dev/null 2>&1' _ "$TMP/msg.sh" "$ICAT"
+# ...and a real one renders, or the check above would pass against a msg() that always failed.
+assert_says "itext:a-real-key-renders" "is not answering" "$(imsg err.podman-mute)"
 # Placeholders really substitute, including into a multi-line value -- err.podman-old-mac
 # interpolates {{HOW}}, which is itself two catalogue entries deep.
-isub="$(bash -c '. "$1"; txt err.subuid-failed "USER=someone"' _ "$TMP/itxt.sh" 2>&1)"
+isub="$(imsg err.subuid-failed "USER=someone")"
 assert_says     "itext:a-placeholder-is-filled-in"  "for someone." "$isub"
 assert_says_not "itext:no-placeholder-is-left-over" "{{" "$isub"
+# AND THE STAFF-NOTE RULE HOLDS ON THIS FILE TOO, which matters more here than anywhere: the
+# installer's notes were comments in a shell heredoc and are now column-0 hashes in a catalogue,
+# so a reader that printed them would put maintainer prose in front of a student mid-install.
+assert_says_not "itext:a-column-0-hash-is-not-printed" "#" "$(imsg welcome)"
 
 # ─── the container's own catalogue ─────────────────────────────────────────────
 # setup-git-messages.txt is the same format read by the same msg(), and gets the same three
@@ -276,9 +274,18 @@ python3 - "$REPO" "$PRIVATE" <<'PY' > "$TMP/ph"
 import re, sys, os
 repo, private = sys.argv[1], sys.argv[2]
 
+# THREE CATALOGUES, ONE PER CONSUMER, and the first entry used to be wrong in a way that read as
+# coverage: it paired course-install.sh with the LAUNCHER's messages.txt, so every installer key
+# was checked against a file it was never in. The installer said `txt` and this pattern matches
+# `msg`, so the arm contributed no call sites at all and the mistake was invisible -- a vacuous
+# arm rather than a red one. Since #221 the installer has its own catalogue and reads it with the
+# same msg(), so it gets an entry of its own and the pairing is now checkable.
 CATALOGUES = (
     (os.path.join(private, "messages.txt"),
-     (os.path.join(repo, "cs193v"), os.path.join(private, "course-install.sh")),
+     (os.path.join(repo, "cs193v"),),
+     r'\bmsg\s+'),
+    (os.path.join(private, "course-install-messages.txt"),
+     (os.path.join(private, "course-install.sh"),),
      r'\bmsg\s+'),
     (os.path.join(private, "files", "setup-git-messages.txt"),
      (os.path.join(private, "files", "setup-git"),),
@@ -307,6 +314,13 @@ for catalogue, scripts, callform in CATALOGUES:
         if m:
             key = m.group(1); bodies[key] = []
         elif key:
+            # A COLUMN-0 HASH IS A STAFF NOTE AND IS NEVER PRINTED, so a {{NAME}} inside one is
+            # not a placeholder anybody has to supply. msg() drops these lines; this has to drop
+            # them too or it reports a note's own example as an unsupplied placeholder. Found the
+            # moment course-install-messages.txt became a real file: its note beside
+            # need.podman-mac.why explains what {{PKGS}} is, and that read as a requirement.
+            if line.startswith("#"):
+                continue
             bodies[key].append(line)
     bodies = {k: "\n".join(v) for k, v in bodies.items()}
 
@@ -330,6 +344,45 @@ for catalogue, scripts, callform in CATALOGUES:
     # on the line the key is on. That reported github.checkpoint as missing {{ORG}} when the call
     # right there supplies it — a false alarm, which is the kind of failure that gets a check
     # weakened rather than fixed.
+    # ─── which call does a NAME= belong to ────────────────────────────────────
+    # TO THE INNERMOST CALL THAT ENCLOSES IT, and this replaced "everything to end of line".
+    # That older rule was deliberate -- an argument can hold a nested command substitution with
+    # its own quoted string, `"EMAIL_ENC=$(email_encoded "$SG_EMAIL")"`, and a per-argument
+    # pattern stops at the space inside it -- but it over-attributes in two ways that only
+    # showed up once the installer's catalogue got an entry of its own:
+    #
+    #   A NESTED CALL'S ARGUMENTS were credited to the OUTER key as well as the inner one.
+    #   need.podman-linux composes need.podman-linux.and inside its own PKGS= argument, so the
+    #   outer key was reported as "passed PKG= but has no {{PKG}}" -- true of the outer, and
+    #   entirely the inner call's business.
+    #
+    #   ANYTHING AFTER THE CALL ON THE SAME LINE was swept in too, including plain shell.
+    #   `printf '    %s ' "$(msg prompt.path)"; IFS= read -r DIR` credited prompt.path with an
+    #   IFS placeholder, which is a shell assignment and not an argument to anything.
+    #
+    # So each call gets the region from its key to the close of the `$(` it sits in -- which
+    # still contains nested substitutions, keeping the case the old rule was written for -- and
+    # every NAME= is assigned to the LAST call whose region still contains it, i.e. the innermost.
+    # A NAME= inside no call's region belongs to nobody, which is the shell-assignment case.
+    def arg_regions(line):           # -> [(key, start, end)] innermost-last within a line
+        out = []
+        for m in re.finditer(callform + r'([a-z0-9._-]+)', line):
+            i, depth, close = m.start(), 0, len(line)
+            # the `$(` this call sits inside, if any
+            open_at = line.rfind("$(", 0, i)
+            if open_at != -1:
+                depth = 0
+                for j in range(open_at + 1, len(line)):
+                    if line[j] == "(":
+                        depth += 1
+                    elif line[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            close = j
+                            break
+            out.append((m.group(1), m.end(), close))
+        return out
+
     calls, indirect = {}, set()
     for path in scripts:
         for line in joined_lines(path):
@@ -337,9 +390,16 @@ for catalogue, scripts, callform in CATALOGUES:
                 continue
             for m in re.finditer(callform + r'"?\$', line):
                 indirect.update(re.findall(r'\b([A-Z_]+)=', line[m.end():]))
-            for m in re.finditer(callform + r'([a-z0-9._-]+)', line):
-                k = m.group(1)
-                calls.setdefault(k, set()).update(re.findall(r'\b([A-Z_]+)=', line[m.end():]))
+            regions = arg_regions(line)
+            for k, _, _ in regions:
+                calls.setdefault(k, set())
+            for a in re.finditer(r'\b([A-Z_]+)=', line):
+                owner = None
+                for k, lo, hi in regions:
+                    if lo <= a.start() < hi:
+                        owner = k          # later entries are nested deeper; innermost wins
+                if owner is not None:
+                    calls[owner].add(a.group(1))
 
     who = os.path.basename(catalogue)
     for k, body in bodies.items():
@@ -531,26 +591,51 @@ limit = box - 4
 # mid-sentence -- "Run the following command to enter the / development environment:" --
 # which is precisely what this lint exists to prevent. Any new way of reaching box() needs
 # a pattern here.
-boxed = set()
-for name, root in (("cs193v", repo), ("course-install.sh", private)):
-    for line in open(os.path.join(root, name)):
-        boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
-        boxed.update(re.findall(r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b', line))
-print("BOXED:%s" % ",".join(sorted(boxed)))
+# ─── one catalogue at a time, with the script that reads it ───────────────────
+# PAIRED, NOT POOLED, and this arm was VACUOUS until #221. course-install.sh has been in the
+# scan list for a while, but the installer's accessor was `txt` and this pattern matches `msg`,
+# so it contributed no keys at all -- and the loop below only ever measured messages.txt, so the
+# installer's boxed prose was unmeasured from both ends at once. Now the installer reads its own
+# catalogue with msg(), so each catalogue is measured against the keys the script that reads it
+# actually boxes.
+#
+# PER-CATALOGUE RATHER THAN ONE SET, even though 10-static.sh now forbids the two files sharing
+# a key name: pooling would mean a key boxed by one script silently imposes the box width on a
+# same-named key in the other, which is the coupling that rule exists to prevent.
+PAIRS = (
+    (os.path.join(private, "messages.txt"), (os.path.join(repo, "cs193v"),)),
+    (os.path.join(private, "course-install-messages.txt"),
+     (os.path.join(private, "course-install.sh"),)),
+)
 
-key = None
-for line in open(os.path.join(private, "messages.txt")).read().splitlines():
-    km = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
-    if km:
-        key = km.group(1); continue
-    if not key or len(line) <= limit:
-        continue
-    if key in boxed:
-        print("LONG:%s: %d cols (limit %d): %s" % (key, len(line), limit, line))
-    elif len(line) > 80:
-        # Not a failure — nothing draws a border around these. Recorded because an
-        # 80-column terminal still soft-wraps them, which is a wording call, not a bug.
-        print("WIDE:%s: %d cols" % (key, len(line)))
+all_boxed = set()
+for catalogue, scripts in PAIRS:
+    boxed = set()
+    for path in scripts:
+        for line in open(path):
+            boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
+            boxed.update(re.findall(r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b', line))
+    all_boxed |= boxed
+
+    key = None
+    for line in open(catalogue).read().splitlines():
+        km = re.match(r"^\[\[([a-z0-9._-]+)\]\]$", line)
+        if km:
+            key = km.group(1); continue
+        # A COLUMN-0 HASH IS A STAFF NOTE AND IS NEVER PRINTED, so its width is nobody's
+        # business. msg() drops these; measuring them would hold maintainer prose to a box a
+        # student never sees it in -- and the installer's catalogue is mostly notes.
+        if line.startswith("#"):
+            continue
+        if not key or len(line) <= limit:
+            continue
+        if key in boxed:
+            print("LONG:%s: %d cols (limit %d): %s" % (key, len(line), limit, line))
+        elif len(line) > 80:
+            # Not a failure — nothing draws a border around these. Recorded because an
+            # 80-column terminal still soft-wraps them, which is a wording call, not a bug.
+            print("WIDE:%s: %d cols" % (key, len(line)))
+print("BOXED:%s" % ",".join(sorted(all_boxed)))
 # THE LAST LINE THIS PROGRAM PRINTS, and it is the only thing standing between the three checks
 # below and a vacuous green. Every one of them reads this file for a line that is there only when
 # something is WRONG -- `grep '^LONG:'`, `grep -c '^WIDE:'` -- so a lint that stopped early leaves
@@ -782,28 +867,33 @@ fi
 # the installer's indent, with the installer's sign-off, still closes" -- which is the thing a
 # student actually sees.
 #
-# THE CATALOGUE AND txt() COME TOO, since issue #116: die()'s sign-off and the whole of the
-# Intel-Mac refusal are entries in it, so carving the functions alone would source a pair that
-# cannot say anything.
+# AND THE CATALOGUE COMES AS A FILE NOW, not as a carved function. die()'s sign-off and the whole
+# of the Intel-Mac refusal are entries in it, so the harness has to be able to READ it -- but
+# since #221 that means pointing MESSAGES at course-install-messages.txt, exactly as
+# course-install.sh does. There is no txt() and no text_catalogue() left to carve: cs193v-ui.sh's
+# msg() is the reader, and it arrives with `cat "$UI"` above.
+#
+# WHICH MAKES THIS HARNESS A CLOSER MODEL OF THE REAL THING than the one it replaces. It used to
+# assemble a private copy of the accessor AND a private copy of the prose; now the only thing it
+# supplies that the product does not is NO_COLOR and the value of MESSAGES.
 {
     printf 'NO_COLOR=1\n'
+    printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
     cat "$UI"
-    sed -n '/^text_catalogue() {$/,/^}$/p' "$PRIVATE/course-install.sh"
-    sed -n '/^txt() {$/,/^}$/p'            "$PRIVATE/course-install.sh"
     sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/course-install.sh"
     # the four knobs, exactly as course-install.sh sets them after sourcing
     printf 'NOTE_INDENT="    "\nMENU_INDENT="    "\nDIE_INDENT="  "\n'
-    printf 'DIE_TRAILER="$(txt die.trailer)"\n'
+    printf 'DIE_TRAILER="$(msg die.trailer)"\n'
 } > "$TMP/idie.sh"
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^say_intel_mac() {$' "$TMP/idie.sh")" = 1 ] &&
-   [ "$(grep -c '^txt() {$' "$TMP/idie.sh")" = 1 ] &&
-   [ "$(grep -c '^text_catalogue() {$' "$TMP/idie.sh")" = 1 ]; then
+   [ "$(grep -c '^msg() {$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^MESSAGES=' "$TMP/idie.sh")" = 1 ]; then
     pass "installer:box-users-extractable"
 else
     fail "installer:box-users-extractable" \
-         "could not assemble cs193v-ui.sh with say_intel_mac(), txt() and the catalogue from course-install.sh"
+         "could not assemble cs193v-ui.sh with say_intel_mac() and the installer's catalogue"
 fi
 
 out="$(bash -c '. "$1"; die "$2"' _ "$TMP/idie.sh" \

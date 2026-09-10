@@ -1249,10 +1249,25 @@ assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELC
 # separate file installed into the image — and the tidy-looking mistake is to fold those keys into
 # messages.txt, where the container cannot read them and every screen would render
 # "(missing message: ...)". Checked in both directions: no key of one file is defined in the other.
-sgkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/files/setup-git-messages.txt | LC_ALL=C sort -u)"
-lkeys="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort -u)"
-assert_ne "setup-git:catalogue-has-keys" "" "$sgkeys"
-both="$(printf '%s\n' "$sgkeys" | grep -xF -f <(printf '%s\n' "$lkeys") | do_tr '\n' ' ')"
+# ALL THREE CATALOGUES, PAIRWISE, since #221 gave the installer one of its own. It used to be
+# this file against setup-git's; course-install-messages.txt is a third file read by the same
+# msg() with a different MESSAGES, so it can collide with either. Derived from a list rather
+# than written out twice, so a fourth catalogue is one line here.
+cat_keys() { grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | LC_ALL=C sort -u; }
+CATS="$PRIVATE/messages.txt $PRIVATE/course-install-messages.txt $PRIVATE/files/setup-git-messages.txt"
+for c in $CATS; do
+    assert_ne "setup-git:catalogue-has-keys-$(basename "$c")" "" "$(cat_keys "$c")"
+done
+both=''
+for a in $CATS; do
+    for b in $CATS; do
+        [ "$a" = "$b" ] && continue
+        # ONE DIRECTION ONLY per pair, or every collision is reported twice.
+        [ "$a" \< "$b" ] || continue
+        dup="$(cat_keys "$a" | grep -xF -f <(cat_keys "$b") | do_tr '\n' ' ')"
+        [ -n "$dup" ] && both="$both$(basename "$a")/$(basename "$b"): $dup"
+    done
+done
 if [ -z "$both" ]; then
     pass "setup-git:catalogues-do-not-overlap"
 else
@@ -1863,15 +1878,39 @@ done
 # WHY IT NEEDS A LINT AT ALL: the file's own banner has claimed "the wording lives here,
 # gathered in one place" since long before it was true, and ~110 call sites quietly disagreed
 # with it. A banner is a promise; this is the part that keeps it.
-assert_eq "text116:the-catalogue-is-declared-once" "1" \
-          "$(grep -c '^text_catalogue() {$' $PRIVATE/course-install.sh)"
-
-# Everything above the catalogue is logic, and no message-printing helper there may be handed a
-# literal. WHOLE-LINE COMMENTS BLANKED, not `sed 's/#.*//'`, for the reason launcher_code below
-# gives: this script documents its own rules in prose that would otherwise match.
-inst_logic="$(sed -n '1,/^text_catalogue() {$/p' $PRIVATE/course-install.sh \
-              | sed 's/^[[:space:]]*#.*//')"
+#
+# THE CATALOGUE IS A FILE NOW, so two of these lints are gone rather than adjusted.
+# text116:the-catalogue-is-declared-once counted `text_catalogue() {` in this script, and
+# the-catalogue-body-is-readable / holds-no-shell read the heredoc between its delimiters. There
+# is no heredoc: the prose is course-install-messages.txt, the `$`/backtick/backslash rule they
+# enforced is moot in a file no shell ever parses, and what replaces them is the reconciliation
+# 20-messages.sh does against that file in both directions.
+#
+# AND THE REGION IS NOW STATED RATHER THAN INHERITED, because the old one was accidentally right.
+# The rule was `sed -n '1,/^text_catalogue() {$/p'` -- everything ABOVE the catalogue -- and with
+# that address deleted both GNU and BSD sed print to EOF, so the region would have silently become
+# the whole file and the assert_ne guarding it could never fail again.
+#
+# THE WHOLE FILE EXCEPT THE HAND-OVER BLOCK, and that exception is the real rule: this lint says
+# "no printf carries a sentence", which is only fair WHERE msg() IS AVAILABLE. The hand-over block
+# runs before it is -- it validates the two arguments, points MESSAGES at the catalogue and sources
+# cs193v-ui.sh -- so its three refusals (not meant to be run directly, your installer is too old,
+# the UI file is unreadable) have no msg() to call and no box() to draw with. Plain printf by
+# necessity, exactly as the bootstrap's refusals are.
+#
+# THOSE THREE WERE UNLINTED UNTIL NOW, which is why this is a new exception and not an old one
+# restated: the hand-over block sits BELOW where the catalogue used to be, so the old region never
+# reached it. Widening the region is what surfaced them.
+#
+# THE STRIP IS ASSERTED, because a `sed //d` whose addresses stop matching is a silent no-op --
+# it would put those three lines back in the region and redden this lint against correct code.
+inst_all="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
+inst_logic="$(printf '%s\n' "$inst_all" | sed '/^BOOTSTRAP_PROTOCOL_WANTED=/,/^\. "\$UI"$/d')"
 assert_ne "text116:the-logic-region-is-readable" "" "$inst_logic"
+if [ "$(printf '%s\n' "$inst_all" | grep -c .)" -gt "$(printf '%s\n' "$inst_logic" | grep -c .)" ]
+then pass "text116:the-handover-block-was-really-excluded"
+else fail "text116:the-handover-block-was-really-excluded" \
+          "the sed addresses matched nothing, so the exception is not being applied"; fi
 
 # THE RULE IS "no letters left once the expansions come out", NOT "the argument starts with $".
 # `ok "$PLAT on $(uname -m)"` starts with an expansion and still carried the word "on", and
@@ -1946,14 +1985,12 @@ printf_hits="$(printf '%s\n' "$inst_logic" \
 ')"
 assert_eq "text116:no-printf-carries-a-sentence" "" "$printf_hits"
 
-# The catalogue is prose and nothing else. A `$`, a backtick or a backslash in there would be
-# inert today -- the heredoc delimiter is quoted -- and a trap for whoever later unquotes it or
-# copies a block somewhere that does expand. {{NAME}} is the only substitution there is.
-inst_text="$(sed -n "/^cat <<'CS193V_TEXT'\$/,/^CS193V_TEXT\$/p" $PRIVATE/course-install.sh \
-             | sed '1d;$d')"
-assert_ne  "text116:the-catalogue-body-is-readable" "" "$inst_text"
-assert_eq  "text116:the-catalogue-holds-no-shell" "" \
-           "$(printf '%s\n' "$inst_text" | grep -nE '[$`\\]' || true)"
+# THE "no shell in the catalogue" RULE RETIRES WITH THE HEREDOC. It existed because the prose
+# lived inside `cat <<'CS193V_TEXT'` in a shell script: a `$`, a backtick or a backslash was
+# inert only because the delimiter was quoted, and a trap for whoever unquoted it or copied a
+# block somewhere that did expand. course-install-messages.txt is never parsed by a shell, so
+# there is nothing left to be inert -- and msg() substitutes {{NAME}} and nothing else, which
+# 20-messages.sh's placeholder reconciliation is what actually holds.
 
 # The deletions. Each of these strings is the whole of a mechanism that #41 removes, so its
 # survival means the old design is still half-wired underneath the new one.
