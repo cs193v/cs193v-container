@@ -41,7 +41,7 @@ else
          "could not extract msg() from cs193v-ui.sh — has it been renamed or reformatted?"
     exit 1
 fi
-# Read by msg() in the carving sourced on the next line, exactly as lib/shared.sh:267-278 sets
+# Read by msg() in the carving sourced on the next line, exactly as lib/shared.sh:196-207 sets
 # it for msg_of -- and disabled here for the reason that comment gives rather than for the file.
 # shellcheck disable=SC2034
 MESSAGES="$PRIVATE/messages.txt"

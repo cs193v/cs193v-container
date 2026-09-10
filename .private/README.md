@@ -183,9 +183,9 @@ It is the one file students read, so keep it readable in one sitting:
   installer proper and are emphatic that there is one copy; the bootstrap's one refusal that
   would want them names both package managers and lets the student pick.
 - **`TARBALL=` stays a literal one-line assignment.** Six places in the test suite repoint the
-  download at a local tarball by rewriting `^TARBALL=.*`, and one asserts the rewrite preserves
-  the file's line numbering. A composed URL would leave all six matching nothing, silently, and
-  the cheap test lane would go back to making live requests to GitHub.
+  download at a local tarball by rewriting `^TARBALL=.*`. A composed URL would leave all six
+  matching nothing, silently, and the cheap test lane would go back to making live requests to
+  GitHub.
 
    **And the one thing no test can see:** the `.cmd` on the website is a hand-uploaded copy, so
    it is the only artefact that can drift out of step with the repo. **Re-upload it whenever
@@ -668,7 +668,7 @@ succeeds, which is well after most of those messages can print. Downloading FIRS
 `course-install-messages.txt` and be read by the launcher's `msg()`. The near-copy of `msg()`
 that used to be called `txt()` is gone with the heredoc.
 
-Four things to know before re-tuning any of that text:
+Three things to know before re-tuning any of that text:
 
 - **`MESSAGES` must be set before anything can refuse.** `course-install.sh` points it at the
   catalogue in its hand-over block, above the resolved-state block, because `msg()` with no
@@ -683,13 +683,6 @@ Four things to know before re-tuning any of that text:
   claimed "the wording lives here, gathered in one place" for a long time while ~110 call sites
   disagreed with it. `text116:*` fails on a literal handed to `step`/`ok`/`skip`/`note`/`die`/
   `need`/`menu`, and on a `printf` carrying a sentence.
-- **The coverage denominator no longer has to exclude it**, and the reason it once did is worth
-  keeping. While the prose lived in a heredoc inside the installer, ~480 non-blank non-comment
-  lines counted as statements that never executed: measured, the denominator went 430 → 658 and
-  the percentage would have fallen by a third for a change that removed no coverage at all. The
-  fix was to blank those lines rather than delete them, because they are line numbers and the
-  allowlist indexes them. A separate file needs none of that — `95-installer-coverage.sh` simply
-  does not read it. **If a heredoc of prose ever comes back, blank it, do not delete it.**
 
 ### Two people on one computer: `CS193V_INSTANCE`
 
@@ -922,10 +915,10 @@ CS193V_GH_TEST_TOKEN=github_pat_... \
 
 Every tier the suites declare except `github`, which is the only one that writes to somebody's
 GitHub account. It runs `./cs193v --rebuild` first, because the image, container and live tiers
-hard-fail without one, and it sets the six cost gates those tiers otherwise skip —
+hard-fail without one, and it sets the five cost gates those tiers otherwise skip —
 `CS193V_INSTALL_NESTED`, `CS193V_INSTALL_NESTED_BUILD`, `CS193V_MINPODMAN_BUILD`,
-`CS193V_RELEASE_BUILD`, `CS193V_COVERAGE` and `CS193V_DESTRUCTIVE`. **Budget about 15 GB and a
-long wall clock, and expect to be logged out of claude, codex, gh and vercel**: the last of those
+`CS193V_RELEASE_BUILD` and `CS193V_DESTRUCTIVE`. **Budget about 15 GB and a long wall clock,
+and expect to be logged out of claude, codex, gh and vercel**: the last of those
 gates is what unskips the `--rebuild --logout` test, which deletes the volumes those logins live
 in. It says all of this on screen before it starts. Set `CS193V_INSTANCE` first or it is the
 *shared* volumes it deletes.
