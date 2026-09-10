@@ -968,30 +968,48 @@ assert_host_state oldest-supported podman-old-nested "$osp_imgs"
 sandbox_reap
 record "oldest-supported:free-disk-gb-after" "$(do_df_avail /)"
 
-# ─── and what happens when the two declarations disagree ───────────────────────
-# TWO DECLARATIONS, ONE NUMBER, AND NOTHING BEHAVIOURAL CHECKED THAT THEY MATCH.
-# MIN_PODMAN_LINUX lives in install-cs193v.sh and again in cs193v, because the installer is
-# curl-piped and cannot source the launcher. 25-installer.sh checks the two statically; this is
-# what a student SEES when they drift.
+# ─── the two declarations became one, and this is what proves it  (#221) ───────
+# WHAT THIS CASE USED TO MEASURE, because the change is the interesting part. MIN_PODMAN_LINUX
+# was declared in install-cs193v.sh and AGAIN in cs193v -- the installer was downloaded on its
+# own and could not source the launcher -- and nothing behavioural checked that the two numbers
+# matched. So this case raised the LAUNCHER's floor to 5.7.0, left the installer's at 4.9.0, and
+# showed a student what drift felt like: survey passes, the files download, podman is confirmed,
+# the disk is confirmed, and only then does build_image hand off to a launcher that refuses.
+# Every reassuring step first and the refusal last, on a machine the installer had just declared
+# fit.
 #
-# sb_work_skew raises the LAUNCHER's floor to 5.7.0 and leaves the installer's at 4.9.0, on a
-# machine with 4.9.3. So the installer accepts, and the launcher does not.
+# THAT CANNOT BE BUILT ANY MORE, and it is not that the test got harder -- the defect is gone.
+# course-install.sh sources cs193v-ui.sh out of the tree it downloaded, and the floor is declared
+# there once. sb_work_skew still raises it in the tarball's copy, and now BOTH ends move together:
+# the installer refuses in survey, naming 5.7.0, because it is reading the launcher's number.
+# There is no edit that makes them disagree.
 #
-# THE SHAPE IS THE POINT: survey passes, the course files download, podman is confirmed working, the
-# disk is confirmed -- and only then does build_image hand off to a launcher that refuses. Every
-# reassuring step first, the refusal last, on a machine the installer just declared fit. A student
-# would read that as the install breaking at the very end.
+# SO THE ASSERTION INVERTS INTO ITS OWN SUCCESSOR. Three assertions asserted the divergence --
+# the-installer-accepted-4.9.3, it-got-all-the-way-to-the-build, but-the-launcher-refuses -- and
+# they are retired rather than reworded, because each one is now false by construction. What
+# replaces them is the stronger claim: raise the one declaration and the installer moves with it,
+# which is the behavioural proof that 25-installer.sh's min-podman:course-install-declares-no-*
+# lints statically.
 #
-# CHEAP, because it dies before building anything.
+# AND THE STUDENT-FACING SHAPE IMPROVED, which is worth asserting too rather than just noting: an
+# unsupported podman is now refused at "Looking at your computer", before the download is used,
+# before consent, and before anything is built -- instead of at the very end of a run that had
+# reported success at every step.
+#
+# CHEAP, because it dies before building anything -- more cheaply than before, in fact.
 sb_work_skew || { fail "floor-skew:the-skew-could-be-built" "sb_work_skew failed"; exit 1; }
 pass "floor-skew:the-skew-could-be-built"
 out="$(nest_build floor-skew "" "" podman-old-nested /work/installer-skew.sh)"
 assert_says "floor-skew:the-skewed-copy-is-what-ran" "installer-skew.sh" \
             "$(sb_section "$out" INSTALLER-USED)"
-assert_says "floor-skew:the-installer-accepted-4.9.3"   "podman 4.9.3" "$out"
-assert_says "floor-skew:it-got-all-the-way-to-the-build" "Building the course container" "$out"
-# ...and then the launcher refused, in the launcher's own words (messages.txt err.podman-too-old).
-assert_says "floor-skew:but-the-launcher-refuses"  "we need:" "$out"
+# THE ONE COPY, PROVED BEHAVIOURALLY. Only cs193v-ui.sh was edited, so an installer that still
+# carried its own floor would have accepted this machine at 4.9.0 and said nothing about 5.7.0.
+assert_says "floor-skew:the-installer-reads-the-launchers-floor" "5.7.0" "$out"
+assert_says "floor-skew:and-refuses-this-machine-by-version"     "4.9.3" "$out"
+# REFUSED EARLY, and the needle is the step it never reached. Guarded against the empty-string
+# pass by the-skewed-copy-is-what-ran above and by exits-nonzero below, so this cannot go green on
+# a run that produced no transcript.
+assert_says_not "floor-skew:refuses-before-it-builds-anything" "Building the course container" "$out"
 assert_says "floor-skew:exits-nonzero"             "===INSTALLER-RC=1===" "$out"
 assert_eq   "floor-skew:and-nothing-was-built" "no" "$(sb_section "$out" IMAGE-EXISTS)"
 sandbox_reap

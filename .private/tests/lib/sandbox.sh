@@ -803,21 +803,30 @@ RUN
 
 # ─── a course tree whose LAUNCHER floor disagrees with the installer's ─────────
 #
-# BUILT ON DEMAND, for one case, and that case exists to prove a defect rather than to measure
-# anything. The podman floor is declared TWICE -- MIN_PODMAN_LINUX in install-cs193v.sh and again
-# in cs193v -- because the installer is curl-piped and cannot source the launcher. Nothing but
-# 25-installer.sh's static check stops them drifting, and this is the behavioural half: what a
-# student actually SEES when they do.
+# BUILT ON DEMAND, and WHAT IT IS FOR CHANGED WITH #221. The podman floor used to be declared
+# TWICE -- MIN_PODMAN_LINUX in install-cs193v.sh and again in cs193v, because the installer was
+# downloaded on its own and could not source the launcher -- and nothing but 25-installer.sh's
+# static check stopped the two drifting. This function existed to show the behavioural half: what
+# a student actually SAW when they did.
 #
-# RAISING THE LAUNCHER'S, NOT LOWERING THE INSTALLER'S, and the direction matters. Lowering the
-# installer's floor would need a fixture whose podman is below it, and the only such fixture
-# (podman-old, 3.4.4) has no nesting adaptations -- so the run would die at check_podman, on
-# `podman info`, long before build_image handed off to the launcher. Raising the launcher's floor
-# instead reproduces the same disagreement on podman-old-nested, whose 4.9.3 the real installer
-# accepts, and gets all the way to the hand-off.
+# THERE IS ONE DECLARATION NOW, in files/cs193v-ui.sh, which course-install.sh sources out of the
+# tree it downloaded. So this raises the only copy there is, and both ends move together -- the
+# installer refuses in survey, naming the raised number, because it is reading the launcher's.
+# The case built on this asserts exactly that, and it is a better claim than the one it replaced:
+# the defect is gone rather than merely linted.
+#
+# WHICH MEANS THIS IS NOT RETIRED WITH IT. Two things still need a second tarball built from an
+# edited tree: this case, and probe:*, which fakes a macOS package receipt by rewriting
+# PODMAN_PKG_ID in a copy of cs193v-ui.sh. Building that copy is the reusable part.
+#
+# RAISING, NOT LOWERING, and the direction still matters for the same reason. Lowering the floor
+# would need a fixture whose podman is below it, and the only such fixture (podman-old, 3.4.4) has
+# no nesting adaptations -- so the run would die at check_podman, on `podman info`, rather than in
+# the version check this is about. Raising it reaches the refusal on podman-old-nested, whose
+# 4.9.3 the unedited floor accepts.
 #
 # 5.7.0 because it is what the macOS floor is, so the number is one somebody might plausibly type
-# into the wrong copy.
+# into the wrong place.
 sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its tarball
     [ -f "$SB_WORK/installer-skew.sh" ] && return 0
     mkdir -p "$SB_TMP/pkg-skew"
@@ -831,8 +840,8 @@ sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its t
         printf 'sb_work_skew: the launcher floor was not raised -- was the constant renamed?\n' >&2
         return 1; }
     ( cd "$SB_TMP/pkg-skew" && tar czf "$SB_WORK/course-skew.tar.gz" cs193v-main ) || return 1
-    # THE INSTALLER IS UNMODIFIED except for where it fetches from, which is the point: the skew is
-    # entirely in the launcher's copy of the number.
+    # THE BOOTSTRAP IS UNMODIFIED except for where it fetches from, which is the point: the edit is
+    # entirely inside the tarball, in the one file that declares the number.
     cp "$SB_WORK/installer.sh" "$SB_WORK/installer-skew.sh"
     edit_sub "$SB_WORK/installer-skew.sh" '^TARBALL=.*' 'TARBALL="file:///work/course-skew.tar.gz"'
     grep -q 'course-skew.tar.gz' "$SB_WORK/installer-skew.sh" || {
