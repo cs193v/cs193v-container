@@ -83,9 +83,12 @@ done
 # 5.10 vs 5.9 is the classic numeric-vs-lexical trap; asserted above for both copies.
 
 # ─── and the two floors it is compared against ─────────────────────────────────
-# THE FUNCTION IS DUPLICATED AND SO ARE THE NUMBERS. version_lt is checked above; the floors are
-# declared separately in install-cs193v.sh and in cs193v, for the reason the duplication exists at
-# all -- the installer is curl-piped and cannot source the launcher.
+# ONE DECLARATION EACH SINCE #221, and this block reads it rather than comparing copies. The
+# function and both numbers used to be declared separately in install-cs193v.sh and in cs193v,
+# because a file downloaded on its own can source nothing, and the checks here existed to prove
+# the copies agreed. They live in files/cs193v-ui.sh now, which course-install.sh and cs193v
+# both source, so what is asserted below is that the installer declares NO floor of its own and
+# that the shared numbers are the measured ones.
 #
 # TWO FLOORS EACH, SINCE THE PLATFORMS DIVERGED. On Linux the floor decides which distros work, so
 # it is 4.9.0 (measured: 4.9.3, 5.4.2 and 5.7.0 all build the whole course image). On a Mac it

@@ -13,10 +13,19 @@
 #     the way cs193v-welcome and cs193v-goodbye already source /etc/cs193v/strings.sh. The
 #     container cannot see the checkout, so it has to be installed; the Containerfile does
 #     that and validates it with `bash -n` in the same layer.
-#   * install-cs193v.sh CANNOT source it. It is curl-piped and standalone, so it keeps inline
-#     copies of box(), menu() and version_lt(), and 20-messages.sh and 25-installer.sh assert
-#     those copies have not drifted from these. That is the one duplication left, where before
-#     it was one copy per script.
+#   * course-install.sh -- the installer proper -- sources it out of the tree the bootstrap
+#     downloaded, at the same .private/files/cs193v-ui.sh the launcher uses, just under a
+#     mktemp directory instead of a checkout. THIS IS WHAT #221 CHANGED. install-cs193v.sh used
+#     to be one file a student downloaded on its own, so it could source nothing and carried
+#     inline copies of box(), menu(), version_lt(), platform(), ensure_podman_path() and the
+#     podman floors; two suites existed to assert those copies had not drifted. Fetching the
+#     tree FIRST means there is something to source, so there is one copy of each and nothing
+#     to keep in agreement.
+#   * install-cs193v.sh -- the bootstrap -- still sources nothing, and that is the property the
+#     split rests on rather than a limitation. It is the file a student downloads and checks a
+#     SHA-256 against: it finds a downloader, fetches the tree, checks the pieces arrived and
+#     execs course-install.sh, and 10-static.sh asserts it sources and evals nothing so it
+#     stays readable in one sitting.
 #
 # WHAT BELONGS IN HERE: anything at least two consumers need. Everything below arrived by
 # being cut out of the launcher verbatim, comments included — those comments are the record of
@@ -24,10 +33,21 @@
 #
 # WHAT DOES NOT, AND THE RULE CHANGED WITH #221. It used to be "anything only the launcher
 # does", justified by a container-side script having no podman, no tunnel and no tmux
-# alternate screen. That reason no longer decides, because the second consumer is now
-# host-side too. install-cs193v.sh is being split so that it can source this file instead of
-# carrying copies (#221), and the pieces it needs moved here first: the podman floors, the
-# receipt id, platform(), min_podman(), ensure_podman_path() and the whole meter RENDERER.
+# alternate screen. That reason no longer decides, because the second host-side consumer
+# arrived: install-cs193v.sh was split so that the installer proper could source this file
+# instead of carrying copies, and what it needed came here -- the podman floors, the receipt
+# id, platform(), min_podman(), ensure_podman_path() and the whole meter RENDERER.
+#
+# SO THE TEST IS "TWO CONSUMERS NEED IT", NOT "THE LAUNCHER DOES IT". The provider half of the
+# meter stayed in cs193v on exactly that test: build_progress and CF_PARSE_AWK know podman's
+# `STEP i/N` grammar, which is a launcher concern, while the renderer draws whatever it is
+# handed and now has two callers.
+#
+# THE METER ARRIVES IN THE IMAGE WITH NO CONTAINER CONSUMER, and that is deliberate rather than
+# an oversight nobody has noticed. This whole file is installed at /etc/cs193v/ui.sh for
+# setup-git, so ~410 lines of renderer go with it that nothing inside the container calls.
+# Splitting it in two to avoid that was weighed and declined: it would put a second shared file
+# and a second sourcing path in front of every reader to save a directory nobody measures.
 # None of them has a reader inside the image. That is expected, not an oversight -- and until
 # the split lands, the installer still carries its own copies and the drift tests still diff
 # them against these.
@@ -121,9 +141,11 @@ BOX_W=71
 # first box here that is not an error, and a second renderer to draw a green one would put
 # back exactly the duplication issue #21 removed.
 #
-# Duplicated verbatim in install-cs193v.sh, the way version_lt already is: the installer is
-# curl-piped and standalone, so it cannot source anything from here. 20-messages.sh renders
-# BOTH copies and asserts the same shape of both.
+# ONE COPY SINCE #221, where there used to be two. install-cs193v.sh carried this verbatim,
+# because a file downloaded on its own can source nothing; the installer proper sources this one
+# now. What used to be "20-messages.sh renders both copies and asserts the same shape of both"
+# is now a single renderer drawn twice -- once at the launcher's indent and once at the
+# installer's, through the knobs below -- which is a stronger test of the thing students see.
 #
 # awk, and LC_ALL=C awk in particular, because the padding has to be measured in DISPLAY
 # COLUMNS and every other way of doing that is wrong somewhere we ship:
@@ -751,10 +773,12 @@ MIN_PODMAN_MACOS="5.7.0"
 # The .pkg declares this string itself, in its PackageInfo -- `identifier="com.redhat.podman"`
 # -- so when install-cs193v.sh's PODMAN_MACOS_VERSION is bumped, check it there.
 #
-# DUPLICATED VERBATIM IN install-cs193v.sh, the way version_lt and box() are: that script is
-# curl-piped and standalone, so it cannot source this one. 25-installer.sh diffs the two copies
-# for the reason it asserts the podman floors agree -- the installer runs FIRST and the launcher
-# runs LAST, so a disagreement between them IS issue #121 over again.
+# ONE COPY SINCE #221. This was duplicated verbatim into install-cs193v.sh, and 25-installer.sh
+# diffed the two for the reason it asserted the podman floors agreed: the installer runs FIRST
+# and the launcher runs LAST, so a disagreement between them IS issue #121 over again. The
+# installer proper sources this file, so there is nothing left to diff -- and the floors went
+# the same way, which is what retired 26-installer-sandbox.sh's floor-skew case in the shape it
+# had. That case now asserts the opposite: raise this number and BOTH ends move together.
 PODMAN_PKG_ID="com.redhat.podman"
 # Which directory the repair had to add, so `doctor` can say so. Empty means PATH was fine.
 PODMAN_PATH_ADDED=""

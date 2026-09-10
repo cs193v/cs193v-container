@@ -142,6 +142,51 @@ Two things need real values:
    the other and the platforms silently diverge. The cheap fix is to point the website's
    macOS/Linux link at the same raw URL so there is one source of truth.
 
+   **#221 made that hazard much smaller, and this is the practical payoff of the split.** The
+   `.sh` used to be the whole installer — 1700 lines that changed whenever any message, package
+   name or refusal changed, so the hand-published copy went stale constantly. It is now a
+   ~160-line bootstrap: three repository coordinates, a downloader, a tarball, four checks and an
+   `exec`. Everything a student is asked, every package installed and every word read after the
+   first few lines comes from `course-install.sh`, which travels in the archive and needs no
+   re-upload. Re-publish the `.sh` when the coordinates or the hand-over contract change; almost
+   nothing else touches it.
+
+#### What the published SHA-256 actually covers
+
+Worth stating plainly rather than leaving implied, because it is easy to read the checksum as
+covering more than it does.
+
+**It covers the bootstrap: the coordinates and the download.** That is the part that decides
+*which* code runs, which is the part worth pinning by hand. What it does not cover is the code
+that gets fetched — and that code is the course repository, which is also where `./cs193v`, the
+`Containerfile`, `files/entrypoint.sh` and both agents' notes come from. **The repository is the
+trust root for everything that runs on a student's machine, checksum or no checksum.** After
+#221 that code also runs `sudo $PM_INSTALL`, so the blast radius is root on the student's box.
+
+The controls that actually address that are repo-side — branch protection on `main`, required
+review, no force-push, passkeys, no broad-scope PATs — not the published hash. There is an open
+issue about pinning a commit SHA rather than following `main`, which would make the fetched tree
+immutable; it is filed with the analysis of what it costs, because it reshapes the mid-quarter
+"just re-run the installer" loop.
+
+#### What the bootstrap may do, and what it may not
+
+It is the one file students read, so keep it readable in one sitting:
+
+- **It sources nothing and `eval`s nothing.** `10-static.sh` asserts both. The tempting way to
+  share one more helper with the installer proper is to source the file that has it; that would
+  end the property the split exists to create.
+- **It has no message catalogue.** Everything it can refuse happens before the course files
+  exist, so there is nothing to read prose out of and nothing to draw a box with. Its refusals
+  are plain `printf`, and `text116:*` deliberately does not lint them.
+- **It must not learn what distro it is on.** `distro_family`/`distro_packages` live in the
+  installer proper and are emphatic that there is one copy; the bootstrap's one refusal that
+  would want them names both package managers and lets the student pick.
+- **`TARBALL=` stays a literal one-line assignment.** Six places in the test suite repoint the
+  download at a local tarball by rewriting `^TARBALL=.*`, and one asserts the rewrite preserves
+  the file's line numbering. A composed URL would leave all six matching nothing, silently, and
+  the cheap test lane would go back to making live requests to GitHub.
+
    **And the one thing no test can see:** the `.cmd` on the website is a hand-uploaded copy, so
    it is the only artefact that can drift out of step with the repo. **Re-upload it whenever
    `install-cs193v.sh`'s last line changes** — that line is the sentinel stage one greps for
@@ -487,9 +532,10 @@ Things worth knowing before changing any of it:
   the display width and `substr()` cannot slice a character in half, so none of `box()`'s
   `dw()`/`dsub()` arithmetic is needed in a renderer that runs three times a second. It costs a
   stray `✔` out of npm and it buys a box that seven third-party tools cannot break.
-- **`box()` was not extended, deliberately.** It wraps rather than cuts, is as tall as its
-  content, and is duplicated verbatim into `install-cs193v.sh` with `20-messages.sh` asserting
-  the copies match. The live box cuts, is a height set by the terminal, and is redrawn in place.
+- **`box()` was not extended, deliberately.** It wraps rather than cuts and is as tall as its
+  content; the live box cuts, is a height set by the terminal, and is redrawn in place. (`box()`
+  used to be duplicated verbatim into `install-cs193v.sh`, with `20-messages.sh` asserting the
+  copies matched. Since #221 there is one copy, drawn twice at two indents.)
   Both still emit every glyph from a `printf`, which is what `box:*-draws-the-box-in-one-place`
   checks — box art typed into a string anywhere else is the issue #21 bug growing back.
 - **`box()` sanitises now too**, and that was a live bug rather than a tidy-up: it interpolates
@@ -553,10 +599,20 @@ checkout; `setup-git` and any future `setup-*` source the installed copy, the wa
 and `cs193v-goodbye` already source `/etc/cs193v/strings.sh`.
 
 That arrangement arrived with `setup-git`, which needed a menu and a box inside the container and
-would otherwise have been a third copy of both. What it replaced was one copy per script; what is
-left is **two** — `install-cs193v.sh` still carries its own, because it is curl-piped and
-standalone and can source nothing at all. `20-messages.sh` diffs `box()` between the two and
-`25-installer.sh` unit-tests `version_lt` in both.
+would otherwise have been a third copy of both. What it replaced was one copy per script.
+
+**Since #221 there is exactly one copy, and the installer is the third consumer.**
+`install-cs193v.sh` is now a ~160-line bootstrap that finds `curl` or `wget`, fetches the course
+tree, checks the pieces arrived and `exec`s `course-install.sh` inside it — and that script
+sources this same file out of the tree it was handed. So `box()`, `menu()`, `die()`, `note()`,
+`version_lt()`, `platform()`, `ensure_podman_path()`, the podman floors and the meter renderer
+exist once. The checks that diffed the copies are retired, and what replaced them tests more: the
+one renderer is drawn twice, at the launcher's indent and at the installer's, through the four
+knobs described below.
+
+**The bootstrap still sources nothing, and that is the point rather than a leftover.** It is the
+file a student downloads and checks a SHA-256 against, so `10-static.sh` asserts it sources and
+`eval`s nothing — the property that makes it readable in one sitting.
 
 Four things to know before touching it:
 
@@ -597,11 +653,13 @@ tail box — the requirements are the opposite ones.
 
 #### The installer's own text catalogue
 
-**Since issue #116 `install-cs193v.sh` carries its own message catalogue as well**, for the same
-reason it carries its own `box()`. That makes three. `messages.txt` is the launcher's,
-`files/setup-git-messages.txt` is `setup-git`'s, and the third is a heredoc at the foot of
-`install-cs193v.sh` under a `THE TEXT STUDENTS SEE` banner, read by `txt <key>` — the same
-`[[key]]`/`{{PLACEHOLDER}}` format — it is the same `msg()` reading a different file.
+**There are three catalogues, one per consumer.** `messages.txt` is the launcher's,
+`files/setup-git-messages.txt` is `setup-git`'s, and `course-install-messages.txt` is the
+installer's. All three are the same `[[key]]`/`{{PLACEHOLDER}}` format read by the same `msg()`
+out of `cs193v-ui.sh`, with `MESSAGES` naming which file. `10-static.sh` asserts no key is
+defined in more than one of them: each script reads its own file, so a shared name is not wrong
+at runtime, but it is wrong for anyone reading either one — and it made a test assert the wrong
+prose once already.
 
 **It is a real file now (#221), and that is new.** It could not be one for as long as the
 installer was downloaded on its own, because `messages.txt` does not exist until the download
@@ -964,7 +1022,11 @@ but `path_helper`, which runs from `/etc/zprofile` — at **login**. So the wind
 installer never sees it, and neither does any non-login shell, which is why "open a new terminal"
 helps some students and not others.
 
-`ensure_podman_path` is the fix, in `cs193v` and duplicated verbatim into `install-cs193v.sh`.
+`ensure_podman_path` is the fix. It lives in `files/cs193v-ui.sh`, which both `cs193v` and
+`course-install.sh` source — it was duplicated verbatim into the installer until #221, and
+`10-static.sh` asserted the installer had a copy of its own so a launcher-only fix could not
+pass. That assertion is retired: there is nothing left to have two of.
+
 The four obvious alternatives, each rejected for a reason worth keeping:
 
 - *Have the installer fix the shell it was run from.* *Impossible*, not merely awkward: a child

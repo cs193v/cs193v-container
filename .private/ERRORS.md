@@ -716,11 +716,19 @@ A third consequence had gone unnoticed for the same reason: `install-cs193v.sh` 
 box in two places — its `die()` and the Intel-Mac refusal heredoc — and the two had drifted
 **a column apart** (69 vs 68). With no right edge there is no width to fail to line up.
 
-**Fix applied:** one `box()` renderer, duplicated verbatim into the installer the way
-`version_lt` already is (it is curl-piped and cannot source anything), with the borders
-**generated** from a single `BOX_W` rather than typed out. Four hand-drawn copies became
+**Fix applied:** one `box()` renderer, duplicated verbatim into the installer -- which at the
+time could source nothing, being a single file a student downloaded on its own -- with the
+borders **generated** from a single `BOX_W` rather than typed out. Four hand-drawn copies became
 none; `box:launcher-draws-the-box-in-one-place` fails if any grows back, and
-`box:both-copies-identical` diffs the two.
+`box:both-copies-identical` diffed the two.
+
+**Since #221 there is one copy and no diff.** `install-cs193v.sh` was split into a bootstrap that
+downloads the course files and a `course-install.sh` that runs afterwards and sources
+`cs193v-ui.sh` out of the tree it fetched, so the duplicate is gone and
+`box:both-copies-identical` is retired with it. What replaced it is stronger for this bug in
+particular: `20-messages.sh` draws the ONE renderer twice, at the launcher's indent and at the
+installer's, and `box_problems` checks both boxes close -- so the missing right edge this entry
+is about is asserted on the thing students actually see rather than on two copies agreeing.
 
 Three things that made this more than a padding change:
 

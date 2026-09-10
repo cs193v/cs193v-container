@@ -80,6 +80,12 @@ ckfail() { local n="$1"; shift; if "$@" >/dev/null 2>&1; then FAIL=$((FAIL+1)); 
 rec()    { printf 'RECORD %-28s %s\n' "$1" "$("${@:2}" 2>&1 | tr '\n' ' ')"; }
 
 DIR="$HOME/cs193v"                        # or wherever the student put it
+# THE INSTALLED TREE IS NOT FLAT, and several checks below used to assume it was: the launcher
+# sits at the top, everything it reads is under .private/, and container.args is under .config/.
+# `cs193v:41` is the launcher's own MESSAGES="$DIR/.private/messages.txt", which is the authority
+# for this. Named once here so a wrong path is one edit rather than nine.
+PRIV="$DIR/.private"                      # Containerfile, messages.txt, course-install*.
+ARGS="$DIR/.config/container.args"
 # The image built on this machine, which is the only image there is: nothing in
 # container.args names one and no environment variable overrides it. The suffix mirrors the
 # launcher's, so this runs against your own instance — see .config/container.args.
@@ -91,17 +97,25 @@ I()  { podman inspect cs193v --format "$1"; }
 
 ## A.1 Static checks — no podman needed
 
+**WHICH INSTALLER, AND WHY `$DIR` HOLDS ONLY ONE OF THEM (#221).** `install-cs193v.sh` is the
+bootstrap a student downloads from the website; it is `export-ignore`d, so it is NOT in the
+installed tree and `$DIR/install-cs193v.sh` does not exist. Every check below that used to name
+it was therefore reading a missing file. What ships is `.private/course-install.sh` — the
+installer proper, which the bootstrap fetches and `exec`s — and that is what these run on. To
+check the bootstrap, run the same commands against wherever you downloaded it.
+
 ```sh
-bash -n "$DIR/cs193v"; bash -n "$DIR/install-cs193v.sh"     # syntax
+INST="$PRIV/course-install.sh"                              # the installer proper; ships
+bash -n "$DIR/cs193v"; bash -n "$INST"                      # syntax
 # bash 4+ constructs that break on macOS's bash 3.2 — expect NO matches.
 # Comments are stripped first (the scripts document the ban, which would self-match) and
 # `|&` requires surrounding whitespace so a sed character class like [&|\\] is not a hit.
-sed 's/#.*//' "$DIR/cs193v" "$DIR/install-cs193v.sh" \
+sed 's/#.*//' "$DIR/cs193v" "$INST" \
   | grep -nE 'declare -A|mapfile|readarray|\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>' \
   && echo "FAIL bash 4+ construct found" || echo "PASS bash 3.2 safe"
 # `read -t` with a fractional timeout is bash 4+ only. Comments stripped first — the
 # scripts document the ban, which would otherwise self-match.
-sed 's/#.*//' "$DIR/cs193v" "$DIR/install-cs193v.sh" \
+sed 's/#.*//' "$DIR/cs193v" "$INST" \
   | grep -nE 'read[^|]*-t *0?\.[0-9]' \
   && echo "FAIL fractional read -t" || echo "PASS no fractional read -t"
 # WHAT THE TWO GREPS ABOVE CANNOT DO is catch a construct that parses on bash 3.2 and 4+ alike
@@ -114,29 +128,38 @@ sed 's/#.*//' "$DIR/cs193v" "$DIR/install-cs193v.sh" \
 # then finds nothing. `case[^#]*` is what keeps the first pattern off the sed and grep SCRIPTS that
 # legitimately hold `[[:space:]]` -- load_args' own trim, and the /etc/wsl.conf greps in the
 # installer. Named by function rather than by line, because these two greps will outlive the numbers.
-grep -nE 'case[^#]*\[:[a-z]+:\]'   "$DIR/cs193v" "$DIR/install-cs193v.sh"   # class in a case bracket
-grep -nE '\$\{[A-Za-z_]+[#%]{1,2}"' "$DIR/cs193v" "$DIR/install-cs193v.sh"  # quoted nested pattern
+grep -nE 'case[^#]*\[:[a-z]+:\]'   "$DIR/cs193v" "$INST"   # class in a case bracket
+grep -nE '\$\{[A-Za-z_]+[#%]{1,2}"' "$DIR/cs193v" "$INST"  # quoted nested pattern
 # No `#` comments inside a line-continued RUN in the Containerfile. The parser does strip
 # them, but if that ever changed, a comment would swallow the command after it and
 # silently produce a broken image.
 awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0; bad=1} {cont=0}
-     END{exit bad?0:1}' "$DIR/Containerfile" \
+     END{exit bad?0:1}' "$PRIV/Containerfile" \
   && echo "FAIL comment inside a continued RUN" || echo "PASS no comments inside continuations"
-command -v shellcheck && shellcheck "$DIR/cs193v" "$DIR/install-cs193v.sh"
-# messages.txt cross-reference: no orphan keys, no missing keys
+command -v shellcheck && shellcheck "$DIR/cs193v" "$INST"
+# Catalogue cross-reference: no orphan keys, no missing keys. ONE PAIR AT A TIME (#221) --
+# there are three catalogues and each is read by one script, so reconciling a pooled set of keys
+# against a pooled set of call sites reports every key of one file as missing from the other.
 # LC_ALL=C throughout: under en_US.UTF-8 sort and comm disagree about punctuation and
 # comm aborts with "file 1 is not in sorted order", so this never actually ran.
 LC_ALL=C comm -3 \
-  <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$DIR/messages.txt" | tr -d '[]' | LC_ALL=C sort -u) \
-  <(grep -ohE 'msg +[a-z0-9._-]+' "$DIR"/cs193v "$DIR"/install-cs193v.sh | awk '{print $2}' | LC_ALL=C sort -u)
-grep -qxF 'projects/*' "$DIR/.gitignore" && echo gitignore-ok
+  <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$PRIV/messages.txt" | tr -d '[]' | LC_ALL=C sort -u) \
+  <(grep -ohE 'msg +[a-z0-9._-]+' "$DIR"/cs193v | awk '{print $2}' | LC_ALL=C sort -u)
+LC_ALL=C comm -3 \
+  <(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$PRIV/course-install-messages.txt" \
+    | tr -d '[]' | LC_ALL=C sort -u) \
+  <(sed 's/^[[:space:]]*#.*//' "$INST" | grep -ohE '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' \
+    | awk '{print $NF}' | LC_ALL=C sort -u)
+# AGAINST THE CHECKOUT, NOT THE TREE: .gitignore is export-ignored, so a student's tree has no
+# copy of it and this is a claim about the repository. Run it from a clone.
+grep -qxF 'projects/*' .gitignore && echo gitignore-ok
 #   -F, not bare -x: `projects/*` as a BRE is "project"+"s"+zero-or-more-"/", so it matched
 #   "projects", "projects/", "projects//" — never the literal line. The check never fired.
 # Containerfile layer order: node < gh < vercel < codex < claude-code, most volatile LAST.
 # Codex sits before Claude Code on cost, not taste: they are the two biggest layers in the file
 # (measured with `podman history`: codex 312 MB, Claude Code 298 MB), and Claude Code's pin is the
 # one most often moved, so it is the one whose bump should not drag the other along.
-grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$DIR/Containerfile"
+grep -nE '^(FROM|RUN|ENV|COPY|USER|ENTRYPOINT|CMD)' "$PRIV/Containerfile"
 ```
 
 ## A.2 Image assertions
@@ -552,7 +575,7 @@ ck still-one-container 1 sh -c 'podman ps -q | wc -l | tr -d " "'
 # plain diff would fail spuriously. comm -13 shows only flags present in the args files
 # but MISSING from the run line, which must be empty.
 MISSING=$(comm -13 <("$DIR/cs193v" --dev-print-command | tr ' ' '\n' | grep -E '^--?[a-z]' | sort -u) \
-                   <(sed 's/#.*//' "$DIR/container.args" 2>/dev/null \
+                   <(sed 's/#.*//' "$ARGS" 2>/dev/null \
                        | tr ' ' '\n' | grep -E '^--?[a-z]' | sort -u))
 if [ -z "$MISSING" ]; then echo "PASS print-command contains every args-file flag"
 else echo "FAIL these args-file flags are missing from the run line:"; echo "$MISSING"; fi
@@ -572,13 +595,13 @@ ckfail refuses-as-root  sudo "$DIR/cs193v"
 cp -a "$DIR" /tmp/vt-copy && ckfail refuses-second-copy /tmp/vt-copy/cs193v && rm -rf /tmp/vt-copy
 
 # config-drift detection — the `podman start` trap
-cp "$DIR/container.args" /tmp/vt-ca.bak
-echo '-p 127.0.0.1:9998:9998' >> "$DIR/container.args"
+cp "$ARGS" /tmp/vt-ca.bak
+echo '-p 127.0.0.1:9998:9998' >> "$ARGS"
 "$DIR/cs193v" --dev-print-command | grep -q 9998 && echo "PASS drift visible in print-command"
 "$DIR/cs193v"     # expect a recreate prompt. Decline -> unchanged. Accept -> then:
 podman port cs193v | grep -q 9998 && echo "PASS recreated with the new flag" \
                                   || echo "FAIL flag never applied"
-cp /tmp/vt-ca.bak "$DIR/container.args"; "$DIR/cs193v" --rebuild
+cp /tmp/vt-ca.bak "$ARGS"; "$DIR/cs193v" --rebuild
 ```
 
 ## A.11 Claude Code assertions
@@ -848,7 +871,8 @@ non-login shell never reads `/etc/paths.d`, which is the student a new terminal 
 the reason the launcher repairs its own PATH rather than the installer printing advice.
 
 Automated as far as it can be: `25-installer.sh :: probe:*` drives the repair's whole truth
-table against both copies of `ensure_podman_path`, and `30-launcher-shim.sh :: probe:*` drives
+table against `ensure_podman_path` — one copy since #221, in `files/cs193v-ui.sh`, where it used
+to be two and the suite's job was proving they agreed — and `30-launcher-shim.sh :: probe:*` drives
 `doctor` and a launch against a fabricated receipt, including the Linux case where the repair
 must NOT fire. What no fixture can answer is whether the real `.pkg` still puts things where its
 own receipt says — `tests/MANUAL.md` has that check, and it belongs to a
@@ -1008,6 +1032,14 @@ be possible" — is the one installer line no tier can execute. The shim tier pr
 cannot hide a real `/usr/bin/curl`; the machine where curl CAN be removed is Linux, where that arm is
 not taken. It is in `tests/fixtures/coverage-allowlist` with that as its reason. If a Mac ever does
 reach it, that is the interesting result and staff want to hear about the machine.
+
+**What #221 changed here, and it is the whole reason the probe has a Linux side worth running.**
+Until the wget arm landed, a Linux machine with no curl never reached `survey` at all — the
+bootstrap needed a downloader before it could fetch the course files, so a stock Ubuntu Desktop
+was refused in the first ten lines with instructions to install one. It now downloads with wget
+and arrives here, where curl is asked for on its own merits: `install_podman`'s macOS arm fetches
+the `.pkg` with it and the launcher uses it afterwards. `26-installer-sandbox.sh :: sb-wget` is
+that machine end to end, and `sb-nodl` takes both tools away and pins the refusal.
 
 ---
 
