@@ -68,6 +68,46 @@ against a fake podman on a pty (`30-launcher-shim.sh :: tailbox:*`). What needs 
 timing, flicker, and whether real podman output is worth reading — none of which is in a
 transcript.
 
+### The installer's progress block (issue #219)
+
+The same obligation as the build's block above, and for the same reason: `ERRORS.md` B18's cursor
+strobe had a perfect transcript. **This one needs eyes after any change to `setup_*` in
+`course-install.sh`, or to `meter_*`.**
+
+`tests/install-sandbox.sh` is the tool — it exists to put you in front of the installer on a
+machine of a chosen shape. Drive it in an 80×24 window:
+
+```sh
+.private/tests/install-sandbox.sh --no-prereqs=podman,ssh   # then: sandbox run
+```
+
+*Expect,* during "Installing podman uidmap openssh-client":
+- A bar, a caption and a box of apt's output, the same furniture the build's block has a minute
+  later. The caption moves through four phases — refreshing, downloading, unpacking, configuring
+  — and the bar reads 0/4, 1/4, 2/4, 3/4 as it goes, reaching 4/4 only on the `✓`.
+- The box keeps moving. During the download it should show `Get:` lines with byte counts; if it
+  sits still *there*, the anchors are matching nothing and the phases are the thing to look at.
+- No flicker at 10 Hz, and the box's right wall dead straight all the way down.
+- **No password prompt underneath it.** `ask_password` primes sudo before this step, and sudo
+  checks its timestamp when the process starts rather than while it runs — so a prompt appearing
+  here at all is the thing to report, not a nuisance.
+- **Resize mid-install**: narrower than 46 columns and back, shorter than twelve rows and back.
+- **Ctrl-C mid-install**: the prompt lands below an intact block and the cursor comes back — type
+  something and check it echoes.
+
+Then make it fail (a bogus package name in `distro_packages`, or `--no-caps`): one red STOP box,
+no live box above it, apt's failing lines readable inside it, and the log path named in the box.
+
+*Automated:* the anchors, the phase order, the piped form, PIPESTATUS and the box's presence are
+`25-installer.sh :: aptbox:*` and `machinebox:*`, against a recorded apt run and podman-fake; the
+anchors against a **real** apt and dnf are `26-installer-sandbox.sh`. What needs a human is
+timing, flicker, and whether the captions read right while they are happening.
+
+**Two arms no fixture reaches.** `sudo installer -pkg` and a real `podman machine init` need a
+Mac. On one, watch that the `.pkg` download shows curl's percentage in the box rather than eight
+blank rows — that is what dropping `-s` buys — and that the VM step reads "Downloading the VM"
+and then "Initializing the VM" rather than sitting on the first.
+
 ### `setup-git` — the four things only GitHub can answer (issue #49)
 
 The sequence, the messages, the redaction and every validator are automated

@@ -896,16 +896,22 @@ ensure_podman_path() {
 METER_STATE=''
 METER_PID=''
 
-# The build's output box: the last few lines podman printed, under the meter's caption row,
-# redrawn three times a second while a build runs (issue #23 left the screen with nothing on it
-# that moves on a human timescale during the four minutes when apt, npm and Chromium are the
-# ones doing the work).
+# The output box: the last few lines the slow command printed, under the meter's caption row,
+# redrawn three times a second (issue #23 left the screen with nothing on it that moves on a
+# human timescale during the four minutes when apt, npm and Chromium are the ones doing the
+# work). The build had it first; since #219 course-install.sh raises one too, around the host
+# package manager, the podman .pkg and `podman machine init`.
 #
 # NOT box(), and not a mode added to it. That one wraps a long line rather than cutting it, is
-# as tall as whatever it is handed, and is duplicated verbatim into install-cs193v.sh with
-# 20-messages.sh rendering both copies to assert they still match -- so teaching it a
-# truncating fixed-height mode would put back the duplication issue #21 removed and would
-# change a renderer that 26 messages depend on. The requirements here are the opposite ones:
+# as tall as whatever it is handed, and is the renderer 26 messages depend on -- so teaching it
+# a truncating fixed-height mode would change all of them to serve this. The requirements here
+# are the opposite ones:
+#
+# (This paragraph used to argue from a second reason -- that box() was "duplicated verbatim into
+# install-cs193v.sh with 20-messages.sh rendering both copies to assert they still match". #221
+# ended both halves of that: the bootstrap draws no box, course-install.sh sources this one, and
+# 20-messages.sh records the removal where the diff used to be. The conclusion is unchanged and
+# the dead evidence is gone.)
 # the height is fixed by the geometry rather than by the content, because a box that changed
 # height between frames would move the rows above it, and for the same reason a long line has
 # to be cut rather than allowed to become two rows.
@@ -1045,8 +1051,9 @@ METER_COLS=80
 METER_LINES=24
 
 # The output box, in body rows and display columns. Zero rows means no box at all, which is
-# what a short or narrow terminal, a non-terminal stdout and every caller other than the build
-# gets -- the block is then exactly the two rows it was before.
+# what a short or narrow terminal, a non-terminal stdout, and any caller that passes no log get
+# -- the block is then exactly the two rows it was before. Passing a log is what asks for one,
+# and two consumers do: the build, and the installer's slow steps (#219).
 #
 # EIGHT ROWS, so the whole block is twelve: half of a default 80x24 terminal, which leaves a
 # dozen rows of what came before it still readable, and visibly less than the `tail -n 12` the
@@ -1231,8 +1238,9 @@ meter_animate() {
 meter_start() {                       # meter_start TOTAL LABEL [LOG]
     [ -t 1 ] || return 0
     # Set before meter_fit, which only looks for room for a box when there is something to put
-    # in it, and before the fork, so that the animator inherits it. Every caller but the build
-    # leaves it empty and gets the two-row block unchanged.
+    # in it, and before the fork, so that the animator inherits it. A caller that leaves it
+    # empty gets the two-row block unchanged -- which is the right answer for a step with
+    # nothing to show, and the wrong one for a step whose output IS the reassurance.
     METER_LOG="${3:-}"
     meter_fit
     METER_ROW=0
@@ -1249,8 +1257,10 @@ meter_start() {                       # meter_start TOTAL LABEL [LOG]
 
 meter_label() {                       # meter_label CUR TOTAL LABEL  -- update in place
     [ -n "$METER_PID" ] || return 0
-    # No retry: the only caller is the container-creation step, which is reached solely after
-    # a build has succeeded, so a marker still standing there would be describing the past.
+    # No retry, and no caller wants one: the launcher reaches this only at the container-creation
+    # step, after a build has succeeded, so a marker still standing there would be describing the
+    # past -- and the installer refuses on the first failure by design, so it never retries at
+    # all. That is also why setup_phase can advance a phase through here (#219).
     meter_write "$1" "$2" '-' "$3"
 }
 
