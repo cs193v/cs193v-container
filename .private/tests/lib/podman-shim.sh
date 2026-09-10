@@ -255,52 +255,11 @@ EOF
 # mechanism, and the same one that cost repo_copy its memo.
 SHIM_LAST="$SHIM_HOST_TMPDIR/cs193v-last.$$"
 
-# TRACED WHEN THERE IS SOMEWHERE TO PUT IT. With CS193V_RUN_DIR set -- which run-tests.sh
-# exports -- every run records which of the installer's lines executed, so a later suite can
-# union them and say what the whole suite reached. PS4 carries $LINENO and the trace goes to
-# fd 9, so the installer's own output is untouched: verified, not assumed, because a trace
-# leaking into stdout would corrupt every assert_says in this file.
-#
-# The line numbers are the ORIGINAL's, because edit_sub substitutes in place and 10-static.sh
-# asserts the copy and the original have the same length. Without that the numbers would drift
-# silently and the gate would measure nothing.
-installer_trace_file() {
-    [ -n "${CS193V_RUN_DIR:-}" ] || return 1
-    mkdir -p "$CS193V_RUN_DIR/trace" 2>/dev/null || return 1
-    # NAMED BY SUITE, not just by pid: the gate has to know WHICH producers reported, so that a
-    # missing one is a named skip rather than a quietly smaller union. run-tests.sh exports
-    # CS193V_SUITE per suite; a direct run of a suite has none, which is itself informative.
-    printf '%s/trace/%s.%s' "$CS193V_RUN_DIR" "${CS193V_SUITE:-standalone}" "$$"
-}
-
 installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> output
-    local script="$1" tf; shift
+    local script="$1"; shift
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    if tf="$(installer_trace_file)"; then
-        # THE TRACE FD COMES FROM lib/shared.sh, and it is NOT 9 -- see the reasoning there. In
-        # short: this variable is EXPORTED, so every descendant of the traced installer inherits
-        # it, including programs the launcher runs; run_timeout owns fd 9 and closes it for its
-        # command; and bash validates BASH_XTRACEFD at startup, so a child arrived naming a closed
-        # fd and wrote a diagnostic into the output this captures.
-        #
-        # A SUBSHELL WITH AN `exec`, rather than a redirection on the env line, because
-        # `exec $fd>>file` is not a redirection -- bash wants the number as a literal, so the open
-        # has to go through eval. Only the OPEN does: the command stays a real argv, which is what
-        # keeps "$@" and $script safe from a second round of word splitting.
-        #
-        # OPENED BEFORE BASH_XTRACEFD EXISTS, and the order is load-bearing: bash validates the
-        # variable on assignment, so setting it first would make THIS shell print the very
-        # diagnostic being avoided. Setting it through `env` keeps it out of this shell entirely.
-        (
-            eval "exec $CS193V_TRACE_FD>>\"\$tf\""
-            env HOME="$SHIM/home" PATH="$SHIM:$PATH" PS4='+${BASH_SOURCE##*/}:${LINENO} ' \
-                BASH_XTRACEFD="$CS193V_TRACE_FD" "$@" \
-                bash -x "$script" </dev/null 2>&1
-        )
-    else
-        env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
-    fi
+    env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
 }
 
 installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] -> rc
@@ -347,21 +306,12 @@ installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
 # shell re-parsing this string. See launcher_tty above and lib/ptyrun.py.
 installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     local keys="$1" script="$2"; shift 2
-    local cmd a tf
+    local cmd a
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
     cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
     for a in "$@"; do cmd="$cmd '$a'"; done
-    if tf="$(installer_trace_file)"; then
-        # No eval needed on this door: it is BUILDING a command string for ptyrun.py, so the fd
-        # number interpolates like any other word. `$CS193V_TRACE_FD>>$tf` has to stay unspaced --
-        # `8 >>file` is the number as an argument, not a redirection. The NUMBER stays bare for
-        # that reason; its target is quoted like every other path here.
-        cmd="$cmd PS4='+\${BASH_SOURCE##*/}:\${LINENO} ' BASH_XTRACEFD=$CS193V_TRACE_FD"
-        cmd="$cmd bash -x '$script' $CS193V_TRACE_FD>>'$tf'"
-    else
-        cmd="$cmd bash '$script'"
-    fi
+    cmd="$cmd bash '$script'"
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 

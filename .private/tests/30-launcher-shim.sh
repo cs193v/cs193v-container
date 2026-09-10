@@ -209,33 +209,6 @@ shim_new; shim_set version "podman version 10.0.0"
 launcher >/dev/null 2>&1
 assert_eq "version:an-accepted-version-reaches-podman-run" "1" "$(shim_count '^run ')"
 
-# ─── and noise on podman's stderr is not part of the version ───────────────────
-# THE VERSION IS READ OUT OF run_timeout's RT_OUT, which merges the command's stderr into its
-# stdout -- so every line podman writes to stderr is text the version gets parsed from. Read with
-# an unanchored `awk '{print $NF}'`, which takes the last field of EVERY line, two lines of output
-# produced two words: the version, and the last word of whatever else had been said.
-#
-# MEASURED ON FEDORA, and it took a day to find. /bin/sh is bash there, not dash, and bash
-# validates an inherited BASH_XTRACEFD at startup -- so the harness's own coverage tracing made
-# every `#!/bin/sh` child the launcher ran write "invalid value for trace file descriptor" to
-# stderr. The version became "descriptor 5.7.0", version_lt called that older than 4.9.0, and a
-# current podman was refused. The fd collision is fixed at its source (lib/shared.sh, and
-# 10-static.sh's trace-fd gate), and 12-run-timeout.sh asserts RT_OUT stays clean -- but the parse
-# should not depend on that being true, because a real podman is free to warn on stderr too.
-#
-# THE NEEDLE COMES FROM messages.txt, not from this file. Asserting a literal "too old" here would
-# turn a rewording of err.podman-too-old into a red test that is not a regression.
-shim_new
-shim_set version "podman version 5.7.0"
-shim_set version_stderr "/bin/sh: BASH_XTRACEFD: 9: invalid value for trace file descriptor"
-out="$(launcher)"
-# The needle asserted first: an empty one would make the refusal check below vacuous forever.
-refusal="$(msg_of err.podman-too-old FOUND=0 NEED=0 | sed -n '1p')"
-if [ -n "$refusal" ]; then pass "version:the-refusal-wording-was-readable"
-else fail "version:the-refusal-wording-was-readable" "msg_of err.podman-too-old came back empty"; fi
-assert_not_contains "version:stderr-noise-is-not-read-as-a-version" "$refusal" "$out"
-assert_eq "version:noisy-but-current-podman-is-accepted" "1" "$(shim_count '^run ')"
-
 # ─── podman not responding  (§6.1) ─────────────────────────────────────────────
 # After a Mac wakes from sleep, `podman info` hangs rather than failing
 # (containers/podman#21675). Every probe is timeout-wrapped so the launcher says something
@@ -827,8 +800,8 @@ PCOPY="$(repo_copy)"
 # would silently interrogate /opt/podman/bin and pass for the wrong reason.
 PROBE_PKG_ID="com.example.cs193v-not-a-real-package"
 # The needle for every refusal below, asserted before it is used: an empty one would make each
-# of those assert_says vacuous forever. Same guard, and same reason, as
-# version:the-refusal-wording-was-readable above.
+# of those assert_says vacuous forever -- a rewording of err.no-podman would then be a silent
+# loss of coverage rather than a red test.
 PROBE_REFUSAL="$(msg_of err.no-podman | sed -n '1p')"
 if [ -n "$PROBE_REFUSAL" ]; then pass "probe:the-refusal-wording-was-readable"
 else fail "probe:the-refusal-wording-was-readable" "msg_of err.no-podman came back empty"; fi

@@ -1072,9 +1072,10 @@ export CS193V_TITLE CS193V_WELCOME CS193V_GOODBYE
 # ─── definitions more than one place needs ─────────────────────────────────────
 # NOT guarded with `[ -r ] &&` the way the strings above are, and the difference is deliberate:
 # a missing strings file costs three assertions their needle, while a missing shared.sh leaves
-# CS193V_TRACE_FD unset -- and podman-shim.sh builds an installer run around it. Sourced
-# unconditionally so the failure is a loud one here rather than a `set -u` abort three files
-# away with nothing saying which file was absent.
+# msg_of and carve_func undefined -- and 20-messages.sh, 30-launcher-shim.sh, 10-static.sh and
+# 25-installer.sh each build assertions on one of them. Sourced unconditionally so the failure
+# is a loud one here rather than a `set -u` abort three files away with nothing saying which
+# file was absent.
 # shellcheck source=shared.sh
 . "$TESTS_DIR/lib/shared.sh" || {
     printf 'assert.sh: cannot read %s\n' "$TESTS_DIR/lib/shared.sh" >&2
