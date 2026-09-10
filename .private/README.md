@@ -754,6 +754,48 @@ blocked in `awk` and cannot animate), a state file, a `WINCH` refit and an eight
 Teaching it a "list of independent rows" mode is the trade already rejected for `box()` versus the
 tail box — the requirements are the opposite ones.
 
+#### The same block around the installer's slow steps (issue #219)
+
+`meter_*` has a second consumer now. `course-install.sh` raises the same block around the host
+package manager, the podman `.pkg` on a Mac and `podman machine init` — the three steps that take
+minutes and used to spend them filling the terminal with apt's `Get:` lines and podman's blob
+digests, un-indented, in the middle of an otherwise two-space-indented step list.
+
+**Nothing in `cs193v-ui.sh` had to change to carry it**, which is the useful thing to know before
+adding a third consumer. `meter_draw` already draws spinner-only when the total is zero, a
+non-empty `METER_LOG` is already the whole "is there a box?" switch, and the block's two-column
+indent already matches the installer's `step()`. What the installer adds is a *reader*, in
+`course-install.sh` beside its callers, exactly as `build_progress` lives beside the launcher's.
+
+Four things worth knowing before touching it:
+
+- **It is a second reader, not a second writer.** The state file the animator reads still has one
+  shell writer — `meter_label` — and `setup_phase` goes through it rather than reproducing
+  `build_progress`'s awk `state()`. A reader that only has to notice one line shape per phase
+  does not need awk: it sees a few hundred lines rather than a build's thousands, and verifies
+  nothing against them. So the anchors are greppable `case` patterns, and the four-field record
+  gained no author. That record still has no validation, which is filed rather than fixed.
+- **The phases are a fixed list per call site, not a count discovered from the output.** apt names
+  every package three times (`Get:`, `Unpacking `, `Setting up `), so a package-count bar either
+  fills three times or stalls through two passes of three; and dnf's `n/N` grammar differs between
+  dnf4 and dnf5, which would make it a per-Fedora-version parse whose failure mode is a *wrong
+  number*. Four phases on Debian, two on Fedora — rpm exposes no unpack/configure split — and two
+  each for the `.pkg` and the VM. **The bar counts phases COMPLETED**, so it is empty during the
+  first and full only at the end, rather than reading 4/4 through the longest pass.
+- **A dead anchor leaves the caption stale, never wrong**, and it has to stay that way round: a
+  caption is side text, and the one thing it must not be able to do is stop an install. The
+  everyday version is a warm apt cache, which prints no `Get:` line at all, so the bar steps twice
+  at once.
+- **Every refusal inside a block carries the log's tail**, because hiding the output is exactly
+  what made `err.build-failed` a lie in ERRORS.md B17. `$SETUP_LOG` outlives the run and is named
+  in the message, the way `$BUILD_LOG` is the artefact to ask a student for.
+
+Two deliberate omissions. **`setup_machine`'s resize arm keeps its raw output**: `grow_machine_disk`
+prints a `notes()` block in the middle of it, and the animator overdraws anything else within
+100 ms. And **`curl` lost its `-s` for the `.pkg` download** rather than gaining a box with nothing
+in it — measured, curl writes its progress meter to stderr even through a pipe, so `2>&1` puts a
+percentage, a rate and an ETA in the one phase that has nothing else to look at.
+
 #### The installer's own text catalogue
 
 **There are three catalogues, one per consumer.** `messages.txt` is the launcher's,
