@@ -237,11 +237,18 @@ export VT_SELINUX_LOCAL VT_MOUNT_Z
 # ─── reading one function out of a script that cannot be sourced ───────────────
 #
 # install-cs193v.sh SOURCES NOTHING AND CANNOT BE SOURCED, by design rather than by accident:
-# a student downloads that one file, checks the SHA-256 published next to it, and runs it, and
-# its own header says why it cannot even use messages.txt ("messages.txt does not exist until
-# the download step succeeds"). So there is no shared file the installer and a test can both
-# read a table out of. The only way for a test to check the installer's own values without
-# writing a second copy of them is to carve the function out and source the carving.
+# a student downloads that one file, checks the SHA-256 published next to it, and runs it. So
+# there is no shared file the bootstrap and a test can both read a table out of, and the only
+# way for a test to check its own values without writing a second copy of them is to carve the
+# function out and source the carving.
+#
+# THAT IS NOW TRUE OF THE BOOTSTRAP ALONE (#221). The sentence used to carry a second clause --
+# that the installer could not even use messages.txt, because it does not exist until the
+# download succeeds -- and that clause is gone: the download is the FIRST thing now, so
+# course-install.sh sources cs193v-ui.sh and reads course-install-messages.txt out of the tree
+# it was fetched with. Anything in the installer PROPER can therefore be tested by pointing
+# MESSAGES at the real catalogue instead of carving, which is what 20-messages.sh's itext:* and
+# 25-installer.sh's check-disk:* now do. Carving is for the ~150-line bootstrap.
 #
 # THE IDIOM IS NOT NEW HERE -- 25-installer.sh has done exactly this for version_lt since it
 # was written. It is lifted into a function because it was about to be spelled out a fourth

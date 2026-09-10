@@ -33,7 +33,7 @@ set -u
 #  THE SETTINGS COURSE STAFF EDIT
 #
 #  THE WORDS ARE NOT HERE ANY MORE. Every student-facing string this script prints is in
-#  THE TEXT STUDENTS SEE at the foot of the file, reached by `txt <key>` -- one block of prose
+#  THE TEXT STUDENTS SEE at the foot of the file, reached by `msg <key>` -- one block of prose
 #  with no shell syntax in it (issue #116). What is left here is the settings: which podman
 #  version to install on a Mac, and how much of a Mac podman's virtual machine gets.
 #
@@ -88,7 +88,7 @@ MAC_VM_DISK_GB=64
 
 say_welcome() {
     printf '\n'
-    txt welcome
+    msg welcome
     printf '\n'
 }
 
@@ -97,7 +97,7 @@ say_welcome() {
 # missing right edge is why that was invisible for so long (issue #21).
 say_intel_mac() {
     printf '\n'
-    { printf '\n'; txt err.intel-mac; printf '\n'; } | box STOP "$C_RED" '  '
+    { printf '\n'; msg err.intel-mac; printf '\n'; } | box STOP "$C_RED" '  '
     printf '\n'
 }
 
@@ -120,14 +120,14 @@ say_intel_mac() {
 say_unsupported_distro() {            # say_unsupported_distro PRETTY_NAME
     printf '\n'
     { printf '\n'
-      txt err.unsupported-distro "PRETTY_NAME=${1:-a Linux we do not recognise}"
+      msg err.unsupported-distro "PRETTY_NAME=${1:-a Linux we do not recognise}"
       printf '\n'; } | box STOP "$C_RED" '  '
     printf '\n'
 }
 
 say_done() {
     printf '\n'
-    txt finished "DIR=$DIR"
+    msg finished "DIR=$DIR"
     printf '\n'
 }
 
@@ -137,10 +137,10 @@ say_done() {
 
 step()  { printf '  %s%s%s\n' "$C_CYAN" "$*" "$C_OFF"; }
 ok()    { printf '    %s✓%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
-skip()  { printf '    %s· %s %s%s\n' "$C_DIM" "$*" "$(txt skip.suffix)" "$C_OFF"; }
+skip()  { printf '    %s· %s %s%s\n' "$C_DIM" "$*" "$(msg skip.suffix)" "$C_OFF"; }
 
 # ─── the text catalogue ────────────────────────────────────────────────────────
-# txt <key> [NAME=value ...] -- one entry out of THE TEXT STUDENTS SEE at the foot of this
+# msg <key> [NAME=value ...] -- one entry out of THE TEXT STUDENTS SEE at the foot of this
 # file. This is files/cs193v-ui.sh's msg() reading a heredoc instead of a file, and it is a
 # fifth deliberate duplication alongside box(), version_lt, menu and ensure_podman_path, for
 # the same reason all four exist: this script can source nothing.
@@ -156,34 +156,6 @@ skip()  { printf '    %s· %s %s%s\n' "$C_DIM" "$*" "$(txt skip.suffix)" "$C_OFF
 # does. Much of what makes those messages right is the note explaining why they say what they
 # say -- see the Mac old-podman refusal -- and without this rule every one of those notes would
 # have had to stay behind in the logic, next to a call site that no longer holds the words.
-txt() {
-    local key="$1"; shift
-    local out kv n v ph head tail
-    out="$(text_catalogue | awk -v k="[[$key]]" '
-        $0 == k { found = 1; next }
-        /^\[\[.*\]\]$/ { if (found) exit }
-        found && /^#/ { next }
-        found { print }
-    ')"
-    if [ -z "$out" ]; then printf '(missing message: %s)\n' "$key"; return 1; fi
-    for kv in "$@"; do
-        n="${kv%%=*}"; v="${kv#*=}"
-        ph="{{$n}}"
-        # Literal split-and-rejoin, carried over from msg() with its reasoning: sed cannot put
-        # a newline in its replacement text and {{HOW}} is multi-line, and ${out//"$ph"/$v}
-        # expands & in the replacement on bash 5.2 but takes it literally on 3.2 -- so a value
-        # containing & would render differently on Linux than on a Mac.
-        head=''; tail="$out"
-        while :; do
-            case "$tail" in
-                *"$ph"*) head="$head${tail%%"$ph"*}$v"; tail="${tail#*"$ph"}" ;;
-                *)       break ;;
-            esac
-        done
-        out="$head$tail"
-    done
-    printf '%s\n' "$out"
-}
 
 # note() prints exactly one line, so a multi-line advisory is one catalogue entry piped here
 # rather than two or three consecutive note calls with the words split across them.
@@ -279,12 +251,12 @@ need() { NEEDS[${#NEEDS[@]}]="$1"; NEEDS_WHY[${#NEEDS_WHY[@]}]="$2"; }
 
 
 survey() {
-    step "$(txt step.survey)"
+    step "$(msg step.survey)"
 
     if [ "$PLAT" = macos ] && [ "$(uname -m)" != arm64 ]; then
         say_intel_mac; exit 1
     fi
-    ok "$(txt ok.platform "PLAT=$PLAT" "ARCH=$(uname -m)")"
+    ok "$(msg ok.platform "PLAT=$PLAT" "ARCH=$(uname -m)")"
 
     # THE SECOND UNSUPPORTED-MACHINE REFUSAL, beside the Intel Mac one above and for the same
     # reason: stop at "Looking at your computer", before ask_consent has offered to change
@@ -309,7 +281,7 @@ survey() {
     # can report or act on.
     ensure_podman_path
     if [ -n "$PODMAN_PATH_ADDED" ]; then
-        txt note.podman-path "DIR=$PODMAN_PATH_ADDED" | notes
+        msg note.podman-path "DIR=$PODMAN_PATH_ADDED" | notes
     fi
     if command -v podman >/dev/null 2>&1; then
         local v; v="$(podman --version 2>/dev/null | awk '{print $NF}')"
@@ -345,39 +317,39 @@ survey() {
                 local where how
                 where="$(command -v podman 2>/dev/null)"
                 case "$where" in
-                    /opt/homebrew/*) how="$(txt err.podman-old-mac.how-homebrew)" ;;
-                    *)               how="$(txt err.podman-old-mac.how-pkg \
+                    /opt/homebrew/*) how="$(msg err.podman-old-mac.how-homebrew)" ;;
+                    *)               how="$(msg err.podman-old-mac.how-pkg \
                                             "WHERE=${where:-/opt/podman/bin/podman}")" ;;
                 esac
-                die "$(txt err.podman-old-mac "V=$v" "MIN=$MIN_PODMAN" "HOW=$how")"
+                die "$(msg err.podman-old-mac "V=$v" "MIN=$MIN_PODMAN" "HOW=$how")"
             fi
             # THE COMMAND COMES FROM THE TABLE, so there is one source for it and a family added
             # later cannot be told to run apt. On Debian this renders exactly the string it always
             # did, which is what keeps 25-installer.sh's podman-old:says-how-to-upgrade green.
-            die "$(txt err.podman-old-linux "V=$v" "MIN=$MIN_PODMAN" "UPGRADE=$PM_UPGRADE")"
+            die "$(msg err.podman-old-linux "V=$v" "MIN=$MIN_PODMAN" "UPGRADE=$PM_UPGRADE")"
         fi
-        ok "$(txt ok.podman "V=$v")"
+        ok "$(msg ok.podman "V=$v")"
     else
         DO_PODMAN_INSTALL=yes
         case "$PLAT" in
-            macos) need "$(txt need.podman-mac)" "$(txt need.podman-mac.why)" ;;
-            *)     need "$(txt need.podman-linux \
-                            "PKGS=$PKG_PODMAN${PKG_UIDMAP:+ $(txt need.podman-linux.and "PKG=$PKG_UIDMAP")}")" \
-                        "$(txt need.podman-linux.why)" ;;
+            macos) need "$(msg need.podman-mac)" "$(msg need.podman-mac.why)" ;;
+            *)     need "$(msg need.podman-linux \
+                            "PKGS=$PKG_PODMAN${PKG_UIDMAP:+ $(msg need.podman-linux.and "PKG=$PKG_UIDMAP")}")" \
+                        "$(msg need.podman-linux.why)" ;;
         esac
     fi
 
     # The ssh CLIENT, not a server. cs193v runs it on this computer to carry the course ports
     # into the container's own loopback; nothing listens for incoming ssh anywhere.
     if command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1; then
-        ok "$(txt ok.ssh)"
+        ok "$(msg ok.ssh)"
     elif [ "$PLAT" = macos ]; then
         # Every supported macOS ships openssh-client, so this means something unusual about
         # the machine, and guessing at a fix would be worse than saying so.
-        die "$(txt err.ssh-missing-mac)"
+        die "$(msg err.ssh-missing-mac)"
     else
         DO_SSH_INSTALL=yes
-        need "$(txt need.ssh "PKG=$PKG_SSH")" "$(txt need.ssh.why)"
+        need "$(msg need.ssh "PKG=$PKG_SSH")" "$(msg need.ssh.why)"
     fi
 
     # THE DOWNLOAD TOOL, and the one thing this script assumed it could run and could not. curl
@@ -399,14 +371,14 @@ survey() {
     # nothing extra either: podman and uidmap are absent from that same desktop image, so apt is
     # already running and the password has already been asked for.
     if command -v curl >/dev/null 2>&1; then
-        ok "$(txt ok.curl)"
+        ok "$(msg ok.curl)"
     elif [ "$PLAT" = macos ]; then
         # Every supported macOS ships /usr/bin/curl, so this is the ssh case again -- something
         # unusual about the machine, and guessing at a fix would be worse than saying so.
-        die "$(txt err.curl-missing-mac)"
+        die "$(msg err.curl-missing-mac)"
     else
         DO_CURL_INSTALL=yes
-        need "$(txt need.curl "PKG=$PKG_CURL")" "$(txt need.curl.why)"
+        need "$(msg need.curl "PKG=$PKG_CURL")" "$(msg need.curl.why)"
     fi
     # THIS ITEM IS REACHED BY A MACHINE THAT ALREADY DOWNLOADED SUCCESSFULLY, which is the part
     # worth stating: since #221 install-cs193v.sh needs curl OR wget before it can fetch anything,
@@ -433,7 +405,7 @@ survey() {
     # names the missing package instead.
     if [ "$PLAT" != macos ]; then
         if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
-            ok "$(txt ok.uidmap)"
+            ok "$(msg ok.uidmap)"
         else
             # AN IMPOSSIBLE STATE ON SOME FAMILIES, refused rather than half-handled. PKG_UIDMAP
             # is empty wherever the setuid helpers are not a separable package -- on Fedora they
@@ -442,14 +414,14 @@ survey() {
             # read "Install " and the install would ask for nothing. Same treatment as the missing
             # ssh on a Mac below -- say so and stop, rather than guess.
             if [ -z "$PKG_UIDMAP" ]; then
-                die "$(txt err.uidmap-missing)"
+                die "$(msg err.uidmap-missing)"
             fi
             DO_UIDMAP_INSTALL=yes
             # ONE ITEM PER APT CALL. When podman is being installed, its own consent item already
             # says "(and uidmap)" and its package list already carries it, so a second item here
             # would describe one change twice.
             if [ "$DO_PODMAN_INSTALL" = no ]; then
-                need "$(txt need.uidmap "PKG=$PKG_UIDMAP")" "$(txt need.uidmap.why)"
+                need "$(msg need.uidmap "PKG=$PKG_UIDMAP")" "$(msg need.uidmap.why)"
             fi
         fi
     fi
@@ -460,35 +432,35 @@ survey() {
             local want_mb; want_mb="$(mac_vm_target_mb)"
             if [ -n "$vm_mb" ] && [ "$vm_mb" -lt "$(( want_mb * 80 / 100 ))" ]; then
                 DO_MACHINE_RESIZE=yes
-                need "$(txt need.vm-memory "HAVE=$vm_mb" "WANT=$want_mb")" \
-                     "$(txt need.vm-memory.why)"
+                need "$(msg need.vm-memory "HAVE=$vm_mb" "WANT=$want_mb")" \
+                     "$(msg need.vm-memory.why)"
             else
-                skip "$(txt skip.vm-size)"
+                skip "$(msg skip.vm-size)"
             fi
         else
             DO_MACHINE_INIT=yes
-            ok "$(txt ok.vm-will-be-created)"
+            ok "$(msg ok.vm-will-be-created)"
         fi
     fi
 
     if [ "$PLAT" = wsl ]; then
         if [ -f /etc/wsl.conf ] && grep -q '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true' /etc/wsl.conf; then
-            skip "$(txt skip.wsl-systemd)"
+            skip "$(msg skip.wsl-systemd)"
         elif [ -f /etc/wsl.conf ]; then
             DO_WSLCONF=yes
-            need "$(txt need.wslconf)" "$(txt need.wslconf.why)"
+            need "$(msg need.wslconf)" "$(msg need.wslconf.why)"
         else
             DO_WSLCONF=yes
-            ok "$(txt ok.wsl-systemd-planned)"
+            ok "$(msg ok.wsl-systemd-planned)"
         fi
     fi
 
     if [ "$PLAT" != macos ]; then
         if grep -q "^$(id -un):" /etc/subuid 2>/dev/null; then
-            skip "$(txt skip.subuid)"
+            skip "$(msg skip.subuid)"
         else
             DO_SUBUID=yes
-            need "$(txt need.subuid)" "$(txt need.subuid.why)"
+            need "$(msg need.subuid)" "$(msg need.subuid.why)"
         fi
     fi
 }
@@ -504,11 +476,11 @@ mac_vm_target_mb() {
 
 ask_consent() {
     if [ "${#NEEDS[@]}" -eq 0 ]; then
-        step "$(txt step.nothing-to-change)"
+        step "$(msg step.nothing-to-change)"
         return 0
     fi
     printf '\n'
-    step "$(txt step.consent "N=${#NEEDS[@]}")"
+    step "$(msg step.consent "N=${#NEEDS[@]}")"
     printf '\n'
     local i=0
     while [ "$i" -lt "${#NEEDS[@]}" ]; do
@@ -517,10 +489,10 @@ ask_consent() {
         printf '\n'
         i=$((i + 1))
     done
-    menu 0 "$(txt menu.consent.stop)" "$(txt menu.consent.go)"
+    menu 0 "$(msg menu.consent.stop)" "$(msg menu.consent.go)"
     if [ "$MENU_CHOICE" -ne 1 ]; then
         printf '\n'
-        txt consent.declined
+        msg consent.declined
         printf '\n'
         exit 0
     fi
@@ -528,17 +500,17 @@ ask_consent() {
 
 # ─── steps ─────────────────────────────────────────────────────────────────────
 choose_dir() {
-    step "$(txt step.choose-dir)"
+    step "$(msg step.choose-dir)"
     if [ -n "${CS193V_DIR:-}" ]; then
-        DIR="$CS193V_DIR"; ok "$(txt ok.dir-from-env "DIR=$DIR")"; return
+        DIR="$CS193V_DIR"; ok "$(msg ok.dir-from-env "DIR=$DIR")"; return
     fi
     if [ ! -t 0 ]; then DIR="$DEFAULT_DIR"; ok "$DIR"; return; fi
     printf '\n'
-    menu 0 "$(txt menu.dir.default "DEFAULT=$DEFAULT_DIR")" "$(txt menu.dir.other)"
+    menu 0 "$(msg menu.dir.default "DEFAULT=$DEFAULT_DIR")" "$(msg menu.dir.other)"
     if [ "$MENU_CHOICE" -eq 0 ]; then
         DIR="$DEFAULT_DIR"
     else
-        printf '    %s ' "$(txt prompt.path)"; IFS= read -r DIR
+        printf '    %s ' "$(msg prompt.path)"; IFS= read -r DIR
         case "$DIR" in
             '')  DIR="$DEFAULT_DIR" ;;
             # ${DIR#"~"/} WITH THE TILDE QUOTED. The pattern half of a #-expansion is
@@ -577,7 +549,7 @@ choose_dir() {
 install_podman() {
     if [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_SSH_INSTALL" = no ] \
        && [ "$DO_CURL_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = no ]; then
-        skip "$(txt skip.prereqs)"; return
+        skip "$(msg skip.prereqs)"; return
     fi
     # ${pkgs:+$pkgs } RATHER THAN "$pkgs name", so an empty list does not open with a space.
     # It never showed while the only way in was a machine missing podman as well: `Installing
@@ -593,7 +565,7 @@ install_podman() {
     [ "$DO_CURL_INSTALL" = yes ]   && pkgs="${pkgs:+$pkgs }$PKG_CURL${PKG_CA:+ $PKG_CA}"
     # ONLY WHEN PODMAN IS NOT ALREADY BRINGING IT, or apt would be handed the same name twice.
     [ "$DO_PODMAN_INSTALL" = no ] && [ "$DO_UIDMAP_INSTALL" = yes ] && pkgs="${pkgs:+$pkgs }$PKG_UIDMAP"
-    step "$(txt step.installing "PKGS=${pkgs:-podman}")"
+    step "$(msg step.installing "PKGS=${pkgs:-podman}")"
     case "$PLAT" in
         linux|wsl)
             # ONE REFRESH STEP, AND ONLY WHERE THERE IS ONE. apt needs its index refreshed
@@ -602,21 +574,21 @@ install_podman() {
             # does nothing. Not a special case for Fedora -- an absent step rather than a
             # different one.
             # shellcheck disable=SC2086   # deliberately word-split: PM_REFRESH is a command line
-    [ -n "$PM_REFRESH" ] && { sudo $PM_REFRESH || die "$(txt err.refresh-failed "CMD=$PM_REFRESH")"; }
+    [ -n "$PM_REFRESH" ] && { sudo $PM_REFRESH || die "$(msg err.refresh-failed "CMD=$PM_REFRESH")"; }
             # shellcheck disable=SC2086   # deliberately word-split: both are lists of words
-            sudo $PM_INSTALL $pkgs || die "$(txt err.install-failed "PKGS=$pkgs")"
+            sudo $PM_INSTALL $pkgs || die "$(msg err.install-failed "PKGS=$pkgs")"
             ;;
         macos)
             local arch pkg url
             arch="$(uname -m)"
             pkg="$(mktemp "${TMPDIR:-/tmp}/podman.XXXXXX").pkg"
             url="https://github.com/containers/podman/releases/download/v${PODMAN_MACOS_VERSION}/podman-installer-macos-${arch}.pkg"
-            note "$(txt note.downloading "URL=$url")"
+            note "$(msg note.downloading "URL=$url")"
             if ! curl -fsSL --retry 5 -o "$pkg" "$url"; then
-                die "$(txt err.podman-download)"
+                die "$(msg err.podman-download)"
             fi
-            note "$(txt note.password)"
-            sudo installer -pkg "$pkg" -target / || die "$(txt err.podman-installer)"
+            note "$(msg note.password)"
+            sudo installer -pkg "$pkg" -target / || die "$(msg err.podman-installer)"
             rm -f "$pkg"
             # NOT `export PATH="/opt/podman/bin:/usr/local/bin:$PATH"`. Where the .pkg puts
             # things is now asked of the receipt it just wrote rather than assumed here, so this
@@ -634,64 +606,64 @@ install_podman() {
     # never runs /etc/zprofile, so it never reads /etc/paths.d, so a new window fixes this for
     # some students and not others (issue #121). Reaching here means the receipt did not answer
     # either, which is a changed .pkg rather than anything the student can do.
-    command -v podman >/dev/null 2>&1 || die "$(txt err.podman-unrunnable)"
-    ok "$(txt ok.podman-version "V=$(podman --version | awk '{print $NF}')")"
+    command -v podman >/dev/null 2>&1 || die "$(msg err.podman-unrunnable)"
+    ok "$(msg ok.podman-version "V=$(podman --version | awk '{print $NF}')")"
     if [ "$DO_SSH_INSTALL" = yes ]; then
-        command -v ssh >/dev/null 2>&1 || die "$(txt err.ssh-not-on-path)"
-        ok "$(txt ok.ssh-installed)"
+        command -v ssh >/dev/null 2>&1 || die "$(msg err.ssh-not-on-path)"
+        ok "$(msg ok.ssh-installed)"
     fi
     # ASKED FOR AGAIN AFTER INSTALLING, per prerequisite, for the reason the podman check above
     # gives: apt can exit 0 having put something somewhere this shell's PATH does not look, and
     # the next step to notice would be a download that fails like a network problem.
     if [ "$DO_CURL_INSTALL" = yes ]; then
-        command -v curl >/dev/null 2>&1 || die "$(txt err.curl-not-on-path)"
-        ok "$(txt ok.curl-installed)"
+        command -v curl >/dev/null 2>&1 || die "$(msg err.curl-not-on-path)"
+        ok "$(msg ok.curl-installed)"
     fi
     if [ "$DO_UIDMAP_INSTALL" = yes ]; then
-        command -v newuidmap >/dev/null 2>&1 || die "$(txt err.uidmap-not-on-path)"
-        ok "$(txt ok.uidmap-installed)"
+        command -v newuidmap >/dev/null 2>&1 || die "$(msg err.uidmap-not-on-path)"
+        ok "$(msg ok.uidmap-installed)"
     fi
 }
 
 setup_wslconf() {
     [ "$DO_WSLCONF" = yes ] || return 0
-    step "$(txt step.wslconf)"
+    step "$(msg step.wslconf)"
     if [ -f /etc/wsl.conf ] && grep -q '^[[:space:]]*\[boot\]' /etc/wsl.conf; then
         sudo sed -i 's/^[[:space:]]*\[boot\][[:space:]]*$/[boot]\nsystemd=true/' /etc/wsl.conf
     else
         printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null
     fi
-    ok "$(txt ok.wslconf)"
-    txt note.wslconf-restart "DISTRO=$WSL_DISTRO" | notes
+    ok "$(msg ok.wslconf)"
+    msg note.wslconf-restart "DISTRO=$WSL_DISTRO" | notes
 }
 
 setup_subuid() {
     [ "$DO_SUBUID" = yes ] || return 0
-    step "$(txt step.subuid)"
+    step "$(msg step.subuid)"
     local u; u="$(id -un)"
     sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$u" \
-        || die "$(txt err.subuid-failed "USER=$u")"
-    ok "$(txt ok.subuid "USER=$u")"
+        || die "$(msg err.subuid-failed "USER=$u")"
+    ok "$(msg ok.subuid "USER=$u")"
 }
 
 setup_machine() {
     [ "$PLAT" = macos ] || return 0
     local want; want="$(mac_vm_target_mb)"
     if [ "$DO_MACHINE_INIT" = yes ]; then
-        step "$(txt step.machine-create "WANT=$want" "DISK=$MAC_VM_DISK_GB")"
+        step "$(msg step.machine-create "WANT=$want" "DISK=$MAC_VM_DISK_GB")"
         podman machine init --memory "$want" --disk-size "$MAC_VM_DISK_GB" --now \
-            || die "$(txt err.machine-create)"
-        ok "$(txt ok.machine-created)"
+            || die "$(msg err.machine-create)"
+        ok "$(msg ok.machine-created)"
     elif [ "$DO_MACHINE_RESIZE" = yes ]; then
-        step "$(txt step.machine-resize "WANT=$want")"
+        step "$(msg step.machine-resize "WANT=$want")"
         podman machine stop >/dev/null 2>&1
-        podman machine set --memory "$want" || die "$(txt err.machine-resize)"
+        podman machine set --memory "$want" || die "$(msg err.machine-resize)"
         grow_machine_disk
-        podman machine start || die "$(txt err.machine-restart)"
-        ok "$(txt ok.machine-resized)"
+        podman machine start || die "$(msg err.machine-restart)"
+        ok "$(msg ok.machine-resized)"
     else
         podman machine start >/dev/null 2>&1 || true
-        skip "$(txt skip.machine)"
+        skip "$(msg skip.machine)"
         grow_machine_disk_when_stopped
     fi
 }
@@ -711,9 +683,9 @@ grow_machine_disk() {
     have="$(podman machine inspect --format '{{.Resources.DiskSize}}' 2>/dev/null | head -1)"
     case "$have" in ''|*[!0-9]*) return 0 ;; esac
     [ "$have" -ge "$MAC_VM_DISK_GB" ] && return 0
-    txt note.growing-disk "HAVE=$have" "WANT=$MAC_VM_DISK_GB" | notes
+    msg note.growing-disk "HAVE=$have" "WANT=$MAC_VM_DISK_GB" | notes
     podman machine set --disk-size "$MAC_VM_DISK_GB" \
-        || note "$(txt note.grow-failed)"
+        || note "$(msg note.grow-failed)"
 }
 
 # The same, for the path where nothing else needed the machine stopped. `podman machine
@@ -745,14 +717,14 @@ grow_machine_disk_when_stopped() {
 # tar can exit 0 having written only some entries, and $DIR can be out of space or unwritable.
 # chmod below catches only the launcher.
 install_files() {
-    step "$(txt step.fetch)"
-    mkdir -p "$DIR" || die "$(txt err.mkdir-failed "DIR=$DIR")"
+    step "$(msg step.fetch)"
+    mkdir -p "$DIR" || die "$(msg err.mkdir-failed "DIR=$DIR")"
     tar xzf "$BOOT_TARBALL" --strip-components=1 -C "$DIR" \
-        || die "$(txt err.unpack-failed "DIR=$DIR")"
+        || die "$(msg err.unpack-failed "DIR=$DIR")"
     for f in cs193v .config/container.args .private/messages.txt .private/Containerfile; do
-        [ -s "$DIR/$f" ] || die "$(txt err.unpack-incomplete "FILE=$f")"
+        [ -s "$DIR/$f" ] || die "$(msg err.unpack-incomplete "FILE=$f")"
     done
-    chmod +x "$DIR/cs193v" || die "$(txt err.chmod-failed "DIR=$DIR")"
+    chmod +x "$DIR/cs193v" || die "$(msg err.chmod-failed "DIR=$DIR")"
     mkdir -p "$DIR/projects" "$DIR/.config"
     ok "$DIR"
 }
@@ -770,11 +742,11 @@ install_files() {
 # STRUCT field fails the whole call, so a field that has always existed keeps this a test of
 # the runtime rather than of the podman version.
 check_podman() {
-    step "$(txt step.check-podman)"
+    step "$(msg step.check-podman)"
     if ! podman info --format '{{.Host.Arch}}' >/dev/null 2>&1; then
-        die "$(txt err.podman-mute)"
+        die "$(msg err.podman-mute)"
     fi
-    ok "$(txt ok.podman-working)"
+    ok "$(msg ok.podman-working)"
 }
 
 # Build the course container, rather than download one.
@@ -788,8 +760,8 @@ check_podman() {
 # The launcher prints its own progress and draws its own STOP box on failure, so this
 # adds neither.
 build_image() {
-    step "$(txt step.build)"
-    txt note.build-slow | notes
+    step "$(msg step.build)"
+    msg note.build-slow | notes
     # --rebuild, which reads oddly for a first install and is right anyway: it is the launcher's
     # only container-creating verb, and with no image on the machine yet its first act is to
     # build one. There is deliberately no separate --build to call -- one verb means the path a
@@ -798,7 +770,7 @@ build_image() {
     # Nothing here needs a terminal: --rebuild prompts for nothing, which is what lets this run
     # under `curl | bash` and under the test suite alike.
     "$DIR/cs193v" --rebuild || exit 1
-    ok "$(txt ok.built)"
+    ok "$(msg ok.built)"
 }
 
 # Enough room to BUILD, which is a different question from enough room to run, and the
@@ -844,16 +816,16 @@ check_disk() {
     [ "$alloc" -gt 0 ] || return 0
     free_gb=$(( (alloc - used) / 1073741824 ))
     if [ "$free_gb" -lt 8 ]; then
-        txt note.low-disk "FREE=$free_gb" | notes
+        msg note.low-disk "FREE=$free_gb" | notes
     else
-        ok "$(txt ok.disk-free "FREE=$free_gb")"
+        ok "$(msg ok.disk-free "FREE=$free_gb")"
     fi
 }
 
 smoke_test() {
-    step "$(txt step.smoke)"
-    "$DIR/cs193v" --dev-print-command >/dev/null || die "$(txt err.launcher-config "DIR=$DIR")"
-    ok "$(txt ok.launcher-config)"
+    step "$(msg step.smoke)"
+    "$DIR/cs193v" --dev-print-command >/dev/null || die "$(msg err.launcher-config "DIR=$DIR")"
+    ok "$(msg ok.launcher-config)"
     # That the IMAGE EXISTS, which nothing else here checks. Without this the script can
     # print "Setup finished" over an installation with no runnable container in it --
     # the same shape of failure as ERRORS.md A6, where a truncated download passed.
@@ -864,11 +836,11 @@ smoke_test() {
     # what is written here. Deliberately unsuffixed: CS193V_INSTANCE is a staff development
     # tool and the installer never runs under one (see CLAUDE.md).
     if ! podman image exists localhost/cs193v:local; then
-        die "$(txt err.no-image "DIR=$DIR")"
+        die "$(msg err.image-missing-after-build "DIR=$DIR")"
     fi
-    ok "$(txt ok.container-present)"
-    if "$DIR/cs193v" doctor >/dev/null 2>&1; then ok "$(txt ok.doctor-runs)"
-    else note "$(txt note.doctor-problems "DIR=$DIR")"; fi
+    ok "$(msg ok.container-present)"
+    if "$DIR/cs193v" doctor >/dev/null 2>&1; then ok "$(msg ok.doctor-runs)"
+    else note "$(msg note.doctor-problems "DIR=$DIR")"; fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -898,516 +870,6 @@ smoke_test() {
 #  House style, worth keeping: say what happened, say what to do, and never make a student
 #  guess whether something is their mistake or ours.
 # ═══════════════════════════════════════════════════════════════════════════════
-text_catalogue() {
-cat <<'CS193V_TEXT'
-# The opening banner.
-
-[[welcome]]
-  CS193V setup
-  ────────────
-  This will set up the course container on your computer. It takes a while, mostly
-  downloading. You can leave it running unattended once you have answered the
-  questions at the start.
-
-# THE THREE REFUSALS OF A MACHINE THIS SCRIPT CANNOT SET UP. All of them
-# are reached before anything has been changed, and all of them say so.
-#
-# THE LINUX ONE IS NAMED FROM PRETTY_NAME rather than from a list of distros,
-# which is what keeps it to one branch: nothing has to be added here when the
-# next distro turns up, and Arch, NixOS, openSUSE and Alpine are none of them
-# named anywhere in this script.
-
-[[err.unsupported-os]]
-This script supports macOS, Ubuntu and the WSL CS193V environment.
-Your system reports: {{OS}}
-
-[[err.intel-mac]]
-This Mac has an Intel processor.
-
-The course container needs a Mac with Apple Silicon (M1 or newer),
-or a Windows or Linux computer.
-
-Please contact course staff BEFORE the first lab and we will sort
-out an alternative for you. This is not something you can fix, and
-it is not your fault — please do not spend time troubleshooting it.
-
-[[err.unsupported-distro]]
-This computer is running {{PRETTY_NAME}}.
-
-The course container works on Ubuntu and Debian, on Fedora, on
-a Mac with Apple Silicon, and on Windows through WSL. It very
-likely works here too -- but this script installs software for
-you, and it does not know the right way to do that on this
-system.
-
-Please contact course staff. Setting this up with you by hand
-is quick, and we would rather do that than have this script
-guess and change something it should not.
-
-# Looking at your computer: what it found, and what that rules out.
-
-[[step.survey]]
-Looking at your computer
-
-[[ok.platform]]
-{{PLAT}} on {{ARCH}}
-
-[[note.podman-path]]
-podman is installed in {{DIR}}, which this terminal's PATH
-does not name yet. That is normal on a Mac, and cs193v handles it.
-
-# THE MAC OLD-PODMAN REFUSAL, in four pieces: the two ways podman can have got
-# onto the Mac, the message that interpolates whichever applies, and the Linux
-# equivalent, where the answer is upgrade rather than uninstall.
-#
-# IT SAYS UNINSTALL, NOT UPGRADE, and the wording it replaced is worth knowing
-# before re-tuning this. It used to say "open Podman Desktop and let it update
-# itself" -- but this script does not install Podman Desktop. It installs the
-# .pkg from podman's own releases into /opt/podman. So a student who ran this a
-# year ago was being told to open an application they have never had.
-#
-# NOTHING IS DONE FOR THEM, deliberately: removing somebody's podman can destroy
-# a podman machine VM and every container in it, and this script changes nothing
-# without asking. A destructive step the student takes knowingly is right; one
-# this script takes on their behalf, while reporting a version problem, is not.
-
-[[err.podman-old-mac.how-homebrew]]
-You installed it with Homebrew, so:
-
-    brew uninstall podman
-
-[[err.podman-old-mac.how-pkg]]
-It came from a package installer, at
-{{WHERE}}. Remove it with:
-
-    sudo rm -rf /opt/podman
-    sudo rm -f /usr/local/bin/podman
-
-If you also have Podman Desktop, drag that to the Trash too.
-
-[[err.podman-old-mac]]
-Podman {{V}} is on this Mac; the course needs
-{{MIN}} or newer.
-
-The simplest fix is to remove the podman you have and run this
-script again -- it installs a version the course is tested
-against.
-
-{{HOW}}
-
-WORTH KNOWING FIRST: if you have used podman on this Mac for
-anything else, removing it can lose the virtual machine it kept
-your containers in. If that matters, talk to course staff first.
-
-[[err.podman-old-linux]]
-Podman {{V}} is installed; the course needs {{MIN}}
-or newer.
-
-Please upgrade podman and run this again:
-
-    {{UPGRADE}}
-
-If that says podman is already the newest version, your Linux
-release is older than the course supports. Send course staff
-the output of:  podman --version
-
-[[ok.podman]]
-podman {{V}}
-
-[[ok.ssh]]
-ssh
-
-[[err.ssh-missing-mac]]
-ssh is missing from this Mac, which should not be possible.
-Please contact course staff rather than working around it.
-
-[[ok.curl]]
-curl
-
-[[err.curl-missing-mac]]
-curl is missing from this Mac, which should not be possible.
-Please contact course staff rather than working around it.
-
-[[ok.uidmap]]
-uidmap
-
-[[err.uidmap-missing]]
-newuidmap and newgidmap are missing, which should not be possible on this
-system -- they are part of the same package as usermod.
-
-Please contact course staff rather than working around it.
-
-[[skip.vm-size]]
-podman virtual machine is a reasonable size
-
-[[ok.vm-will-be-created]]
-podman virtual machine will be created (nothing exists yet)
-
-[[skip.wsl-systemd]]
-systemd is enabled in this WSL environment
-
-[[ok.wsl-systemd-planned]]
-systemd will be enabled (creating /etc/wsl.conf)
-
-[[skip.subuid]]
-your account has the ID range podman needs
-
-# THE CONSENT SCREEN'S ITEMS, which are the only text here a student is asked to
-# agree to. Each is a pair: the one-line label that appears in the numbered list,
-# and the .why printed underneath it.
-#
-# WRITE EVERY .why AS ONE LONG LINE. ask_consent folds them to 66 columns and
-# indents them seven, so a hand-wrapped one wraps twice and comes out ragged.
-#
-# EVERY ONE OF THEM SAYS WHY IT NEEDS A PASSWORD where it needs one. That is the
-# second of the two rules at the top of this script, and these are where it is
-# actually kept.
-
-[[need.podman-mac]]
-Install Podman
-
-[[need.podman-mac.why]]
-Podman runs the course container. On a Mac it installs system-wide, so macOS will ask for your password once.
-
-# {{PKGS}} IS THE WHOLE PACKAGE LIST, and on Debian it arrives with the next entry
-# already folded into it -- "podman (and uidmap)".
-[[need.podman-linux]]
-Install {{PKGS}}
-
-# APPENDED TO THE LABEL ABOVE, and only on a Debian-family machine: on Fedora the setuid
-# helpers are not a separable package, PKG_UIDMAP is empty, and this is not printed at
-# all. Both renderings are asserted in 26-installer-sandbox.sh -- "Install podman (and
-# uidmap)" there, "Install podman" on Fedora.
-[[need.podman-linux.and]]
-(and {{PKG}})
-
-[[need.podman-linux.why]]
-Podman runs the course container. Installing software needs your password.
-
-[[need.ssh]]
-Install {{PKG}}
-
-[[need.ssh.why]]
-cs193v uses ssh on your own computer to connect your browser to servers you run inside the container. Without it the container still works, but nothing in it would be reachable at http://localhost. Installing software needs your password.
-
-[[need.curl]]
-Install {{PKG}}
-
-[[need.curl.why]]
-The course tools use curl, and the Ubuntu desktop install does not include it — the WSL environment does — so it has to be installed here. Installing software needs your password.
-
-[[need.uidmap]]
-Install {{PKG}}
-
-[[need.uidmap.why]]
-Podman needs two small helper programs, newuidmap and newgidmap, to keep the container separated from the rest of your computer. Podman is on this computer but they are not. Installing software needs your password.
-
-[[need.vm-memory]]
-Give podman's virtual machine more memory ({{HAVE}} MB -> {{WANT}} MB)
-
-[[need.vm-memory.why]]
-On a Mac, containers run inside a small Linux virtual machine. Podman gives it a fixed amount of memory that does not scale with your Mac, and the default is too small for this course. This changes a virtual machine that already exists on your computer.
-
-[[need.wslconf]]
-Turn on systemd in this Linux environment
-
-[[need.wslconf.why]]
-Podman needs it to manage the container's resources at all. /etc/wsl.conf already exists, so this changes a file that is already here.
-
-[[need.subuid]]
-Give your account a "subuid range"
-
-[[need.subuid.why]]
-Podman uses a block of spare ID numbers to keep the container separated from the rest of your computer. Your account does not have one. This changes a system-wide file and needs your password.
-
-# Asking permission, and taking no for an answer.
-
-[[step.nothing-to-change]]
-Nothing on your computer needs to change
-
-[[step.consent]]
-Before continuing, this needs your permission for {{N}} thing(s)
-
-[[menu.consent.stop]]
-Stop, do not change anything
-
-[[menu.consent.go]]
-Go ahead
-
-[[consent.declined]]
-  Nothing was changed.
-
-  If you would rather not make these changes, that is fine — please
-  contact course staff and we will work out another way.
-
-# Where the course files go.
-
-[[step.choose-dir]]
-Where should the course files go?
-
-[[ok.dir-from-env]]
-{{DIR}} (from CS193V_DIR)
-
-[[menu.dir.default]]
-{{DEFAULT}}   (recommended)
-
-[[menu.dir.other]]
-Somewhere else — let me type a path
-
-[[prompt.path]]
-path:
-
-# Installing podman and the handful of things it needs.
-
-[[skip.prereqs]]
-podman, uidmap, ssh and curl
-
-[[step.installing]]
-Installing {{PKGS}}
-
-[[err.refresh-failed]]
-{{CMD}} failed.
-
-[[err.install-failed]]
-Could not install {{PKGS}}.
-
-[[note.downloading]]
-downloading {{URL}}
-
-[[err.podman-download]]
-Could not download the podman installer.
-
-You can install Podman Desktop by hand instead — https://podman-desktop.io/downloads/macos
-— and then run this script again. It will pick up from here.
-
-[[note.password]]
-macOS will now ask for your password, to install podman system-wide
-
-[[err.podman-installer]]
-The podman installer did not finish.
-
-[[err.podman-unrunnable]]
-podman was installed, but this script cannot run it.
-
-Please send this to course staff. The podman installer may have
-changed where it puts things, in which case the course files need
-a one-line update.
-
-[[ok.podman-version]]
-podman {{V}}
-
-[[err.ssh-not-on-path]]
-ssh still is not on your PATH after installing.
-Try opening a new terminal window and running this script again.
-
-[[ok.ssh-installed]]
-ssh installed
-
-[[err.curl-not-on-path]]
-curl still is not on your PATH after installing.
-Try opening a new terminal window and running this script again.
-
-[[ok.curl-installed]]
-curl installed
-
-[[err.uidmap-not-on-path]]
-newuidmap still is not on your PATH after installing.
-Try opening a new terminal window and running this script again.
-
-[[ok.uidmap-installed]]
-uidmap installed
-
-# Turning on systemd. WSL only.
-
-[[step.wslconf]]
-Turning on systemd
-
-[[ok.wslconf]]
-/etc/wsl.conf updated
-
-[[note.wslconf-restart]]
-This takes effect after Windows restarts this Linux environment.
-From Windows PowerShell:  wsl --terminate {{DISTRO}}
-
-# The account's ID range.
-
-[[step.subuid]]
-Setting up your account's ID range
-
-[[err.subuid-failed]]
-Could not add a subuid range for {{USER}}.
-
-Please send this to course staff along with:
-    id
-    cat /etc/subuid /etc/subgid
-
-[[ok.subuid]]
-subuid range added for {{USER}}
-
-# Podman's virtual machine. A Mac only.
-
-[[step.machine-create]]
-Creating podman's virtual machine ({{WANT}} MB, {{DISK}} GB disk)
-
-[[err.machine-create]]
-Could not create the podman virtual machine.
-
-[[ok.machine-created]]
-created and started
-
-[[step.machine-resize]]
-Resizing podman's virtual machine to {{WANT}} MB
-
-[[err.machine-resize]]
-Could not resize the podman virtual machine.
-
-[[err.machine-restart]]
-Could not restart the podman virtual machine.
-
-[[ok.machine-resized]]
-resized and restarted
-
-[[skip.machine]]
-podman virtual machine
-
-[[note.growing-disk]]
-Growing the virtual machine's disk from {{HAVE}} GB to {{WANT}} GB,
-which the container build needs. This does not use the space up front.
-
-[[note.grow-failed]]
-Could not grow it; continuing. If the build runs out of space, tell course staff.
-
-# Getting the course files.
-
-[[step.fetch]]
-Getting the course files
-
-[[err.mkdir-failed]]
-Could not create {{DIR}}
-
-# THE UNPACK, NOT THE DOWNLOAD (#221). install-cs193v.sh downloads and checks the archive
-# before this script starts, so what can still go wrong here is putting it in place: no room
-# on the disk, a course directory the student cannot write to, or a tar that stopped partway.
-
-[[err.unpack-failed]]
-Could not unpack the course files into:
-    {{DIR}}
-
-The usual causes are no space left on the disk, or a folder this account
-cannot write to. It is safe to run this script again.
-
-[[err.unpack-incomplete]]
-The course files were unpacked but {{FILE}} is missing or empty.
-That means the unpacking stopped partway. It is safe to run this script again.
-
-[[err.chmod-failed]]
-Could not make {{DIR}}/cs193v executable.
-
-# Is podman actually working, as opposed to merely installed.
-
-[[step.check-podman]]
-Checking that podman is working
-
-[[err.podman-mute]]
-Podman is installed but is not answering.
-On a Mac, try:  podman machine start
-
-[[ok.podman-working]]
-podman is working
-
-# The build, which is the long step.
-
-[[step.build]]
-Building the course container
-
-[[note.build-slow]]
-This is the big one, and it is the slow part of this script: it downloads and
-assembles the whole course environment. Leave it running.
-It is safe to run this script again — podman keeps every step that finished.
-
-[[ok.built]]
-built
-
-# Room to build in. Advisory: it warns and carries on.
-
-[[note.low-disk]]
-Only about {{FREE}} GB is free where podman stores containers.
-Setting up needs about 8 GB free. If it stops part-way, free up space
-and re-run this script — it will pick up where it stopped.
-
-[[ok.disk-free]]
-{{FREE}} GB free for the container
-
-# Checking that it works.
-
-[[step.smoke]]
-Checking that it works
-
-[[err.launcher-config]]
-The launcher could not build a podman command.
-Send course staff the output of:  {{DIR}}/cs193v --dev-print-command
-
-[[ok.launcher-config]]
-launcher reads its configuration
-
-[[err.no-image]]
-The course container was not built, but setup did not stop.
-
-Please send this to course staff, along with the output of:
-    {{DIR}}/cs193v doctor
-
-[[ok.container-present]]
-course container is present
-
-[[ok.doctor-runs]]
-doctor runs
-
-[[note.doctor-problems]]
-doctor reported problems — run: {{DIR}}/cs193v doctor
-
-# The sign-off.
-
-[[finished]]
-  ────────────────────────────────────────────────────────────────────
-  Setup finished.
-
-  To start working:
-
-      cd {{DIR}}
-      ./cs193v
-
-  Put your projects in {{DIR}}/projects — inside the container they appear
-  at ~/projects.
-
-  Closing the terminal window stops the container and anything running
-  in it. Your files are on your own computer, so they are always safe.
-
-  Useful later:
-      ./cs193v doctor     a report to paste if you ask staff for help
-      ./cs193v --stop     stop it if a window was closed unexpectedly
-  ────────────────────────────────────────────────────────────────────
-
-# THE ODDS AND ENDS the helpers and the menu print, not attached to any one step:
-# skip() appends its own suffix, die() its own sign-off under the STOP box, and
-# menu() has to say something when there is no terminal to draw arrows on.
-
-[[skip.suffix]]
-(already done)
-
-[[die.trailer]]
-  Nothing further has been changed. Please send all of the text above to
-  course staff — that is exactly what we need to help.
-
-[[menu.hint]]
-(up and down arrows, then Enter)
-
-# menu.not-a-terminal WAS HERE AND IS NOT ANY MORE (#221). The sentence still prints -- it
-# lives in files/cs193v-ui.sh's menu(), which this script sources, and it was already
-# word-for-word identical to the copy that used to be here. That is why menu() got an
-# indent knob and no text knob: a knob would have put one sentence in two places again,
-# which is the drift this split removes. The hint above it DOES differ, so that one stayed.
-CS193V_TEXT
-}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  THE HANDOVER FROM THE BOOTSTRAP  (#221)
@@ -1427,6 +889,18 @@ BOOT_PROTOCOL="${1:-}"
 BOOT_TMP="${2:-}"
 # THE TARBALL IS AT A FIXED NAME INSIDE IT, which is what keeps the handover to two arguments.
 BOOT_TARBALL="$BOOT_TMP/course.tar.gz"
+# AND THE PROSE, OUT OF THE SAME TREE. Every student-facing string this script prints comes from
+# here, read by cs193v-ui.sh's msg() -- the same reader the launcher uses against its own
+# catalogue, which is what let this file delete its near-identical copy of it.
+#
+# SET BEFORE ANYTHING CAN REFUSE. msg() with no readable file prints "(catalogue missing: ...)",
+# and that would be what a student saw INSTEAD of every refusal below, including the
+# unsupported-OS one -- so this assignment has to be above the resolved-state block rather than
+# beside the other paths. 20-messages.sh's die:* cases render a real refusal end to end, which is
+# what would catch it being moved back down.
+#
+# shellcheck disable=SC2034   # read by msg(), which lives in the sourced cs193v-ui.sh
+MESSAGES="$BOOT_TMP/.private/course-install-messages.txt"
 
 # A FLOOR, NOT AN EQUALITY, and the difference from cs193v-portwatch's handshake is worth
 # naming: that one compares a fixed string because both ends ship in the same tarball, and this
@@ -1495,9 +969,9 @@ fi
 # three reasons this file used to carry its own note(), die() and menu().
 NOTE_INDENT='    '
 MENU_INDENT='    '
-MENU_HINT="$(txt menu.hint)"
+MENU_HINT="$(msg menu.hint)"
 DIE_INDENT='  '
-DIE_TRAILER="$(txt die.trailer)"
+DIE_TRAILER="$(msg die.trailer)"
 
 # platform() comes from the shared file and prints `other` for an OS it does not know, because
 # the launcher wants to report one rather than refuse it. This script refuses, and the refusal
@@ -1508,16 +982,22 @@ DIE_TRAILER="$(txt die.trailer)"
 # and nothing else.
 platform_or_die() {
     local p; p="$(platform)"
-    [ "$p" = other ] && die "$(txt err.unsupported-os "OS=$(uname -s)")"
+    [ "$p" = other ] && die "$(msg err.unsupported-os "OS=$(uname -s)")"
     printf '%s' "$p"
 }
 
 # ─── the state the whole flow reads, resolved once ─────────────────────────────
-# BELOW THE CATALOGUE, and that is what put the catalogue at the foot of the file rather than
-# anywhere else. These lines run where the interpreter meets them, and platform() can refuse an
-# unsupported OS -- a refusal whose words are now a catalogue entry, so it cannot be reached
-# before text_catalogue() is defined. Everything else in this script is a function definition,
-# so this block is the only thing the ordering constrains.
+# BELOW THE HAND-OVER BLOCK, and the constraint is now harder than the one it replaces. It used
+# to be "below the catalogue", because the catalogue was a function in this file and platform()'s
+# refusal could not be worded before text_catalogue() was defined. Moving the prose into
+# course-install-messages.txt dissolves that and puts something stricter in its place: MESSAGES
+# must already POINT AT the catalogue when the line below runs, or msg() has no file to read and
+# every refusal in this script -- the unsupported-OS one included -- degrades to
+# "(catalogue missing: ...)". The hand-over block sets it, which is why that block is above this
+# one and not merely earlier for tidiness.
+#
+# These lines run where the interpreter meets them; everything else in this script is a function
+# definition, so this block is the only thing the ordering constrains.
 #
 # `|| exit 1`, and it is load-bearing. platform() ends in a die() for an OS this script does
 # not support, and die() exits -- but a command substitution is a SUBSHELL, so that exit

@@ -43,6 +43,9 @@
 #                   installer runs `./cs193v --rebuild` and the image is assembled on the
 #                   student's own machine. See README.md, "How the image reaches a student".
 #   messages.txt    every student-facing string the launcher prints.
+#   course-install-messages.txt  every student-facing string the INSTALLER prints (#221).
+#                   A sibling of messages.txt, not a copy of it: different keys, different file,
+#                   and 10-static.sh asserts the two do not overlap.
 #   course-install.sh  the installer proper (#221). install-cs193v.sh is the bootstrap a
 #                   student downloads; it fetches this tree and execs this file out of it, so
 #                   this one has to travel in the archive while the bootstrap must not. That
@@ -70,6 +73,7 @@
 /.private/Containerfile  -export-ignore
 /.private/messages.txt   -export-ignore
 /.private/course-install.sh -export-ignore
+/.private/course-install-messages.txt -export-ignore
 /.private/files          -export-ignore
 /.private/files/**       -export-ignore
 

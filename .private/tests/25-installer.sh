@@ -908,13 +908,17 @@ ok()   { printf 'OK %s\n' "$*"; }
 # so the stub has to be able to fail as well as answer.
 podman() { [ "${FAKE_RC:-0}" -eq 0 ] || return "${FAKE_RC:-0}"; printf '%s\n' "$FAKE_OUT"; }
 EOF
-# THE REAL TEXT COMES WITH IT, since issue #116: check_disk's words are catalogue entries now,
-# so the carve needs txt(), the catalogue and notes() -- the multi-line advisory is one entry
-# piped through notes() rather than three note calls. Carrying the real text rather than a stub
-# `txt` is the point: the numbers below are asserted against what a student would actually read.
+# THE REAL TEXT COMES WITH IT, since issue #116: check_disk's words are catalogue entries, so
+# the carve needs a reader and the prose -- the multi-line advisory is one entry piped through
+# notes() rather than three note calls. Carrying the real text rather than a stub is the point:
+# the numbers below are asserted against what a student would actually read.
+#
+# A READER AND A FILE SINCE #221, not a carved accessor and a carved heredoc. msg() comes out of
+# cs193v-ui.sh -- the same one the product uses -- and MESSAGES points at the real catalogue, so
+# these assertions can no longer pass against a private copy of either that had drifted from it.
 {
-    sed -n '/^text_catalogue() {$/,/^}$/p' $PRIVATE/course-install.sh
-    sed -n '/^txt() {$/,/^}$/p'            $PRIVATE/course-install.sh
+    printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
+    sed -n '/^msg() {$/,/^}$/p'            $PRIVATE/files/cs193v-ui.sh
     sed -n '/^notes() {/p'                 $PRIVATE/course-install.sh
     sed -n '/^check_disk()/,/^}$/p'        $PRIVATE/course-install.sh
 } >> "$TMP/cd.sh"

@@ -162,7 +162,7 @@ tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
 # and tar catches a truncated archive -- but a captive portal answering 200 with its own login
 # page is a well-formed reply, and an archive can extract cleanly having written only some of
 # what it should. So the pieces the hand-over depends on are checked by name.
-for f in .private/course-install.sh .private/files/cs193v-ui.sh; do
+for f in .private/course-install.sh .private/course-install-messages.txt .private/files/cs193v-ui.sh; do
     [ -s "$BOOT_TMP/$f" ] || refuse "  The course files arrived but $f is missing or empty.
 
   That means the transfer was cut short, or something answered for it -- a hotel

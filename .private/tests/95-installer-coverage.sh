@@ -90,28 +90,23 @@ else fail "coverage:the-traces-were-really-read" "no line numbers in $TRACES"; e
 # the percentage is a floor rather than a score -- which is the right direction for a gate to
 # be wrong in, and why the number is RECORDED rather than asserted against a threshold.
 EXEC="$CS193V_RUN_DIR/exec.lines"
-# THE TEXT CATALOGUE IS NOT CODE, and leaving it in the denominator would have been the
-# arithmetic equivalent of a lie. Since issue #116 the foot of this file is ~480 lines of
-# student-facing prose inside one heredoc. Every line of it is non-blank and not a comment,
-# so the conservative rule below counts all of it, and none of it is a statement bash can
-# trace. Measured, on install-cs193v.sh as it then was: the denominator went 430 -> 658 on
-# the refactor and the percentage would have fallen by a third for a change that removed no
-# coverage whatsoever.
+# THE PROSE IS NOT IN THIS FILE ANY MORE, so the blanking pass that used to stand here is gone
+# with it. Worth recording rather than silently deleting, because the reasoning was sound and
+# the same trap is one edit away from returning:
 #
-# EXCLUDED BY BLANKING, NOT BY DELETING, because these are LINE NUMBERS: a `sed //d` would
-# renumber every line after the catalogue and the gate would score, and excuse, the wrong ones.
-# The `cat <<` line is kept -- that one really does execute, every time txt() is called.
+#   Issue #116 put ~480 lines of student-facing prose in a heredoc at the foot of the installer.
+#   Every line of it is non-blank and not a comment, so the conservative rule below counted all
+#   of it while none of it is a statement bash can trace. Measured, on install-cs193v.sh as it
+#   then was: the denominator went 430 -> 658 on that refactor and the percentage would have
+#   fallen by a third for a change that removed no coverage whatsoever. It was excluded by
+#   BLANKING rather than deleting, because these are LINE NUMBERS and a `sed //d` renumbers
+#   everything after the cut -- the gate would then score, and excuse, the wrong lines.
 #
-# It also removes ~69 lines of prose that used to be counted for real, back when the four
-# set-piece heredocs and the multi-line die strings lived in the logic: the honest denominator
-# for the refactored file was 361, which is SMALLER than the 430 it replaced. The #221 split
-# then moved the shared helpers out to cs193v-ui.sh and took the denominator to ~292, so a
-# percentage from before the split is not comparable with one from after it.
-awk '/^cat <<'"'"'CS193V_TEXT'"'"'$/ { print; incat = 1; next }
-     incat && /^CS193V_TEXT$/        { print ""; incat = 0; next }
-     incat                           { print ""; next }
-                                     { print }' "$INST" \
-  | grep -n '' \
+# #221 moved that prose into course-install-messages.txt, which this gate does not read at all,
+# so there is nothing left to blank. IF A HEREDOC OF PROSE EVER COMES BACK, blank it, do not
+# delete it. The percentages either side of these two changes are not comparable: 430 before
+# #116, 361 after it, ~292 once the shared helpers left for cs193v-ui.sh, and ~294 now.
+grep -n '' "$INST" \
   | sed -n 's/^\([0-9]\{1,\}\):[[:space:]]*\([^[:space:]].*\)$/\1 \2/p' \
   | grep -vE ' (#|fi$|esac$|done$|else$|\}$|\{$|then$|do$)' \
   | awk '{print $1}' | sort -un > "$EXEC"

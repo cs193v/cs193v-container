@@ -601,28 +601,37 @@ tail box — the requirements are the opposite ones.
 reason it carries its own `box()`. That makes three. `messages.txt` is the launcher's,
 `files/setup-git-messages.txt` is `setup-git`'s, and the third is a heredoc at the foot of
 `install-cs193v.sh` under a `THE TEXT STUDENTS SEE` banner, read by `txt <key>` — the same
-`[[key]]`/`{{PLACEHOLDER}}` format, because it is `msg()` reading a heredoc instead of a file.
-It cannot be a separate file: the installer is downloaded on its own and `messages.txt` does not
-exist until the download step succeeds, which is well after most of those messages can print.
+`[[key]]`/`{{PLACEHOLDER}}` format — it is the same `msg()` reading a different file.
+
+**It is a real file now (#221), and that is new.** It could not be one for as long as the
+installer was downloaded on its own, because `messages.txt` does not exist until the download
+succeeds, which is well after most of those messages can print. Downloading FIRST removes that:
+`course-install.sh` runs out of the tree it was fetched with, so its prose can sit beside it in
+`course-install-messages.txt` and be read by the launcher's `msg()`. The near-copy of `msg()`
+that used to be called `txt()` is gone with the heredoc.
 
 Four things to know before re-tuning any of that text:
 
-- **The accessor is `txt`, and must not be renamed `msg`.** `20-messages.sh` greps
-  `msg +<key>` in `install-cs193v.sh` against `messages.txt`, so an installer named `msg` would
-  report every one of its own keys as missing from a catalogue they were never in.
-- **A `#` at column 0 inside the catalogue is a note to staff and is never printed** — the one
-  thing `txt()` does that `msg()` does not. Much of what makes those messages right is the note
-  explaining why they say what they say, and without that rule every note would have had to stay
-  behind in the logic beside a call site that no longer holds the words.
+- **`MESSAGES` must be set before anything can refuse.** `course-install.sh` points it at the
+  catalogue in its hand-over block, above the resolved-state block, because `msg()` with no
+  readable file prints `(catalogue missing: …)` — and that would be what a student saw *instead
+  of* every refusal in the script, the unsupported-OS one included.
+- **A `#` at column 0 inside a catalogue is a note to staff and is never printed.** All three
+  catalogues follow that rule. Much of what makes these messages right is the note explaining
+  why they say what they say, and without the rule every note would have had to stay behind in
+  the logic beside a call site that no longer holds the words. `20-messages.sh` skips those
+  lines when it measures widths and when it collects placeholders, for the same reason.
 - **`10-static.sh` keeps the arrangement honest**, and it needs to: this file's own banner
   claimed "the wording lives here, gathered in one place" for a long time while ~110 call sites
   disagreed with it. `text116:*` fails on a literal handed to `step`/`ok`/`skip`/`note`/`die`/
   `need`/`menu`, and on a `printf` carrying a sentence.
-- **The catalogue is excluded from the coverage denominator** (`95-installer-coverage.sh`).
-  ~480 lines of prose are non-blank and not comments, so the conservative rule counted every one
-  of them as a statement that never executed: measured, the denominator went 430 → 658 and the
-  percentage would have fallen by a third for a change that removed no coverage at all. Excluded
-  by blanking rather than deleting, because those are line numbers and the allowlist indexes them.
+- **The coverage denominator no longer has to exclude it**, and the reason it once did is worth
+  keeping. While the prose lived in a heredoc inside the installer, ~480 non-blank non-comment
+  lines counted as statements that never executed: measured, the denominator went 430 → 658 and
+  the percentage would have fallen by a third for a change that removed no coverage at all. The
+  fix was to blank those lines rather than delete them, because they are line numbers and the
+  allowlist indexes them. A separate file needs none of that — `95-installer-coverage.sh` simply
+  does not read it. **If a heredoc of prose ever comes back, blank it, do not delete it.**
 
 ### Two people on one computer: `CS193V_INSTANCE`
 

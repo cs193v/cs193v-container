@@ -60,7 +60,7 @@ record "export:file-count" "$n_paths"
 # or removing one IS a decision. course-install.sh is the fifth since #221: the bootstrap a
 # student downloads fetches this tree and execs it out of the archive, so it has to be here
 # while install-cs193v.sh itself must not be -- see Â§4.
-want=".config/container.args .private/Containerfile .private/course-install.sh .private/messages.txt cs193v projects/.gitkeep"
+want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/messages.txt cs193v projects/.gitkeep"
 got="$(grep -v '^\.private/files/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
 
