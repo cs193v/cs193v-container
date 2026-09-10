@@ -235,7 +235,48 @@ provision_default_user() {
     ok "$(msg prov.ok.default-user "USER=$WSL_USER")"
 }
 
-# ─── 5. everything that needs root, out of the installer's own list ───────────
+
+# ─── 5. and the user manager has to be running for podman to work ─────────────
+# THIS ONE COST A CONTAINER BUILD TO FIND, so the reasoning is written down in full. `wsl -d X -e
+# prog` runs a program without creating a LOGIN SESSION -- there is no PAM session, so logind
+# never starts user@1000.service on demand -- and the student's half of the install runs exactly
+# that way. Measured in a real CS193V instance on 2026-09-10, as the student:
+#
+#     $ systemctl --user is-active default.target
+#     Failed to connect to user scope bus via local transport: No such file or directory
+#     $ podman info --format '{{.Host.CgroupManager}}'
+#     WARN Falling back to --cgroup-manager=cgroupfs
+#     cgroupfs
+#
+# and then `./cs193v --rebuild` DIED at step 3 of 25 with crun reporting `sd-bus call: Access
+# denied ... requires interactive authentication`. So this is not a tidiness step: without it the
+# automated path installs everything correctly and then cannot build the container.
+#
+# `loginctl enable-linger` IS THE FIX, and it is what podman itself suggests in that warning.
+# After it, plus the restart stage 1 already does, the same two questions answer `active` and
+# `systemd`. Lingering means the user manager starts with the instance rather than with a login,
+# which is what a machine whose only user drives it through `wsl -e` actually needs.
+#
+# WHY THE OOBE PATH DID NOT NEED IT, as far as anyone can tell: the first-run setup IS an
+# interactive session, so user@1000.service was already up when the old flow ran stage 2 a few
+# seconds later -- and would have stopped mattering the moment a student closed that window.
+#
+# SKIPPED WHERE systemd IS NOT RUNNING, which is the honest gate rather than a way of being
+# quiet: /run/systemd/system is the standard test, lingering means nothing without a user
+# manager to linger, and the test fixtures are containers with no systemd in them.
+provision_linger() {
+    if [ ! -d /run/systemd/system ]; then
+        skip "$(msg prov.skip.linger)"
+        return 0
+    fi
+    if [ "$(loginctl show-user "$WSL_USER" --property=Linger --value 2>/dev/null)" = yes ]; then
+        skip "$(msg prov.skip.linger-on "USER=$WSL_USER")"
+        return 0
+    fi
+    sudo loginctl enable-linger "$WSL_USER" || die "$(msg err.prov-linger "USER=$WSL_USER")"
+    ok "$(msg prov.ok.linger "USER=$WSL_USER")"
+}
+# ─── 6. everything that needs root, out of the installer's own list ───────────
 # THE TABLE IS RESOLVED FIRST, and it is worth a line of its own because getting this wrong is
 # silent in the one place it matters. install-utils.sh declares PKG_PODMAN and its siblings EMPTY
 # and fills them in distro_packages; a pass that read them without calling it would build an empty
@@ -285,4 +326,5 @@ provision_guards
 provision_oobe_off
 provision_account
 provision_default_user
+provision_linger
 provision_root_steps

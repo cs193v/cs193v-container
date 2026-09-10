@@ -463,6 +463,13 @@ default=student" "$(sb_section "$out" WSL-CONF)"
 assert_eq "sb-prov:switches-the-first-run-setup-off" "/etc/wsl-distribution.conf.cs193v" \
           "$(sb_section "$out" OOBE-CONF)"
 assert_says "sb-prov:says-the-questions-are-off" "first-run questions are switched off" "$out"
+# LINGERING IS SKIPPED HERE, AND THE SKIP IS THE ASSERTION. `wsl -e` creates no login session, so
+# the student's systemd user manager never starts and podman falls back to cgroupfs -- which
+# killed a real container build at step 3 of 25 before the root pass learned to enable lingering
+# (wsl-provision.sh carries the measurement). A container is not a WSL instance and runs no
+# systemd, so the step reports that rather than pretending to have done something; the enable arm
+# is a by-hand check in VERIFICATION.md §1.8, which is where a claim about systemd belongs.
+assert_says "sb-prov:says-why-lingering-is-moot-here" "does not run systemd" "$out"
 
 # THE SUBUID RANGE, which useradd writes for a new account on Debian-family shadow (4.11.1-3+) --
 # so the step SKIPS, and the range is there anyway. The claim is the range, not who wrote it: what
