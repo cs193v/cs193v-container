@@ -178,7 +178,26 @@ apply_sudo() {
             # "sudo: a password is required" before the user had done anything, which reads
             # like the tool is already broken. install does the write and the mode together.
             printf 'student:%s\n' "$pw" | sudo -n chpasswd
-            printf 'student ALL=(ALL) ALL\n' > "$REP/sudoers.new"
+            # `Defaults:student !use_pty` ALONGSIDE the rule, and it is what makes this arm
+            # usable from the suite rather than only by hand (#226). Ubuntu defaults use_pty ON:
+            # sudo then takes a pty of its own, and lib/sandbox.sh:1302 records the measurement
+            # -- `script` stops draining its master until the child exits, so output past the
+            # kernel's pty buffer blocks in write() forever and the case reads as a freeze
+            # mid-transcript. It could not bite while every fixture was NOPASSWD; it bites the
+            # moment sudo reads a password. Scoped to this user and to this arm.
+            #
+            # AND A PROMPT THAT GIVES UP, which is what makes an UNANSWERED prompt a case the
+            # suite can run rather than a wedged container (#226). sudo flushes the terminal's
+            # input queue before reading a password -- a deliberate defence against typed-ahead
+            # passwords -- so nothing this harness writes in advance can answer it, and sudo's
+            # default patience is five minutes against a 60 s container ceiling. Measured: the
+            # case printed its prompt, every ordering assertion passed, and then the container
+            # was killed with its report block never reached. `passwd_timeout` is in MINUTES and
+            # takes fractions; 0.3 is 18 s, which fits the ceiling and is still long enough for
+            # a person driving install-sandbox.sh to type when they are watching for it.
+            # passwd_tries=1 so an unanswered prompt is one prompt, not three.
+            printf 'Defaults:student !use_pty, passwd_tries=1, passwd_timeout=0.3\nstudent ALL=(ALL) ALL\n' \
+                > "$REP/sudoers.new"
             sudo -n install -m 0440 -o root -g root "$REP/sudoers.new" "$SUDOERS"
             sudo -n -K 2>/dev/null || true      # drop any cached credential, or the first
             sudo -K  2>/dev/null || true        # sudo would sail through without prompting
@@ -425,6 +444,14 @@ case "${1:-knobs}" in
     # one arrangement implementation rather than two that drift. It arranges and NOTHING else --
     # no symlink, no baseline -- because everything it touches shows up in the case's audit.
     arrange) arrange || exit 1 ;;
+    # SEPARATE FROM `arrange`, NOT PART OF IT, and the order is the reason (#226). arrange runs
+    # apt to remove prereqs and writes /etc/wsl.conf, both through sudo -- so a policy that
+    # takes sudo away has to be applied AFTER it, which is exactly why `init` calls the two in
+    # this order too. run.sh calls this between the arrangement and the installer.
+    sudo)  apply_sudo || exit 1 ;;
+    # READ-ONLY, and it is what run.sh reports as ===SUDO===. Named apart from `state` because
+    # that one prints the whole knob table and this is one line a case compares against.
+    state-sudo) sudo_state ;;
     state) cmd_state ;;
     run)   cmd_run ;;
     diff)  cmd_diff ;;

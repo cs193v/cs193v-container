@@ -3,11 +3,21 @@
 # A fake `sudo`. It RECORDS AND IT NEVER EXECUTES, and that second half is the point rather
 # than a simplification.
 #
-# install-cs193v.sh reaches the host through exactly four privileged calls -- `apt-get
-# update`, `apt-get install`, `usermod --add-subuids`, `installer -pkg` and the `tee` into
+# course-install.sh reaches the host through six privileged calls -- `apt-get update`,
+# `apt-get install`, `usermod --add-subuids`, `installer -pkg`, and the `sed`/`tee` into
 # /etc/wsl.conf -- and every one of them goes through this one name. So a fake sudo that
 # never execs makes the whole shim tier structurally unable to change the machine, which is
 # a stronger statement than any assertion about what it happened to do.
+#
+# SEVEN NAMES, NOT SIX, since #226: `sudo -n true` and `sudo -v` also arrive here. Those two
+# are QUESTIONS rather than commands -- one asks whether root can be had without prompting,
+# the other asks for the password and runs nothing -- and exit 0 is the right answer to both
+# on a machine that is pretending to have working sudo. `shim_set sudo_fail '-n true'` and
+# `-v` are what drive the refusals; 10-static.sh's SUDO_CMD deliberately excludes both from
+# what it calls a privileged call, for the same reason.
+#
+# THE FILE NAME IN THE FIRST PARAGRAPH USED TO BE install-cs193v.sh, and #221 moved every one
+# of these calls into course-install.sh -- the bootstrap now runs no sudo at all.
 #
 # A fake that sometimes exec'd would be one negated test away from running the real thing,
 # so there is no exec branch at all and 10-static.sh asserts there is none. When a case

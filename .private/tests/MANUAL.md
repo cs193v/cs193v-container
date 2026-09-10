@@ -522,6 +522,30 @@ isolation model, exit non-zero, and create nothing.
 that nothing is created, and that podman is not even contacted. Only the real `sudo`
 invocation is unverified.
 
+### §1.5a — `sudo bash install-cs193v.sh` is refused (#226)
+*Expect:* the installer's own STOP box — not the launcher's — printed before the "Looking at
+your computer" step; exit 1; no course directory; and no temp tree left in `/tmp`. The message
+must offer both remedies: re-run without `sudo`, and contact staff if the machine's only
+account *is* root, which is the state a hand-built WSL instance arrives in.
+*Automated equivalent:* `25-installer.sh :: root:*` fakes `id` exactly as
+`30-launcher-shim.sh :: root:*` does, and asserts on the message KEY rather than on the word
+"sudo" — because before the gate existed the run reached `build_image` and the launcher's
+refusal satisfied every prose assertion. Only the real `sudo` invocation is unverified.
+
+### §1.5b — one real password prompt, at the announced moment (#226, #223)
+*Expect:* on a Mac or an Ubuntu desktop that needs podman installed, exactly one password
+prompt, immediately below the `Asking for your password, once` heading and its note, and
+nothing further asked for the rest of the run.
+*Also worth watching:* that the heading does **not** appear on a machine with passwordless
+sudo, where no prompt is coming.
+*Automated equivalent:* `26-installer-sandbox.sh :: sb-sudo-password:*` sets a real password on
+the fixture's account, drops `NOPASSWD`, drives the prompt over a pty and counts the prompts;
+`sb-sudo-absent:*` and `sb-sudo-deny:*` cover the two refusals with their effects. What is left
+for a person is the *feel* of it — whether the note reads as an explanation at the moment the
+prompt appears, which is the judgement `lib/sandbox-guest.sh:apply_sudo` was written for.
+*Not automatable here:* macOS. `sudo installer -pkg` runs inside the primed window, and no
+fixture stands in for a Mac.
+
 ### `sudo usermod --add-subuids` against a real `/etc`
 *Expect:* on a machine whose account has no subuid range, the installer's one privileged
 `usermod` call adds `200000-265535` to `/etc/subuid` and `/etc/subgid`, and `./cs193v doctor`

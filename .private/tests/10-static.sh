@@ -254,6 +254,71 @@ assert_eq "tmptree:the-installer-declares-one-guard" 1 \
 assert_eq "tmptree:the-guard-matches-the-template" \
           "$(printf '%s' "$boot_tpl"   | tr 'X' '?')" "$boot_guard"
 
+# ─── root is refused above every privileged call there is  (#226) ──────────────
+# STRUCTURAL, because the behavioural half cannot see this. 25-installer.sh :: root:* proves the
+# refusal fires and that podman is never contacted, which is a claim about ONE run on ONE
+# platform; this is the claim that holds for all of them, including the macOS and WSL arms no
+# tier executes. A gate that ended up below `sudo installer -pkg` would leave that arm running
+# as root with nothing red anywhere.
+#
+# WHAT COUNTS AS A PRIVILEGED CALL, and both halves of this were wrong on the first try, in
+# opposite directions:
+#   * IN COMMAND POSITION ONLY, AND NOT INSIDE A STRING. `PM_UPGRADE="sudo apt update && sudo
+#     apt install ..."` is a string this script PRINTS for a student to type. A plain grep for
+#     the word found it first and reported the gate as coming 60 lines too late; requiring
+#     command position was not enough either, because the `&&` INSIDE that string puts its
+#     second `sudo` in command position as far as any regex can tell. So double-quoted spans
+#     are emptied first -- per line, which keeps the line numbers comparable.
+#   * NOT `sudo -n` AND NOT `sudo -v`. Those two are questions rather than commands -- one asks
+#     whether root is available without prompting, the other asks for the password and runs
+#     nothing. Counting them makes survey and ask_password "privileged functions", which is
+#     how the registration assertion below first failed against the very gate it checks.
+# Comments are stripped first, or the prose explaining the gate would count as a call site.
+inst_nc="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
+inst_cmd="$(printf '%s\n' "$inst_nc" | sed 's/"[^"]*"//g')"
+SUDO_CMD='(^[[:space:]]*|[;&|!{][[:space:]]*)sudo[[:space:]]+[^-]'
+root_gate="$(printf '%s\n' "$inst_nc" | grep -nE '\[ "\$\(id -u\)" -eq 0 \]' | head -1 | cut -d: -f1)"
+first_sudo="$(printf '%s\n' "$inst_cmd" | grep -nE "$SUDO_CMD" | head -1 | cut -d: -f1)"
+assert_ne "root:the-gate-is-there-at-all"               "" "$root_gate"
+assert_ne "root:there-is-a-privileged-call-to-be-above" "" "$first_sudo"
+assert_eq "root:the-gate-precedes-every-sudo" "yes" \
+          "$([ -n "$root_gate" ] && [ -n "$first_sudo" ] && [ "$root_gate" -lt "$first_sudo" ] \
+             && printf yes || printf "gate=$root_gate first-sudo=$first_sudo")"
+
+# ─── and every privileged step registers with the gate that guards it  (#226) ──
+# THE ASYMMETRY THIS CATCHES. needs_root() is a list appended to by wants_root, and the whole
+# reason it is a list rather than a disjunction over the DO_* flags is that a flag missing from
+# a disjunction reads exactly like a flag that needs no privilege. That still leaves one way to
+# get it wrong: add a privileged step and forget to register it -- and the consequence is
+# precisely #226's bug back again, a password demanded by a step nothing announced.
+#
+# BY FUNCTION, not by flag, because the mapping runs that way in the source: the function names
+# the flag it returns early on, and the survey names the flag it sets. A function is registered
+# if survey puts a wants_root or need_root within four lines of setting a flag that function
+# reads -- four, because registration is per-branch and the assignment and the call sit in the
+# same arm.
+sudo_fns="$(printf '%s\n' "$inst_cmd" | awk -v pat="$SUDO_CMD" '
+    /^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
+    $0 ~ pat { if (fn != "") print fn }
+' | LC_ALL=C sort -u)"
+assert_ne "sudo-gate:there-are-privileged-functions" "" "$sudo_fns"
+# THE SET, RECORDED, so that a step leaving this list -- or joining it -- is visible in the log
+# rather than only in a pass. #217 moves some of these into a root pass.
+record "sudo-gate:the-privileged-functions" "$(printf '%s' "$sudo_fns" | tr '\n' ' ')"
+ungated=''
+for fn in $sudo_fns; do
+    body="$(printf '%s\n' "$inst_nc" | sed -n "/^$fn() {/,/^}/p")"
+    flags="$(printf '%s\n' "$body" | grep -oE 'DO_[A-Z_]+' | LC_ALL=C sort -u)"
+    [ -n "$flags" ] || { ungated="$ungated $fn(reads-no-flag)"; continue; }
+    seen=no
+    for f in $flags; do
+        if printf '%s\n' "$inst_nc" | grep -A4 -E "^[[:space:]]*$f=yes" \
+             | grep -qE '(wants_root|need_root)'; then seen=yes; fi
+    done
+    [ "$seen" = yes ] || ungated="$ungated $fn"
+done
+assert_eq "sudo-gate:every-privileged-function-is-registered" "" "$ungated"
+
 # ─── the tunnel may only ever bind loopback ────────────────────────────────────
 # EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
 # security property the whole design rests on: the host side of the tunnel is loopback-only

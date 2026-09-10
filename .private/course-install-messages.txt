@@ -32,6 +32,30 @@
   downloading. You can leave it running unattended once you have answered the
   questions at the start.
 
+# REFUSING THE INVOCATION RATHER THAN THE MACHINE (#226), which is why it sits
+# above the three below rather than among them: nothing is wrong with a computer
+# whose owner typed `sudo`. It is also the only refusal here whose remedy is a
+# different command rather than a conversation -- except in the one environment
+# where it is not, which is the last paragraph.
+
+[[err.as-root]]
+This is running as root, probably through sudo.
+
+Setting the course up as root would put the course directory in
+root's home folder instead of yours, leave files in it that you
+cannot edit afterwards, and give the container's ID range to root
+rather than to your account. The container itself refuses to run
+as root, so none of it would work.
+
+Run it again as yourself, without sudo:
+
+    bash install-cs193v.sh
+
+If you are logged in as root and have no other account -- which
+happens in a Linux environment on Windows that was set up by
+hand -- please contact course staff instead. Making an account
+for you is quick, and this is not one to work around.
+
 # THE THREE REFUSALS OF A MACHINE THIS SCRIPT CANNOT SET UP. All of them
 # are reached before anything has been changed, and all of them say so.
 #
@@ -183,9 +207,18 @@ your account has the ID range podman needs
 # WRITE EVERY .why AS ONE LONG LINE. ask_consent folds them to 66 columns and
 # indents them seven, so a hand-wrapped one wraps twice and comes out ragged.
 #
-# EVERY ONE OF THEM SAYS WHY IT NEEDS A PASSWORD where it needs one. That is the
-# second of the two rules at the top of this script, and these are where it is
-# actually kept.
+# EVERY ONE OF THEM SAYS WHY IT NEEDS A PASSWORD where it needs one, and that is
+# now ASSERTED rather than asked for: 20-messages.sh's
+# itext:every-root-requiring-why-says-password derives the list from the
+# need_root call sites in course-install.sh and checks each body. It was written
+# because this note was FALSE -- need.wslconf.why described changing a file that
+# was already there and never mentioned the password, while driving
+# `sudo sed -i /etc/wsl.conf` (#226).
+#
+# WHERE IT NEEDS ONE is the other half, and it is why the assertion reads the
+# need_root sites rather than every need.*: need.vm-memory.why is a
+# `podman machine set` and needs no privilege at all, so saying it wants a
+# password would be a new false sentence rather than a fix for the old one.
 
 [[need.podman-mac]]
 Install Podman
@@ -236,7 +269,7 @@ On a Mac, containers run inside a small Linux virtual machine. Podman gives it a
 Turn on systemd in this Linux environment
 
 [[need.wslconf.why]]
-Podman needs it to manage the container's resources at all. /etc/wsl.conf already exists, so this changes a file that is already here.
+Podman needs it to manage the container's resources at all. /etc/wsl.conf already exists, so this changes a file that is already here, and writing to it needs your password.
 
 [[need.subuid]]
 Give your account a "subuid range"
@@ -289,6 +322,58 @@ podman, uidmap, ssh and curl
 [[step.installing]]
 Installing {{PKGS}}
 
+# THE THREE WAYS THE PASSWORD CAN FAIL, all of them refusals rather than surprises (#226).
+# Two are reached from survey, before consent has offered anything, and the third from
+# ask_password, after consent and before the first privileged command -- so all three are
+# true when die.trailer says nothing further has been changed.
+#
+# {{WANTS}} IS THE CONSENT SCREEN'S OWN LABELS, indented as a list by root_wants(). A refusal
+# about a password has to say what the password was for, and re-wording those items here would
+# be a second copy of them that could disagree with the first.
+
+[[err.no-sudo]]
+Some of the setup has to be done as an administrator, and there is
+no "sudo" command on this computer to ask for that.
+
+What needed it:
+
+{{WANTS}}
+
+Please contact course staff rather than installing sudo yourself.
+Setting this up with you by hand is quick, and a computer with no
+sudo is usually configured that way on purpose.
+
+[[err.sudo-no-terminal]]
+Some of the setup needs your password, and this is not running in
+a terminal that can ask you for one.
+
+What needs it:
+
+{{WANTS}}
+
+Open a terminal window and run the installer from there. If you
+started it by double-clicking, or by piping it into bash, there is
+nowhere for the password prompt to appear.
+
+# ITS FIRST LINE DOES NOT SAY "your password was not accepted", which is what it
+# said first and is wrong for two of the three ways `sudo -v` fails: a student who
+# is not in sudoers never had a password rejected, and a prompt that timed out
+# never had one read. sudo's own words are on the line above the box, so pointing
+# at them is both accurate and more useful than a guess.
+
+[[err.sudo-refused]]
+sudo did not give administrator rights, so none of the setup was
+done. The message just above this box is sudo's own.
+
+What still needs it:
+
+{{WANTS}}
+
+Run this again if you mistyped your password. If it says you are
+not allowed to use sudo on this computer, please contact course
+staff -- only an administrator can change that, and it is not
+something to work around.
+
 [[err.refresh-failed]]
 {{CMD}} failed.
 
@@ -307,8 +392,22 @@ You can install Podman Desktop by hand instead:
 
 — and then run this script again. It will pick up from here.
 
-[[note.password]]
-macOS will now ask for your password, to install podman system-wide
+# THE ONE PASSWORD PROMPT, and the note that arrives just before it (#226, #223). This
+# replaces a macOS-only "macOS will now ask for your password" that sat immediately above
+# `sudo installer -pkg`: since ask_password primes sudo before any step runs, that line
+# described a prompt that no longer happens, and every other privileged step -- apt, dnf,
+# usermod, the write into /etc/wsl.conf -- had no equivalent at all.
+#
+# PRINTED ONLY WHEN A PASSWORD IS REALLY NEEDED. On a machine with passwordless sudo
+# ask_password returns before either of these is read.
+
+[[step.password]]
+Asking for your password, once
+
+[[note.password-why]]
+Your computer will ask for your account password now, so that
+everything you agreed to above can run without stopping to ask
+again part-way through.
 
 [[err.podman-installer]]
 The podman installer did not finish.

@@ -77,6 +77,18 @@ MACHINE_CAP_INTERNAL='unmask fuse tun label'
 # Subtracted at boot by lib/sandbox-guest.sh, which is where the removal commands live.
 MACHINE_PREREQ_NAMES='podman ssh subuid curl wget uidmap'
 
+# ─── the sudo policy this machine hands the student  (#226) ────────────────────
+# THE FOURTH VOCABULARY, and the one the fixtures could not express. Every fixture ships
+# `student ALL=(ALL) NOPASSWD:ALL` so the suite can run unattended, which means every case
+# until now watched an installer on a machine whose sudo never asks for anything -- and the
+# two refusals #226 adds are about machines where it asks and cannot be answered, or where
+# there is no sudo to ask. lib/sandbox-guest.sh:apply_sudo has had these four arms all along
+# for the person driving install-sandbox.sh by hand; this is what lets the suite ask for them.
+#
+# `password` TAKES AN OPTIONAL PASSWORD, as `password:hunter2`, and the comma-splitting in
+# machine_valid is why this is validated on its FIRST field only.
+MACHINE_SUDO_NAMES='nopasswd password deny absent'
+
 # ─── the bases, and which of them nest ─────────────────────────────────────────
 #
 # A DISTRO IS A BASE, NOT A THIRD AXIS. The two axes above are subtractive -- everything is
@@ -166,6 +178,7 @@ machine_valid() {                     # machine_valid caps|prereqs|bases LIST ->
         caps)    known="$MACHINE_CAP_NAMES" ;;
         prereqs) known="$MACHINE_PREREQ_NAMES" ;;
         bases)   known="$MACHINE_BASE_NAMES" ;;
+        sudo)    known="$MACHINE_SUDO_NAMES" ;;
         *) printf 'machine_valid: unknown kind %s\n' "$kind" >&2; return 2 ;;
     esac
     [ -n "$list" ] || return 0
@@ -369,9 +382,14 @@ machine_flags() {                     # machine_flags [NO_CAPS] [PLATFORM] [FAKE
 # no-podman conflation's exact shape -- state standing in for something nobody declared -- and
 # the fix is to make the omission loud.
 SB_BASE=machine; SB_NO_CAPS=''; SB_NO_PREREQS=''; SB_PLATFORM=linux; SB_FAKE_PODMAN=no
+SB_SUDO=''
 SB_SPEC=''
-sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prereqs=L] [platform=P] [fake-podman=yes]
+sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prereqs=L] [platform=P] [fake-podman=yes] [sudo=S]
     SB_BASE=machine; SB_NO_CAPS=''; SB_NO_PREREQS=''; SB_PLATFORM=linux; SB_FAKE_PODMAN=no
+    # EMPTY IS NOT `nopasswd`, and the difference is what keeps 20-odd existing cases exactly as
+    # they were: empty means run.sh does not touch the policy at all, so the fixture's own
+    # NOPASSWD line stands and no `sudo -n chpasswd` runs in a case that never asked about sudo.
+    SB_SUDO=''
     local a bad
     for a in "$@"; do
         case "$a" in
@@ -380,6 +398,7 @@ sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prer
             no-prereqs=*)  SB_NO_PREREQS="${a#no-prereqs=}" ;;
             platform=*)    SB_PLATFORM="${a#platform=}" ;;
             fake-podman=*) SB_FAKE_PODMAN="${a#fake-podman=}" ;;
+            sudo=*)        SB_SUDO="${a#sudo=}" ;;
             *) printf 'sb_machine: unknown key %s\n' "$a" >&2; return 2 ;;
         esac
     done
@@ -396,6 +415,10 @@ sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prer
         printf 'sb_machine: unknown prereq %s (want: %s)\n' "$bad" "$MACHINE_PREREQ_NAMES" >&2; return 2
     fi
     case "$SB_PLATFORM" in linux|wsl) ;; *) printf 'sb_machine: platform %s\n' "$SB_PLATFORM" >&2; return 2 ;; esac
+    # ITS FIRST FIELD ONLY: `password:hunter2` is one arm with an argument, not two names.
+    if ! bad="$(machine_valid sudo "${SB_SUDO%%:*}")"; then
+        printf 'sb_machine: unknown sudo policy %s (want: %s)\n' "$bad" "$MACHINE_SUDO_NAMES" >&2; return 2
+    fi
     # NONSENSE, AND ALSO IMPOSSIBLE: the fake is bind-mounted over /usr/bin/podman, so apt cannot
     # delete the file it is asked to remove. Refused rather than half-honoured.
     case ",$SB_NO_PREREQS," in
@@ -404,7 +427,7 @@ sb_machine() {                        # sb_machine [base=B] [no-caps=L] [no-prer
                     fi ;;
     esac
     SB_SPEC="base=$SB_BASE no-caps=${SB_NO_CAPS:-none} no-prereqs=${SB_NO_PREREQS:-none}"
-    SB_SPEC="$SB_SPEC platform=$SB_PLATFORM fake-podman=$SB_FAKE_PODMAN"
+    SB_SPEC="$SB_SPEC platform=$SB_PLATFORM fake-podman=$SB_FAKE_PODMAN sudo=${SB_SUDO:-fixture}"
     return 0
 }
 
@@ -753,6 +776,12 @@ sb_installed() { dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null
                    | awk '$1 == "installed" { print $2 }' | LC_ALL=C sort; }
 sb_installed > /var/tmp/report/dpkg-before
 
+# ─── and the sudo policy this case asked for, LAST  (#226) ─────────────────────
+# AFTER the arrangement above and after the before-picture, because `deny` and `absent` take
+# sudo away and both of those need it. Empty SB_SUDO is a no-op, so every case that never
+# mentioned sudo runs exactly as it did.
+/work/sandbox sudo </dev/null || { printf '===SUDO-FAILED===\n'; exit 91; }
+
 # WHICH INSTALLER, defaulted, so every existing case is unchanged and only a case that means it
 # says so. nest-run.sh honours the same variable; the floor-skew case is a Tier A case and runs
 # through this file.
@@ -834,6 +863,18 @@ for f in /etc/wsl-distribution.conf /etc/wsl-distribution.conf.cs193v; do
     [ -e "$f" ] && printf '%s\n' "$f"
 done
 printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
+# WHAT SUDO WAS REALLY LIKE, measured rather than echoed back from SB_SUDO: sudo_state reads
+# the applied record if there is one and otherwise ASKS this machine. A case whose refusal
+# assertion depends on sudo being unusable needs to know the arrangement took, the way
+# sb-nodl:the-machine-was-really-arranged does for its missing downloader.
+#
+# THROUGH A %s WITH ITS OWN NEWLINE, which is not fussiness. sudo_state's fall-through arms
+# `printf 'passwordless'` with no trailing newline, so writing it straight out put the NEXT
+# marker on the same line -- and sb_section only finds a marker at the start of a line, so
+# ===ARCH=== vanished and assert_survey_platform failed for every case that does NOT set a
+# policy. Measured, on sb-wsl and sb-fed. This is the rule stated above the origin block:
+# every report marker belongs in this block, after the last thing that writes to stdout.
+printf '\n===SUDO===\n%s\n' "$(/work/sandbox state-sudo 2>/dev/null)"
 # THE FIXTURE'S OWN ARCHITECTURE, so an assertion on the survey's "PLAT on ARCH" line can
 # check that it told the truth rather than that this image happens to be amd64. Three cases
 # used to hardcode x86_64 and so passed or failed on whether their base image was pinned to a
@@ -1335,6 +1376,7 @@ sandbox_run() {                       # sandbox_run LABEL KEYS [PODMAN_ARGS...] 
         --mount type=tmpfs,destination=/var/tmp/report \
         -e "SB_NO_PREREQS=$SB_NO_PREREQS" \
         -e "SB_DISTRO=$(machine_distro "$SB_BASE")" \
+        -e "SB_SUDO=$SB_SUDO" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" "$@" \
         "$(fixture_tag "$SB_BASE")" \
         /work/run.sh > "$SB_TMP/raw" 2>&1
