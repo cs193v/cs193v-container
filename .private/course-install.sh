@@ -719,14 +719,31 @@ install_podman() {
             pkg="$(mktemp "${TMPDIR:-/tmp}/podman.XXXXXX").pkg"
             url="https://github.com/containers/podman/releases/download/v${PODMAN_MACOS_VERSION}/podman-installer-macos-${arch}.pkg"
             note "$(msg note.downloading "URL=$url")"
-            if ! curl -fsSL --retry 5 -o "$pkg" "$url"; then
-                die "$(msg err.podman-download)"
+            # THE NOTE STAYS ABOVE THE BLOCK, and anything else that wants saying does too: the
+            # block has to be the last thing printed until it is finished with, because every
+            # frame addresses itself relative to where the cursor is and the animator overdraws
+            # whatever else arrives within 100 ms.
+            setup_meter_start 2 "$(msg meter.pkg-downloading)"
+            # NOT -s ANY MORE, and that is what makes a box worth having here at all: silent curl
+            # leaves eight blank rows for the length of a 56 MB download. MEASURED rather than
+            # assumed -- curl writes its progress meter to stderr even when stderr is a pipe, so
+            # 2>&1 puts a percentage, a rate and an ETA in the box, which is the best thing on
+            # the screen during the one phase with nothing else in it. -f and -L are unchanged
+            # and are the two that are load-bearing; -S only ever qualified the -s.
+            if ! setup_run setup_drain curl -fL --retry 5 -o "$pkg" "$url"; then
+                setup_meter_stop bad
+                die "$(msg err.podman-download "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
             fi
+            setup_phase 2 "$(msg meter.pkg-installing)"
             # note.password WAS HERE, saying "macOS will now ask for your password" (#226).
             # It will not: ask_password primed sudo before this step ran, so this line is
             # inside the timestamp and prompts for nothing. A heads-up about a prompt that
             # does not arrive is worse than none.
-            sudo installer -pkg "$pkg" -target / || die "$(msg err.podman-installer)"
+            if ! setup_run setup_drain sudo installer -pkg "$pkg" -target /; then
+                setup_meter_stop bad
+                die "$(msg err.podman-installer "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
+            fi
+            setup_meter_stop ok
             rm -f "$pkg"
             # NOT `export PATH="/opt/podman/bin:/usr/local/bin:$PATH"`. Where the .pkg puts
             # things is now asked of the receipt it just wrote rather than assumed here, so this
@@ -779,13 +796,37 @@ setup_subuid() {
     ok "$(msg ok.subuid "USER=$TARGET_USER")"
 }
 
+# `podman machine init --now` fetches an image of a few hundred MB and then does local work on
+# it, which is the split the two captions name.
+#
+# TWO ANCHORS FOR THE SECOND PHASE, neither load-bearing alone: `Extracting compressed file` is
+# where the download ends, and `Machine init complete` still fires if podman ever rewords the
+# extraction line. Forward-only, so whichever arrives first wins and the other is a no-op.
+machine_phases() {
+    local line l_initializing
+    l_initializing="$(msg meter.vm-initializing)"
+    while IFS= read -r line; do
+        case "$line" in
+            Extracting\ compressed\ file*) setup_phase 2 "$l_initializing" ;;
+            Machine\ init\ complete*)      setup_phase 2 "$l_initializing" ;;
+        esac
+    done
+}
+
 setup_machine() {
     [ "$PLAT" = macos ] || return 0
     local want; want="$(mac_vm_target_mb)"
     if [ "$DO_MACHINE_INIT" = yes ]; then
         step "$(msg step.machine-create "WANT=$want" "DISK=$MAC_VM_DISK_GB")"
-        podman machine init --memory "$want" --disk-size "$MAC_VM_DISK_GB" --now \
-            || die "$(msg err.machine-create)"
+        # THE INIT ARM ONLY, and the resize arm below deliberately keeps its raw output: it
+        # interleaves a notes() block from grow_machine_disk, and the animator would overdraw it.
+        setup_meter_start 2 "$(msg meter.vm-downloading)"
+        if ! setup_run machine_phases podman machine init --memory "$want" \
+                                             --disk-size "$MAC_VM_DISK_GB" --now; then
+            setup_meter_stop bad
+            die "$(msg err.machine-create "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
+        fi
+        setup_meter_stop ok
         ok "$(msg ok.machine-created)"
     elif [ "$DO_MACHINE_RESIZE" = yes ]; then
         step "$(msg step.machine-resize "WANT=$want")"

@@ -63,6 +63,7 @@
 #   machine_disk     .Resources.DiskSize, GB                [64 = MAC_VM_DISK_GB, so
 #                    nothing needs growing unless a test says so]
 #   machine_init_rc  exit code for `machine init`           [0]
+#   machine_delay    seconds between `machine init` lines   [0 = all at once]
 #   machine_set_rc   exit code for `machine set`            [0]
 #   machine_start_rc exit code for `machine start`          [0]
 #   machine_stop_rc  exit code for `machine stop`           [0]
@@ -364,7 +365,32 @@ level=error msg="cannot set up pasta"' >&2
                 exit 0 ;;
             init)
                 RC="$(get machine_init_rc 0)"
-                [ "$RC" -ne 0 ] && echo "Error: machine init failed" >&2
+                # WHAT `machine init --now` REALLY PRINTS, and this arm used to print nothing at
+                # all. #219 draws a progress block around this command whose phases are keyed on
+                # these very lines, so a silent fake would let a reader matching nothing pass --
+                # which is exactly the hole ERRORS.md B17 records for `build`, whose fake once
+                # printed one `Successfully tagged` line and hid the absence of any bar.
+                #
+                # machine_delay dribbles it out the way build_delay does, so that a phase is
+                # ever actually IN PROGRESS for a frame to catch.
+                if [ "$RC" -eq 0 ]; then
+                    D="$(get machine_delay 0)"
+                    for ML in \
+                        'Looking up Podman Machine image at quay.io/podman/machine-os:5.4' \
+                        'Getting image source signatures' \
+                        'Copying blob sha256:2a1f0a0c9e5b1f0d 1.1GiB / 1.1GiB' \
+                        'Downloading VM image: podman-machine.aarch64.applehv.raw.zst: done' \
+                        'Extracting compressed file: podman-machine-default-arm64.raw: done' \
+                        'Machine init complete' \
+                        'Starting machine "podman-machine-default"' \
+                        'API forwarding listening on: /var/run/docker.sock' \
+                        'Machine "podman-machine-default" started successfully'; do
+                        printf '%s\n' "$ML"
+                        [ "$D" = 0 ] || sleep "$D"
+                    done
+                else
+                    echo "Error: machine init failed" >&2
+                fi
                 exit "$RC" ;;
             set)
                 RC="$(get machine_set_rc 0)"
