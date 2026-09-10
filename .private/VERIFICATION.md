@@ -915,6 +915,34 @@ itself is what you changed.
 *Expect:* one word per line, no blank lines, and the words in `container.args` order.
 
 ---
+**1.8 — Windows: the whole install, with nothing to type (#217).** On a machine with no CS193V
+environment, right-click `install-cs193v-windows.cmd` → Run as administrator, and answer nothing.
+*Expect:* no username prompt, no password prompt, no telemetry question, and no Linux shell to
+`exit` from. One question only — where to put the course files — from the installer proper. Then
+the success box, naming `\\wsl.localhost\CS193V\home\student\cs193v\projects` with no
+placeholder in it. Measured end to end at about 50 s on a warm connection, of which ~36 s is `wsl --install`
+printing its own progress; the stretch after that is silent for up to a minute, which the
+on-screen text now warns about.
+*Then, in the environment:* `wsl -d CS193V -e id -un` is `student`;
+`wsl -d CS193V -u root -e passwd -S student` reports `L` (locked, so `sudo` cannot work and no
+student is ever asked for a password); `/etc/wsl.conf` holds `[user] default=student` **once**;
+`grep student /etc/subuid /etc/subgid` shows one range each, not two, even after re-running the
+installer; and `/etc/wsl-distribution.conf.cs193v` exists while `/etc/wsl-distribution.conf` does
+not.
+*Why the re-run matters:* every step of the root pass checks before it acts, and the failure
+mode of getting that wrong is silent — a second `systemd=true` in `/etc/wsl.conf`, or a second id
+range. Run the installer twice and diff both files.
+
+**1.9 — Windows: the three refusals a student can reach (#217).** Each of these is a `wsl` command
+you can put the machine into, and none should ever produce the success box.
+*Distro exists, no account:* interrupt an install between `--install` and the account, then re-run.
+*Expect:* it resumes and finishes — this is the state the two-pass design exists to be able to
+resume, and the file's own header promises re-running is safe.
+*Distro exists with somebody else's account* (`wsl --install -d Ubuntu-26.04 --name CS193V` by
+hand, answering the OOBE): *expect* a refusal that names `wsl --unregister CS193V` **and** says
+that unregistering deletes everything inside the environment.
+*Virtualisation off:* provisioning is the third site that needs the utility VM, so it must reach
+the same shared refusal as the create and the curl install, not a guess of its own.
 
 ## 2. Container lifecycle
 

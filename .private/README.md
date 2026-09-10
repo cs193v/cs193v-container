@@ -43,8 +43,17 @@ projects/                      the student's work; the only directory shared wit
                                symlink to it and the entrypoint links ~/.codex/AGENTS.md at it
     claude-code/               managed-settings.json (the notes moved out — see above)
   messages.txt                 all student-facing launcher strings (script config, not reading)
-  install-cs193v.sh            macOS / Ubuntu / WSL setup
-  install-cs193v-windows.cmd   Windows stage one: installs WSL, then DOWNLOADS the above
+  install-cs193v.sh            THE BOOTSTRAP a student downloads: finds curl or wget, fetches
+                               the course tree, checks it arrived and execs one of the two below
+  course-install.sh            the installer proper — macOS / Ubuntu / WSL (#221)
+  course-install-messages.txt  every student-facing string the installer prints
+  install-utils.sh             what the two installer scripts share (#217): the package table
+                               and the three steps that need root, in ONE list
+  wsl-provision.sh             the ROOT pass (#217): prepares a new CS193V WSL instance -- first-
+                               run questions off, the student's account created with no password
+                               -- so the pass a student watches never needs one
+  install-cs193v-windows.cmd   Windows stage one: installs WSL, creates the environment, then
+                               DOWNLOADS the bootstrap into it and runs it TWICE (issue #93, #217)
                                from GitHub and runs it (issue #93)
   CONTAINER-DESIGN.md          threat model, ports and the tunnel, rough edges
   VERIFICATION.md              release gates — hand to a Claude Code instance per platform
@@ -56,12 +65,15 @@ projects/                      the student's work; the only directory shared wit
 There is no `.github/` directory, and that is the design rather than an omission — see
 "How the image reaches a student" below.
 
-**Most of the above never reaches a student.** Six things ship: the launcher,
-`.config/container.args`, `.private/messages.txt`, `.private/Containerfile`, everything under
-`.private/files/`, and `projects/.gitkeep`. Everything else is `export-ignore`d, so GitHub's
-branch tarball — which is what the installer downloads — holds 30 files rather than 108 (issue
-#115): no test suite, no installers, and no documentation except `files/agent-notes.md`, which
-ships because the image installs it as `/etc/cs193v/agent-notes.md`.
+**Most of the above never reaches a student.** Eight things ship: the launcher,
+`.config/container.args`, `.private/messages.txt`, `.private/Containerfile`,
+`.private/course-install.sh` and its catalogue, `.private/install-utils.sh`,
+`.private/wsl-provision.sh`, everything under `.private/files/`, and `projects/.gitkeep`.
+Everything else is `export-ignore`d, so GitHub's branch tarball — which is what the bootstrap
+downloads — holds a few dozen files rather than 108 (issue #115): no test suite, no bootstrap and
+no Windows batch file (those two are downloaded from the website, not from the archive), and no
+documentation except `files/agent-notes.md`, which ships because the image installs it as
+`/etc/cs193v/agent-notes.md`.
 
 `.private/tests/11-export.sh` asserts that file set on every run of the suite, and
 `00-release-gates.sh` checks it against the real GitHub endpoint. Note the rule for `.private/`
@@ -601,13 +613,23 @@ That arrangement arrived with `setup-git`, which needed a menu and a box inside 
 would otherwise have been a third copy of both. What it replaced was one copy per script.
 
 **Since #221 there is exactly one copy, and the installer is the third consumer.**
-`install-cs193v.sh` is now a ~160-line bootstrap that finds `curl` or `wget`, fetches the course
-tree, checks the pieces arrived and `exec`s `course-install.sh` inside it — and that script
-sources this same file out of the tree it was handed. So `box()`, `menu()`, `die()`, `note()`,
+`install-cs193v.sh` is now a ~210-line bootstrap that finds `curl` or `wget`, fetches the course
+tree, checks the pieces arrived and `exec`s one of two scripts inside it — and both of them source
+this same file out of the tree they were handed. So `box()`, `menu()`, `die()`, `note()`,
 `version_lt()`, `platform()`, `ensure_podman_path()`, the podman floors and the meter renderer
 exist once. The checks that diffed the copies are retired, and what replaced them tests more: the
 one renderer is drawn twice, at the launcher's indent and at the installer's, through the four
 knobs described below.
+
+**And there is a SECOND shared file, which is not this one: `install-utils.sh` (#217).** It holds
+what the two installer halves share rather than what the course draws with — the package table,
+and the three steps that need root. It is deliberately NOT under `files/`: everything there is
+COPYied into the image and hashed into `cs193v.buildhash`, so a package name living there would
+prompt every student to rebuild a container that has no reader for it. The split matters because
+the Windows installer runs the bootstrap twice inside the CS193V WSL instance — `wsl-provision.sh`
+as root, then `course-install.sh` as a student whose password is locked — and if the two could
+disagree about what needs root, the second pass would meet a `sudo` prompt nobody can answer.
+`10-static.sh`'s `rootsteps:*` gate is what keeps them from disagreeing.
 
 **The bootstrap still sources nothing, and that is the point rather than a leftover.** It is the
 file a student downloads and checks a SHA-256 against, so `10-static.sh` asserts it sources and

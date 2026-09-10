@@ -105,14 +105,12 @@ cmd_run() {
     # command capture at all -- it shells out via a nested `CMD.EXE /C` that never launches -- so
     # any version of the .cmd that uses a backtick capture dies here for a reason that has
     # nothing to do with Windows. You will see this with --rev on anything before the rewrite.
-    if grep -q "Create a default Unix user account" /tmp/last-run.txt 2>/dev/null; then
-        hr
-        printf 'NOTE: Ubuntu first-run setup above was REPLAYED, not answered -- the prompts are\n'
-        printf '      shown with answers already filled in. On a real machine those three\n'
-        printf '      questions wait for the student. Knobs: wsl.oobe 0 to skip it,\n'
-        printf '      wsl.oobe.insights 0 for the 24.04 shape (two questions, not three),\n'
-        printf '      wsl.oobe.user NAME to change the pre-filled username.\n'
-    fi
+    #
+    # THE NOTE THAT USED TO SIT ABOVE THIS ONE IS GONE WITH #217. It explained that Ubuntu's
+    # first-run questions had been REPLAYED rather than answered, because `wsl --install` launched
+    # the new distribution and a student really did meet three questions there. The .cmd passes
+    # --no-launch now, so there is nothing to replay and nothing to explain: what happens in that
+    # window instead is the root pass preparing the environment, which says so itself.
     if grep -q "CMD.EXE /C" /tmp/last-run.txt 2>/dev/null; then
         hr
         printf 'NOTE: the "Can not recognize CMD.EXE /C ..." lines above are WINE, not the\n'
@@ -183,8 +181,29 @@ Everything you can change, by writing a file into /tmp/case
   wsl.feature.nothingmissing 1
                           `--install --no-distribution` had nothing to enable, so it reports
                           plain success rather than reboot-required
-  wsl.install.rc N        the exit code of the LAUNCHED SHELL, which is what
-                          `wsl --install` actually returns -- not the install's
+  wsl.install.rc N        the exit code of `--install` ITSELF, which is what it returns now
+                          that the .cmd passes --no-launch. Before #217 it was the LAUNCHED
+                          SHELL's, so a student who mistyped before `exit` looked like a
+                          failed install and the .cmd could not test it at all
+  wsl.nolaunch.unsupported 1
+                          a WSL that rejects --no-launch. Nothing supported does; it exists
+                          so the .cmd's new exit check has a failure arm to be tested by
+  wsl.terminate.rc N      `--terminate`. The real one exits 0 whether or not the instance was
+                          running (measured both ways). It also WIPES /tmp, which this fake
+                          models: stage 2 lives in /var/tmp for that reason
+  wsl.provision.rc N      what the ROOT pass exits with -- the same script as stage 2, run as
+                          `env CS193V_PROVISION=1 bash ...`. On 0 the fake records that the
+                          `student` account now exists, which is what the getent probes and
+                          the `test -O` handover check then read
+  wsl.account.foreign NAME
+                          the environment already holds somebody else's account, which is
+                          what a CS193V made by the installer that asked students to choose a
+                          username looks like. `getent passwd 1000` then answers 0 while
+                          `getent passwd student` answers 2, and the .cmd owes that state a
+                          refusal rather than a second account
+  wsl.oobe.conf.missing 1 /etc/wsl-distribution.conf is not there, so Ubuntu's first-run
+                          setup cannot be switched off by moving it aside. That is the shape
+                          of a future Ubuntu image that keeps it somewhere else
   wsl.curl.missing 1      curl is not in the distro. Stage one installs it rather
                           than refusing -- the distro is one it created itself
   wsl.apt.update.rc N     `apt-get update` inside the distro
@@ -205,13 +224,7 @@ Everything you can change, by writing a file into /tmp/case
                           for it at each probe. To break one probe only, use ps.<name>.rc
   wsl.list                one distro name per line. Empty = a fresh WSL
 
-  wsl.oobe 0              skip Ubuntu's first-run setup entirely
-  wsl.oobe.insights 0     drop the telemetry question, i.e. the 24.04 shape.
-                          The installer's text promises THREE questions on 26.04
-                          and two here -- this is how you check that claim
-  wsl.oobe.user NAME      the pre-filled username (real WSL fills in the Windows
-                          account name, lowercased and sanitised)
-  wsl.stage2.quiet 1      drop the "install-cs193v.sh runs here" boundary line
+  wsl.stage2.quiet 1      drop the "install-cs193v.sh runs here" boundary lines
 
   e.g.   echo -1 > /tmp/case/wsl.status.rc && wincmd run
 

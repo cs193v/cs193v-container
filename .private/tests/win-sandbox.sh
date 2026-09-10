@@ -88,8 +88,20 @@ WHAT THE MACHINE IS LIKE
   --reboot-required    \`wsl --install -d\` enables a component, prints the reboot notice,
                        installs NOTHING and exits ZERO. The shape that made "it exited 0"
                        and "the environment is there" look like the same claim
-  --shell-rc N         the exit code of the shell \`wsl --install\` LAUNCHES. Not the
-                       install's own, which is the point: N=1 must NOT read as a failure
+  --shell-rc N         the exit code of \`wsl --install\` itself. With --no-launch there is no
+                       launched shell to blame, so the .cmd tests this now: N=1 must refuse
+  --old-nolaunch       a WSL that rejects --no-launch. Nothing supported does; it is what
+                       gives the .cmd's new exit check a failure to be tested against
+  --provision-rc N     what the ROOT pass exits with -- the same script as stage 2, run with
+                       CS193V_PROVISION=1 to prepare the new environment
+  --terminate-rc N     \`wsl --terminate\` fails, so /etc/wsl.conf never takes effect and the
+                       student's half would have run as root. The handover check catches it
+  --foreign-account [NAME]
+                       the environment already holds somebody else's account (default keith),
+                       which is what a CS193V made by the installer that asked students to
+                       choose a username looks like. Provisioning must refuse, not add a second
+  --no-oobe-conf       /etc/wsl-distribution.conf is not there, so Ubuntu's first-run setup
+                       cannot be switched off by moving it aside
   --apt-fails [RC]     \`apt-get install\` fails (default -1) while installing curl
   --apt-lies           apt exits 0 and curl is still absent, which only the re-probe catches
   --download-fails [RC] the download fails (default 22, an HTTP error under curl -f)
@@ -201,8 +213,22 @@ while [ "$#" -gt 0 ]; do
         --createvm-fails) setk wsl.install.novirt 1; DISTROS='' ;;
         --reboot-required) setk wsl.install.rebootrequired 1; DISTROS='' ;;
         --old-wsl)        setk wsl.name.unsupported 1; DISTROS='' ;;
+        # --install's OWN exit code since #217, not the launched shell's: the .cmd passes
+        # --no-launch, so there is no shell to blame and the code is finally testable. The flag
+        # keeps its name because what an operator wants is still "make the create look failed".
         --shell-rc)       needval --shell-rc "${2:-}"; shift; setk wsl.install.rc "$1" ;;
         --shell-rc=*)     setk wsl.install.rc "${1#--shell-rc=}" ;;
+        --old-nolaunch)   setk wsl.nolaunch.unsupported 1; DISTROS='' ;;
+        --provision-rc)   needval --provision-rc "${2:-}"; shift; setk wsl.provision.rc "$1" ;;
+        --provision-rc=*) setk wsl.provision.rc "${1#--provision-rc=}" ;;
+        --terminate-rc)   needval --terminate-rc "${2:-}"; shift; setk wsl.terminate.rc "$1" ;;
+        --terminate-rc=*) setk wsl.terminate.rc "${1#--terminate-rc=}" ;;
+        # THE ENVIRONMENT SOMEBODY ELSE'S ACCOUNT IS IN, which is what a CS193V created by the
+        # installer that asked students to choose a username looks like. Implies the distro is
+        # there, since an account cannot exist in one that is not.
+        --foreign-account) optval keith "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
+                          setk wsl.account.foreign "$OPTVAL" ;;
+        --no-oobe-conf)   setk wsl.oobe.conf.missing 1 ;;
         --probe-fails)  optval 9009 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
                           setk ps.rc "$OPTVAL" ;;
         --stage2-rc)      needval --stage2-rc "${2:-}"; shift; setk wsl.bash.rc "$1" ;;

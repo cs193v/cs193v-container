@@ -84,7 +84,11 @@ MACHINE_PREREQ_NAMES='podman ssh subuid curl wget uidmap'
 # It is a SUBSTITUTION, which is exactly what `base=` already means: Containerfile.podman-old is
 # "the one machine that is not the machine" because a podman VERSION cannot be produced by
 # subtracting from a 26.04 base. A package MANAGER cannot either.
-MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora fedora-nested arch'
+# wsl-fresh IS THE ONE THAT IS NOT A DISTRO (#217): it is the machine as the WINDOWS INSTALLER
+# finds it -- root, and no human account at all, which is what `wsl --install --no-launch` leaves
+# behind. That is neither an absence of software nor a missing capability, so it is a base for the
+# same reason podman-old is: a substitution rather than a subtraction.
+MACHINE_BASE_NAMES='machine podman-old podman-old-nested debian fedora fedora-nested arch wsl-fresh'
 
 # WHICH BASES RUN A PODMAN INSIDE THEMSELVES, and it is only one of them. SYS_ADMIN, the unmask
 # and the two devices are what a NESTED podman costs; podman-old and debian both die in survey
@@ -778,6 +782,34 @@ fi
 bash "$INST"
 rc=$?
 
+# ─── AND, WHEN THE CASE ASKS FOR IT, AGAIN AS THE STUDENT  (#217) ──────────────
+# THE TWO PASSES ARE THE WHOLE POINT OF THE WINDOWS PATH, so one case has to be both of them: the
+# run above was the root pass (CS193V_PROVISION is in this container's environment), and it created
+# an account with a LOCKED password. This runs the installer proper as that account, which is what
+# a student watches -- and its job is to need no privilege at all. If the split is wrong, this is
+# where it shows: `sudo` on a locked password does not fail fast, it PROMPTS, and with stdin closed
+# it then fails, so the pass reports the refusal rather than hanging.
+#
+# `su - "$user"` RATHER THAN A SECOND CONTAINER, because the state that matters -- the account,
+# /etc/wsl.conf, /etc/subuid, the packages -- is what the first pass just wrote here. A second
+# container would be a second machine and would assert nothing about the handover.
+#
+# ITS OWN STDIN, CLOSED. The keystrokes this case feeds go to the FIRST pass; the second is
+# deliberately non-interactive, which is also the shape stage 1 runs it in on Windows: no consent
+# question is owed, because everything it would ask about is already done.
+if [ -n "${SB_SECOND_PASS:-}" ]; then
+    printf '\n===SECOND-PASS-AS=%s===\n' "$SB_SECOND_PASS"
+    # `su -` CLEARS THE ENVIRONMENT, which is the point -- a student's shell is not root's -- so
+    # the two variables that have to survive are named. CS193V_DIR keeps the second pass from
+    # asking where to put things; CS193V_SHIM is what lib/podman-fake reads, and without it the
+    # fake refuses by design rather than guessing at a directory.
+    su - "$SB_SECOND_PASS" -c \
+       "CS193V_DIR='${CS193V_DIR:-}' CS193V_SHIM='${CS193V_SHIM:-}' bash '$INST'" </dev/null
+    rc2=$?
+else
+    rc2=0
+fi
+
 # ─── release podman's rootless pause process ────────────────────────────────────
 # WITHOUT THIS THE CONTAINER CANNOT EXIT, and that is measured, not defensive. The first podman
 # command to set up the rootless user namespace forks a pause process (`catatonit -P`) which
@@ -794,6 +826,13 @@ sb_installed > /var/tmp/report/dpkg-now
 comm -13 /var/tmp/report/dpkg-before /var/tmp/report/dpkg-now > /var/tmp/report/dpkg-added
 
 printf '\n===INSTALLER-RC=%s===\n' "$rc"
+printf '===SECOND-PASS-RC=%s===\n' "$rc2"
+printf '===PASSWD===\n';    getent passwd | awk -F: '$3 >= 1000 && $3 < 65000 { print $1 ":" $3 }'
+printf '===SHADOW===\n';   awk -F: '$2 == "!" || $2 == "!!" { print $1 ":locked" }' /etc/shadow 2>/dev/null
+printf '===OOBE-CONF===\n'
+for f in /etc/wsl-distribution.conf /etc/wsl-distribution.conf.cs193v; do
+    [ -e "$f" ] && printf '%s\n' "$f"
+done
 printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
 # THE FIXTURE'S OWN ARCHITECTURE, so an assertion on the survey's "PLAT on ARCH" line can
 # check that it told the truth rather than that this image happens to be amd64. Three cases

@@ -1207,11 +1207,12 @@ assert_eq       "missing-tarball:exits-nonzero"         "1" "$(last_rc)"
 #    files. tar extracts it happily and exits 0, so without an explicit per-file check the
 #    install would print "Setup finished" over a directory with no launcher in it.
 #
-#    TWO CHECKS SINCE #221, AND THIS CASE SPLITS TO MATCH. The bootstrap checks the two files it
-#    needs in order to hand over at all; the installer proper checks the files the STUDENT'S tree
-#    needs. They are different claims and they fail at different moments, so an archive that
-#    satisfies the first and not the second has to be built on purpose -- otherwise the second
-#    check is never reached and reads as covered while testing nothing.
+#    TWO CHECKS SINCE #221, AND THIS CASE SPLITS TO MATCH. The bootstrap checks the files it
+#    needs in order to hand over at all -- five of them since #217; the installer proper checks
+#    the files the STUDENT'S tree needs. They are different claims and they fail at different
+#    moments, so an archive that satisfies the first and not the second has to be built on
+#    purpose -- otherwise the second check is never reached and reads as covered while testing
+#    nothing.
 
 # 3a. Nothing the bootstrap can hand over to.
 mkdir -p "$TMP/pkg2/cs193v-main"
@@ -1333,7 +1334,7 @@ assert_ok "windows:uses-the-same-sentinel-as-the-sh" \
 # a "no redirection found" check would pass for free.
 curl_line="$(sed 's/\r$//' "$W" | grep -n 'curl -fsSL' || true)"
 assert_match "windows:downloads-the-shared-installer" \
-             '\-e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%$' "$curl_line"
+             '\-u root \-e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%$' "$curl_line"
 assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
 
 # ORDER, which no wine run can prove absent: the downloaded script must be checked BEFORE it is
@@ -1344,6 +1345,68 @@ bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e bash %STAGE2%' | head -1 | cut -d
 assert_ok "windows:checks-the-download-before-running-it" \
           sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
 
+
+# ─── the Linux account this file creates, pinned the way the URL is  (#217) ────
+# EVERY CHARACTER OF IT CROSSES INTO wsl.exe UNQUOTED, in `-u %LINUX_USER%`, `getent passwd
+# %LINUX_USER%` and `/home/%LINUX_USER%` -- so the class here is the same argument the sentinel's
+# is: a value that needs no quoting is stronger than a quote that has to survive cmd AND wsl.exe.
+# The class is also a POSIX portable username, which is what useradd will accept.
+cmd_user="$(cmd_get 'set "LINUX_USER=\(.*\)"')"
+assert_match "windows:the-linux-user-needs-no-quoting" '^[a-z_][a-z0-9_-]{0,30}$' "$cmd_user"
+
+# AND THE TWO FILES THAT USE IT MUST AGREE, the same shape as the distro-name check below: the
+# .cmd hands the name to wsl.exe, wsl-provision.sh creates the account, and a mismatch would
+# leave the .cmd probing for an account nothing ever made.
+prov_user="$(sed -n 's/^WSL_USER="\(.*\)"$/\1/p' "$PRIVATE/wsl-provision.sh" | head -1)"
+assert_ne "windows:the-root-pass-declares-a-user" "" "$prov_user"
+assert_eq "windows:names-the-same-linux-user-as-the-root-pass" "$cmd_user" "$prov_user"
+
+# AND THE SUCCESS MESSAGE MUST NAME THE ACCOUNT IT REALLY CREATED. This is the line a student
+# copies into Explorer, and it held `[your-linux-username]` for as long as Ubuntu's first-run
+# setup chose that name. Read out of the file rather than typed here, so the two cannot drift.
+proj_line="$(sed 's/\r$//' "$W" | grep -F 'wsl.localhost' | grep -F 'projects' | head -1)"
+assert_ne "windows:the-projects-path-is-there" "" "$proj_line"
+assert_contains "windows:the-projects-path-names-the-account" "%LINUX_USER%" "$proj_line"
+assert_not_contains "windows:the-projects-path-has-no-placeholder" "your-linux-username" "$proj_line"
+
+# ─── --no-launch, and the order of what follows it ─────────────────────────────
+# THE CREATE IS ASKED FOR WITHOUT A LAUNCH, and its exit code is CHECKED -- which it could not be
+# before, because the code belonged to the shell `wsl --install` started. Both halves are pinned:
+# a version that dropped --no-launch would fire Ubuntu's first-run questions at a student, and one
+# that dropped the check would carry on past a failed create.
+install_line="$(sed 's/\r$//' "$W" | grep -n -- '--install -d %IMAGE_NAME%' | head -1)"
+assert_match "windows:creates-the-environment-without-launching-it" '\-\-no-launch$' "$install_line"
+install_ln="${install_line%%:*}"
+next_line="$(sed 's/\r$//' "$W" | sed -n "$((install_ln + 1))p")"
+assert_match "windows:checks-the-create-exit-code" '^if %errorlevel% neq 0 goto ' "$next_line"
+
+# THE ORDER OF THE WHOLE PROVISIONING SEQUENCE, which no wine run can prove is complete: the
+# first-run setup goes off before the download, the root pass runs before the restart, the restart
+# before the handover check, and the handover check before the student's pass. Every one of those
+# is a failure that would be silent -- the worst of them installs the course into /root.
+ln_of() { sed 's/\r$//' "$W" | grep -n -- "$1" | head -1 | cut -d: -f1; }
+mv_ln="$(ln_of '\-e mv /etc/wsl-distribution.conf')"
+dl_ln="$(ln_of 'curl -fsSL')"
+prov_ln="$(ln_of 'env CS193V_PROVISION=1 bash %STAGE2%')"
+term_ln="$(ln_of '\-\-terminate %DISTRO%')"
+own_ln="$(ln_of '\-e test -O /home/%LINUX_USER%')"
+stage2_ln="$(ln_of '\-e bash %STAGE2%')"
+seq_have="$(printf '%s\n' "$mv_ln" "$dl_ln" "$prov_ln" "$term_ln" "$own_ln" "$stage2_ln" | grep -c .)"
+assert_eq "windows:the-provisioning-sequence-was-found" "6" "$seq_have"
+assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
+          "$(printf '%s\n' "$mv_ln" "$dl_ln" "$prov_ln" "$term_ln" "$own_ln" "$stage2_ln" \
+             | { sort -c -n 2>/dev/null && echo sorted || echo "out-of-order: $mv_ln $dl_ln $prov_ln $term_ln $own_ln $stage2_ln"; })"
+
+# AND THE STUDENT'S PASS IS THE ONE THAT IS NOT ROOT. Everything before it runs `-u root`
+# deliberately -- the download, so a re-run can overwrite its own root-owned file; the probes and
+# the root pass, so they mean the same thing whichever way /etc/wsl.conf has been left. The last
+# call must NOT, or the whole point of the split is gone.
+stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e bash %STAGE2%' | head -1)"
+assert_not_contains "windows:the-student-pass-is-not-root" "-u root" "$stage2_full"
+assert_contains "windows:the-root-pass-is-root" "-u root" \
+                "$(sed 's/\r$//' "$W" | grep -- 'env CS193V_PROVISION=1 bash %STAGE2%' | head -1)"
+assert_contains "windows:the-download-is-root" "-u root" \
+                "$(sed 's/\r$//' "$W" | grep -- 'curl -fsSL' | head -1)"
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
           sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/course-install.sh"
 # A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click

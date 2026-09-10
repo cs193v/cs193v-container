@@ -21,7 +21,7 @@ SB_TMP="$(new_tmpdir)"
 # Read by sandbox_cleanup in lib/sandbox.sh:1314 (`for c in $SB_CASES`), which the trap below
 # calls -- so the sweep and this list are the same fact, named once.
 # shellcheck disable=SC2034
-SB_CASES="apt cannot-answer subuid-no subuid-yes wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
+SB_CASES="apt wsl-provision cannot-answer subuid-no subuid-yes wsl-absent wsl-noboot wsl-boot wsl-systemd podman-old debian fedora arch nested"
 trap 'sandbox_cleanup; rm -rf "$SB_TMP"' EXIT
 record "sandbox:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 record "sandbox:leftover-containers-from-an-earlier-run" "$(sandbox_sweep_stale)"
@@ -405,6 +405,94 @@ assert_eq   "sb-subuid:and-the-matching-subgid" "student:200000:65536" "$(sb_sec
 record "sb-subuid:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 sandbox_reap
 
+
+# ─── THE TWO PASSES, IN ONE CONTAINER: the Windows path end to end  (#217) ─────
+#
+# WHAT THIS CASE IS AND WHY IT HAS TO BE ONE CASE. On Windows the installer runs twice inside a
+# brand-new CS193V WSL instance: wsl-provision.sh as root, which creates the student's account
+# with a LOCKED password and does every step that needs privilege, and then course-install.sh as
+# that student, which must need none. Split across two cases neither half would prove anything --
+# the interesting claim is that the SECOND pass finds nothing left to do, and that is a fact about
+# what the first one wrote.
+#
+# THE FIXTURE IS THE MACHINE AS THE .cmd FINDS IT: base=wsl-fresh is root with no human account at
+# all, which is what `wsl --install --no-launch` leaves behind. Nothing else here can stand in for
+# it -- every other base starts as a student on a machine that is already theirs.
+#
+# --user 0, PASSED THROUGH TO podman, because the uid comes from the image and this fixture has no
+# USER line for exactly that reason. sandbox_run forwards its trailing arguments verbatim.
+#
+# fake-podman=yes, and NOT no-prereqs=podman: those two are refused together, and this case does
+# not need a real one. What the packages step does when something IS missing is already covered by
+# sb-apt and sb-uidmap, through the same root_step_packages this pass calls -- one function, two
+# arms. What is only true here is the account, the wsl.conf stanza and the second pass.
+fixture_build wsl-fresh || exit 1
+sb_machine base=wsl-fresh platform=wsl fake-podman=yes
+out="$(sandbox_run wsl-provision '' --user 0 \
+        -e CS193V_PROVISION=1 -e SB_SECOND_PASS=student -e CS193V_DIR=/home/student/cs193v)"
+
+# THE ROOT PASS FIRST, and its own exit code, because everything below is only meaningful if it
+# finished. Recorded as well as asserted: a nonzero here is the whole story of the case.
+record "sb-prov:root-pass-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+assert_eq "sb-prov:the-root-pass-succeeds" "0" \
+          "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+assert_says "sb-prov:says-what-it-is-doing" "Preparing this environment" "$out"
+
+# THE ACCOUNT REALLY EXISTS, and it is the only human account in there. Read out of /etc/passwd
+# rather than from anything the script printed -- an installer that says it created an account and
+# did not is exactly the failure this arm is for.
+assert_eq "sb-prov:creates-the-student-account" "student:1000" "$(sb_section "$out" PASSWD)"
+assert_says "sb-prov:says-it-created-it" "Created the student account" "$out"
+
+# AND ITS PASSWORD IS LOCKED, which is the property the whole two-pass design rests on: nothing
+# ever asks a student for a Linux password because there is none to ask for.
+assert_contains "sb-prov:the-account-has-no-password" "student:locked" "$(sb_section "$out" SHADOW)"
+
+# /etc/wsl.conf GAINS THE [user] STANZA AND KEEPS THE [boot] ONE. Asserted as the file's whole
+# contents rather than as a grep, because the failure mode of a step that acts unconditionally is
+# a SECOND systemd=true line -- measured against the real image, which already ships it -- and a
+# grep for the setting passes happily on a file with two of them.
+assert_eq "sb-prov:records-the-default-user" "[boot]
+systemd=true
+
+[user]
+default=student" "$(sb_section "$out" WSL-CONF)"
+
+# THE FIRST-RUN QUESTIONS ARE OFF: the configuration Ubuntu wires its OOBE up through has been
+# moved aside, and moved rather than emptied -- an emptied one would still be there.
+assert_eq "sb-prov:switches-the-first-run-setup-off" "/etc/wsl-distribution.conf.cs193v" \
+          "$(sb_section "$out" OOBE-CONF)"
+assert_says "sb-prov:says-the-questions-are-off" "first-run questions are switched off" "$out"
+
+# THE SUBUID RANGE, which useradd writes for a new account on Debian-family shadow (4.11.1-3+) --
+# so the step SKIPS, and the range is there anyway. The claim is the range, not who wrote it: what
+# podman needs is a block of ids, and what must not happen is two blocks.
+assert_eq "sb-prov:the-account-has-one-subuid-range" "1" \
+          "$(sb_section "$out" ETC-SUBUID | grep -c '^student:')"
+assert_eq "sb-prov:and-one-subgid-range" "1" \
+          "$(sb_section "$out" ETC-SUBGID | grep -c '^student:')"
+
+# ─── and now the pass a student watches, in the environment the first one made ─
+#
+# NOTHING LEFT TO CHANGE is the assertion. survey() asks the same questions it asks on a Mac, and
+# on a provisioned instance every one of them answers yes -- so NEEDS is empty, the consent menu
+# never appears, and no privileged call is reached. That is what makes a locked password safe.
+assert_eq "sb-prov:the-student-pass-succeeds" "0" \
+          "$(printf '%s' "$out" | sed -n 's/.*===SECOND-PASS-RC=\([0-9]*\)===.*/\1/p' | head -1)"
+assert_says "sb-prov:the-student-pass-ran-as-the-student" "===SECOND-PASS-AS=student===" "$out"
+assert_says "sb-prov:has-nothing-to-change" "Nothing on your computer needs to change" "$out"
+assert_says "sb-prov:finds-the-prereqs-done" "podman, uidmap, ssh and curl" "$out"
+assert_says "sb-prov:finds-the-subuid-range-done" "your account has the ID range podman needs" "$out"
+assert_says "sb-prov:finds-systemd-already-on" "systemd is enabled in this WSL environment" "$out"
+assert_says "sb-prov:finishes"  "Setup finished" "$out"
+
+# AND IT ASKED FOR NO PASSWORD. There is no sudo recorder in this tier -- sudo here is REAL, which
+# is what makes the root pass's effects real -- so the claim is made the way the installer itself
+# makes it: every privileged step reported as already satisfied, and a transcript with no password
+# prompt in it. A pass that reached sudo on this account would print one and then fail.
+assert_says_not "sb-prov:never-asks-for-a-password" "password for" "$out"
+assert_says_not "sb-prov:asks-no-consent-question" "needs your permission" "$out"
+sandbox_reap
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
