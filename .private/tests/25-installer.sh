@@ -1532,7 +1532,7 @@ assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
 # handed to bash. Both line numbers must exist, so a rename on either side goes red rather than
 # quiet.
 sentinel_ln="$(sed 's/\r$//' "$W" | grep -n 'grep -q %SENTINEL%' | head -1 | cut -d: -f1)"
-bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e bash %STAGE2%' | head -1 | cut -d: -f1)"
+bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e env CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
 assert_ok "windows:checks-the-download-before-running-it" \
           sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
 
@@ -1552,13 +1552,13 @@ prov_user="$(sed -n 's/^WSL_USER="\(.*\)"$/\1/p' "$PRIVATE/wsl-provision.sh" | h
 assert_ne "windows:the-root-pass-declares-a-user" "" "$prov_user"
 assert_eq "windows:names-the-same-linux-user-as-the-root-pass" "$cmd_user" "$prov_user"
 
-# AND THE SUCCESS MESSAGE MUST NAME THE ACCOUNT IT REALLY CREATED. This is the line a student
-# copies into Explorer, and it held `[your-linux-username]` for as long as Ubuntu's first-run
-# setup chose that name. Read out of the file rather than typed here, so the two cannot drift.
-proj_line="$(sed 's/\r$//' "$W" | grep -F 'wsl.localhost' | grep -F 'projects' | head -1)"
-assert_ne "windows:the-projects-path-is-there" "" "$proj_line"
-assert_contains "windows:the-projects-path-names-the-account" "%LINUX_USER%" "$proj_line"
-assert_not_contains "windows:the-projects-path-has-no-placeholder" "your-linux-username" "$proj_line"
+# THE SUCCESS MESSAGE IS NO LONGER IN THIS FILE TO READ (#218). Three assertions stood here and
+# checked that the line a student copies into Explorer existed, named %LINUX_USER% rather than
+# the old `[your-linux-username]` placeholder, and had not drifted from the account the root pass
+# creates. The .cmd does not print that line any more -- course-install.sh does, from $DIR -- so
+# all three would now be reading an empty string, and two of them were NEGATIVE assertions that
+# pass for free against one. The property they were after is asserted for real by
+# `win-signoff:the-unc-path-follows-it-too` above, against the path the installer actually built.
 
 # ─── --no-launch, and the order of what follows it ─────────────────────────────
 # THE CREATE IS ASKED FOR WITHOUT A LAUNCH, and its exit code is CHECKED -- which it could not be
@@ -1581,7 +1581,7 @@ dl_ln="$(ln_of 'curl -fsSL')"
 prov_ln="$(ln_of 'env CS193V_PROVISION=1 bash %STAGE2%')"
 term_ln="$(ln_of '\-\-terminate %DISTRO%')"
 own_ln="$(ln_of '\-e test -O /home/%LINUX_USER%')"
-stage2_ln="$(ln_of '\-e bash %STAGE2%')"
+stage2_ln="$(ln_of '\-e env CS193V_WINDOWS=1 bash %STAGE2%')"
 seq_have="$(printf '%s\n' "$mv_ln" "$dl_ln" "$prov_ln" "$term_ln" "$own_ln" "$stage2_ln" | grep -c .)"
 assert_eq "windows:the-provisioning-sequence-was-found" "6" "$seq_have"
 assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
@@ -1592,7 +1592,8 @@ assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
 # deliberately -- the download, so a re-run can overwrite its own root-owned file; the probes and
 # the root pass, so they mean the same thing whichever way /etc/wsl.conf has been left. The last
 # call must NOT, or the whole point of the split is gone.
-stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e bash %STAGE2%' | head -1)"
+stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e env CS193V_WINDOWS=1 bash %STAGE2%' | head -1)"
+assert_ne "windows:the-student-pass-line-is-there" "" "$stage2_full"
 assert_not_contains "windows:the-student-pass-is-not-root" "-u root" "$stage2_full"
 assert_contains "windows:the-root-pass-is-root" "-u root" \
                 "$(sed 's/\r$//' "$W" | grep -- 'env CS193V_PROVISION=1 bash %STAGE2%' | head -1)"
