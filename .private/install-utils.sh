@@ -150,7 +150,14 @@ distro_packages() {                   # distro_packages FAMILY -> sets the PM_/P
 #
 # THE LOG OUTLIVES THE RUN, like the launcher's $BUILD_LOG and for its reason: with the output no
 # longer on the screen it is the thing to ask a student for, and the refusals name it.
-SETUP_LOG="${TMPDIR:-/tmp}/cs193v-setup-$$.log"
+#
+# AND ITS NAME IS FIXED, where $BUILD_LOG carries $TUNNEL_ID. The launcher has CS193V_INSTANCE and
+# so really can have two of itself on one machine; an installer does not, and a path with a pid in
+# it is one nobody can put in a sentence. It also keeps the install tier honest: `podman diff`
+# audits an EXACT set of paths, so a pid-named file under /tmp is an unmatched extra that appears
+# only in the cases that reach a metered step -- the trap /tmp/dpkg-{before,now,added} set once
+# already (lib/sandbox.sh).
+SETUP_LOG="${TMPDIR:-/tmp}/cs193v-setup.log"
 # The staff escape hatch, shared with the launcher's build meter. cs193v carries the argument for
 # there being one switch rather than two.
 SETUP_RAW="${CS193V_SETUP_RAW_LOG:-}"

@@ -964,6 +964,24 @@ printf '===ETC-SUBUID===\n'; cat /etc/subuid  2>/dev/null
 printf '===ETC-SUBGID===\n'; cat /etc/subgid  2>/dev/null
 printf '===WSL-CONF===\n';   cat /etc/wsl.conf 2>/dev/null
 printf '===DPKG-ADDED===\n'; cat /var/tmp/report/dpkg-added 2>/dev/null
+# THE ANCHORS THE PROGRESS BLOCK KEYS ON (#219), counted in the installer's own log rather than
+# looked for in the transcript. The captions are drawn by a 10 Hz animator, so whether any given
+# one was ever ON THE SCREEN depends on how long its phase happened to take -- but whether the
+# package manager PRINTED the line shape the reader matches does not, and that is the claim no
+# fixture of ours can answer and a real apt or dnf can. Counted here rather than asserted, so one
+# grep serves both families and the suite decides which numbers it expects.
+printf '===SETUP-ANCHORS===\n'
+sl="${TMPDIR:-/tmp}/cs193v-setup.log"
+if [ -f "$sl" ]; then
+    printf 'lines=%s\n'       "$(grep -c . "$sl")"
+    printf 'get=%s\n'         "$(grep -c '^Get:' "$sl")"
+    printf 'unpacking=%s\n'   "$(grep -c '^Unpacking ' "$sl")"
+    printf 'settingup=%s\n'   "$(grep -c '^Setting up ' "$sl")"
+    printf 'dnfdownload=%s\n' "$(grep -c '^Downloading Packages' "$sl")"
+    printf 'dnftrans=%s\n'    "$(grep -c '^Running transaction' "$sl")"
+else
+    printf 'lines=no-log\n'
+fi
 printf '===PODMAN-AFTER===\n'
 if command -v podman >/dev/null 2>&1; then podman --version; else echo absent; fi
 # INSTALLED IS NOT THE SAME AS WORKING, and asserting the former let a broken podman read as a
