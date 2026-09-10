@@ -56,11 +56,12 @@ record "export:file-count" "$n_paths"
 # .private/files/ IS EXCLUDED FROM THIS LINE and covered by §3 instead. Everything under files/
 # ships by definition -- it is the only COPY in the Containerfile and build_hash hashes the whole
 # tree -- so listing its 25 names here would mean editing this suite every time somebody adds an
-# image file, for an edit that carries no decision. What is left is the five paths where adding
-# or removing one IS a decision. course-install.sh is the fifth since #221: the bootstrap a
-# student downloads fetches this tree and execs it out of the archive, so it has to be here
-# while install-cs193v.sh itself must not be -- see Â§4.
-want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/messages.txt cs193v projects/.gitkeep"
+# image file, for an edit that carries no decision. What is left is the seven paths where adding
+# or removing one IS a decision. Three of them arrived with a split: course-install.sh with #221,
+# and install-utils.sh and wsl-provision.sh with #217. All three are execed or sourced out of the
+# ARCHIVE by the bootstrap a student downloads, so each has to be here while install-cs193v.sh
+# itself must not be -- see §4.
+want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
 got="$(grep -v '^\.private/files/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
 

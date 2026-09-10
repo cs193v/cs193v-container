@@ -162,77 +162,12 @@ skip()  { printf '    %s· %s %s%s\n' "$C_DIM" "$*" "$(msg skip.suffix)" "$C_OFF
 notes() { local l; while IFS= read -r l; do note "$l"; done; }
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
-# ─── which family of Linux this is, and what it calls things ───────────────────
-#
-# PARSED, NOT SOURCED, and that is a deliberate refusal to use the obvious one-liner.
-# `. /etc/os-release` would let that file set ANY variable in this script -- $DIR, $PLAT, $PATH --
-# and this script runs sudo. It is shell syntax by specification, which is exactly what makes
-# sourcing it the wrong tool.
-os_release_field() {                  # os_release_field NAME -> its value, unquoted
-    sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | head -1 | tr -d '"' | tr -d "'"
-}
-
-# ID FIRST, THEN EACH WORD OF ID_LIKE, which is what makes the derivatives free: Linux Mint says
-# ID_LIKE=ubuntu, Pop!_OS says "ubuntu debian", Nobara and Bazzite say fedora, Rocky and AlmaLinux
-# say "rhel centos fedora". None of them needs naming here.
-#
-# `rhel` and `centos` are patterns on the fedora arm rather than an arm of their own -- RHEL itself
-# is ID=rhel ID_LIKE=fedora and would match anyway, so they are belt-and-braces for a rebuild that
-# omits ID_LIKE, not a second code path.
-#
-# EVERYTHING ELSE IS `unsupported`, INCLUDING ARCH, and survey() refuses it by name. There is no
-# list of unsupported distros to keep up to date; see say_unsupported_distro.
-distro_family() {                     # distro_family -> debian | fedora | unsupported
-    local id like w
-    id="$(os_release_field ID)"
-    like="$(os_release_field ID_LIKE)"
-    # shellcheck disable=SC2086   # deliberately word-split: ID_LIKE is a space-separated list
-    for w in $id $like; do
-        case "$w" in
-            debian|ubuntu)      printf 'debian'; return 0 ;;
-            fedora|rhel|centos) printf 'fedora'; return 0 ;;
-        esac
-    done
-    printf 'unsupported'
-}
-
-# ─── one table, read by BOTH the consent screen and the install ────────────────
-#
-# THE POINT IS THAT THERE IS ONE COPY. Before this, every package name appeared twice: once in a
-# need() string on the consent screen and again in install_podman's package list. Two places, one
-# name, nothing checking they agreed -- and a fix for one family that missed the other would have
-# shown a student "Install openssh-client" and then installed something else.
-#
-# EMPTY IS MEANINGFUL, and only Debian fills these two in:
-#   PKG_UIDMAP  the setuid helpers are a RECOMMENDS of podman on Debian, so apt may not pull them
-#               and they have to be asked for by name. On Fedora they are in shadow-utils, which
-#               also owns usermod and cannot be absent.
-#   PKG_CA      ca-certificates is a Recommends there too (installer notes elsewhere that without
-#               it curl exits 60 and reads as a network problem). On Fedora it is a dependency of
-#               curl and arrives with it.
-# So on Fedora both are empty, which is also why the consent text has to tolerate emptiness -- see
-# the ${PKG_UIDMAP:+...} expansions in survey().
-DISTRO=""
-PM_REFRESH=""; PM_INSTALL=""; PM_UPGRADE=""
-PKG_PODMAN=""; PKG_UIDMAP=""; PKG_SSH=""; PKG_CURL=""; PKG_CA=""
-distro_packages() {                   # distro_packages FAMILY -> sets the PM_/PKG_ globals
-    case "$1" in
-        debian) PM_REFRESH="apt-get update"; PM_INSTALL="apt-get install -y"
-                PM_UPGRADE="sudo apt update && sudo apt install --only-upgrade podman"
-                PKG_PODMAN="podman"; PKG_UIDMAP="uidmap"
-                PKG_SSH="openssh-client"; PKG_CURL="curl"; PKG_CA="ca-certificates" ;;
-        # NO REFRESH STEP, and that is dnf being simpler rather than something omitted: dnf
-        # refreshes its own metadata when stale, so there is no `apt-get update` equivalent to get
-        # wrong. Measured: `dnf install -y curl` on an already-installed package exits 0 with
-        # "Nothing to do.", and `dnf install -y podman <bogus-name>` exits 1 having installed
-        # NOTHING -- the transaction is atomic, so a package name we get wrong fails loudly rather
-        # than half-installing.
-        fedora) PM_REFRESH=""; PM_INSTALL="dnf install -y"
-                PM_UPGRADE="sudo dnf upgrade podman"
-                PKG_PODMAN="podman"; PKG_UIDMAP=""
-                PKG_SSH="openssh-clients"; PKG_CURL="curl"; PKG_CA="" ;;
-    esac
-}
+# WHICH DISTRO THIS IS, AND WHAT IT CALLS THINGS, IS NOT HERE ANY MORE (#217).
+# os_release_field, distro_family, distro_packages and the PM_/PKG_ globals moved to
+# install-utils.sh, sourced at the foot of this file, because wsl-provision.sh needs the same
+# table: it installs the packages as root inside the CS193V WSL instance so that the student's
+# account can keep a locked password. A second copy of the table is exactly the drift #195 and
+# 10-static.sh's PT_REGISTRY gate exist to prevent.
 
 host_ram_mb() {
     case "$(platform)" in
@@ -568,15 +503,15 @@ install_podman() {
     step "$(msg step.installing "PKGS=${pkgs:-podman}")"
     case "$PLAT" in
         linux|wsl)
-            # ONE REFRESH STEP, AND ONLY WHERE THERE IS ONE. apt needs its index refreshed
-            # before installing or it can 404 on a version the mirror has moved past; dnf
-            # refreshes its own metadata when stale, so PM_REFRESH is empty there and this line
-            # does nothing. Not a special case for Fedora -- an absent step rather than a
-            # different one.
-            # shellcheck disable=SC2086   # deliberately word-split: PM_REFRESH is a command line
-    [ -n "$PM_REFRESH" ] && { sudo $PM_REFRESH || die "$(msg err.refresh-failed "CMD=$PM_REFRESH")"; }
-            # shellcheck disable=SC2086   # deliberately word-split: both are lists of words
-            sudo $PM_INSTALL $pkgs || die "$(msg err.install-failed "PKGS=$pkgs")"
+            # THE PRIVILEGED PART IS NOT HERE ANY MORE (#217). The refresh, the install and the
+            # two refusals that go with them are root_step_packages in install-utils.sh, and
+            # wsl-provision.sh runs that same function as root inside a new CS193V WSL instance
+            # before this script ever starts. What is left here is the handover: the list this
+            # machine turned out to need, assembled above from the DO_* flags the consent screen
+            # was worded from. An empty list is a no-op there, which is what makes the root pass
+            # safe to run again.
+            PKGS="$pkgs"
+            root_step_packages
             ;;
         macos)
             local arch pkg url
@@ -628,11 +563,7 @@ install_podman() {
 setup_wslconf() {
     [ "$DO_WSLCONF" = yes ] || return 0
     step "$(msg step.wslconf)"
-    if [ -f /etc/wsl.conf ] && grep -q '^[[:space:]]*\[boot\]' /etc/wsl.conf; then
-        sudo sed -i 's/^[[:space:]]*\[boot\][[:space:]]*$/[boot]\nsystemd=true/' /etc/wsl.conf
-    else
-        printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null
-    fi
+    root_step_wslconf
     ok "$(msg ok.wslconf)"
     msg note.wslconf-restart "DISTRO=$WSL_DISTRO" | notes
 }
@@ -640,10 +571,9 @@ setup_wslconf() {
 setup_subuid() {
     [ "$DO_SUBUID" = yes ] || return 0
     step "$(msg step.subuid)"
-    local u; u="$(id -un)"
-    sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$u" \
-        || die "$(msg err.subuid-failed "USER=$u")"
-    ok "$(msg ok.subuid "USER=$u")"
+    TARGET_USER="$(id -un)"
+    root_step_subuid
+    ok "$(msg ok.subuid "USER=$TARGET_USER")"
 }
 
 setup_machine() {
@@ -916,6 +846,31 @@ if [ "$BOOT_PROTOCOL" -lt "$BOOTSTRAP_PROTOCOL_WANTED" ] 2>/dev/null; then
     exit 1
 fi
 
+# ─── the installer's own shared half, and the temp tree it lets this script own ─
+# TWO SHARED FILES NOW, AND THIS ONE COMES FIRST FOR A REASON (#217). install-utils.sh holds the
+# package table and the three steps that need root -- shared with wsl-provision.sh, which runs
+# those same steps as root inside a new CS193V WSL instance so that a student's account can keep
+# a locked password. It also holds boot_cleanup, and that is what decides the order here: the
+# exit trap cannot be armed until the function it names exists, so this file is read before
+# anything else that can refuse.
+#
+# A MISSING ONE LEAVES THE TREE BEHIND, deliberately rather than by omission. The `rm -rf` that
+# would remove it is guarded by boot_tmp_is_ours, because $BOOT_TMP arrives as an ARGUMENT -- and
+# the guard is in the file that just turned out to be unreadable. The bootstrap's fixed
+# `cs193v-install.` prefix is what lets a later sweep recognise the leftover; lib/assert.sh's
+# sweep_stale_tmpdirs records the doctrine. A plain printf rather than a box, for the reason
+# cs193v gives where it does the same: a script with no box() cannot draw the box that would
+# report the problem.
+UTILS="$BOOT_TMP/.private/install-utils.sh"
+if [ ! -r "$UTILS" ]; then
+    printf 'course-install: cannot read %s\n' "$UTILS" >&2
+    printf 'The download is incomplete. Please run install-cs193v.sh again.\n' >&2
+    exit 1
+fi
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=install-utils.sh
+. "$UTILS"
+
 # ─── and this script now owns the temp tree ────────────────────────────────────
 # THE BOOTSTRAP CANNOT REMOVE IT, and that is not an oversight in either file. It sets
 # `trap ... EXIT` over the tree, which covers every way it can fail -- but the hand-over is
@@ -925,24 +880,11 @@ fi
 # install:the-bootstrap-temp-tree-is-removed and half-tree:leaves-no-temp-tree-behind are what
 # keep it from coming back, one per side of the hand-over.
 #
-# THE GUARD IS NOT DEFENSIVE PROGRAMMING. $BOOT_TMP arrives as an ARGUMENT, in the file that
-# goes on to run `sudo $PM_INSTALL`, and the command it reaches is `rm -rf`. So the path has to
-# earn it: a directory, named the way the bootstrap names one, under the temp directory, and
-# holding the tree the bootstrap unpacked. `$2=/` fails the basename test, since ${x##*/} of
-# `/` is empty.
-#
-# AN INTERRUPTED RUN STILL LEAVES ONE, and that is ordinary rather than a hole -- a trap does
-# not run when the process is KILLED. The bootstrap's fixed `cs193v-install.` prefix is what
-# lets a later sweep recognise one; lib/assert.sh's sweep_stale_tmpdirs records the doctrine.
+# ARMED AS EARLY AS IT CAN BE, which is the line after the guard arrives. Everything that can
+# refuse from here down -- the unreadable UI below, every die() in the flow -- is covered by it.
 #
 # ONE EXIT TRAP, because cs193v-ui.sh forbids setting one and every consumer owns its own. #219
 # adds the meter's state file to this same handler rather than a second trap.
-boot_tmp_is_ours() {
-    case "${BOOT_TMP##*/}" in cs193v-install.??????) ;; *) return 1 ;; esac
-    case "$BOOT_TMP" in "${TMPDIR:-/tmp}"/*|/tmp/*) ;; *) return 1 ;; esac
-    [ -d "$BOOT_TMP" ] && [ -f "$BOOT_TMP/.private/course-install.sh" ]
-}
-boot_cleanup() { boot_tmp_is_ours && rm -rf "$BOOT_TMP"; }
 trap boot_cleanup EXIT
 
 # ─── the shared presentation layer ─────────────────────────────────────────────

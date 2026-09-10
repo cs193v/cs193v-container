@@ -135,6 +135,42 @@ static int stage2_contains(const char *needle) {
     return strstr(body, needle) != NULL;
 }
 
+
+/* ─── the markers the root pass exchanges (#217) ───────────────────────────────
+ * WHY MARKERS AND NOT KNOBS. A knob answers the same way however many times it is asked, which
+ * is fine for "this machine has no virtualisation" and useless for a sequence: the .cmd's whole
+ * provisioning flow is an ORDER -- switch the first-run setup off, create the account, restart
+ * the instance, check who owns the home directory, and only then run the student's half. So each
+ * step writes a file and the steps after it read one, exactly as the --install arm already
+ * appends to wsl.list and apt-get already writes curl.installed. A .cmd that got the order wrong
+ * then fails here rather than passing a fake that cannot tell.
+ */
+static void touch_marker(const char *leaf) {
+    char p[1024]; FILE *f;
+    fake_path(p, sizeof p, leaf);
+    if ((f = fopen(p, "w"))) { fputc('1', f); fclose(f); }
+}
+
+static void remove_marker(const char *leaf) {
+    char p[1024];
+    fake_path(p, sizeof p, leaf);
+    remove(p);
+}
+
+/* Where the .cmd told curl to write stage 2, recorded by the curl arm. Read by --terminate,
+ * because a /tmp inside a systemd WSL instance is a tmpfs and does not survive a restart. */
+static int stage2_is_in_tmp(void) {
+    char p[1024], dest[1024];
+    FILE *f;
+    size_t n;
+    fake_path(p, sizeof p, "stage2.dest");
+    if (!(f = fopen(p, "rb"))) return 0;
+    n = fread(dest, 1, sizeof dest - 1, f);
+    fclose(f);
+    dest[n] = '\0';
+    while (n && (dest[n-1] == '\n' || dest[n-1] == '\r')) dest[--n] = '\0';
+    return strncmp(dest, "/tmp/", 5) == 0;
+}
 int main(int argc, char **argv) {
     fake_log_argv(argc, argv);
     const char *distro = getenv("CS193V_FAKE_DISTRO");
@@ -197,6 +233,15 @@ int main(int argc, char **argv) {
             fake_say(stdout, "MessageInvalidCommandLine", "--name", "wsl.exe");
             return WSL_FAIL;
         }
+        /* THE SAME SHAPE FOR --no-launch, AND IT IS WHAT MAKES THE .cmd's EXIT CHECK REACHABLE
+         * (#217). --no-launch is far older than --name -- it predates the 2.4.4 floor the
+         * installer's docs now name -- so no supported WSL rejects it. But the .cmd tests
+         * --install's exit code for the first time, and an assertion whose failure arm cannot
+         * be produced is an assertion in appearance only, so the knob exists to produce it. */
+        if (has(argc, argv, "--no-launch") && fake_knob_int("wsl.nolaunch.unsupported", 0)) {
+            fake_say(stdout, "MessageInvalidCommandLine", "--no-launch", "wsl.exe");
+            return WSL_FAIL;
+        }
         /* THE PREREQUISITE ARM, AND IT RUNS BEFORE ANY DOWNLOAD. Install() calls
          * InstallPrerequisites FIRST (WslClient.cpp:544), and when a component had to be enabled
          * it sets rebootRequired -- which makes the `legacy || !rebootRequired` guard on
@@ -245,32 +290,18 @@ int main(int argc, char **argv) {
             fake_say(stdout, "MessageDownloading", image ? image : distro, NULL);
             fake_say(stdout, "MessageInstalling", image ? image : distro, NULL);
             fake_say(stdout, "MessageDistributionInstalled", distro, NULL);
-            fake_say(stdout, "MessageLaunchingDistro", distro, NULL);
-            /* `--install` LAUNCHES the distro, and what a student then sees is Canonical's
-             * first-run setup -- three questions on 26.04, not two. Replayed rather than
-             * skipped because the installer's own on-screen text promises exactly this, and a
-             * promise about output that never appears cannot be checked. Non-interactive: the
-             * prompts are shown with the answers already filled in, which is why wincmd says so
-             * afterwards rather than leaving you to think the harness took your input. */
-            if (fake_knob_int("wsl.oobe", 1)) {
-                char user[128];
-                if (!fake_knob("wsl.oobe.user", user, sizeof user) || !user[0])
-                    snprintf(user, sizeof user, "student");
-                fake_say(stdout, "OobeProvisioning", distro, NULL);
-                fake_say(stdout, "OobeWait", NULL, NULL);
-                fake_say(stdout, "OobeCreateUser", user, NULL);
-                fake_say(stdout, "OobeNewPassword", NULL, NULL);
-                fake_say(stdout, "OobeRetypePassword", NULL, NULL);
-                fake_say(stdout, "OobePasswdOk", NULL, NULL);
-                /* 26.04 only. Gated so the 24.04 shape can be driven too, because the
-                 * difference is exactly one question and the installer's text counts them. */
-                if (fake_knob_int("wsl.oobe.insights", 1)) {
-                    fake_say(stdout, "OobeInsightsTitle", NULL, NULL);
-                    fake_say(stdout, "OobeInsightsBody", NULL, NULL);
-                    fake_say(stdout, "OobeInsightsPrompt", NULL, NULL);
-                    fake_say(stdout, "OobeInsightsChoice", NULL, NULL);
-                }
-            }
+            /* NO LAUNCH, AND NO FIRST-RUN SETUP TO REPLAY (#217). The .cmd passes --no-launch,
+             * so the distribution is registered and nothing runs inside it: no Canonical
+             * account questions, no telemetry question, nothing for a student to type. Ten
+             * Oobe* keys were retired from the fixture table with the replay that printed them.
+             *
+             * WHICH ALSO CHANGES WHAT THE EXIT CODE MEANS. Without --no-launch the code
+             * belonged to the LAUNCHED SHELL, so a student who mistyped before `exit` looked
+             * like a failed install and the .cmd could not test it. With --no-launch it is the
+             * install's own, which is why the .cmd now tests it and why wsl.install.rc is
+             * documented as the install's code. */
+            if (!has(argc, argv, "--no-launch"))
+                fake_say(stdout, "MessageLaunchingDistro", distro, NULL);
             /* registered now: later probes must see it */
             char p[1024]; FILE *f;
             fake_path(p, sizeof p, "wsl.list");
@@ -281,6 +312,44 @@ int main(int argc, char **argv) {
             return WSL_FAIL;
         }
         return (int)fake_knob_int("wsl.install.rc", 0);
+    }
+
+    /* `--terminate NAME`. Two things make this worth a real arm rather than a knob.
+     *
+     * IT IS WHAT MAKES /etc/wsl.conf TAKE EFFECT, and the .cmd cannot skip it: wsl.conf is read
+     * when the instance STARTS, and an idle instance lingers for InstanceIdleTimeout (15 s), so
+     * consecutive `wsl.exe` calls from a batch file reuse the instance AND the configuration it
+     * booted with. Without the terminate, the pass that runs as the student would run as root.
+     * The `test -O` arm below is 0 only once this has been seen, so the ordering is asserted
+     * rather than assumed.
+     *
+     * AND IT WIPES /tmp, WHICH CHANGED THE DESIGN. Measured in a real CS193V instance on
+     * 2026-09-10: with systemd=true, /tmp is a tmpfs, so a file downloaded there does not
+     * survive the restart. Stage 2 therefore lives in /var/tmp, which does -- and this arm
+     * models the wipe so that moving it back would fail here rather than on a student's laptop.
+     * The real one exits 0 whether or not the instance was running (measured both ways).
+     *
+     * NO --no-distribution / --shutdown ARM: nothing in the .cmd uses either. */
+    if (has(argc, argv, "--terminate")) {
+        const char *name = argv[argc - 1];
+        if (!registered(name)) {
+            char body[4096], code[512];
+            if (!fake_msg("MessageDistroNotFound", body, sizeof body)
+                || !fake_msg("ErrorCodeDistroNotFound", code, sizeof code)) {
+                fprintf(stderr, "win-fake: --terminate on an absent distro needs both "
+                                "MessageDistroNotFound and ErrorCodeDistroNotFound\n");
+                return 120;
+            }
+            fake_say(stdout, "MessageErrorCode", body, code);
+            return WSL_FAIL;
+        }
+        long rc = fake_knob_int("wsl.terminate.rc", 0);
+        if (rc == 0) {
+            touch_marker("wsl.terminated");
+            if (stage2_is_in_tmp()) remove_marker("stage2.sh");
+            fake_say(stdout, "SystemErrorSuccess", NULL, NULL);
+        }
+        return (int)rc;
     }
     if (has(argc, argv, "-l") || has(argc, argv, "--list")) {
         char p[1024], line[512];
@@ -349,6 +418,61 @@ int main(int argc, char **argv) {
         fake_say(stdout, "MessageEnableVirtualization", NULL, NULL);
         return WSL_FAIL;
     }
+    /* `-u root -e mv /etc/wsl-distribution.conf /etc/wsl-distribution.conf.cs193v`: Ubuntu's
+     * first-run setup, switched off before there is an account gap for a student to fall into.
+     * --no-launch has already created the Start Menu entry, so for as long as the setup is armed
+     * a click on it fires the questions -- and the .cmd's next `-e` call would then block on an
+     * event with no timeout.
+     *
+     * mv RATHER THAN truncate IS THE POINT BEING MODELLED. truncate creates the file if it is
+     * absent and exits 0, so the day Canonical moves that configuration the suppression becomes
+     * a silent no-op; mv fails. So this arm fails the second time too, exactly as the real one
+     * does -- measured on 2026-09-10, `mv: cannot stat ...`, rc 1 -- which is what asserts that
+     * the .cmd only does this on the path where the environment was just created.
+     *
+     * wsl.oobe.conf.missing IS THE CANONICAL-MOVED-IT CASE, and the reason the root pass has a
+     * refusal of its own to reach. */
+    if (has(argc, argv, "mv")) {
+        const char *src = argc > 1 ? argv[argc - 2] : "";
+        if (fake_knob_int("wsl.oobe.conf.missing", 0) || exists("oobe.moved")) {
+            fake_say(stdout, "MvCannotStat", src, NULL);
+            return 1;
+        }
+        touch_marker("oobe.moved");
+        return 0;
+    }
+
+    /* `-u root -e getent passwd student` and `... getent passwd 1000`: does this environment
+     * already have an account, and is it ours? The .cmd branches three ways on the exit code --
+     * 0 present, 2 absent, anything else the question itself failed -- so both codes are real
+     * here. Measured on 2026-09-10: 0 present, 2 absent, no output either way.
+     *
+     * THE STATE IS THE MARKERS, so a distro provisioned earlier in the same case answers 0 and a
+     * fresh one answers 2. wsl.account.foreign NAMES A HUMAN ACCOUNT THAT IS NOT OURS, which is
+     * the shape of a CS193V made by the installer that asked students to choose a username: the
+     * uid-1000 probe answers 0 while the `student` probe answers 2, and the .cmd owes that state
+     * a refusal rather than a second account. */
+    if (has(argc, argv, "getent")) {
+        char foreign[128];
+        const char *key = argv[argc - 1];
+        int have_ours = exists("account.student");
+        int have_foreign = fake_knob("wsl.account.foreign", foreign, sizeof foreign) && foreign[0];
+        if (strcmp(key, "1000") == 0) return (have_ours || have_foreign) ? 0 : 2;
+        if (have_ours && strcmp(key, "student") == 0) return 0;
+        if (have_foreign && strcmp(key, foreign) == 0) return 0;
+        return 2;
+    }
+
+    /* `-e test -O /home/student`: THE HANDOVER, ASKED RATHER THAN ASSUMED. "Is that directory
+     * owned by the user I am running as?" is the one question that proves the whole provisioning
+     * sequence worked -- the account exists, /etc/wsl.conf names it, and the instance has
+     * restarted so that stanza is in effect. Which is why this is 0 only once BOTH markers are
+     * there: before the terminate the default user is still root, and the real `test -O` returns
+     * 1 (measured, both ways, on 2026-09-10). */
+    if (has(argc, argv, "test") && has(argc, argv, "-O")) {
+        return (exists("account.student") && exists("wsl.terminated")) ? 0 : 1;
+    }
+
 
     /* `-e curl --version`: is curl in the distro at all? Checked BEFORE the download, so a
      * missing program is not reported as a network problem. The marker is what makes the
@@ -377,9 +501,16 @@ int main(int argc, char **argv) {
     }
 
     /* `-e curl -fsSL ... -o <path> <url>`: the download. On success it really writes the file
-     * the grep arm below then reads, so the two are not independently stubbed. */
+     * the grep arm below then reads, so the two are not independently stubbed.
+     *
+     * AND THE DESTINATION IS RECORDED, because one property of it is load-bearing: /tmp inside a
+     * systemd WSL instance is a tmpfs, and the .cmd restarts the instance between this download
+     * and the run. --terminate reads this and wipes the file if it landed under /tmp. */
     if (has(argc, argv, "curl")) {
         long rc = fake_knob_int("wsl.curl.rc", 0);
+        int i;
+        for (i = 1; i < argc - 1; i++)
+            if (strcmp(argv[i], "-o") == 0) { write_marker("stage2.dest", argv[i + 1]); break; }
         if (rc != 0) return (int)rc;
         if (serve_stage2(fake_knob_int("wsl.curl.truncated", 0) ? 2000 : 0) != 0) return WSL_FAIL;
         return 0;

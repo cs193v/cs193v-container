@@ -499,12 +499,16 @@ assert_eq "unsupported-os:exits-1" "1" \
 # nothing and cannot be sourced -- a student downloads that one file and checks its published
 # SHA-256 -- so carve_func is how a test reads its values without keeping a second copy of them
 # that can drift. Three functions rather than one, because distro_family needs os_release_field.
-carve_func $PRIVATE/course-install.sh os_release_field "$TMP/orf.sh"
-carve_func $PRIVATE/course-install.sh distro_family    "$TMP/df.sh"
-carve_func $PRIVATE/course-install.sh distro_packages  "$TMP/dp.sh"
+#
+# OUT OF install-utils.sh SINCE #217, not course-install.sh. The table and the steps that need
+# root moved there when the root pass that prepares a new CS193V WSL instance became a second
+# reader of them -- which is the same reason this carve exists: one copy of a package name.
+carve_func $PRIVATE/install-utils.sh os_release_field "$TMP/orf.sh"
+carve_func $PRIVATE/install-utils.sh distro_family    "$TMP/df.sh"
+carve_func $PRIVATE/install-utils.sh distro_packages  "$TMP/dp.sh"
 for f in orf df dp; do
     if [ -s "$TMP/$f.sh" ]; then pass "extract:$f"
-    else fail "extract:$f" "could not carve the distro helpers out of course-install.sh"; fi
+    else fail "extract:$f" "could not carve the distro helpers out of install-utils.sh"; fi
 done
 # The PM_/PKG_ globals are pre-set to empty because distro_packages leaves them untouched for a
 # family it does not know, and this suite runs under `set -u`.
@@ -705,9 +709,13 @@ printf 'root:!:20000:0:99999:7:::\nstudent:!:20000:0:99999:7:::\n' > "$UM/etc/sh
 printf 'root:*::\nstudent:!::\n' > "$UM/etc/gshadow"
 : > "$UM/etc/subuid"; : > "$UM/etc/subgid"
 
-# THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing installer:653 reddens
+# THE RANGE IS PARSED OUT OF THE INSTALLER, not typed here, so changing the constant reddens
 # this instead of leaving a test that agrees with a number nobody uses any more.
-UM_RANGE="$(sed -n 's/.*--add-subuids \([0-9]*-[0-9]*\).*/\1/p' "$PRIVATE/course-install.sh" | head -1)"
+# READ AS THE CONSTANT IT IS NOW, not out of the usermod line (#217). The range used to be a
+# literal inside setup_subuid, so this sed had to reach into the command; it is SUBUID_RANGE in
+# install-utils.sh since the root pass became a second caller of the same step, and a named
+# constant is what the two callers cannot disagree about.
+UM_RANGE="$(sed -n 's/^SUBUID_RANGE="\([0-9]*-[0-9]*\)".*/\1/p' "$PRIVATE/install-utils.sh" | head -1)"
 assert_match "usermod:the-range-came-from-the-installer" '^[0-9]+-[0-9]+$' "$UM_RANGE"
 UM_START="${UM_RANGE%-*}"; UM_END="${UM_RANGE#*-}"
 UM_COUNT=$(( UM_END - UM_START + 1 ))
