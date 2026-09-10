@@ -144,7 +144,13 @@ assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
 # AND NOT EVERY need.*.why: need.vm-memory.why is a `podman machine set`, which needs no
 # privilege, and telling a student it wants their password would be a new false statement
 # rather than a fix for this one.
-root_whys="$(sed 's/^[[:space:]]*#.*//' "$INST" | grep -A3 'need_root' \
+# course-install.sh BY NAME, not $IREADERS: consent is the student pass's business, so need_root
+# is there and only there -- the root pass asks nobody anything. Named explicitly because $INST
+# was this file's handle for it until #217 replaced it with the three-file $IREADERS, and an
+# unbound variable inside a command substitution kills only the SUBSHELL under `set -u`: the
+# list came back empty, the suite carried on, and every key in it went unchecked. Caught by
+# itext:there-are-root-requiring-consent-items below, which exists for exactly that.
+root_whys="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" | grep -A3 'need_root' \
               | grep -ohE 'need\.[a-z0-9.-]+\.why' | LC_ALL=C sort -u)"
 assert_ne "itext:there-are-root-requiring-consent-items" "" "$root_whys"
 record "itext:the-root-requiring-consent-items" "$(printf '%s' "$root_whys" | do_tr '\n' ' ')"

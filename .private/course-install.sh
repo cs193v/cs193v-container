@@ -246,10 +246,12 @@ survey() {
     # "it refuses before it looks at anything" something a test can assert -- see
     # 25-installer.sh :: root:refuses-before-it-looks.
     #
-    # ONE CONDITION IN ONE PLACE, deliberately, because #217 has to carve into it: its WSL
-    # provisioning pass runs as root on purpose and its own first act is the mirror of this
-    # one. That is a change to this `if`, not to the shape around it. No escape hatch ships
-    # now -- nothing would exercise it.
+    # UNCONDITIONAL, AND #217 IS WHY IT GETS TO STAY THAT WAY. Its WSL provisioning pass runs
+    # as root on purpose -- but it is a SEPARATE FILE with the mirror of this gate as its own
+    # first act (`[ "$(id -u)" = 0 ] || die` in wsl-provision.sh), and install-cs193v.sh
+    # chooses between the two before either runs. So course-install.sh is never the root pass,
+    # this needs no exception, and none is written: an escape hatch here would be a hatch
+    # nothing opens.
     if [ "$(id -u)" -eq 0 ]; then say_as_root; exit 1; fi
 
     step "$(msg step.survey)"
