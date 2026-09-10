@@ -297,9 +297,17 @@ assert_eq "root:the-gate-precedes-every-sudo" "yes" \
 # if survey puts a wants_root or need_root within four lines of setting a flag that function
 # reads -- four, because registration is per-branch and the assignment and the call sit in the
 # same arm.
+#
+# A CALL TO A root_step_* COUNTS AS REACHING ROOT (#217, #226), and without this the gate
+# silently narrowed to nothing the moment #217 landed: the three privileged steps moved into
+# install-utils.sh, so setup_subuid and setup_wslconf stopped containing the word `sudo` while
+# still doing every bit of what they did before. A gate that quietly stops looking at two of
+# the three things it guards is worse than no gate, so what it looks for is "reaches root",
+# by either route. Measured: with `sudo` alone the recorded list was `install_podman` and
+# nothing else.
 sudo_fns="$(printf '%s\n' "$inst_cmd" | awk -v pat="$SUDO_CMD" '
     /^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
-    $0 ~ pat { if (fn != "") print fn }
+    $0 ~ pat || /(^|[^_[:alnum:]])root_step_[a-z]/ { if (fn != "") print fn }
 ' | LC_ALL=C sort -u)"
 assert_ne "sudo-gate:there-are-privileged-functions" "" "$sudo_fns"
 # THE SET, RECORDED, so that a step leaving this list -- or joining it -- is visible in the log
@@ -749,11 +757,40 @@ fi
 # WSL paths do as root is a root_step_* now, which is what lets the root pass be a complete
 # substitute for the student's sudo. The macOS installer is not: it never runs in a WSL instance,
 # so it is named here as the one exception rather than left to be re-argued.
+#
+# A CALL, AND NOT THE WORD (#226). The needle was `sudo` followed by whitespace, which is three
+# things at once: a privileged call, a QUESTION about whether root can be had, and -- measured --
+# the message key `err.no-sudo "`. Only the first is what the prose above claims to count, and
+# the difference started to matter when #226 put a `sudo -n true` probe and a `sudo -v` prime in
+# survey and ask_password: neither runs a command as root, and counting them made this gate red
+# for four lines that cannot undermine the two-pass split. So it asks for command position, and
+# excludes the two flags that make sudo answer rather than act. lib/sudo-fake's header keeps the
+# same distinction, and so does SUDO_CMD below.
 ci_sudo="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
-           | grep -nE '(^|[^[:alnum:]_])sudo[[:space:]]' || true)"
+           | grep -nE '(^|[;&|!{][[:space:]]*)[[:space:]]*sudo[[:space:]]+[^-]' || true)"
 assert_eq "rootsteps:the-installer-has-one-privileged-call" "1" \
           "$(printf '%s\n' "$ci_sudo" | grep -c .)"
 assert_contains "rootsteps:and-it-is-the-mac-package" 'installer -pkg' "$ci_sudo"
+
+# AND THE PROPERTY THE COUNT WAS STANDING IN FOR, asserted directly rather than inferred from an
+# absence (#226). What would actually break the split is the student's pass reaching for root on
+# a machine where the root pass already did the work -- so the prime has to sit behind the same
+# gate that decides whether anything needs root at all. On a provisioned WSL instance nothing
+# does, `needs_root` is false, and ask_password returns before it ever calls sudo.
+ap_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" | sed -n '/^ask_password() {/,/^}/p')"
+assert_ne "rootsteps:ask_password-was-found" "" "$ap_body"
+# BY LINE NUMBER, both halves. An earlier form of the second one used `sed -n '1,/needs_root/p'`
+# to carve out "everything before the gate", which does not do that: when line 1 already matches,
+# the end address is searched from line 2, so the range runs to EOF and the check read the whole
+# function. Comparing positions cannot go wrong that way.
+ap_gate="$(printf '%s\n' "$ap_body" | grep -nE 'needs_root \|\| return 0' | head -1 | cut -d: -f1)"
+ap_sudo="$(printf '%s\n' "$ap_body" \
+           | grep -nE '(^|[;&|!{][[:space:]]*)[[:space:]]*sudo[[:space:]]' | head -1 | cut -d: -f1)"
+assert_ne "rootsteps:the-prime-is-gated-on-needs_root" "" "$ap_gate"
+assert_ne "rootsteps:the-prime-really-reaches-for-sudo" "" "$ap_sudo"
+assert_eq "rootsteps:the-prime-asks-nothing-before-the-gate" "yes" \
+          "$([ -n "$ap_gate" ] && [ -n "$ap_sudo" ] && [ "$ap_gate" -lt "$ap_sudo" ] \
+             && printf yes || printf "gate=$ap_gate first-sudo=$ap_sudo")"
 
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's

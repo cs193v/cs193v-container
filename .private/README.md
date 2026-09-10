@@ -270,10 +270,22 @@ combination neither the resting terminal nor either keystroke read is ever in, s
 the level is the arm and no cursor marker is needed — which matters because sudo emits none.
 
 **And the root refusal.** `survey`'s first act, above the step line, because being root is a
-property of the invocation rather than of the computer. It is deliberately *one condition in one
-place*: #217's WSL provisioning pass runs as root on purpose, and its own first act is the mirror
-of this one, so that work amends the `if` rather than the shape around it. No escape hatch ships
-ahead of it — nothing would exercise one.
+property of the invocation rather than of the computer — and *unconditional*, which #217 is what
+makes possible. Its provisioning pass does run as root on purpose, but it is a separate file
+(`wsl-provision.sh`) whose own first act is the mirror of this gate, and `install-cs193v.sh`
+chooses between the two before either runs. So `course-install.sh` is never the root pass and
+needs no exception; an escape hatch here would be one nothing opens.
+
+**What keeps that true as the split moves.** #217 put the three privileged steps in
+`install-utils.sh` so the root pass could be a complete substitute for the student's sudo, and
+guarded it by counting the `sudo` calls left in `course-install.sh` — which #226 then had to
+narrow, because a `sudo -n true` probe and a `sudo -v` prime are questions rather than calls
+(the needle also counted the message key `err.no-sudo`). Two assertions replace what the count
+was standing in for: the prime sits behind `needs_root`, so it cannot fire on a machine the root
+pass already provisioned; and the registration gate now treats *calling a `root_step_*`* as
+reaching root, because otherwise it narrowed to one function the moment those steps moved out —
+measured, and a gate that quietly stops watching two of the three things it guards is worse than
+none.
 
 ### And four things on GitHub, before `setup-git` works for anybody
 
