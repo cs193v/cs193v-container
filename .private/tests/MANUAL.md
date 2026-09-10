@@ -797,19 +797,33 @@ it on both. **If libkrun fails, the install docs must pin applehv.**
 Attempt the full install. The installer currently **refuses** these machines outright.
 Confirm or refute that podman 6 cannot run there; the support policy depends on it.
 
-### §5.4 — WSL `--name`
-`wsl --install -d Ubuntu-26.04 --name CS193V`
+### §5.4 — WSL `--name` and `--no-launch`
+`wsl --install -d Ubuntu-26.04 --name CS193V --no-launch`
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is
 `wsl --import` from a hosted rootfs, which changes the installer.
-**The floor is WSL 2.5.8**, established by diffing `WSL_INSTALL_ARG_NAME_LONG` in
-`src/windows/inc/wsl.h` across tags 2.4.13 (absent), 2.5.7 (absent) and 2.5.8 (present). A
-maintainer comment saying 2.4.4 is wrong. `--name` also rejects **legacy** Store distributions
-(`'--name' is not supported when installing legacy distributions.`), so a fallback to `-d Ubuntu`
-on an old WSL would fail here too.
+
+**The floor is WSL 2.4.4, and the 2.5.8 figure this section used to give was VOID.** It said 2.5.8
+had been established by diffing `WSL_INSTALL_ARG_NAME_LONG` in `src/windows/inc/wsl.h` across tags
+2.4.13 (absent), 2.5.7 (absent) and 2.5.8 (present) — and then overruled a maintainer comment
+saying 2.4.4 on the strength of it. But **WSL was open-sourced AT 2.5.8**: at 2.4.13 and 2.5.7 the
+repository's entire top level is `.github CODE_OF_CONDUCT.md CONTRIBUTING.md LICENSE README.md
+SECURITY.md SUPPORT.MD diagnostics distributions img triage`. There is no `src/` and `wsl.h` 404s
+at both tags, so "absent" meant *the file did not exist*. The maintainer comment was right.
+
+2.4.4 is attested twice over: its release body carries "modern-distro: Implement `wsl --manage
+<distro> --set-default-user`", "modern-distro: Implement install on double click" and "Don't set
+the default UID if it's not in wsl-distribution.conf"; and Microsoft's build-a-custom-distro guide,
+which documents `wsl.exe --install <distro> --name <name>`, states "This guide only applies to WSL
+release 2.4.4 and higher." `--no-launch` is far older than either. Current stable is 2.7.13 — every
+2.9.x build is a *pre-release*, reachable only with `wsl --update --pre-release` — so students are
+comfortably above the floor and #217 did not raise it.
+
+`--name` also rejects **legacy** Store distributions (`'--name' is not supported when installing
+legacy distributions.`), so a fallback to `-d Ubuntu` on an old WSL would fail here too.
 
 ### install-cs193v-windows.cmd — what wine cannot answer
 `.private/tests/run-tests.sh --tier windows` executes the whole file under wine's cmd.exe and
-reaches all fifteen branch targets. Read the count off
+reaches every branch target in it. Read the count off
 `record "windows:branch-targets-in-the-file"` rather than trusting this sentence: the suite
 derives it by parsing the file, and this line is a copy. Three things it structurally cannot
 settle, and one it should not be trusted on:
@@ -925,14 +939,18 @@ settle, and one it should not be trusted on:
    available; and a machine where the WSL OS component is genuinely absent, which Microsoft treats
    as unrepairable by anything short of an in-place upgrade.
 
-### Ubuntu's first-run setup, which the installer warns about but cannot control
-`wsl --install -d Ubuntu-26.04 --name CS193V` **launches** the new distribution and returns *the
-launched shell's* exit code, not the install's (`WslClient.cpp:592-614`). That is why the
-installer no longer tests that exit code and re-runs its distro probe instead.
+### Ubuntu's first-run setup, which no student meets any more (#217)
+**The installer switches it off, and this section is now about checking that it stays off.**
+`wsl --install -d Ubuntu-26.04 --name CS193V --no-launch` registers the distribution without
+running anything in it, and the .cmd then moves `/etc/wsl-distribution.conf` aside — which is what
+Ubuntu's `[oobe] command` is wired up through — before it downloads anything. So there is no
+username to invent, no password, and no telemetry question. The account is `student`, created by
+`.private/wsl-provision.sh` with a **locked** password.
 
-The first-run experience is Canonical's `/usr/lib/wsl/wsl-setup` (package `wsl-setup`, named by
-`oobe.command` in the image's `/etc/wsl-distribution.conf`), **not** the old Store-era
-`Enter new UNIX username:` prompt. Expected sequence on 26.04:
+The first-run experience it suppresses is Canonical's `/usr/lib/wsl/wsl-setup` (package
+`wsl-setup`, named by `oobe.command`), **not** the old Store-era `Enter new UNIX username:`
+prompt. What a student used to see on 26.04, kept here because it is what the suppression is
+measured against:
 
 ```
 Provisioning the new WSL instance CS193V
@@ -945,16 +963,26 @@ passwd: password updated successfully
 Help improve Ubuntu! ... [Y/n/e]:     <- 26.04 ONLY; absent on 24.04 (wsl-setup 0.6.1)
 ```
 
-*Verify:* three questions, not two — the installer's on-screen warning says so, and that wording
-only matters if it is true. Then confirm the student is left at a `$` prompt and that **typing
-`exit` returns to the setup**, which is the one instruction nothing used to give.
+*Verify, on a real install:* **none of those lines appear**, and nothing waits for input between
+"Creating the CS193V Linux environment" and the success box. Then, from a cold start,
+`wsl -d CS193V` — a **bare** launch, which is the one call that can still fire an OOBE — must
+print nothing at all and drop straight to a `student@` prompt. Measured on a lab distro:
+with the conf moved aside the bare launch is silent and completes WSL's handshake anyway, so
+`RunOOBE` goes to 0 and the registry `DefaultUid` is left alone, which is why
+`/etc/wsl.conf`'s `[user] default=student` is what decides. Also worth one look:
+**Explorer browsing `\wsl.localhost\CS193V`** — the success box hands students that path, and
+whether an Explorer visit can fire an OOBE has never been measured.
 
-*And the nasty one:* abort the OOBE at the password prompt, then re-run. If the abort lands after
-`adduser` created the account but before `passwd` set a password, `wsl-setup`'s
-`get_first_interactive_uid` finds that uid, **skips user creation entirely**, and makes it the
-default — leaving an account with no usable password, so `sudo` never works and the student is
-never re-prompted. Recovery is `wsl --unregister CS193V` (§9.3), which is destructive. Confirm or
-refute; if it reproduces, the installer needs to detect it.
+*And the one that used to be a hazard:* aborting the OOBE at the password prompt left an account
+with no usable password, because `wsl-setup`'s `get_first_interactive_uid` found the uid `adduser`
+had already created and skipped user creation. That state is off the shipped path now — nothing
+runs `wsl-setup` — but the shape of it is exactly what the installer's own account probes refuse:
+stage 1 stops on an environment holding an account it did not create, rather than adding a second
+one. `--foreign-account` in `tests/win-sandbox.sh` drives that refusal.
+
+*Unverified, and worth a look on a real machine:* whether a later `wsl-setup` package upgrade
+restores `/etc/wsl-distribution.conf`. `RunOOBE` is 0 by then, so it should be inert — but it is
+the kind of thing that reaches staff as a mystery rather than as a bug report.
 
 ### §5.5 — cgroup delegation in WSL
 With `systemd=true` in `/etc/wsl.conf`: `.private/tests/run-tests.sh --tier container -k 60`

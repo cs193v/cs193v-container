@@ -14,9 +14,12 @@ setlocal
 :: This is a TWO-STAGE setup, because installing WSL requires a restart. Run this file,
 :: restart when it says to, then run it AGAIN. It is safe to run any number of times.
 ::
-:: Stage 1 (here) : install WSL and the CS193V Linux environment
+:: Stage 1 (here) : install WSL and the CS193V Linux environment, then prepare it -- switch
+::                  Ubuntu's first-run questions off, create the student's account, and give it
+::                  everything the install needs root for
 :: Stage 2 (auto) : DOWNLOAD install-cs193v.sh into it and run it -- the same script macOS
-::                  and Linux use
+::                  and Linux use. It runs TWICE: once as root to prepare the environment, then
+::                  as the student, which is the install a Mac or Linux student sees
 ::
 :: ---------------------------------------------------------------------------------
 :: THE ONLY THING THIS FILE FETCHES is stage 2, from INSTALLER_URL below:
@@ -25,7 +28,7 @@ setlocal
 ::
 :: Reading this file therefore tells you everything that will run on your computer. Stage 2 is
 :: fetched over HTTPS INSIDE the CS193V environment, checked for a sentinel line before it is
-:: run, and left at /tmp/install-cs193v.sh in there so you can read it afterwards.
+:: run, and left at /var/tmp/install-cs193v.sh in there so you can read it afterwards.
 ::
 :: It used to be a file you had to download YOURSELF and leave next to this one. That is gone:
 :: two downloads meant two things to get right, and the one that went wrong silently was a
@@ -81,7 +84,7 @@ setlocal
 :: style choice. This file runs elevated with the DOWNLOAD FOLDER as its working directory, and
 :: cmd.exe searches the current directory BEFORE %PATH% -- so a wsl.exe sitting in Downloads is
 :: what a bare `wsl.exe` runs, as Administrator. Downloads is the likeliest place on the machine
-:: for an untrusted file to already be, and wsl.exe has twelve call sites here, one of them the
+:: for an untrusted file to already be, and wsl.exe has nineteen call sites here, one of them the
 :: handoff to stage two.
 ::
 :: %SystemRoot% RATHER THAN A HARD-CODED C:\Windows, because Windows need not be installed on C:
@@ -128,6 +131,14 @@ cd /d "%SystemRoot%"
 set "DISTRO=CS193V"
 set "IMAGE_NAME=Ubuntu-26.04"
 
+:: The Linux account this file creates inside %DISTRO%, and the ONE name it can be. It is the
+:: container's own account name too (.private/Containerfile), so the same word is right inside the
+:: container and outside it -- which is what lets the success message below hand a student a real
+:: path instead of one with a placeholder in it. .private/wsl-provision.sh carries the same
+:: constant as WSL_USER, and 25-installer.sh fails if the two disagree or if this one ever holds a
+:: character that would need quoting on the way into wsl.exe.
+set "LINUX_USER=student"
+
 :: Where stage 2 comes from. These three MUST match install-cs193v.sh's own REPO_OWNER,
 :: REPO_NAME and REPO_BRANCH; 25-installer.sh asserts that they do, because a mismatch would
 :: quietly fetch the wrong course's installer and nothing would notice until it ran. A TA
@@ -139,7 +150,14 @@ set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%R
 
 :: A LINUX path, not a Windows one: everything it names happens inside %DISTRO%. Left in place
 :: on purpose after the install, so a student who wanted to read what ran still can.
-set "STAGE2=/tmp/install-cs193v.sh"
+::
+:: /var/tmp AND NOT /tmp, AND THAT IS A MEASUREMENT (#217). Inside a WSL instance running systemd
+:: -- which %DISTRO% does -- /tmp is a TMPFS. Measured on 2026-09-10: a file written to /tmp is
+:: gone after `wsl --terminate`, and this file now restarts the environment between downloading
+:: this script and running it, so a copy in /tmp would not be there when bash was handed the path.
+:: /var/tmp is on the environment's own disk and survives, which also makes "it is still in there
+:: if you want to read it" true tomorrow rather than only until the next restart.
+set "STAGE2=/var/tmp/install-cs193v.sh"
 
 :: The last line of install-cs193v.sh. A single token ON PURPOSE, so it needs no quoting on
 :: either side of the Windows/Linux boundary. 25-installer.sh pins both halves of the contract:
@@ -261,16 +279,11 @@ goto probefailed
 :makedistro
 echo   [2/3] Creating the %DISTRO% Linux environment.
 echo.
-echo         Ubuntu will ask you a few questions while it sets itself up:
-echo         a username, a password to go with it, and on Ubuntu 26.04 also
-echo         whether to send anonymous usage reports. Pick anything you like
-echo         and write the password down -- you will need it occasionally, and
-echo         it is separate from your Windows one.
+echo         There is nothing for you to type while this happens. It takes
+echo         about a minute, and it may go quiet for a while in the middle
+echo         -- that is setup preparing the environment, not a hang.
 echo.
-echo         When it finishes you will be left at a Linux prompt ending in $.
-echo         TYPE  exit  AND PRESS ENTER there to carry on with the setup.
-echo.
-:: RAISED BEFORE IT IS BLAMED. `--name` needs WSL 2.5.8, and that is the one cause
+:: RAISED BEFORE IT IS BLAMED. `--name` needs WSL 2.4.4, and that is the one cause
 :: :distrofailed below can still name -- so naming it without ever having offered the command
 :: that fixes it is the same defect as issue #112 in miniature. This ran only on the arm where
 :: wsl.exe was absent altogether, which is the one machine that did not need it.
@@ -281,22 +294,43 @@ echo.
 :: the install below fails and says so.
 "%SYS32%\wsl.exe" --update
 
-:: cmdlint-allow: unchecked-exit -- the exit code here is the launched shell's, not
-:: the install's, so it is meaningless. The probe below is the real check.
-"%SYS32%\wsl.exe" --install -d %IMAGE_NAME% --name %DISTRO%
-
-:: Deliberately NOT `if errorlevel` here. `wsl --install` launches the new environment
-:: unless given --no-launch, and then returns THE LAUNCHED SHELL'S exit code -- so a
-:: student who mistypes a command before `exit` looks like a failed install, and a real
-:: failure returns -1 which `if errorlevel 1` cannot see. Re-running the probe asks the
-:: only question that matters: is the environment there now?
+:: --no-launch, AND THE COMMENT HERE USED TO SAY THE OPPOSITE (#217). It said --no-launch was not
+:: the fix, because it skips Ubuntu's first-run setup, which leaves the default user as root, so
+:: stage 2 would install into /root. That is true only if nothing creates a user in between --
+:: and creating one is exactly what the provisioning pass below does, out of the installer's own
+:: code, with no password for a student to invent and no questions for them to answer.
 ::
-:: --no-launch is not the fix. It skips Ubuntu's first-run setup, which leaves the default
-:: user as root, so stage 2 would install into /root and the student's own account would be
-:: created later with none of it.
+:: AND THE EXIT CODE MEANS SOMETHING NOW, which is why this one is checked where it was not
+:: before. Without --no-launch, `wsl --install` LAUNCHES the new environment and returns THE
+:: LAUNCHED SHELL'S code -- so a student who mistyped a command before `exit` looked exactly like
+:: a failed install. With it there is no shell in the picture and the code is the install's own.
+"%SYS32%\wsl.exe" --install -d %IMAGE_NAME% --name %DISTRO% --no-launch
+if %errorlevel% neq 0 goto distrofailed
+
+:: AND THE PROBE STAYS, because a zero exit still does not mean the environment exists: when a
+:: Windows component had to be enabled, wsl.exe prints the reboot notice, installs NOTHING and
+:: returns 0. That is issue #112's mechanism. The two checks answer different questions and both
+:: are asked.
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
-if %errorlevel% equ 0 goto havedistro
-goto distrofailed
+if %errorlevel% neq 0 goto distrofailed
+
+:: UBUNTU'S FIRST-RUN QUESTIONS OFF, IMMEDIATELY, BEFORE ANYTHING ELSE. --install has already
+:: created the Start Menu entry and the Windows Terminal profile, so from the moment it returns
+:: there is a clickable CS193V with no account in it -- and for as long as the first-run setup is
+:: armed, clicking it starts asking a student for a username and a password. Worse than the
+:: confusion: the next `wsl -d` call this file makes would then block waiting for them to finish,
+:: on an event with no timeout.
+::
+:: `mv` AND NOT `truncate -s 0`. truncate CREATES the file when it is absent and exits 0, so the
+:: day Ubuntu keeps that configuration somewhere else, truncate would report success and leave the
+:: questions armed. mv fails, and :provisionfailed says so. It is also reversible, and it explains
+:: itself to anyone reading /etc later.
+::
+:: ONLY ON THIS ARM. An environment that already existed may have had this done to it already, and
+:: `mv` fails on a source that is not there -- so the provisioning pass ensures it instead, where
+:: a shell can tell "already off" from "not there at all".
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e mv /etc/wsl-distribution.conf /etc/wsl-distribution.conf.cs193v
+if %errorlevel% neq 0 goto provisionfailed
 
 :havedistro
 echo   [2/3] The %DISTRO% environment is ready.
@@ -353,7 +387,14 @@ if %errorlevel% neq 0 goto curlfailed
 ::
 :: NOT redirected. curl's own `curl: (6) Could not resolve host ...` belongs in the window the
 :: student pastes to course staff.
-"%SYS32%\wsl.exe" -d %DISTRO% -e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%
+::
+:: `-u root`, AND IT IS LOAD-BEARING NOW RATHER THAN BELT-AND-BRACES (#217). On a FIRST run the
+:: default user is root anyway, because --no-launch leaves it that way. On every run after that
+:: the environment starts as %LINUX_USER% -- and %STAGE2% is a root-owned file from the first run,
+:: which a non-root curl cannot overwrite: it exits 23 and this file would refuse a re-run it
+:: promises is safe. Downloading as root keeps one owner for the file forever. Mode 644, so the
+:: student's own pass can still read it.
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%
 if %errorlevel% neq 0 goto downloadfailed
 
 :: THE CHECK CURL CANNOT DO. `curl -f` catches a 404, and a cut-off transfer against a served
@@ -362,16 +403,68 @@ if %errorlevel% neq 0 goto downloadfailed
 :: install-cs193v.sh's own download step carries the same guard for the same reason -- there it
 :: is four files that must exist, here it is the token on that script's last line, which makes
 :: this a completeness check as well as an identity one.
-"%SYS32%\wsl.exe" -d %DISTRO% -e grep -q %SENTINEL% %STAGE2%
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e grep -q %SENTINEL% %STAGE2%
 if %errorlevel% neq 0 goto downloadincomplete
 
-:: %STAGE2% is left behind deliberately -- see the success message below.
+:: ---- who is already in this environment decides what may be done to it ------
+:: TWO PROBES, THREE STATES EACH, and the same idiom %PROBE% uses: 0 is yes, 2 is no, and
+:: anything else means the QUESTION failed, which is not the same as a negative answer. getent's
+:: codes are exactly that clean -- measured on 2026-09-10: 0 for an account that exists, 2 for one
+:: that does not.
 ::
-:: One rough edge, recorded rather than coded around: if a root-owned /tmp/install-cs193v.sh is
-:: already there, from someone having run `wsl -u root` by hand, curl cannot overwrite it and
-:: exits 23. The download message says the file can be run again, which is true once that copy
-:: is gone. `--cd ~ -e curl -O` would avoid it, at the price of another WSL flag nothing here
-:: has verified.
+:: FIRST: is the account ours? If it is, this environment was set up by this file, and the
+:: provisioning pass below is free to run again -- every step it takes checks first, so a second
+:: run costs a few probes and finishes anything the first one did not. There is deliberately NO
+:: "the account exists, so skip it" short cut: a run that created the account and then failed at
+:: the package install would jump straight to the student's pass, which would reach `sudo` on an
+:: account whose password is locked. That is the one failure this whole arrangement prevents.
+:: OUTPUT DISCARDED, ONLY THE CODE IS BEING ASKED FOR -- the same treatment the curl probe above
+:: gets, and for a sharper reason here: `getent passwd` PRINTS the account's whole entry, and a
+:: raw /etc/passwd line in the middle of a refusal is noise a student cannot use.
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e getent passwd %LINUX_USER% >nul 2>&1
+if %errorlevel% equ 0 goto provision
+if %errorlevel% neq 2 goto provisionfailed
+
+:: SECOND: is somebody ELSE in here? Almost always a CS193V created by an earlier version of this
+:: installer, which asked the student to invent a username -- so their work is in it, under a
+:: different home directory. Creating a second account would change which one they land in and
+:: where their files live, silently, and this file has no way to ask: it is non-interactive apart
+:: from `pause`. So it refuses and names the one command that resolves it.
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e getent passwd 1000 >nul 2>&1
+if %errorlevel% equ 0 goto foreignaccount
+if %errorlevel% neq 2 goto provisionfailed
+
+:provision
+:: THE ROOT PASS. Same script, same download, one environment variable -- so nothing new is
+:: fetched and nothing new is trusted. It switches Ubuntu's first-run questions off if that has
+:: not happened yet, creates %LINUX_USER% with NO password, records it in /etc/wsl.conf as the
+:: account this environment starts in, and runs every step of the install that needs root out of
+:: the installer's own list of them.
+::
+:: `-u root` EXPLICITLY, not relying on the default. On a first run the default user is root and
+:: this is redundant; on a re-run it is not, because by then /etc/wsl.conf names %LINUX_USER% --
+:: and a run resuming after a failure could be in either state. Being explicit costs nothing and
+:: makes this call mean the same thing every time.
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e env CS193V_PROVISION=1 bash %STAGE2%
+if %errorlevel% neq 0 goto provisionfailed
+
+:: AND THE ENVIRONMENT HAS TO BE RESTARTED BEFORE ANY OF THAT COUNTS. /etc/wsl.conf is read when
+:: an instance STARTS, and an idle one lingers for fifteen seconds -- so consecutive wsl.exe calls
+:: from a batch file reuse the instance AND the configuration it booted with. Without this, the
+:: pass below would run as root and install into /root. It is the trap that silently breaks every
+:: obvious alternative to this sequence.
+"%SYS32%\wsl.exe" --terminate %DISTRO%
+if %errorlevel% neq 0 goto provisionfailed
+
+:: THE HANDOVER, ASKED RATHER THAN ASSUMED -- the same standard as the curl re-probe above. "Is
+:: /home/%LINUX_USER% owned by the user I am running as?" is the one question whose answer needs
+:: the account to exist, /etc/wsl.conf to name it, and the restart to have happened. It needs no
+:: capture, no pipe and no quoting.
+"%SYS32%\wsl.exe" -d %DISTRO% -e test -O /home/%LINUX_USER%
+if %errorlevel% neq 0 goto provisionfailed
+
+:: %STAGE2% is left behind deliberately -- see the success message below. It is root-owned and
+:: world-readable, which is why this call can read it as %LINUX_USER% without being root itself.
 "%SYS32%\wsl.exe" -d %DISTRO% -e bash %STAGE2%
 set "RC=%errorlevel%"
 
@@ -389,7 +482,13 @@ echo       ./cs193v
 echo.
 echo   You can also open %DISTRO% from the Windows Terminal dropdown.
 echo   Your project files are reachable from Windows at:
-echo       \\wsl.localhost\%DISTRO%\home\[your-linux-username]\cs193v\projects
+echo       \\wsl.localhost\%DISTRO%\home\%LINUX_USER%\cs193v\projects
+echo.
+echo   Your Linux account in there is called %LINUX_USER% and has no
+echo   password, so nothing will ever ask you for one. If you ever need
+echo   to install something in the environment itself, this gets you in
+echo   as its administrator:
+echo       wsl -d %DISTRO% -u root
 echo.
 echo   The setup script this downloaded is still in %DISTRO%, at
 echo       %STAGE2%
@@ -461,7 +560,7 @@ echo   Could not create the %DISTRO% environment.
 echo.
 echo   Setup has checked what it can: WSL is installed, and WSL has
 echo   just been updated. The likeliest cause left is a WSL older than
-echo   2.5.8, which cannot name a new environment -- but that is a
+echo   2.4.4, which cannot name a new environment -- but that is a
 echo   guess, not a diagnosis, and any error above is worth more.
 echo.
 echo   Please send course staff this whole window, including any
@@ -523,6 +622,62 @@ echo.
 pause
 exit /b 1
 
+:provisionfailed
+:: THE THIRD SITE THAT NEEDS THE UTILITY VM, and it opens the same way :curlfailed does. Every
+:: `wsl -d` call needs one, so a machine that has the environment and has lost virtualisation
+:: fails here -- at the create, at the curl, or in this block, and #114's lesson is that a second
+:: site needs the same classifier rather than a guess of its own.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%VMFAILPROBE%" >nul 2>&1
+if %errorlevel% equ 0 goto novm
+
+:: AND IT IS NOT :distrofailed, deliberately. That block names one cause -- a WSL too old to name
+:: an environment -- which has nothing to do with preparing one that already exists. Sending this
+:: failure there would print a wrong cause over a correct message, which is #112's whole anatomy.
+echo.
+echo   Could not prepare the %DISTRO% environment.
+echo.
+echo   The %DISTRO% environment exists, but setup could not finish
+echo   getting it ready: creating your Linux account in it, or
+echo   installing what the course needs there.
+echo.
+echo   It is safe to run this file again once the problem above is
+echo   fixed -- each step checks whether it has already been done.
+echo.
+echo   Please send course staff this whole window, including any
+echo   "Error code:" line above.
+echo.
+pause
+exit /b 1
+
+:foreignaccount
+:: NOT A MUTATION, AND NOT A SILENT ONE EITHER. There is an account in this environment that this
+:: installer did not create -- almost always a CS193V from an earlier quarter, where Ubuntu's
+:: first-run setup asked the student to choose a username. Their work is in it. Creating a second
+:: account would change which account the environment starts in and where their home directory
+:: is, without asking, and this file cannot ask: it is non-interactive apart from `pause`.
+::
+:: SO IT NAMES THE COMMAND AND WHAT THE COMMAND COSTS. `wsl --unregister` deletes the environment
+:: and everything saved inside it. Anything on the Windows drives is untouched, because those are
+:: mounted rather than stored in there -- worth saying, because it is the difference between a
+:: student running it calmly and not running it at all.
+echo.
+echo   The %DISTRO% environment already has a Linux account in it that
+echo   this installer did not create, so setup has stopped rather than
+echo   adding a second one.
+echo.
+echo   That normally means %DISTRO% was set up by an earlier version of
+echo   this installer, which asked you to choose a username. To let this
+echo   version set it up from scratch, remove it and run this file again:
+echo.
+echo       wsl --unregister %DISTRO%
+echo.
+echo   THAT DELETES EVERYTHING INSIDE THE %DISTRO% ENVIRONMENT, including
+echo   any work saved in there. Files on your Windows drives are not
+echo   affected. If you are not sure, ask course staff first.
+echo.
+pause
+exit /b 1
+
 :stage2failed
 echo   Setup did not finish - see the messages above.
 echo   It is safe to run this file again once the problem is fixed.
@@ -531,10 +686,10 @@ pause
 exit /b %RC%
 
 :novm
-:: ONE REFUSAL, SHARED BY BOTH SITES THAT NEED A VM -- the create above and using an environment
-:: that already exists. Reached only when wsl.exe has ALREADY SAID virtualisation is the problem,
-:: so this block deliberately explains nothing: repeating the cause in our own words is what
-:: turned #112 from a clear error into a wrong one.
+:: ONE REFUSAL, SHARED BY ALL THREE SITES THAT NEED A VM -- creating an environment, preparing
+:: one, and using one that already exists. Reached only when wsl.exe has ALREADY SAID that
+:: virtualisation is the problem, so this block deliberately explains nothing: repeating the
+:: cause in our own words is what turned #112 from a clear error into a wrong one.
 ::
 :: IT HANDS OVER NO COMMANDS OF ITS OWN, and it no longer needs to. Enabling the Virtual Machine
 :: Platform used to be offered from an arm here, decided by a probe that had to be kept in step

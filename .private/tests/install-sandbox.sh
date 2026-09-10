@@ -99,7 +99,7 @@ OPTIONS
   --fake-podman        substitute lib/podman-fake, so nothing real is built.  A TEST
                        CONVENIENCE and neither axis: it is not an absence, not a capability,
                        and not a machine any student could have.  Makes a run take a second
-  --base IMAGE         machine (default) | podman-old | podman-old-nested | debian | fedora
+  --base IMAGE         machine (default) | podman-old | podman-old-nested | debian | fedora | wsl-fresh
                        Run with --list to print the vocabulary and which of them nest.
                        podman-old is ubuntu:22.04 at podman 3.4.4, below
                        MIN_PODMAN_LINUX (4.9.0), so the installer refuses it in the
@@ -115,6 +115,14 @@ OPTIONS
                        floor used to turn away and now accepts.
                        fedora is fedora:43 with NO podman, so install_podman runs and
                        dies in apt-get.  That is issue #94, executed
+                       wsl-fresh is the machine the WINDOWS installer finds (#217): root, and
+                       no human account at all, which is what `wsl --install --no-launch`
+                       leaves behind.  Use --provision, which selects this base, root and
+                       the environment variable together; the suite's wsl-provision case
+                       then runs the student pass after it in the same container
+  --provision          drive the ROOT pass (#217): implies --base wsl-fresh, --platform wsl,
+                       --fake-podman and root, and sets CS193V_PROVISION=1 so the bootstrap
+                       execs wsl-provision.sh instead of the installer proper
   --dir PATH           set CS193V_DIR, so the installer does not ask where to put things
   --ask                leave CS193V_DIR unset, so choose_dir prompts.  Its typed-path,
                        empty-input and ~/ branches are only reachable this way
@@ -154,6 +162,7 @@ PLATFORM=linux
 FAKE=no
 WSLCONF=''
 SUDOK=''
+PROVISION=''
 SBDIR='/home/student/cs193v'
 # EMPTY MEANS "NOT SAID", so the default can depend on the other flags rather than being a
 # constant. Resolved below once --fake-podman and --base are known.
@@ -176,6 +185,13 @@ while [ "$#" -gt 0 ]; do
         --base=*)       BASE="${1#--base=}" ;;
         --sudo)         shift; SUDOK="${1:-}" ;;
         --sudo=*)       SUDOK="${1#--sudo=}" ;;
+        # THE ROOT PASS, BY HAND (#217). One flag rather than three, because all three are the
+        # same decision: the machine as the Windows installer finds it, running as root, with the
+        # environment variable that makes the bootstrap exec wsl-provision.sh instead of the
+        # installer proper. PLATFORM is forced too -- the pass refuses anything that is not WSL,
+        # and being refused by your own harness for a reason you did not choose is a waste of a
+        # minute.
+        --provision)    PROVISION=yes; BASE=wsl-fresh; PLATFORM=wsl; FAKE=yes ;;
         --wslconf)      shift; WSLCONF="${1:-}" ;;
         --wslconf=*)    WSLCONF="${1#--wslconf=}" ;;
         --dir)          shift; SBDIR="${1:-}" ;;
@@ -291,6 +307,7 @@ set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro$VT_MOUNT_Z"
 set -- "$@" -e "SB_NET=$NET"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"
+[ -n "$PROVISION" ] && set -- "$@" --user 0 -e CS193V_PROVISION=1
 [ -n "$SUDOK" ] && set -- "$@" -e "SB_SUDO=$SUDOK"
 set -- "$@" -e "SB_NO_PREREQS=$NOPREREQS" -e "SB_NO_CAPS=$NOCAPS"
 # THE SAME DECLARATION THE SUITE USES. This file used to carry its own copies of the nested

@@ -1,0 +1,67 @@
+# A CS193V WSL INSTANCE AS THE WINDOWS INSTALLER FINDS IT: root, and nobody else (#217).
+#
+# WHAT THIS BASE IS FOR. Every other fixture here starts as a student on a machine that is
+# already theirs; this one starts as ROOT in an operating system that has never had a human in
+# it, which is exactly the state `wsl --install --no-launch` leaves behind. That is the one state
+# .private/wsl-provision.sh is written for, and the only one in which its effects are real:
+# useradd really creates the account, /etc/wsl.conf really gains a [user] stanza, and the pass a
+# student watches really runs afterwards as somebody who has no password.
+#
+# WHY IT IS NOT Containerfile.machine WITH A FLAG. --no-prereqs subtracts SOFTWARE and --no-caps
+# subtracts PERMISSION; "there is no human account" is neither, and lib/sandbox.sh's own note says
+# what to do with a third axis -- a base is a SUBSTITUTION, and this is one. It is also much
+# smaller than the machine: nothing here nests a podman, because the two-pass split is about who
+# runs which step rather than about containers, so this fixture pairs with fake-podman=yes.
+#
+# NO OFFLINE apt REPOSITORY, deliberately, and it is worth saying why given every other
+# Debian-family fixture has one. The root pass installs only what the machine is MISSING, and the
+# Ubuntu WSL image is missing podman and uidmap -- so a fixture that already has them exercises
+# the skip, which is the behaviour that has to hold on a re-run. The install itself is the same
+# root_step_packages the sb-apt and sb-uidmap cases already drive through course-install.sh, on a
+# machine with a repository to install from. Two arms, one function.
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+
+# sudo BECAUSE EVERY PRIVILEGED CALL IN THE INSTALLER GOES THROUGH IT, including the ones the root
+# pass makes as root, where it is a no-op indirection (install-utils.sh says why that is worth
+# keeping). Ubuntu's stock sudoers lists root, so `sudo -n true` succeeds -- which is the
+# preflight wsl-provision.sh refuses on.
+#
+# curl, ssh AND uidmap ARE WHAT THE WSL IMAGE ALREADY HAS, measured on the real Ubuntu-26.04 WSL
+# rootfs: curl and ssh are there, podman and uidmap are not. uidmap is installed here anyway
+# because `newuidmap` absent would send the root pass to apt, and this fixture deliberately has
+# nothing to install from -- see the note above.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      sudo ca-certificates curl openssh-client uidmap \
+ && rm -rf /var/lib/apt/lists/*
+
+# THE ONE THING THE IMAGE SHIPS THAT THE ROOT PASS READS. /etc/wsl.conf with systemd already on is
+# what the real WSL image has, so root_step_wslconf must SKIP -- and its failure mode if it does
+# not is a second `systemd=true` appended on every run, which is why the arm asserts the file's
+# exact contents rather than just grepping for the setting.
+RUN printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
+
+# AND THE FIRST-RUN CONFIGURATION, so that switching it off is something that really happens here.
+# The real file names Canonical's wsl-setup as its [oobe] command; what matters to the installer is
+# only that the path exists and can be moved aside.
+RUN printf '[oobe]\ncommand = /usr/lib/wsl/wsl-setup\ndefaultUid = 1000\n' \
+      > /etc/wsl-distribution.conf
+
+# NO `student`, AND NO uid 1000 AT ALL. ubuntu:26.04 ships its own `ubuntu` user at uid and gid
+# 1000 (ERRORS.md A1 is this repo being bitten by exactly that), and the WSL rootfs does not --
+# measured: the account on a real CS193V is the one the first-run setup created. So it is deleted
+# here, which also leaves useradd free to pick 1000 without being pinned to it.
+RUN oldu="$(getent passwd 1000 | cut -d: -f1)"; \
+    [ -n "$oldu" ] && userdel -r "$oldu" >/dev/null 2>&1; \
+    oldg="$(getent group 1000 | cut -d: -f1)"; \
+    [ -n "$oldg" ] && groupdel "$oldg" >/dev/null 2>&1; \
+    ! getent passwd 1000
+
+# The shim and report directories every fixture carries, and the build stamp the probes echo back
+# so an assertion can prove it ran INSIDE the fixture rather than on the host.
+RUN mkdir -p /var/tmp/shim /var/tmp/report && chmod 1777 /var/tmp/shim /var/tmp/report
+RUN printf 'wsl-fresh-fixture-%s\n' "$(date -u +%s)" > /etc/cs193v-fixture-id
+
+# NO `USER` LINE, WHICH IS THE POINT: this fixture runs as root, because the pass it exists to
+# exercise refuses to run as anything else.
+WORKDIR /root

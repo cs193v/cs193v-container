@@ -94,24 +94,57 @@ assert_says "win-ok:reports-wsl-present"          "WSL is installed" "$WINE_OUT"
 assert_says "win-ok:reports-the-environment-ready" "environment is ready" "$WINE_OUT"
 assert_says "win-ok:says-it-is-done"              "Done. From now on you work inside" "$WINE_OUT"
 assert_says "win-ok:tells-them-where-projects-are" "wsl.localhost" "$WINE_OUT"
-# The defect itself. assert_says matches with a shell glob, so the placeholder is asserted
-# without its brackets -- `[...]` would be a character class matching one character.
+# THE PLACEHOLDER IS GONE, AND THAT IS THE POINT (#217). The path used to read
+# `\\wsl.localhost\CS193V\home\[your-linux-username]\cs193v\projects`, because Ubuntu's first-run
+# setup asked the student to invent a username and nothing here could know it. The account is
+# created by the installer now and it is always `student`, so the path a student is handed is one
+# they can paste rather than one they have to fill in.
 #
-# TWO assertions, because there are two things to be sure of: that the line SURVIVED at all (the
-# original printed nothing here, since cmd extracted `<your-linux-username>` as redirection before
-# echo ran), and that the angle-bracket form has not come back.
-# ONE assertion, on the bracket form, and deliberately not a pair. Measured against the original:
-# an assert_says_not for "<your-linux-username>" PASSES there -- not because the angle brackets are
-# gone but because cmd ate the entire line, so there is nothing to match either way. A negative
-# assertion about a line that may not exist is worthless. assert_match takes an ERE, where the
-# brackets can be escaped, so this demands the real text be PRESENT and in the safe form.
+# STILL assert_match RATHER THAN assert_says, and the reason has changed: it is no longer about
+# escaping brackets, it is that this line's real hazard was cmd extracting `<` and `>` as
+# redirection and printing NOTHING. An ERE anchored on the whole path is what demands the line be
+# present and complete rather than merely free of one bad form.
 assert_match "win-ok:the-projects-path-survives-echo" \
-             'wsl\.localhost.CS193V.home.\[your-linux-username\].cs193v.projects' "$WINE_OUT"
+             'wsl\.localhost.CS193V.home.student.cs193v.projects' "$WINE_OUT"
+# AND THE PLACEHOLDER MUST NOT COME BACK, which is worth an assertion of its own now that there
+# is real text to compare against: this negative could not have been trusted while the line was
+# capable of printing nothing at all.
+assert_says_not "win-ok:no-username-placeholder-left" "your-linux-username" "$WINE_OUT"
 assert_eq   "win-ok:no-stderr-noise"              "" "$WINE_ERR"
 # Pinned to the exact path now, not just `-e bash`: the handoff argument is a constant this file
 # owns, so there is no reason to accept any other one.
-assert_eq   "win-ok:hands-off-to-bash-once"       "1" "$(wine_argv_count '\-e bash /tmp/install-cs193v.sh')"
+#
+# /var/tmp AND NOT /tmp, WHICH IS A MEASUREMENT RATHER THAN A PREFERENCE (#217). Inside a WSL
+# instance with systemd, /tmp is a tmpfs -- measured on 2026-09-10 -- and this flow now restarts
+# the instance between downloading stage 2 and running it, so a copy in /tmp is gone by then. The
+# fake models that: it records where curl was told to write, and --terminate wipes the file if it
+# landed under /tmp, after which bash exits 127 the way the real one does.
+assert_eq   "win-ok:hands-off-to-bash-once"       "1" "$(wine_argv_count '\-e bash /var/tmp/install-cs193v.sh')"
+assert_eq   "win-ok:stage-two-does-not-live-in-tmp" "0" "$(wine_argv_count '\-o /tmp/')"
 assert_eq   "win-ok:never-creates-an-existing-distro" "0" "$(wine_argv_count '\-\-install -d')"
+
+# ─── THE PROVISIONING SEQUENCE, WHICH IS AN ORDER AND NOT A SET  (#217) ────────
+#
+# Five calls, each asserted once, and the fake makes them a real sequence rather than five
+# independent answers: the root pass records that the account exists, --terminate records the
+# restart, and `test -O` is 0 only once BOTH have happened. So a .cmd that got the order wrong --
+# handing over before the restart, say, which is the trap that silently installs into /root --
+# fails here rather than passing a fixture that cannot tell.
+assert_eq "win-ok:asks-whether-the-account-is-ours" "1" \
+          "$(wine_argv_count '\-e getent passwd student')"
+assert_eq "win-ok:asks-whether-anyone-else-lives-here" "1" \
+          "$(wine_argv_count '\-e getent passwd 1000')"
+assert_eq "win-ok:runs-the-root-pass-once" "1" \
+          "$(wine_argv_count 'env CS193V_PROVISION=1 bash')"
+assert_eq "win-ok:restarts-the-instance-once" "1" "$(wine_argv_count '\-\-terminate')"
+assert_eq "win-ok:asks-who-owns-the-home-directory" "1" "$(wine_argv_count '\-e test -O')"
+# THE ORDER ITSELF, out of argv.log rather than out of the file: the restart must come between
+# the root pass and the student's, because /etc/wsl.conf is read when an instance STARTS and an
+# idle one lingers 15 seconds. Getting this wrong is invisible in the .cmd and total at runtime.
+assert_eq "win-ok:restarts-between-the-two-passes" "PROVISION TERMINATE STAGE2" \
+          "$(printf '%s\n' "$WINE_ARGV" \
+             | sed -n 's/.*env CS193V_PROVISION=1 bash.*/PROVISION/p; s/.*--terminate.*/TERMINATE/p; s/.*-e bash \/var\/tmp.*/STAGE2/p' \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── stage two is FETCHED, and the machine it is fetched into is checked first ──
 #
@@ -124,7 +157,7 @@ assert_eq   "win-ok:does-not-apt-when-curl-is-there" "0" "$(wine_argv_count 'apt
 assert_eq   "win-ok:downloads-once"               "1" "$(wine_argv_count '\-e curl -fsSL')"
 assert_eq   "win-ok:checks-the-download-once"     "1" "$(wine_argv_count '\-e grep ')"
 assert_says "win-ok:names-the-url-it-fetches"     "raw.githubusercontent.com/cs193v/cs193v-container/main" "$WINE_OUT"
-assert_says "win-ok:says-where-it-left-the-script" "/tmp/install-cs193v.sh" "$WINE_OUT"
+assert_says "win-ok:says-where-it-left-the-script" "/var/tmp/install-cs193v.sh" "$WINE_OUT"
 
 # ORDER, from argv.log rather than from reading the file: whichever of the two calls appears
 # FIRST must be the download. 25-installer.sh pins the same thing statically; this pins that the
@@ -274,25 +307,48 @@ assert_says_not "win-vmfailprobe:does-not-claim-a-vm-cause"  "could not start a 
 assert_says "win-vmfailprobe:asks-for-the-whole-window"      "this whole window" "$WINE_OUT"
 assert_eq   "win-vmfailprobe:never-runs-bash"                "0" "$(wine_argv_count '\-e bash ')"
 
-# Creating the environment, and the on-screen promise it makes while doing so. The warning text
-# is the installer's OWN words, so it is fair to pin: it tells the student how many questions to
-# expect and that they must type `exit` to carry on, and both were wrong or missing before --
-# `wsl --install` LAUNCHES the distro and leaves them at a Linux prompt with no instruction.
+# Creating the environment, and the on-screen promise it makes while doing so. The text is the
+# installer's OWN words, so it is fair to pin.
 #
-# Canonical's actual OOBE wording is NOT asserted anywhere. The fake replays it so a person can
-# see it in win-sandbox.sh, but it belongs to another project and moves with wsl-setup, so
-# pinning it here would punish the wrong change.
+# FOUR PROMISES WERE PINNED HERE AND ALL FOUR ARE GONE (#217): a username, a password to go with
+# it, a third question about usage reports, and "TYPE exit AND PRESS ENTER". They described what
+# `wsl --install` did when it LAUNCHED the new distribution, which was Ubuntu's first-run setup.
+# With --no-launch none of it happens.
+#
+# REPLACED RATHER THAN DELETED, and that is the point of this block. The .cmd's prose has no key
+# reconciliation -- nothing pairs its echo lines against a catalogue -- so deleting a promise and
+# the assertion that pinned it in the same commit leaves NOTHING red, and the next person cannot
+# tell whether the message was retired or lost. So the new promise is asserted in the old one's
+# place: there is nothing to type, and it may be quiet for a while. That second half matters more
+# than it looks -- the provisioning stretch is silent for up to a minute, and a student who was
+# told to expect questions would sit watching a still window waiting for one.
 wine_new
 wine_list                              # nothing registered yet
 wine_run
 assert_eq   "win-create:succeeds"                  "0" "$WINE_RC"
 assert_says "win-create:says-it-is-creating"       "Creating the CS193V Linux environment" "$WINE_OUT"
-assert_says "win-create:warns-about-the-username"  "a username" "$WINE_OUT"
-assert_says "win-create:warns-about-the-password"  "a password to go with it" "$WINE_OUT"
-assert_says "win-create:warns-about-the-third-question" "anonymous usage reports" "$WINE_OUT"
-assert_says "win-create:tells-them-to-type-exit"   "TYPE exit AND PRESS ENTER" "$WINE_OUT"
+assert_says "win-create:says-there-is-nothing-to-type" "nothing for you to type" "$WINE_OUT"
+assert_says "win-create:warns-that-it-goes-quiet"  "may go quiet" "$WINE_OUT"
+# AND THE OLD PROMISES MUST NOT COME BACK, because they would now be lies rather than merely
+# stale: nothing asks for a username, nothing asks for a password, and there is no shell to exit.
+assert_says_not "win-create:does-not-promise-a-username" "a username" "$WINE_OUT"
+assert_says_not "win-create:does-not-promise-a-password" "a password to go with it" "$WINE_OUT"
+assert_says_not "win-create:does-not-promise-a-telemetry-question" "usage reports" "$WINE_OUT"
+assert_says_not "win-create:does-not-tell-them-to-type-exit" "TYPE exit" "$WINE_OUT"
 assert_says "win-create:then-reports-it-ready"     "environment is ready" "$WINE_OUT"
 assert_eq   "win-create:creates-it-once"           "1" "$(wine_argv_count '\-\-install -d')"
+assert_eq   "win-create:asks-for-no-launch"        "1" "$(wine_argv_count '\-\-no-launch')"
+# THE FIRST-RUN SETUP IS SWITCHED OFF BEFORE ANYTHING ELSE, and the order is the assertion: the
+# Start Menu entry exists the moment --install returns, so for as long as Ubuntu's setup is armed
+# a student who clicks it fires the questions in another window -- and the .cmd's next `-e` call
+# then blocks on an event with no timeout. The fake's mv arm fails the second time, exactly as
+# the real one does, so this cannot be satisfied by doing it twice.
+assert_eq   "win-create:switches-the-first-run-setup-off" "1" \
+            "$(wine_argv_count '\-e mv /etc/wsl-distribution.conf')"
+assert_eq   "win-create:switches-it-off-before-it-downloads" "MV CURL" \
+            "$(printf '%s\n' "$WINE_ARGV" \
+               | sed -n 's/.*-e mv \/etc\/wsl-distribution.conf.*/MV/p; s/.*-e curl -fsSL.*/CURL/p' \
+               | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_says "win-create:says-it-is-done"           "Done. From now on" "$WINE_OUT"
 
 # The same class at the distro-creation call, which is the one that mattered most: its exit code
@@ -303,7 +359,7 @@ wine_list                              # nothing registered
 wine_knob wsl.name.unsupported 1       # WSL < 2.5.8: no --name at all, exits -1
 wine_run
 assert_ne   "win-name:does-not-exit-zero"        "0" "$WINE_RC"
-assert_says "win-name:offers-the-wsl-version-as-a-cause" "older than 2.5.8" "$WINE_OUT"
+assert_says "win-name:offers-the-wsl-version-as-a-cause" "older than 2.4.4" "$WINE_OUT"
 assert_says "win-name:asks-for-wsl-version"      "wsl --version" "$WINE_OUT"
 # AND IT MUST NOT ASSERT IT. The message names one likely cause out of several, which is the whole
 # defect in issue #112 -- a machine that could not run a VM at all was told this and only this.
@@ -315,15 +371,159 @@ assert_says "win-name:says-it-is-a-guess"        "a guess" "$WINE_OUT"
 assert_eq   "win-name:tried-to-update-first"     "1" "$(wine_argv_count '\-\-update')"
 assert_says_not "win-name:does-not-claim-success" "Done. From now on" "$WINE_OUT"
 
-# A shell that exits nonzero after a SUCCESSFUL install must not be reported as a failed install.
+# ─── CLASS: the create's own exit code, which is finally worth reading  (#217) ─
+#
+# THIS CASE USED TO ASSERT THE OPPOSITE, and it is worth saying why rather than quietly turning it
+# round. `wsl --install -d` LAUNCHED the new distribution and returned THE LAUNCHED SHELL's exit
+# code, so a student who mistyped a command before typing `exit` looked exactly like a failed
+# install -- which is why the .cmd could not test that code at all and re-probed instead. With
+# --no-launch there is no shell in the picture: the code is the install's own, and a nonzero one
+# is a real failure that must refuse rather than carry on.
+#
+# THE PROBE STAYS ALL THE SAME, and win-rebootrequired below is why: a create that enables a
+# Windows component prints the reboot notice, installs NOTHING and exits ZERO. So the code and the
+# probe answer different questions and both are asked.
+wine_new
+wine_list                              # nothing registered
+wine_knob wsl.install.rc 1             # the install itself failed
+wine_run
+assert_ne   "win-installrc:refuses"               "0" "$WINE_RC"
+assert_says_not "win-installrc:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+assert_eq   "win-installrc:never-runs-bash"       "0" "$(wine_argv_count '\-e bash ')"
+assert_eq   "win-installrc:never-provisions"      "0" "$(wine_argv_count 'CS193V_PROVISION=1')"
+
+# A WSL SO OLD IT HAS NO --no-launch. Nothing supported is: --no-launch predates the 2.4.4 floor
+# the docs name, and 2.7.13 is current stable. The case exists because the assertion above needs a
+# failure arm that is reachable -- an exit check whose nonzero branch no fixture can produce is an
+# assertion in appearance only, which is exactly the class of defect the issue that added this
+# flow set out to find.
 wine_new
 wine_list
-wine_knob wsl.install.rc 1             # the student mistyped something, then typed `exit`
+wine_knob wsl.nolaunch.unsupported 1
 wine_run
-assert_eq   "win-shellrc:still-succeeds"          "0" "$WINE_RC"
-assert_says "win-shellrc:says-it-is-done"         "Done. From now on" "$WINE_OUT"
-assert_says_not "win-shellrc:does-not-blame-the-wsl-version" "may not support" "$WINE_OUT"
+assert_ne   "win-nolaunch:refuses"                "0" "$WINE_RC"
+assert_says "win-nolaunch:blames-the-create"      "Could not create" "$WINE_OUT"
+assert_says_not "win-nolaunch:does-not-blame-provisioning" "Could not prepare" "$WINE_OUT"
+assert_eq   "win-nolaunch:never-provisions"       "0" "$(wine_argv_count 'CS193V_PROVISION=1')"
 
+
+# ─── CLASS: what is already in the environment decides what may be done to it ──
+#
+# THE CASE THAT WAS RED BEFORE THE .cmd CHANGED AT ALL. A registered CS193V with no account in it
+# is what a run that died between `--install` and the account looks like -- and it is the state
+# the whole two-pass design has to be able to resume, because the file's own header promises it is
+# safe to run again. There is no fast path for "the account is already ours" either: provisioning
+# is idempotent by construction, and a version that skipped it after seeing the account would jump
+# straight to the student's pass on a machine where podman was never installed -- into a sudo
+# prompt on an account whose password is locked, which is the one failure this design exists to
+# prevent.
+wine_new
+wine_list CS193V                       # registered, and nothing has ever run in it
+wine_run
+assert_eq   "win-noaccount:succeeds"              "0" "$WINE_RC"
+assert_eq   "win-noaccount:creates-no-distro"     "0" "$(wine_argv_count '\-\-install -d')"
+assert_eq   "win-noaccount:asks-whether-the-account-is-ours" "1" \
+            "$(wine_argv_count '\-e getent passwd student')"
+assert_eq   "win-noaccount:provisions-it"         "1" "$(wine_argv_count 'CS193V_PROVISION=1')"
+assert_eq   "win-noaccount:then-runs-the-student-pass" "1" \
+            "$(wine_argv_count '\-e bash /var/tmp/install-cs193v.sh')"
+assert_says "win-noaccount:says-it-is-done"       "Done. From now on" "$WINE_OUT"
+# AND IT DOES NOT TOUCH THE FIRST-RUN SETUP ON THIS PATH. The mv belongs to the arm that has just
+# created the environment; here the file may well have been moved already by the run that died,
+# and `mv` fails on a source that is not there -- so doing it again would turn a resumable state
+# into a refusal. The root pass ensures it instead, where a shell can tell the two apart.
+assert_eq   "win-noaccount:leaves-the-first-run-setup-to-the-root-pass" "0" \
+            "$(wine_argv_count '\-e mv /etc/wsl-distribution.conf')"
+
+# SOMEBODY ELSE'S ACCOUNT, which is what a CS193V made by the installer that asked students to
+# choose a username looks like -- last quarter's environment, with their work in it. Creating a
+# second account there would change which one they land in and where their files live, silently,
+# and stage 1 has no way to ask: it is non-interactive apart from `pause`. So it refuses, and the
+# refusal names the destructive command AND what it destroys.
+wine_new
+wine_list CS193V
+wine_knob wsl.account.foreign keith
+wine_run
+assert_ne   "win-foreign:refuses"                 "0" "$WINE_RC"
+assert_says "win-foreign:offers-unregister"       "wsl --unregister CS193V" "$WINE_OUT"
+assert_says "win-foreign:says-what-that-destroys" "DELETES EVERYTHING" "$WINE_OUT"
+assert_eq   "win-foreign:never-provisions"        "0" "$(wine_argv_count 'CS193V_PROVISION=1')"
+assert_eq   "win-foreign:never-runs-the-student-pass" "0" \
+            "$(wine_argv_count '\-e bash /var/tmp')"
+assert_says_not "win-foreign:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+
+# ─── CLASS: provisioning is a third site that can fail, and it fails on its own ─
+#
+# The root pass refusing. It must not be reported as anything else -- :distrofailed names one
+# cause ("a WSL older than...") that has nothing to do with this, which is #112's anatomy: a
+# refusal printing a different cause over the top of a correct one.
+wine_new
+wine_list CS193V
+wine_knob wsl.provision.rc 1
+wine_run
+assert_ne   "win-provisionfail:refuses"           "0" "$WINE_RC"
+assert_says "win-provisionfail:says-what-failed"  "Could not prepare" "$WINE_OUT"
+assert_says_not "win-provisionfail:does-not-blame-the-wsl-version" "older than" "$WINE_OUT"
+assert_eq   "win-provisionfail:never-runs-the-student-pass" "0" \
+            "$(wine_argv_count '\-e bash /var/tmp')"
+assert_says_not "win-provisionfail:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+
+# AND THE VIRTUALISATION CLASSIFIER REACHES IT, which is the second-site lesson of #114 arriving
+# at a third site: every `wsl -d` call needs the utility VM, so a machine that has the environment
+# and has lost virtualisation fails HERE, and must get the shared refusal rather than a guess of
+# its own. Driven with ps.vmfail.rc left honest so the classifier really answers.
+wine_new
+wine_list CS193V
+wine_knob wsl.vm.cannotstart 1
+wine_knob wsl.status.novirt 1
+wine_run
+assert_ne   "win-provisionfail-novm:refuses"      "0" "$WINE_RC"
+assert_says "win-provisionfail-novm:names-virtualisation" "could not start a virtual" "$WINE_OUT"
+assert_says_not "win-provisionfail-novm:does-not-guess-at-provisioning" "Could not prepare" "$WINE_OUT"
+
+# THE RESTART FAILING, which is the quietest of the three and the reason the handover is asked
+# rather than assumed: /etc/wsl.conf is read when an instance STARTS, so without the restart the
+# student's pass would run as root and install into /root. A .cmd that ignored this code would
+# then be caught by `test -O` -- but one refusal is better than two, and this pins the first.
+wine_new
+wine_list CS193V
+wine_knob wsl.terminate.rc 1
+wine_run
+assert_ne   "win-terminatefail:refuses"           "0" "$WINE_RC"
+assert_eq   "win-terminatefail:never-runs-the-student-pass" "0" \
+            "$(wine_argv_count '\-e bash /var/tmp')"
+assert_says_not "win-terminatefail:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+
+# THE FIRST-RUN SETUP THAT CANNOT BE SWITCHED OFF, which is the shape of a future Ubuntu image
+# that keeps its OOBE configuration somewhere else. Refusing is the whole reason the .cmd uses
+# `mv` rather than `truncate`: truncate CREATES the file if it is absent and exits 0, so that
+# version would have carried on with the questions still armed and a student would have met them
+# in a Start Menu window part-way through an install.
+wine_new
+wine_list                              # nothing registered: this is the create path
+wine_knob wsl.oobe.conf.missing 1
+wine_run
+assert_ne   "win-oobeconf:refuses"                "0" "$WINE_RC"
+assert_eq   "win-oobeconf:never-runs-the-student-pass" "0" \
+            "$(wine_argv_count '\-e bash /var/tmp')"
+assert_says_not "win-oobeconf:does-not-claim-success" "Done. From now on" "$WINE_OUT"
+
+# THE HANDOVER CHECK ITSELF, ASKED RATHER THAN ASSUMED. "Is /home/student owned by the user I am
+# running as?" is the one question that proves the whole sequence worked, and this case makes its
+# failure arm reachable: wsl.terminate.noop exits 0 WITHOUT restarting the instance, which is not
+# a hypothetical -- `wsl --manage --set-default-user` terminates only `if (modified)`, so an
+# obvious alternative to the restart really does behave this way on a re-run. Without the restart
+# /etc/wsl.conf has not been read, the student's pass would run as root, and this check is what
+# notices.
+wine_new
+wine_list CS193V
+wine_knob wsl.terminate.noop 1
+wine_run
+assert_ne   "win-handover:refuses"                "0" "$WINE_RC"
+assert_eq   "win-handover:asked-the-question"     "1" "$(wine_argv_count '\-e test -O')"
+assert_eq   "win-handover:never-runs-the-student-pass" "0" \
+            "$(wine_argv_count '\-e bash /var/tmp')"
+assert_says_not "win-handover:does-not-claim-success" "Done. From now on" "$WINE_OUT"
 # ─── CLASS: a machine that cannot fetch must be fixed, or refused ─────────────
 #
 # What used to be here was the wslpath capture: stage two came from a Windows path, wsl.exe
@@ -522,7 +722,7 @@ done
 # directory, and cmd.exe searches that directory BEFORE %PATH% -- so a wsl.exe, reg.exe, where.exe
 # or powershell.exe already sitting in Downloads was what ran, with Administrator rights. Downloads
 # is the likeliest place on a real machine for an untrusted file to already be, and wsl.exe had
-# twelve call sites, one of them the handoff to stage two.
+# nineteen call sites, one of them the handoff to stage two.
 #
 # IT WAS RED BEFORE THE FIX AND IS GREEN AFTER IT, which is the whole reason it exists rather than
 # leaving the property to 25-installer.sh's static rule. It also inverts what this harness used to
@@ -554,7 +754,7 @@ assert_eq   "win-hijack:the-planted-binaries-never-run" "0" "$(wine_argv_count '
 assert_ne   "win-hijack:the-real-programs-did-run"      "0" "$(wine_argv_count '^wsl\.exe ')"
 assert_eq   "win-hijack:exits-zero"                     "0" "$WINE_RC"
 assert_says "win-hijack:says-it-is-done"                "Done. From now on you work inside" "$WINE_OUT"
-assert_eq   "win-hijack:hands-off-to-bash-once"         "1" "$(wine_argv_count '\-e bash /tmp/install-cs193v.sh')"
+assert_eq   "win-hijack:hands-off-to-bash-once"         "1" "$(wine_argv_count '\-e bash /var/tmp/install-cs193v.sh')"
 assert_says_not "win-hijack:no-unrecognised-command"    "recognize" "$WINE_OUT$WINE_ERR"
 
 # ─── decision coverage, reported rather than assumed ──────────────────────────

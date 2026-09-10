@@ -138,3 +138,4 @@ BashNoSuchFile	C	bash: {}: No such file or directory
 # you instead is a VISIBLE boundary, so silence here reads as "faked" rather than "nothing
 # happened", and points at the tool that does drive the real thing.
 Stage2Boundary	D	[ install-cs193v.sh runs here. This harness fakes WSL, so its output is not\n  replayed -- drive the real script with tests/install-sandbox.sh ]
+ProvisionBoundary	D	[ install-cs193v.sh runs here as ROOT, with CS193V_PROVISION=1 in its\n  environment, to prepare the new environment. This harness does not replay its\n  output either -- drive the real script with tests/install-sandbox.sh ]

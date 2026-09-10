@@ -663,6 +663,23 @@ for s in $rs_names; do
     fi
 done
 
+
+# AND THE ROOT PASS RESOLVES THE TABLE BEFORE IT READS IT. install-utils.sh declares PKG_PODMAN
+# and its siblings empty and fills them in distro_packages, so a pass that reads one without
+# having called that leaves the package list empty -- which SKIPS the install and then fails its
+# own re-probe, on the one machine this code ever runs on and nowhere else. Found by reading, and
+# it is the kind of thing no fixture with podman already installed can catch, so it is asserted
+# here as an ORDER: the call comes before the first read.
+prov_call="$(sed 's/^[[:space:]]*#.*//' "$PROV" | grep -n 'distro_packages ' | head -1 | cut -d: -f1)"
+prov_read="$(sed 's/^[[:space:]]*#.*//' "$PROV" | grep -nE '\$\{?PKG_[A-Z]+' | head -1 | cut -d: -f1)"
+assert_ne "rootsteps:the-root-pass-resolves-the-package-table" "" "$prov_call"
+assert_ne "rootsteps:the-root-pass-reads-the-package-table" "" "$prov_read"
+if [ -n "$prov_call" ] && [ -n "$prov_read" ] && [ "$prov_call" -lt "$prov_read" ]; then
+    pass "rootsteps:the-root-pass-resolves-before-it-reads"
+else
+    fail "rootsteps:the-root-pass-resolves-before-it-reads" \
+         "distro_packages at line ${prov_call:-none}, first PKG_ read at ${prov_read:-none}"
+fi
 # ONE PRIVILEGED CALL LEFT IN course-install.sh, AND IT IS THE MAC .pkg. Everything the Linux and
 # WSL paths do as root is a root_step_* now, which is what lets the root pass be a complete
 # substitute for the student's sudo. The macOS installer is not: it never runs in a WSL instance,

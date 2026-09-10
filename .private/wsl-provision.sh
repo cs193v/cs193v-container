@@ -50,7 +50,7 @@ set -u
 # ─── the constants stage 1 shares with this file ───────────────────────────────
 # THE NAME IS FIXED, AND IT IS THE CONTAINER'S OWN (ERRORS.md A1, .private/Containerfile). The
 # same word inside the container and outside it means the path a student is handed --
-# \wsl.localhost\CS193V\home\student\cs193v\projects -- can be written down concretely instead
+# \\wsl.localhost\CS193V\home\student\cs193v\projects -- can be written down concretely instead
 # of with a placeholder they have to substitute. install-cs193v-windows.cmd carries its own copy
 # as LINUX_USER, and 25-installer.sh fails if the two disagree.
 WSL_USER="student"
@@ -236,28 +236,27 @@ provision_default_user() {
 }
 
 # ─── 5. everything that needs root, out of the installer's own list ───────────
-# THE LIST IS NOT HERE, AND THAT IS THE POINT (#217). ROOT_STEPS lives in install-utils.sh beside
-# the functions it names, and course-install.sh calls those same functions for a student on a Mac
-# or a Linux box. This loop names none of them: if it did, a step added to the installer would
-# have to be remembered here too, and the day somebody forgot, a student would meet a sudo prompt
-# on an account with no password -- the one failure this whole arrangement exists to prevent.
-# 10-static.sh asserts that this loop stays a loop.
-#
-# WHAT TO INSTALL IS PROBED, NOT ASSUMED. The Ubuntu WSL image ships curl and ssh but no podman
-# and no uidmap, so this normally resolves to two packages -- but which two comes from the table,
-# and whether each is needed comes from asking this machine the same questions survey() asks a
-# student's. An image that stops shipping curl is then absorbed rather than discovered later, by
-# a student, as a download that failed.
-#
-# ca-certificates RIDES WITH curl, exactly as install_podman does it: without it curl exits 60
-# and an SSL failure reads as a network problem.
-provision_root_steps() {
+# THE TABLE IS RESOLVED FIRST, and it is worth a line of its own because getting this wrong is
+# silent in the one place it matters. install-utils.sh declares PKG_PODMAN and its siblings EMPTY
+# and fills them in distro_packages; a pass that read them without calling it would build an empty
+# package list, skip the install, and then fail its own re-probe -- on a real Ubuntu WSL image,
+# which is the only machine this file ever runs on, and nowhere else. 10-static.sh asserts the
+# order rather than the call, because the call in the wrong place is the same defect.
+provision_packages() {
+    DISTRO="$(distro_family)"
+    [ "$DISTRO" = unsupported ] \
+        && die "$(msg err.unsupported-distro "PRETTY_NAME=$(os_release_field PRETTY_NAME)")"
+    distro_packages "$DISTRO"
     PKGS=""
     command -v podman    >/dev/null 2>&1 || PKGS="$PKGS $PKG_PODMAN"
     command -v newuidmap >/dev/null 2>&1 || PKGS="$PKGS $PKG_UIDMAP"
     command -v ssh       >/dev/null 2>&1 || PKGS="$PKGS $PKG_SSH"
     command -v curl      >/dev/null 2>&1 || PKGS="$PKGS ${PKG_CURL}${PKG_CA:+ $PKG_CA}"
     PKGS="$(printf '%s' "$PKGS" | sed 's/^ *//;s/  */ /g')"
+}
+
+provision_root_steps() {
+    provision_packages
     if [ -n "$PKGS" ]; then
         step "$(msg step.installing "PKGS=$PKGS")"
     else

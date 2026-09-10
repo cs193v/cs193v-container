@@ -151,6 +151,12 @@ static void touch_marker(const char *leaf) {
     if ((f = fopen(p, "w"))) { fputc('1', f); fclose(f); }
 }
 
+static void write_marker(const char *leaf, const char *body) {
+    char p[1024]; FILE *f;
+    fake_path(p, sizeof p, leaf);
+    if ((f = fopen(p, "w"))) { fputs(body, f); fclose(f); }
+}
+
 static void remove_marker(const char *leaf) {
     char p[1024];
     fake_path(p, sizeof p, leaf);
@@ -344,6 +350,15 @@ int main(int argc, char **argv) {
             return WSL_FAIL;
         }
         long rc = fake_knob_int("wsl.terminate.rc", 0);
+        /* EXITS 0 WITHOUT RESTARTING ANYTHING, which is not a hypothetical: `wsl --manage
+         * --set-default-user` terminates the instance only `if (modified)`, so the obvious
+         * alternative to this call really does no-op on a re-run where the value is already
+         * right. The .cmd's handover check is what has to notice, and this is how that arm is
+         * reached. */
+        if (rc == 0 && fake_knob_int("wsl.terminate.noop", 0)) {
+            fake_say(stdout, "SystemErrorSuccess", NULL, NULL);
+            return 0;
+        }
         if (rc == 0) {
             touch_marker("wsl.terminated");
             if (stage2_is_in_tmp()) remove_marker("stage2.sh");
@@ -533,13 +548,41 @@ int main(int argc, char **argv) {
         return stage2_contains(pat) ? 0 : 1;
     }
 
+    /* THE TWO STAGE-2 CALLS, TOLD APART BY THE ENVIRONMENT VARIABLE (#217). The .cmd runs the
+     * same downloaded script twice: once as `-u root -e env CS193V_PROVISION=1 bash <path>`, the
+     * root pass, and once as `-e bash <path>`, the pass a student watches. They are two different
+     * things that can fail differently, so they get two exit codes and the first one leaves a
+     * marker the getent and `test -O` arms read.
+     *
+     * MATCHED ON THE ASSIGNMENT AS A WHOLE, because that is the argv the .cmd really passes and
+     * `has()` compares whole arguments. A .cmd that stopped setting it would fall through to the
+     * student arm and the account marker would never appear, which the handover check then
+     * catches. */
     if (has(argc, argv, "bash")) {
+        int provisioning = has(argc, argv, "CS193V_PROVISION=1");
+        /* WHAT bash DOES WITH A PATH THAT IS NOT THERE, and it is here because /tmp inside a
+         * systemd WSL instance is a tmpfs: a .cmd that downloaded stage 2 to /tmp and then
+         * restarted the instance would hand this arm a file --terminate has already wiped.
+         * Attested on 2026-09-10: `bash: <path>: No such file or directory`, rc 127. */
+        const char *script = argv[argc - 1];
+        if (!exists("stage2.sh")) {
+            fake_say(stdout, "BashNoSuchFile", script, NULL);
+            return 127;
+        }
         /* A VISIBLE boundary, not install-cs193v.sh's transcript. That script is this repo's own
          * and has its own coverage; reproducing its output here would be inventing prose and
          * duplicating tests. Printing nothing was worse: the handoff looked like it had not
          * happened at all. */
         if (fake_knob_int("wsl.stage2.quiet", 0) == 0)
-            fake_say(stdout, "Stage2Boundary", NULL, NULL);
+            fake_say(stdout, provisioning ? "ProvisionBoundary" : "Stage2Boundary", NULL, NULL);
+        if (provisioning) {
+            long rc = fake_knob_int("wsl.provision.rc", 0);
+            /* THE ACCOUNT REALLY APPEARS, so what follows is a sequence rather than a set of
+             * independent answers: getent then says yes, and `test -O` says yes once the
+             * instance has also been restarted. */
+            if (rc == 0) touch_marker("account.student");
+            return (int)rc;
+        }
         return (int)fake_knob_int("wsl.bash.rc", 0);
     }
 

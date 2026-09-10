@@ -71,7 +71,7 @@ assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
 # course tree. A copy of the list here could drift from the list that actually gates an install.
 #
 # course-install.sh SINCE #221, not install-cs193v.sh: the bootstrap has a check of its own, but
-# it names the two files IT hands over, which is a different claim from what the student's tree
+# it names the files IT hands over, which is a different claim from what the student's tree
 # needs. This is the one that gates the tree.
 sentinels="$(sed -n 's/^ *for f in \(cs193v .*\); do$/\1/p' "$PRIVATE/course-install.sh" | head -1)"
 n_sent="$(printf '%s\n' $sentinels | grep -c '' | do_tr -d ' ')"
