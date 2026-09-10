@@ -1440,6 +1440,205 @@ assert_says     "half-tree:blames-the-unpacking"     "unpacking stopped partway"
 # two owners are asserted separately; one assertion could be satisfied by either.
 assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
+# ─── the progress block around the package manager  (#219) ─────────────────────
+# WHY THIS DRIVES THE FUNCTIONS AND NOT THE INSTALLER. install_podman's apt arm needs the
+# installer's LINUX arm -- /etc/os-release, which no PATH shim can fake, see linux_arm above --
+# so on a Mac the whole step is unreachable and every case here would be a named skip. What is
+# under test is not the distro dispatch though: it is the phase anchors and the fact that a box
+# gets started at all, and both are reachable by sourcing the real cs193v-ui.sh beside the real
+# wrapper and feeding it a recorded apt run. 26-installer-sandbox.sh drives the same anchors
+# against a real apt on a real Debian, which is the half no fixture can answer.
+#
+# THE ASSEMBLY IS 20-messages.sh's, for its reason: the functions come out of course-install.sh
+# with sed, so a rename fails aptbox:the-wrapper-is-extractable loudly rather than testing an
+# empty file. The globals are declared by the harness AND asserted to exist in the source, the
+# way this project handles every other place two files have to agree.
+#
+# NOT RE-TESTING THE RENDERER. meter_tail_box's eight rows, its geometry ladder, its sanitising
+# and both of its endings are 30-launcher-shim.sh's tailbox:* group, against the same unchanged
+# code. What is new here is that the installer passes a LOG to meter_start, so a box exists.
+APTFIX="$PRIVATE/tests/fixtures/apt-install-podman.txt"
+ICAT="$PRIVATE/course-install-messages.txt"
+APTBOX="$TMP/aptbox.sh"
+APTDRIVE="$TMP/aptdrive.sh"
+APTLOG="$TMP/aptbox-setup.log"
+assert_file "aptbox:the-fixture-is-there" "$APTFIX"
+
+{
+    printf 'NO_COLOR=1\n'
+    printf 'MESSAGES=%s\n' "'$PRIVATE/course-install-messages.txt'"
+    cat "$PRIVATE/files/cs193v-ui.sh"
+    for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
+                 setup_tail apt_phases dnf_phases; do
+        # NO $ AFTER THE BRACE: every one of these headers carries a signature comment
+        # after it, the way the rest of this file does, so an anchored pattern matched
+        # none of them and the harness was a copy of cs193v-ui.sh and nothing else.
+        sed -n "/^$aptfn() {/,/^}\$/p" "$PRIVATE/course-install.sh"
+    done
+    # The four the wrapper owns, set here because sed extracts functions and not the
+    # assignments between them. aptbox:the-globals-are-declared is what keeps these honest.
+    printf 'SETUP_LOG=%s\n' "'$APTLOG'"
+    printf 'SETUP_RAW=""\nSETUP_TOTAL=0\nSETUP_PHASE=0\n'
+} > "$APTBOX"
+
+# EVERY FUNCTION, SEPARATELY. One `wc -l` over the whole file would be satisfied by four of the
+# five arriving, and the missing one would then be tested by nothing at all.
+aptmissing=''
+for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
+             setup_tail apt_phases dnf_phases; do
+    [ "$(grep -c "^$aptfn() {" "$APTBOX")" = 1 ] || aptmissing="$aptmissing $aptfn"
+done
+assert_eq "aptbox:the-wrapper-is-extractable" "" "$aptmissing"
+assert_ok "aptbox:the-harness-is-valid-bash" bash -n "$APTBOX"
+
+# THE GLOBALS THE HARNESS SUPPLIES MUST REALLY BE THE SOURCE'S. Without this the harness could
+# invent a name course-install.sh never declares, and every assertion below would pass while the
+# installer itself ran with an unset variable under `set -u`.
+aptundeclared=''
+for aptvar in SETUP_LOG SETUP_RAW SETUP_TOTAL SETUP_PHASE; do
+    grep -qE "^$aptvar=" "$PRIVATE/course-install.sh" || aptundeclared="$aptundeclared $aptvar"
+done
+assert_eq "aptbox:the-globals-are-declared" "" "$aptundeclared"
+
+# The replayer paces the fixture, which is podman-fake's build_delay for the same reason it has
+# one: with every line available at once the run finishes in milliseconds and no phase is ever
+# "in progress", so nothing could show whether the block animates. Column-0 `#` lines are staff
+# notes in the fixture and never reach the stream.
+cat > "$APTDRIVE" <<'DRIVE'
+#!/usr/bin/env bash
+set -u
+. "$1"
+APT_FIXTURE="$2"; APT_DELAY="$3"; APT_TOTAL="$4"; APT_RC="${5:-0}"
+apt_replay() {
+    local l
+    while IFS= read -r l; do
+        case "$l" in
+            '#'*)      continue ;;
+            'W: '*|'E: '*) printf '%s\n' "$l" >&2 ;;
+            *)         printf '%s\n' "$l" ;;
+        esac
+        [ "$APT_DELAY" = 0 ] || sleep "$APT_DELAY"
+    done < "$APT_FIXTURE"
+    return "$APT_RC"
+}
+setup_meter_start "$APT_TOTAL" "$(msg meter.pm-refreshing)"
+setup_run apt_phases apt_replay
+apt_rc=$?
+if [ "$apt_rc" -eq 0 ]; then setup_meter_stop ok; else setup_meter_stop bad; fi
+printf 'RC=%s\n' "$apt_rc"
+printf 'LOGLINES=%s\n' "$(grep -c . "$SETUP_LOG" 2>/dev/null || echo 0)"
+DRIVE
+
+apt_piped() {                         # apt_piped [RC] -> the non-tty output
+    bash "$APTDRIVE" "$APTBOX" "$APTFIX" 0 4 "${1:-0}" 2>&1
+}
+apt_tty() {                           # apt_tty [DELAY] -> the raw pty transcript
+    printf '' | do_script 60 "bash '$APTDRIVE' '$APTBOX' '$APTFIX' '${1:-0.05}' 4 0" 2>&1
+}
+
+# ─── the anchors, on the piped form  ───────────────────────────────────────────
+# CONTENT ON THE PIPED FORM, LAYOUT ON THE PTY, which is the split 30-launcher-shim.sh records:
+# a pty transcript is sampled by a 10 Hz animator, so which phases got DRAWN depends on how long
+# each took, and a correct caption held for 40 ms fails an assertion about a display working
+# perfectly. Piped, setup_phase prints one line per phase, by the phase, exactly once.
+aptpiped="$(apt_piped)"
+record "aptbox:the-piped-form" "$(printf '%s' "$aptpiped" | do_tr '\n' '|')"
+for aptkey in meter.pm-refreshing meter.pm-downloading meter.pm-unpacking \
+              meter.pm-configuring; do
+    assert_says_key "aptbox:piped-announces-[$aptkey]" "$aptkey" "$aptpiped" "$ICAT"
+done
+
+# IN ORDER, and that is not implied by the four above: an anchor aimed at the wrong line shape --
+# `Setting up` before `Unpacking`, say -- still makes all four appear.
+#
+# THE NEEDLES COME OUT OF THE CATALOGUE, not out of this file, so re-wording a caption does not
+# red an assertion about ORDERING. An x marks a phase that never printed, and both assertions
+# below reject it: `sort -c` on an empty list succeeds, so "in order" alone could pass a run
+# that announced nothing, which is exactly how it passed before the feature existed.
+aptorder=''
+for aptkey in meter.pm-refreshing meter.pm-downloading meter.pm-unpacking \
+              meter.pm-configuring; do
+    aptat="$(printf '%s\n' "$aptpiped" | grep -nF "$(msg_text "$aptkey" "$ICAT")" \
+             | sed 's/:.*//' | head -1)"
+    aptorder="$aptorder${aptat:-x} "
+done
+aptsorted="$(printf '%s' "$aptorder" | do_tr ' ' '\n' | grep . | sort -n | do_tr '\n' ' ')"
+record "aptbox:the-phase-rows" "$aptorder"
+assert_not_contains "aptbox:piped-announces-all-four-phases" "x" "$aptorder"
+assert_eq "aptbox:piped-phases-are-in-order" "$aptsorted" "$aptorder"
+
+# EXACTLY ONCE EACH, which is the forward-only guard in setup_phase. This fixture holds six
+# Unpacking lines and seven Setting up ones, so without the guard the caption would be rewritten
+# per package -- invisible on a bar, six wasted rows in a piped transcript, and a claim that
+# there are more phases than there are.
+aptrepeats="$(printf '%s\n' "$aptpiped" | grep -cF "$(msg_text meter.pm-unpacking "$ICAT")")"
+assert_eq "aptbox:piped-says-each-phase-once" "1" "$(printf '%s' "$aptrepeats" | do_tr -d ' ')"
+
+# NO BAR IN A PIPE, the same claim tailbox:not-drawn-when-piped makes for the build: \r cannot
+# overdraw a log file, and ten frames a second of it is what a student would be asked to send.
+assert_not_contains "aptbox:piped-draws-no-bar" "█" "$aptpiped"
+
+# ─── a warm cache, which is the fixture apt itself produces on a re-run ────────
+# A student re-running the installer after a failure has the .debs already, so apt prints no
+# `Get:` line at all and the download phase never opens. DERIVED from the one fixture rather
+# than a second copy of it, so the two cannot drift.
+grep -v '^Get:' "$APTFIX" > "$TMP/apt-warm.txt"
+aptwarm="$(bash "$APTDRIVE" "$APTBOX" "$TMP/apt-warm.txt" 0 4 0 2>&1)"
+assert_says_not_key "aptbox:warm-cache-skips-the-download-phase" \
+                    meter.pm-downloading "$aptwarm" "$ICAT"
+assert_says_key "aptbox:warm-cache-still-reaches-configuring" \
+                meter.pm-configuring "$aptwarm" "$ICAT"
+
+# AND THE LOG IS TRUNCATED BETWEEN STEPS, asserted HERE rather than on the first run because the
+# first run cannot see it: three steps share one $SETUP_LOG, so what a missing `: >` costs is a
+# box that opens on the tail of the step before -- and only the second run onwards can tell.
+# This is the third invocation against this path, so without the truncation it would report all
+# three. Mutation-tested: dropping the truncation reds this and nothing else.
+aptwarmexpect="$(grep -v '^#' "$TMP/apt-warm.txt" | grep -c . | do_tr -d ' ')"
+assert_says "aptbox:the-log-is-truncated-between-steps" "LOGLINES=$aptwarmexpect" "$aptwarm"
+
+# ─── setup_run reports the COMMAND's status, not the pipeline's ────────────────
+# The pipeline's own status is its last stage's, which is the phase reader and always 0. So
+# without PIPESTATUS a failed apt would be indistinguishable from a successful one -- and the
+# installer would carry on to `command -v podman` and refuse there, one step past the truth.
+assert_says "aptbox:a-successful-command-reports-zero" "RC=0" "$aptpiped"
+assert_says "aptbox:a-failed-command-reports-its-own-status" "RC=100" "$(apt_piped 100)"
+
+# AND THE LOG REALLY HOLDS WHAT THE COMMAND SAID, which is what the failure box interpolates and
+# what staff ask a student for. Asserted rather than assumed: `tee -a` into a path nothing
+# created is the shape that silently writes nowhere.
+assert_says "aptbox:the-log-holds-the-commands-output" "Setting up podman" "$(cat "$APTLOG")"
+# STDERR TOO, which is a separate claim and the one with a failure mode: apt writes its W: and
+# E: lines there, and a stream that skipped setup_run's pipe would land on the terminal the
+# animator is redrawing -- so the symptom is not a lost line but a smeared block.
+assert_says "aptbox:the-log-holds-stderr-as-well" "Failed to fetch a translation file" \
+            "$(cat "$APTLOG")"
+# DERIVED FROM THE FIXTURE, not written down: a line added to it must not need a number here
+# changed by hand, which is how a count stops being checked. The staff notes are excluded the
+# same way the replayer excludes them.
+aptexpect="$(grep -v '^#' "$APTFIX" | grep -c . | do_tr -d ' ')"
+assert_says "aptbox:the-log-is-the-whole-run" "LOGLINES=$aptexpect" "$aptpiped"
+
+# ─── the block, on a pty ───────────────────────────────────────────────────────
+# FOUR BARS AFTER THE CORNER. box() draws "┏━━ STOP " -- exactly two bars, then a space -- so a
+# run of four can only be the titleless lid of the live output box. The same signature
+# 30-launcher-shim.sh's TAILBOX_LID uses, and it is an assertion INPUT here rather than a second
+# renderer, so it is a literal rather than a shared constant.
+apttty="$(apt_tty)"
+assert_contains "aptbox:the-block-carries-an-output-box" "┏━━━━" "$apttty"
+assert_contains "aptbox:the-box-shows-what-the-command-said" "Unpacking podman" "$apttty"
+aptscreen="$(printf '%s' "$apttty" | render_pty)"
+assert_not_contains "aptbox:the-box-is-gone-at-the-end" "┏━━━━" "$aptscreen"
+assert_contains "aptbox:the-block-ends-on-a-tick" "✓" "$aptscreen"
+assert_match "aptbox:the-bar-fills-only-at-the-end" '✓ .*\] +4/4' "$aptscreen"
+# AND NOT BEFORE IT, which is the other half and the one the arithmetic can get wrong. The bar
+# counts phases COMPLETED, so the longest pass -- configure -- runs at 3/4; counting the phase
+# that is RUNNING would put a full bar over a minute of work, which is ERRORS.md B18's
+# complaint. A spinner frame beside 4/4 is what that looks like in a transcript.
+assert_contains "aptbox:the-last-phase-runs-at-three-of-four" "3/4" "$apttty"
+assert_not_match "aptbox:the-bar-does-not-fill-while-it-runs" \
+                 '[⣾⣽⣻⢿⡿⣟⣯⣷] .*\] +4/4' "$apttty"
+
 # ─── the sentinel the Windows installer checks for ─────────────────────────────
 # Stage one downloads install-cs193v.sh over HTTPS and greps it for this token BEFORE running
 # it. `curl -f` catches a 404 and a cut-off transfer, but not the case that matters on campus

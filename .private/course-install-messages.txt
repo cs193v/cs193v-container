@@ -334,6 +334,37 @@ podman, uidmap, ssh and curl
 [[step.installing]]
 Installing {{PKGS}}
 
+# ─── the progress block's captions  (#219) ────────────────────────────────────
+# ROW 2 OF THE BLOCK, so these are read while they are happening rather than afterwards. They
+# name the PASS the package manager is on and not the package: apt-get install goes over the
+# whole set three times, so a caption naming a package would change thirty-seven times while
+# the bar moved twice.
+#
+# NO PLACEHOLDERS, and that is a rule rather than a coincidence. meter_label writes the caption
+# into a state file the animator re-reads ten times a second, and cs193v-ui.sh sanitises the
+# BOX body but not the caption row -- so a value of the package manager's choosing in here
+# could carry an escape sequence straight into a redrawn row. Everything interpolated from the
+# outside belongs in the box, which strips it.
+#
+# FIVE FOR FOUR PHASES, because the two package managers do not have the same ones: apt has
+# refresh, download, unpack and configure; dnf downloads and then runs one transaction, so it
+# uses pm-downloading and pm-installing and never the other three.
+
+[[meter.pm-refreshing]]
+Refreshing the package list...
+
+[[meter.pm-downloading]]
+Downloading packages...
+
+[[meter.pm-unpacking]]
+Unpacking packages...
+
+[[meter.pm-configuring]]
+Configuring packages...
+
+[[meter.pm-installing]]
+Installing packages...
+
 # THE THREE WAYS THE PASSWORD CAN FAIL, all of them refusals rather than surprises (#226).
 # Two are reached from survey, before consent has offered anything, and the third from
 # ask_password, after consent and before the first privileged command -- so all three are
@@ -386,11 +417,34 @@ not allowed to use sudo on this computer, please contact course
 staff -- only an administrator can change that, and it is not
 something to work around.
 
+# THE OUTPUT GOES INSIDE THE BOX, and that is a correctness fix rather than a flourish (#219).
+# Both of these used to be one line, which was true only for as long as the package manager's
+# own output was on the screen behind them -- and since the progress block took that screen
+# over, a refusal that did not carry the output would be pointing at nothing. ERRORS.md B17 is
+# the same mistake, made once already, about a build.
+
 [[err.refresh-failed]]
-{{CMD}} failed.
+{{CMD}} failed. It stopped here:
+
+{{OUT}}
+
+This is almost always a network problem, and it is safe to run
+this script again.
+
+The whole log is in {{LOG}}
 
 [[err.install-failed]]
-Could not install {{PKGS}}.
+Could not install {{PKGS}}. The package manager stopped here:
+
+{{OUT}}
+
+This is almost always a network problem, and it is safe to run
+this script again.
+
+If it stops in the same place twice, send course staff everything
+above, along with that log.
+
+The whole log is in {{LOG}}
 
 [[note.downloading]]
 downloading {{URL}}
