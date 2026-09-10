@@ -171,14 +171,17 @@ SETUP_PHASE=0
 setup_meter_start() {                 # setup_meter_start TOTAL LABEL
     SETUP_TOTAL="$1"
     SETUP_PHASE=1
+    # TRUNCATED, not appended across steps, and ABOVE THE RAW GUARD rather than below it. Several
+    # steps share this path, so a box that opened on the tail of the previous one would spend its
+    # first second showing a student the end of something that had already finished -- which is
+    # why build_image clears $BUILD_LOG too. But the log is not the meter's: it is the artefact
+    # every refusal here names, so a raw run that skipped this would hand the next failure the
+    # PREVIOUS step's tail, and grow the file without bound across runs.
+    : > "$SETUP_LOG"
     [ -z "$SETUP_RAW" ] || return 0
     # Keyed off this script's own pid, which is what cs193v-ui.sh says the installer does; the
     # launcher keys its own off TUNNEL_ID so two of them cannot redraw each other's bar.
     METER_STATE="${TMPDIR:-/tmp}/cs193v-setup-meter-$$"
-    # TRUNCATED, not appended across steps. Three steps share this path, and a box that opened on
-    # the tail of the previous one would spend its first second showing a student the end of
-    # something that had already finished -- which is why build_image clears $BUILD_LOG too.
-    : > "$SETUP_LOG"
     meter_start "$SETUP_TOTAL" "$2" "$SETUP_LOG"
     # THE OPENING CAPTION GOES THROUGH THE SAME PLACE AS EVERY OTHER ONE, which on a terminal
     # rewrites the record meter_start has just written -- identical values, so a no-op -- and off
@@ -336,19 +339,27 @@ apt_phases() {
     done
 }
 
-# DNF MAKES TWO, and its second anchor is `Running transaction` rather than a per-package line
-# because that is the one string dnf4 and dnf5 agree on: dnf4 prints `Installing : pkg  n/m` and
-# dnf5 prints `[n/m] Installing pkg`, so keying on either would be a per-Fedora-version parse.
-# `Running transaction check` and `Running transaction test` match this prefix too and land after
-# the download, so the caption is early by a second rather than wrong.
+# DNF MAKES TWO PHASES AND NEEDS ONE ANCHOR, because the first phase is the one the block opens
+# on: there is no refresh step on Fedora, so root_step_packages starts the meter on
+# pm-downloading and the only transition left to detect is into the transaction.
+#
+# `Running transaction` RATHER THAN A PER-PACKAGE LINE, because it is the one string dnf4 and
+# dnf5 agree on: dnf4 prints `Installing : pkg  n/m` and dnf5 prints `[n/m] Installing pkg`, so
+# keying on either would be a per-Fedora-version parse. `Running transaction check` and
+# `Running transaction test` match this prefix too and land after the download, so the caption
+# is early by a second rather than wrong.
+#
+# THERE WAS A `Downloading Packages` ARM HERE AND IT IS GONE, on a measurement rather than a
+# tidy-up: 26-installer-sandbox.sh's fedora-e2e case installs from Fedora's real mirrors and
+# reports dnfdownload=0 -- that heading is not in the output at all. It would have been a no-op
+# even if it were, since it advanced to phase 1 and phase 1 is where setup_meter_start already
+# is. The count is still reported by the guest, so a dnf that starts printing it would show up.
 dnf_phases() {
-    local line l_download l_installing
-    l_download="$(msg meter.pm-downloading)"
+    local line l_installing
     l_installing="$(msg meter.pm-installing)"
     while IFS= read -r line; do
         case "$line" in
-            Downloading\ Packages*) setup_phase 1 "$l_download" ;;
-            Running\ transaction*)  setup_phase 2 "$l_installing" ;;
+            Running\ transaction*) setup_phase 2 "$l_installing" ;;
         esac
     done
 }

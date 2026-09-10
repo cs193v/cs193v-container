@@ -1585,6 +1585,8 @@ cat > "$APTDRIVE" <<'DRIVE'
 set -u
 . "$1"
 APT_FIXTURE="$2"; APT_DELAY="$3"; APT_TOTAL="$4"; APT_RC="${5:-0}"
+# The staff escape hatch, set AFTER the harness so it overrides the empty default it wrote.
+SETUP_RAW="${APT_RAW:-}"
 apt_replay() {
     local l
     while IFS= read -r l; do
@@ -1694,6 +1696,31 @@ assert_says "aptbox:the-log-holds-stderr-as-well" "Failed to fetch a translation
 # same way the replayer excludes them.
 aptexpect="$(grep -v '^#' "$APTFIX" | grep -c . | do_tr -d ' ')"
 assert_says "aptbox:the-log-is-the-whole-run" "LOGLINES=$aptexpect" "$aptpiped"
+
+# ─── the staff escape hatch, on the installer's side  (#219) ──────────────────
+# CS193V_SETUP_RAW_LOG is one switch over two blocks, and 30-launcher-shim.sh's build-raw group
+# only ever exercised the launcher's half. What the installer's half has to do is the same three
+# things: no block, no captions, and the command's own words on the screen as they arrive --
+# which is the whole point on a step that HANGS, where the box shows nothing and a log written
+# after the fact never exists.
+aptraw="$(APT_RAW=1 apt_piped)"
+assert_contains "aptraw:the-commands-own-output-is-on-the-screen" "Unpacking podman" "$aptraw"
+assert_says_not_key "aptraw:no-phase-captions" meter.pm-unpacking "$aptraw" "$ICAT"
+assert_says "aptraw:the-command-still-reports-its-status" "RC=0" "$aptraw"
+# AND THE LOG IS STILL WRITTEN, which is not implied by the above and is the half a hung step
+# needs: setup_run tees on both arms, so a staff member who Ctrl-Cs a raw run still has the file.
+assert_says "aptraw:the-log-is-still-written" "Setting up podman" "$(cat "$APTLOG")"
+# AND TRUNCATED, which the line above cannot see. This is the fifth run against this path, so
+# without the `: >` the count would carry all five -- and a raw failure would then interpolate
+# the PREVIOUS step's tail into its refusal. Found by reading the code rather than by a red:
+# the truncation sat below the raw guard, where a raw run never reached it.
+assert_says "aptraw:the-log-is-truncated-too" "LOGLINES=$aptexpect" "$aptraw"
+# ...and on a terminal there is no block at all, which is the assertion that would catch the
+# guard being dropped from setup_meter_start alone.
+aptrawtty="$(printf '' | do_script 60 \
+             "env APT_RAW=1 bash '$APTDRIVE' '$APTBOX' '$APTFIX' 0.02 4 0" 2>&1)"
+assert_not_contains "aptraw:no-box-on-a-terminal-either" "┏━━━━" "$aptrawtty"
+assert_contains "aptraw:the-raw-run-really-ran" "Unpacking podman" "$aptrawtty"
 
 # ─── the block, on a pty ───────────────────────────────────────────────────────
 # FOUR BARS AFTER THE CORNER. box() draws "┏━━ STOP " -- exactly two bars, then a space -- so a

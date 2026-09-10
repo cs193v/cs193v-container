@@ -1599,11 +1599,11 @@ assert_says "fedora-e2e:names-podman-alone"   "Installing podman" "$out"
 # prints either of the lines the reader keys on. This case has a network and really installs.
 #
 # THIS SUITE ALREADY WARNS THAT DNF'S WORDING IS UNSTABLE -- sb-fed:really-reached-fedoras-repos
-# picks a mirror hostname over dnf's progress words on exactly that ground, and `Downloading
-# Packages` is dnf5's phrasing. So a zero here is a caption that goes stale rather than a wrong
-# one: the block still draws, the bar still finishes, and only the words stop keeping up. That
-# is the degradation apt_phases and dnf_phases are designed for, which is why the transaction
-# anchor is asserted and the download one is recorded.
+# picks a mirror hostname over dnf's progress words on exactly that ground. This run is what
+# settled it: dnfdownload came back 0, so `Downloading Packages` is not in dnf's output at all
+# and the arm that matched it has been deleted. The count stays RECORDED rather than removed,
+# because it is the thing that would notice a dnf which started printing it -- and because a
+# zero here is the honest answer rather than a fault.
 fe2e_anchors="$(sb_section "$out" SETUP-ANCHORS)"
 record "fedora-e2e:the-anchor-counts" "$(printf '%s' "$fe2e_anchors" | do_tr '\n' ' ')"
 record "fedora-e2e:dnf-download-lines" "$(printf '%s\n' "$fe2e_anchors" | sed -n 's/^dnfdownload=//p')"
@@ -1613,7 +1613,9 @@ else
     fail "fedora-e2e:real-dnf-prints-[running-transaction]" \
          "the reader keys on this shape and dnf printed none: $fe2e_anchors"
 fi
-assert_says "fedora-e2e:a-progress-box-is-drawn" "┏━━━━" "$out"
+# assert_contains, for the reason sb-apt gives: _flatten deletes box-drawing characters, so
+# assert_says cannot match box art however well it is drawn.
+assert_contains "fedora-e2e:a-progress-box-is-drawn" "┏━━━━" "$out"
 record "fedora-e2e:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 record "fedora-e2e:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
 # THE CONTAINER, NOT JUST THE IMAGE. build_image runs `cs193v --rebuild`, which builds the image
