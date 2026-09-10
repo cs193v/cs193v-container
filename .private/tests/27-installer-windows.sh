@@ -558,10 +558,7 @@ assert_eq   "win-hijack:hands-off-to-bash-once"         "1" "$(wine_argv_count '
 assert_says_not "win-hijack:no-unrecognised-command"    "recognize" "$WINE_OUT$WINE_ERR"
 
 # ─── decision coverage, reported rather than assumed ──────────────────────────
-#
-# No line-coverage gate: wine's own `@echo on` echoing of `if` statements is broken
-# (test_builtins.cmd.exp:138,141), so a trace-based denominator would measure the wrong thing.
-# What IS checkable is that every branch target in the file was reached by some case above, so
+# What this checks is that every branch target in the file was reached by some case above, and
 # the count is derived from the .cmd rather than from a number typed here.
 LABELS="$(sed 's/\r$//' "$PRIVATE/install-cs193v-windows.cmd" \
           | sed -n 's/^:\([a-z][a-z0-9]*\)[[:space:]]*$/\1/p' | sort -u)"

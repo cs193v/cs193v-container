@@ -15,13 +15,13 @@
 # Nothing in here needs sudo, and nothing writes outside its own temp directory.
 
 # SC2034 FOR THE WHOLE FILE, because it is a property of the whole file: this suite carves
-# functions out of install-cs193v.sh (carve_func, lib/shared.sh:247) and sources them in a
+# functions out of install-cs193v.sh (carve_func, lib/shared.sh:191) and sources them in a
 # subshell, so every global those carvings read has to be set HERE, one `.` away from any use a
 # linter can see. (Not spelled with the linter's own name at the start of a line: a comment that
 # opens `# shellcheck <word>` is parsed as a DIRECTIVE, which is SC1072 rather than prose -- the
 # same self-matching hazard 10-static.sh:377 assembles its needles tail-first to avoid.)
 # PODMAN_PKG_ID is read by the podman-path probe, PM_REFRESH/PM_INSTALL and
-# the five PKG_* by distro_packages. lib/shared.sh:267-278 makes this argument for a single line
+# the five PKG_* by distro_packages. lib/shared.sh:196-207 makes this argument for a single line
 # of one file; a suite built entirely out of carvings is the same argument at file scale.
 # shellcheck disable=SC2034
 set -u

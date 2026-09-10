@@ -878,10 +878,6 @@ smoke_test() {
 #  tree, checks the pieces arrived, and execs this script. Everything from here on can source
 #  what it downloaded, which is why the copies of box(), die(), menu(), version_lt() and
 #  ensure_podman_path() that used to live in this file are gone.
-#
-#  TWO ARGUMENTS, and no more, because the coverage door has to be able to fabricate them:
-#  95-installer-coverage.sh traces this file directly rather than through the exec, so a wide
-#  handover would be a wide surface for the door's copy of it to drift against.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BOOTSTRAP_PROTOCOL_WANTED=1

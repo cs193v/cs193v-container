@@ -32,7 +32,7 @@ require_python3
 # and each named a different subset of the same tree: shellcheck reached 28 of the 45, `bash -n`
 # reached 5, the bash-4 ban missed all seven extensionless fakes, and exec: named two of them.
 # A file left out of any one of those is silently exempt from the rule it is meant to obey --
-# which is what lib/shared.sh:17-28 records, what #115 and #125 each paid for once, and what
+# which is what lib/shared.sh:21-28 records, what #115 and #125 each paid for once, and what
 # happened twice more while #158 sat open: #164 needed 60-container.sh linted and answered the
 # way #115 and #125 had, by adding one more name, while 13-term-class.sh arrived carrying none.
 # Seventeen unlinted before, seventeen after -- a different seventeen.
@@ -147,10 +147,10 @@ assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
 
 # ─── every test file, parsed by the shell that will run it ────────────────────
 # THIS REPLACES FIVE NAMED ASSERTIONS -- podman-fake, pty-announce, sh-fake, run-tests and
-# portable -- which between them reached 5 of the 45 files in the list above. The other forty
-# were parsed by nothing but shellcheck's own grammar, and that is a weaker guarantee than it
-# sounds: shellcheck parses what it thinks bash means, and this suite has to run on the bash the
-# TAs actually have. MEASURED, and it is why this is a loop rather than a sixth name:
+# portable -- which between them reached 5 of the 44 files in the list above. The other
+# thirty-nine were parsed by nothing but shellcheck's own grammar, and that is a weaker guarantee
+# than it sounds: shellcheck parses what it thinks bash means, and this suite has to run on the
+# bash the TAs actually have. MEASURED, and it is why this is a loop rather than a sixth name:
 #
 #     x="$(case a in a) echo ok;; esac)"
 #
@@ -2594,17 +2594,17 @@ fi
 # NINE LISTS BECAME THIS ONE CALL, and the property that buys is the one #158 asked for: a file
 # added to this tree tomorrow is linted at the strictest setting without anyone editing anything.
 # What is left to write down is an EXCLUSION -- and an exclusion now lives in the file it excuses,
-# as a `# shellcheck disable=`, where it shows up in the diff that needs it. lib/shared.sh:267-278
+# as a `# shellcheck disable=`, where it shows up in the diff that needs it. lib/shared.sh:215-222
 # already made that argument for one line of one file; this is the same move for the whole tree.
 #
 # NO --exclude AT ALL, which three measurements make affordable rather than brave:
 #   * SC1091 is INFO severity, so --severity=warning has been dropping it in every group that
 #     named it. It was never doing anything.
-#   * SC1090 fires exactly ONCE in these 45 files -- 25-installer.sh:71, where a carving's path
+#   * SC1090 fires exactly ONCE in these 44 files -- 25-installer.sh:71, where a carving's path
 #     is built from an argument -- and that file already carried the answer for it at :187: a
 #     `source=/dev/null` directive. It now carries a second one, at :70.
 #   * SC2034 is what the three old groups really wanted, and blanket-excluding it for a group is
-#     what lib/shared.sh:275-276 objects to: it "would stop catching genuinely dead variables".
+#     what lib/shared.sh:219-220 objects to: it "would stop catching genuinely dead variables".
 #     Measured, it was right to worry -- covering the seventeen unlinted files turned up a
 #     genuinely dead variable, 50-image.sh's GESTURE_TOKENS, which was deleted rather than
 #     excused, exactly as dyn_free_port's was in #115 and as 60-container.sh's DYN1 and DYN2ND
