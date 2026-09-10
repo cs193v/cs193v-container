@@ -29,6 +29,7 @@ platforms (measured on macOS 26 and on Linux):
     line     ICANON and ECHO on   -- `IFS= read -r`, the terminal echoing as usual
     secret   both off             -- `stty -echo -icanon` plus `read -rsn1`
     menu     both off             -- bash's own `read -rsn1`, which is -s and -n
+    password ICANON on, ECHO off  -- sudo's own password prompt (#226)
 
 THAT IS WHAT MAKES A LEAKED CREDENTIAL UNREACHABLE RATHER THAN UNLIKELY. A `secret` step is not
 written until the terminal says echo is OFF. If read_secret ever loses its stty -- which is the
@@ -56,6 +57,11 @@ a step is sent when its needles have matched AND the child is demonstrably at a 
     after the last step and cannot be mistaken for one.
   * The terminal going raw for `menu`. cs193v-ui.sh's menu() never shows the cursor; what it does
     do is `read -rsn1`, and bash puts the line discipline into -icanon -echo for the duration.
+  * ECHO alone going off for `password`. sudo shows no cursor and never will, but it clears ECHO
+    and leaves ICANON set, which is a state no resting terminal and neither keystroke read is
+    ever in -- so for that kind the level is the arm. #226 needs it because sudo DISCARDS the
+    input queue at its own password read, measured both ways, so a password cannot be written
+    ahead of the prompt at all.
 
 Both are properties of the PROGRAM'S OWN BEHAVIOUR rather than of its wording, so neither can drift
 when somebody rewrites a message.
@@ -202,7 +208,7 @@ def read_script(fh):
         kind, name, needles, keys = parts
         optional = kind.startswith("?")
         kind = kind[1:] if optional else kind
-        if kind not in ("line", "secret", "menu"):
+        if kind not in ("line", "secret", "menu", "password"):
             return ([], "script line %d: unknown kind %r" % (lineno, kind))
         steps.append({
             "optional": optional,
@@ -432,6 +438,19 @@ def main(argv):
             at_read = armed_cursor and icanon is True and echo is True
         elif step["kind"] == "secret":
             at_read = armed_cursor and icanon is False and echo is False
+        elif step["kind"] == "password":
+            # A FOURTH STATE, AND IT IS SUDO'S (#226). sudo clears ECHO and leaves ICANON alone,
+            # so its prompt is canonical-with-echo-off -- a combination none of the three above
+            # describes, and one no resting terminal is ever in: canonical+echo is the resting
+            # state, and the two keystroke reads clear both. So the level IS the arm here, with
+            # no cursor marker needed, which matters because sudo emits none and never will.
+            #
+            # MEASURED THROUGH THIS DRIVER, in the fixture 26-installer-sandbox.sh builds:
+            # icanon=1 echo=1 at the start, icanon=1 echo=0 for exactly as long as the prompt is
+            # waiting, and the password written at that moment authenticates. The same password
+            # written BEFORE the prompt does not -- sudo discards the queue at its own read, so
+            # this gate is the only way the suite can answer one.
+            at_read = icanon is True and echo is False
         else:                                   # menu
             at_read = icanon is False and echo is False
 
@@ -467,8 +486,13 @@ def main(argv):
         # divergence at the wrong step on a machine carrying 24 runaway CPU burners, and was not
         # reproducible in isolation 3/3. Silence with nothing drawn is a slow child, not a
         # different screen.
+        # `echo is False` IS THE THIRD WAY TO BE DEMONSTRABLY AT A READ, added with the password
+        # kind: a sudo prompt is canonical, so `icanon is False` cannot see it and it shows no
+        # cursor, so `armed_cursor` cannot either -- and without this a password step whose
+        # screen never comes waits out the whole deadline instead of naming the screen the child
+        # is really parked on. It widens the clause by exactly the state the new kind describes.
         if (missing >= 0 and not step["optional"] and window != ""
-                and (icanon is False or armed_cursor)
+                and (icanon is False or echo is False or armed_cursor)
                 and time.monotonic() - last_output > SETTLE_SECS):
             failure = ("DIVERGED", step,
                        "the child is parked at a read this step does not describe:"

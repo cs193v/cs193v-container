@@ -15,6 +15,10 @@ set -u
 
 require_podman
 
+# THE INSTALLER'S CATALOGUE, named once: assert_says_key defaults to the LAUNCHER's, and the
+# needles the driven cases hand ptydrive come out of this file too, so nothing below types any
+# student-facing wording.
+ICAT="$PRIVATE/course-install-messages.txt"
 SB_TMP="$(new_tmpdir)"
 # LABELS, not machines. Every case below runs on ONE image and says what it took away; these are
 # just the container names to sweep on the way out.
@@ -519,7 +523,7 @@ out="$(sandbox_run sudo-absent '' -e CS193V_DIR=/home/student/cs193v)"
 # one -- sudo_state ASKS the machine rather than echoing back what was requested.
 assert_eq "sb-sudo-absent:the-machine-really-has-no-sudo" "absent" "$(sb_section "$out" SUDO)"
 assert_says_key "sb-sudo-absent:says-why" err.no-sudo "$out" \
-                "$PRIVATE/course-install-messages.txt"
+                "$ICAT"
 assert_says "sb-sudo-absent:names-what-wanted-root" "- Give your account" "$out"
 assert_says "sb-sudo-absent:points-at-course-staff" "contact course staff" "$out"
 assert_says "sb-sudo-absent:exits-nonzero" "===INSTALLER-RC=1===" "$out"
@@ -540,9 +544,9 @@ sb_machine no-prereqs=subuid fake-podman=yes sudo=deny
 out="$(sandbox_run sudo-deny '2' -e CS193V_DIR=/home/student/cs193v)"
 assert_eq "sb-sudo-deny:the-machine-really-denies-sudo" "deny" "$(sb_section "$out" SUDO)"
 assert_says_key "sb-sudo-deny:announced-before-it-is-asked" note.password-why "$out" \
-                "$PRIVATE/course-install-messages.txt"
+                "$ICAT"
 assert_says_key "sb-sudo-deny:says-why-it-failed" err.sudo-refused "$out" \
-                "$PRIVATE/course-install-messages.txt"
+                "$ICAT"
 assert_says "sb-sudo-deny:exits-nonzero" "===INSTALLER-RC=1===" "$out"
 assert_says_not "sb-sudo-deny:does-not-claim-success" "Setup finished" "$out"
 # THE EFFECT, which is the half no shim can check: usermod never ran, so the range is still
@@ -551,45 +555,68 @@ assert_eq "sb-sudo-deny:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBU
 assert_says_not "sb-sudo-deny:does-not-claim-the-range" "subuid range added" "$out"
 sandbox_reap
 
-# ── a real password prompt, arriving exactly where it was announced ────────────
-# THE ONLY CASE ANYWHERE THAT DRIVES A REAL sudo PASSWORD PROMPT. apply_sudo sets the account's
-# password and drops NOPASSWD, so sudo behaves the way a student's does -- and what that buys is
-# the ORDER, measured rather than reasoned about: the heading and its note come out before the
-# prompt, and the prompt happens once rather than once per privileged step. That is the claim
-# #226 makes about rule 2 and the claim #223 asks for, and no fake sudo can make it.
+# ── a real password, typed once, at the announced moment ───────────────────────
+# THE CASE THE WHOLE OF #226 IS ABOUT, and the only one anywhere that answers a REAL sudo
+# password prompt. apply_sudo sets the account's password and drops NOPASSWD, so sudo behaves
+# the way a student's does; the conversation below is what makes answering it possible at all.
 #
-# THE PASSWORD IS NOT SUPPLIED, AND IT CANNOT BE. sudo flushes the terminal's input queue before
-# it reads a password -- TCSAFLUSH when it turns echo off -- which is a deliberate defence
-# against exactly what this harness does: keystrokes written ahead of the prompt are DISCARDED.
-# Measured: `2hunter2\n` got the menu answered, the prompt printed, and then the container sat
-# to its 60 s ceiling with the password already gone. Nothing in this suite can type after a
-# prompt it has not read, so this case asserts everything up to and including the prompt, and
-# what happens when a correct one is typed is tests/MANUAL.md :: §1.5b.
+# WHY THIS IS A SESSION AND NOT KEYSTROKES. sudo discards whatever is already in the terminal's
+# input queue when it reads a password -- measured both ways in this fixture: a password piped
+# in ahead of the container is echoed at offset 0 and then sudo says "timed out reading
+# password", while the same password written after the prompt authenticates. So the keystroke
+# door cannot answer this prompt however the keys are ordered, and ptydrive's `password` step
+# waits for the terminal to say echo is off before it types.
 #
-# WHICH MAKES THE REFUSAL THE OTHER HALF OF THE ASSERTION, and a real one: unanswered, sudo
-# fails, and the installer must refuse with nothing done rather than carry on.
+# THE NEEDLES ARE CATALOGUE KEYS. The menu step names the whole ordered option list, which is a
+# complete state test -- the consent screen cannot be mistaken for any other menu -- and the
+# password step names the announcement that must precede the prompt. So this case asserts the
+# ORDER by construction: if the password prompt arrived before the words did, the step would
+# never arm and ptydrive would report it by name.
 sb_machine no-prereqs=subuid fake-podman=yes sudo=password:hunter2
-out="$(sandbox_run sudo-password '2' -e CS193V_DIR=/home/student/cs193v)"
+sb_step menu     consent  '2' "$(msg_text menu.consent.stop "$ICAT")" \
+                              "$(msg_text menu.consent.go "$ICAT")"
+sb_step password sudo-pw  'hunter2\n' "$(msg_text step.password "$ICAT")" \
+                                      "$(msg_text note.password-why "$ICAT")"
+out="$(sandbox_run sudo-password '' -e CS193V_DIR=/home/student/cs193v)"
 assert_eq "sb-sudo-password:the-machine-really-wants-a-password" "password:hunter2" \
           "$(sb_section "$out" SUDO)"
-assert_says_key "sb-sudo-password:announced" step.password "$out" \
-                "$PRIVATE/course-install-messages.txt"
-assert_says_key "sb-sudo-password:the-note-explains-why" note.password-why "$out" \
-                "$PRIVATE/course-install-messages.txt"
-# A REAL PROMPT, FROM A REAL sudo, and exactly one of them. `[sudo] password for student:` is
-# sudo's own wording, so its presence proves the prompt was not faked and its count proves the
-# prime is one prompt rather than one per call site.
+# THE GATE: this case is worthless if it quietly took the keystroke door.
+assert_eq "sb-sudo-password:really-was-driven" "yes" "$(sb_section "$out" DRIVEN)"
+# AND THE CONVERSATION HAPPENED AS DESCRIBED. Every step armed on its own screen, so an empty
+# failure list is the ordering assertion: the announcement was on screen before the prompt was
+# answered, and the menu was the consent screen rather than some other menu.
+assert_eq "sb-sudo-password:every-step-found-its-screen" "" \
+          "$(sb_section "$out" DRIVE | grep '^FAIL' || true)"
+assert_says "sb-sudo-password:the-driver-reported-both-steps" "OK" "$(sb_section "$out" DRIVE)"
+# A REAL PROMPT, FROM A REAL sudo, and exactly one of them -- which is the claim #223 makes.
 assert_says "sb-sudo-password:really-prompted" "password for student" "$out"
 assert_eq   "sb-sudo-password:asked-exactly-once" "1" \
             "$(printf '%s' "$out" | grep -c 'password for student')"
-# THE ANNOUNCEMENT CAME FIRST, which is the whole of rule 2 reduced to two words in order.
-order="$(printf '%s' "$out" | sed -n 's/.*\(Asking for your password\).*/announced/p; s/.*\(password for student\).*/prompted/p' | tr '\n' ' ')"
-assert_eq "sb-sudo-password:announced-before-prompted" "announced prompted " "$order"
-# Unanswered, so nothing ran and nothing claimed to.
-assert_says_key "sb-sudo-password:refuses-when-unanswered" err.sudo-refused "$out" \
-                "$PRIVATE/course-install-messages.txt"
-assert_eq   "sb-sudo-password:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBUID)"
-assert_says_not "sb-sudo-password:does-not-claim-the-range" "subuid range added" "$out"
+# THE PROMPT CAME FROM THE PRIME, NOT FROM THE PRIVILEGED COMMAND, and this is the assertion
+# #226 is actually about -- everything else here is true of the bug as well. Without it the case
+# could not tell "ask_password obtained the password, then usermod ran inside the timestamp" from
+# "ask_password did nothing and usermod prompted for itself": measured, by removing the `sudo -v`
+# and watching all ten other assertions stay green while the driver answered usermod's own
+# prompt one step later.
+pw_at="$(sb_transcript "$out" | grep -n 'password for student' | head -1 | cut -d: -f1)"
+step_at="$(sb_transcript "$out" | grep -nF "$(msg_text step.subuid "$ICAT")" | head -1 | cut -d: -f1)"
+assert_ne "sb-sudo-password:the-privileged-step-was-announced" "" "$step_at"
+assert_eq "sb-sudo-password:the-password-precedes-the-privileged-step" "yes" \
+          "$([ -n "$pw_at" ] && [ -n "$step_at" ] && [ "$pw_at" -lt "$step_at" ] \
+             && printf yes || printf "prompt=$pw_at step=$step_at")"
+
+# THE FULL CLAIM, which is what a real answer buys over an unanswered prompt: one password, and
+# then the privileged step runs on the far side of it.
+assert_says "sb-sudo-password:the-privileged-step-ran" "subuid range added for student" "$out"
+assert_eq   "sb-sudo-password:the-range-really-landed" "student:200000:65536" \
+            "$(sb_section "$out" ETC-SUBUID)"
+assert_eq   "sb-sudo-password:and-the-matching-subgid" "student:200000:65536" \
+            "$(sb_section "$out" ETC-SUBGID)"
+# AND THE PASSWORD NEVER REACHED THE SCREEN, which is a property of the gate rather than of this
+# fixture: ptydrive types only once the terminal says echo is off. Asserted against the
+# INSTALLER'S OWN output rather than the whole transcript -- the report blocks name the policy
+# this case asked for, so a whole-transcript needle would be matching the harness.
+assert_says_not "sb-sudo-password:does-not-echo-the-password" "hunter2" "$(sb_transcript "$out")"
 sandbox_reap
 
 # ─── /etc/wsl.conf, all four states, with no Windows anywhere ──────────────────
@@ -646,27 +673,41 @@ sandbox_reap
 # WHICH IS WHY needs_root COUNTS ROOT_WANTS[] AND NOT NEEDS[]. Keyed off the consent list, this
 # machine would still be silent.
 #
-# NO KEYS AT ALL: there is no menu on this path. The prompt goes unanswered for the reason
-# sb-sudo-password gives at length, so the run must also refuse without writing the file.
+# ONE STEP, AND NO MENU STEP, which is the assertion as much as the plumbing: there is no menu
+# on this path, so a session with one described. If ask_consent ever did draw one here, the
+# password step would arm on the wrong screen and ptydrive would say so by name.
 sb_machine platform=wsl fake-podman=yes sudo=password:hunter2
+sb_step password sudo-pw 'hunter2\n' "$(msg_text step.password "$ICAT")" \
+                                     "$(msg_text note.password-why "$ICAT")"
 out="$(sandbox_run wsl-absent-password '' -e SB_WSLCONF=absent -e CS193V_DIR=/home/student/cs193v)"
 assert_eq "sb-wsl-pw:the-machine-really-wants-a-password" "password:hunter2" \
           "$(sb_section "$out" SUDO)"
+assert_eq "sb-wsl-pw:really-was-driven" "yes" "$(sb_section "$out" DRIVEN)"
 # RULE 1 IS UNCHANGED, and this is the control for it: nothing was owed a consent question and
 # nothing asked for one.
 assert_says "sb-wsl-pw:still-asks-no-permission" "Nothing on your computer needs to change" "$out"
 assert_says_not "sb-wsl-pw:draws-no-menu" "permission for" "$out"
-# AND RULE 2 IS KEPT ANYWAY, which is the whole point of the case.
-assert_says_key "sb-wsl-pw:announces-the-password" step.password "$out" \
-                "$PRIVATE/course-install-messages.txt"
-assert_says     "sb-wsl-pw:really-prompted" "password for student" "$out"
-assert_eq "sb-wsl-pw:announced-before-prompted" "announced prompted " \
-          "$(printf '%s' "$out" | sed -n 's/.*\(Asking for your password\).*/announced/p; s/.*\(password for student\).*/prompted/p' | tr '\n' ' ')"
-# THE EFFECT: unanswered, so the file it was about to create does not exist.
-assert_says_key "sb-wsl-pw:refuses-when-unanswered" err.sudo-refused "$out" \
-                "$PRIVATE/course-install-messages.txt"
-assert_eq "sb-wsl-pw:the-file-was-not-created" "" "$(sb_section "$out" WSL-CONF)"
-assert_says_not "sb-wsl-pw:does-not-claim-it-enabled-systemd" "systemd enabled" "$out"
+# AND RULE 2 IS KEPT ANYWAY, which is the whole point of the case: the announcement is on the
+# screen the password step armed on, so an empty failure list says it preceded the prompt.
+assert_eq "sb-wsl-pw:the-step-found-its-screen" "" \
+          "$(sb_section "$out" DRIVE | grep '^FAIL' || true)"
+assert_says "sb-wsl-pw:really-prompted" "password for student" "$out"
+assert_eq   "sb-wsl-pw:asked-exactly-once" "1" \
+            "$(printf '%s' "$out" | grep -c 'password for student')"
+# AND IT CAME FROM THE PRIME, not from `sudo tee` prompting for itself -- the same distinction
+# sb-sudo-password makes, and the only one that separates this fix from the bug.
+pw_at="$(sb_transcript "$out" | grep -n 'password for student' | head -1 | cut -d: -f1)"
+step_at="$(sb_transcript "$out" | grep -nF "$(msg_text step.wslconf "$ICAT")" | head -1 | cut -d: -f1)"
+assert_ne "sb-wsl-pw:the-privileged-step-was-announced" "" "$step_at"
+assert_eq "sb-wsl-pw:the-password-precedes-the-privileged-step" "yes" \
+          "$([ -n "$pw_at" ] && [ -n "$step_at" ] && [ "$pw_at" -lt "$step_at" ] \
+             && printf yes || printf "prompt=$pw_at step=$step_at")"
+
+# THE EFFECT: answered, so the file it announced does get created, with both lines.
+assert_eq "sb-wsl-pw:writes-both-lines" "[boot]
+systemd=true" "$(sb_section "$out" WSL-CONF)"
+assert_says_key "sb-wsl-pw:reports-it-updated-the-file" ok.wslconf "$out" "$ICAT"
+assert_says_not "sb-wsl-pw:does-not-echo-the-password" "hunter2" "$(sb_transcript "$out")"
 sandbox_reap
 
 # A wsl.conf with no [boot] section: appended to, and the existing content must survive.

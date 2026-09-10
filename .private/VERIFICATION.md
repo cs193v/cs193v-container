@@ -912,8 +912,10 @@ with an ordinary (password-protected) sudo:
 rest of the run completes without asking again.
 *Why:* the consent screen tells the student they can walk away, and every `need.*.why` says the
 step needs their password. Both were true only of the wording until #226.
-*Automated equivalent:* `26-installer-sandbox.sh :: sb-sudo-password:*` drives a real `sudo`
-password prompt in a fixture whose account really has a password, and counts the prompts.
+*Automated:* `26-installer-sandbox.sh :: sb-sudo-password:*` answers a real `sudo` password
+prompt in a fixture whose account really has one, through `lib/ptydrive.py`'s `password` step,
+and asserts the whole sequence: the announcement, one prompt, and the privileged step running
+afterwards.
 
 **1.5c — An unusable sudo is refused before anything changes.** Either take `sudo` off the
 machine, or remove the account from `sudoers`:

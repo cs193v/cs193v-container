@@ -248,6 +248,27 @@ Two things fall out of that which are easy to get wrong later:
   asks for root without registering is also a step with no consent line, which is the thing
   this script is loudest about.
 
+**How the password prompt is tested at all.** `26-installer-sandbox.sh` asks for a machine whose
+account really has a password (`sb_machine sudo=password:...`, one of `apply_sudo`'s four arms,
+which existed for the hand-driven sandbox long before the suite could reach them) and then
+*answers* the prompt. That needs `lib/ptydrive.py`, and two measurements decide where it runs:
+
+- **sudo discards the input queue at its own password read.** A password piped in ahead of the
+  container is echoed at offset 0 and then sudo says "timed out reading password"; the same
+  password written after the prompt authenticates. So the keystroke door cannot answer one,
+  however the keys are ordered. This is *not* the defect `ptyrun.py` and `ptydrive.py` record —
+  that was `script(1)` injecting a VEOF, and #206 was right to retire it.
+- **`podman run -it` hides the container's line discipline.** The outer terminal is raw for the
+  whole run, before and after an inner `stty -echo -icanon`, identically. So ptydrive's two
+  properties — the KIND check against the slave's termios, and the arm signal — are blind from
+  the host, and driving from there would degrade to prose plus a timeout, which is the clock #206
+  deleted.
+
+Hence the driver runs **inside** the container, around the installer, where the states are the
+installer's own. It needed one new step kind: sudo clears `ECHO` and leaves `ICANON` set, a
+combination neither the resting terminal nor either keystroke read is ever in, so for `password`
+the level is the arm and no cursor marker is needed — which matters because sudo emits none.
+
 **And the root refusal.** `survey`'s first act, above the step line, because being root is a
 property of the invocation rather than of the computer. It is deliberately *one condition in one
 place*: #217's WSL provisioning pass runs as root on purpose, and its own first act is the mirror
