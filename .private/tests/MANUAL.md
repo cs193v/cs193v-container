@@ -968,6 +968,32 @@ settle, and one it should not be trusted on:
    available; and a machine where the WSL OS component is genuinely absent, which Microsoft treats
    as unrepairable by anything short of an in-place upgrade.
 
+7. **That the install ends with exactly ONE closing message, and that it is the right one.**
+   Issue #218. It used to end with two: `course-install.sh` printed the UNIX sign-off inside WSL
+   — `cd …`, `./cs193v`, and no mention of `wsl -d CS193V` — and the `.cmd` then echoed its own
+   block with the Windows instructions. The `.cmd`'s block is gone; `CS193V_WINDOWS=1` on the
+   student pass makes `course-install.sh` print `[[finished.windows]]` instead of `[[finished]]`.
+
+   **No automated tier can see this, and the reason is structural rather than an oversight.**
+   `--tier windows` runs the real `.cmd` but fakes `wsl.exe`, so the installer never executes and
+   there is no sign-off in its transcript to read; it asserts only that the variable is passed, to
+   the student's pass and not to root's. `25-installer.sh` runs the real installer with the
+   variable set and asserts every line of what it prints, but never runs the `.cmd`. The join
+   between them — one message, in one terminal, in the right order relative to `pause` — exists
+   only on a real Windows machine.
+
+   *Expect:* after the student pass returns, the last thing on screen is the boxed
+   `Setup finished.` block naming `wsl -d CS193V`, then a blank line, then `Press any key to
+   continue`. Nothing between the two, and no second set of instructions.
+
+   *Verify once on a real box, and do it twice:* once taking the default directory, and once
+   choosing **Other** at the directory menu and typing a path that is not `~/cs193v`. The second
+   run is the one that matters — the `.cmd`'s old block hardcoded `cd ~/cs193v` and a UNC path
+   ending `home\student\cs193v\projects`, so a student who chose anything else was handed two
+   paths that did not exist. Confirm the `cd` line, the `{{UNC}}` line and
+   `Put your projects in …` all name the directory actually chosen, and that pasting the UNC path
+   into Explorer opens it.
+
 ### Ubuntu's first-run setup, which no student meets any more (#217)
 **The installer switches it off, and this section is now about checking that it stays off.**
 `wsl --install -d Ubuntu-26.04 --name CS193V --no-launch` registers the distribution without

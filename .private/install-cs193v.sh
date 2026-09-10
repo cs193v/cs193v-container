@@ -169,9 +169,11 @@ tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
 # much shorter script, and keeping the choice in the file that does the downloading means the
 # code that runs as root is named in the file a student reads and checks a SHA-256 against.
 #
-# NOT AN ARGUMENT, because this file has never parsed any: its only other external switch is
-# CS193V_DIR, read by course-install.sh, and the .cmd already knows how to pass a variable
-# (`wsl -e env VAR=value prog args`, which it does for DEBIAN_FRONTEND).
+# NOT AN ARGUMENT, because this file has never parsed any: the other two external switches are
+# CS193V_DIR and CS193V_WINDOWS, both read by course-install.sh and neither by this file, and the
+# .cmd already knows how to pass a variable (`wsl -e env VAR=value prog args`, which it does for
+# DEBIAN_FRONTEND). CS193V_WINDOWS (#218) marks the pass as the one the Windows installer
+# launched, which is the whole of what decides which sign-off a student reads at the end.
 TARGET=.private/course-install.sh
 [ -n "${CS193V_PROVISION:-}" ] && TARGET=.private/wsl-provision.sh
 
