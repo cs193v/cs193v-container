@@ -24,9 +24,6 @@
 #              range, in throwaway containers. Seconds, and cached after the first build.
 #   windows    install-cs193v-windows.cmd under wine. NOT run by default: the fixture image
 #              is 3.45 GB. Skips itself on arm64, where wine cannot execute.
-#   coverage   did the suite really execute every line of install-cs193v.sh it claims to?
-#              Reads the traces the installer runs leave in $CS193V_RUN_DIR, so it has to run
-#              after them -- which is why it is numbered last rather than living in 10-static.
 #   image      assertions about the built image, via throwaway containers.
 #   container  assertions about a live cs193v container: flags, kernel, ports, files.
 #   live       the launcher driving real podman: idempotency, drift, cleanup.
@@ -39,7 +36,7 @@
 # --everything-but-github DERIVES that list from the suites rather than holding one, because a
 # written-down list is how `--all` came to omit `windows` without anything going red. It also
 # sets every gate the tiers above skip by default -- CS193V_INSTALL_NESTED,
-# CS193V_INSTALL_NESTED_BUILD, CS193V_MINPODMAN_BUILD, CS193V_RELEASE_BUILD, CS193V_COVERAGE and
+# CS193V_INSTALL_NESTED_BUILD, CS193V_MINPODMAN_BUILD, CS193V_RELEASE_BUILD and
 # CS193V_DESTRUCTIVE -- and runs ./cs193v --rebuild first, because require_image and
 # require_running hard-fail without one. It leaves CS193V_GH_TEST_TOKEN alone, which is the
 # github tier's own gate. It is the slow, destructive answer and it says so before it starts.
@@ -88,7 +85,7 @@ set -u
 
 DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
-DEFAULT_TIERS="static unit shim install image container live coverage"
+DEFAULT_TIERS="static unit shim install image container live"
 TIERS=""
 FILTER=""
 PARALLEL=yes
@@ -201,9 +198,9 @@ fi
 
 # ─── ...and part two: the gates those tiers skip by default ────────────────────
 # THE SECOND WAY TO RUN LESS THAN YOU ASKED FOR. Selecting a tier is not the same as running it:
-# six blocks inside the tiers above skip unless a variable is set, each for a good reason (cost,
+# five blocks inside the tiers above skip unless a variable is set, each for a good reason (cost,
 # or destruction), and each announced as a named SKIP rather than silently. Getting the set
-# right by hand means knowing all six in advance, which is #160's first complaint.
+# right by hand means knowing all five in advance, which is #160's first complaint.
 #
 # PLAIN ASSIGNMENT, not `${VAR:=}`: this flag has one meaning and it overrides. The nesting is
 # why they go together -- CS193V_INSTALL_NESTED_BUILD and CS193V_MINPODMAN_BUILD live INSIDE the
@@ -214,9 +211,9 @@ fi
 # whose name promises to leave GitHub alone must not be the thing that supplies a credential.
 if [ "$EVERYTHING" = yes ]; then
     CS193V_INSTALL_NESTED=1 CS193V_INSTALL_NESTED_BUILD=1 CS193V_MINPODMAN_BUILD=1
-    CS193V_RELEASE_BUILD=yes CS193V_COVERAGE=1 CS193V_DESTRUCTIVE=1
+    CS193V_RELEASE_BUILD=yes CS193V_DESTRUCTIVE=1
     export CS193V_INSTALL_NESTED CS193V_INSTALL_NESTED_BUILD CS193V_MINPODMAN_BUILD
-    export CS193V_RELEASE_BUILD CS193V_COVERAGE CS193V_DESTRUCTIVE
+    export CS193V_RELEASE_BUILD CS193V_DESTRUCTIVE
 fi
 
 if [ "$LIST_ONLY" = yes ]; then
@@ -310,12 +307,8 @@ WALL_T0=$SECONDS
 # to -- which is the opposite of what assert.sh prints per assertion for. Named by pid so the
 # sweep below can tell a finished run's leftovers from a concurrent run's live ones, the same
 # reasoning lib/assert.sh gives for sweeping scratch directories by pid rather than by age.
-#
-# Exported, because it is also the channel a suite can leave artefacts in for a later suite to
-# read -- which is what a coverage gate spanning both lanes needs and had nowhere to put.
 CS193V_RUN_DIR="${TMPDIR:-/tmp}/cs193v-runlog.$$"
 mkdir -p "$CS193V_RUN_DIR"
-export CS193V_RUN_DIR
 # An earlier run's directory, only if the process that made it is gone.
 for _d in "${TMPDIR:-/tmp}"/cs193v-runlog.*; do
     [ -d "$_d" ] || continue

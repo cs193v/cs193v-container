@@ -1090,8 +1090,8 @@ and no `curl`) while the WSL image and macOS both ship it. Only half of that is 
 *Unmeasured, and it stays that way:* the refusal arm — "curl is missing from this Mac, which should not
 be possible" — is the one installer line no tier can execute. The shim tier prepends to `PATH` and
 cannot hide a real `/usr/bin/curl`; the machine where curl CAN be removed is Linux, where that arm is
-not taken. It is in `tests/fixtures/coverage-allowlist` with that as its reason. If a Mac ever does
-reach it, that is the interesting result and staff want to hear about the machine.
+not taken. If a Mac ever does reach it, that is the interesting result and staff want to hear
+about the machine.
 
 **What #221 changed here, and it is the whole reason the probe has a Linux side worth running.**
 Until the wget arm landed, a Linux machine with no curl never reached `survey` at all — the
