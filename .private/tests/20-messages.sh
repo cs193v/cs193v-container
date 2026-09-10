@@ -88,7 +88,17 @@ assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 # SO THIS BLOCK GOT SMALLER RATHER THAN MOVING. There is no heredoc to carve, no second accessor
 # to extract, and the runtime checks below drive THE reader rather than a copy of it -- which is
 # the point: a txt() that had drifted from msg() would have passed its own tests.
-INST="$PRIVATE/course-install.sh"
+# ONE CATALOGUE, THREE READERS SINCE #217, and this is where that has to be said once. The
+# installer is course-install.sh, the root pass that prepares a new CS193V WSL instance is
+# wsl-provision.sh, and the half they share -- which words the refusals of the steps that need
+# root -- is install-utils.sh. All three point MESSAGES at the same file, because a key may not
+# live in two catalogues (10-static.sh) and a second catalogue would therefore have meant a
+# second copy of every shared refusal.
+#
+# SO THE KEYS-IN-USE SIDE IS A UNION, and the reconciliation below is unchanged otherwise. Get
+# this wrong in the obvious direction -- leave the scan on course-install.sh alone -- and every
+# prov.* key reads as an orphan while every key the root pass needs reads as missing.
+IREADERS="$PRIVATE/course-install.sh $PRIVATE/wsl-provision.sh $PRIVATE/install-utils.sh"
 ICAT="$PRIVATE/course-install-messages.txt"
 assert_file "itext:the-catalogue-is-there" "$ICAT"
 
@@ -102,7 +112,8 @@ grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | do_tr -d '[]' \
 # "messages.txt for its early output" -- which registered `for` as a key in use and turned a
 # reconciliation red for a sentence. Whole-line comments go first for the same class of reason:
 # prose about the catalogue is not a call into it.
-sed 's/^[[:space:]]*#.*//' "$INST" \
+# shellcheck disable=SC2086   # deliberately word-split: IREADERS is a list of paths
+sed 's/^[[:space:]]*#.*//' $IREADERS \
     | grep -ohE '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' | awk '{print $NF}' \
     | LC_ALL=C sort -u > "$TMP/iused"
 
@@ -327,12 +338,19 @@ repo, private = sys.argv[1], sys.argv[2]
 # `msg`, so the arm contributed no call sites at all and the mistake was invisible -- a vacuous
 # arm rather than a red one. Since #221 the installer has its own catalogue and reads it with the
 # same msg(), so it gets an entry of its own and the pairing is now checkable.
+#
+# THE SECOND ENTRY IS A TUPLE OF THREE SINCE #217: course-install.sh, the root pass that prepares
+# a new CS193V WSL instance (wsl-provision.sh), and the half they share (install-utils.sh). One
+# catalogue with three readers, because a key may not live in two catalogues -- so the call sites
+# have to be pooled or every prov.* placeholder reads as unsupplied.
 CATALOGUES = (
     (os.path.join(private, "messages.txt"),
      (os.path.join(repo, "cs193v"),),
      r'\bmsg\s+'),
     (os.path.join(private, "course-install-messages.txt"),
-     (os.path.join(private, "course-install.sh"),),
+     (os.path.join(private, "course-install.sh"),
+      os.path.join(private, "wsl-provision.sh"),
+      os.path.join(private, "install-utils.sh")),
      r'\bmsg\s+'),
     (os.path.join(private, "files", "setup-git-messages.txt"),
      (os.path.join(private, "files", "setup-git"),),

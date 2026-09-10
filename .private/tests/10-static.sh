@@ -93,6 +93,13 @@ assert_eq "tests:no-shell-file-name-carries-a-space" \
 assert_ok  "syntax:cs193v"            bash -n cs193v
 assert_ok  "syntax:bootstrap"         bash -n $PRIVATE/install-cs193v.sh
 assert_ok  "syntax:course-install"    bash -n $PRIVATE/course-install.sh
+# TWO MORE SINCE #217, and both ship in the tarball: install-utils.sh is the half the two
+# installer scripts share, and wsl-provision.sh is the root pass the Windows installer runs
+# inside the CS193V WSL instance it creates. Named here rather than globbed for the reason the
+# whole block is: .private/ holds staff files too, and a glob would lint whatever lands there
+# next.
+assert_ok  "syntax:install-utils"     bash -n $PRIVATE/install-utils.sh
+assert_ok  "syntax:wsl-provision"     bash -n $PRIVATE/wsl-provision.sh
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
@@ -240,7 +247,7 @@ boot_tpl="$(sed -n 's/.*mktemp -d "\${TMPDIR:-\/tmp}\/\([^"]*\)".*/\1/p' \
 assert_eq "tmptree:the-bootstrap-declares-one-template" 1 \
           "$(printf '%s\n' "$boot_tpl" | grep -c .)"
 boot_guard="$(sed -n 's/.*case "\${BOOT_TMP##\*\/}" in \([^)]*\)).*/\1/p' \
-                   "$PRIVATE/course-install.sh")"
+                   "$PRIVATE/install-utils.sh")"
 assert_eq "tmptree:the-installer-declares-one-guard" 1 \
           "$(printf '%s\n' "$boot_guard" | grep -c .)"
 # The template's X's become the guard's ?'s; everything before them must be identical.
@@ -299,10 +306,10 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # static test forbids them, which makes that ban load-bearing rather than hygienic." The ban was
 # real; the test was not reading the file obeying it. Now it is.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -601,11 +608,82 @@ else fail "selinux:the-launcher-mounts-were-found" "no type=bind in cs193v -- di
 assert_eq "selinux:launcher-bind-mounts-carry-the-relabel" "" \
           "$(printf '%s\n' "$launcher_binds" | grep -v 'relabel' || true)"
 
+# ─── the two-pass split: one list of the steps that need root  (#217) ──────────
+# WHY THIS IS THE GATE THE SPLIT NEEDS. On Windows the installer runs twice inside the CS193V WSL
+# instance: wsl-provision.sh as root, which does everything privileged, and course-install.sh as
+# a student whose password is LOCKED. If the two could disagree about what needs root, the second
+# pass would reach a sudo prompt no student can answer -- at the longest, latest step. So the list
+# lives once, in install-utils.sh, and the root pass ITERATES it rather than naming steps.
+#
+# STRUCTURAL, NOT A DIFF BETWEEN FILES. Nothing here compares two texts: it reads the registry,
+# then asks each file the question that would have to be true of it.
+UTILS="$PRIVATE/install-utils.sh"
+PROV="$PRIVATE/wsl-provision.sh"
+rs_names="$(sed -n 's/^ROOT_STEPS="\([a-z ]*\)".*/\1/p' "$UTILS" | head -1)"
+assert_match "rootsteps:the-registry-was-readable" '^[a-z]+( [a-z]+)*$' "$rs_names"
+
+# EVERY NAME HAS A FUNCTION, and every function is named -- both directions, because a step
+# added to install-utils.sh without a registry entry is exactly the step the root pass would skip.
+rs_defined="$(sed -n 's/^root_step_\([a-z]*\)() {.*/\1/p' "$UTILS" | LC_ALL=C sort | do_tr '\n' ' ')"
+assert_eq "rootsteps:the-registry-and-the-functions-agree" \
+          "$(printf '%s\n' $rs_names | LC_ALL=C sort | do_tr '\n' ' ')" "$rs_defined"
+
+# THE ROOT PASS NAMES NONE OF THEM. It calls "root_step_$s" through the registry, so this greps
+# for the one thing that would break that: a step called by name, which is how the two lists
+# start to drift.
+assert_contains "rootsteps:the-root-pass-iterates-the-registry" 'for s in $ROOT_STEPS' \
+                "$(sed 's/^[[:space:]]*#.*//' "$PROV")"
+assert_eq "rootsteps:the-root-pass-names-no-single-step" "" \
+          "$(sed 's/^[[:space:]]*#.*//' "$PROV" | grep -nE '(^|[^_[:alnum:]])root_step_[a-z]' \
+             | grep -v 'root_step_\$s' || true)"
+
+# AND THE STUDENT'S PASS CALLS EACH ONE EXACTLY ONCE, gated by its own DO_* flag. A step it
+# stopped calling would be one the root pass still runs -- fine on Windows, silently missing on
+# a Mac or a Linux box, which is the direction nothing else here would notice.
+for s in $rs_names; do
+    assert_eq "rootsteps:course-install-calls-$s-once" "1" \
+              "$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
+                 | grep -cE "(^|[^_[:alnum:]])root_step_$s([^_[:alnum:]]|\$)")"
+done
+
+# EVERY STEP IS A NO-OP WHEN ITS WORK IS DONE, asserted as "there is a `return 0` before the
+# first privileged command in the body". The root pass has no consent screen to gate these with
+# and runs again on every re-run of the Windows installer, so a step that acted unconditionally
+# would append a second `systemd=true` to /etc/wsl.conf and a second id range to /etc/subuid --
+# both measured, both silent. The packages step gates on an empty list, which is the same shape.
+for s in $rs_names; do
+    body="$(sed -n "/^root_step_$s() {/,/^}$/p" "$UTILS" | sed 's/^[[:space:]]*#.*//')"
+    guard="$(printf '%s\n' "$body" | grep -nE 'return 0' | head -1 | cut -d: -f1)"
+    priv="$(printf '%s\n' "$body" | grep -nE '(^|[^[:alnum:]_])sudo[[:space:]]' | head -1 | cut -d: -f1)"
+    if [ -n "$guard" ] && [ -n "$priv" ] && [ "$guard" -lt "$priv" ]; then
+        pass "rootsteps:$s-checks-before-it-acts"
+    else
+        fail "rootsteps:$s-checks-before-it-acts" \
+             "no early return before the first sudo (guard=${guard:-none} sudo=${priv:-none})"
+    fi
+done
+
+# ONE PRIVILEGED CALL LEFT IN course-install.sh, AND IT IS THE MAC .pkg. Everything the Linux and
+# WSL paths do as root is a root_step_* now, which is what lets the root pass be a complete
+# substitute for the student's sudo. The macOS installer is not: it never runs in a WSL instance,
+# so it is named here as the one exception rather than left to be re-argued.
+ci_sudo="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
+           | grep -nE '(^|[^[:alnum:]_])sudo[[:space:]]' || true)"
+assert_eq "rootsteps:the-installer-has-one-privileged-call" "1" \
+          "$(printf '%s\n' "$ci_sudo" | grep -c .)"
+assert_contains "rootsteps:and-it-is-the-mac-package" 'installer -pkg' "$ci_sudo"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
-# All four of the installer's privileged calls go through one name, so a sudo that never
-# execs makes the whole shim tier structurally unable to change this machine. That is worth
-# more than any assertion about what a case happened to do -- and it is one negated test
-# away from being false if an exec branch is ever added, so the absence is checked here.
+# EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's
+# root_step_* functions and wsl-provision.sh's own three -- so a sudo that never execs makes the
+# whole shim tier structurally unable to change this machine. That is worth more than any
+# assertion about what a case happened to do, and it is one negated test away from being false if
+# an exec branch is ever added, so the absence is checked here.
+#
+# #217 KEPT `sudo` IN THE ROOT PASS FOR THIS REASON, where it is a no-op indirection: measured in
+# a real CS193V instance, root's `sudo -n true` exits 0 and /etc/sudoers carries Ubuntu's stock
+# `root ALL=(ALL:ALL) ALL`. An `as_root` that ran commands directly when euid was 0 would have
+# been tidier and would have put a hole right here.
 sudofake="$PRIVATE/tests/lib/sudo-fake"
 assert_ok "sudo-fake:exists" test -x "$sudofake"
 bare="$(grep -nE '(^|[^-[:alnum:]_])(exec|eval)([^[:alnum:]_]|$)' "$sudofake" \
@@ -794,7 +872,7 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 # `$(... || true)` idiom the whole rule would then go silently green on the one platform it
 # exists for.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/files/cs193v-ui.sh $b32files"
+eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $b32files"
 # shellcheck disable=SC2086
 # COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
 # quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version
@@ -844,7 +922,7 @@ pt_col() {                            # pt_col ROW_NAME COLUMN -> that cell of P
     printf '%s\n' "$ptreg" | do_awk -F'|' -v n="$1" -v c="$2" '$2 == n { print $c }'
 }
 reg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ptreg.XXXXXX")"
-if carve_func "$PRIVATE/course-install.sh" distro_packages "$reg_tmp/dp.sh"; then
+if carve_func "$PRIVATE/install-utils.sh" distro_packages "$reg_tmp/dp.sh"; then
     pass "preflight:the-installer-s-table-was-carvable"
     # THE PM_/PKG_ GLOBALS ARE PRE-BLANKED because distro_packages leaves them untouched for a
     # family it does not know and this suite runs under `set -u` -- 25-installer.sh:467 makes the
@@ -2503,6 +2581,17 @@ assert_ok  "shellcheck:bootstrap" shellcheck --severity=warning $PRIVATE/install
 # checked file's own location, the trick cs193v:151-153 already uses and explains.
 assert_ok  "shellcheck:course-install" \
            shellcheck -x --severity=warning $PRIVATE/course-install.sh
+# THE TWO HALVES THE INSTALLER GAINED WITH #217, and both need -x for the same reason
+# course-install.sh does: they source each other and cs193v-ui.sh out of the downloaded tree, and
+# without -x shellcheck reports every function that arrives that way as undefined.
+#
+# SC2034 EXCLUDED ON install-utils.sh, and for the reason the presentation layer below has it:
+# every variable in a library looks unused from inside it. PM_UPGRADE is read by a message
+# course-install.sh renders, SUBUID_RANGE by a test, PKG_CA by install_podman.
+assert_ok  "shellcheck:install-utils" \
+           shellcheck -x --severity=warning --exclude=SC2034 $PRIVATE/install-utils.sh
+assert_ok  "shellcheck:wsl-provision" \
+           shellcheck -x --severity=warning $PRIVATE/wsl-provision.sh
 # The shared presentation layer, checked ALONE as well as through the launcher: the container
 # sources it with no launcher in the picture, so it has to stand up by itself.
 #

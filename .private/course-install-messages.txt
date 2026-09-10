@@ -518,6 +518,164 @@ doctor reported problems — run: {{DIR}}/cs193v doctor
       ./cs193v --stop     stop it if a window was closed unexpectedly
   ────────────────────────────────────────────────────────────────────
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WHAT THE ROOT PASS PRINTS  (#217)
+#
+#  wsl-provision.sh reads this same catalogue. It runs once, as root, inside a CS193V
+#  WSL instance that install-cs193v-windows.cmd created a minute earlier, and it
+#  prepares that instance so the student's own install needs no password. A student
+#  sees its `prov.*` lines go past between two things the Windows installer printed,
+#  and normally reads none of them; they are here because the day one of them fails
+#  is the day somebody has to understand what it was doing.
+#
+#  ONE CATALOGUE, TWO SCRIPTS, deliberately. A key may not live in two catalogues
+#  (10-static.sh), so a second file would have meant a second copy of every shared
+#  refusal -- and the two scripts are two halves of one installer as far as anyone
+#  reading this is concerned.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[prov.step.preparing]]
+Preparing this environment (nothing to type here)
+
+# THE FIRST-RUN SETUP, OFF. Ubuntu's own account questions come from
+# /etc/wsl-distribution.conf; moving it aside is what makes the environment quiet.
+
+[[prov.ok.oobe-off]]
+Ubuntu's first-run questions are switched off
+
+[[prov.skip.oobe-off]]
+Ubuntu's first-run questions were already off
+
+[[prov.ok.account]]
+Created the {{USER}} account
+
+[[prov.skip.account]]
+The {{USER}} account is already here
+
+[[prov.ok.default-user]]
+{{USER}} is who this environment starts you as
+
+[[prov.skip.default-user]]
+{{USER}} is already who this environment starts you as
+
+[[prov.skip.packages]]
+Everything this needs is already installed
+
+[[prov.ok.root-steps]]
+This environment is ready for the setup script
+
+# ─── and the refusals ──────────────────────────────────────────────────────────
+# ALL FIVE OF THE FIRST GROUP MEAN "SOMETHING RAN THIS THE WRONG WAY", so they say
+# so plainly and hand the student straight back to staff rather than offering a fix
+# they should not have to carry out. A student cannot reach any of them by using the
+# Windows installer the way it says to.
+
+[[err.prov-not-wsl]]
+  This part of setup only runs inside the CS193V environment on Windows,
+  and this computer reports itself as {{PLAT}}.
+
+  If you are setting up a Mac or a Linux machine, run install-cs193v.sh
+  on its own -- without CS193V_PROVISION set -- and it will do the right
+  thing.
+
+[[err.prov-not-root]]
+  This part of setup has to run as root inside the CS193V environment,
+  and it is running as {{USER}}.
+
+  Nothing has been changed. Run install-cs193v-windows.cmd instead of
+  running this by hand: it is what creates the environment and it runs
+  this for you.
+
+[[err.prov-no-sudo]]
+  This part of setup cannot run privileged commands in the CS193V
+  environment, even as root, so it has stopped before changing anything.
+
+  That is unusual enough that guessing would be worse than stopping.
+  Please send course staff this whole window.
+
+# THE FOREIGN-ACCOUNT REFUSAL, WHICH IS THE ONE A REAL PERSON CAN REACH. It means
+# the CS193V environment already has somebody's account in it -- almost always a
+# CS193V set up by an earlier version of this installer, which asked the student to
+# choose their own username. Creating a second account there would change which one
+# they land in and where their files live, silently, so setup stops instead.
+#
+# IT NAMES A DESTRUCTIVE COMMAND, so it says what the command destroys. Anything
+# they saved inside the environment goes with it; anything under their Windows
+# drives does not, because those are mounted rather than stored there.
+
+[[err.prov-foreign-account]]
+  The CS193V environment already has an account in it called {{USER}},
+  so setup has stopped rather than adding a second one called {{WANT}}.
+
+  This normally means CS193V was set up by an earlier version of the
+  course installer. The fix is to remove the environment and let this
+  installer build it again:
+
+      wsl --unregister CS193V
+
+  THAT DELETES EVERYTHING INSIDE THE CS193V ENVIRONMENT, including any
+  work saved in it. Files on your Windows drives are not affected. If
+  there is anything in there you need, copy it out first -- or ask
+  course staff before running it.
+
+[[err.prov-useradd]]
+  Could not create the {{USER}} account in the CS193V environment.
+
+  Setup has stopped. It is safe to run install-cs193v-windows.cmd again
+  once the problem above is fixed; if it happens twice, please send
+  course staff this whole window.
+
+[[err.prov-default-user-taken]]
+  The CS193V environment is already set up to start you as somebody
+  other than {{WANT}}, so setup has stopped rather than overruling it.
+
+  Please send course staff this whole window, including the output of:
+      wsl -d CS193V -u root -e cat /etc/wsl.conf
+
+[[err.prov-wslconf]]
+  Could not record {{USER}} as the account the CS193V environment
+  starts you in.
+
+  Setup has stopped, because without that the rest of the install would
+  run as root and put the course files somewhere you would not find
+  them. Please send course staff this whole window.
+
+[[err.prov-oobe-move]]
+  Could not switch off Ubuntu's first-run questions in the CS193V
+  environment ({{FILE}}).
+
+  Setup has stopped rather than leaving them switched on, because they
+  would then interrupt the install from a separate window. Please send
+  course staff this whole window.
+
+[[err.prov-oobe-missing]]
+  The CS193V environment does not have the file that controls Ubuntu's
+  first-run questions ({{FILE}}), so setup cannot tell whether they are
+  switched off.
+
+  That means the Ubuntu image has changed since this installer was
+  written, which is course staff's problem rather than yours. Please
+  send them this whole window and do not spend time on it.
+
+# THE TWO RE-PROBES. A package manager exiting 0 is not the same claim as "the
+# program is on the PATH now", which is the standard the Windows installer sets for
+# itself when it re-probes curl after apt.
+
+[[err.prov-no-podman]]
+  podman was installed in the CS193V environment, but it is still not
+  on the PATH there, so setup has stopped.
+
+  Please send course staff this whole window, including the output of:
+      wsl -d CS193V -u root -e apt-get install podman
+
+[[err.prov-no-uidmap]]
+  The uidmap helpers were installed in the CS193V environment, but
+  newuidmap is still not on the PATH there, so setup has stopped.
+
+  Without them podman cannot start a container at all, which would fail
+  later with a message that names neither cause. Please send course
+  staff this whole window.
+
 # THE ODDS AND ENDS the helpers and the menu print, not attached to any one step:
 # skip() appends its own suffix, die() its own sign-off under the STOP box, and
 # menu() has to say something when there is no terminal to draw arrows on.

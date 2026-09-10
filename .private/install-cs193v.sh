@@ -157,11 +157,35 @@ tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
     || refuse "  The course files downloaded but could not be unpacked.
   That usually means the transfer was cut short. It is safe to run this script again."
 
+# ─── which of the two installers this hands over to ────────────────────────────
+# ONE ENVIRONMENT VARIABLE, SET BY install-cs193v-windows.cmd AND BY NOTHING ELSE (#217). The
+# Windows installer runs this file twice inside the CS193V WSL instance it has just created: once
+# as root with CS193V_PROVISION=1, which creates the student's account and performs every step
+# that needs root, and once as that student, which is the install a student on a Mac or a Linux
+# machine sees. The second run finds nothing left needing a password, which is the whole point --
+# the account is created with a locked one.
+#
+# CHOSEN HERE RATHER THAN INSIDE course-install.sh, deliberately. The root pass is a different,
+# much shorter script, and keeping the choice in the file that does the downloading means the
+# code that runs as root is named in the file a student reads and checks a SHA-256 against.
+#
+# NOT AN ARGUMENT, because this file has never parsed any: its only other external switch is
+# CS193V_DIR, read by course-install.sh, and the .cmd already knows how to pass a variable
+# (`wsl -e env VAR=value prog args`, which it does for DEBIAN_FRONTEND).
+TARGET=.private/course-install.sh
+[ -n "${CS193V_PROVISION:-}" ] && TARGET=.private/wsl-provision.sh
+
 # THE CHECK THAT NEITHER EXIT STATUS CAN MAKE. `curl -f` catches a 404 and a cut-off transfer,
 # and tar catches a truncated archive -- but a captive portal answering 200 with its own login
 # page is a well-formed reply, and an archive can extract cleanly having written only some of
 # what it should. So the pieces the hand-over depends on are checked by name.
-for f in .private/course-install.sh .private/course-install-messages.txt .private/files/cs193v-ui.sh; do
+#
+# $TARGET IS LAST, AND THAT IS THE ORDER RATHER THAN AN AFTERTHOUGHT. In the ordinary case it is
+# already the first name in the list, so the message a student sees for a half-arrived archive
+# still names course-install.sh; on the root pass it adds the one extra file that run needs.
+# course-install.sh stays named unconditionally because boot_cleanup's guard looks for it before
+# it will remove anything.
+for f in .private/course-install.sh .private/install-utils.sh .private/course-install-messages.txt .private/files/cs193v-ui.sh "$TARGET"; do
     [ -s "$BOOT_TMP/$f" ] || refuse "  The course files arrived but $f is missing or empty.
 
   That means the transfer was cut short, or something answered for it -- a hotel
@@ -175,7 +199,7 @@ done
 # choose_dir() reads a typed path. Measured: with the redirect in place every pty-driven case
 # saw "(not a terminal; choosing ...)" and the consent menu took its safe default, so a student
 # could not have answered a single question.
-exec bash "$BOOT_TMP/.private/course-install.sh" "$BOOTSTRAP_PROTOCOL" "$BOOT_TMP"
+exec bash "$BOOT_TMP/$TARGET" "$BOOTSTRAP_PROTOCOL" "$BOOT_TMP"
 
 # ─── the last line, and why the Windows installer needs one ────────────────────
 # install-cs193v-windows.cmd downloads this script into the CS193V environment and greps it for
