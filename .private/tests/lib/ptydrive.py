@@ -94,9 +94,11 @@ Enter the queue reads `Jane Doe\n...`, no leading newline) and destroys the prob
 queue reads `\ntwo\n`). On Linux that is a real lost keystroke, a hang, and a transcript truncated
 by the outer `timeout` -- on which ~125 negative assertions pass vacuously.
 
-    THE INVARIANT: never leave bytes in the input queue when the child changes tty mode.
+    THE INVARIANT: never leave bytes in the input queue that no read ever takes.
 
-Gating on the arm signal satisfies it by construction, because nothing is ever queued.
+Gating on the arm signal satisfies it by construction. A mode change with bytes queued does NOT
+break it on its own -- the child arming the read we wrote for is one, every time -- so the
+detector below asks again a second later and reports only a queue that nobody read.
 """
 
 import errno
@@ -134,6 +136,14 @@ OPT_SECS = float(os.environ.get("CS193V_DRIVE_OPT_SECS") or 3.0)
 # pieces -- run_step`s spinner redraws every 100ms while a probe runs, so a screen that is merely
 # being drawn is never quiet this long.
 SETTLE_SECS = float(os.environ.get("CS193V_DRIVE_SETTLE_SECS") or 2.0)
+
+# HOW LONG A QUEUE THAT CROSSED A TTY MODE CHANGE IS GIVEN TO DRAIN before it is called stranded.
+# Not a pause anything pays for: a keystroke the next read wants is gone in a millisecond or two,
+# and this is only ever waited out on the way to a failure. Generous on purpose -- the gap being
+# covered is one preemption between the child's tcsetattr and its read(), which on an
+# oversubscribed 2-core box is tens of milliseconds and not a bound worth cutting fine. See the
+# loss detector for what asking twice buys.
+STRAND_SECS = float(os.environ.get("CS193V_DRIVE_STRAND_SECS") or 1.0)
 
 # After the script is exhausted the child is left to finish on its own -- the caller's `timeout`
 # is the ceiling, exactly as it is for ptyrun.py.
@@ -336,6 +346,7 @@ def main(argv):
     out = sys.stdout.buffer
     step_i = 0
     prev_icanon = None          # for the loss detector below
+    strand = None               # (count, was, now, deadline) while a queue is under suspicion
     slave_open = True
     window = ""                 # output since the previous step was sent
     armed_cursor = False        # ESC[?25h seen in this window
@@ -410,18 +421,48 @@ def main(argv):
         # earlier draft compared a change seen now against a count taken last tick and reported
         # every clean run as a loss -- because the ordinary end of `read -rsn1` IS a
         # cbreak -> canonical transition, and the byte it just consumed was still in last tick's
-        # count. What distinguishes the real thing is that the bytes are STILL THERE across the
-        # transition, which is exactly what asking now answers.
+        # count.
+        #
+        # AND A MODE CHANGE WITH BYTES QUEUED IS STILL NOT A LOSS, which is what #249 was bounced
+        # by. THE OTHER ORDER IS ORDINARY DELIVERY: we write at the arm, the byte sits in the queue
+        # for as long as the child takes to get from its tcsetattr to its read() -- and ARMING that
+        # read is itself a mode change, so the two are indistinguishable at the instant they
+        # happen. Measured in 35-setup-git-shim.sh's retoken case on a 2-core box under load:
+        # 3 runs in 8 crossed a mode change with a keystroke queued, all of them
+        # canonical -> cbreak, every one of them consumed by the next read, all 8 conversations
+        # correct. Sampling decided which of those runs went red, which is the shape of a flake
+        # rather than of a finding.
+        #
+        # SO THE SUSPICION IS CONFIRMED RATHER THAN REPORTED: the queue has to still be there
+        # STRAND_SECS later. Stranded bytes are the ones nobody ever reads, and that is the only
+        # question whose answer differs between the two cases.
         icanon_now, _echo_now = tty_state(master)
         if icanon_now is not None:
             if (prev_icanon is not None and icanon_now != prev_icanon
-                    and slave_open and queued(slave) > 0):
+                    and slave_open and strand is None and queued(slave) > 0):
+                strand = (queued(slave), prev_icanon, icanon_now,
+                          time.monotonic() + STRAND_SECS)
+            prev_icanon = icanon_now
+
+        if strand is not None:
+            count, was, became, by = strand
+            # DRAINED TO EMPTY, not merely smaller. A cbreak -> canonical strand is read as ONE
+            # mangled line, so the count does drop -- it just drops to the wrong place, which is
+            # the silent failure this exists to catch. Only an empty queue says every byte we
+            # wrote reached a read.
+            #
+            # WHAT CONFIRMING GIVES UP: a queue the child FLUSHES rather than reads drains to zero
+            # too, and sudo's own password read is one (#226). That is the `password` gate's job
+            # rather than this one's -- nothing is written until sudo has cleared ECHO, so there is
+            # never anything ahead of the flush to lose.
+            if not slave_open or queued(slave) == 0:
+                strand = None
+            elif time.monotonic() > by:
                 failure = ("LOST", steps[step_i],
                            "the child changed tty mode with %d byte(s) still unread:"
-                           " icanon %s -> %s. Those bytes do not survive the transition."
-                           % (queued(slave), prev_icanon, icanon_now))
+                           " icanon %s -> %s, and %gs later nothing had read them."
+                           % (count, was, became, STRAND_SECS))
                 break
-            prev_icanon = icanon_now
 
         step = steps[step_i]
         flat = flatten(window)
