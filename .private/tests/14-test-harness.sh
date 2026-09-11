@@ -1157,10 +1157,16 @@ assert_contains "ptydrive:a-malformed-script-is-reported-in-the-report-file" \
 # the following read SUCCEEDS and returns the wrong answer. This fixture strands five bytes on
 # purpose by over-sending: the child takes `X` with `read -rsn1`, restores canonical, and `\ntwo\n`
 # does not survive it.
+#
+# THE SLEEP IS WHAT MAKES THE STRAND A FACT RATHER THAN A COINCIDENCE, and it has to outlast
+# ptydrive's STRAND_SECS: the detector now gives a queue that long to drain before calling it
+# stranded, so a fixture that reads again sooner would be reporting ordinary delivery. Fixed
+# rather than a `wait_until`, and for the reason lib/assert.sh gives: what is being proved here is
+# that NOTHING read those five bytes, and polling for an absence succeeds immediately.
 cat > "$WORK/pd-loss.sh" <<CHILD
 printf 'KEY SCREEN '
 IFS= read -rsn1 k
-sleep 0.4
+sleep 2
 printf '\nLINE SCREEN $PD_SHOW'
 IFS= read -r b
 printf '\nK=[%s] B=[%s]\n' "\$k" "\$b"
@@ -1179,6 +1185,44 @@ assert_contains "ptydrive:counts-the-bytes-that-were-stranded" \
   pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "bash $WORK/pd-loss.sh" >/dev/null
 assert_eq "ptydrive:a-clean-read-restore-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r7" || true)"
+
+# AND THE CONTROL FOR THE OTHER ORDER, which is the one that bounced PR #249. A gated keystroke is
+# QUEUED between our write and the child's read, and the child ARMING that read is itself a tty
+# mode change — so at the instant it happens, ordinary delivery and a strand look identical.
+# Measured in 35-setup-git-shim.sh's retoken case on a 2-core box under load: 3 runs in 8 crossed
+# a mode change with a keystroke queued, all canonical -> cbreak, all consumed by the next read,
+# all 8 conversations correct. Which of them went red was decided by where a 20ms poll landed.
+#
+# THE GAP IS WIDENED TO A THIRD OF A SECOND SO THE ASSERTION IS NOT ITSELF A RACE: `stty` arms the
+# keystroke read, the byte waits, and only then does anything read it. In the real thing that gap
+# is one preemption wide.
+#
+# THE KEYSTROKE IS AN ENTER, and that is forced rather than chosen: FIONREAD on a canonical queue
+# answers `inq_canon`, which is 0 until a LINE is complete, so a queued `z` is invisible to the
+# detector and would prove nothing. `\n` is a complete (empty) line, counts 1, and is exactly what
+# every menu step in fixtures/setup-git-flows.txt sends.
+#
+# THE CHILD GETTING PAST ITS READ IS THE PROOF, since Enter reads back as the empty string either
+# way: a byte that really had been lost leaves that `read` blocked until the ceiling. A SECOND STEP
+# FOLLOWS IT for the same reason pd-loss has one — the detector is not asked anything once the
+# script is exhausted, so a one-step fixture would pass against any driver at all.
+cat > "$WORK/pd-inflight.sh" <<CHILD
+printf 'KEY SCREEN $PD_SHOW'
+sleep 0.3
+stty -icanon -echo
+sleep 0.3
+IFS= read -rsn1 k
+stty icanon echo
+printf '\nLINE SCREEN $PD_SHOW'
+IFS= read -r b
+printf '\nB=[%s]\n' "\$b"
+CHILD
+pd_out="$({ pd_step line inflight 'KEY SCREEN' '\n'
+            pd_step line later 'LINE SCREEN' 'two\n'; } \
+          | pd_run "$WORK/pd-r8" "bash $WORK/pd-inflight.sh")"
+assert_says "ptydrive:a-keystroke-in-flight-still-reaches-the-read" "B=[two]" "$pd_out"
+assert_eq "ptydrive:delivery-in-flight-is-not-a-loss" "0" \
+          "$(grep -c 'LOST' "$WORK/pd-r8" || true)"
 
 # THE CONTROL, without which every assertion above passes against a driver that merely sleeps:
 # the child does not draw its screen for a full second, and the step must not have been sent
