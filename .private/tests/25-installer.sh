@@ -1535,6 +1535,18 @@ assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 # and both of its endings are 30-launcher-shim.sh's tailbox:* group, against the same unchanged
 # code. What is new here is that the installer passes a LOG to meter_start, so a box exists.
 APTFIX="$PRIVATE/tests/fixtures/apt-install-podman.txt"
+# WHICH FILE EACH HALF LIVES IN, and it is two of them since #217. The wrapper and the two
+# package-manager readers are in install-utils.sh because root_step_packages is -- the block goes
+# round the package manager, and the package manager is a root step shared with the WSL root
+# pass. machine_phases stays in course-install.sh beside setup_machine, which only a Mac reaches.
+#
+# NAMED PER FILE RATHER THAN SEARCHED FOR IN BOTH, so a function that moves fails
+# aptbox:the-wrapper-is-extractable loudly instead of being found by accident in its old home.
+APT_WRAPPER_FNS="install-utils.sh:setup_meter_start install-utils.sh:setup_meter_stop
+                 install-utils.sh:setup_phase       install-utils.sh:setup_say_phase
+                 install-utils.sh:setup_run         install-utils.sh:setup_drain
+                 install-utils.sh:setup_tail        install-utils.sh:apt_phases
+                 install-utils.sh:dnf_phases        course-install.sh:machine_phases"
 APTBOX="$TMP/aptbox.sh"
 APTDRIVE="$TMP/aptdrive.sh"
 APTLOG="$TMP/aptbox-setup.log"
@@ -1544,12 +1556,11 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
     printf 'NO_COLOR=1\n'
     printf 'MESSAGES=%s\n' "'$PRIVATE/course-install-messages.txt'"
     cat "$PRIVATE/files/cs193v-ui.sh"
-    for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
-                 setup_tail apt_phases dnf_phases machine_phases; do
+    for aptsrc in $APT_WRAPPER_FNS; do
         # NO $ AFTER THE BRACE: every one of these headers carries a signature comment
         # after it, the way the rest of this file does, so an anchored pattern matched
         # none of them and the harness was a copy of cs193v-ui.sh and nothing else.
-        sed -n "/^$aptfn() {/,/^}\$/p" "$PRIVATE/course-install.sh"
+        sed -n "/^${aptsrc#*:}() {/,/^}\$/p" "$PRIVATE/${aptsrc%%:*}"
     done
     # The four the wrapper owns, set here because sed extracts functions and not the
     # assignments between them. aptbox:the-globals-are-declared is what keeps these honest.
@@ -1560,9 +1571,8 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
 # EVERY FUNCTION, SEPARATELY. One `wc -l` over the whole file would be satisfied by four of the
 # five arriving, and the missing one would then be tested by nothing at all.
 aptmissing=''
-for aptfn in setup_meter_start setup_meter_stop setup_phase setup_say_phase setup_run setup_drain \
-             setup_tail apt_phases dnf_phases machine_phases; do
-    [ "$(grep -c "^$aptfn() {" "$APTBOX")" = 1 ] || aptmissing="$aptmissing $aptfn"
+for aptsrc in $APT_WRAPPER_FNS; do
+    [ "$(grep -c "^${aptsrc#*:}() {" "$APTBOX")" = 1 ] || aptmissing="$aptmissing ${aptsrc#*:}"
 done
 assert_eq "aptbox:the-wrapper-is-extractable" "" "$aptmissing"
 assert_ok "aptbox:the-harness-is-valid-bash" bash -n "$APTBOX"
@@ -1572,7 +1582,7 @@ assert_ok "aptbox:the-harness-is-valid-bash" bash -n "$APTBOX"
 # installer itself ran with an unset variable under `set -u`.
 aptundeclared=''
 for aptvar in SETUP_LOG SETUP_RAW SETUP_TOTAL SETUP_PHASE; do
-    grep -qE "^$aptvar=" "$PRIVATE/course-install.sh" || aptundeclared="$aptundeclared $aptvar"
+    grep -qE "^$aptvar=" "$PRIVATE/install-utils.sh" || aptundeclared="$aptundeclared $aptvar"
 done
 assert_eq "aptbox:the-globals-are-declared" "" "$aptundeclared"
 

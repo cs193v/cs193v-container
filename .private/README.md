@@ -47,8 +47,9 @@ projects/                      the student's work; the only directory shared wit
                                the course tree, checks it arrived and execs one of the two below
   course-install.sh            the installer proper — macOS / Ubuntu / WSL (#221)
   course-install-messages.txt  every student-facing string the installer prints
-  install-utils.sh             what the two installer scripts share (#217): the package table
-                               and the three steps that need root, in ONE list
+  install-utils.sh             what the two installer scripts share (#217): the package table,
+                               the three steps that need root in ONE list, and the progress
+                               block that goes round the slow ones (#219)
   wsl-provision.sh             the ROOT pass (#217): prepares a new CS193V WSL instance -- first-
                                run questions off, the student's account created with no password
                                -- so the pass a student watches never needs one
@@ -756,16 +757,25 @@ tail box — the requirements are the opposite ones.
 
 #### The same block around the installer's slow steps (issue #219)
 
-`meter_*` has a second consumer now. `course-install.sh` raises the same block around the host
-package manager, the podman `.pkg` on a Mac and `podman machine init` — the three steps that take
-minutes and used to spend them filling the terminal with apt's `Get:` lines and podman's blob
-digests, un-indented, in the middle of an otherwise two-space-indented step list.
+`meter_*` has a second consumer now. The installer raises the same block around the host package
+manager, the podman `.pkg` on a Mac and `podman machine init` — the three steps that take minutes
+and used to spend them filling the terminal with apt's `Get:` lines and podman's blob digests,
+un-indented, in the middle of an otherwise two-space-indented step list.
 
 **Nothing in `cs193v-ui.sh` had to change to carry it**, which is the useful thing to know before
 adding a third consumer. `meter_draw` already draws spinner-only when the total is zero, a
 non-empty `METER_LOG` is already the whole "is there a box?" switch, and the block's two-column
-indent already matches the installer's `step()`. What the installer adds is a *reader*, in
-`course-install.sh` beside its callers, exactly as `build_progress` lives beside the launcher's.
+indent already matches the installer's `step()`. What the installer adds is a *reader*, beside
+its callers, exactly as `build_progress` lives beside the launcher's.
+
+**Which file that is, is decided by `root_step_packages` and not by this feature.** The wrapper
+and the two package-manager readers are in `install-utils.sh`, because since #217 the privileged
+steps live there so that the student pass and the WSL root pass cannot run different ones — and
+the block goes round the package manager, which is one of them. So the Windows root pass gets
+the same block for free. `machine_phases` stays in `course-install.sh` beside `setup_machine`,
+which only a Mac reaches. Not `files/cs193v-ui.sh` for either: everything under `files/` is
+hashed into `cs193v.buildhash`, so a host-side tweak there would prompt every student to rebuild
+a container that has no reader for any of it.
 
 Four things worth knowing before touching it:
 
