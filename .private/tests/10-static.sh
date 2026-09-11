@@ -276,7 +276,14 @@ assert_eq "tmptree:the-guard-matches-the-template" \
 # Comments are stripped first, or the prose explaining the gate would count as a call site.
 inst_nc="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
 inst_cmd="$(printf '%s\n' "$inst_nc" | sed 's/"[^"]*"//g')"
-SUDO_CMD='(^[[:space:]]*|[;&|!{][[:space:]]*)sudo[[:space:]]+[^-]'
+# AND `setup_run READER sudo ...` IS COMMAND POSITION TOO (#219). setup_run execs "$@", so
+# the sudo in it is the command however it looks -- and the progress block that wraps the
+# package manager and the Mac .pkg puts every remaining privileged call behind that word.
+# Without this the gate counted ZERO privileged calls in course-install.sh and said so as
+# `expected 1, actual 0`, which reads like the .pkg had gone rather than like the pattern
+# had. THE READER IS OPTIONAL because inst_cmd strips double-quoted strings first, so
+# `setup_run "$PM_READER" sudo` arrives here as `setup_run  sudo`.
+SUDO_CMD='(^[[:space:]]*|[;&|!{][[:space:]]*)(setup_run[[:space:]]+([^[:space:]]+[[:space:]]+)?)?sudo[[:space:]]+[^-]'
 root_gate="$(printf '%s\n' "$inst_nc" | grep -nE '\[ "\$\(id -u\)" -eq 0 \]' | head -1 | cut -d: -f1)"
 first_sudo="$(printf '%s\n' "$inst_cmd" | grep -nE "$SUDO_CMD" | head -1 | cut -d: -f1)"
 assert_ne "root:the-gate-is-there-at-all"               "" "$root_gate"
@@ -766,8 +773,11 @@ fi
 # for four lines that cannot undermine the two-pass split. So it asks for command position, and
 # excludes the two flags that make sudo answer rather than act. lib/sudo-fake's header keeps the
 # same distinction, and so does SUDO_CMD below.
+# THROUGH $SUDO_CMD, not a second copy of it. This used to carry its own near-identical pattern,
+# and #219 had to widen both by hand -- one pattern for one rule is the arrangement the rest of
+# this file keeps.
 ci_sudo="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
-           | grep -nE '(^|[;&|!{][[:space:]]*)[[:space:]]*sudo[[:space:]]+[^-]' || true)"
+           | grep -nE "$SUDO_CMD" || true)"
 assert_eq "rootsteps:the-installer-has-one-privileged-call" "1" \
           "$(printf '%s\n' "$ci_sudo" | grep -c .)"
 assert_contains "rootsteps:and-it-is-the-mac-package" 'installer -pkg' "$ci_sudo"
@@ -2121,13 +2131,29 @@ done
 #
 # THE STRIP IS ASSERTED, because a `sed //d` whose addresses stop matching is a silent no-op --
 # it would put those three lines back in the region and redden this lint against correct code.
+# BOTH HALVES OF THE INSTALLER, not just the one a student watches (#219). install-utils.sh has
+# been able to word its own refusals since #217 -- its header says so -- and it grew the progress
+# block's call sites when root_step_packages did, so a caption typed straight into one of those
+# would have been prose out of the catalogue's reach in the place a student stares at longest.
+# Measured before it was widened: install-utils.sh already satisfied the rule, so this adds
+# coverage and no work.
+#
+# THE EXCLUSION IS MEASURED ON ITS OWN FILE, THEN THE TWO ARE JOINED. The hand-over block is
+# course-install.sh's alone, and the check that the sed really cut it is a LINE COUNT -- so
+# appending a second file before that comparison makes the region longer than the file it came
+# from and reddens a check about something else entirely. Measured, by doing it.
 inst_all="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
-inst_logic="$(printf '%s\n' "$inst_all" | sed '/^BOOTSTRAP_PROTOCOL_WANTED=/,/^\. "\$UI"$/d')"
-assert_ne "text116:the-logic-region-is-readable" "" "$inst_logic"
-if [ "$(printf '%s\n' "$inst_all" | grep -c .)" -gt "$(printf '%s\n' "$inst_logic" | grep -c .)" ]
+inst_ci="$(printf '%s\n' "$inst_all" | sed '/^BOOTSTRAP_PROTOCOL_WANTED=/,/^\. "\$UI"$/d')"
+assert_ne "text116:the-logic-region-is-readable" "" "$inst_ci"
+if [ "$(printf '%s\n' "$inst_all" | grep -c .)" -gt "$(printf '%s\n' "$inst_ci" | grep -c .)" ]
 then pass "text116:the-handover-block-was-really-excluded"
 else fail "text116:the-handover-block-was-really-excluded" \
           "the sed addresses matched nothing, so the exception is not being applied"; fi
+inst_logic="$inst_ci
+$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-utils.sh")"
+# AND THE SECOND HALF REALLY ARRIVED, or widening the rule would be a no-op that reads like
+# coverage. Keyed on a name only install-utils.sh has.
+assert_contains "text116:the-shared-half-is-in-the-region" "root_step_packages" "$inst_logic"
 
 # THE THREE setup_* NAMES ARE #219's, and they belong here for the reason the other seven do:
 # they put a sentence on the screen. A phase caption goes to meter_label, which writes it into a

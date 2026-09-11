@@ -71,8 +71,8 @@ transcript.
 ### The installer's progress block (issue #219)
 
 The same obligation as the build's block above, and for the same reason: `ERRORS.md` B18's cursor
-strobe had a perfect transcript. **This one needs eyes after any change to `setup_*` in
-`course-install.sh`, or to `meter_*`.**
+strobe had a perfect transcript. **This one needs eyes after any change to the `setup_*` wrapper
+in `install-utils.sh`, to `machine_phases` in `course-install.sh`, or to `meter_*`.**
 
 `tests/install-sandbox.sh` is the tool — it exists to put you in front of the installer on a
 machine of a chosen shape. Drive it in an 80×24 window:
