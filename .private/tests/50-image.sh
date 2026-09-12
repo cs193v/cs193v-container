@@ -285,8 +285,13 @@ assert_ok "setup-git:installed-ui-parses" sh -c \
     "$VT_RUN --rm --entrypoint bash '$TEST_IMAGE' -n /etc/cs193v/ui.sh"
 # And it really reads the installed prose and the installed helper with no environment help,
 # which is the one thing the host-side suites cannot check: they both override those paths.
-assert_contains "setup-git:reads-the-installed-catalogue" "terminal" \
-    "$(R 'setup-git </dev/null 2>&1 || true')"
+# BY KEY, out of the catalogue the IMAGE installs. Quoted as "terminal" this was the weakest
+# needle in the suite -- the word turns up in half a dozen messages and in plenty of prose that
+# is not a message at all -- and the claim is precise: setup-git, with no environment help,
+# found /etc/cs193v/messages.txt and rendered err.no-terminal out of it. Read on the host from
+# .private/files/, which is the same file the image installs.
+assert_says_key "setup-git:reads-the-installed-catalogue" err.no-terminal \
+    "$(R 'setup-git </dev/null 2>&1 || true')" "$PRIVATE/files/setup-git-messages.txt"
 assert_contains "setup-git:dev-seam-works-in-the-image" "target_name=cs193v-students" \
     "$(R 'setup-git --dev-print-token-url')"
 assert_ok "nanorc-installed" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.nanorc'"
