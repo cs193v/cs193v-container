@@ -1011,7 +1011,7 @@ outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTM
 # case exists for. Supplying it as {{UNC}} means the needle can only match if the message and
 # win_projects_path agree about it.
 assert_says_sub "win-signoff:finishes" finished.windows "$outw" "$ICAT" \
-                "DIR=$WINDEST" DISTRO=CS193V "USER=$(id -un)" \
+                "DIR=$WINDEST" DISTRO=CS193V \
                 "UNC=$(printf '%s' "\\\\wsl.localhost\\CS193V$WINDEST/projects" | do_tr / '\\')"
 # AND THE UNIX ENTRY WAS NOT THE ONE PRINTED, asserted on the one phrase that differs rather
 # than on the advice, because nearly all of the advice is shared: both entries name the same

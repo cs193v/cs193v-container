@@ -197,7 +197,7 @@ say_done() {
     printf '\n'
     if [ -n "${CS193V_WINDOWS:-}" ]; then
         msg finished.windows "DIR=$DIR" "DISTRO=$WSL_DISTRO" \
-                             "USER=$(id -un)" "UNC=$(win_projects_path)"
+                             "UNC=$(win_projects_path)"
     else
         msg finished "DIR=$DIR"
     fi

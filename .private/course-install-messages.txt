@@ -654,7 +654,9 @@ Checking that it works
 
 [[err.launcher-config]]
 The launcher could not build a podman command.
-Send course staff the output of:
+Please contact the course staff. If you know how to
+run commands, from the terminal, please run this command
+and send its output to us:
 
     {{DIR}}/cs193v --dev-print-command
 
@@ -664,7 +666,10 @@ launcher reads its configuration
 [[err.image-missing-after-build]]
 The course container was not built, but setup did not stop.
 
-Please send this to course staff, along with the output of:
+Please contact the course staff. If you know how to
+run commands, from the terminal, please run this command
+and send its output to us:
+
     {{DIR}}/cs193v doctor
 
 [[ok.container-present]]
@@ -705,37 +710,22 @@ doctor reported problems. Run {{DIR}}/cs193v doctor
 # not exist. Only course-install.sh knows {{DIR}}, and win_projects_path builds it there.
 [[finished.windows]]
   ────────────────────────────────────────────────────────────────────
-  Setup finished.
+  Installation complete!
 
-  From now on you work inside the {{DISTRO}} environment. To start:
+  To start the development environment, open a command prompt and type
+  the following:
 
       wsl -d {{DISTRO}}
-      cd {{DIR}}
-      ./cs193v
+      cd {{DIR}} && ./cs193v
 
   You can also open {{DISTRO}} from the Windows Terminal dropdown.
 
-  Your work goes in the projects folder, one folder with three names.
-  Inside the container it is ~/projects. In the {{DISTRO}} environment:
-
-      {{DIR}}/projects
-
-  And from Windows itself, where you can paste it into Explorer:
+  Your work goes in the projects folder. To put files there, you
+  can open this path in Explorer:
 
       {{UNC}}
 
-  Your account in {{DISTRO}} is called {{USER}} and has no password, so
-  nothing will ever ask you for one. To install something in the
-  environment itself, this gets you in as its administrator:
-
-      wsl -d {{DISTRO}} -u root
-
-  Closing the terminal window stops the container and anything running
-  in it. Your files are on your own computer, so they are always safe.
-
-  Useful later:
-      ./cs193v doctor     a report to paste if you ask staff for help
-      ./cs193v --stop     stop it if a window was closed unexpectedly
+  Happy vibecoding!
   ────────────────────────────────────────────────────────────────────
 
 # ═══════════════════════════════════════════════════════════════════════════════
