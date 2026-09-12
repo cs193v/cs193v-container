@@ -207,6 +207,17 @@ carve_func() {                        # carve_func FILE NAME DEST -> 0 if DEST g
 # other names; a suite that wanted one message should not acquire all of them, and MESSAGES has
 # to be set for msg() to read anything. Nothing leaks out but the text.
 msg_of() {                            # msg_of KEY [NAME=VALUE...] -> the message, expanded
+    msg_of_in "$PRIVATE/messages.txt" "$@"
+}
+
+# THE SAME THING FOR THE OTHER TWO CATALOGUES, and the reason it takes the file rather than
+# guessing is the one msg_text's header already gives: there are three files read by this one
+# msg(), a key may not live in two of them (10-static.sh), and an assertion that does not name
+# its catalogue is an assertion that cannot say which prose it meant. course-install-messages.txt
+# is what the installer and the root pass print; files/setup-git-messages.txt is what setup-git
+# prints inside the container.
+msg_of_in() {                         # msg_of_in FILE KEY [NAME=VALUE...] -> the message, expanded
+    local _cat="$1"; shift
     (
         # SC2034 disabled HERE rather than for a whole file list: msg() reads $MESSAGES out of
         # the file sourced on the next line, which shellcheck cannot see without -x -- the same
@@ -221,7 +232,7 @@ msg_of() {                            # msg_of KEY [NAME=VALUE...] -> the messag
         # the seventeen unlinted files were finally covered -- it turned up one, 50-image.sh's
         # GESTURE_TOKENS, and #164 had just deleted two more of exactly that shape by hand.
         # shellcheck disable=SC2034
-        MESSAGES="$PRIVATE/messages.txt"
+        MESSAGES="$_cat"
         # shellcheck source=../../files/cs193v-ui.sh
         . "$PRIVATE/files/cs193v-ui.sh"
         msg "$@"

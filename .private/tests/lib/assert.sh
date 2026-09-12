@@ -262,12 +262,75 @@ msg_text() {                          # msg_text KEY [FILE] -> its literal prose
     printf '%s' "${t% }"
 }
 
+# THE PROSE ON THE FAR SIDE OF THE SUBSTITUTION, which msg_text cannot reach. msg_text stops at
+# the first {{PLACEHOLDER}} because everything past it is filled in at runtime -- true of the
+# value, and not true of the sentences after it. Two shapes of message have their whole point
+# there:
+#
+#   err.create-failed, err.build-failed, err.machine-create: a diagnosis, then podman's raw
+#   output, then what to do about it. The remedy is the last paragraph, and msg_text's needle
+#   ends before the output begins -- so an assertion that the student is told what to do next
+#   had to quote the prose, and quoted prose is what this whole section exists to avoid.
+#
+#   ok.disk-free: "{{FREE}} GB disk free for the container". The body LEADS with its
+#   placeholder, so msg_text returns the empty string and assert_says_key fails as vacuous.
+#
+# The LAST placeholder, not the first: err.machine-create interpolates {{OUT}} and then
+# {{LOG}}, and only the text after the final one is a phrase every rendering ends with.
+msg_text_tail() {                     # msg_text_tail KEY [FILE] -> its literal prose AFTER the last {{PLACEHOLDER}}
+    local t
+    t="$(awk -v k="[[$1]]" '
+        $0 == k { found = 1; next }
+        /^\[\[.*\]\]$/ { if (found) exit }
+        found && /^#/ { next }
+        found { print }
+    ' "${2:-$PRIVATE/messages.txt}")"
+    # ${t##*\}\}} RATHER THAN A SPLIT, and that choice is the whole of the no-placeholder case: a
+    # `##` pattern that does not match leaves the string untouched, so a body with no placeholder
+    # in it yields the WHOLE body and degrades to exactly the needle assert_says_key would have
+    # built. Written with sed or awk instead -- the obvious reimplementation -- the same body
+    # comes back empty and every assertion on it passes vacuously. tail:no-placeholder-is-the-
+    # whole-body in 20-messages.sh is what holds that.
+    t="${t##*\}\}}"
+    t="$(_flatten "$t")"
+    t="${t# }"
+    printf '%s' "${t% }"
+}
+
+# THE MESSAGE AS THE STUDENT READS IT, substitutions and all, for the assertions whose subject
+# IS the substituted value. step.consent says "...permission for {{N}} thing(s)", and a survey
+# that found two things to do and asked about one is the bug those tests are watching for -- so
+# the count is the assertion, and a needle truncated at {{N}} would pass on either number.
+#
+# Rendered through the real msg() by way of msg_of_in, so this cannot drift from what runs, and
+# flattened because assert_says flattens only its haystack.
+assert_says_sub() {                   # assert_says_sub NAME KEY TEXT FILE [NAME=VALUE...]
+    local n="$1" k="$2" t="$3" f="$4"; shift 4
+    local phrase; phrase="$(_flatten "$(msg_of_in "$f" "$k" "$@")")"
+    phrase="${phrase# }"; phrase="${phrase% }"
+    # THE TWO VACUOUS OUTCOMES, both loud. An unknown key renders as "(missing message: k)",
+    # which would be searched for and not found -- a failure, but one that reads as a wrong
+    # message rather than a wrong key. An unsupplied placeholder leaves {{NAME}} in the needle.
+    case "$phrase" in
+        '') fail "$n" "no prose for message key: $k" ; return 0 ;;
+        *'(missing message'*) fail "$n" "no such message key: $k (in $f)" ; return 0 ;;
+    esac
+    assert_says "$n" "$phrase" "$t"
+}
+
 # An unknown or all-placeholder key FAILS rather than passing vacuously, which is the trap the
 # negative form would otherwise set: assert_says_not with an empty needle passes every time.
 assert_says_key() {                   # assert_says_key NAME KEY TEXT [FILE]
     local phrase; phrase="$(msg_text "$2" "${4-}")"
     case "$phrase" in
         ''|' ') fail "$1" "no literal prose for message key: $2" ; return 0 ;;
+    esac
+    assert_says "$1" "$phrase" "$3"
+}
+assert_says_key_tail() {              # assert_says_key_tail NAME KEY TEXT [FILE]
+    local phrase; phrase="$(msg_text_tail "$2" "${4-}")"
+    case "$phrase" in
+        ''|' ') fail "$1" "no literal prose after the last placeholder in: $2" ; return 0 ;;
     esac
     assert_says "$1" "$phrase" "$3"
 }

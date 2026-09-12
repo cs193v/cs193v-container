@@ -613,6 +613,62 @@ msg_rt="${msg_rt# }"; msg_rt="${msg_rt% }"
 assert_eq "msg:the-test-helper-drops-staff-notes-too" \
           "$msg_rt" "$(msg_text hash.note "$msgtmp")"
 
+# ─── the two needles that msg_text cannot build  ──────────────────────────────
+# msg_text stops at the first {{PLACEHOLDER}}, which is right for the needle it builds and
+# leaves two shapes of message with no assertable prose at all: one whose remedy sentence comes
+# AFTER an interpolated blob of podman output, and one that leads with its placeholder. See
+# msg_text_tail in lib/assert.sh for the measurements. Both helpers are driven against a
+# synthetic catalogue for the same reason msg_text's own check is: the rule has to hold whatever
+# the real files happen to say today.
+tailtmp="$TMP/msg-tail.txt"
+{ printf '[[tail.two]]\n'
+  printf 'head prose\n'
+  printf '{{A}}\n'
+  printf 'middle prose\n'
+  printf '{{B}}\n'
+  printf '# INVISIBLE staff note\n'
+  printf 'tail prose\n'
+  printf '[[tail.none]]\n'
+  printf 'no placeholder here\n'
+  printf '[[tail.leading]]\n'
+  printf '{{FREE}} GB free\n'
+} > "$tailtmp"
+# THE LAST PLACEHOLDER, not the first: "middle prose" sits between two of them and belongs to
+# neither needle. Without this, a msg_text_tail written with ${t#*\}\}} passes every other
+# assertion here and silently carries a paragraph of interpolated-away prose into its needle.
+assert_eq "tail:reads-past-the-last-substitution" \
+          "tail prose" "$(msg_text_tail tail.two "$tailtmp")"
+assert_eq "tail:leaves-the-head-to-msg_text" \
+          "head prose" "$(msg_text tail.two "$tailtmp")"
+# AND IT FOLLOWS THE STAFF-NOTE RULE, which is the gap msg_text had until #221's rule reached
+# it: a column-0 hash between the placeholder and the prose is not something a student reads.
+assert_says_not "tail:drops-staff-notes-too" "INVISIBLE" "$(msg_text_tail tail.two "$tailtmp")"
+# A BODY WITH NO PLACEHOLDER yields the whole body rather than nothing, so a message that loses
+# its last placeholder degrades to the same needle assert_says_key would have built.
+assert_eq "tail:no-placeholder-is-the-whole-body" \
+          "no placeholder here" "$(msg_text_tail tail.none "$tailtmp")"
+# THE SHAPE ok.disk-free HAS: msg_text returns nothing for it, and that is the whole reason
+# this helper exists. Asserted as a pair, because either half alone reads as an accident.
+assert_eq "tail:a-placeholder-led-body-has-no-head" "" "$(msg_text tail.leading "$tailtmp")"
+assert_eq "tail:a-placeholder-led-body-has-a-tail" \
+          "GB free" "$(msg_text_tail tail.leading "$tailtmp")"
+
+# ─── a needle with the substitution still in it  ──────────────────────────────
+# For the assertions whose subject IS the substituted value -- step.consent's count of things it
+# wants permission for, ok.disk-free's number of gigabytes -- a needle truncated at the
+# placeholder passes on any value. msg_of_in renders through the real msg(), and takes the
+# catalogue because there are three of them.
+assert_eq "sub:renders-the-value-into-the-needle" \
+          "12 GB free" "$(msg_of_in "$tailtmp" tail.leading FREE=12)"
+# AND IT READS THE FILE IT IS GIVEN. msg_of defaulted to the launcher's catalogue, which is the
+# drift msg_text was taught to avoid in #221 and which a renderer can repeat: asked for an
+# installer key it would have answered "(missing message: ...)" and any assert_says built on it
+# would have searched an output for that.
+assert_says "sub:reads-the-catalogue-it-is-given" "Building the course container" \
+            "$(msg_of_in "$ICAT" step.build)"
+assert_says "sub:the-launcher-default-is-unchanged" "Nothing was changed" \
+            "$(msg_of status.cancelled)"
+
 # ─── the presentation knobs  (#221) ───────────────────────────────────────────
 # THE WHOLE SHARED FILE, not just the msg() carving above: these exercise note(), die()
 # and menu(), and sourcing this file is inert by contract (see its header), which is the
