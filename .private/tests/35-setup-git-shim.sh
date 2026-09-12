@@ -51,7 +51,18 @@ SGM="$PRIVATE/files/setup-git-messages.txt"
 # exported in their shell gets the same answers CI does. sg_run appends TMPDIR and CS193V_SGSHIM
 # per run, because those change with each fresh shim.
 SG_ENV="CS193V_UI=$PRIVATE/files/cs193v-ui.sh CS193V_MESSAGES=$SGM"
-SG_ENV="$SG_ENV CS193V_GH_ORG=cs193v-students CS193V_TOKEN_EXPIRY=2026-12-31 CS193V_TODAY=2026-08-17"
+SG_ORG=cs193v-students
+SG_ENV="$SG_ENV CS193V_GH_ORG=$SG_ORG CS193V_TOKEN_EXPIRY=2026-12-31 CS193V_TODAY=2026-08-17"
+
+# THE STAFF BOX'S TWO LABELS, read from the catalogue once. err.setup-failed-details is four
+# "Label: {{VALUE}}" lines, so neither msg_text nor msg_text_tail can reach the labels -- the
+# first placeholder is on line one -- and six assertions below name a label and then the value
+# they expect after it. msg_label takes the prose in front of a placeholder on its own line,
+# which is exactly that shape. See lib/assert.sh for why it exists.
+SGD_CMD="$(msg_label err.setup-failed-details CMD "$PRIVATE/files/setup-git-messages.txt")"
+SGD_RC="$(msg_label err.setup-failed-details RC  "$PRIVATE/files/setup-git-messages.txt")"
+assert_ne "sgbox:the-command-label-was-readable"   "" "$SGD_CMD"
+assert_ne "sgbox:the-exit-code-label-was-readable" "" "$SGD_RC"
 # THE REAL SHAPE, NOT MERELY A LONG STRING: 93 characters, `github_pat_` then 22 alphanumerics, an
 # underscore and 59 more, which is what token_kind has required since issue #53. Built from its
 # three parts rather than typed out, the same way 45-setup-git.sh builds its table fixture, because
@@ -87,7 +98,7 @@ sg_says "happy:greets"          intro             "$SG_OUT"
 sg_says "happy:asks-the-three-github-things" github.checkpoint "$SG_OUT"
 sg_says "happy:explains-the-token" token.intro    "$SG_OUT"
 sg_says "happy:succeeds"        status.all-set    "$SG_OUT"
-sg_has     "happy:confirms-the-sunetid"  "You entered jdoe"  "$SG_OUT"
+sg_says_sub     "happy:confirms-the-sunetid"  confirm.entered  "$SG_OUT" VALUE=jdoe
 sg_has     "happy:confirms-the-name"    "Jane Doe"          "$SG_OUT"
 # THE ADDRESS IS DERIVED NOW (issue #92) and nobody types it, so the screen that names it is the
 # GitHub checkpoint. A student never shown it anywhere cannot check it is on their account.
@@ -167,9 +178,11 @@ sg_has "secret:login-row-is-redacted" "gh auth login --with-token < your-token" 
 # silently failed looked exactly like one that worked. THE COUNT IS THE FEEDBACK — six dots and a
 # number, not 93 dots, because 93 dots beside the prompt is about 108 columns and wraps on the
 # 80-column terminal MANUAL.md says to test in.
-sg_has "tally:counts-the-hidden-characters" "$TOKEN_MID more characters" "$SG_OUT"
+sg_says_sub "tally:counts-the-hidden-characters" token.more-characters "$SG_OUT" "N=$TOKEN_MID"
 
-tally="$(sg_final "$SG_OUT" "$TOKEN_MID more characters")"
+# AND THE ROW IS FOUND BY THE SAME RENDERED STRING, so the two cannot disagree about which row
+# the dots below are being counted on.
+tally="$(sg_final "$SG_OUT" "$(sg_render token.more-characters "N=$TOKEN_MID")")"
 sg_has_times "tally:draws-six-dots-not-ninety-three" 6 "•" "$tally"
 
 # NO WRAPPED LINE AT THAT PROMPT. Measured in display columns rather than bytes, because a • is
@@ -183,14 +196,16 @@ assert_eq "tally:fits-an-80-column-terminal" "yes" \
 # whole run, and a prompt with no cursor in it cannot be told from a program that has stopped.
 # Asserted as an ORDERING — the show sequence immediately ahead of the prompt — because a bare
 # "[?25h appears somewhere" would pass on the one the EXIT trap emits at the end of every run.
-assert_match "cursor:shown-at-the-token-prompt" "$SG_ESC\[\?25h.{0,60}Your token" \
+assert_match "cursor:shown-at-the-token-prompt" \
+             "$SG_ESC\[\?25h.{0,60}$(re_quote "$(sg_phrase prompt.token)")" \
              "$(printf '%s' "$SG_OUT" | do_tr -d '\r')"
 # And the same for the two prompts that echo normally, which were just as cursorless. The needle is
 # the PROMPT rather than the words "email address": those now appear first in the GitHub
 # checkpoint's signup link, three screens later, where the cursor is hidden and the assertion was
 # passing on nothing.
 assert_match "cursor:shown-at-the-sunetid-prompt" "$SG_ESC\[\?25h" \
-             "$(printf '%s' "$SG_OUT" | do_tr -d '\r' | sed -n '/What is your SUNetID/,$p' | head -1)"
+             "$(printf '%s' "$SG_OUT" | do_tr -d '\r' \
+                | awk -v p="$(sg_phrase prompt.sunetid)" 'index($0, p) { print; exit }')"
 
 # ─── the two ways to get a token (issue #58) ───────────────────────────────────
 # The link screen ends in a choice, and the by-hand steps sit behind it. Printing both to
@@ -214,7 +229,7 @@ assert_eq "prefill:shortlink-was-asked-for-the-prefilled-url" "1" \
 sg_says_not "prefill:hides-the-by-hand-steps" token.byhand "$SG_OUT"
 # Generating a token takes two clicks. A student who stops at the first sees no token at all and
 # has nothing to paste, which looks from their side like the link having failed.
-sg_has "prefill:names-the-confirmation" "confirm when GitHub asks you to" "$SG_OUT"
+sg_says_tail "prefill:names-the-confirmation" token.prefill "$SG_OUT"
 sg_says "prefill:the-link-path-still-works" status.all-set "$SG_OUT"
 
 # ─── the link fits an 80-column terminal (issue #67) ───────────────────────────
@@ -265,9 +280,13 @@ sg_says "byhand:then-accepts-a-token" status.all-set "$SG_OUT"
 #   * the three permissions have to be ADDED before they can be set to Read and write, and
 #     nothing on the page lists them until they are.
 sg_has_not "byhand:no-generate-new-token-step"        "Generate new token"         "$SG_OUT"
-sg_has     "byhand:names-the-permissions-section"     "Under Permissions"          "$SG_OUT"
-sg_has     "byhand:says-a-permission-must-be-added"   "Add permissions"            "$SG_OUT"
-sg_has     "byhand:says-they-arrive-read-only"        "added as Read-only"         "$SG_OUT"
+# ONE NEEDLE FOR THE THREE, and it is the catalogue's own. byhand:names-the-permissions-section,
+# :says-a-permission-must-be-added and :says-they-arrive-read-only quoted "Under Permissions",
+# "Add permissions" and "added as Read-only" -- steps 6 and 7 of token.byhand. sg_says above
+# asserts the message by key and stops at {{ORG}} in step 3; this asserts the prose after the
+# LAST placeholder, which is steps 5 through 8 entire, so all three phrases are covered and none
+# is named. The comment above still records why those three sentences are there.
+sg_says_tail "byhand:names-the-permissions-section" token.byhand "$SG_OUT"
 
 # ─── the four permission failures ──────────────────────────────────────────────
 # One injected failure each, and three things asserted every time: the row that failed carries a
@@ -282,14 +301,18 @@ sg_has     "byhand:says-they-arrive-read-only"        "added as Read-only"      
 sg_new
 sg_set fail_at 'clone'
 sg_run fail-clone happy stuck
-sg_says "fail-clone:says-which-repo-it-cannot-reach" err.clone "$SG_OUT"
+# RENDERED WITH BOTH VALUES, which is what lets one assertion carry the whole checklist.
+# sg_says stops at {{SANDBOX}} on line two, so items 1 to 5 were covered by two more assertions
+# quoting "1. Your SUNetID" and "Resource owner" -- the ORDER of the checklist, which #92 is
+# about. Rendered, the needle is every item in order, and the repository name it looked for is
+# the value rather than a phrase.
+sg_says_sub "fail-clone:says-which-repo-it-cannot-reach" err.clone "$SG_OUT" \
+            "SANDBOX=$SG_ORG/sandbox-jdoe" "ORG=$SG_ORG"
 # THE REPOSITORY BY NAME, and the SUNetID as item 1 (issue #92). The sandbox is per-student and
 # private, so a mistyped SUNetID 404s exactly like a repository that does not exist -- nothing can
 # tell those apart from outside. What the checklist can do is stop omitting the likeliest cause,
 # and name the repository it actually looked for so a student can see the ID inside it.
-sg_has     "fail-clone:names-the-repository-it-looked-for" "cs193v-students/sandbox-jdoe" "$SG_OUT"
-sg_has     "fail-clone:the-first-item-is-the-sunetid"      "1. Your SUNetID"              "$SG_OUT"
-sg_has     "fail-clone:still-names-the-resource-owner"     "Resource owner"               "$SG_OUT"
+sg_has     "fail-clone:names-the-repository-it-looked-for" "$SG_ORG/sandbox-jdoe" "$SG_OUT"
 assert_contains "fail-clone:the-row-failed" "✗" "$SG_OUT"
 assert_eq       "fail-clone:nothing-after-it-ran" "0" "$(sg_count 'git pull')"
 sg_says "fail-clone:ends-with-the-staff-box" err.setup-failed "$SG_OUT"
@@ -298,7 +321,8 @@ sg_says "fail-clone:ends-with-the-staff-box" err.setup-failed "$SG_OUT"
 # nothing about what a student actually pastes to staff. sg_box cuts the box out; assert_says
 # flattens the walls away and rejoins whatever box() wrapped.
 sgbox="$(sg_box "$SG_OUT")"
-assert_says "fail-clone:box-names-the-command"  "Failed command: git clone --quiet" "$sgbox"
+assert_says "fail-clone:box-names-the-command" \
+            "$SGD_CMD git clone --quiet" "$sgbox"
 assert_says "fail-clone:box-quotes-the-failure" "remote: Permission to"             "$sgbox"
 
 # AND THE TOKEN IS IN NONE OF IT. The three secret:* assertions above run on the HAPPY path only,
@@ -330,8 +354,9 @@ sg_new
 sg_set fail_at 'push -q origin cs193v-setup'
 sg_run fail-push happy stuck
 sg_says "fail-push:blames-contents" err.push "$SG_OUT"
-sg_has     "fail-push:says-read-and-write" "Read and write" "$SG_OUT"
-sg_has     "fail-push:says-the-token-can-be-kept" "You do not need to make a new token" "$SG_OUT"
+# err.push interpolates nothing, so the assertion by key above it is the whole message --
+# which is what fail-push:says-read-and-write and :says-the-token-can-be-kept quoted a sentence
+# of each. Both are retired into it.
 # THE ONE OCCURRENCE COUNT THAT IS NOT sg_has_times, because its needle is an ALTERNATION and that
 # helper searches for a literal (#207). Same three decisions as its header records -- sg_plain
 # first, `grep -c .` rather than `wc -l` -- spelled out here because one call site cannot borrow
@@ -375,7 +400,7 @@ sg_says_not "wrong-owner:not-the-generic-checklist" err.clone "$SG_OUT"
 # the box a student sent staff for every clone and pull failure, not an edge case.
 sgbox="$(sg_box "$SG_OUT")"
 assert_says "wrong-owner:box-quotes-the-clone-failure"    "fatal: repository not found" "$sgbox"
-assert_says "wrong-owner:box-reports-the-clone-exit-code" "Exit code: 128"              "$sgbox"
+assert_says "wrong-owner:box-reports-the-clone-exit-code" "$SGD_RC 128"                "$sgbox"
 sg_has_not  "wrong-owner:box-does-not-quote-the-owner-probe" "janedoe" "$sgbox"
 
 # Ambiguous evidence must NOT produce the specific message. An empty list means the token can see
@@ -428,8 +453,8 @@ sg_set fail_err 'gh: HTTP 403: Resource not accessible by personal access token'
 sg_run stuck happy stuck
 sgbox="$(sg_box "$SG_OUT")"
 assert_ne   "stuck:the-box-is-drawn" "" "$sgbox"
-assert_says "stuck:box-names-the-command"     "Failed command: gh issue create" "$sgbox"
-assert_says "stuck:box-reports-the-exit-code" "Exit code: 42"                   "$sgbox"
+assert_says "stuck:box-names-the-command"     "$SGD_CMD gh issue create" "$sgbox"
+assert_says "stuck:box-reports-the-exit-code" "$SGD_RC 42"               "$sgbox"
 assert_says "stuck:box-quotes-the-output" \
             "Resource not accessible by personal access token" "$sgbox"
 assert_eq "stuck:the-box-is-closed" "" "$(printf '%s\n' "$sgbox" | box_problems)"
@@ -508,7 +533,7 @@ sg_says_times "retry-sunetid:complains-twice-about-the-shape" 2 err.sunetid-inva
 assert_eq "retry-sunetid:the-row-break-is-no-longer-a-race" "2" \
           "$(sg_rows "$SG_OUT" | LC_ALL=C grep -cF "$(sg_phrase err.sunetid-invalid)" || true)"
 sg_says "retry-sunetid:has-a-separate-message-for-an-address" err.sunetid-is-an-email "$SG_OUT"
-sg_has "retry-sunetid:confirms-the-normalised-id" "You entered jdoe" "$SG_OUT"
+sg_says_sub "retry-sunetid:confirms-the-normalised-id" confirm.entered "$SG_OUT" VALUE=jdoe
 assert_match "retry-sunetid:configures-the-normalised-address" \
              'user.email jdoe@stanford.edu' "$(sg_log)"
 assert_match "retry-sunetid:clones-the-normalised-sandbox" 'clone .*sandbox-jdoe' "$(sg_log)"
@@ -521,7 +546,7 @@ sg_says "retry-sunetid:still-gets-there" status.all-set "$SG_OUT"
 # which the run above covers.
 sg_new
 sg_run typed-address happy ID=jdoe@stanford.edu
-sg_has "typed-address:confirms-just-the-id" "You entered jdoe" "$SG_OUT"
+sg_says_sub "typed-address:confirms-just-the-id" confirm.entered "$SG_OUT" VALUE=jdoe
 assert_match "typed-address:configures-the-derived-address" \
              'user.email jdoe@stanford.edu' "$(sg_log)"
 assert_match "typed-address:records-the-id-alone" 'cs193v.sunetid jdoe' "$(sg_log)"
@@ -558,9 +583,10 @@ sg_says "junk-token:says-what-one-looks-like" err.token-shape "$SG_OUT"
 # FIVE DOTS AND NO COUNT for five characters: below SG_DOTS_MAX the tally is the dots themselves,
 # because "... -1 more characters ..." is what a short typo would otherwise render as.
 sg_has_times "junk-token:draws-one-dot-per-character" 5 "•" \
-             "$(sg_final "$SG_OUT" "Your token:")"
-sg_has_not "junk-token:no-count-for-five-characters" "more characters" \
-           "$(sg_final "$SG_OUT" "Your token:")"
+             "$(sg_final "$SG_OUT" "$(sg_phrase prompt.token)")"
+sg_has_not "junk-token:no-count-for-five-characters" \
+           "$(msg_label token.more-characters N "$PRIVATE/files/setup-git-messages.txt")" \
+           "$(sg_final "$SG_OUT" "$(sg_phrase prompt.token)")"
 
 # A TRUNCATED PASTE IS THE CASE ISSUE #53 DREW, and it was accepted outright before that issue: the
 # check was the prefix, and half a token still has the prefix. It reaches `gh auth login` now only
@@ -571,7 +597,7 @@ sg_run partial-token identity checkpoint-ok partial-token account-ok HALF=$HALF
 sg_says "partial-token:says-it-is-only-part-of-one" err.token-partial "$SG_OUT"
 sg_says_not "partial-token:does-not-say-it-is-not-a-token" err.token-shape "$SG_OUT"
 # 44 = 50 - the six dots. The number a student compares against the one a whole token shows.
-sg_has "partial-token:counts-what-did-arrive" "44 more characters" "$SG_OUT"
+sg_says_sub "partial-token:counts-what-did-arrive" token.more-characters "$SG_OUT" N=44
 assert_eq "partial-token:nothing-ran-with-it" "1" "$(sg_count 'gh auth login')"
 sg_says "partial-token:then-accepts-the-right-one" status.all-set "$SG_OUT"
 
@@ -597,8 +623,8 @@ sg_run config-fails happy-to-token
 sg_says "config-fails:goes-to-staff" err.setup-failed "$SG_OUT"
 sgbox="$(sg_box "$SG_OUT")"
 assert_says "config-fails:box-names-the-command" \
-            "Failed command: git config --global pull.rebase true" "$sgbox"
-assert_says "config-fails:box-reports-the-exit-code" "Exit code: 6"          "$sgbox"
+            "$SGD_CMD git config --global pull.rebase true" "$sgbox"
+assert_says "config-fails:box-reports-the-exit-code" "$SGD_RC 6"          "$sgbox"
 assert_says "config-fails:box-quotes-the-output" "could not lock config file" "$sgbox"
 assert_eq "config-fails:never-reached-the-login" "0" "$(sg_count 'gh auth login')"
 
@@ -613,7 +639,8 @@ sg_run second-run second-run-check
 sg_says "second-run:says-it-is-already-set-up" already.configured "$SG_OUT"
 sg_has "second-run:shows-the-name"    "Jane Doe"          "$SG_OUT"
 sg_has "second-run:shows-the-address" "jdoe@stanford.edu" "$SG_OUT"
-sg_has "second-run:shows-the-sunetid" "Your SUNetID: jdoe" "$SG_OUT"
+sg_has "second-run:shows-the-sunetid" \
+       "$(msg_label already.configured ID "$PRIVATE/files/setup-git-messages.txt") jdoe" "$SG_OUT"
 sg_has "second-run:shows-the-account" "@janedoe"          "$SG_OUT"
 sg_says_not "second-run:does-not-ask-again" prompt.sunetid "$SG_OUT"
 sg_says "second-run:just-checks-and-passes" status.all-set "$SG_OUT"
@@ -629,7 +656,7 @@ sg_new
 sg_touch auth_token
 printf 'user.name=Wrong Name\nuser.email=wrong@stanford.edu\ncs193v.sunetid=wrong\n' > "$SGSHIM/gitconfig"
 sg_run start-over second-run-start-over happy
-sg_has "start-over:asks-for-the-sunetid-again" "What is your SUNetID" "$SG_OUT"
+sg_says "start-over:asks-for-the-sunetid-again" prompt.sunetid "$SG_OUT"
 assert_match "start-over:configures-the-new-answer" 'user.email jdoe@stanford.edu' "$(sg_log)"
 assert_match "start-over:records-the-new-sunetid" 'cs193v.sunetid jdoe' "$(sg_log)"
 # THE STALE ANSWER IS CLEARED, ALL OF IT. `wrong` was in the config when this started, so a

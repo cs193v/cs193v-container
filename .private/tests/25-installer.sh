@@ -456,9 +456,10 @@ fi
 # all and the installer should say so rather than asking a pointless question.
 shim_new
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noconsent" || true)"
-assert_says "consent:nothing-to-change-when-already-set-up" \
-            "Nothing on your computer needs to change" "$out"
-assert_says "consent:reports-the-existing-podman" "podman 5.7.0" "$out"
+assert_says_key "consent:nothing-to-change-when-already-set-up" step.nothing-to-change \
+                "$out" "$ICAT"
+# THE VERSION IS THE ASSERTION, so it is rendered in rather than quoted with the prose around it.
+assert_says_sub "consent:reports-the-existing-podman" ok.podman "$out" "$ICAT" V=5.7.0
 
 
 # ─── run as root: refused before it looks at anything  (#226) ──────────────────
@@ -593,9 +594,11 @@ record "podman-old:the-branch-measured-here" "$(uname -s) / ${po_fix}"
 # which is the trap this file's own header records for version_lt.
 assert_ne "podman-old:the-floor-was-readable" "" "$po_floor"
 assert_ne "podman-old:the-fix-was-readable"   "" "$po_fix"
-assert_says "podman-old:refused"            "needs $po_floor or newer" "$out"
-assert_says "podman-old:names-what-it-found" "Podman 4.3.1"            "$out"
-assert_says "podman-old:says-how-to-upgrade" "$po_fix"                 "$out"
+# ONE RENDERED MESSAGE WHERE THERE WERE THREE QUOTES, and all three of the values stay: the
+# floor and the upgrade command were already read out of the installer ($po_floor, $po_fix above)
+# and 4.3.1 is what this case faked. What is gone is the prose between them.
+assert_says_sub "podman-old:refused" err.podman-old-linux "$out" "$ICAT" \
+                V=4.3.1 "MIN=$po_floor" "UPGRADE=$po_fix"
 assert_no_file "podman-old:changes-nothing" "$TMP/old"
 
 # podman missing entirely is NOT here, and the reason is worth writing down rather than
@@ -1138,13 +1141,14 @@ mac_tty() {                           # mac_tty [KEY VALUE]... -> the raw pty tr
 # The gate on everything below: if this fails, every other assertion here is failing
 # because the run is still on Linux, not because of anything to do with a machine.
 out="$(mac_run)"
-assert_says "mac:platform-is-detected" "macos on arm64" "$out"
+assert_says_sub "mac:platform-is-detected" ok.platform "$out" "$ICAT" PLAT=macos ARCH=arm64
 
 # ─── nothing exists yet -> init  (survey's machine-list-empty arm) ─────────────
 # init is announced with ok(), not need(), so it is the one machine change that needs no
 # consent -- which is what makes this reachable with no tty at all.
 assert_says_key "mac-init:announced-in-the-survey" ok.vm-will-be-created "$out" "$ICAT"
-assert_says "mac-init:names-the-size-it-will-use" "8192 MB, 64 GB disk" "$out"
+assert_says_sub "mac-init:names-the-size-it-will-use" step.machine-create "$out" "$ICAT" \
+                WANT=8192 DISK=64
 assert_says_key "mac-init:reports-success" ok.machine-created "$out" "$ICAT"
 # The flags, not just the prose: --now matters (without it the machine is created stopped
 # and every later podman call fails), and the two values must be the computed ones.
@@ -1213,8 +1217,8 @@ assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 # ─── a machine that is too small -> the resize is OFFERED  (survey :384-387) ───
 # 80% of 8192 is 6553, so 4096 is under it and 16384 is over.
 out="$(mac_run machine_list podman-machine-default machine_mem 4096)"
-assert_says "mac-resize:offered-when-the-vm-is-small" \
-            "more memory (4096 MB -> 8192 MB)" "$out"
+assert_says_sub "mac-resize:offered-when-the-vm-is-small" need.vm-memory "$out" "$ICAT" \
+                HAVE=4096 WANT=8192
 assert_says_key "mac-resize:explains-why-a-mac-needs-it" need.vm-memory.why "$out" "$ICAT"
 # EVERY NEGATIVE BELOW IS PAIRED WITH A POSITIVE OFF THE SAME VALUE. An empty argv.log --
 # a wrong path, a run that never started -- satisfies `machine set is absent` perfectly,
@@ -1241,7 +1245,8 @@ assert_says_not_key "mac-inspect-empty:does-not-offer-a-resize" need.vm-memory "
 # ─── growing the disk, on the path where nothing else stopped the machine ──────
 # grow_machine_disk_when_stopped, reached only through the skip arm above.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32)"
-assert_says "mac-disk:grows-a-disk-that-is-too-small" "from 32 GB to 64 GB" "$out"
+assert_says_sub "mac-disk:grows-a-disk-that-is-too-small" note.growing-disk "$out" "$ICAT" \
+                HAVE=32 WANT=64
 assert_says_key "mac-disk:says-it-costs-nothing-up-front" note.growing-disk "$out" "$ICAT"
 assert_says "mac-disk:asks-podman-to-grow-it" 'machine set --disk-size 64' "$(installer_log)"
 
@@ -1324,11 +1329,15 @@ probe_survey() {                      # probe_survey -> the installer's output
 probe_setup present
 out="$(probe_survey)"
 # The gate: if this fails, everything below is failing because the run never got past survey.
-assert_says "probe:the-survey-run-reached-macos"    "macos on arm64" "$out"
-assert_says "probe:the-installer-reports-the-podman-it-found" "podman 5.7.0" "$out"
-assert_says "probe:the-installer-says-where-it-found-it" \
-            "podman is installed in $IOFF" "$out"
-assert_says_key "probe:the-installer-explains-the-path"  note.podman-path "$out" "$ICAT"
+assert_says_sub "probe:the-survey-run-reached-macos" ok.platform "$out" "$ICAT" \
+                PLAT=macos ARCH=arm64
+assert_says_sub "probe:the-installer-reports-the-podman-it-found" ok.podman "$out" "$ICAT" V=5.7.0
+# ONE RENDERED MESSAGE FOR THE PAIR. probe:the-installer-explains-the-path was the other half --
+# it asserted note.podman-path by key, which stops at {{DIR}} -- and this one quoted the prose in
+# front of $IOFF. Rendered with the directory, one needle makes both claims: the note arrived,
+# and it names the directory the repair really resolved.
+assert_says_sub "probe:the-installer-says-where-it-found-it" note.podman-path "$out" "$ICAT" \
+                "DIR=$IOFF"
 # THE NEGATIVE, and its positive is the pair above. BY KEY, and the macOS key: probe_survey
 # fakes a Mac, so need.podman-mac.why is the body this run could have printed. The two arms say
 # the same thing today, which is why the old quoted needle needed no platform gate -- and is
@@ -1346,7 +1355,8 @@ assert_says "probe:the-installer-really-ran-that-podman" "--version" "$(installe
 # would leave a student with no podman and no offer to install one.
 probe_setup absent
 out="$(probe_survey)"
-assert_says "probe:the-survey-absent-run-reached-macos" "macos on arm64" "$out"
+assert_says_sub "probe:the-survey-absent-run-reached-macos" ok.platform "$out" "$ICAT" \
+                PLAT=macos ARCH=arm64
 assert_says_key "probe:the-installer-offers-to-install-a-podman-that-really-is-absent" \
                 need.podman-mac.why "$out" "$ICAT"
 assert_says_not "probe:it-claims-no-directory-when-there-is-none" \
@@ -1390,7 +1400,10 @@ assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
 # the script hands its helpers was in this output too, and "podman" matched the trace rather
 # than the refusal. #231 deleted the tracing, so that reading is gone; the needle stays because
 # it is the more precise of the two either way.
-assert_says     "password:no-sudo-names-what-wanted-root" "- Install Podman" "$out"
+# THE LIST ITEM, which is root_wants()'s "  - " prefix and then the consent item's own label out
+# of the catalogue. The prefix is this script's, so it stays spelled out; the label does not.
+assert_says     "password:no-sudo-names-what-wanted-root" \
+                "- $(msg_of_in "$ICAT" need.podman-mac)" "$out"
 assert_says_not_key "password:no-sudo-asks-no-permission" step.consent "$out" "$ICAT"
 assert_says_not_key "password:no-sudo-does-not-claim-success" finished "$out" "$ICAT"
 assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
@@ -1557,7 +1570,8 @@ assert_ok "half-tree:but-still-has-what-the-bootstrap-needs" \
 out="$(run_with_tarball "$TMP/half-tree.tar.gz" "$TMP/broken-half")"
 assert_says_not_key "half-tree:does-not-claim-success"   finished "$out" "$ICAT"
 assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
-assert_says     "half-tree:names-the-missing-file"   "cs193v is missing" "$out"
+assert_says_sub "half-tree:names-the-missing-file" err.unpack-incomplete "$out" "$ICAT" \
+                FILE=cs193v
 assert_says_key     "half-tree:blames-the-unpacking"     err.unpack-incomplete "$out" "$ICAT"
 # AND THE OTHER SIDE OF THE HAND-OVER. `exec` replaced the bootstrap and took its EXIT trap with
 # it, so here the tree can only be removed by course-install.sh -- on a path that refuses, not

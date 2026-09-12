@@ -317,6 +317,33 @@ sg_phrase() {                         # sg_phrase KEY -> its prose, markup remov
 }
 # An unknown or all-placeholder key fails rather than passing vacuously — the same trap
 # assert_says_key records, and worse in the negative form, where an empty needle passes always.
+# THE THREE NEEDLES sg_phrase CANNOT BUILD, and they are the same three lib/assert.sh grew for
+# the launcher's catalogue: sg_phrase is msg_text, so it stops at the first {{ }} -- which for
+# token.byhand is item 3 of eight, for confirm.entered is the third word, and for err.clone is
+# the second line. Markup is stripped the same way sg_phrase strips it, because setup-git renders
+# through emph_stream and the *asterisks* are never on the screen.
+sg_render() {                         # sg_render KEY [NAME=VALUE...] -> its prose, expanded, markup removed
+    local k="$1"; shift
+    msg_of_in "$SGM" "$k" "$@" | do_tr -d '*' | do_tr '\n' ' ' \
+        | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//'
+}
+sg_phrase_tail() {                    # sg_phrase_tail KEY -> its prose after the last {{ }}, markup removed
+    msg_text_tail "$1" "$SGM" | do_tr -d '*' | LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g'
+}
+sg_says_sub() {                       # sg_says_sub NAME KEY TEXT [NAME=VALUE...]
+    local n="$1" k="$2" t="$3"; shift 3
+    local phrase; phrase="$(sg_render "$k" "$@")"
+    case "$phrase" in
+        ''|' ') fail "$n" "no prose for key: $k" ; return 0 ;;
+        *'(missing message'*) fail "$n" "no such key: $k" ; return 0 ;;
+    esac
+    assert_contains "$n" "$phrase" "$(sg_plain "$t")"
+}
+sg_says_tail() {                      # sg_says_tail NAME KEY TEXT
+    local phrase; phrase="$(sg_phrase_tail "$2")"
+    case "$phrase" in ''|' ') fail "$1" "no prose after the last placeholder in: $2"; return 0 ;; esac
+    assert_contains "$1" "$phrase" "$(sg_plain "$3")"
+}
 sg_says() {                           # sg_says NAME KEY TEXT
     local phrase; phrase="$(sg_phrase "$2")"
     case "$phrase" in ''|' ') fail "$1" "no literal prose for key: $2"; return 0 ;; esac
