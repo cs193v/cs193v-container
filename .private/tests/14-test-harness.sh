@@ -2089,7 +2089,18 @@ record    "sgtimes:ambient-locale-count" "$sgt_ambient"
 #    make the parenthetical OPTIONAL, so the bare stem matches too and a decoy row scores. The
 #    needle comes from the catalogue rather than being quoted, which is the point: nobody
 #    choosing a key gets to audit it for regex metacharacters first.
-sgt_decoy="$(printf 'a What is your SUNetID (e.g. htiek, szum)? jdoe\nb What is your SUNetID (e.g. htiek, szum)? jdoe\nc What is your SUNetID somewhere else\n')"
+#
+#    AND THE DECOY TRANSCRIPT IS BUILT FROM THE CATALOGUE TOO, which it was not: the three rows
+#    below used to carry a typed copy of prompt.sunetid, so rewording that prompt left the needle
+#    and the haystack disagreeing and this case went red for a change that was not a regression.
+#    Reworded, the ERE hazard travels with the prose -- the trailing `?` is only a hazard while
+#    the prompt ends in one -- so sgtimes:and-an-ere-would-have-said-three below is what says
+#    whether this fixture is still exercising the bug, and it reads the same string.
+# NAMED HERE, not borrowed from sgp's subshell: that copy is set INSIDE the subshell, where the
+# shim's sg_phrase reads it, and is gone by the time this line runs.
+sgt_prompt="$(msg_text prompt.sunetid "$PRIVATE/files/setup-git-messages.txt")"
+sgt_decoy="$(printf 'a %s jdoe\nb %s jdoe\nc %s somewhere else\n' \
+                    "$sgt_prompt" "$sgt_prompt" "${sgt_prompt%% (*}")"
 assert_eq "sgtimes:the-needle-is-a-literal-not-a-pattern" "PASS" \
           "$(sgp sg_says_times probe 2 prompt.sunetid "$sgt_decoy")"
 # THE NEGATIVE ARM, because "it passed" is also what a helper that never counted anything would
@@ -2098,7 +2109,7 @@ assert_eq "sgtimes:the-needle-is-a-literal-not-a-pattern" "PASS" \
 assert_contains "sgtimes:and-scoring-it-three-would-have-failed" "actual:   2" \
           "$(sgp sg_says_times probe 3 prompt.sunetid "$sgt_decoy")"
 assert_eq "sgtimes:and-an-ere-would-have-said-three" "3" \
-          "$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE 'What is your SUNetID (e.g. htiek, szum)?' | LC_ALL=C grep -c . || true)"
+          "$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE "$sgt_prompt" | LC_ALL=C grep -c . || true)"
 
 # 5. NO PADDING ON THE NUMBER, which is why this is `grep -c .` and not `wc -l`. BSD wc pads to a
 #    column, which is why the two call sites this replaced carried a `do_tr -d ' '`. TWO

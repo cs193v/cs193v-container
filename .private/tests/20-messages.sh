@@ -154,6 +154,23 @@ root_whys="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" | grep -A3 
               | grep -ohE 'need\.[a-z0-9.-]+\.why' | LC_ALL=C sort -u)"
 assert_ne "itext:there-are-root-requiring-consent-items" "" "$root_whys"
 record "itext:the-root-requiring-consent-items" "$(printf '%s' "$root_whys" | do_tr '\n' ' ')"
+# RECORDED, NOT ASSERTED, AND THAT IS A DELIBERATE LOSS. This was
+# itext:every-root-requiring-why-says-password: it read every root-requiring need.*.why and
+# FAILED on any that did not contain the word "password", which made #226's promise -- that a
+# student is told a password is coming before anything asks for one -- a thing the suite held.
+#
+# It is also the last assertion in this tree that dictated the WORDING of a student-facing
+# message, and the whole point of the catalogue is that its wording belongs to whoever is
+# teaching the course. "Needs your password" is not the only way to say it, and a suite that
+# reddens on "will ask you to authenticate" is punishing an improvement.
+#
+# WHAT STILL HOLDS THE PROMISE. The announcement itself is asserted by key, in the two places
+# where it is a claim about the CODE rather than about prose: 25-installer.sh's
+# password:announced-before-it-is-asked and password:the-step-is-announced put note.password-why
+# and step.password on the screen before ask_password runs, and
+# password:silent-when-no-password-is-needed is the control. What is no longer checked is that
+# each individual consent item repeats it -- so this line prints the list instead, and anyone
+# adding a seventh privileged step can see at a glance whether its `why` says so.
 nopw=''
 for k in $root_whys; do
     case "$(msg_text "$k" "$ICAT")" in
@@ -161,7 +178,8 @@ for k in $root_whys; do
         *) nopw="$nopw $k" ;;
     esac
 done
-assert_eq "itext:every-root-requiring-why-says-password" "" "$nopw"
+record "itext:root-requiring-whys-that-do-not-mention-a-password" \
+       "$(printf '%s' "$nopw" | sed 's/^ *//')"
 
 # A MISSING KEY MUST BE LOUD. msg() is what die() reaches for, so a typo'd key that returned
 # nothing would draw an EMPTY red STOP box at the moment a student most needs the diagnosis --
@@ -184,7 +202,11 @@ assert_says "itext:a-real-key-renders" "$(msg_text err.podman-mute "$ICAT")" "$(
 # Placeholders really substitute, including into a multi-line value -- err.podman-old-mac
 # interpolates {{HOW}}, which is itself two catalogue entries deep.
 isub="$(imsg err.subuid-failed "USER=someone")"
-assert_says     "itext:a-placeholder-is-filled-in"  "for someone." "$isub"
+# THE VALUE, not the prose it lands in. This was "for someone." -- the word "for" is
+# err.subuid-failed's, so the needle pinned the wording of the message as well as the
+# substitution. "someone" is what this line passed in, and the pair with no-placeholder-is-left-
+# over below makes the whole claim: the value arrived and the braces went away.
+assert_says     "itext:a-placeholder-is-filled-in"  "someone" "$isub"
 assert_says_not "itext:no-placeholder-is-left-over" "{{" "$isub"
 # AND THE STAFF-NOTE RULE HOLDS ON THIS FILE TOO, which matters more here than anywhere: the
 # installer's notes were comments in a shell heredoc and are now column-0 hashes in a catalogue,
