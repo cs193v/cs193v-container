@@ -528,7 +528,12 @@ out="$(msg err.create-failed OUT="$multi" 2>&1)"
 assert_contains "msg:multiline-keeps-first-line"  "Error: preparing container failed" "$out"
 assert_contains "msg:multiline-keeps-middle-line" "cannot set up pasta"               "$out"
 assert_contains "msg:multiline-keeps-last-line"   "netavark: unable to bind"          "$out"
-assert_says "msg:multiline-keeps-surrounding-prose" "cs193v doctor"               "$out"
+# BOTH SIDES, BY KEY. This used to quote "cs193v doctor", which is prose the remedy paragraph
+# happened to contain -- so rewording the paragraph reddened it, which is the wrong change to
+# punish. The head is what msg_text reaches and the tail is what msg_text_tail does; between
+# them they are the whole message except the value under test, and neither names a word of it.
+assert_says_key      "msg:multiline-keeps-surrounding-prose" err.create-failed "$out"
+assert_says_key_tail "msg:multiline-keeps-the-prose-after-it" err.create-failed "$out"
 assert_not_contains "msg:multiline-no-sed-error"  "unterminated"                      "$out"
 assert_not_contains "msg:multiline-substitutes"   "{{OUT}}"                           "$out"
 
@@ -974,7 +979,10 @@ assert_contains "die:banner-drawn"          "STOP"                              
 assert_contains "die:shows-podman-line-1"   "preparing container failed"        "$out"
 assert_contains "die:shows-podman-line-2"   "cannot set up pasta"               "$out"
 assert_contains "die:shows-podman-line-3"   "iptables chain creation failed"    "$out"
-assert_says "die:shows-next-step"       "cs193v doctor"                     "$out"
+# THE PARAGRAPH AFTER THE OUTPUT, which is where "what to do next" lives in every message that
+# interpolates podman: the diagnosis comes first, then podman's own words, then the remedy. That
+# last paragraph is the one a quoted needle kept getting wrong, and msg_text stops before it.
+assert_says_key_tail "die:shows-next-step" err.create-failed "$out"
 assert_not_contains "die:no-sed-error"      "unterminated"                      "$out"
 # Every line of the message must be inside the box, not spilling out beneath it.
 body_lines="$(printf '%s\n' "$out" | grep -c '┃' || true)"
@@ -1095,8 +1103,13 @@ if [ -z "$probs" ]; then
 else
     fail "installer:intel-mac-box-is-closed" "$probs"
 fi
-assert_says "installer:intel-mac-says-why" "This Mac has an Intel processor." "$out"
-assert_says "installer:intel-mac-says-what-next" "contact course staff BEFORE the first lab" "$out"
+# ONE ASSERTION WHERE THERE WERE TWO, and it is the stronger of the two rather than a merge.
+# err.intel-mac interpolates nothing, so its whole body is a literal needle -- and a needle that
+# is the whole body already contains the diagnosis AND the remedy, which is what the pair of
+# quoted phrases ("This Mac has an Intel processor." and "contact course staff BEFORE the first
+# lab") were checking one each. The second name is gone because there is nothing left for it to
+# claim that this does not; #219's rewording is what showed that, by reddening only one of them.
+assert_says_key "installer:intel-mac-says-why" err.intel-mac "$out" "$ICAT"
 
 # The systemd=false refusal (#228). It is the fourth box this script can draw and the only one
 # that quotes the student's own file back at them. Whether {{LINE}} is a placeholder somebody
