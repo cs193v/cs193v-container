@@ -432,8 +432,8 @@ assert_eq   "consent:non-tty-exits-0"       "0" \
             "$(run_consent >/dev/null 2>&1; printf '%s' "$?")"
 assert_no_file "consent:declining-creates-no-directory" "$TMP/consent"
 # It must say WHAT it wants permission for, and why, before asking.
-assert_says "consent:names-what-it-wants" "subuid range" "$out"
-assert_says "consent:explains-why"        "needs your password" "$out"
+assert_says_key "consent:names-what-it-wants" need.subuid "$out" "$ICAT"
+assert_says_key "consent:explains-why"        need.subuid.why "$out" "$ICAT"
 # AND IT MUST LEAVE NOTHING OF THE COURSE ON A MACHINE WHOSE OWNER SAID NO. That used to be
 # asserted as "it never reaches the download", which the #221 split inverts: the bootstrap now
 # fetches the tree before this script exists to ask anything, so the transcript DOES say
@@ -487,7 +487,7 @@ assert_says_key "root:says-why" err.as-root "$out" "$PRIVATE/course-install-mess
 # a claim about the code rather than about this transcript. Being root is a property of the
 # invocation, not of the computer, so it is not something the "Looking at your computer" step
 # has any business reporting.
-assert_says_not "root:refuses-before-it-looks" "Looking at your computer" "$out"
+assert_says_not_key "root:refuses-before-it-looks" step.survey "$out" "$ICAT"
 assert_says_not_key "root:does-not-claim-success"  finished "$out" "$ICAT"
 assert_eq "root:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/asroot2")"
@@ -631,9 +631,11 @@ chmod 755 "$TMP/ro"
 shim_new
 shim_set info_rc 1
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman")"
-assert_says "podman-mute:refuses-to-continue"   "Podman is installed but is not answering" "$out"
-assert_says "podman-mute:suggests-the-mac-fix"  "podman machine start" "$out"
-assert_says "podman-mute:changed-nothing-more"  "Nothing further has been changed" "$out"
+# ONE ASSERTION, BY KEY. err.podman-mute is two lines -- the diagnosis and the Mac fix -- and
+# these quoted one each, so a reworded second line would redden half of a message that printed
+# perfectly. podman-mute:suggests-the-mac-fix is retired into this; the body carries both.
+assert_says_key "podman-mute:refuses-to-continue" err.podman-mute "$out" "$ICAT"
+assert_says_key "podman-mute:changed-nothing-more"  die.trailer "$out" "$ICAT"
 assert_says_not_key "podman-mute:does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "podman-mute:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman2")"
@@ -673,9 +675,12 @@ shim_new; shim_fake_mac
 # menu. "It finished" passed while every assertion about the resize failed.
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
 out="$(installer_tty '\033[B\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
-assert_says "consent-yes:the-arrow-moved-the-selection" "Go ahead" "$out"
-assert_says "consent-yes:the-resize-ran"     "Resizing podman's virtual machine to 8192 MB" "$out"
-assert_says "consent-yes:reports-the-resize" "resized and restarted" "$out"
+assert_says_key "consent-yes:the-arrow-moved-the-selection" menu.consent.go "$out" "$ICAT"
+# RENDERED, because 8192 is what the code decided rather than what the catalogue says.
+# step.machine-resize is "Resizing podman's virtual machine to {{WANT}} MB", so the prose comes
+# from the file and only the number is the assertion.
+assert_says_sub "consent-yes:the-resize-ran" step.machine-resize "$out" "$ICAT" WANT=8192
+assert_says_key "consent-yes:reports-the-resize" ok.machine-resized "$out" "$ICAT"
 assert_says_key "consent-yes:finishes"           finished "$out" "$ICAT"
 # The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
 # before setting memory -- podman refuses to change a running one -- and start it again.
@@ -698,7 +703,7 @@ assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer
 shim_new; shim_fake_mac
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
 out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
-assert_says "consent-digit:selects-and-accepts" "resized and restarted" "$out"
+assert_says_key "consent-digit:selects-and-accepts" ok.machine-resized "$out" "$ICAT"
 
 # ─── setup_subuid, executing for the first time ────────────────────────────────
 # The one privileged call reachable from here. sudo-fake records it and runs nothing, so what
@@ -707,8 +712,8 @@ assert_says "consent-digit:selects-and-accepts" "resized and restarted" "$out"
 if linux_arm; then
 shim_new; shim_fake_id 1000 nosuchuser-cs193v
 out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
-assert_says "subuid:step-announced" "Setting up your account's ID range" "$out"
-assert_says "subuid:reports-success" "subuid range added for nosuchuser-cs193v" "$out"
+assert_says_key "subuid:step-announced" step.subuid "$out" "$ICAT"
+assert_says_sub "subuid:reports-success" ok.subuid "$out" "$ICAT" USER=nosuchuser-cs193v
 assert_says "subuid:asks-root-for-the-right-range" \
             "usermod --add-subuids 200000-265535 --add-subgids 200000-265535 nosuchuser-cs193v" \
             "$(sudo_log)"
@@ -728,7 +733,7 @@ out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ans
 # paragraph it pointed at and nothing about it was separately assertable afterwards.
 assert_says_sub "subuid-fails:names-the-account" err.subuid-failed "$out" "$ICAT" \
                 USER=nosuchuser-cs193v
-assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out"
+assert_says_not_key "subuid-fails:does-not-claim-success" ok.subuid "$out" "$ICAT"
 else
 # subuid-fails:* is the one pair with NO container equivalent yet: it needs a sudo that works for
 # everything except `usermod`, and SB_SUDO offers only nopasswd/password/deny/absent -- `deny`
@@ -898,7 +903,7 @@ SGR="$(printf '\033')\[[0-9;]*m"
 raw="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | pre)"
 if printf '%s' "$raw" | grep -q "$SGR"; then pass "colour:on-with-a-terminal"
 else fail "colour:on-with-a-terminal" "no colour sequences in a pty transcript"; fi
-assert_says "colour:the-coloured-run-got-that-far" "Looking at your computer" "$raw"
+assert_says_key "colour:the-coloured-run-got-that-far" step.survey "$raw" "$ICAT"
 
 shim_new
 raw="$(installer_tty '\n' "$TMP/installer.sh" NO_COLOR=1 CS193V_DIR="$SHIM/dest" | pre)"
@@ -906,7 +911,7 @@ if printf '%s' "$raw" | grep -q "$SGR"; then
     fail "colour:NO_COLOR-suppresses-it" "colour sequences survived NO_COLOR=1"
 else pass "colour:NO_COLOR-suppresses-it"; fi
 # ...and the run really ran, so the check above is not passing on an empty transcript.
-assert_says "colour:NO_COLOR-run-got-that-far" "Looking at your computer" "$raw"
+assert_says_key "colour:NO_COLOR-run-got-that-far" step.survey "$raw" "$ICAT"
 
 DEST="$TMP/dest"
 # A TMPDIR OF ITS OWN, so "did the bootstrap clean up after itself" is answerable (#221). The
@@ -935,7 +940,7 @@ assert_says_key "install:first-run-finishes"     finished  "$out1" "$ICAT"
 # the only thing that can remove the unpacked tree is course-install.sh itself. A leak here is a
 # full copy of the repo left in /tmp by every install anyone ever runs.
 assert_eq "install:the-bootstrap-temp-tree-is-removed" "" "$(boot_leftovers)"
-assert_says "install:first-run-fetched"      "course files"    "$out1"
+assert_says_key "install:first-run-fetched"      step.fetch    "$out1" "$ICAT"
 assert_file "install:launcher-installed"     "$DEST/cs193v"
 assert_exec "install:launcher-executable"    "$DEST/cs193v"
 assert_file "install:args-installed"         "$DEST/.config/container.args"
@@ -943,7 +948,7 @@ assert_file "install:messages-installed"     "$DEST/.private/messages.txt"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
 # ...and the UNIX run is the UNIX one: the Windows step must not leak into it.
-assert_says_not "install:no-wsl-step-without-the-flag" "wsl -d CS193V" "$out1"
+assert_says_not_key "install:no-wsl-step-without-the-flag" finished.windows "$out1" "$ICAT"
 
 # Now the actual §A.12 property. Everything except projects/ must be byte-identical: the
 # second run recomputes nothing and rewrites nothing.
@@ -966,7 +971,7 @@ fi
 assert_eq "install:student-work-survives-a-rerun" "my work" \
           "$(cat "$DEST/projects/my-app/index.js" 2>/dev/null)"
 # Re-running must report already-satisfied steps rather than redoing them.
-assert_says "install:reports-already-done" "already done" "$out2"
+assert_says_key "install:reports-already-done" skip.suffix "$out2" "$ICAT"
 
 # ─── the Windows sign-off, which is the same run with one variable set  (#218) ─
 #
@@ -988,19 +993,26 @@ shim_new
 WINDEST="$TMP/windest"
 outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTMP" \
                        CS193V_WINDOWS=1)"
-assert_says_key "win-signoff:finishes"                     finished.windows "$outw" "$ICAT"
-assert_says "win-signoff:names-the-wsl-step"           "wsl -d CS193V"   "$outw"
-assert_says "win-signoff:the-cd-follows-the-chosen-dir" "cd $WINDEST"    "$outw"
-# The whole UNC path, not its prefix: the prefix is a constant and would still match with the
-# directory half wrong, which is precisely the defect this case exists for.
-assert_says "win-signoff:the-unc-path-follows-it-too" \
-            "$(printf '%s' "\\\\wsl.localhost\\CS193V$WINDEST/projects" | do_tr / '\\')" "$outw"
+# THE WHOLE SIGN-OFF, RENDERED WITH ALL FOUR VALUES, which is what makes one assertion out of
+# four. They were win-signoff:finishes, :names-the-wsl-step, :the-cd-follows-the-chosen-dir and
+# :the-unc-path-follows-it-too -- the sign-off quoted a phrase at a time, so rewording any of it
+# reddened some of them and left the rest green. say_done (course-install.sh:199) supplies DIR,
+# DISTRO, USER and UNC; this supplies the same four and asserts the result arrived entire, which
+# covers every one of those claims including the two that were really about $WINDEST.
+#
+# THE UNC PATH IS STILL THE INTERESTING ONE and is still built here rather than quoted: its
+# prefix is a constant that would match with the directory half wrong, which is the defect this
+# case exists for. Supplying it as {{UNC}} means the needle can only match if the message and
+# win_projects_path agree about it.
+assert_says_sub "win-signoff:finishes" finished.windows "$outw" "$ICAT" \
+                "DIR=$WINDEST" DISTRO=CS193V "USER=$(id -un)" \
+                "UNC=$(printf '%s' "\\\\wsl.localhost\\CS193V$WINDEST/projects" | do_tr / '\\')"
 # AND THE UNIX ENTRY WAS NOT THE ONE PRINTED, asserted on the one phrase that differs rather
 # than on the advice, because nearly all of the advice is shared: both entries name the same
 # directory, the same ./cs193v and the same reassurance about closing the window. "To start
 # working:" belongs to [[finished]] and "To start:" to [[finished.windows]], so this is the
 # thing that goes red if say_done ever stops choosing between them.
-assert_says_not "win-signoff:is-not-the-unix-sign-off" "To start working:" "$outw"
+assert_says_not_key "win-signoff:is-not-the-unix-sign-off" finished "$outw" "$ICAT"
 
 # ─── check_disk, which no mechanism could reach before ─────────────────────────
 # check_disk asks podman for two Store fields (installer's check_disk), and podman-fake's
@@ -1128,17 +1140,17 @@ assert_says "mac:platform-is-detected" "macos on arm64" "$out"
 # ─── nothing exists yet -> init  (survey's machine-list-empty arm) ─────────────
 # init is announced with ok(), not need(), so it is the one machine change that needs no
 # consent -- which is what makes this reachable with no tty at all.
-assert_says "mac-init:announced-in-the-survey" "virtual machine will be created" "$out"
+assert_says_key "mac-init:announced-in-the-survey" ok.vm-will-be-created "$out" "$ICAT"
 assert_says "mac-init:names-the-size-it-will-use" "8192 MB, 64 GB disk" "$out"
-assert_says "mac-init:reports-success" "created and started" "$out"
+assert_says_key "mac-init:reports-success" ok.machine-created "$out" "$ICAT"
 # The flags, not just the prose: --now matters (without it the machine is created stopped
 # and every later podman call fails), and the two values must be the computed ones.
 assert_says "mac-init:asks-for-the-computed-size" \
             'machine init --memory 8192 --disk-size 64 --now' "$(installer_log)"
-assert_says_not "mac-init:does-not-also-resize" "Resizing" "$out"
+assert_says_not_key "mac-init:does-not-also-resize" step.machine-resize "$out" "$ICAT"
 
 out="$(mac_run machine_init_rc 1)"
-assert_says "mac-init:failure-is-fatal" "Could not create the podman virtual machine" "$out"
+assert_says_key "mac-init:failure-is-fatal" err.machine-create "$out" "$ICAT"
 assert_says_not_key "mac-init:failure-does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
 
@@ -1186,7 +1198,7 @@ assert_contains "machinebox:the-box-shows-what-podman-said" "┃ Copying blob sh
 macscreen="$(printf '%s' "$macraw" | render_pty)"
 assert_not_contains "machinebox:the-box-is-gone-at-the-end" "┏━━━━" "$macscreen"
 assert_match "machinebox:the-bar-fills-only-at-the-end" '✓ .*\] +2/2' "$macscreen"
-assert_says "machinebox:the-step-still-reports-success" "created and started" "$macscreen"
+assert_says_key "machinebox:the-step-still-reports-success" ok.machine-created "$macscreen" "$ICAT"
 
 # THE FAILURE ARM: the block closes before the STOP box rather than under it, and the refusal
 # carries what podman said -- which it could not point at any more (ERRORS.md B17).
@@ -1201,51 +1213,51 @@ assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 out="$(mac_run machine_list podman-machine-default machine_mem 4096)"
 assert_says "mac-resize:offered-when-the-vm-is-small" \
             "more memory (4096 MB -> 8192 MB)" "$out"
-assert_says "mac-resize:explains-why-a-mac-needs-it" "fixed amount of memory" "$out"
+assert_says_key "mac-resize:explains-why-a-mac-needs-it" need.vm-memory.why "$out" "$ICAT"
 # EVERY NEGATIVE BELOW IS PAIRED WITH A POSITIVE OFF THE SAME VALUE. An empty argv.log --
 # a wrong path, a run that never started -- satisfies `machine set is absent` perfectly,
 # and VERIFICATION.md records assert_not_contains as a measured vacuity blind spot: ten of
 # them passed in the sabotage run. The companion asserts a line that can only be there if
 # the installer really asked podman about a machine.
 # It needs permission, so with no tty it must change NOTHING -- including no init.
-assert_says "mac-resize:no-tty-declines"  "Nothing was changed" "$out"
+assert_says_key "mac-resize:no-tty-declines"  consent.declined "$out" "$ICAT"
 assert_says     "mac-resize:the-log-was-really-read" 'machine list' "$(installer_log)"
 assert_says_not "mac-resize:declining-touches-no-machine" 'machine set' "$(installer_log)"
 
 # ─── a machine that is big enough -> skip  (survey's else arm) ─────────────────
 out="$(mac_run machine_list podman-machine-default machine_mem 16384)"
-assert_says "mac-ok:reasonable-size-is-left-alone" "reasonable size" "$out"
-assert_says_not "mac-ok:does-not-offer-a-resize" "more memory" "$out"
+assert_says_key "mac-ok:reasonable-size-is-left-alone" skip.vm-size "$out" "$ICAT"
+assert_says_not_key "mac-ok:does-not-offer-a-resize" need.vm-memory "$out" "$ICAT"
 assert_says_key "mac-ok:still-finishes" finished "$out" "$ICAT"
 
 # inspect returning nothing must land in the SAME arm, not in the resize one: an empty
 # value would make `[ "$vm_mb" -lt ... ]` an error, so the installer guards with -n first.
 out="$(mac_run machine_list podman-machine-default machine_mem '')"
-assert_says "mac-inspect-empty:treated-as-reasonable" "reasonable size" "$out"
-assert_says_not "mac-inspect-empty:does-not-offer-a-resize" "more memory" "$out"
+assert_says_key "mac-inspect-empty:treated-as-reasonable" skip.vm-size "$out" "$ICAT"
+assert_says_not_key "mac-inspect-empty:does-not-offer-a-resize" need.vm-memory "$out" "$ICAT"
 
 # ─── growing the disk, on the path where nothing else stopped the machine ──────
 # grow_machine_disk_when_stopped, reached only through the skip arm above.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32)"
 assert_says "mac-disk:grows-a-disk-that-is-too-small" "from 32 GB to 64 GB" "$out"
-assert_says "mac-disk:says-it-costs-nothing-up-front" "does not use the space up front" "$out"
+assert_says_key "mac-disk:says-it-costs-nothing-up-front" note.growing-disk "$out" "$ICAT"
 assert_says "mac-disk:asks-podman-to-grow-it" 'machine set --disk-size 64' "$(installer_log)"
 
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 64)"
-assert_says_not "mac-disk:a-big-enough-disk-is-left-alone" "Growing" "$out"
+assert_says_not_key "mac-disk:a-big-enough-disk-is-left-alone" note.growing-disk "$out" "$ICAT"
 assert_says     "mac-disk:the-log-was-really-read" 'machine inspect' "$(installer_log)"
 assert_says_not "mac-disk:no-set-when-there-is-nothing-to-do" 'machine set' "$(installer_log)"
 
 # podman refuses to SHRINK a machine disk, so a refusal here is expected rather than
 # exceptional -- it must be a note and the install must go on.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32 machine_set_rc 1)"
-assert_says "mac-disk:a-refused-grow-is-not-fatal" "Could not grow it; continuing" "$out"
+assert_says_key "mac-disk:a-refused-grow-is-not-fatal" note.grow-failed "$out" "$ICAT"
 assert_says_key "mac-disk:still-finishes-after-a-refused-grow" finished "$out" "$ICAT"
 
 # A non-numeric DiskSize is podman's output changing shape, and the installer's own comment
 # says the harmless direction is to stop growing rather than to guess.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
-assert_says_not "mac-disk:non-numeric-size-grows-nothing" "Growing" "$out"
+assert_says_not_key "mac-disk:non-numeric-size-grows-nothing" note.growing-disk "$out" "$ICAT"
 assert_says_key "mac-disk:non-numeric-size-still-finishes" finished "$out" "$ICAT"
 
 # ─── survey does not reinstall a podman it cannot see  (issue #121) ────────────
@@ -1314,7 +1326,7 @@ assert_says "probe:the-survey-run-reached-macos"    "macos on arm64" "$out"
 assert_says "probe:the-installer-reports-the-podman-it-found" "podman 5.7.0" "$out"
 assert_says "probe:the-installer-says-where-it-found-it" \
             "podman is installed in $IOFF" "$out"
-assert_says "probe:the-installer-explains-the-path"  "does not name yet" "$out"
+assert_says_key "probe:the-installer-explains-the-path"  note.podman-path "$out" "$ICAT"
 # THE NEGATIVE, and its positive is the pair above. BY KEY, and the macOS key: probe_survey
 # fakes a Mac, so need.podman-mac.why is the body this run could have printed. The two arms say
 # the same thing today, which is why the old quoted needle needed no platform gate -- and is
@@ -1377,7 +1389,7 @@ assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
 # than the refusal. #231 deleted the tracing, so that reading is gone; the needle stays because
 # it is the more precise of the two either way.
 assert_says     "password:no-sudo-names-what-wanted-root" "- Install Podman" "$out"
-assert_says_not "password:no-sudo-asks-no-permission" "needs your permission" "$out"
+assert_says_not_key "password:no-sudo-asks-no-permission" step.consent "$out" "$ICAT"
 assert_says_not_key "password:no-sudo-does-not-claim-success" finished "$out" "$ICAT"
 assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
 
@@ -1389,7 +1401,7 @@ assert_says_key "password:no-terminal-says-why" err.sudo-no-terminal "$out" \
                 "$PRIVATE/course-install-messages.txt"
 # BEFORE THE CONSENT SCREEN, which is the whole point of putting this in survey: a machine that
 # cannot produce the password must be refused before it is offered a bargain it cannot keep.
-assert_says_not "password:no-terminal-refuses-before-consent" "needs your permission" "$out"
+assert_says_not_key "password:no-terminal-refuses-before-consent" step.consent "$out" "$ICAT"
 assert_no_file  "password:no-terminal-creates-no-directory" "$TMP/notty"
 # It asked, and it asked non-interactively. `-n` is what makes the probe a question rather
 # than a prompt, so its presence in the log is the assertion.
@@ -1466,7 +1478,7 @@ shim_new
 shim_fake_uname Darwin x86_64
 shim_fake_sysctl 17179869184
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/intel")"
-assert_says "intel-mac:refused" "Intel" "$out"
+assert_says_key "intel-mac:refused" err.intel-mac "$out" "$ICAT"
 assert_no_file "intel-mac:changes-nothing" "$TMP/intel"
 
 # ─── a bad download must never report success ──────────────────────────────────
@@ -1544,7 +1556,7 @@ out="$(run_with_tarball "$TMP/half-tree.tar.gz" "$TMP/broken-half")"
 assert_says_not_key "half-tree:does-not-claim-success"   finished "$out" "$ICAT"
 assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "half-tree:names-the-missing-file"   "cs193v is missing" "$out"
-assert_says     "half-tree:blames-the-unpacking"     "unpacking stopped partway" "$out"
+assert_says_key     "half-tree:blames-the-unpacking"     err.unpack-incomplete "$out" "$ICAT"
 # AND THE OTHER SIDE OF THE HAND-OVER. `exec` replaced the bootstrap and took its EXIT trap with
 # it, so here the tree can only be removed by course-install.sh -- on a path that refuses, not
 # just on the one that finishes. Paired with truncated:leaves-no-temp-tree-behind above so the
@@ -1904,7 +1916,8 @@ assert_eq "windows:names-the-same-linux-user-as-the-root-pass" "$cmd_user" "$pro
 # creates. The .cmd does not print that line any more -- course-install.sh does, from $DIR -- so
 # all three would now be reading an empty string, and two of them were NEGATIVE assertions that
 # pass for free against one. The property they were after is asserted for real by
-# `win-signoff:the-unc-path-follows-it-too` above, against the path the installer actually built.
+# `win-signoff:finishes` above, which supplies that path as {{UNC}} and so can only match if
+# the message and win_projects_path agree about it.
 
 # ─── --no-launch, and the order of what follows it ─────────────────────────────
 # THE CREATE IS ASKED FOR WITHOUT A LAUNCH, and its exit code is CHECKED -- which it could not be

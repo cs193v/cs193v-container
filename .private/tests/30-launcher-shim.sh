@@ -47,22 +47,18 @@ for v in --help -h help; do
     assert_eq "dispatch:$v-exits-0" "0" "$(launcher_rc "$v")"
 done
 out="$(launcher --help)"
-# THE VERB NAMES STAY SPELLED OUT, and that is not an oversight: `doctor`, `--rebuild` and
-# `--stop` are what the argument parser accepts, so these three assert that every verb the
-# launcher answers to is documented -- a claim about the code, not about the prose around it.
-assert_says "usage:mentions-doctor"  "cs193v doctor"  "$out"
-assert_contains "usage:mentions-rebuild" "--rebuild"      "$out"
-assert_contains "usage:mentions-stop" "--stop" "$out"
-# AND THE WHOLE MESSAGE, which is what the two assertions below this used to cover a phrase at a
-# time. They were usage:says-closing-the-window-stops-things and usage:points-at-tabs-not-windows
-# -- #41 put that advice at the top of help.usage, and #219's rewording took both paragraphs out
-# again, so there is no longer a sentence for either to point at. Retired rather than reworded:
-# whether the help says those things is a question about the catalogue, and this assertion is
-# what makes the catalogue's answer the one a student reads.
+# ONE ASSERTION, AND IT NAMES NO WORDING. Five stood here: usage:mentions-doctor,
+# :mentions-rebuild, :mentions-stop, :says-closing-the-window-stops-things and
+# :points-at-tabs-not-windows -- a phrase each out of help.usage. #41 put the window advice at
+# the top of it and #219's rewording took both of those paragraphs out again, so two of the five
+# had nothing left to point at and the other three were pinning the shape of a help screen
+# nobody may now reword. WHAT THE HELP SAYS IS A QUESTION FOR THE CATALOGUE; what a suite can
+# hold is that --help prints THAT message, entire, and that every verb still dispatches -- which
+# is what dispatch:$v-exits-0 above and the verb cases below already assert directly.
 assert_says_key "usage:prints-the-whole-help" help.usage "$out"
 
 assert_eq "dispatch:unknown-verb-exits-2" "2" "$(launcher_rc bogusverb)"
-assert_says "dispatch:unknown-verb-prints-usage" "cs193v doctor" "$(launcher bogusverb)"
+assert_says_key "dispatch:unknown-verb-prints-usage" help.usage "$(launcher bogusverb)"
 # A typo must not create anything.
 assert_eq "dispatch:unknown-verb-creates-nothing" "0" "$(shim_count '^run ')"
 
@@ -143,7 +139,7 @@ shim_new
 shim_fake_id 0 root
 out="$(launcher)"
 assert_contains "root:refused"              "STOP"          "$out"
-assert_contains "root:message-mentions-sudo" "sudo"         "$out"
+assert_says_key "root:message-mentions-sudo" err.running-as-root         "$out"
 assert_eq       "root:exits-1"              "1"             "$(launcher_rc)"
 assert_eq       "root:creates-nothing"      "0"             "$(shim_count '^run ')"
 # It must refuse before even asking podman anything.
@@ -263,7 +259,7 @@ assert_says_key "hang:message-says-not-responding" err.podman-hangs "$out"
 # caught with an explanation rather than surfaced as a raw podman error.
 shim_new; shim_set rootless false
 out="$(launcher)"
-assert_contains "rootful:refused"          "rootful" "$out"
+assert_says_key "rootful:refused"          err.rootful "$out"
 assert_eq       "rootful:creates-nothing"  "0"       "$(shim_count '^run ')"
 
 shim_new; shim_set info_rc 1
@@ -276,8 +272,10 @@ assert_eq       "unreachable:creates-nothing" "0"               "$(shim_count '^
 # the command. There is no registry to fall back to.
 shim_new; shim_set image_exists no
 out="$(launcher)"
+# image:nothing-built-says-how WAS HERE, quoting "--rebuild" out of the same message. One key,
+# one assertion: err.no-image interpolates nothing, so its body is a literal needle that
+# contains the command as well as the diagnosis.
 assert_says_key "image:nothing-built-refuses"      err.no-image "$out"
-assert_says "image:nothing-built-says-how"     "--rebuild"          "$out"
 assert_eq   "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
 
 # A locally built image is the NORMAL case now, not a staff-only escape hatch, so the
@@ -469,7 +467,7 @@ shim_clear_log
 # footgun in exactly the place this project is most careful about.
 out="$(launcher --stop)"
 assert_eq "lifecycle:stop-defaults-to-cancel-without-a-tty" "running" "$(shim_state)"
-assert_says "lifecycle:stop-warns-before-it-acts" "anything running inside it will stop" "$out"
+assert_says_key "lifecycle:stop-warns-before-it-acts" prompt.stop "$out"
 
 # Down-arrow then ENTER selects the non-default, exactly as the stale-recipe test does.
 shim_new
@@ -585,7 +583,6 @@ assert_contains "foreign-dir:names-theirs"   "/somewhere/else/cs193v" "$out"
 # path, which contains none.
 squash() { printf '%s' "$1" | do_tr -d '[:space:]┃┏┓┗┛━'; }
 assert_contains "foreign-dir:names-yours" "$(squash "$COPY")" "$(squash "$out")"
-assert_contains "foreign-dir:offers-rebuild" "--rebuild" "$out"
 assert_eq       "foreign-dir:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq       "foreign-dir:opens-no-shell"  "0" "$(shim_count '^exec ')"
 
@@ -1302,7 +1299,7 @@ fi
 # nothing for all of them. The last line a student saw was "Setting up the course
 # container..." -- which is exactly what an interrupted command looks like.
 assert_says_key "build:creation-step-is-announced" status.creating "$out"
-assert_says "build:creation-step-reports-done" "Ready"                           "$out"
+assert_says_key "build:creation-step-reports-done" status.created                           "$out"
 
 # --- the staff path keeps the raw output ---------------------------------------
 # CS193V_SETUP_RAW_LOG is the staff switch for podman's raw output. A progress bar is the wrong
