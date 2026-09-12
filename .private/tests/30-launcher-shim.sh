@@ -188,11 +188,16 @@ assert_contains "version:refusal-shows-found"  "4.3.1" "$out"
 assert_contains "version:refusal-shows-needed" \
                 "$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)" \
                 "$out"
-# THE FIX SITS PAST THE LAST PLACEHOLDER. err.podman-too-old opens with "you have: {{FOUND}} /
-# we need: {{NEED}}", so msg_text stops before the remedy and the per-platform commands are all
-# in the tail. Quoted as "apt install" this was green on a Debian-family host and said nothing
-# about the other two arms; the tail is the whole of what the message offers.
-assert_says_key_tail "version:refusal-names-the-fix" err.podman-too-old "$out"
+# THE REMEDY SITS PAST THE LAST PLACEHOLDER. err.podman-too-old opens with "you have: {{FOUND}} /
+# we need: {{NEED}}", so msg_text stops before it and everything the message offers is in the
+# tail.
+#
+# RENAMED FROM version:refusal-names-the-fix, which is what the message used to do: it named an
+# upgrade command per platform, and the assertion quoted "apt install" -- green on a
+# Debian-family host and silent about the other two arms. The wording now points at course staff
+# instead, so the name claims what is actually checked: that the paragraph after the two version
+# numbers arrives, whatever it recommends.
+assert_says_key_tail "version:refusal-says-what-to-do-next" err.podman-too-old "$out"
 
 # 4.9.0 is exactly MIN_PODMAN_LINUX, so "equal" must mean "acceptable" — an off-by-one here
 # refuses a machine sitting precisely on the floor. 10.0.0 guards against a lexical compare, which
