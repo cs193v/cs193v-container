@@ -176,7 +176,11 @@ assert_says "itext:a-missing-key-says-which"  "no.such.key" "$imiss"
 assert_fail "itext:a-missing-key-is-an-error" \
             bash -c 'MESSAGES="$2"; . "$1"; msg no.such.key >/dev/null 2>&1' _ "$TMP/msg.sh" "$ICAT"
 # ...and a real one renders, or the check above would pass against a msg() that always failed.
-assert_says "itext:a-real-key-renders" "is not answering" "$(imsg err.podman-mute)"
+# AGAINST msg_text RATHER THAN AGAINST A QUOTED PHRASE, which is the same move as
+# msg:the-test-helper-drops-staff-notes-too below and for the same reason: what is under test is
+# that the reader and the catalogue agree, and quoting "is not answering" made that a claim about
+# the wording of err.podman-mute instead.
+assert_says "itext:a-real-key-renders" "$(msg_text err.podman-mute "$ICAT")" "$(imsg err.podman-mute)"
 # Placeholders really substitute, including into a multi-line value -- err.podman-old-mac
 # interpolates {{HOW}}, which is itself two catalogue entries deep.
 isub="$(imsg err.subuid-failed "USER=someone")"
@@ -669,9 +673,12 @@ assert_eq "sub:renders-the-value-into-the-needle" \
 # drift msg_text was taught to avoid in #221 and which a renderer can repeat: asked for an
 # installer key it would have answered "(missing message: ...)" and any assert_says built on it
 # would have searched an output for that.
-assert_says "sub:reads-the-catalogue-it-is-given" "Building the course container" \
+# ASSERTED AS AGREEMENT, not against quoted prose: both sides read the same file through
+# different code, so rewording either catalogue cannot redden this and a renderer pointed at the
+# wrong file still does.
+assert_says "sub:reads-the-catalogue-it-is-given" "$(msg_text step.build "$ICAT")" \
             "$(msg_of_in "$ICAT" step.build)"
-assert_says "sub:the-launcher-default-is-unchanged" "Nothing was changed" \
+assert_says "sub:the-launcher-default-is-unchanged" "$(msg_text status.cancelled)" \
             "$(msg_of status.cancelled)"
 
 # ─── the presentation knobs  (#221) ───────────────────────────────────────────
@@ -1124,6 +1131,11 @@ if [ -z "$probs" ]; then
 else
     fail "installer:wsl-systemd-off-box-is-closed" "$probs"
 fi
-assert_says "installer:wsl-systemd-off-quotes-the-line" "systemd = false" "$out"
+# RENDERED WITH THE STUDENT'S OWN LINE, which is one assertion where there were two. The pair
+# was :quotes-the-line ("systemd = false", the VALUE, which stays -- it is what was handed in)
+# and :says-what-to-change ("Change it to say systemd=true", which is prose out of the message
+# and is gone). assert_says_sub asserts the whole refusal with the value in the middle of it, so
+# it makes both claims and names none of the wording.
+assert_says_sub "installer:wsl-systemd-off-quotes-the-line" err.wsl-systemd-off "$out" "$ICAT" \
+                "LINE=  systemd = false"
 assert_says_not "installer:wsl-systemd-off-leaves-no-placeholder" "{{LINE}}" "$out"
-assert_says "installer:wsl-systemd-off-says-what-to-change" "Change it to say systemd=true" "$out"

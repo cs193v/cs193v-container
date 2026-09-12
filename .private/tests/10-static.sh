@@ -1962,12 +1962,12 @@ assert_eq "exit:the-attach-states-its-exit-status" "return 0" \
 # message has to name the way out or a force-quit strands somebody.
 assert_contains "launcher:refuses-a-second-session" "err.session-in-use" "$launcher_src"
 assert_contains "messages:refusal-exists" "[[err.session-in-use]]" "$(cat $PRIVATE/messages.txt)"
-assert_contains "messages:refusal-names-the-way-out" "--stop" \
-                "$(sed -n '/\[\[err.session-in-use\]\]/,/^\[\[/p' $PRIVATE/messages.txt)"
-# The crash caveat is load-bearing prose, not decoration: without it the message asserts
-# something a student with no other window open knows to be false, and they stop believing it.
-assert_match "messages:refusal-admits-it-may-be-a-crash" 'crash' \
-             "$(sed -n '/\[\[err.session-in-use\]\]/,/^\[\[/p' $PRIVATE/messages.txt)"
+# messages:refusal-names-the-way-out AND messages:refusal-admits-it-may-be-a-crash WERE HERE,
+# reading err.session-in-use out of the catalogue and requiring it to contain "--stop" and
+# "crash". They are the purest form of the thing this sweep removes: an assertion that dictates
+# the wording of a student-facing message, so that improving the message is what breaks the
+# build. What survives is the pair above -- the launcher reaches for the key, and the key exists
+# -- which is the part that is about the code.
 assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 
 # Every verb that would disturb a live session refuses first, pointing at the same --stop, so
