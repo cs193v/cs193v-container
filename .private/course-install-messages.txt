@@ -655,7 +655,7 @@ Checking that it works
 [[err.launcher-config]]
 The launcher could not build a podman command.
 Please contact the course staff. If you know how to
-run commands, from the terminal, please run this command
+run commands from the terminal, please run this command
 and send its output to us:
 
     {{DIR}}/cs193v --dev-print-command
@@ -667,7 +667,7 @@ launcher reads its configuration
 The course container was not built, but setup did not stop.
 
 Please contact the course staff. If you know how to
-run commands, from the terminal, please run this command
+run commands from the terminal, please run this command
 and send its output to us:
 
     {{DIR}}/cs193v doctor
