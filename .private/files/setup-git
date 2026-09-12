@@ -597,8 +597,7 @@ ask_name() {
 # until the invitation is accepted, and the symptom of skipping it is a 404 three screens later
 # with four possible causes. Asking here turns that into a checklist.
 github_checkpoint() {
-    say github.checkpoint "EMAIL_ENC=$(email_encoded "$SG_EMAIL")" "EMAIL=$SG_EMAIL" \
-                          "ORG=$CS193V_GH_ORG"
+    say github.checkpoint "ORG=$CS193V_GH_ORG"
     printf '\n'
     menu 0 "$(msg opt.all-done)" "$(msg opt.need-help)"
     [ "$MENU_CHOICE" -eq 0 ] && return 0

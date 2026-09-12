@@ -64,25 +64,13 @@ Yes, that's correct.
 No, I want to retype that.
 
 [[github.checkpoint]]
-*Before we go on, three things need to be true on GitHub.*
+In Assignment 0, you set up a GitHub account and added your @stanford.edu
+email address. If you haven't yet done that, please do so before
+proceeding.
 
-1. *You have a GitHub account.*
-   If you don't have one yet, create one here — this link fills in your
-   email address for you:
-
-       https://github.com/signup?user_email={{EMAIL_ENC}}
-
-   If you already have a GitHub account, you can use it. You do not need a
-   new one for this course.
-
-2. *Your Stanford address is on that account.*
-   That address is *{{EMAIL}}*. Add it here — you can keep
-   your personal address on the account too:
-
-       https://github.com/settings/emails
-
-3. *You have accepted your invitation to the {{ORG}} organization.*
-   We emailed it to you. You can also accept it here:
+We've sent you an email inviting you to join the {{ORG}}
+organization on GitHub. If you haven't yet accepted that invite, please
+do so before proceeding. You can also accept it here:
 
        https://github.com/orgs/{{ORG}}/invitation
 
@@ -150,8 +138,8 @@ one. Use the link above — the page you land on should be titled
 *New fine-grained personal access token*.
 
 [[err.token-partial]]
-That looks like only part of an access token — it is shorter than a real
-one. Copy the whole thing, from *github_pat_* through to the very last
+That looks like only part of an access token (it's shorter than a real
+one). Copy the whole thing, from *github_pat_* through to the very last
 character, and paste it again.
 
 [[err.token-shape]]
