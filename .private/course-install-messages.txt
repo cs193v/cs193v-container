@@ -199,16 +199,18 @@ your account has the ID range podman needs
 # WRITE EVERY .why AS ONE LONG LINE. ask_consent folds them to 66 columns and
 # indents them seven, so a hand-wrapped one wraps twice and comes out ragged.
 #
-# EVERY ONE OF THEM SAYS WHY IT NEEDS A PASSWORD where it needs one, and that is
-# now ASSERTED rather than asked for: 20-messages.sh's
-# itext:every-root-requiring-why-says-password derives the list from the
-# need_root call sites in course-install.sh and checks each body. It was written
-# because this note was FALSE -- need.wslconf.why described changing a file that
-# was already there and never mentioned the password, while driving
-# `sudo sed -i /etc/wsl.conf` (#226).
+# SAY WHY IT NEEDS A PASSWORD where it needs one. This note was once FALSE --
+# need.wslconf.why described changing a file that was already there and never
+# mentioned the password, while driving `sudo sed -i /etc/wsl.conf` (#226) -- so
+# it was made an assertion. It is a REQUEST again, because an assertion on the
+# word "password" is an assertion on the wording of these messages, and the
+# wording here is yours. 20-messages.sh still derives the list from the need_root
+# call sites in course-install.sh and prints it, as
+# itext:root-requiring-whys-that-do-not-mention-a-password, so the answer is in
+# front of anyone who runs the suite.
 #
-# WHERE IT NEEDS ONE is the other half, and it is why the assertion reads the
-# need_root sites rather than every need.*: need.vm-memory.why is a
+# WHERE IT NEEDS ONE is the other half, and it is why that list comes from the
+# need_root sites rather than from every need.*: need.vm-memory.why is a
 # `podman machine set` and needs no privilege at all, so saying it wants a
 # password would be a new false sentence rather than a fix for the old one.
 
