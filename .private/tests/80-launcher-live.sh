@@ -153,7 +153,7 @@ if [ "$((T1 - T0))" -lt 60 ]; then
 else
     fail "noterm:refuses-promptly-against-real-podman" "took $((T1 - T0))s — it may be hanging again"
 fi
-assert_says "noterm:explains-itself" "could not open a shell" "$out"
+assert_says_key "noterm:explains-itself" err.needs-a-terminal "$out"
 assert_eq   "noterm:exits-nonzero" "1" "$rc"
 # INVERTED BY #41. The container is still CREATED, which is what the message promises -- but it is
 # no longer left running, because a running container with nobody attached is the exact state the
@@ -441,7 +441,7 @@ drift_applied() { podman inspect "$NAME" --format '{{json .Config.Env}}' | grep 
 assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-print-command)"
 # Declining must leave the container exactly as it was...
 out="$(LB)"
-assert_says "drift:prompt-is-shown" "settings have changed" "$out"
+assert_says_key "drift:prompt-is-shown" prompt.config-changed "$out"
 assert_eq "drift:declining-keeps-the-same-container" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
 if drift_applied; then
@@ -542,7 +542,7 @@ rm -rf "$VT_COPY"
 export_tree "$VT_COPY"
 assert_eq "live:second-copy-is-refused" "1" \
           "$("$VT_COPY/cs193v" >/dev/null 2>&1 </dev/null; printf '%s' "$?")"
-assert_says "live:second-copy-explains-both-paths" "different folder" \
+assert_says_key "live:second-copy-explains-both-paths" err.other-directory \
             "$("$VT_COPY/cs193v" </dev/null 2>&1)"
 assert_eq "live:second-copy-created-nothing" "1" "$(ours_existing)"
 rm -rf "$VT_COPY"
@@ -955,7 +955,7 @@ done
 assert_eq "tunnel:releases-its-ports-when-the-container-dies" "0" "$(count_fwd)"
 record "tunnel:seconds-to-release-ports" "$i"
 # --reset-tunnel must be safe to suggest even then, rather than erroring at a stopped container.
-assert_says "reset-tunnel:says-so-when-nothing-is-running" "no container running" "$(L --reset-tunnel)"
+assert_says_key "reset-tunnel:says-so-when-nothing-is-running" warn.tunnel-reset-not-running "$(L --reset-tunnel)"
 # INVERTED BY #41: a rebuild used to end with a fresh tunnel and its forwards up. It now ends
 # with the container stopped and the ports handed back, so what has to be true is that the next
 # LAUNCH brings them back -- which is the property that actually matters, since a tunnel that could

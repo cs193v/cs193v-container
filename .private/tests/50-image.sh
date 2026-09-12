@@ -1128,7 +1128,11 @@ assert_ok "identity:clear_console-is-what-made-that-matter" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -x /usr/bin/clear_console'"
 
 # The window title must name the course...
-assert_contains "identity:window-title-names-the-course" "CS193V Development Environment" \
+# $CS193V_TITLE, not the words. files/cs193v-strings.sh exists to be the one definition the
+# copies in tmux.conf and rewrite-window-title.py are checked against -- see its header -- and
+# 10-static.sh:1666 and 60-container.sh:461 already read it here. This was the last place the
+# title was spelled out a second time.
+assert_contains "identity:window-title-names-the-course" "$CS193V_TITLE" \
                 "$(R 'grep "e\]0;" /home/student/.bashrc')"
 # ...and Ubuntu's original title escape must be gone, or it would be re-emitted every
 # prompt and overwrite ours.

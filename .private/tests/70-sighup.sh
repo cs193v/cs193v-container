@@ -352,8 +352,10 @@ release_container
 launch_in_pty
 if wait_until 90 session_up; then
     out="$(cd "$REPO" && ./cs193v 2>&1 </dev/null)"
-    assert_says "sighup:a-second-launch-refuses" "already have a CS193V session" "$out"
-    assert_says "sighup:the-refusal-names-the-way-out" "cs193v --stop" "$out"
+    assert_says_key "sighup:a-second-launch-refuses" err.session-in-use "$out"
+    # sighup:the-refusal-names-the-way-out WAS HERE, quoting "cs193v --stop" out of the very
+    # message the line above now asserts whole. err.session-in-use interpolates nothing, so its
+    # body is one literal needle and there is no half of it left to check separately.
     # It must not disturb the session it refused to touch. Getting this wrong would make a second
     # launch a weapon against the first.
     assert_ok "sighup:the-refusal-leaves-the-first-session-alone" \
@@ -410,8 +412,8 @@ launcher should do. Worth understanding before trusting the teardown path."
         # The refusal has to EXPLAIN this, not just refuse. A student who force-quit knows there
         # is no other window, so a message that only says "you have a session open" reads as
         # wrong, and a message they have caught lying once is one they stop reading.
-        assert_says "sighup:a-leftover-container-is-explained-not-just-refused" "crash" \
-                    "$(cd "$REPO" && ./cs193v 2>&1 </dev/null)"
+        assert_says_key "sighup:a-leftover-container-is-explained-not-just-refused" \
+                        err.session-in-use "$(cd "$REPO" && ./cs193v 2>&1 </dev/null)"
         launcher_tty_repo '\033[B\n' --stop >/dev/null 2>&1 || true
         if wait_until 45 container_stopped; then
             pass "sighup:stop-recovers-a-force-quit-leftover"

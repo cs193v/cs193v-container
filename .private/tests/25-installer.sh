@@ -447,7 +447,7 @@ assert_says "consent:explains-why"        "needs your password" "$out"
 assert_eq "consent:declining-leaves-no-temp-tree" "" \
           "$(ls -d "$TMP/boot-consent"/cs193v-install.* 2>/dev/null)"
 else
-skip_linux_arm "consent:non-tty-declines" "consent:offers-a-way-forward" "consent:non-tty-exits-0" \
+skip_linux_arm "consent:non-tty-declines" "consent:non-tty-exits-0" \
                "consent:declining-creates-no-directory" "consent:names-what-it-wants" \
                "consent:explains-why" "consent:declining-leaves-no-temp-tree"
 fi
