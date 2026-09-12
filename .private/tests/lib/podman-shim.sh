@@ -192,11 +192,14 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
 
 # Wait up to SECS for PHRASE to appear in the transcript. Returns 1 if the launcher exits
 # first, so a launcher that does not wait fails in a second rather than after the timeout.
+# -F, BECAUSE THE ARGUMENT IS A PHRASE. It is called with prose read out of messages.txt now, and
+# a needle with a bracket or a full stop in it is a pattern nobody audited -- which here does not
+# redden a line, it times the wait out and reports "the launcher never asked".
 launcher_pty_silent_wait() {          # launcher_pty_silent_wait SECS PHRASE
     local i=0 n
     n=$(( $1 * 2 ))
     while [ "$i" -lt "$n" ]; do
-        grep -q "$2" "$PTY_OUT" 2>/dev/null && return 0
+        grep -qF "$2" "$PTY_OUT" 2>/dev/null && return 0
         kill -0 "$PTY_PID" 2>/dev/null || return 1
         sleep 0.5
         i=$((i + 1))

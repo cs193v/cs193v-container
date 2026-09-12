@@ -318,6 +318,37 @@ assert_says_sub() {                   # assert_says_sub NAME KEY TEXT FILE [NAME
     assert_says "$n" "$phrase" "$t"
 }
 
+# THE LABEL ON A PLACEHOLDER'S OWN LINE, for the messages shaped "Label: {{VALUE}}". Neither
+# msg_text nor msg_text_tail can reach these: err.setup-failed-details is four such lines in a
+# row, so the first placeholder is on line one and everything an assertion wants to name is
+# between placeholders rather than before or after them. What a test wants there is the LABEL out
+# of the catalogue and the VALUE from the run -- "Failed command:" plus the command it expects --
+# which is what this builds.
+#
+# THE LINE, not the whole body, is deliberate: two of those four labels would otherwise be one
+# needle and a box that printed only the first would still match.
+msg_label() {                         # msg_label KEY NAME [FILE] -> the prose before {{NAME}} on its line
+    local t
+    t="$(awk -v k="[[$1]]" -v ph="{{$2}}" '
+        $0 == k { found = 1; next }
+        /^\[\[.*\]\]$/ { if (found) exit }
+        found && /^#/ { next }
+        found && index($0, ph) { print substr($0, 1, index($0, ph) - 1); exit }
+    ' "${3:-$PRIVATE/messages.txt}")"
+    t="$(_flatten "$t")"
+    t="${t# }"
+    printf '%s' "${t% }"
+}
+
+# A CATALOGUE NEEDLE PASTED INTO AN ERE IS A PATTERN NOBODY AUDITED. prompt.sunetid ends in "?"
+# and prompt.token contains ":" -- harmless -- but "(e.g. htiek, szum)" is a group, and
+# 14-test-harness.sh's sgtimes:the-needle-is-a-literal-not-a-pattern measures what that costs: the
+# trailing ? makes the parenthetical OPTIONAL and the bare stem matches too. Where an assertion
+# genuinely needs a regex around the prose, this is how the prose goes in.
+re_quote() {                          # re_quote STRING -> the same string, safe inside an ERE
+    printf '%s' "$1" | LC_ALL=C sed 's/[][\\.^$*+?(){}|]/\\&/g'
+}
+
 # An unknown or all-placeholder key FAILS rather than passing vacuously, which is the trap the
 # negative form would otherwise set: assert_says_not with an empty needle passes every time.
 assert_says_key() {                   # assert_says_key NAME KEY TEXT [FILE]

@@ -441,8 +441,8 @@ for spec in "rebuild:--rebuild" "rebuild-logout:--rebuild --logout" "rebuild-noc
     launcher >/dev/null 2>&1
     shim_set state running
     shim_clear_log
-    assert_says "lifecycle:$name-refuses-while-a-session-is-live" \
-                "already have a CS193V session" "$(launcher $v)"
+    assert_says_key "lifecycle:$name-refuses-while-a-session-is-live" \
+                    err.session-in-use "$(launcher $v)"
     assert_eq "lifecycle:$name-does-not-remove-a-live-container" "0" "$(shim_count '^rm ')"
     assert_eq "lifecycle:$name-does-not-remove-a-live-containers-volumes" \
               "0" "$(shim_count '^volume rm ')"
@@ -500,8 +500,7 @@ shim_new
 shim_set run_rc 125
 shim_set run_err 'Error: creating container storage: the container name "cs193v" is already in use by 15bb56cdbb36. You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.'
 out="$(launcher)"
-assert_says "race:lost-create-is-reported-as-a-live-session" \
-            "already have a CS193V session" "$out"
+assert_says_key "race:lost-create-is-reported-as-a-live-session" err.session-in-use "$out"
 # BOTH negatives are flattened through _flatten, because these strings are inside the STOP box
 # and a raw substring match would silently stop matching the moment the box re-wraps a line --
 # an assert_not_contains that can no longer match is one that passes forever.
@@ -770,11 +769,11 @@ assert_says_not_key "rebuild:says-nothing-about-the-tunnel" warn.tunnel-failed "
 # ─── doctor ────────────────────────────────────────────────────────────────────
 shim_new
 out="$(launcher doctor)"
-assert_contains "doctor:reports-platform"  "platform"     "$out"
+assert_says_key "doctor:reports-platform"  doctor.row.platform     "$out"
 assert_contains "doctor:reports-podman"    "5.7.0"        "$out"
 assert_contains "doctor:reports-dir"       "$COPY"        "$out"
-assert_contains "doctor:reports-container" "container"    "$out"
-assert_says "doctor:asks-for-a-paste"  "Paste all of the above" "$out"
+assert_says_key "doctor:reports-container" doctor.row.container    "$out"
+assert_says_key "doctor:asks-for-a-paste"  doctor.paste "$out"
 # doctor must never create or modify anything — it is what staff ask for first.
 assert_eq "doctor:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
@@ -789,8 +788,11 @@ assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
 shim_new
 launcher >/dev/null 2>&1
 out="$(launcher doctor)"
-assert_says "doctor:reports-a-matching-config-as-matching" "matches container.args" "$out"
-assert_says_not "doctor:does-not-cry-stale-when-config-matches" "STALE" "$out"
+assert_says_key "doctor:reports-a-matching-config-as-matching" doctor.config.matches "$out"
+# BY KEY, WHICH ALSO MAKES IT THE RIGHT ASSERTION. Quoted as "STALE" this matched the image
+# recipe row as well, so a run whose recipe was stale and whose config matched would have failed
+# here -- naming the config. doctor.config.stale is the row this case is about.
+assert_says_not_key "doctor:does-not-cry-stale-when-config-matches" doctor.config.stale "$out"
 # Whatever doctor says has to agree with what a real launch decides, or one of the two is
 # lying to the student.
 assert_says_not_key "doctor:agrees-with-the-launch-path" prompt.config-changed "$(launcher)"
@@ -799,7 +801,7 @@ assert_says_not_key "doctor:agrees-with-the-launch-path" prompt.config-changed "
 shim_new
 launcher >/dev/null 2>&1
 shim_set label_hash STALE
-assert_contains "doctor:reports-stale-config" "STALE" "$(launcher doctor)"
+assert_says_key "doctor:reports-stale-config" doctor.config.stale "$(launcher doctor)"
 
 # doctor is "the report to paste when asking for help", so it has to answer the first
 # question staff will ask about behaviour they cannot reproduce. That question used to be
@@ -809,22 +811,34 @@ assert_contains "doctor:reports-stale-config" "STALE" "$(launcher doctor)"
 shim_new
 launcher >/dev/null 2>&1
 out="$(launcher doctor)"
-assert_says "doctor:names-the-image"      "localhost/cs193v:local" "$out"
-assert_says "doctor:says-it-was-built-here" "built here"           "$out"
-assert_says "doctor:dates-the-image"      "image built"            "$out"
-assert_says "doctor:reports-the-recipe"   "image recipe"           "$out"
+# THE IMAGE TAG IS A VALUE, not prose -- and it carries $CS193V_INSTANCE's suffix, so it cannot
+# be spelled out either. $TEST_IMAGE_DEFAULT is lib/assert.sh's mirror of what the launcher
+# computes (assert.sh:24), which is the same reason $NAME exists beside it.
+assert_says "doctor:names-the-image"      "$TEST_IMAGE_DEFAULT"    "$out"
+# AND THE PROSE AROUND IT IS THE TAIL. doctor.image.built-here is "{{IMAGE}} (built here)", so
+# msg_text stops before the first character of it and msg_text_tail is the whole of the rest.
+assert_says_key_tail "doctor:says-it-was-built-here" doctor.image.built-here      "$out"
+assert_says_key "doctor:dates-the-image"      doctor.row.image-built            "$out"
+assert_says_key "doctor:reports-the-recipe"   doctor.row.image-recipe           "$out"
 
 shim_new
 launcher >/dev/null 2>&1
 shim_set image_buildhash "0000deadbeefnotthecurrentrecipe"
-assert_contains "doctor:reports-a-stale-recipe" "STALE" "$(launcher doctor | grep 'image recipe')"
+# THE ROW IS SELECTED BY ITS OWN LABEL, read from the catalogue: `grep 'image recipe'` was a
+# second copy of doctor.row.image-recipe, so rewording the label would have left this grepping
+# for a row that no longer exists -- and an empty haystack with a `STALE` needle is a FAILURE
+# that names the wrong cause. Both halves come out of messages.txt now.
+assert_says_key "doctor:reports-a-stale-recipe" doctor.recipe.stale \
+                "$(launcher doctor | grep -F "$(msg_of doctor.row.image-recipe)")"
 
 # Nothing built yet: doctor must say so rather than printing a tag that does not exist,
 # and must name the command that fixes it.
 shim_new; shim_set image_exists no
 out="$(launcher doctor)"
-assert_says "doctor:says-when-nothing-is-built" "NOT BUILT" "$out"
-assert_says "doctor:says-how-to-build"          "--rebuild" "$out"
+# doctor:says-how-to-build WAS HERE, quoting "--rebuild" out of this very message.
+# doctor.image.not-built is "{{IMAGE}} — NOT BUILT; run ./cs193v --rebuild", so its tail carries
+# both the diagnosis and the command and there is nothing left for a second assertion to add.
+assert_says_key_tail "doctor:says-when-nothing-is-built" doctor.image.not-built "$out"
 
 # ─── podman installed but not on PATH  (issue #121) ────────────────────────────
 # The machine this describes is the ordinary state of the terminal window a macOS student
@@ -882,8 +896,10 @@ assert_ne "probe:the-fixture-still-has-a-toolbox" "" \
 out="$(probe_launcher doctor)"
 assert_contains "probe:doctor-finds-a-podman-that-is-not-on-PATH" "5.7.0"        "$out"
 assert_contains "probe:doctor-names-the-podman-it-resolved"       "$POFF/podman" "$out"
-assert_says     "probe:doctor-says-it-was-not-on-the-path"        "NOT on your PATH" "$out"
-assert_says     "probe:doctor-explains-why"                       "/etc/paths.d"  "$out"
+# ONE ASSERTION, BY KEY. probe:doctor-explains-why quoted "/etc/paths.d" out of the second line
+# of this same two-line message; doctor.podman.path-added is both lines, and drows gives each its
+# own row, so the flattened needle covers the explanation as well as the diagnosis.
+assert_says_key "probe:doctor-says-it-was-not-on-the-path" doctor.podman.path-added "$out"
 assert_eq       "probe:doctor-still-exits-0" "0" "$(probe_launcher_rc doctor)"
 # THE ANTI-VACUITY HALF. Everything above could be satisfied by a launcher that merely
 # LOCATED podman; this asserts it EXECUTED it through the appended directory. --stop reaches
@@ -937,7 +953,7 @@ assert_eq "probe:the-absent-fixture-really-has-no-podman" "" \
 assert_says "probe:an-absent-podman-still-refuses" \
             "$PROBE_REFUSAL" "$(probe_launcher --stop)"
 assert_eq   "probe:that-refusal-exits-1" "1" "$(probe_launcher_rc --stop)"
-assert_says "probe:doctor-says-podman-is-not-found" "NOT FOUND" "$(probe_launcher doctor)"
+assert_says_key "probe:doctor-says-podman-is-not-found" doctor.podman.not-found "$(probe_launcher doctor)"
 assert_eq   "probe:doctor-with-no-podman-exits-1" "1" "$(probe_launcher_rc doctor)"
 # AND THE --dev- VERBS STILL ANSWER. This is the behavioural half of the promise the dispatch
 # comments make and 10-static.sh's assert_not_contains block states: these three read files and
@@ -1070,7 +1086,11 @@ assert_says_key "ack:the-warning-is-still-on-screen" warn.tunnel-failed "$out"
 assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
 # And the prompt comes BEFORE the container is opened, not after it has already swallowed
 # the screen. Line numbers from the transcript, so this asserts on order, not just presence.
-p_ack="$(printf '%s\n' "$out" | grep -n 'Press ENTER to continue' | head -1 | cut -d: -f1)"
+# -F AND THE PROSE FROM THE CATALOGUE. grep -n needs a pattern and the prompt is prose, so a
+# key-built needle has to go in as a fixed string -- prompt.acknowledge-warnings ends in a full
+# stop today and the next rewording could put a bracket in it.
+p_ack="$(printf '%s\n' "$out" | grep -nF "$(msg_of prompt.acknowledge-warnings)" \
+         | head -1 | cut -d: -f1)"
 p_shell="$(printf '%s\n' "$out" | grep -n 'SHELL-OPENED' | head -1 | cut -d: -f1)"
 if [ -n "$p_ack" ] && [ -n "$p_shell" ] && [ "$p_ack" -lt "$p_shell" ]; then
     pass "ack:prompt-comes-before-the-container-is-opened"
@@ -1086,7 +1106,11 @@ fi
 shim_new
 shim_set exec_out "SHELL-OPENED"
 launcher_pty_silent_start
-if launcher_pty_silent_wait 30 'Press ENTER'; then
+# THE PROMPT, FROM THE CATALOGUE. launcher_pty_silent_wait greps the growing transcript for
+# this, so it is the one needle here whose failure mode is a 30-second deadline rather than a red
+# line -- which is the same hazard 20-messages.sh's sgflow:* block records for setup-git's pty
+# gates, and the reason it must not be a quotation.
+if launcher_pty_silent_wait 30 "$(msg_of prompt.acknowledge-warnings)"; then
     pass "ack:prompt-reached-on-a-silent-terminal"
     assert_eq "ack:silence-does-not-open-the-shell" "0" "$(shim_count '^exec -it')"
 else
@@ -1390,7 +1414,7 @@ assert_eq "build:bar-redraws-in-place-on-a-terminal" "yes" \
 # wired up -- against the fake podman `run` returns at once, and a real one is what makes it
 # spin. The frame is drawn before the first poll for exactly this reason.
 assert_eq "build:creation-step-animates-on-a-terminal" "yes" \
-          "$(printf '%s' "$raw" | redrawn 'Setting up the course container')"
+          "$(printf '%s' "$raw" | redrawn "$(msg_text status.creating)")"
 
 # --- one line, and the setup step is part of it -------------------------------
 # Asserted against the rendered SCREEN, not the byte stream. A \r-redrawn bar appears in the
@@ -1479,13 +1503,14 @@ assert_match "build:meter-counts-container-setup-as-a-step" '\] +4/4' "$screen"
 # container is being created and only completes when it returns, which is the honest reading of
 # a step that is still running. What matters is that the name is in the block.
 assert_match "build:setup-label-sits-in-the-meter-block" \
-             "\] +[0-9]+/4$TAB""Setting up the course container" "$pairs"
+             "\] +[0-9]+/4$TAB""$(msg_text status.creating)" "$pairs"
 
 # The finished block is ONE row: the caption is erased, the outcome takes the spinner's cell
 # and the closing word moves up beside the bar. A student is not left looking at a spinner
 # frame beside a build that has finished, which is what this did before.
-assert_match "build:finished-block-collapses-to-one-row" '✓ .*\] +4/4  Ready' "$screen"
-if printf '%s\n' "$screen" | grep -qxE ' *Setting up the course container\.\.\. *'; then
+assert_match "build:finished-block-collapses-to-one-row" \
+             "✓ .*\] +4/4  $(msg_text status.created)" "$screen"
+if printf '%s\n' "$screen" | grep -qxF "  $(msg_of status.creating)"; then
     fail "build:no-caption-row-survives-the-collapse" \
          "the caption row is still on the screen after the build finished:
 $screen"
@@ -2207,8 +2232,9 @@ shim_set state running
 shim_set label_dir "$COPY"
 shim_set inspect_rc 125
 out="$(launcher doctor)"
-assert_not_match "query-failed:doctor-does-not-report-absent" 'container +absent' "$out"
-assert_contains  "query-failed:doctor-says-it-could-not-tell" "podman did not answer" "$out"
+assert_says_not "query-failed:doctor-does-not-report-absent" \
+                "$(msg_of doctor.row.container) absent" "$out"
+assert_says_key  "query-failed:doctor-says-it-could-not-tell" doctor.container.unreadable "$out"
 
 # --rebuild ACTS on an unreadable read rather than refusing, and that is deliberate. The state
 # that makes `inspect` fail while the container is there is a damaged entry, and remove-and-
@@ -2308,18 +2334,23 @@ shim_set state exited
 shim_set label_dir "$COPY"
 shim_set rootless true
 out="$(launcher doctor)"
-assert_match "doctor:reports-rootless" 'rootless +yes' "$out"
+# THE ROW AND ITS VERDICT, both out of the catalogue. `'rootless +yes'` was an ERE built from
+# the label and the value with the gutter between them; assert_says flattens runs of whitespace,
+# so the two read as one phrase and the regex is not needed.
+assert_says "doctor:reports-rootless" \
+            "$(msg_of doctor.row.rootless) $(msg_of doctor.rootless.yes)" "$out"
 # The host figures that call was already carrying are still in the report.
 assert_contains "doctor:still-reports-what-podman-sees" "8589934592" "$out"
 
 shim_new
 shim_set rootless false
-assert_match "doctor:names-rootful-as-the-problem" 'rootless +NO' "$(launcher doctor)"
+assert_says "doctor:names-rootful-as-the-problem" \
+            "$(msg_of doctor.row.rootless) $(msg_of doctor.rootless.no)" "$(launcher doctor)"
 
 shim_new
 shim_set rootless 'not-a-boolean'
-assert_contains "doctor:reports-an-unreadable-rootless-answer" \
-                "podman gave no usable answer" "$(launcher doctor)"
+assert_says_key "doctor:reports-an-unreadable-rootless-answer" doctor.rootless.unknown \
+                "$(launcher doctor)"
 
 # FOLDED INTO A TEMPLATE THAT WAS ALREADY BEING SENT, so the new field costs no additional
 # `podman info` -- ERRORS.md D11 measures one at 536-1222 ms, and doctor is what a stuck student

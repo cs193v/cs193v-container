@@ -691,7 +691,7 @@ fi
 # The image reference is a constant now that the pin is gone, so every path hashes the same
 # value by construction. This assertion has become structural rather than a fix that could
 # quietly come undone, which is a reason to keep it cheap, not a reason to drop it.
-assert_says "doctor:reports-config-matches" "matches container.args" "$out"
+assert_says_key "doctor:reports-config-matches" doctor.config.matches "$out"
 assert_match "doctor:reports-the-in-container-uid" 'in-container uid *1000:1000' "$out"
 # doctor's tunnel section replaced a `podman port` count, and it is now the ONLY place
 # host-side forwarding state is visible: nothing inside the container can see whether a forward
