@@ -45,8 +45,9 @@ We support the following operating systems:
 * Debian Linux (including Linux Mint, Pop!_OS, etc.)
 * Fedora
 
-If you received this message in error, or if you don't have a computer with
-one of the above operating systems installed, please contact the course staff.
+If you received this message in error, or if you don't have a
+computer with one of the above operating systems installed,
+please contact the course staff.
 
 [[err.intel-mac]]
 This Mac has an Intel processor.
@@ -185,7 +186,7 @@ Nothing in this course sets that line, and Ubuntu does not either,
 so someone chose it. Change it to say systemd=true and run this
 script again.
 
-If you do not know why that line is there, please contact the 
+If you do not know why that line is there, please contact the
 course staff.
 
 [[skip.subuid]]
@@ -254,7 +255,7 @@ Podman needs two small helper programs, newuidmap and newgidmap, to keep the con
 Give podman's virtual machine more memory ({{HAVE}} MB -> {{WANT}} MB)
 
 [[need.vm-memory.why]]
-On a Mac, the course container (sandbox) runs inside  virtual machine (a program that simulates a full operating system). Podman gives the virtual machine a fixed amount of memory that does not scale with your Mac, and the default is too small for this course. This changes a virtual machine that already exists on your computer.
+On a Mac, the course container (sandbox) runs inside a virtual machine (a program that simulates a full operating system). Podman gives the virtual machine a fixed amount of memory that does not scale with your Mac, and the default is too small for this course. This changes a virtual machine that already exists on your computer.
 
 [[need.wslconf]]
 Turn on systemd in this Linux environment
@@ -274,7 +275,7 @@ Podman uses a block of spare ID numbers to keep the container separated from the
 Nothing on your computer needs to change
 
 [[step.consent]]
-Before continuing, we needs your permissio for {{N}} thing(s)
+Before continuing, we need your permission for {{N}} thing(s)
 
 [[menu.consent.stop]]
 Stop, do not change anything
@@ -558,8 +559,8 @@ Could not create the podman virtual machine. Podman stopped here:
 
 The whole log is in {{LOG}}
 
-Check your internet connection and try again. If the installer fails
-here again, contact the course staff.
+Check your internet connection and try again. If the installer
+fails here again, contact the course staff.
 
 [[ok.machine-created]]
 created and started
@@ -631,9 +632,6 @@ podman is working
 [[step.build]]
 Building the course container
 
-[[note.build-slow]]
-
-
 [[ok.built]]
 built
 
@@ -654,8 +652,9 @@ Checking that it works
 
 [[err.launcher-config]]
 The launcher could not build a podman command.
+Send course staff the output of:
 
-Please contact the course staff.
+    {{DIR}}/cs193v --dev-print-command
 
 [[ok.launcher-config]]
 launcher reads its configuration
@@ -663,7 +662,8 @@ launcher reads its configuration
 [[err.image-missing-after-build]]
 The course container was not built, but setup did not stop.
 
-Please contact the course staff.
+Please send this to course staff, along with the output of:
+    {{DIR}}/cs193v doctor
 
 [[ok.container-present]]
 course container is present
@@ -703,13 +703,13 @@ doctor reported problems. Run {{DIR}}/cs193v doctor
 # not exist. Only course-install.sh knows {{DIR}}, and win_projects_path builds it there.
 [[finished.windows]]
   ────────────────────────────────────────────────────────────────────
-  Installation complete!
+  Setup finished.
 
-  To start the development environment, open a command prompt and run
-  the following commands:
+  From now on you work inside the {{DISTRO}} environment. To start:
 
       wsl -d {{DISTRO}}
-      cd {{DIR}} && ./cs193v
+      cd {{DIR}}
+      ./cs193v
 
   You can also open {{DISTRO}} from the Windows Terminal dropdown.
 
@@ -722,7 +722,18 @@ doctor reported problems. Run {{DIR}}/cs193v doctor
 
       {{UNC}}
 
-  Happy vibecoding!
+  Your account in {{DISTRO}} is called {{USER}} and has no password, so
+  nothing will ever ask you for one. To install something in the
+  environment itself, this gets you in as its administrator:
+
+      wsl -d {{DISTRO}} -u root
+
+  Closing the terminal window stops the container and anything running
+  in it. Your files are on your own computer, so they are always safe.
+
+  Useful later:
+      ./cs193v doctor     a report to paste if you ask staff for help
+      ./cs193v --stop     stop it if a window was closed unexpectedly
   ────────────────────────────────────────────────────────────────────
 
 # ═══════════════════════════════════════════════════════════════════════════════

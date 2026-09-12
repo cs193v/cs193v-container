@@ -32,7 +32,7 @@ working around it.
 
 [[err.no-podman]]
 Podman is not installed on this computer. This should not be
-possible because the installation script should hae installed
+possible because the installation script should have installed
 it. Please contact the course staff.
 
 [[err.podman-hangs]]
@@ -50,8 +50,26 @@ staff.
 
 [[err.podman-too-old]]
 Your version of podman is too old for the course container.
-The installer should have updated podman, so this should not
-be possible. Please contact the course staff.
+
+    you have:  {{FOUND}}
+    we need:   {{NEED}} or newer
+
+Inside the WSL CS193V environment, run:
+
+    sudo apt update && sudo apt install --only-upgrade podman
+
+On any other Linux, use your distribution's package manager to
+upgrade podman -- or run the course installer again and it will
+name the exact command for your system.
+
+On a Mac: remove the podman you already have, then run the
+course installer again -- it installs a version the course is
+tested against. Podman Desktop's own updater may leave you on
+a different one.
+
+Nothing has been changed on your computer. Contact course
+staff if that does not work, or before removing podman if you
+use it for anything outside this course.
 
 [[err.podman-unreachable]]
 Podman is installed but the course container cannot reach it.
@@ -61,7 +79,7 @@ running:
 
     podman machine start
 
-If the issue persists, contact the coures staff.
+If the issue persists, contact the course staff.
 
 [[err.rootless-unreadable]]
 Podman answered the "are you rootless?" question with something
@@ -145,7 +163,7 @@ run ./cs193v --stop first.
 
 [[err.needs-a-terminal]]
 cs193v could not open a shell, because it is not being run from a
-terminal. — its input is coming from a file or from another program
+terminal — its input is coming from a file or from another program
 rather than from your keyboard.
 
 If you typed ./cs193v yourself and got this, please contact the
@@ -367,7 +385,9 @@ Stop the container
 The container's clock is {{SKEW}} seconds away from your computer's clock.
 
 This happens when a laptop sleeps: the small Linux virtual machine podman uses does not
-always catch up on waking. It causes confusing failures that look like network problems: secure connections rejected as "not yet valid", downloads failing, logins refused.
+always catch up on waking. It causes confusing failures that look like network
+problems: secure connections rejected as "not yet valid", downloads failing,
+logins refused.
 
 The container cannot fix its own clock, so the fix is to restart podman's virtual
 machine. Anything currently running in the container will stop.

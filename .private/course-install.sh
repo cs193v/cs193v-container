@@ -935,7 +935,6 @@ check_podman() {
 # adds neither.
 build_image() {
     step "$(msg step.build)"
-    msg note.build-slow | notes
     # --rebuild, which reads oddly for a first install and is right anyway: it is the launcher's
     # only container-creating verb, and with no image on the machine yet its first act is to
     # build one. There is deliberately no separate --build to call -- one verb means the path a
