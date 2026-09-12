@@ -421,8 +421,11 @@ run_consent() {
     installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent" TMPDIR="$TMP/boot-consent"
 }
 out="$(run_consent)"
-assert_says "consent:non-tty-declines"      "Nothing was changed"   "$out"
-assert_says "consent:offers-a-way-forward"  "contact course staff"  "$out"
+# BY KEY, AND ONCE. These were "Nothing was changed" and "contact course staff", which are
+# the first and last sentences of ONE message -- so #219's rewording of consent.declined
+# reddened the second and left the first passing, which is the least useful of the three
+# possible outcomes. The whole body is a stronger needle than either and names neither.
+assert_says_key "consent:non-tty-declines" consent.declined "$out" "$ICAT"
 # NOTE: this one PASSED on macOS, and vacuously -- with nothing needing consent the installer
 # runs to the end and exits 0 for an unrelated reason. It belongs inside the guard.
 assert_eq   "consent:non-tty-exits-0"       "0" \
@@ -485,7 +488,7 @@ assert_says_key "root:says-why" err.as-root "$out" "$PRIVATE/course-install-mess
 # invocation, not of the computer, so it is not something the "Looking at your computer" step
 # has any business reporting.
 assert_says_not "root:refuses-before-it-looks" "Looking at your computer" "$out"
-assert_says_not "root:does-not-claim-success"  "Setup finished" "$out"
+assert_says_not_key "root:does-not-claim-success"  finished "$out" "$ICAT"
 assert_eq "root:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/asroot2")"
 # The three claims the refusal makes implicitly: nothing of the course on the disk, nothing
@@ -510,7 +513,14 @@ assert_eq "root:asks-podman-nothing" "0" "$(shim_count '.')"
 shim_new
 shim_fake_uname FreeBSD amd64
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/bsd")"
-assert_says "unsupported-os:says-what-it-supports" "supports macOS, Ubuntu" "$out"
+# RENDERED, not truncated. err.unsupported-os LEADS with {{OS}}, so msg_text's needle would be
+# "We have detected your operating system as" and stop -- which is the half that says nothing
+# about what the script supports, and the list is what this assertion is named for. assert_says_sub
+# fills {{OS}} in with the same value shim_fake_uname reports, so one needle covers both.
+assert_says_sub "unsupported-os:says-what-it-supports" err.unsupported-os "$out" "$ICAT" \
+                OS=FreeBSD
+# STILL SPELLED OUT, and legitimately: "FreeBSD" is what the fake uname says, not catalogue
+# prose, and the point is that the refusal echoes the machine back rather than guessing.
 assert_says "unsupported-os:names-what-it-found"   "FreeBSD" "$out"
 assert_no_file "unsupported-os:changes-nothing" "$TMP/bsd"
 assert_eq "unsupported-os:exits-1" "1" \
@@ -607,7 +617,7 @@ assert_no_file "podman-old:changes-nothing" "$TMP/old"
 shim_new
 mkdir -p "$TMP/ro" && chmod 555 "$TMP/ro"
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
-assert_says_not "unwritable-dest:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "unwritable-dest:does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "unwritable-dest:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
 chmod 755 "$TMP/ro"
@@ -624,7 +634,7 @@ out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman")"
 assert_says "podman-mute:refuses-to-continue"   "Podman is installed but is not answering" "$out"
 assert_says "podman-mute:suggests-the-mac-fix"  "podman machine start" "$out"
 assert_says "podman-mute:changed-nothing-more"  "Nothing further has been changed" "$out"
-assert_says_not "podman-mute:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "podman-mute:does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "podman-mute:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman2")"
 
@@ -634,9 +644,13 @@ assert_eq "podman-mute:exits-1" "1" \
 shim_new
 shim_set image_exists no
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noimage")"
-assert_says "no-image:refuses-to-claim-success" "was not built, but setup did not stop" "$out"
-assert_says_not "no-image:does-not-say-finished" "Setup finished" "$out"
-assert_says "no-image:tells-them-what-to-send-staff" "doctor" "$out"
+assert_says_key "no-image:refuses-to-claim-success" err.image-missing-after-build "$out" "$ICAT"
+assert_says_not_key "no-image:does-not-say-finished" finished "$out" "$ICAT"
+# THE FAR SIDE OF {{DIR}}, which is where the command they are asked for sits. Quoted as
+# "doctor" this matched the word anywhere in the transcript -- ok.doctor-runs says it too, on
+# the success path -- so the needle is the catalogue's own tail rather than one word of it.
+assert_says_key_tail "no-image:tells-them-what-to-send-staff" err.image-missing-after-build \
+                     "$out" "$ICAT"
 
 # ─── everything behind the consent menu  (§1.2's other half) ────────────────────
 # menu() takes the safe default when stdin or stdout is not a terminal, so with no tty
@@ -662,7 +676,7 @@ out="$(installer_tty '\033[B\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | st
 assert_says "consent-yes:the-arrow-moved-the-selection" "Go ahead" "$out"
 assert_says "consent-yes:the-resize-ran"     "Resizing podman's virtual machine to 8192 MB" "$out"
 assert_says "consent-yes:reports-the-resize" "resized and restarted" "$out"
-assert_says "consent-yes:finishes"           "Setup finished" "$out"
+assert_says_key "consent-yes:finishes"           finished "$out" "$ICAT"
 # The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
 # before setting memory -- podman refuses to change a running one -- and start it again.
 assert_says "consent-yes:stopped-before-setting" "machine stop"              "$(installer_log)"
@@ -675,8 +689,7 @@ assert_eq "consent-yes:needed-no-privilege" "" "$(sudo_log)"
 shim_new; shim_fake_mac
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
 out="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
-assert_says "consent-no:declines-on-a-tty"  "Nothing was changed" "$out"
-assert_says "consent-no:offers-a-way-forward" "contact course staff" "$out"
+assert_says_key "consent-no:declines-on-a-tty" consent.declined "$out" "$ICAT"
 assert_says_not "consent-no:the-log-shows-no-resize" "machine set" "$(installer_log)"
 assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer_log)"
 
@@ -703,21 +716,25 @@ assert_says "subuid:asks-root-for-the-right-range" \
 # no real /etc/subuid entry, so the launcher's own preflight refuses at --rebuild. Recorded
 # so the reason is visible instead of looking like a missing assertion.
 record "subuid:what-happens-after-a-faked-usermod" \
-       "$(printf '%s' "$out" | grep -c 'Setup finished') finished-lines"
+       "$(printf '%s' "$out" | grep -cF "$(msg_text finished "$ICAT")") finished-lines"
 
 # ...and when root refuses. The die must name the account and tell them what to send staff.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail usermod
 out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
-assert_says "subuid-fails:names-the-account" "Could not add a subuid range for nosuchuser-cs193v" "$out"
-assert_says "subuid-fails:says-what-to-send" "cat /etc/subuid" "$out"
+# RENDERED WITH THE ACCOUNT, which is what this pair was really about: a refusal that names
+# the wrong account, or no account, is the failure worth catching. The needle is the whole
+# message with {{USER}} filled in, so it covers the sentence the old
+# subuid-fails:says-what-to-send quoted as well -- that name is gone because #219 reworded the
+# paragraph it pointed at and nothing about it was separately assertable afterwards.
+assert_says_sub "subuid-fails:names-the-account" err.subuid-failed "$out" "$ICAT" \
+                USER=nosuchuser-cs193v
 assert_says_not "subuid-fails:does-not-claim-success" "subuid range added" "$out"
 else
 # subuid-fails:* is the one pair with NO container equivalent yet: it needs a sudo that works for
 # everything except `usermod`, and SB_SUDO offers only nopasswd/password/deny/absent -- `deny`
 # takes sudo away entirely and the installer would fail earlier for a different reason.
 skip_linux_arm "subuid:step-announced" "subuid:reports-success" "subuid:asks-root-for-the-right-range" \
-               "subuid-fails:names-the-account" "subuid-fails:says-what-to-send" \
-               "subuid-fails:does-not-claim-success"
+               "subuid-fails:names-the-account" "subuid-fails:does-not-claim-success"
 fi
 
 # ─── and the same usermod, EXECUTED, against a synthetic root ──────────────────
@@ -839,7 +856,7 @@ shim_new
 out="$(installer_tty '\n' "$TMP/installer.sh" | strip_ansi)"
 assert_says "choosedir:enter-takes-the-default" "$SHIM/home/cs193v" "$out"
 assert_ok   "choosedir:default-really-created"  test -x "$SHIM/home/cs193v/cs193v"
-assert_says "choosedir:default-finishes"        "Setup finished" "$out"
+assert_says_key "choosedir:default-finishes"        finished "$out" "$ICAT"
 
 shim_new
 out="$(installer_tty "2$SHIM/typed\n" "$TMP/installer.sh" | strip_ansi)"
@@ -913,7 +930,7 @@ assert_ok "install:and-that-run-created-no-course-directory" test ! -d "$TMP/nod
 shim_new
 run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST" TMPDIR="$BOOTTMP"; }
 out1="$(run_installer)"
-assert_says "install:first-run-finishes"     "Setup finished"  "$out1"
+assert_says_key "install:first-run-finishes"     finished  "$out1" "$ICAT"
 # AND THE TREE IS GONE. `exec` takes the bootstrap's EXIT trap with it, so from the hand-over on
 # the only thing that can remove the unpacked tree is course-install.sh itself. A leak here is a
 # full copy of the repo left in /tmp by every install anyone ever runs.
@@ -940,7 +957,7 @@ mkdir -p "$DEST/projects/my-app" && echo 'my work' > "$DEST/projects/my-app/inde
 out2="$(run_installer)"
 state_hash > "$TMP/s2"
 
-assert_says "install:second-run-finishes" "Setup finished" "$out2"
+assert_says_key "install:second-run-finishes" finished "$out2" "$ICAT"
 if diff -u "$TMP/s1" "$TMP/s2" > "$TMP/statediff" 2>&1; then
     pass "install:is-idempotent"
 else
@@ -971,7 +988,7 @@ shim_new
 WINDEST="$TMP/windest"
 outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTMP" \
                        CS193V_WINDOWS=1)"
-assert_says "win-signoff:finishes"                     "Setup finished"  "$outw"
+assert_says_key "win-signoff:finishes"                     finished.windows "$outw" "$ICAT"
 assert_says "win-signoff:names-the-wsl-step"           "wsl -d CS193V"   "$outw"
 assert_says "win-signoff:the-cd-follows-the-chosen-dir" "cd $WINDEST"    "$outw"
 # The whole UNC path, not its prefix: the prefix is a constant and would still match with the
@@ -1028,15 +1045,28 @@ cd_for() {                            # cd_for ALLOC USED [RC] -> its note/ok li
     ( . "$TMP/cd.sh"; FAKE_OUT="$1 $2" FAKE_RC="${3:-0}" check_disk )
 }
 #  10 GiB allocated, 6 used -> 4 GiB free, under the 8 GiB floor check_disk names.
+# RENDERED WITH THE NUMBER, because the number is the assertion. note.low-disk and ok.disk-free
+# both interpolate {{FREE}}, and ok.disk-free LEADS with it -- so msg_text returns nothing at all
+# for one and stops before the arithmetic for the other, and a needle that cannot see the number
+# passes whatever check_disk computed. That is the bug these four exist to catch.
+# ONE LINE AT A TIME, and the reason is the stub above rather than the product: notes() calls
+# note() once per line, and this carving's note() labels each one "NOTE " so the transcript
+# shows which lines it produced. _flatten strips box GLYPHS, not words, so a whole-body needle
+# arrives with "NOTE" spliced into the middle of it and matches nothing. The first line carries
+# the arithmetic and the last carries the remedy, which is what these two names each claim.
+low4="$(msg_of_in "$ICAT" note.low-disk FREE=4)"
 assert_says "check-disk:warns-under-the-floor" \
-            "Only about 4 GB is free" "$(cd_for 10737418240 6442450944)"
+            "$(printf '%s\n' "$low4" | sed -n 1p)" "$(cd_for 10737418240 6442450944)"
 assert_says "check-disk:says-it-can-be-resumed" \
-            "pick up where it stopped" "$(cd_for 10737418240 6442450944)"
+            "$(printf '%s\n' "$low4" | sed -n '$p')" "$(cd_for 10737418240 6442450944)"
 # 100 GiB allocated, 10 used -> 90 free, comfortably over.
-assert_says "check-disk:reports-ample-room" \
-            "90 GB free for the container" "$(cd_for 107374182400 10737418240)"
-assert_says_not "check-disk:ample-room-does-not-warn" \
-            "Only about" "$(cd_for 107374182400 10737418240)"
+assert_says_sub "check-disk:reports-ample-room" ok.disk-free \
+                "$(cd_for 107374182400 10737418240)" "$ICAT" FREE=90
+# THE NEGATIVE KEEPS THE TRUNCATED NEEDLE, and here that is the right one rather than a
+# concession: msg_text stops at {{FREE}}, so the needle is "Only about" -- the shortest phrase
+# no other message says, which is exactly what a negative assertion wants.
+assert_says_not_key "check-disk:ample-room-does-not-warn" note.low-disk \
+                    "$(cd_for 107374182400 10737418240)" "$ICAT"
 # The three silent early returns. Advisory by design: a wrong guess must not block an
 # install that would have worked, so each of these says NOTHING rather than guessing.
 assert_eq "check-disk:silent-when-podman-says-nothing"   "" "$(cd_for '' '')"
@@ -1051,8 +1081,10 @@ shim_new
 shim_set graph_alloc 10737418240
 shim_set graph_used   6442450944
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/lowdisk")"
-assert_says "check-disk:the-fake-really-feeds-it" "Only about 4 GB is free" "$out"
-assert_says "check-disk:low-disk-is-not-fatal"    "Setup finished"          "$out"
+# THE WHOLE BODY HERE, unlike the carving above: this is the real note(), whose gutter is
+# NOTE_INDENT -- four spaces -- and _flatten collapses whitespace.
+assert_says_sub "check-disk:the-fake-really-feeds-it" note.low-disk "$out" "$ICAT" FREE=4
+assert_says_key "check-disk:low-disk-is-not-fatal"    finished          "$out" "$ICAT"
 
 # ─── the macOS virtual machine, which no mechanism could reach before ──────────
 # `machine) echo ''; exit 0` was podman-fake's whole answer, so `podman machine list |
@@ -1107,7 +1139,7 @@ assert_says_not "mac-init:does-not-also-resize" "Resizing" "$out"
 
 out="$(mac_run machine_init_rc 1)"
 assert_says "mac-init:failure-is-fatal" "Could not create the podman virtual machine" "$out"
-assert_says_not "mac-init:failure-does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "mac-init:failure-does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
 
 # ─── the progress block around `machine init`  (#219) ──────────────────────────
@@ -1184,7 +1216,7 @@ assert_says_not "mac-resize:declining-touches-no-machine" 'machine set' "$(insta
 out="$(mac_run machine_list podman-machine-default machine_mem 16384)"
 assert_says "mac-ok:reasonable-size-is-left-alone" "reasonable size" "$out"
 assert_says_not "mac-ok:does-not-offer-a-resize" "more memory" "$out"
-assert_says "mac-ok:still-finishes" "Setup finished" "$out"
+assert_says_key "mac-ok:still-finishes" finished "$out" "$ICAT"
 
 # inspect returning nothing must land in the SAME arm, not in the resize one: an empty
 # value would make `[ "$vm_mb" -lt ... ]` an error, so the installer guards with -n first.
@@ -1208,13 +1240,13 @@ assert_says_not "mac-disk:no-set-when-there-is-nothing-to-do" 'machine set' "$(i
 # exceptional -- it must be a note and the install must go on.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32 machine_set_rc 1)"
 assert_says "mac-disk:a-refused-grow-is-not-fatal" "Could not grow it; continuing" "$out"
-assert_says "mac-disk:still-finishes-after-a-refused-grow" "Setup finished" "$out"
+assert_says_key "mac-disk:still-finishes-after-a-refused-grow" finished "$out" "$ICAT"
 
 # A non-numeric DiskSize is podman's output changing shape, and the installer's own comment
 # says the harmless direction is to stop growing rather than to guess.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
 assert_says_not "mac-disk:non-numeric-size-grows-nothing" "Growing" "$out"
-assert_says "mac-disk:non-numeric-size-still-finishes" "Setup finished" "$out"
+assert_says_key "mac-disk:non-numeric-size-still-finishes" finished "$out" "$ICAT"
 
 # ─── survey does not reinstall a podman it cannot see  (issue #121) ────────────
 # The second bug #121 caused, and the one that costs a student real money: re-running this
@@ -1283,10 +1315,12 @@ assert_says "probe:the-installer-reports-the-podman-it-found" "podman 5.7.0" "$o
 assert_says "probe:the-installer-says-where-it-found-it" \
             "podman is installed in $IOFF" "$out"
 assert_says "probe:the-installer-explains-the-path"  "does not name yet" "$out"
-# THE NEGATIVE, and its positive is the pair above. "Podman runs the course container" is the
-# opening of the need() body on BOTH the macOS and the Linux arm, so this needs no platform gate.
-assert_says_not "probe:the-installer-does-not-reinstall-a-podman-it-cannot-see" \
-                "Podman runs the course container" "$out"
+# THE NEGATIVE, and its positive is the pair above. BY KEY, and the macOS key: probe_survey
+# fakes a Mac, so need.podman-mac.why is the body this run could have printed. The two arms say
+# the same thing today, which is why the old quoted needle needed no platform gate -- and is
+# also why naming the key is the safer of the two, since nothing keeps them identical.
+assert_says_not_key "probe:the-installer-does-not-reinstall-a-podman-it-cannot-see" \
+                    need.podman-mac.why "$out" "$ICAT"
 assert_says_not "probe:it-downloads-no-pkg" "podman-installer-macos" "$out"
 assert_says_not "probe:it-runs-no-installer" "installer -pkg" "$(sudo_log)"
 # AND IT REALLY RAN THAT PODMAN, rather than merely finding the file. This is what separates
@@ -1299,8 +1333,8 @@ assert_says "probe:the-installer-really-ran-that-podman" "--version" "$(installe
 probe_setup absent
 out="$(probe_survey)"
 assert_says "probe:the-survey-absent-run-reached-macos" "macos on arm64" "$out"
-assert_says "probe:the-installer-offers-to-install-a-podman-that-really-is-absent" \
-            "Podman runs the course container" "$out"
+assert_says_key "probe:the-installer-offers-to-install-a-podman-that-really-is-absent" \
+                need.podman-mac.why "$out" "$ICAT"
 assert_says_not "probe:it-claims-no-directory-when-there-is-none" \
                 "podman is installed in" "$out"
 
@@ -1344,7 +1378,7 @@ assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
 # it is the more precise of the two either way.
 assert_says     "password:no-sudo-names-what-wanted-root" "- Install Podman" "$out"
 assert_says_not "password:no-sudo-asks-no-permission" "needs your permission" "$out"
-assert_says_not "password:no-sudo-does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "password:no-sudo-does-not-claim-success" finished "$out" "$ICAT"
 assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
 
 # ── sudo needs a password and there is no terminal to type it into ──
@@ -1374,7 +1408,7 @@ assert_says_key "password:announced-before-it-is-asked" note.password-why "$out"
 # passes on every input -- which is how this assertion passed before step.password existed.
 assert_says_key "password:the-step-is-announced" step.password "$out" \
                 "$PRIVATE/course-install-messages.txt"
-assert_says_not "password:refused-does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "password:refused-does-not-claim-success" finished "$out" "$ICAT"
 # AND NOTHING WAS INSTALLED. The prime is the only privileged call in the log: no package
 # manager, no .pkg. sudo-fake records without executing, so this reads what would have run.
 assert_says     "password:the-prime-really-ran" "-v" "$(sudo_log)"
@@ -1459,7 +1493,7 @@ fail_leftovers() { ls -d "$TMP/boot-fail"/cs193v-install.* 2>/dev/null; }
 #    that independent of which tar is installed.
 head -c 3000 "$TMP/course.tar.gz" > "$TMP/truncated.tar.gz"
 out="$(run_with_tarball "$TMP/truncated.tar.gz" "$TMP/broken-trunc")"
-assert_says_not "truncated:does-not-claim-success"   "Setup finished" "$out"
+assert_says_not_key "truncated:does-not-claim-success"   finished "$out" "$ICAT"
 assert_eq       "truncated:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "truncated:says-it-is-safe-to-retry" "safe to run this script again" "$out"
 # THE BOOTSTRAP'S OWN TRAP, on the one side of the hand-over where it still runs. This case dies
@@ -1468,7 +1502,7 @@ assert_eq "truncated:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
 # 2. A URL that is not there at all — what a wrong REPO_OWNER produces.
 out="$(run_with_tarball "$TMP/no-such-file.tar.gz" "$TMP/broken-404")"
-assert_says_not "missing-tarball:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "missing-tarball:does-not-claim-success" finished "$out" "$ICAT"
 assert_eq       "missing-tarball:exits-nonzero"         "1" "$(last_rc)"
 
 # 3. The one neither exit status can catch: a well-formed archive that is simply missing
@@ -1488,7 +1522,7 @@ cp "$PRIVATE/messages.txt" "$TMP/pkg2/cs193v-main/"
 ( cd "$TMP/pkg2" && tar czf "$TMP/incomplete.tar.gz" cs193v-main )
 assert_ok "incomplete:archive-is-well-formed" tar tzf "$TMP/incomplete.tar.gz"
 out="$(run_with_tarball "$TMP/incomplete.tar.gz" "$TMP/broken-partial")"
-assert_says_not "incomplete:does-not-claim-success"    "Setup finished" "$out"
+assert_says_not_key "incomplete:does-not-claim-success"    finished "$out" "$ICAT"
 assert_eq       "incomplete:exits-nonzero"             "1" "$(last_rc)"
 assert_says     "incomplete:names-the-missing-file"    "course-install.sh is missing" "$out"
 assert_says     "incomplete:blames-the-transfer"       "cut short" "$out"
@@ -1507,7 +1541,7 @@ assert_ok "half-tree:but-still-has-what-the-bootstrap-needs" \
           test -s "$TMP/pkg3/cs193v-main/.private/course-install.sh"
 ( cd "$TMP/pkg3" && tar czf "$TMP/half-tree.tar.gz" cs193v-main )
 out="$(run_with_tarball "$TMP/half-tree.tar.gz" "$TMP/broken-half")"
-assert_says_not "half-tree:does-not-claim-success"   "Setup finished" "$out"
+assert_says_not_key "half-tree:does-not-claim-success"   finished "$out" "$ICAT"
 assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "half-tree:names-the-missing-file"   "cs193v is missing" "$out"
 assert_says     "half-tree:blames-the-unpacking"     "unpacking stopped partway" "$out"
