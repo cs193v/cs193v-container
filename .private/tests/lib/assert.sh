@@ -341,6 +341,28 @@ assert_says_not_key() {               # assert_says_not_key NAME KEY TEXT [FILE]
     esac
     assert_says_not "$1" "$phrase" "$3"
 }
+# THE NEGATIVE FORMS OF THE TWO ABOVE, and they exist because their absence was SILENT. A test
+# calling an assert_* that is not defined is a `command not found` on stderr and an assertion
+# that never ran -- so 26-installer-sandbox.sh's sb-fed:does-not-ask-for-uidmap was simply
+# missing from a green run, which is #79's vacuous pass with the pass removed as well.
+# 10-static.sh's helpers:every-assertion-used-is-defined is the guard that now catches that.
+assert_says_not_key_tail() {          # assert_says_not_key_tail NAME KEY TEXT [FILE]
+    local phrase; phrase="$(msg_text_tail "$2" "${4-}")"
+    case "$phrase" in
+        ''|' ') fail "$1" "no literal prose after the last placeholder in: $2" ; return 0 ;;
+    esac
+    assert_says_not "$1" "$phrase" "$3"
+}
+assert_says_not_sub() {               # assert_says_not_sub NAME KEY TEXT FILE [NAME=VALUE...]
+    local n="$1" k="$2" t="$3" f="$4"; shift 4
+    local phrase; phrase="$(_flatten "$(msg_of_in "$f" "$k" "$@")")"
+    phrase="${phrase# }"; phrase="${phrase% }"
+    case "$phrase" in
+        '') fail "$n" "no prose for message key: $k" ; return 0 ;;
+        *'(missing message'*) fail "$n" "no such message key: $k (in $f)" ; return 0 ;;
+    esac
+    assert_says_not "$n" "$phrase" "$t"
+}
 
 assert_match() {                      # assert_match NAME ERE ACTUAL
     _checker_ok "$1" "$2" "$3" || return 0

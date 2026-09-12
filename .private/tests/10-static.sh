@@ -1384,6 +1384,70 @@ assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
                 "$(cat $PRIVATE/files/cs193v-welcome)"
 assert_ok  "welcome:syntax" sh -n $PRIVATE/files/cs193v-welcome
 
+# ─── every assertion a suite calls is one lib/assert.sh defines ────────────────
+# A MISSPELLED ASSERTION IS A MISSING TEST, AND IT IS SILENT. `assert_says_not_sub` was called
+# once in 26-installer-sandbox.sh before it existed: bash printed "command not found" on stderr,
+# the line did nothing, and sb-fed:does-not-ask-for-uidmap was simply ABSENT from a run that
+# reported 3458 passes and had no failure to say so. That is #79's vacuous pass with the pass
+# taken away as well -- there is no red, and nothing counts what should have been there.
+#
+# THE STDERR IS NOT THE GUARD. run-tests.sh interleaves suite stderr into the transcript, so the
+# line IS on the screen; it is one line among four thousand, above a green summary, and it was
+# missed. A check is what makes it a failure.
+#
+# DERIVED IN BOTH DIRECTIONS FROM THE TREE, so a new helper needs no edit here: what must be
+# empty is the difference between the names called and the names defined.
+#
+# DEFINED ANYWHERE IN THE TREE, not just in lib/assert.sh. Six suites wrap their own -- 60's
+# assert_probe and assert_pids_floor, 26's assert_survey_platform, 80's assert_carried,
+# sandbox.sh's assert_system_diff and assert_host_state -- and each belongs where it is, beside
+# the fixture it reads. What this rule is about is the name being real, not where it lives.
+#
+# AND CALLED IN A COMMAND POSITION, which is the half that makes the used side honest: `grep -o
+# assert_[a-z_]*` over whole lines also finds the word in prose -- lib/assert.sh's own comments
+# say "Six `podman run --rm` sites in 50-image.sh are assert_fails", and assert_fails is not a
+# function. The anchor set is 20-messages.sh's, which reads msg keys out of scripts the same way.
+# shellcheck disable=SC2086
+assert_ne "helpers:the-assertion-list-was-readable" "" \
+          "$(grep -chE '^assert_[a-z0-9_]+\(\)' $PRIVATE/tests/lib/assert.sh)"
+assert_eq "helpers:every-assertion-used-is-defined" "" \
+          "$(LC_ALL=C comm -13 \
+               <(grep -ohE '^assert_[a-z0-9_]+\(\)' $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh \
+                   | sed 's/()$//' | LC_ALL=C sort -u) \
+               <(grep -ohE '(^|[;&|(]|\$\()[[:space:]]*assert_[a-z0-9_]+' \
+                     $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh \
+                   | grep -oE 'assert_[a-z0-9_]+' | LC_ALL=C sort -u) \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
+
+# ─── a negative assertion by key needs a needle worth searching for ───────────
+# msg_text TRUNCATES AT THE FIRST {{PLACEHOLDER}}, which is right for the needle it builds and
+# wrong for a message that LEADS with one: err.podman-old-linux is "Podman {{V}} is installed",
+# so its needle is the single word "Podman". As a positive assertion that is merely weak. As a
+# NEGATIVE it is a false failure waiting for an unrelated message to use the word -- measured:
+# sb-deb:not-refused-any-more went red because err.podman-mute says "Podman is installed but is
+# not answering" further down the same transcript, on a run that was behaving perfectly.
+#
+# TEN CHARACTERS is the floor, and it comes from the shortest needle in the tree that is
+# genuinely distinctive rather than from a theory: note.low-disk resolves to "Only about", which
+# no other message says. THE FIX WHEN THIS FIRES IS assert_says_not_key_tail, whose needle is the
+# prose AFTER the last placeholder -- not a quotation pasted into the suite, which is the thing
+# every other rule in this section exists to keep out.
+#
+# 20-messages.sh's sgflow:* block makes this argument for setup-git's pty gates, where a short
+# needle deadlocks a step instead of reddening a line. This is the same hazard on the other side.
+# shellcheck disable=SC2086
+nk_weak=''
+for nk_k in $(grep -ohE 'assert_says_not_key +"[^"]*" +[a-z0-9._-]+' $PRIVATE/tests/*.sh \
+                | awk '{print $NF}' | LC_ALL=C sort -u); do
+    for nk_c in $CATS; do
+        grep -q "^\[\[$nk_k\]\]\$" "$nk_c" || continue
+        nk_n="$(printf '%s' "$(msg_text "$nk_k" "$nk_c")" | wc -c | do_tr -d ' ')"
+        [ "$nk_n" -ge 10 ] || nk_weak="$nk_weak $(basename "$nk_c"):$nk_k($nk_n)"
+    done
+done
+assert_eq "helpers:no-negative-key-assertion-rests-on-a-short-needle" "" \
+          "$(printf '%s' "$nk_weak" | sed 's/^ *//')"
+
 # ─── the raw-shell path is retired, files and all  (#220) ─────────────────────
 # THREE FILES GONE, and the absences are asserted rather than assumed. A deleted file that
 # something still installs is a broken build; a deleted file that nothing installs but which is

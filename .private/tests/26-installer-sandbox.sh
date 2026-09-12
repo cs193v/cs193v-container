@@ -981,7 +981,13 @@ sb_machine base=debian
 out="$(sandbox_run debian '' -e CS193V_DIR=/home/student/cs193v)"
 record "sb-deb:the-version-debian-13-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
 assert_says "sb-deb:accepted"                  "podman 5.4.2" "$out"
-assert_says_not_key "sb-deb:not-refused-any-more"  err.podman-old-linux     "$out" "$ICAT"
+# THE TAIL, NOT THE HEAD, and that distinction is the whole of this line. err.podman-old-linux
+# LEADS with "Podman {{V}}", so msg_text's needle is the single word "Podman" -- which this
+# transcript contains anyway, from err.podman-mute further down, so the negative went red on a
+# run that was doing exactly the right thing. 20-messages.sh's sgflow:* notes make the same
+# point about placeholder-led keys. The tail is the paragraph after {{UPGRADE}}, and nothing
+# else in the catalogue says it.
+assert_says_not_key_tail "sb-deb:not-refused-any-more" err.podman-old-linux "$out" "$ICAT"
 assert_says_key "sb-deb:needs-nothing-installed"   step.nothing-to-change "$out" "$ICAT"
 assert_says_not_key "sb-deb:asks-no-permission"    step.consent "$out" "$ICAT"
 # IT GOT THE COURSE FILES, which is further than this machine had ever got: fetch_files runs after
@@ -1418,7 +1424,8 @@ osp_imgs="$SB_TMP/host-imgs.before.oldest-supported"; host_images > "$osp_imgs"
 out="$(nest_build oldest-supported "" "" podman-old-nested)"
 assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/installer.sh" \
             "$(sb_section "$out" INSTALLER-USED)"
-assert_says_not_key "oldest-supported:no-version-refusal-anywhere" err.podman-old-linux "$out" "$ICAT"
+assert_says_not_key_tail "oldest-supported:no-version-refusal-anywhere" \
+                         err.podman-old-linux "$out" "$ICAT"
 record "oldest-supported:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 record "oldest-supported:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
 assert_says_key "oldest-supported:4.9.3-finished-the-install"  finished       "$out" "$ICAT"
