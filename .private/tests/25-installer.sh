@@ -946,7 +946,10 @@ assert_exec "install:launcher-executable"    "$DEST/cs193v"
 assert_file "install:args-installed"         "$DEST/.config/container.args"
 assert_file "install:messages-installed"     "$DEST/.private/messages.txt"
 assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
-assert_says "install:tells-them-how-to-start" "./cs193v" "$out1"
+# THE FAR SIDE OF {{DIR}}, which is where the command a student types sits: [[finished]] is
+# "cd {{DIR}} && ./cs193v", so msg_text stops before the command and msg_text_tail is the half
+# that has it. Quoted as "./cs193v" this matched several other messages as well.
+assert_says_key_tail "install:tells-them-how-to-start" finished "$out1" "$ICAT"
 # ...and the UNIX run is the UNIX one: the Windows step must not leak into it.
 assert_says_not_key "install:no-wsl-step-without-the-flag" finished.windows "$out1" "$ICAT"
 
@@ -1203,8 +1206,7 @@ assert_says_key "machinebox:the-step-still-reports-success" ok.machine-created "
 # THE FAILURE ARM: the block closes before the STOP box rather than under it, and the refusal
 # carries what podman said -- which it could not point at any more (ERRORS.md B17).
 macfail="$(mac_run machine_init_rc 1)"
-assert_says "machinebox:failure-still-refuses" "Could not create the podman virtual machine" \
-            "$macfail"
+assert_says_key "machinebox:failure-still-refuses" err.machine-create "$macfail" "$ICAT"
 assert_says "machinebox:failure-carries-podmans-words" "machine init failed" "$macfail"
 assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 
