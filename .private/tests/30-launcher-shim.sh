@@ -47,15 +47,19 @@ for v in --help -h help; do
     assert_eq "dispatch:$v-exits-0" "0" "$(launcher_rc "$v")"
 done
 out="$(launcher --help)"
+# THE VERB NAMES STAY SPELLED OUT, and that is not an oversight: `doctor`, `--rebuild` and
+# `--stop` are what the argument parser accepts, so these three assert that every verb the
+# launcher answers to is documented -- a claim about the code, not about the prose around it.
 assert_says "usage:mentions-doctor"  "cs193v doctor"  "$out"
 assert_contains "usage:mentions-rebuild" "--rebuild"      "$out"
-# INVERTED BY #41. This used to assert the "many windows are fine" promise, which was the thing
-# students most needed up front. Closing a window now stops the container, so the two facts
-# students most need up front are that leaving takes your dev server with it, and that a second
-# place to work is a TAB rather than a window.
-assert_says "usage:says-closing-the-window-stops-things" "stops the container" "$out"
-assert_says "usage:points-at-tabs-not-windows" "CTRL+T" "$out"
 assert_contains "usage:mentions-stop" "--stop" "$out"
+# AND THE WHOLE MESSAGE, which is what the two assertions below this used to cover a phrase at a
+# time. They were usage:says-closing-the-window-stops-things and usage:points-at-tabs-not-windows
+# -- #41 put that advice at the top of help.usage, and #219's rewording took both paragraphs out
+# again, so there is no longer a sentence for either to point at. Retired rather than reworded:
+# whether the help says those things is a question about the catalogue, and this assertion is
+# what makes the catalogue's answer the one a student reads.
+assert_says_key "usage:prints-the-whole-help" help.usage "$out"
 
 assert_eq "dispatch:unknown-verb-exits-2" "2" "$(launcher_rc bogusverb)"
 assert_says "dispatch:unknown-verb-prints-usage" "cs193v doctor" "$(launcher bogusverb)"
@@ -181,8 +185,18 @@ done
 shim_new; shim_fake_uname Linux x86_64; shim_set version "podman version 4.3.1"
 out="$(launcher)"
 assert_contains "version:refusal-shows-found"  "4.3.1" "$out"
-assert_contains "version:refusal-shows-needed" "4.9.0" "$out"
-assert_says "version:refusal-names-the-fix" "apt install" "$out"
+# OUT OF cs193v-ui.sh, not spelled out here. "4.9.0" is MIN_PODMAN_LINUX, and a test that keeps
+# its own copy of a floor asserts that the floor has not moved rather than that the refusal
+# reports it -- so raising the floor would redden this for the wrong reason. The sed is
+# 25-installer.sh:137's idiom, reading the same constant for the same reason.
+assert_contains "version:refusal-shows-needed" \
+                "$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)" \
+                "$out"
+# THE FIX SITS PAST THE LAST PLACEHOLDER. err.podman-too-old opens with "you have: {{FOUND}} /
+# we need: {{NEED}}", so msg_text stops before the remedy and the per-platform commands are all
+# in the tail. Quoted as "apt install" this was green on a Debian-family host and said nothing
+# about the other two arms; the tail is the whole of what the message offers.
+assert_says_key_tail "version:refusal-names-the-fix" err.podman-too-old "$out"
 
 # 4.9.0 is exactly MIN_PODMAN_LINUX, so "equal" must mean "acceptable" — an off-by-one here
 # refuses a machine sitting precisely on the floor. 10.0.0 guards against a lexical compare, which
@@ -242,7 +256,7 @@ else
     fail "hang:returns-in-seconds-not-minutes" "took ${ELAPSED}s"
 fi
 record "hang:elapsed-seconds" "$ELAPSED"
-assert_says "hang:message-says-not-responding" "not responding" "$out"
+assert_says_key "hang:message-says-not-responding" err.podman-hangs "$out"
 
 # ─── rootless and reachability ─────────────────────────────────────────────────
 # --userns=keep-id is a HARD ERROR on a rootful connection, not a no-op, so this must be
@@ -254,7 +268,7 @@ assert_eq       "rootful:creates-nothing"  "0"       "$(shim_count '^run ')"
 
 shim_new; shim_set info_rc 1
 out="$(launcher)"
-assert_says "unreachable:refused"         "cannot reach it" "$out"
+assert_says_key "unreachable:refused"         err.podman-unreachable "$out"
 assert_eq       "unreachable:creates-nothing" "0"               "$(shim_count '^run ')"
 
 # ─── image resolution ──────────────────────────────────────────────────────────
@@ -262,7 +276,7 @@ assert_eq       "unreachable:creates-nothing" "0"               "$(shim_count '^
 # the command. There is no registry to fall back to.
 shim_new; shim_set image_exists no
 out="$(launcher)"
-assert_says "image:nothing-built-refuses"      "has not been built" "$out"
+assert_says_key "image:nothing-built-refuses"      err.no-image "$out"
 assert_says "image:nothing-built-says-how"     "--rebuild"          "$out"
 assert_eq   "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
 
@@ -395,12 +409,14 @@ launcher >/dev/null 2>&1
 shim_set state running
 shim_clear_log
 out="$(launcher)"
-assert_says "lifecycle:a-second-launch-refuses" "already have a CS193V session" "$out"
-assert_says "lifecycle:the-refusal-names-the-way-out" "cs193v --stop" "$out"
+assert_says_key "lifecycle:a-second-launch-refuses" err.session-in-use "$out"
+# lifecycle:the-refusal-names-the-way-out AND lifecycle:the-refusal-admits-it-may-be-a-crash
+# WERE HERE, quoting "cs193v --stop" and "crash" out of the message the line above now asserts
+# whole. err.session-in-use interpolates nothing, so its body is one literal needle that
+# contains both -- and both of those names could only ever have failed for a rewording.
 # The crash caveat carries real weight: without it the message asserts something a student with
 # no other window open knows to be false, and a message they have caught lying once is one they
 # will not read again.
-assert_says "lifecycle:the-refusal-admits-it-may-be-a-crash" "crash" "$out"
 assert_eq "lifecycle:the-refusal-exits-nonzero" "1" "$(launcher_rc)"
 assert_eq "lifecycle:the-refusal-creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq "lifecycle:the-refusal-removes-nothing" "0" "$(shim_count '^rm ')"
@@ -467,7 +483,7 @@ assert_eq "lifecycle:stop-accepted-stops-the-container" "exited" "$(shim_state)"
 # refusal named --stop, they ran it, and they are trying again.
 shim_new
 shim_set state exited
-assert_says "lifecycle:stop-on-a-stopped-container-says-so" "nothing to stop" "$(launcher --stop)"
+assert_says_key "lifecycle:stop-on-a-stopped-container-says-so" status.already-stopped "$(launcher --stop)"
 assert_eq "lifecycle:stop-on-a-stopped-container-exits-0" "0" "$(launcher_rc --stop)"
 
 # ─── losing the create race  (#41) ─────────────────────────────────────────────
@@ -559,7 +575,7 @@ shim_new
 shim_set state running
 shim_set label_dir /somewhere/else/cs193v
 out="$(launcher)"
-assert_says "foreign-dir:refused"        "different folder" "$out"
+assert_says_key "foreign-dir:refused"        err.other-directory "$out"
 assert_contains "foreign-dir:names-theirs"   "/somewhere/else/cs193v" "$out"
 # COMPARED WITH THE BOX'S DECORATION AND WHITESPACE REMOVED, because box() WRAPS a long path
 # rather than truncating it -- the student still sees all of it, across two rows. On macOS a shim
@@ -582,9 +598,11 @@ launcher >/dev/null 2>&1                       # one container, hash recorded
 shim_clear_log
 echo '-p 127.0.0.1:9998:9998' >> "$COPY/.config/container.args"
 out="$(launcher)"
-assert_says "drift:prompt-shown"    "settings have changed" "$out"
-assert_says "drift:explains-why"    "cannot apply new settings" "$out"
-assert_says "drift:reassures-files" "Your files are safe" "$out"
+# ONE ASSERTION, BY KEY. These were three phrases out of one message -- "settings have
+# changed", "cannot apply new settings" and "Your files are safe" -- so #219's rewording
+# reddened the third and left the first two green, which tells a reader nothing about what
+# changed. The whole body subsumes all three and names none of them.
+assert_says_key "drift:prompt-shown" prompt.config-changed "$out"
 assert_eq "drift:declined-keeps-container" "0" "$(shim_count '^run ')"
 assert_eq "drift:declined-removes-nothing" "0" "$(shim_count '^rm ')"
 # The new flag must be visible in the run line even before the recreate.
@@ -593,7 +611,7 @@ assert_contains "drift:visible-in-print-command" "9998" "$(launcher --dev-print-
 # Accepting it, through a pty, must actually recreate with the new flag.
 shim_clear_log
 out="$(launcher_tty '\033[B\n' | strip_ansi)"
-assert_says "drift:accepted-selects-apply" "Apply the new settings" "$out"
+assert_says_key "drift:accepted-selects-apply" opt.recreate "$out"
 assert_eq "drift:accepted-removes-old" "1" "$(shim_count '^rm ')"
 assert_eq "drift:accepted-creates-new" "1" "$(shim_count '^run ')"
 assert_contains "drift:new-container-has-the-flag" "9998" "$(shim_log | grep '^run ')"
@@ -604,7 +622,7 @@ shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
 out="$(launcher)"
-assert_says_not "nodrift:no-prompt" "settings have changed" "$out"
+assert_says_not_key "nodrift:no-prompt" prompt.config-changed "$out"
 assert_eq "nodrift:no-recreate" "0" "$(shim_count '^run ')"
 
 # ─── a stale recipe  (the replacement for the digest pin, §2.6) ────────────────
@@ -616,7 +634,7 @@ launcher >/dev/null 2>&1
 shim_set image_buildhash "0000deadbeefnotthecurrentrecipe"
 shim_clear_log
 out="$(launcher)"
-assert_says "stale-recipe:prompt-shown" "has been updated since" "$out"
+assert_says_key "stale-recipe:prompt-shown" prompt.image-stale "$out"
 assert_eq   "stale-recipe:declined-builds-nothing" "0" "$(shim_count '^build ')"
 assert_eq   "stale-recipe:declined-keeps-container" "0" "$(shim_count '^run ')"
 
@@ -631,7 +649,7 @@ assert_eq "stale-recipe:accepted-recreates" "1" "$(shim_count '^run ')"
 shim_new
 launcher >/dev/null 2>&1
 shim_clear_log
-assert_says_not "stale-recipe:unlabelled-does-not-nag" "has been updated since" "$(launcher)"
+assert_says_not_key "stale-recipe:unlabelled-does-not-nag" prompt.image-stale "$(launcher)"
 assert_eq       "stale-recipe:unlabelled-builds-nothing" "0" "$(shim_count '^build ')"
 
 # ─── --rebuild, and its two modifiers  (§2.3, §2.4) ────────────────────────────
@@ -658,13 +676,13 @@ assert_eq "rebuild:current-recipe-builds-nothing" "0" "$(shim_count '^build ')"
 # --rebuild must keep logins: none of the seven volumes is touched.
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
 out="$(launcher --rebuild)"
-assert_says "rebuild:says-logins-kept" "logins are kept" "$out"
+assert_says_key "rebuild:says-logins-kept" status.rebuilding "$out"
 # ...AND IT MUST NOT CELEBRATE A BUILD IT DID NOT DO. One verb both builds and merely recreates,
 # so the box is gated on $BUILT: a two-second recreate ending in "Build Successful!" would
 # congratulate the launcher for nothing and send the student into an environment it did not
 # prepare.
 assert_says_not "rebuild:no-box-when-nothing-was-built" "Build Successful" "$out"
-assert_says_not "rebuild:no-vibecoding-when-nothing-was-built" "Happy vibecoding" "$out"
+assert_says_not_key "rebuild:no-vibecoding-when-nothing-was-built" status.build-succeeded "$out"
 
 # ...AND THE EXPENSIVE PATH HAPPENS WITHOUT BEING ASKED FOR. A moved recipe makes the same
 # command build, with no prompt: the student typed the verb whose job is to make the container
@@ -678,7 +696,7 @@ shim_clear_log
 out="$(launcher --rebuild)"
 assert_eq "rebuild:moved-recipe-builds" "1" "$(shim_count '^build ')"
 assert_eq "rebuild:moved-recipe-recreates" "1" "$(shim_count '^run ')"
-assert_says_not "rebuild:moved-recipe-does-not-ask" "has been updated since" "$out"
+assert_says_not_key "rebuild:moved-recipe-does-not-ask" prompt.image-stale "$out"
 # An unlabelled image is an UNKNOWN, not a stale one, and must not provoke a build here either
 # -- the same rule the bare launch follows. This is the case a bare `podman build` produces.
 shim_new
@@ -699,10 +717,10 @@ assert_eq "logout:removes-container" "1" "$(shim_count '^rm ')"
 # container.args and forgotten in remove_volumes fails here.
 if [ "$(shim_count '^volume rm')" -eq 7 ]; then pass "logout:removes-7-volumes"
 else fail "logout:removes-7-volumes" "removed $(shim_count '^volume rm')"; fi
-assert_says "logout:says-you-are-logged-out" "log in again" "$out"
+assert_says_key "logout:says-you-are-logged-out" status.full-rebuilt "$out"
 # ...and it must NOT claim the thing it just deleted was kept: status.rebuilding says "logins are
 # kept", which is the wrong announcement for this path.
-assert_says_not "logout:does-not-promise-logins-kept" "logins are kept" "$out"
+assert_says_not_key "logout:does-not-promise-logins-kept" status.rebuilding "$out"
 
 # A stray modifier is refused rather than ignored: with two modifiers that both matter, a typo
 # that silently means "keep the volumes" is the failure worth being loud about.
@@ -774,7 +792,7 @@ assert_says "doctor:reports-a-matching-config-as-matching" "matches container.ar
 assert_says_not "doctor:does-not-cry-stale-when-config-matches" "STALE" "$out"
 # Whatever doctor says has to agree with what a real launch decides, or one of the two is
 # lying to the student.
-assert_says_not "doctor:agrees-with-the-launch-path" "settings have changed" "$(launcher)"
+assert_says_not_key "doctor:agrees-with-the-launch-path" prompt.config-changed "$(launcher)"
 
 # And drift must still be reported when it is real.
 shim_new
@@ -957,16 +975,13 @@ assert_not_match "no-color:emits-no-escapes" "$(printf '\033')" "$out"
 # looked wedged with no output at all. It now refuses instead.
 shim_new
 out="$(launcher)"
-assert_says "noterm:refuses-without-a-terminal" "could not open a shell" "$out"
-assert_says "noterm:explains-why"               "not being run from a terminal" "$out"
-# INVERTED BY #41: the container is no longer left running, because a running container with
-# nothing attached is exactly the state the change exists to prevent -- so the message can
-# promise it is set up, but not that it is up.
-assert_says "noterm:says-the-container-is-set-up" "container is set up" "$out"
-assert_says "noterm:says-it-was-stopped-again"    "has been stopped again" "$out"
-# The message has to name what a script SHOULD use, or it is just a dead end.
-assert_says "noterm:points-at-rebuild" "cs193v --rebuild" "$out"
-assert_says "noterm:points-at-doctor"  "cs193v doctor"    "$out"
+# SIX ASSERTIONS BECOME ONE, and four of the six had nothing left to assert. They quoted
+# "could not open a shell", "not being run from a terminal", "container is set up", "has been
+# stopped again", "cs193v --rebuild" and "cs193v doctor" -- one phrase each out of one message
+# -- and #219's rewording of err.needs-a-terminal removed the last four paragraphs outright.
+# Whether the refusal should name the script-safe verbs is a question about the catalogue; what
+# this suite can hold is that whatever the catalogue says is what a piped launch prints.
+assert_says_key "noterm:refuses-without-a-terminal" err.needs-a-terminal "$out"
 # AND NAMES NOTHING ELSE (#220). This used to end with `podman exec -it cs193v bash -lc
 # 'your command here'`, asserted here as a third thing a script could use. Two objections
 # retired it: the form was wrong for its own context -- `-it` asks for a tty inside advice
@@ -1018,7 +1033,7 @@ assert_eq "noterm:claim-never-passes-a-degenerate-size" "" "$sz_bad"
 # people to use, so they have to work with a redirected stdin.
 for v in --dev-print-command doctor --rebuild; do
     shim_new
-    assert_says_not "noterm:verb-$v-still-works-piped" "could not open a shell" \
+    assert_says_not_key "noterm:verb-$v-still-works-piped" err.needs-a-terminal \
                     "$(launcher $v)"
 done
 shim_new
@@ -1046,7 +1061,7 @@ assert_eq "noterm:--rebuild-still-creates-a-container-piped" "1" "$(shim_count '
 shim_new
 shim_set exec_out "SHELL-OPENED"
 out="$(launcher_tty '\nexit\n' | strip_ansi)"
-assert_says "ack:a-warned-launch-asks-for-enter" "Press ENTER to continue" "$out"
+assert_says_key "ack:a-warned-launch-asks-for-enter" prompt.acknowledge-warnings "$out"
 # The warning itself has to still be on screen at that point — acknowledging a message you
 # cannot see is no better than not being shown it.
 assert_says_key "ack:the-warning-is-still-on-screen" warn.tunnel-failed "$out"
@@ -1099,7 +1114,7 @@ out="$(launcher_tty 'exit\n' | strip_ansi)"
 # the dev-image advisory, which no longer exists anywhere in the launcher or messages.txt -- so it
 # could not fail. The tunnel failure is the warning this arrangement actually suppresses.
 assert_says_not_key "ack:a-quiet-launch-warns-about-nothing" warn.tunnel-failed "$out"
-assert_says_not "ack:a-quiet-launch-does-not-stop" "Press ENTER to continue" "$out"
+assert_says_not_key "ack:a-quiet-launch-does-not-stop" prompt.acknowledge-warnings "$out"
 assert_contains "ack:a-quiet-launch-still-opens-the-shell" "SHELL-OPENED" "$out"
 
 # Warning and prompting are separate: the verbs warn too, and they return to the student's
@@ -1108,8 +1123,8 @@ assert_contains "ack:a-quiet-launch-still-opens-the-shell" "SHELL-OPENED" "$out"
 # this would pass without asserting anything.
 shim_new
 out="$(launcher_tty '\n' --reset-tunnel | strip_ansi)"
-assert_says "ack:a-verb-still-warns" "no container running" "$out"
-assert_says_not "ack:a-verb-does-not-stop-to-be-acknowledged" "Press ENTER to continue" "$out"
+assert_says_key "ack:a-verb-still-warns" warn.tunnel-reset-not-running "$out"
+assert_says_not_key "ack:a-verb-does-not-stop-to-be-acknowledged" prompt.acknowledge-warnings "$out"
 
 # ─── leaving says one thing, once (#220) ───────────────────────────────────────
 # THE FAKE STANDS IN FOR tmux, and that is what makes this testable in the cheap lane at all.
@@ -1177,7 +1192,7 @@ assert_not_contains "exit:no-escapes-when-piped" "$(printf '\033')[1A" "$piped"
 
 # ─── malformed args files ──────────────────────────────────────────────────────
 shim_new
-assert_says "args:missing-file-refused" "container.args is missing" \
+assert_says_key "args:missing-file-refused" err.no-args-file \
     "$(rm -f "$COPY/.config/container.args.bak"; mv "$COPY/.config/container.args" "$COPY/.config/container.args.bak"; \
        launcher; mv "$COPY/.config/container.args.bak" "$COPY/.config/container.args")"
 
@@ -1256,12 +1271,13 @@ assert_match    "build:progress-reaches-the-last-step"    '\] +23/23' "$out"
 
 # The prose that explains what is happening stays -- it is the only place a student is told
 # this is normal and interruptible.
-assert_says "build:still-explains-the-wait" "safe to run again" "$out"
+assert_says_key "build:still-explains-the-wait" status.building "$out"
 
 # --- #22: it must say it worked ------------------------------------------------
 assert_says "build:announces-success"        "Build Successful"      "$out"
-assert_says "build:success-names-the-next-command" "./cs193v"        "$out"
-assert_says "build:success-is-friendly"      "Happy vibecoding"      "$out"
+# BY KEY, and one assertion where there were two: "./cs193v" and "Happy vibecoding" are the
+# command and the sign-off of one message, and the whole body carries both.
+assert_says_key "build:success-names-the-next-command" status.build-succeeded "$out"
 # Drawn in the same box everything else is drawn in, and closed -- see 20-messages.sh, which
 # owns box(). Asserted here too because this is the FIRST non-error thing ever put in one.
 #
@@ -1285,7 +1301,7 @@ fi
 # `podman run` is given up to 180 seconds and, on a machine slow enough to need them, said
 # nothing for all of them. The last line a student saw was "Setting up the course
 # container..." -- which is exactly what an interrupted command looks like.
-assert_says "build:creation-step-is-announced" "Setting up the course container" "$out"
+assert_says_key "build:creation-step-is-announced" status.creating "$out"
 assert_says "build:creation-step-reports-done" "Ready"                           "$out"
 
 # --- the staff path keeps the raw output ---------------------------------------
@@ -1310,7 +1326,7 @@ out="$(launcher --rebuild --no-cache)"
 # The anti-vacuity guard for the assertion below: status.building is printed by build_image on
 # both output paths, so this proves a build really was attempted and the absence of podman's
 # words is a choice rather than an absence of anything to hide.
-assert_says "build-raw:default-still-built-something" "Building the course container" "$out"
+assert_says_key "build-raw:default-still-built-something" status.building "$out"
 assert_not_contains "build-raw:default-hides-raw-podman-output" \
                     "apt-get install -y package-number" "$out"
 
@@ -1329,7 +1345,11 @@ Error: building at STEP "RUN curl -fsSL https://deb.nodesource.com/...": exit st
 out="$(launcher --rebuild --no-cache 2>&1)"
 assert_contains "build-failed:shows-the-failing-step"   "STEP 6/23"                     "$out"
 assert_contains "build-failed:shows-podmans-diagnosis"  "Could not resolve host"        "$out"
-assert_says     "build-failed:says-it-is-safe-to-retry" "safe to run it again"          "$out"
+# THE PARAGRAPH AFTER PODMAN'S OUTPUT, which is where err.build-failed puts what to do next.
+# RENAMED from build-failed:says-it-is-safe-to-retry: that is what the paragraph used to say and
+# #219's wording does not promise it, so the name now claims what the assertion checks -- that
+# the remedy paragraph arrives, whatever it recommends.
+assert_says_key_tail "build-failed:says-what-to-do-next" err.build-failed                "$out"
 assert_says_not "build-failed:no-longer-claims-output-is-above" "on the screen above"   "$out"
 assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --rebuild --no-cache)"
 

@@ -168,7 +168,7 @@ sb_machine no-prereqs=podman,ssh
 out="$(sandbox_run apt '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
 record "apt:transcript-bytes" "$(printf '%s' "$out" | wc -c | do_tr -d ' ')"
 assert_says "sb-apt:the-machine-was-really-arranged" "prereqs=podman,ssh" "$(sb_section "$out" ARRANGED)"
-assert_says "sb-apt:asks-for-both-independently" "permission for 2 thing" "$out"
+assert_says_sub "sb-apt:asks-for-both-independently" step.consent "$out" "$ICAT" N=2
 assert_says "sb-apt:names-podman-and-uidmap"     "Install podman (and uidmap)" "$out"
 assert_says "sb-apt:names-openssh-client"        "Install openssh-client" "$out"
 assert_says "sb-apt:says-what-it-is-installing"  "Installing podman uidmap openssh-client" "$out"
@@ -275,10 +275,14 @@ sandbox_reap
 sb_machine no-prereqs=podman no-caps=sysadmin
 out="$(sandbox_run cannot-answer '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
 assert_says "sb-noans:apt-still-installed-it" "podman version" "$(sb_section "$out" PODMAN-AFTER)"
+# NOT A CATALOGUE NEEDLE, and it must not become one: this reads podman's OWN failure out of the
+# audit section, and "newuidmap" is the name of the helper podman could not call. The installer's
+# err.uidmap-missing happens to use the word too, which is what makes the distinction worth
+# writing down rather than leaving to the next person to rediscover.
 assert_says "sb-noans:but-it-cannot-answer" "newuidmap" "$(sb_section "$out" PODMAN-WORKS)"
-assert_says "sb-noans:the-installer-says-so" "Podman is installed but is not answering" "$out"
+assert_says_key "sb-noans:the-installer-says-so" err.podman-mute "$out" "$ICAT"
 assert_says "sb-noans:exits-nonzero"         "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-noans:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-noans:does-not-claim-success" finished "$out" "$ICAT"
 # ...and it got far enough to have done the install first, which is what tells this apart from
 # a run that failed before reaching the question.
 assert_says "sb-noans:it-had-already-installed-podman" "Installing podman uidmap" "$out"
@@ -323,7 +327,7 @@ assert_eq "sb-wget:the-course-files-arrived" "launcher-is-executable" "$(sb_sect
 # needed A downloader and found one, while install_podman's macOS arm and the launcher both want
 # curl specifically. This is the consent item that was unreachable for as long as a curl-less
 # machine could not get past the bootstrap at all.
-assert_says "sb-wget:asks-for-one-thing"         "permission for 1 thing" "$out"
+assert_says_sub "sb-wget:asks-for-one-thing"         step.consent "$out" "$ICAT" N=1
 assert_says "sb-wget:names-curl"                 "Install curl" "$out"
 assert_says "sb-wget:says-what-it-is-installing" "Installing curl" "$out"
 added="$(sb_section "$out" DPKG-ADDED)"
@@ -356,7 +360,7 @@ assert_says "sb-nodl:names-both-tools"    "curl or wget" "$out"
 assert_says "sb-nodl:names-the-apt-command" "apt install curl ca-certificates" "$out"
 assert_says "sb-nodl:names-the-dnf-command" "dnf install curl" "$out"
 assert_says "sb-nodl:exits-nonzero"         "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-nodl:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-nodl:does-not-claim-success" finished "$out" "$ICAT"
 # IT REFUSES BEFORE IT ASKS FOR ANYTHING, which is the property the ordering is for: nothing is
 # installed and no permission is sought, because there is nothing to ask on behalf of yet.
 assert_eq "sb-nodl:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
@@ -378,7 +382,7 @@ sandbox_reap
 sb_machine no-prereqs=uidmap
 out="$(sandbox_run uidmap '2' -e CS193V_DIR=/home/student/cs193v -e SB_PROBE_PODMAN=1)"
 assert_says "sb-uidmap:the-machine-was-really-arranged" "prereqs=uidmap" "$(sb_section "$out" ARRANGED)"
-assert_says "sb-uidmap:asks-for-one-thing"         "permission for 1 thing" "$out"
+assert_says_sub "sb-uidmap:asks-for-one-thing"         step.consent "$out" "$ICAT" N=1
 assert_says "sb-uidmap:names-uidmap"               "Install uidmap" "$out"
 assert_says "sb-uidmap:says-what-it-is-installing" "Installing uidmap" "$out"
 added="$(sb_section "$out" DPKG-ADDED)"
@@ -434,10 +438,11 @@ fixture_build machine || exit 1
 sb_machine no-prereqs=subuid
 out="$(sandbox_run subuid-no '1' -e CS193V_DIR=/home/student/cs193v)"
 record "sb-consent:the-range-it-started-with" "$(sb_section "$out" ETC-SUBUID)"
-assert_says "sb-consent:names-what-it-wants" "subuid range" "$out"
-assert_says "sb-consent:explains-why"        "needs your password" "$out"
-assert_says "sb-consent:declining-says-nothing-changed" "Nothing was changed" "$out"
-assert_says "sb-consent:offers-a-way-forward" "contact course staff" "$out"
+assert_says_key "sb-consent:names-what-it-wants" need.subuid "$out" "$ICAT"
+assert_says_key "sb-consent:explains-why"        need.subuid.why "$out" "$ICAT"
+# BY KEY, AND ONCE. "Nothing was changed" and "contact course staff" are the first and last
+# sentences of consent.declined, so #219's rewording reddened one and left the other green.
+assert_says_key "sb-consent:declining-says-nothing-changed" consent.declined "$out" "$ICAT"
 # A refusal must leave no course files on the machine. IT NO LONGER SKIPS THE DOWNLOAD, and the
 # assertion that used to say so is retired rather than reworded, because it asserted the opposite
 # of the design (#221): the bootstrap fetches the tree BEFORE this script exists to ask anything,
@@ -456,7 +461,7 @@ sandbox_reap
 # cases above use.
 sb_machine no-prereqs=subuid
 out="$(sandbox_run subuid-yes '2' -e CS193V_DIR=/home/student/cs193v)"
-assert_says "sb-subuid:step-announced"  "Setting up your account's ID range" "$out"
+assert_says_key "sb-subuid:step-announced"  step.subuid "$out" "$ICAT"
 assert_says "sb-subuid:reports-success" "subuid range added for student" "$out"
 # THE FILE, not the announcement -- this is what the shim tier could never check.
 assert_eq   "sb-subuid:the-range-really-landed" "student:200000:65536" "$(sb_section "$out" ETC-SUBUID)"
@@ -495,7 +500,7 @@ out="$(sandbox_run wsl-provision '' --user 0 \
 record "sb-prov:root-pass-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 assert_eq "sb-prov:the-root-pass-succeeds" "0" \
           "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
-assert_says "sb-prov:says-what-it-is-doing" "Preparing this environment" "$out"
+assert_says_key "sb-prov:says-what-it-is-doing" prov.step.preparing "$out" "$ICAT"
 
 # THE ACCOUNT REALLY EXISTS, and it is the only human account in there. Read out of /etc/passwd
 # rather than from anything the script printed -- an installer that says it created an account and
@@ -521,14 +526,14 @@ default=student" "$(sb_section "$out" WSL-CONF)"
 # moved aside, and moved rather than emptied -- an emptied one would still be there.
 assert_eq "sb-prov:switches-the-first-run-setup-off" "/etc/wsl-distribution.conf.cs193v" \
           "$(sb_section "$out" OOBE-CONF)"
-assert_says "sb-prov:says-the-questions-are-off" "first-run questions are switched off" "$out"
+assert_says_key "sb-prov:says-the-questions-are-off" prov.ok.oobe-off "$out" "$ICAT"
 # LINGERING IS SKIPPED HERE, AND THE SKIP IS THE ASSERTION. `wsl -e` creates no login session, so
 # the student's systemd user manager never starts and podman falls back to cgroupfs -- which
 # killed a real container build at step 3 of 25 before the root pass learned to enable lingering
 # (wsl-provision.sh carries the measurement). A container is not a WSL instance and runs no
 # systemd, so the step reports that rather than pretending to have done something; the enable arm
 # is a by-hand check in VERIFICATION.md §1.8, which is where a claim about systemd belongs.
-assert_says "sb-prov:says-why-lingering-is-moot-here" "does not run systemd" "$out"
+assert_says_key "sb-prov:says-why-lingering-is-moot-here" prov.skip.linger "$out" "$ICAT"
 
 # THE SUBUID RANGE, which useradd writes for a new account on Debian-family shadow (4.11.1-3+) --
 # so the step SKIPS, and the range is there anyway. The claim is the range, not who wrote it: what
@@ -546,11 +551,11 @@ assert_eq "sb-prov:and-one-subgid-range" "1" \
 assert_eq "sb-prov:the-student-pass-succeeds" "0" \
           "$(printf '%s' "$out" | sed -n 's/.*===SECOND-PASS-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 assert_says "sb-prov:the-student-pass-ran-as-the-student" "===SECOND-PASS-AS=student===" "$out"
-assert_says "sb-prov:has-nothing-to-change" "Nothing on your computer needs to change" "$out"
-assert_says "sb-prov:finds-the-prereqs-done" "podman, uidmap, ssh and curl" "$out"
-assert_says "sb-prov:finds-the-subuid-range-done" "your account has the ID range podman needs" "$out"
-assert_says "sb-prov:finds-systemd-already-on" "systemd is enabled in this WSL environment" "$out"
-assert_says "sb-prov:finishes"  "Setup finished" "$out"
+assert_says_key "sb-prov:has-nothing-to-change" step.nothing-to-change "$out" "$ICAT"
+assert_says_key "sb-prov:finds-the-prereqs-done" skip.prereqs "$out" "$ICAT"
+assert_says_key "sb-prov:finds-the-subuid-range-done" skip.subuid "$out" "$ICAT"
+assert_says_key "sb-prov:finds-systemd-already-on" skip.wsl-systemd "$out" "$ICAT"
+assert_says_key "sb-prov:finishes"  finished "$out" "$ICAT"
 
 # AND IT ASKED FOR NO PASSWORD. There is no sudo recorder in this tier -- sudo here is REAL, which
 # is what makes the root pass's effects real -- so the claim is made the way the installer itself
@@ -582,7 +587,7 @@ assert_says_key "sb-sudo-absent:says-why" err.no-sudo "$out" \
 assert_says "sb-sudo-absent:names-what-wanted-root" "- Give your account" "$out"
 assert_says "sb-sudo-absent:points-at-course-staff" "contact course staff" "$out"
 assert_says "sb-sudo-absent:exits-nonzero" "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-sudo-absent:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-sudo-absent:does-not-claim-success" finished "$out" "$ICAT"
 # REFUSED BEFORE THE BARGAIN, which is what putting this in survey buys: a machine that cannot
 # produce the password is never offered a deal it could not keep.
 assert_says_not "sb-sudo-absent:asks-no-permission" "needs your permission" "$out"
@@ -603,11 +608,11 @@ assert_says_key "sb-sudo-deny:announced-before-it-is-asked" note.password-why "$
 assert_says_key "sb-sudo-deny:says-why-it-failed" err.sudo-refused "$out" \
                 "$ICAT"
 assert_says "sb-sudo-deny:exits-nonzero" "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-sudo-deny:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-sudo-deny:does-not-claim-success" finished "$out" "$ICAT"
 # THE EFFECT, which is the half no shim can check: usermod never ran, so the range is still
 # absent on a real /etc.
 assert_eq "sb-sudo-deny:the-range-is-untouched" "" "$(sb_section "$out" ETC-SUBUID)"
-assert_says_not "sb-sudo-deny:does-not-claim-the-range" "subuid range added" "$out"
+assert_says_not_key "sb-sudo-deny:does-not-claim-the-range" ok.subuid "$out" "$ICAT"
 sandbox_reap
 
 # ── a real password, typed once, at the announced moment ───────────────────────
@@ -720,8 +725,8 @@ assert_survey_platform "sb-wsl:detected-as-wsl-on-linux" wsl "$out"
 
 # No wsl.conf at all: announced with ok(), not need(), so this one needs no permission -- the
 # only host-changing step in the whole installer that does not ask.
-assert_says "sb-wsl-absent:needs-no-permission" "Nothing on your computer needs to change" "$out"
-assert_says "sb-wsl-absent:says-it-will-create-it" "systemd will be enabled" "$out"
+assert_says_key "sb-wsl-absent:needs-no-permission" step.nothing-to-change "$out" "$ICAT"
+assert_says_key "sb-wsl-absent:says-it-will-create-it" ok.wsl-systemd-planned "$out" "$ICAT"
 assert_eq   "sb-wsl-absent:writes-both-lines" "[boot]
 systemd=true" "$(sb_section "$out" WSL-CONF)"
 assert_says "sb-wsl-absent:names-the-restart-command" "wsl --terminate CS193V" "$out"
@@ -752,7 +757,7 @@ assert_eq "sb-wsl-pw:the-machine-really-wants-a-password" "password:hunter2" \
 assert_eq "sb-wsl-pw:really-was-driven" "yes" "$(sb_section "$out" DRIVEN)"
 # RULE 1 IS UNCHANGED, and this is the control for it: nothing was owed a consent question and
 # nothing asked for one.
-assert_says "sb-wsl-pw:still-asks-no-permission" "Nothing on your computer needs to change" "$out"
+assert_says_key "sb-wsl-pw:still-asks-no-permission" step.nothing-to-change "$out" "$ICAT"
 assert_says_not "sb-wsl-pw:draws-no-menu" "permission for" "$out"
 # AND RULE 2 IS KEPT ANYWAY, which is the whole point of the case: the announcement is on the
 # screen the password step armed on, so an empty failure list says it preceded the prompt.
@@ -779,7 +784,7 @@ sandbox_reap
 
 # A wsl.conf with no [boot] section: appended to, and the existing content must survive.
 out="$(wsl_run noboot noboot '2')"
-assert_says "sb-wsl-noboot:asks-permission"  "permission for 1 thing" "$out"
+assert_says_sub "sb-wsl-noboot:asks-permission"  step.consent "$out" "$ICAT" N=1
 assert_says "sb-wsl-noboot:says-the-file-exists" "already exists" "$out"
 assert_eq   "sb-wsl-noboot:appends-and-keeps-what-was-there" "[automount]
 enabled=true
@@ -799,7 +804,7 @@ sandbox_reap
 
 # Already on: skipped, and nothing touched.
 out="$(wsl_run systemd systemd '')"
-assert_says "sb-wsl-systemd:skips"           "systemd is enabled" "$out"
+assert_says_key "sb-wsl-systemd:skips"           skip.wsl-systemd "$out" "$ICAT"
 assert_says_not "sb-wsl-systemd:asks-nothing" "permission for" "$out"
 assert_eq "sb-wsl-systemd:leaves-the-file-alone" "[boot]
 systemd=true" "$(sb_section "$out" WSL-CONF)"
@@ -827,7 +832,7 @@ sandbox_reap
 # because [boot] is the only section the installer writes.
 out="$(wsl_run elsewhere elsewhere '2')"
 assert_says "sb-wsl-elsewhere:the-machine-was-arranged" "wslconf=elsewhere" "$(sb_section "$out" ARRANGED)"
-assert_says_not "sb-wsl-elsewhere:does-not-call-it-already-enabled" "systemd is enabled" "$out"
+assert_says_not_key "sb-wsl-elsewhere:does-not-call-it-already-enabled" skip.wsl-systemd "$out" "$ICAT"
 assert_eq "sb-wsl-elsewhere:enables-it-in-the-boot-section" "[automount]
 systemd=true
 [boot]
@@ -841,18 +846,24 @@ sandbox_reap
 # reach the menu, and a case that hangs on its own ceiling is a slow red for the wrong reason.
 out="$(wsl_run off off '2')"
 assert_says "sb-wsl-off:the-machine-was-arranged" "wslconf=off" "$(sb_section "$out" ARRANGED)"
-assert_says "sb-wsl-off:says-it-was-deliberate"  "turned off on purpose" "$out"
-# THE BOX'S OWN WORDS AROUND IT, not the line on its own. This case DUMPS /etc/wsl.conf as part
-# of its audit, so `systemd=false` by itself was in the transcript either way -- it stayed green
-# with the refusal deleted, which is a redundant assertion masquerading as the load-bearing one.
-# `assert_says` flattens whitespace, so the catalogue's indent cannot carry the distinction and
-# the neighbouring prose has to.
-assert_says "sb-wsl-off:names-the-line-it-found" "/etc/wsl.conf says: systemd=false" "$out"
+# THE BOX'S OWN WORDS AROUND THE LINE, not the line on its own. This case DUMPS /etc/wsl.conf
+# as part of its audit, so `systemd=false` by itself was in the transcript either way -- it
+# stayed green with the refusal deleted, which is a redundant assertion masquerading as the
+# load-bearing one. assert_says flattens whitespace, so the catalogue's indent cannot carry the
+# distinction and the neighbouring prose has to.
+#
+# RENDERED, and that is what lets ONE assertion do what two did. The pair was
+# sb-wsl-off:says-it-was-deliberate ("turned off on purpose", which #219 reworded) and this one,
+# which quoted the catalogue's prose either side of {{LINE}}. assert_says_sub fills {{LINE}} in
+# with what the fixture put in the file, so the needle is the whole refusal with the student's
+# own line in the middle of it.
+assert_says_sub "sb-wsl-off:names-the-line-it-found" err.wsl-systemd-off "$out" "$ICAT" \
+                LINE=systemd=false
 assert_says "sb-wsl-off:exits-nonzero"           "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-wsl-off:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-wsl-off:does-not-claim-success" finished "$out" "$ICAT"
 # IT NEVER ASKED FOR ANYTHING, which is the point of refusing in survey: a consent screen here
 # would be asking permission to undo something the student had already decided.
-assert_says_not "sb-wsl-off:asked-no-permission" "permission for" "$out"
+assert_says_not_key "sb-wsl-off:asked-no-permission" step.consent "$out" "$ICAT"
 assert_eq "sb-wsl-off:left-the-file-alone" "[boot]
 systemd=false" "$(sb_section "$out" WSL-CONF)"
 sandbox_reap
@@ -864,11 +875,11 @@ sandbox_reap
 # the file, which is what ok() claims to have updated.
 out="$(wsl_run devnull devnull '')"
 assert_says "sb-wsl-devnull:the-machine-was-arranged" "wslconf=devnull" "$(sb_section "$out" ARRANGED)"
-assert_says "sb-wsl-devnull:it-got-as-far-as-trying" "Turning on systemd" "$out"
-assert_says "sb-wsl-devnull:says-the-setting-is-not-there" "systemd is still not turned on" "$out"
+assert_says_key "sb-wsl-devnull:it-got-as-far-as-trying" step.wslconf "$out" "$ICAT"
+assert_says_key "sb-wsl-devnull:says-the-setting-is-not-there" err.wslconf-unchanged "$out" "$ICAT"
 assert_says "sb-wsl-devnull:exits-nonzero" "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-wsl-devnull:does-not-report-the-update" "/etc/wsl.conf updated" "$out"
-assert_says_not "sb-wsl-devnull:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-wsl-devnull:does-not-report-the-update" ok.wslconf "$out" "$ICAT"
+assert_says_not_key "sb-wsl-devnull:does-not-claim-success" finished "$out" "$ICAT"
 sandbox_reap
 
 # AND THE WRITE THAT IS REFUSED WITH sudo WORKING. /etc/wsl.conf as a DIRECTORY is the arrangement
@@ -892,12 +903,12 @@ assert_says "sb-wsl-dir:the-machine-was-arranged" "wslconf=dir" "$(sb_section "$
 # THE GATE: this case is worthless if sudo refused, because then the run stopped at #226's
 # ask_password and every assertion below is about that refusal instead of about the write.
 assert_eq "sb-wsl-dir:sudo-was-never-the-problem" "passwordless" "$(sb_section "$out" SUDO)"
-assert_says "sb-wsl-dir:it-got-as-far-as-trying" "Turning on systemd" "$out"
-assert_says "sb-wsl-dir:says-it-could-not-create-it" "Could not create /etc/wsl.conf" "$out"
+assert_says_key "sb-wsl-dir:it-got-as-far-as-trying" step.wslconf "$out" "$ICAT"
+assert_says_key "sb-wsl-dir:says-it-could-not-create-it" err.wslconf-create "$out" "$ICAT"
 assert_says "sb-wsl-dir:exits-nonzero" "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-wsl-dir:does-not-report-the-update" "/etc/wsl.conf updated" "$out"
+assert_says_not_key "sb-wsl-dir:does-not-report-the-update" ok.wslconf "$out" "$ICAT"
 assert_says_not "sb-wsl-dir:does-not-hand-over-the-restart" "wsl --terminate" "$out"
-assert_says_not "sb-wsl-dir:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-wsl-dir:does-not-claim-success" finished "$out" "$ICAT"
 sandbox_reap
 
 # ─── a podman that is really too old ───────────────────────────────────────────
@@ -920,7 +931,7 @@ assert_says "sb-old:refused"                 "needs 4.9.0 or newer" "$out"
 assert_says "sb-old:names-what-it-found"     "Podman 3.4.4"         "$out"
 assert_says "sb-old:says-how-to-upgrade"     "only-upgrade podman"  "$out"
 assert_says "sb-old:exits-nonzero"           "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-old:does-not-claim-success" "Setup finished"    "$out"
+assert_says_not_key "sb-old:does-not-claim-success" finished    "$out" "$ICAT"
 # The version really came from a binary, not from a fake: podman is present in this fixture
 # and reports it. If Ubuntu ever raises 22.04's podman past the floor, `sb-old:refused` above
 # fails loudly and the record says why -- which is the behaviour wanted, not a nuisance.
@@ -961,7 +972,7 @@ out="$(sandbox_run debian '' -e CS193V_DIR=/home/student/cs193v)"
 record "sb-deb:the-version-debian-13-actually-ships" "$(sb_section "$out" PODMAN-AFTER)"
 assert_says "sb-deb:accepted"                  "podman 5.4.2" "$out"
 assert_says_not "sb-deb:not-refused-any-more"  "or newer"     "$out"
-assert_says "sb-deb:needs-nothing-installed"   "Nothing on your computer needs to change" "$out"
+assert_says_key "sb-deb:needs-nothing-installed"   step.nothing-to-change "$out" "$ICAT"
 assert_says_not "sb-deb:asks-no-permission"    "permission for" "$out"
 # IT GOT THE COURSE FILES, which is further than this machine had ever got: fetch_files runs after
 # consent and before check_podman, so `launcher-is-executable` can only be true on a run that
@@ -970,7 +981,7 @@ assert_eq "sb-deb:the-course-files-arrived" "launcher-is-executable" \
           "$(sb_section "$out" COURSE-DIR)"
 # ...and then stops for the Tier A reason, not a Debian one. Asserted rather than recorded, because
 # a run that got FURTHER would mean this fixture had grown nesting flags nobody declared.
-assert_says "sb-deb:stops-where-tier-a-always-stops" "Podman is installed but is not answering" "$out"
+assert_says_key "sb-deb:stops-where-tier-a-always-stops" err.podman-mute "$out" "$ICAT"
 record "sb-deb:installer-rc" "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 # NO EXACT-SET AUDIT, deliberately, and lib/sandbox.sh gives the reason where SB_PROBE_PODMAN is
 # defined: any podman command that touches the runtime creates a store, an events log and lock
@@ -997,7 +1008,7 @@ fixture_build fedora || exit 1
 sb_machine base=fedora
 out="$(sandbox_run fedora '2' -e CS193V_DIR=/home/student/cs193v)"
 assert_survey_platform "sb-fed:detected-as-plain-linux" linux "$out"
-assert_says "sb-fed:asks-for-one-thing"       "permission for 1 thing" "$out"
+assert_says_sub "sb-fed:asks-for-one-thing"       step.consent "$out" "$ICAT" N=1
 assert_says "sb-fed:names-podman-alone"       "Install podman" "$out"
 assert_says_not "sb-fed:does-not-name-the-debian-uidmap" "(and uidmap)" "$out"
 assert_says "sb-fed:says-what-it-is-installing" "Installing podman" "$out"
@@ -1012,7 +1023,7 @@ assert_says "sb-fed:really-reached-fedoras-repos" "mirrors.fedoraproject.org" "$
 # because a run that got FURTHER would mean this fixture had grown a network nobody declared.
 assert_says "sb-fed:stops-because-there-is-no-network" "Could not install podman" "$out"
 assert_says "sb-fed:exits-nonzero"            "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-fed:does-not-claim-success" "Setup finished" "$out"
+assert_says_not_key "sb-fed:does-not-claim-success" finished "$out" "$ICAT"
 assert_eq "sb-fed:installed-nothing" "" "$(sb_section "$out" DPKG-ADDED)"
 assert_eq "sb-fed:no-course-tree" "absent" "$(sb_section "$out" COURSE-DIR)"
 sandbox_reap
@@ -1053,7 +1064,7 @@ assert_survey_platform "sb-arch:looked-at-the-computer-first" linux "$out"
 assert_says "sb-arch:names-the-distro-from-os-release" "running Arch Linux" "$out"
 assert_says "sb-arch:points-at-course-staff"      "contact course staff" "$out"
 assert_says "sb-arch:exits-nonzero"               "===INSTALLER-RC=1===" "$out"
-assert_says_not "sb-arch:does-not-claim-success"   "Setup finished" "$out"
+assert_says_not_key "sb-arch:does-not-claim-success"   finished "$out" "$ICAT"
 # IT NEVER ASKED FOR ANYTHING, which is the point of refusing in survey rather than in
 # install_podman. A consent screen here would be asking to do something we cannot do.
 assert_says_not "sb-arch:asked-no-permission"     "permission for" "$out"
@@ -1288,7 +1299,7 @@ assert_says "nest:it-installed-before-it-built" "Installing podman uidmap openss
 record "nest:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
 record "nest:inner-caps"        "$(sb_section "$out" INNER-CAPS)"
 
-assert_says "nest:the-installer-finished"   "Setup finished"       "$out"
+assert_says_key "nest:the-installer-finished"   finished       "$out" "$ICAT"
 assert_says "nest:it-exited-0"              "===INSTALLER-RC=0===" "$out"
 assert_eq   "nest:the-course-image-was-really-built" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
 # PAIRED, because `doctor` returned ok on a run with no image and no container at all -- it
@@ -1401,7 +1412,7 @@ assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/installer.s
 assert_says_not "oldest-supported:no-version-refusal-anywhere" "or newer" "$out"
 record "oldest-supported:installer-rc"      "$(printf '%s' "$out" | sed -n 's/.*===INSTALLER-RC=\([0-9]*\)===.*/\1/p' | head -1)"
 record "oldest-supported:inner-store-bytes" "$(sb_section "$out" INNER-STORE-BYTES)"
-assert_says "oldest-supported:4.9.3-finished-the-install"  "Setup finished"       "$out"
+assert_says_key "oldest-supported:4.9.3-finished-the-install"  finished       "$out" "$ICAT"
 assert_says "oldest-supported:4.9.3-exited-0"             "===INSTALLER-RC=0===" "$out"
 assert_eq   "oldest-supported:4.9.3-built-the-course-image" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
 # PAIRED WITH THE IMAGE, because doctor returns ok on an installation with no image at all --
@@ -1456,7 +1467,7 @@ assert_says "floor-skew:and-refuses-this-machine-by-version"     "4.9.3" "$out"
 # REFUSED EARLY, and the needle is the step it never reached. Guarded against the empty-string
 # pass by the-skewed-copy-is-what-ran above and by exits-nonzero below, so this cannot go green on
 # a run that produced no transcript.
-assert_says_not "floor-skew:refuses-before-it-builds-anything" "Building the course container" "$out"
+assert_says_not_key "floor-skew:refuses-before-it-builds-anything" step.build "$out" "$ICAT"
 assert_says "floor-skew:exits-nonzero"             "===INSTALLER-RC=1===" "$out"
 assert_eq   "floor-skew:and-nothing-was-built" "no" "$(sb_section "$out" IMAGE-EXISTS)"
 sandbox_reap
@@ -1587,7 +1598,7 @@ fe2e_imgs="$SB_TMP/host-imgs.before.fedora-e2e"; host_images > "$fe2e_imgs"
 out="$(nest_build fedora-e2e podman "2" fedora-nested)"
 assert_says "fedora-e2e:the-machine-was-really-arranged" "prereqs=podman" "$(sb_section "$out" ARRANGED)"
 # THE CONSENT SHAPE, on the family where it differs: one item, and no "(and uidmap)".
-assert_says "fedora-e2e:asks-for-one-thing"   "permission for 1 thing" "$out"
+assert_says_sub "fedora-e2e:asks-for-one-thing"   step.consent "$out" "$ICAT" N=1
 assert_says "fedora-e2e:names-podman-alone"   "Installing podman" "$out"
 # NO "never mentions apt" ASSERTION HERE, and the reason is the distinction issue #94 itself draws:
 # the installer runs on the HOST, but the image it builds is Ubuntu. So this transcript carries the
@@ -1632,7 +1643,7 @@ record "fedora-e2e:inner-caps" "$fe2e_caps"
 assert_eq "fedora-e2e:the-container-was-really-created" "[]" "$fe2e_caps"
 assert_says_not "fedora-e2e:SYS_ADMIN-did-not-reach-it" "SYS_ADMIN" "$fe2e_caps"
 # THE VERDICT: dnf installed a working podman, and that podman built the course image.
-assert_says "fedora-e2e:dnf-installed-and-the-install-finished" "Setup finished" "$out"
+assert_says_key "fedora-e2e:dnf-installed-and-the-install-finished" finished "$out" "$ICAT"
 assert_says "fedora-e2e:exited-0"             "===INSTALLER-RC=0===" "$out"
 assert_eq   "fedora-e2e:built-the-course-image" "yes" "$(sb_section "$out" IMAGE-EXISTS)"
 # PAIRED WITH THE IMAGE, because doctor returns ok on an installation with no image at all.
