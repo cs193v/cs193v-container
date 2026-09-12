@@ -396,3 +396,264 @@ machine. Anything currently running in the container will stop.
 Leave it for now
 [[opt.restart-machine]]
 Restart the virtual machine to fix the clock (recommended)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WHAT `cs193v doctor` PRINTS
+#
+#  This report is the first thing staff ask a stuck student for, so every line of it is
+#  read by somebody -- which is why it belongs here with everything else a student sees
+#  rather than inline in the launcher, where it was until now.
+#
+#  TWO COLUMNS, AND THE LEFT ONE IS SIXTEEN CHARACTERS WIDE. doctor.row.* are the row
+#  labels and everything else is a value. The report is meant to be PASTED, so its
+#  alignment is load-bearing: a label wider than the gutter pushes that row's value out of
+#  the column and the paste stops being readable down the page. Reword them freely, but
+#  keep them short -- doctor:every-label-fits-the-gutter in 20-messages.sh is the check,
+#  and it prints the width it measured when it fails.
+#
+#  {{HI}} AND {{OFF}} TURN THE HIGHLIGHT ON AND OFF, and they exist so that the three
+#  lines which highlight one word can say the whole sentence here. The launcher fills them
+#  with its yellow and its reset, or with nothing at all when NO_COLOR is set, so moving
+#  the pair -- or deleting it -- is a decision this file gets to make.
+#
+#  NOTHING HERE IS PARSED BY ANYTHING. The state file the port rows read is tab-separated
+#  and machine-written; these are the sentences drawn from it.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[[doctor.title]]
+CS193V container report
+
+[[doctor.rule]]
+-------------------------------------------------------------
+
+[[doctor.paste]]
+Paste all of the above when asking course staff for help.
+
+# The machine, and what it is running.
+
+[[doctor.row.platform]]
+platform
+
+[[doctor.row.terminal]]
+terminal
+
+[[doctor.row.course-dir]]
+course dir
+
+[[doctor.row.podman]]
+podman
+
+[[doctor.row.podman-path]]
+podman path
+
+# ISSUE #121'S SIGNATURE IN A PASTED REPORT. Two rows, because the second is the part
+# nobody guesses: /etc/paths.d is read when a LOGIN shell starts, so the terminal window a
+# student ran the installer in cannot see the podman it just installed.
+
+[[doctor.podman.path-added]]
+NOT on your PATH — cs193v added its directory itself
+(/etc/paths.d is read only when a login shell starts)
+
+# THE THREE ANSWERS ABOUT PODMAN ITSELF, and they are three rather than two because
+# "NOT FOUND or not responding" conflated the two faults a student is likeliest to hit --
+# podman absent, and a Mac that has slept -- so the first thing staff had to ask was which.
+
+[[doctor.podman.not-responding]]
+NOT RESPONDING (a Mac that has slept can do this)
+
+[[doctor.podman.not-found]]
+NOT FOUND
+
+[[doctor.row.machine]]
+machine
+
+[[doctor.machine.none]]
+none
+
+[[doctor.row.podman-sees]]
+podman sees
+
+[[doctor.row.podman-info]]
+podman info
+
+[[doctor.info.timed-out]]
+TIMED OUT (a Mac that has slept can do this)
+
+# ROOTLESS IS WORDED RATHER THAN ECHOED. This is the line staff read first, and a bare
+# `false` is a fact about podman where what is wanted is a diagnosis.
+
+[[doctor.row.rootless]]
+rootless
+
+[[doctor.rootless.yes]]
+yes
+
+[[doctor.rootless.no]]
+NO — cs193v needs rootless mode
+
+[[doctor.rootless.unknown]]
+podman gave no usable answer
+
+# The image, and whether it still matches the recipe it was built from.
+
+[[doctor.row.image]]
+image
+
+[[doctor.image.built-here]]
+{{IMAGE}} (built here)
+
+[[doctor.image.not-built]]
+{{IMAGE}} — NOT BUILT; run ./cs193v --rebuild
+
+[[doctor.row.image-built]]
+image built
+
+[[doctor.row.image-recipe]]
+image recipe
+
+[[doctor.recipe.no-containerfile]]
+cannot check — no {{FILE}}
+
+# AN EMPTY LABEL IS NOT A STALE ONE: it is an image made before the label existed, or by a
+# bare `podman build`, and the launch path treats that as "do not nag" -- so calling it
+# stale sent a student to accept a recreate prompt that never appears.
+
+[[doctor.recipe.not-recorded]]
+not recorded (built by hand, or before this was tracked)
+
+[[doctor.recipe.matches]]
+matches Containerfile ({{HASH}})
+
+[[doctor.recipe.stale]]
+STALE — run ./cs193v --rebuild
+
+# The container. WHAT "running" MEANS CHANGED WITH #41 and this is where a student reads
+# it: every ordinary way of finishing now stops the container, so `exited` is the healthy
+# resting state and must not look like a fault.
+
+[[doctor.row.container]]
+container
+
+[[doctor.container.exited]]
+normal — nothing is open right now
+
+[[doctor.container.running]]
+a terminal window has this open. If you have none
+open, one was force-quit — run: cs193v --stop
+
+[[doctor.container.unreadable]]
+podman did not answer — the lines below are missing
+for that reason, not because nothing is set up.
+
+[[doctor.row.started]]
+started
+
+[[doctor.row.config]]
+config
+
+[[doctor.config.not-recorded]]
+not recorded (made by hand, or before this was tracked)
+
+[[doctor.config.matches]]
+matches container.args
+
+[[doctor.config.stale]]
+STALE — run cs193v and accept the recreate prompt
+
+[[doctor.row.workspace]]
+workspace
+
+[[doctor.row.uid]]
+in-container uid
+
+[[doctor.uid]]
+{{INSIDE}} (host is {{HOST}})
+
+# ZOMBIES ARE SPLIT BY PARENT, because the bare count this replaced needed a footnote in
+# three documents. The number to read is the first one; a steady 1 in the second is sshd
+# holding one for the tunnel's whole life and is nobody's problem.
+
+[[doctor.row.zombies]]
+zombies
+
+[[doctor.zombies.unknown]]
+unknown
+
+[[doctor.zombies.counts]]
+{{UNREAPED}} unreaped, {{HELD}} held by a live parent
+
+# tmux, which is the landing point -- so "what is my session doing" is a support question.
+
+[[doctor.row.tmux]]
+tmux sessions
+
+[[doctor.tmux.none]]
+none (nobody is in the container right now)
+
+# The tunnel. This is the ONLY place host-side forwarding is visible: nothing inside the
+# container can see whether a forward exists on the host at all, so when a student's
+# server is listening and their browser still cannot reach it, this report is the answer.
+
+[[doctor.row.tunnel]]
+tunnel
+
+[[doctor.tunnel.up]]
+up (pid {{PID}})
+
+[[doctor.tunnel.down]]
+{{HI}}DOWN{{OFF}} — run: cs193v --reset-tunnel
+
+[[doctor.row.ports]]
+dynamic ports
+
+[[doctor.ports.not-running]]
+{{HI}}not running{{OFF}} — run: cs193v --reset-tunnel
+
+[[doctor.ports.state]]
+{{STATE}} — {{REASON}}
+
+[[doctor.ports.forwarded]]
+{{N}} forwarded: {{PORTS}}
+
+[[doctor.ports.nothing-listening]]
+nothing is listening inside the container yet
+
+# ONE LINE PER REASON, not one per port, and the reason carries the advice. Which of them
+# is retryable is the distinction that shapes what a student should do -- "quit that
+# program" versus "bind 127.0.0.1 instead" -- so it lives in the sentence rather than as a
+# column in the state file that every reader would have to interpret for itself.
+
+[[doctor.ports.refused]]
+{{HI}}{{COUNT}} {{REASON}}:{{OFF}} {{PORTS}} — {{WHY}}
+
+[[doctor.ports.why.busy]]
+another program on this computer holds those
+
+[[doctor.ports.why.capped]]
+too many ports are already forwarded
+
+[[doctor.ports.why.v6lo]]
+only reachable over IPv6 — bind 127.0.0.1 or 0.0.0.0 instead
+
+[[doctor.ports.why.loalt]]
+bound to another loopback address — bind 127.0.0.1 instead
+
+[[doctor.ports.why.eth]]
+bound to the container's network interface, not its loopback
+
+[[doctor.ports.why.below-floor]]
+below the lowest port this computer lets a program open
+
+[[doctor.ports.why.other]]
+refused
+
+# The clock, which the container cannot fix for itself -- see prompt.clock-drift above.
+
+[[doctor.row.clock]]
+clock skew
+
+[[doctor.clock.ok]]
+{{SKEW}}s
+
+[[doctor.clock.problem]]
+{{SKEW}}s  {{HI}}PROBLEM{{OFF}}

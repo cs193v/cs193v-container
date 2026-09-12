@@ -644,6 +644,43 @@ msg_rt="${msg_rt# }"; msg_rt="${msg_rt% }"
 assert_eq "msg:the-test-helper-drops-staff-notes-too" \
           "$msg_rt" "$(msg_text hash.note "$msgtmp")"
 
+# ─── doctor's label gutter  (#219) ────────────────────────────────────────────
+# THE REPORT IS MEANT TO BE PASTED, so the width of its left column is load-bearing rather than
+# cosmetic: `drow` pads the label to sixteen characters, and a label WIDER than that pushes its
+# own value out of the column while every other row stays put. One long label is enough to make a
+# pasted report read as ragged down the page, which is the one thing this particular output cannot
+# afford -- it is what staff read first.
+#
+# THE WIDTH COMES OUT OF THE LAUNCHER, not out of this file. drow is the only place the gutter is
+# written down now, so a staff decision to widen it belongs there and this follows. Asserted
+# readable first, because a renamed helper would otherwise leave the floor empty and every label
+# would pass.
+DGUTTER="$(sed -n "s/^drow().*%-\([0-9]*\)s.*/\1/p" "$REPO/cs193v")"
+assert_match "doctor:the-gutter-width-was-readable" '^[0-9][0-9]*$' "$DGUTTER"
+record "doctor:gutter-width" "$DGUTTER"
+# DISPLAY COLUMNS, not bytes, for the reason the box lint above gives: a label with an accent in
+# it is one column and two bytes, and `wc -c` would call it too wide.
+dwide="$(for k in $(grep -oE '^\[\[doctor\.row\.[a-z0-9.-]+\]\]' "$PRIVATE/messages.txt" \
+                      | do_tr -d '[]'); do
+             printf '%s\t%s\n' "$k" "$(msg_text "$k")"
+         done | python3 -c '
+import sys
+for line in sys.stdin:
+    k, _, v = line.rstrip("\n").partition("\t")
+    if len(v) > '"$DGUTTER"': print("%s: %d cols" % (k, len(v)))
+')"
+if [ -z "$dwide" ]; then
+    pass "doctor:every-label-fits-the-gutter"
+else
+    fail "doctor:every-label-fits-the-gutter" "$dwide
+The label gutter is $DGUTTER columns (cs193v's drow). A longer label pushes its own value out of
+the column while every other row stays put, and the report is meant to be pasted."
+fi
+# AND THERE ARE SOME, which is the anti-vacuity half: a renamed prefix would leave the loop with
+# nothing to measure and the check above would pass on an empty list.
+assert_ne "doctor:there-are-labels-to-measure" "" \
+          "$(grep -c '^\[\[doctor\.row\.' "$PRIVATE/messages.txt")"
+
 # ─── the two needles that msg_text cannot build  ──────────────────────────────
 # msg_text stops at the first {{PLACEHOLDER}}, which is right for the needle it builds and
 # leaves two shapes of message with no assertable prose at all: one whose remedy sentence comes

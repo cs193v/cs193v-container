@@ -285,7 +285,11 @@ assert_eq   "image:refusal-creates-nothing" "0" "$(shim_count '^run ')"
 shim_new
 out="$(launcher 2>&1)"
 assert_says_not "image:local-image-does-not-warn"   "locally built" "$out"
-assert_says_not "image:local-image-no-staff-scare"  "tell course staff" "$out"
+# image:local-image-no-staff-scare WAS HERE, searching this output for "tell course staff". The
+# phrase is in no launcher message and in no launcher code path -- the warning it guarded against
+# was deleted with the registry, so the assertion could not fail whatever the launcher did. The
+# line above still can: "locally built" is really in cs193v, in the warning this pair was written
+# to hold down, so one of the two was load-bearing and the other was scenery.
 assert_eq       "image:local-image-launches" "1" "$(shim_count '^run ')"
 
 # ─── the launch says something before it does anything  (issue #57) ────────────
@@ -1677,8 +1681,12 @@ assert_match "retry:marker-appears-beside-the-bar" '\(retrying: 1/2\)' "$pairs"
 # last one rather than a budget with one still in hand.
 assert_not_match "retry:marker-counts-retries-not-attempts" '\(retrying: [0-9]+/3\)' "$pairs"
 assert_says "retry:build-still-succeeds" "Build Successful" "$screen"
-assert_says_not "retry:no-yellow-prose-under-the-meter" "Trying again"     "$screen"
-assert_says_not "retry:no-retry-warning-text"           "did not finish"   "$screen"
+# retry:no-yellow-prose-under-the-meter AND retry:no-retry-warning-text WERE HERE, searching
+# the screen for "Trying again" and "did not finish". Neither string exists anywhere in this tree
+# -- not in cs193v, not in any catalogue -- so neither assertion could fail on any input. What
+# they were written to hold is that a retry is reported IN the meter rather than as prose beside
+# it, and retry:marker-appears-beside-the-bar above asserts that directly, against the marker the
+# meter really draws.
 
 # THE BAR DOES NOT REWIND. A retried build re-runs from step 1 and replays every completed
 # step from the layer cache in about a second; that work is done and on disk, so counting it

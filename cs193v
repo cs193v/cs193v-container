@@ -2214,6 +2214,18 @@ open_shell() {
 }
 
 # ─── verbs ─────────────────────────────────────────────────────────────────────
+# doctor's two columns, in one place. The report is meant to be PASTED, so the width of the
+# label gutter is load-bearing rather than cosmetic: every row's value has to start in the same
+# column or the paste stops being readable down the page. It was written out at thirty-odd printf
+# sites before the prose moved to messages.txt (#219); now the geometry is one fact and the words
+# are somebody else's business.
+#
+# drows READS A VALUE THAT RUNS TO MORE THAN ONE LINE and gives each line its own label-less row,
+# so rewording a two-line explanation into three needs no change here -- which is the whole point
+# of the move. Three messages use it today.
+drow()  { printf '  %-16s %s\n' "$1" "$2"; }
+drows() { local l; while IFS= read -r l; do drow '' "$l"; done; }
+
 verb_doctor() {
     # THE SECOND AND LAST PROBER, and it repairs for itself rather than inheriting preflight's:
     # doctor deliberately does not call preflight, because its whole job is reporting on a
@@ -2221,44 +2233,43 @@ verb_doctor() {
     # "NOT FOUND" about a podman every other path finds perfectly, which is how issue #121
     # arrived as a screenshot and a guess rather than as a diagnosis.
     ensure_podman_path
-    printf '%sCS193V container report%s\n' "$C_CYAN" "$C_OFF"
-    printf '%s\n' "-------------------------------------------------------------"
-    printf '  %-16s %s\n' "platform" "$(platform) / $(uname -m)"
+    printf '%s%s%s\n' "$C_CYAN" "$(msg doctor.title)" "$C_OFF"
+    msg doctor.rule
+    drow "$(msg doctor.row.platform)" "$(platform) / $(uname -m)"
     # THE TERMINAL TOKEN, because a wrong hint is otherwise undiagnosable from a support paste.
     # It is also the only place the resolver's answer is visible to a person: the hints it drives
     # are inside the container, and a student who is being told to hold the wrong key cannot see
     # why. Issue #134 will make this matter more -- a double-clickable launcher has no
     # TERM_PROGRAM to read, so it will report `unknown` and this line is how anyone finds out.
-    printf '  %-16s %s\n' "terminal" "$(term_class)"
-    printf '  %-16s %s\n' "course dir" "$DIR"
+    drow "$(msg doctor.row.terminal)" "$(term_class)"
+    drow "$(msg doctor.row.course-dir)" "$DIR"
 
     # THREE BRANCHES WHERE THERE WAS ONE. "NOT FOUND or not responding" conflated the two
     # faults a student is likeliest to hit -- podman absent, and a Mac that has slept -- so the
     # first thing staff had to ask was which of the two it was.
     if command -v podman >/dev/null 2>&1 && run_timeout 10 podman --version; then
-        printf '  %-16s %s\n' "podman" "$(podman_version_of "$RT_OUT")"
+        drow "$(msg doctor.row.podman)" "$(podman_version_of "$RT_OUT")"
         # WHICH podman, which no report has ever said. It is the first thing to ask on a Mac
         # carrying both a Homebrew podman and a .pkg one.
-        printf '  %-16s %s\n' "podman path" "$(command -v podman)"
+        drow "$(msg doctor.row.podman-path)" "$(command -v podman)"
         # AND WHEN WE HAD TO FIND IT OURSELVES -- issue #121's signature in a pasted report.
         # $PATH itself is deliberately NOT printed: it wraps, and it carries the names of a
         # student's own directories into a paste. The resolved path is the actionable part.
         if [ -n "$PODMAN_PATH_ADDED" ]; then
-            printf '  %-16s %s\n' "" "NOT on your PATH — cs193v added its directory itself"
-            printf '  %-16s %s\n' "" "(/etc/paths.d is read only when a login shell starts)"
+            msg doctor.podman.path-added | drows
         fi
     elif command -v podman >/dev/null 2>&1; then
-        printf '  %-16s %s\n' "podman" "NOT RESPONDING (a Mac that has slept can do this)"
-        printf '  %-16s %s\n' "podman path" "$(command -v podman)"
+        drow "$(msg doctor.row.podman)" "$(msg doctor.podman.not-responding)"
+        drow "$(msg doctor.row.podman-path)" "$(command -v podman)"
         return 1
     else
-        printf '  %-16s %s\n' "podman" "NOT FOUND"
+        drow "$(msg doctor.row.podman)" "$(msg doctor.podman.not-found)"
         return 1
     fi
 
     if has_machine; then
         pmv machine list --format '{{.Name}} {{.Running}}'
-        printf '  %-16s %s\n' "machine" "${RT_OUT:-none}"
+        drow "$(msg doctor.row.machine)" "${RT_OUT:-$(msg doctor.machine.none)}"
     fi
 
     # TWO CALLS, AND THE SPLIT IS LOAD-BEARING. .Host.RootlessNetworkCmd does not exist before
@@ -2290,19 +2301,19 @@ verb_doctor() {
             *)     rootless='' ;;
         esac
         if pmv info --format '{{.Host.RootlessNetworkCmd}}'; then seen="$seen $RT_OUT"; fi
-        printf '  %-16s %s\n' "podman sees" "$seen"
+        drow "$(msg doctor.row.podman-sees)" "$seen"
         # THE SAME THREE ANSWERS PREFLIGHT READS, and worded rather than echoed: this is the
         # line staff read first in a pasted report, and a bare `false` is a fact about podman
         # where what is wanted is a diagnosis. The third branch is here because preflight's is:
         # a report that cannot show the state preflight refused on is no more use than the one
         # that never asked.
         case "$rootless" in
-            true)  printf '  %-16s %s\n' "rootless" "yes" ;;
-            false) printf '  %-16s %s\n' "rootless" "NO — cs193v needs rootless mode" ;;
-            *)     printf '  %-16s %s\n' "rootless" "podman gave no usable answer" ;;
+            true)  drow "$(msg doctor.row.rootless)" "$(msg doctor.rootless.yes)" ;;
+            false) drow "$(msg doctor.row.rootless)" "$(msg doctor.rootless.no)" ;;
+            *)     drow "$(msg doctor.row.rootless)" "$(msg doctor.rootless.unknown)" ;;
         esac
     else
-        printf '  %-16s %s\n' "podman info" "TIMED OUT (a Mac that has slept can do this)"
+        drow "$(msg doctor.row.podman-info)" "$(msg doctor.info.timed-out)"
     fi
 
     # The image, and whether it still matches the recipe it was built from. This is the
@@ -2311,26 +2322,28 @@ verb_doctor() {
     # otherwise have no answer to.
     load_args
     if pmq image exists "$IMAGE"; then
-        printf '  %-16s %s\n' "image" "$IMAGE (built here)"
+        drow "$(msg doctor.row.image)" "$(msg doctor.image.built-here "IMAGE=$IMAGE")"
         pmv image inspect "$IMAGE" --format '{{.Created}}'
-        printf '  %-16s %s\n' "image built" "${RT_OUT:-?}"
+        drow "$(msg doctor.row.image-built)" "${RT_OUT:-?}"
         local hb
         hb="$(image_label_of "$IMAGE" cs193v.buildhash)"
         if [ ! -f "$CONTAINERFILE" ]; then
-            printf '  %-16s %s\n' "image recipe" "cannot check — no $CONTAINERFILE"
+            drow "$(msg doctor.row.image-recipe)" \
+                 "$(msg doctor.recipe.no-containerfile "FILE=$CONTAINERFILE")"
         elif [ -z "$hb" ]; then
-            printf '  %-16s %s\n' "image recipe" "not recorded (built by hand, or before this was tracked)"
+            drow "$(msg doctor.row.image-recipe)" "$(msg doctor.recipe.not-recorded)"
         elif [ "$hb" = "$(build_hash)" ]; then
-            printf '  %-16s %s\n' "image recipe" "matches Containerfile ($(printf '%s' "$hb" | cut -c1-12))"
+            drow "$(msg doctor.row.image-recipe)" \
+                 "$(msg doctor.recipe.matches "HASH=$(printf '%s' "$hb" | cut -c1-12)")"
         else
-            printf '  %-16s %s\n' "image recipe" "STALE — run ./cs193v --rebuild"
+            drow "$(msg doctor.row.image-recipe)" "$(msg doctor.recipe.stale)"
         fi
     else
-        printf '  %-16s %s\n' "image" "$IMAGE — NOT BUILT; run ./cs193v --rebuild"
+        drow "$(msg doctor.row.image)" "$(msg doctor.image.not-built "IMAGE=$IMAGE")"
     fi
 
     local st; st="$(state)"
-    printf '  %-16s %s\n' "container" "$st"
+    drow "$(msg doctor.row.container)" "$st"
     # What "running" MEANS changed with #41, and doctor is where a student or a TA reads it. Every
     # ordinary way of finishing now stops the container, so `exited` is the healthy resting state
     # and must not look like a fault -- while `running` means somebody has a window open, or a
@@ -2346,16 +2359,14 @@ verb_doctor() {
     # err.session-in-use makes, and for the same reason: they know whether they have a window open,
     # and no test here can.
     case "$st" in
-        exited)  printf '  %-16s %s\n' "" "normal — nothing is open right now" ;;
-        running) printf '  %-16s %s\n' "" "a terminal window has this open. If you have none"
-                 printf '  %-16s %s\n' "" "open, one was force-quit — run: cs193v --stop" ;;
+        exited)  msg doctor.container.exited | drows ;;
+        running) msg doctor.container.running | drows ;;
         # A THIRD ANSWER, matching the three-way this report already draws for podman itself
         # above. It used to print `absent` for a container that was demonstrably running (#171),
         # which is the worst thing this particular report can do: doctor is what a student pastes
         # when asking for help, so the first fact staff read was a wrong one.
         unreadable)
-                 printf '  %-16s %s\n' "" "podman did not answer — the lines below are missing"
-                 printf '  %-16s %s\n' "" "for that reason, not because nothing is set up." ;;
+                 msg doctor.container.unreadable | drows ;;
     esac
     # NEITHER absent NOR unreadable, and the second is why this is a `case`. These lines each
     # read the container, so on an unreadable state they would each ask again and print whatever
@@ -2364,24 +2375,25 @@ verb_doctor() {
     case "$st" in
         absent|unreadable) : ;;
         *)  pmv inspect "$NAME" --format '{{.State.StartedAt}}'
-            printf '  %-16s %s\n' "started" "$RT_OUT"
+            drow "$(msg doctor.row.started)" "$RT_OUT"
             # THREE BRANCHES, like the image-recipe block above and for the same reason. An
             # EMPTY label is not a stale one: it is a container made before the label existed,
             # or by a bare `podman run`, and the launch path treats that as "do not nag" -- so
             # calling it STALE sent a student to accept a recreate prompt that never appears.
             # That is ERRORS.md B14 arriving from the other side (#171).
             local hv hw; hv="$(label_of cs193v.confighash)"; hw="$(config_hash)"
-            if   [ -z "$hv" ];      then printf '  %-16s %s\n' "config" "not recorded (made by hand, or before this was tracked)"
-            elif [ "$hv" = "$hw" ]; then printf '  %-16s %s\n' "config" "matches container.args"
-            else printf '  %-16s %s\n' "config" "STALE — run cs193v and accept the recreate prompt"; fi
+            if   [ -z "$hv" ];      then drow "$(msg doctor.row.config)" "$(msg doctor.config.not-recorded)"
+            elif [ "$hv" = "$hw" ]; then drow "$(msg doctor.row.config)" "$(msg doctor.config.matches)"
+            else drow "$(msg doctor.row.config)" "$(msg doctor.config.stale)"; fi
             pmv inspect "$NAME" --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DST\"}}{{.Source}}{{end}}{{end}}"
-            printf '  %-16s %s\n' "workspace" "${RT_OUT:-?}"
+            drow "$(msg doctor.row.workspace)" "${RT_OUT:-?}"
             ;;
     esac
 
     if [ "$st" = running ]; then
         pmv exec "$NAME" sh -c 'echo "$(id -u):$(id -g)"'
-        printf '  %-16s %s (host is %s:%s)\n' "in-container uid" "$RT_OUT" "$(id -u)" "$(id -g)"
+        drow "$(msg doctor.row.uid)" \
+             "$(msg doctor.uid "INSIDE=$RT_OUT" "HOST=$(id -u):$(id -g)")"
         # SPLIT BY PARENT, because the bare count this replaced needed a footnote in three
         # documents. A zombie is its PARENT's business: PID 1 collects the ones reparented onto
         # it, and one whose parent is alive and is not PID 1 -- sshd holds exactly one for the
@@ -2392,17 +2404,26 @@ verb_doctor() {
         # The ps runs bare and the split happens HERE, so there is no awk quoted inside an
         # `sh -c` inside a `podman exec` to get wrong.
         pmv exec "$NAME" ps -eo ppid,stat --no-headers
-        printf '  %-16s %s\n' "zombies" "$(printf '%s\n' "${RT_OUT}" \
+        # THE SENTENCE IS NOT BUILT IN awk ANY MORE (#219). awk counted and worded in one
+        # pass, which put two of doctor's words somewhere messages.txt could not reach; it now
+        # answers two numbers, or nothing at all when it saw no processes to count.
+        local zc
+        zc="$(printf '%s\n' "${RT_OUT}" \
             | awk 'NF >= 2 { seen++ }
                    $2 ~ /Z/ { t++; if ($1 == 1) n++ }
-                   END { if (seen == 0) print "unknown"
-                         else printf "%d unreaped, %d held by a live parent", n+0, t-n+0 }')"
+                   END { if (seen > 0) printf "%d %d", n+0, t-n+0 }')"
+        if [ -n "$zc" ]; then
+            drow "$(msg doctor.row.zombies)" \
+                 "$(msg doctor.zombies.counts "UNREAPED=${zc%% *}" "HELD=${zc##* }")"
+        else
+            drow "$(msg doctor.row.zombies)" "$(msg doctor.zombies.unknown)"
+        fi
         tmux_doctor
         tunnel_doctor
         check_clock
     fi
-    printf '%s\n' "-------------------------------------------------------------"
-    printf '%s\n' "Paste all of the above when asking course staff for help."
+    msg doctor.rule
+    msg doctor.paste
 }
 
 # tmux is the landing point, so "what is my session doing" is now a support question. A
@@ -2420,16 +2441,16 @@ tmux_doctor() {
            -F '#{session_name} #{session_windows}w #{session_attached} attached' 2>/dev/null; then
         out="$RT_OUT"
     else
-        printf '  %-16s none (nobody is in the container right now)\n' "tmux sessions"
+        drow "$(msg doctor.row.tmux)" "$(msg doctor.tmux.none)"
         return 0
     fi
     if [ -z "$out" ]; then
-        printf '  %-16s none (nobody is in the container right now)\n' "tmux sessions"
+        drow "$(msg doctor.row.tmux)" "$(msg doctor.tmux.none)"
         return 0
     fi
-    printf '  %-16s %s\n' "tmux sessions" "$(printf '%s\n' "$out" | head -1)"
+    drow "$(msg doctor.row.tmux)" "$(printf '%s\n' "$out" | head -1)"
     printf '%s\n' "$out" | tail -n +2 | while IFS= read -r line; do
-        [ -n "$line" ] && printf '  %-16s %s\n' "" "$line"
+        [ -n "$line" ] && drow '' "$line"
     done
 }
 
@@ -2442,9 +2463,10 @@ tunnel_doctor() {
     local pid state ports n up
     if tunnel_alive; then
         pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
-        printf '  %-16s up (pid %s)\n' "tunnel" "${pid:-?}"
+        drow "$(msg doctor.row.tunnel)" "$(msg doctor.tunnel.up "PID=${pid:-?}")"
     else
-        printf '  %-16s %sDOWN%s — run: cs193v --reset-tunnel\n' "tunnel" "$C_YEL" "$C_OFF"
+        drow "$(msg doctor.row.tunnel)" \
+             "$(msg doctor.tunnel.down "HI=$C_YEL" "OFF=$C_OFF")"
         return 0
     fi
 
@@ -2457,8 +2479,8 @@ tunnel_doctor() {
     # running, so that is checked first and separately -- the state file would otherwise be read
     # as authoritative while nothing was maintaining it.
     if ! tunnel_sup_alive; then
-        printf '  %-16s %snot running%s — run: cs193v --reset-tunnel\n' \
-               "dynamic ports" "$C_YEL" "$C_OFF"
+        drow "$(msg doctor.row.ports)" \
+             "$(msg doctor.ports.not-running "HI=$C_YEL" "OFF=$C_OFF")"
         return 0
     fi
 
@@ -2477,16 +2499,17 @@ tunnel_doctor() {
     state="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="state"{print $2; exit}')"
     case "${state:-}" in
         ''|healthy) ;;
-        *) printf '  %-16s %s%s%s — %s\n' "dynamic ports" "$C_YEL" "$state" "$C_OFF" \
-                  "$(printf '%s\n' "$ports" | awk -F'\t' '$1=="reason"{print $2; exit}')" ;;
+        *) drow "$(msg doctor.row.ports)" \
+                "$(msg doctor.ports.state "STATE=$C_YEL$state$C_OFF" \
+                       "REASON=$(printf '%s\n' "$ports" | awk -F'\t' '$1=="reason"{print $2; exit}')")" ;;
     esac
 
     up="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="up"{printf "%s ", $2}')"
     n="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="up"' | wc -l | tr -d ' ')"
     if [ "$n" -gt 0 ]; then
-        printf '  %-16s %s forwarded: %s\n' "dynamic ports" "$n" "${up% }"
+        drow "$(msg doctor.row.ports)" "$(msg doctor.ports.forwarded "N=$n" "PORTS=${up% }")"
     else
-        printf '  %-16s nothing is listening inside the container yet\n' "dynamic ports"
+        drow "$(msg doctor.row.ports)" "$(msg doctor.ports.nothing-listening)"
     fi
 
     # ONE LINE PER REASON, not one per port, and the reason carries the advice. Which of them is
@@ -2496,17 +2519,22 @@ tunnel_doctor() {
     printf '%s\n' "$ports" | awk -F'\t' '$1=="refused"{n[$3]++; p[$3]=p[$3] " " $2}
         END{for (r in n) printf "%s\t%d\t%s\n", r, n[r], substr(p[r], 2)}' |
     while IFS="$(printf '\t')" read -r reason count plist; do
+        # A LITERAL KEY PER ARM, not "doctor.ports.why.$reason". 20-messages.sh reconciles the
+        # keys this launcher asks for against the ones messages.txt defines by scanning for
+        # `msg <key>`, so a key assembled from a variable reads as seven orphans and a student
+        # who hits the eighth reason gets "(missing message: ...)" in a support paste.
         case "$reason" in
-            busy)        why="another program on this computer holds those" ;;
-            capped)      why="too many ports are already forwarded" ;;
-            v6lo)        why="only reachable over IPv6 — bind 127.0.0.1 or 0.0.0.0 instead" ;;
-            loalt)       why="bound to another loopback address — bind 127.0.0.1 instead" ;;
-            eth)         why="bound to the container's network interface, not its loopback" ;;
-            below-floor) why="below the lowest port this computer lets a program open" ;;
-            *)           why="refused" ;;
+            busy)        why="$(msg doctor.ports.why.busy)" ;;
+            capped)      why="$(msg doctor.ports.why.capped)" ;;
+            v6lo)        why="$(msg doctor.ports.why.v6lo)" ;;
+            loalt)       why="$(msg doctor.ports.why.loalt)" ;;
+            eth)         why="$(msg doctor.ports.why.eth)" ;;
+            below-floor) why="$(msg doctor.ports.why.below-floor)" ;;
+            *)           why="$(msg doctor.ports.why.other)" ;;
         esac
-        printf '  %-16s %s%s %s:%s %s — %s\n' "dynamic ports" \
-               "$C_YEL" "$count" "$reason" "$C_OFF" "$plist" "$why"
+        drow "$(msg doctor.row.ports)" \
+             "$(msg doctor.ports.refused "HI=$C_YEL" "OFF=$C_OFF" \
+                    "COUNT=$count" "REASON=$reason" "PORTS=$plist" "WHY=$why")"
     done
 }
 
@@ -2524,10 +2552,11 @@ check_clock() {
     case "$cs" in ''|*[!0-9]*) return 0 ;; esac
     skew=$(( cs - hs )); [ "$skew" -lt 0 ] && skew=$(( -skew ))
     if [ "$skew" -le 5 ]; then
-        printf '  %-16s %ss\n' "clock skew" "$skew"
+        drow "$(msg doctor.row.clock)" "$(msg doctor.clock.ok "SKEW=$skew")"
         return 0
     fi
-    printf '  %-16s %ss  %sPROBLEM%s\n' "clock skew" "$skew" "$C_YEL" "$C_OFF"
+    drow "$(msg doctor.row.clock)" \
+         "$(msg doctor.clock.problem "SKEW=$skew" "HI=$C_YEL" "OFF=$C_OFF")"
     has_machine || return 0
     printf '\n'; msg prompt.clock-drift SKEW="$skew"
     if confirm "$(msg opt.leave-clock)" "$(msg opt.restart-machine)"; then
