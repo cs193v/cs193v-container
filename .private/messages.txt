@@ -1,37 +1,15 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Every student-facing string the launcher and installer print.
-#
-#  Edit freely — wording and tone here are yours, and nothing in the scripts depends
-#  on the phrasing. Each block starts with [[key]] on its own line and runs to the
-#  next [[key]]. {{PLACEHOLDER}} is substituted at runtime.
-#
-#  VERIFICATION.md §A.1 cross-references this file against the scripts, so an orphan
-#  key or a missing one is caught automatically.
-#
-#  House style, worth keeping: say what happened, say what to do, and never make a
-#  student guess whether something is their mistake or ours.
-# ═══════════════════════════════════════════════════════════════════════════════
-
 [[help.usage]]
 cs193v — the CS193V course container
 
-  cs193v                     open a shell in the container
+  cs193v                     start the development environment
   cs193v doctor              print a report to paste when asking for help
-  cs193v --stop              stop the container, if a terminal window was closed
-                             without you noticing
-
-  cs193v --reset-tunnel      fix it when your browser cannot reach your server
-  cs193v --rebuild           start the container over. Your files and logins are kept.
-                             If the course container has been updated since yours was
-                             built, this builds the new one, which takes a while.
+  cs193v --stop              stop the container; only run this command if something
+                             tells you to
+  cs193v --reset-tunnel      resets the SSH tunnel; only run if course staff says to
+  cs193v --rebuild           rebuild the course container. Your project files and
+                             logins are kept
   cs193v --rebuild --logout  the same, and also log out of claude, codex, gh and vercel,
                              and forget the name and SUNetID you gave setup-git.
-
-Closing your terminal window stops the container, and anything running inside it. A
-dev server you started will stop. Your files are safe — they live on your own computer.
-
-Use tabs rather than a second window: CTRL+T opens one, and they all share the one
-container. Only one terminal window at a time can be in the container.
 
 Your files live in the projects folder next to this script, and appear inside the
 container at ~/projects. Everything else in the container is temporary.
@@ -53,18 +31,9 @@ has a different cause — please contact course staff rather than
 working around it.
 
 [[err.no-podman]]
-Podman is not installed on this computer.
-
-Podman is the program that runs the course container. If you have
-not installed it yet, run the course installer script -- that is
-the fix in almost every case.
-
-cs193v has already looked in the place a Mac installs podman, so
-if you believe it IS installed, this is worth asking about rather
-than working around. Contact course staff and include the output
-of:
-
-    cs193v doctor
+Podman is not installed on this computer. This should not be
+possible because the installation script should hae installed
+it. Please contact the course staff.
 
 [[err.podman-hangs]]
 Podman is installed but is not responding.
@@ -81,26 +50,8 @@ staff.
 
 [[err.podman-too-old]]
 Your version of podman is too old for the course container.
-
-    you have:  {{FOUND}}
-    we need:   {{NEED}} or newer
-
-Inside the WSL CS193V environment, run:
-
-    sudo apt update && sudo apt install --only-upgrade podman
-
-On any other Linux, use your distribution's package manager to
-upgrade podman -- or run the course installer again and it will
-name the exact command for your system.
-
-On a Mac: remove the podman you already have, then run the
-course installer again -- it installs a version the course is
-tested against. Podman Desktop's own updater may leave you on
-a different one.
-
-Nothing has been changed on your computer. Contact course
-staff if that does not work, or before removing podman if you
-use it for anything outside this course.
+The installer should have updated podman, so this should not
+be possible. Please contact the course staff.
 
 [[err.podman-unreachable]]
 Podman is installed but the course container cannot reach it.
@@ -110,28 +61,17 @@ running:
 
     podman machine start
 
-On Ubuntu or WSL, try:
-
-    podman info
-
-and send the output to course staff along with `cs193v doctor`.
+If the issue persists, contact the coures staff.
 
 [[err.rootless-unreadable]]
 Podman answered the "are you rootless?" question with something
 the course container could not read.
 
-That is probably not a misconfiguration. The likeliest cause is
-podman still finishing its first start-up after your computer
-booted — waiting a minute and running cs193v again often works.
-
 Podman answered:
 
 {{OUT}}
 
-If it keeps happening, send all of the text above to course staff
-along with the output of:
-
-    cs193v doctor
+Please contact the course staff.
 
 [[detail.podman-said]]
 Podman also said:
@@ -142,30 +82,16 @@ Podman also said:
 Podman is running in "rootful" mode, and the course container
 needs "rootless" mode.
 
-This is not something to work around — rootless mode is what keeps
+This is not something to work around. Rootless mode is what keeps
 the container from being able to touch the rest of your computer.
-Please contact course staff and include the output of:
-
-    cs193v doctor
+Please contact course staff.
 
 [[err.no-subuid]]
-Your account is missing something podman needs, and we do not want
-to guess at fixing it because it affects your whole computer.
+The account {{USER}} has no entry in /etc/subuid.
+This should not be possible, as the installer makes sure subuids
+are set up.
 
-Specifically: the account {{USER}} has no entry in /etc/subuid.
-Podman uses that range of ID numbers to keep the container
-separated from the rest of your system.
-
-Contact course staff — this needs one command run with
-administrator rights, and they will tell you which. Include the
-output of:
-
-    id
-    cat /etc/subuid /etc/subgid
-
-Do not hand-edit those files yourself — it usually means something
-slightly unusual about how your account was created, and we would
-rather see it than guess.
+Please contact the course staff.
 
 [[err.no-workspace]]
 Could not create the projects folder at:
@@ -190,14 +116,8 @@ Build it with:
 
     ./cs193v --rebuild
 
-That takes a while the first time — it downloads and assembles
-the whole course environment — and it is safe to run again if it
-is interrupted.
-
-If you just ran the installer and got this, send course staff the
-output of:
-
-    cs193v doctor
+If you just ran the installer and got this, contact the course
+staff.
 
 [[err.create-failed]]
 The course container could not be created.
@@ -206,10 +126,7 @@ Podman said:
 
 {{OUT}}
 
-Please send all of the text above to course staff, along with the
-output of:
-
-    cs193v doctor
+Please send all of the text above to course staff.
 
 [[err.other-directory]]
 There is already a CS193V container, and it is using a different
@@ -217,10 +134,6 @@ folder from this one.
 
     the container is using:  {{INUSE}}
     you ran cs193v from:     {{YOURS}}
-
-If cs193v continued, you would be editing files in the first
-folder while believing you were working in the second — so it has
-stopped instead.
 
 Two ways forward:
 
@@ -232,25 +145,17 @@ run ./cs193v --stop first.
 
 [[err.needs-a-terminal]]
 cs193v could not open a shell, because it is not being run from a
-terminal — its input is coming from a file or from another program
+terminal. — its input is coming from a file or from another program
 rather than from your keyboard.
 
-If you typed ./cs193v yourself and got this, please send it to
-course staff along with how you started it.
-
-Your container is set up, and has been stopped again — it only
-stays running while a terminal window is open on it. These
-commands do not need a terminal, so they are the ones to use in
-a script:
-
-    cs193v --rebuild     make sure a fresh container exists
-    cs193v doctor        print the status report
+If you typed ./cs193v yourself and got this, please contact the
+course staff.
 
 [[err.session-in-use]]
 You already have a CS193V session open in another terminal window.
 
 Switch to that window and carry on working there. Only one
-window at a time can be in the container — if you want a second
+window at a time can be in the container. If you want a second
 place to work, open a new tab there with CTRL+T.
 
 (You may also see this message if your previous session crashed,
@@ -259,36 +164,19 @@ things down. If so, that's okay; the fix is the same.)
 
 To stop the container so you can start again:
 
-    cs193v --stop
+    ./cs193v --stop
 
 [[err.build-failed]]
 The course container could not be built. Podman stopped here:
 
 {{OUT}}
 
-This is most often a network problem. It is safe to run it again:
-podman keeps every step that finished, so a second attempt picks
-up at the step that failed rather than starting over.
-
-    ./cs193v --rebuild
-
-If it stops at the same step twice, send course staff everything
-above, along with the output of:
-
-    cs193v doctor
+Check your internet connection and try again. If the problem
+persists, contact the course staff.
 
 [[err.build-no-disk]]
-The course container could not be built: this computer ran out of
-disk space part-way through.
-
-Free up some space and run it again. Podman keeps every step that
-finished, so it picks up where it stopped:
-
-    ./cs193v --rebuild
-
-Building needs several gigabytes free — more than the finished
-container ends up occupying, because the pieces are assembled
-before the leftovers are cleared away.
+The course container could not be built. This computer ran out of
+disk space part-way through. Free up some space and try again.
 
 If you cannot free up that much space, contact course staff.
 
@@ -296,16 +184,10 @@ If you cannot free up that much space, contact course staff.
 The course container was built, but there was not enough disk
 space left to start it.
 
-The build itself worked — nothing is wrong with it, and it does
-not need doing again. Starting the container needs its own space
-on top of the build, roughly the size of the container again.
+Starting the container needs its own space on top of the build,
+roughly the size of the container again.
 
-Free up a few gigabytes and run this, which will pick up from
-where it stopped:
-
-    ./cs193v
-
-If you cannot free up that much space, contact course staff.
+Free up a few gigabytes and try again.
 
 [[err.no-containerfile]]
 No Containerfile found at:
@@ -315,18 +197,8 @@ No Containerfile found at:
 [[err.no-ssh]]
 The ssh command is not installed, or it is not on your PATH.
 
-cs193v uses ssh on YOUR computer to connect your browser to the
-servers you run inside the container. Without it, nothing you run
-in the container could be reached at http://localhost.
-
-The course installer sets this up along with podman, so the fix is
-to run the installer script again — it will pick up from wherever
-it left off and change nothing that is already correct.
-
-If you believe you already ran it, contact course staff and include
-the output of:
-
-    cs193v doctor
+This should not be possible because the installer configures ssh.
+Please contact the course staff.
 
 [[err.tunnel-keygen]]
 Could not create the keys cs193v uses to connect your browser to
@@ -334,10 +206,7 @@ the container.
 
 This almost always means the .config folder next to this script is
 not writable, or the disk is full. Check both, then try again. If
-neither looks wrong, contact course staff and include the output
-of:
-
-    cs193v doctor
+neither looks wrong, contact the course staff.
 
 [[warn.machine-restart-failed]]
 Could not restart podman's virtual machine automatically. Try it by hand:
@@ -347,7 +216,7 @@ Could not restart podman's virtual machine automatically. Try it by hand:
 
 [[warn.tunnel-failed]]
 The container started, but your browser will not be able to reach servers running
-inside it. Everything else works normally, so you can keep going — you just will
+inside it. Everything else works normally, so you can keep going; you just will
 not be able to load http://localhost pages from the container yet.
 
 Try:
@@ -389,13 +258,13 @@ Setting up the course container...
 Ready.
 
 [[status.rebuilding]]
-Starting the container over. Your files and logins are kept.
+Rebuilding the course container. Your projects and logins are kept.
 
 [[status.rebuilding-logout]]
-Starting the container over, and logging you out.
+Rebuilding the course container and clearing your logins.
 
 [[status.rebuilt]]
-Done. Run ./cs193v to open a shell.
+Done. Run ./cs193v to start the development environment.
 
 [[status.cancelled]]
 Nothing was changed.
@@ -404,9 +273,7 @@ Nothing was changed.
 Done. You will need to log in again the next time you use claude, codex or gh.
 
 [[status.building]]
-Building the course container. This is the big one. It takes a while the first time —
-it downloads and assembles the whole course environment — and it is safe to run again
-if it is interrupted, because podman keeps every step that finished.
+This may take a few minutes.
 
     {{IMAGE}}
 
@@ -464,9 +331,8 @@ Press ENTER to continue.
 The course container settings have changed since your container was created.
 
 Podman cannot apply new settings to a container that already exists, so the container
-needs to be created again for the change to take effect. Your files are safe — they
-live in the projects folder on your own computer — and your logins are kept too.
-Anything currently running inside the container will stop.
+needs to be created again for the change to take effect. Your project files and logins
+will be preserved. Anything currently running inside the container will stop.
 
 [[opt.keep-current]]
 Keep the current container for now
@@ -501,8 +367,7 @@ Stop the container
 The container's clock is {{SKEW}} seconds away from your computer's clock.
 
 This happens when a laptop sleeps: the small Linux virtual machine podman uses does not
-always catch up on waking. It causes confusing failures that look like network problems
-— secure connections rejected as "not yet valid", downloads failing, logins refused.
+always catch up on waking. It causes confusing failures that look like network problems: secure connections rejected as "not yet valid", downloads failing, logins refused.
 
 The container cannot fix its own clock, so the fix is to restart podman's virtual
 machine. Anything currently running in the container will stop.
