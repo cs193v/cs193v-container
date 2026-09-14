@@ -357,10 +357,18 @@ fi
 #     run_timeout disowned is. In job mode that exit signals nobody and the orphan completes,
 #     which is exactly why 1b above can be green with the poison present.
 #
-# MEASURED, THIS FILE, ONE VARIABLE. Against an unpatched launcher the rude close in job mode
-# (1b) recorded `yes` -- it tore down -- and the same close in this shape left the container
-# RUNNING. With #170's drains in place this group is green. That pair is the whole argument for
-# the group existing, and it is also why 1b's record stays a record: it cannot see this.
+# MEASURED, THIS FILE, ONE VARIABLE, ON macOS -- which is where #170's poison exists at all, BSD
+# stdio keeping the tail of a failed write and bash 3.2 having no fpurge. Against an unpatched
+# launcher the rude close in job mode (1b) recorded `yes` -- it tore down -- and the same close in
+# this shape left the container RUNNING. With #170's drains in place this group is green. That pair
+# is the whole argument for the group existing, and it is also why 1b's record stays a record: it
+# cannot see this.
+#
+# AND ON glibc THE PAIR DOES NOT DIFFER, measured both ways on Linux: every assertion below passes
+# with the drains in place and with the whole of #170 reverted. So here this group asserts the
+# OUTCOME -- container stopped, ports released, master killed, in the shape no other group builds --
+# and the `record` and skip below say that is what it is. What carries #170 on Linux is
+# 10-static.sh's two drain gates, mutation-tested, and 12-run-timeout.sh's door.
 #
 # THE RUDE CLOSE, and not because the polite one is uninteresting. In this shape too the poison
 # needs the master GONE while the launcher writes, and a polite close keeps it open until the

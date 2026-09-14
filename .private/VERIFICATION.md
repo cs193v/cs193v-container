@@ -1103,14 +1103,25 @@ the full procedure now lives in `tests/MANUAL.md` §5.1. In short: start a serve
 from the browser, click the window's close button, and confirm the container goes to `exited`, the 46
 forwards are released, and the next `./cs193v` reuses the same container with fresh tabs.
 
-Automated and green on Linux, where `70-sighup.sh` destroys the pty — the same mechanism a terminal
-uses. What no automation can do is press the button, and **what no Linux run can answer is macOS and
-WSL**, where the `podman exec` client lives outside the VM. Do it on Terminal.app, iTerm2 and WSL, and
+Automated and green on Linux, in both orderings: `close_window` signals the pty's foreground group
+and keeps the master open until the launcher has gone, which is what Terminal.app was measured to
+do, and `force_quit_terminal` destroys the pty, which is a force quit or a crashed emulator. (This
+said "destroys the pty — the same mechanism a terminal uses"; #169 is the measurement that it is
+not, and the suite has driven both since.) What no automation can do is press the button, and **what
+no Linux run can answer is macOS and WSL**, where the `podman exec` client lives outside the VM. Do it on Terminal.app, iTerm2 and WSL, and
 force-quit each of them too: **expect the container to stop there as well.** This said "expect a
 container left running" until #171 made the teardown's stop unconditional; a rude close on a
 launcher that is a foreground JOB now tears down, measured by hand (#170) and by the suite's
 force-quit group. The shape that still needed fixing is the one a #134 shortcut makes — launcher as
 session leader — which is §1c of `70-sighup.sh` and issue #170.
+
+That group now **builds** that shape instead of inheriting it: `CS193V_PTY_NOSHELL=1` makes ptyrun
+exec the launcher's argv with no shell in the pty, so it runs on any host — including one whose
+`/bin/sh` is dash, which never exec-optimises and used to leave `sh` as the leader and the group
+measuring §1b twice. What a Linux run still cannot answer there is #170 itself: measured, §1c's four
+assertions pass with the drains in place **and** with the whole fix reverted, because the poison
+needs BSD stdio and bash 3.2. So §1c says so in a named skip, and the Linux instruments for the
+poison are `10-static.sh`'s two drain gates and `12-run-timeout.sh`'s platform door.
 
 **5.2 — macOS provider behaviour (Apple Silicon only).** Run §A.7's ownership checks under **both**
 providers:

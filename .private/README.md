@@ -1535,7 +1535,11 @@ accepted: a force-quit of the *launcher itself* runs no trap, so it leaves a con
 nothing attached — tolerated because it degrades to exactly the old behaviour, and both the refusal
 and `--stop` recover from it. Force-quitting the **terminal** is a different event and does now tear
 down, in both the job shape and the session-leader shape a #134 shortcut makes; `70-sighup.sh` §1b
-records the first and §1c asserts the second.
+records the first and §1c asserts the second. §1c **builds** that shape with ptyrun's shell-free
+path rather than waiting for the host's `/bin/sh` to exec-optimise itself away — dash never does,
+which is why that group was red on Ubuntu and skipping its own assertions — and on a platform that
+discards a failed write it says in a named skip that its greens are outcome checks rather than
+evidence about #170.
 
 One thing NOT done, and available if the lost-work cost turns out to bite: `podman stop` sends
 SIGTERM to PID 1 only, and every other process in the container is killed by the cgroup teardown.
