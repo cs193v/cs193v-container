@@ -1696,8 +1696,10 @@ verb_supervise() {
 # names, and killing a stranger costs whatever that stranger was doing.
 tunnel_sup_alive() {
     local pid
-    pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
-    case "${pid:-}" in ''|*[!0-9]*) return 1 ;; esac
+    # COPIED STRAIGHT INTO A LOCAL. PIDFILE_PID has to be a global -- the whole point of
+    # pidfile_read is that nothing forks -- so anything called later could overwrite it.
+    pidfile_read "$TUNNEL_SUP_PIDFILE" || return 1
+    pid="$PIDFILE_PID"
     kill -0 "$pid" 2>/dev/null || return 1
     case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
         *--dev-supervise*) return 0 ;;
@@ -1749,20 +1751,19 @@ tunnel_sup_start() {
 
 tunnel_sup_stop() {
     local pid
-    pid="$(cat "$TUNNEL_SUP_PIDFILE" 2>/dev/null)"
-    case "${pid:-}" in
-        ''|*[!0-9]*) ;;
-        *)  case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
-                *--dev-supervise*)
-                    # This pid is the LOOP (see verb_supervise), so killing it takes the host
-                    # side down whole: podman exec's next write fails within one tick, because
-                    # there is a write every tick. It does NOT reach the watcher inside the
-                    # container -- measured -- which is what the reap below is for.
-                    kill "$pid" 2>/dev/null || true
-                    sleep 1
-                    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null ;;
-            esac ;;
-    esac
+    if pidfile_read "$TUNNEL_SUP_PIDFILE"; then
+        pid="$PIDFILE_PID"
+        case "$(ps -p "$pid" -wwo args= 2>/dev/null)" in
+            *--dev-supervise*)
+                # This pid is the LOOP (see verb_supervise), so killing it takes the host
+                # side down whole: podman exec's next write fails within one tick, because
+                # there is a write every tick. It does NOT reach the watcher inside the
+                # container -- measured -- which is what the reap below is for.
+                kill "$pid" 2>/dev/null || true
+                sleep 1
+                kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null ;;
+        esac
+    fi
     # AND REAP THE WATCHER INSIDE THE CONTAINER. In the ordinary case this is unnecessary --
     # every path that reaches tunnel_down stops the container a moment later and cgroup teardown
     # takes everything with it. --reset-tunnel is the exception: it never calls tunnel_down, so
@@ -1786,10 +1787,10 @@ ensure_tunnel() {
 # realistic way to arrive at either caller.
 tunnel_kill_pid() {
     local pid
-    pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
-    case "${pid:-}" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
+    # THE READ IS A BUILTIN, and on the teardown path that is the difference between killing
+    # this master and silently declining to (#170). See pidfile_read in cs193v-ui.sh.
+    pidfile_read "$TUNNEL_PID" || return 0
+    pid="$PIDFILE_PID"
     kill -0 "$pid" 2>/dev/null || return 0
     # -ww, WITHOUT WHICH THIS TEST CAN SILENTLY FAIL AND THE KILL BE SKIPPED. procps truncates a
     # PIPED `ps -o args=` to $COLUMNS -- 80 by default -- so on a Linux host whose TMPDIR pushes
@@ -2560,7 +2561,11 @@ tmux_doctor() {
 tunnel_doctor() {
     local pid state ports n up
     if tunnel_alive; then
-        pid="$(cat "$TUNNEL_PID" 2>/dev/null)"
+        # `|| true` because the '?' below IS the failure path. This is the one of the four
+        # sites whose next statement is not a test, so it is the one that would change meaning
+        # under an errexit nobody has set.
+        pidfile_read "$TUNNEL_PID" || true
+        pid="$PIDFILE_PID"
         drow "$(msg doctor.row.tunnel)" "$(msg doctor.tunnel.up "PID=${pid:-?}")"
     else
         drow "$(msg doctor.row.tunnel)" \
