@@ -547,7 +547,6 @@ measure() {
         plain)    run_timeout 5 sh -c 'exit 3'; rc=$? ;;
         labelled) RT_ROW='build';     run_timeout 5 sh -c 'exit 3'; rc=$? ;;
         spin)     RT_SPIN='working';  run_timeout 5 sh -c 'exit 3'; rc=$? ;;
-        control)  val="$(printf abc)" ;;
         pidfile)  if [ "$RTP_HAVE_READER" = yes ]; then
                       pidfile_read "$RTP_PIDFILE" || true; val="$PIDFILE_PID"
                   else val='<no pidfile_read>'; fi ;;
@@ -584,22 +583,37 @@ rtp_field() { sed -n "$1p" "$RTP/report" 2>/dev/null; }
 
 # THE PTY ARM'S RIG. pty_start + `kill -9` on the pty owner is exactly 70-sighup.sh's
 # force_quit_terminal: the master is destroyed first, so the kernel HUPs the session leader --
-# which, with no CS193V_PTY_JOB, is the subject itself. That is the shape a #134 shortcut makes,
-# and the reason nothing revokes the controlling terminal while the handler runs.
+# which here is the SUBJECT, because CS193V_PTY_NOSHELL puts no shell between. That is the shape a
+# #134 shortcut makes, and the reason nothing revokes the controlling terminal while the handler
+# runs.
+#
+# ASKED FOR, NOT INHERITED, and this comment claimed the opposite for one revision. Merely leaving
+# CS193V_PTY_JOB unset does not make the subject the leader: ptyrun then execs `/bin/sh -c` in the
+# pty's session leader, and whether that shell steps aside is the host's (#151). Measured, dash
+# 0.5.12 never does, so on Linux the leader was `sh` and the subject was its child -- which this
+# rig read as the shortcut shape. It was true on the Mac this file's assertions can run on, and
+# true for the reason #151 exists: bash-as-sh optimises this one command shape. The knob makes it
+# true by construction, and the record below says what was actually built.
 #
 # EXPORTED, NOT PREFIXED. `VAR=x some_function` leaves the assignment behind in bash, which is
-# the trap 14-test-harness.sh records against gate_run; these have to reach a grandchild anyway.
-RTP_OWNER=''
+# the trap 14-test-harness.sh records against gate_run; these have to reach a grandchild anyway,
+# and for the shape knob it is also what 10-static.sh's prefix ban requires.
+RTP_OWNER=''; RTP_INNER=''; RTP_LEADER=''
 rtp_ready()    { grep -q READY "$RTP/ptylog" 2>/dev/null; }
 rtp_reported() { [ -s "$RTP/report" ]; }
 rtp_pty() {                           # rtp_pty MODE -> subject under a pty, then a rude close
     rm -f "$RTP/report" "$RTP/ptylog"
     export RTP_UI="$PRIVATE/files/cs193v-ui.sh" RTP_MODE="$1" RTP_OUT="$RTP/report" \
-           RTP_PIDFILE="$RTP/pidfile" RTP_PTY=1
+           RTP_PIDFILE="$RTP/pidfile" RTP_PTY=1 CS193V_PTY_NOSHELL=1
     pty_start 'x\n' "$RTP/subject.sh" > "$RTP/ptylog" 2>&1
     RTP_OWNER="$PTY_OWNER"
-    unset RTP_PTY
+    unset RTP_PTY CS193V_PTY_NOSHELL
     wait_until 20 rtp_ready || { kill -9 "$RTP_OWNER" 2>/dev/null; return 1; }
+    # READ BEFORE THE CLOSE, because after it there is no pid left to ask about -- and the shape is
+    # what decides whether this arm is measuring #170's reachable case or 1b's latent one.
+    RTP_INNER="$(pty_inner_pid)" || RTP_INNER=''
+    RTP_LEADER="$(pid_leads_its_session "${RTP_INNER:-}")"
+    record "rt:the-pty-arms-shape" "pid=${RTP_INNER:-none} leader=$RTP_LEADER"
     kill -9 "$RTP_OWNER" 2>/dev/null
     wait "$RTP_OWNER" 2>/dev/null || true
     RTP_OWNER=''
@@ -611,8 +625,12 @@ rtp_pty() {                           # rtp_pty MODE -> subject under a pty, the
 # on Linux there is nothing here to measure and every assertion below would pass for the reason
 # an empty test passes. That is the vacuous green VERIFICATION.md A.15 exists to hunt, so the
 # checks SKIP there instead -- and say so, rather than going quiet.
-RTP_RETAINS=no
-rtp_closed control && [ "$(rtp_field 3)" != abc ] && RTP_RETAINS=yes
+# ONE MEASUREMENT, IN lib/shared.sh, because 70-sighup.sh's §1c needs the same answer -- to say
+# which of its greens are evidence about #170 and which only say the teardown behaved. This used
+# to be a `control` mode of the subject above, whose `val="$(printf abc)"` read the buffer back
+# through a command substitution; the helper does exactly that and needs nothing from
+# cs193v-ui.sh, so the mode went with the caller rather than being left as a shape nothing runs.
+RTP_RETAINS="$(platform_retains_failed_write)"
 record "rt:this-platform-retains-a-failed-write" "$RTP_RETAINS"
 
 # AND THE DOOR IS ITSELF ASSERTED WHERE IT MUST HOLD. A probe that quietly stops reproducing
@@ -628,6 +646,7 @@ if [ "$RTP_RETAINS" = no ]; then
                  a-labelled-call-leaves-the-buffer-as-it-found-it \
                  a-spinner-call-leaves-the-buffer-as-it-found-it \
                  a-pidfile-read-survives-a-dead-terminal \
+                 the-pty-arm-really-was-the-session-leader \
                  the-pty-arm-still-had-a-terminal \
                  and-the-same-when-the-terminal-is-still-a-terminal; do
         skip "rt:$rtp_n" "this platform discards a failed write, so there is nothing to poison"
@@ -647,7 +666,19 @@ else
     # ─── arm B: a REAL terminal that cannot be written to ─────────────────────────────────
     # The five tty-only writes fire here and nowhere else, so this is the only unit-level
     # evidence for the second drain. A labelled call, because that is the one that draws frames.
+    #
+    # AND IT IS macOS-ONLY FOR A SECOND, INDEPENDENT REASON, which is worth knowing before anyone
+    # tries to hoist it out of the door. Measured on Linux by forcing the door open: once the pty
+    # MASTER is destroyed, tcgetattr on the slave fails EIO, so `[ -t 1 ]` is FALSE and this arm's
+    # first assertion fails -- with the session-leader shape and, isolated as the single variable,
+    # without it too. glibc discards the retained write AND the kernel takes isatty away, so
+    # neither half of what this arm exists to measure survives here; on macOS isatty(1) stays true
+    # while every write fails, which is the state the five tty-only writes need.
     if rtp_pty labelled; then
+        # THE RIG BEFORE THE READING, the guard 70-sighup.sh's §1c carries for the same reason: in
+        # job mode all four of the assertions here are about a shape where the poison is latent,
+        # and they would be green for a reason nobody asked about.
+        assert_eq "rt:the-pty-arm-really-was-the-session-leader" "yes" "$RTP_LEADER"
         assert_eq "rt:the-pty-arm-still-had-a-terminal" "yes" "$(rtp_field 1)"
         assert_eq "rt:and-the-same-when-the-terminal-is-still-a-terminal" "" "$(rtp_field 4)"
     else
