@@ -1565,7 +1565,7 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
     # the container tier stayed green.
     #
     # AND IT MUST NOT BE PER-TERMINAL EITHER. The gesture line is chosen from the terminal token
-    # now (files/cs193v-gesture), and this harness renders inside a container that inherits none,
+    # now (files/cs193v-platform-messages), and this harness renders inside a container that inherits none,
     # so it draws the `unknown` row. The prose above the link is in every frame of every state
     # and is the same for every token, which is what an off-target row has to be.
     set -- $(hx_find "$S3" 'asks you to open')

@@ -1,10 +1,22 @@
 #!/bin/sh
 #
-# The gesture a student is told to make, for the terminal they are actually using.
+# Every student-facing string that depends on the MACHINE THE STUDENT IS SITTING AT rather than
+# on this container. Two questions live here, and they are keyed differently on purpose:
 #
-# Installed as /usr/local/bin/cs193v-gesture. Three callers: cs193v-shell sets @copy-hint from
-# it at claim time, cs193v-linkbox prints its `link` line, and tmux.conf's shifted-drag bindings
-# show its `correct` line. Not for students to run, though running it is harmless.
+#   --copy / --link / --correct   the gesture to make, keyed on the TERMINAL (CS193V_TERM_CLASS),
+#                                 with a host-OS branch inside the rows that need one.
+#   --hostpath                    where the student's own copy of ~/projects is, and how they
+#                                 reach it, keyed on the PLATFORM (CS193V_HOST_OS) alone.
+#
+# SO THERE IS NO TOP-LEVEL PLATFORM SWITCH, and adding one would misdescribe three of the four
+# modes: the gesture rows are a per-terminal table that consults the OS, not a per-OS table. The
+# dispatch is on the MODE first, and each mode then keys on whatever actually decides it.
+#
+# Installed as /usr/local/bin/cs193v-platform-messages. Callers: cs193v-shell sets @copy-hint and
+# @select-correction from it at claim time, cs193v-linkbox prints its --link line, tmux.conf's
+# shifted-drag bindings show the --correct line through the option cs193v-shell set, and the
+# COURSE NOTES tell the agent to run --hostpath. That last one is the only mode a student's agent
+# invokes directly; the rest are for the launcher. Running any of them by hand is harmless.
 #
 # ─── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────
 #
@@ -135,18 +147,18 @@ D_LINK='Select the link and paste it into your browser.'
 D_CORRECT='SHIFT+drag reached the container instead of selecting -- see the guide.'
 
 # SHIFT+drag that gets HERE means the terminal forwarded it rather than intercepting it, which is
-# the definition of a terminal without a Shift bypass. So no `correct` string may answer with
+# the definition of a terminal without a Shift bypass. So no `--correct` string may answer with
 # "hold SHIFT" -- that is the advice that just failed. 50-image.sh asserts it for every token.
 
 usage() {
-    printf 'usage: cs193v-gesture copy|link|correct\n' >&2
+    printf 'usage: cs193v-platform-messages --copy|--link|--correct|--hostpath\n' >&2
     exit 2
 }
 
 [ "$#" -eq 1 ] || usage
 
 case "$1" in
-copy)
+--copy)
     case "$TOKEN" in
     apple-terminal)   printf 'TO COPY: hold FN and drag, then CMD+C.\n' ;;
     iterm2)           printf 'TO COPY: hold OPTION and drag, then CMD+C.\n' ;;
@@ -177,7 +189,7 @@ copy)
     vte)              printf 'TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C.\n' ;;
     *)                printf '%s\n' "$D_COPY" ;;
     esac ;;
-link)
+--link)
     case "$TOKEN" in
     apple-terminal)   printf 'FN+COMMAND+double-click the link to open it.\n' ;;
     iterm2)           printf 'Hold OPTION to select the link, then paste it in your browser.\n' ;;
@@ -190,7 +202,7 @@ link)
     vte)              printf 'CTRL+click the link to open it.\n' ;;
     *)                printf '%s\n' "$D_LINK" ;;
     esac ;;
-correct)
+--correct)
     case "$TOKEN" in
     apple-terminal)   printf 'SHIFT does not select in Terminal.app -- hold FN and drag instead.\n' ;;
     iterm2)           printf 'Hold OPTION, not SHIFT, to select text here.\n' ;;

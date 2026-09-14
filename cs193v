@@ -500,7 +500,7 @@ safe_term() {
 # inside the container can see which terminal is really attached. The launcher resolves it once
 # and forwards the token on the CLAIM exec, which is the exec that starts the tmux server and
 # therefore the only one whose environment reaches a pane; see open_shell. The image maps the
-# token to prose, because student-facing container prose lives in the image (files/cs193v-gesture).
+# token to prose, because student-facing container prose lives in the image (files/cs193v-platform-messages).
 #
 # A TOKEN AND NOT THE RAW STRING, and that is what makes this safe rather than merely guarded.
 # The value ends up in a tmux option and in a display-message argument. Forwarding

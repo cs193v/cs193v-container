@@ -389,7 +389,7 @@ pane must not react — on Ptyxis an unhandled click is explicitly handed back t
 facts and only the pair of them means the gesture is intercepted.
 
 The gesture the box NAMES is per-terminal now (#122), and the box is the thing to read: whatever
-`cs193v-gesture link` says for your terminal is what should work. **Two rows have been measured**
+`cs193v-platform-messages --link` says for your terminal is what should work. **Two rows have been measured**
 — Terminal.app, Ptyxis and Windows Terminal — and one more is extended from source to a terminal
 nobody has run (GNOME Terminal, which shares Ptyxis's token). The rest are still **rows to fill
 in, not claims**:
@@ -1226,7 +1226,7 @@ rather than from hardware" — turned out to understate it. There is no single m
 
 Terminal.app and macOS VS Code do not merely ignore Shift — they **encode it into the mouse
 report (`Cb=4`) and forward it to tmux**, which is why the failure was silent rather than merely
-useless. So the hint is now per-terminal: `files/cs193v-gesture` holds the table, `term_class()`
+useless. So the hint is now per-terminal: `files/cs193v-platform-messages` holds the table, `term_class()`
 in `./cs193v` picks the row, and `cs193v-shell` applies it at claim time. The automated coverage
 is `13-term-class.sh` (which row), `50-image.sh` (what each row says) and `60-container.sh` (that
 it reaches the tmux server).

@@ -38,6 +38,12 @@ projects/                      the student's work; the only directory shared wit
     rewrite-window-title.py    points the terminal's title at the course
     nanorc
     profile.d/                 stty -ixon
+    cs193v-platform-messages   EVERY STRING THAT DEPENDS ON THE STUDENT'S OWN MACHINE rather
+                               than on the container: --copy/--link/--correct are the per-terminal
+                               gestures (issues #122, #123, #133), --hostpath is where their copy
+                               of ~/projects is and how they reach it (#257). Fed CS193V_TERM_CLASS
+                               and CS193V_HOST_OS by the launcher, because nothing in here can
+                               work either out
     agent-notes.md             THE COURSE NOTES BOTH AGENTS READ — installed once as
                                /etc/cs193v/agent-notes.md; /etc/claude-code/CLAUDE.md is a
                                symlink to it and the entrypoint links ~/.codex/AGENTS.md at it
@@ -1445,7 +1451,7 @@ unbound key and was dropped. The student was told to hold SHIFT, did so, and got
 not even the hint back, because the shifted release is a different key from the unshifted one.
 `tests/MANUAL.md` §7.10 called this risk when the hint was written; it fired twice.
 
-**So the per-terminal branch this project twice refused is now the design.** `files/cs193v-gesture`
+**So the per-terminal branch this project twice refused is now the design.** `files/cs193v-platform-messages`
 holds the table, `term_class()` in `./cs193v` resolves which row applies, and the token rides in
 on the claim exec. Two things about that are worth knowing before touching it:
 

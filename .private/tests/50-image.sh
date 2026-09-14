@@ -83,7 +83,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
 # credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox cs193v-gesture setsid; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox cs193v-platform-messages setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | do_tr '\n' ' ')"
@@ -612,7 +612,7 @@ assert_contains "shortlink:a-cancel-file-prints-nothing"      "out=[]" "$out"
 assert_contains "shortlink:a-cancel-file-hands-the-port-back" "listeners=0" "$out"
 
 # ─── the per-terminal gesture strings  (#122, #123, #133) ─────────────────────
-# WHAT THIS OWNS. cs193v-gesture is the whole per-terminal hint system on the container side: a
+# WHAT THIS OWNS. cs193v-platform-messages is the whole per-terminal hint system on the container side: a
 # token in, one line of student-facing prose out. The launcher chooses the token (13-term-class.sh
 # owns that half), and everything here is about the lookup being total -- because the failure mode
 # is not a wrong hint, it is a BLANK one. The linkbox draws its gesture line into a box whose
@@ -633,8 +633,8 @@ assert_contains "shortlink:a-cancel-file-hands-the-port-back" "listeners=0" "$ou
 # Columns, not bytes, measured the way box() measures -- strip UTF-8 continuation bytes and count
 # what is left. See the note above dw() in cs193v-ui.sh.
 g_dump="$(R 'for tok in apple-terminal iterm2 vscode windows-terminal vte unknown; do
-              for mode in copy link correct; do
-                out="$(CS193V_TERM_CLASS=$tok CS193V_HOST_OS=macos cs193v-gesture $mode)"
+              for mode in --copy --link --correct; do
+                out="$(CS193V_TERM_CLASS=$tok CS193V_HOST_OS=macos cs193v-platform-messages $mode)"
                 n="$(printf "%s\n" "$out" | grep -c .)"
                 cols="$(printf "%s" "$out" | LC_ALL=C awk "{ t=\$0; gsub(/[\200-\277]/,\"\",t); print length(t) }")"
                 printf "%s\t%s\t%s\t%s\t%s\n" "$tok" "$mode" "${n:-0}" "${cols:-0}" "$out"
@@ -652,7 +652,7 @@ while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
     # which is BOX_W - 4 = 67 columns, so the string itself gets 65. One column over and box()
     # wraps it, the frame grows a row, and the popup -- whose height open-url chose before any of
     # this was known -- shows a dead row or scrolls its title off the top.
-    if [ "$gm" = link ] && [ "${gc:-999}" -gt 65 ]; then g_wide="$g_wide [$gt=$gc]"; fi
+    if [ "$gm" = --link ] && [ "${gc:-999}" -gt 65 ]; then g_wide="$g_wide [$gt=$gc]"; fi
 done <<GDUMP
 $g_dump
 GDUMP
@@ -666,18 +666,18 @@ assert_eq "gesture:every-link-line-fits-the-box" "" "$g_wide"
 # something new, and that was never the intent of #122 or #123.
 assert_eq "gesture:unknown-is-the-historical-wording" \
     "TO COPY: hold SHIFT and drag, then CTRL+SHIFT+C (CMD+C on a Mac)." \
-    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 
 # AN UNRECOGNISED TOKEN MUST BEHAVE LIKE `unknown`, not like nothing. The launcher only ever
 # emits the six, but the image and the launcher are versioned separately -- a student running an
 # old image against a new launcher is exactly the case that produces a token this file has never
 # heard of, and a blank hint is the one outcome that must not happen.
 assert_eq "gesture:an-unknown-token-degrades-to-the-default" \
-    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')" \
-    "$(R 'CS193V_TERM_CLASS=some-future-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-platform-messages --copy')" \
+    "$(R 'CS193V_TERM_CLASS=some-future-terminal CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 assert_eq "gesture:an-empty-token-degrades-to-the-default" \
-    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-gesture copy')" \
-    "$(R 'cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos cs193v-platform-messages --copy')" \
+    "$(R 'cs193v-platform-messages --copy')"
 
 # ─── the rows where the generic answer is WRONG ────────────────────────────────
 # These three are the entire reason the feature exists, so they are asserted by content and not
@@ -686,23 +686,23 @@ assert_eq "gesture:an-empty-token-degrades-to-the-default" \
 # Option, where SHIFT extends an existing selection instead of bypassing. Everywhere else SHIFT
 # is right and `unknown` already says so.
 assert_contains "gesture:apple-terminal-names-fn" "FN" \
-    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 assert_not_contains "gesture:apple-terminal-does-not-name-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 assert_contains "gesture:iterm2-names-option" "OPTION" \
-    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 assert_not_contains "gesture:iterm2-does-not-name-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=iterm2 CS193V_HOST_OS=macos cs193v-platform-messages --copy')"
 
 # VS CODE IS THE ONE TOKEN THAT SPLITS ON THE OS, which is why the host forwards the platform as
 # well as the terminal. On macOS it has no bypass at all until the student changes a setting; on
 # Windows and Linux xterm.js falls through to plain Shift. (VS Code's own documentation says Alt
 # for Windows and Linux and is wrong -- the source returns event.shiftKey.)
 assert_ne "gesture:vscode-differs-by-os" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=macos cs193v-gesture copy')" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=macos cs193v-platform-messages --copy')" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-platform-messages --copy')"
 assert_contains "gesture:vscode-on-linux-names-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-platform-messages --copy')"
 # AND `wsl` LANDS WHERE `linux` DOES, which is worth its own line because `wsl` is the value that
 # actually OCCURS on the platform this arm exists for. platform() returns `wsl` and not `linux`
 # on every Windows machine -- containers share the WSL kernel and /proc/version says microsoft --
@@ -710,8 +710,8 @@ assert_contains "gesture:vscode-on-linux-names-shift" "SHIFT" \
 # `*`, so the two agree today; asserting it is what stops a future third arm from being added for
 # `linux` alone and silently dropping every Windows student onto the macOS wording.
 assert_eq "gesture:vscode-on-wsl-matches-linux" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture copy')" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=wsl   cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-platform-messages --copy')" \
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=wsl   cs193v-platform-messages --copy')"
 # AND THE LINK ARM ON THE SAME OS, because the dump below runs macos only. `link` is one of the
 # two arms that split on the platform, so the vscode/linux string is in no other assertion here
 # and the set check cannot see it. VS Code may well open a link on CTRL+click -- xterm.js
@@ -720,7 +720,7 @@ assert_eq "gesture:vscode-on-wsl-matches-linux" \
 # alone has never been enough for a row that names a gesture on a terminal nobody has tried. So
 # it stays gesture-free. See PR #146 and tests/MANUAL.md 8.2, which records what is left.
 assert_not_contains "gesture:vscode-on-linux-link-names-no-click" "click" \
-    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=vscode CS193V_HOST_OS=linux cs193v-platform-messages --link')"
 
 # THE ROWS THAT NAME A CLICK, AND THE KINDS OF EVIDENCE UNDER THEM -- which are not all the same
 # strength, and the file says which is which rather than letting one token hide the difference.
@@ -730,7 +730,7 @@ assert_not_contains "gesture:vscode-on-linux-link-names-no-click" "click" \
 #                    FN+CMD+double-click is what actually opened a link -- confirmed by a local
 #                    HTTP server receiving the request, not by eye.
 #   vte              HARDWARE on Ptyxis 50.1, SOURCE for GNOME Terminal. The weaker half is
-#                    labelled as such in cs193v-gesture.
+#                    labelled as such in cs193v-platform-messages.
 #   windows-terminal HARDWARE on Windows Terminal 1.24.11911, Windows 11 26200, measured
 #                    2026-09-05 -- CTRL+click opened the browser with modes 1000 and 1006 both
 #                    active, which is the condition that matters: if the hyperlink branch ran
@@ -748,25 +748,25 @@ assert_not_contains "gesture:vscode-on-linux-link-names-no-click" "click" \
 # conhost have no URL detection at all, and Alacritty's URL hint matches on NO modifier so
 # holding Shift may suppress it.
 assert_contains "gesture:apple-terminal-link-names-the-measured-gesture" "FN+COMMAND+double-click" \
-    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos cs193v-platform-messages --link')"
 assert_contains "gesture:vte-link-names-ctrl-click" "CTRL+click" \
-    "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-platform-messages --link')"
 assert_contains "gesture:windows-terminal-link-names-ctrl-click" "CTRL+click" \
-    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-platform-messages --link')"
 # AND THEY MUST NOT NAME SHIFT IN THE SAME BREATH. Both rows used to read "Hold SHIFT to select
 # the link, then paste it in your browser", which is true but is the longer way round; naming
 # both would put the harder route first in the one line a student reads.
 assert_not_contains "gesture:vte-link-does-not-name-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=vte CS193V_HOST_OS=macos cs193v-platform-messages --link')"
 assert_not_contains "gesture:windows-terminal-link-does-not-name-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture link')"
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-platform-messages --link')"
 # ...AND THE COPY ROW STILL DOES, which is the pair worth asserting together: on Windows Terminal
 # the link is a CTRL+click and the SELECTION is still a SHIFT+drag, because those are two
 # different mechanisms -- an intercepted URL handler and a bypass modifier. Measured in the same
 # sitting: SHIFT+drag under modes 1000/1006 printed nothing and highlighted text, so the bypass
 # is real. A future reader tidying the two rows into one would break exactly this.
 assert_contains "gesture:windows-terminal-copy-still-names-shift" "SHIFT" \
-    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-gesture copy')"
+    "$(R 'CS193V_TERM_CLASS=windows-terminal CS193V_HOST_OS=wsl cs193v-platform-messages --copy')"
 
 # NO OTHER TOKEN MAY INVENT A CLICK, which replaces a check that only ever read `unknown`. The
 # SET and not the count -- and not a list of names in the ASSERTION NAME either, which goes stale

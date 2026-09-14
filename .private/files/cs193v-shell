@@ -159,12 +159,13 @@ set_terminal_facts() {
     local mode opt text
     tm set-environment -g CS193V_TERM_CLASS "${CS193V_TERM_CLASS:-unknown}" 2>/dev/null || true
     tm set-environment -g CS193V_HOST_OS    "${CS193V_HOST_OS:-}"           2>/dev/null || true
-    # TWO OPTIONS, ONE PER GESTURE. @copy-hint is what a plain drag displays; @select-correction
+    # TWO OPTIONS, ONE PER GESTURE, and the mode names double as the flag names -- hence the
+    # "--" spliced on below. @copy-hint is what a plain drag displays; @select-correction
     # is what a SHIFT+drag displays, and it only ever fires on a terminal that forwards Shift
     # instead of intercepting it -- which is precisely a terminal where @copy-hint's SHIFT advice
     # would have been wrong. See tmux.conf Part 3.
     for mode in copy:@copy-hint correct:@select-correction; do
-        text="$(cs193v-gesture "${mode%%:*}" 2>/dev/null)" || text=''
+        text="$(cs193v-platform-messages "--${mode%%:*}" 2>/dev/null)" || text=''
         opt="${mode#*:}"
         [ -n "$text" ] && { tm set-option -g "$opt" "$text" 2>/dev/null || true; }
     done

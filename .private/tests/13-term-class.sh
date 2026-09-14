@@ -91,7 +91,7 @@ expect "term-class:vte-bare-vte-version"     vte VTE_VERSION=7803
 # (vte/src/spawn.cc), so the backstop above catches them and they land on `vte` rather than here.
 # That was invisible while the vte row only restated the default's advice in different words. It
 # is visible now that the row names CTRL+click, so it is written down rather than left for the
-# next reader to trip over. See the same note in files/cs193v-gesture.
+# next reader to trip over. See the same note in files/cs193v-platform-messages.
 expect "term-class:empty-environment"        unknown
 expect "term-class:kitty-falls-through"      unknown KITTY_PID=99 TERM=xterm-kitty
 expect "term-class:ghostty-falls-through"    unknown GHOSTTY_BIN_DIR=/x TERM_PROGRAM=ghostty
