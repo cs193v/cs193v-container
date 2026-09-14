@@ -1705,3 +1705,67 @@ refusal, and it fires only on the remote arm, so the assertion would test differ
 different platforms); and asserting the message inline at the one site (correct, and the smallest
 diff, but the four ways it can pass for the wrong reason are then unreachable by any unit test —
 a Mac only ever produces 125 and a native Linux only ever 255).
+
+### D16. A failed write is retained, and the next fork reads it back as data (issue #170)
+
+On macOS a `write(2)` to fd 1 that **fails** leaves the unwritten bytes in bash 3.2's stdout
+`FILE` buffer — BSD stdio keeps the tail on error and 3.2 has no `__fpurge`. The buffer is never
+cleared, so every later flush emits them wherever fd 1 then points. glibc discards them, which is
+why nothing on Linux has ever seen this.
+
+**Not every idiom carries it, and the difference is the whole of which sites are broken.**
+Measured in the launcher's own shape (a script file, top-level shell) against a file holding
+`4242`, and confirmed identical on a real hung-up pty:
+
+| idiom | result | why |
+| --- | --- | --- |
+| builtin write (`printf … >&9`, `echo x > f`) | **poisoned** | writes through the poisoned `FILE` |
+| `$(cat "$F" 2>/dev/null)` | **`4242\nPOISONPOISON`**, 17 bytes | the redirect stops bash exec'ing in the substitution's subshell, so it survives to flush at exit |
+| `$(cat "$F")` bare | `4242`, 4 bytes | bash execs `cat` directly; nothing is left to flush |
+| `$(some_function)` | **poisoned** | a function is never exec'd, so the subshell always flushes |
+| `{ read -r v < "$F"; } 2>/dev/null` | `4242`, 4 bytes | a builtin: no child, so nothing inherits the buffer |
+| external command with a redirect | clean | fork + execve discards the buffer |
+
+The `2>/dev/null` is the trigger, which is worth knowing before someone "simplifies" a read: a
+bare `$(cat …)` is clean and adding an error redirect is what poisons it. All four of the
+launcher's pidfile reads had one.
+
+**How it reaches `run_timeout`'s return value.** The status protocol writes the child's pid with
+`printf '%s\n' "$c" >&9` — a builtin, so the retained bytes go down the fifo ahead of the pid.
+The parent's `read -r cpid <&9` sees `POISON<pid>`, the numeric guard rejects it, the second read
+is skipped, and `rc` never leaves the 124 it is seeded with. `pmq stop -t 3 -i` **is**
+`run_timeout 20 podman stop`, so the teardown reports a timeout for a stop that worked and takes
+its kill branch.
+
+**Two drains, and what does NOT work.** Measured on bash 3.2.57: `printf '' >/dev/null` drains
+nothing (no bytes, no flush) and `exec 1>/dev/null` drains nothing (writes nothing). Only a real
+byte through a redirect empties the buffer. One drain is not enough either, because `run_timeout`
+writes its own label to the same dead terminal after the first one:
+
+| build | plain | labelled (`RT_ROW`) | spin (`RT_SPIN`) |
+| --- | --- | --- | --- |
+| unpatched | rc **124**, buffer dirty | rc 3, the note ×4 | rc 3, note ×3 + `working` |
+| entry drain only | rc 3, clean | spinner frames + `✗  build` | `⣾  working` ×3 |
+| both drains | rc 3, clean | clean | clean |
+
+**THE SHAPE IS WHAT DECIDES WHETHER ANY OF THIS MATTERS, and this is the part worth remembering.**
+Measured end to end, real launcher, real container, `70-sighup.sh` on an unpatched tree:
+
+| shape | close | container 45 s later |
+| --- | --- | --- |
+| launcher a job under a login shell | polite | **exited** — no poison at all; the master stays open and every write succeeds |
+| launcher a job under a login shell | rude | **exited** — poison present, outcome fine: the launcher's exit signals nobody, so the `podman stop` it disowned completes |
+| **launcher is the session leader** (`exec ./cs193v`, a #134 shortcut) | rude | **still running** |
+
+So the defect is latent in both of the shapes students have today, and reachable in the one an
+OS-native shortcut creates. Two things change in that shape: nothing revokes the controlling
+terminal while the trap runs — the leader is the launcher, still running it — so `isatty(1)` stays
+**true** while every write fails `EIO`, which turns on five writes `run_timeout` makes only to a
+terminal; and the launcher's own exit is then what HUPs the group the disowned stop is in.
+
+**Two measurement traps, both of which produced a wrong reading first.** Under `bash -c` bash runs
+a single compound command in-process instead of forking, and the answer changes — `RT_OUT` comes
+back poisoned there and clean in a script, which is the launcher's real shape. And any builtin
+write between the poison and the measurement drains it: an existence check written
+`command -v pidfile_read >/dev/null` inside the probe made `12-run-timeout.sh`'s pidfile assertion
+pass with the fix reverted. Its own mutation test caught that; nothing else would have.
