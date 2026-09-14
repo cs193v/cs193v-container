@@ -844,6 +844,38 @@ assert_eq "sudo-fake:never-executes-anything" "" "$bare"
 assert_contains "sudo-fake:installed-by-shim_new" 'lib/sudo-fake' \
                 "$(sed -n '/^shim_new()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
 
+# EVERY CONTROL VERB THE LAUNCHER SENDS MUST BE ANSWERED BY THE FAKE ssh (#251). One that is
+# not falls through shim_fake_ssh's case to the master branch, which binds a control socket
+# that already exists and then sleeps -- so the caller pays run_timeout's whole ceiling and
+# reads the timeout as a broken master. Nothing else notices: this tier has no listener to
+# check, and argv.log only ever sees podman. `-O forward` cost five seconds a port and
+# published nothing for as long as it went unanswered.
+#
+# DERIVED FROM THE LAUNCHER, NOT A LIST. Reading the verbs out of the source is the whole
+# point: a fifth one cannot be added without this going red.
+#
+# ...AND cs193v-ui.sh IS READ TOO, for the reason ports:every-forward-binds-loopback and the
+# bash32 rule above both give -- the launcher SOURCES it, so an ssh added there reaches ssh by
+# exactly the same route. It has none today, which is why including it costs nothing.
+#
+# THE COUNT IS THE VACUITY GUARD, and "is it non-empty" would not have been one: it passes on
+# three verbs out of four, which is precisely the failure mode -- a verb moved onto a
+# continuation line, or spelled `-Oforward`, is invisible to this grep AND to the fake's glob,
+# so the check would go green over a fake that cannot answer it. A fifth verb makes a human
+# look, which is what is wanted.
+sshverbs="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" \
+            | grep -E '(^|[^-[:alnum:]_])ssh[[:space:]]' \
+            | grep -oE '(^|[[:space:]])-O [a-z]+' | do_awk '{ print $NF }' | sort -u)"
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of verbs
+assert_eq  "fake-ssh:four-control-verbs-were-found" "4" \
+           "$(printf '%s\n' $sshverbs | grep -c .)"
+fakessh="$(sed -n '/^shim_fake_ssh()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+unanswered=''
+for v in $sshverbs; do
+    case "$fakessh" in *"-O $v "*) ;; *) unanswered="$unanswered $v" ;; esac
+done
+assert_eq  "fake-ssh:answers-every-control-verb-the-launcher-sends" "" "$unanswered"
+
 # ...and no run in the cheap lane may use the UNEDITED installer, whose TARBALL is the real
 # GitHub URL. That is how the shim tier came to make a live network request on every run,
 # in a tier whose own header says "no podman, no image, no network", with `|| true` hiding
