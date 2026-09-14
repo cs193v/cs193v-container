@@ -663,6 +663,101 @@ assert_contains "pty-start:hands-the-pidfile-through-the-environment" 'CS193V_PT
 # rather than remembered at each site.
 assert_contains "pty-start:runs-the-command-through-pty-announce" 'pty-announce' "$ptystart"
 
+# ─── ...AND THE SECOND SHAPE IT CAN BUILD, WHICH IS A SHAPE AND NOT A PID (#134) ───
+# WHY THERE ARE TWO PATHS AT ALL. The pid channel above says WHICH pid the command is. 70-sighup's
+# §1c needs the command to BE the pty's session leader -- the shape an OS-native shortcut makes --
+# and through `sh -c` that is the host shell's decision: dash 0.5.12 never exec-optimises, so the
+# shell is the leader and §1c degrades into a second copy of §1b. CS193V_PTY_NOSHELL passes ARGV
+# and has ptyrun exec it, so no shell is consulted and the shape is ours. The BEHAVIOUR is
+# asserted in 14-test-harness.sh, under the host's shell and under lib/sh-fake; these are the
+# structural halves no behavioural test can see.
+#
+# COMMENTS STRIPPED FIRST, the reason the run_timeout drain gates give below: the comments in this
+# function quote the needles counted here AND the spellings that do not work, so an unstripped
+# body counts prose and passes with either branch deleted. sed BLANKS rather than deletes, so the
+# order check keeps its line numbers.
+ptystart_code="$(printf '%s\n' "$ptystart" | sed 's/^[[:space:]]*#.*//')"
+assert_contains "pty-start:has-a-shell-free-branch" 'CS193V_PTY_NOSHELL' "$ptystart_code"
+# BOTH SHAPES THROUGH THE WRAPPER, and the COUNT is what says so: #151's fix is a pid channel
+# guaranteed by the INTERFACE, not remembered once per branch. Drop it from the argv branch and
+# §1c reports the instrument instead of the shape.
+assert_eq "pty-start:both-shapes-run-through-pty-announce" "2" \
+          "$(printf '%s\n' "$ptystart_code" | grep -cF 'pty-announce' || true)"
+# ...AND ONLY THE SHELL BRANCH QUOTES. #141 is INAPPLICABLE to an argv rather than relaxed:
+# nothing re-parses it, so a quote added for symmetry becomes a literal byte of argv[0] and the
+# exec answers ENOENT -- in the container tier only, which is where it would be found.
+assert_eq "pty-start:only-the-shell-branch-quotes-what-it-interpolates" "1" \
+          "$(printf '%s\n' "$ptystart_code" | grep -cF "'\$a'" || true)"
+# ONE BACKGROUNDED INVOCATION FOR BOTH, so the pidfile, the keystroke feed and $! cannot drift
+# between the shapes -- three properties the assertions above and in 14-test-harness.sh assume.
+assert_eq "pty-start:one-backgrounded-invocation-for-both-shapes" "1" \
+          "$(printf '%s\n' "$ptystart_code" | grep -cF '"$PT_LIB/ptyrun.py"' || true)"
+
+# ─── ptyrun KEEPS ITS SHELL PATH: DUAL, NOT A REPLACEMENT ─────────────────────
+# 14-test-harness.sh drives `test -t 0 && echo ISTTY` through it, which no argv can express, and
+# lib/sh-fake is reachable only through CS193V_PTY_SHELL. A "simplification" to one path would
+# leave most of this looking fine -- the ISTTY drive fails loudly, but the ~125 negative
+# assertions behind these helpers all pass on an empty transcript.
+assert_contains "ptyrun:still-hands-a-string-to-a-shell" '[shell, "-c", cmd]' "$ptyrun_src"
+assert_contains "ptyrun:has-a-shell-free-path"           'CS193V_PTY_NOSHELL' "$ptyrun_src"
+# AND THE TWO SHAPES REFUSE EACH OTHER BEFORE THE FORK. They are complements -- job mode puts a
+# leader ABOVE the command, this puts the command in that place -- and after the fork a refusal
+# would already have built a session leader and a master for somebody else to clean up. The
+# behaviour is asserted in 14-test-harness.sh; the PLACEMENT is what only this can see.
+ptyrun_code="$(printf '%s\n' "$ptyrun_src" | sed 's/^[[:space:]]*#.*//')"
+pn_at() { printf '%s\n' "$ptyrun_code" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
+pn_ref="$(pn_at 'if noshell and job:')"; pn_fork="$(pn_at 'pty.fork()')"
+if [ -n "$pn_ref" ] && [ -n "$pn_fork" ] && [ "$pn_ref" -lt "$pn_fork" ]; then
+    pass "ptyrun:the-two-shapes-refuse-each-other-before-the-fork"
+else
+    fail "ptyrun:the-two-shapes-refuse-each-other-before-the-fork" \
+"want the refusal above the pty.fork() it must precede.
+Got, as line numbers within ptyrun.py's code: refusal=${pn_ref:-none} pty.fork=${pn_fork:-none}"
+fi
+
+# ─── NO SHAPE KNOB IS DELIVERED AS A PREFIX ON pty_start ──────────────────────
+# pty_start IS A FUNCTION, and whether bash leaves an assignment prefixed to a function call set
+# after that call returns is VERSION-DEPENDENT: measured, bash 5.3.9 drops it, and the bash
+# 14-test-harness.sh:1695 was measured on keeps it. So the prefix form silently moves the shape of
+# every LATER pty in the same shell on some machines and not others -- 70-sighup.sh launches six
+# times -- and the machine where it bites is the Mac. export/unset instead, the form
+# 12-run-timeout.sh's rtp_pty already uses.
+#
+# THE TWO SHAPE KNOBS ONLY. CS193V_PTY_SHELL is pinned at each arm that cares (14-test-harness.sh
+# :893 says why), and it selects a fixture rather than a tree shape -- a leaked one changes which
+# shell interposes, which every consumer either pins or does not care about. A leaked JOB or
+# NOSHELL changes what the pty IS.
+#
+# THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, the self-match rule the pgrep -P ban above states:
+# the pattern is in this very line. Prefixing an EXTERNAL command is fine and is not matched.
+knob_prefix="$(grep -rnE '(CS193V_PTY_JOB|CS193V_PTY_NOSHELL)=[^ ]* +(CS193V_PTY_[A-Z]+=[^ ]* +)*pty_start' \
+               "$PRIVATE/tests" --include='*.sh' \
+               | grep -vE ':[[:space:]]*#' | grep -v '/10-static\.sh:' || true)"
+assert_eq "pty-knobs:no-shape-knob-is-prefixed-onto-pty_start" "" "$knob_prefix"
+# AND THE POSITIVE HALF, which is what stops that ban going vacuous the day a knob is renamed:
+# every file that asks for a shape exports it and unsets it the same number of times. DERIVED
+# rather than listed, so a third consumer is covered the day it arrives.
+#
+# `export .*KNOB=` AND NOT `export KNOB`, because the knob is not always the first name on the
+# line: 12-run-timeout.sh's rtp_pty exports it alongside four RTP_ variables, and a needle
+# anchored on `export KNOB` would not list that file at all -- a ban that covers none of the
+# sites it is written for, which is #165's whole shape.
+#
+# READ RATHER THAN WORD-SPLIT: a path with a space in it is ordinary (#141), and splitting the
+# file list on whitespace is how that becomes two paths that do not exist. The loop runs in a
+# pipeline's SUBSHELL, which is safe here and only here because run-tests.sh counts
+# $CS193V_RESULTS rather than any shell state -- _emit's comment says so. Do not add a `local`
+# tally to it.
+for knob in CS193V_PTY_JOB CS193V_PTY_NOSHELL; do
+    grep -rlE "export .*$knob=" "$PRIVATE/tests" --include='*.sh' \
+        | grep -v '/10-static\.sh$' | LC_ALL=C sort | while IFS= read -r kf; do
+        [ -n "$kf" ] || continue
+        assert_eq "pty-knobs:$(basename "$kf" .sh)-pairs-its-$knob-export-with-an-unset" \
+                  "$(grep -cE "export .*$knob=" "$kf" || true)" \
+                  "$(grep -cE "unset .*$knob" "$kf" || true)"
+    done
+done
+
 # ─── every bind mount carries the SELinux label ────────────────────────────────
 # THE SAME SHAPE AS THE --label RULE BELOW, and for the same reason. On an SELinux host a mount
 # written without `$VT_MOUNT_Z` hands the container content it may neither read nor exec, and the

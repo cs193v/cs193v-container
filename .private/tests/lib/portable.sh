@@ -251,6 +251,41 @@ pid_is_gone() {                       # pid_is_gone PID
     esac
 }
 
+# pid_leads_its_session PID -> yes when that pid leads its own session, no when somebody else
+# leads it, gone when the pid has left, unknown when the answer could not be had.
+#
+# FOUR ANSWERS AND NOT A STATUS, and `gone` is the one that earns the spelling: a pid that has
+# already exited answers "not a leader" to any boolean, which reads as the SHAPE being wrong when
+# what happened is that the subject died. The two callers report which they got, so a reader can
+# tell a harness that built the wrong tree from a launcher that fell over.
+#
+# PYTHON, BECAUSE THERE IS NO PORTABLE `ps` COLUMN FOR IT. Linux has `-o sid=`, which BSD ps does
+# not; macOS has `-o sess=`, which prints a kernel address rather than a pid. $DO_PY is already a
+# hard requirement of every tier that can reach this -- lib/ptyrun.py needs it -- so this adds no
+# dependency, and getsid(2) is the question itself rather than a column that stands in for it.
+#
+# AN UNPARSEABLE ANSWER IS `unknown`, NEVER `no`. lib/podman-shim.sh's fake-sysctl comment states
+# the rule -- a fixture that cannot answer must not return a value -- and here the two differ in
+# what they accuse: `no` says the harness built the wrong shape, `unknown` says this check could
+# not see.
+#
+# ALL DIGITS OR NOTHING, and that guard is load-bearing rather than tidy: getsid(0) means "me", so
+# an empty or non-numeric argument -- a caller whose pty never announced -- would otherwise be
+# answered cheerfully about python itself, which is a `yes` for the wrong process entirely.
+pid_leads_its_session() {             # pid_leads_its_session PID -> yes | no | gone | unknown
+    local ans
+    case "${1:-}" in ''|*[!0-9]*) printf 'unknown\n'; return 0 ;; esac
+    [ -n "$DO_PY" ] || { printf 'unknown\n'; return 0; }
+    ans="$("$DO_PY" -c 'import os, sys
+p = int(sys.argv[1])
+try:    print("yes" if os.getsid(p) == p else "no")
+except  ProcessLookupError: print("gone")' "$1" 2>/dev/null)"
+    case "$ans" in
+        yes|no|gone) printf '%s\n' "$ans" ;;
+        *)           printf 'unknown\n' ;;
+    esac
+}
+
 # pty_stop -> take the session down and collect the scratch files pty_start made.
 #
 # IT READS THE GLOBALS pty_start SET, so it belongs to the MOST RECENT pty_start and must be
