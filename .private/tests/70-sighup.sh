@@ -119,6 +119,18 @@ launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_P
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
 
+# ...AND THE SAME THING WITHOUT JOB MODE, which is the ONLY difference between them. Everything
+# the comment above gives as a reason to set CS193V_PTY_JOB is a reason it models a student's
+# terminal -- and a #134 shortcut is not one. "Run this command instead of a shell" has no login
+# shell to be the leader, so the launcher is, which is the shape §1c measures and the shape #170
+# says it stops being latent in. Group 1c asserts it really got it rather than assuming: where
+# /bin/sh -c does not exec-optimise itself away (#151) this quietly yields job mode again.
+launch_as_leader() {                  # launch_as_leader -> sets PTY_PID; the launcher leads
+    pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    PTY_PID="$PTY_OWNER"
+    PTY_PIDS="$PTY_PIDS $PTY_PID"
+}
+
 # ─── the two ways a window can go, and they are NOT the same event ─────────────
 # MEASURED, single variable, unpatched launcher, three runs each: a polite close leaves the
 # container `exited` and a rude one leaves it `running` (#169). Nothing else moved. So which of
@@ -307,6 +319,163 @@ else
 tore down 4/4 when measured. Check the ssh master and the forwarded ports before the launcher."
     fi
 fi
+
+# ─── 1c. the shape an OS-native shortcut makes: the launcher IS the session leader ───
+# WHY THIS GROUP EXISTS AND 1b DOES NOT COVER IT (#134, #170). Every group above launches in job
+# mode, which is a student's tree today: a login shell that stays, the launcher a foreground job
+# beneath it. A shortcut built as "run this command instead of a shell" -- a Terminal profile, a
+# .app bundle, a .desktop Exec= -- has no login shell at all, so the LAUNCHER is the session
+# leader. #170 says that is where its buffer poison stops being latent, and measured, it is:
+#
+#   * NOTHING REVOKES THE CONTROLLING TERMINAL while the trap runs, because revocation happens
+#     when the leader exits and the leader is the launcher, still running its teardown. So
+#     isatty(1) stays TRUE while every write fails EIO -- and that turns on five writes
+#     run_timeout makes only to a terminal (the label, a spinner frame every other tick, the
+#     ending row, the clear, and cursor_show), each of which re-poisons the buffer.
+#   * AND THE LAUNCHER'S OWN EXIT then HUPs the group, which is where the `podman stop` that
+#     run_timeout disowned is. In job mode that exit signals nobody and the orphan completes,
+#     which is exactly why 1b above can be green with the poison present.
+#
+# MEASURED, THIS FILE, ONE VARIABLE. Against an unpatched launcher the rude close in job mode
+# (1b) recorded `yes` -- it tore down -- and the same close in this shape left the container
+# RUNNING. With #170's drains in place this group is green. That pair is the whole argument for
+# the group existing, and it is also why 1b's record stays a record: it cannot see this.
+#
+# THE RUDE CLOSE, and not because the polite one is uninteresting. In this shape too the poison
+# needs the master GONE while the launcher writes, and a polite close keeps it open until the
+# group empties. What this shape changes is the consequence, not the trigger.
+release_container
+launch_as_leader
+if ! wait_until 90 session_up; then
+    fail "sighup:the-shortcut-probe-got-a-session" \
+         "the launcher never reached a tmux session in 90s, so the session-leader ordering was
+not measured at all. Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
+    for k in really-is-a-session-leader had-a-tunnel-to-release; do
+        skip "sighup:the-shortcut-probe-$k" "no session came up"
+    done
+    for k in stops-its-container releases-the-forwarded-ports kills-the-ssh-master; do
+        skip "sighup:a-shortcut-launcher-$k" "no session came up"
+    done
+else
+    pass "sighup:the-shortcut-probe-got-a-session"
+    # DID WE ACTUALLY GET THE SHAPE? Without this the group degrades silently into a second copy
+    # of 1b. ptyrun execs `/bin/sh -c` in the pty's session leader, and whether that shell then
+    # exec-optimises itself away is NOT specifiable -- it is the whole of #151, it varies by
+    # shell and by build, and where it does not, `sh` is the leader and the launcher is its
+    # child, which is job mode again. So ask the kernel: a session leader's sid is its own pid.
+    # Measured on macOS: through /bin/sh -c and pty-announce alike, pid == sid.
+    SL_PID="$(pty_inner_pid)" || SL_PID=''
+    SL_IS=no
+    [ -n "$SL_PID" ] && SL_IS="$("$DO_PY" -c 'import os,sys
+p = int(sys.argv[1])
+try:    print("yes" if os.getsid(p) == p else "no")
+except  ProcessLookupError: print("gone")' "$SL_PID" 2>/dev/null)"
+    record "sighup:the-shortcut-shape-as-measured" "pid=${SL_PID:-none} leader=${SL_IS:-unknown}"
+    if [ "$SL_IS" != yes ]; then
+        fail "sighup:the-shortcut-probe-really-is-a-session-leader" \
+             "the launcher is pid ${SL_PID:-unknown} and its session leader is somebody else, so
+this group is measuring job mode a second time rather than the shape #134 ships. On a host where
+/bin/sh -c does not exec-optimise (#151) that is expected and this group needs a shell-free
+ptyrun path before it can run here."
+        for k in stops-its-container releases-the-forwarded-ports kills-the-ssh-master; do
+            skip "sighup:a-shortcut-launcher-$k" "the probe was not a session leader"
+        done
+        skip "sighup:the-shortcut-probe-had-a-tunnel-to-release" "the probe was not a session leader"
+    else
+        pass "sighup:the-shortcut-probe-really-is-a-session-leader"
+        # A SERVER IN A TAB, FOR THE FORWARD AND NOT FOR THE SERVER. The master comes up with no
+        # -L flags at all and the supervisor adds one per port as something inside starts
+        # listening -- so with nothing listening this group forwards nothing, count_forwards is
+        # 0, and the two tunnel assertions below would pass having measured nothing. That is
+        # #34/#46/#159 exactly, and release_container above has already taken group 1b's away.
+        podman exec "$NAME" sh -c "$TM new-window -d '$SRV'" >/dev/null 2>&1
+        wait_until 20 srv_up || true
+        SL_HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SRV_PORT/")"
+        SL_BEFORE="$(count_forwards)"
+        record "sighup:forwards-while-the-shortcut-session-is-open" "$SL_BEFORE"
+        # THE WHOLE LIST, FROM THE PROCESS TABLE, and not tunnel_owner_pid. That reads the
+        # pidfile tunnel_down unlinks, which is the right question for a caller that must SIGNAL
+        # a master and the wrong one for a measurement taken afterwards (#159, and see
+        # lib/assert.sh). fwd_master_pids applies the launcher's own argv test to every process
+        # instead -- which also catches what group 1's single-pid snapshot structurally cannot:
+        # a teardown that killed the wrong pid and left a second master of ours behind.
+        SL_MASTERS="$(fwd_master_pids | do_tr '\n' ' ')"; SL_MASTERS="${SL_MASTERS% }"
+        record "sighup:the-masters-holding-them-before-the-shortcut-close" "${SL_MASTERS:-none}"
+
+        force_quit_terminal "$PTY_PID"
+
+        if wait_until 45 container_stopped; then
+            pass "sighup:a-shortcut-launcher-stops-its-container"
+        else
+            fail "sighup:a-shortcut-launcher-stops-its-container" \
+                 "the container is still $(st) 45s after the terminal went. In this shape the
+launcher is the session leader, so its own exit HUPs the group the disowned podman stop is in --
+and a run_timeout poisoned by #170 reports 124 for a stop that worked and then kills it.
+Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
+        fi
+
+        # WHAT THESE TWO DO AND DO NOT PROVE, measured rather than assumed, because the honest
+        # answer is less than they read. On an unpatched tree both were GREEN while
+        # stops-its-container was red, and reverting tunnel_kill_pid alone to the poisoned
+        # `$(cat "$TUNNEL_PID" 2>/dev/null)` did not redden either of them. The reason is
+        # tunnel_down (cs193v): it asks the master to leave through the control socket and only
+        # falls back to tunnel_kill_pid when that is not answered -- so on any teardown where
+        # the socket still works, the pid read #170 poisons is never reached. These assert that
+        # the tunnel really goes when the terminal does, which is worth asserting and is what
+        # :286-289 asked for; they are NOT evidence about #170, and stops-its-container above is.
+        # Reddening them needs a wedged control socket, which nothing here arranges.
+        #
+        # THE SUBJECT IS ESTABLISHED BEFORE IT IS ASKED ABOUT, the guard group 1 carries and for
+        # the same reason (#159). It doubles as the instrument check: fwd_master_pids' own fatal
+        # exits only the subshell it runs in, so a ps that listed nothing arrives here as an
+        # empty list -- which fires this guard rather than banking two silent greens.
+        if [ -z "$SL_MASTERS" ] || [ "$SL_BEFORE" = 0 ]; then
+            fail "sighup:the-shortcut-probe-had-a-tunnel-to-release" \
+                 "forwards=$SL_BEFORE, masters=${SL_MASTERS:-none of ours was in the process
+table}, with a session open and a server in a tab answering $SL_HTTP. Neither assertion below
+has a subject, so both would pass however the teardown behaved.
+Check:  ./cs193v doctor
+        $FWD_SUPLOG"
+            skip "sighup:a-shortcut-launcher-releases-the-forwarded-ports" \
+                 "nothing was forwarded to release"
+            skip "sighup:a-shortcut-launcher-kills-the-ssh-master" \
+                 "no master of ours was in the process table"
+        else
+            pass "sighup:the-shortcut-probe-had-a-tunnel-to-release"
+            if wait_until 30 no_forwards; then
+                pass "sighup:a-shortcut-launcher-releases-the-forwarded-ports"
+            else
+                sl_still="$(fwd_owned_ports | do_tr '\n' ' ')"
+                # shellcheck disable=SC2086
+                fail "sighup:a-shortcut-launcher-releases-the-forwarded-ports" \
+                     "$(count_forwards) forwards are still bound (there were $SL_BEFORE while the
+session was open). This is what #170 looks like from outside: the teardown read its own stdout
+buffer back where the pid should have been, declined to kill a master it could not identify, and
+unlinked the pidfile anyway -- so these ports are held against a container that has gone and
+nothing short of --reset-tunnel can find what holds them. Still held, and by whom:
+$(fwd_squatters $sl_still)"
+            fi
+            # A TRANSITION, NOT AN ABSENCE, which is what licenses wait_until here despite its
+            # own prohibition: SL_MASTERS was a non-empty list of live masters of ours a moment
+            # ago. THE LIST, not one pid, and not `kill -0` -- which succeeds on a zombie.
+            sl_masters_gone() { [ -z "$(fwd_master_pids)" ]; }
+            if wait_until 30 sl_masters_gone; then
+                pass "sighup:a-shortcut-launcher-kills-the-ssh-master"
+            else
+                fail "sighup:a-shortcut-launcher-kills-the-ssh-master" \
+                     "still running as this instance's ssh master 30s after the close:
+$(fwd_master_pids | do_tr '\n' ' ') (before it: $SL_MASTERS), holding:
+$(fwd_owned_ports | do_tr '\n' ' ')
+tunnel_down deletes the pidfile whether or not the kill worked, so a master that survives this is
+one nothing can find again except --reset-tunnel -- and every host port it holds stays bound."
+            fi
+        fi
+    fi
+fi
+# THE SUPERVISOR IS NOT ASSERTED HERE, and that is a gap with a reason rather than an oversight.
+# sup_owner_alive reads $FWD_SUPPID, which tunnel_sup_stop unlinks (cs193v:1701) -- so after any
+# teardown it answers "not alive" without looking, the identical silent zero #159 was. There is
+# no process-table twin of it in lib/assert.sh; writing one is what this group would need first.
 
 # ─── 2. `exit` stops it too, by the same path ──────────────────────────────────
 # One teardown, not two: `exit` and a closed window both arrive as the podman exec child ending.

@@ -1953,6 +1953,84 @@ assert_contains "gate:the-read-clears-the-line-first" \
 assert_contains "gate:the-read-does-not-trust-the-status-alone" \
                 '[ -z "${DYNPORTS_LINE+set}" ]' "$gate_read"
 
+# ─── ...AND run_timeout's TWO DRAINS, PINNED FOR THE SAME REASON  (#170) ──────
+# THE SAME ARGUMENT AS THE BLOCK ABOVE, on a different mechanism. On macOS a write to fd 1 that
+# FAILS leaves its bytes in bash 3.2's stdout buffer -- BSD stdio keeps the unwritten tail, 3.2
+# has no fpurge -- and a fork inherits a COPY, so every child flushes it wherever ITS fd 1
+# points. glibc discards the tail instead. So deleting either drain is INVISIBLE ON LINUX: the
+# whole suite stays green while on every Mac `run_timeout 5 sh -c 'exit 3'` returns 124 and the
+# teardown kills the podman stop it believes timed out. 12-run-timeout.sh settles the behaviour,
+# and it can only do so where the platform reproduces -- it SKIPS everywhere else. This is what
+# is left there, and it is the whole reason these two gates exist.
+#
+# TWO DRAINS, AND THE SECOND IS NOT REDUNDANT. The first empties the buffer before the mktemp,
+# which is the function's first fork, so nothing a child inherits can reach the status fifo ahead
+# of the pid. The label and the ending row are then written to the same dead terminal AFTER it,
+# which re-poisons -- so the second sits before the last read, and the function leaves the buffer
+# as it found it. Measured with the two mutations separately: losing the first returns 124 again;
+# losing the second leaves a screenful of spinner frames for the caller's next `$(state)`.
+#
+# THE LITERAL, NOT A SHAPE, because the spelling is the fix. Measured on bash 3.2.57:
+# `printf '' >/dev/null` drains nothing -- no bytes, no flush -- and `exec 1>/dev/null` drains
+# nothing either, because it writes nothing. `grep -F` and not a pattern: in BRE `\n` is not an
+# escape, so a pattern here would happily match `printf 'n' >/dev/null`.
+#
+# COMMENTS STRIPPED FIRST, for the reason the teardown-ordering check gives: the comments beside
+# both drains quote the literal being counted AND the two spellings that do not work, so an
+# unstripped body counts prose and passes with either drain deleted.
+rt_code="$(fn_body run_timeout "$PRIVATE/files/cs193v-ui.sh" | sed 's/^[[:space:]]*#.*//')"
+if [ -z "$rt_code" ]; then
+    fail "gate:run_timeout-was-found" "fn_body returned nothing for run_timeout,
+so both assertions below would search an empty string and pass."
+else
+    pass "gate:run_timeout-was-found"
+fi
+RT_DRAIN="printf '\n' >/dev/null"
+assert_eq "gate:run_timeout-drains-the-buffer-twice" "2" \
+          "$(printf '%s\n' "$rt_code" | grep -cF "$RT_DRAIN" || true)"
+# ORDER, NOT MERELY PRESENCE, and presence is the easy half: two drains in the wrong places are
+# two no-ops. Each has to come before the fork it protects, and the mktemp BETWEEN them is what
+# proves they are two distinct drains rather than one line counted twice.
+rt_at() { printf '%s\n' "$rt_code" | grep -nF -- "$1" | cut -d: -f1; }
+rt_d1="$(rt_at "$RT_DRAIN" | head -1)"; rt_d2="$(rt_at "$RT_DRAIN" | tail -1)"
+rt_mk="$(rt_at 'tmp="$(mktemp' | head -1)"; rt_out="$(rt_at 'RT_OUT="$(cat' | head -1)"
+if [ -n "$rt_d1" ] && [ -n "$rt_d2" ] && [ -n "$rt_mk" ] && [ -n "$rt_out" ] \
+   && [ "$rt_d1" -lt "$rt_mk" ] && [ "$rt_mk" -lt "$rt_d2" ] && [ "$rt_d2" -lt "$rt_out" ]; then
+    pass "gate:each-drain-comes-before-the-fork-it-protects"
+else
+    fail "gate:each-drain-comes-before-the-fork-it-protects" \
+"want a drain before the mktemp and another before the RT_OUT read, in that order.
+Got, as line numbers within run_timeout: drains=$rt_d1,$rt_d2 mktemp=$rt_mk RT_OUT=$rt_out"
+fi
+
+# ─── AND NO PIDFILE IS READ THROUGH A FORK  (#170) ────────────────────────────
+# THE OTHER HALF OF THE SAME BUG, invisible on Linux for the same reason. `$(cat "$PIDFILE")`
+# forks, the fork copies the poisoned buffer, and the child flushes it into the substitution's
+# pipe -- so a file holding `4242` reads back as `4242\nPOISONPOISON`, the numeric guard rejects
+# it, and tunnel_kill_pid returns without killing the master whose host ports are still bound.
+# `read` is a builtin; pidfile_read in cs193v-ui.sh is the one copy of it.
+#
+# THE POSITIVES ARE WHAT KEEP THE BAN FROM GOING VACUOUS. An `assert_eq ""` for a pattern that
+# can no longer match anything passes forever: rename pidfile_read and these four fail loudly
+# instead, and rename either pidfile variable and the count below catches that -- which is the
+# other way this ban could quietly stop matching. assert_contains needs no found-guard, unlike
+# the assert_eq gates above: an empty body does not contain the needle, so an unextractable
+# function fails rather than passes.
+assert_eq "gate:both-pidfile-paths-are-declared-once" "2" \
+          "$(grep -cE '^TUNNEL_PID=|^TUNNEL_SUP_PIDFILE=' $REPO/cs193v || true)"
+for f in tunnel_sup_alive tunnel_sup_stop tunnel_kill_pid tunnel_doctor; do
+    assert_contains "gate:$f-reads-its-pidfile-without-forking" "pidfile_read" \
+                    "$(fn_body $f $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
+done
+# ANY substitution naming either path, not just `$(cat`. `$(head -1 ...)`, `$(awk ...)` and
+# bash's own `$(< ...)` all fork, and the FORK is the bug rather than the command it runs.
+# BRACKET CLASSES rather than backslash escapes, for the reason the KEEP -vE note records above:
+# `\{` and `\$` are ERE extensions BSD and GNU grep read differently, and a pattern one of them
+# rejects goes silently green inside the house `$( ... || true )` idiom on exactly one platform.
+pf_hits="$(sed 's/#.*//' $REPO/cs193v \
+           | grep -nE '[$][(][^)]*[$][{]?(TUNNEL_PID|TUNNEL_SUP_PIDFILE)' || true)"
+assert_eq "gate:no-pidfile-is-read-through-a-fork" "" "$pf_hits"
+
 sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
 assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"
