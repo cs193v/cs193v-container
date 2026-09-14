@@ -582,23 +582,67 @@ out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
 # Darwin is the same thing platform() keys its macos arm off, so this forks where it forks.
 if [ "$(uname -s)" = Darwin ]; then
     po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
-    # The one needle here that is a literal rather than a value read back from the installer:
-    # the Mac branch's advice is inline prose, not a table entry, so there is nothing to carve.
-    po_fix="remove the podman you have"
+    po_key=err.podman-old-mac
+    # THE REMEDY IS A NESTED MESSAGE ON THIS ARM rather than a table entry: the Mac branch picks
+    # how-homebrew or how-pkg from where `command -v podman` found it, and under this fixture that
+    # is the shim, so how-pkg. Read back out of the catalogue the way the Linux verb is read out of
+    # the table -- the literal that used to sit here could not fail its own non-empty check.
+    # THE TAIL of it, because the head holds {{WHERE}}, the one value this case cannot predict as
+    # it will APPEAR -- see the needle below.
+    po_fix="$(msg_text_tail err.podman-old-mac.how-pkg "$ICAT")"
 else
     po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+    po_key=err.podman-old-linux
     po_fix="$(host_upgrade_cmd)"
 fi
-record "podman-old:the-branch-measured-here" "$(uname -s) / ${po_fix}"
+record "podman-old:the-branch-measured-here" "$(uname -s) / ${po_key}"
 # Both non-empty first. An empty needle would make assert_says pass against any output at all,
 # which is the trap this file's own header records for version_lt.
 assert_ne "podman-old:the-floor-was-readable" "" "$po_floor"
 assert_ne "podman-old:the-fix-was-readable"   "" "$po_fix"
-# ONE RENDERED MESSAGE WHERE THERE WERE THREE QUOTES, and all three of the values stay: the
-# floor and the upgrade command were already read out of the installer ($po_floor, $po_fix above)
-# and 4.3.1 is what this case faked. What is gone is the prose between them.
-assert_says_sub "podman-old:refused" err.podman-old-linux "$out" "$ICAT" \
-                V=4.3.1 "MIN=$po_floor" "UPGRADE=$po_fix"
+# ONE RENDERED MESSAGE WHERE THERE WERE THREE QUOTES, and all three of the values stay: the floor
+# and the remedy were already read out of the installer ($po_floor, $po_fix above) and 4.3.1 is
+# what this case faked. What is gone is the prose between them.
+#
+# AND THE KEY IS FORKED WITH THE FLOOR, which is #261. check_podman's macOS arm prints
+# err.podman-old-mac -- a different floor, and remove-and-rerun rather than upgrade -- so naming
+# the linux key here built a needle no Mac run can print, down to a closing sentence about a Linux
+# release being too old. The branch was already RECORDED above and the floor already forked; the
+# key was the one thing left reading the other arm.
+if [ "$po_key" = err.podman-old-mac ]; then
+    # THE NEEDLE STOPS AT {{HOW}}, and that is box() rather than a concession. how-pkg
+    # interpolates `command -v podman`, which under this fixture is the shim's temp directory --
+    # 81 columns of it here, with no space to break at. box() breaks a token like that HARD at
+    # column 67 (BOX_W less its walls) and _flatten turns the break into a space INSIDE the path,
+    # so a needle carrying the unbroken path matches nothing. Measured both ways: the whole-message
+    # spelling fails here and PASSES where TMPDIR is short enough to keep the line under 67, which
+    # is green on some machines and red on others -- worse than either.
+    #
+    # Everything BEFORE {{HOW}} is hand-wrapped catalogue prose plus 4.3.1 and the floor, and it
+    # carries the remove-and-rerun sentence, so the three values this case is about are all in it.
+    po_needle="$(_flatten "$(msg_of_in "$ICAT" "$po_key" V=4.3.1 "MIN=$po_floor" 'HOW=@@CUT@@')")"
+    po_needle="${po_needle%%@@CUT@@*}"; po_needle="${po_needle% }"
+    # assert_says_sub's own two guards, which this arm does not go through: a key that vanished
+    # must be REPORTED rather than searched for, and an empty needle passes against anything.
+    case "$po_needle" in
+        ''|*'(missing message'*|*'{{'*)
+            fail "podman-old:refused" "no rendered prose for message key: $po_key" ;;
+        *)  assert_says "podman-old:refused" "$po_needle" "$out" ;;
+    esac
+    # AND THE REMEDY, which the needle above stops short of. Nothing in this suite asserted
+    # err.podman-old-mac or either of its how-* children before -- the only mention of the key in
+    # the tree was a comment -- so this is the half of #261 that was never covered at all rather
+    # than merely mis-keyed, and it is why a wrong key here went unnoticed.
+    #
+    # BY KEY AND NOT WITH $po_fix, though they build the same needle: assert_says takes an EMPTY
+    # needle as a match, so deleting how-pkg made this pass while the-fix-was-readable carried the
+    # whole failure. Measured -- the keyed form reports the key instead.
+    assert_says_key_tail "podman-old:says-how-to-remove-it" err.podman-old-mac.how-pkg \
+                         "$out" "$ICAT"
+else
+    assert_says_sub "podman-old:refused" "$po_key" "$out" "$ICAT" \
+                    V=4.3.1 "MIN=$po_floor" "UPGRADE=$po_fix"
+fi
 assert_no_file "podman-old:changes-nothing" "$TMP/old"
 
 # podman missing entirely is NOT here, and the reason is worth writing down rather than
