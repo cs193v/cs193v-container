@@ -238,3 +238,52 @@ msg_of_in() {                         # msg_of_in FILE KEY [NAME=VALUE...] -> th
         msg "$@"
     )
 }
+
+# ─── does THIS platform retain a failed write to fd 1?  (#170) ─────────────────
+#
+# THE FACT TWO SUITES NEED, which is why it is here and not in either of them. On macOS a write(2)
+# to fd 1 that FAILS leaves the unwritten bytes in bash 3.2's stdout FILE buffer -- BSD stdio keeps
+# the tail on error and 3.2 has no fpurge -- so every later flush emits them wherever fd 1 then
+# points, and a fork inherits a copy. glibc discards the tail instead. 12-run-timeout.sh uses this
+# as a DOOR, because where the answer is `no` its seven assertions would pass for the reason an
+# empty test passes; 70-sighup.sh's §1c uses it to say which of its greens are evidence about #170
+# and which are only evidence that the teardown behaved. ERRORS.md D16 has the measurements.
+#
+# A SCRIPT FILE AND NOT `bash -c`, and that is the trap D16 records: with a single compound command
+# bash runs it in-process instead of forking, and the answer changes -- a `$( )` that would carry
+# the poison comes back clean. Every caller of this is a script, which is also the launcher's own
+# shape, so the probe has to be one too.
+#
+# WHAT IT MEASURES, in order: fd 1 is closed, so the write fails; the write is a full line through
+# a BUILTIN, because stdout on a tty is line-buffered and `printf X` with no newline may never
+# reach write(2) at all; then the buffer is read back the way the launcher reads it, through a
+# command substitution running a builtin -- the shape of `$(state)`. Nothing may write between
+# those two steps: a `command -v` through a redirect is itself a drain, and inside
+# 12-run-timeout.sh's subject it once made a poisoned run look clean.
+#
+# IT REPORTS WITH /bin/echo, for the same reason that subject does: `printf > FILE` is a builtin
+# with an fd-1 redirection, so the retained bytes would drain into the report and the measurement
+# would eat itself. An external command forks and execve's, so it inherits nothing.
+platform_retains_failed_write() {     # -> yes | no
+    local d out
+    d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-retain.XXXXXX")" || { printf 'no\n'; return 0; }
+    cat > "$d/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -u
+exec 1>&-
+printf 'POISONPOISON\n'
+left="$(printf abc)"; left="${left%abc}"
+/bin/echo "${left:-clean}" > "$REPORT"
+PROBE
+    REPORT="$d/out" bash "$d/probe.sh" 2>/dev/null
+    out="$(cat "$d/out" 2>/dev/null)"
+    rm -rf "$d"
+    # ANY LEFTOVER IS A YES, rather than an exact string match on POISONPOISON: what matters is
+    # that the buffer survived a failed write at all, and a platform that retains a PART of it
+    # poisons a pid read just as thoroughly. An unreadable report reads as `no`, which is the
+    # conservative answer -- it opens no door and skips no assertion.
+    case "$out" in
+        ''|clean) printf 'no\n' ;;
+        *)        printf 'yes\n' ;;
+    esac
+}

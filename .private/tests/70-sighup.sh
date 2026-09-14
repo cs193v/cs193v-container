@@ -405,6 +405,30 @@ Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
         skip "sighup:the-shortcut-probe-had-a-tunnel-to-release" "the probe was not a session leader"
     else
         pass "sighup:the-shortcut-probe-really-is-a-session-leader"
+        # AND WHAT THIS GROUP CAN PROVE ON THIS MACHINE, said in the results file rather than left
+        # to a reader of the comments. MEASURED on Linux: all four assertions below pass with
+        # #170's drains in place AND with the whole of #170 reverted, because the poison is BSD
+        # stdio plus bash 3.2 and glibc discards the unwritten tail. They still assert the
+        # OUTCOME -- in this shape, does a rude close stop the container, release the ports and
+        # kill the master -- which is worth asserting everywhere and can go red for half a dozen
+        # reasons that are not #170. What they are NOT, here, is evidence about the poison.
+        #
+        # A SKIP AND NOT A SILENCE, the rule 12-run-timeout.sh's door states: a platform that
+        # cannot reproduce a condition must say so where it would otherwise bank a vacuous green.
+        # And a skip rather than a hard fail because nothing the operator installs changes a
+        # libc -- lib/wine.sh:36 draws that line for the whole suite.
+        #
+        # THE PROBE IS ASSERTED TO STILL REPRODUCE IN 12-run-timeout.sh, on the bash macOS ships,
+        # and deliberately not a second time here: lib/shared.sh holds one copy of the
+        # measurement, so a probe that quietly stopped working reddens there rather than twice.
+        SL_RETAINS="$(platform_retains_failed_write)"
+        record "sighup:this-platform-retains-a-failed-write" "$SL_RETAINS"
+        if [ "$SL_RETAINS" = yes ]; then
+            pass "sighup:the-shortcut-close-is-evidence-about-170"
+        else
+            skip "sighup:the-shortcut-close-is-evidence-about-170" \
+                 "this platform discards a failed write, so what follows is an outcome check"
+        fi
         # A SERVER IN A TAB, FOR THE FORWARD AND NOT FOR THE SERVER. The master comes up with no
         # -L flags at all and the supervisor adds one per port as something inside starts
         # listening -- so with nothing listening this group forwards nothing, count_forwards is
