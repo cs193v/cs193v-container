@@ -202,15 +202,34 @@ pty_start() {                         # pty_start KEYS CMD... -> sets PTY_OWNER,
     # `else kill -9 "$1"` fallback it replaced is gone. The point of #151's fix is a pid channel
     # guaranteed by the interface rather than remembered at each site, so the interface guarantees
     # it. 10-static.sh asserts this line is still here.
-    cmd="'$PT_LIB/pty-announce'"
-    # EVERY INTERPOLATED ARGUMENT SINGLE-QUOTED (#141). This string is parsed a SECOND time, by
-    # the `/bin/sh -c` inside ptyrun.py, so an unquoted path containing a space word-splits there.
-    # Measured: an unquoted $REPO with a space dies with `/bin/sh: /.../Keith: No such file or
-    # directory`, and that was true of all three of these call sites as they stood. Not exotic --
-    # WSL's interop.appendWindowsPath is on by default and a spacey $HOME is ordinary.
-    for a in "$@"; do cmd="$cmd '$a'"; done
+    # TWO SHAPES, AND WHICH ONE IS ASKED FOR DECIDES HOW THE COMMAND TRAVELS. See lib/ptyrun.py's
+    # header for why the shell-free one exists: a shell in the pty owns the session, and whether
+    # it steps aside is the host's decision (#151), so a caller that needs the command to BE the
+    # session leader cannot get there through a string.
+    if [ "${CS193V_PTY_NOSHELL:-}" = 1 ]; then
+        # ARGV, AND THEREFORE NOT QUOTED. The #141 rule below is INAPPLICABLE here rather than
+        # relaxed: nothing re-parses this, so a quote added for symmetry becomes a literal byte of
+        # argv[0] and the exec answers ENOENT. 10-static.sh counts both spellings for that reason.
+        # The wrapper is still prepended -- the pid channel is guaranteed by the INTERFACE in both
+        # shapes, which is the whole of #151's fix, and mutation-tested: without it here the two
+        # leader arms and both announce arms in 14-test-harness.sh go red together. pty-announce's
+        # `exec "$@"` is a shell exec, so a bare `sleep` is still PATH-searched.
+        set -- "$PT_LIB/pty-announce" "$@"
+    else
+        cmd="'$PT_LIB/pty-announce'"
+        # EVERY INTERPOLATED ARGUMENT SINGLE-QUOTED (#141). This string is parsed a SECOND time, by
+        # the `/bin/sh -c` inside ptyrun.py, so an unquoted path containing a space word-splits there.
+        # Measured: an unquoted $REPO with a space dies with `/bin/sh: /.../Keith: No such file or
+        # directory`, and that was true of all three of these call sites as they stood. Not exotic --
+        # WSL's interop.appendWindowsPath is on by default and a spacey $HOME is ordinary.
+        for a in "$@"; do cmd="$cmd '$a'"; done
+        set -- "$cmd"
+    fi
+    # ONE BACKGROUNDED INVOCATION FOR BOTH SHAPES, so the pidfile, the keystroke feed and $! -- the
+    # three things every caller of this function depends on -- cannot drift between them. `set --`
+    # rather than an array because this file holds itself to bash 3.2 (10-static.sh:422).
     CS193V_PTY_PIDFILE="$PTY_PIDFILE" \
-        "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_FEED" &
+        "$DO_PY" "$PT_LIB/ptyrun.py" "$@" < "$PTY_FEED" &
     PTY_OWNER=$!
 }
 

@@ -447,6 +447,23 @@ if [ -n "${CS193V_PTY_SHELL:-}" ]; then
     printf '%s\n' "-------------------------------------------------------------------"
 fi
 
+# AND THE KNOB THAT MAKES THAT ONE INERT, announced for the same reason and rather more urgently.
+# CS193V_PTY_NOSHELL is a per-call-site shape knob -- two suites set it around one launch each --
+# and set for a whole RUN it removes the shell from every pty, so CS193V_PTY_SHELL stops meaning
+# anything, lib/sh-fake cannot interpose, and the callers that hand ptyrun a shell command STRING
+# (`test -t 0 && echo ISTTY`, `podman exec -it NAME sh -c '...'`) exec a path that does not exist.
+# 14-test-harness.sh's two interposition controls are what turn that red rather than quiet; this is
+# what tells a reader why, before they read 40 failures as a regression.
+if [ "${CS193V_PTY_NOSHELL:-}" = 1 ]; then
+    printf '%spty shell%s\n' "$C_BOLD" "$C_OFF"
+    printf '  %-13s %s\n' shell 'none -- CS193V_PTY_NOSHELL=1 is set for this whole run'
+    printf '  %-13s %s\n' means \
+           'every pty execs its argv, so CS193V_PTY_SHELL is inert and string callers fail (#151)'
+    printf '  %-13s %s\n' 'meant for' \
+           'one call site at a time: 70-sighup.sh §1c and 12-run-timeout.sh, which set it themselves'
+    printf '%s\n' "-------------------------------------------------------------------"
+fi
+
 # ─── ...and part three: say what this is, then build what it needs ─────────────
 # SAID, NOT ASKED. A prompt would break the one thing #160 wanted -- "I just run that one
 # command and everything goes" -- but this flag deletes the volumes five logins live in and
