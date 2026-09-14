@@ -114,7 +114,14 @@ launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_P
     # interposes (#151): green here, wrong on Ubuntu. Job mode gives the pty a leader that is not
     # in the job's group -- which is also, for the first time, the shape a student's terminal
     # builds: a login shell that stays, and the launcher as a foreground job beneath it.
-    CS193V_PTY_JOB=1 pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    # EXPORT AND UNSET, NOT A PREFIX ON pty_start. 14-test-harness.sh:1695 records that bash leaves
+    # an assignment prefixed to a FUNCTION call set after the function returns -- on some builds,
+    # measured, and not on others -- so the prefix form would hand job mode to §1c below, on a Mac
+    # and not on Linux, and §1c would measure this group a second time without saying so. ptyrun
+    # refuses NOSHELL together with JOB, so a leak is now loud; this is what makes it impossible.
+    export CS193V_PTY_JOB=1
+    pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    unset CS193V_PTY_JOB
     PTY_PID="$PTY_OWNER"
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }

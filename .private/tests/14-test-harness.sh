@@ -974,17 +974,22 @@ assert_eq "ptyrun:an-unannounced-pid-yields-nothing-to-kill" "" \
 # shape of every pty BELOW this group, on a Mac and not here, which is the worst way for it to be
 # wrong. 12-run-timeout.sh's rtp_pty is the form copied.
 #
-# AND CS193V_PTY_SHELL IS PUT BACK RATHER THAN UNSET, for the reason ARM 1 pins it above: a
+# AND BOTH KNOBS ARE PUT BACK RATHER THAN UNSET, for the reason ARM 1 pins its shell above: a
 # whole-lane interposing run (run-tests.sh:437) is how #151's reported configuration is
-# reproduced, and a group that quietly cleared it would change what every pty after it measures.
+# reproduced, and a group that quietly cleared either knob would change what every pty after it
+# measures. Measured with CS193V_PTY_NOSHELL=1 set for a whole run -- which is not a supported
+# configuration and is announced as unsupported -- an earlier draft of this helper cleared it on
+# the way out, so the groups below it silently went back to being correct while the run as a whole
+# was not: three failures where the honest answer is "this configuration voids lib/sh-fake".
 NL_OWNER=''; NL_INNER=''; NL_IS=''
 nl_start() {                          # nl_start [SHELL] -> sets NL_OWNER, NL_INNER, NL_IS
-    local had=no saved=''
-    [ -n "${CS193V_PTY_SHELL+set}" ] && { had=yes; saved="$CS193V_PTY_SHELL"; }
+    local had=no saved='' hadn=no savedn=''
+    [ -n "${CS193V_PTY_SHELL+set}" ]   && { had=yes;  saved="$CS193V_PTY_SHELL"; }
+    [ -n "${CS193V_PTY_NOSHELL+set}" ] && { hadn=yes; savedn="$CS193V_PTY_NOSHELL"; }
     export CS193V_PTY_NOSHELL=1
     if [ -n "${1:-}" ]; then export CS193V_PTY_SHELL="$1"; else unset CS193V_PTY_SHELL; fi
     pty_start 'x\n' sleep 30 >/dev/null 2>&1
-    unset CS193V_PTY_NOSHELL
+    if [ "$hadn" = yes ]; then export CS193V_PTY_NOSHELL="$savedn"; else unset CS193V_PTY_NOSHELL; fi
     if [ "$had" = yes ]; then export CS193V_PTY_SHELL="$saved"; else unset CS193V_PTY_SHELL; fi
     NL_OWNER="$PTY_OWNER"
     NL_INNER="$(pty_inner_pid)" || NL_INNER=''
@@ -1026,7 +1031,15 @@ pty_stop "$NL_INNER"
 # interposes, so `no` here is platform-independent.
 # NO OWNER VARIABLE HERE, unlike the arms above: pty_stop reads $PTY_OWNER itself, and the
 # owner-is-distinct property is arm 1's assertion rather than this control's business.
+#
+# THE KNOB IS PINNED OFF, not assumed absent, which is ARM 1's rule applied to the thing under
+# test: with CS193V_PTY_NOSHELL set for a whole run this control would otherwise take the argv
+# path and report `yes` -- a control measuring the configuration instead of the mechanism. Empty
+# rather than unset, and through export, because a prefix on pty_start is banned for the shape
+# knobs (10-static.sh) and for the reason :1695 records.
+export CS193V_PTY_NOSHELL=''
 CS193V_PTY_SHELL="$PT_LIB/sh-fake" pty_start 'x\n' sleep 30 >/dev/null 2>&1
+unset CS193V_PTY_NOSHELL
 NL_C_INNER="$(pty_inner_pid)" || NL_C_INNER=''
 wait_until 10 pr_is_cmd "$NL_C_INNER" || true
 assert_eq "ptyrun:with-a-shell-the-command-is-not-the-session-leader" "no" \
@@ -1115,8 +1128,15 @@ EOS
 PC_REPORT=''; PC_INNER=''
 pc_close() {                          # pc_close usr1|kill9 SHELL -> sets PC_REPORT, PC_INNER
     rm -f "$WORK/pc.out" "$WORK/pc.out.up"
-    CS193V_PTY_JOB=1 CS193V_PTY_SHELL="$2" pty_start 'x\n' \
+    # EXPORT AND UNSET FOR THE SHAPE KNOB, not a prefix: :1695's rule applies to pty_start as much
+    # as to gate_run, and since ptyrun now refuses CS193V_PTY_JOB alongside CS193V_PTY_NOSHELL, a
+    # leak out of here would be a refusal somewhere below rather than a quiet shape change.
+    # CS193V_PTY_SHELL stays a prefix: it selects a fixture rather than a tree shape, and every
+    # arm that cares about it pins it (:893).
+    export CS193V_PTY_JOB=1
+    CS193V_PTY_SHELL="$2" pty_start 'x\n' \
         sh "$WORK/politeclose.sh" "$WORK/pc.out" >"$WORK/pc.log" 2>&1
+    unset CS193V_PTY_JOB
     PC_OWNER="$PTY_OWNER"
     PC_INNER="$(pty_inner_pid)" || PC_INNER=''
     wait_until 15 sh -c "[ -f '$WORK/pc.out.up' ]" || true

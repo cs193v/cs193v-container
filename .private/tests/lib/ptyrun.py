@@ -95,6 +95,39 @@ shell and the job is in a DIFFERENT process group. So in job mode this file buil
 leader forks the command into its own process group, makes it the foreground one, and stays.
 _close_politely then signals the job and not the leader, nothing is revoked, and the command's
 teardown writes succeed -- measured 3/3 under an interposing shell and 3/3 without one.
+
+CS193V_PTY_NOSHELL=1 IS JOB MODE'S COMPLEMENT, and the reason it exists is the paragraph on `sh -c`
+above read the other way round. Job mode puts a leader ABOVE the command; this puts the COMMAND in
+that place, which is the shape an OS-native launch shortcut makes -- "run this command instead of a
+shell", so no login shell exists to be the leader (#134) -- and the only shape in which #170's
+retained stdout buffer changes an outcome. The command arrives as ARGV and is exec'd here, so no
+shell is consulted, and the session leader pty.fork() has already made is the command itself.
+
+WITHOUT IT THE SHAPE IS THE HOST'S TO DECIDE, WHICH IS TO SAY IT IS NOT AVAILABLE. Add to the
+matrix above: dash 0.5.12-12ubuntu3 INTERPOSES for every shape measured, including a single simple
+command with no redirection, so on Ubuntu the pty's session leader is `sh` and the command is its
+child. bash 5.3 and busybox sh replace; `sh -c "exec CMD"` replaces under dash too.
+
+TWO CHEAPER CANDIDATES, MEASURED AND REJECTED, because the next reader will think of both. An
+`exec ` prefix on the command string makes dash replace itself and turns every suite green
+(70-sighup 31/0, 14-test-harness 261/0, 12-run-timeout 55/0, 60-container 133/0, static 607/0) --
+but lib/sh-fake forks BEFORE any shell reads the string, so the one fixture that can PROVE the
+property cannot, and #151's rule is that the condition is injected rather than borrowed.
+CS193V_PTY_SHELL=/bin/bash is also green here and is also the host's shell by another name.
+
+CS193V_PTY_SHELL IS IGNORED IN THIS MODE, NOT REFUSED, and that is the assertable property rather
+than an oversight: 14-test-harness.sh names lib/sh-fake and still demands pid == sid, which is
+what says the shape is this file's guarantee. It also keeps a whole-lane interposing run
+(run-tests.sh) from taking §1c's shape away -- the configuration #151 was reported from must stay
+runnable.
+
+AND A POLITE CLOSE IN THIS MODE IS NOT POLITE. _close_politely signals tcgetpgrp(master), which
+here IS the command: its exit then revokes the terminal for the session, the rude outcome by the
+polite route. Both callers close rudely on purpose; anyone reaching for kill -USR1 with this knob
+set is running a different experiment under the same assertion names.
+
+CS193V_PTY_JOB TOGETHER WITH THIS IS REFUSED, in main, before the fork. See there for what the
+unrefused pair was measured to do.
 """
 
 import fcntl
@@ -291,15 +324,32 @@ def _be_the_leader(shell, cmd):
 
 def main(argv):
     if len(argv) < 2:
-        sys.stderr.write("usage: ptyrun.py COMMAND\n")
+        sys.stderr.write("usage: ptyrun.py COMMAND                     (a shell command STRING)\n"
+                         "       CS193V_PTY_NOSHELL=1 ptyrun.py ARGV...  (no shell: argv as it stands)\n")
         return 2
     cmd = argv[1]
+    cmdv = argv[1:]
 
     rows = os.environ.get("CS193V_PTY_ROWS")
     cols = os.environ.get("CS193V_PTY_COLS")
     shell = os.environ.get("CS193V_PTY_SHELL") or "/bin/sh"
 
     job = os.environ.get("CS193V_PTY_JOB") == "1"
+    noshell = os.environ.get("CS193V_PTY_NOSHELL") == "1"
+
+    # THE TWO SHAPE KNOBS ARE COMPLEMENTS, NOT OPTIONS, so asking for both is asking for two
+    # different experiments: job mode puts a leader ABOVE the command, shell-free mode puts the
+    # command in that place. REFUSED HERE, BEFORE THE FORK, because after it the refusal would
+    # already have built a session leader and a master for somebody else to clean up -- and
+    # measured with the pair half-wired (this change's own prototype), what the caller gets
+    # instead is the silent failure: the command runs, NOTHING announces a pid, pty_inner_pid
+    # burns its ceiling, and every guard downstream reports the instrument rather than the shape.
+    # 10-static.sh pins this above the fork; 14-test-harness.sh asserts the rc and the message.
+    if noshell and job:
+        sys.stderr.write("ptyrun: CS193V_PTY_NOSHELL and CS193V_PTY_JOB ask for opposite shapes"
+                         " -- the command AS the pty's session leader, and a leader above it."
+                         " Set one.\n")
+        return 2
 
     pid, master = pty.fork()
     if pid == 0:
@@ -313,10 +363,10 @@ def main(argv):
         # (251 pass 6 fail, 195s against 62s), and job mode's leader could not die when the master
         # closed -- the leak _be_the_leader's docstring already says must not happen.
         #
-        # FIRST, AND BEFORE THE job BRANCH, because it has to cover all three shapes: the leader,
-        # the job it forks, and the plain execv below. Measured: after the branch it is dead code
-        # in job mode (_be_the_leader never returns), and inside the job alone it arms the
-        # subject's trap while leaving the leader unkillable.
+        # FIRST, AND BEFORE EVERY BRANCH BELOW, because it has to cover all four shapes: the
+        # leader, the job it forks, the shell-free execvp and the plain execv. Measured: after the
+        # branch it is dead code in job mode (_be_the_leader never returns), and inside the job
+        # alone it arms the subject's trap while leaving the leader unkillable.
         #
         # SIGHUP ONLY. bash also hands every backgrounded command an ignored SIGINT and SIGQUIT,
         # which is a real and separate defect -- 30-launcher-shim.sh:534 documents working around
@@ -327,6 +377,25 @@ def main(argv):
         # terminal. WHETHER A SHELL SURVIVES BELOW THIS POINT IS NOT THIS FILE'S CLAIM TO MAKE --
         # see the header, and lib/pty-announce for how a caller that needs the command's pid gets
         # it.
+        # SHELL-FREE: THIS PROCESS BECOMES THE COMMAND, so the session leader pty.fork() has
+        # already made IS the command -- on every host, whatever its /bin/sh does. See the header
+        # for why that cannot be had through a shell, and for the two cheaper candidates measured
+        # and rejected.
+        #
+        # execvp AND NOT execv, because lib/pty-announce ends in `exec "$@"`, which is a shell
+        # exec and therefore PATH-searches: an execv here would resolve `sleep 30` through
+        # pty_start and refuse the same command from a direct call, which is two entry points
+        # disagreeing about what a command is. The shell path below keeps execv --
+        # CS193V_PTY_SHELL is a path by definition, and widening it would change what that
+        # fixture knob can name.
+        if noshell:
+            try:
+                os.execvp(cmdv[0], cmdv)
+            except OSError as exc:
+                # LOUD, for the reason the shell arm below records: rc 127 with an empty
+                # transcript is the shape ~125 negative assertions pass against.
+                os.write(2, ("ptyrun: cannot exec %s: %s\r\n" % (cmdv[0], exc)).encode())
+            os._exit(127)
         if job:
             _be_the_leader(shell, cmd)      # never returns
         try:

@@ -704,9 +704,14 @@ assert_contains "ptyrun:has-a-shell-free-path"           'CS193V_PTY_NOSHELL' "$
 # leader ABOVE the command, this puts the command in that place -- and after the fork a refusal
 # would already have built a session leader and a master for somebody else to clean up. The
 # behaviour is asserted in 14-test-harness.sh; the PLACEMENT is what only this can see.
+# THE WHOLE STATEMENT AS THE NEEDLE, not `pty.fork()`, and this is not fussiness: $ptyrun_src is
+# stripped of the MODULE docstring and of `#` comments, but python's per-function docstrings are
+# neither -- and _close_politely's says "pty.fork() makes the child a session leader", forty lines
+# above the call. Measured: the loose needle put the fork at line 87 and reported this gate red
+# against correct code, which is a check accusing the wrong thing rather than failing to check.
 ptyrun_code="$(printf '%s\n' "$ptyrun_src" | sed 's/^[[:space:]]*#.*//')"
 pn_at() { printf '%s\n' "$ptyrun_code" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
-pn_ref="$(pn_at 'if noshell and job:')"; pn_fork="$(pn_at 'pty.fork()')"
+pn_ref="$(pn_at 'if noshell and job:')"; pn_fork="$(pn_at 'pid, master = pty.fork()')"
 if [ -n "$pn_ref" ] && [ -n "$pn_fork" ] && [ "$pn_ref" -lt "$pn_fork" ]; then
     pass "ptyrun:the-two-shapes-refuse-each-other-before-the-fork"
 else
@@ -735,13 +740,25 @@ knob_prefix="$(grep -rnE '(CS193V_PTY_JOB|CS193V_PTY_NOSHELL)=[^ ]* +(CS193V_PTY
                | grep -vE ':[[:space:]]*#' | grep -v '/10-static\.sh:' || true)"
 assert_eq "pty-knobs:no-shape-knob-is-prefixed-onto-pty_start" "" "$knob_prefix"
 # AND THE POSITIVE HALF, which is what stops that ban going vacuous the day a knob is renamed:
-# every file that asks for a shape exports it and unsets it the same number of times. DERIVED
-# rather than listed, so a third consumer is covered the day it arrives.
+# a file that turns a shape knob ON also turns it off somewhere. DERIVED rather than listed, so a
+# third consumer is covered the day it arrives.
 #
-# `export .*KNOB=` AND NOT `export KNOB`, because the knob is not always the first name on the
+# NOT A COUNT OF export AGAINST unset, which is what this was first written as and what it cannot
+# be. The leak-proof idiom SAVES the knob and puts it back (14-test-harness.sh's nl_start, because
+# a whole-lane run may have set it), so one launch legitimately spells three exports and two
+# unsets -- measured, and it reported `expected 3 actual 2` against code that is exactly right. A
+# count would therefore have to be maintained per site, which is a gate that says nothing and
+# breaks on every edit.
+#
+# SO THIS IS THE WEAK HALF ON PURPOSE, and what carries the invariant is elsewhere: ptyrun now
+# REFUSES the two shape knobs together, so a leak is a message and an rc 2 rather than a silent
+# shape change, and 70-sighup.sh's §1c guard asks the kernel what it actually got. This catches
+# the one thing a grep can honestly catch -- a knob turned on and never turned off at all.
+#
+# `export .*KNOB=1` AND NOT `export KNOB`, because the knob is not always the first name on the
 # line: 12-run-timeout.sh's rtp_pty exports it alongside four RTP_ variables, and a needle
-# anchored on `export KNOB` would not list that file at all -- a ban that covers none of the
-# sites it is written for, which is #165's whole shape.
+# anchored on `export KNOB` would list neither that file nor any future one -- a ban covering none
+# of the sites it is written for, which is #165's whole shape.
 #
 # READ RATHER THAN WORD-SPLIT: a path with a space in it is ordinary (#141), and splitting the
 # file list on whitespace is how that becomes two paths that do not exist. The loop runs in a
@@ -749,12 +766,17 @@ assert_eq "pty-knobs:no-shape-knob-is-prefixed-onto-pty_start" "" "$knob_prefix"
 # $CS193V_RESULTS rather than any shell state -- _emit's comment says so. Do not add a `local`
 # tally to it.
 for knob in CS193V_PTY_JOB CS193V_PTY_NOSHELL; do
-    grep -rlE "export .*$knob=" "$PRIVATE/tests" --include='*.sh' \
-        | grep -v '/10-static\.sh$' | LC_ALL=C sort | while IFS= read -r kf; do
+    knob_on="$(grep -rlE "export .*$knob=1" "$PRIVATE/tests" --include='*.sh' \
+               | grep -v '/10-static\.sh$' | LC_ALL=C sort)"
+    # A FOUND-GUARD, because a rename would otherwise empty the list and assert nothing at all --
+    # the shape the neighbouring drain gates carry one of for the same reason.
+    if [ -n "$knob_on" ]; then pass "pty-knobs:$knob-has-a-caller-that-turns-it-on"
+    else fail "pty-knobs:$knob-has-a-caller-that-turns-it-on" \
+              "nothing under tests/ exports $knob=1, so every check below it measures nothing"; fi
+    printf '%s\n' "$knob_on" | while IFS= read -r kf; do
         [ -n "$kf" ] || continue
-        assert_eq "pty-knobs:$(basename "$kf" .sh)-pairs-its-$knob-export-with-an-unset" \
-                  "$(grep -cE "export .*$knob=" "$kf" || true)" \
-                  "$(grep -cE "unset .*$knob" "$kf" || true)"
+        assert_match "pty-knobs:$(basename "$kf" .sh)-turns-$knob-off-again" \
+                     "unset .*$knob" "$(cat "$kf")"
     done
 done
 
