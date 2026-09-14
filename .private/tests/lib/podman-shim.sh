@@ -482,11 +482,12 @@ EOF
 # that the tunnel failed. That is realistic and worth keeping for every other test here,
 # but it means the quiet path cannot be reached at all without this.
 #
-# It answers `-O check` and `-O exit` directly, and for the master it creates the control
+# It answers all four control verbs the launcher can send -- `-O check`, `-O exit`,
+# `-O forward` and `-O cancel` -- directly, and for the master it creates the control
 # socket the launcher tests for with `[ -S ]`. python3 because a unix socket cannot be made
 # from the shell; the file survives the process, so the socket does not need holding open.
 #
-# TWO THINGS HERE MODEL ssh FEATURES THE LAUNCHER DEPENDS ON, so they have to keep matching
+# THREE THINGS HERE MODEL ssh FEATURES THE LAUNCHER DEPENDS ON, so they have to keep matching
 # ssh(1) rather than matching the launcher:
 #
 #   * -f MUST RETURN. Real ssh forks after authenticating and setting its forwarding up, and
@@ -499,17 +500,42 @@ EOF
 #     pidfile out of exactly that. A fake that only exited 0 would send it to its `ps` fallback,
 #     which finds nothing here because no fake process carries the control socket on its
 #     command line — so doctor would report "up (pid ?)" for a tunnel it can see.
+#   * -O forward AND -O cancel ARE MESSAGES TO A MASTER, and answering them costs nothing on
+#     purpose. A real master binds the host port and never contacts the container -- `-L` is
+#     local, which is the whole of README's "a dead transport is invisible for ~45 s" -- so
+#     exiting 0 and touching nothing is what ssh does, minus the bind. Before this arm they
+#     fell through to the master branch below, which tried to bind a control socket that
+#     already existed and then slept: tunnel_dyn_forward burned run_timeout's five seconds per
+#     port and read the rc 124 as master-unresponsive, and sup_tick returned before it
+#     published anything at all (#251).
+#     THEY ARE ALSO THE ONLY ssh CALLS THAT LEAVE NO OTHER TRACE -- nothing binds, nothing
+#     listens, argv.log only ever sees podman -- which is what ssh.log is for. TWO THINGS IT
+#     CANNOT DO, and a case written later must not assume otherwise: it cannot REFUSE (no host
+#     port is bound, so tunnel_dyn_forward can never return 1 from it and the SUP_BUSY cooldown
+#     is unreachable here), and it answers for ANY direction, including -R and an off-box -L,
+#     which a real sshd refuses and 80-launcher-live.sh asserts are refused.
 shim_fake_ssh() {
     # TRUNCATED HERE, not in shim_new, which installs no ssh. NOT because a previous case
     # could be read -- shim_new mktemp -d's a fresh directory, so its log is somewhere else
     # entirely -- but because a second shim_fake_ssh inside ONE shim would otherwise leave the
     # first arrangement's forwards in place.
     : > "$SHIM/ssh.log"
-    cat > "$SHIM/ssh" <<'EOF'
-#!/bin/sh
+    # TWO WRITES, AND THE FIRST ONE IS INTERPOLATED. The body must NOT be expanded -- it is
+    # made of $*, $@ and $$ -- but the log path must be, so it is written ahead of the quoted
+    # heredoc. shim_fake_pkgutil interpolates its state for the same reason.
+    #
+    # NOT `${CS193V_SHIM:?...}` READ AT RUN TIME, which looks like podman-fake's loud guard and
+    # is not one here: an unset variable exits this script 1, tunnel_dyn_forward reads past its
+    # 0 and 124 arms, re-tests `[ -S ]` successfully and returns 1 -- "the host port is busy".
+    # The port then gets a cooldown and publishes `refused=PORT:busy`, and the diagnostic dies
+    # in the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
+    printf '#!/bin/sh\nSSHLOG=%s\n' "$SHIM/ssh.log" > "$SHIM/ssh"
+    cat >> "$SHIM/ssh" <<'EOF'
 case " $* " in
     *" -O check "*) echo "Master running (pid=$$)" >&2; exit 0 ;;
     *" -O exit "*)  exit 0 ;;
+    *" -O forward "*|*" -O cancel "*)
+        printf '%s\n' "$*" >> "$SSHLOG"; exit 0 ;;
 esac
 ctl=''; prev=''; fork=no
 for a in "$@"; do

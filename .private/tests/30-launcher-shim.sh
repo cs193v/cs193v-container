@@ -2389,9 +2389,11 @@ assert_eq "doctor:asks-podman-info-no-more-often-than-before" "2" "$(shim_count 
 # process tree (10-static.sh bans pgrep -P); its stderr is a file we name rather than a log
 # under a hashed TUNNEL_ID; and there is no nohup'd process left over per scenario.
 #
-# THE PORTS ARE CLASS v6lo ON PURPOSE. tunnel_dyn_classify refuses that class before any ssh
-# is run, so sup_tick still runs end to end and still reaches sup_publish -- which is the
-# observable -- without shim_fake_ssh needing to answer `-O forward`, which it does not.
+# THE PORTS ARE CLASS v6lo ON PURPOSE, and still are now that the fake answers `-O forward`.
+# tunnel_dyn_classify refuses that class before any ssh is run, so sup_tick runs end to end and
+# reaches sup_publish -- which is the observable here -- with no master needed at all. What
+# these cases are about is the GAP, and arranging a control socket to prove it would be one
+# more thing that could go wrong. The section at the end of this file forwards for real.
 sup_pidfile() { launcher --dev-tunnel | do_awk -F'\t' '$1 == "suppid" { print $2 }'; }
 sup_up()      { [ -s "$SUP_PIDFILE" ]; }
 sup_start() {                         # sup_start OUTFILE
