@@ -601,6 +601,27 @@ ptyrun_src="$(sed '1,/^"""$/d' "$PRIVATE/tests/lib/ptyrun.py")"
 assert_not_match "ptyrun-pid:ptyrun-does-not-read-the-process-table" \
                  '(import subprocess|/proc/|pgrep|Popen)' "$ptyrun_src"
 
+# ─── AND EVERY PTY THIS SUITE BUILDS HANDS ITS COMMAND A DEFAULT SIGHUP ───────
+# BOTH FILES, AND STATICALLY, because only one of them can be caught behaving badly.
+# `SIG_IGN` survives fork AND execve and a shell cannot arm a trap for a signal already ignored
+# when it started, so an ancestor that ignores SIGHUP -- `nohup` is the obvious way in -- reaches
+# the command inside the pty and silently un-arms its `trap ... HUP`. That is not hypothetical:
+# with the suite run under `nohup`, 14-test-harness.sh's polite close reported nothing (251 pass
+# 6 fail against 257/0) and 70-sighup.sh's launcher never tore anything down (20 pass 5 fail
+# against 25/0), both for the whole of a working day, and it was read as load three times.
+#
+# 14-test-harness.sh arranges the ignore and asserts the BEHAVIOUR for ptyrun.py, which is the
+# stronger test and the one that would catch a reset that ran in the wrong place. ptydrive.py
+# cannot have that: every caller reaches it through `timeout`, which resets inherited ignores
+# before exec, or across the container boundary, which starts a clean disposition table -- both
+# measured -- so the line there is unreachable by any behavioural test and this is the only thing
+# that can notice it leaving. Which is exactly the shape a silent regression takes.
+for pty_sig_file in ptyrun.py ptydrive.py; do
+    assert_match "pty-sighup:${pty_sig_file%.py}-hands-its-child-a-default-sighup" \
+                 'signal\.signal\(signal\.SIGHUP, signal\.SIG_DFL\)' \
+                 "$(cat "$PRIVATE/tests/lib/$pty_sig_file")"
+done
+
 # AND ptydrive.py STAYS OFF stdout AND stderr. lib/setup-git-shim.sh's sg_run ends `2>&1`, so that
 # process's stderr IS the transcript under test: one line of ours in it would be read by every
 # assertion in 35-setup-git-shim.sh, counted by its 80-column row lint, and searched for the
