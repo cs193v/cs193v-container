@@ -2512,3 +2512,111 @@ assert_says "supervisor:it-names-the-silence-it-measured" "no frames for 30s" "$
 assert_says "supervisor:it-says-the-watcher-has-stopped" "the watcher has stopped" "$SILENT_OUT"
 assert_ok  "supervisor:it-publishes-broken-on-the-way-out" sup_published 'state=broken'
 sup_reap
+
+# ─── and a port that CAN be forwarded actually is  (#251) ──────────────────────
+# WHAT THE SECTION ABOVE CANNOT DO, AND SAYS SO. Its ports are class v6lo, which
+# tunnel_dyn_classify refuses before any ssh runs -- so no case here had ever reached
+# tunnel_dyn_forward, and the fake answered neither `-O forward` nor `-O cancel`. A forward
+# that tried fell through to the fake's master branch, bound a control socket that already
+# existed, slept, and came back as run_timeout's rc 124 -> master-unresponsive, with sup_tick
+# returning BEFORE sup_publish. Class `lo` is the one the supervisor forwards, so this is the
+# first case in the tier that asks the master for a port at all.
+#
+# THE FORWARD IS THE OBSERVABLE, NOT THE PUBLISH. A forward is a message to a master: nothing
+# binds, nothing listens, and argv.log only ever sees podman. ssh.log is the only place it can
+# be seen, and the publish that follows says only what the supervisor CONCLUDED. Both are
+# asserted, the ssh first.
+sup_asked() { grep -qF -- "$1" "$SHIM/ssh.log" 2>/dev/null; }
+# The `up=` side of every publish, in order. Read as a SEQUENCE rather than searched, because
+# `up= refused=` on its own is published in the broken state too -- see below.
+sup_publishes() { grep -F -- 'cs193v-portwatch --publish' "$SHIM/argv.log" 2>/dev/null; }
+
+shim_new
+shim_fake_ssh
+# ONE --dev-tunnel, not one per field: it is a launcher fork and it prints both.
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+# THE VACUITY GUARD FOR EVERYTHING BELOW, and it carries a detail because it is thin ice twice
+# over. The fake SWALLOWS python's bind failure and exits 0 regardless, so `[ -S ]` is the only
+# thing that can tell; and the path is 102 bytes on a stock Mac against an AF_UNIX cap of about
+# 104, so a longer TMPDIR or instance name is a real way for this to go red. Saying which is
+# the difference between "the path got too long" and "the fake is broken".
+if [ -S "$CTL" ]; then
+    pass "forward:a-master-left-a-control-socket"
+else
+    fail "forward:a-master-left-a-control-socket" \
+"the fake ssh left no control socket, so tunnel_dyn_forward would return 2 without
+running ssh at all and nothing below would have been tried.
+  path:   $CTL
+  length: ${#CTL} bytes (macOS refuses an AF_UNIX path over about 104)"
+fi
+
+# EIGHT EMPTY FRAMES, AND THE MARGIN IS THE POINT. TUNNEL_SUP_LINGER counts FRAMES, not
+# seconds, and the fake writes its staged lines as fast as they are read -- so the whole
+# scenario, cancel included, costs under a second of wall clock and needs no sleep. Measured:
+# four empty frames leave the port up and five cancel it, five being TUNNEL_SUP_LINGER exactly.
+# Staging five would make this a test of that constant's VALUE, so raising it would red the
+# cancel case as a bare timeout; eight keeps the assertion on the behaviour. The trailing STALL
+# holds the stream open, so a verdict below cannot be blamed on the watcher having closed it.
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '3000:lo' 'END' \
+           'BEGIN 0' 'END' 'BEGIN 0' 'END' 'BEGIN 0' 'END' 'BEGIN 0' 'END' \
+           'BEGIN 0' 'END' 'BEGIN 0' 'END' 'BEGIN 0' 'END' 'BEGIN 0' 'END' \
+           'STALL 25'
+sup_start "$SHIM/sup-fwd.out"
+assert_ok "forward:the-loop-started" wait_until 10 sup_up
+
+if wait_until 15 sup_asked '-O forward -L 127.0.0.1:3000:127.0.0.1:3000'; then
+    pass "forward:the-master-was-asked-to-open-the-port"
+else
+    fail "forward:the-master-was-asked-to-open-the-port" \
+"the supervisor never sent -O forward for a class-lo port (#251).
+ssh.log:
+$(shim_ssh_log)
+its output:
+$(cat "$SHIM/sup-fwd.out" 2>/dev/null)"
+fi
+assert_ok "forward:the-port-is-published-as-up" wait_until 15 sup_published 'up=3000:lo'
+
+# ...AND THE PORT IS GIVEN BACK. `-O cancel` is the other verb the fake answers, and ssh.log is
+# the ONLY place it can be seen: tunnel_dyn_cancel ends in `|| true` and drops the port from
+# SUP_UP whatever ssh said, so the publish below is identical against a fake that answers the
+# cancel and one that times out on it. This assertion is the whole of the cancel arm's cover.
+if wait_until 15 sup_asked '-O cancel -L 127.0.0.1:3000:127.0.0.1:3000'; then
+    pass "forward:a-vanished-port-is-cancelled-after-the-linger"
+else
+    fail "forward:a-vanished-port-is-cancelled-after-the-linger" \
+"the port left the frames for longer than TUNNEL_SUP_LINGER and the master was never
+asked to close it.
+ssh.log:
+$(shim_ssh_log)"
+fi
+
+# THE WITHDRAWAL, READ AS A SEQUENCE. `sup_published 'up= refused='` was the obvious spelling
+# and it is VACUOUS: with the forward broken nothing ever enters SUP_UP, the empty frames reset
+# the state to healthy, and the supervisor publishes `up= refused=` once anyway -- so the
+# needle matches a port that was never forwarded. Measured: green against the bug. Publishing
+# is on change, so the pair plus the count is what distinguishes the two.
+# A GATE, DELIBERATELY NOT A CASE. It only lets the withdrawal land before the three
+# assertions below read the log. Named as a case it would be one that PASSES against the bug --
+# `up= refused=` is published there too, by a supervisor that never forwarded anything -- and a
+# green case that cannot fail is worse than no case at all.
+wait_until 15 sup_published 'up= refused=' || true
+assert_eq "forward:exactly-two-publishes-a-forward-and-a-withdrawal" "2" \
+          "$(sup_publishes | wc -l | do_tr -d ' ')"
+assert_contains "forward:the-first-publish-carried-the-port" 'up=3000:lo refused=' \
+                "$(sup_publishes | head -1)"
+# CANNOT FAIL ON ITS OWN, and is kept for what it says rather than what it catches: it is the
+# second half of the pair above, and the two together are what make the withdrawal readable.
+assert_contains "forward:the-last-publish-carried-nothing" 'up= refused=' \
+                "$(sup_publishes | tail -1)"
+
+# LAST, AFTER EVERY WAIT, because it is an absence and nothing anchors it but the positives
+# above. Run earlier it would be asking whether a forward that is still in flight has failed
+# yet. This is the assertion that names the bug: an unanswered -O forward turns a healthy
+# forward into run_timeout's ceiling, and rc 124 into master-unresponsive.
+assert_not_contains "forward:a-healthy-forward-is-not-an-unresponsive-master" \
+                    "master not answering" "$(cat "$SHIM/sup-fwd.out" 2>/dev/null)"
+sup_reap

@@ -74,6 +74,10 @@ shim_log()  { cat "$SHIM/argv.log" 2>/dev/null; }
 # What the installer WOULD have run as root, from the most recent installer_host run.
 sudo_log()  { cat "$(cat "$SHIM_LAST" 2>/dev/null)/sudo.log" 2>/dev/null; }
 shim_clear_log() { : > "$SHIM/argv.log"; }
+# What the fake ssh was asked to do with the master's control socket. A separate log because a
+# forward is a MESSAGE and leaves no other trace -- nothing binds, nothing listens, and
+# argv.log only ever sees podman -- so this is the only place a shim case can see one.
+shim_ssh_log() { cat "$SHIM/ssh.log" 2>/dev/null; }
 
 # How many invocations matched an extended regex. Used for "exactly one container was
 # created across twenty launches".
@@ -496,6 +500,11 @@ EOF
 #     which finds nothing here because no fake process carries the control socket on its
 #     command line — so doctor would report "up (pid ?)" for a tunnel it can see.
 shim_fake_ssh() {
+    # TRUNCATED HERE, not in shim_new, which installs no ssh. NOT because a previous case
+    # could be read -- shim_new mktemp -d's a fresh directory, so its log is somewhere else
+    # entirely -- but because a second shim_fake_ssh inside ONE shim would otherwise leave the
+    # first arrangement's forwards in place.
+    : > "$SHIM/ssh.log"
     cat > "$SHIM/ssh" <<'EOF'
 #!/bin/sh
 case " $* " in
@@ -514,6 +523,20 @@ s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)' "$ctl"
 sleep 30
 EOF
     chmod +x "$SHIM/ssh"
+}
+
+# The control socket a master would have left behind, arranged the way tunnel_start arranges
+# one: the fake, with -f, binds it and returns. Nothing here binds it directly, so there is one
+# definition of what a master leaves and it lives in the fake that leaves it.
+#
+# WITHOUT THIS, tunnel_dyn_forward RETURNS 2 BEFORE IT RUNS ssh AT ALL -- its first line is
+# `[ -S "$TUNNEL_CTL" ] || return 2` -- so every forward assertion in a case would pass for
+# want of having been tried. Callers check `[ -S ]` afterwards for exactly that reason.
+#
+# The user@host is inert: the fake reads only -S and -f. It is spelled here rather than read
+# from the launcher because no --dev verb prints it.
+shim_ssh_master() {                   # shim_ssh_master CTL
+    PATH="$SHIM:$PATH" ssh -f -N -M -S "$1" student@cs193v-tunnel </dev/null
 }
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
