@@ -442,6 +442,21 @@ RT_ERR=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
     local tmp fifo eout pid cpid i rc frame lbl pad end line
+    # DRAIN THE STDOUT BUFFER BEFORE THE FIRST FORK, and this is not hygiene (#170). On macOS a
+    # write to fd 1 that FAILS leaves its bytes in bash 3.2's buffer -- BSD stdio keeps the
+    # unwritten tail and 3.2 has no fpurge -- and the buffer is never cleared, so every later
+    # flush emits them wherever fd 1 then points. A fork inherits a COPY, so the fifo branch
+    # below, whose `printf ... >&9` is a builtin, sends the poison down the status pipe ahead of
+    # the child's pid; the numeric guard rejects it, the second read never happens, and rc stays
+    # at the 124 it is seeded with two lines down. Measured: `run_timeout 5 sh -c 'exit 3'`
+    # returns 124 with a poisoned buffer and 3 with this line. Since `pmq stop -t 3 -i` IS this
+    # function, that is a teardown reporting a timeout for a stop that worked.
+    #
+    # A REAL BYTE THROUGH A REDIRECT, and both halves are load-bearing. Measured on bash 3.2.57:
+    # `printf '' >/dev/null` drains NOTHING, because no bytes means no flush; and
+    # `exec 1>/dev/null` drains nothing either, because it writes nothing at all. Only a write
+    # that lands empties the buffer. Do not tidy this into either of them.
+    printf '\n' >/dev/null
     # $$ IN THE NAME so that rt_cleanup can sweep what a signal interrupted. A remembered path
     # cannot: half these calls are made from inside a command substitution, and a variable
     # assigned in that subshell never reaches the parent's trap. See rt_cleanup.
@@ -581,6 +596,16 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         kill -9 "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
     fi
+    # AND AGAIN ON THE WAY OUT, so this function leaves the buffer as it found it. The drain at
+    # the top cannot cover this: the label and the ending row above are written to the SAME dead
+    # terminal, and they re-poison it after it. Nothing here reads that back -- RT_OUT is a bare
+    # `$(cat ...)`, which bash execs directly, so there is no subshell left to flush -- but the
+    # CALLER's next `$(state)` or `$(label_of ...)` is a function, which always forks a subshell
+    # that does. Measured in the shape a #134 shortcut makes, where the controlling terminal is
+    # never revoked so isatty(1) stays true and all five of the tty-only writes above fire: with
+    # only the first drain a labelled call leaves a screenful of spinner frames behind; with this
+    # one it leaves nothing. Same spelling, same reason as above.
+    printf '\n' >/dev/null
     RT_OUT="$(cat "$tmp")"
     # AFTER THE CEILING'S kill, not before: a command killed at $secs has usually said why on
     # its way out, and that line is the most useful one there is. Cleared unconditionally so
@@ -740,6 +765,49 @@ podman_version_of() {                 # podman_version_of TEXT -> the version, o
     v="$(printf '%s' "$1" | sed -n 's/^podman version \([0-9][^ ]*\).*/\1/p' | head -1)"
     [ -n "$v" ] || v="$(printf '%s' "$1" | awk 'NR==1{print $NF}')"
     printf '%s' "$v"
+}
+
+# A PID OUT OF A PIDFILE WITHOUT FORKING, which is #170's other half and not an optimisation.
+# `pid="$(cat "$FILE" 2>/dev/null)"` forks, and a fork inherits a COPY of the stdout buffer that
+# a failed write to a dead terminal leaves poisoned on macOS -- see the drains in run_timeout.
+# The child then flushes its copy into the substitution's pipe, so a file holding `4242` reads
+# back as `4242\nPOISONPOISON`, the numeric guard rejects it as non-decimal, and the reader
+# declines to act: tunnel_kill_pid returns without killing the ssh master, whose 46 host ports
+# stay bound to a container that has gone -- and tunnel_down has already unlinked the only file
+# that named it. Measured, 17 bytes against 4, on a closed fd and on a real hung-up pty alike.
+#
+# THE REDIRECT IS WHAT DOES IT, which is worth knowing before someone "simplifies" this back:
+# a BARE `$(cat "$FILE")` is clean, because bash execs cat directly in the substitution's
+# subshell and leaves nothing behind to flush. Adding `2>/dev/null` is what forces a subshell
+# that survives to flush. So the bug is invisible until the day someone silences an error.
+#
+# `read` IS A BUILTIN: no child, so nothing inherits the buffer. It also takes the FIRST LINE,
+# which is the pid even when something has been appended after it -- a second, independent
+# reason it is the right instrument rather than merely the cheaper one.
+#
+# A GLOBAL, AND IT HAS TO BE ONE. The whole point is that nothing forks, so this may NEVER be
+# called as `$(pidfile_read ...)`: that fork is the bug it exists to avoid, and the assignment
+# would be thrown away with the subshell. Read PIDFILE_PID on the next line. Same contract as
+# MENU_CHOICE and DYNPORTS_PORT.
+#
+# THE NUMERIC GUARD LIVES HERE rather than at each of the four call sites, and it also settles
+# what `read`'s exit status cannot: a pidfile with no trailing newline makes read return 1
+# HAVING ASSIGNED the value, so status and value disagree. The value is the answer -- the rule
+# dynports_read follows and gate:the-read-does-not-trust-the-status-alone pins.
+#
+# BRACES ROUND THE REDIRECT, not `read -r x < "$1" 2>/dev/null`. Redirections are applied left to
+# right, so in that spelling the open is attempted while fd 2 is still the terminal and a missing
+# pidfile prints `No such file or directory` at the student. It is also why this does not copy
+# sup_tick's `[ -r "$F" ] && read`: verb_reset_tunnel unlinks this very file, so a test before
+# the read is a race rather than a guard.
+PIDFILE_PID=''
+pidfile_read() {                      # pidfile_read PATH -> sets PIDFILE_PID; 1 if there is none
+    PIDFILE_PID=''
+    { read -r PIDFILE_PID < "$1"; } 2>/dev/null
+    case "$PIDFILE_PID" in
+        ''|*[!0-9]*) PIDFILE_PID=''; return 1 ;;
+    esac
+    return 0
 }
 
 # ─── host facts: the platform, the podman floors, and finding podman ───────────
