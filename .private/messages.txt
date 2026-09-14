@@ -546,8 +546,19 @@ matches container.args
 [[doctor.config.stale]]
 STALE — run cs193v and accept the recreate prompt
 
-[[doctor.row.workspace]]
-workspace
+# WAS `workspace`, WHICH IS THE ONE WORD IN THIS REPORT A STUDENT COULD NOT ACT ON (#257). The
+# row has always printed the right directory -- read back from podman, so it is the container's
+# state rather than the launcher's intent -- and called it a name out of the container's
+# vocabulary. "your files" is what the student came looking for.
+[[doctor.row.your-files]]
+your files
+
+# HOW TO OPEN THAT FOLDER IS NOT A KEY HERE, and it is the one student-facing launcher string in
+# this project that is not. It is CS193V_OPEN_MACOS / CS193V_OPEN_WINDOWS in
+# files/cs193v-strings.sh, because cs193v-platform-messages --hostpath prints the same two
+# sentences to an agent inside the container, and the container cannot read this file. A copy
+# here would be a second wording of one instruction -- which is what the first draft of #257 had,
+# and the two came out different. See the exception recorded at the top of that file.
 
 [[doctor.row.uid]]
 in-container uid

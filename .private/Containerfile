@@ -853,6 +853,13 @@ RUN set -eux; \
                 || { echo "cs193v-linkbox --frame $g_f is not 10 rows for $g_tok" >&2; exit 1; }; \
         done; \
     done; \
+    for h_os in macos linux wsl other; do \
+        h_out="$(CS193V_HOST_OS="$h_os" CS193V_HOST_PROJECTS=/PUB/p /usr/local/bin/cs193v-platform-messages --hostpath)"; \
+        test "$(printf '%s\n' "$h_out" | head -1)" = /PUB/p \
+            || { echo "cs193v-platform-messages --hostpath does not lead with the path for $h_os" >&2; exit 1; }; \
+    done; \
+    test -n "$(CS193V_HOST_OS=macos /usr/local/bin/cs193v-platform-messages --hostpath)" \
+        || { echo "cs193v-platform-messages --hostpath says nothing when no path was published" >&2; exit 1; }; \
     test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \

@@ -475,19 +475,42 @@ claude -p "Use the Read tool on /home/student/.claude/settings.json and list its
 claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."
 claude -p "Use the Read tool on /home/student/.codex/auth.json."
 claude -p "Run: cat /home/student/.codex/auth.json | head -c 20"
-claude -p "Which port ranges may a dev server use in this container? List them and nothing else."
+claude -p "May a dev server use any port in this container, or only certain ones? Answer in one sentence."
 ```
 *Expect, in order:* refusal; **success** (the deny covers the credential file, not the whole
 directory); refusal (whole subtree denied); refusal (`~/.codex` is denied wholesale, for the
 reason in `managed-settings.json`: OpenAI moves the credential filename, and `history.jsonl` is
 every prompt the student has typed); **success** (Bash is not covered by a `Read(...)` rule, and
 that is the honest limit of these rules rather than a gap — an agent with Bash can read anything
-the student can); the six forwarded ranges from the notes.
+the student can); that **any** port works and the bind address is what matters.
 
-*Also:* the same port-ranges answer proves the SYMLINK works — `/etc/claude-code/CLAUDE.md` is a
-link to `/etc/cs193v/agent-notes.md` now, and nothing in the suite can prove Claude Code follows
-it in the managed slot. Ask codex the same question (`codex exec "Which port ranges may a dev
-server use here?"`) to cover the other end of the same file.
+THE LAST PROMPT WAS "List the six forwarded ranges" UNTIL #257, AND BY THEN IT COULD NOT PASS.
+The notes stopped naming ranges when dynamic forwarding landed (`6af5e53`) and have said "Any
+port works" since, so the expected answer had been describing prose that no longer existed —
+which for the one check that an agent reads the notes at all is the worst place for it to rot.
+Ask about the property the notes actually state, not about a list.
+
+*Also:* the same answer proves the SYMLINK works — `/etc/claude-code/CLAUDE.md` is a link to
+`/etc/cs193v/agent-notes.md`, and nothing in the suite can prove Claude Code follows it in the
+managed slot. Ask codex the same question (`codex exec "May a dev server use any port here, or
+only certain ones?"`) to cover the other end of the same file.
+
+*And the host-path half of the notes (#257), on both agents:*
+```
+claude -p "I want to open the file you just made in Finder/File Explorer. Where is it?"
+codex exec "Where on my own computer is ~/projects? How do I open it?"
+```
+*Expect:* the location given **relative to the projects folder**, plus the host folder and the
+graphical route, both taken from `cs193v-platform-messages --hostpath` rather than invented. Two
+specific failures to watch for, because each is what this change exists to prevent: an answer
+that hands back a `/home/student/projects/...` path as the place to look, and — on Windows only —
+an answer naming the WSL path `/home/student/cs193v/projects` instead of the `\\wsl.localhost\...`
+one. The second is the expensive one: that path does not exist in the container but an agent can
+CREATE it, with no error and no privilege, and the copy dies at the next `--rebuild`.
+*Automated:* the per-platform rendering is `21-host-paths.sh`, the arm that prints it is
+`50-image.sh :: hostpath:*`, and that the launcher forwards it is `30-launcher-shim.sh ::
+print:publishes-the-host-projects-dir` and `60-container.sh :: env:the-host-projects-dir-reaches-the-container`.
+What no machine can judge is whether the agent RUNS it, which is why this prompt is here.
 Also check `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` with no
 "ignored"/"invalid"/"unknown key" warning — a `Write(...)` or `Glob(...)` path rule would be
 accepted and then silently ignored.

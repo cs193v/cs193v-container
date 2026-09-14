@@ -1184,7 +1184,10 @@ export TESTS_DIR PRIVATE REPO
 # tier can use them too. That is why the file has no logic in it.
 # shellcheck source=../../files/cs193v-strings.sh
 [ -r "$PRIVATE/files/cs193v-strings.sh" ] && . "$PRIVATE/files/cs193v-strings.sh"
-export CS193V_TITLE CS193V_WELCOME
+# CS193V_OPEN_* JOIN THE EXPORT LIST since #257: doctor and cs193v-platform-messages
+# --hostpath print the same two sentences, so the suites compare against the definition
+# rather than against a literal in three places.
+export CS193V_TITLE CS193V_WELCOME CS193V_OPEN_MACOS CS193V_OPEN_WINDOWS
 
 # ─── userland portability ──────────────────────────────────────────────────────
 # UNCONDITIONALLY, unlike the strings file above: that one is a convenience and degrades to a

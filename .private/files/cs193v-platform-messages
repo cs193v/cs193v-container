@@ -72,6 +72,12 @@
 # A CLOSED SET OF TOKENS RATHER THAN THE RAW $TERM_PROGRAM, so no string a student controls ever
 # reaches a tmux option or a display-message argument, and there is nothing here to escape.
 #
+# --hostpath IS THE ONE STUDENT-CONTROLLED STRING IN THIS FILE, and it does not weaken that: a
+# course folder can be called anything, so CS193V_HOST_PROJECTS is arbitrary text -- but it is
+# only ever printed to stdout for an agent to read, and never set as a tmux option, passed to
+# display-message, or re-parsed by anything. The gesture modes are the ones tmux consumes, and
+# they still carry nothing but tokens.
+#
 # ─── WHY `link` NAMES A CLICK ON SOME ROWS AND NOT THE REST ────────────────────
 #
 # THE RULE IS NOT "hardware or nothing", it is that a row may name a click only when the
@@ -131,14 +137,24 @@
 # sanctions -- "39 characters can be retyped" -- until someone runs it. See PR #146.
 #
 # ─── SHELL ─────────────────────────────────────────────────────────────────────
-# /bin/sh and a case statement, like open-url: no bashisms, nothing to source, no output but the
-# one line. Called from a tmux command substitution at session-claim time, so it must be fast
-# and it must never write to stderr.
+# /bin/sh and a case statement, like open-url: no bashisms and nothing to source. The three
+# gesture modes are called from a tmux command substitution at session-claim time, so they must
+# be fast, must print exactly one line, and must never write to stderr.
+#
+# --hostpath IS THE ONE MODE THOSE LAST TWO DO NOT BIND, and the difference is worth stating so
+# nobody "fixes" it: it is read by an AGENT rather than by tmux, so it prints the path on its own
+# line and the instruction on a second, and nothing is laying it out in a box. Still no stderr,
+# for the ordinary reason -- an agent that gets a diagnostic mixed into the answer relays it.
 
 set -u
 
 TOKEN="${CS193V_TERM_CLASS:-unknown}"
 HOST_OS="${CS193V_HOST_OS:-}"
+# ALREADY RENDERED FOR THE PLATFORM by gui_projects_path in cs193v-ui.sh, so this is a string to
+# print and never one to translate: on WSL it is the \\wsl.localhost\... form File Explorer
+# needs, and nothing in here would know how to build that. Empty on a container created before
+# #257, or by a bare `podman run`, which --hostpath answers rather than ignoring.
+HOST_PROJECTS="${CS193V_HOST_PROJECTS:-}"
 
 # THE DEFAULT WORDING, defined once because three arms fall back to it and 50-image.sh pins the
 # first one against a literal. Keep them in this order: what to hold, then what to press.
@@ -213,5 +229,51 @@ case "$1" in
         esac ;;
     *)                printf '%s\n' "$D_CORRECT" ;;
     esac ;;
+# ─── WHERE THE STUDENT'S OWN FILES ARE, AND HOW THEY OPEN THEM (#257) ─────────
+# The one mode a student's AGENT runs rather than the launcher, and the only one keyed on the
+# platform alone -- there is no terminal in the question.
+#
+# WHY THE AGENT NEEDS THIS AT ALL. Claude Code and codex only ever see /home/student/projects, so
+# left to themselves they hand a student a path that does not exist on the student's computer.
+# The notes tell them to run this and relay it.
+#
+# THE PATH FIRST, ON ITS OWN LINE, so it survives being quoted: it is the part a student pastes,
+# and on Windows it is full of backslashes that must not be wrapped into prose.
+#
+# NO COMMAND IS EVER SUGGESTED TO A STUDENT HERE, and that is a course decision rather than a
+# limitation: a student on a Mac or on Windows is not assumed to know a terminal, so they get a
+# graphical route to a folder. `explorer.exe .` would be the shorter answer on WSL and is what
+# Microsoft documents, but it is a command, and it cannot run in here anyway -- this container
+# has no Windows interop.
+#
+# LINUX GETS THE PATH AND NOTHING ELSE, deliberately: that student is assumed to be at home in a
+# terminal and a file manager, so a sentence naming one of the several Linux file managers would
+# be wrong more often than it helped.
+#
+# AND AN UNKNOWN PLATFORM FALLS THROUGH TO THE SAME SILENCE as linux rather than guessing, while
+# a MISSING PATH is answered instead of ignored. An empty answer is what teaches an agent to stop
+# asking and reason from its own guesses, which is the failure this mode exists to prevent.
+--hostpath)
+    if [ -z "$HOST_PROJECTS" ]; then
+        printf 'Not known in here -- this container was made without it.\n'
+        printf 'Ask the student to run ./cs193v doctor on their own computer; it prints the folder.\n'
+    else
+        printf '%s\n' "$HOST_PROJECTS"
+        # SOURCED HERE AND NOT AT THE TOP, so "nothing to source" stays true of the three gesture
+        # modes -- they are called from a tmux command substitution at claim time and this arm is
+        # not. The two sentences live in strings.sh because the LAUNCHER prints them too, and a
+        # student who asks the agent and then runs doctor must not get two wordings of one
+        # instruction; see that file.
+        #
+        # AND A MISSING FILE COSTS THE SENTENCE, NOT THE PATH. The path is already printed above,
+        # which is the half that cannot be guessed, so an image whose /etc/cs193v is incomplete
+        # still answers usefully rather than failing.
+        # shellcheck source=cs193v-strings.sh
+        [ -r /etc/cs193v/strings.sh ] && . /etc/cs193v/strings.sh
+        case "$HOST_OS" in
+        macos) [ -n "${CS193V_OPEN_MACOS:-}" ]   && printf '%s\n' "$CS193V_OPEN_MACOS" ;;
+        wsl)   [ -n "${CS193V_OPEN_WINDOWS:-}" ] && printf '%s\n' "$CS193V_OPEN_WINDOWS" ;;
+        esac
+    fi ;;
 *)  usage ;;
 esac

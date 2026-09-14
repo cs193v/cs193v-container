@@ -52,6 +52,24 @@ long-running process as something that will still be there next session. If work
 survive, it has to be a file in `~/projects` (which is on their own computer) rather than a
 running process.
 
+## Where the student's files are on their own computer
+
+`~/projects` is the only directory shared with the student's computer. Everything else in here,
+including the rest of `~`, exists only in this container.
+
+That directory has a different name on their machine, and you do not know what it is. **Run
+`cs193v-platform-messages --hostpath` and relay what it says** — it knows which computer they
+are on, what the folder is called there, and how they open it.
+
+- **Give locations relative to the projects folder.** "`lab1/index.html`, in your projects
+  folder" is something a student can act on; `/home/student/projects/lab1/index.html` is not.
+  That path is for your own tool calls, not for them to go looking with.
+- **Never put one of their own-computer paths into a command, an import, a config file, or
+  anything you write.** It is not a path that exists in here. On Windows it can even look like
+  one and quietly succeed against the wrong directory.
+- **When describing a path to the student, write it `~/`-relative** (`~/projects/lab1`), and
+  give a full path for anything outside `~`, such as `/tmp/build.log`.
+
 ## Credentials
 
 Never read or print the contents of these, and never copy a token into a file, into a commit,

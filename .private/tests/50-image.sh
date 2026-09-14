@@ -776,7 +776,7 @@ assert_contains "gesture:windows-terminal-copy-still-names-shift" "SHIFT" \
 # because a re-worded row capitalising the word is the slip most likely to get through.
 g_clicks=''
 while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
-    [ "$gm" = link ] || continue
+    [ "$gm" = --link ] || continue
     case "$gtext" in *[Cc]lick*) g_clicks="$g_clicks $gt" ;; esac
 done <<GDUMP
 $g_dump
@@ -789,12 +789,82 @@ assert_eq "gesture:exactly-the-measured-rows-name-a-click" \
 # the wrong advice. It must not itself tell the student to hold SHIFT.
 g_corr_bad=''
 while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
-    [ "$gm" = correct ] || continue
+    [ "$gm" = --correct ] || continue
     case "$gtext" in *"hold SHIFT"*) g_corr_bad="$g_corr_bad [$gt]" ;; esac
 done <<GDUMP
 $g_dump
 GDUMP
 assert_eq "gesture:no-correction-tells-you-to-hold-shift-again" "" "$g_corr_bad"
+
+# ─── --hostpath: where the student's own files are, and how they open them (#257) ─────────────
+# THE FOURTH MODE, and the only one keyed on the platform alone -- there is no terminal in the
+# question. The launcher renders the string (gui_projects_path in cs193v-ui.sh, driven by
+# 21-host-paths.sh) and forwards it at create time; this is the half that turns it into something
+# an agent can read out to a student.
+#
+# ONE CONTAINER for the whole matrix, like the gesture dump above and for the same reason.
+# CS193V_HOST_PROJECTS is handed in per row rather than taken from the environment, so each
+# platform is reachable without a container per platform.
+hp_dump="$(R 'for os in macos linux wsl other ""; do
+               out="$(CS193V_HOST_OS=$os CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath)"
+               printf "%s\t%s\n" "${os:-EMPTY}" "$(printf "%s" "$out" | tr "\n" "|")"
+             done')"
+record "hostpath:dump" "$(printf '%s' "$hp_dump" | do_tr '\n' ' ')"
+
+# EVERY PLATFORM LEADS WITH THE PATH, on its own line. That is the part a student pastes, and on
+# Windows it is full of backslashes that must not be wrapped into a sentence.
+hp_bad=''
+while IFS="$(printf '\t')" read -r ho htext; do
+    [ -n "$ho" ] || continue
+    case "$htext" in /PUB/projects*) ;; *) hp_bad="$hp_bad [$ho does not lead with the path]" ;; esac
+done <<HPDUMP
+$hp_dump
+HPDUMP
+assert_eq "hostpath:every-platform-leads-with-the-path" "" "$hp_bad"
+
+# AND THE ROW COUNT IS THE POLICY. macOS and Windows get a route through a graphical file browser
+# because those students are not assumed to know a terminal; Linux gets the path alone, because
+# that student is, and naming one of the several Linux file managers would be wrong more often
+# than it helped. An unknown platform falls through to Linux's silence rather than guessing.
+# THE EXPECTED SENTENCES COME OUT OF files/cs193v-strings.sh, not out of a literal here, for the
+# reason that file exists: they are printed by the launcher's `doctor` as well, so a reword has
+# one place to happen and this stays green through it while a DELETION still fails. lib/assert.sh
+# already sourced them on the HOST with no container in the picture, which is the property that
+# file's header asks callers to keep.
+#
+# GUARDED FIRST, because an empty definition would make both assertions below compare
+# "/PUB/projects|" against "/PUB/projects|" and pass having checked no sentence at all.
+assert_ne "hostpath:the-shared-strings-were-readable" "" "${CS193V_OPEN_MACOS:-}${CS193V_OPEN_WINDOWS:-}"
+assert_eq "hostpath:macos-explains-how-to-open-it" "/PUB/projects|$CS193V_OPEN_MACOS|" \
+    "$(R 'CS193V_HOST_OS=macos CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath | tr "\n" "|"')"
+assert_eq "hostpath:windows-explains-how-to-open-it" "/PUB/projects|$CS193V_OPEN_WINDOWS|" \
+    "$(R 'CS193V_HOST_OS=wsl CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath | tr "\n" "|"')"
+assert_eq "hostpath:linux-is-the-path-alone" "/PUB/projects|" \
+    "$(R 'CS193V_HOST_OS=linux CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath | tr "\n" "|"')"
+assert_eq "hostpath:an-unknown-platform-is-the-path-alone" "/PUB/projects|" \
+    "$(R 'CS193V_HOST_OS=some-future-os CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath | tr "\n" "|"')"
+
+# NO COMMAND IS EVER SUGGESTED TO A STUDENT, on any platform. `explorer.exe .` is what Microsoft
+# documents for this and is shorter than the UNC path -- and it is a command, and it cannot run
+# in here anyway, since this container has no Windows interop. A future tidy-up that "helpfully"
+# adds one is what this catches.
+hp_cmds=''
+for hp_os in macos linux wsl other; do
+    case "$(R "CS193V_HOST_OS=$hp_os CS193V_HOST_PROJECTS=/PUB/projects cs193v-platform-messages --hostpath")" in
+        *explorer.exe*|*xdg-open*|*"open ."*) hp_cmds="$hp_cmds [$hp_os]" ;;
+    esac
+done
+assert_eq "hostpath:no-platform-tells-a-student-to-run-a-command" "" "$hp_cmds"
+
+# AND A CONTAINER THAT WAS NEVER TOLD ANSWERS ANYWAY. Unset is the real state of every container
+# made before #257 and of any bare `podman run`, and an empty answer is what teaches an agent to
+# stop asking and reason from its own guesses -- which is the failure this mode exists to
+# prevent. It must name doctor, which is where the student can still get it.
+hp_unset="$(R 'unset CS193V_HOST_PROJECTS; CS193V_HOST_OS=macos cs193v-platform-messages --hostpath')"
+assert_ne "hostpath:an-unpublished-path-still-answers" "" "$hp_unset"
+assert_contains "hostpath:and-sends-the-student-to-doctor" "cs193v doctor" "$hp_unset"
+# ...and does NOT print a path it does not have, which is the way this arm would go wrong.
+assert_not_contains "hostpath:and-invents-no-path" "/PUB/projects" "$hp_unset"
 
 # ─── the link box's three frames  (the modal states) ──────────────────────────
 # WHY THE FRAMES ARE ASSERTED HERE and not only in the tmux tier: the popup is created with a
@@ -1215,12 +1285,28 @@ assert_ok "files:inotifywait-present" \
 # volumes: a file seeded there on first mount is never refreshed by a later image.
 #
 # WHAT THIS CANNOT PROVE is that Claude Code follows the symlink in its managed slot -- only a
-# real session does, which is MANUAL.md §A.11's port-ranges prompt. What it proves is the half a
-# machine can judge: one real file, both names reaching it, readable by the student.
+# real session does, which is MANUAL.md §A.11's prompt. What it proves is the half a machine can
+# judge: one real file, both names reaching it, readable by the student.
+#
+# -e AND NOT -f, AND THE DIFFERENCE IS A TEST THAT COULD NOT FAIL IN THE ONE CASE IT IS FOR.
+# `readlink -f` canonicalises all but the LAST component, so for a link whose target is absent it
+# prints the path and exits 0. That is harmless when the link is repointed somewhere else -- the
+# printed path then differs from the expected one and the row fails either way -- and it is the
+# whole bug when the link is spelled correctly and the FILE was never installed, which is the
+# state a render-the-notes-at-startup design would have produced. Measured in this image, with
+# the link left alone and /etc/cs193v/agent-notes.md deleted:
+#
+#     readlink -f  ->  /etc/cs193v/agent-notes.md    (equals the expectation: PASSES)
+#     readlink -e  ->  (nothing)                     (fails, which is the point)
+#
+# So the -f spelling asserted how the link was SPELLED rather than that the notes were reachable.
+# -e requires every component to exist, which is the property this row claims. Only the
+# readable-through-both-names row below could ever have caught it, and one of two names reaching
+# the file is not the same assertion as both of them doing so.
 assert_eq "notes:claude-managed-slot-is-a-link-to-the-one-file" "/etc/cs193v/agent-notes.md" \
-    "$(R 'readlink -f /etc/claude-code/CLAUDE.md')"
+    "$(R 'readlink -e /etc/claude-code/CLAUDE.md')"
 assert_eq "notes:codex-global-slot-is-a-link-to-the-one-file" "/etc/cs193v/agent-notes.md" \
-    "$(R 'cs193v-entrypoint true >/dev/null 2>&1; readlink -f /home/student/.codex/AGENTS.md')"
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1; readlink -e /home/student/.codex/AGENTS.md')"
 assert_eq "notes:readable-through-both-names" "ok" \
     "$(R 'cs193v-entrypoint true >/dev/null 2>&1
           test -r /etc/claude-code/CLAUDE.md && test -r /home/student/.codex/AGENTS.md && echo ok')"
