@@ -1031,6 +1031,56 @@ for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
     pty_stop "${PC_INNER:-}"
 done
 
+# ─── AND NEITHER CLOSE MAY INHERIT THE HARNESS'S OWN SIGHUP ───────────────────
+# WHAT THIS IS. `SIG_IGN` survives fork AND execve, and a shell CANNOT arm a trap for a signal
+# that was already ignored when it started. So any ancestor of the suite that ignores SIGHUP hands
+# that ignore all the way down -- through run-tests.sh, this suite, the backgrounded ptyrun, its
+# pty child -- to the `/bin/sh` running politeclose.sh, whose `trap ... HUP` then does nothing at
+# all. Measured, with the whole suite started under `nohup`: these six go red together, the
+# subject survives BOTH closes, _close_politely burns its full CLOSE_WAIT before giving up, and
+# 14-test-harness goes from 62s to 195s. It is not load and it is not a race; `nohup` is one
+# instance of the class, and a bare `trap '' HUP` in a FOREGROUND shell reproduces it identically.
+#
+# WHY IT IS ARRANGED HERE RATHER THAN LEFT TO THE ENVIRONMENT. The group above is green on a
+# normally-invoked run whether or not ptyrun defends itself, so it cannot see this. Arranging the
+# ignore is the only way to make the defence observable -- and bash can clear an ignore it set
+# ITSELF (measured: `trap '' HUP` then `trap - HUP` returns the disposition to default), which is
+# what makes the arrangement scopable to these few lines.
+#
+# NOT THROUGH `timeout`, AND THAT IS LOAD-BEARING. Measured on this host: `timeout` RESETS every
+# inherited ignore before exec, so a probe written as `timeout N python3 ptyrun.py ...` -- the
+# idiom four other assertions in this file use -- would sanitise the very condition it is trying
+# to arrange and pass while measuring nothing. pc_close goes through pty_start, which does not.
+#
+# NO GRACE ON THE pid_is_gone CHECKS, for the reason the bare form is used above: measured, a
+# `wait_until 10 pid_is_gone` PASSES in the broken shape, because the subject does eventually die
+# by another route. Promptness is the whole of what is being asserted, so the deadline IS the test.
+pc_holders() {                        # how many processes still hold this arm's pty open
+    pgrep -f "$WORK/politeclose.sh" 2>/dev/null | do_awk 'END {print NR}'
+}
+trap '' HUP                           # the arrangement: the suite now ignores SIGHUP
+pc_close usr1 /bin/sh
+assert_eq "ptyrun:a-polite-close-survives-an-ancestor-that-ignores-sighup" "write=ok" "$PC_REPORT"
+assert_ok "ptyrun:and-that-polite-close-really-ended-the-command" pid_is_gone "${PC_INNER:-0}"
+pty_stop "${PC_INNER:-}"
+pc_close kill9 /bin/sh
+assert_eq "ptyrun:a-force-quit-still-reports-a-dead-terminal-under-an-ignored-sighup" \
+          "write=fail" "$PC_REPORT"
+pty_stop "${PC_INNER:-}"
+# THE INVARIANT ptyrun.py ALREADY CLAIMS AND NOTHING CHECKED. Its _be_the_leader docstring says
+# "with SIGHUP ignored, a rude close leaks two processes holding the pty; without, none" -- and
+# that was measured, written down, and left untested. It is what 35 orphaned pty leaders on this
+# machine turned out to be. It is also what separates resetting SIGHUP for the whole pty child
+# from resetting it only for the command: the second arms the subject's trap and still leaves the
+# leader unkillable, so the assertion above would pass and this one would not.
+assert_eq "ptyrun:a-force-quit-leaves-nothing-holding-the-pty" "0" "$(pc_holders)"
+# AND THIS ARM REAPS ITS OWN STRAYS. A red run here leaves processes that pty_stop does not reach
+# (it kills the owner and the announced pid; the leader's pid is never published) and that
+# run-tests.sh does not sweep, so without this a failure here silently costs the next suite a pty.
+for pc_stray in $(pgrep -f "$WORK/politeclose.sh" 2>/dev/null); do
+    kill -9 "$pc_stray" 2>/dev/null
+done
+trap - HUP                            # and the arrangement is scoped to the group above
 
 
 # ─── lib/ptydrive.py drives a pty from a described conversation (#206) ────────
