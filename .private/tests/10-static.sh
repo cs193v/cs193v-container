@@ -108,7 +108,7 @@ assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
 assert_ok  "syntax:linkbox"           bash -n $PRIVATE/files/cs193v-linkbox
 # /bin/sh, unlike the box it feeds: it is a case statement over two variables with no output but
 # one line, and it is called from a tmux command substitution at session-claim time.
-assert_ok  "syntax:gesture"           sh -n $PRIVATE/files/cs193v-gesture
+assert_ok  "syntax:platform-messages" sh -n $PRIVATE/files/cs193v-platform-messages
 # THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS UNDER A BARE NAME, and `compile()` rather than
 # py_compile for the reason the Containerfile records: py_compile would drop a .pyc beside it.
 # It is named rather than globbed because it has no extension to glob on -- which is exactly what
@@ -1699,11 +1699,11 @@ assert_not_contains "tmux:no-mouse-selection" "begin-selection" "$conf_code"
 # six bindings display it and a student-facing string repeated six times drifts.
 #
 # STILL PINNED TO SHIFT, AND THAT IS NOT STALE. Since #122/#123 the live value is set per launch
-# by cs193v-shell's set_terminal_facts from files/cs193v-gesture, because the terminal a student
+# by cs193v-shell's set_terminal_facts from files/cs193v-platform-messages, because the terminal a student
 # is using cannot be known when this file is parsed. What stays here is the FALLBACK, and its job
 # is to be right on every terminal that bypasses with Shift -- which is every terminal except
 # Terminal.app, macOS VS Code and iTerm2. So this assertion is about the default staying the
-# conservative one, and 50-image.sh asserts cs193v-gesture's own default arm matches it byte for
+# conservative one, and 50-image.sh asserts cs193v-platform-messages's own default arm matches it byte for
 # byte, which is what keeps the two definitions from drifting apart.
 assert_contains "tmux:copy-hint-names-shift" 'set -g @copy-hint "TO COPY: hold SHIFT' "$tmux_conf"
 # The correction a SHIFT+drag displays. It can only be reached on a terminal that FORWARDS Shift
@@ -2995,7 +2995,7 @@ assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
 # `man something` into a shell error on top of the missing manual page.
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
                                 $PRIVATE/files/open-url \
-                                $PRIVATE/files/cs193v-gesture \
+                                $PRIVATE/files/cs193v-platform-messages \
                                 $PRIVATE/files/man
 # cs193v-portwatch, which was in NO list at all until the #155 audit -- 455 lines of bash that
 # classifies /proc/net/tcp, emits the frames the host parses, and parses the host's replies.
