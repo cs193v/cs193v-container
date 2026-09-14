@@ -317,6 +317,16 @@ def main(argv):
     master, slave = pty.openpty()
     pid = os.fork()
     if pid == 0:
+        # THE SAME RESET ptyrun.py MAKES, AND FOR THE SAME REASON. `SIG_IGN` survives fork and
+        # execve, so an ancestor that ignores SIGHUP hands it to the child in here, and a shell
+        # cannot arm a trap for a signal already ignored when it started. It is LATENT on this
+        # path rather than reachable -- every caller reaches ptydrive through `timeout`, which
+        # resets inherited ignores before exec, or across the container boundary, which starts a
+        # clean disposition table (both measured) -- so no test can go red on removing it and
+        # 10-static.sh asserts it instead. It is here because "latent" is a property of today's
+        # callers, not of this file, and a `secret` or `password` flow that trapped SIGHUP would
+        # find it the hard way.
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
         try:
             os.close(master)
             os.setsid()

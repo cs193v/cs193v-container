@@ -108,6 +108,31 @@ absence succeeds the instant the thing is absent, which for something that was n
 immediately — so a check that a killed server stayed dead, or that a stray key changed nothing,
 has to wait a while and then look. Say so at the call site, the way the existing ones do.
 
+## Signal dispositions are inherited, and that reaches the tests
+
+`SIG_IGN` survives both `fork` and `execve`, and **a shell cannot arm a trap for a signal that was
+already ignored when it started.** So whatever ignores a signal above a test run hands that ignore
+to everything underneath — `run-tests.sh`, the suite, the pty it builds, and the program under test
+inside it, whose `trap` for that signal then silently does nothing.
+
+This is not theoretical. Running the suite under `nohup` — which ignores SIGHUP, that being its
+whole job — cost a day: `14-test-harness.sh`'s polite close reported nothing (251 pass 6 fail
+against 257/0, 195s against 62s) and `70-sighup.sh`'s launcher never tore anything down (20 pass
+5 fail against 25/0). Both were read as load, and two issues were filed against the wrong cause.
+
+`lib/ptyrun.py` and `lib/ptydrive.py` now reset SIGHUP for the pty child, so a `nohup`'d run is
+correct again and `10-static.sh` keeps them that way. What to carry forward:
+
+- **A new pty anywhere else must do the same.** The invariant is that the command in the pty gets a
+  student's dispositions, not the harness's.
+- **`nohup` is one instance of a class, not the problem.** A bare `trap '' HUP` in a foreground
+  shell reproduces it identically; `&`, `</dev/null` and `setsid` do not.
+- **`timeout` resets inherited ignores before exec**, so a probe written as
+  `timeout N python3 ptyrun.py ...` destroys the condition it is trying to arrange.
+- **Do not ask a shell what its traps are.** Under an inherited ignore, `dash` prints the handler as
+  though it were installed while the kernel disposition stays `SIG_IGN`. bash is honest
+  (`trap -p HUP` gives `trap -- '' SIGHUP`), but read the disposition or test the behaviour.
+
 ## Cleaning up messes
 
 Always offer to remove any podman containers, images, or volumes you create in the course of development work after you finish a task.
