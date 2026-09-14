@@ -1518,12 +1518,24 @@ rejected on the way, and each is worth recording because each looks better than 
 - **A grace period** before stopping, so an accidental close could be undone. Rejected because it
   reintroduces precisely the confusion #41 removes: "closing the window stops things, except
   sometimes, for a while" is harder to hold in your head than either rule alone.
+- **`discard_output` and a HUP/EXIT trap split**, the larger half of the abandoned
+  `fix/140-hangup-stdout-buffer` branch, for the retained-stdout defect that is now #170. Both are
+  correct and both were measured to change no reachable outcome, at the cost of silence on the HUP
+  path, an `exec >/dev/null 2>&1` inside a trap handler, and a standing "no errexit" constraint on
+  two files. What landed instead is two `printf '\n' >/dev/null` drains in `run_timeout` and one
+  fork-free `pidfile_read` — measured to fix every arm either of them fixed. **Do not re-propose
+  the bigger version without a measurement that separates them**; D16 in `ERRORS.md` has the
+  matrix, including the two rigs (`bash -c`, and a builtin write between the poison and the
+  probe) that each produced a wrong reading first.
 
 The cost that was accepted rather than solved: an accidental window close is **unrecoverable**. Every
 tab, its scrollback and any `claude` session mid-task go with it, where the old design would have
 handed them all back. That is stated plainly in `CONTAINER-DESIGN.md` rather than hidden. Also
-accepted: a force-quit runs no trap, so it leaves a container up with nothing attached — tolerated
-because it degrades to exactly the old behaviour, and both the refusal and `--stop` recover from it.
+accepted: a force-quit of the *launcher itself* runs no trap, so it leaves a container up with
+nothing attached — tolerated because it degrades to exactly the old behaviour, and both the refusal
+and `--stop` recover from it. Force-quitting the **terminal** is a different event and does now tear
+down, in both the job shape and the session-leader shape a #134 shortcut makes; `70-sighup.sh` §1b
+records the first and §1c asserts the second.
 
 One thing NOT done, and available if the lost-work cost turns out to bite: `podman stop` sends
 SIGTERM to PID 1 only, and every other process in the container is killed by the cgroup teardown.

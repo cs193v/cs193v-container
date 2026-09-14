@@ -560,8 +560,17 @@ real terminal.
 
 **Worth doing on macOS (Terminal.app and iTerm2) and on WSL**, where the `podman exec` client lives
 outside the VM and nothing in the Linux suite can answer for them. Also try **force-quitting** the
-terminal on each: expect the container left running, and `./cs193v` to explain it and point at
-`--stop`.
+terminal on each: **expect the container to stop here too.** That expectation was the other way
+round until #171 made the teardown's `podman stop` unconditional; measured since, by hand in
+Terminal.app and VS Code (#170) and by `70-sighup.sh`'s force-quit group, a rude close tears the
+whole thing down — the launcher is a foreground job, so its exit signals nobody and the `podman
+stop` that `run_timeout` disowned runs to completion.
+
+**And force-quit a SHORTCUT-launched window separately**, once #134 ships them. "Run this command
+instead of a shell" makes the launcher the session leader, and that is a different event: its own
+exit is then what HUPs the group the disowned stop is in. On an unpatched tree that left the
+container running 1/1 where the job shape left it stopped — §1c of `70-sighup.sh` is that test,
+and #170 is the fix.
 
 ### §2.8 — zombies after real use
 After a few hours of normal work: `cs193v doctor`, and read the `zombies` line.

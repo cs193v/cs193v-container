@@ -485,7 +485,10 @@ time E 'rm -rf /home/student/projects/.vt-many'
 > and asserts the container stops, the 46 forwards come back, and a server in a tab dies with it.
 > A second group destroys the pty instead — the force-quit ordering, where the kernel HUPs the
 > **session leader only** and it is the leader's exit that HUPs the group. Those are different
-> events and the launcher does not handle them identically, which is why both are probed. The one
+> events and the launcher does not handle them identically, which is why both are probed. A third
+> (§1c) drops job mode so the LAUNCHER is that session leader, which is what an OS-native shortcut
+> built as "run this command instead of a shell" produces (#134) — and is the one shape where
+> #170's retained stdout buffer left the container running. The one
 > thing still not automatable is the actual close button — see §5.1, which is now the most important
 > manual check in `tests/MANUAL.md`.
 
@@ -1103,8 +1106,11 @@ forwards are released, and the next `./cs193v` reuses the same container with fr
 Automated and green on Linux, where `70-sighup.sh` destroys the pty — the same mechanism a terminal
 uses. What no automation can do is press the button, and **what no Linux run can answer is macOS and
 WSL**, where the `podman exec` client lives outside the VM. Do it on Terminal.app, iTerm2 and WSL, and
-force-quit each of them too: expect a container left running, explained by the next `./cs193v` and
-cleared by `--stop`.
+force-quit each of them too: **expect the container to stop there as well.** This said "expect a
+container left running" until #171 made the teardown's stop unconditional; a rude close on a
+launcher that is a foreground JOB now tears down, measured by hand (#170) and by the suite's
+force-quit group. The shape that still needed fixing is the one a #134 shortcut makes — launcher as
+session leader — which is §1c of `70-sighup.sh` and issue #170.
 
 **5.2 — macOS provider behaviour (Apple Silicon only).** Run §A.7's ownership checks under **both**
 providers:
