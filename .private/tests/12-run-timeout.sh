@@ -49,7 +49,8 @@ WORK="$(new_tmpdir)"
 # The decoy below is started after this line, so the trap has to read it lazily. A killed run
 # would otherwise leave a `sleep 30` behind -- harmless in itself, but this file is about not
 # leaving processes for other runs to trip over.
-trap 'rm -rf "$WORK"; [ -n "${DECOY:-}" ] && kill -9 "$DECOY" 2>/dev/null; true' EXIT
+trap 'rm -rf "$WORK"; [ -n "${DECOY:-}" ] && kill -9 "$DECOY" 2>/dev/null
+      [ -n "${RTP_OWNER:-}" ] && kill -9 "$RTP_OWNER" 2>/dev/null; true' EXIT
 export TMPDIR="$WORK"
 
 # Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
@@ -484,3 +485,175 @@ assert_match "read:a-gap-after-a-line-is-a-timeout"      'line:beta timeout'    
 # gamma, not beta: had the previous line survived the next call, this would read `line:beta`.
 assert_match "read:a-line-after-a-gap-still-arrives"     'timeout line:gamma'    "$RD_SAW"
 assert_match "read:and-the-end-is-still-found-after-all-that" 'line:gamma ended$' "$RD_SAW"
+
+# ─── A DEAD TERMINAL, AND THE BYTES A FAILED WRITE LEAVES BEHIND  (#170) ──────
+# WHAT THIS IS ABOUT, because the failure does not look like its cause. On macOS a write(2) to
+# fd 1 that FAILS leaves the unwritten bytes in bash 3.2's stdout buffer -- BSD stdio keeps the
+# tail on error and 3.2 has no fpurge -- and the buffer is never cleared, so every later flush
+# emits them wherever fd 1 then points. run_timeout learns its child's status by having a
+# subshell `printf` the pid down a fifo, and `printf` is a BUILTIN: it flushes the retained bytes
+# into the fifo ahead of the pid, the numeric guard at the first read rejects `POISON<pid>`, the
+# second read is skipped, and rc never leaves the 124 it was seeded with. So `pmq stop -t 3 -i`
+# -- which IS run_timeout -- reports a timeout for a stop that worked, and takes the kill branch.
+#
+# WHY IT MATTERS NOW AND NOT BEFORE (#134). A student's launcher is a foreground JOB under a
+# login shell: the poison happens on a rude close, but the launcher's exit signals nobody, so the
+# podman stop it disowned completes anyway. An OS-native shortcut built as "run this command
+# instead of a shell" makes the launcher the SESSION LEADER, and then its own exit is what
+# revokes the terminal and HUPs the group that stop is in. Same defect, reachable outcome.
+#
+# TWO ARMS, AND THE SECOND IS NOT A LUXURY. Closing fd 1 is the cheap way to make writes fail,
+# but it also makes `[ -t 1 ]` FALSE -- which skips five writes run_timeout makes only to a
+# terminal: the label, a spinner frame every other tick, the ending row, the clear, and
+# cursor_show. In the shape a shortcut creates, the controlling terminal is never revoked, so
+# isatty(1) stays TRUE while every write fails EIO and all five fire. Measured: that is the
+# difference between four bytes left in the buffer and a screenful of spinner frames.
+#
+# NOT UNDER `bash -c`. With a single compound command bash runs it in-process instead of forking,
+# and the answer changes -- a `$( )` that would carry the poison comes back clean. This file is a
+# script and the subject below is a script, which is the shape the launcher runs in. Measured
+# both ways; do not "simplify" either into `bash -c`.
+RTP="$WORK/rt-poison"; mkdir -p "$RTP"
+printf '4242\n' > "$RTP/pidfile"
+
+# THE SUBJECT, shared by both arms so they cannot drift into measuring different things.
+#
+# IT REPORTS WITH /bin/echo AND NOT printf. `printf ... > FILE` is a builtin with an fd-1
+# redirection, so the retained bytes drain into the report and the measurement eats itself --
+# 14-test-harness.sh's politeclose control records the same trap from the other side. An external
+# command forks and execve's, so it inherits nothing. The explicit drain before it is belt as
+# well as braces: rc and the reading are already in shell variables by then, so draining cannot
+# change what is reported, only where the poison goes.
+cat > "$RTP/subject.sh" <<'SUBJ'
+#!/usr/bin/env bash
+set -u
+RT_OUT=''; RT_SPIN=''; RT_ROW=''; RT_BARE=''; RT_ERR=''; PIDFILE_PID=''
+# shellcheck disable=SC1090
+. "$RTP_UI"
+# ASKED BEFORE THE POISON IS LAID, AND THAT IS NOT TIDINESS -- it is this file's own mutation
+# test catching it. `command -v pidfile_read >/dev/null` inside measure() is a BUILTIN writing
+# through a redirect, which is precisely the drain run_timeout uses: it emptied the buffer before
+# the read under test, and rt:a-pidfile-read-survives-a-dead-terminal then passed with the fix
+# reverted. Anything that writes between the poison and the measurement destroys the measurement.
+RTP_HAVE_READER=no
+command -v pidfile_read >/dev/null 2>&1 && RTP_HAVE_READER=yes
+
+measure() {
+    local tty rc left val
+    printf 'POISONPOISON'             # fails on a dead fd 1, and bash 3.2 keeps the bytes
+    tty=no; [ -t 1 ] && tty=yes
+    rc=0; val=''
+    case "$RTP_MODE" in
+        plain)    run_timeout 5 sh -c 'exit 3'; rc=$? ;;
+        labelled) RT_ROW='build';     run_timeout 5 sh -c 'exit 3'; rc=$? ;;
+        spin)     RT_SPIN='working';  run_timeout 5 sh -c 'exit 3'; rc=$? ;;
+        control)  val="$(printf abc)" ;;
+        pidfile)  if [ "$RTP_HAVE_READER" = yes ]; then
+                      pidfile_read "$RTP_PIDFILE" || true; val="$PIDFILE_PID"
+                  else val='<no pidfile_read>'; fi ;;
+    esac
+    # WHAT run_timeout LEFT IN THE BUFFER, read back the way the launcher would read it: a
+    # command substitution running a BUILTIN, which is the shape of $(state) and $(label_of).
+    left="$(printf abc)"; left="${left%abc}"
+    printf '\n' >/dev/null
+    /bin/echo "$tty"   > "$RTP_OUT.tmp"
+    /bin/echo "$rc"   >> "$RTP_OUT.tmp"
+    /bin/echo "$val"  >> "$RTP_OUT.tmp"
+    /bin/echo "$left" >> "$RTP_OUT.tmp"
+    mv "$RTP_OUT.tmp" "$RTP_OUT"      # appears complete, or not at all
+}
+if [ "${RTP_PTY:-}" = 1 ]; then
+    # THE PTY ARM. Work happens in the HUP handler, which is where the launcher's teardown
+    # happens, and the master is gone by then -- so writes fail while isatty(1) is still true.
+    trap 'measure; exit 0' HUP
+    printf 'READY\n'
+    while :; do read -t 30 -r _ || break; done
+else
+    exec 1>&-                         # the cheap arm: fd 1 gone, so every write through it fails
+    measure
+fi
+SUBJ
+chmod +x "$RTP/subject.sh"
+
+rtp_closed() {                        # rtp_closed MODE -> runs the subject with fd 1 closed
+    rm -f "$RTP/report"
+    RTP_UI="$PRIVATE/files/cs193v-ui.sh" RTP_MODE="$1" RTP_OUT="$RTP/report" \
+        RTP_PIDFILE="$RTP/pidfile" bash "$RTP/subject.sh" 2>/dev/null
+}
+rtp_field() { sed -n "$1p" "$RTP/report" 2>/dev/null; }
+
+# THE PTY ARM'S RIG. pty_start + `kill -9` on the pty owner is exactly 70-sighup.sh's
+# force_quit_terminal: the master is destroyed first, so the kernel HUPs the session leader --
+# which, with no CS193V_PTY_JOB, is the subject itself. That is the shape a #134 shortcut makes,
+# and the reason nothing revokes the controlling terminal while the handler runs.
+#
+# EXPORTED, NOT PREFIXED. `VAR=x some_function` leaves the assignment behind in bash, which is
+# the trap 14-test-harness.sh records against gate_run; these have to reach a grandchild anyway.
+RTP_OWNER=''
+rtp_ready()    { grep -q READY "$RTP/ptylog" 2>/dev/null; }
+rtp_reported() { [ -s "$RTP/report" ]; }
+rtp_pty() {                           # rtp_pty MODE -> subject under a pty, then a rude close
+    rm -f "$RTP/report" "$RTP/ptylog"
+    export RTP_UI="$PRIVATE/files/cs193v-ui.sh" RTP_MODE="$1" RTP_OUT="$RTP/report" \
+           RTP_PIDFILE="$RTP/pidfile" RTP_PTY=1
+    pty_start 'x\n' "$RTP/subject.sh" > "$RTP/ptylog" 2>&1
+    RTP_OWNER="$PTY_OWNER"
+    unset RTP_PTY
+    wait_until 20 rtp_ready || { kill -9 "$RTP_OWNER" 2>/dev/null; return 1; }
+    kill -9 "$RTP_OWNER" 2>/dev/null
+    wait "$RTP_OWNER" 2>/dev/null || true
+    RTP_OWNER=''
+    wait_until 20 rtp_reported
+}
+
+# ─── does THIS platform retain a failed write at all? ─────────────────────────
+# RECORDED, THEN USED AS A DOOR. glibc discards the unwritten tail where BSD stdio keeps it, so
+# on Linux there is nothing here to measure and every assertion below would pass for the reason
+# an empty test passes. That is the vacuous green VERIFICATION.md A.15 exists to hunt, so the
+# checks SKIP there instead -- and say so, rather than going quiet.
+RTP_RETAINS=no
+rtp_closed control && [ "$(rtp_field 3)" != abc ] && RTP_RETAINS=yes
+record "rt:this-platform-retains-a-failed-write" "$RTP_RETAINS"
+
+# AND THE DOOR IS ITSELF ASSERTED WHERE IT MUST HOLD. A probe that quietly stops reproducing
+# would skip every check below and leave the suite green on the one platform that can see this
+# defect. On the bash macOS ships, "no" is a broken probe, not a clean machine.
+case "$(uname -s):$BASH_VERSION" in
+    Darwin:3.*) assert_eq "rt:the-poison-reproduces-where-it-must" "yes" "$RTP_RETAINS" ;;
+esac
+
+if [ "$RTP_RETAINS" = no ]; then
+    for rtp_n in a-dead-terminal-does-not-become-a-timeout \
+                 a-dead-terminal-leaves-the-buffer-as-it-found-it \
+                 a-labelled-call-leaves-the-buffer-as-it-found-it \
+                 a-spinner-call-leaves-the-buffer-as-it-found-it \
+                 a-pidfile-read-survives-a-dead-terminal \
+                 the-pty-arm-still-had-a-terminal \
+                 and-the-same-when-the-terminal-is-still-a-terminal; do
+        skip "rt:$rtp_n" "this platform discards a failed write, so there is nothing to poison"
+    done
+else
+    # ─── arm A: fd 1 closed.  The status defect, and the writes that are not the tty's ────
+    rtp_closed plain
+    assert_eq "rt:a-dead-terminal-does-not-become-a-timeout"           "3"  "$(rtp_field 2)"
+    assert_eq "rt:a-dead-terminal-leaves-the-buffer-as-it-found-it"    ""   "$(rtp_field 4)"
+    rtp_closed labelled
+    assert_eq "rt:a-labelled-call-leaves-the-buffer-as-it-found-it"    ""   "$(rtp_field 4)"
+    rtp_closed spin
+    assert_eq "rt:a-spinner-call-leaves-the-buffer-as-it-found-it"     ""   "$(rtp_field 4)"
+    rtp_closed pidfile
+    assert_eq "rt:a-pidfile-read-survives-a-dead-terminal"          "4242"  "$(rtp_field 3)"
+
+    # ─── arm B: a REAL terminal that cannot be written to ─────────────────────────────────
+    # The five tty-only writes fire here and nowhere else, so this is the only unit-level
+    # evidence for the second drain. A labelled call, because that is the one that draws frames.
+    if rtp_pty labelled; then
+        assert_eq "rt:the-pty-arm-still-had-a-terminal" "yes" "$(rtp_field 1)"
+        assert_eq "rt:and-the-same-when-the-terminal-is-still-a-terminal" "" "$(rtp_field 4)"
+    else
+        fail "rt:the-pty-arm-still-had-a-terminal" \
+             "the subject never announced READY, or never reported after the close.
+pty log: $(tail -3 "$RTP/ptylog" 2>/dev/null)"
+        fail "rt:and-the-same-when-the-terminal-is-still-a-terminal" "see above"
+    fi
+fi
