@@ -558,6 +558,12 @@ call it a window close, which is why `sighup:closing-the-window-stops-the-contai
 macOS against a launcher that was not at fault. This check exists to confirm the equivalence on a
 real terminal.
 
+*And a third group (§1c) drops the login shell altogether*, so the launcher is the session leader —
+the shape a #134 shortcut makes. That shape is now **constructed** by the harness
+(`CS193V_PTY_NOSHELL`, which puts no shell in the pty) rather than depending on the host's `/bin/sh`
+stepping aside, so "automated, and green" holds on a dash host too. What it does not carry on Linux
+is #170: that group's greens there are outcome checks, which it says in a named skip.
+
 **Worth doing on macOS (Terminal.app and iTerm2) and on WSL**, where the `podman exec` client lives
 outside the VM and nothing in the Linux suite can answer for them. Also try **force-quitting** the
 terminal on each: **expect the container to stop here too.** That expectation was the other way

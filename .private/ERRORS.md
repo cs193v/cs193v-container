@@ -1769,3 +1769,25 @@ back poisoned there and clean in a script, which is the launcher's real shape. A
 write between the poison and the measurement drains it: an existence check written
 `command -v pidfile_read >/dev/null` inside the probe made `12-run-timeout.sh`'s pidfile assertion
 pass with the fix reverted. Its own mutation test caught that; nothing else would have.
+
+**And a third trap, which is how the shape row above is reached at all: measuring it through a host
+shell measures the host's shell.** By hand the row is `exec ./cs193v`; in the suite it was "launch
+without `CS193V_PTY_JOB`", on the premise that `sh -c CMD` would exec-optimise itself away and leave
+the launcher as the pty's session leader. Measured, dash 0.5.12-12ubuntu3 **never** does — not even
+for a single simple command with no redirection — so on Ubuntu the leader was `sh`, the launcher was
+its child, and `70-sighup.sh` §1c measured §1b a second time while its own guard reported the fault
+as a platform limit. bash 5.3 and busybox `sh` replace; Apple's bash-3.2-as-sh replaces for exactly
+that shape, which is why the reading was right on the development Mac. §1c now constructs the shape
+instead: `CS193V_PTY_NOSHELL=1` has `lib/ptyrun.py` exec the launcher's argv in the pty child, so no
+shell is consulted. An `exec ` prefix on the command string was measured first and rejected — it
+works under every real shell, including dash, but `lib/sh-fake` forks before any shell reads the
+string, so the one fixture that can prove the property could not.
+
+**What Linux cannot see, recorded so nobody re-derives it.** On glibc §1c's four assertions pass
+with the drains in place and with the whole of #170 reverted, so there they are outcome checks and
+say so in a named skip; the Linux instruments for the poison are `10-static.sh`'s two drain gates
+and `12-run-timeout.sh`'s door. And arm B of that door — a real terminal whose master is gone — is
+macOS-only for a second, independent reason, measured by forcing the door open on Linux: once the
+master is destroyed, `tcgetattr` on the slave fails `EIO`, so `isatty(1)` is **false** there, with
+the session-leader shape and without it. On macOS it stays true while every write fails, which is
+the state the five tty-only writes need.
