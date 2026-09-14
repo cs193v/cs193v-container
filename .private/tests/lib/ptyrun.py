@@ -303,10 +303,30 @@ def main(argv):
 
     pid, master = pty.fork()
     if pid == 0:
-        # Child: pty.fork() has already made this the session leader with the slave as its
-        # controlling terminal. WHETHER A SHELL SURVIVES BELOW THIS POINT IS NOT THIS FILE'S
-        # CLAIM TO MAKE -- see the header, and lib/pty-announce for how a caller that needs the
-        # command's pid gets it.
+        # THE COMMAND GETS A STUDENT'S SIGHUP, NOT WHATEVER STARTED THE HARNESS. SIG_IGN survives
+        # fork AND execve -- the same rule _be_the_leader records for SIGTTOU below -- and a shell
+        # cannot arm a trap for a signal that was already ignored when it started. So an ancestor
+        # that ignores SIGHUP reaches the shell in here and silently un-arms its `trap ... HUP`,
+        # which is the one signal everything this file exists to measure turns on. Measured with
+        # the suite started under `nohup`: 70-sighup.sh's launcher never ran its teardown (20 pass
+        # 5 fail, 272s against 35s), 14-test-harness.sh's polite close reported nothing at all
+        # (251 pass 6 fail, 195s against 62s), and job mode's leader could not die when the master
+        # closed -- the leak _be_the_leader's docstring already says must not happen.
+        #
+        # FIRST, AND BEFORE THE job BRANCH, because it has to cover all three shapes: the leader,
+        # the job it forks, and the plain execv below. Measured: after the branch it is dead code
+        # in job mode (_be_the_leader never returns), and inside the job alone it arms the
+        # subject's trap while leaving the leader unkillable.
+        #
+        # SIGHUP ONLY. bash also hands every backgrounded command an ignored SIGINT and SIGQUIT,
+        # which is a real and separate defect -- 30-launcher-shim.sh:534 documents working around
+        # it -- but resetting those changes what eight other callers hand their commands and wants
+        # its own red-first test.
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        # pty.fork() has already made this the session leader with the slave as its controlling
+        # terminal. WHETHER A SHELL SURVIVES BELOW THIS POINT IS NOT THIS FILE'S CLAIM TO MAKE --
+        # see the header, and lib/pty-announce for how a caller that needs the command's pid gets
+        # it.
         if job:
             _be_the_leader(shell, cmd)      # never returns
         try:
