@@ -941,6 +941,130 @@ assert_ok "ptyrun:an-unannounced-pid-is-an-error-not-a-fallback" pr_inner_refuse
 assert_eq "ptyrun:an-unannounced-pid-yields-nothing-to-kill" "" \
           "$(PTY_PIDFILE="$WORK/never-announced" PTY_INNER_WAIT=1 pty_inner_pid || true)"
 
+# ─── A SHAPE AND NOT A PID: CS193V_PTY_NOSHELL (#134, #151, #170) ─────────────
+# WHAT THE TWO ARMS ABOVE CANNOT ANSWER. They ask WHICH pid the command is, which is what the five
+# sites that have to signal it need. 70-sighup.sh's §1c needs something else: that the command IS
+# the pty's SESSION LEADER -- the shape an OS-native launch shortcut makes (#134), and the only one
+# in which #170's retained stdout buffer changes an outcome. Through `/bin/sh -c` that is a
+# property of the HOST'S SHELL rather than of this harness: measured, dash 0.5.12-12ubuntu3 never
+# exec-optimises, not even for a single simple command with no redirection, so the shell is the
+# leader, the command is its child, and §1c quietly becomes a second copy of §1b.
+#
+# SO THE SHAPE IS CONSTRUCTED, the way job mode's is. CS193V_PTY_NOSHELL hands ptyrun an ARGV and
+# has it exec that itself, with no shell anywhere in the pty -- the complement of CS193V_PTY_JOB,
+# which exists to put a leader ABOVE the command.
+#
+# TWO ARMS AND A CONTROL, and arm 2 is the entire reason this is a ptyrun mode rather than a
+# cleverer command string. MEASURED AND REJECTED FIRST: an `exec ` prefix on the string makes dash
+# replace itself, and it turns this suite, 70-sighup, 60-container, 12-run-timeout and the static
+# tier green -- but lib/sh-fake forks BEFORE any shell reads the string, so the one fixture that
+# can PROVE the property cannot. Same objection to CS193V_PTY_SHELL=/bin/bash: also green, also the
+# host's shell by another name. #151's rule is that the condition is injected, never borrowed.
+#
+# NO TTY ASSERTION HERE, DELIBERATELY. The obvious one -- that a shell-free pty still hands its
+# command a terminal -- cannot fail: with the mode reduced to the string path the subject still
+# prints ISTTY, so it would pass against the mutation it looks like it guards. pty.fork() puts the
+# slave on 0/1/2 and execve preserves fds, so there is nothing here for a mode to lose; the
+# fixture-tty assertion above is about POSIX giving an asynchronous list /dev/null, which is a
+# property of lib/sh-fake's `&` and not of this path. An assertion that cannot go red is what
+# ERRORS.md D1's family of issues is made of.
+#
+# EXPORT AND UNSET, NOT A PREFIX ON pty_start. :1695 records a bash that leaves an assignment
+# prefixed to a FUNCTION call set after that function returns -- so the prefix form would move the
+# shape of every pty BELOW this group, on a Mac and not here, which is the worst way for it to be
+# wrong. 12-run-timeout.sh's rtp_pty is the form copied.
+#
+# AND CS193V_PTY_SHELL IS PUT BACK RATHER THAN UNSET, for the reason ARM 1 pins it above: a
+# whole-lane interposing run (run-tests.sh:437) is how #151's reported configuration is
+# reproduced, and a group that quietly cleared it would change what every pty after it measures.
+NL_OWNER=''; NL_INNER=''; NL_IS=''
+nl_start() {                          # nl_start [SHELL] -> sets NL_OWNER, NL_INNER, NL_IS
+    local had=no saved=''
+    [ -n "${CS193V_PTY_SHELL+set}" ] && { had=yes; saved="$CS193V_PTY_SHELL"; }
+    export CS193V_PTY_NOSHELL=1
+    if [ -n "${1:-}" ]; then export CS193V_PTY_SHELL="$1"; else unset CS193V_PTY_SHELL; fi
+    pty_start 'x\n' sleep 30 >/dev/null 2>&1
+    unset CS193V_PTY_NOSHELL
+    if [ "$had" = yes ]; then export CS193V_PTY_SHELL="$saved"; else unset CS193V_PTY_SHELL; fi
+    NL_OWNER="$PTY_OWNER"
+    NL_INNER="$(pty_inner_pid)" || NL_INNER=''
+    # THE EXEC, NOT THE ANNOUNCE, the rule pr_is_cmd's comment states above: lib/pty-announce
+    # publishes its pid before it execs, so for a moment the pid names the wrapper.
+    wait_until 10 pr_is_cmd "$NL_INNER" || true
+    NL_IS="$(pid_leads_its_session "${NL_INNER:-}")"
+}
+
+# ARM 1: no shell is named, and none is used.
+nl_start ''
+assert_eq "ptyrun:a-shell-free-pty-makes-the-command-the-session-leader" "yes" "$NL_IS"
+assert_eq "ptyrun:a-shell-free-pty-still-announces-the-commands-own-pid" "sleep" \
+          "$(pr_comm "$NL_INNER")"
+# $! STILL THE OWNER, the contract five kill sites depend on and the one thing a new launch path
+# could break without any assertion above noticing.
+assert_eq "ptyrun:a-shell-free-pty-still-backgrounds-as-the-owner" "owner-alive-and-distinct" \
+          "$( { [ -n "$NL_OWNER" ] && [ "$NL_OWNER" != "$NL_INNER" ] && ! pid_is_gone "$NL_OWNER"; } \
+              && echo owner-alive-and-distinct || echo "owner=$NL_OWNER inner=$NL_INNER")"
+pty_stop "$NL_INNER"
+
+# ARM 2: a shell that ALWAYS interposes is named, AND IGNORED. This is the assertable property --
+# not "usually no shell" but "no shell even when one is handed to us" -- and it is what makes the
+# shape this harness's to guarantee rather than the host's.
+nl_start "$PT_LIB/sh-fake"
+assert_eq "ptyrun:a-shell-free-pty-ignores-CS193V_PTY_SHELL" "yes" "$NL_IS"
+assert_eq "ptyrun:and-still-announces-the-command-under-that-ignored-shell" "sleep" \
+          "$(pr_comm "$NL_INNER")"
+pty_stop "$NL_INNER"
+
+# THE CONTROL, AND IT IS THE POINT OF THE GROUP. Same subject, same fixture, knob OFF: the command
+# must NOT be the leader. Without it every assertion above passes against a probe stuck on `yes`,
+# against a pty_start that took the argv branch unconditionally, and against a run that set
+# CS193V_PTY_NOSHELL for the whole lane.
+#
+# UNDER lib/sh-fake AND NOT THE HOST'S /bin/sh, which is not a detail: on a Mac, bash-as-sh
+# exec-optimises this exact command shape, so a host-shell control would answer `yes` for the
+# HOST's reason and be red there against a ptyrun behaving perfectly. The fixture always
+# interposes, so `no` here is platform-independent.
+# NO OWNER VARIABLE HERE, unlike the arms above: pty_stop reads $PTY_OWNER itself, and the
+# owner-is-distinct property is arm 1's assertion rather than this control's business.
+CS193V_PTY_SHELL="$PT_LIB/sh-fake" pty_start 'x\n' sleep 30 >/dev/null 2>&1
+NL_C_INNER="$(pty_inner_pid)" || NL_C_INNER=''
+wait_until 10 pr_is_cmd "$NL_C_INNER" || true
+assert_eq "ptyrun:with-a-shell-the-command-is-not-the-session-leader" "no" \
+          "$(pid_leads_its_session "${NL_C_INNER:-}")"
+pty_stop "$NL_C_INNER"
+
+# AND NOTHING RE-PARSED THE ARGV, which is the other half of "no shell is consulted" and the half
+# a leader check cannot see. Four re-parsings at once: a space inside one argument, a `$`, a `;`
+# and a `*`. Through a shell this line is four words, an expansion, a separator and a glob.
+#
+# A DIRECT CALL AND NO pty_start, because this needs no pid -- and a prefix on an EXTERNAL command
+# is safe, the leak above being a property of function calls only. TIMED OUT because the failure
+# this is red-first for is a mode that does not exist yet, and ptyrun holds its pty open.
+nl_argv="$(printf '\n' | CS193V_PTY_NOSHELL=1 "$DO_TIMEOUT" 20 "$DO_PY" "$PTYRUN" \
+             /bin/echo 'a b' '$HOME' ';' '*' 2>&1 | do_tr -d '\r')"
+assert_contains "ptyrun:a-shell-free-pty-does-not-re-parse-its-argv" 'a b $HOME ; *' "$nl_argv"
+# ...AND THE STRING FORM IS UNCHANGED, which keeps the line above from passing for the wrong
+# reason and pins the dual path: there, argv[1] is the WHOLE command and argv[2:] is not a command
+# at all. Both spellings have to keep meaning what they say, because eight callers use this one.
+nl_str="$(printf '\n' | "$DO_TIMEOUT" 20 "$DO_PY" "$PTYRUN" \
+            /bin/echo 'a b' '$HOME' ';' '*' 2>&1 | do_tr -d '\r')"
+assert_not_contains "ptyrun:the-string-form-still-takes-one-whole-command" 'a b $HOME' "$nl_str"
+
+# AND THE TWO SHAPES REFUSE EACH OTHER, LOUDLY AND BEFORE ANY PTY EXISTS. They are complements,
+# not options: job mode puts a leader above the command, this puts the command in that place.
+# MEASURED with the pair half-wired -- the prototype for this change -- and the failure is the
+# silent kind: the command ran, NOTHING announced a pid, pty_inner_pid burned its ceiling, and the
+# caller's guard reported the instrument instead of the shape. Refused before the fork so there is
+# no pty and no master to clean up, and the message lands on the caller's stderr.
+#
+# TIMED OUT for the same reason as the argv probe: without the refusal this is job mode, whose
+# leader holds the slave open on purpose, so an un-timed probe would hang the suite instead of
+# failing it.
+assert_fail_saying "ptyrun:the-two-pty-shapes-refuse-each-other" "CS193V_PTY_NOSHELL" \
+    env CS193V_PTY_NOSHELL=1 CS193V_PTY_JOB=1 "$DO_TIMEOUT" 20 "$DO_PY" "$PTYRUN" /bin/echo hi
+assert_exit "ptyrun:and-the-refusal-is-an-error-status" 2 \
+    env CS193V_PTY_NOSHELL=1 CS193V_PTY_JOB=1 "$DO_TIMEOUT" 20 "$DO_PY" "$PTYRUN" /bin/echo hi
+
 # ─── the two ways to close the window are not the same event (#169) ───────────
 # WHY THIS IS HERE AND NOT IN 70-sighup.sh. That file needs a container and two minutes to ask
 # whether the LAUNCHER survives a close; this asks whether ptyrun delivers the close it claims to,
