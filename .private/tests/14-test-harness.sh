@@ -2154,23 +2154,58 @@ record    "sgtimes:ambient-locale-count" "$sgt_ambient"
 #    AND THE DECOY TRANSCRIPT IS BUILT FROM THE CATALOGUE TOO, which it was not: the three rows
 #    below used to carry a typed copy of prompt.sunetid, so rewording that prompt left the needle
 #    and the haystack disagreeing and this case went red for a change that was not a regression.
-#    Reworded, the ERE hazard travels with the prose -- the trailing `?` is only a hazard while
-#    the prompt ends in one -- so sgtimes:and-an-ere-would-have-said-three below is what says
-#    whether this fixture is still exercising the bug, and it reads the same string.
+#    Reworded, the ERE hazard travels with the prose, so the oracle at the bottom of this case is
+#    what says whether this fixture is still exercising the bug, and it reads the same string.
+#
+#    THE EMPHASIS MARKUP COMES OFF, and that is not tidying. The catalogue writes this prompt as
+#    `*What is your SUNetID (e.g. htiek, szum)?*`: emph_stream CONSUMES every `*` into a colour
+#    sequence and sg_plain strips the colour back off, so a literal asterisk is a byte no student
+#    can see and no transcript can carry -- a transcript-shaped decoy has no business holding one.
+#    It is also not a valid ERE. A LEADING `*` is a repetition operator with nothing to repeat, so
+#    grep REFUSED the pattern rather than over-matching, and the oracle below scored the refusal
+#    as 0. That was #260. do_tr -d '*' is how sg_phrase strips it inside the shim and how
+#    20-messages.sh strips it at a suite's top level.
 # NAMED HERE, not borrowed from sgp's subshell: that copy is set INSIDE the subshell, where the
 # shim's sg_phrase reads it, and is gone by the time this line runs.
-sgt_prompt="$(msg_text prompt.sunetid "$PRIVATE/files/setup-git-messages.txt")"
+sgt_prompt="$(msg_text prompt.sunetid "$PRIVATE/files/setup-git-messages.txt" | do_tr -d '*')"
 sgt_decoy="$(printf 'a %s jdoe\nb %s jdoe\nc %s somewhere else\n' \
                     "$sgt_prompt" "$sgt_prompt" "${sgt_prompt%% (*}")"
 assert_eq "sgtimes:the-needle-is-a-literal-not-a-pattern" "PASS" \
           "$(sgp sg_says_times probe 2 prompt.sunetid "$sgt_decoy")"
 # THE NEGATIVE ARM, because "it passed" is also what a helper that never counted anything would
-# report if the expectation happened to match. 3 is the answer the ERE spelling gives, so this is
-# the one wrong number worth naming.
+# report if the expectation happened to match. 3 is the answer the ERE spelling gives today, so
+# this is the one wrong number worth naming.
 assert_contains "sgtimes:and-scoring-it-three-would-have-failed" "actual:   2" \
           "$(sgp sg_says_times probe 3 prompt.sunetid "$sgt_decoy")"
-assert_eq "sgtimes:and-an-ere-would-have-said-three" "3" \
-          "$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE "$sgt_prompt" | LC_ALL=C grep -c . || true)"
+#    AND THE ORACLE PINS THE DIFFERENCE RATHER THAN THE NUMBER, which is this block's own header
+#    applied to its last case, and what #260 cost. Two decisions, both measured:
+#
+#      GREP'S STATUS IS ASKED FOR, BY NAME. `|| true` turns a grep that REFUSED THE PATTERN into
+#      the empty string, which `grep -c .` then scores 0 -- so the `= 3` spelling this replaces
+#      reddened with `actual: 0` and read as "the over-count stopped happening" when the truth
+#      was "no search ran". Nothing about the COUNT can tell those two apart: measured over six
+#      plausible rewordings, the two spellings disagree on the REFUSED pattern as well as on the
+#      over-matching one. The rc can -- 2 is a pattern grep would not compile, 0 and 1 are both
+#      a search that happened.
+#
+#      AND THE COUNT IS COMPARED WITH THE LITERAL ONE, not with 3. The prose is free text: a
+#      reword that drops the trailing `?`, or appends a `+`, leaves this fixture still telling -F
+#      from -E -- 0 against 2, measured -- and has broken nothing, yet `= 3` reddens it. That is
+#      msg_text's "punishing the wrong change" one level down, and it is the same mistake as
+#      quoting the prose, made about the prose's SHAPE instead of its words. WHICH wrong answer
+#      -E gives is a property of the day's prose and of the host's grep rather than of this tree,
+#      so it is RECORDED, for the reason case 3 above records its own count.
+sgt_ere_rc=0
+printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE "$sgt_prompt" >/dev/null 2>&1 || sgt_ere_rc=$?
+assert_ne "sgtimes:the-catalogue-prose-still-compiles-as-a-pattern" "2" "$sgt_ere_rc"
+# BOTH SPELLINGS SIDE BY SIDE, and the literal one computed here rather than read off sg_times:
+# an oracle that asked the helper under test would agree with it however that helper broke.
+sgt_ere="$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oE "$sgt_prompt" 2>/dev/null \
+           | LC_ALL=C grep -c . || true)"
+sgt_lit="$(printf '%s' "$sgt_decoy" | LC_ALL=C grep -oF -- "$sgt_prompt" \
+           | LC_ALL=C grep -c . || true)"
+record    "sgtimes:ere-count" "$sgt_ere"
+assert_ne "sgtimes:and-a-pattern-would-not-have-agreed" "$sgt_lit" "$sgt_ere"
 
 # 5. NO PADDING ON THE NUMBER, which is why this is `grep -c .` and not `wc -l`. BSD wc pads to a
 #    column, which is why the two call sites this replaced carried a `do_tr -d ' '`. TWO
