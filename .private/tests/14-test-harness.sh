@@ -999,7 +999,17 @@ pc_close() {                          # pc_close usr1|kill9 SHELL -> sets PC_REP
     if [ "$1" = usr1 ]; then kill -USR1 "$PC_OWNER" 2>/dev/null; else kill -9 "$PC_OWNER" 2>/dev/null; fi
     wait "$PC_OWNER" 2>/dev/null || true
     wait_until 15 sh -c "[ -s '$WORK/pc.out' ]" || true
-    PC_REPORT="$(do_tr -d ' \r\n' < "$WORK/pc.out" 2>/dev/null)"
+    # SELF-DESCRIBING RATHER THAN EMPTY, and that distinction cost six hours once. A subject that
+    # never wrote its report used to leave PC_REPORT as the empty string, so `write=ok` and
+    # `write=fail` failed TOGETHER with `actual:` blank -- which reads as "the close went the
+    # other way" when what happened is that the close did nothing at all. The only trace was the
+    # shell's own "No such file or directory" on the suite's stderr, which the suite does not
+    # count: four such lines in a transcript of four thousand. Say it in the value instead.
+    if [ -s "$WORK/pc.out" ]; then
+        PC_REPORT="$(do_tr -d ' \r\n' < "$WORK/pc.out")"
+    else
+        PC_REPORT='no-report(the-subject-never-wrote-one)'
+    fi
 }
 
 for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
@@ -1020,6 +1030,7 @@ for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
     assert_eq "ptyrun:a-force-quit-does-not-under-$pc_name" "write=fail" "$PC_REPORT"
     pty_stop "${PC_INNER:-}"
 done
+
 
 
 # ─── lib/ptydrive.py drives a pty from a described conversation (#206) ────────
