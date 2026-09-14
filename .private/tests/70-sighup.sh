@@ -126,14 +126,28 @@ launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_P
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
 
-# ...AND THE SAME THING WITHOUT JOB MODE, which is the ONLY difference between them. Everything
-# the comment above gives as a reason to set CS193V_PTY_JOB is a reason it models a student's
-# terminal -- and a #134 shortcut is not one. "Run this command instead of a shell" has no login
-# shell to be the leader, so the launcher is, which is the shape §1c measures and the shape #170
-# says it stops being latent in. Group 1c asserts it really got it rather than assuming: where
-# /bin/sh -c does not exec-optimise itself away (#151) this quietly yields job mode again.
+# ...AND THE OTHER SHAPE, which is the ONLY difference between them. Everything the comment above
+# gives as a reason to set CS193V_PTY_JOB is a reason it models a student's terminal -- and a #134
+# shortcut is not one. "Run this command instead of a shell" has no login shell to be the leader,
+# so the launcher is, which is the shape §1c measures and the shape #170 says it stops being
+# latent in.
+#
+# CONSTRUCTED, NOT BORROWED, and this used to be the difference between a green Mac and a red
+# Ubuntu. Simply omitting CS193V_PTY_JOB is not this shape: ptyrun then execs `/bin/sh -c` in the
+# pty's session leader, and whether that shell steps aside is the HOST's decision -- dash 0.5.12
+# never exec-optimises, so the leader was `sh`, the launcher was its child, and this group
+# measured job mode a second time. CS193V_PTY_NOSHELL is ptyrun exec'ing the launcher's argv
+# itself, with no shell anywhere in the pty; see lib/ptyrun.py's header for the two cheaper
+# candidates measured and rejected. The guard below still asks the kernel, because what can go
+# wrong has MOVED rather than gone.
+#
+# EXPORT AND UNSET, for the reason launch_in_pty above now carries: a prefix on a function call
+# survives it on some bash builds (14-test-harness.sh:1695), and ptyrun refuses the two shape
+# knobs together -- so a leak either way is a message in $LOG rather than a silent shape.
 launch_as_leader() {                  # launch_as_leader -> sets PTY_PID; the launcher leads
+    export CS193V_PTY_NOSHELL=1
     pty_start 'sleep 600\n' "$REPO/cs193v" >"$LOG" 2>&1
+    unset CS193V_PTY_NOSHELL
     PTY_PID="$PTY_OWNER"
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
@@ -366,24 +380,25 @@ not measured at all. Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
 else
     pass "sighup:the-shortcut-probe-got-a-session"
     # DID WE ACTUALLY GET THE SHAPE? Without this the group degrades silently into a second copy
-    # of 1b. ptyrun execs `/bin/sh -c` in the pty's session leader, and whether that shell then
-    # exec-optimises itself away is NOT specifiable -- it is the whole of #151, it varies by
-    # shell and by build, and where it does not, `sh` is the leader and the launcher is its
-    # child, which is job mode again. So ask the kernel: a session leader's sid is its own pid.
-    # Measured on macOS: through /bin/sh -c and pty-announce alike, pid == sid.
+    # of 1b, and every assertion below it stays green while measuring the wrong thing.
+    #
+    # STILL ASKED, THOUGH THE HARNESS NOW BUILDS IT. What can go wrong has moved rather than gone:
+    # the knob may not have reached ptyrun (a prefix that leaked, an export that did not), ptyrun
+    # may have refused it because CS193V_PTY_JOB was also set, or pty_start may have flattened the
+    # argv back into a string. Each of those degrades this group the same silent way the host's
+    # /bin/sh used to. So ask the kernel -- a session leader's sid is its own pid.
     SL_PID="$(pty_inner_pid)" || SL_PID=''
-    SL_IS=no
-    [ -n "$SL_PID" ] && SL_IS="$("$DO_PY" -c 'import os,sys
-p = int(sys.argv[1])
-try:    print("yes" if os.getsid(p) == p else "no")
-except  ProcessLookupError: print("gone")' "$SL_PID" 2>/dev/null)"
+    SL_IS="$(pid_leads_its_session "${SL_PID:-}")"
     record "sighup:the-shortcut-shape-as-measured" "pid=${SL_PID:-none} leader=${SL_IS:-unknown}"
     if [ "$SL_IS" != yes ]; then
         fail "sighup:the-shortcut-probe-really-is-a-session-leader" \
-             "the launcher is pid ${SL_PID:-unknown} and its session leader is somebody else, so
-this group is measuring job mode a second time rather than the shape #134 ships. On a host where
-/bin/sh -c does not exec-optimise (#151) that is expected and this group needs a shell-free
-ptyrun path before it can run here."
+             "the launcher is pid ${SL_PID:-unknown} and pid_leads_its_session says ${SL_IS:-unknown},
+so this group is measuring job mode a second time rather than the shape #134 ships.
+NOT A PLATFORM LIMIT ANY MORE, and this message used to say it was: the shape is built by
+CS193V_PTY_NOSHELL in launch_as_leader, which no host's /bin/sh can take away. So check, in order:
+that launch_as_leader still exports the knob; that nothing leaked CS193V_PTY_JOB into it, which
+ptyrun refuses and says so; and that pty_start still has its argv branch.
+Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
         for k in stops-its-container releases-the-forwarded-ports kills-the-ssh-master; do
             skip "sighup:a-shortcut-launcher-$k" "the probe was not a session leader"
         done
