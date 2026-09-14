@@ -368,8 +368,9 @@ survey() {
             fi
             # THE COMMAND COMES FROM THE TABLE, so there is one source for it and a family added
             # later cannot be told to run apt. 25-installer.sh's podman-old:refused reads the same
-            # table entry and renders this message with it, so a family whose command went missing
-            # fails there rather than shipping a refusal with a blank remedy.
+            # table entry and renders this message with it -- on a Linux host; on a Mac it forks to
+            # err.podman-old-mac above, which is what #261 was -- so a family whose command went
+            # missing fails there rather than shipping a refusal with a blank remedy.
             die "$(msg err.podman-old-linux "V=$v" "MIN=$MIN_PODMAN" "UPGRADE=$PM_UPGRADE")"
         fi
         ok "$(msg ok.podman "V=$v")"
