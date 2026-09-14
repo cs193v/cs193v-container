@@ -1354,6 +1354,24 @@ assert_not_contains "strings:goodbye-is-gone" 'CS193V_GOODBYE' \
 assert_ok  "containerfile:installs-the-strings" \
            grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' $PRIVATE/Containerfile
 
+# ─── the two strings BOTH sides print (#257) ──────────────────────────────────
+# CS193V_OPEN_MACOS and CS193V_OPEN_WINDOWS are the one exception to "host prose in messages.txt,
+# container prose in the image", because doctor and cs193v-platform-messages --hostpath answer
+# the same question for the same student. Neither home can hold it: the container cannot read
+# messages.txt, and an image-only copy the launcher could not read would drift the moment either
+# was reworded -- which is exactly what the first draft of #257 did, wording the same instruction
+# two ways. So both consumers must SOURCE this file, and neither may carry its own copy.
+assert_ne  "strings:open-macos-is-defined"   "" "${CS193V_OPEN_MACOS:-}"
+assert_ne  "strings:open-windows-is-defined" "" "${CS193V_OPEN_WINDOWS:-}"
+assert_contains "launcher:reads-the-shared-strings" 'files/cs193v-strings.sh' "$(cat cs193v)"
+assert_contains "platform-messages:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
+                "$(cat $PRIVATE/files/cs193v-platform-messages)"
+# AND NEITHER SPELLS THE SENTENCE OUT. A literal in either consumer is the drift this whole
+# arrangement exists to prevent, and it would pass every other check in this file.
+open_copies="$(grep -l -F "$CS193V_OPEN_MACOS" cs193v $PRIVATE/messages.txt \
+                  $PRIVATE/files/cs193v-platform-messages 2>/dev/null || true)"
+assert_eq "strings:no-consumer-carries-its-own-copy" "" "$open_copies"
+
 assert_ok  "welcome:script-exists" test -f $PRIVATE/files/cs193v-welcome
 # The script must SOURCE the shared definitions rather than carry its own copy, or the two
 # drift and the tests go on passing against text nobody sees.
@@ -2835,6 +2853,66 @@ assert_eq  "notes:no-unbackticked-at-import" "" "$at_imports"
 lines="$(wc -l < $NOTES | do_tr -d ' ')"
 if [ "$lines" -lt 200 ]; then pass "notes:under-200-lines"
 else fail "notes:under-200-lines" "$lines lines"; fi
+
+# ─── the notes may not carry a host path, and must name a command that exists (#257) ─────────
+# BOTH OF THESE ARE PATH-AND-NAME CHECKS, not prose checks, which is what keeps them on the right
+# side of the decision recorded below: every sentence around them can be rewritten freely.
+#
+# NO HOST PATH LITERAL. Where a student's files are is per-machine -- they choose the course
+# folder at install time and may move it afterwards -- so any literal here is wrong for most
+# readers, and wrong in the way that costs work: on Windows the WSL path sits one segment from
+# the mount with the same /home/student prefix, so an agent that believed it would create a
+# directory inside the container, succeed, and lose the copy at the next --rebuild. The answer
+# comes from cs193v-platform-messages --hostpath at runtime instead. Anything under /home/student,
+# /etc, /tmp or ~ is a CONTAINER path and allowed; an absolute path outside them, or the literal
+# \\wsl, is a host path that has been written down.
+#
+# THE LOOKBEHIND EXCLUDES ~ AND . AS WELL AS \\w AND /, and it did not on the first draft: without
+# them `~/projects/lab1` and `./cs193v` matched on their TAILS as `/projects/lab1` and `/cs193v`,
+# so the check failed on three container-relative paths it was never meant to see. An absolute
+# path is one that starts a word, not one that follows a tilde.
+host_paths="$(python3 -c "
+import re, sys
+t = open(sys.argv[1]).read()
+bad = [m for m in re.findall(r'(?<![\\w/~.])/[A-Za-z][A-Za-z0-9._/-]*', t)
+       if not m.startswith(('/home/student', '/etc', '/tmp', '/usr', '/proc', '/dev'))]
+if '\\\\\\\\wsl' in t or r'\\\\wsl' in t:
+    bad.append('a literal UNC path')
+print(' '.join(sorted(set(bad))))
+" "$NOTES" 2>&1)" || host_paths="the check itself failed: $host_paths"
+assert_eq "notes:no-host-path-literals" "" "$host_paths"
+
+# AND EVERY cs193v-* COMMAND THE NOTES NAME IS ONE THE IMAGE INSTALLS. The notes tell the agent to
+# run two of these now -- cs193v-portwatch --show for ports and cs193v-platform-messages
+# --hostpath for the host folder -- and until #257 nothing checked that either existed. A renamed
+# helper would have left the notes sending the agent after a command that is not there, which
+# fails silently: the agent reads "command not found" and answers from its own guesses instead.
+# THE INSTALL LINE IS THE SOURCE, so this cannot pass by both sides being wrong together.
+notes_cmds="$(grep -oE 'cs193v-[a-z-]+' $NOTES | LC_ALL=C sort -u)"
+notes_missing=''
+for nc in $notes_cmds; do
+    grep -q "install -m 0755 /tmp/cs193v-files/$nc /usr/local/bin/$nc" $PRIVATE/Containerfile \
+        || notes_missing="$notes_missing $nc"
+done
+# NAMED SOMETHING, or the loop above is a loop over nothing and the assertion is vacuous.
+assert_ne "notes:name-at-least-one-command" "" "$notes_cmds"
+assert_eq "notes:names-an-installed-command" "" "$notes_missing"
+
+# ─── CS193V_HOST_OS is forwarded twice, and both copies must come from platform() (#257) ──────
+# The claim exec has carried it since #122 because the TERMINAL can change between launches of a
+# container that already exists, and #140 means a tmux server holding the old value can outlive
+# the session. build_run_args now carries it too, at create time, because that is the only place
+# a value can be written by the same `podman run` as the mount it describes.
+#
+# TWO INJECTION POINTS FOR ONE FACT IS A DRIFT RISK, and this is what makes it not one: both read
+# platform(), so they agree by construction rather than by anyone remembering. Hardcode either
+# and a student on one platform gets the other one's instructions, which no other check would
+# notice -- the value is a plausible token whichever way it is wrong.
+host_os_sites="$(grep -c 'CS193V_HOST_OS=\$(platform)' cs193v || true)"
+assert_eq "launcher:both-host-os-sites-read-platform" "2" "$host_os_sites"
+# AND NOTHING SPELLS IT ANY OTHER WAY, so the count above cannot be satisfied by two of three.
+assert_eq "launcher:no-host-os-is-spelled-any-other-way" "" \
+          "$(grep -n 'CS193V_HOST_OS=' cs193v | grep -v 'CS193V_HOST_OS=\$(platform)' || true)"
 
 # NOTHING asserts on the PROSE of the notes, or of CONTAINER-DESIGN.md, by decision.
 # Assertions forbidding the old bind-0.0.0.0 imperatives lived in both places briefly and were

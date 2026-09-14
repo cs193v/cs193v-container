@@ -114,6 +114,21 @@ fi
 # shellcheck source=.private/files/cs193v-ui.sh
 . "$UI"
 
+# THE TWO STRINGS BOTH SIDES PRINT (#257). files/cs193v-strings.sh is otherwise the IMAGE's
+# string file -- cs193v-welcome sources it as /etc/cs193v/strings.sh -- and the launcher reads it
+# for CS193V_OPEN_MACOS and CS193V_OPEN_WINDOWS alone, because `doctor` and
+# cs193v-platform-messages --hostpath answer the same question and must not word it differently.
+# See the exception recorded at the top of that file.
+#
+# NOT GUARDED THE WAY $UI IS, and the difference is what a failure costs. Without ui.sh there is
+# no box() and no die(), so the launcher cannot even report its own fault; without these two
+# strings, `doctor` loses one advisory line out of a report whose every other row still prints.
+# So a missing file degrades here instead of exiting, and doctor's own arms already test for
+# empty before printing.
+STRINGS="$PRIVATE/files/cs193v-strings.sh"
+# shellcheck source=.private/files/cs193v-strings.sh
+[ -r "$STRINGS" ] && . "$STRINGS"
+
 # A warning has to be ACKNOWLEDGED, not merely printed. The launcher's last act is
 # `exec podman exec -it ... cs193v-shell`, and cs193v-shell attaches tmux, which switches
 # the terminal to its alternate screen -- so every line printed beforehand is wiped from
@@ -500,7 +515,8 @@ safe_term() {
 # inside the container can see which terminal is really attached. The launcher resolves it once
 # and forwards the token on the CLAIM exec, which is the exec that starts the tmux server and
 # therefore the only one whose environment reaches a pane; see open_shell. The image maps the
-# token to prose, because student-facing container prose lives in the image (files/cs193v-platform-messages).
+# token to prose, because student-facing container prose lives in the image
+# (files/cs193v-platform-messages).
 #
 # A TOKEN AND NOT THE RAW STRING, and that is what makes this safe rather than merely guarded.
 # The value ends up in a tmux option and in a display-message argument. Forwarding
@@ -715,6 +731,21 @@ load_args() {
     done < "$ARGS_FILE"
 }
 
+# THE WORKSPACE, NAMED THE WAY THE STUDENT CAN OPEN IT (#257). One definition because three
+# callers need the same answer: build_run_args forwards it into the container, config_hash covers
+# it so a change cannot go unnoticed, and verb_doctor prints it. Three spellings of this would be
+# three chances for `doctor` and the agent to disagree in front of a student.
+#
+# $WSL_DISTRO_NAME RATHER THAN THE INSTALLER'S CONSTANT. course-install.sh knows the distro is
+# called CS193V because it MADE it; the launcher only knows the one it is running in, which is not
+# the same question and is not always the same answer -- a student who ran the installer by hand
+# inside a distro they already had is not in CS193V, and a UNC path naming CS193V would point
+# into a filesystem that is not theirs. Empty is handled by gui_projects_path, which falls back
+# rather than guessing.
+host_projects() {
+    gui_projects_path "$(platform)" "$WORKSPACE" "${WSL_DISTRO_NAME:-}"
+}
+
 # The flags the launcher itself contributes: identity, the workspace mount, and the
 # labels that make drift detectable.
 RUN_ARGS=()
@@ -734,6 +765,41 @@ build_run_args() {
     RUN_ARGS[${#RUN_ARGS[@]}]="cs193v.dir=$DIR"
     RUN_ARGS[${#RUN_ARGS[@]}]="--mount"
     RUN_ARGS[${#RUN_ARGS[@]}]="type=bind,src=$WORKSPACE,dst=$MOUNT_DST,rw$relabel"
+    # WHERE THAT MOUNT CAME FROM, in the form the student can open it (#257). The agents inside
+    # the container only ever see $MOUNT_DST, so without this they hand a student a path that
+    # does not exist on the student's own computer; cs193v-platform-messages --hostpath is what
+    # reads these, and the course notes tell the agent to run it.
+    #
+    # AT CREATE TIME, WHERE CS193V_COLS, CS193V_LINES AND CS193V_TERM_CLASS CANNOT GO. Those are
+    # forwarded on the claim exec instead because they CHANGE between launches of a container
+    # that already exists -- the student moves to another terminal or resizes it, and #140 means
+    # a tmux server carrying the old values can outlive the session. Neither of these two can
+    # change that way: the workspace is in config_hash, so a moved course folder recreates the
+    # container rather than reusing it, and refuse_if_foreign_dir turns the remaining case into
+    # an exit.
+    #
+    # WHICH MAKES THE CLAIM EXEC'S OWN CS193V_HOST_OS REDUNDANT, and it is still there. An exec
+    # inherits the container's spec environment, so this copy already reaches every pane -- but
+    # deleting the one below would change the #140 stale-server path, which has its own tests and
+    # no fault to fix. Two writers for one fact is a drift risk, so both read platform() and
+    # 10-static.sh :: launcher:both-host-os-sites-read-platform is what keeps them agreeing.
+    #
+    # AND PUTTING IT HERE IS WHAT MAKES IT TRUE RATHER THAN MERELY CONVENIENT. This -e and the
+    # --mount above are written by the SAME `podman run`, so the path published inside cannot
+    # disagree with the directory actually mounted. Forwarded on an exec instead, it would be
+    # the launcher's intent rather than the container's state -- and those two come apart on a
+    # container with no cs193v.dir label, where both the foreign-dir refusal and the confighash
+    # prompt deliberately stay quiet (see refuse_if_foreign_dir and ERRORS.md B14). The agent
+    # would then name a real directory holding somebody else's files, which is worse than saying
+    # nothing. A container predating this simply has the variables unset, and --hostpath says so.
+    #
+    # THE STRING IS RENDERED HERE, not in the container, because only the host can: platform()
+    # and $WSL_DISTRO_NAME are both host facts, and on WSL the answer is a \\wsl.localhost\...
+    # path that nothing inside could build. See gui_projects_path in files/cs193v-ui.sh.
+    RUN_ARGS[${#RUN_ARGS[@]}]="--env"
+    RUN_ARGS[${#RUN_ARGS[@]}]="CS193V_HOST_PROJECTS=$(host_projects)"
+    RUN_ARGS[${#RUN_ARGS[@]}]="--env"
+    RUN_ARGS[${#RUN_ARGS[@]}]="CS193V_HOST_OS=$(platform)"
     # The tunnel's key material, read-only. Added here rather than in container.args because
     # the paths are absolute and machine-specific, so there is nothing to write in a file that
     # ships to every student unchanged.
@@ -796,7 +862,13 @@ config_hash() {
     # moved, and a container created without them cannot serve a tunnel at all -- sshd would
     # have no authorized_keys and no host key. Without this, a student whose container
     # predates the tunnel would get no recreate prompt and a tunnel that simply never works.
-    { printf '%s\n' "$IMAGE" "$WORKSPACE" "$MOUNT_DST"
+    # host_projects() IS HASHED AS WELL AS WORKSPACE, and it is not redundant with it. The two
+    # answer differently for the same directory: $WSL_DISTRO_NAME is part of the rendered string
+    # and none of the launcher's other inputs, so a student whose distro was renamed would keep a
+    # container publishing a UNC path that no longer resolves, with nothing to notice it. Same
+    # reasoning as MOUNT_DST above: the value is decided here rather than in container.args, so
+    # this is the only thing that could see it move.
+    { printf '%s\n' "$IMAGE" "$WORKSPACE" "$MOUNT_DST" "$(host_projects)"
       printf '%s\n' "$TUNNEL_AUTH_KEYS_DST" "$TUNNEL_HOST_KEY_DST"
       printf '%s\n' ${ARGS[@]+"${ARGS[@]}"}; } | sha_stdin
 }
@@ -2385,8 +2457,34 @@ verb_doctor() {
             if   [ -z "$hv" ];      then drow "$(msg doctor.row.config)" "$(msg doctor.config.not-recorded)"
             elif [ "$hv" = "$hw" ]; then drow "$(msg doctor.row.config)" "$(msg doctor.config.matches)"
             else drow "$(msg doctor.row.config)" "$(msg doctor.config.stale)"; fi
+            # READ BACK OUT OF PODMAN rather than printed from $WORKSPACE, and that distinction
+            # is the whole value of this row: it reports what the container HAS, so on the one
+            # container where the launcher's intent and the mount disagree -- no cs193v.dir
+            # label, so neither the foreign-dir refusal nor the confighash prompt fires -- this
+            # line is the thing that says so. Do not "simplify" it to $WORKSPACE.
             pmv inspect "$NAME" --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DST\"}}{{.Source}}{{end}}{{end}}"
-            drow "$(msg doctor.row.workspace)" "${RT_OUT:-?}"
+            # RENDERED FOR THE PLATFORM, because the raw POSIX path is not openable on Windows:
+            # the launcher runs inside the WSL distro, so what podman reports is a Linux path
+            # File Explorer cannot follow. gui_projects_path turns it into the UNC form there and
+            # leaves it alone everywhere else. Guarded on a non-empty read, so the "?" fallback
+            # is still a "?" rather than a UNC path wrapped around nothing.
+            local ws_gui; ws_gui="$(host_projects)"
+            [ -n "${RT_OUT:-}" ] && \
+                ws_gui="$(gui_projects_path "$(platform)" "$RT_OUT" "${WSL_DISTRO_NAME:-}")"
+            drow "$(msg doctor.row.your-files)" "${ws_gui:-?}"
+            # AND HOW TO OPEN IT, which is the half a student could not act on before (#257).
+            # No linux arm, deliberately -- see the note beside these strings for why that
+            # student gets the path alone.
+            # FROM files/cs193v-strings.sh AND NOT FROM messages.txt, which is the one place
+            # this project puts student-facing launcher prose anywhere else -- see the exception
+            # recorded at the top of that file. The container prints the same two sentences from
+            # the same definitions, and the container cannot read messages.txt.
+            case "$(platform)" in
+                macos) [ -n "${CS193V_OPEN_MACOS:-}" ] \
+                           && printf '%s\n' "$CS193V_OPEN_MACOS" | drows ;;
+                wsl)   [ -n "${CS193V_OPEN_WINDOWS:-}" ] \
+                           && printf '%s\n' "$CS193V_OPEN_WINDOWS" | drows ;;
+            esac
             ;;
     esac
 

@@ -811,6 +811,42 @@ platform() {
     esac
 }
 
+# WHERE THE STUDENT'S OWN COPY OF ~/projects IS, named the way they can actually open it (#257).
+#
+# TWO CONSUMERS, which is what puts it in this file rather than in the launcher: build_run_args
+# forwards the rendered string into the container for cs193v-platform-messages --hostpath, and
+# verb_doctor prints it. Neither can be the one definition, and the container cannot compute it
+# at all -- nothing in there knows the host path, the platform, or the distro name.
+#
+# ARGUMENTS, NOT THE ENVIRONMENT, so all three platforms are reachable in one process with no
+# `uname` stub. The callers read platform() and $WSL_DISTRO_NAME; this does string arithmetic
+# only. 21-host-paths.sh drives every arm.
+#
+# macOS and native Linux need no translation: Finder and a Linux file manager both open the POSIX
+# path. WSL is the whole reason this exists -- the launcher runs INSIDE the distro, so the path it
+# is standing in is one File Explorer cannot open, and the form Explorer needs is the UNC one.
+#
+# THE SAME SPELLING AS win_projects_path IN course-install.sh, deliberately, so a student who read
+# the Windows install sign-off and later runs `doctor` is shown one answer and not two. Those stay
+# two functions rather than one because they answer different questions: the INSTALLER created the
+# distro and so knows its name as a constant, while the launcher has to ask the environment it
+# finds itself in. See the note at win_projects_path.
+#
+# AND AN ABSENT DISTRO NAME IS NOT A GUESS. WSL exports WSL_DISTRO_NAME into every process, so an
+# empty one means something is wrong with the assumption rather than with the student -- and a UNC
+# path naming a distro they are not in either fails to resolve or points into somebody else's
+# tree. The POSIX path is plainly not an Explorer path when a student reads it, which is the
+# better of the two failures.
+gui_projects_path() {                 # gui_projects_path PLATFORM POSIX_PATH DISTRO -> what to show
+    if [ "$1" = wsl ] && [ -n "$3" ]; then
+        # `tr` AND NOT ${2//\//\\}: this file must stay bash 3.2 compatible and is also read by
+        # /bin/sh in the image, so the substitution form is out on two counts.
+        printf '\\\\wsl.localhost\\%s%s' "$3" "$(printf '%s' "$2" | tr / '\\')"
+    else
+        printf '%s' "$2"
+    fi
+}
+
 min_podman() {                        # min_podman -> the floor for THIS platform
     case "$(platform)" in
         macos) printf '%s' "$MIN_PODMAN_MACOS" ;;

@@ -232,6 +232,35 @@ assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.
 # reached the container, so a -e line added by any other route is caught too.
 assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
                     "$(I '{{json .Config.Env}}')"
+# ...AND THE TWO THAT DO REACH IT ARRIVE AT CREATE TIME (#257), which is the other half of that
+# same invariant rather than an exception to it. The rule is that no PORT LIST is declared, because
+# which ports reach a browser is decided at runtime from what is actually listening. These two are
+# the opposite kind of value: facts about the student's own machine that nothing inside the
+# container can work out, fixed for the life of the container, and read by
+# cs193v-platform-messages --hostpath so the agents can tell a student where their files are.
+#
+# THE SAME DIRECTORY AS THE MOUNT is the assertion, not merely a non-empty string. Both are written
+# by one `podman run`, which is what makes the published path and the actual mount unable to
+# disagree -- so this is the check that would notice them being split apart. On macOS and Linux the
+# rendered form is the POSIX path; on WSL it would be the UNC form, which 21-host-paths.sh covers.
+assert_eq "env:the-host-projects-dir-reaches-the-container" "$REPO/projects" \
+          "$(E 'printenv CS193V_HOST_PROJECTS')"
+# AND THROUGH AN EXEC, not just in the container's stored config, because that is how every
+# process a student's agent runs will see it -- `podman exec` merges the container's spec
+# environment into the session, and this asserts that rather than assuming it.
+# ASKED OF THE LAUNCHER RATHER THAN RE-DERIVED, and not by sourcing cs193v-ui.sh either. An
+# expectation spelled `uname -s | grep darwin` would be a second implementation of platform() and
+# would be wrong on the platform this feature most needs to be right about -- WSL answers Linux to
+# uname and must not be called linux. Sourcing the real function looks like the fix and is worse
+# here: cs193v-ui.sh defines box(), die() and msg(), and pulling those into a suite this size
+# would redefine names under the half of it that has not run yet. --dev-print-command already
+# prints the value the launcher would pass, so the two ends can be compared with neither side
+# re-deriving anything.
+host_os_want="$(cd "$REPO" && ./cs193v --dev-print-command | do_tr ' ' '\n' \
+                | sed -n 's/^CS193V_HOST_OS=//p' | head -1)"
+assert_ne "env:the-launcher-names-a-host-os" "" "$host_os_want"
+assert_eq "env:the-host-os-reaches-the-container" "$host_os_want" \
+          "$(E 'printenv CS193V_HOST_OS')"
 record "pid1" "$(I '{{json .Config.Entrypoint}} {{json .Config.Cmd}}')"
 
 # ─── identity: hostname, and a raw shell that is plain  (#3, #4, #220) ─────────

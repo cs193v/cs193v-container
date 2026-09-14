@@ -76,6 +76,15 @@ assert_contains "print:has-detach"     "--detach"      "$line"
 assert_contains "print:has-confighash" "cs193v.confighash=" "$line"
 assert_contains "print:has-dir-label"  "cs193v.dir=$COPY"   "$line"
 assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/student/projects,rw" "$line"
+# AND THE SAME DIRECTORY IS PUBLISHED INSIDE (#257), so the agents can tell a student where their
+# files are rather than handing back a container path. THE SAME $COPY AS THE MOUNT ABOVE is the
+# assertion: these two are written by one `podman run` precisely so they cannot disagree, and a
+# test that accepted any non-empty value would not notice them coming apart. This is the shim
+# tier, so the platform is whatever the host is -- the per-platform RENDERING is 21-host-paths.sh
+# and the arm that consumes it is 50-image.sh; what is checked here is that the launcher forwards
+# it at all, and forwards the directory it actually mounted.
+assert_contains "print:publishes-the-host-projects-dir" "CS193V_HOST_PROJECTS=$COPY/projects" "$line"
+assert_contains "print:publishes-the-host-os" "CS193V_HOST_OS=" "$line"
 
 # One-directional on purpose: the launcher legitimately ADDS --name, --detach, --label and
 # --mount, so a plain diff would fail spuriously. What must be empty is the set of flags
