@@ -1502,14 +1502,17 @@ Apple Event afterwards**. Teardown completes first: at 20 Hz sampling the ssh ma
 forwarded port was released 250 ms before the close. Both verdicts were measured directly —
 `exit 0` → `verdict=[ok]` → closed; `exit 1` → `verdict=[]` → left open.
 
-*And the margin is wider than that.* A second probe left blocked deliberately passed **4628 s
-(1 h 17 m)** in the same state without AppleScript ever ending the block. Both numbers are floors,
-not limits — nothing was observed to end a block, so the 60 s and 120 s figures reported for
+*And the margin is much wider than that.* A second probe left blocked deliberately reached
+**13 726 s (3 h 49 m)** with its log never gaining a second line — so AppleScript never ended that
+block either, and it was still blocked when it was killed to tidy up rather than because anything
+happened to it. All three numbers are floors, not limits — nothing was observed to end a block, so the 60 s and 120 s figures reported for
 `do shell script` are not this. Consistent with the documented rule that `with timeout` governs
 only commands sent to *other applications*, and `do shell script` is not one.
 
-*What is still unmeasured:* a block that lasts a whole working day. If a window is ever found
-still open long after its container exited, that is the suspect, and the fallback is to ship the
+*What is still unmeasured:* a block spanning a full working day, or one crossing a sleep/wake
+cycle. 3 h 49 m of continuous blocking is measured and is the longest a student session is likely
+to run unattended, so this is close to closed. If a window is ever found still open long after its
+container exited, that is the suspect, and the fallback is to ship the
 applet without the auto-close — which is only a loss of the feature, not of §134.2.
 
 ### §134.5 — a reinstall does not re-prompt
