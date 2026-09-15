@@ -14,10 +14,10 @@
 # `::` inside a block, where it is MORE permissive than cmd.exe; those are asserted statically in
 # 25-installer.sh precisely because a green run here would prove nothing about them.
 
-# SC2034: this library sets WINE_OUT, WINE_ERR, WINE_RC and WINE_SKIP_WHY for its CALLER to read
-# -- 27-installer-windows.sh reads them a hundred times, and WINE_SKIP_WHY is the skip message
-# the caller prints when the tier declines. None of that is visible from inside the file, and
-# each of the four is written at three or four sites, so this is file-level for the same reason
+# SC2034: this library sets WINE_OUT, WINE_ERR, WINE_RC, WINE_LNK and WINE_SKIP_WHY for its
+# CALLER to read -- 27-installer-windows.sh reads them a hundred times, and WINE_SKIP_WHY is the
+# skip message the caller prints when the tier declines. None of that is visible from inside the
+# file, and each of them is written at three or four sites, so this is file-level for the reason
 # 12-run-timeout.sh's is: shellcheck names only the last one.
 # shellcheck disable=SC2034
 WINE_FIXTURE=wine
@@ -69,7 +69,7 @@ wine_new() {                          # wine_new [DOWNLOAD_DIR_NAME]
     # one fetches stage two by URL and never looks beside itself, and 25-installer.sh asserts
     # that %HERE%, wslpath and %TEMP% are all gone from the .cmd.
     cp "$PRIVATE/install-cs193v.sh" "$WINE_CASE/stage2.src"
-    WINE_OUT=''; WINE_ERR=''; WINE_RC=''; WINE_ARGV=''; WINE_DIED=''
+    WINE_OUT=''; WINE_ERR=''; WINE_RC=''; WINE_ARGV=''; WINE_LNK=''; WINE_DIED=''
 }
 
 wine_knob() {                         # wine_knob NAME VALUE
@@ -105,6 +105,59 @@ wine_plant_hijack() {                 # wine_plant_hijack
 # answering a question about %PATH% that the installer no longer asks.
 wine_hide_wsl() {                     # wine_hide_wsl
     : > "$WINE_CASE/harness.no-wsl-exe"
+}
+
+# ─── the icon the shortcut step copies, and why it is present by default  (#270) ─
+#
+# THE COPY FAILED ON EVERY CASE, which left the whole Start Menu block dead code in a tier
+# reporting 213 pass 1 fail: `copy /y "\\wsl.localhost\%DISTRO%\home\student\.cs193v-icon.ico"`
+# failed with `Path not found.`, the .cmd took :shortcutfailed, and nothing past that line ran.
+# The one red assertion was win-ok:no-stderr-noise carrying that message, which reads as harness
+# noise rather than as a block nothing entered.
+#
+# WINE DOES RESOLVE UNC, AND THE MAPPING IS A DIRECTORY IN THE PREFIX. Measured with
+# WINEDEBUG=+file inside this fixture: `\\wsl.localhost\CS193V\home\student\.cs193v-icon.ico`
+# becomes the NT path `\??\UNC\wsl.localhost\CS193V\home\student\.cs193v-icon.ico`, and `\??\`
+# is built out of the prefix's own dosdevices -- so
+#
+#     dosdevices/unc/<host>/<share>/...   IS   \\<host>\<share>\...
+#
+# and creating that tree makes the .cmd's own copy line succeed with rc 0 against the path it
+# really names. A symlink at dosdevices/unc works identically; a plain directory is used because
+# it needs nothing outside the container's own filesystem.
+#
+# DO NOT BELIEVE THE OTHER ANSWER. An earlier attempt here recorded that wine collapses
+# `\\host\share` onto the current drive -- `C:\wsl.localhost\...` -- and planted the icon under
+# drive_c accordingly. That was an artefact of the PROBE: the .cmd it measured had lost one of
+# its two leading backslashes, so wine was resolving `\wsl.localhost\...`, a drive-relative path,
+# and answering a question nobody had asked. The trace for a real UNC path says `\??\UNC`. Any
+# future probe here must be built from the installer's own bytes for that reason.
+#
+# WHAT THIS TIER STILL DOES NOT PROVE is that \\wsl.localhost resolves on WINDOWS -- that needs
+# a running distribution and a real redirector, and it stays in MANUAL.md §134.3, the same line
+# this file's header draws between a decision and an effect. What is now reachable is every
+# decision AFTER the copy, which is all of #134's Start Menu code.
+#
+# PRESENT BY DEFAULT, AND THE KNOB SUBTRACTS -- install-sandbox.sh's rule, for its reason: with
+# no arrangement at all a case gets the run that succeeds all the way to its last step, and
+# asking for :shortcutfailed is something a case does on purpose.
+#
+# CS193V IS HARDCODED, matching CS193V_FAKE_DISTRO's default in fake-powershell.c. The .cmd's
+# %DISTRO% is a constant and 25-installer.sh's windows:names-the-same-distro-as-the-sh is what
+# keeps it one.
+wine_hide_shim_icon() {               # wine_hide_shim_icon
+    : > "$WINE_CASE/harness.no-shim-icon"
+}
+
+# A Start Menu entry that was ALREADY THERE before this run. Two uses, and neither can be got at
+# by letting the fake --install create one: a leftover from an older install of the same
+# environment, and a decoy that proves the delete's target guard is consulted rather than its
+# filename alone.
+#
+# RELATIVE TO THE START MENU ROOT, so a case says where it means in the terms the defect is
+# about: `CS193V.lnk` is the root, `Programs/CS193V.lnk` is the app list.
+wine_plant_lnk() {                    # wine_plant_lnk RELPATH TARGETPATH
+    printf '%s\t%s\n' "$1" "$2" >> "$WINE_CASE/harness.startmenu.tsv"
 }
 
 # ─── running it ────────────────────────────────────────────────────────────────
@@ -146,6 +199,24 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
                     cp /home/ubuntu/shim/hostile.exe "/tmp/case/'"$WINE_DL_NAME"'/$n.exe"
                 done
             fi
+            # THE ICON, BEHIND THE UNC PATH THE .cmd NAMES. dosdevices/unc IS \\, so this tree
+            # is literally \\wsl.localhost\CS193V\home\student. See wine_hide_shim_icon above
+            # for the trace; without it the .cmd never gets past the copy.
+            if [ ! -f /tmp/case/harness.no-shim-icon ]; then
+                unc=/home/ubuntu/.wine/dosdevices/unc/wsl.localhost/CS193V/home/student
+                mkdir -p "$unc"
+                printf ICONBYTES > "$unc/.cs193v-icon.ico"
+            fi
+            # ENTRIES THAT WERE ALREADY THERE, written as the fakes write them so the delete
+            # cannot tell a planted one from one `wsl --install` made. Relative to the root.
+            sm="/home/ubuntu/.wine/drive_c/users/ubuntu/AppData/Roaming/Microsoft/Windows/Start Menu"
+            if [ -f /tmp/case/harness.startmenu.tsv ]; then
+                while IFS="$(printf "\t")" read -r rel tgt; do
+                    [ -n "$rel" ] || continue
+                    mkdir -p "$sm/$(dirname "$rel")"
+                    printf "TargetPath=%s\nArguments=\nIconLocation=\n" "$tgt" > "$sm/$rel"
+                done < /tmp/case/harness.startmenu.tsv
+            fi
             # cd first and invoke by RELATIVE name. `wine64 cmd /c <path with ( or )>` fails with
             # "Can not recognize ... as an internal or external command" (WineHQ 37789), so a
             # case testing a download folder called "cs193v (1)" would fail in the HARNESS and
@@ -157,6 +228,22 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
             printf "===OUT===\n"; cat /tmp/o
             printf "\n===ERR===\n"; cat /tmp/e
             printf "\n===ARGV===\n"; cat /tmp/case/argv.log 2>/dev/null
+            # THE START MENU AS IT STANDS AFTERWARDS, which is the one channel that reports an
+            # EFFECT rather than a decision. Paths are relative to the root and directories
+            # carry a trailing slash, so `CS193V.lnk`, `Programs/CS193V.lnk` and
+            # `Programs/CS193V/` are three distinguishable answers -- and telling the first two
+            # apart is the whole of #270.
+            printf "\n===LNK===\n"
+            if [ -d "$sm" ]; then
+                find "$sm" -mindepth 1 \( -type f -o -type d \) | LC_ALL=C sort | while IFS= read -r one; do
+                    rel=${one#"$sm/"}
+                    if [ -d "$one" ]; then
+                        printf "%s/\t(dir)\n" "$rel"
+                    else
+                        printf "%s\t%s\n" "$rel" "$(sed -n "s/^TargetPath=//p" "$one" | head -1)"
+                    fi
+                done
+            fi
             printf "\n===END===\n"
         ' > "$raw" 2>&1
 
@@ -164,6 +251,7 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
     WINE_OUT="$(_wine_section "$raw" OUT)"
     WINE_ERR="$(_wine_section "$raw" ERR)"
     WINE_ARGV="$(_wine_section "$raw" ARGV)"
+    WINE_LNK="$(_wine_section "$raw" LNK)"
     # A run that produced no report at all is a harness failure, and must not look like a program
     # that simply printed nothing -- otherwise every assert_says_not in the suite passes for free.
     # A run that produced no report is a HARNESS failure and must not be able to look like a
@@ -174,7 +262,26 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
         WINE_DIED="$CHECKER_DIED: no report from the container; raw output follows:
 $(head -20 "$raw")"
         WINE_OUT="$WINE_DIED"; WINE_ERR="$WINE_DIED"; WINE_ARGV="$WINE_DIED"; WINE_RC="$WINE_DIED"
+        WINE_LNK="$WINE_DIED"
     fi
+}
+
+# Is there an entry at exactly this path? yes|no, relative to the Start Menu root.
+#
+# AN EXACT, WHOLE-LINE MATCH, which the defect makes necessary rather than tidy: `CS193V.lnk` is
+# a substring of nothing here, but `Programs/CS193V.lnk` contains `CS193V.lnk` and a
+# `-contains`-shaped check would answer yes for the root entry while looking at the app list one.
+# grep -x on the first field is what keeps the two answers separate.
+wine_lnk_has() {                      # wine_lnk_has RELPATH -> yes|no
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    if printf '%s\n' "$WINE_LNK" | cut -f1 | grep -qxF "$1"; then printf yes; else printf no; fi
+}
+
+# What that entry points at, or "" when there is no such entry. A case asserting on a target has
+# to distinguish those two, so this deliberately does not report "absent" as a target of its own.
+wine_lnk_target() {                   # wine_lnk_target RELPATH -> its TargetPath
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    printf '%s\n' "$WINE_LNK" | awk -F'\t' -v p="$1" '$1 == p { print $2; exit }'
 }
 
 _wine_section() {                     # _wine_section FILE NAME
