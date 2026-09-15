@@ -520,7 +520,12 @@ if not "%RC%"=="0" goto stage2failed
 :: NOT wt.exe EITHER. Windows Terminal is an App Execution Alias whose backing path moves with
 :: every Store update and which Settings can switch off; wsl opens in whatever the student's
 :: default terminal is, which on Windows 11 22H2 and later is Windows Terminal anyway.
-set "LNKDIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+:: TWO DIRECTORIES, AND TELLING THEM APART IS THE WHOLE OF #270. %SMDIR% is the Start Menu
+:: ROOT, which is where `wsl --install` puts its own entry; %LNKDIR% is the app list, which
+:: is where ours goes. Derived from one another so the pair cannot drift, and the delete
+:: below reads %SMDIR% rather than assuming both entries live in the same folder.
+set "SMDIR=%APPDATA%\Microsoft\Windows\Start Menu"
+set "LNKDIR=%SMDIR%\Programs"
 set "LNKNAME=CS193V Development Environment"
 set "ICODIR=%LOCALAPPDATA%\CS193V"
 set "SHIMUNC=\\wsl.localhost\%DISTRO%\home\%LINUX_USER%"
@@ -557,7 +562,27 @@ if %errorlevel% neq 0 goto shortcutfailed
 :: the file is named for the distribution and points at something called wsl. Failure here is
 :: ignored on purpose: a leftover entry is untidy, not broken, and is not worth losing an
 :: otherwise finished install over.
-set "PSDEL=$p = '%LNKDIR%\%DISTRO%.lnk'; if (Test-Path -LiteralPath $p) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p); if ($t.TargetPath -match 'wsl') { Remove-Item -LiteralPath $p -Force } }"
+::
+:: AND IT LOOKS IN THE START MENU ROOT, WHICH IS A MEASUREMENT AND NOT A READING OF THE DOCS
+:: (#270). This used to read %LNKDIR% -- the app list, where the entry above goes -- so it
+:: never removed anything, and because the call is waived below it said nothing about that.
+:: Measured on Windows 11 26200.9445 with WSL 2.7.14.0: four environments created by
+:: `wsl --install --name`, four .lnk in %APPDATA%\Microsoft\Windows\Start Menu, none under
+:: Programs. Target is `C:\Program Files\WSL\wsl.exe` with `--distribution-id {GUID} --cd ~`,
+:: so the wsl match was right all along; only the directory was wrong.
+::
+:: WHAT MADE THE WRONG GUESS PLAUSIBLE, recorded because it still looks like the right answer:
+:: `wsl --install` ALSO creates an empty `Programs\<distro>\` DIRECTORY beside the root .lnk,
+:: so a per-distro name really does appear under %LNKDIR%. It is a folder rather than a
+:: shortcut, and an empty one renders nowhere in the app list. Deliberately left alone: a
+:: directory a student may since have put something in is not ours to remove.
+::
+:: BOTH ARE CHECKED, and the second costs one Test-Path on a path that is normally absent.
+:: Nothing documents where WSL writes this, the location has moved before, and a version that
+:: put it in the app list instead would otherwise reintroduce this exact defect in this exact
+:: way -- silently, because the failure of a delete that finds nothing is indistinguishable
+:: from the success of one that had nothing to do.
+set "PSDEL=foreach ($p in @('%SMDIR%\%DISTRO%.lnk', '%LNKDIR%\%DISTRO%.lnk')) { if (Test-Path -LiteralPath $p) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p); if ($t.TargetPath -match 'wsl') { Remove-Item -LiteralPath $p -Force } } }"
 :: cmdlint-allow: unchecked-exit -- attached HERE and not above the `set`, because
 :: _cmdlint_waivers binds to the next non-comment line and `set` would consume it.
 :: A leftover plain-shell entry is cosmetic: the install is complete and usable either

@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <direct.h>
 
 /* Every path the fakes touch lives under this directory, handed in as a Windows path. */
 static inline const char *fake_dir(void) {
@@ -153,6 +155,92 @@ static inline void fake_write_line(const char *s) {
     }
     fputc('\r', stdout); fputc(0, stdout);
     fputc('\n', stdout); fputc(0, stdout);
+}
+
+/* ─── the Start Menu, as much of one as these fakes need  (#270) ───────────────
+ *
+ * A .lnk HERE IS A TEXT FILE, and only these fakes ever read one. Authoring a real shell link
+ * needs WScript.Shell, which is COM, which the powershell stand-in is not -- and nothing in this
+ * tier resolves a shortcut, so the binary format would buy exactly nothing. What the tier is for
+ * is the PATHS and the DECISIONS: which directory each entry is written to, which directory the
+ * delete looks in, and whether the target it guards on matched.
+ *
+ * REAL FILES AT REAL PATHS, THOUGH, AND THAT IS THE PART THAT MATTERS. fake-powershell.c parses
+ * the paths out of the .cmd's OWN -Command text rather than being handed them by a knob, so a
+ * .cmd that names the wrong directory creates and deletes in the wrong place here too. That is
+ * precisely how #270 survived: the delete named a folder WSL never writes to, and both of the
+ * assertions about it compared that string against itself.
+ *
+ * NO PROSE HERE EITHER. These move paths around and never print anything a student reads, so
+ * the message-table rule at the top of this file is not weakened by them.
+ */
+
+/* mkdir -p for a Windows path, which _mkdir is not. The separator right after a drive letter is
+ * part of the root rather than a component, so `C:` is skipped instead of created. */
+static inline void fake_mkdirp(const char *dir) {
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", dir);
+    for (char *s = buf; *s; s++) {
+        if ((*s != '\\' && *s != '/') || s == buf || s[-1] == ':') continue;
+        char c = *s; *s = '\0';
+        _mkdir(buf);
+        *s = c;
+    }
+    _mkdir(buf);
+}
+
+/* Everything up to the last separator, or "" for a bare name. */
+static inline void fake_dirname(const char *path, char *out, size_t n) {
+    char *cut = NULL;
+    snprintf(out, n, "%s", path);
+    for (char *s = out; *s; s++) if (*s == '\\' || *s == '/') cut = s;
+    if (cut) *cut = '\0'; else out[0] = '\0';
+}
+
+/* Case-insensitive substring, which is what PowerShell's `-match 'wsl'` amounts to here. */
+static inline int fake_contains_ci(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    if (!n) return 1;
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < n && hay[i] &&
+               tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i])) i++;
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
+/* Create the parent directories and record the three properties the .cmd sets. 0 means the file
+ * could not be opened, which is the only failure a case can arrange. */
+static inline int fake_lnk_write(const char *path, const char *target,
+                                 const char *args, const char *icon) {
+    char dir[1024]; FILE *f;
+    fake_dirname(path, dir, sizeof dir);
+    if (dir[0]) fake_mkdirp(dir);
+    if (!(f = fopen(path, "wb"))) return 0;
+    fprintf(f, "TargetPath=%s\n",  target ? target : "");
+    fprintf(f, "Arguments=%s\n",   args   ? args   : "");
+    fprintf(f, "IconLocation=%s\n", icon  ? icon   : "");
+    fclose(f);
+    return 1;
+}
+
+/* The recorded TargetPath, or 0 when there is no entry at that path at all -- which is the
+ * `Test-Path -LiteralPath` the .cmd asks first, and the question #270 turned on. */
+static inline int fake_lnk_target(const char *path, char *out, size_t n) {
+    char line[1024]; FILE *f; int found = 0;
+    if (!(f = fopen(path, "rb"))) return 0;
+    while (fgets(line, sizeof line, f)) {
+        size_t len;
+        if (strncmp(line, "TargetPath=", 11) != 0) continue;
+        len = strlen(line);
+        while (len && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        snprintf(out, n, "%s", line + 11);
+        found = 1;
+        break;
+    }
+    fclose(f);
+    return found;
 }
 
 #endif
