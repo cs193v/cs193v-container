@@ -737,6 +737,127 @@ assert_eq   "win-hijack:exits-zero"                     "0" "$WINE_RC"
 assert_eq   "win-hijack:hands-off-to-bash-once"         "1" "$(wine_argv_count '\-e env CS193V_WINDOWS=1 bash /var/tmp/install-cs193v.sh')"
 assert_says_not "win-hijack:no-unrecognised-command"    "recognize" "$WINE_OUT$WINE_ERR"
 
+# ─── CLASS: the Start Menu, which is an EFFECT and not a decision  (#134, #270) ─
+#
+# THE SECOND CASE IN THIS FILE THAT ASSERTS ON WHAT IS ON THE MACHINE AFTERWARDS rather than on a
+# transcript or an argv count, and it is here for the same reason win-hijack is: the property
+# cannot be read off the source. #270's defect was one wrong directory in a string that named the
+# right filename and guarded on the right target, so every static assertion about it compared
+# that string against itself and passed.
+#
+# WHAT MADE IT UNREACHABLE, WHICH IS THE PART WORTH NOT REPEATING. #134 added both PowerShell
+# calls without touching this file or fixtures/win-fakes/, and three separate things then stopped
+# any of it from running: the icon copy reads a \\wsl.localhost path and wine does not implement
+# UNC, so `copy` failed first; fake-powershell.c dispatched on neither marker, so both calls
+# would have returned its 120; and the .cmd checks PSLNK's code, so the run would have taken
+# :shortcutfailed even had the copy worked. The tier reported 213 pass 1 fail, and the one fail
+# was win-ok:no-stderr-noise carrying `Path not found.` -- which reads as harness noise rather
+# than as a block nothing entered. lib/wine.sh's wine_hide_shim_icon has the measurement.
+#
+# THE WHOLE SEQUENCE IS THE FIXTURE, AND NOTHING PLANTS THE ENTRY UNDER TEST. This case starts
+# with NO environment registered, so the .cmd creates one -- and it is the fake's own `--install`
+# arm that writes the Start Menu entry, at the path Windows writes it to. So what the delete
+# finds is what a create produced, which is the same standard win-ok:restarts-between-the-two-
+# passes holds the provisioning order to.
+wine_new
+wine_list                               # nothing registered yet: this run creates it
+# TWO ENTRIES THAT MUST SURVIVE, and each rules out a different way of passing. Another
+# distribution's entry says the delete named a file rather than emptying a directory; a longer
+# name beginning with this one says it named it exactly rather than by prefix -- which is not
+# idle, because `-match` is a REGEX operator and the obvious wrong spelling of this whole step
+# is `Get-ChildItem | Where-Object Name -match $env:DISTRO`.
+#
+# NEITHER OF THESE TESTS THE TARGET GUARD, and an earlier draft claimed the second one did.
+# Measured: with `-match 'wsl'` removed from the .cmd altogether the tier stayed at 231 pass 0
+# fail, because the delete only ever opens %DISTRO%.lnk and neither of these entries is at that
+# path. The guard has a case of its own below, where the decoys ARE at the two paths.
+wine_plant_lnk 'Ubuntu.lnk'        'C:\Program Files\WSL\wsl.exe'
+wine_plant_lnk 'CS193V-notwsl.lnk' 'C:\Windows\notepad.exe'
+# AND ONE IN THE APP LIST, which is where the delete used to look and the only place it looked.
+# With the fix it checks both, so this one goes too -- and it is what would go red if a later
+# change swapped one directory for the other instead of adding the second.
+wine_plant_lnk 'Programs/CS193V.lnk' 'C:\Program Files\WSL\wsl.exe'
+wine_run
+assert_eq   "win-lnk:exits-zero"            "0" "$WINE_RC"
+assert_eq   "win-lnk:no-stderr-noise"       ""  "$WINE_ERR"
+# THE BLOCK WAS ENTERED AT ALL, asserted before anything about its results. Every assertion
+# below is an absence or a presence in a directory tree, and :shortcutfailed produces a tree
+# that satisfies several of them for the wrong reason.
+assert_says_not "win-lnk:does-not-report-the-entry-as-failed" "could not be created" "$WINE_OUT"
+assert_eq   "win-lnk:creates-the-entry-once" "1" \
+            "$(wine_argv_count 'powershell\.exe .*CreateShortcut.*\.Save\(\)')"
+assert_eq   "win-lnk:runs-the-delete-once"   "1" \
+            "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+# ─── and now the tree itself ───────────────────────────────────────────────────
+# OURS IS IN THE APP LIST. %LNKDIR% is what puts it in "All apps"; the root is not enumerated
+# there on Windows 11, so an entry written to %SMDIR% would be one a student cannot find.
+assert_eq "win-lnk:writes-the-course-entry-to-the-app-list" "yes" \
+          "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+assert_contains "win-lnk:the-course-entry-targets-wsl" "wsl.exe" \
+          "$(wine_lnk_target 'Programs/CS193V Development Environment.lnk')"
+# AND WSL'S OWN IS GONE. This is the assertion #270 is about: it is red against the shipped
+# .cmd, whose delete reads %LNKDIR% and therefore never looks here at all.
+assert_eq "win-lnk:removes-the-entry-wsl-made-for-itself" "no" \
+          "$(wine_lnk_has 'CS193V.lnk')"
+assert_eq "win-lnk:also-removes-one-left-in-the-app-list" "no" \
+          "$(wine_lnk_has 'Programs/CS193V.lnk')"
+# THE THREE THINGS IT MUST NOT TOUCH.
+assert_eq "win-lnk:leaves-another-distros-entry-alone" "yes" "$(wine_lnk_has 'Ubuntu.lnk')"
+assert_eq "win-lnk:matches-the-name-exactly-not-by-prefix" "yes" \
+          "$(wine_lnk_has 'CS193V-notwsl.lnk')"
+# The empty folder `wsl --install` makes beside its shortcut, which is the thing that made the
+# wrong directory look like the right one. A student may have put something in it since.
+assert_eq "win-lnk:leaves-the-empty-folder-wsl-made" "yes" "$(wine_lnk_has 'Programs/CS193V/')"
+
+# ─── THE TARGET GUARD, at the two paths where it can actually be consulted ─────
+#
+# WHY THIS NEEDS A CASE OF ITS OWN. The delete opens exactly %SMDIR%\%DISTRO%.lnk and
+# %LNKDIR%\%DISTRO%.lnk, so `-match 'wsl'` can only ever change the outcome for an entry AT one
+# of those two paths -- and in the case above both of them hold something WSL made, which the
+# guard is supposed to accept. A decoy anywhere else cannot go red when the guard is broken, and
+# one placed here would have to displace the entry whose removal that case exists to check.
+#
+# SO THE ENVIRONMENT ALREADY EXISTS HERE. With CS193V registered the .cmd skips :makedistro, the
+# fake's --install arm never runs, and both paths are free for a decoy that must survive. That is
+# also a real machine: a student who had renamed or retargeted these by hand, or a future WSL
+# that writes something else there, must not have it deleted on the strength of its filename.
+#
+# MEASURED IN BOTH DIRECTIONS, because a guard can fail two ways and the wrong one is the one
+# that deletes a student's file. `-match ''` is true for every string: with it, both assertions
+# below go red. `-match 'zzz'` is true for none: with that, win-lnk:removes-the-entry-wsl-made-
+# for-itself in the case above goes red instead. Neither mutation touches the other's case.
+wine_new
+wine_list CS193V
+wine_plant_lnk 'CS193V.lnk'          'C:\Windows\notepad.exe'
+wine_plant_lnk 'Programs/CS193V.lnk' 'C:\Windows\notepad.exe'
+wine_run
+assert_eq "win-lnk-guard:exits-zero"      "0" "$WINE_RC"
+assert_eq "win-lnk-guard:runs-the-delete" "1" \
+          "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+assert_eq "win-lnk-guard:leaves-a-non-wsl-entry-in-the-root" "yes" \
+          "$(wine_lnk_has 'CS193V.lnk')"
+assert_eq "win-lnk-guard:leaves-a-non-wsl-entry-in-the-app-list" "yes" \
+          "$(wine_lnk_has 'Programs/CS193V.lnk')"
+
+# ...AND THE ARM WHERE THE ENTRY CANNOT BE MADE, which is what stops the case above passing for
+# a reason other than the one it claims: with the icon gone the .cmd takes :shortcutfailed, so
+# the same tree assertions come out the other way and the install still succeeds.
+#
+# THE SIGN-OFF IS NOT ASSERTED HERE, for the reason win-ok gives: course-install.sh prints it
+# inside WSL, and this file's half of #218 is the handover. What is asserted is the one line the
+# .cmd itself prints on this arm, and that a failed shortcut does not fail the install.
+wine_new
+wine_list CS193V
+wine_hide_shim_icon
+wine_run
+assert_eq   "win-lnk-noicon:still-exits-zero"      "0" "$WINE_RC"
+assert_says "win-lnk-noicon:says-the-entry-failed" "could not be created" "$WINE_OUT"
+assert_says "win-lnk-noicon:points-back-at-the-typed-commands" "commands shown above" "$WINE_OUT"
+assert_eq   "win-lnk-noicon:writes-no-course-entry" "no" \
+            "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+assert_eq   "win-lnk-noicon:never-reaches-the-delete" "0" \
+            "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+
 # ─── decision coverage, reported rather than assumed ──────────────────────────
 # What this checks is that every branch target in the file was reached by some case above, and
 # the count is derived from the .cmd rather than from a number typed here.

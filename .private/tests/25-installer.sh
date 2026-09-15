@@ -2647,10 +2647,64 @@ fi
 
 # AND WSL'S OWN ENTRY GOES. Two entries a letter apart is worse than either alone; the plain one
 # opens a login shell in the home directory, not the launcher.
+#
+# ─── WHICH DIRECTORY, AND WHY THIS USED TO BE UNASKED  (#270) ──────────────────
+#
+# THE TWO ASSERTIONS THAT WERE HERE WERE VACUOUS, and the shape is worth keeping because it is
+# an easy one to write again. They read the PSDEL string and checked it contained `%DISTRO%.lnk`
+# and `TargetPath` -- both true, both still true, and neither able to see that the path in front
+# of that filename named a directory `wsl --install` never writes to. Mutating the .cmd to delete
+# `C:\nonexistent\%DISTRO%.lnk` left both green. So the delete had never removed anything, on any
+# machine, and because the call carries a documented unchecked-exit waiver it said nothing.
+#
+# WHAT IS ASSERTED NOW IS THE DIRECTORY, out of the two `set` lines rather than out of the
+# PowerShell, so a rename of either variable fails here rather than silently matching nothing.
+# %SMDIR% is the Start Menu ROOT -- measured on Windows 11 26200.9445 / WSL 2.7.14.0 as where
+# `wsl --install --name` puts its entry -- and %LNKDIR% is the app list one level down.
+#
+# AND 27-installer-windows.sh's win-lnk:removes-the-entry-wsl-made-for-itself IS THE OTHER HALF.
+# A directory name is still only a string here; that case plants an entry where WSL puts one and
+# asserts it is gone afterwards. Neither is redundant: this one runs in the static tier on every
+# machine, that one needs wine and 3.46 GB.
+sm_dir="$(printf '%s\n' "$WCMD" | sed -n 's/^set "SMDIR=\(.*\)"$/\1/p')"
+lnk_dir="$(printf '%s\n' "$WCMD" | sed -n 's/^set "LNKDIR=\(.*\)"$/\1/p')"
 del_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSDEL=\(.*\)"$/\1/p')"
-assert_ne       "windows:the-delete-was-readable" "" "$del_ps"
-assert_contains "windows:deletes-the-entry-named-for-the-distro" '%DISTRO%.lnk' "$del_ps"
-assert_contains "windows:the-delete-is-guarded-on-the-target"    'TargetPath'   "$del_ps"
+assert_ne "windows:the-delete-was-readable"       "" "$del_ps"
+assert_ne "windows:the-start-menu-root-was-readable" "" "$sm_dir"
+# THE ROOT IS THE ROOT: under %APPDATA%, and not the app list. A `set "SMDIR=...\Programs"` is
+# the exact regression this rule exists to stop, so it is checked rather than assumed from the
+# derivation below.
+assert_match        "windows:the-start-menu-root-is-under-appdata" \
+                    '^%APPDATA%\\Microsoft\\Windows\\Start Menu$' "$sm_dir"
+assert_not_contains "windows:the-start-menu-root-is-not-the-app-list" 'Programs' "$sm_dir"
+# AND THE APP LIST IS DERIVED FROM IT, which is what keeps the pair from drifting: one of them
+# has to change for the other to.
+assert_eq "windows:the-app-list-is-the-root-plus-programs" '%SMDIR%\Programs' "$lnk_dir"
+
+# OURS GOES IN THE APP LIST. The Start Menu root is not enumerated in "All apps" on Windows 11,
+# so an entry written to %SMDIR% would be one a student cannot find by typing its name. Read out
+# of PSLNK unexpanded, because that is what the file says and %LNKNAME% is pinned separately
+# above against the mac bundle's label.
+lnk_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSLNK=\(.*\)"$/\1/p')"
+assert_ne       "windows:the-create-was-readable" "" "$lnk_ps"
+assert_contains "windows:the-course-entry-goes-in-the-app-list" \
+                'CreateShortcut('"'"'%LNKDIR%\%LNKNAME%.lnk'"'"')' "$lnk_ps"
+
+# AND THE DELETE LOOKS IN THE ROOT. This is the assertion whose absence was #270.
+assert_contains "windows:the-delete-reads-the-start-menu-root" '%SMDIR%\%DISTRO%.lnk' "$del_ps"
+assert_contains "windows:the-delete-is-guarded-on-the-target"  'TargetPath'            "$del_ps"
+# BOTH DIRECTORIES, NOT ONE SWAPPED FOR THE OTHER. Nothing documents where WSL writes this and
+# it has moved before, so a version that used the app list instead would reintroduce the defect
+# in exactly the same silent way.
+assert_contains "windows:the-delete-also-reads-the-app-list" '%LNKDIR%\%DISTRO%.lnk' "$del_ps"
+# THE FOLDER `wsl --install` LEAVES BESIDE ITS SHORTCUT IS NOT OURS TO REMOVE. It is an empty
+# directory named for the distribution in the app list -- the detail that made #270's wrong
+# guess look right -- and a student may have put something in it since. So the file gets exactly
+# one deletion, of the .lnk the loop is holding, and no way to descend into anything.
+assert_eq "windows:deletes-in-exactly-one-place" "1" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'Remove-Item')"
+assert_contains     "windows:the-delete-removes-the-path-it-tested" 'Remove-Item -LiteralPath $p' "$del_ps"
+assert_not_contains "windows:removes-nothing-recursively"           '-Recurse'                    "$WCMD"
 
 # ─── the four arms, asserted  (#134) ───────────────────────────────────────────
 assert_eq "sign-off:macos-with-a-bundle-promises-the-app" \
