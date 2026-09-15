@@ -127,10 +127,11 @@ launch_in_pty() {                     # launch_in_pty -> sets PTY_PID, and PTY_P
 }
 
 # ...AND THE OTHER SHAPE, which is the ONLY difference between them. Everything the comment above
-# gives as a reason to set CS193V_PTY_JOB is a reason it models a student's terminal -- and a #134
-# shortcut is not one. "Run this command instead of a shell" has no login shell to be the leader,
-# so the launcher is, which is the shape §1c measures and the shape #170 says it stops being
-# latent in.
+# gives as a reason to set CS193V_PTY_JOB is a reason it models a student's terminal, and this shape
+# is the one that does not have one: "run this command instead of a shell" has no login shell to be
+# the leader, so the launcher is, which is the shape §1c measures and the shape #170 says it stops
+# being latent in. Read §1c's header for which real entry points do and do not produce it -- #134's
+# two, measured, do NOT.
 #
 # CONSTRUCTED, NOT BORROWED, and this used to be the difference between a green Mac and a red
 # Ubuntu. Simply omitting CS193V_PTY_JOB is not this shape: ptyrun then execs `/bin/sh -c` in the
@@ -341,12 +342,13 @@ tore down 4/4 when measured. Check the ssh master and the forwarded ports before
     fi
 fi
 
-# ─── 1c. the shape an OS-native shortcut makes: the launcher IS the session leader ───
-# WHY THIS GROUP EXISTS AND 1b DOES NOT COVER IT (#134, #170). Every group above launches in job
+# ─── 1c. the shape where the launcher IS the session leader ───
+# WHY THIS GROUP EXISTS AND 1b DOES NOT COVER IT (#170). Every group above launches in job
 # mode, which is a student's tree today: a login shell that stays, the launcher a foreground job
-# beneath it. A shortcut built as "run this command instead of a shell" -- a Terminal profile, a
-# .app bundle, a .desktop Exec= -- has no login shell at all, so the LAUNCHER is the session
-# leader. #170 says that is where its buffer poison stops being latent, and measured, it is:
+# beneath it. An entry point built as "run this command instead of a shell" -- a Terminal profile,
+# a `.desktop` Exec=, a bundle that execs the launcher directly -- has no login shell at all, so the
+# LAUNCHER is the session leader. #170 says that is where its buffer poison stops being latent, and
+# measured, it is:
 #
 #   * NOTHING REVOKES THE CONTROLLING TERMINAL while the trap runs, because revocation happens
 #     when the leader exits and the leader is the launcher, still running its teardown. So
@@ -363,6 +365,16 @@ fi
 # this shape left the container RUNNING. With #170's drains in place this group is green. That pair
 # is the whole argument for the group existing, and it is also why 1b's record stays a record: it
 # cannot see this.
+#
+# WHAT #134 ACTUALLY SHIPS IS NOT THIS SHAPE, and an earlier draft of this header said it was.
+# Measured on a real Mac: both OS-native entry points reach the launcher THROUGH an interactive
+# shell -- `do script` types a command at a Terminal login shell, and the Windows `.lnk` runs
+# `bash -ic` -- so `login` is the sole session leader and the launcher is a foreground job, which is
+# 1b's shape and not this one. The `bash -ic` is deliberate: the obvious `-- ~/.cs193v-enter` WOULD
+# have built this shape, and it was rejected for the reason spelled out above. So this
+# group covers a STRICTER shape than anything the repo ships today, which is why it stays: it is
+# where #170's poison is deterministic rather than latent, and the next entry point somebody adds
+# (a Terminal profile, a `.desktop` Exec=) would land in it.
 #
 # AND ON glibc THE PAIR DOES NOT DIFFER, measured both ways on Linux: every assertion below passes
 # with the drains in place and with the whole of #170 reverted. So here this group asserts the
@@ -401,7 +413,7 @@ else
     if [ "$SL_IS" != yes ]; then
         fail "sighup:the-shortcut-probe-really-is-a-session-leader" \
              "the launcher is pid ${SL_PID:-unknown} and pid_leads_its_session says ${SL_IS:-unknown},
-so this group is measuring job mode a second time rather than the shape #134 ships.
+so this group is measuring job mode a second time rather than the session-leader shape.
 NOT A PLATFORM LIMIT ANY MORE, and this message used to say it was: the shape is built by
 CS193V_PTY_NOSHELL in launch_as_leader, which no host's /bin/sh can take away. So check, in order:
 that launch_as_leader still exports the knob; that nothing leaked CS193V_PTY_JOB into it, which

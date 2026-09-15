@@ -3344,6 +3344,14 @@ assert_ok  "shellcheck:wsl-provision" \
 # sources nothing.
 assert_ok  "shellcheck:make-icons" \
            shellcheck --severity=warning $PRIVATE/icons/make-icons.sh
+# THE APPLET BUILDER AND THE HELPER IT BUNDLES (#134). The builder ships to nobody, but it is
+# the only thing that can rebuild the applet that DOES ship. The helper is different: it is
+# copied INTO the bundle and runs on every student's Mac, inside the Terminal window, so a
+# quoting bug in it is a session nobody can start. No -x on either: neither sources anything.
+assert_ok  "shellcheck:make-macapp" \
+           shellcheck --severity=warning $PRIVATE/macapp/make-macapp.sh
+assert_ok  "shellcheck:macapp-helper" \
+           shellcheck --severity=warning $PRIVATE/macapp/cs193v-run
 # The shared presentation layer, checked ALONE as well as through the launcher: the container
 # sources it with no launcher in the picture, so it has to stand up by itself.
 #

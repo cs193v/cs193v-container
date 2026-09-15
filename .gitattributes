@@ -112,8 +112,30 @@
 #
 #     git archive HEAD | tar -t | grep '^\.private/icons/'       # expect exactly these two
 /.private/icons          -export-ignore
-/.private/icons/cs193v.icns -export-ignore
 /.private/icons/cs193v.ico  -export-ignore
+
+# cs193v.icns IS NO LONGER SHIPPED, and that is a change rather than an oversight. It used to be
+# read at install time, when install_mac_app generated a bundle and copied the icon into it. The
+# applet is now prebuilt and carries its own copy, so the only install-time reader left is the
+# Windows shim, which wants the .ico. The .icns stays in the repo because make-macapp.sh reads
+# it; it just stops travelling to students, which is 224 KB off the tree.
+
+# ─── the prebuilt macOS applet  (#134) ────────────────────────────────────────
+# THE BUNDLE SHIPS; WHAT BUILT IT DOES NOT. Same split as icons/: cs193v-app.applescript and
+# make-macapp.sh are for reading and rebuilding on a staff Mac, and cs193v-run is copied INTO
+# the bundle at build time so the loose copy would be a second, divergeable one. All three stay
+# behind the `/.private/**` blanket; only the bundle is un-ignored.
+#
+# BOTH FORMS AGAIN, for the reason the files/ pair above records: `/.private/**` matches the
+# macapp DIRECTORY, and a pruned walk never reaches its children.
+# THREE LINES, NOT TWO, and the middle one is the one I first left out: `/.private/**` prunes
+# the macapp directory AND the CS193V.app directory inside it, and a pruned walk never reaches
+# the children -- so un-ignoring `CS193V.app/**` alone has nothing to act on. Measured: the
+# archive contained `.private/macapp/` and not one file beneath it. The `/**` then covers every
+# nested directory too, Contents/ and Contents/MacOS/ included, because ** crosses slashes.
+/.private/macapp                 -export-ignore
+/.private/macapp/CS193V.app      -export-ignore
+/.private/macapp/CS193V.app/**   -export-ignore
 
 # ─── the first binary assets in this repo  (#134) ──────────────────────────────
 # EVERY OTHER TRACKED FILE HERE IS TEXT, which is why no rule covered these and why they need
@@ -127,6 +149,15 @@
 *.png   binary
 *.icns  binary
 *.ico   binary
+
+# THE APPLET NEEDS A PATH RULE, NOT AN EXTENSION ONE, and this is measured rather than assumed.
+# Inside a signed bundle, Contents/Info.plist and Contents/_CodeSignature/CodeResources are XML
+# TEXT with no useful extension, and under core.autocrlf git rewrites both -- after which
+# `codesign -v` reports `invalid Info.plist`. The Mach-O itself survives, because git detects it
+# as binary on its own, so the app still LAUNCHES in that state and nothing but a verify would
+# notice. A bundle that fails to verify has a damaged identity, which is the one thing the applet
+# exists to have. With this rule the round-trip is byte-identical and the seal stays VALID.
+/.private/macapp/CS193V.app/** binary
 
 # CRLF ON THE BATCH FILE IS LOAD-BEARING, and this is the only thing that keeps it.
 #

@@ -2338,145 +2338,191 @@ for route in 'wsl.exe --status' \
               "$(run_checker cmdlint_unqualified_programs "$violating")"
 done
 
-# ─── the macOS .app bundle  (#134) ─────────────────────────────────────────────
-# GENERATION IS PORTABLE AND ONLY LAUNCHING IS NOT, which is what puts these cases in the shim
-# tier rather than behind a Darwin gate. install_mac_app writes three files and copies an icon;
-# `osascript` appears only inside the TEXT of the script it writes, and is run by a student
-# double-clicking the bundle, never by the installer and never here. So a Linux developer gets
-# the same verdict on the same code, and the one thing neither platform can check from a test --
-# what Terminal.app does with that script -- is MANUAL.md's, where it is written down.
+# ─── the macOS entry point: a prebuilt applet  (#134) ──────────────────────────
+# WHAT CHANGED AND WHY THE ASSERTIONS MOVED. This used to be a bundle whose CFBundleExecutable
+# was a /bin/sh script, and roughly ten assertions here read that script as text. Two measured
+# defects killed that shape: Launch Services cannot read an architecture out of a script, so
+# Apple Silicon offers Rosetta; and TCC attributes the Automation grant to the INTERPRETER, so
+# the grant landed on /bin/sh -- meaning every shell script the student ever ran gained
+# permission to control Terminal, and the usage string was never shown because the prompt did
+# not name the app. A compiled applet is a real universal Mach-O with a real identity.
+#
+# THE APPLET IS BUILT AT AUTHORING TIME AND COMMITTED, for a reason a student's Mac cannot get
+# around: `codesign` shells out to /usr/bin/codesign_allocate, which is a Command Line Tools
+# shim, so on a Mac without the CLT it can verify but not sign. A bundle compiled there could
+# not be re-sealed after its Info.plist was written, and a broken seal damages exactly the
+# identity the applet exists to have. macapp/make-macapp.sh does that work; this file checks
+# what it produced. Same trade as the icons (11-export.sh:68).
+#
+# WHAT STAYS PORTABLE, WHICH IS MORE THAN IT LOOKS. install_mac_app now COPIES a prebuilt
+# bundle and writes one text file, so its behaviour is checkable on Linux exactly as before; and
+# plist_get reads binary plists through python's plistlib, so the metadata is too. Only three
+# questions genuinely need a Mac -- the Mach-O's architectures, the signature, and decompiling
+# the script -- and those are gated below. The helper is a shell script, so the synchronisation
+# it implements stays verifiable everywhere.
+
+# ── the committed artifact ─────────────────────────────────────────────────────
+MACAPP="$PRIVATE/macapp/CS193V.app"
+assert_file "applet:source-is-committed"   "$PRIVATE/macapp/cs193v-app.applescript"
+assert_file "applet:builder-is-committed"  "$PRIVATE/macapp/make-macapp.sh"
+assert_file "applet:executable-is-there"   "$MACAPP/Contents/MacOS/applet"
+assert_exec "applet:executable-is-executable" "$MACAPP/Contents/MacOS/applet"
+assert_file "applet:icon-is-in-resources"  "$MACAPP/Contents/Resources/cs193v.icns"
+assert_exec "applet:helper-is-in-resources" "$MACAPP/Contents/Resources/cs193v-run"
+assert_file "applet:script-is-compiled"    "$MACAPP/Contents/Resources/Scripts/main.scpt"
+# AND NOT osacompile's DROPLET ASSETS: Assets.car is 375 KB of template UI this applet never
+# shows, and shipping it would mean raising the student tree's size ceiling to carry something
+# nothing reads. Measured safe to drop -- the applet still runs and `display alert` still works.
+assert_no_file "applet:carries-no-droplet-assets" "$MACAPP/Contents/Resources/Assets.car"
+assert_no_file "applet:carries-no-template-icon"  "$MACAPP/Contents/Resources/applet.icns"
+
+# plistlib, NOT plutil, so this runs on Linux -- the same reason the old plist_get gave. It
+# reads the binary plist osacompile writes without caring that it is binary.
+applet_plist() {                      # applet_plist KEY -> value | key-absent | sentinel
+    python3 - "$MACAPP/Contents/Info.plist" "$1" <<'APLIST' 2>/dev/null || printf 'plist-unreadable'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    print(plistlib.load(f).get(sys.argv[2], 'key-absent'))
+APLIST
+}
+assert_eq "applet:plist-names-the-executable-that-is-there" "applet" "$(applet_plist CFBundleExecutable)"
+assert_eq "applet:plist-display-name-is-the-label"   "$MAC_LABEL"   "$(applet_plist CFBundleDisplayName)"
+assert_eq "applet:plist-name-is-the-label"           "$MAC_LABEL"   "$(applet_plist CFBundleName)"
+assert_eq "applet:plist-carries-the-icon-file"       "cs193v.icns"  "$(applet_plist CFBundleIconFile)"
+assert_eq "applet:plist-identifier-is-stable"        "edu.stanford.cs193v.launcher" \
+          "$(applet_plist CFBundleIdentifier)"
+# The identifier matters more than it looks: TCC keys its grant on it, so changing it silently
+# re-prompts every student who had already allowed the app.
+assert_ne "applet:plist-explains-the-automation-prompt" "key-absent" \
+          "$(applet_plist NSAppleEventsUsageDescription)"
+# AND THESE TWO MUST BE ABSENT, not merely unread. They existed only to tell Launch Services
+# what a shell script could not; a universal Mach-O declares its own architectures. Keeping them
+# would be dead weight that a reader would mistake for load-bearing.
+assert_eq "applet:declares-no-architecture-priority" "key-absent" "$(applet_plist LSArchitecturePriority)"
+assert_eq "applet:does-not-require-native-execution" "key-absent" "$(applet_plist LSRequiresNativeExecution)"
+
+# ── the three questions that need a Mac ────────────────────────────────────────
+if [ "$(uname -s)" = Darwin ]; then
+    # A REAL MACH-O COVERING BOTH ARCHITECTURES is the whole Rosetta fix, and the `x86_64` half
+    # is what keeps an Intel Mac working (MANUAL.md 5.3).
+    assert_eq "applet:covers-both-architectures" "x86_64 arm64" \
+              "$(lipo -archs "$MACAPP/Contents/MacOS/applet" 2>/dev/null)"
+    # THE SEAL, checked after every edit the builder makes. This is the assertion that catches a
+    # git round-trip mangling Info.plist or CodeResources -- measured: without a path-scoped
+    # `binary` attribute those two are rewritten under core.autocrlf and codesign reports
+    # `invalid Info.plist`. The app still LAUNCHES in that state, so nothing else would notice.
+    assert_ok "applet:bundle-is-sealed" codesign --verify "$MACAPP"
+    # AND THE COMPILED SCRIPT REALLY IS THE COMMITTED SOURCE. A binary is the one artifact a
+    # reviewer cannot read, so the link between it and the readable source is asserted rather
+    # than trusted. Compared on the substantive lines, because osadecompile reformats.
+    decompiled="$(osadecompile "$MACAPP/Contents/Resources/Scripts/main.scpt" 2>/dev/null)"
+    assert_ne       "applet:script-decompiles"                    "" "$decompiled"
+    assert_contains "applet:script-asks-terminal-to-do-script"    "do script"       "$decompiled"
+    assert_contains "applet:script-blocks-on-the-fifo"            "read -r v"       "$decompiled"
+    assert_contains "applet:script-closes-only-on-success"        "if verdict is"   "$decompiled"
+    assert_contains "applet:script-reads-the-course-dir-record"   "course-dir"      "$decompiled"
+    # No placeholder survived into the shipped artifact.
+    assert_not_match "applet:no-placeholder-survived-the-build"   '@@[A-Z_]+@@'     "$decompiled"
+else
+    for k in covers-both-architectures bundle-is-sealed script-decompiles \
+             script-asks-terminal-to-do-script script-blocks-on-the-fifo \
+             script-closes-only-on-success script-reads-the-course-dir-record \
+             no-placeholder-survived-the-build; do
+        skip "applet:$k" "needs macOS: lipo, codesign and osadecompile have no Linux equivalent"
+    done
+fi
+
+# ── the helper, which is a text file and therefore portable ────────────────────
+# EVERY TOKEN HERE WAS MEASURED, and an earlier design that opened the fd in the typed command
+# instead could block the waiter forever. Comments stripped first, because the helper documents
+# its own rules and a substring search would match the documentation -- 10-static.sh:13.
+helper_code="$(sed 's/#.*//' "$PRIVATE/macapp/cs193v-run" 2>/dev/null)"
+assert_ne       "helper:code-survived-comment-stripping" "" "$(printf '%s' "$helper_code" | do_tr -d ' \n')"
+assert_contains "helper:opens-the-fifo-read-write"   '9<>'  "$helper_code"
+assert_contains "helper:closes-the-fd-for-the-launcher" '9>&-' "$helper_code"
+assert_contains "helper:runs-the-launcher"           './cs193v' "$helper_code"
+# THE SENTINEL IS GATED ON THE EXIT STATUS. Unconditional, it would close the window ~100ms
+# after a fast refusal and the student would never read the error.
+assert_contains "helper:signals-only-on-success"     '[ "$st" -eq 0 ]' "$helper_code"
+# AND IT MUST NOT exec THE LAUNCHER: that would make it the process group leader in place of the
+# helper. The two `exec 9` forms are redirections and are fine, so the ban is on the launcher.
+assert_not_contains "helper:does-not-exec-the-launcher" 'exec ./cs193v' "$helper_code"
+
+# ── what install_mac_app does with it ─────────────────────────────────────────
+# STILL PORTABLE, AND DELIBERATELY SO: the function copies a directory and writes one text file,
+# neither of which needs a Mac. That is what keeps a Linux developer able to break this code and
+# find out. The read-back names come out of the installer so there is one definition of each.
+MAC_RECORD_REL="$(sed -n 's/^MAC_APP_RECORD="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+assert_ne "mac-app:record-path-was-readable" "" "$MAC_RECORD_REL"
+
 carve_func $PRIVATE/course-install.sh install_mac_app "$TMP/mac_app.sh"
 if [ -s "$TMP/mac_app.sh" ]; then pass "extract:mac-app"
 else fail "extract:mac-app" "could not carve install_mac_app out of course-install.sh"; fi
 
-# READ BACK RATHER THAN SPELLED, for the reason podman-old:the-floor-was-readable gives above:
-# the bundle's name is also the Start Menu label on the other platform and the string students
-# are told to look for, so it has one definition and this reads it.
-assert_ne "mac-app:label-was-readable" "" "$MAC_LABEL"
-
 run_mac_app() {                       # run_mac_app DIR FAKEHOME PLAT -> whatever it printed
     (
         . "$TMP/mac_app.sh"
-        # THE STUBS PRINT, and that is not cosmetic. With them silent, mac-app:says-nothing-off-macos
-        # asserted the empty string against a function whose every output path had been muted --
-        # so it passed with the `[ "$PLAT" = macos ]` gate DELETED, which is the one thing it
-        # exists to catch. Measured: mutation D of this block. A stub that swallows the signal
-        # makes the assertion above it vacuous.
+        # The stubs PRINT, because silent ones once made says-nothing-off-macos vacuous: it
+        # asserted the empty string against a function whose every output path was muted, and
+        # passed with the platform gate deleted.
         step() { printf 'STEP %s\n' "$*"; }
         ok()   { printf 'OK %s\n'   "$*"; }
         note() { printf 'NOTE %s\n' "$*"; }
         warn() { printf 'WARN %s\n' "$*"; }
+        notes() { while IFS= read -r l; do note "$l"; done; }
         die() { printf 'DIED: %s\n' "$*"; exit 1; }
-        # "$*" AND NOT "$1", so the VALUES reach the output too and an assertion can check that
-        # the right variable was handed over. This is deliberately not a reimplementation of
-        # msg() -- it does no {{NAME}} substitution and pretends to none; it echoes the key and
-        # its arguments, which is what makes `APP=<path>` assertable without a second copy of
-        # the real substituter living in this file.
         msg() { printf '%s' "$*"; }
-        MAC_APP_LABEL="$MAC_LABEL"
+        MAC_APP_LABEL="$MAC_LABEL"; MAC_APP_RECORD="$MAC_RECORD_REL"
         DIR="$1"; HOME="$2"; PLAT="$3"
         install_mac_app
     )
 }
 
-# A COURSE DIRECTORY WITH A SPACE IN ITS NAME, and that is not a contrived input: choose_dir's
-# second option is "type a path", so $DIR is student text. The path then crosses three quoting
-# boundaries on its way to the launcher -- sh, AppleScript, and the sh Terminal opens -- and each
-# one has its own escape. #218 is the same failure one layer up, where a hardcoded {{UNC}} was
-# right only until somebody took that option.
+# A COURSE DIRECTORY WITH A SPACE AND A QUOTE, because choose_dir's second option is "type a
+# path" and #218 is the same failure one layer up. The fixture needs the real committed bundle
+# in place, since the function copies rather than generates.
 appdir="$TMP/mac/course dir with'quote"
-mkdir -p "$appdir/.private/icons" "$TMP/mac/home"
-printf 'stand-in for the real icns\n' > "$appdir/.private/icons/cs193v.icns"
+mkdir -p "$appdir/.private" "$TMP/mac/home"
+cp -R "$PRIVATE/macapp" "$appdir/.private/macapp"
 out="$(run_mac_app "$appdir" "$TMP/mac/home" macos 2>&1)"
-record "mac-app:generation-said" "${out:-nothing}"
+record "mac-app:install-said" "${out:-nothing}"
 APP="$TMP/mac/home/Applications/$MAC_LABEL.app"
-# ^ declared before the assertions below read it, which matters because one of them now asserts
-# the path the installer REPORTED equals the path this suite goes looking for. Two spellings of
-# one location is how a bundle gets written somewhere nobody checks.
-# IT ANNOUNCES A STEP AND REPORTS WHERE THE BUNDLE WENT, which is the other half of the gate
-# assertion below: "says nothing off macOS" only means something if it says something on it.
-assert_contains "mac-app:announces-its-step"        "STEP step.mac-app" "$out"
-assert_contains "mac-app:reports-where-it-put-it"   "APP=$APP" "$out"
-assert_not_contains "mac-app:did-not-warn-on-a-good-run" "WARN" "$out"
-assert_file "mac-app:plist-written"        "$APP/Contents/Info.plist"
-assert_file "mac-app:icon-copied"          "$APP/Contents/Resources/cs193v.icns"
-assert_exec "mac-app:script-is-executable" "$APP/Contents/MacOS/cs193v-launch"
+assert_contains "mac-app:announces-its-step"      "STEP step.mac-app" "$out"
+assert_contains "mac-app:reports-where-it-put-it" "APP=$APP"          "$out"
+assert_not_contains "mac-app:did-not-warn-on-a-good-run" "NOTE"       "$out"
 
-# THE PLIST IS PARSED, NOT GREPPED, and with plistlib rather than plutil so this runs on Linux
-# too. A bundle whose Info.plist is malformed is one Finder shows as a folder, and a bundle whose
-# CFBundleExecutable names a file that is not there launches nothing at all -- both of which a
-# grep for the key name passes happily.
-plist_get() {                         # plist_get KEY -> the value, or a sentinel
-    python3 - "$APP/Contents/Info.plist" "$1" <<'PY' 2>/dev/null || printf 'plist-unreadable'
-import plistlib, sys
-with open(sys.argv[1], 'rb') as f:
-    print(plistlib.load(f).get(sys.argv[2], 'key-absent'))
-PY
-}
-assert_eq "mac-app:plist-names-the-script-that-is-there" "cs193v-launch" "$(plist_get CFBundleExecutable)"
-assert_eq "mac-app:plist-carries-the-icon-file"          "cs193v.icns"   "$(plist_get CFBundleIconFile)"
-assert_eq "mac-app:plist-is-an-application"              "APPL"          "$(plist_get CFBundlePackageType)"
-assert_eq "mac-app:plist-display-name-is-the-label"      "$MAC_LABEL"    "$(plist_get CFBundleDisplayName)"
-# The Apple Events usage string is what the one-time "wants to control Terminal" prompt shows a
-# student. Absent, the prompt is the generic wording and on some releases the send fails outright.
-assert_ne "mac-app:plist-explains-the-automation-prompt" "key-absent"    "$(plist_get NSAppleEventsUsageDescription)"
+assert_file "mac-app:bundle-was-copied"      "$APP/Contents/MacOS/applet"
+assert_exec "mac-app:copied-helper-is-executable" "$APP/Contents/Resources/cs193v-run"
+assert_file "mac-app:copied-icon-came-along" "$APP/Contents/Resources/cs193v.icns"
 
-# ─── the process SHAPE, which is the whole reason this mechanism was chosen ────
-# #134's own comment measured the three candidates and only one is safe: `do script` types the
-# command at a fresh interactive login shell, so the launcher is a foreground JOB in its own
-# process group and a window close tears the session down cleanly, 4/4. The two rejected shapes
-# both make the launcher the SESSION LEADER, which is the one state in which #170 is
-# deterministic -- and an `.app` cannot run the launcher directly in any case, because it has no
-# tty and cs193v:2077 refuses that by design.
-launch="$(cat "$APP/Contents/MacOS/cs193v-launch" 2>/dev/null)"
-assert_ne       "mac-app:script-is-not-empty" "" "$launch"
-assert_contains "mac-app:asks-terminal-to-do-script" "do script" "$launch"
-# COMMENTS STRIPPED BEFORE THE exec BAN IS APPLIED, which is the hazard this file's own header
-# records at 10-static.sh:13: the generated script DOCUMENTS that it must not gain an exec, so a
-# substring search matches its own warning and reports the code as broken for saying so. The ban
-# is about a command, so it is asked of the code.
-launch_code="$(sed 's/#.*//' "$APP/Contents/MacOS/cs193v-launch" 2>/dev/null)"
-assert_ne           "mac-app:code-survived-comment-stripping" "" "$(printf '%s' "$launch_code" | do_tr -d ' \n')"
-assert_not_contains "mac-app:never-execs"            "exec"      "$launch_code"
+# THE COPY IS BYTE-IDENTICAL TO THE COMMITTED BUNDLE, which is one assertion standing in for the
+# rule that nothing may ever be written INSIDE the bundle. Editing a signed bundle invalidates
+# its seal, and a bundle that fails `codesign -v` has a damaged identity -- the one thing the
+# applet exists to have. So the course directory goes in a record beside it, never in it.
+assert_ok "mac-app:copy-is-identical-to-the-committed-bundle" \
+          diff -r "$PRIVATE/macapp/CS193V.app" "$APP"
 
-# THE PATH GOES THROUGH argv AND NOT THROUGH THE APPLESCRIPT SOURCE. Interpolating $DIR into the
-# -e text makes the directory name part of the PROGRAM, so a course directory containing a double
-# quote or a backslash stops being a path and becomes syntax. Passing it as an argument and
-# letting `quoted form of` do the shell escaping is what makes the space case above work, and
-# these two needles are what a refactor back to string interpolation trips over.
-assert_contains "mac-app:path-arrives-as-an-argument"  "item 1 of argv"  "$launch"
-assert_contains "mac-app:path-is-shell-quoted-by-applescript" "quoted form of" "$launch"
-# AND THE CHOSEN DIRECTORY REALLY COMES BACK OUT, which is asserted by RUNNING the assignment
-# rather than by looking for the path in the text -- because for this directory the raw path is
-# NOT in the text. It holds a single quote, so what is written is the escaped form
-# `course dir with'"'"'\\'"'"''"'"'quote`, and a grep for the original fails on a file that is
-# perfectly correct. Sourcing the one line and printing the result tests the escaping instead of
-# testing that no escaping happened.
-sed -n '/^DIR=/p' "$APP/Contents/MacOS/cs193v-launch" > "$TMP/mac/dirline.sh"
-assert_eq "mac-app:the-dir-line-was-found" "1" \
-          "$(grep -c '' "$TMP/mac/dirline.sh" | do_tr -d ' ')"
-assert_eq "mac-app:carries-the-chosen-directory" "$appdir" \
-          "$(sh -c '. "$1"; printf %s "$DIR"' _ "$TMP/mac/dirline.sh" 2>/dev/null)"
+# AND THE RECORD CARRIES THE CHOSEN DIRECTORY EXACTLY, quote and space included. Compared by
+# reading the file rather than grepping the bundle, because that is where it now lives.
+assert_eq "mac-app:records-the-course-directory" "$appdir" \
+          "$(cat "$TMP/mac/home/$MAC_RECORD_REL" 2>/dev/null)"
 
-# ─── run it twice ──────────────────────────────────────────────────────────────
-# A STUDENT WHO RE-RUNS THE INSTALLER IS THE NORMAL CASE, not an edge one -- it is what they are
-# told to do when something went wrong. The second pass must leave a working bundle, and it must
-# not leave the first pass's files behind inside it either.
+# A RERUN IS THE NORMAL CASE -- it is what a student is told to do when something went wrong.
 printf 'a stale file no bundle should keep\n' > "$APP/Contents/MacOS/leftover"
 out2="$(run_mac_app "$appdir" "$TMP/mac/home" macos 2>&1)"
 record "mac-app:second-pass-said" "${out2:-nothing}"
-assert_exec    "mac-app:second-pass-leaves-a-working-bundle" "$APP/Contents/MacOS/cs193v-launch"
-assert_no_file "mac-app:second-pass-sweeps-the-old-bundle"   "$APP/Contents/MacOS/leftover"
+assert_file    "mac-app:second-pass-leaves-a-bundle"       "$APP/Contents/MacOS/applet"
+assert_no_file "mac-app:second-pass-sweeps-the-old-bundle" "$APP/Contents/MacOS/leftover"
+assert_ok      "mac-app:second-pass-is-still-identical" \
+               diff -r "$PRIVATE/macapp/CS193V.app" "$APP"
 
-# ─── and nothing at all anywhere else ──────────────────────────────────────────
-# The gate is `[ "$PLAT" = macos ] || return 0`, the same first line setup_machine has. Asserted
-# because a step that silently ran everywhere would put an Applications directory and a bundle
-# nobody can launch into a Linux student's home.
+# THE GATE. Asserted because a step that ran everywhere would put an Applications directory and
+# an unlaunchable bundle into a Linux student's home.
 mkdir -p "$TMP/mac/home-linux"
 out3="$(run_mac_app "$appdir" "$TMP/mac/home-linux" linux 2>&1)"
-assert_eq      "mac-app:says-nothing-off-macos" "" "$out3"
-assert_no_file "mac-app:writes-nothing-off-macos" \
-               "$TMP/mac/home-linux/Applications/$MAC_LABEL.app/Contents/Info.plist"
+assert_eq      "mac-app:says-nothing-off-macos"   "" "$out3"
+assert_no_file "mac-app:writes-nothing-off-macos" "$TMP/mac/home-linux/Applications/$MAC_LABEL.app/Contents/MacOS/applet"
+assert_no_file "mac-app:writes-no-record-off-macos" "$TMP/mac/home-linux/$MAC_RECORD_REL"
 
 # ─── the Windows Start Menu shim  (#134) ───────────────────────────────────────
 # WHY THE WORK IS SPLIT ACROSS TWO FILES, and it is the same tension #218 resolved for the
@@ -2662,10 +2708,43 @@ assert_eq "sign-off:windows-with-a-shortcut-promises-it" \
 assert_eq "sign-off:windows-without-a-shortcut-falls-back" \
           "finished.windows"          "$(run_say_done 1 '' '')"
 # LINUX IS THE SAME ARM AS A MAC WHOSE BUNDLE FAILED, and that is the reason there are two new
-# keys rather than four: MAC_APP_READY is empty everywhere install_mac_app does not run, so a
-# Linux install reaches `finished` down the path it always did.
-assert_eq "sign-off:a-linux-install-is-unchanged" \
-          "$(run_say_done '' '' '')"  "$(run_say_done '' '' '')"
+# keys rather than four: the flags are empty everywhere their step does not run, so a Linux
+# install reaches `finished` down the path it always did.
+#
+# BUT "EMPTY" AND "NEVER ASSIGNED" ARE NOT THE SAME THING UNDER `set -u`, and this assertion used
+# to miss the difference -- it compared run_say_done to ITSELF, which no change could ever redden.
+# The difference is the whole defect: MAC_APP_READY and WIN_SHIM_READY were set only INSIDE
+# install_mac_app and install_win_shim, which return early off their own platform, so a Linux or
+# WSL install reached say_done with them UNBOUND and died AT ITS OWN SIGN-OFF -- after smoke_test
+# had already told the student the environment works. run_say_done cannot see that: it assigns all
+# three flags itself, which is right for the four arms above and wrong for this one.
+#
+# So this arm sources say_done together with whatever column-0 initialisation the script really
+# makes. 26-installer-sandbox.sh's student pass is what caught the defect end to end; this is the
+# millisecond guard for the rule that keeps it fixed.
+say_done_as_a_linux_install() {       # -> the key, or the shell's own error text
+    (
+        set -u
+        eval "$(grep '^[A-Z][A-Z0-9_]*_READY=' $PRIVATE/course-install.sh)"
+        . "$TMP/say_done.sh"
+        msg() { printf '%s' "$1"; }
+        win_projects_path() { printf 'UNC'; }
+        DIR=/course; WSL_DISTRO=CS193V; MAC_APP_LABEL="a label"
+        say_done
+    ) 2>&1 | do_tr -d ' \n'
+}
+assert_eq "sign-off:a-linux-install-is-unchanged" "finished" "$(say_done_as_a_linux_install)"
+
+# AND BY NAME AS WELL AS BY BEHAVIOUR, so a flag ADDED later inherits the rule rather than
+# needing somebody to remember it. Every *_READY say_done reads bare -- ${X:-} forms are excluded
+# by the pattern, because a default is its own initialisation -- must be assigned at column 0.
+sd_flags="$(grep -o '\$[A-Z][A-Z0-9_]*_READY' "$TMP/say_done.sh" | do_tr -d '$' | sort -u)"
+record    "sign-off:the-flags-say-done-reads" "${sd_flags:-none}"
+assert_ne "sign-off:the-flag-list-was-readable" "" "$sd_flags"
+for v in $sd_flags; do
+    assert_ne "sign-off:$(printf '%s' "$v" | do_tr 'A-Z_' 'a-z-')-is-initialised-before-the-flow" \
+              "" "$(grep "^$v=" $PRIVATE/course-install.sh)"
+done
 # AND THE WINDOWS FLAG WINS OVER A STALE MAC FLAG. Nothing sets both today; the arms are ordered
 # so that if something ever did, a Windows student is not sent to an Applications folder.
 assert_eq "sign-off:windows-wins-over-a-mac-flag" \
