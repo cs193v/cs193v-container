@@ -18,8 +18,23 @@
 #     ~100ms after a fast refusal -- session-in-use, the foreign-directory box -- and the student
 #     would never read the error. On failure we write nothing, the applet sees EOF with no
 #     verdict, and it leaves the window open.
-cd "$1" || exit 1
+# THE FIFO IS OPENED FIRST, BEFORE ANYTHING THAT CAN FAIL, and the order is the whole point.
+# The waiter's `read -r v < fifo` blocks in open(2) until a writer appears, so every line above
+# this one is a region where a failure here strands the waiter FOREVER -- it never becomes a
+# writer, EOF never arrives, and the applet hangs holding a Dock icon. Worse, a live applet makes
+# every later launch a silent no-op (macOS sends `reopen` to the running instance, which a blocked
+# applet cannot dispatch -- see #274), so the app is bricked until the process is killed.
+#
+# MEASURED, NOT THEORISED: with `cd` above this line, pointing the course-dir record at a folder
+# the student had moved left the applet blocked for 15 minutes on a fifo with ZERO holders. The
+# synchronisation review missed it because it only examined what happens after the launcher runs.
+#
+# `9<>` so the open cannot block, and it is read-write so this process alone keeps the pipe alive
+# until it exits -- whereupon fd 9 closes, the waiter reads EOF, and an unsuccessful run correctly
+# leaves its tab open. What remains uncovered is only a failure to START this script at all; it
+# lives inside the signed bundle, so that means a broken bundle rather than a student's mistake.
 exec 9<>"$2"
+cd "$1" || exit 1
 ./cs193v 9>&-
 st=$?
 [ "$st" -eq 0 ] && printf 'ok\n' >&9
