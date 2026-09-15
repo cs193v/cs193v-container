@@ -1369,6 +1369,18 @@ once per change to the applet.
 LaunchServices, TCC, Terminal.app, Explorer and the Start Menu are all on the far side of the line
 the suite stops at. That is this section, and §134.2 is the one it exists for.
 
+**A known limitation to expect while testing, not a fault in your run:** while a session is live the
+app is *blocked*, and macOS sends an already-running app a `reopen` rather than starting a second
+instance — which a blocked applet cannot dispatch. So clicking the icon during a session does
+nothing at all. Measured: the event is **dropped, not queued**, so an `on reopen` handler is not a
+fix. Tracked as **#274**. It also means the session-in-use refusal cannot be provoked by
+double-clicking twice; start a session by hand in a terminal first.
+
+**Staff note: build on a Mac whose xattrs you have not polluted.** `cs193v.icns` once carried a
+`com.apple.quarantine` set by **Preview**, and the builder copied it inside the signed bundle. Git
+stores no xattrs so it never shipped, but `make-macapp.sh` now runs `xattr -cr` before sealing and
+`applet:carries-no-extended-attributes` asserts the result.
+
 Measured on macOS 26.6.2 while the work was done, and recorded so a later run can tell "differs"
 from "broken".
 
@@ -1422,6 +1434,15 @@ the privacy regression is back.
 with `open` from an already-authorised terminal lets TCC attribute the event to that terminal,
 which already holds the permission. Only a double-click in Finder asks as the bundle.
 
+*Measured 2026-09-15, and it passed:* the prompt named **CS193V Development Environment** with the
+`mac-app.automation-why` reason, and Automation afterwards listed the app in its own right with no
+new `sh` entry. An entry called plain **`applet`** may also appear — that is any osacompile applet
+with **no `CFBundleIdentifier` and no `CFBundleDisplayName`**, since TCC then falls back to the
+executable's filename and `osacompile` names every one of them `applet`. A throwaway test applet
+produced exactly that, which is the negative control for `applet:plist-identifier-is-stable` and
+`applet:plist-display-name-is-the-label`: without those keys our app would appear anonymously too,
+and the student would be approving something unidentifiable.
+
 ### §134.3 — a second user account, which is the clean-machine proxy
 TCC is per-user: `~/Library/Application Support/com.apple.TCC/TCC.db` is separate from the system
 database. So a **fresh macOS user account on the same Mac** is a genuine stand-in for a student's
@@ -1447,7 +1468,33 @@ sentinel from a fifo; it closes the Terminal window only when the launcher exite
    refusal has swallowed the error message the student needed, which is the whole reason the
    sentinel is gated on the exit status.
 3. Suspend mid-session with `^Z`, then `fg` and `exit`.
-   *Expect:* the window survives the suspend and closes after the exit.
+   *Measured: `^Z` inside the environment never reaches the host shell at all* — tmux owns it, so
+   the helper cannot be suspended by a student who fat-fingers it. The hazard is narrower than the
+   design assumed; it is only reachable in the moment before the session attaches.
+4. **Provoke a refusal and check the prompt's directory**, not just that the tab stayed. Start a
+   session by hand in a terminal, then launch the app; the launcher refuses session-in-use.
+   *Expect:* the tab stays, **and its shell is in the course directory**, so the
+   `./cs193v --stop` the message tells you to run actually works.
+
+**"Window" here means "tab", and that matters.** `do script` with no `in` parameter always makes a
+new window; under macOS window tabbing each such window is its own `NSWindow` that Terminal merges
+into one visual tab bar. So closing it takes only our own session. **Measured** with an unrelated
+⌘T tab open beside it: that tab survived. The one way to get this wrong would be
+`do script … in window 1`, which the applet does not do.
+
+**Two defects found here by hand, both fixed, both now regression-tested:**
+
+- *The tab landed in `$HOME`.* `do script` types at a login shell, which starts in `$HOME`, and the
+  helper's own `cd` runs in a child — so every refusal left the student at a prompt where the
+  launcher's own advice did not work. `messages.txt` says bare `./cs193v` in **twelve** places, all
+  correct for someone who typed `cd DIR && ./cs193v` and all wrong for a tab we opened. The typed
+  command now `cd`s first.
+- *A failure before the fifo opened stranded the applet forever.* The helper `cd`'d before
+  `exec 9<>`, so a moved course folder made it exit without ever becoming a writer, leaving the
+  applet blocked in `open(2)` with **no writer, permanently** — measured at 15 minutes on a fifo
+  with zero holders. And because a blocked applet cannot dispatch the `reopen` macOS sends to an
+  already-running app, every later launch was a silent no-op: **the app was bricked until the
+  process was killed.** The fifo is now opened before anything that can fail.
 
 *Measured:* the block itself is sound. A `do shell script` sat on that read for **1531 s (25.5
 min)** at ~0% CPU in state `S` with no timeout, woke on the sentinel, and **could still send an
@@ -1479,8 +1526,23 @@ Also check the record the applet reads, since a reinstall rewrites it:
 `~/Library/Application Support/CS193V/course-dir` holds the course directory, one line. Move the
 course folder and launch.
 
-*Expect:* the applet refuses with `mac-app.not-installed`'s wording rather than opening a window
-into nothing.
+*Expect:* the applet refuses with `mac-app.not-installed`'s wording rather than opening a tab into
+nothing — **and leaves no process behind.** Check the Dock: the icon should disappear when you
+dismiss the alert.
+
+*This is what it used to do, and why the check changed.* The applet tested only whether the record
+was non-empty, which is a pointer existing rather than anything being installed. A record pointing
+at a folder the student had moved therefore sailed through to a tab containing two raw shell errors
+and no CS193V wording at all:
+
+```
+cd: no such file or directory: /Users/htiek/Desktop/dev2-moved-by-the-student
+…/cs193v-run: line 21: cd: …: No such file or directory
+```
+
+It now tests `test -x DIR/cs193v` — the launcher being there is what "installed" means — which
+covers the moved folder, a path that is not a course tree, and a directory on an unmounted volume,
+all with the same message, since re-running the installer is the fix for every one.
 
 ### §134.6 — a quarantined copy, which is the case the docs forbid
 The app must only ever reach a student through the installer. Prove why:
@@ -1500,6 +1562,20 @@ directory a browser would have written it to.
 *Expect:* Gatekeeper refuses it. The bundle is ad-hoc signed and not notarized, and since Sequoia
 there is no right-click → Open bypass for that, so the student would be stuck. Record what the
 dialog actually says.
+
+**`spctl -a` reports `rejected` for the installed copy too, and that is expected rather than
+alarming** — measured on both copies, which are byte-identical and differ only in one xattr.
+`spctl -a` *forces* an assessment; Gatekeeper only assesses files that carry quarantine. So the
+verdict "would fail if assessed" and the fact "launches fine" are both true at once, and the
+distinction between them is the entire argument for ad-hoc signing being enough here. Do not read
+a bare `spctl` rejection as a defect.
+
+*Measured 2026-09-15:* the quarantined copy was **refused, with an offer to move it to the Trash**
+and no Open option. Worth noting which way that fails — Gatekeeper does not merely decline to
+launch it, it invites the student to **delete** it. A student who obtained the `.app` outside the
+installer would most likely throw it away and conclude the course software is broken. That is the
+concrete cost behind the rule, and it is why the constraint is *"the `.app` must never be
+distributed as a direct download"* rather than a mild preference.
 
 *And the contrast, which is measured:* the tree the real bootstrap extracts (`curl` → `tar`)
 carries **no xattrs at all**, so no `com.apple.quarantine` — `curl` does not set it, and only apps
