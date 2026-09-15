@@ -61,9 +61,22 @@ record "export:file-count" "$n_paths"
 # and install-utils.sh and wsl-provision.sh with #217. All three are execed or sourced out of the
 # ARCHIVE by the bootstrap a student downloads, so each has to be here while install-cs193v.sh
 # itself must not be -- see §4.
-want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
+want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/icons/cs193v.icns .private/icons/cs193v.ico .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
 got="$(grep -v '^\.private/files/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
+
+# THE TWO ICONS SHIP AND WHAT MADE THEM DOES NOT  (#134). iconutil is macOS-only and
+# install-cs193v-windows.cmd cannot build an .ico at all, so both artifacts are committed and
+# handed to students while the masters and the generator stay behind.
+#
+# THIS IS THE ONE PLACE .gitattributes GETS WRONG BY DEFAULT HERE, and it fails in the generous
+# direction, which is why it is asserted rather than trusted. `/.private/**` prunes the icons
+# DIRECTORY, so reaching anything inside it needs the directory un-ignored too -- and the obvious
+# way to finish that, a `/.private/icons/** -export-ignore` mirroring the files/ pair above,
+# un-ignores src/ and make-icons.sh with it. Per-file negations are what keep them out, and a
+# `/**` added later in the name of symmetry is exactly what this catches.
+assert_eq "export:no-icon-sources" "" \
+          "$(grep -E '^\.private/icons/(src/|make-icons)' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── 2. what the installer itself insists on ───────────────────────────────────
 # READ OUT OF THE INSTALLER PROPER rather than repeated here: install_files checks these four
@@ -121,13 +134,27 @@ assert_eq "export:no-staff-docs" "" \
 # copy. A zero is a failure rather than a pass, because that is what `du` on a missing directory
 # reports.
 #
-# WHAT THE CEILING IS AND IS NOT FOR, because 636 KB against 1 MB is not a lot of room. It is
-# for a BULK leak: the test tree alone is 2.2 MB, so re-shipping it breaches this by more than
-# double. It would NOT catch the four staff documents coming back -- they are about 200 KB
-# together -- and it does not need to, because §1 and §4 name that class directly. Raise it if
-# files/ genuinely grows; do not raise it to make a surprise go away without reading §1 first.
+# WHAT THE CEILING IS AND IS NOT FOR. It is for a BULK leak: the test tree alone is 2.2 MB, so
+# re-shipping it breaches this by a wide margin at any ceiling this file has had. It would NOT
+# catch the four staff documents coming back -- they are about 200 KB together -- and it does not
+# need to, because §1 and §4 name that class directly. Raise it if the shipped set genuinely
+# grows; do not raise it to make a surprise go away without reading §1 first.
+#
+# RAISED FROM 1024 TO 1536 FOR THE ICONS (#134), which is the growth that instruction describes:
+# two named files added to §1 deliberately, not a surprise. Measured, the whole 280 KB of it:
+#
+#     cs193v.icns  228 KB   ic10 1024px 106 KB  |  ic14+ic09 512px 37 KB each
+#                           ic13+ic08 256px 17 KB each  |  the rest under 4 KB apiece
+#     cs193v.ico    56 KB   256px PNG 20 KB  |  64px BMP 17 KB  |  48px BMP 10 KB  |  rest small
+#
+# SO IF SPACE EVER GETS TIGHT, ic10 IS THE FIRST THING TO DROP: one rung, 46% of the .icns, and
+# macOS only reaches for 1024 on a Quick Look or the largest Finder icon size -- neither of which
+# is on the path a student takes to this app. It is kept today because the cost is a one-off
+# 106 KB on a download that already carries a megabyte, and because an icon that goes soft at the
+# top is the kind of wrong nobody reports. The .ico's sub-256 entries are uncompressed BMP on
+# purpose; make-icons.sh records why, and all-PNG would roughly halve that file.
 size_kb="$(du -sk "$TREE" 2>/dev/null | awk '{print $1}')"
-if [ -n "${size_kb:-}" ] && [ "$size_kb" -gt 0 ] && [ "$size_kb" -lt 1024 ]; then
+if [ -n "${size_kb:-}" ] && [ "$size_kb" -gt 0 ] && [ "$size_kb" -lt 1536 ]; then
     pass "export:is-small"
 else
     fail "export:is-small" "du reports ${size_kb:-nothing} KB for the student tree"

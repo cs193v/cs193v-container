@@ -2312,8 +2312,21 @@ verb_doctor() {
     # THE TERMINAL TOKEN, because a wrong hint is otherwise undiagnosable from a support paste.
     # It is also the only place the resolver's answer is visible to a person: the hints it drives
     # are inside the container, and a student who is being told to hold the wrong key cannot see
-    # why. Issue #134 will make this matter more -- a double-clickable launcher has no
-    # TERM_PROGRAM to read, so it will report `unknown` and this line is how anyone finds out.
+    # why.
+    #
+    # #134 DOES NOT MAKE THIS REPORT `unknown`, which is what this comment predicted before the
+    # mechanism was chosen. The prediction assumed a double-clickable launcher would have no
+    # TERM_PROGRAM to read. What #134 actually ships cannot: an .app has no tty, and open_shell
+    # refuses a launcher without one (see its `[ ! -t 0 ]` arm), so the bundle does not run the
+    # launcher at all -- it asks Terminal.app for a window and types the launcher into it. The
+    # launcher therefore runs under a shell Terminal.app started, with TERM_PROGRAM set the way
+    # it is for anyone. Measured in a real `do script` window: TERM_PROGRAM=Apple_Terminal and
+    # term_class apple-terminal, which is also what 13-term-class.sh:67 already pins.
+    #
+    # THE WINDOWS SHORTCUT CAN STILL REPORT `unknown`, and only when the student's default
+    # terminal is conhost rather than Windows Terminal -- no WT_SESSION, nothing else to read.
+    # That is equally true of the `wsl -d` command finished.windows tells them to type today, so
+    # the shortcut adds no case this row did not already have to cover.
     drow "$(msg doctor.row.terminal)" "$(term_class)"
     drow "$(msg doctor.row.course-dir)" "$DIR"
 

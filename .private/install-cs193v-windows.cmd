@@ -34,10 +34,22 @@ setlocal
 :: two downloads meant two things to get right, and the one that went wrong silently was a
 :: stale copy from an earlier quarter, which looks like a working install and is not.
 ::
-:: Nothing is downloaded onto Windows itself. One consequence worth knowing, since the note
+:: Nothing is DOWNLOADED onto Windows itself. One consequence worth knowing, since the note
 :: above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS alternate
 :: data stream, and stage 2 lands on the environment's own Linux filesystem, so it can never
 :: carry one. THIS file still does, and still just runs, which is the whole point.
+::
+:: TWO FILES ARE WRITTEN TO THE WINDOWS SIDE, AND UNTIL #134 THERE WERE NONE. The paragraph
+:: above used to read "nothing is downloaded onto Windows itself" and was taken to mean this
+:: file touches nothing out there at all, which is no longer true. The Start Menu section near
+:: the end creates
+::
+::     %APPDATA%\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
+::     %LOCALAPPDATA%\CS193V\cs193v.ico
+::
+:: and deletes the Start Menu entry `wsl --install` made. Both are per-user and need no
+:: elevation of their own; neither is downloaded -- the icon is copied out of the environment
+:: over \\wsl.localhost, so the mark-of-the-web argument above still holds for both.
 ::
 :: ---------------------------------------------------------------------------------
 :: THE BATCH SUBSET THIS FILE KEEPS TO, AND WHY
@@ -486,6 +498,80 @@ echo.
 :: A string compare, not `if errorlevel`: stage 2 can exit -1, which prints as 4294967295
 :: and is a failure, but is NOT caught by a `>=` test.
 if not "%RC%"=="0" goto stage2failed
+
+:: ---- the Start Menu entry (#134) ---------------------------------------------
+:: WHY THE WINDOWS HALF IS HERE AND THE REST OF IT IS NOT. Authoring a .lnk needs a Windows
+:: process, which this is and course-install.sh is not; knowing $DIR needs course-install.sh,
+:: which chose it. So install_win_shim writes a shim at a path that never varies and this points
+:: a shortcut at that path. Nothing student-specific crosses the boundary, which is what keeps a
+:: `for /f` capture out of this file and means none of it depends on WSL interop.
+::
+:: AFTER THE SIGN-OFF, UNAVOIDABLY. The shim only exists once stage two has run, and stage two
+:: ends by printing finished.windows -- so a student has already been told about the Start Menu
+:: entry by the time it gets made. finished.windows therefore keeps the typed commands as its
+:: fallback, and the one failure arm below points back at them rather than printing a second
+:: closing block of its own. That is the #218 boundary: one sign-off, and a correction is not one.
+::
+:: %SystemRoot%\System32 AND NOT %SYS32% FOR THE TARGET, and this is the only place in the file
+:: where the difference matters. %SYS32% becomes %SystemRoot%\Sysnative on WOW64 (line 102), and
+:: Sysnative is a redirector visible only to the 32-bit process looking at it -- correct for
+:: RUNNING wsl here, meaningless once written into a shortcut that Explorer resolves later.
+::
+:: NOT wt.exe EITHER. Windows Terminal is an App Execution Alias whose backing path moves with
+:: every Store update and which Settings can switch off; wsl opens in whatever the student's
+:: default terminal is, which on Windows 11 22H2 and later is Windows Terminal anyway.
+set "LNKDIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+set "LNKNAME=CS193V Development Environment"
+set "ICODIR=%LOCALAPPDATA%\CS193V"
+set "SHIMUNC=\\wsl.localhost\%DISTRO%\home\%LINUX_USER%"
+
+if not exist "%ICODIR%" md "%ICODIR%"
+copy /y "%SHIMUNC%\.cs193v-icon.ico" "%ICODIR%\cs193v.ico" >nul
+if %errorlevel% neq 0 goto shortcutfailed
+
+:: THE ICON IS COPIED OUT RATHER THAN POINTED AT. An IconLocation under \\wsl.localhost resolves
+:: only while the distribution is running, and a stopped distribution is exactly the state a
+:: student's Start Menu is in when they go looking for this.
+::
+:: bash -ic AND NOT A BARE `-- ~/.cs193v-enter`. The bare form makes the launcher the session
+:: leader, which is the one shape in which #170 is deterministic; -i gives an interactive shell
+:: with job control on, so the shim is a foreground job and the launcher its child, inside the
+:: process group a window close signals.
+set "PSLNK=$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%LNKDIR%\%LNKNAME%.lnk'); $s.TargetPath = '%SystemRoot%\System32\wsl.exe'; $s.Arguments = '-d %DISTRO% --cd ~ -- bash -ic ~/.cs193v-enter'; $s.IconLocation = '%ICODIR%\cs193v.ico'; $s.Description = 'Start the CS193V development environment'; $s.Save()"
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSLNK%"
+if %errorlevel% neq 0 goto shortcutfailed
+
+:: ---- and remove the one wsl --install made -----------------------------------
+:: `wsl --install` CREATED A START MENU ENTRY OF ITS OWN, named after the distribution, and it
+:: opens a bare login shell in the home directory -- not the launcher, and not the course folder.
+:: Two entries a letter apart is worse than either alone, so the plain one goes.
+::
+:: IT CANNOT BE RETARGETED INSTEAD. /etc/wsl-distribution.conf's [shortcut] section has exactly
+:: two keys, `enabled` and `icon`; nothing there sets the command. The file is Canonical's and
+:: lives inside the tarball besides, and `wsl --install` has already read it and written both
+:: artifacts by the time line 332 can move it aside.
+::
+:: THE GUARD IS THE FILENAME AND A wsl TARGET, AND DELIBERATELY NOT THE ARGUMENTS. The obvious
+:: check -- does it mention this distribution -- cannot work: WSL writes
+:: `--distribution-id {GUID}`, not the name (microsoft/WSL#13414). So what is asserted is that
+:: the file is named for the distribution and points at something called wsl. Failure here is
+:: ignored on purpose: a leftover entry is untidy, not broken, and is not worth losing an
+:: otherwise finished install over.
+set "PSDEL=$p = '%LNKDIR%\%DISTRO%.lnk'; if (Test-Path -LiteralPath $p) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p); if ($t.TargetPath -match 'wsl') { Remove-Item -LiteralPath $p -Force } }"
+:: cmdlint-allow: unchecked-exit -- attached HERE and not above the `set`, because
+:: _cmdlint_waivers binds to the next non-comment line and `set` would consume it.
+:: A leftover plain-shell entry is cosmetic: the install is complete and usable either
+:: way, and there is no remediation worth offering a student for an extra Start Menu icon.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSDEL%"
+goto shortcutdone
+
+:shortcutfailed
+echo.
+echo   The Start Menu entry could not be created. Everything else
+echo   installed: use the commands shown above to start CS193V.
+
+:shortcutdone
+
 pause
 exit /b 0
 
