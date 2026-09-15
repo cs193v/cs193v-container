@@ -96,6 +96,38 @@
 /.private/files          -export-ignore
 /.private/files/**       -export-ignore
 
+# THE ICONS, AND NOTE WHAT IS **NOT** HERE: no `/.private/icons/** -export-ignore`.
+#
+# The files/ pair above needs its /** because everything under files/ ships. icons/ is the
+# opposite case -- two of its four entries ship and two must not. src/ holds the 1024 and 824
+# masters and make-icons.sh is what turns them into these two artifacts, and neither is any use
+# on a student's machine: iconutil is macOS-only and install-cs193v-windows.cmd cannot build an
+# .ico at all, which is why both outputs are committed rather than generated on demand.
+#
+# SO THE DIRECTORY IS UN-IGNORED AND THEN EACH FILE IS NAMED. The directory line is still
+# required for the reason the files/ comment above measured -- `/.private/**` matches the icons
+# DIRECTORY, and a pruned tree walk never reaches its children -- but the second half is per-file
+# rather than a glob. Adding a `/**` here in the name of symmetry with files/ would ship the
+# masters and the generator; 11-export.sh's export:no-icon-sources is what catches that.
+#
+#     git archive HEAD | tar -t | grep '^\.private/icons/'       # expect exactly these two
+/.private/icons          -export-ignore
+/.private/icons/cs193v.icns -export-ignore
+/.private/icons/cs193v.ico  -export-ignore
+
+# ─── the first binary assets in this repo  (#134) ──────────────────────────────
+# EVERY OTHER TRACKED FILE HERE IS TEXT, which is why no rule covered these and why they need
+# one. Without `binary`, git applies its text heuristics: on a machine with core.autocrlf set --
+# the default on a Windows checkout, which is not hypothetical for a repo carrying a .cmd -- a
+# byte pair inside compressed image data can be rewritten on checkout. That corrupts the file
+# silently, and only on the machine that checked it out, so it cannot be reproduced anywhere else.
+#
+# `binary` IS A MACRO for `-text -diff -merge`, so it also stops git printing a megabyte of
+# mojibake into a diff and stops it attempting a line merge on two different pictures.
+*.png   binary
+*.icns  binary
+*.ico   binary
+
 # CRLF ON THE BATCH FILE IS LOAD-BEARING, and this is the only thing that keeps it.
 #
 # cmd.exe does not read a batch file line by line. It reads it in 512-BYTE CHUNKS, and its label

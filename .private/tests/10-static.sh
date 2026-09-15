@@ -2905,6 +2905,96 @@ for f in tunnel-key tunnel-key.pub tunnel-host-key tunnel-host-key.pub tunnel-kn
               sh -c "! git -C '$REPO' ls-files --error-unmatch '.config/$f' >/dev/null 2>&1"
 done
 
+# ─── the icon assets  (#134) ───────────────────────────────────────────────────
+# TWO MASTERS AND NOT ONE SCALED, because the platforms do not ask for the same picture. Anything
+# before Tahoe renders .icns artwork literally -- no mask -- so the master has to carry the
+# squircle and its 100px gutter itself; Tahoe then clips to the squircle and demotes artwork that
+# does not already fit it into a grey rounded box. Windows neither masks nor insets, so that same
+# gutter would leave a ~13px glyph in a 16px Start Menu row.
+#
+# NOT UNDER files/, and that is a decision rather than tidiness: build_hash fingerprints the
+# Containerfile plus everything `COPY files/` reaches, NAMES INCLUDED, so an icon there would
+# offer every student and developer a rebuild each time it changed, and bake host GUI assets into
+# a Linux image.
+#
+# THE GUTTER ITSELF IS CHECKED BY THE GENERATOR AND NOT HERE. Proving it needs a full PNG decode
+# -- zlib plus per-line unfiltering over a megapixel -- which is a second or two of real money in
+# a tier whose whole point is milliseconds. What is cheap and portable is the IHDR, and a swapped
+# or re-exported master changes that first. make-icons.sh refuses bad input at authoring time.
+ICONS="$PRIVATE/icons"
+assert_file "icons:master-1024"  "$ICONS/src/cs193v-1024.png"
+assert_file "icons:master-824"   "$ICONS/src/cs193v-824.png"
+assert_file "icons:generator"    "$ICONS/make-icons.sh"
+assert_file "icons:icns"         "$ICONS/cs193v.icns"
+assert_file "icons:ico"          "$ICONS/cs193v.ico"
+
+# EVERY PARSER BELOW ANSWERS WITH A SENTINEL RATHER THAN THE EMPTY STRING. An unreadable file, a
+# truncated header and a python that dies all produce "" otherwise, and "" is the happy answer for
+# none of these -- #79's family. assert_eq against a fixed expectation then fails on the sentinel.
+png_size() {                          # png_size FILE -> "WxH" | sentinel
+    python3 - "$1" <<'PY' 2>/dev/null || printf 'png-read-failed'
+import struct, sys
+d = open(sys.argv[1], 'rb').read(24)
+print('%dx%d' % struct.unpack('>II', d[16:24])
+      if d[:8] == b'\x89PNG\r\n\x1a\n' else 'not-a-png')
+PY
+}
+assert_eq "icons:master-1024-is-the-full-canvas"  "1024x1024" "$(png_size "$ICONS/src/cs193v-1024.png")"
+assert_eq "icons:master-824-is-the-bare-artwork"  "824x824"   "$(png_size "$ICONS/src/cs193v-824.png")"
+
+# THE SIZES INSIDE THE CONTAINERS, PARSED RATHER THAN TRUSTED. A one-entry .ico holding only a 256
+# and a one-entry .icns holding only a 1024 both satisfy "the file is there", and both render
+# wrong in the one place they are actually looked at -- a 16px Start Menu row, a Finder list.
+ico_sizes="$(python3 - "$ICONS/cs193v.ico" <<'PY' 2>/dev/null || printf 'ico-parse-failed'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+res, typ, n = struct.unpack('<HHH', d[:6])
+if (res, typ) != (0, 1) or n == 0:
+    print('bad-ico'); raise SystemExit
+print(' '.join(str(s) for s in sorted({d[6 + i * 16] or 256 for i in range(n)})))
+PY
+)"
+record "icons:ico-sizes" "$ico_sizes"
+assert_eq "icons:ico-carries-the-sizes-windows-asks-for" "16 20 24 32 48 64 256" "$ico_sizes"
+
+# ASSERTED AS PIXEL SIZES, NOT AS TYPE CODES. `ic11` and `icp5` are both 32 and iconutil's choice
+# between them is its own business; what this file has to guarantee is that every rung macOS asks
+# for is present. Mask and table chunks carry no image and are skipped by not being in the map.
+icns_sizes="$(python3 - "$ICONS/cs193v.icns" <<'PY' 2>/dev/null || printf 'icns-parse-failed'
+import struct, sys
+SIZE = {'icp4': 16, 'icp5': 32, 'icp6': 64, 'ic04': 16, 'ic05': 32,
+        'ic07': 128, 'ic08': 256, 'ic09': 512, 'ic10': 1024,
+        'ic11': 32, 'ic12': 64, 'ic13': 256, 'ic14': 512,
+        'is32': 16, 'il32': 32, 'ih32': 48, 'it32': 128}
+d = open(sys.argv[1], 'rb').read()
+if d[:4] != b'icns':
+    print('bad-icns'); raise SystemExit
+p, out = 8, set()
+while p + 8 <= len(d):
+    t = d[p:p + 4].decode('ascii', 'replace')
+    ln = struct.unpack('>I', d[p + 4:p + 8])[0]
+    if ln < 8:
+        break
+    if t in SIZE:
+        out.add(SIZE[t])
+    p += ln
+print(' '.join(str(s) for s in sorted(out)) if out else 'no-image-chunks')
+PY
+)"
+record "icons:icns-sizes" "$icns_sizes"
+assert_eq "icons:icns-carries-the-sizes-macos-asks-for" "16 32 64 128 256 512 1024" "$icns_sizes"
+
+# MARKED BINARY, which nothing else in this repo has ever needed. Every other tracked file is
+# text, so no rule covered these three -- and an unmarked .png is one git may rewrite on checkout
+# on a machine with a different core.autocrlf, which corrupts it silently and only where it was
+# checked out. Asserted through `git check-attr` rather than by grepping .gitattributes, so any
+# spelling that actually works passes and any that silently does not fails.
+for iconf in icons/src/cs193v-1024.png icons/src/cs193v-824.png \
+             icons/cs193v.icns icons/cs193v.ico; do
+    assert_eq "icons:${iconf##*/}-is-marked-binary" "unset" \
+              "$(git -C "$REPO" check-attr text -- ".private/$iconf" | sed 's/.*: //')"
+done
+
 # ─── Claude Code policy ────────────────────────────────────────────────────────
 # ONE SPELLING OF THE PATH, which every check below is handed. Three of them used to build a
 # command substitution around `files/claude-code/managed-settings.json` RELATIVE to the repo
@@ -3248,6 +3338,12 @@ assert_ok  "shellcheck:install-utils" \
            shellcheck -x --severity=warning --exclude=SC2034 $PRIVATE/install-utils.sh
 assert_ok  "shellcheck:wsl-provision" \
            shellcheck -x --severity=warning $PRIVATE/wsl-provision.sh
+# THE ICON GENERATOR (#134). It ships to nobody -- .gitattributes keeps it out of the branch
+# tarball -- but it is the only thing that can rebuild the two artifacts that DO ship, so a
+# quoting bug in it is discovered the next time a master changes and not before. No -x: it
+# sources nothing.
+assert_ok  "shellcheck:make-icons" \
+           shellcheck --severity=warning $PRIVATE/icons/make-icons.sh
 # The shared presentation layer, checked ALONE as well as through the launcher: the container
 # sources it with no launcher in the picture, so it has to stand up by itself.
 #

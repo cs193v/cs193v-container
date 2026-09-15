@@ -193,11 +193,27 @@ win_projects_path() {
 #
 # SET BY install-cs193v-windows.cmd AND BY NOTHING ELSE, like CS193V_PROVISION before it.
 # The root pass does not get it: wsl-provision.sh prints no sign-off to choose between.
+# FOUR ARMS NOW, AND THE SPLIT IS "DID THE ONE-CLICK ENTRY POINT GET MADE" rather than "which
+# platform is this" (#134). #218 made this function the single sign-off; what it must not become
+# is a single sign-off that is sometimes untrue. install_mac_app and install_win_shim are both
+# advisory, so on the run where one of them warned, the message that follows it has to be the one
+# that does not mention an application or a Start Menu entry -- which is exactly the text that
+# was already here for the platform that has neither.
+#
+# WHICH IS WHY THERE ARE TWO NEW KEYS AND NOT FOUR. finished and finished.windows are unchanged
+# and are now the FALLBACKS; finished.macos and finished.windows-shortcut are the arms that can
+# promise a gesture. A Linux install reaches `finished` the way it always did, because
+# MAC_APP_READY is empty everywhere the step does not run.
 say_done() {
     printf '\n'
-    if [ -n "${CS193V_WINDOWS:-}" ]; then
+    if [ -n "${CS193V_WINDOWS:-}" ] && [ -n "$WIN_SHIM_READY" ]; then
+        msg finished.windows-shortcut "DIR=$DIR" "DISTRO=$WSL_DISTRO" \
+                                      "LABEL=$MAC_APP_LABEL" "UNC=$(win_projects_path)"
+    elif [ -n "${CS193V_WINDOWS:-}" ]; then
         msg finished.windows "DIR=$DIR" "DISTRO=$WSL_DISTRO" \
                              "UNC=$(win_projects_path)"
+    elif [ -n "$MAC_APP_READY" ]; then
+        msg finished.macos "DIR=$DIR" "LABEL=$MAC_APP_LABEL"
     else
         msg finished "DIR=$DIR"
     fi
@@ -905,6 +921,210 @@ install_files() {
     ok "$DIR"
 }
 
+# ─── the one-click way in on macOS  (#134) ─────────────────────────────────────
+# WHY THIS EXISTS. A student who has not used a terminal has to open one, find the course folder
+# and type ./cs193v before anything happens. A bundle in ~/Applications is reached by Finder, by
+# Spotlight and by the Apps view that replaced Launchpad in Tahoe -- so the instruction becomes
+# "open CS193V Development Environment", which is a thing a student can be checked on, rather
+# than three commands, which is not.
+#
+# THE SAME STRING AS THE START MENU LABEL on the other platform, and deliberately so: it is what
+# students are told to look for. 25-installer.sh reads it back out of this line rather than
+# keeping a second copy that can drift.
+MAC_APP_LABEL="CS193V Development Environment"
+
+# WHETHER THE ONE-CLICK WAY IN ACTUALLY EXISTS, which say_done has to know. Both of these
+# steps are advisory -- ~/Applications and the student's WSL home are places an MDM profile
+# or a full disk can refuse -- so the sign-off cannot simply assume its own success and tell
+# a student to open something that is not there. Empty until the step that writes it says
+# otherwise, which is also the state on a platform where the step never runs.
+MAC_APP_READY=""
+WIN_SHIM_READY=""
+
+# `do script` AND NOTHING ELSE, which is the whole of why this mechanism was chosen over a
+# double-clickable .command. #134's comment measured all three candidates on a real Terminal.app:
+#
+#   * `do script` -- the command is TYPED at a fresh interactive login shell, so the launcher is
+#     a foreground JOB in its own process group. A window close tears the session down cleanly,
+#     4/4. This one.
+#   * a .command file -- Terminal runs the file AS the shell, so the launcher is a child of a
+#     NON-interactive shell with job control off, sharing its process group. Tested by nothing.
+#   * anything of the form "run this instead of a shell", `exec ./cs193v` included -- makes the
+#     launcher the SESSION LEADER, which is the one shape in which #170 is deterministic.
+#
+# AN .app COULD NOT RUN THE LAUNCHER ITSELF ANYWAY. LaunchServices gives it no tty, and
+# cs193v:2077 refuses that by design: `podman exec -it` allocates a pty, a pty never delivers
+# EOF the way a pipe does, so the alternative to refusing is a student watching a wedged window
+# with no output. That refusal is also why there is no "just run it in the background" variant.
+#
+# $DIR TRAVELS AS AN ARGUMENT AND NEVER AS APPLESCRIPT SOURCE. choose_dir lets a student type a
+# path, so it can hold a space, a quote or a backslash; interpolated into the -e text those stop
+# being a path and become syntax. Passed as argv it is data, and `quoted form of` does the
+# shell escaping for the inner command. Measured against a directory named  dir with spaces/and'quote .
+#
+# ADVISORY, NOT FATAL. Everything above this point is a working install whatever happens here,
+# and ~/Applications is somewhere an MDM profile or a full disk can genuinely refuse -- so a
+# failure warns, repeats the commands that do still work, and carries on. check_disk below makes
+# the same call for the same reason.
+install_mac_app() {
+    [ "$PLAT" = macos ] || return 0
+    step "$(msg step.mac-app)"
+
+    local app contents dir_esc
+    app="$HOME/Applications/$MAC_APP_LABEL.app"
+
+    # THE ONLY `rm -rf` IN THIS SCRIPT, so it is guarded on the shape of its own argument rather
+    # than trusted. $HOME is the developer's real one on a test run, and MAC_APP_LABEL is the one
+    # part of this path that a future edit could empty -- which would make the target
+    # ~/Applications/.app, or with a stray expansion ~/Applications itself.
+    case "$app" in
+        "$HOME/Applications/"?*.app) : ;;
+        *) msg warn.mac-app-failed "DIR=$DIR" | notes; return 0 ;;
+    esac
+
+    # SINGLE-QUOTE ESCAPING FOR THE SHELL ASSIGNMENT BELOW, which is a different job from the
+    # AppleScript one above and still has to be done: the path is written into the generated
+    # script as a '...' literal, so every quote in it has to close, escape and reopen.
+    dir_esc="$(printf '%s' "$DIR" | sed "s/'/'\\\\''/g")"
+
+    # REBUILT RATHER THAN WRITTEN OVER. A rerun is the normal case -- it is what a student is
+    # told to do when something went wrong -- and writing over the top leaves any file an older
+    # layout put inside the bundle still sitting there, where Finder and LaunchServices both
+    # still see it.
+    rm -rf "$app"
+    contents="$app/Contents"
+    if ! (
+        set -e
+        mkdir -p "$contents/MacOS" "$contents/Resources"
+        cp "$DIR/.private/icons/cs193v.icns" "$contents/Resources/cs193v.icns"
+
+        # CFBundleDisplayName AS WELL AS THE DIRECTORY NAME, because they answer to different
+        # readers: Finder shows the bundle's filename, and the Dock and the automation prompt
+        # show this. CFBundleName is deliberately absent -- it is capped at about 16 characters
+        # for a menu bar this bundle has no NSApplication to draw.
+        cat > "$contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>       <string>cs193v-launch</string>
+    <key>CFBundleIdentifier</key>       <string>edu.stanford.cs193v.launcher</string>
+    <key>CFBundlePackageType</key>      <string>APPL</string>
+    <key>CFBundleDisplayName</key>      <string>$MAC_APP_LABEL</string>
+    <key>CFBundleIconFile</key>         <string>cs193v.icns</string>
+    <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>   <string>12.0</string>
+    <key>NSAppleEventsUsageDescription</key> <string>$(msg mac-app.automation-why)</string>
+</dict>
+</plist>
+PLIST
+
+        cat > "$contents/MacOS/cs193v-launch" <<LAUNCH
+#!/bin/sh
+# Written by the CS193V installer. See install_mac_app in .private/course-install.sh.
+#
+# Opens a Terminal window and types the launcher into it, so that cs193v runs as a foreground
+# job of an interactive login shell. DO NOT change this to run the launcher directly, and do not
+# add an exec: an app bundle has no terminal, and cs193v refuses to open a shell without one.
+DIR='$dir_esc'
+/usr/bin/osascript \
+    -e 'on run argv' \
+    -e '  tell application "Terminal"' \
+    -e '    activate' \
+    -e '    do script "cd " & quoted form of (item 1 of argv) & " && ./cs193v"' \
+    -e '  end tell' \
+    -e 'end run' \
+    "\$DIR"
+LAUNCH
+        chmod +x "$contents/MacOS/cs193v-launch"
+    ); then
+        rm -rf "$app"
+        msg warn.mac-app-failed "DIR=$DIR" | notes
+        return 0
+    fi
+    MAC_APP_READY=yes
+    ok "$(msg ok.mac-app "APP=$app")"
+}
+
+# ─── the one-click way in on Windows  (#134) ───────────────────────────────────
+# TWO FIXED PATHS, AND THAT IS THE WHOLE INTERFACE. install-cs193v-windows.cmd creates the Start
+# Menu entry, because authoring a .lnk needs a Windows process; this script writes what the entry
+# points at, because $DIR is known here and nowhere else (win_projects_path, above, records the
+# same split for {{UNC}} and why #218 needed it). So the .cmd hardcodes these two names and
+# nothing student-specific has to cross the boundary.
+#
+# WHICH ALSO MEANS NONE OF THIS NEEDS WSL INTEROP. Calling powershell.exe from in here was the
+# obvious alternative and it rests on three things that are not guaranteed: root_step_wslconf
+# turns on `[boot] systemd=true`, and systemd-binfmt has a history of wiping the WSLInterop
+# binfmt_misc registration (systemd#28126, ubuntu/WSL#334, fixed by a generator in WSL 2.5.7);
+# WSL_INTEROP does not survive sudo (microsoft/WSL#4465); and the student pass arrives through
+# `wsl -e`, which provision_linger already documents as a session with less in it than a login.
+# A fixed path costs none of that. 25-installer.sh reads both names back out of these two lines.
+WIN_SHIM_NAME=".cs193v-enter"
+WIN_ICON_NAME=".cs193v-icon.ico"
+
+# THE SHIM IS A JOB, NOT A SESSION LEADER, which is the same argument install_mac_app's header
+# makes for `do script`. The .lnk runs `bash -ic <shim>`: bash is the session leader, job control
+# is on, and the shim runs as a foreground job in its own process group with the launcher as its
+# child -- so a window close signals the group the launcher is in, and nothing here is the
+# session leader. `exec ./cs193v` would also be safe on that count and is still not used, because
+# the shim has something to say first: see the cd refusal below.
+#
+# #170 IS NOT RELIED ON. It is being fixed in parallel and this branch does not merge until it
+# is, but no shape here was chosen on the grounds that it will have been.
+install_win_shim() {
+    [ -n "${CS193V_WINDOWS:-}" ] || return 0
+    step "$(msg step.win-shim)"
+
+    local shim icon dir_esc
+    shim="$HOME/$WIN_SHIM_NAME"
+    icon="$HOME/$WIN_ICON_NAME"
+
+    # Single-quote escaped for the `cd` below, the same job install_mac_app does for its own
+    # generated script and for the same reason: choose_dir hands us student text.
+    dir_esc="$(printf '%s' "$DIR" | sed "s/'/'\\\\''/g")"
+
+    if ! (
+        set -e
+        cp "$DIR/.private/icons/cs193v.ico" "$icon"
+
+        # `if !` RATHER THAN `|| { ... }`, AND NOT AS A STYLE CHOICE. carve_func, which is how
+        # 25-installer.sh tests this function, is `sed -n '/^name()/,/^}$/p'` -- it ends the
+        # carving at the first line that is exactly `}`. A brace group closing at column 0
+        # anywhere in this body, including inside the heredoc below, truncates the carving
+        # mid-function and every assertion downstream fails with a syntax error instead of a
+        # verdict. Measured. An `if` has no such line.
+        #
+        # THE INNER HEREDOC IS QUOTED AND ITS DELIMITER IS UNINDENTED, both load-bearing. The
+        # outer one expands, which is how $(msg ...) becomes prose here; the inner one must not,
+        # or a reworded message containing a $ or a backtick would be evaluated on the student's
+        # machine at click time. An indented delimiter would not terminate it at all.
+        cat > "$shim" <<SHIM
+#!/bin/sh
+# Written by the CS193V installer. See install_win_shim in .private/course-install.sh.
+#
+# The Start Menu entry runs this through \`bash -ic\`, which makes it a foreground job and the
+# launcher its child. Do not add an exec: the refusal below is the only thing a student sees if
+# the course folder has moved, and exec would replace this script before it could print it.
+if ! cd '$dir_esc'; then
+cat >&2 <<'CS193V_MOVED'
+
+$(msg win-shim.moved "DIR=$DIR")
+CS193V_MOVED
+    exit 1
+fi
+./cs193v
+SHIM
+        chmod +x "$shim"
+    ); then
+        rm -f "$shim" "$icon"
+        msg warn.win-shim-failed "DIR=$DIR" "DISTRO=$WSL_DISTRO" | notes
+        return 0
+    fi
+    WIN_SHIM_READY=yes
+    ok "$(msg ok.win-shim "SHIM=$shim")"
+}
+
 # INSTALLED IS NOT THE SAME AS WORKING, and the difference is worth a step of its own.
 # `podman --version` never touches the runtime, so it answers happily from a podman that
 # cannot create a user namespace: a missing uidmap, a restrictive AppArmor profile, a nosuid
@@ -1226,5 +1446,16 @@ check_podman
 check_disk
 build_image
 smoke_test
+# THE TWO ONE-CLICK ENTRY POINTS GO LAST, AFTER smoke_test HAS PASSED (#134). Anywhere earlier --
+# next to install_files, where the icons they read have just been unpacked -- and a run whose
+# build fails leaves a bundle in ~/Applications and an entry in the Start Menu pointing at an
+# install that cannot start. #134 asks for a way in that also makes sure a student really is
+# INSIDE the environment, so the gesture should not exist until there is something behind it.
+#
+# WHICH IS ALSO WHY say_done CAN TRUST THEIR FLAGS. MAC_APP_READY and WIN_SHIM_READY are set on
+# the success path of steps that now run after everything that can still refuse, so the arm the
+# sign-off picks is the arm that is true.
+install_mac_app
+install_win_shim
 say_done
 
