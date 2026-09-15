@@ -617,6 +617,97 @@ installer. If it fails a second time, contact the course staff.
 [[err.chmod-failed]]
 Could not make {{DIR}}/cs193v executable.
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  THE ONE-CLICK WAY IN ON macOS  (#134)
+#
+#  A student who has never used a terminal has to open one, find the course folder and type
+#  ./cs193v before anything happens. install_mac_app writes ~/Applications/<label>.app so
+#  Finder, Spotlight and the Apps view all reach the environment the way they reach any other
+#  program -- and so a student can be told "open CS193V Development Environment", which is
+#  checkable, rather than three commands, which is not.
+#
+#  ADVISORY AND NOT FATAL. A course tree that installed is usable from the terminal whatever
+#  happened here, and ~/Applications is a place an MDM profile or a full disk can genuinely
+#  refuse. So the failure warns, names the typed commands that still work, and carries on --
+#  the same call check_disk makes for the same reason.
+
+[[step.mac-app]]
+Adding CS193V to your Applications
+
+[[ok.mac-app]]
+{{APP}}
+
+[[warn.mac-app-failed]]
+Could not create the application in your Applications folder.
+
+Everything else installed, and the development environment
+works. To start it, open a terminal and run
+
+    cd {{DIR}} && ./cs193v
+
+# WHAT THE "wants to control Terminal" PROMPT SAYS, and it is here rather than in the plist
+# because it is prose a student reads. macOS shows it once, the first time the app asks Terminal
+# to open a window; without a usage string the dialog falls back to generic wording and on some
+# releases the Apple Event is refused outright.
+#
+# ONE LINE AND NO TRAILING FULL STOP BEYOND THE FIRST: the dialog is narrow and appends its own
+# "Allow"/"Don't Allow", so a paragraph here is truncated mid-sentence.
+# WHAT THE APPLET ITSELF SAYS when it cannot start. These two are BAKED INTO THE APPLET at
+# authoring time by make-macapp.sh, not printed by this script -- the applet ships without the
+# catalogue, so it cannot read them at launch.
+[[mac-app.not-installed]]
+CS193V does not appear to be installed on this account. Run the
+installer again, then open this application.
+
+[[mac-app.launch-failed]]
+CS193V could not open a Terminal window. If macOS asked for
+permission to control Terminal and it was declined, you can allow
+it in System Settings, under Privacy and Security, Automation.
+
+[[mac-app.automation-why]]
+CS193V opens a Terminal window to start the development environment.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  THE ONE-CLICK WAY IN ON WINDOWS  (#134)
+#
+#  install-cs193v-windows.cmd puts a Start Menu entry on the Windows side; what it points at is
+#  the shim this writes, at a path that never varies. The split exists because only this script
+#  knows $DIR -- see win_projects_path -- and only the .cmd can author a .lnk, so the fixed path
+#  is the whole interface between them and no student-specific value has to cross it.
+
+[[step.win-shim]]
+Adding CS193V to your Start Menu
+
+[[ok.win-shim]]
+{{SHIM}}
+
+[[warn.win-shim-failed]]
+Could not set up the Start Menu entry.
+
+Everything else installed, and the development environment
+works. To start it, open a command prompt and type
+
+    wsl -d {{DISTRO}}
+    cd {{DIR}} && ./cs193v
+
+# WHAT THE STUDENT SEES IF THEY CLICK THE START MENU ENTRY AFTER MOVING THE COURSE FOLDER.
+#
+# THIS IS THE ONE MESSAGE IN THIS FILE THAT IS NOT PRINTED BY THIS SCRIPT. It is rendered into
+# the shim at install time, so the copy that a student reads is a frozen one -- rewording it here
+# changes what the NEXT install writes, not what an existing machine says. That is the trade for
+# having a shim that needs nothing but /bin/sh at click time.
+#
+# IT HAS TO SAY WHERE IT LOOKED. A window that opens and closes says nothing at all, and the
+# student who moved the folder is the only person who can put it back.
+[[win-shim.moved]]
+CS193V cannot start: the course folder is not where it was installed.
+
+It was installed at:
+    {{DIR}}
+
+If you moved or renamed that folder, move it back. If you
+deleted it, run the installer again.
+
 # Is podman actually working, as opposed to merely installed.
 
 [[step.check-podman]]
@@ -708,6 +799,75 @@ doctor reported problems. Run {{DIR}}/cs193v doctor
 # \\wsl.localhost\CS193V\home\student\cs193v\projects -- but choose_dir's menu runs on the
 # Windows path too, so a student who chose any other directory was handed a path that did
 # not exist. Only course-install.sh knows {{DIR}}, and win_projects_path builds it there.
+# ─── the two arms that can promise a gesture  (#134) ───────────────────────────
+#
+# THE ONE-CLICK WAY LEADS AND THE TYPED COMMANDS STAY. Leading with the gesture is the whole
+# point of #134 -- a student who has never used a terminal has something to do that does not
+# involve one. Keeping the commands underneath is not hedging: it is the only thing that still
+# works when the course folder has been moved, it is what staff will ask for over email, and on
+# Windows it is already on screen if the .cmd's Start Menu step fails after this printed.
+#
+# {{LABEL}} RATHER THAN THE NAME SPELLED OUT, because that string is also the .app bundle's
+# filename and the .lnk's, and 25-installer.sh asserts all three agree. Spelling it here would be
+# a fourth copy, and the one nobody would think to check.
+#
+# THE FOUR ARMS MUST DIVERGE BEFORE THEIR FIRST {{PLACEHOLDER}}, and that is a constraint on the
+# PROSE imposed by how this suite asserts. msg_text stops at the first placeholder, so two arms
+# whose opening lines agree up to that point have the SAME needle and no keyed assertion can tell
+# them apart -- including the ones that check a Windows sign-off did not leak into a UNIX run.
+# Worse, containment is enough: an arm whose needle is a PREFIX of another's matches it too.
+#
+# These two both used to open "To start the development environment, open" and were therefore
+# indistinguishable, which is what install:no-start-menu-step-without-the-flag found. They now
+# diverge at "your Applications folder" against "your Start menu", and all four are pairwise
+# non-containing -- which signoff-arms:are-mutually-distinguishable is what keeps true.
+
+[[finished.macos]]
+  ────────────────────────────────────────────────────────────────────
+  Installation complete!
+
+  To start the development environment, open this from your
+  Applications folder:
+
+      {{LABEL}}
+
+  You can also find it by pressing Command-Space and typing
+  CS193, the way you would open any other app.
+
+  You can also start it from a terminal, which is what to do if
+  you ever move the course folder:
+
+      cd {{DIR}} && ./cs193v
+
+  Happy vibecoding!
+  ────────────────────────────────────────────────────────────────────
+
+[[finished.windows-shortcut]]
+  ────────────────────────────────────────────────────────────────────
+  Installation complete!
+
+  To start the development environment, open this from your
+  Start menu:
+
+      {{LABEL}}
+
+  You can also find it by pressing the Windows key and typing
+  CS193.
+
+  You can also start it by hand, which is what to do if you ever
+  move the course folder:
+
+      wsl -d {{DISTRO}}
+      cd {{DIR}} && ./cs193v
+
+  Your work goes in the projects folder. To put files there, you
+  can open this path in Explorer:
+
+      {{UNC}}
+
+  Happy vibecoding!
+  ────────────────────────────────────────────────────────────────────
+
 [[finished.windows]]
   ────────────────────────────────────────────────────────────────────
   Installation complete!

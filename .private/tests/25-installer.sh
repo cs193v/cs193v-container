@@ -35,6 +35,94 @@ TMP="$(new_tmpdir)"
 # which catalogue it means.
 ICAT="$PRIVATE/course-install-messages.txt"
 
+# ─── which sign-off a run ends with  (#134) ────────────────────────────────────
+# #218 made say_done the single closing message. #134 gave it something it can get WRONG: two of
+# the steps ahead of it are advisory, so on the run where one of them warned, a sign-off that
+# still says "open CS193V Development Environment" is telling a student to open something the
+# same screen just said could not be created. The four arms are the whole of that decision, and
+# nothing else asserts them.
+#
+# THE STUB PRINTS THE KEY AND THE COMPARISON IS EXACT. `assert_contains "finished"` would be
+# satisfied by finished.macos as well -- these arms differ only by suffix, so a containment test
+# cannot tell the fallback from the promise. Trimmed because say_done brackets its output in
+# blank lines.
+# ─── the three strings both halves of #134 have to agree about ─────────────────
+# READ OUT OF THE INSTALLER, ONCE, AND HIGH ENOUGH UP THAT EVERY CASE BELOW CAN SEE THEM. The
+# bundle name is also the Start Menu label and the string students are told to look for; the two
+# fixed paths are the entire interface between course-install.sh and the .cmd. Spelling any of
+# them in this file would be the copy that drifts.
+MAC_LABEL="$(sed -n 's/^MAC_APP_LABEL="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+WIN_SHIM_PATH="$(sed -n 's/^WIN_SHIM_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+WIN_ICON_PATH="$(sed -n 's/^WIN_ICON_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+
+# ─── "did not claim success" now means FOUR messages, not one ──────────────────
+# Every failure case in this file asserts that the run did not print a sign-off, and until #134
+# there was one sign-off to look for. There are now four, and a needle for `finished` alone is
+# satisfied by a run that claimed success through finished.macos -- whose text diverges one word
+# earlier, at "open", so it does not contain the other's needle. That would have quietly weakened
+# roughly ten assertions on every Mac. One helper, so the list of arms lives in one place and the
+# next arm added is a one-line edit here rather than ten silent holes.
+# AND THE ARMS HAVE TO BE TELLABLE APART, which is a property of the PROSE and is asserted here
+# because every keyed sign-off assertion in this file silently depends on it. msg_text stops at
+# the first {{placeholder}}, so two arms that open identically share a needle -- and containment
+# is enough to spoil it: if one arm's needle is a prefix of another's, a run printing the second
+# matches an assertion about the first. Measured: finished.macos and finished.windows-shortcut
+# were exactly that pair until the catalogue was reworded.
+SIGNOFF_ARMS='finished finished.macos finished.windows finished.windows-shortcut'
+overlap=''
+for a in $SIGNOFF_ARMS; do
+    for b in $SIGNOFF_ARMS; do
+        [ "$a" = "$b" ] && continue
+        na="$(msg_text "$a" "$ICAT")"; nb="$(msg_text "$b" "$ICAT")"
+        case "$nb" in *"$na"*) overlap="$overlap $a-inside-$b" ;; esac
+    done
+done
+assert_eq "signoff-arms:are-mutually-distinguishable" "" "$overlap"
+
+assert_no_signoff() {                 # assert_no_signoff NAME TEXT
+    local k needle
+    for k in finished finished.macos finished.windows finished.windows-shortcut; do
+        needle="$(msg_text "$k" "$ICAT")"
+        if [ -z "$needle" ]; then
+            fail "$1" "no prose for $k -- the arm list in assert_no_signoff has gone stale"
+            return
+        fi
+        case "$2" in *"$needle"*)
+            fail "$1" "claimed success: the output contains the $k sign-off"; return ;;
+        esac
+    done
+    pass "$1"
+}
+
+carve_func $PRIVATE/course-install.sh say_done "$TMP/say_done.sh"
+if [ -s "$TMP/say_done.sh" ]; then pass "extract:say-done"
+else fail "extract:say-done" "could not carve say_done out of course-install.sh"; fi
+
+run_say_done() {                      # run_say_done WINFLAG MACREADY WINREADY -> the key that fired
+    (
+        . "$TMP/say_done.sh"
+        msg() { printf '%s' "$1"; }
+        win_projects_path() { printf 'UNC'; }
+        DIR=/course; WSL_DISTRO=CS193V; MAC_APP_LABEL="a label"
+        CS193V_WINDOWS="$1"; MAC_APP_READY="$2"; WIN_SHIM_READY="$3"
+        say_done
+    ) | do_tr -d ' \n'
+}
+
+# THE KEY A SUCCESSFUL INSTALL ENDS WITH ON *THIS* MACHINE, derived from say_done rather than
+# spelled out. Three end-to-end cases below assert that a run reached its sign-off, and before
+# #134 there was only one sign-off to reach. Now which one depends on whether a bundle got made,
+# so a test naming `finished` unconditionally is red on every Mac -- which is precisely the shape
+# of #261, where podman-old:refused asserts the generic key on the branch that prints the macOS
+# one. Asking say_done removes the second copy that could drift: the only thing forked here is
+# "does this platform make a bundle", which is install_mac_app's own gate, and Darwin is what
+# platform() keys its macos arm off.
+if [ "$(uname -s)" = Darwin ]; then FINISHED_KEY="$(run_say_done '' yes '')"
+else                               FINISHED_KEY="$(run_say_done '' '' '')"; fi
+record "sign-off:the-key-a-clean-run-ends-with" "$FINISHED_KEY"
+assert_ne "sign-off:that-key-was-derivable" "" "$FINISHED_KEY"
+
+
 # The cheapest tripwire for the whole class of accident installer_host exists to prevent.
 # $HOME here is the REAL one -- the door redirects it for the installer's process only --
 # so if any case in this file ever writes the course tree into the developer's own home
@@ -489,7 +577,7 @@ assert_says_key "root:says-why" err.as-root "$out" "$PRIVATE/course-install-mess
 # invocation, not of the computer, so it is not something the "Looking at your computer" step
 # has any business reporting.
 assert_says_not_key "root:refuses-before-it-looks" step.survey "$out" "$ICAT"
-assert_says_not_key "root:does-not-claim-success"  finished "$out" "$ICAT"
+assert_no_signoff "root:does-not-claim-success" "$out"
 assert_eq "root:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/asroot2")"
 # The three claims the refusal makes implicitly: nothing of the course on the disk, nothing
@@ -664,7 +752,7 @@ assert_no_file "podman-old:changes-nothing" "$TMP/old"
 shim_new
 mkdir -p "$TMP/ro" && chmod 555 "$TMP/ro"
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
-assert_says_not_key "unwritable-dest:does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "unwritable-dest:does-not-claim-success" "$out"
 assert_eq "unwritable-dest:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
 chmod 755 "$TMP/ro"
@@ -683,7 +771,7 @@ out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman")"
 # perfectly. podman-mute:suggests-the-mac-fix is retired into this; the body carries both.
 assert_says_key "podman-mute:refuses-to-continue" err.podman-mute "$out" "$ICAT"
 assert_says_key "podman-mute:changed-nothing-more"  die.trailer "$out" "$ICAT"
-assert_says_not_key "podman-mute:does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "podman-mute:does-not-claim-success" "$out"
 assert_eq "podman-mute:exits-1" "1" \
           "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman2")"
 
@@ -694,7 +782,7 @@ shim_new
 shim_set image_exists no
 out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noimage")"
 assert_says_key "no-image:refuses-to-claim-success" err.image-missing-after-build "$out" "$ICAT"
-assert_says_not_key "no-image:does-not-say-finished" finished "$out" "$ICAT"
+assert_no_signoff "no-image:does-not-say-finished" "$out"
 # THE FAR SIDE OF {{DIR}}, which is where the command they are asked for sits. Quoted as
 # "doctor" this matched the word anywhere in the transcript -- ok.doctor-runs says it too, on
 # the success path -- so the needle is the catalogue's own tail rather than one word of it.
@@ -728,7 +816,7 @@ assert_says_key "consent-yes:the-arrow-moved-the-selection" menu.consent.go "$ou
 # from the file and only the number is the assertion.
 assert_says_sub "consent-yes:the-resize-ran" step.machine-resize "$out" "$ICAT" WANT=8192
 assert_says_key "consent-yes:reports-the-resize" ok.machine-resized "$out" "$ICAT"
-assert_says_key "consent-yes:finishes"           finished "$out" "$ICAT"
+assert_says_key "consent-yes:finishes"           "$FINISHED_KEY" "$out" "$ICAT"
 # The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
 # before setting memory -- podman refuses to change a running one -- and start it again.
 assert_says "consent-yes:stopped-before-setting" "machine stop"              "$(installer_log)"
@@ -768,7 +856,7 @@ assert_says "subuid:asks-root-for-the-right-range" \
 # no real /etc/subuid entry, so the launcher's own preflight refuses at --rebuild. Recorded
 # so the reason is visible instead of looking like a missing assertion.
 record "subuid:what-happens-after-a-faked-usermod" \
-       "$(printf '%s' "$out" | grep -cF "$(msg_text finished "$ICAT")") finished-lines"
+       "$(printf '%s' "$out" | grep -cF "$(msg_text "$FINISHED_KEY" "$ICAT")") finished-lines"
 
 # ...and when root refuses. The die must name the account and tell them what to send staff.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail usermod
@@ -908,7 +996,7 @@ shim_new
 out="$(installer_tty '\n' "$TMP/installer.sh" | strip_ansi)"
 assert_says "choosedir:enter-takes-the-default" "$SHIM/home/cs193v" "$out"
 assert_ok   "choosedir:default-really-created"  test -x "$SHIM/home/cs193v/cs193v"
-assert_says_key "choosedir:default-finishes"        finished "$out" "$ICAT"
+assert_says_key "choosedir:default-finishes"        "$FINISHED_KEY" "$out" "$ICAT"
 
 shim_new
 out="$(installer_tty "2$SHIM/typed\n" "$TMP/installer.sh" | strip_ansi)"
@@ -982,7 +1070,7 @@ assert_ok "install:and-that-run-created-no-course-directory" test ! -d "$TMP/nod
 shim_new
 run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST" TMPDIR="$BOOTTMP"; }
 out1="$(run_installer)"
-assert_says_key "install:first-run-finishes"     finished  "$out1" "$ICAT"
+assert_says_key "install:first-run-finishes"     "$FINISHED_KEY"  "$out1" "$ICAT"
 # AND THE TREE IS GONE. `exec` takes the bootstrap's EXIT trap with it, so from the hand-over on
 # the only thing that can remove the unpacked tree is course-install.sh itself. A leak here is a
 # full copy of the repo left in /tmp by every install anyone ever runs.
@@ -996,9 +1084,11 @@ assert_ok   "install:projects-dir-created"   test -d "$DEST/projects"
 # THE FAR SIDE OF {{DIR}}, which is where the command a student types sits: [[finished]] is
 # "cd {{DIR}} && ./cs193v", so msg_text stops before the command and msg_text_tail is the half
 # that has it. Quoted as "./cs193v" this matched several other messages as well.
-assert_says_key_tail "install:tells-them-how-to-start" finished "$out1" "$ICAT"
+assert_says_key_tail "install:tells-them-how-to-start" "$FINISHED_KEY" "$out1" "$ICAT"
 # ...and the UNIX run is the UNIX one: the Windows step must not leak into it.
 assert_says_not_key "install:no-wsl-step-without-the-flag" finished.windows "$out1" "$ICAT"
+assert_says_not_key "install:no-start-menu-step-without-the-flag" \
+                    finished.windows-shortcut "$out1" "$ICAT"
 
 # Now the actual §A.12 property. Everything except projects/ must be byte-identical: the
 # second run recomputes nothing and rewrites nothing.
@@ -1012,7 +1102,7 @@ mkdir -p "$DEST/projects/my-app" && echo 'my work' > "$DEST/projects/my-app/inde
 out2="$(run_installer)"
 state_hash > "$TMP/s2"
 
-assert_says_key "install:second-run-finishes" finished "$out2" "$ICAT"
+assert_says_key "install:second-run-finishes" "$FINISHED_KEY" "$out2" "$ICAT"
 if diff -u "$TMP/s1" "$TMP/s2" > "$TMP/statediff" 2>&1; then
     pass "install:is-idempotent"
 else
@@ -1054,8 +1144,12 @@ outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTM
 # prefix is a constant that would match with the directory half wrong, which is the defect this
 # case exists for. Supplying it as {{UNC}} means the needle can only match if the message and
 # win_projects_path agree about it.
-assert_says_sub "win-signoff:finishes" finished.windows "$outw" "$ICAT" \
-                "DIR=$WINDEST" DISTRO=CS193V \
+# finished.windows-shortcut RATHER THAN finished.windows (#134): install_win_shim runs on this
+# path, so the arm that promises the Start Menu entry is the one say_done picks. The fallback arm
+# is still asserted -- by sign-off:windows-without-a-shortcut-falls-back, against say_done
+# directly, because reaching it end to end would mean arranging for the shim write to fail.
+assert_says_sub "win-signoff:finishes" finished.windows-shortcut "$outw" "$ICAT" \
+                "DIR=$WINDEST" DISTRO=CS193V "LABEL=$MAC_LABEL" \
                 "UNC=$(printf '%s' "\\\\wsl.localhost\\CS193V$WINDEST/projects" | do_tr / '\\')"
 # AND THE UNIX ENTRY WAS NOT THE ONE PRINTED, asserted on the one phrase that differs rather
 # than on the advice, because nearly all of the advice is shared: both entries name the same
@@ -1146,7 +1240,7 @@ out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/lowdisk")"
 # THE WHOLE BODY HERE, unlike the carving above: this is the real note(), whose gutter is
 # NOTE_INDENT -- four spaces -- and _flatten collapses whitespace.
 assert_says_sub "check-disk:the-fake-really-feeds-it" note.low-disk "$out" "$ICAT" FREE=4
-assert_says_key "check-disk:low-disk-is-not-fatal"    finished          "$out" "$ICAT"
+assert_says_key "check-disk:low-disk-is-not-fatal"    "$FINISHED_KEY"          "$out" "$ICAT"
 
 # ─── the macOS virtual machine, which no mechanism could reach before ──────────
 # `machine) echo ''; exit 0` was podman-fake's whole answer, so `podman machine list |
@@ -1202,7 +1296,7 @@ assert_says_not_key "mac-init:does-not-also-resize" step.machine-resize "$out" "
 
 out="$(mac_run machine_init_rc 1)"
 assert_says_key "mac-init:failure-is-fatal" err.machine-create "$out" "$ICAT"
-assert_says_not_key "mac-init:failure-does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "mac-init:failure-does-not-claim-success" "$out"
 assert_eq "mac-init:failure-exits-1" "1" "$(mac_rc machine_init_rc 1)"
 
 # ─── the progress block around `machine init`  (#219) ──────────────────────────
@@ -1278,7 +1372,7 @@ assert_says_not "mac-resize:declining-touches-no-machine" 'machine set' "$(insta
 out="$(mac_run machine_list podman-machine-default machine_mem 16384)"
 assert_says_key "mac-ok:reasonable-size-is-left-alone" skip.vm-size "$out" "$ICAT"
 assert_says_not_key "mac-ok:does-not-offer-a-resize" need.vm-memory "$out" "$ICAT"
-assert_says_key "mac-ok:still-finishes" finished "$out" "$ICAT"
+assert_says_key "mac-ok:still-finishes" "$FINISHED_KEY" "$out" "$ICAT"
 
 # inspect returning nothing must land in the SAME arm, not in the resize one: an empty
 # value would make `[ "$vm_mb" -lt ... ]` an error, so the installer guards with -n first.
@@ -1303,13 +1397,13 @@ assert_says_not "mac-disk:no-set-when-there-is-nothing-to-do" 'machine set' "$(i
 # exceptional -- it must be a note and the install must go on.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32 machine_set_rc 1)"
 assert_says_key "mac-disk:a-refused-grow-is-not-fatal" note.grow-failed "$out" "$ICAT"
-assert_says_key "mac-disk:still-finishes-after-a-refused-grow" finished "$out" "$ICAT"
+assert_says_key "mac-disk:still-finishes-after-a-refused-grow" "$FINISHED_KEY" "$out" "$ICAT"
 
 # A non-numeric DiskSize is podman's output changing shape, and the installer's own comment
 # says the harmless direction is to stop growing rather than to guess.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
 assert_says_not_key "mac-disk:non-numeric-size-grows-nothing" note.growing-disk "$out" "$ICAT"
-assert_says_key "mac-disk:non-numeric-size-still-finishes" finished "$out" "$ICAT"
+assert_says_key "mac-disk:non-numeric-size-still-finishes" "$FINISHED_KEY" "$out" "$ICAT"
 
 # ─── survey does not reinstall a podman it cannot see  (issue #121) ────────────
 # The second bug #121 caused, and the one that costs a student real money: re-running this
@@ -1449,7 +1543,7 @@ assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
 assert_says     "password:no-sudo-names-what-wanted-root" \
                 "- $(msg_of_in "$ICAT" need.podman-mac)" "$out"
 assert_says_not_key "password:no-sudo-asks-no-permission" step.consent "$out" "$ICAT"
-assert_says_not_key "password:no-sudo-does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "password:no-sudo-does-not-claim-success" "$out"
 assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
 
 # ── sudo needs a password and there is no terminal to type it into ──
@@ -1479,7 +1573,7 @@ assert_says_key "password:announced-before-it-is-asked" note.password-why "$out"
 # passes on every input -- which is how this assertion passed before step.password existed.
 assert_says_key "password:the-step-is-announced" step.password "$out" \
                 "$PRIVATE/course-install-messages.txt"
-assert_says_not_key "password:refused-does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "password:refused-does-not-claim-success" "$out"
 # AND NOTHING WAS INSTALLED. The prime is the only privileged call in the log: no package
 # manager, no .pkg. sudo-fake records without executing, so this reads what would have run.
 assert_says     "password:the-prime-really-ran" "-v" "$(sudo_log)"
@@ -1564,7 +1658,7 @@ fail_leftovers() { ls -d "$TMP/boot-fail"/cs193v-install.* 2>/dev/null; }
 #    that independent of which tar is installed.
 head -c 3000 "$TMP/course.tar.gz" > "$TMP/truncated.tar.gz"
 out="$(run_with_tarball "$TMP/truncated.tar.gz" "$TMP/broken-trunc")"
-assert_says_not_key "truncated:does-not-claim-success"   finished "$out" "$ICAT"
+assert_no_signoff "truncated:does-not-claim-success" "$out"
 assert_eq       "truncated:exits-nonzero"            "1" "$(last_rc)"
 assert_says     "truncated:says-it-is-safe-to-retry" "safe to run this script again" "$out"
 # THE BOOTSTRAP'S OWN TRAP, on the one side of the hand-over where it still runs. This case dies
@@ -1573,7 +1667,7 @@ assert_eq "truncated:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
 # 2. A URL that is not there at all — what a wrong REPO_OWNER produces.
 out="$(run_with_tarball "$TMP/no-such-file.tar.gz" "$TMP/broken-404")"
-assert_says_not_key "missing-tarball:does-not-claim-success" finished "$out" "$ICAT"
+assert_no_signoff "missing-tarball:does-not-claim-success" "$out"
 assert_eq       "missing-tarball:exits-nonzero"         "1" "$(last_rc)"
 
 # 3. The one neither exit status can catch: a well-formed archive that is simply missing
@@ -1593,7 +1687,7 @@ cp "$PRIVATE/messages.txt" "$TMP/pkg2/cs193v-main/"
 ( cd "$TMP/pkg2" && tar czf "$TMP/incomplete.tar.gz" cs193v-main )
 assert_ok "incomplete:archive-is-well-formed" tar tzf "$TMP/incomplete.tar.gz"
 out="$(run_with_tarball "$TMP/incomplete.tar.gz" "$TMP/broken-partial")"
-assert_says_not_key "incomplete:does-not-claim-success"    finished "$out" "$ICAT"
+assert_no_signoff "incomplete:does-not-claim-success" "$out"
 assert_eq       "incomplete:exits-nonzero"             "1" "$(last_rc)"
 assert_says     "incomplete:names-the-missing-file"    "course-install.sh is missing" "$out"
 assert_says     "incomplete:blames-the-transfer"       "cut short" "$out"
@@ -2242,4 +2336,582 @@ for route in 'wsl.exe --status' \
     { sed 's/\r$//' "$W"; printf '%s\n' "$route"; } | sed 's/$/\r/' > "$violating"
     assert_ne "windows:the-qualification-rule-catches-[$route]" "" \
               "$(run_checker cmdlint_unqualified_programs "$violating")"
+done
+
+# ─── the macOS entry point: a prebuilt applet  (#134) ──────────────────────────
+# WHAT CHANGED AND WHY THE ASSERTIONS MOVED. This used to be a bundle whose CFBundleExecutable
+# was a /bin/sh script, and roughly ten assertions here read that script as text. Two measured
+# defects killed that shape: Launch Services cannot read an architecture out of a script, so
+# Apple Silicon offers Rosetta; and TCC attributes the Automation grant to the INTERPRETER, so
+# the grant landed on /bin/sh -- meaning every shell script the student ever ran gained
+# permission to control Terminal, and the usage string was never shown because the prompt did
+# not name the app. A compiled applet is a real universal Mach-O with a real identity.
+#
+# THE APPLET IS BUILT AT AUTHORING TIME AND COMMITTED, for a reason a student's Mac cannot get
+# around: `codesign` shells out to /usr/bin/codesign_allocate, which is a Command Line Tools
+# shim, so on a Mac without the CLT it can verify but not sign. A bundle compiled there could
+# not be re-sealed after its Info.plist was written, and a broken seal damages exactly the
+# identity the applet exists to have. macapp/make-macapp.sh does that work; this file checks
+# what it produced. Same trade as the icons (11-export.sh:68).
+#
+# WHAT STAYS PORTABLE, WHICH IS MORE THAN IT LOOKS. install_mac_app now COPIES a prebuilt
+# bundle and writes one text file, so its behaviour is checkable on Linux exactly as before; and
+# plist_get reads binary plists through python's plistlib, so the metadata is too. Only three
+# questions genuinely need a Mac -- the Mach-O's architectures, the signature, and decompiling
+# the script -- and those are gated below. The helper is a shell script, so the synchronisation
+# it implements stays verifiable everywhere.
+
+# ── the committed artifact ─────────────────────────────────────────────────────
+MACAPP="$PRIVATE/macapp/CS193V.app"
+assert_file "applet:source-is-committed"   "$PRIVATE/macapp/cs193v-app.applescript"
+assert_file "applet:builder-is-committed"  "$PRIVATE/macapp/make-macapp.sh"
+assert_file "applet:executable-is-there"   "$MACAPP/Contents/MacOS/applet"
+assert_exec "applet:executable-is-executable" "$MACAPP/Contents/MacOS/applet"
+assert_file "applet:icon-is-in-resources"  "$MACAPP/Contents/Resources/cs193v.icns"
+assert_exec "applet:helper-is-in-resources" "$MACAPP/Contents/Resources/cs193v-run"
+assert_file "applet:script-is-compiled"    "$MACAPP/Contents/Resources/Scripts/main.scpt"
+# AND NOT osacompile's DROPLET ASSETS: Assets.car is 375 KB of template UI this applet never
+# shows, and shipping it would mean raising the student tree's size ceiling to carry something
+# nothing reads. Measured safe to drop -- the applet still runs and `display alert` still works.
+assert_no_file "applet:carries-no-droplet-assets" "$MACAPP/Contents/Resources/Assets.car"
+assert_no_file "applet:carries-no-template-icon"  "$MACAPP/Contents/Resources/applet.icns"
+
+# plistlib, NOT plutil, so this runs on Linux -- the same reason the old plist_get gave. It
+# reads the binary plist osacompile writes without caring that it is binary.
+applet_plist() {                      # applet_plist KEY -> value | key-absent | sentinel
+    python3 - "$MACAPP/Contents/Info.plist" "$1" <<'APLIST' 2>/dev/null || printf 'plist-unreadable'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    print(plistlib.load(f).get(sys.argv[2], 'key-absent'))
+APLIST
+}
+assert_eq "applet:plist-names-the-executable-that-is-there" "applet" "$(applet_plist CFBundleExecutable)"
+assert_eq "applet:plist-display-name-is-the-label"   "$MAC_LABEL"   "$(applet_plist CFBundleDisplayName)"
+assert_eq "applet:plist-name-is-the-label"           "$MAC_LABEL"   "$(applet_plist CFBundleName)"
+assert_eq "applet:plist-carries-the-icon-file"       "cs193v.icns"  "$(applet_plist CFBundleIconFile)"
+assert_eq "applet:plist-identifier-is-stable"        "edu.stanford.cs193v.launcher" \
+          "$(applet_plist CFBundleIdentifier)"
+# The identifier matters more than it looks: TCC keys its grant on it, so changing it silently
+# re-prompts every student who had already allowed the app.
+assert_ne "applet:plist-explains-the-automation-prompt" "key-absent" \
+          "$(applet_plist NSAppleEventsUsageDescription)"
+# AND THESE TWO MUST BE ABSENT, not merely unread. They existed only to tell Launch Services
+# what a shell script could not; a universal Mach-O declares its own architectures. Keeping them
+# would be dead weight that a reader would mistake for load-bearing.
+assert_eq "applet:declares-no-architecture-priority" "key-absent" "$(applet_plist LSArchitecturePriority)"
+
+# NO EXTENDED ATTRIBUTES INSIDE THE SEAL, and this is not hypothetical: cs193v.icns had picked up
+# `com.apple.quarantine ... Preview` from somebody opening it while the artwork was worked on, and
+# the builder copied it into the bundle. Git launders xattrs so it never shipped -- but quarantine
+# on any file in a bundle can make Gatekeeper assess an app that otherwise never would be, and the
+# builder is the one place that decides what is inside the signature. Darwin-only: xattr(1) is
+# macOS's, and on Linux there is nothing to find.
+if [ "$(uname -s)" = Darwin ]; then
+    xa="$(xattr -lr "$PRIVATE/macapp/CS193V.app" 2>/dev/null)"
+    record    "applet:extended-attributes-found" "${xa:-none}"
+    assert_eq "applet:carries-no-extended-attributes" "" "$xa"
+else
+    skip "applet:carries-no-extended-attributes" "needs macOS: xattr(1) has no Linux equivalent here"
+fi
+assert_eq "applet:does-not-require-native-execution" "key-absent" "$(applet_plist LSRequiresNativeExecution)"
+
+# ── the three questions that need a Mac ────────────────────────────────────────
+if [ "$(uname -s)" = Darwin ]; then
+    # A REAL MACH-O COVERING BOTH ARCHITECTURES is the whole Rosetta fix, and the `x86_64` half
+    # is what keeps an Intel Mac working (MANUAL.md 5.3).
+    assert_eq "applet:covers-both-architectures" "x86_64 arm64" \
+              "$(lipo -archs "$MACAPP/Contents/MacOS/applet" 2>/dev/null)"
+    # THE SEAL, checked after every edit the builder makes. This is the assertion that catches a
+    # git round-trip mangling Info.plist or CodeResources -- measured: without a path-scoped
+    # `binary` attribute those two are rewritten under core.autocrlf and codesign reports
+    # `invalid Info.plist`. The app still LAUNCHES in that state, so nothing else would notice.
+    assert_ok "applet:bundle-is-sealed" codesign --verify "$MACAPP"
+    # AND THE COMPILED SCRIPT REALLY IS THE COMMITTED SOURCE. A binary is the one artifact a
+    # reviewer cannot read, so the link between it and the readable source is asserted rather
+    # than trusted. Compared on the substantive lines, because osadecompile reformats.
+    decompiled="$(osadecompile "$MACAPP/Contents/Resources/Scripts/main.scpt" 2>/dev/null)"
+    assert_ne       "applet:script-decompiles"                    "" "$decompiled"
+    assert_contains "applet:script-asks-terminal-to-do-script"    "do script"       "$decompiled"
+    assert_contains "applet:script-blocks-on-the-fifo"            "read -r v"       "$decompiled"
+    assert_contains "applet:script-closes-only-on-success"        "if verdict is"   "$decompiled"
+    assert_contains "applet:script-reads-the-course-dir-record"   "course-dir"      "$decompiled"
+    # THE TYPED COMMAND `cd`s THE INTERACTIVE SHELL FIRST, and this is a defect found by hand on
+    # a real Mac rather than a nicety. The helper's own `cd` runs in a CHILD, so without this the
+    # tab's shell stays in $HOME -- and on a refusal the student reads `./cs193v --stop`, which
+    # messages.txt says in twelve places and which fails from anywhere but the course directory.
+    # `;` not `&&`, so a bad directory still reaches the helper's own `cd "$1" || exit 1`, which
+    # is what reports it.
+    assert_contains "applet:script-cds-before-running-the-helper" '"cd "' "$decompiled"
+    # IT CHECKS FOR THE LAUNCHER, NOT JUST FOR THE RECORD. Found by hand: a record pointing at a
+    # course folder the student had moved got no CS193V wording at all, just two raw shell errors
+    # in a tab, because the only test was whether `cat` returned something. `test -x DIR/cs193v`
+    # is what "installed" actually means, and it also covers a path that is not a course tree and
+    # a directory on an unmounted volume.
+    assert_contains "applet:script-checks-the-launcher-is-really-there" '"test -x "' "$decompiled"
+    assert_contains "applet:script-tests-the-launcher-path"            '"/cs193v"'   "$decompiled"
+    assert_contains "applet:script-cds-in-the-same-typed-command" '"; "'  "$decompiled"
+    # No placeholder survived into the shipped artifact.
+    assert_not_match "applet:no-placeholder-survived-the-build"   '@@[A-Z_]+@@'     "$decompiled"
+else
+    for k in covers-both-architectures bundle-is-sealed script-decompiles \
+             script-asks-terminal-to-do-script script-blocks-on-the-fifo \
+             script-closes-only-on-success script-reads-the-course-dir-record \
+             script-cds-before-running-the-helper script-cds-in-the-same-typed-command \
+             script-checks-the-launcher-is-really-there script-tests-the-launcher-path \
+             no-placeholder-survived-the-build; do
+        skip "applet:$k" "needs macOS: lipo, codesign and osadecompile have no Linux equivalent"
+    done
+fi
+
+# ── the helper, which is a text file and therefore portable ────────────────────
+# EVERY TOKEN HERE WAS MEASURED, and an earlier design that opened the fd in the typed command
+# instead could block the waiter forever. Comments stripped first, because the helper documents
+# its own rules and a substring search would match the documentation -- 10-static.sh:13.
+helper_code="$(sed 's/#.*//' "$PRIVATE/macapp/cs193v-run" 2>/dev/null)"
+assert_ne       "helper:code-survived-comment-stripping" "" "$(printf '%s' "$helper_code" | do_tr -d ' \n')"
+assert_contains "helper:opens-the-fifo-read-write"   '9<>'  "$helper_code"
+# AND IT OPENS THAT FIFO BEFORE ANYTHING THAT CAN FAIL, which is an ORDERING and so needs an
+# ordering assertion rather than a containment one. The waiter blocks in open(2) until a writer
+# appears, so any line above the open is a region where a failure here strands the applet FOREVER:
+# it never becomes a writer, EOF never comes, and a live blocked applet makes every later launch a
+# silent no-op (#274) -- the app is bricked until the process is killed.
+#
+# MEASURED, on a real Mac, with `cd` above the open: a course-dir record pointing at a folder the
+# student had moved left the applet blocked 15 minutes on a fifo with ZERO holders. The
+# synchronisation review missed this because it reasoned only about what happens after the
+# launcher starts, and every containment assertion above stayed green throughout.
+fifo_line="$(printf '%s\n' "$helper_code" | grep -n '9<>' | head -1 | cut -d: -f1)"
+risky_line="$(printf '%s\n' "$helper_code" | grep -nE '^[[:space:]]*(cd|\./cs193v)' | head -1 | cut -d: -f1)"
+record    "helper:fifo-open-and-first-fallible-line" "open=${fifo_line:-none} first-fallible=${risky_line:-none}"
+assert_ne "helper:both-lines-were-found" "" "${fifo_line:-}${risky_line:-}"
+if [ -n "${fifo_line:-}" ] && [ -n "${risky_line:-}" ] && [ "$fifo_line" -lt "$risky_line" ]; then
+    pass "helper:opens-the-fifo-before-anything-that-can-fail"
+else
+    fail "helper:opens-the-fifo-before-anything-that-can-fail" \
+         "the fifo is opened on line ${fifo_line:-?} but the first line that can fail is
+line ${risky_line:-?}. Anything failing above the open leaves the applet blocked in open(2) with no
+writer, forever, and a blocked applet makes every later launch a silent no-op (#274)."
+fi
+assert_contains "helper:closes-the-fd-for-the-launcher" '9>&-' "$helper_code"
+
+# AND THE SAME PROPERTY BEHAVIOURALLY, because a line-order assertion only guards the shape of
+# today's fix. This runs the REAL helper against a course directory that does not exist, with a
+# reader standing in for the applet's `read -r v < fifo`, and requires the reader to be RELEASED.
+# Before the reorder it blocked in open(2) forever: the helper exited on its `cd` without ever
+# becoming a writer, so EOF never arrived. Portable -- a fifo and two shells -- so unlike most of
+# the applet checks this one also runs on Linux.
+hdir="$TMP/helper-strand"; mkdir -p "$hdir"
+hfifo="$hdir/fifo"; mkfifo "$hfifo" 2>/dev/null
+( read -r hv < "$hfifo" || true; printf '%s' "${hv:-}" > "$hdir/verdict" ) &
+hreader=$!
+"$PRIVATE/macapp/cs193v-run" "$hdir/no-such-course-dir" "$hfifo" >/dev/null 2>&1
+hrc=$?
+if wait_until 10 test -f "$hdir/verdict"; then
+    pass      "helper:releases-the-waiter-when-it-fails-before-the-launcher"
+    assert_eq "helper:sends-no-verdict-on-an-early-failure" "" "$(cat "$hdir/verdict" 2>/dev/null)"
+else
+    kill "$hreader" 2>/dev/null
+    fail "helper:releases-the-waiter-when-it-fails-before-the-launcher" \
+         "the helper exited $hrc against a missing course directory and the reader was STILL
+blocked 10s later -- which is the applet hanging forever on a fifo with no writer. Check that the
+fifo is opened before the cd; see helper:opens-the-fifo-before-anything-that-can-fail."
+    skip "helper:sends-no-verdict-on-an-early-failure" "the waiter never returned"
+fi
+wait "$hreader" 2>/dev/null || true
+record "helper:early-failure-exit-status" "$hrc"
+assert_contains "helper:runs-the-launcher"           './cs193v' "$helper_code"
+# THE SENTINEL IS GATED ON THE EXIT STATUS. Unconditional, it would close the window ~100ms
+# after a fast refusal and the student would never read the error.
+assert_contains "helper:signals-only-on-success"     '[ "$st" -eq 0 ]' "$helper_code"
+# AND IT MUST NOT exec THE LAUNCHER: that would make it the process group leader in place of the
+# helper. The two `exec 9` forms are redirections and are fine, so the ban is on the launcher.
+assert_not_contains "helper:does-not-exec-the-launcher" 'exec ./cs193v' "$helper_code"
+
+# ── what install_mac_app does with it ─────────────────────────────────────────
+# STILL PORTABLE, AND DELIBERATELY SO: the function copies a directory and writes one text file,
+# neither of which needs a Mac. That is what keeps a Linux developer able to break this code and
+# find out. The read-back names come out of the installer so there is one definition of each.
+MAC_RECORD_REL="$(sed -n 's/^MAC_APP_RECORD="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+assert_ne "mac-app:record-path-was-readable" "" "$MAC_RECORD_REL"
+
+carve_func $PRIVATE/course-install.sh install_mac_app "$TMP/mac_app.sh"
+if [ -s "$TMP/mac_app.sh" ]; then pass "extract:mac-app"
+else fail "extract:mac-app" "could not carve install_mac_app out of course-install.sh"; fi
+
+run_mac_app() {                       # run_mac_app DIR FAKEHOME PLAT -> whatever it printed
+    (
+        . "$TMP/mac_app.sh"
+        # The stubs PRINT, because silent ones once made says-nothing-off-macos vacuous: it
+        # asserted the empty string against a function whose every output path was muted, and
+        # passed with the platform gate deleted.
+        step() { printf 'STEP %s\n' "$*"; }
+        ok()   { printf 'OK %s\n'   "$*"; }
+        note() { printf 'NOTE %s\n' "$*"; }
+        warn() { printf 'WARN %s\n' "$*"; }
+        notes() { while IFS= read -r l; do note "$l"; done; }
+        die() { printf 'DIED: %s\n' "$*"; exit 1; }
+        msg() { printf '%s' "$*"; }
+        MAC_APP_LABEL="$MAC_LABEL"; MAC_APP_RECORD="$MAC_RECORD_REL"
+        DIR="$1"; HOME="$2"; PLAT="$3"
+        install_mac_app
+    )
+}
+
+# A COURSE DIRECTORY WITH A SPACE AND A QUOTE, because choose_dir's second option is "type a
+# path" and #218 is the same failure one layer up. The fixture needs the real committed bundle
+# in place, since the function copies rather than generates.
+appdir="$TMP/mac/course dir with'quote"
+mkdir -p "$appdir/.private" "$TMP/mac/home"
+cp -R "$PRIVATE/macapp" "$appdir/.private/macapp"
+out="$(run_mac_app "$appdir" "$TMP/mac/home" macos 2>&1)"
+record "mac-app:install-said" "${out:-nothing}"
+APP="$TMP/mac/home/Applications/$MAC_LABEL.app"
+assert_contains "mac-app:announces-its-step"      "STEP step.mac-app" "$out"
+assert_contains "mac-app:reports-where-it-put-it" "APP=$APP"          "$out"
+assert_not_contains "mac-app:did-not-warn-on-a-good-run" "NOTE"       "$out"
+
+assert_file "mac-app:bundle-was-copied"      "$APP/Contents/MacOS/applet"
+assert_exec "mac-app:copied-helper-is-executable" "$APP/Contents/Resources/cs193v-run"
+assert_file "mac-app:copied-icon-came-along" "$APP/Contents/Resources/cs193v.icns"
+
+# THE COPY IS BYTE-IDENTICAL TO THE COMMITTED BUNDLE, which is one assertion standing in for the
+# rule that nothing may ever be written INSIDE the bundle. Editing a signed bundle invalidates
+# its seal, and a bundle that fails `codesign -v` has a damaged identity -- the one thing the
+# applet exists to have. So the course directory goes in a record beside it, never in it.
+assert_ok "mac-app:copy-is-identical-to-the-committed-bundle" \
+          diff -r "$PRIVATE/macapp/CS193V.app" "$APP"
+
+# AND THE RECORD CARRIES THE CHOSEN DIRECTORY EXACTLY, quote and space included. Compared by
+# reading the file rather than grepping the bundle, because that is where it now lives.
+assert_eq "mac-app:records-the-course-directory" "$appdir" \
+          "$(cat "$TMP/mac/home/$MAC_RECORD_REL" 2>/dev/null)"
+
+# A RERUN IS THE NORMAL CASE -- it is what a student is told to do when something went wrong.
+printf 'a stale file no bundle should keep\n' > "$APP/Contents/MacOS/leftover"
+out2="$(run_mac_app "$appdir" "$TMP/mac/home" macos 2>&1)"
+record "mac-app:second-pass-said" "${out2:-nothing}"
+assert_file    "mac-app:second-pass-leaves-a-bundle"       "$APP/Contents/MacOS/applet"
+assert_no_file "mac-app:second-pass-sweeps-the-old-bundle" "$APP/Contents/MacOS/leftover"
+assert_ok      "mac-app:second-pass-is-still-identical" \
+               diff -r "$PRIVATE/macapp/CS193V.app" "$APP"
+
+# THE GATE. Asserted because a step that ran everywhere would put an Applications directory and
+# an unlaunchable bundle into a Linux student's home.
+mkdir -p "$TMP/mac/home-linux"
+out3="$(run_mac_app "$appdir" "$TMP/mac/home-linux" linux 2>&1)"
+assert_eq      "mac-app:says-nothing-off-macos"   "" "$out3"
+assert_no_file "mac-app:writes-nothing-off-macos" "$TMP/mac/home-linux/Applications/$MAC_LABEL.app/Contents/MacOS/applet"
+assert_no_file "mac-app:writes-no-record-off-macos" "$TMP/mac/home-linux/$MAC_RECORD_REL"
+
+# ─── the Windows Start Menu shim  (#134) ───────────────────────────────────────
+# WHY THE WORK IS SPLIT ACROSS TWO FILES, and it is the same tension #218 resolved for the
+# closing message. Only course-install.sh knows $DIR -- win_projects_path's comment at :183 says
+# so -- and only install-cs193v-windows.cmd is a Windows process that can author a .lnk. So
+# neither does the other's job: this side writes a shim at a FIXED path with $DIR baked into it,
+# and the .cmd points a shortcut at that fixed path. No student-specific value crosses the
+# boundary, which is what keeps `for /f` out of the .cmd and means none of this depends on WSL
+# interop being available from inside the student pass.
+carve_func $PRIVATE/course-install.sh install_win_shim "$TMP/win_shim.sh"
+if [ -s "$TMP/win_shim.sh" ]; then pass "extract:win-shim"
+else fail "extract:win-shim" "could not carve install_win_shim out of course-install.sh"; fi
+
+# THE TWO FIXED PATHS, read back out of the installer for the reason mac-app:label-was-readable
+# gives: the .cmd hardcodes the Windows spelling of both, so a rename here that this suite did
+# not notice would leave a shortcut pointing at nothing.
+assert_ne "win-shim:shim-name-was-readable" "" "$WIN_SHIM_PATH"
+assert_ne "win-shim:icon-name-was-readable" "" "$WIN_ICON_PATH"
+
+run_win_shim() {                      # run_win_shim DIR FAKEHOME WINFLAG -> whatever it printed
+    (
+        . "$TMP/win_shim.sh"
+        step() { printf 'STEP %s\n' "$*"; }
+        ok()   { printf 'OK %s\n'   "$*"; }
+        note() { printf 'NOTE %s\n' "$*"; }
+        die() { printf 'DIED: %s\n' "$*"; exit 1; }
+        msg() { printf '%s' "$*"; }
+        WIN_SHIM_NAME="$WIN_SHIM_PATH"; WIN_ICON_NAME="$WIN_ICON_PATH"
+        DIR="$1"; HOME="$2"; CS193V_WINDOWS="$3"
+        install_win_shim
+    )
+}
+
+# THE SAME AWKWARD DIRECTORY AS THE MAC CASE, and for the same reason: choose_dir runs on the
+# Windows path too, which is exactly the hole #218 found in the hardcoded {{UNC}}.
+windir="$TMP/win/course dir with'quote"
+mkdir -p "$windir/.private/icons" "$TMP/win/home"
+printf 'stand-in for the real ico\n' > "$windir/.private/icons/cs193v.ico"
+wout="$(run_win_shim "$windir" "$TMP/win/home" 1 2>&1)"
+record "win-shim:generation-said" "${wout:-nothing}"
+SHIM="$TMP/win/home/$WIN_SHIM_PATH"
+assert_exec "win-shim:shim-is-executable" "$SHIM"
+assert_file "win-shim:icon-was-copied"    "$TMP/win/home/$WIN_ICON_PATH"
+assert_contains "win-shim:announces-its-step" "STEP step.win-shim" "$wout"
+
+# ─── the shim is asserted by RUNNING it, not by reading it ─────────────────────
+# The path in it is single-quote escaped, so for this directory the raw string is not in the
+# file -- the same reason mac-app:carries-the-chosen-directory sources its DIR= line instead of
+# grepping for it. Here the whole shim can simply be run against a stub launcher, which tests
+# the cd, the quoting and the exit status in one go.
+# `pwd -P` ON BOTH SIDES, NOT THE STRING WE PASSED IN. On macOS $TMPDIR ends in a slash, so
+# $TMP/... carries a `//` that the shell collapses the moment it stores $PWD -- and /var is a
+# symlink to /private/var besides. Comparing what we typed against what the shell resolved fails
+# on a shim that went to exactly the right place. Measured: that was this assertion's first run.
+printf '#!/bin/sh\npwd -P > "%s/win/RAN"\n' "$TMP" > "$windir/cs193v"
+chmod +x "$windir/cs193v"
+rm -f "$TMP/win/RAN"
+if "$SHIM" >/dev/null 2>&1; then pass "win-shim:runs-cleanly"
+else fail "win-shim:runs-cleanly" "the shim exited non-zero against a stub launcher"; fi
+assert_eq "win-shim:lands-in-the-chosen-directory" \
+          "$(cd "$windir" && pwd -P)" "$(cat "$TMP/win/RAN" 2>/dev/null)"
+
+# A MISSING COURSE DIRECTORY MUST NOT LOOK LIKE A CLEAN RUN. The shim is what a Start Menu entry
+# points at, so if the course tree has been moved or deleted the student clicks an icon and gets
+# a window. Something has to be in it: a shim that ran `cd` unchecked would run ./cs193v from
+# whatever directory WSL happened to start in, and `wsl --cd ~` makes that the home directory.
+# FROM AN EMPTY DIRECTORY, AND ASSERTED ON WHAT IT SAYS -- both because of what the first
+# version of this case measured. It ran the shim from the suite's own working directory, which
+# is $REPO, and asked only "did it exit non-zero". $REPO CONTAINS A REAL ./cs193v: with the cd
+# check deleted the shim fell through and ran the launcher itself, which refused for its own
+# unrelated reason (no tty) and exited non-zero -- so the assertion passed, having tested
+# nothing, and had quietly invoked the real launcher to do it. Mutation I of this block.
+#
+# An empty CWD removes the accident, and keying the assertion to the message removes the
+# ambiguity: "exited non-zero" is true of almost any failure, while win-shim.moved is printed
+# on exactly one path.
+mkdir -p "$TMP/win/empty"
+mv "$windir" "$TMP/win/moved-away"
+moved_out="$(cd "$TMP/win/empty" && "$SHIM" 2>&1)" && moved_rc=0 || moved_rc=$?
+mv "$TMP/win/moved-away" "$windir"
+assert_eq       "win-shim:refuses-a-course-tree-that-moved" "1" "$moved_rc"
+# THE DIRECTORY IT LOOKED IN, which is the student-visible contract -- the person who moved the
+# folder is the only one who can put it back, and a window that opens and closes tells them
+# nothing. Asserted as the PATH rather than through the catalogue on purpose: run_win_shim stubs
+# msg(), so the prose baked into the shim here is the stub output, and a needle keyed to the real
+# catalogue could never match. The path survives either renderer, so this assertion does not
+# depend on which one generated the shim. The prose itself is 20-messages.sh's job -- it is what
+# proves win-shim.moved exists, is non-empty and has its {{DIR}} supplied at exactly one site.
+assert_contains "win-shim:says-where-it-looked" "$windir" "$moved_out"
+
+# ─── shape, idempotency, and the gate ──────────────────────────────────────────
+# The exec ban is the Windows half of the argument install_mac_app's header makes: the .lnk runs
+# `bash -ic <shim>`, so the shim is a foreground job of an interactive shell and the launcher is
+# its child -- inside the process group that a window close signals, and not the session leader,
+# which is the one shape in which #170 is deterministic. Comments stripped first for the reason
+# mac-app:never-execs records.
+shim_code="$(sed 's/#.*//' "$SHIM" 2>/dev/null)"
+assert_ne           "win-shim:code-survived-comment-stripping" "" "$(printf '%s' "$shim_code" | do_tr -d ' \n')"
+assert_not_contains "win-shim:never-execs" "exec" "$shim_code"
+
+printf 'stale\n' > "$TMP/win/home/$WIN_ICON_PATH"
+wout2="$(run_win_shim "$windir" "$TMP/win/home" 1 2>&1)"
+assert_exec "win-shim:second-pass-leaves-a-working-shim" "$SHIM"
+assert_eq   "win-shim:second-pass-refreshes-the-icon" "stand-in for the real ico" \
+            "$(cat "$TMP/win/home/$WIN_ICON_PATH" 2>/dev/null)"
+
+# CS193V_WINDOWS IS THE GATE, the same variable say_done branches on -- it is set by
+# install-cs193v-windows.cmd and by nothing else, so a Mac or Linux install never comes here.
+mkdir -p "$TMP/win/home-unix"
+wout3="$(run_win_shim "$windir" "$TMP/win/home-unix" '' 2>&1)"
+assert_eq      "win-shim:says-nothing-without-the-windows-flag" "" "$wout3"
+assert_no_file "win-shim:writes-nothing-without-the-windows-flag" "$TMP/win/home-unix/$WIN_SHIM_PATH"
+
+# ─── the two files must agree about the Start Menu entry  (#134) ───────────────
+# THREE CONSTANTS CROSS THE BOUNDARY AND NOTHING ENFORCES THEM BUT THIS. install_win_shim writes
+# a shim and an icon at fixed paths in the student's WSL home; the .cmd hardcodes the Windows
+# spelling of both and points a shortcut at them. Neither file imports anything from the other,
+# so a rename on either side is a shortcut that opens a window with an error in it -- and the
+# wine tier cannot catch it, because no Windows shell there ever resolves the shortcut. These are
+# read out of BOTH files and compared, the same move windows:names-the-same-distro-as-the-sh
+# makes for %DISTRO%.
+WCMD="$(sed 's/\r$//' "$W")"
+lnk_name="$(printf '%s\n' "$WCMD" | sed -n 's/^set "LNKNAME=\(.*\)"$/\1/p')"
+lnk_args="$(printf '%s\n' "$WCMD" | sed -n 's/.*\$s\.Arguments = '"'"'\([^'"'"']*\)'"'"'.*/\1/p')"
+lnk_target="$(printf '%s\n' "$WCMD" | sed -n 's/.*\$s\.TargetPath = '"'"'\([^'"'"']*\)'"'"'.*/\1/p')"
+ico_copy="$(printf '%s\n' "$WCMD" | grep -- 'copy /y' | head -1)"
+assert_ne "windows:the-shortcut-name-was-readable"   "" "$lnk_name"
+assert_ne "windows:the-shortcut-args-were-readable"  "" "$lnk_args"
+assert_ne "windows:the-shortcut-target-was-readable" "" "$lnk_target"
+
+# ONE LABEL ACROSS BOTH PLATFORMS. It is the string students are told to look for, so a Mac and
+# a Windows student have to be told the same one.
+assert_eq "windows:the-start-menu-label-matches-the-mac-bundle" "$MAC_LABEL" "$lnk_name"
+# AND THE SHORTCUT RUNS THE SHIM install_win_shim ACTUALLY WROTE.
+assert_contains "windows:the-shortcut-runs-the-shim-the-installer-writes" \
+                "$WIN_SHIM_PATH" "$lnk_args"
+assert_contains "windows:the-icon-it-copies-is-the-one-the-installer-left" \
+                "$WIN_ICON_PATH" "$ico_copy"
+
+# SYSTEM32 AND NOT %SYS32%, which is the one place in that file where the difference bites:
+# %SYS32% is %SystemRoot%\Sysnative under WOW64, and Sysnative is a redirector that exists only
+# for the 32-bit process looking at it -- fine for running wsl from the script, unresolvable once
+# baked into a .lnk that Explorer opens later.
+assert_contains     "windows:the-shortcut-targets-a-real-system32-path" '%SystemRoot%\System32\wsl' "$lnk_target"
+assert_not_contains "windows:the-shortcut-does-not-bake-sysnative"      'SYS32'  "$lnk_target"
+# NOT WINDOWS TERMINAL. wt is an App Execution Alias: its backing path moves with every Store
+# update and Settings can switch the alias off entirely.
+assert_not_contains "windows:the-shortcut-does-not-target-windows-terminal" 'wt.exe' "$lnk_target"
+
+# THE SHAPE, which is the Windows half of the argument install_mac_app's header makes. A bare
+# `-- <shim>` runs the shim instead of a shell, which makes it the session leader and is the one
+# state in which #170 is deterministic. `bash -ic` is an interactive shell with job control on,
+# so the shim is a foreground job and the launcher its child.
+assert_contains     "windows:the-shortcut-goes-through-an-interactive-shell" 'bash -ic' "$lnk_args"
+assert_not_contains "windows:the-shortcut-does-not-run-the-launcher-itself"  './cs193v' "$lnk_args"
+
+# ORDERING. The shim does not exist until stage two has run, so a shortcut created before it
+# points at nothing. Compared by line number rather than by reading the file twice.
+pass_line="$(printf '%s\n' "$WCMD" | grep -n -- 'env CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
+lnk_line="$(printf '%s\n' "$WCMD" | grep -n -- 'set "LNKNAME=' | head -1 | cut -d: -f1)"
+assert_ne "windows:both-lines-were-found" "" "${pass_line:-}${lnk_line:-}"
+if [ -n "${pass_line:-}" ] && [ -n "${lnk_line:-}" ] && [ "$lnk_line" -gt "$pass_line" ]; then
+    pass "windows:the-shortcut-is-made-after-the-student-pass"
+else
+    fail "windows:the-shortcut-is-made-after-the-student-pass" \
+         "the Start Menu block is at line ${lnk_line:-?}, the student pass at ${pass_line:-?}"
+fi
+
+# AND WSL'S OWN ENTRY GOES. Two entries a letter apart is worse than either alone; the plain one
+# opens a login shell in the home directory, not the launcher.
+#
+# ─── WHICH DIRECTORY, AND WHY THIS USED TO BE UNASKED  (#270) ──────────────────
+#
+# THE TWO ASSERTIONS THAT WERE HERE WERE VACUOUS, and the shape is worth keeping because it is
+# an easy one to write again. They read the PSDEL string and checked it contained `%DISTRO%.lnk`
+# and `TargetPath` -- both true, both still true, and neither able to see that the path in front
+# of that filename named a directory `wsl --install` never writes to. Mutating the .cmd to delete
+# `C:\nonexistent\%DISTRO%.lnk` left both green. So the delete had never removed anything, on any
+# machine, and because the call carries a documented unchecked-exit waiver it said nothing.
+#
+# WHAT IS ASSERTED NOW IS THE DIRECTORY, out of the two `set` lines rather than out of the
+# PowerShell, so a rename of either variable fails here rather than silently matching nothing.
+# %SMDIR% is the Start Menu ROOT -- measured on Windows 11 26200.9445 / WSL 2.7.14.0 as where
+# `wsl --install --name` puts its entry -- and %LNKDIR% is the app list one level down.
+#
+# AND 27-installer-windows.sh's win-lnk:removes-the-entry-wsl-made-for-itself IS THE OTHER HALF.
+# A directory name is still only a string here; that case plants an entry where WSL puts one and
+# asserts it is gone afterwards. Neither is redundant: this one runs in the static tier on every
+# machine, that one needs wine and 3.46 GB.
+sm_dir="$(printf '%s\n' "$WCMD" | sed -n 's/^set "SMDIR=\(.*\)"$/\1/p')"
+lnk_dir="$(printf '%s\n' "$WCMD" | sed -n 's/^set "LNKDIR=\(.*\)"$/\1/p')"
+del_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSDEL=\(.*\)"$/\1/p')"
+assert_ne "windows:the-delete-was-readable"       "" "$del_ps"
+assert_ne "windows:the-start-menu-root-was-readable" "" "$sm_dir"
+# THE ROOT IS THE ROOT: under %APPDATA%, and not the app list. A `set "SMDIR=...\Programs"` is
+# the exact regression this rule exists to stop, so it is checked rather than assumed from the
+# derivation below.
+assert_match        "windows:the-start-menu-root-is-under-appdata" \
+                    '^%APPDATA%\\Microsoft\\Windows\\Start Menu$' "$sm_dir"
+assert_not_contains "windows:the-start-menu-root-is-not-the-app-list" 'Programs' "$sm_dir"
+# AND THE APP LIST IS DERIVED FROM IT, which is what keeps the pair from drifting: one of them
+# has to change for the other to.
+assert_eq "windows:the-app-list-is-the-root-plus-programs" '%SMDIR%\Programs' "$lnk_dir"
+
+# OURS GOES IN THE APP LIST. The Start Menu root is not enumerated in "All apps" on Windows 11,
+# so an entry written to %SMDIR% would be one a student cannot find by typing its name. Read out
+# of PSLNK unexpanded, because that is what the file says and %LNKNAME% is pinned separately
+# above against the mac bundle's label.
+lnk_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSLNK=\(.*\)"$/\1/p')"
+assert_ne       "windows:the-create-was-readable" "" "$lnk_ps"
+assert_contains "windows:the-course-entry-goes-in-the-app-list" \
+                'CreateShortcut('"'"'%LNKDIR%\%LNKNAME%.lnk'"'"')' "$lnk_ps"
+
+# AND THE DELETE LOOKS IN THE ROOT. This is the assertion whose absence was #270.
+assert_contains "windows:the-delete-reads-the-start-menu-root" '%SMDIR%\%DISTRO%.lnk' "$del_ps"
+assert_contains "windows:the-delete-is-guarded-on-the-target"  'TargetPath'            "$del_ps"
+# BOTH DIRECTORIES, NOT ONE SWAPPED FOR THE OTHER. Nothing documents where WSL writes this and
+# it has moved before, so a version that used the app list instead would reintroduce the defect
+# in exactly the same silent way.
+assert_contains "windows:the-delete-also-reads-the-app-list" '%LNKDIR%\%DISTRO%.lnk' "$del_ps"
+# THE FOLDER `wsl --install` LEAVES BESIDE ITS SHORTCUT IS NOT OURS TO REMOVE. It is an empty
+# directory named for the distribution in the app list -- the detail that made #270's wrong
+# guess look right -- and a student may have put something in it since. So the file gets exactly
+# one deletion, of the .lnk the loop is holding, and no way to descend into anything.
+assert_eq "windows:deletes-in-exactly-one-place" "1" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'Remove-Item')"
+assert_contains     "windows:the-delete-removes-the-path-it-tested" 'Remove-Item -LiteralPath $p' "$del_ps"
+assert_not_contains "windows:removes-nothing-recursively"           '-Recurse'                    "$WCMD"
+
+# ─── the four arms, asserted  (#134) ───────────────────────────────────────────
+assert_eq "sign-off:macos-with-a-bundle-promises-the-app" \
+          "finished.macos"            "$(run_say_done '' yes '')"
+assert_eq "sign-off:macos-without-a-bundle-falls-back" \
+          "finished"                  "$(run_say_done '' '' '')"
+assert_eq "sign-off:windows-with-a-shortcut-promises-it" \
+          "finished.windows-shortcut" "$(run_say_done 1 '' yes)"
+assert_eq "sign-off:windows-without-a-shortcut-falls-back" \
+          "finished.windows"          "$(run_say_done 1 '' '')"
+# LINUX IS THE SAME ARM AS A MAC WHOSE BUNDLE FAILED, and that is the reason there are two new
+# keys rather than four: the flags are empty everywhere their step does not run, so a Linux
+# install reaches `finished` down the path it always did.
+#
+# BUT "EMPTY" AND "NEVER ASSIGNED" ARE NOT THE SAME THING UNDER `set -u`, and this assertion used
+# to miss the difference -- it compared run_say_done to ITSELF, which no change could ever redden.
+# The difference is the whole defect: MAC_APP_READY and WIN_SHIM_READY were set only INSIDE
+# install_mac_app and install_win_shim, which return early off their own platform, so a Linux or
+# WSL install reached say_done with them UNBOUND and died AT ITS OWN SIGN-OFF -- after smoke_test
+# had already told the student the environment works. run_say_done cannot see that: it assigns all
+# three flags itself, which is right for the four arms above and wrong for this one.
+#
+# So this arm sources say_done together with whatever column-0 initialisation the script really
+# makes. 26-installer-sandbox.sh's student pass is what caught the defect end to end; this is the
+# millisecond guard for the rule that keeps it fixed.
+say_done_as_a_linux_install() {       # -> the key, or the shell's own error text
+    (
+        set -u
+        eval "$(grep '^[A-Z][A-Z0-9_]*_READY=' $PRIVATE/course-install.sh)"
+        . "$TMP/say_done.sh"
+        msg() { printf '%s' "$1"; }
+        win_projects_path() { printf 'UNC'; }
+        DIR=/course; WSL_DISTRO=CS193V; MAC_APP_LABEL="a label"
+        say_done
+    ) 2>&1 | do_tr -d ' \n'
+}
+assert_eq "sign-off:a-linux-install-is-unchanged" "finished" "$(say_done_as_a_linux_install)"
+
+# AND BY NAME AS WELL AS BY BEHAVIOUR, so a flag ADDED later inherits the rule rather than
+# needing somebody to remember it. Every *_READY say_done reads bare -- ${X:-} forms are excluded
+# by the pattern, because a default is its own initialisation -- must be assigned at column 0.
+sd_flags="$(grep -o '\$[A-Z][A-Z0-9_]*_READY' "$TMP/say_done.sh" | do_tr -d '$' | sort -u)"
+record    "sign-off:the-flags-say-done-reads" "${sd_flags:-none}"
+assert_ne "sign-off:the-flag-list-was-readable" "" "$sd_flags"
+for v in $sd_flags; do
+    assert_ne "sign-off:$(printf '%s' "$v" | do_tr 'A-Z_' 'a-z-')-is-initialised-before-the-flow" \
+              "" "$(grep "^$v=" $PRIVATE/course-install.sh)"
+done
+# AND THE WINDOWS FLAG WINS OVER A STALE MAC FLAG. Nothing sets both today; the arms are ordered
+# so that if something ever did, a Windows student is not sent to an Applications folder.
+assert_eq "sign-off:windows-wins-over-a-mac-flag" \
+          "finished.windows-shortcut" "$(run_say_done 1 yes yes)"
+
+# ─── the one-click entry points are the LAST thing a run does  (#134) ──────────
+# NOT A STYLE POINT. install_mac_app and install_win_shim read icons that install_files has just
+# unpacked, so sitting them next to it is the obvious placement and the wrong one: build_image
+# and smoke_test can both still refuse, and a run that gets that far leaves a bundle in
+# ~/Applications and an entry in the Start Menu pointing at an install that cannot start. #134
+# asks for a way in that also makes sure a student really is inside the environment.
+#
+# IT IS ALSO WHAT LETS say_done TRUST MAC_APP_READY AND WIN_SHIM_READY. Those flags are set on
+# the success path of these two steps; if either ran before something that could still abort, the
+# sign-off could promise a gesture on a run that never finished.
+#
+# READ OFF THE CALL SEQUENCE, not the function definitions, which sit elsewhere in the file and
+# in a different order on purpose.
+flow="$(sed -n '/^say_welcome$/,/^say_done$/p' $PRIVATE/course-install.sh \
+        | grep -vE '^[[:space:]]*(#|$)')"
+flow_n() { printf '%s\n' "$flow" | grep -n "^$1\$" | head -1 | cut -d: -f1; }
+for step in say_welcome install_files build_image smoke_test install_mac_app install_win_shim say_done; do
+    assert_ne "flow:$step-is-in-the-sequence" "" "$(flow_n "$step")"
+done
+# AND THE ORDER, as three separate questions so a failure says which one moved.
+for pair in smoke_test:install_mac_app smoke_test:install_win_shim \
+            install_mac_app:say_done install_win_shim:say_done \
+            build_image:install_mac_app install_files:build_image; do
+    earlier="${pair%%:*}"; later="${pair#*:}"
+    a="$(flow_n "$earlier")"; b="$(flow_n "$later")"
+    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
+        pass "flow:$earlier-runs-before-$later"
+    else
+        fail "flow:$earlier-runs-before-$later" \
+             "$earlier is at line ${a:-absent} and $later at ${b:-absent} in the call sequence"
+    fi
 done
