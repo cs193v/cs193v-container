@@ -39,16 +39,28 @@ on run
 	-- existing file, and $TMPDIR is per-user and mode 700 on macOS.
 	set fifoPath to do shell script "F=$(mktemp -u \"${TMPDIR:-/tmp}/cs193v-win.XXXXXX\"); mkfifo \"$F\"; printf %s \"$F\""
 
-	-- Type the helper into a NEW Terminal window. `do script` types at a fresh interactive login
+	-- Type the helper into a NEW Terminal tab. `do script` types at a fresh interactive login
 	-- shell, so the launcher ends up a foreground JOB in its own process group and `login` stays
 	-- the session leader -- the shape measured clean, and not the session-leader shape #170 is
-	-- about. A bare `cmd arg arg` is also the one form every shell macOS ships parses alike;
+	-- about. `cd dir; cmd arg arg` is a form every shell macOS ships parses alike;
 	-- `exec 9>...` typed here would be read by tcsh as "run a command named 9".
+	--
+	-- WHY IT `cd`s FIRST, WHEN THE HELPER ALREADY DOES. The helper's own `cd` is in a CHILD
+	-- process, so the interactive shell never moves -- and on a refusal the student is left at a
+	-- prompt in $HOME, reading launcher advice that says `./cs193v --stop`. messages.txt says
+	-- that in twelve places, all correct for a student who typed `cd DIR && ./cs193v` by hand and
+	-- all wrong for a tab we opened. Landing the shell where the documented path would have put
+	-- it fixes every one of them at once; rewording twelve messages would not, since they are
+	-- right for the manual path.
+	--
+	-- `;` NOT `&&`: if the cd fails the helper must still run, because the helper's
+	-- `cd "$1" || exit 1` is the authority and it reports the failure. With `&&` a bad directory
+	-- would leave a silent shell and no message at all.
 	set windowId to 0
 	try
 		tell application "Terminal"
 			activate
-			set theTab to do script (quoted form of helperPath & " " & quoted form of courseDir & " " & quoted form of fifoPath)
+			set theTab to do script ("cd " & quoted form of courseDir & "; " & quoted form of helperPath & " " & quoted form of courseDir & " " & quoted form of fifoPath)
 			set windowId to id of (first window whose tabs contains theTab)
 		end tell
 	on error
