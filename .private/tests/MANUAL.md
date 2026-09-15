@@ -1588,6 +1588,19 @@ On a real Windows machine, after `install-cs193v-windows.cmd` finishes:
 
 - **Exactly one** CS193V entry in the Start Menu, named *CS193V Development Environment*, with
   the course icon — the plain `CS193V` entry `wsl --install` created should be gone.
+
+  **This check is what found #270, so look on disk and not only in the UI.** The two entries live
+  in *different directories*, which is the whole of that defect:
+
+  ```
+  %APPDATA%\Microsoft\Windows\Start Menu\CS193V.lnk                            <- wsl --install
+  %APPDATA%\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
+  ```
+
+  `wsl --install` also leaves an **empty `Programs\CS193V\` folder** beside its shortcut. That one
+  stays: it renders nowhere, and it is not ours to delete. Seeing it is what made the installer's
+  original guess — that the shortcut was in `Programs` too — look right for a release.
+
 - `Win`, type `CS193` — it is found.
 - The icon is legible at the size the Start Menu draws it. The wordmark goes to mush below about
   32px by design; what has to survive is the shape and the colour.

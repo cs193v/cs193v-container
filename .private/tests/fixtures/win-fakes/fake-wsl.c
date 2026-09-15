@@ -313,6 +313,38 @@ int main(int argc, char **argv) {
             fake_path(p, sizeof p, "wsl.list");
             if ((f = fopen(p, "a"))) { fprintf(f, "%s\n", distro); fclose(f); }
             (void)list;
+
+            /* AND THE START MENU ENTRY WSL MAKES FOR ITSELF (#270), which is the whole reason
+             * the .cmd has a delete step. Created HERE rather than planted by the harness
+             * because on a real machine it is `wsl --install` that creates it, so the delete is
+             * handed something this sequence produced rather than something a case arranged to
+             * be found.
+             *
+             * THE ROOT, NOT Programs, AND THAT IS THE MEASUREMENT. Windows 11 26200.9445 with
+             * WSL 2.7.14.0: four environments created by `wsl --install --name`, four .lnk in
+             * %APPDATA%\Microsoft\Windows\Start Menu and none in the app list under it.
+             *
+             * THE ARGUMENTS NAME A GUID AND NOT THE DISTRIBUTION (microsoft/WSL#13414), which
+             * is why the .cmd cannot guard on the name and guards on the target instead. The
+             * GUID here is arbitrary -- nothing reads it, and a fake that invented a plausible
+             * one would only invite an assertion on a value WSL picks at random.
+             *
+             * AND THE EMPTY Programs\<distro>\ DIRECTORY BESIDE IT, which is the detail that
+             * made #270's wrong guess look like the right answer: a per-distro name really does
+             * appear in the app list, as a folder rather than a shortcut. Nothing may remove it,
+             * and win-lnk:leaves-the-empty-folder-wsl-made is what says so. */
+            const char *appdata = getenv("APPDATA");
+            if (appdata) {
+                char lnk[1024], progdir[1024];
+                snprintf(lnk, sizeof lnk, "%s\\Microsoft\\Windows\\Start Menu\\%s.lnk",
+                         appdata, distro);
+                fake_lnk_write(lnk, "C:\\Program Files\\WSL\\wsl.exe",
+                               "--distribution-id {b5ad5e01-310c-4827-ad57-84ce8cbcdcbd} --cd ~",
+                               "");
+                snprintf(progdir, sizeof progdir,
+                         "%s\\Microsoft\\Windows\\Start Menu\\Programs\\%s", appdata, distro);
+                fake_mkdirp(progdir);
+            }
         } else {
             fake_say(stdout, "MessageDistroNameAlreadyExists", NULL, NULL);
             return WSL_FAIL;
