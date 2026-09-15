@@ -2428,6 +2428,13 @@ if [ "$(uname -s)" = Darwin ]; then
     # `;` not `&&`, so a bad directory still reaches the helper's own `cd "$1" || exit 1`, which
     # is what reports it.
     assert_contains "applet:script-cds-before-running-the-helper" '"cd "' "$decompiled"
+    # IT CHECKS FOR THE LAUNCHER, NOT JUST FOR THE RECORD. Found by hand: a record pointing at a
+    # course folder the student had moved got no CS193V wording at all, just two raw shell errors
+    # in a tab, because the only test was whether `cat` returned something. `test -x DIR/cs193v`
+    # is what "installed" actually means, and it also covers a path that is not a course tree and
+    # a directory on an unmounted volume.
+    assert_contains "applet:script-checks-the-launcher-is-really-there" '"test -x "' "$decompiled"
+    assert_contains "applet:script-tests-the-launcher-path"            '"/cs193v"'   "$decompiled"
     assert_contains "applet:script-cds-in-the-same-typed-command" '"; "'  "$decompiled"
     # No placeholder survived into the shipped artifact.
     assert_not_match "applet:no-placeholder-survived-the-build"   '@@[A-Z_]+@@'     "$decompiled"
@@ -2436,6 +2443,7 @@ else
              script-asks-terminal-to-do-script script-blocks-on-the-fifo \
              script-closes-only-on-success script-reads-the-course-dir-record \
              script-cds-before-running-the-helper script-cds-in-the-same-typed-command \
+             script-checks-the-launcher-is-really-there script-tests-the-launcher-path \
              no-placeholder-survived-the-build; do
         skip "applet:$k" "needs macOS: lipo, codesign and osadecompile have no Linux equivalent"
     done
@@ -2448,7 +2456,55 @@ fi
 helper_code="$(sed 's/#.*//' "$PRIVATE/macapp/cs193v-run" 2>/dev/null)"
 assert_ne       "helper:code-survived-comment-stripping" "" "$(printf '%s' "$helper_code" | do_tr -d ' \n')"
 assert_contains "helper:opens-the-fifo-read-write"   '9<>'  "$helper_code"
+# AND IT OPENS THAT FIFO BEFORE ANYTHING THAT CAN FAIL, which is an ORDERING and so needs an
+# ordering assertion rather than a containment one. The waiter blocks in open(2) until a writer
+# appears, so any line above the open is a region where a failure here strands the applet FOREVER:
+# it never becomes a writer, EOF never comes, and a live blocked applet makes every later launch a
+# silent no-op (#274) -- the app is bricked until the process is killed.
+#
+# MEASURED, on a real Mac, with `cd` above the open: a course-dir record pointing at a folder the
+# student had moved left the applet blocked 15 minutes on a fifo with ZERO holders. The
+# synchronisation review missed this because it reasoned only about what happens after the
+# launcher starts, and every containment assertion above stayed green throughout.
+fifo_line="$(printf '%s\n' "$helper_code" | grep -n '9<>' | head -1 | cut -d: -f1)"
+risky_line="$(printf '%s\n' "$helper_code" | grep -nE '^[[:space:]]*(cd|\./cs193v)' | head -1 | cut -d: -f1)"
+record    "helper:fifo-open-and-first-fallible-line" "open=${fifo_line:-none} first-fallible=${risky_line:-none}"
+assert_ne "helper:both-lines-were-found" "" "${fifo_line:-}${risky_line:-}"
+if [ -n "${fifo_line:-}" ] && [ -n "${risky_line:-}" ] && [ "$fifo_line" -lt "$risky_line" ]; then
+    pass "helper:opens-the-fifo-before-anything-that-can-fail"
+else
+    fail "helper:opens-the-fifo-before-anything-that-can-fail" \
+         "the fifo is opened on line ${fifo_line:-?} but the first line that can fail is
+line ${risky_line:-?}. Anything failing above the open leaves the applet blocked in open(2) with no
+writer, forever, and a blocked applet makes every later launch a silent no-op (#274)."
+fi
 assert_contains "helper:closes-the-fd-for-the-launcher" '9>&-' "$helper_code"
+
+# AND THE SAME PROPERTY BEHAVIOURALLY, because a line-order assertion only guards the shape of
+# today's fix. This runs the REAL helper against a course directory that does not exist, with a
+# reader standing in for the applet's `read -r v < fifo`, and requires the reader to be RELEASED.
+# Before the reorder it blocked in open(2) forever: the helper exited on its `cd` without ever
+# becoming a writer, so EOF never arrived. Portable -- a fifo and two shells -- so unlike most of
+# the applet checks this one also runs on Linux.
+hdir="$TMP/helper-strand"; mkdir -p "$hdir"
+hfifo="$hdir/fifo"; mkfifo "$hfifo" 2>/dev/null
+( read -r hv < "$hfifo" || true; printf '%s' "${hv:-}" > "$hdir/verdict" ) &
+hreader=$!
+"$PRIVATE/macapp/cs193v-run" "$hdir/no-such-course-dir" "$hfifo" >/dev/null 2>&1
+hrc=$?
+if wait_until 10 test -f "$hdir/verdict"; then
+    pass      "helper:releases-the-waiter-when-it-fails-before-the-launcher"
+    assert_eq "helper:sends-no-verdict-on-an-early-failure" "" "$(cat "$hdir/verdict" 2>/dev/null)"
+else
+    kill "$hreader" 2>/dev/null
+    fail "helper:releases-the-waiter-when-it-fails-before-the-launcher" \
+         "the helper exited $hrc against a missing course directory and the reader was STILL
+blocked 10s later -- which is the applet hanging forever on a fifo with no writer. Check that the
+fifo is opened before the cd; see helper:opens-the-fifo-before-anything-that-can-fail."
+    skip "helper:sends-no-verdict-on-an-early-failure" "the waiter never returned"
+fi
+wait "$hreader" 2>/dev/null || true
+record "helper:early-failure-exit-status" "$hrc"
 assert_contains "helper:runs-the-launcher"           './cs193v' "$helper_code"
 # THE SENTINEL IS GATED ON THE EXIT STATUS. Unconditional, it would close the window ~100ms
 # after a fast refusal and the student would never read the error.

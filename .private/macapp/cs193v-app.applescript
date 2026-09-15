@@ -22,12 +22,27 @@
 on run
 	set supportPath to (POSIX path of (path to library folder from user domain)) & "Application Support/CS193V/course-dir"
 
-	-- Where did the installer say the course files are? No record means no install.
+	-- Where did the installer say the course files are?
 	set courseDir to ""
 	try
 		set courseDir to do shell script "cat " & quoted form of supportPath
 	end try
-	if courseDir is "" then
+
+	-- THE RECORD IS ONLY A POINTER; THE LAUNCHER BEING THERE IS WHAT "INSTALLED" MEANS. Checking
+	-- the record for emptiness alone catches just the fresh-account case, and measured by hand it
+	-- let three others through to a Terminal tab full of raw shell errors and no CS193V wording at
+	-- all: a course folder the student moved or deleted, a path that exists but is not a course
+	-- tree, and a directory on an unmounted volume. `test -x` answers all four at once, and the
+	-- advice is the same for every one of them -- re-running the installer is what re-records the
+	-- location -- so this reuses the message rather than adding a key.
+	set installed to false
+	if courseDir is not "" then
+		try
+			do shell script "test -x " & quoted form of (courseDir & "/cs193v")
+			set installed to true
+		end try
+	end if
+	if not installed then
 		display alert "@@LABEL@@" message "@@NOT_INSTALLED@@" as critical
 		return
 	end if
