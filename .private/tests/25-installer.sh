@@ -2421,12 +2421,21 @@ if [ "$(uname -s)" = Darwin ]; then
     assert_contains "applet:script-blocks-on-the-fifo"            "read -r v"       "$decompiled"
     assert_contains "applet:script-closes-only-on-success"        "if verdict is"   "$decompiled"
     assert_contains "applet:script-reads-the-course-dir-record"   "course-dir"      "$decompiled"
+    # THE TYPED COMMAND `cd`s THE INTERACTIVE SHELL FIRST, and this is a defect found by hand on
+    # a real Mac rather than a nicety. The helper's own `cd` runs in a CHILD, so without this the
+    # tab's shell stays in $HOME -- and on a refusal the student reads `./cs193v --stop`, which
+    # messages.txt says in twelve places and which fails from anywhere but the course directory.
+    # `;` not `&&`, so a bad directory still reaches the helper's own `cd "$1" || exit 1`, which
+    # is what reports it.
+    assert_contains "applet:script-cds-before-running-the-helper" '"cd "' "$decompiled"
+    assert_contains "applet:script-cds-in-the-same-typed-command" '"; "'  "$decompiled"
     # No placeholder survived into the shipped artifact.
     assert_not_match "applet:no-placeholder-survived-the-build"   '@@[A-Z_]+@@'     "$decompiled"
 else
     for k in covers-both-architectures bundle-is-sealed script-decompiles \
              script-asks-terminal-to-do-script script-blocks-on-the-fifo \
              script-closes-only-on-success script-reads-the-course-dir-record \
+             script-cds-before-running-the-helper script-cds-in-the-same-typed-command \
              no-placeholder-survived-the-build; do
         skip "applet:$k" "needs macOS: lipo, codesign and osadecompile have no Linux equivalent"
     done
