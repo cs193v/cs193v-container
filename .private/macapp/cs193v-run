@@ -1,0 +1,27 @@
+#!/bin/sh
+# Runs INSIDE the Terminal window the applet opens.  $1 = course directory, $2 = window fifo.
+#
+# THIS FILE IS THE SYNCHRONISATION, and every token in it was measured (#134). Three agents
+# audited an earlier design where the fd was opened by the typed command instead; that version
+# could block the waiter forever and returned a false verdict under tcsh. What survived:
+#
+#   * THE FD IS OPENED HERE, not typed at the student's interactive shell. Typed there, any job
+#     the student backgrounds inherits the write end and the applet waits on it forever -- and
+#     `./cs193v 9>&-` cannot defend that, because the leak is upstream of the launcher. Measured
+#     on real interactive zsh and bash, with a positive control.
+#   * `9<>` AND NOT `9>`: read-write opens without blocking even with no reader yet, so the
+#     rendezvous cannot strand this window before the launcher starts.
+#   * `9>&-` ON THE LAUNCHER: it must not inherit the write end, or a lingering `podman exec`
+#     child holds the pipe open and the applet's EOF never arrives. cs193v-ui.sh:519 records the
+#     same hazard for conmon in the launcher's own fifo protocol.
+#   * THE SENTINEL IS GATED ON THE EXIT STATUS. Writing it unconditionally would close the window
+#     ~100ms after a fast refusal -- session-in-use, the foreign-directory box -- and the student
+#     would never read the error. On failure we write nothing, the applet sees EOF with no
+#     verdict, and it leaves the window open.
+cd "$1" || exit 1
+exec 9<>"$2"
+./cs193v 9>&-
+st=$?
+[ "$st" -eq 0 ] && printf 'ok\n' >&9
+exec 9>&-
+exit $st

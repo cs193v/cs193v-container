@@ -1354,16 +1354,25 @@ still works.
 
 ## The OS-native launchers  (#134)
 
-The bundle and the shortcut are *generated* by portable code, and 25-installer.sh checks the
-generation on either platform — `install_mac_app` and `install_win_shim` write files and copy an
-icon, and nothing in them is macOS- or Windows-only. **What no test here can reach is what the
-two operating systems then do with what was written**: LaunchServices, Terminal.app, Explorer and
-the Start Menu are all on the far side of the line the suite stops at. That is this section.
+Two artifacts, and they are reachable by automated tests to different depths.
+
+The Windows shortcut is *generated* at install time by portable code — `install_win_shim` writes
+a shim and copies an icon, and the `.cmd` half is checked as text — so 25-installer.sh covers the
+generation on either platform. The macOS app is not generated at all: it is a **prebuilt,
+ad-hoc-signed AppleScript applet committed at `.private/macapp/CS193V.app`**, and `install_mac_app`
+only copies it and records the course directory beside it. That makes the install step portable
+too, but the assertions that read *inside* the bundle need `lipo`, `codesign` and `osadecompile`,
+so they are **Darwin-gated** and a Linux run does not see them. Run the suite on a Mac at least
+once per change to the applet.
+
+**What no test here can reach is what the two operating systems then do with what was written**:
+LaunchServices, TCC, Terminal.app, Explorer and the Start Menu are all on the far side of the line
+the suite stops at. That is this section, and §134.2 is the one it exists for.
 
 Measured on macOS 26.6.2 while the work was done, and recorded so a later run can tell "differs"
 from "broken".
 
-### §134.1 — the bundle, from Finder and from Spotlight
+### §134.1 — the applet, from Finder and from Spotlight
 Run a real install on a Mac. Then, *without* using a terminal:
 
 - `~/Applications` in Finder holds **CS193V Development Environment** with the course icon, shown
@@ -1376,28 +1385,123 @@ Run a real install on a Mac. Then, *without* using a terminal:
 - Drag it to the Dock and launch it from there once.
 
 *Expect, each time:* a new Terminal window, the launcher's own output in it, a container shell.
+**No Rosetta dialog** — and note what that is now worth. The first implementation was a shell
+script named as `CFBundleExecutable`, which has no Mach-O header, so Apple Silicon offered to
+install Rosetta; that was seen verbatim on a real Mac. The applet's executable is a genuine
+universal Mach-O (`lipo -archs` → `x86_64 arm64`), so Launch Services reads the architectures out
+of the binary and the two `LS*` workaround keys are gone. A Rosetta prompt here would mean the
+committed bundle is no longer what it claims to be, which `applet:executable-is-a-macho` and
+`applet:covers-both-architectures` should have caught first.
 
-*Measured:* the whole chain works — `.app` → `osascript` → `do script` → a new window → `cd` into
-a course directory whose name contained both a space and a single quote → launcher ran. `plutil
--lint` accepts the generated Info.plist.
+*Measured (on the superseded shell-script bundle, so re-confirm):* the whole chain worked —
+`.app` → `do script` → a new window → `cd` into a course directory whose name contained both a
+space and a single quote → launcher ran.
 
-### §134.2 — the automation prompt, which is the one thing a fresh Mac does differently
-The first launch sends an Apple Event to Terminal, so macOS asks once:
+### §134.2 — the automation prompt, and who it is attributed to
+**This is the check the applet exists to satisfy.** The first launch sends an Apple Event to
+Terminal, so macOS asks once:
 **"CS193V Development Environment" wants access to control "Terminal"**, with the reason from
 `mac-app.automation-why`.
 
-*Expect:* the prompt names the bundle and gives that reason, not generic wording. Click Allow;
+*Expect:* the prompt **names the bundle** and gives that reason, not generic wording. Click Allow;
 the window opens. Quit and relaunch — **no second prompt**.
 
-*Then re-run the installer* and launch again. TCC grants key on code identity, and the bundle is
-unsigned and rewritten from scratch on every install, so this is where a re-prompt would show up.
-If it does, ad-hoc signing (`codesign -s -`) is the fix, and it belongs in `install_mac_app`.
+Then open **System Settings → Privacy & Security → Automation** and read the list.
 
-**This did not fire during development and that means nothing**: the measurement above ran the
-bundle's inner script from an existing terminal, so the responsible process was that terminal,
-which already held the permission. Only a double-click from Finder asks as the bundle.
+*Expect:* an entry for **CS193V Development Environment**, holding Terminal.
 
-### §134.3 — the Start Menu entry
+*Measured, and this is why the implementation changed:* with the shell-script bundle, after a real
+Finder double-click, that list held `sh`, `Terminal` and `gtimeout` and **nothing for CS193V**. TCC
+keys the grant on the *responsible process*, which for a script bundle is the interpreter — so the
+grant landed on `/bin/sh`, giving every shell script the student ever runs standing permission to
+control Terminal, and `NSAppleEventsUsageDescription` was probably never shown at all. If `sh`
+appears here instead of the bundle, the applet is not being treated as the responsible process and
+the privacy regression is back.
+
+**A prompt that does not fire proves nothing unless you got there from Finder.** Launching the app
+with `open` from an already-authorised terminal lets TCC attribute the event to that terminal,
+which already holds the permission. Only a double-click in Finder asks as the bundle.
+
+### §134.3 — a second user account, which is the clean-machine proxy
+TCC is per-user: `~/Library/Application Support/com.apple.TCC/TCC.db` is separate from the system
+database. So a **fresh macOS user account on the same Mac** is a genuine stand-in for a student's
+machine as far as §134.2 is concerned, with no cached grant to hide behind.
+
+Create an account, log in, run a real install, and do §134.1 and §134.2 there.
+
+*Expect:* identical behaviour, including the prompt, on an account that has never approved
+anything. This is the closest available test to a clean machine; what it does **not** cover is a
+Mac without the Command Line Tools, which would need a VM. That gap is recorded rather than closed
+— it only matters if the applet ever goes back to being built on the student's machine, which it
+should not.
+
+### §134.4 — the window closes on a clean exit, and stays on a refusal
+The applet hands the launcher a helper (`Contents/Resources/cs193v-run`) and blocks reading a
+sentinel from a fifo; it closes the Terminal window only when the launcher exited **0**.
+
+1. Launch, then `exit` the container shell normally.
+   *Expect:* the Terminal window closes by itself, and `podman ps -a` shows the container
+   `exited`.
+2. Launch again while the first session is still up, so the launcher refuses fast.
+   *Expect:* the window **stays open** with the refusal readable. A window that closes on a
+   refusal has swallowed the error message the student needed, which is the whole reason the
+   sentinel is gated on the exit status.
+3. Suspend mid-session with `^Z`, then `fg` and `exit`.
+   *Expect:* the window survives the suspend and closes after the exit.
+
+*Measured:* the block itself is sound. A `do shell script` sat on that read for **1531 s (25.5
+min)** at ~0% CPU in state `S` with no timeout, woke on the sentinel, and **could still send an
+Apple Event afterwards**. Teardown completes first: at 20 Hz sampling the ssh master died and the
+forwarded port was released 250 ms before the close. Both verdicts were measured directly —
+`exit 0` → `verdict=[ok]` → closed; `exit 1` → `verdict=[]` → left open.
+
+*What is still unmeasured:* a block that lasts a whole working day. If a window is ever found
+still open long after its container exited, that is the suspect, and the fallback is to ship the
+applet without the auto-close — which is only a loss of the feature, not of §134.2.
+
+### §134.5 — a reinstall does not re-prompt
+Run the installer a second time and launch again.
+
+*Expect:* **no new automation prompt.** The bundle is a committed artifact signed once at authoring
+time, so every install copies the same bytes and the ad-hoc code identity — which is what TCC keys
+on — does not move. (The superseded design compiled the bundle on the student's machine and would
+have minted a fresh identity per install; a re-prompt was expected there and accepted.) A
+re-prompt now means something is rewriting the bundle after it is copied, and
+`mac-app:copy-is-identical-to-the-committed-bundle` should have caught it.
+
+Also check the record the applet reads, since a reinstall rewrites it:
+`~/Library/Application Support/CS193V/course-dir` holds the course directory, one line. Move the
+course folder and launch.
+
+*Expect:* the applet refuses with `mac-app.not-installed`'s wording rather than opening a window
+into nothing.
+
+### §134.6 — a quarantined copy, which is the case the docs forbid
+The app must only ever reach a student through the installer. Prove why:
+
+```sh
+cp -R ~/Applications/"CS193V Development Environment.app" /tmp/q.app
+xattr -w -r com.apple.quarantine \
+  "0081;$(printf %x "$(date +%s)");Safari;$(uuidgen)" /tmp/q.app
+xattr -p com.apple.quarantine /tmp/q.app     # confirm it took
+open /tmp/q.app
+```
+
+The value is the four semicolon-separated fields Gatekeeper reads — flags, a hex timestamp, the
+agent name, and an event UUID — and `-r` is needed because the attribute has to be on the bundle
+directory a browser would have written it to.
+
+*Expect:* Gatekeeper refuses it. The bundle is ad-hoc signed and not notarized, and since Sequoia
+there is no right-click → Open bypass for that, so the student would be stuck. Record what the
+dialog actually says.
+
+*And the contrast, which is measured:* the tree the real bootstrap extracts (`curl` → `tar`)
+carries **no xattrs at all**, so no `com.apple.quarantine` — `curl` does not set it, and only apps
+opting into `LSFileQuarantineEnabled` do. Gatekeeper evaluates only quarantined files, so the
+installed copy is never assessed. That is the entire reason the ad-hoc signature is enough here
+and would not be enough for a download.
+
+### §134.7 — the Start Menu entry
 On a real Windows machine, after `install-cs193v-windows.cmd` finishes:
 
 - **Exactly one** CS193V entry in the Start Menu, named *CS193V Development Environment*, with
@@ -1409,7 +1513,7 @@ On a real Windows machine, after `install-cs193v-windows.cmd` finishes:
 
 *Expect:* no visible `wsl -d` step, no bare shell prompt first.
 
-### §134.4 — does the deleted entry stay deleted
+### §134.8 — does the deleted entry stay deleted
 Run `wsl --update`, reboot, and look at the Start Menu again.
 
 *Expect:* still one entry. **This is genuinely unresolved** — the only evidence found that WSL
@@ -1419,23 +1523,25 @@ regenerated by a running plugin, a different mechanism from the one-shot shortcu
 rather than rename it reopens, and the decision is recorded in the Start Menu section of
 `install-cs193v-windows.cmd`.
 
-### §134.5 — a course directory the student chose
+### §134.9 — a course directory the student chose
 Both platforms, taking `choose_dir`'s **type a path** option, with a space in the name.
 
-*Expect:* the bundle and the shortcut both land in that directory. This is #218's defect one layer
-down — a hardcoded path is right until somebody takes that option — and it is why 25-installer.sh
-runs its cases against a directory called `course dir with'quote`.
+*Expect:* the shortcut lands in that directory, and on macOS `course-dir` records it verbatim so
+the app follows. This is #218's defect one layer down — a hardcoded path is right until somebody
+takes that option — and it is why 25-installer.sh runs its cases against a directory called
+`course dir with'quote`.
 
-### §134.6 — closing the window still stops the container
+### §134.10 — closing the window still stops the container
 The #41 invariant, re-checked through the new entry point rather than a typed launcher, because
-the process shape is not the same: `do script` types the launcher at an interactive login shell,
-and the Windows shortcut runs it under `bash -ic`.
+the process shape is not the same: `do script` types the helper at an interactive login shell,
+and the Windows shortcut runs it under `bash -ic`. In both, `login` is the sole session leader and
+the launcher is a foreground job — **not** the session-leader shape `70-sighup.sh` §1c builds.
 
-Launch from the bundle, then from the shortcut, and each time close the window with the mouse
+Launch from the app, then from the shortcut, and each time close the window with the mouse
 (⌘W / the X, **not** `exit`). Then `podman ps -a` and `cs193v doctor`.
 
-*Expect:* container `exited`, tunnel down, no host ports held.
+*Expect:* container `exited`, tunnel down, no host ports held. Terminal raises its "terminate
+running processes?" sheet first; that is expected and not caused by this work.
 
-**Do this against a launcher with #170 fixed.** Until it is, a dirty teardown here may be #170
-rather than anything the shortcut did — #170's writeup gives the discriminating fields
-(`note_rc`, `state_len`, `pid_len`; clean is 0, 7, 4). A dirty teardown with `note_rc=1` is #170.
+#170's fix is on `main`, so a dirty teardown here is now a finding rather than a known bug. Its
+writeup gives the discriminating fields (`note_rc`, `state_len`, `pid_len`; clean is 0, 7, 4).

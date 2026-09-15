@@ -61,9 +61,65 @@ record "export:file-count" "$n_paths"
 # and install-utils.sh and wsl-provision.sh with #217. All three are execed or sourced out of the
 # ARCHIVE by the bootstrap a student downloads, so each has to be here while install-cs193v.sh
 # itself must not be -- see §4.
-want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/icons/cs193v.icns .private/icons/cs193v.ico .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
-got="$(grep -v '^\.private/files/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
+want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/icons/cs193v.ico .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
+# THE APPLET BUNDLE IS EXCLUDED FROM THIS LINE, like .private/files/ above and for the same
+# reason: everything inside a bundle ships by definition, so listing Assets-style internals here
+# would mean editing this suite whenever osacompile's template changes -- an edit carrying no
+# decision. What IS a decision is whether the bundle ships at all and whether its source does,
+# and that is asserted separately below.
+#
+# cs193v.icns LEFT THIS LINE when the applet became prebuilt: the installer no longer reads it,
+# because the bundle carries its own copy. Only the .ico is still read at install time, by the
+# Windows shim.
+got="$(grep -vE '^\.private/(files|macapp/CS193V\.app)/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "export:is-the-student-tree-and-nothing-more" "$want" "$got"
+
+# ─── the prebuilt macOS applet  (#134) ─────────────────────────────────────────
+# WHAT MUST ARRIVE, named rather than counted: install_mac_app copies the bundle wholesale, so
+# a missing executable is a student double-clicking something macOS refuses to open.
+for f in Contents/MacOS/applet Contents/Info.plist Contents/Resources/cs193v-run \
+         Contents/Resources/cs193v.icns Contents/Resources/Scripts/main.scpt; do
+    assert_ok "export:applet-ships-$(printf '%s' "$f" | do_tr '/' '-')" \
+              test -e "$TREE/.private/macapp/CS193V.app/$f"
+done
+assert_ok "export:applet-executable-keeps-its-bit" test -x "$TREE/.private/macapp/CS193V.app/Contents/MacOS/applet"
+
+# AND WHAT MUST NOT. The AppleScript source and make-macapp.sh are for reading and rebuilding on
+# a staff Mac; the loose cs193v-run is copied INTO the bundle at build time, so shipping it too
+# would hand students a second copy that could diverge from the sealed one.
+assert_eq "export:no-applet-sources" "" \
+          "$(grep -E '^\.private/macapp/(cs193v-app|make-macapp|cs193v-run)' "$TMP/paths" \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
+
+# THE ATTRIBUTE ITSELF, ASKED OF GIT, and this is the assertion that actually guards the rule.
+# Learned the hard way: the seal-survives check below passed with the `binary` line deleted,
+# because mangling needs core.autocrlf and this repo does not set it -- so that check cannot
+# fail here no matter what .gitattributes says. It would only fire on a developer who had
+# autocrlf on, which is exactly the person it is meant to protect and exactly the person whose
+# machine we are not testing on. `git check-attr` answers deterministically instead.
+#
+# Info.plist and CodeResources are the two that matter, because they are XML TEXT inside a signed
+# bundle; the Mach-O is safe on git's own binary detection. Asked via check-attr rather than by
+# grepping .gitattributes, so any spelling that works passes and any that silently does not fails.
+for f in Contents/Info.plist Contents/_CodeSignature/CodeResources Contents/MacOS/applet; do
+    assert_eq "export:applet-$(printf '%s' "$f" | do_tr '/' '-')-is-marked-binary" "unset" \
+              "$(git -C "$REPO" check-attr text -- ".private/macapp/CS193V.app/$f" | sed 's/.*: //')"
+done
+
+# THE SEAL SURVIVES THE ARCHIVE -- kept as an end-to-end check, NOT as the guard for the rule
+# above. On a machine with core.autocrlf unset it cannot fail; on one with it set it is the
+# symptom the attribute prevents. Measured by hand
+# before it was written: without a path-scoped `binary` attribute, git rewrites Info.plist and
+# _CodeSignature/CodeResources under core.autocrlf, and `codesign -v` then reports
+# `invalid Info.plist`. The Mach-O survives either way, because git detects it as binary on its
+# own, so the app still LAUNCHES while its identity is damaged -- and identity is exactly what
+# the applet exists to have. Nothing but a verify notices, which is why this is here.
+if [ "$(uname -s)" = Darwin ]; then
+    assert_ok "export:applet-seal-survives-the-archive" \
+              codesign --verify "$TREE/.private/macapp/CS193V.app"
+else
+    skip "export:applet-seal-survives-the-archive" "needs macOS: codesign has no Linux equivalent"
+fi
 
 # THE TWO ICONS SHIP AND WHAT MADE THEM DOES NOT  (#134). iconutil is macOS-only and
 # install-cs193v-windows.cmd cannot build an .ico at all, so both artifacts are committed and
