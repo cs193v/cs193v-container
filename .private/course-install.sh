@@ -923,125 +923,78 @@ install_files() {
 
 # ─── the one-click way in on macOS  (#134) ─────────────────────────────────────
 # WHY THIS EXISTS. A student who has not used a terminal has to open one, find the course folder
-# and type ./cs193v before anything happens. A bundle in ~/Applications is reached by Finder, by
+# and type ./cs193v before anything happens. An app in ~/Applications is reached by Finder, by
 # Spotlight and by the Apps view that replaced Launchpad in Tahoe -- so the instruction becomes
-# "open CS193V Development Environment", which is a thing a student can be checked on, rather
-# than three commands, which is not.
+# "open CS193V Development Environment", which is a thing a student can be checked on.
 #
-# THE SAME STRING AS THE START MENU LABEL on the other platform, and deliberately so: it is what
-# students are told to look for. 25-installer.sh reads it back out of this line rather than
-# keeping a second copy that can drift.
+# THE APP IS NOT BUILT HERE. It is a prebuilt, ad-hoc signed AppleScript applet, committed under
+# .private/macapp/ and built on a staff Mac by macapp/make-macapp.sh. Two measured reasons:
+#
+#   * A BUNDLE WHOSE EXECUTABLE IS A SHELL SCRIPT IS BROKEN IN TWO WAYS. Launch Services reads a
+#     bundle's architecture from a Mach-O header, and a script has none, so Apple Silicon offers
+#     to install Rosetta -- seen verbatim on a real Mac. And TCC attributes the Automation grant
+#     to the INTERPRETER: after a real double-click, Privacy & Security -> Automation listed
+#     `sh` and nothing for CS193V, which means every shell script the student ever runs gains
+#     permission to control Terminal, and the usage string is never shown.
+#   * A STUDENT'S MAC CANNOT BUILD ONE. `codesign` shells out to /usr/bin/codesign_allocate,
+#     which is a Command Line Tools shim -- byte-identical to the /usr/bin/git stub -- so without
+#     the CLT it can verify but not sign. A bundle compiled here could not be re-sealed after
+#     its Info.plist was written, and a bundle that fails `codesign -v` has a damaged identity,
+#     which is the one thing the applet exists to have.
+#
+# SO THIS FUNCTION COPIES, AND WRITES ONE FILE. Both portable, which is what keeps 25-installer.sh
+# able to check it on Linux.
 MAC_APP_LABEL="CS193V Development Environment"
 
-# WHETHER THE ONE-CLICK WAY IN ACTUALLY EXISTS, which say_done has to know. Both of these
-# steps are advisory -- ~/Applications and the student's WSL home are places an MDM profile
-# or a full disk can refuse -- so the sign-off cannot simply assume its own success and tell
-# a student to open something that is not there. Empty until the step that writes it says
-# otherwise, which is also the state on a platform where the step never runs.
-MAC_APP_READY=""
-WIN_SHIM_READY=""
+# WHERE THE COURSE DIRECTORY IS RECORDED, and it is OUTSIDE the bundle on purpose. Writing
+# anything inside would invalidate the ad-hoc seal. The applet reads this at launch, and says so
+# when it is missing -- which is also the "student deleted the course folder" case.
+MAC_APP_RECORD="Library/Application Support/CS193V/course-dir"
 
-# `do script` AND NOTHING ELSE, which is the whole of why this mechanism was chosen over a
-# double-clickable .command. #134's comment measured all three candidates on a real Terminal.app:
-#
-#   * `do script` -- the command is TYPED at a fresh interactive login shell, so the launcher is
-#     a foreground JOB in its own process group. A window close tears the session down cleanly,
-#     4/4. This one.
-#   * a .command file -- Terminal runs the file AS the shell, so the launcher is a child of a
-#     NON-interactive shell with job control off, sharing its process group. Tested by nothing.
-#   * anything of the form "run this instead of a shell", `exec ./cs193v` included -- makes the
-#     launcher the SESSION LEADER, which is the one shape in which #170 is deterministic.
-#
-# AN .app COULD NOT RUN THE LAUNCHER ITSELF ANYWAY. LaunchServices gives it no tty, and
-# cs193v:2077 refuses that by design: `podman exec -it` allocates a pty, a pty never delivers
-# EOF the way a pipe does, so the alternative to refusing is a student watching a wedged window
-# with no output. That refusal is also why there is no "just run it in the background" variant.
-#
-# $DIR TRAVELS AS AN ARGUMENT AND NEVER AS APPLESCRIPT SOURCE. choose_dir lets a student type a
-# path, so it can hold a space, a quote or a backslash; interpolated into the -e text those stop
-# being a path and become syntax. Passed as argv it is data, and `quoted form of` does the
-# shell escaping for the inner command. Measured against a directory named  dir with spaces/and'quote .
-#
+# AND THE FLAG say_done READS, INITIALISED HERE RATHER THAN ONLY IN THE STEP THAT SETS IT. This
+# script runs under `set -u`, so a flag assigned only inside install_mac_app is UNBOUND on every
+# platform where that function returns early -- and say_done is the LAST thing a good install
+# does, so the crash landed after smoke_test had already told the student it works. Measured
+# exactly that way in a WSL student pass; 25-installer.sh's sign-off arm now models it.
+MAC_APP_READY=""
+
 # ADVISORY, NOT FATAL. Everything above this point is a working install whatever happens here,
 # and ~/Applications is somewhere an MDM profile or a full disk can genuinely refuse -- so a
-# failure warns, repeats the commands that do still work, and carries on. check_disk below makes
-# the same call for the same reason.
+# failure warns, repeats the commands that do still work, and carries on. check_disk makes the
+# same call for the same reason.
 install_mac_app() {
     [ "$PLAT" = macos ] || return 0
     step "$(msg step.mac-app)"
 
-    local app contents dir_esc
+    local app src record
+    src="$DIR/.private/macapp/CS193V.app"
     app="$HOME/Applications/$MAC_APP_LABEL.app"
+    record="$HOME/$MAC_APP_RECORD"
 
     # THE ONLY `rm -rf` IN THIS SCRIPT, so it is guarded on the shape of its own argument rather
-    # than trusted. $HOME is the developer's real one on a test run, and MAC_APP_LABEL is the one
-    # part of this path that a future edit could empty -- which would make the target
-    # ~/Applications/.app, or with a stray expansion ~/Applications itself.
+    # than trusted. $HOME is the developer's own on a test run, and MAC_APP_LABEL is the one part
+    # of this path a future edit could empty -- which would make the target ~/Applications/.app,
+    # or with a stray expansion ~/Applications itself.
     case "$app" in
         "$HOME/Applications/"?*.app) : ;;
         *) msg warn.mac-app-failed "DIR=$DIR" | notes; return 0 ;;
     esac
 
-    # SINGLE-QUOTE ESCAPING FOR THE SHELL ASSIGNMENT BELOW, which is a different job from the
-    # AppleScript one above and still has to be done: the path is written into the generated
-    # script as a '...' literal, so every quote in it has to close, escape and reopen.
-    dir_esc="$(printf '%s' "$DIR" | sed "s/'/'\\\\''/g")"
-
-    # REBUILT RATHER THAN WRITTEN OVER. A rerun is the normal case -- it is what a student is
-    # told to do when something went wrong -- and writing over the top leaves any file an older
-    # layout put inside the bundle still sitting there, where Finder and LaunchServices both
-    # still see it.
+    # REPLACED RATHER THAN MERGED. A rerun is the normal case -- it is what a student is told to
+    # do when something went wrong -- and copying over the top leaves any file an older layout
+    # put inside the bundle still sitting there, where it would also break the seal.
     rm -rf "$app"
-    contents="$app/Contents"
     if ! (
         set -e
-        mkdir -p "$contents/MacOS" "$contents/Resources"
-        cp "$DIR/.private/icons/cs193v.icns" "$contents/Resources/cs193v.icns"
-
-        # CFBundleDisplayName AS WELL AS THE DIRECTORY NAME, because they answer to different
-        # readers: Finder shows the bundle's filename, and the Dock and the automation prompt
-        # show this. CFBundleName is deliberately absent -- it is capped at about 16 characters
-        # for a menu bar this bundle has no NSApplication to draw.
-        cat > "$contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>       <string>cs193v-launch</string>
-    <key>CFBundleIdentifier</key>       <string>edu.stanford.cs193v.launcher</string>
-    <key>CFBundlePackageType</key>      <string>APPL</string>
-    <key>CFBundleDisplayName</key>      <string>$MAC_APP_LABEL</string>
-    <key>CFBundleIconFile</key>         <string>cs193v.icns</string>
-    <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>   <string>12.0</string>
-    <key>NSAppleEventsUsageDescription</key> <string>$(msg mac-app.automation-why)</string>
-</dict>
-</plist>
-PLIST
-
-        cat > "$contents/MacOS/cs193v-launch" <<LAUNCH
-#!/bin/sh
-# Written by the CS193V installer. See install_mac_app in .private/course-install.sh.
-#
-# Opens a Terminal window and types the launcher into it, so that cs193v runs as a foreground
-# job of an interactive login shell. DO NOT change this to run the launcher directly, and do not
-# add an exec: an app bundle has no terminal, and cs193v refuses to open a shell without one.
-DIR='$dir_esc'
-/usr/bin/osascript \
-    -e 'on run argv' \
-    -e '  tell application "Terminal"' \
-    -e '    activate' \
-    -e '    do script "cd " & quoted form of (item 1 of argv) & " && ./cs193v"' \
-    -e '  end tell' \
-    -e 'end run' \
-    "\$DIR"
-LAUNCH
-        chmod +x "$contents/MacOS/cs193v-launch"
+        mkdir -p "$HOME/Applications" "$HOME/$(dirname "$MAC_APP_RECORD")"
+        cp -R "$src" "$app"
+        printf '%s\n' "$DIR" > "$record"
     ); then
         rm -rf "$app"
         msg warn.mac-app-failed "DIR=$DIR" | notes
         return 0
     fi
+
     MAC_APP_READY=yes
     ok "$(msg ok.mac-app "APP=$app")"
 }
@@ -1062,6 +1015,11 @@ LAUNCH
 # A fixed path costs none of that. 25-installer.sh reads both names back out of these two lines.
 WIN_SHIM_NAME=".cs193v-enter"
 WIN_ICON_NAME=".cs193v-icon.ico"
+
+# Initialised for the same reason MAC_APP_READY is, and it is the same bug one platform over:
+# install_win_shim is advisory too, so a Windows run where it warned would reach say_done with
+# this unbound.
+WIN_SHIM_READY=""
 
 # THE SHIM IS A JOB, NOT A SESSION LEADER, which is the same argument install_mac_app's header
 # makes for `do script`. The .lnk runs `bash -ic <shim>`: bash is the session leader, job control

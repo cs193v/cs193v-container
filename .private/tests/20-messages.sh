@@ -98,7 +98,12 @@ assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 # SO THE KEYS-IN-USE SIDE IS A UNION, and the reconciliation below is unchanged otherwise. Get
 # this wrong in the obvious direction -- leave the scan on course-install.sh alone -- and every
 # prov.* key reads as an orphan while every key the root pass needs reads as missing.
-IREADERS="$PRIVATE/course-install.sh $PRIVATE/wsl-provision.sh $PRIVATE/install-utils.sh"
+# macapp/make-macapp.sh IS A READER TOO (#134), and a fourth catalogue was the alternative.
+# It bakes three strings into the applet at AUTHORING time -- the automation-prompt reason and
+# the two alerts the applet shows when it cannot start -- because the applet ships without any
+# catalogue and cannot read one at launch. Nothing else consumes those keys, so without this
+# path they report as orphans; measured, two of them did.
+IREADERS="$PRIVATE/course-install.sh $PRIVATE/wsl-provision.sh $PRIVATE/install-utils.sh $PRIVATE/macapp/make-macapp.sh"
 ICAT="$PRIVATE/course-install-messages.txt"
 assert_file "itext:the-catalogue-is-there" "$ICAT"
 

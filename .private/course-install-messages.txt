@@ -652,6 +652,18 @@ works. To start it, open a terminal and run
 #
 # ONE LINE AND NO TRAILING FULL STOP BEYOND THE FIRST: the dialog is narrow and appends its own
 # "Allow"/"Don't Allow", so a paragraph here is truncated mid-sentence.
+# WHAT THE APPLET ITSELF SAYS when it cannot start. These two are BAKED INTO THE APPLET at
+# authoring time by make-macapp.sh, not printed by this script -- the applet ships without the
+# catalogue, so it cannot read them at launch.
+[[mac-app.not-installed]]
+CS193V does not appear to be installed on this account. Run the
+installer again, then open this application.
+
+[[mac-app.launch-failed]]
+CS193V could not open a Terminal window. If macOS asked for
+permission to control Terminal and it was declined, you can allow
+it in System Settings, under Privacy and Security, Automation.
+
 [[mac-app.automation-why]]
 CS193V opens a Terminal window to start the development environment.
 
