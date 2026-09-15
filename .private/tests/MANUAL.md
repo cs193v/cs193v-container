@@ -1455,6 +1455,12 @@ Apple Event afterwards**. Teardown completes first: at 20 Hz sampling the ssh ma
 forwarded port was released 250 ms before the close. Both verdicts were measured directly —
 `exit 0` → `verdict=[ok]` → closed; `exit 1` → `verdict=[]` → left open.
 
+*And the margin is wider than that.* A second probe left blocked deliberately passed **4628 s
+(1 h 17 m)** in the same state without AppleScript ever ending the block. Both numbers are floors,
+not limits — nothing was observed to end a block, so the 60 s and 120 s figures reported for
+`do shell script` are not this. Consistent with the documented rule that `with timeout` governs
+only commands sent to *other applications*, and `do shell script` is not one.
+
 *What is still unmeasured:* a block that lasts a whole working day. If a window is ever found
 still open long after its container exited, that is the suspect, and the fallback is to ship the
 applet without the auto-close — which is only a loss of the feature, not of §134.2.
