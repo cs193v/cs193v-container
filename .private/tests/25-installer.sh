@@ -2399,6 +2399,20 @@ assert_ne "applet:plist-explains-the-automation-prompt" "key-absent" \
 # what a shell script could not; a universal Mach-O declares its own architectures. Keeping them
 # would be dead weight that a reader would mistake for load-bearing.
 assert_eq "applet:declares-no-architecture-priority" "key-absent" "$(applet_plist LSArchitecturePriority)"
+
+# NO EXTENDED ATTRIBUTES INSIDE THE SEAL, and this is not hypothetical: cs193v.icns had picked up
+# `com.apple.quarantine ... Preview` from somebody opening it while the artwork was worked on, and
+# the builder copied it into the bundle. Git launders xattrs so it never shipped -- but quarantine
+# on any file in a bundle can make Gatekeeper assess an app that otherwise never would be, and the
+# builder is the one place that decides what is inside the signature. Darwin-only: xattr(1) is
+# macOS's, and on Linux there is nothing to find.
+if [ "$(uname -s)" = Darwin ]; then
+    xa="$(xattr -lr "$PRIVATE/macapp/CS193V.app" 2>/dev/null)"
+    record    "applet:extended-attributes-found" "${xa:-none}"
+    assert_eq "applet:carries-no-extended-attributes" "" "$xa"
+else
+    skip "applet:carries-no-extended-attributes" "needs macOS: xattr(1) has no Linux equivalent here"
+fi
 assert_eq "applet:does-not-require-native-execution" "key-absent" "$(applet_plist LSRequiresNativeExecution)"
 
 # ── the three questions that need a Mac ────────────────────────────────────────

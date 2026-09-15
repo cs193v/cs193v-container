@@ -115,6 +115,20 @@ rm -f "$APP/Contents/Resources/applet.icns"
 # again to ship something nothing reads.
 rm -f "$APP/Contents/Resources/Assets.car"
 
+# ─── 3b. strip extended attributes, because a staff Mac's are not a student's ──
+# MEASURED, AND IT HAD ALREADY HAPPENED: .private/icons/cs193v.icns carried
+# `com.apple.quarantine: 0082;...;Preview;` -- somebody opened it in Preview while the artwork was
+# being worked on -- and the `cp` above copied that straight into the bundle we sign. Git stores no
+# xattrs, so it never reached a student (verified through `git archive` | tar: zero xattrs in the
+# export). But it is a trap worth closing at the source rather than relying on git to launder it:
+# quarantine on any file inside a bundle can make Gatekeeper assess an app that would otherwise
+# never be assessed, and this builder is the one place that decides what goes inside the seal.
+#
+# BEFORE THE RE-SEAL BELOW, deliberately. Clearing xattrs does not change file contents, so it
+# cannot invalidate a signature -- but doing it after signing would be relying on that, and the
+# order here makes it a non-question.
+xattr -cr "$APP"
+
 # ─── 4. the Info.plist keys osacompile does not write ─────────────────────────
 # NOT LSArchitecturePriority / LSRequiresNativeExecution: those existed only to tell Launch
 # Services what a shell script could not. A universal Mach-O declares its own architectures, so
