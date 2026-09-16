@@ -259,15 +259,52 @@ sentinel check runs against the actual script's actual last line.
 EOF
 }
 
+# ─── the run after the restart  (issue #275) ─────────────────────────────────
+#
+# What Windows does at the next sign-in: it takes the RunOnce value the previous run registered
+# and hands it to CreateProcess. `wincmd resume` does the same, through startvalue.exe, which is
+# that one call and nothing else -- see harness-startvalue.c for why `wine64 cmd /c "$value"`
+# cannot stand in for it.
+#
+# THE MACHINE IS NOT RESET FIRST, deliberately: arrange() short-circuits on an existing case
+# directory, so the environment this resumes into is whatever the previous `wincmd run` left
+# behind. To model the restart itself -- WSL now working where it did not -- change the knob by
+# hand between the two, which is what the tier's resume case does:
+#
+#     wincmd run            # with wsl.status.rc -1: stops at the restart notice
+#     echo 0 > "$CASE/wsl.status.rc"
+#     wincmd resume         # starts what the first run registered
+cmd_resume() {
+    arrange
+    if [ ! -s "$CASE/runonce" ]; then
+        printf 'Nothing is registered: the previous run wrote no resume entry.\n' >&2
+        printf 'Run `wincmd run` on a machine with no WSL first.\n' >&2
+        return 1
+    fi
+    : > "$CASE/argv.log"
+    printf 'Starting the registered value the way Windows would:\n'
+    printf '  %s\n' "$(cat "$CASE/runonce")"
+    hr
+    # From / and not from the download folder: at sign-in the student is not standing in it, and
+    # a value holding a relative path would simply not be found.
+    ( cd / && CS193V_FAKE_DIR='Z:\tmp\case' \
+        wine64 /home/ubuntu/shim/startvalue.exe "Z:\tmp\case\runonce" </dev/null 2>&1 ) \
+        | tee /tmp/last-run.txt
+    rc=${PIPESTATUS[0]}
+    hr
+    printf 'exit code: %s\n' "$rc"
+}
+
 case "${1:-knobs}" in
     # Called by win-sandbox.sh before you get a prompt, so the tree exists and the fakes are in
     # place on your first command rather than after it.
     init)  arrange || exit 1 ;;
     state) cmd_state ;;
     run)   shift; cmd_run "$@" ;;
+    resume) cmd_resume ;;
     log)   cmd_log ;;
     knobs) cmd_knobs ;;
     cmd)   arrange; ( cd "$DL" && CS193V_FAKE_DIR='Z:\tmp\case' exec wine64 cmd ) ;;
     -h|--help|help) cmd_knobs ;;
-    *) printf 'wincmd: unknown command %s   (state|run|log|knobs|cmd)\n' "$1" >&2; exit 2 ;;
+    *) printf 'wincmd: unknown command %s   (state|run|resume|log|knobs|cmd)\n' "$1" >&2; exit 2 ;;
 esac

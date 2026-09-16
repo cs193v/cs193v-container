@@ -70,6 +70,9 @@ wine_new() {                          # wine_new [DOWNLOAD_DIR_NAME]
     # that %HERE%, wslpath and %TEMP% are all gone from the .cmd.
     cp "$PRIVATE/install-cs193v.sh" "$WINE_CASE/stage2.src"
     WINE_OUT=''; WINE_ERR=''; WINE_RC=''; WINE_ARGV=''; WINE_LNK=''; WINE_DIED=''
+    WINE_OUTB=''; WINE_ERRB=''; WINE_RCB=''; WINE_ARGVB=''; WINE_LNKB=''
+    WINE_RESUME=''; WINE_RESUMEB=''
+    WINE_RESUME0=''
 }
 
 wine_knob() {                         # wine_knob NAME VALUE
@@ -219,6 +222,30 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
                     printf "TargetPath=%s\nArguments=\nIconLocation=\n" "$tgt" > "$sm/$rel"
                 done < /tmp/case/harness.startmenu.tsv
             fi
+            # THE START MENU AS IT STANDS, which is the one channel that reports an EFFECT rather
+            # than a decision. Paths are relative to the root and directories carry a trailing
+            # slash, so `CS193V.lnk`, `Programs/CS193V.lnk` and `Programs/CS193V/` are three
+            # distinguishable answers -- and telling the first two apart is the whole of #270.
+            # A function because the resume phase below reports it a second time.
+            emit_lnk() {
+                [ -d "$sm" ] || return 0
+                find "$sm" -mindepth 1 \( -type f -o -type d \) | LC_ALL=C sort | while IFS= read -r one; do
+                    rel=${one#"$sm/"}
+                    if [ -d "$one" ]; then
+                        printf "%s/\t(dir)\n" "$rel"
+                    else
+                        printf "%s\t%s\n" "$rel" "$(sed -n "s/^TargetPath=//p" "$one" | head -1)"
+                    fi
+                done
+            }
+            # THE RESUME ENTRY AS IT STANDS, which is the second such channel (#275). Empty when
+            # nothing is registered, which is the assertion most of the cases in the tier make.
+            emit_resume() { cat /tmp/case/runonce 2>/dev/null; }
+            # THE STORE AS IT STANDS BEFORE ANYTHING RUNS. Only a seeded case has one, and without
+            # this a case asserting the clear WORKED could not tell that from there having been
+            # nothing to clear -- which is exactly the hole mutation testing found in
+            # win-resumeclear, where counting the call passed while the clear did nothing.
+            printf "===RESUME0===\n"; emit_resume
             # cd first and invoke by RELATIVE name. `wine64 cmd /c <path with ( or )>` fails with
             # "Can not recognize ... as an internal or external command" (WineHQ 37789), so a
             # case testing a download folder called "cs193v (1)" would fail in the HARNESS and
@@ -230,21 +257,66 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
             printf "===OUT===\n"; cat /tmp/o
             printf "\n===ERR===\n"; cat /tmp/e
             printf "\n===ARGV===\n"; cat /tmp/case/argv.log 2>/dev/null
-            # THE START MENU AS IT STANDS AFTERWARDS, which is the one channel that reports an
-            # EFFECT rather than a decision. Paths are relative to the root and directories
-            # carry a trailing slash, so `CS193V.lnk`, `Programs/CS193V.lnk` and
-            # `Programs/CS193V/` are three distinguishable answers -- and telling the first two
-            # apart is the whole of #270.
-            printf "\n===LNK===\n"
-            if [ -d "$sm" ]; then
-                find "$sm" -mindepth 1 \( -type f -o -type d \) | LC_ALL=C sort | while IFS= read -r one; do
-                    rel=${one#"$sm/"}
-                    if [ -d "$one" ]; then
-                        printf "%s/\t(dir)\n" "$rel"
-                    else
-                        printf "%s\t%s\n" "$rel" "$(sed -n "s/^TargetPath=//p" "$one" | head -1)"
-                    fi
+            printf "\n===LNK===\n"; emit_lnk
+            printf "\n===RESUME===\n"; emit_resume
+            # ─── AND THEN THE MACHINE CAME BACK  (issue #275) ──────────────────────
+            #
+            # THE SECOND RUN IS THE STORED COMMAND LINE, NOT THE .cmd AGAIN, and that is the whole
+            # point of the case. Re-invoking install-cs193v-windows.cmd here would assert that the
+            # installer is idempotent -- which it already was -- and would say nothing about
+            # whether the value it wrote into RunOnce is a thing Windows could actually start. The
+            # quoting in that value is the part most likely to be wrong, and running it is the
+            # only way to find out.
+            #
+            # IT RUNS FROM THE ROOT AND NOT FROM THE DOWNLOAD FOLDER, because at logon the student
+            # is not standing in Downloads. That also makes this a real test of the self path: a
+            # relative one would simply not be found from here.
+            #
+            # STARTED THE WAY WINDOWS STARTS IT, through startvalue.exe, which is one CreateProcess
+            # call on the line verbatim. `wine64 cmd /c "$value"` was tried first and cannot work:
+            # wine escapes the quotes when it turns a Unix argv into a Windows command line, so the
+            # inner cmd sees \" where the value had " and refuses every spelling with exit 49.
+            # Measured in the fixture on 2026-09-16; see harness-startvalue.c for the trace. What
+            # is still not Windows is the cmd.exe wine ships, which splits an `&` that real cmd
+            # leaves protected -- so this proves the value starts, not that it starts under every
+            # profile name, and MANUAL.md carries the row that watches a real logon.
+            # AND IT DOES NOT DELETE THE VALUE FIRST, WHICH WINDOWS WOULD. A RunOnce value is
+            # removed before its command is started, so on a real machine the resumed run finds
+            # nothing armed. Leaving it here models the opposite -- an entry that survived into
+            # the second run -- which is the harsher of the two: it is the state a by-hand re-run
+            # produces, and it makes the clear at :havewsl load-bearing on this road as well as
+            # on that one. A case asserting nothing is left armed afterwards is therefore
+            # asserting the installer cleared it, not that Windows did.
+            if [ -f /tmp/case/harness.resume ]; then
+                for ov in /tmp/case/resume.*; do
+                    [ -e "$ov" ] || continue
+                    mv "$ov" "/tmp/case/$(basename "$ov" | sed "s/^resume[.]//")"
                 done
+                # A FRESH LOG, so wine_argv_count can be asked about the two runs separately.
+                # lib/wine-guest.sh does the same between by-hand runs.
+                : > /tmp/case/argv.log
+                cd / || exit 97
+                resumed="$(cat /tmp/case/runonce 2>/dev/null)"
+                if [ -z "$resumed" ]; then
+                    # NOT SILENCE. A first run that armed nothing is the interesting failure, and
+                    # without a report the second-run sections would be empty and every
+                    # assert_says_not about them would pass for free.
+                    printf "===RCB=97===\n"
+                    printf "===OUTB===\nharness: the first run wrote no resume entry, so there was nothing to start\n"
+                    printf "\n===ERRB===\n"
+                    printf "\n===ARGVB===\n"
+                    printf "\n===LNKB===\n"; emit_lnk
+                    printf "\n===RESUMEB===\n"; emit_resume
+                else
+                    wine64 /home/ubuntu/shim/startvalue.exe "Z:\tmp\case\runonce" </dev/null >/tmp/o2 2>/tmp/e2
+                    rc2=$?
+                    printf "===RCB=%s===\n" "$rc2"
+                    printf "===OUTB===\n"; cat /tmp/o2
+                    printf "\n===ERRB===\n"; cat /tmp/e2
+                    printf "\n===ARGVB===\n"; cat /tmp/case/argv.log 2>/dev/null
+                    printf "\n===LNKB===\n"; emit_lnk
+                    printf "\n===RESUMEB===\n"; emit_resume
+                fi
             fi
             printf "\n===END===\n"
         ' > "$raw" 2>&1
@@ -254,18 +326,89 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
     WINE_ERR="$(_wine_section "$raw" ERR)"
     WINE_ARGV="$(_wine_section "$raw" ARGV)"
     WINE_LNK="$(_wine_section "$raw" LNK)"
-    # A run that produced no report at all is a harness failure, and must not look like a program
-    # that simply printed nothing -- otherwise every assert_says_not in the suite passes for free.
+    WINE_RESUME0="$(_wine_section "$raw" RESUME0)"
+    WINE_RESUME="$(_wine_section "$raw" RESUME)"
+    # THE SECOND RUN, present only for a wine_resume_knob case and empty otherwise (#275). Named
+    # with a B rather than a 2 for a reason worth keeping: _wine_section's terminator was
+    # letters-only, so a section called OUT2 would have ended nothing and LNK would have run
+    # silently to the bottom of the report. The class is widened below and the suffix is still a
+    # letter, because two ways of being right are cheaper than rediscovering that one.
+    WINE_RCB="$(sed -n 's/^===RCB=\([0-9-]*\)===$/\1/p' "$raw" | head -1)"
+    WINE_OUTB="$(_wine_section "$raw" OUTB)"
+    WINE_ERRB="$(_wine_section "$raw" ERRB)"
+    WINE_ARGVB="$(_wine_section "$raw" ARGVB)"
+    WINE_LNKB="$(_wine_section "$raw" LNKB)"
+    WINE_RESUMEB="$(_wine_section "$raw" RESUMEB)"
     # A run that produced no report is a HARNESS failure and must not be able to look like a
     # program that merely printed nothing -- otherwise every assert_says_not and every count of
     # zero below passes for free. The marker travels IN THE VALUE, which is what assert.sh
-    # inspects, so all four channels carry it and wine_argv_count refuses to answer at all.
+    # inspects, so every channel carries it and wine_argv_count refuses to answer at all.
     if ! grep -q '^===END===$' "$raw"; then
         WINE_DIED="$CHECKER_DIED: no report from the container; raw output follows:
 $(head -20 "$raw")"
         WINE_OUT="$WINE_DIED"; WINE_ERR="$WINE_DIED"; WINE_ARGV="$WINE_DIED"; WINE_RC="$WINE_DIED"
-        WINE_LNK="$WINE_DIED"
+        WINE_LNK="$WINE_DIED"; WINE_RESUME="$WINE_DIED"; WINE_RESUME0="$WINE_DIED"
+        WINE_OUTB="$WINE_DIED"; WINE_ERRB="$WINE_DIED"; WINE_ARGVB="$WINE_DIED"
+        WINE_RCB="$WINE_DIED"; WINE_LNKB="$WINE_DIED"; WINE_RESUMEB="$WINE_DIED"
     fi
+}
+
+# ─── the run after the restart  (issue #275) ─────────────────────────────────
+#
+
+# Pre-arm the resume entry, as a run that reached the restart notice would have left it.
+# For the case that asserts the clear at :havewsl actually REMOVES one: without a seeded
+# entry there is nothing for the clear to do, and "the call was made" is not "the call
+# worked". Mutation testing found that hole -- a fake whose clear did nothing left
+# win-resumeclear green, because it counted the argv line and nothing else.
+wine_arm_resume() {                   # wine_arm_resume VALUE
+    printf '%s\n' "$1" > "$WINE_CASE/runonce"
+}
+
+# What was armed BEFORE the run, so a case can tell a clear that worked from a machine
+# that had nothing to clear.
+wine_resume_entry_before() {          # wine_resume_entry_before -> the stored command line
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    printf '%s' "$WINE_RESUME0"
+}
+# Arrange the machine the student comes back to, then run it. `wine_resume_knob` overrides a knob
+# for the SECOND run only -- the file is written as resume.<name> and moved over <name> between
+# the two -- which is how a case says "and then WSL worked". Calling it is also what turns the
+# resume phase on, so a case cannot ask for a second run and forget to change anything about the
+# machine it is asking about.
+#
+# The second run executes the command line the FIRST run stored, not the .cmd; see the container
+# script above for why that distinction is the whole case.
+wine_resume_knob() {                  # wine_resume_knob NAME VALUE
+    printf '%s\n' "$2" > "$WINE_CASE/resume.$1"
+    : > "$WINE_CASE/harness.resume"
+}
+
+# What the first run registered, or "" when it registered nothing. A case asserting that nothing
+# was armed and a case asserting what WAS armed both read this, so it deliberately does not
+# report "absent" as a value of its own.
+wine_resume_entry() {                 # wine_resume_entry -> the stored command line
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    printf '%s' "$WINE_RESUME"
+}
+
+# ...and what it looks like after the second run, which for a completed install is nothing:
+# Windows clears a RunOnce value itself, and the .cmd clears any leftover at :havewsl.
+wine_resume_entry_after() {           # wine_resume_entry_after -> the stored command line
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    printf '%s' "$WINE_RESUMEB"
+}
+
+# The two run-2 counterparts of wine_argv_count and wine_lnk_has. Separate names rather than a
+# channel argument, so a case reads as the run it is asking about.
+wine_argv_count_b() {                 # wine_argv_count_b ERE -> how many logged calls match
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    printf '%s\n' "$WINE_ARGVB" | grep -cE "$1" || true
+}
+
+wine_lnk_has_b() {                    # wine_lnk_has_b RELPATH -> yes|no
+    if [ -n "${WINE_DIED:-}" ]; then printf '%s' "$WINE_DIED"; return 0; fi
+    if printf '%s\n' "$WINE_LNKB" | cut -f1 | grep -qxF "$1"; then printf yes; else printf no; fi
 }
 
 # Is there an entry at exactly this path? yes|no, relative to the Start Menu root.
@@ -287,7 +430,7 @@ wine_lnk_target() {                   # wine_lnk_target RELPATH -> its TargetPat
 }
 
 _wine_section() {                     # _wine_section FILE NAME
-    sed -n "/^===$2===\$/,/^===[A-Z]*=*[A-Z]*===\$/p" "$1" \
+    sed -n "/^===$2===\$/,/^===[A-Z]*=*[A-Z0-9-]*===\$/p" "$1" \
         | sed '1d;$d' | sed 's/\r$//'
 }
 

@@ -92,6 +92,8 @@ RUN mkdir -p /home/ubuntu/shim \
  && for f in wsl net powershell reg hostile; do \
       x86_64-w64-mingw32-gcc -O1 -Wall -Wextra -o "/home/ubuntu/shim/$f.exe" "fake-$f.c"; \
     done \
+ && x86_64-w64-mingw32-gcc -O1 -Wall -Wextra \
+      -o /home/ubuntu/shim/startvalue.exe harness-startvalue.c \
  && ls -1 /home/ubuntu/shim
 
 # Boot the prefix ONCE, here. Measured on this machine: creating a prefix costs 10.6 s and a warm

@@ -1156,20 +1156,35 @@ or refute — the support policy depends on it.
 hosted rootfs, which changes the installer.
 
 **5.4b — Windows stage one, from one downloaded file (issue #93).** On a Windows box with **no
-`install-cs193v.sh` anywhere on it**, download only `install-cs193v-windows.cmd`, right-click, Run
-as administrator.
+`install-cs193v.sh` anywhere on it**, download only `install-cs193v-windows.cmd` and run it **as
+yourself, by its full path** — not "Run as administrator", which #277 made the installer refuse,
+and not a double-click, which the Attachment Manager refuses on a downloaded `.cmd`.
 *Expect:* it prints the `raw.githubusercontent.com` URL, fetches stage two into the environment,
 and hands off — no "could not find install-cs193v.sh next to this file", because that arm no
 longer exists. Then check all four of these, because the whole suite fakes `wsl.exe` and can
 reach none of them:
 - `wsl -d CS193V -e curl --version` answers. If curl is absent, stage one apt-installs it: confirm
   that runs **without a password prompt and without a debconf question**.
-- `wsl -d CS193V -e ls -l /tmp/install-cs193v.sh` — the script it ran is still there, and is the
-  published one. `shasum -a 256` it against the course website's value.
+- `wsl -d CS193V -e ls -l /var/tmp/install-cs193v.sh` — the script it ran is still there, and is
+  the published one. `shasum -a 256` it against the course website's value. (`/var/tmp` and not
+  `/tmp` since #217: `/tmp` is a tmpfs under systemd WSL and the .cmd restarts the instance
+  between downloading the script and running it.)
 - The long `-e` line is forwarded intact: `wsl -d CS193V -e curl -fsSL --retry 10 --retry-delay 3
-  -o /tmp/x <url>` must fetch, not have `--retry` eaten by `wsl.exe` itself.
+  -o /var/tmp/x <url>` must fetch, not have `--retry` eaten by `wsl.exe` itself.
 - `raw.githubusercontent.com` resolves **from campus wifi and from a dorm room**, not only from a
   staff machine. It is a different host from the `codeload.github.com` stage two itself uses.
+  Since #275 this one is load-bearing twice over: the create now waits on a HEAD request to that
+  same URL before it downloads anything, so a network that cannot reach it stops the install at
+  `:nonetwork` instead of part-way through.
+
+**5.4c — Windows stage one resumes itself after the restart (issue #275).** The full by-hand
+procedure is `tests/MANUAL.md` item 8 under *what wine cannot answer*, and its first row —
+whether an `HKCU` RunOnce entry runs with the student's ordinary token — should be settled before
+anything else here is trusted.
+*Expect:* on a machine with no WSL, one UAC prompt, a restart notice that says setup will reopen
+by itself, and setup reopening by itself at the next sign-in and finishing. *Unmeasured and worth
+the most:* whether antivirus leaves the value alone, and whether a profile path containing an
+ampersand still resumes — the wine tier cannot see either.
 
 **5.5 — cgroup delegation in WSL.** With `systemd=true` in `/etc/wsl.conf`, run §A.5's
 `cgroup-pids` check.
