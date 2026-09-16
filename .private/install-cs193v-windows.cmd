@@ -29,11 +29,14 @@ setlocal
 :: The course instructions carry the gesture; nothing in this file depends on which one is used,
 :: and no message here names one.
 ::
-:: RUN IT AS YOURSELF, BOTH TIMES. If WSL is not installed yet this takes two runs, because
-:: turning on a Windows feature needs a restart: the first run asks Windows for permission for
-:: that one step -- one UAC prompt, mid-run -- and then says to restart; the second finishes the
-:: job. If WSL is already on, one run does everything and nothing asks for permission at all.
-:: It is safe to run any number of times.
+:: RUN IT AS YOURSELF. ON A MACHINE WITHOUT WSL IT STILL TAKES TWO RUNS, but since #275 you
+:: normally only start the first one. Turning on a Windows feature needs a restart, so the first
+:: run asks Windows for permission for that one step -- one UAC prompt, mid-run -- registers a
+:: RunOnce entry naming this file, and says to restart. Windows starts the second run itself at
+:: the next sign-in, and that one asks for no permission. If the entry cannot be written, or
+:: something on the machine removes it, the notice says to run this file again by hand instead
+:: and that still works exactly as it did. If WSL is already on, one run does everything and
+:: nothing asks for permission at all. It is safe to run any number of times.
 ::
 :: Stage 1 (here) : install WSL and the CS193V Linux environment, then prepare it -- switch
 ::                  Ubuntu's first-run questions off, create the student's account, and give it
@@ -55,23 +58,30 @@ setlocal
 :: two downloads meant two things to get right, and the one that went wrong silently was a
 :: stale copy from an earlier quarter, which looks like a working install and is not.
 ::
-:: Nothing is DOWNLOADED onto Windows itself. One consequence worth knowing, since the note
-:: above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS alternate
-:: data stream, and stage 2 lands on the environment's own Linux filesystem, so it can never
-:: carry one. THIS file still does -- and, per the measurement above, is refused from a
+:: NOTHING IS DOWNLOADED ONTO WINDOWS ITSELF, AND ONE REQUEST IS NOW MADE FROM IT. Since #275
+:: the create waits for a network first, which is one HTTPS HEAD of the URL above -- nothing is
+:: read from the response and nothing is written to disk. The consequence worth knowing, since
+:: the note above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS
+:: alternate data stream, and stage 2 lands on the environment's own Linux filesystem, so it can
+:: never carry one. THIS file still does -- and, per the measurement above, is refused from a
 :: double-click because of it.
 ::
-:: TWO FILES ARE WRITTEN TO THE WINDOWS SIDE, AND UNTIL #134 THERE WERE NONE. The paragraph
-:: above used to read "nothing is downloaded onto Windows itself" and was taken to mean this
-:: file touches nothing out there at all, which is no longer true. The Start Menu section near
-:: the end creates
+:: TWO FILES AND ONE REGISTRY VALUE ARE WRITTEN TO THE WINDOWS SIDE, AND UNTIL #134 THERE WERE
+:: NONE. The paragraph above used to read "nothing is downloaded onto Windows itself" and was
+:: taken to mean this file touches nothing out there at all, which is no longer true. The Start
+:: Menu section near the end creates
 ::
 ::     %APPDATA%\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
 ::     %LOCALAPPDATA%\CS193V\cs193v.ico
 ::
 :: and deletes the Start Menu entry `wsl --install` made. Neither is downloaded -- the icon is
 :: copied out of the environment over \\wsl.localhost, so the mark-of-the-web argument above
-:: still holds for both.
+:: still holds for both. The third arrived with #275 and is transient:
+::
+::     HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce  ->  CS193VSetup
+::
+:: written only on the road that asks for a restart, deleted by Windows before it runs it, and
+:: deleted again at :havewsl for the run where it never did.
 ::
 :: THEY ARE PER-USER, AND THE QUESTION THAT MATTERS IS *WHICH* USER. This paragraph used to end
 :: "both are per-user and need no elevation of their own", which is true about permissions and
@@ -154,6 +164,25 @@ setlocal
 set "SYS32=%SystemRoot%\System32"
 if defined PROCESSOR_ARCHITEW6432 set "SYS32=%SystemRoot%\Sysnative"
 
+:: ---- where this file is, which is asked once and used once (#275) -----------
+:: CAPTURED BEFORE THE `cd` BELOW, and the order is the whole of it. %~f0 is expanded
+:: against the batch file cmd is running, but reading it while the working directory is
+:: still the one the student launched from removes the question rather than relying on
+:: the answer -- the same reason NoDefaultCurrentDirectoryInExePath is set before the
+:: first external call rather than merely somewhere above it. 25-installer.sh pins the
+:: ordering, and pins that this is the only %~ in the file.
+::
+:: THE HEADER USED TO BAN THIS OUTRIGHT, and the ban is narrowed rather than dropped.
+:: What %~dp0 was banned FOR was %HERE%: a second route to stage two, a sibling
+:: install-cs193v.sh beside this file, which went stale between quarters and looked
+:: exactly like a working install. Relaunching THIS file is not that route. %SELF% goes
+:: into one registry value and nowhere else, and 25-installer.sh asserts it never
+:: reaches wsl.exe -- which is the property the old ban was actually protecting.
+::
+:: %~f0 AND NOT %~dp0. The whole path, because what is wanted is the file and not the
+:: folder, and nothing here ever joins a name onto a directory.
+set "SELF=%~f0"
+
 :: ---- two additive guards, and NEITHER replaces the qualification above --------
 :: TURN THE CURRENT-DIRECTORY SEARCH OFF ALTOGETHER. cmd.exe consults
 :: NoDefaultCurrentDirectoryInExePath -- documented since Vista -- and its EXISTENCE, not its
@@ -175,10 +204,18 @@ set "NoDefaultCurrentDirectoryInExePath=1"
 ::
 :: %SystemRoot% AND NOT %SYS32%: C:\Windows is a real directory under both the native and the
 :: WOW64 view, so it needs no reasoning about the redirector. Nothing here depends on the working
-:: directory -- %~dp0, wslpath and %TEMP% are all banned, and 25-installer.sh asserts they are
-:: gone -- and every value crossing into Linux is an absolute path, so the distro starting in
-:: /mnt/c/windows is inert. Deliberately unchecked: `cd` is a builtin, and if it somehow failed
-:: the qualification above still carries the property on its own.
+:: directory -- wslpath and %TEMP% are banned, %~f0 is read once and only into %SELF%, and
+:: 25-installer.sh asserts all three -- and every value crossing into Linux is an absolute path,
+:: so the distro starting in /mnt/c/windows is inert. Deliberately unchecked: `cd` is a builtin,
+:: and if it somehow failed the qualification above still carries the property on its own.
+::
+:: THE BAN ON KNOWING WHERE THIS FILE IS WAS NARROWED BY #275, NOT DROPPED. It read "%~dp0,
+:: wslpath and %TEMP% are all banned", and what it was protecting was that stage two has exactly
+:: ONE route: %HERE% used to point at a sibling install-cs193v.sh, which went stale between
+:: quarters and looked precisely like a working install. Relaunching THIS file after a restart is
+:: not that route. So the file may now know its own path, once, and 25-installer.sh pins the
+:: narrowness rather than the ban -- one %~ in the whole file, it is %~f0, it is read before the
+:: `cd` above, and the value it produces never reaches wsl.exe.
 cd /d "%SystemRoot%"
 
 set "DISTRO=CS193V"
@@ -281,6 +318,101 @@ set "PROBE=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; if ((& $w -l
 :: refusal, so splitting them would be a branch with no different behaviour behind it.
 set "VMFAILPROBE=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; if ((& $w --status 2>&1) -match 'aka.ms/enablevirtualization') { exit 0 } else { exit 1 }"
 
+:: ---- the entry that resumes setup after the restart (#275) -------------------
+:: WHAT GETS WRITTEN, SPELLED OUT HERE SO IT CAN BE READ WITHOUT RUNNING ANYTHING. One value under
+:: the current user's RunOnce key, holding one command line that starts this same file. Windows
+:: removes the value before running it, so it is gone by the time setup reopens; :havewsl removes
+:: it too, for the student who re-ran the file by hand before logging off.
+::
+:: BUILT HERE IN BATCH RATHER THAN INSIDE THE POWERSHELL BELOW, and that is a testability
+:: decision rather than a style one. The fake powershell the test suite runs records this value
+:: verbatim out of the environment; if PowerShell assembled it instead, out of %SystemRoot% and
+:: the script path, the fake would have to assemble the expected answer the same way -- and a
+:: fixture that agrees with the installer's reasoning cannot contradict it. That is how #270
+:: shipped, and .private/README.md records it.
+::
+:: `set "VAR=..."` ENDS AT THE LAST QUOTE ON THE LINE, so the doubled quotes below survive intact
+:: and a path containing a space needs nothing else done to it. Delayed expansion is off -- the
+:: header says why, and 25-installer.sh asserts it -- so a `!` in the path survives too.
+set "RESUMEKEY=HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+set "RESUMENAME=CS193VSetup"
+
+:: cmd.exe AND NOT THIS FILE DIRECTLY. A RunOnce value is handed to CreateProcess, which cannot
+:: execute a .cmd at all -- a batch file needs the interpreter named -- so the value starts with
+:: cmd.exe and this file is its argument.
+::
+:: /s IS THE PART THAT SURVIVES A REAL STUDENT'S PROFILE. Without it, `cmd /c "path"` keeps the
+:: outer quotes only when the quoted text contains whitespace AND contains none of & ^ ( ), and
+:: strips them otherwise -- so it happens to work for `C:\Users\jo\Downloads\` and breaks for an
+:: account called `Tom & Jerry`. With /s cmd removes exactly the first and last quote and runs the
+:: rest verbatim, which is the same answer for every path.
+::
+:: %SystemRoot%\System32 AND NOT %SYS32%, and this is the second and last place in the file where
+:: that difference matters -- the other is the .lnk target near the end. %SYS32% becomes
+:: %SystemRoot%\Sysnative in a 32-bit process, and Sysnative is a redirector visible only to the
+:: process looking at it: right for launching wsl.exe from here, meaningless once written into a
+:: registry value that something else resolves after a reboot.
+set "RESUMECMD=%SystemRoot%\System32\cmd.exe /s /c ""%SELF%"""
+
+:: THE VALUE TRAVELS IN THE ENVIRONMENT AND IS NEVER INTERPOLATED INTO THIS STRING. A student's
+:: path can hold an apostrophe, a quote, an ampersand or a percent sign, and each of those breaks
+:: a PowerShell string that cmd's expander built. $env: is read by PowerShell itself, long after
+:: cmd has finished parsing, so none of them can reach the parser. Same idiom as %PSELEV% above.
+::
+:: -Force so the value is created when it is absent and overwritten when a previous run left one.
+:: The RunOnce key itself is present on a stock Windows, so nothing here creates it; if some
+:: policy or cleanup has removed it, Set-ItemProperty fails, the read-back fails with it, and
+:: :restartmanual prints the wording that needs no entry. Measured on 5.1.26100.9444 on
+:: 2026-09-16: writing this value to a key that does not exist exits 1 rather than creating it.
+set "PSRESUME=Set-ItemProperty -Path '%RESUMEKEY%' -Name '%RESUMENAME%' -Value $env:RESUMECMD -Force; if ((Get-ItemProperty -Path '%RESUMEKEY%' -Name '%RESUMENAME%' -ErrorAction SilentlyContinue).'%RESUMENAME%' -ne $env:RESUMECMD) { exit 1 }; exit 0"
+
+:: REMOVING IT IS ALLOWED TO FIND NOTHING. On the road this feature is for, Windows has already
+:: deleted the value by the time setup reopens, so the ordinary case is a no-op.
+set "PSRESUMECLEAR=Remove-ItemProperty -Path '%RESUMEKEY%' -Name '%RESUMENAME%' -ErrorAction SilentlyContinue"
+
+:: ---- waiting for the network, which is what resuming at logon costs (#275) ---
+:: A RunOnce entry fires EARLY. The Run key and the Startup group are documented as deliberately
+:: delayed by Windows "to a time when they are less likely to interfere with the foreground user
+:: experience"; RunOnce is not in that sentence. So setup can now reach the 600 MB create a second
+:: or two before the wifi has associated, which it never could when a student started it by hand.
+::
+:: THE LOOP IS IN HERE AND NOT IN BATCH, for the reason :restartneeded gives: a retry loop in
+:: batch needs a backward `goto` and this file has never contained one. It is also one process
+:: instead of twenty-four.
+::
+:: BOUNDED BY THE CLOCK AND NOT BY A COUNT OF TRIES. Twenty-four attempts with a five-second
+:: connect timeout is four minutes of wall clock, and the student was told two.
+::
+:: ...BUT NEVER FEWER THAN TWO TRIES, AND THE FLOOR IS CONJOINED WITH THE DEADLINE ON PURPOSE. A
+:: first attempt that hangs -- no resolver yet, a half-associated link, a stalled lookup outliving
+:: -TimeoutSec -- can spend the whole budget by itself, and a bare deadline test would then make
+:: this a single try wearing a loop's clothes. Catching a network that comes up a moment later is
+:: the entire reason this exists, so it always looks twice. An `-or` here instead of `-and`
+:: restores that defect and changes nothing anyone would see; 25-installer.sh pins the `-and`.
+::
+:: IT ASKS THE HOST IT ACTUALLY NEEDS, over HTTPS, rather than asking Windows whether it feels
+:: connected. Not ping: campus networks drop ICMP as a matter of course, and a resolved name with
+:: a dropped echo is ambiguous in the direction that refuses a working machine. A real request
+:: also fails a captive portal, which answers DNS and completes a connection and is the case a
+:: reachability flag cannot see. Not a machine property either -- every one of those is the
+:: proxy-with-a-blind-spot shape #112 and #114 were both about.
+::
+:: WHAT IT DOES NOT PROVE, said plainly because the message on failure is confident: this reaches
+:: GitHub, and `wsl --install -d` below pulls from Microsoft's distribution CDN. They can
+:: disagree. That is why :nonetwork tells the student to run the file again rather than telling
+:: them their computer cannot do this -- the bound is a delay, not a verdict.
+::
+:: $null = RATHER THAN A PIPE TO Out-Null. Pipes are banned throughout this file; under wine one
+:: aborts the whole script with exit 255. Nothing here needs one.
+::
+:: A DOT PER ATTEMPT, so a two-minute wait does not read as a hang. It is punctuation rather than
+:: prose, so nothing has to be added to the message table for it.
+:: MEASURED, because no tier runs this loop. On Windows PowerShell 5.1.26100.9444 on 2026-09-16,
+:: against a working connection, the whole command exits 0 in 1.06 s -- one attempt, no sleep, no
+:: dot printed. So the ordinary student pays about a second for it, which is the number that makes
+:: this worth having in front of the create rather than only on the resumed road.
+set "PSNETWAIT=$ProgressPreference='SilentlyContinue'; $deadline=(Get-Date).AddSeconds(120); $n=0; while ($true) { $n++; try { $null = Invoke-WebRequest -UseBasicParsing -Method Head -TimeoutSec 5 -Uri $env:INSTALLER_URL; exit 0 } catch { }; if ($n -ge 2 -and (Get-Date) -ge $deadline) { exit 1 }; Write-Host -NoNewline '.'; Start-Sleep -Seconds 5 }"
+
 :: THERE IS NO VIRTUALISATION PRE-FLIGHT, AND TWO OF THEM HAVE NOW BEEN REMOVED FROM HERE.
 :: Anyone about to add a third should read .private/README.md first; both are recorded there with
 :: the measurement that killed them. In short:
@@ -380,17 +512,77 @@ if %errorlevel% neq 0 goto wslfeaturefailed
 goto restartneeded
 
 :restartneeded
-:: TWO CALLERS NOW, both on the WSL-absent road: the self-elevating arm and the already-elevated
-:: one. It used to have exactly one, and the count is worth keeping accurate because the placement
-:: argument below depends on every caller reaching it going forward.
+:: ONE CALLER, and the count is worth keeping accurate because the placement argument below
+:: depends on every caller reaching it going forward. It said "two callers now" while an
+:: already-elevated arm existed; #277 deleted that arm and left the sentence behind.
 ::
 :: PLACED so that caller reaches it going FORWARD. A backward `goto` would work; cmd rescans from
 :: the top of the file for a label. But this file keeps to a subset of batch that the test suite
 :: can verify, and it has never contained one, so adding the first would be a construct to argue
-:: about in exchange for nothing.
+:: about in exchange for nothing. The same rule is why the network wait's retry loop lives inside
+:: PowerShell rather than being spelled out here.
+::
+:: ---- ask Windows to start setup again after the restart (#275) --------------
+:: THE SECOND RUN IS THE ONE STUDENTS LOSE, and it is not because the instruction is unclear. It
+:: asks them to remember something across a reboot, find a file in their downloads, and start it
+:: BY FULL PATH -- because the copy they downloaded carries a Zone.Identifier stream and the
+:: Attachment Manager refuses a double-click. So Windows is asked to do it instead.
+::
+:: HKCU AND NOT HKLM, WHICH IS THE SAME ARGUMENT AS :isadmin ONE LAYER OUT. HKLM's RunOnce runs
+:: only when a member of the Administrators group logs on, and it runs ELEVATED -- so the resumed
+:: run would meet the refusal at the top of this file and stop, on exactly the machine this exists
+:: for. HKCU needs no elevation to write and its entry runs in the student's own session under
+:: their own token, which is the account everything below :havewsl has to belong to.
+::
+:: WINDOWS DELETES THE VALUE BEFORE IT RUNS IT, and that is the whole safety property. An entry
+:: that is malformed, or that names a file the student has since deleted, fires once and is gone.
+:: A `!` prefix on the name would defer that deletion until after the command completed, which
+:: turns an entry that cannot start at all into a window at every logon for the life of the
+:: machine. There is no `!` here and 25-installer.sh keeps it that way.
+::
+:: REGISTERED AFTER CONSENT AND NOT BEFORE. :uacdeclined tells the student that nothing has been
+:: changed; an entry armed ahead of the prompt would reopen, at the next logon, a setup they had
+:: just said no to.
+::
+:: AND THE WRITE IS READ BACK, because "exited 0 and wrote nothing" is a state this file has been
+:: caught by before -- #270's delete looked in the wrong directory and reported nothing, and
+:: #134's .lnk needed an `if not exist` after its exit code for the same reason. Here the answer
+:: also chooses the message: a promise that setup will reopen is only printed once the registry
+:: has been asked whether it kept it.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSRESUME%"
+if %errorlevel% neq 0 goto restartmanual
 echo.
 echo   ------------------------------------------------------------------
-echo   RESTART YOUR COMPUTER NOW.
+echo   RESTART YOUR COMPUTER NOW -- use Restart, not Shut down.
+echo.
+echo   Setup will open again by itself when you sign back in, and will
+echo   finish the job. Nothing will ask for permission a second time.
+echo.
+echo   If it does not open, run this same file again. It will carry on
+echo   from here.
+echo   ------------------------------------------------------------------
+echo.
+pause
+exit /b 0
+
+:restartmanual
+:: THE SAME RESTART, PROMISING NOTHING. Reached when the entry could not be written or did not
+:: read back -- antivirus, a policy-locked hive, a profile path past RunOnce's 260-character
+:: limit. None of those is a broken install and none is worth stopping for: this is the wording
+:: this file carried before #275, and the run still exits 0 because nothing has failed.
+::
+:: WHY THE TWO MESSAGES ARE NOT ONE WITH A CONDITIONAL CLAUSE: a student reads the first sentence
+:: and stops. "Setup will open by itself" and "run this file again" are different instructions,
+:: and printing both with a hedge between them is how someone ends up waiting for a window that
+:: is never coming.
+::
+:: USE RESTART, NOT SHUT DOWN, in both. With Fast Startup on -- which is the default -- a shutdown
+:: is a hybrid one: the user session ends but the kernel session is hibernated, and Microsoft
+:: documents that pending servicing operations do not complete across it. Turning a Windows
+:: feature on is exactly such an operation. A restart is always a full boot.
+echo.
+echo   ------------------------------------------------------------------
+echo   RESTART YOUR COMPUTER NOW -- use Restart, not Shut down.
 echo.
 echo   After it restarts, run this same file again. It will carry on
 echo   from here and will not need permission a second time.
@@ -412,6 +604,27 @@ exit /b 0
 
 :havewsl
 echo   [1/3] WSL is installed.
+:: ---- disarm anything the reboot road left behind (#275) ----------------------
+:: NOT FOR THE ROAD THAT ARMED IT. Windows deletes a RunOnce value before running it, so
+:: a setup that reopened by itself already has nothing to clear. This is for the student
+:: who ran the file again BY HAND before logging off: the entry is still armed, and
+:: without this they get a window at the next logon re-running an install that finished.
+::
+:: HERE AND NOT AT THE TOP OF THE FILE, so that :isadmin can keep saying it stopped
+:: without changing anything. Everything from this label down is per-user work, and
+:: removing a value from the running account HKCU is per-user work like the rest of it.
+::
+:: cmdlint-allow: unchecked-exit -- AND THE ORDINARY RUN FAILS THIS CALL, which is the measurement
+:: that makes the waiver necessary rather than tidy. Measured on Windows PowerShell 5.1.26100.9444
+:: on 2026-09-16: `Remove-ItemProperty -ErrorAction SilentlyContinue` on a value that is not there
+:: exits 1. SilentlyContinue suppresses the MESSAGE and not the failure. Almost every run has
+:: nothing to clear, so checking this code would refuse almost every install. fake-powershell.c
+:: returns the same 1 for the same reason, so removing this waiver turns the tier red rather than
+:: shipping. Beyond that: a leftover entry is an untidy re-run of an install that is already
+:: complete and already idempotent, which is not worth failing a finished setup over -- the same
+:: trade as the %PSDEL% waiver near the end.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSRESUMECLEAR%"
+
 
 :: ---- does the CS193V environment exist? --------------------------------------
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
@@ -426,6 +639,19 @@ echo         There is nothing for you to type while this happens. It takes
 echo         about a minute, and it may go quiet for a while in the middle
 echo         -- that is setup preparing the environment, not a hang.
 echo.
+:: ---- is there a network to download over? (#275) ----------------------------
+:: ASKED HERE AND NOWHERE ELSE: this is the road that downloads, and `wsl --update` just
+:: below is the first call on it that needs a network at all. A student whose environment
+:: already exists skips this label entirely and pays nothing.
+::
+:: IT MATTERS NOW BECAUSE OF WHO STARTED THE RUN. Until #275 a student typed this when
+:: they were ready; it can now be started by Windows at logon, seconds before the wifi
+:: associates. See %PSNETWAIT% above for what is asked and what that does not prove.
+echo         Checking that the internet is reachable. This can take up
+echo         to two minutes if the computer has only just started up.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSNETWAIT%"
+if %errorlevel% neq 0 goto nonetwork
+
 :: RAISED BEFORE IT IS BLAMED. `--name` needs WSL 2.4.4, and that is the one cause
 :: :distrofailed below can still name -- so naming it without ever having offered the command
 :: that fixes it is the same defect as issue #112 in miniature. This ran only on the arm where
@@ -445,6 +671,7 @@ echo.
 :: thing that reaches 2.4.4, which `--name` below requires, and because its failure is already
 :: waived. If it does prove to prompt, the fix is to delete this line and let :distrofailed name
 :: the version as the cause -- it already does -- with the remedy being to update WSL by hand.
+
 "%SYS32%\wsl.exe" --update
 
 :: --no-launch, AND THE COMMENT HERE USED TO SAY THE OPPOSITE (#217). It said --no-launch was not
@@ -495,8 +722,8 @@ echo   [2/3] The %DISTRO% environment is ready.
 :: boundary re-quotes anything and no pipe is needed -- which matters, because a pipe in this
 :: file aborts the whole script under wine with exit 255.
 ::
-:: It also means the download and the install both run as the student's LINUX user. This file
-:: runs as Administrator; nothing it fetches is fetched with those rights.
+:: It also means the download and the install both run as the student's LINUX user, and
+:: this file runs as the student on the Windows side too -- :isadmin refuses anything else.
 echo   [3/3] Downloading the setup script and setting up the container inside %DISTRO%.
 echo         %INSTALLER_URL%
 echo.
@@ -654,7 +881,7 @@ if not "%RC%"=="0" goto stage2failed
 :: closing block of its own. That is the #218 boundary: one sign-off, and a correction is not one.
 ::
 :: %SystemRoot%\System32 AND NOT %SYS32% FOR THE TARGET, and this is the only place in the file
-:: where the difference matters. %SYS32% becomes %SystemRoot%\Sysnative on WOW64 (line 102), and
+:: where the difference matters. %SYS32% becomes %SystemRoot%\Sysnative on WOW64, and
 :: Sysnative is a redirector visible only to the 32-bit process looking at it -- correct for
 :: RUNNING wsl here, meaningless once written into a shortcut that Explorer resolves later.
 ::
@@ -708,7 +935,7 @@ if not exist "%LNKDIR%\%LNKNAME%.lnk" goto shortcutfailed
 :: IT CANNOT BE RETARGETED INSTEAD. /etc/wsl-distribution.conf's [shortcut] section has exactly
 :: two keys, `enabled` and `icon`; nothing there sets the command. The file is Canonical's and
 :: lives inside the tarball besides, and `wsl --install` has already read it and written both
-:: artifacts by the time line 332 can move it aside.
+:: artifacts by the time the create above can move it aside.
 ::
 :: THE GUARD IS THE FILENAME AND A wsl TARGET, AND DELIBERATELY NOT THE ARGUMENTS. The obvious
 :: check -- does it mention this distribution -- cannot work: WSL writes
@@ -853,10 +1080,11 @@ if %errorlevel% equ 0 goto novm
 :: only what it actually did: WSL is present, and `wsl --update` has run.
 echo.
 echo   Could not create the %DISTRO% environment.
-echo.
-echo   Setup has checked what it can: WSL is installed, and WSL has
-echo   just been updated. The likeliest cause left is a WSL older than
-echo   2.4.4, which cannot name a new environment -- but that is a
+echo   just been updated, and the internet was reachable a moment ago.
+echo   The likeliest cause left is a WSL older than 2.4.4, which cannot
+echo   name a new environment, or the connection dropping mid-download --
+echo   but that is a guess, not a diagnosis, and any error above is
+echo   worth more.
 echo   guess, not a diagnosis, and any error above is worth more.
 echo.
 echo   Please send course staff this whole window, including any
@@ -1004,6 +1232,40 @@ echo.
 echo   Please send course staff this whole window. Do not spend time
 echo   troubleshooting this yourself, and do not run this file again
 echo   until it has been sorted out.
+echo.
+pause
+exit /b 1
+
+:nonetwork
+:: REACHED FROM ONE PLACE, and only on the road that is about to download 600 MB. Setup waits for
+:: the network rather than assuming it, because since #275 this run may have been started by
+:: Windows at logon rather than by a student who was sitting there ready -- and at logon the wifi
+:: is frequently a few seconds behind the desktop.
+::
+:: NOTHING HAS BEEN CHANGED, and saying so matters as much as it does at :uacdeclined: the wait is
+:: ahead of `wsl --update` and ahead of the create, so a student who lands here has not been left
+:: with a half-made environment.
+::
+:: IT NAMES RUNNING THE FILE AGAIN, AND THAT IS WHAT KEEPS A BOUNDED WAIT FROM BEING A REFUSAL.
+:: The probe asks one host over HTTPS; the download asks Microsoft's CDN. Those can disagree, and
+:: when they do this arm is wrong about a machine that would have worked. The cost of being wrong
+:: therefore has to be one more run and not a dead end -- which is the difference between this and
+:: the two virtualisation pre-flights the header records as removed.
+::
+:: THE CAPTIVE PORTAL IS NAMED because it is the case a student cannot diagnose and course staff
+:: cannot fix remotely: campus and hotel networks answer DNS, accept the connection, and then
+:: serve a sign-in page, so the computer looks connected and is not.
+echo.
+echo   Setup could not reach the internet, so it has stopped before
+echo   downloading anything. Nothing has been changed.
+echo.
+echo   If the computer has only just started up, the wifi may still be
+echo   connecting -- give it a moment. Then run this file again and it
+echo   will carry on from here.
+echo.
+echo   If you are on a network that asks you to sign in through a web
+echo   browser, open one and sign in first. Setup cannot answer that
+echo   page for you.
 echo.
 pause
 exit /b 1

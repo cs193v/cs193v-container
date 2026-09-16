@@ -1433,6 +1433,51 @@ executing assertions describe the one invocation students are now told not to us
 **What no tier can reach** is whether the *identity* is right on a real machine, since wine has no
 elevation and no second profile. `MANUAL.md` §134.7 carries the two-account reproduction.
 
+**No longer on this list: the Windows installer knowing where it is (issue #275).** `%~dp0` was
+banned outright, and the ban is now narrowed rather than kept. What it was protecting is worth
+restating, because the narrowing is only safe while that stays true: `%HERE%` existed to find a
+**sibling `install-cs193v.sh`** next to the `.cmd`, which meant stage two had two routes, and the
+one that failed silently was a copy left over from an earlier quarter — an install that looks
+finished and is not. #93 deleted that route; the ban outlived it as a keeper.
+
+Relaunching *the same file* after a restart is not that route. So the `.cmd` reads `%~f0` once,
+into `%SELF%`, and puts it in one registry value. `25-installer.sh` now pins the narrowness
+instead of the ban — exactly one `%~` in the file, it is `%~f0` and not `%~dp0`, it is read before
+the `cd /d "%SystemRoot%"` in the prologue, and the value it produces never appears in a command
+that names `wsl.exe`. That last rule is the one doing the real work; the others make it hard to
+get there by accident.
+
+**Three relaunch mechanisms were weighed and two rejected.** The requirement is that a failed
+resume costs a student one manual run and nothing more, because the installer already worked
+without one:
+
+- **A shortcut in the Startup folder** would have been free to test — `%PSLNK%`'s `CreateShortcut`
+  arm and `wine_lnk_has` already exist, so it needed no new fake and no fixture rebuild, against
+  the 3.46 GB one the registry arm cost. It was rejected anyway: the Startup folder fires at
+  *every* logon until something removes it, and the removal would be ours to get right. A student
+  who abandons the install, or deletes the download, gets a console window at every sign-in for
+  the life of the machine.
+- **A scheduled task** (`schtasks /sc ONLOGON /delay`) is the only one that can express "wait a
+  minute first", which would have addressed the logon network race directly instead of with a
+  retry loop. It carries the Startup folder's self-deletion burden *and* the registry arm's fake
+  cost, adds `schtasks.exe` as a new external program, and its `/tr` quoting is the worst of the
+  three.
+- **`HKCU\...\RunOnce`, which is what shipped.** Windows deletes the value *before* running it, so
+  the one-shot property comes from the OS rather than from our code: a malformed entry, or one
+  naming a file that is gone, fires once and disappears. It must be HKCU — `HKLM`'s RunOnce runs
+  only for members of the Administrators group and runs **elevated**, straight into `:isadmin`.
+
+**And the pre-flight ban does not cover the network wait, which is a different shape.** Two
+virtualisation pre-flights were removed from this file and the rule that replaced them is above:
+nothing may ask the machine a question whose answer reality supplies for free a moment later. The
+wait added for #275 looks like one and is not, on two counts. It waits for a **transient** rather
+than classifying the machine, so a wrong answer corrects itself on the next tick; and the cost of
+being wrong at the deadline is **one more run**, which `:nonetwork` says in as many words, where
+#112 and #114 each refused a working machine with a confident wrong diagnosis. It is still a probe
+with a blind spot — it reaches GitHub, and `wsl --install -d` pulls from Microsoft's CDN — and the
+comment at `%PSNETWAIT%` says so rather than implying otherwise.
+
+
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open
 item below for the set that was deferred. These are the branches that were measured and dropped, so

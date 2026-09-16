@@ -1083,6 +1083,58 @@ settle, and one it should not be trusted on:
    `{{DIR}}/projects` line all name the directory actually chosen, and that pasting the UNC path
    into Explorer opens it.
 
+8. **That Windows really restarts setup after the reboot, and does it as the student.** Issue
+   #275. The reboot arm now writes one value under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce`, named `CS193VSetup`, holding
+   `%SystemRoot%\System32\cmd.exe /s /c ""<full path to the .cmd>""`. `--tier windows` covers the
+   decision and one real consequence — `win-resume` runs the value the first run stored, through
+   `startvalue.exe`, which is the same `CreateProcess` call Windows makes — but a wine prefix has
+   no logon, no antivirus and no Fast Startup, so the following is unmeasured.
+
+   **Do this one before writing any more code that depends on it.** *Does an HKCU RunOnce entry
+   run with the student's ordinary token, or an elevated one?* On an **administrator** account
+   (the interesting case; a standard user has no elevated token to get), add the value by hand,
+   sign out, sign in, and have the relaunched script report `reg query "HKU\S-1-5-19"`'s exit
+   code. *Expect:* non-zero, i.e. not elevated, so `:isadmin` lets it through. **If it comes back
+   0 the design is wrong**: the resumed run would refuse itself at the top of the file, on exactly
+   the machine the feature exists for, and the fix is not a message — it is a different mechanism.
+
+   The rest, in the order they are cheapest to run:
+
+   - **It fires, and then it is gone.** Reach the restart notice on a machine with no WSL,
+     restart, and confirm setup opens by itself and finishes. Then check the value is absent —
+     Windows deletes it before running it, so it should be gone even if setup then failed. Run the
+     finished installer once more by hand and confirm it arms nothing.
+   - **Restart is not Shut down.** Both notices say so. With Fast Startup on — the default — a
+     shutdown is a hybrid one: the user session ends but the kernel session is hibernated, and
+     Microsoft documents that pending servicing operations do not complete across it. *Check
+     both:* does "Shut down, then power on" actually enable the WSL feature, and does the entry
+     still fire? If shut-down works fine the sentence is merely harmless; if it does not, this is
+     the row that says so.
+   - **Antivirus.** A Run/RunOnce write is the textbook userland persistence technique
+     (MITRE T1547.001), and this is the risk with no test and no measurement behind it. Confirm
+     Defender leaves the value alone, and ask anyone with a third-party product to try it. The
+     fallback wording in `:restartmanual` exists for whatever this turns up: the point is that a
+     stripped entry costs one manual run and nothing else.
+   - **A profile path with an ampersand in it.** `Tom & Jerry` is a legal Windows account name,
+     and it is the case `/s` is in the value for. The wine tier **cannot** cover it: measured in
+     the fixture on 2026-09-16, wine's own cmd splits at the `&` inside the quotes that `/S`
+     leaves behind, where real cmd leaves them protecting it. Make such an account, download the
+     `.cmd` into its profile, and confirm the resumed run starts.
+   - **RunOnce's 260-character ceiling**, with a deep profile path. The write is read back, so a
+     truncated or refused value should land on `:restartmanual` and print the manual wording —
+     confirm that rather than a promise nothing can keep.
+   - **The network wait, which no tier executes.** The loop lives inside `%PSNETWAIT%` and
+     `fake-powershell.c` answers the whole call at once, so what is covered is the branch. Turn
+     Wi-Fi off, reach `:makedistro`, and watch it print dots and then refuse with `:nonetwork`;
+     turn Wi-Fi on mid-wait and watch it carry on. Then the one that matters: **pull the network
+     so the first attempt hangs** rather than failing fast, and confirm a second attempt still
+     happens. The attempt floor is conjoined with the deadline precisely for that case, and an
+     `-or` there would restore the defect invisibly.
+   - **`Invoke-WebRequest -Method Head` against `raw.githubusercontent.com` really answers 2xx**
+     under Windows PowerShell 5.1. If it does not, the wait refuses every machine, so this is
+     worth one command before shipping.
+
 ### Ubuntu's first-run setup, which no student meets any more (#217)
 **The installer switches it off, and this section is now about checking that it stays off.**
 `wsl --install -d Ubuntu-26.04 --name CS193V --no-launch` registers the distribution without

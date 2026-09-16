@@ -654,7 +654,7 @@ assert_eq   "win-isadmin:touches-nothing-else"    "0" "$(wine_argv_count 'wsl.ex
 assert_eq   "win-isadmin:asks-no-permission"      "0" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
 assert_eq   "win-isadmin:writes-no-start-menu-entry" "no" \
             "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
-assert_eq   "win-isadmin:deletes-nothing"         "0" "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+assert_eq   "win-isadmin:deletes-nothing"         "0" "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
 assert_says_not "win-isadmin:claims-no-success"   "environment is ready" "$WINE_OUT"
 
 # ...AND THE ORDINARY RUN IS NOT REFUSED, which would otherwise rest on the fake's default alone.
@@ -733,6 +733,10 @@ assert_says "win-uacdeclined:says-nothing-changed" "nothing has been changed" "$
 assert_says "win-uacdeclined:says-how-to-retry"   "choose Yes when Windows" "$WINE_OUT"
 assert_says_not "win-uacdeclined:does-not-blame-the-feature" "Could not turn on" "$WINE_OUT"
 assert_says_not "win-uacdeclined:does-not-promise-a-restart-will-help" "RESTART YOUR COMPUTER" "$WINE_OUT"
+# NOTHING WAS ARMED, AND THAT IS WHAT "NOTHING HAS BEEN CHANGED" MEANS (#275). The prompt comes
+# before any change, so a student who clicked No has not left the machine half-configured -- and
+# an entry registered ahead of the prompt would reopen, at the next logon, a setup they declined.
+assert_eq "win-uacdeclined:arms-no-resume-entry" "" "$(wine_resume_entry)"
 
 # ...AND A MACHINE WITH NO System32\wsl.exe AT ALL, which `if exist` is what now detects. Microsoft
 # treats that state as unrepairable by anything short of an in-place upgrade -- `where wsl` returns
@@ -756,6 +760,9 @@ assert_says_not "win-nowslexe:does-not-promise-a-restart-will-help" "RESTART YOU
 # child failing rather than about the .cmd never asking: fake-powershell answers 102 here because
 # system32\wsl.exe is genuinely gone from the prefix, which is what cmd.exe would do.
 assert_eq   "win-nowslexe:asked-permission-first" "1" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
+# AND A FAILED FEATURE ARMS NOTHING EITHER. There is no restart to resume from, so an entry
+# here would reopen setup at the next logon on a machine nothing has changed on.
+assert_eq "win-nowslexe:arms-no-resume-entry" "" "$(wine_resume_entry)"
 
 # THE CHILD FAILING, WHICH USED TO BE TWO CASES DRIVING wsl.update.rc AND wsl.feature.rc. Those
 # knobs reach the commands the CHILD runs, and the child is not run under wine at all -- there is
@@ -788,6 +795,166 @@ assert_says_not "win-elevfailed:does-not-tell-them-to-restart" "RESTART YOUR COM
 # non-zero code is the child having failed, and conflating them tells a student to click Yes when
 # the problem is their machine.
 assert_says_not "win-elevfailed:is-not-a-declined-prompt" "permission was" "$WINE_OUT"
+assert_eq "win-elevfailed:arms-no-resume-entry" "" "$(wine_resume_entry)"
+
+# ─── resuming after the restart  (issue #275) ────────────────────────────────
+#
+# THE SECOND RUN IS THE ONE STUDENTS LOSE. On a machine with no WSL the install takes two, and the
+# second needs them to remember it, find the file they downloaded, and start it BY FULL PATH -- a
+# double-click is refused, because the copy carries a Zone.Identifier stream. So the reboot arm
+# now registers an HKCU RunOnce entry naming itself, and Windows starts it at the next logon.
+#
+# EVERY CASE BELOW IS ABOUT THE ENTRY AND NOT ABOUT THE REGISTRY. fake-powershell.c keeps the value
+# in a file and records it out of $env:RESUMECMD verbatim, so what these assert is the command line
+# the INSTALLER decided on -- see that arm for why the fake composes none of it itself.
+
+# THE ENTRY IS WRITTEN ON THE ROAD IT IS FOR, and it names this file through cmd.exe. `/s` is the
+# part most likely to be wrong and the part a reader would drop: without it the outer quotes are
+# kept or stripped depending on whether the path holds whitespace AND whether it holds & ^ ( or ),
+# so a profile called `Tom & Jerry` breaks the resume and nothing else changes.
+wine_new
+wine_list
+wine_knob wsl.status.rc -1
+wine_run
+assert_ne   "win-resumearm:registers-something"        "" "$(wine_resume_entry)"
+assert_says "win-resumearm:registers-the-interpreter"  "System32\\cmd.exe" "$(wine_resume_entry)"
+assert_says "win-resumearm:registers-unambiguous-quoting" "/s /c" "$(wine_resume_entry)"
+assert_says "win-resumearm:registers-this-file"        "install-cs193v-windows.cmd" "$(wine_resume_entry)"
+# ...AS AN ABSOLUTE PATH. The .cmd is invoked here by a RELATIVE name, the way wine_run has to
+# invoke it, so a `%~n0` or a bare `%0` would register something that only works from the download
+# folder -- and the folder is exactly where the resumed run does not start. This is the assertion
+# that would go red for that mistake; the second-run case below is what proves the path resolves.
+assert_says "win-resumearm:registers-an-absolute-path" "Z:\\tmp\\case" "$(wine_resume_entry)"
+# AND IT ASKS FOR NO ELEVATION OF ITS OWN. An entry that relaunched elevated would walk into
+# :isadmin and refuse itself on the one machine this feature exists for -- which is also why the
+# key is HKCU, asserted statically because no prefix here has two hives to tell apart.
+assert_says_not "win-resumearm:registers-no-elevation" "RunAs" "$(wine_resume_entry)"
+# THE NOTICE PROMISES IT, and the promise is what makes the entry worth writing.
+assert_says "win-resumearm:says-setup-will-reopen" "by itself" "$WINE_OUT"
+assert_says "win-resumearm:still-says-to-restart"  "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
+# ...AND STILL NAMES THE FALLBACK. A RunOnce entry can be stripped by antivirus, skipped in Safe
+# Mode, or blocked by policy, and none of that is visible from here. The sentence that tells a
+# student what to do when nothing opens is the one thing that must survive every such case.
+assert_says "win-resumearm:still-says-how-to-do-it-by-hand" "run this same file again" "$WINE_OUT"
+
+# A REGISTRY THAT REFUSED THE WRITE MAKES NO PROMISE. This is the arm that keeps the sentence
+# above honest: the .cmd reads its own write back, and prints the wording it has always had when
+# the value is not there afterwards. "Exited 0 and wrote nothing" is a real state -- #270 was
+# exactly that, one layer over -- so the read-back decides the message rather than the exit code.
+wine_new
+wine_list
+wine_knob wsl.status.rc -1
+wine_knob ps.runonce.rc 1
+wine_run
+assert_eq   "win-resumefail:exits-zero-because-nothing-failed" "0" "$WINE_RC"
+assert_eq   "win-resumefail:registers-nothing" "" "$(wine_resume_entry)"
+assert_says "win-resumefail:still-says-to-restart" "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
+assert_says "win-resumefail:tells-them-to-rerun"   "run this same file again" "$WINE_OUT"
+# THE PROMISE IS THE DIFFERENCE, AND IT IS ABSENT. Without this the two notices could converge on
+# one string and the read-back would be machinery with nothing behind it.
+assert_says_not "win-resumefail:promises-nothing-it-cannot-keep" "by itself" "$WINE_OUT"
+
+# ─── ...AND THEN THE MACHINE CAME BACK ────────────────────────────────────────
+#
+# THE CASE THIS WHOLE FEATURE IS FOR, and the only one in the file that runs the installer twice.
+# The second run is the COMMAND LINE THE FIRST ONE STORED -- not install-cs193v-windows.cmd again.
+# Re-invoking the .cmd would assert idempotency, which was already true and already covered, and
+# would say nothing about whether the value Windows was handed is one it could start. It runs from
+# the filesystem root, because at logon the student is not standing in their download folder.
+wine_new
+wine_list
+wine_knob wsl.status.rc -1
+wine_resume_knob wsl.status.rc 0
+wine_run
+# RUN ONE STOPPED WHERE IT ALWAYS DID. The per-user work belongs to the run after the restart.
+assert_eq "win-resume:first-run-exits-zero"       "0" "$WINE_RC"
+assert_eq "win-resume:first-run-creates-nothing"  "0" "$(wine_argv_count '\-\-install -d')"
+assert_eq "win-resume:first-run-writes-no-start-menu-entry" "no" \
+          "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+# RUN TWO IS THE STORED LINE, AND IT FINISHED THE JOB.
+assert_eq   "win-resume:second-run-exits-zero"    "0" "$WINE_RCB"
+assert_says "win-resume:second-run-says-wsl-is-installed" "WSL is installed" "$WINE_OUTB"
+assert_eq   "win-resume:second-run-creates-the-environment" "1" \
+            "$(wine_argv_count_b '\-\-install -d')"
+assert_eq   "win-resume:second-run-hands-off-to-stage-two" "1" \
+            "$(wine_argv_count_b '\-e env CS193V_WINDOWS=1 bash /var/tmp/install-cs193v\.sh')"
+assert_eq   "win-resume:second-run-writes-the-start-menu-entry" "yes" \
+            "$(wine_lnk_has_b 'Programs/CS193V Development Environment.lnk')"
+# AND IT NEVER ASKS FOR PERMISSION AGAIN, which is what the notice told the student.
+assert_eq   "win-resume:second-run-asks-no-permission" "0" \
+            "$(wine_argv_count_b 'powershell\.exe .*Start-Process')"
+# THE ENTRY IS GONE AFTERWARDS. Windows deletes a RunOnce value before running it, and the .cmd
+# clears any leftover at :havewsl for the student who re-ran the file by hand before logging off.
+# Either way a finished install must leave nothing armed, or the next logon reopens a window on an
+# install that is already done.
+assert_ne "win-resume:something-was-armed-to-begin-with" "" "$(wine_resume_entry)"
+assert_eq "win-resume:nothing-is-left-armed" "" "$(wine_resume_entry_after)"
+
+# AN ALREADY-INSTALLED MACHINE ARMS NOTHING, AND DISARMS WHAT IT FINDS. The clear at :havewsl is
+# not for the reboot road -- Windows has already cleared that one -- it is for the student who
+# re-ran the file by hand in the same session. Without it they get a window at the next logon
+# running a setup that finished an hour ago.
+#
+# THE ENTRY IS SEEDED FIRST, AND MUTATION TESTING IS WHY. This case used to arrange nothing and
+# assert that the clear had been CALLED, counted off argv.log -- and a fake whose clear removed
+# nothing left it green, because a call that does nothing is still a call. The seeded value and
+# the before/after pair are what make it an assertion about the effect: something was armed
+# going in, and nothing is armed coming out.
+wine_new
+wine_list CS193V
+wine_arm_resume 'C:\windows\System32\cmd.exe /s /c ""Z:\tmp\case\Downloads\install-cs193v-windows.cmd""'
+wine_run
+assert_eq "win-resumeclear:exits-zero" "0" "$WINE_RC"
+assert_ne "win-resumeclear:something-was-armed-to-begin-with" "" "$(wine_resume_entry_before)"
+assert_eq "win-resumeclear:the-stale-entry-is-gone" "" "$(wine_resume_entry)"
+assert_eq "win-resumeclear:clears-the-entry-exactly-once" "1" \
+          "$(wine_argv_count 'powershell\.exe .*Remove-ItemProperty')"
+
+# ...AND A MACHINE THAT HAD NOTHING ARMED ARMS NOTHING. The pair matters: the case above cannot
+# tell "cleared it" from "never wrote one" on its own, and this one cannot tell "wrote nothing"
+# from "wrote one and cleared it". Together they pin both.
+wine_new
+wine_list CS193V
+wine_run
+assert_eq "win-resumeclear:nothing-was-armed-to-begin-with" "" "$(wine_resume_entry_before)"
+assert_eq "win-resumeclear:arms-nothing-when-there-is-nothing-to-resume" "" "$(wine_resume_entry)"
+
+# ─── waiting for the network before the download ──────────────────────────────
+#
+# A RunOnce entry fires EARLY at logon -- earlier than the Startup group, which Windows is
+# documented as deliberately delaying -- and the next thing on this road pulls about 600 MB. A
+# laptop whose Wi-Fi has not associated yet would fail into :distrofailed, which guesses at a WSL
+# version, and printing a wrong cause over a correct one is issue #112 exactly.
+#
+# WHAT THIS TIER CAN SEE IS THE BRANCH AND NOT THE WAIT. The container runs --network=none and no
+# case may pay two minutes, so fake-powershell answers instantly. The deadline, the attempt floor
+# and the gap between tries are held by 25-installer.sh as text and by a MANUAL.md row.
+wine_new
+wine_list
+wine_knob net.reachable 0
+wine_run
+assert_ne   "win-nonet:does-not-exit-zero" "0" "$WINE_RC"
+assert_says "win-nonet:says-the-network-is-unreachable" "could not reach the internet" "$WINE_OUT"
+# THE REMEDY IS WHAT KEEPS A BOUNDED WAIT FROM BEING A REFUSAL. A probe has a blind spot the real
+# download may not, so the one thing this arm must never do is send a working machine away.
+assert_says "win-nonet:tells-them-to-run-it-again" "run this file again" "$WINE_OUT"
+# AND IT STOPS BEFORE SPENDING THE DOWNLOAD. Asserted because a wait that warned and carried on
+# would satisfy every line above.
+assert_eq   "win-nonet:downloads-nothing" "0" "$(wine_argv_count '\-\-install -d')"
+assert_eq   "win-nonet:does-not-even-update-wsl" "0" "$(wine_argv_count 'wsl\.exe --update$')"
+
+# ...AND THE WAIT IS ASKED ONCE ON THE ROAD THAT NEEDS IT AND NOT AT ALL ON THE ONE THAT DOES NOT.
+# A student whose environment already exists is downloading nothing here and must pay nothing.
+wine_new
+wine_list
+wine_run
+assert_eq "win-netwait:asks-once-before-creating" "1" \
+          "$(wine_argv_count 'powershell\.exe .*Invoke-WebRequest')"
+wine_new
+wine_list CS193V
+wine_run
+assert_eq "win-netwait:asks-nothing-when-the-environment-exists" "0" \
+          "$(wine_argv_count 'powershell\.exe .*Invoke-WebRequest')"
 
 # ─── CLASS: a download folder that already holds hostile executables ──────────
 #
@@ -887,7 +1054,7 @@ assert_says_not "win-lnk:does-not-report-the-entry-as-failed" "could not be crea
 assert_eq   "win-lnk:creates-the-entry-once" "1" \
             "$(wine_argv_count 'powershell\.exe .*CreateShortcut.*\.Save\(\)')"
 assert_eq   "win-lnk:runs-the-delete-once"   "1" \
-            "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+            "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
 # ─── and now the tree itself ───────────────────────────────────────────────────
 # OURS IS IN THE APP LIST. %LNKDIR% is what puts it in "All apps"; the root is not enumerated
 # there on Windows 11, so an entry written to %SMDIR% would be one a student cannot find.
@@ -933,7 +1100,7 @@ wine_plant_lnk 'Programs/CS193V.lnk' 'C:\Windows\notepad.exe'
 wine_run
 assert_eq "win-lnk-guard:exits-zero"      "0" "$WINE_RC"
 assert_eq "win-lnk-guard:runs-the-delete" "1" \
-          "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+          "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
 assert_eq "win-lnk-guard:leaves-a-non-wsl-entry-in-the-root" "yes" \
           "$(wine_lnk_has 'CS193V.lnk')"
 assert_eq "win-lnk-guard:leaves-a-non-wsl-entry-in-the-app-list" "yes" \
@@ -956,7 +1123,7 @@ assert_says "win-lnk-noicon:points-back-at-the-typed-commands" "commands shown a
 assert_eq   "win-lnk-noicon:writes-no-course-entry" "no" \
             "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
 assert_eq   "win-lnk-noicon:never-reaches-the-delete" "0" \
-            "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+            "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
 
 # ─── decision coverage, reported rather than assumed ──────────────────────────
 # What this checks is that every branch target in the file was reached by some case above, and

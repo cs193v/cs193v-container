@@ -66,6 +66,11 @@ WHAT THE MACHINE IS LIKE
                        told to use and the only one that installs into their own account
   --uac-declined       the student clicks No on the prompt that turns WSL on
   --no-wsl             no wsl.exe in System32: the install-WSL-and-reboot arm
+  --no-network         nothing answers on the network, so the create refuses before it
+                       spends 600 MB. What the fake models is the ANSWER: the retry loop
+                       itself lives inside %PSNETWAIT% and no tier runs it
+  --registry-fails     the RunOnce write does not take, so the restart notice falls back
+                       to "run this same file again" and promises nothing (#275)
   --hijacked           the download folder already holds hostile copies of every program the
                        installer calls; nothing should ever reach them
   --wsl-broken [RC]    wsl.exe is there but --status fails (default -1, which is what it
@@ -201,6 +206,8 @@ while [ "$#" -gt 0 ]; do
         --as-admin)       setk reg.query.rc 0 ;;
         --uac-declined)   setk win.uac-declined 1 ;;
         --no-wsl)         setk harness.no-wsl-exe 1; DISTROS='' ;;
+        --no-network)     setk net.reachable 0 ;;
+        --registry-fails) setk ps.runonce.rc 1 ;;
         # The download folder already holds hostile copies of every program the installer calls.
         # On the unfixed installer they ran, elevated, because cmd.exe searches the current
         # directory before %PATH% (issue #125). Expect `wincmd log` to show no HIJACKED line.

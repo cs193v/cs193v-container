@@ -2404,6 +2404,193 @@ assert_eq "windows:the-elevated-arm-touches-nothing-per-user" "" \
                     inarm && /%APPDATA%|%LOCALAPPDATA%|%PROBE%|-l -q|--install -d|-d %DISTRO%|CreateShortcut|Remove-Item|%STAGE2%/ \
                         { print "line " NR ": " $0 }')"
 
+
+# ─── resuming after the restart, and the entry that does it (issue #275) ─────
+#
+# THE DEFECT THIS BLOCK EXISTS FOR IS A MISSING STEP RATHER THAN A WRONG ONE. On a machine with no
+# WSL the install takes two runs, and students lose the second one: they have to remember it, find
+# the file they downloaded, and launch it BY FULL PATH -- a double-click is refused, because a
+# browser-downloaded .cmd carries a Zone.Identifier stream and the Attachment Manager acts on it.
+# So stage one now asks Windows to start it again at the next logon, and every rule below guards
+# one property of the entry it writes rather than the fact that it writes one.
+#
+# HKCU AND NEVER HKLM, WHICH IS WHERE THIS TOUCHES #277. HKLM\...\RunOnce executes only when a
+# member of the Administrators group logs on, and it executes ELEVATED -- so the resumed run would
+# walk straight into :isadmin and refuse itself, on the one machine the feature exists for. HKCU is
+# writable with no elevation and its entry runs in the student's own session under their own token,
+# which is the account :isadmin exists to keep everything belonging to.
+runonce_cmds="$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /RunOnce/ { print "line " $2 ": " $4 }')"
+assert_ne "windows:the-resume-entry-was-found" "" "$runonce_cmds"
+assert_eq "windows:the-resume-entry-is-per-user" "" \
+          "$(printf '%s\n' "$runonce_cmds" | grep -v 'HKCU:' || true)"
+assert_eq "windows:the-resume-entry-is-never-machine-wide" "" \
+          "$(printf '%s\n' "$runonce_cmds" | grep 'HKLM' || true)"
+
+# IT MUST NOT BE STICKY, and the character that decides is one byte nobody would notice in review.
+# Windows deletes a RunOnce value BEFORE running it, which is the whole safety property here: an
+# entry that is broken, or that points at a file the student has since deleted, fires once and is
+# gone. A `!` prefix on the VALUE NAME defers that deletion until after the command completes -- so
+# an entry that cannot start at all is never cleared, and the student gets a console window at
+# every logon for the rest of the machine's life. That is not a failure this course gets to have.
+resumename="$(printf '%s\n' "$WCMD" | sed -n 's/^set "RESUMENAME=\(.*\)"$/\1/p')"
+assert_ne "windows:the-resume-entry-is-named" "" "$resumename"
+assert_not_match "windows:the-resume-entry-is-not-sticky" '^!' "$resumename"
+
+# IT NAMES THIS FILE THROUGH cmd.exe, and both halves of that are load-bearing. A RunOnce value is
+# handed to CreateProcess, which cannot execute a .cmd at all -- a batch file needs the interpreter
+# named -- so the value has to start with cmd.exe. And `/s` is what makes the quoting survive a
+# real student's profile: without it, `cmd /c "path"` keeps or strips the outer quotes depending on
+# whether the path contains whitespace AND whether it contains & ^ ( or ), so an account named
+# `Tom & Jerry` breaks it. With /s cmd removes exactly the outer pair and runs the rest verbatim.
+resumecmd="$(printf '%s\n' "$WCMD" | sed -n 's/^set "RESUMECMD=\(.*\)"$/\1/p')"
+assert_ne       "windows:the-resume-command-was-readable" "" "$resumecmd"
+assert_contains "windows:the-resume-command-names-the-interpreter" 'System32\cmd.exe' "$resumecmd"
+assert_contains "windows:the-resume-command-quotes-unambiguously"  '/s /c' "$resumecmd"
+assert_contains "windows:the-resume-command-names-this-file"       '%SELF%' "$resumecmd"
+# ...AND IT RESOLVES THE SYSTEM DIRECTORY THE WAY WINDOWS WILL LATER, not the way this process
+# does. %SYS32% becomes %SystemRoot%\Sysnative in a 32-bit process, and Sysnative is a redirector
+# visible only to the process looking at it -- correct for RUNNING a program here, meaningless once
+# written into a registry value something else resolves after a reboot. Same distinction the .lnk
+# TargetPath makes, and this is the second and only other place it matters.
+assert_not_contains "windows:the-resume-command-does-not-name-sysnative" '%SYS32%' "$resumecmd"
+
+# THE FILE IS ALLOWED TO KNOW WHERE IT IS, ONCE, AND FOR THIS ONLY. `%~dp0` was banned outright
+# because %HERE% was a SECOND ROUTE TO STAGE TWO -- a sibling install-cs193v.sh next to this file,
+# which went stale and looked like a working install. Relaunching this same file is not that route,
+# so the ban is narrowed rather than kept: one capture, of %~f0 and not %~dp0, and the rule below
+# keeps the value out of everything the old ban was actually about.
+selfrefs="$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /%~/ { print "line " $2 ": " $4 }')"
+assert_eq "windows:knows-its-own-path-exactly-once" "1" "$(printf '%s\n' "$selfrefs" | grep -c .)"
+assert_contains "windows:knows-its-own-path-as-a-full-path" '%~f0' "$selfrefs"
+# AND THE SELF PATH NEVER CROSSES INTO LINUX. This is the narrow restatement of the old ban and the
+# thing that actually keeps stage two on one route: %SELF% may reach the registry and nothing else.
+# A path handed to wsl.exe is also the case the header's quoting argument was about -- `cs193v (1)`
+# is what a browser names a second download -- and none of that reasoning has to be redone while
+# this holds.
+assert_eq "windows:the-self-path-never-reaches-wsl" "" \
+          "$(_cmdlint_commands "$W" \
+             | awk -F'\t' '$4 ~ /wsl\.exe/ && $4 ~ /%SELF%|%RESUMECMD%/ { print "line " $2 ": " $4 }')"
+# ...AND IT IS CAPTURED BEFORE THE FILE LEAVES THE DOWNLOAD FOLDER. `cd /d "%SystemRoot%"` is a few
+# lines of prologue away, and a capture after it would resolve against the wrong directory if cmd
+# ever expanded %~f0 relatively. Ordering removes the question instead of relying on the answer --
+# the same reason NoDefaultCurrentDirectoryInExePath is asserted to precede every external call.
+self_ln="$(ln_of 'set "SELF=')"
+cd_ln="$(ln_of 'cd /d "%SystemRoot%"')"
+assert_eq "windows:the-self-path-boundary-was-found" "2" \
+          "$(printf '%s\n' "$self_ln" "$cd_ln" | grep -c .)"
+assert_ok "windows:the-self-path-is-captured-before-the-cd" \
+          sh -c "test $self_ln -lt $cd_ln"
+
+# NOTHING IS REGISTERED BEFORE CONSENT. :uacdeclined tells the student that nothing has been
+# changed, and that sentence is only true while the write happens after the prompt has been
+# answered. An entry armed before Start-Process would survive a declined prompt and relaunch a
+# setup the student said no to.
+psresume_ln="$(ln_of 'Command "%PSRESUME%"')"
+pselev_ln="$(ln_of 'Command "%PSELEV%"')"
+assert_eq "windows:the-consent-boundary-was-found" "2" \
+          "$(printf '%s\n' "$psresume_ln" "$pselev_ln" | grep -c .)"
+assert_ok "windows:nothing-is-registered-before-consent" \
+          sh -c "test $pselev_ln -lt $psresume_ln"
+
+# AND A STALE ENTRY IS CLEARED BEFORE ANY PER-USER WORK. RunOnce clears itself on the road this
+# feature is for, so this is for the student who re-runs the file BY HAND before logging off: the
+# entry is still armed, and without this they get a window at the next logon re-running a finished
+# install. Placed after :isadmin so that "stopped without changing anything" stays literally true.
+psclear_ln="$(ln_of 'Command "%PSRESUMECLEAR%"')"
+makedistro_ln="$(ln_of '^:makedistro')"
+isadmin_br_ln="$(ln_of 'goto isadmin')"
+assert_eq "windows:the-clear-boundary-was-found" "3" \
+          "$(printf '%s\n' "$psclear_ln" "$makedistro_ln" "$isadmin_br_ln" | grep -c .)"
+assert_ok "windows:the-resume-entry-is-cleared-before-the-per-user-work" \
+          sh -c "test $psclear_ln -lt $makedistro_ln"
+assert_ok "windows:the-refusal-still-changes-nothing" \
+          sh -c "test $isadmin_br_ln -lt $psclear_ln"
+
+# THE WRITE IS READ BACK, because "exited 0 and wrote nothing" is a real state and this file has
+# been caught by it before -- #270's delete looked in the wrong directory and said nothing, and
+# #134's .lnk needed an `if not exist` after its exit code for the same reason. Here the read-back
+# also decides which of the two restart notices the student gets, so a promise is never printed
+# that the registry cannot keep.
+psresume="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSRESUME=\(.*\)"$/\1/p')"
+assert_ne       "windows:the-resume-write-was-readable" "" "$psresume"
+assert_contains "windows:the-resume-write-reads-itself-back" 'Get-ItemProperty' "$psresume"
+# THE VALUE TRAVELS IN THE ENVIRONMENT AND IS NEVER INTERPOLATED. A student's path can hold a
+# quote, an apostrophe, an ampersand or a percent sign, and every one of those breaks a PowerShell
+# string built by cmd's expander. $env: is read by PowerShell itself, after cmd has finished
+# parsing, so none of them can reach the parser. Same idiom %PSELEV% and %PROBE% already use.
+assert_contains     "windows:the-resume-write-reads-the-value-from-the-environment" \
+                    '$env:RESUMECMD' "$psresume"
+assert_not_contains "windows:the-resume-write-interpolates-no-path" '%RESUMECMD%' "$psresume"
+
+# TWO NOTICES, AND THE PROMISE IS THE DIFFERENCE. One says setup will reopen by itself; the other
+# is the wording this file has always had. Which one prints follows the read-back above, so the
+# file never tells a student to wait for something that was not armed.
+assert_eq "windows:a-failed-registration-has-somewhere-to-go" "1" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'goto restartmanual')"
+
+# ─── waiting for the network, which is the cost of resuming at logon ─────────
+#
+# A RunOnce entry fires EARLY -- earlier than the Startup group, which Windows is documented as
+# deliberately delaying -- and the next thing on this road downloads about 600 MB. A laptop whose
+# Wi-Fi has not associated yet would fail into :distrofailed, which guesses at a WSL version, and
+# printing a wrong cause over a correct one is issue #112 exactly. So the create waits.
+#
+# THE LOOP IS INSIDE POWERSHELL, NOT IN BATCH, and that is the subset rather than a preference: a
+# retry loop in batch needs a backward `goto`, which this file has never contained. One process
+# instead of twenty-four, and nothing new for cmdlint to reason about.
+netwait="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSNETWAIT=\(.*\)"$/\1/p')"
+assert_ne "windows:the-network-wait-was-readable" "" "$netwait"
+# IT IS BOUNDED BY ELAPSED TIME AND NOT BY A COUNT OF ATTEMPTS. Twenty-four attempts with a
+# five-second connect timeout is four minutes of wall clock, not the two the student was told.
+assert_contains "windows:the-network-wait-is-bounded"         'AddSeconds' "$netwait"
+assert_contains "windows:the-network-wait-measures-the-clock" 'Get-Date'   "$netwait"
+# ...AND IT ALWAYS LOOKS TWICE, WHICH THE DEADLINE ALONE DOES NOT GIVE. A first attempt that hangs
+# -- DNS with no resolver yet, a half-associated link, a stalled lookup outliving -TimeoutSec --
+# can spend the whole budget by itself, and a bare deadline test would then make this a one-shot
+# wearing a loop's clothes. The single thing a wait like this exists to catch is a network that
+# comes up a moment later, so the attempt floor is conjoined with the deadline and checked after
+# the attempt. An `-or` here instead of an `-and` restores the defect and changes nothing visible.
+assert_contains "windows:the-network-wait-always-looks-twice" '-ge 2 -and' "$netwait"
+# IT ASKS THE HOST IT ACTUALLY NEEDS, over HTTPS. Not ping: campus networks drop ICMP routinely,
+# and a resolved name with a dropped echo is ambiguous in the direction that refuses a working
+# machine. A real request also fails a captive portal, which is the case a reachability bit cannot
+# see. Not a machine property either -- Win32 has several, and each is the proxy-with-a-blind-spot
+# shape #112 and #114 were both about.
+assert_contains     "windows:the-network-wait-makes-a-real-request" 'Invoke-WebRequest' "$netwait"
+assert_not_contains "windows:the-network-wait-does-not-ping"        'ping' "$netwait"
+# ...AND IT ASKS FOR THE URL THE FILE ALREADY NAMES, out of the environment. An empty -Uri throws,
+# the throw is caught, and the loop then runs its full two minutes before refusing a machine whose
+# network is fine -- a silent misconfiguration with a confident message at the end of it. The
+# variable is the one thing here that could go empty without anything else changing.
+assert_contains "windows:the-network-wait-asks-for-the-installer-url" '$env:INSTALLER_URL' "$netwait"
+# AND IT WAITS BEFORE THE DOWNLOAD RATHER THAN BEFORE THE RUN. Asked on the create road only, so a
+# student whose environment already exists pays nothing, and asked ahead of `wsl --update`, which
+# is the first call on that road that needs a network at all.
+netwait_ln="$(ln_of 'Command "%PSNETWAIT%"')"
+update_ln="$(ln_of '^"%SYS32%.wsl\.exe" --update$')"
+assert_eq "windows:the-network-wait-boundary-was-found" "3" \
+          "$(printf '%s\n' "$netwait_ln" "$makedistro_ln" "$update_ln" | grep -c .)"
+assert_eq "windows:the-network-wait-precedes-the-download" "sorted" \
+          "$(printf '%s\n' "$makedistro_ln" "$netwait_ln" "$update_ln" \
+             | { sort -nc 2>/dev/null && echo sorted || echo unsorted; })"
+assert_eq "windows:a-missing-network-has-somewhere-to-go" "1" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'goto nonetwork')"
+
+# ─── ...AND FOUR OF THOSE RULES CAN GO RED, demonstrated rather than trusted ──
+#
+# Each guards a decision that was never once coded wrong, so a typo in the pattern would be
+# indistinguishable from a clean file -- the same "a gate that cannot go red is an assertion only
+# in appearance" the bcdedit rule above is demonstrated for. These are the four spellings a reader
+# would actually reach for, and each is checked against the rule's own pattern rather than against
+# a copy of it typed here.
+assert_ne "windows:the-sticky-mutation-is-caught" "" \
+          "$(printf '!%s\n' "$resumename" | grep '^!' || true)"
+assert_ne "windows:the-machine-wide-mutation-is-caught" "" \
+          "$(printf '%s\n' "$runonce_cmds" | sed 's/HKCU:/HKLM:/' | grep 'HKLM' || true)"
+assert_eq "windows:the-attempt-floor-mutation-is-caught" "" \
+          "$(printf '%s\n' "$netwait" | sed 's/-ge 2 -and/-ge 2 -or/' | grep -- '-ge 2 -and' || true)"
+assert_eq "windows:the-deadline-mutation-is-caught" "" \
+          "$(printf '%s\n' "$netwait" | sed 's/AddSeconds/AddMinutes/' | grep 'AddSeconds' || true)"
 # ─── the current-directory hole, and the three lines that close it (issue #125) ───
 #
 # install-cs193v-windows.cmd's working directory is the folder the student downloaded it into,
@@ -3014,8 +3201,25 @@ assert_contains "windows:the-delete-also-reads-the-app-list" '%LNKDIR%\%DISTRO%.
 # directory named for the distribution in the app list -- the detail that made #270's wrong
 # guess look right -- and a student may have put something in it since. So the file gets exactly
 # one deletion, of the .lnk the loop is holding, and no way to descend into anything.
+#
+# COUNTED WITH A WORD BOUNDARY, WHICH #275 MADE NECESSARY. `Remove-Item` is a strict PREFIX of
+# `Remove-ItemProperty`, and the resume entry is cleared with the latter -- so a bare substring
+# count read the registry clear as a second FILE deletion and this rule went red on a change that
+# deletes no files at all. The two are different operations on different things, and the boundary
+# is what says so: `m` to `P` is not a word boundary, so Remove-ItemProperty cannot match here.
+# The same collision, one layer down, is why fake-powershell.c must dispatch RunOnce first.
 assert_eq "windows:deletes-in-exactly-one-place" "1" \
-          "$(printf '%s\n' "$WCMD" | grep -c 'Remove-Item')"
+          "$(printf '%s\n' "$WCMD" | grep -cE 'Remove-Item\b')"
+# ...AND THE REGISTRY CLEAR IS THE OTHER ONE, counted on its own so that neither can quietly
+# become the other. One value, removed from the running account's own hive.
+#
+# COUNTED OVER THE COMMANDS AND NOT THE RAW FILE, which this rule was caught by within the hour
+# of being written -- the third time this suite has made the mistake, after the bcdedit rule and
+# the bcdedit assertion. The .cmd's waiver comment at :havewsl NAMES Remove-ItemProperty in order
+# to record what it exits with, so a grep over the file counts the explanation as a second call.
+# _cmdlint_commands drops comments and keeps the real line number.
+assert_eq "windows:removes-exactly-one-registry-value" "1" \
+          "$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /Remove-ItemProperty/ { n++ } END { print n + 0 }')"
 assert_contains     "windows:the-delete-removes-the-path-it-tested" 'Remove-Item -LiteralPath $p' "$del_ps"
 assert_not_contains "windows:removes-nothing-recursively"           '-Recurse'                    "$WCMD"
 

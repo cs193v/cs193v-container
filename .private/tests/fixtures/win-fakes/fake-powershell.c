@@ -160,6 +160,103 @@ int main(int argc, char **argv) {
     const char *distro = getenv("CS193V_FAKE_DISTRO");
     if (!distro) distro = "CS193V";
 
+    /* ─── THE ENTRY THAT RESUMES SETUP AFTER THE RESTART  (#275) ──────────────
+     *
+     * DISPATCHED FIRST, AND THAT IS A CORRECTNESS REQUIREMENT RATHER THAN A PREFERENCE.
+     * `Remove-ItemProperty` CONTAINS `Remove-Item`, which the Start Menu delete arm at the bottom
+     * of this file dispatches on -- so a clear that reached that arm would be read as a shortcut
+     * delete. It would find no .lnk literal and return 120, which a case would read as a failed
+     * clear; and a future clear that happened to carry a path would have that shortcut REMOVED.
+     * The arms below already state the rule twice ("two commands sharing a substring must be
+     * dispatched on the one that distinguishes them"); this is the third instance and the only
+     * one where the shared text is a strict prefix of the other command's marker, which is the
+     * case no amount of care at the other end catches.
+     *
+     * THE STORE IS A FILE AND NOT A KNOB, for the reason fake-wsl.c keeps `wsl.list` in one: the
+     * .cmd writes this value, reads it back, and clears it, and those three have to agree with
+     * each other rather than with three separate arrangements a case typed out.
+     *
+     * AND THE VALUE IS READ OUT OF THE ENVIRONMENT, NOT COMPOSED HERE. %RESUMECMD% is built in
+     * batch and handed over as $env:RESUMECMD precisely so this fake can record what the
+     * installer DECIDED. A fake that assembled the expected command line itself, out of
+     * %SystemRoot% and the script path, would agree with the installer's reasoning and could
+     * therefore never contradict it -- which is exactly how #270 survived a release.
+     *
+     * WHAT IT DOES NOT MODEL: the read-back inside %PSRESUME% is not replayed. On a real machine
+     * a write that did not take is indistinguishable here from one that did, so the fake models
+     * the OUTCOME -- `ps.runonce.rc` non-zero means the value is not there afterwards, and the
+     * store is left absent so the machine cannot contradict itself. That the .cmd reads its own
+     * write back at all is asserted in 25-installer.sh, as text. */
+    if (mentions(argc, argv, "RunOnce")) {
+        char store[1024];
+        fake_path(store, sizeof store, "runonce");
+        if (mentions(argc, argv, "Remove-ItemProperty")) {
+            char raw[64];
+            /* THE FORCED CODE IS CONSULTED BEFORE THE REMOVAL, the same way the write arm below
+             * consults it before writing. A case arranging "the registry refused this" has to get
+             * a prefix where the value is STILL THERE, not one where it is gone and the .cmd was
+             * told otherwise -- the machine a case arranges must not contradict itself, which is
+             * the rule the two probes at the top of this file were given shared state for.
+             * Read by PRESENCE and not by sign, which is #278, and the blanket ps.rc still wins.
+             *
+             * A CLEAR THAT FOUND NOTHING EXITS NON-ZERO, AND THAT IS A MEASUREMENT RATHER THAN A
+             * GUESS. Measured on Windows PowerShell 5.1.26100.9444 on 2026-09-16:
+             * `Remove-ItemProperty -ErrorAction SilentlyContinue` on a value that is not there
+             * exits 1 -- SilentlyContinue suppresses the MESSAGE, not the failure, and
+             * powershell.exe -Command reports it. Removing a value that IS there exits 0.
+             *
+             * WHICH MEANS THE ORDINARY RUN GETS A 1. :havewsl clears the entry on every run and
+             * almost every run has nothing to clear, so an honest fake returns the awkward code
+             * here rather than the tidy one. The .cmd waives that exit deliberately; if the
+             * waiver is ever removed, this arm is what turns the tier red on the common path,
+             * which is the point of modelling it. A fake returning 0 would have let that change
+             * look correct. */
+            if ((fake_knob("ps.rc", raw, sizeof raw) && raw[0]) ||
+                (fake_knob("ps.runonce.rc", raw, sizeof raw) && raw[0]))
+                return (int)strtol(raw, NULL, 10);
+            return remove(store) == 0 ? 0 : 1;
+        }
+        if (mentions(argc, argv, "Set-ItemProperty")) {
+            /* THE FORCED FAILURE IS DECIDED BEFORE THE WRITE, so a case arranging "the registry
+             * refused this" gets a prefix with no entry in it, and not one holding a value the
+             * .cmd was told it had failed to store. */
+            int rc = answer("ps.runonce.rc", 0);
+            if (rc != 0) return rc;
+            const char *v = getenv("RESUMECMD");
+            /* A write carrying nothing is a HARNESS failure and not an empty value. The .cmd
+             * passes the command line in the environment; an installer that stopped doing so
+             * would otherwise register an empty entry here and every assertion about the entry
+             * EXISTING would still pass. */
+            if (!v || !*v) {
+                fprintf(stderr, "win-fake: the resume write carried no RESUMECMD\n");
+                return 120;
+            }
+            FILE *f = fopen(store, "wb");
+            if (!f) {
+                fprintf(stderr, "win-fake: could not write %s\n", store);
+                return 1;
+            }
+            fputs(v, f); fputc('\n', f);
+            fclose(f);
+            return 0;
+        }
+        fprintf(stderr, "win-fake: unrecognised RunOnce operation: %s\n",
+                argc > 1 ? argv[argc-1] : "(no arguments)");
+        return 120;
+    }
+
+    /* ─── WAITING FOR A NETWORK BEFORE THE 600 MB DOWNLOAD  (#275) ─────────────
+     *
+     * ANSWERED INSTANTLY, AND THE LOOP IS THEREFORE EXERCISED BY NO TIER AT ALL. wine_run gives
+     * the container --network=none, and no case may pay two minutes of wall clock, so what this
+     * arm models is the .cmd's BRANCH on reachable-or-not and nothing whatever about the retry.
+     * The deadline, the attempt floor and the gap between tries are held by 25-installer.sh
+     * reading %PSNETWAIT% as text, and by a MANUAL.md row that pulls a real network mid-probe.
+     * Stated here because an arm that returns 0 in a microsecond looks like it tested the wait,
+     * and the next person to weaken the loop will look at this file first. */
+    if (mentions(argc, argv, "Invoke-WebRequest"))
+        return answer("ps.netwait.rc", fake_knob_int("net.reachable", 1) ? 0 : 1);
+
     /* DID WINDOWS BLAME VIRTUALISATION? The .cmd asks this only after a create or a `-d` call has
      * already failed, to choose between :novm and a refusal that names no cause. It answers from
      * the same wsl.status.novirt knob fake-wsl.c's --status arm prints from, so a case cannot
