@@ -117,10 +117,21 @@ run_say_done() {                      # run_say_done WINFLAG MACREADY WINREADY -
 # one. Asking say_done removes the second copy that could drift: the only thing forked here is
 # "does this platform make a bundle", which is install_mac_app's own gate, and Darwin is what
 # platform() keys its macos arm off.
-if [ "$(uname -s)" = Darwin ]; then FINISHED_KEY="$(run_say_done '' yes '')"
-else                               FINISHED_KEY="$(run_say_done '' '' '')"; fi
+#
+# AND THERE ARE TWO OF THEM, because there are two kinds of run below and the host decides
+# only one of them. FINISHED_KEY is for a run that takes THIS platform's arm -- install:,
+# choosedir:, check-disk: -- so it follows `uname -s`. The mac_run cases force Darwin with a
+# `uname` shim the installer sees and this shell does not, so they make a bundle on any host
+# and end with the macOS sign-off whatever the host is: asking `uname -s` for them read the
+# wrong machine, and all four went red on Linux while staying green on a Mac.
+FINISHED_KEY="$(run_say_done '' '' '')"
+MAC_FINISHED_KEY="$(run_say_done '' yes '')"
+if [ "$(uname -s)" = Darwin ]; then FINISHED_KEY="$MAC_FINISHED_KEY"; fi
 record "sign-off:the-key-a-clean-run-ends-with" "$FINISHED_KEY"
+record "sign-off:the-key-a-forced-macos-run-ends-with" "$MAC_FINISHED_KEY"
 assert_ne "sign-off:that-key-was-derivable" "" "$FINISHED_KEY"
+assert_ne "sign-off:the-macos-key-was-derivable" "" "$MAC_FINISHED_KEY"
+assert_ne "sign-off:the-two-keys-differ" "$FINISHED_KEY" "$MAC_FINISHED_KEY"
 
 
 # The cheapest tripwire for the whole class of accident installer_host exists to prevent.
@@ -816,7 +827,7 @@ assert_says_key "consent-yes:the-arrow-moved-the-selection" menu.consent.go "$ou
 # from the file and only the number is the assertion.
 assert_says_sub "consent-yes:the-resize-ran" step.machine-resize "$out" "$ICAT" WANT=8192
 assert_says_key "consent-yes:reports-the-resize" ok.machine-resized "$out" "$ICAT"
-assert_says_key "consent-yes:finishes"           "$FINISHED_KEY" "$out" "$ICAT"
+assert_says_key "consent-yes:finishes"           "$MAC_FINISHED_KEY" "$out" "$ICAT"
 # The far side of the branch, in argv rather than prose. setup_machine must STOP the machine
 # before setting memory -- podman refuses to change a running one -- and start it again.
 assert_says "consent-yes:stopped-before-setting" "machine stop"              "$(installer_log)"
@@ -1372,7 +1383,7 @@ assert_says_not "mac-resize:declining-touches-no-machine" 'machine set' "$(insta
 out="$(mac_run machine_list podman-machine-default machine_mem 16384)"
 assert_says_key "mac-ok:reasonable-size-is-left-alone" skip.vm-size "$out" "$ICAT"
 assert_says_not_key "mac-ok:does-not-offer-a-resize" need.vm-memory "$out" "$ICAT"
-assert_says_key "mac-ok:still-finishes" "$FINISHED_KEY" "$out" "$ICAT"
+assert_says_key "mac-ok:still-finishes" "$MAC_FINISHED_KEY" "$out" "$ICAT"
 
 # inspect returning nothing must land in the SAME arm, not in the resize one: an empty
 # value would make `[ "$vm_mb" -lt ... ]` an error, so the installer guards with -n first.
@@ -1397,13 +1408,13 @@ assert_says_not "mac-disk:no-set-when-there-is-nothing-to-do" 'machine set' "$(i
 # exceptional -- it must be a note and the install must go on.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk 32 machine_set_rc 1)"
 assert_says_key "mac-disk:a-refused-grow-is-not-fatal" note.grow-failed "$out" "$ICAT"
-assert_says_key "mac-disk:still-finishes-after-a-refused-grow" "$FINISHED_KEY" "$out" "$ICAT"
+assert_says_key "mac-disk:still-finishes-after-a-refused-grow" "$MAC_FINISHED_KEY" "$out" "$ICAT"
 
 # A non-numeric DiskSize is podman's output changing shape, and the installer's own comment
 # says the harmless direction is to stop growing rather than to guess.
 out="$(mac_run machine_list pmd machine_mem 16384 machine_disk bad)"
 assert_says_not_key "mac-disk:non-numeric-size-grows-nothing" note.growing-disk "$out" "$ICAT"
-assert_says_key "mac-disk:non-numeric-size-still-finishes" "$FINISHED_KEY" "$out" "$ICAT"
+assert_says_key "mac-disk:non-numeric-size-still-finishes" "$MAC_FINISHED_KEY" "$out" "$ICAT"
 
 # ─── survey does not reinstall a podman it cannot see  (issue #121) ────────────
 # The second bug #121 caused, and the one that costs a student real money: re-running this
