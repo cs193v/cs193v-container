@@ -947,7 +947,10 @@ itself is what you changed.
 
 ---
 **1.8 — Windows: the whole install, with nothing to type (#217).** On a machine with no CS193V
-environment, right-click `install-cs193v-windows.cmd` → Run as administrator, and answer nothing.
+environment, run `install-cs193v-windows.cmd` **as yourself — not as an administrator** — and
+answer nothing. If WSL is not installed yet, expect **one** UAC prompt part-way through, for the
+step that turns WSL on, then a restart and a second run; if WSL is already there, expect no prompt
+at all. Running it elevated is now **refused**, so that is a separate check — §1.9.
 *Expect:* no username prompt, no password prompt, no telemetry question, and no Linux shell to
 `exit` from. One question only — where to put the course files — from the installer proper. Then
 the success box, naming `\\wsl.localhost\CS193V\home\student\cs193v\projects` with no
@@ -972,8 +975,17 @@ measured, and it is why the root pass runs `loginctl enable-linger`. No containe
 mode of getting that wrong is silent — a second `systemd=true` in `/etc/wsl.conf`, or a second id
 range. Run the installer twice and diff both files.
 
-**1.9 — Windows: the three refusals a student can reach (#217).** Each of these is a `wsl` command
-you can put the machine into, and none should ever produce the success box.
+**1.9 — Windows: the refusals a student can reach (#217).** Each of these is a state you can put
+the machine into, and none should ever produce the success box.
+*Run as an administrator* (right-click → Run as administrator, or launch it from an elevated
+terminal): *expect* an immediate refusal saying not to, explaining that what setup installs belongs
+to one Windows account, and telling them to start it again the ordinary way — and **nothing
+touched**: no `wsl.exe` called, no environment created, no Start Menu entry written. This is the
+defect's own case: requiring elevation is what installed the course into a different account.
+*Permission declined* — on a machine with no WSL, click **No** on the UAC prompt: *expect* a
+refusal that says permission was not given and that nothing has been changed, that tells them to
+run it again and choose Yes, and that does **not** blame the WSL feature or promise a restart will
+help. A declined prompt is a person saying no, not a broken computer.
 *Distro exists, no account:* interrupt an install between `--install` and the account, then re-run.
 *Expect:* it resumes and finishes — this is the state the two-pass design exists to be able to
 resume, and the file's own header promises re-running is safe.

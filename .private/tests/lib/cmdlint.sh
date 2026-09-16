@@ -190,12 +190,20 @@ cmdlint_unchecked_calls() {           # cmdlint_unchecked_calls FILE -> violatio
 
 # EVERY EXTERNAL PROGRAM MUST CARRY ITS OWN PATH, and this is issue #125.
 #
-# install-cs193v-windows.cmd runs elevated -- its own instructions are "right-click and Run as
-# administrator" -- so its working directory is the folder the student downloaded it into, normally
-# Downloads. cmd.exe resolves an unqualified program name against the CURRENT DIRECTORY BEFORE
-# %PATH%, so a wsl.exe, reg.exe or powershell.exe already sitting in that folder is what runs, with
-# Administrator rights. Downloads is the likeliest place on the machine for an untrusted file to
-# already be, and wsl.exe had twelve call sites including the handoff to stage two.
+# install-cs193v-windows.cmd's working directory is the folder the student downloaded it into,
+# normally Downloads. cmd.exe resolves an unqualified program name against the CURRENT DIRECTORY
+# BEFORE %PATH%, so a wsl.exe, reg.exe or powershell.exe already sitting in that folder is what
+# runs. Downloads is the likeliest place on the machine for an untrusted file to already be, and
+# wsl.exe had twelve call sites including the handoff to stage two.
+#
+# "ELEVATED" USED TO BE PART OF THIS SENTENCE, AND THE RULE IS NOT WEAKER WITHOUT IT. The file's
+# instructions were "right-click and Run as administrator", so a planted program ran with
+# Administrator rights; it now refuses an elevated run, so one would run as the student instead.
+# That lowers the CONSEQUENCE and changes nothing about the hole: it is still the student's whole
+# account, still their WSL environment, and still the handoff that fetches and executes stage two.
+# The elevated case also still exists -- :installwsl asks for permission and the child it starts
+# runs `cmd /c` with two program names in it -- which is exactly why those are spelled with full
+# paths. Anyone tempted to relax this rule because "it is not elevated any more" should start there.
 #
 # MEASURED on Windows 11 26200: a copy of csc.exe in the working directory ran in preference to the
 # one %PATH% would have found. That needs NoDefaultCurrentDirectoryInExePath UNSET, which is the
@@ -236,6 +244,16 @@ cmdlint_unqualified_programs() {      # cmdlint_unqualified_programs FILE -> vio
         while (match(s, /[A-Za-z_][A-Za-z0-9_.+-]*\.[Ee][Xx][Ee]/)) {
             tok = substr(s, RSTART, RLENGTH)
             pre = substr(s, 1, RSTART - 1)
+            post = substr(s, RSTART + RLENGTH, 1)
+            # `.exe` HAS TO END THE TOKEN, and this is a FIX rather than a refinement. The match
+            # carries no trailing boundary -- POSIX ERE here has no lookahead -- so the pattern
+            # stops at the first `.exe` it can reach and reports whatever it has so far. Measured:
+            # the PowerShell property `$p.ExecutablePath` was reported as an unqualified program
+            # called `p.Exe`, a name that is not in the file and cannot be qualified. Any
+            # identifier with `.exe` as the prefix of a longer word does the same -- `.Executable`,
+            # `.exec` -- so the rule refused a construct it has no business seeing. Latent until
+            # something needed such a property, which is why nothing caught it sooner.
+            if (post ~ /[A-Za-z0-9_]/) { s = substr(s, RSTART + RLENGTH); continue }
             # The command own program is half one report; saying it twice would make a
             # single unqualified call look like two separate ones.
             if (pre ~ /^[ \t]*@?"?$/) { s = substr(s, RSTART + RLENGTH); continue }

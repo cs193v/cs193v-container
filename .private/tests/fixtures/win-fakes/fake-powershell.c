@@ -116,11 +116,23 @@ static int lnk_literals(int argc, char **argv, char lits[][512]) {
 /* -1 is not a plausible answer to a yes/no question, so it doubles as "unset" for every rc knob.
  * `forced` is consulted before the answer is computed, and the GLOBAL knob wins: a machine with
  * no powershell cannot answer one question and fail another. */
+/* PRESENCE DECIDES WHETHER A KNOB IS SET, NOT THE SIGN OF ITS VALUE, and that is a fix rather than
+ * a preference. This used to read `fake_knob_int(rcknob, -1)` and act on `forced >= 0`, which made
+ * -1 the sentinel for "absent" -- so `ps.elev.rc -1` was indistinguishable from never setting it.
+ * fake-wsl.c's answer() has always disagreed: it takes `fake_knob_int(rcknob, dfltrc)` straight, so
+ * `wsl.status.rc -1` is honoured, and -1 is the DOCUMENTED value there because it is what wsl.exe
+ * really returns. One convention, two behaviours, no warning at either site.
+ *
+ * MEASURED THE HARD WAY while adding win-elevfailed: the case set `ps.elev.rc -1` to arrange a
+ * failing elevation, the fake answered 0, and the installer printed the restart notice -- a case
+ * that looked like it arranged a failure and arranged nothing, and would have gone green saying so.
+ * Reading the knob's PRESENCE removes the sentinel altogether, so a negative code now means what it
+ * says and the two fakes agree. Checked before changing it: every ps.* knob in the suite is set to
+ * a non-negative value, so nothing depended on the old reading. */
 static int answer(const char *rcknob, int value) {
-    long forced = fake_knob_int("ps.rc", -1);
-    if (forced >= 0) return (int)forced;
-    forced = fake_knob_int(rcknob, -1);
-    if (forced >= 0) return (int)forced;
+    char raw[64];
+    if (fake_knob("ps.rc", raw, sizeof raw) && raw[0]) return (int)strtol(raw, NULL, 10);
+    if (fake_knob(rcknob, raw, sizeof raw) && raw[0]) return (int)strtol(raw, NULL, 10);
     return value;
 }
 
@@ -159,6 +171,51 @@ int main(int argc, char **argv) {
      * needle must be dispatched on the needle. */
     if (mentions(argc, argv, "aka.ms/enablevirtualization"))
         return answer("ps.vmfail.rc", fake_knob_int("wsl.status.novirt", 0) ? 0 : 1);
+
+    /* ASKING WINDOWS FOR PERMISSION TO TURN WSL ON. The .cmd reaches this only when WSL is
+     * absent, and it is the single elevation request in the file -- one child running
+     * `wsl --update & wsl --install --no-distribution`, whose exit code is the only thing that
+     * comes back. See install-cs193v-windows.cmd's %PSELEV% for why no output can.
+     *
+     * DISPATCHED ON Start-Process, which no other command here uses. It shares `--no-distribution`
+     * with nothing and `WSL_UTF8` with nothing, but it is tested BEFORE the distro probe anyway,
+     * for the reason the two arms above state: order is how this file stays honest about which
+     * command it is answering, and a needle added to %PSELEV% later must not silently land on a
+     * probe that happens to match.
+     *
+     * WHAT THIS CANNOT MODEL, AND IT IS THE TIER'S LIMIT HERE. The child never runs: under wine
+     * there is no elevation and no AppInfo service, so the two wsl.exe calls inside it are never
+     * made and never logged. So a case can drive what the .cmd DOES with each answer -- carry on,
+     * refuse a declined prompt, refuse a failure -- and cannot see what the child did. That the
+     * child carries BOTH commands, and joins them with `&` rather than `&&`, is asserted
+     * statically in 25-installer.sh instead (windows:the-child-updates-wsl and its siblings).
+     * A fake that re-implemented the child's two calls would be this file agreeing with the
+     * installer's own reasoning, which is what let #270 survive a release.
+     *
+     * THREE ANSWERS, MATCHING THE .cmd's CONTRACT. 0 the child ran and succeeded; 101 the prompt
+     * was declined, which is a person and not a broken machine; anything else a failure. 101 is
+     * its own knob rather than a value of ps.elev.rc, so a case reads as the machine it is
+     * arranging -- `wine_knob win.uac-declined 1` -- and not as a number. */
+    if (mentions(argc, argv, "Start-Process")) {
+        /* CAN THE CHILD'S PROGRAM EVEN RUN? This is the one thing about the child the fake CAN
+         * know, and it has to answer it or the fixture contradicts the machine: with
+         * system32\wsl.exe deleted -- harness.no-wsl-exe, which is a real deletion in the prefix
+         * and not a knob -- cmd.exe would fail to start the program and return non-zero, so the
+         * .cmd must reach :wslfeaturefailed. Answering 0 from a knob regardless would have this
+         * file telling a student to restart a machine whose wsl.exe is gone, which Microsoft
+         * treats as unrepairable short of an in-place upgrade.
+         *
+         * CHECKED ON DISK RATHER THAN BY READING THE MARKER the harness writes: the marker is
+         * harness bookkeeping, the binary is the fact. */
+        char wslexe[1024];
+        const char *root = getenv("SystemRoot");
+        FILE *probe;
+        snprintf(wslexe, sizeof wslexe, "%s\\system32\\wsl.exe", root ? root : "C:\\windows");
+        if (!(probe = fopen(wslexe, "rb")))
+            return answer("ps.elev.rc", 102);
+        fclose(probe);
+        return answer("ps.elev.rc", fake_knob_int("win.uac-declined", 0) ? 101 : 0);
+    }
 
     /* Does the CS193V distro exist? WSL_UTF8 is the marker because batch cannot read wsl.exe's
      * UTF-16, which is the whole reason this probe goes through PowerShell at all. */

@@ -1989,6 +1989,10 @@ assert_eq "installer:sentinel-appears-once" "1" \
 # Every rule derives its work list by PARSING the file, so a call site or message added later is
 # covered the day it lands rather than when someone remembers to extend a list.
 W=$PRIVATE/install-cs193v-windows.cmd
+# The whole file with \r stripped, read once here rather than at each block that wants it. It used
+# to be read halfway down, which silently made it the empty string for anything above that point:
+# every extraction from it matched nothing and every assert_not_contains against "" passed.
+WCMD="$(sed 's/\r$//' "$W")"
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
 # ─── stage one fetches stage two, and the contract that makes that safe ────────
 #
@@ -2271,13 +2275,148 @@ assert_eq "windows:never-enables-delayed-expansion" "" \
           "$(_cmdlint_commands "$W" \
              | awk -F'\t' 'tolower($4) ~ /enabledelayedexpansion|\/v:on/ { print "line " $2 ": " $4 }')"
 
+# ─── elevation is a fact to record, not a door to pass ────────────────────────
+#
+# THE DEFECT THIS BLOCK EXISTS FOR, because none of it is visible in the file afterwards. This
+# .cmd used to refuse every run that was not elevated, and then do ALL of its per-user work under
+# whatever token the elevation produced. A standard user cannot be elevated as themselves: UAC
+# asks for a DIFFERENT administrator's credentials and the process then runs as THAT account, so
+# %APPDATA%, %LOCALAPPDATA% and HKCU all name the admin's profile and nothing says so.
+#
+# Measured on Windows 11 26200 on 2026-09-15, from a standard account authorised with a separate
+# admin's password: %PROBE% found the ADMIN's CS193V and skipped creation, stage two provisioned
+# the ADMIN's environment, the shortcut and icon were written into the ADMIN's profile, %PSDEL%
+# deleted the ADMIN's `wsl --install` entry, and the run exited 0 telling the student to open the
+# entry from their own Start Menu. The student's account got nothing -- not the shortcut, not the
+# environment. :shortcutfailed cannot fire for this: nothing failed, the writes simply landed in
+# another profile.
+#
+# WSL REGISTERS DISTRIBUTIONS PER-USER, AND THERE IS NO MACHINE-WIDE REGISTRATION. Measured on the
+# same machine: HKLM's Lxss key holds only MSI, Plugins and DiskMounts, while every distribution
+# is a subkey of HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss with its VHD under that
+# user's %LOCALAPPDATA%\wsl. So `wsl -l -q` answers for the account the process is RUNNING AS and
+# cannot be made to answer for anyone else.
+#
+# WHICH IS WHY ONLY THE WSL-FEATURE ARM MAY DEMAND ELEVATION. Measured un-elevated on the same
+# machine: `wsl --install -d Ubuntu-26.04 --name CS193VMEAS --no-launch` exits 0, writes exactly
+# one HKCU subkey and one %LOCALAPPDATA%\wsl directory, and leaves HKLM byte-identical.
+# Un-elevated `wsl --update` exits 0 in one second with "already installed" and raises no UAC
+# dialog. So nothing from :havewsl onward needs an administrator, and all of it is per-user.
+
+# AN ELEVATED RUN IS REFUSED OUTRIGHT, which is the reversal: this file used to REQUIRE elevation.
+# The reg.exe probe itself is unchanged -- see the .cmd for why it reads HKU\S-1-5-19 and not
+# `net session` -- but the sense of the branch is inverted, and the branch is the assertion.
+#
+# WHY OUTRIGHT AND NOT A COMPARISON OF IDENTITIES. An earlier fix asked whether the elevating
+# account was the student's own, by comparing the token's SID against the owner of the Explorer in
+# its session, and carried on when they matched. That works and is strictly more machinery for a
+# state that should not exist: if WSL is already installed, elevation is simply wrong, and if it is
+# not, the one step that needs an administrator asks for permission itself. So there is no run for
+# which elevation is correct, nothing has to be established about it, and the refusal needs no WMI,
+# cannot be wrong about RDP or a domain-joined machine, and has nothing to fail open.
+reg_ln="$(ln_of 'reg\.exe" query')"
+assert_ne "windows:the-elevation-probe-was-found" "" "$reg_ln"
+assert_match "windows:an-elevated-run-is-refused" \
+             '^if %errorlevel% equ 0 goto isadmin$' \
+             "$(printf '%s\n' "$WCMD" | sed -n "$((reg_ln + 1))p")"
+# AND THE REFUSAL IS UNCONDITIONAL. A second test on the same code, or a `%ELEVATED%`-style
+# variable that some later arm consults, is how this becomes a conditional again -- and a
+# conditional is exactly what was removed. Neither can be seen by running the file.
+assert_not_match "windows:the-refusal-is-not-conditional" \
+                 '^if %errorlevel%' \
+                 "$(printf '%s\n' "$WCMD" | sed -n "$((reg_ln + 2))p")"
+assert_eq "windows:elevation-is-asked-about-in-one-place" "1" \
+          "$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /S-1-5-19/ { n++ } END { print n + 0 }')"
+# IT REFUSES BEFORE IT LOOKS AT ANYTHING, so a run that is about to be refused has not read the
+# student's environment list, has not launched wsl.exe and has printed nothing reassuring. The same
+# standard root:refuses-before-it-looks holds install-cs193v.sh to.
+first_wsl_ln="$(ln_of '%SYS32%\\wsl\.exe')"
+assert_ne "windows:the-first-wsl-call-was-found" "" "$first_wsl_ln"
+assert_ok "windows:the-refusal-precedes-every-per-user-read" \
+          sh -c "test $reg_ln -lt $first_wsl_ln"
+
+# IT ASKS FOR ELEVATION RATHER THAN DEMANDING IT UP FRONT, and exactly once. The file used to
+# refuse every un-elevated run and tell the student to start again as an administrator -- which a
+# standard user can only do by borrowing another account, which is the defect above. So there is
+# one elevation request in the file, it is a UAC prompt raised mid-run, and it covers only the
+# step that changes Windows itself.
+#
+# COUNTED OVER THE COMMANDS AND NOT THE RAW FILE, which this suite has already been caught by
+# twice: the comment above NAMES the construct in order to explain it, so a plain grep counts the
+# explanation as a second request. _cmdlint_commands drops comments and keeps the real line number.
+assert_eq "windows:asks-for-elevation-exactly-once" "1" \
+          "$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /Verb RunAs/ { n++ } END { print n + 0 }')"
+# AND IT NEVER SENDS AN UN-ELEVATED STUDENT AWAY TO COME BACK ELEVATED. This is the instruction
+# that produced the cross-account installs, so its absence is asserted rather than assumed.
+assert_eq "windows:never-sends-a-student-away-to-re-run-elevated" "0" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'goto needadmin')"
+
+# THE ELEVATED CHILD RUNS ONE PROGRAM LIST AND WAITS FOR IT. -Wait and -PassThru are the only way
+# the parent learns anything: -Verb RunAs is in Start-Process's UseShellExecute parameter set,
+# which has no -NoNewWindow and no -RedirectStandard*, so the child's OUTPUT cannot come back at
+# all -- the elevated process is created by the AppInfo service, not by us, so nothing is
+# inherited across the boundary. Without -Wait the restart notice would print while the install
+# was still running.
+elev_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSELEV=\(.*\)"$/\1/p')"
+assert_ne       "windows:the-elevation-request-was-readable" "" "$elev_ps"
+assert_contains "windows:the-elevation-request-waits-for-the-child"   '-Wait'     "$elev_ps"
+assert_contains "windows:the-elevation-request-reads-the-exit-code"   '-PassThru' "$elev_ps"
+# ONE CHILD, THEREFORE ONE PROMPT. Windows never coalesces consecutive elevation requests, so two
+# Start-Process calls would be two prompts for one logical step.
+assert_eq "windows:one-child-carries-both-machine-wide-commands" "1" \
+          "$(printf '%s\n' "$elev_ps" | grep -c 'Start-Process')"
+# ...AND IT CARRIES BOTH OF THEM. Found by hand: deleting `--update` from the child's argument
+# string reddened nothing, because counting Start-Process says how many prompts there are and
+# nothing said what the single child actually does. Both commands are named, and `&` rather than
+# `&&` is asserted too -- with `&&` a non-zero `--update`, which is explicitly tolerated
+# elsewhere in this file, would skip the install that matters and still look like one step.
+assert_contains "windows:the-child-updates-wsl"          ' --update &' "$elev_ps"
+assert_contains "windows:the-child-turns-the-feature-on" ' --install --no-distribution' "$elev_ps"
+assert_not_contains "windows:the-install-does-not-hang-on-the-update" '--update &&' "$elev_ps"
+# A DECLINED PROMPT IS A PERSON SAYING NO, not a broken computer, and it gets its own answer.
+# Start-Process THROWS on refused consent, so without the catch it would be indistinguishable
+# from the install failing.
+assert_contains "windows:a-declined-prompt-is-told-apart" 'catch { exit 101 }' "$elev_ps"
+assert_eq "windows:a-declined-prompt-has-somewhere-to-go" "1" \
+          "$(printf '%s\n' "$WCMD" | grep -c 'goto uacdeclined')"
+
+# THE PROMPT COMES BEFORE ANY MACHINE-WIDE CHANGE AND AFTER NOTHING PER-USER, which is the ordering
+# that makes ":isadmin refuses everything elevated" survivable: the only elevated code in the
+# picture is the child, and it runs before the per-user road is taken at all.
+elev_ln="$(ln_of 'Command "%PSELEV%"')"
+havewsl_ln="$(ln_of '^:havewsl')"
+probe_ln="$(ln_of 'Command "%PROBE%"')"
+smdir_ln="$(ln_of 'set "SMDIR=')"
+assert_eq "windows:the-elevation-boundary-was-found" "4" \
+          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdir_ln" | grep -c .)"
+assert_eq "windows:the-prompt-precedes-every-per-user-step" "sorted" \
+          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdir_ln" \
+             | { sort -nc 2>/dev/null && echo sorted || echo unsorted; })"
+
+# THE ELEVATED ARM WRITES NOTHING PER-USER, which is what makes an over-the-shoulder elevation
+# harmless rather than destructive: it enables a Windows feature, says to restart, and stops.
+# Derived by parsing the span rather than from a list typed here, so a per-user call added to that
+# arm later fails on the day it lands.
+assert_eq "windows:the-elevated-arm-touches-nothing-per-user" "" \
+          "$(printf '%s\n' "$WCMD" \
+             | awk '/^:installwsl$/ { inarm = 1 }
+                    inarm && /^exit \/b 0$/ { inarm = 0; next }
+                    inarm && /%APPDATA%|%LOCALAPPDATA%|%PROBE%|-l -q|--install -d|-d %DISTRO%|CreateShortcut|Remove-Item|%STAGE2%/ \
+                        { print "line " NR ": " $0 }')"
+
 # ─── the current-directory hole, and the three lines that close it (issue #125) ───
 #
-# install-cs193v-windows.cmd runs elevated -- its own instructions are "right-click and Run as
-# administrator" -- so its working directory is the folder the student downloaded it into, normally
-# Downloads. cmd.exe resolves an unqualified program name against THAT DIRECTORY BEFORE %PATH%, so
-# a bare `wsl.exe` ran whatever copy was sitting there, with Administrator rights. Twelve call
-# sites, one of them the handoff to stage two. lib/cmdlint.sh's own header carries the measurement.
+# install-cs193v-windows.cmd's working directory is the folder the student downloaded it into,
+# normally Downloads. cmd.exe resolves an unqualified program name against THAT DIRECTORY BEFORE
+# %PATH%, so a bare `wsl.exe` ran whatever copy was sitting there. Twelve call sites, one of them
+# the handoff to stage two. lib/cmdlint.sh's own header carries the measurement.
+#
+# THE FILE NO LONGER RUNS ELEVATED, AND THESE ASSERTIONS ARE NOT WEAKER FOR IT. Its instructions
+# used to be "right-click and Run as administrator", so a planted program ran with Administrator
+# rights; it now refuses an elevated run, so one would run as the student. The consequence is
+# smaller and the hole is identical -- the student's account, their environment, and the fetch that
+# executes stage two. And an elevated path still exists: :installwsl asks for permission and starts
+# `cmd /c` with two program names in it. Full paths are what carry the property in both.
 #
 # QUALIFYING THE CALLS IS THE FIX; the other two lines are ADDITIVE. That distinction is the whole
 # reason each gets its own keeper. The environment variable protects only what FOLLOWS it and is
@@ -2347,6 +2486,21 @@ for route in 'wsl.exe --status' \
     { sed 's/\r$//' "$W"; printf '%s\n' "$route"; } | sed 's/$/\r/' > "$violating"
     assert_ne "windows:the-qualification-rule-catches-[$route]" "" \
               "$(run_checker cmdlint_unqualified_programs "$violating")"
+done
+
+# AND THE OTHER DIRECTION, which this loop had no case for and which cost a false refusal. The
+# rule matches `<word>.exe` with no trailing boundary, because the awk here has no lookahead -- so
+# it stopped at the first `.exe` it could reach and reported a prefix of a longer identifier.
+# Measured: `$p.ExecutablePath` in %SAMEUSER% was reported as an unqualified program named
+# `p.Exe`, which is not a name in the file and cannot be qualified by anyone. A rule that refuses
+# a legitimate construct is as broken as one that misses a violation, and only the missing half
+# had a keeper -- so both spellings are pinned now, and the first one here is the regression.
+for benign in '$p.ExecutablePath -eq $x' \
+              '$q.Executable + $r.exec'; do
+    clean="$TMP/unqualified-benign.cmd"
+    { sed 's/\r$//' "$W"; printf 'set "BENIGN=%s"\n' "$benign"; } | sed 's/$/\r/' > "$clean"
+    assert_eq "windows:the-qualification-rule-allows-[$benign]" "" \
+              "$(run_checker cmdlint_unqualified_programs "$clean")"
 done
 
 # ─── the macOS entry point: a prebuilt applet  (#134) ──────────────────────────
@@ -2734,7 +2888,6 @@ assert_no_file "win-shim:writes-nothing-without-the-windows-flag" "$TMP/win/home
 # wine tier cannot catch it, because no Windows shell there ever resolves the shortcut. These are
 # read out of BOTH files and compared, the same move windows:names-the-same-distro-as-the-sh
 # makes for %DISTRO%.
-WCMD="$(sed 's/\r$//' "$W")"
 lnk_name="$(printf '%s\n' "$WCMD" | sed -n 's/^set "LNKNAME=\(.*\)"$/\1/p')"
 lnk_args="$(printf '%s\n' "$WCMD" | sed -n 's/.*\$s\.Arguments = '"'"'\([^'"'"']*\)'"'"'.*/\1/p')"
 lnk_target="$(printf '%s\n' "$WCMD" | sed -n 's/.*\$s\.TargetPath = '"'"'\([^'"'"']*\)'"'"'.*/\1/p')"
@@ -2825,6 +2978,30 @@ lnk_ps="$(printf '%s\n' "$WCMD" | sed -n 's/^set "PSLNK=\(.*\)"$/\1/p')"
 assert_ne       "windows:the-create-was-readable" "" "$lnk_ps"
 assert_contains "windows:the-course-entry-goes-in-the-app-list" \
                 'CreateShortcut('"'"'%LNKDIR%\%LNKNAME%.lnk'"'"')' "$lnk_ps"
+
+# AND THE CREATE IS CHECKED AGAINST THE FILE, NOT JUST THE EXIT CODE. PowerShell's code says the
+# command RAN; an unwritable directory, a policy-redirected Start Menu and a name Explorer refuses
+# are all "exited 0, no shortcut", and by that point stage two has already promised the entry.
+#
+# IT MUST VERIFY THE PATH IT WROTE, and that is #270's shape one layer down: a check against a
+# DIFFERENT directory passes on every machine while proving nothing. Found vacuous by hand while
+# writing this -- substituting %SMDIR% for %LNKDIR% in the verification reddened nothing, because
+# nothing tied the two paths together. So the path is extracted and compared to PSLNK's rather
+# than matched against a literal typed here.
+verify_path="$(printf '%s\n' "$WCMD" \
+               | sed -n 's/^if not exist "\(.*\.lnk\)" goto shortcutfailed$/\1/p' | head -1)"
+assert_ne       "windows:the-created-entry-is-verified"          "" "$verify_path"
+assert_contains "windows:the-verification-reads-the-path-written" "$verify_path" "$lnk_ps"
+# AND IT SITS BETWEEN THE CREATE AND THE DELETE, so a failure stops before the delete runs -- the
+# same ordering win-lnk-noicon:never-reaches-the-delete pins by executing it.
+create_ln="$(ln_of 'Command "%PSLNK%"')"
+verify_ln="$(ln_of 'if not exist "%LNKDIR%')"
+del_ln="$(ln_of 'Command "%PSDEL%"')"
+assert_eq "windows:the-verification-order-was-found" "3" \
+          "$(printf '%s\n' "$create_ln" "$verify_ln" "$del_ln" | grep -c .)"
+assert_eq "windows:the-entry-is-verified-before-anything-is-deleted" "sorted" \
+          "$(printf '%s\n' "$create_ln" "$verify_ln" "$del_ln" \
+             | { sort -nc 2>/dev/null && echo sorted || echo unsorted; })"
 
 # AND THE DELETE LOOKS IN THE ROOT. This is the assertion whose absence was #270.
 assert_contains "windows:the-delete-reads-the-start-menu-root" '%SMDIR%\%DISTRO%.lnk' "$del_ps"

@@ -61,7 +61,10 @@ WHAT THE MACHINE IS LIKE
                        'cs193v (1)' is what a browser names a second copy, and it used
                        to kill the block outright with "Syntax error: unexpected ("
   --no-curl            curl is not in the distro, so watch stage one install it
-  --not-admin          the elevation probe says no
+  --as-admin           run it elevated, which the installer REFUSES. Replaces --not-admin:
+                       not-elevated is the DEFAULT now, being the only invocation students are
+                       told to use and the only one that installs into their own account
+  --uac-declined       the student clicks No on the prompt that turns WSL on
   --no-wsl             no wsl.exe in System32: the install-WSL-and-reboot arm
   --hijacked           the download folder already holds hostile copies of every program the
                        installer calls; nothing should ever reach them
@@ -195,7 +198,8 @@ while [ "$#" -gt 0 ]; do
         --download-fails) optval 22 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
                           setk wsl.curl.rc "$OPTVAL" ;;
         --truncated)      setk wsl.curl.truncated 1 ;;
-        --not-admin)      setk reg.query.rc 1 ;;
+        --as-admin)       setk reg.query.rc 0 ;;
+        --uac-declined)   setk win.uac-declined 1 ;;
         --no-wsl)         setk harness.no-wsl-exe 1; DISTROS='' ;;
         # The download folder already holds hostile copies of every program the installer calls.
         # On the unfixed installer they ran, elevated, because cmd.exe searches the current
