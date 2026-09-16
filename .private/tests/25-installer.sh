@@ -2156,6 +2156,35 @@ assert_eq "windows:has-crlf-line-endings" "" "$(run_checker cmdlint_line_endings
 # and `chcp` cannot change it (batch.c:245), so a non-ASCII byte is mojibake on some machine.
 assert_eq "windows:is-ascii-only" "" "$(run_checker cmdlint_non_ascii "$W")"
 
+# EVERY %~ IS A VALID SUBSTITUTION, COMMENTS INCLUDED, and this rule exists because the file's own
+# documentation broke it. Measured on Windows 11 26200 on 2026-09-16: real cmd.exe expands
+# batch-parameter substitutions on `::` lines too, so a header sentence reading "one %~ in the
+# whole file" -- prose ABOUT the construct -- was read as a use of it and refused the whole run at
+# the first line, with "The following usage of the path operator in batch-parameter substitution
+# is invalid: %~ in the file."
+#
+# THE THIRD RULE IN THE SET WINE CANNOT HOLD, beside the CRLF one and ::-inside-a-block. The
+# executing tier ran that same file 299 pass 0 fail while real cmd.exe would not start it, which
+# is exactly the split MANUAL.md describes -- and it is why #275 was caught by hand and not here.
+assert_eq "windows:every-parameter-substitution-is-valid" "" \
+          "$(run_checker cmdlint_bad_parameter_substitution "$W")"
+# ...AND THE RULE GOES RED, demonstrated with the sentence that actually broke it rather than with
+# an invented one. Both spellings the header carried are checked, because the defect was a comment
+# and a regex narrow enough to miss comments would look identical to a clean file.
+for phrase in 'one substitution in the whole file|one %~ in the whole file' \
+              'the only batch-parameter substitution in the file|the only %~ in the file'; do
+    fixed="${phrase%%|*}"; broken="${phrase#*|}"
+    violating="$TMP/tilde-violation.cmd"
+    sed "s/$fixed/$broken/" "$W" > "$violating"
+    assert_ne "windows:the-substitution-rule-catches-[$broken]" "" \
+              "$(run_checker cmdlint_bad_parameter_substitution "$violating")"
+done
+# ...and stays quiet on every form that IS valid, so the rule cannot be satisfied by banning %~.
+valid="$TMP/tilde-valid.cmd"
+printf 'set "A=%%~f0"\r\nset "B=%%~dp0"\r\nset "C=%%~nx1"\r\nset "D=%%~$PATH:1"\r\n' > "$valid"
+assert_eq "windows:the-substitution-rule-allows-the-valid-forms" "" \
+          "$(run_checker cmdlint_bad_parameter_substitution "$valid")"
+
 assert_eq "windows:every-goto-resolves" "" "$(run_checker cmdlint_labels "$W")"
 
 # `echo` arguments must not contain cmd metacharacters. Redirection characters are extracted

@@ -949,6 +949,24 @@ settle, and one it should not be trusted on:
    start to finish and every `goto` lands.
 2. **`::` inside a parenthesized block.** Wine accepts it; real cmd.exe treats it as a label and
    errors. Measured. Also a static rule, for the same reason.
+
+   **And `%~` inside a comment, which is the same family and cost a broken installer (#275).**
+   Real cmd.exe performs batch-parameter substitution on `::` lines too, and an invalid modifier
+   sequence is a hard parse failure on the first line of the run:
+
+   ```
+   The following usage of the path operator in batch-parameter
+   substitution is invalid: %~ in the file.
+   ```
+
+   Measured on Windows 11 26200 on 2026-09-16. The offending text was a *header sentence about
+   the construct* — "one `%~` in the whole file" — so the file's own documentation refused to let
+   it start. `--tier windows` ran that same file **299 pass 0 fail** while real cmd.exe would not
+   parse it, which is this section's thesis arriving in the worst possible place: prose. Now
+   `cmdlint_bad_parameter_substitution`, read over the RAW file rather than over
+   `_cmdlint_commands`, because the question is what cmd.exe can parse and cmd.exe does not skip
+   comments. *Verify once on a real box:* the file starts at all. That is the whole check, and it
+   is the one thing no green wine run can tell you.
 3. **Every EFFECT.** Whether `wsl --install` really installs, whether the feature really needs a
    reboot, whether `--name` really works on the student's build. The suite fakes `wsl.exe`
    entirely, so it reaches every decision and no consequence. Since stage one now *downloads*
