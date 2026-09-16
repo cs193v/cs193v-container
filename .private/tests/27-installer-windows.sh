@@ -120,6 +120,11 @@ assert_eq   "win-ok:no-stderr-noise"              "" "$WINE_ERR"
 # fake models that: it records where curl was told to write, and --terminate wipes the file if it
 # landed under /tmp, after which bash exits 127 the way the real one does.
 assert_eq   "win-ok:hands-off-to-bash-once"       "1" "$(wine_argv_count '\-e env CS193V_WINDOWS=1 bash /var/tmp/install-cs193v.sh')"
+# AND NOTHING RIDES ALONG WITH IT (#280). %XENV% is empty on every case but the two override ones
+# at the foot of this file, so this is what proves the two hand-over lines still render exactly as
+# they did before it existed -- and it is why the needle above can stay spelled out in full.
+# 25-installer.sh can only make that claim about the source text; this makes it about argv.
+assert_eq   "win-ok:passes-no-override-along" "0" "$(wine_argv_count 'CS193V_TARBALL')"
 assert_eq   "win-ok:stage-two-does-not-live-in-tmp" "0" "$(wine_argv_count '\-o /tmp/')"
 assert_eq   "win-ok:never-creates-an-existing-distro" "0" "$(wine_argv_count '\-\-install -d')"
 
@@ -1124,6 +1129,66 @@ assert_eq   "win-lnk-noicon:writes-no-course-entry" "no" \
             "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
 assert_eq   "win-lnk-noicon:never-reaches-the-delete" "0" \
             "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
+
+# ─── the two staff overrides, proved on the command line  (#280) ──────────────
+#
+# WHAT THESE ARE FOR. Testing the Windows installer against a working tree means two things have
+# to come from somewhere other than GitHub: stage two, which the .cmd fetches by URL, and the
+# course tarball, which stage two fetches for itself. CS193V_INSTALLER_URL and CS193V_TARBALL are
+# those two switches, and both cross the Windows/Linux boundary on a wsl.exe command line.
+#
+# WHY THEY ARE DRIVEN HERE RATHER THAN LEFT TO A STATIC CHECK. 25-installer.sh pins the SOURCE
+# TEXT of the two hand-over lines, which proves %XENV% is written in the right place and nothing
+# more. Whether cmd.exe expands it into an argument wsl.exe really receives is a runtime question,
+# and argv.log is the only thing that can answer it. This project has twice refused an unexercised
+# fallback as "a path that rots"; a staff escape hatch that silently stopped working is the same
+# defect with a smaller audience.
+#
+# WHAT THEY CANNOT SHOW, said plainly. fake-wsl's bash arm never executes the fetched bootstrap --
+# it checks that stage2.sh exists, prints a boundary marker and returns a knob -- and its curl arm
+# serves stage2.src whatever URL it is handed. So the EFFECT of either variable is out of reach
+# here by design, and is covered where it can be: 25-installer.sh drives CS193V_TARBALL through
+# the real bootstrap, and 26-installer-sandbox.sh drives it through a real download.
+
+# ── the tarball override rides on both hand-over lines ──
+wine_new
+wine_list CS193V
+wine_env CS193V_TARBALL /mnt/c/Users/student/Downloads/course.tar.gz
+wine_run
+assert_eq   "win-tarball:exits-zero" "0" "$WINE_RC"
+# ONE PER PASS, AND BOTH SPELLED OUT, because the two lines are edited separately and a %XENV%
+# dropped from either is a by-hand test that silently downloads from GitHub for half the install.
+assert_eq "win-tarball:the-root-pass-carries-it" "1" \
+          "$(wine_argv_count '\-e env CS193V_TARBALL=/mnt/c/Users/student/Downloads/course\.tar\.gz CS193V_PROVISION=1 bash /var/tmp/install-cs193v\.sh')"
+assert_eq "win-tarball:the-student-pass-carries-it" "1" \
+          "$(wine_argv_count '\-e env CS193V_TARBALL=/mnt/c/Users/student/Downloads/course\.tar\.gz CS193V_WINDOWS=1 bash /var/tmp/install-cs193v\.sh')"
+# AND IT IS PREPENDED, not substituted: the switch each pass already carried must still be there,
+# which the two needles above assert by naming both tokens in one string. This is the separate
+# claim that neither pass acquired the OTHER pass's switch on the way through.
+assert_eq "win-tarball:the-two-passes-stay-distinct" "0" \
+          "$(wine_argv_count 'CS193V_PROVISION=1.*CS193V_WINDOWS|CS193V_WINDOWS.*CS193V_PROVISION')"
+assert_eq "win-tarball:no-stderr-noise" "" "$WINE_ERR"
+
+# ── the stage-two override replaces the URL curl is given ──
+# A file:// URL, which is the shape a by-hand test uses: curl inside the distro takes it, so the
+# real download path runs against a file on the Windows drive. The fake serves stage2.src whatever
+# it is asked for, so what is asserted is the URL it was ASKED for.
+wine_new
+wine_list CS193V
+wine_env CS193V_INSTALLER_URL 'file:///mnt/c/Users/student/Downloads/install-cs193v.sh'
+wine_run
+assert_eq   "win-url:exits-zero" "0" "$WINE_RC"
+assert_eq   "win-url:downloads-once" "1" "$(wine_argv_count '\-e curl -fsSL')"
+assert_eq   "win-url:curl-is-given-the-override" "1" \
+            "$(wine_argv_count '\-o /var/tmp/install-cs193v\.sh file:///mnt/c/Users/student/Downloads/install-cs193v\.sh$')"
+assert_eq   "win-url:github-is-not-asked-at-all" "0" \
+            "$(wine_argv_count 'raw\.githubusercontent\.com')"
+# AND THE STUDENT IS TOLD. The .cmd echoes %INSTALLER_URL% while it downloads, so the override
+# announces itself with no code of its own -- the same reason install-cs193v.sh prints a banner.
+assert_says "win-url:the-transcript-names-the-override" \
+            "file:///mnt/c/Users/student/Downloads/install-cs193v.sh" "$WINE_OUT"
+assert_says_not "win-url:and-does-not-still-name-github" "raw.githubusercontent.com" "$WINE_OUT"
+assert_eq   "win-url:no-stderr-noise" "" "$WINE_ERR"
 
 # ─── decision coverage, reported rather than assumed ──────────────────────────
 # What this checks is that every branch target in the file was reached by some case above, and

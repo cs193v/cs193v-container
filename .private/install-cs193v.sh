@@ -43,19 +43,28 @@ set -u
 # THREE CONSTANTS AND ONE URL, and install-cs193v-windows.cmd composes the same URL out of its
 # own copy of the three; 25-installer.sh fails if the two files disagree.
 #
-# TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and that is load-bearing rather than a style
-# choice. Six places in the test suite repoint the download at a local tarball by rewriting
-# `^TARBALL=.*` with sed -- lib/sandbox.sh and 25-installer.sh. A function that composed the URL
-# instead would leave every one of them matching nothing, silently, and the cheap test lane would
-# go back to making live requests to GitHub.
+# TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and the reason changed with #280. It used to be
+# load-bearing because six places in the test suite repointed the download by rewriting
+# `^TARBALL=.*` with sed, and a composed URL would have left all six matching nothing, silently.
+# CS193V_TARBALL replaced every one of them, so nothing edits this line any more. Keep it one
+# line regardless: it is the value a commit pin would replace, and one literal is what makes that
+# a one-line change rather than an argument about where the URL gets assembled.
 #
-# tarball_url() reads it so that there is exactly one expression to change if the course ever
-# pins a commit rather than following a branch. See the issue filed against #221.
+# CS193V_TARBALL IS A STAFF SWITCH AND NOT A SECURITY BOUNDARY, which is worth saying plainly
+# because it can be mistaken for one. Anyone who can set a variable in your shell can also edit
+# the script you are about to run; what a commit pin defends against is a compromised
+# REPOSITORY, and nothing here weakens that. This exists so that testing a change means pointing
+# at the change, and the banner below exists so a puzzling transcript says which copy ran.
+#
+# RESOLVED ONCE, ABOVE ALL THREE READERS. tarball_url() is not the only thing that reads the
+# source -- the two refusals below name it in their prose -- so an override applied at the fetch
+# alone would make a failed local run print the GitHub URL it never touched.
 REPO_OWNER="cs193v"
 REPO_NAME="cs193v-container"
 REPO_BRANCH="main"
 TARBALL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_BRANCH.tar.gz"
-tarball_url() { printf '%s\n' "$TARBALL"; }
+COURSE_SRC="${CS193V_TARBALL:-$TARBALL}"
+tarball_url() { printf '%s\n' "$COURSE_SRC"; }
 
 # ─── the handover contract ─────────────────────────────────────────────────────
 # Bumped only when the arguments below change meaning. course-install.sh refuses anything
@@ -122,20 +131,39 @@ BOOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX")" \
     || refuse "  Could not create a temporary directory. Is the disk full?"
 trap 'rm -rf "$BOOT_TMP"' EXIT
 
-printf '\n  Getting the course files...\n'
-# THE EXIT STATUS IS KEPT, because one value of it has its own answer. Both tools have a
-# dedicated code for "the certificate could not be verified" -- curl 60, wget 5 -- and that is
-# the one genuinely new way this can fail since the download moved ahead of everything else:
-# install_podman used to install ca-certificates beside curl, and nothing installs it before the
-# download any more. Left undiagnosed it reads as a network problem, which is the single most
-# misleading thing this script could say about a machine whose network is fine.
-if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)"; then
-    dl_rc=$?
-    case "$TOOL:$dl_rc" in
-        curl:60|wget:5)
-            refuse "  Could not verify the security certificate for:
+# WHICH SOURCE, AND ONLY WHEN IT IS NOT THE PUBLISHED ONE. Plain printf beside the refusals:
+# there is no catalogue in this file, and nothing has been downloaded yet to read one out of. It
+# is loud on purpose. The point of a switch somebody else can set is that the transcript of a
+# surprising install can be read back to it, so this has to survive being screenshotted.
+[ -n "${CS193V_TARBALL:-}" ] && printf '
+  *** CS193V_TARBALL is set, so the course files are NOT being downloaded. ***
+  *** Using: %s
+  *** Unset CS193V_TARBALL to install the published copy.                  ***
+' "$COURSE_SRC"
 
-      $TARBALL
+printf '\n  Getting the course files...\n'
+# TWO ARMS, AND THE BARE-PATH ONE IS NOT A CONVENIENCE. wget has no file:// scheme -- measured,
+# GNU wget 1.21.4 given file:///tmp/x.txt exits 1 having written nothing -- and this script picks
+# between curl and wget without caring which answered. So a local tarball named as a file:// URL
+# works on a Mac and fails on the Ubuntu desktop image, whereas a bare path behaves identically
+# under both, which is what a by-hand test wants. Anything carrying a scheme goes to the
+# downloader untouched, file:// included; that is then curl's to answer for, and is the arm the
+# test suite drives to keep the download path itself exercised.
+case "$COURSE_SRC" in
+  *://*)
+    # THE EXIT STATUS IS KEPT, because one value of it has its own answer. Both tools have a
+    # dedicated code for "the certificate could not be verified" -- curl 60, wget 5 -- and that is
+    # the one genuinely new way this can fail since the download moved ahead of everything else:
+    # install_podman used to install ca-certificates beside curl, and nothing installs it before the
+    # download any more. Left undiagnosed it reads as a network problem, which is the single most
+    # misleading thing this script could say about a machine whose network is fine.
+    if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)"; then
+        dl_rc=$?
+        case "$TOOL:$dl_rc" in
+            curl:60|wget:5)
+                refuse "  Could not verify the security certificate for:
+
+      $COURSE_SRC
 
   Your network is probably fine. What is usually missing is the list of
   certificate authorities, which is a package your system may not have:
@@ -144,17 +172,30 @@ if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)"; then
       Fedora:                         sudo dnf install ca-certificates
 
   Install it and run this script again." ;;
-    esac
-    refuse "  Could not download the course files from:
+        esac
+        refuse "  Could not download the course files from:
 
-      $TARBALL
+      $COURSE_SRC
 
   This is usually a network problem. It is safe to run this script again."
-fi
+    fi ;;
+  *)
+    # A COPY, AND A REFUSAL THAT DOES NOT SAY "NETWORK". Nothing was downloaded on this arm, so
+    # the download wording would send a staff member to look at the wrong thing entirely.
+    cp "$COURSE_SRC" "$BOOT_TMP/course.tar.gz" || refuse "  Could not read the course files at:
+
+      $COURSE_SRC
+
+  CS193V_TARBALL is set, so nothing was downloaded. Check that path, or unset
+  CS193V_TARBALL to install the published copy instead." ;;
+esac
 
 # --strip-components=1 because GitHub wraps the archive in a <repo>-<branch>/ directory.
+# "ARRIVED" RATHER THAN "DOWNLOADED", because since #280 they may not have been: a bare
+# CS193V_TARBALL is copied, and a staff member with a half-written local tarball should not be
+# told to look at their network.
 tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
-    || refuse "  The course files downloaded but could not be unpacked.
+    || refuse "  The course files arrived but could not be unpacked.
   That usually means the transfer was cut short. It is safe to run this script again."
 
 # ─── which of the two installers this hands over to ────────────────────────────
@@ -169,11 +210,13 @@ tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
 # much shorter script, and keeping the choice in the file that does the downloading means the
 # code that runs as root is named in the file a student reads and checks a SHA-256 against.
 #
-# NOT AN ARGUMENT, because this file has never parsed any: the other two external switches are
-# CS193V_DIR and CS193V_WINDOWS, both read by course-install.sh and neither by this file, and the
-# .cmd already knows how to pass a variable (`wsl -e env VAR=value prog args`, which it does for
-# DEBIAN_FRONTEND). CS193V_WINDOWS (#218) marks the pass as the one the Windows installer
-# launched, which is the whole of what decides which sign-off a student reads at the end.
+# NOT AN ARGUMENT, because this file has never parsed any, and the .cmd already knows how to pass
+# a variable (`wsl -e env VAR=value prog args`, which it does for DEBIAN_FRONTEND). CS193V_WINDOWS
+# (#218) marks the pass as the one the Windows installer launched, which is the whole of what
+# decides which sign-off a student reads at the end; it and CS193V_DIR are read by
+# course-install.sh and not here. THIS FILE READS THREE VARIABLES AND NO ARGUMENTS: TMPDIR,
+# CS193V_PROVISION, and CS193V_TARBALL (#280). 10-static.sh asserts that list, so a fourth is a
+# deliberate edit in two places rather than something that arrives unremarked.
 TARGET=.private/course-install.sh
 [ -n "${CS193V_PROVISION:-}" ] && TARGET=.private/wsl-provision.sh
 

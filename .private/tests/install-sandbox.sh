@@ -312,6 +312,12 @@ set -- --label "cs193v.sandbox=${USER:-unknown}" -i --name "$NAME_SB"
 set -- "$@" --mount type=tmpfs,destination=/var/tmp/report
 set -- "$@" -v "$SB_WORK:/work:ro$VT_MOUNT_Z"
 set -- "$@" -v "$SB_WORK/sandbox:/usr/local/bin/sandbox:ro$VT_MOUNT_Z"
+# WHERE THE COURSE FILES COME FROM, ALWAYS SET (#280). The bootstrap in /work is the shipped file
+# byte for byte now -- it used to be a copy with a file:// URL sed'd into it -- so without this a
+# hand-driven run downloads the published tree from GitHub instead of the one sb_work_init just
+# built out of your working copy, which is the opposite of what this tool is for. A bare path, so
+# it is copied rather than fetched and behaves the same on a fixture with wget and no curl.
+set -- "$@" -e "CS193V_TARBALL=/work/course.tar.gz"
 set -- "$@" -e "SB_NET=$NET"
 [ -n "$SBDIR" ] && set -- "$@" -e "CS193V_DIR=$SBDIR"
 [ -n "$WSLCONF" ] && set -- "$@" -e "SB_WSLCONF=$WSLCONF"

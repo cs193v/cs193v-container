@@ -593,19 +593,23 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     # base; a fixture without it would fail the door below by name rather than silently).
     cp "$TESTS_DIR/lib/ptydrive.py"     "$SB_WORK/ptydrive.py"
     chmod +x "$SB_WORK/sandbox" "$SB_WORK/podman-fake"
-    cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer.sh"
-    edit_sub "$SB_WORK/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-    edit_sub "$SB_WORK/installer.sh" '^TARBALL=.*'    'TARBALL="file:///work/course.tar.gz"'
+    # THE INSTALLER AS SHIPPED, BYTE FOR BYTE (#280). It used to arrive here as a copy with
+    # `^TARBALL=.*` sed'd to a file:// URL and REPO_OWNER rewritten as insurance against that sed
+    # silently matching nothing -- and neither edit was ever checked here, so a miss would have
+    # pointed every cheap fixture at the real GitHub. CS193V_TARBALL carries the same instruction
+    # in the container's environment instead, where run.sh defaults it and reports what it used as
+    # ===TARBALL-USED===, which is a guard the sed never had.
+    cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/install-cs193v.sh"
     # ─── an origin wget can actually fetch from (#221) ────────────────────────────
     #
     # BECAUSE wget HAS NO file:// SCHEME. Measured, not inferred from the manual: GNU wget 1.21.4
-    # given file:///tmp/x.txt exits 1 and writes nothing. Every fixture serves the tarball over
-    # file://, which curl is happy with, so the wget arm cannot be exercised by any of them and an
-    # arm no test can reach is the "path that rots" this project has refused twice.
+    # given file:///tmp/x.txt exits 1 and writes nothing. Every other case hands the bootstrap a
+    # BARE PATH, which it copies rather than downloads, so nothing else in the tier reaches either
+    # tool's fetch -- and an arm no test can reach is the "path that rots" this project has
+    # refused twice.
     #
-    # ONLY FOR THE wget CASES. The six file:// sites are left exactly as they are -- this is a
-    # second installer copy beside the first, the same shape as installer-skew.sh, so no existing
-    # case changes behaviour or pays for a listener it does not use.
+    # ONLY FOR THE wget CASE, which asks for it with SB_HTTP_ORIGIN and points CS193V_TARBALL at
+    # this port. Nothing else starts the listener or pays for it.
     #
     # LOOPBACK UNDER --network=none, which podman gives every container: `none` still brings up lo
     # with 127.0.0.1/8, so nothing here reaches the network or another run. The port is fixed
@@ -615,15 +619,8 @@ sb_work_init() {                      # sb_work_init -> $SB_WORK holding install
     # perl RATHER THAN python3, because IO::Socket::INET is in perl-base, which is Essential -- so
     # it is present on every Debian-family fixture regardless of what the closure carries, and the
     # contingency of dragging python3 into /opt/localrepo is not needed.
-    cp "$PRIVATE/install-cs193v.sh" "$SB_WORK/installer-http.sh"
-    edit_sub "$SB_WORK/installer-http.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-    edit_sub "$SB_WORK/installer-http.sh" '^TARBALL=.*' \
-             'TARBALL="http://127.0.0.1:8099/course.tar.gz"'
-    grep -q '127.0.0.1:8099' "$SB_WORK/installer-http.sh" || {
-        fail "sandbox:the-http-installer-was-repointed" "the TARBALL edit matched nothing"
-        return 1; }
     cat > "$SB_WORK/http-origin.pl" <<'ORIGIN'
-# One file, over loopback, for the wget arm. Serves the same bytes the file:// cases read.
+# One file, over loopback, for the wget arm. Serves the same bytes the bare-path cases copy.
 #
 # THE READY FILE IS THE HANDSHAKE, and it is written AFTER bind+listen returns rather than at
 # the top: run.sh waits for it before starting the installer, so a listener that has not bound
@@ -766,9 +763,19 @@ set -u
 # one nothing covered before: no-podman proved apt installs it, nested proved the build works,
 # and nothing joined them.
 /work/sandbox arrange </dev/null || { printf '===ARRANGE-FAILED===\n'; exit 90; }
-# WHICH INSTALLER, because one case runs the lowered-floor copy sb_work_init writes beside the
-# real one. Defaulted, so every existing case is unchanged and only the case that means it says so.
-INST="${SB_INSTALLER:-/work/installer.sh}"
+# WHICH TARBALL, AND WHICH INSTALLER. Both defaulted, so a case that means something unusual is
+# the only one that says so -- and both REPORTED, which is the part that matters: the bootstrap
+# arrives here byte for byte as shipped (#280), so what repoints its download is this variable and
+# nothing in the file. A case that forgot to set it would otherwise fall back to the published
+# GitHub URL, silently, which is exactly the failure the sed it replaced could produce.
+#
+# TARBALL-USED FIRST, and that ordering is load-bearing. sb_section reads a marker to the next
+# line beginning `===`, so whichever of these comes last takes the installer's whole transcript as
+# its value. Printing this one first leaves it bounded by the marker below and leaves
+# INSTALLER-USED with exactly the shape it has always had.
+CS193V_TARBALL="${CS193V_TARBALL:-/work/course.tar.gz}"; export CS193V_TARBALL
+printf '===TARBALL-USED===\n%s\n' "$CS193V_TARBALL"
+INST="${SB_INSTALLER:-/work/install-cs193v.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 bash "$INST"
 rc=$?
@@ -843,10 +850,16 @@ sb_installed > /var/tmp/report/dpkg-before
 # mentioned sudo runs exactly as it did.
 /work/sandbox sudo </dev/null || { printf '===SUDO-FAILED===\n'; exit 91; }
 
-# WHICH INSTALLER, defaulted, so every existing case is unchanged and only a case that means it
-# says so. nest-run.sh honours the same variable; the floor-skew case is a Tier A case and runs
-# through this file.
-INST="${SB_INSTALLER:-/work/installer.sh}"
+# WHICH TARBALL, AND WHICH INSTALLER, both defaulted and both reported. nest-run.sh carries the
+# same pair and its comment has the reasoning, including why TARBALL-USED is printed first.
+#
+# CS193V_TARBALL IS WHAT REPOINTS THE DOWNLOAD NOW (#280): /work/install-cs193v.sh is the shipped
+# bootstrap byte for byte, so nothing in the file says where the course files come from. The wget
+# case overrides this with a real http:// URL, which is the only thing in the tier that reaches a
+# download tool's fetch at all -- a bare path is copied.
+CS193V_TARBALL="${CS193V_TARBALL:-/work/course.tar.gz}"; export CS193V_TARBALL
+printf '===TARBALL-USED===\n%s\n' "$CS193V_TARBALL"
+INST="${SB_INSTALLER:-/work/install-cs193v.sh}"
 printf '===INSTALLER-USED===\n%s\n' "$INST"
 
 # ─── how the installer is driven: keystrokes, or a described conversation  (#226) ──
@@ -913,11 +926,19 @@ rc=$?
 if [ -n "${SB_SECOND_PASS:-}" ]; then
     printf '\n===SECOND-PASS-AS=%s===\n' "$SB_SECOND_PASS"
     # `su -` CLEARS THE ENVIRONMENT, which is the point -- a student's shell is not root's -- so
-    # the two variables that have to survive are named. CS193V_DIR keeps the second pass from
+    # the three variables that have to survive are named. CS193V_DIR keeps the second pass from
     # asking where to put things; CS193V_SHIM is what lib/podman-fake reads, and without it the
-    # fake refuses by design rather than guessing at a directory.
+    # fake refuses by design rather than guessing at a directory; CS193V_TARBALL is where the
+    # course files come from, and without it this pass downloads from GitHub (#280).
+    #
+    # THAT THIRD ONE WAS FOUND BY ===TARBALL-USED===, WHICH IS THE POINT OF HAVING IT. Before the
+    # override this pass ran a copy of the bootstrap with the path sed'd into the file, so it
+    # could not be dropped by an environment that got cleared. It can now, and a cleared one is
+    # silent: the pass simply fetches the published tree instead of the one under test, and under
+    # --network=none it fails as "this is usually a network problem" -- which is what it did here.
     su - "$SB_SECOND_PASS" -c \
-       "CS193V_DIR='${CS193V_DIR:-}' CS193V_SHIM='${CS193V_SHIM:-}' bash '$INST'" </dev/null
+       "CS193V_DIR='${CS193V_DIR:-}' CS193V_SHIM='${CS193V_SHIM:-}' \
+        CS193V_TARBALL='$CS193V_TARBALL' bash '$INST'" </dev/null
     rc2=$?
 else
     rc2=0
@@ -1070,8 +1091,8 @@ RUN
 #
 # 5.7.0 because it is what the macOS floor is, so the number is one somebody might plausibly type
 # into the wrong place.
-sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its tarball
-    [ -f "$SB_WORK/installer-skew.sh" ] && return 0
+sb_work_skew() {                      # -> $SB_WORK/course-skew.tar.gz
+    [ -f "$SB_WORK/course-skew.tar.gz" ] && return 0
     mkdir -p "$SB_TMP/pkg-skew"
     cp -a "$SB_TMP/pkg/cs193v-main" "$SB_TMP/pkg-skew/cs193v-main" || return 1
     edit_sub "$SB_TMP/pkg-skew/cs193v-main/.private/files/cs193v-ui.sh" '^MIN_PODMAN_LINUX=.*' 'MIN_PODMAN_LINUX="5.7.0"'
@@ -1083,12 +1104,10 @@ sb_work_skew() {                      # -> $SB_WORK/installer-skew.sh, and its t
         printf 'sb_work_skew: the launcher floor was not raised -- was the constant renamed?\n' >&2
         return 1; }
     ( cd "$SB_TMP/pkg-skew" && tar czf "$SB_WORK/course-skew.tar.gz" cs193v-main ) || return 1
-    # THE BOOTSTRAP IS UNMODIFIED except for where it fetches from, which is the point: the edit is
-    # entirely inside the tarball, in the one file that declares the number.
-    cp "$SB_WORK/installer.sh" "$SB_WORK/installer-skew.sh"
-    edit_sub "$SB_WORK/installer-skew.sh" '^TARBALL=.*' 'TARBALL="file:///work/course-skew.tar.gz"'
-    grep -q 'course-skew.tar.gz' "$SB_WORK/installer-skew.sh" || {
-        printf 'sb_work_skew: the tarball URL was not repointed\n' >&2; return 1; }
+    # AND THE BOOTSTRAP IS NOT TOUCHED AT ALL, which is the point and used to be nearly the point:
+    # this made a second copy of it with `^TARBALL=.*` sed'd at this tarball. The edit that matters
+    # is entirely inside the archive, in the one file that declares the number, so the case now
+    # says which tarball it wants with SB_TARBALL and the shipped bootstrap runs unmodified.
     return 0
 }
 
@@ -1313,8 +1332,14 @@ sb_ceiling_note() {                   # sb_ceiling_note LABEL RC CAP OUTER NAME 
 # costs 900 s to prove a printf. One knob drives both numbers, keeping today's 900/1000 relation
 # exactly, because the pair has to stay ordered: the inner ceiling is the one a real hang should
 # hit, and the outer only exists for a podman that will not honour it.
+# SB_TARBALL IS A NAMED KNOB AND NOT A SIXTH POSITIONAL (#280), for the reason the arity warning
+# above gives: the keys are argument three, an off-by-one here HANGS rather than fails, and a sixth
+# slot reached past an empty fifth is exactly how that happens. It also matches the shape the other
+# per-case switches already have -- SB_HTTP_ORIGIN and SB_NO_PREREQS are names, not positions.
+# Empty is the same as unset to nest-run.sh's `${CS193V_TARBALL:-...}`, so passing it always is
+# safe and keeps the podman line free of a conditional.
 nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE] [INSTALLER] -> transcript
-    local name="cs193v-fixture-nested-$$" base="${4:-machine}" inst="${5:-/work/installer.sh}"
+    local name="cs193v-fixture-nested-$$" base="${4:-machine}" inst="${5:-/work/install-cs193v.sh}"
     local cap="${CS193V_NEST_CAP:-900}" outer rc
     outer=$((cap + 100))
     machine_flags '' host no "$base" || return 1
@@ -1329,6 +1354,7 @@ nest_build() {                        # nest_build LABEL [PREREQS] [KEYS] [BASE]
         -e "SB_NO_PREREQS=${2:-}" \
         -e "SB_DISTRO=$(machine_distro "$base")" \
         -e "SB_INSTALLER=$inst" \
+        -e "CS193V_TARBALL=${SB_TARBALL:-}" \
         -v "$SB_WORK:/work:ro$VT_MOUNT_Z" \
         "$(fixture_tag "$base")" \
         sh /work/nest-run.sh > "$SB_TMP/nraw" 2>&1

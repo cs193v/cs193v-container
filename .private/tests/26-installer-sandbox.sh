@@ -307,7 +307,8 @@ sandbox_reap
 # half a dozen other refusals.
 sb_machine no-prereqs=curl
 out="$(sandbox_run wget '2' -e CS193V_DIR=/home/student/cs193v \
-                            -e SB_INSTALLER=/work/installer-http.sh -e SB_HTTP_ORIGIN=1)"
+                            -e CS193V_TARBALL=http://127.0.0.1:8099/course.tar.gz \
+                            -e SB_HTTP_ORIGIN=1)"
 assert_says "sb-wget:the-machine-was-really-arranged" "prereqs=curl" "$(sb_section "$out" ARRANGED)"
 assert_eq   "sb-wget:the-origin-was-listening" "listening" "$(sb_section "$out" HTTP-ORIGIN)"
 # FLATTENED, NOT THROUGH sb_section, and the reason generalises to any marker printed before the
@@ -318,8 +319,13 @@ assert_eq   "sb-wget:the-origin-was-listening" "listening" "$(sb_section "$out" 
 # worse failure: an assert_says on an empty haystack simply fails, and an assert_says_not would
 # have passed. The tail-block markers are far past the echo and are safe; this one is not, so it
 # is read the way sb-ceiling reads the same marker -- as marker-and-value in one flattened string.
-assert_says "sb-wget:the-http-copy-is-what-ran" \
-            "===INSTALLER-USED=== /work/installer-http.sh" "$out"
+assert_says "sb-wget:the-http-url-is-what-ran" \
+            "===TARBALL-USED=== http://127.0.0.1:8099/course.tar.gz" "$out"
+# AND IT IS THE SHIPPED BOOTSTRAP THAT RAN (#280). This used to need a second sed'd copy of the
+# file to reach the loopback origin; now the URL rides in the environment and the installer under
+# test is the one a student downloads.
+assert_says "sb-wget:the-shipped-bootstrap-is-what-ran" \
+            "===INSTALLER-USED=== /work/install-cs193v.sh" "$out"
 # THE ARM ITSELF. curl is gone and the tree still arrived, which no curl-only bootstrap could
 # manage -- it would have refused before survey. `dir-only` would be the interesting failure.
 assert_eq "sb-wget:the-course-files-arrived" "launcher-is-executable" "$(sb_section "$out" COURSE-DIR)"
@@ -1422,7 +1428,7 @@ osp_imgs="$SB_TMP/host-imgs.before.oldest-supported"; host_images > "$osp_imgs"
 # THE REAL INSTALLER, unpatched, which is what makes this a regression check rather than a
 # measurement -- and is itself an assertion that 4.9.3 is admitted by the shipped floors.
 out="$(nest_build oldest-supported "" "" podman-old-nested)"
-assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/installer.sh" \
+assert_says "oldest-supported:the-real-installer-is-what-ran" "/work/install-cs193v.sh" \
             "$(sb_section "$out" INSTALLER-USED)"
 assert_says_not_key_tail "oldest-supported:no-version-refusal-anywhere" \
                          err.podman-old-linux "$out" "$ICAT"
@@ -1473,9 +1479,12 @@ record "oldest-supported:free-disk-gb-after" "$(do_df_avail /)"
 # CHEAP, because it dies before building anything -- more cheaply than before, in fact.
 sb_work_skew || { fail "floor-skew:the-skew-could-be-built" "sb_work_skew failed"; exit 1; }
 pass "floor-skew:the-skew-could-be-built"
-out="$(nest_build floor-skew "" "" podman-old-nested /work/installer-skew.sh)"
-assert_says "floor-skew:the-skewed-copy-is-what-ran" "installer-skew.sh" \
-            "$(sb_section "$out" INSTALLER-USED)"
+out="$(SB_TARBALL=/work/course-skew.tar.gz nest_build floor-skew "" "" podman-old-nested)"
+# WHICH TARBALL, NOT WHICH COPY OF THE INSTALLER (#280). The skew lives inside the archive, in
+# cs193v-ui.sh, and used to be reached by a second sed'd bootstrap pointed at it. Naming the
+# tarball says what the case is actually about, and the bootstrap that runs is the shipped one.
+assert_says "floor-skew:the-skewed-tarball-is-what-ran" "course-skew.tar.gz" \
+            "$(sb_section "$out" TARBALL-USED)"
 # THE ONE COPY, PROVED BEHAVIOURALLY. Only cs193v-ui.sh was edited, so an installer that still
 # carried its own floor would have accepted this machine at 4.9.0 and said nothing about 5.7.0.
 assert_says "floor-skew:the-installer-reads-the-launchers-floor" "5.7.0" "$out"
