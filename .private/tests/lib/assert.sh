@@ -513,9 +513,10 @@ assert_exec()  {  [ -x "$2" ] && pass "$1" || fail "$1" "not executable: $2"; }
 
 # ─── box art ───────────────────────────────────────────────────────────────────
 # Shared because two suites draw conclusions from it now: 20-messages.sh renders die() and
-# the installer's boxes, and 30-launcher-shim.sh renders the build's success box -- the
-# first box in this project that is not an error. See issue #21 for what it is checking and
-# why neither of the checks that came before it could.
+# the installer's boxes, and 30-launcher-shim.sh renders the launcher's -- the STOP box, and
+# the titleless live build-tail box, which is the one left that is not an error now that #285
+# has taken the build's success box away. See issue #21 for what it is checking and why
+# neither of the checks that came before it could.
 box_problems() {                      # box art on stdin -> one line per structural problem
     run_checker python3 -c '
 import sys

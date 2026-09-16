@@ -492,8 +492,15 @@ shim_new
 launcher >/dev/null 2>&1
 shim_set state running
 shim_clear_log
-launcher_tty '\033[B\n' --stop >/dev/null 2>&1
+# OUTPUT KEPT, and this is now the cheap lane's ONLY check that status.stopping is printed at
+# all (#285). It used to be the interrupt test below, which went quiet with the rest of
+# --rebuild; every other assertion on that line lives in the container tier. --stop is the
+# right home for it, being the one remaining path where the student asked for a stop and has
+# not already been told something. Through render_pty because menu() erases its own rows on a
+# pty and the raw transcript still holds them.
+stop_screen="$(launcher_tty '\033[B\n' --stop | render_pty)"
 assert_eq "lifecycle:stop-accepted-stops-the-container" "exited" "$(shim_state)"
+assert_says_key "lifecycle:stop-accepted-says-stopping" status.stopping "$stop_screen"
 
 # Idempotent, because the student most likely to run it is the one who has already run it: the
 # refusal named --stop, they ran it, and they are trying again.
@@ -550,9 +557,10 @@ assert_not_contains "race:lost-create-does-not-leak-podmans-output" \
 shim_new
 shim_set state absent
 shim_set run_hold 1
-# OUTPUT KEPT rather than discarded (#220). Now that the clean exit has its own wording, this
-# is the cheapest place that still checks the OLDER one is printed at all -- every other
-# assertion on status.stopping lives in the container tier.
+# OUTPUT KEPT rather than discarded, and now to assert on what it does NOT say (#285).
+# --rebuild says nothing on the way out on this path either: a student who interrupted a
+# rebuild never started a container, so there is nothing to announce the stopping of. The
+# cheap lane's check that the line is printed at all moved to --stop above.
 PATH="$SHIM:$PATH" "${LAUNCHER_DIR:-$REPO}/cs193v" --rebuild >"$SHIM/rb.out" 2>&1 &
 rb=$!
 container_is_up() { [ "$(cat "$SHIM/state" 2>/dev/null)" = running ]; }
@@ -566,11 +574,12 @@ if wait_until 30 container_is_up; then
     # would tell a script that the rebuild succeeded. Per-signal, so a caller can still tell a
     # Ctrl-C (130) from a closed window (129).
     assert_eq "interrupt:exits-128-plus-the-signal" "143" "$rb_rc"
-    # A SIGNAL IS NOT A CLEAN EXIT. This path is rebuild_interrupted, which calls stop_container
-    # bare, so it keeps the wording it always had -- and must not borrow the line that means
-    # "the student typed exit and is watching", because nobody typed anything here.
+    # NEITHER WORDING BELONGS HERE, and they are refused for two different reasons.
+    # status.stopping is suppressed because this student never started a container (#285), the
+    # same reason the ordinary --rebuild ending is silent; status.exiting would be a lie,
+    # because nobody typed exit -- a signal is not a clean exit.
     rb_out="$(cat "$SHIM/rb.out" 2>/dev/null)"
-    assert_says_key     "interrupt:the-signal-path-still-says-stopping" \
+    assert_says_not_key "interrupt:the-signal-path-is-quiet-too" \
                         status.stopping "$rb_out"
     assert_says_not_key "interrupt:the-signal-path-does-not-claim-a-clean-exit" \
                         status.exiting  "$rb_out"
@@ -578,7 +587,7 @@ else
     kill "$rb" 2>/dev/null
     fail "interrupt:stops-the-container-it-created" "podman run never reported a container up"
     fail "interrupt:exits-128-plus-the-signal" "see above"
-    fail "interrupt:the-signal-path-still-says-stopping" "see above"
+    fail "interrupt:the-signal-path-is-quiet-too" "see above"
     fail "interrupt:the-signal-path-does-not-claim-a-clean-exit" "see above"
 fi
 rm -f "$SHIM/run_hold"
@@ -691,12 +700,12 @@ assert_eq "rebuild:current-recipe-builds-nothing" "0" "$(shim_count '^build ')"
 assert_eq "rebuild:keeps-volumes" "0" "$(shim_count '^volume rm')"
 out="$(launcher --rebuild)"
 assert_says_key "rebuild:says-logins-kept" status.rebuilding "$out"
-# ...AND IT MUST NOT CELEBRATE A BUILD IT DID NOT DO. One verb both builds and merely recreates,
-# so the box is gated on $BUILT: a two-second recreate ending in "Build Successful!" would
-# congratulate the launcher for nothing and send the student into an environment it did not
-# prepare.
-assert_says_not "rebuild:no-box-when-nothing-was-built" "Build Successful" "$out"
-assert_says_not_key "rebuild:no-vibecoding-when-nothing-was-built" status.build-succeeded "$out"
+# ...AND THE RECREATE IS THE ARM THAT HAS TO SAY SOMETHING. One verb both builds and merely
+# recreates, and since #285 a run that BUILT ends on the meter's own "Ready." with nothing
+# after it -- so $BUILT gates status.rebuilt rather than a success box. This is the recreate
+# half of that gate; build:a-build-does-not-also-say-done is the other, and it takes both,
+# because a gate asserted from one side can invert with nothing going red.
+assert_says_key "rebuild:a-recreate-says-done" status.rebuilt "$out"
 
 # ...AND THE EXPENSIVE PATH HAPPENS WITHOUT BEING ASKED FOR. A moved recipe makes the same
 # command build, with no prompt: the student typed the verb whose job is to make the container
@@ -1211,8 +1220,9 @@ assert_eq "exit:the-last-line-a-student-sees" \
 # first the way it can on a screen.
 assert_eq "exit:the-exit-line-is-said-once" "1" \
           "$(printf '%s\n' "$raw" | grep -cF "$(msg_text status.exiting)")"
-# And the older wording is gone from THIS path, which is the whole job of stop_container's
-# --quiet. The signal paths keep it; interrupt:the-signal-path-still-says-stopping covers that.
+# And the older wording is gone from THIS path, which is what stop_container's --quiet is for.
+# A closed window and a Ctrl-C in a session keep it (70-sighup.sh), and so does --stop, which
+# lifecycle:stop-accepted-says-stopping covers; the rebuild paths no longer do (#285).
 assert_says_not_key "exit:the-old-line-is-gone-on-the-clean-path" status.stopping "$screen"
 
 # A TTY ON STDIN BUT NOT ON STDOUT, which is a shape a student reaches by running
@@ -1312,29 +1322,28 @@ assert_match    "build:progress-reaches-the-last-step"    '\] +23/23' "$out"
 # this is normal and interruptible.
 assert_says_key "build:still-explains-the-wait" status.building "$out"
 
-# --- #22: it must say it worked ------------------------------------------------
-assert_says "build:announces-success"        "Build Successful"      "$out"
-# BY KEY, and one assertion where there were two: "./cs193v" and "Happy vibecoding" are the
-# command and the sign-off of one message, and the whole body carries both.
-assert_says_key "build:success-names-the-next-command" status.build-succeeded "$out"
-# Drawn in the same box everything else is drawn in, and closed -- see 20-messages.sh, which
-# owns box(). Asserted here too because this is the FIRST non-error thing ever put in one.
+# --- #22, then #285: it must say it worked, and say it in one row --------------
+# THE SUCCESS BOX IS GONE (#285). It told the student to run ./cs193v, which contradicts the
+# installer's own sign-off -- and since course-install.sh builds by calling --rebuild, both
+# landed on the same screen, the wrong one first. What reports the outcome now is the meter's
+# own closing row, pinned by build:finished-block-collapses-to-one-row and by
+# build:creation-step-reports-done below.
 #
-# THIS COMMENT USED TO CLAIM require_cmd COVERED IT, and the claim was the defect (#79). It said
-# that swallowing box_problems' failure "would turn the checker could not run into a pass", which
-# is true, and then guarded it with `command -v` -- which is satisfied by an interpreter that
-# exists and cannot run a program. Measured: with a sabotaged python3 first on $PATH the guard
-# passed and this assertion went vacuous anyway.
-#
-# What actually covers it is box_problems answering with $CHECKER_DIED, which every assertion
-# below refuses. require_python3 is the other half: it runs a program rather than looking one up.
+# SO WHAT IS LEFT HERE IS THE REGRESSION GUARD, and it is about box ART rather than about prose:
+# nothing the launcher draws on a successful build is boxed. A returning celebrate() reddens
+# this whatever it is given to say, which a needle quoting the old message could not do.
+assert_not_contains "build:nothing-is-boxed-after-a-successful-build" '┏' "$out"
+# ...AND A RUN THAT BUILT DOES NOT ALSO SAY "Done." $BUILT gates status.rebuilt now, and
+# rebuild:a-recreate-says-done is the other half. Both, because a gate asserted from one side
+# can invert with nothing going red.
+assert_says_not_key "build:a-build-does-not-also-say-done" status.rebuilt "$out"
+# THE BARE require_python3 IS LOAD-BEARING, and #79 is why. box_problems answers with
+# $CHECKER_DIED, which every assertion below refuses; `command -v python3` would not be enough,
+# being satisfied by an interpreter that exists and cannot run a program -- measured, with a
+# sabotaged python3 first on $PATH a guard written that way passed and the assertion went
+# vacuous anyway. This runs one instead. It kept its place when the assertion it was written
+# beside (build:success-box-is-closed) went with the box.
 require_python3
-probs="$(printf '%s\n' "$out" | box_problems)"
-if [ -z "$probs" ]; then
-    pass "build:success-box-is-closed"
-else
-    fail "build:success-box-is-closed" "$probs"
-fi
 
 # --- #24: the container-creation step must not go silent -----------------------
 # `podman run` is given up to 180 seconds and, on a machine slow enough to need them, said
@@ -1661,7 +1670,9 @@ Successfully tagged localhost/cs193v:local'
 raw="$(launcher_tty '' --rebuild --no-cache)"
 screen="$(printf '%s' "$raw" | render_pty)"
 pairs="$(printf '%s' "$raw" | frame_pairs)"
-assert_says     "mismatch:build-still-succeeds"  "Build Successful" "$screen"
+# BY KEY, against the meter's closing word rather than the success box #285 removed. Same claim:
+# the mismatch switches the labels off and the build still finishes.
+assert_says_key "mismatch:build-still-succeeds"  status.created     "$screen"
 assert_match    "mismatch:bar-and-count-survive" '\] +4/4'          "$screen"
 # No CONTAINERFILE label survives the mismatch. Two things deliberately still do, and naming
 # them is the point of matching on the labels themselves rather than on "any caption":
@@ -1719,7 +1730,7 @@ assert_match "retry:marker-appears-beside-the-bar" '\(retrying: 1/2\)' "$pairs"
 # RETRIES, not attempts: tries=3 means two of them, and a student who sees 2/2 has seen the
 # last one rather than a budget with one still in hand.
 assert_not_match "retry:marker-counts-retries-not-attempts" '\(retrying: [0-9]+/3\)' "$pairs"
-assert_says "retry:build-still-succeeds" "Build Successful" "$screen"
+assert_says_key "retry:build-still-succeeds" status.created "$screen"
 # retry:no-yellow-prose-under-the-meter AND retry:no-retry-warning-text WERE HERE, searching
 # the screen for "Trying again" and "did not finish". Neither string exists anywhere in this tree
 # -- not in cs193v, not in any catalogue -- so neither assertion could fail on any input. What
@@ -1822,7 +1833,8 @@ assert_not_match "build-failed:no-spinner-frame-left-behind" '[⣾⣽⣻⢿⡿�
 # argument gave for not doing that is what TAILBOX_LID is for.
 
 # THE TITLELESS LID IS THIS BOX'S SIGNATURE, and it is what tells it apart from a message box on
-# the same screen. box() draws "┏━━ STOP " and "┏━━ Build Successful! "; this one has no title, so
+# the same screen. box() draws a title straight after the corner -- "┏━━ STOP " on the failure
+# path, and since #285 that is the only message box a build can leave; this one has no title, so
 # a run of bars straight after the corner can only be this.
 #
 # DEFINED ABOVE render_pty_mid because that function now selects on it.
@@ -1889,7 +1901,9 @@ mid_frame() {                         # mid_frame ROW2 -> one two-row frame, cur
 mid_boxed="$(mid_frame "$TAILBOX_LID STALE-BOX")$MID_J$(mid_frame "$TAILBOX_LID STALE-BOX")$MID_J$(mid_frame "$TAILBOX_LID FRESH-BOX")"
 mid_close="$(mid_frame 'CLOSED')"
 mid_extra="$(mid_frame 'CREATING')"
-mid_tail='┏━━ Build Successful! ━━┓'
+# A TITLED box, standing for whatever message box follows the build -- STOP, since #285 took the
+# success box away. Synthetic, so what matters about it is only that it is not TAILBOX_LID.
+mid_tail='┏━━ STOP ━━┓'
 
 mid_screen() { printf '%s' "$1" | render_pty_mid | render_pty; }
 
@@ -2052,10 +2066,13 @@ assert_eq "tailbox:lid-sits-two-rows-under-the-bar" "2" "$gap"
 screen="$(printf '%s' "$raw" | render_pty)"
 assert_not_contains "tailbox:gone-after-a-successful-build" "$TAILBOX_LID" "$screen"
 assert_not_contains "tailbox:no-build-output-survives-the-collapse" 'ZZTOPMARKER' "$screen"
-# The box that IS left is the green one, and it is still square: the ESC[J that erased eight rows
-# had to stop at the right one.
-assert_contains "tailbox:the-box-left-after-success-is-the-success-box" 'Build Successful' "$screen"
-assert_eq "tailbox:success-box-is-intact" "" "$(printf '%s\n' "$screen" | box_problems)"
+# NO BOX IS LEFT AT ALL since #285, so what these two used to pin -- that the ESC[J which erased
+# eight rows stopped at the right one -- is asserted against the row BELOW the erase instead of
+# against the box that used to follow it. box_problems cannot do that half any more: it reports
+# "no complete box found" as a problem, so on this screen it would fail rather than answer.
+assert_not_contains "tailbox:nothing-boxed-survives-a-successful-build" '┏' "$screen"
+assert_match "tailbox:the-erase-stops-at-the-finished-row" \
+             "✓ .*\] +[0-9]+/[0-9]+  $(msg_text status.created)" "$screen"
 
 shim_new
 shim_set state absent

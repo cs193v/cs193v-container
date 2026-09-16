@@ -649,7 +649,8 @@ BUILD_NOTE="$BUILD_LOG.note"
 # wrong one and losing the output you were trying to read. The LOCAL name stays BUILD_RAW, since
 # in this file it gates exactly one thing.
 BUILD_RAW="${CS193V_SETUP_RAW_LOG:-}"
-# Set by build_image on success, read by verb_rebuild: only a run that really built celebrates.
+# Set by build_image on success, read by verb_rebuild: a run that really built has the meter's
+# own "Ready." to end on, so it is the recreate that has to say status.rebuilt.
 BUILT=''
 # Where the progress meter's reader and its animator meet. Keyed by TUNNEL_ID like the rest,
 # so two instances on one machine do not redraw each other's bar. See meter_start.
@@ -1146,8 +1147,8 @@ build_image() {
         # The meter deliberately stays RUNNING on success: create_container is the next
         # step and shares this bar (issue #24), so the line is closed there rather than here.
         #
-        # BUILT earns the success box: verb_rebuild recreates whether or not it built, and a
-        # two-second recreate must not announce "Build Successful!".
+        # BUILT tells the two endings apart: verb_rebuild recreates whether or not it built, and
+        # only the recreate says status.rebuilt -- a build ends on the meter's "Ready." instead.
         #
         # build_note_fold on BOTH arms, before anything else looks at the log: a mismatch note
         # is worth having whether the build then succeeded or failed, and on the failing arm the
@@ -1971,8 +1972,14 @@ SESSION_LEFT=''
 # lost either way. Making that work would mean TERMing the container's own processes before the
 # stop; deliberately not done, see .private/README.md.
 stop_container() {                     # stop_container [--quiet]
-    # --quiet SUPPRESSES THE ANNOUNCEMENT AND NOTHING ELSE. The clean-exit path has already told
-    # the student it is exiting, and would otherwise say the same thing twice in two wordings.
+    # --quiet SUPPRESSES THE ANNOUNCEMENT AND NOTHING ELSE, and two kinds of caller ask for it.
+    # The clean-exit path has already told the student it is exiting, and would otherwise say the
+    # same thing twice in two wordings (#220). The two rebuild paths have the opposite problem
+    # (#285): the container they stop is one this script created and nobody was ever in, so
+    # naming it tells a student who typed --rebuild about something they never started.
+    #
+    # What is left loud is every path where the student's own container really is going away: a
+    # closed window, a Ctrl-C in a session, and `cs193v --stop`.
     #
     # A FLAG RATHER THAN THE MESSAGE KEY, which was the first shape tried and is a trap worth
     # naming: 20-messages.sh reconciles this file against `grep 'msg +KEY'`, so reaching the key
@@ -2054,8 +2061,11 @@ shell_teardown() {
 #
 # Signals only, not EXIT: create_container's own failures (ENOSPC, a podman run that never came
 # up) die with nothing running, so EXIT would buy nothing and would shadow transient_cleanup.
-# The animator goes FIRST -- it redraws ten times a second and would otherwise paint over the
-# "stopping" line -- and the exit then lets the EXIT trap run it again, which is harmless.
+# The animator goes FIRST because it redraws ten times a second, so anything printed while it is
+# alive gets overdrawn -- and the exit then lets the EXIT trap run it again, which is harmless.
+# Nothing on this path prints any more (#285 quieted the stop below), which does NOT make the
+# order free: the animator owns the cursor and the row it is drawing on, so it has to stop
+# before the shell exits into whatever the student's terminal does next.
 #
 # The status is passed in rather than fixed at 130, because all three signals arrive here and
 # 128+signal is what a caller reads to tell "the student pressed Ctrl-C" from "the window was
@@ -2069,7 +2079,10 @@ rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
     # is not up, and the interrupt leaves running exactly what this handler exists to stop.
     RT_SPIN=''
     transient_cleanup
-    stop_container
+    # --quiet for the same reason verb_rebuild's stop is quiet (#285): a student who interrupted
+    # a rebuild never started a container, so "Stopping the container..." names something they
+    # have never seen. The stop itself is not optional -- see verb_rebuild.
+    stop_container --quiet
     exit "${1:-130}"
 }
 
@@ -2732,23 +2745,32 @@ verb_rebuild() {
     remove_container
     [ -n "$wipe" ] && remove_volumes
     # Cleared on the line after stop_container rather than left installed: past there is nothing
-    # running to clean up, and an interrupt during the success box should behave like an
+    # running to clean up, and an interrupt during the closing line should behave like an
     # interrupt anywhere else. Same shape as open_shell's handoff.
     trap 'rebuild_interrupted 130' INT
     trap 'rebuild_interrupted 143' TERM
     trap 'rebuild_interrupted 129' HUP
     create_container
-    stop_container
+    # --quiet, BECAUSE THE STUDENT NEVER STARTED IT (#285). The stop is not optional -- see the
+    # note above the dispatch -- but announcing it names a container they have not seen: the one
+    # this verb created two lines ago and nobody was ever in.
+    stop_container --quiet
     trap - INT TERM HUP
 
-    # Not one if/elif chain ending in the box: the logout has to be reported whether or not a
-    # build happened, or a --logout that also built would never mention it.
+    # A RUN THAT BUILT SAYS NOTHING HERE (#285), and that is not an omission: create_container
+    # has just closed the meter on "Ready.", which is the completion signal, and the green
+    # "Build Successful!" box that used to follow it told the student to run ./cs193v -- the
+    # wrong instruction, arriving just before course-install.sh's own sign-off names the
+    # CS193V Development Environment shortcut instead. The recreate arm keeps its line, having
+    # no meter and nothing else to show.
+    #
+    # Not one if/elif chain: the logout has to be reported whether or not a build happened, or a
+    # --logout that also built would never mention it.
     if [ -n "$wipe" ]; then
         info "$(msg status.full-rebuilt)"
     elif [ -z "$BUILT" ]; then
         info "$(msg status.rebuilt)"
     fi
-    [ -n "$BUILT" ] && msg status.build-succeeded | celebrate "Build Successful!"
     return 0
 }
 
