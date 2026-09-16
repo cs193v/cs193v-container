@@ -79,6 +79,23 @@ wine_knob() {                         # wine_knob NAME VALUE
     printf '%s\n' "$2" > "$WINE_CASE/$1"
 }
 
+# ─── the .cmd's OWN ENVIRONMENT, for the staff overrides (#280) ────────────────
+# WHY THIS HAD TO EXIST. wine_run's podman line named two variables and no more, so a case could
+# arrange every FILE the .cmd reads and nothing it inherits -- which is fine until the thing under
+# test is a variable. CS193V_TARBALL and CS193V_INSTALLER_URL are both read by the .cmd itself, so
+# a case that cannot set one cannot drive either override at all.
+#
+# THE PATH IS ALREADY PROVEN: wine_run passes CS193V_FAKE_DIR the same way, and win-fake.h:36
+# reads it with getenv() from inside wine, so a POSIX variable set in the container really does
+# reach the Windows environment cmd.exe sees.
+#
+# A FILE RATHER THAN MORE `-e` FLAGS, because the podman line is assembled before a case exists
+# and the guest script is where the case's own arrangements are already unpacked. wine_new mktemps
+# a fresh case directory, so there is nothing to reset between cases.
+wine_env() {                          # wine_env NAME VALUE
+    printf '%s=%s\n' "$1" "$2" >> "$WINE_CASE/harness.env"
+}
+
 # Seed the registered-distribution list. With no arguments the machine has none, which is the
 # state a fresh WSL install is in -- and the state in which `wsl -l -q` exits 0 with EMPTY output
 # rather than failing, which is why the installer cannot use its exit code to answer the question.
@@ -250,6 +267,14 @@ wine_run() {                          # wine_run -> populates WINE_OUT / WINE_ER
             # "Can not recognize ... as an internal or external command" (WineHQ 37789), so a
             # case testing a download folder called "cs193v (1)" would fail in the HARNESS and
             # look like a defect in the installer. Measured; this is the workaround.
+            # WHAT wine_env ASKED FOR, exported so cmd.exe inherits it. `set -a` rather than a
+            # read loop: the file is written by wine_env alone, one NAME=VALUE per line, and a
+            # value with a space in it is a case the .cmd deliberately does not support.
+            if [ -f /tmp/case/harness.env ]; then
+                set -a
+                . /tmp/case/harness.env
+                set +a
+            fi
             cd "/tmp/case/'"$WINE_DL_NAME"'" || exit 97
             wine64 cmd /c install-cs193v-windows.cmd </dev/null >/tmp/o 2>/tmp/e
             rc=$?

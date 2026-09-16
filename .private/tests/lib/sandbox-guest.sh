@@ -12,7 +12,7 @@
 
 set -u
 
-INST=/work/installer.sh
+INST=/work/install-cs193v.sh
 REP=/var/tmp/report
 BASE="$REP/baseline"
 
@@ -150,8 +150,8 @@ arrange_prereqs() {
 # bootstrap does, wget is a first-class arm beside curl rather than a fallback behind it, and
 # the arm has a fixture that reaches it -- sb-wget installs through it end to end, and sb-nodl
 # takes both tools away and asserts the refusal. Measured while building it: wget 1.21.4 exits 1
-# on a file:// URL and writes nothing, which is why that case needs the loopback origin and why
-# the six file:// sites are left alone.
+# on a file:// URL and writes nothing, which is why that case needs the loopback origin while
+# every other case hands CS193V_TARBALL a bare path and is copied rather than downloaded (#280).
 case "${SB_DISTRO:-debian}" in
     fedora) PM_RM='dnf remove -y'
             # podman ALONE, unlike Debian. There the setuid helpers are a separate `uidmap`
@@ -277,13 +277,14 @@ sudo_state() {
 }
 
 # THE INSTALLER WHERE A STUDENT WOULD HAVE IT. It is bind-mounted read-only at
-# /work/installer.sh, and landing in $HOME with nothing visible is both unhelpful and
-# unfaithful: a student downloads install-cs193v.sh into a directory and runs
-# `bash install-cs193v.sh` from there. A SYMLINK rather than a copy, so editing
-# .private/install-cs193v.sh on the host still reaches this run with no rebuild.
+# /work/install-cs193v.sh -- the shipped file byte for byte since #280, where it used to be a
+# sed'd copy -- and landing in $HOME with nothing visible is both unhelpful and unfaithful: a
+# student downloads install-cs193v.sh into a directory and runs `bash install-cs193v.sh` from
+# there. A SYMLINK rather than a copy, so editing .private/install-cs193v.sh on the host still
+# reaches this run with no rebuild.
 link_installer() {
     [ -e "$HOME/install-cs193v.sh" ] && return 0
-    ln -sf /work/installer.sh "$HOME/install-cs193v.sh" 2>/dev/null || true
+    ln -sf /work/install-cs193v.sh "$HOME/install-cs193v.sh" 2>/dev/null || true
 }
 
 # Taken once, on the first command that needs it, so `state` before anything is still a true

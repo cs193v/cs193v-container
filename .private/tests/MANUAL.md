@@ -1066,6 +1066,25 @@ settle, and one it should not be trusted on:
      own tarball URL 302s to `codeload.github.com` instead. Try it from campus wifi and from a
      dorm room, not just from a staff machine. `00-release-gates.sh` fetches the URL, but only
      from wherever the release run happens.
+
+   **And since #280 you can run all of that against your own working tree.** Every item above used
+   to mean testing whatever is on `main`, because stage one fetches `install-cs193v.sh` from
+   `raw.githubusercontent.com` and stage two then fetches the course tarball from GitHub — so a
+   change you had not pushed was not in the thing you were testing. Two variables fix that, and
+   both are read on the Windows box before anything is fetched:
+
+   ```
+   set CS193V_INSTALLER_URL=file:///mnt/c/Users/you/Downloads/install-cs193v.sh
+   set CS193V_TARBALL=/mnt/c/Users/you/Downloads/course.tar.gz
+   install-cs193v-windows.cmd
+   ```
+
+   Both values are LINUX paths — they are read inside the distro — and neither may contain a space,
+   `&`, `|`, `>`, `^` or `%`, because the `.cmd` passes them bare. Build the tarball with
+   `.private/tests/make-tarball.sh`, and copy both it and `install-cs193v.sh` onto the Windows drive
+   first. `.private/README.md` has the full rules. The `--tier windows` cases `win-tarball:*` and
+   `win-url:*` prove the two variables reach the command line; what they cannot prove — and what
+   this list is for — is that the real `wsl.exe` and the real curl do the right thing with them.
 4. **The Tier C strings** in `fixtures/wsl-messages.2.9.8` — `net.exe` is a closed component with
    no published exit-code contract, so its wording is third-party-attested only. The suite gates on
    its exit codes and matches prose loosely. *Verify once:* run `net session` elevated, unelevated,

@@ -121,6 +121,17 @@ WHAT THE MACHINE IS LIKE
   --update-fails [RC]  \`wsl --update\` fails
   --feature-fails [RC] \`wsl --install --no-distribution\` fails
 
+WHERE THE CODE COMES FROM  (#280)
+  --tarball PATH       set CS193V_TARBALL, so stage two installs from a local tarball instead
+                       of downloading one. A LINUX path, since it is read inside the distro --
+                       /mnt/c/... is how you name a file on the Windows drive. Build one with
+                       tests/make-tarball.sh.
+  --stage2-url URL     set CS193V_INSTALLER_URL, so stage one fetches install-cs193v.sh from
+                       there instead of raw.githubusercontent.com. Note the fake curl serves
+                       stage2.src whatever it is asked for, so here this changes what it is
+                       ASKED for and nothing else -- watch it with \`wincmd log\`.
+  Neither value may contain a space, &, |, >, ^ or % : they travel bare on a cmd.exe line.
+
 WHICH COPY OF THE INSTALLER
   --rev REV            take the .cmd from a git revision instead of the working tree.
                        This is how you watch the defects for yourself:
@@ -157,6 +168,8 @@ KEEP=no
 CMD=''
 KNOBS=''                              # accumulated "name=value" pairs, applied below
 DISTROS='CS193V'
+OVTARBALL=''                          # CS193V_TARBALL, if --tarball asked for one (#280)
+OVURL=''                              # CS193V_INSTALLER_URL, if --stage2-url did
 
 die_usage() { printf '%s\n\n' "$1" >&2; usage >&2; exit 2; }
 setk() { KNOBS="$KNOBS $1=$2"; }
@@ -195,6 +208,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --dir)            needval --dir "${2:-}"; shift; DLNAME="$1" ;;
         --dir=*)          DLNAME="${1#--dir=}" ;;
+        --tarball)        needval --tarball "${2:-}"; shift; OVTARBALL="$1" ;;
+        --tarball=*)      OVTARBALL="${1#--tarball=}" ;;
+        --stage2-url)     needval --stage2-url "${2:-}"; shift; OVURL="$1" ;;
+        --stage2-url=*)   OVURL="${1#--stage2-url=}" ;;
         --no-curl)        setk wsl.curl.missing 1 ;;
         --apt-fails)      setk wsl.curl.missing 1
                           optval -1 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
@@ -313,6 +330,13 @@ set -- --label "cs193v.sandbox=${USER:-unknown}" -i --name "$NAME_SB" --network=
 [ -t 0 ] && set -- "$@" -t
 [ "$KEEP" = no ] && set -- "$@" --rm
 set -- "$@" -e XDG_RUNTIME_DIR=/tmp/xdg -e "SB_DL=$DLNAME"
+# THE TWO STAFF OVERRIDES, AND NOTHING FORWARDS THEM BY HAND (#280). They go into the container's
+# environment, and `wincmd run` starts cmd.exe without clearing it -- so wine hands them to the
+# .cmd the same way it hands over CS193V_FAKE_DIR. Only set when asked: an empty CS193V_TARBALL
+# would still be "defined" as far as `if defined` is concerned, which would put an empty
+# assignment on both hand-over lines.
+[ -n "$OVTARBALL" ] && set -- "$@" -e "CS193V_TARBALL=$OVTARBALL"
+[ -n "$OVURL" ]     && set -- "$@" -e "CS193V_INSTALLER_URL=$OVURL"
 set -- "$@" -v "$CASE:/work:ro$VT_MOUNT_Z"
 set -- "$@" -v "$CASE/wincmd:/usr/local/bin/wincmd:ro$VT_MOUNT_Z"
 set -- "$@" "$(fixture_tag wine)"

@@ -231,6 +231,22 @@ assert_eq "bootstrap:sources-nothing" "" \
 assert_eq "bootstrap:evals-nothing" "" \
           "$(printf '%s\n' "$boot_code" | grep -nE '(^|[^[:alnum:]_])eval[[:space:]]' || true)"
 
+# ─── and the environment it reads, named so that a fourth variable is a decision  (#280) ───────
+# THE SURFACE, FROZEN. Nothing used to freeze it, and the cost of that showed up the first time
+# anyone had to describe it: a plan for #280 recorded the bootstrap's switches as CS193V_DIR and
+# CS193V_WINDOWS, neither of which this file has ever read -- both are course-install.sh's. This
+# is the file a student checks a SHA-256 against, so what it consults is part of what reading it
+# tells you, and an input that arrives without anybody noticing is what this refuses.
+#
+# DEFAULTED READS ARE THE WHOLE POPULATION, and that is a property of the file rather than a
+# convenience: `set -u` is on at :40, so a variable the bootstrap does not itself set has to be
+# written `${NAME:-...}` or the script dies on the machine that lacks it. Anything the file
+# assigns before reading is not an input and correctly does not appear here.
+boot_env="$(printf '%s\n' "$boot_code" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' \
+            | sed 's/^\${//; s/:-$//' | LC_ALL=C sort -u | do_tr '\n' ' ')"
+assert_eq "bootstrap:reads-only-these-env-vars" \
+          "CS193V_PROVISION CS193V_TARBALL TMPDIR " "$boot_env"
+
 # ─── the temp tree's name is a contract between the two files  (#221) ──────────
 # ONE FILE MAKES THE DIRECTORY AND THE OTHER RUNS `rm -rf` ON IT. The bootstrap creates it with
 # `mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX"`; course-install.sh will only remove a path
@@ -1074,19 +1090,33 @@ for v in $sshverbs; do
 done
 assert_eq  "fake-ssh:answers-every-control-verb-the-launcher-sends" "" "$unanswered"
 
-# ...and no run in the cheap lane may use the UNEDITED installer, whose TARBALL is the real
-# GitHub URL. That is how the shim tier came to make a live network request on every run,
-# in a tier whose own header says "no podman, no image, no network", with `|| true` hiding
-# what came back. Every case now runs a copy whose TARBALL is a file:// path, so the rule
-# is simply that the original is never handed to the door.
+# ...and every run in the cheap lane has to repoint the download. As shipped, the bootstrap's
+# TARBALL is the real GitHub URL, and that is how the shim tier came to make a live network
+# request on every run -- in a tier whose own header says "no podman, no image, no network" --
+# with `|| true` hiding what came back.
 #
-# Assembled second-literal-first for the same reason as the needle above: written in one
-# piece this line would match itself.
-net_arg='install-cs193v.sh'; net_fn='installer_host'
+# THE RULE USED TO BE A PROXY AND IS NOW THE THING ITSELF (#280). It used to read "the pristine
+# file is never handed to the door", which decided "unedited" from the FILENAME on the call line
+# and never looked at what ran. That was wrong in both directions once CS193V_TARBALL existed:
+# the natural call names the real file and is perfectly safe, while the copies it used to insist
+# on were, with their sed dropped, byte-identical to the original -- so the rule would have gone
+# GREEN for a call that really did reach GitHub. What it was always after is that the download is
+# repointed, and that is now visible on the call line, so that is what this asserts.
+#
+# installer_tty IS INCLUDED, AND WAS NOT BEFORE. The sibling rule above whitelists both doors by
+# name; this one named only installer_host, so a case written as `installer_tty ...
+# install-cs193v.sh` sailed past it. installer_host_rc needs no separate mention -- installer_host
+# is a prefix of it.
+#
+# Assembled second-literal-first for the same reason as the needle above: written in one piece
+# this line would match itself. net_arg FIRST is what does it -- the needle is function-then-file,
+# so a line carrying the filename ahead of the function name cannot match.
+net_arg='install-cs193v.sh'; net_fn='installer_(host|tty)'; net_env='CS193V_TARBALL='
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-bare="$(grep -Hn "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
-        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
-assert_eq "installer-door:never-runs-the-unedited-installer" "" "$bare"
+bare="$(grep -HnE "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
+        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+        | grep -v "$net_env" || true)"
+assert_eq "installer-door:every-run-repoints-the-download" "" "$bare"
 
 # ─── one place decides what a fixture machine needs ────────────────────────────
 # The install tier and the hand-driven sandbox both run the same fixture images, and each used

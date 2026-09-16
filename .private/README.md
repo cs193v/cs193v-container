@@ -210,10 +210,54 @@ It is the one file students read, so keep it readable in one sitting:
 - **It must not learn what distro it is on.** `distro_family`/`distro_packages` live in the
   installer proper and are emphatic that there is one copy; the bootstrap's one refusal that
   would want them names both package managers and lets the student pick.
-- **`TARBALL=` stays a literal one-line assignment.** Six places in the test suite repoint the
-  download at a local tarball by rewriting `^TARBALL=.*`. A composed URL would leave all six
-  matching nothing, silently, and the cheap test lane would go back to making live requests to
-  GitHub.
+- **It reads three environment variables and no arguments.** `TMPDIR`, `CS193V_PROVISION` and
+  `CS193V_TARBALL`, and `10-static.sh`'s `bootstrap:reads-only-these-env-vars` asserts that list,
+  so a fourth is a deliberate edit in two places. Nothing froze this before #280, and the cost
+  showed the first time anybody wrote the surface down: the plan for that issue recorded it as
+  `CS193V_DIR` and `CS193V_WINDOWS`, neither of which this file has ever read.
+- **`TARBALL=` stays a literal one-line assignment.** It used to be load-bearing because six
+  places in the test suite repointed the download by rewriting `^TARBALL=.*`; `CS193V_TARBALL`
+  replaced all six in #280, so nothing edits the line any more. Keep it one line regardless — it
+  is the value a commit pin (#232) would replace, and one literal is what makes that a one-line
+  change.
+
+#### Installing from a local copy, for testing  (#280)
+
+Two variables, because a Windows install fetches twice — the `.cmd` fetches `install-cs193v.sh`,
+and `install-cs193v.sh` fetches the course tarball.
+
+- **`CS193V_TARBALL`** — read by `install-cs193v.sh`. **With `://` in it** it is used verbatim as
+  the download URL; **without**, it is treated as a local path and *copied*. Prefer the bare path:
+  wget has no `file://` scheme (measured — GNU wget 1.21.4 given `file:///tmp/x.txt` exits 1 and
+  writes nothing), so a `file://` value works on a Mac and fails on the Ubuntu desktop image,
+  which ships wget and no curl. The bootstrap prints an unmissable banner naming the source
+  whenever this is set.
+- **`CS193V_INSTALLER_URL`** — read by `install-cs193v-windows.cmd`, replacing the whole stage-two
+  URL. curl inside the distro takes `file:///mnt/c/…`, so the real download path still runs. It
+  needs no banner: the `.cmd` already echoes `%INSTALLER_URL%` to the student while it downloads.
+
+Build something to point at with **`.private/tests/make-tarball.sh`**, which prints the path of a
+tarball shaped the way GitHub's archive endpoint shapes it:
+
+```sh
+CS193V_TARBALL="$(.private/tests/make-tarball.sh)" bash .private/install-cs193v.sh
+```
+
+It stages **tracked** edits only (`git archive` over `git add -u`), so a file you have created but
+not `git add`ed is silently absent. The directory it leaves in `$TMPDIR` is yours to delete.
+
+**On a cmd.exe line neither value may contain a space, `&`, `|`, `>`, `^` or `%`.** The `.cmd`
+passes them bare — `!` is safe, because that file refuses `EnableDelayedExpansion`. This is a
+staff path, so the restriction is documented rather than enforced.
+
+**Neither is a privilege boundary, and neither should be argued as one.** Anyone who can set a
+variable in a student's shell can also edit the script they are about to run. What #232's pin
+defends against is a compromised *repository*; these do not weaken that. The banner exists so a
+puzzling screenshot is diagnosable, not to stop anybody.
+
+Driving it under wine, for the Windows half: `tests/win-sandbox.sh --tarball PATH` and
+`--stage2-url URL`. Inside the sandbox tiers `tests/install-sandbox.sh` sets `CS193V_TARBALL`
+itself, so a hand-driven run installs the tree you just built rather than the published one.
 
    **And the one thing no test can see:** the `.cmd` on the website is a hand-uploaded copy, so
    it is the only artefact that can drift out of step with the repo. **Re-upload it whenever

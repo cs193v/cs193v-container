@@ -475,7 +475,7 @@ assert_eq "mac-vm:never-exceeds-the-cap" "8192" "$(vm_for 131072)"
 # ─── the course files, served from a local tarball  (§A.12 needs this too) ─────
 # BUILT BEFORE THE CONSENT CASES, not beside the idempotency ones it was written for, and
 # that ordering is the whole point: the run below that reaches fetch_files used to use the
-# UNEDITED installer, whose TARBALL is the real GitHub URL. So the cheap lane -- whose own
+# installer as shipped, whose TARBALL is the real GitHub URL. So the cheap lane -- whose own
 # header says "no podman, no image, no network" -- made a live request on every run, with
 # `|| true` hiding whatever came back. Driven, not read: it reaches "Getting the course
 # files" and prints the "Could not download" box in about a second, because a 404 is not a
@@ -490,10 +490,53 @@ assert_eq "mac-vm:never-exceeds-the-cap" "8192" "$(vm_for 131072)"
 export_tree "$TMP/pkg/cs193v-main"
 ( cd "$TMP/pkg" && tar czf "$TMP/course.tar.gz" cs193v-main )
 assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
-cp $PRIVATE/install-cs193v.sh "$TMP/installer.sh"
-edit_sub "$TMP/installer.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-edit_sub "$TMP/installer.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course.tar.gz\""
-assert_ok "install:test-copy-is-valid-bash" bash -n "$TMP/installer.sh"
+
+# ─── and pointed at with CS193V_TARBALL rather than a doctored copy  (#280) ────
+# WHAT USED TO BE HERE. Four lines that copied the bootstrap, rewrote `^TARBALL=.*` at it with
+# sed and rewrote REPO_OWNER as insurance in case that sed ever silently matched nothing -- a
+# hand-rolled version of exactly what CS193V_TARBALL now is. Every door call below passes the
+# variable instead, so there is one mechanism, the student's file is the file under test, and
+# 10-static.sh can see from the call line whether a case repointed the download or not. It could
+# not see that before: the calls named a copy, and a copy with the sed dropped is byte-identical
+# to the original.
+#
+# THE TWO ASSERTIONS THAT WENT WITH THE COPY are not replaced here. `bash -n` on the copy asked
+# whether the sed had produced valid bash; with no sed left, syntax:bootstrap (10-static.sh:94)
+# already asks that of the real file, every run, in milliseconds.
+#
+# A BARE PATH, NOT file://, for the base fixture -- that arm copies rather than downloads, so it
+# behaves the same under curl and wget. The download arm is still driven: run_with_tarball below
+# keeps a file:// URL precisely so download_to's curl path stays exercised in this tier.
+
+# ─── the override says which copy it is using, out loud  (#280) ────────────────
+# WHY A BANNER AT ALL. This variable decides which code a machine is about to run, and it can be
+# set by something other than the person watching the screen -- a shell profile, a wrapper, a
+# stale export in a terminal opened yesterday. The banner is what lets a screenshot of a puzzling
+# install answer "which copy was that?" without anyone having to reconstruct the environment.
+shim_new
+ov="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/ov-said-so")"
+assert_says "override:the-banner-names-the-variable" "CS193V_TARBALL is set" "$ov"
+assert_says "override:the-banner-names-the-source"   "$TMP/course.tar.gz"    "$ov"
+# AND BEFORE THE FETCH, not after it. A banner printed once the files are unpacked answers the
+# question too late for the answer to be worth anything. Line numbers rather than prose order,
+# the same shape 25-installer.sh uses on the .cmd's provisioning sequence.
+ov_ban="$(printf '%s\n' "$ov" | grep -n 'CS193V_TARBALL is set' | head -1 | cut -d: -f1)"
+ov_get="$(printf '%s\n' "$ov" | grep -n 'Getting the course files' | head -1 | cut -d: -f1)"
+assert_ok "override:the-banner-comes-before-the-fetch" \
+          test "${ov_ban:-0}" -gt 0 -a "${ov_ban:-0}" -lt "${ov_get:-0}"
+
+# ─── and a local tarball that is not there refuses without blaming the network  (#280) ──
+# THE COPY ARM HAS ITS OWN REFUSAL, and that is the whole reason it is a separate arm rather than
+# a file:// URL handed to curl. Nothing was downloaded here, so the download wording would send a
+# staff member to look at their wifi for what is a typo in a path.
+shim_new
+ovm="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/no-such-course.tar.gz" CS193V_DIR="$TMP/ov-missing" || true)"
+assert_says     "override:a-missing-local-tarball-is-refused" \
+                "Could not read the course files" "$ovm"
+assert_says     "override:that-refusal-names-the-path-it-tried" "no-such-course.tar.gz" "$ovm"
+assert_says_not "override:that-refusal-does-not-blame-the-network" "network problem" "$ovm"
+assert_no_signoff "override:a-missing-local-tarball-does-not-claim-success" "$ovm"
+assert_no_file  "override:a-missing-local-tarball-changes-nothing" "$TMP/ov-missing"
 
 # ─── the cases that need the installer's LINUX arm ─────────────────────────────
 # platform() (install-cs193v.sh:361) reads the real `uname -s`, and the Linux arm it selects then
@@ -536,7 +579,7 @@ shim_new
 shim_fake_id 1000 nosuchuser-cs193v
 rm -rf "$TMP/boot-consent"; mkdir -p "$TMP/boot-consent"
 run_consent() {
-    installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/consent" TMPDIR="$TMP/boot-consent"
+    installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/consent" TMPDIR="$TMP/boot-consent"
 }
 out="$(run_consent)"
 # BY KEY, AND ONCE. These were "Nothing was changed" and "contact course staff", which are
@@ -573,7 +616,7 @@ fi
 # With podman already present and a subuid range already there, nothing needs consent at
 # all and the installer should say so rather than asking a pointless question.
 shim_new
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noconsent" || true)"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/noconsent" || true)"
 assert_says_key "consent:nothing-to-change-when-already-set-up" step.nothing-to-change \
                 "$out" "$ICAT"
 # THE VERSION IS THE ASSERTION, so it is rendered in rather than quoted with the prose around it.
@@ -594,7 +637,7 @@ assert_says_sub "consent:reports-the-existing-podman" ok.podman "$out" "$ICAT" V
 # platform -- unlike the subuid and apt cases below.
 shim_new
 shim_fake_id 0 root
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/asroot")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/asroot")"
 assert_says "root:refused" "STOP" "$out"
 # BY KEY, NOT BY QUOTED PROSE, and that is the difference between this case and a vacuous one.
 # Written as assert_says "sudo", every assertion here PASSED before the gate existed --
@@ -609,7 +652,7 @@ assert_says_key "root:says-why" err.as-root "$out" "$PRIVATE/course-install-mess
 assert_says_not_key "root:refuses-before-it-looks" step.survey "$out" "$ICAT"
 assert_no_signoff "root:does-not-claim-success" "$out"
 assert_eq "root:exits-1" "1" \
-          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/asroot2")"
+          "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/asroot2")"
 # The three claims the refusal makes implicitly: nothing of the course on the disk, nothing
 # asked of root, and podman never contacted -- the last being what proves it did not get as
 # far as build_image, which is where the objection used to come from. sudo-fake and
@@ -631,7 +674,7 @@ assert_eq "root:asks-podman-nothing" "0" "$(shim_count '.')"
 # guessing that anything not-Darwin is Ubuntu.
 shim_new
 shim_fake_uname FreeBSD amd64
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/bsd")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/bsd")"
 # RENDERED, not truncated. err.unsupported-os LEADS with {{OS}}, so msg_text's needle would be
 # "We have detected your operating system as" and stop -- which is the half that says nothing
 # about what the script supports, and the list is what this assertion is named for. assert_says_sub
@@ -643,7 +686,7 @@ assert_says_sub "unsupported-os:says-what-it-supports" err.unsupported-os "$out"
 assert_says "unsupported-os:names-what-it-found"   "FreeBSD" "$out"
 assert_no_file "unsupported-os:changes-nothing" "$TMP/bsd"
 assert_eq "unsupported-os:exits-1" "1" \
-          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/bsd2")"
+          "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/bsd2")"
 
 # A podman older than MIN_PODMAN. version_lt is unit-tested above over twelve pairs; what
 # this adds is that the comparison is WIRED to a refusal, and that the refusal tells a
@@ -696,7 +739,7 @@ host_upgrade_cmd() {                  # host_upgrade_cmd -> $PM_UPGRADE for THIS
 
 shim_new
 shim_set version "podman version 4.3.1"
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/old")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/old")"
 # Darwin is the same thing platform() keys its macos arm off, so this forks where it forks.
 if [ "$(uname -s)" = Darwin ]; then
     po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
@@ -781,10 +824,10 @@ assert_no_file "podman-old:changes-nothing" "$TMP/old"
 # parent, which is what a student hits when they point this at somewhere they do not own.
 shim_new
 mkdir -p "$TMP/ro" && chmod 555 "$TMP/ro"
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/ro/sub")"
 assert_no_signoff "unwritable-dest:does-not-claim-success" "$out"
 assert_eq "unwritable-dest:exits-1" "1" \
-          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/ro/sub")"
+          "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/ro/sub")"
 chmod 755 "$TMP/ro"
 
 # podman INSTALLED BUT NOT WORKING, which is a different machine from podman absent and wants
@@ -795,7 +838,7 @@ chmod 755 "$TMP/ro"
 # millisecond here, deliberately, on any machine.
 shim_new
 shim_set info_rc 1
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/nopodman")"
 # ONE ASSERTION, BY KEY. err.podman-mute is two lines -- the diagnosis and the Mac fix -- and
 # these quoted one each, so a reworded second line would redden half of a message that printed
 # perfectly. podman-mute:suggests-the-mac-fix is retired into this; the body carries both.
@@ -803,14 +846,14 @@ assert_says_key "podman-mute:refuses-to-continue" err.podman-mute "$out" "$ICAT"
 assert_says_key "podman-mute:changed-nothing-more"  die.trailer "$out" "$ICAT"
 assert_no_signoff "podman-mute:does-not-claim-success" "$out"
 assert_eq "podman-mute:exits-1" "1" \
-          "$(installer_host_rc "$TMP/installer.sh" CS193V_DIR="$TMP/nopodman2")"
+          "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/nopodman2")"
 
 # THE WORST POSSIBLE LIE, and the one smoke_test exists to prevent: a build that produced
 # no image, reported over the words "Setup finished". The installer's own comment calls this
 # ERRORS.md A6's shape -- a truncated download that passed.
 shim_new
 shim_set image_exists no
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/noimage")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/noimage")"
 assert_says_key "no-image:refuses-to-claim-success" err.image-missing-after-build "$out" "$ICAT"
 assert_no_signoff "no-image:does-not-say-finished" "$out"
 # THE FAR SIDE OF {{DIR}}, which is where the command they are asked for sits. Quoted as
@@ -839,7 +882,7 @@ shim_new; shim_fake_mac
 # survey found no machine, nothing needed permission, and the run sailed straight past the
 # menu. "It finished" passed while every assertion about the resize failed.
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
-out="$(installer_tty '\033[B\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '\033[B\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_key "consent-yes:the-arrow-moved-the-selection" menu.consent.go "$out" "$ICAT"
 # RENDERED, because 8192 is what the code decided rather than what the catalogue says.
 # step.machine-resize is "Resizing podman's virtual machine to {{WANT}} MB", so the prose comes
@@ -858,7 +901,7 @@ assert_eq "consent-yes:needed-no-privilege" "" "$(sudo_log)"
 # Enter on its own leaves the default selected, which is the refusal.
 shim_new; shim_fake_mac
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
-out="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_key "consent-no:declines-on-a-tty" consent.declined "$out" "$ICAT"
 assert_says_not "consent-no:the-log-shows-no-resize" "machine set" "$(installer_log)"
 assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer_log)"
@@ -867,7 +910,7 @@ assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer
 # the digits are listed; this proves they work in the installer's own copy.
 shim_new; shim_fake_mac
 shim_set machine_list podman-machine-default; shim_set machine_mem 4096
-out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_key "consent-digit:selects-and-accepts" ok.machine-resized "$out" "$ICAT"
 
 # ─── setup_subuid, executing for the first time ────────────────────────────────
@@ -876,7 +919,7 @@ assert_says_key "consent-digit:selects-and-accepts" ok.machine-resized "$out" "$
 # because a wrong range is a silent failure much later, inside podman.
 if linux_arm; then
 shim_new; shim_fake_id 1000 nosuchuser-cs193v
-out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_key "subuid:step-announced" step.subuid "$out" "$ICAT"
 assert_says_sub "subuid:reports-success" ok.subuid "$out" "$ICAT" USER=nosuchuser-cs193v
 assert_says "subuid:asks-root-for-the-right-range" \
@@ -893,7 +936,7 @@ record "subuid:what-happens-after-a-faked-usermod" \
 
 # ...and when root refuses. The die must name the account and tell them what to send staff.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail usermod
-out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 # RENDERED WITH THE ACCOUNT, which is what this pair was really about: a refusal that names
 # the wrong account, or no account, is the failure worth catching. The needle is the whole
 # message with {{USER}} filled in, so it covers the sentence the old
@@ -1026,23 +1069,23 @@ fi
 # so HOME is the only thing standing between these cases and the developer's home directory.
 # Each asserts the destination it landed on, so a case that escaped the door fails loudly.
 shim_new
-out="$(installer_tty '\n' "$TMP/installer.sh" | strip_ansi)"
+out="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" | strip_ansi)"
 assert_says "choosedir:enter-takes-the-default" "$SHIM/home/cs193v" "$out"
 assert_ok   "choosedir:default-really-created"  test -x "$SHIM/home/cs193v/cs193v"
 assert_says_key "choosedir:default-finishes"        "$FINISHED_KEY" "$out" "$ICAT"
 
 shim_new
-out="$(installer_tty "2$SHIM/typed\n" "$TMP/installer.sh" | strip_ansi)"
+out="$(installer_tty "2$SHIM/typed\n" "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" | strip_ansi)"
 assert_says "choosedir:typed-path-is-used"   "$SHIM/typed" "$out"
 assert_ok   "choosedir:typed-path-created"   test -x "$SHIM/typed/cs193v"
 
 shim_new
-out="$(installer_tty '2\n' "$TMP/installer.sh" | strip_ansi)"
+out="$(installer_tty '2\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" | strip_ansi)"
 assert_says "choosedir:empty-input-falls-back" "$SHIM/home/cs193v" "$out"
 assert_ok   "choosedir:fallback-created"       test -x "$SHIM/home/cs193v/cs193v"
 
 shim_new
-out="$(installer_tty '2~/elsewhere\n' "$TMP/installer.sh" | strip_ansi)"
+out="$(installer_tty '2~/elsewhere\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" | strip_ansi)"
 assert_says "choosedir:tilde-is-expanded"    "$SHIM/home/elsewhere" "$out"
 assert_ok   "choosedir:tilde-target-created" test -x "$SHIM/home/elsewhere/cs193v"
 # NOT asserted: that "~/elsewhere" is absent from the transcript. A pty echoes the keys this
@@ -1068,13 +1111,13 @@ shim_new
 # arm cannot be satisfied by a cursor move either.
 pre() { sed -n '1,/Building the course container/p'; }
 SGR="$(printf '\033')\[[0-9;]*m"
-raw="$(installer_tty '\n' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | pre)"
+raw="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | pre)"
 if printf '%s' "$raw" | grep -q "$SGR"; then pass "colour:on-with-a-terminal"
 else fail "colour:on-with-a-terminal" "no colour sequences in a pty transcript"; fi
 assert_says_key "colour:the-coloured-run-got-that-far" step.survey "$raw" "$ICAT"
 
 shim_new
-raw="$(installer_tty '\n' "$TMP/installer.sh" NO_COLOR=1 CS193V_DIR="$SHIM/dest" | pre)"
+raw="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" NO_COLOR=1 CS193V_DIR="$SHIM/dest" | pre)"
 if printf '%s' "$raw" | grep -q "$SGR"; then
     fail "colour:NO_COLOR-suppresses-it" "colour sequences survived NO_COLOR=1"
 else pass "colour:NO_COLOR-suppresses-it"; fi
@@ -1096,12 +1139,12 @@ boot_leftovers() { ls -d "$BOOTTMP"/cs193v-install.* 2>/dev/null; }
 # makes the bootstrap say so, which only a bootstrap that consulted it can do.
 shim_new
 assert_says "install:the-bootstrap-unpacks-under-TMPDIR" "temporary directory" \
-            "$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/nodest" \
+            "$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/nodest" \
                               TMPDIR="$TMP/no-such-tmpdir")"
 assert_ok "install:and-that-run-created-no-course-directory" test ! -d "$TMP/nodest"
 
 shim_new
-run_installer() { installer_host "$TMP/installer.sh" CS193V_DIR="$DEST" TMPDIR="$BOOTTMP"; }
+run_installer() { installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$DEST" TMPDIR="$BOOTTMP"; }
 out1="$(run_installer)"
 assert_says_key "install:first-run-finishes"     "$FINISHED_KEY"  "$out1" "$ICAT"
 # AND THE TREE IS GONE. `exec` takes the bootstrap's EXIT trap with it, so from the hand-over on
@@ -1164,7 +1207,7 @@ assert_says_key "install:reports-already-done" skip.suffix "$out2" "$ICAT"
 # thing a test can fail rather than a coincidence.
 shim_new
 WINDEST="$TMP/windest"
-outw="$(installer_host "$TMP/installer.sh" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTMP" \
+outw="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$WINDEST" TMPDIR="$BOOTTMP" \
                        CS193V_WINDOWS=1)"
 # THE WHOLE SIGN-OFF, RENDERED WITH ALL FOUR VALUES, which is what makes one assertion out of
 # four. They were win-signoff:finishes, :names-the-wsl-step, :the-cd-follows-the-chosen-dir and
@@ -1269,7 +1312,7 @@ assert_eq "check-disk:silent-when-podman-info-fails"     "" "$(cd_for 1 1 1)"
 shim_new
 shim_set graph_alloc 10737418240
 shim_set graph_used   6442450944
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/lowdisk")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/lowdisk")"
 # THE WHOLE BODY HERE, unlike the carving above: this is the real note(), whose gutter is
 # NOTE_INDENT -- four spaces -- and _flatten collapses whitespace.
 assert_says_sub "check-disk:the-fake-really-feeds-it" note.low-disk "$out" "$ICAT" FREE=4
@@ -1295,7 +1338,7 @@ mac_run() {                           # mac_run [KEY VALUE]... -> the installer'
     # The destination lives under the shim rather than a counter, because a counter
     # incremented in this subshell would be 1 for every case -- so all of them would share
     # one directory and every case after the first would take "already done" paths.
-    installer_host "$TMP/installer.sh" CS193V_DIR="$SHIM/dest"
+    installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest"
 }
 mac_rc() { mac_run "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 # The same door through a real pty, which is the only way the progress block draws at all --
@@ -1306,7 +1349,7 @@ mac_tty() {                           # mac_tty [KEY VALUE]... -> the raw pty tr
     shim_new
     shim_fake_mac
     while [ "$#" -gt 1 ]; do shim_set "$1" "$2"; shift 2; done
-    installer_tty '' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest"
+    installer_tty '' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest"
 }
 
 # The gate on everything below: if this fails, every other assertion here is failing
@@ -1461,12 +1504,13 @@ assert_eq "probe:the-probe-tree-names-the-fake-package" "1" \
 ( cd "$TMP/pkg-probe" && tar czf "$TMP/course-probe.tar.gz" cs193v-main )
 assert_file "probe:the-probe-tarball-was-built" "$TMP/course-probe.tar.gz"
 
-cp "$PRIVATE/install-cs193v.sh" "$TMP/install-probe.sh"
-edit_sub "$TMP/install-probe.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-edit_sub "$TMP/install-probe.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course-probe.tar.gz\""
-assert_eq "probe:the-installer-copy-names-the-probe-tarball" "1" \
-          "$(grep -c 'course-probe\.tar\.gz' "$TMP/install-probe.sh")"
-assert_ok "probe:the-installer-copy-is-valid-bash" bash -n "$TMP/install-probe.sh"
+# NO SECOND COPY OF THE BOOTSTRAP ANY MORE (#280). This used to `cp` the installer and sed a
+# `file://` URL into it, with a grep afterwards checking the sed had matched -- the guard mattered
+# because an unmatched edit leaves a case interrogating the developer's real /opt/podman and
+# passing. CS193V_TARBALL cannot silently match nothing, and pointing at the WRONG tarball is
+# caught downstream rather than here: probe:the-installer-says-where-it-found-it renders
+# note.podman-path with $IOFF, which only resolves if this tree's PODMAN_PKG_ID reached the run
+# and shim_fake_pkgutil answered for it. A base-tarball run fails that assertion.
 
 # THE PATH OVERRIDE RIDES ON THE DOOR'S OWN env LINE. installer_host runs
 # `env HOME=... PATH="$SHIM:$PATH" "$@" bash "$script"`, and a duplicate assignment later in an
@@ -1493,7 +1537,8 @@ probe_setup() {                       # probe_setup present|absent   (in the CAL
     esac
 }
 probe_survey() {                      # probe_survey -> the installer's output
-    installer_host "$TMP/install-probe.sh" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM"
+    installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" \
+                   CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM"
 }
 
 # ── podman installed, invisible: found, reported, and NOT reinstalled ──
@@ -1558,7 +1603,7 @@ NOSUDO="$SHIM/farm-nosudo"; mkdir -p "$NOSUDO"
 ln -s "$IFARM"/* "$NOSUDO/" 2>/dev/null
 rm -f "$NOSUDO/sudo" "$SHIM/sudo"
 assert_eq "password:the-no-sudo-farm-really-has-no-sudo" "" "$(ls "$NOSUDO/sudo" 2>/dev/null)"
-out="$(installer_host "$TMP/install-probe.sh" CS193V_DIR="$TMP/nosudo" PATH="$SHIM:$NOSUDO")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/nosudo" PATH="$SHIM:$NOSUDO")"
 assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
                 "$PRIVATE/course-install-messages.txt"
 # THE RENDERED LIST LINE, not the word "podman". The refusal has to say what it wanted the
@@ -1582,7 +1627,7 @@ assert_no_file  "password:no-sudo-creates-no-directory" "$TMP/nosudo"
 # ── sudo needs a password and there is no terminal to type it into ──
 probe_setup absent
 shim_set sudo_fail '-n true'
-out="$(installer_host "$TMP/install-probe.sh" CS193V_DIR="$TMP/notty" PATH="$SHIM:$IFARM")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/notty" PATH="$SHIM:$IFARM")"
 assert_says_key "password:no-terminal-says-why" err.sudo-no-terminal "$out" \
                 "$PRIVATE/course-install-messages.txt"
 # BEFORE THE CONSENT SCREEN, which is the whole point of putting this in survey: a machine that
@@ -1596,7 +1641,7 @@ assert_says "password:the-probe-never-prompts" "-n true" "$(sudo_log)"
 # ── sudo answers no: refused after consent, before the first privileged command ──
 probe_setup absent
 shim_set sudo_fail "$(printf '%s\n%s' '-n true' '-v')"
-out="$(installer_tty '2' "$TMP/install-probe.sh" CS193V_DIR="$TMP/sudono" PATH="$SHIM:$IFARM" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/sudono" PATH="$SHIM:$IFARM" | strip_ansi)"
 assert_says_key "password:refused-says-why" err.sudo-refused "$out" \
                 "$PRIVATE/course-install-messages.txt"
 # ANNOUNCED FIRST, which is rule 2 of course-install.sh:20-28 and the thing #223 asks for.
@@ -1626,7 +1671,7 @@ if linux_arm; then
 # `-n true` fails and `-v` does not, which is the shape of every ordinary machine: a password
 # is needed, and the student supplies it once.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail '-n true'
-out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_key "password:announced-on-the-linux-arm-too" step.password "$out" \
                 "$PRIVATE/course-install-messages.txt"
 # THE CLAIM #226 IS ABOUT, reduced to two words in order: the password is obtained BEFORE the
@@ -1639,7 +1684,7 @@ assert_eq "password:asked-before-the-first-privileged-command" "prime usermod " 
 # fail. With sudo answering the probe, the announcement must not print: on a machine with
 # passwordless sudo it would promise a prompt that never comes.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v
-out="$(installer_tty '2' "$TMP/installer.sh" CS193V_DIR="$SHIM/dest" | strip_ansi)"
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | strip_ansi)"
 assert_says_not_key "password:silent-when-no-password-is-needed" step.password "$out" \
                     "$PRIVATE/course-install-messages.txt"
 # ...and it really did get past it, rather than dying before the announcement would have been
@@ -1942,7 +1987,7 @@ shim_new
 shim_new
 shim_fake_uname Darwin x86_64
 shim_fake_sysctl 17179869184
-out="$(installer_host "$TMP/installer.sh" CS193V_DIR="$TMP/intel")"
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/intel")"
 assert_says_key "intel-mac:refused" err.intel-mac "$out" "$ICAT"
 assert_no_file "intel-mac:changes-nothing" "$TMP/intel"
 
@@ -1955,12 +2000,16 @@ assert_no_file "intel-mac:changes-nothing" "$TMP/intel"
 # fail on both sides of the hand-over, and which side cleaned up is a question worth being able
 # to ask. The bootstrap's own EXIT trap owns the tree until `exec`; course-install.sh owns it
 # after. Emptied per case so one case's leftovers cannot be read as the next one's.
+# A file:// URL AND NOT A BARE PATH, WHICH IS THE POINT OF THIS ONE (#280). CS193V_TARBALL takes
+# either, and the base fixture above uses a path because a path copies rather than downloads. If
+# this used a path too, nothing in the cheap lane would call download_to at all and curl's fetch
+# would be covered only by the sandbox tiers. The three shapes below are download failures, so
+# they belong on the download arm.
 run_with_tarball() {                  # run_with_tarball FILE DEST
-    cp "$TMP/installer.sh" "$TMP/installer-case.sh"
-    edit_sub "$TMP/installer-case.sh" '^TARBALL=.*' "TARBALL=\"file://$1\""
     rm -rf "$TMP/boot-fail"; mkdir -p "$TMP/boot-fail"
     shim_new
-    installer_host "$TMP/installer-case.sh" CS193V_DIR="$2" TMPDIR="$TMP/boot-fail"
+    installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="file://$1" \
+                   CS193V_DIR="$2" TMPDIR="$TMP/boot-fail"
     printf '%s' "$?" > "$TMP/rc"
 }
 last_rc() { cat "$TMP/rc"; }
@@ -2365,7 +2414,7 @@ assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
 # handed to bash. Both line numbers must exist, so a rename on either side goes red rather than
 # quiet.
 sentinel_ln="$(sed 's/\r$//' "$W" | grep -n 'grep -q %SENTINEL%' | head -1 | cut -d: -f1)"
-bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e env CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
+bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
 assert_ok "windows:checks-the-download-before-running-it" \
           sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
 
@@ -2412,10 +2461,10 @@ assert_match "windows:checks-the-create-exit-code" '^if %errorlevel% neq 0 goto 
 ln_of() { sed 's/\r$//' "$W" | grep -n -- "$1" | head -1 | cut -d: -f1; }
 mv_ln="$(ln_of '\-e mv /etc/wsl-distribution.conf')"
 dl_ln="$(ln_of 'curl -fsSL')"
-prov_ln="$(ln_of 'env CS193V_PROVISION=1 bash %STAGE2%')"
+prov_ln="$(ln_of 'env %XENV%CS193V_PROVISION=1 bash %STAGE2%')"
 term_ln="$(ln_of '\-\-terminate %DISTRO%')"
 own_ln="$(ln_of '\-e test -O /home/%LINUX_USER%')"
-stage2_ln="$(ln_of '\-e env CS193V_WINDOWS=1 bash %STAGE2%')"
+stage2_ln="$(ln_of '\-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%')"
 seq_have="$(printf '%s\n' "$mv_ln" "$dl_ln" "$prov_ln" "$term_ln" "$own_ln" "$stage2_ln" | grep -c .)"
 assert_eq "windows:the-provisioning-sequence-was-found" "6" "$seq_have"
 assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
@@ -2426,11 +2475,11 @@ assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
 # deliberately -- the download, so a re-run can overwrite its own root-owned file; the probes and
 # the root pass, so they mean the same thing whichever way /etc/wsl.conf has been left. The last
 # call must NOT, or the whole point of the split is gone.
-stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e env CS193V_WINDOWS=1 bash %STAGE2%' | head -1)"
+stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' | head -1)"
 assert_ne "windows:the-student-pass-line-is-there" "" "$stage2_full"
 assert_not_contains "windows:the-student-pass-is-not-root" "-u root" "$stage2_full"
 assert_contains "windows:the-root-pass-is-root" "-u root" \
-                "$(sed 's/\r$//' "$W" | grep -- 'env CS193V_PROVISION=1 bash %STAGE2%' | head -1)"
+                "$(sed 's/\r$//' "$W" | grep -- 'env %XENV%CS193V_PROVISION=1 bash %STAGE2%' | head -1)"
 assert_contains "windows:the-download-is-root" "-u root" \
                 "$(sed 's/\r$//' "$W" | grep -- 'curl -fsSL' | head -1)"
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
@@ -3446,7 +3495,7 @@ assert_not_contains "windows:the-shortcut-does-not-run-the-launcher-itself"  './
 
 # ORDERING. The shim does not exist until stage two has run, so a shortcut created before it
 # points at nothing. Compared by line number rather than by reading the file twice.
-pass_line="$(printf '%s\n' "$WCMD" | grep -n -- 'env CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
+pass_line="$(printf '%s\n' "$WCMD" | grep -n -- 'env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
 lnk_line="$(printf '%s\n' "$WCMD" | grep -n -- 'set "LNKNAME=' | head -1 | cut -d: -f1)"
 assert_ne "windows:both-lines-were-found" "" "${pass_line:-}${lnk_line:-}"
 if [ -n "${pass_line:-}" ] && [ -n "${lnk_line:-}" ] && [ "$lnk_line" -gt "$pass_line" ]; then

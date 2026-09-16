@@ -237,6 +237,16 @@ set "REPO_OWNER=cs193v"
 set "REPO_NAME=cs193v-container"
 set "REPO_BRANCH=main"
 set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%REPO_BRANCH%/.private/install-cs193v.sh"
+:: AND ONE WAY TO POINT IT SOMEWHERE ELSE, FOR STAFF (#280). Unset, this changes nothing; set,
+:: it replaces the whole URL, so a by-hand test can serve stage two out of a working tree --
+:: curl inside %DISTRO% takes file:///mnt/c/... and the real download path is still what runs.
+::
+:: `if defined` AND NOT A SECOND `set "INSTALLER_URL=..."` AT TOP LEVEL, which matters more than
+:: it looks. 25-installer.sh and 00-release-gates.sh both read this constant with a sed anchored
+:: at `^set "INSTALLER_URL=`, taking the first match -- so a second bare assignment would be what
+:: they compare against the .sh, and the release gate would fetch a placeholder. This line starts
+:: with `if`, so both readers look straight past it. Same shape as the SYS32 line above.
+if defined CS193V_INSTALLER_URL set "INSTALLER_URL=%CS193V_INSTALLER_URL%"
 
 :: A LINUX path, not a Windows one: everything it names happens inside %DISTRO%. Left in place
 :: on purpose after the install, so a student who wanted to read what ran still can.
@@ -248,6 +258,24 @@ set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%R
 :: /var/tmp is on the environment's own disk and survives, which also makes "it is still in there
 :: if you want to read it" true tomorrow rather than only until the next restart.
 set "STAGE2=/var/tmp/install-cs193v.sh"
+
+:: WHAT TO HAND STAGE TWO BESIDES ITS OWN SWITCH, AND NORMALLY NOTHING (#280). CS193V_TARBALL
+:: tells install-cs193v.sh to install from a local tarball instead of downloading one; this
+:: carries it across the Windows/Linux boundary on the two `wsl -e env` lines below.
+::
+:: THE QUOTED `set` FORM IS WHAT KEEPS THE TRAILING SPACE, so with the variable unset %XENV% is
+:: empty and both of those lines render exactly as they did before this existed -- which is the
+:: property 25-installer.sh pins and the wine tier proves at run time by counting argv.
+::
+:: IT GOES INSIDE `env`'s ARGUMENT LIST, never at the start of a line: cmdlint reads the first
+:: word of every command and demands %SYS32%\, so a token in front of wsl.exe fails
+:: windows:every-program-is-fully-qualified regardless of what it expands to.
+::
+:: NO QUOTING IS APPLIED, so the value must not contain a space, &, |, >, ^ or %. That is a staff
+:: path and the restriction is documented in .private/README.md rather than enforced here; ! is
+:: safe because this file refuses EnableDelayedExpansion (see the header).
+set "XENV="
+if defined CS193V_TARBALL set "XENV=CS193V_TARBALL=%CS193V_TARBALL% "
 
 :: The last line of install-cs193v.sh. A single token ON PURPOSE, so it needs no quoting on
 :: either side of the Windows/Linux boundary. 25-installer.sh pins both halves of the contract:
@@ -826,7 +854,7 @@ if %errorlevel% neq 2 goto provisionfailed
 :: this is redundant; on a re-run it is not, because by then /etc/wsl.conf names %LINUX_USER% --
 :: and a run resuming after a failure could be in either state. Being explicit costs nothing and
 :: makes this call mean the same thing every time.
-"%SYS32%\wsl.exe" -d %DISTRO% -u root -e env CS193V_PROVISION=1 bash %STAGE2%
+"%SYS32%\wsl.exe" -d %DISTRO% -u root -e env %XENV%CS193V_PROVISION=1 bash %STAGE2%
 if %errorlevel% neq 0 goto provisionfailed
 
 :: AND THE ENVIRONMENT HAS TO BE RESTARTED BEFORE ANY OF THAT COUNTS. /etc/wsl.conf is read when
@@ -859,7 +887,7 @@ if %errorlevel% neq 0 goto provisionfailed
 ::
 :: env, AND ONE BARE TOKEN, exactly as the root pass above passes CS193V_PROVISION. Nothing
 :: passed to wsl.exe needs quoting and 25-installer.sh asserts that, so the value stays 1.
-"%SYS32%\wsl.exe" -d %DISTRO% -e env CS193V_WINDOWS=1 bash %STAGE2%
+"%SYS32%\wsl.exe" -d %DISTRO% -e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%
 set "RC=%errorlevel%"
 
 echo.
