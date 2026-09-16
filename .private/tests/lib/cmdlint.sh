@@ -81,6 +81,36 @@ cmdlint_line_endings() {              # cmdlint_line_endings FILE -> violations
     [ "$cr" -ge "$total" ] || printf 'LF-only line endings (%s lines, %s CR bytes): cmd.exe reads batch in 512-byte chunks and its label scanner assumes CRLF, so goto/call fails by byte offset\n' "$total" "$cr"
 }
 
+# EVERY %~ MUST BE A VALID SUBSTITUTION, INCLUDING THE ONES INSIDE COMMENTS -- and that last
+# clause is the whole rule. Measured on Windows 11 26200 on 2026-09-16: real cmd.exe expands
+# batch-parameter substitutions on `::` comment lines too, and an invalid modifier sequence is a
+# HARD parse failure at the top of the run:
+#
+#     The following usage of the path operator in batch-parameter
+#     substitution is invalid: %~ in the file.
+#
+# That came from a header sentence reading "one %~ in the whole file" -- prose about the
+# construct, which cmd read as a use of it. The file was correct and its own documentation broke
+# it, which is the third time this project has been bitten by a comment that names what it bans.
+#
+# WINE DOES NOT REPRODUCE IT, so this rule joins the CRLF and ::-inside-a-block rules in the set
+# that only a static check can hold: `--tier windows` ran the same file green 299/0 while real
+# cmd.exe refused to parse it. That is exactly the split MANUAL.md describes.
+#
+# READ OVER THE RAW FILE AND NOT OVER _cmdlint_commands, which is the opposite of the rule for
+# bcdedit and for the elevation counts. Those ask what the file DOES, so comments must be dropped;
+# this one asks what cmd.exe can PARSE, and cmd.exe does not drop them.
+#
+# WHAT COUNTS AS VALID: %~ followed by any run of the modifier letters f d p n x s a t z and then
+# an argument digit, or $VAR: for a PATH search. Anything else -- a bare %~, or a modifier run
+# that runs into prose -- is what cmd rejects.
+cmdlint_bad_parameter_substitution() {   # cmdlint_bad_parameter_substitution FILE -> violations
+    [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
+    sed 's/\r$//' "$1" \
+        | grep -nE '%~[fdpnxsatz]*[^fdpnxsatz0-9$]' \
+        | sed 's/^/invalid batch-parameter substitution on line /' || true
+}
+
 cmdlint_non_ascii() {                 # cmdlint_non_ascii FILE -> violations
     [ -s "$1" ] || { echo "file is empty or missing: $1"; return 0; }
     grep -nP '[^\x00-\x7F]' "$1" | sed 's/^/non-ASCII byte on line /' || true

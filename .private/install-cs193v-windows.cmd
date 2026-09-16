@@ -170,7 +170,7 @@ if defined PROCESSOR_ARCHITEW6432 set "SYS32=%SystemRoot%\Sysnative"
 :: still the one the student launched from removes the question rather than relying on
 :: the answer -- the same reason NoDefaultCurrentDirectoryInExePath is set before the
 :: first external call rather than merely somewhere above it. 25-installer.sh pins the
-:: ordering, and pins that this is the only %~ in the file.
+:: ordering, and pins that this is the only batch-parameter substitution in the file.
 ::
 :: THE HEADER USED TO BAN THIS OUTRIGHT, and the ban is narrowed rather than dropped.
 :: What %~dp0 was banned FOR was %HERE%: a second route to stage two, a sibling
@@ -214,7 +214,7 @@ set "NoDefaultCurrentDirectoryInExePath=1"
 :: ONE route: %HERE% used to point at a sibling install-cs193v.sh, which went stale between
 :: quarters and looked precisely like a working install. Relaunching THIS file after a restart is
 :: not that route. So the file may now know its own path, once, and 25-installer.sh pins the
-:: narrowness rather than the ban -- one %~ in the whole file, it is %~f0, it is read before the
+:: narrowness rather than the ban -- one substitution in the whole file, it is %~f0, read before
 :: `cd` above, and the value it produces never reaches wsl.exe.
 cd /d "%SystemRoot%"
 
