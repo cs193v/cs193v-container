@@ -1315,13 +1315,20 @@ wsl.exe's message sound. All four are in `25-installer.sh`, and the last two go 
 `2f14c85`. The BitLocker claim is still a MANUAL.md item and still unverified; it is no longer
 load-bearing, since nothing offers the command either way.
 
-**An unqualified program name, run as Administrator out of `Downloads` (issue #125).** The
-installer's own instructions are "right-click and Run as administrator", which makes the download
-folder its working directory — and `cmd.exe` resolves an unqualified program name against the
-current directory **before `%PATH%`**. Every external program it named was unqualified: `reg`,
-`where`, `powershell` ×4, and `wsl.exe` ×12, the last including the handoff to stage two. So a file
-called `wsl.exe` sitting in `Downloads` was what ran, elevated, and `Downloads` is the likeliest
-place on the machine for an untrusted file to already be.
+**An unqualified program name, run out of `Downloads` (issue #125).** Double-clicking the
+installer makes the download folder its working directory — and `cmd.exe` resolves an unqualified
+program name against the current directory **before `%PATH%`**. Every external program it named was
+unqualified: `reg`, `where`, `powershell` ×4, and `wsl.exe` ×12, the last including the handoff to
+stage two. So a file called `wsl.exe` sitting in `Downloads` was what ran, and `Downloads` is the
+likeliest place on the machine for an untrusted file to already be.
+
+This paragraph used to say **"run as Administrator"**, because the installer's instructions were
+"right-click and Run as administrator" and a planted program therefore ran elevated. It now refuses
+an elevated run outright (see *Elevation identity*, below), so a planted program would run as the
+student instead. That is a smaller consequence and an identical hole — the student's whole account,
+their WSL environment, and the fetch that executes stage two — and an elevated path still exists,
+since `:installwsl` asks for permission and starts a `cmd /c` with two program names in it. The
+three layers below are what carry the property, and none of them was weakened.
 
 Three layers now, and which one is the fix matters, because a reader who finds the second must not
 conclude the first is redundant:
@@ -1373,6 +1380,58 @@ entirely in the fixture. `WINEDLLOVERRIDES` pins those names to native, and a bu
 `WhereNotFound` row are retired with the `where` call site: `where` searched the current directory
 itself, so its *answer* stayed plantable even after the calls were qualified, and it was answering
 a question about `%PATH%` that the installer no longer asks.
+
+**Elevation identity: requiring Administrator installed the course into somebody else's account.**
+The Windows installer's instructions were "right-click and Run as administrator", and its first act
+was to refuse any run that was not elevated. A standard user **cannot be elevated as themselves**:
+UAC asks for a different administrator's credentials, and the whole file then runs as *that*
+account. `%APPDATA%`, `%LOCALAPPDATA%` and `HKCU` all follow the token, and WSL registers
+distributions **per-user** — measured on Windows 11 26200, `HKLM`'s `Lxss` key holds only `MSI`,
+`Plugins` and `DiskMounts`, while every distribution is an `HKCU` subkey with its VHD under that
+user's `%LOCALAPPDATA%\wsl`.
+
+Measured end to end on 2026-09-15 from a standard account authorised with a separate admin's
+password: `%PROBE%` found the *admin's* `CS193V` and skipped creation, stage two provisioned the
+*admin's* environment, the shortcut and icon landed in the *admin's* profile, `%PSDEL%` deleted the
+*admin's* `wsl --install` entry, and the run **exited 0** telling the student to open an entry their
+Start Menu did not have. `:shortcutfailed` cannot fire for it: nothing failed, the writes landed
+somewhere else. The chain of custody — a fresh interactive logon for the admin at 20:22:38, writes
+inside the admin's distro at 20:23:16 and 20:23:28, both files owned by `BUILTIN\Administrators` —
+is in `25-installer.sh`'s elevation block.
+
+**The fix is to refuse elevation outright, and two narrower shapes were rejected first:**
+
+| Shape | Why not |
+| --- | --- |
+| Compare identities and continue when they match — token SID against the owner of the Explorer in its session | Works, and is strictly more machinery for a state that should not exist. Adds a WMI dependency, an RDP false-positive class, and a fail-open path, to permit a run that is never correct |
+| Refuse an un-elevated run and tell the student to come back elevated | Three runs, two wasted, to reach a prompt the installer can raise itself — and for a standard user "come back elevated" *means* borrowing another account, which is the defect |
+
+There is no run for which starting elevated is right: if WSL is installed the rest is per-user, and
+if it is not, `:installwsl` asks for permission at the moment it needs it. So the identity of an
+elevated run never has to be established. `:isadmin` refuses the class, `%PSELEV%` raises **one**
+UAC prompt for a single child running `wsl --update & wsl --install --no-distribution`, and
+`-Wait -PassThru` brings back the only thing that can cross an elevation boundary — an exit code.
+`-Verb RunAs` lives in `Start-Process`'s `UseShellExecute` parameter set, which has no
+`-NoNewWindow` and no `-RedirectStandard*`: the elevated process is created by the AppInfo service
+rather than by the caller, so no console, handle or pipe is inherited and the child's *words* can
+never come back. The parent re-probes instead.
+
+Measured un-elevated before committing to any of it: `wsl --install -d Ubuntu-26.04 --name … --no-launch`
+exits 0, writes one `HKCU` subkey and one `%LOCALAPPDATA%\wsl` directory, and leaves `HKLM`
+byte-identical; `wsl --update` exits 0 in about a second with "already installed" and raises no
+prompt. Had either needed elevation the whole shape would have been void.
+
+Guardrails: `windows:an-elevated-run-is-refused` and
+`windows:the-refusal-is-not-conditional` pin the branch and the absence of a second one;
+`windows:the-elevated-arm-touches-nothing-per-user` parses the `:installwsl` span rather than
+reading a list; `windows:the-child-updates-wsl` and its siblings pin that the single child carries
+*both* commands joined by `&` and not `&&` — added after a by-hand mutation showed that deleting
+`--update` from it reddened nothing. `27-installer-windows.sh`'s `win-isadmin:*` is the executing
+half, and `fake-reg.c`'s default flipped to **not-elevated**, because the old default made all 184
+executing assertions describe the one invocation students are now told not to use.
+
+**What no tier can reach** is whether the *identity* is right on a real machine, since wine has no
+elevation and no second profile. `MANUAL.md` §134.7 carries the two-account reproduction.
 
 **Four ways of doing Python, all rejected (issue #44).** The image ships an interpreter, `pip`,
 headers and `venv`, and no libraries — see the Containerfile's apt line for the rule and the open

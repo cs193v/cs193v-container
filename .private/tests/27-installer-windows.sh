@@ -180,7 +180,11 @@ for rc in -1 1 2 9009; do
     wine_knob wsl.status.msg MessageWslOptionalComponentRequired
     wine_run
     assert_says_not "win-status-$rc:does-not-claim-wsl-is-installed" "WSL is installed" "$WINE_OUT"
-    assert_says     "win-status-$rc:offers-to-install-wsl"           "Installing WSL" "$WINE_OUT"
+    # THE WORDING MOVED WITH THE ARM: this used to read "Installing WSL", from a step the file ran
+    # itself once it had been started elevated. It now says what is about to happen and why a
+    # prompt is appearing, because the step is a child it asks permission for.
+    assert_says     "win-status-$rc:offers-to-turn-wsl-on"           "Turning WSL on" "$WINE_OUT"
+    assert_says     "win-status-$rc:warns-about-the-prompt"          "ask for an administrator" "$WINE_OUT"
 done
 
 # 5. THE CREATE THAT FAILS AFTER THE DOWNLOAD, which is where the diagnosis lives now that the
@@ -618,17 +622,51 @@ assert_says "win-probe:says-the-question-failed"  "Could not ask WSL which envir
 assert_says "win-probe:distinguishes-it-from-absent" "not the same as not having" "$WINE_OUT"
 assert_eq   "win-probe:does-not-create-anything"  "0" "$(wine_argv_count '\-\-install -d')"
 
-# The elevation probe, whose old form (`net session`) returned 2 -- not 5 -- when the Server
-# service is stopped, reporting a real Administrator as not one. The current probe has no such
-# third state, and this pins that it refuses only when it should.
+# ─── CLASS: an elevated run is REFUSED, which is the reverse of what was here ─
+#
+# win-admin:* USED TO BE HERE AND ASSERTED THE OPPOSITE: that an UN-elevated run was refused with
+# "needs to run as Administrator". Recorded rather than deleted quietly, because the probe
+# survives with a different job and a reader should be able to tell "reversed" from "lost". Its
+# original point was the old `net session` form, which returned 2 -- not 5 -- when the Server
+# service is stopped and so reported a real Administrator as not one; the reg.exe form has no such
+# third state. That reasoning stands; it just no longer decides whether to continue.
+#
+# WHY THE REVERSAL. A standard user cannot be elevated as THEMSELVES: UAC asks for a different
+# administrator's credentials and the whole file then runs as that account, silently installing the
+# course into that profile. Measured on Windows 11 26200 on 2026-09-15 -- 25-installer.sh's
+# elevation block carries the chain. And no run needs elevation up front: if WSL is present the
+# rest is per-user, and if it is not, :installwsl asks for permission itself. So the class is
+# refused rather than its identity examined.
+#
+# reg.query.rc 0 IS THE ARRANGEMENT, and this is the only case in the file that asks for it, now
+# that fake-reg.c defaults to not-elevated -- the ordinary invocation.
 wine_new
 wine_list CS193V
-wine_knob reg.query.rc 1
+wine_knob reg.query.rc 0
 wine_run
-assert_ne   "win-admin:refuses"                   "0" "$WINE_RC"
-assert_says "win-admin:explains-why"              "needs to run as Administrator" "$WINE_OUT"
-assert_says "win-admin:says-how-to-fix-it"        "Run as administrator" "$WINE_OUT"
-assert_eq   "win-admin:touches-nothing-else"      "0" "$(wine_argv_count 'wsl.exe')"
+assert_ne   "win-isadmin:refuses"                 "0" "$WINE_RC"
+assert_says "win-isadmin:says-not-to"             "Do not run setup as an administrator" "$WINE_OUT"
+assert_says "win-isadmin:says-why-it-matters"     "belongs to ONE Windows account" "$WINE_OUT"
+assert_says "win-isadmin:says-what-to-do"         "Start it again the ordinary way" "$WINE_OUT"
+# THE NEGATIVES ARE THE POINT OF THE CASE, not the message: the defect was that an elevated run
+# went on to do all of its per-user work under the wrong token.
+assert_eq   "win-isadmin:touches-nothing-else"    "0" "$(wine_argv_count 'wsl.exe')"
+assert_eq   "win-isadmin:asks-no-permission"      "0" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
+assert_eq   "win-isadmin:writes-no-start-menu-entry" "no" \
+            "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+assert_eq   "win-isadmin:deletes-nothing"         "0" "$(wine_argv_count 'powershell\.exe .*Remove-Item')"
+assert_says_not "win-isadmin:claims-no-success"   "environment is ready" "$WINE_OUT"
+
+# ...AND THE ORDINARY RUN IS NOT REFUSED, which would otherwise rest on the fake's default alone.
+# Named so the property has a case of its own: if the refusal above were ever widened to every
+# run, this is what catches it.
+wine_new
+wine_list CS193V
+wine_run
+assert_eq   "win-unelevated:installs"             "0" "$WINE_RC"
+assert_eq   "win-unelevated:asks-no-permission"   "0" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
+assert_eq   "win-unelevated:hands-off-to-bash"    "1" \
+            "$(wine_argv_count '\-e env CS193V_WINDOWS=1 bash /var/tmp/install-cs193v.sh')"
 
 # ─── CLASS: the installer works from any folder a student downloads into ──────
 #
@@ -668,6 +706,33 @@ wine_run
 assert_eq   "win-nowsl:exits-zero-because-nothing-failed" "0" "$WINE_RC"
 assert_says "win-nowsl:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
 assert_says "win-nowsl:tells-them-to-rerun"       "run this same file again" "$WINE_OUT"
+# THE ANTI-VACUITY POSITIVE, and the assertion that this arm now goes through a UAC prompt rather
+# than requiring the whole run to have been elevated: ONE permission request, and it is the only
+# one the file ever makes. A run that died before reaching it would satisfy every line above.
+assert_eq   "win-nowsl:asks-permission-once"      "1" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
+assert_says "win-nowsl:says-why-it-is-asking"     "change to Windows itself" "$WINE_OUT"
+# AND IT STOPS THERE. The per-user work belongs to the run after the restart, so nothing on this
+# arm may create an environment or write a Start Menu entry -- the property 25-installer.sh
+# asserts statically as windows:the-elevated-arm-touches-nothing-per-user.
+assert_eq   "win-nowsl:creates-nothing"           "0" "$(wine_argv_count '\-\-install -d')"
+assert_eq   "win-nowsl:writes-no-start-menu-entry" "no" \
+            "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+
+# ...AND A DECLINED PROMPT IS NOT A BROKEN MACHINE. Start-Process THROWS when consent is refused,
+# which without the .cmd's catch would be indistinguishable from the install failing -- so a
+# student who clicked No would be told the feature could not be turned on. Nothing has happened at
+# that point, and the remedy is to run it again and allow it.
+wine_new
+wine_list
+wine_knob wsl.status.rc -1
+wine_knob win.uac-declined 1
+wine_run
+assert_ne   "win-uacdeclined:does-not-exit-zero"  "0" "$WINE_RC"
+assert_says "win-uacdeclined:says-permission-was-refused" "permission was" "$WINE_OUT"
+assert_says "win-uacdeclined:says-nothing-changed" "nothing has been changed" "$WINE_OUT"
+assert_says "win-uacdeclined:says-how-to-retry"   "choose Yes when Windows" "$WINE_OUT"
+assert_says_not "win-uacdeclined:does-not-blame-the-feature" "Could not turn on" "$WINE_OUT"
+assert_says_not "win-uacdeclined:does-not-promise-a-restart-will-help" "RESTART YOUR COMPUTER" "$WINE_OUT"
 
 # ...AND A MACHINE WITH NO System32\wsl.exe AT ALL, which `if exist` is what now detects. Microsoft
 # treats that state as unrepairable by anything short of an in-place upgrade -- `where wsl` returns
@@ -679,31 +744,66 @@ wine_list
 wine_hide_wsl
 wine_run
 assert_ne   "win-nowslexe:does-not-exit-zero"     "0" "$WINE_RC"
-assert_says "win-nowslexe:admits-what-failed"     "Could not update WSL" "$WINE_OUT"
+# THE MESSAGE CHANGED WITH THE ARM. `wsl --update` used to run here directly, with
+# :wslupdatefailed and "Could not update WSL" of its own; it now runs inside the elevated child
+# beside `wsl --install --no-distribution`, and cmd returns one code for the pair -- so the
+# distinction is unrecoverable and :wslupdatefailed is gone rather than left unreachable. Both
+# land on :wslfeaturefailed, whose words cover this machine: the feature did not get turned on.
+assert_says "win-nowslexe:admits-what-failed"     "Could not turn on the WSL Windows feature" "$WINE_OUT"
 assert_says "win-nowslexe:asks-for-the-whole-window" "send course staff this whole window" "$WINE_OUT"
 assert_says_not "win-nowslexe:does-not-promise-a-restart-will-help" "RESTART YOUR COMPUTER" "$WINE_OUT"
+# AND IT GOT THERE THROUGH THE PROMPT, not by skipping it. This is what makes the case about the
+# child failing rather than about the .cmd never asking: fake-powershell answers 102 here because
+# system32\wsl.exe is genuinely gone from the prefix, which is what cmd.exe would do.
+assert_eq   "win-nowslexe:asked-permission-first" "1" "$(wine_argv_count 'powershell\.exe .*Start-Process')"
 
-# The two calls whose exit codes used to be ignored. wsl.exe must EXIST for either knob to be the
-# thing under test -- with the binary gone, `--update` fails at 9009 whatever the knob says, and
-# the case would pass while measuring nothing.
-for knob in wsl.update.rc wsl.feature.rc; do
-    wine_new
-    wine_list
-    wine_knob wsl.status.rc -1
-    wine_knob "$knob" -1
-    wine_run
-    assert_ne "win-$knob:does-not-exit-zero"      "0" "$WINE_RC"
-    assert_says_not "win-$knob:does-not-tell-them-to-restart" "RESTART YOUR COMPUTER" "$WINE_OUT"
-done
+# THE CHILD FAILING, WHICH USED TO BE TWO CASES DRIVING wsl.update.rc AND wsl.feature.rc. Those
+# knobs reach the commands the CHILD runs, and the child is not run under wine at all -- there is
+# no elevation and no AppInfo service here -- so they no longer touch this arm and driving them
+# would have measured nothing. One knob replaces both, for the same reason the .cmd has one
+# message: the pair's exit code is all that crosses back.
+#
+# ps.elev.rc AND NOT ps.rc, for the reason win-probe gives: the blanket knob fails every probe,
+# including the distro one, so the case would stop somewhere else and still look green here.
+#
+# -1 IS DELIBERATE, AND IT IS THE CODE THAT USED TO ARRANGE NOTHING. fake-powershell.c's answer()
+# read any value below zero as "not set" -- `if (forced >= 0) return forced;` -- so this case set
+# `ps.elev.rc -1`, the fake answered 0, and the installer printed the restart notice while the case
+# reported green. The fake now decides on the knob's PRESENCE, which is what fake-wsl.c always did,
+# so -1 means -1. Kept here rather than replaced with a positive code, because it is the spelling
+# that was broken and the one a reader will reach for: `wsl.status.rc -1` on the line above is the
+# documented value for a real wsl.exe failure, and the two should not need different conventions.
+#
+# AND -1 EXERCISES THE CATCH-ALL. The .cmd tests `equ 101` and then `neq 0`, so any code that is
+# neither 0 nor 101 proves the second branch rather than a value spelled in the file.
+wine_new
+wine_list
+wine_knob wsl.status.rc -1
+wine_knob ps.elev.rc -1
+wine_run
+assert_ne "win-elevfailed:does-not-exit-zero"     "0" "$WINE_RC"
+assert_says "win-elevfailed:admits-what-failed"   "Could not turn on the WSL Windows feature" "$WINE_OUT"
+assert_says_not "win-elevfailed:does-not-tell-them-to-restart" "RESTART YOUR COMPUTER" "$WINE_OUT"
+# NOT READ AS A DECLINED PROMPT. 101 is a person saying no and has its own message; every other
+# non-zero code is the child having failed, and conflating them tells a student to click Yes when
+# the problem is their machine.
+assert_says_not "win-elevfailed:is-not-a-declined-prompt" "permission was" "$WINE_OUT"
 
 # ─── CLASS: a download folder that already holds hostile executables ──────────
 #
 # ISSUE #125, and the only case in this file that asserts a security property by EXECUTING rather
-# than by reading the source. The installer runs elevated with the download folder as its working
-# directory, and cmd.exe searches that directory BEFORE %PATH% -- so a wsl.exe, reg.exe, where.exe
-# or powershell.exe already sitting in Downloads was what ran, with Administrator rights. Downloads
-# is the likeliest place on a real machine for an untrusted file to already be, and wsl.exe had
-# nineteen call sites, one of them the handoff to stage two.
+# than by reading the source. The installer's working directory is the download folder, and cmd.exe
+# searches that directory BEFORE %PATH% -- so a wsl.exe, reg.exe, where.exe or powershell.exe
+# already sitting in Downloads was what ran. Downloads is the likeliest place on a real machine for
+# an untrusted file to already be, and wsl.exe had nineteen call sites, one of them the handoff to
+# stage two.
+#
+# "WITH ADMINISTRATOR RIGHTS" USED TO END THAT SENTENCE, and the case is not weaker without it.
+# The installer required elevation then, so a planted program ran elevated; it now refuses an
+# elevated run, so one would run as the student. Smaller consequence, identical hole -- their whole
+# account, their WSL environment, and the fetch that executes stage two -- and the elevated path
+# still exists, since :installwsl starts a `cmd /c` carrying two program names. Full paths are what
+# carry the property either way, which is what this case executes.
 #
 # IT WAS RED BEFORE THE FIX AND IS GREEN AFTER IT, which is the whole reason it exists rather than
 # leaving the property to 25-installer.sh's static rule. It also inverts what this harness used to

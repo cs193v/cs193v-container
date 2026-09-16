@@ -3,16 +3,37 @@ setlocal
 ::
 :: CS193V setup for Windows -- stage one.
 ::
-:: HOW TO RUN THIS: right-click the file and choose "Run as administrator".
+:: HOW TO RUN THIS: run it as yourself. Do NOT "Run as administrator" -- see below.
 ::
-:: A .cmd file is used rather than a .ps1 on purpose. A downloaded PowerShell script is
-:: blocked by both the execution policy and the mark-of-the-web, so it would need
-:: Unblock-File or -ExecutionPolicy Bypass first -- which is confusing, and teaches
-:: students to click past security warnings in a course about not trusting code. A .cmd
-:: just runs. Where batch is a poor tool, this shells out to short PowerShell commands.
+:: DO NOT RUN THIS AS AN ADMINISTRATOR, and that reverses what this line used to say. Nearly
+:: everything here is PER-USER: %APPDATA%, %LOCALAPPDATA% and HKCU -- which is where WSL registers
+:: environments, there being no machine-wide registration -- all follow the token the process runs
+:: under. A student who is not an administrator cannot be elevated as THEMSELVES: UAC asks for
+:: somebody else's password and the whole file then runs as that account, which silently installs
+:: the course into THAT account's profile and leaves the student's with nothing. Measured on
+:: Windows 11 26200 on 2026-09-15. The one step that genuinely needs an administrator is turning
+:: WSL on, and :installwsl asks for permission for that step by itself.
 ::
-:: This is a TWO-STAGE setup, because installing WSL requires a restart. Run this file,
-:: restart when it says to, then run it AGAIN. It is safe to run any number of times.
+:: A .cmd file is used rather than a .ps1 on purpose, and the difference is what each mark costs.
+:: A downloaded .ps1 is REFUSED outright under the default execution policy -- unsigned and of
+:: internet origin -- and clearing that needs Unblock-File or -ExecutionPolicy Bypass, which
+:: teaches students to click past security warnings in a course about not trusting code. A .ps1
+:: also has no execute association at all, so nothing happens when you double-click one.
+:: Where batch is a poor tool, this shells out to short PowerShell commands.
+::
+:: THE MARK OF THE WEB REACHES A .cmd TOO, which this header used to deny -- "a .cmd just runs".
+:: Measured 2026-09-15: a copy downloaded from a browser carries a Zone.Identifier stream
+:: [ZoneTransfer] ZoneId=3, and Windows then refuses to run it from a double-click. The difference
+:: from a .ps1 is that it is the Attachment Manager rather than a policy, so launching the file by
+:: its full path runs it -- there is nothing to unblock and nothing to teach anyone to override.
+:: The course instructions carry the gesture; nothing in this file depends on which one is used,
+:: and no message here names one.
+::
+:: RUN IT AS YOURSELF, BOTH TIMES. If WSL is not installed yet this takes two runs, because
+:: turning on a Windows feature needs a restart: the first run asks Windows for permission for
+:: that one step -- one UAC prompt, mid-run -- and then says to restart; the second finishes the
+:: job. If WSL is already on, one run does everything and nothing asks for permission at all.
+:: It is safe to run any number of times.
 ::
 :: Stage 1 (here) : install WSL and the CS193V Linux environment, then prepare it -- switch
 ::                  Ubuntu's first-run questions off, create the student's account, and give it
@@ -37,7 +58,8 @@ setlocal
 :: Nothing is DOWNLOADED onto Windows itself. One consequence worth knowing, since the note
 :: above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS alternate
 :: data stream, and stage 2 lands on the environment's own Linux filesystem, so it can never
-:: carry one. THIS file still does, and still just runs, which is the whole point.
+:: carry one. THIS file still does -- and, per the measurement above, is refused from a
+:: double-click because of it.
 ::
 :: TWO FILES ARE WRITTEN TO THE WINDOWS SIDE, AND UNTIL #134 THERE WERE NONE. The paragraph
 :: above used to read "nothing is downloaded onto Windows itself" and was taken to mean this
@@ -47,9 +69,18 @@ setlocal
 ::     %APPDATA%\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
 ::     %LOCALAPPDATA%\CS193V\cs193v.ico
 ::
-:: and deletes the Start Menu entry `wsl --install` made. Both are per-user and need no
-:: elevation of their own; neither is downloaded -- the icon is copied out of the environment
-:: over \\wsl.localhost, so the mark-of-the-web argument above still holds for both.
+:: and deletes the Start Menu entry `wsl --install` made. Neither is downloaded -- the icon is
+:: copied out of the environment over \\wsl.localhost, so the mark-of-the-web argument above
+:: still holds for both.
+::
+:: THEY ARE PER-USER, AND THE QUESTION THAT MATTERS IS *WHICH* USER. This paragraph used to end
+:: "both are per-user and need no elevation of their own", which is true about permissions and
+:: silent about identity -- and that silence is the whole of the cross-account defect. %APPDATA%
+:: and %LOCALAPPDATA% name the profile of the account THIS FILE IS RUNNING AS, which under an
+:: over-the-shoulder elevation is the administrator's and not the student's. There is no way to
+:: write into another profile from here and no attempt to: what makes that account the right one
+:: is :isadmin, which refuses an elevated run outright. If that refusal is ever relaxed into a
+:: conditional, every path below silently comes to belong to whoever answered the UAC prompt.
 ::
 :: ---------------------------------------------------------------------------------
 :: THE BATCH SUBSET THIS FILE KEEPS TO, AND WHY
@@ -79,9 +110,12 @@ setlocal
 ::     here needs one, so nothing here has one.
 ::
 ::   * AN UNQUALIFIED PROGRAM NAME. cmd.exe searches the current directory BEFORE %PATH%, and
-::     this file runs elevated from the student's download folder, so a bare `wsl.exe` would run
-::     a copy planted there with Administrator rights. Every external program is named through
-::     %SYS32%; the block just below this header holds the three lines that close it. Issue #125.
+::     this file runs from the student's download folder, so a bare `wsl.exe` would run a copy
+::     planted there. Every external program is named through %SYS32%; the block just below this
+::     header holds the three lines that close it. Issue #125. It said "with Administrator rights"
+::     while this file required elevation; it refuses that now, so a planted program would run as
+::     the student -- a smaller consequence over the same account, and the elevated child
+::     :installwsl starts carries two program names of its own, spelled in full for this reason.
 ::
 :: NOTHING PASSED TO wsl.exe NEEDS QUOTING, and that is asserted rather than hoped for.
 :: %~dp0 used to be read into %HERE% and handed to wslpath, so a student downloading into
@@ -93,11 +127,18 @@ setlocal
 
 :: ---- where the system's own programs live ------------------------------------
 :: EVERY EXTERNAL PROGRAM BELOW IS NAMED THROUGH %SYS32%, and that is issue #125 rather than a
-:: style choice. This file runs elevated with the DOWNLOAD FOLDER as its working directory, and
-:: cmd.exe searches the current directory BEFORE %PATH% -- so a wsl.exe sitting in Downloads is
-:: what a bare `wsl.exe` runs, as Administrator. Downloads is the likeliest place on the machine
-:: for an untrusted file to already be, and wsl.exe has nineteen call sites here, one of them the
-:: handoff to stage two.
+:: style choice. This file runs with the DOWNLOAD FOLDER as its working directory, and cmd.exe
+:: searches the current directory BEFORE %PATH% -- so a wsl.exe sitting in Downloads is what a
+:: bare `wsl.exe` runs. Downloads is the likeliest place on the machine for an untrusted file to
+:: already be, and wsl.exe has nineteen call sites here, one of them the handoff to stage two.
+::
+:: AND "AS ADMINISTRATOR" IS NO LONGER PART OF THAT, WHICH CHANGES THE STAKES AND NOT THE RULE.
+:: This file required elevation when #125 was reported, so a planted program ran with
+:: Administrator rights; it refuses an elevated run now, so one would run as the student instead.
+:: That is the student's whole account, their WSL environment and the fetch that executes stage
+:: two, so the qualification stays exactly as load-bearing. An elevated path also still exists --
+:: :installwsl asks for permission and starts a `cmd /c` naming two programs -- and those are
+:: written out in full for this reason, in a place where %SYS32% would be the wrong answer.
 ::
 :: %SystemRoot% RATHER THAN A HARD-CODED C:\Windows, because Windows need not be installed on C:
 :: and the directory need not be called Windows. System32 is never localised, so no translation
@@ -176,11 +217,49 @@ set "STAGE2=/var/tmp/install-cs193v.sh"
 :: that the .sh ends with it, and that it occurs there exactly once.
 set "SENTINEL=CS193V-INSTALLER-COMPLETE"
 
+:: TURNING WSL ON, WHICH IS THE ONE STEP THAT NEEDS AN ADMINISTRATOR -- so it ASKS, rather than
+:: sending the student away to start over as somebody else. One UAC prompt, in the middle of an
+:: otherwise ordinary run, and setup carries on afterwards.
+::
+:: A NEW PROCESS, BECAUSE A RUNNING ONE CANNOT BE ELEVATED. Windows has no seteuid: a token's
+:: elevation is fixed when the process is created, and the elevated child is created by the
+:: AppInfo service rather than by us. That is also why its output cannot come back here --
+:: -Verb RunAs lives in Start-Process's UseShellExecute parameter set, where -NoNewWindow and
+:: every -RedirectStandard* are absent, and there is no console or handle inheritance across the
+:: boundary. -Wait and -PassThru ARE in every parameter set, so the EXIT CODE does come back, and
+:: the caller re-asks `wsl --status` afterwards rather than reading the child's words.
+::
+:: ONE CHILD FOR BOTH COMMANDS, AND THEREFORE ONE PROMPT. Consecutive elevation requests are never
+:: coalesced by Windows -- two Start-Process calls are two prompts -- so both go to a single
+:: cmd.exe. `&` and not `&&`: --update is best effort, and cmd returns the LAST command's code,
+:: which is exactly the one that matters.
+::
+:: WHAT THAT TRADES, stated because the header closes it elsewhere: for `cmd /c "a & b"` the
+:: current-directory search is fixed once for the whole line, so NoDefaultCurrentDirectoryInExePath
+:: cannot protect the second command -- and an elevated child would not inherit that variable from
+:: us anyway. Both programs are named by full path, which is issue #125's actual fix and carries
+:: the property on its own, and -WorkingDirectory takes the download folder out of the picture.
+::
+:: THREE ANSWERS. 0 the child ran and succeeded; 101 the prompt was declined or could not be
+:: raised at all, which is a person saying no and not a broken computer; 102 the child ran and
+:: failed. Distinct because the first two need different things said to the student, and 101 is
+:: the arm a `try` is here for -- Start-Process THROWS when consent is refused.
+set "PSELEV=$w=$env:SystemRoot+'\System32\wsl.exe'; $c=$env:SystemRoot+'\System32\cmd.exe'; $a='/c '+$w+' --update & '+$w+' --install --no-distribution'; try { $p=Start-Process -FilePath $c -ArgumentList $a -WorkingDirectory $env:SystemRoot -Verb RunAs -Wait -PassThru } catch { exit 101 }; if ($p.ExitCode -ne 0) { exit 102 }; exit 0"
+
 :: One probe, used twice: before creating the environment and again afterwards. Batch cannot
 :: read `wsl --list` directly -- its output is UTF-16, which breaks findstr and for /f alike --
 :: so WSL_UTF8 makes it plain text and PowerShell does the comparison. The answer comes back
 :: as an EXIT CODE rather than on stdout: 0 = present, 1 = absent, anything else = the probe
 :: itself could not run, which is a different thing from "absent" and is handled separately.
+::
+:: ITS ANSWER IS THE RUNNING ACCOUNT'S, AND CANNOT BE ANYONE ELSE'S. WSL registers every
+:: environment under HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss, with the VHD under that
+:: user's %LOCALAPPDATA%\wsl, and there is no machine-wide registration at all -- measured on
+:: Windows 11 26200, where HKLM's Lxss key holds only MSI, Plugins and DiskMounts. So `wsl -l -q`
+:: cannot see another user's environments and cannot be made to. This is the line to read when an
+:: environment that plainly exists is reported absent, or an absent one is reported present: the
+:: question is which account asked. :isadmin is what makes that account the student's: an elevated
+:: run is refused outright, so the only token that ever reaches this line is the one at the keyboard.
 set "PROBE=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; if ((& $w -l -q) -match '^%DISTRO%$') { exit 0 } else { exit 1 }"
 
 :: A SECOND PROBE, ASKED ONLY AFTER SOMETHING HAS ALREADY FAILED: does Windows itself say the
@@ -227,7 +306,34 @@ echo   CS193V setup for Windows
 echo   ------------------------
 echo.
 
-:: ---- must be Administrator ----------------------------------------------------
+:: ---- must NOT be Administrator -----------------------------------------------
+:: THIS USED TO REQUIRE ELEVATION, AND NOW IT REFUSES IT. The reversal is the fix for the defect
+:: below, and the reasoning is that there is no longer any run for which elevation is correct:
+::
+::   * IF WSL IS ALREADY INSTALLED, everything left is per-user and elevation is simply wrong.
+::   * IF WSL IS NOT, the one step that needs an administrator asks for permission itself, at the
+::     moment it needs it -- see %PSELEV% above. Nothing is gained by starting out elevated.
+::
+:: WHAT REQUIRING IT COST. A standard user cannot be elevated as THEMSELVES: UAC asks for a
+:: different administrator's credentials and the whole file then runs as that account. %APPDATA%,
+:: %LOCALAPPDATA% and HKCU -- which is where WSL registers environments, there being no
+:: machine-wide registration -- all follow the token. Measured on Windows 11 26200 on 2026-09-15
+:: from a standard account authorised with a separate admin's password: %PROBE% found the ADMIN's
+:: CS193V and skipped creation, stage two provisioned the ADMIN's environment, the shortcut and
+:: icon were written into the ADMIN's profile, %PSDEL% deleted the ADMIN's `wsl --install` entry,
+:: and the run exited 0 telling the student to open the entry from their own Start Menu. The
+:: student's account got nothing. :shortcutfailed cannot fire for that: nothing failed.
+::
+:: AN UNCONDITIONAL REFUSAL RATHER THAN A COMPARISON OF IDENTITIES. The earlier fix here asked
+:: whether the elevating account was the student's own -- comparing the process token's SID against
+:: the owner of the Explorer in its session -- and carried on when they matched. That works, and it
+:: is strictly more machinery for a case that should not exist: an elevated run is never the right
+:: one, so the identity behind it does not need to be established. Refusing the whole class needs
+:: no WMI, cannot be wrong about RDP or a domain-joined machine, and has nothing to fail open.
+::
+:: SO THIS IS THE ONLY PLACE ELEVATION IS ASKED ABOUT, and it is asked before any external call,
+:: before %PROBE%, and before anything reads %APPDATA%. 25-installer.sh pins that ordering.
+::
 :: NOT `net session`: that idiom returns errorlevel 2 when the Server service is stopped,
 :: which hardening baselines routinely do, so a real Administrator is told they are not one.
 ::
@@ -244,7 +350,7 @@ echo.
 :: Corroborated the hard way: under wine that pipe does not merely misbehave, it aborts the
 :: whole script with exit 255, which is also why no test could have covered it.
 "%SYS32%\reg.exe" query "HKU\S-1-5-19" >nul 2>&1
-if %errorlevel% neq 0 goto notadmin
+if %errorlevel% equ 0 goto isadmin
 
 :: ---- is WSL present at all? ---------------------------------------------------
 if not exist "%SYS32%\wsl.exe" goto installwsl
@@ -253,16 +359,30 @@ if %errorlevel% neq 0 goto installwsl
 goto havewsl
 
 :installwsl
-echo   [1/3] Installing WSL. This is a Windows feature, so it needs a restart.
+:: THE ONE STEP THAT NEEDS AN ADMINISTRATOR, AND IT ASKS RATHER THAN SENDING ANYONE AWAY. The
+:: student runs this file as themselves; Windows raises one prompt here; setup carries on. The
+:: alternative -- refuse, and tell them to start again as an administrator -- is what this file
+:: used to do, and for a standard user it can only end in somebody else's account owning the
+:: course. See the refusal at :isadmin for the measurement.
+::
+:: ONE ARM AND NOT TWO. There is deliberately no "already elevated, so run the commands directly"
+:: path, because :isadmin has already refused every elevated run: reaching here means this process
+:: is not elevated, and the only way the machine-wide work happens is the child below. The cost is
+:: that a failing `wsl --update` and a failing `wsl --install --no-distribution` can no longer be
+:: told apart -- the child reports one code for both -- so :wslupdatefailed is gone and both land
+:: on :wslfeaturefailed. That is the right trade for an arm that cannot be entered elevated at all.
+echo   [1/3] Turning WSL on. This is a change to Windows itself, so
+echo         Windows will ask for an administrator's permission.
 echo.
-"%SYS32%\wsl.exe" --update
-if %errorlevel% neq 0 goto wslupdatefailed
-"%SYS32%\wsl.exe" --install --no-distribution
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSELEV%"
+if %errorlevel% equ 101 goto uacdeclined
 if %errorlevel% neq 0 goto wslfeaturefailed
 goto restartneeded
 
 :restartneeded
-:: ONE CALLER -- WSL absent entirely.
+:: TWO CALLERS NOW, both on the WSL-absent road: the self-elevating arm and the already-elevated
+:: one. It used to have exactly one, and the count is worth keeping accurate because the placement
+:: argument below depends on every caller reaching it going forward.
 ::
 :: PLACED so that caller reaches it going FORWARD. A backward `goto` would work; cmd rescans from
 :: the top of the file for a label. But this file keeps to a subset of batch that the test suite
@@ -272,12 +392,23 @@ echo.
 echo   ------------------------------------------------------------------
 echo   RESTART YOUR COMPUTER NOW.
 echo.
-echo   After it restarts, run this same file again ^(right-click, Run as
-echo   administrator^) and it will carry on from here.
+echo   After it restarts, run this same file again. It will carry on
+echo   from here and will not need permission a second time.
 echo   ------------------------------------------------------------------
 echo.
 pause
 exit /b 0
+
+:: EVERYTHING BELOW THIS LINE IS PER-USER, and belongs to whoever is sitting at the computer.
+:: %APPDATA%, %LOCALAPPDATA% and HKCU -- which is where WSL registers environments; there is no
+:: machine-wide registration -- all follow the TOKEN this process runs under. So an elevation
+:: borrowed from another account would not merely fail to help here, it would silently do all of
+:: it to that account instead.
+::
+:: WHAT MAKES THAT IMPOSSIBLE IS :isadmin, AT THE TOP, and nothing here re-checks it. There was a
+:: guard at this point for one revision, asking whether the elevating account was the student's
+:: own; refusing elevation outright made it unnecessary. If :isadmin is ever relaxed into a
+:: conditional, every path below silently comes to belong to whoever answered the UAC prompt.
 
 :havewsl
 echo   [1/3] WSL is installed.
@@ -300,10 +431,20 @@ echo.
 :: that fixes it is the same defect as issue #112 in miniature. This ran only on the arm where
 :: wsl.exe was absent altogether, which is the one machine that did not need it.
 ::
-:: cmdlint-allow: unchecked-exit -- BEST EFFORT here, unlike the :installwsl arm where it is
-:: load-bearing. `wsl --update` on an already-current WSL is not contractually zero, and a
+:: cmdlint-allow: unchecked-exit -- BEST EFFORT here, unlike inside %PSELEV% where the pair's code
+:: is load-bearing. `wsl --update` on an already-current WSL is not contractually zero, and a
 :: refusal from an optimisation would turn a working install into a failed one. If it mattered,
 :: the install below fails and says so.
+::
+:: AND IT RUNS UN-ELEVATED NOW, WHICH IS A RESIDUAL WORTH KNOWING. Measured on Windows 11 26200 on
+:: 2026-09-15: un-elevated `wsl --update` on an already-current WSL exits 0 in about a second
+:: saying so, and raises no prompt. What is NOT measured is the same call on a machine that has an
+:: update available -- WSL installs to %ProgramFiles%\WSL, so applying one needs an administrator,
+:: and this could therefore raise a SECOND consent prompt at a point the student was not told to
+:: expect one. It is left in place because on a machine with an old-but-working WSL it is the only
+:: thing that reaches 2.4.4, which `--name` below requires, and because its failure is already
+:: waived. If it does prove to prompt, the fix is to delete this line and let :distrofailed name
+:: the version as the cause -- it already does -- with the remedy being to update WSL by hand.
 "%SYS32%\wsl.exe" --update
 
 :: --no-launch, AND THE COMMENT HERE USED TO SAY THE OPPOSITE (#217). It said --no-launch was not
@@ -546,6 +687,19 @@ set "PSLNK=$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%LNKDIR%\%
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSLNK%"
 if %errorlevel% neq 0 goto shortcutfailed
 
+:: AND THE FILE IS THERE, which the exit code above does not say. A COM terminating error does
+:: reach that code, but an unwritable directory, a policy-redirected Start Menu and a name
+:: Explorer refuses are all "exited 0, no shortcut" -- and by this point stage two has already
+:: promised the student the entry, so :shortcutfailed is the only channel left for the truth.
+:: A builtin, so it adds no external call and no unchecked-exit obligation.
+::
+:: WHAT THIS DOES NOT CATCH, said here because it looks as though it should: a .lnk written into
+:: the WRONG PROFILE. %APPDATA% is read here and %APPDATA% was read to write it, so both name the
+:: same directory and this passes happily. :isadmin is what closes that, by refusing the only
+:: state in which the two could differ; this is not a second guard against it, and reading it as
+:: one is how the first would come to look redundant.
+if not exist "%LNKDIR%\%LNKNAME%.lnk" goto shortcutfailed
+
 :: ---- and remove the one wsl --install made -----------------------------------
 :: `wsl --install` CREATED A START MENU ENTRY OF ITS OWN, named after the distribution, and it
 :: opens a bare login shell in the home directory -- not the launcher, and not the course folder.
@@ -600,25 +754,64 @@ echo   installed: use the commands shown above to start CS193V.
 pause
 exit /b 0
 
-:notadmin
-echo   This needs to run as Administrator, because installing WSL is a
-echo   Windows feature change.
+:uacdeclined
+:: REPLACES :notadmin, WHICH ASKED FOR THE WRONG THING. That block refused every un-elevated run
+:: and told the student to start over as an administrator -- which for a standard user means
+:: borrowing somebody else's account, and that is the defect this whole change is about. This one
+:: is reached only after permission was actually ASKED FOR and not given, so it is a person's
+:: decision rather than a property of the computer, and the remedy is to run it again and allow it.
+::
+:: NOTHING HAS HAPPENED AT THIS POINT, and saying so matters: the prompt comes before any change,
+:: so a student who clicked No has not left the machine half-configured.
+echo   Setup needs permission to turn WSL on, and that permission was
+echo   not given -- so nothing has been changed.
 echo.
-echo   Close this window, then RIGHT-CLICK install-cs193v-windows.cmd and
-echo   choose "Run as administrator".
+echo   Run install-cs193v-windows.cmd again and choose Yes when Windows
+echo   asks. Turning WSL on is the only step that needs permission; the
+echo   rest of setup runs as you.
+echo.
+echo   If you are asked for a password you do not have, whoever looks
+echo   after this computer has to allow that one step for you. Everything
+echo   after it you can do yourself.
 echo.
 pause
 exit /b 1
 
-:wslupdatefailed
+:isadmin
+:: THE REFUSAL THAT REPLACED A REQUIREMENT. This file used to insist on being run as an
+:: administrator; it now refuses to be. See the reasoning at the probe above -- in short, an
+:: elevated run is never the right one, so its identity never has to be established.
+::
+:: THE PAIR TO :foreignaccount BELOW, one layer out. That one refuses because somebody else's
+:: LINUX account owns the environment; this one because an elevated run would make somebody else's
+:: WINDOWS account own everything setup is about to write. Same shape: say so, change nothing, stop.
+::
+:: IT DOES NOT NAME THE OTHER ACCOUNT, and that is a constraint rather than a choice: reading a
+:: VALUE back out of a probe needs `for /f` or a scratch file in %TEMP%, and both are banned -- see
+:: the header. It does not need to. What the student has to change is the way they start the file,
+:: and %USERNAME% here is free from the environment and is the account that would have owned it.
+echo   Do not run setup as an administrator -- it has stopped without
+echo   changing anything.
 echo.
-echo   Could not update WSL.
+echo   Almost everything setup does belongs to ONE Windows account: the
+echo   CS193V environment, the Start Menu entry, your files. Running as
+echo   an administrator gives all of it to whichever account answered
+echo   the prompt -- %USERNAME% here -- and not necessarily to yours.
 echo.
-echo   Please send course staff this whole window, and do not spend time
-echo   troubleshooting it.
+echo   Start it again the ordinary way, as yourself. If WSL still has to
+echo   be turned on, setup will ask for permission for that one step
+echo   when it gets there.
 echo.
 pause
 exit /b 1
+
+:: :wslupdatefailed WAS HERE, AND IS GONE RATHER THAN LEFT UNUSED -- the same standard the header
+:: applies to the sibling lookup and the scratch file. `wsl --update` used to run on the
+:: :installwsl arm as a checked command with a message of its own; it now runs inside the elevated
+:: child next to `wsl --install --no-distribution`, and cmd returns one exit code for the pair. So
+:: the distinction is not merely unreported, it is unrecoverable, and a label nothing can reach
+:: would be a message that reads as available and is not. A failing update arrives at
+:: :wslfeaturefailed, whose words cover it: the feature did not get turned on.
 
 :wslfeaturefailed
 echo.

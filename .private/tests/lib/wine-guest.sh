@@ -53,7 +53,13 @@ cmd_state() {
         "$( [ "$(knob wsl.curl.missing 0)" = 0 ] && printf 'present' \
             || printf 'MISSING -- stage one will apt-get install it' )"
     printf '  elevated             %s\n' \
-        "$( [ "$(knob reg.query.rc 0)" = 0 ] && printf 'yes' || printf "no  -- reg query exits $(knob reg.query.rc 0)" )"
+        "$( [ "$(knob reg.query.rc 1)" = 0 ] \
+            && printf 'YES -- the installer will REFUSE this run' \
+            || printf "no  -- the ordinary run; reg query exits $(knob reg.query.rc 1)" )"
+    printf '  the UAC prompt       %s\n' \
+        "$( [ "$(knob win.uac-declined 0)" = 0 ] \
+            && printf "allowed, and the request answers $(knob ps.elev.rc 0)" \
+            || printf 'DECLINED -- the installer must say so and change nothing' )"
     printf '  wsl.exe in System32  %s\n' \
         "$( [ -f "$CASE/harness.no-wsl-exe" ] && printf 'NO -- it will try to install WSL' || printf 'yes' )"
     printf '  planted binaries     %s\n' \
@@ -134,7 +140,22 @@ cmd_knobs() {
     cat <<'EOF'
 Everything you can change, by writing a file into /tmp/case
 ---------------------------------------------------------------
-  reg.query.rc N          elevation probe exit code. 0 = Administrator
+  reg.query.rc N          elevation probe exit code. 0 = Administrator, and the installer now
+                          REFUSES that -- nothing it does needs elevation up front, and a standard
+                          user can only obtain it by borrowing another account. DEFAULTS TO 1, the
+                          ordinary run, so set it to 0 only to exercise the refusal
+  win.uac-declined 1      the student clicked No on the prompt that turns WSL on. Start-Process
+                          throws on refused consent, so the installer answers 101 and says so;
+                          without that it is indistinguishable from the install failing
+  ps.elev.rc N            exit code of the whole elevation request, for states no arrangement can
+                          express. 101 means declined -- use win.uac-declined for that -- and any
+                          other non-zero means the elevated child failed. NOTE the child never
+                          runs under wine: there is no elevation and no AppInfo service here, so
+                          wsl.update.rc and wsl.feature.rc do NOT reach the commands inside it.
+                          Any code works, negatives included -- fake-powershell.c's answer() used
+                          to read a value below zero as "not set", so `ps.elev.rc -1` silently
+                          arranged nothing and the case went green saying it had; it now decides
+                          on the knob's PRESENCE, which is what fake-wsl.c always did
 
   harness.no-wsl-exe 1    delete system32\wsl.exe, i.e. no WSL at all. A FILE and not a knob:
                           the installer asks `if not exist "%SYS32%\wsl.exe"`, so this is the

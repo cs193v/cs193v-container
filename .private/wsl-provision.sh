@@ -35,12 +35,22 @@
 # made, which is why stage 1 refuses an environment that already has an account, and why
 # provision_account below refuses one too.
 #
-# IT RUNS NOTHING STUDENT-SUPPLIED, and keeps itself short for that reason. Stage 1 runs as
-# Administrator, so the `wsl -d ... -e` calls it makes -- including the one that starts this file
-# -- get the ELEVATED DrvFs mount of C:. Root in WSL is not Administrator on Windows (as root,
-# `ls "/mnt/c/System Volume Information"` is refused, because DrvFs access is mediated by the
-# launching process's Windows token) but that mount namespace question is open, recorded under
-# #155, and the honest answer to an open question about privilege is to do less in it.
+# IT RUNS NOTHING STUDENT-SUPPLIED, and keeps itself short for that reason. Root in WSL is not
+# Administrator on Windows -- as root, `ls "/mnt/c/System Volume Information"` is refused, because
+# DrvFs access is mediated by the LAUNCHING PROCESS'S Windows token -- and that mount namespace
+# question is open, recorded under #155. The honest answer to an open question about privilege is
+# to do less in it, so that is what this file does.
+#
+# AND THE PREMISE HERE HAS INVERTED, WHICH MAKES THE QUESTION SMALLER RATHER THAN ANSWERING IT.
+# This used to read "Stage 1 runs as Administrator, so the `wsl -d ... -e` calls it makes --
+# including the one that starts this file -- get the ELEVATED DrvFs mount of C:." Stage 1 now
+# REFUSES to run elevated: nothing it does needs it up front, and requiring it installed the course
+# into whichever account answered the UAC prompt. So these calls get the STUDENT'S DrvFs mount,
+# which is the one they would have had anyway. #155 stays open -- the reasoning above is about
+# root-in-WSL against a Windows token and does not depend on which token that was -- but the
+# elevated case is no longer on the ordinary path. The one elevated thing stage 1 starts is a child
+# that runs `wsl --update` and `wsl --install --no-distribution` and nothing else; it never reaches
+# this file.
 #
 # MUST STAY BASH 3.2 COMPATIBLE — macOS ships bash 3.2. Nothing here will ever run on a Mac, but
 # 10-static.sh holds every shipped script to one dialect and one exception is how a file drifts.

@@ -1023,9 +1023,12 @@ settle, and one it should not be trusted on:
    `lib/cmdlint.sh`'s `cmdlint_bcdedit_writes` holds the line whether or not the claim is true.
 
 6. **The resolution itself — that a binary planted in the download folder is not what runs.**
-   Issue #125. The installer runs elevated with the download folder as its working directory, and
-   cmd.exe searches that directory *before* `%PATH%`, so a `wsl.exe` sitting in `Downloads` was
-   what ran, as Administrator. The `--tier windows` case `win-hijack:*` plants `hostile.exe` there
+   Issue #125. The installer's working directory is the download folder, and cmd.exe searches that
+   directory *before* `%PATH%`, so a `wsl.exe` sitting in `Downloads` was what ran. It used to run
+   **as Administrator**, because the file required elevation; it now refuses an elevated run, so a
+   planted program would run as the student — a smaller consequence and the same hole, over the
+   same account, the same WSL environment and the same handoff that executes stage two. The
+   `--tier windows` case `win-hijack:*` plants `hostile.exe` there
    under every name the installer calls and asserts none of them ran. That is a real gate — revert
    the `%SYS32%\` qualification and it goes red — but **wine is not Windows**: it appears to ignore
    `NoDefaultCurrentDirectoryInExePath`, which is precisely *why* the case can go red, and it says
@@ -1034,9 +1037,10 @@ settle, and one it should not be trusted on:
    *Verify once on a real box:* copy `C:\Windows\System32\hostname.exe` to `wsl.exe` beside the
    `.cmd`; **confirm `NoDefaultCurrentDirectoryInExePath` is unset in that shell first** — Git Bash
    and several dev shells set it to 1, and with it set the test looks clean whether or not the fix
-   is there, which is how the first attempt at reproducing #125 came back negative — then
-   right-click → Run as administrator and confirm the planted copy never executes and the install
-   still completes.
+   is there, which is how the first attempt at reproducing #125 came back negative — then run it
+   **as yourself** and confirm the planted copy never executes and the install still completes.
+   Right-click → Run as administrator is no longer the invocation to test with: it is refused
+   before any external program is named, so it would pass this check vacuously.
 
    Measured while writing the fix, so the layout claims below are not guesses. On Windows 11 26200,
    `System32\wsl.exe` is the OS component (hardlinked into `WinSxS`) and is what a bare `wsl.exe`
@@ -1610,6 +1614,51 @@ On a real Windows machine, after `install-cs193v-windows.cmd` finishes:
 - Click it: a terminal opens **already inside the launcher**, with no typing.
 
 *Expect:* no visible `wsl -d` step, no bare shell prompt first.
+
+**And check *whose* Start Menu it is, which is the one thing no tier can reach.** `lib/wine.sh`
+hardcodes a single profile and wine has no elevation at all, so nothing automated can tell the
+invoking user's `%APPDATA%` from anybody else's. This is the Windows counterpart to §134.3's
+second-account technique, and it is the check that found the elevation defect.
+
+*Arrange:* one Windows 11 machine, two accounts — a **standard** user (not in `Administrators`)
+and a separate **administrator**. Sign in as the standard user at the physical console. Note in
+passing that UAC's *credential* prompt, which is what a standard user gets, looks almost exactly
+like its *consent* prompt, which is what an administrator gets: that resemblance is why this went
+unnoticed.
+
+*Run it as yourself.* If WSL is absent, expect exactly one prompt — for the WSL step — and note
+that answering it with the **administrator's** password is correct and expected here: the child
+only turns a Windows feature on. After the restart, run it again.
+
+*Expect, in the standard user's profile:*
+
+```
+C:\Users\<student>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
+C:\Users\<student>\AppData\Local\CS193V\cs193v.ico
+```
+
+*and the administrator's profile unchanged* — `C:\Users\<admin>\AppData\Roaming\Microsoft\Windows\Start Menu`
+and `C:\Users\<admin>\AppData\Local\CS193V` gained nothing. Check `wsl -l -q` as **both** accounts:
+`CS193V` appears for the student and not for the administrator. There is no machine-wide
+registration to check — `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss` holds only `MSI`,
+`Plugins` and `DiskMounts`.
+
+*Then the refusal.* Right-click → Run as administrator, supplying the administrator's password.
+*Expect* an immediate refusal, and both profiles untouched.
+
+**What this looked like before the fix, recorded as the negative control** so the refusal does not
+read as speculative. Measured 2026-09-15: `wsl -l -q` reported the **administrator's**
+distributions, so `goto havedistro` skipped creation; stage two ran inside the **administrator's**
+`CS193V` — evidence was the mtimes of `/home/student/.cs193v-enter` and `.cs193v-icon.ico` in it;
+`%PSDEL%` deleted the **administrator's** `Start Menu\CS193V.lnk`; the `.lnk` and `cs193v.ico`
+landed in the **administrator's** profile, owned by `BUILTIN\Administrators`; and the run exited
+**0**, printing `finished.windows-shortcut`. The student's account got nothing at all.
+
+**Also measure the Mark of the Web, which decides what the course instructions say.** A
+browser-downloaded copy carries a `Zone.Identifier` stream (`[ZoneTransfer]`, `ZoneId=3`) and
+Windows then refuses to run it from a double-click; launching it by full path works. Confirm both,
+and confirm the stream is present in the first place — `Get-Item <file> -Stream *` — because
+clearing it once makes every later attempt look fine.
 
 ### §134.8 — does the deleted entry stay deleted
 Run `wsl --update`, reboot, and look at the Start Menu again.

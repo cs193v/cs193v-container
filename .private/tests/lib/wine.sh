@@ -87,9 +87,11 @@ wine_list() {                         # wine_list [DISTRO...]
 # ─── arranging a hostile download folder ──────────────────────────────────────
 #
 # Plant a copy of hostile.exe under every name the installer calls, in the folder the .cmd sits in.
-# That is the shape issue #125 reports: the installer runs elevated with the download folder as its
-# working directory, so anything already sitting there is a candidate for execution -- and
-# Downloads is the likeliest place on a real machine for an untrusted file to already be.
+# That is the shape issue #125 reports: the download folder is the installer's working directory,
+# so anything already sitting there is a candidate for execution -- and Downloads is the likeliest
+# place on a real machine for an untrusted file to already be. It used to run ELEVATED out of that
+# folder, which is what made the report urgent; it now refuses an elevated run, so the consequence
+# is the student's account rather than Administrator and the hole is otherwise unchanged.
 #
 # THESE ARE HARNESS ARRANGEMENTS, NOT FAKE KNOBS, and the `harness.` prefix says so. A knob
 # configures how a program the installer means to call ANSWERS; these two change what exists on the
