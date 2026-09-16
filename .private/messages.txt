@@ -281,14 +281,6 @@ Done. You will need to log in again the next time you use claude, codex or gh.
 
     {{IMAGE}}
 
-[[status.build-succeeded]]
-The container was built successfully. Run the following command to
-enter the development environment:
-
-    ./cs193v
-
-Happy vibecoding!
-
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
 
@@ -308,9 +300,11 @@ Exiting the CS193V development environment...
 done.
 
 [[status.stopping]]
-# NOT the clean-exit path, which says status.exiting instead. This is what a closed window,
-# a Ctrl-C and `cs193v --stop` say, and stop_container's --quiet flag is what suppresses it
-# for the one path that has already spoken (#220).
+# NOT the clean-exit path, which says status.exiting instead. This is what a closed window, a
+# Ctrl-C IN A SESSION and `cs193v --stop` say -- every path where a container the student has
+# actually been in is going away. stop_container's --quiet flag suppresses it everywhere else:
+# for the clean exit, which has already spoken (#220), and for both --rebuild paths, which stop
+# a container this script created and nobody was ever in (#285).
 Stopping the container...
 
 [[status.stopped]]

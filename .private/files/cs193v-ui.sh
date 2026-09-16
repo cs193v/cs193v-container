@@ -164,9 +164,10 @@ BOX_W=71
 # Draws a box around whatever it is given on stdin.
 #   box [TITLE] [COLOUR] [INDENT]      defaults: STOP, red, none
 #
-# The title and colour are parameters because the build's success box (issue #22) is the
-# first box here that is not an error, and a second renderer to draw a green one would put
-# back exactly the duplication issue #21 removed.
+# The title and colour are parameters because the build's success box (issue #22) was the
+# first box here that was not an error, and a second renderer to draw a green one would put
+# back exactly the duplication issue #21 removed. That box came off again in #285 -- setup-git's
+# "all set" box is the green one now, and it wants the parameters for the same reason.
 #
 # ONE COPY SINCE #221, where there used to be two. install-cs193v.sh carried this verbatim,
 # because a file downloaded on its own can source nothing; the installer proper sources this one
@@ -1400,7 +1401,7 @@ meter_stop() {                        # meter_stop ok|bad [CUR TOTAL LABEL]
     if [ "$#" -ge 2 ]; then cur="$1"; tot="$2"; label="${3:-$label}"; fi
     cur="${cur:-0}"; tot="${tot:-0}"
     # Before the final frame, not after: whatever the caller prints next -- a STOP box, a
-    # success box, a shell -- must have the cursor back, and on the failure path the very next
+    # closing line, a shell -- must have the cursor back, and on the failure path the very next
     # thing is a die() that never returns here.
     cursor_show
     if [ "$outcome" = bad ]; then
@@ -1418,7 +1419,10 @@ meter_stop() {                        # meter_stop ok|bad [CUR TOTAL LABEL]
     fi
     # ESC[J rather than ESC[K, and it does both jobs: it erases the caption row from the cursor
     # onwards AND every row below, which is where the box was. The cursor is left on the blank
-    # caption row, so whatever prints next -- the success box, a shell -- starts on a clean row.
+    # caption row, so whatever prints next -- a shell, or nothing at all on the --rebuild path
+    # since #285 -- starts on a clean row. The \r\n is what keeps the row ABOVE: erasing from
+    # the meter row instead would take the ✓ and the label with it, which is what
+    # tailbox:the-erase-stops-at-the-finished-row refuses.
     printf '\r\n%s[J' "$ESC"
 }
 

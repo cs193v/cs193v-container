@@ -776,6 +776,12 @@ seen nothing resembling a real build. It emits real `STEP i/N` lines now.
 **Fixed as:** a bar rendered from podman's own step numbering, a spinner on the 180-second
 `podman run`, and a green success box. Four things are worth recording beyond the UI:
 
+> **Note (issue #285):** the green box came off again. It told the student to run `./cs193v`,
+> which contradicted the installer's own sign-off a few lines later, and `--rebuild` is how
+> `course-install.sh` builds — so both were on the same screen. The defect B17 is about is
+> unaffected: the completion signal is now the meter's own closing row, `✓ … 26/26  Ready.`,
+> which is a completion rather than "a progress message with no completion".
+
 - **Hiding output made an error message a lie.** `err.build-failed` said "Podman's own
   output is on the screen above this box, ending at the step that failed" — true only for
   as long as the raw output *was* on the screen. The failing tail now goes INSIDE the box.
