@@ -58,9 +58,53 @@ set -u
 #  files/cs193v-ui.sh, so that this script and the launcher read one pair rather than two.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PODMAN_MACOS_VERSION="6.0.2"              # bump when you re-test; used only on macOS
-                                          # -- and when you do, check the .pkg still declares
-                                          # PODMAN_PKG_ID (now in files/cs193v-ui.sh) in its PackageInfo.
+# THE VERSION AND ITS DIGEST, AND THEY MOVE TOGETHER (#283). Bump one and the other is wrong,
+# which is the point of them being adjacent: the .pkg is 71 MB fetched over HTTPS and handed
+# straight to `sudo installer -pkg`, and `curl -f` catching a 404 or a cut-off transfer is not
+# the same as knowing the bytes that arrived are the release that was asked for. A captive
+# portal answering 200 with its own login page is a well-formed reply -- the same gap
+# install-cs193v.sh names for the course tarball, and the reason install-cs193v-windows.cmd
+# greps its own download for a sentinel before running it.
+#
+# A RELEASE ASSET IS HASHABLE WHERE A BRANCH TARBALL IS NOT, which is why this pin exists and
+# why #232 argues against one for the course tree. This is an uploaded file, byte-stable for the
+# life of the release, with its digest published upstream -- so a pinned version HAS a pinned
+# digest and there is nothing to guess. GitHub promises nothing about the bytes of
+# archive/refs/heads/*.tar.gz, and the 2023-01-30 compression change is what that cost everyone
+# who had pinned one.
+#
+# WHERE TO GET THE NEW ONE. Both of these answer, and they agreed for 6.0.2. Take the arm64
+# line; see below for why that is the only one there is to take:
+#
+#   curl -fsSL https://github.com/containers/podman/releases/download/v6.0.2/shasums
+#   gh api repos/containers/podman/releases/tags/v6.0.2 --jq '.assets[]|[.name,.digest]|@tsv'
+#
+# THE API FORM CARRIES A `sha256:` PREFIX AND THE shasums FORM DOES NOT. Paste the 64 hex
+# characters only -- pkgsha:the-pin-is-64-lowercase-hex in 10-static.sh is what catches either
+# shape of a hurried paste, since the shasums line is `<hex>  <filename>`.
+#
+# ONE DIGEST IS ENOUGH, and that is survey()'s doing rather than luck: an Intel Mac is refused
+# above the consent screen, so $arch in install_podman is always arm64 and there is one asset to
+# name. Podman 6.0.2 publishes no amd64 and no universal .pkg at all, so a second constant would
+# be a constant with nothing to hold.
+#
+# AND NO SIGNATURE CHECK GOES BESIDE THIS, which is the tempting addition and the wrong one.
+# `installer` evaluates TRUST, not identity: any Developer ID passes, no team identifier is
+# pinned and notarization is not consulted, so bytes that match this digest necessarily carry
+# the real signature while the converse does not hold. A trust evaluation is also a check
+# against a clock -- certificates expire, and a refusal would then arrive mid-quarter on a
+# pinned version whose bytes never changed. A digest cannot rot that way.
+#
+# NOR IS THE DIGEST FETCHED AT INSTALL TIME from the shasums asset above. It would travel the
+# same connection from the same host to the same curl in the same second as the .pkg, so
+# anything able to substitute one substitutes both and the pair is self-consistent. A digest is
+# a pin only if it arrives by a different route than the thing it describes, and here that route
+# is a person reading it once, by hand, and committing it.
+PODMAN_MACOS_VERSION="6.0.2"
+PODMAN_MACOS_SHA256="5a1d97f98f626cdb82dbd9932cf43102d1e9b6621627085fec2dcadf59743930"
+                                          # bump BOTH when you re-test -- and when you do, check
+                                          # the .pkg still declares PODMAN_PKG_ID (now in
+                                          # files/cs193v-ui.sh) in its PackageInfo.
 
 DEFAULT_DIR="$HOME/cs193v"
 WSL_DISTRO="CS193V"
@@ -732,7 +776,7 @@ install_podman() {
             root_step_packages
             ;;
         macos)
-            local arch pkg url
+            local arch pkg url got
             arch="$(uname -m)"
             pkg="$(mktemp "${TMPDIR:-/tmp}/podman.XXXXXX").pkg"
             url="https://github.com/containers/podman/releases/download/v${PODMAN_MACOS_VERSION}/podman-installer-macos-${arch}.pkg"
@@ -743,14 +787,64 @@ install_podman() {
             # whatever else arrives within 100 ms.
             setup_meter_start 2 "$(msg meter.pkg-downloading)"
             # NOT -s ANY MORE, and that is what makes a box worth having here at all: silent curl
-            # leaves eight blank rows for the length of a 56 MB download. MEASURED rather than
+            # leaves eight blank rows for the length of a 71 MB download. MEASURED rather than
             # assumed -- curl writes its progress meter to stderr even when stderr is a pipe, so
             # 2>&1 puts a percentage, a rate and an ETA in the box, which is the best thing on
             # the screen during the one phase with nothing else in it. -f and -L are unchanged
             # and are the two that are load-bearing; -S only ever qualified the -s.
             if ! setup_run setup_drain curl -fL --retry 5 -o "$pkg" "$url"; then
                 setup_meter_stop bad
+                # REMOVED HERE TOO (#283). curl truncates its -o target before it knows the
+                # transfer will fail, so this arm was leaving a partial .pkg in TMPDIR under a
+                # name nothing would ever look at again. The digest refusal below removes its
+                # file for a stronger reason; this one is just tidiness, and the two arms
+                # leaving different messes behind was the thing worth not keeping.
+                rm -f "$pkg"
                 die "$(msg err.podman-download "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
+            fi
+            # ─── THE BYTES, BEFORE ROOT IS HANDED THEM  (#283) ───────────────────────────
+            # ABOVE setup_phase 2, so the caption over the STOP box still reads "Downloading
+            # podman..." -- which is what went wrong -- rather than "Installing podman...",
+            # which never started. meter_stop keeps that row on the failure path for exactly
+            # this reason. It also makes "before the sudo" structural rather than a
+            # line-ordering accident that a later edit could undo quietly.
+            #
+            # AND NO PHASE OF ITS OWN, measured rather than assumed: on the 71 MB .pkg this is
+            # 0.07s with sha256sum, 0.27s with shasum and 0.07s with openssl. The animator draws
+            # at 10 Hz, so a phase here would live for one or two frames -- the flicker
+            # setup_phase's forward-only guard exists to prevent -- and going from two phases to
+            # three would hand a third of the bar to a tenth of a second of work, which makes
+            # the one bar that exists to make this download legible less honest, not more.
+            #
+            # THE METER IS TORN DOWN BEFORE THE DIGESTS ARE WRITTEN. The animator tails
+            # $SETUP_LOG into the block's output box and setup_meter_stop draws that box on the
+            # failure path too, so appending first would put 128 hex characters on the screen in
+            # the frame before the refusal.
+            #
+            # THE DIGESTS GO TO THE LOG AND THE BOX POINTS AT IT, the way its two neighbours do.
+            # BOX_W is 71, so one digest is most of a row and two of them are the whole refusal
+            # -- box() wraps rather than cuts, so they would arrive split mid-hex. The log
+            # answers the other half of the question for free: curl's progress meter is teed
+            # into it, so the byte total already there is what separates a 4 KB login page from
+            # 71 MB of something else.
+            got="$(pkg_sha256 "$pkg")"
+            if [ "$got" != "$PODMAN_MACOS_SHA256" ]; then
+                setup_meter_stop bad
+                # REMOVED, WHERE THE OTHER TWO REFUSALS LEAVE IT. They leave behind a file
+                # nothing has been said against -- a cut-off download, or a good package whose
+                # install failed. This leaves behind 71 MB specifically concluded not to be what
+                # it claims, under an mktemp name no student can guess, and the evidence worth
+                # keeping is the digest in the log rather than the file.
+                rm -f "$pkg"
+                # EMPTY MEANS NOTHING COULD HASH IT, which is a different refusal because it is
+                # a different instruction. Telling a student their download is corrupt when the
+                # truth is that this script could not look sends them round a re-download loop
+                # that can never succeed. Two refusals, one comparison.
+                if [ -z "$got" ]; then
+                    die "$(msg err.podman-no-sha)"
+                fi
+                msg detail.pkg-digests "GOT=$got" "WANT=$PODMAN_MACOS_SHA256" >> "$SETUP_LOG"
+                die "$(msg err.podman-pkg-digest "LOG=$SETUP_LOG")"
             fi
             setup_phase 2 "$(msg meter.pkg-installing)"
             # note.password WAS HERE, saying "macOS will now ask for your password" (#226).

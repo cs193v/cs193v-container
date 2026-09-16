@@ -940,6 +940,87 @@ assert_eq "rootsteps:the-prime-asks-nothing-before-the-gate" "yes" \
           "$([ -n "$ap_gate" ] && [ -n "$ap_sudo" ] && [ "$ap_gate" -lt "$ap_sudo" ] \
              && printf yes || printf "gate=$ap_gate first-sudo=$ap_sudo")"
 
+# ─── the macOS .pkg is pinned by digest, and checked before root sees it (#283) ─
+#
+# BESIDE rootsteps:*, because this is a rule about the same privileged call the two assertions
+# above just finished naming. The one thing course-install.sh still hands to root is a 56 MB file
+# it downloaded over the network, and `curl -f` catching a 404 or a cut-off transfer is not the
+# same as knowing the bytes that arrived are the release that was asked for -- a captive portal
+# answering 200 with its own login page is a well-formed reply, which is the gap
+# install-cs193v.sh:180-186 already names for the course tarball. The pin is what closes it here.
+#
+# THE VALUE IS NOT ASSERTED HERE AND CANNOT BE. No static check knows what podman's .pkg really
+# hashes to; 00-release-gates.sh :: pkgsha:the-pin-is-the-published-digest reads podman's own
+# shasums asset for that. What is here is the pin's SHAPE and its POSITION, which is the half no
+# tier can execute -- 25-installer.sh's cases drive the refusals, but a reorder that moved the
+# check below `sudo installer -pkg` would leave every one of them green.
+pkgsha="$(sed -n 's/^PODMAN_MACOS_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+# COUNTED RATHER THAN FOUND, the rule min-podman:* keeps for the floors: a second declaration
+# later in the file shadows the first, and every assertion here would read the wrong one.
+assert_eq "pkgsha:the-pin-is-declared-once" "1" \
+          "$(grep -c '^PODMAN_MACOS_SHA256=' "$PRIVATE/course-install.sh")"
+record    "pkgsha:the-pinned-digest" "$pkgsha"
+# 64 LOWERCASE HEX, ANCHORED AT BOTH ENDS, AND THE ANCHORS ARE THE ASSERTION. `shasum -a 256`
+# prints the digest, two spaces and a FILENAME, and GitHub's REST API answers `sha256:<hex>` --
+# so the two shapes a hurried bump produces are a whole line and a prefix, and both match an
+# unanchored pattern. Lowercase because that is what all three hashers print; an uppercase digest,
+# which is what Finder and several vendor pages show, would refuse every download forever.
+assert_match "pkgsha:the-pin-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$pkgsha"
+# NOT THE DIGEST OF AN EMPTY FILE, which is the one wrong value that is both easy to arrive at
+# and impossible to notice: it is what a pin filled in from a failed download carries, and it is
+# what pkg_sha256 would return for an unreadable file if it ever printed a digest instead of
+# nothing -- so against it the comparison would pass and wave every .pkg through. DERIVED rather
+# than spelled, so this cannot drift from what do_sha256 says.
+assert_ne "pkgsha:the-pin-is-not-the-empty-file-digest" \
+          "$(printf '' | do_sha256 | awk '{print $1}')" "$pkgsha"
+# AND NOBODY ELSE CARRIES ONE. The launcher never downloads the .pkg, so a pin appearing there is
+# a second number to forget -- the half that catches a copy coming back, which is the rule
+# probe:* keeps for the receipt id.
+assert_eq "pkgsha:nobody-else-declares-a-pin" "" \
+          "$(grep -l '^PODMAN_MACOS_SHA256=' cs193v "$PRIVATE/files/cs193v-ui.sh" \
+             "$PRIVATE/install-cs193v.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+
+# THE ORDER, BY LINE NUMBER INSIDE THE ONE FUNCTION, which is the shape
+# rootsteps:the-prime-asks-nothing-before-the-gate uses just above and for its reason: "both
+# lines are present" proves nothing about which ran first, and a check placed after
+# `sudo installer -pkg` is a check that has already lost. THREE POSITIONS RATHER THAN TWO,
+# because the middle one is what makes the first meaningful -- you cannot hash a file that has
+# not been downloaded yet, so curl < digest < installer is the claim.
+ip_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
+           | sed -n '/^install_podman() {/,/^}/p')"
+assert_ne "pkgsha:install_podman-was-found" "" "$ip_body"
+ip_curl="$(printf '%s\n' "$ip_body" | grep -n 'curl -fL'            | head -1 | cut -d: -f1)"
+ip_sha="$( printf '%s\n' "$ip_body" | grep -n 'PODMAN_MACOS_SHA256' | head -1 | cut -d: -f1)"
+ip_inst="$(printf '%s\n' "$ip_body" | grep -n 'installer -pkg'      | head -1 | cut -d: -f1)"
+assert_ne "pkgsha:the-download-is-in-install_podman"    "" "$ip_curl"
+assert_ne "pkgsha:the-check-is-in-install_podman"       "" "$ip_sha"
+assert_ne "pkgsha:the-pkg-install-is-in-install_podman" "" "$ip_inst"
+assert_eq "pkgsha:checked-after-the-download-and-before-the-install" "yes" \
+          "$([ -n "$ip_curl" ] && [ -n "$ip_sha" ] && [ -n "$ip_inst" ] \
+             && [ "$ip_curl" -lt "$ip_sha" ] && [ "$ip_sha" -lt "$ip_inst" ] \
+             && printf yes || printf "curl=$ip_curl digest=$ip_sha installer=$ip_inst")"
+
+# THE HASHER PROBES EVERY TOOL IT USES, including the last, and there is no `else`. A fallthrough
+# would run the final tool on a machine that does not have it, and what reaches the caller is
+# then an empty string with a `command not found` on stderr -- the same value a real refusal
+# produces, arrived at by accident. It is also what keeps 25-installer.sh's no-hasher case
+# honest: that case derives its removal list from these very `command -v` occurrences, so a tool
+# reached by fallthrough never appears in the derivation, the fixture leaves it on PATH, the hash
+# succeeds, and the case passes having tested nothing.
+ps_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-utils.sh" | sed -n '/^pkg_sha256() {/,/^}/p')"
+assert_ne "pkgsha:pkg_sha256-was-found" "" "$ps_body"
+assert_eq "pkgsha:every-hasher-is-probed" \
+          "$(printf '%s\n' "$ps_body" | grep -c 'command -v ')" \
+          "$(printf '%s\n' "$ps_body" | grep -cE '^[[:space:]]+(sha256sum|shasum|openssl)')"
+assert_eq "pkgsha:the-hasher-has-no-fallthrough" "0" \
+          "$(printf '%s\n' "$ps_body" | grep -cE '^[[:space:]]*else[[:space:]]*$')"
+# AND IT CANNOT REFUSE ON ITS OWN BEHALF. It is called inside a command substitution, and a die()
+# there prints the STOP box into the captured string and lets the script carry on -- the hazard
+# harness:no-exiting-helper-runs-in-a-subshell exists for. So the refusals live at the call site
+# and this function's contract is the string it prints, not its exit status.
+assert_eq "pkgsha:the-hasher-does-not-refuse-for-itself" "0" \
+          "$(printf '%s\n' "$ps_body" | grep -cE '(die|exit)[[:space:]]')"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's
 # root_step_* functions and wsl-provision.sh's own three -- so a sudo that never execs makes the

@@ -475,6 +475,105 @@ EOF
     chmod +x "$SHIM/pkgutil"
 }
 
+# Fake `curl`, which is what makes install_podman's macOS arm executable off a Mac at all.
+#
+# THE FIRST curl FAKE IN THIS TREE, and the reason there was none is the reason this one is
+# narrow: the shim tier must not fetch 71 MB from GitHub, so until #283 there was nothing about
+# that download worth asserting that did not need the network. A pinned digest is assertable
+# offline, and this is what makes the bytes the test's to choose.
+#
+# TWO URLS AND NOTHING ELSE, which is shim_fake_sysctl's doctrine above and here is load-bearing
+# twice over. The registered one gets BODY byte for byte and the exit status it was given.
+# Anything file:// is COPIED -- not as a courtesy, but because install-cs193v.sh fetches the
+# suite's own course tarball that way, and a fake that refused it would die in the BOOTSTRAP,
+# before install_podman exists. Every other URL is an error, which keeps the cheap lane off the
+# network AND is the only thing asserting the URL the installer composes: a product that changed
+# the version, the arch or the path arrives here unregistered and is refused.
+#
+# THE BODY IS A PATH, NOT A STRING. shim_set writes with `printf '%s'` and cannot carry a
+# newline -- see shim_watch -- and the case this fake exists for is a captive portal's HTML login
+# page. The caller writes the file; this copies it.
+#
+# IT LOGS, for the reason shim_fake_ssh does: a download leaves nothing else a case can read.
+# `-o` writes under the installer's own TMPDIR, and on the refusal path the product removes that
+# file before any assertion runs -- so the log is the only record of what was asked for.
+shim_fake_curl() {                    # shim_fake_curl URL BODY [RC]
+    : > "$SHIM/curl.log"
+    printf '#!/bin/sh\nCURLLOG=%s\nWANT=%s\nBODY=%s\nRC=%s\n' \
+           "$SHIM/curl.log" "$1" "$2" "${3:-0}" > "$SHIM/curl"
+    cat >> "$SHIM/curl" <<'INNER'
+ARGV="$*"
+printf '%s\n' "$ARGV" >> "$CURLLOG"
+# THE FLAG FORMS BOTH CALLERS REALLY USE, and they are not the same: course-install.sh sends
+# `-fL --retry 5` and install-cs193v.sh sends `-fsSL --retry 10 --retry-delay 3`. So the clusters
+# fall through `-*` and only the flags that TAKE a value are named.
+#
+# AND THE FIRST POSITIONAL WINS, WHICH IS WHAT MAKES THAT LIST LOAD-BEARING. Written the obvious
+# way -- `url="$1"` for every non-flag -- the last one wins, so the 5 in `--retry 5` set url=5
+# and the real URL then overwrote it: the value-taking arm above could be deleted entirely and
+# nothing went red. Measured, by deleting it. Taking the first instead means a value that leaks
+# through is the URL this fake answers on, so it refuses, so the case says so.
+dest=''; url=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)  dest="$2"; shift 2 ;;
+        --retry|--retry-delay|--max-time|--connect-timeout) shift 2 ;;
+        -*)  shift ;;
+        *)   if [ -z "$url" ]; then url="$1"; fi; shift ;;
+    esac
+done
+[ -n "$dest" ] || { echo "curl-fake: no -o in: $ARGV" >&2; exit 2; }
+case "$url" in
+    file://*)
+        src=${url#file://}
+        cp "$src" "$dest" 2>/dev/null && exit 0
+        echo "curl: (37) Couldn't open file $src" >&2; exit 37 ;;
+esac
+# `[ -n "$WANT" ]` FIRST. A caller whose sed failed hands this an empty URL to register, and
+# without the guard an argv with no URL in it at all would match it and be served.
+if [ -n "$WANT" ] && [ "$url" = "$WANT" ]; then
+    # THE FILE IS CREATED EVEN WHEN RC IS NONZERO, because real curl truncates its -o target
+    # before it knows the transfer will fail -- which is what leaves a partial .pkg behind on the
+    # download-failure arm, and what the leftover assertions there are paired against.
+    cat "$BODY" > "$dest" || exit 23
+    exit "$RC"
+fi
+echo "curl-fake: refusing a URL it was not given: $url" >&2
+exit 1
+INNER
+    chmod +x "$SHIM/curl"
+}
+
+# THROUGH $SHIM_LAST, like sudo_log above and for the #76 reason its comment records: every call
+# site is `out="$(... installer_tty ...)"`, and a reader that trusted $SHIM would silently read
+# the PREVIOUS case's log, which is a pass.
+shim_curl_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/curl.log" 2>/dev/null; }
+
+# The same receipt shim_fake_pkgutil writes, except that it does not exist until
+# `installer -pkg` has run -- which is the sequence a real Mac has, and the one tests/MANUAL.md
+# keeps as a by-hand check.
+#
+# WITHOUT THIS THERE IS NO POSITIVE. install_podman is reachable only with podman absent, and a
+# receipt for an empty directory stays empty for the whole run -- so a run whose digest MATCHED
+# would install the .pkg and then die at err.podman-unrunnable. Correct for that fixture, and
+# useless as the thing every refusal is paired against.
+#
+# IT READS sudo-fake's LOG, which is the only record that the privileged call happened. That is
+# also what keeps the model from being circular: a product that checked the digest AFTER the
+# install would get its receipt here too, and it is 10-static.sh's ordering rule that refuses
+# that shape -- not this fake.
+shim_fake_pkgutil_on_install() {      # shim_fake_pkgutil_on_install ID BINDIR
+    shim_fake_pkgutil "$1" "$2" || return 1
+    mv "$SHIM/pkgutil" "$SHIM/pkgutil-after" || return 1
+    cat > "$SHIM/pkgutil" <<EOF
+#!/bin/sh
+grep -q 'installer -pkg' "$SHIM/sudo.log" 2>/dev/null \\
+  || { echo "No receipt for '$1' found at '/'." >&2; exit 1; }
+exec "$SHIM/pkgutil-after" "\$@"
+EOF
+    chmod +x "$SHIM/pkgutil"
+}
+
 # Fake `ssh`, so a launch can reach open_shell having warned about NOTHING.
 #
 # Against the fake podman the tunnel can never come up — its ProxyCommand is

@@ -110,10 +110,14 @@ answer whether its cursor moves land correctly there, and the build's block alre
 bridge on the same run — so the thing to check is that they look the *same*, one after the other,
 rather than checking this one alone.
 
-**Two arms no fixture reaches.** `sudo installer -pkg` and a real `podman machine init` need a
-Mac. On one, watch that the `.pkg` download shows curl's percentage in the box rather than eight
-blank rows — that is what dropping `-s` buys — and that the VM step reads "Downloading the VM"
-and then "Initializing the VM" rather than sitting on the first.
+**Two arms, and one of them is now half-reachable.** A real `sudo installer -pkg` and a real
+`podman machine init` still need a Mac. What is no longer unreachable is the *download* around
+them: since #283 gave it a pinned digest to check, `25-installer.sh :: pkgsha:*` drives
+`install_podman`'s macOS arm end to end against a fake curl, so the check, its two refusals and
+its position relative to the privileged call are all asserted offline. On a Mac, watch the two
+things a fake cannot show: that the `.pkg` download shows curl's percentage in the box rather
+than eight blank rows — that is what dropping `-s` buys — and that the VM step reads
+"Downloading the VM" and then "Initializing the VM" rather than sitting on the first.
 
 ### `setup-git` — the four things only GitHub can answer (issue #49)
 
@@ -789,7 +793,13 @@ behaves the way the repair assumes**, and that is three facts about a Mac.
    assumption in the change: `install_podman` calls `ensure_podman_path` immediately after the
    pkg install, and that reads the receipt the installer just wrote. It has held on every Mac
    tried, and a failure is loud (`podman was installed, but this script cannot run it`), but
-   nothing asserts it. Check it whenever `PODMAN_MACOS_VERSION` moves:
+   nothing asserts it. **A fixture now models it** — `lib/podman-shim.sh ::
+   shim_fake_pkgutil_on_install` answers "no receipt" until `installer -pkg` appears in the fake
+   sudo's log, which is what lets `pkgsha:the-installed-podman-is-reported` exist at all. That is
+   a model of the assumption, not a test of it: nothing offline can know whether a real
+   `installer -pkg` has registered its receipt by the time it returns. So this check is what
+   keeps the model honest. Check it whenever `PODMAN_MACOS_VERSION` moves — and bump
+   `PODMAN_MACOS_SHA256` in the same edit, per the digest section below:
    ```sh
    pkgutil --pkg-info com.redhat.podman            # expect a location: line
    pkgutil --only-files --files com.redhat.podman | grep -E '(^|/)podman$'
@@ -821,7 +831,9 @@ pre-5.0 implementation out of reach rather than trusting it.
 *What a person on a Mac should check, in order of how likely it is to matter:*
 
 1. **A Mac with no podman at all** — the ordinary path. The installer downloads
-   `PODMAN_MACOS_VERSION` (6.0.2) and never consults the floor. *Expect:* unchanged behaviour.
+   `PODMAN_MACOS_VERSION` (6.0.2), verifies it against `PODMAN_MACOS_SHA256` before handing it to
+   `installer -pkg`, and never consults the floor. *Expect:* unchanged behaviour, and **no digest
+   message at all** — a refusal on a good network means the pin is wrong, not the network.
 2. **A Mac already carrying podman 5.7.0 or newer** — accepted, `setup_machine` runs against it.
    *Expect:* unchanged behaviour. This is the case the floor is chosen to guarantee.
 3. **A Mac carrying podman older than 5.7.0** — refused, with the message rewritten for this
@@ -838,6 +850,75 @@ pre-5.0 implementation out of reach rather than trusting it.
 so the refusal branch and its two-way message split **are** reachable there — what is not is
 whether `podman machine` on a pre-5.0 podman would actually have worked. Nobody needs to find out
 while the floor holds.
+
+### The pinned `.pkg` digest, and the one edit that breaks it (#283)
+`curl -f` catches a 404 and a cut-off transfer. It cannot catch a 200 carrying somebody else's
+bytes — a hotel or campus wifi login page, or an intercepting proxy — and until #283 the
+installer handed whatever arrived to `sudo installer -pkg … -target /`, which runs that package's
+scripts as root. `install-cs193v.sh` already refuses that shape for the *tarball* by checking the
+tree by name; a `.pkg` has no member to check, so a pinned SHA-256 is the only thing that can.
+
+Two things were established while filing that issue, and both are worth not re-deriving:
+**Gatekeeper never evaluates this download at all** — `curl` is not LaunchServices-aware and sets
+no `com.apple.quarantine`, verified by downloading a file and finding no extended attributes on
+it — and **`installer`'s own signature check is a trust check rather than an identity pin**: any
+Developer ID passes, no team identifier is pinned, notarization is not consulted. So a digest
+subsumes it, which is why no signature check sits beside the pin. The reasoning is recorded
+beside the constant.
+
+*Automated:* the mechanism is `25-installer.sh :: pkgsha:*` — a fake curl serves bytes the test
+chose, a second tarball pins the digest of one of them, and five bodies (matching, same-length
+but different, truncated, empty, and a captive-portal login page) are driven through the real
+`install_podman`. The constant's shape, and its position relative to `sudo installer -pkg`, are
+`10-static.sh :: pkgsha:*`. **The pinned value is asserted by neither**, and cannot be: no
+fixture knows what the real package hashes to. `00-release-gates.sh ::
+pkgsha:the-pin-is-the-published-digest` compares it against podman's own `shasums` asset, and
+that gate is not in the default run.
+
+*The edit that will actually break this,* and the reason the release gate exists: **bumping
+`PODMAN_MACOS_VERSION` without `PODMAN_MACOS_SHA256`.** Nothing in the default suite goes red —
+the shim cases read the URL out of the installer, so they follow the bump — and the symptom on a
+student's Mac is a digest refusal on a perfectly good network. When you bump one, bump both, then
+run `run-tests.sh --tier release`:
+```sh
+v=6.0.2; a=arm64
+curl -fsSL "https://github.com/containers/podman/releases/download/v$v/shasums" \
+  | grep "podman-installer-macos-$a.pkg"
+```
+`-L` is not optional there: a release download URL is a 302 to the asset CDN, and without it curl
+writes an empty file and exits 0. Once, against the bytes rather than the claim:
+```sh
+curl -fL -o /tmp/p.pkg \
+  "https://github.com/containers/podman/releases/download/v$v/podman-installer-macos-$a.pkg"
+shasum -a 256 /tmp/p.pkg
+```
+Note that the gate reports a **named skip** rather than a pass when GitHub does not answer, so a
+run showing `SKIP pkgsha:the-pin-is-the-published-digest` has not confirmed the pin.
+
+*What a person on a Mac should check, in order:*
+1. **The pin is right for the bytes GitHub really serves.** On a Mac with no podman, on a good
+   network, run the installer. *Expect:* no digest message, and the install completes. This is
+   the only check that closes the gap between "the pin equals what podman published" and "the
+   pin equals what the CDN delivered".
+2. **The refusal is reachable, readable, and inside its box.** Edit a local copy's
+   `PODMAN_MACOS_SHA256` to `$(printf x | shasum -a 256 | cut -d' ' -f1)` and re-run. *Expect:*
+   the STOP box with every line inside its borders, the download block closed above it rather
+   than overdrawing it, `/opt/podman` untouched, and both digests in
+   `${TMPDIR:-/tmp}/cs193v-setup.log`. `pkgsha:the-box-is-gone-before-the-refusal` asserts the
+   third of those against a pty; the rest is a judgement about whether the wording reads as "try
+   a different network" rather than "your computer is broken".
+3. **Nothing is left behind.** After a refusal, `ls "${TMPDIR:-/tmp}"/podman.*.pkg`. *Expect:*
+   nothing — 71 MB nobody will ever look at is not a thing to leave in a student's temp
+   directory.
+4. **The hash is not slow enough to need a caption.** The meter sits at 1/2 while it runs.
+   *Expect:* well under a second — measured 0.07s with `sha256sum`, 0.27s with `shasum`, 0.07s
+   with `openssl` on the 71 MB package. If it is ever visibly slow the block needs a third phase,
+   which is a `setup_meter_start 3` and a catalogue key, not a tweak.
+
+*Not automatable, and not worth faking:* whether a real captive portal's reply arrives as a 200
+at all — some answer 302, which `-L` follows, and that lands on the download arm rather than this
+one.
+
 
 ### §1.3 — bash 3.2 on macOS
 `bash --version` (expect 3.2.x), then run the installer with `/bin/bash` explicitly, and run

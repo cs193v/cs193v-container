@@ -262,6 +262,78 @@ setup_tail() {                        # setup_tail -> the last 12 lines of the l
     tail -n 12 "$SETUP_LOG" 2>/dev/null
 }
 
+# ─── small utilities ──────────────────────────────────────────────────────────
+#
+# THE SAME IDIOM THE LAUNCHER HAS, AND A SECOND COPY ON PURPOSE (#283). cs193v has sha_stdin
+# under this same heading, and moving that one here -- or both of them into
+# files/cs193v-ui.sh -- was weighed and declined three times over:
+#
+#   * IT IS NOT A CONTRACT BETWEEN TWO FILES, where PODMAN_PKG_ID and the podman floors are.
+#     The launcher's three hashes are self-consistent KEYS: they have to be stable across
+#     launches of the same launcher and equal to nothing this file computes. This one is
+#     compared against a constant in course-install.sh. Two copies of a function is a
+#     coincidence of implementation, and there is no invariant here for a drift test to hold --
+#     which is exactly what the retired #221 drift suites did hold about the receipt id.
+#   * files/cs193v-ui.sh IS IN THE BUILD HASH. build_hash reads Containerfile plus files/, so
+#     the obvious shared home would offer every student on every platform a container rebuild --
+#     for a function the container has no reader for. That is this file's own argument about the
+#     package table, one screen up.
+#   * AND THE LAUNCHER'S THREE CALL SITES ARE THE THREE NOT TO TOUCH. Two of them decide whether
+#     a student's container is recreated and rebuilt, and nothing compares either against a
+#     stored value -- so a refactor that changed the output by one character would rebuild every
+#     container in the course with nothing red anywhere.
+#
+# THE COPIES DIFFER, AND THAT IS THE POINT RATHER THAN DRIFT. This one probes a third tool,
+# because its failure mode is a refusal a student reads: the launcher's is a cache miss.
+#
+# EVERY TOOL IS PROBED, INCLUDING THE LAST: THERE IS NO `else`. A fallthrough would run openssl
+# on a machine that does not have it, and what reaches the caller is then an empty string with a
+# `command not found` beside it -- the same value a real refusal produces, arrived at by
+# accident. Probing it makes "this computer has none of the three" a state the caller can name.
+# It is also what keeps 25-installer.sh's no-hasher case honest: that case derives its removal
+# list from these `command -v` occurrences, and a tool reached by `else` appears in no
+# derivation, so the fixture would leave it on PATH and the case would pass having tested
+# nothing.
+#
+# THE THREE, AND WHY THEY ARE IN THIS ORDER:
+#   sha256sum  every Linux has it (coreutils is Essential), and macOS has had it since 15.0 --
+#              /sbin/sha256sum, Apple-signed, a hardlink to /sbin/md5, from Apple's 2024 re-import
+#              of FreeBSD's md5. NOT on 14 or earlier, which is why it cannot be the only branch:
+#              an M1 shipped with macOS 11 and nothing here sets a floor.
+#   shasum     on every Mac there has ever been, and the documented answer -- but it is
+#              `#!/usr/bin/perl`, and Apple's standing notice is that future macOS will not
+#              include the scripting runtimes by default.
+#   openssl    /usr/bin/openssl is LibreSSL, in the base system since High Sierra and not a
+#              scripting runtime, so it is the one that survives that removal. Last because
+#              macOS ships no openssl(1) man page and Apple describes the system OpenSSL as
+#              there for backwards compatibility, which makes it the least documented of the
+#              three rather than the least available.
+#
+# A FILE ARGUMENT, WITH STDIN REDIRECTED INSIDE. Not handed to the tool as a path: `openssl dgst
+# -sha256 /path` prints `SHA256(/path)= hex`, and the caller's path is an mktemp name whose six
+# random characters can themselves be hex -- so anything hunting for hex in that line can pick
+# the wrong token. Fed on stdin, openssl prints no path at all.
+#
+# $1 FOR TWO OF THEM AND $NF FOR THE THIRD, WHICH IS NOT A TYPO. coreutils prints `hex  -`;
+# LibreSSL on stdin prints bare hex; OpenSSL 3 prints `SHA2-256(stdin)= hex` and OpenSSL 1
+# `(stdin)= hex`. So $1 is right for the first two and would return the literal `(stdin)=` for
+# the third -- an installer that refuses every download, on the one machine where that branch
+# runs and nowhere a test looks. Tidying these onto one normaliser is the change not to make.
+#
+# IT DOES NOT REFUSE ON ITS OWN BEHALF, and that is why both refusals live at the call site: it
+# is read inside a command substitution, and a die() there prints the STOP box into the captured
+# string and lets the script carry on. So the contract is the STRING, not the status: no branch
+# matching prints nothing, which is what the caller tests.
+pkg_sha256() {                        # pkg_sha256 FILE -> 64 lower-case hex digits, or nothing
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum            < "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256        < "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 < "$1" | awk '{print $NF}'
+    fi
+}
+
 # ─── THE STEPS THAT NEED ROOT, and the registry that says which those are ──────
 #
 # ONE LIST, TWO CALLERS, AND THAT IS THE POINT OF THIS FILE (#217). course-install.sh runs these

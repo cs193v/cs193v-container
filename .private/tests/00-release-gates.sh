@@ -131,6 +131,68 @@ $(cat "$rel_tmp/curl.err")"
 fi
 rm -rf "$rel_tmp"
 
+# ─── 1b. the pinned podman .pkg digest is still the published one  (#283) ──────
+# WHY THIS IS A RELEASE GATE AND NOT A REGRESSION. 10-static.sh asserts the pin's SHAPE and
+# 25-installer.sh :: pkgsha:* asserts that a difference is refused; neither can know what the
+# real .pkg hashes to, because no fixture can. The VALUE depends on PUBLICATION -- it changes
+# when podman cuts a release and somebody bumps PODMAN_MACOS_VERSION -- which is this file's
+# whole criterion.
+#
+# AND THE FAILURE IT EXISTS FOR IS ONE EDIT: the version moved and the digest did not. Nothing
+# in the default suite goes red for that, because those cases read the URL out of the installer
+# and so follow the bump; the symptom is every Mac refusing a perfectly good download with a
+# message about captive portals.
+#
+# THE shasums ASSET, NOT THE PACKAGE. podman publishes a plain-text file per release listing
+# every artefact, so this needs one small GET and no JSON parser -- and `curl -f` on it is the
+# tag check as well, since a version bumped past a tag that does not exist is a 404 here.
+# GitHub's per-asset `digest` field answers the same question if podman ever stops publishing
+# shasums, and would need a JSON read. NOTHING HERE DOWNLOADS THE 56 MB PACKAGE, for the reason
+# §1 gives above for not diffing the stage-two bytes: a red you can only clear by waiting out a
+# long download is a red people disable. What that leaves unchecked -- that the CDN serves what
+# podman published -- is a by-hand item in tests/MANUAL.md, and the product's own job at install
+# time, which is the whole of #283.
+pkg_ver="$(sed -n 's/^PODMAN_MACOS_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+pkg_pin="$(sed -n 's/^PODMAN_MACOS_SHA256="\([^"]*\)".*/\1/p'  "$PRIVATE/course-install.sh")"
+assert_ne "pkgsha:the-version-is-set" "" "$pkg_ver"
+assert_ne "pkgsha:the-pin-is-set"     "" "$pkg_pin"
+record    "pkgsha:pinned-version" "$pkg_ver"
+record    "pkgsha:pinned-digest"  "$pkg_pin"
+
+pkg_tmp="$(new_tmpdir)"
+pkg_asset="podman-installer-macos-arm64.pkg"
+pkg_pub=""
+# -L, AND IT IS LOAD-BEARING HERE IN A WAY IT IS NOT IN §1 ABOVE. A release download URL is a
+# 302 to the asset CDN, so without it curl follows nothing, writes an empty file and exits 0 --
+# which is what happened the first time this gate ran. The named skip below is what reported it;
+# a bare pass would have called an empty answer agreement.
+if curl -fsSL --retry 3 -o "$pkg_tmp/shasums" \
+        "https://github.com/containers/podman/releases/download/v$pkg_ver/shasums" \
+        2>"$pkg_tmp/curl.err"; then
+    pass   "pkgsha:the-release-publishes-a-shasums-file"
+    record "pkgsha:shasums-bytes" "$(wc -c < "$pkg_tmp/shasums" | do_tr -d ' ')"
+    # `*name` AS WELL AS `name`, because sha256sum's --binary form writes an asterisk before the
+    # filename and a checksums file carrying one would silently match nothing here.
+    pkg_pub="$(awk -v n="$pkg_asset" '$2 == n || $2 == "*" n {print $1}' "$pkg_tmp/shasums" \
+               | head -1)"
+else
+    fail "pkgsha:the-release-publishes-a-shasums-file" \
+         "no shasums asset at v$pkg_ver -- the tag may not exist, or podman stopped publishing one.
+$(cat "$pkg_tmp/curl.err")"
+fi
+record "pkgsha:published-digest" "${pkg_pub:-<unanswered>}"
+# SHAPE-CHECKED BEFORE IT IS COMPARED, or an unanswered fetch would leave an empty string to
+# compare against an empty pin and pass forever. A NAMED skip rather than a silent pass when
+# GitHub did not answer, which is the §A.15 rule the stage-two block above keeps: a gate that
+# did not run is the same defect as an assertion that never executed.
+if printf '%s' "$pkg_pub" | grep -qE '^[0-9a-f]{64}$'; then
+    assert_eq "pkgsha:the-pin-is-the-published-digest" "$pkg_pub" "$pkg_pin"
+else
+    skip "pkgsha:the-pin-is-the-published-digest" \
+         "no 64-hex line for $pkg_asset in v$pkg_ver's shasums -- asset renamed, or the file changed shape"
+fi
+rm -rf "$pkg_tmp"
+
 # ─── 2. the recipe is the distribution, so its pins are the release gate ───────
 # THIS SECTION REPLACED A REGISTRY CHECK, and it is stricter than the one it replaced.
 #

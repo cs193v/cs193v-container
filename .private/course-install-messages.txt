@@ -456,6 +456,67 @@ You can install Podman Desktop by hand instead:
 
 Then run this script again. It will pick up from here.
 
+# THE BYTES THAT CAME BACK, AND THE TWO WAYS THAT GOES WRONG (#283). PODMAN_MACOS_SHA256 in
+# course-install.sh pins what the .pkg must hash to, and install_podman checks it between the
+# download and `sudo installer`. Neither refusal carries a digest, and that is not a width
+# accident: BOX_W is 71, so one digest is most of a row and two of them are the whole refusal,
+# and box() wraps rather than cuts -- they would arrive split mid-hex. They go to the log by
+# detail.pkg-digests below, and these point at it the way err.podman-download and
+# err.podman-installer already do.
+#
+# AND THE BOX LINT WOULD NOT HAVE CAUGHT IT. It measures the raw line here, so a {{GOT}} scores
+# eight columns and renders at sixty-four. The rule is a convention; this note is what holds it.
+
+[[err.podman-pkg-digest]]
+The podman installer downloaded, but it is not the file this
+script expected, so nothing has been installed.
+
+Almost always this means something answered for the download --
+a hotel or campus wifi login page, for instance. Try again, on a
+different network if you can.
+
+What arrived and what was expected are both in {{LOG}}
+
+You can install Podman Desktop by hand instead:
+
+    https://podman-desktop.io/downloads/macos
+
+Then run this script again. It will pick up from here.
+
+# FAIL CLOSED, AND IN ITS OWN WORDS. pkg_sha256 probes sha256sum, shasum and openssl and prints
+# nothing if it finds none of the three, and install_podman refuses on that rather than
+# installing something it could not check. A SEPARATE MESSAGE because the one above names a
+# cause and prescribes an action -- try another network -- and both are false here: it would
+# send a student round a re-download loop that can never succeed.
+#
+# AND IT ENDS AT COURSE STAFF rather than at podman-desktop.io like its neighbours. Every Mac
+# has at least one of the three, so a machine with none of them has something unusual about it
+# that staff should see; a self-service path would leave that unexamined. err.no-sudo above ends
+# the same way, for the same reason.
+
+[[err.podman-no-sha]]
+This script checks the podman installer it downloads against a
+known checksum, and this computer has none of the programs it
+can use to work one out. Nothing has been installed.
+
+It looks for sha256sum, shasum and openssl. Every Mac has at
+least one of them, so the usual cause is a PATH that has been
+narrowed by hand in a shell startup file.
+
+Please send this to course staff.
+
+# FOR THE LOG, NOT FOR A BOX. Appended to $SETUP_LOG after the progress block has been torn
+# down -- the animator tails that file into the block, so writing it while the meter was still
+# live would draw it. Terse on purpose: this is the artefact a student is asked to send staff,
+# and the one question it has to answer is whether OUR constant is stale or THEIR bytes are
+# wrong. NOT a printf -- text116:no-printf-carries-a-sentence reads quoted printf arguments for
+# two consecutive words, and every natural label pair here trips it.
+
+[[detail.pkg-digests]]
+sha-256 of the file that arrived, and the one expected:
+  got  {{GOT}}
+  want {{WANT}}
+
 # THE ONE PASSWORD PROMPT, and the note that arrives just before it (#226, #223). This
 # replaces a macOS-only "macOS will now ask for your password" that sat immediately above
 # `sudo installer -pkg`: since ask_password primes sudo before any step runs, that line
