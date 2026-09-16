@@ -187,6 +187,16 @@ issue about pinning a commit SHA rather than following `main`, which would make 
 immutable; it is filed with the analysis of what it costs, because it reshapes the mid-quarter
 "just re-run the installer" loop.
 
+**The third download is pinned, and the difference between it and the other two is the whole
+argument** (#283). `course-install.sh` fetches podman's macOS `.pkg` and hands it to
+`sudo installer -pkg … -target /`, and `PODMAN_MACOS_SHA256` now sits beside the version it
+belongs to. That one is hashable where the course tarball is not: a release asset is an
+*uploaded* file, byte-stable for the life of the release, with its digest published upstream — so
+a pinned version has a pinned digest and there is nothing to guess. GitHub promises nothing about
+the bytes of an auto-generated `archive/refs/heads/*.tar.gz`, which is what the 2023-01-30
+compression change demonstrated to everyone who had pinned one. So the `.pkg` gets a digest, the
+tarball gets a commit SHA if it gets anything, and neither answer generalises to the other.
+
 #### What the bootstrap may do, and what it may not
 
 It is the one file students read, so keep it readable in one sitting:

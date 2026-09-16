@@ -1630,6 +1630,285 @@ skip_linux_arm "password:announced-on-the-linux-arm-too" \
                "password:the-control-ran-the-privileged-step"
 fi
 
+# ─── the pinned .pkg digest: install_podman's macOS arm, end to end  (#283) ────
+#
+# THE FIRST BLOCK IN THIS SUITE THAT EXECUTES THAT ARM. Everything above dies before it on
+# purpose -- see the ordering note further down -- because its first act is to fetch 71 MB from
+# GitHub and the cheap lane must not. What makes it reachable is that #283 gave the download
+# something checkable offline, and shim_fake_curl makes the bytes the test's to choose.
+#
+# THE PIN'S VALUE IS NOT ASSERTED HERE AND CANNOT BE. No fixture knows what the real .pkg hashes
+# to without downloading it, so what these cases measure is the MECHANISM: computed over the
+# whole file, compared before the privileged call, refused on any difference.
+# 00-release-gates.sh :: pkgsha:the-pin-is-the-published-digest measures the VALUE, against
+# podman's own shasums asset. Same split as the podman floors -- the comparison is measured
+# where it is cheap, the number where publication can be read -- and neither half is the claim
+# on its own: a pin of all zeroes passes every assertion below.
+
+# FIVE BODIES, AND THE FIRST TWO ARE THE SAME LENGTH BY CONSTRUCTION. That is the whole
+# difference between "somebody else's bytes" and "not all of our bytes": a check that compared
+# sizes passes one and fails the other, so neither case alone tells a digest check from a length
+# check. The portal body is the shape the fix exists for -- a 200 carrying a login page.
+printf 'cs193v test pkg A\n' > "$TMP/pkgbody-good"
+printf 'cs193v test pkg B\n' > "$TMP/pkgbody-hostile"
+head -c 9 "$TMP/pkgbody-good" > "$TMP/pkgbody-cut"
+: > "$TMP/pkgbody-empty"
+cat > "$TMP/pkgbody-portal" <<'PORTAL'
+<!DOCTYPE html>
+<html><head><title>Sign in to continue</title></head>
+<body><h1>Campus Wi-Fi</h1>
+<form action="/login"><input name="user"><input name="pass" type="password">
+<button>Connect</button></form></body></html>
+PORTAL
+assert_eq "pkgsha:the-two-bodies-are-the-same-length" \
+          "$(wc -c < "$TMP/pkgbody-good")" "$(wc -c < "$TMP/pkgbody-hostile")"
+assert_ne "pkgsha:the-two-bodies-hash-differently" \
+          "$(do_sha256 "$TMP/pkgbody-good"    | awk '{print $1}')" \
+          "$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')"
+assert_eq "pkgsha:the-cut-body-is-a-prefix-of-the-good-one" \
+          "$(head -c 9 "$TMP/pkgbody-good")" "$(cat "$TMP/pkgbody-cut")"
+assert_eq "pkgsha:the-empty-body-really-is-empty" "0" \
+          "$(wc -c < "$TMP/pkgbody-empty" | do_tr -d ' ')"
+assert_eq "pkgsha:the-portal-body-really-is-a-login-page" "1" \
+          "$(grep -c 'type="password"' "$TMP/pkgbody-portal")"
+
+# THE URL IS READ OUT OF THE INSTALLER, NOT RETYPED, which is the rule MAC_LABEL keeps at the
+# head of this file. arm64 rather than $(uname -m) because that is the only value this arm can
+# ever see: survey stops an Intel Mac before consent, which is also why there is one digest to
+# pin rather than one per architecture.
+PKG_VER="$(sed -n 's/^PODMAN_MACOS_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+PKG_URL="$(sed -n 's/^ *url="\(https:[^"]*\)".*/\1/p' "$PRIVATE/course-install.sh" | head -1)"
+PKG_URL="$(printf '%s' "$PKG_URL" \
+           | sed -e "s|\${PODMAN_MACOS_VERSION}|$PKG_VER|" -e 's|${arch}|arm64|')"
+record "pkgsha:the-url-under-test" "$PKG_URL"
+# BOTH GUARDS, because a sed that matched nothing leaves an empty URL -- shim_fake_curl then
+# refuses every request and every case below goes red reading "the installer asked for the wrong
+# thing", which is a long way from the truth.
+assert_ne    "pkgsha:the-version-was-readable" "" "$PKG_VER"
+assert_match "pkgsha:the-url-was-read-out-of-the-installer" \
+             '^https://github\.com/containers/podman/releases/download/v[0-9]+\.' "$PKG_URL"
+assert_says  "pkgsha:the-url-names-the-arm64-package" "podman-installer-macos-arm64.pkg" "$PKG_URL"
+
+# ── a second tarball, whose pin names a body the test wrote ──
+# The pattern the probe block above uses for PODMAN_PKG_ID, and for its reason: the constant
+# lives in the tree the bootstrap downloads, so varying it means varying a copy of that tree.
+PKG_GOOD_SHA="$(do_sha256 "$TMP/pkgbody-good" | awk '{print $1}')"
+assert_match "pkgsha:the-good-bodys-digest-is-hex" '^[0-9a-f]{64}$' "$PKG_GOOD_SHA"
+cp -a "$TMP/pkg-probe" "$TMP/pkg-digest"
+edit_sub "$TMP/pkg-digest/cs193v-main/.private/course-install.sh" \
+         '^PODMAN_MACOS_SHA256=.*' "PODMAN_MACOS_SHA256=\"$PKG_GOOD_SHA\""
+# ASSERTED BEFORE IT IS PACKED, because an ERE that matches nothing is a silent no-op -- and
+# here the consequence is that the "digest matches" case runs against the SHIPPED pin, refuses,
+# and reads as the fix being broken rather than the fixture being broken.
+assert_eq "pkgsha:the-digest-tree-names-the-test-bodys-digest" "1" \
+          "$(grep -c "^PODMAN_MACOS_SHA256=\"$PKG_GOOD_SHA\"\$" \
+             "$TMP/pkg-digest/cs193v-main/.private/course-install.sh")"
+# AND THE PROBE TREE STILL CARRIES THE SHIPPED PIN, which is the other half of the arrangement:
+# the captive-portal case below runs against that one precisely because it is the pin a
+# student's machine uses.
+assert_ne "pkgsha:the-probe-tree-keeps-a-different-pin" "$PKG_GOOD_SHA" \
+          "$(sed -n 's/^PODMAN_MACOS_SHA256="\([^"]*\)".*/\1/p' \
+             "$TMP/pkg-probe/cs193v-main/.private/course-install.sh")"
+( cd "$TMP/pkg-digest" && tar czf "$TMP/course-digest.tar.gz" cs193v-main )
+assert_file "pkgsha:the-digest-tarball-was-built" "$TMP/course-digest.tar.gz"
+cp "$PRIVATE/install-cs193v.sh" "$TMP/install-digest.sh"
+edit_sub "$TMP/install-digest.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
+edit_sub "$TMP/install-digest.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course-digest.tar.gz\""
+assert_eq "pkgsha:the-installer-copy-names-the-digest-tarball" "1" \
+          "$(grep -c 'course-digest\.tar\.gz' "$TMP/install-digest.sh")"
+assert_ok "pkgsha:the-installer-copy-is-valid-bash" bash -n "$TMP/install-digest.sh"
+
+# TWO FUNCTIONS, AND THE SPLIT IS NOT STYLE -- probe_setup's own comment records what it cost
+# this file. Every run below is `out="$(pkgsha_run ...)"`, which is a subshell; the fixture sets
+# $SHIM, $IOFF and $IFARM and MUST run in the caller's shell, or every assertion reads the
+# PREVIOUS case's logs, which is a pass.
+pkgsha_setup() {                      # pkgsha_setup BODY [CURL_RC]   (in the CALLER's shell)
+    probe_setup absent
+    # A MACHINE THAT REALLY NEEDS A PASSWORD, which is what makes every negative below
+    # non-vacuous. sudo-fake answers `-n true` with 0 unless told otherwise, so ask_password
+    # returns before priming and a REFUSED run leaves sudo.log completely empty -- against which
+    # `assert_says_not "installer -pkg"` passes perfectly and proves nothing. With the probe
+    # failing, the prime is recorded on every run, refused or not, so the `-v` beside each of
+    # those negatives is a positive off the same value. It is also the ordinary machine: the
+    # Linux password case above arranges the same shape for the same reason.
+    shim_set sudo_fail '-n true'
+    # THE RECEIPT THAT ARRIVES WITH THE INSTALL. probe_setup's is for an empty directory and
+    # stays empty, so a matching run would install and then die at err.podman-unrunnable --
+    # correct for that fixture, useless as the positive these refusals are paired against.
+    shim_fake_pkgutil_on_install "$IPROBE_PKG_ID" "$IOFF"
+    shim_fake_curl "$PKG_URL" "$1" "${2:-0}"
+}
+pkgsha_run() {                        # pkgsha_run SCRIPT -> the transcript, ANSI stripped
+    # A PTY, because install_podman is downstream of ask_consent and a piped run declines there.
+    # '2' is the go item of `menu 0 stop go`.
+    installer_tty '2' "$1" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM" | strip_ansi
+}
+# The .pkg course-install.sh mktemps, which lands under shim_new's own exported TMPDIR.
+pkg_leftovers() { ls "$SHIM/tmp"/podman.*.pkg 2>/dev/null; }
+
+# ── the fixture is not vacuous ──
+pkgsha_setup "$TMP/pkgbody-good"
+assert_eq "pkgsha:the-fixture-hides-podman"    ""           "$(PATH="$SHIM:$IFARM" command -v podman)"
+assert_eq "pkgsha:the-fixture-owns-curl"       "$SHIM/curl" "$(PATH="$SHIM:$IFARM" command -v curl)"
+assert_ne "pkgsha:the-fixture-keeps-a-toolbox" ""           "$(PATH="$SHIM:$IFARM" command -v awk)"
+# AND THE FAKE REFUSES ANYTHING IT WAS NOT GIVEN, which is what keeps the network out of this
+# block rather than a promise that it stays out.
+assert_exit "pkgsha:the-fake-refuses-an-unregistered-url" "1" \
+            env PATH="$SHIM:$IFARM" curl -fL --retry 5 -o "$SHIM/nope" \
+                https://example.invalid/podman-installer-macos-arm64.pkg
+# ...and serves the one it was, byte for byte. The positive off the same fake: without it the
+# assertion above passes on a fake that refuses everything, including what the installer asks for.
+PATH="$SHIM:$IFARM" curl -fL --retry 5 -o "$SHIM/served" "$PKG_URL" >/dev/null 2>&1
+assert_eq "pkgsha:the-fake-serves-the-body-it-was-given" "$PKG_GOOD_SHA" \
+          "$(do_sha256 "$SHIM/served" | awk '{print $1}')"
+
+# ── the digest matches: the install proceeds  (THE POSITIVE FOR EVERYTHING BELOW) ──
+pkgsha_setup "$TMP/pkgbody-good"
+out="$(pkgsha_run "$TMP/install-digest.sh")"
+# THE GATE. If this fails, nothing below is about a digest: the run never reached the macOS arm,
+# or podman was visible and install_podman was skipped entirely.
+assert_says_sub "pkgsha:the-run-reached-the-macos-download" note.downloading "$out" "$ICAT" \
+                "URL=$PKG_URL"
+# THE TWO FLAGS course-install.sh's own comment calls load-bearing: -f is what makes a 404 an
+# error, -L is what follows GitHub's redirect to the CDN.
+assert_says "pkgsha:the-download-used--f-and--L"        "-fL"        "$(shim_curl_log)"
+assert_says "pkgsha:the-download-retries"               "--retry 5"  "$(shim_curl_log)"
+assert_says "pkgsha:the-download-asked-for-that-url"    "$PKG_URL"   "$(shim_curl_log)"
+assert_says "pkgsha:the-download-wrote-into-our-tmpdir" "-o $SHIM/tmp/podman." "$(shim_curl_log)"
+# THE CLAIM.
+assert_says_not_key "pkgsha:a-matching-digest-is-not-refused" err.podman-pkg-digest "$out" "$ICAT"
+assert_says "pkgsha:a-matching-digest-reaches-the-installer" "installer -pkg" "$(sudo_log)"
+assert_says "pkgsha:the-pkg-goes-to-the-root-volume"         "-target /"      "$(sudo_log)"
+# AND THE WHOLE ARM RAN, receipt and all, which is what makes this a positive rather than a
+# "did not die": the first end-to-end macOS podman install this suite has executed.
+assert_says_sub "pkgsha:the-installed-podman-is-reported" ok.podman-version "$out" "$ICAT" V=5.7.0
+assert_eq "pkgsha:a-matching-digest-leaves-no-package-behind" "" "$(pkg_leftovers)"
+
+# ── somebody else's bytes, the same length ──
+pkgsha_setup "$TMP/pkgbody-hostile"
+out="$(pkgsha_run "$TMP/install-digest.sh")"
+assert_says_key "pkgsha:a-different-body-of-the-same-length-is-refused" \
+                err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not   "pkgsha:a-refused-digest-installs-nothing"       "installer -pkg" "$(sudo_log)"
+assert_no_signoff "pkgsha:a-refused-digest-does-not-claim-success" "$out"
+assert_eq "pkgsha:a-refused-digest-leaves-no-package-behind" "" "$(pkg_leftovers)"
+# THREE POSITIVES OFF THE SAME VALUES, because each negative above passes on an empty one. The
+# password prime is the only privileged call a refused run should hold; and the download really
+# did write a file where pkg_leftovers looks, so "" there means REMOVED rather than never made.
+assert_says "pkgsha:a-refused-digest-still-asked-for-the-password" "-v" "$(sudo_log)"
+assert_says "pkgsha:a-refused-digest-did-download-something" \
+            "-o $SHIM/tmp/podman." "$(shim_curl_log)"
+# AND BOTH DIGESTS REACH THE LOG, which is what a student is asked to send staff and the only
+# thing that separates "our pin is stale" from "their bytes are wrong". Not in the box: BOX_W is
+# 71 and a rendered digest line is 76, so box() would wrap it mid-hex.
+assert_says_sub "pkgsha:the-log-names-both-digests" detail.pkg-digests \
+                "$(cat "$SHIM/tmp/cs193v-setup.log" 2>/dev/null)" "$ICAT" \
+                "GOT=$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')" \
+                "WANT=$PKG_GOOD_SHA"
+
+# ── not all of our bytes ──
+pkgsha_setup "$TMP/pkgbody-cut"
+out="$(pkgsha_run "$TMP/install-digest.sh")"
+assert_says_key   "pkgsha:a-truncated-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not   "pkgsha:a-truncated-body-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_says       "pkgsha:the-truncated-run-asked-for-the-password" "-v" "$(sudo_log)"
+assert_no_signoff "pkgsha:a-truncated-body-does-not-claim-success" "$out"
+
+# ── nothing at all ──
+# WHY EMPTY IS ITS OWN CASE. sha256 of nothing is a perfectly valid digest, so this is not "the
+# hasher had no answer" -- it is the one input where a product treating an empty COMPUTED digest
+# as a match would wave the file through. 10-static.sh :: pkgsha:the-pin-is-not-the-empty-file-digest
+# is the other half, and without it this case and the matching case could both pass on a check
+# that did nothing.
+pkgsha_setup "$TMP/pkgbody-empty"
+out="$(pkgsha_run "$TMP/install-digest.sh")"
+assert_says_key "pkgsha:an-empty-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not "pkgsha:an-empty-body-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_says     "pkgsha:the-empty-run-asked-for-the-password" "-v" "$(sudo_log)"
+
+# ── the captive portal, against the SHIPPED pin ──
+# THE ONLY CASE HERE THAT USES IT, deliberately: install-probe.sh carries the real
+# PODMAN_MACOS_SHA256, so this is the pin a student's machine would use, refusing a login page.
+# The cases above need a pin that NAMES a body the test wrote; this one needs no such thing,
+# because any pin refuses HTML.
+#
+# THIS IS THE ARGUMENT THE FIX RESTS ON, and install-cs193v.sh already makes it in prose for the
+# tarball -- a captive portal answering 200 with its own login page is a well-formed reply -- and
+# answers it there by checking the tree BY NAME. A .pkg has no member to check by name, so a
+# digest is the only thing that can.
+pkgsha_setup "$TMP/pkgbody-portal"
+out="$(pkgsha_run "$TMP/install-probe.sh")"
+assert_says_key   "pkgsha:a-captive-portal-page-is-refused" err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not   "pkgsha:a-captive-portal-page-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_no_signoff "pkgsha:a-captive-portal-page-does-not-claim-success" "$out"
+assert_says       "pkgsha:the-portal-run-asked-for-the-password" "-v" "$(sudo_log)"
+# AND curl SAID IT WORKED, which is the whole of why -f cannot catch this: the fake exits 0 and
+# the transfer is complete. Without this the case could be passing because the download failed,
+# which is a different refusal that sends a student somewhere else.
+assert_says_not_key "pkgsha:the-portal-download-did-not-fail" err.podman-download "$out" "$ICAT"
+assert_eq "pkgsha:a-captive-portal-page-leaves-no-package-behind" "" "$(pkg_leftovers)"
+
+# ── curl itself fails: the OTHER refusal, unmoved ──
+# A 404 is what a version bumped past a tag that does not exist produces, and the two refusals
+# send a student to different places -- one to a different network, the other to
+# podman-desktop.io. A fix that routed both through the digest message would be worse than none.
+pkgsha_setup "$TMP/pkgbody-empty" 22
+out="$(pkgsha_run "$TMP/install-digest.sh")"
+assert_says_key     "pkgsha:a-failed-download-says-so" err.podman-download "$out" "$ICAT"
+assert_says_not_key "pkgsha:a-failed-download-is-not-a-digest-refusal" \
+                    err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not     "pkgsha:a-failed-download-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_says         "pkgsha:the-failed-download-was-really-tried" "$PKG_URL" "$(shim_curl_log)"
+
+# ── a machine with nothing that can hash ──
+# A PRIVATE FARM, not `rm -f "$IFARM/sha256sum"`: shim_toolfarm builds one farm per suite and
+# every later case shares it, so taking a hasher out of that would silently disarm them all.
+#
+# THE LIST IS READ OUT OF THE PRODUCT, not spelled here. A fourth arm added to pkg_sha256 later
+# and not removed here leaves this case passing against a hasher it forgot about -- which is a
+# case that proves nothing while looking like coverage. It is also why pkg_sha256 probes its last
+# tool instead of falling through to it: a tool reached by `else` appears in no derivation.
+pkgsha_setup "$TMP/pkgbody-good"
+sha_tools="$(sed -n '/^pkg_sha256() {/,/^}/p' "$PRIVATE/install-utils.sh" \
+             | grep -oE 'command -v [a-z0-9]+' | awk '{print $NF}')"
+assert_ne "pkgsha:the-hashers-the-product-tries-were-readable" "" "$sha_tools"
+record    "pkgsha:the-hashers-the-product-tries" "$(printf '%s' "$sha_tools" | do_tr '\n' ' ')"
+NOSHA="$SHIM/farm-nosha"; mkdir -p "$NOSHA"
+ln -s "$IFARM"/* "$NOSHA/" 2>/dev/null
+for t in $sha_tools; do rm -f "$NOSHA/$t"; done
+# BOTH HALVES OF THE FIXTURE, because either alone passes vacuously -- an empty farm satisfies
+# the first perfectly.
+assert_eq "pkgsha:the-no-hasher-farm-really-has-no-hasher" "" \
+          "$(PATH="$SHIM:$NOSHA" sh -c 'for t in '"$sha_tools"'; do command -v $t; done')"
+assert_ne "pkgsha:the-no-hasher-farm-keeps-a-toolbox" "" "$(PATH="$SHIM:$NOSHA" command -v awk)"
+out="$(installer_tty '2' "$TMP/install-digest.sh" \
+       CS193V_DIR="$SHIM/dest" PATH="$SHIM:$NOSHA" | strip_ansi)"
+# THE BODY IS THE ONE THE PIN NAMES, so this is not a mismatch case wearing a different hat: on
+# a machine that can hash, this exact run installs. What is asserted is that a machine that
+# CANNOT hash refuses -- unverifiable is not verified -- and that it says so in its own words
+# rather than telling a student their download is corrupt, which would send them round a
+# re-download loop that can never succeed.
+assert_says_key     "pkgsha:no-hasher-refuses" err.podman-no-sha "$out" "$ICAT"
+assert_says_not_key "pkgsha:no-hasher-does-not-blame-the-download" \
+                    err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not     "pkgsha:no-hasher-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_no_signoff   "pkgsha:no-hasher-does-not-claim-success" "$out"
+# THE VACUITY GUARD THIS CASE NEEDS MORE THAN ANY OTHER. Taking tools off the PATH can make a run
+# die somewhere else entirely, and a run that never reached the download would satisfy all four
+# negatives above perfectly.
+assert_says "pkgsha:no-hasher-still-reached-the-download" "$PKG_URL" "$(shim_curl_log)"
+
+# ── on a terminal: the block closes before the STOP box ──
+# ERRORS.md B17's shape, which machinebox:* covers for the VM's block and nothing covered for
+# this one: a die() that did not call setup_meter_stop bad first gets its STOP box overdrawn by
+# the animator within 100 ms. One forgotten line away from being true.
+pkgsha_setup "$TMP/pkgbody-hostile"
+pkgraw="$(installer_tty '2' "$TMP/install-digest.sh" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM")"
+assert_contains     "pkgsha:the-download-block-carries-an-output-box" "┏━━━━" "$pkgraw"
+assert_not_contains "pkgsha:the-box-is-gone-before-the-refusal" "┏━━━━" \
+                    "$(printf '%s' "$pkgraw" | render_pty)"
+assert_says_key     "pkgsha:the-refusal-survives-the-box" err.podman-pkg-digest \
+                    "$(printf '%s' "$pkgraw" | strip_ansi)" "$ICAT"
 # A CLEAN SHIM LEFT BEHIND, DELIBERATELY. probe_setup runs in THIS shell rather than a subshell
 # (it has to -- see its own comment), so it leaves $SHIM with podman moved out of it. Anything
 # added after this block that reused that shim would see a machine with no podman and take
