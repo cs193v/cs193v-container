@@ -79,15 +79,24 @@ for a in $SIGNOFF_ARMS; do
 done
 assert_eq "signoff-arms:are-mutually-distinguishable" "" "$overlap"
 
+# AND BOTH SIDES ARE FLATTENED, which this helper did not do and which cost it everything it was
+# written for. msg_text returns ONE line (lib/assert.sh:242) and a sign-off is a wrapped block, so
+# the needle could not occur in the RAW text at all: every call below passed unconditionally, on
+# Linux as much as on a Mac, and the hole it was closing stayed open underneath it. Measured while
+# fixing #286 -- a die() that also printed the macOS sign-off left the suite at 521 pass 0 fail
+# with the raw match, and reddens seven of these call sites with the flattened one. assert_says
+# flattens its haystack for exactly this reason; this is that, once, for four needles under one
+# result name.
 assert_no_signoff() {                 # assert_no_signoff NAME TEXT
-    local k needle
+    local k needle hay
+    hay="$(_flatten "$2")"
     for k in finished finished.macos finished.windows finished.windows-shortcut; do
         needle="$(msg_text "$k" "$ICAT")"
         if [ -z "$needle" ]; then
             fail "$1" "no prose for $k -- the arm list in assert_no_signoff has gone stale"
             return
         fi
-        case "$2" in *"$needle"*)
+        case "$hay" in *"$needle"*)
             fail "$1" "claimed success: the output contains the $k sign-off"; return ;;
         esac
     done
@@ -124,14 +133,24 @@ run_say_done() {                      # run_say_done WINFLAG MACREADY WINREADY -
 # `uname` shim the installer sees and this shell does not, so they make a bundle on any host
 # and end with the macOS sign-off whatever the host is: asking `uname -s` for them read the
 # wrong machine, and all four went red on Linux while staying green on a Mac.
-FINISHED_KEY="$(run_say_done '' '' '')"
+#
+# ...AND THREE NAMES FOR THEM, BECAUSE THE TRIPWIRE BELOW IS A CLAIM ABOUT THE CATALOGUE (#286).
+# "There are two sign-offs to choose between" is a property of say_done, which no host decides, so
+# both operands of the-two-keys-differ are spelled out in flags: GENERIC_FINISHED_KEY is the arm a
+# run that made no bundle ends with ANYWHERE, and it is what FINISHED_KEY starts as. Comparing
+# FINISHED_KEY there instead asked the question of a value the `uname` line had just assigned FROM
+# the other one, so on a Mac the assertion compared finished.macos against itself and could not
+# pass -- the same accident as #261 and as the paragraph above, one layer up.
+GENERIC_FINISHED_KEY="$(run_say_done '' '' '')"
 MAC_FINISHED_KEY="$(run_say_done '' yes '')"
+FINISHED_KEY="$GENERIC_FINISHED_KEY"
 if [ "$(uname -s)" = Darwin ]; then FINISHED_KEY="$MAC_FINISHED_KEY"; fi
-record "sign-off:the-key-a-clean-run-ends-with" "$FINISHED_KEY"
-record "sign-off:the-key-a-forced-macos-run-ends-with" "$MAC_FINISHED_KEY"
+record "sign-off:the-key-a-clean-run-ends-with"          "$FINISHED_KEY"
+record "sign-off:the-key-a-run-with-no-bundle-ends-with" "$GENERIC_FINISHED_KEY"
+record "sign-off:the-key-a-forced-macos-run-ends-with"   "$MAC_FINISHED_KEY"
 assert_ne "sign-off:that-key-was-derivable" "" "$FINISHED_KEY"
 assert_ne "sign-off:the-macos-key-was-derivable" "" "$MAC_FINISHED_KEY"
-assert_ne "sign-off:the-two-keys-differ" "$FINISHED_KEY" "$MAC_FINISHED_KEY"
+assert_ne "sign-off:the-two-keys-differ" "$GENERIC_FINISHED_KEY" "$MAC_FINISHED_KEY"
 
 
 # The cheapest tripwire for the whole class of accident installer_host exists to prevent.
@@ -866,8 +885,11 @@ assert_says "subuid:asks-root-for-the-right-range" \
 # This run cannot reach the end and that is correct rather than a gap: the faked account has
 # no real /etc/subuid entry, so the launcher's own preflight refuses at --rebuild. Recorded
 # so the reason is visible instead of looking like a missing assertion.
+# FLATTENED FOR THE REASON assert_no_signoff NOW IS (#286): msg_text builds ONE line and the
+# transcript is wrapped, so counting the needle in the raw text reported 0 whatever the run did --
+# a diagnostic that always agrees with the sentence above it is not evidence for it.
 record "subuid:what-happens-after-a-faked-usermod" \
-       "$(printf '%s' "$out" | grep -cF "$(msg_text "$FINISHED_KEY" "$ICAT")") finished-lines"
+       "$(printf '%s' "$(_flatten "$out")" | grep -cF "$(msg_text "$FINISHED_KEY" "$ICAT")") sign-offs"
 
 # ...and when root refuses. The die must name the account and tell them what to send staff.
 shim_new; shim_fake_id 1000 nosuchuser-cs193v; shim_set sudo_fail usermod
@@ -1717,7 +1739,12 @@ assert_ok "half-tree:but-still-has-what-the-bootstrap-needs" \
           test -s "$TMP/pkg3/cs193v-main/.private/course-install.sh"
 ( cd "$TMP/pkg3" && tar czf "$TMP/half-tree.tar.gz" cs193v-main )
 out="$(run_with_tarball "$TMP/half-tree.tar.gz" "$TMP/broken-half")"
-assert_says_not_key "half-tree:does-not-claim-success"   finished "$out" "$ICAT"
+# ALL FOUR ARMS, not the generic key (#286's second half). A needle for `finished` alone is
+# satisfied by a run that claimed success through finished.macos -- the blindness on every Mac that
+# assert_no_signoff exists to prevent, and this was the one refusal never moved onto it while its
+# three siblings above were. Measured with a say_done wedged into install_files' refusal: green as
+# `assert_says_not_key ... finished`, red through the helper.
+assert_no_signoff "half-tree:does-not-claim-success" "$out"
 assert_eq       "half-tree:exits-nonzero"            "1" "$(last_rc)"
 assert_says_sub "half-tree:names-the-missing-file" err.unpack-incomplete "$out" "$ICAT" \
                 FILE=cs193v
