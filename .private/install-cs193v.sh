@@ -44,8 +44,8 @@ set -u
 # own copy of the three; 25-installer.sh fails if the two files disagree.
 #
 # TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and the reason changed with #280. It used to be
-# load-bearing because six places in the test suite repointed the download by rewriting
-# `^TARBALL=.*` with sed, and a composed URL would have left all six matching nothing, silently.
+# load-bearing because seven places in the test suite repointed the download by rewriting
+# `^TARBALL=.*` with sed, and a composed URL would have left all seven matching nothing, silently.
 # CS193V_TARBALL replaced every one of them, so nothing edits this line any more. Keep it one
 # line regardless: it is the value a commit pin would replace, and one literal is what makes that
 # a one-line change rather than an argument about where the URL gets assembled.
