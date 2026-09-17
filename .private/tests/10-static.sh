@@ -1118,6 +1118,31 @@ bare="$(grep -HnE "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -v "$net_env" || true)"
 assert_eq "installer-door:every-run-repoints-the-download" "" "$bare"
 
+# ...AND THE SCRIPT IT RUNS IS SPELT OUT ON THE CALL LINE, which is what the rule above needs in
+# order to be about anything. A door called as `installer_tty KEYS "$1"` from a wrapper names no
+# file, so neither rule can see what ran or whether it was repointed -- and both then pass, on a
+# call that may be starting the shipped bootstrap straight at GitHub.
+#
+# NOT HYPOTHETICAL, AND THE COST IS THE ARGUMENT FOR THIS BEING STATIC. 25-installer.sh's
+# pkgsha_run was written that way and took a doctored copy of the installer from each caller.
+# When #280 deleted the copies, every rule here stayed green and the suite reported it as two
+# failed assertions in the shim tier, minutes into a run, reading "no such file" -- while the
+# four negatives beside them passed on a run that had not happened.
+#
+# ANY .sh ON THE LINE SATISFIES IT, deliberately: 14-test-harness.sh drives its own probe script
+# through the door, which is a legitimate thing to hand it and nothing to do with the download.
+# What is refused is a call line that names no script at all. installer_host_rc is spelled out
+# rather than left to the prefix, because this needle ends in a space.
+#
+# THE FILENAME PREFIX IS SKIPPED, not searched: grep -H puts `10-static.sh:` in front of every
+# line, so a bare `.sh` test would find one on all of them and this rule would never fire.
+door_call="$net_fn"'(_rc)?[[:space:]]'
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+nameless="$(grep -HnE "$door_call" $PRIVATE/tests/[0-9][0-9]-*.sh \
+            | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+            | grep -vE '^[^:]*:[0-9]+:.*\.sh' || true)"
+assert_eq "installer-door:every-call-names-the-script-it-runs" "" "$nameless"
+
 # ─── one place decides what a fixture machine needs ────────────────────────────
 # The install tier and the hand-driven sandbox both run the same fixture images, and each used
 # to decide a machine's podman flags for itself -- install-sandbox.sh had the nested caps and

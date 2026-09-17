@@ -215,9 +215,9 @@ It is the one file students read, so keep it readable in one sitting:
   so a fourth is a deliberate edit in two places. Nothing froze this before #280, and the cost
   showed the first time anybody wrote the surface down: the plan for that issue recorded it as
   `CS193V_DIR` and `CS193V_WINDOWS`, neither of which this file has ever read.
-- **`TARBALL=` stays a literal one-line assignment.** It used to be load-bearing because six
+- **`TARBALL=` stays a literal one-line assignment.** It used to be load-bearing because seven
   places in the test suite repointed the download by rewriting `^TARBALL=.*`; `CS193V_TARBALL`
-  replaced all six in #280, so nothing edits the line any more. Keep it one line regardless — it
+  replaced all seven in #280, so nothing edits the line any more. Keep it one line regardless — it
   is the value a commit pin (#232) would replace, and one literal is what makes that a one-line
   change.
 

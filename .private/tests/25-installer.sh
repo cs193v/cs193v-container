@@ -1778,12 +1778,18 @@ assert_ne "pkgsha:the-probe-tree-keeps-a-different-pin" "$PKG_GOOD_SHA" \
              "$TMP/pkg-probe/cs193v-main/.private/course-install.sh")"
 ( cd "$TMP/pkg-digest" && tar czf "$TMP/course-digest.tar.gz" cs193v-main )
 assert_file "pkgsha:the-digest-tarball-was-built" "$TMP/course-digest.tar.gz"
-cp "$PRIVATE/install-cs193v.sh" "$TMP/install-digest.sh"
-edit_sub "$TMP/install-digest.sh" '^REPO_OWNER=.*' 'REPO_OWNER="test"'
-edit_sub "$TMP/install-digest.sh" '^TARBALL=.*'    "TARBALL=\"file://$TMP/course-digest.tar.gz\""
-assert_eq "pkgsha:the-installer-copy-names-the-digest-tarball" "1" \
-          "$(grep -c 'course-digest\.tar\.gz' "$TMP/install-digest.sh")"
-assert_ok "pkgsha:the-installer-copy-is-valid-bash" bash -n "$TMP/install-digest.sh"
+# AND NO DOCTORED COPY OF THE BOOTSTRAP TO POINT AT IT (#280). What stood here was a `cp` of the
+# installer with `^TARBALL=.*` sed'd at it, a REPO_OWNER rewrite as insurance against that sed
+# matching nothing, and a grep to catch it if it did -- the seventh of the sites #280 removes,
+# written into this file after the removal of the other six was. CS193V_TARBALL is that
+# mechanism now, so the tarball is named on the door's own env line and the file under test is
+# the student's. `bash -n` on the copy went with them: it asked whether the sed had produced
+# valid bash, and with no sed left, syntax:bootstrap (10-static.sh:94) asks that of the real
+# file on every run.
+#
+# A BARE PATH RATHER THAN file://, which is what every other fixture in this suite hands
+# CS193V_TARBALL: that arm copies instead of downloading, so the only request the fake curl sees
+# in these runs is the .pkg -- which is the download every curl-log assertion below is about.
 
 # TWO FUNCTIONS, AND THE SPLIT IS NOT STYLE -- probe_setup's own comment records what it cost
 # this file. Every run below is `out="$(pkgsha_run ...)"`, which is a subshell; the fixture sets
@@ -1805,10 +1811,17 @@ pkgsha_setup() {                      # pkgsha_setup BODY [CURL_RC]   (in the CA
     shim_fake_pkgutil_on_install "$IPROBE_PKG_ID" "$IOFF"
     shim_fake_curl "$PKG_URL" "$1" "${2:-0}"
 }
-pkgsha_run() {                        # pkgsha_run SCRIPT -> the transcript, ANSI stripped
+pkgsha_run() {                        # pkgsha_run TARBALL -> the transcript, ANSI stripped
     # A PTY, because install_podman is downstream of ask_consent and a piped run declines there.
     # '2' is the go item of `menu 0 stop go`.
-    installer_tty '2' "$1" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM" | strip_ansi
+    #
+    # THE TARBALL IS THE ARGUMENT, AND THE SCRIPT IS SPELT OUT. This took the script until #280,
+    # which is how it came to name a copy that no longer exists: the door's script argument was
+    # invisible to 10-static.sh's installer-door rules, so nothing static noticed. Spelt out, it
+    # is visible to both -- and the thing that actually varies between these cases, the tree the
+    # pin lives in, is what the argument now carries.
+    installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$1" \
+                  CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM" | strip_ansi
 }
 # The .pkg course-install.sh mktemps, which lands under shim_new's own exported TMPDIR.
 pkg_leftovers() { ls "$SHIM/tmp"/podman.*.pkg 2>/dev/null; }
@@ -1831,7 +1844,7 @@ assert_eq "pkgsha:the-fake-serves-the-body-it-was-given" "$PKG_GOOD_SHA" \
 
 # ── the digest matches: the install proceeds  (THE POSITIVE FOR EVERYTHING BELOW) ──
 pkgsha_setup "$TMP/pkgbody-good"
-out="$(pkgsha_run "$TMP/install-digest.sh")"
+out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 # THE GATE. If this fails, nothing below is about a digest: the run never reached the macOS arm,
 # or podman was visible and install_podman was skipped entirely.
 assert_says_sub "pkgsha:the-run-reached-the-macos-download" note.downloading "$out" "$ICAT" \
@@ -1853,7 +1866,7 @@ assert_eq "pkgsha:a-matching-digest-leaves-no-package-behind" "" "$(pkg_leftover
 
 # ── somebody else's bytes, the same length ──
 pkgsha_setup "$TMP/pkgbody-hostile"
-out="$(pkgsha_run "$TMP/install-digest.sh")"
+out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key "pkgsha:a-different-body-of-the-same-length-is-refused" \
                 err.podman-pkg-digest "$out" "$ICAT"
 assert_says_not   "pkgsha:a-refused-digest-installs-nothing"       "installer -pkg" "$(sudo_log)"
@@ -1875,7 +1888,7 @@ assert_says_sub "pkgsha:the-log-names-both-digests" detail.pkg-digests \
 
 # ── not all of our bytes ──
 pkgsha_setup "$TMP/pkgbody-cut"
-out="$(pkgsha_run "$TMP/install-digest.sh")"
+out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key   "pkgsha:a-truncated-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
 assert_says_not   "pkgsha:a-truncated-body-installs-nothing" "installer -pkg" "$(sudo_log)"
 assert_says       "pkgsha:the-truncated-run-asked-for-the-password" "-v" "$(sudo_log)"
@@ -1888,13 +1901,13 @@ assert_no_signoff "pkgsha:a-truncated-body-does-not-claim-success" "$out"
 # is the other half, and without it this case and the matching case could both pass on a check
 # that did nothing.
 pkgsha_setup "$TMP/pkgbody-empty"
-out="$(pkgsha_run "$TMP/install-digest.sh")"
+out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key "pkgsha:an-empty-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
 assert_says_not "pkgsha:an-empty-body-installs-nothing" "installer -pkg" "$(sudo_log)"
 assert_says     "pkgsha:the-empty-run-asked-for-the-password" "-v" "$(sudo_log)"
 
 # ── the captive portal, against the SHIPPED pin ──
-# THE ONLY CASE HERE THAT USES IT, deliberately: install-probe.sh carries the real
+# THE ONLY CASE HERE THAT USES IT, deliberately: the probe tarball carries the real
 # PODMAN_MACOS_SHA256, so this is the pin a student's machine would use, refusing a login page.
 # The cases above need a pin that NAMES a body the test wrote; this one needs no such thing,
 # because any pin refuses HTML.
@@ -1904,7 +1917,7 @@ assert_says     "pkgsha:the-empty-run-asked-for-the-password" "-v" "$(sudo_log)"
 # answers it there by checking the tree BY NAME. A .pkg has no member to check by name, so a
 # digest is the only thing that can.
 pkgsha_setup "$TMP/pkgbody-portal"
-out="$(pkgsha_run "$TMP/install-probe.sh")"
+out="$(pkgsha_run "$TMP/course-probe.tar.gz")"
 assert_says_key   "pkgsha:a-captive-portal-page-is-refused" err.podman-pkg-digest "$out" "$ICAT"
 assert_says_not   "pkgsha:a-captive-portal-page-installs-nothing" "installer -pkg" "$(sudo_log)"
 assert_no_signoff "pkgsha:a-captive-portal-page-does-not-claim-success" "$out"
@@ -1920,7 +1933,7 @@ assert_eq "pkgsha:a-captive-portal-page-leaves-no-package-behind" "" "$(pkg_left
 # send a student to different places -- one to a different network, the other to
 # podman-desktop.io. A fix that routed both through the digest message would be worse than none.
 pkgsha_setup "$TMP/pkgbody-empty" 22
-out="$(pkgsha_run "$TMP/install-digest.sh")"
+out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key     "pkgsha:a-failed-download-says-so" err.podman-download "$out" "$ICAT"
 assert_says_not_key "pkgsha:a-failed-download-is-not-a-digest-refusal" \
                     err.podman-pkg-digest "$out" "$ICAT"
@@ -1948,7 +1961,7 @@ for t in $sha_tools; do rm -f "$NOSHA/$t"; done
 assert_eq "pkgsha:the-no-hasher-farm-really-has-no-hasher" "" \
           "$(PATH="$SHIM:$NOSHA" sh -c 'for t in '"$sha_tools"'; do command -v $t; done')"
 assert_ne "pkgsha:the-no-hasher-farm-keeps-a-toolbox" "" "$(PATH="$SHIM:$NOSHA" command -v awk)"
-out="$(installer_tty '2' "$TMP/install-digest.sh" \
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-digest.tar.gz" \
        CS193V_DIR="$SHIM/dest" PATH="$SHIM:$NOSHA" | strip_ansi)"
 # THE BODY IS THE ONE THE PIN NAMES, so this is not a mismatch case wearing a different hat: on
 # a machine that can hash, this exact run installs. What is asserted is that a machine that
@@ -1970,7 +1983,8 @@ assert_says "pkgsha:no-hasher-still-reached-the-download" "$PKG_URL" "$(shim_cur
 # this one: a die() that did not call setup_meter_stop bad first gets its STOP box overdrawn by
 # the animator within 100 ms. One forgotten line away from being true.
 pkgsha_setup "$TMP/pkgbody-hostile"
-pkgraw="$(installer_tty '2' "$TMP/install-digest.sh" CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM")"
+pkgraw="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-digest.tar.gz" \
+          CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM")"
 assert_contains     "pkgsha:the-download-block-carries-an-output-box" "┏━━━━" "$pkgraw"
 assert_not_contains "pkgsha:the-box-is-gone-before-the-refusal" "┏━━━━" \
                     "$(printf '%s' "$pkgraw" | render_pty)"
