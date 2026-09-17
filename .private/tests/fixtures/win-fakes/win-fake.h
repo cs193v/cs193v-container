@@ -59,6 +59,22 @@ static inline void fake_log_argv(int argc, char **argv) {
 /* A knob is a file whose name is the question and whose first line is the answer. Absent means
  * "the default", which for every knob here is the success case -- so a test writes only the
  * knobs whose behaviour it is actually varying. */
+/* Is there a file by this name in the case directory? A marker's PRESENCE is how the fakes leave
+ * notes for each other -- curl writes stage2.sh, the root pass writes account.student -- so this
+ * is the question every one of those exchanges asks.
+ *
+ * SHARED SINCE #232, having lived in fake-wsl.c. fake-powershell.c's digest arm needs the same
+ * question ("was anything downloaded?"), and a second copy of a three-line fopen is the shape
+ * this header exists to prevent.
+ */
+static inline int fake_exists(const char *leaf) {
+    char p[1024]; FILE *f;
+    fake_path(p, sizeof p, leaf);
+    if (!(f = fopen(p, "rb"))) return 0;
+    fclose(f);
+    return 1;
+}
+
 static inline int fake_knob(const char *name, char *out, size_t n) {
     char p[1024]; FILE *f; size_t len;
     fake_path(p, sizeof p, name);

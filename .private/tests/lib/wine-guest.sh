@@ -83,10 +83,11 @@ cmd_state() {
         "$(knob wsl.apt.update.rc 0)" "$(knob wsl.apt.install.rc 0)" \
         "$( [ "$(knob wsl.apt.nomarker 0)" = 0 ] && printf '' \
             || printf ' -- and leaves curl STILL missing' )"
-    printf '  the download         exits %s%s\n' \
+    printf '  the download         exits %s, serving %s bytes\n' \
         "$(knob wsl.curl.rc 0)" \
-        "$( [ "$(knob wsl.curl.truncated 0)" = 0 ] && printf ', serving the whole script' \
-            || printf ', serving a CUT-SHORT body: the sentinel check must refuse it' )"
+        "$(wc -c < /tmp/case/stage2.src 2>/dev/null | tr -d ' ')"
+    printf '  its digest           %s\n' \
+        "$( [ -r /tmp/case/stage2.sha256 ] && cat /tmp/case/stage2.sha256 || printf '(none written)' )"
     printf '  stage 2 (the .sh)    exits %s\n' "$(knob wsl.bash.rc 0)"
     printf '  distro probe         %s\n' \
         "$( [ "$(knob ps.rc -1)" = -1 ] && printf 'answers honestly from the distro list' || printf "FORCED to exit $(knob ps.rc -1)" )"
@@ -234,10 +235,11 @@ Everything you can change, by writing a file into /tmp/case
   wsl.curl.rc N           the download. curl's real codes: 6 no such host, 22 an
                           HTTP error under -f, 23 could not write the file,
                           28 timed out, 56 the transfer died mid-flight
-  wsl.curl.truncated 1    the download exits 0 but the body is CUT SHORT -- which is
-                          what a wifi sign-in page answering 200 OK looks like from
-                          the outside. install-cs193v.sh's last line is missing from
-                          it, and the sentinel check is what refuses
+  (no truncation knob)    what the download SERVES is prepared on the harness side now,
+                          not cut here: win-sandbox.sh's --truncated and --altered write
+                          stage2.src and the digest beside it. A cut body and a body of
+                          the right length with a byte changed are different cases once
+                          the .cmd checks a digest rather than a last-line token
   wsl.bash.rc N           what stage 2 (install-cs193v.sh) exits with
   ps.rc N                 force EVERY probe -- which is what powershell being missing looks
                           like, and 9009 is cmd's own not-found code. -1 = answer honestly.
@@ -254,8 +256,10 @@ fixtures/wsl-messages.<version> -- each line tagged with how its wording was
 sourced. Nothing is invented in the fakes themselves.
 
 What the download SERVES is /tmp/case/stage2.src, which is the real
-install-cs193v.sh. The fake copies it to stage2.sh and greps that, so the
-sentinel check runs against the actual script's actual last line.
+install-cs193v.sh unless --truncated or --altered asked for something else. The
+fake copies it to stage2.sh verbatim, and /tmp/case/stage2.sha256 holds that
+body's digest as computed by real sha256sum -- so the .cmd's digest check is
+judged against a number no C in the fake tree invented.
 EOF
 }
 

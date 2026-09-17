@@ -538,6 +538,167 @@ assert_says_not "override:that-refusal-does-not-blame-the-network" "network prob
 assert_no_signoff "override:a-missing-local-tarball-does-not-claim-success" "$ovm"
 assert_no_file  "override:a-missing-local-tarball-changes-nothing" "$TMP/ov-missing"
 
+# ─── the manifest format, frozen against known values  (#232) ──────────────────
+# WHY FROZEN CONSTANTS AND NOT A SECOND IMPLEMENTATION. The format is a published contract between
+# a release and every copy of the bootstrap in the wild, so a change to it -- a different
+# separator, a dropped directory line, a sort that is not LC_ALL=C -- silently invalidates every
+# PAYLOAD_SHA256 anyone has already published. A drift test between two implementations cannot
+# catch that, because both would move together; a frozen hash of a known tree can, and it is the
+# only thing that can. 22-manifest-fuzz.sh drives the same verb against an independent oracle for
+# the other half: whether the WALK survives hostile names.
+#
+# THE FIRST VALUE IS HAND-DERIVED, WHICH IS WHAT ANCHORS ALL THE OTHERS. `flat` was computed
+# straight from the prose spec -- sha256 of "hello\n", sha256 of "", assembled as
+# `f  <digest>  <path>` in LC_ALL=C order with a trailing newline, then hashed -- and the verb
+# agreed. Recorded here because a table of constants that only ever agreed with the code that
+# produced them is a table nobody can check:
+#
+#     f  5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a.txt
+#     f  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  b.txt
+#
+# THE VERB, NOT A COPY OF THE WALK. --dev-manifest-hash is the bootstrap's own code, so what is
+# frozen here is what a student's machine will compute. installer-door:no-other-way-to-start-it
+# exempts this call on the VERB, because it dispatches above the temp directory and exits.
+build_vector() {                      # build_vector NAME DIR
+    case "$1" in
+    flat)       printf 'hello\n' > "$2/a.txt"; : > "$2/b.txt" ;;
+    nested)     mkdir -p "$2/one/two"; printf 'x\n' > "$2/one/two/deep.txt"
+                printf 'y\n' > "$2/top.txt" ;;
+    spaces)     printf 'x\n' > "$2/a file with spaces.txt" ;;
+    utf8)       printf 'x\n' > "$2/caf\303\251.txt" ;;
+    sortorder)  printf 'x\n' > "$2/A"; printf 'x\n' > "$2/_"; printf 'x\n' > "$2/a" ;;
+    lf)         printf 'one\ntwo\n'     > "$2/same.txt" ;;
+    crlf)       printf 'one\r\ntwo\r\n' > "$2/same.txt" ;;
+    notrailing) printf 'no newline at the end' > "$2/tail.txt" ;;
+    hexname)    printf 'x\n' > "$2/deadbeefcafe0123456789abcdef0123456789abcdef0123456789abcdef0123" ;;
+    dupcontent) printf 'same\n' > "$2/one.txt"; printf 'same\n' > "$2/two.txt" ;;
+    dashname)   printf 'x\n' > "$2/-" ;;
+    symlink)    printf 'x\n' > "$2/real.txt"; ln -s real.txt "$2/link.txt" ;;
+    newline)    printf 'x\n' > "$2/$(printf 'we\nird')" ;;
+    fifo)       printf 'x\n' > "$2/real.txt"; mkfifo "$2/pipe" ;;
+    esac
+}
+vector_hash() {                       # vector_hash NAME -> what the bootstrap makes of it
+    rm -rf "$TMP/vec"; mkdir -p "$TMP/vec"
+    build_vector "$1" "$TMP/vec"
+    bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/vec" 2>/dev/null
+}
+
+# WHAT EACH ONE PINS, because a table of hashes with no stated purpose is a table nobody dares
+# change:
+#
+#   flat        the baseline, and the trailing-newline decision
+#   nested      paths are relative with no `./`, directories get their own line, the root does not
+#   spaces      the walk does not word-split
+#   utf8        bytes are bytes
+#   sortorder   `A` `_` `a` order differently under C than under en_US, so the locale is pinned
+#   lf/crlf     content decides, under one filename -- the case a .gitattributes slip would break
+#   notrailing  content is hashed whole, not line-wise
+#   hexname     nothing in the reader hunts for hex, per pkg_sha256's own warning
+#   dupcontent  the path is part of the line, so two copies do not collapse into one
+#   dashname    a file called `-` is option injection into find, sort and the hasher; the hasher
+#               takes stdin with the file redirected in, which is what defeats it
+assert_eq "manifest:flat"       "e941f13da1b179d65e21ea00374462faee6b18e48e4f5f1c08d6a25a679a1d2b" "$(vector_hash flat)"
+assert_eq "manifest:nested"     "9420e7bfc4546a199fdf1e83cd2e37b7936f4c9322e1dc7b371b308dda92fd13" "$(vector_hash nested)"
+assert_eq "manifest:spaces"     "0a376eda1a63e6938e5a81d0bf86f455238c366b40dffc7d343e803d16248ba4" "$(vector_hash spaces)"
+assert_eq "manifest:utf8"       "ec7c6da22b455715c49bc145309003d32fb1a2c92f511c6b0f8ffc3b0e1fdf43" "$(vector_hash utf8)"
+assert_eq "manifest:sort-order" "5c0cccdf3984bc58d81f248f4a52ade7cca242c284f746e29715a072cba9cb3a" "$(vector_hash sortorder)"
+assert_eq "manifest:lf"         "a68000dddee3b7a3e0fb66e696501e4c11084d7c5ecc7f07e1304ae040e9abe2" "$(vector_hash lf)"
+assert_eq "manifest:crlf"       "e9ace51009733661f006f82495eb991ba0e98a4177e565985f7bfd23b662ec66" "$(vector_hash crlf)"
+assert_eq "manifest:no-trailing-newline" "0af4110160933ffad1b8550478784b4629bd78334f0b249f7ed15cdc3e905397" "$(vector_hash notrailing)"
+assert_eq "manifest:a-name-that-looks-like-a-digest" "1952b5db6a7c14f34e5fe12d250b2b7fed420ff7769b73e90fe047f45c85e23b" "$(vector_hash hexname)"
+assert_eq "manifest:duplicate-content" "949cf6b403c0d4963c4c3dba86622a0a6bfe764ad0f459c1826b9f9d6061b717" "$(vector_hash dupcontent)"
+assert_eq "manifest:a-file-called-dash" "f6e625ce38cb6b4a1807b4f836f76352a93e4f9471b10a89829955c248c33297" "$(vector_hash dashname)"
+# AND CRLF REALLY DIFFERS FROM LF, stated as its own assertion rather than left to two constants
+# happening not to match. Two frozen values that had been computed from the same tree by mistake
+# would pass every line above and this is what notices.
+assert_ne "manifest:crlf-is-not-lf" "$(vector_hash lf)" "$(vector_hash crlf)"
+
+# ─── and what the format refuses ───────────────────────────────────────────────
+# NOT DESCRIBED, REFUSED. A symlink is the one that matters: `find -type f` skips it, so it would
+# travel OUTSIDE the verified content and a matching digest would say nothing about it. The
+# exported set has none (11-export.sh holds that), so one appearing is a mistake or an attack.
+# A newline in a path cannot be represented by a line-oriented format at all, and the sort would
+# be wrong as well. Anything that is neither a file nor a directory goes the same way.
+vector_refuses() {                    # vector_refuses NAME -> "refused" or what it printed
+    rm -rf "$TMP/vec"; mkdir -p "$TMP/vec"
+    build_vector "$1" "$TMP/vec"
+    if out="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/vec" 2>/dev/null)"; then
+        printf 'printed %s' "$out"
+    else
+        printf 'refused'
+    fi
+}
+vector_why() {                        # vector_why NAME -> the diagnosis it wrote to stderr
+    rm -rf "$TMP/vec"; mkdir -p "$TMP/vec"
+    build_vector "$1" "$TMP/vec"
+    # BRACES, NOT `2>&1 >/dev/null`: that orders the redirections the other way round and
+    # captures stdout, which shellcheck flags as SC2069 and is the classic way to get this wrong.
+    { bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/vec" >/dev/null; } 2>&1
+}
+assert_eq   "manifest:a-symlink-is-refused"      "refused" "$(vector_refuses symlink)"
+assert_says "manifest:the-symlink-refusal-says-why" "not a file or a directory" "$(vector_why symlink)"
+assert_eq   "manifest:a-newline-in-a-name-is-refused" "refused" "$(vector_refuses newline)"
+assert_says "manifest:the-newline-refusal-says-why" "contains a newline" "$(vector_why newline)"
+assert_eq   "manifest:a-fifo-is-refused"         "refused" "$(vector_refuses fifo)"
+# AND AN EMPTY TREE IS REFUSED RATHER THAN HASHED. Hashing nothing yields e3b0c442..., a real
+# 64-hex value -- so without this the digest of an empty extraction would compare equal to a pin
+# filled in from a failed release and wave it through. Same hazard as
+# pkgsha:the-pin-is-not-the-empty-file-digest, one layer down.
+rm -rf "$TMP/vec-empty"; mkdir -p "$TMP/vec-empty"
+assert_eq "manifest:an-empty-tree-is-refused" "1" \
+          "$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/vec-empty" >/dev/null 2>&1; printf '%s' "$?")"
+# AND A DIRECTORY THAT IS NOT THERE, which is the release script's most likely mistake.
+assert_eq "manifest:a-missing-directory-is-refused" "1" \
+          "$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/vec-nope" >/dev/null 2>&1; printf '%s' "$?")"
+# AND THE VERB REFUSES AN ARGUMENT IT DOES NOT KNOW, which before #232 was silently ignored: a
+# mistyped switch installed the course instead of reporting the typo.
+assert_eq "manifest:an-unknown-argument-is-refused" "2" \
+          "$(bash "$PRIVATE/install-cs193v.sh" --oops >/dev/null 2>&1; printf '%s' "$?")"
+
+# ─── the three states the payload check has, driven offline  (#232) ────────────
+# THE MIDDLE ONE IS WHY THE OTHER TWO EXIST. Without CS193V_PAYLOAD_SHA256 the refusal branch is
+# unreachable from any test: the only way to see it would be to serve bad bytes at the published
+# URL, and the sed that used to repoint the download was deleted by #280. With it, a case points
+# the installer at a tarball it knows the digest of, supplies a deliberately wrong expectation,
+# and watches the refusal -- which proves the COMPARISON works rather than that a hash gets
+# printed.
+pay_real="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$TMP/pkg/cs193v-main" 2>/dev/null)"
+assert_match "payload:the-fixture-digest-was-computed" '^[0-9a-f]{64}$' "$pay_real"
+
+# 1. AGREEMENT: the expectation matches, so nothing is said about digests and the install proceeds.
+shim_new
+pay_ok="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" \
+          CS193V_PAYLOAD_SHA256="$pay_real" CS193V_DIR="$TMP/pay-ok")"
+assert_says_not "payload:agreement-is-not-refused" "are not the ones this installer expects" "$pay_ok"
+assert_says_not "payload:agreement-is-not-reported-as-unchecked" "NOT being checked" "$pay_ok"
+assert_file     "payload:agreement-installs" "$TMP/pay-ok/cs193v"
+
+# 2. MISMATCH: the load-bearing case. Same tarball, an expectation that is one digit out.
+shim_new
+pay_bad="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" \
+           CS193V_PAYLOAD_SHA256="0000000000000000000000000000000000000000000000000000000000000000" \
+           CS193V_DIR="$TMP/pay-bad" || true)"
+assert_says       "payload:mismatch-is-refused" "are not the ones this installer expects" "$pay_bad"
+assert_says       "payload:mismatch-names-the-expectation" "0000000000000000000000000000000000000000000000000000000000000000" "$pay_bad"
+assert_says       "payload:mismatch-names-what-arrived"    "$pay_real" "$pay_bad"
+assert_says       "payload:mismatch-says-it-is-safe-to-retry" "safe to run this" "$pay_bad"
+assert_says       "payload:mismatch-says-to-tell-staff"       "tell course staff" "$pay_bad"
+assert_no_signoff "payload:mismatch-does-not-claim-success" "$pay_bad"
+assert_no_file    "payload:mismatch-changes-nothing" "$TMP/pay-bad"
+
+# 3. INFORMATIONAL: CS193V_TARBALL alone reports the number and proceeds, because a local tarball
+#    will essentially never hash to a published constant and comparing would fire on every staff
+#    run. The number printed is exactly what a release needs, which is why it is worded as
+#    information rather than as a warning.
+shim_new
+pay_info="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" \
+            CS193V_DIR="$TMP/pay-info")"
+assert_says  "payload:alone-is-reported-not-enforced" "NOT being checked" "$pay_info"
+assert_says  "payload:alone-prints-the-digest" "$pay_real" "$pay_info"
+assert_says  "payload:alone-names-the-variable-to-set" "CS193V_PAYLOAD_SHA256" "$pay_info"
+assert_file  "payload:alone-still-installs" "$TMP/pay-info/cs193v"
+
 # ─── the cases that need the installer's LINUX arm ─────────────────────────────
 # platform() (install-cs193v.sh:361) reads the real `uname -s`, and the Linux arm it selects then
 # reads FILES: /etc/os-release to name the package manager, /etc/subuid for DO_SUBUID,
@@ -2097,6 +2258,142 @@ assert_says_key     "half-tree:blames-the-unpacking"     err.unpack-incomplete "
 # two owners are asserted separately; one assertion could be satisfied by either.
 assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
+
+# ─── the staleness check, driven as a function  (#282) ─────────────────────────
+# WHY AS A FUNCTION AND NOT THROUGH AN INSTALL, which is the apt progress block's reason one
+# section up: check_release deliberately returns early when CS193V_TARBALL is set -- every case in
+# this tier sets it, because that is how the tier stays offline -- so the interesting behaviour is
+# unreachable through the door. Carved out, it is reachable in milliseconds against a file:// feed
+# and no network at all.
+#
+# AND THAT IS ALSO WHY THE FEED URL IS AN ARGUMENT to course-install.sh rather than something it
+# composes: the bootstrap knows the repository coordinates and this file deliberately does not, so
+# the URL is handed down -- and a handed-down URL is one a test can point at a local file. The
+# check would otherwise be asserted only by reading it.
+# NAMED PER FILE, the way APT_WRAPPER_FNS below is and for its reason: a function that moves
+# fails stale:every-function-was-extracted loudly instead of being found by accident in its old
+# home. step and notes come along because check_release calls them and they live in
+# course-install.sh rather than in the UI -- which is the kind of thing this list makes visible:
+# without them the driver ran and printed `step: command not found`. note() itself is the UI's,
+# and arrives with it.
+STALE_FNS="install-utils.sh:fetch_quietly install-utils.sh:newest_release
+           course-install.sh:step         course-install.sh:notes
+           course-install.sh:check_release"
+STALEDRV="$TMP/stale-driver.sh"
+stale_missing=''
+{
+    printf 'NO_COLOR=1\n'
+    printf 'MESSAGES=%s\n' "$ICAT"
+    printf '. %s\n' "$PRIVATE/files/cs193v-ui.sh"
+} > "$STALEDRV"
+for spec in $STALE_FNS; do
+    stale_f="${spec%%:*}"; stale_fn="${spec#*:}"
+    if carve_func "$PRIVATE/$stale_f" "$stale_fn" "$TMP/one-fn.sh"; then
+        cat "$TMP/one-fn.sh" >> "$STALEDRV"
+    else
+        stale_missing="$stale_missing $stale_fn"
+    fi
+done
+# EXTRACTED FIRST, for carve_func's own reason: an empty file sources cleanly and every assertion
+# below it would then be testing nothing.
+assert_eq "stale:every-function-was-extracted" "" "$(printf '%s' "$stale_missing" | sed 's/^ //')"
+# ${1:-} AND NOT $1, because two callers source this file with no arguments at all to reach the
+# reader inside it -- and under `set -u` a bare $1 there aborts the source, which silently took
+# the function definitions with it and left every reader assertion measuring an empty string.
+printf 'BOOT_TMP=%s\nREL_TAG="${1:-}"\nTAGS_URL="${2:-}"\ncheck_release\n' "$TMP" >> "$STALEDRV"
+
+# A FEED SHAPED LIKE GitHub's, with both places a tag name appears in it: the entry title and the
+# link to the tag. The reader takes either, so a feed that stopped carrying one of them still
+# works -- and this fixture is what says so.
+stale_feed() {                        # stale_feed TAG... -> a file:// URL for a feed naming them
+    {
+        printf '<feed xmlns="http://www.w3.org/2005/Atom">\n'
+        for t in "$@"; do
+            printf '  <entry>\n    <title>%s</title>\n' "$t"
+            printf '    <link rel="alternate" type="text/html" href="https://github.com/cs193v/cs193v-container/releases/tag/%s"/>\n' "$t"
+            printf '  </entry>\n'
+        done
+        printf '</feed>\n'
+    } > "$TMP/feed.atom"
+    printf 'file://%s' "$TMP/feed.atom"
+}
+# SOURCED IN A SUBSHELL, so the driver's trailing `check_release` call runs and is discarded
+# rather than leaking a prompt into the reader's answer. The path is built above, so the linter
+# cannot follow it and the directive below says so.
+#
+# AND THAT SENTENCE DOES NOT START A LINE WITH THE TOOL'S NAME, deliberately: a comment beginning
+# `# shellcheck ...` IS a directive, so explaining the directive on its own line broke the parse
+# of the file that carries it. Third time this project has been bitten by a comment that names
+# what it is about -- see cmdlint_bad_parameter_substitution for the other two.
+newest() {                            # newest TAG... -> what newest_release makes of that feed
+    stale_feed "$@" >/dev/null
+    # shellcheck source=/dev/null
+    ( . "$STALEDRV" >/dev/null 2>&1 || true
+      newest_release "$TMP/feed.atom" ) 2>/dev/null
+}
+
+# ─── what the reader makes of a feed ───────────────────────────────────────────
+assert_eq "stale:reads-a-single-release"    "1.0.0"  "$(newest release-1.0.0)"
+assert_eq "stale:takes-the-highest"         "1.2.0"  "$(newest release-1.0.0 release-1.2.0 release-0.9.9)"
+# NUMERICALLY, NOT LEXICALLY, AND THIS IS THE CASE THAT PROVES IT. `release-9.0.0` sorts ABOVE
+# `release-10.0.0` as text, so a reader that took the maximum string would tell every student on
+# 10.0.0 that 9.0.0 was newer -- and would do it for the first time in the tenth release, long
+# after anyone was looking.
+assert_eq "stale:compares-numerically"      "10.0.0" "$(newest release-9.0.0 release-10.0.0)"
+# AND NOT BY FEED ORDER. tags.atom is ordered by tag CREATION time, so a tag backfilled after the
+# fact appears first; "the newest entry" would be the wrong question.
+assert_eq "stale:ignores-feed-order"        "1.3.0"  "$(newest release-1.3.0 release-0.1.0)"
+# A TAG THAT MERELY STARTS LIKE A RELEASE IS NOT ONE, which is the case that made the reader
+# anchor both of its patterns. Unanchored, `release-1.3.0-oops` read as release 1.3.0 -- so a
+# stray `release-1.3.0-rc1` would have told every student they were behind something that was
+# never published, and the release-tier tag-shape gate would not have fired until the next
+# release.
+assert_eq "stale:a-tag-that-only-starts-like-one-is-ignored" "1.2.0" \
+          "$(newest release-1.2.0 release-1.3.0-oops)"
+assert_eq "stale:ignores-non-release-tags"  ""       "$(newest probe-l-min wip-something v1.2.3)"
+assert_eq "stale:an-empty-feed-says-nothing" ""      "$(newest)"
+# A REPLY THAT IS NOT A FEED AT ALL, which is what a captive portal serves: the bytes arrive, curl
+# is happy, and nothing in them is a tag.
+newest_from_current_feed() {          # -> what the reader makes of $TMP/feed.atom as it stands
+    # shellcheck source=/dev/null
+    ( . "$STALEDRV" >/dev/null 2>&1 || true
+      newest_release "$TMP/feed.atom" ) 2>/dev/null
+}
+printf '<html><body>Please sign in to the network</body></html>\n' > "$TMP/feed.atom"
+assert_eq "stale:a-sign-in-page-says-nothing" "" \
+          "$(newest_from_current_feed)"
+
+# ─── and what the check does with the answer ───────────────────────────────────
+# OFF A TERMINAL, so menu() takes its default -- which is index 0, the option that PROCEEDS. That
+# is the property worth pinning: a student running this from a script or a pipe must not be
+# stopped by a nicety, and every other menu in the installer defaults the other way.
+stale_run() {                         # stale_run HAVE_TAG FEED_URL -> what the check printed
+    ( cd "$TMP" && bash "$STALEDRV" "$1" "$2" 2>&1 )
+}
+url="$(stale_feed release-1.0.0 release-1.2.0)"
+out="$(stale_run release-1.0.0 "$url")"
+assert_says "stale:an-older-copy-is-told"          "newer version" "$out"
+assert_says "stale:it-names-both-versions"         "1.2.0" "$out"
+assert_says "stale:it-says-where-to-get-it"        "course website" "$out"
+assert_says_not "stale:it-names-no-installer-file" "install-cs193v" "$out"
+assert_says "stale:off-a-terminal-it-carries-on"   "not a terminal" "$out"
+assert_eq   "stale:and-does-not-exit-nonzero" "0" \
+            "$( cd "$TMP" && bash "$STALEDRV" release-1.0.0 "$url" >/dev/null 2>&1; printf '%s' "$?")"
+# THE CURRENT RELEASE, AND ONE AHEAD OF IT, both silent. The second is the staff case: a working
+# copy whose VERSION is ahead of anything published must not be told it is behind.
+assert_eq "stale:the-current-release-is-silent" "" "$(stale_run release-1.2.0 "$url")"
+assert_eq "stale:a-newer-copy-is-silent"        "" "$(stale_run release-1.9.0 "$url")"
+# FAIL OPEN, EVERY WAY IN. A URL that cannot be fetched, a feed that is not a feed, a tag that is
+# not a version, and no URL at all: none of them may say anything or stop the install.
+assert_eq "stale:an-unfetchable-url-is-silent" "" \
+          "$(stale_run release-1.0.0 "file://$TMP/there-is-no-such-feed.atom")"
+assert_eq "stale:a-tag-that-is-not-a-version-is-silent" "" "$(stale_run release-main "$url")"
+assert_eq "stale:no-url-at-all-is-silent" "" "$(stale_run release-1.0.0 '')"
+# AND NOT ON A STAFF RUN, which is what keeps this tier offline: every other case here sets
+# CS193V_TARBALL, and under it the tree being installed is a working copy rather than a release.
+assert_eq "stale:a-local-tarball-is-silent" "" \
+          "$( cd "$TMP" && CS193V_TARBALL=/some/where bash "$STALEDRV" release-1.0.0 "$url" 2>&1 )"
+
 # ─── the progress block around the package manager  (#219) ─────────────────────
 # WHY THIS DRIVES THE FUNCTIONS AND NOT THE INSTALLER. install_podman's apt arm needs the
 # installer's LINUX arm -- /etc/os-release, which no PATH shim can fake, see linux_arm above --
@@ -2332,20 +2629,23 @@ assert_contains "aptbox:the-last-phase-runs-at-three-of-four" "3/4" "$apttty"
 assert_not_match "aptbox:the-bar-does-not-fill-while-it-runs" \
                  '[⣾⣽⣻⢿⡿⣟⣯⣷] .*\] +4/4' "$apttty"
 
-# ─── the sentinel the Windows installer checks for ─────────────────────────────
-# Stage one downloads install-cs193v.sh over HTTPS and greps it for this token BEFORE running
-# it. `curl -f` catches a 404 and a cut-off transfer, but not the case that matters on campus
-# wifi: a captive portal answering 200 with its own login page. The bytes arrive, curl is
-# happy, and `bash` would run the HTML. The token is what makes "these bytes are the installer"
-# a checkable claim.
+# ─── the sentinel the Windows installer used to check for  (#232) ──────────────
+# THERE IS NO SENTINEL ANY MORE, and what stood here were two assertions about it: that the token
+# was install-cs193v.sh's last line, and that it occurred exactly once. Between them they made
+# finding it a completeness check as well as an identity one -- which was the best claim available
+# before the .cmd could hash what it downloaded.
 #
-# TWO halves, and the second is the one that is easy to lose. Last-line-ness is what makes the
-# token a completeness check as well as an identity one; without the occurs-once half, a token
-# that also appeared near the TOP of the file would let a truncated download pass.
-assert_ok "installer:sentinel-is-the-last-line" \
-          sh -c "tail -1 '$PRIVATE/install-cs193v.sh' | grep -q 'CS193V-INSTALLER-COMPLETE'"
-assert_eq "installer:sentinel-appears-once" "1" \
-          "$(grep -c 'CS193V-INSTALLER-COMPLETE' "$PRIVATE/install-cs193v.sh")"
+# A DIGEST STRICTLY SUBSUMES BOTH, so the token is gone rather than kept beside it. Keeping both
+# would have left one unreachable by any fixture: no body can fail the token without also failing
+# the digest, so whichever ran second would have had nothing able to drive it.
+#
+# WHAT IS ASSERTED INSTEAD IS THAT IT IS REALLY GONE, from both files. A half-revert -- the token
+# back on the .sh's last line, nothing looking for it -- is silent, and it is exactly what someone
+# restoring "the old check" would produce. The digest's own shape and position are pinned in the
+# windows: block below.
+assert_eq "installer:the-stage-two-token-is-gone" "" \
+          "$(grep -l 'CS193V-INSTALLER-COMPLETE' "$PRIVATE/install-cs193v.sh" \
+             "$PRIVATE/install-cs193v-windows.cmd" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── the Windows stage-one script ──────────────────────────────────────────────
 # The .cmd cannot be EXECUTED here -- that is 27-installer-windows.sh, which drives it under
@@ -2363,6 +2663,20 @@ W=$PRIVATE/install-cs193v-windows.cmd
 # every extraction from it matched nothing and every assert_not_contains against "" passed.
 WCMD="$(sed 's/\r$//' "$W")"
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
+# ─── the .cmd reader every block below shares ──────────────────────────────────
+# SOURCED HERE AND NOT FURTHER DOWN (#232). It used to sit beside the cmdlint_* rules near the end
+# of this file, which was fine until an assertion ABOVE them wanted _cmdlint_commands -- the
+# ordering check below needs it, to read line numbers off code rather than off prose that names
+# the same construct. An undefined function there is an `exit 127` that reads as the .cmd being
+# broken, which is the failure the note below already records once.
+#
+# $TESTS_DIR, not `dirname "$0"`: this file does `cd "$REPO"` at the top. The two sources at the
+# head of the file run BEFORE that cd and so a relative $0 resolves; this one runs after it, and
+# resolved to $REPO/lib/cmdlint.sh -- which does not exist. Via run-tests.sh $0 is absolute and it
+# worked anyway, so the breakage only showed when the suite was run by hand from tests/, where it
+# cost 19 windows:* assertions an `exit 127` apiece.
+. "$TESTS_DIR/lib/cmdlint.sh"
+
 # ─── stage one fetches stage two, and the contract that makes that safe ────────
 #
 # The old check here was `grep -q 'install-cs193v.sh' "$W"`, with a comment saying the two files
@@ -2378,17 +2692,24 @@ cmd_get() {                           # cmd_get REGEX -> the \1 of the first mat
 }
 cmd_owner="$(cmd_get 'set "REPO_OWNER=\(.*\)"')"
 cmd_name="$(cmd_get 'set "REPO_NAME=\(.*\)"')"
-cmd_branch="$(cmd_get 'set "REPO_BRANCH=\(.*\)"')"
+cmd_tag="$(cmd_get 'set "REPO_TAG=\(.*\)"')"
 cmd_url="$(cmd_get 'set "INSTALLER_URL=\(.*\)"')"
-cmd_sentinel="$(cmd_get 'set "SENTINEL=\(.*\)"')"
+cmd_digest="$(cmd_get 'set "STAGE2_SHA256=\(.*\)"')"
+cmd_probe="$(cmd_get 'set "PSHASH=\(.*\)"')"
 
 # The .cmd carries its own copy of the three repo values, so a mismatch with the .sh would fetch
 # a DIFFERENT course's installer and nothing would notice until it ran. Compared as sorted
 # triples rather than one at a time, so the failure message names which one drifted.
 # Same shape as windows:names-the-same-distro-as-the-sh below.
+#
+# ONE SIDE IS DERIVED AND THE OTHER IS SPELLED OUT, which is why renaming a constant costs an edit
+# here (#232). The .sh side reads `^REPO_\([A-Z]*\)=` and so followed REPO_BRANCH -> REPO_TAG on
+# its own; this printf did not, and a triple that no longer names the same three keys compares
+# `BRANCH=main ...` against `TAG=release-0.0.0 ...` and fails with both values visible -- which is
+# the right failure, but the fix is here rather than in the file under test.
 triple_of_sh="$(sed -n 's/^REPO_\([A-Z]*\)="\(.*\)"$/\1=\2/p' "$PRIVATE/install-cs193v.sh" \
                 | LC_ALL=C sort | do_tr '\n' ' ')"
-triple_of_cmd="$(printf 'BRANCH=%s\nNAME=%s\nOWNER=%s\n' "$cmd_branch" "$cmd_name" "$cmd_owner" \
+triple_of_cmd="$(printf 'NAME=%s\nOWNER=%s\nTAG=%s\n' "$cmd_name" "$cmd_owner" "$cmd_tag" \
                  | LC_ALL=C sort | do_tr '\n' ' ')"
 assert_eq "windows:names-the-same-repo-as-the-sh" "$triple_of_sh" "$triple_of_cmd"
 
@@ -2398,22 +2719,57 @@ assert_eq "windows:names-the-same-repo-as-the-sh" "$triple_of_sh" "$triple_of_cm
 # That is what lets the .cmd pass it to wsl.exe bare. A `&` here would break the line silently.
 cmd_url_x="$(printf '%s' "$cmd_url" \
              | sed -e "s|%REPO_OWNER%|$cmd_owner|" -e "s|%REPO_NAME%|$cmd_name|" \
-                   -e "s|%REPO_BRANCH%|$cmd_branch|")"
+                   -e "s|%REPO_TAG%|$cmd_tag|")"
 assert_match "windows:the-stage2-url-is-this-repo-s-installer" \
              "^https://raw\.githubusercontent\.com/.*/\.private/install-cs193v\.sh$" "$cmd_url_x"
 assert_match "windows:the-stage2-url-needs-no-quoting" \
              '^https://[A-Za-z0-9._~/-]+$' "$cmd_url_x"
 
-# ...and the same for the sentinel, which crosses the same boundary as a grep argument.
-assert_match "windows:the-sentinel-needs-no-quoting" '^[A-Za-z0-9._-]+$' "$cmd_sentinel"
+# ...and the same for the stage-two digest, which crosses the same boundary -- it is interpolated
+# into the PowerShell probe string that `set` builds. 64 lowercase hex needs no quoting anywhere,
+# which is most of why the check is shaped this way rather than around a filename or a URL.
+#
+# ANCHORED AT BOTH ENDS, the rule pkgsha:the-pin-is-64-lowercase-hex records: unanchored, the
+# pattern matches a whole `sha256sum` output line and a `sha256:`-prefixed value as well.
+#
+# SHAPE ONLY, AND THE COMPARISON IS IN THE RELEASE TIER. The constant names the digest of the blob
+# raw.githubusercontent.com serves AT THE PINNED TAG, so comparing it against the working tree
+# here would be red from the first commit after a release until the next one -- including this
+# one, which rewrites the bootstrap heavily. pkgsha:* splits the same way for the same reason.
+assert_match "windows:the-stage2-digest-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$cmd_digest"
+assert_eq "windows:the-stage2-digest-is-declared-once" "1" \
+          "$(sed 's/\r$//' "$W" | grep -c '^set "STAGE2_SHA256=')"
+# NOT THE DIGEST OF AN EMPTY FILE, which is what a constant filled in from a failed release
+# carries -- and against which the comparison would pass for any empty download. DERIVED rather
+# than spelled, so it cannot drift from what do_sha256 says.
+assert_ne "windows:the-stage2-digest-is-not-the-empty-digest" \
+          "$(printf '' | do_sha256 | awk '{print $1}')" "$cmd_digest"
+# AND THE PROBE REALLY REFERENCES IT, single-quoted. Statically the probe holds the VARIABLE and
+# not its value -- cmd expands %STAGE2_SHA256% when the `set` line runs -- so what can be checked
+# here is that the reference is present and quoted the way the wine fixture reads it back:
+# quoted_after() finds a single-quoted literal after a spelled-out prefix. A probe that had lost
+# the interpolation would compare against something that is not a digest at all and refuse every
+# download, and no check on the constant alone would have noticed.
+assert_says "windows:the-probe-references-the-expected-digest" "-eq '%STAGE2_SHA256%'" "$cmd_probe"
+# AND IT ASKS FOR THE FILE IT DOWNLOADED, rather than some other path: the fakes ignore the path
+# they are handed, deliberately (fake-wsl.c says so on its grep arm), so the probe naming the
+# wrong file is a defect no wine run can see and this is the only place it is caught.
+assert_says "windows:the-probe-hashes-the-downloaded-file" "sha256sum %STAGE2%" "$cmd_probe"
+# AND THE OVERRIDE IS APPLIED BEFORE THE PROBE IS COMPOSED. cmd expands %STAGE2_SHA256% when the
+# `set "PSHASH=..."` line RUNS, so an override below it would leave the probe comparing against
+# the published constant while every other reader believed the override was in force -- a
+# staff-only failure, and a confusing one. BY LINE NUMBER, the shape
+# pkgsha:checked-after-the-download-and-before-the-install uses.
+ovr_ln="$(sed 's/\r$//' "$W" | grep -n '^if defined CS193V_STAGE2_SHA256 set ' | head -1 | cut -d: -f1)"
+probe_ln="$(sed 's/\r$//' "$W" | grep -n '^set "PSHASH=' | head -1 | cut -d: -f1)"
+assert_eq "windows:the-digest-override-precedes-the-probe" "yes" \
+          "$([ -n "$ovr_ln" ] && [ -n "$probe_ln" ] && [ "$ovr_ln" -lt "$probe_ln" ] \
+             && printf yes || printf "override=$ovr_ln probe=$probe_ln")"
 
 # The token the .cmd looks for must be the one the .sh actually ends with. Asserted against the
 # .sh's LAST LINE rather than the whole file, so this cannot be satisfied by a passing mention
 # somewhere in the middle. `test -n` first, or an empty extraction would grep for nothing and
 # match every line.
-assert_ok "windows:uses-the-same-sentinel-as-the-sh" \
-          sh -c "test -n '$cmd_sentinel' \
-                 && tail -1 '$PRIVATE/install-cs193v.sh' | grep -qF -- '$cmd_sentinel'"
 
 # The download line itself, and that curl's own diagnostics are NOT redirected away: the
 # `curl: (6) Could not resolve host ...` line belongs in the window a student pastes to staff.
@@ -2425,12 +2781,39 @@ assert_match "windows:downloads-the-shared-installer" \
 assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
 
 # ORDER, which no wine run can prove absent: the downloaded script must be checked BEFORE it is
-# handed to bash. Both line numbers must exist, so a rename on either side goes red rather than
-# quiet.
-sentinel_ln="$(sed 's/\r$//' "$W" | grep -n 'grep -q %SENTINEL%' | head -1 | cut -d: -f1)"
-bash_ln="$(sed 's/\r$//' "$W" | grep -n -- '-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' | head -1 | cut -d: -f1)"
-assert_ok "windows:checks-the-download-before-running-it" \
-          sh -c "test -n '$sentinel_ln' && test -n '$bash_ln' && test '$sentinel_ln' -lt '$bash_ln'"
+# handed to bash.
+#
+# BEFORE THE **FIRST** OF THE TWO bash CALLS, AND THAT IS A FIX RATHER THAN A RESTATEMENT (#232).
+# This assertion used to derive its bash line from `-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%`
+# -- the STUDENT pass, which is the second of the two. Stage two runs first as
+# `-u root -e env %XENV%CS193V_PROVISION=1 bash %STAGE2%`, so a check moved between the two calls
+# left this green while bash had already run unverified code AS ROOT inside the distro. The
+# mutation that proves it is exactly that move, and it is the regression this wording keeps.
+#
+# THREE POSITIONS, NOT TWO, the shape pkgsha:checked-after-the-download-and-before-the-install
+# uses: you cannot hash a file that has not been downloaded, so curl < digest < first-bash is the
+# claim, and all three are printed on failure.
+#
+# AND EXACTLY TWO RUNS, so a third route cannot appear ABOVE the check and satisfy the ordering
+# by being first. Counted rather than assumed.
+#
+# OVER _cmdlint_commands AND NOT THE RAW FILE, because this file's own PROSE names the construct
+# in order to explain it -- the .cmd's comment above the probe says "above both `bash %STAGE2%`
+# lines" -- and a raw grep would take that comment line as the first run. The two rules further
+# down this suite carry the same warning for the same reason; measured, by writing it wrong first.
+cmd_lines() {                         # cmd_lines NEEDLE -> the real line numbers, code only
+    _cmdlint_commands "$W" | awk -F'\t' -v n="$1" 'index($4, n) { print $2 }'
+}
+curl_ln="$(cmd_lines '-e curl -fsSL' | head -1)"
+digest_ln="$(cmd_lines '-Command "%PSHASH%"' | head -1)"
+first_bash_ln="$(cmd_lines 'bash %STAGE2%' | head -1)"
+assert_eq "windows:there-are-exactly-two-stage-two-runs" "2" \
+          "$(cmd_lines 'bash %STAGE2%' | grep -c '')"
+assert_eq "windows:checks-the-download-before-running-it" "yes" \
+          "$([ -n "$curl_ln" ] && [ -n "$digest_ln" ] && [ -n "$first_bash_ln" ] \
+             && [ "$curl_ln" -lt "$digest_ln" ] && [ "$digest_ln" -lt "$first_bash_ln" ] \
+             && printf yes \
+             || printf "curl=$curl_ln digest=$digest_ln first-bash=$first_bash_ln")"
 
 
 # ─── the Linux account this file creates, pinned the way the URL is  (#217) ────
@@ -2506,13 +2889,6 @@ assert_ok "windows:names-the-same-distro-as-the-sh"  \
 # .private/install-cs193v-windows.ps1 passed it.
 assert_no_file "windows:is-cmd-not-ps1" "$PRIVATE/install-cs193v-windows.ps1"
 
-# $TESTS_DIR, not `dirname "$0"`, and for the reason the assert_no_file above gives: this file
-# does `cd "$REPO"` at the top. The two sources at the head of the file run BEFORE that cd and
-# so a relative $0 resolves; this one runs after it, and resolved to $REPO/lib/cmdlint.sh --
-# which does not exist. Via run-tests.sh $0 is absolute and it worked anyway, so the breakage
-# only showed when the suite was run by hand from tests/, where it cost 19 windows:* assertions
-# an `exit 127` apiece and read as the .cmd being broken rather than the source line.
-. "$TESTS_DIR/lib/cmdlint.sh"
 
 # CRLF is not a tidiness preference. cmd.exe reads a batch file in 512-byte chunks and its label
 # scanner assumes a two-byte \r\n terminator, so under LF-only endings `goto`/`call :label` fails

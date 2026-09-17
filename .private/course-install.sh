@@ -53,7 +53,7 @@ set -u
 #  version to install on a Mac, and how much of a Mac podman's virtual machine gets.
 #
 #  WHERE THE COURSE FILES COME FROM IS NOT HERE any more -- REPO_OWNER, REPO_NAME,
-#  REPO_BRANCH and TARBALL live in install-cs193v.sh, which is the file that does the
+#  REPO_TAG and TARBALL live in install-cs193v.sh, which is the file that does the
 #  downloading and the file staff publish. The podman floors moved too, into
 #  files/cs193v-ui.sh, so that this script and the launcher read one pair rather than two.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -64,7 +64,7 @@ set -u
 # the same as knowing the bytes that arrived are the release that was asked for. A captive
 # portal answering 200 with its own login page is a well-formed reply -- the same gap
 # install-cs193v.sh names for the course tarball, and the reason install-cs193v-windows.cmd
-# greps its own download for a sentinel before running it.
+# checks its own download against a SHA-256 before running it.
 #
 # A RELEASE ASSET IS HASHABLE WHERE A BRANCH TARBALL IS NOT, which is why this pin exists and
 # why #232 argues against one for the course tree. This is an uploaded file, byte-stable for the
@@ -660,6 +660,76 @@ ask_consent() {
         printf '\n'
         exit 0
     fi
+}
+
+
+# ─── is this the current release?  (#282) ──────────────────────────────────────
+# WHAT THE PIN COST, AND THIS IS THE PAYMENT. Before #232 the bootstrap fetched refs/heads/main,
+# so "re-run the installer" delivered current code even to a student who never heard a fix was
+# published -- which install-cs193v.sh's own header advertises as the standard answer when
+# something is broken later. Under a pinned tag, re-running a stale copy re-installs the identical
+# broken tree, and the student's report is indistinguishable from a fresh install. Nothing local
+# can see it: the recipe, the launcher and this script all arrived in one tarball and agree with
+# each other perfectly. Only the network knows.
+#
+# EARLY, AND BEFORE choose_dir. Telling a student their installer is out of date AFTER installing
+# the out-of-date thing is useless at the one moment it could be acted on -- and there is no point
+# asking them to type an install directory for something you are about to call stale. After
+# survey, though: an unsupported OS should get THAT refusal rather than this prompt.
+#
+# FAIL OPEN ON EVERYTHING. Offline, captive portal, non-200, a malformed or empty feed, no
+# downloader, a version that does not parse -- every one of those returns 0 and installs. This is
+# a nicety; refusing to install because we could not ask is strictly worse than installing
+# something slightly old.
+#
+# AND IT PROMPTS ONLY ON A DEFINITE ANSWER, with continue as the default so that an off-tty run
+# carries on: menu() picks the default index when stdin or stdout is not a terminal, and index 0
+# is the option that proceeds. That matches every other menu in this file -- the safe default is
+# the one that changes least -- except that here "changes least" is to keep going.
+#
+# THE MESSAGE NAMES NO FILE, and that is deliberate. On macOS and Linux the stale artefact is
+# install-cs193v.sh; on Windows it is install-cs193v-windows.cmd; and both are published under
+# names carrying a version, so a student's copy may be called install-cs193v-1.2.0.sh. Naming any
+# of those would be wrong for somebody. "Download the current installer from the course website"
+# is right for everyone, and needs no platform switch.
+check_release() {
+    [ -n "$TAGS_URL" ] || return 0
+    # NOT ON A STAFF RUN, and this is what keeps the everyday suite offline. Under CS193V_TARBALL
+    # the tree being installed is a working copy rather than a release, so "is the release I
+    # fetched current" has no answer worth printing -- and the bootstrap has already said, in as
+    # many words, that the course files are not being checked. Without this every case in the shim
+    # and install tiers would reach for the network, and on a machine with none each would pay the
+    # timeout.
+    #
+    # WHICH MEANS THE CHECK IS DRIVEN AS A FUNCTION, not through a whole install: 25-installer.sh
+    # carves it out with carve_func and hands it a file:// feed. That is the same door the apt
+    # progress block is tested through, and for the same reason -- the interesting behaviour is
+    # reachable in milliseconds and the install around it is not the subject.
+    [ -z "${CS193V_TARBALL:-}" ] || return 0
+    local have want feed
+    have="${REL_TAG#release-}"
+    case "$have" in [0-9]*.[0-9]*.[0-9]*) ;; *) return 0 ;; esac
+    # INSIDE $BOOT_TMP, so boot_cleanup takes it away on every path out of this script -- and
+    # BESIDE the tree rather than inside it, because $BOOT_TREE is the directory the bootstrap
+    # hashed and a file appearing in there afterwards would make a second run of the manifest
+    # disagree with the first.
+    feed="$BOOT_TMP/tags.atom"
+    fetch_quietly "$TAGS_URL" "$feed" || return 0
+    want="$(newest_release "$feed")"
+    rm -f "$feed"
+    [ -n "$want" ] || return 0
+    # PRINTS, NOT RETURNS -- see newest_release's note on the same trap. As
+    # `version_lt ... || return 0` this never returned early, because awk exits 0 either way, so
+    # every run would have warned -- including a student already on the current release.
+    [ "$(version_lt "$have" "$want")" = yes ] || return 0
+    step "$(msg step.newer-release)"
+    msg note.newer-release "HAVE=$have" "WANT=$want" | notes
+    menu 0 "$(msg menu.newer-release.go "HAVE=$have")" "$(msg menu.newer-release.stop)"
+    [ "$MENU_CHOICE" -eq 0 ] && return 0
+    printf '\n'
+    msg newer-release.stopped
+    printf '\n'
+    exit 0
 }
 
 # ─── the password, once, where the consent screen said it would be  (#226, #223) ────
@@ -1327,11 +1397,24 @@ smoke_test() {
 #  ensure_podman_path() that used to live in this file are gone.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BOOTSTRAP_PROTOCOL_WANTED=1
-BOOT_PROTOCOL="${1:-}"
-BOOT_TMP="${2:-}"
+BOOT_TMP="${1:-}"
+# THE RELEASE THE BOOTSTRAP FETCHED, and the feed that says whether a newer one exists (#282).
+# BOTH ARRIVE AS ARGUMENTS because this file does not know where the course files come from --
+# see the note at the top about REPO_OWNER and friends living in install-cs193v.sh.
+#
+# THE TAG, NOT .private/VERSION FROM THE TREE, and the two disagree by construction on a staff
+# run: under CS193V_TARBALL the tree carries whatever version the working copy has while the
+# bootstrap's constant names a release. The question being asked is "is the release I fetched
+# current", so the bootstrap's answer is the right one.
+REL_TAG="${2:-}"
+TAGS_URL="${3:-}"
 # THE TARBALL IS AT A FIXED NAME INSIDE IT, which is what keeps the handover to two arguments.
 BOOT_TARBALL="$BOOT_TMP/course.tar.gz"
+# AND THE UNPACKED TREE IS IN A SUBDIRECTORY BESIDE IT (#232). The bootstrap extracts into
+# $BOOT_TMP/tree rather than over $BOOT_TMP, so that the manifest it hashes cannot include the
+# .tar.gz sitting in the same directory -- see its own note. One name here, rather than `/tree`
+# spelled into each of the three paths below.
+BOOT_TREE="$BOOT_TMP/tree"
 # AND THE PROSE, OUT OF THE SAME TREE. Every student-facing string this script prints comes from
 # here, read by cs193v-ui.sh's msg() -- the same reader the launcher uses against its own
 # catalogue, which is what let this file delete its near-identical copy of it.
@@ -1343,23 +1426,24 @@ BOOT_TARBALL="$BOOT_TMP/course.tar.gz"
 # what would catch it being moved back down.
 #
 # shellcheck disable=SC2034   # read by msg(), which lives in the sourced cs193v-ui.sh
-MESSAGES="$BOOT_TMP/.private/course-install-messages.txt"
+MESSAGES="$BOOT_TREE/.private/course-install-messages.txt"
 
-# A FLOOR, NOT AN EQUALITY, and the difference from cs193v-portwatch's handshake is worth
-# naming: that one compares a fixed string because both ends ship in the same tarball, and this
-# one cannot -- the bootstrap is published on the course website and can be older than the tree
-# it fetched. So a student running last quarter's download gets a sentence rather than a
-# mystery. Bumped only when the two lines above change meaning.
-if [ -z "$BOOT_PROTOCOL" ] || [ -z "$BOOT_TMP" ]; then
+# TWO ARGUMENTS ARE REQUIRED AND THE THIRD IS NOT, which is deliberate rather than lax. The first
+# two are what this script cannot run without; the third only feeds a check that fails open on
+# everything anyway, so a missing one skips it silently. That also lets a test hand this script a
+# file:// URL and drive both branches, which is the only way the staleness check is reachable
+# offline -- and it is why wsl-provision.sh, which wants neither, is unaffected.
+#
+# THE PROTOCOL FLOOR THAT USED TO BE HERE IS GONE (#232). It compared a number the bootstrap
+# passed against one this file wanted, so that a student running last quarter's download got a
+# sentence rather than a mystery. Under a pinned tag both halves always ship together and the
+# floor could never be exceeded, so it was a check that could not fire; the staleness check below
+# answers the question it was really asking, and answers it about the release rather than about an
+# argument count.
+if [ -z "$BOOT_TMP" ] || [ -z "$REL_TAG" ]; then
     printf '\n  This is not meant to be run directly.\n\n' >&2
     printf '  Run install-cs193v.sh instead -- it fetches the course files that this\n' >&2
     printf '  script needs, then starts it.\n\n' >&2
-    exit 1
-fi
-if [ "$BOOT_PROTOCOL" -lt "$BOOTSTRAP_PROTOCOL_WANTED" ] 2>/dev/null; then
-    printf '\n  The installer you ran is from an older version of the course.\n\n' >&2
-    printf '  Download it again and re-run it:\n' >&2
-    printf '    https://github.com/%s/%s\n\n' "cs193v" "cs193v-container" >&2
     exit 1
 fi
 
@@ -1378,7 +1462,7 @@ fi
 # sweep_stale_tmpdirs records the doctrine. A plain printf rather than a box, for the reason
 # cs193v gives where it does the same: a script with no box() cannot draw the box that would
 # report the problem.
-UTILS="$BOOT_TMP/.private/install-utils.sh"
+UTILS="$BOOT_TREE/.private/install-utils.sh"
 if [ ! -r "$UTILS" ]; then
     printf 'course-install: cannot read %s\n' "$UTILS" >&2
     printf 'The download is incomplete. Please run install-cs193v.sh again.\n' >&2
@@ -1408,7 +1492,7 @@ trap boot_cleanup EXIT
 # The same file the launcher sources, out of the tree the bootstrap just unpacked. A missing one
 # gets a plain printf rather than a box, for the reason cs193v gives where it does the same: a
 # script with no box() cannot draw the box that would report the problem.
-UI="$BOOT_TMP/.private/files/cs193v-ui.sh"
+UI="$BOOT_TREE/.private/files/cs193v-ui.sh"
 if [ ! -r "$UI" ]; then
     printf 'course-install: cannot read %s\n' "$UI" >&2
     printf 'The download is incomplete. Please run install-cs193v.sh again.\n' >&2
@@ -1486,6 +1570,7 @@ DO_SUBUID=no
 # ─── main ──────────────────────────────────────────────────────────────────────
 say_welcome
 survey
+check_release
 choose_dir
 ask_consent
 ask_password

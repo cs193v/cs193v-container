@@ -17,19 +17,27 @@
 # ─── What this file is, and what it is not  (#221) ─────────────────────────────
 #
 # THIS IS THE BOOTSTRAP. It does four things: find a program that can download, fetch the
-# course files, check they arrived, and hand over to course-install.sh inside them. Every
-# question you are asked, every package that gets installed and every word you read after
-# the next few lines comes from that file, not this one.
+# course files, CHECK THEY ARE THE ONES THIS FILE EXPECTS, and hand over to course-install.sh
+# inside them. Every question you are asked, every package that gets installed and every word you
+# read after the next few lines comes from that file, not this one.
+#
+# THE THIRD ONE CHANGED WITH #232, and the wording used to be "check they arrived". Arriving is
+# what curl and tar can tell you; being OURS is what the manifest below tells you, and that is a
+# different claim -- a hotel wifi login page arrives perfectly.
 #
 # WHY IT IS SPLIT THIS WAY. The installer used to be one file, and carried its own copy of
 # the course's box-drawing, menus, version comparison and podman-finding code -- because a
 # file downloaded on its own has nothing to source. Downloading first means there is
 # something to source, so there is now one copy of each instead of two.
 #
-# WHAT THE PUBLISHED SHA-256 COVERS, stated plainly rather than implied: this file. It is
-# the coordinates and the download, which is the part that decides WHICH code runs. The code
-# it fetches is the course repository, which is also where ./cs193v and the container recipe
-# come from -- so the repository is the trust root either way. See .private/README.md.
+# WHAT THE PUBLISHED SHA-256 COVERS, stated plainly rather than implied: this file -- and since
+# #232 this file covers everything else. It carries the tag the course files are fetched from AND
+# the digest their content must hash to, so checking this one number is checking the lot. If you
+# do not check it, what you are trusting is the course website and TLS. See .private/README.md.
+#
+# YOUR COPY MAY HAVE A VERSION IN ITS NAME -- install-cs193v-1.2.0.sh, or whatever your browser
+# called it -- because each release is published under its own name. The digest beside the
+# download link is the one for that file.
 #
 # MUST STAY BASH 3.2 COMPATIBLE — macOS ships bash 3.2. No associative arrays, no
 # mapfile, no ${var,,}, no fractional `read -t`.
@@ -43,12 +51,25 @@ set -u
 # THREE CONSTANTS AND ONE URL, and install-cs193v-windows.cmd composes the same URL out of its
 # own copy of the three; 25-installer.sh fails if the two files disagree.
 #
-# TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and the reason changed with #280. It used to be
+# A TAG, NOT A BRANCH (#232), AND THAT IS THE WHOLE POINT OF THIS FILE'S EXISTENCE. refs/heads/main
+# moves on every push, so what a student installed depended on when they ran this -- and a
+# compromised repository reached them with sudo, because course-install.sh runs the package install
+# as root. archive/<tag>.tar.gz names a fixed tree, and PAYLOAD_SHA256 below is what makes that
+# claim checkable on the student's own machine rather than trusted.
+#
+# WHY A TAG AND NOT A COMMIT SHA, since the SHA is the stronger name: a commit cannot contain its
+# own hash, so pinning a SHA means the bootstrap that names release N is a CHILD of the commit it
+# names -- three commits and an off-by-one-release trap. A ref can be created AFTER the object it
+# names, so a tag lets one commit carry the tag name and the digests that describe it. The pin is
+# not what makes the payload trustworthy here; the manifest is, and it does not care how the tree
+# was addressed. See .private/README.md's "Cutting a release".
+#
+# TARBALL IS A LITERAL ASSIGNMENT ON ONE LINE, and the reason changed twice. It used to be
 # load-bearing because seven places in the test suite repointed the download by rewriting
-# `^TARBALL=.*` with sed, and a composed URL would have left all seven matching nothing, silently.
-# CS193V_TARBALL replaced every one of them, so nothing edits this line any more. Keep it one
-# line regardless: it is the value a commit pin would replace, and one literal is what makes that
-# a one-line change rather than an argument about where the URL gets assembled.
+# `^TARBALL=.*` with sed; CS193V_TARBALL (#280) replaced every one of them. Now it is
+# .private/release.sh that rewrites REPO_TAG, with sed anchored at `^REPO_TAG=`, so the constant
+# stays one literal on one line for the same reason it always did -- a composed URL would leave
+# the rewrite matching nothing, silently.
 #
 # CS193V_TARBALL IS A STAFF SWITCH AND NOT A SECURITY BOUNDARY, which is worth saying plainly
 # because it can be mistaken for one. Anyone who can set a variable in your shell can also edit
@@ -61,16 +82,156 @@ set -u
 # alone would make a failed local run print the GitHub URL it never touched.
 REPO_OWNER="cs193v"
 REPO_NAME="cs193v-container"
-REPO_BRANCH="main"
-TARBALL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_BRANCH.tar.gz"
+REPO_TAG="release-0.0.0"
+TARBALL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/$REPO_TAG.tar.gz"
 COURSE_SRC="${CS193V_TARBALL:-$TARBALL}"
 tarball_url() { printf '%s\n' "$COURSE_SRC"; }
 
-# ─── the handover contract ─────────────────────────────────────────────────────
-# Bumped only when the arguments below change meaning. course-install.sh refuses anything
-# lower and says to download this file again -- which is the one thing that goes wrong when a
-# student has last quarter's copy sitting in Downloads.
-BOOTSTRAP_PROTOCOL=1
+# ─── what the course files have to hash to ─────────────────────────────────────
+# THE ONE THING ON THIS PAGE THAT IS CHECKED RATHER THAN TRUSTED (#232). The tag above says WHICH
+# tree to fetch; this says what that tree must contain, and it is verified on the student's own
+# machine. So the trust root is the course website and TLS -- the place this file came from -- and
+# not codeload. That is a different and stronger claim than a pin alone can make.
+#
+# A MANIFEST, NOT THE ARCHIVE'S BYTES, and that distinction is the whole design. GitHub does not
+# guarantee the bytes of an auto-generated archive: the 2023-01-30 compression change broke
+# Homebrew, Bazel, Spack and Go modules, and `git archive` stamps every member's mtime from the
+# commit date. Measured: the same tree served under two refs differs in bytes, 555,816 against
+# 555,476, because the embedded directory name differs. A hash over extracted CONTENT has none of
+# those degrees of freedom.
+#
+# .private/release.sh COMPUTES THIS WITH THIS FILE'S OWN CODE, through --dev-manifest-hash below,
+# so there is exactly one implementation of the format and no second one to drift from. Rewritten
+# by sed anchored at `^PAYLOAD_SHA256=`, which is why it is one literal on one line.
+PAYLOAD_SHA256="48d27b5d3fabf919326b7e9ca9b0eefb41bec34a72a59c3670fa77bbc597ef0c"
+# AND ONE WAY TO SUPPLY A DIFFERENT EXPECTATION, FOR STAFF. Consulted ONLY beside CS193V_TARBALL:
+# alone it could do nothing but make a genuine release fail against a value nobody published, and
+# the banner below says so rather than leaving that to guesswork. With both set, a by-hand run --
+# and the test suite -- can drive the REFUSAL, which is otherwise unreachable without serving bad
+# bytes at the published URL.
+PAYLOAD_WANT="${CS193V_PAYLOAD_SHA256:-$PAYLOAD_SHA256}"
+
+# ─── hashing, in the one shape this project has already argued out ─────────────
+# COPIED FROM install-utils.sh's pkg_sha256, DELIBERATELY, and this is the third copy of a hasher
+# in the tree after the launcher's sha_stdin and that one. The bootstrap sources nothing --
+# 10-static.sh asserts it, and that property is what makes this file readable in one sitting -- so
+# the alternative to a copy is no check at all. #283 already recorded the argument for a second
+# copy on purpose; this is the same argument.
+#
+# THREE ARMS AND NO uname, WHICH KEEPS THIS FILE'S OTHER BAN INTACT: it must not learn what OS it
+# is on, because the code that answers that question lives in the files it has not downloaded yet.
+# `command -v` asks the only question that matters anyway.
+#
+#   sha256sum  coreutils, so every Linux -- and macOS 15+, where /sbin/sha256sum arrived. NOT on
+#              macOS 14 or earlier, and course-install.sh sets no macOS floor, so it cannot be the
+#              only branch.
+#   shasum     on every Mac there has ever been -- but it is `#!/usr/bin/perl`, and Apple's
+#              standing notice is that future macOS will not include the scripting runtimes.
+#   openssl    /usr/bin/openssl is LibreSSL, in the base system since High Sierra and not a
+#              scripting runtime, so it is the one that survives that removal.
+#
+# STDIN, NEVER A PATH ARGUMENT, and that is measured rather than tidy: `openssl dgst -sha256 /p`
+# prints `SHA256(/p)= hex`, and a path can itself contain hex -- so anything hunting for hex in
+# that line can pick the wrong token. Fed on stdin, openssl prints no path at all.
+#
+# $1 FOR TWO OF THEM AND $NF FOR THE THIRD, WHICH IS NOT A TYPO. coreutils prints `hex  -`;
+# LibreSSL on stdin prints bare hex; OpenSSL 3 prints `SHA2-256(stdin)= hex` and OpenSSL 1
+# `(stdin)= hex`. So $1 is right for the first two and would return the literal `(stdin)=` for the
+# third. Tidying these onto one normaliser is the change not to make.
+sha_stdin() {                         # sha_stdin < FILE -> 64 lower-case hex digits, or nothing
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum            | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256        | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 | awk '{print $NF}'
+    fi
+}
+
+# ─── the manifest, and the format is a published contract ──────────────────────
+# EVERY ENTRY, TYPED. One line per entry, `LC_ALL=C sort`ed, hashed as text:
+#
+#     d  <path>
+#     f  <sha256>  <path>
+#
+# Two spaces after the type, two between the digest and the path, paths relative to the extraction
+# root with no leading `./`, and the text ENDS WITH A NEWLINE -- the classic off-by-one-byte, so it
+# is written down. Because `d` sorts before `f`, directories come first; that falls out of the sort
+# rather than being arranged, and nothing depends on it.
+#
+# DIRECTORIES ARE IN IT even though git cannot store an empty one, so today every directory line is
+# derivable from the file lines beside it. That redundancy is free and cannot drift, and it is what
+# makes a directory arriving that should not have a detectable event rather than a silent one.
+#
+# MODES, mtimes AND OWNERSHIP ARE NOT IN IT, and that is the one exclusion. `tar x` as an ordinary
+# user applies the caller's UMASK and the two tars differ in their defaults, so a mode-inclusive
+# manifest would refuse a student's install for no reason but their shell configuration. The only
+# mode anything depends on is the launcher's +x, and course-install.sh chmods it unconditionally
+# after extraction -- so that is covered, just not covered here. Do not "fix" this by adding modes.
+#
+# ANYTHING THAT IS NOT A REGULAR FILE OR A DIRECTORY IS REFUSED, rather than described. A symlink
+# is the case that matters: `find -type f` would skip it, so it would ship OUTSIDE the verified
+# content -- and the exported set has none, so one appearing is either a mistake or an attack. A
+# newline in a path is refused because a line-oriented format cannot represent it unambiguously and
+# the sort would be wrong as well. 11-export.sh refuses both at development time and release.sh
+# before publishing; this is the same predicate at install time, on a tarball nobody here built.
+#
+# IT IS AN AUTHENTICITY CHECK ON WHAT LANDED, NOT CONTAINMENT DURING EXTRACTION. A tarball that
+# wrote outside this directory has already written by the time any of this runs; what stops that is
+# tar's own path handling and the fresh mktemp root, not the manifest. Worth knowing before anyone
+# reads more into it than it says.
+#
+# NO `find -printf`: it is GNU-only and this runs on macOS. One pass per type instead.
+manifest_hash() {                     # manifest_hash DIR -> the digest, or nothing + why on stderr
+    _mh_nl='
+'
+    ( cd "$1" 2>/dev/null || { printf 'cannot read %s\n' "$1" >&2; exit 1; }
+      if [ -n "$(find . ! -type f ! -type d -print 2>/dev/null | sed 1q)" ]; then
+          printf 'the course files contain something that is not a file or a directory\n' >&2
+          exit 1
+      fi
+      if [ -n "$(find . -name "*$_mh_nl*" -print 2>/dev/null | sed 1q)" ]; then
+          printf 'a course file name contains a newline\n' >&2
+          exit 1
+      fi
+      # NO WORD-SPLITTING ANYWHERE IN HERE. Spaces in paths are legal and must survive untouched;
+      # the text is only ever hashed, never re-parsed, so nothing downstream has to take it apart.
+      _mh_text="$(
+        { find . -type d -print | sed -e 's|^\./||' -e '/^\.$/d' | while IFS= read -r _mh_p; do
+              printf 'd  %s\n' "$_mh_p"
+          done
+          find . -type f -print | sed 's|^\./||' | while IFS= read -r _mh_p; do
+              printf 'f  %s  %s\n' "$(sha_stdin < "$_mh_p")" "$_mh_p"
+          done
+        } | LC_ALL=C sort
+      )"
+      # AN EMPTY MANIFEST IS A REFUSAL, NOT A DIGEST. Hashing nothing yields e3b0c442..., a real
+      # 64-hex value that would compare equal to a pin filled in from a failed release -- the same
+      # trap pkgsha:the-pin-is-not-the-empty-file-digest exists for one file up.
+      if [ -z "$_mh_text" ]; then
+          printf 'the course files are empty\n' >&2
+          exit 1
+      fi
+      # THE TRAILING NEWLINE IS PART OF THE TEXT, and printf is what puts it back: the command
+      # substitution above strips it, so hashing $_mh_text bare would hash one byte less than the
+      # format specifies and nothing would ever agree with release.sh.
+      printf '%s\n' "$_mh_text" | sha_stdin
+    )
+}
+
+# ─── and where a newer release would announce itself  (#282) ───────────────────
+# HANDED DOWN RATHER THAN RE-DERIVED, because course-install.sh deliberately does not know where
+# the course files come from: its own header says the coordinates live here, and a second copy of
+# them would be a second thing to forget at release time. So this composes the URL and passes it,
+# and the installer proper fetches it without knowing what a repository is.
+#
+# WHY THAT CHECK EXISTS AT ALL. Before the pin, "re-run the installer" delivered whatever was on
+# main -- so a student who never heard a fix was published got it anyway, which is what this
+# file's own header promises. Under a tag, re-running a stale copy re-installs the identical
+# broken tree and the report is indistinguishable from a fresh install. Nothing on the machine can
+# see that: the recipe, the launcher and the installer all arrived together and agree with each
+# other perfectly.
+TAGS_URL="https://github.com/$REPO_OWNER/$REPO_NAME/tags.atom"
 
 # ─── refusals ──────────────────────────────────────────────────────────────────
 # PLAIN printf, AND THERE IS NO CATALOGUE IN THIS FILE. Everything this script can refuse
@@ -78,6 +239,34 @@ BOOTSTRAP_PROTOCOL=1
 # to draw a box with. That is also the lint boundary: 10-static.sh's text116 rules hold
 # course-install.sh to the catalogue and deliberately do not look at this file.
 refuse() { printf '\n%s\n\n' "$*" >&2; exit 1; }
+
+# ─── one argument, and it is not part of an install  (#232) ────────────────────
+# NOT AN ARGUMENT USED TO BE THE CLAIM, and this file had never parsed one. .private/release.sh
+# needs the manifest that the block above defines, and the alternative to a verb here is a second
+# implementation of the format in the release script -- two copies which, if they disagree by one
+# byte, refuse every install. This project's answer to that shape is a --dev- verb: cs193v carries
+# six, files/setup-git carries one, and the launcher records the reasoning beside verb_args as
+# "A VERB RATHER THAN A SOURCED FUNCTION". This file cannot offer a sourced function anyway; it
+# sources nothing and nothing may source it.
+#
+# DISPATCHED HERE, WHICH IS BEFORE THE FIRST THING THAT CAN REFUSE. The TOOL= line below exits on
+# a machine with no curl and no wget, and hashing a directory needs neither -- so a verb placed
+# after it would fail for a reason that has nothing to do with what it was asked. It is also
+# before the temp directory and the EXIT trap, so this path creates nothing and removes nothing.
+#
+# ONE LINE ON STDOUT AND NOTHING ELSE, so `$(...)` around it yields a digest -- the property
+# 13-term-class.sh records for --dev-term-class. Diagnostics go to stderr for the same reason.
+#
+# AND AN UNKNOWN ARGUMENT IS NOW A REFUSAL. Before this block `bash install-cs193v.sh --oops`
+# silently ignored it and installed; make-tarball.sh already had the right shape.
+case "${1:-}" in
+    --dev-manifest-hash)
+        [ -n "${2:-}" ] || { printf 'install-cs193v.sh: --dev-manifest-hash needs a directory\n' >&2; exit 2; }
+        manifest_hash "$2" || exit 1
+        exit 0 ;;
+    '') ;;
+    *)  printf 'install-cs193v.sh: unexpected argument: %s\n' "$1" >&2; exit 2 ;;
+esac
 
 # ─── something that can download ───────────────────────────────────────────────
 # EITHER TOOL, AND NEITHER IS A FALLBACK. curl is absent from the Ubuntu DESKTOP image -- the
@@ -130,6 +319,15 @@ TOOL="$(find_download_tool)" || refuse "  This needs curl or wget to download th
 BOOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-install.XXXXXX")" \
     || refuse "  Could not create a temporary directory. Is the disk full?"
 trap 'rm -rf "$BOOT_TMP"' EXIT
+
+# AND THE COURSE FILES GO IN A SUBDIRECTORY OF IT, WHICH IS NOT TIDINESS (#232). The archive is
+# downloaded to $BOOT_TMP/course.tar.gz and course-install.sh reads it back from that fixed name
+# to unpack the student's own copy -- so if the tree were extracted over $BOOT_TMP, the manifest
+# walk would find the .tar.gz sitting in its own root and hash it. Those are precisely the
+# auto-generated archive bytes the manifest exists to avoid depending on, and the payload digest
+# would then change with GitHub's compression settings. One directory keeps the two apart.
+BOOT_TREE="$BOOT_TMP/tree"
+mkdir -p "$BOOT_TREE" || refuse "  Could not create a temporary directory. Is the disk full?"
 
 # WHICH SOURCE, AND ONLY WHEN IT IS NOT THE PUBLISHED ONE. Plain printf beside the refusals:
 # there is no catalogue in this file, and nothing has been downloaded yet to read one out of. It
@@ -190,11 +388,12 @@ case "$COURSE_SRC" in
   CS193V_TARBALL to install the published copy instead." ;;
 esac
 
-# --strip-components=1 because GitHub wraps the archive in a <repo>-<branch>/ directory.
+# --strip-components=1 because GitHub wraps the archive in a <repo>-<ref>/ directory -- so the
+# component this drops is `cs193v-container-release-0.0.0`, and it changes with every release.
 # "ARRIVED" RATHER THAN "DOWNLOADED", because since #280 they may not have been: a bare
 # CS193V_TARBALL is copied, and a staff member with a half-written local tarball should not be
 # told to look at their network.
-tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
+tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TREE" \
     || refuse "  The course files arrived but could not be unpacked.
   That usually means the transfer was cut short. It is safe to run this script again."
 
@@ -214,28 +413,70 @@ tar xzf "$BOOT_TMP/course.tar.gz" --strip-components=1 -C "$BOOT_TMP" \
 # a variable (`wsl -e env VAR=value prog args`, which it does for DEBIAN_FRONTEND). CS193V_WINDOWS
 # (#218) marks the pass as the one the Windows installer launched, which is the whole of what
 # decides which sign-off a student reads at the end; it and CS193V_DIR are read by
-# course-install.sh and not here. THIS FILE READS THREE VARIABLES AND NO ARGUMENTS: TMPDIR,
-# CS193V_PROVISION, and CS193V_TARBALL (#280). 10-static.sh asserts that list, so a fourth is a
-# deliberate edit in two places rather than something that arrives unremarked.
+# course-install.sh and not here. THIS FILE READS FOUR VARIABLES AND ONE ARGUMENT: TMPDIR,
+# CS193V_PROVISION, CS193V_TARBALL (#280) and CS193V_PAYLOAD_SHA256 (#232), plus the
+# --dev-manifest-hash verb above. 10-static.sh asserts both lists, so a fifth variable or a second
+# verb is a deliberate edit in two places rather than something that arrives unremarked.
 TARGET=.private/course-install.sh
 [ -n "${CS193V_PROVISION:-}" ] && TARGET=.private/wsl-provision.sh
 
-# THE CHECK THAT NEITHER EXIT STATUS CAN MAKE. `curl -f` catches a 404 and a cut-off transfer,
-# and tar catches a truncated archive -- but a captive portal answering 200 with its own login
-# page is a well-formed reply, and an archive can extract cleanly having written only some of
-# what it should. So the pieces the hand-over depends on are checked by name.
+# ─── and now the check that no exit status can make ────────────────────────────
+# THREE THINGS HAVE TO BE TRUE, AND THIS IS THE THIRD: something downloaded, tar unpacked it, and
+# the content is the release. `curl -f` catches a 404 and a cut-off transfer and tar catches a
+# truncated archive, but a captive portal answering 200 with its own login page is a well-formed
+# reply -- and until #232 nothing at all caught a tree that arrived whole and was not ours.
 #
-# $TARGET IS LAST, AND THAT IS THE ORDER RATHER THAN AN AFTERTHOUGHT. In the ordinary case it is
-# already the first name in the list, so the message a student sees for a half-arrived archive
-# still names course-install.sh; on the root pass it adds the one extra file that run needs.
-# course-install.sh stays named unconditionally because boot_cleanup's guard looks for it before
-# it will remove anything.
-for f in .private/course-install.sh .private/install-utils.sh .private/course-install-messages.txt .private/files/cs193v-ui.sh "$TARGET"; do
-    [ -s "$BOOT_TMP/$f" ] || refuse "  The course files arrived but $f is missing or empty.
+# THIS REPLACED A FIVE-NAME PRESENCE CHECK, and the manifest subsumes it: a tree whose digest
+# matches holds every one of those files, with the right bytes, and holds nothing else. What is
+# left below is one name, for the staff path where the digest is reported rather than enforced.
+#
+# WHAT THE THREE STATES DO, because the middle one is the reason the other two are testable:
+#
+#   no overrides                      compare against PAYLOAD_SHA256 and REFUSE on mismatch
+#   CS193V_TARBALL                    compute and REPORT; a local tarball will never hash to a
+#                                     published constant, so comparing would fire on every run
+#   CS193V_TARBALL + ..._SHA256       compare against the supplied value and REFUSE on mismatch
+#
+# The third is what makes the refusal reachable offline: without it, the only way to see this
+# branch would be to serve bad bytes at the published URL.
+#
+# BOTH DIGESTS IN THE MESSAGE, and that is what makes a screenshot diagnosable. A cut-short
+# transfer and a mis-cut release land here identically, and only the numbers tell staff which one
+# they are looking at -- one is fixed by re-running and the other only by a new release.
+payload_got="$(manifest_hash "$BOOT_TREE")" || refuse "  The course files arrived but could not be checked.
+
+  It is safe to run this script again. If this keeps happening, tell course staff."
+
+if [ -n "${CS193V_TARBALL:-}" ] && [ -z "${CS193V_PAYLOAD_SHA256:-}" ]; then
+    printf '
+  *** CS193V_TARBALL is set, so the course files are NOT being checked.       ***
+  *** Their manifest hashes to: %s
+  *** Set CS193V_PAYLOAD_SHA256 to that value to have it enforced.            ***
+' "$payload_got"
+elif [ "$payload_got" != "$PAYLOAD_WANT" ]; then
+    refuse "  The course files that arrived are not the ones this installer expects.
+
+      expected: $PAYLOAD_WANT
+      received: $payload_got
+
+  That usually means the transfer was cut short, or that something answered for
+  it -- a hotel or campus wifi login page, for instance. It is safe to run this
+  script again. If this keeps happening, tell course staff."
+fi
+
+# AND ONE NAME, FOR THE PATH THE DIGEST IS NOT ENFORCED ON. With CS193V_TARBALL set and no
+# expectation supplied the block above only reports, so this is what still refuses a half-written
+# local tarball -- and it gives a message naming the file, where a digest can only say the bytes
+# differ. make-tarball.sh replicates the same check for the same reason.
+#
+# $TARGET AND NOT A LIST. The five names this used to walk are all inside the manifest, so on the
+# student's path they cannot be missing once the digest matched; what is left is the one file this
+# script is about to hand control to. In the ordinary case that is course-install.sh, which is
+# also the file boot_cleanup's guard looks for before it will remove anything.
+[ -s "$BOOT_TREE/$TARGET" ] || refuse "  The course files arrived but $TARGET is missing or empty.
 
   That means the transfer was cut short, or something answered for it -- a hotel
   or campus wifi login page, for instance. It is safe to run this script again."
-done
 
 # AND STDIN IS PASSED STRAIGHT THROUGH, deliberately. An earlier draft redirected it from
 # /dev/null here, on the reasoning that `curl | bash` is not a shipped path so nothing downstream
@@ -244,20 +485,4 @@ done
 # choose_dir() reads a typed path. Measured: with the redirect in place every pty-driven case
 # saw "(not a terminal; choosing ...)" and the consent menu took its safe default, so a student
 # could not have answered a single question.
-exec bash "$BOOT_TMP/$TARGET" "$BOOTSTRAP_PROTOCOL" "$BOOT_TMP"
-
-# ─── the last line, and why the Windows installer needs one ────────────────────
-# install-cs193v-windows.cmd downloads this script into the CS193V environment and greps it for
-# the token below BEFORE running it. `curl -f` catches a 404 and a cut-off transfer; what it
-# cannot catch is a captive portal answering 200 with its own login page, and it is bash that
-# would then run the HTML. The token being LAST is what makes finding it prove that the whole
-# file arrived, so this is an identity check and a completeness check at once.
-#
-# IT PROVES THIS FILE ARRIVED WHOLE, which is all the .cmd needs: this file then checks the
-# tree it downloads by name, so each layer verifies what it hands on. course-install.sh
-# deliberately has no token of its own -- a truncated archive fails tar, and a missing member
-# fails the check above.
-#
-# KEEP IT LAST, and keep it the only occurrence in this file. 25-installer.sh asserts both, and
-# 00-release-gates.sh fetches the published URL and looks for it there.
-# CS193V-INSTALLER-COMPLETE
+exec bash "$BOOT_TREE/$TARGET" "$BOOT_TMP" "$REPO_TAG" "$TAGS_URL"

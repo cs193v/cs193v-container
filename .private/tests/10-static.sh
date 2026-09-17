@@ -100,6 +100,20 @@ assert_ok  "syntax:course-install"    bash -n $PRIVATE/course-install.sh
 # next.
 assert_ok  "syntax:install-utils"     bash -n $PRIVATE/install-utils.sh
 assert_ok  "syntax:wsl-provision"     bash -n $PRIVATE/wsl-provision.sh
+# THE RELEASE SCRIPT (#232). Nothing sources it and nothing else runs it, so a parse error in it
+# is discovered by the next person cutting a release -- which is the worst possible moment, and the
+# reason this gate is NOT vacuous where the module's below would be.
+assert_ok  "syntax:release"           bash -n $PRIVATE/release.sh
+# AND IT IS EXECUTABLE, because .private/README.md's checklist tells a TA to run it by path. The
+# module beside it is sourced and correctly has no bit.
+assert_exec "exec:release"            "$PRIVATE/release.sh"
+
+# THERE IS DELIBERATELY NO syntax:export-tree, AND THAT IS THE ONE PLACE A PARSE GATE WOULD BE
+# VACUOUS (#232). .private/lib/export-tree.sh is SOURCED by assert.sh, so a parse error in it
+# fires assert.sh's `|| exit 1` before any suite reaches its first assertion -- measured: the run
+# reports `SUITES THAT DIED / 10-static.sh exited 1 without finishing`, naming the file and the
+# line. An assertion here could never fail, and the harness already says more than it would.
+# release.sh gets one below for the opposite reason: nothing sources it, so nothing else notices.
 assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
 assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
 assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
@@ -245,7 +259,72 @@ assert_eq "bootstrap:evals-nothing" "" \
 boot_env="$(printf '%s\n' "$boot_code" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' \
             | sed 's/^\${//; s/:-$//' | LC_ALL=C sort -u | do_tr '\n' ' ')"
 assert_eq "bootstrap:reads-only-these-env-vars" \
-          "CS193V_PROVISION CS193V_TARBALL TMPDIR " "$boot_env"
+          "CS193V_PAYLOAD_SHA256 CS193V_PROVISION CS193V_TARBALL TMPDIR " "$boot_env"
+
+# ─── and the arguments, named so that a second verb is a decision too  (#232) ──
+# THE TWIN OF THE RULE ABOVE, and it exists because this file's header used to be able to say
+# "NOT AN ARGUMENT, because this file has never parsed any". --dev-manifest-hash ended that, and
+# an argument surface that grows unremarked is the same defect as an input that does: this is the
+# file a student checks a SHA-256 against, so what it will do when handed something is part of
+# what reading it tells you.
+#
+# DERIVED FROM THE DISPATCH ITSELF, not from a list kept beside it. The case labels ARE the
+# surface, so a verb added without touching this assertion cannot exist.
+boot_verbs="$(printf '%s\n' "$boot_code" \
+              | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
+              | sed -n 's/^[[:space:]]*\(--[a-z][a-z-]*\)).*/\1/p' \
+              | LC_ALL=C sort -u | do_tr '\n' ' ')"
+# THE DISPATCH WAS REALLY FOUND, first: a sed whose addresses stop matching yields an empty
+# surface, and an assertion that the surface is empty would then pass forever on a file that
+# parses anything it likes.
+assert_ne "bootstrap:the-argument-dispatch-was-found" "" "$boot_verbs"
+assert_eq "bootstrap:parses-only-these-arguments" "--dev-manifest-hash " "$boot_verbs"
+# AND IT DISPATCHES BEFORE ANYTHING CAN REFUSE OR CREATE ANYTHING, which is what makes the narrow
+# door exemption below honest. BY LINE NUMBER INSIDE THE FILE, the shape
+# pkgsha:checked-after-the-download-and-before-the-install uses and for its reason: "both lines
+# are present" proves nothing about which came first. Two positions matter -- the TOOL= line exits
+# on a machine with neither curl nor wget, and hashing a directory needs neither, so a verb after
+# it would refuse for a reason that has nothing to do with what it was asked; and the mktemp line
+# is the first thing that creates state, so a verb after it would leave a directory behind on a
+# path that installs nothing.
+boot_disp="$(printf '%s\n' "$boot_code" | grep -n 'case "${1:-}" in' | head -1 | cut -d: -f1)"
+boot_tool="$(printf '%s\n' "$boot_code" | grep -n '^TOOL='          | head -1 | cut -d: -f1)"
+boot_mk="$(  printf '%s\n' "$boot_code" | grep -n 'mktemp -d'       | head -1 | cut -d: -f1)"
+assert_eq "bootstrap:the-verb-dispatches-before-anything-else" "yes" \
+          "$([ -n "$boot_disp" ] && [ -n "$boot_tool" ] && [ -n "$boot_mk" ] \
+             && [ "$boot_disp" -lt "$boot_tool" ] && [ "$boot_disp" -lt "$boot_mk" ] \
+             && printf yes || printf "dispatch=$boot_disp tool=$boot_tool mktemp=$boot_mk")"
+# AND EVERY VERB ARM LEAVES ON ITS LAST LINE. A verb that fell through would carry on into the
+# install carrying an argument nobody downstream reads, which is the shape the unexpected-argument
+# arm exists to stop.
+#
+# THE LAST LINE OF THE ARM, NOT "THE ARM MENTIONS exit", and that is the whole assertion rather
+# than a detail. The looser form was written first and mutation testing found it vacuous in one
+# try: deleting the `exit 0` from --dev-manifest-hash left the arm still holding the `exit 2` of
+# its own missing-argument guard, so a grep for `exit` over the whole arm passed on an arm that
+# now falls through into the download.
+#
+# THE `'')` ARM IS DELIBERATELY NOT COVERED: that one is the ordinary install and MUST fall
+# through, which is why this reads only the `--` labels.
+# ONE LINE OF EACH ARM IS THE SUBJECT -- THE ONE CARRYING `;;` -- AND awk READS IT, NOT sed. A
+# `sed -n '/start/,/;;/p'` looks for its END pattern on lines AFTER the start, so on a one-line arm
+# like the catch-all it never terminates and prints to the end of the file. Measured: the check
+# below then read `esac` and reported that the arm does not exit. awk tracks the arm itself and
+# stops at the first `;;`, which is right for a one-line arm and for a multi-line one.
+boot_arm_tail() {                     # boot_arm_tail LABEL_RE -> the arm's last line
+    printf '%s\n' "$boot_code" | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
+        | awk -v re="$1" '$0 ~ re { f = 1 } f { last = $0 } f && /;;[ \t]*$/ { print last; exit }'
+}
+# AND SO DOES THE CATCH-ALL, which is the half that makes "handing this file ANY argument cannot
+# start an install" true -- and that property is what the door exemption below leans on. Before
+# #232 an unknown argument was silently ignored and the install proceeded.
+assert_says "bootstrap:an-unknown-argument-exits" "exit " "$(boot_arm_tail '^[[:space:]]*\*\)')"
+assert_eq "bootstrap:every-verb-arm-exits" "" \
+          "$(printf '%s\n' "$boot_code" | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
+             | sed -n 's/^[[:space:]]*\(--[a-z][a-z-]*\)).*/\1/p' \
+             | while IFS= read -r v; do
+                 boot_arm_tail "^[[:space:]]*$v\\)" | grep -q 'exit ' || printf '%s ' "$v"
+               done | sed 's/ *$//')"
 
 # ─── the temp tree's name is a contract between the two files  (#221) ──────────
 # ONE FILE MAKES THE DIRECTORY AND THE OTHER RUNS `rm -rf` ON IT. The bootstrap creates it with
@@ -401,11 +480,17 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # `read -t 0.1` because "bash 3.2 cannot read -t 0.1 -- fractional timeouts are bash 4, and a
 # static test forbids them, which makes that ban load-bearing rather than hygienic." The ban was
 # real; the test was not reading the file obeying it. Now it is.
+#
+# AND .private/lib/export-tree.sh AND .private/release.sh, WHICH SHIP TO NOBODY (#232). They are
+# on these lists anyway, because the constraint is not "does it ship" but "does it run on a TA's
+# Mac": a release is cut there, and a TA settling VERIFICATION.md's by-hand sections runs
+# make-tarball.sh there too. Nothing else would scan either -- the derived list below reaches only
+# $PRIVATE/tests.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh | grep -nE "$BASH4" || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -545,6 +630,18 @@ assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 door_tail='install'; door_head='bash '
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
 #
+# A CALL THAT PASSES AN ARGUMENT IS EXCLUDED (#232), and what makes that safe is a property of the
+# file rather than a hope about the call site: the bootstrap dispatches `case "${1:-}"` above the
+# TOOL= line and above the mktemp, and EVERY arm of it exits -- the verb, and the catch-all for
+# anything unknown. So an invocation carrying an argument reads a directory or prints a refusal and
+# stops: it cannot reach $HOME, cannot download and cannot install. Three assertions hold that
+# together: bootstrap:the-verb-dispatches-before-anything-else,
+# bootstrap:every-verb-arm-exits and bootstrap:an-unknown-argument-exits.
+#
+# THE NEEDLE STILL REQUIRES THE ARGUMENT, not merely the filename. `bash "$PRIVATE/install-...sh"`
+# with nothing after it is the invocation that installs, and it is exactly what this rule exists to
+# catch -- excluding on the FILENAME alone would have excused it.
+#
 # `wine_argv_count` is excluded for the same reason as `bash -n`: it is not a way to start
 # anything. It greps the argv log the Windows fakes wrote, and since issue #93 the handoff line
 # in that log IS `wsl.exe -d CS193V -e bash /tmp/install-cs193v.sh` -- so any assertion pinning
@@ -554,6 +651,7 @@ door_tail='install'; door_head='bash '
 bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
         | grep -v 'bash -n' | grep -v 'wine_argv_count' \
+        | grep -v -- 'install-cs193v.sh" -' \
         | grep -vE 'installer_host|installer_tty' || true)"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
@@ -1037,6 +1135,73 @@ assert_eq "pkgsha:the-hasher-has-no-fallthrough" "0" \
 assert_eq "pkgsha:the-hasher-does-not-refuse-for-itself" "0" \
           "$(printf '%s\n' "$ps_body" | grep -cE '(die|exit)[[:space:]]')"
 
+# ─── the payload is pinned to a tag, and the tag agrees with VERSION  (#232) ───
+#
+# BESIDE pkgsha:*, AND MODELLED ON IT. Same shape of problem -- a constant in a shipped file that
+# names something published elsewhere -- so the same split: SHAPE here, where it is always true
+# and needs no network, and the comparison against what is really on GitHub in
+# 00-release-gates.sh. A default-tier check that compared REPO_TAG against origin would be red for
+# everyone between releases, which §1 of that file calls "a red you can only clear by publishing".
+#
+# WHY A SHAPE CHECK EARNS ITS KEEP HERE. The tag is what the bootstrap's whole URL is built from,
+# so a typo in it is a 404 for every student at once and nothing else in the default tiers looks
+# at it: the shim and install tiers all run with CS193V_TARBALL set, so they never compose the
+# published URL at all. A TA testing a branch does NOT edit this -- that is what CS193V_TARBALL is
+# for (#280) -- so holding it to the release shape costs nobody anything.
+pin_tag="$(sed -n 's/^REPO_TAG="\([^"]*\)".*/\1/p' "$PRIVATE/install-cs193v.sh")"
+# COUNTED RATHER THAN FOUND, the rule pkgsha:* and min-podman:* both keep: a second declaration
+# later in the file shadows the first, and every assertion here would read the wrong one.
+assert_eq "pin:the-tag-is-declared-once" "1" \
+          "$(grep -c '^REPO_TAG=' "$PRIVATE/install-cs193v.sh")"
+record    "pin:the-pinned-tag" "$pin_tag"
+# ANCHORED AT BOTH ENDS. Unanchored, `release-1.2.3` is matched by `release-1.2.3-rc1` and by a
+# whole line of prose containing it, and the release tier's tag-shape gate would then let a name
+# through that tags.atom's numeric comparison cannot order.
+assert_match "pin:the-tag-matches-the-release-shape" '^release-[0-9]+\.[0-9]+\.[0-9]+$' "$pin_tag"
+# AND THE TWO SOURCES OF TRUTH AGREE. .private/VERSION ships so that `cs193v doctor` can answer
+# "what release is this?" out of a local file (#282), which makes the version a second place the
+# number is written down -- exactly the "second number to forget" that
+# pkgsha:nobody-else-declares-a-pin exists to prevent. It cannot be prevented here, because the
+# two files serve different readers, so it is asserted instead. release.sh writes both.
+pin_version="$(cat "$PRIVATE/VERSION" 2>/dev/null)"
+record    "pin:the-shipped-version" "$pin_version"
+assert_match "pin:the-version-is-three-numbers" '^[0-9]+\.[0-9]+\.[0-9]+$' "$pin_version"
+assert_eq "pin:the-tag-agrees-with-the-version" "release-$pin_version" "$pin_tag"
+# AND NOBODY ELSE DECLARES A TAG. The .cmd carries its own copy on purpose and 25-installer.sh
+# asserts the two agree; what must not appear is a THIRD, in a file that has no business knowing
+# where the course files come from. course-install.sh's handover header records that in prose -- the
+# coordinates live in the bootstrap -- and this is what holds it.
+assert_eq "pin:nobody-else-declares-a-tag" "" \
+          "$(grep -l '^REPO_TAG=' cs193v "$PRIVATE/course-install.sh" "$PRIVATE/install-utils.sh" \
+             "$PRIVATE/wsl-provision.sh" "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
+
+# ─── and the payload digest beside it ──────────────────────────────────────────
+# SHAPE ONLY, AND THE COMPARISON IS IN THE RELEASE TIER, which is pkgsha:*'s split and for its
+# reason. The constant names the digest of a tree AS PUBLISHED AT THE PINNED TAG, so comparing it
+# against the working tree here would be red for everyone from the first commit after a release
+# until the next one -- including the commit that introduced it. 00-release-gates.sh fetches the
+# published archive and runs this file's own --dev-manifest-hash over it, which is the comparison
+# that can be made honestly.
+pin_payload="$(sed -n 's/^PAYLOAD_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/install-cs193v.sh")"
+assert_eq "pin:the-payload-digest-is-declared-once" "1" \
+          "$(grep -c '^PAYLOAD_SHA256=' "$PRIVATE/install-cs193v.sh")"
+record    "pin:the-payload-digest" "$pin_payload"
+# ANCHORED AT BOTH ENDS, the rule pkgsha:the-pin-is-64-lowercase-hex records: unanchored, the
+# pattern matches a whole `shasum` output line and a `sha256:`-prefixed value as well, so a
+# constant that had accidentally kept its filename or its prefix would pass.
+assert_match "pin:the-payload-digest-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$pin_payload"
+# NOT THE DIGEST OF NOTHING, which is the one wrong value that is both easy to arrive at and
+# impossible to notice: it is what a pin filled in from an empty manifest carries. The bootstrap
+# refuses an empty manifest for the same reason, so the two guards meet in the middle. DERIVED
+# rather than spelled, so this cannot drift from what do_sha256 says.
+assert_ne "pin:the-payload-digest-is-not-the-empty-digest" \
+          "$(printf '' | do_sha256 | awk '{print $1}')" "$pin_payload"
+assert_eq "pin:nobody-else-declares-a-payload-digest" "" \
+          "$(grep -l '^PAYLOAD_SHA256=' cs193v "$PRIVATE/course-install.sh" \
+             "$PRIVATE/install-utils.sh" "$PRIVATE/wsl-provision.sh" \
+             "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's
 # root_step_* functions and wsl-provision.sh's own three -- so a sudo that never execs makes the
@@ -1307,7 +1472,7 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 # `$(... || true)` idiom the whole rule would then go silently green on the one platform it
 # exists for.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $b32files"
+eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh $b32files"
 # shellcheck disable=SC2086
 # COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
 # quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version
@@ -2604,12 +2769,26 @@ done
 # Measured before it was widened: install-utils.sh already satisfied the rule, so this adds
 # coverage and no work.
 #
+# THE START ADDRESS MOVED WITH #232, AND IT IS A LANDMARK RATHER THAN A REFERENCE. It used to be
+# `^BOOTSTRAP_PROTOCOL_WANTED=`, which was deleted with the protocol -- and a grep for that name
+# would have found this line, but nothing would have told you that the CLOSING address
+# `^\. "\$UI"$` is an equally literal dependency on the same block's shape. The good news is that
+# this failed loudly rather than silently, because the check below compares LINE COUNTS: a
+# `sed //d` whose addresses stop matching is a silent no-op, and that is exactly what it would
+# otherwise have become.
+#
+# `^BOOT_TMP=` IS THE NEW FIRST LINE OF THE BLOCK, and it is unique in the file.
+#
+# ONE FEWER REFUSAL IN THE REGION NOW. The comment above names three -- not meant to be run
+# directly, your installer is too old, the UI file is unreadable -- and the middle one was the
+# protocol floor, which #232 deleted.
+#
 # THE EXCLUSION IS MEASURED ON ITS OWN FILE, THEN THE TWO ARE JOINED. The hand-over block is
 # course-install.sh's alone, and the check that the sed really cut it is a LINE COUNT -- so
 # appending a second file before that comparison makes the region longer than the file it came
 # from and reddens a check about something else entirely. Measured, by doing it.
 inst_all="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
-inst_ci="$(printf '%s\n' "$inst_all" | sed '/^BOOTSTRAP_PROTOCOL_WANTED=/,/^\. "\$UI"$/d')"
+inst_ci="$(printf '%s\n' "$inst_all" | sed '/^BOOT_TMP=/,/^\. "\$UI"$/d')"
 assert_ne "text116:the-logic-region-is-readable" "" "$inst_ci"
 if [ "$(printf '%s\n' "$inst_all" | grep -c .)" -gt "$(printf '%s\n' "$inst_ci" | grep -c .)" ]
 then pass "text116:the-handover-block-was-really-excluded"
@@ -3506,6 +3685,15 @@ assert_ok  "shellcheck:install-utils" \
            shellcheck -x --severity=warning --exclude=SC2034 $PRIVATE/install-utils.sh
 assert_ok  "shellcheck:wsl-provision" \
            shellcheck -x --severity=warning $PRIVATE/wsl-provision.sh
+# THE STAFF-SIDE MODULE (#232). No -x: it sources nothing. SC2034 is not excluded -- it defines
+# one variable, _ET_REPO, and reads it in the same file, so nothing here looks unused from inside.
+assert_ok  "shellcheck:export-tree" \
+           shellcheck --severity=warning $PRIVATE/lib/export-tree.sh
+
+# THE RELEASE SCRIPT. -x, because it sources lib/export-tree.sh and without it export_tree reads
+# as undefined.
+assert_ok  "shellcheck:release" \
+           shellcheck -x --severity=warning $PRIVATE/release.sh
 # THE ICON GENERATOR (#134). It ships to nobody -- .gitattributes keeps it out of the branch
 # tarball -- but it is the only thing that can rebuild the two artifacts that DO ship, so a
 # quoting bug in it is discovered the next time a master changes and not before. No -x: it

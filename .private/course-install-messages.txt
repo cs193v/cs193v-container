@@ -291,6 +291,35 @@ Go ahead
   These changes are necessary to install the development environment.
   Please rerun the installer or contact the course staff.
 
+# Whether the copy of the installer a student ran is still the current release (#282).
+#
+# NO FILENAME IN ANY OF THESE. The stale artefact is install-cs193v.sh on macOS and Linux and
+# install-cs193v-windows.cmd on Windows, and both are published under names carrying a version --
+# so a student's copy may be called install-cs193v-1.2.0.sh, or whatever their browser renamed it
+# to. Naming a file would be wrong for somebody; naming the website is right for everyone.
+[[step.newer-release]]
+A newer version of the course setup is available
+
+[[note.newer-release]]
+Your copy of the installer sets up release {{HAVE}}, and the current release
+is {{WANT}}. Installing this one will work, but it will not include anything
+fixed since it was published -- and re-running this same copy later will
+install {{HAVE}} again.
+
+To get the current one: download the installer again from the course
+website and run that instead.
+
+[[menu.newer-release.go]]
+Install {{HAVE}} anyway
+
+[[menu.newer-release.stop]]
+Stop, so I can download the current installer
+
+[[newer-release.stopped]]
+  Nothing was changed on your system.
+
+  Download the installer again from the course website and run that copy.
+
 # Where the course files go.
 
 [[step.choose-dir]]

@@ -82,23 +82,23 @@ OOBE_CONF_MOVED="/etc/wsl-distribution.conf.cs193v"
 NEW_USER_GROUPS="adm,cdrom,sudo,dip,plugdev"
 
 # ─── the handover from the bootstrap ───────────────────────────────────────────
-# THE SAME TWO ARGUMENTS course-install.sh TAKES, and the same floor check, because the bootstrap
-# has one exec line for both targets and a second contract would be a second thing to get wrong.
-BOOTSTRAP_PROTOCOL_WANTED=1
-BOOT_PROTOCOL="${1:-}"
-BOOT_TMP="${2:-}"
-MESSAGES="$BOOT_TMP/.private/course-install-messages.txt"
+# THE SAME ARGUMENTS course-install.sh TAKES, because the bootstrap has one exec line for both
+# targets and a second contract would be a second thing to get wrong.
+#
+# AND THE LAST TWO ARE IGNORED HERE. This is the root pass: it creates an account and installs
+# packages, and then the student's own pass does the install a Mac or Linux student sees. Asking
+# whether a newer release exists is that pass's job, and asking it twice would prompt twice.
+BOOT_TMP="${1:-}"
+# THE UNPACKED TREE IS A SUBDIRECTORY OF IT (#232), for the reason the bootstrap's own note gives:
+# the archive sits at $BOOT_TMP/course.tar.gz, and a tree extracted over $BOOT_TMP would put it
+# inside the manifest the bootstrap hashes.
+BOOT_TREE="$BOOT_TMP/tree"
+MESSAGES="$BOOT_TREE/.private/course-install-messages.txt"
 
-if [ -z "$BOOT_PROTOCOL" ] || [ -z "$BOOT_TMP" ]; then
+if [ -z "$BOOT_TMP" ]; then
     printf '\n  This is not meant to be run directly.\n\n' >&2
     printf '  It is run for you by install-cs193v-windows.cmd, inside the CS193V\n' >&2
     printf '  environment it creates.\n\n' >&2
-    exit 1
-fi
-if [ "$BOOT_PROTOCOL" -lt "$BOOTSTRAP_PROTOCOL_WANTED" ] 2>/dev/null; then
-    printf '\n  The installer you ran is from an older version of the course.\n\n' >&2
-    printf '  Download it again and re-run it:\n' >&2
-    printf '    https://github.com/%s/%s\n\n' "cs193v" "cs193v-container" >&2
     exit 1
 fi
 
@@ -107,7 +107,7 @@ fi
 # the function it names exists. A missing one leaves the temp tree behind deliberately: the
 # `rm -rf` is guarded by boot_tmp_is_ours, and the guard is in the file that just turned out to
 # be unreadable.
-UTILS="$BOOT_TMP/.private/install-utils.sh"
+UTILS="$BOOT_TREE/.private/install-utils.sh"
 if [ ! -r "$UTILS" ]; then
     printf 'wsl-provision: cannot read %s\n' "$UTILS" >&2
     printf 'The download is incomplete. Please run install-cs193v.sh again.\n' >&2
@@ -118,7 +118,7 @@ fi
 . "$UTILS"
 trap boot_cleanup EXIT
 
-UI="$BOOT_TMP/.private/files/cs193v-ui.sh"
+UI="$BOOT_TREE/.private/files/cs193v-ui.sh"
 if [ ! -r "$UI" ]; then
     printf 'wsl-provision: cannot read %s\n' "$UI" >&2
     printf 'The download is incomplete. Please run install-cs193v.sh again.\n' >&2

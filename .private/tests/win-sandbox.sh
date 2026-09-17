@@ -114,7 +114,9 @@ WHAT THE MACHINE IS LIKE
   --apt-lies           apt exits 0 and curl is still absent, which only the re-probe catches
   --download-fails [RC] the download fails (default 22, an HTTP error under curl -f)
   --truncated          the download exits 0 but serves a cut-short body, the way a wifi
-                       sign-in page does. The sentinel check is what has to refuse it
+                       sign-in page does. The digest check is what has to refuse it
+  --altered            the download exits 0 and serves a body of the RIGHT LENGTH with one
+                       byte changed, which a check on the size alone would wave through
   --probe-fails [RC]   the distro probe cannot run (default 9009, powershell missing).
                        "cannot tell" is not "absent" and must not become "create it"
   --stage2-rc N        what install-cs193v.sh exits with
@@ -170,6 +172,7 @@ KNOBS=''                              # accumulated "name=value" pairs, applied 
 DISTROS='CS193V'
 OVTARBALL=''                          # CS193V_TARBALL, if --tarball asked for one (#280)
 OVURL=''                              # CS193V_INSTALLER_URL, if --stage2-url did
+BODY=whole                            # what the curl arm serves: whole, truncated or altered
 
 die_usage() { printf '%s\n\n' "$1" >&2; usage >&2; exit 2; }
 setk() { KNOBS="$KNOBS $1=$2"; }
@@ -219,7 +222,8 @@ while [ "$#" -gt 0 ]; do
         --apt-lies)       setk wsl.curl.missing 1; setk wsl.apt.nomarker 1 ;;
         --download-fails) optval 22 "${2:-}"; [ "$OPTSHIFT" = 1 ] && shift
                           setk wsl.curl.rc "$OPTVAL" ;;
-        --truncated)      setk wsl.curl.truncated 1 ;;
+        --truncated)      BODY=truncated ;;
+        --altered)        BODY=altered ;;
         --as-admin)       setk reg.query.rc 0 ;;
         --uac-declined)   setk win.uac-declined 1 ;;
         --no-wsl)         setk harness.no-wsl-exe 1; DISTROS='' ;;
@@ -313,8 +317,16 @@ cp "$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION" "$CASE/messages"
 # developer's disk after a sandbox run, which is a lasting change to the checkout for the sake of
 # a throwaway container. Everything else mounted here is already under $WINE_TMP.
 cp "$DIR0/lib/wine-guest.sh" "$CASE/wincmd"
-# What the fake's curl arm serves: the real install-cs193v.sh, exactly as lib/wine.sh does it.
-cp "$PRIVATE/install-cs193v.sh" "$CASE/stage2.src"
+# What the fake's curl arm serves, and the digest fake-powershell judges the .cmd's expectation
+# against -- exactly as lib/wine.sh's wine_body does it, and for its reasons (#232). BODY is
+# `whole` unless --truncated or --altered asked otherwise.
+case "$BODY" in
+    whole)     cp "$PRIVATE/install-cs193v.sh" "$CASE/stage2.src" ;;
+    truncated) head -c 2000 "$PRIVATE/install-cs193v.sh" > "$CASE/stage2.src" ;;
+    altered)   sed 's/^PAYLOAD_SHA256="./PAYLOAD_SHA256="Z/' \
+                   "$PRIVATE/install-cs193v.sh" > "$CASE/stage2.src" ;;
+esac
+do_sha256 "$CASE/stage2.src" | awk '{print $1}' > "$CASE/stage2.sha256"
 : > "$CASE/wsl.list"
 for d in $DISTROS; do printf '%s\n' "$d" >> "$CASE/wsl.list"; done
 for kv in $KNOBS; do printf '%s\n' "${kv#*=}" > "$CASE/${kv%%=*}"; done
@@ -337,6 +349,12 @@ set -- "$@" -e XDG_RUNTIME_DIR=/tmp/xdg -e "SB_DL=$DLNAME"
 # assignment on both hand-over lines.
 [ -n "$OVTARBALL" ] && set -- "$@" -e "CS193V_TARBALL=$OVTARBALL"
 [ -n "$OVURL" ]     && set -- "$@" -e "CS193V_INSTALLER_URL=$OVURL"
+# AND THE STAGE-TWO DIGEST, ALWAYS (#232), for lib/wine.sh's reason: the .cmd's literal
+# STAGE2_SHA256 is the digest of the blob raw.githubusercontent.com serves at the pinned tag, and
+# the working tree matches that only just after a release -- so without this every hand-driven run
+# would stop at the digest refusal. The WHOLE file's digest, not the served body's, which is what
+# makes --truncated and --altered refusals rather than passes.
+set -- "$@" -e "CS193V_STAGE2_SHA256=$(do_sha256 "$PRIVATE/install-cs193v.sh" | awk '{print $1}')"
 set -- "$@" -v "$CASE:/work:ro$VT_MOUNT_Z"
 set -- "$@" -v "$CASE/wincmd:/usr/local/bin/wincmd:ro$VT_MOUNT_Z"
 set -- "$@" "$(fixture_tag wine)"

@@ -32,14 +32,14 @@
 set -u
 
 DIR0="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-CS193V_STANDALONE=1; export CS193V_STANDALONE
-# shellcheck source=/dev/null
-. "$DIR0/lib/assert.sh"
 
-# assert.sh installs a standalone EXIT trap that prints a pass/fail summary. This tool asserts
-# nothing, so that line is noise -- and here it would land on stdout beside the one path this
-# prints, which is the thing a caller substitutes into a command line.
-trap - EXIT
+# ONE FUNCTION, NOT A HARNESS (#232). This used to source lib/assert.sh with CS193V_STANDALONE=1
+# for the one function it wants, and then `trap - EXIT` to undo the pass/fail summary that bought
+# -- a summary which would have landed on stdout, beside the one path this prints. export_tree
+# lives in a module of its own now, so both lines are deleted rather than explained.
+# shellcheck source=../lib/export-tree.sh
+. "$DIR0/../lib/export-tree.sh" || {
+    printf 'make-tarball.sh: cannot read %s\n' "$DIR0/../lib/export-tree.sh" >&2; exit 1; }
 
 case "${1:-}" in
     -h|--help)

@@ -2322,6 +2322,23 @@ verb_doctor() {
     printf '%s%s%s\n' "$C_CYAN" "$(msg doctor.title)" "$C_OFF"
     msg doctor.rule
     drow "$(msg doctor.row.platform)" "$(platform) / $(uname -m)"
+    # WHICH RELEASE THIS TREE IS (#282), and it is the first question staff could not ask before.
+    # Every other row here describes the machine; this one describes the COURSE FILES, which since
+    # #232 are pinned to a tag -- so "have you re-run the installer?" finally has an answer that is
+    # not a guess. It is also the manual half of the staleness check: that check fails open on
+    # every network problem, and when it does this row is what a pasted report still carries.
+    #
+    # A LOCAL FILE, AND THE LAUNCHER STILL FETCHES NOTHING. That property is asserted, and it is
+    # why the version SHIPS in the tarball rather than being asked for over the network here.
+    #
+    # ABSENT IS A REAL ANSWER, not a blank. A tree installed before this shipped has no VERSION,
+    # and so does one somebody assembled by hand; both are worth telling staff about, and an empty
+    # row would read as a launcher fault.
+    if [ -r "$PRIVATE/VERSION" ]; then
+        drow "$(msg doctor.row.release)" "$(cat "$PRIVATE/VERSION")"
+    else
+        drow "$(msg doctor.row.release)" "$(msg doctor.release.unknown)"
+    fi
     # THE TERMINAL TOKEN, because a wrong hint is otherwise undiagnosable from a support paste.
     # It is also the only place the resolver's answer is visible to a person: the hints it drives
     # are inside the container, and a student who is being told to hold the wrong key cannot see
