@@ -414,6 +414,12 @@ Paste all of the above when asking course staff for help.
 [[doctor.row.platform]]
 platform
 
+[[doctor.row.release]]
+course release
+
+[[doctor.release.unknown]]
+not recorded (installed before releases were numbered, or assembled by hand)
+
 [[doctor.row.terminal]]
 terminal
 

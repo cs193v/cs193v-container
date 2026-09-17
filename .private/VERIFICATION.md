@@ -1176,6 +1176,28 @@ reach none of them:
   Since #275 this one is load-bearing twice over: the create now waits on a HEAD request to that
   same URL before it downloads anything, so a network that cannot reach it stops the install at
   `:nonetwork` instead of part-way through.
+- **The stage-two digest check runs, and its PowerShell really works (#232).** This is the one
+  line in the `.cmd` that no test executes: the windows tier fakes `powershell.exe`, so what is
+  exercised there is the branching, never the expression. On a real box, confirm the install gets
+  past it silently — and then confirm it can REFUSE, by re-running with a deliberately wrong
+  expectation:
+
+  ```
+  set CS193V_STAGE2_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+  install-cs193v-windows-<version>.cmd
+  ```
+
+  *Expect:* the announcement that the override is set, then a refusal naming both digests — the
+  expected one on its own line and the received one printed by the probe just above it — and
+  **no `bash` run at all**, not even the root pass. Three things inside that expression are
+  unmeasured anywhere else: that `$env:WSL_UTF8=1` makes `wsl.exe`'s output readable, that
+  `-split` on the `sha256sum` line yields the digest as field one, and that `$LASTEXITCODE`
+  distinguishes "cannot ask" from "does not match".
+- **A by-hand run against a working tree needs three overrides together**, because each of the
+  three files it would otherwise fetch is pinned: `CS193V_INSTALLER_URL` to point stage one at
+  your `install-cs193v.sh`, `CS193V_STAGE2_SHA256` to the digest of that file, and
+  `CS193V_TARBALL` to a tarball from `tests/make-tarball.sh`. Two out of three gets you a refusal
+  that is correct and confusing.
 
 **5.4c — Windows stage one resumes itself after the restart (issue #275).** The full by-hand
 procedure is `tests/MANUAL.md` item 8 under *what wine cannot answer*, and its first row —

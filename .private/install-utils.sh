@@ -334,6 +334,78 @@ pkg_sha256() {                        # pkg_sha256 FILE -> 64 lower-case hex dig
     fi
 }
 
+
+# ─── is the release we just fetched still the current one?  (#282) ─────────────
+# WHY THIS IS HERE AND NOT IN THE BOOTSTRAP. The bootstrap's diff for #232 should be one constant
+# and one argument; and this file ships in the tarball, is sourced by both installer halves, and
+# sits outside files/ -- which is the same argument that sent pkg_sha256 here rather than to
+# files/cs193v-ui.sh: that file IS IN THE BUILD HASH, so a function added there would offer every
+# student on every platform a container rebuild for code the container has no reader for.
+#
+# THE FLAGS ARE DELIBERATELY NOT THE BOOTSTRAP'S, and that divergence is the point rather than an
+# oversight. install-cs193v.sh's download_to is the one place that knows curl's and wget's flags
+# for fetching the COURSE FILES, and it uses `--retry 10 --retry-delay 3` because the single
+# likeliest thing to go wrong there is dorm wifi and the install cannot continue without them.
+# This fetch is the opposite: it is a nicety, it must never delay an install that would otherwise
+# work, and it has no retry at all. Someone will eventually try to unify the two; the comment at
+# download_to says the same thing from the other side.
+#
+#   curl   -fsSL --max-time 5, no --retry      worst case 5 s, a total wall-clock cap
+#   wget   -q --timeout=3 --tries=1            worst case about 9 s: DNS 3 + connect 3 + read 3
+#
+# --timeout=5 IS DELIBERATELY NOT USED: it would put wget's worst case at about 15 s. AND ONE
+# LIMIT IS ACCEPTED RATHER THAN SOLVED: wget's read timeout resets on activity, so a server
+# dribbling a byte every two seconds keeps it alive indefinitely. Wrapping the arm in `timeout 8`
+# was considered and rejected -- it is a conditional dependency for a cosmetic check.
+fetch_quietly() {                     # fetch_quietly URL DEST -> 0 if something arrived
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 5 -o "$2" "$1" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=3 --tries=1 -O "$2" "$1" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# THE NEWEST RELEASE THE FEED MENTIONS, or nothing at all.
+#
+# COMPARED NUMERICALLY, NOT BY FEED ORDER, and that is the whole reason the tags are named
+# `release-<major>.<minor>.<patch>`. tags.atom is ordered by tag CREATION time, so a tag
+# backfilled after the fact sorts first and "the newest entry" would be wrong. Stripping the
+# prefix and taking the numeric maximum asks the right question instead, and version_lt already
+# exists to answer it -- files/cs193v-ui.sh defines it and the podman floor above already calls it.
+#
+# ANYTHING THAT IS NOT A RELEASE TAG IS IGNORED, which is what keeps a `probe/l-min` or a
+# `wip-whatever` from becoming "the newest release" for every student at once. A release-tier
+# assertion holds every `release-` tag to the full shape, so the two halves cannot drift.
+#
+# A LIMIT WORTH KNOWING: tags.atom carries only the most recent handful of tags -- about ten. Push
+# ten non-release tags after a release and the release tag falls out of the window, this finds
+# nothing, and the check fails open. Harmless, and silent, which is why it is written down here.
+newest_release() {                    # newest_release FEED_FILE -> X.Y.Z, or nothing
+    local best='' v
+    # NO grep -P AND NO -o WITH A GROUP: BSD grep has neither. sed is what both platforms share.
+    # BOTH PATTERNS ARE CLOSED ON THE RIGHT, and that is a fix rather than a flourish: with a
+    # trailing `.*` the first expression read `release-1.3.0-oops` as release 1.3.0, so a stray
+    # `release-1.3.0-rc1` would have told every student they were behind a release that does not
+    # exist. `</title>` and the closing quote are what say the tag ENDS there.
+    for v in $(sed -n 's|.*/releases/tag/release-\([0-9][0-9.]*\)"|\1|p; s|.*<title>release-\([0-9][0-9.]*\)</title>.*|\1|p' \
+               "$1" 2>/dev/null); do
+        case "$v" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) continue ;;
+        esac
+        # version_lt PRINTS `yes` OR `no`; IT DOES NOT RETURN A STATUS, which is the one thing
+        # to know before calling it. Written as `version_lt a b && ...` it is ALWAYS true -- awk
+        # exits 0 either way -- and it writes its answer to stdout, where in a function whose own
+        # output is a version it turns up as a stray `no` in front of the answer. Measured, by
+        # writing it wrong: stale:reads-a-single-release read `no` and then `1.0.0`. The podman
+        # floor in course-install.sh has the right shape and predates this by a long way.
+        if [ -z "$best" ] || [ "$(version_lt "$best" "$v")" = yes ]; then best="$v"; fi
+    done
+    printf '%s' "$best"
+}
+
 # ─── THE STEPS THAT NEED ROOT, and the registry that says which those are ──────
 #
 # ONE LIST, TWO CALLERS, AND THAT IS THE POINT OF THIS FILE (#217). course-install.sh runs these
@@ -557,7 +629,7 @@ root_step_wslconf() {
 boot_tmp_is_ours() {
     case "${BOOT_TMP##*/}" in cs193v-install.??????) ;; *) return 1 ;; esac
     case "$BOOT_TMP" in "${TMPDIR:-/tmp}"/*|/tmp/*) ;; *) return 1 ;; esac
-    [ -d "$BOOT_TMP" ] && [ -f "$BOOT_TMP/.private/course-install.sh" ]
+    [ -d "$BOOT_TMP" ] && [ -f "$BOOT_TMP/tree/.private/course-install.sh" ]
 }
 boot_cleanup() {
     # THE CURSOR FIRST, and the order is the launcher's for the launcher's reason: meter_start

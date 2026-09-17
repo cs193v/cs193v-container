@@ -16,7 +16,8 @@
 #
 # EVERY ASSERTION HERE IS OVER THE STAGED WORKING TREE, not HEAD, so editing .gitattributes
 # turns this red or green immediately rather than after a commit. See export_tree in
-# lib/assert.sh for how that is done without writing to the developer's repository.
+# .private/lib/export-tree.sh for how that is done without writing to the developer's
+# repository.
 
 set -u
 . "$(dirname -- "$0")/lib/assert.sh"
@@ -40,6 +41,43 @@ else
 fi
 ( cd "$TREE" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) > "$TMP/paths"
 
+# ─── and the staging ignores the developer's line-ending config  (#232) ────────
+# `git archive` runs contents through the same conversion a CHECKOUT would, so core.autocrlf=true
+# rewrites the archive -- and that is Git for Windows' DEFAULT, so it is the configuration a TA
+# cutting a release from a Windows checkout has. Measured on this repo: 31 of the 40 exported
+# files come out CRLF under it. codeload builds its archives with the setting absent, so an
+# unpinned staging disagrees with what a student downloads -- and since #232 hashes that content,
+# a release cut that way would refuse EVERY install on EVERY platform. export-tree.sh pins
+# `-c core.autocrlf=false -c core.eol=lf` on the archive call; this is what keeps the pin there.
+#
+# HOME, NOT GIT_CONFIG_GLOBAL, so this works on the git a TA has rather than only on 2.32+.
+#
+# TWO HALVES, AND THE FIRST ONE IS THE VACUITY GUARD. Asserting only that the staged copy has no
+# CR would pass on a git that had stopped honouring autocrlf at all, and then stop testing
+# anything without saying so. So the bare `git archive` under the same hostile HOME has to show
+# the damage first. cs193v is the subject because it is the largest exported text file and can
+# never legitimately hold a CR -- four exported files CAN, all of them binary: the .ico, the
+# applet, main.scpt and the .icns.
+#
+# STDERR DISCARDED on the staging call only: `git add -u` under autocrlf=true warns once per
+# modified file about what it will do to the working copy, which is noise about a configuration
+# this case invented. A real failure is still caught, by the exit status.
+HOSTILE="$TMP/hostile-home"
+mkdir -p "$HOSTILE"
+printf '[core]\n\tautocrlf = true\n' > "$HOSTILE/.gitconfig"
+crlf_bytes() {                        # crlf_bytes FILE -> how many CR bytes it holds
+    do_tr -cd '\r' < "$1" | wc -c | do_tr -d ' '
+}
+( cd "$REPO" && HOME="$HOSTILE" git archive HEAD ) | ( cd "$TMP" && mkdir -p bare && tar xf - -C bare )
+assert_ne "export:autocrlf-really-would-convert" "0" "$(crlf_bytes "$TMP/bare/cs193v")"
+if HOME="$HOSTILE" export_tree "$TMP/pinned" 2>/dev/null; then
+    pass "export:staging-succeeds-under-autocrlf"
+    assert_eq "export:staging-ignores-autocrlf" "0" "$(crlf_bytes "$TMP/pinned/cs193v")"
+else
+    fail "export:staging-succeeds-under-autocrlf" "export_tree failed under core.autocrlf=true"
+    skip "export:staging-ignores-autocrlf" "the staging under core.autocrlf=true failed"
+fi
+
 # A ZERO IS A FAILURE, NOT A PASS. Every equality below would be satisfied by an empty listing
 # in one direction or another, so the count is asserted before anything reads it -- the same
 # reason 14-test-harness.sh:104-111 refuses a zero from `du`.
@@ -52,16 +90,45 @@ else
 fi
 record "export:file-count" "$n_paths"
 
+# ─── nothing that is not a file or a directory  (#232) ─────────────────────────
+# THE PREDICATE install-cs193v.sh ENFORCES AT INSTALL TIME, held here at development time so that
+# it is a red run rather than a refused install. The manifest the bootstrap hashes has one line
+# per entry and covers files and directories only, so anything else in the export set would ship
+# OUTSIDE the verified content -- a symlink being the case that matters, because `find -type f`
+# skips one silently and every listing in this suite is built with exactly that.
+#
+# WHICH IS WHY §1 ABOVE COULD NOT HAVE CAUGHT IT. `find . -type f` is how $TMP/paths is built, so
+# a symlink entering the export would be invisible to the exhaustive `want=` comparison as well.
+# This is the one assertion in the file that looks for what the others cannot see.
+#
+# AND A NEWLINE IN A PATH, for the format's other limit: a line-oriented manifest cannot
+# represent it unambiguously, and `LC_ALL=C sort` would order it wrongly too. release.sh refuses
+# both before publishing a digest, and the bootstrap refuses both on a tarball nobody here built
+# -- three moments, one predicate, each catching it where the previous one could not have looked.
+assert_eq "export:nothing-but-files-and-directories" "" \
+          "$( (cd "$TREE" && find . ! -type f ! -type d -print | sed 's|^\./||') \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
+nl_pat='
+'
+assert_eq "export:no-path-contains-a-newline" "" \
+          "$( (cd "$TREE" && find . -name "*$nl_pat*" -print) | do_tr '\n' ' ' | sed 's/ *$//')"
+
 # ─── 1. the whole listing, as one equality ─────────────────────────────────────
 # .private/files/ IS EXCLUDED FROM THIS LINE and covered by §3 instead. Everything under files/
 # ships by definition -- it is the only COPY in the Containerfile and build_hash hashes the whole
 # tree -- so listing its 25 names here would mean editing this suite every time somebody adds an
-# image file, for an edit that carries no decision. What is left is the seven paths where adding
+# image file, for an edit that carries no decision. What is left is the eight paths where adding
 # or removing one IS a decision. Three of them arrived with a split: course-install.sh with #221,
 # and install-utils.sh and wsl-provision.sh with #217. All three are execed or sourced out of the
 # ARCHIVE by the bootstrap a student downloads, so each has to be here while install-cs193v.sh
 # itself must not be -- see §4.
-want=".config/container.args .private/Containerfile .private/course-install-messages.txt .private/course-install.sh .private/icons/cs193v.ico .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
+#
+# .private/VERSION IS THE EIGHTH, and it is here rather than left to the blanket because it is
+# the one shipped file nothing executes: it exists so `cs193v doctor` can print which release a
+# student is on (#282). Its ABSENCE is the failure worth catching -- it matches
+# `/.private/**` and would have been silently export-ignored, and then the manifest would never
+# have covered it and doctor would have found nothing.
+want=".config/container.args .private/Containerfile .private/VERSION .private/course-install-messages.txt .private/course-install.sh .private/icons/cs193v.ico .private/install-utils.sh .private/messages.txt .private/wsl-provision.sh cs193v projects/.gitkeep"
 # THE APPLET BUNDLE IS EXCLUDED FROM THIS LINE, like .private/files/ above and for the same
 # reason: everything inside a bundle ships by definition, so listing Assets-style internals here
 # would mean editing this suite whenever osacompile's template changes -- an edit carrying no

@@ -25,9 +25,9 @@
  * to wsl.list so a later probe sees it. apt-get writes `curl.installed`, which is what makes
  * the .cmd's probe/install/re-probe sequence real: a .cmd that installed curl and then failed
  * to re-check would pass a knob-based fake and fails this one. curl copies `stage2.src` -- THE
- * ACTUAL install-cs193v.sh, put there by wine_new -- to `stage2.sh`, whole or cut short, and
- * grep searches that file for the pattern the .cmd passed. So the sentinel check is exercised
- * against the real script's real last line; nothing here knows what the token is.
+ * BODY lib/wine.sh prepared -- to `stage2.sh`. So the digest check is exercised against real
+ * bytes, and the number it is judged by comes from real sha256sum on the harness side; nothing
+ * here computes a digest or knows what one looks like.
  */
 #include "win-fake.h"
 
@@ -85,55 +85,33 @@ static int registered(const char *name) {
     return 0;
 }
 
-static int exists(const char *leaf) {
-    char p[1024]; FILE *f;
-    fake_path(p, sizeof p, leaf);
-    if (!(f = fopen(p, "rb"))) return 0;
-    fclose(f);
-    return 1;
-}
-
-/* Copy stage2.src to stage2.sh. `cut` > 0 stops after that many bytes, which is how both a
- * short read and a captive portal's substituted page are modelled: the observable the .cmd
- * checks is the same one -- the sentinel on the last line is not there. */
-static int serve_stage2(long cut) {
+/* Copy stage2.src to stage2.sh, verbatim.
+ *
+ * IT USED TO TRUNCATE, AND THE BYTE BUDGET IS GONE WITH THE SENTINEL (#232). `cut` existed
+ * because a short read and a captive portal's substituted page were modelled as one case -- the
+ * observable the .cmd checked was the same for both, the token on the last line being absent.
+ * The .cmd checks a DIGEST now, and the observable is no longer shared: a cut body, a
+ * byte-altered body of the right length, and a wholly different body are three different things
+ * and want three different fixtures.
+ *
+ * SO THE HARNESS PREPARES THE BODY AND THIS ONLY SERVES IT. lib/wine.sh writes stage2.src with
+ * real tools -- cp, head -c, a byte flip -- and writes stage2.sha256 beside it from real
+ * sha256sum. That is what lets the digest arm in fake-powershell.c judge the .cmd's expectation
+ * against a number no C in this tree computed, with no SHA-256 implementation here at all. */
+static int serve_stage2(void) {
     char src[1024], dst[1024], buf[4096];
     FILE *in, *out;
     size_t n;
-    long written = 0;
     fake_path(src, sizeof src, "stage2.src");
     fake_path(dst, sizeof dst, "stage2.sh");
     if (!(in = fopen(src, "rb"))) return -1;
     if (!(out = fopen(dst, "wb"))) { fclose(in); return -1; }
-    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
-        if (cut > 0 && written + (long)n > cut) n = (size_t)(cut - written);
-        if (n == 0) break;
-        fwrite(buf, 1, n, out);
-        written += (long)n;
-        if (cut > 0 && written >= cut) break;
-    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
     fclose(in);
     fclose(out);
     return 0;
 }
 
-/* Whole file into memory and strstr, because the token the .cmd looks for is on the LAST line:
- * a streaming search with a small window is exactly the thing that would find it by accident or
- * miss it at a chunk boundary. 1 MB against a 40 KB script leaves room to grow; if it ever
- * overflowed, the sentinel would fall off the end and every check here would go red rather
- * than quietly pass, which is the right direction to fail in. */
-static int stage2_contains(const char *needle) {
-    static char body[1 << 20];
-    char p[1024];
-    FILE *f;
-    size_t n;
-    fake_path(p, sizeof p, "stage2.sh");
-    if (!(f = fopen(p, "rb"))) return 0;
-    n = fread(body, 1, sizeof body - 1, f);
-    fclose(f);
-    body[n] = '\0';
-    return strstr(body, needle) != NULL;
-}
 
 
 /* ─── the markers the root pass exchanges (#217) ───────────────────────────────
@@ -481,7 +459,7 @@ int main(int argc, char **argv) {
      * refusal of its own to reach. */
     if (has(argc, argv, "mv")) {
         const char *src = argc > 1 ? argv[argc - 2] : "";
-        if (fake_knob_int("wsl.oobe.conf.missing", 0) || exists("oobe.moved")) {
+        if (fake_knob_int("wsl.oobe.conf.missing", 0) || fake_exists("oobe.moved")) {
             fake_say(stdout, "MvCannotStat", src, NULL);
             return 1;
         }
@@ -502,7 +480,7 @@ int main(int argc, char **argv) {
     if (has(argc, argv, "getent")) {
         char foreign[128];
         const char *key = argv[argc - 1];
-        int have_ours = exists("account.student");
+        int have_ours = fake_exists("account.student");
         int have_foreign = fake_knob("wsl.account.foreign", foreign, sizeof foreign) && foreign[0];
         if (strcmp(key, "1000") == 0) return (have_ours || have_foreign) ? 0 : 2;
         if (have_ours && strcmp(key, "student") == 0) return 0;
@@ -517,7 +495,7 @@ int main(int argc, char **argv) {
      * there: before the terminate the default user is still root, and the real `test -O` returns
      * 1 (measured, both ways, on 2026-09-10). */
     if (has(argc, argv, "test") && has(argc, argv, "-O")) {
-        return (exists("account.student") && exists("wsl.terminated")) ? 0 : 1;
+        return (fake_exists("account.student") && fake_exists("wsl.terminated")) ? 0 : 1;
     }
 
 
@@ -525,7 +503,7 @@ int main(int argc, char **argv) {
      * missing program is not reported as a network problem. The marker is what makes the
      * .cmd's re-probe after apt-get mean something. */
     if (has(argc, argv, "curl") && has(argc, argv, "--version")) {
-        if (fake_knob_int("wsl.curl.missing", 0) && !exists("curl.installed")) return WSL_FAIL;
+        if (fake_knob_int("wsl.curl.missing", 0) && !fake_exists("curl.installed")) return WSL_FAIL;
         return 0;
     }
 
@@ -559,26 +537,21 @@ int main(int argc, char **argv) {
         for (i = 1; i < argc - 1; i++)
             if (strcmp(argv[i], "-o") == 0) { write_marker("stage2.dest", argv[i + 1]); break; }
         if (rc != 0) return (int)rc;
-        if (serve_stage2(fake_knob_int("wsl.curl.truncated", 0) ? 2000 : 0) != 0) return WSL_FAIL;
+        if (serve_stage2() != 0) return WSL_FAIL;
         return 0;
     }
 
-    /* `-e grep -q PATTERN FILE`. The pattern is the first argv entry after `grep` that does not
-     * start with `-`; the FILE argument is deliberately ignored, since the only thing this fake
-     * can serve is what its own curl arm wrote. The pattern, though, is the .cmd's own -- so a
-     * .cmd looking for the wrong token fails here. */
-    if (has(argc, argv, "grep")) {
-        const char *pat = NULL;
-        int i, seen = 0;
-        for (i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "grep") == 0) { seen = 1; continue; }
-            if (!seen || argv[i][0] == '-') continue;
-            pat = argv[i];
-            break;
-        }
-        if (!pat) return WSL_FAIL;
-        return stage2_contains(pat) ? 0 : 1;
-    }
+    /* THERE IS NO grep ARM ANY MORE (#232). It answered `-e grep -q %SENTINEL% %STAGE2%`, and
+     * both it and stage2_contains() are REMOVED rather than left in place: an unanswered command
+     * falls through to MessageInvalidCommandLine and WSL_FAIL below, so a leftover arm for a
+     * call the .cmd no longer makes is dead code that reads as live. Its one durable idea moved
+     * to fake-powershell.c's digest arm -- the FILE argument was deliberately ignored, because
+     * the only thing this fake can serve is what its own curl arm wrote, while the PATTERN was
+     * the .cmd's own and therefore worth judging. The digest is the new pattern.
+     *
+     * AND THERE IS DELIBERATELY NO sha256sum ARM either. The .cmd asks for the digest through
+     * PowerShell, so under wine that question reaches fake-powershell.exe and never gets here.
+     * A sha256sum arm would be a second, unreached answer to the same question. */
 
     /* THE TWO STAGE-2 CALLS, TOLD APART BY THE ENVIRONMENT VARIABLE (#217). The .cmd runs the
      * same downloaded script twice: once as `-u root -e env CS193V_PROVISION=1 bash <path>`, the
@@ -597,7 +570,7 @@ int main(int argc, char **argv) {
          * restarted the instance would hand this arm a file --terminate has already wiped.
          * Attested on 2026-09-10: `bash: <path>: No such file or directory`, rc 127. */
         const char *script = argv[argc - 1];
-        if (!exists("stage2.sh")) {
+        if (!fake_exists("stage2.sh")) {
             fake_say(stdout, "BashNoSuchFile", script, NULL);
             return 127;
         }

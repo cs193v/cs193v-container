@@ -61,14 +61,32 @@ wine_new() {                          # wine_new [DOWNLOAD_DIR_NAME]
     cp "$PRIVATE/install-cs193v-windows.cmd" "$WINE_DL/"
     cp "$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION" "$WINE_CASE/messages"
     # WHAT THE FAKE SERVES, and it is the real thing rather than a stand-in. fake-wsl's curl arm
-    # copies this to stage2.sh and its grep arm searches that, so the .cmd's sentinel check runs
-    # against install-cs193v.sh's ACTUAL last line. A token invented here instead would make the
-    # check tautological: the fixture would be agreeing with itself.
+    # copies stage2.src to stage2.sh, so the .cmd's digest check runs against install-cs193v.sh's
+    # ACTUAL bytes. A body invented here instead would make the check tautological: the fixture
+    # would be agreeing with itself.
+    #
+    # THE ARGUMENT TRANSFERRED FROM THE SENTINEL TO THE DIGEST, INTACT (#232). It used to read
+    # "against install-cs193v.sh's ACTUAL last line", because what the .cmd checked was a token
+    # there. It now checks a SHA-256, and the reason the real file has to be the thing served is
+    # the same reason it always was -- and it is load-bearing in one more way than before: the
+    # digest beside it is computed from these bytes with real sha256sum, which is what lets
+    # fake-powershell.c judge the .cmd's expectation without implementing SHA-256 in C.
     #
     # There is deliberately no sibling install-cs193v.sh in the download folder any more. Stage
     # one fetches stage two by URL and never looks beside itself, and 25-installer.sh asserts
     # that %HERE%, wslpath and %TEMP% are all gone from the .cmd.
-    cp "$PRIVATE/install-cs193v.sh" "$WINE_CASE/stage2.src"
+    wine_body whole
+    # AND THE .cmd's EXPECTATION, TIER-WIDE RATHER THAN PER-CASE. The .cmd's literal
+    # STAGE2_SHA256 is the digest of the blob raw.githubusercontent.com serves AT THE PINNED TAG,
+    # which the working tree matches only in the moments just after a release -- so without this
+    # every case that reaches the digest check would refuse, and the whole tier would be red on a
+    # true statement about an untrue expectation. Set here and not opted into per case: the tier
+    # tests the MECHANISM, and 25-installer.sh tests the CONSTANT.
+    #
+    # THE WHOLE FILE'S DIGEST, NOT THE SERVED BODY'S. Those are the same number for an ordinary
+    # case and deliberately different for wsl.curl.truncated and for the altered body -- which is
+    # what makes those two cases refusals rather than passes.
+    wine_env CS193V_STAGE2_SHA256 "$(do_sha256 "$PRIVATE/install-cs193v.sh" | awk '{print $1}')"
     WINE_OUT=''; WINE_ERR=''; WINE_RC=''; WINE_ARGV=''; WINE_LNK=''; WINE_DIED=''
     WINE_OUTB=''; WINE_ERRB=''; WINE_RCB=''; WINE_ARGVB=''; WINE_LNKB=''
     WINE_RESUME=''; WINE_RESUMEB=''
@@ -78,6 +96,40 @@ wine_new() {                          # wine_new [DOWNLOAD_DIR_NAME]
 wine_knob() {                         # wine_knob NAME VALUE
     printf '%s\n' "$2" > "$WINE_CASE/$1"
 }
+
+# ─── what the fake's curl arm will serve, and its digest  (#232) ───────────────
+# BUILT HERE AND NOT IN C, which is the whole reason the windows tier needs no SHA-256
+# implementation. fake-wsl.c used to truncate at a byte budget it read from a knob, because a
+# short read and a captive portal were one case: the observable was the same for both, the
+# sentinel on the last line being absent. The .cmd checks a digest now, so "cut short", "the right
+# length with a byte changed" and "something else entirely" are three different things -- and the
+# harness is where real tools exist to make them.
+#
+# THE DIGEST IS WRITTEN FROM THE BYTES THAT WILL BE SERVED, by real sha256sum, and that file is
+# what fake-powershell.c's digest arm judges the .cmd's expectation against. Nothing in C computes
+# or invents it.
+#
+# `altered` IS SAME-LENGTH ON PURPOSE. Without it, a check that compared only the byte COUNT would
+# pass every case in this tier -- the truncated fixture would fail it for the wrong reason and
+# nothing would say so. One character inside the payload constant, which is mid-file and not in
+# any prefix a lazy implementation would sample.
+#
+# AND THE CALLER MUST ASSERT THE ALTERATION TOOK. A sed whose address stops matching is a silent
+# no-op, which here would serve the whole file under the name of a corrupt one and turn a negative
+# case green. win-altered does that comparison; see its own note.
+wine_body() {                         # wine_body whole|truncated|altered
+    case "$1" in
+        whole)     cp "$PRIVATE/install-cs193v.sh" "$WINE_CASE/stage2.src" ;;
+        truncated) head -c 2000 "$PRIVATE/install-cs193v.sh" > "$WINE_CASE/stage2.src" ;;
+        altered)   sed 's/^PAYLOAD_SHA256="./PAYLOAD_SHA256="Z/' \
+                       "$PRIVATE/install-cs193v.sh" > "$WINE_CASE/stage2.src" ;;
+        *)         printf 'wine_body: unknown body %s\n' "$1" >&2; return 1 ;;
+    esac
+    do_sha256 "$WINE_CASE/stage2.src" | awk '{print $1}' > "$WINE_CASE/stage2.sha256"
+}
+
+# The digest of whatever wine_body last prepared, so a case can assert on it.
+wine_body_digest() { cat "$WINE_CASE/stage2.sha256"; }
 
 # ─── the .cmd's OWN ENVIRONMENT, for the staff overrides (#280) ────────────────
 # WHY THIS HAD TO EXIST. wine_run's podman line named two variables and no more, so a case could

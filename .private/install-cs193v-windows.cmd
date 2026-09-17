@@ -48,10 +48,10 @@ setlocal
 :: ---------------------------------------------------------------------------------
 :: THE ONLY THING THIS FILE FETCHES is stage 2, from INSTALLER_URL below:
 ::
-::   https://raw.githubusercontent.com/cs193v/cs193v-container/main/.private/install-cs193v.sh
+::   https://raw.githubusercontent.com/cs193v/cs193v-container/release-0.0.0/.private/install-cs193v.sh
 ::
 :: Reading this file therefore tells you everything that will run on your computer. Stage 2 is
-:: fetched over HTTPS INSIDE the CS193V environment, checked for a sentinel line before it is
+:: fetched over HTTPS INSIDE the CS193V environment, checked against a SHA-256 before it is
 :: run, and left at /var/tmp/install-cs193v.sh in there so you can read it afterwards.
 ::
 :: It used to be a file you had to download YOURSELF and leave next to this one. That is gone:
@@ -230,13 +230,18 @@ set "IMAGE_NAME=Ubuntu-26.04"
 set "LINUX_USER=student"
 
 :: Where stage 2 comes from. These three MUST match install-cs193v.sh's own REPO_OWNER,
-:: REPO_NAME and REPO_BRANCH; 25-installer.sh asserts that they do, because a mismatch would
-:: quietly fetch the wrong course's installer and nothing would notice until it ran. A TA
-:: testing a branch edits REPO_BRANCH here and nothing else.
+:: REPO_NAME and REPO_TAG; 25-installer.sh asserts that they do, because a mismatch would
+:: quietly fetch the wrong course's installer and nothing would notice until it ran.
+::
+:: A TAG, NOT A BRANCH (#232). raw.githubusercontent.com serves whatever ref you name, so this
+:: used to track main and every Windows student got whatever had last been pushed. It is now the
+:: release, and STAGE2_SHA256 below is checked against the bytes that arrive -- which is why this
+:: is no longer the one line a TA edits by hand: the tag and the digest move TOGETHER, and
+:: .private/release.sh is what moves them. Editing this alone gets you a refusal, correctly.
 set "REPO_OWNER=cs193v"
 set "REPO_NAME=cs193v-container"
-set "REPO_BRANCH=main"
-set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%REPO_BRANCH%/.private/install-cs193v.sh"
+set "REPO_TAG=release-0.0.0"
+set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%REPO_TAG%/.private/install-cs193v.sh"
 :: AND ONE WAY TO POINT IT SOMEWHERE ELSE, FOR STAFF (#280). Unset, this changes nothing; set,
 :: it replaces the whole URL, so a by-hand test can serve stage two out of a working tree --
 :: curl inside %DISTRO% takes file:///mnt/c/... and the real download path is still what runs.
@@ -277,10 +282,67 @@ set "STAGE2=/var/tmp/install-cs193v.sh"
 set "XENV="
 if defined CS193V_TARBALL set "XENV=CS193V_TARBALL=%CS193V_TARBALL% "
 
-:: The last line of install-cs193v.sh. A single token ON PURPOSE, so it needs no quoting on
-:: either side of the Windows/Linux boundary. 25-installer.sh pins both halves of the contract:
-:: that the .sh ends with it, and that it occurs there exactly once.
-set "SENTINEL=CS193V-INSTALLER-COMPLETE"
+:: What the downloaded setup script has to hash to (#232).
+::
+:: WHAT THIS REPLACED, and why the replacement is not merely stronger. It used to be SENTINEL, a
+:: token on install-cs193v.sh's LAST line which the download was grepped for: finding it proved
+:: the whole file arrived, because it was last. What it could not prove is that the file was OURS.
+:: A digest proves both, so the token is gone rather than kept beside it -- keeping both would
+:: leave one of them unreachable by any fixture, since no body can fail the token without also
+:: failing the digest.
+::
+:: THE DIGEST OF THE BLOB raw.githubusercontent.com SERVES, which is not automatically the digest
+:: of a file in a checkout: .gitattributes gives install-cs193v.sh `text eol=lf` so the two agree
+:: on every platform, and .private/release.sh hashes the STAGED blob rather than the working copy
+:: for the same reason. See .gitattributes' note on the two published files.
+set "STAGE2_SHA256=43bfba9b94009ae2c151d09b16ca826fadb9a9fe434727aa8cf472148655ded2"
+
+:: AND ONE WAY TO POINT IT SOMEWHERE ELSE, FOR STAFF -- the same shape CS193V_INSTALLER_URL has.
+:: It REPLACES the expected value and never disables the check, so a by-hand test of an edited
+:: bootstrap still has to supply the right number.
+::
+:: `if defined` AND NOT A SECOND `set "STAGE2_SHA256=..."` AT TOP LEVEL, for the reason the URL
+:: override gives: 25-installer.sh and 00-release-gates.sh read this constant with a sed anchored
+:: at `^set "STAGE2_SHA256=`, taking the first match, so a second bare assignment would become
+:: what they compare and what the release gate treats as the pin.
+::
+:: IT ANNOUNCES ITSELF, unlike the URL override, which announces itself by printing the URL it is
+:: about to fetch. This one changes nothing else a student can see, and a check that was quietly
+:: pointed at a different expectation is the kind of thing a transcript has to be able to answer.
+if defined CS193V_STAGE2_SHA256 set "STAGE2_SHA256=%CS193V_STAGE2_SHA256%"
+if defined CS193V_STAGE2_SHA256 echo   *** CS193V_STAGE2_SHA256 is set, so the setup script is checked against it. ***
+
+:: And the question that asks it.
+::
+:: A POWERSHELL PROBE, WHICH IS THIS FILE'S OWN IDIOM for asking something and branching on the
+:: answer -- see %PROBE%, %VMFAILPROBE% and %PSNETWAIT%. Three states, like the getent pair below:
+:: 0 the digests match, 1 they do not, 2 the question could not be asked.
+::
+:: AND 2 REFUSES RATHER THAN CONTINUING, which is the one place this file departs from "a failed
+:: question is not a negative answer". Everywhere else that doctrine spares a student a refusal
+:: they do not deserve; here it would hand root inside the distro a file nothing had checked.
+::
+:: WHY NOT `wsl -e sha256sum` AND A `for /f`. Reading a value back out needs either a capture,
+:: which wine cannot execute at all -- it shells out to a nested CMD.EXE /C that never launches --
+:: or a scratch file on the Windows side, and %TEMP%, %HERE% and wslpath are all refused because
+:: they were the three legs of the route this file used to have before it downloaded anything.
+:: wsl's own output is UTF-16 as well, which is why $env:WSL_UTF8=1 leads every probe here.
+::
+:: IT PRINTS WHAT IT RECEIVED on a mismatch, because the batch side cannot: with no capture there
+:: is no way for it to learn the number. Between the probe's line and the refusal's, a student's
+:: screenshot carries both digests -- which is the difference between staff guessing and staff
+:: knowing, since a cut-short transfer and a mis-cut release land here identically and only the
+:: numbers say which.
+::
+:: THE EXPECTED DIGEST IS SINGLE-QUOTED IN THE STRING, like %DISTRO% in %PROBE%. The fake
+:: powershell the windows tier runs reads it back out of its own command line with quoted_after(),
+:: which finds a single-quoted literal after a spelled-out prefix -- so the fixture judges the
+:: value THIS FILE supplied rather than one the harness invented. No double quotes anywhere in the
+:: string: batch would end the `set` at the first one.
+::
+:: -join ' ' FIRST, because `& $w` yields an ARRAY when the command prints more than one line and
+:: -split on an array does not do what it looks like it does.
+set "PSHASH=$env:WSL_UTF8=1; $w=$env:SystemRoot+'\System32\wsl.exe'; $o=(& $w -d %DISTRO% -u root -e sha256sum %STAGE2%) -join ' '; if ($LASTEXITCODE -ne 0) { exit 2 }; $h=($o -split '\s+')[0]; if ($h -eq '%STAGE2_SHA256%') { exit 0 }; Write-Host ('  received: ' + $h); exit 1"
 
 :: TURNING WSL ON, WHICH IS THE ONE STEP THAT NEEDS AN ADMINISTRATOR -- so it ASKS, rather than
 :: sending the student away to start over as somebody else. One UAC prompt, in the middle of an
@@ -750,8 +812,18 @@ echo   [2/3] The %DISTRO% environment is ready.
 :: boundary re-quotes anything and no pipe is needed -- which matters, because a pipe in this
 :: file aborts the whole script under wine with exit 255.
 ::
-:: It also means the download and the install both run as the student's LINUX user, and
-:: this file runs as the student on the Windows side too -- :isadmin refuses anything else.
+:: WHO ACTUALLY RUNS AS WHAT, because this used to say "the download and the install both run as
+:: the student's LINUX user" and that conflated three separate claims (#232). Separately:
+::
+::   * This file, on the WINDOWS side, runs as the student. :isadmin refuses anything else.
+::   * The download and the FIRST installer pass run as ROOT inside the distro. The download is
+::     `-u root` so that re-running can overwrite a root-owned %STAGE2% from an earlier run, and
+::     the first pass has to be root because it creates the student's account.
+::   * The SECOND pass -- the install a Mac or Linux student sees -- runs as %LINUX_USER%.
+::
+:: So the blast radius of an unverified stage two is root inside the CS193V distro, which reaches
+:: the student's Windows profile through drvfs but not the machine. That is why the digest check
+:: below sits above the FIRST bash call and not merely above the second.
 echo   [3/3] Downloading the setup script and setting up the container inside %DISTRO%.
 echo         %INSTALLER_URL%
 echo.
@@ -809,11 +881,16 @@ if %errorlevel% neq 0 goto downloadfailed
 :: THE CHECK CURL CANNOT DO. `curl -f` catches a 404, and a cut-off transfer against a served
 :: Content-Length, but not a captive portal answering 200 OK with its own login page: the bytes
 :: arrived, they are simply not the installer, and it is bash that would run the HTML.
-:: install-cs193v.sh's own download step carries the same guard for the same reason -- there it
-:: is four files that must exist, here it is the token on that script's last line, which makes
-:: this a completeness check as well as an identity one.
-"%SYS32%\wsl.exe" -d %DISTRO% -u root -e grep -q %SENTINEL% %STAGE2%
-if %errorlevel% neq 0 goto downloadincomplete
+:: install-cs193v.sh's own download step carries the same guard for the same reason -- there it is
+:: a manifest of everything in the tarball, here it is the digest of this one file.
+::
+:: AND IT IS ABOVE BOTH `bash %STAGE2%` LINES, not just the student's. The first of them runs as
+:: ROOT inside the distro, so a check moved between the two would leave root executing code
+:: nothing had verified -- which is exactly what the assertion on this ordering used to miss,
+:: because it anchored on the second call. 25-installer.sh pins all three positions now.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSHASH%"
+if %errorlevel% equ 1 goto digestmismatch
+if %errorlevel% neq 0 goto digestunchecked
 
 :: ---- who is already in this environment decides what may be done to it ------
 :: TWO PROBES, THREE STATES EACH, and the same idiom %PROBE% uses: 0 is yes, 2 is no, and
@@ -1162,14 +1239,34 @@ echo.
 pause
 exit /b 1
 
-:downloadincomplete
+:: THE WORDING OF :downloadincomplete MOVED HERE (#232), rather than being deleted with the
+:: sentinel it belonged to. A cut-short transfer and a wifi sign-in page are still the likeliest
+:: things to reach this refusal, so they are still what it names; what is new is the pair of
+:: digests, which is the only way a screenshot distinguishes those from a mis-cut release.
+:digestmismatch
 echo.
-echo   The setup script downloaded, but it is not the whole file, so setup
-echo   is stopping rather than running part of it.
+echo   The setup script downloaded, but it is not the file this installer
+echo   expects, so setup is stopping rather than running it.
+echo.
+echo   expected: %STAGE2_SHA256%
+echo   The number that actually arrived is printed just above.
 echo.
 echo   That means the transfer was cut short, or something on the network
 echo   answered instead of the real thing - a wifi sign-in page, typically.
-echo   Get properly connected and run this file again.
+echo   It is safe to run this file again. If it keeps happening, tell course staff.
+echo.
+pause
+exit /b 1
+
+:: AND THE THIRD STATE, WHICH IS NOT A NEGATIVE ANSWER BUT STILL REFUSES. The probe could not ask
+:: -- no sha256sum in the distro, or wsl itself failed -- so nothing is known about the file. See
+:: %PSHASH% above for why this is the one question whose failure is not allowed to continue.
+:digestunchecked
+echo.
+echo   The setup script downloaded, but this installer could not check it,
+echo   so setup is stopping rather than running something unverified.
+echo.
+echo   It is safe to run this file again. If it keeps happening, tell course staff.
 echo.
 pause
 exit /b 1

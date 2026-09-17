@@ -154,6 +154,28 @@ static int listed(const char *name) {
     return found;
 }
 
+/* Are two files in the case directory byte-identical? Used by the digest arm below to check that
+ * what the curl arm actually WROTE is the body the harness prepared and hashed. */
+static int same_bytes(const char *a, const char *b) {
+    char pa[1024], pb[1024];
+    unsigned char ba[4096], bb[4096];
+    FILE *fa, *fb;
+    size_t na, nb;
+    int same = 1;
+    fake_path(pa, sizeof pa, a);
+    fake_path(pb, sizeof pb, b);
+    if (!(fa = fopen(pa, "rb"))) return 0;
+    if (!(fb = fopen(pb, "rb"))) { fclose(fa); return 0; }
+    do {
+        na = fread(ba, 1, sizeof ba, fa);
+        nb = fread(bb, 1, sizeof bb, fb);
+        if (na != nb || memcmp(ba, bb, na) != 0) { same = 0; break; }
+    } while (na > 0);
+    fclose(fa);
+    fclose(fb);
+    return same;
+}
+
 int main(int argc, char **argv) {
     fake_log_argv(argc, argv);
 
@@ -312,6 +334,69 @@ int main(int argc, char **argv) {
             return answer("ps.elev.rc", 102);
         fclose(probe);
         return answer("ps.elev.rc", fake_knob_int("win.uac-declined", 0) ? 101 : 0);
+    }
+
+    /* ─── THE STAGE-TWO DIGEST  (#232) ────────────────────────────────────────
+     *
+     * DISPATCHED ABOVE THE WSL_UTF8 ARM, AND THAT IS A CORRECTNESS REQUIREMENT. Every probe in
+     * the .cmd opens with `$env:WSL_UTF8=1`, including this one -- so the distro-list arm below
+     * would answer the digest question first and return `listed(distro) ? 0 : 1`, i.e. "the
+     * digests match" on every case where the distro exists. That is the third instance of the
+     * rule this file states twice already: two commands sharing a substring must be dispatched on
+     * the one that DISTINGUISHES them. `sha256sum` appears in no other probe.
+     *
+     * NO SHA-256 IN THIS FILE, AND THAT IS THE POINT. The harness writes the body it wants served
+     * as stage2.src and writes its digest beside it, with real sha256sum -- so the number this
+     * arm judges by was computed by coreutils and not by ~130 lines of hand-rolled C in a mingw
+     * PE with no -Werror. What is compared is the expectation THE .cmd SUPPLIED against that
+     * number, which is the same shape as the grep arm this replaces: fake-wsl.c ignored the FILE
+     * it was handed and judged the PATTERN, because the pattern was the installer's own.
+     *
+     * AND IT IS NOT TAUTOLOGICAL, which is the thing to check before believing any of that. A
+     * .cmd carrying a wrong constant fails here; one whose batch expansion of %STAGE2_SHA256%
+     * went missing fails here; a truncated or byte-altered body fails here, because the harness
+     * hashed the body it served rather than the body it wished it had served. What this cannot
+     * catch is a probe that hashes the wrong PATH -- the fakes ignore paths by design, on both
+     * sides -- so 25-installer.sh asserts that statically instead.
+     *
+     * THE EXPECTATION COMES OUT OF THE COMMAND LINE, with quoted_after(), for the reason that
+     * function's own header gives: a knob would mean the fixture deciding the answer and the
+     * .cmd's own value never being consulted.
+     *
+     * 2 AND NOT 1 WHEN THERE IS NOTHING TO HASH. The .cmd distinguishes "the digests differ" from
+     * "the question could not be asked" and refuses differently for each, so a missing download
+     * has to produce the second -- which is also what a real `wsl -e sha256sum` on an absent file
+     * would do.
+     *
+     * exit 120 FOR A PROBE THIS FILE CANNOT READ, per the header: a fake that guessed would
+     * report a harness defect as a student-visible answer. */
+    if (mentions(argc, argv, "sha256sum")) {
+        char want[128], truth[128];
+        if (!fake_exists("stage2.sh")) return 2;
+        if (!quoted_after(argc, argv, "-eq '", want, sizeof want)) {
+            fprintf(stderr, "win-fake: the digest probe carries no single-quoted expectation\n");
+            return 120;
+        }
+        if (!fake_knob("stage2.sha256", truth, sizeof truth) || !truth[0]) {
+            fprintf(stderr, "win-fake: no stage2.sha256 beside stage2.src in the case\n");
+            return 120;
+        }
+        if (same_bytes("stage2.sh", "stage2.src") && strcmp(want, truth) == 0) return 0;
+        /* AND IT ECHOES WHAT ARRIVED, IN THE .cmd's OWN WORDS. The real probe prints the digest it
+         * computed, because the batch side has no way to learn it -- so a fixture that returned
+         * only the code would leave the refusal naming one number where the file promises two, and
+         * the case asserting on that would have nothing to find.
+         *
+         * THE LABEL IS PARSED OUT OF THE COMMAND, not spelled here, which is the same discipline
+         * the expectation above follows and win-fake.h's "no prose lives in these programs" asks
+         * for. `Write-Host ('  received: ' + $h)` puts the wording in a single-quoted literal, so
+         * quoted_after() reads it back -- and a .cmd that stopped printing it at all yields no
+         * label, this prints nothing, and the assertion goes red rather than passing on a fixture
+         * that had invented the sentence. */
+        char label[128];
+        if (quoted_after(argc, argv, "Write-Host ('", label, sizeof label))
+            printf("%s%s\n", label, truth);
+        return 1;
     }
 
     /* Does the CS193V distro exist? WSL_UTF8 is the marker because batch cannot read wsl.exe's

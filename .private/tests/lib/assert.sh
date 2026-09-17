@@ -1278,107 +1278,24 @@ new_tmpdir() {
     printf '%s' "$d"
 }
 
-# ─── what a student actually unpacks ───────────────────────────────────────────
+# ─── what a student actually unpacks ──────────────────────────────────────────
 # export_tree DST      -> the file set a student downloads, materialised at DST.
 # would_ship_paths     -> the same, plus untracked files, as a sorted list of names.
 #
-# THIS IS `git archive`, NOT A COPY WITH EXCLUSIONS, and that is the whole point. GitHub builds
-# its tarballs with `git archive`, which honours .gitattributes' export-ignore -- so the only
-# fixture that cannot disagree with what a student receives is one git builds. The hand-written
-# exclusion list this replaced had already drifted: it carried CLAUDE.md, which is export-ignored
-# and has never been in the archive, and nothing noticed (#115).
+# FACTORED OUT TO .private/lib/export-tree.sh (#232), because two of its three callers are not
+# tests: make-tarball.sh wanted exactly this one function out of a whole harness and paid for it
+# with CS193V_STANDALONE=1 and a `trap - EXIT`, and release.sh would have paid the same. Every
+# word of reasoning that used to sit here -- why this is `git archive` rather than a copy with
+# exclusions, why it stages the working tree rather than HEAD, why one function has two modes,
+# and the five things that are easy to get wrong -- moved with the code.
 #
-# It also subsumes three things that list did by hand. .git, projects/* and .config/tunnel-* are
-# all git-IGNORED, so the archive omits them by construction and the "exclude the directory, put
-# its one tracked file back" dance goes away with them.
-#
-# FROM THE WORKING TREE, NOT HEAD. `git archive HEAD` would test committed code, so a red-first
-# loop -- edit the launcher, run the suite, watch it fail -- would silently run the OLD launcher
-# until you committed. Verified: an UNCOMMITTED .gitattributes edit is honoured here.
-#
-# ─── the two modes, and why they share one function ───────────────────────────
-#
-# `add -u` is the FIXTURE. An untracked file never reaches GitHub's archive, so putting one in a
-# fixture would make it lie about what ships. Seeded from the REAL index rather than HEAD so a
-# file you have `git add`ed is included.
-#
-# `add -A` is the GATE's second opinion: the same tree with untracked files folded in, i.e. what
-# would ship if everything visible were committed. 11-export.sh subtracts the first from the
-# second, and the difference is exactly the set of untracked paths that WOULD reach a student.
-#
-# ONE FUNCTION, TWO MODES, rather than two functions: the git plumbing below has three separate
-# ways to be silently wrong (see the list) and two copies of it would eventually disagree about
-# one of them -- which would make the gate's subtraction report a difference that is an artefact
-# of the staging rather than a fact about the tree.
-#
-# THE SEED IS THE SAME FOR BOTH, deliberately, and that is why the gate checks ONE direction.
-# With a HEAD seed for `add -A` the subtraction could invert -- a force-added ignored file is in
-# the index but invisible to `add -A` -- so there would be a second, exotic difference to explain.
-# Seeding both from the real index makes that direction structurally empty, so an assertion on it
-# could not fail and has no business existing (#79).
-#
-# Four things that are easy to get wrong here, each measured rather than reasoned about:
-#
-#   * PIPEFAIL IS LOAD-BEARING. A failing `git archive` piped into `tar xf -` leaves rc 0 and an
-#     empty destination -- measured, and the same trap install-cs193v.sh:1063 documents for its
-#     own download. In a subshell, so it stays local to this one pipeline.
-#   * `cd "$REPO"` FIRST, then use --git-path's answer verbatim. It is relative to the current
-#     directory in an ordinary checkout (.git/index) and ABSOLUTE inside a linked worktree
-#     (/.../.git/worktrees/NAME/index) -- both measured -- so "$REPO/$(...)" is wrong in a
-#     worktree. The alternates path is made absolute for the same reason.
-#   * THE ALTERNATES PATH IS READ BEFORE GIT_OBJECT_DIRECTORY IS EXPORTED. `--git-path objects`
-#     answers with GIT_OBJECT_DIRECTORY when it is set, so asking afterwards would point the
-#     alternates at themselves and lose every object the repo already has.
-#   * ANYTHING THAT READS THE REAL INDEX must run with GIT_INDEX_FILE unset, or it reads the
-#     empty temp one and the archive comes out empty. Copying the index file rather than
-#     rebuilding it with plumbing avoids that class entirely.
-#
-# core.excludesFile=/dev/null on the `add -A` arm: it is the only arm that consults ignore rules
-# for untracked paths, and a developer's GLOBAL excludes would otherwise shrink the gate's second
-# opinion and make it more permissive on their machine than on anyone else's.
-#
-# The temp index and object store are a throwaway directory, so nothing here writes to the
-# developer's repository -- verified: .git/objects and .git/index are byte-unchanged, and the new
-# blobs land in $work/odb. It is named with the suite's pid and swept by shim_sweep_stale,
-# because a trap does not run when the process is KILLED and that is ordinary here.
-_stage_tree() {                       # _stage_tree u|A DST -> 0 on success
-    local mode="$1" d="$2" work rc=0
-    work="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-exp.$$.XXXXXX")" || return 1
-    mkdir -p "$d" "$work/odb" || { rm -rf "$work"; return 1; }
-    (
-        cd "$REPO" || exit 1
-        alt="$(git rev-parse --git-path objects)" || exit 1
-        case "$alt" in /*) ;; *) alt="$(pwd -P)/$alt" ;; esac
-        cp "$(git rev-parse --git-path index)" "$work/index" || exit 1
-        export GIT_INDEX_FILE="$work/index" \
-               GIT_OBJECT_DIRECTORY="$work/odb" \
-               GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt"
-        case "$mode" in
-            u) git add -u || exit 1 ;;
-            A) git -c core.excludesFile=/dev/null add -A . || exit 1 ;;
-            *) exit 1 ;;
-        esac
-        tree="$(git write-tree)" || exit 1
-        set -o pipefail
-        git archive "$tree" | ( cd "$d" && tar xf - )
-    ) || rc=1
-    rm -rf "$work"
-    return "$rc"
+# SOURCED UNCONDITIONALLY, for shared.sh's reason above: absent, it leaves export_tree undefined
+# and the three fixture call sites fail as `command not found` somewhere else entirely.
+# shellcheck source=../../lib/export-tree.sh
+. "$PRIVATE/lib/export-tree.sh" || {
+    printf 'assert.sh: cannot read %s\n' "$PRIVATE/lib/export-tree.sh" >&2
+    exit 1
 }
-
-# The listing form, so an assertion can be an equality on names rather than a walk of a
-# materialised copy. Same staging, so a listing and a fixture can never disagree.
-_stage_paths() {                      # _stage_paths u|A -> one path per line, LC_ALL=C sorted
-    local d rc=0
-    d="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-exp.$$.XXXXXX")" || return 1
-    _stage_tree "$1" "$d" || rc=1
-    [ "$rc" = 0 ] && ( cd "$d" && find . -type f | sed 's|^\./||' | LC_ALL=C sort )
-    rm -rf "$d"
-    return "$rc"
-}
-
-export_tree()      { _stage_tree  u "$1"; }
-would_ship_paths() { _stage_paths A; }
 
 # THE THREE FIXTURE-MAKING CALL SITES all use export_tree: repo_copy in lib/podman-shim.sh, the
 # fake GitHub archive in 25-installer.sh, and the §2.7 second-copy group in 80-launcher-live.sh.

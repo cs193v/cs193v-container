@@ -36,7 +36,7 @@ assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 # ...and the URL the WINDOWS installer fetches stage two from, ACTUALLY FETCHED.
 #
 # THIS IS THE ONLY TEST IN THE SUITE THAT CAN CATCH A WRONG URL. install-cs193v-windows.cmd
-# carries its own REPO_OWNER/REPO_NAME/REPO_BRANCH and composes a raw.githubusercontent.com URL
+# carries its own REPO_OWNER/REPO_NAME/REPO_TAG and composes a raw.githubusercontent.com URL
 # from them; 25-installer.sh checks that those three agree with the .sh's and that the result
 # needs no quoting, and the windows tier drives the whole download against a fake with
 # --network=none. None of that can notice that the URL is a 404 -- a typo in the host, a renamed
@@ -47,32 +47,36 @@ assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 # publication rather than on code, so it goes stale on someone else's schedule and a failure
 # here would be unactionable noise in the everyday suite.
 #
-# DELIBERATELY WEAK, AND NOTHING BELOW LOOKS AT THE WORKING TREE. This gate answers one question
-# -- "is something installer-shaped at that URL" -- and stops there. It used to also assert that
-# the URL served THIS TREE's bytes, and that the published copy carried the sentinel. Both had to
-# go, and the reason is worth keeping because the second version of this file will be tempted by
-# them again:
+# IT USED TO BE DELIBERATELY WEAK, AND #232 MADE ONE HALF STRICT AGAIN. This gate answered one
+# question -- "is something installer-shaped at that URL" -- because two stronger checks had been
+# removed from it, and the reasons are worth keeping straight: one of them has lapsed and the
+# other has not.
 #
-#   * The bytes comparison was red for anyone with an uncommitted edit to install-cs193v.sh, and
-#     could only be made green by committing AND pushing to the student branch. That is the exact
-#     failure §6 warns about -- "failing for everybody with no change to blame" -- committed
-#     inside the tier that was supposed to be immune to it. A red you can only clear by
-#     publishing is not a test of the code.
-#   * The sentinel check could not catch the thing it was aimed at. The .cmd and the .sh are
-#     published by the SAME PUSH of the SAME BRANCH, so they cannot disagree about the token in
-#     the repo. The one way they really can diverge is the course website's hand-uploaded .cmd
-#     going stale against raw's .sh -- and this suite does not know the website's URL, so no
-#     assertion here can see it. That is a line in README's release list, not a test.
+#   * THE BYTES COMPARISON, WHICH IS BACK IN A FORM THAT CANNOT MISFIRE. It used to compare the
+#     URL's bytes against the WORKING TREE, which was red for anyone with an uncommitted edit to
+#     install-cs193v.sh and clearable only by committing AND pushing -- "failing for everybody
+#     with no change to blame", inside the tier that was supposed to be immune to it. What the
+#     URL serves is now frozen at a TAG, and what it is compared against is the .cmd's own
+#     STAGE2_SHA256 rather than a file on disk, so neither side moves when anybody edits
+#     anything. It goes red for one thing only: a release whose two published files were cut from
+#     different trees. See installer:stage2-url-hashes-to-the-pin below.
+#   * THE SENTINEL CHECK, WHICH IS GONE FOR GOOD along with the sentinel itself (#232). It could
+#     not catch what it was aimed at even then: the .cmd and the .sh travelled in the same commit,
+#     so they could not disagree about the token in the repo, and the one way they really could
+#     diverge -- a hand-uploaded .cmd on the website going stale -- is at a URL this suite does
+#     not know. The digest above closes the repo-side half of that properly; the website half is
+#     still a line in README's release list rather than a test, and still cannot be otherwise.
 #
-# THE STRICT HALF IS ALREADY COVERED, OFFLINE, AGAINST THE WORKING TREE, which is why weakening
-# this costs nothing:
+# AND THE OFFLINE HALF IS STILL WHERE THE EVERYDAY COVERAGE IS:
 #
-#   * `--tier windows` drives the whole download -> sentinel -> bash sequence against the tree as
-#     it stands. lib/wine.sh copies install-cs193v.sh in as stage2.src and fake-wsl.c's curl arm
-#     serves it, so an edit to that script is exercised by the next run rather than by the next
-#     push. Both directions: win-ok:* on a full body, win-portal on a cut-short one.
-#   * 25-installer.sh asserts the contract a developer can actually act on -- that the token the
-#     .cmd greps for is the .sh's last line and occurs there exactly once.
+#   * `--tier windows` drives the whole download -> digest -> bash sequence against the tree as it
+#     stands. lib/wine.sh prepares the body install-cs193v.sh really is and writes its digest
+#     beside it, so an edit to that script is exercised by the next run rather than by the next
+#     push. Three directions now: win-ok:* on a whole body, win-portal on a cut-short one, and
+#     win-altered on one of the right length with a byte changed.
+#   * 25-installer.sh asserts the contract a developer can act on -- the digest's shape, that the
+#     probe references it, and that the check sits above the FIRST of the two `bash` calls rather
+#     than the second.
 #
 # The .cmd is parsed rather than the URL retyped, or this would assert that a constant equals
 # itself. \r is stripped first: the file is CRLF, and a trailing carriage return in a URL is a
@@ -82,17 +86,33 @@ cget() { sed 's/\r$//' "$cmdfile" | sed -n "s/^set \"$1=\(.*\)\"\$/\1/p" | head 
 stage2_url="$(cget INSTALLER_URL \
               | sed -e "s|%REPO_OWNER%|$(cget REPO_OWNER)|" \
                     -e "s|%REPO_NAME%|$(cget REPO_NAME)|" \
-                    -e "s|%REPO_BRANCH%|$(cget REPO_BRANCH)|")"
+                    -e "s|%REPO_TAG%|$(cget REPO_TAG)|")"
 record "installer:stage2-url" "$stage2_url"
+
+# IS THE PIN PUBLISHED AT ALL? Probed before anything is fetched, and a missing tag is a NAMED
+# SKIP with the remedy in it rather than three reds (#232). Forgetting `git push origin <tag>` is
+# a routine mistake with a one-line fix, and raw.githubusercontent.com answers an unpublished tag
+# with a 404 -- indistinguishable, from the failure message, from a typo in the URL this gate
+# exists to catch. §9 probes the same thing the same way for the same reason.
+#
+# ON origin AND NOT LOCALLY, because it is the published bytes this gate is about: a tag that
+# exists only in a TA's repository serves nothing to a student.
+stage2_tag="$(cget REPO_TAG)"
+stage2_pushed="$(git ls-remote --tags origin "refs/tags/$stage2_tag" 2>/dev/null | awk '{print $1}' | head -1)"
 rel_tmp="$(new_tmpdir)"
-if curl -fsS --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.err"; then
+if [ -z "$stage2_pushed" ]; then
+    stage2_why="$stage2_tag is not on origin -- push the tag, then re-run --release"
+    skip "installer:stage2-url-is-fetchable"                "$stage2_why"
+    skip "installer:stage2-url-serves-a-shell-script"       "$stage2_why"
+    skip "installer:stage2-url-serves-the-course-installer" "$stage2_why"
+elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.err"; then
     pass "installer:stage2-url-is-fetchable"
     record "installer:stage2-url-bytes" "$(wc -c < "$rel_tmp/stage2.sh")"
 
     # `curl -f` has already done most of the work: measured, it exits 22 for a wrong owner, a
     # wrong repo, a wrong branch AND a wrong path, so the assertion above covers the whole typo
     # class on its own. What it cannot see is a 200 carrying something else, which is the shape a
-    # captive portal or an intercepting proxy has -- the same failure the .cmd's own sentinel
+    # captive portal or an intercepting proxy has -- the same failure the .cmd's own digest
     # check exists to refuse at run time, here caught one layer earlier.
     #
     # `bash -n` and not a token search, on purpose. It asks "is this a shell script at all",
@@ -109,15 +129,43 @@ if curl -fsS --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.er
     # keeps it honest. Both names are load-bearing in the .sh and pinned by other assertions, so
     # neither can be renamed quietly.
     #
-    # REPO_BRANCH RATHER THAN WSL_DISTRO SINCE #221, and it is a replacement rather than a
-    # retarget: WSL_DISTRO has one reader, setup_wslconf, so it went with the logic into
-    # course-install.sh -- which never appears at this URL, because it travels in the tarball.
-    # REPO_BRANCH is the second name the bootstrap must carry, for the same reason REPO_OWNER is:
-    # they are the coordinates this file exists to fetch from, and 25-installer.sh asserts the
-    # .cmd agrees with all three.
+    # REPO_TAG RATHER THAN WSL_DISTRO SINCE #221, AND RATHER THAN REPO_BRANCH SINCE #232. The
+    # first was a replacement: WSL_DISTRO has one reader, setup_wslconf, so it went with the logic
+    # into course-install.sh -- which never appears at this URL, because it travels in the tarball.
+    # The second is a rename. REPO_TAG is the second name the bootstrap must carry, for the same
+    # reason REPO_OWNER is: they are the coordinates this file exists to fetch from, and
+    # 25-installer.sh asserts the .cmd agrees with all three.
     assert_ok "installer:stage2-url-serves-the-course-installer" \
               sh -c "grep -q '^REPO_OWNER=' '$rel_tmp/stage2.sh' \
-                     && grep -q '^REPO_BRANCH=' '$rel_tmp/stage2.sh'"
+                     && grep -q '^REPO_TAG=' '$rel_tmp/stage2.sh'"
+
+    # ─── AND ITS BYTES HASH TO WHAT THE .cmd EXPECTS  (#232) ──────────────────
+    # THE ONE CHECK ON THE PAIR AGAINST WHAT IS ACTUALLY PUBLISHED, and the only place it can be
+    # made. 25-installer.sh pins the constant's SHAPE and cannot do more: the value names the
+    # digest of the blob at the pinned tag, so a default-tier comparison against the working tree
+    # would be red from the first commit after a release until the next one.
+    #
+    # AND THE OBJECTION THAT REMOVED THE OLD BYTES COMPARISON DOES NOT APPLY. §1's header records
+    # why the previous version of this gate had to go -- it compared the URL's bytes against the
+    # working tree, which was red for anyone with an uncommitted edit and clearable only by
+    # pushing. Under a pinned tag the served bytes are frozen at the release, so an uncommitted
+    # edit moves neither side. What this can still go red for is a real defect: a release whose
+    # .cmd and .sh were cut from different trees.
+    #
+    # SHAPE FIRST, WHICH IS pkgsha:the-pin-is-the-published-digest's OWN RULE, learned twice: an
+    # unanswered fetch would leave an empty string to compare against an empty pin and pass
+    # forever.
+    cmd_pin="$(cget STAGE2_SHA256)"
+    if printf '%s' "$cmd_pin" | grep -qE '^[0-9a-f]{64}$'; then
+        pass "installer:the-stage2-pin-is-a-digest"
+        record "installer:stage2-url-digest" "$(do_sha256 "$rel_tmp/stage2.sh" | awk '{print $1}')"
+        assert_eq "installer:stage2-url-hashes-to-the-pin" "$cmd_pin" \
+                  "$(do_sha256 "$rel_tmp/stage2.sh" | awk '{print $1}')"
+    else
+        fail "installer:the-stage2-pin-is-a-digest" \
+             "install-cs193v-windows.cmd's STAGE2_SHA256 is not 64 lowercase hex: '$cmd_pin'"
+        skip "installer:stage2-url-hashes-to-the-pin" "the pin is not a digest, so there is nothing to compare"
+    fi
 else
     fail "installer:stage2-url-is-fetchable" \
          "the Windows installer would fetch stage two from:
@@ -413,39 +461,60 @@ assert_eq "setup-git:CS193V_GH_SANDBOX-is-not-pinned" "" "$(sgval CS193V_GH_SAND
 # about. So this is the assertion that closes the loop, and it belongs in the tier that is
 # already allowed to reach the network.
 #
-# AGAINST THE REMOTE TIP, NOT THE WORKING TREE, and gated on the two being the same commit. §1's
-# header sets out why: a red you can only clear by publishing is not a test of the code. So an
-# unpushed tree SKIPS here rather than failing, and the skip says which commit to push.
+# AGAINST THE TAG, ON BOTH SIDES (#232). This used to compare `git archive HEAD` against the
+# archive of refs/heads/main, gated on HEAD and the remote tip being the same commit -- because
+# §1's header is right that a red you can only clear by publishing is not a test of the code, and
+# an unpushed tree had to skip. Under a pinned tag that gate is both wrong and unnecessary: HEAD is
+# normally AHEAD of the release, so the old comparison would have reddened on any exported-file
+# addition after a release -- which is precisely the change this gate exists to catch, so it could
+# not have been dismissed as noise. Comparing the tag's archive against the tag's remote archive
+# asks §9's actual question, and asks it whether or not HEAD has moved since.
 #
-# `git ls-remote` rather than a local origin/main, which can be arbitrarily stale -- a stale ref
-# that happens to equal HEAD would send this into comparing HEAD's archive against a tarball
-# built from a newer commit, and fail for a reason that is not a fault.
+# AND EVERY SKIP HERE NAMES ITS REMEDY, which is the rule the new release gates share. Forgetting
+# to push the tag is a routine mistake with a one-line fix, and four assertions going red would
+# read as "the new work is broken" rather than as "the tag is not pushed yet". So publication is
+# PROBED first and a missing tag is a named skip that says what to do -- never a failure. A tag
+# that IS published and whose archive disagrees is a real defect and fails loudly.
+#
+# `git ls-remote` rather than a local refs/tags/, which can be arbitrarily stale: a tag fetched
+# before it was moved would send this into comparing against an archive nobody can fetch.
 #
 # PARSED OUT OF THE INSTALLER, never retyped, for §1's reason: retyping asserts that a constant
 # equals itself. This is the URL a student's installer really fetches.
 iget() { sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$PRIVATE/install-cs193v.sh" | head -1; }
-rel_owner="$(iget REPO_OWNER)"; rel_name="$(iget REPO_NAME)"; rel_branch="$(iget REPO_BRANCH)"
-rel_tarball="https://github.com/$rel_owner/$rel_name/archive/refs/heads/$rel_branch.tar.gz"
+rel_owner="$(iget REPO_OWNER)"; rel_name="$(iget REPO_NAME)"; rel_tag="$(iget REPO_TAG)"
+rel_tarball="https://github.com/$rel_owner/$rel_name/archive/$rel_tag.tar.gz"
 record "export:tarball-url" "$rel_tarball"
 
-if [ -z "$rel_owner" ] || [ -z "$rel_name" ] || [ -z "$rel_branch" ]; then
-    fail "export:tarball-url-was-parsed" "could not read REPO_OWNER/NAME/BRANCH from the installer"
+# THE SAME NAMES IT SKIPS AND PASSES UNDER. A skip that announces a name the passing path never
+# emits is a name nobody can diff two runs on -- so all four go out together on every path,
+# export:local-archive-is-listable included. That one used to appear only on failure.
+# PROBED ONCE, ABOVE BOTH SECTIONS THAT NEED THE ANSWER. §10 asks the same question, and two
+# `git ls-remote` calls could disagree if a tag were pushed between them -- which would leave one
+# section skipping and the other comparing against an archive that had only just appeared.
+rel_pushed="$(git ls-remote --tags origin "refs/tags/$rel_tag" 2>/dev/null | awk '{print $1}' | head -1)"
+rel_here="$(git rev-parse -q --verify "refs/tags/$rel_tag^{commit}" 2>/dev/null)"
+record "export:the-pinned-tag-is-published" "$( [ -n "$rel_pushed" ] && printf 'yes' || printf 'no' )"
+
+rel_skip_all() {                      # rel_skip_all WHY -> skip every §9 assertion, with a reason
+    skip "export:tarball-is-fetchable"         "$1"
+    skip "export:local-archive-is-listable"    "$1"
+    skip "export:github-ships-nothing-extra"   "$1"
+    skip "export:github-ships-nothing-missing" "$1"
+}
+
+if [ -z "$rel_owner" ] || [ -z "$rel_name" ] || [ -z "$rel_tag" ]; then
+    fail "export:tarball-url-was-parsed" "could not read REPO_OWNER/NAME/TAG from the installer"
+    rel_skip_all "the tarball URL could not be parsed out of the installer"
 else
     pass "export:tarball-url-was-parsed"
-    remote_tip="$(git ls-remote origin "refs/heads/$rel_branch" 2>/dev/null | awk '{print $1}' | head -1)"
-    local_tip="$(git rev-parse HEAD 2>/dev/null)"
-    # THE SAME NAMES IT SKIPS AND PASSES UNDER. A skip that announces a name the passing path
-    # never emits is a name nobody can diff two runs on.
-    if [ -z "$remote_tip" ]; then
-        skip "export:github-ships-nothing-extra"   "could not reach origin to read refs/heads/$rel_branch"
-        skip "export:github-ships-nothing-missing" "could not reach origin to read refs/heads/$rel_branch"
-    elif [ "$remote_tip" != "$local_tip" ]; then
-        rel_why="HEAD is $(printf '%.8s' "$local_tip") and origin/$rel_branch is $(printf '%.8s' "$remote_tip") -- push first"
-        skip "export:github-ships-nothing-extra"   "$rel_why"
-        skip "export:github-ships-nothing-missing" "$rel_why"
+    if [ -z "$rel_pushed" ]; then
+        rel_skip_all "$rel_tag is not on origin -- push the tag, then re-run --release"
+    elif [ -z "$rel_here" ]; then
+        rel_skip_all "$rel_tag is not present locally -- run \`git fetch --tags\`, then re-run --release"
     else
         exp_tmp="$(new_tmpdir)"
-        # --strip-components cannot be used with -t, so the leading NAME-BRANCH/ component comes
+        # --strip-components cannot be used with -t, so the leading NAME-TAG/ component comes
         # off with sed. Directory entries are dropped: git's tar emits them and a listing of
         # names is what both sides can agree on.
         if ( set -o pipefail
@@ -454,22 +523,92 @@ else
                | LC_ALL=C sort > "$exp_tmp/remote" ); then
             pass "export:tarball-is-fetchable"
             # pipefail here too: a git archive that dies leaves tar exiting 0 and an EMPTY
-            # local listing, which turns both assertions below into a diff of the whole
+            # local listing, which would turn both assertions below into a diff of the whole
             # archive against nothing -- a loud failure for entirely the wrong reason.
-            ( set -o pipefail
-              git archive HEAD | tar -t | grep -v '/$' | LC_ALL=C sort > "$exp_tmp/local" ) \
-                || fail "export:local-archive-is-listable" "git archive HEAD could not be listed"
-            record "export:tarball-file-count" "$(grep -c '' "$exp_tmp/remote" | do_tr -d ' ')"
-            # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about how
-            # to order punctuation and comm then mis-pairs silently, reporting differences that
-            # are not there -- measured on this listing.
-            only_remote="$(LC_ALL=C comm -13 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
-            only_local="$(LC_ALL=C comm -23 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
-            assert_eq "export:github-ships-nothing-extra"   "" "$only_remote"
-            assert_eq "export:github-ships-nothing-missing" "" "$only_local"
+            if ( set -o pipefail
+                 git archive "$rel_tag" | tar -t | grep -v '/$' | LC_ALL=C sort > "$exp_tmp/local" ); then
+                pass "export:local-archive-is-listable"
+                record "export:tarball-file-count" "$(grep -c '' "$exp_tmp/remote" | do_tr -d ' ')"
+                # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about
+                # how to order punctuation and comm then mis-pairs silently, reporting differences
+                # that are not there -- measured on this listing.
+                only_remote="$(LC_ALL=C comm -13 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+                only_local="$(LC_ALL=C comm -23 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+                assert_eq "export:github-ships-nothing-extra"   "" "$only_remote"
+                assert_eq "export:github-ships-nothing-missing" "" "$only_local"
+            else
+                fail "export:local-archive-is-listable" "git archive $rel_tag could not be listed"
+                skip "export:github-ships-nothing-extra"   "the local archive of $rel_tag could not be listed"
+                skip "export:github-ships-nothing-missing" "the local archive of $rel_tag could not be listed"
+            fi
         else
             fail "export:tarball-is-fetchable" "could not download $rel_tarball"
+            skip "export:local-archive-is-listable"    "the published archive could not be downloaded"
+            skip "export:github-ships-nothing-extra"   "the published archive could not be downloaded"
+            skip "export:github-ships-nothing-missing" "the published archive could not be downloaded"
         fi
         rm -rf "$exp_tmp"
     fi
+fi
+
+# ─── 10. the payload digest a student's bootstrap will insist on  (#232) ───────
+# END TO END, AND WITH THE PRODUCT'S OWN CODE. This fetches the archive at the pinned tag,
+# extracts it the way install-cs193v.sh does, and hands it to that same script's
+# --dev-manifest-hash -- so what is compared is what a student's machine will compute, not a
+# second implementation of the format that could agree with the constant while both were wrong.
+#
+# THIS IS THE ASSERTION THAT WOULD HAVE CAUGHT A MIS-CUT RELEASE, and there is no local
+# substitute: 25-installer.sh pins the constant's shape, 22-manifest-fuzz.sh pins the walk, and
+# the frozen vectors pin the format -- none of them knows what is at the tag.
+#
+# --strip-components=1, THE SAME AS THE BOOTSTRAP'S. The archive wraps everything in one
+# <repo>-<tag>/ directory, and a manifest computed with that component still on every path would
+# disagree with the released constant on every entry.
+#
+# NAMED SKIPS, NOT FAILURES, when the tag is not published yet -- §9's header gives the reason.
+# ─── FIRST, TAG DISCIPLINE, BECAUSE THE STALENESS CHECK DEPENDS ON IT ─────────
+# WHY A STRAY TAG MATTERS. course-install.sh decides whether a student is behind by reading
+# tags.atom, keeping every `release-` entry, and taking the NUMERIC maximum. A tag like
+# `release-test` or `release-2.0.0-rc1` is either ignored or -- if the reader were ever loosened --
+# becomes "the newest release" for every student at once. The reader anchors its patterns so that
+# today it ignores them; this gate is the other half, so that the repository does not accumulate
+# names the reader has to be careful about in the first place.
+#
+# ASKED OF origin, NOT OF THE LOCAL TAG LIST, because tags.atom is built from what is PUBLISHED --
+# a local experiment nobody pushed cannot reach a student, and reddening on one would be noise.
+rel_tags="$(git ls-remote --tags origin 'refs/tags/release-*' 2>/dev/null \
+            | sed -n 's|.*refs/tags/||p' | sed 's|\^{}$||' | LC_ALL=C sort -u)"
+# THE EXIT STATUS, NOT THE OUTPUT. A repository with no tags at all answers with nothing and
+# exits 0 -- which is a legitimate state, and one this gate should PASS on rather than skip.
+# Reading emptiness as unreachability reported "could not reach origin" on a reachable origin.
+if ! git ls-remote --tags origin >/dev/null 2>&1; then
+    skip "export:every-release-tag-is-a-version" "could not reach origin to list its tags"
+else
+    assert_eq "export:every-release-tag-is-a-version" "" \
+              "$(printf '%s\n' "$rel_tags" | grep -vE '^(release-[0-9]+\.[0-9]+\.[0-9]+)?$' \
+                 | do_tr '\n' ' ' | sed 's/ *$//')"
+fi
+
+pay_pin="$(iget PAYLOAD_SHA256)"
+if [ -z "$rel_pushed" ]; then
+    skip "payload:the-published-tree-matches-the-pin" \
+         "$rel_tag is not on origin -- push the tag, then re-run --release"
+elif ! printf '%s' "$pay_pin" | grep -qE '^[0-9a-f]{64}$'; then
+    fail "payload:the-published-tree-matches-the-pin" \
+         "install-cs193v.sh's PAYLOAD_SHA256 is not 64 lowercase hex: '$pay_pin'"
+else
+    pay_tmp="$(new_tmpdir)"
+    mkdir -p "$pay_tmp/tree"
+    if ( set -o pipefail
+         curl -fsSL --retry 3 "$rel_tarball" \
+           | tar xzf - --strip-components=1 -C "$pay_tmp/tree" ); then
+        pass "payload:the-published-archive-unpacks"
+        pay_got="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$pay_tmp/tree" 2>/dev/null)"
+        record "payload:the-published-manifest" "$pay_got"
+        assert_eq "payload:the-published-tree-matches-the-pin" "$pay_pin" "$pay_got"
+    else
+        fail "payload:the-published-archive-unpacks" "could not fetch and unpack $rel_tarball"
+        skip "payload:the-published-tree-matches-the-pin" "the published archive could not be unpacked"
+    fi
+    rm -rf "$pay_tmp"
 fi

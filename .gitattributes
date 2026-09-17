@@ -1,10 +1,18 @@
 # WHAT A STUDENT DOWNLOADS, and the only thing that decides it (issue #115).
 #
 # This repo IS the ~/cs193v layout. install-cs193v.sh downloads
-# https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.tar.gz and unpacks it into the
-# student's course directory. GitHub builds those archives with `git archive`, which honours
-# export-ignore -- so every rule below is present for anyone working in the repo and absent from
-# every student download. There is no other filter: no release step, no packaging script, no CI.
+# https://github.com/<owner>/<repo>/archive/<tag>.tar.gz and unpacks it into the student's course
+# directory. GitHub builds those archives with `git archive`, which honours export-ignore -- so
+# every rule below is present for anyone working in the repo and absent from every student
+# download.
+#
+# THERE IS A RELEASE STEP NOW (#232), and this file's claim that there was none is the thing that
+# changed. .private/release.sh writes a version, hashes the exported tree's CONTENT into a
+# manifest, and compiles that digest into the bootstrap, which refuses a payload that does not
+# match. So these rules no longer only decide what a student receives -- they decide what the
+# published digest covers, and a rule added here changes the hash a released bootstrap expects.
+# It is still not a packaging script and still not CI: nothing rewrites, filters or generates a
+# shipped file, and `git archive` remains the only thing that chooses.
 #
 # .private/tests/11-export.sh asserts the result on every run of the suite, so this file and the
 # file set it produces cannot drift apart. 00-release-gates.sh checks the same thing against the
@@ -93,6 +101,17 @@
 /.private/course-install-messages.txt -export-ignore
 /.private/install-utils.sh -export-ignore
 /.private/wsl-provision.sh -export-ignore
+# AND THE VERSION, WHICH IS THE ONE SHIPPED FILE THAT IS PURE METADATA (#282). It ships so that
+# `cs193v doctor` can answer "what release is this?" out of a local file -- which is the manual
+# diagnosis that still works when the automatic staleness check has failed open, and there was
+# nothing that answered that question before. Export-ignoring it would invert its value: it would
+# become a second copy of what REPO_TAG already says, i.e. a second number to forget.
+#
+# NOT UNDER files/, AND THAT IS MEASURED RATHER THAN TIDY. build_hash() is
+# `find Containerfile files -type f` relative to $PRIVATE, so a version under files/ would change
+# the build hash on every release and rebuild every student's container even when the recipe never
+# moved -- README's 250 s and 726 MB, re-running 18 of 23 steps.
+/.private/VERSION        -export-ignore
 /.private/files          -export-ignore
 /.private/files/**       -export-ignore
 
@@ -193,3 +212,19 @@
 #     file .private/install-cs193v-windows.cmd
 #         # expect: ... with CRLF line terminators
 *.cmd text eol=crlf
+
+# ─── AND THE BOOTSTRAP, FOR THE OTHER HALF OF THE SAME HAZARD  (#232) ──────────
+# THIS ONE IS ABOUT A TA'S CHECKOUT, NOT ABOUT WHAT THE .cmd FETCHES, and the naive reading is the
+# opposite -- see the note above: raw.githubusercontent.com serves the stored blob and honours no
+# attribute, so the bytes a Windows student receives are the blob's whatever this says.
+#
+# WHAT IT PROTECTS. install-cs193v-windows.cmd now carries STAGE2_SHA256, the digest of the blob
+# raw serves. With no `text` attribute, CHECKOUT honours core.autocrlf -- which Git for Windows
+# sets to `true` by default -- so a TA on Windows gets a CRLF working copy, and a release cut there
+# would hash CRLF while raw served LF. Every Windows student would then fail the digest check, and
+# nothing local would have noticed. `text eol=lf` makes the checkout LF on every platform.
+#
+# release.sh REFUSES A CR IN THIS FILE as well, because the attribute fixes the checkout and not an
+# editor: a TA whose editor saved CRLF has a CRLF working copy and an LF blob, and it is the
+# working copy that gets hashed. Two guards, one for each way the bytes can diverge.
+/.private/install-cs193v.sh text eol=lf

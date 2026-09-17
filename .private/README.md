@@ -157,35 +157,56 @@ Two things need real values:
 
    **The consequence to watch: the `.sh` now has TWO publication points** — the website copy
    students verify by hand, and the raw URL the `.cmd` fetches unattended. Update one and not
-   the other and the platforms silently diverge. The cheap fix is to point the website's
-   macOS/Linux link at the same raw URL so there is one source of truth.
+   the other and the platforms silently diverge.
+
+   **Pointing the website's macOS/Linux link at the raw URL is NOT the fix, and #232 is why.**
+   Both files are published under names carrying the release — `install-cs193v-1.2.0.sh` and
+   `install-cs193v-windows-1.2.0.cmd` — so that a copy sitting in a student's `Downloads` from
+   last month is visibly last month's. A raw URL serves the file under its repository name, with
+   no version in it, which is the one property the naming scheme exists to provide. Upload both,
+   every release, with their digests beside them.
 
    **#221 made that hazard much smaller, and this is the practical payoff of the split.** The
    `.sh` used to be the whole installer — 1700 lines that changed whenever any message, package
    name or refusal changed, so the hand-published copy went stale constantly. It is now a
-   ~160-line bootstrap: three repository coordinates, a downloader, a tarball, four checks and an
-   `exec`. Everything a student is asked, every package installed and every word read after the
-   first few lines comes from `course-install.sh`, which travels in the archive and needs no
-   re-upload. Re-publish the `.sh` when the coordinates or the hand-over contract change; almost
-   nothing else touches it.
+   bootstrap: the repository coordinates, a downloader, a tarball, a content check and an `exec`.
+   Everything a student is asked, every package installed and every word read after the first few
+   lines comes from `course-install.sh`, which travels in the archive and needs no re-upload.
+
+   **Since #232 it is re-published at every release rather than rarely**, because it carries the
+   tag and the payload digest — and `.private/release.sh` writes both, so this is a step in a
+   checklist rather than something to remember. It grew with that change too: the hasher and the
+   manifest walk are worth their lines, and the file's remit is still "readable in one sitting"
+   rather than a line count.
 
 #### What the published SHA-256 actually covers
 
 Worth stating plainly rather than leaving implied, because it is easy to read the checksum as
 covering more than it does.
 
-**It covers the bootstrap: the coordinates and the download.** That is the part that decides
-*which* code runs, which is the part worth pinning by hand. What it does not cover is the code
-that gets fetched — and that code is the course repository, which is also where `./cs193v`, the
-`Containerfile`, `files/entrypoint.sh` and both agents' notes come from. **The repository is the
-trust root for everything that runs on a student's machine, checksum or no checksum.** After
-#221 that code also runs `sudo $PM_INSTALL`, so the blast radius is root on the student's box.
+**It covers the bootstrap, and since #232 the bootstrap covers everything else.** That is a
+change of kind, not of degree, so the old wording — "the checksum covers the coordinates and the
+download, and deliberately not the payload" — is gone rather than softened.
 
-The controls that actually address that are repo-side — branch protection on `main`, required
-review, no force-push, passkeys, no broad-scope PATs — not the published hash. There is an open
-issue about pinning a commit SHA rather than following `main`, which would make the fetched tree
-immutable; it is filed with the analysis of what it costs, because it reshapes the mid-quarter
-"just re-run the installer" loop.
+The chain now runs: a student checks the published digest of the file they downloaded (or does
+not, and trusts the course website over TLS); that file carries `REPO_TAG` and `PAYLOAD_SHA256`;
+it fetches `archive/<tag>.tar.gz`, builds a **content manifest** of what it unpacked, and refuses
+loudly unless that manifest hashes to the constant compiled into it. On Windows there is one more
+link: the `.cmd` carries `STAGE2_SHA256` and refuses a stage two whose bytes do not match.
+
+**So the trust root is the course website and TLS, not codeload.** Nothing is taken on faith
+between the file a student downloaded and the tree it installs — which is a stronger claim than a
+pin alone can make, because a pin only says *which* tree to fetch and says nothing about what
+arrives. What remains outside it: whoever can push to `main` decides what the next release
+contains, and whoever cuts the release decides what gets tagged. Those are addressed by repo-side
+controls — branch protection, required review, no force-push, passkeys, no broad-scope PATs — and
+by reading the release commit. A digest cannot help with either.
+
+**Why a manifest and not the archive's bytes.** GitHub promises nothing about the bytes of an
+auto-generated `archive/*.tar.gz` — the 2023-01-30 compression change demonstrated that to
+everyone who had pinned one — and `git archive` stamps member mtimes from the commit date.
+Measured: the same tree served under two refs differs in bytes, 555,816 against 555,476, because
+the embedded directory name differs. A hash over extracted *content* depends on none of that.
 
 **The third download is pinned, and the difference between it and the other two is the whole
 argument** (#283). `course-install.sh` fetches podman's macOS `.pkg` and hands it to
@@ -194,8 +215,9 @@ belongs to. That one is hashable where the course tarball is not: a release asse
 *uploaded* file, byte-stable for the life of the release, with its digest published upstream — so
 a pinned version has a pinned digest and there is nothing to guess. GitHub promises nothing about
 the bytes of an auto-generated `archive/refs/heads/*.tar.gz`, which is what the 2023-01-30
-compression change demonstrated to everyone who had pinned one. So the `.pkg` gets a digest, the
-tarball gets a commit SHA if it gets anything, and neither answer generalises to the other.
+compression change demonstrated to everyone who had pinned one. So the `.pkg` gets the digest of
+an uploaded file and the tarball gets the digest of a manifest over what it unpacks to (#232);
+both are checked on the student's machine, and neither method would have worked for the other.
 
 #### What the bootstrap may do, and what it may not
 
@@ -210,16 +232,29 @@ It is the one file students read, so keep it readable in one sitting:
 - **It must not learn what distro it is on.** `distro_family`/`distro_packages` live in the
   installer proper and are emphatic that there is one copy; the bootstrap's one refusal that
   would want them names both package managers and lets the student pick.
-- **It reads three environment variables and no arguments.** `TMPDIR`, `CS193V_PROVISION` and
-  `CS193V_TARBALL`, and `10-static.sh`'s `bootstrap:reads-only-these-env-vars` asserts that list,
-  so a fourth is a deliberate edit in two places. Nothing froze this before #280, and the cost
-  showed the first time anybody wrote the surface down: the plan for that issue recorded it as
-  `CS193V_DIR` and `CS193V_WINDOWS`, neither of which this file has ever read.
-- **`TARBALL=` stays a literal one-line assignment.** It used to be load-bearing because seven
-  places in the test suite repointed the download by rewriting `^TARBALL=.*`; `CS193V_TARBALL`
-  replaced all seven in #280, so nothing edits the line any more. Keep it one line regardless — it
-  is the value a commit pin (#232) would replace, and one literal is what makes that a one-line
-  change.
+- **It reads four environment variables and one argument.** `TMPDIR`, `CS193V_PROVISION`,
+  `CS193V_TARBALL` and `CS193V_PAYLOAD_SHA256`, plus the `--dev-manifest-hash` verb, and
+  `10-static.sh` asserts *both* lists — `bootstrap:reads-only-these-env-vars` and
+  `bootstrap:parses-only-these-arguments` — so a fifth variable or a second verb is a deliberate
+  edit in two places. Nothing froze the environment before #280, and the cost showed the first
+  time anybody wrote the surface down: the plan for that issue recorded it as `CS193V_DIR` and
+  `CS193V_WINDOWS`, neither of which this file has ever read. The argument surface was frozen with
+  #232, when the file stopped being able to say it parsed none.
+- **The one argument dispatches before anything can refuse or create anything**, and every arm of
+  it exits. That is what makes `--dev-manifest-hash` safe to exempt from
+  `installer-door:no-other-way-to-start-it`, and three assertions hold it:
+  `bootstrap:the-verb-dispatches-before-anything-else`, `bootstrap:every-verb-arm-exits` and
+  `bootstrap:an-unknown-argument-exits`.
+- **`TARBALL=`, `REPO_TAG=` and `PAYLOAD_SHA256=` stay literal one-line assignments.** `TARBALL`
+  used to be load-bearing because seven places in the test suite repointed the download by
+  rewriting `^TARBALL=.*`; `CS193V_TARBALL` replaced all seven in #280. The reason is now
+  `.private/release.sh`, which rewrites the other two with `sed` anchored at `^REPO_TAG=` and
+  `^PAYLOAD_SHA256=` — and a composed value would leave those matching nothing, silently, which is
+  the same failure in a new spelling.
+- **It grew with #232, and that is allowed.** The hasher and the manifest walk are worth their
+  lines: the alternative to a copy of `pkg_sha256`'s three probed arms is no check at all, since
+  this file may source nothing. "Readable in one sitting" is the constraint, not a line count —
+  there is no test asserting one and there should not be.
 
 #### Installing from a local copy, for testing  (#280)
 
@@ -259,13 +294,14 @@ Driving it under wine, for the Windows half: `tests/win-sandbox.sh --tarball PAT
 `--stage2-url URL`. Inside the sandbox tiers `tests/install-sandbox.sh` sets `CS193V_TARBALL`
 itself, so a hand-driven run installs the tree you just built rather than the published one.
 
-   **And the one thing no test can see:** the `.cmd` on the website is a hand-uploaded copy, so
-   it is the only artefact that can drift out of step with the repo. **Re-upload it whenever
-   `install-cs193v.sh`'s last line changes** — that line is the sentinel stage one greps for
-   before running stage two, and a stale `.cmd` looking for a token the published `.sh` no longer
-   ends with refuses the download for every Windows student at once. Inside the repo the pair
-   cannot disagree, because both files travel in the same commit on the same branch;
-   `run-tests.sh --release` therefore checks only that the URL serves *an* installer, and
+   **And the one thing no test can see:** both files on the website are hand-uploaded copies, so
+   they are the only artefacts that can drift out of step with the repo. **Re-upload both at every
+   release** — the `.cmd` carries `STAGE2_SHA256`, the digest of the `install-cs193v.sh` blob that
+   `raw.githubusercontent.com` serves at the pinned tag, so a stale `.cmd` expecting a digest the
+   published `.sh` no longer hashes to refuses the download for every Windows student at once.
+   Inside the repo the pair cannot disagree, because `release.sh` writes both in one step and both
+   travel in the same commit; `run-tests.sh --release` checks that the URL's bytes really do hash
+   to the `.cmd`'s pin, and
    deliberately does not compare it against your working tree — a check that goes red until you
    push is one nobody can develop against.
 
@@ -1074,11 +1110,61 @@ The test suite honours `CS193V_INSTANCE` too, so `run-tests.sh` exercises your i
 rather than a colleague's. With the variable unset, every name is byte-identical to what it
 was before — a student never sets it.
 
+## Cutting a release
+
+Everything a student downloads is pinned to a tag and checked against a digest (#232), so the
+three numbers that describe a release — the version, the payload manifest and the stage-two digest
+— have to agree with each other and with what GitHub will serve. `.private/release.sh` computes
+all three. Do not do it by hand; the first release was seeded that way and it is the kind of task
+that works four times and then ships something nobody can install.
+
+```sh
+.private/release.sh --patch          # or --minor, or --major
+```
+
+It refuses a dirty tree, an untracked or malformed `.private/VERSION`, a version that disagrees
+with `REPO_TAG`, a tag that already exists, a carriage return in the bootstrap, a symlink or a
+newline in what would ship, an implausibly small export set, and a machine with no working
+hasher. **Every one of those runs before it writes anything**, which is why it has no `--dry-run`.
+Then it writes `.private/VERSION`, the tag and payload digest into `install-cs193v.sh`, and the
+tag and stage-two digest into `install-cs193v-windows.cmd`, and stops.
+
+It prints the rest as commands, and the order matters:
+
+1. `git commit -a` and `git tag release-X.Y.Z`.
+2. `git push origin main <tag>` — **straight to `main`.** This repository rebase-merges pull
+   requests, so a tag created on a branch names a commit that never appears on `main`; the release
+   commit is the one place that is worth avoiding.
+3. `.private/tests/run-tests.sh --release`. **Not optional.** It is the only thing that checks the
+   two digests against what GitHub actually serves: it fetches the archive at the tag, runs the
+   bootstrap's own `--dev-manifest-hash` over it, and compares. Run it *after* the push — before,
+   every gate that depends on publication takes a named skip telling you to push the tag first.
+4. Upload both files to the course website under their versioned names, with the digests
+   `release.sh` printed beside them.
+
+**The tension worth knowing about:** #232's own issue recommends branch protection with required
+review on `main`, and step 2 pushes there directly. Today one person pushes, so it does not bite.
+When a second person can, the answer is either an exemption for whoever cuts releases or a
+`release` branch — `git branch release <tag>` costs nothing later, and unwinding a branch that has
+accumulated divergence is painful.
+
 ## Shipping a fix mid-quarter
 
-1. Edit the `Containerfile` (or anything under `files/`); push to `main`.
+1. Edit the `Containerfile` (or anything under `files/`); commit and push to `main`. Then **cut a
+   release** — see "Cutting a release" below — and tell students to re-run the installer.
 2. Students run `./cs193v --rebuild`, which sees the moved recipe and builds. Anyone who
    doesn't gets prompted on their next launch.
+
+**Step 1 grew a release with #232, and step 2 did not change at all.** Before the pin, pushing to
+`main` was the whole of shipping: the bootstrap fetched `refs/heads/main`, so the next student to
+re-run the installer got the fix whether or not anyone told them. Under a pinned tag a push
+reaches nobody — a student's tree only moves when they re-run the installer, and re-running a
+stale copy re-installs the same frozen tree. That is why the release step is not optional and why
+`check_release` exists: it is the only thing that tells a student their copy is behind, and it
+tells them over the network or not at all.
+
+Once a student has re-run, step 2 works exactly as documented: the tree moved, so `build_hash`
+differs, so the rebuild prompt appears.
 
 **What makes step 2 work is `cs193v.buildhash`.** The launcher hashes the Containerfile
 plus every file under `files/` and bakes it into the image as a label at build time; on

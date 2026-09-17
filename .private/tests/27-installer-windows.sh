@@ -160,8 +160,33 @@ assert_eq "win-ok:restarts-between-the-two-passes" "PROVISION TERMINATE STAGE2" 
 assert_eq   "win-ok:probes-for-curl-once"         "1" "$(wine_argv_count '\-e curl --version')"
 assert_eq   "win-ok:does-not-apt-when-curl-is-there" "0" "$(wine_argv_count 'apt-get')"
 assert_eq   "win-ok:downloads-once"               "1" "$(wine_argv_count '\-e curl -fsSL')"
-assert_eq   "win-ok:checks-the-download-once"     "1" "$(wine_argv_count '\-e grep ')"
-assert_says "win-ok:names-the-url-it-fetches"     "raw.githubusercontent.com/cs193v/cs193v-container/main" "$WINE_OUT"
+# THE DIGEST CHECK HAPPENS ONCE, AND IT IS COUNTED ON THE POWERSHELL CALL NOW (#232). This used to
+# count `-e grep `, the sentinel check; there is no grep any more. The probe reaches
+# fake-powershell.exe rather than fake-wsl.exe, so the needle is the marker that fake's digest arm
+# dispatches on -- which is also why no `-e sha256sum` appears in the log at all: the batch side
+# asks PowerShell, and PowerShell is faked.
+assert_eq   "win-ok:checks-the-download-once"     "1" "$(wine_argv_count 'sha256sum')"
+# READ OUT OF THE .cmd, NOT RETYPED (#232). This needle used to end in `/main`, a constant nobody
+# would ever move; the pinned tag moves at every release, so a literal here would be a second
+# place to remember it and this assertion would go red on the release commit rather than on a
+# defect. 25-installer.sh checks the URL is well formed and needs no quoting on either side of
+# the boundary; what this one checks is that the .cmd really printed it to the student.
+#
+# THE SAME PARSER 00-release-gates.sh USES, and \r stripped first for its reason: the file is
+# CRLF, and a trailing carriage return inside a needle matches nothing and says nothing about why.
+wcget() {                             # wcget NAME -> the .cmd's `set "NAME=..."` value
+    sed 's/\r$//' "$PRIVATE/install-cs193v-windows.cmd" \
+        | sed -n "s/^set \"$1=\(.*\)\"\$/\1/p" | head -1
+}
+win_url="$(wcget INSTALLER_URL \
+           | sed -e "s|%REPO_OWNER%|$(wcget REPO_OWNER)|" \
+                 -e "s|%REPO_NAME%|$(wcget REPO_NAME)|" \
+                 -e "s|%REPO_TAG%|$(wcget REPO_TAG)|")"
+# NON-EMPTY FIRST, and it is load-bearing rather than ceremonial: assert_says with an empty needle
+# matches any output at all, so a parser that stopped matching would turn the assertion below into
+# a tautology that passes on a run which printed nothing.
+assert_ne   "win-ok:the-url-needle-was-composed" "" "$win_url"
+assert_says "win-ok:names-the-url-it-fetches"     "$win_url" "$WINE_OUT"
 
 # ORDER, from argv.log rather than from reading the file: whichever of the two calls appears
 # FIRST must be the download. 25-installer.sh pins the same thing statically; this pins that the
@@ -594,18 +619,49 @@ for rc in -1 6 22 23 28 56; do
     assert_eq   "win-dl-$rc:never-runs-bash"       "0" "$(wine_argv_count '\-e bash ')"
 done
 
-# AND THE ONE curl CANNOT REPORT. The fake writes a body with no sentinel in it and exits ZERO,
-# which is what a captive portal answering 200 with its own sign-in page looks like from the
-# outside: the bytes arrived, they are simply not the installer. Without the sentinel check this
-# is the case that ends with bash running a login page and the .cmd printing "Done".
+# AND THE ONE curl CANNOT REPORT. The fake serves a cut-short body and exits ZERO, which is what a
+# captive portal answering 200 with its own sign-in page looks like from the outside: the bytes
+# arrived, they are simply not the installer. Without this check it is the case that ends with bash
+# running a login page and the .cmd printing "Done".
+#
+# RETARGETED FROM THE SENTINEL TO THE DIGEST (#232), and the wording it asserts moved with it: the
+# old refusal said "not the whole file", which was exactly what a last-line token could conclude.
+# A digest cannot distinguish a short body from a substituted one, so the refusal says "not the
+# file this installer expects" and keeps naming the sign-in page as the likely cause -- because it
+# still is.
 wine_new
 wine_list CS193V
-wine_knob wsl.curl.truncated 1
+wine_body truncated
 wine_run
 assert_ne   "win-portal:does-not-exit-zero"        "0" "$WINE_RC"
-assert_says "win-portal:says-it-is-not-the-whole-file" "not the whole file" "$WINE_OUT"
+assert_says "win-portal:says-it-is-not-the-expected-file" "not the file this installer" "$WINE_OUT"
 assert_says "win-portal:names-the-likely-cause"    "sign-in page" "$WINE_OUT"
+assert_says "win-portal:names-the-expected-digest" "expected:" "$WINE_OUT"
+assert_says "win-portal:names-what-arrived"        "received:" "$WINE_OUT"
 assert_eq   "win-portal:never-runs-bash"           "0" "$(wine_argv_count '\-e bash ')"
+
+# AND A BODY OF THE RIGHT LENGTH WITH A BYTE CHANGED, which is the case the truncated one cannot
+# stand in for. A check that compared the byte COUNT rather than the content would pass every other
+# case in this tier: win-portal would fail it for the wrong reason, and nothing would say so. This
+# is the fixture that tells those two implementations apart.
+#
+# THE VACUITY GUARD IS FIRST AND IT IS NOT CEREMONIAL. wine_body's `altered` arm is a sed on the
+# payload constant, and a sed whose address stops matching is a silent no-op -- which would serve
+# the whole file under the name of a corrupt one and turn this whole case green. So the served
+# body's digest is compared against the one the .cmd expects BEFORE anything is asserted about the
+# run: they must differ, or there is nothing here to refuse.
+wine_new
+wine_list CS193V
+wine_body altered
+assert_ne "win-altered:the-body-really-differs" \
+          "$(do_sha256 "$PRIVATE/install-cs193v.sh" | awk '{print $1}')" "$(wine_body_digest)"
+assert_eq "win-altered:the-body-is-the-same-length" \
+          "$(wc -c < "$PRIVATE/install-cs193v.sh" | do_tr -d ' ')" \
+          "$(wc -c < "$WINE_CASE/stage2.src" | do_tr -d ' ')"
+wine_run
+assert_ne   "win-altered:does-not-exit-zero"       "0" "$WINE_RC"
+assert_says "win-altered:is-refused"               "not the file this installer" "$WINE_OUT"
+assert_eq   "win-altered:never-runs-bash"          "0" "$(wine_argv_count '\-e bash ')"
 
 # ─── CLASS: a probe must not conflate "no" with "cannot tell" ─────────────────
 #
