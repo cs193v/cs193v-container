@@ -259,6 +259,27 @@ refuse() { printf '\n%s\n\n' "$*" >&2; exit 1; }
 #
 # AND AN UNKNOWN ARGUMENT IS NOW A REFUSAL. Before this block `bash install-cs193v.sh --oops`
 # silently ignored it and installed; make-tarball.sh already had the right shape.
+# ─── and everything below here runs only if ALL of it arrived  (#297) ─────────
+# ONE BRACE, AND IT IS THE WHOLE REASON `curl -fsSL URL | bash` IS SAFE TO PUBLISH. bash reads a
+# piped script off the pipe and executes each complete statement as it arrives, so a transfer
+# that stops half way used to run everything it had received and then exit 0 -- measured: a cut
+# at 24000 bytes created the temp tree, printed "Getting the course files...", and reported
+# success. On the wifi this file's own refusals are written about, that is a half-done install
+# that says nothing.
+#
+# A compound command has to be PARSED IN FULL before any of it runs, so a stream that stops
+# early is a syntax error and NOTHING here executes. Measured at every cut point above.
+#
+# THE CONSTANTS STAY ABOVE IT on purpose: release.sh rewrites `^REPO_TAG=` and
+# `^PAYLOAD_SHA256=` anchored at column 0, and three suites read them the same way. Nothing
+# above this line has a side effect, so nothing is lost by leaving it out here.
+#
+# A BRACE AND NOT `main() { ... }; main "$@"`, which is the usual spelling of this. They protect
+# identically; the brace needs no re-indentation, so the body below is untouched and every
+# column-anchored pattern in the suite still matches it. bootstrap:the-body-is-guarded holds the
+# position, because a `{` that drifted below the first side effect would look exactly like this
+# one and protect nothing.
+{
 case "${1:-}" in
     --dev-manifest-hash)
         [ -n "${2:-}" ] || { printf 'install-cs193v.sh: --dev-manifest-hash needs a directory\n' >&2; exit 2; }
@@ -479,10 +500,42 @@ fi
   or campus wifi login page, for instance. It is safe to run this script again."
 
 # AND STDIN IS PASSED STRAIGHT THROUGH, deliberately. An earlier draft redirected it from
-# /dev/null here, on the reasoning that `curl | bash` is not a shipped path so nothing downstream
-# reads stdin. That was wrong twice over: the redirect applies to EVERY invocation, not just
-# piped ones, and the installer proper reads stdin constantly -- menu() takes arrow keys and
-# choose_dir() reads a typed path. Measured: with the redirect in place every pty-driven case
-# saw "(not a terminal; choosing ...)" and the consent menu took its safe default, so a student
-# could not have answered a single question.
-exec bash "$BOOT_TREE/$TARGET" "$BOOT_TMP" "$REPO_TAG" "$TAGS_URL"
+# /dev/null here, on the reasoning that nothing downstream reads stdin. That was wrong twice
+# over: the redirect applies to EVERY invocation, not just piped ones, and the installer proper
+# reads stdin constantly -- menu() takes arrow keys and choose_dir() reads a typed path.
+# Measured: with the redirect in place every pty-driven case saw "(not a terminal; choosing
+# ...)" and the consent menu took its safe default, so a student could not have answered a
+# single question.
+#
+# ─── ...UNLESS THERE IS NOTHING TO PASS, WHICH IS WHAT `| bash` LEAVES  (#297) ───
+# UNDER A PIPE, BASH'"'"'S OWN STDIN *IS* THIS SCRIPT. So fd 0 is a pipe for the whole run while
+# stdout and the controlling terminal are still the student'"'"'s -- #297'"'"'s screenshot shows exactly
+# that, in colour, with the box drawn. Everything downstream that asks a question reads fd 0:
+# menu() falls back to its safe default ("stop, change nothing") whenever stdin is not a
+# terminal, choose_dir() stops asking, and survey() refuses outright with err.sudo-no-terminal
+# because it cannot see anywhere to type a password. So the pipe reached the student as a red
+# STOP box on a machine that had a perfectly good terminal two file descriptors away.
+#
+# /dev/tty IS THAT TERMINAL, and it is still open to us: it is the CONTROLLING terminal, which a
+# pipe on fd 0 says nothing about. Measured under a pty -- piped, `[ -t 0 ]` is false and
+# /dev/tty opens; with no controlling terminal at all it does not, and the refusal above is
+# still what happens, correctly.
+#
+# THE REDIRECT RIDES ON THE HAND-OVER AND IS NEVER A STATEMENT OF ITS OWN. A bare
+# `exec </dev/tty` here would HANG, measured: bash would go on reading the rest of THIS script
+# from the terminal it just attached. A redirect on a function call applies to the body, and the
+# exec inside inherits it, so the argument list stays in one copy.
+# bootstrap:reattaches-only-at-the-hand-over is what keeps that true.
+#
+# THE PROBE IS A SUBSHELL, NOT `exec 3</dev/tty`. A failed exec redirection can end a
+# non-interactive shell, and its error is emitted BEFORE a trailing `2>/dev/null` on the same
+# line applies -- so the obvious spelling leaks "/dev/tty: Device not configured" to exactly the
+# student who has no terminal to read it on. `( : </dev/tty )` cannot exit this shell, leaves no
+# descriptor open, and is silent.
+hand_over() { exec bash "$BOOT_TREE/$TARGET" "$BOOT_TMP" "$REPO_TAG" "$TAGS_URL"; }
+
+if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
+    hand_over </dev/tty
+fi
+hand_over
+}
