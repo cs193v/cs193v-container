@@ -900,9 +900,23 @@ fi
 # assertion then compared `listening` against `listening` followed by the whole transcript, and
 # the marker it displaced left INSTALLER-USED empty. Every report marker belongs in the block at
 # the foot of this script, after the last thing that writes to stdout.
+# ─── ...and, when the case asks for it, delivered the way `curl | bash` delivers it (#297) ──
+# SB_PIPED PUTS THE SCRIPT ON BASH'S STDIN, which is the one thing neither door above does.
+# Under a pipe the installer's own fd 0 is the script, so every question it asks reads a pipe
+# unless it reattaches -- and whether sudo can then still find a terminal to take a REAL
+# password on is not something a fake sudo can answer. Hence a case here rather than only in
+# the shim tier.
+#
+# THE TWO EXISTING ARMS ARE UNTOUCHED, deliberately: `bash "$INST"` stays spelled exactly as it
+# was rather than becoming `sh -c "$INST_CMD"` for symmetry, because every other case in this
+# tier goes through it and none of them asked for another shell in the way.
+INST_CMD="bash $INST"
+[ -n "${SB_PIPED:-}" ] && INST_CMD="cat $INST | bash"
 if [ "$DRIVEN" = yes ]; then
     CS193V_DRIVE_REPORT=/var/tmp/report/drive \
-        python3 /work/ptydrive.py "bash $INST" < "$SB_SESSION_FILE"
+        python3 /work/ptydrive.py "$INST_CMD" < "$SB_SESSION_FILE"
+elif [ -n "${SB_PIPED:-}" ]; then
+    cat "$INST" | bash
 else
     bash "$INST"
 fi
@@ -981,6 +995,12 @@ printf '===ARRANGED===\n';   cat /var/tmp/report/arranged 2>/dev/null
 # every report marker belongs in this block, after the last thing that writes to stdout.
 printf '\n===SUDO===\n%s\n' "$(/work/sandbox state-sudo 2>/dev/null)"
 printf '===DRIVEN===\n%s\n' "$DRIVEN"
+# HOW THE INSTALLER WAS LAUNCHED, VERBATIM (#297). ===INSTALLER-USED=== above names the file;
+# this names the command, which is the only thing that tells `bash FILE` from `cat FILE | bash`.
+# Without it a case asking for SB_PIPED and not getting it -- a typo in the -e, a run.sh that
+# stopped branching -- degrades silently into a second copy of the unpiped case, green
+# throughout and testing nothing it claims to.
+printf '===INSTALLER-CMD===\n%s\n' "$INST_CMD"
 # THE CONVERSATION'S OWN ACCOUNT, and empty on every case that did not have one. A step that
 # never found its screen is a FAIL line naming the step, which is worth reading beside a
 # transcript that merely stops early.
