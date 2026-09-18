@@ -861,6 +861,15 @@ RUN set -eux; \
     test -n "$(CS193V_HOST_OS=macos /usr/local/bin/cs193v-platform-messages --hostpath)" \
         || { echo "cs193v-platform-messages --hostpath says nothing when no path was published" >&2; exit 1; }; \
     test "$(grep -c '^\[\[intro\]\]$' /etc/cs193v/setup-git-messages.txt)" = 1; \
+    install -m 0644 /tmp/cs193v-files/claude-code/global-config-defaults.py \
+            /etc/cs193v/claude-global-defaults.py; \
+    python3 -c "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" \
+            /etc/cs193v/claude-global-defaults.py; \
+    d="$(mktemp -d)"; printf '{}\n' > "$d/a"; printf '{"copyOnSelect":true}\n' > "$d/b"; \
+    python3 /etc/cs193v/claude-global-defaults.py "$d/a" > /dev/null; \
+    python3 /etc/cs193v/claude-global-defaults.py "$d/b" > /dev/null; \
+    python3 -c "import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); sys.exit(0 if a.get('copyOnSelect') is False and b.get('copyOnSelect') is True else 'global-config-defaults.py misbehaved: %r %r' % (a, b))" "$d/a" "$d/b"; \
+    rm -rf "$d"; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \
     printf '\n# CS193V tab labels inside tmux. Must stay last: it composes PROMPT_COMMAND.\nif [ -n "${TMUX:-}" ]; then . /etc/cs193v/tabname.bash; fi\n' >> /etc/bash.bashrc; \
@@ -913,29 +922,44 @@ RUN set -eux; \
 
 ####> Finishing up...
 #
-# CLAUDE_CODE_DISABLE_MOUSE_CLICKS IS HALF OF ISSUE #77 AND MUST NOT BE READ ON ITS OWN.
-# The other half is `"tui": "fullscreen"` in files/claude-code/managed-settings.json, which is
-# what makes the wheel reach Claude Code at all. Turning that on also turns on the fullscreen
-# renderer's `copyOnSelect`, which DEFAULTS TO TRUE: a drag then writes the selection out over
-# OSC 52 and toasts "copied N chars to tmux buffer - paste with <prefix>p". Measured. This
-# configuration sets `prefix None`, so that is instructions to press a key that does not exist,
-# about text the student cannot reach -- the same class of failure a9336c0 deleted tmux's own
-# copy path over, arriving through the application instead of through tmux.
+# NO CLAUDE_CODE_DISABLE_MOUSE* VARIABLE HERE, AND THE NAME IS WHY ONE EVER WAS (#77, #307).
 #
-# THE NAME IS A TRAP: it does not disable clicks. It switches Claude Code's tracking from
-# `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so button press and release are still
-# reported -- clicking a link or a button inside the agent still works, which is what
-# tmux.conf's MouseDown1Pane binding exists for -- and only MOTION is dropped. Measured both
-# ways in the container: mouse_any_flag stays 1 so the wheel guard still forwards, while a drag
-# and a double-click each produce zero paste buffers and no toast. SHIFT+drag is untouched,
-# because it never reaches the application in the first place.
+# `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` sat in the ENV block below from #77 until #307, on a
+# reading of the escape sequences alone. Read out of the binary this image ships (2.1.225,
+# re-read in 2.1.277) it selects mouse mode "scroll", and that does TWO things, not one:
 #
-# An internal, undocumented variable, so it can vanish without notice. Nothing can assert that
-# Claude Code still honours it -- there is no non-interactive readout of the renderer or of the
-# mouse mode (`claude config` is not a subcommand and `claude doctor` reports installation
-# health only), and the behavioural check needs a logged-in session. tests/MANUAL.md carries it.
+#   * the tracking modes narrow from `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so
+#     press and release are still reported ON THE WIRE -- the half the old note got right;
+#   * and the input loop then DISCARDS what arrives. `if (kind === "mouse" && mouseMode() ===
+#     "scroll" && (button & 3) === 0) continue` is the LEFT button in all of press (Cb=0),
+#     release (Cb=0 with a final `m`) and drag motion (Cb=32). Right (Cb=2) and middle (Cb=1)
+#     survive the mask; the wheel survives because it is parsed as a KEY (wheelup/wheeldown)
+#     and never reaches the gate at all.
+#
+# So the conclusion drawn from the first bullet alone -- that a click still reached the agent --
+# was false, and it was the bug. Expanding a "ran 1 shell command" line and clicking to move
+# the cursor were both dead on every platform. #307.
+#
+# TMUX WAS NEVER INVOLVED, measured rather than argued. `mouse_any_flag` is
+# `mode & ALL_MOUSE_MODES`, so it was already 1 under `?1000h` alone and every guard in
+# files/tmux/tmux.conf was already taking its forwarding arm; removing this variable changes
+# nothing at the tmux layer. An injected bare click reaches a mouse-reporting pane complete,
+# press AND release, with MouseUp1Pane unbound -- tests/tmux-harness/suite.sh holds that now,
+# along with the buttonless motion report (Cb=35) that hovering needs.
+#
+# DELETED RATHER THAN SET TO 0, because the mode chooser keys on `!== undefined`: `=0` is
+# functionally identical and leaves behind a variable whose name says "disable" and whose value
+# says "don't". Same argument as the HOST/FLASK_RUN_HOST note below.
+#
+# WHAT REMOVING IT COSTS, which is a real cost and not a clean win. The fullscreen renderer
+# (`"tui": "fullscreen"`, files/claude-code/managed-settings.json) has `copyOnSelect` defaulting
+# TRUE, so a drag inside Claude Code selects, copies, and toasts advice naming a prefix key this
+# configuration does not have. That is handled where it can be -- files/entrypoint.sh, because
+# `copyOnSelect` is not a settings key at all but a GLOBAL CONFIG one, living in ~/.claude.json
+# on a named volume that no image layer can reach. The part that suppression does NOT fix --
+# an explicit ctrl+c still claiming a copy on a terminal without OSC 52 -- is #318. DO NOT
+# re-add a mouse variable to buy any of it back: that trade was made once and it cost every click.
 ENV LANG=en_US.UTF-8 \
-    CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 \
     LC_ALL=en_US.UTF-8 \
     PATH=/home/student/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \
     EDITOR=nano \

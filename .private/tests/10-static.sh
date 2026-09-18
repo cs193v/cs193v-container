@@ -3442,22 +3442,106 @@ import json, sys
 print(json.load(open(sys.argv[1])).get("tui", "ABSENT"))
 ' "$managed")"
 
-# CLAUDE_CODE_DISABLE_MOUSE_CLICKS IS PART OF THE SAME FIX AND MUST NOT BE SEPARATED FROM IT.
+# ...AND NO VARIABLE THAT COUNTERMANDS IT (#307). CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 shipped in
+# the ENV block from #77 until #307, on a reading of the escape sequences alone. It does narrow
+# the tracking modes -- that half was right -- and it ALSO makes Claude Code's input loop discard
+# every LEFT-button event it still receives, so clicking anything inside the agent did nothing at
+# all. The comment that used to sit here asserted the opposite, in prose, as measured.
 #
-# The fullscreen renderer turns on `copyOnSelect`, which defaults to TRUE, and a drag inside it
-# then writes the selection out over OSC 52. Measured: the toast reads "copied N chars to tmux
-# buffer - paste with <prefix>p", and this configuration sets `prefix None` -- so the student is
-# told to press a key that does not exist, about text they cannot reach. That is the failure #61
-# deleted tmux's own copy path over, arriving by a different door.
+# THE BAN IS ON THE FAMILY, NOT ON THE VALUE WE SHIPPED. CLAUDE_CODE_DISABLE_MOUSE is a second
+# variable with the same trap and a worse blast radius -- it selects mouse mode "off", which
+# takes the WHEEL with it and is #77 back in full -- so a check naming only the one this image
+# set would pass while the worse one was in. One substring covers both; do not tidy it into two.
 #
-# The variable is MISNAMED and the name is the trap: it does not disable clicks. It switches
-# Claude Code's tracking from `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so button
-# press/release is still reported -- clicking a link or a button in the agent still works, which
-# is what tmux.conf's MouseDown1Pane binding exists for -- and only MOTION is dropped. Measured
-# both ways: the wheel guard still sees mouse_any_flag=1, and a drag and a double-click each
-# produce zero paste buffers and no toast.
-assert_ok "claude:drag-selection-is-off-in-the-image" \
-          grep -q 'CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1' $PRIVATE/Containerfile
+# COMMENTS STRIPPED, AND THE ENV BLOCK ONLY, for the reason containerfile:no-HOST-env gives above
+# -- read the other way round. The Containerfile's own note now EXPLAINS the removal and names
+# the variable, so an un-stripped whole-file grep would match the explanation and report the bug
+# as still present.
+claude_env_live="$(sed 's/#.*//' $PRIVATE/Containerfile | sed -n '/^ENV /,/^$/p')"
+# THE POSITIVE CONTROL, and it is load-bearing rather than ceremonial: an absence measured
+# through a sed that returned nothing is not an absence, it is a silent pass. LANG= is the one
+# entry in that block that cannot go away.
+assert_contains "claude:the-env-block-is-readable" "LANG=" "$claude_env_live"
+assert_not_contains "claude:no-mouse-mode-override-in-the-recipe" \
+                    "CLAUDE_CODE_DISABLE_MOUSE" "$claude_env_live"
+
+# COPY-ON-SELECT IS SUPPRESSED SOMEWHERE ELSE, and naming where is what keeps the absence above
+# from being a bare absence. The toast the variable used to suppress is real; what changed is the
+# lever. `copyOnSelect` is not in Claude Code's settings schema at all -- it is read from the
+# GLOBAL CONFIG, ~/.claude.json -- so managed-settings.json cannot carry it and neither can an
+# ENV line. files/entrypoint.sh merges it into the volume's copy instead; 50-image.sh drives that
+# end to end, and the matrix below drives the helper itself.
+assert_ok "claude:the-global-defaults-helper-exists" \
+          test -r $PRIVATE/files/claude-code/global-config-defaults.py
+# COMMENTS STRIPPED HERE TOO, and this one was caught vacuous by hand mutation rather than
+# reasoned about: entrypoint.sh's own note names the helper, so pointing the INVOCATION at a
+# different file left this green. Same self-match as the Containerfile check above.
+entrypoint_live="$(sed 's/#.*//' $PRIVATE/files/entrypoint.sh)"
+assert_contains "entrypoint:merges-the-claude-global-defaults" \
+                "python3 /etc/cs193v/claude-global-defaults.py" "$entrypoint_live"
+# CONTINUATIONS JOINED FIRST: the install is written across two lines, so a per-line grep
+# cannot see the source and the destination together -- and matching the destination alone
+# would also be satisfied by the smoke-test lines that merely run the helper.
+claude_cf_joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' $PRIVATE/Containerfile)"
+assert_contains "containerfile:installs-the-claude-global-defaults" \
+                "global-config-defaults.py /etc/cs193v/claude-global-defaults.py" \
+                "$(printf '%s' "$claude_cf_joined" | tr -s ' ')"
+# READ AS A VALUE, not grepped: the helper's docstring names the key in prose, so a text search
+# would pass on the documentation rather than on the default.
+assert_eq "claude:global-defaults-are-copyOnSelect-false" '{"copyOnSelect": false}' \
+    "$(python3 -c '
+import importlib.util, json, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("gcd", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.DEFAULTS, sort_keys=True))
+' $PRIVATE/files/claude-code/global-config-defaults.py)"
+
+# ─── the global-config merge, driven on the host (#307) ────────────────────────
+#
+# THE WHOLE MATRIX LIVES HERE rather than in the image tier, and that is a testability
+# decision: `merge()` is pure enough to drive from the host in milliseconds, which is what
+# makes red-first and hand mutation cheap enough to actually do. 50-image.sh asserts the
+# end-to-end wiring; this asserts the behaviour.
+#
+# WHAT EACH CASE IS FOR, because two of them look like paraphrases and are not:
+#   * "a students own choice is left alone" is the ONLY-WHEN-ABSENT invariant. Deleting the
+#     filter in the helper -- i.e. forcing the value on every start -- reddens this and
+#     nothing else.
+#   * "a symlink argument reaches the real file" is the trap the helper's realpath() exists
+#     for. ~/.claude.json IS a symlink into a named volume, and rename(2) does not follow a
+#     symlink on its destination, so a merge without realpath() REPLACES THE SYMLINK with a
+#     regular file in the writable layer: the volume's copy goes stale and the replacement
+#     dies at the next --rebuild.
+#   * "the original survives a failed write" is the ATOMICITY case, and it has to force the
+#     failure MID-WRITE. A read-only directory does not test this -- mkstemp fails there
+#     before writing a byte, while a naive open(path,"w") on a writable file in a read-only
+#     directory SUCCEEDS. Measured: with the failure injected inside the dump, the helper
+#     leaves the file byte-identical and a truncating implementation leaves it as
+#     `{\n  "partial": 1,\n  "and then"` -- an unparseable config, which costs the student
+#     the project trust state and history that file also holds.
+gcd_out="$(python3 "$(dirname -- "$0")/lib/gcd-matrix.py" \
+                   "$PRIVATE/files/claude-code/global-config-defaults.py" 2>&1)"
+# NON-EMPTY FIRST, same family as syntax:python-files-were-found above: a matrix whose python
+# died before its first case prints nothing, and every assert_contains below would then be
+# looking for "ok NAME" in an empty string -- which fails loudly, but for the wrong reason and
+# with no hint. This names the real one.
+if [ -n "$gcd_out" ]; then pass "claude:global-defaults-matrix-ran"
+else fail "claude:global-defaults-matrix-ran" 'the merge matrix printed nothing at all'; fi
+for gcd_case in absent-key-is-added added-value-is-false \
+                a-students-own-choice-is-left-alone a-students-own-choice-is-still-true \
+                everything-else-survives the-trust-state-survives \
+                an-unparseable-config-is-declined an-unparseable-config-is-byte-identical \
+                a-json-array-is-declined \
+                the-file-mode-survives-0644 the-file-mode-survives-0600 \
+                a-symlink-argument-reaches-the-real-file and-leaves-the-symlink-a-symlink \
+                and-the-real-file-got-the-key \
+                a-second-run-is-a-byte-identical-no-op \
+                a-failure-mid-write-is-declined-not-raised \
+                and-the-original-survives-a-failed-write \
+                no-temp-file-is-left-behind; do
+    assert_contains "claude:merge-$gcd_case" "ok $gcd_case" "$gcd_out"
+done
 
 # ONE FILE, TWO TOOLS. The notes are the only real copy: /etc/claude-code/CLAUDE.md is a
 # symlink to them, and the entrypoint links ~/.codex/AGENTS.md at them on every start, because
