@@ -93,7 +93,7 @@ After writing a new test or changing an existing test, always perform a mutation
 
 ## How to write commits and PRs
 
-Previous commits and PRs were extremely verbose. That's unnecessary here. Be concise about what the commit or PR does; one paragraph max.
+Previous commits and PRs were extremely verbose. That's unnecessary here. Be concise about what the commit or PR does; one paragraph max. When writing PRs, always use the wording "Closes #NNN" on its own line for each issue that the PR closes.
 
 ## Synchronization
 
