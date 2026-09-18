@@ -1458,7 +1458,7 @@ section's actual job. Per terminal, expect:
 | wheel back, then modifier + drag | selects the scrolled-back text — **the gesture the design rests on** |
 | **SHIFT+drag on Terminal.app or macOS VS Code** | an amber correction naming FN, **not silence** |
 | SHIFT+drag anywhere else | the terminal selects; nothing reaches tmux, so no message |
-| plain drag inside `claude` and inside `nano` | reaches the app; no hint |
+| plain drag inside `claude` and inside `nano` | reaches the app; no hint — and inside `claude` it now **selects**, see §7.11 (#307) |
 | **SHIFT+drag inside `claude`** | still reaches the app; **no correction interrupts it** |
 | `cs193v doctor` | the `terminal` line names the terminal you are actually in |
 
@@ -1476,7 +1476,7 @@ Also worth recording per terminal: a selection made by the terminal returns a so
 **with** a newline at the wrap, because the terminal copies what it drew. tmux's own copy used to
 return one unbroken line. Nothing can be done about that from inside the container.
 
-### §7.11 — Claude Code scrolls itself, and does not claim a copy it cannot deliver (#77)
+### §7.11 — Claude Code takes the mouse: scroll, click, hover, drag (#77, #307)
 
 The only part of #77 that cannot be automated, and it needs a **logged-in** session: everything
 before Claude Code's REPL — sign-in, and the "Accessing workspace:" trust prompt — renders on the
@@ -1490,19 +1490,46 @@ measures the wrong thing. That confound cost two false readings while #77 was be
 | the wheel, over Claude Code | **Claude Code's** conversation scrolls |
 | the amber "SCROLLED BACK" banner | never appears while Claude Code is in front |
 | Claude Code's own drawing | fills the pane, not a third of it |
-| a plain drag inside Claude Code | selects nothing, and **no "copied … to tmux buffer" toast** |
-| `SHIFT`+drag inside Claude Code | the terminal's own selection, exactly as at a shell prompt |
-| clicking a link or a button inside Claude Code | still works — only motion reporting is off |
+| **hovering a "ran N shell commands" line** | the expand affordance appears (#307) |
+| **clicking that line** | it expands (#307) |
+| **clicking inside the prompt text** | the cursor moves to where you clicked (#307) |
+| a plain drag inside Claude Code | **selects, and Claude Code's footer reads `ctrl+c to copy`** — and **no "copied … to tmux buffer" toast** |
+| `SHIFT`/`FN`+drag inside Claude Code | the terminal's own selection, exactly as at a shell prompt |
+| `ctrl+c` with that selection | copies — **and see the warning below about where it lands** |
+| `ctrl+c` with a selection | does **not** interrupt the turn; measured true both before and after #307, so it is not a regression of it |
 | resize the window mid-session | no flicker, no stale layout |
 
-The toast is the one to watch for. `copyOnSelect` defaults to **true** in the fullscreen renderer
-and writes over OSC 52; measured, the message reads *"copied N chars to tmux buffer · paste with
-&lt;prefix&gt;p"*, and this configuration has no prefix key. `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` in the
-Containerfile is what suppresses it. **If that toast ever comes back, the variable has stopped
-being honoured** — it is internal and undocumented, Claude Code auto-updates in this image, and
-nothing in the automated tiers can see it (there is no non-interactive readout of the renderer or
-the mouse mode: `claude config` is not a subcommand and `claude doctor` reports installation health
-only).
+**THE THREE CLICK ROWS ARE #307 AND THEY REPLACE A ROW THAT ASSERTED THE OPPOSITE.** This table
+used to read *"clicking a link or a button inside Claude Code | still works — only motion
+reporting is off"*, marked as measured, and the Linux baseline below used to say every row
+passed. It cannot have: `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` put Claude Code in mouse mode
+`"scroll"`, whose input loop discards every left-button event it receives, so nothing inside the
+agent could be clicked on any platform from a33a9ba until #307. A by-hand check that tells the
+checker to expect the broken behaviour is the manual equivalent of a vacuous test, and it is a
+credible reason the bug survived several release cycles.
+
+**The toast is still the one to watch for, and the lever has changed.** `copyOnSelect` defaults
+to **true** in the fullscreen renderer; measured, the message reads *"copied N chars to tmux
+buffer · paste with prefix + ]"*, and this configuration has no prefix key.
+`files/entrypoint.sh` now turns `copyOnSelect` off instead of the env variable doing it — and it
+**cannot** be a policy setting, because `copyOnSelect` is not in Claude Code's settings schema at
+all: it is read from the global config, `~/.claude.json`, which is why a named volume and not
+`/etc/claude-code/managed-settings.json` is where it lives. **If that toast comes back, the key
+has stopped being read.** That is the dominant failure mode here: an upstream rename would be
+*silently ignored* with no validation error, every file-level assertion in the suite would stay
+green, and Claude Code auto-updates in this image. Nothing in the automated tiers can see it —
+there is still no non-interactive readout of the renderer or the mouse mode (`claude config` is
+not a subcommand and `claude doctor` reports installation health only).
+
+**WHERE `ctrl+c` ACTUALLY PUTS THE TEXT, per terminal, and this is the residue #307 did not
+fix (#318).** Claude Code copies with `tmux load-buffer -w -`, and `set -s set-clipboard on` plus the
+`Ms=` override in tmux.conf forward that outward as OSC 52 — so it reaches the clipboard on
+iTerm2, VS Code, Windows Terminal, Ptyxis, kitty, ghostty and foot, and **not on macOS
+Terminal.app**, which does not implement OSC 52 (measured). On Terminal.app the toast therefore
+claims a copy that did not happen, which is #66 arriving through the application. **Tracked as
+#318**, and it is not fixable from inside the container: there is no setting for the transport and no way to correct
+the string. Before #307 this path was unreachable, because a drag inside Claude Code was
+discarded entirely — so confirm it per terminal and treat Terminal.app's answer as known.
 
 Then the same wheel test with `codex`, where the expectation is the **opposite** and that is not a
 bug: tmux scrolls, the banner does appear, and codex uses part of the pane. Its TUI is inline by
@@ -1512,11 +1539,15 @@ output really is in the 50,000-line scrollback and copy mode is the right way to
 **Known, filed separately as #83:** `CTRL+T` is bound to "new tab", so Codex's own *"ctrl + t to
 view transcript"* never reaches it. Do not report that as a failure of this section.
 
-*Linux baseline (Ubuntu 26.04 native, rootless podman 5.7.0):* **every row above passes.** Two of
-them were the reasons to doubt this change at all and are the ones to watch on another platform:
-no flicker, which was the open question about running an alt-screen renderer under this tmux, and
-no "copied … to tmux buffer" toast, which is the entire job of
-`CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1`.
+*Baseline, re-measured for #307 rather than inherited — macOS 15, Terminal.app, rootless podman,
+image 2.1.225:* the three click rows and the hover row **pass**; the plain-drag row passes, with
+the footer reading `ctrl+c to copy` and no toast; `FN`+drag then `CMD+C` copies **provided FN is
+released before CMD+C** — holding it through the chord copies nothing, which cost a bad bug report
+during this very check. **Not re-measured on Linux or WSL**, and the previous Linux baseline is
+withdrawn rather than carried forward: it signed off a click row that cannot have passed. The two
+rows to watch on another platform are still no flicker, which was the open question about running
+an alt-screen renderer under this tmux, and no "copied … to tmux buffer" toast on a drag, which is
+now the entire job of `copyOnSelect: false`.
 
 **The wheel row is why this section exists**, because it is the one part of #77 that no test
 reaches. `alt=1 mouse=1` off the shipped image proves tmux *forwards* the event and stops there;

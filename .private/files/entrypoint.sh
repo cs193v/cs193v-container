@@ -36,6 +36,43 @@ link="$HOME/.claude.json"
 if [ -d "$store" ]; then
     [ -e "$store/.claude.json" ] || printf '{}\n' > "$store/.claude.json" 2>/dev/null || true
     ln -sfn "$store/.claude.json" "$link" 2>/dev/null || true
+    # COPY-ON-SELECT OFF, ONCE PER CONFIG. `"tui": "fullscreen"` (see
+    # files/claude-code/managed-settings.json) turns on the renderer's own text selection,
+    # whose `copyOnSelect` DEFAULTS TO TRUE: a drag inside Claude Code then copies with
+    # `tmux load-buffer -w -` and toasts "copied N chars to tmux buffer - paste with
+    # prefix + ]". This configuration sets `prefix None`, so that names a key that does not
+    # exist -- and on macOS Terminal.app, which does not implement OSC 52 (measured; see
+    # files/tmux/tmux.conf Part 3), the copy does not reach the clipboard either. That is
+    # issue #66 arriving through the application instead of through tmux.
+    #
+    # WHAT THIS DOES NOT BUY, so nobody reads it as more than it is: with copyOnSelect off a
+    # drag no longer copies, but Claude Code's footer then offers `ctrl+c to copy` and that
+    # path uses the SAME transport. On a terminal without OSC 52 it still claims a copy that
+    # did not happen -- opt-in behind a keystroke rather than fired by an unintended gesture,
+    # which is the whole of the improvement. Tracked as #318.
+    #
+    # HERE, AND NOT IN THE IMAGE, because podman copies image content only into an EMPTY
+    # named volume: a copy baked in at this path would be seeded on first mount and never
+    # refreshed, which is every student and every staff checkout that already exists. Same
+    # trap and same shape of fix as ~/.codex/AGENTS.md below. It is also why this runs
+    # UNCONDITIONALLY rather than inside the seed arm above -- a new volume and a volume
+    # created weeks ago then reach the outcome by the same code path, which is the whole
+    # point and also what makes the test of it non-vacuous.
+    #
+    # ONLY WHEN THE KEY IS ABSENT, which the helper decides. /config offers "Copy on
+    # select" as a toggle and nothing here can mark a value as policy the way `tui` is, so
+    # forcing it every start would make that toggle appear to work and then revert.
+    #
+    # THE REAL FILE, NOT $link: the helper replaces the file by renaming a temp beside it,
+    # and rename(2) does not follow a symlink on its destination. The helper resolves the
+    # path itself, so this is belt and braces rather than the only guard.
+    #
+    # THIS IS THE SAFE MOMENT AND THE ONLY ONE: PID 1's prologue runs before any `claude`
+    # exists, and Claude Code holds this file parsed in memory and writes it back whole.
+    if [ -f "$store/.claude.json" ] && [ -r /etc/cs193v/claude-global-defaults.py ]; then
+        python3 /etc/cs193v/claude-global-defaults.py \
+                "$store/.claude.json" >/dev/null 2>&1 || true
+    fi
 fi
 
 # The course notes, for Codex. Same class of problem as the line above and a different shape of

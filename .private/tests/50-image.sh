@@ -43,7 +43,13 @@ done
 # they nudge nothing and would only be an unexplained environment variable that quietly
 # changes what a student's server binds to. Asserted as an absence for the same reason
 # GIT_EDITOR is: the tempting change is to add it back, so that has to break something.
-for forbidden in "HOST=" "FLASK_RUN_HOST="; do
+#
+# CLAUDE_CODE_DISABLE_MOUSE IS HERE FOR THE SAME REASON AND COVERS TWO VARIABLES (#307). The
+# substring catches both ..._DISABLE_MOUSE and ..._DISABLE_MOUSE_CLICKS: the first selects mouse
+# mode "off" and the second "scroll", and both make Claude Code drop left-button events -- "off"
+# additionally takes the wheel, which is #77. Re-adding either is the tempting fix, so it has to
+# break something. DO NOT tidy this into two entries; one of them would drift.
+for forbidden in "HOST=" "FLASK_RUN_HOST=" "CLAUDE_CODE_DISABLE_MOUSE"; do
     assert_not_contains "img:no-$forbidden" "$forbidden" "$env_json"
 done
 # GIT_EDITOR must stay unset. With GIT_EDITOR, core.editor, VISUAL and EDITOR all unset,
@@ -1447,15 +1453,25 @@ assert_eq "claude:policy-not-student-writable" "ok" \
 # an empty answer is also what a crashed python3 leaves behind.
 assert_eq "claude:image-pins-the-fullscreen-renderer" "fullscreen" \
     "$(R 'python3 -c "import json;print(json.load(open(\"/etc/claude-code/managed-settings.json\")).get(\"tui\",\"ABSENT\"))"')"
-# ...and the variable that keeps its copy-on-select from promising a paste route this container
-# does not have. Asserted from a process's real environment rather than by reading the ENV line,
-# so a layer ordering that dropped it would be caught.
+# ...AND NO VARIABLE THAT COUNTERMANDS IT (#307). CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 shipped
+# here until #307 and was read as narrowing the tracking modes only; it also makes Claude Code
+# discard every LEFT-button event, so nothing inside the agent could be clicked. The toast it
+# suppressed is real and is handled in files/entrypoint.sh instead -- see the entrypoint block
+# below, which asserts that end to end.
 #
-# WHAT THIS DOES NOT PROVE, recorded rather than glossed: that Claude Code still honours the
-# variable. It is internal and undocumented, there is no non-interactive readout of the renderer
-# or the mouse mode, and the behavioural check needs a logged-in session. tests/MANUAL.md 7.11.
-assert_eq "claude:image-turns-off-drag-selection" "1" \
-    "$(R 'printf %s "$CLAUDE_CODE_DISABLE_MOUSE_CLICKS"')"
+# ASKED OF A REAL PROCESS'S ENVIRONMENT rather than of the ENV line, which is the half worth
+# keeping from the assertion this replaces: a variable reintroduced in a later layer, or by any
+# route other than that one ENV, is caught here and not in the static tier.
+#
+# THE PREFIX, NOT THE NAME WE SHIPPED: CLAUDE_CODE_DISABLE_MOUSE is a second variable with the
+# same trap and a worse blast radius (mouse mode "off" takes the WHEEL too, which is #77 back in
+# full). One probe covers both, and a failure NAMES the offender instead of only going red.
+#
+# AND THE HAPPY ANSWER IS A WORD, NOT THE EMPTY STRING. R() folds stderr in, so a probe that
+# failed to run at all must not read as "the variable is absent".
+assert_eq "claude:no-mouse-mode-override-in-the-image" "mouse-overrides:none" \
+    "$(R 'hits="$(env | grep -E "^CLAUDE_CODE_DISABLE_MOUSE" | tr "\n" " ")"
+          printf "mouse-overrides:%s" "${hits:-none}"')"
 
 # ─── the entrypoint's ~/.claude.json symlink ────────────────────────────────────
 # ~/.claude.json must be a FILE, and a single file cannot be a volume target, so the volume
@@ -1473,6 +1489,80 @@ assert_eq "entrypoint:is-idempotent" "ok" \
 assert_eq "entrypoint:seeds-valid-json" "ok" \
     "$(R 'cs193v-entrypoint true >/dev/null 2>&1
           python3 -c "import json;json.load(open(\"/home/student/.claude.json\"))" && echo ok')"
+
+# ─── copy-on-select, end to end through the real entrypoint (#307) ──────────────
+#
+# WHY THIS IS THE TIER FOR IT. R() is a throwaway with no volume, so
+# /home/student/.claude-json is the image's own empty directory -- which makes a
+# pre-populated store an exact model of a volume created weeks ago, and the merge's two
+# arms separable without touching anybody's real config. 10-static.sh drives merge()
+# itself; these assert that the entrypoint actually calls it and that a real start lands
+# the key.
+#
+# EVERY ANSWER IS A WORD WITH A SENTINEL, per this file's rule: an empty reply is also what
+# a crashed python3 leaves behind.
+assert_eq "entrypoint:sets-copyOnSelect-false-on-a-fresh-store" "False" \
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1
+          python3 -c "import json;print(json.load(open(\"/home/student/.claude.json\")).get(\"copyOnSelect\",\"ABSENT\"))"')"
+
+# THE ASSERTION THAT MATTERS, and the one the fix exists for. A volume that already holds a
+# config gets the key too -- seeding only on first creation would test green here and reach
+# nobody, because cs193v-claude-json survives every --rebuild and only --logout clears it.
+# The trust flag rides along because ~/.claude.json also holds project trust and history, so
+# "the key arrived" is not enough on its own.
+assert_eq "entrypoint:reaches-a-store-that-already-has-a-file" "False True" \
+    "$(R 'printf "%s" "{\"projects\":{\"/p\":{\"hasTrustDialogAccepted\":true}}}" \
+            > /home/student/.claude-json/.claude.json
+          cs193v-entrypoint true >/dev/null 2>&1
+          python3 -c "
+import json
+d = json.load(open(\"/home/student/.claude.json\"))
+print(d.get(\"copyOnSelect\", \"ABSENT\"), d[\"projects\"][\"/p\"][\"hasTrustDialogAccepted\"])"')"
+
+# ONLY WHEN ABSENT: a student who turned it back on in /config keeps it. /config can write
+# this key and nothing here can mark it as policy, so forcing it every start would make that
+# toggle appear to work and then revert.
+assert_eq "entrypoint:leaves-a-students-own-choice-alone" "True" \
+    "$(R 'printf "%s" "{\"copyOnSelect\":true}" > /home/student/.claude-json/.claude.json
+          cs193v-entrypoint true >/dev/null 2>&1
+          python3 -c "import json;print(json.load(open(\"/home/student/.claude.json\")).get(\"copyOnSelect\",\"ABSENT\"))"')"
+
+# A CONFIG IT CANNOT PARSE IS LEFT ALONE, byte for byte. This is the one that would cost a
+# student their trust state and history, so it is asserted on the bytes rather than on a
+# return value.
+assert_eq "entrypoint:does-not-damage-an-unparseable-config" "same" \
+    "$(R 'printf "%s" "{\"projects\":" > /home/student/.claude-json/.claude.json
+          before="$(md5sum < /home/student/.claude-json/.claude.json)"
+          cs193v-entrypoint true >/dev/null 2>&1
+          after="$(md5sum < /home/student/.claude-json/.claude.json)"
+          [ "$before" = "$after" ] && echo same || echo CHANGED')"
+
+# TWICE IS A NO-OP ON THE BYTES, not merely idempotent in outcome: indent=2 matches what
+# Claude Code itself writes, so a second start must not reformat the file under it.
+assert_eq "entrypoint:the-merge-is-a-byte-identical-no-op-the-second-time" "same" \
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1
+          before="$(md5sum < /home/student/.claude-json/.claude.json)"
+          cs193v-entrypoint true >/dev/null 2>&1
+          after="$(md5sum < /home/student/.claude-json/.claude.json)"
+          [ "$before" = "$after" ] && echo same || echo CHANGED')"
+
+# NOTHING LEFT BESIDE IT. The merge renames a temp into place; a failure path that forgot to
+# unlink would litter the student's volume, and the volume is the one place litter persists.
+assert_eq "entrypoint:leaves-no-temp-file-in-the-store" ". .. .claude.json" \
+    "$(R 'cs193v-entrypoint true >/dev/null 2>&1; ls -a /home/student/.claude-json | tr "\n" " " | sed "s/ $//"')"
+
+assert_eq "claude:the-global-defaults-helper-is-installed" "644 root" \
+    "$(R 'stat -c "%a %U" /etc/cs193v/claude-global-defaults.py')"
+
+# NO LINUX CLIPBOARD TOOL, and that is what pins the transport rather than a preference.
+# Claude Code picks "native" on linux as soon as it finds xclip/xsel/wl-copy -- and in a
+# container with no DISPLAY that tool cannot work, so the toast would claim a copy that went
+# nowhere. Without them the transport is deterministically the tmux buffer, which is the case
+# files/entrypoint.sh's note reasons about.
+assert_eq "claude:no-linux-clipboard-tool-pins-the-transport" "none" \
+    "$(R 'found=""
+          for t in xclip xsel wl-copy; do command -v "$t" >/dev/null 2>&1 && found="$found $t"; done
+          printf "%s" "${found:-none}"')"
 # Given a command it must exec it rather than entering the keep-alive loop, which is what
 # lets `podman run IMAGE sh -c ...` work at all — including in these very tests.
 assert_eq "entrypoint:execs-a-given-command" "handed-through" \
