@@ -318,7 +318,14 @@ boot_arm_tail() {                     # boot_arm_tail LABEL_RE -> the arm's last
 # AND SO DOES THE CATCH-ALL, which is the half that makes "handing this file ANY argument cannot
 # start an install" true -- and that property is what the door exemption below leans on. Before
 # #232 an unknown argument was silently ignored and the install proceeded.
-assert_says "bootstrap:an-unknown-argument-exits" "exit " "$(boot_arm_tail '^[[:space:]]*\*\)')"
+# `[*]` AND NOT `\*`, because this string reaches awk through `-v`, which processes escape
+# sequences BEFORE the regex is compiled: `\*` arrives as a plain `*`, the pattern becomes
+# `^[[:space:]]**)`, and it matches nothing. Measured on macOS awk 20200816 -- boot_arm_tail
+# returned empty, so this assertion was RED against a catch-all arm that does exit. A bracket
+# expression carries no backslash and so cannot be eaten on the way in. The `)` survives only
+# by luck (an unmatched `)` is literal here), which is why it is left alone rather than
+# "fixed" to match.
+assert_says "bootstrap:an-unknown-argument-exits" "exit " "$(boot_arm_tail '^[[:space:]]*[*])')"
 assert_eq "bootstrap:every-verb-arm-exits" "" \
           "$(printf '%s\n' "$boot_code" | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
              | sed -n 's/^[[:space:]]*\(--[a-z][a-z-]*\)).*/\1/p' \
@@ -1201,6 +1208,7 @@ assert_eq "pin:nobody-else-declares-a-payload-digest" "" \
           "$(grep -l '^PAYLOAD_SHA256=' cs193v "$PRIVATE/course-install.sh" \
              "$PRIVATE/install-utils.sh" "$PRIVATE/wsl-provision.sh" \
              "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+
 
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's
