@@ -690,6 +690,7 @@ cmode() { it display-message -p -t "cs193v:$cwin" '#{pane_in_mode}' 2>/dev/null;
 cpos()  { it display-message -p -t "cs193v:$cwin" '#{scroll_position}' 2>/dev/null; }
 crow()  { hx_cap "$S" | awk -v n="$1" '$0 ~ n {print NR; exit}'; }
 ccopy() { it show-buffer 2>/dev/null; }
+cmouse() { it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}' 2>/dev/null; }
 # Rewind to the fixture. Three things, and each one was a bug in this section before it was one of
 # its rules:
 #
@@ -866,6 +867,87 @@ hx_cmd "$S" "printf '\\033[?1000l\\033[?1006l'"
 hx_settle 0.5
 hx_expect_eq "the mouse goes back to tmux when the app stops asking for it" \
              "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
+
+# --- and a BARE CLICK, which is what #307 turned out to be -------------------
+#
+# THE GESTURE WITH NO COVERAGE AT ALL. Every hx_click in this file aims at the tab bar, a pane
+# border, a popup, or a pane in copy mode; the only thing that has ever reached a mouse-aware APP
+# here is a DRAG, and the unshifted RELEASE is asserted only inside the shifted block above. So
+# "a single click arrives, press and release, at the app under the pointer" was asserted nowhere
+# -- which is how the claim that clicking worked survived in four files' prose while it did not.
+# #307.
+#
+# THE MODE SET IS CLAUDE CODE'S OWN, and it is not the one the fixture above uses. That one asks
+# for `?1000h ?1006h`, which is exactly what Claude Code requested while
+# CLAUDE_CODE_DISABLE_MOUSE_CLICKS was set. Without that variable the agent asks for all four, so
+# that is what this asks for. The flag check pins mouse_any_flag=1 for the whole set: inside tmux
+# it is `mode & ALL_MOUSE_MODES`, so it reads 1 for any ONE of them, and a narrowing that broke
+# the wheel guard for the full set would otherwise show up nowhere.
+#
+# ITS OWN FIXTURE RATHER THAN A CHANGE TO THE ONE ABOVE, for two reasons that are not tidiness.
+# That line already carries ~25 events against HX_W=100, so a needle injected into it can straddle
+# a wrap and `hx_cap | grep -o` works per line. And changing its mode set would re-measure
+# assertions that are already green, which then have to be re-proved.
+#
+# NEITHER HALF OF A CLICK IS OWNED BY THIS CONFIGURATION, and hand mutation is how that was
+# established rather than assumed. MouseUp1Pane is unbound and arrives through tmux's own
+# fall-through for mouse keys it has no binding for -- but so does the PRESS: `unbind -n
+# MouseDown1Pane` leaves this assertion GREEN, because the fall-through delivers it anyway. So
+# `bind -n MouseDown1Pane send-keys -M` is redundant for a mouse-aware pane; what it does is stop
+# stock tmux's `select-pane -t=` applying elsewhere.
+#
+# WHICH DECIDES THE MUTATION TO USE ON THESE THREE, and it is not the obvious one. Unbinding
+# proves nothing; STEALING does -- `bind -n MouseDown1Pane display-message` reddens the press
+# alone, `bind -n MouseUp1Pane display-message` the release alone. That is the realistic
+# regression too, and the same shape tmux.conf already records for the S- bindings: an unguarded
+# binding took the press and swallowed the release, leaving the app with a button held forever.
+#
+# THE MOTION CHECK CANNOT BE MUTATED FROM THE CONFIG AT ALL, recorded so nobody spends the
+# measurement again: tmux 3.6 has NO key name for a buttonless motion report -- `MouseMovePane`
+# and `MouseMove1Pane` are both "unknown key" -- so motion is handed to a mouse-aware pane with
+# no key lookup in between and there is nothing to bind over it. Its mutation is therefore the
+# FIXTURE: drop `?1003h` from the printf above and this assertion reddens alone, which proves it
+# measures the mode rather than nothing. What it guards is a future tmux changing that
+# pass-through, and no config can stand in for that.
+it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
+hx_cmd "$S" "printf '\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006h'; cat -v"
+hx_until 'cmouse' 1 8
+hx_expect_eq "an app asking for the FULL mouse mode set is detected as one" "$(cmouse)" "1"
+
+# COLUMN 20, NOT 5: the drag above left its own press at (5,5) on this screen, and a needle at
+# column 5 would match it instead. The row is pane-relative for the reason given at that drag --
+# two status lines and a border sit above the pane -- and is derived, not hardcoded.
+click_row=8
+hx_click "$S" "$click_row" 20
+hx_until_ok "hx_cap $S | grep -qF '[<0;20;$((click_row - 3))m'" 6
+app_saw_click="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
+hx_expect_contains "a bare click reaches a mouse-aware app" \
+                   "$app_saw_click" "[<0;20;$((click_row - 3))M"
+hx_expect_contains "...and the app gets the RELEASE, not just the press (#307)" \
+                   "$app_saw_click" "[<0;20;$((click_row - 3))m"
+hx_expect_absent "a bare click inside an app gets no copy hint" \
+                 "$(hx_cap "$S" | head -2)" "hold SHIFT"
+
+# MOTION WITH NO BUTTON HELD, which is #307's FIRST symptom and a new event class in this
+# container. Hovering a "ran N shell commands" line needs `?1003h` AND needs tmux to forward a
+# report carrying no button at all (Cb=35): it resolves to MouseMovePane, which Part 3 leaves
+# unbound, so it arrives by the same fall-through as the release. Measured rather than assumed --
+# until #307 removed the variable, no pane in this container had ever asked for 1003.
+hx_str "$S" "$(printf '\033[<35;22;%dM' "$click_row")"
+hx_until_ok "hx_cap $S | grep -qF '[<35;22;$((click_row - 3))M'" 6
+hx_expect_contains "a bare mouse MOVE reaches an app that asked for 1003" \
+                   "$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')" \
+                   "[<35;22;$((click_row - 3))M"
+
+hx_hex "$S" "03"
+hx_settle 0.4
+# ALL FOUR MODES OFF, not the two the block above resets. mouse_any_flag is
+# `mode & ALL_MOUSE_MODES`, so leaving 1002 or 1003 set holds it at 1 and every check below then
+# measures a pane that is still asking for the mouse -- the same failure recorded at the reset
+# above, reached by a different door.
+hx_cmd "$S" "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l'"
+hx_until 'cmouse' 0 8
+hx_expect_eq "the mouse goes back to tmux after the full mode set too" "$(cmouse)" "0"
 
 # --- and the OTHER arm of the same guard: a full-screen app (#77) ------------
 # THE ARM THAT HAD NO COVERAGE. WheelUpPane forwards on
