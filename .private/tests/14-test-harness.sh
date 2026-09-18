@@ -2022,11 +2022,52 @@ assert_contains "ebg:announces-that-it-logs-you-out"   "CS193V_DESTRUCTIVE" "$ou
 assert_match    "ebg:announces-the-volumes-it-deletes" 'claude/codex/gh/vercel/git' "$out"
 
 # ─── it composes the way every other tier flag does ───────────────────────────
-# The parser's standing contract is that tier flags are assignments and the last one wins. An
-# exception for this one would be a special case to remember at exactly the wrong moment.
-out="$(ebg_run --everything-but-github --tier windows)"
-assert_contains     "ebg:a-later-tier-flag-wins"      "EBG-RAN 60-win" "$out"
-assert_not_contains "ebg:a-later-tier-flag-wins-alone" "EBG-RAN 70-rel" "$out"
+# AND COMPOSING NOW MEANS ADDING (#256). This block used to assert the opposite -- "tier flags are
+# assignments and the last one wins" -- and that contract IS the bug: a repeated --tier threw the
+# previous one away in silence, so a command naming three tiers measured one and printed a green
+# count for it. This flag composing the same way as every other one is still the claim; what
+# changed underneath it is what every other one does.
+#
+# --serial because the union spans both lanes, and the cheap one is buffered and flushed in a
+# block -- the reason given above the first ebg_run in this fixture.
+out="$(ebg_run --everything-but-github --tier windows --serial)"
+assert_contains "ebg:a-tier-flag-still-runs-what-it-names"   "EBG-RAN 60-win" "$out"
+assert_contains "ebg:a-tier-flag-does-not-narrow-the-flag"   "EBG-RAN 70-rel" "$out"
+
+# THE UNION REALLY UNIONS, and the only tier that can prove it is the excluded one -- every other
+# tier the fixture declares is in the derived list already, so naming it adds nothing and this
+# assertion would hold against a parser that ignored --tier entirely.
+#
+# SO `--everything-but-github --tier github` RUNS THE GITHUB TIER, on purpose. The flag's promise
+# is that it does not SUPPLY A CREDENTIAL -- CS193V_GH_TEST_TOKEN is deliberately not among the
+# gates it sets, and the real 90-setup-git-github.sh skips itself without one. Naming the tier
+# yourself is not the flag reaching for GitHub behind your back, and the alternative is a
+# precedence rule: a flag that silently un-asks for something you typed is exactly the shape of
+# #256. The fixture's fake has no token gate, so here it runs and says so.
+out="$(ebg_run --everything-but-github --tier github --serial)"
+assert_contains "ebg:an-explicitly-named-tier-is-added"   "EBG-RAN 90-gh"  "$out"
+assert_contains "ebg:adding-one-tier-drops-no-other"      "EBG-RAN 70-rel" "$out"
+# AND IN THE OTHER ORDER, which is the only order that can tell a union from a re-assignment.
+# The flag used to blank TIERS as it was read, so everything typed BEFORE it was discarded -- and
+# because it then adds every tier but github back, the loss is invisible for every tier except
+# that one. So this is the same claim as the pair above with the words swapped, and it is the
+# only arrangement of them that fails when the blanking comes back.
+out="$(ebg_run --tier github --everything-but-github --serial)"
+assert_contains "ebg:the-flag-does-not-un-ask-an-earlier-tier" "EBG-RAN 90-gh" "$out"
+
+# ─── and it selects nothing the suites do not declare ─────────────────────────
+# THE DEFAULT TIER LIST IS NOT PART OF THIS FLAG'S ANSWER, and keeping it out is a matter of
+# WHERE the `|| TIERS="$DEFAULT_TIERS"` fill-in sits rather than of what this block does. It used
+# to be safe above the flag only because the flag re-assigned TIERS from empty; once every arm
+# merely ADDS, a fill-in that ran first would union the seven default tiers into every
+# --everything-but-github run and advertise tiers that no suite declares and nothing can run.
+#
+# ASSERTED THROUGH THE SCOPE LINE, on the whole list at once: five fake suites declaring five
+# tiers, and a sixth tier in that string means the fill-in leaked in. The fixture's tiers are in
+# suite-file order, which is the order the derivation walks them.
+out="$(ebg_run --everything-but-github --serial)"
+assert_contains "ebg:selects-no-tier-the-suites-do-not-declare" \
+                "over 5 suites, tiers: static container windows release quux" "$out"
 
 # ─── and --help mentions it ───────────────────────────────────────────────────
 # usage() prints the runner's own header, and it USED TO print a hardcoded line range -- so
@@ -2040,6 +2081,141 @@ assert_contains "ebg:help-documents-every-tier" "windows"                 "$out"
 # AND IT STILL STOPS. Reading to a sentinel trades one failure for another: delete the sentinel
 # and `--help` prints the whole script. `set -u` is the first line of code below the header.
 assert_not_contains "ebg:help-stops-at-the-sentinel" "set -u" "$out"
+
+# ─── ARGV: EVERY LIST FLAG ADDS, AND NOTHING IT CANNOT HONOUR GOES UNSAID (#256) ──
+# WHAT WENT WRONG WAS A SILENT NARROWING. `--tier` and `-k` ASSIGNED, so each occurrence threw the
+# last one away without a word: `--tier static --tier unit --tier shim` ran one tier of three and
+# printed a green count for it, and `-k a -k b -k c` re-checked one suite of three and was read as
+# "did not reproduce". The comma form was documented and worked; the repeated form was not
+# documented, not rejected and not warned about, and the two differ by two commas.
+#
+# DRIVEN THROUGH ebg_run, which is the general "run the copied runner with arbitrary argv" harness
+# its own comment says it is, rather than through $RUN above: accumulating TIERS is not observable
+# against a fixture whose every suite is static. Nothing here sets a gate or builds anything.
+#
+# THE CLAIM IS AN EQUIVALENCE, not a hand-written expectation. The comma form is the documented
+# one and has always worked, so the repeated form is right exactly when it selects what the comma
+# form selects -- and a wrong belief about which suites that is cannot hide inside a diff of the
+# two. The per-suite needles either side of it are what stops the equivalence passing on two
+# identically empty runs.
+# ONE SORTED LINE, so a claim about which suites ran can be an EQUALITY against a literal rather
+# than a handful of presences -- and assert_contains is structurally blind to a suite that was
+# DROPPED, which is the whole of #256. SORTED because --serial fixes the order only within a
+# lane, and no assertion here should depend on which lane finished first.
+ebg_ran() {                           # ebg_ran OUTPUT -> the suites that ran, sorted, space-joined
+    printf '%s\n' "$1" | sed -n 's/^EBG-RAN \([^ ]*\).*/\1/p' | LC_ALL=C sort \
+        | do_tr '\n' ' ' | sed 's/ *$//'
+}
+
+repeated="$(ebg_run --serial --tier static --tier windows)"
+comma="$(ebg_run --serial --tier static,windows)"
+assert_contains "args:a-repeated-tier-keeps-the-first"  "EBG-RAN 01-cheap" "$repeated"
+assert_contains "args:a-repeated-tier-keeps-the-second" "EBG-RAN 60-win"   "$repeated"
+# AND NOTHING CAME WITH THEM. Two tiers asked for, two suites run -- and this is an EQUALITY on
+# the whole set rather than one more absence, because the absence has to be of the right thing:
+# written as `assert_not_contains EBG-RAN 70-rel` it was green against a union that also pulled
+# in DEFAULT_TIERS, since `release` is not one of those. Pinning the set catches a suite arriving
+# as readily as one going missing, which is the asymmetry #256 turned on.
+assert_eq "args:a-repeated-tier-adds-nothing-else" "01-cheap 60-win" "$(ebg_ran "$repeated")"
+assert_eq "args:a-repeated-tier-matches-the-comma-form" \
+          "$(ebg_ran "$comma")" "$(ebg_ran "$repeated")"
+
+# ─── and the same for -k, which had no way to name two suites at all ──────────
+# FILTER WAS ONE PATTERN AND ONE ONLY, so three named suites meant three runs -- and the command
+# that looks like it asks for three asked for the last. Accumulating ORs them, which is what
+# `-k a -k b` reads as; -k stays a NARROWING of the tier set, so the tiers still have to be asked
+# for and a suite outside them is still not run.
+krepeat="$(ebg_run --serial --tier static,windows,release -k 01-cheap -k 60-win)"
+kcomma="$(ebg_run --serial --tier static,windows,release -k 01-cheap,60-win)"
+assert_contains "args:a-repeated-k-keeps-the-first"  "EBG-RAN 01-cheap" "$krepeat"
+assert_contains "args:a-repeated-k-keeps-the-second" "EBG-RAN 60-win"   "$krepeat"
+# 70-rel's TIER WAS ASKED FOR on that run and it still did not run, which is the half of -k that
+# an OR could have destroyed. Not vacuous: the two needles above prove this run started.
+assert_not_contains "args:k-still-narrows-inside-the-tiers" "EBG-RAN 70-rel" "$krepeat"
+assert_eq "args:a-k-list-matches-the-comma-form" \
+          "$(ebg_ran "$kcomma")" "$(ebg_ran "$krepeat")"
+
+# ─── a tier nobody declares is a typo, and it used to go green ────────────────
+# `--tier static,unti` ran the three static suites and exited 0: an unrecognised tier matched no
+# suite, and the good tier beside it kept the count non-zero. The same failure wearing a smaller
+# hat -- a subset reported as the whole.
+#
+# CHECKED AGAINST WHAT THE SUITES DECLARE, not a list written down in the runner, for the reason
+# the derived tier list above gives. `quux` is a tier THIS FIXTURE INVENTED and the runner has
+# never heard of, so its presence in the refusal is the proof the set was derived: a hand-written
+# list could not contain it.
+out="$(ebg_run --tier static,unti)"
+assert_contains "args:an-unknown-tier-is-refused"           "unknown tier: unti" "$out"
+assert_contains "args:an-unknown-tier-exits-2"              "[rc=2]"             "$out"
+assert_contains "args:an-unknown-tier-names-the-known-ones" "quux"               "$out"
+# AND THE GOOD HALF OF THE COMMAND RAN NOTHING. A warning that let the run carry on would print
+# the same green-for-a-subset this section exists to stop. Anchored by the three needles above.
+assert_not_contains "args:a-bad-tier-runs-no-suite" "EBG-RAN" "$out"
+# A TIER NAME IS LOWERCASE LETTERS, which is all tier_of's sed can ever capture. Refused for its
+# shape before any suite is read, so `--tier '*'` cannot become a glob against whatever directory
+# you happened to run from.
+# THE NEEDLE IS THE REFUSAL, not the exit code: `--tier '*'` ALREADY exits 2 today, because the
+# glob expands against the working directory, matches no tier and lands on "no suites matched".
+# An assertion on rc alone would have been green before this change and green after the shape
+# check was deleted again -- which is the vacuous-test shape this whole section is about.
+out="$(ebg_run --tier '*')"
+assert_contains "args:a-tier-that-cannot-be-a-tier-name-is-refused" "not a tier name: *" "$out"
+
+# ─── a flag with nothing after it asked for something, and got the defaults ────
+# A TRAILING `--tier` fell through to `[ -n "$TIERS" ] || TIERS="$DEFAULT_TIERS"` and ran all seven
+# default tiers -- the widest possible answer to the narrowest possible request. `-k` with nothing
+# after it disabled filtering the same way.
+out="$(ebg_run --tier)"
+assert_contains     "args:a-tier-with-no-value-is-refused" "[rc=2]"  "$out"
+assert_not_contains "args:a-tier-with-no-value-runs-nothing" "EBG-RAN" "$out"
+out="$(ebg_run -k)"
+assert_contains     "args:a-k-with-no-value-is-refused"    "[rc=2]"  "$out"
+assert_not_contains "args:a-k-with-no-value-runs-nothing"  "EBG-RAN" "$out"
+# A VALUE OF NOTHING BUT SEPARATORS IS THE SAME BUG WEARING A COMMA, and it is why the refusal
+# asks "did this occurrence name a tier" rather than "was the string empty". `,` is not empty; it
+# splits to a single space, a `for` over that iterates zero times, and it fell through to the
+# default tiers exactly as a missing value did.
+out="$(ebg_run --tier ,)"
+assert_contains     "args:a-value-of-only-separators-is-refused" "[rc=2]"  "$out"
+assert_not_contains "args:a-value-of-only-separators-runs-nothing" "EBG-RAN" "$out"
+# AND A REPEAT IS NOT A VALUE THAT NAMED NOTHING. `--tier static --tier static` contributes a
+# token the de-duplication declines to add, and refusing that would make the union's own
+# idempotence an error -- which is what asking "was anything ADDED" instead would have done.
+assert_eq "args:naming-one-tier-twice-is-not-an-error" "01-cheap" \
+          "$(ebg_ran "$(ebg_run --serial --tier static --tier static)")"
+
+# ─── the attached and = spellings are their own case arms ─────────────────────
+# `--tier=` and `-kVALUE` are SEPARATE ARMS of the option loop from `--tier ` and `-k `, and
+# neither had ever been asserted at all -- so a fix applied to one arm and missed on its twin
+# would have shipped green. That is how #256 itself survived: the comma path worked and was the
+# only one anybody tested.
+assert_eq "args:the-equals-spelling-accumulates-too" "01-cheap 60-win" \
+          "$(ebg_ran "$(ebg_run --serial --tier=static --tier=windows)")"
+assert_eq "args:the-attached-k-spelling-accumulates-too" "01-cheap 60-win" \
+          "$(ebg_ran "$(ebg_run --serial --tier static,windows -k01-cheap -k60-win)")"
+
+# ─── -k '*' is a literal asterisk and has to stay one ─────────────────────────
+# GREEN BEFORE THIS CHANGE AND GREEN AFTER, and it is here as a guard against the refactor
+# itself: FILTERS is now read through an unquoted expansion, so an unguarded loop would expand
+# `*` against the runner's own working directory -- which for this fixture is a directory whose
+# every filename IS a substring of a suite basename, so `-k '*'` would silently start matching
+# every suite instead of none. Mutation: drop the `set -f` from add_filters or matches_filter.
+assert_eq "args:a-star-filter-is-a-substring-not-a-glob" "" \
+          "$(ebg_ran "$(ebg_run --serial -k '*')")"
+
+# ─── and the run says what it measured, at both ends ──────────────────────────
+# THE COMPLAINT #256 CLOSES WITH. `2195 pass` and `919 pass` are both green-looking numbers from
+# commands that differed by two commas, and nothing in either transcript said which one you had
+# just run. The banner grew a suite count and the -k list; the summary grew the whole thing,
+# because by then the banner is thousands of lines up and it is the summary that gets pasted
+# into an issue. Asserted at BOTH ends with different needles, so deleting either one reds.
+out="$(ebg_run --serial --tier static,release)"
+assert_contains "args:the-banner-counts-the-suites"  "(2 suites, tiers:" "$out"
+assert_contains "args:the-summary-repeats-the-scope" "over 2 suites, tiers:" "$out"
+out="$(ebg_run --serial --tier static,release -k 01-cheap)"
+assert_contains "args:the-scope-names-the-filter"    "-k: 01-cheap" "$out"
+# AND IT COUNTS IN ENGLISH. One suite is the commonest narrow run there is.
+assert_contains "args:one-suite-is-not-1-suites"     "over 1 suite, tiers:" "$out"
 
 # ─── telling this run's podman images from a colleague's (#199) ────────────────
 # THE INSTRUMENT THE INSTALL TIER'S THREE HOST CANARIES ARE READ THROUGH. They used to cksum the
