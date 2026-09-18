@@ -238,11 +238,20 @@ assert_eq "export:every-COPY-input-survives" "" "$(printf '%s' "$absent" | sed '
 # §1 already fails if any of these appear, but it fails as a diff. These name the mistake.
 assert_eq "export:no-test-suite"  "" "$(grep '^\.private/tests/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 # NAMED, NOT MATCHED ON "installer" (#221). One installer ships now -- course-install.sh, which
-# the bootstrap execs out of the archive -- so the claim is about the two files a student is
-# handed by the WEBSITE: the bootstrap and the Windows batch file. Both are downloaded, neither
-# travels in the tarball, and a substring match would now be asserting the opposite of the rule.
+# the bootstrap execs out of the archive -- so the claim is about the THREE files a student is
+# handed from outside the tarball: the POSIX bootstrap, the Windows batch file, and the Windows
+# PowerShell bootstrap the one-liner runs (#299). None travels in the tarball, and a substring
+# match would now be asserting the opposite of the rule.
+#
+# `ps1` WAS ADDED TO THE ALTERNATION DELIBERATELY AND NOT AS TIDYING. The pattern read
+# `\.(sh|cmd)$` when install-cs193v.ps1 arrived, so it matched neither of the two branches --
+# the new file's name is not `install-cs193v-windows*` either -- and this assertion silently
+# stopped covering it. Verified before the edit: a `.private/install-cs193v.ps1` in the export
+# list passed. That matters more than it looks, because writing a digest into a file that SHIPS
+# would change the payload manifest and stale PAYLOAD_SHA256 behind release.sh's back; the
+# export-ignore is what keeps the release ordering acyclic, and this is the test of it.
 assert_eq "export:no-bootstrap" "" \
-          "$(grep -E '^\.private/install-cs193v\.(sh|cmd)$|install-cs193v-windows' "$TMP/paths" \
+          "$(grep -E '^\.private/install-cs193v\.(sh|cmd|ps1)$|install-cs193v-windows' "$TMP/paths" \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 # agent-notes.md is the one .md that ships: Containerfile:803 installs it as
 # /etc/cs193v/agent-notes.md and /etc/claude-code/CLAUDE.md is a symlink to it, so both agents

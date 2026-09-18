@@ -147,13 +147,38 @@ Two things need real values:
    values in `install-cs193v-windows.cmd`, which composes the URL it downloads stage two from
    out of its own copy of them; `25-installer.sh` fails if the two files disagree.
 2. **The course website** — host `install-cs193v.sh` and `install-cs193v-windows.cmd`
-   with their SHA-256 published next to the links.
+   with their SHA-256 published next to the links, and `install-cs193v.ps1` at a stable
+   address students can paste.
 
    **A Windows student needs only the `.cmd` now** (issue #93). Stage one used to require the
    `.sh` downloaded into the same folder and refused without it; it fetches it from
    `raw.githubusercontent.com` instead, so the Windows instructions are one file, not two.
    Keep hosting the `.sh` for macOS and Linux, where "download it, read it, check the SHA-256,
    run it" is still the whole story.
+
+   **And since #299 a Windows student normally downloads nothing at all.** They paste
+
+   ```
+   irm <wherever install-cs193v.ps1 lives> | iex
+   ```
+
+   which fetches the `.cmd` from `raw.githubusercontent.com` at the pinned tag, checks it
+   against a digest compiled into the `.ps1`, converts git's LF endings back to the CRLF
+   cmd.exe needs, writes it to `%LOCALAPPDATA%\CS193V`, and starts it.
+
+   **This repository deliberately does not know the course website's address.** The `.ps1` is
+   the only file hosted there and the only one that needs to be found, and it composes the URL
+   it fetches out of `$RepoOwner`/`$RepoName`/`$RepoTag` — the same three constants the `.cmd`
+   and the `.sh` already carry. So the address lives in the course instructions and nowhere in
+   the source tree, and changing where it is hosted changes no file here.
+
+   **The `.ps1` is overwritten in place, which reverses the naming rule below on purpose.** Its
+   two siblings carry the release in their filenames so that a stale copy in `Downloads` is
+   visibly stale. A file that is never on disk cannot go stale, and a student cannot be asked to
+   type a version. What that trades is a new and quiet failure: forget the upload and every new
+   Windows student silently installs the *previous* release — not a broken install, just an old
+   one, so nothing complains. `release.sh` prints the step and `00-release-gates.sh` §1c checks
+   the digest chain, but neither can see an address it is not told.
 
    **The consequence to watch: the `.sh` now has TWO publication points** — the website copy
    students verify by hand, and the raw URL the `.cmd` fetches unattended. Update one and not
@@ -193,6 +218,37 @@ not, and trusts the course website over TLS); that file carries `REPO_TAG` and `
 it fetches `archive/<tag>.tar.gz`, builds a **content manifest** of what it unpacked, and refuses
 loudly unless that manifest hashes to the constant compiled into it. On Windows there is one more
 link: the `.cmd` carries `STAGE2_SHA256` and refuses a stage two whose bytes do not match.
+
+**The one-liner adds a fourth link and removes the first, and that is a weakening rather than a
+rearrangement** (#299). Say it plainly, because the chain still looks complete from the inside.
+`install-cs193v.ps1` carries `CmdSha256` and refuses a `.cmd` whose bytes do not match, so
+everything below it is pinned exactly as before — but nothing checks the `.ps1` itself. There is
+no file for a student to hash, and the step the published digest exists for is simply gone for
+anyone who pastes the line.
+
+What partly replaces it:
+
+- **The payload is still pinned.** The 92 KB `.cmd` and everything downstream of it are verified
+  on the student's machine, which is the part a tampered mirror would have to get past.
+- **A truncated fetch runs nothing.** The whole body of the `.ps1` is inside one `& { … }` whose
+  closing brace is the last byte, so any cut leaves it unbalanced and `iex` refuses the text
+  before executing any of it. Measured at every byte offset, LF and CRLF alike: none ran
+  anything. `curl | bash` has no equivalent — it runs every complete line of a short download.
+- **A captive portal fails loudly**, as a PowerShell parse error rather than as a plausible
+  install.
+
+What is genuinely gone: nobody checks the bootstrap's bytes, and the trust root for that file is
+the course website and TLS alone. The mitigation is that it is short enough to read at its own
+address before pasting it — which is a property maintained by convention, not by a test.
+
+**The digests are two different kinds, and the difference is the `.cmd`'s line endings.**
+`STAGE2_SHA256` and `CmdSha256` are both digests of the **git blob**, because
+`raw.githubusercontent.com` serves the stored object and honours no `.gitattributes`. For the
+`.sh` that is the same bytes as a checkout; for the `.cmd` it is not, because `text eol=crlf`
+means git stores LF and every working tree has CRLF. `release.sh` therefore hashes both with
+`git cat-file blob` rather than reading the files, which is what makes the numbers independent of
+the platform the release was cut on — and it is why the bootstrap converts LF to CRLF *after* it
+verifies rather than before.
 
 **So the trust root is the course website and TLS, not codeload.** Nothing is taken on faith
 between the file a student downloaded and the tree it installs — which is a stronger claim than a
@@ -255,6 +311,52 @@ It is the one file students read, so keep it readable in one sitting:
   lines: the alternative to a copy of `pkg_sha256`'s three probed arms is no check at all, since
   this file may source nothing. "Readable in one sitting" is the constraint, not a line count —
   there is no test asserting one and there should not be.
+
+#### What the Windows bootstrap may do, and what it may not  (#299)
+
+`install-cs193v.ps1` is the sibling of the rules above, and the constraint is sharper: it is the
+one published file **nothing downstream hashes**, so being short enough to read is the only thing
+standing behind it. The `winboot:*` block in `25-installer.sh` holds each of these.
+
+- **No `exit`, anywhere.** Measured on 5.1.26100.9444: `exit` inside text run by `iex` ends
+  `powershell.exe` itself, so a refusal would print and the student's window would close before
+  it could be read. Every refusal arm is a `return` inside the file's one script block.
+  `ps1lint_exit` keeps it that way, and it is the rule nobody remembers.
+- **The whole body is inside one `& { … }` whose closing brace is the last byte.** That is what
+  makes a truncated download fail closed, and it is load-bearing twice — the same construct is
+  what makes `return` available instead of `exit`.
+- **It installs nothing and never names `wsl.exe`.** This is the boundary that lets the launcher
+  be PowerShell while the installer stays a `.cmd`, and it is the direct successor to the
+  deleted `windows:is-cmd-not-ps1`. If installer logic ever appears here, the split has stopped
+  being real and the `.cmd` header's reasoning needs revisiting rather than patching.
+- **7-bit ASCII, no byte-order mark.** A BOM makes `iex` fail to parse; `Invoke-RestMethod`
+  decodes a charset-less response as ISO-8859-1. ASCII is the one encoding under which the
+  course website's server configuration cannot matter. `release.sh` refuses both before it
+  writes anything.
+- **No line-ending rule, deliberately**, which is the one place it differs from its two
+  siblings. `iex` parses LF and CRLF identically and nothing hashes the file, so a rule would
+  pin a property nobody can observe. The obvious move is to add one for symmetry; don't.
+- **Four literal one-line constants** — `$RepoOwner`, `$RepoName`, `$RepoTag`, `$CmdSha256` —
+  for the same reason the `.sh`'s three are literal: `release.sh` rewrites the last two with
+  anchored `sed`, and a composed value would leave the rewrite matching nothing, silently.
+  Everything else is derived from them, so the version and the filename have no second home.
+- **One external program, named in full.** `cmd.exe`, through `$env:SystemRoot`. Issue #125's
+  rule kept rather than inherited: PowerShell does not resolve bare names against the current
+  directory, but Windows still need not be installed on `C:`.
+- **`Invoke-WebRequest`, not `curl.exe`.** curl has shipped in System32 since Windows 10 1803
+  and would save the CRLF conversion, but it does not read Windows' WPAD/PAC proxy
+  configuration and `Invoke-WebRequest` does — so on a managed laptop the cmdlet can reach a
+  host curl cannot, and it is the same stack that already delivered the bootstrap.
+- **No `param()` block.** Measured: a `param()` in text run by `iex` parses but binds nothing,
+  and `$args` is empty. The record is here so nobody adds one and wonders why it never fires.
+- **Two staff overrides and no more:** `CS193V_CMD_URL` and `CS193V_CMD_SHA256`, the same pair
+  the `.cmd` carries one level up. They exist because there is otherwise no way to exercise the
+  file against anything but a tag that has already shipped. Neither is a privilege boundary.
+- **Structural AMSI hygiene, as rules rather than preferences.** `iex` hands the text to
+  Defender before running it, and we do not own the signature set: no `-EncodedCommand`, no
+  `[Convert]::FromBase64String`, no `New-Object Net.WebClient`, no `[scriptblock]::Create` over
+  downloaded text, no concatenation that assembles cmdlet names. The file avoids all of them
+  today by construction; the point is that a future edit must too.
 
 #### Installing from a local copy, for testing  (#280)
 
@@ -1112,11 +1214,24 @@ was before — a student never sets it.
 
 ## Cutting a release
 
-Everything a student downloads is pinned to a tag and checked against a digest (#232), so the
-three numbers that describe a release — the version, the payload manifest and the stage-two digest
-— have to agree with each other and with what GitHub will serve. `.private/release.sh` computes
-all three. Do not do it by hand; the first release was seeded that way and it is the kind of task
-that works four times and then ships something nobody can install.
+Everything a student downloads is pinned to a tag and checked against a digest (#232, #299), so
+the four numbers that describe a release — the version, the payload manifest, the stage-two digest
+and the Windows installer's own digest — have to agree with each other and with what GitHub will
+serve. `.private/release.sh` computes all four. Do not do it by hand; the first release was seeded
+that way and it is the kind of task that works four times and then ships something nobody can
+install.
+
+They form a chain, and `release.sh` writes them in dependency order:
+
+```
+VERSION -> payload manifest -> .sh -> staged .sh blob -> .cmd -> staged .cmd blob -> .ps1
+```
+
+It stays acyclic only because none of the three published files is inside the tree the manifest
+describes — `.gitattributes` export-ignores all of `.private` — so writing a digest into one of
+them cannot change `PAYLOAD_SHA256` behind the script's back. `11-export.sh :: export:no-bootstrap`
+is the test of that, and it had to be widened by hand when the `.ps1` arrived: its pattern matched
+`.sh` and `.cmd` only, so the new file slipped through it silently.
 
 ```sh
 .private/release.sh --patch          # or --minor, or --major
@@ -1126,8 +1241,12 @@ It refuses a dirty tree, an untracked or malformed `.private/VERSION`, a version
 with `REPO_TAG`, a tag that already exists, a carriage return in the bootstrap, a symlink or a
 newline in what would ship, an implausibly small export set, and a machine with no working
 hasher. **Every one of those runs before it writes anything**, which is why it has no `--dry-run`.
-Then it writes `.private/VERSION`, the tag and payload digest into `install-cs193v.sh`, and the
-tag and stage-two digest into `install-cs193v-windows.cmd`, and stops.
+Then it writes `.private/VERSION`, the tag and payload digest into `install-cs193v.sh`, the tag
+and stage-two digest into `install-cs193v-windows.cmd`, and the tag and the `.cmd`'s own digest
+into `install-cs193v.ps1`, and stops. It also refuses a byte-order mark or a non-ASCII byte in
+the `.ps1`, and a missing one — that last because without it the run would die at the final
+rewrite, *after* three files had already been changed, which is the half-cut release
+`assert_unwritten` exists to catch.
 
 It prints the rest as commands, and the order matters:
 
@@ -1139,8 +1258,11 @@ It prints the rest as commands, and the order matters:
    two digests against what GitHub actually serves: it fetches the archive at the tag, runs the
    bootstrap's own `--dev-manifest-hash` over it, and compares. Run it *after* the push — before,
    every gate that depends on publication takes a named skip telling you to push the tag first.
-4. Upload both files to the course website under their versioned names, with the digests
-   `release.sh` printed beside them.
+4. Upload the `.sh` and the `.cmd` to the course website under their versioned names, with the
+   digests `release.sh` printed beside them — **and overwrite `install-cs193v.ps1` at the stable
+   address students paste.** That last one has no version in its name and no digest beside it,
+   so nothing anywhere will tell you it is stale: forget it and every new Windows student
+   silently installs the previous release, which is not a broken install, just an old one.
 
 **The tension worth knowing about:** #232's own issue recommends branch protection with required
 review on `main`, and step 2 pushes there directly. Today one person pushes, so it does not bite.
@@ -1606,6 +1728,74 @@ without one:
   the one-shot property comes from the OS rather than from our code: a malformed entry, or one
   naming a file that is gone, fires once and disappears. It must be HKCU — `HKLM`'s RunOnce runs
   only for members of the Administrators group and runs **elevated**, straight into `:isadmin`.
+
+**#299 made this arrangement more robust without touching any of it.** The value names the `.cmd`
+by absolute path, and under the hand gesture that path is in `Downloads`. The bootstrap writes it
+to `%LOCALAPPDATA%\CS193V` instead — the folder setup already owns — and the resume mechanism is
+unchanged: `%~f0` still reads a real absolute path and `%RESUMECMD%` is byte-for-byte what it was.
+
+**Be precise about how much that is worth, because the tempting version of this claim is wrong.**
+Measured on Windows 11 26200: `StorageSense\Parameters\StoragePolicy` has `01=1` (Storage Sense
+on) and `04=1` (temp files), and **no value** for the Downloads cleanup, which defaults to Never.
+So Storage Sense empties `%TEMP%` out of the box and does **not** empty `Downloads`. What is left
+is a weaker but real hazard — an administrator can turn that cleanup on, and Downloads is a
+folder students tidy by hand between a restart they were told to perform and the sign-in that
+resumes setup. `%LOCALAPPDATA%` is somewhere neither happens.
+
+**Six things were tried and rejected while building the one-liner (#299), each with a
+measurement on Windows 11 26200 / PowerShell 5.1.26100.9444.**
+
+- **Piping the `.cmd` into `cmd.exe`** — the direct translation of `curl | bash`, and it is a
+  dead end rather than an awkward one. Measured with both `type f.cmd | cmd` and `cmd < f.cmd`:
+  `@echo off` is ignored, the banner and prompt print, every line is echoed, **`goto` is
+  silently ignored** (the line it should have skipped ran), and `call :label` fails outright
+  with *Invalid attempt to call batch label outside of batch script*. This installer is 25
+  labels and ~40 forward `goto`s with no other control flow, so piped it does not fail, it runs
+  **wrong**. Nothing recovers this; the one-liner has to go through PowerShell.
+- **A `param()` block in the bootstrap** — parses under `iex` and binds nothing; `$args` is
+  empty and every parameter keeps its default. The working form is
+  `& ([scriptblock]::Create((irm URL))) -Arg`, which is not used here because nothing needs an
+  argument and because `[scriptblock]::Create` over downloaded text is an AMSI signature.
+- **`exit` in the bootstrap** — ends `powershell.exe` itself, closing the student's window and
+  taking the refusal with it. `return` inside the script block is the equivalent of `curl |
+  bash`'s `exit`, which ends the *subprocess* and not the terminal.
+- **`Test-Path 'Registry::HKEY_USERS\S-1-5-19'` as the elevation probe** — the obvious
+  translation of `:isadmin`'s `reg query`, and wrong: it returns **True** from an ordinary
+  session. Seeing the key needs nothing; *reading* it is what needs the token, so
+  `Get-ChildItem` is the correct mirror.
+- **`curl.exe`** — in System32 since Windows 10 1803, and it would make the LF-to-CRLF
+  conversion unnecessary by never involving .NET at all. Rejected because it does not read
+  Windows' WPAD/PAC proxy configuration and `Invoke-WebRequest` does, so on a managed or campus
+  laptop the cmdlet can reach a host curl cannot — and the cmdlet has already proved the network
+  works, since it is how the bootstrap itself arrived.
+- **A line-ending rule on the `.ps1`** — rejected for symmetry's own sake. `iex` parses LF and
+  CRLF identically, inside the script block and outside it, and nothing hashes the file.
+
+**And #276, "rewrite the Windows installer in PowerShell", is deferred rather than done or
+closed.** It was costed while #299 was being planned and came to 4–8 weeks to arrive at
+*strictly less* coverage than today: it retires `27-installer-windows.sh`, `lib/wine.sh`,
+`lib/cmdlint.sh` and 34 wine case families, and the ~12 that cannot be recovered on a
+pwsh-on-Linux harness are exactly the ones that reach an **effect** rather than a decision
+(`IsInRole`, `Start-Process -Verb`, the registry provider and COM are all Windows-only) — the
+families that caught #270. Three of its stated benefits also do not survive contact: UTF-16
+`wsl.exe` output still needs `$env:WSL_UTF8=1` because 5.1 decodes native stdout via
+`[Console]::OutputEncoding`; `$ErrorActionPreference` does not apply to native executables until
+7.3, so every `& wsl` still needs an explicit `$LASTEXITCODE` test and forgetting one is still
+silent; and ASCII-only survives anyway. What genuinely shrinks is real — #125's three-layer
+defence collapses entirely, and the three tri-state exit-code contracts die with it.
+
+The blocker, which postdates the `.cmd` header's reasoning: **a `.ps1` installer cannot be
+relaunched from RunOnce without teaching the machine to bypass execution policy.**
+`cmd.exe /s /c "file.cmd"` is ungoverned; `powershell.exe -File script.ps1` is governed, and
+`Restricted` is the stock client default. The three options are writing `-ExecutionPolicy Bypass`
+into the student's registry, writing `iex (gc file -raw)` into it, or keeping a `.cmd` wrapper
+and admitting the rewrite is partial. The first is the exact gesture the header refuses to teach.
+
+Revisit it when **any** of these becomes true: #129 lands a `windows-latest` job (a real 5.1, a
+real registry, real COM — the only path to *more* coverage than today); or the `.cmd` needs a
+13th PowerShell shell-out, since each one crosses a quoting boundary where `"` cannot appear and
+`%PSDEL%` is already a single-line `foreach` over an array; or a shipped defect is traced to a
+batch pathology `cmdlint` cannot express.
 
 **And the pre-flight ban does not cover the network wait, which is a different shape.** Two
 virtualisation pre-flights were removed from this file and the rule that replaced them is above:

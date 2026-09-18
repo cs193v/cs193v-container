@@ -1526,6 +1526,71 @@ live logged-in session its pane reports `alt=0 mouse=0` and it draws 14 rows of 
 *Expect:* removes the distro without touching any other. Confirm a pre-existing distro
 still works.
 
+### install-cs193v.ps1 — the one-liner, and what *nothing* can answer  (#299)
+
+The section above says wine cannot settle three things about the `.cmd`. For the PowerShell
+bootstrap the position is worse and worth stating bluntly: **no tier executes a single line of
+it.** There is no Windows CI (`.private/README.md` records why there is no `.github/` at all),
+wine's `powershell.exe` is a C fake that interprets nothing, and Windows PowerShell 5.1 needs the
+.NET Framework CLR, which the wine fixture disables outright. `10-static.sh` will parse the file
+if `pwsh` happens to be installed, and pwsh 7 is a different language runtime whose divergences
+from 5.1 are not enumerated anywhere — constructs valid in 7 (`&&`, `||`, `??`, ternary) are hard
+parse failures in 5.1, so a green result there is weaker evidence than it looks.
+
+So everything below is a person's job. Items 1, 2 and 7 break **every Windows student at once**;
+do those every release.
+
+1. **It parses and runs at all under 5.1.** Paste the published line on a clean box. The
+   precedent is not hypothetical: the `%~`-in-a-comment defect shipped a `.cmd` real cmd.exe
+   refused to parse while `--tier windows` ran it 299 pass / 0 fail. A parse error in the
+   bootstrap is that same shape, one file earlier.
+2. **The window does NOT close on a refusal.** Paste from an *elevated* PowerShell. *Expect:* the
+   refusal, the window still open, nothing in `%LOCALAPPDATA%\CS193V`, no download. `exit` inside
+   text run by `iex` ends `powershell.exe` itself; the whole body is wrapped in `& { … }` so that
+   `return` is available instead, and `ps1lint_exit` keeps `exit` out. This item is the only
+   thing that checks the wrapper actually does its job.
+3. **The CRLF conversion is byte-exact on the student's machine.**
+   `(Get-FileHash "$env:LOCALAPPDATA\CS193V\install-cs193v-windows-<v>.cmd").Hash` against the
+   working tree's digest. Fail-closed if the download is wrong — the pin refuses it — but the
+   conversion happens *after* the pin, so a defect there is unguarded.
+4. **AMSI / Defender.** `iex` hands the script text to the Antimalware Scan Interface before
+   executing it, and on a signature match nothing runs and the student sees
+   `ScriptContainedMaliciousContent`. We do not own the signature set and definitions update
+   continuously, so a file that passed last month can be refused this month with nothing in the
+   repo having changed. *Verify each release on a stock-Defender box with current definitions.*
+   Nothing here can be automated: Defender's signatures cannot be shipped into a container. The
+   structural defences are rules, not preferences, and live in `.private/README.md`: no
+   `-EncodedCommand`, no `[Convert]::FromBase64String`, no `New-Object Net.WebClient`, no
+   `[scriptblock]::Create` over downloaded text, no concatenation that assembles cmdlet names.
+5. **`Invoke-WebRequest` reaches the host from campus wifi and from a managed laptop.** This is
+   the measurement the choice of cmdlet over `curl.exe` rests on: curl does not read Windows'
+   WPAD/PAC proxy configuration and the cmdlet does. If it turns out curl works everywhere the
+   cmdlet does, the conversion in item 3 could be dropped — so this is worth measuring properly
+   rather than assuming.
+6. **The console is really inherited.** `pause` reads the keyboard under
+   `Start-Process -NoNewWindow -Wait` from an `iex`'d block, in Windows Terminal, in conhost, and
+   in the VS Code integrated terminal. `irm | iex` does not redirect stdin — the pipeline is an
+   in-process object pipeline, not a file handle — but that is measured on one host, and the
+   seventeen `pause`es downstream all depend on it.
+7. **`%~f0` and the resume, on a profile path containing an ampersand.** Confirm the RunOnce value
+   names `%LOCALAPPDATA%\CS193V\install-cs193v-windows-<v>.cmd`, restart, and confirm setup
+   reopens and finishes. Then do it again on an account called `Tom&Jerry` — **no surrounding
+   spaces**, which is the case that distinguishes a single `-ArgumentList` string from letting
+   .NET quote separate arguments: .NET quotes an argument containing whitespace and not one
+   containing an ampersand, so `Tom & Jerry` would survive the wrong implementation and
+   `Tom&Jerry` would not.
+8. **No `Zone.Identifier` on the written `.cmd`.** `Get-Item <path> -Stream *` lists only
+   `:$DATA`. The mark is applied by the Attachment Manager on a browser's behalf, not by the .NET
+   HTTP stack — that is the claim the `.cmd` header now makes, and this is its check.
+9. **Two concurrent runs.** Paste the line while a `.cmd` from an earlier paste is sitting at a
+   `pause`, and paste it while RunOnce is firing. The bootstrap writes to a temporary name and
+   renames only after the digest matches, so it cannot corrupt a running batch file by byte
+   offset — but two concurrent `wsl --install -d` calls are genuinely unmeasured.
+10. **Execution policy really does not apply.** Confirm the one-liner works under `Restricted` and
+    under a Group-Policy-set policy. "Execution policy governs files, not strings" is load-bearing
+    for the whole design — it is why the launcher may be a `.ps1` at all — and it is asserted
+    nowhere.
+
 ## The OS-native launchers  (#134)
 
 Two artifacts, and they are reachable by automated tests to different depths.

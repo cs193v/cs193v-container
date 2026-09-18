@@ -78,6 +78,10 @@ cget() {                              # cget NAME -> the .cmd's value for it
 sget() {                              # sget NAME -> the .sh's value for it
     sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$CASE/.private/install-cs193v.sh" | head -1
 }
+pget() {                              # pget NAME -> the .ps1's value for it
+    sed 's/\r$//' "$CASE/.private/install-cs193v.ps1" \
+        | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1
+}
 
 # ─── and the promise every refusal makes ───────────────────────────────────────
 # NOTHING IS WRITTEN BEFORE A REFUSAL, which is the whole reason release.sh has no --dry-run: a
@@ -158,6 +162,39 @@ assert_eq "release:the-cmd-keeps-its-crlf" \
           "$(grep -c '' "$CASE/.private/install-cs193v-windows.cmd")" \
           "$(grep -c $'\r$' "$CASE/.private/install-cs193v-windows.cmd")"
 
+# ─── and the Windows bootstrap, which is the last link of the chain (#299) ────
+assert_eq "release:the-ps1-names-the-new-tag" "release-0.0.1" "$(pget RepoTag)"
+
+# THE PIN IS THE .cmd's STAGED BLOB, and this assertion is also the ORDERING test: $CmdSha256 can
+# only equal the digest of the REWRITTEN .cmd if the .ps1 was written after it. Step 7 exists to
+# be last, and nothing else here would notice if it moved.
+assert_eq "release:the-ps1-pins-the-staged-cmd-blob" \
+          "$(gitq cat-file blob :.private/install-cs193v-windows.cmd | do_sha256 | awk '{print $1}')" \
+          "$(pget CmdSha256)"
+
+# AND EXPLICITLY NOT THE WORKING COPY, which is the assertion that goes red the day somebody
+# "restores symmetry" by hashing the file on disk. The two differ only because .gitattributes
+# gives the .cmd `text eol=crlf`: git stores LF, every checkout is CRLF, and it is the stored
+# object raw.githubusercontent.com serves to the bootstrap. Hashing the checkout would publish a
+# number that depends on which platform cut the release.
+#
+# THE PREMISE IS ASSERTED FIRST. If this fixture's .cmd were LF on disk the two digests would be
+# equal for an innocent reason and assert_ne would go red while release.sh was correct -- or,
+# worse, a future fixture change could make them equal and leave this passing vacuously. The CRLF
+# check above is what rules that out, so this line depends on it and says so.
+assert_ne "release:the-ps1-does-not-pin-the-working-copy" \
+          "$(do_sha256 < "$CASE/.private/install-cs193v-windows.cmd" | awk '{print $1}')" \
+          "$(pget CmdSha256)"
+
+# The .ps1 is the one published file nothing downstream hashes, so its own bytes are checked here
+# and nowhere else. ASCII because Invoke-RestMethod falls back to ISO-8859-1 without a charset;
+# no BOM because `iex` will not parse one. Line endings are deliberately NOT checked -- see the
+# note in release.sh for why the third guard the .sh gets would pin nothing here.
+assert_eq "release:the-ps1-stays-ascii" "" \
+          "$(LC_ALL=C grep -n '[^ -~	]' "$CASE/.private/install-cs193v.ps1" || true)"
+assert_ne "release:the-ps1-has-no-bom" "efbbbf" \
+          "$(head -c 3 "$CASE/.private/install-cs193v.ps1" | od -An -tx1 | tr -d ' \n')"
+
 # ─── and every refusal, each of which exists because publishing past it is costly ──
 reset_case
 printf 'stray\n' >> "$CASE/cs193v"
@@ -215,6 +252,59 @@ out="$(rel --patch)"
 assert_eq   "release:a-carriage-return-in-the-bootstrap-is-refused" "1" "$(rel_rc)"
 assert_unwritten "release:a-carriage-return-writes-nothing"
 assert_says "release:that-refusal-explains-the-blob" "raw.githubusercontent.com" "$out"
+
+# ─── the Windows bootstrap's own two refusals (#299) ──────────────────────────
+# A BYTE-ORDER MARK. Measured on Windows PowerShell 5.1: a leading UTF-8 BOM makes `iex` fail to
+# PARSE, so the one-liner dies on line one for every Windows student at once. Nothing downstream
+# hashes this file, so if release.sh does not refuse it, nothing ever will.
+#
+# THE rc ASSERTION HERE IS SUBSUMED, AND THE MESSAGE ONE IS THE REAL TEST. Mutation-tested by
+# deleting the BOM refusal outright: the run still exited 1, because a BOM IS three non-ASCII
+# bytes and the check below catches it one line later. Only
+# release:that-refusal-says-iex-will-not-parse-it went red. The guard earns its place on the
+# message rather than the outcome -- "starts with a byte-order mark, iex will not parse it" is
+# actionable and "contains a non-ASCII byte" sends a TA looking for an accented character that
+# is not there. Keep the rc line for symmetry with the other cases, but do not read it as
+# evidence that this guard exists.
+reset_case
+printf '\357\273\277' > "$TMP/bom.ps1"
+cat "$CASE/.private/install-cs193v.ps1" >> "$TMP/bom.ps1"
+cat "$TMP/bom.ps1" > "$CASE/.private/install-cs193v.ps1"
+gitq commit -qam bom >/dev/null 2>&1
+out="$(rel --patch)"
+assert_eq   "release:a-bom-in-the-ps1-is-refused" "1" "$(rel_rc)"
+assert_unwritten "release:a-bom-in-the-ps1-writes-nothing"
+assert_says "release:that-refusal-says-iex-will-not-parse-it" "byte-order mark" "$out"
+
+# A NON-ASCII BYTE, for the other half: Invoke-RestMethod on 5.1 decodes a response whose
+# Content-Type carries no charset as ISO-8859-1, so the bytes a student runs would not be the
+# bytes written here. ASCII is the one encoding under which the web server cannot matter.
+reset_case
+printf 'Write-Host "caf\303\251"\n' >> "$CASE/.private/install-cs193v.ps1"
+gitq commit -qam nonascii >/dev/null 2>&1
+out="$(rel --patch)"
+assert_eq   "release:a-non-ascii-byte-in-the-ps1-is-refused" "1" "$(rel_rc)"
+assert_unwritten "release:a-non-ascii-byte-in-the-ps1-writes-nothing"
+assert_says "release:that-refusal-names-the-encoding" "ISO-8859-1" "$out"
+
+# AND A MISSING ONE, which is the case a rename produces. Without this, release.sh would reach
+# step 7 and rewrite_one would fail there -- AFTER VERSION and both other files had been
+# rewritten, leaving a half-cut release. That is the failure assert_unwritten exists for, and it
+# is why the check sits with the other pre-write refusals rather than beside the rewrite.
+#
+# MUTATION-TESTED, AND IT CONFIRMED THE PARAGRAPH ABOVE RATHER THAN MERELY ILLUSTRATING IT.
+# Deleting the `[ -r "$PS1" ]` guard left release:a-missing-ps1-is-refused GREEN -- rewrite_one
+# still died at step 7, so the rc was still 1 -- and turned
+# release:a-missing-ps1-writes-nothing RED. This is exactly the case recorded at assert_unwritten
+# above, reproduced by a second guard: an rc-only assertion cannot tell "refused" from "failed
+# halfway", so the pairing is the test and the rc line alone is not.
+reset_case
+gitq rm -q .private/install-cs193v.ps1 >/dev/null 2>&1
+gitq commit -qam "drop the ps1" >/dev/null 2>&1
+out="$(rel --patch)"
+assert_eq   "release:a-missing-ps1-is-refused" "1" "$(rel_rc)"
+assert_unwritten "release:a-missing-ps1-writes-nothing"
+assert_says "release:that-refusal-names-the-bootstrap" "install-cs193v.ps1" "$out"
 
 # A SYMLINK IN WHAT WOULD SHIP. `find -type f` skips one, so it would travel OUTSIDE the verified
 # content -- the whole reason the manifest refuses rather than describes it.

@@ -179,6 +179,72 @@ $(cat "$rel_tmp/curl.err")"
 fi
 rm -rf "$rel_tmp"
 
+# ─── 1c. the Windows one-liner's own link: the .ps1 pins the .cmd  (#299) ─────
+# THE SAME GATE AS §1, ONE LEVEL UP. install-cs193v.ps1 is what a Windows student pastes; it
+# fetches install-cs193v-windows.cmd from raw.githubusercontent.com at the pinned tag and refuses
+# a copy whose bytes do not hash to $CmdSha256. That pin is written by release.sh from the STAGED
+# BLOB, and nothing in the default tiers can check it against what GitHub actually serves --
+# 25-installer.sh pins the shape and the agreement with the .cmd, which is all a working tree can
+# know. This is the one place the published bytes are reachable.
+#
+# WHAT IT CATCHES: a release cut from one tree and tagged from another, and the plain mistake of
+# bumping the .cmd after the .ps1 was written. Every Windows student stops at the digest refusal,
+# so a red here is a class-wide outage caught before the upload rather than after it.
+ps1file="$PRIVATE/install-cs193v.ps1"
+pget() { sed 's/\r$//' "$ps1file" | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1; }
+ps1_tag="$(pget RepoTag)"
+# COMPOSED THE WAY THE .ps1 COMPOSES IT, out of its own three constants, so that a gate cannot
+# pass by testing a URL the bootstrap would not build. 25-installer.sh already pins that the .ps1
+# assembles $CmdUrl from exactly these three.
+cmd_url="https://raw.githubusercontent.com/$(pget RepoOwner)/$(pget RepoName)/$ps1_tag/.private/install-cs193v-windows.cmd"
+ps1_pushed="$(git ls-remote --tags origin "refs/tags/$ps1_tag" 2>/dev/null | awk '{print $1}' | head -1)"
+ps1_tmp="$(new_tmpdir)"
+if [ -z "$ps1_pushed" ]; then
+    # NAMED SKIPS, the same shape §1 uses and for the same reason: an unpushed tag 404s, which is
+    # indistinguishable in the failure message from a typo in the constants this gate exists to
+    # catch. Push the tag, then re-run --release.
+    ps1_why="$ps1_tag is not on origin -- push the tag, then re-run --release"
+    skip "winboot:the-cmd-url-is-fetchable"   "$ps1_why"
+    skip "winboot:the-cmd-url-hashes-to-the-pin" "$ps1_why"
+    skip "winboot:the-served-cmd-is-lf"       "$ps1_why"
+elif curl -fsSL --retry 3 -o "$ps1_tmp/win.cmd" "$cmd_url" 2>"$ps1_tmp/curl.err"; then
+    pass "winboot:the-cmd-url-is-fetchable"
+    record "winboot:cmd-url-bytes" "$(wc -c < "$ps1_tmp/win.cmd")"
+
+    # SHAPE FIRST, which is pkgsha:the-pin-is-the-published-digest's rule and the reason §1 above
+    # states it too: an unanswered fetch would otherwise compare an empty string against an empty
+    # pin and pass forever.
+    ps1_pin="$(pget CmdSha256)"
+    if printf '%s' "$ps1_pin" | grep -qE '^[0-9a-f]{64}$'; then
+        pass "winboot:the-cmd-pin-is-a-digest"
+        record "winboot:cmd-url-digest" "$(do_sha256 "$ps1_tmp/win.cmd" | awk '{print $1}')"
+        assert_eq "winboot:the-cmd-url-hashes-to-the-pin" "$ps1_pin" \
+                  "$(do_sha256 "$ps1_tmp/win.cmd" | awk '{print $1}')"
+    else
+        fail "winboot:the-cmd-pin-is-a-digest" \
+             "install-cs193v.ps1's CmdSha256 is not 64 lowercase hex: '$ps1_pin'"
+        skip "winboot:the-cmd-url-hashes-to-the-pin" "the pin is not a digest, so there is nothing to compare"
+    fi
+
+    # AND THE SERVED COPY IS LF, WHICH IS THE PREMISE THE BOOTSTRAP'S CONVERSION RESTS ON.
+    # raw.githubusercontent.com serves the stored object and honours no .gitattributes, so a
+    # `text eol=crlf` file arrives with LF endings and the .ps1 converts it back before handing it
+    # to cmd.exe -- whose label scanner assumes a two-byte terminator. If GitHub ever served CRLF
+    # the conversion would still be correct (it normalises first, deliberately), but the pin would
+    # be wrong, so this records the assumption rather than leaving it implied.
+    assert_eq "winboot:the-served-cmd-is-lf" "0" \
+              "$(do_tr -dc '\r' < "$ps1_tmp/win.cmd" | wc -c | do_tr -d ' ')"
+else
+    fail "winboot:the-cmd-url-is-fetchable" \
+         "the Windows one-liner would fetch the installer from:
+    $cmd_url
+and that failed. Every Windows student who pastes the one-liner stops here.
+$(cat "$ps1_tmp/curl.err")"
+    skip "winboot:the-cmd-url-hashes-to-the-pin" "the URL could not be fetched"
+    skip "winboot:the-served-cmd-is-lf"          "the URL could not be fetched"
+fi
+rm -rf "$ps1_tmp"
+
 # ─── 1b. the pinned podman .pkg digest is still the published one  (#283) ──────
 # WHY THIS IS A RELEASE GATE AND NOT A REGRESSION. 10-static.sh asserts the pin's SHAPE and
 # 25-installer.sh :: pkgsha:* asserts that a difference is refused; neither can know what the
