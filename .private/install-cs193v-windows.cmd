@@ -21,22 +21,43 @@ setlocal
 :: also has no execute association at all, so nothing happens when you double-click one.
 :: Where batch is a poor tool, this shells out to short PowerShell commands.
 ::
+:: AND THERE IS NOW A .ps1 ANYWAY, WHICH DOES NOT CONTRADICT THE PARAGRAPH ABOVE (#299). Both
+:: reasons in it are facts about a file SAVED ON DISK. install-cs193v.ps1 is never saved: a
+:: student pastes `irm <address> | iex`, `iex` runs a STRING, execution policy governs FILES, and
+:: a string carries no mark of the web either. So neither reason reaches the launcher and both
+:: still reach this file, which is why the launcher may be PowerShell and the installer may not.
+:: What keeps that split honest is that the launcher contains NO INSTALLER LOGIC -- it downloads
+:: one file, checks its SHA-256, and starts it -- and 25-installer.sh asserts that it never so
+:: much as names wsl.exe. The assertion that used to forbid a .ps1 outright is gone, replaced by
+:: that one; see the winboot:* block for the reasoning.
+::
 :: THE MARK OF THE WEB REACHES A .cmd TOO, which this header used to deny -- "a .cmd just runs".
 :: Measured 2026-09-15: a copy downloaded from a browser carries a Zone.Identifier stream
 :: [ZoneTransfer] ZoneId=3, and Windows then refuses to run it from a double-click. The difference
 :: from a .ps1 is that it is the Attachment Manager rather than a policy, so launching the file by
 :: its full path runs it -- there is nothing to unblock and nothing to teach anyone to override.
-:: The course instructions carry the gesture; nothing in this file depends on which one is used,
-:: and no message here names one.
+::
+:: THAT MARK DEPENDS ON HOW THIS FILE ARRIVED, and since #299 there are two ways. A browser
+:: download carries the stream and is refused from a double-click, as above. The copy the
+:: bootstrap writes carries NONE: the mark is applied by the Attachment Manager on a browser's
+:: behalf, not by the .NET HTTP stack Invoke-WebRequest uses, so a file written that way has only
+:: a $DATA stream. Nothing in this file depends on which way it came, and no message here names
+:: one -- the course instructions carry the gesture.
 ::
 :: RUN IT AS YOURSELF. ON A MACHINE WITHOUT WSL IT STILL TAKES TWO RUNS, but since #275 you
 :: normally only start the first one. Turning on a Windows feature needs a restart, so the first
 :: run asks Windows for permission for that one step -- one UAC prompt, mid-run -- registers a
 :: RunOnce entry naming this file, and says to restart. Windows starts the second run itself at
 :: the next sign-in, and that one asks for no permission. If the entry cannot be written, or
-:: something on the machine removes it, the notice says to run this file again by hand instead
+:: something on the machine removes it, the notice says to rerun the installer by hand instead
 :: and that still works exactly as it did. If WSL is already on, one run does everything and
 :: nothing asks for permission at all. It is safe to run any number of times.
+::
+:: AND "RERUN THE INSTALLER" IS NOW THE WORDING EVERYWHERE, rather than "run this file again"
+:: (#299). Under the one-liner this file lives in %LOCALAPPDATA%\CS193V, which no student has
+:: ever navigated to, so a message naming "this file" named something they could not find. None
+:: of them says HOW any more, because the answer differs by gesture and the one that works is
+:: whichever one they used the first time.
 ::
 :: Stage 1 (here) : install WSL and the CS193V Linux environment, then prepare it -- switch
 ::                  Ubuntu's first-run questions off, create the student's account, and give it
@@ -63,8 +84,15 @@ setlocal
 :: read from the response and nothing is written to disk. The consequence worth knowing, since
 :: the note above about the mark-of-the-web is what makes this a .cmd: that mark is an NTFS
 :: alternate data stream, and stage 2 lands on the environment's own Linux filesystem, so it can
-:: never carry one. THIS file still does -- and, per the measurement above, is refused from a
-:: double-click because of it.
+:: never carry one.
+::
+:: THAT SENTENCE IS ABOUT WHAT THIS FILE DOES, AND SINCE #299 IT IS NOT TRUE OF HOW THIS FILE
+:: ARRIVED. Under the one-liner THIS file is itself a download onto Windows: install-cs193v.ps1
+:: fetches it from the raw URL at the pinned tag, checks its bytes against a SHA-256 compiled
+:: into that script, converts the LF endings git stores back to the CRLF cmd.exe needs, and
+:: writes it to %LOCALAPPDATA%\CS193V. So the chain a reader should have in mind is three links,
+:: not two: the .ps1 pins this file, this file pins stage 2, stage 2 pins the course tree. Only
+:: the .ps1 is unchecked, and it is short enough to read at its address.
 ::
 :: TWO FILES AND ONE REGISTRY VALUE ARE WRITTEN TO THE WINDOWS SIDE, AND UNTIL #134 THERE WERE
 :: NONE. The paragraph above used to read "nothing is downloaded onto Windows itself" and was
@@ -82,6 +110,20 @@ setlocal
 ::
 :: written only on the road that asks for a restart, deleted by Windows before it runs it, and
 :: deleted again at :havewsl for the run where it never did.
+::
+:: AND UNDER THE ONE-LINER THERE IS A FOURTH, WRITTEN BY THE .ps1 RATHER THAN BY THIS FILE:
+::
+::     %LOCALAPPDATA%\CS193V\install-cs193v-windows-<release>.cmd
+::
+:: which is THIS file, and it is deliberately the same folder cs193v.ico already lives in. It has
+:: to outlive the restart, because the RunOnce value above names it BY ABSOLUTE PATH -- which is
+:: also why it is not in %TEMP%, which Storage Sense empties out of the box, and not in Downloads,
+:: which it can be configured to empty and which students empty by hand. Measured on Windows 11
+:: 26200: StoragePolicy has 01=1 and 04=1, and no value for the Downloads cleanup, which defaults
+:: to Never -- so that second one is a weaker hazard than the first and is still a real one. The
+:: name carries the release so two
+:: can sit side by side, and so a newer paste cannot overwrite the copy an earlier run verified
+:: and a pending RunOnce entry still points at.
 ::
 :: THEY ARE PER-USER, AND THE QUESTION THAT MATTERS IS *WHICH* USER. This paragraph used to end
 :: "both are per-user and need no elevation of their own", which is true about permissions and
@@ -120,8 +162,8 @@ setlocal
 ::     here needs one, so nothing here has one.
 ::
 ::   * AN UNQUALIFIED PROGRAM NAME. cmd.exe searches the current directory BEFORE %PATH%, and
-::     this file runs from the student's download folder, so a bare `wsl.exe` would run a copy
-::     planted there. Every external program is named through %SYS32%; the block just below this
+::     this file runs from a folder the student can write to, so a bare `wsl.exe` would run a
+::     copy planted there. Every external program is named through %SYS32%; the block just below
 ::     header holds the three lines that close it. Issue #125. It said "with Administrator rights"
 ::     while this file required elevation; it refuses that now, so a planted program would run as
 ::     the student -- a smaller consequence over the same account, and the elevated child
@@ -137,10 +179,17 @@ setlocal
 
 :: ---- where the system's own programs live ------------------------------------
 :: EVERY EXTERNAL PROGRAM BELOW IS NAMED THROUGH %SYS32%, and that is issue #125 rather than a
-:: style choice. This file runs with the DOWNLOAD FOLDER as its working directory, and cmd.exe
-:: searches the current directory BEFORE %PATH% -- so a wsl.exe sitting in Downloads is what a
-:: bare `wsl.exe` runs. Downloads is the likeliest place on the machine for an untrusted file to
-:: already be, and wsl.exe has nineteen call sites here, one of them the handoff to stage two.
+:: style choice. This file runs with WHATEVER DIRECTORY LAUNCHED IT as its working directory,
+:: and cmd.exe searches the current directory BEFORE %PATH% -- so a wsl.exe sitting there is
+:: what a bare `wsl.exe` runs. wsl.exe has nineteen call sites here, one of them the handoff
+:: to stage two.
+::
+:: IT USED TO NAME THE DOWNLOAD FOLDER, AND THE RULE IS UNCHANGED BY ITS NO LONGER BEING ONE.
+:: Under the hand gesture the working directory is Downloads: the likeliest place on the
+:: machine for an untrusted file to already be. Under the one-liner (#299) it is wherever the
+:: student's shell happened to be, normally %USERPROFILE%. That is a less likely place to find
+:: a planted wsl.exe and an equally writable one, which is all #125 needs -- the qualification
+:: below is about what cmd.exe WOULD resolve, not about how probable the plant is.
 ::
 :: AND "AS ADMINISTRATOR" IS NO LONGER PART OF THAT, WHICH CHANGES THE STAKES AND NOT THE RULE.
 :: This file required elevation when #125 was reported, so a planted program ran with
@@ -181,6 +230,14 @@ if defined PROCESSOR_ARCHITEW6432 set "SYS32=%SystemRoot%\Sysnative"
 ::
 :: %~f0 AND NOT %~dp0. The whole path, because what is wanted is the file and not the
 :: folder, and nothing here ever joins a name onto a directory.
+::
+:: THE ORDERING NOW PROTECTS THE HAND GESTURE ONLY, AND IS KEPT FOR EXACTLY THAT (#299).
+:: install-cs193v.ps1 starts this file by absolute path, so under the one-liner %~f0 is
+:: already absolute and the `cd` below could not have changed the answer. A student who
+:: downloaded the file and typed a relative name is the case that still depends on the
+:: order, and it is still a real case -- the one-liner is an addition, not a replacement.
+:: So the assertion stays and this note says what it is now for, rather than the line
+:: quietly becoming decoration that the next reader deletes.
 set "SELF=%~f0"
 
 :: ---- two additive guards, and NEITHER replaces the qualification above --------
@@ -648,7 +705,7 @@ echo.
 echo   Setup will open again by itself when you sign back in, and will
 echo   finish the job. Nothing will ask for permission a second time.
 echo.
-echo   If it does not open, run this same file again. It will carry on
+echo   If it does not open, rerun the installer. It will carry on
 echo   from here.
 echo   ------------------------------------------------------------------
 echo.
@@ -674,7 +731,7 @@ echo.
 echo   ------------------------------------------------------------------
 echo   RESTART YOUR COMPUTER NOW -- use Restart, not Shut down.
 echo.
-echo   After it restarts, run this same file again. It will carry on
+echo   After it restarts, rerun the installer. It will carry on
 echo   from here and will not need permission a second time.
 echo   ------------------------------------------------------------------
 echo.
@@ -1098,7 +1155,7 @@ exit /b 0
 echo   Setup needs permission to turn WSL on, and that permission was
 echo   not given -- so nothing has been changed.
 echo.
-echo   Run install-cs193v-windows.cmd again and choose Yes when Windows
+echo   Rerun the installer and choose Yes when Windows
 echo   asks. Turning WSL on is the only step that needs permission; the
 echo   rest of setup runs as you.
 echo.
@@ -1130,9 +1187,9 @@ echo   CS193V environment, the Start Menu entry, your files. Running as
 echo   an administrator gives all of it to whichever account answered
 echo   the prompt -- %USERNAME% here -- and not necessarily to yours.
 echo.
-echo   Start it again the ordinary way, as yourself. If WSL still has to
-echo   be turned on, setup will ask for permission for that one step
-echo   when it gets there.
+echo   Rerun the installer as yourself, in an ordinary window. If WSL
+echo   still has to be turned on, setup will ask for permission for
+echo   that one step when it gets there.
 echo.
 pause
 exit /b 1
@@ -1215,8 +1272,8 @@ echo.
 echo   Could not install curl in the %DISTRO% environment, which setup
 echo   needs in order to download the rest of itself.
 echo.
-echo   If the network was not up yet inside the environment, running
-echo   this file again is enough. If it happens twice, it is something
+echo   If the network was not up yet inside the environment, rerunning
+echo   the installer is enough. If it happens twice, it is something
 echo   else and running it a third time will not help.
 echo.
 echo   Please send course staff this whole window, including any
@@ -1231,8 +1288,8 @@ echo.
 echo   Could not download the setup script from:
 echo       %INSTALLER_URL%
 echo.
-echo   This is usually a network problem, and it is safe to run this file
-echo   again. Some campus and company networks block
+echo   This is usually a network problem, and it is safe to rerun the
+echo   installer. Some campus and company networks block
 echo   raw.githubusercontent.com outright; if yours does, tell course staff
 echo   rather than spending time on it.
 echo.
@@ -1253,7 +1310,7 @@ echo   The number that actually arrived is printed just above.
 echo.
 echo   That means the transfer was cut short, or something on the network
 echo   answered instead of the real thing - a wifi sign-in page, typically.
-echo   It is safe to run this file again. If it keeps happening, tell course staff.
+echo   It is safe to rerun the installer. If it keeps happening, tell course staff.
 echo.
 pause
 exit /b 1
@@ -1266,7 +1323,7 @@ echo.
 echo   The setup script downloaded, but this installer could not check it,
 echo   so setup is stopping rather than running something unverified.
 echo.
-echo   It is safe to run this file again. If it keeps happening, tell course staff.
+echo   It is safe to rerun the installer. If it keeps happening, tell course staff.
 echo.
 pause
 exit /b 1
@@ -1289,7 +1346,7 @@ echo   The %DISTRO% environment exists, but setup could not finish
 echo   getting it ready: creating your Linux account in it, or
 echo   installing what the course needs there.
 echo.
-echo   It is safe to run this file again once the problem above is
+echo   It is safe to rerun the installer once the problem above is
 echo   fixed -- each step checks whether it has already been done.
 echo.
 echo   Please send course staff this whole window, including any
@@ -1316,7 +1373,7 @@ echo   adding a second one.
 echo.
 echo   That normally means %DISTRO% was set up by an earlier version of
 echo   this installer, which asked you to choose a username. To let this
-echo   version set it up from scratch, remove it and run this file again:
+echo   version set it up from scratch, remove it and rerun the installer:
 echo.
 echo       wsl --unregister %DISTRO%
 echo.
@@ -1329,7 +1386,7 @@ exit /b 1
 
 :stage2failed
 echo   Setup did not finish - see the messages above.
-echo   It is safe to run this file again once the problem is fixed.
+echo   It is safe to rerun the installer once the problem is fixed.
 echo.
 pause
 exit /b %RC%
@@ -1355,7 +1412,7 @@ echo   wrong with this computer. Setup is not going to guess at a
 echo   different reason.
 echo.
 echo   Please send course staff this whole window. Do not spend time
-echo   troubleshooting this yourself, and do not run this file again
+echo   troubleshooting this yourself, and do not rerun the installer
 echo   until it has been sorted out.
 echo.
 pause
@@ -1385,7 +1442,7 @@ echo   Setup could not reach the internet, so it has stopped before
 echo   downloading anything. Nothing has been changed.
 echo.
 echo   If the computer has only just started up, the wifi may still be
-echo   connecting -- give it a moment. Then run this file again and it
+echo   connecting -- give it a moment. Then rerun the installer and it
 echo   will carry on from here.
 echo.
 echo   If you are on a network that asks you to sign in through a web

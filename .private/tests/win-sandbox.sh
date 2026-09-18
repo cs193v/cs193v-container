@@ -70,7 +70,7 @@ WHAT THE MACHINE IS LIKE
                        spends 600 MB. What the fake models is the ANSWER: the retry loop
                        itself lives inside %PSNETWAIT% and no tier runs it
   --registry-fails     the RunOnce write does not take, so the restart notice falls back
-                       to "run this same file again" and promises nothing (#275)
+                       to "rerun the installer" and promises nothing (#275)
   --hijacked           the download folder already holds hostile copies of every program the
                        installer calls; nothing should ever reach them
   --wsl-broken [RC]    wsl.exe is there but --status fails (default -1, which is what it

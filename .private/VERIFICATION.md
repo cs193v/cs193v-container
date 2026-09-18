@@ -977,15 +977,22 @@ range. Run the installer twice and diff both files.
 
 **1.9 — Windows: the refusals a student can reach (#217).** Each of these is a state you can put
 the machine into, and none should ever produce the success box.
-*Run as an administrator* (right-click → Run as administrator, or launch it from an elevated
-terminal): *expect* an immediate refusal saying not to, explaining that what setup installs belongs
-to one Windows account, and telling them to start it again the ordinary way — and **nothing
-touched**: no `wsl.exe` called, no environment created, no Start Menu entry written. This is the
-defect's own case: requiring elevation is what installed the course into a different account.
+*Run as an administrator* — and since #299 there are **two** gestures to try, because the one a
+student is likeliest to reach is the new one. **Paste the one-liner into an elevated PowerShell**
+(Win+X → Terminal (Admin)): *expect* the bootstrap's own refusal, **the window still open
+afterwards**, and nothing in `%LOCALAPPDATA%\CS193V` — no download at all, because the check runs
+before the fetch. The still-open window is the point: `exit` inside text run by `iex` ends
+`powershell.exe` itself, so getting this wrong prints the refusal and then closes it unread.
+Then the original gesture, which still exists: launch the `.cmd` from an elevated terminal, or
+right-click → Run as administrator on a copy downloaded by hand: *expect* an immediate refusal
+saying not to, explaining that what setup installs belongs to one Windows account, and telling
+them to rerun the installer as themselves — and **nothing touched**: no `wsl.exe` called, no
+environment created, no Start Menu entry written. This is the defect's own case: requiring
+elevation is what installed the course into a different account.
 *Permission declined* — on a machine with no WSL, click **No** on the UAC prompt: *expect* a
 refusal that says permission was not given and that nothing has been changed, that tells them to
-run it again and choose Yes, and that does **not** blame the WSL feature or promise a restart will
-help. A declined prompt is a person saying no, not a broken computer.
+rerun the installer and choose Yes, and that does **not** blame the WSL feature or promise a
+restart will help. A declined prompt is a person saying no, not a broken computer.
 *Distro exists, no account:* interrupt an install between `--install` and the account, then re-run.
 *Expect:* it resumes and finishes — this is the state the two-pass design exists to be able to
 resume, and the file's own header promises re-running is safe.
@@ -1155,10 +1162,15 @@ or refute — the support policy depends on it.
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is `wsl --import` from a
 hosted rootfs, which changes the installer.
 
-**5.4b — Windows stage one, from one downloaded file (issue #93).** On a Windows box with **no
-`install-cs193v.sh` anywhere on it**, download only `install-cs193v-windows.cmd` and run it **as
-yourself, by its full path** — not "Run as administrator", which #277 made the installer refuse,
-and not a double-click, which the Attachment Manager refuses on a downloaded `.cmd`.
+**5.4b — Windows stage one, from one downloaded file (issue #93).** This is the **hand gesture**,
+which #299 kept rather than replaced: it is the fallback for a network that breaks the one-liner
+and the only path on which a student can check a published digest themselves. §5.4d below covers
+the one-liner.
+
+On a Windows box with **no `install-cs193v.sh` anywhere on it**, download only
+`install-cs193v-windows.cmd` and run it **as yourself, by its full path** — not "Run as
+administrator", which #277 made the installer refuse, and not a double-click, which the
+Attachment Manager refuses on a downloaded `.cmd`.
 *Expect:* it prints the `raw.githubusercontent.com` URL, fetches stage two into the environment,
 and hands off — no "could not find install-cs193v.sh next to this file", because that arm no
 longer exists. Then check all four of these, because the whole suite fakes `wsl.exe` and can
@@ -1207,6 +1219,30 @@ anything else here is trusted.
 by itself, and setup reopening by itself at the next sign-in and finishing. *Unmeasured and worth
 the most:* whether antivirus leaves the value alone, and whether a profile path containing an
 ampersand still resumes — the wine tier cannot see either.
+
+**5.4d — the Windows one-liner (issue #299).** On a clean Windows box, paste the published line
+into an ordinary PowerShell window. *Expect:* it prints the `raw.githubusercontent.com` URL it is
+fetching, then the path it wrote, then setup runs in **that same window**.
+
+This is the gesture most Windows students will use, and almost nothing about it is covered by a
+tier: there is no Windows CI, wine's `powershell.exe` is a C fake that interprets nothing, and
+Windows PowerShell 5.1 cannot run under wine at all. The full list of what only a person can
+answer is `tests/MANUAL.md`, *the one-liner — what nothing can answer*; run at minimum items 1, 2
+and 7 every release, since each of those breaks every Windows student at once:
+
+1. **It parses and runs at all under 5.1.** The `%~`-in-a-comment episode is the precedent — the
+   `.cmd`'s own documentation broke it and the wine tier ran 299/0 over the wreckage.
+2. **The window does not close on a refusal** (also §1.9 above).
+7. **`%~f0` and the resume**: the RunOnce value names
+   `%LOCALAPPDATA%\CS193V\install-cs193v-windows-<v>.cmd`, and setup reopens after a restart and
+   finishes. Include a profile path containing an ampersand **with no surrounding space** —
+   `Tom&Jerry`, not `Tom & Jerry` — which is the case `-ArgumentList` as a single string exists
+   for and the one .NET's own quoting would get wrong.
+
+*Unmeasured and worth the most:* whether Defender's current definitions let the text through at
+all (AMSI scans anything `iex` runs, and we do not own the signature set), and whether
+`Invoke-WebRequest` reaches `raw.githubusercontent.com` from campus wifi behind the proxy — the
+measurement the choice of cmdlet over `curl.exe` rests on.
 
 **5.5 — cgroup delegation in WSL.** With `systemd=true` in `/etc/wsl.conf`, run §A.5's
 `cgroup-pids` check.

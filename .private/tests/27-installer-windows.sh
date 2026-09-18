@@ -302,7 +302,7 @@ assert_ne   "win-novm-existing:refuses"                        "0" "$WINE_RC"
 assert_says "win-novm-existing:gives-the-same-refusal"         "could not start a virtual" "$WINE_OUT"
 assert_says "win-novm-existing:carries-wsl-own-words"          "virtualization is not enabled" "$WINE_OUT"
 assert_says_not "win-novm-existing:does-not-blame-the-network" "network is not up" "$WINE_OUT"
-assert_says_not "win-novm-existing:does-not-invite-a-retry"    "safe to run this file again" "$WINE_OUT"
+assert_says_not "win-novm-existing:does-not-invite-a-retry"    "safe to rerun the installer" "$WINE_OUT"
 assert_eq   "win-novm-existing:never-runs-bash"                "0" "$(wine_argv_count '\-e bash ')"
 # NOT ASSERTED: that it never says "environment is ready". It IS ready -- it exists, and saying so
 # is true. What was wrong was everything after it, which is what the assertions above pin.
@@ -314,7 +314,7 @@ wine_knob wsl.vm.cannotstart 1
 wine_run
 assert_ne   "win-existing-quiet:refuses"                        "0" "$WINE_RC"
 assert_says_not "win-existing-quiet:does-not-blame-the-network"  "network is not up" "$WINE_OUT"
-assert_says_not "win-existing-quiet:does-not-invite-a-retry"     "safe to run this file again" "$WINE_OUT"
+assert_says_not "win-existing-quiet:does-not-invite-a-retry"     "safe to rerun the installer" "$WINE_OUT"
 assert_says "win-existing-quiet:asks-for-the-whole-window"       "this whole window" "$WINE_OUT"
 assert_eq   "win-existing-quiet:never-runs-bash"                 "0" "$(wine_argv_count '\-e bash ')"
 
@@ -586,7 +586,7 @@ for knob in wsl.apt.update.rc wsl.apt.install.rc; do
     # saying it was safe to run again -- which on a machine that had lost virtualisation was a
     # loop with no exit, since every attempt failed the same way. The offer survives for the case
     # it was always right about; what went is the unconditional promise.
-    assert_says "win-$knob:still-offers-a-retry"   "this file again is enough" "$WINE_OUT"
+    assert_says "win-$knob:still-offers-a-retry"   "the installer is enough" "$WINE_OUT"
     assert_says "win-$knob:bounds-the-retry"       "it is something" "$WINE_OUT"
     assert_eq   "win-$knob:never-downloads"        "0" "$(wine_argv_count '\-e curl -fsSL')"
     assert_eq   "win-$knob:never-runs-bash"        "0" "$(wine_argv_count '\-e bash ')"
@@ -615,7 +615,7 @@ for rc in -1 6 22 23 28 56; do
     wine_run
     assert_ne   "win-dl-$rc:does-not-exit-zero"    "0" "$WINE_RC"
     assert_says "win-dl-$rc:names-the-url"         "raw.githubusercontent.com" "$WINE_OUT"
-    assert_says "win-dl-$rc:says-it-is-safe-to-retry" "safe to run this file again" "$WINE_OUT"
+    assert_says "win-dl-$rc:says-it-is-safe-to-retry" "safe to rerun the installer" "$WINE_OUT"
     assert_eq   "win-dl-$rc:never-runs-bash"       "0" "$(wine_argv_count '\-e bash ')"
 done
 
@@ -708,7 +708,7 @@ wine_run
 assert_ne   "win-isadmin:refuses"                 "0" "$WINE_RC"
 assert_says "win-isadmin:says-not-to"             "Do not run setup as an administrator" "$WINE_OUT"
 assert_says "win-isadmin:says-why-it-matters"     "belongs to ONE Windows account" "$WINE_OUT"
-assert_says "win-isadmin:says-what-to-do"         "Start it again the ordinary way" "$WINE_OUT"
+assert_says "win-isadmin:says-what-to-do"         "Rerun the installer as yourself" "$WINE_OUT"
 # THE NEGATIVES ARE THE POINT OF THE CASE, not the message: the defect was that an elevated run
 # went on to do all of its per-user work under the wrong token.
 assert_eq   "win-isadmin:touches-nothing-else"    "0" "$(wine_argv_count 'wsl.exe')"
@@ -766,7 +766,7 @@ wine_knob wsl.status.rc -1             # WSL present but not usable: the optiona
 wine_run
 assert_eq   "win-nowsl:exits-zero-because-nothing-failed" "0" "$WINE_RC"
 assert_says "win-nowsl:tells-them-to-restart"     "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
-assert_says "win-nowsl:tells-them-to-rerun"       "run this same file again" "$WINE_OUT"
+assert_says "win-nowsl:tells-them-to-rerun"       "rerun the installer" "$WINE_OUT"
 # THE ANTI-VACUITY POSITIVE, and the assertion that this arm now goes through a UAC prompt rather
 # than requiring the whole run to have been elevated: ONE permission request, and it is the only
 # one the file ever makes. A run that died before reaching it would satisfy every line above.
@@ -896,7 +896,7 @@ assert_says "win-resumearm:still-says-to-restart"  "RESTART YOUR COMPUTER NOW" "
 # ...AND STILL NAMES THE FALLBACK. A RunOnce entry can be stripped by antivirus, skipped in Safe
 # Mode, or blocked by policy, and none of that is visible from here. The sentence that tells a
 # student what to do when nothing opens is the one thing that must survive every such case.
-assert_says "win-resumearm:still-says-how-to-do-it-by-hand" "run this same file again" "$WINE_OUT"
+assert_says "win-resumearm:still-says-how-to-do-it-by-hand" "rerun the installer" "$WINE_OUT"
 
 # A REGISTRY THAT REFUSED THE WRITE MAKES NO PROMISE. This is the arm that keeps the sentence
 # above honest: the .cmd reads its own write back, and prints the wording it has always had when
@@ -910,7 +910,7 @@ wine_run
 assert_eq   "win-resumefail:exits-zero-because-nothing-failed" "0" "$WINE_RC"
 assert_eq   "win-resumefail:registers-nothing" "" "$(wine_resume_entry)"
 assert_says "win-resumefail:still-says-to-restart" "RESTART YOUR COMPUTER NOW" "$WINE_OUT"
-assert_says "win-resumefail:tells-them-to-rerun"   "run this same file again" "$WINE_OUT"
+assert_says "win-resumefail:tells-them-to-rerun"   "rerun the installer" "$WINE_OUT"
 # THE PROMISE IS THE DIFFERENCE, AND IT IS ABSENT. Without this the two notices could converge on
 # one string and the read-back would be machinery with nothing behind it.
 assert_says_not "win-resumefail:promises-nothing-it-cannot-keep" "by itself" "$WINE_OUT"
@@ -998,7 +998,7 @@ assert_ne   "win-nonet:does-not-exit-zero" "0" "$WINE_RC"
 assert_says "win-nonet:says-the-network-is-unreachable" "could not reach the internet" "$WINE_OUT"
 # THE REMEDY IS WHAT KEEPS A BOUNDED WAIT FROM BEING A REFUSAL. A probe has a blind spot the real
 # download may not, so the one thing this arm must never do is send a working machine away.
-assert_says "win-nonet:tells-them-to-run-it-again" "run this file again" "$WINE_OUT"
+assert_says "win-nonet:tells-them-to-run-it-again" "rerun the installer" "$WINE_OUT"
 # AND IT STOPS BEFORE SPENDING THE DOWNLOAD. Asserted because a wait that warned and carried on
 # would satisfy every line above.
 assert_eq   "win-nonet:downloads-nothing" "0" "$(wine_argv_count '\-\-install -d')"

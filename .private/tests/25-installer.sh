@@ -2951,13 +2951,181 @@ assert_contains "windows:the-download-is-root" "-u root" \
                 "$(sed 's/\r$//' "$W" | grep -- 'curl -fsSL' | head -1)"
 assert_ok "windows:names-the-same-distro-as-the-sh"  \
           sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/course-install.sh"
-# A .cmd, not a .ps1, so a downloaded file just runs instead of teaching students to click
-# past security warnings in a course about not trusting code.
+# ─── the one-liner bootstrap (#299) ───────────────────────────────────────────
 #
-# $PRIVATE, not a bare name: this file does `cd "$REPO"` at the top, so the relative form this
-# check used to have looked in the repo root while the .cmd lives one directory down -- a
-# .private/install-cs193v-windows.ps1 passed it.
-assert_no_file "windows:is-cmd-not-ps1" "$PRIVATE/install-cs193v-windows.ps1"
+# THIS BLOCK REPLACES windows:is-cmd-not-ps1, AND THE PROPERTY IS NARROWED RATHER THAN DROPPED.
+# That assertion said "there is no PowerShell installer", on the reasoning that a downloaded .ps1
+# is refused by the default execution policy and has no double-click association. Both of those
+# are facts about a file SAVED ON DISK, and #299 introduced a .ps1 that is never saved: `irm | iex`
+# runs a string, execution policy governs files, and a string carries no mark of the web. So the
+# old assertion forbade exactly the file the feature needs, while the property actually worth
+# keeping is one it never stated -- that the LAUNCHER CONTAINS NO INSTALLER LOGIC. That is
+# winboot:it-installs-nothing-itself below, and it is the direct successor to the deleted line.
+P=$PRIVATE/install-cs193v.ps1
+. "$TESTS_DIR/lib/ps1lint.sh"
+assert_file "winboot:the-bootstrap-exists" "$P"
+
+# The same reader idiom as cmd_get above, against `$Name = "value"` instead of `set "NAME=value"`.
+ps_get() {                            # ps_get NAME -> the quoted value of the first assignment
+    sed 's/\r$//' "$P" | sed -n "s/^\\\$$1 *= *\"\\(.*\\)\"\$/\\1/p" | head -1
+}
+# The first line number, among lines that are not whole-line comments, matching a pattern. Used
+# for the ordering assertions, so that prose NAMING a construct cannot satisfy or break them --
+# the same rule the elevation-ordering checks above follow.
+ps_line() {                           # ps_line REGEX -> first matching code line number
+    sed 's/\r$//' "$P" | grep -nv '^[[:space:]]*#' | grep -E ":.*$1" | head -1 | cut -d: -f1
+}
+
+# ── the bytes, which are what `iex` has to be able to parse ──
+# ASCII and BOM are asserted for REASONS THAT DIFFER FROM THE .cmd's even though one predicate is
+# shared: batch is decoded as OEM, while this file is decoded by Invoke-RestMethod, which falls
+# back to ISO-8859-1 when the response carries no charset. Measured on 5.1.26100.9444: a leading
+# BOM makes `iex` fail to parse outright.
+#
+# THERE IS DELIBERATELY NO LINE-ENDING ASSERTION HERE, which is the one place this block and the
+# .cmd's diverge. Measured on the same host: `iex` parses this file identically with LF and with
+# CRLF, and nothing hashes it, so a rule would pin a property nobody can observe. ps1lint.sh says
+# so at length, because the obvious move is to add one for symmetry.
+assert_eq "winboot:is-ascii-only"            "" "$(run_checker cmdlint_non_ascii "$P")"
+assert_eq "winboot:has-no-byte-order-mark"   "" "$(run_checker ps1lint_bom "$P")"
+assert_eq "winboot:names-every-program-in-full" "" \
+          "$(run_checker ps1lint_unqualified_programs "$P")"
+
+# ── the script block, which is load-bearing twice over ──
+# `exit` inside text run by `iex` ends powershell.exe ITSELF, so a refusal would print and the
+# student's window would close before it could be read. And because the closing brace is the LAST
+# byte of the file, any truncated download leaves it unbalanced and `iex` refuses the whole text:
+# measured at every byte offset, none ran anything. Bare `iex` has no such property.
+#
+# ONE OPENER AND THE FILE ENDS WITH THE CLOSER -- not "one `}` at column 0", which is what this
+# assertion said first and which is simply false: the catch blocks and the refusal arms all close
+# at column 0 too. What is unique is the opener, and what matters is that the closer is last.
+assert_eq "winboot:never-exits"              "" "$(run_checker ps1lint_exit "$P")"
+assert_eq "winboot:the-body-is-one-script-block" "1" \
+          "$(sed 's/\r$//' "$P" | grep -c '^& {$')"
+assert_eq "winboot:the-script-block-closes-the-file" "}" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*$' | tail -1)"
+
+# ── the pin, and the sed in release.sh that has to keep finding it ──
+# DECLARED ONCE AND LITERAL. .private/release.sh rewrites $RepoTag and $CmdSha256 with sed
+# anchored at the start of the line; a composed value or a second assignment would leave the
+# rewrite matching nothing and publish the previous release's digest in silence. That failure is
+# the reason install-cs193v.sh's three constants are pinned the same way.
+assert_eq "winboot:the-pin-is-declared-once" "1" \
+          "$(sed 's/\r$//' "$P" | grep -c '^\$CmdSha256 = "')"
+assert_eq "winboot:the-tag-is-declared-once" "1" \
+          "$(sed 's/\r$//' "$P" | grep -c '^\$RepoTag *= *"')"
+ps_digest="$(ps_get CmdSha256)"
+assert_match "winboot:the-pin-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$ps_digest"
+# DERIVED, NOT SPELLED. Writing the empty-input digest out as a literal here would make this
+# assertion agree with itself if the constant were ever pasted in from the same place.
+assert_ne "winboot:the-pin-is-not-the-digest-of-nothing" \
+          "$(printf '' | do_sha256 | awk '{print $1}')" "$ps_digest"
+
+# ── it has to be pointed at the same release as everything else ──
+# The .cmd carries its own copy of the repo triple and 25-installer.sh already fails if it and
+# the .sh disagree; this file is the third copy and joins that check rather than adding a second
+# kind of it. A mismatch here fetches a DIFFERENT release's installer and the digest refuses it,
+# so the failure is loud -- but it is loud on every student's machine rather than here.
+assert_eq "winboot:the-repo-owner-matches-the-cmd" "$cmd_owner" "$(ps_get RepoOwner)"
+assert_eq "winboot:the-repo-name-matches-the-cmd"  "$cmd_name"  "$(ps_get RepoName)"
+assert_eq "winboot:the-tag-matches-the-cmd"        "$cmd_tag"   "$(ps_get RepoTag)"
+assert_eq "winboot:the-tag-names-this-release"     "release-$(cat "$PRIVATE/VERSION")" \
+          "$(ps_get RepoTag)"
+
+# ── where it fetches from, which is what keeps the website out of the repo ──
+# raw.githubusercontent.com AND NOT THE COURSE WEBSITE. This file is the only thing hosted there,
+# so nothing in the source tree has to know the address -- and because raw serves the stored git
+# OBJECT and honours no .gitattributes, the digest above is a blob digest, the same kind and by
+# the same `git cat-file blob` idiom as the .sh's. A website URL would have to be the working
+# tree's digest instead, because the .cmd is `text eol=crlf` and only a checkout has CRLF.
+assert_contains "winboot:it-fetches-the-cmd-from-raw" "raw.githubusercontent.com" \
+                "$(sed 's/\r$//' "$P" | grep '^\$CmdUrl = ')"
+assert_eq "winboot:the-repo-triple-composes-the-url" "1" \
+          "$(sed 's/\r$//' "$P" | grep -c '^\$CmdUrl = ".*\$RepoOwner/\$RepoName/\$RepoTag/')"
+
+# ── the elevation refusal ──
+# NOT THE AUTHORITY -- :isadmin in the .cmd is -- but it spares an elevated student a download
+# and a folder in the wrong profile. Where the two could disagree they disagree safely: this one
+# lets a run through and :isadmin stops it.
+#
+# Get-ChildItem AND NOT Test-Path, WHICH IS THE OBVIOUS TRANSLATION AND IS WRONG. Measured on
+# 5.1.26100.9444 from an ordinary session: Test-Path 'Registry::HKEY_USERS\S-1-5-19' returns
+# True. Seeing the key is there needs nothing; READING it is what needs the token. A rule rather
+# than a comment, because the wrong form looks more idiomatic than the right one.
+assert_eq "winboot:the-refusal-exists" "1" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -c 'HKEY_USERS.S-1-5-19')"
+assert_eq "winboot:it-does-not-use-Test-Path-for-elevation" "" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep 'Test-Path.*S-1-5-19')"
+# UNCONDITIONAL, the same shape as windows:the-refusal-is-not-conditional above. An identity
+# comparison here would hand every path below to whoever answered a UAC prompt.
+#
+# AN EXACT MATCH, AND THE FIRST DRAFT IS WHY. It was `assert_not_match '\-(and|or)'` over
+# `grep '^if (\$elevated)'`, which is vacuous: the mutation it exists to catch turns the line
+# into `if ($elevated -and $true) {`, and that no longer matches the SELECTOR -- so the grep
+# returned nothing, and a not-match against the empty string passes. Mutation-tested, and it was
+# the only assertion in this block that stayed green. The lesson generalises to every negative
+# assertion here: if the needle that picks the subject can be escaped by the defect, the
+# assertion tests nothing. Pinning the whole line cannot be escaped that way.
+assert_eq "winboot:the-refusal-is-not-conditional" 'if ($elevated) {' \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep '^if (\$elevated')"
+# BEFORE ANYTHING IS FETCHED OR CREATED. Line numbers off CODE, not prose.
+assert_ok "winboot:the-refusal-precedes-every-effect" \
+          sh -c "[ $(ps_line 'if \(\$elevated\)') -lt $(ps_line 'New-Item') ] && \
+                 [ $(ps_line 'if \(\$elevated\)') -lt $(ps_line 'Invoke-WebRequest') ]"
+
+# ── the digest check, and the order it has to happen in ──
+# -ne AND NOT -cne. PowerShell's -ne on strings is case-INSENSITIVE, Get-FileHash returns
+# UPPER-case hex, and every digest this project publishes is lower-case. Measured on
+# 5.1.26100.9444: -cne here would refuse every correct download, on every machine, always.
+assert_eq "winboot:the-comparison-is-case-insensitive" "" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -E '\-c(ne|eq) ')"
+# CHECKED FIRST, CONVERTED SECOND. The pin is of the bytes GitHub served; converting to CRLF
+# before hashing would check something GitHub never sent, and the published number would be one
+# nobody could reproduce with `git cat-file blob`.
+#
+# ANCHORED ON ReadAllBytes AND WriteAllText, NOT ON `-replace`, and the first draft of this line
+# is why it says so. `-replace` also spells the version strip forty lines higher up
+# ($RepoTag -replace '^release-'), so the check read "is the hash after line 86", which is false
+# and went red -- the right answer for the wrong reason. A needle that matches a construct used
+# twice tests whichever use comes first, not the one it was written for.
+assert_ok "winboot:it-verifies-before-it-converts" \
+          sh -c "[ $(ps_line 'Get-FileHash') -lt $(ps_line 'ReadAllBytes') ] && \
+                 [ $(ps_line 'Get-FileHash') -lt $(ps_line 'WriteAllText') ]"
+# AND IT DOES CONVERT. raw serves the blob, which is LF; cmd.exe's label scanner assumes CRLF and
+# this installer is entirely goto-structured.
+assert_ok "winboot:it-converts-lf-to-crlf" \
+          sh -c "sed 's/\r\$//' '$P' | grep -q 'WriteAllText'"
+
+# ── what it may and may not do ──
+# THE SUCCESSOR TO windows:is-cmd-not-ps1. The launcher may be PowerShell; the installer may not.
+# The boundary that makes that coherent is that the launcher contains no installer logic at all --
+# it downloads one file, checks it, and starts it. If wsl.exe is ever named here, the split has
+# stopped being real and the deleted assertion's reasoning needs revisiting rather than patching.
+assert_eq "winboot:it-installs-nothing-itself" "" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -i 'wsl')"
+# ONE FOLDER, AND IT IS THE ONE THE INSTALLER ALREADY OWNS (cs193v.ico lives there). The RunOnce
+# entry the .cmd writes names this file by absolute path across a reboot, so it has to persist:
+# %TEMP% is emptied by Storage Sense out of the box (measured: StoragePolicy 01=1, 04=1) and
+# Downloads is not, though that cleanup can be switched on and students tidy it by hand;
+# %APPDATA% roams, so a domain profile would copy 92 KB at every sign-in; %ProgramData% needs an
+# administrator, which setup refuses to be.
+assert_eq "winboot:it-writes-only-under-LOCALAPPDATA" "" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' \
+             | grep -E '\$env:(TEMP|TMP|APPDATA|USERPROFILE|ProgramData)')"
+assert_contains "winboot:it-works-in-the-installers-own-folder" 'Join-Path $env:LOCALAPPDATA "CS193V"' \
+                "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep 'Join-Path \$env:LOCALAPPDATA')"
+# cmd.exe, because a batch file is not an executable and something has to name the interpreter --
+# and ONE -ArgumentList string, because .NET quotes an argument containing whitespace and not one
+# containing an ampersand, so `Tom & Jerry` survives and `Tom&Jerry` would be split by cmd.
+assert_contains "winboot:it-launches-the-cmd-through-cmd-exe" 'System32\cmd.exe' \
+                "$(sed 's/\r$//' "$P" | grep 'Start-Process')"
+assert_contains "winboot:it-passes-one-argument-string" '/s /c' \
+                "$(sed 's/\r$//' "$P" | grep 'Start-Process')"
+# No pipes, matching the .cmd's rule. Comments are stripped first: the header quotes both
+# `irm | iex` and `curl | bash`, which is the trap cmdlint_bcdedit_writes records.
+assert_eq "winboot:it-has-no-pipes" "" \
+          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep '|')"
 
 
 # CRLF is not a tidiness preference. cmd.exe reads a batch file in 512-byte chunks and its label

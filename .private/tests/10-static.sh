@@ -3694,6 +3694,32 @@ assert_ok  "shellcheck:export-tree" \
 # as undefined.
 assert_ok  "shellcheck:release" \
            shellcheck -x --severity=warning $PRIVATE/release.sh
+
+# ─── the Windows bootstrap, if this machine happens to be able to parse it (#299) ───
+# THIS GATE SKIPS ALMOST EVERYWHERE AND IS STILL WORTH ITS LINES. There is no shellcheck for
+# PowerShell here and no way to run Windows PowerShell 5.1 on this machine or in the test image:
+# 5.1 needs the .NET Framework CLR, which the wine fixture disables outright, and wine's
+# powershell.exe is a C fake that interprets nothing. So install-cs193v.ps1 is the one published
+# file whose SYNTAX no tier can check, and the failure that costs is not hypothetical -- the
+# `%~`-in-a-comment defect shipped a .cmd real cmd.exe refused to parse while the wine tier ran
+# it 299/0 (see cmdlint_bad_parameter_substitution). A parse error in the bootstrap is that same
+# shape and lands on every Windows student at once.
+#
+# pwsh 7 IS NOT 5.1, AND THE GAP RUNS THE WRONG WAY. Constructs valid in 7 -- `&&`, `||`, `??`,
+# ternary -- are hard parse failures in 5.1, so a green result here is weaker evidence than it
+# looks: this catches what BOTH reject and is blind to what only 5.1 rejects. It is a smoke test
+# against typos, not a conformance check, and MANUAL.md carries the real one (paste the published
+# line on a clean box, once per release).
+#
+# NAMED RATHER THAN ABSENT, per VERIFICATION.md §A.15: a check that quietly disappears on the
+# machines that cannot run it is indistinguishable from one that was never written.
+if command -v pwsh >/dev/null 2>&1; then
+    assert_ok "syntax:windows-bootstrap" pwsh -NoProfile -Command \
+        "\$e = \$null; \$null = [System.Management.Automation.Language.Parser]::ParseFile('$PRIVATE/install-cs193v.ps1', [ref]\$null, [ref]\$e); if (\$e.Count) { \$e | ForEach-Object { \$_.Message }; exit 1 }"
+else
+    skip "syntax:windows-bootstrap" \
+         "pwsh is not installed; PowerShell 7 parses close enough to 5.1 for a typo gate, and nothing here can run 5.1 at all"
+fi
 # THE ICON GENERATOR (#134). It ships to nobody -- .gitattributes keeps it out of the branch
 # tarball -- but it is the only thing that can rebuild the two artifacts that DO ship, so a
 # quoting bug in it is discovered the next time a master changes and not before. No -x: it

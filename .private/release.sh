@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 #
-# Cut a release: write the version, hash what ships, and compile both digests into the two files
-# a student downloads. Then stop.
+# Cut a release: write the version, hash what ships, and compile every digest into the files a
+# student downloads. Then stop.
 #
 #     .private/release.sh --patch        # 1.2.3 -> 1.2.4
 #     .private/release.sh --minor        # 1.2.3 -> 1.3.0
 #     .private/release.sh --major        # 1.2.3 -> 2.0.0
 #
-# WHAT THIS EXISTS FOR (#232). install-cs193v.sh pins a TAG and refuses a payload whose content
-# does not hash to PAYLOAD_SHA256; install-cs193v-windows.cmd pins the same tag and refuses a
-# stage two whose bytes do not hash to STAGE2_SHA256. Three numbers, in three files, that have to
-# agree with each other and with what GitHub will serve. Computing them by hand is the kind of
-# task that works four times and then ships a release nobody can install.
+# WHAT THIS EXISTS FOR (#232, #299). install-cs193v.sh pins a TAG and refuses a payload whose
+# content does not hash to PAYLOAD_SHA256; install-cs193v-windows.cmd pins the same tag and
+# refuses a stage two whose bytes do not hash to STAGE2_SHA256; install-cs193v.ps1 pins the same
+# tag again and refuses a .cmd whose bytes do not hash to CmdSha256. Numbers in four files that
+# all have to agree with each other and with what GitHub will serve. Computing them by hand is
+# the kind of task that works four times and then ships a release nobody can install.
+#
+# THE ORDER BELOW IS A DEPENDENCY CHAIN AND NOT A SEQUENCE OF CONVENIENCE. Each file is rewritten
+# only after the file it pins has been staged and hashed:
+#
+#     VERSION -> payload manifest -> .sh -> staged .sh blob -> .cmd -> staged .cmd blob -> .ps1
+#
+# It stays acyclic because none of the three published files is inside the tree the manifest
+# describes -- .gitattributes export-ignores all of .private -- so writing a digest into one of
+# them cannot change PAYLOAD_SHA256 behind us.
 #
 # IT WRITES FILES AND STOPS. No commit, no tag, no push, no upload -- it prints those as commands
 # instead. Writing is reversible, the rest is progressively less so, and uploading is
@@ -35,6 +45,7 @@ DIR0="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 REPO0="$(cd -- "$DIR0/.." && pwd -P)"
 BOOT="$DIR0/install-cs193v.sh"
 CMD="$DIR0/install-cs193v-windows.cmd"
+PS1="$DIR0/install-cs193v.ps1"
 VERSION_FILE="$DIR0/VERSION"
 
 # ONE FUNCTION OUT OF THE HARNESS AND NOT THE HARNESS, the same import make-tarball.sh makes. It
@@ -157,6 +168,38 @@ $(printf '%s\n' "$dirty" | sed 's/^/      /')"
   Save it with LF line endings -- raw.githubusercontent.com serves the blob git stored, which
   will be LF, so a CRLF working copy would publish a digest no Windows student can match."
 
+# ─── and the Windows bootstrap, which has two of the same guards and deliberately not the third
+#
+# THE .ps1 IS THE ONLY FILE PUBLISHED FROM THIS TREE THAT NOTHING HASHES. Students paste its
+# address and `iex` runs whatever comes back, so a defect in its BYTES is not caught anywhere
+# downstream -- the digest chain starts one level below it. These two refusals are the whole of
+# the machine-checkable part; MANUAL.md carries the rest.
+[ -r "$PS1" ] || die "the Windows bootstrap is missing: $PS1"
+
+# A BYTE-ORDER MARK, WHICH IS A PUBLISHED-BYTES DEFECT AND NOT A TIDINESS ONE. Measured on
+# Windows PowerShell 5.1.26100.9444: a leading UTF-8 BOM makes `iex` fail to PARSE, so the
+# one-liner dies on line one for every Windows student at once, with nothing on screen but a
+# parse error. Git has no attribute that can prevent one, so this and 25-installer.sh are it.
+[ "$(head -c 3 "$PS1" | od -An -tx1 | tr -d ' \n')" != "efbbbf" ] \
+    || die "install-cs193v.ps1 starts with a UTF-8 byte-order mark.
+  Save it without one -- iex refuses to parse a file that begins with a BOM, so the one-liner
+  would fail on its first line for every Windows student."
+
+# NON-ASCII, for the other half of the same problem: Invoke-RestMethod on 5.1 decodes a response
+# whose Content-Type carries no charset as ISO-8859-1, so anything above 0x7F arrives as a
+# different character than was written. ASCII is the one encoding under which the course
+# website's server configuration cannot matter.
+! LC_ALL=C grep -q '[^ -~	]' "$PS1" || die "install-cs193v.ps1 contains a non-ASCII byte.
+  Invoke-RestMethod decodes a charset-less response as ISO-8859-1, so the bytes a student runs
+  would not be the bytes written here."
+
+# THERE IS DELIBERATELY NO CARRIAGE-RETURN REFUSAL FOR THIS FILE, which is the one place it
+# differs from install-cs193v.sh above, and it is worth saying so here because the obvious move
+# is to add one for symmetry. Measured on the same host: `iex` parses the bootstrap identically
+# with LF and with CRLF endings, inside its script block and outside it, and nothing hashes the
+# file -- so the rule would pin a property no one can observe. The .sh needs it because its blob
+# digest is published; the .cmd needs CRLF because cmd.exe's label scanner does.
+
 # ─── the version, computed rather than typed ───────────────────────────────────
 o_major="${old_version%%.*}"
 o_rest="${old_version#*.}"
@@ -243,10 +286,43 @@ printf '%s' "$stage2" | grep -qE '^[0-9a-f]{64}$' \
     || die "the stage-two digest did not come back as a digest: '$stage2'"
 say "stage two digest  $stage2"
 
-# 5. AND THE .cmd LAST, because it is the only file that depends on another file's digest.
+# 5. THEN THE .cmd, which depends on the digest step 4 just computed.
 rewrite_one "$CMD" 'set "REPO_TAG='       '"' "$new_tag" 'set "REPO_TAG=\([^"]*\)".*'
 rewrite_one "$CMD" 'set "STAGE2_SHA256='  '"' "$stage2"  'set "STAGE2_SHA256=\([^"]*\)".*'
 say "wrote install-cs193v-windows.cmd"
+
+# 6. THE .cmd's OWN BLOB DIGEST, BY THE SAME IDIOM AS STEP 4 AND FOR THE SAME REASON (#299).
+#    The Windows bootstrap fetches the .cmd from raw.githubusercontent.com, which serves the
+#    stored git OBJECT and honours no attribute -- so what a student receives is the blob, and
+#    the blob is what has to be pinned.
+#
+#    `git cat-file blob` AND NOT `sha_stdin < "$CMD"`, AND THE DIFFERENCE IS THE WHOLE POINT.
+#    .gitattributes gives the .cmd `text eol=crlf`, so the blob is LF and every checkout is
+#    CRLF -- two different files with two different digests. Reading the object database asks
+#    git what it stored and is therefore insensitive to the platform the release is cut on; the
+#    working copy on a staff Mac and on a TA's Windows box would give different answers, and one
+#    of them would be a number no student could ever match. This is also why the bootstrap
+#    converts LF to CRLF after it verifies: it checks the bytes GitHub sent, then makes them into
+#    the file cmd.exe needs.
+#
+#    STAGED FIRST, because `git add` is what applies the clean filter that produces those bytes.
+git add -- "$CMD" || die "could not stage install-cs193v-windows.cmd"
+cmdsha="$(git cat-file blob ":.private/install-cs193v-windows.cmd" | sha_stdin)"
+printf '%s' "$cmdsha" | grep -qE '^[0-9a-f]{64}$' \
+    || die "the Windows installer digest did not come back as a digest: '$cmdsha'"
+say "windows .cmd digest  $cmdsha"
+
+# 7. AND THE BOOTSTRAP LAST, because it is now the only file that depends on another file's
+#    digest -- one more link of the chain step 5 is the middle of.
+#
+#    THE `$` NEEDS NO ESCAPING AND IS LEFT ALONE ON PURPOSE. rewrite_one uses its PREFIX as both
+#    the search pattern and the replacement text, so a backslash added to satisfy the pattern
+#    would land in the file. In a POSIX basic regular expression `$` is an anchor only as the
+#    LAST character, and here it is the second, so it is already literal in both roles. Verified
+#    on GNU and BSD sed. The read-back is a pattern only, so it escapes its own.
+rewrite_one "$PS1" '$RepoTag   = "'  '"' "$new_tag" '\$RepoTag   = "\([^"]*\)".*'
+rewrite_one "$PS1" '$CmdSha256 = "'  '"' "$cmdsha"  '\$CmdSha256 = "\([^"]*\)".*'
+say "wrote install-cs193v.ps1"
 
 printf '
   Nothing has been committed, tagged, pushed or uploaded. Next, in this order:
@@ -256,14 +332,25 @@ printf '
       git push origin main %s
       .private/tests/run-tests.sh --release
 
-  Then upload BOTH files to the course website, named for the release, with their
-  digests beside them so a student can check what they downloaded:
+  Then upload these to the course website. The first two are named for the release
+  and carry their digests beside them, so a student can check what they downloaded:
 
       install-cs193v-%s.sh   %s
       install-cs193v-windows-%s.cmd   %s
 
-  --release is not optional: it is the only thing that checks the two digests above
+  And the Windows one-liner, which is OVERWRITTEN IN PLACE at a stable address --
+  it is the one file students never download, so a version in its name would be a
+  version somebody has to type:
+
+      install-cs193v.ps1   %s
+
+  Forgetting that last upload is the quiet failure of this feature: every new
+  Windows student silently installs the PREVIOUS release, which is not a broken
+  install, just an old one, so nothing complains.
+
+  --release is not optional: it is the only thing that checks the digests above
   against what GitHub actually serves. Run it after the push, not before.
 ' "$new_version" "$new_tag" "$new_tag" \
   "$new_version" "$(sha_stdin < "$BOOT")" \
-  "$new_version" "$(sha_stdin < "$CMD")"
+  "$new_version" "$(sha_stdin < "$CMD")" \
+  "$(sha_stdin < "$PS1")"
