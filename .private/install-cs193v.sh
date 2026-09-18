@@ -2,13 +2,18 @@
 #
 # CS193V setup — macOS, Ubuntu, and the WSL CS193V environment on Windows.
 #
-# Download this file, read it, then run it:
+# Run it straight from the course website:
 #
+#     curl -fsSL https://<the address on the course page> | bash
+#
+# Or download it, read it, and run it yourself -- the same install, one more step:
+#
+#     curl -fLO https://<the address on the course page>
+#     shasum -a 256 install-cs193v.sh      # compare with the digest beside the link
 #     bash install-cs193v.sh
 #
-# Its SHA-256 is published next to the download link. Verify it first if you like:
-#
-#     shasum -a 256 install-cs193v.sh
+# `-f` MATTERS IN THE ONE-LINER and is not decoration: without it curl hands the body of a 404
+# to bash and exits 0, so a mistyped address becomes a shell script made of an error page.
 #
 # IT IS SAFE TO RUN THIS AGAIN. Every step checks whether it is already done, so if
 # your wifi drops or you run out of disk part-way through, fix the problem and re-run.
@@ -32,8 +37,15 @@
 #
 # WHAT THE PUBLISHED SHA-256 COVERS, stated plainly rather than implied: this file -- and since
 # #232 this file covers everything else. It carries the tag the course files are fetched from AND
-# the digest their content must hash to, so checking this one number is checking the lot. If you
-# do not check it, what you are trusting is the course website and TLS. See .private/README.md.
+# the digest their content must hash to, so checking this one number is checking the lot.
+#
+# THE ONE-LINER DOES NOT CHECK IT, AND THAT IS A DECISION RATHER THAN AN OVERSIGHT (#297). What a
+# student running it trusts is the course website and TLS -- which is what a student who skipped
+# the check was always trusting, and is now the common case instead of the careless one. It does
+# NOT extend to the course files: PAYLOAD_SHA256 below is verified on the student's own machine
+# on every path, piped or not, and a mismatch refuses. So the unchecked surface is this file.
+# The digest is still published beside the link, and 00-release-gates.sh still fetches the
+# published copy and checks it is a shell script and ours. See .private/README.md.
 #
 # YOUR COPY MAY HAVE A VERSION IN ITS NAME -- install-cs193v-1.2.0.sh, or whatever your browser
 # called it -- because each release is published under its own name. The digest beside the

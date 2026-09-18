@@ -153,8 +153,36 @@ Two things need real values:
    **A Windows student needs only the `.cmd` now** (issue #93). Stage one used to require the
    `.sh` downloaded into the same folder and refused without it; it fetches it from
    `raw.githubusercontent.com` instead, so the Windows instructions are one file, not two.
-   Keep hosting the `.sh` for macOS and Linux, where "download it, read it, check the SHA-256,
-   run it" is still the whole story.
+   Keep hosting the `.sh` for macOS and Linux. Since #297 the published instruction there is
+   one line:
+
+   ```sh
+   curl -fsSL https://<the published .sh> | bash
+   ```
+
+   **`-f` is part of the instruction.** Without `--fail` curl writes the body of a 404 into
+   `bash` and exits 0, so a mistyped or moved link becomes a shell script made of an error page.
+
+   **What the one-liner gives up, and what it does not.** It drops the hand-checked SHA-256 of
+   the bootstrap, so what a student trusts is the course website and TLS — which is what a
+   student who skipped the check was always trusting, now as the common case rather than the
+   careless one. It does **not** touch the course files: `PAYLOAD_SHA256` travels in the
+   bootstrap and is verified on the student's own machine on every path, so the unverified
+   surface is the ~31 KB bootstrap alone. Keep publishing its digest beside the link anyway —
+   `release.sh` writes it for free and it is what staff diff when an install looks wrong — and
+   keep the download/verify/run sequence documented under the one-liner for anyone who wants it.
+
+   **The case neither `-f` nor the digest-in-the-file can catch** is a captive portal answering
+   200 with an HTML login page: it reaches `bash` and its lines run as commands. A student-side
+   digest is the only defence and it is the one this instruction chooses not to require. Staff
+   side it is covered — `00-release-gates.sh`'s `installer:stage2-url-serves-a-shell-script`
+   fetches the published URL and runs `bash -n` over it, measured to reject exactly that page.
+
+   **A truncated transfer is handled in the file rather than in the instruction.** A piped
+   script executes statement by statement as it arrives, so the bootstrap's whole executable
+   body sits inside one brace group: bash must parse it all before running any of it, and a cut
+   stream is a syntax error that does nothing. `bootstrap:the-body-is-guarded` holds the shape
+   and `pipe:a-cut-transfer-*` holds the behaviour.
 
    **And since #299 a Windows student normally downloads nothing at all.** They paste
 
@@ -190,6 +218,11 @@ Two things need real values:
    last month is visibly last month's. A raw URL serves the file under its repository name, with
    no version in it, which is the one property the naming scheme exists to provide. Upload both,
    every release, with their digests beside them.
+
+   **#297 weakened half of that argument and left the other half standing.** Nothing lands in
+   `Downloads` under a one-liner, so "a stale copy is visibly stale" now describes the download
+   path only. The versioned name still earns its keep for staff: it is what makes a student's
+   transcript say which release they ran.
 
    **#221 made that hazard much smaller, and this is the practical payoff of the split.** The
    `.sh` used to be the whole installer — 1700 lines that changed whenever any message, package

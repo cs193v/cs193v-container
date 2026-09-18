@@ -1285,7 +1285,9 @@ build_image() {
     # student takes on day one cannot drift from the one staff run every day.
     #
     # Nothing here needs a terminal: --rebuild prompts for nothing, which is what lets this run
-    # under `curl | bash` and under the test suite alike.
+    # under the test suite and under a double-click alike. It used to say `curl | bash` here;
+    # since #297 that path has a terminal like any other, so it is no longer the example of a
+    # run with nothing to ask with.
     "$DIR/cs193v" --rebuild || exit 1
     ok "$(msg ok.built)"
 }

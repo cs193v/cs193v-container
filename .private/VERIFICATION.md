@@ -639,7 +639,11 @@ rec claude-dir-contents E 'ls -a /home/student/.claude | head -20'
 STATE() { find "$DIR" -type f -not -path '*/projects/*' -not -name '*.log' \
             -exec shasum -a 256 {} + 2>/dev/null | sort; }
 STATE > /tmp/vt-s1
-bash ./install-cs193v.sh </dev/null    # second run; empty stdin surfaces any unguarded prompt
+# second run. `</dev/null` ALONE NO LONGER ARRANGES THIS (#297): the installer reattaches
+# stdin from /dev/tty when it is piped, so from a terminal an unguarded prompt would simply
+# prompt instead of surfacing. nosid.py puts the run in a session with no controlling
+# terminal, which is what "there is nowhere to ask" actually means.
+python3 .private/tests/lib/nosid.py bash ./install-cs193v.sh </dev/null
 STATE > /tmp/vt-s2
 diff /tmp/vt-s1 /tmp/vt-s2 && echo "PASS installer is idempotent"
 # published checksum must match
