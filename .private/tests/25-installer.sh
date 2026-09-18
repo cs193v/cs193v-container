@@ -2259,6 +2259,76 @@ assert_says_key     "half-tree:blames-the-unpacking"     err.unpack-incomplete "
 assert_eq "half-tree:leaves-no-temp-tree-behind" "" "$(fail_leftovers)"
 
 
+# ─── a downloader that complains and gets there anyway  (#298) ─────────────────
+# THE CASE FROM THE ISSUE IS NOT A FAILURE AT ALL, which is why none of the three shapes above
+# covers it. A Windows tester saw ten `curl: (6) Could not resolve host: github.com` lines and
+# then a finished install: the .cmd restarts the WSL instance between its two passes, the
+# resolver in the fresh one was not up yet, curl retried through it and the ELEVENTH attempt
+# landed. What reached the student was ten lines of alarm about a transfer that worked.
+#
+# WHY A FAKE. Reproducing it needs a name server that fails for thirty seconds and then does
+# not; this tier has no network at all. Measured on a real curl 8.21.0 before writing this:
+# `-fsSL --retry 10 --retry-delay 3` against an unresolvable name makes eleven attempts, prints
+# the line eleven times and takes ~30 s -- so ten lines then success is the last attempt landing,
+# with no margin left. The noise knob writes that symptom.
+#
+# A URL AND NOT A PATH, for run_with_tarball's reason: the copy arm never calls download_to.
+DL_NOISE='curl: (6) Could not resolve host: github.com'
+DL_URL='https://codeload.invalid/cs193v-container/tar.gz/release-0.0.0'
+
+shim_new
+shim_fake_curl "$DL_URL" "$TMP/course.tar.gz" 0 11 "$DL_NOISE"
+# THE FAKE IS ASSERTED AGAINST ITSELF FIRST, and that is not ceremony. The claim below is an
+# ABSENCE, and a noise knob that silently did nothing would satisfy it for free -- the same trap
+# the `windows:curl-diagnostics-reach-the-student` pair further down is paired the way it is to
+# avoid, and the reason that one's comment says the positive is what keeps the negative honest.
+assert_eq "dlquiet:the-fake-really-is-noisy" "11" \
+          "$("$SHIM/curl" -fsSL --retry 10 --retry-delay 3 -o "$TMP/noise-probe" "$DL_URL" 2>&1 >/dev/null \
+             | grep -c 'Could not resolve host')"
+dq="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-quiet")"
+assert_says "dlquiet:the-download-really-ran" "$DL_URL" "$(shim_curl_log)"
+assert_eq   "dlquiet:it-did-not-refuse" "0" \
+            "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-quiet2")"
+assert_says_not "dlquiet:the-student-sees-none-of-it" "Could not resolve host" "$dq"
+
+# AND THE RUN SAYS WHAT IT IS WAITING FOR, because suppressing the chatter buys thirty seconds of
+# silence and an unexplained pause is its own kind of alarming. The URL has to be read out of the
+# lines under that heading rather than out of the whole transcript: CS193V_TARBALL's banner names
+# the same source a few lines up, so a needle for the URL alone passes without the heading.
+dl_get="$(printf '%s\n' "$dq" | grep -n 'Getting the course files from' | head -1 | cut -d: -f1)"
+assert_ok   "dlsrc:says-what-it-is-fetching" test "${dl_get:-0}" -gt 0
+# THE WINDOW IS EMPTY WHEN THERE IS NO HEADING, and that guard is not defensive tidiness --
+# measured. Defaulting the line number to 1 instead windows lines 1-3, which is where the
+# CS193V_TARBALL banner prints the same URL, so this assertion passed with the product unfixed.
+dl_win=''
+[ -n "$dl_get" ] && dl_win="$(printf '%s\n' "$dq" | sed -n "$dl_get,$(( dl_get + 2 ))p")"
+assert_says "dlsrc:and-names-it-right-there" "$DL_URL" "$dl_win"
+
+# ─── and the same complaint when the transfer really does fail  (#298) ─────────
+# NOT DISCARDED, WHICH IS THE OTHER HALF OF THE FIX. `2>/dev/null` would empty the screenshot
+# above and take the diagnosis with it. install-cs193v-windows.cmd:869 records the same trade in
+# the opposite direction and its reasoning holds -- those words belong in the window a student
+# pastes to staff. They just do not belong there on a run that worked.
+shim_new
+shim_fake_curl "$DL_URL" /dev/null 6 11 "$DL_NOISE"
+df="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-loud")"
+assert_eq   "dlloud:exits-nonzero" "1" \
+            "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-loud2")"
+assert_says       "dlloud:refuses"              "Could not download the course files" "$df"
+assert_says       "dlloud:names-the-source"     "$DL_URL" "$df"
+assert_no_signoff "dlloud:does-not-claim-success" "$df"
+# ONCE, NOT ELEVEN TIMES, WHICH IS THE WHOLE OF #298. uniq is adjacent-only, so a transfer that
+# failed DIFFERENTLY on each attempt would still show each way it failed.
+assert_eq "dlloud:says-what-went-wrong-once" "1" \
+          "$(printf '%s\n' "$df" | grep -c 'Could not resolve host')"
+# AND INSIDE THE REFUSAL RATHER THAN AHEAD OF IT. Line numbers, the shape the CS193V_TARBALL
+# banner case above uses: a diagnosis is only worth printing where the prose that frames it is.
+dl_ref="$(printf '%s\n' "$df" | grep -n 'Could not download the course files' | head -1 | cut -d: -f1)"
+dl_say="$(printf '%s\n' "$df" | grep -n 'Could not resolve host'             | head -1 | cut -d: -f1)"
+assert_ok "dlloud:the-diagnosis-follows-the-refusal" \
+          test "${dl_ref:-0}" -gt 0 -a "${dl_say:-0}" -gt "${dl_ref:-0}"
+
+
 # ─── the staleness check, driven as a function  (#282) ─────────────────────────
 # WHY AS A FUNCTION AND NOT THROUGH AN INSTALL, which is the apt progress block's reason one
 # section up: check_release deliberately returns early when CS193V_TARBALL is set -- every case in

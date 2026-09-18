@@ -329,6 +329,35 @@ trap 'rm -rf "$BOOT_TMP"' EXIT
 BOOT_TREE="$BOOT_TMP/tree"
 mkdir -p "$BOOT_TREE" || refuse "  Could not create a temporary directory. Is the disk full?"
 
+# ─── what the downloader said, kept rather than shown  (#298) ──────────────────
+# curl RETRIES A NAME-RESOLUTION FAILURE, which its manual page does not promise and which is
+# the whole of this. Measured on curl 8.21.0: `-fsSL --retry 10 --retry-delay 3` against an
+# unresolvable name makes ELEVEN attempts over about thirty seconds, and -sS -- "quiet, but say
+# why" -- prints `curl: (6) Could not resolve host: github.com` for every one of them. A Windows
+# tester's install printed TEN of those and then finished, because install-cs193v-windows.cmd
+# restarts the WSL instance between its two passes and the resolver in the fresh one was not up
+# yet. So what reached them was ten lines of alarm about a transfer that worked -- on the last
+# attempt it had, with no margin left. The stderr goes to a file now, and the refusal prints it.
+#
+# NOT 2>/dev/null, WHICH IS THE OTHER HALF. Discarding it would empty the screenshot and take the
+# diagnosis with it. install-cs193v-windows.cmd:869 records the same trade in the opposite
+# direction and its reasoning holds: those words belong in the window a student pastes to course
+# staff. They just do not belong there on a run that worked.
+#
+# INSIDE $BOOT_TMP, so the EXIT trap takes it. A run that worked has nothing left to diagnose,
+# and a run that did not has already printed the whole of it.
+DL_LOG="$BOOT_TMP/download.log"
+
+# uniq IS THE POINT RATHER THAN TIDINESS: eleven identical lines inside the refusal would
+# reproduce the complaint in a smaller box. It is adjacent-only, so a transfer that failed
+# DIFFERENTLY on each attempt still shows each way it failed. tail -n 12 is the bound
+# install-utils.sh's setup_tail uses, for the reason it has one.
+dl_said() {                           # dl_said -> the tool's own words, indented, or nothing
+    [ -s "$DL_LOG" ] || return 0
+    printf '\n\n  What %s said:\n\n%s' "$TOOL" \
+           "$(uniq "$DL_LOG" | tail -n 12 | sed 's/^/      /')"
+}
+
 # WHICH SOURCE, AND ONLY WHEN IT IS NOT THE PUBLISHED ONE. Plain printf beside the refusals:
 # there is no catalogue in this file, and nothing has been downloaded yet to read one out of. It
 # is loud on purpose. The point of a switch somebody else can set is that the transcript of a
@@ -339,7 +368,11 @@ mkdir -p "$BOOT_TREE" || refuse "  Could not create a temporary directory. Is th
   *** Unset CS193V_TARBALL to install the published copy.                  ***
 ' "$COURSE_SRC"
 
-printf '\n  Getting the course files...\n'
+# AND IT SAYS WHERE FROM, IN THE REFUSAL'S OWN WORDS (#298). Capturing the downloader's chatter
+# buys up to thirty seconds of silence on a slow resolver, and an unexplained pause is its own
+# kind of alarming; naming the source is what makes the wait legible. The wording matches the
+# refusal below deliberately, so the two read as one thought rather than two.
+printf '\n  Getting the course files from:\n\n      %s\n' "$COURSE_SRC"
 # TWO ARMS, AND THE BARE-PATH ONE IS NOT A CONVENIENCE. wget has no file:// scheme -- measured,
 # GNU wget 1.21.4 given file:///tmp/x.txt exits 1 having written nothing -- and this script picks
 # between curl and wget without caring which answered. So a local tarball named as a file:// URL
@@ -355,7 +388,14 @@ case "$COURSE_SRC" in
     # install_podman used to install ca-certificates beside curl, and nothing installs it before the
     # download any more. Left undiagnosed it reads as a network problem, which is the single most
     # misleading thing this script could say about a machine whose network is fine.
-    if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)"; then
+    #
+    # THE REDIRECT IS AT THE CALL SITE AND NOT INSIDE download_to (#298), which keeps "ONE PLACE
+    # THAT KNOWS THE FLAGS" above meaning what it says, covers the wget arm without naming it --
+    # `wget -nv` prints a line on SUCCESS too, measured -- and leaves the `cp` arm below alone.
+    if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)" 2>"$DL_LOG"; then
+        # AND dl_rc IS ALWAYS 0 HERE, SO THE ARM BELOW IS DEAD -- see #303. `$?` inside this
+        # branch is the status of `! download_to`, not of download_to. Left as it stands rather
+        # than fixed in passing, because the fix needs the coverage that arm has never had.
         dl_rc=$?
         case "$TOOL:$dl_rc" in
             curl:60|wget:5)
@@ -375,7 +415,7 @@ case "$COURSE_SRC" in
 
       $COURSE_SRC
 
-  This is usually a network problem. It is safe to run this script again."
+  This is usually a network problem. It is safe to run this script again.$(dl_said)"
     fi ;;
   *)
     # A COPY, AND A REFUSAL THAT DOES NOT SAY "NETWORK". Nothing was downloaded on this arm, so
