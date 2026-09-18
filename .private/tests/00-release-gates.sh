@@ -166,31 +166,17 @@ elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl
     # working tree that cannot be hashed. Without this the comparison below is empty-to-empty.
     assert_match "installer:the-tree-hashes-locally" '^[0-9a-f]{64}$' "$rel_tree_hash"
     assert_eq "installer:stage2-url-works-when-piped" "$rel_tree_hash" "$rel_piped_hash"
-    # AND A CUT STREAM DOES NOTHING, measured on the published bytes rather than on ours.
-    #
-    # THE CUT POINT IS DERIVED FROM THE FILE, not a fraction of it. Measured: half the published
-    # bytes lands ABOVE the brace, where there is nothing but comments, constants and function
-    # definitions -- all complete statements, so bash runs them, exits 0 and the assertion that
-    # "a cut does not succeed" is red for a cut that was never dangerous. Cutting just past the
-    # brace is the case that matters and is the one a fraction cannot reliably name as the file
-    # grows. Twenty lines past it, so the cut is inside the group rather than on its edge.
-    rel_brace="$(grep -n '^{$' "$rel_tmp/stage2.sh" | head -1 | cut -d: -f1)"
-    # ITS OWN ASSERTION FIRST. Without the brace there is nothing to cut into, and both checks
-    # below would be measuring a file that has no guard at all -- which is the defect, stated
-    # plainly here rather than as two confusing failures underneath.
-    assert_ne "installer:the-published-stage2-guards-its-body" "" "$rel_brace"
-    if [ -n "$rel_brace" ]; then
-        rel_cut_bytes="$(head -n "$((rel_brace + 20))" "$rel_tmp/stage2.sh" | wc -c | do_tr -d ' ')"
-        rel_cut_out="$(head -c "$rel_cut_bytes" "$rel_tmp/stage2.sh" \
-                       | bash -s -- --dev-manifest-hash "$rel_tmp/tree" 2>/dev/null; printf 'rc=%s' "$?")"
-        assert_says_not "installer:a-cut-stage2-produces-no-digest" "$rel_tree_hash" "$rel_cut_out"
-        # `rc=0` rather than a specific status: bash says 2 today and the claim is "did not
-        # succeed", not which number it chose to say so with.
-        assert_says_not "installer:a-cut-stage2-does-not-report-success" "rc=0" "$rel_cut_out"
-    else
-        skip "installer:a-cut-stage2-produces-no-digest"        "the published stage two has no brace group"
-        skip "installer:a-cut-stage2-does-not-report-success"   "the published stage two has no brace group"
-    fi
+
+    # AND THE HALF THAT IS NOT CHECKED HERE, NAMED WHERE IT WOULD HAVE GONE -- see #313. The
+    # other half of the pipe story is that a CUT stream does nothing, which is what the brace
+    # group in the bootstrap buys. It cannot be asserted from this tier yet: these bytes come
+    # from the tag the .cmd currently pins, which is always the PREVIOUS release, so it would
+    # ask an old file for a property the release being cut is what introduces -- and it blocked
+    # the very release that would have fixed it. Measured: release-0.0.0 serves 488 lines with
+    # no `^{$` in them. The guard is held at the source by bootstrap:the-body-is-guarded in
+    # 10-static.sh, default on every commit, and the behaviour by pipe:a-cut-transfer-* in
+    # 25-installer.sh; #313 carries the exact assertion to restore here once there is a guarded
+    # release to point it at.
 
     # ─── AND ITS BYTES HASH TO WHAT THE .cmd EXPECTS  (#232) ──────────────────
     # THE ONE CHECK ON THE PAIR AGAINST WHAT IS ACTUALLY PUBLISHED, and the only place it can be
