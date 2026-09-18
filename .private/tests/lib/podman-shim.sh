@@ -497,10 +497,24 @@ EOF
 # IT LOGS, for the reason shim_fake_ssh does: a download leaves nothing else a case can read.
 # `-o` writes under the installer's own TMPDIR, and on the refusal path the product removes that
 # file before any assertion runs -- so the log is the only record of what was asked for.
-shim_fake_curl() {                    # shim_fake_curl URL BODY [RC]
+#
+# AND IT CAN BE MADE TO COMPLAIN WHILE IT WORKS (#298), which is the one shape only a fake can
+# reach here. curl retries a name-resolution failure -- not something its manual page promises,
+# but what tool_operate.c does -- and -sS prints the error on every attempt, so a resolver that
+# is slow to come back produces N identical lines and then a perfectly good file. The cheap lane
+# has no resolver to make slow, so NOISE_LINES and NOISE_TEXT write the symptom directly.
+#
+# INDEPENDENT OF RC ON PURPOSE. The case that matters is the one where the download SUCCEEDS
+# noisily, which is what #298 actually was; tying the noise to a failure would leave it untested.
+shim_fake_curl() {                    # shim_fake_curl URL BODY [RC] [NOISE_LINES] [NOISE_TEXT]
     : > "$SHIM/curl.log"
-    printf '#!/bin/sh\nCURLLOG=%s\nWANT=%s\nBODY=%s\nRC=%s\n' \
-           "$SHIM/curl.log" "$1" "$2" "${3:-0}" > "$SHIM/curl"
+    # TWO printfs, AND ONLY THE SECOND QUOTES. The values above it are paths and URLs with no
+    # spaces; the noise is a sentence, and unquoted it would be a syntax error inside the fake
+    # rather than a failing assertion -- which reads as the product breaking.
+    { printf '#!/bin/sh\nCURLLOG=%s\nWANT=%s\nBODY=%s\nRC=%s\nNOISE_N=%s\n' \
+             "$SHIM/curl.log" "$1" "$2" "${3:-0}" "${4:-0}"
+      printf "NOISE='%s'\n" "${5:-}"
+    } > "$SHIM/curl"
     cat >> "$SHIM/curl" <<'INNER'
 ARGV="$*"
 printf '%s\n' "$ARGV" >> "$CURLLOG"
@@ -532,6 +546,10 @@ esac
 # `[ -n "$WANT" ]` FIRST. A caller whose sed failed hands this an empty URL to register, and
 # without the guard an argv with no URL in it at all would match it and be served.
 if [ -n "$WANT" ] && [ "$url" = "$WANT" ]; then
+    # THE COMPLAINT COMES FIRST, which is the order real curl produces it in: --retry prints per
+    # attempt, and whether a file appears at all is decided by the last one.
+    i=0
+    while [ "$i" -lt "$NOISE_N" ]; do printf '%s\n' "$NOISE" >&2; i=$((i+1)); done
     # THE FILE IS CREATED EVEN WHEN RC IS NONZERO, because real curl truncates its -o target
     # before it knows the transfer will fail -- which is what leaves a partial .pkg behind on the
     # download-failure arm, and what the leftover assertions there are paired against.

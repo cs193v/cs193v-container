@@ -687,7 +687,11 @@ what a real Ubuntu Desktop box adds is:
   nothing here has ever exercised that.
 - **`--tries=10 --waitretry=3` under a real flaky link.** Exercising the retry loop needs fault
   injection and ≥3 s of wall clock per forced retry; nothing exercises it, and this is where
-  it would actually be seen.
+  it would actually be seen. What IS covered offline since #298 is the retry loop's *output*
+  rather than its timing: `shim_fake_curl`'s `NOISE_LINES` knob writes the symptom — eleven
+  complaints and then a perfectly good file — straight into the cheap lane, and `dlquiet:*` /
+  `dlloud:*` in `25-installer.sh` pin that a run which recovers shows the student nothing while
+  a run which does not shows it once, inside the refusal. Only the wall clock is left here.
 - **The certificate refusal, on a machine that really lacks `ca-certificates`.** curl exits 60
   and wget exits 5, and the bootstrap turns either into a message naming the package. This is
   the one genuinely new failure mode the #221 split introduced — `install_podman` used to
