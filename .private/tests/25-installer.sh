@@ -1805,6 +1805,64 @@ assert_no_file  "password:no-terminal-creates-no-directory" "$TMP/notty"
 # than a prompt, so its presence in the log is the assertion.
 assert_says "password:the-probe-never-prompts" "-n true" "$(sudo_log)"
 
+# ── #297: THE SAME MACHINE, REACHED THROUGH `curl -fsSL URL | bash` ──
+# THE MACHINE IS ALREADY RIGHT. probe_setup fakes a Mac and `absent` gives it no podman, so this
+# is #297's screenshot exactly: macos on arm64, ssh and curl present, podman to be installed,
+# and a sudo that wants a password. The ONLY difference from the case above is the door -- the
+# script arrives on stdin, so fd 0 is a pipe while the controlling terminal is still there.
+#
+# `-v` FAILS TOO, DELIBERATELY, and it is what keeps this case in the cheap lane. On a Mac the
+# only root-requiring step is installing podman, so a run that CLEARS ask_password goes straight
+# into install_podman and fetches 75 MB from GitHub -- the reason the ordering cases below are
+# fenced behind linux_arm. Refusing at the prime stops one line after the thing under test has
+# already been proved: the prompt was reached.
+probe_setup absent
+shim_set sudo_fail "$(printf '%s\n%s' '-n true' '-v')"
+out="$(installer_pipe '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" \
+                      CS193V_DIR="$TMP/piped" PATH="$SHIM:$IFARM" | strip_ansi)"
+# THE HEADLINE, AND IT IS A NEGATIVE ON PURPOSE: the refusal in #297's screenshot is gone.
+assert_says_not_key "pipe:no-longer-refuses-for-want-of-a-terminal" err.sudo-no-terminal "$out" \
+                    "$PRIVATE/course-install-messages.txt"
+# AND THE RUN GOT SOMEWHERE, which is the half that stops the assertion above passing on a run
+# that died earlier for some other reason -- an empty transcript satisfies any assert_says_not.
+assert_says_key "pipe:the-consent-screen-is-reached" step.consent "$out" "$ICAT"
+# THE KEYSTROKE LANDED. menu() falls back to index 0 -- "stop, change nothing" -- whenever stdin
+# is not a terminal, so reaching the password step at all proves the `2` was read from /dev/tty
+# rather than defaulted. Asserted both ways: the decline is absent and the step is present.
+assert_says_not_key "pipe:the-consent-menu-was-answered-not-defaulted" consent.declined "$out" "$ICAT"
+assert_says_key "pipe:the-password-step-is-announced" step.password "$out" \
+                "$PRIVATE/course-install-messages.txt"
+# AND SUDO WAS REALLY ASKED. sudo-fake records without executing, so this is the prompt #297
+# could not reach, named by the flag that makes it a prompt rather than a probe.
+assert_says "pipe:the-prime-really-ran" "-v" "$(sudo_log)"
+assert_says_key "pipe:and-the-refusal-is-the-ordinary-one" err.sudo-refused "$out" \
+                "$PRIVATE/course-install-messages.txt"
+
+# ── ...and a transfer that stops half way changes nothing (#297) ──
+# THE HAZARD THE PIPE BRINGS WITH IT. bash executes a piped script statement by statement as it
+# arrives, so a dropped connection used to run every complete statement it had and exit 0 --
+# a half-done install that says nothing and reports success.
+#
+# 24000 BYTES, AND THE NUMBER IS MEASURED RATHER THAN ROUND. It has to land past the point where
+# the old shape had already DONE something, or the assertion passes on a cut that never reached
+# anything -- measured, a cut at 20000 stops inside the TOOL= line and prints nothing either way,
+# which made every one of these three green before the fix existed. At 24000 the old shape
+# created the temp tree and printed "Getting the course files..."; the file is 31357 bytes, so
+# this is comfortably inside it.
+probe_setup absent
+cut_out="$(installer_pipe_cut 24000 "$PRIVATE/install-cs193v.sh" \
+           CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/cut" PATH="$SHIM:$IFARM" | strip_ansi)"
+cut_rc="$(installer_pipe_cut 24000 "$PRIVATE/install-cs193v.sh" \
+          CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/cut" PATH="$SHIM:$IFARM" \
+          >/dev/null 2>&1; printf '%s' "$?")"
+# NOT A WORD OF ITS OWN. "Getting the course files" is the bootstrap's first print and its first
+# side effect is two lines above it, so this one needle answers "did any of it run". Spelled
+# literally because the bootstrap carries its own prose -- it is the one file that sources no
+# catalogue, which bootstrap:sources-nothing holds.
+assert_says_not "pipe:a-cut-transfer-runs-nothing" "Getting the course files" "$cut_out"
+assert_no_file  "pipe:a-cut-transfer-creates-no-directory" "$TMP/cut"
+assert_ne       "pipe:a-cut-transfer-does-not-report-success" "0" "$cut_rc"
+
 # ── sudo answers no: refused after consent, before the first privileged command ──
 probe_setup absent
 shim_set sudo_fail "$(printf '%s\n%s' '-n true' '-v')"

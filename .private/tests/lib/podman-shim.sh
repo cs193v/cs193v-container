@@ -274,11 +274,21 @@ EOF
 # mechanism, and the same one that cost repo_copy its memo.
 SHIM_LAST="$SHIM_HOST_TMPDIR/cs193v-last.$$"
 
+# AND IT RUNS IN A SESSION OF ITS OWN, which is what makes the name true (#297). `</dev/null`
+# says nothing about a CONTROLLING terminal: a suite started from a developer's terminal still
+# has one, so /dev/tty opens and hands back that terminal. That was invisible while nothing
+# looked past fd 0, and stopped being invisible when install-cs193v.sh learned to reattach
+# stdin from /dev/tty -- this door would then have found the developer's terminal, and the
+# password:no-terminal-* cases would have been asserting against a machine that has somewhere
+# to type after all. lib/nosid.py detaches the session so the refusal is arranged rather than
+# assumed; see its header for why setsid(1) is not what does it.
 installer_host() {                    # installer_host SCRIPT [VAR=VALUE...] -> output
     local script="$1"; shift
+    [ -n "$DO_PY" ] || _pt_fatal python3 'no python3 on PATH; lib/nosid.py needs it'
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" bash "$script" </dev/null 2>&1
+    env HOME="$SHIM/home" PATH="$SHIM:$PATH" "$@" \
+        "$DO_PY" "$PT_LIB/nosid.py" bash "$script" </dev/null 2>&1
 }
 
 installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] -> rc
@@ -332,6 +342,49 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     for a in "$@"; do cmd="$cmd '$a'"; done
     cmd="$cmd bash '$script'"
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
+}
+
+# THE THIRD DOOR: the script arrives ON STDIN, the way `curl -fsSL URL | bash` delivers it (#297).
+#
+# WHAT MAKES THIS A DIFFERENT DOOR RATHER THAN A FLAG ON installer_tty. Under a pipe, bash's own
+# stdin IS the script, so fd 0 is a pipe for the whole run while stdout and the CONTROLLING
+# terminal stay the student's -- the exact combination #297's screenshot shows, and one neither
+# other door can produce. installer_host has no terminal at all and installer_tty has one on
+# every fd.
+#
+# `cat FILE | ...` AND NOT A REDIRECT, because `bash < file` is seekable and a pipe is not, and
+# that difference is the whole subject: bash reads a seekable script differently, and §2b's
+# truncation guard is about what it does with the unseekable one.
+#
+# KEYS GO TO THE PTY, NOT TO BASH, and that is the point of driving this through ptyrun.py at
+# all. They are written to the master, so they sit in the terminal until the installer reattaches
+# stdin from /dev/tty and reads them -- which is precisely the behaviour under test. `cat` cannot
+# eat them on the way past: it is given a FILE argument, so it never reads its own stdin.
+#
+# EVERY INTERPOLATED VALUE IS SINGLE-QUOTED, for the reason installer_tty's header gives at
+# length (#141): the string is re-parsed by `sh -c` inside ptyrun.py.
+installer_pipe() {                    # installer_pipe KEYS SCRIPT [VAR=VALUE...]
+    local keys="$1" script="$2"; shift 2
+    local cmd a
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
+    for a in "$@"; do cmd="$cmd '$a'"; done
+    cmd="$cmd bash"
+    printf '%b' "$keys" | do_script 120 "cat '$script' | $cmd" 2>&1
+}
+
+# The same door with the stream cut short, which is what a dropped connection delivers. BYTES
+# rather than lines: a transfer stops mid-buffer, not mid-statement.
+installer_pipe_cut() {                # installer_pipe_cut BYTES SCRIPT [VAR=VALUE...] -> output
+    local bytes="$1" script="$2"; shift 2
+    local cmd a
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
+    for a in "$@"; do cmd="$cmd '$a'"; done
+    cmd="$cmd bash"
+    printf '' | do_script 120 "head -c '$bytes' '$script' | $cmd" 2>&1
 }
 
 # Fake `uname` and `sysctl`, which is what makes the macOS arm executable on Linux.

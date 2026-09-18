@@ -294,6 +294,57 @@ assert_eq "bootstrap:the-verb-dispatches-before-anything-else" "yes" \
           "$([ -n "$boot_disp" ] && [ -n "$boot_tool" ] && [ -n "$boot_mk" ] \
              && [ "$boot_disp" -lt "$boot_tool" ] && [ "$boot_disp" -lt "$boot_mk" ] \
              && printf yes || printf "dispatch=$boot_disp tool=$boot_tool mktemp=$boot_mk")"
+
+# ─── and the whole executable body is inside one brace group  (#297) ──────────
+# WHAT THIS BUYS, since a brace around a script reads like decoration. bash executes a PIPED
+# script statement by statement as it arrives off the pipe, and `curl -fsSL URL | bash` is the
+# published instruction -- so a transfer that stops half way would run everything it had and
+# exit 0. Inside a compound command it cannot: bash has to parse the group in full before any
+# of it runs, so a short stream is a syntax error and nothing happens. The behavioural half is
+# pipe:a-cut-transfer-* in 25-installer.sh, at a cut point measured to have run things before.
+#
+# BY POSITION, NOT BY PRESENCE, and that is the whole assertion. A `{` that drifted below the
+# mktemp -- or below the dispatch -- would look exactly like this one, satisfy any grep for a
+# brace, and protect nothing: the statements above it would execute off the pipe as before. So
+# it reuses the three line numbers the dispatch gate just established.
+#
+# AND IT CLOSES ON THE LAST LINE, because a group that closed early would leave the hand-over
+# outside it -- the one statement whose partial execution matters most.
+boot_open="$(printf '%s\n' "$boot_code" | grep -n '^{$' | head -1 | cut -d: -f1)"
+boot_lastln="$(printf '%s\n' "$boot_code" | grep -n '.' | tail -1 | cut -d: -f1)"
+boot_lasttxt="$(printf '%s\n' "$boot_code" | grep '.' | tail -1)"
+assert_eq "bootstrap:there-is-exactly-one-group" "1" \
+          "$(printf '%s\n' "$boot_code" | grep -c '^{$')"
+assert_eq "bootstrap:the-body-is-guarded" "yes" \
+          "$([ -n "$boot_open" ] && [ -n "$boot_disp" ] && [ -n "$boot_tool" ] && [ -n "$boot_mk" ] \
+             && [ "$boot_open" -lt "$boot_disp" ] && [ "$boot_open" -lt "$boot_tool" ] \
+             && [ "$boot_open" -lt "$boot_mk" ] \
+             && printf yes \
+             || printf "open=$boot_open dispatch=$boot_disp tool=$boot_tool mktemp=$boot_mk")"
+assert_eq "bootstrap:the-group-closes-on-the-last-line" "}" "$boot_lasttxt"
+record    "bootstrap:the-group" "opens $boot_open closes $boot_lastln"
+
+# ─── and stdin is only ever reattached ON the hand-over  (#297) ───────────────
+# THE HAZARD A BEHAVIOURAL TEST CANNOT REACH, because reaching it is hanging. A bare
+# `exec </dev/tty` in a script arriving on a pipe makes bash read the REST OF ITS OWN SCRIPT
+# from the terminal it just attached: measured, the run prints its last completed line and then
+# sits there forever. No assertion survives that -- the suite would time out with nothing to
+# say -- so the shape is pinned statically instead.
+#
+# THE REDIRECT BELONGS TO THE CALL, `hand_over </dev/tty`, where it applies to the body and the
+# exec inside inherits it. Anything of the form `exec <` or `exec 0<` in command position is the
+# spelling that hangs, and there is deliberately no exemption: the bootstrap has one hand-over.
+#
+# `^[[:space:]]*` AND NOT `^`, which is SUDO_CMD's shape above and is here for the same reason it
+# is there. Written without it this assertion passed against the mutation it exists for: the
+# hang lives inside an `if`, so the line it is written on is INDENTED, and an anchor that
+# demands `exec` in column 1 never sees it. Found by mutation, not by reading.
+assert_eq "bootstrap:reattaches-only-at-the-hand-over" "" \
+          "$(printf '%s\n' "$boot_code" | grep -nE '(^[[:space:]]*|[;&|{][[:space:]]*)exec[[:space:]]+0?<' || true)"
+# AND IT REALLY REATTACHES, which is the non-vacuous half: the assertion above is satisfied just
+# as well by a file that gave up on the pipe entirely, which is the state #297 filed.
+assert_match "bootstrap:the-hand-over-can-take-the-terminal" 'hand_over[[:space:]]*</dev/tty' \
+             "$boot_code"
 # AND EVERY VERB ARM LEAVES ON ITS LAST LINE. A verb that fell through would carry on into the
 # install carrying an argument nobody downstream reads, which is the shape the unexpected-argument
 # arm exists to stop.
@@ -659,7 +710,7 @@ bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
         | grep -v 'bash -n' | grep -v 'wine_argv_count' \
         | grep -v -- 'install-cs193v.sh" -' \
-        | grep -vE 'installer_host|installer_tty' || true)"
+        | grep -vE 'installer_host|installer_tty|installer_pipe' || true)"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
 # And the door has to do the thing it exists for. Extraction asserted first: an empty
@@ -680,6 +731,19 @@ assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
 # so an unquoted $PATH word-splits on any host whose PATH has a space in it. The behavioural
 # half of this lives in 14-test-harness.sh, which injects one and drives the door through it.
 assert_contains "installer-door:tty-puts-the-shim-first" "PATH='\$SHIM" "$ttydoor"
+
+# And the third, which carries the script on stdin the way `curl | bash` does (#297). Same two
+# properties, asserted the same way and for the same reasons; the extraction guard first, because
+# an empty body satisfies every grep under it forever.
+pipedoor="$(sed -n '/^installer_pipe()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$pipedoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:pipe-extractable"
+else fail "installer-door:pipe-extractable" "could not find installer_pipe"; fi
+assert_contains "installer-door:pipe-redirects-HOME"      'HOME=' "$pipedoor"
+assert_contains "installer-door:pipe-puts-the-shim-first" "PATH='\$SHIM" "$pipedoor"
+# AND IT REALLY PIPES. A door that quietly became `bash '$script'` would still satisfy everything
+# above while testing the case that already had two doors -- and every piped assertion under it
+# would go green against a seekable script, which is the one thing they are not about.
+assert_contains "installer-door:pipe-feeds-the-script-on-stdin" "cat '\$script' |" "$pipedoor"
 
 # ─── nothing may infer a pty child's pid from the process tree again (#151) ────
 # THE PREMISE THAT MADE THIS NECESSARY. lib/ptyrun.py used to claim that `sh -c 'simple command'`
