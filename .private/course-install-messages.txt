@@ -857,6 +857,8 @@ launcher reads its configuration
 [[err.image-missing-after-build]]
 The course container was not built, but setup did not stop.
 
+We looked for: {{IMAGE}}
+
 Please contact the course staff. If you know how to
 run commands from the terminal, please run this command
 and send its output to us:

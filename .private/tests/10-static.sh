@@ -1298,6 +1298,43 @@ assert_eq "pin:nobody-else-declares-a-payload-digest" "" \
 case_dupes="$(git ls-files | do_tr 'A-Z' 'a-z' | LC_ALL=C sort | uniq -d | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq "manifest:no-case-colliding-paths" "" "$case_dupes"
 
+# ─── and the installer never spells the image tag out for itself  (#312) ──────
+# ONE PLACE KNOWS THE IMAGE NAME, and it is the launcher, which computes it and then appends
+# CS193V_INSTANCE. smoke_test used to carry a second copy as a literal, with a comment saying
+# the installer never runs under an instance -- and the first staff run that did exactly that
+# succeeded end to end, built localhost/cs193v:local-tryout, and was then refused by a check
+# looking for localhost/cs193v:local. The refusal said "the course container was not built",
+# which was false, and `doctor` run without the variable agreed with it.
+#
+# THE ANSWER IS ASKED FOR NOW, via --dev-print-image, so there is no second copy to drift.
+# This holds that: any reappearance of the literal in the installer is the defect returning.
+# course-install.sh ONLY -- the launcher is where the constant belongs, and install-utils.sh
+# and the bootstrap never knew it.
+# ON $inst_nc, WHICH IS THIS FILE'S COMMENT-STRIPPED COPY (:430), because the reasoning above
+# is written INTO course-install.sh and names the tag it stopped using. Grepping the raw file
+# made this assertion red against the very fix it is checking for -- the prose is the record of
+# why the constant went, and a gate that forbids mentioning it forbids explaining it.
+assert_eq "smoke:the-installer-does-not-spell-the-image-out" "" \
+          "$(printf '%s\n' "$inst_nc" | grep -n 'localhost/cs193v:' || true)"
+# AND THE VERB IT ASKS WITH EXISTS, because the assertion above is also satisfied by an
+# installer that stopped checking the image at all -- which is the failure smoke_test was
+# written for (ERRORS.md A6: a build that produced nothing, reported as success).
+assert_says "smoke:the-installer-asks-the-launcher-instead" '--dev-print-image' \
+            "$(sed -n '/^smoke_test() {/,/^}$/p' "$PRIVATE/course-install.sh")"
+assert_says "smoke:and-still-checks-the-image-exists" 'podman image exists' \
+            "$(sed -n '/^smoke_test() {/,/^}$/p' "$PRIVATE/course-install.sh")"
+# AND THE LAUNCHER ANSWERS IT. A verb the installer calls and the launcher does not implement
+# is an installer that dies at its own smoke test on every machine.
+assert_says "smoke:the-launcher-implements-that-verb" '--dev-print-image' "$(cat cs193v)"
+# AND THE REFUSAL NAMES THE IMAGE IT LOOKED FOR. Asserted on the CATALOGUE rather than on a
+# transcript: the tag also appears in the build's own output two lines above, so a needle for it
+# in the run's text passes on a message that never mentions it -- measured, that assertion was
+# green before the placeholder existed. Without the name this refusal asserts a negative about a
+# thing it does not identify, which is what made the VM run a round trip instead of a glance.
+assert_says "smoke:the-refusal-names-the-image" '{{IMAGE}}' \
+            "$(sed -n '/^\[\[err.image-missing-after-build\]\]$/,/^\[\[/p' \
+               "$PRIVATE/course-install-messages.txt")"
+
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's
 # root_step_* functions and wsl-provision.sh's own three -- so a sudo that never execs makes the

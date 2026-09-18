@@ -86,6 +86,26 @@ assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/st
 assert_contains "print:publishes-the-host-projects-dir" "CS193V_HOST_PROJECTS=$COPY/projects" "$line"
 assert_contains "print:publishes-the-host-os" "CS193V_HOST_OS=" "$line"
 
+# ─── --dev-print-image  (#312) ────────────────────────────────────────────────
+# WHY THE LAUNCHER OWNS THIS ANSWER. course-install.sh's smoke_test has to know whether the
+# build produced an image, and it used to ask by spelling `localhost/cs193v:local` out --
+# a second copy of a name the launcher already computes, and one that is wrong the moment
+# CS193V_INSTANCE is set. Measured on a fresh Ubuntu VM: the install succeeded end to end,
+# built localhost/cs193v:local-tryout, and then refused with "the course container was not
+# built" because the constant named a tag nothing had created.
+#
+# NO PREFLIGHT AND NO ARGS FILES: this prints a variable. It is the cheapest verb here, and
+# it must stay answerable on a machine whose podman is broken -- which is exactly the machine
+# smoke_test is asking about.
+assert_eq "printimg:exits-0" "0" "$(launcher_rc --dev-print-image)"
+img="$(launcher --dev-print-image)"
+assert_match "printimg:looks-like-the-course-image" '^localhost/cs193v:local' "$img"
+# THE CROSS-CHECK, and it is the whole reason a verb beats a constant: --dev-print-command ends
+# with the image the launcher will actually run, so the two answers must be the same string.
+# Derived from the run line rather than rebuilt from CS193V_INSTANCE here, because a test that
+# re-implements the suffix rule agrees with itself rather than with the launcher.
+assert_eq "printimg:agrees-with-the-run-command" "${line##* }" "$img"
+
 # One-directional on purpose: the launcher legitimately ADDS --name, --detach, --label and
 # --mount, so a plain diff would fail spuriously. What must be empty is the set of flags
 # present in the args files but missing from the run line.
