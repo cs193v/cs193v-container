@@ -1242,12 +1242,10 @@ if %errorlevel% equ 0 goto novm
 :: only what it actually did: WSL is present, and `wsl --update` has run.
 echo.
 echo   Could not create the %DISTRO% environment.
-echo   just been updated, and the internet was reachable a moment ago.
 echo   The likeliest cause left is a WSL older than 2.4.4, which cannot
 echo   name a new environment, or the connection dropping mid-download --
 echo   but that is a guess, not a diagnosis, and any error above is
 echo   worth more.
-echo   guess, not a diagnosis, and any error above is worth more.
 echo.
 echo   Please send course staff this whole window, including any
 echo   "Error code:" line above, and the output of:   wsl --version
