@@ -1029,6 +1029,33 @@ assert_no_signoff "no-image:does-not-say-finished" "$out"
 assert_says_key_tail "no-image:tells-them-what-to-send-staff" err.image-missing-after-build \
                      "$out" "$ICAT"
 
+# ── the check asks the LAUNCHER which image, rather than spelling one out (#312) ──
+# THE CASE THAT WAS RED ON A REAL VM. Under CS193V_INSTANCE the launcher builds and runs
+# localhost/cs193v:local-<instance>; a hard-coded `localhost/cs193v:local` in smoke_test then
+# refused a build that had worked, over the words "the course container was not built".
+#
+# ONE ASSERTION, AND THE THREE OBVIOUS COMPANIONS ARE DELIBERATELY ABSENT -- each was written,
+# measured GREEN BEFORE THE FIX, and deleted. They are worth naming so nobody adds them back:
+#
+#   "it asks about the suffixed image"  -- the LAUNCHER asks that itself, at four `pmq image
+#       exists "$IMAGE"` sites (cs193v:1039, 1054, 2440, 2751), and build_image runs the
+#       launcher. So the needle was in the log whatever smoke_test did.
+#   "the run is not refused" and "it exits 0" -- lib/podman-fake answers `image exists` from a
+#       knob and IGNORES the tag, so the unsuffixed question succeeds here too. The shim tier
+#       structurally cannot reproduce the VM's refusal; only the QUESTION is observable.
+#
+# So the load-bearing observable is the absence of the wrong question. `grep -x` because the
+# suffixed tag contains the unsuffixed one as a prefix -- a substring needle matches the very
+# line this case wants and passes on the defect.
+shim_new
+installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" \
+               CS193V_DIR="$TMP/instimg" CS193V_INSTANCE=tryout >/dev/null 2>&1
+assert_eq "instance:never-asks-about-the-unsuffixed-image" "" \
+          "$(installer_log | grep -x 'image exists localhost/cs193v:local' || true)"
+# AND THE LOG WAS REALLY READ. An empty log satisfies the assertion above forever, which is the
+# shape 22-manifest-fuzz.sh's own oracle gate exists for.
+assert_says "instance:the-image-was-really-queried" "image exists" "$(installer_log)"
+
 # ─── everything behind the consent menu  (§1.2's other half) ────────────────────
 # menu() takes the safe default when stdin or stdout is not a terminal, so with no tty
 # ask_consent DECLINES and returns -- which is why nothing in this suite had ever executed

@@ -2877,6 +2877,24 @@ verb_print_command() {
     printf ' %s\n' "$IMAGE"
 }
 
+# THE IMAGE NAME, ON ITS OWN, so that nothing else has to keep a copy of it (#312).
+#
+# WHO ASKS. course-install.sh's smoke_test, which has to decide whether the build produced an
+# image before it is allowed to say "Setup finished". It used to answer that by spelling
+# `localhost/cs193v:local` out, with a comment reasoning that CS193V_INSTANCE is a staff switch
+# and the installer never runs under one. The first staff run that did exactly that installed
+# perfectly, built localhost/cs193v:local-tryout, and was then refused by a check looking for a
+# tag nothing had created -- and `doctor`, run without the variable, agreed with the refusal.
+# One owner for the name, and that is this file, because this is where the suffix is applied.
+#
+# NOT build_run_args, WHICH IS THE POINT. --dev-print-command already ends with this string, but
+# it JOINS its words with spaces, and 16-args-parse.sh:21 records why that makes it the wrong
+# thing to parse: it cannot tell one word from two. A caller that scraped the last word would be
+# doing string arithmetic to recover a variable this file could simply print. So: no load_args,
+# no build_run_args, no preflight. It answers on a machine whose podman is broken, which is
+# exactly the machine smoke_test is asking about.
+verb_print_image() { printf '%s\n' "$IMAGE"; }
+
 # The args files' parse, one word per line. The seam 16-args-parse.sh drives.
 #
 # WHY NOT --dev-print-command, which already prints every one of these words: it joins them
@@ -3013,6 +3031,8 @@ case "${1:-}" in
     # "$@", not "${1:-}": the two modifiers are independent and may be given together.
     --rebuild)           shift; verb_rebuild "$@" ;;
     --dev-print-command) verb_print_command ;;
+    # No preflight, and less than any of them needs: this prints a variable. See the function.
+    --dev-print-image)   verb_print_image ;;
     # No preflight here either, and 16-args-parse.sh asserts it by counting podman calls: the
     # args files are all this reads, and the unit tier drives it with no podman running.
     --dev-args)          verb_dev_args ;;

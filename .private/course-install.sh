@@ -1349,13 +1349,23 @@ smoke_test() {
     # print "Setup finished" over an installation with no runnable container in it --
     # the same shape of failure as ERRORS.md A6, where a truncated download passed.
     #
-    # The tag is spelled out rather than derived. It used to be read out of container.args,
-    # because a pin there could name a registry image instead -- there is no pin any more and
-    # the launcher's IMAGE is a constant, so parsing anything would be parsing to find out
-    # what is written here. Deliberately unsuffixed: CS193V_INSTANCE is a staff development
-    # tool and the installer never runs under one (see CLAUDE.md).
-    if ! podman image exists localhost/cs193v:local; then
-        die "$(msg err.image-missing-after-build "DIR=$DIR")"
+    # THE LAUNCHER IS ASKED WHICH IMAGE, and the history of this line is the argument for that
+    # (#312). It was once read out of container.args, because a pin there could name a registry
+    # image; the pin went, and it became the literal `localhost/cs193v:local` with a comment
+    # reasoning that CS193V_INSTANCE is a staff switch the installer never runs under. That
+    # reasoning was falsified the first time anyone tested the installer under one: on a clean
+    # Ubuntu VM the install succeeded end to end, built localhost/cs193v:local-tryout, and was
+    # then refused HERE -- by a check naming a tag nothing had created, in the words "the course
+    # container was not built", which was false. `doctor` run without the variable agreed with
+    # it, so the transcript and the diagnosis pointed the same wrong way.
+    #
+    # The name is the launcher's to compute -- it is where the suffix is applied -- so it is the
+    # launcher that is asked. There is no second copy left to drift, which is what
+    # smoke:the-installer-does-not-spell-the-image-out holds.
+    local img
+    img="$("$DIR/cs193v" --dev-print-image)" || die "$(msg err.launcher-config "DIR=$DIR")"
+    if ! podman image exists "$img"; then
+        die "$(msg err.image-missing-after-build "DIR=$DIR" "IMAGE=$img")"
     fi
     ok "$(msg ok.container-present)"
     if "$DIR/cs193v" doctor >/dev/null 2>&1; then ok "$(msg ok.doctor-runs)"
