@@ -3,14 +3,27 @@
 # CS193V container test runner.
 #
 #   tests/run-tests.sh                    the default tiers: not release, github or windows
-#   tests/run-tests.sh --tier static      one tier (comma-separated for several)
-#   tests/run-tests.sh -k tmux            only suites whose filename matches
+#   tests/run-tests.sh --tier static      one tier (comma-separated, or repeat it, for several)
+#   tests/run-tests.sh -k tmux            only suites whose filename CONTAINS this (same two forms)
 #   tests/run-tests.sh --release          the "not shippable yet" gates
 #   tests/run-tests.sh --everything-but-github
-#                                         every tier but that one, with every cost gate set
+#                                         adds every tier but that one, with every cost gate set
 #                                         and the image built first. Slow, and it logs you out.
 #   tests/run-tests.sh --serial           one suite at a time, in file order
 #   tests/run-tests.sh --list             what exists, in which tier, and in which lane
+#
+# --tier AND -k BOTH TAKE A LIST, AND REPEATING EITHER ADDS TO IT. `--tier static --tier unit` and
+# `--tier static,unit` select the same two tiers; `-k a -k b` runs every suite matching either.
+# Every tier flag adds and none of them narrows -- --release and --all included, and
+# --everything-but-github unions its derived list into whatever else you asked for. NARROWING IS
+# -k's JOB: it is a substring of the filename, not a glob, and it is applied within the tiers you
+# selected. A tier no suite declares is refused, and so is a flag with nothing after it.
+#
+# Until #256 both flags ASSIGNED, so a repeat threw the previous one away in silence: `--tier
+# static --tier unit --tier shim` ran one tier of three and printed a green count for it. The
+# rule that came out of it is worth stating once -- A FLAG THIS SUITE SILENTLY IGNORES IS A
+# MEASUREMENT NOBODY TOOK -- and it is the same shape as #158 (hand-enumerated shellcheck lists,
+# so 17 files went unlinted) and #242 (a checker reading comments as call sites).
 #
 # MUST STAY BASH 3.2 COMPATIBLE — see tests/lib/assert.sh for why.
 #
@@ -40,6 +53,16 @@
 # CS193V_DESTRUCTIVE -- and runs ./cs193v --rebuild first, because require_image and
 # require_running hard-fail without one. It leaves CS193V_GH_TEST_TOKEN alone, which is the
 # github tier's own gate. It is the slow, destructive answer and it says so before it starts.
+#
+# IT ADDS, IT DOES NOT SUBTRACT, and since #256 that is the whole of how it composes. The skip
+# above can decline to ADD the github tier; it cannot REMOVE one you named yourself. So
+# `--everything-but-github --tier github` runs the github tier too, with the gates and the build,
+# and CS193V_GH_TEST_TOKEN is then the only thing between you and a write to a repository the
+# whole class can see -- which is exactly the gate that is deliberately not in the list above.
+# The alternative was a precedence rule that silently un-asks for something you typed, and that
+# is the shape #256 reported. NARROWING IS -k's JOB: `--everything-but-github -k 30-launcher`
+# still runs one suite and still pays no build, because the rebuild below keys off the selected
+# suites rather than off the tier list.
 #:end-of-help
 #
 # image/container/live HARD-FAIL rather than skip when their prerequisite is missing, by
@@ -52,7 +75,8 @@
 # ─── exit codes ────────────────────────────────────────────────────────────────
 #   0   green
 #   1   a test failed, or a suite died
-#   2   you asked for something that does not exist (bad option, no suite matched)
+#   2   you asked for something that does not exist (bad option, unknown tier, a flag with
+#       nothing after it, or no suite matched)
 #  78   THIS MACHINE CANNOT RUN THE TESTS -- the preflight refused. EX_CONFIG from sysexits.h,
 #       chosen over an arbitrary number because a CI author can look it up (#124)
 #  97   results were lost mid-run: see _emit in lib/assert.sh
@@ -87,7 +111,8 @@ DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
 DEFAULT_TIERS="static unit shim install image container live"
 TIERS=""
-FILTER=""
+ASKED=""
+FILTERS=""
 PARALLEL=yes
 EVERYTHING=no
 
@@ -120,20 +145,86 @@ usage() {
     exit "${1:-0}"
 }
 
+# ─── the list flags accumulate (#256) ─────────────────────────────────────────
+# BOTH OF THEM USED TO ASSIGN, so a repeat threw the previous one away without a word: `--tier
+# static --tier unit --tier shim` ran one tier of three and printed a green count for it, and
+# `-k a -k b -k c` re-checked one suite of three and was read as "did not reproduce". The comma
+# form was documented and worked, so the two forms differed by two commas and by twelve suites.
+#
+# THE DE-DUPLICATION IS THE NO-ASSOCIATIVE-ARRAY IDIOM this project uses elsewhere -- see the
+# --everything-but-github block and preflight below, which need it for the same reason: bash 3.2
+# has no associative arrays. The one departure is `${TIERS:+$TIERS }` rather than that idiom's
+# `TIERS="$TIERS $t"` followed by one `${TIERS# }` at the end: those two run to completion in a
+# single loop and can strip the leading space afterwards, and an appender called from five option
+# arms has no "afterwards" to put it in.
+add_tiers() {                         # add_tiers LIST -> append to $TIERS; 1 if LIST held nothing
+    local t seen=no
+    # `set -f` BEFORE THE SPLIT, not after it. These are the operator's own strings, and without
+    # it `--tier '*'` expands against whatever directory you ran from -- so the shape check below
+    # would be handed filenames and would report one of those as the thing that is not a tier.
+    set -f
+    for t in $1; do
+        # SHAPE-CHECKED HERE, which is what lets every later `for t in $TIERS` stay glob-safe with
+        # no `set -f` of its own: tier_of's sed can only ever capture [a-z]*, so anything else
+        # cannot be the name of a tier any suite declares.
+        case "$t" in *[!a-z]*) set +f; printf 'not a tier name: %s\n' "$t" >&2; exit 2 ;; esac
+        seen=yes
+        case " $TIERS " in *" $t "*) ;; *) TIERS="${TIERS:+$TIERS }$t" ;; esac
+    done
+    set +f
+    # SEEN, NOT ADDED. `--tier static --tier static` adds nothing on its second pass and must
+    # not be an error -- that is the de-duplication working, not a value that named no tier.
+    [ "$seen" = yes ]
+}
+
+# WHAT A HUMAN TYPED, kept apart from what the runner derived. Only this is checked against the
+# declared tiers below -- DEFAULT_TIERS and --all are hand-written lists, and holding them to the
+# same rule would mean that deleting the last install-tier suite makes the DEFAULT invocation
+# refuse to run. That staleness is #160's complaint and not this one's.
+ask_tiers() {                         # ask_tiers FLAG LIST -> add_tiers, remembering it was TYPED
+    add_tiers "$2" || need_value "$1"
+    ASKED="${ASKED:+$ASKED }$2"
+}
+
+add_filters() {                       # add_filters LIST -> append to $FILTERS; 1 if LIST held nothing
+    local p seen=no
+    set -f                            # same reason as add_tiers, and more sharply: -k '*' is a
+    for p in $1; do                   # plausible thing to type and has always been a substring
+        seen=yes
+        case " $FILTERS " in *" $p "*) ;; *) FILTERS="${FILTERS:+$FILTERS }$p" ;; esac
+    done
+    set +f
+    [ "$seen" = yes ]
+}
+
+# ASKED FOR SOMETHING AND GOT THE DEFAULTS. A trailing `--tier` fell through to the
+# `|| TIERS="$DEFAULT_TIERS"` below and ran all seven default tiers -- the widest possible answer
+# to the narrowest possible request -- and a trailing `-k` disabled filtering the same way.
+#
+# "NAMED NOTHING" RATHER THAN "WAS EMPTY", which is the whole reason this is reached through
+# add_tiers' return value instead of a `[ -n "$1" ]` at the call site: `--tier ,` is not empty,
+# but `,` splits to a single space, a `for` over that iterates zero times, and it fell through
+# to the defaults exactly as a missing value did.
+need_value() {                        # need_value FLAG -> refuse: this occurrence named nothing
+    printf '%s needs a tier or pattern after it\n' "$1" >&2
+    exit 2
+}
+
 LIST_ONLY=no
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --tier)    shift; TIERS="$(printf '%s' "${1:-}" | do_tr ',' ' ')"; EVERYTHING=no ;;
-        --tier=*)  TIERS="$(printf '%s' "${1#--tier=}" | do_tr ',' ' ')"; EVERYTHING=no ;;
-        --release) TIERS="release"; EVERYTHING=no ;;
-        --all)     TIERS="$DEFAULT_TIERS release"; EVERYTHING=no ;;
+        --tier)    shift; ask_tiers --tier "$(printf '%s' "${1:-}" | do_tr ',' ' ')" ;;
+        --tier=*)  ask_tiers --tier "$(printf '%s' "${1#--tier=}" | do_tr ',' ' ')" ;;
+        --release) add_tiers release ;;
+        --all)     add_tiers "$DEFAULT_TIERS release" ;;
         # EVERY tier the suites declare except one, plus the gates and the build those tiers
-        # need -- see the header. EVERYTHING=no above rather than a precedence rule here: the
-        # arms are assignments and the last one wins, and an exception for this flag would be a
-        # special case to remember at exactly the wrong moment.
-        --everything-but-github) EVERYTHING=yes; TIERS="" ;;
-        -k)        shift; FILTER="${1:-}" ;;
-        -k*)       FILTER="${1#-k}" ;;
+        # need -- see the header. NO PRECEDENCE RULE AND NO EVERYTHING=no, because every arm here
+        # now ADDS: this flag unions its derived list into whatever else was asked for, and an
+        # exception for it would be a special case to remember at exactly the wrong moment. The
+        # arms USED to assign and the last one won, which is the bug #256 reported.
+        --everything-but-github) EVERYTHING=yes ;;
+        -k)        shift; add_filters "$(printf '%s' "${1:-}" | do_tr ',' ' ')" || need_value -k ;;
+        -k*)       add_filters "$(printf '%s' "${1#-k}" | do_tr ',' ' ')" || need_value -k ;;
         --serial)  PARALLEL=no ;;
         --list)    LIST_ONLY=yes ;;
         -h|--help) usage 0 ;;
@@ -141,7 +232,11 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-[ -n "$TIERS" ] || TIERS="$DEFAULT_TIERS"
+
+# THE DEFAULT IS WHAT NOTHING-AT-ALL-ACCUMULATED MEANS, so it cannot be decided here any more:
+# --everything-but-github adds its tiers below, and a fill-in that ran first would union the
+# seven default tiers into every one of its runs. It used to be safe here only because both
+# --everything-but-github and the derivation below re-assigned TIERS from empty. See below.
 
 tier_of() {                           # tier_of FILE -> the declared tier, or 'static'
     local t
@@ -153,6 +248,20 @@ wanted() {                            # wanted TIER -> 0 if it is in $TIERS
     local t
     for t in $TIERS; do [ "$t" = "$1" ] && return 0; done
     return 1
+}
+
+# ONE PATTERN OR SEVERAL, matched as an OR. `-k a -k b` reads as "either", and until #256 it read
+# as "b". A SPACE-SEPARATED LIST LOSES NOTHING: these are matched against suite basenames, and the
+# discovery glob below only ever yields NN-*.sh, which cannot contain a space.
+matches_filter() {                    # matches_filter BASE -> 0 if no -k, or any pattern matches
+    local p rc=1
+    [ -n "$FILTERS" ] || return 0
+    set -f                            # the operator's strings again -- see add_filters
+    for p in $FILTERS; do
+        case "$1" in *"$p"*) rc=0; break ;; esac
+    done
+    set +f
+    return "$rc"
 }
 
 # Anything not named here is podman, on purpose: an unrecognised tier is serialised with the
@@ -173,6 +282,23 @@ for f in "$DIR"/[0-9][0-9]-*.sh; do
     SUITES="$SUITES $f"
 done
 
+# ─── every tier the suites declare ────────────────────────────────────────────
+# DERIVED, NEVER WRITTEN DOWN, for the reason the flag below gives at length. Two readers now:
+# that flag, and the refusal of a tier name no suite declares -- which is why this is computed
+# here, where $SUITES exists, and read again well below the preflight.
+#
+# COMPUTED ONLY WHEN SOMETHING WILL READ IT. tier_of is a sed and a head per suite -- 72ms across
+# this tree, measured -- and an ordinary run has no use for the SET, so a bare `run-tests.sh` must
+# not pay for it. The selection loop below asks tier_of per suite either way.
+KNOWN=""
+if [ -n "$ASKED" ] || [ "$EVERYTHING" = yes ]; then
+    for f in $SUITES; do
+        t="$(tier_of "$f")"
+        case " $KNOWN " in *" $t "*) ;; *) KNOWN="$KNOWN $t" ;; esac
+    done
+    KNOWN="${KNOWN# }"
+fi
+
 # ─── --everything-but-github, part one: the tier list (#160) ───────────────────
 # DERIVED FROM THE SUITES, and that is the whole reason this is not one more string beside
 # DEFAULT_TIERS. `--all` IS such a string, written when there were eight tiers, and it has
@@ -187,14 +313,12 @@ done
 # The de-duplication is the no-associative-array idiom this project uses elsewhere -- see
 # preflight below, which needs it for the same reason: bash 3.2 has no associative arrays.
 if [ "$EVERYTHING" = yes ]; then
-    TIERS=""
-    for f in $SUITES; do
-        t="$(tier_of "$f")"
+    for t in $KNOWN; do
         [ "$t" = github ] && continue
-        case " $TIERS " in *" $t "*) ;; *) TIERS="$TIERS $t" ;; esac
+        add_tiers "$t"
     done
-    TIERS="${TIERS# }"
 fi
+[ -n "$TIERS" ] || TIERS="$DEFAULT_TIERS"
 
 # ─── ...and part two: the gates those tiers skip by default ────────────────────
 # THE SECOND WAY TO RUN LESS THAN YOU ASKED FOR. Selecting a tier is not the same as running it:
@@ -299,6 +423,35 @@ PREFLIGHT_EOF
     exit 78
 }
 preflight
+
+# ─── a tier nobody declares is a typo, not a selection (#256) ──────────────────
+# `--tier static,unti` USED TO RUN THE STATIC SUITES AND EXIT 0 GREEN. An unrecognised tier simply
+# matched no suite, and the good tier beside it kept the count non-zero -- so the typo cost you a
+# tier and said nothing: the same subset-reported-as-the-whole the header's #256 note describes,
+# wearing a smaller hat.
+#
+# ONLY WHAT WAS TYPED, which is what $ASKED is for. DEFAULT_TIERS and --all are hand-written
+# strings, and holding them to this rule would mean that deleting the last install-tier suite
+# makes the DEFAULT invocation refuse to run -- a tier the runner selects by default cannot be a
+# tier the runner rejects by name. That staleness is #160's complaint, not this one's; a tier that
+# is legitimate but declared nowhere still lands on "no suites matched" below.
+#
+# BELOW THE PREFLIGHT ON PURPOSE, and this is the one ordering in this block worth arguing.
+# `unknown option` (in the loop above) refuses before --list, so argv errors precede everything --
+# but the preflight is placed where it is so that it is "unconditional by construction", and an
+# exit above it would make that false for one argv shape. A machine that cannot run the suite at
+# all should say so before it comments on your spelling. It is still ABOVE CS193V_RUN_DIR and the
+# mkdir below, so a refusal here leaves no run directory -- unlike the "no suites matched" exit,
+# which is below them and always has been.
+#
+# AND --list STAYS UNGATED, which follows rather than being a second decision: it exits above the
+# preflight, so it cannot reach this. That is the right answer anyway -- `--list` is how you look
+# up the spelling you just got wrong.
+for t in $ASKED; do
+    case " $KNOWN " in *" $t "*) ;;
+        *) printf 'unknown tier: %s\nknown tiers: %s\n' "$t" "$KNOWN" >&2; exit 2 ;;
+    esac
+done
 
 # ─── run ───────────────────────────────────────────────────────────────────────
 WALL_T0=$SECONDS
@@ -410,15 +563,13 @@ for f in $SUITES; do
     base="$(basename "$f")"
     tier="$(tier_of "$f")"
     wanted "$tier" || continue
-    if [ -n "$FILTER" ]; then
-        case "$base" in *"$FILTER"*) : ;; *) continue ;; esac
-    fi
+    matches_filter "$base" || continue
     RAN=$((RAN + 1))
     if [ "$(lane_of "$tier")" = cheap ]; then CHEAP="$CHEAP $f"; else PODMAN="$PODMAN $f"; fi
 done
 
 if [ "$RAN" -eq 0 ]; then
-    printf '\n%sno suites matched%s (tiers: %s, filter: %s)\n' "$C_YEL" "$C_OFF" "$TIERS" "${FILTER:-none}" >&2
+    printf '\n%sno suites matched%s (tiers: %s, filter: %s)\n' "$C_YEL" "$C_OFF" "$TIERS" "${FILTERS:-none}" >&2
     exit 2
 fi
 
@@ -428,7 +579,14 @@ fi
 LANES=one
 [ "$PARALLEL" = yes ] && [ -n "$CHEAP" ] && [ -n "$PODMAN" ] && LANES=two
 
-printf '%sCS193V container tests%s  %s(tiers: %s)%s\n' "$C_BOLD" "$C_OFF" "$C_DIM" "$TIERS" "$C_OFF"
+# WHAT IS ABOUT TO BE MEASURED, IN FULL (#256). The tier list was here already; the suite count
+# and the -k patterns were not, and those are what separate `--tier static,unit,shim` from
+# `--tier static --tier unit` -- two commands that differed by two commas, by twelve suites, and
+# by nothing at all on screen. Built once and printed twice: see the summary.
+SUITEWORD=suites; [ "$RAN" -eq 1 ] && SUITEWORD=suite
+SCOPE="$RAN $SUITEWORD, tiers: $TIERS"
+[ -n "$FILTERS" ] && SCOPE="$SCOPE, -k: $FILTERS"
+printf '%sCS193V container tests%s  %s(%s)%s\n' "$C_BOLD" "$C_OFF" "$C_DIM" "$SCOPE" "$C_OFF"
 [ "$LANES" = two ] && printf '%stwo lanes: the podman tiers below, and static/unit/shim alongside them%s\n' \
                              "$C_DIM" "$C_OFF"
 printf '%s\n' "-------------------------------------------------------------------"
@@ -577,6 +735,11 @@ fi
 printf '%s%s pass%s   ' "$C_GRN" "$P" "$C_OFF"
 [ "$F" -gt 0 ] && printf '%s%s fail%s   ' "$C_RED" "$F" "$C_OFF" || printf '0 fail   '
 printf '%s%s skip   %s recorded%s\n' "$C_DIM" "$S" "$R" "$C_OFF"
+# AND WHAT THOSE COUNTS COVER, on the same screen as the counts themselves. Deliberately the same
+# string the banner printed: by the time this line appears the banner is thousands of lines up,
+# and it is this block that gets pasted into an issue. `2195 pass` and `919 pass` are both
+# green-looking numbers, and #256 is the report of someone reading the second as the first.
+printf '%sover %s%s\n' "$C_DIM" "$SCOPE" "$C_OFF"
 # Where the record of this run is, said on every run rather than only on a bad one -- a path
 # you only learn about when things went wrong is a path you have to go looking for at the worst
 # moment. Holds results.tsv, timings.tsv, crashes.tsv and the no-podman lane's full output.

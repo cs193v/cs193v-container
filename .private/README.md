@@ -1363,6 +1363,15 @@ CS193V_GH_TEST_TOKEN=github_pat_... \
 .private/tests/run-tests.sh --list           # what exists, and in which tier
 ```
 
+`--tier` and `-k` both take a comma-separated list, and **repeating either adds to it** rather
+than replacing it (#256): `--tier static --tier unit` is `--tier static,unit`, and `-k a -k b`
+runs the suites matching either. Every tier flag adds; narrowing is `-k`'s job. A tier no suite
+declares is refused, and so is a flag with nothing after it — until #256 all three of those
+cases silently ran something other than what was asked for, and reported it as green. Both the
+banner and the summary print how many suites ran and in which tiers, because the thing that
+goes wrong here is never a wrong answer, it is **a narrower measurement wearing a wide
+command's clothes**.
+
 **Bringing the container up on a new platform is one command** (#160):
 
 ```
@@ -1378,6 +1387,14 @@ and expect to be logged out of claude, codex, gh and vercel**: the last of those
 gates is what unskips the `--rebuild --logout` test, which deletes the volumes those logins live
 in. It says all of this on screen before it starts. Set `CS193V_INSTANCE` first or it is the
 *shared* volumes it deletes.
+
+**`--tier` no longer narrows it.** Every tier flag adds (#256), so
+`--everything-but-github --tier static` is the whole destructive run and not a cheap corner of
+it — and `--everything-but-github --tier github` runs the github tier too, since the flag can
+decline to *add* that tier but cannot *remove* one you named yourself. `CS193V_GH_TEST_TOKEN`
+is still deliberately not among the gates it sets, so the real github suite skips itself. To
+run one suite with these gates, use `-k`: it still narrows, and a selection that lands entirely
+in the cheap lane still pays no build.
 
 **On a Mac, install the dependencies once first:**
 

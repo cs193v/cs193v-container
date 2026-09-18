@@ -64,9 +64,21 @@ measurement that killed them.
 ```
 .private/tests/run-tests.sh --list           # what exists, in which tier, in which lane
 .private/tests/run-tests.sh --tier static    # no podman, no image, no network — milliseconds
-.private/tests/run-tests.sh -k 16-args       # only suites whose filename matches
+.private/tests/run-tests.sh -k 16-args       # only suites whose filename contains this
 .private/tests/run-tests.sh                  # the default tiers: not release, github or windows
 ```
+
+**Both list flags take a list, and repeating either adds to it** (#256): `--tier static,unit`
+and `--tier static --tier unit` select the same two tiers, and `-k a -k b` runs every suite
+matching either. Every tier flag adds and none of them narrows — `--everything-but-github`
+included, so it can no longer be narrowed with `--tier`. Narrowing is `-k`'s job. A tier no
+suite declares is refused rather than ignored, and so is a flag with nothing after it.
+
+Until #256 both flags *assigned*, so a repeat threw the previous one away in silence and
+`--tier static --tier unit --tier shim` measured one tier of three and printed a green count
+for it. The rule that came out of it: **a flag this suite silently ignores is a measurement
+nobody took.** The banner and the summary now both say how many suites ran, in which tiers,
+under which `-k` — check that line against what you typed before you believe a green number.
 
 Don't reach for `--everything-but-github` to check your own work: it rebuilds first, budgets
 about 15 GB and a long wall clock, and its last cost gate logs you out of claude, codex, gh
