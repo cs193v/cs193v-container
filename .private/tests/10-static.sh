@@ -1209,6 +1209,30 @@ assert_eq "pin:nobody-else-declares-a-payload-digest" "" \
              "$PRIVATE/install-utils.sh" "$PRIVATE/wsl-provision.sh" \
              "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
 
+# ─── and no two paths in the tree differ only in case  (#302) ──────────────────
+# THE DIGEST ABOVE IS ONLY MEANINGFUL IF EVERY MACHINE SEES THE SAME TREE, and that is not a
+# property of the archive -- it is a property of the filesystem it lands on. macOS ships APFS
+# case-INSENSITIVE by default, so `Readme.md` and `README.md` extract to ONE file there and to
+# two on Linux and WSL. manifest_hash walks what it finds, so the student's digest would differ
+# from the pin for a reason no message in the bootstrap can name: it refuses with "the course
+# files that arrived are not the ones this installer expects", which sends a student looking at
+# their wifi.
+#
+# AND IT CUTS BOTH WAYS, which is the half that makes this a release gate rather than a student
+# one. release.sh:220 computes the pin by running --dev-manifest-hash on whoever's machine is
+# cutting the release. A release cut on a Mac over a colliding tree pins the COLLAPSED digest,
+# and then Linux and WSL are the platforms that mismatch.
+#
+# SO IT IS HELD HERE, WHERE IT IS FREE. No path collides today, and the cost of keeping it that
+# way is one sort. The runtime alternative -- teaching manifest_hash to detect this -- adds code
+# to the file whose remit is "readable in one sitting" and tells a student something they cannot
+# act on anyway.
+#
+# `git ls-files` AND NOT A WALK, because the tarball is built from what git tracks, so that is
+# the population the pin is computed over. do_tr rather than tr for the macOS locale reason the
+# rest of this file uses it.
+case_dupes="$(git ls-files | do_tr 'A-Z' 'a-z' | LC_ALL=C sort | uniq -d | do_tr '\n' ' ' | sed 's/ *$//')"
+assert_eq "manifest:no-case-colliding-paths" "" "$case_dupes"
 
 # ─── the fake sudo cannot execute anything ─────────────────────────────────────
 # EVERY privileged call in the installer goes through one name -- `sudo`, in install-utils.sh's

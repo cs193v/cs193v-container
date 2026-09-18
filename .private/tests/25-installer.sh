@@ -566,7 +566,7 @@ build_vector() {                      # build_vector NAME DIR
                 printf 'y\n' > "$2/top.txt" ;;
     spaces)     printf 'x\n' > "$2/a file with spaces.txt" ;;
     utf8)       printf 'x\n' > "$2/caf\303\251.txt" ;;
-    sortorder)  printf 'x\n' > "$2/A"; printf 'x\n' > "$2/_"; printf 'x\n' > "$2/a" ;;
+    sortorder)  printf 'x\n' > "$2/A"; printf 'x\n' > "$2/_"; printf 'x\n' > "$2/b" ;;
     lf)         printf 'one\ntwo\n'     > "$2/same.txt" ;;
     crlf)       printf 'one\r\ntwo\r\n' > "$2/same.txt" ;;
     notrailing) printf 'no newline at the end' > "$2/tail.txt" ;;
@@ -591,7 +591,13 @@ vector_hash() {                       # vector_hash NAME -> what the bootstrap m
 #   nested      paths are relative with no `./`, directories get their own line, the root does not
 #   spaces      the walk does not word-split
 #   utf8        bytes are bytes
-#   sortorder   `A` `_` `a` order differently under C than under en_US, so the locale is pinned
+#   sortorder   `A` `_` `b` order differently under C than under en_US, so the locale is pinned
+#               -- C gives `A _ b`, en_US gives `_ A b`, both measured. `b` AND NOT `a` (#302):
+#               macOS APFS is case-insensitive by default, so `A` and `a` were ONE file there,
+#               the vector built two entries instead of three, and this assertion could not pass
+#               on any stock Mac. `b` keeps the collation question and cannot collide. The wider
+#               defect that vector was sitting on -- a manifest digest that depends on the
+#               filesystem under it -- is held by manifest:no-case-colliding-paths in 10-static.sh
 #   lf/crlf     content decides, under one filename -- the case a .gitattributes slip would break
 #   notrailing  content is hashed whole, not line-wise
 #   hexname     nothing in the reader hunts for hex, per pkg_sha256's own warning
@@ -602,7 +608,7 @@ assert_eq "manifest:flat"       "e941f13da1b179d65e21ea00374462faee6b18e48e4f5f1
 assert_eq "manifest:nested"     "9420e7bfc4546a199fdf1e83cd2e37b7936f4c9322e1dc7b371b308dda92fd13" "$(vector_hash nested)"
 assert_eq "manifest:spaces"     "0a376eda1a63e6938e5a81d0bf86f455238c366b40dffc7d343e803d16248ba4" "$(vector_hash spaces)"
 assert_eq "manifest:utf8"       "ec7c6da22b455715c49bc145309003d32fb1a2c92f511c6b0f8ffc3b0e1fdf43" "$(vector_hash utf8)"
-assert_eq "manifest:sort-order" "5c0cccdf3984bc58d81f248f4a52ade7cca242c284f746e29715a072cba9cb3a" "$(vector_hash sortorder)"
+assert_eq "manifest:sort-order" "0494a707deb2483d73bf2c9f891066b54917e0b703ffae112235aeb6327211c4" "$(vector_hash sortorder)"
 assert_eq "manifest:lf"         "a68000dddee3b7a3e0fb66e696501e4c11084d7c5ecc7f07e1304ae040e9abe2" "$(vector_hash lf)"
 assert_eq "manifest:crlf"       "e9ace51009733661f006f82495eb991ba0e98a4177e565985f7bfd23b662ec66" "$(vector_hash crlf)"
 assert_eq "manifest:no-trailing-newline" "0af4110160933ffad1b8550478784b4629bd78334f0b249f7ed15cdc3e905397" "$(vector_hash notrailing)"
