@@ -422,14 +422,24 @@ What needs it:
 {{WANTS}}
 
 Open a terminal window and run the installer from there. If you
-started it by double-clicking, or by piping it into bash, there is
-nowhere for the password prompt to appear.
+started it by double-clicking, or from something that has no
+terminal of its own, there is nowhere for the password prompt to
+appear.
 
 # ITS FIRST LINE DOES NOT SAY "your password was not accepted", which is what it
 # said first and is wrong for two of the three ways `sudo -v` fails: a student who
 # is not in sudoers never had a password rejected, and a prompt that timed out
 # never had one read. sudo's own words are on the line above the box, so pointing
 # at them is both accurate and more useful than a guess.
+#
+# AND IT NO LONGER BLAMES THE PIPE (#297). This used to end "if you started it by
+# double-clicking, or by piping it into bash, there is nowhere for the password
+# prompt to appear", and the second half stopped being true: `curl -fsSL URL | bash`
+# is the published instruction now, and install-cs193v.sh reattaches stdin from
+# /dev/tty before handing over, so a piped run reaches this prompt like any other.
+# What is left is the case that really has no terminal anywhere -- a double-click,
+# a cron job, an ssh with no pty -- and the wording names the shape rather than
+# listing the ways in, because the list was what went stale.
 
 [[err.sudo-refused]]
 sudo did not give administrator rights, so none of the setup was
