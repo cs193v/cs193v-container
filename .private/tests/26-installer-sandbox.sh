@@ -684,6 +684,49 @@ assert_eq   "sb-sudo-password:and-the-matching-subgid" "student:200000:65536" \
 assert_says_not "sb-sudo-password:does-not-echo-the-password" "hunter2" "$(sb_transcript "$out")"
 sandbox_reap
 
+# ── the same real password, this time through `curl -fsSL URL | bash`  (#297) ──
+# WHAT THIS ADDS OVER THE CASE ABOVE, which is otherwise identical: the installer arrives on
+# bash's stdin. So fd 0 is a pipe for the whole run, and the only reason a password prompt can
+# happen at all is the reattach from /dev/tty at the hand-over. The shim tier proves the prime
+# is REACHED; a fake sudo cannot prove sudo can still READ a password there, because sudo opens
+# the terminal itself. This is the case that answers that, with a real sudo and a real password.
+#
+# #297'S SCREENSHOT IS A MAC AND THIS IS A LINUX CONTAINER, and the gap is only in which
+# privileged step is wanted -- subuid here, the .pkg there. The terminal question is the same
+# one, and it is the whole question; podman-shim.sh:346-348 is why the Mac half stays manual.
+sb_machine no-prereqs=subuid fake-podman=yes sudo=password:hunter2
+sb_step menu     consent  '2' "$(msg_text menu.consent.stop "$ICAT")" \
+                              "$(msg_text menu.consent.go "$ICAT")"
+sb_step password sudo-pw  'hunter2\n' "$(msg_text step.password "$ICAT")" \
+                                      "$(msg_text note.password-why "$ICAT")"
+out="$(sandbox_run piped-password '' -e CS193V_DIR=/home/student/cs193v -e SB_PIPED=yes)"
+# IT REALLY WAS PIPED. Without this the case silently degrades into a second copy of the one
+# above -- SB_PIPED unset, run.sh takes the ordinary arm, and every assertion below stays green
+# while testing nothing new.
+assert_eq "sb-piped-password:really-was-piped" "cat /work/install-cs193v.sh | bash" \
+          "$(sb_section "$out" INSTALLER-CMD)"
+assert_eq "sb-piped-password:really-was-driven" "yes" "$(sb_section "$out" DRIVEN)"
+assert_eq "sb-piped-password:the-machine-really-wants-a-password" "password:hunter2" \
+          "$(sb_section "$out" SUDO)"
+# THE CONVERSATION HAPPENED. Both steps armed on their own screen, which says the consent menu
+# was answered from the terminal rather than defaulted -- menu() takes index 0, "stop, change
+# nothing", whenever it cannot see one.
+assert_eq "sb-piped-password:every-step-found-its-screen" "" \
+          "$(sb_section "$out" DRIVE | grep '^FAIL' || true)"
+# AND A REAL sudo REALLY PROMPTED, once, through the reattached terminal. This is the line
+# #297 could not reach: on that machine the run stopped at err.sudo-no-terminal instead.
+assert_says "sb-piped-password:really-prompted" "password for student" "$out"
+assert_eq   "sb-piped-password:asked-exactly-once" "1" \
+            "$(printf '%s' "$out" | grep -c 'password for student')"
+assert_says_not_key "sb-piped-password:does-not-refuse-for-want-of-a-terminal" \
+                    err.sudo-no-terminal "$out" "$ICAT"
+# AND THE PRIVILEGED STEP RAN ON THE FAR SIDE OF IT, which is what makes the password real
+# rather than merely typed.
+assert_eq   "sb-piped-password:the-range-really-landed" "student:200000:65536" \
+            "$(sb_section "$out" ETC-SUBUID)"
+assert_says_not "sb-piped-password:does-not-echo-the-password" "hunter2" "$(sb_transcript "$out")"
+sandbox_reap
+
 # ─── /etc/wsl.conf, every state it can be in, with no Windows anywhere ─────────
 # platform() decides WSL by `grep -qi microsoft /proc/version` and setup_wslconf's effect is
 # two file writes, so one bind mount makes the entire arm executable here. Verified rather
