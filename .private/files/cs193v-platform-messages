@@ -14,9 +14,17 @@
 #
 # Installed as /usr/local/bin/cs193v-platform-messages. Callers: cs193v-shell sets @copy-hint and
 # @select-correction from it at claim time, cs193v-linkbox prints its --link line, tmux.conf's
-# shifted-drag bindings show the --correct line through the option cs193v-shell set, and the
-# COURSE NOTES tell the agent to run --hostpath. That last one is the only mode a student's agent
-# invokes directly; the rest are for the launcher. Running any of them by hand is harmless.
+# shifted-drag bindings show the --correct line through the option cs193v-shell set, setup-git
+# puts a line under each URL it shows (#321), and the COURSE NOTES tell the agent to run
+# --hostpath. That last one is the only mode a student's agent invokes directly; the rest are for
+# the launcher. Running any of them by hand is harmless.
+#
+# SETUP-GIT USES BOTH GESTURE MODES AND PICKS BY THE URL, not by the screen, which is the one
+# thing to know before editing either row. Its short `shortlink` URL can be clicked, so that gets
+# --link; the 157-character GitHub URL it falls back to cannot -- a terminal selects what it has
+# DRAWN, so a click on a wrapped URL opens the half sharing that row, which is issue #67 -- so
+# that, and the by-hand steps whose URLs are always long, get --copy instead. So --copy now has a
+# reader that is not a status line, and therefore a WIDTH: see the 69-column gate below.
 #
 # ─── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────
 #
@@ -140,6 +148,12 @@
 # /bin/sh and a case statement, like open-url: no bashisms and nothing to source. The three
 # gesture modes are called from a tmux command substitution at session-claim time, so they must
 # be fast, must print exactly one line, and must never write to stderr.
+#
+# AND TWO OF THEM HAVE A COLUMN CEILING, enforced by the image build and by 50-image.sh rather
+# than here. --link gets 65, which is what box() leaves inside cs193v-linkbox's popup. --copy
+# gets 69, which is what setup-git's catalogue leaves once token.byhand has indented the line
+# five columns to sit under step 1 and wrapped it in brackets; it had no ceiling at all while its
+# only reader was a status line, that being the terminal's own width. Both arms at 65 today.
 #
 # --hostpath IS THE ONE MODE THOSE LAST TWO DO NOT BIND, and the difference is worth stating so
 # nobody "fixes" it: it is read by an AGENT rather than by tmux, so it prints the path on its own

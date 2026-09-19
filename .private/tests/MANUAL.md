@@ -148,8 +148,15 @@ hand, click *Generate token* and confirm, then open the token's own page at
 item 2 and is recoverable; a wrong **Expiration** is silent until the token dies mid-quarter, and
 neither the probes nor any test can see it — `00-release-gates.sh` checks the date `setup-git` is
 compiled with, not the date GitHub gave the token. If it reads wrong, put one line back into
-`token.prefill` naming the field — there are four rows of headroom on that screen — and record
-what GitHub actually did here.
+`token.prefill` naming the field and record what GitHub actually did here.
+
+**That used to say "there are four rows of headroom on that screen", and there are none.** The
+figure did not survive being measured, whatever it was counting: the link path was 21 rows of the
+23 the container's tmux leaves visible — two spare, not four — and #321 spent both on the line
+naming the gesture that opens the link. So a line added here now has to be paid for by one removed, and
+the row to take is the blank `say` emits above the block. Measure, do not count: replay the pty
+transcript `35-setup-git-shim.sh` produces onto a 24-row screen and read where `Your token:`
+lands. `files/setup-git`'s comment above `ask_token` carries the current figures.
 
 Resource owner stays the most expensive of the three, and is worth re-reading whenever GitHub
 touches that page: [community discussion
@@ -393,7 +400,21 @@ pane must not react — on Ptyxis an unhandled click is explicitly handed back t
 facts and only the pair of them means the gesture is intercepted.
 
 The gesture the box NAMES is per-terminal now (#122), and the box is the thing to read: whatever
-`cs193v-platform-messages --link` says for your terminal is what should work. **Two rows have been measured**
+`cs193v-platform-messages --link` says for your terminal is what should work.
+
+**AND `setup-git` NOW PRINTS THAT SENTENCE ITSELF (#321), so it is checkable there too — with two
+differences worth knowing before you read a failure as a regression.** Under its short link the
+screen names the click, and that is the same claim this table makes, so the row below applies
+unchanged. But the screen switches to `--copy` wherever the URL on it is one of GitHub's own long
+ones — the by-hand steps always, and the prefilled screen whenever `shortlink` could not make a
+port reachable — because a terminal selects what it has *drawn* and a click on a wrapped URL opens
+the half of it sharing that row, which is #67. So on those screens the thing to check is §7.10's
+selection gesture, not this section's click, and a screen naming a click over a wrapped URL is a
+bug rather than a row to fill in. `setup-git` is also where an *unrecognised* terminal shows: no
+`CS193V_TERM_CLASS` means the generic "select the link and paste it" arm, which is correct rather
+than degraded.
+
+**Two rows have been measured**
 — Terminal.app, Ptyxis and Windows Terminal — and one more is extended from source to a terminal
 nobody has run (GNOME Terminal, which shares Ptyxis's token). The rest are still **rows to fill
 in, not claims**:

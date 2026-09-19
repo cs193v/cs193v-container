@@ -26,7 +26,9 @@ projects/                      the student's work; the only directory shared wit
                                farewell now, from messages.txt (issue #220)
     cs193v-ui.sh               THE SHARED PRESENTATION LAYER — sourced by the launcher AND,
                                as /etc/cs193v/ui.sh, by everything in the image that draws
-    setup-git                  guides a student through git and GitHub (issue #49)
+    setup-git                  guides a student through git and GitHub (issue #49). Every URL it
+                               shows carries a line saying how to reach it on the student's own
+                               terminal, from cs193v-platform-messages (#321)
     setup-git-messages.txt     all of setup-git's prose, messages.txt's format,
                                hard-wrapped at 76 columns (issue #58 — see below)
     tmux/tmux.conf             the beginner-locked tmux configuration
@@ -43,7 +45,8 @@ projects/                      the student's work; the only directory shared wit
                                gestures (issues #122, #123, #133), --hostpath is where their copy
                                of ~/projects is and how they reach it (#257). Fed CS193V_TERM_CLASS
                                and CS193V_HOST_OS by the launcher, because nothing in here can
-                               work either out
+                               work either out. Read by cs193v-shell, cs193v-linkbox, setup-git
+                               (#321) and the course notes
     agent-notes.md             THE COURSE NOTES BOTH AGENTS READ — installed once as
                                /etc/cs193v/agent-notes.md; /etc/claude-code/CLAUDE.md is a
                                symlink to it and the entrypoint links ~/.codex/AGENTS.md at it

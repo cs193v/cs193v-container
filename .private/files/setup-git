@@ -362,6 +362,35 @@ token_link() {
     fi
 }
 
+# HOW TO GET AT THE LINK THIS SCREEN JUST PRINTED, for the terminal the student is really sitting
+# in. Issue #321.
+#
+# WHY THE SCREEN HAS TO SAY THIS AT ALL. tmux.conf takes the mouse for the whole attach, and a
+# terminal in reporting mode has by definition given up its own click-drag selection -- so
+# neither clicking a URL nor dragging across one does what a student expects, and which gesture
+# gets it back is a per-terminal question with no standard, no capability and no query behind it.
+# cs193v-platform-messages is the table; the launcher resolves the terminal on the host (tmux
+# overwrites TERM_PROGRAM for every pane it spawns) and cs193v-shell publishes the token into the
+# session environment, which is how it reaches this process. Issues #122 and #123 are what
+# happens without it: the student was told to hold SHIFT, did so, and got nothing.
+#
+# TWO MODES, AND WHICH ONE IS NOT A STYLE CHOICE. --link names a CLICK, and a click is only
+# meaningful on the short link: a terminal selects what it has DRAWN, so a click on a URL long
+# enough to wrap opens the half of it that shares that row, which is issue #67 arriving through
+# the cure for #67. The long form therefore gets --copy -- how to select and copy it -- and so do
+# the by-hand steps, whose two URLs are GitHub's own and always long. open-url:156 splits its own
+# prose the same way and on the same test.
+#
+# UNGUARDED, unlike token_link above, and that is measured rather than assumed. The helper is
+# installed and syntax-checked in the same Containerfile layer that installs this script, which
+# then exercises all six terminal tokens across all three modes -- an arm that printed nothing
+# fails the build. Nothing else renders these screens: 45-setup-git.sh drives this file through
+# the --dev-* seams only. `2>/dev/null` stays for the reason cs193v-linkbox:190 keeps it -- this
+# script's stderr is the student's screen, so a `command not found` would land mid-sentence.
+gesture() {                           # gesture --link|--copy -> the one line it prints
+    cs193v-platform-messages "$1" 2>/dev/null
+}
+
 # The signup link carries the derived address, so the first field is filled in. Only @ needs
 # escaping: the address is a SUNetID and a literal domain, and validate_sunetid has already
 # refused every other byte.
@@ -623,20 +652,39 @@ github_checkpoint() {
 # preference: this screen printed BOTH ways of making a token to every student, one after the
 # other, and came to 53 rows on an 80-column terminal when the container's tmux leaves 23 of them
 # visible. A student who followed the link arrived at `Your token:` with the link itself scrolled
-# off the top. Now the link path is 21 rows and the by-hand path 22, so neither scrolls at all --
+# off the top. Now the link path is 23 rows and the by-hand path 22, so neither scrolls at all --
 # and the by-hand steps are read only by the student who asked for them.
+#
+# THE LINK PATH IS AT 23 OF 23 AND THAT IS DELIBERATE, having been 21 until #321 gave each screen
+# a row naming the gesture that opens the link (and, above the by-hand steps, the one that copies
+# it). Measured rather than counted: replay the pty transcript 35-setup-git-shim.sh already
+# produces onto a 24-row screen and read where `Your token:` lands. Both counts include the blank
+# line `say` emits ahead of the block, which is the row to spend if a third has to be found --
+# losing it costs a paragraph break at the top of a screen rather than anything a student reads.
 #
 # THE DEFAULT IS "YES, I SEE MY TOKEN", which is the same departure from the launcher's
 # safe-default rule that ask_sunetid makes, for the same reason: nothing here is destructive, and
 # the cost of arrowing down is one keystroke on the path almost nobody takes.
 ask_token() {
-    local kind prompt byhand=yes
+    local kind prompt byhand=yes url mode
     say token.intro
     if [ "$CS193V_TOKEN_PREFILL" = yes ]; then
         # NO "EXPIRY=" ANY MORE. The date is named in the by-hand steps and nowhere else: the
         # link carries it as a lifetime in days, and the four checks that used to ask a student
         # to read it back off the page went with issue #58.
-        say token.prefill "URL=$(token_link)"
+        #
+        # RESOLVED ONCE INTO A VARIABLE, because the hint under it depends on WHICH link it
+        # turned out to be. shortlink prints its ARGUMENT back when it cannot make a port
+        # reachable, and comparing against token_url is how open-url:156 tells the two apart too.
+        #
+        # THE STRING AND NOT THE EXIT STATUS, and that is the difference between the two roads to
+        # the long URL rather than a preference. shortlink degrading exits 3, which a status
+        # check would catch -- but token_link also reaches the long form by not finding shortlink
+        # at all, and that arm is token_url alone, exiting 0. One test covers both. See gesture()
+        # for why the two forms want different advice.
+        url="$(token_link)"
+        if [ "$url" = "$(token_url)" ]; then mode=--copy; else mode=--link; fi
+        say token.prefill "URL=$url" "HOWTO=$(gesture "$mode")"
         printf '\n'
         menu 0 "$(msg opt.have-token)" "$(msg opt.by-hand)"
         [ "$MENU_CHOICE" -eq 0 ] && byhand=no
@@ -644,7 +692,8 @@ ask_token() {
     # An `if` rather than `[ ... ] &&`, because this is the last command in the branch and a
     # false test would make ask_token itself return 1.
     if [ "$byhand" = yes ]; then
-        say token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY"
+        say token.byhand "ORG=$CS193V_GH_ORG" "EXPIRY=$CS193V_TOKEN_EXPIRY" \
+                         "HOWTO=$(gesture --copy)"
     fi
     say token.paste
     printf '\n'

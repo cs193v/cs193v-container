@@ -350,6 +350,24 @@ prefix = default("CS193V_GH_SANDBOX_PREFIX", "sandbox-")
 subs = {"ORG": org,
         "EXPIRY": default("CS193V_TOKEN_EXPIRY", "2026-12-31"),
         "URL": "http://localhost:65535/magic-token-link",
+        # {{HOWTO}} IS THE PER-TERMINAL GESTURE (#321), measured at its CEILING rather than at
+        # the widest row shipping today, because the value comes from outside this catalogue --
+        # files/cs193v-platform-messages, keyed on whichever terminal the launcher resolved.
+        # Left out, this checker scores the parenthetical that carries it at seven columns and
+        # goes blind to the widest line on the token screen, which is the shape of a lint that
+        # passes for no reason. 69 is where the tighter of the two lines puts it: token.byhand
+        # indents its parenthetical five columns to sit under step 1, so 76 less that indent and
+        # less the two brackets is 69. That is what the image build and 50-image.sh hold --copy
+        # to; --link is held tighter, at the 65 cs193v-linkbox needs, so 69 covers whichever mode
+        # setup-git asks for and a row too wide is refused at the gate rather than wrapping
+        # silently onto a screen that has no spare row.
+        #
+        # NO APOSTROPHES OR BACKTICKS IN HERE, for the reason the heredoc this sits inside is
+        # quoted: this
+        # python program sits inside a command substitution, and bash tracks quoting through one.
+        # A single apostrophe opens a quote that runs to the end of the program and the file
+        # stops parsing -- measured, 1.2s into a run, as an unmatched backtick 700 lines later.
+        "HOWTO": "x" * 69,
         # WORST CASES, NOT EXAMPLES, and all three are eight characters of SUNetID: the ID itself,
         # the address derived from it, and the repository named after it (issue #92). err.clone
         # carries the last, and measuring that line at the width of the PLACEHOLDER scores it 21

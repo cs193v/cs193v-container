@@ -847,6 +847,10 @@ RUN set -eux; \
                   | LC_ALL=C awk '{ t=$0; gsub(/[\200-\277]/,"",t); print length(t) }')"; \
         test "$g_cols" -le 65 \
             || { echo "cs193v-platform-messages --link is $g_cols columns for $g_tok; box() wraps over 65" >&2; exit 1; }; \
+        g_ccols="$(CS193V_TERM_CLASS="$g_tok" CS193V_HOST_OS=macos /usr/local/bin/cs193v-platform-messages --copy \
+                  | LC_ALL=C awk '{ t=$0; gsub(/[\200-\277]/,"",t); print length(t) }')"; \
+        test "$g_ccols" -le 69 \
+            || { echo "cs193v-platform-messages --copy is $g_ccols columns for $g_tok; setup-git wraps over 69" >&2; exit 1; }; \
         for g_f in initializing ready error; do \
             test "$(CS193V_TERM_CLASS="$g_tok" CS193V_HOST_OS=macos \
                     /usr/local/bin/cs193v-linkbox --expires-in 900 --frame "$g_f" | wc -l)" = 10 \

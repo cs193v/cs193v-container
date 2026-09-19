@@ -207,6 +207,29 @@ assert_match "cursor:shown-at-the-sunetid-prompt" "$SG_ESC\[\?25h" \
              "$(printf '%s' "$SG_OUT" | do_tr -d '\r' \
                 | awk -v p="$(sg_phrase prompt.sunetid)" 'index($0, p) { print; exit }')"
 
+# ─── WHICH GESTURE THE SCREEN NAMES, and it is the terminal's rather than a guess (#321) ──────
+# THE NEEDLES ARE READ OUT OF THE SHIPPED TABLE, never quoted here. That is 50-image.sh's house
+# rule and PR #258's: an assertion that carries a copy of the prose fails when the prose is
+# reworded, which is not a regression. Read first, then checked non-empty, because a table that
+# printed nothing would otherwise make every assertion below pass against the empty string --
+# #79's shape, and 25-installer.sh:929 is the precedent for the guard.
+#
+# TWO MODES, because setup-git asks two different questions. A SHORT link can be clicked, so it
+# gets --link; the 157-character form CANNOT -- a terminal selects what it has drawn, so a click
+# on a wrapped URL opens the row it landed on, which is #67 arriving through the cure for #67 --
+# so it gets --copy instead, the same split open-url:156 makes.
+SG_PM="$PRIVATE/files/cs193v-platform-messages"
+g_apple="$(CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos sh "$SG_PM" --link)"
+g_copy="$(CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos sh "$SG_PM" --copy)"
+g_plain="$(CS193V_TERM_CLASS=unknown CS193V_HOST_OS=macos sh "$SG_PM" --link)"
+assert_ne "gesture:the-apple-link-needle-was-readable" "" "$g_apple"
+assert_ne "gesture:the-default-link-needle-was-readable" "" "$g_plain"
+assert_ne "gesture:the-apple-copy-needle-was-readable" "" "$g_copy"
+# AND THE TWO LINK ROWS MUST DIFFER, or the pair of cases below proves nothing: each asserts its
+# own arm present and the other absent, and if the table gave one answer to both tokens they
+# would be the same assertion twice.
+assert_ne "gesture:the-two-link-rows-differ" "$g_apple" "$g_plain"
+
 # ─── the two ways to get a token (issue #58) ───────────────────────────────────
 # The link screen ends in a choice, and the by-hand steps sit behind it. Printing both to
 # everybody is what made this screen 53 rows on an 80-column terminal, of which the container's
@@ -214,8 +237,13 @@ assert_match "cursor:shown-at-the-sunetid-prompt" "$SG_ESC\[\?25h" \
 # link itself scrolled off. Two things are asserted here: the fallback is REACHABLE, and it is out
 # of the way of the student who did not need it.
 sg_new
-sg_run prefill happy
+sg_run prefill happy CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos
 sg_says "prefill:offers-the-link"  token.prefill "$SG_OUT"
+# THE TERMINAL'S OWN ROW, AND NOT THE DEFAULT. Both halves are needed: the positive alone would
+# pass on a screen that printed the generic sentence to everybody, which is exactly the bug
+# #122 and #123 were.
+sg_has     "prefill:names-this-terminals-gesture" "$g_apple" "$SG_OUT"
+sg_has_not "prefill:does-not-fall-back-to-the-default-gesture" "$g_plain" "$SG_OUT"
 sg_says "prefill:offers-a-way-out" opt.by-hand   "$SG_OUT"
 # THE LINK ITSELF, and where to look for it MOVED with issue #67. The prefilled parameters are the
 # whole point of offering the link, and they used to be on the screen because the screen carried the
@@ -231,6 +259,17 @@ sg_says_not "prefill:hides-the-by-hand-steps" token.byhand "$SG_OUT"
 # has nothing to paste, which looks from their side like the link having failed.
 sg_says_tail "prefill:names-the-confirmation" token.prefill "$SG_OUT"
 sg_says "prefill:the-link-path-still-works" status.all-set "$SG_OUT"
+
+# ─── AND WITH NO TERMINAL TOKEN AT ALL, which is a bare `podman exec` rather than a fault ─────
+# CS193V_TERM_CLASS reaches a pane because cs193v-shell publishes it into the tmux session
+# environment at claim time (cs193v-shell:160). A student who got here some other way -- podman
+# exec, a plain ssh -- has no token, and the table's job then is to answer generically rather
+# than to guess. This is the mirror of the case above: the default row present, the measured one
+# absent.
+sg_new
+sg_run prefill-unknown happy
+sg_has     "prefill-unknown:names-the-default-gesture" "$g_plain" "$SG_OUT"
+sg_has_not "prefill-unknown:invents-no-terminal-specific-click" "$g_apple" "$SG_OUT"
 
 # ─── the link fits an 80-column terminal (issue #67) ───────────────────────────
 # THE REGRESSION TEST FOR #67, and it has to live here rather than in 20-messages.sh. The
@@ -257,11 +296,17 @@ assert_eq "prefill:the-link-fits-an-80-column-terminal" "" "$(sg_rows_over 80 "$
 # and what it must show is the URL this screen printed before any of this existed.
 sg_new
 rm -f "$SGSHIM/shortlink"
-sg_run noshortlink happy
+sg_run noshortlink happy CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos
 sg_says "noshortlink:still-offers-the-link" token.prefill "$SG_OUT"
 sg_has  "noshortlink:falls-back-to-the-long-url" \
         "settings/personal-access-tokens/new?name=CS193V" "$SG_OUT"
 sg_says "noshortlink:the-flow-still-completes" status.all-set "$SG_OUT"
+# AND IT NAMES HOW TO COPY THE URL RATHER THAN HOW TO CLICK IT (#321). This is the half of the
+# split that only the degraded path can show: the URL on screen is the 157-character form, which
+# wraps, and a click on a wrapped URL opens the row it landed on -- #67. So the screen has to
+# stop naming a click here, and the assertion that it does is the negative one.
+sg_has     "noshortlink:says-how-to-copy-the-long-url" "$g_copy"  "$SG_OUT"
+sg_has_not "noshortlink:names-no-click-on-a-url-that-wraps" "$g_apple" "$SG_OUT"
 # AND IT WRAPS, which is the measurement that says the short link is doing the work rather than
 # something else having changed. Recorded rather than asserted: this is the old behaviour, and a
 # test that demanded it stay broken would be the wrong shape.
@@ -270,8 +315,18 @@ record "noshortlink:widest-row" "$(sg_widest_row "$SG_OUT") columns"
 # Arrowing down is the only way to the by-hand steps, and it has to end at the same prompt. The
 # arrows are counted by the harness from `pick opt.by-hand`, so a reordered menu retargets itself.
 sg_new
-sg_run byhand happy-by-hand
+sg_run byhand happy-by-hand CS193V_TERM_CLASS=apple-terminal CS193V_HOST_OS=macos
 sg_says "byhand:shows-the-steps"      token.byhand   "$SG_OUT"
+# THE BY-HAND STEPS NAME HOW TO COPY, NOT HOW TO CLICK (#321), and for the same reason the
+# degraded path does: both URLs on this screen are GitHub's own, long enough to wrap.
+#
+# COUNTED, NOT ASSERTED ABSENT, and finding that out is the reason this pair is worth reading.
+# Reaching the by-hand steps means passing THROUGH the link screen and declining it, so the
+# transcript carries both screens and the click sentence is legitimately in it -- an
+# sg_has_not for it failed here and was right to. One of each is the real claim: the short link
+# above was clickable, the GitHub URLs below it are not.
+sg_has_times "byhand:says-how-to-copy-the-urls"        1 "$g_copy"  "$SG_OUT"
+sg_has_times "byhand:still-named-the-click-on-the-short-link" 1 "$g_apple" "$SG_OUT"
 sg_says "byhand:then-accepts-a-token" status.all-set "$SG_OUT"
 # THE THREE THINGS THE OLD STEPS GOT WRONG about GitHub's page, each asserted by the phrase that
 # fixes it, because each one stopped a student who followed the instructions exactly:
