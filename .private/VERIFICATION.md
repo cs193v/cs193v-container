@@ -198,7 +198,7 @@ ck  vol-owners     "student student student student student student" \
 ckfail no-gitconfig                      R 'test -e /etc/gitconfig'      # vanilla git, by decision
 ckx  sudo-works                          R 'sudo -n true'
 ck  git-editor     nano                  R 'git var GIT_EDITOR'          # NOT vi
-ckx  nanorc                              R 'test -f /home/student/.nanorc'
+ckfail no-nanorc                         R 'test -e /home/student/.nanorc'  # stock nano, by decision
 rec  open-url-stub                       R '/usr/local/bin/open-url https://example.com/x'
 ckfail man-absent                        R 'man git'                     # deliberately not restored
 ckx  tldr-present                        R 'command -v tldr'

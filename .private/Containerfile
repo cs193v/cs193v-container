@@ -605,7 +605,7 @@ COPY files/ /tmp/cs193v-files/
 #     caller -- cs193v-shell, which passes it as the first window's command. It stays a command
 #     because the text belongs beside cs193v-strings.sh rather than inside a tmux argument.
 #     There is no goodbye here at all now; the launcher says that one, from messages.txt.
-#     See item 9.
+#     See item 8.
 #
 #     `shortlink` is the one python3 program this image installs, and it is python3 for a
 #     reason it cannot avoid: it has to LISTEN on a socket, which bash's /dev/tcp cannot do
@@ -652,7 +652,7 @@ COPY files/ /tmp/cs193v-files/
 #     time so a typo fails the build instead of a student's session.
 #
 #     THE NOTES THEMSELVES ARE ONE FILE FOR TWO AGENTS, and they are not here: they live at
-#     /etc/cs193v/agent-notes.md with item 10's other shared files, and /etc/claude-code/CLAUDE.md
+#     /etc/cs193v/agent-notes.md with item 9's other shared files, and /etc/claude-code/CLAUDE.md
 #     is a SYMLINK to them. Codex reads global instructions only from $CODEX_HOME, which is a
 #     volume, so files/entrypoint.sh links ~/.codex/AGENTS.md at the same file on every start —
 #     the "seeded once, never refreshed" trap this item exists to avoid, met a second time.
@@ -685,9 +685,7 @@ COPY files/ /tmp/cs193v-files/
 #     user created later cannot reintroduce it. 50-image.sh asserts the absence in the BUILT
 #     image, which is the only place this is visible -- the recipe merely stopped installing.
 #
-#  4. Installs the nanorc.
-#
-#  5. Pre-creates all SEVEN volume mount points STUDENT-OWNED. This is the load-bearing part.
+#  4. Pre-creates all SEVEN volume mount points STUDENT-OWNED. This is the load-bearing part.
 #     ~/.cache/ms-playwright already exists by now — Layer 5 put the browser there — but it
 #     is listed here anyway so that one block names every mount point the volume set covers,
 #     rather than five of them plus one created as a side effect three layers earlier.
@@ -698,12 +696,12 @@ COPY files/ /tmp/cs193v-files/
 #     run with no root phase and no sudo, which is what the devcontainer's five
 #     `sudo chown -R` calls were working around.
 #
-#  6. (Moved to layer 2.) npm's global prefix, and the ~/.local directories it needs, are
+#  5. (Moved to layer 2.) npm's global prefix, and the ~/.local directories it needs, are
 #     set up alongside Node now — every `npm install -g` in this file depends on them, so
 #     configuring the prefix down here meant the build-time globals went to root's prefix
 #     instead of the student's. See issue #13 and the comment on layer 2.
 #
-#  7. Removes /etc/gitconfig if the base image has one. git stays completely stock so
+#  6. Removes /etc/gitconfig if the base image has one. git stays completely stock so
 #     students meet its real hints and errors. The `git commit` editor trap is closed by
 #     EDITOR/VISUAL below, NOT by core.editor: git resolves
 #     GIT_EDITOR -> core.editor -> VISUAL -> EDITOR -> vi.
@@ -720,8 +718,8 @@ COPY files/ /tmp/cs193v-files/
 #     configured by this file being here; it stays stock and empty until setup-git runs.
 #     50-image.sh asserts a --global write really lands in it.
 #
-#  8. Installs the tunnel's sshd config, and pre-creates ~/.ssh STUDENT-OWNED at 0700.
-#     That directory is load-bearing for the same class of reason as item 5, and it was
+#  7. Installs the tunnel's sshd config, and pre-creates ~/.ssh STUDENT-OWNED at 0700.
+#     That directory is load-bearing for the same class of reason as item 4, and it was
 #     measured rather than assumed: the launcher bind-mounts authorized_keys INTO ~/.ssh, and
 #     if the directory does not already exist podman creates the mount's parent itself as
 #     ROOT (verified: root:root 0755). A root-owned ~/.ssh would then stop a student from
@@ -735,7 +733,7 @@ COPY files/ /tmp/cs193v-files/
 #     deleted in the same layer. It must not survive: a host key baked into the image would
 #     be one private key shipped to every student.
 #
-#  9. Installs the tmux configuration into /etc/cs193v/ and the tab-label hook's source
+#  8. Installs the tmux configuration into /etc/cs193v/ and the tab-label hook's source
 #     line into /etc/bash.bashrc.
 #
 #     NOT /etc/tmux.conf. cs193v-shell names the file with an explicit `-f`, which
@@ -761,7 +759,7 @@ COPY files/ /tmp/cs193v-files/
 #     tmux-256color terminfo entry from ncurses-term is actually present, since tmux will
 #     not start without it.
 #
-# 10. Installs setup-git, its message catalogue, and /etc/cs193v/ui.sh — the shared
+#  9. Installs setup-git, its message catalogue, and /etc/cs193v/ui.sh — the shared
 #     presentation layer the LAUNCHER also sources, out of the checkout. That is why it lives
 #     under files/ rather than being inlined anywhere: one definition of box(), the arrow-key
 #     menu and msg() serves the launcher and everything in here that draws.
@@ -882,7 +880,6 @@ RUN set -eux; \
     test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild list-keys -T root' | grep -cE ' (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ')" = 6; \
     test "$(su student -s /bin/bash -c 'tmux -L cs193vbuild show -gv destroy-unattached')" = off; \
     su student -s /bin/bash -c 'tmux -L cs193vbuild kill-server'; \
-    install -o student -g student -m 0644 /tmp/cs193v-files/nanorc /home/student/.nanorc; \
     install -d -o student -g student -m 0700 /home/student/.claude; \
     install -d -o student -g student -m 0700 /home/student/.codex; \
     install -d -o student -g student -m 0700 /home/student/.claude-json; \
@@ -1010,6 +1007,13 @@ ENV LANG=en_US.UTF-8 \
 # unset, `git var GIT_EDITOR` returns `vi` and /usr/bin/vi is vim.tiny — so `git commit`
 # with no -m strands a novice in a modal editor with no visible way out. The VS Code
 # extension hides this today by exporting GIT_EDITOR=true; we fix it properly instead.
+#
+# nano rather than some other way out of vim.tiny because it is the only common terminal editor
+# with a permanently visible escape route: the shortcut bar at the bottom always says how to get
+# out, which is what a student who landed there by accident needs. That is the whole of the
+# decision. Nothing configures nano beyond making it the choice -- there is no ~/.nanorc, so the
+# keys a student learns here are the keys nano has on every other machine (#334), by the same
+# argument that keeps git stock above.
 #
 # LESS=FRX is git's own default (PAGER_ENV in git's Makefile): F quits if the output fits
 # one screen, R passes ANSI colour through, X leaves output on screen instead of wiping

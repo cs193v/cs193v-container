@@ -1458,7 +1458,8 @@ Terminal/Ptyxis:
 | `SHIFT`+drag | the terminal's own selection appears |
 | ...then that terminal's copy key (`CTRL+SHIFT+C`, `⌘C`) | the text pastes into another app |
 | wheel back, then `SHIFT`+drag | selects the scrolled-back text on screen — **the gesture the whole design rests on** |
-| plain drag inside `claude`, and inside `nano` | reaches the app; no hint appears |
+| plain drag inside `claude` | reaches the app; no hint appears |
+| plain drag inside `nano` | behaves like any other pane: nothing selected, and the hint appears (#334) |
 | the `printf` above | record whether this terminal implements OSC 52 at all |
 
 **THE MODIFIER RISK THIS SECTION WARNED ABOUT HAS FIRED, TWICE (#122, #123).** What it said —
@@ -1491,7 +1492,8 @@ section's actual job. Per terminal, expect:
 | wheel back, then modifier + drag | selects the scrolled-back text — **the gesture the design rests on** |
 | **SHIFT+drag on Terminal.app or macOS VS Code** | an amber correction naming FN, **not silence** |
 | SHIFT+drag anywhere else | the terminal selects; nothing reaches tmux, so no message |
-| plain drag inside `claude` and inside `nano` | reaches the app; no hint — and inside `claude` it now **selects**, see §7.11 (#307) |
+| plain drag inside `claude` | reaches the app; no hint — and it now **selects**, see §7.11 (#307) |
+| plain drag inside `nano` | behaves like any other pane: nothing selected, and the hint appears (#334) |
 | **SHIFT+drag inside `claude`** | still reaches the app; **no correction interrupts it** |
 | `cs193v doctor` | the `terminal` line names the terminal you are actually in |
 
