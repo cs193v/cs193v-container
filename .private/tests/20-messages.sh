@@ -58,7 +58,20 @@ grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | do_tr -d '[]' | LC_ALL=
 # no catalogue at all, while course-install.sh reads its OWN via txt() -- which is why the
 # accessor must not be renamed msg, and why feeding this its keys would report every one of
 # them as missing from a catalogue they were never in. itext:* below is their reconciliation.
-grep -ohE 'msg +[a-z0-9._-]+' cs193v | awk '{print $2}' \
+#
+# COMMENTS STRIPPED FIRST, the way the installer arm below already does it, and the python
+# placeholder pass further down (#242). Read raw, any comment containing the words `msg some.key`
+# credits that key with a caller -- and the case this reconciliation exists for is precisely a
+# call site that was commented out and never restored, which it would then stay green over.
+# Measured: commenting out status.stopped's only call site and leaving the text in place kept
+# keys:no-orphans PASS. Nothing was mis-credited when this was found -- it was a hole, not a
+# wrong answer -- but this launcher explains its own message keys in prose constantly.
+#
+# STRIPPING ONLY, AND NOT THE INSTALLER ARM'S STRICTER `[^A-Za-z0-9_.]msg +` PREFIX, which is
+# there because its readers hold prose ABOUT the catalogue. That prefix cannot match a call in
+# column 0; every msg call here is indented or inside a `$(`, so today it would agree, but that
+# is a property of the current indentation rather than a rule anything holds.
+sed 's/^[[:space:]]*#.*//' cs193v | grep -ohE 'msg +[a-z0-9._-]+' | awk '{print $2}' \
     | LC_ALL=C sort -u > "$TMP/used"
 
 orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
