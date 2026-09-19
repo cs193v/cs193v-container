@@ -416,15 +416,19 @@ fi
 
 # WORDS, NOT THE THREE RETURN CODES, so a failure says which of the three things happened
 # instead of leaving a reader to look 0/1/2 up.
-verdict() {                           # verdict SECS  <caller redirects stdin>  -> word
+verdict_here() {                      # verdict_here SECS  <caller redirects stdin>  -> $RD_WORD
     dynports_read "$1"
     case "$?" in
-        0) printf 'line:%s' "$DYNPORTS_LINE" ;;
-        1) printf 'timeout' ;;
-        2) printf 'ended' ;;
-        *) printf 'unknown' ;;
+        0) RD_WORD="line:$DYNPORTS_LINE" ;;
+        1) RD_WORD=timeout ;;
+        2) RD_WORD=ended ;;
+        *) RD_WORD=unknown ;;
     esac
 }
+# THE PRINTING FORM, for the single-call cases below only. Each of those wants a variable that
+# nothing earlier touched, and a command substitution gives them one for free -- so the fork is
+# the point there, and the sequence loop further down is the one place it is not (#332).
+verdict() { verdict_here "$1"; printf '%s' "$RD_WORD"; }
 
 # A FIFO OPENED READ-WRITE IS A STREAM THAT CANNOT END: this process is its own writer, so there
 # is never an EOF to find and the only thing the read can do is time out. That is the whole
@@ -447,10 +451,25 @@ assert_eq "read:a-partial-line-then-a-close-has-ended" "ended" "$(verdict 1 < <(
 assert_eq "read:a-whole-line-is-a-line" "line:hello" "$(verdict 1 < <(echo hello))"
 
 # ─── ...and the three of them in one stream, which is the shape sup_loop sees ──
-# The cases above each start from a clean variable. This one does not: it is here because the
-# predicate reads a variable that the PREVIOUS call may have set, so "a timeout after a line"
-# is the case where a stale value would be mistaken for a fresh one, and it cannot be caught by
-# testing the outcomes one at a time.
+# EVERY CALL HERE RUNS IN THIS SHELL, which is what makes the sequence a sequence (#332). The
+# cases above are each a `$(verdict ...)`, so DYNPORTS_LINE is born and dies inside one subshell
+# and every call starts from the parent's empty copy; written that way this block was a fifth
+# single-call case wearing a loop, and the two comments it used to carry described a mechanism
+# it could not reach. verdict_here assigns instead, so the value a call leaves behind is the
+# value the next one meets -- which is the condition sup_loop is actually in, reading frame
+# after frame from one stream.
+#
+# WHAT THAT PUTS UNDER TEST is the `unset` in dynports_read, and the reason it is load-bearing
+# is #244's, not a new one: on the bash 3.2 macOS ships a `read -t` timeout returns 1 -- the
+# same status as EOF -- and leaves the variable UNTOUCHED, so set-versus-unset is the only thing
+# telling a five-second silence from the watcher having gone away. See the measured table at
+# files/cs193v-ui.sh:1491. Without the `unset`, the previous line is still set when the timeout
+# is classified and the read is called ENDED: sup_loop exits on the first gap, which is what
+# #244 cost. Measured here -- deleting it gives `line:alpha line:beta ended`.
+#
+# THAT MUTATION REDS ON 3.2 AND NOT ON BASH 4+, where the rc arm decides before set-ness is ever
+# consulted. Same split as the section header above: a Mac proves this half, CI proves the other,
+# and rt:bash-version records which one a given run was.
 RDS="$WORK/rd.seq"
 mkfifo "$RDS"
 (
@@ -467,7 +486,7 @@ RD_SAW=''
 rd_drain() {                          # read until the stream ends, or give up
     local n=0
     while [ "$n" -lt 12 ]; do
-        RD_SAW="$RD_SAW $(verdict 1)"
+        verdict_here 1; RD_SAW="$RD_SAW $RD_WORD"
         case "$RD_SAW" in *ended) return 0 ;; esac
         n=$(( n + 1 ))
     done
