@@ -38,7 +38,6 @@ projects/                      the student's work; the only directory shared wit
                                fits on one line (issue #67). python3, not shell: it has
                                to LISTEN, and /dev/tcp cannot
     rewrite-window-title.py    points the terminal's title at the course
-    nanorc
     profile.d/                 stty -ixon
     cs193v-platform-messages   EVERY STRING THAT DEPENDS ON THE STUDENT'S OWN MACHINE rather
                                than on the container: --copy/--link/--correct are the per-terminal

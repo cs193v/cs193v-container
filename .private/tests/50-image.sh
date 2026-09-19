@@ -252,6 +252,11 @@ assert_ok "sudo-works-without-a-password" sh -c "$VT_RUN --rm --entrypoint sh '$
 assert_fail "no-etc-gitconfig" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /etc/gitconfig'"
 assert_eq "git-editor-is-nano" "nano" "$(R 'git var GIT_EDITOR')"
 
+# nano is stock for the same reason (#334): with no ~/.nanorc, the keys a student learns here
+# are the keys nano has everywhere else. EDITOR/VISUAL still point at it -- picking the editor
+# is not configuring it.
+assert_fail "no-nanorc" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -e /home/student/.nanorc'"
+
 # ─── where `git config --global` writes ────────────────────────────────────────
 # THE ASSERTION THAT PINS THE WHOLE cs193v-git VOLUME. `git config --global` writes
 # $XDG_CONFIG_HOME/git/config if that file EXISTS and ~/.gitconfig does not, and ~/.gitconfig
@@ -300,8 +305,6 @@ assert_says_key "setup-git:reads-the-installed-catalogue" err.no-terminal \
     "$(R 'setup-git </dev/null 2>&1 || true')" "$PRIVATE/files/setup-git-messages.txt"
 assert_contains "setup-git:dev-seam-works-in-the-image" "target_name=cs193v-students" \
     "$(R 'setup-git --dev-print-token-url')"
-assert_ok "nanorc-installed" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /home/student/.nanorc'"
-assert_eq "nanorc-is-student-owned" "student" "$(R 'stat -c %U /home/student/.nanorc')"
 
 # npm's global prefix points at the student's home so `npm install -g` works without sudo,
 # while build-time globals stay in root-owned /usr/local.

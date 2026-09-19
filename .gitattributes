@@ -93,7 +93,7 @@
 # recursively, subdirectories included. Deleting either line ships a course directory whose
 # ./cs193v cannot start.
 #
-#     git archive HEAD | tar -t | grep -c '^\.private/files/'     # expect 30
+#     git archive HEAD | tar -t | grep -c '^\.private/files/'     # expect 27
 /.private/**              export-ignore
 /.private/Containerfile  -export-ignore
 /.private/messages.txt   -export-ignore

@@ -473,8 +473,9 @@ that *sound* protective actually are.
   it is turning the lights off. `exit` does exactly the same thing. Your files are untouched
   either way — they are on your own computer, not in the container. See "Leaving, and coming
   back" above.
-- **`nano`** is the editor. `git commit` with no `-m` opens it. (Without this it would
-  open `vim.tiny`, which is a genuinely bad first experience.)
+- **`nano`** is the editor, and it is completely stock. `git commit` with no `-m` opens it.
+  (Without this it would open `vim.tiny`, which is a genuinely bad first experience.) There is
+  no `~/.nanorc`, so the keys you learn here are the ones nano has everywhere else.
 - **git is completely stock.** There is no `/etc/gitconfig`, so the hints and errors you
   see are the real ones you will meet everywhere else. Your first commit needs
   `git config --global user.name` and `user.email`.
