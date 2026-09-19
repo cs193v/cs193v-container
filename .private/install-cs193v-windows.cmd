@@ -619,8 +619,13 @@ echo.
 :: HKU\S-1-5-19 is the LOCAL SERVICE hive, which only an elevated process can read. One
 :: command, one exit code: no dependency on a service being started, none on the console
 :: language, and it works from a 32-bit process: reg.exe exists in both System32 and SysWOW64,
-:: and %SYS32% names whichever of the two is the native one. It also succeeds for SYSTEM, so a
-:: management agent running this is not locked out.
+:: and %SYS32% names whichever of the two is the native one. It also succeeds for SYSTEM, and
+:: since #277 that means SYSTEM is refused along with every other elevated context. This
+:: sentence used to say the opposite, and it was true when elevation was REQUIRED: the probe
+:: succeeding meant getting IN. It now means `goto isadmin`. So a management agent pushing
+:: this out is turned away, and that is the unconditional refusal above working as written
+:: rather than a gap in it -- an elevated run installs into whatever profile its token names,
+:: and SYSTEM's is nobody's.
 ::
 :: The `whoami /groups | findstr S-1-16-12288` form reads the integrity level directly and is
 :: the more precise test, but it needs a PIPE. In batch a pipe runs each side in a child cmd,
