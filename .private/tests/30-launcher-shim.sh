@@ -521,6 +521,14 @@ shim_clear_log
 stop_screen="$(launcher_tty '\033[B\n' --stop | render_pty)"
 assert_eq "lifecycle:stop-accepted-stops-the-container" "exited" "$(shim_state)"
 assert_says_key "lifecycle:stop-accepted-says-stopping" status.stopping "$stop_screen"
+# AND THE ONE IT ENDS ON (#327). verb_stop prints status.stopped unconditionally after
+# stop_container and nothing asserted it in any tier, while status.already-stopped had three
+# sites -- so the two halves of one verb were covered unevenly and the last thing a student sees
+# after asking for a stop could have gone missing unnoticed. Measured by deleting the call site:
+# the whole shim tier stayed green and only keys:no-orphans noticed, which is a reconciliation of
+# names and not an observation of the screen. Free here: $stop_screen is already the accepted
+# path, so this needs no fixture of its own.
+assert_says_key "lifecycle:stop-accepted-says-it-stopped" status.stopped "$stop_screen"
 
 # Idempotent, because the student most likely to run it is the one who has already run it: the
 # refusal named --stop, they ran it, and they are trying again.
