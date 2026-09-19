@@ -2204,14 +2204,25 @@ pkgsha_setup "$TMP/pkgbody-good"
 sha_tools="$(sed -n '/^pkg_sha256() {/,/^}/p' "$PRIVATE/install-utils.sh" \
              | grep -oE 'command -v [a-z0-9]+' | awk '{print $NF}')"
 assert_ne "pkgsha:the-hashers-the-product-tries-were-readable" "" "$sha_tools"
-record    "pkgsha:the-hashers-the-product-tries" "$(printf '%s' "$sha_tools" | do_tr '\n' ' ')"
+# FLATTENED ONCE, AND BOTH READERS BELOW TAKE THE FLAT ONE. $sha_tools is one tool per LINE, and
+# what that costs is not cosmetic -- see the probe below.
+sha_tools_1line="$(printf '%s' "$sha_tools" | do_tr '\n' ' ')"
+record    "pkgsha:the-hashers-the-product-tries" "$sha_tools_1line"
 NOSHA="$SHIM/farm-nosha"; mkdir -p "$NOSHA"
 ln -s "$IFARM"/* "$NOSHA/" 2>/dev/null
 for t in $sha_tools; do rm -f "$NOSHA/$t"; done
 # BOTH HALVES OF THE FIXTURE, because either alone passes vacuously -- an empty farm satisfies
 # the first perfectly.
+#
+# AND THE FLAT LIST IN THE PROBE, which is the whole of whether the first half can see anything.
+# Interpolated one-per-line, the string handed to `sh` is a `for` whose list ends at the first
+# newline -- a syntax error, not a loop. rc=2, nothing on stdout, and `assert_eq "" ""` then
+# passes against a farm holding every hasher there is (#294). Measured: with the deletion loop
+# above commented out, this still said PASS while three assertions below it went red -- so the
+# guard that exists to diagnose a broken fixture in one line was the one thing that could not.
+# The error was on stderr of every run and had been read as harness noise.
 assert_eq "pkgsha:the-no-hasher-farm-really-has-no-hasher" "" \
-          "$(PATH="$SHIM:$NOSHA" sh -c 'for t in '"$sha_tools"'; do command -v $t; done')"
+          "$(PATH="$SHIM:$NOSHA" sh -c 'for t in '"$sha_tools_1line"'; do command -v $t; done')"
 assert_ne "pkgsha:the-no-hasher-farm-keeps-a-toolbox" "" "$(PATH="$SHIM:$NOSHA" command -v awk)"
 out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-digest.tar.gz" \
        CS193V_DIR="$SHIM/dest" PATH="$SHIM:$NOSHA" | strip_ansi)"
@@ -2226,7 +2237,7 @@ assert_says_not_key "pkgsha:no-hasher-does-not-blame-the-download" \
 assert_says_not     "pkgsha:no-hasher-installs-nothing" "installer -pkg" "$(sudo_log)"
 assert_no_signoff   "pkgsha:no-hasher-does-not-claim-success" "$out"
 # THE VACUITY GUARD THIS CASE NEEDS MORE THAN ANY OTHER. Taking tools off the PATH can make a run
-# die somewhere else entirely, and a run that never reached the download would satisfy all four
+# die somewhere else entirely, and a run that never reached the download would satisfy all three
 # negatives above perfectly.
 assert_says "pkgsha:no-hasher-still-reached-the-download" "$PKG_URL" "$(shim_curl_log)"
 
