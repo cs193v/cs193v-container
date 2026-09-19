@@ -3847,6 +3847,17 @@ done
 # THE THREE FILES SPELL THE SAME PATH THREE WAYS -- `~/...` in the notes, `//home/student/...` in
 # the rules, `/home/student/...` in container.args -- so everything is normalised to a leading
 # /home/student before it is compared.
+#
+# AND THE SCAN TAKES TWO OF THOSE SPELLINGS, not one, because the normalisation above happens
+# AFTER the regex has already chosen what to look at (#263). Written `~/` only, rewording the
+# section to absolute paths -- same paths, same meaning, same protection claimed -- emptied the
+# loop and left this passing having compared nothing. Measured: with an UNCOVERED
+# /home/student/.ssh/id_ed25519 named in the section, the whole static tier stayed green.
+#
+# SO THE EMPTY LOOP ANSWERS WITH A SENTINEL, which is the half that stops this recurring: there
+# was a guard for the section going missing and none for it being present and holding no paths,
+# and any future narrowing of the pattern would go quiet the same way. Same shape as
+# NO-DENY-RULES above, and this file's rule at claude:deny-rules-are-Read-or-Edit-only.
 uncovered="$(python3 -c "
 import json, re, sys
 rules = []
@@ -3856,9 +3867,10 @@ for r in json.load(open(sys.argv[1]))['permissions']['deny']:
         rules.append(re.sub(r'^/+', '/', m.group(1)))
 text = open(sys.argv[2]).read()
 sec = re.search(r'^#+ *Credentials\b(.*?)(?=^#+ |\Z)', text, flags=re.S | re.M)
+found = re.findall(r'(?:~|/home/student)/[A-Za-z0-9._/-]+', sec.group(1) if sec else '')
 bad = []
-for tilde in re.findall(r'~/[A-Za-z0-9._/-]+', sec.group(1) if sec else ''):
-    path = '/home/student/' + tilde[2:]
+for named in found:
+    path = '/home/student/' + named[2:] if named.startswith('~/') else named
     covered = False
     for r in rules:
         stem = r[:-3] if r.endswith('/**') else None
@@ -3868,8 +3880,9 @@ for tilde in re.findall(r'~/[A-Za-z0-9._/-]+', sec.group(1) if sec else ''):
         elif path == r:
             covered = True
     if not covered:
-        bad.append(tilde)
+        bad.append(named)
 print('' if sec else 'NO-CREDENTIALS-SECTION')
+print('' if found else 'NO-CREDENTIAL-PATHS-FOUND')
 print(' '.join(sorted(set(bad))))
 " "$managed" "$NOTES" 2>&1)" || uncovered="the check itself failed: $uncovered"
 assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$uncovered" | sed '/^$/d')"
