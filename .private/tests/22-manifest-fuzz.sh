@@ -39,7 +39,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-mfwork.$$.XXXXXX")"
 trap 'rm -f "$OUT"; rm -rf "$WORK"' EXIT
 
 python3 - "$PRIVATE/install-cs193v.sh" "$SEED" "$WORK" > "$OUT" 2>&1 <<'PY'
-import hashlib, os, random, shutil, subprocess, sys
+import errno, hashlib, os, random, shutil, subprocess, sys
 
 BOOT, SEED, WORK = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 rng = random.Random(SEED)
@@ -96,26 +96,52 @@ NAMES = [
 ]
 out("name-corpus", str(len(NAMES)))
 
+# ─── ...and the one entry a conforming filesystem is allowed to refuse  (#305) ─
+# DECLARED, NOT A WILDCARD, and that is what keeps this from becoming a hole. APFS requires
+# filenames to be valid UTF-8 and refuses this one with EILSEQ, so on every Mac property 1 died
+# on it, the oracle emitted nothing but a traceback, and mffuzz:the-fuzzer-ran fired -- correctly,
+# since nothing below it had run. The name is still worth having: on Linux it is the case that
+# catches a tool which decoded a path instead of treating it as bytes.
+#
+# A REFUSAL OF ANYTHING ELSE STILL RAISES, which is the whole guard and the reason there is no
+# numeric floor here. A filesystem that refused the corpus wholesale would be stopped by the very
+# first name -- plain.txt is not in this set -- and that arrives as the traceback and the gate
+# above, loudly, rather than as a suite that quietly skipped everything and reported green.
+MAY_REFUSE = {b"not-utf8-\xff\xfe.txt"}
+out("names-may-be-refused", str(len(MAY_REFUSE)))
+refused = []
+
 def fresh(tag):
     d = os.path.join(WORK, tag)
     shutil.rmtree(d, ignore_errors=True)
     os.mkdir(d)
     return d
 
-def plant(d, name, body=b"x\n", sub=None):
+def plant(d, name, body=b"x\n", sub=None):   # -> True if it landed, False if refused
     base = os.fsencode(d)
     if sub is not None:
         base = os.path.join(base, sub)
         os.makedirs(base, exist_ok=True)
-    with open(os.path.join(base, name), "wb") as fh:
-        fh.write(body)
+    try:
+        with open(os.path.join(base, name), "wb") as fh:
+            fh.write(body)
+    except OSError as exc:
+        if exc.errno != errno.EILSEQ or name not in MAY_REFUSE:
+            raise
+        refused.append(name)
+        return False
+    return True
 
 # ─── property 1: valid input first, which is what stops "refuse everything" passing ──
 disagree, nonhex, dirty_err = [], [], []
 n_ok = 0
 for i, name in enumerate(NAMES):
     d = fresh("ok%d" % i)
-    plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 40))]))
+    # THE WHOLE CASE, NOT THE NAME ALONE. A case that ran without its own name would compare the
+    # walk against the oracle over a tree holding only the sibling -- green, and proving nothing
+    # about the entry it is named for. So it is skipped and n_ok counts what really ran.
+    if not plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 40))])):
+        continue
     plant(d, b"sibling", sub=b"sub" + (b"dir with space" if i % 3 == 0 else b""))
     rc, got, err = run_verb(d)
     n_ok += 1
@@ -134,25 +160,42 @@ out("stderr-on-success", "; ".join(dirty_err[:4]))
 
 # ─── property 2: random trees, same comparison ────────────────────────────────
 rand_disagree = []
+n_rand_skipped = 0
 for i in range(120):
     d = fresh("rand%d" % i)
+    n_planted = 0
     for _ in range(rng.randint(1, 6)):
         name = rng.choice(NAMES)
         sub = None
         if rng.random() < 0.4:
             sub = b"/".join(rng.choice(NAMES) for _ in range(rng.randint(1, 2)))
             sub = sub.replace(b"-", b"d")          # keep dir names off the dash cases
+        # THE except IS THE GENERATOR'S, NOT THE FILESYSTEM'S, and the two must not be merged.
+        # sub is built from corpus names, so this loop asks for a file to be a directory and gets
+        # ENOTDIR -- on every platform, not just a Mac. plant() handles the filesystem refusing a
+        # NAME (#305) through its return value; this handles the generator asking the impossible.
+        # Narrowing this to EILSEQ was tried and crashes on rand0.
         try:
-            plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 60))]), sub=sub)
+            if plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 60))]), sub=sub):
+                n_planted += 1
         except OSError:
             pass
+    # AN EMPTY TREE IS NOT A SUBJECT. --dev-manifest-hash refuses one ("the course files are
+    # empty", rc 1) and it is right to, so judging it here would count a correct refusal as a
+    # disagreement. Reachable two ways: every planting ENOTDIR'd, which any platform can do at
+    # some seed, or the tree drew only a name this filesystem refuses -- which is tree 27 at the
+    # default seed on a Mac, and is what turned #305 into a red here instead of a dead suite.
+    if n_planted == 0:
+        n_rand_skipped += 1
+        continue
     rc, got, _ = run_verb(d)
     if rc != 0:
         rand_disagree.append("rc=%d on tree %d" % (rc, i))
         continue
     if got != oracle(d):
         rand_disagree.append("tree %d: shell=%s oracle=%s" % (i, got, oracle(d)))
-out("cases-random", "120")
+out("cases-random", str(120 - n_rand_skipped))
+out("cases-random-skipped", str(n_rand_skipped))
 out("random-disagree", "; ".join(rand_disagree[:4]))
 
 # ─── property 3: every single-point mutation moves the digest, or is refused ──
@@ -235,6 +278,9 @@ for i in range(6):
     if a != b:
         unstable.append("tree %d: %s then %s" % (i, a, b))
 out("unstable", "; ".join(unstable[:4]))
+
+out("plantings-refused", str(len(refused)))
+out("names-refused", b" ".join(sorted(set(refused))).decode("utf-8", "replace"))
 PY
 
 fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
@@ -260,6 +306,30 @@ assert_eq "mffuzz:a-refusal-prints-no-digest"     "" "$(fz refusal-is-quiet)"
 assert_eq "mffuzz:the-same-tree-hashes-the-same"  "" "$(fz unstable)"
 record "mffuzz:cases-run" \
        "$(fz cases-valid) named + $(fz cases-random) random + $(fz cases-mutated) mutated (seed $SEED)"
+
+# ─── and what this filesystem would not let us ask  (#305) ────────────────────
+# A SKIP RATHER THAN SILENCE, the shape 12-run-timeout.sh uses for a platform it cannot measure
+# on: the corpus entry that is not valid UTF-8 cannot exist on APFS, so on a Mac one name is
+# never put to the walk and saying so is the difference between "not applicable here" and
+# "quietly stopped testing". On Linux nothing is refused and this is a plain pass.
+#
+# THE record IS THE DURABLE HALF, not decoration: skip() passes only its NAME to _emit
+# (lib/assert.sh:86), so the reason reaches the screen and never $CS193V_RESULTS. Without this
+# line a diff of two runs could not see the skipped set change.
+record "mffuzz:plantings-the-filesystem-refused" \
+       "$(fz plantings-refused) across [$(fz names-refused)], $(fz cases-random-skipped) random trees left empty"
+if [ -n "$(fz names-refused)" ]; then
+    skip "mffuzz:every-name-in-the-corpus-was-planted" \
+         "this filesystem refuses $(fz names-refused) -- APFS requires valid UTF-8 in a filename (EILSEQ), so that entry cannot be put to the walk here"
+else
+    pass "mffuzz:every-name-in-the-corpus-was-planted"
+fi
+
+# A LITERAL, the same device as the corpus count below: the tolerated set is the ONLY thing
+# standing between "one name this filesystem cannot hold" and "a filesystem that refuses
+# everything", since a refusal outside it re-raises and takes the oracle down. Growing it must
+# make somebody come and look.
+assert_eq "mffuzz:only-one-name-may-be-refused" "1" "$(fz names-may-be-refused)"
 
 # A LITERAL, so adding a name to the corpus makes you come and look at this line -- the device
 # 17-portparse-fuzz.sh uses, for the reason it gives: the corpus is the part that silently shrinks.
