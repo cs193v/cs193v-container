@@ -90,7 +90,14 @@ assert_eq "signoff-arms:are-mutually-distinguishable" "" "$overlap"
 assert_no_signoff() {                 # assert_no_signoff NAME TEXT
     local k needle hay
     hay="$(_flatten "$2")"
-    for k in finished finished.macos finished.windows finished.windows-shortcut; do
+    # $SIGNOFF_ARMS, NOT A SECOND COPY OF IT (#325). The list above is the one
+    # signoff-arms:are-mutually-distinguishable proves the per-arm needles are meaningful over,
+    # and this loop is the only thing that searches for them -- so spelled out again here, the
+    # list being asserted on was not the list being used. A fifth arm added to one and missed in
+    # the other is #292 growing back one arm at a time: covered by the distinguishability check,
+    # searched for by nothing.
+    # shellcheck disable=SC2086   # deliberately word-split: it is a list of keys
+    for k in $SIGNOFF_ARMS; do
         needle="$(msg_text "$k" "$ICAT")"
         if [ -z "$needle" ]; then
             fail "$1" "no prose for $k -- the arm list in assert_no_signoff has gone stale"
