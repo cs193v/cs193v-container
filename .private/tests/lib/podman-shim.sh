@@ -615,10 +615,62 @@ INNER
     chmod +x "$SHIM/curl"
 }
 
+# THE OTHER DOWNLOADER, AND ONLY BECAUSE ONE EXIT STATUS NEEDS IT (#303). Both tools have
+# dedicated codes for "the certificate could not be verified" -- curl 60 and 77, wget 5 -- and the
+# bootstrap maps ALL THREE to one refusal. shim_fake_curl covers the two curl codes; without this
+# the wget label was one nothing had ever taken, which is the "path that rots" the
+# install-cs193v.sh:277 comment refuses to allow for the download arm itself.
+#
+# SIMPLER THAN ITS SIBLING, TWICE OVER. No `file://` arm: wget has no such scheme (measured -- GNU
+# wget 1.21.4 exits 1 having written nothing), which is why the bootstrap's bare-path arm `cp`s
+# instead, so a fake that served file:// would model a wget that does not exist. And no noise
+# COUNT: #298 was curl retrying a resolver failure and printing per attempt, whereas the case this
+# fake exists for is fatal at the first attempt, so one line is the honest shape.
+#
+# -O AND NOT -o, which is the whole reason this cannot be shim_fake_curl with a different name --
+# download_to spells every flag differently for the two tools. `--tries=10` and `--waitretry=3`
+# carry their values with `=`, so unlike curl's `--retry 10` they need no value-taking arm.
+shim_fake_wget() {                    # shim_fake_wget URL BODY [RC] [NOISE_TEXT]
+    : > "$SHIM/wget.log"
+    # TWO printfs AND ONLY THE SECOND QUOTES, for shim_fake_curl's reason: the noise is a
+    # sentence, and unquoted it would be a syntax error inside the fake rather than a red test.
+    { printf '#!/bin/sh\nWGETLOG=%s\nWANT=%s\nBODY=%s\nRC=%s\n' \
+             "$SHIM/wget.log" "$1" "$2" "${3:-0}"
+      printf "NOISE='%s'\n" "${4:-}"
+    } > "$SHIM/wget"
+    cat >> "$SHIM/wget" <<'INNER'
+ARGV="$*"
+printf '%s\n' "$ARGV" >> "$WGETLOG"
+dest=''; url=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -O)  dest="$2"; shift 2 ;;
+        -*)  shift ;;
+        *)   if [ -z "$url" ]; then url="$1"; fi; shift ;;
+    esac
+done
+[ -n "$dest" ] || { echo "wget-fake: no -O in: $ARGV" >&2; exit 2; }
+# `[ -n "$WANT" ]` FIRST, shim_fake_curl's guard and its reason: a caller whose URL came out empty
+# would otherwise have every argv match it.
+if [ -n "$WANT" ] && [ "$url" = "$WANT" ]; then
+    [ -n "$NOISE" ] && printf '%s\n' "$NOISE" >&2
+    # THE FILE IS CREATED EVEN WHEN RC IS NONZERO, because -O truncates before the transfer is
+    # known to fail -- the same property shim_fake_curl documents, and what leaves a zero-byte
+    # tarball behind on the refusal path.
+    cat "$BODY" > "$dest" || exit 3
+    exit "$RC"
+fi
+echo "wget-fake: refusing a URL it was not given: $url" >&2
+exit 1
+INNER
+    chmod +x "$SHIM/wget"
+}
+
 # THROUGH $SHIM_LAST, like sudo_log above and for the #76 reason its comment records: every call
 # site is `out="$(... installer_tty ...)"`, and a reader that trusted $SHIM would silently read
 # the PREVIOUS case's log, which is a pass.
 shim_curl_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/curl.log" 2>/dev/null; }
+shim_wget_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/wget.log" 2>/dev/null; }
 
 # The same receipt shim_fake_pkgutil writes, except that it does not exist until
 # `installer -pkg` has run -- which is the sequence a real Mac has, and the one tests/MANUAL.md

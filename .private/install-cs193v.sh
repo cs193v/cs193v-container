@@ -415,23 +415,39 @@ printf '\n  Getting the course files from:\n\n      %s\n' "$COURSE_SRC"
 # test suite drives to keep the download path itself exercised.
 case "$COURSE_SRC" in
   *://*)
-    # THE EXIT STATUS IS KEPT, because one value of it has its own answer. Both tools have a
-    # dedicated code for "the certificate could not be verified" -- curl 60, wget 5 -- and that is
-    # the one genuinely new way this can fail since the download moved ahead of everything else:
-    # install_podman used to install ca-certificates beside curl, and nothing installs it before the
-    # download any more. Left undiagnosed it reads as a network problem, which is the single most
-    # misleading thing this script could say about a machine whose network is fine.
+    # THE EXIT STATUS IS KEPT, because some values of it have their own answer. Both tools have
+    # dedicated codes for "the certificate could not be verified" -- curl 60 and 77, wget 5 -- and
+    # that is the one genuinely new way this can fail since the download moved ahead of everything
+    # else: install_podman used to install ca-certificates beside curl, and nothing installs it
+    # before the download any more. Left undiagnosed it reads as a network problem, which is the
+    # single most misleading thing this script could say about a machine whose network is fine.
     #
     # THE REDIRECT IS AT THE CALL SITE AND NOT INSIDE download_to (#298), which keeps "ONE PLACE
     # THAT KNOWS THE FLAGS" above meaning what it says, covers the wget arm without naming it --
     # `wget -nv` prints a line on SUCCESS too, measured -- and leaves the `cp` arm below alone.
-    if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)" 2>"$DL_LOG"; then
-        # AND dl_rc IS ALWAYS 0 HERE, SO THE ARM BELOW IS DEAD -- see #303. `$?` inside this
-        # branch is the status of `! download_to`, not of download_to. Left as it stands rather
-        # than fixed in passing, because the fix needs the coverage that arm has never had.
-        dl_rc=$?
+    #
+    # AND THE STATUS IS READ ON ITS OWN LINE RATHER THAN INSIDE `if ! ...` (#303). `$?` in the
+    # then-branch of `if ! cmd` is the status of the NEGATION -- 0, in bash, dash and sh alike --
+    # so written that way dl_rc was always 0, the arm below could never match, and every
+    # certificate failure got the "usually a network problem" wording instead: the one thing that
+    # arm exists to stop this script saying about a machine whose network is fine. There is no
+    # `set -e` in this file, so a bare failing call is safe; what is NOT safe is a line between
+    # the call and the capture, which is the hazard cs193v:2290 records the other way round.
+    download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)" 2>"$DL_LOG"
+    dl_rc=$?
+    if [ "$dl_rc" -ne 0 ]; then
         case "$TOOL:$dl_rc" in
-            curl:60|wget:5)
+            # TWO CURL CODES, AND 77 IS THE ONE THIS REFUSAL IS ACTUALLY ABOUT. Measured on
+            # debian:13 with curl 8.14.1, which is the machine tests/MANUAL.md nominates for
+            # this check: with the ca-certificates package absent curl exits 77 -- "error
+            # setting certificate file: /etc/ssl/certs/ca-certificates.crt", because Debian
+            # builds curl with that path compiled in and the FILE is what is missing -- and
+            # never 60. 60 is CURLE_PEER_FAILED_VERIFICATION, which needs a CA store that
+            # exists and does not vouch for the peer: an expired certificate, or a
+            # TLS-inspecting proxy. Both are certificate problems and both want this message,
+            # but only 77 is the "you are missing a package" case the prose below describes --
+            # so an arm carrying 60 alone diagnosed every shape except its own.
+            curl:60|curl:77|wget:5)
                 refuse "  Could not verify the security certificate for:
 
       $COURSE_SRC
@@ -442,7 +458,7 @@ case "$COURSE_SRC" in
       Debian, Ubuntu, Mint, Pop!_OS:  sudo apt install ca-certificates
       Fedora:                         sudo dnf install ca-certificates
 
-  Install it and run this script again." ;;
+  Install it and run this script again.$(dl_said)" ;;
         esac
         refuse "  Could not download the course files from:
 

@@ -697,6 +697,39 @@ what a real Ubuntu Desktop box adds is:
   the one genuinely new failure mode the #221 split introduced — `install_podman` used to
   install `ca-certificates` beside curl, and nothing installs it before the download any more.
   `debian:13` ships without it, which is the cheapest way to see the real thing.
+  **Both halves of the mapping are covered offline since #303**, and until #303 neither was:
+  `dl_rc` was read inside `if ! download_to ...; then`, where `$?` is the negation's status, so
+  the arm was dead for a release and every certificate failure was called a network problem.
+  `dlcert:*` in `25-installer.sh` drives curl 60 through `shim_fake_curl`'s rc knob, and
+  `dlcertw:*` drives wget 5 through `shim_fake_wget` on a `farm-nocurl` — which also pins that
+  `find_download_tool` picks wget when curl is absent. Between them they hold the wording, the
+  package name, that neither falls through to the network refusal, and that the tool's own line
+  still reaches the screenshot. What is left here is the only part a fake cannot assert: that a
+  real curl and a real wget, against real TLS on a machine genuinely missing the CA bundle, exit
+  the codes the arm names rather than something else.
+  **Run on 2026-09-18, and it disagreed with the product** — which is what this entry is for.
+  Measured in `debian:13`, curl 8.14.1 / wget 1.25.0, arm64:
+
+  | scenario | curl | wget |
+  |---|---|---|
+  | `ca-certificates` package absent — the case the refusal's prose describes | `77` `error setting certificate file: /etc/ssl/certs/ca-certificates.crt` | `5` |
+  | a CA store that exists and does not vouch for the peer — expired cert, TLS-inspecting proxy | `60` `unable to get local issuer certificate` | `5` |
+
+  Debian compiles `/etc/ssl/certs/ca-certificates.crt` into curl, so when the package is missing
+  it is the FILE that is unreadable (77) and not the issuer that is unknown (60). The arm carried
+  `curl:60` alone and therefore answered every certificate shape **except its own**; it is now
+  `curl:60|curl:77|wget:5`, and `dlcert77:*` pins the new half. `wget:5` was right all along.
+  Re-run this the same way if curl's packaging changes: the codes are the product of how Debian
+  builds it, not of the protocol.
+
+#### What `10-static.sh :: dollarq:*` holds instead (#303)
+Nothing by hand here — recorded because the rule is easy to mistake for shellcheck's. SC2319 is
+the same diagnosis and does fire on `if [ ... ]; then rc=$?`, but it is silent on
+`if ! cmd; then rc=$?` at every severity, `--enable=all` included, and silent on
+`install-cs193v.sh` in full; `shellcheck:bootstrap` already runs that file with no `--exclude`,
+so there was nothing suppressed to turn on. The rule flags `$?` read as the FIRST statement of a
+`then` branch, which is what makes it quiet on `files/cs193v-ui.sh:505` — `wait "$pid"; rc=$?`
+is correct, and `$?` there is `wait`'s.
 
 ### A real Fedora machine — what it would tell us that no fixture can
 The installer supports Fedora as of the dnf work, and the fixtures cover a lot: `--base fedora`

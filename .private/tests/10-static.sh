@@ -1615,6 +1615,96 @@ bare="$(grep -HnE '"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' $eafiles \
         | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 
+# ─── `$?` may not be the first thing a `then` branch reads  (#303) ─────────────
+# IN ONE SENTENCE: inside `if ! cmd; then`, `$?` is the status of the NEGATION and not of cmd --
+# 0, in bash, dash and sh alike -- so a branch that OPENS by capturing it captures nothing. #303
+# is that bug: install-cs193v.sh read `dl_rc=$?` there, the value was always 0, and the
+# `curl:60|wget:5` certificate refusal under it was unreachable for a release. The same hazard
+# reads `$?` first after a bracket condition, where it is the test's status rather than a
+# command's.
+#
+# SHELLCHECK CANNOT DO THIS ONE, which is why there is a rule here instead of a directive
+# somewhere. SC2319 is exactly this diagnosis and it DOES fire on the bracket form; measured on
+# 0.11.0 it is SILENT on `if ! f; then rc=$?` at every severity including --enable=all, and
+# silent on install-cs193v.sh in full. shellcheck:bootstrap already runs that file with no
+# --exclude at all, so there was never anything suppressed to switch back on.
+#
+# THE FIRST STATEMENT ONLY, AND THAT IS THE WHOLE DISCRIMINATOR. files/cs193v-ui.sh:505 is
+# `if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi`, which is CORRECT -- the
+# `$?` there is wait's. Truncating the branch at its first `;` leaves `wait "$pid"`, so that line
+# stays green, while a branch whose first statement IS the capture does not. Measured over every
+# file in the list below: one hit, the bug, and nothing else.
+#
+# KEYED ON `then` RATHER THAN ON `if !`, deliberately broader. It needs no condition parsing, so
+# `elif`, a multi-line condition and a `then` on its own line all come free, and it subsumes the
+# bracket form shellcheck already covers.
+dq_then_first() {                     # dq_then_first FILE... -> one line per violation
+    do_awk '
+        function first_stmt(s,  n) {
+            sub(/^[ \t]+/, "", s); n = index(s, ";")
+            if (n > 0) s = substr(s, 1, n - 1)
+            return s
+        }
+        FNR == 1 { pend = 0 }
+        /^[ \t]*#/ { next }
+        pend == 1 {
+            s = first_stmt($0)
+            if (s == "") next
+            if (s ~ /[$][?]/) printf "%s:%d:%s\n", FILENAME, FNR, $0
+            pend = 0; next
+        }
+        /(;[ \t]*|^[ \t]*)then([ \t]|$)/ {
+            rest = $0; sub(/.*then/, "", rest)
+            if (first_stmt(rest) == "") { pend = 1; next }
+            if (first_stmt(rest) ~ /[$][?]/) printf "%s:%d:%s\n", FILENAME, FNR, $0
+        }
+    ' "$@"
+}
+# SIX FILES BEYOND $eafiles, ALL PRODUCT SCRIPTS THAT READ `$?` AND WERE IN NO LIST. Measured
+# when they were added: they trip nothing today, which is the argument the bash32 rule's own
+# comment makes for its widening. A SEPARATE list rather than widening $eafiles, so a bug fix
+# does not quietly move an unrelated rule's coverage as a side effect.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+dqfiles="$eafiles $PRIVATE/files/setup-git $PRIVATE/files/open-url $PRIVATE/files/cs193v-shell $PRIVATE/files/cs193v-portwatch $PRIVATE/files/entrypoint.sh $PRIVATE/macapp/cs193v-run"
+# shellcheck disable=SC2086
+assert_eq "dollarq:not-the-first-read-in-a-then-branch" "" "$(dq_then_first $dqfiles)"
+
+dq_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-dollarq.XXXXXX")"
+# AND THE RULE GOES RED ON THE TEXT THAT ACTUALLY BROKE, rather than on an invented specimen --
+# d45b40b's shape and its reason: a rule demonstrated against something written to satisfy it has
+# only proved that the something matches. These are install-cs193v.sh:395-399 as they stood.
+#
+# ASSEMBLED RATHER THAN QUOTED, because $dqfiles above covers the test suite and therefore covers
+# THIS file: a heredoc holding those lines verbatim would be a real violation sitting in the
+# scanner, and the rule would flag itself. Same self-match hazard the door needle at the bottom of
+# this file is assembled tail-first to dodge; the pieces below are inert on every line.
+dq_then='then'
+dq_status='$?'
+{ printf 'if ! download_to "$BOOT_TMP/course.tar.gz" "$(tarball_url)" 2>"$DL_LOG"; %s\n' "$dq_then"
+  printf '    # AND dl_rc IS ALWAYS 0 HERE, SO THE ARM BELOW IS DEAD.\n'
+  printf '    dl_rc=%s\n' "$dq_status"
+  printf '    case "$TOOL:$dl_rc" in\n        curl:60|wget:5) refuse "cert" ;;\n    esac\nfi\n'
+} > "$dq_tmp/bad.sh"
+assert_ne "dollarq:the-rule-catches-the-bug-it-exists-for" "" "$(dq_then_first "$dq_tmp/bad.sh")"
+# AND IT STAYS QUIET ON EVERY FORM THAT IS LEGITIMATELY VALID, so the rule cannot be satisfied by
+# banning `$?` outright. The first two lines are files/cs193v-ui.sh:505 and :567 verbatim -- the
+# near-misses a matcher keyed on `if !` alone, or on `$?` anywhere in the branch, would fail.
+#
+# THESE ARE SAFE TO QUOTE where the bad ones were not: each is green BY CONSTRUCTION, so a copy
+# sitting in this file is not a violation, and the rule reading it here changes nothing.
+cat > "$dq_tmp/good.sh" <<'DQGOOD'
+if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
+kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; rc=$?; }
+if ! f; then
+    g
+    rc=$?
+fi
+f
+rc=$?
+DQGOOD
+assert_eq "dollarq:the-rule-passes-the-correct-forms" "" "$(dq_then_first "$dq_tmp/good.sh")"
+rm -rf "$dq_tmp"
+
 # ─── the dependency registry: one row shape, one package name per family (#195) ─
 # TWO GATES OVER lib/portable.sh's PT_REGISTRY, and #195 bought both.
 #
