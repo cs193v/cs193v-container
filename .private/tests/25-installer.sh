@@ -2420,6 +2420,126 @@ assert_ok "dlloud:the-diagnosis-follows-the-refusal" \
           test "${dl_ref:-0}" -gt 0 -a "${dl_say:-0}" -gt "${dl_ref:-0}"
 
 
+# ─── the one exit status with its own answer  (#303) ──────────────────────────
+# curl 60 IS NOT A NETWORK PROBLEM, and until #303 this script said it was. Both tools have a
+# dedicated code for "the certificate could not be verified" -- curl 60, wget 5 -- and it is the
+# one genuinely new way the download can fail since the #221 split moved it ahead of everything
+# else: install_podman used to install ca-certificates beside curl, and nothing installs it
+# before the download any more.
+#
+# THE ARM EXISTED AND HAD NEVER RUN. `$?` read in the then-branch of `if ! cmd` is the status of
+# the NEGATION -- 0 -- so dl_rc could not carry 60 and the case could not match. Nothing was red
+# because nothing had ever driven the arm: tests/MANUAL.md listed it as a by-hand check, and
+# 859b2b2 chose to leave the bug rather than fix it uncovered. This is the coverage it waited for.
+#
+# RC=60 AND NO NEW MACHINERY: shim_fake_curl's third argument is an arbitrary exit status.
+#
+# ONE COMPLAINT AND NOT ELEVEN, unlike dlloud just above. --retry retries a TRANSIENT failure and
+# a certificate curl cannot verify is fatal, so the real thing prints once and stops.
+DL_CERT='curl: (60) SSL certificate problem: unable to get local issuer certificate'
+
+shim_new
+shim_fake_curl "$DL_URL" /dev/null 60 1 "$DL_CERT"
+# THE FAKE IS ASSERTED AGAINST ITSELF FIRST, for the reason dlquiet's probe above gives. Every
+# claim below turns on the status really being 60: a fake that exited 1 would drive the GENERIC
+# refusal, leaving the two negatives as the only things standing -- and a negative passes for
+# free on a case that never reached the arm at all.
+"$SHIM/curl" -fsSL --retry 10 --retry-delay 3 -o "$TMP/cert-probe" "$DL_URL" >/dev/null 2>&1
+dl_cert_rc=$?
+assert_eq "dlcert:the-fake-really-exits-60" "60" "$dl_cert_rc"
+dc="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-cert")"
+assert_eq   "dlcert:exits-nonzero" "1" \
+            "$(installer_host_rc "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-cert2")"
+assert_says       "dlcert:blames-the-certificate" "Could not verify the security certificate" "$dc"
+assert_says       "dlcert:names-the-package"      "sudo apt install ca-certificates" "$dc"
+assert_says       "dlcert:names-the-source"       "$DL_URL" "$dc"
+assert_no_signoff "dlcert:does-not-claim-success" "$dc"
+# AND NOT THE OTHER REFUSAL, WHICH IS THE WHOLE OF #303. The two are mutually exclusive by
+# construction -- refuse() exits -- so this pair is what the misdiagnosis looked like from
+# outside, and it is what was red on the unfixed file.
+assert_says_not "dlcert:does-not-fall-through-to-the-generic-refusal" \
+                "Could not download the course files" "$dc"
+assert_says_not "dlcert:does-not-call-it-a-network-problem" "usually a network problem" "$dc"
+# AND IT STILL CARRIES curl's OWN WORDS, which correcting only the dispatch would have DROPPED:
+# before #303 a certificate failure reached the generic refusal, and that one ends in dl_said.
+# curl 60 is an expired certificate and a TLS-inspecting proxy as well as a missing CA bundle,
+# and this line is the only thing that says which -- on the other two the advice printed above it
+# is wrong, and the screenshot is what tells staff so.
+assert_says "dlcert:says-what-curl-said" "unable to get local issuer certificate" "$dc"
+# INSIDE THE REFUSAL RATHER THAN AHEAD OF IT, the line-number shape dlloud uses above.
+dc_ref="$(printf '%s\n' "$dc" | grep -n 'Could not verify the security certificate' | head -1 | cut -d: -f1)"
+dc_say="$(printf '%s\n' "$dc" | grep -n 'unable to get local issuer'                | head -1 | cut -d: -f1)"
+assert_ok "dlcert:the-diagnosis-follows-the-refusal" \
+          test "${dc_ref:-0}" -gt 0 -a "${dc_say:-0}" -gt "${dc_ref:-0}"
+
+
+# ─── and the code a real missing package actually produces  (#303) ────────────
+# 77 AND NOT 60 IS WHAT debian:13 DOES, and this is the case no fake could have found on its
+# own -- it is here because the by-hand check tests/MANUAL.md keeps for exactly this ran, and
+# disagreed with the product. Measured on curl 8.14.1 with the ca-certificates package absent:
+# `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`, exit 77,
+# never 60. Debian compiles that path in, so on the machine the refusal's prose describes what
+# is missing is the FILE; 60 is CURLE_PEER_FAILED_VERIFICATION and needs a store that exists and
+# does not vouch for the peer -- an expired certificate, or a TLS-inspecting proxy. The arm
+# carried 60 alone, so it answered every certificate shape except its own.
+#
+# WHICH MEANS #303 WAS TWO BUGS WEARING ONE COAT: the dispatch could not reach the arm, and the
+# arm would not have matched the case it was written for if it had. Fixing only the first would
+# have left a student on a fresh Debian box reading "usually a network problem" exactly as
+# before, with the issue closed.
+DL_CERT77='curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt'
+
+shim_new
+shim_fake_curl "$DL_URL" /dev/null 77 1 "$DL_CERT77"
+"$SHIM/curl" -fsSL --retry 10 --retry-delay 3 -o "$TMP/cert77-probe" "$DL_URL" >/dev/null 2>&1
+dl_c77_rc=$?
+assert_eq "dlcert77:the-fake-really-exits-77" "77" "$dl_c77_rc"
+d7="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-cert77")"
+assert_says     "dlcert77:blames-the-certificate" "Could not verify the security certificate" "$d7"
+assert_says     "dlcert77:names-the-package"      "sudo apt install ca-certificates" "$d7"
+assert_says_not "dlcert77:does-not-call-it-a-network-problem" "usually a network problem" "$d7"
+assert_says     "dlcert77:says-what-curl-said"    "error setting certificate file" "$d7"
+
+
+# ─── and the same answer through the other downloader  (#303) ─────────────────
+# THE ARM IS `curl:60|wget:5`, AND THIS IS THE HALF NOTHING COULD REACH. A fix verified only
+# through curl leaves the wget label exactly what it was before -- a value nothing had ever
+# produced -- and install-cs193v.sh:277 is where this project wrote down that an unexercised
+# download arm is "a path that rots".
+#
+# A PRIVATE FARM, farm-nosudo's shape and its reason: shim_toolfarm memoises $SHIM_FARM and every
+# later case shares it, so taking curl out of the shared one would silently disarm them all.
+#
+# AND THE CALLER'S PATH= IS WHAT MAKES THIS REACHABLE AT ALL. installer_host hardcodes
+# PATH="$SHIM:$PATH" and then expands the caller's assignments AFTER it; env applies them left to
+# right, so the one below wins outright and the developer's own curl is genuinely gone. Measured:
+# `env PATH=/aaa:$PATH PATH=/bbb sh -c :` cannot find sh.
+IFARM="$(shim_toolfarm)"
+DL_CERTW='ERROR: cannot verify codeload.invalid certificate, issued by CN=Fake CA'
+
+shim_new
+shim_fake_wget "$DL_URL" /dev/null 5 "$DL_CERTW"
+NOCURL="$SHIM/farm-nocurl"; mkdir -p "$NOCURL"
+ln -s "$IFARM"/* "$NOCURL/" 2>/dev/null
+rm -f "$NOCURL/curl" "$SHIM/curl"
+# BOTH HALVES OF THE FIXTURE, because either alone passes vacuously -- an empty farm satisfies
+# the first perfectly, which is the trap the no-hasher farm above is paired against.
+assert_eq "dlcertw:the-no-curl-farm-really-has-no-curl" "" "$(PATH="$SHIM:$NOCURL" command -v curl)"
+assert_ne "dlcertw:the-no-curl-farm-keeps-a-toolbox"    "" "$(PATH="$SHIM:$NOCURL" command -v tar)"
+dw="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$DL_URL" CS193V_DIR="$TMP/dl-certw" PATH="$SHIM:$NOCURL")"
+# THAT wget IS WHAT ANSWERED IS THE SECOND THING THIS CASE PINS. find_download_tool tries curl
+# first, so with curl gone the choice is forced -- and that choice is otherwise exercised only by
+# sb-wget in the install tier, which needs podman.
+assert_says     "dlcertw:wget-is-what-ran"       "$DL_URL" "$(shim_wget_log)"
+assert_says     "dlcertw:blames-the-certificate" "Could not verify the security certificate" "$dw"
+assert_says     "dlcertw:names-the-package"      "sudo apt install ca-certificates" "$dw"
+assert_says_not "dlcertw:does-not-call-it-a-network-problem" "usually a network problem" "$dw"
+# AND dl_said NAMES THE TOOL THAT ACTUALLY ANSWERED, which it takes from $TOOL -- so this would
+# go red on a refusal that had hardcoded "curl" into the prose.
+assert_says     "dlcertw:says-what-wget-said"    "What wget said" "$dw"
+assert_says     "dlcertw:quotes-wget-verbatim"   "cannot verify codeload.invalid certificate" "$dw"
+
+
 # ─── the staleness check, driven as a function  (#282) ─────────────────────────
 # WHY AS A FUNCTION AND NOT THROUGH AN INSTALL, which is the apt progress block's reason one
 # section up: check_release deliberately returns early when CS193V_TARBALL is set -- every case in
