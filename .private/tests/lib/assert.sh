@@ -843,21 +843,63 @@ dyn_is_forwarded() { fwd_owned_ports | grep -qx "$1"; }
 # lib/assert.sh:57-58 is the invariant both of them serve.
 DYN_PORTS=''
 dyn_ports() {                         # dyn_ports [N] -> $DYN_PORTS, N forwarded ports, spaced
-    local want="${1:-1}" got='' p i=0
+    local want="${1:-1}" got='' p i=0 rc=0
     [ -n "$DYN_PORTS" ] && return 0
     fwd_init
     while [ "$i" -lt "$want" ]; do
         p="$(dyn_free_port $got)" || break
-        dyn_serve "$p"
+        # dyn_serve's rc, WHICH USED TO BE DROPPED (#178). `podman exec -d` failing leaves nothing
+        # listening inside; the wait below then times out correctly and blames the TUNNEL, whose
+        # two Check: lines send the developer at a subsystem that is working -- 30 s per port
+        # before misdirecting them. On macOS every podman call is an ssh round-trip into the VM,
+        # and this suite has already measured transient rc=124 and rc=125 from exactly that path
+        # against a container that was demonstrably up (#140), so this needs no more than one bad
+        # exec. Measured: dyn_serve returning 125 left `rc=0 DYN_PORTS=[20000 20001]` with nothing
+        # bound anywhere and no result recorded.
+        #
+        # IT CATCHES "exec failed" AND NOT "the server failed to bind", because -d returns once
+        # podman has detached. That limit is why the message further down no longer claims the
+        # port was bound: proving the bind means asking the container, which it does print.
+        dyn_serve "$p"; rc=$?
+        if [ "$rc" -ne 0 ]; then
+            fail "require:dynports" "podman exec could not start a server on 127.0.0.1:$p (rc $rc).
+So nothing is listening inside the container to forward, and this is podman or the container
+rather than the tunnel. Every port assertion in this suite establishes its ports this way, so
+there is nothing left to test.
+Check:  podman ps -a --filter name=$NAME"
+            exit 1
+        fi
         got="$got $p"
         i=$((i + 1))
     done
     got="${got# }"
+    # AND AS MANY PORTS AS WERE ASKED FOR (#178). dyn_free_port returns 1 when its scan comes up
+    # empty, the `break` above leaves $got short, and the loop below validates only the ports it
+    # does have -- so a fixture that delivered one of two reported success and recorded nothing.
+    # Measured: `dyn_ports 2` with the pool dry after one port gave `rc=0 DYN_PORTS=[20000]`.
+    #
+    # WHAT THAT COSTS IS A VACUOUS ASSERTION, not just a thin one:
+    # ports:one-ssh-process-carries-them-all exists to catch ssh having stopped multiplexing, and
+    # one port cannot show that -- the answer is 1 by construction. Two ports and two distinct ssh
+    # pids fails it correctly; one port passes it. Until #164 the second port had a witness in
+    # DYN2ND, which was never read and has been deleted.
+    #
+    # REACHABILITY IS LOW AND WORTH SAYING PLAINLY: dyn_free_port scans 20000-32767 and then
+    # 1024-32767, so a short count needs ~30,000 host ports busy at once. The argument for the
+    # guard is that the failure is silent and turns a real check vacuous, not that it is likely.
+    if [ "$i" -ne "$want" ]; then
+        fail "require:dynports" "asked for $want free host ports and $i came back (${got:-none}).
+Every port assertion below would run against fewer ports than it names, and the ones that COUNT
+something would answer with the short number rather than fail."
+        exit 1
+    fi
     for p in $got; do
         wait_until 30 dyn_is_forwarded "$p" && continue
-        fail "require:dynports" "bound 127.0.0.1:$p inside the container, and the tunnel never
-carried it to this host. Every port assertion in this suite establishes its ports this way, so
-there is nothing left to test.
+        fail "require:dynports" "asked the container for a server on 127.0.0.1:$p and the tunnel
+never carried it to this host. podman exec accepted the request -- it returns once it has
+DETACHED, so the bind is not proven from here -- the container-says line below is what tells
+the two apart. Every port assertion in this suite establishes its ports this way, so there is
+nothing left to test.
   the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
   the container says:
 $(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')
