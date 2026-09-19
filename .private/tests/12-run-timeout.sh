@@ -477,7 +477,16 @@ mkfifo "$RDS"
     printf 'alpha\nbeta\n' >&3
     # A DURATION, DELIBERATELY. This sleep is the stimulus -- the silence itself -- not a wait
     # for anything to appear. See wait_until in lib/assert.sh for why that distinction decides.
-    sleep 3
+    #
+    # 2.5 AND NOT 3, BECAUSE 3 LANDS ON A READ'S EXPIRY (#330). The reads are a second each and
+    # the first two return at once, so a three-second silence puts gamma on the boundary between
+    # two of them and the answer stops being deterministic -- the writer and the expiry are then
+    # separated by the loop's own overhead, which is single-digit milliseconds and not ours to
+    # control. Measured on this Mac once #332 tightened the loop: 3.0 gave two timeouts 19 runs
+    # in 20 and three in the twentieth; 2.5 gave one shape 20 times in 20, because gamma then
+    # falls in the middle of a read rather than at its edge. The read timeout cannot move --
+    # lib/assert.sh:5-7 bans `read -t 0.5` as a bash-4 construct -- so the gap is the only dial.
+    sleep 2.5
     printf 'gamma\n' >&3
     exec 3>&-
 ) &
@@ -494,16 +503,38 @@ rd_drain() {                          # read until the stream ends, or give up
 }
 # A GROUP, NOT A SUBSHELL: `{ ...; } < FILE` redirects without forking, so what rd_drain
 # accumulates is still here to assert on.
-{ rd_drain; } < "$RDS"
+{ rd_drain; } < "$RDS"; rd_rc=$?
 RD_SAW="${RD_SAW# }"
 wait "$RDS_W" 2>/dev/null || true
 rm -f "$RDS"
 record "read:the-sequence-seen" "$RD_SAW"
-assert_match "read:lines-arrive-in-order"                '^line:alpha line:beta' "$RD_SAW"
-assert_match "read:a-gap-after-a-line-is-a-timeout"      'line:beta timeout'     "$RD_SAW"
-# gamma, not beta: had the previous line survived the next call, this would read `line:beta`.
-assert_match "read:a-line-after-a-gap-still-arrives"     'timeout line:gamma'    "$RD_SAW"
-assert_match "read:and-the-end-is-still-found-after-all-that" 'line:gamma ended$' "$RD_SAW"
+
+# rd_drain's OWN STATUS, WHICH USED TO BE DROPPED HERE (#330). Running out of reads without ever
+# seeing the stream end is a different event from the stream arriving mangled, and in the word
+# list alone the two are identical -- both simply lack `line:gamma ended`. Named separately, it
+# says which, and the shape check below stops having to mean two things at once.
+if [ "$rd_rc" -eq 0 ]; then
+    pass "read:the-stream-ended-inside-the-read-budget"
+else
+    fail "read:the-stream-ended-inside-the-read-budget" \
+"rd_drain spent all 12 one-second reads without the stream ending, so what follows is a prefix
+of the sequence rather than the whole of it: $RD_SAW"
+fi
+
+# ONE SHAPE OVER THE WHOLE STRING, NOT FOUR ADJACENCIES (#330). The four this replaces were
+# unanchored substring probes on a whitespace-exact accumulation, so a single empty word -- a
+# verdict that printed nothing, a line split across a read boundary -- reddened whichever of them
+# happened to sit next to it, naming a property that was not the one that broke. Four causes, the
+# same two reds, and nothing saying which. Anchored at both ends this says it once and says it
+# about the whole sequence; `( timeout)+` is the only part that legitimately varies, since how
+# MANY timeouts fit in the gap is a property of the machine and the words either side are not.
+#
+# THE HOLD #244 ASKED FOR IS NOT WEAKENED BY LOSING THREE NAMES. That hold is the five
+# single-call assertions above, one per row of its measured table, and they are untouched; this
+# is the sixth, combined case. Mutation-tested: deleting the `unset` from dynports_read gives
+# `line:alpha line:beta ended`, which this rejects.
+assert_match "read:the-sequence-is-line-line-gap-line-end" \
+             '^line:alpha line:beta( timeout)+ line:gamma ended$' "$RD_SAW"
 
 # ─── A DEAD TERMINAL, AND THE BYTES A FAILED WRITE LEAVES BEHIND  (#170) ──────
 # WHAT THIS IS ABOUT, because the failure does not look like its cause. On macOS a write(2) to
