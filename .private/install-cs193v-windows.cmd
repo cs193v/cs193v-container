@@ -297,7 +297,7 @@ set "LINUX_USER=student"
 :: .private/release.sh is what moves them. Editing this alone gets you a refusal, correctly.
 set "REPO_OWNER=cs193v"
 set "REPO_NAME=cs193v-container"
-set "REPO_TAG=release-0.0.0"
+set "REPO_TAG=release-0.0.1"
 set "INSTALLER_URL=https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/%REPO_TAG%/.private/install-cs193v.sh"
 :: AND ONE WAY TO POINT IT SOMEWHERE ELSE, FOR STAFF (#280). Unset, this changes nothing; set,
 :: it replaces the whole URL, so a by-hand test can serve stage two out of a working tree --
@@ -352,7 +352,7 @@ if defined CS193V_TARBALL set "XENV=CS193V_TARBALL=%CS193V_TARBALL% "
 :: of a file in a checkout: .gitattributes gives install-cs193v.sh `text eol=lf` so the two agree
 :: on every platform, and .private/release.sh hashes the STAGED blob rather than the working copy
 :: for the same reason. See .gitattributes' note on the two published files.
-set "STAGE2_SHA256=43bfba9b94009ae2c151d09b16ca826fadb9a9fe434727aa8cf472148655ded2"
+set "STAGE2_SHA256=c5710482301d490e35604b13fc7dcff1e5a9016b71b622a7ddd4d979aab48529"
 
 :: AND ONE WAY TO POINT IT SOMEWHERE ELSE, FOR STAFF -- the same shape CS193V_INSTALLER_URL has.
 :: It REPLACES the expected value and never disables the check, so a by-hand test of an edited
