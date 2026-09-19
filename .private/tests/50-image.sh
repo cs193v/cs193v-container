@@ -650,6 +650,7 @@ record "gesture:dump" "$(printf '%s' "$g_dump" | do_tr '\n' '|')"
 
 g_bad=''
 g_wide=''
+g_cwide=''
 while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
     [ -n "$gt" ] || continue
     [ -n "$gtext" ]  || g_bad="$g_bad [$gt/$gm empty]"
@@ -659,11 +660,21 @@ while IFS="$(printf '\t')" read -r gt gm gn gc gtext; do
     # wraps it, the frame grows a row, and the popup -- whose height open-url chose before any of
     # this was known -- shows a dead row or scrolls its title off the top.
     if [ "$gm" = --link ] && [ "${gc:-999}" -gt 65 ]; then g_wide="$g_wide [$gt=$gc]"; fi
+    # AND THE COPY LINE HAS TO FIT setup-git's PARENTHETICAL, which is a second consumer with a
+    # second geometry (#321). It was ungated until then, and #319 records why that was fine while
+    # the only reader was a tmux status line -- that is the terminal's own width, so nothing
+    # could be too wide for it. setup-git renders this line inside token.byhand, indented five
+    # columns under step 1 and wrapped in brackets, against a catalogue hard-wrapped at 76: so
+    # 76 less the indent and less the brackets is 69, and 20-messages.sh lints the line at
+    # exactly that worst case. One column over and the line wraps on an 80-column terminal,
+    # taking a row from a screen measured to have none spare.
+    if [ "$gm" = --copy ] && [ "${gc:-999}" -gt 69 ]; then g_cwide="$g_cwide [$gt=$gc]"; fi
 done <<GDUMP
 $g_dump
 GDUMP
 assert_eq "gesture:every-token-and-mode-is-one-non-empty-line" "" "$g_bad"
 assert_eq "gesture:every-link-line-fits-the-box" "" "$g_wide"
+assert_eq "gesture:every-copy-line-fits-setup-gits-parenthetical" "" "$g_cwide"
 
 # THE DEFAULT BRANCH IS THE OLD STRING, BYTE FOR BYTE. This is the assertion that makes the
 # change provably a no-op for anyone the resolver cannot identify -- which, since SHIFT is the

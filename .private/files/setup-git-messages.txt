@@ -92,6 +92,8 @@ later this quarter.)
 
     {{URL}}
 
+    (*{{HOWTO}}*)
+
 Scroll to the bottom and click *Generate token*, then confirm when GitHub
 asks you to. It will then show you your token: a long string of letters
 and numbers that starts with *github_pat_*.
@@ -106,6 +108,7 @@ That link didn't work for me. Show me how to do it by hand.
 Here's how to set the same thing up by hand:
 
   1. Open https://github.com/settings/personal-access-tokens/new
+     (*{{HOWTO}}*)
   2. *Token name*: CS193V.
   3. *Resource owner*: *{{ORG}}*. If it isn't in the list, you haven't
      accepted your invitation to it yet:

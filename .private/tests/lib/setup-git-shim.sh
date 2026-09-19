@@ -25,7 +25,15 @@ sg_new() {
         # every run that reaches the token screen, and a run without it is the DEGRADED path --
         # the long URL, which is what a TA's Mac gets and what one case below asks for by name.
         cp "$TESTS_DIR/lib/shortlink-fake" "$SGSHIM/shortlink"
-        chmod +x "$SGSHIM/gh" "$SGSHIM/git" "$SGSHIM/shortlink"
+        # AND THE REAL cs193v-platform-messages, NOT A FAKE, which is the one thing in here that
+        # is not a stand-in. setup-git asks it how to open the link it just printed (#321), and
+        # what the assertions check is which ROW of the shipped table reached the screen -- so a
+        # fake would be asserting the fake. It is dependency-free POSIX sh keyed on two
+        # environment variables, so it runs on a TA's Mac as-is, and this suite already drives
+        # the real setup-git, the real cs193v-ui.sh and the real catalogue out of the checkout.
+        cp "$PRIVATE/files/cs193v-platform-messages" "$SGSHIM/cs193v-platform-messages"
+        chmod +x "$SGSHIM/gh" "$SGSHIM/git" "$SGSHIM/shortlink" \
+                 "$SGSHIM/cs193v-platform-messages"
     fi
     : > "$SGSHIM/argv.log"
     SGDIRS="$SGDIRS $SGSHIM"
