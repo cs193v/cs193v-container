@@ -2439,6 +2439,10 @@ assert_eq "doctor:asks-podman-info-no-more-often-than-before" "2" "$(shim_count 
 # reaches sup_publish -- which is the observable here -- with no master needed at all. What
 # these cases are about is the GAP, and arranging a control socket to prove it would be one
 # more thing that could go wrong. The section at the end of this file forwards for real.
+#
+# NO MASTER NOW READS AS A GONE ONE (#338), so these publishes say `state=master-unresponsive`
+# beside their v6lo refusals. Nothing here reads that word, and the refusals are still what each
+# case waits on; the only state these cases assert is `broken`, which the silence path sets.
 sup_pidfile() { launcher --dev-tunnel | do_awk -F'\t' '$1 == "suppid" { print $2 }'; }
 sup_up()      { [ -s "$SUP_PIDFILE" ]; }
 sup_start() {                         # sup_start OUTFILE
@@ -2666,4 +2670,77 @@ assert_contains "forward:the-last-publish-carried-nothing" 'up= refused=' \
 # forward into run_timeout's ceiling, and rc 124 into master-unresponsive.
 assert_not_contains "forward:a-healthy-forward-is-not-an-unresponsive-master" \
                     "master not answering" "$(cat "$SHIM/sup-fwd.out" 2>/dev/null)"
+sup_reap
+
+# ─── ...and a master that has gone is published as gone  (#338) ───────────────
+# A master that exits cleanly -- ServerAlive after a sleep, `-O exit`, a TERM -- deletes its
+# control socket, and every forward it held goes with it. The supervisor used to recheck nothing
+# it had already forwarded, so the state file kept `state healthy` and the old `up` rows, and
+# `cs193v-portwatch --show` went on telling a student (and the agent-notes it teaches) that ports
+# nobody was carrying were reachable.
+#
+# THE SOCKET IS REMOVED BY HAND, because that is all a clean exit does that the supervisor can
+# see; the fake has no master process to exit. It comes back the same way --reset-tunnel brings
+# it back, and with NO pidfile written, which is the shape tunnel_record_pid leaves when it
+# cannot learn the pid: recovery must not depend on the pidfile changing.
+#
+# THE v6lo PORT IS THE ANCHOR. It is refused before any ssh runs, so its refusal has to survive
+# a gone master -- the advice it carries is still true -- and its presence in the publish is what
+# proves the frames after the removal were read at all.
+#
+# RECOVERY IS READ AS A SEQUENCE: the case's own first publish already says `state=healthy` and
+# `up=3000:lo`, so only a healthy publish AFTER the gone one is evidence of anything.
+sup_published_after_gone() {
+    sup_publishes | do_awk '/state=master-unresponsive/ { g = 1; next }
+                            g && /state=healthy/ && /up=3000:lo refused=21500:v6lo/ { f = 1 }
+                            END { exit !f }'
+}
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-gone.out"
+assert_ok "forward:the-gone-master-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "forward:the-port-was-up-before-the-master-went"
+else
+    fail "forward:the-port-was-up-before-the-master-went" \
+"3000 was never published as up, so nothing below is about a master going away.
+ssh.log:
+$(shim_ssh_log)"
+fi
+rm -f "$CTL"
+if wait_until 15 sup_published 'state=master-unresponsive'; then
+    pass "forward:a-gone-master-is-published"
+else
+    fail "forward:a-gone-master-is-published" \
+"the control socket was removed and the next frame arrived, and nothing was published: the state
+file still says healthy, with 3000 in it.
+publishes:
+$(sup_publishes)"
+fi
+assert_contains "forward:a-gone-master-is-published-with-nothing-up" 'up= refused=21500:v6lo' \
+                "$(sup_publishes | grep -F 'state=master-unresponsive' | head -1)"
+shim_ssh_master "$CTL"
+if wait_until 15 sup_published_after_gone; then
+    pass "forward:a-replaced-master-is-published-healthy-again"
+else
+    fail "forward:a-replaced-master-is-published-healthy-again" \
+"a control socket came back and the next frame did not return the state to healthy with 3000 up.
+publishes:
+$(sup_publishes)"
+fi
+# THE ssh, NOT THE PUBLISH, because the publish only says what the supervisor concluded (#267):
+# the forward died with the old master, so the new one has to be ASKED for it.
+assert_eq "forward:a-replaced-master-is-asked-for-the-port-again" "2" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
 sup_reap

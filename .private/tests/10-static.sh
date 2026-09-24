@@ -2558,7 +2558,7 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
 # further up this file, and placed earlier the whole block errored out with "fn_body: command not
 # found" while assert_eq compared two empty strings and passed. Measured -- it did.
 sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_cancel \
-                      tunnel_dyn_classify sup_log sup_publish sup_tick sup_loop; do
+                      tunnel_dyn_classify sup_log sup_publish sup_gone sup_tick sup_loop; do
                  fn_body "$f" "$REPO/cs193v"
              done | sed 's/^[[:space:]]*#.*//')"
 if [ -z "$sup_parse" ]; then
