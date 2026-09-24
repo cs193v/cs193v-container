@@ -113,6 +113,126 @@ $(row 1 0100007F:0BB8 00000000:0000 0A)
 $(row 2 0100007F:2710 00000000:0000 0A)" "$HDR"
 assert_eq "pw:output-is-sorted" "3000:lo 8080:lo 10000:lo" "$PW_SET"
 
+# ─── the cost of a scan grows with the table, not with its square  (#337) ──────
+# /proc/net/tcp lists EVERY socket in the netns, not just listeners, and TIME_WAIT alone keeps a
+# closed connection in it for 60 s -- a Playwright run leaves ~6-11 lines per test. The scan used
+# to peel one line off the front of the text per iteration, copying everything after it each
+# time, so a tick cost the SQUARE of the table: 6.5 s at 1000 lines in the container, 25.7 s at
+# 2000, and past 30 s the supervisor declared the watcher dead for the rest of the session.
+#
+# A RATIO, NOT A BOUND. The constant moves with the machine and the locale -- the old code was
+# ~5x slower under the image's en_US.UTF-8 than under C -- while the shape does not: four times
+# the rows costs ~4x linear and ~16x quadratic whatever the constant. The minimum of three runs,
+# because a loaded machine only ever adds time. The absolute ceiling beside it catches a linear
+# scan that has merely become expensive.
+#
+# FAIL FAST ON THE SMALL TABLE, so a red run is seconds rather than minutes: the old code took
+# ~1.8 s for 500 of these rows under UTF-8, and ~5 s per 2000-row run under C.
+#
+# ONE awk FOR THE WHOLE TABLE, not a $(row) per line -- that would be 4000 forks per run.
+pw_table() {                          # pw_table ROWS v4|v6 -> a /proc/net/tcp{,6}-shaped table
+    do_awk -v n="$1" -v fam="$2" -v hdr="$HDR" 'BEGIN {
+        print hdr
+        lo = (fam == "v4") ? "0100007F" : "0000000000000000FFFF00000100007F"
+        for (i = 0; i < n - 2; i++)
+            printf "%4d: %s:%04X %s:%04X %s 00000000:00000000 00:00000000 00000000  1000        0 0 1 0000 0 0 0 0 0\n",
+                   i, lo, 32768 + (i * 7) % 28000, lo, 5173, (i % 7 == 0) ? "01" : "06"
+        # A TIME_WAIT whose own port is 0A0A: whatever skips lines cheaply, it is the state
+        # field that has to decide.
+        printf "%4d: %s:0A0A %s:1F90 06 00000000:00000000 00:00000000 00000000  1000        0 0 1 0000 0 0 0 0 0\n", n - 2, lo, lo
+        # The ONLY listener, and it is the last line: nothing may stop early.
+        if (fam == "v4")
+            printf "%4d: %s:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 0 1 0000 0 0 0 0 0\n", n - 1, lo
+        else
+            printf "%4d: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 0 1 0000 0 0 0 0 0\n", n - 1
+    }'
+}
+PW_T4_500="$(pw_table 500 v4)";   PW_T6_500="$(pw_table 500 v6)"
+PW_T4_2000="$(pw_table 2000 v4)"; PW_T6_2000="$(pw_table 2000 v6)"
+scan_small() { pw_scan_text "$PW_T4_500" "$PW_T6_500"; }
+scan_large() { pw_scan_text "$PW_T4_2000" "$PW_T6_2000"; }
+fastest_of_3() {                      # fastest_of_3 FN -> the least of three elapsed times
+    local a b c
+    a="$(elapsed "$1")"; b="$(elapsed "$1")"; c="$(elapsed "$1")"
+    printf '%s\n%s\n%s\n' "$a" "$b" "$c" | sort -n | head -1
+}
+
+# THE ANSWER FIRST, in this shell rather than elapsed's subshell, because a fast scan that
+# returns the wrong set is not a fix. The small table has the same last-row listener and the
+# same 0A0A TIME_WAIT, and on the old code it costs seconds where the large one costs a minute.
+scan_small
+assert_eq "pw:a-large-table-yields-exactly-its-listeners" "3000:lo 8080:any" "$PW_SET"
+
+PW_TS="$(elapsed scan_small)"
+if ! faster_than 0.5 "$PW_TS"; then
+    record "pw:seconds-to-scan-1000-lines" "$PW_TS"
+    fail "pw:scan-cost-grows-linearly-with-the-table" "one scan of 2 x 500 rows took ${PW_TS}s,
+which is quadratic territory (#337); a linear scan does it in a few hundredths. Not timing the
+2000-row table, which would take minutes."
+    fail "pw:a-large-table-scans-in-under-a-second" "see above"
+else
+    PW_TS="$(fastest_of_3 scan_small)"; PW_TL="$(fastest_of_3 scan_large)"
+    record "pw:seconds-to-scan-1000-lines" "$PW_TS"
+    record "pw:seconds-to-scan-4000-lines" "$PW_TL"
+    # The floor keeps a 1 ms clock from dividing by zero on a fast machine; it cannot make a
+    # linear ratio look quadratic, because a 4x table under 4 ms is under 16 ms.
+    PW_RATIO="$(awk -v s="$PW_TS" -v l="$PW_TL" 'BEGIN { if (s < 0.004) s = 0.004; printf "%.1f", l / s }')"
+    record "pw:scan-cost-ratio-for-4x-the-rows" "$PW_RATIO"
+    if faster_than 8 "$PW_RATIO"; then
+        pass "pw:scan-cost-grows-linearly-with-the-table"
+    else
+        fail "pw:scan-cost-grows-linearly-with-the-table" "4x the rows cost ${PW_RATIO}x the time
+(${PW_TS}s -> ${PW_TL}s). Linear is ~4x; the peel loop #337 removed was ~16x."
+    fi
+    if faster_than 1 "$PW_TL"; then
+        pass "pw:a-large-table-scans-in-under-a-second"
+    else
+        fail "pw:a-large-table-scans-in-under-a-second" "2 x 2000 rows took ${PW_TL}s at best of three."
+    fi
+fi
+
+# ─── ...and the split that made it linear changes nothing else ─────────────────
+# The scan now splits the whole table on newlines and word-splits each line itself, so the
+# caller's IFS, noglob and locale are the scan's business only while it runs.
+#
+# A GLOB CHARACTER IN A FIELD. The old per-line `set -- $line` globbed: a lone `*` field expanded
+# to every file in the current directory, shifted the fields, and the row was silently dropped --
+# an answer that depended on where the watcher happened to be standing.
+one "$HDR
+   * 0100007F:0BB8 00000000:0000 0A x" "$HDR"
+assert_eq "pw:a-glob-character-in-a-field-is-not-expanded" "3000:lo" "$PW_SET"
+# A row that ends at its state, and one separated by tabs. Both are rows the word split accepts,
+# so whatever skips lines before the split must accept them too.
+one "$HDR
+   0: 0100007F:0BB8 00000000:0000 0A" "$HDR"
+assert_eq "pw:a-row-that-ends-at-its-state-is-read" "3000:lo" "$PW_SET"
+one "$HDR
+$(printf '   0:\t0100007F:0BB8\t00000000:0000\t0A\t00000000:00000000')" "$HDR"
+assert_eq "pw:a-tab-separated-row-is-read" "3000:lo" "$PW_SET"
+# The caller's IFS: honoured neither in the split nor afterwards. The old loop word-split with
+# whatever IFS it was handed, so a caller's `IFS=:` cut every row at its colons.
+PW_OLD_IFS="$IFS"
+IFS=:
+one "$HDR
+$(row 0 0100007F:0BB8 00000000:0000 0A)" "$HDR"
+PW_IFS_AFTER="$IFS"; IFS="$PW_OLD_IFS"
+assert_eq "pw:a-caller-ifs-does-not-reach-the-scan" "3000:lo" "$PW_SET"
+assert_eq "pw:the-scan-leaves-the-caller-ifs-alone" ":" "$PW_IFS_AFTER"
+# noglob: off after the scan if it was off before, and still on if the caller had set it.
+one "$HDR" "$HDR"
+case "$-" in *f*) fail "pw:the-scan-leaves-noglob-off" "set -f was still on after the scan returned" ;;
+             *)   pass "pw:the-scan-leaves-noglob-off" ;; esac
+set -f; one "$HDR" "$HDR"; PW_FLAGS="$-"; set +f
+case "$PW_FLAGS" in *f*) pass "pw:the-scan-keeps-a-callers-noglob" ;;
+                    *)   fail "pw:the-scan-keeps-a-callers-noglob" "the caller's set -f was turned off" ;; esac
+# The locale: the scan runs under C, and hands the caller's setting back. A SENTINEL rather than
+# whatever LC_ALL was, because every scan above has already run -- a scan that leaked C would
+# have leaked it before this line, and "unchanged" would compare C with C. Measured: it did.
+PW_LC_WAS="${LC_ALL+set}"; PW_LC_ORIG="${LC_ALL-}"
+LC_ALL=POSIX; one "$HDR" "$HDR"; PW_LC_AFTER="${LC_ALL-unset}"
+if [ -n "$PW_LC_WAS" ]; then LC_ALL="$PW_LC_ORIG"; else unset LC_ALL; fi
+assert_eq "pw:the-scan-leaves-the-callers-locale-alone" "POSIX" "$PW_LC_AFTER"
+
 # ─── garbage in: never a crash, never a bogus port ─────────────────────────────
 BAD=''
 feed() {                              # feed LABEL V4 V6
@@ -247,4 +367,5 @@ rd_bad "bad-port"         "state${T}healthy
 up${T}0${T}lo"
 rd_bad "space-separated"  "state healthy"
 assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
+
 rm -f /tmp/pwstate.txt

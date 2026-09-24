@@ -539,16 +539,21 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # static test forbids them, which makes that ban load-bearing rather than hygienic." The ban was
 # real; the test was not reading the file obeying it. Now it is.
 #
+# AND files/cs193v-portwatch, since #337 gave it its first array. It runs on the image's bash 5,
+# but 18-portwatch-fuzz.sh SOURCES it on the TAs' Macs, so a bash 4 construct in it fails the unit
+# tier on exactly the machines this section is for. Until now that sourcing was the only thing
+# holding it to 3.2, and a sourced file only fails on the lines a case happens to reach.
+#
 # AND .private/lib/export-tree.sh AND .private/release.sh, WHICH SHIP TO NOBODY (#232). They are
 # on these lists anyway, because the constraint is not "does it ship" but "does it run on a TA's
 # Mac": a release is cut there, and a TA settling VERIFICATION.md's by-hand sections runs
 # make-tarball.sh there too. Nothing else would scan either -- the derived list below reaches only
 # $PRIVATE/tests.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE "$BASH4" || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE "$BASH4" || true)"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -1605,7 +1610,7 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 # `$(... || true)` idiom the whole rule would then go silently green on the one platform it
 # exists for.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh $b32files"
+eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh $b32files"
 # shellcheck disable=SC2086
 # COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
 # quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version

@@ -1313,6 +1313,22 @@ wait_until() {                        # wait_until SECS CMD [ARGS...]  -> 0 as s
     return 1
 }
 
+# Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
+# runs on the 3.2 macOS ships. The `time` keyword with TIMEFORMAT is in every bash that matters,
+# and the command substitution passes the command's own exit status through, so a caller can have
+# both from one run.
+#
+# HERE RATHER THAN IN 12-run-timeout.sh, where it was written, because 18-portwatch-fuzz.sh now
+# times the scan too (#337). Two copies of a timing helper is two places for them to disagree
+# about what a number means.
+elapsed() {                           # elapsed CMD... -> seconds as 0.000, rc is the command's
+    { TIMEFORMAT=%R; time "$@" >/dev/null 2>&1; } 2>&1
+}
+# Floats, so awk rather than [ -lt ].
+faster_than() {                       # faster_than LIMIT ELAPSED
+    awk -v e="$2" -v lim="$1" 'BEGIN { exit !(e < lim) }'
+}
+
 # A scratch directory per suite, cleaned up on exit.
 new_tmpdir() {
     local d

@@ -1643,6 +1643,13 @@ sup_loop() {
     # a dead one closes the pipe and a lid close contributes at most ONE timeout (a frozen read
     # returns once; the next call starts a fresh timer on a woken machine).
     #
+    # "ONLY A DEADLOCKED WATCHER" WAS NOT TRUE, and #337 is how it was found out. A watcher that is
+    # merely SLOW is silent for as long as one scan takes, and the scan used to cost the square of
+    # the socket table: ten Playwright Chromiums pushed a tick past thirty seconds, this gave up,
+    # and forwarding was gone for the session. The scan is linear now, so a slow tick is a
+    # fraction of a second again. A watcher that is stopped (SIGSTOP, `podman pause`) is the other
+    # live process that says nothing, and it too ends here; restarting rather than ending is #341.
+    #
     # WHICH OF THE THREE IT WAS IS dynports_read's ANSWER, NOT read's, and that distinction is the
     # whole of #244. Asked directly, `read -t` returns >128 on a timeout from bash 4.0 on and 1
     # on the 3.2 macOS ships -- where a closed stream returns 1 as well. So the timeout arm below
