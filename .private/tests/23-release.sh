@@ -115,6 +115,35 @@ else
     exit 1
 fi
 
+# THE RELEASE THIS RUN CUTS IS THE ONE AFTER THE TREE'S, whatever that is (#347). The suite used to
+# name it -- 0.0.0 -> 0.0.1 -- which was true of the tree it was written against and false from the
+# moment 0.0.1 was cut: every release moves VERSION, so every release broke this file. Read from
+# the COPY, because that is what release.sh will find.
+#
+# THE NEXT NUMBER IS WORKED OUT HERE, NOT ASKED OF release.sh, because a test that took the script's
+# word for what comes next would agree with any bump it made.
+OLD_V="$(cat "$CASE/.private/VERSION" 2>/dev/null)"
+IFS=. read -r V_MAJ V_MIN V_PAT V_REST <<<"$OLD_V"
+V_OK=1
+for p in "$V_MAJ" "$V_MIN" "$V_PAT"; do
+    case "$p" in ''|*[!0-9]*) V_OK='' ;; esac
+done
+[ -z "$V_REST" ] || V_OK=''
+if [ -z "$V_OK" ]; then
+    fail "release:the-trees-own-version-was-read" "the copy's .private/VERSION is '$OLD_V', not
+three numbers, so there is no next release to expect."
+    exit 1
+fi
+NEW_V="$V_MAJ.$V_MIN.$(( 10#$V_PAT + 1 ))"
+pass "release:the-trees-own-version-was-read"
+record "release:the-case-cuts" "$OLD_V -> $NEW_V"
+# THE PREMISE OF EVERY REWRITE ASSERTION BELOW. They check that the three bootstraps name
+# release-$NEW_V afterwards, which proves a rewrite only if they did not already -- so they must
+# start at the tree's own release, as a released tree does. Asserted rather than assumed, for the
+# same reason the-cmd-keeps-its-crlf is asserted ahead of the-ps1-does-not-pin-the-working-copy.
+assert_eq "release:the-bootstraps-start-at-the-trees-own-release" \
+          "release-$OLD_V release-$OLD_V release-$OLD_V" "$(sget REPO_TAG) $(cget REPO_TAG) $(pget RepoTag)"
+
 # ─── the argument surface ──────────────────────────────────────────────────────
 out="$(rel)"
 assert_eq   "release:no-flag-is-refused" "1" "$(rel_rc)"
@@ -131,15 +160,15 @@ assert_eq   "release:a-second-argument-is-refused" "1" "$(rel_rc)"
 reset_case
 out="$(rel --patch)"
 assert_eq   "release:a-clean-tree-cuts-a-release" "0" "$(rel_rc)"
-assert_says "release:it-names-the-new-version" "0.0.0 -> 0.0.1" "$out"
+assert_says "release:it-names-the-new-version" "$OLD_V -> $NEW_V" "$out"
 assert_says "release:it-says-nothing-was-committed" "Nothing has been committed" "$out"
 assert_says "release:it-prints-the-commit-command" "git commit -a" "$out"
-assert_says "release:it-prints-the-tag-command" "git tag release-0.0.1" "$out"
+assert_says "release:it-prints-the-tag-command" "git tag release-$NEW_V" "$out"
 assert_says "release:it-insists-on-the-release-gates" "run-tests.sh --release" "$out"
-assert_says "release:it-names-both-files-for-the-website" "install-cs193v-windows-0.0.1.cmd" "$out"
-assert_eq   "release:the-version-file-was-written" "0.0.1" "$(cat "$CASE/.private/VERSION")"
-assert_eq   "release:the-sh-names-the-new-tag"  "release-0.0.1" "$(sget REPO_TAG)"
-assert_eq   "release:the-cmd-names-the-new-tag" "release-0.0.1" "$(cget REPO_TAG)"
+assert_says "release:it-names-both-files-for-the-website" "install-cs193v-windows-$NEW_V.cmd" "$out"
+assert_eq   "release:the-version-file-was-written" "$NEW_V" "$(cat "$CASE/.private/VERSION")"
+assert_eq   "release:the-sh-names-the-new-tag"  "release-$NEW_V" "$(sget REPO_TAG)"
+assert_eq   "release:the-cmd-names-the-new-tag" "release-$NEW_V" "$(cget REPO_TAG)"
 # RECOMPUTED, NOT READ BACK. The payload digest has to equal what the bootstrap makes of the
 # tree the release describes, and the stage-two digest has to equal the STAGED BLOB -- not the
 # working copy, because the blob is what raw.githubusercontent.com serves.
@@ -163,7 +192,7 @@ assert_eq "release:the-cmd-keeps-its-crlf" \
           "$(grep -c $'\r$' "$CASE/.private/install-cs193v-windows.cmd")"
 
 # ─── and the Windows bootstrap, which is the last link of the chain (#299) ────
-assert_eq "release:the-ps1-names-the-new-tag" "release-0.0.1" "$(pget RepoTag)"
+assert_eq "release:the-ps1-names-the-new-tag" "release-$NEW_V" "$(pget RepoTag)"
 
 # THE PIN IS THE .cmd's STAGED BLOB, and this assertion is also the ORDERING test: $CmdSha256 can
 # only equal the digest of the REWRITTEN .cmd if the .ps1 was written after it. Step 7 exists to
@@ -236,11 +265,11 @@ assert_unwritten "release:a-version-skew-writes-nothing"
 assert_says "release:that-refusal-shows-both" "disagree" "$out"
 
 reset_case
-gitq tag release-0.0.1
+gitq tag "release-$NEW_V"
 out="$(rel --patch)"
 assert_eq   "release:an-existing-tag-is-refused" "1" "$(rel_rc)"
 assert_unwritten "release:an-existing-tag-writes-nothing"
-assert_says "release:that-refusal-names-the-tag" "release-0.0.1 already exists" "$out"
+assert_says "release:that-refusal-names-the-tag" "release-$NEW_V already exists" "$out"
 
 # A CR IN THE BOOTSTRAP. The .gitattributes rule makes a CHECKOUT LF everywhere; it cannot fix an
 # editor that saved CRLF, and it is the working copy that gets hashed. Publishing past this gives
