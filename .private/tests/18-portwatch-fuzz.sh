@@ -368,4 +368,17 @@ up${T}0${T}lo"
 rd_bad "space-separated"  "state healthy"
 assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
 
+# ─── what --show says when the tunnel itself has gone  (#338) ──────────────────
+# Once the ssh master's control socket has gone, the supervisor publishes master-unresponsive with
+# nothing up. --show is what a student reads, and what agent-notes.md sends a coding agent to, so
+# it has to say what happened and what to do -- not print the state's name and leave them to
+# guess. The v6lo refusal is still listed: that advice is as true without a tunnel as with one.
+PW_STATE_WAS="$PW_STATE"; PW_STATE=/tmp/pwstate.txt
+printf 'state\tmaster-unresponsive\nfloor\t1024\nrefused\t21500\tv6lo\n' > "$PW_STATE"
+PW_SHOWN="$(pw_show)"
+assert_contains "pw:show-says-the-tunnel-has-stopped" "The tunnel to your own computer has stopped" "$PW_SHOWN"
+assert_contains "pw:show-says-how-to-bring-it-back" "run: cs193v --reset-tunnel" "$PW_SHOWN"
+assert_contains "pw:show-says-nothing-is-reachable" "Nothing of yours is reachable" "$PW_SHOWN"
+assert_contains "pw:show-still-explains-a-refusal" "21500" "$PW_SHOWN"
+PW_STATE="$PW_STATE_WAS"
 rm -f /tmp/pwstate.txt

@@ -417,6 +417,11 @@ pw_show() {
     fi
     case "$PWS_STATE" in
         healthy) : ;;
+        # The supervisor's word for a master whose control socket has gone (#338). The remedy is on
+        # the student's own computer, not in here, so say so rather than print the state's name.
+        master-unresponsive)
+            printf 'The tunnel to your own computer has stopped.\n'
+            printf 'On your own computer, run: cs193v --reset-tunnel\n\n' ;;
         *) printf 'Port forwarding is not healthy right now: %s\n\n' "$PWS_STATE" ;;
     esac
     if [ -n "$PWS_UP" ]; then

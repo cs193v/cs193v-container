@@ -931,6 +931,37 @@ instance's tunnel keeps it (cs193v --dev-tunnel), so there was nothing to ask fo
     fail "tunnel:the-borrowed-port-is-handed-back" "see above"
 fi
 
+# A TUNNEL THAT HAS CLOSED IS REPORTED AS CLOSED (#338). A master that exits cleanly -- which is
+# what ServerAlive does once a sleep outlasts it -- deletes its control socket, and every forward
+# goes with it. The supervisor used to recheck nothing it had already forwarded, so the state file
+# kept `state healthy` with the dead ports still up, and `cs193v-portwatch --show` called them
+# reachable. TERM is the clean exit a suite can cause on purpose, sent to the pid the launcher
+# itself identifies as its master (tunnel_owner_pid).
+#
+# A FORWARDED PORT FIRST, because "nothing is up" is only news about a state file that had
+# something up.
+state_says_gone() {
+    podman exec "$NAME" cat /tmp/cs193v/ports 2>/dev/null \
+        | do_awk -F'\t' '$1 == "state" { s = $2 } $1 == "up" { u++ }
+                         END { exit !(s == "master-unresponsive" && u == 0) }'
+}
+TPID="$(tunnel_pid)"
+if a_port_is_carried && [ -n "$TPID" ] && kill "$TPID" 2>/dev/null; then
+    if wait_until 15 state_says_gone; then
+        pass "tunnel:a-closed-master-is-reported-as-unreachable"
+    else
+        fail "tunnel:a-closed-master-is-reported-as-unreachable" "the master (pid $TPID) exited on TERM
+with $CARRIED_PORT forwarded, and fifteen seconds later the state file still said:
+$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
+    fi
+    dyn_serve_stop
+    L --reset-tunnel >/dev/null 2>&1
+    assert_carried "tunnel:forwarding-comes-back-after-a-closed-master-is-replaced"
+else
+    skip "tunnel:a-closed-master-is-reported-as-unreachable" "no port was carried, or no master pid to stop"
+    skip "tunnel:forwarding-comes-back-after-a-closed-master-is-replaced" "see above"
+fi
+
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means
 # -O exit can never be answered, and a reset that waited for it would hang forever.
 TPID="$(tunnel_pid)"

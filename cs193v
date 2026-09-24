@@ -1558,8 +1558,16 @@ sup_publish() {                       # sup_publish REFUSED_LIST
     return 0
 }
 
+# The master's control socket has gone, and every forward it held went with it (#338). Called
+# from sup_tick, whose `gone` it sets; logged on the way INTO the state, not once a tick.
+sup_gone() {
+    [ "$SUP_STATE" = master-unresponsive ] \
+        || sup_log "the ssh master's control socket has gone; nothing is forwarded until it is replaced"
+    gone=1; SUP_STATE=master-unresponsive; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '
+}
+
 sup_tick() {                          # sup_tick "port:class port:class ..."
-    local frame="$1" e port cls now seen refused='' out c n
+    local frame="$1" e port cls now seen refused='' out c n gone
     # RE-READ THE MASTER EVERY TICK. One builtin file read, and it is the whole self-heal: a
     # --reset-tunnel in another window replaces the master, every forward it held died with it,
     # but the container's ports are all still listening so the watcher reports no change. Dropping
@@ -1573,6 +1581,22 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
         SUP_MASTER="$now"; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '
         SUP_STATE=healthy
     fi
+
+    # A MASTER THAT HAS GONE TAKES ITS FORWARDS WITH IT (#338). One that exits cleanly --
+    # ServerAlive after a sleep, `-O exit`, a TERM -- deletes its control socket, and nothing
+    # below used to notice: ports already in SUP_UP are skipped, so the state file went on saying
+    # healthy with every one of them up, and `cs193v-portwatch --show` told a student (and the
+    # agent agent-notes.md sends to it) that ports nobody was carrying were reachable. The SOCKET
+    # rather than the pidfile, because tunnel_record_pid may leave no pidfile at all. The frame is
+    # still read, so a refusal's advice is still published, and a port that would have been
+    # forwarded costs one builtin test: tunnel_dyn_forward answers 2 before running any ssh. It
+    # comes back through the reset after the loop, once --reset-tunnel has made a new socket --
+    # with or without a new pidfile.
+    #
+    # NOT SEEN HERE: a master killed with SIGKILL, which cannot remove its socket (#339), and one
+    # that is alive but wedged, which only a forward that times out reveals (#266).
+    gone=''
+    [ -S "$TUNNEL_CTL" ] || sup_gone
 
     # age the cooldowns
     out=' '
@@ -1601,11 +1625,13 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
         case "$?" in
             0) SUP_UP="$SUP_UP$port " ;;
             1) SUP_BUSY="$SUP_BUSY$port:$TUNNEL_SUP_COOLDOWN "; refused="$refused $port:busy" ;;
-            2) SUP_MASTER=''; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '; return 0 ;;
+            2) sup_gone ;;                                   # it went while we asked
             3) SUP_STATE=master-unresponsive; sup_log "master not answering; not attempting more"; return 0 ;;
         esac
     done
-    [ "$SUP_STATE" = master-unresponsive ] && SUP_STATE=healthy
+    # BACK TO HEALTHY on a tick that reached a master: after a timeout, or once a gone master's
+    # socket is back.
+    [ -z "$gone" ] && [ "$SUP_STATE" = master-unresponsive ] && SUP_STATE=healthy
 
     # LINGER before cancelling. A port that vanishes for a moment is a vite restart, and
     # cancel-then-reforward is visible: the host port is briefly unbound, so a reload racing it
