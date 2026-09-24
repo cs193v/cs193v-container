@@ -53,17 +53,9 @@ trap 'rm -rf "$WORK"; [ -n "${DECOY:-}" ] && kill -9 "$DECOY" 2>/dev/null
       [ -n "${RTP_OWNER:-}" ] && kill -9 "$RTP_OWNER" 2>/dev/null; true' EXIT
 export TMPDIR="$WORK"
 
-# Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
-# runs on the 3.2 macOS ships. The `time` keyword with TIMEFORMAT is in every bash that matters,
-# and the command substitution passes the command's own exit status through, so a caller can have
-# both from one run.
-elapsed() {                           # elapsed CMD... -> seconds as 0.000, rc is the command's
-    { TIMEFORMAT=%R; time "$@" >/dev/null 2>&1; } 2>&1
-}
-# Floats, so awk rather than [ -lt ].
-faster_than() {                       # faster_than LIMIT ELAPSED
-    awk -v e="$2" -v lim="$1" 'BEGIN { exit !(e < lim) }'
-}
+# elapsed and faster_than are in lib/assert.sh; this suite wrote them, 18-portwatch-fuzz.sh
+# shares them (#337).
+#
 # What run_timeout leaves in TMPDIR. Named on the pid the way rt_cleanup sweeps them, so the
 # suite's own scratch files are not counted.
 #

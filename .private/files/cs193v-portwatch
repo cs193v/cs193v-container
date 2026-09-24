@@ -86,18 +86,51 @@ pw_rank() { case "$1" in any) PW_R=4 ;; lo) PW_R=3 ;; loalt) PW_R=2 ;; eth) PW_R
 # procfs file 2.8ms, `raw=$(</proc/net/tcp)` 0.86ms. `ss` is 11x and is out of the hot loop -- it
 # stays installed because agent-notes.md teaches it for diagnosis. `while read` is 3x because bash
 # reads SPECIAL files a byte at a time to avoid over-consuming; the sys-time column shows it.
+#
+# THOSE NUMBERS ARE FOR AN EMPTY TABLE, and the table is not the listeners (#337). /proc/net/tcp
+# lists EVERY socket in the netns -- ESTABLISHED, and TIME_WAIT for 60 s after each close -- and a
+# Playwright run leaves ~6-11 lines per test, so ten workers keep thousands in it. `ss -l` asks the
+# kernel for listeners only and never sees the rest; /proc hands us all of them. So the comparison
+# above was of fixed costs, and what #337 hit was growth. Whether the growth ever justifies `ss`
+# is #344, with the measurements it needs.
+#
+# LINEAR IN THE TABLE, which the loop was not (#337). It used to take one line off the front per
+# iteration -- `${raw%%$'\n'*}`, then `${raw#*$'\n'}` -- and each of those copies everything after
+# it, and under the image's en_US.UTF-8 converts it to wide characters as well. A tick cost the
+# SQUARE of the table: 6.5 s at 1000 lines in the container, 25.7 s at 2000, 20.7 s at 935 while
+# ten Chromiums competed for the CPU. Past one second the watcher never rested; past thirty the
+# supervisor declared it dead for the rest of the session. Now the text is split ONCE, into an
+# array, and each line is word-split on its own. Measured on the 3.2 macOS ships, same answers:
+# 0.025 s at 1000 lines, 0.06 s at 4000, 0.35 s at 16000 -- and an idle tick is cheaper too.
+#
+# WHAT THE SPLIT OWES THE CALLER, three things, all scoped to this function:
+#   * IFS is local, set explicitly for each of its two jobs. The old loop word-split with whatever
+#     IFS it was handed, so a caller's `IFS=:` cut every row at its colons.
+#   * set -f while it runs, restored only if it was off. The old per-line `set -- $line` globbed,
+#     so a lone `*` field became every file in the working directory and the row was dropped.
+#   * LC_ALL=C, local. The input is ASCII hex, so C is also what `[!0-9A-Fa-f]` and `${#}` should
+#     mean, and it is ~1.7x cheaper per line. Not the test-environment LC_ALL=C that
+#     .private/tests/MANUAL.md warns against: it ends at this function's return.
+# THE `*0A*` SKIP decides nothing. A row whose fourth field is 0A contains `0A`, so it cannot drop
+# a listener; it only spares ~95% of lines the word split. The state test below still decides.
 PW_SET=''
 PW_RAW_LAST=''
 PW_SORTED_LAST=''
 pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
-    local v4="$1" v6="$2" which raw line addr hexport port cur curr newr best
+    local v4="$1" v6="$2" which raw line addr hexport port cur curr newr best noglob=''
+    local IFS LC_ALL=C
+    local -a lines
+    case "$-" in *f*) noglob=1 ;; *) set -f ;; esac
 
     best=' '
     for which in 4 6; do
         if [ "$which" = 4 ]; then raw="$v4"; else raw="$v6"; fi
-        while [ -n "$raw" ]; do
-            line="${raw%%$'\n'*}"
-            if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
+        IFS=$'\n'
+        # shellcheck disable=SC2206   # splitting on newlines is the point, under set -f
+        lines=( $raw )
+        IFS=$' \t\n'
+        for line in ${lines[@]+"${lines[@]}"}; do
+            case "$line" in *0A*) ;; *) continue ;; esac
             # shellcheck disable=SC2086
             set -- $line
             [ "$#" -ge 4 ] || continue
@@ -128,6 +161,7 @@ pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
             esac
         done
     done
+    [ -n "$noglob" ] || set +f
 
     best="${best# }"; best="${best% }"
 
@@ -135,7 +169,8 @@ pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
     # tick to tick, so "did anything change" is a string compare and a log diffs cleanly --
     # /proc's own order is by hash bucket and relying on it would be accidental correctness. The
     # sort is a fork, though, and the tick budget is ~2ms, so it runs only when the merged set
-    # differs from last tick's. A steady container pays for it once.
+    # differs from last tick's. A steady container pays for it once. (Re-measured for #337, in the
+    # container: a scan of a quiet 21-line table is 0.67 ms, where the quadratic loop took 4.4.)
     if [ "$best" = "$PW_RAW_LAST" ]; then
         PW_SET="$PW_SORTED_LAST"
         return 0
@@ -296,9 +331,10 @@ pw_once() { pw_scan_now; printf '%s\n' "$PW_SET"; }
 pw_emit() { printf '%s\n' "$1" || exit 0; }
 
 # THE TICK TIMER IS A FIFO, NOT `sleep`. Measured: a sleep fork is 4.9ms against 0.2ms for a
-# read that times out -- five times the entire rest of the tick, which is ~1.9ms. At 1 Hz for ten
-# weeks on a laptop that is worth three lines. Holding BOTH ends open means no EOF, so the read
-# blocks the whole interval instead of returning immediately.
+# read that times out -- five times the entire rest of the tick, which is ~1.9ms (and less since
+# #337, whose scan of a quiet table is under a millisecond). At 1 Hz for ten weeks on a laptop
+# that is worth three lines. Holding BOTH ends open means no EOF, so the read blocks the whole
+# interval instead of returning immediately.
 #
 # AND THERE IS NO `sleep` FALLBACK. An earlier draft carried one, copying run_timeout's mkfifo
 # degradation in cs193v-ui.sh -- but that guards the HOST's TMPDIR, which on WSL can be a DrvFs

@@ -1518,3 +1518,67 @@ assert_ne "limits:pids-limit-without-the-flag-is-not-enforced" "enforced" \
 # And the real container must NOT be the one that hit the limit: pids exhaustion wedges a
 # container beyond `podman exec`'s reach and does not self-heal.
 assert_ok "limits:cs193v-itself-is-still-reachable" sh -c "podman exec ${NAME} true"
+
+# ─── a socket table the size ten browsers leave behind  (#337) ─────────────────
+# The watcher reads /proc/net/tcp, which lists EVERY socket in the netns, and TIME_WAIT keeps a
+# closed connection in it for 60 s. Ten Playwright workers against a dev server kept ~1,000 lines
+# there on a 4-vCPU machine, and a scan cost ~20 s because the scan was quadratic; past 30 s the
+# supervisor gave up for the rest of the session. 18-portwatch-fuzz.sh pins the shape on synthetic
+# text. This is the real kernel, the image's bash and the image's locale.
+#
+# ONE EXEC FOR THE LOAD AND THE MEASUREMENT, because TIME_WAIT is a 60-second fact: the table is
+# counted in the same breath as the scan it is meant to slow, and a table that never reached its
+# size is a SKIP rather than a pass. tcp_max_tw_buckets is recorded because it is what would cap
+# the burst. `timeout 20` inside, so a red run costs twenty seconds rather than the minute the old
+# scan took at this size.
+#
+# LAST IN THE SUITE, AND IT HAS TO BE. The watcher's own ticks read the same table, so on the old
+# scan this starves the supervisor for the whole 60 s the TIME_WAITs live: frames stop, shortlink
+# waits out its ten seconds, and the supervisor gives up a little later. require_tunnel after it
+# is no defence -- the supervisor is still ALIVE when it looks. Measured: placed before the
+# shortlink group, the two red cases here took eight shortlink cases down with them.
+PT="$(dyn_free_port)"
+TW_OUT="$(podman exec "$NAME" bash -c '
+    python3 -c "import socket, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((\"127.0.0.1\", '"$PT"')); s.listen(8); time.sleep(90)" &
+    lp=$!
+    hex=$(printf %04X '"$PT"'); i=0
+    until grep -q ":$hex 00000000:0000 0A" /proc/net/tcp || [ $i -ge 100 ]; do sleep 0.05; i=$((i + 1)); done
+    python3 -c "import socket
+l = socket.socket(); l.bind((\"127.0.0.1\", 0)); l.listen(128)
+for _ in range(3000):
+    c = socket.create_connection(l.getsockname()); a, _ = l.accept(); c.close(); a.close()"
+    echo "lines $(( $(wc -l < /proc/net/tcp) - 1 ))"
+    echo "twmax $(cat /proc/sys/net/ipv4/tcp_max_tw_buckets 2>/dev/null)"
+    s=$(date +%s%N); res=$(timeout 20 cs193v-portwatch --once); rc=$?; e=$(date +%s%N)
+    echo "rc $rc"; echo "ms $(( (e - s) / 1000000 ))"; echo "set $res"
+    kill $lp 2>/dev/null' 2>&1)"
+tw_field() { printf '%s\n' "$TW_OUT" | do_awk -v k="$1" '$1 == k { sub(/^[^ ]+ /, ""); print; exit }'; }
+TW_LINES="$(tw_field lines)"
+record "ports:time-wait-lines-under-the-scan" "${TW_LINES:-?}"
+record "ports:tcp-max-tw-buckets" "$(tw_field twmax)"
+record "ports:milliseconds-to-scan-that-table" "$(tw_field ms)"
+case "${TW_LINES:-}" in
+    ''|*[!0-9]*) TW_LINES=0 ;;
+esac
+if [ "$TW_LINES" -lt 2500 ]; then
+    skip "ports:a-large-socket-table-scans-in-seconds" "only $TW_LINES lines in /proc/net/tcp; wanted 2500+
+$TW_OUT"
+    skip "ports:a-large-socket-table-still-yields-its-listener" "see above"
+else
+    if [ "$(tw_field rc)" = 0 ] && [ "$(tw_field ms)" -lt 5000 ]; then
+        pass "ports:a-large-socket-table-scans-in-seconds"
+    else
+        fail "ports:a-large-socket-table-scans-in-seconds" "one scan of $TW_LINES lines: rc $(tw_field rc)
+(124 is timeout's), $(tw_field ms) ms. A linear scan takes a fraction of a second here; the
+quadratic one #337 removed took most of a minute."
+    fi
+    if printf ' %s ' "$(tw_field set)" | grep -qF " $PT:lo "; then
+        pass "ports:a-large-socket-table-still-yields-its-listener"
+    else
+        fail "ports:a-large-socket-table-still-yields-its-listener" "a listener on $PT was bound before
+the burst and the scan did not report it. What the exec said:
+$TW_OUT"
+    fi
+fi
