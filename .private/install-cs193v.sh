@@ -94,7 +94,7 @@ set -u
 # alone would make a failed local run print the GitHub URL it never touched.
 REPO_OWNER="cs193v"
 REPO_NAME="cs193v-container"
-REPO_TAG="release-0.0.1"
+REPO_TAG="release-0.0.2"
 TARBALL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/$REPO_TAG.tar.gz"
 COURSE_SRC="${CS193V_TARBALL:-$TARBALL}"
 tarball_url() { printf '%s\n' "$COURSE_SRC"; }
@@ -115,7 +115,7 @@ tarball_url() { printf '%s\n' "$COURSE_SRC"; }
 # .private/release.sh COMPUTES THIS WITH THIS FILE'S OWN CODE, through --dev-manifest-hash below,
 # so there is exactly one implementation of the format and no second one to drift from. Rewritten
 # by sed anchored at `^PAYLOAD_SHA256=`, which is why it is one literal on one line.
-PAYLOAD_SHA256="4e7cd8853dff07356671bece187d7d45cd1568e5fb57e9c8b70d9b0db7621672"
+PAYLOAD_SHA256="7e65b9b117048c780ce2af85df6f1e902cb458247112d2d253cf9b81d5d82b53"
 # AND ONE WAY TO SUPPLY A DIFFERENT EXPECTATION, FOR STAFF. Consulted ONLY beside CS193V_TARBALL:
 # alone it could do nothing but make a genuine release fail against a value nobody published, and
 # the banner below says so rather than leaving that to guesswork. With both set, a by-hand run --

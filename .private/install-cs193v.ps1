@@ -62,8 +62,8 @@
 # is no second place for the version or the file name to be written down and go stale.
 $RepoOwner = "cs193v"
 $RepoName  = "cs193v-container"
-$RepoTag   = "release-0.0.1"
-$CmdSha256 = "207ca1b59045bcfa6bb3e42165d2ce45162394301aefb78e667a7edb0d4443d6"
+$RepoTag   = "release-0.0.2"
+$CmdSha256 = "3dc7835a7cb35ae93715df0e1b735c0862e8815ad612d242ef2779a071a9120c"
 
 # FROM GITHUB AND NOT FROM THE COURSE WEBSITE, and that is what keeps the website's address out of
 # the repository altogether: this file is the only thing hosted there, and no file in the source
