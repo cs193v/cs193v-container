@@ -387,10 +387,12 @@ installer_pipe_cut() {                # installer_pipe_cut BYTES SCRIPT [VAR=VAL
     printf '' | do_script 120 "head -c '$bytes' '$script' | $cmd" 2>&1
 }
 
-# Fake `uname` and `sysctl`, which is what makes the macOS arm executable on Linux.
+# Fake `uname`, `sysctl` and `sw_vers`, which is what makes the macOS arm executable on Linux.
 #
-# platform() reads `uname -s` and survey() reads `uname -m` (the Intel-Mac stop), so between
-# them these two flags decide four of the installer's branches. host_ram_mb then reads
+# platform() reads `uname -s`, and mac_cpu reads `sysctl -n hw.optional.arm64` with `uname -m`
+# behind it -- the hardware rather than the process, so a Rosetta shell is not an Intel Mac. On
+# Intel alone, survey then reads `sw_vers -productVersion` and `machdep.cpu.leaf7_features` to
+# decide whether this macOS can boot the VM (#350). host_ram_mb then reads
 # `sysctl -n hw.memsize` -- BYTES on a Mac, where /proc/meminfo is kB on Linux -- and
 # mac_vm_target_mb does arithmetic on the result, so a missing sysctl fake does not fail
 # cleanly: it makes `$(( $(host_ram_mb) / 1024 ))` a bash arithmetic error that reads like
@@ -412,25 +414,86 @@ EOF
     chmod +x "$SHIM/uname"
 }
 
-# Only hw.memsize is answered, and anything else is an error rather than an empty line: a
-# sysctl that silently returns nothing would put an empty string into the installer's
-# arithmetic, which is the failure this fake exists to avoid.
-shim_fake_sysctl() {                  # shim_fake_sysctl TOTAL_BYTES
-    cat > "$SHIM/sysctl" <<EOF
+# Only hw.memsize and the OIDs a case names are answered, and anything else is an error rather
+# than an empty line: a sysctl that silently returns nothing would put an empty string into the
+# installer's arithmetic, which is the failure this fake exists to avoid. It is also what a real
+# Intel Mac says for hw.optional.arm64, which does not exist there -- so an Intel fixture gets
+# that answer by NOT naming the OID, and the unknown-oid path is the one it exercises.
+#
+# VALUES MAY CARRY SPACES (leaf7 is a word list) and may not carry a single quote.
+shim_fake_sysctl() {                  # shim_fake_sysctl TOTAL_BYTES [OID=VALUE]...
+    local kv
+    {
+        cat <<EOF
 #!/bin/sh
 [ "\$1" = -n ] && shift
 case "\$1" in
     hw.memsize) echo $1 ;;
+EOF
+        shift
+        for kv in "$@"; do
+            printf "    %s) echo '%s' ;;\n" "${kv%%=*}" "${kv#*=}"
+        done
+        cat <<EOF
     *)          echo "sysctl: unknown oid '\$1'" >&2; exit 1 ;;
 esac
 EOF
+    } > "$SHIM/sysctl"
     chmod +x "$SHIM/sysctl"
 }
 
-# A Mac the installer will accept: arm64, and enough RAM to want a 12 GB VM.
+# `fail` IS A sw_vers THAT EXITS 1 RATHER THAN NO sw_vers AT ALL. On Linux the two behave the
+# same; on a Mac dev host a missing fake would fall through to the real /usr/bin/sw_vers and the
+# case would measure the developer's own macOS. shim_toolfarm drops the real one for that reason.
+shim_fake_sw_vers() {                 # shim_fake_sw_vers VERSION|fail
+    if [ "$1" = fail ]; then
+        printf '#!/bin/sh\nexit 1\n' > "$SHIM/sw_vers"
+    else
+        cat > "$SHIM/sw_vers" <<EOF
+#!/bin/sh
+case "\$1" in
+    -productVersion|--productVersion) echo $1 ;;
+    *) echo "sw_vers-fake: not faked: \$*" >&2; exit 1 ;;
+esac
+EOF
+    fi
+    chmod +x "$SHIM/sw_vers"
+}
+
+# WHAT xnu PRINTS FOR machdep.cpu.leaf7_features, abridged, on the two Intel generations that
+# matter: an Ice Lake part, which has PKU (MacBookAir9,1, MacBookPro16,2), and a Coffee Lake one,
+# which does not (MacBookPro16,1). The installer only asks whether the word PKU is in the list.
+SHIM_LEAF7_PKU="RDWRFSGS TSC_THREAD_OFFSET SGX BMI1 AVX2 SMEP BMI2 ERMS INVPCID AVX512F RDSEED ADX SMAP CLFSOPT IPT AVX512CD SHA UMIP PKU OSPKE GFNI VAES RDPID MDCLEAR IBRS STIBP L1DF SSBD"
+SHIM_LEAF7_NOPKU="RDWRFSGS TSC_THREAD_OFFSET SGX BMI1 HLE AVX2 SMEP BMI2 ERMS INVPCID RTM MPX RDSEED ADX SMAP CLFSOPT IPT MDCLEAR IBRS STIBP L1DF SSBD"
+
+# A Mac the installer will accept: arm64, and enough RAM to want a 12 GB VM. It answers
+# hw.optional.arm64 as Apple Silicon does, and carries a sw_vers so nothing on a Mac dev host can
+# answer for it -- the arm64 path reads neither version nor leaf7, and asserting that is the
+# rosetta fixture's job, not this one's.
 shim_fake_mac() {                     # shim_fake_mac [TOTAL_BYTES]
     shim_fake_uname Darwin arm64
-    shim_fake_sysctl "${1:-17179869184}"
+    shim_fake_sysctl "${1:-17179869184}" hw.optional.arm64=1
+    shim_fake_sw_vers 26.0
+}
+
+# An Intel Mac: x86_64 from uname and NO hw.optional.arm64, which is what a real one reports
+# (flutter#160530 records the unknown oid on 14.6.1). PKU decides which leaf7 list it carries.
+shim_fake_intel_mac() {               # shim_fake_intel_mac MACOS_VERSION|fail yes|no [TOTAL_BYTES]
+    shim_fake_uname Darwin x86_64
+    case "$2" in
+        yes) shim_fake_sysctl "${3:-17179869184}" "machdep.cpu.leaf7_features=$SHIM_LEAF7_PKU" ;;
+        *)   shim_fake_sysctl "${3:-17179869184}" "machdep.cpu.leaf7_features=$SHIM_LEAF7_NOPKU" ;;
+    esac
+    shim_fake_sw_vers "$1"
+}
+
+# Apple Silicon seen from a Rosetta shell: uname says x86_64 and the sysctl still says arm64. The
+# version and CPU list are ones an INTEL Mac would be refused for, so a gate that keyed on the
+# process rather than the hardware refuses this machine instead of installing on it.
+shim_fake_rosetta_mac() {             # shim_fake_rosetta_mac
+    shim_fake_uname Darwin x86_64
+    shim_fake_sysctl 17179869184 hw.optional.arm64=1 "machdep.cpu.leaf7_features=$SHIM_LEAF7_PKU"
+    shim_fake_sw_vers 14.6.1
 }
 
 # ─── podman that is installed and invisible: issue #121 ────────────────────────
@@ -478,12 +541,13 @@ shim_toolfarm() {                     # shim_toolfarm -> a directory of tools, m
         # AFTER the loop, not by skipping it: either of these could be reachable from more than
         # one PATH directory, and this way the farm cannot end up with whichever copy came second.
         #
-        # TWO NAMES, AND pkgutil IS THE SECOND ON PURPOSE. It is the other binary these cases
+        # THREE NAMES, AND pkgutil IS THE SECOND ON PURPOSE. It is the other binary these cases
         # control, through shim_fake_pkgutil. A real /usr/sbin/pkgutil left in the farm would be
         # shadowed by the fake whenever a case installs one -- and would silently answer from
         # the DEVELOPER'S OWN MACHINE for any case that forgot to. Nothing here wants the real
-        # one, so the farm does not carry it.
-        rm -f "$SHIM_FARM/podman" "$SHIM_FARM/pkgutil"
+        # one, so the farm does not carry it. sw_vers is the third for the same reason (#350):
+        # the Intel gate reads it, and a case on a Mac dev host must not read the developer's.
+        rm -f "$SHIM_FARM/podman" "$SHIM_FARM/pkgutil" "$SHIM_FARM/sw_vers"
     fi
     printf '%s' "$SHIM_FARM"
 }
