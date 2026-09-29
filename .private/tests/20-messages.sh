@@ -889,13 +889,50 @@ PAIRS = (
      (os.path.join(private, "course-install.sh"),)),
 )
 
+INLINE_BOX = r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b'
+
 all_boxed = set()
 for catalogue, scripts in PAIRS:
     boxed = set()
     for path in scripts:
         for line in open(path):
             boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
-            boxed.update(re.findall(r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b', line))
+            boxed.update(re.findall(INLINE_BOX, line))
+    all_boxed |= boxed
+
+    # THE THIRD ROUTE, AND #290 IS WHAT IT COST TO NOT HAVE IT. The installer's refusals reach
+    # box() as `{ printf '\n'; msg KEY; printf '\n'; } | box STOP ...` inside a say_* function --
+    # the blank lines are why -- and neither pattern above can see a key with `; printf '\n'; }`
+    # between it and the pipe. So err.intel-mac went in with a 69-column line and nothing here
+    # measured it. Read per FUNCTION rather than per line, because say_unsupported_distro spreads
+    # its brace group over three lines and a third line pattern would have missed it too.
+    #
+    # AND EVERY BOX SITE IS ACCOUNTED FOR, which is what keeps the next route from going the same
+    # way: a `| box` line that is neither the inline form nor inside a say_* body is reported
+    # rather than skipped. That is also this block's vacuity guard -- if the function pattern
+    # stopped matching, every say_* box would come back UNLINTED instead of passing unmeasured.
+    for path in scripts:
+        if os.path.basename(path) != "course-install.sh":
+            continue
+        src = open(path).read()
+        spans = []
+        for fm in re.finditer(r"^(say_[a-z0-9_]+)\(\)[^\n]*\n(.*?)^\}$", src, re.M | re.S):
+            body = "\n".join(l for l in fm.group(2).splitlines()
+                             if not l.lstrip().startswith("#"))
+            if not re.search(r"\|\s*box\b", body):
+                continue
+            keys = sorted(set(re.findall(r"\bmsg\s+([a-z0-9._-]+)", body)))
+            print("SAYBOX:%s=%s" % (fm.group(1), ",".join(keys)))
+            boxed.update(keys)
+            spans.append((fm.start(), fm.end()))
+        offset = 0
+        for n, line in enumerate(src.splitlines(True), 1):
+            here, offset = offset, offset + len(line)
+            if line.lstrip().startswith("#") or not re.search(r"\|\s*box\b", line):
+                continue
+            if re.search(INLINE_BOX, line) or any(a <= here < b for a, b in spans):
+                continue
+            print("UNLINTED:%s:%d: %s" % (os.path.basename(path), n, line.strip()))
     all_boxed |= boxed
 
     key = None
@@ -939,6 +976,14 @@ fi
 
 record "box:messages-drawn-in-a-box" \
        "$(sed -n 's/^BOXED://p' "$TMP/width" | do_tr ',' ' ')"
+
+# #290's route, read back. A say_* body that boxes a key held in a variable contributes no key and
+# would be measured against nothing; `=` with nothing after it is that case.
+saybox="$(sed -n 's/^SAYBOX://p' "$TMP/width")"
+record    "box:say-functions-drawing-a-box" "$(printf '%s' "$saybox" | do_tr '\n' ' ')"
+assert_ne "box:the-say-functions-were-found" "" "$saybox"
+assert_eq "box:every-say-box-names-a-literal-key" "" "$(printf '%s\n' "$saybox" | grep '=$')"
+assert_eq "box:every-installer-box-is-measured" "" "$(sed -n 's/^UNLINTED://p' "$TMP/width")"
 
 # ─── setup-git's boxed messages ────────────────────────────────────────────────
 # NO EMPHASIS MARKUP IN ANYTHING THAT GOES IN A BOX. setup-git renders *asterisks* as colour AFTER

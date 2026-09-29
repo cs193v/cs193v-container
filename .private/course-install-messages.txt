@@ -55,7 +55,8 @@ This Mac has an Intel processor.
 The course container needs a Mac with Apple Silicon (M1 or newer),
 or a Windows or Linux computer.
 
-Please contact course staff so that we can come up with a workaround.
+Please contact course staff so that we can come up with a
+workaround.
 
 [[err.unsupported-distro]]
 This computer is running {{PRETTY_NAME}}.
