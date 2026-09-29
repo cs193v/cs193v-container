@@ -135,8 +135,8 @@ PAYLOAD_WANT="${CS193V_PAYLOAD_SHA256:-$PAYLOAD_SHA256}"
 # `command -v` asks the only question that matters anyway.
 #
 #   sha256sum  coreutils, so every Linux -- and macOS 15+, where /sbin/sha256sum arrived. NOT on
-#              macOS 14 or earlier, and course-install.sh sets no macOS floor, so it cannot be the
-#              only branch.
+#              macOS 14 or earlier, and course-install.sh sets no macOS floor above 13 (Intel's;
+#              Apple Silicon has none), so it cannot be the only branch.
 #   shasum     on every Mac there has ever been -- but it is `#!/usr/bin/perl`, and Apple's
 #              standing notice is that future macOS will not include the scripting runtimes.
 #   openssl    /usr/bin/openssl is LibreSSL, in the base system since High Sierra and not a
