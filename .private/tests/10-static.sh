@@ -1144,51 +1144,122 @@ assert_eq "rootsteps:the-prime-asks-nothing-before-the-gate" "yes" \
 # shasums asset for that. What is here is the pin's SHAPE and its POSITION, which is the half no
 # tier can execute -- 25-installer.sh's cases drive the refusals, but a reorder that moved the
 # check below `sudo installer -pkg` would leave every one of them green.
-pkgsha="$(sed -n 's/^PODMAN_MACOS_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-# COUNTED RATHER THAN FOUND, the rule min-podman:* keeps for the floors: a second declaration
-# later in the file shadows the first, and every assertion here would read the wrong one.
-assert_eq "pkgsha:the-pin-is-declared-once" "1" \
-          "$(grep -c '^PODMAN_MACOS_SHA256=' "$PRIVATE/course-install.sh")"
-record    "pkgsha:the-pinned-digest" "$pkgsha"
-# 64 LOWERCASE HEX, ANCHORED AT BOTH ENDS, AND THE ANCHORS ARE THE ASSERTION. `shasum -a 256`
-# prints the digest, two spaces and a FILENAME, and GitHub's REST API answers `sha256:<hex>` --
-# so the two shapes a hurried bump produces are a whole line and a prefix, and both match an
-# unanchored pattern. Lowercase because that is what all three hashers print; an uppercase digest,
-# which is what Finder and several vendor pages show, would refuse every download forever.
-assert_match "pkgsha:the-pin-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$pkgsha"
-# NOT THE DIGEST OF AN EMPTY FILE, which is the one wrong value that is both easy to arrive at
-# and impossible to notice: it is what a pin filled in from a failed download carries, and it is
-# what pkg_sha256 would return for an unreadable file if it ever printed a digest instead of
-# nothing -- so against it the comparison would pass and wave every .pkg through. DERIVED rather
-# than spelled, so this cannot drift from what do_sha256 says.
-assert_ne "pkgsha:the-pin-is-not-the-empty-file-digest" \
-          "$(printf '' | do_sha256 | awk '{print $1}')" "$pkgsha"
+# TWO PINS SINCE #350, one per architecture, named for podman's own asset token -- so every rule
+# below is asked of each, and one more is asked of the pair. Apple Silicon installs the current
+# line; Intel installs the 5.8 LTS line, because Podman 6 no longer runs on an Intel Mac.
+pkg_empty="$(printf '' | do_sha256 | awk '{print $1}')"
+for pin in ARM64 AMD64; do
+    pkgsha="$(sed -n "s/^PODMAN_MACOS_${pin}_SHA256=\"\([^\"]*\)\".*/\1/p" \
+              "$PRIVATE/course-install.sh")"
+    # COUNTED RATHER THAN FOUND, the rule min-podman:* keeps for the floors: a second declaration
+    # later in the file shadows the first, and every assertion here would read the wrong one.
+    assert_eq "pkgsha:the-$pin-pin-is-declared-once" "1" \
+              "$(grep -c "^PODMAN_MACOS_${pin}_SHA256=" "$PRIVATE/course-install.sh")"
+    assert_eq "pkgsha:the-$pin-version-is-declared-once" "1" \
+              "$(grep -c "^PODMAN_MACOS_${pin}_VERSION=" "$PRIVATE/course-install.sh")"
+    record    "pkgsha:the-pinned-$pin-digest" "$pkgsha"
+    # 64 LOWERCASE HEX, ANCHORED AT BOTH ENDS, AND THE ANCHORS ARE THE ASSERTION. `shasum -a 256`
+    # prints the digest, two spaces and a FILENAME, and GitHub's REST API answers `sha256:<hex>`
+    # -- so the two shapes a hurried bump produces are a whole line and a prefix, and both match
+    # an unanchored pattern. Lowercase because that is what all three hashers print; an uppercase
+    # digest, which is what Finder and several vendor pages show, would refuse every download.
+    assert_match "pkgsha:the-$pin-pin-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$pkgsha"
+    # NOT THE DIGEST OF AN EMPTY FILE, which is the one wrong value that is both easy to arrive at
+    # and impossible to notice: it is what a pin filled in from a failed download carries, and it
+    # is what pkg_sha256 would return for an unreadable file if it ever printed a digest instead
+    # of nothing -- so against it the comparison would pass and wave every .pkg through. DERIVED
+    # rather than spelled, so this cannot drift from what do_sha256 says.
+    assert_ne "pkgsha:the-$pin-pin-is-not-the-empty-file-digest" "$pkg_empty" "$pkgsha"
+done
+# THE TWO ARE TWO. A bump that pasted one digest into both lines passes every rule above, and
+# then one architecture refuses a perfectly good download forever.
+assert_ne "pkgsha:the-two-pins-differ" \
+          "$(sed -n 's/^PODMAN_MACOS_ARM64_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")" \
+          "$(sed -n 's/^PODMAN_MACOS_AMD64_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+# AND THE INTEL PIN IS A PODMAN THAT RUNS ON INTEL. Podman 6 publishes no amd64 .pkg at all, so a
+# bump that moved both pins to the same major would fail only at 00-release-gates.sh -- as a SKIP,
+# because the shasums file simply has no line for the asset.
+pkg_amd64_ver="$(sed -n 's/^PODMAN_MACOS_AMD64_VERSION="\([^"]*\)".*/\1/p' \
+                 "$PRIVATE/course-install.sh")"
+record "pkgsha:the-intel-podman" "$pkg_amd64_ver"
+assert_eq "pkgsha:the-intel-pin-is-below-podman-6" "yes" \
+          "$(case "${pkg_amd64_ver%%.*}" in ''|*[!0-9]*) printf 'unreadable: %s' "$pkg_amd64_ver" ;;
+             *) [ "${pkg_amd64_ver%%.*}" -lt 6 ] && printf yes || printf 'major %s' \
+                "${pkg_amd64_ver%%.*}" ;; esac)"
 # AND NOBODY ELSE CARRIES ONE. The launcher never downloads the .pkg, so a pin appearing there is
 # a second number to forget -- the half that catches a copy coming back, which is the rule
-# probe:* keeps for the receipt id.
+# probe:* keeps for the receipt id. Any architecture's, not just today's two.
 assert_eq "pkgsha:nobody-else-declares-a-pin" "" \
-          "$(grep -l '^PODMAN_MACOS_SHA256=' cs193v "$PRIVATE/files/cs193v-ui.sh" \
-             "$PRIVATE/install-cs193v.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+          "$(grep -lE '^PODMAN_MACOS_[A-Z0-9]+_(SHA256|VERSION)=' cs193v \
+             "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/install-cs193v.sh" \
+             "$PRIVATE/install-utils.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+# AND THE OLD SINGLE-PIN NAMES ARE GONE FROM EVERY LINE THAT RUNS. A read of one of them now
+# comes back empty rather than failing, and an empty read is how a vacuous comparison starts.
+# Comments may still say them: files/cs193v-ui.sh has one, and editing files/ rebuilds every
+# student's image.
+assert_eq "pkgsha:the-single-pin-names-are-retired" "" \
+          "$(grep -nE '^[^#]*PODMAN_MACOS_(VERSION|SHA256)([^A-Z0-9_]|$)' cs193v \
+             "$PRIVATE/course-install.sh" "$PRIVATE/install-utils.sh" \
+             "$PRIVATE/install-cs193v.sh" "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh \
+             2>/dev/null | head -5)"
 
 # THE ORDER, BY LINE NUMBER INSIDE THE ONE FUNCTION, which is the shape
 # rootsteps:the-prime-asks-nothing-before-the-gate uses just above and for its reason: "both
 # lines are present" proves nothing about which ran first, and a check placed after
-# `sudo installer -pkg` is a check that has already lost. THREE POSITIONS RATHER THAN TWO,
-# because the middle one is what makes the first meaningful -- you cannot hash a file that has
-# not been downloaded yet, so curl < digest < installer is the claim.
+# `sudo installer -pkg` is a check that has already lost. The pin is chosen before the download
+# (the URL needs its version), hashed after it, compared, and only then installed:
+# want < curl < hash < compare < installer.
+#
+# EACH OF THE FOUR EXACTLY ONCE, because first-occurrence line numbers can be satisfied by a decoy:
+# a second curl and installer inside one architecture's arm would put a correctly ordered first
+# pair in front of an unchecked second one.
 ip_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
            | sed -n '/^install_podman() {/,/^}/p')"
 assert_ne "pkgsha:install_podman-was-found" "" "$ip_body"
-ip_curl="$(printf '%s\n' "$ip_body" | grep -n 'curl -fL'            | head -1 | cut -d: -f1)"
-ip_sha="$( printf '%s\n' "$ip_body" | grep -n 'PODMAN_MACOS_SHA256' | head -1 | cut -d: -f1)"
-ip_inst="$(printf '%s\n' "$ip_body" | grep -n 'installer -pkg'      | head -1 | cut -d: -f1)"
-assert_ne "pkgsha:the-download-is-in-install_podman"    "" "$ip_curl"
-assert_ne "pkgsha:the-check-is-in-install_podman"       "" "$ip_sha"
-assert_ne "pkgsha:the-pkg-install-is-in-install_podman" "" "$ip_inst"
+ip_line() { printf '%s\n' "$ip_body" | grep -nF -- "$1" | cut -d: -f1; }
+ip_curl="$(ip_line 'curl -fL')"
+ip_hash="$(ip_line 'got="$(pkg_sha256 "$pkg")"')"
+ip_cmp="$( ip_line '[ "$got" != "$want" ]')"
+ip_inst="$(ip_line 'sudo installer -pkg')"
+ip_want="$(printf '%s\n' "$ip_body" | grep -nE '(^|[^A-Za-z0-9_])want=' | tail -1 | cut -d: -f1)"
+# ONE LINE NUMBER, OR NOTHING TO COMPARE. Two matches arrive as "12\n40", which `[ -lt ]` and
+# `$(( ))` both choke on quietly -- and a choked comparison that prints nothing is a pass below.
+ip_one() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
+assert_eq "pkgsha:install_podman-downloads-once" "yes" "$(ip_one "$ip_curl" && printf yes)"
+assert_eq "pkgsha:install_podman-hashes-once"    "yes" "$(ip_one "$ip_hash" && printf yes)"
+assert_eq "pkgsha:install_podman-compares-once"  "yes" "$(ip_one "$ip_cmp"  && printf yes)"
+assert_eq "pkgsha:install_podman-installs-once"  "yes" "$(ip_one "$ip_inst" && printf yes)"
+assert_eq "pkgsha:install_podman-chooses-a-pin"  "yes" "$(ip_one "$ip_want" && printf yes)"
+ip_ordered=no
+if ip_one "$ip_want" && ip_one "$ip_curl" && ip_one "$ip_hash" && ip_one "$ip_cmp" \
+   && ip_one "$ip_inst" && [ "$ip_want" -lt "$ip_curl" ] && [ "$ip_curl" -lt "$ip_hash" ] \
+   && [ "$ip_hash" -lt "$ip_cmp" ] && [ "$ip_cmp" -lt "$ip_inst" ]; then
+    ip_ordered=yes
+fi
 assert_eq "pkgsha:checked-after-the-download-and-before-the-install" "yes" \
-          "$([ -n "$ip_curl" ] && [ -n "$ip_sha" ] && [ -n "$ip_inst" ] \
-             && [ "$ip_curl" -lt "$ip_sha" ] && [ "$ip_sha" -lt "$ip_inst" ] \
-             && printf yes || printf "curl=$ip_curl digest=$ip_sha installer=$ip_inst")"
+          "$([ "$ip_ordered" = yes ] && printf yes \
+             || printf 'want=%s curl=%s hash=%s compare=%s installer=%s' \
+                "$ip_want" "$ip_curl" "$ip_hash" "$ip_cmp" "$ip_inst")"
+# WHAT `want` CAN BE, which is exactly the two pins: a third right-hand side is a pin the lints
+# above never saw.
+assert_eq "pkgsha:want-is-only-ever-a-pin" \
+          '"$PODMAN_MACOS_AMD64_SHA256" "$PODMAN_MACOS_ARM64_SHA256"' \
+          "$(printf '%s\n' "$ip_body" | grep -oE '(^|[^A-Za-z0-9_])want="[^"]*"' \
+             | sed 's/.*want=//' | LC_ALL=C sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
+# NOTHING REASSIGNS EITHER SIDE BETWEEN THE COMPARISON AND THE INSTALL. Only asked once the order
+# above holds, since the range is built from those two numbers.
+if [ "$ip_ordered" = yes ]; then
+    assert_eq "pkgsha:nothing-moves-between-the-check-and-the-install" "" \
+              "$(printf '%s\n' "$ip_body" | sed -n "$((ip_cmp + 1)),$((ip_inst - 1))p" \
+                 | grep -E '(^|[^A-Za-z0-9_])(got|want)=')"
+else
+    fail "pkgsha:nothing-moves-between-the-check-and-the-install" \
+         "the order check above failed, so there is no range to read"
+fi
+# AND A CPU IT DOES NOT KNOW IS REFUSED, NOT DEFAULTED. With `want` empty, a machine whose hasher
+# also printed nothing would compare "" with "" and install an unchecked package.
+assert_ne "pkgsha:an-unknown-cpu-is-refused" "" \
+          "$(printf '%s\n' "$ip_body" | grep -E '^[[:space:]]*\*\)[[:space:]]*die "\$\(msg err\.mac-cpu-unknown\)"')"
 
 # THE HASHER PROBES EVERY TOOL IT USES, including the last, and there is no `else`. A fallthrough
 # would run the final tool on a machine that does not have it, and what reaches the caller is

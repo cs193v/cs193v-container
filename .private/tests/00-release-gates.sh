@@ -288,7 +288,7 @@ rm -rf "$ps1_tmp"
 # WHY THIS IS A RELEASE GATE AND NOT A REGRESSION. 10-static.sh asserts the pin's SHAPE and
 # 25-installer.sh :: pkgsha:* asserts that a difference is refused; neither can know what the
 # real .pkg hashes to, because no fixture can. The VALUE depends on PUBLICATION -- it changes
-# when podman cuts a release and somebody bumps PODMAN_MACOS_VERSION -- which is this file's
+# when podman cuts a release and somebody bumps a PODMAN_MACOS_*_VERSION -- which is this file's
 # whole criterion.
 #
 # AND THE FAILURE IT EXISTS FOR IS ONE EDIT: the version moved and the digest did not. Nothing
@@ -305,46 +305,87 @@ rm -rf "$ps1_tmp"
 # long download is a red people disable. What that leaves unchecked -- that the CDN serves what
 # podman published -- is a by-hand item in tests/MANUAL.md, and the product's own job at install
 # time, which is the whole of #283.
-pkg_ver="$(sed -n 's/^PODMAN_MACOS_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-pkg_pin="$(sed -n 's/^PODMAN_MACOS_SHA256="\([^"]*\)".*/\1/p'  "$PRIVATE/course-install.sh")"
-assert_ne "pkgsha:the-version-is-set" "" "$pkg_ver"
-assert_ne "pkgsha:the-pin-is-set"     "" "$pkg_pin"
-record    "pkgsha:pinned-version" "$pkg_ver"
-record    "pkgsha:pinned-digest"  "$pkg_pin"
+#
+# ONCE PER PIN SINCE #350, OVER A LIST WRITTEN OUT HERE. Deriving it from the settings block would
+# let a deleted pair shrink the loop to one pass and still report green. Every name carries its
+# asset, and every pass starts from nothing, so an amd64 fetch that failed cannot be compared
+# against the digest the arm64 pass left behind.
+for pkg_arch in arm64 amd64; do
+    pkg_key="$(printf '%s' "$pkg_arch" | do_tr a-z A-Z)"
+    pkg_ver="$(sed -n "s/^PODMAN_MACOS_${pkg_key}_VERSION=\"\([^\"]*\)\".*/\1/p" \
+               "$PRIVATE/course-install.sh")"
+    pkg_pin="$(sed -n "s/^PODMAN_MACOS_${pkg_key}_SHA256=\"\([^\"]*\)\".*/\1/p" \
+               "$PRIVATE/course-install.sh")"
+    assert_ne "pkgsha:$pkg_arch:the-version-is-set" "" "$pkg_ver"
+    assert_ne "pkgsha:$pkg_arch:the-pin-is-set"     "" "$pkg_pin"
+    record    "pkgsha:$pkg_arch:pinned-version" "$pkg_ver"
+    record    "pkgsha:$pkg_arch:pinned-digest"  "$pkg_pin"
 
-pkg_tmp="$(new_tmpdir)"
-pkg_asset="podman-installer-macos-arm64.pkg"
-pkg_pub=""
-# -L, AND IT IS LOAD-BEARING HERE IN A WAY IT IS NOT IN §1 ABOVE. A release download URL is a
-# 302 to the asset CDN, so without it curl follows nothing, writes an empty file and exits 0 --
-# which is what happened the first time this gate ran. The named skip below is what reported it;
-# a bare pass would have called an empty answer agreement.
-if curl -fsSL --retry 3 -o "$pkg_tmp/shasums" \
-        "https://github.com/containers/podman/releases/download/v$pkg_ver/shasums" \
-        2>"$pkg_tmp/curl.err"; then
-    pass   "pkgsha:the-release-publishes-a-shasums-file"
-    record "pkgsha:shasums-bytes" "$(wc -c < "$pkg_tmp/shasums" | do_tr -d ' ')"
-    # `*name` AS WELL AS `name`, because sha256sum's --binary form writes an asterisk before the
-    # filename and a checksums file carrying one would silently match nothing here.
-    pkg_pub="$(awk -v n="$pkg_asset" '$2 == n || $2 == "*" n {print $1}' "$pkg_tmp/shasums" \
-               | head -1)"
-else
-    fail "pkgsha:the-release-publishes-a-shasums-file" \
-         "no shasums asset at v$pkg_ver -- the tag may not exist, or podman stopped publishing one.
+    pkg_tmp="$(new_tmpdir)"
+    pkg_asset="podman-installer-macos-$pkg_arch.pkg"
+    pkg_pub=""
+    # -L, AND IT IS LOAD-BEARING HERE IN A WAY IT IS NOT IN §1 ABOVE. A release download URL is a
+    # 302 to the asset CDN, so without it curl follows nothing, writes an empty file and exits 0
+    # -- which is what happened the first time this gate ran. The named skip below is what
+    # reported it; a bare pass would have called an empty answer agreement.
+    if curl -fsSL --retry 3 -o "$pkg_tmp/shasums" \
+            "https://github.com/containers/podman/releases/download/v$pkg_ver/shasums" \
+            2>"$pkg_tmp/curl.err"; then
+        pass   "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file"
+        record "pkgsha:$pkg_arch:shasums-bytes" "$(wc -c < "$pkg_tmp/shasums" | do_tr -d ' ')"
+        # `*name` AS WELL AS `name`, because sha256sum's --binary form writes an asterisk before
+        # the filename and a checksums file carrying one would silently match nothing here.
+        pkg_pub="$(awk -v n="$pkg_asset" '$2 == n || $2 == "*" n {print $1}' "$pkg_tmp/shasums" \
+                   | head -1)"
+    else
+        fail "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file" \
+             "no shasums asset at v$pkg_ver -- the tag may not exist, or podman stopped publishing one.
 $(cat "$pkg_tmp/curl.err")"
-fi
-record "pkgsha:published-digest" "${pkg_pub:-<unanswered>}"
-# SHAPE-CHECKED BEFORE IT IS COMPARED, or an unanswered fetch would leave an empty string to
-# compare against an empty pin and pass forever. A NAMED skip rather than a silent pass when
-# GitHub did not answer, which is the §A.15 rule the stage-two block above keeps: a gate that
-# did not run is the same defect as an assertion that never executed.
-if printf '%s' "$pkg_pub" | grep -qE '^[0-9a-f]{64}$'; then
-    assert_eq "pkgsha:the-pin-is-the-published-digest" "$pkg_pub" "$pkg_pin"
+    fi
+    record "pkgsha:$pkg_arch:published-digest" "${pkg_pub:-<unanswered>}"
+    # SHAPE-CHECKED BEFORE IT IS COMPARED, or an unanswered fetch would leave an empty string to
+    # compare against an empty pin and pass forever. A NAMED skip rather than a silent pass when
+    # GitHub did not answer, which is the §A.15 rule the stage-two block above keeps: a gate that
+    # did not run is the same defect as an assertion that never executed.
+    if printf '%s' "$pkg_pub" | grep -qE '^[0-9a-f]{64}$'; then
+        assert_eq "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_pub" "$pkg_pin"
+    else
+        skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" \
+             "no 64-hex line for $pkg_asset in v$pkg_ver's shasums -- asset renamed, or the file changed shape"
+    fi
+    rm -rf "$pkg_tmp"
+done
+
+# ─── 1b'. the Intel pin's VM image is still published  (#350) ──────────────────
+# THE OTHER HALF OF WHAT AN INTEL MAC DOWNLOADS. The .pkg above is a release asset and cannot
+# change; the VM image is not. `podman machine init` on 5.8 pulls quay.io/podman/machine-os at
+# the pin's major.minor and takes the x86_64 applehv disk from it, and Podman 6's images have no
+# such disk at all -- so the day 5.8's stops carrying one, every Intel install fails at the
+# machine step with nothing in this tree having changed. The registry answers an index listing
+# every disk it has; that is one small GET, like the shasums above.
+mos_ver="$(sed -n 's/^PODMAN_MACOS_AMD64_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+mos_tag="${mos_ver%.*}"
+record "machine-os:the-intel-tag" "${mos_tag:-<unreadable>}"
+mos_tmp="$(new_tmpdir)"
+if [ -n "$mos_tag" ] && curl -fsSL --retry 3 \
+        -H 'Accept: application/vnd.oci.image.index.v1+json' -o "$mos_tmp/index" \
+        "https://quay.io/v2/podman/machine-os/manifests/$mos_tag" 2>"$mos_tmp/curl.err"; then
+    # THE PAIR ON ONE ENTRY, not the two words anywhere: an index with an aarch64 applehv disk and
+    # an x86_64 hyperv one has both words and no disk an Intel Mac can boot. python3 because the
+    # index is JSON and the two fields sit in different objects of the same entry.
+    mos_has="$(run_checker python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(any(m.get("platform", {}).get("architecture") == "x86_64"
+          and m.get("annotations", {}).get("disktype") == "applehv"
+          for m in d.get("manifests", [])))
+' "$mos_tmp/index")"
+    assert_eq "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" "True" "$mos_has"
 else
-    skip "pkgsha:the-pin-is-the-published-digest" \
-         "no 64-hex line for $pkg_asset in v$pkg_ver's shasums -- asset renamed, or the file changed shape"
+    skip "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" \
+         "quay.io did not answer for machine-os:${mos_tag:-?} -- $(head -c 200 "$mos_tmp/curl.err" 2>/dev/null)"
 fi
-rm -rf "$pkg_tmp"
+rm -rf "$mos_tmp"
 
 # ─── 2. the recipe is the distribution, so its pins are the release gate ───────
 # THIS SECTION REPLACED A REGISTRY CHECK, and it is stricter than the one it replaced.

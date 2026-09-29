@@ -1205,19 +1205,28 @@ fi
 # WHICH MAKES THIS HARNESS A CLOSER MODEL OF THE REAL THING than the one it replaces. It used to
 # assemble a private copy of the accessor AND a private copy of the prose; now the only thing it
 # supplies that the product does not is NO_COLOR and the value of MESSAGES.
+#
+# THE INTEL REFUSALS READ TWO SETTINGS (#350), which come across with them: without the floors,
+# {{MIN}} renders empty and a check on the key's opening sentence would still pass. The carve is
+# anchored on /^name()/ for the reason lib/shared.sh gives -- a usage comment after the brace
+# makes a `{$` anchor match nothing.
 {
     printf 'NO_COLOR=1\n'
     printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
     cat "$UI"
-    sed -n '/^say_intel_mac() {$/,/^}$/p'  "$PRIVATE/course-install.sh"
+    sed -n '/^INTEL_MACOS_MIN=/p; /^INTEL_PKU_MACOS_MIN=/p' "$PRIVATE/course-install.sh"
+    sed -n '/^say_intel_mac()/,/^}$/p'  "$PRIVATE/course-install.sh"
     sed -n '/^say_wsl_systemd_off() {/,/^}$/p' "$PRIVATE/course-install.sh"
     # the four knobs, exactly as course-install.sh sets them after sourcing
     printf 'NOTE_INDENT="    "\nMENU_INDENT="    "\nDIE_INDENT="  "\n'
     printf 'DIE_TRAILER="$(msg die.trailer)"\n'
 } > "$TMP/idie.sh"
+IMAC_MIN="$(sed -n 's/^INTEL_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+IMAC_PKU_MIN="$(sed -n 's/^INTEL_PKU_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
-   [ "$(grep -c '^say_intel_mac() {$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^say_intel_mac()' "$TMP/idie.sh")" = 1 ] &&
+   [ -n "$IMAC_MIN" ] && [ -n "$IMAC_PKU_MIN" ] &&
    [ "$(grep -c '^say_wsl_systemd_off() {' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^msg() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^MESSAGES=' "$TMP/idie.sh")" = 1 ]; then
@@ -1240,23 +1249,26 @@ else
 fi
 assert_says "installer:die-shows-the-diagnosis" "Unable to locate package" "$out"
 
-# The Intel-Mac refusal. It is reached before anything is installed, by a student whose
-# machine will never run this course — so it is the only thing they ever see the setup
-# print, and it is worth it being a box rather than three walls.
-out="$(bash -c '. "$1"; say_intel_mac' _ "$TMP/idie.sh" 2>&1)"
-probs="$(printf '%s\n' "$out" | box_problems)"
-if [ -z "$probs" ]; then
-    pass "installer:intel-mac-box-is-closed"
-else
-    fail "installer:intel-mac-box-is-closed" "$probs"
-fi
-# ONE ASSERTION WHERE THERE WERE TWO, and it is the stronger of the two rather than a merge.
-# err.intel-mac interpolates nothing, so its whole body is a literal needle -- and a needle that
-# is the whole body already contains the diagnosis AND the remedy, which is what the pair of
-# quoted phrases ("This Mac has an Intel processor." and "contact course staff BEFORE the first
-# lab") were checking one each. The second name is gone because there is nothing left for it to
-# claim that this does not; #219's rewording is what showed that, by reddening only one of them.
-assert_says_key "installer:intel-mac-says-why" err.intel-mac "$out" "$ICAT"
+# The Intel-Mac refusals (#350). Reached before anything is installed, by a student whose Mac
+# cannot boot the course's VM on the macOS it has -- so they are the only thing that student sees
+# the setup print, and worth being a box rather than three walls. RENDERED WITH THE VALUES, one
+# whole-message needle each: the version and the floor are the part a student acts on, and the
+# two messages share enough prose that a key-prefix needle could match the wrong one.
+for ireason in too-old needs-update; do
+    case "$ireason" in
+        too-old)      ikey=err.intel-mac-too-old;     iv=12.7.6; imin="$IMAC_MIN" ;;
+        needs-update) ikey=err.intel-mac-update-macos; iv=14.6.1; imin="$IMAC_PKU_MIN" ;;
+    esac
+    out="$(bash -c '. "$1"; say_intel_mac "$2" "$3"' _ "$TMP/idie.sh" "$ireason" "$iv" 2>&1)"
+    probs="$(printf '%s\n' "$out" | box_problems)"
+    if [ -z "$probs" ]; then
+        pass "installer:intel-mac-$ireason-box-is-closed"
+    else
+        fail "installer:intel-mac-$ireason-box-is-closed" "$probs"
+    fi
+    assert_says_sub "installer:intel-mac-$ireason-says-why" "$ikey" "$out" "$ICAT" \
+                    "V=$iv" "MIN=$imin"
+done
 
 # The systemd=false refusal (#228). It is the fourth box this script can draw and the only one
 # that quotes the student's own file back at them. Whether {{LINE}} is a placeholder somebody
