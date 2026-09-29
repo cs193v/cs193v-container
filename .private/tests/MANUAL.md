@@ -856,8 +856,8 @@ behaves the way the repair assumes**, and that is three facts about a Mac.
    sudo's log, which is what lets `pkgsha:the-installed-podman-is-reported` exist at all. That is
    a model of the assumption, not a test of it: nothing offline can know whether a real
    `installer -pkg` has registered its receipt by the time it returns. So this check is what
-   keeps the model honest. Check it whenever `PODMAN_MACOS_VERSION` moves — and bump
-   `PODMAN_MACOS_SHA256` in the same edit, per the digest section below:
+   keeps the model honest. Check it whenever either `PODMAN_MACOS_*_VERSION` moves — and bump
+   the `_SHA256` beside it in the same edit, per the digest section below:
    ```sh
    pkgutil --pkg-info com.redhat.podman            # expect a location: line
    pkgutil --only-files --files com.redhat.podman | grep -E '(^|/)podman$'
@@ -888,15 +888,17 @@ pre-5.0 implementation out of reach rather than trusting it.
 
 *What a person on a Mac should check, in order of how likely it is to matter:*
 
-1. **A Mac with no podman at all** — the ordinary path. The installer downloads
-   `PODMAN_MACOS_VERSION` (6.0.2), verifies it against `PODMAN_MACOS_SHA256` before handing it to
-   `installer -pkg`, and never consults the floor. *Expect:* unchanged behaviour, and **no digest
+1. **A Mac with no podman at all** — the ordinary path. The installer downloads the pin for its
+   CPU — `PODMAN_MACOS_ARM64_*` (6.0.2) on Apple Silicon, `PODMAN_MACOS_AMD64_*` (5.8.7) on Intel
+   (#350) — verifies it against that pin's digest before handing it to `installer -pkg`, and never
+   consults the floor. *Expect:* unchanged behaviour, and **no digest
    message at all** — a refusal on a good network means the pin is wrong, not the network.
 2. **A Mac already carrying podman 5.7.0 or newer** — accepted, `setup_machine` runs against it.
    *Expect:* unchanged behaviour. This is the case the floor is chosen to guarantee.
 3. **A Mac carrying podman older than 5.7.0** — refused, with the message rewritten for this
-   change. Check that the *right branch* fires: `command -v podman` under `/opt/homebrew/` should
-   offer `brew uninstall podman`, anything else should name the path and offer
+   change. Check that the *right branch* fires: `command -v podman` under `/opt/homebrew/`, or a
+   link into Homebrew's `Cellar` (Intel Homebrew's `/usr/local/bin/podman`), should offer
+   `brew uninstall podman`; anything else should name the path and offer
    `sudo rm -rf /opt/podman`. *Expect:* the advice matches how podman actually got there. The old
    message said "open Podman Desktop and let it update itself", which was wrong for the `.pkg`
    this installer itself uses.
@@ -930,19 +932,29 @@ but different, truncated, empty, and a captive-portal login page) are driven thr
 `install_podman`. The constant's shape, and its position relative to `sudo installer -pkg`, are
 `10-static.sh :: pkgsha:*`. **The pinned value is asserted by neither**, and cannot be: no
 fixture knows what the real package hashes to. `00-release-gates.sh ::
-pkgsha:the-pin-is-the-published-digest` compares it against podman's own `shasums` asset, and
-that gate is not in the default run.
+pkgsha:<arch>:the-pin-is-the-published-digest` compares each pin against podman's own `shasums`
+asset, and that gate is not in the default run. **There are two pins since #350** — arm64 for Apple
+Silicon, amd64 for Intel, which is held on the 5.8 line because Podman 6 does not run on Intel —
+and each is bumped with its own version.
 
-*The edit that will actually break this,* and the reason the release gate exists: **bumping
-`PODMAN_MACOS_VERSION` without `PODMAN_MACOS_SHA256`.** Nothing in the default suite goes red —
+*The edit that will actually break this,* and the reason the release gate exists: **bumping a
+`PODMAN_MACOS_*_VERSION` without the `_SHA256` beside it.** Nothing in the default suite goes red —
 the shim cases read the URL out of the installer, so they follow the bump — and the symptom on a
 student's Mac is a digest refusal on a perfectly good network. When you bump one, bump both, then
 run `run-tests.sh --tier release`:
 ```sh
-v=6.0.2; a=arm64
+v=6.0.2; a=arm64          # or, for the Intel pin: v=5.8.7; a=amd64
 curl -fsSL "https://github.com/containers/podman/releases/download/v$v/shasums" \
   | grep "podman-installer-macos-$a.pkg"
 ```
+**The Intel pin moves only within 5.8**, and it needs one more thing than a digest: a run on an
+Intel Mac on the *oldest* macOS the Intel floor admits (`INTEL_MACOS_MIN`), with
+`/opt/podman/bin/vfkit --version` succeeding. 5.8.5 moved the bundled vfkit to a build whose Mach-O
+header claims macOS 26.0; it runs on older macOS only because it weak-links everything newer than
+macOS 12, and nothing offline can see a future build get that wrong. After **2027-06-07** there is
+no supported podman for Intel Macs at all — that date is the conversation about whether Intel stays
+supported, and it is recorded here and beside the pin rather than as a gate, because the only ways
+to clear a gate on it would be dropping Intel or editing the date.
 `-L` is not optional there: a release download URL is a 302 to the asset CDN, and without it curl
 writes an empty file and exits 0. Once, against the bytes rather than the claim:
 ```sh
@@ -951,15 +963,15 @@ curl -fL -o /tmp/p.pkg \
 shasum -a 256 /tmp/p.pkg
 ```
 Note that the gate reports a **named skip** rather than a pass when GitHub does not answer, so a
-run showing `SKIP pkgsha:the-pin-is-the-published-digest` has not confirmed the pin.
+run showing `SKIP pkgsha:<arch>:the-pin-is-the-published-digest` has not confirmed that pin.
 
 *What a person on a Mac should check, in order:*
 1. **The pin is right for the bytes GitHub really serves.** On a Mac with no podman, on a good
    network, run the installer. *Expect:* no digest message, and the install completes. This is
    the only check that closes the gap between "the pin equals what podman published" and "the
    pin equals what the CDN delivered".
-2. **The refusal is reachable, readable, and inside its box.** Edit a local copy's
-   `PODMAN_MACOS_SHA256` to `$(printf x | shasum -a 256 | cut -d' ' -f1)` and re-run. *Expect:*
+2. **The refusal is reachable, readable, and inside its box.** Edit a local copy's pin for that
+   Mac (`PODMAN_MACOS_ARM64_SHA256`, or `_AMD64_` on Intel) to `$(printf x | shasum -a 256 | cut -d' ' -f1)` and re-run. *Expect:*
    the STOP box with every line inside its borders, the download block closed above it rather
    than overdrawing it, `/opt/podman` untouched, and both digests in
    `${TMPDIR:-/tmp}/cs193v-setup.log`. `pkgsha:the-box-is-gone-before-the-refusal` asserts the
@@ -1046,9 +1058,96 @@ permissive, and there are open reports of read-only bind mounts and `root nogrou
 (`podman#28316`, `#27893`, `#27679`). Confirm `--userns=keep-id:uid=1000,gid=1000` resolves
 it on both. **If libkrun fails, the install docs must pin applehv.**
 
-### §5.3 — Intel Mac
-Attempt the full install. The installer currently **refuses** these machines outright.
-Confirm or refute that podman 6 cannot run there; the support policy depends on it.
+**applehv is also the only provider an Intel Mac has** (#350): Podman 5.8 refuses libkrun on
+amd64, and that is the line Intel installs. So the applehv half of this check is the Intel
+student's everyday case, and §5.3 step 7 repeats it on an Intel Mac.
+
+### §5.3 — Intel Mac  (#350)
+Podman 6 removed Intel Mac support, so an Intel Mac installs **Podman 5.8** from
+`PODMAN_MACOS_AMD64_*` and runs its VM on **applehv** (vfkit). Every decision the installer makes
+on the way is in the shim tier — `25-installer.sh :: intel-mac:*`, `rosetta:*`, `brew-intel:*` —
+and none of what those decisions lead to is. This is that half.
+
+**Getting a branch onto the Mac without pushing it** (#280). The one-liner installs the
+published release, so point the bootstrap at a tarball of the working tree instead:
+```sh
+# on the dev box, in the checkout -- tracked edits only, so `git add` any new file first
+t="$(.private/tests/make-tarball.sh)"; echo "$t"
+# copy "$t" and .private/install-cs193v.sh to the Mac: AirDrop, USB or scp
+```
+```sh
+# on the Mac, with NO podman installed (the reset at the end of this section makes one)
+CS193V_TARBALL="$HOME/Downloads/<the tarball>" /bin/bash ~/Downloads/install-cs193v.sh
+```
+*Expect* the `CS193V_TARBALL is set` banner first — it is what says which copy ran.
+
+**0. Record the machine**, before installing, because the gate keys on exactly these:
+```sh
+sw_vers
+sysctl -n hw.model machdep.cpu.brand_string kern.hv_support
+sysctl -n machdep.cpu.leaf7_features | tr ' ' '\n' | grep -x PKU   # prints PKU, or nothing
+sysctl -n hw.optional.arm64; echo "rc=$?"                          # expect an unknown oid
+```
+*Expect:* `kern.hv_support` is 1, and `hw.optional.arm64` is an *unknown oid*. `mac_cpu` accepts a
+`0` just as well, but the fixture models the unknown oid, so a `0` is worth writing down.
+
+**1. The install.** *Expect,* in order: `macos on x86_64`; no STOP box — unless step 0 printed
+`PKU` and macOS is below 15.5, in which case the update box *is* the right answer: check it reads
+well, update, and start again; the consent screen; a download of
+`…/v5.8.7/podman-installer-macos-amd64.pkg`; no digest refusal; the VM created; the image built;
+the smoke test; the app in `~/Applications`. **Record the cold build time**, beside Apple
+Silicon's 242 s.
+
+**2. What got installed.**
+```sh
+podman --version                  # 5.8.7
+podman machine list               # VM TYPE applehv
+/opt/podman/bin/vfkit --version   # RUNS -- see below
+podman machine inspect --format '{{.Resources.Memory}} MB, {{.Resources.DiskSize}} GB'
+```
+**The vfkit line matters most below macOS 26.** The vfkit bundled since 5.8.5 declares macOS 26.0
+in its Mach-O header; its imports say it runs on 13 and later — every Virtualization class newer
+than macOS 12 is weak-linked — but nobody has watched it do so. If it fails with `Symbol not found`
+or will not launch, write down which macOS, and the Intel pin falls back to 5.8.4 (vfkit 0.6.1,
+which declares 14.0) with `INTEL_MACOS_MIN` following it.
+
+**3. The environment.** `./cs193v`, then `cs193v doctor`. Start something on 5173 inside the
+container (`python3 -m http.server 5173`) and open `http://localhost:5173` in the Mac's browser.
+Edit a file under `projects/` from the Mac and check the container sees it. Double-click the app.
+
+**4. Sleep.** Note `date -u` on the Mac and in the container, sleep the Mac for ten minutes or
+more, wake it, and compare again. vfkit's guest clock stops while the host sleeps (podman#28345);
+record the drift and whether it closes by itself within a minute.
+
+**5. Memory.** During the build, note vfkit's memory in Activity Monitor. The VM-size policy in
+`course-install.sh` was measured on libkrun only.
+
+**6. Housekeeping.** If Homebrew is installed, `brew doctor`: the `.pkg`'s postinstall creates
+`/usr/local/etc/man.d` as root, which on an Intel Mac is inside Homebrew's prefix.
+
+**7. Optional — §5.2's ownership checks, on Intel.** They need a checkout, not the installed
+tree (`.private/tests` is export-ignored): `git bundle create /tmp/cs193v.bundle <branch>` on the
+dev box, `git clone -b <branch> /path/to/cs193v.bundle` on the Mac, `brew install coreutils
+shellcheck` (§1.3), then `CS193V_INSTANCE=intel .private/tests/run-tests.sh --tier container -k
+files`.
+
+**If `machine init` or `machine start` hangs,** that is the PKU boot hang the gate exists to
+prevent, on a Mac the gate let through — so step 0's output is the finding. Ctrl-C, then
+`podman machine rm -f`: a machine left at `"Starting": true` makes the next run's `machine start`
+fail quietly.
+
+**To run it again on the same Mac:**
+```sh
+podman machine rm -f
+sudo rm -rf /opt/podman /etc/paths.d/podman-pkg
+sudo pkgutil --forget com.redhat.podman    # or the next run meets the stale-receipt case above
+```
+
+**And on any Apple Silicon Mac: the Rosetta shell.** Run the same bootstrap as
+`arch -x86_64 /bin/bash ~/Downloads/install-cs193v.sh`, with the same `CS193V_TARBALL`. *Expect:*
+`macos on arm64` and no Intel refusal; answer **No** at consent. Which package it would download
+is `rosetta:downloads-the-arm64-package` in the shim tier — on a Mac that already has podman,
+nothing is downloaded at all.
 
 ### §5.4 — WSL `--name` and `--no-launch`
 `wsl --install -d Ubuntu-26.04 --name CS193V --no-launch`

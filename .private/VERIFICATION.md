@@ -1026,7 +1026,7 @@ to be two and the suite's job was proving they agreed — and `30-launcher-shim.
 `doctor` and a launch against a fabricated receipt, including the Linux case where the repair
 must NOT fire. What no fixture can answer is whether the real `.pkg` still puts things where its
 own receipt says — `tests/MANUAL.md` has that check, and it belongs to a
-`PODMAN_MACOS_VERSION` bump.
+`PODMAN_MACOS_*_VERSION` bump.
 
 **2.1 — First launch.** `./cs193v`
 *Expect:* container created and a shell opens. Note wall-clock time to first prompt — and that
@@ -1156,11 +1156,16 @@ CONTAINERS_MACHINE_PROVIDER=applehv podman machine init cs193v-test && podman ma
 *Expect:* both work. Libkrun's virtiofs *enforces* permissions where applehv's is permissive, and there
 are open reports of read-only bind mounts and `root nogroup` ownership (`podman#28316`, `#27893`,
 `#27679`). Confirm `--userns=keep-id:uid=1000,gid=1000` resolves it on both. **If libkrun fails, the
-install docs must pin applehv.**
+install docs must pin applehv.** applehv is also all an Intel Mac has (#350): Podman 5.8 refuses
+libkrun on amd64.
 
-**5.3 — Intel Mac (Intel Macs only).** Attempt the full install.
-*Expect:* unknown. The design assumes podman 6 does not run at all and refuses these machines. Confirm
-or refute — the support policy depends on it.
+**5.3 — Intel Mac (Intel Macs only).** Podman 6 does not run on an Intel Mac — upstream removed it —
+so the installer puts Podman 5.8 there from its own pin, on applehv, and refuses only a macOS that
+cannot boot that VM (below 13, or below 15.5 on a CPU with PKU). Follow `tests/MANUAL.md` §5.3,
+which installs a branch from a local tarball and says what to record.
+*Expect:* the install completes, `podman machine list` shows applehv, `/opt/podman/bin/vfkit
+--version` runs, and ports, file sharing and the app all work. Record the model, macOS, whether the
+CPU has PKU, the cold build time and the clock drift after sleep.
 
 **5.4 — WSL `--name`.** `wsl --install -d Ubuntu-26.04 --name CS193V`
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is `wsl --import` from a
@@ -1367,7 +1372,8 @@ still works.
 ## 10. Report template
 
 ```
-PLATFORM: (macOS 15.x arm64 / Windows 11 + WSL2 Ubuntu 26.04 / Ubuntu 26.04 native / Intel Mac)
+PLATFORM: (macOS 15.x arm64 / Windows 11 + WSL2 Ubuntu 26.04 / Ubuntu 26.04 native / Intel Mac
+          -- for an Intel Mac, also: hw.model, and whether leaf7_features has PKU)
 HARDWARE: (model, RAM)
 PODMAN:   (version, provider if applicable)
 DATE:
@@ -1395,7 +1401,7 @@ ANSWERS TO THE DISPUTED QUESTIONS — quote actual output verbatim:
   A.7 host-side inotify fires?
   A.6 loopback-bound server reachable from the host?
   5.2 macOS provider (libkrun vs applehv):
-  5.3 Intel Mac — does podman run at all?
+  5.3 Intel Mac — podman 5.8 on applehv: install, vfkit --version, build time, sleep drift:
   5.5 cgroup delegation — is a rootless cgroup delegated at all?
 
 SURPRISES (passed, but not as expected):

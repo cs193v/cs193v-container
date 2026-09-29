@@ -301,14 +301,56 @@ the embedded directory name differs. A hash over extracted *content* depends on 
 
 **The third download is pinned, and the difference between it and the other two is the whole
 argument** (#283). `course-install.sh` fetches podman's macOS `.pkg` and hands it to
-`sudo installer -pkg … -target /`, and `PODMAN_MACOS_SHA256` now sits beside the version it
-belongs to. That one is hashable where the course tarball is not: a release asset is an
+`sudo installer -pkg … -target /`, and each `PODMAN_MACOS_*_SHA256` now sits beside the version
+it belongs to — two of them since #350, one per architecture. That one is hashable where the course tarball is not: a release asset is an
 *uploaded* file, byte-stable for the life of the release, with its digest published upstream — so
 a pinned version has a pinned digest and there is nothing to guess. GitHub promises nothing about
 the bytes of an auto-generated `archive/refs/heads/*.tar.gz`, which is what the 2023-01-30
 compression change demonstrated to everyone who had pinned one. So the `.pkg` gets the digest of
 an uploaded file and the tarball gets the digest of a manifest over what it unpacks to (#232);
 both are checked on the student's machine, and neither method would have worked for the other.
+
+#### Intel Macs get Podman 5.8, not 6  (#350)
+
+**Podman 6 does not run on an Intel Mac,** and that is upstream's decision rather than a gap:
+v6.0.0's release notes say "Support for running on Intel Macs has been removed", 6.x publishes no
+amd64 `.pkg` and no x86_64 VM image, and it no longer compiles for darwin/amd64. **Podman 5.8 still
+does** — an LTS line, supported until **2027-06-07**, publishing `podman-installer-macos-amd64.pkg`
+and an x86_64 applehv image. Podman Desktop made the same split. So the installer carries two pins,
+`PODMAN_MACOS_ARM64_*` (6.x) and `PODMAN_MACOS_AMD64_*` (5.8.x), and `install_podman` picks by
+`mac_cpu`. The launcher needed nothing: its macOS floor is 5.7.0 and it never looks at the CPU or
+the provider. The image already builds natively on x86_64.
+
+**The CPU comes from `hw.optional.arm64`, not `uname -m`.** A Terminal running under Rosetta says
+x86_64 on Apple Silicon, and the amd64 `.pkg` declares `hostArchitectures="x86_64,arm64"`, so macOS
+would install it there without complaint. `uname -m` is kept as a second yes so a failed sysctl can
+never send an Apple Silicon Mac the Intel package.
+
+**An Intel Mac is refused only for a macOS that cannot boot 5.8's VM,** and both floors are facts
+about Apple's releases:
+- **below 13.0** vfkit has no EFI boot loader. podman does not check at `machine init`; it fails at
+  `machine start`, after a ~1 GB download, so the installer asks first.
+- **below 15.5 on a CPU with PKU** — read from `machdep.cpu.leaf7_features` — the 6.12+ guest
+  kernel hangs at boot under Apple's hypervisor (podman#25121, lima#3334; reported on 15.0–15.4
+  and on 14.6.1). `machine-os:5.8` has no `nopku` workaround and nothing in the install has a
+  timeout, so the alternative is a student watching a meter forever. A *version-only* rule was the
+  first draft and is wrong both ways: it misses the Sonoma report, and it would refuse 2017–19 Macs
+  without PKU that are stuck below 15 and boot fine. Every Mac with PKU can reach 15.5, so this
+  refusal is always one Software Update away.
+
+**What was checked rather than assumed.** 5.8.7 and 6.0.2 share the pkg identifier, the
+postinstall, the `machine init` output `machine_phases` keys on, and the units of
+`.Resources.Memory` and `.Resources.DiskSize`. The vfkit in 5.8.5 and later declares macOS 26.0 in
+its Mach-O header, which looked fatal; its imports say otherwise — every Virtualization class
+newer than macOS 12 is weak-linked, nothing from 26 is referenced at all, and dyld does not refuse a
+launch on the header alone. That is why the bump recipe in `tests/MANUAL.md` wants the Intel pin run
+on the oldest macOS the floor admits.
+
+**No end-of-life gate, deliberately.** A release gate on 2027-06-07 was proposed and dropped: the
+only ways to clear it would be dropping Intel support or editing the date, which is a red people
+learn to edit. The date sits beside the pin and in the bump recipe instead, and
+`00-release-gates.sh` checks the two things that *can* change under us — that each pin is still
+the published digest, and that `machine-os:5.8` still carries an x86_64 applehv disk.
 
 #### What the bootstrap may do, and what it may not
 
@@ -453,7 +495,7 @@ part of the code keeps each, because for a long time one of them was kept only b
 
 **Rule 1 — never change what was already here without asking.** Kept by `survey`, which decides
 nothing and only records: every item it appends to `NEEDS[]` is printed with its reason by
-`ask_consent`, and a `no` there exits before anything runs. The three refusals of a machine this
+`ask_consent`, and a `no` there exits before anything runs. The refusals of a machine this
 script cannot set up all happen inside `survey` too, so a computer that will be refused is
 refused before it is asked for permission for anything.
 
@@ -1478,8 +1520,9 @@ measurements in `ERRORS.md` §D):
   to run while the 46 binds might still be in flight. This is the one wait in the launcher that
   could not simply be polled faster: the probe is a whole `ssh` process, not a builtin.
 
-Still needing other hardware: libkrun vs applehv on Apple Silicon, whether podman 6 runs on
-an Intel Mac, and WSL's `--name` support.
+Still needing other hardware: libkrun vs applehv on Apple Silicon, Podman 5.8 end to end on a
+physical Intel Mac (podman 6 cannot run there at all — see "Intel Macs get Podman 5.8, not 6"),
+and WSL's `--name` support.
 
 ### The launcher repairs its own PATH, and four ways of doing it that were rejected (issue #121)
 
@@ -1516,7 +1559,7 @@ The four obvious alternatives, each rejected for a reason worth keeping:
 - *Hardcode a candidate directory list* — `/opt/podman/bin`, `/opt/homebrew/bin`,
   `/usr/local/bin`. This was the first design and it is the one to argue against hardest,
   because it looks simpler than what replaced it. It guesses; it needs re-checking whenever
-  `PODMAN_MACOS_VERSION` moves; and it puts a maintenance obligation in a file nobody edits for
+  `PODMAN_MACOS_*_VERSION` moves; and it puts a maintenance obligation in a file nobody edits for
   years. Asking `pkgutil` where the receipt says the payload went is the same three forks and
   needs no list, so a future `.pkg` that relocates is still found. What survived from that
   design is the *identifier* — one constant, which the `.pkg` declares in its own `PackageInfo`.

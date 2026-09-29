@@ -299,7 +299,8 @@ setup_tail() {                        # setup_tail -> the last 12 lines of the l
 #   sha256sum  every Linux has it (coreutils is Essential), and macOS has had it since 15.0 --
 #              /sbin/sha256sum, Apple-signed, a hardlink to /sbin/md5, from Apple's 2024 re-import
 #              of FreeBSD's md5. NOT on 14 or earlier, which is why it cannot be the only branch:
-#              an M1 shipped with macOS 11 and nothing here sets a floor.
+#              an M1 shipped with macOS 11 and nothing sets an Apple Silicon floor, and an Intel
+#              Mac is admitted from 13 (#350).
 #   shasum     on every Mac there has ever been, and the documented answer -- but it is
 #              `#!/usr/bin/perl`, and Apple's standing notice is that future macOS will not
 #              include the scripting runtimes by default.
