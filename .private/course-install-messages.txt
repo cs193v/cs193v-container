@@ -26,8 +26,14 @@ If you ran this script using sudo, run it again without sudo.
 If you didn't do that - or you don't know what that means - please
 contact the course staff to ask for help.
 
-# THE THREE REFUSALS OF A MACHINE THIS SCRIPT CANNOT SET UP. All of them
-# are reached before anything has been changed, and all of them say so.
+# THE REFUSALS OF A MACHINE THIS SCRIPT CANNOT SET UP. All of them are
+# reached before anything has been changed.
+#
+# AN INTEL MAC IS NOT ONE OF THEM ANY MORE (#350). It installs Podman 5.8,
+# and is refused only when its macOS cannot boot that line's VM -- two
+# messages, because the remedies differ: a Mac whose CPU has PKU is one
+# free update away, and a Mac below macOS 13 often cannot update at all.
+# Their opening sentences differ so a needle can tell them apart.
 #
 # THE LINUX ONE IS NAMED FROM PRETTY_NAME rather than from a list of distros,
 # which is what keeps it to one branch: nothing has to be added here when the
@@ -49,23 +55,49 @@ If you received this message in error, or if you don't have a
 computer with one of the above operating systems installed,
 please contact the course staff.
 
-[[err.intel-mac]]
-This Mac has an Intel processor.
+[[err.intel-mac-too-old]]
+This Mac's version of macOS is too old for the course container.
 
-The course container needs a Mac with Apple Silicon (M1 or newer),
-or a Windows or Linux computer.
+It is an Intel Mac running macOS {{V}}, and on an Intel Mac the
+course's virtual machine needs macOS {{MIN}} or newer.
 
-Please contact course staff so that we can come up with a
-workaround.
+If Software Update offers a newer macOS, install it and run this
+script again. Many Intel Macs from 2017 or earlier cannot update
+that far; if yours cannot, you can use a Windows or Linux computer
+instead, or contact course staff and we will work something out.
+
+Nothing on this Mac has been changed.
+
+[[err.intel-mac-update-macos]]
+Please update macOS first, then run this script again.
+
+This is an Intel Mac running macOS {{V}}. Its processor has a
+feature that stops the course's virtual machine from starting on
+macOS versions older than {{MIN}}, where Apple fixed the problem.
+
+Open System Settings, then General, then Software Update, and
+install the newest macOS it offers. Then run this script again.
+
+Nothing on this Mac has been changed.
+
+# NOT A say_* REFUSAL, and so it signs off with die.trailer: every macOS
+# ships sw_vers, so no answer from it is a broken machine rather than an
+# old one -- which is a conversation with staff, not a step to take.
+[[err.mac-version-unreadable]]
+This Mac has an Intel processor, and this script could not read
+which version of macOS it is running (`sw_vers -productVersion`
+printed nothing it recognised).
+
+On an Intel Mac the course's virtual machine needs a recent enough
+macOS, so this script has stopped rather than guess.
 
 [[err.unsupported-distro]]
 This computer is running {{PRETTY_NAME}}.
 
-The course container works on Ubuntu and Debian, on Fedora, on
-a Mac with Apple Silicon, and on Windows through WSL. It very
-likely works here too, but this script installs software for
-you, and it does not know the right way to do that on this
-system.
+The course container works on Ubuntu and Debian, on Fedora, on a
+Mac, and on Windows through WSL. It very likely works here too,
+but this script installs software for you, and it does not know
+the right way to do that on this system.
 
 Please contact course staff. Setting this up with you by hand
 is quick, and we would rather do that than have this script
@@ -480,6 +512,14 @@ The whole log is in {{LOG}}
 Check your internet connection and try again. If this error recurs,
 contact the course staff.
 
+# UNREACHABLE ON ANY MAC WE KNOW OF: mac_cpu answers arm64 or x86_64 and
+# nothing else. It exists so that install_podman's pin choice has no
+# default -- a default would be a pin compared against nothing (#350).
+[[err.mac-cpu-unknown]]
+This script could not tell whether this Mac has an Apple Silicon
+or an Intel processor, so it does not know which podman installer
+to download.
+
 [[note.downloading]]
 downloading {{URL}}
 
@@ -496,10 +536,13 @@ You can install Podman Desktop by hand instead:
 
 Then run this script again. It will pick up from here.
 
-# THE BYTES THAT CAME BACK, AND THE TWO WAYS THAT GOES WRONG (#283). PODMAN_MACOS_SHA256 in
-# course-install.sh pins what the .pkg must hash to, and install_podman checks it between the
-# download and `sudo installer`. Neither refusal carries a digest, and that is not a width
-# accident: BOX_W is 71, so one digest is most of a row and two of them are the whole refusal,
+# PODMAN DESKTOP IS STILL THE RIGHT FALLBACK ON AN INTEL MAC (#350): its x64 build bundles
+# Podman 5.8, the same line this script installs there.
+#
+# THE BYTES THAT CAME BACK, AND THE TWO WAYS THAT GOES WRONG (#283). The PODMAN_MACOS_*_SHA256
+# pins in course-install.sh say what the .pkg must hash to, and install_podman checks this Mac's
+# one between the download and `sudo installer`. Neither refusal carries a digest, and that is
+# not a width accident: BOX_W is 71, so one digest is most of a row and two are the whole refusal,
 # and box() wraps rather than cuts -- they would arrive split mid-hex. They go to the log by
 # detail.pkg-digests below, and these point at it the way err.podman-download and
 # err.podman-installer already do.

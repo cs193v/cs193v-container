@@ -73,20 +73,28 @@ set -u
 # archive/refs/heads/*.tar.gz, and the 2023-01-30 compression change is what that cost everyone
 # who had pinned one.
 #
-# WHERE TO GET THE NEW ONE. Both of these answer, and they agreed for 6.0.2. Take the arm64
-# line; see below for why that is the only one there is to take:
+# WHERE TO GET THE NEW ONE. Both of these answer, and they agreed for 6.0.2 and 5.8.7. Take the
+# line for the asset the pin is named after -- arm64 for one, amd64 for the other:
 #
 #   curl -fsSL https://github.com/containers/podman/releases/download/v6.0.2/shasums
 #   gh api repos/containers/podman/releases/tags/v6.0.2 --jq '.assets[]|[.name,.digest]|@tsv'
 #
 # THE API FORM CARRIES A `sha256:` PREFIX AND THE shasums FORM DOES NOT. Paste the 64 hex
-# characters only -- pkgsha:the-pin-is-64-lowercase-hex in 10-static.sh is what catches either
+# characters only -- pkgsha:the-*-pin-is-64-lowercase-hex in 10-static.sh is what catches either
 # shape of a hurried paste, since the shasums line is `<hex>  <filename>`.
 #
-# ONE DIGEST IS ENOUGH, and that is survey()'s doing rather than luck: an Intel Mac is refused
-# above the consent screen, so $arch in install_podman is always arm64 and there is one asset to
-# name. Podman 6.0.2 publishes no amd64 and no universal .pkg at all, so a second constant would
-# be a constant with nothing to hold.
+# TWO PINS, BECAUSE TWO MAJORS (#350). Podman 6 removed Intel Mac support outright -- its release
+# notes say so, and 6.x publishes no amd64 .pkg and no x86_64 VM image -- so an Intel Mac installs
+# the 5.8 line instead, which podman supports as an LTS release until 2027-06-07. Each pin is named
+# after podman's own asset token, and install_podman picks the pair by mac_cpu. They are bumped
+# separately: nothing newer than 5.8 will ever run on an Intel Mac, so the AMD64 pair only moves
+# within 5.8, and after that date there is no supported podman for Intel at all.
+#
+# BUMPING THE AMD64 PAIR NEEDS A MAC, not just a digest. 5.8.5 moved the bundled vfkit to a build
+# whose Mach-O header claims macOS 26.0 (the link step stamps the build host); what decides whether
+# it runs is what it imports, and 0.6.4 weak-links everything newer than macOS 12. A future build
+# could get that wrong, and nothing here would see it -- so the recipe in tests/MANUAL.md has
+# `vfkit --version` run on the oldest macOS the Intel floor below admits.
 #
 # AND NO SIGNATURE CHECK GOES BESIDE THIS, which is the tempting addition and the wrong one.
 # `installer` evaluates TRUST, not identity: any Developer ID passes, no team identifier is
@@ -100,11 +108,31 @@ set -u
 # anything able to substitute one substitutes both and the pair is self-consistent. A digest is
 # a pin only if it arrives by a different route than the thing it describes, and here that route
 # is a person reading it once, by hand, and committing it.
-PODMAN_MACOS_VERSION="6.0.2"
-PODMAN_MACOS_SHA256="5a1d97f98f626cdb82dbd9932cf43102d1e9b6621627085fec2dcadf59743930"
-                                          # bump BOTH when you re-test -- and when you do, check
-                                          # the .pkg still declares PODMAN_PKG_ID (now in
-                                          # files/cs193v-ui.sh) in its PackageInfo.
+PODMAN_MACOS_ARM64_VERSION="6.0.2"
+PODMAN_MACOS_ARM64_SHA256="5a1d97f98f626cdb82dbd9932cf43102d1e9b6621627085fec2dcadf59743930"
+PODMAN_MACOS_AMD64_VERSION="5.8.7"
+PODMAN_MACOS_AMD64_SHA256="a05640de459ce1a7ecb8ece4af107f64523e5fa9ecda78f01df11d606394b1e2"
+                                          # bump each PAIR together when you re-test -- and when
+                                          # you do, check the .pkg still declares PODMAN_PKG_ID
+                                          # (in files/cs193v-ui.sh) in its PackageInfo.
+
+# WHICH INTEL MACS CAN BOOT THAT LINE'S VM (#350). Two floors, both facts about Apple's releases
+# rather than choices, and survey refuses below them before it asks for anything:
+#
+#   INTEL_MACOS_MIN      vfkit boots the VM through Virtualization.framework's EFI loader, which
+#                        is macOS 13. podman does not check this at `machine init` -- it fails at
+#                        `machine start`, after the .pkg and a ~1 GB image have downloaded.
+#   INTEL_PKU_MACOS_MIN  on an Intel CPU with PKU (reported on the 2020 MacBook Air, the four-port
+#                        2020 13" MacBook Pro, the 2020 iMac and the 2019 Mac Pro; mac_has_pku asks
+#                        the CPU rather than a model list), the 6.12+ guest kernel hangs at
+#                        boot under Apple's hypervisor: podman#25121, lima#3334, reported on 15.0
+#                        through 15.4 and on 14.6.1, fixed by Apple in 15.5. machine-os:5.8 carries
+#                        no `nopku` workaround and nothing here has a timeout, so without this the
+#                        install would hang forever. Every Mac with PKU can run 15.5 or later, so
+#                        the refusal is always one Software Update away; Macs WITHOUT PKU -- the
+#                        2017-19 ones, some stuck on 13 or 14 -- are not affected and not refused.
+INTEL_MACOS_MIN="13.0"
+INTEL_PKU_MACOS_MIN="15.5"
 
 DEFAULT_DIR="$HOME/cs193v"
 WSL_DISTRO="CS193V"
@@ -121,7 +149,8 @@ WSL_DISTRO="CS193V"
 # machine running a container, krunkit's RSS was 0.89 GB, so libkrun demand-pages. And it is
 # NOT that the figure is unrevisable: `podman machine set --memory` works on libkrun -- 4096 ->
 # 4608 -> 4096, applied and reverted, on podman 6.0.2 -- whatever podman-machine-set(1) says
-# about QEMU.
+# about QEMU. BOTH MEASURED ON APPLE SILICON'S libkrun; an Intel Mac runs 5.8 on applehv (vfkit),
+# where neither has been measured yet -- tests/MANUAL.md §5.3 asks (#350).
 #
 # It is that this workload does not benefit from more. The image is 2.48 GB and a cold build
 # is 242 s; nothing here scales with a bigger VM, so the ceiling costs a student nothing they
@@ -154,9 +183,21 @@ say_welcome() {
 # Drawn by box() rather than typed out. Hand-drawn, this was the one STOP box in either
 # script whose art had drifted — a column narrower than the one die() drew — and the
 # missing right edge is why that was invisible for so long (issue #21).
-say_intel_mac() {
+#
+# NOT EVERY INTEL MAC ANY MORE (#350): only one whose macOS cannot boot the VM, for one of the two
+# reasons at INTEL_MACOS_MIN. Two keys rather than one with a placeholder for the reason, because
+# the remedies differ -- a PKU Mac is one free update away, and a too-old one often cannot update at
+# all -- and each key named literally, which is what lets 20-messages.sh find and measure them.
+say_intel_mac() {                     # say_intel_mac too-old|needs-update MACOS_VERSION
     printf '\n'
-    { printf '\n'; msg err.intel-mac; printf '\n'; } | box STOP "$C_RED" '  '
+    case "$1" in
+        too-old)
+            { printf '\n'; msg err.intel-mac-too-old "V=$2" "MIN=$INTEL_MACOS_MIN"
+              printf '\n'; } | box STOP "$C_RED" '  ' ;;
+        *)
+            { printf '\n'; msg err.intel-mac-update-macos "V=$2" "MIN=$INTEL_PKU_MACOS_MIN"
+              printf '\n'; } | box STOP "$C_RED" '  ' ;;
+    esac
     printf '\n'
 }
 
@@ -309,6 +350,45 @@ host_ram_mb() {
     esac
 }
 
+# ─── which Mac this is, and whether its macOS can boot the VM  (#350) ──────────
+# THE HARDWARE, NOT THE PROCESS. `uname -m` answers for the shell that asks, and a Terminal running
+# under Rosetta says x86_64 on an Apple Silicon Mac -- which the amd64 .pkg would then install onto
+# without complaint, since it declares hostArchitectures="x86_64,arm64". hw.optional.arm64 is 1 on
+# Apple Silicon whatever the process is, and does not exist on an Intel Mac. `uname -m` stays as a
+# second yes, so a sysctl that fails on Apple Silicon can never hand it the Intel package.
+mac_cpu() {                           # mac_cpu -> arm64 | x86_64
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || [ "$(uname -m)" = arm64 ]; then
+        printf 'arm64'
+    else
+        printf 'x86_64'
+    fi
+}
+
+# PKU IS A WORD IN xnu's leaf7 LIST (osfmk/i386/cpuid.c), matched whole. AN ANSWER IT CANNOT READ
+# IS A YES, because the two mistakes cost different amounts: calling a PKU Mac clean lets its VM
+# hang with no timeout to end it, and calling a clean one PKU asks for a free macOS update.
+mac_has_pku() {                       # mac_has_pku -> yes | no
+    local f
+    f="$(sysctl -n machdep.cpu.leaf7_features 2>/dev/null)"
+    [ -n "$f" ] || { printf 'yes'; return 0; }
+    case " $f " in
+        *' PKU '*) printf 'yes' ;;
+        *)         printf 'no' ;;
+    esac
+}
+
+# The two floors at INTEL_MACOS_MIN, applied. version_lt PRINTS its answer and always exits 0, so
+# it is compared and never tested -- the trap check_release's comment records.
+intel_mac_verdict() {                 # intel_mac_verdict MACOS_VERSION yes|no -> too-old|needs-update|ok
+    if [ "$(version_lt "$1" "$INTEL_MACOS_MIN")" = yes ]; then
+        printf 'too-old'
+    elif [ "$2" = yes ] && [ "$(version_lt "$1" "$INTEL_PKU_MACOS_MIN")" = yes ]; then
+        printf 'needs-update'
+    else
+        printf 'ok'
+    fi
+}
+
 # ─── consent survey ────────────────────────────────────────────────────────────
 # Each entry that lands in NEEDS[] is something already on this computer that we would
 # have to change, or something that needs the student's password. Nothing is done until
@@ -356,10 +436,26 @@ survey() {
 
     step "$(msg step.survey)"
 
-    if [ "$PLAT" = macos ] && [ "$(uname -m)" != arm64 ]; then
-        say_intel_mac; exit 1
+    # THE MAC'S CPU, NOT THE SHELL'S, on a Mac: a Rosetta Terminal on Apple Silicon reports arm64
+    # here because that is what install_podman will act on (#350). MAC_CPU is empty elsewhere.
+    ok "$(msg ok.platform "PLAT=$PLAT" "ARCH=${MAC_CPU:-$(uname -m)}")"
+
+    # AN INTEL MAC IS NO LONGER REFUSED FOR BEING ONE (#350) -- it installs Podman 5.8 from its own
+    # pin -- but it is refused HERE, before consent, if its macOS cannot boot that line's VM. The
+    # two reasons are at INTEL_MACOS_MIN. Both need the version, so a sw_vers that cannot answer is
+    # a machine that is broken rather than old, and a staff problem rather than a student's.
+    # SYSTEM_VERSION_COMPAT cleared because it makes sw_vers report Big Sur and later as 10.16.
+    if [ "$MAC_CPU" = x86_64 ]; then
+        local macv
+        macv="$(SYSTEM_VERSION_COMPAT=0 sw_vers -productVersion 2>/dev/null)"
+        case "$macv" in
+            ''|*[!0-9.]*) die "$(msg err.mac-version-unreadable)" ;;
+        esac
+        case "$(intel_mac_verdict "$macv" "$(mac_has_pku)")" in
+            too-old)      say_intel_mac too-old "$macv"; exit 1 ;;
+            needs-update) say_intel_mac needs-update "$macv"; exit 1 ;;
+        esac
     fi
-    ok "$(msg ok.platform "PLAT=$PLAT" "ARCH=$(uname -m)")"
 
     # THE SECOND UNSUPPORTED-MACHINE REFUSAL, beside the Intel Mac one above and for the same
     # reason: stop at "Looking at your computer", before ask_consent has offered to change
@@ -403,13 +499,18 @@ survey() {
             # never had. Homebrew users likewise.
             #
             # AND UNINSTALL IS BETTER THAN UPGRADE HERE even when Podman Desktop IS present:
-            # re-running this script installs PODMAN_MACOS_VERSION, which is the one version the
-            # macOS path is tested against, rather than whatever Podman Desktop ships this week.
+            # re-running this script installs the pinned version for this Mac's CPU, which is the
+            # one the macOS path is tested against, rather than whatever Podman Desktop ships this
+            # week.
             #
-            # WHICH uninstall depends on how it got there, and `command -v podman` says. Only two
-            # cases are possible on a machine this script supports, because Intel Macs are refused
-            # outright above: /opt/podman/bin (the .pkg, ours or Podman Desktop's) and
-            # /opt/homebrew/bin (Homebrew).
+            # WHICH uninstall depends on how it got there, and `command -v podman` mostly says:
+            # /opt/podman/bin is the .pkg (ours or Podman Desktop's) and /opt/homebrew/bin is
+            # Apple Silicon's Homebrew. INTEL'S HOMEBREW IS /usr/local (#350), and so was an old
+            # .pkg's link, so there the path cannot tell them apart and the link's target has to:
+            # Homebrew links into its Cellar, as `../Cellar/podman/X/bin/podman`. This arm is live
+            # on Intel -- Homebrew's podman formula is arm64-only on macOS since 6.0, so an Intel
+            # Homebrew podman is an old one -- and the .pkg advice would have the student delete
+            # Homebrew's link by hand.
             #
             # NOTHING IS DONE FOR THEM, deliberately. Removing somebody's podman can destroy a
             # `podman machine` VM and every container in it, and this script's whole contract is
@@ -417,13 +518,15 @@ survey() {
             # takes knowingly is right; one this script takes on their behalf, while reporting a
             # version problem, is not.
             if [ "$PLAT" = macos ]; then
-                local where how
+                local where how brew=no
                 where="$(command -v podman 2>/dev/null)"
-                case "$where" in
-                    /opt/homebrew/*) how="$(msg err.podman-old-mac.how-homebrew)" ;;
-                    *)               how="$(msg err.podman-old-mac.how-pkg \
-                                            "WHERE=${where:-/opt/podman/bin/podman}")" ;;
-                esac
+                case "$where" in /opt/homebrew/*) brew=yes ;; esac
+                case "$(readlink "$where" 2>/dev/null)" in */Cellar/*) brew=yes ;; esac
+                if [ "$brew" = yes ]; then
+                    how="$(msg err.podman-old-mac.how-homebrew)"
+                else
+                    how="$(msg err.podman-old-mac.how-pkg "WHERE=${where:-/opt/podman/bin/podman}")"
+                fi
                 die "$(msg err.podman-old-mac "V=$v" "MIN=$MIN_PODMAN" "HOW=$how")"
             fi
             # THE COMMAND COMES FROM THE TABLE, so there is one source for it and a family added
@@ -846,10 +949,19 @@ install_podman() {
             root_step_packages
             ;;
         macos)
-            local arch pkg url got
-            arch="$(uname -m)"
+            local asset ver want pkg url got
+            # THE PIN IS PICKED BY THE HARDWARE (#350), before anything is fetched, because the URL
+            # needs its version. NO DEFAULT ARM: `want` empty would meet an empty `got` from a Mac
+            # with no hasher, compare equal, and install a package nobody checked.
+            case "$MAC_CPU" in
+                arm64)  asset=arm64; ver="$PODMAN_MACOS_ARM64_VERSION"
+                        want="$PODMAN_MACOS_ARM64_SHA256" ;;
+                x86_64) asset=amd64; ver="$PODMAN_MACOS_AMD64_VERSION"
+                        want="$PODMAN_MACOS_AMD64_SHA256" ;;
+                *)      die "$(msg err.mac-cpu-unknown)" ;;
+            esac
             pkg="$(mktemp "${TMPDIR:-/tmp}/podman.XXXXXX").pkg"
-            url="https://github.com/containers/podman/releases/download/v${PODMAN_MACOS_VERSION}/podman-installer-macos-${arch}.pkg"
+            url="https://github.com/containers/podman/releases/download/v${ver}/podman-installer-macos-${asset}.pkg"
             note "$(msg note.downloading "URL=$url")"
             # THE NOTE STAYS ABOVE THE BLOCK, and anything else that wants saying does too: the
             # block has to be the last thing printed until it is finished with, because every
@@ -898,7 +1010,7 @@ install_podman() {
             # into it, so the byte total already there is what separates a 4 KB login page from
             # 71 MB of something else.
             got="$(pkg_sha256 "$pkg")"
-            if [ "$got" != "$PODMAN_MACOS_SHA256" ]; then
+            if [ "$got" != "$want" ]; then
                 setup_meter_stop bad
                 # REMOVED, WHERE THE OTHER TWO REFUSALS LEAVE IT. They leave behind a file
                 # nothing has been said against -- a cut-off download, or a good package whose
@@ -913,7 +1025,7 @@ install_podman() {
                 if [ -z "$got" ]; then
                     die "$(msg err.podman-no-sha)"
                 fi
-                msg detail.pkg-digests "GOT=$got" "WANT=$PODMAN_MACOS_SHA256" >> "$SETUP_LOG"
+                msg detail.pkg-digests "GOT=$got" "WANT=$want" >> "$SETUP_LOG"
                 die "$(msg err.podman-pkg-digest "LOG=$SETUP_LOG")"
             fi
             setup_phase 2 "$(msg meter.pkg-installing)"
@@ -1562,7 +1674,12 @@ PLAT="$(platform_or_die)" || exit 1
 # MIN_PODMAN and does not care which floor it came from.
 if [ "$PLAT" = macos ]; then
     MIN_PODMAN="$MIN_PODMAN_MACOS"
+    # AND WHICH MAC (#350), for the same reason: survey reports it, gates an Intel Mac's macOS on
+    # it, and install_podman picks its pin by it. Empty everywhere else, which install_podman's
+    # macos arm refuses rather than defaults -- see its `*)`.
+    MAC_CPU="$(mac_cpu)"
 else
+    MAC_CPU=""
     MIN_PODMAN="$MIN_PODMAN_LINUX"
     # THE SAME SEAM, for the same reason: this depends on PLAT, and macOS has no /etc/os-release to
     # read. survey() is what refuses an unsupported family -- see say_unsupported_distro.
