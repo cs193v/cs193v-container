@@ -898,7 +898,6 @@ for catalogue, scripts in PAIRS:
         for line in open(path):
             boxed.update(re.findall(r'die\s+"\$\(msg\s+([a-z0-9._-]+)', line))
             boxed.update(re.findall(INLINE_BOX, line))
-    all_boxed |= boxed
 
     # THE THIRD ROUTE, AND #290 IS WHAT IT COST TO NOT HAVE IT. The installer's refusals reach
     # box() as `{ printf '\n'; msg KEY; printf '\n'; } | box STOP ...` inside a say_* function --
@@ -907,13 +906,12 @@ for catalogue, scripts in PAIRS:
     # measured it. Read per FUNCTION rather than per line, because say_unsupported_distro spreads
     # its brace group over three lines and a third line pattern would have missed it too.
     #
-    # AND EVERY BOX SITE IS ACCOUNTED FOR, which is what keeps the next route from going the same
-    # way: a `| box` line that is neither the inline form nor inside a say_* body is reported
-    # rather than skipped. That is also this block's vacuity guard -- if the function pattern
-    # stopped matching, every say_* box would come back UNLINTED instead of passing unmeasured.
+    # AND EVERY BOX SITE IS ACCOUNTED FOR, in every script of the pair, which is what keeps the
+    # next route from going the same way: a `| box` line that is neither the inline form nor inside
+    # a say_* body is reported rather than skipped. That is also this block's vacuity guard -- if
+    # the function pattern stopped matching, every say_* box would come back UNLINTED instead of
+    # passing unmeasured.
     for path in scripts:
-        if os.path.basename(path) != "course-install.sh":
-            continue
         src = open(path).read()
         spans = []
         for fm in re.finditer(r"^(say_[a-z0-9_]+)\(\)[^\n]*\n(.*?)^\}$", src, re.M | re.S):
@@ -924,13 +922,12 @@ for catalogue, scripts in PAIRS:
             keys = sorted(set(re.findall(r"\bmsg\s+([a-z0-9._-]+)", body)))
             print("SAYBOX:%s=%s" % (fm.group(1), ",".join(keys)))
             boxed.update(keys)
-            spans.append((fm.start(), fm.end()))
-        offset = 0
-        for n, line in enumerate(src.splitlines(True), 1):
-            here, offset = offset, offset + len(line)
+            first = src.count("\n", 0, fm.start()) + 1
+            spans.append((first, first + fm.group(0).count("\n")))
+        for n, line in enumerate(src.splitlines(), 1):
             if line.lstrip().startswith("#") or not re.search(r"\|\s*box\b", line):
                 continue
-            if re.search(INLINE_BOX, line) or any(a <= here < b for a, b in spans):
+            if re.search(INLINE_BOX, line) or any(a <= n <= b for a, b in spans):
                 continue
             print("UNLINTED:%s:%d: %s" % (os.path.basename(path), n, line.strip()))
     all_boxed |= boxed
@@ -1210,23 +1207,25 @@ fi
 # {{MIN}} renders empty and a check on the key's opening sentence would still pass. The carve is
 # anchored on /^name()/ for the reason lib/shared.sh gives -- a usage comment after the brace
 # makes a `{$` anchor match nothing.
+IMAC_MIN="$(setting_of INTEL_MACOS_MIN)"
+IMAC_PKU_MIN="$(setting_of INTEL_PKU_MACOS_MIN)"
 {
     printf 'NO_COLOR=1\n'
     printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
     cat "$UI"
-    sed -n '/^INTEL_MACOS_MIN=/p; /^INTEL_PKU_MACOS_MIN=/p' "$PRIVATE/course-install.sh"
-    sed -n '/^say_intel_mac()/,/^}$/p'  "$PRIVATE/course-install.sh"
+    printf 'INTEL_MACOS_MIN="%s"\nINTEL_PKU_MACOS_MIN="%s"\n' "$IMAC_MIN" "$IMAC_PKU_MIN"
+    carve_func "$PRIVATE/course-install.sh" say_intel_mac "$TMP/say-intel-mac.sh" \
+        && cat "$TMP/say-intel-mac.sh"
     sed -n '/^say_wsl_systemd_off() {/,/^}$/p' "$PRIVATE/course-install.sh"
     # the four knobs, exactly as course-install.sh sets them after sourcing
     printf 'NOTE_INDENT="    "\nMENU_INDENT="    "\nDIE_INDENT="  "\n'
     printf 'DIE_TRAILER="$(msg die.trailer)"\n'
 } > "$TMP/idie.sh"
-IMAC_MIN="$(sed -n 's/^INTEL_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-IMAC_PKU_MIN="$(sed -n 's/^INTEL_PKU_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
 
 if [ "$(grep -c '^die() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^say_intel_mac()' "$TMP/idie.sh")" = 1 ] &&
-   [ -n "$IMAC_MIN" ] && [ -n "$IMAC_PKU_MIN" ] &&
+   [ "$(grep -c '^INTEL_MACOS_MIN="[0-9.]*"$' "$TMP/idie.sh")" = 1 ] &&
+   [ "$(grep -c '^INTEL_PKU_MACOS_MIN="[0-9.]*"$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^say_wsl_systemd_off() {' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^msg() {$' "$TMP/idie.sh")" = 1 ] &&
    [ "$(grep -c '^MESSAGES=' "$TMP/idie.sh")" = 1 ]; then
@@ -1252,13 +1251,12 @@ assert_says "installer:die-shows-the-diagnosis" "Unable to locate package" "$out
 # The Intel-Mac refusals (#350). Reached before anything is installed, by a student whose Mac
 # cannot boot the course's VM on the macOS it has -- so they are the only thing that student sees
 # the setup print, and worth being a box rather than three walls. RENDERED WITH THE VALUES, one
-# whole-message needle each: the version and the floor are the part a student acts on, and the
-# two messages share enough prose that a key-prefix needle could match the wrong one.
-for ireason in too-old needs-update; do
-    case "$ireason" in
-        too-old)      ikey=err.intel-mac-too-old;     iv=12.7.6; imin="$IMAC_MIN" ;;
-        needs-update) ikey=err.intel-mac-update-macos; iv=14.6.1; imin="$IMAC_PKU_MIN" ;;
-    esac
+# whole-message needle each, because the version and the floor are the part a student acts on
+# and a key's prefix stops at the first of them.
+for row in "too-old err.intel-mac-too-old 12.7.6 $IMAC_MIN" \
+           "needs-update err.intel-mac-update-macos 14.6.1 $IMAC_PKU_MIN"; do
+    set -- $row
+    ireason="$1"; ikey="$2"; iv="$3"; imin="$4"
     out="$(bash -c '. "$1"; say_intel_mac "$2" "$3"' _ "$TMP/idie.sh" "$ireason" "$iv" 2>&1)"
     probs="$(printf '%s\n' "$out" | box_problems)"
     if [ -z "$probs" ]; then

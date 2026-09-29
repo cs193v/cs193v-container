@@ -54,6 +54,13 @@ ICAT="$PRIVATE/course-install-messages.txt"
 MAC_LABEL="$(sed -n 's/^MAC_APP_LABEL="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
 WIN_SHIM_PATH="$(sed -n 's/^WIN_SHIM_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
 WIN_ICON_PATH="$(sed -n 's/^WIN_ICON_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+# AND THE SETTINGS #350 ADDED: the two podman versions a Mac is given, and the two macOS floors an
+# Intel Mac is held to. Through setting_of, which answers the checker sentinel rather than an empty
+# string when a constant is missing or doubled, so the assertions that read them fail and say why.
+PKG_VER="$(setting_of PODMAN_MACOS_ARM64_VERSION)"
+PKG_VER_AMD64="$(setting_of PODMAN_MACOS_AMD64_VERSION)"
+IMAC_MIN="$(setting_of INTEL_MACOS_MIN)"
+IMAC_PKU_MIN="$(setting_of INTEL_PKU_MACOS_MIN)"
 
 # ─── "did not claim success" now means FOUR messages, not one ──────────────────
 # Every failure case in this file asserts that the run did not print a sign-off, and until #134
@@ -267,10 +274,9 @@ assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
 # pin is a different major from the arm64 one, and the launcher refuses anything under the floor
 # at every start -- so a floor raised past 5.8 would turn every Intel install into a STOP box on
 # first launch, with nothing on the installer's side to say so.
-for pin in ARM64 AMD64; do
-    pv="$(sed -n "s/^PODMAN_MACOS_${pin}_VERSION=\"\([^\"]*\)\".*/\1/p" "$PRIVATE/course-install.sh")"
-    assert_ne "min-podman:the-$pin-pin-was-readable" "" "$pv"
-    assert_eq "min-podman:the-$pin-pin-clears-the-mac-floor" "no" "$(run_vl vl_ui "$pv" "$mp_mac")"
+for row in "ARM64 $PKG_VER" "AMD64 $PKG_VER_AMD64"; do
+    set -- $row
+    assert_eq "min-podman:the-$1-pin-clears-the-mac-floor" "no" "$(run_vl vl_ui "$2" "$mp_mac")"
 done
 
 # ─── the PATH repair is the same code in both copies  (issue #121) ─────────────
@@ -534,9 +540,8 @@ ov="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.ta
 # THE ONE ok.platform ASSERTION ON A HOST RUN. Every other one is a forced Mac, so an ARCH that
 # read the Mac's CPU on every platform would be caught only by the install tier (#350).
 if [ "$(uname -s)" = Linux ]; then
-    ov_plat=linux; grep -qi microsoft /proc/version 2>/dev/null && ov_plat=wsl
     assert_says_sub "platform:a-linux-host-reports-uname-m" ok.platform "$ov" "$ICAT" \
-                    "PLAT=$ov_plat" "ARCH=$(uname -m)"
+                    "PLAT=$( . "$PRIVATE/files/cs193v-ui.sh"; platform )" "ARCH=$(uname -m)"
 fi
 assert_says "override:the-banner-names-the-variable" "CS193V_TARBALL is set" "$ov"
 assert_says "override:the-banner-names-the-source"   "$TMP/course.tar.gz"    "$ov"
@@ -2027,9 +2032,6 @@ assert_eq "pkgsha:the-portal-body-really-is-a-login-page" "1" \
 # and which pair fills them is install_podman's choice by CPU -- so each architecture's URL is
 # rebuilt here from that same template with its own version, and a case is served on its own.
 PKG_TEMPLATE="$(sed -n 's/^ *url="\(https:[^"]*\)".*/\1/p' "$PRIVATE/course-install.sh" | head -1)"
-PKG_VER="$(sed -n 's/^PODMAN_MACOS_ARM64_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-PKG_VER_AMD64="$(sed -n 's/^PODMAN_MACOS_AMD64_VERSION="\([^"]*\)".*/\1/p' \
-                 "$PRIVATE/course-install.sh")"
 pkg_url_for() {                       # pkg_url_for VERSION ASSET -> the URL install_podman builds
     printf '%s' "$PKG_TEMPLATE" | sed -e "s|\${ver}|$1|" -e "s|\${asset}|$2|"
 }
@@ -2042,7 +2044,6 @@ record "pkgsha:the-intel-url-under-test" "$PKG_URL_AMD64"
 # thing", which is a long way from the truth. The version in the needle is what catches a
 # template whose placeholder was renamed: it would survive into the URL unsubstituted.
 assert_ne    "pkgsha:the-version-was-readable"       "" "$PKG_VER"
-assert_ne    "pkgsha:the-intel-version-was-readable" "" "$PKG_VER_AMD64"
 assert_match "pkgsha:the-url-was-read-out-of-the-installer" \
              '^https://github\.com/containers/podman/releases/download/v[0-9]+\.' "$PKG_URL"
 assert_says  "pkgsha:the-url-names-the-arm64-package" \
@@ -2060,6 +2061,7 @@ assert_says  "pkgsha:the-intel-url-names-the-amd64-package" \
 printf 'cs193v test pkg C\n' > "$TMP/pkgbody-intel"
 PKG_GOOD_SHA="$(do_sha256 "$TMP/pkgbody-good" | awk '{print $1}')"
 PKG_INTEL_SHA="$(do_sha256 "$TMP/pkgbody-intel" | awk '{print $1}')"
+PKG_HOSTILE_SHA="$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')"
 assert_match "pkgsha:the-good-bodys-digest-is-hex"  '^[0-9a-f]{64}$' "$PKG_GOOD_SHA"
 assert_match "pkgsha:the-intel-bodys-digest-is-hex" '^[0-9a-f]{64}$' "$PKG_INTEL_SHA"
 assert_ne    "pkgsha:the-two-good-bodies-differ"    "$PKG_GOOD_SHA" "$PKG_INTEL_SHA"
@@ -2080,16 +2082,13 @@ assert_eq "pkgsha:the-digest-tree-names-the-intel-bodys-digest" "1" \
              "$TMP/pkg-digest/cs193v-main/.private/course-install.sh")"
 # AND THE PROBE TREE STILL CARRIES THE SHIPPED PINS, which is the other half of the arrangement:
 # the captive-portal case below runs against that one precisely because it is the pin a
-# student's machine uses. Read non-empty first: after a rename, an empty read differs from any
-# digest and this would pass for the wrong reason.
-pkg_probe_pin="$(sed -n 's/^PODMAN_MACOS_ARM64_SHA256="\([^"]*\)".*/\1/p' \
-                 "$TMP/pkg-probe/cs193v-main/.private/course-install.sh")"
-pkg_probe_pin_amd64="$(sed -n 's/^PODMAN_MACOS_AMD64_SHA256="\([^"]*\)".*/\1/p' \
-                       "$TMP/pkg-probe/cs193v-main/.private/course-install.sh")"
-assert_ne "pkgsha:the-probe-tree-pin-was-readable"       "" "$pkg_probe_pin"
-assert_ne "pkgsha:the-probe-tree-intel-pin-was-readable" "" "$pkg_probe_pin_amd64"
-assert_ne "pkgsha:the-probe-tree-keeps-a-different-pin"       "$PKG_GOOD_SHA"  "$pkg_probe_pin"
-assert_ne "pkgsha:the-probe-tree-keeps-a-different-intel-pin" "$PKG_INTEL_SHA" "$pkg_probe_pin_amd64"
+# student's machine uses. Through setting_of, because after a rename an empty read differs from
+# any digest and this would pass for the wrong reason.
+pkg_probe="$TMP/pkg-probe/cs193v-main/.private/course-install.sh"
+assert_ne "pkgsha:the-probe-tree-keeps-a-different-pin" "$PKG_GOOD_SHA" \
+          "$(setting_of PODMAN_MACOS_ARM64_SHA256 "$pkg_probe")"
+assert_ne "pkgsha:the-probe-tree-keeps-a-different-intel-pin" "$PKG_INTEL_SHA" \
+          "$(setting_of PODMAN_MACOS_AMD64_SHA256 "$pkg_probe")"
 ( cd "$TMP/pkg-digest" && tar czf "$TMP/course-digest.tar.gz" cs193v-main )
 assert_file "pkgsha:the-digest-tarball-was-built" "$TMP/course-digest.tar.gz"
 # AND NO DOCTORED COPY OF THE BOOTSTRAP TO POINT AT IT (#280). What stood here was a `cp` of the
@@ -2112,9 +2111,10 @@ assert_file "pkgsha:the-digest-tarball-was-built" "$TMP/course-digest.tar.gz"
 # THE MACHINE DECIDES THE URL THE FAKE SERVES, and nothing else does: an Intel machine is served
 # the amd64 URL and nothing on the arm64 one, so a run that asked for the wrong package is
 # refused by the fake rather than served by it.
-pkgsha_setup() {                      # pkgsha_setup BODY [CURL_RC [MACHINE...]]   (CALLER's shell)
-    local body="$1" rc="${2:-0}" url="$PKG_URL"
-    shift; [ "$#" -gt 0 ] && shift
+pkgsha_setup() {                      # pkgsha_setup BODY [CURL_RC] [MACHINE...]   (CALLER's shell)
+    local body="$1" rc=0 url="$PKG_URL"
+    shift
+    case "${1:-}" in [0-9]*) rc="$1"; shift ;; esac
     [ "${1:-mac}" = intel ] && url="$PKG_URL_AMD64"
     probe_setup absent "$@"
     # A MACHINE THAT REALLY NEEDS A PASSWORD, which is what makes every negative below
@@ -2183,6 +2183,13 @@ assert_says "pkgsha:the-pkg-goes-to-the-root-volume"         "-target /"      "$
 # "did not die": the first end-to-end macOS podman install this suite has executed.
 assert_says_sub "pkgsha:the-installed-podman-is-reported" ok.podman-version "$out" "$ICAT" V=5.7.0
 assert_eq "pkgsha:a-matching-digest-leaves-no-package-behind" "" "$(pkg_leftovers)"
+# THE PROPERTY ITSELF, which the order lint in 10-static.sh stands in for: root is handed exactly
+# the bytes that were checked, once. The fake sudo hashes whatever file reaches `installer -pkg`,
+# so a second, unchecked install or a file swapped after the check shows up here as a second line
+# or a different digest -- however the code that did it is spelt.
+assert_eq "pkgsha:root-is-handed-the-checked-bytes" "$PKG_GOOD_SHA" "$(installed_digests)"
+assert_eq "pkgsha:the-pkg-is-downloaded-once" "1" \
+          "$(shim_curl_log | grep -c 'podman-installer-macos')"
 
 # ── somebody else's bytes, the same length ──
 pkgsha_setup "$TMP/pkgbody-hostile"
@@ -2203,7 +2210,7 @@ assert_says "pkgsha:a-refused-digest-did-download-something" \
 # 71 and a rendered digest line is 76, so box() would wrap it mid-hex.
 assert_says_sub "pkgsha:the-log-names-both-digests" detail.pkg-digests \
                 "$(cat "$SHIM/tmp/cs193v-setup.log" 2>/dev/null)" "$ICAT" \
-                "GOT=$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')" \
+                "GOT=$PKG_HOSTILE_SHA" \
                 "WANT=$PKG_GOOD_SHA"
 
 # ── not all of our bytes ──
@@ -2342,11 +2349,7 @@ shim_new
 # rows written out -- so a boundary that moves goes red here, which is the point: both numbers are
 # facts about Apple's releases rather than settings. The runs after the tables are what prove that
 # survey and install_podman actually consult them.
-IMAC_MIN="$(sed -n 's/^INTEL_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-IMAC_PKU_MIN="$(sed -n 's/^INTEL_PKU_MACOS_MIN="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
-assert_ne "intel-mac:the-floor-was-readable"     "" "$IMAC_MIN"
-assert_ne "intel-mac:the-pku-floor-was-readable" "" "$IMAC_PKU_MIN"
-record    "intel-mac:the-floors" "macOS $IMAC_MIN, or $IMAC_PKU_MIN on a CPU with PKU"
+record "intel-mac:the-floors" "macOS $IMAC_MIN, or $IMAC_PKU_MIN on a CPU with PKU"
 for f in mac_cpu mac_has_pku intel_mac_verdict; do
     if carve_func "$PRIVATE/course-install.sh" "$f" "$TMP/carved-$f.sh"; then
         pass "intel-mac:$f-was-carved"
@@ -2354,20 +2357,23 @@ for f in mac_cpu mac_has_pku intel_mac_verdict; do
         fail "intel-mac:$f-was-carved" "no $f() in course-install.sh"
     fi
 done
+# In a subshell, so the carving and anything a row sets die with it; run_vl's shape.
+# shellcheck source=/dev/null
+run_carved() { ( . "$TMP/carved-$1.sh"; "$@" ); }   # run_carved FUNCTION [ARGS...]
 
 # ── mac_cpu: the hardware, not the process ──
 # (hw.optional.arm64, uname -m, expected). `-` is an OID the fake does not answer, which is what a
 # real Intel Mac says; `yes` is an answer that is not 1. The second row is the fallback that keeps
-# an Apple Silicon Mac with a broken sysctl from ever being handed the Intel package.
+# an Apple Silicon Mac with a broken sysctl from ever being handed the Intel package. One shim for
+# the table: each row rewrites both fakes.
+shim_new
 for row in "1 x86_64 arm64" "- arm64 arm64" "0 x86_64 x86_64" "- x86_64 x86_64" \
            "yes x86_64 x86_64"; do
     set -- $row
-    shim_new
     shim_fake_uname Darwin "$2"
     if [ "$1" = - ]; then shim_fake_sysctl 17179869184
     else                  shim_fake_sysctl 17179869184 "hw.optional.arm64=$1"; fi
-    assert_eq "intel-mac:mac_cpu(sysctl=$1,uname=$2)" "$3" \
-              "$(PATH="$SHIM:$PATH" bash -c '. "$1"; mac_cpu' _ "$TMP/carved-mac_cpu.sh")"
+    assert_eq "intel-mac:mac_cpu(sysctl=$1,uname=$2)" "$3" "$(PATH="$SHIM:$PATH" run_carved mac_cpu)"
 done
 
 # ── mac_has_pku: an answer it cannot read counts as PKU ──
@@ -2375,36 +2381,36 @@ done
 # forever, and calling a clean one PKU asks it to install a macOS update it can have for free.
 for row in "pku yes" "nopku no" "absent yes" "empty yes"; do
     set -- $row
-    shim_new
     case "$1" in
         pku)    shim_fake_sysctl 17179869184 "machdep.cpu.leaf7_features=$SHIM_LEAF7_PKU" ;;
         nopku)  shim_fake_sysctl 17179869184 "machdep.cpu.leaf7_features=$SHIM_LEAF7_NOPKU" ;;
         absent) shim_fake_sysctl 17179869184 ;;
         empty)  shim_fake_sysctl 17179869184 "machdep.cpu.leaf7_features=" ;;
     esac
-    assert_eq "intel-mac:mac_has_pku($1)" "$2" \
-              "$(PATH="$SHIM:$PATH" bash -c '. "$1"; mac_has_pku' _ "$TMP/carved-mac_has_pku.sh")"
+    assert_eq "intel-mac:mac_has_pku($1)" "$2" "$(PATH="$SHIM:$PATH" run_carved mac_has_pku)"
 done
 
 # ── intel_mac_verdict ──
 # 13.0 and 15.5 are the edges, and 14.6.1 is the report that makes this a CPU rule rather than a
-# Sequoia one. 15.5.0 is there because sw_vers prints either spelling.
+# Sequoia one. 15.5.0 is there because sw_vers prints either spelling. version_lt comes with it,
+# carved at the head of this file.
+cat "$TMP/vl_ui.sh" >> "$TMP/carved-intel_mac_verdict.sh"
 for row in "12.7.6 no too-old" "12.7.6 yes too-old" "13.0 no ok" "13.0 yes needs-update" \
            "14.6.1 no ok" "14.6.1 yes needs-update" "15.4.1 no ok" "15.4.1 yes needs-update" \
            "15.5 yes ok" "15.5.0 yes ok" "26.0 yes ok"; do
     set -- $row
     assert_eq "intel-mac:verdict($1,pku=$2)" "$3" \
               "$(INTEL_MACOS_MIN="$IMAC_MIN" INTEL_PKU_MACOS_MIN="$IMAC_PKU_MIN" \
-                 bash -c '. "$1"; . "$2"; intel_mac_verdict "$3" "$4"' _ \
-                 "$TMP/vl_ui.sh" "$TMP/carved-intel_mac_verdict.sh" "$1" "$2")"
+                 run_carved intel_mac_verdict "$1" "$2")"
 done
 
 # ── an Intel Mac that boots the VM: THE CONTROL for every refusal below ──
 # The pkgsha fixture, because it is the one that reaches install_podman: podman absent, a password
 # that really has to be asked for, and a fake curl serving ONLY the amd64 URL. The refusals below
 # assert an empty curl log and an empty sudo log, and this is the run that shows both are full
-# when the gate lets a machine through.
-pkgsha_setup "$TMP/pkgbody-intel" 0 intel "$IMAC_PKU_MIN" yes
+# when the gate lets a machine through. It is also the one Intel run that goes all the way to the
+# sign-off; everything after install_podman is the arm64 path's, and is asserted there.
+pkgsha_setup "$TMP/pkgbody-intel" intel "$IMAC_PKU_MIN" yes
 assert_eq "intel-mac:the-fixture-is-x86_64"        "x86_64" "$(PATH="$SHIM:$IFARM" uname -m)"
 assert_ne "intel-mac:the-fixture-has-no-arm64-oid" "1" \
           "$(PATH="$SHIM:$IFARM" sysctl -n hw.optional.arm64 2>/dev/null)"
@@ -2418,62 +2424,55 @@ assert_says_not_key "intel-mac:a-new-enough-macos-is-not-sent-to-update" \
                     err.intel-mac-update-macos "$out" "$ICAT"
 assert_says_sub "intel-mac:announces-the-amd64-package" note.downloading "$out" "$ICAT" \
                 "URL=$PKG_URL_AMD64"
-assert_says "intel-mac:asked-for-the-amd64-url"     "$PKG_URL_AMD64" "$(shim_curl_log)"
-assert_says "intel-mac:asked-for-the-password"      "-v"             "$(sudo_log)"
-# THE CLAIM: the Intel body matches the AMD64 pin, and only that pin. Compared against the arm64
-# one it would be refused here.
-assert_says "intel-mac:a-matching-digest-reaches-the-installer" "installer -pkg" "$(sudo_log)"
+assert_says "intel-mac:asked-for-the-amd64-url" "$PKG_URL_AMD64" "$(shim_curl_log)"
+assert_says "intel-mac:asked-for-the-password"  "-v"             "$(sudo_log)"
+# THE CLAIM: root is handed the Intel body, which matches the AMD64 pin and only that pin.
+# Compared against the arm64 one it would be refused here.
+assert_eq "intel-mac:root-is-handed-the-checked-bytes" "$PKG_INTEL_SHA" "$(installed_digests)"
 assert_says_sub "intel-mac:the-installed-podman-is-reported" ok.podman-version "$out" "$ICAT" V=5.7.0
+assert_says_key "intel-mac:finishes" "$MAC_FINISHED_KEY" "$out" "$ICAT"
 
-# ── the same Mac, somebody else's bytes: refused against the AMD64 pin ──
-pkgsha_setup "$TMP/pkgbody-hostile" 0 intel "$IMAC_PKU_MIN" yes
-out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
-assert_says_key "intel-mac:a-different-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
-assert_says_not "intel-mac:a-refused-digest-installs-nothing" "installer -pkg" "$(sudo_log)"
-# WANT IS THE ONE THAT SAYS WHICH PIN WAS USED. An install_podman that hashed correctly and then
-# compared against the arm64 pin refuses this body too -- for the right result and the wrong pin.
-assert_says_sub "intel-mac:the-log-names-the-amd64-pin" detail.pkg-digests \
-                "$(cat "$SHIM/tmp/cs193v-setup.log" 2>/dev/null)" "$ICAT" \
-                "GOT=$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')" \
-                "WANT=$PKG_INTEL_SHA"
-
-# ── no PKU: an older macOS is fine ──
-# The other half of the CPU rule. A survey that ignored mac_has_pku and assumed the worst would
-# refuse this Mac; the needs-update case below catches the opposite mistake.
-pkgsha_setup "$TMP/pkgbody-intel" 0 intel 14.6.1 no
+# ── somebody else's bytes, on a Mac with no PKU below 15.5 ──
+# TWO CLAIMS, ONE RUN. The refusal is against the AMD64 pin -- WANT is the one that says which pin
+# was used, since an install_podman that compared against the arm64 one refuses this body too.
+# And the Mac got that far at all: no PKU means 14.6.1 is fine, which is the other half of the CPU
+# rule -- a survey that ignored mac_has_pku and assumed the worst would refuse it before the
+# download, and the needs-update case below catches the opposite mistake.
+pkgsha_setup "$TMP/pkgbody-hostile" intel 14.6.1 no
 out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_not_key "intel-mac:without-pku-14-is-not-sent-to-update" \
                     err.intel-mac-update-macos "$out" "$ICAT"
 assert_says "intel-mac:without-pku-14-downloads-the-amd64-package" \
             "$PKG_URL_AMD64" "$(shim_curl_log)"
+assert_says_key "intel-mac:a-different-body-is-refused" err.podman-pkg-digest "$out" "$ICAT"
+assert_says_not "intel-mac:a-refused-digest-installs-nothing" "installer -pkg" "$(sudo_log)"
+assert_says_sub "intel-mac:the-log-names-the-amd64-pin" detail.pkg-digests \
+                "$(cat "$SHIM/tmp/cs193v-setup.log" 2>/dev/null)" "$ICAT" \
+                "GOT=$PKG_HOSTILE_SHA" "WANT=$PKG_INTEL_SHA"
 
-# ── too old for vfkit ──
-pkgsha_setup "$TMP/pkgbody-intel" 0 intel 12.7.6 no
-out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
-assert_says_sub "intel-mac:too-old-is-refused" err.intel-mac-too-old "$out" "$ICAT" \
-                V=12.7.6 "MIN=$IMAC_MIN"
-assert_says_not_key "intel-mac:too-old-is-not-told-an-update-fixes-it" \
-                    err.intel-mac-update-macos "$out" "$ICAT"
-assert_eq "intel-mac:too-old-downloads-nothing" "" "$(shim_curl_log)"
-assert_eq "intel-mac:too-old-touches-no-sudo"   "" "$(sudo_log)"
-assert_no_signoff "intel-mac:too-old-does-not-claim-success" "$out"
-
-# ── PKU on a macOS that hangs its VM ──
-pkgsha_setup "$TMP/pkgbody-intel" 0 intel 14.6.1 yes
-out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
-assert_says_sub "intel-mac:pku-below-the-fix-is-sent-to-update" err.intel-mac-update-macos \
-                "$out" "$ICAT" V=14.6.1 "MIN=$IMAC_PKU_MIN"
-assert_says_not_key "intel-mac:pku-below-the-fix-is-not-called-too-old" \
-                    err.intel-mac-too-old "$out" "$ICAT"
-assert_eq "intel-mac:pku-below-the-fix-downloads-nothing" "" "$(shim_curl_log)"
-assert_eq "intel-mac:pku-below-the-fix-touches-no-sudo"   "" "$(sudo_log)"
-assert_no_signoff "intel-mac:pku-below-the-fix-does-not-claim-success" "$out"
+# ── the two refusals ──
+# THE SAME FIVE CLAIMS FOR EACH, and every negative is paired with the control above, whose curl
+# and sudo logs are full: the refusal names this Mac's version and the floor it missed, it is not
+# the other refusal, nothing is downloaded, sudo is not touched, and no success is claimed.
+intel_refused() {                     # intel_refused LABEL MACOS PKU KEY MIN OTHER_KEY (CALLER's shell)
+    pkgsha_setup "$TMP/pkgbody-intel" intel "$2" "$3"
+    out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
+    assert_says_sub "intel-mac:$1-is-refused" "$4" "$out" "$ICAT" "V=$2" "MIN=$5"
+    assert_says_not_key "intel-mac:$1-is-not-the-other-refusal" "$6" "$out" "$ICAT"
+    assert_eq "intel-mac:$1-downloads-nothing" "" "$(shim_curl_log)"
+    assert_eq "intel-mac:$1-touches-no-sudo"   "" "$(sudo_log)"
+    assert_no_signoff "intel-mac:$1-does-not-claim-success" "$out"
+}
+intel_refused too-old            12.7.6 no  err.intel-mac-too-old      "$IMAC_MIN" \
+              err.intel-mac-update-macos
+intel_refused pku-below-the-fix 14.6.1 yes err.intel-mac-update-macos "$IMAC_PKU_MIN" \
+              err.intel-mac-too-old
 
 # ── a macOS that will not say what it is ──
 # sw_vers ships with every macOS, so no answer means something is broken rather than old -- and
 # both gates need the number. Refused as a problem to send staff, not waved through to a VM that
 # may never boot.
-pkgsha_setup "$TMP/pkgbody-intel" 0 intel fail yes
+pkgsha_setup "$TMP/pkgbody-intel" intel fail yes
 out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key "intel-mac:an-unreadable-macos-is-refused" err.mac-version-unreadable \
                 "$out" "$ICAT"
@@ -2481,40 +2480,34 @@ assert_eq "intel-mac:an-unreadable-macos-downloads-nothing" "" "$(shim_curl_log)
 
 # ── Apple Silicon from a Rosetta shell: not an Intel Mac ──
 # uname says x86_64 here, and the macOS and CPU list are ones the Intel gate refuses -- so every
-# assertion below fails for a gate that asked the process rather than the hardware.
-pkgsha_setup "$TMP/pkgbody-good" 0 rosetta
-assert_eq "rosetta:the-fixture-is-x86_64-to-uname"   "x86_64" "$(PATH="$SHIM:$IFARM" uname -m)"
-assert_eq "rosetta:the-fixture-is-arm64-to-sysctl"   "1" \
+# assertion below fails for a gate that asked the process rather than the hardware. STOPPED at the
+# machine step once the package is in: nothing after it reads the CPU.
+pkgsha_setup "$TMP/pkgbody-good" rosetta
+shim_set machine_init_rc 1
+assert_eq "rosetta:the-fixture-is-x86_64-to-uname" "x86_64" "$(PATH="$SHIM:$IFARM" uname -m)"
+assert_eq "rosetta:the-fixture-is-arm64-to-sysctl" "1" \
           "$(PATH="$SHIM:$IFARM" sysctl -n hw.optional.arm64)"
 out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_sub "rosetta:reports-arm64" ok.platform "$out" "$ICAT" PLAT=macos ARCH=arm64
 assert_says_not_key "rosetta:is-not-refused-as-an-intel-mac" \
                     err.intel-mac-update-macos "$out" "$ICAT"
-assert_says "rosetta:downloads-the-arm64-package" "$PKG_URL"        "$(shim_curl_log)"
-assert_says "rosetta:reaches-the-installer"       "installer -pkg" "$(sudo_log)"
-shim_new
-
-# ── an Intel Mac that already has a new enough podman ──
-# Podman Desktop and Homebrew both put a 5.8 on Intel Macs, and the floor is 5.7.0 on any Mac, so
-# this is the ordinary returning student: accepted, and nothing downloaded.
-shim_new; shim_fake_intel_mac "$IMAC_PKU_MIN" yes
-out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest")"
-assert_says_sub "intel-mac:with-podman-reports-x86_64" ok.platform "$out" "$ICAT" \
-                PLAT=macos ARCH=x86_64
-assert_says_key "intel-mac:with-podman-finishes" "$MAC_FINISHED_KEY" "$out" "$ICAT"
-assert_says_not "intel-mac:with-podman-downloads-no-pkg" "podman-installer-macos" "$out"
+assert_says "rosetta:downloads-the-arm64-package" "$PKG_URL" "$(shim_curl_log)"
+assert_eq   "rosetta:root-is-handed-the-arm64-bytes" "$PKG_GOOD_SHA" "$(installed_digests)"
 
 # ── an old Homebrew podman on an Intel Mac is Homebrew's ──
 # Intel Homebrew lives in /usr/local, not /opt/homebrew, and /usr/local/bin/podman is ALSO where
 # an old .pkg put its link -- so the path cannot tell them apart and the link's target has to.
-# Homebrew's is relative, `../Cellar/podman/X/bin/podman`; this fixture's is too, because a
-# fixture with an absolute link would pass a product that only handled the absolute form. Getting
-# it wrong tells the student `sudo rm -f /usr/local/bin/podman`, which breaks Homebrew's link.
-shim_new; shim_fake_intel_mac "$IMAC_PKU_MIN" no
-shim_set version "podman version 4.3.1"
-mkdir -p "$SHIM/Cellar/podman/4.3.1/bin"
-mv "$SHIM/podman" "$SHIM/Cellar/podman/4.3.1/bin/podman"
-ln -s "../$(basename "$SHIM")/Cellar/podman/4.3.1/bin/podman" "$SHIM/podman"
+# Homebrew's is relative, into its Cellar; this fixture's is too, because a fixture with an
+# absolute link would pass a product that only handled the absolute form. Getting it wrong tells
+# the student `sudo rm -f /usr/local/bin/podman`, which breaks Homebrew's link.
+old_podman_behind() {                 # old_podman_behind RELATIVE_DIR -> a run with $SHIM/podman linked there
+    shim_new; shim_fake_intel_mac "$IMAC_PKU_MIN" no
+    shim_set version "podman version 4.3.1"
+    mkdir -p "$SHIM/$1"
+    mv "$SHIM/podman" "$SHIM/$1/podman"
+    ln -s "./$1/podman" "$SHIM/podman"
+}
+old_podman_behind Cellar/podman/4.3.1/bin
 assert_says "brew-intel:the-fixture-links-into-a-cellar" "/Cellar/" "$(readlink "$SHIM/podman")"
 assert_says "brew-intel:the-linked-podman-answers" "4.3.1" "$("$SHIM/podman" --version)"
 out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest")"
@@ -2522,11 +2515,7 @@ assert_says_key "brew-intel:says-brew-uninstall" err.podman-old-mac.how-homebrew
 assert_says_not_key_tail "brew-intel:does-not-say-it-came-from-a-pkg" \
                          err.podman-old-mac.how-pkg "$out" "$ICAT"
 # THE CONTROL: a link into anything else is still the .pkg's advice.
-shim_new; shim_fake_intel_mac "$IMAC_PKU_MIN" no
-shim_set version "podman version 4.3.1"
-mkdir -p "$SHIM/pkgbin"
-mv "$SHIM/podman" "$SHIM/pkgbin/podman"
-ln -s pkgbin/podman "$SHIM/podman"
+old_podman_behind pkgbin
 assert_says "brew-intel:the-control-answers" "4.3.1" "$("$SHIM/podman" --version)"
 out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest")"
 assert_says_key_tail "brew-intel:a-non-cellar-link-is-a-pkg" \
