@@ -353,7 +353,9 @@ host_ram_mb() {
 # under Rosetta says x86_64 on an Apple Silicon Mac -- which the amd64 .pkg would then install onto
 # without complaint, since it declares hostArchitectures="x86_64,arm64". hw.optional.arm64 is 1 on
 # Apple Silicon whatever the process is, and does not exist on an Intel Mac. `uname -m` stays as a
-# second yes, so a sysctl that fails on Apple Silicon can never hand it the Intel package.
+# second yes, so a sysctl that fails in a NATIVE shell on Apple Silicon still reads arm64. The one
+# case neither catches is a Rosetta shell with no sysctl at all -- and that shell fails earlier, at
+# host_ram_mb, which needs the same sysctl.
 mac_cpu() {                           # mac_cpu -> arm64 | x86_64
     if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || [ "$(uname -m)" = arm64 ]; then
         printf 'arm64'
@@ -374,13 +376,15 @@ mac_has_pku() {                       # mac_has_pku -> yes | no
     esac
 }
 
-# The two floors at INTEL_MACOS_MIN, applied. version_lt PRINTS its answer and always exits 0, so
-# it is compared and never tested -- the trap check_release's comment records.
+# The two floors at INTEL_MACOS_MIN, applied. THE PKU ONE FIRST: it is the higher of the two, and a
+# PKU Mac below both would otherwise be sent to 13 and then, on the next run, to 15.5 -- one update
+# too many, for a Mac that can reach 15.5 in one. version_lt PRINTS its answer and always exits 0,
+# so it is compared and never tested -- the trap check_release's comment records.
 intel_mac_verdict() {                 # intel_mac_verdict MACOS_VERSION yes|no -> too-old|needs-update|ok
-    if [ "$(version_lt "$1" "$INTEL_MACOS_MIN")" = yes ]; then
-        printf 'too-old'
-    elif [ "$2" = yes ] && [ "$(version_lt "$1" "$INTEL_PKU_MACOS_MIN")" = yes ]; then
+    if [ "$2" = yes ] && [ "$(version_lt "$1" "$INTEL_PKU_MACOS_MIN")" = yes ]; then
         printf 'needs-update'
+    elif [ "$(version_lt "$1" "$INTEL_MACOS_MIN")" = yes ]; then
+        printf 'too-old'
     else
         printf 'ok'
     fi

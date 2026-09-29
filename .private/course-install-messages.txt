@@ -75,8 +75,10 @@ This is an Intel Mac running macOS {{V}}. Its processor has a
 feature that stops the course's virtual machine from starting on
 macOS versions older than {{MIN}}, where Apple fixed the problem.
 
-Open System Settings, then General, then Software Update, and
-install the newest macOS it offers. Then run this script again.
+Open Software Update (in System Settings under General, or in
+System Preferences on older macOS), install the newest macOS it
+offers, and run this script again. If it does not offer macOS
+{{MIN}} or newer, please contact course staff.
 
 Nothing on this Mac has been changed.
 
@@ -661,7 +663,8 @@ Could not add systemd=true to the [boot] section of /etc/wsl.conf.
 Please contact the course staff.
 
 [[err.wslconf-unchanged]]
-/etc/wsl.conf was written, and systemd is still not turned on in it.
+/etc/wsl.conf was written, and systemd is still not turned on in
+it.
 
 Please contact the course staff.
 
@@ -1083,8 +1086,8 @@ The {{USER}} account is already here
 This environment does not run systemd, so there is nothing to start
 
 [[err.prov-linger]]
-  Could not arrange for {{USER}}'s services to start with the CS193V
-  environment.
+  Could not arrange for {{USER}}'s services to start with the
+  CS193V environment.
 
   Setup has stopped, because without that podman cannot build the
   course container: it would fail part-way through with a message
@@ -1154,9 +1157,10 @@ This environment is ready for the setup script
 
       wsl --unregister CS193V
 
-  This will delete everything inside the existing CS193V environment
-  except for the files in your projects directory. If there is anything
-  in there you need, copy it out first or ask course staff for help.
+  This will delete everything inside the existing CS193V
+  environment except for the files in your projects directory. If
+  there is anything in there you need, copy it out first or ask
+  course staff for help.
 
 [[err.prov-useradd]]
   Could not create the {{USER}} account in the CS193V environment.

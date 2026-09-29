@@ -537,8 +537,10 @@ assert_file "install:test-tarball-built" "$TMP/course.tar.gz"
 # install answer "which copy was that?" without anyone having to reconstruct the environment.
 shim_new
 ov="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/ov-said-so")"
-# THE ONE ok.platform ASSERTION ON A HOST RUN. Every other one is a forced Mac, so an ARCH that
-# read the Mac's CPU on every platform would be caught only by the install tier (#350).
+# THE ONE ok.platform ASSERTION ON A HOST RUN. Every other one is a forced Mac, so this is what
+# catches a Linux ARCH that is empty or is not uname's (#350). NOT a Linux HOST_ARCH taken from
+# mac_cpu, on an x86_64 host: there sysctl has no hw.optional.arm64 and mac_cpu agrees with
+# `uname -m`. That one goes red on an aarch64 host only.
 if [ "$(uname -s)" = Linux ]; then
     assert_says_sub "platform:a-linux-host-reports-uname-m" ok.platform "$ov" "$ICAT" \
                     "PLAT=$( . "$PRIVATE/files/cs193v-ui.sh"; platform )" "ARCH=$(uname -m)"
@@ -2316,6 +2318,28 @@ assert_no_signoff   "pkgsha:no-hasher-does-not-claim-success" "$out"
 # negatives above perfectly.
 assert_says "pkgsha:no-hasher-still-reached-the-download" "$PKG_URL" "$(shim_curl_log)"
 
+# ── an EMPTY pin on that machine: "" must never equal "" ──
+# THE ONE PAIR OF VALUES THAT WOULD INSTALL UNCHECKED. A pin left blank by a hurried edit, and a
+# Mac whose hasher printed nothing, compare equal -- so install_podman refuses an empty `got`
+# before it compares at all, and this is the run that proves it rather than a grep for the line.
+# The pin tree is the probe tree with the arm64 pin emptied; the farm is the no-hasher one.
+cp -a "$TMP/pkg-probe" "$TMP/pkg-emptypin"
+edit_sub "$TMP/pkg-emptypin/cs193v-main/.private/course-install.sh" \
+         '^PODMAN_MACOS_ARM64_SHA256=.*' 'PODMAN_MACOS_ARM64_SHA256=""'
+assert_eq "pkgsha:the-empty-pin-tree-really-has-an-empty-pin" "1" \
+          "$(grep -c '^PODMAN_MACOS_ARM64_SHA256=""$' \
+             "$TMP/pkg-emptypin/cs193v-main/.private/course-install.sh")"
+( cd "$TMP/pkg-emptypin" && tar czf "$TMP/course-emptypin.tar.gz" cs193v-main )
+pkgsha_setup "$TMP/pkgbody-good"
+NOSHA="$SHIM/farm-nosha"; mkdir -p "$NOSHA"
+ln -s "$IFARM"/* "$NOSHA/" 2>/dev/null
+for t in $sha_tools; do rm -f "$NOSHA/$t"; done
+out="$(installer_tty '2' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-emptypin.tar.gz" \
+       CS193V_DIR="$SHIM/dest" PATH="$SHIM:$NOSHA" | strip_ansi)"
+assert_says "pkgsha:empty-pin-still-reached-the-download" "$PKG_URL" "$(shim_curl_log)"
+assert_says_key "pkgsha:an-empty-pin-and-no-hasher-is-refused" err.podman-no-sha "$out" "$ICAT"
+assert_says_not "pkgsha:an-empty-pin-and-no-hasher-installs-nothing" "installer -pkg" "$(sudo_log)"
+
 # ── on a terminal: the block closes before the STOP box ──
 # ERRORS.md B17's shape, which machinebox:* covers for the VM's block and nothing covered for
 # this one: a die() that did not call setup_meter_stop bad first gets its STOP box overdrawn by
@@ -2392,10 +2416,11 @@ done
 
 # ── intel_mac_verdict ──
 # 13.0 and 15.5 are the edges, and 14.6.1 is the report that makes this a CPU rule rather than a
-# Sequoia one. 15.5.0 is there because sw_vers prints either spelling. version_lt comes with it,
-# carved at the head of this file.
+# Sequoia one. 15.5.0 is there because sw_vers prints either spelling. A PKU Mac below 13 is sent
+# straight to 15.5 -- the floor it really has, and one every PKU Mac can reach -- rather than to 13
+# first and 15.5 on the next run. version_lt comes with it, carved at the head of this file.
 cat "$TMP/vl_ui.sh" >> "$TMP/carved-intel_mac_verdict.sh"
-for row in "12.7.6 no too-old" "12.7.6 yes too-old" "13.0 no ok" "13.0 yes needs-update" \
+for row in "12.7.6 no too-old" "12.7.6 yes needs-update" "13.0 no ok" "13.0 yes needs-update" \
            "14.6.1 no ok" "14.6.1 yes needs-update" "15.4.1 no ok" "15.4.1 yes needs-update" \
            "15.5 yes ok" "15.5.0 yes ok" "26.0 yes ok"; do
     set -- $row
@@ -2431,6 +2456,7 @@ assert_says "intel-mac:asked-for-the-password"  "-v"             "$(sudo_log)"
 assert_eq "intel-mac:root-is-handed-the-checked-bytes" "$PKG_INTEL_SHA" "$(installed_digests)"
 assert_says_sub "intel-mac:the-installed-podman-is-reported" ok.podman-version "$out" "$ICAT" V=5.7.0
 assert_says_key "intel-mac:finishes" "$MAC_FINISHED_KEY" "$out" "$ICAT"
+assert_ok "intel-mac:the-control-creates-the-course-directory" test -d "$SHIM/dest"
 
 # ── somebody else's bytes, on a Mac with no PKU below 15.5 ──
 # TWO CLAIMS, ONE RUN. The refusal is against the AMD64 pin -- WANT is the one that says which pin
@@ -2451,9 +2477,11 @@ assert_says_sub "intel-mac:the-log-names-the-amd64-pin" detail.pkg-digests \
                 "GOT=$PKG_HOSTILE_SHA" "WANT=$PKG_INTEL_SHA"
 
 # ── the two refusals ──
-# THE SAME FIVE CLAIMS FOR EACH, and every negative is paired with the control above, whose curl
-# and sudo logs are full: the refusal names this Mac's version and the floor it missed, it is not
-# the other refusal, nothing is downloaded, sudo is not touched, and no success is claimed.
+# THE SAME SIX CLAIMS FOR EACH, and every negative is paired with the control above, whose curl
+# and sudo logs are full and whose course directory exists: the refusal names this Mac's version
+# and the floor it missed, it is not the other refusal, nothing is downloaded, sudo is not
+# touched, no course directory is made -- the box says nothing has been changed -- and no success
+# is claimed.
 intel_refused() {                     # intel_refused LABEL MACOS PKU KEY MIN OTHER_KEY (CALLER's shell)
     pkgsha_setup "$TMP/pkgbody-intel" intel "$2" "$3"
     out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
@@ -2461,6 +2489,7 @@ intel_refused() {                     # intel_refused LABEL MACOS PKU KEY MIN OT
     assert_says_not_key "intel-mac:$1-is-not-the-other-refusal" "$6" "$out" "$ICAT"
     assert_eq "intel-mac:$1-downloads-nothing" "" "$(shim_curl_log)"
     assert_eq "intel-mac:$1-touches-no-sudo"   "" "$(sudo_log)"
+    assert_no_file "intel-mac:$1-changes-nothing" "$SHIM/dest"
     assert_no_signoff "intel-mac:$1-does-not-claim-success" "$out"
 }
 intel_refused too-old            12.7.6 no  err.intel-mac-too-old      "$IMAC_MIN" \
@@ -2477,6 +2506,9 @@ out="$(pkgsha_run "$TMP/course-digest.tar.gz")"
 assert_says_key "intel-mac:an-unreadable-macos-is-refused" err.mac-version-unreadable \
                 "$out" "$ICAT"
 assert_eq "intel-mac:an-unreadable-macos-downloads-nothing" "" "$(shim_curl_log)"
+assert_eq "intel-mac:an-unreadable-macos-touches-no-sudo"   "" "$(sudo_log)"
+assert_no_file "intel-mac:an-unreadable-macos-changes-nothing" "$SHIM/dest"
+assert_no_signoff "intel-mac:an-unreadable-macos-does-not-claim-success" "$out"
 
 # ── Apple Silicon from a Rosetta shell: not an Intel Mac ──
 # uname says x86_64 here, and the macOS and CPU list are ones the Intel gate refuses -- so every
