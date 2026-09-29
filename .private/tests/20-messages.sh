@@ -883,10 +883,18 @@ limit = box - 4
 # PER-CATALOGUE RATHER THAN ONE SET, even though 10-static.sh now forbids the two files sharing
 # a key name: pooling would mean a key boxed by one script silently imposes the box width on a
 # same-named key in the other, which is the coupling that rule exists to prevent.
+#
+# THE INSTALLER'S CATALOGUE HAS THREE READERS THAT BOX, not one (#290): course-install.sh, and the
+# two it shares refusals with -- install-utils.sh's root_step_* and the WSL root pass in
+# wsl-provision.sh, both of which die() with keys from the same file. Measuring against
+# course-install.sh alone left three of their keys over the width with nothing going red.
+# make-macapp.sh reads it too, but bakes its keys into applet alerts, which have no box.
 PAIRS = (
     (os.path.join(private, "messages.txt"), (os.path.join(repo, "cs193v"),)),
     (os.path.join(private, "course-install-messages.txt"),
-     (os.path.join(private, "course-install.sh"),)),
+     (os.path.join(private, "course-install.sh"),
+      os.path.join(private, "install-utils.sh"),
+      os.path.join(private, "wsl-provision.sh"))),
 )
 
 INLINE_BOX = r'msg\s+([a-z0-9._-]+)\s*\|\s*(?:celebrate|box)\b'
@@ -921,6 +929,10 @@ for catalogue, scripts in PAIRS:
                 continue
             keys = sorted(set(re.findall(r"\bmsg\s+([a-z0-9._-]+)", body)))
             print("SAYBOX:%s=%s" % (fm.group(1), ",".join(keys)))
+            # A KEY HELD IN A VARIABLE IS A KEY THIS CANNOT MEASURE, and it would pass unseen
+            # beside a literal one -- the function would still contribute a key.
+            if re.search(r"\bmsg\s+[\"'$]", body):
+                print("SAYBOX-VARKEY:%s" % fm.group(1))
             boxed.update(keys)
             first = src.count("\n", 0, fm.start()) + 1
             spans.append((first, first + fm.group(0).count("\n")))
@@ -980,6 +992,8 @@ saybox="$(sed -n 's/^SAYBOX://p' "$TMP/width")"
 record    "box:say-functions-drawing-a-box" "$(printf '%s' "$saybox" | do_tr '\n' ' ')"
 assert_ne "box:the-say-functions-were-found" "" "$saybox"
 assert_eq "box:every-say-box-names-a-literal-key" "" "$(printf '%s\n' "$saybox" | grep '=$')"
+assert_eq "box:no-say-box-names-a-key-in-a-variable" "" \
+          "$(sed -n 's/^SAYBOX-VARKEY://p' "$TMP/width")"
 assert_eq "box:every-installer-box-is-measured" "" "$(sed -n 's/^UNLINTED://p' "$TMP/width")"
 
 # ─── setup-git's boxed messages ────────────────────────────────────────────────

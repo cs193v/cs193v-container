@@ -324,8 +324,9 @@ the provider. The image already builds natively on x86_64.
 
 **The CPU comes from `hw.optional.arm64`, not `uname -m`.** A Terminal running under Rosetta says
 x86_64 on Apple Silicon, and the amd64 `.pkg` declares `hostArchitectures="x86_64,arm64"`, so macOS
-would install it there without complaint. `uname -m` is kept as a second yes so a failed sysctl can
-never send an Apple Silicon Mac the Intel package.
+would install it there without complaint. `uname -m` is kept as a second yes, so a failed sysctl in
+a native shell still reads arm64; the one case neither catches, a Rosetta shell with no sysctl at
+all, fails earlier at `host_ram_mb`, which needs the same sysctl.
 
 **An Intel Mac is refused only for a macOS that cannot boot 5.8's VM,** and both floors are facts
 about Apple's releases:
@@ -337,7 +338,9 @@ about Apple's releases:
   timeout, so the alternative is a student watching a meter forever. A *version-only* rule was the
   first draft and is wrong both ways: it misses the Sonoma report, and it would refuse 2017–19 Macs
   without PKU that are stuck below 15 and boot fine. Every Mac with PKU can reach 15.5, so this
-  refusal is always one Software Update away.
+  refusal is always one Software Update away — which is also why it is checked before the 13.0
+  floor, so a PKU Mac below 13 is sent to 15.5 in one step rather than two. An unreadable CPU
+  list counts as PKU, so the message still ends at course staff for a Mac that cannot update.
 
 **What was checked rather than assumed.** 5.8.7 and 6.0.2 share the pkg identifier, the
 postinstall, the `machine init` output `machine_phases` keys on, and the units of

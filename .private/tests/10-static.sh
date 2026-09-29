@@ -1151,10 +1151,8 @@ assert_eq "rootsteps:the-prime-asks-nothing-before-the-gate" "yes" \
 # min-podman:* keeps for the floors, since a second declaration later in the file shadows the
 # first and every assertion here would read the wrong one.
 pkg_empty="$(printf '' | do_sha256 | awk '{print $1}')"
-pkg_pin_ARM64="$(setting_of PODMAN_MACOS_ARM64_SHA256)"
-pkg_pin_AMD64="$(setting_of PODMAN_MACOS_AMD64_SHA256)"
-for row in "ARM64 $pkg_pin_ARM64" "AMD64 $pkg_pin_AMD64"; do
-    pin="${row%% *}"; pkgsha="${row#* }"
+for pin in ARM64 AMD64; do
+    pkgsha="$(setting_of "PODMAN_MACOS_${pin}_SHA256")"
     record "pkgsha:the-pinned-$pin-digest" "$pkgsha"
     # AND ITS VERSION, which the URL is built from. Counted, because a version is free text and has
     # no shape to check.
@@ -1175,7 +1173,8 @@ for row in "ARM64 $pkg_pin_ARM64" "AMD64 $pkg_pin_AMD64"; do
 done
 # THE TWO ARE TWO. A bump that pasted one digest into both lines passes every rule above, and
 # then one architecture refuses a perfectly good download forever.
-assert_ne "pkgsha:the-two-pins-differ" "$pkg_pin_ARM64" "$pkg_pin_AMD64"
+assert_ne "pkgsha:the-two-pins-differ" \
+          "$(setting_of PODMAN_MACOS_ARM64_SHA256)" "$(setting_of PODMAN_MACOS_AMD64_SHA256)"
 # AND THE INTEL PIN IS A PODMAN THAT RUNS ON INTEL. Podman 6 publishes no amd64 .pkg at all, so a
 # bump that moved both pins to the same major would fail only at 00-release-gates.sh -- as a SKIP,
 # because the shasums file simply has no line for the asset.
@@ -1183,9 +1182,10 @@ assert_match "pkgsha:the-intel-pin-is-below-podman-6" '^[0-5]\.' \
              "$(setting_of PODMAN_MACOS_AMD64_VERSION)"
 # AND NOBODY ELSE CARRIES ONE. The launcher never downloads the .pkg, so a pin appearing there is
 # a second number to forget -- the half that catches a copy coming back, which is the rule
-# probe:* keeps for the receipt id. Any architecture's, not just today's two.
+# probe:* keeps for the receipt id. Any architecture's, and the unsuffixed single-pin names from
+# before #350, which are the copy most likely to come back from an old branch.
 assert_eq "pkgsha:nobody-else-declares-a-pin" "" \
-          "$(grep -lE '^PODMAN_MACOS_[A-Z0-9]+_(SHA256|VERSION)=' cs193v \
+          "$(grep -lE '^PODMAN_MACOS_([A-Z0-9]+_)?(SHA256|VERSION)=' cs193v \
              "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/install-cs193v.sh" \
              "$PRIVATE/install-utils.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
 
@@ -1196,7 +1196,9 @@ assert_eq "pkgsha:nobody-else-declares-a-pin" "" \
 #
 # THE PROPERTY THIS STANDS IN FOR IS MEASURED IN 25-installer.sh, not here: the fake sudo hashes
 # the file it is handed, and pkgsha:root-is-handed-the-checked-bytes compares that with the body
-# the pin names. This is the cheap early warning, in milliseconds, for the shape a refactor breaks.
+# the pin names -- as pkgsha:an-empty-pin-and-no-hasher-is-refused drives the one pair of values,
+# "" and "", that would otherwise compare equal. This is the cheap early warning, in milliseconds,
+# for the shape a refactor breaks.
 ip_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh" \
            | sed -n '/^install_podman() {/,/^}/p')"
 assert_ne "pkgsha:install_podman-was-found" "" "$ip_body"
@@ -1214,11 +1216,6 @@ assert_eq "pkgsha:checked-after-the-download-and-before-the-install" "yes" \
              && [ "$ip_want" -lt "$ip_curl" ] && [ "$ip_curl" -lt "$ip_cmp" ] \
              && [ "$ip_cmp" -lt "$ip_inst" ] && printf yes \
              || printf "want=$ip_want curl=$ip_curl compare=$ip_cmp installer=$ip_inst")"
-# AND AN EMPTY DIGEST NEVER MATCHES. No fixture can reach this one -- it needs an empty pin, and
-# both pins are literals -- so it is held here: without it, an empty pin on a Mac with no hasher
-# would compare "" with "" and hand root a package nobody checked.
-assert_ne "pkgsha:an-empty-digest-never-matches" "" \
-          "$(printf '%s\n' "$ip_body" | grep -F '[ -z "$got" ] || [ "$got" != "$want" ]')"
 
 # THE HASHER PROBES EVERY TOOL IT USES, including the last, and there is no `else`. A fallthrough
 # would run the final tool on a machine that does not have it, and what reaches the caller is
