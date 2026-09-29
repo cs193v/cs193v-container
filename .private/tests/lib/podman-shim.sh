@@ -73,6 +73,8 @@ shim_watch() {                        # shim_watch LINE...
 shim_log()  { cat "$SHIM/argv.log" 2>/dev/null; }
 # What the installer WOULD have run as root, from the most recent installer_host run.
 sudo_log()  { cat "$(cat "$SHIM_LAST" 2>/dev/null)/sudo.log" 2>/dev/null; }
+# And the digest of every file it would have handed `installer -pkg`, one line per call (#350).
+installed_digests() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/installed.sha256" 2>/dev/null; }
 shim_clear_log() { : > "$SHIM/argv.log"; }
 # What the fake ssh was asked to do with the master's control socket. A separate log because a
 # forward is a MESSAGE and leaves no other trace -- nothing binds, nothing listens, and
@@ -479,11 +481,10 @@ shim_fake_mac() {                     # shim_fake_mac [TOTAL_BYTES]
 # An Intel Mac: x86_64 from uname and NO hw.optional.arm64, which is what a real one reports
 # (flutter#160530 records the unknown oid on 14.6.1). PKU decides which leaf7 list it carries.
 shim_fake_intel_mac() {               # shim_fake_intel_mac MACOS_VERSION|fail yes|no [TOTAL_BYTES]
+    local leaf7="$SHIM_LEAF7_NOPKU"
+    [ "$2" = yes ] && leaf7="$SHIM_LEAF7_PKU"
     shim_fake_uname Darwin x86_64
-    case "$2" in
-        yes) shim_fake_sysctl "${3:-17179869184}" "machdep.cpu.leaf7_features=$SHIM_LEAF7_PKU" ;;
-        *)   shim_fake_sysctl "${3:-17179869184}" "machdep.cpu.leaf7_features=$SHIM_LEAF7_NOPKU" ;;
-    esac
+    shim_fake_sysctl "${3:-17179869184}" "machdep.cpu.leaf7_features=$leaf7"
     shim_fake_sw_vers "$1"
 }
 

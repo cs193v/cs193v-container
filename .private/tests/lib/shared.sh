@@ -193,6 +193,28 @@ carve_func() {                        # carve_func FILE NAME DEST -> 0 if DEST g
     [ -s "$3" ]
 }
 
+# ─── a setting, read out of the file that declares it ──────────────────────────
+#
+# THE SAME TRAP AS carve_func'S, ONE LEVEL DOWN. Settings are read with `sed -n 's/^NAME="..."/p'`,
+# and a renamed, re-quoted or doubled constant makes that print nothing -- or two lines -- which
+# is how a comparison comes to pass against an empty string. Every such read used to carry a
+# `-was-readable` assertion of its own to catch it; this refuses in one place instead.
+#
+# EXACTLY ONE QUOTED, NON-EMPTY DECLARATION, or the answer is the checker sentinel rather than a
+# value, so the assertion that reads it fails and says why (assert.sh's _checker_ok) -- which a
+# helper that failed by itself could not do, since every caller reads it through `$( )`.
+setting_of() {                        # setting_of NAME [FILE] -> the value, or the sentinel
+    local f="${2:-$PRIVATE/course-install.sh}" n v
+    n="$(grep -c "^$1=" "$f" 2>/dev/null)"
+    v="$(sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$f" 2>/dev/null)"
+    if [ "${n:-0}" != 1 ] || [ -z "$v" ]; then
+        printf '%s (%s is declared %s times in %s, value "%s")\n' \
+               "$CHECKER_DIED" "$1" "${n:-0}" "$f" "$v"
+        return 0
+    fi
+    printf '%s\n' "$v"
+}
+
 # ─── the launcher's own words ──────────────────────────────────────────────────
 #
 # Student-facing prose lives in .private/messages.txt so it can be reworded without touching

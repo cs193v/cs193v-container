@@ -190,14 +190,12 @@ say_welcome() {
 # all -- and each key named literally, which is what lets 20-messages.sh find and measure them.
 say_intel_mac() {                     # say_intel_mac too-old|needs-update MACOS_VERSION
     printf '\n'
-    case "$1" in
-        too-old)
-            { printf '\n'; msg err.intel-mac-too-old "V=$2" "MIN=$INTEL_MACOS_MIN"
-              printf '\n'; } | box STOP "$C_RED" '  ' ;;
-        *)
-            { printf '\n'; msg err.intel-mac-update-macos "V=$2" "MIN=$INTEL_PKU_MACOS_MIN"
-              printf '\n'; } | box STOP "$C_RED" '  ' ;;
-    esac
+    { printf '\n'
+      case "$1" in
+          too-old) msg err.intel-mac-too-old     "V=$2" "MIN=$INTEL_MACOS_MIN" ;;
+          *)       msg err.intel-mac-update-macos "V=$2" "MIN=$INTEL_PKU_MACOS_MIN" ;;
+      esac
+      printf '\n'; } | box STOP "$C_RED" '  '
     printf '\n'
 }
 
@@ -370,8 +368,7 @@ mac_cpu() {                           # mac_cpu -> arm64 | x86_64
 mac_has_pku() {                       # mac_has_pku -> yes | no
     local f
     f="$(sysctl -n machdep.cpu.leaf7_features 2>/dev/null)"
-    [ -n "$f" ] || { printf 'yes'; return 0; }
-    case " $f " in
+    case " ${f:-PKU} " in
         *' PKU '*) printf 'yes' ;;
         *)         printf 'no' ;;
     esac
@@ -437,23 +434,23 @@ survey() {
     step "$(msg step.survey)"
 
     # THE MAC'S CPU, NOT THE SHELL'S, on a Mac: a Rosetta Terminal on Apple Silicon reports arm64
-    # here because that is what install_podman will act on (#350). MAC_CPU is empty elsewhere.
-    ok "$(msg ok.platform "PLAT=$PLAT" "ARCH=${MAC_CPU:-$(uname -m)}")"
+    # here because that is what install_podman will act on (#350). See HOST_ARCH.
+    ok "$(msg ok.platform "PLAT=$PLAT" "ARCH=$HOST_ARCH")"
 
     # AN INTEL MAC IS NO LONGER REFUSED FOR BEING ONE (#350) -- it installs Podman 5.8 from its own
     # pin -- but it is refused HERE, before consent, if its macOS cannot boot that line's VM. The
     # two reasons are at INTEL_MACOS_MIN. Both need the version, so a sw_vers that cannot answer is
     # a machine that is broken rather than old, and a staff problem rather than a student's.
     # SYSTEM_VERSION_COMPAT cleared because it makes sw_vers report Big Sur and later as 10.16.
-    if [ "$MAC_CPU" = x86_64 ]; then
-        local macv
+    if [ "$PLAT" = macos ] && [ "$HOST_ARCH" = x86_64 ]; then
+        local macv verdict
         macv="$(SYSTEM_VERSION_COMPAT=0 sw_vers -productVersion 2>/dev/null)"
         case "$macv" in
             ''|*[!0-9.]*) die "$(msg err.mac-version-unreadable)" ;;
         esac
-        case "$(intel_mac_verdict "$macv" "$(mac_has_pku)")" in
-            too-old)      say_intel_mac too-old "$macv"; exit 1 ;;
-            needs-update) say_intel_mac needs-update "$macv"; exit 1 ;;
+        verdict="$(intel_mac_verdict "$macv" "$(mac_has_pku)")"
+        case "$verdict" in
+            too-old|needs-update) say_intel_mac "$verdict" "$macv"; exit 1 ;;
         esac
     fi
 
@@ -518,15 +515,12 @@ survey() {
             # takes knowingly is right; one this script takes on their behalf, while reporting a
             # version problem, is not.
             if [ "$PLAT" = macos ]; then
-                local where how brew=no
+                local where how
                 where="$(command -v podman 2>/dev/null)"
-                case "$where" in /opt/homebrew/*) brew=yes ;; esac
-                case "$(readlink "$where" 2>/dev/null)" in */Cellar/*) brew=yes ;; esac
-                if [ "$brew" = yes ]; then
-                    how="$(msg err.podman-old-mac.how-homebrew)"
-                else
-                    how="$(msg err.podman-old-mac.how-pkg "WHERE=${where:-/opt/podman/bin/podman}")"
-                fi
+                case "$where $(readlink "$where" 2>/dev/null)" in
+                    /opt/homebrew/*|*/Cellar/*) how="$(msg err.podman-old-mac.how-homebrew)" ;;
+                    *) how="$(msg err.podman-old-mac.how-pkg "WHERE=${where:-/opt/podman/bin/podman}")" ;;
+                esac
                 die "$(msg err.podman-old-mac "V=$v" "MIN=$MIN_PODMAN" "HOW=$how")"
             fi
             # THE COMMAND COMES FROM THE TABLE, so there is one source for it and a family added
@@ -949,16 +943,16 @@ install_podman() {
             root_step_packages
             ;;
         macos)
-            local asset ver want pkg url got
+            local asset='' ver='' want='' pkg url got
             # THE PIN IS PICKED BY THE HARDWARE (#350), before anything is fetched, because the URL
-            # needs its version. NO DEFAULT ARM: `want` empty would meet an empty `got` from a Mac
-            # with no hasher, compare equal, and install a package nobody checked.
-            case "$MAC_CPU" in
+            # needs its version. mac_cpu answers one of these two, and anything else leaves the URL
+            # without a version -- a 404, err.podman-download -- and `want` empty, which the
+            # comparison below refuses whatever `got` is.
+            case "$HOST_ARCH" in
                 arm64)  asset=arm64; ver="$PODMAN_MACOS_ARM64_VERSION"
                         want="$PODMAN_MACOS_ARM64_SHA256" ;;
                 x86_64) asset=amd64; ver="$PODMAN_MACOS_AMD64_VERSION"
                         want="$PODMAN_MACOS_AMD64_SHA256" ;;
-                *)      die "$(msg err.mac-cpu-unknown)" ;;
             esac
             pkg="$(mktemp "${TMPDIR:-/tmp}/podman.XXXXXX").pkg"
             url="https://github.com/containers/podman/releases/download/v${ver}/podman-installer-macos-${asset}.pkg"
@@ -1010,7 +1004,10 @@ install_podman() {
             # into it, so the byte total already there is what separates a 4 KB login page from
             # 71 MB of something else.
             got="$(pkg_sha256 "$pkg")"
-            if [ "$got" != "$want" ]; then
+            # AN EMPTY `got` NEVER MATCHES, whatever `want` is. Checked here rather than trusted to
+            # the pin: an empty pin and a Mac with no hasher would otherwise compare equal and hand
+            # root a package nobody checked.
+            if [ -z "$got" ] || [ "$got" != "$want" ]; then
                 setup_meter_stop bad
                 # REMOVED, WHERE THE OTHER TWO REFUSALS LEAVE IT. They leave behind a file
                 # nothing has been said against -- a cut-off download, or a good package whose
@@ -1674,12 +1671,12 @@ PLAT="$(platform_or_die)" || exit 1
 # MIN_PODMAN and does not care which floor it came from.
 if [ "$PLAT" = macos ]; then
     MIN_PODMAN="$MIN_PODMAN_MACOS"
-    # AND WHICH MAC (#350), for the same reason: survey reports it, gates an Intel Mac's macOS on
-    # it, and install_podman picks its pin by it. Empty everywhere else, which install_podman's
-    # macos arm refuses rather than defaults -- see its `*)`.
-    MAC_CPU="$(mac_cpu)"
+    # AND THE ARCHITECTURE (#350), for the same reason: survey reports it and gates an Intel Mac's
+    # macOS on it, and install_podman picks its pin by it. On a Mac it is the hardware's, from
+    # mac_cpu, so a Rosetta shell is still Apple Silicon; elsewhere it is simply `uname -m`.
+    HOST_ARCH="$(mac_cpu)"
 else
-    MAC_CPU=""
+    HOST_ARCH="$(uname -m)"
     MIN_PODMAN="$MIN_PODMAN_LINUX"
     # THE SAME SEAM, for the same reason: this depends on PLAT, and macOS has no /etc/os-release to
     # read. survey() is what refuses an unsupported family -- see say_unsupported_distro.

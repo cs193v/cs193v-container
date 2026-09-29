@@ -302,13 +302,14 @@ the embedded directory name differs. A hash over extracted *content* depends on 
 **The third download is pinned, and the difference between it and the other two is the whole
 argument** (#283). `course-install.sh` fetches podman's macOS `.pkg` and hands it to
 `sudo installer -pkg … -target /`, and each `PODMAN_MACOS_*_SHA256` now sits beside the version
-it belongs to — two of them since #350, one per architecture. That one is hashable where the course tarball is not: a release asset is an
-*uploaded* file, byte-stable for the life of the release, with its digest published upstream — so
-a pinned version has a pinned digest and there is nothing to guess. GitHub promises nothing about
-the bytes of an auto-generated `archive/refs/heads/*.tar.gz`, which is what the 2023-01-30
-compression change demonstrated to everyone who had pinned one. So the `.pkg` gets the digest of
-an uploaded file and the tarball gets the digest of a manifest over what it unpacks to (#232);
-both are checked on the student's machine, and neither method would have worked for the other.
+it belongs to — two of them since #350, one per architecture. A `.pkg` is hashable where the
+course tarball is not: a release asset is an *uploaded* file, byte-stable for the life of the
+release, with its digest published upstream — so a pinned version has a pinned digest and there
+is nothing to guess. GitHub promises nothing about the bytes of an auto-generated
+`archive/refs/heads/*.tar.gz`, which is what the 2023-01-30 compression change demonstrated to
+everyone who had pinned one. So the `.pkg` gets the digest of an uploaded file and the tarball
+gets the digest of a manifest over what it unpacks to (#232); both are checked on the student's
+machine, and neither method would have worked for the other.
 
 #### Intel Macs get Podman 5.8, not 6  (#350)
 

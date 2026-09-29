@@ -54,4 +54,20 @@ if [ -f "$SHIM/sudo_fail" ]; then
     done < "$SHIM/sudo_fail"
 fi
 
+# WHAT ROOT WOULD HAVE BEEN HANDED, for `installer -pkg FILE` (#350): the file's digest as it
+# stands at the privileged call, one line per call, in $CS193V_SHIM/installed.sha256. That is what
+# lets 25-installer.sh assert the property the digest check exists for -- root gets exactly the
+# bytes that were checked -- rather than the order of the lines that are supposed to ensure it.
+# HASHED, NEVER RUN, with whichever of the installer's own first two hashers is on PATH.
+if [ "${1:-}" = installer ] && [ "${2:-}" = -pkg ] && [ -n "${3:-}" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        d="$(sha256sum < "$3" 2>/dev/null | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        d="$(shasum -a 256 < "$3" 2>/dev/null | awk '{print $1}')"
+    else
+        d=no-hasher
+    fi
+    printf '%s\n' "${d:-unreadable}" >> "$SHIM/installed.sha256"
+fi
+
 exit 0

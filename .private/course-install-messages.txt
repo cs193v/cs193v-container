@@ -512,14 +512,6 @@ The whole log is in {{LOG}}
 Check your internet connection and try again. If this error recurs,
 contact the course staff.
 
-# UNREACHABLE ON ANY MAC WE KNOW OF: mac_cpu answers arm64 or x86_64 and
-# nothing else. It exists so that install_podman's pin choice has no
-# default -- a default would be a pin compared against nothing (#350).
-[[err.mac-cpu-unknown]]
-This script could not tell whether this Mac has an Apple Silicon
-or an Intel processor, so it does not know which podman installer
-to download.
-
 [[note.downloading]]
 downloading {{URL}}
 

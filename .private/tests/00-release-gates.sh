@@ -310,12 +310,13 @@ rm -rf "$ps1_tmp"
 # let a deleted pair shrink the loop to one pass and still report green. Every name carries its
 # asset, and every pass starts from nothing, so an amd64 fetch that failed cannot be compared
 # against the digest the arm64 pass left behind.
-for pkg_arch in arm64 amd64; do
-    pkg_key="$(printf '%s' "$pkg_arch" | do_tr a-z A-Z)"
-    pkg_ver="$(sed -n "s/^PODMAN_MACOS_${pkg_key}_VERSION=\"\([^\"]*\)\".*/\1/p" \
-               "$PRIVATE/course-install.sh")"
-    pkg_pin="$(sed -n "s/^PODMAN_MACOS_${pkg_key}_SHA256=\"\([^\"]*\)\".*/\1/p" \
-               "$PRIVATE/course-install.sh")"
+mos_ver=""                            # the amd64 pass leaves its version here for 1b'
+for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
+    set -- $pkg_row
+    pkg_arch="$1"
+    pkg_ver="$(setting_of "PODMAN_MACOS_${2}_VERSION")"
+    pkg_pin="$(setting_of "PODMAN_MACOS_${2}_SHA256")"
+    [ "$pkg_arch" = amd64 ] && mos_ver="$pkg_ver"
     assert_ne "pkgsha:$pkg_arch:the-version-is-set" "" "$pkg_ver"
     assert_ne "pkgsha:$pkg_arch:the-pin-is-set"     "" "$pkg_pin"
     record    "pkgsha:$pkg_arch:pinned-version" "$pkg_ver"
@@ -363,7 +364,6 @@ done
 # such disk at all -- so the day 5.8's stops carrying one, every Intel install fails at the
 # machine step with nothing in this tree having changed. The registry answers an index listing
 # every disk it has; that is one small GET, like the shasums above.
-mos_ver="$(sed -n 's/^PODMAN_MACOS_AMD64_VERSION="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
 mos_tag="${mos_ver%.*}"
 record "machine-os:the-intel-tag" "${mos_tag:-<unreadable>}"
 mos_tmp="$(new_tmpdir)"

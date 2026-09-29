@@ -940,8 +940,8 @@ and each is bumped with its own version.
 *The edit that will actually break this,* and the reason the release gate exists: **bumping a
 `PODMAN_MACOS_*_VERSION` without the `_SHA256` beside it.** Nothing in the default suite goes red —
 the shim cases read the URL out of the installer, so they follow the bump — and the symptom on a
-student's Mac is a digest refusal on a perfectly good network. When you bump one, bump both, then
-run `run-tests.sh --tier release`:
+student's Mac is a digest refusal on a perfectly good network. When you bump a version, bump the
+`_SHA256` beside it, then run `run-tests.sh --tier release`:
 ```sh
 v=6.0.2; a=arm64          # or, for the Intel pin: v=5.8.7; a=amd64
 curl -fsSL "https://github.com/containers/podman/releases/download/v$v/shasums" \
