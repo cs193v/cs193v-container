@@ -1885,14 +1885,18 @@ fi
 # EVERY STEP IS NAMED, checked through the launcher's own parser rather than by counting
 # markers here -- a second implementation of the counting rule is exactly how the two would
 # come to disagree. Markers are sticky, so this fails only when a section is added ahead of
-# the first marker, which cannot happen, or when the closing marker is removed.
-unnamed="$("$REPO/cs193v" --dev-steps | awk -F'\t' '$2 == "" { print $1": "$3 }')"
+# the first marker, which cannot happen, or when the closing marker is removed. The parse is
+# taken once, and the three label checks below all read that one copy.
+dev_steps="$("$REPO/cs193v" --dev-steps)"
+unnamed="$(printf '%s\n' "$dev_steps" | awk -F'\t' '$2 == "" { print $1": "$3 }')"
 assert_eq  "containerfile:every-step-has-a-label" "" "$unnamed"
 
-# AND NO RUN BORROWS THE PREVIOUS RUN'S LABEL. Because markers are sticky, a layer added without
-# one is not unnamed -- it silently wears the layer above's, and the student reads "Installing the
-# Vercel CLI..." while apt runs. The check above cannot see that; this does, for any layer.
-borrowed="$("$REPO/cs193v" --dev-steps \
+# AND NO RUN BORROWS THE PREVIOUS RUN'S LABEL. Because markers are sticky, a RUN added without
+# one is not unnamed -- it silently wears the step above's, and the student reads "Installing the
+# Vercel CLI..." while apt runs. The check above cannot see that. This catches a RUN added
+# straight after another RUN; it cannot also compare a RUN with the COPY before it, because
+# layer 9's COPY and RUN share "Adding the course files..." on purpose.
+borrowed="$(printf '%s\n' "$dev_steps" \
     | awk -F'\t' '$3 ~ /^RUN / { if ($2 == prev) print $1": "$2; prev = $2 }')"
 assert_eq  "containerfile:no-run-borrows-the-previous-label" "" "$borrowed"
 
@@ -1900,7 +1904,7 @@ assert_eq  "containerfile:no-run-borrows-the-previous-label" "" "$borrowed"
 # the launcher's --label flag -- has no marker of its own and inherits the last one. That is
 # only correct if the last marker is a closing one rather than the name of a specific job, so
 # a student is not told the build is "Caching the tldr pages..." while it sets WORKDIR.
-last_label="$("$REPO/cs193v" --dev-steps | tail -1 | cut -f2)"
+last_label="$(printf '%s\n' "$dev_steps" | tail -1 | cut -f2)"
 assert_eq  "containerfile:closing-marker-covers-the-tail" "Finishing up..." "$last_label"
 
 # Whole-line comments blanked, line NUMBERS preserved, so an ordering check cannot match the
@@ -1939,13 +1943,15 @@ fi
 # move, and a bump re-runs every step below its ARG, so an apt step down there refetches Ubuntu's
 # package lists (26.5 MB) on every one of those bumps. Ubuntu packages added after release go in
 # layer 6b, above them (#349, #358). Anchored on the ARG rather than the npm line because the ARG
-# is where the cache breaks. `apt-get`, not `apt`: layer 9's `capture_output` contains the latter.
+# is where the cache breaks. Matched as `apt` or `apt-get` standing as a word, so layer 9's
+# `capture_output` does not trip it, plus `install-deps`, which is how Playwright runs apt.
 ln_codex_arg="$(cf_grep '^ARG CODEX_VERSION=')"
 if [ -z "$ln_codex_arg" ]; then
     fail "containerfile:no-apt-from-the-codex-arg-down" "could not locate ARG CODEX_VERSION"
 else
     assert_eq "containerfile:no-apt-from-the-codex-arg-down" "" \
-        "$(printf '%s\n' "$cf_code" | awk -v from="$ln_codex_arg" 'NR >= from && /apt-get/ { print NR ": " $0 }')"
+        "$(printf '%s\n' "$cf_code" | awk -v from="$ln_codex_arg" \
+            'NR >= from && /(^|[^a-z_])apt(-get)?[[:space:]]|install-deps/ { print NR ": " $0 }')"
 fi
 
 # EACH VERSION ARG MUST SIT NEXT TO THE LAYER THAT USES IT, never in a tidy block at the
@@ -2304,8 +2310,11 @@ assert_ok  "man:build-checks-the-stub-took" \
 #
 # EVERY `apt-get install` IN THE FILE, not just layer 1's: packages added after release go on
 # layer 6b's line, and bans that read only layer 1 would guard the line that no longer grows.
-# Read from cf_code, so prose that mentions apt-get cannot open a range.
-apt_line="$(printf '%s\n' "$cf_code" | sed -n '/apt-get install/,/rm -rf \/var\/lib\/apt\/lists/p')"
+# Read from cf_code, so prose that mentions apt-get cannot open a range. awk rather than a sed
+# range, because sed looks for a range's end only from the NEXT line: a one-line
+# `apt-get install ... && rm -rf /var/lib/apt/lists/*` would leave it open to the end of the file.
+apt_line="$(printf '%s\n' "$cf_code" \
+    | awk '/apt-get install/ { on = 1 } on { print } on && /rm -rf \/var\/lib\/apt\/lists/ { on = 0 }')"
 assert_contains "net:openssh-client-named-explicitly" "openssh-client" "$apt_line"
 assert_contains "net:telnet-installed"                "inetutils-telnet" "$apt_line"
 # `telnet` on Ubuntu 26.04 is a transitional dummy whose whole content is a dependency on
@@ -2313,6 +2322,11 @@ assert_contains "net:telnet-installed"                "inetutils-telnet" "$apt_l
 # break on some future release for a reason nobody would connect to this line.
 assert_not_match "net:not-the-transitional-telnet-package" \
                  '(^|[[:space:]])telnet([[:space:]]|\\|$)' "$apt_line"
+# The same rule for `host` (#358): on 26.04 it is only a virtual package that bind9-host
+# Provides, so the real name goes on the line.
+assert_contains "net:bind9-host-installed"            "bind9-host" "$apt_line"
+assert_not_match "net:not-the-virtual-host-package" \
+                 '(^|[[:space:]])host([[:space:]]|\\|$)' "$apt_line"
 
 # ─── Python: the floor, and nothing above it  (issue #44) ──────────────────────
 # The image ships an interpreter and the means to install libraries, not the libraries. These

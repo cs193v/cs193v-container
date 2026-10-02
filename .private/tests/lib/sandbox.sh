@@ -1132,7 +1132,7 @@ sb_work_skew() {                      # -> $SB_WORK/course-skew.tar.gz
 }
 
 # An installer that never finishes, so the ceiling machinery can be exercised for the price of a
-# container start rather than the price of a 25-step build (#130).
+# container start rather than the price of a course build (#130).
 #
 # WHY A FIXTURE INSTALLER RATHER THAN A FIXTURE GUEST. nest_build's entry command is fixed --
 # `sh /work/nest-run.sh` -- and the one thing a case may substitute is which installer that script

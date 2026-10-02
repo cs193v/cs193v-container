@@ -1643,8 +1643,9 @@ shim_set state absent
 # podman's total is every parsed instruction plus the LABEL step it injects from our --label.
 # DERIVED, not written down: 15-containerfile-parse.sh's literal is the canary for the count
 # itself, and a copy here only meant a dozen lines to bump by hand for every new layer.
-steps=$(( $("${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps | wc -l) + 1 ))
-{ "${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps \
+dev_steps="$("${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps)"
+steps=$(( $(printf '%s\n' "$dev_steps" | wc -l) + 1 ))
+{ printf '%s\n' "$dev_steps" \
       | awk -F'\t' -v n="$steps" '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
   printf 'STEP %d/%d: LABEL "cs193v.buildhash"="deadbeef"\n' "$steps" "$steps"
   printf 'COMMIT localhost/cs193v:local\nSuccessfully tagged localhost/cs193v:local\n'
