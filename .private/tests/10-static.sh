@@ -1928,6 +1928,19 @@ else
          "want node < gh < vercel < codex < claude-code; got node=$ln_node gh=$ln_gh vercel=$ln_vercel codex=$ln_codex claude=$ln_claude"
 fi
 
+# NOTHING FROM `ARG CODEX_VERSION` DOWN RUNS APT. Codex and Claude Code are the pins expected to
+# move, and a bump re-runs every step below its ARG, so an apt step down there refetches Ubuntu's
+# package lists (26.5 MB) on every one of those bumps. Ubuntu packages added after release go in
+# layer 6b, above them (#349, #358). Anchored on the ARG rather than the npm line because the ARG
+# is where the cache breaks. `apt-get`, not `apt`: layer 9's `capture_output` contains the latter.
+ln_codex_arg="$(cf_grep '^ARG CODEX_VERSION=')"
+if [ -z "$ln_codex_arg" ]; then
+    fail "containerfile:no-apt-from-the-codex-arg-down" "could not locate ARG CODEX_VERSION"
+else
+    assert_eq "containerfile:no-apt-from-the-codex-arg-down" "" \
+        "$(printf '%s\n' "$cf_code" | awk -v from="$ln_codex_arg" 'NR >= from && /apt-get/ { print NR ": " $0 }')"
+fi
+
 # EACH VERSION ARG MUST SIT NEXT TO THE LAYER THAT USES IT, never in a tidy block at the
 # top of the file. This is a performance contract, and it is invisible: buildah folds every
 # in-scope build arg into each step's cache key, so an ARG declared above the RUN steps

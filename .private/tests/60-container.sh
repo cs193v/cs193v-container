@@ -688,6 +688,9 @@ record "term:colours-without-forwarding" \
 # and quietly claim to test this one. If an -e line is ever added back, this is the test to
 # restore with it.
 assert_ok "net:dns-resolves" sh -c "podman exec ${NAME} getent hosts registry.npmjs.org"
+# `host` is the networking lecture's demo (#358), and it is not the lookup above: getent goes
+# through glibc and /etc/hosts, while host sends its own query to the server in resolv.conf.
+assert_contains "net:host-resolves" "has address" "$(E 'host registry.npmjs.org')"
 assert_ok "net:https-egress-works" sh -c "podman exec ${NAME} curl -fsS -o /dev/null --max-time 20 https://registry.npmjs.org/"
 
 # PID 1 must be the reaping keep-alive loop, not `sleep infinity` — sleep never calls
