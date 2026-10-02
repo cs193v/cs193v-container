@@ -76,7 +76,7 @@ fixture_build machine || exit 1
 # ─── a ceiling that fires announces itself, on the real pipeline (#130) ────────
 #
 # WHAT THIS COSTS AND WHY IT IS NOT BEHIND A GATE. Every other case that drives nest_build is
-# gated behind CS193V_INSTALL_NESTED_BUILD because it assembles the 25-step course image -- 6.2 GB
+# gated behind CS193V_INSTALL_NESTED_BUILD because it assembles the course image -- 6.2 GB
 # of inner store and several minutes. This one substitutes an installer that prints and then
 # sleeps, so it costs a container start and the ceiling it is asserting about. That is the whole
 # point: the machinery that explains a killed build was covered by nothing at all, and a check
@@ -1295,7 +1295,7 @@ record "nest:store" "$(nest_get "$np" STORE)"
 # ─── and now the build, for real ───────────────────────────────────────────────
 # A SECOND GATE, because the two answer different questions and cost wildly different amounts.
 # Everything above proves nesting works here and pins what it costs, in seconds. This assembles
-# the whole 25-step course image inside the fixture: measured at 6.2 GB of inner store, 8 GB of
+# the whole course image inside the fixture: measured at 6.2 GB of inner store, 8 GB of
 # host disk while it runs, and several minutes.
 #
 # IT WORKS, and every step of getting there was an artefact of the extra nesting level rather
@@ -1304,7 +1304,7 @@ record "nest:store" "$(nest_get "$np" STORE)"
 # The host control matters most: the identical package list installs cleanly unnested, so the
 # Containerfile was never at fault.
 if [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
-    skip "nested:the-course-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real 25-step build, ~6GB and several minutes"
+    skip "nested:the-course-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real course build, ~6GB and several minutes"
 else
 # THE HOST CANARY, taken around it. Everything else here is measured through a container
 # boundary; this is the assertion that the boundary held. Paired with the inner store growing,
@@ -1331,7 +1331,7 @@ else
 # would fire on precisely the symptom of the fixture losing its nesting flags, which would turn a
 # regression into a calm named skip.
 if [ "$(nest_get "$np" INNER_RUN)" != ok ]; then
-    skip "nested:the-course-build" "no container starts inside this fixture on this host, so a 25-step build cannot: $(nest_get "$np" INNER_RUN)"
+    skip "nested:the-course-build" "no container starts inside this fixture on this host, so a course build cannot: $(nest_get "$np" INNER_RUN)"
 else
 sb_free_gb="$(do_df_avail /)"
 record "nest:free-disk-gb-before" "${sb_free_gb:-unknown}"
@@ -1446,7 +1446,7 @@ assert_says_not "oldest-supported:without-SYS_ADMIN-there-is-no-namespace" 'user
 assert_says "oldest-supported:newuidmap-is-what-fails" 'newuidmap' "$(nest_get "$ospn" INNER_USERNS)"
 
 if [ "${CS193V_MINPODMAN_BUILD:-}" != 1 ]; then
-    skip "oldest-supported:the-build" "set CS193V_MINPODMAN_BUILD=1 -- a real 25-step build on podman 4.9.3, ~6GB and several minutes"
+    skip "oldest-supported:the-build" "set CS193V_MINPODMAN_BUILD=1 -- a real course build on podman 4.9.3, ~6GB and several minutes"
 else
 # THE HOST PRECONDITION AGAIN (#119), and here it has to name TWO cases. Everything from here to
 # the `fi` below is inside one else-block: the 4.9.3 build AND the floor-skew case, which needs a
@@ -1618,7 +1618,7 @@ fi
 # THE PROOF THE TIER A CASE CANNOT GIVE. sb-fed above shows the installer reaches dnf with Fedora's
 # package names, and stops there because sandbox_run always passes --network=none. This is the other
 # half: nest_build runs WITH a network, so `dnf install -y podman` reaches Fedora's mirrors for real,
-# and then the podman it produced assembles the whole 25-step course image.
+# and then the podman it produced assembles the whole course image.
 #
 # --no-prereqs=podman ON A FIXTURE THAT HAS IT, rather than a second fixture without it. The
 # alternative was a near-duplicate of Containerfile.fedora-nested minus one package -- 600 MB and a
@@ -1641,7 +1641,7 @@ fi
 if [ "${CS193V_INSTALL_NESTED:-}" != 1 ]; then
     skip "fedora-e2e:the-prerequisites" "set CS193V_INSTALL_NESTED=1"
 elif [ "${CS193V_INSTALL_NESTED_BUILD:-}" != 1 ]; then
-    skip "fedora-e2e:the-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real dnf install and 25-step build, ~6GB"
+    skip "fedora-e2e:the-build" "set CS193V_INSTALL_NESTED_BUILD=1 -- a real dnf install and course build, ~6GB"
 else
 fixture_build fedora-nested || exit 1
 # THE HOST PRECONDITION (#119), ON THIS BASE'S OWN PROBE. There was no nest_probe for

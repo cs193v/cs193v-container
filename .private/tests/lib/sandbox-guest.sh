@@ -260,11 +260,11 @@ net_state() {
         printf 'on (asked: %s) -- a real build can reach its origins' "$asked"
     elif [ "$(podman_kind)" = 'FAKE (lib/podman-fake)' ] || ! have podman; then
         # NOT A WARNING HERE, because nothing in this machine will build anything: saying "a real
-        # build stops at STEP 1/25" on a machine with a fake podman is a true sentence about a
+        # build stops at STEP 1" on a machine with a fake podman is a true sentence about a
         # thing that cannot happen, which is how a reader learns to skip these lines.
         printf 'off (asked: %s) -- nothing here builds for real, so nothing needs it' "$asked"
     else
-        printf 'NO DNS (asked: %s) -- a real build stops at STEP 1/25' "$asked"
+        printf 'NO DNS (asked: %s) -- a real build stops at STEP 1' "$asked"
     fi
 }
 
@@ -337,7 +337,7 @@ cmd_state() {
     # THE NETWORK, ASKED-FOR AND MEASURED, because the two can differ and only one of them
     # explains a failed build. `sandbox run` on a machine with everything present ends in the
     # launcher's build, which reaches seven origins -- so "no DNS" here is the whole reason a run
-    # stops at STEP 1/25, and it belongs next to the other things the installer is about to see.
+    # stops at STEP 1, and it belongs next to the other things the installer is about to see.
     printf '  %-22s %s\n' 'network' "$(net_state)"
     printf '  %-22s %s\n' '--no-caps asked for'    "${SB_NO_CAPS:-<none>}"
     printf '  %-22s %s\n' '--no-prereqs asked for' "${SB_NO_PREREQS:-<none>}"
@@ -368,7 +368,7 @@ cmd_run() {
     # instead is the launcher's build failing on a DNS error that looks like a product bug.
     if [ "$(podman_kind)" != "absent" ] && ! grep -ql 'CS193V_SHIM' "$(command -v podman)" 2>/dev/null \
        && ! timeout 3 getent hosts registry-1.docker.io >/dev/null 2>&1; then
-        printf '[sandbox] no DNS in here, so the launcher'"'"'s build will stop at STEP 1/25.\n'
+        printf '[sandbox] no DNS in here, so the launcher'"'"'s build will stop at STEP 1.\n'
         printf '[sandbox] leave, and start again without --no-net, to watch it build for real.\n\n'
     fi
     bash "$INST"

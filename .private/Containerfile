@@ -466,9 +466,6 @@ RUN set -eux; \
 # containerfile:no-apt-from-the-codex-arg-down holds that line. The next time the FROM digest
 # moves, every step re-runs anyway: fold this into layer 1 then.
 #
-# `RUN set -eux`, not `RUN apt-get update`: 10-static.sh reads layer 1's package list as the range
-# that starts at that exact text, and would sweep this layer into it.
-#
 # bind9-host, NOT `host`, which on 26.04 is a virtual package that bind9-host Provides. The real
 # name goes on the line for the reason inetutils-telnet's does. It is the networking lecture's demo
 # (#358), and it asks the server in /etc/resolv.conf directly, skipping /etc/hosts and nsswitch. So
@@ -539,10 +536,8 @@ RUN set -eux; \
 # binary that installs perfectly happily -- which is what the Chromium check was written for
 # after puppeteer#7740.
 #
-# BUBBLEWRAP IS INSTALLED IN LAYER 6b, not here and not on layer 1's apt line, and both are
-# build-cost decisions. A package added to layer 1 costs every student a full rebuild, and an apt
-# step here, below `ARG CODEX_VERSION`, would refetch Ubuntu's package lists on every codex bump. It
-# lived in this layer until #349 and #358 gave layer 6b a reason to exist.
+# BUBBLEWRAP IS INSTALLED IN LAYER 6b, for the rebuild-cost reason given there. It lived in this
+# layer until #349 and #358 gave 6b a reason to exist.
 #
 # What it buys is exact, and it is not a sandbox. codex ships its own vendored bwrap but prefers
 # a system one, warning at every start when there is none: "Codex could not find system
