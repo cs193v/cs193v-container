@@ -1244,6 +1244,32 @@ hx_until 'probe_name' bash 8 \
   || hx_note "the HX-PROBE label did not revert; sections below see a pinned tab"
 
 # ============================================================================
+hx_section "Tab completion in a fresh tab  (issue #349)"
+# The one test of completion as a student meets it: a tab's own login shell, its own startup
+# files, and a real Tab byte. A known-clean tab for the reason R7 gives below, and closed again
+# before R7 counts tabs -- waited on rather than assumed, or R7's ALT+T wait could be satisfied
+# by this close landing late.
+#
+# `git chec` because git's completion file is in the image whether or not bash-completion is
+# there to load it, so what this tests is the loader. Ctrl+U rather than Ctrl+C clears the line,
+# so no signal arrives just before the `exit`.
+n0="$(probe_wincount)"
+hx_hex "$S" "$KEY_ALT_T_ESCPREFIX"
+hx_until_ne 'probe_wincount' "$n0" 6
+hx_wait "$S" '\$' 8 || true
+hx_type "$S" 'git chec'
+hx_hex "$S" "09"
+if hx_wait "$S" 'git checkout' 8; then
+  hx_pass "Tab completes 'git chec' to 'git checkout' in a new tab"
+else
+  hx_fail "Tab completes 'git chec' to 'git checkout' in a new tab" "$(hx_cap "$S" | tail -3)"
+fi
+hx_hex "$S" "15"
+hx_cmd "$S" 'exit'
+hx_until 'probe_wincount' "$n0" 8 \
+  || hx_note "the completion tab did not close; R7 below starts from $(probe_wincount) tabs"
+
+# ============================================================================
 hx_section "R7  exit closes the tab; last exit ends the session"
 # Test the actual requirement on a KNOWN-CLEAN tab: open one with ALT+T (guaranteed to be a
 # fresh bash prompt) and type `exit`. Testing it on whatever tab happens to be focused is

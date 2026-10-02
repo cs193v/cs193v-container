@@ -92,7 +92,7 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # (issue #357): setup-git hashes the token to record its verdict, and without it every student's
 # second run would say their token had never been checked. The shim tier cannot see this; it hands
 # setup-git the host's tool under that name.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty sha256sum shortlink cs193v-linkbox cs193v-platform-messages setsid; do
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet host stty sha256sum shortlink cs193v-linkbox cs193v-platform-messages setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | do_tr '\n' ' ')"
@@ -1015,8 +1015,11 @@ fi
 # chromium/chrome stay on this list even though a Chromium build now ships: what is asserted
 # is that no browser is on $PATH. The headless shell lives in the Playwright cache and is
 # launched by Playwright, never typed by a student, and `code` is still absent entirely.
+#
+# dig and nslookup are absent beside a present `host` (#358): bind9-host is the lecture's tool,
+# and bind9-dnsutils, which brings the other two, was left out on purpose.
 assert_eq "absent:no-extra-tools" "none" \
-    "$(R 'for t in rg fzf delta bat fd chromium google-chrome chrome code; do command -v $t >/dev/null && echo $t; done; echo none')"
+    "$(R 'for t in rg fzf delta bat fd chromium google-chrome chrome code dig nslookup; do command -v $t >/dev/null && echo $t; done; echo none')"
 # man pages are stripped by the base image and deliberately not restored; tldr stands in.
 manout="$(R 'man git 2>&1; echo "rc=$?"')"
 record "absent:man-behaviour" "$(printf '%s' "$manout" | do_tr '\n' ' ')"
