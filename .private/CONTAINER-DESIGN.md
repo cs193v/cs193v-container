@@ -507,6 +507,10 @@ that *sound* protective actually are.
   talk to a web server by hand — `telnet example.com 80`, then type `GET / HTTP/1.0` and
   press Enter twice, and you see the raw reply. (Press Enter; do not try to type the `\r\n`
   yourself. telnet turns your Enter into the CRLF the protocol wants.)
+- **`host` looks a name up in DNS.** `host stanford.edu` prints its addresses. It asks the DNS
+  server directly and skips `/etc/hosts`, so `host localhost` can say "not found" on some
+  networks even though `localhost` works everywhere else.
+- **Tab completes** commands, `git` subcommands and branch names, and `gh` commands.
 - **No browser.** Anything that would open one prints a URL instead. It will usually be a
   short `http://localhost:PORT/magic-link` rather than the real address: the container
   serves that link to your browser over the tunnel and redirects you on, because the real
