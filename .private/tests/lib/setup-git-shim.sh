@@ -32,15 +32,43 @@ sg_new() {
         # environment variables, so it runs on a TA's Mac as-is, and this suite already drives
         # the real setup-git, the real cs193v-ui.sh and the real catalogue out of the checkout.
         cp "$PRIVATE/files/cs193v-platform-messages" "$SGSHIM/cs193v-platform-messages"
+        # AND sha256sum UNDER THAT NAME, because setup-git calls it by that name (issue #357) and
+        # it is a container program, where coreutils always has it. A host does not have to:
+        # macOS 14 and earlier have no sha256sum, and Homebrew's coreutils installs gsha256sum.
+        # lib/portable.sh has already found whichever this host has, as an absolute path, so the
+        # wrapper cannot find itself on PATH and recurse.
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "$DO_SHA256" > "$SGSHIM/sha256sum"
         chmod +x "$SGSHIM/gh" "$SGSHIM/git" "$SGSHIM/shortlink" \
-                 "$SGSHIM/cs193v-platform-messages"
+                 "$SGSHIM/cs193v-platform-messages" "$SGSHIM/sha256sum"
     fi
     : > "$SGSHIM/argv.log"
     SGDIRS="$SGDIRS $SGSHIM"
 }
 sg_set()   { printf '%s' "$2" > "$SGSHIM/$1"; }
 sg_touch() { : > "$SGSHIM/$1"; }
+sg_unset() { rm -f "$SGSHIM/$1"; }
 sg_log()   { cat "$SGSHIM/argv.log" 2>/dev/null; }
+# The fake git config, whole. git-fake appends every write to it and no read touches it, so the
+# same text before and after a run is a run that configured nothing -- whatever the key was called,
+# and whether or not it was written with a flag.
+sg_config() { cat "$SGSHIM/gitconfig" 2>/dev/null; }
+
+# A FRESH SHIM THAT STARTS WHERE ANOTHER RUN LEFT OFF (issue #357): its git config and its login,
+# copied out of SEED. So a second run reads what a real first run wrote, without paying for that
+# first run once per case -- the seed is run once and never again.
+sg_new_from() {                       # sg_new_from SEED_SHIM
+    sg_new
+    cp "$1/gitconfig" "$1/auth_token" "$SGSHIM/"
+}
+# What setup-git last recorded about the token, read the way git-fake reads a key: last write wins.
+sg_record() {
+    grep '^cs193v\.tokencheck=' "$SGSHIM/gitconfig" 2>/dev/null | tail -1 | sed 's/^[^=]*=//'
+}
+# And that it recorded WORD against a whole fingerprint, anchored at both ends: a record that grew
+# the token itself, or lost its hash, fails rather than matching on its last word.
+sg_recorded() {                       # sg_recorded NAME WORD
+    assert_match "$1" "^[0-9a-f]{64} $2\$" "$(sg_record)"
+}
 # A LINE COUNT ON PURPOSE, and the one in this file that should stay one. Each fake writes exactly
 # one `printf '%s\n'` per invocation (lib/gh-fake:28, lib/git-fake:24, lib/shortlink-fake:21), so a
 # row IS a call here and rows and occurrences are the same number. Do not "fix" it into sg_times
@@ -142,7 +170,7 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
             return t
         }
         function emit(kind, name, needles, keys) {
-            printf "%s%s\t%s\t%s\t%s\n", (opt ? "?" : ""), kind, name, needles, keys
+            printf "%s\t%s\t%s\t%s\n", kind, name, needles, keys
         }
         function expand(name, depth,   lines, i, nl, ln, lhs, rhs, kind, keys, nk, kk,
                         act, arg, needles, j, idx, d, sname) {
@@ -152,7 +180,6 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
             for (i = 1; i <= nl; i++) {
                 ln = lines[i]; sub(/[ \t]+$/, "", ln)
                 if (ln == "") continue
-                if (ln ~ /^optional[ \t]*$/) { opt = 1; continue }
                 if (ln ~ /^include[ \t]/) { sub(/^include[ \t]+/, "", ln); expand(ln, depth + 1); continue }
                 idx = index(ln, "->")
                 if (idx == 0) { print "ptydrive-flow: no -> in: " ln > "/dev/stderr"; exit 2 }
@@ -241,6 +268,10 @@ sg_run() {                            # sg_run CASE FLOW|VAR=VAL...
     fi
     SG_REPORT="$SGSHIM/drive.report"
     rm -f "$SG_REPORT"
+    # EACH RUN'S OWN LOG. A case may run setup-git twice in one shim to see what the first run left
+    # (issue #357), and an assertion about the second must not pass on the first one's commands.
+    # A case that wants both reads sg_log before the second run.
+    : > "$SGSHIM/argv.log"
     # SPLIT ON TABS ONLY, so a flow value may contain spaces (`NAME=Jane Doe`).
     local oldifs="$IFS"
     IFS="$A_TAB"

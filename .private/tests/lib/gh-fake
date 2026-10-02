@@ -18,7 +18,8 @@
 #   fail_err     what it writes to stderr when it fails    [gh: HTTP 403 ...]
 #   login        what `gh api user --jq .login` prints                             [janedoe]
 #   owners       what the user/repos owner query prints            [cs193v-students]
-#   auth_token   present => `gh auth token` succeeds                          [absent]
+#   auth_token   present => `gh auth token` succeeds; `gh auth login` creates it  [absent]
+#                and its contents, if any, are what it prints        [the constant below]
 #   issue_no     the number in the URL `gh issue create` prints                    [7]
 #   pr_no        the number in the URL `gh pr create` prints                       [9]
 
@@ -51,9 +52,19 @@ if [ -f "$SHIM/fail_at" ]; then
 fi
 
 case "$ALL" in
+    # LOGGED IN, which is all a later `gh auth token` needs to know -- so the file is emptied and
+    # NOT given the token. 35-setup-git-shim.sh greps every file under $SHIM for the pasted token,
+    # and a fake that kept it would be the one file that grep could never pass on. After the
+    # failure injection above, so a login told to fail leaves nobody logged in.
+    "gh auth login"*)
+        : > "$SHIM/auth_token" ;;
+    # A STAND-IN, NOT THE PASTED TOKEN, for the reason above. What setup-git does with it is
+    # fingerprint it (issue #357), so a test that swaps the token by hand writes a different one
+    # into auth_token and this prints that instead.
     "gh auth token"*)
         [ -f "$SHIM/auth_token" ] || exit 1
-        printf 'github_pat_11FAKE0000000000000000000\n' ;;
+        if [ -s "$SHIM/auth_token" ]; then cat "$SHIM/auth_token"; echo
+        else printf 'github_pat_11FAKE0000000000000000000\n'; fi ;;
     # The owner query first: it is also an `api user` call, so matching in the other order would
     # answer it with a login and setup-git would read that as "the token sees no repositories".
     *"api user/repos"*)

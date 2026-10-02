@@ -282,8 +282,8 @@ assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')
 # that has started timing out.
 SGFLOWS="$TESTS_DIR/fixtures/setup-git-flows.txt"
 assert_file "sgflow:the-fixture-is-there" "$SGFLOWS"
-grep -oE '^(line|secret|menu|\?menu)[[:space:]]+[a-z0-9._ -]+' "$SGFLOWS" \
-    | sed -E 's/^(line|secret|menu|\?menu)[[:space:]]+//' | do_tr ' ' '\n' \
+grep -oE '^(line|secret|menu)[[:space:]]+[a-z0-9._ -]+' "$SGFLOWS" \
+    | sed -E 's/^(line|secret|menu)[[:space:]]+//' | do_tr ' ' '\n' \
     | grep -E '^[a-z]' | LC_ALL=C sort -u > "$TMP/sg_gatekeys"
 assert_ne "sgflow:the-fixture-names-keys" "" "$(cat "$TMP/sg_gatekeys")"
 

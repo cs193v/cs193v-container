@@ -16,7 +16,6 @@
 #   secret KEY... -> paste TEXT     read_secret: `stty -echo -icanon`, tallied, never echoed
 #   menu  KEY...  -> pick KEY       an arrow-key menu, whose KEYS ARE ITS OPTIONS IN ORDER
 #   include FLOW                    another flow, spliced in here
-#   optional                        everything after it in this flow may go unreached
 #
 # `pick` NAMES THE OPTION AND THE HARNESS COUNTS THE ARROWS. That is the half that makes a
 # reordered menu a one-line change rather than a hunt for `\033[B\033[B\n` at seven call sites --
@@ -92,22 +91,56 @@ include account-ok
 [[stuck]]
 menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.stuck
 
-# The same, for a run that may or may not reach it: 90-setup-git-github.sh runs against the real
-# GitHub, where the point is to find out WHETHER a probe fails.
-[[stuck-if-a-probe-failed]]
-optional
-menu    opt.followed-instructions opt.reenter-token opt.stuck  -> pick opt.stuck
+# THE SAME MENU IN A DIFFERENT ORDER after the one failure a retry cannot fix (#362): a token
+# created under the wrong Resource owner stays wrong, so re-entering it comes first.
+[[reenter-token-after-wrong-owner]]
+menu    opt.reenter-token opt.followed-instructions opt.stuck  -> pick opt.reenter-token
+include get-token
+include account-ok
+
+[[stuck-after-wrong-owner]]
+menu    opt.reenter-token opt.followed-instructions opt.stuck  -> pick opt.stuck
 
 # ─── the second run ────────────────────────────────────────────────────────────
+# ONE MENU PER VERDICT ON THE TOKEN (issue #357), and the order IS the verdict: whatever fixes it
+# comes first, because the highlighted option is the one a student takes. Named after the screen
+# rather than the choice, so a flow that lands on the wrong screen diverges at its first step.
+#
+# Re-entering the token from here passes through the GitHub checkpoint on its way to the token
+# prompt, which the in-run [[reenter-token]] above does not -- so it cannot be reused.
 
-[[second-run-check]]
-menu    opt.just-check opt.start-over opt.quit          -> pick opt.just-check
+[[verified-check]]
+menu    opt.just-check opt.reenter-token opt.start-over opt.quit     -> pick opt.just-check
 
-[[second-run-start-over]]
-menu    opt.just-check opt.start-over opt.quit          -> pick opt.start-over
+[[verified-retoken]]
+menu    opt.just-check opt.reenter-token opt.start-over opt.quit     -> pick opt.reenter-token
+include checkpoint-ok
+include get-token
+include account-ok
 
-[[second-run-quit]]
-menu    opt.just-check opt.start-over opt.quit          -> pick opt.quit
+[[verified-quit]]
+menu    opt.just-check opt.reenter-token opt.start-over opt.quit     -> pick opt.quit
+
+[[unfinished-check]]
+menu    opt.check-again opt.reenter-token opt.start-over opt.quit    -> pick opt.check-again
+
+[[unfinished-quit]]
+menu    opt.check-again opt.reenter-token opt.start-over opt.quit    -> pick opt.quit
+
+[[owner-retoken]]
+menu    opt.reenter-token opt.check-again opt.start-over opt.quit    -> pick opt.reenter-token
+include checkpoint-ok
+include get-token
+include account-ok
+
+[[owner-quit]]
+menu    opt.reenter-token opt.check-again opt.start-over opt.quit    -> pick opt.quit
+
+[[unchecked-start-over]]
+menu    opt.check-now opt.reenter-token opt.start-over opt.quit      -> pick opt.start-over
+
+[[unchecked-quit]]
+menu    opt.check-now opt.reenter-token opt.start-over opt.quit      -> pick opt.quit
 
 # ─── validation, as the student meets it ───────────────────────────────────────
 # EACH REJECTION IS A STEP, AND IT NAMES THE COMPLAINT IT EXPECTS. That is what replaces

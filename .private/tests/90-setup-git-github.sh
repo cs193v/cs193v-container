@@ -39,11 +39,12 @@
 #   CS193V_GH_EXPECT_ROW='git push'  CS193V_GH_EXPECT_KEY=err.push    <- Contents: Read-only
 #   CS193V_GH_EXPECT_ROW='gh issue'  CS193V_GH_EXPECT_KEY=err.issues  <- no Issues
 #   CS193V_GH_EXPECT_ROW='gh pr'     CS193V_GH_EXPECT_KEY=err.prs     <- no Pull requests
-#   CS193V_GH_EXPECT_ROW='git clone'                                  <- resource owner = you
+#   CS193V_GH_EXPECT_ROW='git clone' CS193V_GH_EXPECT_KEY=err.clone-wrong-owner  <- owner = you
 #
-# With neither set, the suite asserts a clean pass — the case to run with a correctly configured
-# token, and the one that proves the probe list is possible at all. Either way it records what
-# GitHub actually said under `github:what-github-said`; the messages in
+# BOTH OR NEITHER, since #364: the key says which conversation to expect, so a row with no key is
+# refused rather than guessed at. With neither set, the suite asserts a clean pass — the case to run
+# with a correctly configured token, and the one that proves the probe list is possible at all.
+# Either way it records what GitHub actually said under `github:what-github-said`; the messages in
 # files/setup-git-messages.txt should be written from that rather than from the documentation.
 #
 # ─── what it does to your machine, and to your container ───────────────────────
@@ -184,12 +185,6 @@ SG_RUN="$SG_RUN $NAME setup-git"
 # shellcheck disable=SC2034
 SG_TIMEOUT=600
 
-# Same clean first run 35-setup-git-shim.sh uses, named as flows rather than spelled out as
-# keystrokes. `stuck-if-a-probe-failed` is marked `optional` in the fixture, and that is the whole
-# difference this tier needs: whether a probe fails is the FINDING here rather than the fixture,
-# so those last three keys may legitimately go unreached and a run that never draws that menu is
-# not a failure. Spelled as keystrokes they were three keys nobody consumed and nothing recorded.
-
 # CS193V_GH_EXPECT_ROW IS CHECKED AGAINST THE FIVE REAL LABELS FIRST, because a typo in it reads
 # exactly like the finding this suite exists to produce. Measured the hard way: `git issues` instead
 # of `gh issue` reported "the expected row failed" as a FAILURE while the row that mattered was red
@@ -202,13 +197,42 @@ case "${EXPECT_ROW:-none}" in
         exit 1 ;;
 esac
 
+# WHICH CONVERSATION TO EXPECT, FROM THE KEY (#364): the clean first run 35-setup-git-shim.sh uses,
+# then, when a probe is expected to fail, the way out of that failure's menu. This used to be one
+# flow for every token, ending in an `optional` failure menu answered if it came -- and an optional
+# step waited 3 s from the step before it, less than the real probes take to reach the menu, so
+# nothing ever picked "I'm stuck". Named, the menu is waited for like any other screen.
+#
+# THE SECOND RUN FOLLOWS FROM THE SAME ANSWER (issue #357): it must say what the first run found,
+# and this is the only test anywhere that a real `gh auth token` fingerprints the same on the run
+# that records a verdict as on the run that reads it. The shim's token is a constant.
+FIRST='happy stuck'; SECOND=unfinished-quit
+case "$EXPECT_ROW|$EXPECT_KEY" in
+    '|')                        FIRST=happy; SECOND=verified-quit; LINE='' ;;
+    ?*'|err.clone-wrong-owner') FIRST='happy stuck-after-wrong-owner'; SECOND=owner-quit
+                                LINE=check.owner ;;
+    ?*'|err.clone')             LINE=check.sandbox ;;
+    ?*'|err.push')              LINE=check.contents ;;
+    ?*'|err.issues')            LINE=check.issues ;;
+    ?*'|err.prs')               LINE=check.prs ;;
+    *)  fail "github:expect-row-and-key-agree" \
+             "CS193V_GH_EXPECT_ROW='$EXPECT_ROW' CS193V_GH_EXPECT_KEY='$EXPECT_KEY':
+set both or neither, and the key to one of
+  err.clone-wrong-owner   err.clone   err.push   err.issues   err.prs"
+        exit 1 ;;
+esac
+if [ -n "$LINE" ]; then HEADING=already.unfinished; else HEADING=already.configured; fi
+record "github:expected-conversation" "$FIRST, then $SECOND"
+
 # THE FIRST STEP HAS TO ABSORB A COLD `podman exec`, which on this tier means pulling the image
 # layers into the container's page cache before setup-git prints anything. The shim tier's slowest
 # screen is about 1.6s; this one is not comparable, so the per-step ceiling is raised for the whole
 # run rather than the ceiling being guessed at per step.
 CS193V_DRIVE_STEP_SECS="${CS193V_DRIVE_STEP_SECS:-90}"
 export CS193V_DRIVE_STEP_SECS
-sg_run github happy stuck-if-a-probe-failed \
+# Unquoted on purpose: FIRST is one or two flow names.
+# shellcheck disable=SC2086
+sg_run github $FIRST \
        "ID=$TEST_ID" "NAME=CS193V Setup Test" "TOKEN=$CS193V_GH_TEST_TOKEN"
 out="$SG_OUT"
 plain="$(sg_plain "$out")"
@@ -230,7 +254,7 @@ if [ -n "$EXPECT_ROW" ]; then
     assert_match "github:the-expected-row-failed" "✗ $EXPECT_ROW" "$plain"
     assert_not_contains "github:no-earlier-row-failed" "✗ git clone" \
         "$(printf '%s' "$plain" | sed "s/✗ $EXPECT_ROW.*//")"
-    [ -n "$EXPECT_KEY" ] && sg_says "github:the-expected-message-appeared" "$EXPECT_KEY" "$out"
+    sg_says "github:the-expected-message-appeared" "$EXPECT_KEY" "$out"
     # The verbatim words, which is the whole reason to run this by hand.
     record "github:what-github-said" "$plain"
 else
@@ -240,6 +264,15 @@ else
     # outright — a self-review, a merge into a non-default branch — this is where it shows up.
     sg_has_times "github:twelve-rows-succeeded" 12 "✓" "$out"
 fi
+
+# AND THE NEXT RUN SAYS SO. Same throwaway HOME, so it reads the git config and the gh login the
+# run above left; it quits at the menu, so it probes nothing and leaves the sandbox alone.
+sg_run github-again "$SECOND"
+again="$SG_OUT"
+sg_says "github:the-next-run-says-what-this-one-found" "$HEADING" "$again"
+[ -n "$LINE" ] && sg_says "github:the-next-run-names-the-row" "$LINE" "$again"
+assert_not_contains "github:the-token-is-not-in-the-next-transcript" \
+                    "$CS193V_GH_TEST_TOKEN" "$(sg_unwrap "$again")"
 
 # THE SANDBOX IS LEFT AS IT WAS FOUND, on the failing path as well as the passing one. It belongs
 # to somebody — staff, or whoever CS193V_GH_TEST_ID names — so a suite that left branches in it

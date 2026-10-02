@@ -194,11 +194,19 @@ CS193V_GH_TEST_TOKEN=<no Issues>            CS193V_GH_EXPECT_ROW='gh issue' \
 CS193V_GH_TEST_TOKEN=<no Pull requests>     CS193V_GH_EXPECT_ROW='gh pr' \
   CS193V_GH_EXPECT_KEY=err.prs     .private/tests/run-tests.sh --tier github
 CS193V_GH_TEST_TOKEN=<resource owner: you>  CS193V_GH_EXPECT_ROW='git clone' \
-  .private/tests/run-tests.sh --tier github
+  CS193V_GH_EXPECT_KEY=err.clone-wrong-owner  .private/tests/run-tests.sh --tier github
 ```
-*Expect:* the named row fails and no earlier one does. The suite records what GitHub said verbatim
-(`github:what-github-said`) — **rewrite the message in `setup-git-messages.txt` from that rather
-than from the docs** if the two disagree.
+The key is required since #364: it tells the suite which way out of the failure menu to take, so
+the run waits for that menu by name. For the last one, `err.clone` instead if §3 below finds that
+the owner discriminator cannot fire from your account.
+
+*Expect:* the named row fails and no earlier one does, and then a second run — the same throwaway
+HOME, quitting at the menu — says what the first found (issue #357): `already.unfinished` and the
+`check.*` line for that row, or `already.configured` after a clean pass. That second run is the only
+place anything shows that a real `gh auth token` fingerprints the same on the run that records a
+verdict as on the run that reads it; the shim's token is a constant. The suite records what GitHub
+said verbatim (`github:what-github-said`) — **rewrite the message in `setup-git-messages.txt` from
+that rather than from the docs** if the two disagree.
 
 **Measured 2026-08-17**, three of the four, against the image's gh 2.97:
 
@@ -313,6 +321,13 @@ on.
   human's eyes on whether that is enough**, and worth knowing that shortening any of the five
   messages is the lever if it is not.
 - The green ALL SET box closed and square on the right.
+- **The second run tells a failed setup from a working one** (issue #357). Make a token with
+  *Contents* left at *Read-only*, run `setup-git`, and choose *I'm stuck* at the `git push` failure.
+  Run it again: the screen must say *Setup isn't finished yet*, not *already set up*, with an
+  `Access token:` line naming `git push`, and *I've fixed my token on GitHub* highlighted. Set
+  *Contents* to *Read and write* on GitHub, choose that option, and expect ALL SET; a third run then
+  says *already set up*. No test measures height, so count these screens' rows too: the heading,
+  five fields and a four-option menu should leave them well inside 23.
 
 *Automated:* the glyphs, the messages, the ordering, the redaction, the tally's count and width,
 and the cursor sequences (`35-setup-git-shim.sh`), plus that the terminal is handed back with echo
