@@ -235,7 +235,7 @@ assert_fail "missing:reports-an-error" "$REPO/cs193v" --dev-steps "$WORK/does-no
 # A LITERAL ON PURPOSE, unlike the forward counts #46 derived: deriving this from the same parse
 # it is checking would assert nothing at all. It is a canary -- add a layer and the number moves,
 # so you are made to look. Codex moved it by TWO, from 22, because `ARG` is an instruction in its
-# own right and takes a step of its own beside the `RUN`. Layer 6b moved it by one: a RUN, no ARG.
+# own right and takes a step of its own beside the `RUN`.
 assert_eq "real:parses-every-instruction" "25" "$(count "$PRIVATE/Containerfile")"
 assert_match "real:first-step-is-the-base-image" \
              '^1	Downloading the base image\.\.\.	FROM ubuntu:' "$(steps "$PRIVATE/Containerfile")"

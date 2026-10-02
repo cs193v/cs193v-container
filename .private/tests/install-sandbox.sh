@@ -137,7 +137,7 @@ OPTIONS
   --no-net             cut the container off from the network (--network=none).  ON by default
                        for a REAL podman, because the default machine's whole point is that the
                        install runs all the way through and the launcher's build reaches seven
-                       origins -- offline it always stops at STEP 1/25 with a DNS error.  Off
+                       origins -- offline it always stops at STEP 1 with a DNS error.  Off
                        by default with --fake-podman or --base podman-old, which build nothing
   --net                explicit form of the default; accepted so a habit does not break
   --keep               leave the container behind on exit instead of removing it
@@ -262,7 +262,7 @@ if [ "$PLATFORM" = wsl ] && [ -z "$WSLCONF" ]; then WSLCONF=noboot; fi
 # principle as the two axes: the default is the case that SUCCEEDS, and a failure is something
 # you ask for. It used to be off always, and that made the default machine -- everything present,
 # nothing denied -- guaranteed to fail at its very last step, in the launcher's build, with a DNS
-# error from STEP 1/25. The tool printed a note about it before you had a prompt, which is
+# error from STEP 1. The tool printed a note about it before you had a prompt, which is
 # minutes and a screenful before you type `sandbox run`; a warning nobody can see when it matters
 # is the same as no warning.
 if [ -z "$NET" ]; then

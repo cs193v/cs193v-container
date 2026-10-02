@@ -1889,6 +1889,13 @@ fi
 unnamed="$("$REPO/cs193v" --dev-steps | awk -F'\t' '$2 == "" { print $1": "$3 }')"
 assert_eq  "containerfile:every-step-has-a-label" "" "$unnamed"
 
+# AND NO RUN BORROWS THE PREVIOUS RUN'S LABEL. Because markers are sticky, a layer added without
+# one is not unnamed -- it silently wears the layer above's, and the student reads "Installing the
+# Vercel CLI..." while apt runs. The check above cannot see that; this does, for any layer.
+borrowed="$("$REPO/cs193v" --dev-steps \
+    | awk -F'\t' '$3 ~ /^RUN / { if ($2 == prev) print $1": "$2; prev = $2 }')"
+assert_eq  "containerfile:no-run-borrows-the-previous-label" "" "$borrowed"
+
 # The tail of the file -- ENV, USER, WORKDIR, ENTRYPOINT and the LABEL podman synthesizes from
 # the launcher's --label flag -- has no marker of its own and inherits the last one. That is
 # only correct if the last marker is a closing one rather than the name of a specific job, so
@@ -2294,7 +2301,11 @@ assert_ok  "man:build-checks-the-stub-took" \
 # only because openssh-server Depends on openssh-client, which is not a promise. If the
 # tunnel ever stopped needing sshd, they would vanish and the only symptom would be a lab
 # exercise that no longer works.
-apt_line="$(sed -n '/^RUN apt-get update/,/rm -rf \/var\/lib\/apt\/lists/p' $PRIVATE/Containerfile)"
+#
+# EVERY `apt-get install` IN THE FILE, not just layer 1's: packages added after release go on
+# layer 6b's line, and bans that read only layer 1 would guard the line that no longer grows.
+# Read from cf_code, so prose that mentions apt-get cannot open a range.
+apt_line="$(printf '%s\n' "$cf_code" | sed -n '/apt-get install/,/rm -rf \/var\/lib\/apt\/lists/p')"
 assert_contains "net:openssh-client-named-explicitly" "openssh-client" "$apt_line"
 assert_contains "net:telnet-installed"                "inetutils-telnet" "$apt_line"
 # `telnet` on Ubuntu 26.04 is a transitional dummy whose whole content is a dependency on
