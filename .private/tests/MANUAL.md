@@ -1188,6 +1188,18 @@ comfortably above the floor and #217 did not raise it.
 `--name` also rejects **legacy** Store distributions (`'--name' is not supported when installing
 legacy distributions.`), so a fallback to `-d Ubuntu` on an old WSL would fail here too.
 
+### `host` on macOS and WSL  (#358)
+Inside the container, on a Mac and on a Windows machine:
+```sh
+host stanford.edu          # expect: "has address" and "has IPv6 address" lines
+host nosuchname.invalid    # expect: "not found: 3(NXDOMAIN)"
+```
+*Why by hand:* `60-container.sh`'s `net:host-resolves` runs only where the suite does. On a Mac
+the query is answered by gvproxy, which rebuilds A/MX/TXT answers itself and forwards AAAA raw.
+On WSL it is answered by DNS tunneling, which hands it to Windows. Neither is the pasta-to-host
+path that Linux measures. Don't demo `host localhost`: `host` skips `/etc/hosts`, so the answer
+is the student's resolver's, and 1.1.1.1 and 8.8.8.8 say NXDOMAIN.
+
 ### install-cs193v-windows.cmd — what wine cannot answer
 `.private/tests/run-tests.sh --tier windows` executes the whole file under wine's cmd.exe and
 reaches every branch target in it. Read the count off

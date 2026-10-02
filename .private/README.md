@@ -1615,7 +1615,31 @@ and undetectable on one); `--cap-drop` / `no-new-privileges`
 (mutually exclusive with the sudo decision, and they would buy nothing since root owns
 the tamper targets); a `serve` wrapper; ripgrep/fzf/bat/fd/delta; man pages;
 terminal image viewers; egress filtering; `/etc/gitconfig`; a `cs193v install` verb;
-`podman diff` tamper detection.
+`podman diff` tamper detection; `dig`/`nslookup` (bind9-dnsutils — `host` is what the
+networking lecture uses, #358); ImageMagick (below).
+
+**ImageMagick, and why not (#359).** Measured on 26.04, three things decided it:
+
+- **It is in universe, and it is not being patched.** As of 2026-10-01 the archive carries only
+  the release build, 7.1.2-18, while the main-archive image libraries it pulls in (libheif, libraw,
+  libopenjp2, libtiff) have all had post-release updates. Upstream fixes decoder memory bugs at a
+  steady clip, so every student's build would carry them for the quarter, and rebuilding fetches
+  the same version.
+- **Ubuntu's stock policy leaves the dangerous coders on.** It blocks URL fetches, `@file`
+  indirection and oversized images, but not `text:` or `msl:`. With
+  `libmagickcore-7.q16-10-extra` installed (without it, SVG does not load at all), an SVG whose
+  `<image>` points at `text:/path` renders that file into the output, and one pointing at `msl:`
+  runs an ImageMagick script that writes files. Both were demonstrated against a stand-in token.
+  `<policy domain="coder" rights="none" pattern="{MSL,TEXT}" />` closes both and leaves ordinary
+  SVG working. Denying `MVG` as well breaks SVG, because that is how ImageMagick renders it. But
+  it is a denylist over ~200 coders, of which these are only the well-known two.
+- **The Python half was never missing.** #359 assumed Pillow was installed, and it is not, by the
+  rule that keeps every library out of the image. `pip3 install pillow` takes 2.4 s and 21 MB, and
+  its wheel reads JPEG, WebP and AVIF.
+
+What would reopen it: Ubuntu moving it to main or patching it in -updates, or a course need for
+command-line image work that Pillow cannot meet. If it comes back, it comes with the `{MSL,TEXT}`
+policy and a test that a crafted SVG cannot read a file.
 
 **No longer on this list: a browser.** "puppeteer and Chrome" was rejected and that decision
 is now reversed — the course's test harnesses are browser tests, so `npm test` needs one. It

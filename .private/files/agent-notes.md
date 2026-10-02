@@ -20,8 +20,8 @@ localhost is SSH forwarded to this container's localhost over IPv4, so:
 **`cs193v-portwatch --show` answers "is my port reachable, and if not why"** from in here, which
 is the first thing to run when the student says their browser cannot get to their server. It
 lists each port with either `up` or the reason it was refused. `ss -ltn` shows what is actually
-listening and at which address; `lsof -i` names the process holding a port. All are installed;
-do not install network tools.
+listening and at which address; `lsof -i` names the process holding a port; `host <name>` looks a
+name up in DNS. All are installed; do not install network tools.
 
 If `--show` says a port is `busy`, another program on the student's own computer is holding that
 number — pick a different one, or have them quit it. For anything `--show` cannot explain, the

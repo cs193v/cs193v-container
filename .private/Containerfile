@@ -87,6 +87,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 1 — system packages
+#
+# Ubuntu packages added after release go in layer 6b, not here. See there for why.
 # ─────────────────────────────────────────────────────────────────────────────
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -449,6 +451,54 @@ RUN set -eux; \
     /home/student/.local/bin/vercel --version
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Layer 6b — shell completion, `host` and bubblewrap, from Ubuntu
+#
+# 6b BECAUSE IT WAS INSERTED AFTER RELEASE. Renumbering would have meant rewording every place that
+# cites layers 7 to 9 by number.
+#
+# THE ONE LATE APT LAYER. Ubuntu packages added after release go on this line, not on layer 1's and
+# not in a layer of their own, and that is a rebuild-cost decision. A recipe change re-runs its step
+# and every step after it. So a package added to layer 1 costs every installed student a full
+# rebuild (224-242 s, ~728 MB), while one added here re-runs this layer, Codex and Claude Code.
+# MEASURED as the rebuild an installed student got when this layer arrived: 78 s, and ~257 MB
+# received on the host's interface. It sits ABOVE `ARG CODEX_VERSION` so that neither of the pins
+# expected to move ever re-runs an apt step, and 10-static.sh's
+# containerfile:no-apt-from-the-codex-arg-down holds that line. The next time the FROM digest
+# moves, every step re-runs anyway: fold this into layer 1 then.
+#
+# `RUN set -eux`, not `RUN apt-get update`: 10-static.sh reads layer 1's package list as the range
+# that starts at that exact text, and would sweep this layer into it.
+#
+# bind9-host, NOT `host`, which on 26.04 is a virtual package that bind9-host Provides. The real
+# name goes on the line for the reason inetutils-telnet's does. It is the networking lecture's demo
+# (#358), and it asks the server in /etc/resolv.conf directly, skipping /etc/hosts and nsswitch. So
+# `host localhost` is the student's resolver's opinion: systemd-resolved and 9.9.9.9 answer
+# 127.0.0.1, while 1.1.1.1 and 8.8.8.8 say NXDOMAIN. curl and the browser read /etc/hosts.
+# bind9-dnsutils (dig, nslookup) is deliberately absent; see the staff README.
+#
+# bash-completion needs no configuration (#349). Ubuntu's skel ~/.bashrc sources it when it is
+# present, and the package adds /etc/profile.d/bash_completion.sh; a tab is a login shell, so it
+# loads through both. What it buys was mostly on disk already: git and gh ship completion files here
+# that nothing loaded until now. It is interactive-only: `bash -c` and `bash -lc`, the forms agents
+# and scripts run commands in, never load it. A new tab costs about 20 ms more on an idle machine
+# and about 80 ms at load average 7, timed as `bash -lic exit` with both loads included. One side
+# effect: it turns on `extglob`, and Claude Code's shell snapshot carries that option into the
+# agent's commands. The snapshot drops the completion functions themselves, which all start
+# with `_`.
+#
+# bubblewrap is codex's, and it is here rather than beside codex for the rebuild-cost reason above.
+# See layer 7 for what it is for.
+# ─────────────────────────────────────────────────────────────────────────────
+####> Installing command-line tools...
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bash-completion bind9-host bubblewrap; \
+    rm -rf /var/lib/apt/lists/*; \
+    bwrap --version; \
+    host -V; \
+    test -r /usr/share/bash-completion/bash_completion
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Layer 7 — OpenAI Codex
 #
 # BEFORE Claude Code, not after, and that ordering is a cache-cost decision rather than a
@@ -489,11 +539,10 @@ RUN set -eux; \
 # binary that installs perfectly happily -- which is what the Chromium check was written for
 # after puppeteer#7740.
 #
-# BUBBLEWRAP IS HERE AND NOT ON LAYER 1'S apt LINE, which will look like untidiness to whoever
-# reads this next. It is a build-cost decision: layer 1 sits above everything, so adding a
-# package there turns any future change to this file into a full ~2.5 GB rebuild for every
-# student instead of re-running the layers from here down. Layer 4 already establishes the shape
-# -- an apt install as root in a later layer, beside an npm install as the student.
+# BUBBLEWRAP IS INSTALLED IN LAYER 6b, not here and not on layer 1's apt line, and both are
+# build-cost decisions. A package added to layer 1 costs every student a full rebuild, and an apt
+# step here, below `ARG CODEX_VERSION`, would refetch Ubuntu's package lists on every codex bump. It
+# lived in this layer until #349 and #358 gave layer 6b a reason to exist.
 #
 # What it buys is exact, and it is not a sandbox. codex ships its own vendored bwrap but prefers
 # a system one, warning at every start when there is none: "Codex could not find system
@@ -531,10 +580,6 @@ RUN set -eux; \
 ####> Installing Codex...
 ARG CODEX_VERSION=0.148.0
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends bubblewrap; \
-    rm -rf /var/lib/apt/lists/*; \
-    bwrap --version; \
     su student -s /bin/sh -c "npm install -g '@openai/codex@${CODEX_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
     su student -s /bin/sh -c '/home/student/.local/bin/codex --version' | grep -qF "${CODEX_VERSION}"; \
