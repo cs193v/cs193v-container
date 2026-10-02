@@ -90,6 +90,20 @@ TOKEN_MID=87
 # that says which screen it answers.
 SG_DEFAULT_TOKEN="$TOKEN"
 
+# THE SECOND-RUN SCREENS' "Your SUNetID:" LABEL, read from the catalogue once and GUARDED, like
+# the staff box's two above. msg_label prints nothing for a key or placeholder it cannot find, and
+# an empty label leaves the needle " jdoe" -- which the email row, jdoe@stanford.edu, satisfies.
+SG_ID_LABEL="$(msg_label already.fields ID "$PRIVATE/files/setup-git-messages.txt")"
+assert_ne "already:the-sunetid-label-was-readable" "" "$SG_ID_LABEL"
+
+# THE TOKEN THE FAKE gh HANDS BACK, read from the fake rather than copied out of it. It is a stand-
+# in for $TOKEN (lib/gh-fake keeps nothing it is given), and it is the value setup-git actually
+# reads back to fingerprint -- so it is the one the leak assertions on the second run look for.
+sg_new
+sg_touch auth_token
+SG_FAKE_TOKEN="$(CS193V_SGSHIM="$SGSHIM" "$SGSHIM/gh" auth token)"
+assert_match "fake:the-stand-in-token-was-readable" '^github_pat_' "$SG_FAKE_TOKEN"
+
 # ─── the happy path ────────────────────────────────────────────────────────────
 sg_new
 sg_run happy happy
@@ -405,6 +419,16 @@ assert_file "fail-clone:the-shim-really-has-files-to-search" "$SGSHIM/argv.log"
 assert_eq   "fail-clone:the-token-is-on-no-file-this-run-left" "" \
             "$(grep -rl -- "$TOKEN" "$SGSHIM" 2>/dev/null || true)"
 
+# AND THE NEXT RUN SAYS WHICH ROW IT WAS (issue #357). Each of the five failures is recorded under
+# its own word and shown as its own line on the second run, so these four blocks and wrong-owner's
+# each end with one -- a mapping that sent two failures to the same line would leave one of them
+# describing the wrong permission to the student who has to fix it. Run again IN THE SAME SHIM, so
+# the second run reads what the first really left, with nothing failing any more.
+sg_recorded "fail-clone:records-the-sandbox" sandbox
+sg_unset fail_at
+sg_run fail-clone-again unfinished-quit
+sg_says "fail-clone:the-next-run-names-the-sandbox" check.sandbox "$SG_OUT"
+
 sg_new
 sg_set fail_at 'push -q origin cs193v-setup'
 sg_run fail-push happy stuck
@@ -420,6 +444,46 @@ sg_says "fail-push:blames-contents" err.push "$SG_OUT"
 assert_eq       "fail-push:clone-and-pull-still-passed" "2" \
                 "$(sg_plain "$SG_OUT" | LC_ALL=C grep -oE '✓ git (clone|pull)' | LC_ALL=C grep -c . || true)"
 assert_eq       "fail-push:nothing-after-it-ran" "0" "$(sg_count 'gh issue')"
+sg_recorded "fail-push:records-contents" contents
+
+# THE CASE ISSUE #357 IS ABOUT, and it carries on from here in the same shim. The student gave up
+# at that failure -- at the staff box, which is why the verdict is written BEFORE the menu -- and
+# the next run must not call that set up, must say the token is the problem and which permission,
+# and must offer the retry first: Read-only Contents is fixed on GitHub, on the token it has.
+first="$SG_OUT"
+firstlog="$(sg_log)"
+before="$(sg_config)"
+sg_unset fail_at
+sg_run unfinished unfinished-quit
+sg_says "unfinished:says-setup-is-not-finished" already.unfinished "$SG_OUT"
+sg_says_not "unfinished:does-not-say-it-is-set-up" already.configured "$SG_OUT"
+sg_says "fail-push:the-next-run-names-contents" check.contents "$SG_OUT"
+sg_has "unfinished:still-shows-the-sunetid" "$SG_ID_LABEL jdoe" "$SG_OUT"
+assert_eq "unfinished:quitting-runs-no-probes" "0" "$(sg_count 'git clone')"
+assert_eq "unfinished:quitting-configures-nothing" "$before" "$(sg_config)"
+# THE TOKEN, AND THE ONE gh HANDS BACK, ARE IN NONE OF IT. The record is made from what `gh auth
+# token` prints, which in this shim is the fake's stand-in rather than $TOKEN -- so the stand-in is
+# what a leak through the new code would carry, and the assertions on $TOKEN alone cannot see it.
+# The fake gh itself holds the stand-in, so that one is looked for in the record, the log and the
+# screens rather than in every file.
+assert_eq "unfinished:the-token-is-on-no-file-either-run-left" "" \
+          "$(grep -rl -- "$TOKEN" "$SGSHIM" 2>/dev/null || true)"
+assert_not_contains "unfinished:the-stand-in-is-not-in-the-record" "$SG_FAKE_TOKEN" "$(sg_config)"
+assert_not_contains "unfinished:the-stand-in-is-not-in-the-log" "$SG_FAKE_TOKEN" \
+                    "$(sg_unwrap "$firstlog$(sg_log)")"
+assert_not_contains "unfinished:the-stand-in-is-not-in-the-staff-box" "$SG_FAKE_TOKEN" \
+                    "$(sg_unwrap "$(sg_box "$first")")"
+assert_not_contains "unfinished:the-stand-in-is-not-on-either-screen" "$SG_FAKE_TOKEN" \
+                    "$(sg_unwrap "$first$SG_OUT")"
+# And "I've fixed my token on GitHub" really does check again, with the token already pasted -- the
+# quit above changed nothing -- and a pass is remembered: the run after it is told it is set up.
+sg_run check-again unfinished-check
+sg_says "check-again:passes-once-fixed" status.all-set "$SG_OUT"
+assert_eq "check-again:does-not-ask-for-the-token" "0" \
+          "$(sg_asks "$SG_OUT" "$(sg_phrase prompt.token)")"
+sg_recorded "check-again:records-the-pass" passed
+sg_run check-again-after verified-quit
+sg_says "check-again:the-run-after-is-set-up" already.configured "$SG_OUT"
 
 sg_new
 sg_set fail_at 'issue create'
@@ -427,24 +491,35 @@ sg_run fail-issue happy stuck
 sg_says "fail-issue:blames-issues" err.issues "$SG_OUT"
 sg_says_not "fail-issue:does-not-blame-contents" err.push "$SG_OUT"
 assert_eq       "fail-issue:nothing-after-it-ran" "0" "$(sg_count 'gh pr create')"
+sg_recorded "fail-issue:records-issues" issues
+sg_unset fail_at
+sg_run fail-issue-again unfinished-quit
+sg_says "fail-issue:the-next-run-names-issues" check.issues "$SG_OUT"
 
 sg_new
 sg_set fail_at 'pr create'
 sg_run fail-pr happy stuck
 sg_says "fail-pr:blames-pull-requests" err.prs "$SG_OUT"
 sg_says_not "fail-pr:does-not-blame-issues" err.issues "$SG_OUT"
+sg_recorded "fail-pr:records-prs" prs
+sg_unset fail_at
+sg_run fail-pr-again unfinished-quit
+sg_says "fail-pr:the-next-run-names-pull-requests" check.prs "$SG_OUT"
 
 # ─── the token created under the wrong account ─────────────────────────────────
 # The most likely mistake and the only unrecoverable one: resource owner cannot be changed after
 # a token exists. It produces exactly the same 404 as three other causes, so the message is
 # earned by evidence — the repositories the token CAN see belong to the student and none belong to
 # the organization — and falls back to the four-item checklist when the evidence is not there.
+sg_wrong_owner() {                    # the fakes' answer to a token owned by the student
+    sg_set fail_at 'clone'
+    sg_set fail_rc 128
+    sg_set fail_err 'fatal: repository not found'
+    sg_set owners 'janedoe'
+}
 sg_new
-sg_set fail_at 'clone'
-sg_set fail_rc 128
-sg_set fail_err 'fatal: repository not found'
-sg_set owners 'janedoe'
-sg_run wrong-owner happy stuck
+sg_wrong_owner
+sg_run wrong-owner happy stuck-after-wrong-owner
 sg_says "wrong-owner:says-so-outright" err.clone-wrong-owner "$SG_OUT"
 sg_has     "wrong-owner:names-the-account" "@janedoe" "$SG_OUT"
 sg_says_not "wrong-owner:not-the-generic-checklist" err.clone "$SG_OUT"
@@ -457,10 +532,41 @@ sgbox="$(sg_box "$SG_OUT")"
 assert_says "wrong-owner:box-quotes-the-clone-failure"    "fatal: repository not found" "$sgbox"
 assert_says "wrong-owner:box-reports-the-clone-exit-code" "$SGD_RC 128"                "$sgbox"
 sg_has_not  "wrong-owner:box-does-not-quote-the-owner-probe" "janedoe" "$sgbox"
+sg_recorded "wrong-owner:records-the-owner" owner
+
+# AND THE NEXT RUN PUTS RE-ENTERING THE TOKEN FIRST TOO (#362), since a retry cannot fix this one.
+# Re-entering from there asks for the token and nothing else -- the SUNetID and the name were right
+# -- and shows the checkpoint again, because accepting the invitation is half of making a token
+# under the right owner. The flow names the menu's order, so a retry-first menu diverges.
+sg_unset fail_at
+sg_run unfinished-owner owner-retoken
+sg_says "unfinished-owner:names-the-owner" check.owner "$SG_OUT"
+sg_says_not "unfinished-owner:does-not-ask-for-the-sunetid" prompt.sunetid "$SG_OUT"
+sg_says_not "unfinished-owner:does-not-ask-for-the-name"    prompt.name    "$SG_OUT"
+assert_eq "unfinished-owner:asks-for-the-token-once" "1" \
+          "$(sg_asks "$SG_OUT" "$(sg_phrase prompt.token)")"
+sg_says "unfinished-owner:then-gets-there" status.all-set "$SG_OUT"
+sg_run unfinished-owner-after verified-quit
+sg_says "unfinished-owner:the-run-after-is-set-up" already.configured "$SG_OUT"
+
+# AND THE WAY OUT IS TO PASTE A NEW TOKEN, so that comes first (#362). The message just said this
+# token cannot be fixed; the option that used to be first re-ran the probes with it, and a student
+# who had done as told and made a new one picked it, because it describes what they did. Every
+# pass round that loop failed identically. Here the student re-enters, and the clone count says the
+# old token was never probed again in between: one clone per token pasted, and no more.
+sg_new
+sg_wrong_owner
+sg_run wrong-owner-retoken happy reenter-token-after-wrong-owner stuck-after-wrong-owner
+assert_eq "wrong-owner-retoken:asks-for-the-token-twice" "2" \
+          "$(sg_asks "$SG_OUT" "$(sg_phrase prompt.token)")"
+sg_says_times "wrong-owner-retoken:asks-for-the-sunetid-once" 1 prompt.sunetid "$SG_OUT"
+assert_eq "wrong-owner-retoken:one-clone-per-token" "2" "$(sg_count 'git clone')"
 
 # Ambiguous evidence must NOT produce the specific message. An empty list means the token can see
 # nothing at all, which is consistent with several causes, and guessing wrong here sends a student
-# to throw away a token that was fine.
+# to throw away a token that was fine. AND IT KEEPS THE ORDINARY MENU -- `stuck`, not the reordered
+# one -- which makes this and org-visible the controls for #362: the checklist they show is mostly
+# fixed on the token already pasted, so "I followed those instructions" stays first.
 sg_new
 sg_set fail_at 'clone'
 sg_set owners ''
@@ -663,8 +769,9 @@ sg_new
 sg_run checkpoint-help identity checkpoint-help
 sg_says "checkpoint-help:ends-in-the-staff-box" err.setup-failed "$SG_OUT"
 sg_says_not "checkpoint-help:never-asks-for-a-token" token.paste "$SG_OUT"
-assert_eq "checkpoint-help:configures-nothing" "0" \
-          "$(sg_count 'git config --global [a-z.]+ .')"
+# A FRESH SHIM HAS NO GIT CONFIG AT ALL, so any write -- under any key, with or without a flag --
+# is a file where there was none. Counting argv for writes could not see cs193v.* keys (#363).
+assert_eq "checkpoint-help:configures-nothing" "" "$(sg_config)"
 
 # ─── a failed config command ───────────────────────────────────────────────────
 # The other route into the staff box, and the one issue #49 spells out: a `git config` that fails
@@ -687,30 +794,88 @@ assert_eq "config-fails:never-reached-the-login" "0" "$(sg_count 'gh auth login'
 # Re-running is the normal case, not an edge one: a token expires, a permission was wrong, or
 # --rebuild --logout cleared the volumes. Re-asking for a name and an address that are already
 # right is the wrong answer to any of those.
+#
+# AND WHAT IT SAYS DEPENDS ON THE LAST CHECK OF THIS TOKEN (issue #357). "Already set up" used to
+# mean only that the five things it lists exist -- and a token with the wrong permissions has all
+# five. The cases where the first run FAILED sit with the failures they follow, above; fail-push is
+# the one the issue is about. These start from a run that PASSED: one real run, and each case
+# starts from a copy of what it left, so a second run reads what a first run really wrote rather
+# than a config this file wrote by hand -- without paying for the first run once per case.
 sg_new
-sg_touch auth_token
-printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
-sg_run second-run second-run-check
+sg_run passed-seed happy
+SG_PASSED="$SGSHIM"
+sg_recorded "passed-seed:records-the-pass" passed
+
+sg_new_from "$SG_PASSED"
+before="$(sg_config)"
+sg_run second-run verified-check
 sg_says "second-run:says-it-is-already-set-up" already.configured "$SG_OUT"
+sg_says_not "second-run:does-not-say-it-is-unfinished" already.unfinished "$SG_OUT"
 sg_has "second-run:shows-the-name"    "Jane Doe"          "$SG_OUT"
 sg_has "second-run:shows-the-address" "jdoe@stanford.edu" "$SG_OUT"
-sg_has "second-run:shows-the-sunetid" \
-       "$(msg_label already.configured ID "$PRIVATE/files/setup-git-messages.txt") jdoe" "$SG_OUT"
+sg_has "second-run:shows-the-sunetid" "$SG_ID_LABEL jdoe" "$SG_OUT"
 sg_has "second-run:shows-the-account" "@janedoe"          "$SG_OUT"
 sg_says_not "second-run:does-not-ask-again" prompt.sunetid "$SG_OUT"
 sg_says "second-run:just-checks-and-passes" status.all-set "$SG_OUT"
 # AND IT PROBED THE RIGHT REPOSITORY, which is the whole reason the SUNetID is stored at all: the
 # second run never asks a question, so the only place sandbox-jdoe can come from is the config.
 assert_match "second-run:probes-the-students-own-sandbox" 'clone .*sandbox-jdoe' "$(sg_log)"
-assert_eq "second-run:configures-nothing" "0" \
-          "$(sg_count 'git config --global [a-z.]+ .')"
+# NOT EVEN THE RECORD. A re-check that passes says what the record already says, so rewriting it
+# would be a write a student never asked for on a setup that was already right.
+assert_eq "second-run:configures-nothing" "$before" "$(sg_config)"
+
+# AND A SETUP THAT WORKS CAN STILL HAVE ITS TOKEN REPLACED without being started over -- the
+# option a student wants when a token is about to expire, or was made under the wrong name.
+sg_new_from "$SG_PASSED"
+sg_run verified-retoken verified-retoken
+assert_eq "verified-retoken:asks-for-the-token-once" "1" \
+          "$(sg_asks "$SG_OUT" "$(sg_phrase prompt.token)")"
+sg_says_not "verified-retoken:does-not-ask-for-the-sunetid" prompt.sunetid "$SG_OUT"
+sg_says_not "verified-retoken:does-not-ask-for-the-name"    prompt.name    "$SG_OUT"
+sg_says "verified-retoken:then-gets-there" status.all-set "$SG_OUT"
+
+# A VERDICT BELONGS TO THE TOKEN IT WAS MEASURED ON. One swapped in some other way -- a `gh auth
+# login` by hand -- has not been checked by anybody, and inheriting a `passed` would put this
+# issue back by a rarer road.
+sg_new_from "$SG_PASSED"
+SWAPPED="github_pat_22SWAPPEDccccccccccccc_$(printf 'c%.0s' $(seq 1 59))"
+sg_set auth_token "$SWAPPED"
+sg_run swapped-token unchecked-quit
+sg_says "swapped-token:says-it-is-unchecked" already.unchecked "$SG_OUT"
+sg_says "swapped-token:says-the-token-is-unchecked" check.unchecked "$SG_OUT"
+sg_says_not "swapped-token:does-not-say-it-is-set-up" already.configured "$SG_OUT"
+assert_not_contains "swapped-token:not-on-the-screen" "$SWAPPED" "$(sg_unwrap "$SG_OUT")"
+assert_not_contains "swapped-token:not-in-the-log"    "$SWAPPED" "$(sg_unwrap "$(sg_log)")"
+
+# AND TO THE SANDBOX IT WAS MEASURED AGAINST. A passing run as jdoe says nothing about jdo's
+# repository: a start-over that typed a different SUNetID and then stopped before the probes would
+# otherwise come back "already set up" over a sandbox nothing ever reached.
+sg_new_from "$SG_PASSED"
+printf 'cs193v.sunetid=jdo\n' >> "$SGSHIM/gitconfig"
+sg_run sunetid-changed unchecked-quit
+sg_says "sunetid-changed:says-it-is-unchecked" already.unchecked "$SG_OUT"
+sg_says_not "sunetid-changed:does-not-say-it-is-set-up" already.configured "$SG_OUT"
+
+# A NETWORK FAILURE SAYS NOTHING ABOUT THE TOKEN, so it leaves the verdict where it was.
+sg_new_from "$SG_PASSED"
+sg_set fail_at 'clone'
+sg_set fail_err 'fatal: unable to access: Could not resolve host: github.com'
+sg_run network-recheck verified-check
+sg_says "network-recheck:blames-the-network" err.network "$SG_OUT"
+sg_unset fail_at
+sg_run network-after verified-quit
+sg_says "network-recheck:still-set-up-afterwards" already.configured "$SG_OUT"
 
 # "Start over" does ask again, and that is the option that exists for a student whose name or
-# address was wrong.
+# address was wrong. SEEDED BY HAND, which is also the config of anyone who set up before #357:
+# nothing recorded a verdict, so the screen says the token has not been checked -- not that it
+# failed, which for every one of them would be false.
 sg_new
 sg_touch auth_token
 printf 'user.name=Wrong Name\nuser.email=wrong@stanford.edu\ncs193v.sunetid=wrong\n' > "$SGSHIM/gitconfig"
-sg_run start-over second-run-start-over happy
+sg_run start-over unchecked-start-over happy
+sg_says "start-over:a-config-with-no-verdict-is-unchecked" already.unchecked "$SG_OUT"
+sg_says_not "start-over:and-not-unfinished" already.unfinished "$SG_OUT"
 sg_says "start-over:asks-for-the-sunetid-again" prompt.sunetid "$SG_OUT"
 assert_match "start-over:configures-the-new-answer" 'user.email jdoe@stanford.edu' "$(sg_log)"
 assert_match "start-over:records-the-new-sunetid" 'cs193v.sunetid jdoe' "$(sg_log)"
@@ -718,20 +883,29 @@ assert_match "start-over:records-the-new-sunetid" 'cs193v.sunetid jdoe' "$(sg_lo
 # start-over that reset the name and the address but not the ID would clone somebody else's repo.
 assert_not_match "start-over:does-not-probe-the-old-sandbox" 'sandbox-wrong' "$(sg_log)"
 
-# And "nothing, thanks" changes nothing at all.
+# And "nothing, thanks" changes nothing at all, from either kind of screen.
+sg_new_from "$SG_PASSED"
+before="$(sg_config)"
+sg_run quit verified-quit
+assert_eq "quit:runs-no-probes" "0" "$(sg_count 'git clone')"
+assert_eq "quit:configures-nothing" "$before" "$(sg_config)"
+sg_says_not "quit:does-not-claim-success" status.all-set "$SG_OUT"
 sg_new
 sg_touch auth_token
 printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
-sg_run quit second-run-quit
-assert_eq "quit:runs-no-probes" "0" "$(sg_count 'git clone')"
-sg_says_not "quit:does-not-claim-success" status.all-set "$SG_OUT"
+before="$(sg_config)"
+sg_run quit-unchecked unchecked-quit
+assert_eq "quit-unchecked:runs-no-probes" "0" "$(sg_count 'git clone')"
+assert_eq "quit-unchecked:configures-nothing" "$before" "$(sg_config)"
 
-# An unfinished setup must NOT take the second-run screen. A git config with no working token is
-# not "already set up" whatever the config says, and the ordinary flow is the right place to be.
+# A setup with no token at all must NOT take any second-run screen. A git config with no working
+# token is not "already set up" whatever the config says -- nor a token waiting to be checked, since
+# there is none -- and the ordinary flow is the right place to be.
 sg_new
 printf 'user.name=Jane Doe\nuser.email=jdoe@stanford.edu\ncs193v.sunetid=jdoe\n' > "$SGSHIM/gitconfig"
 sg_run no-token happy
 sg_says_not "no-token:is-not-already-configured" already.configured "$SG_OUT"
+sg_says_not "no-token:is-not-unchecked-either"   already.unchecked  "$SG_OUT"
 sg_says "no-token:asks-from-the-start" prompt.sunetid "$SG_OUT"
 
 # NEITHER IS A CONFIG FROM BEFORE ISSUE #92, and this is the case every returning student meets

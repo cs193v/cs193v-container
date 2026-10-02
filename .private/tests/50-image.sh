@@ -88,8 +88,11 @@ assert_eq "projects-mount-is-student-owned" "student" "$(R 'stat -c %U /home/stu
 # stty is in that list because setup-git's token prompt turns echo off with it (issue #53). It comes
 # from coreutils and cannot plausibly be missing — which is the argument for asserting it rather than
 # assuming it, since a base image that dropped it would be discovered by a student pasting a
-# credential onto a visible screen.
-for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty shortlink cs193v-linkbox cs193v-platform-messages setsid; do
+# credential onto a visible screen. sha256sum is there for the same reason and from the same package
+# (issue #357): setup-git hashes the token to record its verdict, and without it every student's
+# second run would say their token had never been checked. The shim tier cannot see this; it hands
+# setup-git the host's tool under that name.
+for cmd in node npm python3 git gh vercel claude codex nano less sudo tldr curl unzip ssh scp telnet stty sha256sum shortlink cs193v-linkbox cs193v-platform-messages setsid; do
     assert_ok "have:$cmd" sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v $cmd'"
 done
 record "versions" "$(R 'node -v; npm -v; python3 -V; gh --version | head -1; vercel --version; claude --version; codex --version' | do_tr '\n' ' ')"

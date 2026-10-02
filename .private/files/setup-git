@@ -715,6 +715,19 @@ ask_token() {
     done
 }
 
+# menu_of KEY... -> SG_ACTION, the opt.* key chosen. THE FIRST IS THE DEFAULT, ALWAYS, so a screen
+# says what it recommends by the order it names its options in -- the same order a flow in
+# 35-setup-git-shim.sh lists them, counting arrows from the top.
+menu_of() {
+    local k
+    local -a labels
+    labels=()
+    for k in "$@"; do labels+=("$(msg "$k")"); done
+    menu 0 "${labels[@]}"
+    shift "$MENU_CHOICE"
+    SG_ACTION="$1"
+}
+
 # ─── the commands, as rows ─────────────────────────────────────────────────────
 # THE LABEL IS THE COMMAND, which is the point of showing them at all: a student can see exactly
 # what was done to their machine, repeat it by hand, and read it out to staff. The one exception
@@ -1007,11 +1020,11 @@ run_probes() {
 
 # 0 = verified; 1 = ask for the token again; 2 = stop, having said why.
 verify() {
-    local kind failed_out
+    local kind failed_out shown word
     while :; do
         say status.verifying
         printf '\n'
-        if run_probes; then return 0; fi
+        if run_probes; then record_check passed; return 0; fi
         kind="$(classify_failure)"
         case "$kind" in
             network)    say err.network;    return 2 ;;
@@ -1024,20 +1037,30 @@ verify() {
         # the two failures a student is most likely to have, reported with the wrong text.
         failed_out="$RT_OUT"
         if [ "$SG_FAIL_KEY" = err.clone ] && token_owner_wrong; then
+            shown=err.clone-wrong-owner
             say err.clone-wrong-owner "LOGIN=$SG_LOGIN" "ORG=$CS193V_GH_ORG"
         else
+            shown="$SG_FAIL_KEY"
             say "$SG_FAIL_KEY" "ORG=$CS193V_GH_ORG" "SANDBOX=$SG_SANDBOX"
         fi
         # Restored at the join rather than inside token_owner_wrong: that function has four ways
         # out, and this is the one place every one of them arrives at.
         RT_OUT="$failed_out"
+        # THE VERDICT IS WRITTEN BEFORE THE MENU (issue #357), so a student who picks "I'm stuck",
+        # presses Ctrl-C or closes the window still leaves the next run something true to say.
+        word="$(check_word "$shown")"
+        record_check "$word"
         say prompt.how-to-proceed
         printf '\n'
-        menu 0 "$(msg opt.followed-instructions)" "$(msg opt.reenter-token)" "$(msg opt.stuck)"
-        case "$MENU_CHOICE" in
-            0) continue ;;
-            1) return 1 ;;
-            *) fail_to_staff "$SG_FAIL_RC" ;;
+        if needs_new_token "$word"; then
+            menu_of opt.reenter-token opt.followed-instructions opt.stuck
+        else
+            menu_of opt.followed-instructions opt.reenter-token opt.stuck
+        fi
+        case "$SG_ACTION" in
+            opt.followed-instructions) continue ;;
+            opt.reenter-token)         return 1 ;;
+            *)                         fail_to_staff "$SG_FAIL_RC" ;;
         esac
     done
 }
@@ -1082,14 +1105,120 @@ sg_cleanup() {
     return 0
 }
 
+# ─── the verdict on this token ─────────────────────────────────────────────────
+# ISSUE #357, and .private/README.md tells why it exists. apply_config saves the token before verify
+# has tried it, so what a failed run leaves is what a passing one leaves -- unless the verdict is
+# written down. It is, in one key beside cs193v.sunetid:
+#
+#     cs193v.tokencheck = <sha256> <passed|sandbox|owner|contents|issues|prs>
+#
+# THE HASH IS OF THE TOKEN AND THE SANDBOX TOGETHER, which is what a verdict is about. A token
+# swapped in by hand, or a start-over that typed another SUNetID and stopped before the probes, both
+# hash to something nothing was recorded for -- `unchecked`, not a pass somebody else earned. The
+# whole hash, not a prefix: shortening it buys nothing.
+#
+# THE WORDS NAME THE PERMISSION, NOT THE MESSAGE KEY: `clone` is the substring 35-setup-git-shim.sh
+# makes git-fake fail on, and it matches every argv -- this write included.
+
+# THE TOKEN REACHES NO ARGV, NO FILE AND NO SCREEN. printf is a builtin, so the pipe is the only
+# place it goes -- gh_login's arrangement. AND NOTHING HERE GOES THROUGH run_timeout, run_step,
+# run_noted OR note_cmd: the first three keep what a command printed in RT_OUT, which the staff box
+# quotes, and the last names the command in it. A token fetched that way would be inside the one
+# block of text a student is told to paste to staff.
+token_fingerprint() {                 # -> 64 hex digits, or 1
+    local t fp
+    t="$(gh auth token 2>/dev/null)" || return 1
+    [ -n "$t" ] || return 1
+    fp="$(printf '%s\n%s' "$t" "$SG_SANDBOX" | sha256sum 2>/dev/null)"
+    t=''
+    fp="${fp%% *}"
+    [ -n "$fp" ] || return 1
+    printf '%s\n' "$fp"
+}
+
+# check_state STORED FP -> passed | unchecked | sandbox | owner | contents | issues | prs
+#
+# PURE, so 45-setup-git.sh drives it as a table through --dev-check-state. Anything that is not an
+# exact match is `unchecked`, the one answer that claims nothing: a record for another token, one a
+# hand edit mangled, or a word this version does not know must not put "already set up" on the
+# screen -- nor "(missing message: ...)", which is what an unknown word would look up.
+check_state() {
+    local fp="$2" rest
+    if ! printf '%s' "$fp" | LC_ALL=C grep -qE '^[0-9a-f]{64}$'; then
+        printf 'unchecked\n'; return 0
+    fi
+    case "$1" in
+        "$fp "*) rest="${1#"$fp "}" ;;
+        *)       printf 'unchecked\n'; return 0 ;;
+    esac
+    # A failure word is one check_line knows, which keeps the list of them in one place.
+    if [ "$rest" = passed ] || [ "$(check_line "$rest")" != check.unchecked ]; then
+        printf '%s\n' "$rest"
+    else
+        printf 'unchecked\n'
+    fi
+}
+
+# record_check WORD -- the verdict on the token gh holds now. SILENT, NOT A ROW: it is bookkeeping,
+# like the teardown, and a row would be a thirteenth check mark on a screen whose twelve are each a
+# command a student can read out to staff. BEST-EFFORT: a verdict that could not be written costs
+# the next run a check, not this run its result.
+#
+# AND NOT WRITTEN WHEN IT WOULD NOT CHANGE, so a re-check that passes on a setup that had already
+# passed configures nothing -- which 35-setup-git-shim.sh :: second-run:configures-nothing holds.
+record_check() {
+    local fp new
+    [ -n "$1" ] || return 0
+    fp="$(token_fingerprint)" || return 0
+    new="$fp $1"
+    [ "$(git config --global cs193v.tokencheck 2>/dev/null || true)" = "$new" ] && return 0
+    git config --global cs193v.tokencheck "$new" >/dev/null 2>&1 || :
+    return 0
+}
+
+# The word recorded for the message a failed probe was explained with.
+check_word() {                        # check_word KEY -> sandbox | owner | contents | issues | prs
+    case "$1" in
+        err.clone)             printf 'sandbox\n' ;;
+        err.clone-wrong-owner) printf 'owner\n' ;;
+        err.push)              printf 'contents\n' ;;
+        err.issues)            printf 'issues\n' ;;
+        err.prs)               printf 'prs\n' ;;
+    esac
+}
+
+# And the line the second run shows for it, NAMED IN FULL so 20-messages.sh can see each is used.
+# Anything else -- `unchecked` included -- is check.unchecked.
+check_line() {                        # check_line STATE -> a check.* key
+    case "$1" in
+        sandbox)  printf 'check.sandbox\n' ;;
+        owner)    printf 'check.owner\n' ;;
+        contents) printf 'check.contents\n' ;;
+        issues)   printf 'check.issues\n' ;;
+        prs)      printf 'check.prs\n' ;;
+        *)        printf 'check.unchecked\n' ;;
+    esac
+}
+
+# A TOKEN THAT CANNOT BE FIXED PUTS RE-ENTERING IT FIRST (#362), on both menus that offer it.
+# Resource owner cannot be changed after a token is made, so retrying the token gh holds fails the
+# same way every time -- and a student who had made a new one, as told, used to pick the retry,
+# because "I was able to follow those instructions" describes what they did. Every other failure is
+# fixed on GitHub, on the token already pasted, so there the retry stays first.
+needs_new_token() { [ "$1" = owner ]; }
+
 # ─── already set up ────────────────────────────────────────────────────────────
 # A second run is the normal case, not an edge one: a token expires, a permission was wrong, or
 # `--rebuild --logout` cleared the volumes. Re-asking for a name and an email that are already
 # correct is the wrong response to any of those.
 #
-# ALL THREE HAVE TO BE KNOWN for this screen to appear. If the token is missing or GitHub will
-# not say who it belongs to, then setup is not finished whatever the git config says, and the
+# ALL THREE HAVE TO BE KNOWN for any of these screens to appear. If the token is missing or GitHub
+# will not say who it belongs to, then setup is not finished whatever the git config says, and the
 # ordinary flow is the right place to be.
+#
+# AND "ALREADY SET UP" MEANS VERIFIED (issue #357). Returning 0 says only that there is something to
+# show; SG_STATE says what -- whether this token, against this sandbox, last passed, last failed and
+# where, or was never checked -- and main picks the heading and the menu from it.
 already_configured() {
     local n e i
     n="$(git config --global user.name 2>/dev/null || true)"
@@ -1112,6 +1241,9 @@ already_configured() {
     # that would be punishing a choice that is theirs to make.
     SG_NAME="$n"; SG_EMAIL="$e"; SG_ID="$VALID_ID"
     set_sandbox
+    # After set_sandbox, because the fingerprint covers the repository as well as the token.
+    SG_STATE="$(check_state "$(git config --global cs193v.tokencheck 2>/dev/null || true)" \
+                            "$(token_fingerprint || true)")"
     return 0
 }
 
@@ -1153,6 +1285,8 @@ dev_seam() {
             else line=''; IFS= read -r line || true; token_kind "$line"; fi ;;
         --dev-print-token-url)
             token_url; printf '\n' ;;
+        --dev-check-state)
+            check_state "${2-}" "${3-}" ;;
         --dev-sandbox-repo)
             # THROUGH THE VALIDATOR, because that is the only way SG_ID is ever set: the repository
             # is named from the NORMALISED value, and a seam that skipped it would answer a question
@@ -1178,6 +1312,8 @@ dev_seam() {
 SG_EMAIL=''; SG_NAME=''; SG_TOKEN=''; SG_LOGIN=''; SG_ID=''; SG_SANDBOX=''
 SG_TMP=''; SG_CLONE=''; SG_CMD=''; SG_FAIL_KEY=''
 SG_HEX=''; SG_BR_A=''; SG_BR_B=''; SG_BR_C=''; SG_PLAN=''; SG_FAIL_RC=1
+# What the last check said about this token, and which option a menu_of menu was answered with.
+SG_STATE=''; SG_ACTION=''
 # What the two readers hand back, and the terminal settings read_secret borrows. Globals for the
 # reason VALID_ID is one: a value handed back on stdout has to be read in a subshell, where an
 # assignment made on the way is discarded on return.
@@ -1209,18 +1345,45 @@ main() {
     cursor_hide
 
     if already_configured; then
-        say already.configured "NAME=$SG_NAME" "EMAIL=$SG_EMAIL" "ID=$SG_ID" \
-                               "LOGIN=$SG_LOGIN"
+        # THREE HEADINGS OVER ONE LIST, AND A LINE FOR THE TOKEN (issue #357). The list is the same
+        # on every screen; what changes is whether the screen may say "set up", and whether the
+        # token -- the thing most likely to be wrong -- is on it. `unchecked` gets a heading that
+        # claims nothing, because it is also every config written before the verdict was: telling a
+        # student who passed last month that setup "isn't finished" would be false.
+        #
+        # MEASURED 2026-10-02 on an 80x24 pty, since nothing automated counts rows: 17 for each of
+        # the three that carry an `Access token:` line and 16 for the verified one, plus the blank
+        # line `say` puts above -- well inside tmux's 23. The widest line is check.owner's, at 76.
+        case "$SG_STATE" in
+            passed)    say already.configured ;;
+            unchecked) say already.unchecked ;;
+            *)         say already.unfinished ;;
+        esac
+        printf '\n'
+        render already.fields "NAME=$SG_NAME" "EMAIL=$SG_EMAIL" "ID=$SG_ID" "LOGIN=$SG_LOGIN"
+        [ "$SG_STATE" = passed ] || render "$(check_line "$SG_STATE")"
         say prompt.what-now
         printf '\n'
-        menu 0 "$(msg opt.just-check)" "$(msg opt.start-over)" "$(msg opt.quit)"
-        case "$MENU_CHOICE" in
-            0)  verify; rc=$?
+        # WHATEVER FIXES IT COMES FIRST, and re-entering the token is on every screen: on the
+        # verified one it is how a token about to expire is replaced without retyping the rest.
+        if [ "$SG_STATE" = passed ]; then
+            menu_of opt.just-check opt.reenter-token opt.start-over opt.quit
+        elif needs_new_token "$SG_STATE"; then
+            menu_of opt.reenter-token opt.check-again opt.start-over opt.quit
+        elif [ "$SG_STATE" = unchecked ]; then
+            menu_of opt.check-now opt.reenter-token opt.start-over opt.quit
+        else
+            menu_of opt.check-again opt.reenter-token opt.start-over opt.quit
+        fi
+        case "$SG_ACTION" in
+            opt.just-check|opt.check-again|opt.check-now)
+                verify; rc=$?
                 [ "$rc" -eq 0 ] && { msg status.all-set | celebrate "$(msg title.all-set)"; exit 0; }
                 [ "$rc" -eq 2 ] && exit 1
                 ;;                    # 1 = they want to re-enter the token: fall through
-            1)  SG_NAME=''; SG_EMAIL=''; SG_ID='' ;;
-            *)  exit 0 ;;
+            opt.reenter-token) : ;;   # the same fall-through, chosen up front
+            opt.start-over)    SG_NAME=''; SG_EMAIL=''; SG_ID='' ;;
+            *)                 exit 0 ;;
         esac
     fi
 

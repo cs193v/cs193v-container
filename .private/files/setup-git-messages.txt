@@ -293,10 +293,35 @@ I'm stuck! I'll need some help.
 [[already.configured]]
 *Git and GitHub are already set up on this computer.*
 
+[[already.unfinished]]
+*Setup isn't finished yet.* Your access token didn't pass our last check.
+
+[[already.unchecked]]
+*Your settings are saved,* but we haven't checked this access token yet.
+
+[[already.fields]]
   Your name:       {{NAME}}
   Your SUNetID:    {{ID}}
   Your email:      {{EMAIL}}
   GitHub account:  @{{LOGIN}}
+
+[[check.unchecked]]
+  Access token:    not checked yet
+
+[[check.sandbox]]
+  Access token:    can't reach your sandbox repository
+
+[[check.owner]]
+  Access token:    made under the wrong *Resource owner*, so needs replacing
+
+[[check.contents]]
+  Access token:    can't *git push* (its *Contents* permission)
+
+[[check.issues]]
+  Access token:    can't work with issues (its *Issues* permission)
+
+[[check.prs]]
+  Access token:    can't work with pull requests (*Pull requests* permission)
 
 [[prompt.what-now]]
 What would you like to do?
@@ -309,6 +334,12 @@ Start over from the beginning.
 
 [[opt.quit]]
 Nothing, thanks — quit.
+
+[[opt.check-again]]
+I've fixed my token on GitHub. Check it again.
+
+[[opt.check-now]]
+Check that everything works.
 
 [[err.no-terminal]]
 setup-git asks you questions, so it has to be run from a terminal window.

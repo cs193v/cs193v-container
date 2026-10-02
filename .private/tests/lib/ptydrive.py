@@ -124,11 +124,6 @@ US = "\x1f"          # between needles within a step
 # assertions pass vacuously.
 STEP_SECS = float(os.environ.get("CS193V_DRIVE_STEP_SECS") or 20.0)
 
-# An OPTIONAL step gets a short one instead: by the time it is pending, either its screen is on
-# the way or it is never coming, and waiting the full deadline for each would add a minute to a
-# run that behaved perfectly.
-OPT_SECS = float(os.environ.get("CS193V_DRIVE_OPT_SECS") or 3.0)
-
 # HOW LONG A SCREEN MUST BE STILL before "the child is slow" becomes "the child is somewhere
 # else". A program that has stopped writing AND is sitting in a read is not going to produce the
 # screen this step is waiting for; waiting out the whole deadline for each of 38 cases turns a
@@ -216,12 +211,9 @@ def read_script(fh):
         if len(parts) != 4:
             return ([], "script line %d has %d fields, want 4" % (lineno, len(parts)))
         kind, name, needles, keys = parts
-        optional = kind.startswith("?")
-        kind = kind[1:] if optional else kind
         if kind not in ("line", "secret", "menu", "password"):
             return ([], "script line %d: unknown kind %r" % (lineno, kind))
         steps.append({
-            "optional": optional,
             "kind": kind,
             "name": name,
             "needles": [n for n in needles.split(US) if n != ""],
@@ -360,7 +352,7 @@ def main(argv):
     slave_open = True
     window = ""                 # output since the previous step was sent
     armed_cursor = False        # ESC[?25h seen in this window
-    deadline = time.monotonic() + (OPT_SECS if (steps and steps[0]["optional"]) else STEP_SECS)
+    deadline = time.monotonic() + STEP_SECS
     started = time.monotonic()
     last_output = time.monotonic()
     failure = None
@@ -382,10 +374,9 @@ def main(argv):
                 data = b""      # EIO: the child is gone and the slave is closed
             if not data:
                 eof = True
-                # AN OPTIONAL TAIL IS NOT A FAILURE, and it exists for exactly one caller:
-                # 90-setup-git-github.sh drives the real GitHub, where whether a probe fails is
-                # the finding rather than the fixture. Everything before it is still required.
-                if any(not s["optional"] for s in steps[step_i:]):
+                # NO STEP IS OPTIONAL, not since #364: the one caller that wanted some, the real-
+                # GitHub tier, now says which failure it expects and names the menu that follows.
+                if step_i < len(steps):
                     failure = ("CHILD-ENDED", steps[step_i], "the child exited with %d step(s) unsent"
                                % (len(steps) - step_i))
                 break
@@ -520,7 +511,7 @@ def main(argv):
             step_i += 1
             window = ""
             armed_cursor = False
-            deadline = time.monotonic() + (OPT_SECS if (step_i < len(steps) and steps[step_i]["optional"]) else STEP_SECS)
+            deadline = time.monotonic() + STEP_SECS
             started = time.monotonic()
             last_output = time.monotonic()
             continue
@@ -542,7 +533,7 @@ def main(argv):
         # cursor, so `armed_cursor` cannot either -- and without this a password step whose
         # screen never comes waits out the whole deadline instead of naming the screen the child
         # is really parked on. It widens the clause by exactly the state the new kind describes.
-        if (missing >= 0 and not step["optional"] and window != ""
+        if (missing >= 0 and window != ""
                 and (icanon is False or echo is False or armed_cursor)
                 and time.monotonic() - last_output > SETTLE_SECS):
             failure = ("DIVERGED", step,
@@ -552,14 +543,6 @@ def main(argv):
             break
 
         if time.monotonic() > deadline:
-            if step["optional"]:
-                report.line("SKIP", step["name"], "never reached")
-                step_i += 1
-                window = ""
-                armed_cursor = False
-                deadline = time.monotonic() + STEP_SECS
-                started = time.monotonic()
-                continue
             why = ("the screen never arrived: needle %d of %d is missing"
                    % (missing + 1, len(step["needles"]))) if missing >= 0 else \
                   ("the screen arrived but the terminal was never at a %s read"

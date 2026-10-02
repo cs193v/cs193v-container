@@ -246,6 +246,27 @@ assert_contains "plan:a-bad-id-is-refused" "not a SUNetID" "$out"
 assert_contains "plan:a-bad-id-exits-2"    "[rc=2]"        "$out"
 assert_not_contains "plan:a-bad-id-plans-nothing" "gh issue" "$out"
 
+# ─── what the last check said about this token ─────────────────────────────────
+# THE SECOND RUN'S SCREEN IS CHOSEN FROM THIS (issue #357): the record git config holds, read
+# against the fingerprint of the token gh holds now. Pure, so it is a table. Everything that is
+# not an exact match is `unchecked` -- the one verdict that claims nothing -- because a record that
+# was hand-edited, belongs to another token, or names a row this version does not know must not
+# put "already set up" on the screen, nor "(missing message: ...)".
+state() { bash "$SG" --dev-check-state "$1" "$2"; }
+FP="$(printf 'a%.0s' $(seq 1 64))"
+FP2="$(printf 'b%.0s' $(seq 1 64))"
+for row in passed\|passed sandbox\|sandbox owner\|owner contents\|contents \
+           issues\|issues prs\|prs; do
+    assert_eq "state:a-match-recorded-as-${row#*|}" "${row%%|*}" "$(state "$FP ${row#*|}" "$FP")"
+done
+assert_eq "state:another-tokens-pass-is-unchecked" unchecked "$(state "$FP2 passed" "$FP")"
+assert_eq "state:no-record-is-unchecked"           unchecked "$(state '' "$FP")"
+assert_eq "state:no-token-is-unchecked"            unchecked "$(state "$FP passed" '')"
+assert_eq "state:an-unknown-row-is-unchecked"      unchecked "$(state "$FP clone" "$FP")"
+assert_eq "state:two-spaces-is-unchecked"          unchecked "$(state "$FP  passed" "$FP")"
+assert_eq "state:a-trailing-space-is-unchecked"    unchecked "$(state "$FP passed " "$FP")"
+assert_eq "state:a-short-fingerprint-is-unchecked" unchecked "$(state "abc passed" "abc")"
+
 # ─── the probe plan ────────────────────────────────────────────────────────────
 # --dev-probe-plan runs the REAL probe functions with the commands recorded instead of executed,
 # so this cannot go stale against what a student's machine actually does. That is also what makes

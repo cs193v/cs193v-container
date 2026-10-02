@@ -625,6 +625,33 @@ needs admin permission on the repository, which a student does not have on their
 either, so `setup-git` closes them.
 Branches it creates are deleted, on the failure path as well as the success one.
 
+### The second run reads a verdict, not just a config (issue #357)
+
+`setup-git` saves the token before it tests it, and has to: the probes go through the credential
+helper `gh auth setup-git` installs, which is the path homework takes. So a failed run left what a
+passing one leaves, and the second run called both "already set up". It listed four fields that were
+right and left out the token, which was the one thing wrong. Students who read that correctly chose
+*Just check* and failed the same probe again.
+
+So `verify` now writes `cs193v.tokencheck = <sha256> <word>` beside `cs193v.sunetid`. The hash is
+of the token **and** the sandbox, so a verdict cannot outlive either. The word is `passed` or the
+permission that failed: `sandbox`, `owner`, `contents`, `issues` or `prs`. The second run picks one
+of three headings from it:
+
+- `already.configured`: this token passed.
+- `already.unfinished`: it failed, with an `Access token:` line saying where.
+- `already.unchecked`: there is no verdict for this token and this sandbox. That covers a token
+  swapped in by hand, and every config written before this change. It is deliberately not
+  "unfinished", which would be false for anyone who passed before the verdict existed.
+
+Whatever fixes the problem is the first option. For a wrong resource owner that is re-entering the
+token, because owner cannot be changed; for every other failure it is checking again, because the
+fix is made on GitHub to the token already pasted. The in-run failure menu follows the same rule for
+the wrong owner (#362).
+
+The verdict is written silently rather than as a row, and only when it changes. It is never
+`--unset`: a new token or a new sandbox simply hashes differently.
+
 ### The prose is hard-wrapped at 76 columns, and that is load-bearing
 
 `files/setup-git-messages.txt` is wrapped at 76 rather than at whatever looks right in the editor,
