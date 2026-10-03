@@ -1338,9 +1338,13 @@ tunnel_keys() {
 
 # Is a tunnel alive for THIS course directory and instance? The control socket is the
 # identity, and -O check is the only honest test: a socket file can outlive its process.
+#
+# -F none HERE AND ON EVERY CONTROL CALL, not only on the master tunnel_start runs, and for its
+# reason (#397): ssh reads the student's config before it touches the socket, so a `Match exec`
+# there was charged to every call and a `CanonicalizeHostname` could fail them all.
 tunnel_alive() {
     [ -S "$TUNNEL_CTL" ] || return 1
-    run_timeout 10 ssh -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1
+    run_timeout 10 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1
 }
 
 # THE MASTER STARTS WITH NO -L FLAGS AT ALL, which is the shape of the whole change: it comes up
@@ -1488,7 +1492,7 @@ tunnel_dyn_read_floor() {
 # separates "the host port is taken" from "the master went away while we were asking".
 tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
     [ -S "$TUNNEL_CTL" ] || return 2
-    run_timeout 5 ssh -S "$TUNNEL_CTL" -O forward \
+    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O forward \
         -L "127.0.0.1:$1:127.0.0.1:$1" "$TUNNEL_USER@$TUNNEL_HOST" </dev/null
     case "$?" in
         0)   return 0 ;;
@@ -1500,7 +1504,7 @@ tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
 
 tunnel_dyn_cancel() {                 # tunnel_dyn_cancel PORT
     [ -S "$TUNNEL_CTL" ] || return 0
-    run_timeout 5 ssh -S "$TUNNEL_CTL" -O cancel \
+    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O cancel \
         -L "127.0.0.1:$1:127.0.0.1:$1" "$TUNNEL_USER@$TUNNEL_HOST" </dev/null || true
     return 0
 }
@@ -1891,7 +1895,7 @@ tunnel_down() {
     tunnel_sup_stop
     # Time-boxed, because a wedged ssh may never answer -O exit -- and the box expiring is
     # itself the signal that asking did not work.
-    if [ -S "$TUNNEL_CTL" ] && run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit \
+    if [ -S "$TUNNEL_CTL" ] && run_timeout 10 ssh -F none -S "$TUNNEL_CTL" -O exit \
            "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1; then
         :                         # accepted; the master is on its way out under its own power
     else
@@ -2896,7 +2900,7 @@ verb_reset_tunnel() {
     # 1. The clean way first, but TIME-BOXED. A wedged ssh may never answer -O exit, and
     #    waiting forever for it is precisely the failure this verb exists to break out of.
     if [ -S "$TUNNEL_CTL" ]; then
-        run_timeout 10 ssh -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1 || true
+        run_timeout 10 ssh -F none -S "$TUNNEL_CTL" -O exit "$TUNNEL_USER@$TUNNEL_HOST" >/dev/null 2>&1 || true
     fi
 
     # 2. Then force, UNCONDITIONALLY -- the difference between this verb and tunnel_down, which
