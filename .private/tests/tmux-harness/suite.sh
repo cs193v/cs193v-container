@@ -691,6 +691,7 @@ cpos()  { it display-message -p -t "cs193v:$cwin" '#{scroll_position}' 2>/dev/nu
 crow()  { hx_cap "$S" | awk -v n="$1" '$0 ~ n {print NR; exit}'; }
 ccopy() { it show-buffer 2>/dev/null; }
 cmouse() { it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}' 2>/dev/null; }
+calt()   { it display-message -p -t "cs193v:$cwin" '#{alternate_on}' 2>/dev/null; }
 # Rewind to the fixture. Three things, and each one was a bug in this section before it was one of
 # its rules:
 #
@@ -777,8 +778,19 @@ hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold 
 # rather than intercepting it, doing so produced nothing whatsoever. The correction is a separate
 # option from @copy-hint because it answers a separate question -- and it must not repeat the
 # advice that just failed, which is why it is asserted for what it does NOT say as well.
+#
+# WAITED FOR, NOT WAITED OUT (#186), here and at the seven checks below that assert something
+# HAPPENED: a fixed settle that ran short failed the check instead of waiting for the screen, so
+# each one polls for its event now. 10-static.sh's tmux:event-checks-poll-rather-than-settle keeps
+# all eight polling.
+#
+# WHERE A GESTURE'S CHECKS INCLUDE AN ABSENCE -- "does not tell you to hold SHIFT", "does not
+# interrupt the app" -- THE POLL ACCEPTS EITHER ARM of the binding that answers the release: the
+# effect the check wants, or the message a broken guard would show instead. Polling for the wanted
+# effect alone is the trap: when the guard breaks it never comes, the poll runs out its 8 s, and the
+# 4 s message the absence check exists to see has expired by the time it looks.
 hx_drag "$S" "$lr" 3 "$lr" 12 4
-hx_settle 0.8
+hx_until_ok "hx_cap $S | head -2 | grep -qE 'reached the container|hold SHIFT'" 8
 shift_msg="$(hx_cap "$S" | head -2)"
 hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than dropped" \
                    "$shift_msg" "reached the container"
@@ -790,7 +802,7 @@ hx_gone "$S" 'reached the container' 8 || true
 # The shifted multi-clicks answer too. Same reasoning, and they fire once each so they can carry
 # the message themselves.
 hx_multiclick "$S" "$lr" 3 2 4
-hx_settle 0.6
+hx_until_ok "hx_cap $S | head -2 | grep -qF 'reached the container'" 8
 hx_expect_contains "a SHIFTED double-click is answered too" \
                    "$(hx_cap "$S" | head -2)" "reached the container"
 hx_gone "$S" 'reached the container' 8 || true
@@ -820,15 +832,14 @@ hx_expect_eq "double-clicking at a live prompt leaves no lingering mode" "$(cmod
 it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
 hx_settle 0.2
 hx_cmd "$S" "printf '\\033[?1006h\\033[?1000h'; cat -v"
-hx_settle 0.8
-hx_expect_eq "a mouse-reporting app is detected as one" \
-             "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "1"
+hx_until 'cmouse' 1 8
+hx_expect_eq "a mouse-reporting app is detected as one" "$(cmouse)" "1"
 # THE FORWARDED COORDINATES ARE PANE-RELATIVE. tmux translates the event before handing it on, so a
 # press at screen row 8 reaches the app as row 5: the two status lines and the pane border sit above
 # the pane. Derived here rather than hardcoded, so this check follows the chrome if it ever changes.
 drag_row=8
 hx_drag "$S" "$drag_row" 5 "$drag_row" 9
-hx_settle 0.8
+hx_until_ok "hx_cap $S | grep -qF '[<0;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -qF 'hold SHIFT'" 8
 app_saw="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a drag inside a mouse-aware app still reaches the app" \
                    "$app_saw" "[<0;5;$((drag_row - 3))M"
@@ -848,7 +859,7 @@ hx_expect_absent "and does NOT get the SHIFT+drag hint" "$(hx_cap "$S" | head -2
 # `cat -v` fixture -- the unguarded form delivered the press and swallowed the RELEASE, leaving
 # the app with a button held down forever.
 hx_drag "$S" "$drag_row" 5 "$drag_row" 9 4
-hx_settle 0.8
+hx_until_ok "hx_cap $S | grep -qF '[<4;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -qF 'reached the container'" 8
 app_saw_shift="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a SHIFTED drag inside a mouse-aware app still reaches the app" \
                    "$app_saw_shift" "[<4;5;$((drag_row - 3))M"
@@ -864,9 +875,8 @@ hx_settle 0.4
 # scrolling tmux back -- so the scrollback checks below cannot rewind to the fixture at all and fail
 # in a way that looks nothing like its cause. Found the hard way; a real app resets this on exit.
 hx_cmd "$S" "printf '\\033[?1000l\\033[?1006l'"
-hx_settle 0.5
-hx_expect_eq "the mouse goes back to tmux when the app stops asking for it" \
-             "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
+hx_until 'cmouse' 0 8
+hx_expect_eq "the mouse goes back to tmux when the app stops asking for it" "$(cmouse)" "0"
 
 # --- and a BARE CLICK, which is what #307 turned out to be -------------------
 #
@@ -962,9 +972,8 @@ hx_expect_eq "the mouse goes back to tmux after the full mode set too" "$(cmouse
 it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
 hx_settle 0.2
 hx_cmd "$S" "printf '\\033[?1049h'; cat -v"
-hx_settle 0.8
-hx_expect_eq "a full-screen app is detected as one" \
-             "$(it display-message -p -t "cs193v:$cwin" '#{alternate_on}')" "1"
+hx_until 'calt' 1 8
+hx_expect_eq "a full-screen app is detected as one" "$(calt)" "1"
 hx_expect_eq "...and it is NOT detected through the mouse term" \
              "$(it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}')" "0"
 # The whole point: the wheel must NOT scroll tmux back over a full-screen app.
@@ -992,9 +1001,8 @@ hx_settle 0.4
 # every wheel event after this point is forwarded to the pane instead of scrolling tmux -- so the
 # scrollback checks below could not rewind to their fixture at all.
 hx_cmd "$S" "printf '\\033[?1049l'"
-hx_settle 0.5
-hx_expect_eq "the wheel goes back to tmux when the app leaves the alternate screen" \
-             "$(it display-message -p -t "cs193v:$cwin" '#{alternate_on}')" "0"
+hx_until 'calt' 0 8
+hx_expect_eq "the wheel goes back to tmux when the app leaves the alternate screen" "$(calt)" "0"
 
 # ============================================================================
 hx_section "R6  clicks and drags never move the scrollback view (#61)"
