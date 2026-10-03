@@ -3198,6 +3198,10 @@ sup_reap
 # BEFORE the supervisor starts, the way tunnel_start leaves one; written after, the pidfile change
 # would reset the state and the re-forward of 3000 would find the death instead, through the path
 # the case above covers, and this would pass with the pid check deleted.
+#
+# THE RESTART IS MADE TO FAIL (#343): a death proved by the pid is one the supervisor now puts
+# back, and this case is about the state between -- what is published while there is no master.
+# The section after this one lets the restart succeed.
 shim_new
 shim_fake_ssh
 DEVT="$(launcher --dev-tunnel)"
@@ -3207,6 +3211,7 @@ MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
 shim_ssh_master "$CTL"
 H1="$(shim_ssh_master_pid "$CTL")"
 printf '%s\n' "$H1" > "$MPIDFILE"
+shim_touch ssh_start_fails
 shim_watch 'cs193v-portwatch 1' \
            'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
            'STALL 4' \
@@ -3243,7 +3248,7 @@ assert_says "dead:the-supervisor-names-the-pid-that-died" "pid $H1 is no longer 
 assert_eq "dead:the-dead-master-is-not-asked-for-the-port" "1" \
           "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
 # ...AND IT COMES BACK the way --reset-tunnel leaves things: socket and pidfile both replaced.
-rm -f "$CTL" "$MPIDFILE"
+rm -f "$CTL" "$MPIDFILE" "$SHIM/ssh_start_fails"
 shim_ssh_master "$CTL"
 shim_ssh_master_pid "$CTL" > "$MPIDFILE"
 if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
@@ -3256,4 +3261,230 @@ $(sup_publishes)"
 fi
 assert_eq "dead:the-replacement-is-asked-for-the-port" "2" \
           "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+sup_reap
+
+# ─── a master that dies is restarted by the supervisor  (#343) ─────────────────
+# WHAT USED TO NEED --reset-tunnel. A master that died -- a sleep past ServerAlive, the OOM killer
+# -- stayed dead until a student was told to run something, and most of them never are. The
+# supervisor that notices the death now starts a new master itself, but only for a death PROVED by
+# the pidfile's pid: a socket that has merely gone, or a forward that fails, can both happen with
+# the master still alive, and starting another then would strand it holding host ports.
+#
+# ONE STREAM SHAPE FOR ALL FOUR CASES: a frame, a STALL in which the case does its damage, frames
+# for the supervisor to react to, and an anchor frame adding 21501 that changes the publish, so
+# "how many starts" is counted after a frame demonstrably processed after every start it is
+# counting. The start is the master's own `-f` line in ssh.log, counted from a baseline taken
+# after the case's own shim_ssh_master, which logs one too.
+restart_stream() {
+    shim_watch 'cs193v-portwatch 1' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'STALL 4' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 3' '3000:lo' '21500:v6lo' '21501:v6lo' 'END' \
+               'STALL 20'
+}
+restart_setup() {                     # restart_setup NAME -> SHIM, CTL, MPIDFILE, H1, BASE; output in $SHIM/NAME
+    shim_new
+    shim_fake_ssh
+    DEVT="$(launcher --dev-tunnel)"
+    SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+    CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+    MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+    shim_ssh_master "$CTL"
+    H1="$(shim_ssh_master_pid "$CTL")"
+    printf '%s\n' "$H1" > "$MPIDFILE"
+    BASE="$(wc -l < "$SHIM/ssh.log" | do_tr -d ' ')"
+    restart_stream
+    # A NAME, NOT A PATH: the caller's "$SHIM/..." would expand before the shim_new above, and the
+    # supervisor's output would land in the previous case's shim.
+    sup_start "$SHIM/$1"
+    wait_until 10 sup_up
+}
+starts_since_base() { ssh_log_since "$BASE" '-f -N -M -S '; }
+the_anchor() { sup_published 'refused=21500:v6lo,21501:v6lo'; }
+
+# ─── ...one killed with SIGKILL ──────────────────────────────────────────────────
+restart_setup sup-restart-kill.out
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:the-port-was-up-before-the-master-was-killed"
+else
+    fail "restart:the-port-was-up-before-the-master-was-killed" "3000 was never published as up.
+ssh.log:
+$(shim_ssh_log)"
+fi
+kill -9 "$H1" 2>/dev/null
+assert_ok "restart:the-killed-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:a-killed-master-is-replaced-without-a-reset"
+else
+    fail "restart:a-killed-master-is-replaced-without-a-reset" \
+"the master was killed and the supervisor never brought forwarding back: no healthy publish with
+3000 up followed the gone one.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-restart-kill.out" 2>/dev/null)"
+fi
+H2="$(cat "$MPIDFILE" 2>/dev/null)"
+assert_ne "restart:the-pidfile-names-a-new-master" "$H1" "${H2:-$H1}"
+# THE PIDFILE'S MASTER IS THE ONE ON THE SOCKET, not merely a new number: a pidfile naming some
+# other process would pass the line above and leave the next death unprovable.
+assert_eq "restart:the-new-master-is-the-one-answering" "${H2:-none}" "$(shim_ssh_master_pid "$CTL")"
+assert_eq "restart:the-new-master-is-asked-for-the-port" "2" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+assert_says "restart:the-supervisor-says-it-restarted-the-master" "has been restarted" \
+            "$(cat "$SHIM/sup-restart-kill.out" 2>/dev/null)"
+sup_reap
+
+# ─── ...one that exits cleanly, as ServerAlive makes it after a sleep ───────────
+# TERM IS THE CLEAN EXIT a case can cause: the holder removes its socket and goes, as a master does
+# when ServerAlive gives up -- the death #343 is mostly about. The pid going is waited for inside
+# the STALL, so the frames after it see a death proved rather than a socket that has merely gone.
+restart_setup sup-restart-term.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+kill "$H1" 2>/dev/null
+assert_ok "restart:the-exited-master-is-gone" wait_until 5 holder_gone "$H1"
+assert_fail "restart:an-exited-master-takes-its-socket" test -S "$CTL"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:an-exited-master-is-replaced-without-a-reset"
+else
+    fail "restart:an-exited-master-is-replaced-without-a-reset" \
+"the master exited cleanly and the supervisor never brought forwarding back.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-restart-term.out" 2>/dev/null)"
+fi
+sup_reap
+
+# ─── ...and one that cannot be restarted is tried once, then left to the student ─
+# ONE ATTEMPT PER DEATH, and the count is the assertion: a failed start leaves no pidfile, so no
+# later frame can prove another death. A supervisor that retried on "gone" instead would start a
+# master every frame for as long as the failure lasted -- an ssh and a podman exec a second.
+restart_setup sup-restart-fails.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+shim_touch ssh_start_fails
+kill -9 "$H1" 2>/dev/null
+assert_ok "restart:the-unrestartable-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-a-failed-restart-were-read"
+else
+    fail "restart:the-frames-after-a-failed-restart-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-master-that-will-not-start-is-tried-once" "1" "$(starts_since_base)"
+assert_contains "restart:it-is-still-published-gone" 'state=master-unresponsive' \
+                "$(sup_publishes | tail -1)"
+assert_says "restart:the-supervisor-says-to-reset" "could not be restarted; run cs193v --reset-tunnel" \
+            "$(cat "$SHIM/sup-restart-fails.out" 2>/dev/null)"
+sup_reap
+
+# ─── ...but a socket that has merely gone, under a master still alive, is not a death ─
+# THE CASE THE RESTART MUST NOT FIRE ON. Something unlinked the socket -- a TMPDIR cleaner, a hand
+# -- and the master is still running, holding its forwards. Starting another would remove nothing
+# the old one holds and strand it, alive, under a socket nobody can reach; the new master's
+# forwards would then find those host ports busy. So: published gone, and no start at all.
+restart_setup sup-restart-unlinked.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+rm -f "$CTL"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-an-unlinked-socket-were-read"
+else
+    fail "restart:the-frames-after-an-unlinked-socket-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-live-master-is-not-replaced" "0" "$(starts_since_base)"
+assert_ok "restart:the-live-master-is-still-running" kill -0 "$H1"
+sup_reap
+
+# ─── ...and a pidfile naming the wrong process is repaired, not obeyed ──────────
+# THE ONE WAY THE PROOF CAN BE WRONG: a pidfile naming something other than the master -- nothing
+# has been seen to write one, but tunnel_record_pid has a ps fallback that could. kill -0 then
+# says "dead" about a healthy master. The restart asks the master first, and when it answers, the
+# pidfile is rewritten from that answer and nothing is started: a second master beside a live one
+# would strand the first, holding host ports. The wrong pid here is a process this case started
+# and killed, so it is certainly not running.
+restart_setup sup-restart-wrongpid.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+sleep 60 >/dev/null 2>&1 &
+WRONG=$!
+kill -9 "$WRONG" 2>/dev/null; wait "$WRONG" 2>/dev/null
+printf '%s\n' "$WRONG" > "$MPIDFILE"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-a-wrong-pidfile-were-read"
+else
+    fail "restart:the-frames-after-a-wrong-pidfile-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-live-master-behind-a-wrong-pidfile-is-not-replaced" "0" "$(starts_since_base)"
+assert_eq "restart:the-pidfile-is-rewritten-from-the-master-itself" "$H1" \
+          "$(cat "$MPIDFILE" 2>/dev/null)"
+assert_contains "restart:it-is-published-healthy-again" 'state=healthy' "$(sup_publishes | tail -1)"
+sup_reap
+
+# ─── --reset-tunnel stops the supervisor before it touches the master  (#343) ───
+# ONE WRITER AT A TIME. The supervisor now starts masters, so --reset-tunnel -- which kills one and
+# starts another -- has to stop it first, or the two race: each starts a master, and one is
+# stranded under a socket the other deleted. Before #343 it left the supervisor running, and
+# tunnel_sup_start returned early because one was alive.
+#
+# WHAT THIS CAN AND CANNOT SEE. It sees that the reset ends with the old supervisor stopped and a
+# new one in its place -- red before #343, which left the old one running. It cannot see WHEN in the
+# reset the stop happens: ensure_tunnel's own stop catches the supervisor too, once the reset has
+# killed the master, and the race the early stop exists for -- a tick landing between the kill and
+# the new start -- cannot be staged on demand. Measured: with the reset's own stop deleted, this
+# stays green. The ORDER is 10-static.sh's supervisor:reset-tunnel-stops-the-supervisor-first.
+#
+# THE OLD SUPERVISOR IS KEPT ALIVE BY ITS STREAM, and the new one gets its own, swapped in with mv:
+# the old watcher keeps reading the inode it opened, and the path still exists, so its STALL goes
+# on. Removing watch_out instead ends that STALL, the old supervisor exits on end-of-stream within
+# a second, and "it is gone afterwards" passes with nothing having stopped it. Hence the status
+# too: a supervisor TERMinated by tunnel_sup_stop exits by signal, one whose stream ended exits 0.
+shim_new
+shim_fake_ssh
+shim_set state running
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+SUPLOG="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suplog" { print $2 }')"
+shim_ssh_master "$CTL"
+shim_ssh_master_pid "$CTL" > "$MPIDFILE"
+# What a supervisor had written before the reset, which the reset must not destroy (#252).
+printf 'the supervisor before the reset\n' > "$SUPLOG"
+shim_watch 'cs193v-portwatch 1' 'BEGIN 1' '21500:v6lo' 'END' 'STALL 25'
+sup_start "$SHIM/sup-reset-old.out"
+OLD_SUP="$SUP_PID"
+wait_until 10 sup_up || true
+wait_until 15 sup_published 'refused=21500:v6lo' || true
+assert_ok "reset:the-old-supervisor-runs-until-the-reset" kill -0 "$OLD_SUP"
+printf '%s\n' 'cs193v-portwatch 1' 'BEGIN 1' '21501:v6lo' 'END' 'STALL 25' > "$SHIM/watch_out.next"
+mv -f "$SHIM/watch_out.next" "$SHIM/watch_out"
+reset_out="$(launcher --reset-tunnel)"
+NEW_SUP="$(cat "$SUP_PIDFILE" 2>/dev/null)"
+SUP_PIDS="$SUP_PIDS $NEW_SUP"
+assert_says_key "reset:the-reset-says-it-finished" status.tunnel-reset "$reset_out"
+wait "$OLD_SUP" 2>/dev/null; OLD_RC=$?
+if [ "$OLD_RC" -gt 128 ]; then
+    pass "reset:the-old-supervisor-was-stopped"
+else
+    fail "reset:the-old-supervisor-was-stopped" \
+"the supervisor running before --reset-tunnel exited $OLD_RC rather than by a signal, so nothing
+stopped it: it ran until its own stream ran out, alongside the reset's.
+its output:
+$(cat "$SHIM/sup-reset-old.out" 2>/dev/null)"
+fi
+assert_ne "reset:a-new-supervisor-replaced-it" "$OLD_SUP" "${NEW_SUP:-$OLD_SUP}"
+# THE OLD LOG IS KEPT, one deep: the reset is the moment a student is sent to, and deleting the
+# log there destroyed the only record of why forwarding had stopped (#252).
+assert_contains "reset:the-last-supervisor-log-is-kept" 'the supervisor before the reset' \
+                "$(cat "$SUPLOG.prev" 2>/dev/null)"
 sup_reap

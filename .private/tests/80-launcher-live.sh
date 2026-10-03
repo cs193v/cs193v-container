@@ -60,7 +60,15 @@ tunnel_pid() { tunnel_owner_pid; }
 # The CONTAINER is not this function's business: the suite's last line stops it, and so does
 # restore() for a run that never gets there.
 release_tunnel() {
-    local p
+    local p s
+    # THE SUPERVISOR FIRST, as tunnel_down does it (#343): it restarts a master that dies, so
+    # killing only the master would hand the ports straight to a new one and this would be waiting
+    # for a release the launcher keeps undoing. Identified the way sup_owner_alive identifies it.
+    if sup_owner_alive; then
+        s="$(cat "$FWD_SUPPID" 2>/dev/null)"
+        kill "$s" 2>/dev/null || true
+        wait_until 10 sh -c "! kill -0 $s 2>/dev/null" || kill -9 "$s" 2>/dev/null || true
+    fi
     p="$(tunnel_pid)"
     [ -n "$p" ] || return 0
     kill "$p" 2>/dev/null || true
@@ -1054,35 +1062,54 @@ fi
 [ -n "$BUSY_HOLDER" ] && kill "$BUSY_HOLDER" 2>/dev/null
 BUSY_HOLDER=''
 
-# A TUNNEL THAT HAS CLOSED IS REPORTED AS CLOSED (#338). A master that exits cleanly -- which is
+# A TUNNEL THAT HAS CLOSED COMES BACK BY ITSELF (#343). A master that exits cleanly -- which is
 # what ServerAlive does once a sleep outlasts it -- deletes its control socket, and every forward
-# goes with it. The supervisor used to recheck nothing it had already forwarded, so the state file
-# kept `state healthy` with the dead ports still up, and `cs193v-portwatch --show` called them
-# reachable. TERM is the clean exit a suite can cause on purpose, sent to the pid the launcher
-# itself identifies as its master (tunnel_owner_pid).
+# goes with it. Before #338 the state file went on saying healthy with the dead ports up; before
+# #343 it said so correctly and stayed that way until somebody ran --reset-tunnel. Now the
+# supervisor starts a new master and re-forwards. TERM is the clean exit a suite can cause on
+# purpose, sent to the pid the launcher itself identifies as its master (tunnel_owner_pid).
 #
-# A FORWARDED PORT FIRST, because "nothing is up" is only news about a state file that had
-# something up.
+# THE GONE STATE IS NO LONGER WHAT IS ASSERTED: it lasts as long as the restart, about a second,
+# and the state file keeps only the latest word. What is asserted is the outcome -- a NEW master
+# carrying the port, with no reset run -- and the supervisor's own log line, which pins that the
+# restart is what did it.
+#
+# A FORWARDED PORT FIRST, because "it came back" is only news about a port that was up.
+#
+# state_says_gone STAYS FOR THE WEDGED CASE BELOW: a stopped master is alive, so nothing restarts
+# it, and there the gone state is exactly what is published until it answers again.
 state_says_gone() {
     podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
         | do_awk -F'\t' '$1 == "state" { s = $2 } $1 == "up" { u++ }
                          END { exit !(s == "master-unresponsive" && u == 0) }'
 }
+# A NEW MASTER, CARRYING THE PORT: our pidfile names a live master that is not the one killed, and
+# that master holds the port. dyn_is_forwarded asks of the master the pidfile names, so the second
+# half is about the new one.
+replaced_and_carried() {
+    local now
+    now="$(tunnel_pid)"
+    [ -n "$now" ] && [ "$now" != "$TPID" ] && dyn_is_forwarded "$CARRIED_PORT"
+}
+suplog_says_restarted() { grep -qF 'the ssh master has been restarted' "$FWD_SUPLOG" 2>/dev/null; }
 TPID="$(tunnel_pid)"
 if a_port_is_carried && [ -n "$TPID" ] && kill "$TPID" 2>/dev/null; then
-    if wait_until 15 state_says_gone; then
-        pass "tunnel:a-closed-master-is-reported-as-unreachable"
+    if wait_until 30 replaced_and_carried; then
+        pass "tunnel:a-closed-master-is-replaced-without-a-reset"
     else
-        fail "tunnel:a-closed-master-is-reported-as-unreachable" "the master (pid $TPID) exited on TERM
-with $CARRIED_PORT forwarded, and fifteen seconds later the state file still said:
-$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+        fail "tunnel:a-closed-master-is-replaced-without-a-reset" "the master (pid $TPID) exited on TERM
+with $CARRIED_PORT forwarded, and thirty seconds later nothing had replaced it.
+  master now: $(tunnel_pid)
+  the state file:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')
+  the supervisor's log:
+$(tail -5 "$FWD_SUPLOG" 2>/dev/null | sed 's/^/    /')"
     fi
+    assert_ok "tunnel:the-supervisor-restarted-the-closed-master" suplog_says_restarted
     dyn_serve_stop
-    L --reset-tunnel >/dev/null 2>&1
-    assert_carried "tunnel:forwarding-comes-back-after-a-closed-master-is-replaced"
 else
-    skip "tunnel:a-closed-master-is-reported-as-unreachable" "no port was carried, or no master pid to stop"
-    skip "tunnel:forwarding-comes-back-after-a-closed-master-is-replaced" "see above"
+    skip "tunnel:a-closed-master-is-replaced-without-a-reset" "no port was carried, or no master pid to stop"
+    skip "tunnel:the-supervisor-restarted-the-closed-master" "see above"
 fi
 
 # A MASTER THAT STOPS ANSWERING IS REPORTED AS UNREACHABLE (#266), and as healthy once it answers
@@ -1132,10 +1159,11 @@ else
     skip "tunnel:a-master-that-answers-again-is-reported-healthy" "see above"
 fi
 
-# ...AND SO IS ONE KILLED WITH SIGKILL (#339), which is the case TERM cannot stand in for: SIGKILL
-# leaves the control socket behind, so the check the TERM case exercises still passes, and the
-# state file used to go on saying healthy with the port up -- while every new port was published
-# busy. Measured on a Mac before the fix: exactly that.
+# ...AND SO DOES ONE KILLED WITH SIGKILL (#339, #343), which is the case TERM cannot stand in for:
+# SIGKILL leaves the control socket behind, so the check the TERM case exercises still passes, and
+# the state file used to go on saying healthy with the port up -- while every new port was
+# published busy. Measured on a Mac before the fix: exactly that. The death is found by the
+# pidfile's pid, and the master is put back the same way.
 #
 # THE PID GOING IS THE PRECONDITION, waited for rather than assumed: this is the one place the
 # suite learns how a real host reaps a master killed this way, and a pid that still answered
@@ -1144,22 +1172,27 @@ master_gone() { ! kill -0 "$TPID" 2>/dev/null; }
 TPID="$(tunnel_pid)"
 if a_port_is_carried && [ -n "$TPID" ] && kill -9 "$TPID" 2>/dev/null; then
     assert_ok "tunnel:a-killed-master-is-gone" wait_until 10 master_gone
-    assert_ok "tunnel:a-killed-master-leaves-its-socket" test -S "$FWD_CTL"
-    if wait_until 15 state_says_gone; then
-        pass "tunnel:a-killed-master-is-reported-as-unreachable"
+    # NOT "leaves its socket" any more: the restart rm's the dead socket and makes a new one at the
+    # same path within a second, so the file's presence no longer says anything about the kill.
+    if wait_until 30 replaced_and_carried; then
+        pass "tunnel:a-killed-master-is-replaced-without-a-reset"
     else
-        fail "tunnel:a-killed-master-is-reported-as-unreachable" "the master (pid $TPID) was killed
-with SIGKILL with $CARRIED_PORT forwarded, and fifteen seconds later the state file still said:
-$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+        fail "tunnel:a-killed-master-is-replaced-without-a-reset" "the master (pid $TPID) was killed
+with SIGKILL with $CARRIED_PORT forwarded, and thirty seconds later nothing had replaced it.
+  master now: $(tunnel_pid)
+  the state file:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')
+  the supervisor's log:
+$(tail -5 "$FWD_SUPLOG" 2>/dev/null | sed 's/^/    /')"
     fi
+    # PINNED TO THE PID PATH: SIGKILL leaves the socket, so the death was found by kill -0.
+    assert_ok "tunnel:the-supervisor-found-the-killed-master-by-its-pid" \
+              grep -qF "pid $TPID is no longer running" "$FWD_SUPLOG"
     dyn_serve_stop
-    L --reset-tunnel >/dev/null 2>&1
-    assert_carried "tunnel:forwarding-comes-back-after-a-killed-master-is-replaced"
 else
     skip "tunnel:a-killed-master-is-gone" "no port was carried, or no master pid to kill"
-    skip "tunnel:a-killed-master-leaves-its-socket" "see above"
-    skip "tunnel:a-killed-master-is-reported-as-unreachable" "see above"
-    skip "tunnel:forwarding-comes-back-after-a-killed-master-is-replaced" "see above"
+    skip "tunnel:a-killed-master-is-replaced-without-a-reset" "see above"
+    skip "tunnel:the-supervisor-found-the-killed-master-by-its-pid" "see above"
 fi
 
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means

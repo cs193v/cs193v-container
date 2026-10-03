@@ -2331,6 +2331,19 @@ master refuses a forward with the same exit status as a taken port, and every ne
 reported as "another program on your own computer"; `-O check` against it is refused at once, where
 a wedged one's times out, and that difference is what tells gone from mute.
 
+**Since #343 it also puts the master back.** A death proved by the pidfile's pid — TERM, `-O exit`
+and ServerAlive remove the socket and exit, SIGKILL exits and leaves it — makes the supervisor start
+a new master itself and re-forward everything, so the window above now ends with the ports coming
+back rather than with advice to reset. It deliberately does not restart on a socket that has merely
+gone, or on a forward that fails: the master can be alive through both, and a second one would
+strand it under a deleted socket holding host ports. Nor does it retry a start that fails — that
+leaves no pidfile, so nothing proves another death — which leaves `--show`'s advice to run
+`cs193v --reset-tunnel` standing exactly when it is true. **One writer at a time, not a lock:** every
+other path that starts or stops a master — teardown, `--reset-tunnel`, a launch that finds none to
+reuse, `check_clock`'s VM restart — stops the supervisor first, so only one thing can start a master
+while it runs. The window that leaves is a writer stopping the supervisor mid-restart, whose
+in-flight `ssh -f` can finish after the writer's `rm` and leave a master holding no ports.
+
 This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
 carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
 one acknowledged exception to "a failure must be loud", and because both obvious fixes are worse:

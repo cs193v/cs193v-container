@@ -3796,6 +3796,27 @@ done
 pf_hits="$(lint_grep --strip-comments -E -e '[$][(][^)]*[$][{]?(TUNNEL_PID|TUNNEL_SUP_PIDFILE)' -- "$REPO/cs193v")"
 assert_eq "gate:no-pidfile-is-read-through-a-fork" "" "$pf_hits"
 
+# ONE WRITER AT A TIME (#343). The supervisor restarts a master that dies, so every other path that
+# starts or stops one must stop the supervisor FIRST, or the two race and one master is stranded
+# under a socket the other deleted. Line ORDER within each function, comments stripped, and each
+# needle found at all -- a missing one would otherwise compare an empty line number and pass.
+first_line() { printf '%s\n' "$2" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
+for spec in 'reset-tunnel-stops-the-supervisor-first|verb_reset_tunnel|tunnel_sup_stop|tunnel_kill_pid' \
+            'ensure-tunnel-stops-the-supervisor-first|ensure_tunnel|tunnel_sup_stop|tunnel_start' \
+            'check-clock-takes-the-tunnel-down-before-the-vm|check_clock|tunnel_down|podman machine stop' \
+            'tunnel-down-stops-the-supervisor-first|tunnel_down|tunnel_sup_stop|-O exit'; do
+    name="${spec%%|*}"; rest="${spec#*|}"
+    fn="${rest%%|*}"; rest="${rest#*|}"; a="${rest%%|*}"; b="${rest#*|}"
+    body="$(run_checker fn_body "$fn" "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+    la="$(first_line "$a" "$body")"; lb="$(first_line "$b" "$body")"
+    if [ -n "$la" ] && [ -n "$lb" ] && [ "$la" -lt "$lb" ]; then
+        pass "supervisor:$name"
+    else
+        fail "supervisor:$name" "in $fn, '$a' is at line ${la:-<missing>} and '$b' at
+${lb:-<missing>}: the supervisor would still be running when the master is touched."
+    fi
+done
+
 sup_body="$(run_checker fn_body verb_supervise "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
 assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"

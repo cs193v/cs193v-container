@@ -1645,8 +1645,60 @@ sup_master_died() {
     ! kill -0 "$SUP_MASTER" 2>/dev/null
 }
 
+# A MASTER THAT HAS DIED IS PUT BACK BY THE SUPERVISOR THAT NOTICED (#343), so a student whose
+# laptop slept past ServerAlive gets their ports back without being told to run anything. Called
+# by sup_tick only when sup_master_died -- the death PROVED by the pidfile's pid -- and never on the
+# two things that merely look like one: a socket that is missing (a TMPDIR cleaner, a hand) and a
+# refused -O check with no pid to confirm it. The master can be alive through the first, and the
+# second is one ssh's word with nothing to identify the master by; either way tunnel_start's rm -f
+# would strand a live master under a deleted socket, holding host ports the new master's forwards
+# would find busy. Every death measured meets the proof: TERM, `-O exit` and ServerAlive remove the socket
+# and exit; SIGKILL exits and leaves it.
+#
+# ONE ATTEMPT PER DEATH, and that is the start's own doing rather than a counter's. tunnel_start
+# removes the pidfile first and writes one only once the new master answers, so a start that fails
+# leaves no pid, and with no pid sup_master_died cannot fire again. The state stays
+# master-unresponsive, and --show's advice to run --reset-tunnel is then the right advice. Nothing
+# has shown a first attempt failing for a reason a second would not, so there is no retry.
+#
+# A MASTER THAT ANSWERS AFTER ALL means the pidfile was what was wrong. It is rewritten from the
+# master's own answer -- rm first, because tunnel_record_pid writes nothing when it cannot learn a
+# pid and the wrong one would stay -- and the next tick's SUP_MASTER change re-forwards everything
+# to it, which a master that already holds a forward accepts and keeps once (measured).
+#
+# THE DEAD MASTER'S LOG IS COPIED IN FIRST: tunnel_start truncates it, and it is the only record of
+# why the master died -- a sleep that outlasted ServerAlive, a VM that went away.
+#
+# NO tunnel_keys. It can die(), which would end this process, and the keys live in $CONFIG and were
+# made when the session began.
+#
+# </dev/null ON BOTH CALLS, for tunnel_dyn_forward's reason: this process's stdin IS the watcher's
+# stream, and tunnel_alive's ssh -- and the one inside tunnel_start -- would otherwise inherit it
+# and eat frames. tunnel_start's own `ssh -f` already has one; the -O check after it does not.
+#
+# ONE WRITER AT A TIME is what makes tunnel_start safe to run here. Every other path that starts or
+# stops a master stops this process first -- tunnel_down (teardown, --stop, --rebuild, check_clock),
+# --reset-tunnel, and ensure_tunnel when it finds no master to reuse -- so this is the only thing
+# that can start one while it runs. The window that leaves: a writer that stops the supervisor while
+# this restart's `ssh -f` is still in flight lets that ssh finish after the writer's own rm, and a
+# master with no forwards -- holding no host port -- is left behind. Not closed; see #343.
+sup_restart_master() {
+    if tunnel_alive </dev/null; then
+        rm -f "$TUNNEL_PID"; tunnel_record_pid
+        sup_log "the ssh master answered after all; its pidfile has been rewritten"
+        return 0
+    fi
+    [ -s "$TUNNEL_LOG" ] && sup_log "the dead ssh master's last words: $(tail -5 "$TUNNEL_LOG")"
+    if tunnel_start </dev/null; then
+        sup_log "the ssh master has been restarted"
+    else
+        sup_log "the ssh master could not be restarted; run cs193v --reset-tunnel"
+    fi
+    return 0
+}
+
 sup_tick() {                          # sup_tick "port:class port:class ..."
-    local frame="$1" e port cls now seen refused='' out c n gone
+    local frame="$1" e port cls now seen refused='' out c n gone died
     # RE-READ THE MASTER EVERY TICK. One builtin file read, and it is the whole self-heal: a
     # --reset-tunnel in another window replaces the master, every forward it held died with it,
     # but the container's ports are all still listening so the watcher reports no change. Dropping
@@ -1669,17 +1721,18 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     # rather than the pidfile, because tunnel_record_pid may leave no pidfile at all. The frame is
     # still read, so a refusal's advice is still published, and a port that would have been
     # forwarded costs nothing: the loop below asks no master once `gone` is set. It comes back
-    # through the -O check below, once --reset-tunnel has made a new socket -- with or without a
-    # new pidfile.
+    # once a new master has made a new socket -- the restart at the end of this tick (#343), or
+    # --reset-tunnel -- through the pidfile change above or, with no pidfile, the -O check below.
     #
     # A MASTER KILLED WITH SIGKILL LEAVES ITS SOCKET BEHIND (#339), so the socket cannot be the
     # only witness: sup_master_died asks about the pidfile's pid. With no pidfile -- which
     # tunnel_record_pid can leave -- that death is still found, by the first -O check or forward
     # that asks the dead socket and is refused (tunnel_dyn_check's 2).
-    gone=''
+    gone=''; died=''
+    sup_master_died && died=1
     if [ ! -S "$TUNNEL_CTL" ]; then
         sup_gone "its control socket has gone"
-    elif sup_master_died; then
+    elif [ -n "$died" ]; then
         sup_gone "pid $SUP_MASTER is no longer running"
     fi
 
@@ -1768,6 +1821,9 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     fi
 
     sup_publish "$refused"
+    # AFTER THE PUBLISH, so the state file says the master has gone for as long as putting it back
+    # takes, and a restart that fails leaves that true rather than a healthy word from before.
+    [ -n "$died" ] && sup_restart_master
     return 0
 }
 
@@ -1876,7 +1932,11 @@ tunnel_sup_start() {
     # and so never reaches tunnel_sup_stop; without this, every reset would leave one behind and
     # start another beside it. Measured: four accumulated across one testing session.
     pmq exec "$NAME" pkill -f "cs193v-portwatch --watch" || true
-    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY" "$TUNNEL_SUP_LOG"
+    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY"
+    # THE LAST SUPERVISOR'S LOG IS KEPT, ONE DEEP, rather than deleted (#252). --reset-tunnel now
+    # always comes through here (it stops the supervisor first, #343), so deleting would destroy
+    # the record of why forwarding stopped at the moment a student is told to reset it.
+    mv -f "$TUNNEL_SUP_LOG" "$TUNNEL_SUP_LOG.prev" 2>/dev/null || true
     nohup "$SELF" --dev-supervise >>"$TUNNEL_SUP_LOG" 2>&1 </dev/null &
     i=0
     while [ "$i" -lt 50 ]; do
@@ -1923,6 +1983,10 @@ tunnel_sup_stop() {
 
 ensure_tunnel() {
     tunnel_alive && { tunnel_sup_start || true; return 0; }
+    # A SUPERVISOR WITH NO MASTER TO REUSE may be restarting one itself (#343) -- one can outlive
+    # its launch, after a force-quit or a --reset-tunnel with no session open -- so it is stopped
+    # before this starts another. tunnel_sup_start below brings it back.
+    tunnel_sup_alive && tunnel_sup_stop
     tunnel_keys
     tunnel_start || return 1
     tunnel_sup_start || true
@@ -2862,13 +2926,15 @@ check_clock() {
     printf '\n'; msg prompt.clock-drift SKEW="$skew"
     if confirm "$(msg opt.leave-clock)" "$(msg opt.restart-machine)"; then
         info "$(msg status.restarting-machine)"
+        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
+        # into a VM that is about to go away. Without the ensure_tunnel below, the clock fix
+        # would silently cost the student every forwarded port, and the next symptom would look
+        # unrelated to the prompt they just accepted. DOWN BEFORE THE STOP, not after it (#343):
+        # the supervisor restarts a master that dies, and left running through the stop it would
+        # try to start one into the VM on its way out.
+        tunnel_down
         run_timeout 120 podman machine stop || true
         run_timeout 180 podman machine start || warn "$(msg warn.machine-restart-failed)"
-        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
-        # into a VM that just went away. Without this, the clock fix would silently cost the
-        # student every forwarded port, and the next symptom would look unrelated to the
-        # prompt they just accepted.
-        tunnel_down
         ensure_tunnel || true
     fi
 }
@@ -2990,6 +3056,12 @@ verb_stop() {
 verb_reset_tunnel() {
     preflight; load_args; require_image
     info "$(msg status.tunnel-resetting)"
+
+    # 0. THE SUPERVISOR FIRST (#343). It restarts a master that dies, so left running it would race
+    #    the kill and rm below -- each side starting a master, one stranded under a socket the other
+    #    deleted. ensure_tunnel starts it again at the end. GUARDED, because tunnel_sup_stop always
+    #    pays a podman exec, and a hung podman is one of the things that sends people to this verb.
+    tunnel_sup_alive && tunnel_sup_stop
 
     # 1. The clean way first, but TIME-BOXED. A wedged ssh may never answer -O exit, and
     #    waiting forever for it is precisely the failure this verb exists to break out of.
