@@ -81,6 +81,9 @@
 #                    is how a test proves the writer was RUNNING while the host saw nothing --
 #                    silence and EOF are identical from the reading end, and this is the only
 #                    witness that says which one a test actually produced.
+#   publish_rcs      exit codes for successive `cs193v-portwatch --publish` execs, space-
+#                    separated, e.g. `1 1 0`. READ AND REWRITTEN BY THE FAKE: each call takes
+#                    the first code and leaves the rest [absent or empty = every one exits 0].
 
 SHIM="${CS193V_SHIM:?podman-fake needs CS193V_SHIM}"
 
@@ -415,11 +418,11 @@ level=error msg="cannot set up pasta"' >&2
         # The launcher's doctor/check_clock use `podman exec NAME sh -c '...'`. Answer the
         # handful of probes it makes; anything else is empty.
         for a in "$@"; do LASTARG="$a"; done
-        # THESE TWO MATCH THE WHOLE COMMAND LINE, not LASTARG, and that is not a style choice:
-        # the watcher is run as `cs193v-portwatch --watch 1`, so its last argument is `1` and a
-        # LASTARG arm below can never fire. Keyed there, the watcher fell through to exec_out,
-        # answered the handshake with whatever a test had staged, and every shim launch warned
-        # about a protocol violation. Measured: it did.
+        # THESE MATCH THE WHOLE COMMAND LINE, not LASTARG, and that is not a style choice: the
+        # watcher is run as `cs193v-portwatch --watch 1`, so its last argument is `1` (and a
+        # publish's is `refused=...`) and a LASTARG arm below can never fire. Keyed there, the
+        # watcher fell through to exec_out, answered the handshake with whatever a test had
+        # staged, and every shim launch warned about a protocol violation. Measured: it did.
         case "$*" in
             # PKILL FIRST. tunnel_sup_stop reaps the watcher with
             # `pkill -f "cs193v-portwatch --watch"`, whose ARGUMENT contains the very string the
@@ -465,6 +468,15 @@ level=error msg="cannot set up pasta"' >&2
                     exit 0
                 fi
                 echo 'cs193v-portwatch 1'; echo 'BEGIN 0'; echo 'END'; exit 0 ;;
+            # A PUBLISH, which can be told to fail: one staged code per call (#368). Silent,
+            # as pmq discards the output anyway.
+            *cs193v-portwatch*--publish*)
+                prc=0
+                if [ -s "$SHIM/publish_rcs" ]; then
+                    read -r prc prest < "$SHIM/publish_rcs"
+                    printf '%s' "$prest" > "$SHIM/publish_rcs"
+                fi
+                exit "$prc" ;;
         esac
         case "${LASTARG:-}" in
             *'id -u'*)        echo "1000:1000" ;;

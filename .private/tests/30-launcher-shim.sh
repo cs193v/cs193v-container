@@ -2747,3 +2747,72 @@ fi
 assert_eq "forward:a-replaced-master-is-asked-for-the-port-again" "2" \
           "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
 sup_reap
+
+# ─── ...and a publish that fails is sent again  (#368) ─────────────────────────
+# sup_publish used to record the signature BEFORE its exec and drop the exec's status. Every
+# frame after a failed publish has the same signature, so it was never sent again, and the state
+# file kept its old answer until something else changed -- a lost `master-unresponsive` among
+# them, which is #338's lie told by a failed exec instead of a missed socket.
+#
+# v6lo AND NO MASTER, for the reason the gap cases give: tunnel_dyn_classify refuses the port
+# before any ssh runs, so the signature moves only when the staged frame does.
+#
+# THE CODES ARE THE SCENARIO. A fails twice and lands on the third try; B fails once, lands on
+# the second, and its third frame sends nothing; C times out (124 is run_timeout's word for its
+# ceiling), and B coming back after it is SENT AGAIN although B is what last landed -- the timed-out
+# C may have landed too; M lands first time. argv.log records the failures as well, so the
+# publishes, by port, are exactly one per attempt.
+sup_publish_ports() {
+    sup_publishes | do_awk '{ sub(/.*refused=/, ""); sub(/:.*/, ""); printf "%s%s", s, $0; s = " " }'
+}
+# What each logged failure gave as its reason, in order.
+sup_publish_reasons() {
+    do_awk '/could not publish/ { sub(/.*\(/, ""); sub(/\)$/, ""); printf "%s%s", s, $0; s = ", " }' \
+        "$SHIM/sup-retry.out" 2>/dev/null
+}
+# The fake TAKES a code per call, so a list it has touched is shorter. Not "empty": the bug makes
+# fewer calls than the fix and leaves codes over, and a check that failed there would report a
+# real failure as a broken fake.
+PUBLISH_RCS='1 1 0 1 0 124'
+sup_publish_codes_taken() {
+    [ -f "$SHIM/publish_rcs" ] && [ "$(cat "$SHIM/publish_rcs")" != "$PUBLISH_RCS" ]
+}
+shim_new
+SUP_PIDFILE="$(sup_pidfile)"
+shim_set publish_rcs "$PUBLISH_RCS"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '21500:v6lo' 'END' 'BEGIN 1' '21500:v6lo' 'END' 'BEGIN 1' '21500:v6lo' 'END' \
+           'BEGIN 1' '21501:v6lo' 'END' 'BEGIN 1' '21501:v6lo' 'END' 'BEGIN 1' '21501:v6lo' 'END' \
+           'BEGIN 1' '21502:v6lo' 'END' 'BEGIN 1' '21501:v6lo' 'END' \
+           'BEGIN 1' '21503:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-retry.out"
+assert_ok "publish:the-loop-started" wait_until 10 sup_up
+# THE MARKER IS THE CLOCK. The loop takes one frame at a time and pmq waits for each exec, so once
+# M's publish is in argv.log every frame before it has been dealt with -- including the third B,
+# whose whole job is to send nothing. A case rather than a gate: without it, a timeout would leave
+# the sequence below reading half a log and calling it the answer.
+if wait_until 15 sup_published 'refused=21503:v6lo'; then
+    pass "publish:every-staged-frame-was-read"
+else
+    fail "publish:every-staged-frame-was-read" \
+"the marker frame was never published, so the sequence below is not a whole run.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-retry.out" 2>/dev/null)"
+fi
+if sup_publish_codes_taken; then
+    pass "publish:the-fake-answered-from-the-staged-codes"
+else
+    fail "publish:the-fake-answered-from-the-staged-codes" \
+"publish_rcs reads '$(cat "$SHIM/publish_rcs" 2>/dev/null)', so the fake never failed a publish
+and nothing below is about a failure."
+fi
+assert_eq "publish:a-failed-publish-is-sent-again-until-it-lands" \
+          "21500 21500 21500 21501 21501 21502 21501 21503" "$(sup_publish_ports)"
+# ONCE PER EPISODE, not once per attempt: four failures, two of them in a row, and the successes
+# between the episodes are what let B's and C's be said at all. The timeout is named as one.
+assert_eq "publish:each-failing-episode-is-logged-once-with-its-reason" \
+          "exit 1, exit 1, timed out after 20s" "$(sup_publish_reasons)"
+sup_reap

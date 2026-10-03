@@ -1539,22 +1539,45 @@ SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '; SUP_MASTER=''; SUP_STATE=healthy; SUP_SI
 
 sup_log() { printf '%s\n' "$*" >&2; }
 
-# The publish is the only path state takes out of the supervisor. On change only -- per-tick would
-# be ~28,800 lines and ~28,800 podman execs a session, and the linger already absorbs the churn
-# that would otherwise cause: a crash-looping dev server rebinds the SAME port, which never leaves
-# SUP_UP, so nothing publishes at all.
-SUP_PUBLISHED=''
+# The publish is the only path state takes out of the supervisor. On change only, plus a retry
+# each frame until the change lands (below) -- per-tick would be ~28,800 lines and ~28,800 podman
+# execs a session, and the linger already absorbs the churn that would otherwise cause: a
+# crash-looping dev server rebinds the SAME port, which never leaves SUP_UP, so nothing publishes
+# at all.
+#
+# SUP_PUBLISHED IS WHAT LANDED, NOT WHAT WAS TRIED (#368). It used to be set before the exec, and
+# a publish that failed was then never sent again: every frame after it has the same signature,
+# so the file kept its old answer until something else changed. AND UNKNOWN AFTER A FAILURE, not
+# the last one that landed: a publish reported failed may have landed anyway -- pmq kills the
+# client at its ceiling, not the exec -- so the next frame sends whatever is current, even a
+# return to that last state. A failure is logged on the way INTO failing, as sup_gone does.
+#
+# NO RATE LIMIT ON THE RETRY, deliberately. A failure costs one exec a frame while it lasts, which
+# for one that never clears is the per-tick figure above. An exec that HANGS -- what pm's ceiling
+# is for, after a Mac wakes -- would stall this loop for pmq's 20s every frame; that has not been
+# measured with this podman (#157). If it is, note that frames queued behind a stall are read
+# instantly afterwards, so a backoff counted in ticks must be well over 20 of them or forwarding
+# falls further behind.
+SUP_PUBLISHED=''; SUP_PUBFAIL=''
 sup_publish() {                       # sup_publish REFUSED_LIST
-    local up refused sig e
+    local up refused sig e rc why
     up=''; refused=''
     for e in $SUP_UP;   do up="$up,$e:lo"; done
     for e in $1;        do refused="$refused,$e"; done
     up="${up#,}"; refused="${refused#,}"
     sig="$SUP_STATE|$up|$refused"
     [ "$sig" = "$SUP_PUBLISHED" ] && return 0
-    SUP_PUBLISHED="$sig"
+    SUP_PUBLISHED=''
     pmq exec "$NAME" cs193v-portwatch --publish \
-        "state=$SUP_STATE" "floor=$TUNNEL_DYN_FLOOR" "up=$up" "refused=$refused" || true
+        "state=$SUP_STATE" "floor=$TUNNEL_DYN_FLOOR" "up=$up" "refused=$refused"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        SUP_PUBLISHED="$sig"; SUP_PUBFAIL=''
+    else
+        why="exit $rc"; [ "$rc" -eq 124 ] && why='timed out after 20s'   # run_timeout's ceiling
+        [ -n "$SUP_PUBFAIL" ] || sup_log "could not publish the port state ($why)"
+        SUP_PUBFAIL=1
+    fi
     return 0
 }
 
