@@ -69,6 +69,8 @@
 #   machine_stop_rc  exit code for `machine stop`           [0]
 #   exec_out         what `podman exec ... --attach` prints  []
 #   claim_out        what `podman exec ... --claim` prints   []
+#   ports_out        what `podman exec ... cat /tmp/cs193v-volatile/ports` prints, i.e.
+#                    the supervisor's state file as doctor reads it  []
 #   top_out          what `podman top` prints               []
 #   port_out         what `podman port` prints              []
 #   watch_out        the WHOLE `cs193v-portwatch --watch` stream, one line of protocol
@@ -487,6 +489,7 @@ level=error msg="cannot set up pasta"' >&2
             # "the ENTER prompt comes before the container is opened" sees the claim and fails on
             # an ordering that is actually correct. Measured: it did.
             *--claim)         get claim_out ''; printf '' ;;
+            */tmp/cs193v-volatile/ports) get ports_out ''; echo ;;
             *)                case "$*" in
                                   *'date +%s'*) get container_date "$(date +%s)"; echo ;;
                                   *) get exec_out ''; echo ;;

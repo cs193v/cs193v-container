@@ -606,8 +606,15 @@ dynamic ports
 [[doctor.ports.not-running]]
 {{HI}}not running{{OFF}} — run: cs193v --reset-tunnel
 
+# The tunnel answered doctor's own check, but the supervisor's last forward through it did not
+# (#266) -- so this sits under "tunnel up" and is worded about forwarding, not the tunnel.
+[[doctor.ports.stalled]]
+{{HI}}forwarding stalled{{OFF}} — run: cs193v --reset-tunnel
+
+# Any other state that is not healthy, by its name. `broken` is the only one, and it reaches here
+# only in the moment before its supervisor exits and doctor.ports.not-running takes over.
 [[doctor.ports.state]]
-{{STATE}} — {{REASON}}
+{{STATE}}
 
 [[doctor.ports.forwarded]]
 {{N}} forwarded: {{PORTS}}

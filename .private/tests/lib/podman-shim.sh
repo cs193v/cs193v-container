@@ -801,12 +801,19 @@ EOF
 #     port is bound, so tunnel_dyn_forward can never return 1 from it and the SUP_BUSY cooldown
 #     is unreachable here), and it answers for ANY direction, including -R and an off-box -L,
 #     which a real sshd refuses and 80-launcher-live.sh asserts are refused.
+#
+# AND IT CAN BE WEDGED, which is what #266 needed: a master that keeps its control socket and
+# answers nothing, the way a SIGSTOPped one does (measured against a real OpenSSH master: -O check
+# and -O forward both block until killed). Opt-in, through shim_ssh_wedge. BY CALL NUMBER, not by
+# a file a test creates and removes, because podman-fake plays every staged frame into the pipe at
+# once -- a test-side switch would race the supervisor rather than sit between two frames.
 shim_fake_ssh() {
     # TRUNCATED HERE, not in shim_new, which installs no ssh. NOT because a previous case
     # could be read -- shim_new mktemp -d's a fresh directory, so its log is somewhere else
     # entirely -- but because a second shim_fake_ssh inside ONE shim would otherwise leave the
     # first arrangement's forwards in place.
     : > "$SHIM/ssh.log"
+    rm -f "$SHIM/ssh_wedge" "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
     # TWO WRITES, AND THE FIRST ONE IS INTERPOLATED. The body must NOT be expanded -- it is
     # made of $*, $@ and $$ -- but the log path must be, so it is written ahead of the quoted
     # heredoc. shim_fake_pkgutil interpolates its state for the same reason.
@@ -816,8 +823,22 @@ shim_fake_ssh() {
     # 0 and 124 arms, re-tests `[ -S ]` successfully and returns 1 -- "the host port is busy".
     # The port then gets a cooldown and publishes `refused=PORT:busy`, and the diagnostic dies
     # in the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
-    printf '#!/bin/sh\nSSHLOG=%s\n' "$SHIM/ssh.log" > "$SHIM/ssh"
+    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\n' "$SHIM/ssh.log" "$SHIM/ssh_wedge" > "$SHIM/ssh"
     cat >> "$SHIM/ssh" <<'EOF'
+# The wedge: control calls FROM..TO never answer. `exec`, so run_timeout's kill -9 of the pid it
+# started takes the sleep with it rather than leaving one behind per wedged call.
+if [ -s "$SSHWEDGE" ]; then
+    case " $* " in
+        *" -O check "*|*" -O forward "*|*" -O cancel "*)
+            read -r wfrom wto < "$SSHWEDGE"
+            n="$(cat "$SSHWEDGE.n" 2>/dev/null || echo 0)"; n=$((n + 1))
+            printf '%s\n' "$n" > "$SSHWEDGE.n"
+            if [ "$n" -ge "$wfrom" ] && [ "$n" -le "$wto" ]; then
+                printf '%s WEDGED %s\n' "$n" "$*" >> "$SSHWEDGE.log"; exec sleep 30
+            fi
+            printf '%s ok %s\n' "$n" "$*" >> "$SSHWEDGE.log" ;;
+    esac
+fi
 case " $* " in
     *" -O check "*) echo "Master running (pid=$$)" >&2; exit 0 ;;
     *" -O exit "*)  exit 0 ;;
@@ -851,6 +872,14 @@ EOF
 shim_ssh_master() {                   # shim_ssh_master CTL
     PATH="$SHIM:$PATH" ssh -f -N -M -S "$1" student@cs193v-tunnel </dev/null
 }
+
+# Wedge control calls FROM..TO, counted across -O check, forward and cancel from the first call
+# after this. Every counted call, wedged or answered, is logged in order: `N ok|WEDGED ARGV`.
+shim_ssh_wedge() {                    # shim_ssh_wedge FROM TO
+    printf '%s %s\n' "$1" "$2" > "$SHIM/ssh_wedge"
+    rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
+}
+shim_ssh_calls() { cat "$SHIM/ssh_wedge.log" 2>/dev/null; }
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
 # BSD/macOS requires one, so `sed -i '/x/d' f` works on Linux and fails on a Mac.

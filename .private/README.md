@@ -2321,9 +2321,11 @@ ServerAliveCountMax=3` fires and the master exits, taking `$TUNNEL_CTL` with it.
 **Since #338 the supervisor does notice that last step.** Once the control socket has gone, the next
 frame publishes `master-unresponsive` with nothing up, so `cs193v-portwatch --show` stops calling
 those ports reachable and says to run `cs193v --reset-tunnel`. That is one builtin test of one file
-per frame, not the cross-check rejected below. What it still cannot see is a master killed with
-SIGKILL, which leaves its socket behind (#339), or one that is alive but wedged, which only a
-forward that times out reveals (#266).
+per frame, not the cross-check rejected below. **Since #266 it notices a master that is alive but
+wedged**, though only when a forward to it times out: that publishes the same state, and only an
+`ssh -O check` that the master answers ends it, so a tick with nothing new to forward cannot
+quietly call the tunnel healthy again. What it still cannot see is a master killed with SIGKILL,
+which leaves its socket behind (#339).
 
 This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
 carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
