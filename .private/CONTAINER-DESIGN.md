@@ -233,8 +233,9 @@ computer**, not in the container:
 cs193v doctor
 ```
 
-It reports whether the tunnel is up and lists what it is currently forwarding. If it says the
-tunnel is down, or things stop working after your computer sleeps:
+It reports whether the tunnel is up and lists what it is currently forwarding. If the tunnel drops
+— after your computer sleeps, say — the launcher notices and reconnects it by itself within a few
+seconds. If doctor still says the tunnel is down, or things stay broken:
 
 ```
 cs193v --reset-tunnel

@@ -1033,6 +1033,9 @@ EOF
 #     port fail the way a real master's does when the port is taken -- rc 255 and the two lines
 #     below, measured against OpenSSH 10.2. PER PORT rather than a flag, because the cases worth
 #     having are the mixed ones: one port forwarded and another refused in the same frame (#267).
+#   * IT FAILS TO START ONLY WHEN TOLD TO. `shim_touch ssh_start_fails` makes the master's own
+#     start exit 255 having bound nothing, the way an ssh whose transport cannot be reached does --
+#     which is what a restart into a VM that is still waking would meet (#343).
 #     ONE THING IT CANNOT DO, and a case written later must not assume otherwise: it answers for
 #     ANY direction, including -R and an off-box -L, which a real sshd refuses and
 #     80-launcher-live.sh asserts are refused.
@@ -1064,10 +1067,10 @@ shim_fake_ssh() {
     # fails that way as an answer -- once "the host port is busy", now a master that has gone,
     # since the -O check tunnel_dyn_forward asks next fails identically. The diagnostic dies in
     # the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
-    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\nSSHBUSY=%s\nSSHALIVE=%s\nSSHPY=%s\n' \
+    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\nSSHBUSY=%s\nSSHALIVE=%s\nSSHPY=%s\nSSHNOSTART=%s\n' \
         "$(sh_quote "$SHIM/ssh.log")" "$(sh_quote "$SHIM/ssh_wedge")" \
         "$(sh_quote "$SHIM/ssh_busy_ports")" "$(sh_quote "$SHIM/ssh_alive")" \
-        "$(sh_quote "$TESTS_DIR/lib/ssh-master-fake.py")" > "$SHIM/ssh"
+        "$(sh_quote "$TESTS_DIR/lib/ssh-master-fake.py")" "$(sh_quote "$SHIM/ssh_start_fails")" > "$SHIM/ssh"
     cat >> "$SHIM/ssh" <<'EOF'
 # The wedge: control calls FROM..TO never answer. `exec`, so run_timeout's kill -9 of the pid it
 # started takes the sleep with it rather than leaving one behind per wedged call. FIRST, before
@@ -1117,6 +1120,10 @@ case " $* " in
         exit 0 ;;
 esac
 [ -n "$ctl" ] || exit 255
+if [ -e "$SSHNOSTART" ]; then
+    echo "kex_exchange_identification: Connection closed by remote host" >&2
+    exit 255
+fi
 python3 "$SSHPY" hold "$ctl" "$SSHALIVE" || exit 255
 [ "$fork" = yes ] && exit 0
 sleep 30
@@ -1172,10 +1179,11 @@ shim_ssh_unwedge() {
 }
 
 # The pid of the master holding CTL, asked of the holder directly rather than through the fake
-# ssh, so that asking puts nothing in ssh.log for a case's counts to trip over. Empty when
-# nothing answers -- which is the question a case asks after killing one.
+# ssh, so that asking puts nothing in ssh.log for a case's counts to trip over. THROUGH
+# run_checker (#559): every caller asks it of a master it expects to answer, and an empty pid is
+# what an assert_ne against it, or a pidfile compared with it, passes on.
 shim_ssh_master_pid() {               # shim_ssh_master_pid CTL
-    python3 "$TESTS_DIR/lib/ssh-master-fake.py" ask "$1" check 2>/dev/null
+    run_checker python3 "$TESTS_DIR/lib/ssh-master-fake.py" ask "$1" check
 }
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
