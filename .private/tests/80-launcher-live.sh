@@ -1132,6 +1132,36 @@ else
     skip "tunnel:a-master-that-answers-again-is-reported-healthy" "see above"
 fi
 
+# ...AND SO IS ONE KILLED WITH SIGKILL (#339), which is the case TERM cannot stand in for: SIGKILL
+# leaves the control socket behind, so the check the TERM case exercises still passes, and the
+# state file used to go on saying healthy with the port up -- while every new port was published
+# busy. Measured on a Mac before the fix: exactly that.
+#
+# THE PID GOING IS THE PRECONDITION, waited for rather than assumed: this is the one place the
+# suite learns how a real host reaps a master killed this way, and a pid that still answered
+# kill -0 would make the state file's verdict a statement about a zombie instead.
+master_gone() { ! kill -0 "$TPID" 2>/dev/null; }
+TPID="$(tunnel_pid)"
+if a_port_is_carried && [ -n "$TPID" ] && kill -9 "$TPID" 2>/dev/null; then
+    assert_ok "tunnel:a-killed-master-is-gone" wait_until 10 master_gone
+    assert_ok "tunnel:a-killed-master-leaves-its-socket" test -S "$FWD_CTL"
+    if wait_until 15 state_says_gone; then
+        pass "tunnel:a-killed-master-is-reported-as-unreachable"
+    else
+        fail "tunnel:a-killed-master-is-reported-as-unreachable" "the master (pid $TPID) was killed
+with SIGKILL with $CARRIED_PORT forwarded, and fifteen seconds later the state file still said:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+    fi
+    dyn_serve_stop
+    L --reset-tunnel >/dev/null 2>&1
+    assert_carried "tunnel:forwarding-comes-back-after-a-killed-master-is-replaced"
+else
+    skip "tunnel:a-killed-master-is-gone" "no port was carried, or no master pid to kill"
+    skip "tunnel:a-killed-master-leaves-its-socket" "see above"
+    skip "tunnel:a-killed-master-is-reported-as-unreachable" "see above"
+    skip "tunnel:forwarding-comes-back-after-a-killed-master-is-replaced" "see above"
+fi
+
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means
 # -O exit can never be answered, and a reset that waited for it would hang forever.
 TPID="$(tunnel_pid)"

@@ -32,6 +32,8 @@ sup_reap() {
     # ...and the fake watchers with them. A stalling one is asleep, not writing, so killing
     # the supervisor gives it no EPIPE to notice; removing the file that armed it does.
     rm -f "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/watch_out 2>/dev/null || true
+    # ...and the fake ssh masters, which end when their sentinel does (lib/ssh-master-fake.py).
+    rm -f "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/ssh_alive 2>/dev/null || true
 }
 trap 'sup_reap; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
@@ -2659,11 +2661,11 @@ DEVT="$(launcher --dev-tunnel)"
 SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
 CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
 shim_ssh_master "$CTL"
-# THE VACUITY GUARD FOR EVERYTHING BELOW, and it carries a detail because it is thin ice twice
-# over. The fake SWALLOWS python's bind failure and exits 0 regardless, so `[ -S ]` is the only
-# thing that can tell; and the path is 102 bytes on a stock Mac against an AF_UNIX cap of about
-# 104, so a longer TMPDIR or instance name is a real way for this to go red. Saying which is
-# the difference between "the path got too long" and "the fake is broken".
+# THE VACUITY GUARD FOR EVERYTHING BELOW, and it carries a detail because the path is 102 bytes
+# on a stock Mac against an AF_UNIX cap of about 104, so a longer TMPDIR or instance name is a real
+# way for this to go red. The fake now fails loudly when it cannot bind, but this case does not
+# read its status, so `[ -S ]` is still what tells; saying which is the difference between "the
+# path got too long" and "the fake is broken".
 if [ -S "$CTL" ]; then
     pass "forward:a-master-left-a-control-socket"
 else
@@ -3073,6 +3075,10 @@ shim_set ssh_busy_ports ''
 # THE ASK, NOT ONLY THE CONCLUSION (#267): the publish says what the supervisor decided, and only
 # ssh.log says the master was asked at all.
 assert_eq "busy:the-refused-ask-is-in-the-log" "1" "$(busy_asks)"
+# ...AND THE MASTER WAS ASKED WHETHER IT IS ALIVE before the port was called busy (#339): a dead
+# master refuses a forward exactly as a taken port does, so without this check "busy" is a guess.
+assert_eq "busy:the-master-was-asked-before-the-port-was-called-busy" "1" \
+          "$(grep -cF -- '-O check ' "$SHIM/ssh.log" 2>/dev/null)"
 
 if wait_until 15 sup_published 'refused=3001:busy,21500:v6lo'; then
     pass "busy:the-anchor-frame-inside-the-cooldown-was-read"
@@ -3097,4 +3103,157 @@ ssh.log:
 $(shim_ssh_log)"
 fi
 assert_eq "busy:it-was-asked-exactly-twice" "2" "$(busy_asks)"
+sup_reap
+
+# ─── a master killed with SIGKILL is gone, not busy  (#339) ──────────────────────
+# A MASTER KILLED WITH SIGKILL CANNOT REMOVE ITS SOCKET. The supervisor's only witness was the
+# socket, so after one -- the OOM killer, a stray `kill -9` -- it went on saying healthy with the
+# dead forwards up, and every NEW port was refused by the dead master and published `busy`:
+# "another program on your own computer is using that port". Measured live: exactly that.
+#
+# `kill -9` OF THE FAKE'S HOLDER IS THAT DEATH: the socket file stays and nothing answers on it,
+# which is what OpenSSH 10.2 does (lib/ssh-master-fake.py). Its own two controls come first --
+# the pid is gone, the socket is not -- because each is what makes this a SIGKILL rather than a
+# clean exit, and the #338 case above already covers the clean one.
+holder_gone() { ! kill -0 "$1" 2>/dev/null; }
+# The same sequence reading as sup_published_after_gone, for whatever up/refused a case expects.
+sup_healthy_after_gone() {            # sup_healthy_after_gone NEEDLE
+    sup_publishes | do_awk -v n="$1" '/state=master-unresponsive/ { g = 1; next }
+                                       g && /state=healthy/ && index($0, n) { f = 1 }
+                                       END { exit !f }'
+}
+ssh_log_since() {                     # ssh_log_since LINE PATTERN -> how many asks after LINE
+    tail -n +"$(( $1 + 1 ))" "$SHIM/ssh.log" 2>/dev/null | grep -cF -- "$2"
+}
+
+# ─── ...found by the forward that asks it, when there is no pidfile ──────────────
+# NO PIDFILE, which is what tunnel_record_pid leaves when it cannot learn a pid, so the per-tick
+# pid check is blind here and the only witness is a forward. The frame after the death adds THREE
+# new ports: the first asks the dead master and is answered "gone"; the other two must not be
+# asked at all. That is the whole cost of a dead socket -- one forward and one -O check a tick --
+# and it is read during the STALL after that frame, before the next one could ask again.
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+H1="$(shim_ssh_master_pid "$CTL")"
+assert_ne "dead:the-master-has-a-pid-to-kill" "" "$H1"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 5' '3000:lo' '3001:lo' '3002:lo' '3003:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 5' '3000:lo' '3001:lo' '3002:lo' '3003:lo' '21500:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-kill-nopid.out"
+assert_ok "dead:the-no-pidfile-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:the-port-was-up-before-the-master-was-killed"
+else
+    fail "dead:the-port-was-up-before-the-master-was-killed" \
+"3000 was never published as up, so nothing below is about a master dying.
+ssh.log:
+$(shim_ssh_log)"
+fi
+BASE="$(wc -l < "$SHIM/ssh.log" | do_tr -d ' ')"
+kill -9 "$H1" 2>/dev/null
+assert_ok "dead:the-killed-master-is-gone" wait_until 5 holder_gone "$H1"
+assert_ok "dead:a-killed-master-leaves-its-socket" test -S "$CTL"
+if wait_until 15 sup_published 'state=master-unresponsive'; then
+    pass "dead:a-killed-master-is-published-gone"
+else
+    fail "dead:a-killed-master-is-published-gone" \
+"the master was killed with its socket left behind, three new ports were asked for, and nothing
+was published as gone.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-kill-nopid.out" 2>/dev/null)"
+fi
+assert_contains "dead:a-killed-master-is-published-with-nothing-up" 'up= refused=21500:v6lo' \
+                "$(sup_publishes | grep -F 'state=master-unresponsive' | head -1)"
+assert_not_contains "dead:no-port-of-a-dead-master-is-called-busy" ':busy' "$(sup_publishes)"
+assert_says "dead:the-supervisor-says-a-forward-found-it-gone" "a forward found nothing answering" \
+            "$(cat "$SHIM/sup-kill-nopid.out" 2>/dev/null)"
+assert_eq "dead:the-dead-master-is-asked-one-forward" "1" "$(ssh_log_since "$BASE" '-O forward ')"
+assert_eq "dead:the-dead-master-is-asked-one-check" "1" "$(ssh_log_since "$BASE" '-O check ')"
+# ...AND IT COMES BACK the way --reset-tunnel brings it back: a new socket, still no pidfile.
+rm -f "$CTL"
+shim_ssh_master "$CTL"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo,3001:lo,3002:lo,3003:lo refused=21500:v6lo'; then
+    pass "dead:a-replaced-master-carries-every-port-again"
+else
+    fail "dead:a-replaced-master-carries-every-port-again" \
+"a new master came up after the dead one and the next frame did not forward all four ports.
+publishes:
+$(sup_publishes)"
+fi
+sup_reap
+
+# ─── ...and found by its pid, with no new port to ask about ──────────────────────
+# THE HALF THE FORWARD CANNOT SEE: the ports are all forwarded already, so no frame asks the
+# master anything and the state file went on saying healthy with 3000 up. The pidfile is written
+# BEFORE the supervisor starts, the way tunnel_start leaves one; written after, the pidfile change
+# would reset the state and the re-forward of 3000 would find the death instead, through the path
+# the case above covers, and this would pass with the pid check deleted.
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+shim_ssh_master "$CTL"
+H1="$(shim_ssh_master_pid "$CTL")"
+printf '%s\n' "$H1" > "$MPIDFILE"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-kill-pid.out"
+assert_ok "dead:the-pidfile-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:the-port-was-up-before-the-named-master-was-killed"
+else
+    fail "dead:the-port-was-up-before-the-named-master-was-killed" \
+"3000 was never published as up, so nothing below is about a master dying.
+ssh.log:
+$(shim_ssh_log)"
+fi
+kill -9 "$H1" 2>/dev/null
+assert_ok "dead:the-named-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 sup_published 'state=master-unresponsive'; then
+    pass "dead:a-killed-master-is-found-with-no-new-port"
+else
+    fail "dead:a-killed-master-is-found-with-no-new-port" \
+"the pidfile's master was killed and the next frame published nothing: the state file still says
+healthy, with 3000 up.
+publishes:
+$(sup_publishes)"
+fi
+assert_contains "dead:it-is-published-with-nothing-up" 'up= refused=21500:v6lo' \
+                "$(sup_publishes | grep -F 'state=master-unresponsive' | head -1)"
+assert_says "dead:the-supervisor-names-the-pid-that-died" "pid $H1 is no longer running" \
+            "$(cat "$SHIM/sup-kill-pid.out" 2>/dev/null)"
+# NOTHING WAS ASKED OF IT: found by the builtin, not by a forward.
+assert_eq "dead:the-dead-master-is-not-asked-for-the-port" "1" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+# ...AND IT COMES BACK the way --reset-tunnel leaves things: socket and pidfile both replaced.
+rm -f "$CTL" "$MPIDFILE"
+shim_ssh_master "$CTL"
+shim_ssh_master_pid "$CTL" > "$MPIDFILE"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:a-replaced-named-master-is-published-healthy-again"
+else
+    fail "dead:a-replaced-named-master-is-published-healthy-again" \
+"a new master and pidfile replaced the dead one and the next frame did not bring 3000 back.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "dead:the-replacement-is-asked-for-the-port" "2" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
 sup_reap

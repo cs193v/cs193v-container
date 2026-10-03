@@ -770,23 +770,30 @@ EOF
 # but it means the quiet path cannot be reached at all without this.
 #
 # It answers all four control verbs the launcher can send -- `-O check`, `-O exit`,
-# `-O forward` and `-O cancel` -- directly, and for the master it creates the control
-# socket the launcher tests for with `[ -S ]`. python3 because a unix socket cannot be made
-# from the shell; the file survives the process, so the socket does not need holding open.
+# `-O forward` and `-O cancel` -- and for the master it starts a process that holds the control
+# socket the launcher tests for with `[ -S ]`: lib/ssh-master-fake.py, whose header says how
+# closely that process follows a real master and why. python3 because a unix socket cannot be
+# made from the shell.
 #
-# THREE THINGS HERE MODEL ssh FEATURES THE LAUNCHER DEPENDS ON, so they have to keep matching
-# ssh(1) rather than matching the launcher:
+# THESE MODEL ssh FEATURES THE LAUNCHER DEPENDS ON, so they have to keep matching ssh(1) rather
+# than matching the launcher:
 #
 #   * -f MUST RETURN. Real ssh forks after authenticating and setting its forwarding up, and
 #     the foreground process exits 0 — which is the whole reason tunnel_start uses it (#38).
 #     A fake that stayed in the foreground instead would sit there until run_timeout's ceiling
 #     and report a tunnel failure, which is what this did before -f: the launcher backgrounded
 #     it, so sleeping was free. Without -f it still sleeps, because a caller that backgrounds
-#     this expects a master to stay alive.
+#     this expects a master to stay alive. With it, it returns only once the socket listens.
 #   * -O check PRINTS "Master running (pid=N)" ON STDERR, and tunnel_record_pid reads the
-#     pidfile out of exactly that. A fake that only exited 0 would send it to its `ps` fallback,
-#     which finds nothing here because no fake process carries the control socket on its
-#     command line — so doctor would report "up (pid ?)" for a tunnel it can see.
+#     pidfile out of exactly that. N IS THE HOLDER'S PID: a process that lives exactly as long as
+#     the master does and carries the socket path on its argv, so the supervisor's kill -0 and
+#     tunnel_kill_pid's identity test see what they would see of a real master (#339). It used
+#     to be this script's own $$, which had exited before anybody read it -- harmless until
+#     something asked whether that pid was alive.
+#   * EVERY -O VERB ASKS THE HOLDER FIRST, by connecting to the socket the way a real client
+#     does, and fails the way ssh fails when nothing answers: rc 255 and "Control socket
+#     connect(...): Connection refused". So `kill -9` of the holder IS a SIGKILLed master -- the
+#     socket left behind with nothing listening on it, measured against OpenSSH 10.2.
 #   * -O forward AND -O cancel ARE MESSAGES TO A MASTER, and answering them costs nothing on
 #     purpose. A real master binds the host port and never contacts the container -- `-L` is
 #     local, which is the whole of README's "a dead transport is invisible for ~45 s" -- so
@@ -796,9 +803,10 @@ EOF
 #     port and read the rc 124 as master-unresponsive, and sup_tick returned before it
 #     published anything at all (#251).
 #     THEY ARE ALSO THE ONLY ssh CALLS THAT LEAVE NO OTHER TRACE -- nothing binds, nothing
-#     listens, argv.log only ever sees podman -- which is what ssh.log is for. A REFUSED forward
-#     is logged too, before it is refused: "it was asked and said no" needs the ask in the log
-#     as much as "it was asked and said yes" does (#267).
+#     listens, argv.log only ever sees podman -- which is what ssh.log is for. EVERY CALL IS
+#     LOGGED, before anything is decided: the master's own start, each -O check, and a refused
+#     forward as much as a granted one -- "it was asked and said no" needs the ask in the log as
+#     much as "it was asked and said yes" does (#267).
 #   * IT REFUSES ONLY WHAT A CASE TELLS IT TO. It binds no host port, so nothing on this machine
 #     can be in its way; `shim_set ssh_busy_ports '3001 5173'` makes `-O forward` for a listed
 #     port fail the way a real master's does when the port is taken -- rc 255 and the two lines
@@ -820,20 +828,26 @@ shim_fake_ssh() {
     # first arrangement's forwards in place.
     : > "$SHIM/ssh.log"
     rm -f "$SHIM/ssh_wedge" "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
+    # THE MASTERS' SENTINEL: every holder this fake starts ends when this file goes, the way
+    # podman-fake's watcher ends with watch_out. sup_reap removes it, and shim_cleanup's rm -rf
+    # takes it with the rest of the shim.
+    : > "$SHIM/ssh_alive"
     # TWO WRITES, AND THE FIRST ONE IS INTERPOLATED. The body must NOT be expanded -- it is
-    # made of $*, $@ and $$ -- but the log path must be, so it is written ahead of the quoted
+    # made of $*, $@ and $$ -- but the paths must be, so they are written ahead of the quoted
     # heredoc. shim_fake_pkgutil interpolates its state for the same reason.
     #
     # NOT `${CS193V_SHIM:?...}` READ AT RUN TIME, which looks like podman-fake's loud guard and
-    # is not one here: an unset variable exits this script 1, tunnel_dyn_forward reads past its
-    # 0 and 124 arms, re-tests `[ -S ]` successfully and returns 1 -- "the host port is busy".
-    # The port then gets a cooldown and publishes `refused=PORT:busy`, and the diagnostic dies
-    # in the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
-    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\nSSHBUSY=%s\n' "$SHIM/ssh.log" "$SHIM/ssh_wedge" \
-        "$SHIM/ssh_busy_ports" > "$SHIM/ssh"
+    # is not one here: an unset variable exits this script 1, and the launcher reads an ssh that
+    # fails that way as an answer -- once "the host port is busy", now a master that has gone,
+    # since the -O check tunnel_dyn_forward asks next fails identically. The diagnostic dies in
+    # the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
+    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\nSSHBUSY=%s\nSSHALIVE=%s\nSSHPY=%s\n' \
+        "$SHIM/ssh.log" "$SHIM/ssh_wedge" "$SHIM/ssh_busy_ports" "$SHIM/ssh_alive" \
+        "$TESTS_DIR/lib/ssh-master-fake.py" > "$SHIM/ssh"
     cat >> "$SHIM/ssh" <<'EOF'
 # The wedge: control calls FROM..TO never answer. `exec`, so run_timeout's kill -9 of the pid it
-# started takes the sleep with it rather than leaving one behind per wedged call.
+# started takes the sleep with it rather than leaving one behind per wedged call. FIRST, before
+# anything is logged or asked of the holder: a wedged call is one that never gets that far.
 if [ -s "$SSHWEDGE" ]; then
     case " $* " in
         *" -O check "*|*" -O forward "*|*" -O cancel "*)
@@ -846,11 +860,22 @@ if [ -s "$SSHWEDGE" ]; then
             printf '%s ok %s\n' "$n" "$*" >> "$SSHWEDGE.log" ;;
     esac
 fi
+printf '%s\n' "$*" >> "$SSHLOG"
+ctl=''; prev=''; fork=no
+for a in "$@"; do
+    [ "$prev" = "-S" ] && ctl="$a"
+    [ "$a" = "-f" ] && fork=yes
+    prev="$a"
+done
 case " $* " in
-    *" -O check "*) echo "Master running (pid=$$)" >&2; exit 0 ;;
-    *" -O exit "*)  exit 0 ;;
+    *" -O check "*)
+        pid="$(python3 "$SSHPY" ask "$ctl" check)" || exit 255
+        echo "Master running (pid=$pid)" >&2; exit 0 ;;
+    *" -O exit "*)
+        python3 "$SSHPY" ask "$ctl" exit >/dev/null || exit 255
+        echo "Exit request sent." >&2; exit 0 ;;
     *" -O forward "*)
-        printf '%s\n' "$*" >> "$SSHLOG"
+        python3 "$SSHPY" ask "$ctl" check >/dev/null || exit 255
         p=''
         for a in "$@"; do
             case "$a" in 127.0.0.1:*:*:*) p="${a#127.0.0.1:}"; p="${p%%:*}" ;; esac
@@ -863,16 +888,11 @@ case " $* " in
         esac
         exit 0 ;;
     *" -O cancel "*)
-        printf '%s\n' "$*" >> "$SSHLOG"; exit 0 ;;
+        python3 "$SSHPY" ask "$ctl" check >/dev/null || exit 255
+        exit 0 ;;
 esac
-ctl=''; prev=''; fork=no
-for a in "$@"; do
-    [ "$prev" = "-S" ] && ctl="$a"
-    [ "$a" = "-f" ] && fork=yes
-    prev="$a"
-done
-[ -n "$ctl" ] && python3 -c 'import socket, sys
-s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)' "$ctl"
+[ -n "$ctl" ] || exit 255
+python3 "$SSHPY" hold "$ctl" "$SSHALIVE" || exit 255
 [ "$fork" = yes ] && exit 0
 sleep 30
 EOF
@@ -887,6 +907,9 @@ EOF
 # `[ -S "$TUNNEL_CTL" ] || return 2` -- so every forward assertion in a case would pass for
 # want of having been tried. Callers check `[ -S ]` afterwards for exactly that reason.
 #
+# A PATH THAT IS ALREADY A SOCKET IS REFUSED, loudly, the way ssh refuses it: rm it first, as
+# tunnel_start does, when a case is replacing a master rather than starting one.
+#
 # The user@host is inert: the fake reads only -S and -f. It is spelled here rather than read
 # from the launcher because no --dev verb prints it.
 shim_ssh_master() {                   # shim_ssh_master CTL
@@ -900,6 +923,13 @@ shim_ssh_wedge() {                    # shim_ssh_wedge FROM TO
     rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
 }
 shim_ssh_calls() { cat "$SHIM/ssh_wedge.log" 2>/dev/null; }
+
+# The pid of the master holding CTL, asked of the holder directly rather than through the fake
+# ssh, so that asking puts nothing in ssh.log for a case's counts to trip over. Empty when
+# nothing answers -- which is the question a case asks after killing one.
+shim_ssh_master_pid() {               # shim_ssh_master_pid CTL
+    python3 "$TESTS_DIR/lib/ssh-master-fake.py" ask "$1" check 2>/dev/null
+}
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
 # BSD/macOS requires one, so `sed -i '/x/d' f` works on Linux and fails on a Mac.

@@ -1488,8 +1488,14 @@ tunnel_dyn_read_floor() {
 # round trip -- 15-40ms. Ten seconds was copied from tunnel_alive, which runs once at startup;
 # here it would cost that per port per tick.
 #
-# THE SECOND [ -S ] IS THE ONE DOING WORK. The first is a cheap racy pre-check; the second is what
-# separates "the host port is taken" from "the master went away while we were asking".
+# A FAILED FORWARD IS "BUSY" ONLY ONCE THE MASTER HAS ANSWERED (#339). A host port that is taken
+# and a master that has died exit alike -- 255, measured against OpenSSH 10.2: "Port forwarding
+# failed" for one, "Control socket connect(...): Connection refused" for the other. A master
+# killed with SIGKILL cannot remove its socket, so the `[ -S ]` that used to be the whole test
+# passed, and every new port was published as "another program on your own computer" for a
+# master nobody was running. tunnel_dyn_check tells them apart: -O check answers after a
+# refusal and is refused by a dead socket, in ~5 ms, and it runs only on this failure path --
+# one more fork per cooldown for a port that really is busy.
 tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
     [ -S "$TUNNEL_CTL" ] || return 2
     run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O forward \
@@ -1498,21 +1504,35 @@ tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
         0)   return 0 ;;
         124) return 3 ;;              # run_timeout's timeout convention
     esac
-    [ -S "$TUNNEL_CTL" ] || return 2
-    return 1
+    [ -S "$TUNNEL_CTL" ] || return 2  # it went while we were asking
+    tunnel_dyn_check
+    case "$?" in
+        0) return 1 ;;                # it answered, so the refusal was the host port's
+        1) return 3 ;;                # it is there and answers nothing (#266)
+    esac
+    return 2
 }
 
 # IS THE MASTER ANSWERING AT ALL (#266)? Asked only while the supervisor believes it is not, so a
 # healthy session never pays for it -- and it is the only way out of master-unresponsive. The
 # shape is tunnel_dyn_forward's, for its reasons: </dev/null for the watcher's stream, a
-# five-second backstop, and a second [ -S ] that tells a master that went from one that is mute.
-# NOT tunnel_alive, which has neither the redirect nor the ceiling.
-tunnel_dyn_check() {                  # 0 = it answered, 1 = it did not, 2 = its socket has gone
+# five-second backstop. NOT tunnel_alive, which has neither the redirect nor the ceiling.
+#
+# MUTE IS A TIMEOUT; ANY OTHER FAILURE IS GONE (#339). A stopped master still has a listener, so
+# the connect lands and the request hangs until run_timeout's ceiling -- that is 1. A master killed
+# with SIGKILL leaves its socket file with nothing behind it, and the connect is refused at once --
+# measured against OpenSSH 10.2, rc 255 in ~4 ms -- which used to read as mute too, and a master
+# nobody was running then sat in master-unresponsive asking itself every tick instead of being
+# found gone. With -F none on every control call, a fast failure cannot be the student's own ssh
+# config speaking.
+tunnel_dyn_check() {                  # 0 = it answered, 1 = it is there and mute, 2 = it has gone
     [ -S "$TUNNEL_CTL" ] || return 2
-    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" </dev/null \
-        && return 0
-    [ -S "$TUNNEL_CTL" ] || return 2
-    return 1
+    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" </dev/null
+    case "$?" in
+        0)   return 0 ;;
+        124) return 1 ;;              # run_timeout's timeout convention
+    esac
+    return 2
 }
 
 tunnel_dyn_cancel() {                 # tunnel_dyn_cancel PORT
@@ -1606,12 +1626,23 @@ sup_publish() {                       # sup_publish REFUSED_LIST
     return 0
 }
 
-# The master's control socket has gone, and every forward it held went with it (#338). Called
-# from sup_tick, whose `gone` it sets; logged on the way INTO the state, not once a tick.
-sup_gone() {
+# The master has gone, and every forward it held went with it (#338, #339). Called from sup_tick,
+# whose `gone` it sets; logged on the way INTO the state, not once a tick, with the evidence.
+sup_gone() {                          # sup_gone WHY
     [ "$SUP_STATE" = master-unresponsive ] \
-        || sup_log "the ssh master's control socket has gone; nothing is forwarded until it is replaced"
+        || sup_log "the ssh master has gone ($1); nothing is forwarded until it is replaced"
     gone=1; SUP_STATE=master-unresponsive; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '
+}
+
+# THE PIDFILE'S MASTER HAS DIED, which the socket cannot say when the death was SIGKILL -- the OOM
+# killer, a stray `kill -9` -- because nothing was left to remove it (#339). kill -0 is a builtin,
+# so asking costs nothing on every tick. A pid it cannot vouch for answers "not known to be dead":
+# no pidfile, a stranger's reused pid and a zombie all read as alive, which is the blindness this
+# had before rather than a wrong answer. NOT confirmed with -O check: the pid is the master's own
+# answer to one (tunnel_record_pid), and nothing has been seen to write any other.
+sup_master_died() {
+    case "$SUP_MASTER" in ''|0|*[!0-9]*) return 1 ;; esac
+    ! kill -0 "$SUP_MASTER" 2>/dev/null
 }
 
 sup_tick() {                          # sup_tick "port:class port:class ..."
@@ -1637,13 +1668,20 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     # agent agent-notes.md sends to it) that ports nobody was carrying were reachable. The SOCKET
     # rather than the pidfile, because tunnel_record_pid may leave no pidfile at all. The frame is
     # still read, so a refusal's advice is still published, and a port that would have been
-    # forwarded costs one builtin test: tunnel_dyn_forward answers 2 before running any ssh. It
-    # comes back through the -O check below, once --reset-tunnel has made a new socket -- with or
-    # without a new pidfile.
+    # forwarded costs nothing: the loop below asks no master once `gone` is set. It comes back
+    # through the -O check below, once --reset-tunnel has made a new socket -- with or without a
+    # new pidfile.
     #
-    # NOT SEEN HERE: a master killed with SIGKILL, which cannot remove its socket (#339).
+    # A MASTER KILLED WITH SIGKILL LEAVES ITS SOCKET BEHIND (#339), so the socket cannot be the
+    # only witness: sup_master_died asks about the pidfile's pid. With no pidfile -- which
+    # tunnel_record_pid can leave -- that death is still found, by the first -O check or forward
+    # that asks the dead socket and is refused (tunnel_dyn_check's 2).
     gone=''
-    [ -S "$TUNNEL_CTL" ] || sup_gone
+    if [ ! -S "$TUNNEL_CTL" ]; then
+        sup_gone "its control socket has gone"
+    elif sup_master_died; then
+        sup_gone "pid $SUP_MASTER is no longer running"
+    fi
 
     # LEAVING master-unresponsive TAKES AN ANSWER (#266). A master that keeps its socket and
     # answers nothing -- stopped, or anything else that holds a request past run_timeout -- shows
@@ -1656,7 +1694,7 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
         tunnel_dyn_check
         case "$?" in
             0) SUP_STATE=healthy ;;
-            2) sup_gone ;;
+            2) sup_gone "nothing answers its control socket" ;;
             *) SUP_STUCK=1 ;;
         esac
     fi
@@ -1685,13 +1723,17 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
             refused="$refused $port:capped"; continue
         fi
         # STUCK SKIPS ONLY THE ASK. Everything above still ran, so every refusal in the frame is
-        # still published -- the tick goes on to the end rather than giving up on it.
+        # still published -- the tick goes on to the end rather than giving up on it. GONE DOES TOO:
+        # a missing socket made that free -- tunnel_dyn_forward answers 2 before forking -- but a
+        # dead one left behind (#339) does not, and every port would cost a forward and a check,
+        # every tick, to learn it again.
         [ -n "$SUP_STUCK" ] && continue
+        [ -n "$gone" ] && continue
         tunnel_dyn_forward "$port"
         case "$?" in
             0) SUP_UP="$SUP_UP$port " ;;
             1) SUP_BUSY="$SUP_BUSY$port:$TUNNEL_SUP_COOLDOWN "; refused="$refused $port:busy" ;;
-            2) sup_gone ;;                                   # it went while we asked
+            2) sup_gone "a forward found nothing answering its control socket" ;;
             3) SUP_STUCK=1; SUP_STATE=master-unresponsive
                sup_log "master not answering; not attempting more" ;;
         esac

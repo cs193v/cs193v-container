@@ -2324,8 +2324,12 @@ those ports reachable and says to run `cs193v --reset-tunnel`. That is one built
 per frame, not the cross-check rejected below. **Since #266 it notices a master that is alive but
 wedged**, though only when a forward to it times out: that publishes the same state, and only an
 `ssh -O check` that the master answers ends it, so a tick with nothing new to forward cannot
-quietly call the tunnel healthy again. What it still cannot see is a master killed with SIGKILL,
-which leaves its socket behind (#339).
+quietly call the tunnel healthy again. **A master killed with SIGKILL leaves its socket behind**
+(#339), so the same frame also asks `kill -0` about the pidfile's pid — another builtin — and a
+forward that fails is called `busy` only once `ssh -O check` has shown the master alive. A dead
+master refuses a forward with the same exit status as a taken port, and every new port used to be
+reported as "another program on your own computer"; `-O check` against it is refused at once, where
+a wedged one's times out, and that difference is what tells gone from mute.
 
 This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
 carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
