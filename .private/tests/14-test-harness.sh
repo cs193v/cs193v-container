@@ -1687,6 +1687,170 @@ assert_fail "harness:an-unidentifiable-tunnel-is-fatal-rather-than-empty" ctl_un
 # shellcheck disable=SC2034   # read by fwd_init in lib/assert.sh, which shellcheck cannot see
 FWD_READY='' FWD_CTL='' FWD_PIDFILE=''
 
+# ─── the tunnel's identity is read ONCE, and a seam that answers nothing STOPS the suite (#165) ─
+# THE VACUOUS ZERO ABOVE, ONE LAYER FURTHER OUT. fwd_init set FWD_READY before it ran
+# `cs193v --dev-tunnel` and threw the launcher's rc away, so one failed read cached empty paths
+# for the whole suite process. Measured with a stand-in that exits 1: count_forwards 0 and
+# no_forwards TRUE -- fwd_require_ctl's exit 96 above ends only fwd_owned_ports' `$( )` -- while
+# require_tunnel blamed "no working tunnel" for what was really "we could not ask".
+#
+# AND THE CACHE ONLY CACHED WHEN THE FIRST REACH WAS A STATEMENT. Every value helper is called
+# inside a `$( )`, and a flag set in there is lost with the subshell: five reads forked the
+# launcher five times, which a `wait_until 30 no_forwards` would make twenty a second. An `exit`
+# from in there ends only the subshell, too (#164). So fwd_init refuses a first reach from a
+# subshell before asking anything, and stops the suite by signalling it.
+#
+# STAND-IN LAUNCHERS, one per shape of answer, swapped in through $REPO, which fwd_init reads
+# when it runs. Each logs its own invocation, so "asked once" is a count of lines rather than an
+# inference. The GOOD answer is the real launcher's, through a counting wrapper, so a
+# verb_dev_tunnel that stopped answering goes red here, in the unit tier.
+FWDI="$WORK/fwd-init"
+mkdir -p "$FWDI"
+fwdi_launcher() {                     # fwdi_launcher NAME RC ANSWER -> $FWDI/NAME/cs193v
+    mkdir -p "$FWDI/$1"
+    printf '%s' "$3" > "$FWDI/$1/answer"
+    printf '#!/bin/sh\necho asked >> "%s/asked"\ncat "%s/answer"\nexit %s\n' \
+           "$FWDI/$1" "$FWDI/$1" "$2" > "$FWDI/$1/cs193v"
+    chmod 755 "$FWDI/$1/cs193v"
+}
+# Spelled the way verb_dev_tunnel spells it, `log` included: fwd_init reads five of the six.
+FWDI_ROWS="$(printf 'ctl\t%s\npid\t%s\nlog\t%s\nbuildlog\t%s\nsuppid\t%s\nsuplog\t%s' \
+             "$FWDI/t.ctl" "$FWDI/t.pid" "$FWDI/t.log" "$FWDI/b.log" "$FWDI/t.sup.pid" \
+             "$FWDI/t.sup.log")"
+fwdi_launcher fails  1 ''
+fwdi_launcher silent 0 ''
+fwdi_launcher short  0 "$(printf 'ctl\t%s\npid\t%s' "$FWDI/t.ctl" "$FWDI/t.pid")"
+fwdi_launcher lies   1 "$FWDI_ROWS"
+mkdir -p "$FWDI/real"
+printf '#!/bin/sh\necho asked >> "%s/asked"\nexec "%s/cs193v" "$@"\n' \
+       "$FWDI/real" "$REAL_REPO" > "$FWDI/real/cs193v"
+chmod 755 "$FWDI/real/cs193v"
+
+cat > "$FWDI/child.sh" <<'CHILD'
+set -u
+. "$1"
+REPO="$2"
+case "$3" in
+    # The shape every suite here uses: the first reach is a statement in the suite's own shell.
+    statement) fwd_init ;;
+    # The first reach is a VALUE, which is how every one of the value helpers is called.
+    subst)     trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               n="$(count_forwards)" ;;
+    # ...under 80-launcher-live.sh's trap, which RETURNS from INT and TERM...
+    subst-term-trapped)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT INT TERM
+               n="$(count_forwards)" ;;
+    # ...and with TERM ignored, the disposition `trap '' TERM` hands down to everything below it.
+    subst-term-ignored)
+               trap '' TERM
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               n="$(count_forwards)" ;;
+    # One statement, then every reader: what got cached, and how often the launcher was asked.
+    reads)     fwd_init
+               o="$(tunnel_owner_pid)"; n="$(count_forwards)"; m="$(fwd_master_pids)"
+               no_forwards; dyn_is_forwarded 1; sup_owner_alive
+               printf 'ROW ctl\t%s\nROW pid\t%s\nROW buildlog\t%s\nROW suppid\t%s\nROW suplog\t%s\n' \
+                      "$FWD_CTL" "$FWD_PIDFILE" "$FWD_BUILDLOG" "$FWD_SUPPID" "$FWD_SUPLOG" ;;
+    # The one place a suite can reach the tunnel again after a refusal: its own EXIT trap.
+    trapped)   trap 'fwd_init && printf "TRAP-FOUND-A-CACHE ctl=[%s]\n" "$FWD_CTL"
+                     printf "TRAP-FINISHED\n"' EXIT
+               fwd_init ;;
+esac
+printf 'REACHED-THE-END\n'
+CHILD
+fwdi() {                              # fwdi LAUNCHER SHAPE -> the child's output, then [rc=N]
+    rm -f "$FWDI/$1/asked" "$FWDI/$1-$2.tsv"
+    CS193V_RESULTS="$FWDI/$1-$2.tsv" CS193V_SUITE=child NO_COLOR=1 \
+        bash "$FWDI/child.sh" "$TESTS_DIR/lib/assert.sh" "$FWDI/$1" "$2" 2>&1
+    printf '[rc=%s]' "$?"
+}
+fwdi_asked()    { do_awk 'END { printf "%d", NR }' "$FWDI/$1/asked" 2>/dev/null || printf 0; }
+fwdi_recorded() {
+    do_awk -F'\t' '{ print $1, $3 }' "$FWDI/$1-$2.tsv" 2>/dev/null | do_tr '\n' '|' | sed 's/|$//'
+}
+
+# A. A LAUNCHER THAT FAILS, first reached as a statement.
+out="$(fwdi fails statement)"
+assert_contains     "fwdinit:a-failing-seam-is-a-require-failure" "FAIL  require:dev-tunnel" "$out"
+assert_contains     "fwdinit:it-ends-the-suite"                   "[rc=1]"                   "$out"
+assert_not_contains "fwdinit:nothing-downstream-of-it-runs"       "REACHED-THE-END"          "$out"
+assert_contains     "fwdinit:it-names-the-command-to-run"         "./cs193v --dev-tunnel"   "$out"
+assert_eq "fwdinit:it-records-one-fail-and-no-pass" "FAIL require:dev-tunnel" \
+          "$(fwdi_recorded fails statement)"
+
+# B. ONE THAT EXITS 0 HAVING SAID NOTHING, which no rc check can see.
+out="$(fwdi silent statement)"
+assert_contains     "fwdinit:a-silent-seam-is-a-require-failure"  "FAIL  require:dev-tunnel" "$out"
+assert_not_contains "fwdinit:a-silent-seam-stops-the-suite"       "REACHED-THE-END"          "$out"
+
+# C. ONE THAT ANSWERS ONLY PART. ctl and pid are all the issue's sketch checked, and
+#    sup_owner_alive and the release gate read the other three.
+out="$(fwdi short statement)"
+assert_contains     "fwdinit:a-short-answer-is-a-require-failure" "FAIL  require:dev-tunnel" "$out"
+assert_contains     "fwdinit:it-names-the-rows-that-are-missing"  "buildlog suppid suplog"   "$out"
+assert_not_contains "fwdinit:a-short-answer-stops-the-suite"      "REACHED-THE-END"          "$out"
+
+# D. ONE THAT ANSWERS IN FULL AND THEN EXITS 1, which only the rc can see.
+out="$(fwdi lies statement)"
+assert_contains     "fwdinit:a-failing-rc-is-a-require-failure"   "FAIL  require:dev-tunnel" "$out"
+assert_contains     "fwdinit:it-says-what-the-launcher-exited"    "exited 1"                 "$out"
+assert_not_contains "fwdinit:a-failing-rc-stops-the-suite"        "REACHED-THE-END"          "$out"
+
+# E. FIRST REACHED INSIDE A `$( )`, which #164 found an `exit` cannot escape. The rc is SIGUSR2's,
+#    whose number differs between macOS and Linux, and EXIT-TRAP-RAN is the suite's cleanup still
+#    running on the way out.
+FWDI_SIGRC=$((128 + $(kill -l USR2)))
+out="$(fwdi fails subst)"
+assert_contains     "fwdinit:a-first-reach-in-a-subshell-is-a-require-failure" \
+                    "FAIL  require:dev-tunnel" "$out"
+assert_contains     "fwdinit:it-stops-the-suite-from-in-there"    "[rc=$FWDI_SIGRC]"         "$out"
+assert_not_contains "fwdinit:nothing-after-that-subshell-runs"    "REACHED-THE-END"          "$out"
+assert_contains     "fwdinit:the-suite-still-cleans-up"           "EXIT-TRAP-RAN"            "$out"
+assert_contains     "fwdinit:it-says-to-call-it-as-a-statement"   "as a statement"           "$out"
+assert_eq "fwdinit:the-subshell-records-one-fail-and-no-pass" "FAIL require:dev-tunnel" \
+          "$(fwdi_recorded fails subst)"
+assert_eq "fwdinit:it-asks-nothing-from-a-subshell" "0" "$(fwdi_asked fails)"
+# ...AND WITH A LAUNCHER THAT WORKS, because its answer would be thrown away with the subshell.
+out="$(fwdi real subst)"
+assert_contains     "fwdinit:a-working-seam-first-reached-in-a-subshell-is-refused-too" \
+                    "FAIL  require:dev-tunnel" "$out"
+assert_not_contains "fwdinit:and-that-stops-the-suite-too"        "REACHED-THE-END"          "$out"
+assert_eq "fwdinit:a-working-seam-is-not-asked-from-a-subshell" "0" "$(fwdi_asked real)"
+# ...AND WHERE SIGTERM WOULD NOT HAVE STOPPED IT, which is why the signal is USR2. Measured: a
+#    TERM trap that returns, and a TERM ignored by whatever started the suite, each let it carry on
+#    past the subshell with the empty value the refusal was meant to keep out.
+out="$(fwdi fails subst-term-trapped)"
+assert_not_contains "fwdinit:a-term-trap-that-returns-does-not-save-the-suite" \
+                    "REACHED-THE-END" "$out"
+assert_contains     "fwdinit:and-that-suite-still-cleans-up"      "EXIT-TRAP-RAN"            "$out"
+out="$(fwdi fails subst-term-ignored)"
+assert_not_contains "fwdinit:an-ignored-term-does-not-save-the-suite" "REACHED-THE-END"      "$out"
+
+# F. A GOOD ANSWER IS READ ONCE AND KEPT, checked against what the launcher itself prints. Only the
+#    five rows fwd_init reads, sorted, so a row the launcher adds or reorders breaks nothing here;
+#    the shape match is what stops two empty answers from agreeing.
+fwdi_rows() { do_awk -F'\t' '$1 ~ /^(ctl|pid|buildlog|suppid|suplog)$/' | LC_ALL=C sort; }
+want="$("$REAL_REPO/cs193v" --dev-tunnel 2>/dev/null | fwdi_rows)"
+out="$(fwdi real reads)"
+got="$(printf '%s\n' "$out" | sed -n 's/^ROW //p' | fwdi_rows)"
+assert_match "fwdinit:the-real-seam-names-a-control-socket" 'cs193v-[0-9a-f]+\.ctl$' \
+             "$(printf '%s\n' "$got" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+assert_eq       "fwdinit:a-good-answer-populates-every-path"      "$want"                    "$got"
+assert_contains "fwdinit:a-good-answer-lets-the-suite-run"        "REACHED-THE-END"          "$out"
+assert_contains "fwdinit:a-good-answer-exits-0"                   "[rc=0]"                   "$out"
+assert_eq       "fwdinit:a-good-answer-records-nothing"           ""  "$(fwdi_recorded real reads)"
+assert_eq       "fwdinit:the-launcher-is-asked-once-not-per-read" "1" "$(fwdi_asked real)"
+
+# G. A REFUSAL CACHES NOTHING, AND IS NOT REPEATED. The refusal exits, so the only place left to
+#    meet a poisoned cache is the suite's own EXIT trap -- three of them reach the tunnel through
+#    clean_vt_processes. It must find no cache; and it must not ask again, record a second FAIL, or
+#    exit before the rest of its cleanup has run.
+out="$(fwdi fails trapped)"
+assert_not_contains "fwdinit:a-refusal-caches-nothing"            "TRAP-FOUND-A-CACHE"       "$out"
+assert_contains     "fwdinit:the-trap-runs-to-its-end"            "TRAP-FINISHED"            "$out"
+assert_eq "fwdinit:a-refusal-is-not-asked-again" "1" "$(fwdi_asked fails)"
+assert_eq "fwdinit:or-recorded-twice" "FAIL require:dev-tunnel" "$(fwdi_recorded fails trapped)"
+
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.
 # NOT via `sh -c`: a child shell does not inherit a function, so that would assert 127 and pass
