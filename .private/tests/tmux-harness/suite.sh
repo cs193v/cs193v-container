@@ -1606,14 +1606,13 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
     # wrapped is a URL the terminal hands back with a newline in the middle of it.
     hx_expect_contains "the link is on one unwrapped line" "$(hx_cap "$S3")" "$LBURL"
 
-    # Every row exactly 71 columns. box() computes its own padding, so a short row has had its
-    # right wall pulled in by something -- a colour sequence measured as bytes, or a glyph the
-    # terminal scored as two columns. Counted the way box() counts, by ignoring UTF-8
-    # continuation bytes, so this agrees with dw() rather than with `wc -c`.
+    # Every row exactly 71 columns. box() computes its own padding, so a row of any other width
+    # has had its right wall moved by something -- a colour sequence measured as bytes, or a
+    # glyph the terminal scored as two columns. Measured in SCREEN columns, between the box's own
+    # walls (#375). Counting the way box() counts agreed with box() by construction, which is
+    # exactly the disagreement this check is for. All ten rows, so a screen with no box fails.
     hx_expect_eq "every row of the box is 71 columns" \
-      "$(hx_cap "$S3" | grep -E '^[┏┃┗]' | awk '{ n = 0
-           for (i = 1; i <= length($0); i++) { c = substr($0, i, 1); if (c !~ /[\200-\277]/) n++ }
-           if (n != 71) bad++ } END { print bad + 0 }')" "0"
+      "$(hx_box_widths "$S3")" "71 71 71 71 71 71 71 71 71 71"
 
     # --- a dropped key explains itself -------------------------------------
     # No key but x closes the box, because a popup captures the keyboard: if any key closed it,

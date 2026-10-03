@@ -63,6 +63,48 @@ else
   hx_fail "hx_find locates on-screen text" "got '$loc'"
 fi
 
+# 6b. ...and the column it reports is the screen column, not an offset into the captured string
+#     (issue #376). Each needle is placed with CSI G, so its column is known by construction. ┃ and
+#     ✓ are three bytes and one column each. ⚠️ is U+26A0 plus VS16: six bytes, and two columns
+#     here where East Asian Width says one. 🚫 is one code point and two columns.
+#     Written to a file and cat'd so that no needle is on the screen in the echo of a typed command.
+F="$(hx_scratch)"
+{
+  printf 'plain ascii\033[30GAT30ASCII\n'
+  printf '┃\033[30GAT30BAR\n'
+  printf '✓\033[30GAT30CHECK\n'
+  printf '\xe2\x9a\xa0\xef\xb8\x8f\033[30GAT30WARN\n'
+  printf '🚫\033[30GAT30NOENTRY\n'
+  printf '┃ ✓ \xe2\x9a\xa0\xef\xb8\x8f 🚫 \033[30GAT30ALL\n'
+} > "$F"
+hx_cmd "$S" "clear; cat $F"
+hx_wait "$S" 'AT30ALL' 5 || true
+got=""
+for n in ASCII BAR CHECK WARN NOENTRY ALL; do
+  got="$got${got:+, }$(hx_find "$S" "AT30$n" || echo none)"
+done
+hx_expect_eq "hx_find reports the screen column after multibyte glyphs" \
+  "$got" "1 30, 2 30, 3 30, 4 30, 5 30, 6 30"
+
+# 6c. hx_box_widths measures every row of a box in screen columns, between its walls (issue #375).
+#     One row of each way to be wrong: short, long, and a 🚫 row -- 71 code points, 72 columns.
+#     Indented, as the link box popup is, and with text past two right walls. Waited for on the
+#     last row's text, so the capture cannot be taken with the bottom rows still to come.
+B="$(hx_scratch)"
+rep() { local s='' i; for ((i = 0; i < $2; i++)); do s+="$1"; done; printf '%s' "$s"; }
+{
+  printf '    ┏━━ BOXFIXTURE %s┓\n' "$(rep ━ 55)"
+  printf '    ┃%s┃ tail text\n' "$(rep ' ' 69)"
+  printf '    ┃%s┃\n' "$(rep ' ' 68)"
+  printf '    ┃%s┃\n' "$(rep ' ' 70)"
+  printf '    ┃ 🚫%s┃\n' "$(rep ' ' 67)"
+  printf '    ┗%s┛ BOXEND\n' "$(rep ━ 69)"
+} > "$B"
+hx_cmd "$S" "clear; cat $B"
+hx_wait "$S" 'BOXEND' 5 || true
+hx_expect_eq "hx_box_widths measures each box row in screen columns" \
+  "$(hx_box_widths "$S")" "71 71 70 72 72 71"
+
 # 7. mouse bytes are deliverable (inner program must see the SGR sequence verbatim).
 #    `cat -v` renders them visibly so we can assert on the wire format.
 hx_cmd "$S" 'clear; cat -v'
