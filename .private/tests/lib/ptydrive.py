@@ -97,8 +97,8 @@ by the outer `timeout` -- on which ~125 negative assertions pass vacuously.
     THE INVARIANT: never leave bytes in the input queue that no read ever takes.
 
 Gating on the arm signal satisfies it by construction. A mode change with bytes queued does NOT
-break it on its own -- the child arming the read we wrote for is one, every time -- so the
-detector below asks again a second later and reports only a queue that nobody read.
+break it on its own -- an arrow key's `[B` crosses one every time -- so the detector below asks
+again a second later and reports only a queue that nobody read.
 """
 
 import errno
@@ -256,6 +256,15 @@ def queued(fd):
         return 0
 
 
+def mode_name(icanon, echo):
+    """A look at the terminal, as a failure report says it. RAW is -icanon -echo: both keystroke
+    reads, and what `menu` and `secret` steps wait for."""
+    if icanon is None:
+        return "unreadable"
+    return {(True, True): "canonical+echo", (False, False): "raw",
+            (True, False): "canonical-noecho", (False, True): "cbreak+echo"}[(icanon, echo)]
+
+
 def needles_in_order(window, needles):
     """Every needle present, in order. Returns the index of the first one that is not."""
     at = 0
@@ -285,6 +294,142 @@ class Report(object):
         for row in str(text).splitlines() or [""]:
             self.fh.write("# " + row + "\n")
         self.fh.flush()
+
+
+class Terminal(object):
+    """THE PTY, BEHIND THE ONE SEAM converse() TALKS THROUGH. Everything the rules learn about the
+    child comes through these calls, so 14-test-harness.sh can replay them against a scripted child
+    and choose where, between two of the driver's looks, the child gets to run -- the only way to
+    make a race that one run in a hundred wins (#253) fail on demand."""
+
+    def __init__(self, master, slave, pid):
+        self.master, self.slave, self.pid = master, slave, pid
+
+    def read(self):
+        """Output; None after a quiet tick; b"" at EOF."""
+        ready, _, _ = select.select([self.master], [], [], 0.02)
+        if self.master not in ready:
+            return None
+        try:
+            return os.read(self.master, BUF)
+        except OSError:
+            return b""      # EIO: the child is gone and the slave is closed
+
+    def record(self, data):
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()       # PER READ: nothing may buffer a transcript another process reads
+
+    def mode(self):
+        return tty_state(self.master)
+
+    def queued(self):
+        return queued(self.slave) if self.slave is not None else 0
+
+    def send(self, keys):
+        os.write(self.master, keys)
+        # CONFIRM DELIVERY BEFORE MOVING ON. A master write is not instantly visible on the
+        # slave: measured at up to 49ms on Linux, 0 on macOS. Without this the next tick reads
+        # FIONREAD as 0, concludes the child has consumed the key, and both the loss detector
+        # and the gate reason from a queue state that has not happened yet. Bounded and cheap:
+        # it is over as soon as the bytes appear, and a platform where they appear instantly
+        # never enters the loop at all.
+        confirm_by = time.monotonic() + 0.25
+        while time.monotonic() < confirm_by and self.queued() == 0:
+            time.sleep(0.001)
+
+    def release(self):
+        if self.slave is not None:
+            try:
+                os.close(self.slave)
+            except OSError:
+                pass
+            self.slave = None
+
+    def where(self):
+        """WHERE THE CHILD IS, for a TIMEOUT (#447): the terminal's foreground process group, and
+        every process on the pty with its state and wait channel -- still working, asleep in a
+        drain, stopped by SIGTTOU, or in a canonical read. BY TERMINAL rather than by descent, so a
+        process reparented away from the child is still listed. A POST-MORTEM, NOT A SIGNAL: the
+        failure is called before this runs, so it is not the process-table inference 10-static.sh
+        keeps out of ptyrun.py (#151). COMM, NEVER ARGS, since a failed conversation may be carrying
+        a credential. Failures are reported in the listing's place, never raised."""
+        try:
+            rows = ["the terminal's foreground process group: %d" % os.tcgetpgrp(self.master)]
+        except OSError as exc:
+            rows = ["the terminal's foreground process group: unreadable (%s)" % exc]
+        import subprocess       # only a failing run pays for it
+        try:
+            tty = os.ttyname(self.slave)[len("/dev/"):]     # ttys012 or pts/3: what ps -t takes
+            ps = subprocess.Popen(["ps", "-t", tty, "-o", "pid=", "-o", "ppid=", "-o", "pgid=",
+                                   "-o", "stat=", "-o", "wchan=", "-o", "comm="],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL)
+        except (OSError, TypeError) as exc:
+            return rows + ["(no process listing: %s)" % exc]
+        try:
+            listing = ps.communicate(timeout=5)[0].decode("utf-8", "replace")
+        except subprocess.TimeoutExpired:
+            ps.kill()
+            ps.communicate()
+            return rows + ["(no process listing: ps took longer than 5s)"]
+        for line in listing.splitlines()[:11]:
+            f = line.split(None, 5)
+            if len(f) == 6:
+                rows.append("pid %s ppid %s pgid %s  %s %s  %s" % tuple(f))
+        return rows
+
+
+class Seen(object):
+    """WHAT THE DRIVER SAW DURING ONE STEP, so that a failure can say it (#447).
+
+    "The screen arrived but the terminal was never at a menu read (icanon=True echo=True)" is one
+    look, the last, and 14-test-harness.sh replays it from a child that never armed AND from a
+    screen that came on the deadline's own tick -- two causes, two fixes. So a step keeps when its
+    screen matched and what every look after that found (one look, or a thousand canonical ones),
+    each change of mode, and the longest gap between two looks, which is the driver's own health.
+    A menu's `read -rsn1` has no timeout and re-arms only after a keystroke, so "it came and went
+    between looks" would have to show up here as a change. Bounded: the first change and the
+    latest 23 are kept.
+    """
+
+    def __init__(self, start):
+        self.start, self.last, self.looks = start, start, 0
+        self.gap, self.gap_end = 0.0, start
+        self.mode, self.changes, self.dropped = None, [], 0
+        self.screen_at, self.since = None, {}
+
+    def look(self, now, icanon, echo, screen):
+        if now - self.last > self.gap:
+            self.gap, self.gap_end = now - self.last, now
+        self.last, self.looks = now, self.looks + 1
+        mode = mode_name(icanon, echo)
+        if mode != self.mode:
+            self.mode = mode
+            self.changes.append((self.ms(now), mode))
+            if len(self.changes) > 24:
+                del self.changes[1]
+                self.dropped += 1
+        if screen:
+            self.screen_at = now if self.screen_at is None else self.screen_at
+            self.since[mode] = self.since.get(mode, 0) + 1
+
+    def ms(self, t):
+        return int(round((t - self.start) * 1000))
+
+    def describe(self):
+        if self.screen_at is None:
+            rows = ["the screen never matched"]
+        else:
+            rows = ["the screen matched at +%dms, and the %d look(s) from then on found: %s"
+                    % (self.ms(self.screen_at), sum(self.since.values()),
+                       ", ".join("%s x%d" % kv for kv in sorted(self.since.items())))]
+        rows.append("%d look(s) at the terminal, the longest gap between two %dms (ending at +%dms)"
+                    % (self.looks, int(round(self.gap * 1000)), self.ms(self.gap_end)))
+        rows.append("the terminal as it changed%s:"
+                    % (" (%d after the first not kept)" % self.dropped if self.dropped else ""))
+        for i in range(0, len(self.changes), 6):
+            rows.append("  " + "; ".join("+%dms %s" % c for c in self.changes[i:i + 6]))
+        return rows
 
 
 def main(argv):
@@ -345,33 +490,36 @@ def main(argv):
         except OSError:
             pass
 
-    out = sys.stdout.buffer
+    term = Terminal(master, slave, pid)
+    report.line("BEGIN", "steps=%d" % len(steps))
+    failure, step_i = converse(steps, report, term)
+    return finish(pid, master, term, report, failure, step_i, len(steps))
+
+
+def converse(steps, report, term, clock=time.monotonic):
+    """Every rule, and no pty: the conversation against whatever `term` says. Returns
+    (failure, steps sent). The clock is a parameter for the replay, which runs a twenty-second
+    deadline in a millisecond."""
     step_i = 0
     prev_icanon = None          # for the loss detector below
     strand = None               # (count, was, now, deadline) while a queue is under suspicion
-    slave_open = True
     window = ""                 # output since the previous step was sent
     armed_cursor = False        # ESC[?25h seen in this window
-    deadline = time.monotonic() + STEP_SECS
-    started = time.monotonic()
-    last_output = time.monotonic()
+    deadline = clock() + STEP_SECS
+    started = clock()
+    last_output = clock()
+    seen = Seen(started)        # what this step saw, for a failure to report (#447)
     failure = None
     eof = False
-
-    report.line("BEGIN", "steps=%d" % len(steps))
 
     while True:
         if step_i >= len(steps) and eof:
             break
         try:
-            ready, _, _ = select.select([master], [], [], 0.02)
+            data = term.read()
         except OSError:
             break
-        if master in ready:
-            try:
-                data = os.read(master, BUF)
-            except OSError:
-                data = b""      # EIO: the child is gone and the slave is closed
+        if data is not None:
             if not data:
                 eof = True
                 # NO STEP IS OPTIONAL, not since #364: the one caller that wanted some, the real-
@@ -380,9 +528,8 @@ def main(argv):
                     failure = ("CHILD-ENDED", steps[step_i], "the child exited with %d step(s) unsent"
                                % (len(steps) - step_i))
                 break
-            out.write(data)
-            out.flush()         # PER READ: nothing here may buffer a transcript another process reads
-            last_output = time.monotonic()
+            term.record(data)
+            last_output = clock()
             chunk = data.decode("utf-8", "replace")
             window += chunk
             if "\x1b[?25h" in chunk:
@@ -394,12 +541,7 @@ def main(argv):
         # Nothing after the last step needs to ask about the input queue either: there is no
         # keystroke left that could be stranded by a mode change.
         if step_i >= len(steps):
-            if slave_open:
-                try:
-                    os.close(slave)
-                except OSError:
-                    pass
-                slave_open = False
+            term.release()
             continue
 
         # ── THE LOSS DETECTOR ──────────────────────────────────────────────────────────────────
@@ -425,25 +567,38 @@ def main(argv):
         # count.
         #
         # AND A MODE CHANGE WITH BYTES QUEUED IS STILL NOT A LOSS, which is what #249 was bounced
-        # by. THE OTHER ORDER IS ORDINARY DELIVERY: we write at the arm, the byte sits in the queue
-        # for as long as the child takes to get from its tcsetattr to its read() -- and ARMING that
-        # read is itself a mode change, so the two are indistinguishable at the instant they
-        # happen. Measured in 35-setup-git-shim.sh's retoken case on a 2-core box under load:
-        # 3 runs in 8 crossed a mode change with a keystroke queued, all of them
-        # canonical -> cbreak, every one of them consumed by the next read, all 8 conversations
-        # correct. Sampling decided which of those runs went red, which is the shape of a flake
-        # rather than of a finding.
+        # by. Measured in 35-setup-git-shim.sh's retoken case on a 2-core box under load: 3 runs in
+        # 8 crossed a mode change with a keystroke queued, all canonical -> cbreak, every one
+        # consumed by the next read, all 8 conversations correct. Those were the split look below,
+        # which is gone -- but ordinary delivery still crosses mode changes: an arrow key is two
+        # reads with a 12-130us canonical window between them, and a key can be written in one
+        # mode and read in the next (14-test-harness.sh's pd-inflight does it on purpose).
         #
         # SO THE SUSPICION IS CONFIRMED RATHER THAN REPORTED: the queue has to still be there
         # STRAND_SECS later. Stranded bytes are the ones nobody ever reads, and that is the only
         # question whose answer differs between the two cases.
-        icanon_now, _echo_now = tty_state(master)
-        if icanon_now is not None:
-            if (prev_icanon is not None and icanon_now != prev_icanon
-                    and slave_open and strand is None and queued(slave) > 0):
-                strand = (queued(slave), prev_icanon, icanon_now,
-                          time.monotonic() + STRAND_SECS)
-            prev_icanon = icanon_now
+        #
+        # ONE LOOK PER TICK, SHARED WITH THE GATE BELOW (#253). They used to take a tcgetattr
+        # each, and a child that armed its read between the two was typed at by the gate while
+        # this recorded the canonical terminal -- so the cbreak -> canonical that then stranded
+        # the bytes was, to the detector, no change at all: #253's run that sent both steps and
+        # reported no LOST, about one in 115 under load. Read the other way, the same split is
+        # the only route to #255's `icanon True -> False with N queued`, since setup-git's reads
+        # leave raw only by reading. Shared, whatever the gate typed into is what this remembers,
+        # and 14-test-harness.sh's replay goes red the moment the gate gets a look of its own.
+        icanon, echo = term.mode()
+        if icanon is not None:
+            # ONE FIONREAD, so the count tested and the count recorded cannot disagree.
+            waiting = (term.queued() if prev_icanon is not None and icanon != prev_icanon
+                       and strand is None else 0)
+            if waiting > 0:
+                strand = (waiting, prev_icanon, icanon, clock() + STRAND_SECS)
+                # EVERY SUSPICION IS RECORDED, passing or not: it is what #255 had to instrument
+                # the loop to count, and the replay in 14-test-harness.sh counts it here. Named
+                # after the step that SENT the queued bytes, which the gate has already moved past.
+                report.line("NOTE", steps[max(step_i - 1, 0)]["name"], "suspected %d byte(s)"
+                            " across icanon %s -> %s" % (waiting, prev_icanon, icanon))
+            prev_icanon = icanon
 
         if strand is not None:
             count, was, became, by = strand
@@ -456,9 +611,9 @@ def main(argv):
             # too, and sudo's own password read is one (#226). That is the `password` gate's job
             # rather than this one's -- nothing is written until sudo has cleared ECHO, so there is
             # never anything ahead of the flush to lose.
-            if not slave_open or queued(slave) == 0:
+            if term.queued() == 0:
                 strand = None
-            elif time.monotonic() > by:
+            elif clock() > by:
                 failure = ("LOST", steps[step_i],
                            "the child changed tty mode with %d byte(s) still unread:"
                            " icanon %s -> %s, and %gs later nothing had read them."
@@ -468,7 +623,7 @@ def main(argv):
         step = steps[step_i]
         flat = flatten(window)
         missing = needles_in_order(flat, step["needles"])
-        icanon, echo = tty_state(master)
+        seen.look(clock(), icanon, echo, missing < 0)
 
         # TTY MODE IS A LEVEL HERE, NEVER A COUNTED EDGE, and that is measured rather than
         # stylistic. An arrow key is TWO arms -- cs193v-ui.sh:659-660 reads the ESC with
@@ -497,23 +652,15 @@ def main(argv):
             at_read = icanon is False and echo is False
 
         if missing < 0 and at_read:
-            os.write(master, step["keys"].encode())
-            # CONFIRM DELIVERY BEFORE MOVING ON. A master write is not instantly visible on the
-            # slave: measured at up to 49ms on Linux, 0 on macOS. Without this the next tick reads
-            # FIONREAD as 0, concludes the child has consumed the key, and both the loss detector
-            # above and the gate below reason from a queue state that has not happened yet.
-            # Bounded and cheap: it is over as soon as the bytes appear, and a platform where they
-            # appear instantly never enters the loop at all.
-            confirm_by = time.monotonic() + 0.25
-            while slave_open and time.monotonic() < confirm_by and queued(slave) == 0:
-                time.sleep(0.001)
-            report.line("OK", step["name"], "%dms" % int((time.monotonic() - started) * 1000))
+            term.send(step["keys"].encode())
+            report.line("OK", step["name"], "%dms" % int((clock() - started) * 1000))
             step_i += 1
             window = ""
             armed_cursor = False
-            deadline = time.monotonic() + STEP_SECS
-            started = time.monotonic()
-            last_output = time.monotonic()
+            deadline = clock() + STEP_SECS
+            started = clock()
+            last_output = clock()
+            seen = Seen(started)
             continue
 
         # PARKED SOMEWHERE ELSE, which is a DIVERGENCE and not slowness. The child has stopped
@@ -535,14 +682,14 @@ def main(argv):
         # is really parked on. It widens the clause by exactly the state the new kind describes.
         if (missing >= 0 and window != ""
                 and (icanon is False or echo is False or armed_cursor)
-                and time.monotonic() - last_output > SETTLE_SECS):
+                and clock() - last_output > SETTLE_SECS):
             failure = ("DIVERGED", step,
                        "the child is parked at a read this step does not describe:"
                        " needle %d of %d (%r) is not on the screen"
                        % (missing + 1, len(step["needles"]), step["needles"][missing]))
             break
 
-        if time.monotonic() > deadline:
+        if clock() > deadline:
             why = ("the screen never arrived: needle %d of %d is missing"
                    % (missing + 1, len(step["needles"]))) if missing >= 0 else \
                   ("the screen arrived but the terminal was never at a %s read"
@@ -559,10 +706,21 @@ def main(argv):
         for i, needle in enumerate(step["needles"]):
             mark = "??" if i >= 0 and needles_in_order(flatten(window), step["needles"][:i + 1]) >= 0 else "ok"
             report.detail("  [%s] %s" % (mark, needle))
+        report.detail("what the driver saw in this step, timed from its start (%gs allowed):"
+                      % STEP_SECS)
+        for row in seen.describe() + (term.where() if what == "TIMEOUT" else []):
+            report.detail("  " + row)
         report.detail("the screen since the previous step:")
         shown = _CSI.sub("", window).replace("\r", "\n").rstrip().splitlines()[-24:]
         for row in shown:
             report.detail("  | " + row)
+    return failure, step_i
+
+
+def finish(pid, master, term, report, failure, step_i, nsteps):
+    """Kill or drain the child, reap it, and turn the run into an exit code."""
+    out = sys.stdout.buffer
+    if failure:
         # KILLED, NOT ABANDONED. Letting the caller's `timeout` fire instead would come back as
         # rc 124 with a TRUNCATED transcript, which is the shape that makes negative assertions
         # pass vacuously -- the very failure this file exists to remove.
@@ -575,12 +733,7 @@ def main(argv):
     # and it is also what would stop the master ever reaching EOF -- the drain below and the exit
     # condition above both depend on that EOF, and ptyrun.py:220-228 records the same trap in job
     # mode. Nothing after this point needs to ask about the queue.
-    if slave_open:
-        try:
-            os.close(slave)
-        except OSError:
-            pass
-        slave_open = False
+    term.release()
 
     # Drain whatever the child still has to say, then let it go.
     end = time.monotonic() + (2.0 if failure else STEP_SECS)
@@ -632,7 +785,7 @@ def main(argv):
             grace = float("inf")
         time.sleep(0.01)
 
-    report.line("END", "sent=%d" % step_i, "of=%d" % len(steps))
+    report.line("END", "sent=%d" % step_i, "of=%d" % nsteps)
 
     if failure:
         # 90 IS NOT A CHILD STATUS, and that is the point: a caller reading only the exit code can

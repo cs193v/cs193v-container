@@ -1565,6 +1565,223 @@ CHILD
 assert_says "ptydrive:really-waits-rather-than-sleeping" "A=[typed]" \
             "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "bash $WORK/pd-slow.sh")"
 
+# ─── the same rules, replayed against a child that runs where we say (#253, #447) ───
+# pd-loss ABOVE CANNOT GO RED ON DEMAND, and #253 is why that matters: it reported no LOST about
+# one run in 115 under load, a race that instrumenting the loop hid (0/40 with probes in place).
+# So the adversary is scripted. lib/ptydrive.py's converse() learns about the child only through a
+# Terminal, and the fake one below is a scripted child released by the driver's own LOOKS -- its
+# mode() and queued() calls. After drawing its screen it arms only after the Kth look, and after
+# a keystroke arrives it answers only after the Jth look since. Every K below 8 and J below 5 is
+# played, which lands the arm between every two adjacent looks of the first few ticks. Fake time,
+# so the forty runs cost a fraction of a second.
+#
+# THE CHILD IS pd-loss.sh, op for op, under the line discipline lib/ptydrive.py's header measured:
+# a cbreak -> canonical restore with bytes queued makes the whole queue ONE line, and a canonical
+# FIONREAD counts complete lines only. Two verdicts, each over all forty placements:
+#
+#     strand   the over-send is LOST, five bytes, across the edge that stranded them
+#              (icanon False -> True), not on a suspicion armed early on the wrong edge -- and
+#              with the NOTE every suspicion writes, which is what makes clean's zero mean anything
+#     clean    one step per read goes through with no NOTE, i.e. no suspicion ever armed: a menu
+#              leaves raw only by reading, so `icanon True -> False with N queued` (#255's shape)
+#              means a detector look older than the gate's. Also strand's control -- a detector
+#              that called everything stranded would pass that one.
+cat > "$WORK/pd-replay.py" <<'PY'
+import io
+import os
+import sys
+
+sys.dont_write_bytecode = True          # never a __pycache__ beside lib/ptydrive.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+import ptydrive as pd                   # noqa: E402
+
+TICK = 0.02                             # ptydrive's select timeout
+
+
+class Sink(object):
+    """A Report that keeps what it is told."""
+    def __init__(self):
+        self.rows = []
+
+    def line(self, *fields):
+        self.rows.append("\t".join(str(f) for f in fields))
+
+    def detail(self, text):
+        self.rows.append("# " + str(text))
+
+
+class Child(object):
+    """Terminal's calls, answered by a scripted child and just enough line discipline. read() is
+    one tick of fake time; mode() and queued() are the looks that release a held child."""
+
+    def __init__(self, ops, arm_after, answer_after):
+        self.ops, self.arm_after, self.answer_after = list(ops), arm_after, answer_after
+        self.n, self.icanon = 0, True           # ticks so far; both reads set ICANON with ECHO
+        self.queue, self.lines = "", 0          # unread input; what a canonical FIONREAD counts
+        self.out, self.hold, self.wake = "", 0, None
+        self.run()
+
+    def clock(self):
+        return self.n * TICK
+
+    def read(self):
+        self.n += 1
+        if self.n > 3 * pd.STEP_SECS / TICK:
+            return b""                          # a bound, so a broken rule cannot spin forever
+        self.run()
+        data, self.out = self.out.encode(), ""
+        return data or (None if self.ops else b"")
+
+    def mode(self):
+        seen = (self.icanon, self.icanon)
+        self.looked()
+        return seen
+
+    def queued(self):
+        seen = self.lines if self.icanon else len(self.queue)
+        self.looked()
+        return seen
+
+    def send(self, keys):
+        self.queue += keys.decode()
+        if self.icanon:
+            self.lines = max(self.lines, self.queue.rfind("\n") + 1)
+        self.hold = self.answer_after
+        self.run()
+
+    def record(self, data):
+        pass                                    # the transcript: nobody reads this one
+
+    def release(self):
+        self.hold = 0                           # nobody is looking any more: run free
+
+    def where(self):
+        return []
+
+    def looked(self):
+        if self.hold:
+            self.hold -= 1
+            if not self.hold:
+                self.run()
+
+    def run(self):
+        while self.ops and not self.hold:
+            op, arg = self.ops[0][0], self.ops[0][1:]
+            if op == "say":
+                self.out += arg[0]
+            elif op == "hold":                  # where the arm lands: the replay's choice
+                self.hold = self.arm_after
+            elif op == "raw":                   # `read -rsn1` arming
+                self.icanon = False
+            elif op == "cooked":                # ... and restoring: the queue becomes ONE line
+                self.icanon, self.lines = True, len(self.queue)
+            elif op in ("key", "line"):         # one byte raw; through the first newline cooked
+                n = (1 if self.queue else 0) if op == "key" else \
+                    self.queue.find("\n", 0, self.lines) + 1
+                if not n:
+                    return
+                self.queue, self.lines = self.queue[n:], max(0, self.lines - n)
+            elif op == "sleep":
+                self.wake = self.clock() + arg[0] if self.wake is None else self.wake
+                if self.clock() < self.wake:
+                    return
+                self.wake = None
+            self.ops.pop(0)
+
+
+def session(*rows):
+    steps, error = pd.read_script(io.BytesIO("".join("\t".join(r) + "\n" for r in rows).encode()))
+    if error:
+        raise SystemExit("replay: " + error)
+    return steps
+
+
+def play(ops, steps, arm_after, answer_after):
+    child, sink = Child(ops, arm_after, answer_after), Sink()
+    failure, sent = pd.converse(steps, sink, child, child.clock)
+    return failure, sent, sink.rows
+
+
+def verdict(name, ops, steps, good):
+    misses = []
+    for arm_after in range(8):
+        for answer_after in range(5):
+            failure, sent, rows = play(ops, steps, arm_after, answer_after)
+            notes = sum(1 for r in rows if r.startswith("NOTE"))
+            if not good(failure, sent == len(steps), notes):
+                misses.append("K=%d J=%d: %s, %d of %d sent, %d NOTE(s)"
+                              % (arm_after, answer_after,
+                                 failure and "%s %s" % (failure[0], failure[2]),
+                                 sent, len(steps), notes))
+    print("%s %d/40%s" % (name, 40 - len(misses), misses and "; first miss " + misses[0] or ""))
+
+
+# pd-loss.sh: draw, take one key raw, restore, sleep past the detector's grace, draw, read a line.
+LOSS = [("say", "KEY SCREEN "), ("hold",), ("raw",), ("key",), ("cooked",),
+        ("sleep", 2 * pd.STRAND_SECS),
+        ("say", "\nLINE SCREEN \x1b[?25h"), ("line",), ("say", "\ndone\n")]
+STRANDED = "5 byte(s) still unread: icanon False -> True"
+verdict("strand", LOSS, session(("menu", "oversend", "KEY SCREEN", "X\\ntwo\\n"),
+                                ("line", "later", "LINE SCREEN", "z\\n")),
+        lambda f, all_sent, notes: f is not None and f[0] == "LOST" and STRANDED in f[2]
+                                   and notes >= 1)
+verdict("clean", LOSS, session(("menu", "k", "KEY SCREEN", "X"),
+                               ("line", "l", "LINE SCREEN", "two\\n")),
+        lambda f, all_sent, notes: f is None and all_sent and notes == 0)
+
+# #447's report, reached two ways: a menu drawn and then never at its read, and one drawn half a
+# tick after the deadline whose read arms a tick later. Printed whole, for the shell to read.
+MENU = session(("menu", "pick", "MENU SCREEN", "\\n"))
+for name, ops in (("never", [("say", "MENU SCREEN "), ("sleep", 10 * pd.STEP_SECS)]),
+                  ("late", [("sleep", pd.STEP_SECS + TICK / 2), ("say", "MENU SCREEN "),
+                            ("sleep", TICK), ("raw",), ("key",)])):
+    for row in play(ops, MENU, 0, 0)[2]:
+        print("%s| %s" % (name, row))
+PY
+# THE TIMINGS ARE PINNED, because the verdicts are written against them: a developer's exported
+# CS193V_DRIVE_STEP_SECS=1 would otherwise shrink "never"'s thousand looks to fifty.
+CS193V_DRIVE_STEP_SECS=20 CS193V_DRIVE_STRAND_SECS=1 CS193V_DRIVE_SETTLE_SECS=2 \
+    run_checker python3 -B "$WORK/pd-replay.py" "$PTYDRIVE" > "$WORK/pd-replay.out" 2>&1
+# `|| cat`: a replay that died has no verdict line, and then its traceback is the actual value.
+pd_replay() { grep -- "$1" "$WORK/pd-replay.out" || cat "$WORK/pd-replay.out"; }
+assert_eq "ptydrive:replay-a-strand-is-reported-wherever-the-child-arms" "strand 40/40" \
+          "$(pd_replay '^strand ')"
+assert_eq "ptydrive:replay-a-clean-keystroke-is-never-suspected-wherever-the-child-arms" \
+          "clean 40/40" "$(pd_replay '^clean ')"
+
+# #447, WHICH THE SENTENCE ALONE CANNOT DIAGNOSE. A menu step that times out says "the screen
+# arrived but the terminal was never at a menu read (icanon=True echo=True, cursor_show=False)",
+# and the replay reaches those exact words from a child that NEVER armed and from a screen that
+# simply came LATE. Those want different fixes, so the report now says what the driver saw during
+# the step: here, a thousand looks after the screen against exactly one.
+pd_447='the screen arrived but the terminal was never at a menu read (icanon=True echo=True, cursor_show=False)'
+assert_contains "ptydrive:replay-a-child-that-never-arms-times-out-as-447-did" "$pd_447" \
+                "$(pd_replay '^never| FAIL')"
+assert_contains "ptydrive:replay-a-screen-at-the-deadline-times-out-as-447-did" "$pd_447" \
+                "$(pd_replay '^late| FAIL')"
+assert_match "ptydrive:a-timeout-says-the-child-had-every-look-and-never-armed" \
+             'the screen matched at \+20ms, and the [0-9]{3,} look\(s\) from then on found: canonical\+echo x[0-9]{3,}$' \
+             "$(pd_replay '^never| #')"
+assert_match "ptydrive:a-timeout-says-a-late-screen-had-one-look" \
+             'the screen matched at \+20020ms, and the 1 look\(s\) from then on found: canonical\+echo x1$' \
+             "$(pd_replay '^late| #')"
+
+# AND WHERE THE CHILD WAS, which only a real pty can show: a TIMEOUT lists the pty's processes
+# with their state, so "never armed" comes with what it was doing instead. The child here draws a
+# menu's screen and then sleeps in canonical mode, so the step times out -- after one second, not
+# twenty, and the variable is on pd_run because that is the command it has to reach.
+cat > "$WORK/pd-stuck.sh" <<'CHILD'
+printf 'STUCK SCREEN '
+sleep 20
+CHILD
+pd_step menu stuck 'STUCK SCREEN' 'x' \
+    | CS193V_DRIVE_STEP_SECS=1 pd_run "$WORK/pd-r9" "bash $WORK/pd-stuck.sh" >/dev/null
+assert_contains "ptydrive:a-stuck-menu-times-out" "never at a menu read" "$(cat "$WORK/pd-r9")"
+assert_match "ptydrive:a-timeout-names-the-terminals-foreground-group" \
+             "^#   the terminal's foreground process group: [0-9]+$" "$(cat "$WORK/pd-r9")"
+assert_match "ptydrive:a-timeout-lists-what-the-child-was-doing" \
+             '^#   pid [0-9]+ ppid [0-9]+ pgid [0-9]+  [^ ]+ [^ ]+  .*sleep$' "$(cat "$WORK/pd-r9")"
+
 # ─── the installer's pty door survives a space in $PATH (#141) ────────────────
 # installer_tty BUILDS A COMMAND STRING, for the reason its own comment gives, and that string is
 # parsed a SECOND time before `env` ever sees it: do_script hands it to ptyrun.py, whose child
