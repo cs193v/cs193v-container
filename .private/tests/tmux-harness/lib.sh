@@ -416,11 +416,83 @@ hx_gone() { # session regex [timeout_seconds]
 
 hx_settle() { sleep "${1:-0.6}"; }
 
-# Locate text on screen. Prints "row col" as 1-based wire coordinates.
+# --- measuring in screen columns ---------------------------------------------
+#
+# A captured row is a string, and an offset into it is not a column. awk's index() and length()
+# count bytes under the image's mawk, where ┃ and ✓ are three bytes and one column each (#376);
+# counting code points instead misses 🚫, one code point and two columns (#375); and East Asian
+# Width tables call VS16 emoji such as ⚠️ narrow where this tmux draws them two columns wide.
+#
+# So tmux is asked. The ruler is a pane on this outer server, the same tmux that holds every
+# screen captured here. hx_width writes a string into it and reads back where the cursor stopped.
+# The marker is an OSC 2 title in the same byte stream, after the string, so once the title reads
+# back the string has been laid out. It moves no cursor. Not tmux's own #{w:} format modifier:
+# measured, that scores ⚠️ as one column while the grid draws it in two.
+#
+# One session per measurement, killed afterwards, so no ruler outlives the call that needed it.
+# Wider than any screen this harness captures, so nothing measured can wrap. hx_width refuses
+# rather than guesses if something ever does.
+HX_RULER=hxruler
+HX_RULER_W=1000
+
+hx_width() { # text -> its width in screen columns
+  local f mark yx='' pane="=$HX_RULER:"
+  f="$(hx_scratch)" || return 1
+  mark="${f##*/}"                       # unique per call, so a stale title cannot match
+  printf '\033c%s\033]2;%s\033\\' "$1" "$mark" > "$f"
+  hx_tmux kill-session -t "=$HX_RULER" 2>/dev/null
+  hx_tmux new-session -d -s "$HX_RULER" -x "$HX_RULER_W" -y 2 "cat '$f'; exec sleep 86400" &&
+    hx_until "hx_tmux display-message -p -t '$pane' '#{pane_title}'" "$mark" 5 &&
+    yx="$(hx_tmux display-message -p -t "$pane" '#{cursor_y} #{cursor_x}')"
+  hx_tmux kill-session -t "=$HX_RULER" 2>/dev/null
+  rm -f "$f"
+  case "$yx" in
+    "0 "*) if [ "${yx#0 }" -lt "$HX_RULER_W" ]; then printf '%s' "${yx#0 }"; return 0; fi ;;
+  esac
+  # Into the results as well as onto stderr, which 65-tmux.sh discards: otherwise a broken ruler
+  # reads only as the caller's own failure, "could not find [x]", blaming the screen under test.
+  hx_emit REC "the column ruler did not measure" "[$1] cursor: ${yx:-unread}"
+  printf 'hx_width: the ruler did not measure [%s] (cursor: %s)\n' "$1" "${yx:-unread}" >&2
+  return 1
+}
+
+# Locate text on screen. Prints "row col" as 1-based wire coordinates: the first row holding the
+# needle, and the column tmux drew its first character in.
 hx_find() { # session needle
-  hx_cap "$1" | awk -v needle="$2" '
-    { i = index($0, needle); if (i > 0 && !found) { print NR, i; found = 1 } }
-    END { if (!found) exit 1 }'
+  local line row=0 w
+  while IFS= read -r line || [ -n "$line" ]; do
+    row=$((row + 1))
+    case "$line" in *"$2"*) ;; *) continue ;; esac
+    w="$(hx_width "${line%%"$2"*}" </dev/null)" || return 1   # stdin is the capture
+    printf '%s %s\n' "$row" "$((w + 1))"
+    return 0
+  done < <(hx_cap "$1")
+  return 1
+}
+
+# The width of every row of a box drawn with box()'s walls (files/cs193v-ui.sh), in screen
+# columns from its left wall to its right wall inclusive. Space-separated, top to bottom. A row
+# with no right wall reads `-`, and one the ruler would not measure reads `?`.
+#
+# Rows are found wherever they sit on the screen. A popup is centred, so a row starts with
+# whatever is to the box's left; anchoring the match at the start of the row found nothing.
+hx_box_widths() { # session
+  local line l r body w out=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *┏*) l='┏' r='┓' ;;
+      *┗*) l='┗' r='┛' ;;
+      *┃*) l='┃' r='┃' ;;
+      *) continue ;;
+    esac
+    body="${line#*"$l"}"                # everything after the first left wall
+    case "$body" in
+      *"$r"*) w="$(hx_width "$l${body%"$r"*}$r" </dev/null)" || w='?' ;;   # ...to the last right wall
+      *) w='-' ;;
+    esac
+    out+=("$w")
+  done < <(hx_cap "$1")
+  printf '%s\n' "${out[*]}"
 }
 
 # --- test fixtures ----------------------------------------------------------
