@@ -29,13 +29,15 @@ set -u
 cd "$REPO" || exit 1
 
 SEED="${CS193V_FUZZ_SEED:-20260821}"
-OUT="$(mktemp "${TMPDIR:-/tmp}/cs193v-slfuzz.XXXXXX")"
-trap 'rm -f "$OUT"' EXIT
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-slfuzz.XXXXXX")"
+OUT="$WORK/out"
+CANARY="$WORK/canary"
+trap 'rm -rf "$WORK"' EXIT
 
-python3 - "$PRIVATE/files/shortlink" "$SEED" > "$OUT" 2>&1 <<'PY'
-import importlib.machinery, importlib.util, io, random, sys, traceback
+python3 - "$PRIVATE/files/shortlink" "$SEED" "$CANARY" > "$OUT" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, io, os, random, shlex, sys, traceback
 
-PATH, SEED = sys.argv[1], int(sys.argv[2])
+PATH, SEED, CANARY = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 
 loader = importlib.machinery.SourceFileLoader("shortlink_under_test", PATH)
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -83,6 +85,16 @@ bad_known = [x for x in known if verdict(GOOD, x[0]) != x[1]]
 out("known-good", ";".join("%s->%r want %r" % (p, verdict(GOOD, p), w) for p, w in bad_known))
 
 # ─── the hostile corpus, which is also the mutator's seed material ─────────────
+# THE CANARY, aimed into this run's own scratch directory (#395), in BOTH places a reason lives:
+# the text of a `reason` row, which follows a state that is not healthy, and the third field of a
+# `refused` row, which port_verdict itself reads as `reason`. It used to be the first alone, aimed
+# at /tmp/CANARY, and nothing ever looked -- measured: a port_verdict that os.system'd either field
+# passed every check here, and the second never reached the payload at all. This covers
+# port_verdict only; doctor reads `reason` rows too, and nothing here drives it.
+# slfuzz:nothing-in-the-input-is-run is the look.
+CANARY_CASE = ("state\tbroken\n"
+               "reason\t$(touch {0})\n"
+               "refused\t3000\t$(touch {0})\n").format(shlex.quote(CANARY))
 HOSTILE = [
     "", "\n", "\t", "\0", "up", "up\t", "up\t3000", "up\t3000\t",
     "up\t3000\tlo\nup\t3000\tany\n",
@@ -93,7 +105,7 @@ HOSTILE = [
     "refused\t3000\t\n", "refused\t3000\tnot-a-reason\n", "refused\t3000\tbusy\textra\n",
     "UP\t3000\tlo\n", " up\t3000\tlo\n", "up 3000 lo\n",
     "up\t3000\tlo\r\n",                      # CR must not become part of the class
-    "state\tbroken\nreason\t$(touch /tmp/CANARY)\n",
+    CANARY_CASE,
     "up\t3000\t`id`\n", "up\t3000\t${IFS}\n",
     "state\t" + "A" * 100000 + "\n",         # one enormous line
     "up\t3000\tlo\n" * 5000,                 # a huge file
@@ -116,17 +128,23 @@ def mutate(rng, s):
         else:         del b[i:]
     return b.decode("utf-8", "replace")
 
+# EVERY HOSTILE CASE BUT THE CANARY. Its bytes name a scratch path whose length varies by machine,
+# and mutate() draws its offsets from the length, so as seed material it would give every machine
+# a different corpus under the same printed seed. And mutated copies of a shell payload are what a
+# broken reader runs: against the old corpus they left /tmp/CANAR], /tmp/CANARYY and a third
+# stray beside /tmp/CANARY, none of them inside anything a trap removes.
+SEEDS = [GOOD] + [h for h in HOSTILE if h != CANARY_CASE]
 rng = random.Random(SEED)
 cases = list(HOSTILE)
 for _ in range(4000):
-    seed_s = rng.choice([GOOD] + HOSTILE)
+    seed_s = rng.choice(SEEDS)
     cases.append(mutate(rng, seed_s))
 for _ in range(1000):
     cases.append("".join(chr(rng.randint(0, 255)) for _ in range(rng.randint(0, 200))))
 
 PORTS = [3000, 1, 65535, 0, -1, 99999999999999999999, 8080]
 
-raised, bad_vocab, unsound, canary = [], [], [], []
+raised, bad_vocab, unsound = [], [], []
 err = io.StringIO()
 real_err, sys.stderr = sys.stderr, err
 try:
@@ -187,6 +205,24 @@ for p in ["3000", None, 3.5, [], {"a": 1}, True]:
     except Exception:
         weird.append("%r raised" % (p,))
 out("weird-port", "; ".join(weird[:3]))
+
+# ─── what the canary is aimed at, and whether it was hit ───────────────────────
+# LAST, so nothing here can cut short a probe above, every one of which reads a missing answer as
+# a pass. And only once the corpus has run, so a run that died inside it reports nothing.
+#
+# Spelled HERE, row by row, from the path the shell handed in, not taken from CANARY_CASE, so a
+# corpus aimed elsewhere cannot vouch for itself. HOSTILE must hold each row once, and the corpus as
+# run no other `$(touch` at all: a dropped or moved row, an unquoted path a shell would split, a
+# canary back among the seeds or a second payload aimed at /tmp is each a canary nobody watches,
+# and #395 was one.
+want = "$(touch %s)" % shlex.quote(CANARY)
+rows = ["reason\t" + want, "refused\t3000\t" + want]
+lines = "\n".join(HOSTILE).split("\n")
+found = [r for r in rows if lines.count(r) == 1]
+n_any = sum(c.count("$(touch ") for c in cases)
+out("canary-aimed", CANARY if found == rows and n_any == len(rows) else
+    "want %r once each and no other `$(touch`; found %r, and %d in all" % (rows, found, n_any))
+out("canary", "%s %s" % (CANARY, "present" if os.path.exists(CANARY) else "absent"))
 PY
 
 fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
@@ -213,6 +249,30 @@ assert_eq "slfuzz:stderr-stays-clean"         "" "$(fz stderr)"
 assert_eq "slfuzz:a-hostile-port-is-safe"     "" "$(fz weird-port)"
 assert_eq "slfuzz:text-need-not-be-text"      "" "$(fz nonstr-text)"
 assert_eq "slfuzz:only-canonical-ports-match" "" "$(fz noncanonical-port)"
+
+# ─── nothing in the input is ever run ──────────────────────────────────────────
+# THE GUARD FIRST. An absent canary is also what a missing case, a payload aimed somewhere else --
+# #395's was aimed at /tmp/CANARY -- or a run that died before the loop finished all produce, so
+# the absence means nothing until the corpus is known to have aimed at exactly the path looked at.
+#
+# BOTH ANSWERS NAME THE PATH, so neither can be pointed somewhere the other is not looking. The
+# first draft looked with `assert_no_file "$CANARY"`, and editing only that argument passed --
+# measured.
+#
+# NO SLEEP BEFORE THE LOOK, though it proves an absence. The payload runs inside verdict() for any
+# reader that waits for its shell, and for one that does not, the rest of the corpus -- ~35,000
+# calls after HOSTILE's canary -- is already the wait.
+#
+# AND A FAIL, NOT A PASS, when the guard fails: the look was not taken, and a green line for it
+# would be counted as one. Not a skip either -- nothing goes red for a skip, so a gate that broke
+# would skip the look forever on a green run.
+aimed="$(fz canary-aimed)"
+assert_eq "slfuzz:the-canary-is-in-the-corpus" "$CANARY" "$aimed"
+if [ "$aimed" = "$CANARY" ]; then
+    assert_eq "slfuzz:nothing-in-the-input-is-run" "$CANARY absent" "$(fz canary)"
+else
+    fail "slfuzz:nothing-in-the-input-is-run" "not looked at: the canary is not in the corpus"
+fi
 record "slfuzz:cases-run" "$(fz cases) (seed $SEED)"
 
 # A LITERAL, so adding a hostile case makes you come and look at this line -- the same device
