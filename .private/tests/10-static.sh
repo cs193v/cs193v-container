@@ -717,6 +717,45 @@ bare="$(grep -Hn 'podman run' $real_podman | grep -vE '^[^:]*:[0-9]+:[[:space:]]
         | grep -v -- '--label' || true)"
 assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 
+# ─── no cheap-lane suite writes a fixed path in /tmp  (#379) ───────────────────
+# /tmp is one directory for everybody on the machine, and CS193V_INSTANCE does not namespace it.
+# So a suite that writes /tmp/NAME on the host shares NAME with every concurrent run of itself,
+# and its verdict depends on another checkout's activity -- the rule the label check above
+# enforces for containers. 18-portwatch-fuzz.sh wrote /tmp/pwstate.txt and /tmp/pw.err. Measured:
+# two parallel runs went red 4 times in 40, on the round trip and --show, having read the other
+# run's state file or none. A leftover it could not write made it red every time -- or, for
+# pw.err, green without the scan ever running. Host scratch belongs under new_tmpdir.
+#
+# THE CHEAP LANE -- static, unit and shim -- ASKED OF `run-tests.sh --list`, which is the one place
+# a TIER line becomes a lane, rather than a third copy of its sed: that copy would also miss its
+# default, which runs a suite with no TIER line as static. The cheap lane runs on the host with no
+# container; the podman lane writes /tmp/... inside one, whose /tmp is its own. Suites only:
+# lib/ is shared with the podman lane (sandbox.sh, wine.sh), and no host-side helper writes /tmp.
+#
+# TWO SHAPES, both of which the bug had. A redirection: every operator that opens a file for
+# writing (> >> >| &> >& N> <>), with or without a space or a quote before the path. And /tmp/NAME
+# assigned at the start of a statement, which is how PW_STATE=/tmp/pwstate.txt reached
+# `> "$PW_STATE"`. A /tmp that is neither is not this rule's business: 16-args-parse.sh's
+# TMPDIR=/tmp/ is the input under test, 13-term-class.sh's TMUX=/tmp/x,1,0 is an argument, and
+# `${TMPDIR:-/tmp}` never matches, because /tmp/ has to follow the operator or the `=`.
+fixed_tmp_suites="$(NO_COLOR=1 "$PRIVATE/tests/run-tests.sh" --list 2>/dev/null \
+                    | awk -v d="$PRIVATE/tests" '$1 == "cheap" { printf "%s/%s ", d, $3 }')"
+# One suite per tier, so a list that came back empty -- or lost a tier -- cannot pass the rule
+# below having read nothing.
+for probe in 10-static.sh 18-portwatch-fuzz.sh 30-launcher-shim.sh; do
+    case " $fixed_tmp_suites" in
+        *"/tests/$probe "*) pass "fixed-tmp:the-cheap-lane-reaches-$probe" ;;
+        *) fail "fixed-tmp:the-cheap-lane-reaches-$probe" \
+                "run-tests.sh --list does not put $probe in the cheap lane -- has its TIER line moved?" ;;
+    esac
+done
+# </dev/null because an empty list would otherwise leave grep reading the terminal.
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+hits="$(grep -HnE -e "(<>|>>?[|&]?)[[:space:]]*[\"']?/tmp/" \
+        -e "(^|[;&|(]|[[:space:]](then|do|else))[[:space:]]*((local|export|readonly)[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=[\"']?/tmp/[^[:space:]\"']" \
+        $fixed_tmp_suites </dev/null | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "fixed-tmp:no-cheap-lane-suite-writes-a-literal-tmp-path" "" "$hits"
+
 # ─── one door for running the installer on the host ────────────────────────────
 # install-cs193v.sh is the one script in this repo that changes a machine, and the suite
 # runs it FOR REAL -- against a fake podman, but with real mkdir, real tar and real chmod.
