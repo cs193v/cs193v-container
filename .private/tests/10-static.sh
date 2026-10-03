@@ -738,23 +738,65 @@ assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 # `> "$PW_STATE"`. A /tmp that is neither is not this rule's business: 16-args-parse.sh's
 # TMPDIR=/tmp/ is the input under test, 13-term-class.sh's TMUX=/tmp/x,1,0 is an argument, and
 # `${TMPDIR:-/tmp}` never matches, because /tmp/ has to follow the operator or the `=`.
-fixed_tmp_suites="$(NO_COLOR=1 "$PRIVATE/tests/run-tests.sh" --list 2>/dev/null \
-                    | awk -v d="$PRIVATE/tests" '$1 == "cheap" { printf "%s/%s ", d, $3 }')"
+# ONE PATH PER LINE, THEN ONE ARRAY ELEMENT PER PATH (#432). This was a space-separated string
+# handed to grep unquoted, under `|| true`. Measured from a checkout whose path holds a space:
+# every path split into pieces that did not exist, grep exited 2, and the rule compared "" with ""
+# and passed -- with a literal /tmp/ write planted in 12-run-timeout.sh.
+fixed_tmp_list="$(NO_COLOR=1 "$PRIVATE/tests/run-tests.sh" --list 2>/dev/null \
+                  | awk -v d="$PRIVATE/tests" '$1 == "cheap" { print d "/" $3 }')"
 # One suite per tier, so a list that came back empty -- or lost a tier -- cannot pass the rule
 # below having read nothing.
 for probe in 10-static.sh 18-portwatch-fuzz.sh 30-launcher-shim.sh; do
-    case " $fixed_tmp_suites" in
-        *"/tests/$probe "*) pass "fixed-tmp:the-cheap-lane-reaches-$probe" ;;
-        *) fail "fixed-tmp:the-cheap-lane-reaches-$probe" \
-                "run-tests.sh --list does not put $probe in the cheap lane -- has its TIER line moved?" ;;
-    esac
+    if printf '%s\n' "$fixed_tmp_list" | grep -qxF -- "$PRIVATE/tests/$probe"; then
+        pass "fixed-tmp:the-cheap-lane-reaches-$probe"
+    else
+        fail "fixed-tmp:the-cheap-lane-reaches-$probe" \
+             "run-tests.sh --list does not put $probe in the cheap lane -- has its TIER line moved?"
+    fi
 done
-# </dev/null because an empty list would otherwise leave grep reading the terminal.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-hits="$(grep -HnE -e "(<>|>>?[|&]?)[[:space:]]*[\"']?/tmp/" \
-        -e "(^|[;&|(]|[[:space:]](then|do|else))[[:space:]]*((local|export|readonly)[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=[\"']?/tmp/[^[:space:]\"']" \
-        $fixed_tmp_suites </dev/null | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+# GREP'S EXIT 2 TRAVELS IN THE VALUE, as $CHECKER_DIED, so the assertion that reads it fails
+# rather than taking "could not read a file" for "found nothing", which is exit 1. A status would
+# not survive the `$( )` this is called from. </dev/null because an empty argument list would
+# otherwise leave grep reading the terminal.
+fixed_tmp_scan() {                    # fixed_tmp_scan FILE... -> grep's hits, or $CHECKER_DIED
+    local rc
+    grep -HnE -e "(<>|>>?[|&]?)[[:space:]]*[\"']?/tmp/" \
+         -e "(^|[;&|(]|[[:space:]](then|do|else))[[:space:]]*((local|export|readonly)[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=[\"']?/tmp/[^[:space:]\"']" \
+         "$@" </dev/null
+    rc=$?
+    [ "$rc" -le 1 ] || printf '%s (exit %s from: grep)\n' "$CHECKER_DIED" "$rc"
+}
+ft_tmp="$(new_tmpdir)"
+case "$(fixed_tmp_scan "$ft_tmp/absent" 2>/dev/null)" in
+    *"$CHECKER_DIED"*) pass "fixed-tmp:a-file-grep-cannot-read-fails-the-scan" ;;
+    *) fail "fixed-tmp:a-file-grep-cannot-read-fails-the-scan" \
+            "grep was handed a file that does not exist and the scan reported nothing" ;;
+esac
+# A SPECIMEN THAT MUST BE FOUND, on the same list as the suites, so a green verdict is one grep
+# reached. It is #379's own two lines, under a path with a space in it, which is what a list that
+# word-splits cannot hand over whole. ASSEMBLED, because this file is on that list too.
+ft_specimen="$ft_tmp/a checkout with spaces/planted.sh"
+mkdir -p "${ft_specimen%/*}"
+ft_root='/tmp'
+{ printf '    pw_scan_text "$1" "$2" 2>%s/pw.err || true\n' "$ft_root"
+  printf 'PW_STATE_WAS="$PW_STATE"; PW_STATE=%s/pwstate.txt\n' "$ft_root"
+} > "$ft_specimen"
+fixed_tmp_files=()
+while IFS= read -r f; do
+    [ -z "$f" ] || fixed_tmp_files+=("$f")
+done <<FIXEDTMP
+$fixed_tmp_list
+$ft_specimen
+FIXEDTMP
+ft_raw="$(fixed_tmp_scan ${fixed_tmp_files[@]+"${fixed_tmp_files[@]}"})"
+case "$ft_raw" in
+    *"$ft_specimen:1:"*"$ft_specimen:2:"*) pass "fixed-tmp:the-scan-finds-a-planted-write" ;;
+    *) fail "fixed-tmp:the-scan-finds-a-planted-write" \
+            "the scan did not report both lines of $ft_specimen" ;;
+esac
+hits="$(printf '%s\n' "$ft_raw" | grep -vF -- "$ft_specimen:" | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#')"
 assert_eq "fixed-tmp:no-cheap-lane-suite-writes-a-literal-tmp-path" "" "$hits"
+rm -rf "$ft_tmp"
 
 # ─── one door for running the installer on the host ────────────────────────────
 # install-cs193v.sh is the one script in this repo that changes a machine, and the suite
