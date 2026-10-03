@@ -154,7 +154,7 @@ hx_settle 1.5
 # `-N` flag silently unbound all three keys while making the "SCROLLED BACK" banner appear on
 # a session nobody had scrolled. Both halves are now regression-tested.
 msgs="$(it show-messages 2>/dev/null)"
-if printf '%s' "$msgs" | grep -qiE 'unknown|invalid|error|ambiguous|bad '; then
+if grep -qiE 'unknown|invalid|error|ambiguous|bad ' <<< "$msgs"; then
   hx_fail "the config loads with zero error messages" \
           "$(printf '%s' "$msgs" | grep -iE 'unknown|invalid|error|ambiguous|bad ' | head -3)"
 else
@@ -190,7 +190,7 @@ hx_expect_contains "no secondary prefix key is set" "$pfx" "prefix2 None"
 # macOS terminals compose Option by default and an ALT-only keymap is unreachable for most
 # of the class.
 for k in "M-t" "C-t" "M-Left" "S-Left" "M-Right" "S-Right"; do
-  if printf '%s\n' "$keys" | grep -qE -- "-T root +$k "; then
+  if grep -qE -- "-T root +$k " <<< "$keys"; then
     hx_pass "$k is bound in the root table (no prefix needed)"
   else
     hx_fail "$k is bound in the root table" "not present in list-keys"
@@ -199,14 +199,14 @@ done
 # ...and all six again inside copy mode, or the tab bar goes dead the instant the wheel is
 # brushed -- which is exactly when a confused student reaches for it.
 for k in "M-t" "C-t" "M-Left" "S-Left" "M-Right" "S-Right"; do
-  if printf '%s\n' "$keys" | grep -qE -- "-T copy-mode +$k "; then
+  if grep -qE -- "-T copy-mode +$k " <<< "$keys"; then
     hx_pass "$k still works while scrolled back"
   else
     hx_fail "$k still works while scrolled back" "not bound in the copy-mode table"
   fi
 done
 # Clicking the chip is the only route to a new tab that needs no keyboard at all.
-if printf '%s\n' "$keys" | grep -qE -- "-T root +MouseDown1StatusRight "; then
+if grep -qE -- "-T root +MouseDown1StatusRight " <<< "$keys"; then
   hx_pass "the + NEW TAB chip is bound to a click"
 else
   hx_fail "the + NEW TAB chip is bound to a click" "MouseDown1StatusRight is not bound"
@@ -217,7 +217,7 @@ for danger in split-window detach-client command-prompt choose-tree choose-windo
               kill-pane kill-session kill-server display-menu display-popup rename-window \
               rename-session resize-pane swap-pane next-layout break-pane join-pane \
               switch-client suspend-client source-file run-shell new-session; do
-  if printf '%s\n' "$keys" | grep -qE -- "(^|[ ;{])$danger([ ;}]|$)"; then
+  if grep -qE -- "(^|[ ;{])$danger([ ;}]|$)" <<< "$keys"; then
     hx_fail "no keybinding can invoke '$danger'" "$(printf '%s\n' "$keys" | grep -m1 -- "$danger")"
   else
     hx_pass "no keybinding can invoke '$danger'"
@@ -255,7 +255,7 @@ gkeys="$(tmux -L "$SOCK2" list-keys 2>/dev/null | grep -c 'bind-key')"
 if [ -z "$gkeys" ] || [ "$gkeys" = "0" ]; then
   hx_fail "the config is error-free when the 3.6 block is gated off (simulates tmux 3.4)" \
           "the probe session reported no bindings at all -- the server did not come up"
-elif printf '%s' "$gmsg" | grep -qiE 'unknown|invalid|error'; then
+elif grep -qiE 'unknown|invalid|error' <<< "$gmsg"; then
   hx_fail "the config is error-free when the 3.6 block is gated off (simulates tmux 3.4)" \
           "$(printf '%s' "$gmsg" | grep -iE 'unknown|invalid|error' | head -3)"
 else
@@ -541,7 +541,7 @@ for target in "the tab bar:10:1" "inside the terminal:20:12"; do
   hx_settle 1                         # a DURATION: the claim is that NO menu opened
   scr="$(hx_cap "$S")"
   if [ "$(probe_struct)" = "$before" ] &&
-     ! printf '%s' "$scr" | grep -qE 'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename'; then
+     ! grep -qE 'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename' <<< "$scr"; then
     hx_pass "right-clicking $what opens no menu"
   else
     hx_fail "right-clicking $what opens no menu" "$(printf '%s' "$scr" | sed -n '2,4p')"
@@ -569,7 +569,7 @@ hx_wheel_up "$S" 15 40 12
 hx_until 'probe_mode' 1 6
 hx_wait "$S" 'SCROLLED BACK' 6 || true
 scrolled="$(hx_cap "$S")"
-if printf '%s' "$scrolled" | grep -qE 'LINE_(2[0-9][0-9]|3[0-4][0-9])'; then
+if grep -qE 'LINE_(2[0-9][0-9]|3[0-4][0-9])' <<< "$scrolled"; then
   hx_pass "mouse wheel scrolls back through history"
 else
   hx_fail "mouse wheel scrolls back through history" "row 2: $(printf '%s' "$scrolled" | sed -n '2p')"
@@ -758,7 +758,7 @@ hx_settle 0.3
 # suite run to find. The marker is assembled from $P at runtime for the usual reason: crow searches
 # the visible screen, and the echoed command line is on it.
 hx_cmd "$S" 'P=PROMPT; echo ${P}LINE here'
-hx_until_ok "hx_cap $S | grep -q 'PROMPTLINE here'" 8
+hx_until_ok "hx_cap $S | grep 'PROMPTLINE here'" 8
 lr="$(crow 'PROMPTLINE here$')"
 it delete-buffer 2>/dev/null || true
 hx_drag "$S" "$lr" 1 "$lr" 11
@@ -790,7 +790,7 @@ hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold 
 # effect alone is the trap: when the guard breaks it never comes, the poll runs out its 8 s, and the
 # 4 s message the absence check exists to see has expired by the time it looks.
 hx_drag "$S" "$lr" 3 "$lr" 12 4
-hx_until_ok "hx_cap $S | head -2 | grep -qE 'reached the container|hold SHIFT'" 8
+hx_until_ok "hx_cap $S | head -2 | grep -E 'reached the container|hold SHIFT'" 8
 shift_msg="$(hx_cap "$S" | head -2)"
 hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than dropped" \
                    "$shift_msg" "reached the container"
@@ -802,7 +802,7 @@ hx_gone "$S" 'reached the container' 8 || true
 # The shifted multi-clicks answer too. Same reasoning, and they fire once each so they can carry
 # the message themselves.
 hx_multiclick "$S" "$lr" 3 2 4
-hx_until_ok "hx_cap $S | head -2 | grep -qF 'reached the container'" 8
+hx_until_ok "hx_cap $S | head -2 | grep -F 'reached the container'" 8
 hx_expect_contains "a SHIFTED double-click is answered too" \
                    "$(hx_cap "$S" | head -2)" "reached the container"
 hx_gone "$S" 'reached the container' 8 || true
@@ -839,7 +839,7 @@ hx_expect_eq "a mouse-reporting app is detected as one" "$(cmouse)" "1"
 # the pane. Derived here rather than hardcoded, so this check follows the chrome if it ever changes.
 drag_row=8
 hx_drag "$S" "$drag_row" 5 "$drag_row" 9
-hx_until_ok "hx_cap $S | grep -qF '[<0;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -qF 'hold SHIFT'" 8
+hx_until_ok "hx_cap $S | grep -F '[<0;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
 app_saw="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a drag inside a mouse-aware app still reaches the app" \
                    "$app_saw" "[<0;5;$((drag_row - 3))M"
@@ -859,7 +859,7 @@ hx_expect_absent "and does NOT get the SHIFT+drag hint" "$(hx_cap "$S" | head -2
 # `cat -v` fixture -- the unguarded form delivered the press and swallowed the RELEASE, leaving
 # the app with a button held down forever.
 hx_drag "$S" "$drag_row" 5 "$drag_row" 9 4
-hx_until_ok "hx_cap $S | grep -qF '[<4;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -qF 'reached the container'" 8
+hx_until_ok "hx_cap $S | grep -F '[<4;9;$((drag_row - 3))m' || hx_cap $S | head -2 | grep -F 'reached the container'" 8
 app_saw_shift="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a SHIFTED drag inside a mouse-aware app still reaches the app" \
                    "$app_saw_shift" "[<4;5;$((drag_row - 3))M"
@@ -929,7 +929,7 @@ hx_expect_eq "an app asking for the FULL mouse mode set is detected as one" "$(c
 # two status lines and a border sit above the pane -- and is derived, not hardcoded.
 click_row=8
 hx_click "$S" "$click_row" 20
-hx_until_ok "hx_cap $S | grep -qF '[<0;20;$((click_row - 3))m'" 6
+hx_until_ok "hx_cap $S | grep -F '[<0;20;$((click_row - 3))m'" 6
 app_saw_click="$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')"
 hx_expect_contains "a bare click reaches a mouse-aware app" \
                    "$app_saw_click" "[<0;20;$((click_row - 3))M"
@@ -944,7 +944,7 @@ hx_expect_absent "a bare click inside an app gets no copy hint" \
 # unbound, so it arrives by the same fall-through as the release. Measured rather than assumed --
 # until #307 removed the variable, no pane in this container had ever asked for 1003.
 hx_str "$S" "$(printf '\033[<35;22;%dM' "$click_row")"
-hx_until_ok "hx_cap $S | grep -qF '[<35;22;$((click_row - 3))M'" 6
+hx_until_ok "hx_cap $S | grep -F '[<35;22;$((click_row - 3))M'" 6
 hx_expect_contains "a bare mouse MOVE reaches an app that asked for 1003" \
                    "$(hx_cap "$S" | grep -o '\[<[0-9;]*[Mm]' | tr '\n' ' ')" \
                    "[<35;22;$((click_row - 3))M"
@@ -1134,7 +1134,7 @@ if [ "$(probe_wincount)" -ge 2 ]; then
 else
   hx_fail "tabs survived the key battery" "only $(probe_wincount) left"
 fi
-if it list-sessions 2>/dev/null | grep -q 'cs193v'; then
+if it list-sessions 2>/dev/null | grep 'cs193v' >/dev/null; then
   hx_pass "the session was never detached or destroyed by a stray key"
 else
   hx_fail "the session was never detached or destroyed by a stray key"
@@ -1295,7 +1295,7 @@ hx_record "stale tab labels at capture" \
 # was never shown the label it is about.
 pin_label() { # name text -- pin the focused tab's label; fails unless the bar then shows TEXT
   it rename-window -t cs193v "$1"
-  hx_until_ok "hx_cap $S | sed -n 2p | grep -qF -- '$2'" 6 && return 0
+  hx_until_ok "hx_cap $S | sed -n 2p | grep -F -- '$2'" 6 && return 0
   lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(hx_cap "$S" | sed -n 2p)]"
   return 1
 }
@@ -1436,7 +1436,7 @@ fi
 gone=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   out="$(it list-sessions 2>&1)"
-  if printf '%s' "$out" | grep -qE 'no server|No such file|error connecting'; then gone=1; break; fi
+  if grep -qE 'no server|No such file|error connecting' <<< "$out"; then gone=1; break; fi
   if [ -z "$out" ] && ! it has-session -t cs193v 2>/dev/null; then gone=1; break; fi
   sleep 0.5
 done
@@ -1515,7 +1515,7 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   # underlying reason.
   hx_cmd "$S2" "export PATH=$FAKESUDO:\$PATH; hash -r"
   hx_cmd "$S2" "command -v sudo"
-  hx_until_ok "hx_cap $S2 | grep -qF '$FAKESUDO/sudo'" 6
+  hx_until_ok "hx_cap $S2 | grep -F '$FAKESUDO/sudo'" 6
   hx_expect_contains "the fake tools win the PATH lookup inside the pane" \
                      "$(hx_cap "$S2")" "$FAKESUDO/sudo"
 
