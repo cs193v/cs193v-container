@@ -13,7 +13,7 @@
 # THEY ARE GREEN NOW. This header used to say they "fail today by design: the repo is scaffolding
 # with four deliberate blanks in it", and that stopped being true once the blanks were filled --
 # REPO_OWNER is cs193v, the stage-two URL serves the installer, the token expiry is set, and the
-# GitHub org and sandbox prefix are both real. Measured 2026-09-05: 28 pass, 0 fail, 2 skip. The
+# GitHub org and sandbox prefix are both real. Measured 2026-10-02: 49 pass, 0 fail, 2 skip. The
 # skips are opt-in rather than broken: they need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
 # build).
 #
@@ -93,18 +93,45 @@ record "installer:stage2-url" "$stage2_url"
 # SKIP with the remedy in it rather than three reds (#232). Forgetting `git push origin <tag>` is
 # a routine mistake with a one-line fix, and raw.githubusercontent.com answers an unpublished tag
 # with a 404 -- indistinguishable, from the failure message, from a typo in the URL this gate
-# exists to catch. §9 probes the same thing the same way for the same reason.
+# exists to catch. §9 probes the same thing for the same reason.
 #
 # ON origin AND NOT LOCALLY, because it is the published bytes this gate is about: a tag that
 # exists only in a TA's repository serves nothing to a student.
+#
+# THE EXIT STATUS, NOT THE OUTPUT (#331), which is §10's rule for its reason. This read the output
+# alone, so an unreachable origin -- which prints nothing -- was told to push a tag it already had.
+# A call that fails could not reach origin; an empty answer from one that worked is "not pushed".
+# The failure names the command rather than guessing at the cause, which is not always the network:
+# a remote under another name and a failed credential helper exit the same way.
+tag_skip_why() {                      # tag_skip_why TAG -> why TAG's gates skip, or nothing if pushed
+    local out
+    if ! out="$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)"; then
+        printf '%s' "could not reach origin to ask whether $1 is published -- see \`git ls-remote origin\`, then re-run --release"
+    elif [ -z "$out" ]; then
+        printf '%s' "$1 is not on origin -- push the tag, then re-run --release"
+    fi
+}
 stage2_tag="$(cget REPO_TAG)"
-stage2_pushed="$(git ls-remote --tags origin "refs/tags/$stage2_tag" 2>/dev/null | awk '{print $1}' | head -1)"
+stage2_why="$(tag_skip_why "$stage2_tag")"
 rel_tmp="$(new_tmpdir)"
-if [ -z "$stage2_pushed" ]; then
-    stage2_why="$stage2_tag is not on origin -- push the tag, then re-run --release"
-    skip "installer:stage2-url-is-fetchable"                "$stage2_why"
-    skip "installer:stage2-url-serves-a-shell-script"       "$stage2_why"
-    skip "installer:stage2-url-serves-the-course-installer" "$stage2_why"
+
+# EVERY NAME THE FETCHED ARM EMITS AFTER THE FETCH, skipped by both arms that never get there --
+# §9's rel_skip_all, and for its reason. The two lists used to be written out in each arm, were
+# written for §1's first three names, and never grew: #297 and #232 added four inside the fetched
+# arm, so an offline run or an unpushed tag dropped them from the results file (#331). A name added
+# below is a line here, and 10-static.sh's release-gates:every-stage2-failure-arm-* goes red until
+# it is.
+stage2_skip_body() {                  # stage2_skip_body WHY -> skip every §1 name after the fetch
+    skip "installer:stage2-url-serves-a-shell-script"       "$1"
+    skip "installer:stage2-url-serves-the-course-installer" "$1"
+    skip "installer:the-tree-hashes-locally"                "$1"
+    skip "installer:stage2-url-works-when-piped"            "$1"
+    skip "installer:the-stage2-pin-is-a-digest"             "$1"
+    skip "installer:stage2-url-hashes-to-the-pin"           "$1"
+}
+if [ -n "$stage2_why" ]; then
+    skip "installer:stage2-url-is-fetchable" "$stage2_why"
+    stage2_skip_body "$stage2_why"
 elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl.err"; then
     pass "installer:stage2-url-is-fetchable"
     record "installer:stage2-url-bytes" "$(wc -c < "$rel_tmp/stage2.sh")"
@@ -213,8 +240,7 @@ and that failed. Every Windows student stops here.
 $(cat "$rel_tmp/curl.err")"
     # Named rather than dropped: a check that quietly disappears is the same defect as one that
     # never ran (VERIFICATION.md §A.15).
-    skip "installer:stage2-url-serves-a-shell-script"      "the URL could not be fetched"
-    skip "installer:stage2-url-serves-the-course-installer" "the URL could not be fetched"
+    stage2_skip_body "the URL could not be fetched"
 fi
 rm -rf "$rel_tmp"
 

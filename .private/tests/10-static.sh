@@ -2324,6 +2324,142 @@ done
 assert_eq "helpers:no-negative-key-assertion-rests-on-a-short-needle" "" \
           "$(printf '%s' "$nk_weak" | sed 's/^ *//')"
 
+# ─── a release gate that does not run still names what it did not run  (#331) ──
+# 00-release-gates.sh §1 STATED THE RULE AND BROKE IT. Its fetched arm emitted seven names and its
+# two failure arms skipped three: #297 and #232 each added two inside that arm and neither extended
+# the skip lists, so an offline --release, or one run before the tag was pushed, dropped four names
+# from the results file with nothing to say so. #313 has three more queued for the same arm.
+#
+# STATIC AND IN THE DEFAULT RUN, rather than a comparison of two --release runs' name sets. The
+# hole opens in the commit that adds a name, and this goes red on that commit for everybody. A
+# run-level comparison needs the release tier twice, once reaching the URL and once not, which
+# nothing does by default -- it would report the hole only to someone who already suspected it.
+#
+# THE ARMS ARE THE TOP-LEVEL if/elif/else OF THE CHAIN WITH AN ARM THAT CURLS "$URLVAR", and a name
+# is the first argument of a pass/fail/skip/assert_* call that opens its line -- or opens the next
+# one, after a bare `assert_eq \`. A line calling a function defined at column 0 -- stage2_skip_body
+# -- names what that function's body names. BOTH DIRECTIONS: a failure arm missing a name is #331,
+# and one naming something the fetched arm never emits is §9's "a name nobody can diff two runs on".
+arm_name_gaps() {                     # arm_name_gaps FILE URLVAR -> one line per gap, or nothing
+    do_awk -v url="\"\$$2\"" '
+        function called(s) {
+            if (wrapped) {
+                wrapped = 0
+                if (!match(s, /^[ \t]*"[^"]+"/)) return ""
+            } else if (s ~ /^[ \t]*(pass|fail|skip|assert_[a-z0-9_]+)[ \t]*\\$/) {
+                wrapped = 1; return ""
+            } else if (!match(s, /^[ \t]*(pass|fail|skip|assert_[a-z0-9_]+)[ \t]+"[^"]+"/)) return ""
+            s = substr(s, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/"$/, "", s)
+            return s
+        }
+        /^[ \t]*#/ { next }
+        fn != "" {
+            if ($0 ~ /^}/) fn = ""
+            else if ((n = called($0)) != "") body[fn] = body[fn] " " n
+            next
+        }
+        /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
+            o = $0; sub(/[ \t]+#.*$/, "", o)
+            if (o !~ /}[ \t]*$/) { fn = $0; sub(/\(.*/, "", fn) }
+            next
+        }
+        /^if[ \t]/ && /;[ \t]*fi[ \t]*$/ { next }
+        /^if[ \t]/ { c++; a = 0; head[c, 0] = $0; arms[c] = 1; inchain = 1; next }
+        inchain && /^elif[ \t]/      { a = arms[c]++; head[c, a] = $0; next }
+        inchain && /^else([ \t]|$)/  { a = arms[c]++; head[c, a] = "else"; has_else[c] = 1; next }
+        inchain && /^fi([ \t;]|$)/   { inchain = 0; next }
+        inchain {
+            if ((n = called($0)) != "") names[c, a] = names[c, a] " " n
+            w = $0; sub(/^[ \t]+/, "", w); sub(/[ \t].*/, "", w)
+            if (w in body) names[c, a] = names[c, a] " " body[w]
+        }
+        END {
+            for (i = 1; i <= c; i++)
+                for (j = 0; j < arms[i]; j++)
+                    if (head[i, j] ~ /curl/ && index(head[i, j], url)) { fc = i; fa = j }
+            if (!fc) { print "NO-ARM-CURLS-" url; exit }
+            n = split(names[fc, fa], wl, " ")
+            if (n == 0) { print "THE-FETCHING-ARM-NAMES-NOTHING"; exit }
+            for (k = 1; k <= n; k++) want[wl[k]] = 1
+            if (!has_else[fc]) print "NO-ELSE-ARM: a failed fetch would name nothing at all"
+            for (j = 0; j < arms[fc]; j++) {
+                if (j == fa) continue
+                split("", got); m = split(names[fc, j], g, " ")
+                for (k = 1; k <= m; k++) got[g[k]] = 1
+                for (x in want) if (!(x in got)) print "never named by `" head[fc, j] "`: " x
+                for (x in got) if (!(x in want)) print "named only by `" head[fc, j] "`: " x
+            }
+        }
+    ' "$1" | LC_ALL=C sort
+}
+assert_eq "release-gates:every-stage2-failure-arm-names-what-the-fetch-arm-does" "" \
+          "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" stage2_url)"
+
+rg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-relgate.XXXXXX")"
+# AND THE RULE GOES RED ON THE SHAPE THAT BROKE, so an awk that dies or a comparison that stops
+# comparing cannot leave the line above green having read nothing. One arm covers a gap through a
+# helper, both miss a name wrapped onto its own line, and one names a name the fetched arm never
+# does. The commented one-liner above them must not be read as the start of a function body.
+cat > "$rg_tmp/broke.sh" <<'RGBROKE'
+cget() { echo x; }   # a one-liner, with a comment after it
+skip_rest() {                         # skip_rest WHY
+    skip "installer:stage2-url-works-when-piped" "$1"
+}
+if [ -n "$why" ]; then
+    skip "installer:stage2-url-is-fetchable" "$why"
+    skip_rest "$why"
+elif curl -fsSL -o "$t" "$stage2_url"; then
+    pass "installer:stage2-url-is-fetchable"
+    assert_eq "installer:stage2-url-works-when-piped" "$a" "$b"
+    assert_eq \
+        "installer:a-wrapped-name" "$a" "$b"
+else
+    fail "installer:stage2-url-is-fetchable" "that failed"
+    skip "installer:nothing-else-emits-this" "x"
+fi
+RGBROKE
+assert_eq "release-gates:the-arm-rule-catches-the-gap-it-exists-for" \
+          "$(printf '%s\n' 'named only by `else`: installer:nothing-else-emits-this' \
+                           'never named by `else`: installer:a-wrapped-name' \
+                           'never named by `else`: installer:stage2-url-works-when-piped' \
+                           'never named by `if [ -n "$why" ]; then`: installer:a-wrapped-name')" \
+          "$(arm_name_gaps "$rg_tmp/broke.sh" stage2_url)"
+
+# AND OFFLINE IS NOT "PUSH THE TAG". §1's probe read `git ls-remote`'s OUTPUT, so an unreachable
+# origin -- which prints nothing -- was reported as an unpublished tag, for a tag that was pushed.
+# §10 records the same lesson: THE EXIT STATUS, NOT THE OUTPUT. Driven here against a fake git, so
+# all three answers are checked without a network: fails, answers empty, answers the tag.
+if carve_func "$PRIVATE/tests/00-release-gates.sh" tag_skip_why "$rg_tmp/probe.sh"; then
+    pass "release-gates:the-tag-probe-was-carvable"
+    rg_probe() {                      # rg_probe unreachable|absent|present -> tag_skip_why's answer
+        ( rg_state="$1"
+          git() {
+              case "$rg_state" in
+                  unreachable) printf 'fatal: unable to access origin\n' >&2; return 128 ;;
+                  absent)      return 0 ;;
+                  present)     printf '0123456789abcdef0123456789abcdef01234567\trefs/tags/release-9.9.9\n' ;;
+              esac
+          }
+          . "$rg_tmp/probe.sh"
+          tag_skip_why release-9.9.9 )
+    }
+    assert_contains     "release-gates:an-unreachable-origin-says-so" \
+                        "could not reach origin" "$(rg_probe unreachable)"
+    assert_not_contains "release-gates:an-unreachable-origin-is-not-told-to-push" \
+                        "push the tag" "$(rg_probe unreachable)"
+    assert_contains     "release-gates:a-tag-origin-lacks-is-told-to-push" \
+                        "push the tag" "$(rg_probe absent)"
+    assert_eq           "release-gates:a-tag-origin-has-skips-nothing" "" "$(rg_probe present)"
+else
+    fail "release-gates:the-tag-probe-was-carvable" \
+         "could not carve tag_skip_why() out of 00-release-gates.sh"
+    for rg_n in an-unreachable-origin-says-so an-unreachable-origin-is-not-told-to-push \
+                a-tag-origin-lacks-is-told-to-push a-tag-origin-has-skips-nothing; do
+        skip "release-gates:$rg_n" "the probe could not be carved"
+    done
+fi
+rm -rf "$rg_tmp"
+
 # ─── the raw-shell path is retired, files and all  (#220) ─────────────────────
 # THREE FILES GONE, and the absences are asserted rather than assumed. A deleted file that
 # something still installs is a broken build; a deleted file that nothing installs but which is
