@@ -757,22 +757,69 @@ Build it first:  ./cs193v --rebuild
 #
 # LAZY AND CACHED. The cheap lane (static, unit, shim) sources this file too and must not pay a
 # launcher fork it never uses -- the same cost concern as #57, one layer out.
-FWD_CTL='' FWD_PIDFILE='' FWD_BUILDLOG='' FWD_SUPPID='' FWD_SUPLOG='' FWD_READY=''
+#
+# AND ONLY A SUCCESSFUL ANSWER IS CACHED (#165). This used to set FWD_READY before asking and drop
+# the launcher's rc, so one failed `--dev-tunnel` cached empty paths for the whole process:
+# measured with a stand-in that exits 1, count_forwards said 0 and no_forwards TRUE. The flag is
+# now set last, after an answer carrying every row read below, and anything less is a require:
+# failure. A refusal is remembered as FWD_REFUSED, so the suite's EXIT trap -- the only thing
+# still running after it, and three of them reach this through clean_vt_processes -- neither
+# asks again nor exits halfway through its cleanup.
+#
+# A FIRST REACH FROM A SUBSHELL IS REFUSED BEFORE ASKING ANYTHING. Every value helper is called
+# inside a `$( )`, where the flag is lost with the subshell -- five reads forked the launcher five
+# times -- and an `exit` ends only the subshell (#164). So that refusal stops the suite with a
+# signal, and SIGUSR2 rather than TERM, measured on bash 3.2: a TERM trap that returns
+# (80-launcher-live.sh has one) and an inherited `trap '' TERM` both let the suite carry on,
+# while nothing here traps or ignores USR2. bash still runs the suite's EXIT trap on the way out.
+FWD_CTL='' FWD_PIDFILE='' FWD_BUILDLOG='' FWD_SUPPID='' FWD_SUPLOG='' FWD_READY='' FWD_REFUSED=''
 fwd_init() {
     [ -n "$FWD_READY" ] && return 0
-    FWD_READY=1
-    local out
-    out="$("$REPO/cs193v" --dev-tunnel 2>/dev/null)" || true
-    FWD_CTL="$(printf '%s\n' "$out"     | awk -F'\t' '$1 == "ctl"  { print $2 }')"
-    FWD_PIDFILE="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "pid"  { print $2 }')"
+    [ -n "$FWD_REFUSED" ] && return 1
+    local out rc ctl pidf buildlog suppid suplog why=''
+    if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
+        # fail's detail goes to stdout, which here is somebody's `$( )`; stderr reaches a human.
+        fail "require:dev-tunnel" "fwd_init was first reached inside a subshell, where neither what cs193v
+--dev-tunnel answers nor a refusal of it can reach the suite: the cache would be lost with the
+subshell and an exit would end only the subshell (#164).
+  called from:  ${FUNCNAME[*]:1}
+Call fwd_init as a statement before the first \$( ) that reads the tunnel." >&2
+        kill -s USR2 "$$" 2>/dev/null
+        exit 1
+    fi
+    out="$("$REPO/cs193v" --dev-tunnel 2>/dev/null)"; rc=$?
+    ctl="$(printf '%s\n' "$out"      | awk -F'\t' '$1 == "ctl"  { print $2 }')"
+    pidf="$(printf '%s\n' "$out"     | awk -F'\t' '$1 == "pid"  { print $2 }')"
     # NOT a tunnel file, and read from the same seam for the same reason: it is keyed by TUNNEL_ID,
     # so only the launcher can name this instance's build log. 00-release-gates.sh globbed TMPDIR
     # for the newest cs193v-build-*.log instead, and diffed a colleague's build against our
     # Containerfile whenever theirs finished last (#74).
-    FWD_BUILDLOG="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "buildlog" { print $2 }')"
-    FWD_SUPPID="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "suppid" { print $2 }')"
-    FWD_SUPLOG="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "suplog" { print $2 }')"
+    buildlog="$(printf '%s\n' "$out" | awk -F'\t' '$1 == "buildlog" { print $2 }')"
+    suppid="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "suppid" { print $2 }')"
+    suplog="$(printf '%s\n' "$out"   | awk -F'\t' '$1 == "suplog" { print $2 }')"
+    # EVERY ROW READ HERE, not just ctl and pid: an empty $FWD_SUPPID makes require_tunnel report
+    # "supervisor: not running" and an empty $FWD_BUILDLOG fails the release gate's step diff, each
+    # naming the wrong cause for the same broken seam.
+    [ -n "$ctl" ]      || why="$why ctl"
+    [ -n "$pidf" ]     || why="$why pid"
+    [ -n "$buildlog" ] || why="$why buildlog"
+    [ -n "$suppid" ]   || why="$why suppid"
+    [ -n "$suplog" ]   || why="$why suplog"
+    [ -n "$why" ] && why="named no${why}"
+    [ "$rc" -eq 0 ] || why="exited $rc${why:+ and $why}"
+    if [ -n "$why" ]; then
+        FWD_REFUSED=1
+        fail "require:dev-tunnel" "cs193v --dev-tunnel $why.
+So no listener, tunnel, supervisor or build log can be identified as this instance's, and every
+port assertion below would measure nothing. It runs no preflight and needs no podman, so this is
+the checkout rather than the machine.
+Check:  ./cs193v --dev-tunnel"
+        exit 1
+    fi
+    FWD_CTL="$ctl" FWD_PIDFILE="$pidf" FWD_BUILDLOG="$buildlog" FWD_SUPPID="$suppid"
+    FWD_SUPLOG="$suplog"
     export FWD_CTL FWD_PIDFILE FWD_BUILDLOG FWD_SUPPID FWD_SUPLOG
+    FWD_READY=1
 }
 
 # ─── establishing a forwarded port ─────────────────────────────────────────────
@@ -971,10 +1018,10 @@ tunnel_owner_pid() {                  # -> the pid the LAUNCHER records as its m
 # opposite reasons. `case ... in *""*)` matches EVERY argv, so an empty needle makes the pidfile
 # reader believe any live pid it finds; `index($0, "")` matches every LINE, so it makes the process
 # scanner claim strangers -- or, taken as the launcher's own `awk 'NR == 1'`, exactly pid 1, which
-# holds no loopback listener and so answers a silent ZERO. Measured, both directions. fwd_init
-# cannot be relied on to have succeeded: it sets FWD_READY before the launcher call and swallows
-# the rc, so one failed `--dev-tunnel` caches empty paths for the whole suite process. Same
-# discipline as do_listeners' missing backend: refuse to answer rather than answer wrongly.
+# holds no loopback listener and so answers a silent ZERO. Measured, both directions. fwd_init no
+# longer caches an empty answer (#165), so this is reached only by a caller that fills the cache
+# by hand, as 14-test-harness.sh's fixtures do, or by an EXIT trap after fwd_init has refused.
+# Same discipline as do_listeners' missing backend: refuse to answer rather than answer wrongly.
 fwd_require_ctl() {
     [ -n "$FWD_CTL" ] || _pt_fatal dev-tunnel \
         'cs193v --dev-tunnel named no control socket, so no listener can be identified as ours'

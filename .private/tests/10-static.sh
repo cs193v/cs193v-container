@@ -1617,7 +1617,7 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-g
 # zero across the suites when this landed, and every guard in them is the statement form
 # `... || { fail ...; exit 1; }`.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-exitful='dyn_ports|require_cmd|require_image|require_running|require_tunnel'
+exitful='dyn_ports|fwd_init|require_cmd|require_image|require_running|require_tunnel'
 exitful="$exitful|pass|fail|skip|record|assert_[a-z_]+"
 subshelled="$(grep -HnE '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
               $PRIVATE/tests/[0-9][0-9]-*.sh $PRIVATE/tests/lib/*.sh \

@@ -488,7 +488,10 @@ if [ "${CS193V_RELEASE_BUILD:-}" = yes ]; then
     # Through fwd_init rather than a second call to the seam, so there is still only one place that
     # parses it. It used to inherit a hard-fail from fwd_init -- fewer than two declared ports and
     # the whole release gate stopped for a reason that was about ports and not about this check.
-    # fwd_init reads no ports at all now, so that coupling is gone.
+    # fwd_init reads no ports at all now. It hard-fails again since #165, when the seam itself
+    # fails or answers short -- and that stops the gates below this one too. Accepted: this check
+    # is left no build log to name, and a launcher whose --dev-tunnel cannot answer is not one to
+    # release.
     fwd_init
     log="$FWD_BUILDLOG"
     [ -n "$log" ] && [ -f "$log" ] || log=''
