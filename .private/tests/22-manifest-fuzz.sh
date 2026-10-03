@@ -38,7 +38,10 @@ OUT="$(mktemp "${TMPDIR:-/tmp}/cs193v-mffuzz.XXXXXX")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-mfwork.$$.XXXXXX")"
 trap 'rm -f "$OUT"; rm -rf "$WORK"' EXIT
 
-python3 - "$PRIVATE/install-cs193v.sh" "$SEED" "$WORK" > "$OUT" 2>&1 <<'PY'
+# UNBUFFERED (-u), or a fuzzer killed without unwinding -- a signal, os._exit -- takes every line
+# still in python's buffer with it and is reported as one that produced nothing. Measured: a walk
+# that sent its caller SIGTERM in property 3 left $OUT empty (#435).
+python3 -u - "$PRIVATE/install-cs193v.sh" "$SEED" "$WORK" > "$OUT" 2>&1 <<'PY'
 import errno, hashlib, os, random, shutil, subprocess, sys
 
 BOOT, SEED, WORK = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -99,9 +102,10 @@ out("name-corpus", str(len(NAMES)))
 # ─── ...and the one entry a conforming filesystem is allowed to refuse  (#305) ─
 # DECLARED, NOT A WILDCARD, and that is what keeps this from becoming a hole. APFS requires
 # filenames to be valid UTF-8 and refuses this one with EILSEQ, so on every Mac property 1 died
-# on it, the oracle emitted nothing but a traceback, and mffuzz:the-fuzzer-ran fired -- correctly,
-# since nothing below it had run. The name is still worth having: on Linux it is the case that
-# catches a tool which decoded a path instead of treating it as bytes.
+# on it, the oracle emitted nothing but a traceback, and mffuzz:the-fuzzer-ran (now
+# mffuzz:the-fuzzer-ran-to-the-end) fired -- correctly, since nothing below it had run. The name
+# is still worth having: on Linux it is the case that catches a tool which decoded a path instead
+# of treating it as bytes.
 #
 # A REFUSAL OF ANYTHING ELSE STILL RAISES, which is the whole guard and the reason there is no
 # numeric floor here. A filesystem that refused the corpus wholesale would be stopped by the very
@@ -132,10 +136,20 @@ def plant(d, name, body=b"x\n", sub=None):   # -> True if it landed, False if re
         return False
     return True
 
+# ─── the plan, printed before any case runs ────────────────────────────────────
+# Every generated loop below counts each case it reaches into `reached`, which is printed as the
+# LAST line, and mffuzz:the-fuzzer-ran-to-the-end wants the two to agree (#435). A case skipped by
+# design -- the name this filesystem refuses, an empty random tree -- is still reached, so the plan
+# is the same on every platform and the skip goes on being reported where it always was.
+N_RANDOM, N_MUTATED, N_STABLE = 120, 40, 6
+out("cases-planned", str(len(NAMES) + N_RANDOM + N_MUTATED + N_STABLE))
+reached = 0
+
 # ─── property 1: valid input first, which is what stops "refuse everything" passing ──
 disagree, nonhex, dirty_err = [], [], []
 n_ok = 0
 for i, name in enumerate(NAMES):
+    reached += 1
     d = fresh("ok%d" % i)
     # THE WHOLE CASE, NOT THE NAME ALONE. A case that ran without its own name would compare the
     # walk against the oracle over a tree holding only the sibling -- green, and proving nothing
@@ -161,7 +175,8 @@ out("stderr-on-success", "; ".join(dirty_err[:4]))
 # ─── property 2: random trees, same comparison ────────────────────────────────
 rand_disagree = []
 n_rand_skipped = 0
-for i in range(120):
+for i in range(N_RANDOM):
+    reached += 1
     d = fresh("rand%d" % i)
     n_planted = 0
     for _ in range(rng.randint(1, 6)):
@@ -194,7 +209,7 @@ for i in range(120):
         continue
     if got != oracle(d):
         rand_disagree.append("tree %d: shell=%s oracle=%s" % (i, got, oracle(d)))
-out("cases-random", str(120 - n_rand_skipped))
+out("cases-random", str(N_RANDOM - n_rand_skipped))
 out("cases-random-skipped", str(n_rand_skipped))
 out("random-disagree", "; ".join(rand_disagree[:4]))
 
@@ -203,7 +218,8 @@ out("random-disagree", "; ".join(rand_disagree[:4]))
 # in a directory would pass everything above -- both sides would ignore it. Sensitivity is what
 # says the digest is a function of the WHOLE tree.
 insensitive = []
-for i in range(40):
+for i in range(N_MUTATED):
+    reached += 1
     d = fresh("mut%d" % i)
     for k in range(3):
         plant(d, b"file%d" % k, body=b"body %d\n" % k, sub=(b"sub" if k == 2 else None))
@@ -226,7 +242,7 @@ for i in range(40):
     rc1, after, _ = run_verb(d)
     if rc1 == 0 and after == base:
         insensitive.append("tree %d op %d: digest unchanged" % (i, op))
-out("cases-mutated", "40")
+out("cases-mutated", str(N_MUTATED))
 out("insensitive", "; ".join(insensitive[:4]))
 
 # ─── property 4: what the format refuses, it refuses ──────────────────────────
@@ -266,7 +282,8 @@ out("refusal-is-quiet", "; ".join(noisy[:4]))
 
 # ─── property 5: the same tree twice is the same digest ───────────────────────
 unstable = []
-for i in range(6):
+for i in range(N_STABLE):
+    reached += 1
     d = fresh("det%d" % i)
     for name in rng.sample(NAMES, 5):
         try:
@@ -281,20 +298,42 @@ out("unstable", "; ".join(unstable[:4]))
 
 out("plantings-refused", str(len(refused)))
 out("names-refused", b" ".join(sorted(set(refused))).decode("utf-8", "replace"))
+
+# ─── THE LAST LINE: how many cases the loops above actually reached ────────────
+# Counted case by case, unlike cases-random and cases-mutated, which a loop cut short still printed
+# in full (measured, #435). And last, so it is missing if anything above died at all.
+out("cases-reached", str(reached))
 PY
+FUZZ_RC=$?
 
 fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
 
-# ─── the oracle ran at all ─────────────────────────────────────────────────────
+# ─── the oracle ran, and ran to its last line ──────────────────────────────────
 # FIRST AND ON ITS OWN, the rule 19-shortlink-fuzz.sh states: every property below is satisfied by
 # a run that produced nothing, so a python traceback would otherwise read as a clean pass.
-if [ -z "$(fz cases-valid)" ]; then
-    fail "mffuzz:the-fuzzer-ran" \
-"the oracle produced no results, so nothing below tested anything.
+#
+# AND AT THE END, NOT PARTWAY. This used to be mffuzz:the-fuzzer-ran, which asked only whether
+# cases-valid had been printed -- after property 1 -- and never looked at python's exit status. A
+# run that died after it passed every property from 2 on, on keys it never printed (#435). Measured
+# both ways: a sys.exit(0) after property 1, and a walk that left the oracle a dangling symlink in
+# property 2, each 12 pass 0 fail. Against the fuzzer's own plan rather than a literal, so a name
+# added to the corpus reaches every-name-is-in-the-corpus below instead of stopping here.
+#
+# NO except AROUND A CASE, unlike 19-shortlink-fuzz.sh's, and on purpose: the walk runs in a
+# subprocess, so what it does comes back as a status each property already judges. What raises in
+# here uncaught -- plant()'s re-raise in property 1, or the oracle on a tree the walk left it unable
+# to read -- ends the run, and this gate is where that belongs: the traceback it prints names the
+# path.
+planned="$(fz cases-planned)"
+reached="$(fz cases-reached)"
+if [ "$FUZZ_RC" != 0 ] || [ -z "$reached" ] || [ "$reached" != "$planned" ]; then
+    fail "mffuzz:the-fuzzer-ran-to-the-end" \
+"python3 exited $FUZZ_RC, and its last line counted '$reached' of the '$planned' cases it planned,
+so nothing below is read from this run.
 $(cat "$OUT")"
     exit 1
 fi
-pass "mffuzz:the-fuzzer-ran"
+pass "mffuzz:the-fuzzer-ran-to-the-end"
 
 assert_eq "mffuzz:every-valid-tree-hashes"        "" "$(fz nonhex)"
 assert_eq "mffuzz:the-walk-agrees-with-the-oracle" "" "$(fz disagree)"
