@@ -34,7 +34,10 @@ OUT="$WORK/out"
 CANARY="$WORK/canary"
 trap 'rm -rf "$WORK"' EXIT
 
-python3 - "$PRIVATE/files/shortlink" "$SEED" "$CANARY" > "$OUT" 2>&1 <<'PY'
+# UNBUFFERED (-u), or a reader that dies without unwinding -- os._exit, a signal -- takes every line
+# still in python's buffer with it, `exists` included, and is reported as a parser that is not there.
+# Measured.
+python3 -u - "$PRIVATE/files/shortlink" "$SEED" "$CANARY" > "$OUT" 2>&1 <<'PY'
 import importlib.machinery, importlib.util, io, os, random, shlex, sys, traceback
 
 PATH, SEED, CANARY = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -95,6 +98,14 @@ out("known-good", ";".join("%s->%r want %r" % (p, verdict(GOOD, p), w) for p, w 
 CANARY_CASE = ("state\tbroken\n"
                "reason\t$(touch {0})\n"
                "refused\t3000\t$(touch {0})\n").format(shlex.quote(CANARY))
+# AND THE CLASS FIELD OF AN `up` ROW, which port_verdict does not read at all, so these two stand
+# guard for a reader that starts to. They were `id` and ${IFS}, aimed at nothing (#417) -- measured:
+# a port_verdict that shell-evaluated the field ran `id` and passed every check, and ${IFS} on its
+# own does nothing anybody could see. Backticks are the other substitution syntax, and ${IFS} is
+# the spelling with no space in the command, for a reader that splits on whitespace first.
+CANARY_CLASS = ["up\t3000\t`touch %s`\n" % shlex.quote(CANARY),
+                "up\t3000\t$(touch${IFS}%s)\n" % shlex.quote(CANARY)]
+CANARIES = [CANARY_CASE] + CANARY_CLASS
 HOSTILE = [
     "", "\n", "\t", "\0", "up", "up\t", "up\t3000", "up\t3000\t",
     "up\t3000\tlo\nup\t3000\tany\n",
@@ -105,8 +116,7 @@ HOSTILE = [
     "refused\t3000\t\n", "refused\t3000\tnot-a-reason\n", "refused\t3000\tbusy\textra\n",
     "UP\t3000\tlo\n", " up\t3000\tlo\n", "up 3000 lo\n",
     "up\t3000\tlo\r\n",                      # CR must not become part of the class
-    CANARY_CASE,
-    "up\t3000\t`id`\n", "up\t3000\t${IFS}\n",
+    CANARY_CASE, *CANARY_CLASS,
     "state\t" + "A" * 100000 + "\n",         # one enormous line
     "up\t3000\tlo\n" * 5000,                 # a huge file
     "\n" * 10000,
@@ -128,12 +138,12 @@ def mutate(rng, s):
         else:         del b[i:]
     return b.decode("utf-8", "replace")
 
-# EVERY HOSTILE CASE BUT THE CANARY. Its bytes name a scratch path whose length varies by machine,
-# and mutate() draws its offsets from the length, so as seed material it would give every machine
-# a different corpus under the same printed seed. And mutated copies of a shell payload are what a
-# broken reader runs: against the old corpus they left /tmp/CANAR], /tmp/CANARYY and a third
+# EVERY HOSTILE CASE BUT THE CANARIES. Their bytes name a scratch path whose length varies by
+# machine, and mutate() draws its offsets from the length, so as seed material they would give every
+# machine a different corpus under the same printed seed. And mutated copies of a shell payload are
+# what a broken reader runs: against the old corpus they left /tmp/CANAR], /tmp/CANARYY and a third
 # stray beside /tmp/CANARY, none of them inside anything a trap removes.
-SEEDS = [GOOD] + [h for h in HOSTILE if h != CANARY_CASE]
+SEEDS = [GOOD] + [h for h in HOSTILE if h not in CANARIES]
 rng = random.Random(SEED)
 cases = list(HOSTILE)
 for _ in range(4000):
@@ -143,16 +153,24 @@ for _ in range(1000):
     cases.append("".join(chr(rng.randint(0, 255)) for _ in range(rng.randint(0, 200))))
 
 PORTS = [3000, 1, 65535, 0, -1, 99999999999999999999, 8080]
+out("cases-planned", str(len(cases) * len(PORTS)))
 
+# SystemExit IN EVERY GUARD, beside Exception, which it is not: a sys.exit() from the reader went
+# straight past `except Exception` and ended the run (#417). Caught, it is a raise like any other,
+# reported against the input that caused it. KeyboardInterrupt is deliberately let through, so a real
+# Ctrl+C stops the run instead of being blamed on whatever input was in flight -- and it, or a raise
+# in a probe with no guard, ends the run where slfuzz:the-fuzzer-ran-to-the-end reports it.
 raised, bad_vocab, unsound = [], [], []
+ran = 0
 err = io.StringIO()
 real_err, sys.stderr = sys.stderr, err
 try:
     for c in cases:
         for p in PORTS:
+            ran += 1
             try:
                 v = verdict(c, p)
-            except Exception:
+            except (Exception, SystemExit):
                 raised.append("%r/%s: %s" % (c[:40], p, traceback.format_exc(0).strip()))
                 continue
             if v is not None and (not isinstance(v, str) or (VOCAB and v not in VOCAB)):
@@ -162,7 +180,6 @@ try:
 finally:
     sys.stderr = real_err
 
-out("cases", str(len(cases) * len(PORTS)))
 out("raised", "; ".join(raised[:3]))
 out("bad-vocab", "; ".join(bad_vocab[:3]))
 out("unsound", "; ".join(unsound[:3]))
@@ -179,7 +196,7 @@ for t in [None, b"up\t3000\tlo\n", 3000, ["up", "3000"], {"up": 3000}, object()]
         v = verdict(t, 3000)
         if v is not None:
             nonstr.append("%r -> %r" % (t, v))
-    except Exception:
+    except (Exception, SystemExit):
         nonstr.append("%r raised" % (t,))
 out("nonstr-text", "; ".join(nonstr[:3]))
 
@@ -202,28 +219,38 @@ for p in ["3000", None, 3.5, [], {"a": 1}, True]:
         v = verdict(GOOD, p)
         if v is not None and VOCAB and v not in VOCAB:
             weird.append("%r -> %r" % (p, v))
-    except Exception:
+    except (Exception, SystemExit):
         weird.append("%r raised" % (p,))
 out("weird-port", "; ".join(weird[:3]))
 
 # ─── what the canary is aimed at, and whether it was hit ───────────────────────
-# LAST, so nothing here can cut short a probe above, every one of which reads a missing answer as
-# a pass. And only once the corpus has run, so a run that died inside it reports nothing.
+# AFTER EVERY PROBE, so nothing here can cut short one above, every one of which reads a missing
+# answer as a pass. And only once the corpus has run, so a run that died inside it reports nothing.
 #
-# Spelled HERE, row by row, from the path the shell handed in, not taken from CANARY_CASE, so a
+# Spelled HERE, row by row, from the path the shell handed in, not taken from the cases, so a
 # corpus aimed elsewhere cannot vouch for itself. HOSTILE must hold each row once, and the corpus as
-# run no other `$(touch` at all: a dropped or moved row, an unquoted path a shell would split, a
+# run no other touch payload at all: a dropped or moved row, an unquoted path a shell would split, a
 # canary back among the seeds or a second payload aimed at /tmp is each a canary nobody watches,
-# and #395 was one.
-want = "$(touch %s)" % shlex.quote(CANARY)
-rows = ["reason\t" + want, "refused\t3000\t" + want]
+# and #395 was one. Counted by the payloads' openings, never a bare `touch`, which a path can hold.
+q = shlex.quote(CANARY)
+want = "$(touch %s)" % q
+rows = ["reason\t" + want, "refused\t3000\t" + want,
+        "up\t3000\t`touch %s`" % q, "up\t3000\t$(touch${IFS}%s)" % q]
 lines = "\n".join(HOSTILE).split("\n")
 found = [r for r in rows if lines.count(r) == 1]
-n_any = sum(c.count("$(touch ") for c in cases)
+n_any = sum(c.count(n) for c in cases for n in ("$(touch ", "`touch ", "$(touch${IFS}"))
 out("canary-aimed", CANARY if found == rows and n_any == len(rows) else
-    "want %r once each and no other `$(touch`; found %r, and %d in all" % (rows, found, n_any))
+    "want %r once each and no other touch payload; found %r, and %d in all" % (rows, found, n_any))
 out("canary", "%s %s" % (CANARY, "present" if os.path.exists(CANARY) else "absent"))
+
+# ─── THE LAST LINE: how many verdicts the corpus loop actually asked for ───────
+# Counted call by call, unlike cases-planned, which a loop cut short still printed in full -- and so
+# did this key, until #417 (measured). And printed last, so it is missing if anything above died at
+# all, including by a sys.exit() from the reader, which exits 0. slfuzz:the-fuzzer-ran-to-the-end
+# reads it.
+out("cases", str(ran))
 PY
+FUZZ_RC=$?
 
 fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
 
@@ -238,6 +265,25 @@ $(cat "$OUT")"
     exit 1
 fi
 pass "slfuzz:the-parser-exists"
+
+# ─── and the fuzzer ran to its last line ───────────────────────────────────────
+# A GATE TOO, because the properties below pass on an empty answer and fz answers "" for a key the
+# fuzzer never printed. Measured (#417): a port_verdict calling sys.exit() mid-corpus left every one
+# of them green. Both halves, because each misses what the other sees: that sys.exit() exits 0, and
+# a crash after the last line has already printed everything.
+#
+# AGAINST THE FUZZER'S OWN PLAN, not a literal: the hostile corpus has its literal at the bottom,
+# and a gate that hard-coded it too would exit before that line could say what had changed.
+planned="$(fz cases-planned)"
+ran="$(fz cases)"
+if [ "$FUZZ_RC" != 0 ] || [ -z "$ran" ] || [ "$ran" != "$planned" ]; then
+    fail "slfuzz:the-fuzzer-ran-to-the-end" \
+"python3 exited $FUZZ_RC, and its last line counted '$ran' of the '$planned' calls it planned,
+so nothing below can be read.
+$(cat "$OUT")"
+    exit 1
+fi
+pass "slfuzz:the-fuzzer-ran-to-the-end"
 assert_eq "slfuzz:the-vocabulary-is-declared" "yes" "$(fz vocab)"
 
 # ─── the seven properties ──────────────────────────────────────────────────────
