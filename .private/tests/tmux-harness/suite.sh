@@ -1179,7 +1179,8 @@ hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TA
 # "the chrome is crowding out the tabs" about chrome that was behaving perfectly.
 #
 # SO ASK tmux WHAT THE LABEL IS. The bar renders window-status-format, which is `#I #W`, and
-# probe_name reads that same #{window_name}. The two agree whether the name is stale or fresh,
+# probe_name reads that same #{window_name}. The two agree whether the name is stale or fresh
+# -- PROVIDED they describe the same moment, which two separate reads do not (#367, below) --
 # so the race cannot reach the verdict, and what is left being measured is width and layout --
 # which is what this section is for. It is also STRONGER than the literal for the regression
 # this section exists to catch: tmux guarantees the focused window is in the visible slice, so
@@ -1197,11 +1198,66 @@ hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TA
 # whatever the chrome did, and this check would then be a statement about the label instead of
 # about the layout. Nothing arranges that today; it is written down because it would look like
 # a chrome regression.
-want="$(probe_win) $(probe_name)"
-case "$narrow" in
-  *"$want"*) hx_pass "at 40 columns the focused tab's label is still on the bar" ;;
-  *) hx_fail "at 40 columns the focused tab's label is still on the bar" \
-             "expected to find: $want   bar was: [$narrow]" ;;
+
+# ─── THE BAR AND THE NAME, FROM ONE MOMENT (#367) ──────────────────────────────
+#
+# Asking tmux left a race of its own, because the capture and the name are two reads. It FAILed
+# once at load ~7 -- "expected to find: 18 bash   bar was: [ 18 TABS 17 bash 18 tmux + NEW TAB]"
+# -- about a bar that was right when it was captured. Two ways for the reads to disagree:
+#
+#   * THE BAR LAGS THE NAME. When tmux's own name timer does the re-sample, the inner server
+#     renames the window and then does not redraw the bar until something next wakes it -- the
+#     status-interval tick, measured at 940-990 ms. Any command sent to it wakes it, and the read
+#     after the capture was one: the capture caught the old bar, and the read then woke the server
+#     and got the new name. With that timer path arranged on demand, capture-then-read falsely
+#     failed 15 times in 40.
+#   * THE NAME FLIPS BETWEEN THE READS -- reproduced by pinning `tmux` for the capture and handing
+#     the label back to automatic-rename before the read.
+#
+# SO THE NAME IS READ ON BOTH SIDES OF THE CAPTURE. The read before wakes the server, so the
+# capture after it sees the bar redrawn -- 0 false failures in 40, same arrangement -- and the
+# read after says the name held while the capture was taken; a disagreement re-captures. What
+# neither read can prove is that the outer pane has drawn every byte the inner server wrote, and
+# only polling the bar could, which is the retry refused next. 0 in 40 is what that gap measures.
+#
+# THE NAME DRIVES THE RETRY, NEVER THE VERDICT. Once the reads agree the bar is judged once, so
+# a bar that has really lost the label fails on the first settled capture instead of being
+# re-captured until it passes. A name that never holds across LABEL_TRIES captures fails as
+# exactly that, "never settled", and is not judged against a bar nobody can vouch for. Nor is
+# this the hx_until refused above: a stale `tmux` that holds for seconds agrees with itself on
+# the first try and is judged as `tmux`. Only a flip during one capture costs a second.
+#
+# LABEL_GAP_HOOK runs between the capture and the read after it. Empty for the check itself; the
+# guards below rename the tab there.
+LABEL_TRIES=10
+LABEL_GAP_HOOK=''
+# The index and the name in ONE read, so they come from one moment too.
+probe_focus() { it display-message -p -t cs193v '#{window_index} #{window_name}' 2>/dev/null; }
+label_verdict() {
+  local before after n=0
+  while :; do
+    n=$((n + 1))
+    before="$(probe_focus)"
+    lbl_bar="$(hx_cap "$S" | sed -n 2p)"
+    [ -z "$LABEL_GAP_HOOK" ] || "$LABEL_GAP_HOOK"
+    after="$(probe_focus)"
+    [ "$before" = "$after" ] && break
+    if [ "$n" -ge "$LABEL_TRIES" ]; then
+      lbl_tries="$n" lbl_want="$after" lbl_verdict=unsettled
+      lbl_detail="the focused tab's name never settled: it changed across all $n captures, last from [$before] to [$after]   bar was: [$lbl_bar]"
+      return 0
+    fi
+  done
+  lbl_tries="$n" lbl_want="$after"
+  case "$lbl_bar" in
+    *"$lbl_want"*) lbl_verdict=pass lbl_detail='' ;;
+    *)             lbl_verdict=fail lbl_detail="expected to find: $lbl_want   bar was: [$lbl_bar]" ;;
+  esac
+}
+label_verdict
+case "$lbl_verdict" in
+  pass) hx_pass "at 40 columns the focused tab's label is still on the bar" ;;
+  *)    hx_fail "at 40 columns the focused tab's label is still on the bar" "$lbl_detail" ;;
 esac
 
 # RECORDED, NOT ASSERTED, because zero is not guaranteed and non-zero is not a defect -- it is
@@ -1212,6 +1268,58 @@ hx_sep="$(printf '\t')"
 hx_record "stale tab labels at capture" \
   "$(it list-windows -t cs193v -F "#{window_name}${hx_sep}#{pane_current_command}" 2>/dev/null \
      | awk -F"$hx_sep" '$1 != $2' | wc -l | tr -d ' ') of $(probe_wincount)"
+
+# ─── ...AND THE GAP, RENAMED IN ON DEMAND (#367) ───────────────────────────────
+#
+# label_verdict judged three more times, with LABEL_GAP_HOOK renaming the tab between the capture
+# and the read after it. PINNED NAMES, waited for on the bar wherever a verdict reads the bar, so
+# these are deterministic -- and that is also their limit. They cover a name that flips in the gap, not the bar lagging the
+# name, because the name timer behind the lag can only be waited out by sleeping; that half is
+# the read before the capture, measured above.
+#
+#   1. one rename in the gap: a correct bar still passes, judged on the NEW name -- which is also
+#      what proves the rename happened. The single-read check failed this, as #367 did.
+#   2. a rename in every gap: fails "unsettled", rather than as a verdict on some bar.
+#   3. a label too long for 40 columns, held still: fails, on the FIRST capture. This one catches
+#      the wrong fix -- re-capturing until the bar passes would spend every try.
+#
+# A pin the bar never draws is a failure of its own, "setup", so no guard passes on a bar that
+# was never shown the label it is about.
+pin_label() { # name text -- pin the focused tab's label; fails unless the bar then shows TEXT
+  it rename-window -t cs193v "$1"
+  hx_until_ok "hx_cap $S | sed -n 2p | grep -qF -- '$2'" 6 && return 0
+  lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(hx_cap "$S" | sed -n 2p)]"
+  return 1
+}
+expect_label() { # desc verdict [want] [tries] -- an empty want or tries is not checked
+  if [ "$lbl_verdict" = "$2" ] && { [ -z "${3:-}" ] || [ "$lbl_want" = "$3" ]; } \
+     && { [ -z "${4:-}" ] || [ "$lbl_tries" = "$4" ]; }; then
+    hx_pass "$1"
+  else
+    hx_fail "$1" "$lbl_verdict after $lbl_tries capture(s), judged [$lbl_want]: $lbl_detail"
+  fi
+}
+raced_verdict() { LABEL_GAP_HOOK="$1"; label_verdict; LABEL_GAP_HOOK=''; }
+lbl_raced=0
+race_once() { [ "$lbl_raced" = 1 ] && return 0; lbl_raced=1; pin_label HX-RACE-B " $(probe_win) HX-RACE-B "; }
+race_always() {
+  if [ "$(probe_name)" = HX-RACE-C ]; then it rename-window -t cs193v HX-RACE-D
+  else it rename-window -t cs193v HX-RACE-C; fi
+}
+
+pin_label HX-RACE-A " $(probe_win) HX-RACE-A " && raced_verdict race_once
+expect_label "at 40 columns a rename between the capture and the name read does not fail a correct bar" \
+             pass "$(probe_win) HX-RACE-B"
+
+# Not pinned through the bar: this verdict is about the reads, and must not depend on a drawing.
+it rename-window -t cs193v HX-RACE-C
+raced_verdict race_always
+expect_label "at 40 columns a name that never settles fails as unsettled, not on the bar" unsettled
+
+# A repeating label, so any slice of it the bar has room for still contains HX-WIDE.
+pin_label HX-WIDE-HX-WIDE-HX-WIDE-HX-WIDE-HX-WIDE HX-WIDE && label_verdict
+expect_label "at 40 columns a label that is really off the bar fails on the first settled capture" \
+             fail '' 1
 
 # ─── ...AND THE VERDICT MUST NOT CARE WHAT THE TAB IS CALLED (#145) ────────────
 #
