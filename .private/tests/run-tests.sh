@@ -80,7 +80,9 @@
 #  78   THIS MACHINE CANNOT RUN THE TESTS -- the preflight refused. EX_CONFIG from sysexits.h,
 #       chosen over an arbitrary number because a CI author can look it up (#124)
 #  97   results were lost mid-run: see _emit in lib/assert.sh
-# 130   interrupted
+# 130   interrupted with Ctrl+C. The runner DIES of SIGINT rather than exiting 130, so a calling
+#       shell reads 130 and stops as well (#450)
+# 143   stopped with SIGTERM
 #
 # ─── the two lanes ─────────────────────────────────────────────────────────────
 # The tiers split cleanly by what they contend for, and the two halves share nothing:
@@ -498,27 +500,78 @@ flush_cheap() {
 # so there is no group to signal, and the suite the subshell was running is simply orphaned.
 # Measured — a Ctrl+C'd run left 30-launcher-shim.sh going after the runner had exited, which
 # for the podman lane would mean a suite still driving the container nobody is watching.
-# Children first, so nothing is reparented and missed. pgrep -P is on macOS too.
+# Children first, so nothing is reparented and missed. pgrep -P is on macOS too. Each pid it
+# signalled is remembered in KILLED, for cleanup to wait on.
+KILLED=''
 kill_tree() {                         # kill_tree PID
     local kid
     for kid in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$kid"; done
-    kill "$1" 2>/dev/null
+    kill "$1" 2>/dev/null && KILLED="$KILLED $1"
     return 0
 }
+# PRUNED AS IT GOES, so a pid is looked at only until it is first seen gone: the leaf commands
+# and the lane's own subshells die at once and give their pids back, and one handed to an
+# unrelated process mid-wait would otherwise hold the wait to its ceiling and be named below.
+killed_gone() {                       # 0 once nothing kill_tree signalled is still running
+    local p left=''
+    for p in $KILLED; do pid_is_gone "$p" || left="$left $p"; done
+    KILLED="$left"
+    [ -z "$KILLED" ]
+}
 
+# WAITS FOR THE LANE TO BE GONE, not merely signalled. TERM starts each suite's own EXIT trap,
+# which takes down what that suite raised, and a runner that returned first handed back the
+# terminal -- and its caller a status -- while those teardowns were still running: measured, the
+# lane's suite alive and halfway through its trap when the runner had already exited (#450).
+# Then flushed, so the lane's log includes what its teardown said. Thirty seconds is a failure
+# bound, not a delay; what outlives it is NAMED rather than killed harder, since a pid waited on
+# that long may by then belong to something else.
+#
+# SAID WHEN IT TAKES A WHILE, because a second Ctrl+C cannot cut it short -- bash does not re-enter
+# a trap for the signal it is already handling -- and a silent pause reads as a hang.
+#
+# TWO THINGS IT CANNOT SEE, both because it finds the lane by parentage. A TERM sent to the whole
+# process group, as a CI timeout does, reaches the lane's own shells too: they die at once and
+# orphan the suite they were running before pgrep -P can find it, so the runner exits 143 while
+# that suite's EXIT trap may still be running (measured). And a suite that forks its next command
+# between kill_tree signalling its last one and signalling the suite itself leaves that command
+# unsignalled. A Ctrl+C never causes the first: the lane ignores SIGINT.
 cleanup() {
-    [ -n "$CHEAP_PID" ] && kill_tree "$CHEAP_PID"
+    local i=0
+    if [ -n "$CHEAP_PID" ]; then
+        kill_tree "$CHEAP_PID"
+        while ! killed_gone && [ "$i" -lt 600 ]; do
+            [ "$i" -eq 20 ] && printf '%swaiting for the no-podman lane to finish its teardown...%s\n' \
+                                      "$C_DIM" "$C_OFF" >&2
+            sleep 0.05; i=$((i + 1))
+        done
+        wait "$CHEAP_PID" 2>/dev/null
+        [ -z "$KILLED" ] || printf '%sthe no-podman lane outlived its teardown; still running:%s%s\n' \
+                                   "$C_YEL" "$KILLED" "$C_OFF" >&2
+        CHEAP_PID='' KILLED=''
+    fi
     flush_cheap
     # DELIBERATELY NOT REMOVED. The run directory is the record of what happened, and it is
     # most wanted exactly when the run did not finish. Its path is printed below; the next run
     # sweeps it once this pid is gone.
     return 0
 }
+# INT and TERM as well as EXIT, and each ENDS THE RUN: bash runs an EXIT trap on both, but only
+# after the handler for them returns, and a handler that returned would carry on running suites.
+#
+# INT RE-RAISES rather than exiting 130. A shell running this carries on past a child that exits
+# 130 on a Ctrl+C and stops on one that dies of SIGINT (measured, #448 and #450), so a loop around
+# the runner ran on into its next iteration. Nothing waits cooperatively on TERM, so 143 says it.
+# Each arm clears EXIT before it ends the run, so cleanup runs once.
+#
+# AN INT IGNORED BY WHATEVER STARTED THIS -- `&` without job control, a `trap '' INT` above it --
+# means the INT arm is never armed: a shell cannot trap a signal ignored at entry. A Ctrl+C then
+# reaches nothing, the run goes on to its summary, and the EXIT arm cleans up (measured). The
+# background lane below is in that position always, which is why cleanup kills it rather than
+# relying on the Ctrl+C reaching it.
 trap 'cleanup' EXIT
-# INT and TERM as well as EXIT: bash runs an EXIT trap on both, but only after the handler for
-# them returns, and without an explicit exit the script would carry on running suites after a
-# Ctrl+C. 130 is the conventional status for SIGINT.
-trap 'cleanup; exit 130' INT TERM
+trap 'cleanup; trap - EXIT INT; kill -s INT $$' INT
+trap 'cleanup; trap - EXIT; exit 143' TERM
 
 # ─── the clock ─────────────────────────────────────────────────────────────────
 # `date +%N` is GNU-only — on a TA's Mac it prints a literal "N", so anything built on it

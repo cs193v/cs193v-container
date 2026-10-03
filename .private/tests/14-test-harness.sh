@@ -2020,7 +2020,7 @@ out="$(gate_run shellcheck)"
 assert_contains "preflight:names-the-missing-tool"        "shellcheck" "$out"
 assert_match    "preflight:offers-a-command-that-fixes-it" 'install .*shellcheck' "$out"
 # ITS OWN EXIT CODE, so CI can tell a broken machine from a broken commit. 78 is EX_CONFIG from
-# sysexits.h; 0/1/2/97/130 are all taken already -- see the table in run-tests.sh's header.
+# sysexits.h; 0/1/2/97/130/143 are all taken already -- see the table in run-tests.sh's header.
 assert_contains "preflight:has-its-own-exit-code"         "[rc=78]"    "$out"
 # NOTHING RAN, and nothing was recorded. Both halves matter: a gate that let one suite through
 # before refusing would leave a results file that the summary would then under-report from.
@@ -2458,6 +2458,146 @@ out="$(ebg_run --serial --tier static,release -k 01-cheap)"
 assert_contains "args:the-scope-names-the-filter"    "-k: 01-cheap" "$out"
 # AND IT COUNTS IN ENGLISH. One suite is the commonest narrow run there is.
 assert_contains "args:one-suite-is-not-1-suites"     "over 1 suite, tiers:" "$out"
+
+# ─── an interrupted run DIES OF THE SIGNAL, and only once its lanes are gone (#450) ─
+# run-tests.sh trapped `cleanup; exit 130` on INT and TERM. A shell that runs it carries on past a
+# child that exits 130 on a Ctrl+C and stops on one that dies of SIGINT (measured, #448), so a
+# loop around the runner ran on into its next iteration, and TERM reported 130 rather than 143.
+# And cleanup only SIGNALLED the background lane: measured, the runner had returned while that
+# lane's suite was still alive and halfway through its own teardown.
+#
+# A COPY OF THE RUNNER WITH FOUR FAKE SUITES, for the reason the two runner fixtures above give.
+# Two lanes, because the background one is the one cleanup has to take down. 01-cheap is static
+# and runs in that lane, and its EXIT trap takes a second the way a real suite's teardown does.
+# 50-pod is container tier and sits in the foreground while the signal lands; 51-podquick is too,
+# and finishes at once, so the signal finds the runner in `wait` on the other lane instead -- the
+# usual place to be when a run's podman half is the shorter one. 02-quick is for the runs that
+# sweep up after.
+#
+# THE RUN'S OWN PROCESS GROUP, SIGNALLED WHOLE, with INT and TERM reset to default, for the reason
+# the #425 cases give: `&` without job control hands this suite's children SIGINT ignored, and a
+# shell cannot arm a trap for a signal ignored at entry. The python that does it stays out of the
+# signal's way, and reports how its child ended and, AT THAT INSTANT, which fake suite or busy
+# command is still running. Each case has its own TMPDIR, so no run sweeps another's directory.
+RTS="$WORK/rt-signal"
+mkdir -p "$RTS/tests"
+cp "$TESTS_DIR/run-tests.sh" "$RTS/tests/run-tests.sh"
+ln -s "$TESTS_DIR/lib" "$RTS/tests/lib"
+# The busy command each suite sits in. Its 30 seconds are a ceiling for a signal that never
+# arrives, not a wait: the signal or cleanup ends it.
+cat > "$RTS/tests/50-pod.sh" <<'EOF'
+# TIER: container
+echo $$ > "$RTS_RUN/pod.pid"
+sh -c 'echo $$ > "$1"; exec sleep 30' sh "$RTS_RUN/pod.busy"
+EOF
+cat > "$RTS/tests/51-podquick.sh" <<'EOF'
+# TIER: container
+echo $$ > "$RTS_RUN/podquick.pid"
+EOF
+cat > "$RTS/tests/01-cheap.sh" <<'EOF'
+# TIER: static
+trap '"$DO_PY" -c "import time; time.sleep(1)"; echo finished > "$RTS_RUN/cheap.teardown"' EXIT
+echo $$ > "$RTS_RUN/cheap.pid"
+sh -c 'echo $$ > "$1"; exec sleep 30' sh "$RTS_RUN/cheap.busy"
+EOF
+cat > "$RTS/tests/02-quick.sh" <<'EOF'
+# TIER: static
+printf 'PASS\t02-quick.sh\tfake:ran\n' >> "$CS193V_RESULTS"
+EOF
+# rts_run NAME group|runner SIG READY CMD [ALSO] -> $RTS/NAME/{status,out,log,tmp}
+#   READY is the files that must exist before the signal goes, and they are also the processes
+#   that must be gone when the runner is. ALSO is one more condition, run in $RTS/NAME.
+rts_run() {
+    local d="$RTS/$1" pid f ready
+    rm -rf "$d"; mkdir -p "$d/tmp"; : > "$d/log"
+    ready="cd '$d' && ${6:-:}"
+    for f in $4 top.pid; do ready="$ready && [ -s '$f' ]"; done
+    ( cd "$RTS/tests" || exit 1
+      export RTS_RUN="$d" TMPDIR="$d/tmp" NO_COLOR=1 RTS_LOG="$d/log" RTS_WATCH="$4"
+      exec "$DO_PY" -c 'import os, signal, subprocess, sys
+os.setpgid(0, 0)
+for s in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(s, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    for s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(s, signal.SIG_DFL)
+    os.execv("/bin/bash", ["/bin/bash", "-c", sys.argv[2]])
+open(os.path.join(os.environ["RTS_RUN"], "top.pid"), "w").write(str(pid))
+st = os.waitpid(pid, 0)[1]
+left = []
+for f in os.environ["RTS_WATCH"].split():
+    try:
+        p = open(os.path.join(os.environ["RTS_RUN"], f)).read().strip()
+    except OSError:
+        left.append(f + ":never-started"); continue
+    state = subprocess.run(["ps", "-p", p, "-o", "state="], capture_output=True, text=True).stdout.strip()
+    if state and not state.startswith("Z"):
+        left.append(f.replace(".pid", "") + ":" + p)
+torn = os.path.exists(os.path.join(os.environ["RTS_RUN"], "cheap.teardown"))
+said = ("signal " + signal.Signals(os.WTERMSIG(st)).name) if os.WIFSIGNALED(st) else ("exit %d" % os.WEXITSTATUS(st))
+open(sys.argv[1], "w").write("%s\nleft=%s\nteardown=%s\n" % (said, " ".join(left) or "none", "finished" if torn else "unfinished"))' \
+          "$d/status" "$5" ) > "$d/out" 2>&1 &
+    pid=$!
+    if wait_until 15 sh -c "$ready"; then
+        case "$2" in
+            group)  kill -s "$3" -- "-$pid" ;;
+            # The runner itself, as `kill PID` reaches it, and then the command its foreground
+            # suite is sitting in: bash defers a trap until the foreground child returns, so
+            # without the second signal this would wait out that command's 30 seconds.
+            runner) kill -s "$3" "$(cat "$d/top.pid")"; kill -s "$3" "$(cat "$d/pod.busy")" ;;
+        esac
+    fi
+    wait_until 60 pid_is_gone "$pid" || kill -s KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+}
+rts_said() { sed -n "${2}p" "$RTS/$1/status" 2>/dev/null; }
+# THE RUN DIRECTORY IS KEPT, and taken by the first later run whose `kill -0` finds its pid gone.
+# Asserted per case: a runner that outlived its signal, or one that removed its own record, shows
+# up here. Only for the cases where the runner IS the process the python started.
+rts_rundir() { printf '%s/tmp/cs193v-runlog.%s' "$RTS/$1" "$(cat "$RTS/$1/top.pid" 2>/dev/null)"; }
+rts_swept() {                         # rts_swept NAME -> asserts kept, then swept by the next run
+    local dir; dir="$(rts_rundir "$1")"
+    assert_ok "rtsig:$1-keeps-its-run-directory" test -d "$dir"
+    ( cd "$RTS/tests" && TMPDIR="$RTS/$1/tmp" NO_COLOR=1 bash ./run-tests.sh -k 02-quick ) \
+        > "$RTS/$1/sweep.out" 2>&1
+    assert_fail "rtsig:$1-run-directory-is-swept-by-the-next-run" test -e "$dir"
+}
+RTS_BOTH='bash ./run-tests.sh -k 01-cheap -k 50-pod'
+RTS_BOTH_READY='cheap.pid cheap.busy pod.pid pod.busy'
+
+# A CTRL+C TO A SHELL RUNNING THE RUNNER and then something else, which is the whole of a loop.
+rts_run loop group INT "$RTS_BOTH_READY" "$RTS_BOTH"'; echo "THE-CALLER-CARRIED-ON rc=$?" >> "$RTS_LOG"'
+assert_eq       "rtsig:a-ctrl-c-stops-the-shell-that-ran-it-too" "" "$(cat "$RTS/loop/log")"
+assert_eq       "rtsig:that-shell-dies-of-sigint" "signal SIGINT" "$(rts_said loop 1)"
+# ...because the runner itself does, which is the only thing a calling shell reads.
+rts_run int group INT "$RTS_BOTH_READY" "exec $RTS_BOTH"
+assert_eq       "rtsig:int-the-runner-dies-of-sigint" "signal SIGINT" "$(rts_said int 1)"
+assert_eq       "rtsig:int-leaves-no-suite-running"   "left=none" "$(rts_said int 2)"
+assert_eq       "rtsig:int-waits-for-the-lane-teardown" "teardown=finished" "$(rts_said int 3)"
+rts_swept int
+# ...and the same from `wait`, with the podman lane already done: its timing line is the runner's
+# last word before it waits on the other lane.
+rts_run wait group INT 'cheap.pid cheap.busy podquick.pid' \
+        'exec bash ./run-tests.sh -k 01-cheap -k 51-podquick' "grep -q '^  [0-9.]*s\$' out"
+assert_eq       "rtsig:int-in-wait-the-runner-dies-of-sigint" "signal SIGINT" "$(rts_said wait 1)"
+assert_eq       "rtsig:int-in-wait-leaves-no-suite-running"   "left=none" "$(rts_said wait 2)"
+assert_eq       "rtsig:int-in-wait-waits-for-the-lane-teardown" "teardown=finished" \
+                "$(rts_said wait 3)"
+rts_swept wait
+# AND IT CLEANS UP BEFORE IT RE-RAISES, read off the arm because no case here can see the order.
+# Measured on bash 3.2: after a `kill -s INT $$` inside its own INT trap, bash finishes the trap
+# first when the trap was entered from a `$( )` or a `wait`, and dies on the spot when it was
+# entered from a plain foreground command. Every moment the runner has a lane to take down it is
+# in one of the first two, so the two orders behave alike today -- until a plain command lands
+# there, or a bash acts on the signal at once, and then the lane is left running.
+assert_match    "rtsig:the-int-arm-cleans-up-before-it-re-raises" '^cleanup;.*kill -s INT \$\$$' \
+                "$(sed -n "s/^trap '\(.*\)' INT\$/\1/p" "$TESTS_DIR/run-tests.sh")"
+rts_run term runner TERM "$RTS_BOTH_READY" "exec $RTS_BOTH"
+assert_eq       "rtsig:term-the-runner-exits-143"     "exit 143" "$(rts_said term 1)"
+assert_eq       "rtsig:term-leaves-no-suite-running"  "left=none" "$(rts_said term 2)"
+assert_eq       "rtsig:term-waits-for-the-lane-teardown" "teardown=finished" "$(rts_said term 3)"
+rts_swept term
 
 # ─── telling this run's podman images from a colleague's (#199) ────────────────
 # THE INSTRUMENT THE INSTALL TIER'S THREE HOST CANARIES ARE READ THROUGH. They used to cksum the
