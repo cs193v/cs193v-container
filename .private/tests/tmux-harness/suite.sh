@@ -1540,6 +1540,36 @@ fi
 it2 kill-server 2>/dev/null
 hx_stop "$S2"
 
+# THE NOTE hx_assert_no_real_claude PRINTS IS ONLY AS GOOD AS ITS LIST OF INSTALL LAYOUTS (#201).
+# The list missed the one this image ships -- `npm install -g`, which neither of its first two
+# patterns described -- so the note could never fire, and nothing said so. Ask it about the
+# claude this image really installs. Outside the hooked session's `if`, so a session that failed
+# to start does not take this check with it.
+#
+# The path asked about is ~/.local/bin/claude with the symlink resolved, which is what the kernel
+# reports as /proc/PID/exe ONLY WHILE THAT FILE IS A NATIVE BINARY -- measured, with the real CLI
+# held at exec. A `#!/usr/bin/env node` shim, the repackaging tabname.bash still guards against,
+# would run as `node`: invisible to `pgrep -x claude` and to any list, while its resolved path
+# still matched one. Hence the ELF check, so that case is a red rather than a vacuous green.
+#
+# `command -v` first and readlink -f second: given an empty name, readlink -f answers with the
+# working directory, so `readlink -f "$(command -v claude)"` can never come back empty.
+claude_bin="$(command -v claude)"
+real_claude="$([ -n "$claude_bin" ] && readlink -f "$claude_bin")"
+magic="$([ -n "$real_claude" ] && head -c 4 "$real_claude" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+if [ -z "$claude_bin" ]; then
+  hx_fail "the no-real-claude note recognises the image's own claude" \
+          "no claude on PATH in the container, so there was nothing to classify"
+elif [ "$magic" != 7f454c46 ]; then
+  hx_fail "the no-real-claude note recognises the image's own claude" \
+          "$claude_bin resolves to '$real_claude', which is not a native binary. Running, /proc would name its interpreter instead, which neither pgrep -x claude nor hx_real_claude_exe can see"
+elif hx_real_claude_exe "$real_claude"; then
+  hx_pass "the no-real-claude note recognises the image's own claude"
+else
+  hx_fail "the no-real-claude note recognises the image's own claude" \
+          "$real_claude matches no layout in hx_real_claude_exe (tmux-harness/lib.sh) -- add it there"
+fi
+
 # ============================================================================
 hx_section "the link box  (issue #85)"
 # ============================================================================
