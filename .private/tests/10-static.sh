@@ -686,6 +686,212 @@ hits="$(printf '%s\n' "$settle_event_checks" | awk '
     }' - "$PRIVATE/tests/tmux-harness/suite.sh")"
 assert_eq  "tmux:event-checks-poll-rather-than-settle" "" "$hits"
 
+# ─── no `| grep -q` where pipefail is on  (#402) ───────────────────────────────
+# `grep -q` exits at its first match, and bash's printf writes a multi-line string one line per
+# write(), because bash line-buffers its stdout. A writer descheduled after grep has gone dies of
+# SIGPIPE on its next write, and pipefail makes the pipeline 141: false, although grep matched.
+# Measured on suite.sh with strace delaying printf's writes from the 17th on: all six copy-mode
+# checks failed with PIPESTATUS=141 0, and the danger loop passed a planted split-window binding.
+# Feed grep a here-string, or drop -q and send its output to /dev/null so it reads to the end.
+#
+# THE SCOPE IS DERIVED. A `set ... pipefail` on an unindented line puts its whole file in scope,
+# guarded or not. One that opens a subshell, `( set -o pipefail` or a `set` straight under a `(`,
+# holds while the lines below stay indented at least as far as the `set`, which is how every such
+# subshell here is written. Anywhere else, a function body or an `if` branch, it outlives its block,
+# and the rule refuses rather than guess how far.
+#
+# WHAT A SCOPE SOURCES IS IN IT TOO, since a sourced function runs under its caller's options: that
+# is how tmux-harness/lib.sh held six sites without saying pipefail anywhere. A relative path is
+# followed only behind a variable or `$(...)` built from `dirname` of $0 or BASH_SOURCE, and an
+# absolute one is an installed file, traced back through the Containerfile's install line. A source
+# the rule cannot trace fails. A function that a subshell region calls is not followed.
+#
+# A STRING IS SCANNED AS CODE, because hx_until_ok evals one, and so is a trailing comment: telling
+# one from a ` # ` inside a string would take a quote parser, and a false alarm is loud where a miss
+# is silent. A whole-line comment is skipped.
+pf_strip='function strip(s) { if (s ~ /^[ \t]*#/) return ""; sub(/[ \t]#([ \t].*)?$/, "", s); return s }'
+pf_regions() {                        # pf_regions FILE -> "whole", "part START END", or "? LINE"
+    awk "$pf_strip"'
+    function lead(s) { match(s, /^[ \t]*/); return RLENGTH }
+    { code = strip($0) }
+    code !~ /[^ \t]/ { next }
+    open && lead(code) < col { print "part", start, NR - 1; open = 0 }
+    !open && !whole && code ~ /-[A-Za-z]*o[ \t]+pipefail/ {
+        L = lead(code); up = ""
+        for (k in last) if (k + 0 < L && (up == "" || k + 0 > up + 0)) up = k
+        if (!match(" " code, /[^A-Za-z0-9_]set[ \t]([^;&|]*[ \t])?-[A-Za-z]*o[ \t]+pipefail/)) print "?", NR
+        else if (substr(code, 1, RSTART - 1) ~ /\([ \t]*$/ ||
+                 substr(code, 1, RSTART - 1) ~ /^[ \t]*$/ && up != "" && last[up] ~ /\([ \t]*$/) {
+            open = 1; start = NR; col = RSTART - 1
+        }
+        else if (L == 0) whole = 1
+        else print "?", NR
+    }
+    { L = lead(code); for (k in last) if (k + 0 > L) delete last[k]; last[L] = code }
+    END { if (whole) print "whole"; else if (open) print "part", start, NR }' "$1"
+}
+pf_sources() {                        # pf_sources FILE [START END] -> "abs PATH", "rel PATH" or "? TEXT"
+    awk -v a="${2:-1}" -v b="${3:-2147483647}" "$pf_strip"'
+    { code = strip($0) }
+    match(code, /^[ \t]*((local|readonly|export)[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=/) &&
+    code ~ /dirname[^|;]*(\$0|BASH_SOURCE)/ {
+        v = substr(code, 1, RLENGTH - 1); sub(/^[ \t]*((local|readonly|export)[ \t]+)?/, "", v); own[v] = 1
+    }
+    NR < a || NR > b { next }
+    match(";" code, /((;|&&|\|\||\{|\(|!)[ \t]*|[^A-Za-z0-9_](if|elif|then|do|else|while|until)[ \t]+)(\.|source)[ \t]+[^ \t]/) {
+        o = substr(";" code, RSTART + 1); sub(/^[;&|{(! \t]*/, "", o)
+        w = substr(";" code, RSTART + RLENGTH - 1); gsub(/["\047]/, "", w); k = "rel"
+        if (w ~ /^\//) k = "abs"
+        else if (substr(w, 1, 2) == "$(") {
+            d = 0
+            for (i = 1; i <= length(w); i++) {
+                c = substr(w, i, 1)
+                if (c == "(") d++; else if (c == ")" && --d == 0) break
+            }
+            if (substr(w, 1, i) !~ /dirname[^|;]*(\$0|BASH_SOURCE)/) k = "?"
+            w = substr(w, i + 1)
+        } else if (match(w, /^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) {
+            v = substr(w, 2, RLENGTH - 1); gsub(/[{}]/, "", v)
+            if (!(v in own)) k = "?"
+            w = substr(w, RLENGTH + 1)
+        }
+        sub(/[ \t;].*$/, "", w)
+        if (k == "?" || k == "rel" && sub(/^\//, "", w) == 0 || w == "" || w ~ /\$/) print "?", o
+        else print k, w
+    }' "$1"
+}
+pf_installed() {                      # pf_installed PATH -> the files/ entry the Containerfile installs there
+    awk -v p="$1;" '{ for (i = 1; i < NF; i++) if ($(i + 1) == p && $i ~ /^\/tmp\/cs193v-files\//) {
+        sub(/^\/tmp\/cs193v-files\//, "", $i); print $i; exit } }' "$PRIVATE/Containerfile"
+}
+pf_queue() {                          # pf_queue FILE [START END] -> adds what FILE sources there to pf_todo
+    local k a r
+    while read -r k a; do
+        case "$k" in
+            abs) r="$(pf_installed "$a")"; r="${r:+$PRIVATE/files/$r}" ;;
+            rel) r="$(dirname -- "$1")/$a" ;;
+            '?') r='' ;;
+            *)   continue ;;
+        esac
+        if [ -n "$r" ] && [ -f "$r" ]; then pf_todo="$pf_todo $r"
+        else printf '? %s sources %s, which this rule cannot trace to a file\n' "$1" "$a"; fi
+    done <<EOF
+$(pf_sources "$@")
+EOF
+}
+pf_scope() {                          # pf_scope FILE... -> "FILE START END" per region, "? WHY" per gap
+    local f k a b seen=' '
+    pf_todo=''
+    for f in "$@"; do
+        while read -r k a b; do
+            case "$k" in
+                whole) pf_todo="$pf_todo $f" ;;
+                part)  printf '%s %s %s\n' "$f" "$a" "$b"; pf_queue "$f" "$a" "$b" ;;
+                '?')   printf '? %s:%s turns pipefail on where this rule cannot tell how far it reaches\n' "$f" "$a" ;;
+            esac
+        done <<EOF
+$(pf_regions "$f")
+EOF
+    done
+    while [ -n "$pf_todo" ]; do
+        # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+        set -- $pf_todo; f="$1"; shift; pf_todo="$*"
+        case "$seen" in *" $f "*) continue ;; esac
+        seen="$seen$f "
+        printf '%s 1 %s\n' "$f" "$(awk 'END { print NR }' "$f")"
+        pf_queue "$f"
+    done
+}
+pf_scan() {                           # pf_scan FILE START END -> "FILE:LINE: TEXT" per piped grep -q
+    awk -v a="$2" -v b="$3" -v f="${1#"$REPO"/}" '
+    NR < a || NR > b || /^[ \t]*#/ { next }
+    { code = carry $0; carry = "" }
+    code ~ /\\$/ { sub(/\\$/, "", code); carry = code " "; next }
+    (" " code) ~ /[^|]\|[ \t]*$/ { carry = code " "; next }
+    (" " code) ~ /[^|]\|&?[ \t]*([A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*((command|env|sudo)[ \t]+)*\\?[ef]?grep[ \t]([^|;&)]*[ \t])?(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)([^A-Za-z0-9-]|$)/ {
+        t = $0; sub(/^[ \t]+/, "", t); print f ":" NR ": " t
+    }' "$1"
+}
+pf_violations() {                     # pf_violations FILE... -> one line per piped grep -q in scope
+    local f a b
+    while read -r f a b; do
+        case "$f" in
+            '')  ;;
+            '?') printf '%s %s\n' "${a#"$REPO"/}" "$b" ;;
+            *)   pf_scan "$f" "$a" "$b" ;;
+        esac
+    done <<EOF
+$(pf_scope "$@")
+EOF
+}
+# Every file that so much as mentions pipefail; pf_regions decides which of them turn it on.
+pf_files="$(find -L "$REPO/cs193v" "$PRIVATE" -type f ! -name '*.md' -exec grep -l pipefail {} + \
+            | LC_ALL=C sort | do_tr '\n' ' ')"
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+pf_scope_txt="$(pf_scope $pf_files)"
+record "pipefail:scope" "$(printf '%s\n' "$pf_scope_txt" | sed "s|$REPO/||g" | do_tr '\n' ';')"
+# THE FIVE SHAPES THE DERIVATION HAS TO REACH, probed rather than counted, as the shell file list at
+# the top of this file is: a file that sets it unindented, a library it sources by a relative path,
+# one sourced by its installed path, a `( set -o pipefail` and a `set` straight under a `(`.
+pf_reach() {                          # pf_reach PATH whole|part -> 0 if the scope holds PATH that way
+    local f a b
+    while read -r f a b; do
+        [ "$f" = "$PRIVATE/$1" ] || continue
+        case "$2:$a" in whole:1) return 0 ;; part:1) ;; part:*) return 0 ;; esac
+    done <<EOF
+$pf_scope_txt
+EOF
+    return 1
+}
+for pf_probe in tests/tmux-harness/suite.sh:whole tests/tmux-harness/lib.sh:whole \
+                files/cs193v-ui.sh:whole tests/00-release-gates.sh:part lib/export-tree.sh:part; do
+    if pf_reach "${pf_probe%:*}" "${pf_probe#*:}"; then pass "pipefail:the-scope-reaches-$pf_probe"
+    else fail "pipefail:the-scope-reaches-$pf_probe" \
+              "${pf_probe%:*} is not in the derived scope as $pf_probe -- has the derivation stopped reaching it?"; fi
+done
+# shellcheck disable=SC2086
+assert_eq "pipefail:no-piped-grep-q-where-pipefail-is-on" "" "$(pf_violations $pf_files)"
+
+# AND THE RULE GOES RED WHERE IT SHOULD, and only there. The pipefail line is assembled, so this
+# file does not put its own specimens in scope.
+pf_tmp="$(new_tmpdir)"
+pf_on="set -uo pipe""fail"
+{ printf '#!/bin/bash\n%s\n' "$pf_on"
+  printf '%s\n' 'HERE="$(cd "$(dirname "$0")" && pwd)"' '. "$HERE/lib.sh"' \
+         "# printf '%s\n' \"\$x\" | grep -q y" "printf '%s\n' \"\$x\" | grep -q y" \
+         'grep -q y <<< "$x"' 'foo | grep y >/dev/null' 'foo || grep -q y f' 'foo | grep -c y' \
+         'foo |' '  grep -qE y' 'hx_until_ok "hx_cap $S | grep -qF x" 6' 'foo | grep -E -q y' \
+         'foo | LC_ALL=C grep --quiet y' "echo '#{x}' | grep -Fxq y" 'echo ok   # foo | grep -q y' \
+         'foo | \' '  grep -q y' 'foo | command grep -q y' 'x=" # y"; foo | grep -q z'
+} > "$pf_tmp/top.sh"
+printf 'foo | grep -q y\n' > "$pf_tmp/lib.sh"
+printf 'foo | grep -q y\n' > "$pf_tmp/sub.sh"
+printf 'foo | grep -q y\n' > "$pf_tmp/lib2.sh"
+printf 'foo | grep -q y\n' > "$pf_tmp/none.sh"
+{ printf '%s\n' 'HERE="$(dirname "$0")"' 'foo | grep -q y'; printf 'if ( %s\n' "$pf_on"
+  printf '%s\n' '     . "$HERE/sub.sh"' '     foo | grep -q y ); then' '    :' 'fi' 'foo | grep -q y'
+} > "$pf_tmp/part.sh"
+printf '[ -n "$x" ] && %s\nfoo | grep -q y\n' "$pf_on" > "$pf_tmp/cond.sh"
+{ printf '%s\n' "$pf_on"
+  printf '%s\n' 'D="$(dirname "${BASH_SOURCE[0]}")"' 'if source "$D/lib2.sh"; then :; fi'
+} > "$pf_tmp/src.sh"
+pf_lines() { (cd "$pf_tmp" && pf_violations "$@") | cut -d: -f1,2 | LC_ALL=C sort -t: -k1,1 -k2,2n \
+             | do_tr '\n' ' ' | sed 's/ *$//'; }
+assert_eq "pipefail:the-rule-flags-each-piped-grep-q-in-scope-and-nothing-else" \
+          "./lib.sh:1 ./lib2.sh:1 ./sub.sh:1 cond.sh:2 part.sh:5 top.sh:6 top.sh:12 top.sh:13 top.sh:14 top.sh:15 top.sh:16 top.sh:17 top.sh:19 top.sh:20 top.sh:21" \
+          "$(pf_lines top.sh part.sh none.sh cond.sh src.sh)"
+# ...AND REFUSES WHAT IT CANNOT PLACE: a `set` in a function body, a source through a variable it
+# cannot see, through one that is not the file's own directory, and through the working directory.
+printf 'f() {\n    %s\n}\n' "$pf_on" > "$pf_tmp/fn.sh"
+printf '%s\n. "$UI"\n' "$pf_on" > "$pf_tmp/lost.sh"
+printf '%s\n. "$OTHER/lib.sh"\n' "$pf_on" > "$pf_tmp/other.sh"
+printf '%s\n. ./lib.sh\n' "$pf_on" > "$pf_tmp/cwd.sh"
+pf_gaps="$(cd "$pf_tmp" && pf_violations fn.sh lost.sh other.sh cwd.sh)"
+assert_eq "pipefail:what-the-rule-cannot-place-fails-rather-than-shrinking-the-scope" \
+          "fn.sh:2 lost.sh other.sh cwd.sh" "$(printf '%s\n' "$pf_gaps" | cut -d' ' -f1 | do_tr '\n' ' ' | sed 's/ *$//')"
+assert_contains "pipefail:a-refusal-names-the-source-it-could-not-trace" '. "$OTHER/lib.sh"' "$pf_gaps"
+rm -rf "$pf_tmp"
+
 # ─── every throwaway container the suite starts is labelled as ours ────────────
 # The live tier tells its own containers from a colleague's by a label, because a `podman run --rm`
 # with no --name gets a name podman chose and there is nothing else to go on (#74, and VT_LABEL in
