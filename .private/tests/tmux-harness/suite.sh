@@ -692,6 +692,13 @@ crow()  { hx_cap "$S" | awk -v n="$1" '$0 ~ n {print NR; exit}'; }
 ccopy() { it show-buffer 2>/dev/null; }
 cmouse() { it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}' 2>/dev/null; }
 calt()   { it display-message -p -t "cs193v:$cwin" '#{alternate_on}' 2>/dev/null; }
+ccmd()   { it display-message -p -t "cs193v:$cwin" '#{pane_current_command}' 2>/dev/null; }
+# After Ctrl+C, wait for the shell -- and if it never comes back, say so here, because the reset
+# typed next would go to the app instead and everything after it fails for a reason it cannot name.
+cshell() { # what
+  hx_until 'ccmd' bash 6 && return 0
+  hx_fail "$1 exits on Ctrl+C before its reset is typed" "the pane is still running [$(ccmd)]"
+}
 # Rewind to the fixture. Three things, and each one was a bug in this section before it was one of
 # its rules:
 #
@@ -719,12 +726,18 @@ cback() {
 # gesture from the issue's own steps; the two multi-clicks are separate KEYS (SecondClick1Pane and
 # friends) rather than variations of it, which is why they get their own checks rather than a loop
 # over one.
+#
+# THE SETTLE IS FOR THE NON-EVENTS AND THE HINT IS POLLED FOR (#428). "Copies nothing" and "does
+# not move" can only be proved by waiting a while and looking; the hint is something that HAPPENS,
+# so after those checks each gesture waits for it rather than trusting the settle to have covered
+# it. Measured with the hint held back a second, test-side: all three failed after the settle.
 cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
 hx_drag "$S" "$cr" 18 "$((cr + 3))" 20
 hx_settle 0.8
 hx_expect_eq "a drag in the scrollback copies NOTHING" "$(ccopy)" ""
 hx_expect_eq "a drag in the scrollback leaves the pane scrolled back" "$(cmode)" "1"
 hx_expect_eq "a drag in the scrollback does not move the view" "$(cpos)" "$cstart"
+hx_until_ok "hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
 hx_expect_contains "a drag in the scrollback explains SHIFT+drag instead" \
                    "$(hx_cap "$S" | head -2)" "hold SHIFT"
 
@@ -733,6 +746,7 @@ hx_multiclick "$S" "$cr" 16 2
 hx_settle 0.6
 hx_expect_eq "double-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
 hx_expect_eq "double-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+hx_until_ok "hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
 hx_expect_contains "double-clicking explains SHIFT+drag too" "$(hx_cap "$S" | head -2)" "hold SHIFT"
 
 cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
@@ -765,6 +779,7 @@ hx_drag "$S" "$lr" 1 "$lr" 11
 hx_settle 0.8
 hx_expect_eq "a drag at a live prompt copies NOTHING" "$(ccopy)" ""
 hx_expect_eq "a drag at a live prompt leaves no lingering mode" "$(cmode)" "0"
+hx_until_ok "hx_cap $S | head -2 | grep -E 'hold SHIFT|COPIED'" 8
 hx_expect_contains "a drag at a live prompt explains SHIFT+drag" "$(hx_cap "$S" | head -2)" "hold SHIFT"
 hx_expect_absent "no gesture claims to have copied anything any more" "$(hx_cap "$S" | head -2)" "COPIED"
 # The hint is chrome, so it answers to the same two rules as the rest of it: legible on either host
@@ -782,7 +797,7 @@ hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold 
 # WAITED FOR, NOT WAITED OUT (#186), here and at the seven checks below that assert something
 # HAPPENED: a fixed settle that ran short failed the check instead of waiting for the screen, so
 # each one polls for its event now. 10-static.sh's tmux:event-checks-poll-rather-than-settle keeps
-# all eight polling.
+# these eight polling, and #428's three hint checks above.
 #
 # WHERE A GESTURE'S CHECKS INCLUDE AN ABSENCE -- "does not tell you to hold SHIFT", "does not
 # interrupt the app" -- THE POLL ACCEPTS EITHER ARM of the binding that answers the release: the
@@ -797,14 +812,36 @@ hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than drop
 hx_expect_absent "and the correction does not tell you to hold SHIFT again" \
                  "$shift_msg" "hold SHIFT"
 hx_expect_eq "a SHIFTED drag still copies nothing" "$(ccopy)" ""
-hx_gone "$S" 'reached the container' 8 || true
+# AND IT HAS TO GO BEFORE THE NEXT GESTURE IS JUDGED (#428), because that gesture answers with the
+# same words and could otherwise pass on this one's leftover. Measured: an ordinary leftover is
+# dismissed by the double-click's own clicks -- tmux clears a message on any key, mouse included --
+# but one shown with `display-message -N` outlives them, and the double-click check then passed
+# with its own answer removed. So a correction that does not go is a failure, and the double-click
+# is not judged on a bar it is still on. Judged only on a correction that appeared: one that never
+# did has "gone" on the first look, which proves nothing (hx_gone's own rule).
+shift_gone=1
+case "$shift_msg" in
+  *"reached the container"*)
+    if hx_gone "$S" 'reached the container' 8; then
+      hx_pass "the SHIFT+drag correction expires on its own"
+    else
+      hx_fail "the SHIFT+drag correction expires on its own" \
+              "still up after 8 s: [$(hx_cap "$S" | head -2 | tr '\n' ' ')]"; shift_gone=0
+    fi ;;
+  *) hx_skip "the SHIFT+drag correction expires on its own" "it never appeared -- see the check above" ;;
+esac
 
 # The shifted multi-clicks answer too. Same reasoning, and they fire once each so they can carry
 # the message themselves.
 hx_multiclick "$S" "$lr" 3 2 4
 hx_until_ok "hx_cap $S | head -2 | grep -F 'reached the container'" 8
-hx_expect_contains "a SHIFTED double-click is answered too" \
-                   "$(hx_cap "$S" | head -2)" "reached the container"
+if [ "$shift_gone" = 1 ]; then
+  hx_expect_contains "a SHIFTED double-click is answered too" \
+                     "$(hx_cap "$S" | head -2)" "reached the container"
+else
+  hx_skip "a SHIFTED double-click is answered too" \
+          "the drag's correction never went, so this answer could not be told from it"
+fi
 hx_gone "$S" 'reached the container' 8 || true
 
 # THE SHIFTED TRIPLE-CLICK IS BOUND AND CANNOT BE PROVED FROM HERE, which is worth recording so
@@ -867,8 +904,12 @@ hx_expect_contains "and the app gets the shifted RELEASE, not just the press" \
                    "$app_saw_shift" "[<4;9;$((drag_row - 3))m"
 hx_expect_absent "and the correction does NOT interrupt the app" \
                  "$(hx_cap "$S" | head -2)" "reached the container"
+# WAIT FOR THE SHELL, NOT FOR 0.4 s (#428), here and at the two resets below: the reset has to be
+# typed to the shell, and a `cat` still alive takes it as a line of input and the reset is lost.
+# Measured with a reader that outlives Ctrl+C by a second: the 0.4 s settle typed into it, and the
+# mouse stayed with the app. ccmd rather than probe_name, which can hold a stale `tmux` for seconds.
 hx_hex "$S" "03"
-hx_settle 0.4
+cshell "the mouse-reporting app"
 # TURN MOUSE REPORTING BACK OFF, or everything after this section measures the wrong thing. Killing
 # `cat` does not undo the `\033[?1000h` it was reading through: the pane keeps asking for mouse
 # events, mouse_any_flag stays 1, and every wheel event is then FORWARDED to the pane instead of
@@ -950,7 +991,7 @@ hx_expect_contains "a bare mouse MOVE reaches an app that asked for 1003" \
                    "[<35;22;$((click_row - 3))M"
 
 hx_hex "$S" "03"
-hx_settle 0.4
+cshell "the full-mouse-mode app"
 # ALL FOUR MODES OFF, not the two the block above resets. mouse_any_flag is
 # `mode & ALL_MOUSE_MODES`, so leaving 1002 or 1003 set holds it at 1 and every check below then
 # measures a pane that is still asking for the mouse -- the same failure recorded at the reset
@@ -992,10 +1033,9 @@ hx_wheel_up "$S" "$((HX_H / 2))" "$((HX_W / 2))" 3
 hx_settle 0.8
 hx_expect_eq "the wheel does not put a full-screen app's pane into copy mode" "$(cmode)" "0"
 hx_expect_absent "and does NOT announce SCROLLED BACK over it" "$(hx_cap "$S" | head -2)" "SCROLLED BACK"
-hx_expect_eq "...measured against a full-screen app that is still running" \
-             "$(it display-message -p -t "cs193v:$cwin" '#{pane_current_command}')" "cat"
+hx_expect_eq "...measured against a full-screen app that is still running" "$(ccmd)" "cat"
 hx_hex "$S" "03"
-hx_settle 0.4
+cshell "the full-screen app"
 # LEAVE THE ALTERNATE SCREEN, for the same reason the block above turns mouse reporting back
 # off: `cat` dying does not undo the `?1049h` it was reading through, alternate_on stays 1, and
 # every wheel event after this point is forwarded to the pane instead of scrolling tmux -- so the
