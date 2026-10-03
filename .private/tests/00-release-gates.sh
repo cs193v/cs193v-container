@@ -104,20 +104,53 @@ record "installer:stage2-url" "$stage2_url"
 # A call that fails could not reach origin; an empty answer from one that worked is "not pushed".
 # The failure names the command rather than guessing at the cause, which is not always the network:
 # a remote under another name and a failed credential helper exit the same way.
+#
+# AND AN EMPTY TAG IS NOT ASKED ABOUT (#440). origin answers refs/tags/ with nothing and exit 0, so a
+# constant that failed to parse was told to push the tag. It applies to every caller, §1's and §1c's
+# as much as §9's.
 tag_skip_why() {                      # tag_skip_why TAG -> why TAG's gates skip, or nothing if pushed
     local out
-    if ! out="$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)"; then
+    if [ -z "$1" ]; then
+        printf '%s' "no tag could be read out of the installer, so there is nothing to ask origin about"
+    elif ! out="$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)"; then
         printf '%s' "could not reach origin to ask whether $1 is published -- see \`git ls-remote origin\`, then re-run --release"
     elif [ -z "$out" ]; then
         printf '%s' "$1 is not on origin -- push the tag, then re-run --release"
     fi
 }
+
+# ONE RULE FOR A FETCH THAT REACHED NO SERVER, WRITTEN HERE AND NOWHERE ELSE (#409, #440). curl exits
+# 5, 6 or 7 when the proxy or the host did not resolve or would not connect, and 28 when it did not
+# answer in time. A fetch like that says nothing about the release, so every gate below that fetches
+# -- §1, §1c, §1b, §1b', §9, §10 -- skips on it with this reason, and judges anything a server
+# answered with. 10-static.sh drives every column-0 fetch chain here against a fake curl to hold it.
+#
+# EVEN AFTER ORIGIN HAS ANSWERED. tag_skip_why's answer comes from git, about github.com, and says
+# nothing about raw.githubusercontent.com, codeload or a release-asset CDN reached through curl.
+# Measured both ways: with a curlrc proxy, git reaches origin and every curl exits 7; with
+# NO_PROXY=github.com, origin answers and raw.githubusercontent.com exits 7. §1 and §1c used to fail
+# there with "every Windows student stops here", about what was this machine's own way to the host.
+#
+# 5, 6 AND 7 ARE LISTED, RATHER THAN 22 SINGLED OUT AS THE ONE FAILURE. A 404 under -f is 22 over
+# HTTP/1.1 and 56 from curl 8.7.1 over HTTP/2, measured on all four of §1's typo classes and on
+# podman v6.0.99's shasums, so a rule keyed on 22 would skip every 404 this machine sees.
+#
+# AND 28, BECAUSE NOTHING HERE SETS -m OR --speed-time. With no transfer limit, curl's only timeout
+# is the connect phase's, so 28 is a host or proxy that never answered: "Failed to connect ...
+# Timeout was reached", measured against a blackholed address. It is the dropping proxy to 7's
+# refusing one. A transfer limit added to any fetch here would make 28 ambiguous, so do not.
+curl_skip_why() {                     # curl_skip_why RC WHAT -> why a curl exiting RC skips, or nothing
+    case "$1" in
+        5|6|7|28) printf 'could not reach the network to fetch %s (curl exit %s) -- %s' \
+                      "$2" "$1" "re-run --release once it is reachable" ;;
+    esac
+}
 stage2_tag="$(cget REPO_TAG)"
 stage2_why="$(tag_skip_why "$stage2_tag")"
 rel_tmp="$(new_tmpdir)"
 
-# EVERY NAME THE FETCHED ARM EMITS AFTER THE FETCH, skipped by both arms that never get there --
-# §9's rel_skip_all, and for its reason. The two lists used to be written out in each arm, were
+# EVERY NAME THE FETCHED ARM EMITS AFTER THE FETCH, skipped by both arms that never get there. §1c,
+# §9 and §10 each have one of these too. The two lists used to be written out in each arm, were
 # written for §1's first three names, and never grew: #297 and #232 added four inside the fetched
 # arm, so an offline run or an unpushed tag dropped them from the results file (#331). A name added
 # below is a line here, and 10-static.sh's release-gates:every-stage2-failure-arm-* goes red until
@@ -137,11 +170,13 @@ elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl
     pass "installer:stage2-url-is-fetchable"
     record "installer:stage2-url-bytes" "$(wc -c < "$rel_tmp/stage2.sh")"
 
-    # `curl -f` has already done most of the work: measured, it exits 22 for a wrong owner, a
-    # wrong repo, a wrong branch AND a wrong path, so the assertion above covers the whole typo
-    # class on its own. What it cannot see is a 200 carrying something else, which is the shape a
-    # captive portal or an intercepting proxy has -- the same failure the .cmd's own digest
-    # check exists to refuse at run time, here caught one layer earlier.
+    # `curl -f` has already done most of the work: a wrong owner, a wrong repo, a wrong tag AND a
+    # wrong path are each a 404, so the assertion above covers the whole typo class on its own. Not
+    # always exit 22, which is curl's code for it over HTTP/1.1: curl 8.7.1 exits 56 for all four
+    # over HTTP/2 (measured, #440), and curl_skip_why above judges both. What it cannot see is a
+    # 200 carrying something else, which is the shape a captive portal or an intercepting proxy
+    # has -- the same failure the .cmd's own digest check exists to refuse at run time, here caught
+    # one layer earlier.
     #
     # `bash -n` and not a token search, on purpose. It asks "is this a shell script at all",
     # which is a property of every version of install-cs193v.sh past and future, so this cannot
@@ -234,14 +269,20 @@ elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl
         skip "installer:stage2-url-hashes-to-the-pin" "the pin is not a digest, so there is nothing to compare"
     fi
 else
-    fail "installer:stage2-url-is-fetchable" \
-         "the Windows installer would fetch stage two from:
+    # $? IS THE FAILED curl's, read before anything else can run; curl_skip_why decides.
+    stage2_net="$(curl_skip_why "$?" "stage two")"
+    if [ -n "$stage2_net" ]; then
+        skip "installer:stage2-url-is-fetchable" "$stage2_net"
+    else
+        fail "installer:stage2-url-is-fetchable" \
+             "the Windows installer would fetch stage two from:
     $stage2_url
 and that failed. Every Windows student stops here.
 $(cat "$rel_tmp/curl.err")"
+    fi
     # Named rather than dropped: a check that quietly disappears is the same defect as one that
     # never ran (VERIFICATION.md §A.15).
-    stage2_skip_body "the URL could not be fetched"
+    stage2_skip_body "${stage2_net:-the URL could not be fetched}"
 fi
 rm -rf "$rel_tmp"
 
@@ -309,12 +350,17 @@ elif curl -fsSL --retry 3 -o "$ps1_tmp/win.cmd" "$cmd_url" 2>"$ps1_tmp/curl.err"
     assert_eq "winboot:the-served-cmd-is-lf" "0" \
               "$(do_tr -dc '\r' < "$ps1_tmp/win.cmd" | wc -c | do_tr -d ' ')"
 else
-    fail "winboot:the-cmd-url-is-fetchable" \
-         "the Windows one-liner would fetch the installer from:
+    ps1_net="$(curl_skip_why "$?" "the .cmd")"   # $? is the failed curl's, as in §1
+    if [ -n "$ps1_net" ]; then
+        skip "winboot:the-cmd-url-is-fetchable" "$ps1_net"
+    else
+        fail "winboot:the-cmd-url-is-fetchable" \
+             "the Windows one-liner would fetch the installer from:
     $cmd_url
 and that failed. Every Windows student who pastes the one-liner stops here.
 $(cat "$ps1_tmp/curl.err")"
-    winboot_skip_body "the URL could not be fetched"
+    fi
+    winboot_skip_body "${ps1_net:-the URL could not be fetched}"
 fi
 rm -rf "$ps1_tmp"
 
@@ -345,18 +391,9 @@ rm -rf "$ps1_tmp"
 # asset, and every pass starts from nothing, so an amd64 fetch that failed cannot be compared
 # against the digest the arm64 pass left behind.
 #
-# AN UNREACHABLE NETWORK IS A SKIP AND AN HTTP ERROR IS A FAILURE (#409). This failed on any curl
-# error, so an offline run was red the same way a release really lacking the asset is. curl's exit
-# status tells them apart: 5, 6 and 7 mean no server was reached -- the proxy or the host did not
-# resolve, or would not connect. Anything else is judged. That includes 22, an HTTP error, and 56,
-# which is what curl 8.7.1 exits for the same 404 over HTTP/2 (measured, on v6.0.99's shasums).
-# So the three are listed as skips, rather than 22 being singled out as the only failure.
-curl_skip_why() {                     # curl_skip_why RC WHAT -> why a curl exiting RC skips, or nothing
-    case "$1" in
-        5|6|7) printf 'could not reach the network to fetch %s (curl exit %s) -- %s' \
-                      "$2" "$1" "re-run --release once it is reachable" ;;
-    esac
-}
+# AN UNREACHABLE NETWORK IS A SKIP AND AN HTTP ERROR IS A FAILURE (#409), by §1's curl_skip_why. This
+# failed on any curl error, so an offline run was red the same way a release really lacking the
+# asset is.
 mos_ver=""                            # the amd64 pass leaves its version here for 1b'
 for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
     set -- $pkg_row
@@ -381,6 +418,7 @@ for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
          2>"$pkg_tmp/curl.err"
     pkg_rc=$?
     pkg_why="$(curl_skip_why "$pkg_rc" "v$pkg_ver's shasums")"
+    pkg_nodigest="$pkg_why"           # why the digest below goes uncompared, if the fetch says
     if [ "$pkg_rc" -eq 0 ]; then
         pass   "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file"
         record "pkgsha:$pkg_arch:shasums-bytes" "$(wc -c < "$pkg_tmp/shasums" | do_tr -d ' ')"
@@ -394,6 +432,7 @@ for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
         fail "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file" \
              "no shasums asset at v$pkg_ver -- the tag may not exist, or podman stopped publishing one.
 $(cat "$pkg_tmp/curl.err")"
+        pkg_nodigest="the shasums fetch failed (curl exit $pkg_rc), so there is no published digest to compare"
     fi
     record "pkgsha:$pkg_arch:published-digest" "${pkg_pub:-<unanswered>}"
     # SHAPE-CHECKED BEFORE IT IS COMPARED, or an unanswered fetch would leave an empty string to
@@ -402,9 +441,10 @@ $(cat "$pkg_tmp/curl.err")"
     # did not run is the same defect as an assertion that never executed.
     if printf '%s' "$pkg_pub" | grep -qE '^[0-9a-f]{64}$'; then
         assert_eq "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_pub" "$pkg_pin"
-    elif [ -n "$pkg_why" ]; then
-        # Offline, the network's reason rather than a guess about a file that never arrived.
-        skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_why"
+    elif [ -n "$pkg_nodigest" ]; then
+        # The fetch's reason, offline or refused, rather than a guess about a file that never
+        # arrived (#440: it blamed "the file changed shape" after podman v6.0.99's 404).
+        skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_nodigest"
     else
         skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" \
              "no 64-hex line for $pkg_asset in v$pkg_ver's shasums -- asset renamed, or the file changed shape"
@@ -422,7 +462,13 @@ done
 mos_tag="${mos_ver%.*}"
 record "machine-os:the-intel-tag" "${mos_tag:-<unreadable>}"
 mos_tmp="$(new_tmpdir)"
-if [ -n "$mos_tag" ] && curl -fsSL --retry 3 \
+# §1's RULE TOO (#440). This skipped on every curl failure, so a tag quay.io no longer had -- a 404,
+# which is the day this gate exists for -- read "quay.io did not answer". The unreadable tag is an
+# arm of its own so that the `else` is left with curl's exit status alone.
+if [ -z "$mos_tag" ]; then
+    skip "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" \
+         "the Intel pin's version could not be read, so there is no machine-os tag to ask quay.io about"
+elif curl -fsSL --retry 3 \
         -H 'Accept: application/vnd.oci.image.index.v1+json' -o "$mos_tmp/index" \
         "https://quay.io/v2/podman/machine-os/manifests/$mos_tag" 2>"$mos_tmp/curl.err"; then
     # THE PAIR ON ONE ENTRY, not the two words anywhere: an index with an aarch64 applehv disk and
@@ -437,8 +483,14 @@ print(any(m.get("platform", {}).get("architecture") == "x86_64"
 ' "$mos_tmp/index")"
     assert_eq "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" "True" "$mos_has"
 else
-    skip "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" \
-         "quay.io did not answer for machine-os:${mos_tag:-?} -- $(head -c 200 "$mos_tmp/curl.err" 2>/dev/null)"
+    mos_net="$(curl_skip_why "$?" "machine-os:$mos_tag's index")"   # $? is the failed curl's, as in §1
+    if [ -n "$mos_net" ]; then
+        skip "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" "$mos_net"
+    else
+        fail "machine-os:the-intel-tag-still-has-an-x86_64-applehv-disk" \
+             "quay.io refused machine-os:$mos_tag's index -- if the tag is gone, every Intel install stops at the machine step.
+$(cat "$mos_tmp/curl.err")"
+    fi
 fi
 rm -rf "$mos_tmp"
 
@@ -698,64 +750,79 @@ record "export:tarball-url" "$rel_tarball"
 # section skipping and the other comparing against an archive that had only just appeared.
 # THROUGH §1's tag_skip_why (#409): reading the output here told an offline run "no" and "push the
 # tag", for a tag that was pushed. The record is the reason when there is one.
-rel_why="$(tag_skip_why "$rel_tag")"
+#
+# AND ONLY FOR A TAG THAT PARSED (#440). An empty one asked origin for refs/tags/, which answers
+# empty with exit 0, so §10 -- which has no parse check of its own -- said " is not on origin --
+# push the tag". The parse failure is the reason, for both sections.
+if [ -n "$rel_owner" ] && [ -n "$rel_name" ] && [ -n "$rel_tag" ]; then
+    pass "export:tarball-url-was-parsed"
+    rel_why="$(tag_skip_why "$rel_tag")"
+else
+    fail "export:tarball-url-was-parsed" "could not read REPO_OWNER/NAME/TAG from the installer"
+    rel_why="the tarball URL could not be parsed out of the installer, so there is no tag to ask about"
+fi
 rel_here="$(git rev-parse -q --verify "refs/tags/$rel_tag^{commit}" 2>/dev/null)"
 record "export:the-pinned-tag-is-published" "${rel_why:-yes}"
 
-rel_skip_all() {                      # rel_skip_all WHY -> skip every §9 assertion, with a reason
-    skip "export:tarball-is-fetchable"         "$1"
+# EVERY NAME AFTER THE FETCH, stage2_skip_body's rule, so every arm that never gets there names them.
+export_skip_body() {                  # export_skip_body WHY -> skip every §9 name after the fetch
     skip "export:local-archive-is-listable"    "$1"
     skip "export:github-ships-nothing-extra"   "$1"
     skip "export:github-ships-nothing-missing" "$1"
 }
-
-if [ -z "$rel_owner" ] || [ -z "$rel_name" ] || [ -z "$rel_tag" ]; then
-    fail "export:tarball-url-was-parsed" "could not read REPO_OWNER/NAME/TAG from the installer"
-    rel_skip_all "the tarball URL could not be parsed out of the installer"
-else
-    pass "export:tarball-url-was-parsed"
-    if [ -n "$rel_why" ]; then
-        rel_skip_all "$rel_why"
-    elif [ -z "$rel_here" ]; then
-        rel_skip_all "$rel_tag is not present locally -- run \`git fetch --tags\`, then re-run --release"
-    else
-        exp_tmp="$(new_tmpdir)"
-        # --strip-components cannot be used with -t, so the leading NAME-TAG/ component comes
-        # off with sed. Directory entries are dropped: git's tar emits them and a listing of
-        # names is what both sides can agree on.
+# ONE FLAT CHAIN, §1's SHAPE (#440), which is what lets 10-static.sh's arm rule read it: the fetch
+# was an `if` two levels inside the parse check's `else`. And INTO A FILE, so the `else` is handed
+# curl's own exit status for curl_skip_why rather than whichever stage of a pipe failed last.
+exp_tmp="$(new_tmpdir)"
+if [ -n "$rel_why" ]; then
+    skip "export:tarball-is-fetchable" "$rel_why"
+    export_skip_body "$rel_why"
+elif [ -z "$rel_here" ]; then
+    exp_why="$rel_tag is not present locally -- run \`git fetch --tags\`, then re-run --release"
+    skip "export:tarball-is-fetchable" "$exp_why"
+    export_skip_body "$exp_why"
+elif curl -fsSL --retry 3 -o "$exp_tmp/archive.tgz" "$rel_tarball" 2>"$exp_tmp/curl.err"; then
+    # --strip-components cannot be used with -t, so the leading NAME-TAG/ component comes off with
+    # sed. Directory entries are dropped: git's tar emits them and a listing of names is what both
+    # sides can agree on.
+    if ( set -o pipefail
+         tar tzf "$exp_tmp/archive.tgz" | sed -e 's|^[^/]*/||' -e '/^$/d' | grep -v '/$' \
+           | LC_ALL=C sort > "$exp_tmp/remote" ); then
+        pass "export:tarball-is-fetchable"
+        # pipefail here too: a git archive that dies leaves tar exiting 0 and an EMPTY local
+        # listing, which would turn both assertions below into a diff of the whole archive against
+        # nothing -- a loud failure for entirely the wrong reason.
         if ( set -o pipefail
-             curl -fsSL --retry 3 "$rel_tarball" \
-               | tar tzf - | sed -e 's|^[^/]*/||' -e '/^$/d' | grep -v '/$' \
-               | LC_ALL=C sort > "$exp_tmp/remote" ); then
-            pass "export:tarball-is-fetchable"
-            # pipefail here too: a git archive that dies leaves tar exiting 0 and an EMPTY
-            # local listing, which would turn both assertions below into a diff of the whole
-            # archive against nothing -- a loud failure for entirely the wrong reason.
-            if ( set -o pipefail
-                 git archive "$rel_tag" | tar -t | grep -v '/$' | LC_ALL=C sort > "$exp_tmp/local" ); then
-                pass "export:local-archive-is-listable"
-                record "export:tarball-file-count" "$(grep -c '' "$exp_tmp/remote" | do_tr -d ' ')"
-                # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about
-                # how to order punctuation and comm then mis-pairs silently, reporting differences
-                # that are not there -- measured on this listing.
-                only_remote="$(LC_ALL=C comm -13 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
-                only_local="$(LC_ALL=C comm -23 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
-                assert_eq "export:github-ships-nothing-extra"   "" "$only_remote"
-                assert_eq "export:github-ships-nothing-missing" "" "$only_local"
-            else
-                fail "export:local-archive-is-listable" "git archive $rel_tag could not be listed"
-                skip "export:github-ships-nothing-extra"   "the local archive of $rel_tag could not be listed"
-                skip "export:github-ships-nothing-missing" "the local archive of $rel_tag could not be listed"
-            fi
+             git archive "$rel_tag" | tar -t | grep -v '/$' | LC_ALL=C sort > "$exp_tmp/local" ); then
+            pass "export:local-archive-is-listable"
+            record "export:tarball-file-count" "$(grep -c '' "$exp_tmp/remote" | do_tr -d ' ')"
+            # LC_ALL=C on comm as well as on sort: under en_US.UTF-8 the two disagree about how to
+            # order punctuation and comm then mis-pairs silently, reporting differences that are
+            # not there -- measured on this listing.
+            only_remote="$(LC_ALL=C comm -13 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+            only_local="$(LC_ALL=C comm -23 "$exp_tmp/local" "$exp_tmp/remote" | do_tr '\n' ' ' | sed 's/ *$//')"
+            assert_eq "export:github-ships-nothing-extra"   "" "$only_remote"
+            assert_eq "export:github-ships-nothing-missing" "" "$only_local"
         else
-            fail "export:tarball-is-fetchable" "could not download $rel_tarball"
-            skip "export:local-archive-is-listable"    "the published archive could not be downloaded"
-            skip "export:github-ships-nothing-extra"   "the published archive could not be downloaded"
-            skip "export:github-ships-nothing-missing" "the published archive could not be downloaded"
+            fail "export:local-archive-is-listable" "git archive $rel_tag could not be listed"
+            skip "export:github-ships-nothing-extra"   "the local archive of $rel_tag could not be listed"
+            skip "export:github-ships-nothing-missing" "the local archive of $rel_tag could not be listed"
         fi
-        rm -rf "$exp_tmp"
+    else
+        fail "export:tarball-is-fetchable" "downloaded $rel_tarball, and it could not be listed"
+        export_skip_body "the published archive could not be listed"
     fi
+else
+    exp_net="$(curl_skip_why "$?" "the published archive")"   # $? is the failed curl's, as in §1
+    if [ -n "$exp_net" ]; then
+        skip "export:tarball-is-fetchable" "$exp_net"
+    else
+        fail "export:tarball-is-fetchable" "could not download $rel_tarball
+$(cat "$exp_tmp/curl.err")"
+    fi
+    export_skip_body "${exp_net:-the published archive could not be downloaded}"
 fi
+rm -rf "$exp_tmp"
 
 # ─── 10. the payload digest a student's bootstrap will insist on  (#232) ───────
 # END TO END, AND WITH THE PRODUCT'S OWN CODE. This fetches the archive at the pinned tag,
@@ -804,7 +871,8 @@ payload_skip_body() {                 # payload_skip_body WHY -> skip every §10
     skip "payload:the-published-tree-matches-the-pin" "$1"
 }
 # ONE FLAT CHAIN, §1's SHAPE. The fetch used to be an `if` inside the last arm, where 10-static.sh's
-# arm rule could not see it; as an arm of its own, every other arm is compared against it.
+# arm rule could not see it; as an arm of its own, every other arm is compared against it. INTO A
+# FILE since #440, as §9's is and for its reason: curl_skip_why needs curl's own exit status.
 if [ -n "$rel_why" ]; then
     skip "payload:the-published-archive-unpacks" "$rel_why"
     payload_skip_body "$rel_why"
@@ -812,15 +880,24 @@ elif ! printf '%s' "$pay_pin" | grep -qE '^[0-9a-f]{64}$'; then
     fail "payload:the-published-tree-matches-the-pin" \
          "install-cs193v.sh's PAYLOAD_SHA256 is not 64 lowercase hex: '$pay_pin'"
     skip "payload:the-published-archive-unpacks" "the pin is not a digest, so the archive was not fetched"
-elif ( set -o pipefail
-       curl -fsSL --retry 3 "$rel_tarball" \
-         | tar xzf - --strip-components=1 -C "$pay_tmp/tree" ); then
-    pass "payload:the-published-archive-unpacks"
-    pay_got="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$pay_tmp/tree" 2>/dev/null)"
-    record "payload:the-published-manifest" "$pay_got"
-    assert_eq "payload:the-published-tree-matches-the-pin" "$pay_pin" "$pay_got"
+elif curl -fsSL --retry 3 -o "$pay_tmp/archive.tgz" "$rel_tarball" 2>"$pay_tmp/curl.err"; then
+    if tar xzf "$pay_tmp/archive.tgz" --strip-components=1 -C "$pay_tmp/tree"; then
+        pass "payload:the-published-archive-unpacks"
+        pay_got="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$pay_tmp/tree" 2>/dev/null)"
+        record "payload:the-published-manifest" "$pay_got"
+        assert_eq "payload:the-published-tree-matches-the-pin" "$pay_pin" "$pay_got"
+    else
+        fail "payload:the-published-archive-unpacks" "downloaded $rel_tarball, and it could not be unpacked"
+        payload_skip_body "the published archive could not be unpacked"
+    fi
 else
-    fail "payload:the-published-archive-unpacks" "could not fetch and unpack $rel_tarball"
-    payload_skip_body "the published archive could not be unpacked"
+    pay_net="$(curl_skip_why "$?" "the published archive")"   # $? is the failed curl's, as in §1
+    if [ -n "$pay_net" ]; then
+        skip "payload:the-published-archive-unpacks" "$pay_net"
+    else
+        fail "payload:the-published-archive-unpacks" "could not download $rel_tarball
+$(cat "$pay_tmp/curl.err")"
+    fi
+    payload_skip_body "${pay_net:-the published archive could not be downloaded}"
 fi
 rm -rf "$pay_tmp"
