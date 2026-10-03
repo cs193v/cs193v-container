@@ -1548,6 +1548,21 @@ for v in $sshverbs; do
 done
 assert_eq  "fake-ssh:answers-every-control-verb-the-launcher-sends" "" "$unanswered"
 
+# EVERY ssh THE LAUNCHER RUNS IGNORES THE STUDENT'S ~/.ssh/config (#397). tunnel_start's master
+# always passed -F none; the control calls after it did not, and ssh reads its config before it
+# touches the control socket. Measured on OpenSSH 10.3p1: a `Match exec` there is added to every
+# forward, and `CanonicalizeHostname yes` with `CanonicalizeFallbackLocal no` makes every one exit
+# 255, which tunnel_dyn_forward reads as "busy". STATIC BECAUSE NOTHING DYNAMIC CAN SEE IT: ssh
+# finds ~/.ssh through the password database rather than $HOME, so no test can hand it a config.
+#
+# -F none ON THE ssh LINE, so this stays a grep rather than a parse. The count is the vacuity
+# guard and, as with the verbs above, it makes a new call get looked at.
+sshcalls="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" \
+            | grep -E '(^|[[:space:]])ssh[[:space:]]+-')"
+assert_eq "ssh:six-ssh-calls-were-found" "6" "$(printf '%s\n' "$sshcalls" | grep -c .)"
+assert_eq "ssh:every-call-ignores-the-students-config" "" \
+          "$(printf '%s\n' "$sshcalls" | grep -vF -- '-F none' || true)"
+
 # ...and every run in the cheap lane has to repoint the download. As shipped, the bootstrap's
 # TARBALL is the real GitHub URL, and that is how the shim tier came to make a live network
 # request on every run -- in a tier whose own header says "no podman, no image, no network" --
