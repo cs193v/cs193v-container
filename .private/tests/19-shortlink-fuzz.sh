@@ -286,7 +286,7 @@ fi
 pass "slfuzz:the-fuzzer-ran-to-the-end"
 assert_eq "slfuzz:the-vocabulary-is-declared" "yes" "$(fz vocab)"
 
-# ─── the seven properties ──────────────────────────────────────────────────────
+# ─── the properties ────────────────────────────────────────────────────────────
 assert_eq "slfuzz:valid-input-is-still-read"  "" "$(fz known-good)"
 assert_eq "slfuzz:nothing-ever-raises"        "" "$(fz raised)"
 assert_eq "slfuzz:answers-stay-in-vocabulary" "" "$(fz bad-vocab)"
