@@ -1559,9 +1559,22 @@ assert_eq  "fake-ssh:answers-every-control-verb-the-launcher-sends" "" "$unanswe
 # guard and, as with the verbs above, it makes a new call get looked at.
 sshcalls="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" \
             | grep -E '(^|[[:space:]])ssh[[:space:]]+-')"
-assert_eq "ssh:six-ssh-calls-were-found" "6" "$(printf '%s\n' "$sshcalls" | grep -c .)"
+assert_eq "ssh:seven-ssh-calls-were-found" "7" "$(printf '%s\n' "$sshcalls" | grep -c .)"
 assert_eq "ssh:every-call-ignores-the-students-config" "" \
           "$(printf '%s\n' "$sshcalls" | grep -vF -- '-F none' || true)"
+
+# EVERY STATE THE PORT FILE ACCEPTS IS ONE THE SUPERVISOR SETS, AND THE OTHER WAY ROUND (#266).
+# A word with no setter names a condition nothing can express, so a check written against it
+# passes whatever happens: `no-frames` sat in PW_STATES with nothing to set it, and MANUAL.md's
+# "no spurious no-frames state after the wake" could not fail. The other direction costs a
+# student: pw_publish_parse refuses a word it does not know, so that state never reaches the file.
+sup_states="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" | grep -oE 'SUP_STATE=[a-z-]+' \
+              | sed 's/^SUP_STATE=//' | LC_ALL=C sort -u | tr '\n' ' ')"
+pw_states="$(sed -n "s/^PW_STATES='\([^']*\)'.*/\1/p" "$PRIVATE/files/cs193v-portwatch" \
+             | tr ' ' '\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ')"
+assert_ne "states:the-supervisor-sets-some" "" "$sup_states"
+assert_ne "states:the-port-file-accepts-some" "" "$pw_states"
+assert_eq "states:the-supervisor-sets-exactly-what-the-port-file-accepts" "$pw_states" "$sup_states"
 
 # ...and every run in the cheap lane has to repoint the download. As shipped, the bootstrap's
 # TARBALL is the real GitHub URL, and that is how the shim tier came to make a live network
@@ -3161,7 +3174,7 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
 # consumers. It has to sit down here rather than beside the other port lints: fn_body is defined
 # further up this file, and placed earlier the whole block errored out with "fn_body: command not
 # found" while assert_eq compared two empty strings and passed. Measured -- it did.
-sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_cancel \
+sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_check tunnel_dyn_cancel \
                       tunnel_dyn_classify sup_log sup_publish sup_gone sup_tick sup_loop; do
                  fn_body "$f" "$REPO/cs193v"
              done | sed 's/^[[:space:]]*#.*//')"

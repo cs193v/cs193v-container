@@ -1005,6 +1005,53 @@ else
     skip "tunnel:forwarding-comes-back-after-a-closed-master-is-replaced" "see above"
 fi
 
+# A MASTER THAT STOPS ANSWERING IS REPORTED AS UNREACHABLE (#266), and as healthy once it answers
+# again. SIGSTOP keeps the control socket and answers nothing -- -O check and -O forward both block
+# -- so only a forward that times out can reveal it. Hence a NEW port bound after the stop: the
+# supervisor has to ask the stopped master for something. It used to return on that timeout before
+# publishing, and the state file went on saying healthy with the old ports up.
+#
+# SIGCONT, NOT --reset-tunnel, to come back. The pair below covers a reset, which replaces the
+# master and resets the supervisor through the pidfile. This is the other way out -- the same
+# master answering again -- and only the -O check the supervisor sends while unresponsive sees it.
+state_says_healthy_with() {           # state_says_healthy_with PORT
+    podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
+        | do_awk -F'\t' -v p="$1" '$1 == "state" { s = $2 } $1 == "up" && $2 == p { u = 1 }
+                                   END { exit !(s == "healthy" && u) }'
+}
+TPID="$(tunnel_pid)"
+if a_port_is_carried && [ -n "$TPID" ] && kill -STOP "$TPID" 2>/dev/null; then
+    WEDGED_PORT="$(dyn_free_port)"
+    dyn_serve "$WEDGED_PORT"
+    if wait_until 30 state_says_gone; then
+        pass "tunnel:a-wedged-master-is-reported-as-unreachable"
+    else
+        fail "tunnel:a-wedged-master-is-reported-as-unreachable" "the master (pid $TPID) was stopped
+with $CARRIED_PORT forwarded and $WEDGED_PORT bound after it, and thirty seconds later the state
+file still said:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+    fi
+    assert_says "tunnel:show-says-a-wedged-tunnel-has-stopped" \
+                "The tunnel to your own computer has stopped" \
+                "$(podman exec "$NAME" cs193v-portwatch --show 2>&1)"
+    kill -CONT "$TPID" 2>/dev/null
+    if wait_until 30 dyn_is_forwarded "$WEDGED_PORT" \
+       && wait_until 30 state_says_healthy_with "$WEDGED_PORT"; then
+        pass "tunnel:a-master-that-answers-again-is-reported-healthy"
+    else
+        fail "tunnel:a-master-that-answers-again-is-reported-healthy" "the master (pid $TPID) was
+continued, and thirty seconds later $WEDGED_PORT was not both forwarded and published healthy.
+  the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
+  the state file says:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+    fi
+    dyn_serve_stop
+else
+    skip "tunnel:a-wedged-master-is-reported-as-unreachable" "no port was carried, or no master pid to stop"
+    skip "tunnel:show-says-a-wedged-tunnel-has-stopped" "see above"
+    skip "tunnel:a-master-that-answers-again-is-reported-healthy" "see above"
+fi
+
 # A wedged tunnel is the case --reset-tunnel exists for, so it is tested wedged: SIGSTOP means
 # -O exit can never be answered, and a reset that waited for it would hang forever.
 TPID="$(tunnel_pid)"

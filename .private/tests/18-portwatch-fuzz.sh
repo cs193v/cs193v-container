@@ -398,10 +398,11 @@ rd_bad "space-separated"  "unknown key 'state healthy'" "state healthy"
 assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
 
 # ─── what --show says when the tunnel itself has gone  (#338) ──────────────────
-# Once the ssh master's control socket has gone, the supervisor publishes master-unresponsive with
-# nothing up. --show is what a student reads, and what agent-notes.md sends a coding agent to, so
-# it has to say what happened and what to do -- not print the state's name and leave them to
-# guess. The v6lo refusal is still listed: that advice is as true without a tunnel as with one.
+# Once the ssh master's control socket has gone (#338), or a forward through it has timed out
+# (#266), the supervisor publishes master-unresponsive with nothing up. --show is what a student
+# reads, and what agent-notes.md sends a coding agent to, so it has to say what happened and what
+# to do -- not print the state's name and leave them to guess. The v6lo refusal is still listed:
+# that advice is as true without a tunnel as with one.
 PW_STATE_WAS="$PW_STATE"; PW_STATE="$WORK/pwstate.txt"
 printf 'state\tmaster-unresponsive\nfloor\t1024\nrefused\t21500\tv6lo\n' > "$PW_STATE"
 PW_SHOWN="$(pw_show)"

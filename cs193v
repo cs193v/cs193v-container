@@ -1502,6 +1502,19 @@ tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
     return 1
 }
 
+# IS THE MASTER ANSWERING AT ALL (#266)? Asked only while the supervisor believes it is not, so a
+# healthy session never pays for it -- and it is the only way out of master-unresponsive. The
+# shape is tunnel_dyn_forward's, for its reasons: </dev/null for the watcher's stream, a
+# five-second backstop, and a second [ -S ] that tells a master that went from one that is mute.
+# NOT tunnel_alive, which has neither the redirect nor the ceiling.
+tunnel_dyn_check() {                  # 0 = it answered, 1 = it did not, 2 = its socket has gone
+    [ -S "$TUNNEL_CTL" ] || return 2
+    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" </dev/null \
+        && return 0
+    [ -S "$TUNNEL_CTL" ] || return 2
+    return 1
+}
+
 tunnel_dyn_cancel() {                 # tunnel_dyn_cancel PORT
     [ -S "$TUNNEL_CTL" ] || return 0
     run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O cancel \
@@ -1531,6 +1544,8 @@ tunnel_dyn_classify() {               # tunnel_dyn_classify PORT CLASS -> DYN_WH
 #   SUP_BUSY  ' 3005:27 '      the host port was refused, with a cooldown in TICKS
 #   SUP_GONE  ' 8123:3 '       forwarded but absent from this frame, with a linger in TICKS
 #   SUP_MASTER                 the master pid we believe we are talking to
+#   SUP_STUCK  '1'             this tick found the master not answering, so nothing more is
+#                              asked of it and nothing it holds is published as up (#266)
 #
 # TICKS, NOT SECONDS, for everything counted here: no `date` fork and no dependence on a clock.
 # The single exception is the frame-arrival timeout, and it has to be -- ticks are DEFINED by
@@ -1541,6 +1556,7 @@ tunnel_dyn_classify() {               # tunnel_dyn_classify PORT CLASS -> DYN_WH
 # stored nowhere -- which means a `v6lo` clears itself the moment the student changes their bind
 # address, with no invalidation logic at all.
 SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '; SUP_MASTER=''; SUP_STATE=healthy; SUP_SILENT=0
+SUP_STUCK=''
 
 sup_log() { printf '%s\n' "$*" >&2; }
 
@@ -1567,7 +1583,11 @@ SUP_PUBLISHED=''; SUP_PUBFAIL=''
 sup_publish() {                       # sup_publish REFUSED_LIST
     local up refused sig e rc why
     up=''; refused=''
-    for e in $SUP_UP;   do up="$up,$e:lo"; done
+    # NOTHING UP WHILE THE MASTER IS NOT ANSWERING (#266). It still holds those forwards as far as
+    # anyone knows, but it is not carrying them: a stopped master's listeners accept a connection
+    # and then hang. On the flag rather than the state, so a `broken` published straight after a
+    # stuck tick says the same.
+    [ -n "$SUP_STUCK" ] || for e in $SUP_UP; do up="$up,$e:lo"; done
     for e in $1;        do refused="$refused,$e"; done
     up="${up#,}"; refused="${refused#,}"
     sig="$SUP_STATE|$up|$refused"
@@ -1618,13 +1638,28 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     # rather than the pidfile, because tunnel_record_pid may leave no pidfile at all. The frame is
     # still read, so a refusal's advice is still published, and a port that would have been
     # forwarded costs one builtin test: tunnel_dyn_forward answers 2 before running any ssh. It
-    # comes back through the reset after the loop, once --reset-tunnel has made a new socket --
-    # with or without a new pidfile.
+    # comes back through the -O check below, once --reset-tunnel has made a new socket -- with or
+    # without a new pidfile.
     #
-    # NOT SEEN HERE: a master killed with SIGKILL, which cannot remove its socket (#339), and one
-    # that is alive but wedged, which only a forward that times out reveals (#266).
+    # NOT SEEN HERE: a master killed with SIGKILL, which cannot remove its socket (#339).
     gone=''
     [ -S "$TUNNEL_CTL" ] || sup_gone
+
+    # LEAVING master-unresponsive TAKES AN ANSWER (#266). A master that keeps its socket and
+    # answers nothing -- stopped, or anything else that holds a request past run_timeout -- shows
+    # only as a forward below timing out. That used to return before the publish, and the next tick
+    # with nothing to forward reset the state to healthy without asking anyone: so a wedged master
+    # never reached the state file at all. Now, while the state says so, the master is asked first,
+    # and asked nothing else unless it answers. One ssh a tick, and only while it is unresponsive.
+    SUP_STUCK=''
+    if [ -z "$gone" ] && [ "$SUP_STATE" = master-unresponsive ]; then
+        tunnel_dyn_check
+        case "$?" in
+            0) SUP_STATE=healthy ;;
+            2) sup_gone ;;
+            *) SUP_STUCK=1 ;;
+        esac
+    fi
 
     # age the cooldowns
     out=' '
@@ -1649,39 +1684,46 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
         if [ "$n" -ge "$DYNPORTS_MAX" ]; then
             refused="$refused $port:capped"; continue
         fi
+        # STUCK SKIPS ONLY THE ASK. Everything above still ran, so every refusal in the frame is
+        # still published -- the tick goes on to the end rather than giving up on it.
+        [ -n "$SUP_STUCK" ] && continue
         tunnel_dyn_forward "$port"
         case "$?" in
             0) SUP_UP="$SUP_UP$port " ;;
             1) SUP_BUSY="$SUP_BUSY$port:$TUNNEL_SUP_COOLDOWN "; refused="$refused $port:busy" ;;
             2) sup_gone ;;                                   # it went while we asked
-            3) SUP_STATE=master-unresponsive; sup_log "master not answering; not attempting more"; return 0 ;;
+            3) SUP_STUCK=1; SUP_STATE=master-unresponsive
+               sup_log "master not answering; not attempting more" ;;
         esac
     done
-    # BACK TO HEALTHY on a tick that reached a master: after a timeout, or once a gone master's
-    # socket is back.
-    [ -z "$gone" ] && [ "$SUP_STATE" = master-unresponsive ] && SUP_STATE=healthy
 
     # LINGER before cancelling. A port that vanishes for a moment is a vite restart, and
     # cancel-then-reforward is visible: the host port is briefly unbound, so a reload racing it
     # gets connection refused on a port that worked a second ago.
-    out=' '
-    for e in $SUP_GONE; do
-        port="${e%%:*}"
-        case "$seen" in *" $port "*) continue ;; esac        # came back
-        n=$(( ${e#*:} + 1 ))
-        if [ "$n" -ge "$TUNNEL_SUP_LINGER" ]; then
-            tunnel_dyn_cancel "$port"
-            SUP_UP="${SUP_UP/ $port / }"
-        else
-            out="$out$port:$n "
-        fi
-    done
-    SUP_GONE="$out"
-    for e in $SUP_UP; do
-        case "$seen" in *" $e "*) continue ;; esac
-        case "$SUP_GONE" in *" $e:"*) continue ;; esac
-        SUP_GONE="$SUP_GONE$e:1 "
-    done
+    #
+    # NOT WHILE STUCK, and the counts simply wait. A cancel would hang for run_timeout's five
+    # seconds like everything else, and the port would then leave SUP_UP while the master -- if it
+    # answers again -- still holds it, with nothing left to cancel it.
+    if [ -z "$SUP_STUCK" ]; then
+        out=' '
+        for e in $SUP_GONE; do
+            port="${e%%:*}"
+            case "$seen" in *" $port "*) continue ;; esac        # came back
+            n=$(( ${e#*:} + 1 ))
+            if [ "$n" -ge "$TUNNEL_SUP_LINGER" ]; then
+                tunnel_dyn_cancel "$port"
+                SUP_UP="${SUP_UP/ $port / }"
+            else
+                out="$out$port:$n "
+            fi
+        done
+        SUP_GONE="$out"
+        for e in $SUP_UP; do
+            case "$seen" in *" $e "*) continue ;; esac
+            case "$SUP_GONE" in *" $e:"*) continue ;; esac
+            SUP_GONE="$SUP_GONE$e:1 "
+        done
+    fi
 
     sup_publish "$refused"
     return 0
@@ -2703,17 +2745,25 @@ tunnel_doctor() {
     # student already has.
     [ -n "$ports" ] || return 0
 
+    # A WORD PER STATE, not the state's name with a reason after it: the reason was read from a
+    # key nothing writes, so the row ended in a dash (#266). master-unresponsive reaches here only
+    # for a master that answered tunnel_alive's -O check above, so it is worded about forwarding
+    # rather than the tunnel -- a fully wedged one says DOWN instead and never gets this far.
     state="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="state"{print $2; exit}')"
     case "${state:-}" in
         ''|healthy) ;;
-        *) drow "$(msg doctor.row.ports)" \
-                "$(msg doctor.ports.state "STATE=$C_YEL$state$C_OFF" \
-                       "REASON=$(printf '%s\n' "$ports" | awk -F'\t' '$1=="reason"{print $2; exit}')")" ;;
+        master-unresponsive)
+            drow "$(msg doctor.row.ports)" "$(msg doctor.ports.stalled "HI=$C_YEL" "OFF=$C_OFF")" ;;
+        *)  drow "$(msg doctor.row.ports)" "$(msg doctor.ports.state "STATE=$C_YEL$state$C_OFF")" ;;
     esac
 
+    # NOT WHILE STALLED: nothing is published as up then, by design, and "nothing is listening"
+    # would be false. The refusals below still are, and still say why.
     up="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="up"{printf "%s ", $2}')"
     n="$(printf '%s\n' "$ports" | awk -F'\t' '$1=="up"' | wc -l | tr -d ' ')"
-    if [ "$n" -gt 0 ]; then
+    if [ "$state" = master-unresponsive ]; then
+        :
+    elif [ "$n" -gt 0 ]; then
         drow "$(msg doctor.row.ports)" "$(msg doctor.ports.forwarded "N=$n" "PORTS=${up% }")"
     else
         drow "$(msg doctor.row.ports)" "$(msg doctor.ports.nothing-listening)"

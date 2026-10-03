@@ -2748,6 +2748,123 @@ assert_eq "forward:a-replaced-master-is-asked-for-the-port-again" "2" \
           "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
 sup_reap
 
+# ─── ...and a master that stops answering is published as stopped  (#266) ─────
+# A master can keep its control socket and answer nothing: SIGSTOP does it, and so does anything
+# that holds an -O forward past run_timeout's five seconds. tunnel_dyn_forward reads that as rc 3,
+# and sup_tick used to RETURN on it, before the tick's only publish -- and the next tick that did
+# publish had already reset the state to healthy, whether or not it had asked the master anything.
+# So a wedged master never left the supervisor: --show, shortlink and doctor all called it healthy.
+#
+# THE WEDGE IS BY CALL NUMBER (shim_ssh_wedge), because podman-fake plays every frame below into
+# the pipe at once and nothing on this side can land between two of them. Calls 2-4 hang:
+#   F0  3000 is forwarded (call 1). Healthy: the control.
+#   F1  4000 is new and its forward hangs (call 2). 21500 comes AFTER it in the frame, so its
+#       refusal in the publish is what says the tick ran to the end rather than giving up.
+#   F2  4000 is still pending. The master is asked first (call 3, hangs), so 4000 is not tried.
+#   F3  4000 has gone and there is nothing new to forward -- the tick the old code published as
+#       healthy without asking anybody. Asked again (call 4, hangs).
+#   F4  asked again (call 5) and it answers, so 4000 is forwarded (call 6).
+#   F5  F4 again. Nothing to do under the fix; on main it is the frame whose forward finally
+#       lands, which is what lets the marker below arrive there too instead of timing out.
+# 21501 and 21502 give F2 and F3 publishes of their own.
+#
+# THE CALL ORDER IS ASSERTED, NOT ONLY THE PUBLISHES. A supervisor that went on sending forwards
+# to a master it had just seen hang publishes exactly this sequence too -- measured -- and only
+# what it asked, in what order, tells the two apart.
+sup_calls() {                         # the control calls as `ok forward 3000, WEDGED check, ...`
+    shim_ssh_calls | do_awk '{ v = ""; p = ""
+        for (i = 3; i <= NF; i++) {
+            if ($i == "-O") v = $(i + 1)
+            if ($i == "-L") { p = $(i + 1); sub(/^127\.0\.0\.1:/, "", p); sub(/:.*/, "", p) }
+        }
+        printf "%s%s %s%s", s, $2, v, (p == "" ? "" : " " p); s = ", " }'
+}
+sup_publish_with() { sup_publishes | grep -F -- "$1" | head -1; }
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+if [ -S "$CTL" ]; then
+    pass "wedge:a-master-left-a-control-socket"
+else
+    fail "wedge:a-master-left-a-control-socket" \
+"the fake ssh left no control socket at $CTL (${#CTL} bytes), so nothing below asks a master."
+fi
+shim_ssh_wedge 2 4
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'BEGIN 3' '3000:lo' '4000:lo' '21500:v6lo' 'END' \
+           'BEGIN 4' '3000:lo' '4000:lo' '21500:v6lo' '21501:v6lo' 'END' \
+           'BEGIN 3' '3000:lo' '21500:v6lo' '21502:v6lo' 'END' \
+           'BEGIN 3' '3000:lo' '4000:lo' '21500:v6lo' 'END' \
+           'BEGIN 3' '3000:lo' '4000:lo' '21500:v6lo' 'END' \
+           'STALL 45'
+sup_start "$SHIM/sup-wedge.out"
+assert_ok "wedge:the-loop-started" wait_until 10 sup_up
+# THE MARKER, and a case rather than a gate, as #368's is: three hung calls are fifteen seconds,
+# and without it a timeout would leave everything below reading half a log.
+if wait_until 40 sup_published 'up=3000:lo,4000:lo refused=21500:v6lo'; then
+    pass "wedge:every-staged-frame-was-read"
+else
+    fail "wedge:every-staged-frame-was-read" \
+"4000 was never published as up, so the sequence below is not a whole run.
+control calls: $(sup_calls)
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-wedge.out" 2>/dev/null)"
+fi
+assert_contains "wedge:a-master-that-stops-answering-is-published" "state=master-unresponsive" \
+                "$(sup_publishes)"
+# Nothing up -- 3000 is still held by the master, but nobody can vouch for it -- and every refusal.
+assert_match "wedge:it-is-published-with-nothing-up-and-every-refusal" \
+             'state=master-unresponsive floor=[0-9]+ up= refused=21500:v6lo$' \
+             "$(sup_publish_with 'state=master-unresponsive')"
+assert_contains "wedge:it-stays-unresponsive-while-the-master-says-nothing" \
+                "state=master-unresponsive" "$(sup_publish_with 'refused=21500:v6lo,21501:v6lo')"
+assert_contains "wedge:it-stays-unresponsive-with-nothing-new-to-forward" \
+                "state=master-unresponsive" "$(sup_publish_with 'refused=21500:v6lo,21502:v6lo')"
+assert_contains "wedge:it-is-healthy-again-once-the-master-answers" \
+                "state=healthy floor=1024 up=3000:lo,4000:lo refused=21500:v6lo" \
+                "$(sup_publishes | tail -1)"
+assert_eq "wedge:it-asks-the-master-before-it-asks-for-anything-more" \
+          "ok forward 3000, WEDGED forward 4000, WEDGED check, WEDGED check, ok check, ok forward 4000" \
+          "$(sup_calls)"
+sup_reap
+
+# ─── doctor's word for it  (#266) ──────────────────────────────────────────────
+# doctor prints the state row only under "tunnel up", which a fully wedged master never reaches --
+# its -O check hangs as well, so doctor says DOWN first. A slow master does reach it, and the row
+# used to be `{{STATE}} — {{REASON}}` with REASON read from a key nothing writes: the paste a
+# student sends for help ended in a dash. And with nothing published as up, the row after it
+# would have said nothing was listening inside the container.
+#
+# A STAND-IN SUPERVISOR, not a real one. tunnel_sup_alive asks only that the pidfile's process
+# is alive and has --dev-supervise in its argv; a real supervisor would publish over the state
+# this case stages, and the file podman-fake serves is the staged one regardless.
+shim_new
+shim_fake_ssh
+shim_set state running
+shim_set label_dir "$COPY"
+DEVT="$(launcher --dev-tunnel)"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+python3 -c 'import time; time.sleep(60)' --dev-supervise </dev/null >/dev/null 2>&1 &
+STANDIN=$!; SUP_PIDS="$SUP_PIDS $STANDIN"
+printf '%s\n' "$STANDIN" > "$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+shim_set ports_out "$(printf 'state\tmaster-unresponsive\nfloor\t1024\nrefused\t21500\tv6lo\n')"
+out="$(launcher doctor)"
+# THE CONTROL: the refusal row is printed from the same file, so this says doctor got that far.
+assert_says_key "doctor:a-stalled-tunnel-still-explains-a-refusal" doctor.ports.why.v6lo "$out"
+assert_says_sub "doctor:a-stalled-tunnel-says-what-to-do" doctor.ports.stalled "$out" \
+                "$PRIVATE/messages.txt" HI= OFF=
+assert_says_not_key "doctor:a-stalled-tunnel-is-not-nothing-listening" \
+                    doctor.ports.nothing-listening "$out"
+assert_not_match "doctor:no-row-ends-in-a-dangling-dash" '—[[:space:]]*$' "$out"
+sup_reap
+
 # ─── ...and a publish that fails is sent again  (#368) ─────────────────────────
 # sup_publish used to record the signature BEFORE its exec and drop the exec's status. Every
 # frame after a failed publish has the same signature, so it was never sent again, and the state

@@ -191,7 +191,7 @@ pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
 # shortlink, which consults it before printing a URL a student is about to click.
 PW_CLASSES='lo any v6lo eth loalt'
 PW_REASONS='busy v6lo loalt eth below-floor capped'
-PW_STATES='healthy master-unresponsive no-frames broken'
+PW_STATES='healthy master-unresponsive broken'
 PW_TAB="$(printf '\t')"
 
 PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
@@ -415,8 +415,9 @@ pw_show() {
     fi
     case "$PWS_STATE" in
         healthy) : ;;
-        # The supervisor's word for a master whose control socket has gone (#338). The remedy is on
-        # the student's own computer, not in here, so say so rather than print the state's name.
+        # The supervisor's word for a master whose control socket has gone (#338), or that has kept
+        # it and stopped answering (#266). The remedy is on the student's own computer, not in
+        # here, so say so rather than print the state's name.
         master-unresponsive)
             printf 'The tunnel to your own computer has stopped.\n'
             printf 'On your own computer, run: cs193v --reset-tunnel\n\n' ;;

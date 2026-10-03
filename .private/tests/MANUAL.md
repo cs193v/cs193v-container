@@ -1520,7 +1520,7 @@ podman exec cs193v cs193v-portwatch --show    # must work, not report a dead sup
 podman exec -d cs193v python3 -m http.server 21500 --bind 127.0.0.1; sleep 5
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:21500/    # expect 200
 ```
-*Expect:* no spurious `no-frames` state after the wake, and a port bound after it still becomes
+*Expect:* no spurious `broken` state after the wake, and a port bound after it still becomes
 reachable. If it did fire, the supervisor's log (`cs193v --dev-tunnel` names it as `suplog`) says
 so, and the threshold in `TUNNEL_SUP_SILENCE_MAX` is what needs raising.
 
