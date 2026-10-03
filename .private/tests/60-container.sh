@@ -893,6 +893,10 @@ dyn_reason() {
     podman exec "$NAME" awk -F'\t' -v p="$1" \
         '$1 == "refused" && $2 == p { print $3; exit }' "$PORTS_STATE" 2>/dev/null
 }
+# A FUNCTION, so wait_until re-reads the file on every poll. Written as
+# `sh -c "[ -n \"$(dyn_reason ...)\" ]"` the substitution ran once, before the first poll, and the
+# wait burned its whole ceiling on every run (#378; 10-static.sh's waits: rule).
+has_reason() { [ -n "$(dyn_reason "$1")" ]; }
 
 # THE assertion this design exists for, and it is deliberately the inverse of what podman did. A
 # 127.0.0.1-bound server inside was unreachable, because podman's forwarder delivers to the
@@ -958,7 +962,7 @@ fi
 # can apply themselves.
 PV="$(dyn_free_port)"
 assert_probe "ports:probe-bound-a-port-on-ipv6-loopback" "$PV" "::1"
-wait_until 15 sh -c "[ -n \"$(dyn_reason "$PV")\" ]" >/dev/null 2>&1 || true
+wait_until 15 has_reason "$PV" || true
 c="$(host_code "$PV")"
 record "ports:ipv6-only-server-http" "$c"
 record "ports:ipv6-only-server-reason" "$(dyn_reason "$PV")"
