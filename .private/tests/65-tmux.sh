@@ -109,14 +109,15 @@ assert_ok "tmux:harness-sources-exist" test -f "$HARNESS_SRC/suite.sh"
 # for sweep_stale_tmpdirs (#76).
 #
 # BLANKET, NOT BY PID, and that is the correction that matters. `/tmp` in the container is on the
-# writable layer (.config/container.args:205-208) so it survives `podman stop`/`start` -- but the
-# PID NAMESPACE DOES NOT, and since #41 stopped is the resting state, so hold_container restarts
-# routinely. A leftover named for a pid from a previous container lifetime, asked about with
-# `kill -0` in a fresh namespace whose pids start at 1 again, is likely to be told "still alive"
-# -- which pins the leak permanently and silently. Pid-keying is HOST reasoning, and
-# sweep_stale_tmpdirs says why: one shared /tmp that CS193V_INSTANCE does not namespace. In here
-# the path is namespaced by $NAME, and the in-container precedent is clean_vt_processes: blanket,
-# narrowed by name, both ends, count recorded.
+# writable layer (.config/container.args, its rejected "--tmpfs /tmp" entry) so it survives
+# `podman stop`/`start` -- but the PID NAMESPACE DOES NOT, and since #41 stopped is the resting
+# state, so hold_container restarts routinely. A leftover named for a pid from a previous
+# container lifetime, asked about with `kill -0` in a fresh namespace whose pids start at 1
+# again, is likely to be told "still alive" -- which pins the leak permanently and silently.
+# Pid-keying is HOST reasoning, and sweep_stale_tmpdirs says why: one shared /tmp that
+# CS193V_INSTANCE does not namespace. In here the path is namespaced by $NAME, and the
+# in-container precedent is clean_vt_processes: blanket, narrowed by name, both ends, count
+# recorded.
 #
 # Two runs against one $NAME are ALREADY fatal -- the `rm -rf "$DEST"` below deletes the other
 # run's harness mid-execution and the socket sweep kills its servers -- so a blanket glob in here
@@ -276,8 +277,9 @@ fi
 # TWO QUESTIONS, NOT ONE, and the second is the one that is easy to leave out.
 #
 # (1) NOTHING IN /tmp. The container's /tmp is on the writable layer by deliberate choice
-#     (.config/container.args:205-208), so what leaks here is not reclaimed by anything short of
-#     `--rebuild` -- 15 MB per run of this suite, 230 MB across sixteen runs of it (#190).
+#     (.config/container.args, its rejected "--tmpfs /tmp" entry), so what leaks here is not
+#     reclaimed by anything short of `--rebuild` -- 15 MB per run of this suite, 230 MB across
+#     sixteen runs of it (#190).
 #
 # (2) NO FIXTURE STILL RUNNING, which is not the same question and cannot be folded into the
 #     first. Unlinking a 7.5 MB ELF that a live process is still executing frees NOTHING: the

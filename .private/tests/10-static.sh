@@ -3268,10 +3268,32 @@ done
 
 # Each of these was considered and rejected for a documented reason; re-adding one should
 # be a deliberate act that breaks a test, not a quiet edit.
-for rejected in --init --tmpfs --pids-limit --cpus --shm-size \
+for rejected in --init --pids-limit --cpus --shm-size \
                 host-lo-to-ns-lo '-t,auto'; do
     assert_not_contains "rejected:no-$rejected" "$rejected" "$args_live"
 done
+
+# --tmpfs IS STILL REJECTED FOR /tmp, AND ALLOWED FOR EXACTLY ONE DIRECTORY (#370): the per-boot
+# state directory, with its mode -- container.args "Per-boot state" says why both. A closed set
+# rather than a ban, so /tmp itself, a second directory, or this one without mode=1777 is a
+# deliberate act that breaks this. $PORTS_STATE_DIR is the directory the watcher writes, asked of
+# cs193v-portwatch by lib/assert.sh, so this also proves the mount is where the file goes.
+assert_eq "args:the-only-tmpfs-is-the-state-dir" "--tmpfs $PORTS_STATE_DIR:mode=1777,size=1m" \
+          "$(printf '%s\n' "$args_live" | grep -e '--tmpfs' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+# The other spelling of the same mount, which the closed set above cannot see.
+assert_not_contains "rejected:no-type=tmpfs" "type=tmpfs" "$args_live"
+
+# THE READERS MUST LOOK WHERE THE WATCHER WRITES (#370). If shortlink or doctor drifted, the
+# file would be read from somewhere the mount does not cover -- everything keeps working until a
+# restart, and the stale-file bug is back. Each haystack is the one line that names the path, and
+# never a comment, so a comment cannot stand in for the code.
+assert_contains "volatile:shortlink-reads-where-the-watcher-writes" "PORTS_FILE = \"$PORTS_STATE\"" \
+                "$(grep -e '^PORTS_FILE = ' $PRIVATE/files/shortlink)"
+assert_contains "volatile:doctor-reads-where-the-watcher-writes" "cat $PORTS_STATE" \
+                "$(printf '%s\n' "$launcher_code" | grep -e ' cat /tmp/')"
+# AND THE NAME SAYS WHAT IT IS. Everything else under /tmp survives a restart; this name is the
+# only warning the next person to add a file there gets. The one literal spelling in the suite.
+assert_eq "volatile:the-state-dir-is-named-for-what-it-is" "/tmp/cs193v-volatile" "$PORTS_STATE_DIR"
 
 # :Z relabels recursively and can break unrelated host services; the launcher adds :z
 # narrowly and only where SELinux is enforcing.
@@ -3320,7 +3342,7 @@ assert_contains "args:network-pasta"           "--network=pasta"                
 #
 # 16-args-parse.sh proves the COST behaviourally, by counting sed calls through a shim, which is
 # the stronger test. This grep is here for the case that one cannot see: a rewrite that keeps the
-# fork count at 11 for today's file while putting the guard somewhere it no longer dominates. The
+# fork count right for today's file while putting the guard somewhere it no longer dominates. The
 # order is the invariant; the count is a consequence of it.
 #
 # Read out of the FUNCTION BODY, not the file, so line numbers cannot drift with edits elsewhere,

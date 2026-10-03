@@ -1603,6 +1603,33 @@ unlaunchable browser fails the build instead of the student.
 to be "Chrome is not installed", and now the honest reason is that Playwright puts
 `--disable-dev-shm-usage` in its own default chromium arguments.
 
+**`--tmpfs` stays rejected for `/tmp`, and one directory under it is a tmpfs on purpose (#370).**
+The port state the launcher publishes into the container lived on the writable layer, so a
+container stopped and started again served the previous boot's answer: `cs193v-portwatch --show`
+called ports reachable that nothing was carrying, and shortlink waited ten seconds on every
+`$BROWSER` call for a port that would never appear. Only a starting watcher cleared it, and a launch
+whose tunnel failed never started one. The directory is now `/tmp/cs193v-volatile`, mounted
+`--tmpfs ...:mode=1777,size=1m`, so it begins every boot empty and nothing has to delete anything.
+
+- **`mode=1777` is not optional.** Without it the directory is 1777 on the first boot and root-owned
+  1755 from the second — podman copies the leftover mountpoint's mode into the new tmpfs. Measured
+  identically on podman 4.9.3 (crun 1.14.1), 5.8.4 and 6.0.2 (crun 1.28). `--rebuild` boots the
+  container once and stops it, so a student's first session is already the second boot, and the
+  watcher's tick fifo lives in that directory: no port would be forwarded at all. `notmpcopyup`
+  or a directory pre-created in the image also work, and buy nothing over the mode.
+- **Deleting the file at boot was rejected twice.** In the entrypoint it races the launch: `podman
+  start` returns once PID 1 is launched, not once it has run any particular line, so an `rm` there
+  can land after the new watcher's first publish. In `cs193v-shell --claim`'s winning branch it is
+  ordered, but covers launcher sessions only and is still a delete. A tmpfs has no step to order.
+- **Renamed from `/tmp/cs193v`, and not to `/run/cs193v`.** The name is the only warning the next
+  person to add a file gets that it will not survive a restart; its neighbours under `/tmp` do. And
+  `/run` is on the writable layer in this container (only `/run/.containerenv` and `/run/secrets`
+  are tmpfs), so the "`/run` is per-boot" convention would be half-true here.
+
+`10-static.sh` allows exactly that one `--tmpfs` line and checks that the watcher, shortlink and
+`doctor` all name the same directory; `80-launcher-live.sh` restarts the container and checks that
+the previous boot's file is gone and the directory is still writable.
+
 **Every remediation the Windows installer used to offer, now rejected (issues #112 and #114).**
 The original argument was about one command. `hypervisorlaunchtype Off` is the likeliest *fixable*
 reason a Windows machine cannot start WSL2 — "disable VBS to gain FPS" guides leave it that way, as

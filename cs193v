@@ -689,7 +689,8 @@ load_args() {
         # ahead of the trim, because the trim is a subshell and a sed: container.args is
         # 239 lines of which 228 are a comment or blank, and paying that for each of them
         # cost ~700ms of the launcher's ~1.8s startup. Issue #57, measured with
-        # `strace -e trace=execve` -- 239 sed execs per launch, now 11.
+        # `strace -e trace=execve` -- 239 sed execs per launch, now one per line that carries
+        # an argument.
         #
         # A WHITESPACE TEST RATHER THAN `[ -z ]`, and the difference is not style. `[ -z ]`
         # moved up here skips only the already-empty lines, so it holds only while the
@@ -2668,7 +2669,7 @@ tunnel_doctor() {
     # dynamic line at all. run_timeout leaves the output in RT_OUT, which is how every other
     # probe in this report reads its answer.
     ports=''
-    pmv exec "$NAME" cat /tmp/cs193v/ports && ports="$RT_OUT"
+    pmv exec "$NAME" cat /tmp/cs193v-volatile/ports && ports="$RT_OUT"
     # AND IF THAT READ FAILS, SAY NOTHING EXTRA. verb_doctor has already run four probes through
     # this same container by the time it reaches here, each of which renders visibly empty when
     # podman is not answering. A fifth line saying so would be noise on top of a diagnosis the
@@ -2956,8 +2957,8 @@ verb_dev_args() {
 #
 # NO PORTS ARE PRINTED HERE ANY MORE, and nothing replaced them: there is no declared list to
 # expand, and which ports are forwarded right now is a fact about what is listening inside the
-# container. /tmp/cs193v/ports is where that lives, a test reads it the same way `doctor` and
-# `shortlink` do, and a second copy on this side would be a second thing to keep true.
+# container. /tmp/cs193v-volatile/ports is where that lives, a test reads it the same way `doctor`
+# and `shortlink` do, and a second copy on this side would be a second thing to keep true.
 #
 # THE PATHS ARE HERE BECAUSE "IS THIS LISTENER MINE" HAS NO OTHER CHEAP ANSWER, and that
 # question is the other half of #46: count_forwards used to count any listener on those ports, so

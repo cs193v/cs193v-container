@@ -24,7 +24,7 @@
 
 set -u
 
-PW_STATE_DIR=/tmp/cs193v
+PW_STATE_DIR=/tmp/cs193v-volatile
 PW_STATE="$PW_STATE_DIR/ports"
 PW_PROTO='cs193v-portwatch 1'
 PW_MAX=128
@@ -51,12 +51,6 @@ pw_v4class() {                        # 8 hex chars, little-endian -> PW_C
 }
 
 # A v6 address is four 32-bit words, each little-endian, printed as 32 hex characters.
-#
-# THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
-# checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
-# `0000000000000000FFFF00000100007F`, so the last eight characters are the IPv4 address in the
-# same little-endian form /proc/net/tcp uses and handing them to pw_v4class is right. Verified end
-# to end -- classified `lo`, forwarded, HTTP 200 from the host. 60-container.sh keeps it that way.
 #
 # THE V4-MAPPED ARM IS THE ONE THAT WAS DERIVED RATHER THAN OBSERVED, and it has since been
 # checked against a real kernel: a dual-stack listener on ::ffff:127.0.0.1 prints
@@ -338,7 +332,7 @@ pw_emit() { printf '%s\n' "$1" || exit 0; }
 #
 # AND THERE IS NO `sleep` FALLBACK. An earlier draft carried one, copying run_timeout's mkfifo
 # degradation in cs193v-ui.sh -- but that guards the HOST's TMPDIR, which on WSL can be a DrvFs
-# mount with no fifo support. This fifo is in the container's /tmp, an overlayfs layer that does
+# mount with no fifo support. This fifo is in the container's per-boot tmpfs (#370), which does
 # mknod like any Linux filesystem. The constraint does not transfer, and the fallback would have
 # added the one failure shape this loop otherwise cannot have: `sleep` inherits stdout, so a
 # watcher killed mid-sleep leaves a child holding the pipe open -- silence at the supervisor
@@ -349,8 +343,12 @@ pw_watch() {
     [ "$iv" -ge 1 ] || iv=$PW_INTERVAL_DEFAULT
 
     mkdir -p "$PW_STATE_DIR" 2>/dev/null
-    # TRUNCATED BEFORE THE HANDSHAKE, so a container that was stopped and started again cannot
-    # serve the previous session's answer to shortlink or --show.
+    # TRUNCATED BEFORE THE HANDSHAKE, so the file EXISTS for as long as a watcher is running, even
+    # before the first publish. That is shortlink's signal: an empty file means a tunnel is coming
+    # up and is worth waiting for, a missing one means nothing will ever write here. It used to be
+    # what kept a restarted container from serving the previous boot's answer too, but only when a
+    # watcher started; the directory is a tmpfs now (#370, container.args "Per-boot state"), so a
+    # new boot begins with no file whether or not a watcher ever starts.
     : > "$PW_STATE" 2>/dev/null
 
     rm -f "$fifo" 2>/dev/null

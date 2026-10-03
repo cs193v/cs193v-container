@@ -26,9 +26,9 @@
 # See CONTAINER-DESIGN.md, "Ports, and the one thing that will bite you".
 #
 # WHICH MEANS THIS HAS TO WAIT TO BE TOLD. Binding a port no longer implies being reachable on it
-# -- the tunnel decides that, a moment later, and says so in /tmp/cs193v/ports. Hence the poll in
-# acquire_forwarded_port, and hence the ~1 s this costs on a path that ends with a human reading
-# a URL and switching to a browser.
+# -- the tunnel decides that, a moment later, and says so in /tmp/cs193v-volatile/ports. Hence
+# the poll in acquire_forwarded_port, and hence the ~1 s this costs on a path that ends with a
+# human reading a URL and switching to a browser.
 #
 # THIS IS NOT A URL SHORTENER in the bit.ly sense and nothing leaves the machine: no service is
 # called, and the long URL is never sent anywhere except to the student's own browser, by the
@@ -108,10 +108,11 @@ def check_url(url):
 # has to wait and be told.
 #
 # The tunnel forwards a port once it sees something listening on the container's loopback, and it
-# publishes what it did to /tmp/cs193v/ports. So the sequence is bind, wait for our port to appear
-# as `up`, and only then print a short URL. Printing optimistically and letting the student's click
-# race the forward would remove the pause, but a dead link is far worse than a wait.
-PORTS_FILE = "/tmp/cs193v/ports"
+# publishes what it did to /tmp/cs193v-volatile/ports. So the sequence is bind, wait for our port
+# to appear as `up`, and only then print a short URL. Printing optimistically and letting the
+# student's click race the forward would remove the pause, but a dead link is far worse than a
+# wait.
+PORTS_FILE = "/tmp/cs193v-volatile/ports"
 
 # THE FILE'S WHOLE VOCABULARY, as a closed set, because that is what makes an unrecognised word
 # detectable rather than invisible. `up` is a state; the rest are reasons a port was refused.

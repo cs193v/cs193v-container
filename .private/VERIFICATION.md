@@ -254,7 +254,10 @@ ck  pids-default   2048    I '{{.HostConfig.PidsLimit}}'
 ck  no-cap-add     "[] []" I '{{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}}'
 rec security-opt           I '{{json .HostConfig.SecurityOpt}}'  # no no-new-privileges, no label=disable
 ck  no-init        false   I '{{.HostConfig.Init}}'
-rec tmpfs                  I '{{json .HostConfig.Tmpfs}}'        # expect no /tmp entry
+rec tmpfs                  I '{{json .HostConfig.Tmpfs}}'        # expect ONLY /tmp/cs193v-volatile,
+#                                                                 # with mode=1777 (#370)
+ck  volatile-is-tmpfs tmpfs E 'stat -f -c %T /tmp/cs193v-volatile'
+ck  volatile-mode     1777  E 'stat -c %a /tmp/cs193v-volatile'     # 1755 = the mode trap
 rec shm-size               I '{{.HostConfig.ShmSize}}'           # podman default; playwright passes
 #                                                                 # --disable-dev-shm-usage itself
 # NO published ports at all. `-p` and `ssh -L` both bind host 127.0.0.1:<port>, so a -p line
@@ -368,7 +371,7 @@ S(("::1",21002),http.server.SimpleHTTPRequestHandler).serve_forever()'; sleep 3
 c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:21002/)
 [ "$c" = 000 ] && echo "PASS ::1-only is refused, as documented" \
               || echo "NOTE ::1-only is reachable ($c) — better than documented, update the docs"
-podman exec cs193v grep -q '^refused	21002	v6lo' /tmp/cs193v/ports \
+podman exec cs193v grep -q '^refused	21002	v6lo' /tmp/cs193v-volatile/ports \
   && echo "PASS and the reason is recorded" || echo "FAIL no v6lo reason for 21002"
 podman exec cs193v cs193v-portwatch --show      # expect 21002 under "Not reachable, and why"
 
@@ -393,7 +396,7 @@ python3 -c 'import socket,time
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
 s.bind(("127.0.0.1",21200)); s.listen(1); time.sleep(60)' &
 sleep 1; podman exec -d cs193v python3 -m http.server 21200 --bind 127.0.0.1; sleep 5
-podman exec cs193v grep -q '^refused	21200	busy' /tmp/cs193v/ports \
+podman exec cs193v grep -q '^refused	21200	busy' /tmp/cs193v-volatile/ports \
   && echo "PASS the busy port is named, with a reason" || echo "FAIL busy port not reported"
 "$DIR/cs193v" doctor | grep -q 'busy: 21200' \
   && echo "PASS doctor names it too" || echo "FAIL doctor missed it"
@@ -667,7 +670,7 @@ time "$DIR/cs193v" --dev-print-command       # launcher overhead, NO podman call
 # forks rather than trusting the clock on a loaded machine; 16-args-parse.sh does this portably,
 # through a shim, because a Mac has no strace.
 strace -f -e trace=execve "$DIR/cs193v" --dev-print-command 2>&1 >/dev/null \
-  | grep -c 'execve("/usr/bin/sed'          # expect 11 -- one per line with content, not per line
+  | grep -c 'execve("/usr/bin/sed'          # expect one per line that carries an argument, not per line
 time podman exec cs193v true                 # exec overhead — relevant to the rejected relay design
 time E 'cd /home/student/projects && npm init -y >/dev/null && npm i --silent lodash'
 ```

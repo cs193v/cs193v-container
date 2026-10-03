@@ -128,7 +128,8 @@
 #     flag: the ssh client binds 127.0.0.1 itself. Nothing is exposed to dorm wifi.
 #   * NOT free: a host port that is already busy. `podman run` used to fail loudly (and take
 #     the whole container down with it); a forward that cannot bind now fails on its own,
-#     mid-session, and is reported per-port through /tmp/cs193v/ports and `cs193v doctor`.
+#     mid-session, and is reported per-port through /tmp/cs193v-volatile/ports and
+#     `cs193v doctor`.
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
 # Six volumes holding logins and settings, and ONE holding a package cache. That last one is
@@ -178,6 +179,28 @@
 -v cs193v-vercel:/home/student/.local/share/com.vercel.cli
 -v cs193v-playwright:/home/student/.cache/ms-playwright
 
+# ─── Per-boot state ────────────────────────────────────────────────────────────
+# ONE DIRECTORY THAT STARTS EMPTY ON EVERY BOOT, and that is the whole of its contract (#370).
+# The port watcher and the launcher's supervisor keep the forwarding state in it -- which ports
+# reach the student's browser, and why any do not -- and what reads that state inside the
+# container trusts it. On the writable layer it survived `podman stop` / `podman start`, so a
+# restarted container served the previous boot's answer: `cs193v-portwatch --show` called ports
+# reachable that nothing was carrying, and shortlink waited ten seconds on every $BROWSER call for
+# a port that would never appear. A tmpfs is created by the runtime before PID 1 exists and
+# discarded when the container stops, so nothing has to delete anything, and there is nothing to
+# race against a launch that is starting a watcher.
+#
+# NAMED -volatile SO IT CANNOT BE MISTAKEN FOR ITS NEIGHBOURS. Everything else under /tmp stays on
+# the writable layer and survives a restart (see "--tmpfs /tmp" below); this name is the only
+# warning the next person to add a file gets. Put nothing here that has to outlive a boot.
+#
+# mode=1777 IS NOT OPTIONAL. Without it the directory is 1777 on the first boot and root-owned
+# 1755 from the second, because podman copies the leftover mountpoint's mode into the new tmpfs --
+# measured identically on podman 4.9.3, 5.8.4 and 6.0.2. --rebuild boots the container once and
+# stops it, so a student's first session is already the second boot: the watcher could not create
+# its tick fifo, and no port would be forwarded at all. size=1m is a ceiling on a few hundred bytes.
+--tmpfs /tmp/cs193v-volatile:mode=1777,size=1m
+
 # ─── Environment ───────────────────────────────────────────────────────────────
 # NOTHING IS DECLARED HERE, and the absence is the design. Which ports reach the student's
 # browser is decided at runtime by the launcher's supervisor from what is actually listening
@@ -205,7 +228,9 @@
 #  --tmpfs /tmp
 #      The devcontainer's --tmpfs runArg was a workaround for buildah#6503 during
 #      FEATURE installs. There are no features here. /tmp on the writable layer means
-#      no RAM pressure and no size to tune, and --rebuild clears it anyway.
+#      no RAM pressure and no size to tune, and --rebuild clears it anyway. That is about
+#      /tmp as a whole: the one per-boot directory under it IS a tmpfs, of a megabyte, on
+#      purpose (see "Per-boot state" above), and 10-static.sh allows exactly that line.
 #
 #  --init
 #      Bind-mounts the HOST's catatonit, which Ubuntu's podman package only Recommends
