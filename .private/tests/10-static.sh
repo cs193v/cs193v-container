@@ -640,7 +640,7 @@ assert_contains "tmux:cleanup-walks-the-socket-list" 'in $INNER_SOCKS' \
                 "$(cat "$PRIVATE/tests/tmux-harness/suite.sh")"
 
 # ─── the harness's event checks wait for the event, not for a while (#186) ─────
-# Each of these eight asserts that something HAPPENED -- a message appeared, a flag flipped, an
+# Each of these eleven asserts that something HAPPENED -- a message appeared, a flag flipped, an
 # app saw a mouse report -- and each used to be a fixed hx_settle followed by a one-shot
 # hx_expect_*. A settle that turned out too short then failed the check instead of waiting for
 # the screen. They poll now, and this keeps them polling: walking back from each check, the
@@ -654,7 +654,8 @@ assert_contains "tmux:cleanup-walks-the-socket-list" 'in $INNER_SOCKS' \
 # hx_expect_contains still flags three persistence checks ("leaves the box up", "outlives one
 # spinner tick", "does not close itself"), where the duration IS the claim. Both would be false
 # positives. So an event check after a settle -- first after it or further down -- is still
-# review's to catch, and these eight cannot quietly go back.
+# review's to catch, and these eleven cannot quietly go back. The last three are #428's: hint
+# checks that sit behind "copies NOTHING" checks, whose settle stays and is right for them.
 settle_event_checks='a SHIFTED drag at a live prompt is answered rather than dropped
 a SHIFTED double-click is answered too
 a mouse-reporting app is detected as one
@@ -662,7 +663,10 @@ a drag inside a mouse-aware app still reaches the app
 a SHIFTED drag inside a mouse-aware app still reaches the app
 the mouse goes back to tmux when the app stops asking for it
 a full-screen app is detected as one
-the wheel goes back to tmux when the app leaves the alternate screen'
+the wheel goes back to tmux when the app leaves the alternate screen
+a drag in the scrollback explains SHIFT+drag instead
+double-clicking explains SHIFT+drag too
+a drag at a live prompt explains SHIFT+drag'
 hits="$(printf '%s\n' "$settle_event_checks" | awk '
     NR == FNR { want[++nw] = "\"" $0 "\""; next }
     { line[++nl] = $0 }
