@@ -3000,3 +3000,101 @@ assert_eq "publish:a-failed-publish-is-sent-again-until-it-lands" \
 assert_eq "publish:each-failing-episode-is-logged-once-with-its-reason" \
           "exit 1, exit 1, timed out after 20s" "$(sup_publish_reasons)"
 sup_reap
+
+# ─── a refused forward is busy, waits out its cooldown, then clears itself  (#267) ─
+# EVERYTHING DOWNSTREAM OF tunnel_dyn_forward's "1" HAD NO COVER, because the fake could not refuse
+# a forward: the SUP_BUSY cooldown had never been decremented in a test, the short-circuit that stops
+# a busy port being asked every tick had never run, and the self-clearing CLAUDE.md promises for
+# `busy` was a claim about code nothing executed. ssh_busy_ports is the refusal.
+#
+# ONE STREAM, IN THE ORDER IT HAPPENS. The first frame forwards 3000 and is refused 3001; a STALL
+# lets the case lift the refusal, so a retry would now succeed; nothing inside the cooldown may
+# retry it; the first frame after the cooldown must, and must get it.
+#
+# THE FRAME COUNTS COME FROM THE LAUNCHER, not from here. Staged as a literal 35, this would become
+# a test of TUNNEL_SUP_COOLDOWN's value the day somebody raised it.
+#
+# THE ANCHOR IS 21500:v6lo, which first appears halfway through the cooldown and changes the
+# publish. The "asked only once" count is read during the STALL that follows it, so it is an
+# absence pinned to a frame that was demonstrably processed after every ask it is counting --
+# and frames arrive as fast as they are read, so without the STALL the retry would race the count.
+COOLDOWN="$(sed -n 's/^TUNNEL_SUP_COOLDOWN=\([0-9][0-9]*\)$/\1/p' "$LAUNCHER_DIR/cs193v")"
+busy_stream() {                       # busy_stream COOLDOWN -> stages the stream described above
+    local c="$1" i=2 half
+    half=$(( c / 2 ))
+    set -- 'cs193v-portwatch 1' 'BEGIN 2' '3000:lo' '3001:lo' 'END' 'STALL 3'
+    while [ "$i" -le $(( c + 3 )) ]; do
+        if [ "$i" -lt "$half" ]; then
+            set -- "$@" 'BEGIN 2' '3000:lo' '3001:lo' 'END'
+        else
+            set -- "$@" 'BEGIN 3' '3000:lo' '3001:lo' '21500:v6lo' 'END'
+        fi
+        [ "$i" -eq "$half" ] && set -- "$@" 'STALL 3'
+        i=$(( i + 1 ))
+    done
+    shim_watch "$@" 'STALL 20'
+}
+busy_asks() { grep -cF -- '-O forward -L 127.0.0.1:3001:127.0.0.1:3001' "$SHIM/ssh.log" 2>/dev/null; }
+# THE FIRST PUBLISH, and one line carrying both halves. "Some publish says busy" is satisfied a
+# tick late by the short-circuit below, which publishes the refusal too -- measured: with the
+# refused arm's own publish deleted, a search of every publish stayed green. floor= is not in the
+# needle: it is the HOST's unprivileged-port floor, 1024 here and not necessarily on Linux.
+busy_first_publish() {
+    sup_publishes | head -1 | grep -F -- 'state=healthy' | grep -qF -- 'up=3000:lo refused=3001:busy'
+}
+
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+assert_ne "busy:the-cooldown-was-read-from-the-launcher" "" "$COOLDOWN"
+shim_set ssh_busy_ports '3001'
+busy_stream "${COOLDOWN:-30}"
+sup_start "$SHIM/sup-busy.out"
+assert_ok "busy:the-loop-started" wait_until 10 sup_up
+
+# A GATE, not a case: it only lets the first publish land before it is read.
+wait_until 15 sup_published 'cs193v-portwatch --publish' || true
+if busy_first_publish; then
+    pass "busy:a-refused-port-is-published-busy-beside-a-forwarded-one"
+else
+    fail "busy:a-refused-port-is-published-busy-beside-a-forwarded-one" \
+"3001 was refused by the master and 3000 was not, and no publish said so.
+publishes:
+$(sup_publishes)
+ssh.log:
+$(shim_ssh_log)"
+fi
+# Lifted DURING the first STALL: from here on a retry would succeed, so anything below that sees
+# 3001 up before the cooldown has run out is a retry that should not have happened.
+shim_set ssh_busy_ports ''
+# THE ASK, NOT ONLY THE CONCLUSION (#267): the publish says what the supervisor decided, and only
+# ssh.log says the master was asked at all.
+assert_eq "busy:the-refused-ask-is-in-the-log" "1" "$(busy_asks)"
+
+if wait_until 15 sup_published 'refused=3001:busy,21500:v6lo'; then
+    pass "busy:the-anchor-frame-inside-the-cooldown-was-read"
+else
+    fail "busy:the-anchor-frame-inside-the-cooldown-was-read" \
+"the frame that adds 21500 was never published, so the count below would be read before the
+frames it is about.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "busy:a-busy-port-is-not-asked-again-inside-its-cooldown" "1" "$(busy_asks)"
+
+if wait_until 15 sup_published 'up=3000:lo,3001:lo refused=21500:v6lo'; then
+    pass "busy:a-busy-port-is-forwarded-once-its-cooldown-ends"
+else
+    fail "busy:a-busy-port-is-forwarded-once-its-cooldown-ends" \
+"the refusal was lifted and $COOLDOWN frames went by, and 3001 was never forwarded: busy did not
+clear itself.
+publishes:
+$(sup_publishes)
+ssh.log:
+$(shim_ssh_log)"
+fi
+assert_eq "busy:it-was-asked-exactly-twice" "2" "$(busy_asks)"
+sup_reap

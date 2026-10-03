@@ -103,6 +103,8 @@ restore() {
     # with the tunnel group behind a `command -v` guard, so a run interrupted before that group
     # left its tunnel up (#425).
     release_tunnel
+    # The host listener the busy case holds a port with, if the run was stopped mid-case.
+    [ -n "${BUSY_HOLDER:-}" ] && kill "$BUSY_HOLDER" 2>/dev/null
     # And the container, which the suite's last line stops and an interrupted run never reaches:
     # hold_container leaves it up between groups, and since #41 running means somebody is in it.
     release_container
@@ -1005,6 +1007,52 @@ instance's tunnel keeps it (cs193v --dev-tunnel), so there was nothing to ask fo
     fail "tunnel:cannot-proxy-off-box" "see above"
     fail "tunnel:the-borrowed-port-is-handed-back" "see above"
 fi
+
+# A HOST PORT SOMETHING ELSE HOLDS IS REPORTED AS BUSY, by the state file and by doctor (#267). The
+# shim tier refuses forwards with a fake; this is the one place a REAL master is refused, so it is
+# also the check that asking the master whether it is alive before calling a port busy does not
+# turn a genuine "busy" into something else.
+#
+# 127.0.0.1 EXACTLY, and confirmed listening before the container serves the port. Bound to
+# 0.0.0.0 instead, the holder does not stop the master's 127.0.0.1 bind on macOS -- measured -- so
+# the forward would succeed and this case would never see a refusal.
+#
+# NOT THE SELF-CLEARING, which the shim tier covers frame by frame: here it would cost
+# TUNNEL_SUP_COOLDOWN seconds of wall clock.
+host_holds_busy_port() { do_listeners 2>/dev/null | grep -qE "127\.0\.0\.1[:.]$BUSY_PORT	"; }
+state_says_busy() {
+    podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
+        | do_awk -F'\t' -v p="$BUSY_PORT" '$1 == "refused" && $2 == p && $3 == "busy" { f = 1 }
+                                           END { exit !f }'
+}
+BUSY_PORT="$(dyn_free_port)"
+BUSY_HOLDER=''
+if [ -n "$BUSY_PORT" ]; then
+    python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(1); time.sleep(300)' \
+        "$BUSY_PORT" </dev/null >/dev/null 2>&1 &
+    BUSY_HOLDER=$!
+fi
+if [ -n "$BUSY_HOLDER" ] && wait_until 10 host_holds_busy_port; then
+    dyn_serve "$BUSY_PORT"
+    if wait_until 30 state_says_busy; then
+        pass "tunnel:a-port-held-on-the-host-is-reported-busy"
+    else
+        fail "tunnel:a-port-held-on-the-host-is-reported-busy" "a host process holds 127.0.0.1:$BUSY_PORT
+and the container serves it, and the state file never said busy:
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
+    fi
+    out="$(L doctor | strip_ansi)"
+    assert_contains "tunnel:doctor-names-the-busy-port" "busy: $BUSY_PORT" "$out"
+    assert_says_key "tunnel:doctor-says-another-program-holds-it" doctor.ports.why.busy "$out"
+    dyn_serve_stop
+else
+    skip "tunnel:a-port-held-on-the-host-is-reported-busy" "could not hold a free host port"
+    skip "tunnel:doctor-names-the-busy-port" "see above"
+    skip "tunnel:doctor-says-another-program-holds-it" "see above"
+fi
+[ -n "$BUSY_HOLDER" ] && kill "$BUSY_HOLDER" 2>/dev/null
+BUSY_HOLDER=''
 
 # A TUNNEL THAT HAS CLOSED IS REPORTED AS CLOSED (#338). A master that exits cleanly -- which is
 # what ServerAlive does once a sleep outlasts it -- deletes its control socket, and every forward

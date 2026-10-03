@@ -796,11 +796,17 @@ EOF
 #     port and read the rc 124 as master-unresponsive, and sup_tick returned before it
 #     published anything at all (#251).
 #     THEY ARE ALSO THE ONLY ssh CALLS THAT LEAVE NO OTHER TRACE -- nothing binds, nothing
-#     listens, argv.log only ever sees podman -- which is what ssh.log is for. TWO THINGS IT
-#     CANNOT DO, and a case written later must not assume otherwise: it cannot REFUSE (no host
-#     port is bound, so tunnel_dyn_forward can never return 1 from it and the SUP_BUSY cooldown
-#     is unreachable here), and it answers for ANY direction, including -R and an off-box -L,
-#     which a real sshd refuses and 80-launcher-live.sh asserts are refused.
+#     listens, argv.log only ever sees podman -- which is what ssh.log is for. A REFUSED forward
+#     is logged too, before it is refused: "it was asked and said no" needs the ask in the log
+#     as much as "it was asked and said yes" does (#267).
+#   * IT REFUSES ONLY WHAT A CASE TELLS IT TO. It binds no host port, so nothing on this machine
+#     can be in its way; `shim_set ssh_busy_ports '3001 5173'` makes `-O forward` for a listed
+#     port fail the way a real master's does when the port is taken -- rc 255 and the two lines
+#     below, measured against OpenSSH 10.2. PER PORT rather than a flag, because the cases worth
+#     having are the mixed ones: one port forwarded and another refused in the same frame (#267).
+#     ONE THING IT CANNOT DO, and a case written later must not assume otherwise: it answers for
+#     ANY direction, including -R and an off-box -L, which a real sshd refuses and
+#     80-launcher-live.sh asserts are refused.
 #
 # AND IT CAN BE WEDGED, which is what #266 needed: a master that keeps its control socket and
 # answers nothing, the way a SIGSTOPped one does (measured against a real OpenSSH master: -O check
@@ -823,7 +829,8 @@ shim_fake_ssh() {
     # 0 and 124 arms, re-tests `[ -S ]` successfully and returns 1 -- "the host port is busy".
     # The port then gets a cooldown and publishes `refused=PORT:busy`, and the diagnostic dies
     # in the RT_OUT that tunnel_dyn_forward discards. A silent wrong answer, in other words.
-    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\n' "$SHIM/ssh.log" "$SHIM/ssh_wedge" > "$SHIM/ssh"
+    printf '#!/bin/sh\nSSHLOG=%s\nSSHWEDGE=%s\nSSHBUSY=%s\n' "$SHIM/ssh.log" "$SHIM/ssh_wedge" \
+        "$SHIM/ssh_busy_ports" > "$SHIM/ssh"
     cat >> "$SHIM/ssh" <<'EOF'
 # The wedge: control calls FROM..TO never answer. `exec`, so run_timeout's kill -9 of the pid it
 # started takes the sleep with it rather than leaving one behind per wedged call.
@@ -842,7 +849,20 @@ fi
 case " $* " in
     *" -O check "*) echo "Master running (pid=$$)" >&2; exit 0 ;;
     *" -O exit "*)  exit 0 ;;
-    *" -O forward "*|*" -O cancel "*)
+    *" -O forward "*)
+        printf '%s\n' "$*" >> "$SSHLOG"
+        p=''
+        for a in "$@"; do
+            case "$a" in 127.0.0.1:*:*:*) p="${a#127.0.0.1:}"; p="${p%%:*}" ;; esac
+        done
+        [ -n "$p" ] && case " $(cat "$SSHBUSY" 2>/dev/null) " in
+            *" $p "*)
+                echo "mux_client_forward: forwarding request failed: Port forwarding failed" >&2
+                echo "muxclient: master forward request failed" >&2
+                exit 255 ;;
+        esac
+        exit 0 ;;
+    *" -O cancel "*)
         printf '%s\n' "$*" >> "$SSHLOG"; exit 0 ;;
 esac
 ctl=''; prev=''; fork=no
