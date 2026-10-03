@@ -2426,8 +2426,16 @@ assert_eq "helpers:no-negative-key-assertion-rests-on-a-short-needle" "" \
 # one, after a bare `assert_eq \`. A line calling a function defined at column 0 -- stage2_skip_body
 # -- names what that function's body names. BOTH DIRECTIONS: a failure arm missing a name is #331,
 # and one naming something the fetched arm never emits is §9's "a name nobody can diff two runs on".
+#
+# AN ARM'S CONDITION RUNS TO ITS `then`, NOT TO THE END OF ITS FIRST LINE (#409). §10 fetches inside
+# `( set -o pipefail` with the curl on the line after, so a head read as one line never curls and
+# the rule found nothing to compare. Messages still quote the first line, which is what a reader
+# can find.
 arm_name_gaps() {                     # arm_name_gaps FILE URLVAR -> one line per gap, or nothing
     do_awk -v url="\"\$$2\"" '
+        function then_ends(s) {
+            return s ~ /(^|[ \t;])then([ \t]+#.*)?[ \t]*$/
+        }
         function called(s) {
             if (wrapped) {
                 wrapped = 0
@@ -2449,37 +2457,57 @@ arm_name_gaps() {                     # arm_name_gaps FILE URLVAR -> one line pe
             if (o !~ /}[ \t]*$/) { fn = $0; sub(/\(.*/, "", fn) }
             next
         }
+        inhead { head[c, a] = head[c, a] " " $0; inhead = !then_ends($0); next }
         /^if[ \t]/ && /;[ \t]*fi[ \t]*$/ { next }
-        /^if[ \t]/ { c++; a = 0; head[c, 0] = $0; arms[c] = 1; inchain = 1; next }
-        inchain && /^elif[ \t]/      { a = arms[c]++; head[c, a] = $0; next }
-        inchain && /^else([ \t]|$)/  { a = arms[c]++; head[c, a] = "else"; has_else[c] = 1; next }
+        /^if[ \t]/ {
+            c++; a = 0; head[c, 0] = label[c, 0] = $0; arms[c] = 1; inchain = 1
+            inhead = !then_ends($0); next
+        }
+        inchain && /^elif[ \t]/ {
+            a = arms[c]++; head[c, a] = label[c, a] = $0; inhead = !then_ends($0); next
+        }
+        inchain && /^else([ \t]|$)/ {
+            a = arms[c]++; head[c, a] = label[c, a] = "else"; has_else[c] = 1; next
+        }
         inchain && /^fi([ \t;]|$)/   { inchain = 0; next }
         inchain {
             if ((n = called($0)) != "") names[c, a] = names[c, a] " " n
             w = $0; sub(/^[ \t]+/, "", w); sub(/[ \t].*/, "", w)
             if (w in body) names[c, a] = names[c, a] " " body[w]
         }
-        END {
-            for (i = 1; i <= c; i++)
-                for (j = 0; j < arms[i]; j++)
-                    if (head[i, j] ~ /curl/ && index(head[i, j], url)) { fc = i; fa = j }
-            if (!fc) { print "NO-ARM-CURLS-" url; exit }
+        function compare(fc, fa,    n, wl, k, want, j, got, m, g, x) {
             n = split(names[fc, fa], wl, " ")
-            if (n == 0) { print "THE-FETCHING-ARM-NAMES-NOTHING"; exit }
+            if (n == 0) { print "THE-FETCHING-ARM-NAMES-NOTHING"; return }
             for (k = 1; k <= n; k++) want[wl[k]] = 1
             if (!has_else[fc]) print "NO-ELSE-ARM: a failed fetch would name nothing at all"
             for (j = 0; j < arms[fc]; j++) {
                 if (j == fa) continue
                 split("", got); m = split(names[fc, j], g, " ")
                 for (k = 1; k <= m; k++) got[g[k]] = 1
-                for (x in want) if (!(x in got)) print "never named by `" head[fc, j] "`: " x
-                for (x in got) if (!(x in want)) print "named only by `" head[fc, j] "`: " x
+                for (x in want) if (!(x in got)) print "never named by `" label[fc, j] "`: " x
+                for (x in got) if (!(x in want)) print "named only by `" label[fc, j] "`: " x
             }
+        }
+        # EVERY CHAIN THAT CURLS IT, not the last: §9 and §10 both fetch "$rel_tarball", and keeping
+        # one would leave the other unchecked behind a green line.
+        END {
+            for (i = 1; i <= c; i++) {
+                fa = -1
+                for (j = 0; j < arms[i]; j++)
+                    if (head[i, j] ~ /curl/ && index(head[i, j], url)) fa = j
+                if (fa >= 0) { found = 1; compare(i, fa) }
+            }
+            if (!found) print "NO-ARM-CURLS-" url
         }
     ' "$1" | LC_ALL=C sort
 }
 assert_eq "release-gates:every-stage2-failure-arm-names-what-the-fetch-arm-does" "" \
           "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" stage2_url)"
+# §1c AND §10 HAD THE SAME HOLE (#409): each named one assertion only where its URL was fetched.
+assert_eq "release-gates:every-winboot-failure-arm-names-what-the-fetch-arm-does" "" \
+          "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" cmd_url)"
+assert_eq "release-gates:every-payload-failure-arm-names-what-the-fetch-arm-does" "" \
+          "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" rel_tarball)"
 
 rg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-relgate.XXXXXX")"
 # AND THE RULE GOES RED ON THE SHAPE THAT BROKE, so an awk that dies or a comparison that stops
@@ -2510,6 +2538,89 @@ assert_eq "release-gates:the-arm-rule-catches-the-gap-it-exists-for" \
                            'never named by `else`: installer:stage2-url-works-when-piped' \
                            'never named by `if [ -n "$why" ]; then`: installer:a-wrapped-name')" \
           "$(arm_name_gaps "$rg_tmp/broke.sh" stage2_url)"
+
+# AND ON §10's SHAPE, where the curl is the second line of a `( set -o pipefail` condition. Read a
+# line at a time, no arm curls at all and this answers NO-ARM-CURLS rather than the gap. The pin
+# arm's condition runs over two lines as well, and is quoted by its first.
+cat > "$rg_tmp/piped.sh" <<'RGPIPED'
+unpack_rest() {                       # unpack_rest WHY
+    skip "payload:the-published-tree-matches-the-pin" "$1"
+}
+if [ -n "$why" ]; then
+    unpack_rest "$why"
+elif ! pin_ok "$pin" \
+       || pin_odd "$pin"; then
+    fail "payload:the-published-tree-matches-the-pin" "not a digest"
+elif ( set -o pipefail
+       curl -fsSL "$rel_tarball" \
+         | tar xzf - -C "$t" ); then
+    pass "payload:the-published-archive-unpacks"
+    assert_eq "payload:the-published-tree-matches-the-pin" "$a" "$b"
+else
+    fail "payload:the-published-archive-unpacks" "that failed"
+    unpack_rest "that failed"
+fi
+RGPIPED
+assert_eq "release-gates:the-arm-rule-reads-a-condition-over-several-lines" \
+          "$(printf '%s\n' 'never named by `elif ! pin_ok "$pin" \`: payload:the-published-archive-unpacks' \
+                           'never named by `if [ -n "$why" ]; then`: payload:the-published-archive-unpacks')" \
+          "$(arm_name_gaps "$rg_tmp/piped.sh" rel_tarball)"
+
+# AND ON EVERY CHAIN THAT CURLS THE URL. The gap is in the first of two; reading only the last, as
+# the rule once did, would report nothing. The quoted ` #` is not a comment, so the head still ends
+# at its `then` rather than swallowing the file.
+cat > "$rg_tmp/two.sh" <<'RGTWO'
+if [ -n "$why" ]; then
+    skip "export:tarball-is-fetchable" "$why"
+elif curl -fsSL "$rel_tarball" | grep -v ' #' > "$t"; then
+    pass "export:tarball-is-fetchable"
+    assert_eq "export:github-ships-nothing-extra" "" "$x"
+else
+    fail "export:tarball-is-fetchable" "that failed"
+    skip "export:github-ships-nothing-extra" "that failed"
+fi
+if [ -n "$why" ]; then
+    skip "payload:the-published-archive-unpacks" "$why"
+elif curl -fsSL "$rel_tarball" | tar xzf - -C "$t"; then
+    pass "payload:the-published-archive-unpacks"
+else
+    fail "payload:the-published-archive-unpacks" "that failed"
+fi
+RGTWO
+assert_eq "release-gates:the-arm-rule-reads-every-chain-that-fetches" \
+          'never named by `if [ -n "$why" ]; then`: export:github-ships-nothing-extra' \
+          "$(arm_name_gaps "$rg_tmp/two.sh" rel_tarball)"
+
+# AND EVERY PROBE GOES THROUGH tag_skip_why (#409). The carve below proves the function right and
+# cannot prove anybody calls it: §1c and §9 kept probes of their own that read the output, and went
+# on telling an offline run to push a pushed tag after #331 fixed §1's. An ls-remote that mentions
+# a variable outside its body is one of those: asking after one tag needs its name, and §10's
+# listing of them all and its reachability check do not.
+raw_tag_probes() {                    # raw_tag_probes FILE -> one line per probe of its own, or nothing
+    do_awk '
+        /^tag_skip_why\(\)/ { inprobe = 1 }
+        inprobe { if ($0 ~ /^}/) inprobe = 0; next }
+        /^[ \t]*#/ { next }
+        /ls-remote.*\$/ { s = $0; sub(/^[ \t]+/, "", s); print FNR ": " s }
+    ' "$1"
+}
+assert_eq "release-gates:every-tag-probe-goes-through-tag_skip_why" "" \
+          "$(raw_tag_probes "$PRIVATE/tests/00-release-gates.sh")"
+cat > "$rg_tmp/raw.sh" <<'RGRAW'
+tag_skip_why() {
+    out="$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)"
+}
+# x="$(git ls-remote --tags origin "refs/tags/$x")" in a comment is not a probe
+rel_tags="$(git ls-remote --tags origin 'refs/tags/release-*' 2>/dev/null \
+            | sed 's|\^{}$||')"
+if ! git ls-remote --tags origin >/dev/null 2>&1; then :; fi
+    ps1_pushed="$(git ls-remote --tags origin "refs/tags/$ps1_tag" 2>/dev/null)"
+rel_pushed="$(git ls-remote --tags origin "$rel_tag")"
+RGRAW
+assert_eq "release-gates:the-probe-rule-catches-a-probe-of-its-own" \
+          "$(printf '%s\n' '8: ps1_pushed="$(git ls-remote --tags origin "refs/tags/$ps1_tag" 2>/dev/null)"' \
+                           '9: rel_pushed="$(git ls-remote --tags origin "$rel_tag")"')" \
+          "$(raw_tag_probes "$rg_tmp/raw.sh")"
 
 # AND OFFLINE IS NOT "PUSH THE TAG". §1's probe read `git ls-remote`'s OUTPUT, so an unreachable
 # origin -- which prints nothing -- was reported as an unpublished tag, for a tag that was pushed.
@@ -2542,6 +2653,44 @@ else
     for rg_n in an-unreachable-origin-says-so an-unreachable-origin-is-not-told-to-push \
                 a-tag-origin-lacks-is-told-to-push a-tag-origin-has-skips-nothing; do
         skip "release-gates:$rg_n" "the probe could not be carved"
+    done
+fi
+
+# AND OFFLINE IS NOT "THE RELEASE HAS NO SHASUMS" (#409). §1b failed on any curl error, so a run with
+# no network was red the same way a podman release really lacking the asset is. curl tells them
+# apart by exit status: 5, 6 and 7 never reached a server. A 404 is 22, or 56 from curl 8.7.1 over
+# HTTP/2 -- measured -- and both must still fail. §1b's OWN LOOP, run against a fake curl, so what
+# is checked is the verdict where §1b gives it and not only the function it asks.
+sed -n '/^for pkg_row in/,/^done$/p' "$PRIVATE/tests/00-release-gates.sh" > "$rg_tmp/pkgsha.sh"
+if carve_func "$PRIVATE/tests/00-release-gates.sh" curl_skip_why "$rg_tmp/curlwhy.sh" \
+   && grep -q 'the-release-publishes-a-shasums-file' "$rg_tmp/pkgsha.sh"; then
+    pass "release-gates:the-shasums-gate-was-carvable"
+    rg_pkgsha() {                     # rg_pkgsha RC -> §1b's verdict on each pin when curl exits RC
+        ( rg_rc="$1"
+          curl()       { return "$rg_rc"; }
+          setting_of() { printf '9.9.9\n'; }
+          new_tmpdir() { mktemp -d "$rg_tmp/pkg.XXXXXX"; }
+          pass() { printf 'PASS %s\n' "$1"; }
+          fail() { printf 'FAIL %s\n' "$1"; }
+          skip() { printf 'SKIP %s\n' "$1"; }
+          record() { :; }; assert_ne() { :; }; assert_eq() { :; }
+          . "$rg_tmp/curlwhy.sh"; . "$rg_tmp/pkgsha.sh" ) \
+        | sed -n 's/^\([A-Z]*\) pkgsha:\([a-z0-9]*\):the-release-publishes-a-shasums-file$/\2=\1/p' \
+        | do_tr '\n' ' ' | sed 's/ $//'
+    }
+    rg_verdicts() {                   # rg_verdicts RC... -> "RC: arch=VERDICT ..." for each
+        for rg_rc in "$@"; do printf '%s: %s | ' "$rg_rc" "$(rg_pkgsha "$rg_rc")"; done | sed 's/ | $//'
+    }
+    assert_eq "release-gates:an-unreachable-network-skips" \
+              "5: arm64=SKIP amd64=SKIP | 6: arm64=SKIP amd64=SKIP | 7: arm64=SKIP amd64=SKIP" \
+              "$(rg_verdicts 5 6 7)"
+    assert_eq "release-gates:an-http-error-still-fails" \
+              "22: arm64=FAIL amd64=FAIL | 56: arm64=FAIL amd64=FAIL" "$(rg_verdicts 22 56)"
+else
+    fail "release-gates:the-shasums-gate-was-carvable" \
+         "could not carve curl_skip_why() and §1b's loop out of 00-release-gates.sh"
+    for rg_n in an-unreachable-network-skips an-http-error-still-fails; do
+        skip "release-gates:$rg_n" "the shasums gate could not be carved"
     done
 fi
 rm -rf "$rg_tmp"

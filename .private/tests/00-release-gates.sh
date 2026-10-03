@@ -13,9 +13,10 @@
 # THEY ARE GREEN NOW. This header used to say they "fail today by design: the repo is scaffolding
 # with four deliberate blanks in it", and that stopped being true once the blanks were filled --
 # REPO_OWNER is cs193v, the stage-two URL serves the installer, the token expiry is set, and the
-# GitHub org and sandbox prefix are both real. Measured 2026-10-02: 49 pass, 0 fail, 2 skip. The
+# GitHub org and sandbox prefix are both real. Measured 2026-10-03: 49 pass, 0 fail, 2 skip. The
 # skips are opt-in rather than broken: they need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
-# build).
+# build). Offline it is 26 pass, 0 fail, 25 skip: an offline run, an unpushed tag and a failed
+# fetch all name the same 51 assertions as this one (#409).
 #
 # Run this before the quarter starts, and again after any change to the publishing setup.
 
@@ -262,16 +263,24 @@ ps1_tag="$(pget RepoTag)"
 # pass by testing a URL the bootstrap would not build. 25-installer.sh already pins that the .ps1
 # assembles $CmdUrl from exactly these three.
 cmd_url="https://raw.githubusercontent.com/$(pget RepoOwner)/$(pget RepoName)/$ps1_tag/.private/install-cs193v-windows.cmd"
-ps1_pushed="$(git ls-remote --tags origin "refs/tags/$ps1_tag" 2>/dev/null | awk '{print $1}' | head -1)"
+# §1's PROBE, NOT ONE OF ITS OWN (#409). This one read the output too, and went on telling an
+# offline run to push a pushed tag after #331 fixed §1's.
+ps1_why="$(tag_skip_why "$ps1_tag")"
 ps1_tmp="$(new_tmpdir)"
-if [ -z "$ps1_pushed" ]; then
+# EVERY NAME THE FETCHED ARM EMITS AFTER THE FETCH, stage2_skip_body's rule and for its reason. The
+# pin's shape was named only in the fetched arm, so an offline run, an unpushed tag or a failed
+# fetch dropped winboot:the-cmd-pin-is-a-digest from the results (#409).
+winboot_skip_body() {                 # winboot_skip_body WHY -> skip every §1c name after the fetch
+    skip "winboot:the-cmd-pin-is-a-digest"       "$1"
+    skip "winboot:the-cmd-url-hashes-to-the-pin" "$1"
+    skip "winboot:the-served-cmd-is-lf"          "$1"
+}
+if [ -n "$ps1_why" ]; then
     # NAMED SKIPS, the same shape §1 uses and for the same reason: an unpushed tag 404s, which is
     # indistinguishable in the failure message from a typo in the constants this gate exists to
-    # catch. Push the tag, then re-run --release.
-    ps1_why="$ps1_tag is not on origin -- push the tag, then re-run --release"
-    skip "winboot:the-cmd-url-is-fetchable"   "$ps1_why"
-    skip "winboot:the-cmd-url-hashes-to-the-pin" "$ps1_why"
-    skip "winboot:the-served-cmd-is-lf"       "$ps1_why"
+    # catch.
+    skip "winboot:the-cmd-url-is-fetchable" "$ps1_why"
+    winboot_skip_body "$ps1_why"
 elif curl -fsSL --retry 3 -o "$ps1_tmp/win.cmd" "$cmd_url" 2>"$ps1_tmp/curl.err"; then
     pass "winboot:the-cmd-url-is-fetchable"
     record "winboot:cmd-url-bytes" "$(wc -c < "$ps1_tmp/win.cmd")"
@@ -305,8 +314,7 @@ else
     $cmd_url
 and that failed. Every Windows student who pastes the one-liner stops here.
 $(cat "$ps1_tmp/curl.err")"
-    skip "winboot:the-cmd-url-hashes-to-the-pin" "the URL could not be fetched"
-    skip "winboot:the-served-cmd-is-lf"          "the URL could not be fetched"
+    winboot_skip_body "the URL could not be fetched"
 fi
 rm -rf "$ps1_tmp"
 
@@ -336,6 +344,19 @@ rm -rf "$ps1_tmp"
 # let a deleted pair shrink the loop to one pass and still report green. Every name carries its
 # asset, and every pass starts from nothing, so an amd64 fetch that failed cannot be compared
 # against the digest the arm64 pass left behind.
+#
+# AN UNREACHABLE NETWORK IS A SKIP AND AN HTTP ERROR IS A FAILURE (#409). This failed on any curl
+# error, so an offline run was red the same way a release really lacking the asset is. curl's exit
+# status tells them apart: 5, 6 and 7 mean no server was reached -- the proxy or the host did not
+# resolve, or would not connect. Anything else is judged. That includes 22, an HTTP error, and 56,
+# which is what curl 8.7.1 exits for the same 404 over HTTP/2 (measured, on v6.0.99's shasums).
+# So the three are listed as skips, rather than 22 being singled out as the only failure.
+curl_skip_why() {                     # curl_skip_why RC WHAT -> why a curl exiting RC skips, or nothing
+    case "$1" in
+        5|6|7) printf 'could not reach the network to fetch %s (curl exit %s) -- %s' \
+                      "$2" "$1" "re-run --release once it is reachable" ;;
+    esac
+}
 mos_ver=""                            # the amd64 pass leaves its version here for 1b'
 for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
     set -- $pkg_row
@@ -355,15 +376,20 @@ for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
     # 302 to the asset CDN, so without it curl follows nothing, writes an empty file and exits 0
     # -- which is what happened the first time this gate ran. The named skip below is what
     # reported it; a bare pass would have called an empty answer agreement.
-    if curl -fsSL --retry 3 -o "$pkg_tmp/shasums" \
-            "https://github.com/containers/podman/releases/download/v$pkg_ver/shasums" \
-            2>"$pkg_tmp/curl.err"; then
+    curl -fsSL --retry 3 -o "$pkg_tmp/shasums" \
+         "https://github.com/containers/podman/releases/download/v$pkg_ver/shasums" \
+         2>"$pkg_tmp/curl.err"
+    pkg_rc=$?
+    pkg_why="$(curl_skip_why "$pkg_rc" "v$pkg_ver's shasums")"
+    if [ "$pkg_rc" -eq 0 ]; then
         pass   "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file"
         record "pkgsha:$pkg_arch:shasums-bytes" "$(wc -c < "$pkg_tmp/shasums" | do_tr -d ' ')"
         # `*name` AS WELL AS `name`, because sha256sum's --binary form writes an asterisk before
         # the filename and a checksums file carrying one would silently match nothing here.
         pkg_pub="$(awk -v n="$pkg_asset" '$2 == n || $2 == "*" n {print $1}' "$pkg_tmp/shasums" \
                    | head -1)"
+    elif [ -n "$pkg_why" ]; then
+        skip "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file" "$pkg_why"
     else
         fail "pkgsha:$pkg_arch:the-release-publishes-a-shasums-file" \
              "no shasums asset at v$pkg_ver -- the tag may not exist, or podman stopped publishing one.
@@ -376,6 +402,9 @@ $(cat "$pkg_tmp/curl.err")"
     # did not run is the same defect as an assertion that never executed.
     if printf '%s' "$pkg_pub" | grep -qE '^[0-9a-f]{64}$'; then
         assert_eq "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_pub" "$pkg_pin"
+    elif [ -n "$pkg_why" ]; then
+        # Offline, the network's reason rather than a guess about a file that never arrived.
+        skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" "$pkg_why"
     else
         skip "pkgsha:$pkg_arch:the-pin-is-the-published-digest" \
              "no 64-hex line for $pkg_asset in v$pkg_ver's shasums -- asset renamed, or the file changed shape"
@@ -667,9 +696,11 @@ record "export:tarball-url" "$rel_tarball"
 # PROBED ONCE, ABOVE BOTH SECTIONS THAT NEED THE ANSWER. §10 asks the same question, and two
 # `git ls-remote` calls could disagree if a tag were pushed between them -- which would leave one
 # section skipping and the other comparing against an archive that had only just appeared.
-rel_pushed="$(git ls-remote --tags origin "refs/tags/$rel_tag" 2>/dev/null | awk '{print $1}' | head -1)"
+# THROUGH §1's tag_skip_why (#409): reading the output here told an offline run "no" and "push the
+# tag", for a tag that was pushed. The record is the reason when there is one.
+rel_why="$(tag_skip_why "$rel_tag")"
 rel_here="$(git rev-parse -q --verify "refs/tags/$rel_tag^{commit}" 2>/dev/null)"
-record "export:the-pinned-tag-is-published" "$( [ -n "$rel_pushed" ] && printf 'yes' || printf 'no' )"
+record "export:the-pinned-tag-is-published" "${rel_why:-yes}"
 
 rel_skip_all() {                      # rel_skip_all WHY -> skip every §9 assertion, with a reason
     skip "export:tarball-is-fetchable"         "$1"
@@ -683,8 +714,8 @@ if [ -z "$rel_owner" ] || [ -z "$rel_name" ] || [ -z "$rel_tag" ]; then
     rel_skip_all "the tarball URL could not be parsed out of the installer"
 else
     pass "export:tarball-url-was-parsed"
-    if [ -z "$rel_pushed" ]; then
-        rel_skip_all "$rel_tag is not on origin -- push the tag, then re-run --release"
+    if [ -n "$rel_why" ]; then
+        rel_skip_all "$rel_why"
     elif [ -z "$rel_here" ]; then
         rel_skip_all "$rel_tag is not present locally -- run \`git fetch --tags\`, then re-run --release"
     else
@@ -765,25 +796,31 @@ else
 fi
 
 pay_pin="$(iget PAYLOAD_SHA256)"
-if [ -z "$rel_pushed" ]; then
-    skip "payload:the-published-tree-matches-the-pin" \
-         "$rel_tag is not on origin -- push the tag, then re-run --release"
+pay_tmp="$(new_tmpdir)"
+mkdir -p "$pay_tmp/tree"
+# EVERY NAME AFTER THE FETCH, stage2_skip_body's rule (#409): the archive's own name was emitted only
+# where it was fetched, so an offline run, an unpushed tag or a malformed pin dropped it.
+payload_skip_body() {                 # payload_skip_body WHY -> skip every §10 name after the fetch
+    skip "payload:the-published-tree-matches-the-pin" "$1"
+}
+# ONE FLAT CHAIN, §1's SHAPE. The fetch used to be an `if` inside the last arm, where 10-static.sh's
+# arm rule could not see it; as an arm of its own, every other arm is compared against it.
+if [ -n "$rel_why" ]; then
+    skip "payload:the-published-archive-unpacks" "$rel_why"
+    payload_skip_body "$rel_why"
 elif ! printf '%s' "$pay_pin" | grep -qE '^[0-9a-f]{64}$'; then
     fail "payload:the-published-tree-matches-the-pin" \
          "install-cs193v.sh's PAYLOAD_SHA256 is not 64 lowercase hex: '$pay_pin'"
+    skip "payload:the-published-archive-unpacks" "the pin is not a digest, so the archive was not fetched"
+elif ( set -o pipefail
+       curl -fsSL --retry 3 "$rel_tarball" \
+         | tar xzf - --strip-components=1 -C "$pay_tmp/tree" ); then
+    pass "payload:the-published-archive-unpacks"
+    pay_got="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$pay_tmp/tree" 2>/dev/null)"
+    record "payload:the-published-manifest" "$pay_got"
+    assert_eq "payload:the-published-tree-matches-the-pin" "$pay_pin" "$pay_got"
 else
-    pay_tmp="$(new_tmpdir)"
-    mkdir -p "$pay_tmp/tree"
-    if ( set -o pipefail
-         curl -fsSL --retry 3 "$rel_tarball" \
-           | tar xzf - --strip-components=1 -C "$pay_tmp/tree" ); then
-        pass "payload:the-published-archive-unpacks"
-        pay_got="$(bash "$PRIVATE/install-cs193v.sh" --dev-manifest-hash "$pay_tmp/tree" 2>/dev/null)"
-        record "payload:the-published-manifest" "$pay_got"
-        assert_eq "payload:the-published-tree-matches-the-pin" "$pay_pin" "$pay_got"
-    else
-        fail "payload:the-published-archive-unpacks" "could not fetch and unpack $rel_tarball"
-        skip "payload:the-published-tree-matches-the-pin" "the published archive could not be unpacked"
-    fi
-    rm -rf "$pay_tmp"
+    fail "payload:the-published-archive-unpacks" "could not fetch and unpack $rel_tarball"
+    payload_skip_body "the published archive could not be unpacked"
 fi
+rm -rf "$pay_tmp"
