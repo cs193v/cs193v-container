@@ -1736,7 +1736,7 @@ case "$3" in
     # The first reach is a VALUE, which is how every one of the value helpers is called.
     subst)     trap 'printf "EXIT-TRAP-RAN\n"' EXIT
                n="$(count_forwards)" ;;
-    # ...under 80-launcher-live.sh's trap, which RETURNS from INT and TERM...
+    # ...under the trap 80-launcher-live.sh had until #425, which RETURNS from INT and TERM...
     subst-term-trapped)
                trap 'printf "EXIT-TRAP-RAN\n"' EXIT INT TERM
                n="$(count_forwards)" ;;
@@ -1871,6 +1871,188 @@ assert_eq "portable:do_sha256-hashes-stdin" \
           "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" \
           "$(printf 'hello\n' | do_sha256 | cut -d' ' -f1)"
 assert_ok "portable:DO_SHA256-is-a-usable-binary-path" sh -c '[ -x "$DO_SHA256" ]'
+
+# ─── an interrupted live run STOPS, and tears down once (#425) ─────────────────
+# 80-launcher-live.sh's trap, driven here because 80 needs a container to run at all. It was
+# `trap restore EXIT INT TERM`, and restore() returns -- and an INT or TERM trap that returns
+# RESUMES the script at the next command. Measured on bash 3.2: a Ctrl+C'd run tore down, then
+# carried on creating containers and tunnels, exited 0, and tore down again at exit.
+#
+# 80's OWN restore() AND trap LINES, cut out of the file, with everything restore touches stubbed
+# to a line in a log. So this goes red on 80, not on a copy of it, and "tore down once" is a count.
+#
+# THE INTERRUPTED COMMAND CATCHES SIGINT AND EXITS ON ITS OWN, because 80's commands do: the
+# launcher traps INT around a rebuild and a shell and exits 130. That is also the shape that needs
+# an INT arm at all. With only `trap restore EXIT`, bash carries on past a child that handled the
+# Ctrl+C itself (measured), so a stand-in that simply died of it would pass that broken shape too.
+#
+# ITS OWN PROCESS GROUP, SIGNALLED WHOLE, because that is what a Ctrl+C is; signalling bash alone
+# defers its trap until the stand-in finishes. AND INT AND TERM RESET TO DEFAULT, because `&`
+# without job control starts the child with SIGINT ignored -- as run-tests.sh's cheap lane starts
+# this whole suite -- and a shell cannot arm a trap for a signal ignored at entry. Without the
+# reset the INT arm is never armed here and the INT cases measure the ignore instead. The python
+# that does both stays out of the signal's way and reports HOW the child ended, because "exited
+# 130" and "died of SIGINT" are both $? 130 and only the second stops a shell that ran it.
+LT="$WORK/live-trap"
+LT_SUITE="$TESTS_DIR/80-launcher-live.sh"
+mkdir -p "$LT"
+do_awk '/^restore\(\) \{$/, /^\}$/' "$LT_SUITE" > "$LT/restore.sh"
+lt_traps="$(grep -E '^trap[[:space:]].*restore' "$LT_SUITE")"
+printf '%s\n' "$lt_traps" >> "$LT/restore.sh"
+assert_match "livetrap:80-still-defines-restore" '^restore\(\) \{$' "$(cat "$LT/restore.sh")"
+# The signals each trap line names, with its action stripped: a match on the whole line would
+# find EXIT in an INT arm's own `trap - EXIT`.
+lt_sigs=" $(printf '%s\n' "$lt_traps" | sed -E "s/^trap[[:space:]]+('[^']*'|[^[:space:]]+)//" \
+            | do_tr -s ' \t\n' '   ') "
+lt_missing=''
+for lt_s in EXIT INT TERM; do
+    case "$lt_sigs" in *" $lt_s "*) ;; *) lt_missing="$lt_missing $lt_s" ;; esac
+done
+assert_eq "livetrap:80-traps-exit-int-and-term-into-restore" "" "$lt_missing"
+
+# AND NOTHING restore() REACHES MAY BE DEFINED BELOW THE TRAP, which can fire on the next line.
+# release_tunnel was, behind a `command -v` guard, so a real run interrupted before the tunnel
+# group left its tunnel up (measured, #425). Followed through every function 80 defines, since
+# release_tunnel itself calls tunnel_pid; the stubs below cannot see this, so it is read here.
+lt_late="$(do_awk '
+    function strip(s) { sub(/[[:space:]]#.*$/, "", s); return s }
+    /^trap[[:space:]].*restore/ && !t { t = NR }
+    /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
+        cur = $0; sub(/\(.*/, "", cur)
+        if (!(cur in def)) { def[cur] = NR; body[cur] = "" }
+        body[cur] = body[cur] " " strip(substr($0, index($0, ")") + 1))
+        if (strip($0) !~ /\{[[:space:]]*$/) cur = ""
+        next
+    }
+    cur != "" && /^\}/ { cur = ""; next }
+    cur != "" && !/^[[:space:]]*#/ { body[cur] = body[cur] " " strip($0) }
+    END {
+        q[1] = "restore"; seen["restore"] = 1; h = 1; n = 1
+        while (h <= n) {
+            f = q[h++]
+            for (g in def)
+                if (!(g in seen) && body[f] ~ ("(^|[^A-Za-z0-9_])" g "([^A-Za-z0-9_]|$)")) {
+                    seen[g] = 1; q[++n] = g
+                    if (def[g] > t) print g
+                }
+        }
+    }' "$LT_SUITE" | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//')"
+assert_eq "livetrap:restore-reaches-nothing-defined-below-its-trap" "" "$lt_late"
+
+cat > "$LT/child.sh" <<'CHILD'
+set -u
+DIR="$2" MODE="$3"
+LOG="$DIR/log"
+REPO="$DIR/repo" TMP="$DIR/tmp" NAME=cs193v-livetrap
+mkdir -p "$REPO/.config" "$TMP"
+printf 'the student flags\n' > "$REPO/.config/container.args"
+cp "$REPO/.config/container.args" "$TMP/ca.orig"
+DECOY_OURS=decoy
+# The command the signal lands in. Its 30 seconds are a ceiling for a signal that never arrives,
+# not a wait: the signal ends it. The busy file is written INSIDE the try, so a signal that lands
+# the moment it appears is still caught rather than killing the stand-in outright.
+busy() {
+    "$DO_PY" -c 'import os, sys, time
+try:
+    open(sys.argv[1], "w").write(str(os.getpid()))
+    time.sleep(30)
+except KeyboardInterrupt:
+    sys.exit(1)' "$DIR/busy"
+}
+podman()             { printf 'podman %s\n' "$*" >> "$LOG"; }
+clean_vt_fixtures()  { printf 'clean_vt_fixtures\n' >> "$LOG"; }
+# In `late` the signal lands HERE, partway through the EXIT arm's teardown.
+clean_vt_processes() {
+    printf 'clean_vt_processes\n' >> "$LOG"
+    if [ "$MODE" = late ] && [ ! -e "$DIR/busy" ]; then busy; fi
+    return 0
+}
+release_tunnel()     { printf 'release_tunnel\n' >> "$LOG"; }
+release_container()  { printf 'release_container\n' >> "$LOG"; }
+shim_cleanup()       { printf 'shim_cleanup\n' >> "$LOG"; }
+. "$1"
+printf 'drifted\n' > "$REPO/.config/container.args"     # what the drift group does to it
+# What the race group leaves in the background: started with `&` and no job control, so it
+# ignores SIGINT and only the teardown can end it. 30 seconds is the ceiling, not a wait.
+sleep 30 &
+RACE_PIDS=$!
+printf '%s' "$RACE_PIDS" > "$DIR/race.pid"
+case "$MODE" in INT|TERM) busy ;; esac
+printf 'THE-REST-OF-THE-SUITE\n' >> "$LOG"
+CHILD
+lt_run() {                            # lt_run finish|INT|TERM|late -> $LT/$1/{log,status}
+    local d="$LT/$1" sig="$1" pid
+    [ "$1" = late ] && sig=INT
+    rm -rf "$d"; mkdir -p "$d"; : > "$d/log"
+    "$DO_PY" -c 'import os, signal, sys
+os.setpgid(0, 0)
+for s in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(s, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    for s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(s, signal.SIG_DFL)
+    os.execv(sys.argv[2], sys.argv[2:])
+st = os.waitpid(pid, 0)[1]
+if os.WIFSIGNALED(st):
+    said, rc = "signal " + signal.Signals(os.WTERMSIG(st)).name, 128 + os.WTERMSIG(st)
+else:
+    said, rc = "exit %d" % os.WEXITSTATUS(st), os.WEXITSTATUS(st)
+open(sys.argv[1], "w").write(said)
+sys.exit(rc)' "$d/status" "$BASH" "$LT/child.sh" "$LT/restore.sh" "$d" "$1" > "$d/out" 2>&1 &
+    pid=$!
+    [ "$1" = finish ] || { wait_until 15 test -s "$d/busy" && kill -s "$sig" -- "-$pid"; }
+    wait_until 60 pid_is_gone "$pid" || kill -s KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+}
+lt_log()       { cat "$LT/$1/log" 2>/dev/null; }
+lt_status()    { cat "$LT/$1/status" 2>/dev/null; }
+lt_teardowns() { grep -c '^release_tunnel$' "$LT/$1/log" 2>/dev/null || true; }
+lt_args()      { cat "$LT/$1/repo/.config/container.args" 2>/dev/null; }
+
+# THE CONTROL: nothing interrupts it, so the end of the suite is visible here -- which is what
+# makes its absence below mean something.
+lt_run finish
+assert_eq       "livetrap:an-uninterrupted-run-exits-0"          "exit 0" "$(lt_status finish)"
+assert_contains "livetrap:an-uninterrupted-run-reaches-the-end"  "THE-REST-OF-THE-SUITE" \
+                "$(lt_log finish)"
+assert_eq       "livetrap:an-uninterrupted-run-tears-down-once"  "1" "$(lt_teardowns finish)"
+assert_eq       "livetrap:an-uninterrupted-run-restores-the-args" "the student flags" \
+                "$(lt_args finish)"
+# INT DIES OF THE SIGNAL rather than exiting 130, so a shell running the suite stops as well:
+# measured, a bash loop with no INT trap carries on past a child that exits 130 on a Ctrl+C,
+# the shape this case's stand-in has. Nothing waits cooperatively on TERM, so 143 is enough.
+for lt_sig in INT TERM; do
+    case "$lt_sig" in INT) lt_want='signal SIGINT' ;; TERM) lt_want='exit 143' ;; esac
+    lt_run "$lt_sig"
+    lt_name="$(printf '%s' "$lt_sig" | do_tr '[:upper:]' '[:lower:]')"
+    assert_not_contains "livetrap:$lt_name-stops-the-suite"      "THE-REST-OF-THE-SUITE" \
+                        "$(lt_log "$lt_sig")"
+    assert_eq    "livetrap:$lt_name-ends-in-$(printf '%s' "$lt_want" | do_tr ' ' '-')" \
+                 "$lt_want" "$(lt_status "$lt_sig")"
+    assert_eq    "livetrap:$lt_name-tears-down-once"              "1" "$(lt_teardowns "$lt_sig")"
+    assert_eq    "livetrap:$lt_name-restores-the-args"            "the student flags" \
+                 "$(lt_args "$lt_sig")"
+    # The suite's own last line stops the container hold_container raised; an interrupted run
+    # never gets there, so the teardown has to.
+    assert_match "livetrap:$lt_name-stops-the-container"          '^release_container$' \
+                 "$(lt_log "$lt_sig")"
+done
+# ...and ends the race group's launchers, which a Ctrl+C cannot reach. INT only: a TERM sent to
+# the whole group ends them by itself, so it cannot tell a teardown that does from one that does not.
+# A missing pid file reads as this suite's own pid, which is alive, so it fails rather than passes.
+assert_ok "livetrap:int-ends-what-the-race-group-left-running" \
+          wait_until 5 pid_is_gone "$(cat "$LT/INT/race.pid" 2>/dev/null || echo "$$")"
+
+# A CTRL+C DURING THE EXIT ARM'S OWN TEARDOWN, which is where a slow podman stop or tunnel release
+# invites a second one. bash runs the INT arm inside the EXIT arm (measured), and that arm has to
+# do the whole teardown -- a once-only guard set on the way in would find it under way and leave
+# with the tunnel still up.
+lt_run late
+assert_contains "livetrap:a-late-ctrl-c-lands-after-the-suite-finished" "THE-REST-OF-THE-SUITE" \
+                "$(lt_log late)"
+assert_eq "livetrap:a-late-ctrl-c-still-releases-the-tunnel" "1" "$(lt_teardowns late)"
+assert_eq "livetrap:a-late-ctrl-c-ends-in-signal-SIGINT" "signal SIGINT" "$(lt_status late)"
 
 # ─── pt_distro_family: which package family a Linux is, from any machine (#195) ─
 # A UNIT TEST FOR THE REASON mf() AND sel_door_remote() ARE, and it is the same reason twice: the

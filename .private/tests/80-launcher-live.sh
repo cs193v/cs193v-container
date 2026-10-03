@@ -30,6 +30,43 @@ fwd_init
 cd "$REPO" || exit 1
 
 TMP="$(new_tmpdir)"
+# Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
+# pidfile are named by a hash of (course directory, instance), so a glob picks up every other
+# checkout's and instance's files too -- including stale ones whose process is long dead. That
+# is not hypothetical: it made the two --reset-tunnel assertions below skip with "no pidfile"
+# while a perfectly good tunnel was running, which is worse than failing.
+#
+# THROUGH --dev-tunnel NOW, not `L doctor`, and both halves of that are improvements rather than
+# tidying. Cost: doctor runs preflight, so every call paid a `podman info` -- 536-1222ms (ERRORS.md
+# D11) -- and release_tunnel calls this from the EXIT trap. Capability: doctor's pid line is gated
+# on tunnel_alive, so it goes SILENT for a master that has been SIGSTOPped, which is exactly the
+# state the two wedge cases below create on purpose; they had to reach it before wedging it. The
+# identity test is unchanged and is the launcher's own -- tunnel_owner_pid checks that our control
+# socket is on that pid's command line before believing the pidfile (lib/assert.sh).
+tunnel_pid() { tunnel_owner_pid; }
+
+# Moved up from "giving the host ports back" below, for restore() -- see the note there.
+# SCOPED TO OUR OWN TUNNEL, by asking the launcher through tunnel_pid rather than globbing
+# TMPDIR or matching on `ssh`: doctor honours CS193V_INSTANCE, so a colleague's tunnel is
+# invisible to it and cannot be killed by accident. Do not "simplify" this to a pkill.
+#
+# A plain kill, not `ssh -O exit`. The pid came from the launcher itself, SIGTERM makes the
+# master release its listening sockets and unlink its control socket, and if a stale socket
+# ever did survive, tunnel_start rm -f's it before starting the next one. Waiting for the
+# ports to actually go is the point -- a kill that has not taken effect yet is indistinguishable
+# from one that never will, and cleanup:the-forwards-are-released at the bottom would then be
+# measuring the wrong instant.
+#
+# The CONTAINER is not this function's business: the suite's last line stops it, and so does
+# restore() for a run that never gets there.
+release_tunnel() {
+    local p
+    p="$(tunnel_pid)"
+    [ -n "$p" ] || return 0
+    kill "$p" 2>/dev/null || true
+    wait_until 15 no_forwards
+}
+
 # container.args is edited in place to provoke config drift, so restore it from the backup
 # on ANY exit — an interrupted run must not leave the student's flag file modified.
 cp $REPO/.config/container.args "$TMP/ca.orig"
@@ -54,14 +91,37 @@ restore() {
     # listener on a FORWARDED port and the next 60-container.sh run measured it instead of its
     # own (#34).
     clean_vt_processes
+    # The race group's four launchers, before the tunnel and the container, because one still
+    # starting up could raise both again after the lines below took them down. They were started with
+    # `&` and no job control, so a Ctrl+C never reaches them. The group clears the list once it has
+    # reaped them, so this never signals a pid that has since been handed to something else.
+    # shellcheck disable=SC2086
+    [ -n "${RACE_PIDS:-}" ] && kill -9 $RACE_PIDS 2>/dev/null
     # And the host ports, for the same reason one resource further out: a run that is
     # interrupted has still started tunnels, and leaving them bound hands the next developer a
-    # failure they did not cause. Guarded because this trap can fire before release_tunnel is
-    # even parsed -- require_image bails out above it.
-    command -v release_tunnel >/dev/null 2>&1 && release_tunnel
+    # failure they did not cause. Defined ABOVE this function for that reason: it used to sit
+    # with the tunnel group behind a `command -v` guard, so a run interrupted before that group
+    # left its tunnel up (#425).
+    release_tunnel
+    # And the container, which the suite's last line stops and an interrupted run never reaches:
+    # hold_container leaves it up between groups, and since #41 running means somebody is in it.
+    release_container
     shim_cleanup
 }
-trap restore EXIT INT TERM
+# INT AND TERM END THE RUN AFTER CLEANING UP. A trap on either that returns resumes the script at
+# the next command, so `trap restore EXIT INT TERM` tore down on a Ctrl+C and then carried on
+# creating containers and tunnels (#425). Nor is EXIT alone enough: bash carries on past a child
+# that caught the Ctrl+C and exited, which the launcher does around a rebuild and a shell.
+#
+# INT RE-RAISES rather than exiting 130, because that same rule applies one level up: a shell
+# running this suite carries on past it if it exits 130, and stops if it dies of SIGINT (both
+# measured on bash 3.2). Nothing waits cooperatively on TERM, so 143 is enough there. Each arm
+# clears EXIT first so the teardown runs once -- and restore() keeps no once-only flag, because
+# a Ctrl+C during the EXIT arm's teardown runs the INT arm inside it and that one has to finish
+# the job. 14-test-harness.sh drives these three lines and restore() as they stand here.
+trap restore EXIT
+trap 'restore; trap - EXIT INT; kill -s INT $$' INT
+trap 'restore; trap - EXIT; exit 143' TERM
 clean_vt_fixtures                     # ...and at START, which is the half a kill cannot skip
 clean_vt_processes                    # a no-op while the container does not exist yet
 
@@ -454,6 +514,7 @@ fi
 # shellcheck disable=SC2086
 [ -n "$RACE_PIDS" ] && kill -9 $RACE_PIDS 2>/dev/null
 wait 2>/dev/null || true
+RACE_PIDS=''                          # reaped, so restore() must not signal them again
 release_container
 
 # ─── the `podman start` config trap  (§2.5) ────────────────────────────────────
@@ -766,20 +827,8 @@ record "doctor:full-output" "$(printf '%s' "$out" | do_tr '\n' '|')"
 # The port list itself is derived once in lib/assert.sh, for all three tiers.
 count_fwd() { count_forwards; }
 
-# Ask the LAUNCHER which tunnel is ours, rather than globbing TMPDIR. The control socket and
-# pidfile are named by a hash of (course directory, instance), so a glob picks up every other
-# checkout's and instance's files too -- including stale ones whose process is long dead. That
-# is not hypothetical: it made the two --reset-tunnel assertions below skip with "no pidfile"
-# while a perfectly good tunnel was running, which is worse than failing.
-#
-# THROUGH --dev-tunnel NOW, not `L doctor`, and both halves of that are improvements rather than
-# tidying. Cost: doctor runs preflight, so every call paid a `podman info` -- 536-1222ms (ERRORS.md
-# D11) -- and release_tunnel calls this from the EXIT trap. Capability: doctor's pid line is gated
-# on tunnel_alive, so it goes SILENT for a master that has been SIGSTOPped, which is exactly the
-# state the two wedge cases below create on purpose; they had to reach it before wedging it. The
-# identity test is unchanged and is the launcher's own -- tunnel_owner_pid checks that our control
-# socket is on that pid's command line before believing the pidfile (lib/assert.sh).
-tunnel_pid() { tunnel_owner_pid; }
+# tunnel_pid, which asks the LAUNCHER which tunnel is ours, is defined at the top beside
+# restore(), which reaches it through release_tunnel from the first line of the run.
 # EMPTY UNLESS THE SOCKET IS REALLY THERE, using tunnel_alive's own test. --dev-tunnel prints the
 # path this instance WOULD use, which is what makes it derivable at all -- but the caller below
 # branches on "did we find a control socket", and a path that always answers would turn its else
@@ -801,25 +850,8 @@ record "tunnel:control-socket" "${CTL:-<none>}"
 # and watches their run fail for a reason they did not cause. "Whoever tested last still owns
 # the ports" is exactly the slow collision CLAUDE.md warns about, produced by the suite itself.
 #
-# SCOPED TO OUR OWN TUNNEL, by asking the launcher through tunnel_pid rather than globbing
-# TMPDIR or matching on `ssh`: doctor honours CS193V_INSTANCE, so a colleague's tunnel is
-# invisible to it and cannot be killed by accident. Do not "simplify" this to a pkill.
-#
-# A plain kill, not `ssh -O exit`. The pid came from the launcher itself, SIGTERM makes the
-# master release its listening sockets and unlink its control socket, and if a stale socket
-# ever did survive, tunnel_start rm -f's it before starting the next one. Waiting for the
-# ports to actually go is the point -- a kill that has not taken effect yet is indistinguishable
-# from one that never will, and the assertion below would then be measuring the wrong instant.
-#
-# The CONTAINER is deliberately left running: it is what the developer goes on to use, and the
-# next `./cs193v` brings the tunnel back in about a second.
-release_tunnel() {
-    local p
-    p="$(tunnel_pid)"
-    [ -n "$p" ] || return 0
-    kill "$p" 2>/dev/null || true
-    wait_until 15 no_forwards
-}
+# release_tunnel itself is defined at the top, beside restore(), which needs it from the first line
+# of the run: a run interrupted before this group is exactly the one whose tunnel must come down.
 
 # THE test: a server bound to the container's OWN loopback, which was unreachable by design
 # before this change, must answer from the host.

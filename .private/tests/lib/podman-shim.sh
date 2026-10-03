@@ -131,7 +131,7 @@ launcher_rc() {                       # launcher_rc [ARGS...] -> prints rc, disc
 #
 # PUT A BARE ENTER BEFORE A LINE ANSWER AND IT BECOMES THE FAILING SHAPE: the queue then starts
 # with the newline, `read -r` returns empty, and the answer is gone. `launcher_tty_repo '\nexit\n'`
-# at 70-sighup.sh:301 and 80-launcher-live.sh:110 is one screen away from it. setup-git hit exactly
+# at 70-sighup.sh:301 and 80-launcher-live.sh:170 is one screen away from it. setup-git hit exactly
 # this and #206 replaced its feeder with lib/ptydrive.py; these 24 sites were left alone
 # deliberately, because none of them is that shape today. If one becomes it, this is the note that
 # says what happened.
