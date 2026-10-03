@@ -42,7 +42,7 @@ trap 'rm -f "$OUT"; rm -rf "$WORK"' EXIT
 # still in python's buffer with it and is reported as one that produced nothing. Measured: a walk
 # that sent its caller SIGTERM in property 3 left $OUT empty (#435).
 python3 -u - "$PRIVATE/install-cs193v.sh" "$SEED" "$WORK" > "$OUT" 2>&1 <<'PY'
-import errno, hashlib, os, random, shutil, subprocess, sys
+import errno, hashlib, os, random, re, shutil, subprocess, sys
 
 BOOT, SEED, WORK = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 rng = random.Random(SEED)
@@ -69,14 +69,28 @@ def oracle(root):
     lines.sort()
     return hashlib.sha256(b"".join(l + b"\n" for l in lines)).hexdigest()
 
-def run_verb(d):                      # -> (rc, stdout, stderr)
-    p = subprocess.run(["bash", BOOT, "--dev-manifest-hash", d],
+# STDOUT AS PRINTED, NOT STRIPPED (#454). It used to be stripped here, before anything judged it,
+# so a walk that padded its digest passed every property that read one -- measured: a leading
+# space, a leading or trailing blank line, a trailing space, each 11 pass 0 fail. Every reader of
+# stdout below gets it raw, refusal-is-quiet included, so a refusal that prints only a newline now
+# counts as printing something. stderr is left stripped, as it was.
+def run_verb(d, boot=BOOT):           # -> (rc, stdout, stderr)
+    p = subprocess.run(["bash", boot, "--dev-manifest-hash", d],
                        capture_output=True)
-    return p.returncode, p.stdout.decode("utf-8", "replace").strip(), \
+    return p.returncode, p.stdout.decode("utf-8", "replace"), \
            p.stderr.decode("utf-8", "replace").strip()
 
-def is_digest(s):                     # a stripped stdout that is a digest, as success prints
-    return len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+# ONE DIGEST LINE AND NOTHING ELSE, which is the verb's own contract (install-cs193v.sh: "ONE LINE
+# ON STDOUT AND NOTHING ELSE") and narrower than what its readers forgive. The verb prints exactly
+# what manifest_hash prints, and everything that reads either takes it through `$(...)` --
+# release.sh's pin and the tests through the verb, install-cs193v.sh's payload check through
+# manifest_hash itself. `$(...)` strips trailing newlines and nothing else, so a leading space or
+# blank line, or a trailing space, reaches a comparison against the pin and fails it, while a
+# trailing blank line would be forgiven. The contract is what is held here, blank line included;
+# only the newline that ends the one line is optional, since `$(...)` makes it so.
+DIGEST_LINE = re.compile(r"[0-9a-f]{64}\n?")
+def digest_of(printed):               # -> the digest, or None if stdout is not one digest line
+    return printed[:64] if DIGEST_LINE.fullmatch(printed) else None
 
 # ─── the name corpus: every shape that has ever broken a shell walk ───────────
 # BYTES, INCLUDING ONE THAT IS NOT VALID UTF-8. surrogateescape is how Python carries such a name,
@@ -116,7 +130,7 @@ out("name-corpus", str(len(NAMES)))
 # above, loudly, rather than as a suite that quietly skipped everything and reported green.
 MAY_REFUSE = {b"not-utf8-\xff\xfe.txt"}
 out("names-may-be-refused", str(len(MAY_REFUSE)))
-refused = []
+refused, refused_as_dir = [], []
 
 def fresh(tag):
     d = os.path.join(WORK, tag)
@@ -124,18 +138,36 @@ def fresh(tag):
     os.mkdir(d)
     return d
 
+def as_dirname(name):                 # how property 2 spells a corpus name as a directory
+    return name.replace(b"-", b"d")
+MAY_REFUSE_AS_DIR = {as_dirname(n): n for n in MAY_REFUSE}
+
+# THE REFUSAL IS ANSWERED HERE IN BOTH ITS FORMS (#454): MAY_REFUSE's name as the file, and as a
+# directory in the spelling as_dirname() gives it, which os.makedirs refuses before the file is
+# reached. Judged by the component the filesystem actually named in the error, and by which step
+# failed -- the file's name only from open(), its directory spelling only from os.makedirs() --
+# then recorded under the corpus entry it came from, so names-refused names corpus entries. The
+# directory form used to be let through by property 2 and recorded nowhere -- 6 of the 14 refusals
+# at the default seed on a Mac, measured.
 def plant(d, name, body=b"x\n", sub=None):   # -> True if it landed, False if refused
     base = os.fsencode(d)
-    if sub is not None:
-        base = os.path.join(base, sub)
-        os.makedirs(base, exist_ok=True)
+    as_dir = True                     # which step failed: each spelling is allowed only at its own
     try:
+        if sub is not None:
+            base = os.path.join(base, sub)
+            os.makedirs(base, exist_ok=True)
+        as_dir = False
         with open(os.path.join(base, name), "wb") as fh:
             fh.write(body)
     except OSError as exc:
-        if exc.errno != errno.EILSEQ or name not in MAY_REFUSE:
+        what = os.path.basename(os.fsencode(exc.filename)) if exc.filename is not None else None
+        allowed = MAY_REFUSE_AS_DIR if as_dir else MAY_REFUSE
+        if exc.errno != errno.EILSEQ or what not in allowed:
             raise
-        refused.append(name)
+        if as_dir:
+            refused_as_dir.append(what)
+            what = MAY_REFUSE_AS_DIR[what]
+        refused.append(what)
         return False
     return True
 
@@ -147,6 +179,31 @@ def plant(d, name, body=b"x\n", sub=None):   # -> True if it landed, False if re
 N_RANDOM, N_MUTATED, N_STABLE = 120, 40, 6
 out("cases-planned", str(len(NAMES) + N_RANDOM + N_MUTATED + N_STABLE))
 reached = 0
+
+# ─── the judge first: one digest line is a digest, and nothing else is  (#454) ─
+# Properties 1, 2, 3 and 5 read the walk's digest through run_verb and digest_of, so the two are
+# asked here, before anything trusts them, of a stand-in verb that prints each shape verbatim. The
+# same path the real verb takes, which is the point: a strip creeping back into run_verb is caught
+# as surely as a digest_of that has been loosened, and both pass every property below on a walk
+# that prints its digest correctly. The first two are the ones that must be ACCEPTED, so a judge
+# that refused everything does not pass either.
+JUDGE = os.path.join(WORK, "judge-verb.sh")
+with open(JUDGE, "w") as fh:
+    fh.write('cat -- "$2"\n')
+H = "0123456789abcdef" * 4
+JUDGED = [(H + "\n", True), (H, True),
+          ("\n" + H + "\n", False), (H + "\n\n", False), (" " + H + "\n", False),
+          (H + " \n", False), (H + "\r\n", False), (H + "\n" + H + "\n", False),
+          ("", False), ("\n", False), (H.upper() + "\n", False), (H[:-1] + "\n", False)]
+misjudged = []
+for k, (text, want) in enumerate(JUDGED):
+    f = os.path.join(WORK, "judged%d" % k)
+    with open(f, "w") as fh:
+        fh.write(text)
+    rc, got, _ = run_verb(f, boot=JUDGE)
+    if (rc == 0 and digest_of(got) is not None) != want:
+        misjudged.append("%r %s" % (text, "refused" if want else "accepted"))
+out("judge-misjudged", "; ".join(misjudged))
 
 # ─── property 1: valid input first, which is what stops "refuse everything" passing ──
 disagree, nonhex, dirty_err = [], [], []
@@ -160,10 +217,11 @@ for i, name in enumerate(NAMES):
     if not plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 40))])):
         continue
     plant(d, b"sibling", sub=b"sub" + (b"dir with space" if i % 3 == 0 else b""))
-    rc, got, err = run_verb(d)
+    rc, printed, err = run_verb(d)
     n_ok += 1
-    if rc != 0 or not is_digest(got):
-        nonhex.append("%r rc=%d out=%r" % (name, rc, got[:80]))
+    got = digest_of(printed)
+    if rc != 0 or got is None:
+        nonhex.append("%r rc=%d out=%r" % (name, rc, printed[:80]))
         continue
     if err:
         dirty_err.append("%r: %s" % (name, err[:80]))
@@ -176,18 +234,22 @@ out("disagree", "; ".join(disagree[:4]))
 out("stderr-on-success", "; ".join(dirty_err[:4]))
 
 # ─── property 2: random trees, same comparison ────────────────────────────────
-def as_dirname(name):                 # keep dir names off the dash cases
-    return name.replace(b"-", b"d")
-MAY_REFUSE_AS_DIR = {as_dirname(n) for n in MAY_REFUSE}
 GENERATOR_COLLISIONS = {errno.ENOTDIR, errno.EEXIST, errno.EISDIR}
 
+# EVERY PLANTING ACCOUNTED FOR (#454): it landed, collided, or plant() put it in `refused` -- the
+# list behind the plantings-the-filesystem-refused record. A planting let through without being
+# any of those is a refusal nobody recorded, which is what the directory form of #305's was until
+# #454, and what every refusal was under the `except OSError: pass` that stood here before #445.
 rand_disagree = []
 n_rand_skipped = 0
+p2_asked = p2_landed = p2_collided = 0
+p2_refused_from = len(refused)
 for i in range(N_RANDOM):
     reached += 1
     d = fresh("rand%d" % i)
     n_planted = 0
     for _ in range(rng.randint(1, 6)):
+        p2_asked += 1
         name = rng.choice(NAMES)
         sub = None
         if rng.random() < 0.4:
@@ -199,19 +261,18 @@ for i in range(N_RANDOM):
         # handles the generator asking the impossible. Narrowing this to EILSEQ was tried and
         # crashes on rand0.
         #
-        # AND NOTHING ELSE (#445), which it used to swallow too. The one refusal allowed here
-        # beside those is #305's arriving as a DIRECTORY, which os.makedirs refuses before plant()'s
-        # own check is reached: MAY_REFUSE's name, spelled as as_dirname() spells it. Any other
-        # refusal -- EILSEQ on another name, EACCES, EINVAL -- raises to the gate, as plant()'s do.
-        # Measured: an EACCES on every name here left 0 random trees tested and the suite green.
+        # AND NOTHING ELSE (#445), which it used to swallow too. #305's refusal, as a file or as a
+        # directory, is plant()'s to answer (#454); any other refusal -- EILSEQ on another name,
+        # EACCES, EINVAL -- raises to the gate, as plant()'s do. Measured: an EACCES on every name
+        # here left 0 random trees tested and the suite green.
         try:
             if plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 60))]), sub=sub):
                 n_planted += 1
         except OSError as exc:
-            if not (exc.errno in GENERATOR_COLLISIONS
-                    or (exc.errno == errno.EILSEQ and sub is not None
-                        and MAY_REFUSE_AS_DIR & set(sub.split(b"/")))):
+            if exc.errno not in GENERATOR_COLLISIONS:
                 raise
+            p2_collided += 1
+    p2_landed += n_planted
     # AN EMPTY TREE IS NOT A SUBJECT. --dev-manifest-hash refuses one ("the course files are
     # empty", rc 1) and it is right to, so judging it here would count a correct refusal as a
     # disagreement. Reachable two ways: every planting collided, which any platform can do at
@@ -221,15 +282,20 @@ for i in range(N_RANDOM):
     if n_planted == 0:
         n_rand_skipped += 1
         continue
-    rc, got, _ = run_verb(d)
-    if rc != 0:
-        rand_disagree.append("rc=%d on tree %d" % (rc, i))
+    rc, printed, _ = run_verb(d)
+    got = digest_of(printed)
+    if rc != 0 or got is None:
+        rand_disagree.append("tree %d did not hash: rc=%d out=%r" % (i, rc, printed[:80]))
         continue
     if got != oracle(d):
         rand_disagree.append("tree %d: shell=%s oracle=%s" % (i, got, oracle(d)))
 out("cases-random", str(N_RANDOM - n_rand_skipped))
 out("cases-random-skipped", str(n_rand_skipped))
 out("random-disagree", "; ".join(rand_disagree[:4]))
+p2_unaccounted = p2_asked - p2_landed - p2_collided - (len(refused) - p2_refused_from)
+out("plantings-unaccounted", "" if p2_unaccounted == 0 else
+    "%d of the %d plantings property 2 asked for neither landed, collided nor were recorded as refused"
+    % (p2_unaccounted, p2_asked))
 
 # ─── property 3: every single-point mutation moves the digest ─────────────────
 # THE HALF THAT MATTERS MOST. A walk that agreed with the oracle but ignored, say, the last file
@@ -249,9 +315,10 @@ for i in range(N_MUTATED):
     d = fresh("mut%d" % i)
     for k in range(3):
         plant(d, b"file%d" % k, body=b"body %d\n" % k, sub=(b"sub" if k == 2 else None))
-    rc0, base, err0 = run_verb(d)
-    if rc0 != 0 or not is_digest(base):
-        insensitive.append("base tree %d did not hash (rc=%d): %s" % (i, rc0, err0[:80]))
+    rc0, printed0, err0 = run_verb(d)
+    base = digest_of(printed0)
+    if rc0 != 0 or base is None:
+        insensitive.append("base tree %d did not hash (rc=%d, out=%r): %s" % (i, rc0, printed0[:80], err0[:80]))
         continue
     op = i % len(MUTATIONS)
     if op == 0:                                   # flip a content byte
@@ -265,10 +332,11 @@ for i in range(N_MUTATED):
         os.rename(os.path.join(d, "file0"), os.path.join(d, "file0-renamed"))
     else:                                         # add a directory, no files in it
         os.mkdir(os.path.join(d, "newdir"))
-    rc1, after, err1 = run_verb(d)
-    if rc1 != 0 or not is_digest(after):
-        insensitive.append("tree %d, %s: the mutated tree did not hash (rc=%d): %s"
-                           % (i, MUTATIONS[op], rc1, err1[:80]))
+    rc1, printed1, err1 = run_verb(d)
+    after = digest_of(printed1)
+    if rc1 != 0 or after is None:
+        insensitive.append("tree %d, %s: the mutated tree did not hash (rc=%d, out=%r): %s"
+                           % (i, MUTATIONS[op], rc1, printed1[:80], err1[:80]))
     elif after == base:
         insensitive.append("tree %d, %s: digest unchanged" % (i, MUTATIONS[op]))
 out("cases-mutated", str(N_MUTATED))
@@ -278,20 +346,20 @@ out("insensitive", "; ".join(insensitive[:4]))
 accepted = []
 d = fresh("neg-symlink"); plant(d, b"real"); os.symlink("real", os.path.join(d, "link"))
 rc, got, _ = run_verb(d)
-if rc == 0: accepted.append("a symlink was accepted: %s" % got)
+if rc == 0: accepted.append("a symlink was accepted: %r" % got)
 d = fresh("neg-dirlink"); plant(d, b"real", sub=b"sub")
 os.symlink("sub", os.path.join(d, "sublink"))
 rc, got, _ = run_verb(d)
-if rc == 0: accepted.append("a symlink to a directory was accepted: %s" % got)
+if rc == 0: accepted.append("a symlink to a directory was accepted: %r" % got)
 d = fresh("neg-newline"); plant(d, b"we\nird")
 rc, got, _ = run_verb(d)
-if rc == 0: accepted.append("a newline in a name was accepted: %s" % got)
+if rc == 0: accepted.append("a newline in a name was accepted: %r" % got)
 d = fresh("neg-fifo"); plant(d, b"real"); os.mkfifo(os.path.join(d, "pipe"))
 rc, got, _ = run_verb(d)
-if rc == 0: accepted.append("a fifo was accepted: %s" % got)
+if rc == 0: accepted.append("a fifo was accepted: %r" % got)
 d = fresh("neg-empty")
 rc, got, _ = run_verb(d)
-if rc == 0: accepted.append("an empty tree was accepted: %s" % got)
+if rc == 0: accepted.append("an empty tree was accepted: %r" % got)
 out("accepted-what-it-refuses", "; ".join(accepted))
 
 # AND A REFUSAL PRINTS NOTHING ON STDOUT, which is what makes `$(...)` around the verb safe: a
@@ -324,16 +392,18 @@ for i in range(N_STABLE):
     # A DIGEST BOTH TIMES, not merely the same answer twice: two refusals print the same nothing,
     # and that passed here as stable -- measured, a walk refusing every tree this property builds
     # stayed green (#445).
-    ra, a, ea = run_verb(d)
-    rb, b, eb = run_verb(d)
-    if ra != 0 or rb != 0 or not is_digest(a) or not is_digest(b):
+    ra, pa, ea = run_verb(d)
+    rb, pb, eb = run_verb(d)
+    a, b = digest_of(pa), digest_of(pb)
+    if ra != 0 or rb != 0 or a is None or b is None:
         unstable.append("tree %d did not hash: rc=%d %r, then rc=%d %r: %s"
-                        % (i, ra, a[:16], rb, b[:16], (ea or eb)[:80]))
+                        % (i, ra, pa[:80], rb, pb[:80], (ea or eb)[:80]))
     elif a != b:
         unstable.append("tree %d: %s then %s" % (i, a, b))
 out("unstable", "; ".join(unstable[:4]))
 
 out("plantings-refused", str(len(refused)))
+out("plantings-refused-as-dir", str(len(refused_as_dir)))
 out("names-refused", b" ".join(sorted(set(refused))).decode("utf-8", "replace"))
 
 # ─── THE LAST LINE: how many cases the loops above actually reached ────────────
@@ -372,6 +442,7 @@ $(cat "$OUT")"
 fi
 pass "mffuzz:the-fuzzer-ran-to-the-end"
 
+assert_eq "mffuzz:only-one-digest-line-is-a-digest" "" "$(fz judge-misjudged)"
 assert_eq "mffuzz:every-valid-tree-hashes"        "" "$(fz nonhex)"
 assert_eq "mffuzz:the-walk-agrees-with-the-oracle" "" "$(fz disagree)"
 assert_eq "mffuzz:success-writes-no-stderr"       "" "$(fz stderr-on-success)"
@@ -392,8 +463,12 @@ record "mffuzz:cases-run" \
 # THE record IS THE DURABLE HALF, not decoration: skip() passes only its NAME to _emit
 # (lib/assert.sh:86), so the reason reaches the screen and never $CS193V_RESULTS. Without this
 # line a diff of two runs could not see the skipped set change.
+#
+# AND IT COUNTS A REFUSAL AS A DIRECTORY TOO (#454), saying how many, so a diff can see them; the
+# assertion beneath is what keeps a planting from going missing from it again.
 record "mffuzz:plantings-the-filesystem-refused" \
-       "$(fz plantings-refused) across [$(fz names-refused)], $(fz cases-random-skipped) random trees left empty"
+       "$(fz plantings-refused) across [$(fz names-refused)] ($(fz plantings-refused-as-dir) of them as a directory), $(fz cases-random-skipped) random trees left empty"
+assert_eq "mffuzz:every-refused-planting-is-recorded" "" "$(fz plantings-unaccounted)"
 if [ -n "$(fz names-refused)" ]; then
     skip "mffuzz:every-name-in-the-corpus-was-planted" \
          "this filesystem refuses $(fz names-refused) -- APFS requires valid UTF-8 in a filename (EILSEQ), so that entry cannot be put to the walk here"
