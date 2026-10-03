@@ -26,9 +26,7 @@ cd "$REPO" || exit 1
 
 # THIS RUN'S OWN SCRATCH, not a fixed name in /tmp (#379). /tmp is one directory for every developer
 # on the machine, so /tmp/pwstate.txt was one file for every concurrent run of this suite: one run
-# read another's --show fixture as its round trip, or found it deleted. WORK and not T, which is
-# the tab the state-file cases below are spelled with: holding a path, T makes five of them pass
-# on "unknown key" in their first line instead of the defect each one names.
+# read another's --show fixture as its round trip, or found it deleted.
 #
 # CHECKED, because a redirect that cannot open its file never runs its command: feed() below would
 # then pass the garbage check having scanned nothing. Removed at the end of the file rather than
@@ -41,9 +39,9 @@ else
     exit 1
 fi
 
-# Read by the guard at the bottom of cs193v-portwatch, three lines below -- a `.` which shellcheck
-# does not follow without -x, and -x here would resolve the source and hide every finding this
-# file has.
+# Read by the source guard at the bottom of cs193v-portwatch, which the `.` three lines below brings
+# in -- a `.` shellcheck does not follow without -x, and -x here would resolve the source and hide
+# every finding this file has.
 # shellcheck disable=SC2034
 CS193V_PORTWATCH_SOURCED=1
 # shellcheck source-path=SCRIPTDIR/..
@@ -353,36 +351,50 @@ assert_eq "pw:publish-every-rejection-ran" "14" "$PUB_BAD_RAN"
 # ─── file out, and back in ─────────────────────────────────────────────────────
 # ROUND TRIP. Whatever the writer emits, the reader must read back identically -- that is the
 # only property that matters across the two, and it is the one a format change would break.
+#
+# THE PARSE ITSELF IS A CHECK (#392). The reader fills PWS_* a line at a time, so by the time it
+# refuses a record it has set the fields before it, and their checks below pass on a refused file.
 pw_publish_parse "state=healthy" "floor=1024" "up=3000:lo,41573:any" "refused=8080:busy,9000:v6lo"
 pw_state_render > "$WORK/pwstate.txt"
-pw_state_parse "$(cat "$WORK/pwstate.txt")"
+if pw_state_parse "$(cat "$WORK/pwstate.txt")"; then
+    pass "pw:roundtrip-parses"
+else
+    fail "pw:roundtrip-parses" "pw_state_parse returned $? on what pw_state_render wrote: ${PWS_ERR:-no reason given}"
+fi
 assert_eq "pw:roundtrip-state"   "healthy"              "$PWS_STATE"
 assert_eq "pw:roundtrip-floor"   "1024"                 "$PWS_FLOOR"
 assert_eq "pw:roundtrip-up"      "3000:lo 41573:any"    "$PWS_UP"
 assert_eq "pw:roundtrip-refused" "8080:busy 9000:v6lo"  "$PWS_REFUSED"
 
 # ─── the reader, against files it should refuse ────────────────────────────────
-rd_bad() {                            # rd_bad NAME TEXT
-    if pw_state_parse "$2" 2>/dev/null; then
+# EACH CASE NAMES ITS REASON, and the reader must give exactly that one (#391). A file is easily
+# refused for something other than the defect it was written to carry -- a tab spelled wrong makes
+# its first line an unknown key, and with the unknown-key check deleted the reader still refuses
+# on "no state line" -- so "rejected" alone passes whatever the reader does about that defect.
+# EXACT, not a prefix: the wrong tab is refused as "unknown key" too, just not as 'colour'.
+rd_bad() {                            # rd_bad NAME WHY TEXT
+    if pw_state_parse "$3" 2>/dev/null; then
         fail "pw:state-rejects:$1" "accepted it"
-    else
+    elif [ "$PWS_ERR" = "$2" ]; then
         pass "pw:state-rejects:$1"
+    else
+        fail "pw:state-rejects:$1" "rejected it, but for \"$PWS_ERR\" rather than \"$2\""
     fi
     RD_BAD_RAN=$(( RD_BAD_RAN + 1 ))
 }
 RD_BAD_RAN=0
-rd_bad "empty"            ""
-rd_bad "no-state-line"    "floor$(printf '\t')1024"
-rd_bad "unknown-key"      "state${T:=$(printf '\t')}healthy
-colour${T}blue"
-rd_bad "bad-state"        "state${T}sideways"
-rd_bad "up-without-class" "state${T}healthy
-up${T}3000"
-rd_bad "bad-class"        "state${T}healthy
-up${T}3000${T}wat"
-rd_bad "bad-port"         "state${T}healthy
-up${T}0${T}lo"
-rd_bad "space-separated"  "state healthy"
+rd_bad "empty"            "empty state file"            ""
+rd_bad "no-state-line"    "no state line"               "floor${A_TAB}1024"
+rd_bad "unknown-key"      "unknown key 'colour'"        "state${A_TAB}healthy
+colour${A_TAB}blue"
+rd_bad "bad-state"        "unknown state 'sideways'"    "state${A_TAB}sideways"
+rd_bad "up-without-class" "up needs a port and a word"  "state${A_TAB}healthy
+up${A_TAB}3000"
+rd_bad "bad-class"        "unknown value 'wat'"         "state${A_TAB}healthy
+up${A_TAB}3000${A_TAB}wat"
+rd_bad "bad-port"         "port out of range '0'"       "state${A_TAB}healthy
+up${A_TAB}0${A_TAB}lo"
+rd_bad "space-separated"  "unknown key 'state healthy'" "state healthy"
 assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
 
 # ─── what --show says when the tunnel itself has gone  (#338) ──────────────────
