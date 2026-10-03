@@ -301,20 +301,25 @@ done
 
 # ─── argv in ───────────────────────────────────────────────────────────────────
 pub_ok() {                            # pub_ok NAME EXPECT_UP ARGS...
-    local name="$1" want="$2"; shift 2
-    if pw_publish_parse "$@" 2>/dev/null && [ "$PWP_UP" = "$want" ]; then
+    local name="$1" want="$2" rc; shift 2
+    pw_publish_parse "$@" 2>/dev/null; rc=$?
+    if [ "$rc" -eq 0 ] && [ "$PWP_UP" = "$want" ]; then
         pass "pw:publish:$name"
     else
-        fail "pw:publish:$name" "rc=$? up='${PWP_UP:-}' err='${PWP_ERR:-}'"
+        fail "pw:publish:$name" "rc=$rc up='${PWP_UP:-}' err='${PWP_ERR:-}'"
     fi
 }
-pub_bad() {                           # pub_bad NAME ARGS...
-    local name="$1"; shift
+# EACH CASE NAMES ITS REASON, exactly, as the reader's do below (#404). Without it a case passed on
+# whichever rejection fired first: with the no-colon check deleted, port-no-class stayed green on
+# "unknown value '3000'".
+pub_bad() {                           # pub_bad NAME WHY ARGS...
+    local name="$1" why="$2"; shift 2
     if pw_publish_parse "$@" 2>/dev/null; then
         fail "pw:publish-rejects:$name" "accepted it; up='${PWP_UP:-}'"
+    elif [ "$PWP_ERR" = "$why" ]; then
+        pass "pw:publish-rejects:$name"
     else
-        [ -n "${PWP_ERR:-}" ] && pass "pw:publish-rejects:$name" \
-                              || fail "pw:publish-rejects:$name" "rejected but set no reason"
+        fail "pw:publish-rejects:$name" "rejected it, but for \"$PWP_ERR\" rather than \"$why\""
     fi
     PUB_BAD_RAN=$(( PUB_BAD_RAN + 1 ))
 }
@@ -326,20 +331,21 @@ pub_ok "empty-up"  ""                 "state=healthy" "up="
 pub_ok "no-up-key" ""                 "state=healthy"
 pub_ok "with-all"  "3000:lo"          "state=healthy" "floor=1024" "up=3000:lo" "refused=8080:busy"
 
-pub_bad "no-state"          "up=3000:lo"
-pub_bad "unknown-state"     "state=confused" "up="
-pub_bad "unknown-key"       "state=healthy" "colour=blue"
-pub_bad "bare-word"         "state=healthy" "hello"
-pub_bad "duplicate-key"     "state=healthy" "up=3000:lo" "up=5173:lo"
-pub_bad "bad-class"         "state=healthy" "up=3000:wat"
-pub_bad "bad-port"          "state=healthy" "up=0:lo"
-pub_bad "octal-port"        "state=healthy" "up=03000:lo"
-pub_bad "port-no-class"     "state=healthy" "up=3000"
-pub_bad "bad-reason"        "state=healthy" "refused=8080:whatever"
-pub_bad "floor-not-a-port"  "state=healthy" "floor=0" "up="
-pub_bad "floor-nondecimal"  "state=healthy" "floor=x" "up="
-pub_bad "embedded-tab"      "state=healthy" "up=3000:lo$(printf '\t')"
-pub_bad "embedded-newline"  "state=healthy" "up=$(printf '3000:lo\nup=9:lo')"
+pub_bad "no-state"         "no state given"             "up=3000:lo"
+pub_bad "unknown-state"    "unknown state 'confused'"   "state=confused" "up="
+pub_bad "unknown-key"      "unknown key 'colour'"       "state=healthy" "colour=blue"
+pub_bad "bare-word"        "not key=value: 'hello'"     "state=healthy" "hello"
+pub_bad "duplicate-key"    "duplicate up"               "state=healthy" "up=3000:lo" "up=5173:lo"
+pub_bad "bad-class"        "unknown value 'wat'"        "state=healthy" "up=3000:wat"
+pub_bad "bad-port"         "port out of range '0'"      "state=healthy" "up=0:lo"
+pub_bad "octal-port"       "non-canonical port '03000'" "state=healthy" "up=03000:lo"
+pub_bad "port-no-class"    "no colon in '3000'"         "state=healthy" "up=3000"
+pub_bad "bad-reason"       "unknown value 'whatever'"   "state=healthy" "refused=8080:whatever"
+pub_bad "floor-not-a-port" "floor out of range '0'"     "state=healthy" "floor=0" "up="
+pub_bad "floor-nondecimal" "non-decimal floor 'x'"      "state=healthy" "floor=x" "up="
+pub_bad "embedded-tab"     "unknown value 'lo${A_TAB}'" "state=healthy" "up=3000:lo$(printf '\t')"
+pub_bad "embedded-newline" "unknown value '$(printf 'lo\nup=9:lo')'" \
+                                                        "state=healthy" "up=$(printf '3000:lo\nup=9:lo')"
 assert_eq "pw:publish-every-rejection-ran" "14" "$PUB_BAD_RAN"
 
 # The two control-character cases matter because the file below is tab-separated and
@@ -395,7 +401,13 @@ up${A_TAB}3000${A_TAB}wat"
 rd_bad "bad-port"         "port out of range '0'"       "state${A_TAB}healthy
 up${A_TAB}0${A_TAB}lo"
 rd_bad "space-separated"  "unknown key 'state healthy'" "state healthy"
-assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
+rd_bad "floor-nondecimal" "non-decimal floor"           "state${A_TAB}healthy
+floor${A_TAB}x"
+# `lo` IS A CLASS, a word an `up` record may carry but a refusal may not. A reason in neither list
+# would stay refused by a reader that checked refusals against the classes as well (#405).
+rd_bad "bad-reason"       "unknown value 'lo'"          "state${A_TAB}healthy
+refused${A_TAB}8080${A_TAB}lo"
+assert_eq "pw:state-every-rejection-ran" "10" "$RD_BAD_RAN"
 
 # ─── what --show says when the tunnel itself has gone  (#338) ──────────────────
 # Once the ssh master's control socket has gone, the supervisor publishes master-unresponsive with
