@@ -841,10 +841,19 @@ dyn_is_forwarded() { fwd_owned_ports | grep -qx "$1"; }
 # wrapped in a `$( )` that looks like it works. 10-static.sh's
 # harness:no-exiting-helper-runs-in-a-subshell keeps every other call site honest, and
 # lib/assert.sh:57-58 is the invariant both of them serve.
+#
+# MEMOISED ON THE COUNT, NOT ON BEING SET (#328). A second call is answered from $DYN_PORTS only
+# when that already holds N, so it costs nothing and binds nothing -- and gets the whole held set,
+# since more ports than asked cannot turn a counting check vacuous and fewer is what did. Asked for
+# more, it binds the difference and validates the whole set below exactly as a first call would,
+# so a held port that has stopped being carried fails it too. The memo used to be
+# `[ -n "$DYN_PORTS" ]`, which skipped both guards and handed `dyn_ports 4` the two ports an
+# earlier `dyn_ports 2` had made, with rc 0.
 DYN_PORTS=''
-dyn_ports() {                         # dyn_ports [N] -> $DYN_PORTS, N forwarded ports, spaced
-    local want="${1:-1}" got='' p i=0 rc=0
-    [ -n "$DYN_PORTS" ] && return 0
+dyn_ports() {                         # dyn_ports [N] -> $DYN_PORTS, at least N forwarded, spaced
+    local want="${1:-1}" got="$DYN_PORTS" p i=0 rc=0
+    for p in $got; do i=$((i + 1)); done
+    [ "$i" -ge "$want" ] && return 0
     fwd_init
     while [ "$i" -lt "$want" ]; do
         p="$(dyn_free_port $got)" || break
