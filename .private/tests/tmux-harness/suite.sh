@@ -1187,7 +1187,7 @@ hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TA
 # "the chrome is crowding out the tabs" about chrome that was behaving perfectly.
 #
 # SO ASK tmux WHAT THE LABEL IS. The bar renders window-status-format, which is `#I #W`, and
-# probe_name reads that same #{window_name}. The two agree whether the name is stale or fresh
+# probe_focus reads that same #{window_name}. The two agree whether the name is stale or fresh
 # -- PROVIDED they describe the same moment, which two separate reads do not (#367, below) --
 # so the race cannot reach the verdict, and what is left being measured is width and layout --
 # which is what this section is for. It is also STRONGER than the literal for the regression
@@ -1236,19 +1236,29 @@ hx_expect_contains "at 40 columns the new-tab button survives" "$narrow" "NEW TA
 # the first try and is judged as `tmux`. Only a flip during one capture costs a second.
 #
 # LABEL_GAP_HOOK runs between the capture and the read after it. Empty for the check itself; the
-# guards below rename the tab there.
+# guards below rename the tab there. LABEL_PROBE is the read, and the guards below swap it for
+# one that answers nothing.
 LABEL_TRIES=10
 LABEL_GAP_HOOK=''
 # The index and the name in ONE read, so they come from one moment too.
 probe_focus() { it display-message -p -t cs193v '#{window_index} #{window_name}' 2>/dev/null; }
+LABEL_PROBE=probe_focus
+# AN ALL-DIGIT INDEX, A SPACE, AND A NAME WITH SOMETHING IN IT, or there is nothing to look for
+# (#420): an empty or blank part is a needle every bar contains. See the guards below.
+label_readable() {
+  case "$1" in *" "*) ;; *) return 1 ;; esac
+  case "${1%% *}" in ''|*[!0-9]*) return 1 ;; esac
+  case "${1#* }" in *[![:space:]]*) return 0 ;; esac
+  return 1
+}
 label_verdict() {
   local before after n=0
   while :; do
     n=$((n + 1))
-    before="$(probe_focus)"
+    before="$("$LABEL_PROBE")"
     lbl_bar="$(hx_cap "$S" | sed -n 2p)"
     [ -z "$LABEL_GAP_HOOK" ] || "$LABEL_GAP_HOOK"
-    after="$(probe_focus)"
+    after="$("$LABEL_PROBE")"
     [ "$before" = "$after" ] && break
     if [ "$n" -ge "$LABEL_TRIES" ]; then
       lbl_tries="$n" lbl_want="$after" lbl_verdict=unsettled
@@ -1257,16 +1267,26 @@ label_verdict() {
     fi
   done
   lbl_tries="$n" lbl_want="$after"
+  if ! label_readable "$lbl_want"; then
+    lbl_verdict=unreadable
+    lbl_detail="could not read the focused tab: the label read answered [$lbl_want]   bar was: [$lbl_bar]"
+    return 0
+  fi
   case "$lbl_bar" in
     *"$lbl_want"*) lbl_verdict=pass lbl_detail='' ;;
     *)             lbl_verdict=fail lbl_detail="expected to find: $lbl_want   bar was: [$lbl_bar]" ;;
   esac
 }
+expect_label() { # desc verdict [want] [tries] -- an empty want or tries is not checked
+  if [ "$lbl_verdict" = "$2" ] && { [ -z "${3:-}" ] || [ "$lbl_want" = "$3" ]; } \
+     && { [ -z "${4:-}" ] || [ "$lbl_tries" = "$4" ]; }; then
+    hx_pass "$1"
+  else
+    hx_fail "$1" "$lbl_verdict after $lbl_tries capture(s), judged [$lbl_want]: $lbl_detail"
+  fi
+}
 label_verdict
-case "$lbl_verdict" in
-  pass) hx_pass "at 40 columns the focused tab's label is still on the bar" ;;
-  *)    hx_fail "at 40 columns the focused tab's label is still on the bar" "$lbl_detail" ;;
-esac
+expect_label "at 40 columns the focused tab's label is still on the bar" pass
 
 # RECORDED, NOT ASSERTED, because zero is not guaranteed and non-zero is not a defect -- it is
 # load-dependent, which is what record() is for. It is also the number that tells a reader
@@ -1279,11 +1299,12 @@ hx_record "stale tab labels at capture" \
 
 # ─── ...AND THE GAP, RENAMED IN ON DEMAND (#367) ───────────────────────────────
 #
-# label_verdict judged three more times, with LABEL_GAP_HOOK renaming the tab between the capture
-# and the read after it. PINNED NAMES, waited for on the bar wherever a verdict reads the bar, so
-# these are deterministic -- and that is also their limit. They cover a name that flips in the gap, not the bar lagging the
-# name, because the name timer behind the lag can only be waited out by sleeping; that half is
-# the read before the capture, measured above.
+# label_verdict judged again below: three times with LABEL_GAP_HOOK renaming the tab between the
+# capture and the read after it, then with LABEL_PROBE swapped for reads that answer nothing.
+# PINNED NAMES, waited for on the bar wherever a verdict reads the bar, so these are deterministic
+# -- and that is also their limit. They cover a name that flips in the gap, not the bar lagging
+# the name, because the name timer behind the lag can only be waited out by sleeping; that half
+# is the read before the capture, measured above.
 #
 #   1. one rename in the gap: a correct bar still passes, judged on the NEW name -- which is also
 #      what proves the rename happened. The single-read check failed this, as #367 did.
@@ -1298,14 +1319,6 @@ pin_label() { # name text -- pin the focused tab's label; fails unless the bar t
   hx_until_ok "hx_cap $S | sed -n 2p | grep -F -- '$2'" 6 && return 0
   lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(hx_cap "$S" | sed -n 2p)]"
   return 1
-}
-expect_label() { # desc verdict [want] [tries] -- an empty want or tries is not checked
-  if [ "$lbl_verdict" = "$2" ] && { [ -z "${3:-}" ] || [ "$lbl_want" = "$3" ]; } \
-     && { [ -z "${4:-}" ] || [ "$lbl_tries" = "$4" ]; }; then
-    hx_pass "$1"
-  else
-    hx_fail "$1" "$lbl_verdict after $lbl_tries capture(s), judged [$lbl_want]: $lbl_detail"
-  fi
 }
 raced_verdict() { LABEL_GAP_HOOK="$1"; label_verdict; LABEL_GAP_HOOK=''; }
 lbl_raced=0
@@ -1329,6 +1342,24 @@ pin_label HX-WIDE-HX-WIDE-HX-WIDE-HX-WIDE-HX-WIDE HX-WIDE && label_verdict
 expect_label "at 40 columns a label that is really off the bar fails on the first settled capture" \
              fail '' 1
 
+# AND A READ WITH NOTHING IN IT IS REFUSED, NOT MATCHED (#420). An empty name leaves `18 `, which
+# the `18 TABS` badge contains; an empty index leaves ` bash`, which ` 17 bash ` contains; an
+# empty read leaves nothing, which every bar contains -- so all of them used to pass. Measured:
+# with the name read emptied, the main check passed on `18 `.
+probed_verdict() { LABEL_PROBE="$1"; label_verdict; LABEL_PROBE=probe_focus; }
+probe_no_name()    { printf '%s ' "$(probe_win)"; }
+probe_blank_name() { printf '%s  ' "$(probe_win)"; }
+probe_no_index()   { printf ' %s' "$(probe_name)"; }
+probe_nothing()    { :; }
+probed_verdict probe_no_name
+expect_label "at 40 columns a read with no tab name is refused as unreadable" unreadable
+probed_verdict probe_blank_name
+expect_label "at 40 columns a read with a blank tab name is refused as unreadable" unreadable
+probed_verdict probe_no_index
+expect_label "at 40 columns a read with no tab index is refused as unreadable" unreadable
+probed_verdict probe_nothing
+expect_label "at 40 columns a read that answers nothing is refused as unreadable" unreadable
+
 # ─── ...AND THE VERDICT MUST NOT CARE WHAT THE TAB IS CALLED (#145) ────────────
 #
 # THE ASSERTION THAT STOPS THE LITERAL COMING BACK, and the reason the fix for #145 is not just
@@ -1336,14 +1367,18 @@ expect_label "at 40 columns a label that is really off the bar fails on the firs
 # exactly what the race produced by accident, so if this check ever again needs the tab to be
 # running a particular program, this is what goes red. Short on purpose: ` 18 HX-PROBE ` is 13
 # of the 40 columns, which leaves the margin the real labels have.
-it rename-window -t cs193v HX-PROBE
-narrow="$(hx_cap "$S" | sed -n 2p)"
-want="$(probe_win) HX-PROBE"
-case "$narrow" in
-  *"$want"*) hx_pass "at 40 columns the check does not depend on what the tab is called" ;;
-  *) hx_fail "at 40 columns the check does not depend on what the tab is called" \
-             "expected to find: $want   bar was: [$narrow]" ;;
-esac
+#
+# THROUGH label_verdict, WHICH IS WHAT MAKES THE CLAIM ABOVE TRUE (#420). This used to build its
+# own `want` beside the main check's, so a literal put back into the main check left it green --
+# measured. Now it judges and reports with the main check's own label_verdict and expect_label,
+# and is told what was read: a verdict made on anything but `N HX-PROBE` is red. pin_label waits
+# for the bar to draw the new name first, rather than capturing straight after the rename --
+# never seen to matter (0 stale captures in 300 rename-then-capture pairs), but nothing else
+# vouches for the redraw. That wait is also why this is not a layout check: a bar that cannot
+# show the label fails here as "setup", and the main check above is the one that judges layout.
+pin_label HX-PROBE " $(probe_win) HX-PROBE " && label_verdict
+expect_label "at 40 columns the check does not depend on what the tab is called" \
+             pass "$(probe_win) HX-PROBE"
 
 hx_tmux resize-window -t "$S" -x "$HX_W" -y "$HX_H" 2>/dev/null || true
 hx_until 'it display-message -p -t cs193v "#{window_width}"' "$HX_W" 6
