@@ -311,12 +311,12 @@ hx_wheel_down() {
 hx_scroll_to() { # session regex [max_notches]
   local name="$1" re="$2" max="${3:-60}" i=0
   while [ "$i" -lt "$max" ]; do
-    hx_cap "$name" | grep -qE "$re" && return 0
+    hx_cap "$name" | grep -E "$re" >/dev/null && return 0
     hx_wheel_up "$name" "$((HX_H / 2))" "$((HX_W / 2))" 1
     i=$((i + 1))
     sleep 0.05
   done
-  hx_cap "$name" | grep -qE "$re"
+  hx_cap "$name" | grep -E "$re" >/dev/null
 }
 
 # --- screen capture ---------------------------------------------------------
@@ -352,7 +352,7 @@ hx_wait() { # session regex [timeout_seconds]
   local name="$1" re="$2" i=0 max
   max="$(_hx_polls "${3:-8}")"
   while [ "$i" -lt "$max" ]; do
-    if hx_cap "$name" | grep -qE "$re"; then return 0; fi
+    if hx_cap "$name" | grep -E "$re" >/dev/null; then return 0; fi
     sleep "$HX_POLL"
     i=$((i + 1))
   done
@@ -408,7 +408,7 @@ hx_gone() { # session regex [timeout_seconds]
   local name="$1" re="$2" i=0 max
   max="$(_hx_polls "${3:-8}")"
   while [ "$i" -lt "$max" ]; do
-    hx_cap "$name" | grep -qE "$re" || return 0
+    hx_cap "$name" | grep -E "$re" >/dev/null || return 0
     sleep "$HX_POLL"
     i=$((i + 1))
   done
@@ -593,7 +593,7 @@ hx_use_fixture() { # session fixture_dir name
   # one, which is the thing the capture below reads.
   hx_cmd "$name_sess" "export PATH=$dir:\$PATH; hash -r"
   hx_cmd "$name_sess" "command -v $name"
-  hx_until_ok "hx_cap $name_sess | grep -qF '$dir/$name'" 6 || true
+  hx_until_ok "hx_cap $name_sess | grep -F '$dir/$name'" 6 || true
   out="$(hx_cap "$name_sess")"
   case "$out" in
     *"$dir/$name"*) hx_pass "fixture '$name' resolves to the test copy, not a real install" ;;
@@ -637,7 +637,7 @@ hx_test_forbidden_keys() { # session probe_command_string [screen_denylist_regex
     fi
     if [ -n "$deny" ]; then
       screen_after="$(hx_cap "$name")"
-      if printf '%s' "$screen_after" | grep -qE "$deny"; then
+      if grep -qE "$deny" <<< "$screen_after"; then
         hx_fail "forbidden key revealed UI matching /$deny/: $label"
         bad=1
       fi

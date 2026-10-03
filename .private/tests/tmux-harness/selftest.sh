@@ -57,7 +57,7 @@ fi
 hx_cmd "$S" 'clear; printf "  FINDME\n"'
 hx_wait "$S" 'FINDME' 5 || true
 loc="$(hx_find "$S" "FINDME")" || loc="none"
-if printf '%s' "$loc" | grep -qE '^[0-9]+ [0-9]+$'; then
+if grep -qE '^[0-9]+ [0-9]+$' <<< "$loc"; then
   hx_pass "hx_find locates on-screen text (row/col = $loc)"
 else
   hx_fail "hx_find locates on-screen text" "got '$loc'"
