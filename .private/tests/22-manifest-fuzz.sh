@@ -75,6 +75,9 @@ def run_verb(d):                      # -> (rc, stdout, stderr)
     return p.returncode, p.stdout.decode("utf-8", "replace").strip(), \
            p.stderr.decode("utf-8", "replace").strip()
 
+def is_digest(s):                     # a stripped stdout that is a digest, as success prints
+    return len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+
 # ─── the name corpus: every shape that has ever broken a shell walk ───────────
 # BYTES, INCLUDING ONE THAT IS NOT VALID UTF-8. surrogateescape is how Python carries such a name,
 # and a tool that decoded it would produce a different digest than one that did not.
@@ -159,7 +162,7 @@ for i, name in enumerate(NAMES):
     plant(d, b"sibling", sub=b"sub" + (b"dir with space" if i % 3 == 0 else b""))
     rc, got, err = run_verb(d)
     n_ok += 1
-    if rc != 0 or len(got) != 64 or any(c not in "0123456789abcdef" for c in got):
+    if rc != 0 or not is_digest(got):
         nonhex.append("%r rc=%d out=%r" % (name, rc, got[:80]))
         continue
     if err:
@@ -173,6 +176,11 @@ out("disagree", "; ".join(disagree[:4]))
 out("stderr-on-success", "; ".join(dirty_err[:4]))
 
 # ─── property 2: random trees, same comparison ────────────────────────────────
+def as_dirname(name):                 # keep dir names off the dash cases
+    return name.replace(b"-", b"d")
+MAY_REFUSE_AS_DIR = {as_dirname(n) for n in MAY_REFUSE}
+GENERATOR_COLLISIONS = {errno.ENOTDIR, errno.EEXIST, errno.EISDIR}
+
 rand_disagree = []
 n_rand_skipped = 0
 for i in range(N_RANDOM):
@@ -183,23 +191,33 @@ for i in range(N_RANDOM):
         name = rng.choice(NAMES)
         sub = None
         if rng.random() < 0.4:
-            sub = b"/".join(rng.choice(NAMES) for _ in range(rng.randint(1, 2)))
-            sub = sub.replace(b"-", b"d")          # keep dir names off the dash cases
+            sub = b"/".join(as_dirname(rng.choice(NAMES)) for _ in range(rng.randint(1, 2)))
         # THE except IS THE GENERATOR'S, NOT THE FILESYSTEM'S, and the two must not be merged.
-        # sub is built from corpus names, so this loop asks for a file to be a directory and gets
-        # ENOTDIR -- on every platform, not just a Mac. plant() handles the filesystem refusing a
-        # NAME (#305) through its return value; this handles the generator asking the impossible.
-        # Narrowing this to EILSEQ was tried and crashes on rand0.
+        # sub is built from corpus names, so this loop asks for a file to be a directory or the
+        # reverse, and gets ENOTDIR, EEXIST or EISDIR -- on every platform, not just a Mac.
+        # plant() handles the filesystem refusing a NAME (#305) through its return value; this
+        # handles the generator asking the impossible. Narrowing this to EILSEQ was tried and
+        # crashes on rand0.
+        #
+        # AND NOTHING ELSE (#445), which it used to swallow too. The one refusal allowed here
+        # beside those is #305's arriving as a DIRECTORY, which os.makedirs refuses before plant()'s
+        # own check is reached: MAY_REFUSE's name, spelled as as_dirname() spells it. Any other
+        # refusal -- EILSEQ on another name, EACCES, EINVAL -- raises to the gate, as plant()'s do.
+        # Measured: an EACCES on every name here left 0 random trees tested and the suite green.
         try:
             if plant(d, name, body=bytes([rng.randint(0, 255) for _ in range(rng.randint(0, 60))]), sub=sub):
                 n_planted += 1
-        except OSError:
-            pass
+        except OSError as exc:
+            if not (exc.errno in GENERATOR_COLLISIONS
+                    or (exc.errno == errno.EILSEQ and sub is not None
+                        and MAY_REFUSE_AS_DIR & set(sub.split(b"/")))):
+                raise
     # AN EMPTY TREE IS NOT A SUBJECT. --dev-manifest-hash refuses one ("the course files are
     # empty", rc 1) and it is right to, so judging it here would count a correct refusal as a
-    # disagreement. Reachable two ways: every planting ENOTDIR'd, which any platform can do at
-    # some seed, or the tree drew only a name this filesystem refuses -- which is tree 27 at the
-    # default seed on a Mac, and is what turned #305 into a red here instead of a dead suite.
+    # disagreement. Reachable two ways: every planting collided, which any platform can do at
+    # some seed, or the tree drew only a name this filesystem refuses, as a file or a directory --
+    # which is tree 27 at the default seed on a Mac, and is what turned #305 into a red here
+    # instead of a dead suite.
     if n_planted == 0:
         n_rand_skipped += 1
         continue
@@ -213,21 +231,29 @@ out("cases-random", str(N_RANDOM - n_rand_skipped))
 out("cases-random-skipped", str(n_rand_skipped))
 out("random-disagree", "; ".join(rand_disagree[:4]))
 
-# ─── property 3: every single-point mutation moves the digest, or is refused ──
+# ─── property 3: every single-point mutation moves the digest ─────────────────
 # THE HALF THAT MATTERS MOST. A walk that agreed with the oracle but ignored, say, the last file
 # in a directory would pass everything above -- both sides would ignore it. Sensitivity is what
 # says the digest is a function of the WHOLE tree.
+#
+# AND A REFUSAL IS A FAILURE, NAMED FOR ITS MUTATION. Every mutation below leaves a valid tree, so
+# a walk that refuses one is rejecting what it must accept. This property used to read "moves the
+# digest, or is refused", and passed on exactly that -- measured: a walk refusing any tree with an
+# empty directory in it stayed green (#445). So does a walk that says nothing and exits 0, which
+# is why both answers must be digests.
+MUTATIONS = ("flip a content byte", "add a file", "remove a file", "rename a file",
+             "add an empty directory")
 insensitive = []
 for i in range(N_MUTATED):
     reached += 1
     d = fresh("mut%d" % i)
     for k in range(3):
         plant(d, b"file%d" % k, body=b"body %d\n" % k, sub=(b"sub" if k == 2 else None))
-    rc0, base, _ = run_verb(d)
-    if rc0 != 0:
-        insensitive.append("base tree %d did not hash" % i)
+    rc0, base, err0 = run_verb(d)
+    if rc0 != 0 or not is_digest(base):
+        insensitive.append("base tree %d did not hash (rc=%d): %s" % (i, rc0, err0[:80]))
         continue
-    op = i % 5
+    op = i % len(MUTATIONS)
     if op == 0:                                   # flip a content byte
         with open(os.path.join(d, "file0"), "r+b") as fh:
             fh.write(b"B")
@@ -239,9 +265,12 @@ for i in range(N_MUTATED):
         os.rename(os.path.join(d, "file0"), os.path.join(d, "file0-renamed"))
     else:                                         # add a directory, no files in it
         os.mkdir(os.path.join(d, "newdir"))
-    rc1, after, _ = run_verb(d)
-    if rc1 == 0 and after == base:
-        insensitive.append("tree %d op %d: digest unchanged" % (i, op))
+    rc1, after, err1 = run_verb(d)
+    if rc1 != 0 or not is_digest(after):
+        insensitive.append("tree %d, %s: the mutated tree did not hash (rc=%d): %s"
+                           % (i, MUTATIONS[op], rc1, err1[:80]))
+    elif after == base:
+        insensitive.append("tree %d, %s: digest unchanged" % (i, MUTATIONS[op]))
 out("cases-mutated", str(N_MUTATED))
 out("insensitive", "; ".join(insensitive[:4]))
 
@@ -285,14 +314,22 @@ unstable = []
 for i in range(N_STABLE):
     reached += 1
     d = fresh("det%d" % i)
+    # NO except HERE (#445). Five distinct names in one flat directory raise no collision -- `A`
+    # and `a` on a case-insensitive filesystem merely become one file -- and the one refusal the
+    # corpus allows is plant()'s to answer, by returning False. So the `except OSError: pass` that
+    # stood here could only ever swallow a refusal outside MAY_REFUSE. Measured: on six seeds it
+    # swallowed nothing at all.
     for name in rng.sample(NAMES, 5):
-        try:
-            plant(d, name)
-        except OSError:
-            pass
-    a = run_verb(d)[1]
-    b = run_verb(d)[1]
-    if a != b:
+        plant(d, name)
+    # A DIGEST BOTH TIMES, not merely the same answer twice: two refusals print the same nothing,
+    # and that passed here as stable -- measured, a walk refusing every tree this property builds
+    # stayed green (#445).
+    ra, a, ea = run_verb(d)
+    rb, b, eb = run_verb(d)
+    if ra != 0 or rb != 0 or not is_digest(a) or not is_digest(b):
+        unstable.append("tree %d did not hash: rc=%d %r, then rc=%d %r: %s"
+                        % (i, ra, a[:16], rb, b[:16], (ea or eb)[:80]))
+    elif a != b:
         unstable.append("tree %d: %s then %s" % (i, a, b))
 out("unstable", "; ".join(unstable[:4]))
 
@@ -321,9 +358,9 @@ fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
 #
 # NO except AROUND A CASE, unlike 19-shortlink-fuzz.sh's, and on purpose: the walk runs in a
 # subprocess, so what it does comes back as a status each property already judges. What raises in
-# here uncaught -- plant()'s re-raise in property 1, or the oracle on a tree the walk left it unable
-# to read -- ends the run, and this gate is where that belongs: the traceback it prints names the
-# path.
+# here uncaught -- plant()'s re-raise, which properties 2 and 5 no longer swallow (#445), or the
+# oracle on a tree the walk left it unable to read -- ends the run, and this gate is where that
+# belongs: the traceback it prints names the path.
 planned="$(fz cases-planned)"
 reached="$(fz cases-reached)"
 if [ "$FUZZ_RC" != 0 ] || [ -z "$reached" ] || [ "$reached" != "$planned" ]; then
