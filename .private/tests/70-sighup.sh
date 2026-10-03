@@ -492,9 +492,11 @@ Launcher output: $(tail -5 "$LOG" 2>/dev/null)"
         # Reddening them needs a wedged control socket, which nothing here arranges.
         #
         # THE SUBJECT IS ESTABLISHED BEFORE IT IS ASKED ABOUT, the guard group 1 carries and for
-        # the same reason (#159). It doubles as the instrument check: fwd_master_pids' own fatal
-        # exits only the subshell it runs in, so a ps that listed nothing arrives here as an
-        # empty list -- which fires this guard rather than banking two silent greens.
+        # the same reason (#159). It doubles as the instrument check, though less of one since
+        # #424: fwd_master_pids' own fatal still exits only the subshell it runs in, but a ps that
+        # listed nothing now stops the suite at count_forwards above, before SL_MASTERS is read.
+        # What reaches this guard is a table that holds no master of ours, which it fires on
+        # rather than banking two silent greens.
         if [ -z "$SL_MASTERS" ] || [ "$SL_BEFORE" = 0 ]; then
             fail "sighup:the-shortcut-probe-had-a-tunnel-to-release" \
                  "forwards=$SL_BEFORE, masters=${SL_MASTERS:-none of ours was in the process

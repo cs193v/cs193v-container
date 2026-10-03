@@ -1740,12 +1740,17 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-g
 # swallowed exactly the same way. Third time the subshell boundary has eaten something
 # load-bearing here, so it is a rule rather than a fix.
 #
+# fwd_require_ctl IS ON IT AND fwd_master_pids IS NOT, and the difference is stdout (#424). The
+# first prints nothing, so a `$( )` around it can only swallow its exit. The second is a value
+# every caller must capture, and a grep cannot tell fwd_owned_ports' `pids="$(fwd_master_pids)"
+# || {` -- which carries the status out and stops the suite -- from a capture that drops it.
+#
 # THE SINGLE-LINE `$( )` FORM ONLY, which is worth being honest about: a substitution spanning
 # lines, or an assertion on the right of a pipe, is invisible to a grep. Both were measured at
 # zero across the suites when this landed, and every guard in them is the statement form
 # `... || { fail ...; exit 1; }`.
 # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-exitful='dyn_ports|fwd_init|require_cmd|require_image|require_running|require_tunnel'
+exitful='dyn_ports|fwd_init|fwd_require_ctl|require_cmd|require_image|require_running|require_tunnel'
 exitful="$exitful|pass|fail|skip|record|assert_[a-z_]+"
 subshelled="$(grep -HnE '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
               $PRIVATE/tests/[0-9][0-9]-*.sh $PRIVATE/tests/lib/*.sh \
