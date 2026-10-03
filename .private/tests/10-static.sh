@@ -639,6 +639,53 @@ assert_eq  "tmux:every-inner-socket-is-registered-for-cleanup" "$sock_vars" "$re
 assert_contains "tmux:cleanup-walks-the-socket-list" 'in $INNER_SOCKS' \
                 "$(cat "$PRIVATE/tests/tmux-harness/suite.sh")"
 
+# ─── the harness's event checks wait for the event, not for a while (#186) ─────
+# Each of these eight asserts that something HAPPENED -- a message appeared, a flag flipped, an
+# app saw a mouse report -- and each used to be a fixed hx_settle followed by a one-shot
+# hx_expect_*. A settle that turned out too short then failed the check instead of waiting for
+# the screen. They poll now, and this keeps them polling: walking back from each check, the
+# first wait or gesture found must be an hx_until / hx_until_ok / hx_until_ne / hx_wait. An
+# hx_settle there is the bug coming back; a gesture there means nothing waits at all.
+#
+# NAMED, NOT DISCOVERED, because what separates an event check from a non-event one is meaning
+# rather than syntax. Measured on the first assertion after each settle in the tree #186 was fixed
+# on: "a non-absent hx_expect_* with a non-empty expectation" also flags the seven "stays in / does
+# not move the view" checks (cmode "1", a state that must NOT change), and narrowing it to
+# hx_expect_contains still flags three persistence checks ("leaves the box up", "outlives one
+# spinner tick", "does not close itself"), where the duration IS the claim. Both would be false
+# positives. So an event check after a settle -- first after it or further down -- is still
+# review's to catch, and these eight cannot quietly go back.
+settle_event_checks='a SHIFTED drag at a live prompt is answered rather than dropped
+a SHIFTED double-click is answered too
+a mouse-reporting app is detected as one
+a drag inside a mouse-aware app still reaches the app
+a SHIFTED drag inside a mouse-aware app still reaches the app
+the mouse goes back to tmux when the app stops asking for it
+a full-screen app is detected as one
+the wheel goes back to tmux when the app leaves the alternate screen'
+hits="$(printf '%s\n' "$settle_event_checks" | awk '
+    NR == FNR { want[++nw] = "\"" $0 "\""; next }
+    { line[++nl] = $0 }
+    END {
+        for (k = 1; k <= nw; k++) {
+            at = 0
+            for (i = 1; i <= nl; i++)
+                if (line[i] ~ /^[[:space:]]*hx_expect_/ && index(line[i], want[k])) { at = i; break }
+            if (!at) { print "not found: " want[k]; continue }
+            got = "nothing waits before it"
+            for (j = at - 1; j > 0; j--) {
+                t = line[j]
+                if (t ~ /^[[:space:]]*#/) continue
+                sub(/[[:space:]]#[[:space:]].*$/, "", t)
+                if (t ~ /(^|[;[:space:]])hx_settle([;[:space:]]|$)/) { got = "hx_settle at line " j; break }
+                if (t ~ /^[[:space:]]*hx_(until|until_ok|until_ne|wait)([[:space:]]|$)/) { got = ""; break }
+                if (t ~ /^[[:space:]]*(cback|hx_(drag|multiclick|cmd|hex|str|type|enter|click|press|release|wheel_up|wheel_down|scroll_to))([[:space:]]|$)/) break
+            }
+            if (got != "") print "line " at " " want[k] ": " got
+        }
+    }' - "$PRIVATE/tests/tmux-harness/suite.sh")"
+assert_eq  "tmux:event-checks-poll-rather-than-settle" "" "$hits"
+
 # ─── every throwaway container the suite starts is labelled as ours ────────────
 # The live tier tells its own containers from a colleague's by a label, because a `podman run --rm`
 # with no --name gets a name podman chose and there is nothing else to go on (#74, and VT_LABEL in
