@@ -24,6 +24,23 @@ set -u
 
 cd "$REPO" || exit 1
 
+# THIS RUN'S OWN SCRATCH, not a fixed name in /tmp (#379). /tmp is one directory for every developer
+# on the machine, so /tmp/pwstate.txt was one file for every concurrent run of this suite: one run
+# read another's --show fixture as its round trip, or found it deleted. WORK and not T, which is
+# the tab the state-file cases below are spelled with: holding a path, T makes five of them pass
+# on "unknown key" in their first line instead of the defect each one names.
+#
+# CHECKED, because a redirect that cannot open its file never runs its command: feed() below would
+# then pass the garbage check having scanned nothing. Removed at the end of the file rather than
+# from an EXIT trap, which would replace the one lib/assert.sh sets to print a direct run's summary.
+WORK="$(new_tmpdir)"
+if [ -d "$WORK" ] && [ -w "$WORK" ]; then
+    pass "pw:has-a-scratch-directory-of-its-own"
+else
+    fail "pw:has-a-scratch-directory-of-its-own" "new_tmpdir gave '$WORK' under TMPDIR=${TMPDIR:-}"
+    exit 1
+fi
+
 # Read by the guard at the bottom of cs193v-portwatch, three lines below -- a `.` which shellcheck
 # does not follow without -x, and -x here would resolve the source and hide every finding this
 # file has.
@@ -239,8 +256,8 @@ BAD=''
 feed() {                              # feed LABEL V4 V6
     local e p c
     PW_SET=''
-    pw_scan_text "$1" "$2" 2>/tmp/pw.err || true
-    [ -s /tmp/pw.err ] && BAD="${BAD:-$3 -> stderr: $(cat /tmp/pw.err)}"
+    pw_scan_text "$1" "$2" 2>"$WORK/pw.err" || true
+    [ -s "$WORK/pw.err" ] && BAD="${BAD:-$3 -> stderr: $(cat "$WORK/pw.err")}"
     for e in $PW_SET; do
         p="${e%%:*}"; c="${e#*:}"
         case "$p" in ''|*[!0-9]*) BAD="${BAD:-$3 -> non-decimal '$e'}"; continue ;; esac
@@ -267,7 +284,6 @@ feed "$(printf '%s\n   0: 0100007F:0BB8 00000000:0000 0A\r' "$HDR")" "" "carriag
 feed "$HDR
    0: 0100007F:0BB8 00000000:0000 0a" "" "lowercase-state"
 assert_eq "pw:garbage-never-yields-a-bad-port" "" "$BAD"
-rm -f /tmp/pw.err
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -338,8 +354,8 @@ assert_eq "pw:publish-every-rejection-ran" "14" "$PUB_BAD_RAN"
 # ROUND TRIP. Whatever the writer emits, the reader must read back identically -- that is the
 # only property that matters across the two, and it is the one a format change would break.
 pw_publish_parse "state=healthy" "floor=1024" "up=3000:lo,41573:any" "refused=8080:busy,9000:v6lo"
-pw_state_render > /tmp/pwstate.txt
-pw_state_parse "$(cat /tmp/pwstate.txt)"
+pw_state_render > "$WORK/pwstate.txt"
+pw_state_parse "$(cat "$WORK/pwstate.txt")"
 assert_eq "pw:roundtrip-state"   "healthy"              "$PWS_STATE"
 assert_eq "pw:roundtrip-floor"   "1024"                 "$PWS_FLOOR"
 assert_eq "pw:roundtrip-up"      "3000:lo 41573:any"    "$PWS_UP"
@@ -374,7 +390,7 @@ assert_eq "pw:state-every-rejection-ran" "8" "$RD_BAD_RAN"
 # nothing up. --show is what a student reads, and what agent-notes.md sends a coding agent to, so
 # it has to say what happened and what to do -- not print the state's name and leave them to
 # guess. The v6lo refusal is still listed: that advice is as true without a tunnel as with one.
-PW_STATE_WAS="$PW_STATE"; PW_STATE=/tmp/pwstate.txt
+PW_STATE_WAS="$PW_STATE"; PW_STATE="$WORK/pwstate.txt"
 printf 'state\tmaster-unresponsive\nfloor\t1024\nrefused\t21500\tv6lo\n' > "$PW_STATE"
 PW_SHOWN="$(pw_show)"
 assert_contains "pw:show-says-the-tunnel-has-stopped" "The tunnel to your own computer has stopped" "$PW_SHOWN"
@@ -382,4 +398,4 @@ assert_contains "pw:show-says-how-to-bring-it-back" "run: cs193v --reset-tunnel"
 assert_contains "pw:show-says-nothing-is-reachable" "Nothing of yours is reachable" "$PW_SHOWN"
 assert_contains "pw:show-still-explains-a-refusal" "21500" "$PW_SHOWN"
 PW_STATE="$PW_STATE_WAS"
-rm -f /tmp/pwstate.txt
+rm -rf "$WORK"
