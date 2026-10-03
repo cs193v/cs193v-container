@@ -1737,6 +1737,112 @@ DQGOOD
 assert_eq "dollarq:the-rule-passes-the-correct-forms" "" "$(dq_then_first "$dq_tmp/good.sh")"
 rm -rf "$dq_tmp"
 
+# ─── a wait re-reads its condition on every poll, or it is a sleep  (#378) ─────
+# `wait_until SECS ... sh -c "..."` and the tmux harness's hx_until family take their condition
+# as a STRING and run it again on every poll. A `$(` or a backtick that the caller's shell expands
+# runs once, while the arguments are being built, so every poll tests the same frozen answer. #378
+# was that: 60-container.sh's wait for a v6lo reason handed `sh -c` the text `[ -n "" ]`, false
+# forever, and paid its full ceiling on every run (rc 1 after 18.3 s, against rc 0 in 0.52 s
+# written as a function). In hx_test_forbidden_keys, which evals its probe before and after each
+# key, the same mistake is worse than slow: before and after are always equal, and the check that
+# nothing changed passes by construction.
+#
+# `wait_until SECS [ ... ]` and `wait_until SECS test ...` are held to it too: they re-run a
+# comparison whose every operand was fixed before the first poll.
+#
+# NOT A BAN ON SUBSTITUTION NEAR A WAIT. lib/frozen-waits.py reads the condition as shell words
+# and flags only what the CALLER expands: escaped `\$(`, single quotes and arithmetic `$((` are
+# all fine, and so is any other argument -- hx_until's expected value, or a function's operand, is
+# meant to be computed once. A call in a comment or a string is not a call, as far as the text
+# before it on its own line can tell. Its docstring has the rest.
+frozen_waits() {                      # frozen_waits [--count] FILE... -> one line per violation
+    python3 "$PRIVATE/tests/lib/frozen-waits.py" "$@" 2>&1 || printf 'frozen-waits-scan-failed\n'
+}
+# The derived list plus tmux-harness/, which that list exempts from shellcheck and style but which
+# is where every hx_until lives.
+#
+# BOTH HALVES MUST BE REACHED before the verdict means anything: a list or a pattern that stopped
+# reaching one of them would leave that half green forever. Counted WITHOUT this file, whose own
+# specimens below would otherwise satisfy both halves on their own.
+ws_files='' ws_reach=''
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
+for f in $testfiles "$PRIVATE"/tests/tmux-harness/*.sh; do
+    ws_files="$ws_files $f"
+    case "$f" in */10-static.sh) ;; *) ws_reach="$ws_reach $f" ;; esac
+done
+# shellcheck disable=SC2086
+ws_sites="$(frozen_waits --count $ws_reach)"
+record "waits:condition-words-examined" "$ws_sites"
+case "$ws_sites" in
+    "wait="[1-9]*" hx="[1-9]*) pass "waits:the-scan-reaches-both-kinds-of-wait" ;;
+    *) fail "waits:the-scan-reaches-both-kinds-of-wait" "got '$ws_sites' -- one kind of wait has no
+call site the pattern recognises any more. Did they move, or change shape?" ;;
+esac
+# shellcheck disable=SC2086
+assert_eq "waits:no-condition-is-expanded-by-the-caller" "" "$(frozen_waits $ws_files)"
+
+# AND THE RULE GOES RED ON THE LINE THAT BROKE, and on every shape it claims. ASSEMBLED, for the
+# reason the dollarq specimens above are: this file is in $ws_files, so the bad lines written out
+# here would be violations in the scanner's own input. Scanned from inside $ws_tmp, so a colon in
+# $TMPDIR cannot move the line number out of the second field.
+ws_tmp="$(new_tmpdir)"
+ws_cs='$(' ws_bq='`' ws_wu=wait_until ws_hx=hx_until ws_ok=hx_until_ok ws_ne=hx_until_ne
+ws_fk=hx_test_forbidden_keys ws_ke=hx_test_key_encodings
+ws_lines() { (cd "$ws_tmp" && frozen_waits "$1") | cut -d: -f2 | do_tr '\n' ' ' | sed 's/ *$//'; }
+printf '%s 15 sh -c "[ -n \\"%sdyn_reason "$PV")\\" ]" >/dev/null 2>&1 || true\n' \
+       "$ws_wu" "$ws_cs" > "$ws_tmp/bad-378.sh"
+assert_eq "waits:the-rule-catches-the-bug-it-exists-for" "1" "$(ws_lines bad-378.sh)"
+# A word that goes on past its closing quote; a shell later in CMD; a continuation, `-ec` and
+# `/bin/sh`; a backtick; `\\` before `$(`, which escapes the backslash and not the `$`; a call
+# inside a substitution, which is still a call; `-e -c` and `-c --`; a `$(` inside arithmetic; and
+# the two ways of writing the #378 line with no `sh -c` at all.
+{ printf '%s 15 sh -c "[ -n "%sx)" ]"\n'                       "$ws_wu" "$ws_cs"
+  printf '%s 15 podman exec "$NAME" sh -c "test -s %sx)"\n'    "$ws_wu" "$ws_cs"
+  printf '%s 15 \\\n    sh -ec "[ -n \\"%sx)\\" ]"\n'          "$ws_wu" "$ws_cs"
+  printf '%s 15 /bin/sh -c "test -n %sx%s"\n'                  "$ws_wu" "$ws_bq" "$ws_bq"
+  printf '%s 15 bash -c "test -s \\\\%sx)/f"\n'                "$ws_wu" "$ws_cs"
+  printf 'ok="%s%s 15 sh -c "test -s %sx)" && echo up)"\n'     "$ws_cs" "$ws_wu" "$ws_cs"
+  printf '%s 15 sh -e -c "[ -n \\"%sx)\\" ]"\n'                "$ws_wu" "$ws_cs"
+  printf '%s 15 sh -c -- "test -n %sx)"\n'                     "$ws_wu" "$ws_cs"
+  printf '%s 15 sh -c "[ %s( %scat f) + 1 )) -gt 0 ]"\n'       "$ws_wu" "$ws_cs" "$ws_cs"
+  printf '%s 15 [ -n "%sx)" ]\n'                               "$ws_wu" "$ws_cs"
+  printf '%s 15 test -n "%sx)"\n'                              "$ws_wu" "$ws_cs"
+} > "$ws_tmp/bad-wait.sh"
+assert_eq "waits:the-rule-catches-every-wait_until-shape" "1 2 3 5 6 7 8 9 10 11 12" \
+          "$(ws_lines bad-wait.sh)"
+# Every name in the family, each at the argument it evals; unquoted; and a continuation.
+{ printf '%s "hx_cap $S | grep -qF %spwd)" 6\n'      "$ws_ok" "$ws_cs"
+  printf '%s %sprobe_name) bash 8\n'                  "$ws_hx" "$ws_cs"
+  printf '%s "%sprobe_win)" "$before" 6\n'            "$ws_ne" "$ws_cs"
+  printf '%s \\\n  "test -n %scat f%s" 6\n'           "$ws_ok" "$ws_bq" "$ws_bq"
+  printf '%s "$S" "%sprobe_struct)"\n'                "$ws_fk" "$ws_cs"
+  printf '%s "$S" alt-left "%sprobe_win)" moved\n'    "$ws_ke" "$ws_cs"
+} > "$ws_tmp/bad-hx.sh"
+assert_eq "waits:the-rule-catches-every-hx-shape" "1 2 3 4 6 7" "$(ws_lines bad-hx.sh)"
+# AND STAYS QUIET ON THE FORMS THAT ARE RIGHT. The first three are lib/assert.sh's hold_container,
+# tmux-harness/suite.sh's click check and its forbidden-keys call, verbatim: the escaped `\$(`, the
+# arithmetic `$((` and a probe passed by name are the near-misses a matcher keyed on `$(` alone
+# would fail. The last three are not calls at all, or not that call: one in a trailing comment,
+# one in a string, and a wait whose comment mentions `sh -c`.
+cat > "$ws_tmp/good.sh" <<'WSGOOD'
+wait_until 15 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" = running ]"
+hx_until_ok "hx_cap $S | grep -qF '[<0;20;$((click_row - 3))m'" 6
+hx_test_forbidden_keys "$S" probe_struct \
+  'Kill|Respawn|New Window|Horizontal|Vertical|Swap|Rename|\(detached\)|choose|--INSERT--|SCROLLED BACK'
+wait_until 15 has_reason "$PV" || true
+wait_until 15 has_reason "$(dyn_free_port)" || true
+wait_until 15 sh -c 'test -n "$(cat "$1")"' sh "$f"
+wait_until 15 [ -s "$f" ] || true
+hx_until 'hx_cap "$S" | sed -n 2p | tr -d " "' '+NEWTAB' 6
+hx_until probe_name "$(cat "$want")" 8
+# wait_until 15 sh -c "[ -n \"$(dyn_reason "$PV")\" ]"
+echo ok   # wait_until 15 sh -c "[ -n \"$(dyn_reason "$PV")\" ]"
+echo 'wait_until 15 sh -c "[ -n \"$(dyn_reason "$PV")\" ]"'
+wait_until 15 container_up   # unlike sh -c "$(x)"
+WSGOOD
+assert_eq "waits:the-rule-passes-the-correct-forms" "" "$(frozen_waits "$ws_tmp/good.sh")"
+rm -rf "$ws_tmp"
+
 # ─── the dependency registry: one row shape, one package name per family (#195) ─
 # TWO GATES OVER lib/portable.sh's PT_REGISTRY, and #195 bought both.
 #

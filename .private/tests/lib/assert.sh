@@ -1300,6 +1300,9 @@ I() { podman inspect "$NAME" --format "$1" 2>&1; }
 # fixed sleep. Those are marked at their call sites.
 #
 # CMD is run directly rather than eval'd, so anything with a pipe in it wants a shell function.
+# So does anything that reads state: a `$(` the caller expands -- unescaped inside a `sh -c "..."`
+# string, or as an operand of `[` or `test` -- runs once, before the first poll, and every poll
+# then tests the same frozen answer (#378).
 # 20 Hz because that is what container_pkill already polls at and its teardown is measured at
 # 0.35 s; a slower tick would make the commonest wait here worse than it is today.
 wait_until() {                        # wait_until SECS CMD [ARGS...]  -> 0 as soon as CMD succeeds
