@@ -426,6 +426,52 @@ for mode in dry uncarried dropped; do
               "$(do_awk -F'\t' '{print $1, $3}' "$WORK/dyn-top-up-$mode.tsv" | do_tr '\n' '|' | sed 's/|$//')"
 done
 
+# ─── ...and STOPPING THE SERVERS DROPS THE MEMO THAT NAMES THEM ────────────────
+# #415. dyn_serve_stop kills every http.server inside and left $DYN_PORTS set, so the memo outlived
+# what it described. A request no larger than the memo is answered from it unlooked-at, so the
+# next `dyn_ports 2` handed back two dead ports with rc 0; a larger one re-validates (#328) and so
+# waited 30 s per dead port and then blamed the TUNNEL for servers this suite had stopped itself.
+# Measured with these fakes before the fix: the memo still said [20000 20001] with nothing live,
+# and the second call served nothing.
+#
+# #328's FAKES, PLUS A LIVE SET. dyn_serve adds to it and container_pkill, which is all
+# dyn_serve_stop reaches, empties it -- so "carried" means "served and not stopped since", which
+# is what the real tunnel reports. wait_until polls once, as above.
+cat > "$WORK/dyn-after-stop.sh" <<'CHILD'
+set -u
+. "$1"
+SERVED="$2" LIVE="$3"
+fwd_init()         { FWD_READY=1; }
+dyn_free_port()    { printf '%s' "$((20000 + $#))"; }
+dyn_serve()        { printf '%s\n' "$1" >> "$SERVED"; printf '%s\n' "$1" >> "$LIVE"; }
+container_pkill()  { : > "$LIVE"; }
+dyn_is_forwarded() { grep -qx "$1" "$LIVE"; }
+fwd_owned_ports()  { cat "$LIVE"; }
+podman()           { return 1; }
+wait_until()       { shift; "$@"; }
+dyn_ports 2
+dyn_serve_stop
+printf 'AFTER-STOP=[%s]\n' "$DYN_PORTS"
+dyn_ports 2
+printf 'SECOND=[%s] LIVE=[%s]\n' "$DYN_PORTS" "$(do_tr '\n' ' ' < "$LIVE" | sed 's/ $//')"
+printf 'REACHED-THE-END\n'
+CHILD
+: > "$WORK/dyn-stop-served"
+: > "$WORK/dyn-stop-live"
+out="$(CS193V_RESULTS="$WORK/dyn-after-stop.tsv" CS193V_SUITE=child NO_COLOR=1 \
+       bash "$WORK/dyn-after-stop.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dyn-stop-served" \
+            "$WORK/dyn-stop-live" 2>&1)"
+assert_contains "dynports:a-stop-drops-the-memo" "AFTER-STOP=[]" "$out"
+# The issue's own guard: the call after a stop binds its ports again rather than reading the memo.
+assert_eq "dynports:the-call-after-a-stop-serves-afresh" "20000 20001 20000 20001" \
+          "$(do_tr '\n' ' ' < "$WORK/dyn-stop-served" | sed 's/ $//')"
+assert_contains "dynports:and-hands-back-ports-that-are-being-served" \
+                "SECOND=[20000 20001] LIVE=[20000 20001]" "$out"
+# The control: serving afresh is a first call, so it passes, reaches the end and records nothing.
+assert_contains "dynports:the-call-after-a-stop-lets-the-suite-run" "REACHED-THE-END" "$out"
+assert_eq "dynports:the-call-after-a-stop-records-nothing" "" \
+          "$(cat "$WORK/dyn-after-stop.tsv" 2>/dev/null)"
+
 # ─── a CHECKER that could not run must fail, not pass ──────────────────────────
 # THE SAME DEFECT AS #76, one layer in. box_problems and render_pty both pipe their input
 # through `python3 -c`, and both are read by assertions whose HAPPY answer is the empty string:
@@ -1755,6 +1801,30 @@ case "$3" in
     trapped)   trap 'fwd_init && printf "TRAP-FOUND-A-CACHE ctl=[%s]\n" "$FWD_CTL"
                      printf "TRAP-FINISHED\n"' EXIT
                fwd_init ;;
+    # ...and the same trap asking about forwards, which is what release_tunnel's wait does.
+    trapped-reads)
+               trap 'no_forwards; printf "TRAP-FINISHED\n"' EXIT
+               fwd_init ;;
+    # A GOOD answer, then the control socket gone: the state a cache filled by hand reaches, and
+    # the one #424 measured. Each forward reader gets its own child, because each one is a
+    # separate way to be told "nothing is forwarded".
+    lost-ctl-no)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               no_forwards && printf 'ANSWERED no_forwards TRUE\n' ;;
+    lost-ctl-count)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               printf 'ANSWERED count_forwards [%s]\n' "$(count_forwards)" ;;
+    lost-ctl-dyn)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               dyn_is_forwarded 1 || printf 'ANSWERED dyn_is_forwarded FALSE\n' ;;
+    # ...and the scan's OTHER fatal, which a statement-level check of $FWD_CTL could not see.
+    ps-empty)  trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init
+               ps() { :; }
+               no_forwards && printf 'ANSWERED no_forwards TRUE\n' ;;
 esac
 printf 'REACHED-THE-END\n'
 CHILD
@@ -1850,6 +1920,34 @@ assert_not_contains "fwdinit:a-refusal-caches-nothing"            "TRAP-FOUND-A-
 assert_contains     "fwdinit:the-trap-runs-to-its-end"            "TRAP-FINISHED"            "$out"
 assert_eq "fwdinit:a-refusal-is-not-asked-again" "1" "$(fwdi_asked fails)"
 assert_eq "fwdinit:or-recorded-twice" "FAIL require:dev-tunnel" "$(fwdi_recorded fails trapped)"
+
+# H. A FORWARD READER THAT CANNOT SAY WHOSE A LISTENER IS STOPS THE SUITE, rather than counting
+#    none (#424). fwd_owned_ports took `pids="$(fwd_master_pids)"`, and both of fwd_master_pids'
+#    fatals -- no control socket, and a ps that listed nothing -- exit 96 inside that `$( )`,
+#    so pids came back empty and read as "no master of ours": count_forwards 0, no_forwards
+#    TRUE, dyn_is_forwarded FALSE. Measured against the real launcher before the fix: all three
+#    answered, rc 0, nothing recorded. The rc is SIGUSR2's because every reader is itself
+#    inside a `$( )` or a pipeline, which no `exit` escapes -- the same reason as E.
+for shape in lost-ctl-no lost-ctl-count lost-ctl-dyn ps-empty; do
+    out="$(fwdi real "$shape")"
+    assert_not_contains "fwdinit:$shape:the-reader-gives-no-answer"  "ANSWERED"         "$out"
+    assert_contains     "fwdinit:$shape:it-stops-the-suite"          "[rc=$FWDI_SIGRC]" "$out"
+    assert_not_contains "fwdinit:$shape:nothing-downstream-runs"     "REACHED-THE-END"  "$out"
+    assert_contains     "fwdinit:$shape:it-says-why"   "no listener can be counted as ours" "$out"
+    assert_contains     "fwdinit:$shape:the-suite-still-cleans-up"   "EXIT-TRAP-RAN"    "$out"
+    assert_eq "fwdinit:$shape:it-records-one-fail-and-no-pass" "FAIL require:dev-tunnel" \
+              "$(fwdi_recorded real "$shape")"
+done
+
+# I. ...EXCEPT AFTER A REFUSAL, where the suite is already in its EXIT trap with the FAIL recorded.
+#    A reader there must neither add a second FAIL for the one fault nor signal the suite out of
+#    the rest of its cleanup -- G's rule, which H's signal would otherwise break. GREEN BEFORE
+#    #424's FIX TOO, because nothing signalled then: this guards the fix rather than the bug.
+#    Dropping `|| return 1` after fwd_owned_ports' fwd_init turns both red.
+out="$(fwdi fails trapped-reads)"
+assert_contains "fwdinit:a-reader-in-the-trap-after-a-refusal-lets-it-finish" "TRAP-FINISHED" "$out"
+assert_eq "fwdinit:and-records-nothing-more" "FAIL require:dev-tunnel" \
+          "$(fwdi_recorded fails trapped-reads)"
 
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.
