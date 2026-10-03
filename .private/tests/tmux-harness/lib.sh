@@ -543,22 +543,33 @@ hx_fake_run() { # name [secs]
   printf '%s/%s -c "import time; time.sleep(%s)"' "$d" "$1" "${2:-120}"
 }
 
+# Does this /proc/PID/exe name a real Claude Code install? A DENYLIST of install layouts, so it
+# is only as good as its list, and a layout missing from it fails SILENTLY: the note below just
+# never fires. That is #201 -- the list named only the native installer's layouts while this
+# image installs with `npm install -g`. The npm layout is the one the image ships; the native two
+# stay, for a student whose own install shadows it. suite.sh resolves the image's own claude and
+# asks this, so the next repackaging is a red there rather than a note that quietly stops firing.
+hx_real_claude_exe() { # exe-path -> 0 if it is a real install
+  case "$1" in
+    "$(hx_fakebin_dir)"/*) return 1 ;;      # our fixture, fine
+    */node_modules/@anthropic-ai/claude-code/*) return 0 ;;
+    */claude/versions/*|*/.local/share/claude/*) return 0 ;;
+  esac
+  return 1
+}
+
 # Belt and braces: assert a test never started the real Claude Code CLI. Call after any test
 # that runs a "claude" fixture.
 hx_assert_no_real_claude() { # desc
-  local p exe bad=0 d
-  d="$(hx_fakebin_dir)"
+  local p exe bad=0
   for p in $(pgrep -x claude 2>/dev/null); do
     # `readlink -f` FIRST, plain `readlink` as the fallback, and the fallback is the whole
     # point: -f resolves through the link and so returns NOTHING once the fixture binary has
     # been unlinked, which maps "our fixture" and "unreadable" onto the same empty string.
-    # Plain readlink still answers "<root>/fakebin/claude (deleted)", which the case below
-    # matches. See hx_teardown.
+    # Plain readlink still answers "<root>/fakebin/claude (deleted)", which
+    # hx_real_claude_exe's fixture arm matches. See hx_teardown.
     exe="$(readlink -f "/proc/$p/exe" 2>/dev/null || readlink "/proc/$p/exe" 2>/dev/null)"
-    case "$exe" in
-      "$d"/*) ;;                                # our fixture, fine
-      */claude/versions/*|*/.local/share/claude/*) bad=1 ;;
-    esac
+    hx_real_claude_exe "$exe" && bad=1
   done
   if [ "$bad" -eq 1 ]; then
     hx_note "NOTE: a real Claude Code process is running. If this test started it, the fixture"
