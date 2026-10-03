@@ -348,6 +348,84 @@ assert_contains "dynports:it-says-how-to-fix-the-tunnel"        "cs193v --reset-
 assert_eq "dynports:it-records-one-fail-and-no-pass" "FAIL require:dynports" \
           "$(do_awk -F'\t' '{print $1, $3}' "$WORK/dyn-nothing.tsv" | do_tr '\n' '|' | sed 's/|$//')"
 
+# ─── ...and a SECOND, LARGER request gets the count it asked for ───────────────
+# #328. The memo was keyed on $DYN_PORTS being non-empty and nothing else, so `dyn_ports 2` then
+# `dyn_ports 4` returned rc 0 with two ports, and #178's short-count guard could not see it: it
+# sits in the branch the memo skipped. Measured against a live container before the fix: rc=0,
+# DYN_PORTS=[20000 20001], two servers inside and two forwards held.
+#
+# THE SERVED LOG IS WHAT $DYN_PORTS CANNOT SHOW. A top-up that started again from nothing would
+# bind 20000 a second time inside the container, and the smaller third request must bind nothing.
+cat > "$WORK/dyn-tops-up.sh" <<'CHILD'
+set -u
+. "$1"
+SERVED="$2"
+fwd_init()         { FWD_READY=1; }
+dyn_free_port()    { printf '%s' "$((20000 + $#))"; }
+dyn_serve()        { printf '%s\n' "$1" >> "$SERVED"; }
+dyn_is_forwarded() { return 0; }
+dyn_ports 2
+dyn_ports 4
+printf 'SECOND=[%s]\n' "$DYN_PORTS"
+dyn_ports 3
+printf 'THIRD=[%s]\n' "$DYN_PORTS"
+CHILD
+: > "$WORK/dyn-served"
+out="$(CS193V_RESULTS="$WORK/dyn-tops-up.tsv" CS193V_SUITE=child NO_COLOR=1 \
+       bash "$WORK/dyn-tops-up.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dyn-served" 2>&1)"
+assert_contains "dynports:a-larger-second-request-gets-its-count" \
+                "SECOND=[20000 20001 20002 20003]" "$out"
+assert_eq "dynports:a-top-up-binds-only-the-ports-it-adds" "20000 20001 20002 20003" \
+          "$(do_tr '\n' ' ' < "$WORK/dyn-served" | sed 's/ $//')"
+assert_contains "dynports:a-smaller-request-is-answered-from-the-memo" \
+                "THIRD=[20000 20001 20002 20003]" "$out"
+
+# AND THE TOP-UP IS VALIDATED LIKE A FIRST CALL. Both guards have to reach the second call, or a
+# top-up that came back short or uncarried is #328 over again with more steps. `dropped` is the
+# held port that stopped being carried between the calls: the whole set is checked, not only the
+# port the top-up added. wait_until polls once: the real one would spend 30 s on a port this
+# fixture has already decided is not carried.
+cat > "$WORK/dyn-top-up-fails.sh" <<'CHILD'
+set -u
+. "$1"
+fwd_init()         { FWD_READY=1; }
+dyn_serve()        { :; }
+fwd_owned_ports()  { printf '20000\n20001\n'; }
+podman()           { return 1; }
+wait_until()       { shift; "$@"; }
+DROPPED=''
+case "$2" in
+    dry)       dyn_free_port() { [ "$#" -lt 2 ] || return 1; printf '%s' "$((20000 + $#))"; }
+               dyn_is_forwarded() { return 0; } ;;
+    uncarried) dyn_free_port() { printf '%s' "$((20000 + $#))"; }
+               dyn_is_forwarded() { [ "$1" -lt 20002 ]; } ;;
+    dropped)   dyn_free_port() { printf '%s' "$((20000 + $#))"; }
+               dyn_is_forwarded() { [ "$1" != "$DROPPED" ]; } ;;
+esac
+dyn_ports 2
+printf 'FIRST=[%s]\n' "$DYN_PORTS"
+[ "$2" = dropped ] && DROPPED=20000
+dyn_ports 3
+printf 'REACHED-THE-END\n'
+CHILD
+for mode in dry uncarried dropped; do
+    case "$mode" in
+        dry)       why="asked for 3 free host ports and 2 came back" ;;
+        uncarried) why="a server on 127.0.0.1:20002 and the tunnel" ;;
+        dropped)   why="a server on 127.0.0.1:20000 and the tunnel" ;;
+    esac
+    out="$(CS193V_RESULTS="$WORK/dyn-top-up-$mode.tsv" CS193V_SUITE=child NO_COLOR=1 \
+           bash "$WORK/dyn-top-up-fails.sh" "$TESTS_DIR/lib/assert.sh" "$mode" 2>&1
+           printf '[rc=%s]' "$?")"
+    # The control: two ports are available and carried, so the first call must still pass.
+    assert_contains "dynports:$mode-top-up:the-first-call-passes" "FIRST=[20000 20001]" "$out"
+    assert_contains "dynports:$mode-top-up:the-second-call-fails-and-says-why" "$why" "$out"
+    assert_contains "dynports:$mode-top-up:it-ends-the-suite" "[rc=1]" "$out"
+    assert_not_contains "dynports:$mode-top-up:nothing-downstream-runs" "REACHED-THE-END" "$out"
+    assert_eq "dynports:$mode-top-up:it-records-one-fail-and-no-pass" "FAIL require:dynports" \
+              "$(do_awk -F'\t' '{print $1, $3}' "$WORK/dyn-top-up-$mode.tsv" | do_tr '\n' '|' | sed 's/|$//')"
+done
+
 # ─── a CHECKER that could not run must fail, not pass ──────────────────────────
 # THE SAME DEFECT AS #76, one layer in. box_problems and render_pty both pipe their input
 # through `python3 -c`, and both are read by assertions whose HAPPY answer is the empty string:
