@@ -47,8 +47,9 @@ HX_H="${HX_H:-30}"
 # glob finds whatever a killed run left. There used to be no root and no rm at all: the fixture
 # directory alone put 15 MB of copied python3 into the container's /tmp per run -- on the GREEN
 # path, not only on a crash -- and /tmp in here is the writable layer
-# (.config/container.args:205-208), so nothing short of `--rebuild` ever took it back. 230 MB
-# had accumulated across sixteen runs of this suite when #190 measured it.
+# (.config/container.args, its rejected "--tmpfs /tmp" entry), so nothing short of `--rebuild`
+# ever took it back. 230 MB had accumulated across sixteen runs of this suite when #190 measured
+# it.
 #
 # THE DRIVER PICKS THE PATH, not this file. 65-tmux.sh passes HX_TMPROOT because it is the thing
 # that has to clean up after a harness it cannot signal (ERRORS.md D1a) and the only place where

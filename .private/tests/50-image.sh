@@ -321,7 +321,10 @@ assert_ok "npm-install-g-needs-no-sudo" \
 # EVERY PORT MARKED UP, because shortlink asks the KERNEL for a port and no test can predict which
 # one it gets. Marking the whole range means whatever it picks is confirmed, which is what these
 # cases are about; the case where a port is NOT confirmed is asserted separately below.
-FAKE_UP='mkdir -p /tmp/cs193v; { printf "state\thealthy\nfloor\t1024\n"; seq 1 65535 | awk "{print \"up\\t\" \$1 \"\\tlo\"}"; } > /tmp/cs193v/ports'
+FAKE_UP='mkdir -p '"$PORTS_STATE_DIR"'; { printf "state\thealthy\nfloor\t1024\n"; seq 1 65535 | awk "{print \"up\\t\" \$1 \"\\tlo\"}"; } > '"$PORTS_STATE"
+# AND ITS OPPOSITE: a tunnel that is up and has confirmed nothing, so shortlink waits and is never
+# told yes.
+FAKE_HEALTHY='mkdir -p '"$PORTS_STATE_DIR"'; printf "state\thealthy\nfloor\t1024\n" > '"$PORTS_STATE"
 
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
@@ -332,10 +335,10 @@ assert_contains "helper:open-url-explains-why"   "no browser" "$out"
 assert_fail "helper:open-url-needs-an-argument" \
             sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/open-url'"
 # THE STUB'S TWO ASSERTIONS ABOVE RUN WITH NO STATE FILE, and that is load-bearing rather than
-# incidental: $VT_RUN is a bare `podman run` with no tunnel behind it, so /tmp/cs193v/ports does
-# not exist, shortlink has nothing to tell it a port is reachable, degrades to printing its
-# argument, and open-url prints exactly what it always did. That is the contract every caller of
-# shortlink leans on to need no conditional of its own.
+# incidental: $VT_RUN is a bare `podman run` with no tunnel behind it, so
+# /tmp/cs193v-volatile/ports does not exist, shortlink has nothing to tell it a port is reachable,
+# degrades to printing its argument, and open-url prints exactly what it always did. That is the
+# contract every caller of shortlink leans on to need no conditional of its own.
 out="$(R "$FAKE_UP"' && /usr/local/bin/open-url https://example.com/verify?code=ABCD')"
 assert_match "helper:open-url-shortens-when-a-port-is-forwarded" \
              "http://localhost:[0-9]+/magic-link" "$out"
@@ -442,14 +445,14 @@ assert_ok "shortlink:help-answers" \
 # THE PORT IT PRINTS IS ONE IT WAS TOLD IS REACHABLE. "Any free port" on its own would be a bug
 # rather than a simplification: a server on a port the tunnel did not carry looks exactly like a
 # broken link. So the port is the kernel's choice, but printing it is the state file's decision.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; grep -c "^up	${p%%/*}	" /tmp/cs193v/ports')"
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; grep -c "^up	${p%%/*}	" '"$PORTS_STATE")"
 assert_match "shortlink:prints-a-short-url" "http://localhost:[0-9]+/token" "$out"
 assert_contains "shortlink:the-port-it-printed-was-confirmed" "1" "$out"
 
 # AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
 # the group above passing for a shortlink that ignores the file entirely: with a state file that
 # is present, healthy and simply never mentions the port, it must degrade rather than guess.
-out="$(R 'mkdir -p /tmp/cs193v; printf "state\thealthy\nfloor\t1024\n" > /tmp/cs193v/ports; /usr/local/bin/shortlink https://example.com/unconfirmed; echo rc=$?')"
+out="$(R "$FAKE_HEALTHY"'; /usr/local/bin/shortlink https://example.com/unconfirmed; echo rc=$?')"
 assert_contains "shortlink:an-unconfirmed-port-degrades"  "https://example.com/unconfirmed" "$out"
 assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
 
@@ -610,7 +613,7 @@ assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
 # file says the tunnel is healthy but says nothing about any port, so await_verdict polls for its
 # full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_UP: with
 # every port confirmed there is no wait to interrupt.
-out="$(R 'mkdir -p /tmp/cs193v; printf "state\thealthy\nfloor\t1024\n" > /tmp/cs193v/ports
+out="$(R "$FAKE_HEALTHY"'
           ( sleep 1; touch /tmp/c2 ) &
           t0=$(date +%s)
           o=$(/usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c2 token); rc=$?

@@ -653,8 +653,8 @@ COPY files/ /tmp/cs193v-files/
 #     and which socat and netcat are not here for. It gets a syntax check by the same
 #     argument as `sh -n /usr/bin/man` below -- `compile()` rather than `py_compile`, which
 #     would drop a .pyc into /usr/local/bin -- then two behavioural checks that cost
-#     nothing at build time: `--help` answers, and with no /tmp/cs193v/ports -- no tunnel,
-#     so nothing it binds can be reached -- it degrades to printing the URL it was handed.
+#     nothing at build time: `--help` answers, and with no /tmp/cs193v-volatile/ports -- no
+#     tunnel, so nothing it binds can be reached -- it degrades to printing the URL it was handed.
 #     That degradation is the contract every caller relies on to need no conditional, and
 #     the build is the cheapest place to notice it broken.
 #

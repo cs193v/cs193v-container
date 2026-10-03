@@ -232,7 +232,8 @@ printf -- '--hostname=probe\n' | fix_args container.args
 PATH="$WORK/bin:$PATH" "$FIX/cs193v" --dev-args >/dev/null 2>&1
 assert_eq "cost:asks-podman-nothing" "0" "$(awk 'END { print NR }' "$WORK/podman.count")"
 
-# The real file, as shipped: 11 lines carry an argument, and nothing else may cost a fork.
+# The real file, as shipped: each line that carries an argument costs one sed, and nothing else
+# may cost a fork.
 fix_reset
 cp "$REPO/.config/container.args" "$FIX/.config/container.args"
 real_lines="$(awk '{ l = $0; sub(/#.*/, "", l) } l ~ /[^[:space:]]/ { n++ } END { print n+0 }' \

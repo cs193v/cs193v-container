@@ -902,7 +902,7 @@ the two apart. Every port assertion in this suite establishes its ports this way
 nothing left to test.
   the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
   the container says:
-$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')
 Check:  ./cs193v doctor
         ./cs193v --reset-tunnel"
         exit 1
@@ -1213,6 +1213,24 @@ TESTS_DIR="$(cd -- "$(dirname -- "$_assert_self")/.." && pwd -P)"
 PRIVATE="$(cd -- "$TESTS_DIR/.." && pwd -P)"
 REPO="$(cd -- "$PRIVATE/.." && pwd -P)"
 export TESTS_DIR PRIVATE REPO
+
+# THE PORT STATE FILE, asked of the watcher that writes it (#370) rather than spelled here as one
+# more copy. cs193v-portwatch is built to be sourced -- 18-portwatch-fuzz.sh does it, behind the
+# same guard -- so this is PW_STATE exactly as the watcher computes it, in a subshell so nothing
+# else leaks. A copy that drifted from the real path would make every "the previous boot's file is
+# gone" check pass against any container, broken or not; and an empty answer has to stop the run,
+# because a test that reads "" for this path is measuring nothing.
+# shellcheck disable=SC2034
+PORTS_STATE="$(CS193V_PORTWATCH_SOURCED=1
+               # shellcheck source=.private/files/cs193v-portwatch
+               . "$PRIVATE/files/cs193v-portwatch" && printf '%s' "${PW_STATE:-}")"
+if [ -z "$PORTS_STATE" ]; then
+    printf 'assert.sh: sourcing %s gave no PW_STATE, so the port state file cannot be located\n' \
+           "$PRIVATE/files/cs193v-portwatch" >&2
+    exit 2
+fi
+PORTS_STATE_DIR="${PORTS_STATE%/*}"
+export PORTS_STATE PORTS_STATE_DIR
 
 # ─── the strings the container prints ──────────────────────────────────────────
 # Sourced from the SAME file the image installs at /etc/cs193v/strings.sh, so a test never

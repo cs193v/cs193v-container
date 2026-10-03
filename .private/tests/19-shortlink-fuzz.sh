@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TIER: unit
 #
-# shortlink's reader of /tmp/cs193v/ports, fuzzed. No podman, no container, no network.
+# shortlink's reader of /tmp/cs193v-volatile/ports, fuzzed. No podman, no container, no network.
 #
 # WHY THIS IS A PARSER WORTH FUZZING AT ALL, when the file it reads is written by code we also
 # wrote: shortlink decides from it whether to print a SHORT url or the long one, and getting that

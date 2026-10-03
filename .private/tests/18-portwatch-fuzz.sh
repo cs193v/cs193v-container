@@ -24,8 +24,9 @@ set -u
 
 cd "$REPO" || exit 1
 
-# Read by cs193v-portwatch:453, three lines below, which is a `.` shellcheck does not follow
-# without -x -- and -x here would resolve the source and hide every finding this file has.
+# Read by the guard at the bottom of cs193v-portwatch, three lines below -- a `.` which shellcheck
+# does not follow without -x, and -x here would resolve the source and hide every finding this
+# file has.
 # shellcheck disable=SC2034
 CS193V_PORTWATCH_SOURCED=1
 # shellcheck source-path=SCRIPTDIR/..

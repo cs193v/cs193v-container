@@ -135,7 +135,7 @@ assert_carried() {                    # assert_carried NAME
 it to this host, so nothing a student runs in there would be reachable.
   the tunnel holds: $(fwd_owned_ports | do_tr '\n' ' ')
   the container says:
-$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
     fi
     dyn_serve_stop
 }
@@ -300,6 +300,49 @@ assert_eq "live:20-launches-still-one-container" "1" "$(ours_existing)"
 # that things installed with sudo survive until a rebuild.
 assert_eq "live:20-launches-do-not-recreate" "$before" "$(podman inspect "$NAME" --format '{{.Id}}')"
 assert_eq "live:20-launches-leave-nothing-running" "0" "$(ours_running)"
+
+# ─── the port state does not outlive its boot  (#370) ──────────────────────────
+# $PORTS_STATE used to be on the writable layer, so a container stopped and started again served
+# the previous boot's answer to `cs193v-portwatch --show` and to shortlink. Its directory is a
+# tmpfs now; container.args "Per-boot state" has the story and the measurements.
+#
+# HERE, AND BOTH HALVES OF THE POSITION ARE LOAD-BEARING:
+#   * AFTER THE TWENTY LAUNCHES, whose LB calls each wait for their launcher to exit, teardown and
+#     all, so nothing is still acting on this container. NOT after the race group below: its kill -9
+#     lands on the pty, and the winning launcher tears down asynchronously after that -- it removes
+#     its supervisor's pidfile first and runs `podman stop` LAST, so it stopped this container under
+#     the restart below. Measured: the first exec here found it not running.
+#   * BEFORE THE FIRST require_tunnel. Without the mount's mode=1777 the directory is unwritable from
+#     the second boot, which kills the watcher and with it every forward; require_tunnel would then
+#     end the suite, and a test placed after it would never get to say why.
+#
+# A RAW RESTART -- release_container and hold_container, nothing else. LV can rebuild, and a
+# recreated container has no old file even without the mount, so the absence below would pass on a
+# broken tree. A marker that DOES survive on the writable layer is what makes this a restart: a
+# recreated container would have lost it with everything else. Removed before it is written, so
+# one left behind by a run that died mid-group cannot stand in for this run's.
+hold_container
+E 'rm -f /tmp/cs193v-370-marker && echo kept > /tmp/cs193v-370-marker &&
+   cs193v-portwatch --publish state=healthy floor=1024 up=5173:lo refused=' >/dev/null
+# THE PUBLISH LANDED, or its absence after the restart proves nothing. Its own exec, not folded
+# into the one above: a refused publish echoes its arguments to stderr, which E keeps, and "5173"
+# would then be found in an error message.
+assert_contains "volatile:the-publish-landed-before-the-restart" "5173" \
+                "$(E 'cs193v-portwatch --show')"
+release_container
+hold_container
+assert_contains "volatile:restarted-and-the-writable-layer-kept-its-marker" "kept" \
+                "$(E 'cat /tmp/cs193v-370-marker; rm -f /tmp/cs193v-370-marker')"
+# NOT A POLL FOR AN ABSENCE, so no fixed sleep is owed here. hold_container has finished waiting
+# for the container to run, the tmpfs was mounted before PID 1 existed, and no launcher is running
+# to write into it: what is read is the state this boot began with, not one that might change.
+assert_contains "volatile:the-previous-boot-state-is-gone" "ABSENT" \
+                "$(E "test ! -e $PORTS_STATE && echo ABSENT")"
+assert_contains "volatile:show-has-nothing-to-report" "No forwarding information yet" \
+                "$(E 'cs193v-portwatch --show')"
+assert_contains "volatile:the-state-dir-is-writable-after-a-restart" "PUBLISHED" \
+                "$(E 'cs193v-portwatch --publish state=healthy up= refused= && echo PUBLISHED')"
+release_container
 
 # ─── the exited -> running race, which is the one podman cannot make atomic ─────
 # This group used to assert that four simultaneous launches all got a shell in one container,
@@ -941,7 +984,7 @@ fi
 # A FORWARDED PORT FIRST, because "nothing is up" is only news about a state file that had
 # something up.
 state_says_gone() {
-    podman exec "$NAME" cat /tmp/cs193v/ports 2>/dev/null \
+    podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
         | do_awk -F'\t' '$1 == "state" { s = $2 } $1 == "up" { u++ }
                          END { exit !(s == "master-unresponsive" && u == 0) }'
 }
@@ -952,7 +995,7 @@ if a_port_is_carried && [ -n "$TPID" ] && kill "$TPID" 2>/dev/null; then
     else
         fail "tunnel:a-closed-master-is-reported-as-unreachable" "the master (pid $TPID) exited on TERM
 with $CARRIED_PORT forwarded, and fifteen seconds later the state file still said:
-$(podman exec "$NAME" cat /tmp/cs193v/ports 2>&1 | sed 's/^/    /')"
+$(podman exec "$NAME" cat "$PORTS_STATE" 2>&1 | sed 's/^/    /')"
     fi
     dyn_serve_stop
     L --reset-tunnel >/dev/null 2>&1

@@ -21,6 +21,30 @@ set -u
 . "$(dirname -- "$0")/lib/assert.sh"
 
 require_running
+# BEFORE require_tunnel, AND THE POSITION IS LOAD-BEARING (the same reason as the restart test in
+# 80-launcher-live.sh). Without the mount's mode=1777 the directory is unwritable from the second
+# boot, the watcher dies, and require_tunnel ends the suite -- so a check placed after it could
+# never say why. Up here the container is running and nothing has needed forwarding yet.
+#
+# ONE TMPFS, ON THE PER-BOOT STATE DIRECTORY, AND NO OTHER (#370; container.args "Per-boot
+# state" says why). /tmp itself stays on the writable layer (kernel:tmp-is-not-a-tmpfs below). A
+# closed set, like mount:binds-are-exactly-the-three-expected, so a tmpfs on /tmp or a second one
+# fails here -- and the expected value is non-empty, so an empty or unparsable answer cannot pass.
+# With exactly one key, the mode can only be that key's.
+tmpfs="$(I '{{json .HostConfig.Tmpfs}}')"
+record "flag:tmpfs" "$tmpfs"
+assert_eq "flag:the-only-tmpfs-is-the-state-dir" "$PORTS_STATE_DIR" \
+          "$(printf '%s' "$tmpfs" | python3 -c 'import json, sys
+print(" ".join(sorted(json.load(sys.stdin) or {})))')"
+assert_contains "flag:the-state-dir-carries-its-mode" "mode=1777" "$tmpfs"
+# AND WHAT THE STUDENT ACTUALLY GETS, not only what podman was told. Without the mode the directory
+# is unwritable from the second boot, and this container is always past its first: --rebuild starts
+# it once and stops it.
+assert_eq "volatile:the-state-dir-is-a-tmpfs" "tmpfs" "$(E "stat -f -c %T $PORTS_STATE_DIR")"
+assert_eq "volatile:the-state-dir-is-mode-1777" "1777" "$(E "stat -c %a $PORTS_STATE_DIR")"
+assert_contains "volatile:the-student-can-write-the-state-dir" "WRITABLE" \
+                "$(E "touch $PORTS_STATE_DIR/.probe && rm $PORTS_STATE_DIR/.probe && echo WRITABLE")"
+
 # WHICH PORTS: none, until this file makes some. There is no declared set to read any more, so
 # every port assertion below runs against ports THIS RUN binds inside the container and waits for
 # the tunnel to carry -- dyn_ports, which hard-fails if it never does. Established rather than
@@ -57,11 +81,11 @@ clean_vt_fixtures
 # ─── §A.4 the flags the container was actually created with ────────────────────
 assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 
-# NOTHING IN THIS PROJECT SETS A PIDS LIMIT -- .config/container.args:197-199 names
-# `--pids-limit` only as something deliberately NOT set -- so this was never a test of ours. It
-# was a CANARY ON PODMAN'S DEFAULT, and the direction that matters is only one of the two: a
-# TIGHTER limit does not kill the container, it WEDGES it, because `podman exec` must fork into
-# the same cgroup, so the launcher cannot get back in and it does not self-heal.
+# NOTHING IN THIS PROJECT SETS A PIDS LIMIT -- .config/container.args' "Deliberately ABSENT"
+# list names `--pids-limit` only as something deliberately NOT set -- so this was never a test of
+# ours. It was a CANARY ON PODMAN'S DEFAULT, and the direction that matters is only one of the
+# two: a TIGHTER limit does not kill the container, it WEDGES it, because `podman exec` must fork
+# into the same cgroup, so the launcher cannot get back in and it does not self-heal.
 #
 # PODMAN 6 MOVED THE DEFAULT THE OTHER WAY, to unlimited: HostConfig.PidsLimit is 0 and
 # pids.max is `max` (podman 6.0.2, measured on two independent probes). Asserting `2048`
@@ -71,9 +95,9 @@ assert_eq "flag:network-is-pasta" "pasta" "$(I '{{.HostConfig.NetworkMode}}')"
 # podman 6 removed by accident, and it collides with three things that would all have to be
 # rewritten to lie: 10-static.sh's rejected:no---pids-limit holds --pids-limit absent from
 # container.args, among flags "considered and rejected" that it says re-adding "should be a
-# deliberate act that breaks a test"; container.args:197-199 documents the rejection; and both
-# assertions here name a provenance that would stop being true. (By name, not by line: the number
-# that used to sit here, :1104, had drifted onto the #41 lifecycle block.)
+# deliberate act that breaks a test"; container.args' --pids-limit entry documents the
+# rejection; and both assertions here name a provenance that would stop being true. (By name, not
+# by line: the number that used to sit here, :1104, had drifted onto the #41 lifecycle block.)
 #
 # SO: RECORD THE VALUE, AND ASSERT ONLY AGAINST A DANGEROUSLY TIGHT ONE. Green on podman 5.7
 # (2048) and 6.x (0/max) alike, red only on a value low enough to hurt. This is NOT green-for-free:
@@ -124,9 +148,6 @@ assert_not_contains "flag:seccomp-not-unconfined" "seccomp=unconfined" "$sec"
 # loop in the image instead.
 assert_eq "flag:init-is-off" "false" "$(I '{{.HostConfig.Init}}')"
 
-tmpfs="$(I '{{json .HostConfig.Tmpfs}}')"
-record "flag:tmpfs" "$tmpfs"
-assert_not_contains "flag:no-tmpfs-on-tmp" '/tmp' "$tmpfs"
 record "flag:shm-size" "$(I '{{.HostConfig.ShmSize}}')"
 
 # The EXPLICIT uid=/gid= form, not bare --userns=keep-id: bare keep-id maps the host uid to
@@ -870,7 +891,7 @@ host_gets_000() { [ "$(host_code "$1")" = 000 ]; }
 # is broken" and "you bound ::1", which is the whole reason the state file carries a reason at all.
 dyn_reason() {
     podman exec "$NAME" awk -F'\t' -v p="$1" \
-        '$1 == "refused" && $2 == p { print $3; exit }' /tmp/cs193v/ports 2>/dev/null
+        '$1 == "refused" && $2 == p { print $3; exit }' "$PORTS_STATE" 2>/dev/null
 }
 
 # THE assertion this design exists for, and it is deliberately the inverse of what podman did. A
@@ -884,7 +905,7 @@ else
     fail "ports:loopback-bound-server-IS-reachable" \
          "got HTTP $(host_code "$PL") from 127.0.0.1:$PL — a server on the container's own
 loopback did not become reachable from this host, which is the entire premise of the design.
-  the container says: $(podman exec "$NAME" grep "	$PL	" /tmp/cs193v/ports 2>&1)
+  the container says: $(podman exec "$NAME" grep "	$PL	" "$PORTS_STATE" 2>&1)
 Check: cs193v doctor"
 fi
 
@@ -1069,12 +1090,12 @@ fi
 # port is up, so this is close to a tautology -- but it is the one assertion that would catch it
 # printing on the strength of a stale or misread file, which is the failure the fuzzer cannot see
 # because the fuzzer never touches a real one.
-if [ -n "$sl_port" ] && E "grep -q '^up	$sl_port	' /tmp/cs193v/ports"; then
+if [ -n "$sl_port" ] && E "grep -q '^up	$sl_port	' $PORTS_STATE"; then
     pass "shortlink:the-tunnel-says-that-port-is-up"
 else
     fail "shortlink:the-tunnel-says-that-port-is-up" \
-         "/tmp/cs193v/ports does not list $sl_port as up:
-$(E 'cat /tmp/cs193v/ports' 2>&1)"
+         "$PORTS_STATE does not list $sl_port as up:
+$(E "cat $PORTS_STATE" 2>&1)"
 fi
 
 # THE END TO END. Headers kept, because the two things worth asserting are both in them, and
