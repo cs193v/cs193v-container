@@ -770,8 +770,9 @@ Build it first:  ./cs193v --rebuild
 # inside a `$( )`, where the flag is lost with the subshell -- five reads forked the launcher five
 # times -- and an `exit` ends only the subshell (#164). So that refusal stops the suite with a
 # signal, and SIGUSR2 rather than TERM, measured on bash 3.2: a TERM trap that returns
-# (80-launcher-live.sh has one) and an inherited `trap '' TERM` both let the suite carry on,
-# while nothing here traps or ignores USR2. bash still runs the suite's EXIT trap on the way out.
+# (80-launcher-live.sh had one until #425) and an inherited `trap '' TERM` both let the suite
+# carry on, while nothing here traps or ignores USR2. bash still runs the suite's EXIT trap on
+# the way out.
 FWD_CTL='' FWD_PIDFILE='' FWD_BUILDLOG='' FWD_SUPPID='' FWD_SUPLOG='' FWD_READY='' FWD_REFUSED=''
 fwd_init() {
     [ -n "$FWD_READY" ] && return 0
