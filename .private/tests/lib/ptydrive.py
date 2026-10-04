@@ -502,7 +502,7 @@ def converse(steps, report, term, clock=time.monotonic):
     deadline in a millisecond."""
     step_i = 0
     prev_icanon = None          # for the loss detector below
-    strand = None               # (count, was, now, deadline) while a queue is under suspicion
+    strand = None               # (count, was, now, deadline, sender) while a queue is under suspicion
     window = ""                 # output since the previous step was sent
     armed_cursor = False        # ESC[?25h seen in this window
     deadline = clock() + STEP_SECS
@@ -592,16 +592,19 @@ def converse(steps, report, term, clock=time.monotonic):
             waiting = (term.queued() if prev_icanon is not None and icanon != prev_icanon
                        and strand is None else 0)
             if waiting > 0:
-                strand = (waiting, prev_icanon, icanon, clock() + STRAND_SECS)
+                # NAMED AFTER THE STEP THAT SENT THE QUEUED BYTES, which the gate has already moved
+                # past -- and pinned NOW, because the gate does not wait on a suspicion and may send
+                # again before it is confirmed (#465).
+                strand = (waiting, prev_icanon, icanon, clock() + STRAND_SECS,
+                          steps[max(step_i - 1, 0)])
                 # EVERY SUSPICION IS RECORDED, passing or not: it is what #255 had to instrument
-                # the loop to count, and the replay in 14-test-harness.sh counts it here. Named
-                # after the step that SENT the queued bytes, which the gate has already moved past.
-                report.line("NOTE", steps[max(step_i - 1, 0)]["name"], "suspected %d byte(s)"
+                # the loop to count, and the replay in 14-test-harness.sh counts it here.
+                report.line("NOTE", strand[4]["name"], "suspected %d byte(s)"
                             " across icanon %s -> %s" % (waiting, prev_icanon, icanon))
             prev_icanon = icanon
 
         if strand is not None:
-            count, was, became, by = strand
+            count, was, became, by, sender = strand
             # DRAINED TO EMPTY, not merely smaller. A cbreak -> canonical strand is read as ONE
             # mangled line, so the count does drop -- it just drops to the wrong place, which is
             # the silent failure this exists to catch. Only an empty queue says every byte we
@@ -614,7 +617,7 @@ def converse(steps, report, term, clock=time.monotonic):
             if term.queued() == 0:
                 strand = None
             elif clock() > by:
-                failure = ("LOST", steps[step_i],
+                failure = ("LOST", sender,
                            "the child changed tty mode with %d byte(s) still unread:"
                            " icanon %s -> %s, and %gs later nothing had read them."
                            % (count, was, became, STRAND_SECS))
@@ -700,14 +703,20 @@ def converse(steps, report, term, clock=time.monotonic):
 
     if failure:
         what, step, why = failure
+        # A LOST BLAMES A STEP ALREADY SENT, so its number is found from the step itself and its
+        # needles are not asked for: they matched before it was sent, and against the screen since
+        # they would read `??`. The rest of the report is about the step being WAITED ON, and says so.
+        at = [s is step for s in steps].index(True)
         report.line("FAIL", step["name"], what, why)
-        report.detail("step %d of %d: %s %s" % (step_i + 1, len(steps), step["kind"], step["name"]))
-        report.detail("wanted, in order:")
-        for i, needle in enumerate(step["needles"]):
-            mark = "??" if i >= 0 and needles_in_order(flatten(window), step["needles"][:i + 1]) >= 0 else "ok"
-            report.detail("  [%s] %s" % (mark, needle))
-        report.detail("what the driver saw in this step, timed from its start (%gs allowed):"
-                      % STEP_SECS)
+        report.detail("step %d of %d: %s %s" % (at + 1, len(steps), step["kind"], step["name"]))
+        if at == step_i:
+            report.detail("wanted, in order:")
+            for i, needle in enumerate(step["needles"]):
+                mark = "??" if needles_in_order(flatten(window), step["needles"][:i + 1]) >= 0 else "ok"
+                report.detail("  [%s] %s" % (mark, needle))
+        report.detail("what the driver saw %s, timed from its start (%gs allowed, %gs to settle):"
+                      % ("in this step" if at == step_i else "waiting on step %d, %s"
+                         % (step_i + 1, steps[step_i]["name"]), STEP_SECS, SETTLE_SECS))
         for row in seen.describe() + (term.where() if what == "TIMEOUT" else []):
             report.detail("  " + row)
         report.detail("the screen since the previous step:")
