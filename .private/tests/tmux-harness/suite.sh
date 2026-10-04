@@ -212,17 +212,25 @@ else
   hx_fail "the + NEW TAB chip is bound to a click" "MouseDown1StatusRight is not bound"
 fi
 
-# No binding anywhere may invoke a destructive or confusing command.
-for danger in split-window detach-client command-prompt choose-tree choose-window kill-window \
-              kill-pane kill-session kill-server display-menu display-popup rename-window \
-              rename-session resize-pane swap-pane next-layout break-pane join-pane \
-              switch-client suspend-client source-file run-shell new-session; do
-  if grep -qE -- "(^|[ ;{])$danger([ ;}]|$)" <<< "$keys"; then
-    hx_fail "no keybinding can invoke '$danger'" "$(printf '%s\n' "$keys" | grep -m1 -- "$danger")"
+# No binding anywhere may invoke a destructive or confusing command, from an if-shell arm, from
+# run-shell -C or by an alias either (#377). HX_DANGER and hx_danger_hits are in lib.sh, and
+# selftest.sh holds a fixture for each shape this check used to miss.
+reach="$(hx_reach <<< "$keys")"
+danger_hits="$(hx_danger_hits <<< "$reach")"
+for danger in $HX_DANGER; do
+  hit="$(awk -F'\t' -v d="$danger" '$2 == d { print $1; exit }' <<< "$danger_hits")"
+  if [ -n "$hit" ]; then
+    hx_fail "no keybinding can invoke '$danger'" "the $hit binding reaches it"
   else
     hx_pass "no keybinding can invoke '$danger'"
   fi
 done
+hx_expect_eq "every command a binding carries is one tmux can parse" \
+  "$(awk -F'\t' '$2 == "?" { print $1 ": " $3 }' <<< "$danger_hits")" ""
+# ...and the audit reads inside the config's own if-shell arms, or a broken recursion would leave
+# every check above green.
+hx_expect_contains "the danger check reads inside if-shell arms" \
+  "$(awk -F'\t' '$3 == 1 { print $2 }' <<< "$reach")" "send-keys"
 
 # --- the scrollbar must stay OFF -------------------------------------------
 # This is a regression test for a measured bug, not a style preference. With pane-scrollbars on,
@@ -2133,8 +2141,10 @@ SLFAIL
 
   # --- and still no key may summon one ------------------------------------
   # The packaging section's danger list already forbids display-popup in any binding. open-url
-  # invokes it as a program; a student must still have no key that does.
-  hx_expect_absent "no keybinding summons a popup" "$(it3 list-keys 2>/dev/null)" "display-popup"
+  # invokes it as a program; a student must still have no key that does, by any name or route.
+  hx_expect_eq "no keybinding summons a popup" \
+    "$(it3 list-keys 2>/dev/null | hx_reach | hx_danger_hits |
+       awk -F'\t' '$2 == "display-popup" || $2 == "?" { print $1 ": " $2 " " $3 }')" ""
 else
   hx_fail "the link box session starts" "screen: $(hx_cap "$S3" | head -3)"
 fi

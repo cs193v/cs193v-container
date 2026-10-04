@@ -117,4 +117,33 @@ hx_settle 0.4
 hx_expect_contains "SGR wheel bytes reach the inner PTY" "$(hx_cap "$S")" "[<64;20;10M"
 hx_hex "$S" "03"  # Ctrl+C out of cat
 
+# 8. suite.sh's danger check sees every forbidden command a binding can reach (#377). Each shape is
+#    bound alone in a config of its own and must come back naming exactly what it hides. The first
+#    seven are #377's shapes, and all but the braced arm used to pass. The last three must come
+#    back clean, and refused.
+danger_fixture() { # what binding expected [key]
+  local f; f="$(hx_scratch)"
+  printf 'bind -T hxfixture %s %s\n' "${4:-X}" "$2" > "$f"
+  hx_expect_eq "the danger check sees $1" \
+    "$(hx_keys_of "$f" hxfixture | hx_reach | hx_danger_hits | cut -f2 | sort -u | tr '\n' ' ' |
+       sed 's/ $//')" "$3"
+}
+danger_fixture "a braced if-shell arm"          'if -F 1 { split-window -h }'                  'split-window'
+danger_fixture "a quoted multi-word arm"        'if -F 1 "select-window -t 1 ; kill-window"'   'kill-window'
+danger_fixture "the second if-shell arm"        'if -F 1 "select-window" "split-window -h"'    'split-window'
+danger_fixture "an alias in a quoted arm"       'if -F 1 "popup -E true"'                      'display-popup'
+danger_fixture "a single-word alias"            'if -F 1 killw'                                'kill-window'
+danger_fixture "a command run-shell -C carries" 'run-shell -t . -C "kill-pane -a"'             'kill-pane run-shell'
+danger_fixture "an arm inside an arm"           "if -F 1 \"if -F 1 'run -C killp'\""           'kill-pane run-shell'
+danger_fixture "an arm after if-shell -t"       'if -t . -F 1 "kill-window -a"'                'kill-window'
+danger_fixture "confirm-before's command"       'confirm-before -p x "kill-pane -a"'           'kill-pane'
+danger_fixture "a later line of a braced arm"   $'if -F 1 {\n  select-window\n  if -F 1 "kill-window -a"\n}' 'kill-window'
+danger_fixture "a later line of a braced block" $'{\n  select-window\n  if -F 1 "kill-pane -a"\n}' 'kill-pane'
+danger_fixture "a block any command is given"   'bind -n F2 { kill-server }'                   'kill-server'
+danger_fixture "a name passed as an argument"   'new-window tmux kill-server'                  'kill-server'
+danger_fixture "only run-shell without -C"      'run-shell "echo kill-window -a"'              'run-shell'
+danger_fixture "nothing in a clean binding"     'if -F 1 "select-window -t 1" { send-keys -M }' ''
+danger_fixture "nothing in a binding for ;"     'select-window'                                '' '\;'
+danger_fixture "an arm tmux cannot parse"       'if -F 1 "nosuchcommand"'                      '?'
+
 hx_summary "harness self-test"

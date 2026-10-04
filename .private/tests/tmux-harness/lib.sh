@@ -613,6 +613,36 @@ hx_check_colors() { # session label [extra screencheck args...]
   if [ "$rc" -eq 0 ]; then hx_pass "legible: $label"; else hx_fail "legible: $label"; fi
 }
 
+# --- what a key binding can run (#377) --------------------------------------
+#
+# The commands no binding may reach. suite.sh's danger loop walks this list, and selftest.sh's
+# fixtures check the audit against it.
+HX_DANGER='split-window detach-client command-prompt choose-tree choose-window kill-window
+kill-pane kill-session kill-server display-menu display-popup rename-window rename-session
+resize-pane swap-pane next-layout break-pane join-pane switch-client suspend-client source-file
+run-shell new-session'
+
+# list-keys for one table of a config, sourced into a scratch server of its own. The server still
+# holds tmux's built-in bindings, which is why only TABLE is listed.
+hx_keys_of() { # config table
+  "$HX_TMUX" -L "hxkeys-$$-$RANDOM" -f /dev/null start-server \; source-file "$1" \; \
+    list-keys -T "$2" \; kill-server 2>&1
+}
+
+# list-keys on stdin -> "TABLE KEY<TAB>COMMAND<TAB>DEPTH" for every command a binding can reach,
+# from inside if-shell arms, run-shell -C, confirm-before and any braced block too, by its full
+# name. COMMAND is `?` for anything that could not be read, with the reason in the third field.
+# keyreach.py says how.
+hx_reach() { python3 "$HX_DIR/keyreach.py" "$HX_TMUX"; }
+
+# hx_reach's output on stdin -> the lines of it that name a command in HX_DANGER, or that could
+# not be read.
+hx_danger_hits() {
+  awk -F'\t' -v deny="${HX_DANGER//$'\n'/ }" '
+    BEGIN { n = split(deny, d, " "); for (i = 1; i <= n; i++) bad[d[i]] = 1 }
+    $2 in bad || $2 == "?"'
+}
+
 # --- R1: prove no other keybinding does anything ----------------------------
 #
 # Takes a "structure probe" -- a command that prints a stable fingerprint of the session's
