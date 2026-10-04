@@ -1414,15 +1414,24 @@ I() { podman inspect "$NAME" --format "$1" 2>&1; }
 # then tests the same frozen answer (#378).
 # 20 Hz because that is what container_pkill already polls at and its teardown is measured at
 # 0.35 s; a slower tick would make the commonest wait here worse than it is today.
+#
+# THE CEILING IS ELAPSED SECONDS, NOT A COUNT OF POLLS (#401). It was SECS x 20 iterations, each
+# CMD and then the sleep, so a CMD that costs a `podman exec` stretched it by its own cost: a
+# "15 s" wait gave up after 53.5 s. $SECONDS is whole seconds, plenty for a failure bound, and it
+# can tick a moment after the wait begins -- so the wait gives up only once the clock is PAST the
+# deadline, and a ceiling of N gives up after more than N seconds and at most N+1, plus one CMD.
+# The deadline is checked after CMD rather than before it, so the last poll is always one taken
+# after the deadline passed: a Mac that slept through the window still looks once on waking.
+# $SECONDS is the wall clock, so a clock stepped BACK mid-wait lengthens it -- bash 3.2 has no
+# monotonic clock to offer instead.
 wait_until() {                        # wait_until SECS CMD [ARGS...]  -> 0 as soon as CMD succeeds
     local limit="$1"; shift
-    local i=0 max=$((limit * 20))
-    while [ "$i" -lt "$max" ]; do
+    local end=$((SECONDS + limit))
+    while :; do
         "$@" && return 0
+        [ "$SECONDS" -le "$end" ] || return 1
         sleep 0.05
-        i=$((i + 1))
     done
-    return 1
 }
 
 # Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
