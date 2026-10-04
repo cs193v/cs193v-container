@@ -4677,9 +4677,26 @@ import json, sys
 print("\n".join(json.load(open(sys.argv[1]))["permissions"]["deny"]))
 ' "$managed" 2>&1)" || deny_rules="the check itself failed: $deny_rules"
 
+# THE SECTION, NOT THE FILE (#326), for the reason the reverse check below gives: the notes name
+# paths elsewhere -- ~/projects, and ~/.codex in the staff comment at the top -- so a search of the
+# whole file passed for a store moved out of the section, or left named only in that comment.
+# Measured: with ~/.config/gh/ moved to Miscellaneous, or ~/.codex/auth.json deleted from the
+# section, 10-static.sh stayed green. ONE PATTERN serves both halves, so they cannot disagree about
+# where the section ends, and a missing section says so rather than calling every store unnamed.
+CRED_SECTION_RE='^#+ *Credentials\b(.*?)(?=^#+ |\Z)'
+cred_section="$(python3 -c '
+import re, sys
+sec = re.search(sys.argv[2], open(sys.argv[1]).read(), flags=re.S | re.M)
+print(sec.group(1) if sec else "NO-CREDENTIALS-SECTION")
+' "$NOTES" "$CRED_SECTION_RE" 2>&1)" || cred_section="the check itself failed: $cred_section"
+
 for store in $CRED_STORES; do
     assert_contains "claude:denies-$store" "$store" "$deny_rules"
-    assert_contains "notes:names-$store"   "$store" "$(cat $NOTES)"
+    case "$cred_section" in
+        NO-CREDENTIALS-SECTION)
+            fail "notes:names-$store" "$NOTES has no Credentials heading to name it under" ;;
+        *)  assert_contains "notes:names-$store" "$store" "$cred_section" ;;
+    esac
 done
 
 # And the other direction, which is the one a reword cannot break: every path the notes name
@@ -4712,7 +4729,7 @@ for r in json.load(open(sys.argv[1]))['permissions']['deny']:
     if m:
         rules.append(re.sub(r'^/+', '/', m.group(1)))
 text = open(sys.argv[2]).read()
-sec = re.search(r'^#+ *Credentials\b(.*?)(?=^#+ |\Z)', text, flags=re.S | re.M)
+sec = re.search(sys.argv[3], text, flags=re.S | re.M)
 found = re.findall(r'(?:~|/home/student)/[A-Za-z0-9._/-]+', sec.group(1) if sec else '')
 bad = []
 for named in found:
@@ -4730,7 +4747,7 @@ for named in found:
 print('' if sec else 'NO-CREDENTIALS-SECTION')
 print('' if found else 'NO-CREDENTIAL-PATHS-FOUND')
 print(' '.join(sorted(set(bad))))
-" "$managed" "$NOTES" 2>&1)" || uncovered="the check itself failed: $uncovered"
+" "$managed" "$NOTES" "$CRED_SECTION_RE" 2>&1)" || uncovered="the check itself failed: $uncovered"
 assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$uncovered" | sed '/^$/d')"
 
 # ─── shellcheck ────────────────────────────────────────────────────────────────
