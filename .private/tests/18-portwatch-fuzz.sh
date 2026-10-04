@@ -331,16 +331,19 @@ pub_ok "empty-up"  ""                 "state=healthy" "up="
 pub_ok "no-up-key" ""                 "state=healthy"
 pub_ok "with-all"  "3000:lo"          "state=healthy" "floor=1024" "up=3000:lo" "refused=8080:busy"
 
+# bad-class and bad-reason offer each other's vocabulary: `busy` is a reason and `lo` a class
+# (#410). A word in neither list stays refused by a check widened to accept both, so its case
+# stays green whichever list the check used. The reader's two cases below do the same.
 pub_bad "no-state"         "no state given"             "up=3000:lo"
 pub_bad "unknown-state"    "unknown state 'confused'"   "state=confused" "up="
 pub_bad "unknown-key"      "unknown key 'colour'"       "state=healthy" "colour=blue"
 pub_bad "bare-word"        "not key=value: 'hello'"     "state=healthy" "hello"
 pub_bad "duplicate-key"    "duplicate up"               "state=healthy" "up=3000:lo" "up=5173:lo"
-pub_bad "bad-class"        "unknown value 'wat'"        "state=healthy" "up=3000:wat"
+pub_bad "bad-class"        "unknown value 'busy'"       "state=healthy" "up=3000:busy"
 pub_bad "bad-port"         "port out of range '0'"      "state=healthy" "up=0:lo"
 pub_bad "octal-port"       "non-canonical port '03000'" "state=healthy" "up=03000:lo"
 pub_bad "port-no-class"    "no colon in '3000'"         "state=healthy" "up=3000"
-pub_bad "bad-reason"       "unknown value 'whatever'"   "state=healthy" "refused=8080:whatever"
+pub_bad "bad-reason"       "unknown value 'lo'"         "state=healthy" "refused=8080:lo"
 pub_bad "floor-not-a-port" "floor out of range '0'"     "state=healthy" "floor=0" "up="
 pub_bad "floor-nondecimal" "non-decimal floor 'x'"      "state=healthy" "floor=x" "up="
 pub_bad "embedded-tab"     "unknown value 'lo${A_TAB}'" "state=healthy" "up=3000:lo$(printf '\t')"
@@ -360,7 +363,13 @@ assert_eq "pw:publish-every-rejection-ran" "14" "$PUB_BAD_RAN"
 #
 # THE PARSE ITSELF IS A CHECK (#392). The reader fills PWS_* a line at a time, so by the time it
 # refuses a record it has set the fields before it, and their checks below pass on a refused file.
-pw_publish_parse "state=healthy" "floor=1024" "up=3000:lo,41573:any" "refused=8080:busy,9000:v6lo"
+# So is the publish (#410): a writer that refuses an argument renders a short file the reader
+# accepts, and the value checks below, failing alone, would blame the reader for what it left out.
+if pw_publish_parse "state=healthy" "floor=1024" "up=3000:lo,41573:any" "refused=8080:busy,9000:v6lo"; then
+    pass "pw:roundtrip-publishes"
+else
+    fail "pw:roundtrip-publishes" "pw_publish_parse returned $? on the round trip's own arguments: ${PWP_ERR:-no reason given}"
+fi
 pw_state_render > "$WORK/pwstate.txt"
 if pw_state_parse "$(cat "$WORK/pwstate.txt")"; then
     pass "pw:roundtrip-parses"
@@ -396,15 +405,15 @@ colour${A_TAB}blue"
 rd_bad "bad-state"        "unknown state 'sideways'"    "state${A_TAB}sideways"
 rd_bad "up-without-class" "up needs a port and a word"  "state${A_TAB}healthy
 up${A_TAB}3000"
-rd_bad "bad-class"        "unknown value 'wat'"         "state${A_TAB}healthy
-up${A_TAB}3000${A_TAB}wat"
+rd_bad "bad-class"        "unknown value 'busy'"        "state${A_TAB}healthy
+up${A_TAB}3000${A_TAB}busy"
 rd_bad "bad-port"         "port out of range '0'"       "state${A_TAB}healthy
 up${A_TAB}0${A_TAB}lo"
 rd_bad "space-separated"  "unknown key 'state healthy'" "state healthy"
 rd_bad "floor-nondecimal" "non-decimal floor"           "state${A_TAB}healthy
 floor${A_TAB}x"
-# `lo` IS A CLASS, a word an `up` record may carry but a refusal may not. A reason in neither list
-# would stay refused by a reader that checked refusals against the classes as well (#405).
+# `lo` IS A CLASS, a word an `up` record may carry but a refusal may not, as `busy` in bad-class is
+# a reason (#405, #410). A word in neither list would stay refused by a check widened to both.
 rd_bad "bad-reason"       "unknown value 'lo'"          "state${A_TAB}healthy
 refused${A_TAB}8080${A_TAB}lo"
 assert_eq "pw:state-every-rejection-ran" "10" "$RD_BAD_RAN"
