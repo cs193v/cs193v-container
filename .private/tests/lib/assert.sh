@@ -1693,10 +1693,36 @@ _count() {
     n="$(grep -c "^$1" "$CS193V_RESULTS" 2>/dev/null)" || true
     printf '%s' "${n:-0}"
 }
-if [ -n "${CS193V_STANDALONE:-}" ]; then
-    trap '
-        printf "\n  %s standalone: %s pass, %s fail, %s skip\n" \
-            "$CS193V_SUITE" "$(_count PASS)" "$(_count FAIL)" "$(_count SKIP)"
-        rm -f "$CS193V_RESULTS"
-    ' EXIT
-fi
+# AND SAY IT WITH THE EXIT STATUS, which is what a bisect or a `suite.sh && ...` reads (#394).
+# Without this a direct run exited with its last command's status: PASS FAIL PASS returned 0.
+# Only a clean exit is promoted, so any other status reaches the caller unchanged -- a require_*
+# refusal's 1, _emit's 97, a last command that failed. A signal's does too, but not by that test:
+# measured on bash 3.2, the trap sees `$?` = 0 when a fatal signal fires it, and bash re-raises the
+# signal once the trap is done, whatever the trap exits with.
+#
+# A RESULTS FILE THAT IS GONE IS NOT "0 fail". _count answers 0 for a file it cannot read, so a
+# direct run whose file was deleted under it would exit 0 having lost every FAIL; it exits 97
+# instead, _emit's number for results that were lost.
+#
+# A FUNCTION, NOT INLINE IN THE TRAP, so #393's fix can keep it: a suite's own `trap ... EXIT`
+# replaces this one, so twenty suites get neither the totals nor the status until assert.sh owns
+# the trap and runs their cleanup first and this last, handing it the status the suite exited with.
+_standalone_summary() {               # _standalone_summary RC -> the totals; exits 1 on a FAIL
+    local nfail
+    if [ ! -r "$CS193V_RESULTS" ]; then
+        printf '\n  %s standalone: its results file %s is gone, so nothing it recorded can be counted\n' \
+            "$CS193V_SUITE" "$CS193V_RESULTS" >&2
+        [ "$1" -eq 0 ] && exit 97
+        return 0
+    fi
+    nfail="$(_count FAIL)"
+    printf "\n  %s standalone: %s pass, %s fail, %s skip\n" \
+        "$CS193V_SUITE" "$(_count PASS)" "$nfail" "$(_count SKIP)"
+    rm -f "$CS193V_RESULTS"
+    [ "$1" -eq 0 ] && [ "$nfail" -gt 0 ] && exit 1
+    return 0
+}
+# `||` rather than `if ...; then`: the `$?` is the trap's, read when it fires, but a `then` branch
+# opening on one is what 10-static.sh's dollarq rule refuses, and a grep cannot tell the two
+# apart. Either way this line, the last in the file, leaves the `.` that sourced it with status 0.
+[ -z "${CS193V_STANDALONE:-}" ] || trap '_standalone_summary "$?"' EXIT

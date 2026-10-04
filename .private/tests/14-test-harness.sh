@@ -281,6 +281,69 @@ assert_contains "runner:still-counts-what-ran"      "2 pass"                "$ou
 assert_match    "runner:names-the-one-that-could-not-record" '03-cannot-record\.sh +exited 97' "$out"
 assert_contains "runner:says-results-were-lost"    "results were LOST"     "$out"
 
+# ─── a suite run DIRECTLY exits non-zero when an assertion failed (#394) ───────
+# The runner above counts FAILs from the results file, so a suite that fails an assertion and exits
+# 0 is still red there. Run directly -- which lib/assert.sh supports, and which a bisect or a
+# `suite.sh && ...` gates on -- a suite exited with its LAST command's status: measured, PASS FAIL
+# PASS returned 0 while the standalone trap printed `1 fail`.
+#
+# NO CS193V_RESULTS, because that is what a direct run is: the child makes its own results file in
+# a TMPDIR of its own, says where, and the trap must remove exactly that. The clean control matters
+# as much as the case: a trap that exited 1 whatever it counted would pass the first half.
+#
+# NOT YET FOR TWENTY SUITES, which is #393: a suite that installs an EXIT trap of its own replaces
+# assert.sh's, so a direct run of one prints no totals and takes no status from them.
+SA="$WORK/standalone"
+mkdir -p "$SA/tmp"
+cat > "$SA/suite.sh" <<'CHILD'
+set -u
+. "$1"
+printf 'RESULTS=%s\n' "$CS193V_RESULTS"
+[ -f "$CS193V_RESULTS" ] && printf 'RESULTS-EXISTED\n'
+case "$2" in
+    one-fail)   pass "sa:first"; fail "sa:second"; pass "sa:the-last-command-succeeds" ;;
+    clean)      pass "sa:first" ;;
+    own-status) fail "sa:first"; exit 3 ;;
+    # A signal sent to yourself is acted on before the next command, so `:` and not a sleep.
+    signalled)  fail "sa:first"; kill -s TERM $$; : ;;
+    lost)       fail "sa:first"; rm -f "$CS193V_RESULTS" ;;
+esac
+CHILD
+standalone() {                        # standalone SHAPE -> the direct run's output, then [rc=N]
+    # The subshell's own stderr too: it is what reports "Terminated" for the signalled child.
+    ( unset CS193V_RESULTS CS193V_SUITE CS193V_STANDALONE
+      TMPDIR="$SA/tmp" NO_COLOR=1 bash "$SA/suite.sh" "$TESTS_DIR/lib/assert.sh" "$1" ) 2>&1
+    printf '[rc=%s]' "$?"
+}
+out="$(standalone one-fail)"
+assert_contains "standalone:a-failed-assertion-fails-the-run" "[rc=1]"                 "$out"
+assert_contains "standalone:still-prints-its-totals"          "2 pass, 1 fail, 0 skip" "$out"
+# A listing and a path rather than an absence alone: an empty $SA/tmp is also what a results file
+# written somewhere else entirely would leave.
+sa_results="$(printf '%s\n' "$out" | sed -n 's/^RESULTS=//p')"
+case "$sa_results" in
+    "$SA/tmp/"?*) pass "standalone:makes-its-results-file-in-its-own-TMPDIR" ;;
+    *) fail "standalone:makes-its-results-file-in-its-own-TMPDIR" "it said: ${sa_results:-nothing}" ;;
+esac
+assert_contains "standalone:which-existed-while-it-ran"       "RESULTS-EXISTED"        "$out"
+assert_eq       "standalone:and-is-removed-at-exit"           "" "$(ls -A "$SA/tmp")"
+out="$(standalone clean)"
+assert_contains "standalone:a-clean-run-still-exits-0"        "[rc=0]"                 "$out"
+# A status the suite chose for itself is the more specific one, so it is kept: a require_* refusal
+# is 1 already, and _emit's 97 is what run-tests.sh reads as "results were lost".
+out="$(standalone own-status)"
+assert_contains "standalone:a-status-of-its-own-is-kept"      "[rc=3]"                 "$out"
+# And a signal's, which reaches the trap as `$?` = 0 and survives because bash re-raises it. So no
+# change inside _standalone_summary can turn this red; a trap that CATCHES the signal can, and is
+# the shape a shared EXIT trap for #393 is most likely to take -- measured, adding TERM to the
+# trap's signal list here gives rc 1.
+out="$(standalone signalled)"
+assert_contains "standalone:a-signal-death-is-kept"           "[rc=$((128 + $(kill -l TERM)))]" "$out"
+# A RESULTS FILE THAT IS GONE IS NOT A CLEAN RUN: the FAIL it held must not read as "0 fail".
+out="$(standalone lost)"
+assert_contains "standalone:a-lost-results-file-is-not-a-pass" "[rc=97]"               "$out"
+assert_contains "standalone:and-it-says-so"                    "is gone"               "$out"
+
 # ─── the ports fixture HARD-FAILS, and hands its ports back in a variable ──────
 # #164, and the third time the subshell boundary has eaten something load-bearing here (#76 was
 # repo_copy's memo, #79 the checkers). dyn_ports is the fixture every port assertion in
