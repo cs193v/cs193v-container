@@ -3018,12 +3018,15 @@ RTS="$WORK/rt-signal"
 mkdir -p "$RTS/tests"
 cp "$TESTS_DIR/run-tests.sh" "$RTS/tests/run-tests.sh"
 ln -s "$TESTS_DIR/lib" "$RTS/tests/lib"
-# The busy command each suite sits in. Its 30 seconds are a ceiling for a signal that never
-# arrives, not a wait: the signal or cleanup ends it.
+# The busy command each suite sits in. Its 90 seconds are a ceiling for a signal that never
+# arrives, not a wait: the signal or cleanup ends it. LONGER THAN THE RUNNER'S OWN 30-SECOND WAIT
+# on purpose (#463): a runner that waited for the lane without stopping it -- one that signalled
+# only the lane's leader, say -- would otherwise pass every case here, just slowly, once the busy
+# commands ran out on their own. Measured: 24 of 24 green under that mutation, at 30 seconds.
 cat > "$RTS/tests/50-pod.sh" <<'EOF'
 # TIER: container
 echo $$ > "$RTS_RUN/pod.pid"
-sh -c 'echo $$ > "$1"; exec sleep 30' sh "$RTS_RUN/pod.busy"
+sh -c 'echo $$ > "$1"; exec sleep 90' sh "$RTS_RUN/pod.busy"
 EOF
 cat > "$RTS/tests/51-podquick.sh" <<'EOF'
 # TIER: container
@@ -3033,7 +3036,61 @@ cat > "$RTS/tests/01-cheap.sh" <<'EOF'
 # TIER: static
 trap '"$DO_PY" -c "import time; time.sleep(1)"; echo finished > "$RTS_RUN/cheap.teardown"' EXIT
 echo $$ > "$RTS_RUN/cheap.pid"
-sh -c 'echo $$ > "$1"; exec sleep 30' sh "$RTS_RUN/cheap.busy"
+ps -o pgid= -p $$ | tr -d ' ' > "$RTS_RUN/cheap.pgid"
+sh -c 'echo $$ > "$1"; exec sleep 90' sh "$RTS_RUN/cheap.busy"
+EOF
+# A SUITE THAT IS FORKING WHEN THE SIGNAL LANDS: one background command after another, each a
+# short foreground command apart. Walking the tree child by child takes a pgrep per child, and
+# every command forked during that walk was never in the snapshot it signals. 150, not forever,
+# so a runner that cannot stop it still leaves a bounded number behind.
+#
+# EACH LIVES 5 SECONDS. On this Mac a command forked in the very instant of the group kill can miss
+# it -- measured, 3 times in 45 runs of this suite -- and the runner cannot tell it from one that had
+# the TERM, so it waits it out (see lane_stragglers). 5 seconds keeps that wait short, and still
+# outlives by far a runner that does not wait: main's walk left dozens of these running.
+cat > "$RTS/tests/03-forker.sh" <<'EOF'
+# TIER: static
+echo $$ > "$RTS_RUN/forker.pid"
+i=0
+while [ "$i" -lt 150 ]; do
+    sh -c 'echo $$ >> "$1"; exec sleep 5' sh "$RTS_RUN/forked.list" &
+    sh -c :
+    i=$((i + 1))
+    [ "$i" -eq 5 ] && echo forking > "$RTS_RUN/forker.busy"
+done
+wait
+EOF
+# A SUITE THAT LEAVES SOMETHING BEHIND ON ITS WAY OUT: its TERM trap starts a command and exits.
+# It starts it only once the runner has said it is waiting -- the thing itself, read off the
+# runner's own output, which goes to $RTS_RUN/out -- so the command joins the lane's group well
+# after the kill and cannot have had the TERM, and its parent is gone at once. The runner has to
+# signal it rather than wait its 90 seconds out against a 30-second bound. 10 seconds is the
+# ceiling on hearing the runner say so, not a wait.
+cat > "$RTS/tests/05-leaver.sh" <<'EOF'
+# TIER: static
+trap 'i=0
+      while ! grep -q "waiting for the no-podman lane" "$RTS_RUN/out" 2>/dev/null && [ "$i" -lt 200 ]; do
+          sleep 0.05; i=$((i + 1))
+      done
+      sh -c "echo \$\$ > \"\$1\"; exec sleep 90" sh "$RTS_RUN/left.pid" & exit 143' TERM
+echo $$ > "$RTS_RUN/leaver.pid"
+sh -c 'echo $$ > "$1"; exec sleep 90' sh "$RTS_RUN/leaver.busy"
+EOF
+# A SUITE WHOSE BUSY COMMAND IS IN A SESSION OF ITS OWN, the way ptyrun's and ptydrive's pty children
+# are: through lib/nosid.py, whose python stays in the lane's group and whose child does not.
+cat > "$RTS/tests/06-outsider.sh" <<'EOF'
+# TIER: static
+echo $$ > "$RTS_RUN/outer.pid"
+"$DO_PY" "$(dirname "$0")/lib/nosid.py" sh -c 'echo $$ > "$1"; exec sleep 90' sh "$RTS_RUN/outsider.pid"
+EOF
+# How a pipe into `head` ends, in each lane: 04 is in the background one, 52 the foreground.
+cat > "$RTS/tests/04-pipe.sh" <<'EOF'
+# TIER: static
+yes | head -1 >/dev/null; echo "${PIPESTATUS[0]}" > "$RTS_RUN/pipe.cheap"
+EOF
+cat > "$RTS/tests/52-pipe.sh" <<'EOF'
+# TIER: container
+yes | head -1 >/dev/null; echo "${PIPESTATUS[0]}" > "$RTS_RUN/pipe.fg"
 EOF
 cat > "$RTS/tests/02-quick.sh" <<'EOF'
 # TIER: static
@@ -3048,39 +3105,69 @@ rts_run() {
     ready="cd '$d' && ${6:-:}"
     for f in $4 top.pid; do ready="$ready && [ -s '$f' ]"; done
     ( cd "$RTS/tests" || exit 1
-      export RTS_RUN="$d" TMPDIR="$d/tmp" NO_COLOR=1 RTS_LOG="$d/log" RTS_WATCH="$4"
+      export RTS_RUN="$d" TMPDIR="$d/tmp" NO_COLOR=1 RTS_LOG="$d/log" RTS_WATCH="$4 ${RTS_LATER:-}"
+      export RTS_SETTLE="${RTS_SETTLE:-0}" RTS_PIPE="${RTS_PIPE:-}"
       exec "$DO_PY" -c 'import os, signal, subprocess, sys
 os.setpgid(0, 0)
 for s in (signal.SIGINT, signal.SIGTERM):
     signal.signal(s, signal.SIG_IGN)
 pid = os.fork()
 if pid == 0:
-    for s in (signal.SIGINT, signal.SIGTERM):
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGPIPE, signal.SIGXFSZ):
         signal.signal(s, signal.SIG_DFL)
+    if os.environ.get("RTS_PIPE") == "ignore":
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     os.execv("/bin/bash", ["/bin/bash", "-c", sys.argv[2]])
 open(os.path.join(os.environ["RTS_RUN"], "top.pid"), "w").write(str(pid))
 st = os.waitpid(pid, 0)[1]
-left = []
+def gone(f):
+    try:
+        pids = open(os.path.join(os.environ["RTS_RUN"], f)).read().split()
+    except OSError:
+        return True
+    return not any((lambda st: st and not st.startswith("Z"))(subprocess.run(
+        ["ps", "-p", p, "-o", "state="], capture_output=True, text=True).stdout.strip()) for p in pids)
+import time
+end = time.time() + float(os.environ.get("RTS_SETTLE", "0"))
+while time.time() < end and not all(gone(f) for f in os.environ["RTS_WATCH"].split()):
+    time.sleep(0.05)
+left, stray = [], []
 for f in os.environ["RTS_WATCH"].split():
     try:
-        p = open(os.path.join(os.environ["RTS_RUN"], f)).read().strip()
+        pids = open(os.path.join(os.environ["RTS_RUN"], f)).read().split()
     except OSError:
         left.append(f + ":never-started"); continue
-    state = subprocess.run(["ps", "-p", p, "-o", "state="], capture_output=True, text=True).stdout.strip()
-    if state and not state.startswith("Z"):
-        left.append(f.replace(".pid", "") + ":" + p)
+    alive = [p for p in pids if (lambda st: st and not st.startswith("Z"))(subprocess.run(
+        ["ps", "-p", p, "-o", "state="], capture_output=True, text=True).stdout.strip())]
+    stray += alive
+    if alive:
+        left.append(f.replace(".pid", "") + ":" + (alive[0] if len(pids) == 1 else "%d-of-%d" % (len(alive), len(pids))))
+for p in stray:
+    try:
+        os.kill(int(p), signal.SIGKILL)
+    except OSError:
+        pass
 torn = os.path.exists(os.path.join(os.environ["RTS_RUN"], "cheap.teardown"))
+try:
+    g = open(os.path.join(os.environ["RTS_RUN"], "cheap.pgid")).read().strip()
+    group = "own" if g and int(g) != os.getpgid(0) else "the-runners"
+except (OSError, ValueError):
+    group = "unknown"
 said = ("signal " + signal.Signals(os.WTERMSIG(st)).name) if os.WIFSIGNALED(st) else ("exit %d" % os.WEXITSTATUS(st))
-open(sys.argv[1], "w").write("%s\nleft=%s\nteardown=%s\n" % (said, " ".join(left) or "none", "finished" if torn else "unfinished"))' \
+open(sys.argv[1], "w").write("%s\nleft=%s\nteardown=%s\nlanegroup=%s\n" % (said, " ".join(left) or "none", "finished" if torn else "unfinished", group))' \
           "$d/status" "$5" ) > "$d/out" 2>&1 &
     pid=$!
     if wait_until 15 sh -c "$ready"; then
         case "$2" in
+            none)   ;;
             group)  kill -s "$3" -- "-$pid" ;;
             # The runner itself, as `kill PID` reaches it, and then the command its foreground
             # suite is sitting in: bash defers a trap until the foreground child returns, so
             # without the second signal this would wait out that command's 30 seconds.
             runner) kill -s "$3" "$(cat "$d/top.pid")"; kill -s "$3" "$(cat "$d/pod.busy")" ;;
+            # Everything in the runner's group bar the python watching it: what a KILL to that
+            # group, `timeout -k` escalating, reaches.
+            all)    kill -s "$3" "$(cat "$d/top.pid")" "$(cat "$d/pod.pid")" "$(cat "$d/pod.busy")" ;;
         esac
     fi
     wait_until 60 pid_is_gone "$pid" || kill -s KILL -- "-$pid" 2>/dev/null
@@ -3133,6 +3220,62 @@ assert_eq       "rtsig:term-the-runner-exits-143"     "exit 143" "$(rts_said ter
 assert_eq       "rtsig:term-leaves-no-suite-running"  "left=none" "$(rts_said term 2)"
 assert_eq       "rtsig:term-waits-for-the-lane-teardown" "teardown=finished" "$(rts_said term 3)"
 rts_swept term
+
+# ─── ...and the lane is a process group of its own, signalled and waited on whole (#463) ─
+# A TERM TO THE RUNNER'S WHOLE GROUP, which is what a CI timeout sends. With the lane in that group
+# the TERM killed the lane's own shells as well, orphaning the suite they were running before
+# cleanup could find it, and the runner exited 143 with that suite still in its EXIT trap --
+# measured, 5 runs of 5. In a group of its own, the lane is left to cleanup.
+rts_run groupterm group TERM "$RTS_BOTH_READY" "exec $RTS_BOTH"
+assert_eq       "rtsig:a-group-term-the-runner-exits-143" "exit 143" "$(rts_said groupterm 1)"
+assert_eq       "rtsig:a-group-term-leaves-no-suite-running" "left=none" "$(rts_said groupterm 2)"
+assert_eq       "rtsig:a-group-term-waits-for-the-lane-teardown" "teardown=finished" \
+                "$(rts_said groupterm 3)"
+assert_eq       "rtsig:the-background-lane-is-a-group-of-its-own" "lanegroup=own" \
+                "$(rts_said groupterm 4)"
+# AND A SUITE THAT IS FORKING WHEN IT LANDS. One signal to the group reaches every member at once,
+# where a walk of the tree signalled a snapshot and missed whatever was forked during it -- and
+# the one fork a group kill can miss is still in the group, so the runner waits that one out.
+rts_run forkrace group INT 'forker.pid forker.busy forked.list pod.pid pod.busy' \
+        'exec bash ./run-tests.sh -k 03-forker -k 50-pod'
+assert_eq       "rtsig:a-forking-suite-is-stopped-whole" "left=none" "$(rts_said forkrace 2)"
+assert_eq       "rtsig:a-forking-suite-the-runner-dies-of-sigint" "signal SIGINT" \
+                "$(rts_said forkrace 1)"
+# A MEMBER THAT MISSED THE TERM AND WHOSE PARENT IS GONE, made on purpose by 05-leaver: the runner
+# sends it the TERM rather than waiting out its 90 seconds, and returns with nothing left. RTS_LATER
+# is the pid file that only exists once the signal has gone, watched but not waited for.
+RTS_LATER=left.pid rts_run orphan group INT 'leaver.pid leaver.busy pod.pid pod.busy' \
+        'exec bash ./run-tests.sh -k 05-leaver -k 50-pod'
+assert_eq       "rtsig:what-a-suite-leaves-behind-is-signalled-too" "left=none" "$(rts_said orphan 2)"
+assert_eq       "rtsig:and-that-runner-still-dies-of-sigint" "signal SIGINT" "$(rts_said orphan 1)"
+# A RUNNER KILLED OUTRIGHT, with its foreground lane. In a session of its own the lane is out of
+# reach of that KILL, where it used to die with everything else; it has to notice it is alone, and
+# tear down rather than run on. Given 10 seconds to, against its watch's one-second tick and the
+# second its suite's teardown takes -- a ceiling, not a wait.
+RTS_SETTLE=10 rts_run killed all KILL "$RTS_BOTH_READY" "exec $RTS_BOTH"
+assert_eq       "rtsig:a-killed-runner-leaves-no-suite-running" "left=none" "$(rts_said killed 2)"
+assert_eq       "rtsig:a-killed-runner-still-gets-the-lane-torn-down" "teardown=finished" \
+                "$(rts_said killed 3)"
+# WHAT LEFT THE LANE'S GROUP IS STILL THE LANE'S. 06-outsider's busy command is in a session of its
+# own, out of reach of the group's TERM, as a pty child is; the runner finds it as a descendant
+# before the kill and signals and waits on it by pid, as the walk this replaced did for everything.
+rts_run outsider group INT 'outer.pid outsider.pid pod.pid pod.busy' \
+        'exec bash ./run-tests.sh -k 06-outsider -k 50-pod'
+assert_eq       "rtsig:a-lane-command-in-its-own-session-is-stopped-too" "left=none" \
+                "$(rts_said outsider 2)"
+# AND THE LANE RUNS WITH A SHELL'S DISPOSITIONS, not python's: the helper that makes its session
+# is CPython, which ignores SIGPIPE at startup, and an ignore survives exec. A pipe into `head`
+# then ends in "Broken pipe" and 1 instead of SIGPIPE and 141 -- measured -- in every suite of the
+# lane. Default whatever the runner had, the way ptyrun's child gets a default SIGHUP: so the
+# runner is handed an IGNORED SIGPIPE here, which the foreground lane keeps -- the proof that the
+# arrangement took -- and the background lane must not. A run to the end, so no lane may be
+# recorded as having died either.
+RTS_PIPE=ignore rts_run pipe none - 'podquick.pid' 'exec bash ./run-tests.sh -k 04-pipe -k 52-pipe -k 51-podquick'
+assert_eq       "rtsig:the-runner-was-handed-an-ignored-sigpipe" "1" "$(cat "$RTS/pipe/pipe.fg" 2>/dev/null)"
+assert_eq       "rtsig:the-background-lane-gets-a-shells-sigpipe-anyway" "141" \
+                "$(cat "$RTS/pipe/pipe.cheap" 2>/dev/null)"
+assert_eq       "rtsig:a-run-to-the-end-ends-0" "exit 0" "$(rts_said pipe 1)"
+assert_not_contains "rtsig:and-records-no-lane-as-having-died" "SUITES THAT DIED" "$(cat "$RTS/pipe/out")"
 
 # ─── telling this run's podman images from a colleague's (#199) ────────────────
 # THE INSTRUMENT THE INSTALL TIER'S THREE HOST CANARIES ARE READ THROUGH. They used to cksum the

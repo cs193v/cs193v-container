@@ -180,8 +180,8 @@ def _install_close_handler():
 
     SIGUSR1 BECAUSE EVERYTHING ELSE IS TAKEN. SIGTERM already means "die now, be reapable" at
     lib/podman-shim.sh's launcher_pty_silent_stop, which rm -f's its fifo the moment we are
-    reaped, and at 14-test-harness.sh's cleanup -- and it is what run-tests.sh's kill_tree sends
-    down the whole cheap lane on a Ctrl-C. SIGHUP is unused but it is the very thing under test,
+    reaped, and at 14-test-harness.sh's cleanup -- and it is what run-tests.sh sends the whole
+    cheap lane's process group on a Ctrl-C. SIGHUP is unused but it is the very thing under test,
     so naming it as the trigger would be a trap for the next reader.
     """
     r, w = os.pipe()
