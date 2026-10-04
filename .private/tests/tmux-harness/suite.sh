@@ -693,6 +693,25 @@ ccopy() { it show-buffer 2>/dev/null; }
 cmouse() { it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}' 2>/dev/null; }
 calt()   { it display-message -p -t "cs193v:$cwin" '#{alternate_on}' 2>/dev/null; }
 ccmd()   { it display-message -p -t "cs193v:$cwin" '#{pane_current_command}' 2>/dev/null; }
+# A MESSAGE THAT MUST GO BEFORE THE NEXT GESTURE IS JUDGED (#428, #455). Judged only if SEEN shows it
+# appeared -- one that never did has "gone" on the first look, which proves nothing (hx_gone's own
+# rule). Returns 1 when it appeared and did not go, so the caller skips what it would have judged on
+# a screen still showing it. Measured: tmux dismisses an ordinary message on any key, mouse
+# included, so only one shown with `display-message -N` can stay -- and that kind swallows every key
+# while it does, so the gesture after it never happens at all.
+#
+# NEEDLE IS AN ERE IN BOTH HALVES, the way hx_gone reads it, so "appeared" and "gone" cannot disagree
+# about a `+` -- and it is the same either-arm set the gesture's own poll accepted, so a message
+# from the wrong arm has to go too.
+msg_expires() { # desc needle seen
+  if grep -E -- "$2" >/dev/null <<<"$3"; then
+    hx_gone "$S" "$2" 8 && { hx_pass "$1"; return 0; }
+    hx_fail "$1" "still up after 8 s: [$(hx_cap "$S" | head -2 | tr '\n' ' ')]"
+    return 1
+  fi
+  hx_skip "$1" "it never appeared -- see the check above"
+  return 0
+}
 # After Ctrl+C, wait for the shell -- and if it never comes back, say so here, because the reset
 # typed next would go to the app instead and everything after it fails for a reason it cannot name.
 cshell() { # what
@@ -780,13 +799,14 @@ hx_settle 0.8
 hx_expect_eq "a drag at a live prompt copies NOTHING" "$(ccopy)" ""
 hx_expect_eq "a drag at a live prompt leaves no lingering mode" "$(cmode)" "0"
 hx_until_ok "hx_cap $S | head -2 | grep -E 'hold SHIFT|COPIED'" 8
-hx_expect_contains "a drag at a live prompt explains SHIFT+drag" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+hint_msg="$(hx_cap "$S" | head -2)"
+hx_expect_contains "a drag at a live prompt explains SHIFT+drag" "$hint_msg" "hold SHIFT"
 hx_expect_absent "no gesture claims to have copied anything any more" "$(hx_cap "$S" | head -2)" "COPIED"
 # The hint is chrome, so it answers to the same two rules as the rest of it: legible on either host
 # theme, and self-expiring rather than a banner that sits there.
 hx_check_colors "$S" "SHIFT+drag hint" --grep "hold SHIFT" --require-explicit
-hx_gone "$S" 'hold SHIFT' 8 || true
-hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+hint_gone=1
+msg_expires "the hint expires on its own" 'hold SHIFT|COPIED' "$hint_msg" || hint_gone=0
 
 # THE SHIFTED DRAG AT A LIVE PROMPT ANSWERS, WHERE IT USED TO BE SILENT. This is #123 as the
 # student reported it: the hint above says "hold SHIFT", and on a terminal that forwards Shift
@@ -807,42 +827,50 @@ hx_expect_absent "the hint expires on its own" "$(hx_cap "$S" | head -2)" "hold 
 hx_drag "$S" "$lr" 3 "$lr" 12 4
 hx_until_ok "hx_cap $S | head -2 | grep -E 'reached the container|hold SHIFT'" 8
 shift_msg="$(hx_cap "$S" | head -2)"
-hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than dropped" \
-                   "$shift_msg" "reached the container"
-hx_expect_absent "and the correction does not tell you to hold SHIFT again" \
-                 "$shift_msg" "hold SHIFT"
-hx_expect_eq "a SHIFTED drag still copies nothing" "$(ccopy)" ""
-# AND IT HAS TO GO BEFORE THE NEXT GESTURE IS JUDGED (#428), because that gesture answers with the
-# same words and could otherwise pass on this one's leftover. Measured: an ordinary leftover is
-# dismissed by the double-click's own clicks -- tmux clears a message on any key, mouse included --
-# but one shown with `display-message -N` outlives them, and the double-click check then passed
-# with its own answer removed. So a correction that does not go is a failure, and the double-click
-# is not judged on a bar it is still on. Judged only on a correction that appeared: one that never
-# did has "gone" on the first look, which proves nothing (hx_gone's own rule).
-shift_gone=1
-case "$shift_msg" in
-  *"reached the container"*)
-    if hx_gone "$S" 'reached the container' 8; then
-      hx_pass "the SHIFT+drag correction expires on its own"
-    else
-      hx_fail "the SHIFT+drag correction expires on its own" \
-              "still up after 8 s: [$(hx_cap "$S" | head -2 | tr '\n' ' ')]"; shift_gone=0
-    fi ;;
-  *) hx_skip "the SHIFT+drag correction expires on its own" "it never appeared -- see the check above" ;;
-esac
+shift_gone=0
+if [ "$hint_gone" = 1 ]; then
+  hx_expect_contains "a SHIFTED drag at a live prompt is answered rather than dropped" \
+                     "$shift_msg" "reached the container"
+  hx_expect_absent "and the correction does not tell you to hold SHIFT again" \
+                   "$shift_msg" "hold SHIFT"
+  hx_expect_eq "a SHIFTED drag still copies nothing" "$(ccopy)" ""
+  # AND IT HAS TO GO BEFORE THE NEXT GESTURE IS JUDGED (#428), because that gesture answers with the
+  # same words and could otherwise pass on this one's leftover. Measured: an ordinary leftover is
+  # dismissed by the double-click's own clicks, but one shown with `display-message -N` outlives
+  # them, and the double-click check then passed with its own answer removed. msg_expires is that
+  # rule, for all three messages here.
+  msg_expires "the SHIFT+drag correction expires on its own" 'reached the container|hold SHIFT' \
+    "$shift_msg" && shift_gone=1
+else
+  # NOTHING HERE IS JUDGED WHILE THE HINT ABOVE IS STILL UP (#455): measured with the hint made
+  # key-proof, the poll above returned on it and all three checks failed, on a gesture the hint
+  # had swallowed.
+  for d in "a SHIFTED drag at a live prompt is answered rather than dropped" \
+           "and the correction does not tell you to hold SHIFT again" \
+           "a SHIFTED drag still copies nothing" "the SHIFT+drag correction expires on its own"; do
+    hx_skip "$d" "the hint above never went, so this gesture could not be judged apart from it"
+  done
+fi
 
 # The shifted multi-clicks answer too. Same reasoning, and they fire once each so they can carry
 # the message themselves.
 hx_multiclick "$S" "$lr" 3 2 4
 hx_until_ok "hx_cap $S | head -2 | grep -F 'reached the container'" 8
+dbl_msg="$(hx_cap "$S" | head -2)"
+dbl_gone=0
 if [ "$shift_gone" = 1 ]; then
-  hx_expect_contains "a SHIFTED double-click is answered too" \
-                     "$(hx_cap "$S" | head -2)" "reached the container"
+  hx_expect_contains "a SHIFTED double-click is answered too" "$dbl_msg" "reached the container"
+  # ...and it has to go too (#455), or the unshifted double-click below is judged on a screen still
+  # showing it -- and, if it is key-proof, on a gesture it swallowed: measured, "copies NOTHING"
+  # then held for a double-click that never happened.
+  msg_expires "the SHIFTED double-click's correction expires on its own" 'reached the container' \
+    "$dbl_msg" && dbl_gone=1
 else
-  hx_skip "a SHIFTED double-click is answered too" \
-          "the drag's correction never went, so this answer could not be told from it"
+  for d in "a SHIFTED double-click is answered too" \
+           "the SHIFTED double-click's correction expires on its own"; do
+    hx_skip "$d" "the message before it never went, so this answer could not be told from it"
+  done
 fi
-hx_gone "$S" 'reached the container' 8 || true
 
 # THE SHIFTED TRIPLE-CLICK IS BOUND AND CANNOT BE PROVED FROM HERE, which is worth recording so
 # nobody spends the measurement again. tmux promotes a third click to TripleClick off its own
@@ -857,8 +885,15 @@ hx_skip "a SHIFTED triple-click is answered too" "hx_multiclick cannot promote t
 it delete-buffer 2>/dev/null || true
 hx_multiclick "$S" "$lr" 3 2
 hx_settle 0.6
-hx_expect_eq "double-clicking at a live prompt copies NOTHING" "$(ccopy)" ""
-hx_expect_eq "double-clicking at a live prompt leaves no lingering mode" "$(cmode)" "0"
+if [ "$dbl_gone" = 1 ]; then
+  hx_expect_eq "double-clicking at a live prompt copies NOTHING" "$(ccopy)" ""
+  hx_expect_eq "double-clicking at a live prompt leaves no lingering mode" "$(cmode)" "0"
+else
+  for d in "double-clicking at a live prompt copies NOTHING" \
+           "double-clicking at a live prompt leaves no lingering mode"; do
+    hx_skip "$d" "an earlier message never went, so this gesture may not have happened"
+  done
+fi
 
 # --- but a mouse-aware app must still get the drag ---------------------------
 # THE ONE REGRESSION THIS DESIGN COULD CAUSE. Every gesture above reaches its hint through the else
@@ -1283,6 +1318,9 @@ LABEL_GAP_HOOK=''
 # The index and the name in ONE read, so they come from one moment too.
 probe_focus() { it display-message -p -t cs193v '#{window_index} #{window_name}' 2>/dev/null; }
 LABEL_PROBE=probe_focus
+# ...and LABEL_BAR the bar, swapped below for a replayed one.
+probe_bar() { hx_cap "$S" | sed -n 2p; }
+LABEL_BAR=probe_bar
 # AN ALL-DIGIT INDEX, A SPACE, AND A NAME WITH SOMETHING IN IT, or there is nothing to look for
 # (#420): an empty or blank part is a needle every bar contains. See the guards below.
 label_readable() {
@@ -1296,7 +1334,7 @@ label_verdict() {
   while :; do
     n=$((n + 1))
     before="$("$LABEL_PROBE")"
-    lbl_bar="$(hx_cap "$S" | sed -n 2p)"
+    lbl_bar="$("$LABEL_BAR")"
     [ -z "$LABEL_GAP_HOOK" ] || "$LABEL_GAP_HOOK"
     after="$("$LABEL_PROBE")"
     [ "$before" = "$after" ] && break
@@ -1312,8 +1350,10 @@ label_verdict() {
     lbl_detail="could not read the focused tab: the label read answered [$lbl_want]   bar was: [$lbl_bar]"
     return 0
   fi
-  case "$lbl_bar" in
-    *"$lbl_want"*) lbl_verdict=pass lbl_detail='' ;;
+  # A WHOLE CELL OF THE BAR (#455): the bar draws every label as ` #I #W `, so the wanted label has
+  # a space on both sides -- and the padding gives one to a label at either edge of the line.
+  case " $lbl_bar " in
+    *" $lbl_want "*) lbl_verdict=pass lbl_detail='' ;;
     *)             lbl_verdict=fail lbl_detail="expected to find: $lbl_want   bar was: [$lbl_bar]" ;;
   esac
 }
@@ -1356,8 +1396,8 @@ hx_record "stale tab labels at capture" \
 # was never shown the label it is about.
 pin_label() { # name text -- pin the focused tab's label; fails unless the bar then shows TEXT
   it rename-window -t cs193v "$1"
-  hx_until_ok "hx_cap $S | sed -n 2p | grep -F -- '$2'" 6 && return 0
-  lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(hx_cap "$S" | sed -n 2p)]"
+  hx_until_ok "probe_bar | grep -F -- '$2'" 6 && return 0
+  lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(probe_bar)]"
   return 1
 }
 raced_verdict() { LABEL_GAP_HOOK="$1"; label_verdict; LABEL_GAP_HOOK=''; }
@@ -1399,6 +1439,25 @@ probed_verdict probe_no_index
 expect_label "at 40 columns a read with no tab index is refused as unreadable" unreadable
 probed_verdict probe_nothing
 expect_label "at 40 columns a read that answers nothing is refused as unreadable" unreadable
+
+# AND THE LABEL IS MATCHED AS A WHOLE CELL OF THE BAR (#455), not as a substring of it: `1 bash` is
+# inside ` 11 bash `, so a bar that had lost the focused tab 1 passed on tab 11 carrying the same
+# name. Measured on a real screen -- tab 1 focused with its name dropped from the bar, tab 11 renamed
+# to match -- the check passed. These replay that bar and two others, so they cannot depend on
+# arranging it again: the measured one, a name that only BEGINS the wanted one, and a correct label
+# at the very edge of the line, which the anchoring must still find.
+replay_read() { printf '%s' "$lbl_replay_read"; }
+replay_bar()  { printf '%s' "$lbl_replay_bar"; }
+replayed_verdict() { # read bar -- local, so the swapped reads end with the call
+  local lbl_replay_read="$1" lbl_replay_bar="$2" LABEL_PROBE=replay_read LABEL_BAR=replay_bar
+  label_verdict
+}
+replayed_verdict "1 HX-SAME" " 18 TABS  1   2 bash  11 HX-SAME  12 bash  + NEW TAB "
+expect_label "at 40 columns another tab's label is not taken for the focused one's (1 inside 11)" fail
+replayed_verdict "1 HX-SAME" " 18 TABS  1 HX-SAMEX  2 bash  + NEW TAB "
+expect_label "at 40 columns a longer name that begins with the focused one's is not taken for it" fail
+replayed_verdict "1 HX-SAME" "1 HX-SAME"
+expect_label "at 40 columns a label at the very edge of the bar is still found" pass
 
 # ─── ...AND THE VERDICT MUST NOT CARE WHAT THE TAB IS CALLED (#145) ────────────
 #
