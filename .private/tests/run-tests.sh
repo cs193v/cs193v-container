@@ -495,61 +495,130 @@ flush_cheap() {
     cat "$CHEAPLOG"
 }
 
-# Kill a background lane and everything under it. `kill $CHEAP_PID` on its own reaches only
-# the subshell: bash gives a background job no process group of its own without job control,
-# so there is no group to signal, and the suite the subshell was running is simply orphaned.
-# Measured — a Ctrl+C'd run left 30-launcher-shim.sh going after the runner had exited, which
-# for the podman lane would mean a suite still driving the container nobody is watching.
-# Children first, so nothing is reparented and missed. pgrep -P is on macOS too. Each pid it
-# signalled is remembered in KILLED, for cleanup to wait on.
-KILLED=''
-kill_tree() {                         # kill_tree PID
-    local kid
-    for kid in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$kid"; done
-    kill "$1" 2>/dev/null && KILLED="$KILLED $1"
-    return 0
+# THE BACKGROUND LANE IS A PROCESS GROUP OF ITS OWN -- a session, in fact; see where it starts --
+# so the lane's group is $CHEAP_PID, and it is signalled and waited on WHOLE. It used to share the
+# runner's group and be walked child by child, which lost twice (#463): a TERM to the runner's
+# whole group, as a CI timeout sends, killed the lane's own shells and orphaned the suite they were
+# running before the walk could find it, so the runner exited 143 with that suite still in its
+# EXIT trap (5 runs of 5); and a suite forking during the walk was signalled from a stale snapshot
+# (dozens of forked commands still running when the runner was gone, 5 runs of 5). One kill to
+# the group reaches every member at once, and a member stays in the group however it is reparented.
+lane_group_alive() { kill -0 -- "-$CHEAP_PID" 2>/dev/null; }
+
+# IDENTIFIED BEFORE KILLED, as lib/portable.sh's tunnel_kill_pid has it: bash reaps a finished `&`
+# child at once, so $CHEAP_PID is a pid that can have been handed on while the podman lane ran on.
+# It is ours while its process is our child -- in its first instants not yet a group, which is
+# waited for -- or, once that process is gone, while a group of that id still has members: a pid
+# is not handed out while it names a live group.
+lane_ours() {
+    local row
+    row="$(ps -o ppid=,pgid= -p "$CHEAP_PID" 2>/dev/null | do_awk '{ print $1, $2 }')"
+    case "$row" in
+        '')     lane_group_alive ;;
+        "$$ "*) lane_group_wait ;;
+        *)      return 1 ;;
+    esac
 }
-# PRUNED AS IT GOES, so a pid is looked at only until it is first seen gone: the leaf commands
-# and the lane's own subshells die at once and give their pids back, and one handed to an
-# unrelated process mid-wait would otherwise hold the wait to its ceiling and be named below.
-killed_gone() {                       # 0 once nothing kill_tree signalled is still running
-    local p left=''
-    for p in $KILLED; do pid_is_gone "$p" || left="$left $p"; done
-    KILLED="$left"
-    [ -z "$KILLED" ]
+# THE LANE'S FIRST INSTANTS: until python has made it a session of its own, there is no group, and
+# a TERM to it would go nowhere. Waited for when the lane starts, and again by cleanup in case a
+# signal lands in between.
+lane_group_wait() {                   # 0 once the lane's group exists; 1 if it never comes to be
+    local t0=$SECONDS
+    while ! lane_group_alive; do
+        pid_is_gone "$CHEAP_PID" && return 1
+        [ $((SECONDS - t0)) -lt 10 ] || return 1
+        sleep 0.05
+    done
+}
+
+# ONE LOOK AT THE PROCESS TABLE -- pid, parent, group, state -- and one pass over it, per tick of
+# the wait below. A zombie has finished, and is left out.
+lane_ps() { ps -A -o pid=,ppid=,pgid=,stat= 2>/dev/null; }
+
+# NOT EVERYTHING THE LANE STARTED IS IN ITS GROUP. A pty child -- ptyrun and ptydrive put theirs in
+# a session of its own -- or anything else a suite detached has left it, and the group's TERM does
+# not reach it. They are found before the kill, as descendants of the lane's members outside its
+# group, and signalled and waited on by pid -- the recursive walk this replaced, kept for exactly
+# the part of the lane a group cannot name.
+lane_outsiders() {                    # lane_outsiders TABLE -> descendants of members, not members
+    printf '%s\n' "$1" | do_awk -v g="$CHEAP_PID" '
+        $4 !~ /^Z/ { pg[$1] = $3; kids[$2] = kids[$2] " " $1 }
+        END {
+            for (p in pg) if (pg[p] == g) { q[++n] = p; seen[p] = 1 }
+            for (i = 1; i <= n; i++) {
+                m = split(kids[q[i]], k, " ")
+                for (j = 1; j <= m; j++)
+                    if (!(k[j] in seen)) {
+                        seen[k[j]] = 1; q[++n] = k[j]
+                        if (pg[k[j]] != g) printf "%s ", k[j]
+                    }
+            }
+        }'
+}
+
+# EVERYTHING THE WAIT ASKS, IN ONE PASS: "members|outsiders|stragglers".
+#   members     the lane's group, still running.
+#   outsiders   those of OUTSIDE still running. Pruned by the caller as each goes, so a pid that
+#               finished and was handed to something else mid-wait is never looked at again.
+#   stragglers  members that cannot have had the TERM, because they were not there just after it
+#               went -- not in SEEN -- and whose parent has left the group, so nothing is going to
+#               wait on them. A suite whose teardown starts something and exits leaves one; each is
+#               sent the TERM it missed. Only those: a second TERM to a bash already in its EXIT trap
+#               ends that trap halfway (measured), and anything in SEEN could be such a bash. A
+#               suite's own teardown commands are new too, but their parent is still in the group.
+#
+# WHAT THAT LEAVES: a command forked between the kill and that read just after it is counted as
+# having had the TERM. On this Mac one forked in the very instant of the kill can miss it --
+# measured, 3 times in 45 runs of a suite forking without pause -- and is then waited out, and
+# named if it outlives the bound, rather than signalled.
+lane_scan() {                         # lane_scan TABLE SEEN OUTSIDE -> members|outsiders|stragglers
+    printf '%s\n' "$1" | do_awk -v g="$CHEAP_PID" -v seen=" $2 " -v out=" $3 " '
+        $4 !~ /^Z/ { pp[$1] = $2; pg[$1] = $3 }
+        END {
+            for (p in pg) {
+                if (pg[p] == g) {
+                    m = m p " "
+                    if (!index(seen, " " p " ") && pg[pp[p]] != g) s = s p " "
+                } else if (index(out, " " p " ")) o = o p " "
+            }
+            printf "%s|%s|%s", m, o, s
+        }'
 }
 
 # WAITS FOR THE LANE TO BE GONE, not merely signalled. TERM starts each suite's own EXIT trap,
 # which takes down what that suite raised, and a runner that returned first handed back the
-# terminal -- and its caller a status -- while those teardowns were still running: measured, the
-# lane's suite alive and halfway through its trap when the runner had already exited (#450).
-# Then flushed, so the lane's log includes what its teardown said. Thirty seconds is a failure
-# bound, not a delay; what outlives it is NAMED rather than killed harder, since a pid waited on
-# that long may by then belong to something else.
+# terminal -- and its caller a status -- while those teardowns were still running (#450). Then
+# flushed, so the lane's log includes what its teardown said. Thirty seconds is a failure bound,
+# not a delay; what outlives it is NAMED rather than killed harder.
 #
 # SAID WHEN IT TAKES A WHILE, because a second Ctrl+C cannot cut it short -- bash does not re-enter
 # a trap for the signal it is already handling -- and a silent pause reads as a hang.
-#
-# TWO THINGS IT CANNOT SEE, both because it finds the lane by parentage. A TERM sent to the whole
-# process group, as a CI timeout does, reaches the lane's own shells too: they die at once and
-# orphan the suite they were running before pgrep -P can find it, so the runner exits 143 while
-# that suite's EXIT trap may still be running (measured). And a suite that forks its next command
-# between kill_tree signalling its last one and signalling the suite itself leaves that command
-# unsignalled. A Ctrl+C never causes the first: the lane ignores SIGINT.
 cleanup() {
-    local i=0
-    if [ -n "$CHEAP_PID" ]; then
-        kill_tree "$CHEAP_PID"
-        while ! killed_gone && [ "$i" -lt 600 ]; do
-            [ "$i" -eq 20 ] && printf '%swaiting for the no-podman lane to finish its teardown...%s\n' \
-                                      "$C_DIM" "$C_OFF" >&2
-            sleep 0.05; i=$((i + 1))
+    local t0 tick=0 scan members stray seen outside=''
+    if [ -n "$CHEAP_PID" ] && lane_ours; then
+        outside="$(lane_outsiders "$(lane_ps)")"
+        kill -s TERM -- "-$CHEAP_PID" 2>/dev/null || kill -s TERM "$CHEAP_PID" 2>/dev/null
+        # shellcheck disable=SC2086
+        [ -z "$outside" ] || kill -s TERM $outside 2>/dev/null
+        seen="$(lane_scan "$(lane_ps)" '' '')"; seen="${seen%%|*}"
+        t0=$SECONDS
+        while [ $((SECONDS - t0)) -le 30 ]; do
+            scan="$(lane_scan "$(lane_ps)" "$seen" "$outside")"
+            members="${scan%%|*}"; stray="${scan##*|}"
+            outside="${scan#*|}"; outside="${outside%|*}"
+            [ -n "$members$outside" ] || break
+            # shellcheck disable=SC2086
+            [ -z "$stray" ] || { kill -s TERM $stray 2>/dev/null; seen="$seen $stray"; }
+            tick=$((tick + 1))
+            [ "$tick" -eq 20 ] && printf '%swaiting for the no-podman lane to finish its teardown...%s\n' \
+                                         "$C_DIM" "$C_OFF" >&2
+            sleep 0.05
         done
-        wait "$CHEAP_PID" 2>/dev/null
-        [ -z "$KILLED" ] || printf '%sthe no-podman lane outlived its teardown; still running:%s%s\n' \
-                                   "$C_YEL" "$KILLED" "$C_OFF" >&2
-        CHEAP_PID='' KILLED=''
+        [ -z "$members$outside" ] || \
+            printf '%sthe no-podman lane outlived its teardown; still running: %s%s\n' \
+                   "$C_YEL" "$members$outside" "$C_OFF" >&2
     fi
+    CHEAP_PID=''
     flush_cheap
     # DELIBERATELY NOT REMOVED. The run directory is the record of what happened, and it is
     # most wanted exactly when the run did not finish. Its path is printed below; the next run
@@ -567,8 +636,11 @@ cleanup() {
 # AN INT IGNORED BY WHATEVER STARTED THIS -- `&` without job control, a `trap '' INT` above it --
 # means the INT arm is never armed: a shell cannot trap a signal ignored at entry. A Ctrl+C then
 # reaches nothing, the run goes on to its summary, and the EXIT arm cleans up (measured). The
-# background lane below is in that position always, which is why cleanup kills it rather than
-# relying on the Ctrl+C reaching it.
+# background lane below never sees a Ctrl+C at all -- it has no terminal -- which is why cleanup
+# takes it down rather than relying on the Ctrl+C reaching it.
+#
+# NO HUP ARM, and that is measured rather than forgotten: closing the window HUPs the runner, and
+# bash 3.2 runs this EXIT trap on the way out, which takes the lane down with it.
 trap 'cleanup' EXIT
 trap 'cleanup; trap - EXIT INT; kill -s INT $$' INT
 trap 'cleanup; trap - EXIT; exit 143' TERM
@@ -726,12 +798,75 @@ if [ "$LANES" = two ]; then
     CHEAPLOG="$CS193V_RUN_DIR/cheap-lane.log"; : > "$CHEAPLOG"
     # Everything the lane emits goes to its log, fd 3 and 4 included — those are where
     # run_suite sends each suite's own output, and in this lane the log IS the terminal.
-    # shellcheck disable=SC2086
-    ( exec >"$CHEAPLOG" 2>&1 3>&1 4>&1; run_lane $CHEAP ) &
+    #
+    # IN A SESSION OF ITS OWN, which makes it a process group of its own -- see cleanup -- and
+    # leaves it no controlling terminal. A session and not just a group, because a background
+    # group in the terminal's session is STOPPED the moment it touches the terminal: measured, a
+    # lane started under `set -m` sat in state T on `stty -echo </dev/tty`, and ignoring TTOU and
+    # TTIN in it did not save it. With no terminal the same command fails at once ("Device not
+    # configured"). `set -m` measured otherwise clean -- the runner kept its group and its place in
+    # the foreground, and a Ctrl+C still reached it -- but it can only make a group.
+    #
+    # SO THE LANE IS A NEW $BASH -- the one that passed the preflight -- setsid() by python before
+    # the exec, carrying the three functions it runs as text and the six variables they read in its
+    # environment, unexported again before any suite starts. No fork in the helper: an `&` child is
+    # not a group leader, so setsid() succeeds in place and $! IS the session, the group and the
+    # lane. If job control has made it a leader already (`bash -i`), it has its own group anyway,
+    # and setsid's EPERM is let pass.
+    #
+    # A SHELL'S DISPOSITIONS, NOT PYTHON'S. CPython ignores SIGPIPE and SIGXFSZ at startup, and an
+    # ignore survives exec: measured, `yes | head -1` under it exits 1 saying "Broken pipe" instead
+    # of 141. Both go back to default -- whatever the runner inherited, as ptyrun hands its child a
+    # default SIGHUP whatever it inherited. SIGINT stays ignored, as `&` without job control has
+    # always left it here. stdin is /dev/null, as it was.
+    #
+    # AND IT DOES NOT OUTLIVE THE RUNNER. In a session of its own, the lane is out of reach of a
+    # KILL sent to the runner's group -- `timeout -k` escalating, say -- which used to take it down
+    # with everything else. So it watches the runner, once a second, and on finding it gone sends
+    # its own group the TERM cleanup would have: its suites tear down rather than carry on. "Gone"
+    # is kill -0 failing, or ps saying zombie, for a runner whose own parent has not reaped it; a
+    # ps that fails to answer says neither, so one bad fork never takes a healthy lane down. Its
+    # sleep is its own child, waited on, so ending it leaves nothing behind; and the lane says 0
+    # once its suites are done, so killing the watch is never taken for a crash.
+    #
+    # TWO THINGS THE SESSION COSTS, both known. Ctrl+Z suspends the runner and the foreground lane
+    # and not this one, which has no terminal to be suspended from; it runs on, and the runner
+    # collects it when resumed. And under job control -- `bash -i run-tests.sh` -- the `&` child
+    # already leads a group, setsid's EPERM is let pass, and the lane is a background group of the
+    # terminal's session after all, where touching the terminal stops it (see above).
+    #
+    # A LANE THAT EXITS NON-ZERO IS A CRASH, because the helper failing would otherwise run none of
+    # this lane's suites and print a green summary of the other one.
+    # shellcheck disable=SC2016,SC2086
+    C_BOLD="$C_BOLD" C_DIM="$C_DIM" C_OFF="$C_OFF" CRASHES="$CRASHES" TIMINGS="$TIMINGS" \
+    TIMEFORMAT="$TIMEFORMAT" \
+        "$DO_PY" -c 'import os, signal, sys
+for s in (signal.SIGPIPE, signal.SIGXFSZ):
+    signal.signal(s, signal.SIG_DFL)
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execv(sys.argv[1], [sys.argv[1], "-c"] + sys.argv[2:])' "$BASH" "set -u
+$(declare -f tier_of run_suite run_lane)
+export -n C_BOLD C_DIM C_OFF CRASHES TIMINGS TIMEFORMAT
+exec >\"\$0\" 2>&1 3>&1 4>&1
+runner=\$1; shift
+( trap 'kill \"\${nap:-}\" 2>/dev/null; exit 0' TERM
+  while kill -0 \"\$runner\" 2>/dev/null &&
+        case \"\$(ps -o stat= -p \"\$runner\" 2>/dev/null)\" in *Z*) false ;; *) true ;; esac; do
+      sleep 1 & nap=\$!; wait \"\$nap\"
+  done
+  kill -s TERM -- \"-\$\$\" ) </dev/null &
+watchdog=\$!
+run_lane \"\$@\"
+kill \"\$watchdog\" 2>/dev/null
+exit 0" "$CHEAPLOG" "$$" $CHEAP </dev/null &
     CHEAP_PID=$!
+    lane_group_wait
     # shellcheck disable=SC2086
     run_lane $PODMAN
-    wait "$CHEAP_PID" 2>/dev/null || true
+    wait "$CHEAP_PID" 2>/dev/null || printf '%s\t%s\n' "$?" 'the no-podman lane' >> "$CRASHES"
     CHEAP_PID=""
     flush_cheap
 else

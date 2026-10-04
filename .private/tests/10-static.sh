@@ -1165,11 +1165,13 @@ assert_contains "installer-door:pipe-feeds-the-script-on-stdin" "cat '\$script' 
 # `pgrep -P` on the pid it captured. The pid comes from lib/pty-announce, through
 # lib/portable.sh's pty_inner_pid. The behavioural half is in 14-test-harness.sh, which asserts
 # the announce channel under the host's own shell AND under lib/sh-fake.
-# TWO EXEMPTIONS, AND BOTH ARE NAMED RATHER THAN GLOBBED AWAY. run-tests.sh's kill_tree walks
-# parentage RECURSIVELY to reap a whole run, which is structurally immune -- it does not care what
-# any level is. And 14-test-harness.sh is where the tree's shape is the SUBJECT: it reads the
-# owner's direct child on purpose, to record what this host's shell did and to prove lib/sh-fake
-# really interposed. Excluding the file that tests the rule is the point, not a loophole.
+# ONE EXEMPTION, NAMED RATHER THAN GLOBBED AWAY. 14-test-harness.sh is where the tree's shape is
+# the SUBJECT: it reads the owner's direct child on purpose, to record what this host's shell did
+# and to prove lib/sh-fake really interposed. Excluding the file that tests the rule is the point,
+# not a loophole. run-tests.sh was the other, for a kill_tree that walked parentage to reap its
+# background lane. It signals that lane's process group now (#463), and walks parentage only to
+# find what of the lane has left the group -- recursively, in awk over one `ps` table, which is the
+# reaping this rule always let pass and not a `pgrep -P` it would see. A `pgrep -P` back in it is.
 #
 # COMMENTS ARE STRIPPED BY CONTENT, not by a `:#` that an indented comment would slip past. And
 # THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, because the pattern is in the search's own source
@@ -1181,7 +1183,7 @@ assert_contains "installer-door:pipe-feeds-the-script-on-stdin" "cat '\$script' 
 # itself cannot grow a tree walk is asserted separately, below.
 pty_pgrep="$(grep -rn --include='*.sh' 'pgrep -P' "$PRIVATE/tests" \
              | grep -vE ':[[:space:]]*#' \
-             | grep -vE '/(run-tests|14-test-harness|10-static)\.sh:')"
+             | grep -vE '/(14-test-harness|10-static)\.sh:')"
 assert_eq "ptyrun-pid:nothing-walks-the-tree-for-a-pty-child" "" "$pty_pgrep"
 # AND ptyrun ITSELF STAYS OUT OF THE PROCESS TABLE. It knows the pid it forked and has no business
 # inferring any other; a tree reader in here would need a per-platform backend (/proc on Linux,

@@ -1558,7 +1558,7 @@ new_tmpdir() {
 # What an EARLIER, KILLED run left in a scratch directory. Called at suite START as well as from
 # an EXIT trap, for the reason 60-container.sh gives for its own two-ended cleanup (#34): a trap
 # does not run when the process is killed, and a killed suite is ordinary here -- Ctrl+C, a
-# --tier run cut short, run-tests.sh's own kill_tree.
+# --tier run cut short, run-tests.sh's own TERM to its cheap lane.
 #
 # BY PID, NOT BY AGE, and that is the load-bearing part. This directory is SHARED: /tmp is one
 # filesystem, CS193V_INSTANCE does not namespace it, and #76 was measured on a machine with two
