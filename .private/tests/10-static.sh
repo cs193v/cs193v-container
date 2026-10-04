@@ -81,11 +81,12 @@ for probe in 10-static.sh lib/assert.sh lib/podman-fake; do
                 "$probe is not in the derived list -- the find above has stopped reaching it" ;;
     esac
 done
-# AND NO NAME IN IT CARRIES A SPACE, which is the one thing this idiom cannot hold: the list is
-# word-split at four call sites, under the same `# shellcheck disable=SC2086` the ban list below
-# carries, so a space would silently become two paths -- neither of which exists, and both of
-# which shellcheck and `bash -n` would then refuse in a way that reads as a lint failure rather
-# than as a filename. Counted both ways rather than searched for: that IS the failure.
+# AND NO NAME IN IT CARRIES A SPACE, which is the one thing this idiom cannot hold: $testfiles is
+# still word-split where shellcheck, the exec check and the waits rule read it (the parse gate and
+# the bash-4 ban read b32files, one path per element, since #437), so a space would become two paths --
+# neither of which exists, and both of which shellcheck would then refuse in a way that reads as a
+# lint failure rather than as a filename. Counted both ways rather than searched for: that IS the
+# failure.
 assert_eq "tests:no-shell-file-name-carries-a-space" \
           "$(printf '%s\n' "$tf_nl" | grep -c .)" "$(printf '%s\n' $testfiles | grep -c .)"
 
@@ -194,16 +195,25 @@ assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
 #
 # `-guest.sh` IS EXEMPT, on the same suffix and for the same reason as the bash-4 ban below:
 # those two files run inside a container on its bash 5, and parsing them with a TA's bash 3.2
-# would hold them to a platform they never see.
-unparsed=''
-for f in $testfiles; do
-    case "$f" in *-guest.sh) continue ;; esac
+# would hold them to a platform they never see. ONE LIST, b32files, read by this gate and by the
+# ban, one path per element (#437), so the two cannot disagree about which files are exempt.
+b32files=()
+while IFS= read -r f; do
+    case "$f" in ''|*-guest.sh) ;; *) b32files+=("$f") ;; esac
+done <<B32FILES
+$tf_nl
+B32FILES
+unparsed='' parsed=0
+for f in ${b32files[@]+"${b32files[@]}"}; do
+    parsed=$((parsed + 1))
     case "$(head -1 "$f")" in
         *bash*) err="$(bash -n "$f" 2>&1)" || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
         *sh*)   err="$(sh -n "$f" 2>&1)"   || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
         *)      err="$(bash -n "$f" 2>&1)" || unparsed="$unparsed [${f#"$PRIVATE"/tests/}: $err]" ;;
     esac
 done
+# NONE PARSED IS NOT NONE BROKEN (#437): a find that reached nothing left this green.
+[ "$parsed" -gt 0 ] || unparsed="$CHECKER_DIED (no test file was parsed)"
 assert_eq  "syntax:every-test-file-parses" "" "$unparsed"
 
 # ─── and the ones run as commands are executable ──────────────────────────────
@@ -487,6 +497,79 @@ for fn in $sudo_fns; do
 done
 assert_eq "sudo-gate:every-privileged-function-is-registered" "" "$ungated"
 
+# ─── a lint that cannot read its files fails, rather than finding nothing (#437) ─
+# THE EMPTY-MEANS-PASS LINTS BELOW READ THEIR FILES THROUGH HERE. They used to hand grep or sed a
+# space-separated list, or an unquoted $PRIVATE path, under `|| true`, so a reader that could not
+# open a file printed nothing and the lint compared "" with "" and passed. A checkout whose path
+# holds a space splits every path, and #432 measured fixed-tmp green that way with a /tmp write
+# planted; #437 found about forty sites of the same shape. A reader whose only good status is 0
+# goes through run_checker instead. Either way a failed read puts $CHECKER_DIED in the value.
+#
+# lint_grep IS grep, file by file, in the three shapes these lints use: plain; --skip-comments,
+# which drops a hit on a comment line; and --strip-comments, which strips from the first # before
+# matching, as the old `sed 's/#.*//' FILES | grep` did. Long names because grep's own -c and -s
+# mean something else. Exit 1 is "no match"; 2 and above is the marker, and so is no files at
+# all. BOTH FILTERS RUN ON grep's OWN N:LINE, before the name goes on, so a colon in the checkout
+# path cannot move the line number out of the second field -- the false red the old
+# `^[^:]*:[0-9]+:` filter gave -- and the name is the path from $REPO, so no filter downstream can
+# match the checkout's own path either. GREP-ARG must include the pattern.
+#
+#   lint_grep [--skip-comments|--strip-comments] GREP-ARG... -- FILE...  -> NAME:N:LINE per hit
+lint_grep() {
+    local mode='' f rc out ga
+    ga=()
+    case "${1:-}" in --skip-comments|--strip-comments) mode="$1"; shift ;; esac
+    while [ "$#" -gt 0 ] && [ "$1" != -- ]; do ga+=("$1"); shift; done
+    [ "$#" -gt 0 ] && shift
+    if [ "$#" -eq 0 ]; then printf '%s (lint_grep was handed no files)\n' "$CHECKER_DIED"; return 0; fi
+    for f in "$@"; do
+        if [ "$mode" = --strip-comments ]; then
+            out="$(sed 's/#.*//' "$f" </dev/null)"; rc=$?
+            if [ "$rc" -ne 0 ]; then
+                printf '%s (exit %s from: sed %s)\n' "$CHECKER_DIED" "$rc" "${f#"$REPO"/}"; continue
+            fi
+            out="$(printf '%s\n' "$out" | grep -n ${ga[@]+"${ga[@]}"})"; rc=$?
+        else
+            out="$(grep -n ${ga[@]+"${ga[@]}"} -- "$f" </dev/null)"; rc=$?
+        fi
+        if [ "$rc" -gt 1 ]; then
+            printf '%s (exit %s from: grep %s)\n' "$CHECKER_DIED" "$rc" "${f#"$REPO"/}"; continue
+        fi
+        # Most files have no hit and stop here, having cost one grep. The name goes in through
+        # ENVIRON, which unlike awk -v leaves a backslash in it alone.
+        [ -n "$out" ] || continue
+        printf '%s\n' "$out" | LG_NAME="${f#"$REPO"/}" LG_MODE="$mode" awk '
+            ENVIRON["LG_MODE"] == "--skip-comments" && /^[0-9]+:[[:space:]]*#/ { next }
+            { print ENVIRON["LG_NAME"] ":" $0 }'
+    done
+}
+lr_has_died() { case "$1" in *"$CHECKER_DIED"*) printf died ;; *) printf '%s' "$1" ;; esac; }
+lr_tmp="$(new_tmpdir)"
+assert_eq "lint-read:a-missing-file-fails-the-scan" died \
+          "$(lr_has_died "$(lint_grep -e x -- "$lr_tmp/absent" 2>/dev/null)")"
+assert_eq "lint-read:a-missing-file-fails-the-scan-skipping-comments" died \
+          "$(lr_has_died "$(lint_grep --skip-comments -e x -- "$lr_tmp/absent" 2>/dev/null)")"
+assert_eq "lint-read:a-missing-file-fails-the-scan-stripping-comments" died \
+          "$(lr_has_died "$(lint_grep --strip-comments -e x -- "$lr_tmp/absent" 2>/dev/null)")"
+assert_eq "lint-read:no-files-fails-the-scan" died "$(lr_has_died "$(lint_grep -e x --)")"
+# A PATH WITH A SPACE AND A COLON IN IT, read whole, and each shape keeping the lines it claims.
+lr_sp="$lr_tmp/a dir: with spaces/specimen.sh"
+mkdir -p "${lr_sp%/*}"
+printf 'hit\n# hit\ncode # hit\n' > "$lr_sp"
+assert_eq "lint-read:plain-keeps-every-hit" "$lr_sp:1:hit
+$lr_sp:2:# hit
+$lr_sp:3:code # hit" "$(lint_grep -e hit -- "$lr_sp")"
+assert_eq "lint-read:skip-comments-drops-a-comment-line" "$lr_sp:1:hit
+$lr_sp:3:code # hit" "$(lint_grep --skip-comments -e hit -- "$lr_sp")"
+assert_eq "lint-read:strip-comments-matches-only-the-code" "$lr_sp:1:hit" \
+          "$(lint_grep --strip-comments -e hit -- "$lr_sp")"
+assert_eq "lint-read:a-pattern-grep-rejects-fails-the-scan" died \
+          "$(lr_has_died "$(lint_grep --strip-comments -e '\(' -- "$lr_sp" 2>/dev/null)")"
+assert_eq "lint-read:a-file-in-the-repo-is-named-from-the-repo" \
+          ".private/tests/10-static.sh:2:# TIER: static" \
+          "$(lint_grep -e '^# TIER: static$' -- "$PRIVATE/tests/10-static.sh")"
+rm -rf "$lr_tmp"
+
 # ─── the tunnel may only ever bind loopback ────────────────────────────────────
 # EVERY -L IN THE LAUNCHER MUST BIND 127.0.0.1, and this is the cheapest possible guard on the
 # security property the whole design rests on: the host side of the tunnel is loopback-only
@@ -517,10 +600,10 @@ assert_eq "sudo-gate:every-privileged-function-is-registered" "" "$ungated"
 # AND cs193v-ui.sh IS SCANNED TOO, because the launcher SOURCES it -- so a forward added there
 # reaches ssh by exactly the same route as one added here. Same omission, and the same fix, as
 # the bash-3.2 scan two blocks down already had to make for this file.
-hits="$(sed 's/#.*//' cs193v $PRIVATE/files/cs193v-ui.sh \
-        | grep -nE '(^|[^[:alnum:]_])-L[[:space:]]*[^[:space:]]' \
+hits="$(lint_grep --strip-comments -E -e '(^|[^[:alnum:]_])-L[[:space:]]*[^[:space:]]' \
+             -- cs193v "$PRIVATE/files/cs193v-ui.sh" \
         | grep -vE '\[ *!? *-L ' | grep -vE 'tmux[^|]*-L ' \
-        | grep -vE '[-]L[[:space:]]*"?127[.]0[.]0[.]1:' || true)"
+        | grep -vE '[-]L[[:space:]]*"?127[.]0[.]0[.]1:')"
 assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 
 # ─── bash 3.2 compatibility ────────────────────────────────────────────────────
@@ -550,10 +633,13 @@ assert_eq "ports:every-forward-binds-loopback" "" "$hits"
 # make-tarball.sh there too. Nothing else would scan either -- the derived list below reaches only
 # $PRIVATE/tests.
 BASH4='declare -A|mapfile|readarray|coproc |\$\{[A-Za-z_]+,,\}|\$\{[A-Za-z_]+\^\^\}|[[:space:]]\|&[[:space:]]|&>>'
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE "$BASH4" || true)"
+b4files=(cs193v "$PRIVATE/install-cs193v.sh" "$PRIVATE/course-install.sh" "$PRIVATE/install-utils.sh"
+         "$PRIVATE/wsl-provision.sh" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/files/cs193v-portwatch"
+         "$PRIVATE/lib/export-tree.sh" "$PRIVATE/release.sh")
+hits="$(lint_grep --strip-comments -E -e "$BASH4" -- ${b4files[@]+"${b4files[@]}"})"
 assert_eq  "bash32:no-bash4-constructs" "" "$hits"
 
-hits="$(sed 's/#.*//' cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh | grep -nE 'read[^|]*-t *0?\.[0-9]' || true)"
+hits="$(lint_grep --strip-comments -E -e 'read[^|]*-t *0?\.[0-9]' -- ${b4files[@]+"${b4files[@]}"})"
 assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 
 # The test suite itself has to run on bash 3.2, since the TAs use it on Macs to settle
@@ -576,13 +662,9 @@ assert_eq  "bash32:no-fractional-read-t" "" "$hits"
 # lib/sandbox-guest.sh and lib/wine-guest.sh execute INSIDE a container, on its bash 5, and
 # holding them to 3.2 would be holding them to a platform they never see -- the same argument as
 # tmux-harness/ above. Anything new that runs in-container must carry that suffix or it will be
-# scanned and will trip on legitimate bash 5. The parse gate above filters on the same suffix
-# for the same reason, so the two rules cannot disagree about what runs where.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-b32files="$(printf '%s\n' $testfiles | grep -v -- '-guest\.sh$' | do_tr '\n' ' ')"
-# shellcheck disable=SC2086
-hits="$(sed 's/#.*//' $b32files \
-        | grep -v 'BASH4=' | grep -nE "$BASH4" || true)"
+# scanned and will trip on legitimate bash 5. The list is b32files, built once beside the parse
+# gate above and read by both, so the two rules cannot disagree about what runs where.
+hits="$(lint_grep --strip-comments -E -e "$BASH4" -- ${b32files[@]+"${b32files[@]}"} | grep -v 'BASH4=')"
 assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 
 # ─── the harness's scratch stays where the driver can see it ───────────────────
@@ -600,8 +682,9 @@ assert_eq  "bash32:tests-are-bash32-safe" "" "$hits"
 #
 # NOT A BAN ON mktemp -- a line that names the root is fine, helper or not. What is forbidden
 # is scratch the driver cannot find.
-hits="$(grep -Hn 'mktemp' $PRIVATE/tests/tmux-harness/suite.sh $PRIVATE/tests/tmux-harness/selftest.sh \
-        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' | grep -v 'hx_tmproot' || true)"
+hits="$(lint_grep --skip-comments -e 'mktemp' \
+             -- "$PRIVATE/tests/tmux-harness/suite.sh" "$PRIVATE/tests/tmux-harness/selftest.sh" \
+        | grep -v 'hx_tmproot')"
 assert_eq  "tmux:harness-scratch-stays-under-the-root" "" "$hits"
 
 # ─── every inner tmux server is reachable from the harness's trap ──────────────
@@ -914,17 +997,13 @@ rm -rf "$pf_tmp"
 # at all for that tier. `install` joins the case arm for the same reason -- a new tier is
 # silently exempt from this rule otherwise, which is how the hole reopens without anyone
 # editing the rule.
-real_podman="$PRIVATE/tests/lib/assert.sh $PRIVATE/tests/lib/sandbox.sh"
-for f in $PRIVATE/tests/[0-9][0-9]-*.sh; do
+real_podman=("$PRIVATE/tests/lib/assert.sh" "$PRIVATE/tests/lib/sandbox.sh")
+for f in "$PRIVATE"/tests/[0-9][0-9]-*.sh; do
     case "$(sed -n 's/^#[[:space:]]*TIER:[[:space:]]*\([a-z]*\).*/\1/p' "$f" | head -1)" in
-        image|container|live|install) real_podman="$real_podman $f" ;;
+        image|container|live|install) real_podman+=("$f") ;;
     esac
 done
-# -H so the failure names the file even when the list is one entry long, and the comment filter
-# is anchored to grep's own file:line: prefix rather than looking for a `#` anywhere.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-bare="$(grep -Hn 'podman run' $real_podman | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
-        | grep -v -- '--label' || true)"
+bare="$(lint_grep --skip-comments -e 'podman run' -- ${real_podman[@]+"${real_podman[@]}"} | grep -v -- '--label')"
 assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 
 # ─── no cheap-lane suite writes a fixed path in /tmp  (#379) ───────────────────
@@ -952,8 +1031,10 @@ assert_eq "throwaways:every-podman-run-is-labelled-as-ours" "" "$bare"
 # handed to grep unquoted, under `|| true`. Measured from a checkout whose path holds a space:
 # every path split into pieces that did not exist, grep exited 2, and the rule compared "" with ""
 # and passed -- with a literal /tmp/ write planted in 12-run-timeout.sh.
+# THE DIRECTORY GOES IN THROUGH ENVIRON, NOT -v (#437): awk -v rewrites backslash escapes in the
+# value, so a checkout under `a\tb` printed a TAB there and the list named nothing that existed.
 fixed_tmp_list="$(NO_COLOR=1 "$PRIVATE/tests/run-tests.sh" --list 2>/dev/null \
-                  | awk -v d="$PRIVATE/tests" '$1 == "cheap" { print d "/" $3 }')"
+                  | FT_DIR="$PRIVATE/tests" awk '$1 == "cheap" { print ENVIRON["FT_DIR"] "/" $3 }')"
 # One suite per tier, so a list that came back empty -- or lost a tier -- cannot pass the rule
 # below having read nothing.
 for probe in 10-static.sh 18-portwatch-fuzz.sh 30-launcher-shim.sh; do
@@ -964,24 +1045,8 @@ for probe in 10-static.sh 18-portwatch-fuzz.sh 30-launcher-shim.sh; do
              "run-tests.sh --list does not put $probe in the cheap lane -- has its TIER line moved?"
     fi
 done
-# GREP'S EXIT 2 TRAVELS IN THE VALUE, as $CHECKER_DIED, so the assertion that reads it fails
-# rather than taking "could not read a file" for "found nothing", which is exit 1. A status would
-# not survive the `$( )` this is called from. </dev/null because an empty argument list would
-# otherwise leave grep reading the terminal.
-fixed_tmp_scan() {                    # fixed_tmp_scan FILE... -> grep's hits, or $CHECKER_DIED
-    local rc
-    grep -HnE -e "(<>|>>?[|&]?)[[:space:]]*[\"']?/tmp/" \
-         -e "(^|[;&|(]|[[:space:]](then|do|else))[[:space:]]*((local|export|readonly)[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=[\"']?/tmp/[^[:space:]\"']" \
-         "$@" </dev/null
-    rc=$?
-    [ "$rc" -le 1 ] || printf '%s (exit %s from: grep)\n' "$CHECKER_DIED" "$rc"
-}
+# Read through lint_grep --skip-comments, so a file grep cannot open fails the verdict.
 ft_tmp="$(new_tmpdir)"
-case "$(fixed_tmp_scan "$ft_tmp/absent" 2>/dev/null)" in
-    *"$CHECKER_DIED"*) pass "fixed-tmp:a-file-grep-cannot-read-fails-the-scan" ;;
-    *) fail "fixed-tmp:a-file-grep-cannot-read-fails-the-scan" \
-            "grep was handed a file that does not exist and the scan reported nothing" ;;
-esac
 # A SPECIMEN THAT MUST BE FOUND, on the same list as the suites, so a green verdict is one grep
 # reached. It is #379's own two lines, under a path with a space in it, which is what a list that
 # word-splits cannot hand over whole. ASSEMBLED, because this file is on that list too.
@@ -998,13 +1063,15 @@ done <<FIXEDTMP
 $fixed_tmp_list
 $ft_specimen
 FIXEDTMP
-ft_raw="$(fixed_tmp_scan ${fixed_tmp_files[@]+"${fixed_tmp_files[@]}"})"
+ft_raw="$(lint_grep --skip-comments -E -e "(<>|>>?[|&]?)[[:space:]]*[\"']?/tmp/" \
+           -e "(^|[;&|(]|[[:space:]](then|do|else))[[:space:]]*((local|export|readonly)[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=[\"']?/tmp/[^[:space:]\"']" \
+           -- ${fixed_tmp_files[@]+"${fixed_tmp_files[@]}"})"
 case "$ft_raw" in
     *"$ft_specimen:1:"*"$ft_specimen:2:"*) pass "fixed-tmp:the-scan-finds-a-planted-write" ;;
     *) fail "fixed-tmp:the-scan-finds-a-planted-write" \
             "the scan did not report both lines of $ft_specimen" ;;
 esac
-hits="$(printf '%s\n' "$ft_raw" | grep -vF -- "$ft_specimen:" | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#')"
+hits="$(printf '%s\n' "$ft_raw" | grep -vF -- "$ft_specimen:")"
 assert_eq "fixed-tmp:no-cheap-lane-suite-writes-a-literal-tmp-path" "" "$hits"
 rm -rf "$ft_tmp"
 
@@ -1049,11 +1116,10 @@ door_tail='install'; door_head='bash '
 # that call contains "bash " before "install" and matches this needle exactly. Narrowing the
 # needle instead would weaken the rule for the case it exists for; a case that really did start
 # the installer would not be doing it inside a count of logged arguments.
-bare="$(grep -Hn "$door_head.*$door_tail" $PRIVATE/tests/[0-9][0-9]-*.sh \
-        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
+bare="$(lint_grep --skip-comments -e "$door_head.*$door_tail" -- "$PRIVATE"/tests/[0-9][0-9]-*.sh \
         | grep -v 'bash -n' | grep -v 'wine_argv_count' \
         | grep -v -- 'install-cs193v.sh" -' \
-        | grep -vE 'installer_host|installer_tty|installer_pipe' || true)"
+        | grep -vE 'installer_host|installer_tty|installer_pipe')"
 assert_eq "installer-door:no-other-way-to-start-it" "" "$bare"
 
 # And the door has to do the thing it exists for. Extraction asserted first: an empty
@@ -1808,10 +1874,8 @@ assert_eq "states:the-supervisor-sets-exactly-what-the-port-file-accepts" "$pw_s
 # this line would match itself. net_arg FIRST is what does it -- the needle is function-then-file,
 # so a line carrying the filename ahead of the function name cannot match.
 net_arg='install-cs193v.sh'; net_fn='installer_(host|tty)'; net_env='CS193V_TARBALL='
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-bare="$(grep -HnE "$net_fn.*$net_arg" $PRIVATE/tests/[0-9][0-9]-*.sh \
-        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
-        | grep -v "$net_env" || true)"
+bare="$(lint_grep --skip-comments -E -e "$net_fn.*$net_arg" -- "$PRIVATE"/tests/[0-9][0-9]-*.sh \
+        | grep -v "$net_env")"
 assert_eq "installer-door:every-run-repoints-the-download" "" "$bare"
 
 # ...AND THE SCRIPT IT RUNS IS SPELT OUT ON THE CALL LINE, which is what the rule above needs in
@@ -1830,13 +1894,11 @@ assert_eq "installer-door:every-run-repoints-the-download" "" "$bare"
 # What is refused is a call line that names no script at all. installer_host_rc is spelled out
 # rather than left to the prefix, because this needle ends in a space.
 #
-# THE FILENAME PREFIX IS SKIPPED, not searched: grep -H puts `10-static.sh:` in front of every
-# line, so a bare `.sh` test would find one on all of them and this rule would never fire.
+# THE FILENAME PREFIX IS SKIPPED, not searched: lint_grep puts `.private/tests/10-static.sh:` in
+# front of every line, so a bare `.sh` test would find one on all of them and this rule would never fire.
 door_call="$net_fn"'(_rc)?[[:space:]]'
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-nameless="$(grep -HnE "$door_call" $PRIVATE/tests/[0-9][0-9]-*.sh \
-            | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' \
-            | grep -vE '^[^:]*:[0-9]+:.*\.sh' || true)"
+nameless="$(lint_grep --skip-comments -E -e "$door_call" -- "$PRIVATE"/tests/[0-9][0-9]-*.sh \
+            | grep -vE '^[^:]*:[0-9]+:.*\.sh')"
 assert_eq "installer-door:every-call-names-the-script-it-runs" "" "$nameless"
 
 # ─── one place decides what a fixture machine needs ────────────────────────────
@@ -2007,15 +2069,13 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 # grep rejects outright -- "braces not balanced", rc 2, no output -- and inside the house
 # `$(... || true)` idiom the whole rule would then go silently green on the one platform it
 # exists for.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-eafiles="cs193v $PRIVATE/install-cs193v.sh $PRIVATE/course-install.sh $PRIVATE/install-utils.sh $PRIVATE/wsl-provision.sh $PRIVATE/files/cs193v-ui.sh $PRIVATE/files/cs193v-portwatch $PRIVATE/lib/export-tree.sh $PRIVATE/release.sh $b32files"
-# shellcheck disable=SC2086
+# The bash-4 ban's product files and the test suite's: the same two lists.
+eafiles=(${b4files[@]+"${b4files[@]}"} ${b32files[@]+"${b32files[@]}"})
 # COMMENTS EXEMPT, the same way the only-one-place rules above do it: explaining the hazard means
 # quoting it, and lib/sandbox.sh's note on why it uses `+=` does exactly that. The first version
 # of this widening failed on that comment.
-bare="$(grep -HnE '"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' $eafiles \
-        | grep -vE '\+"\$\{' \
-        | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+bare="$(lint_grep --skip-comments -E -e '"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}"' -- ${eafiles[@]+"${eafiles[@]}"} \
+        | grep -vE '\+"\$\{')"
 assert_eq  "bash32:empty-array-expansions-guarded" "" "$bare"
 
 # ─── `$?` may not be the first thing a `then` branch reads  (#303) ─────────────
@@ -2067,10 +2127,12 @@ dq_then_first() {                     # dq_then_first FILE... -> one line per vi
 # when they were added: they trip nothing today, which is the argument the bash32 rule's own
 # comment makes for its widening. A SEPARATE list rather than widening $eafiles, so a bug fix
 # does not quietly move an unrelated rule's coverage as a side effect.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-dqfiles="$eafiles $PRIVATE/files/setup-git $PRIVATE/files/open-url $PRIVATE/files/cs193v-shell $PRIVATE/files/cs193v-portwatch $PRIVATE/files/entrypoint.sh $PRIVATE/macapp/cs193v-run"
-# shellcheck disable=SC2086
-assert_eq "dollarq:not-the-first-read-in-a-then-branch" "" "$(dq_then_first $dqfiles)"
+dqfiles=(${eafiles[@]+"${eafiles[@]}"} "$PRIVATE/files/setup-git" "$PRIVATE/files/open-url"
+         "$PRIVATE/files/cs193v-shell" "$PRIVATE/files/cs193v-portwatch" "$PRIVATE/files/entrypoint.sh"
+         "$PRIVATE/macapp/cs193v-run")
+# THROUGH run_checker, so an awk that could not open a file is $CHECKER_DIED rather than silence.
+assert_eq "dollarq:not-the-first-read-in-a-then-branch" "" \
+          "$(run_checker dq_then_first ${dqfiles[@]+"${dqfiles[@]}"})"
 
 dq_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-dollarq.XXXXXX")"
 # AND THE RULE GOES RED ON THE TEXT THAT ACTUALLY BROKE, rather than on an invented specimen --
@@ -2309,7 +2371,7 @@ rm -rf "$reg_tmp"
 # A `#` line inside a line-continued RUN is stripped by the parser today, but if that ever
 # changed the comment would swallow the command after it and silently produce a broken
 # image. The Containerfile documents this rule; this enforces it.
-bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0} {cont=0}' $PRIVATE/Containerfile)"
+bad="$(run_checker awk '/\\$/{cont=1; next} cont && /^[[:space:]]*#/{print FILENAME":"NR": "$0} {cont=0}' "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-comments-in-continuations" "" "$bad"
 
 # ─── what the progress meter's labels depend on ────────────────────────────────
@@ -2322,30 +2384,30 @@ assert_eq  "containerfile:no-comments-in-continuations" "" "$bad"
 # HEREDOCS ARE THE DANGEROUS ONE. podman supports `RUN <<EOF`, and a line-based parse counts
 # every line of the body as another instruction -- so one heredoc would misname every step
 # after it, and the mismatch check would switch the labels off for the rest of the build.
-bad="$(grep -nE '^[[:space:]]*(RUN|COPY|ADD)[[:space:]].*<<-?[A-Za-z_"'"'"']' $PRIVATE/Containerfile || true)"
+bad="$(lint_grep -E -e '^[[:space:]]*(RUN|COPY|ADD)[[:space:]].*<<-?[A-Za-z_"'"'"']' -- "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-heredocs" "" "$bad"
 
 # `# escape=` changes the line-continuation character out from under the parser, which decides
 # where one instruction ends and the next begins.
-bad="$(grep -nE '^[[:space:]]*#[[:space:]]*escape[[:space:]]*=' $PRIVATE/Containerfile || true)"
+bad="$(lint_grep -E -e '^[[:space:]]*#[[:space:]]*escape[[:space:]]*=' -- "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-escape-directive" "" "$bad"
 
 # A backslash followed by trailing whitespace continues nothing -- docker does not treat it as
 # a continuation -- but it reads exactly like one, so the parser and the human would disagree
 # about how many instructions the file has.
-bad="$(grep -nE '\\[[:space:]]+$' $PRIVATE/Containerfile || true)"
+bad="$(lint_grep -E -e '\\[[:space:]]+$' -- "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-space-after-a-continuation" "" "$bad"
 
 # A blank line inside a continuation is the one case where podman's own behaviour is not worth
 # depending on, so it is forbidden rather than handled.
-bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*$/{print FILENAME":"NR": blank line inside a continuation"} {cont=0}' \
-       $PRIVATE/Containerfile)"
+bad="$(run_checker awk '/\\$/{cont=1; next} cont && /^[[:space:]]*$/{print FILENAME":"NR": blank line inside a continuation"} {cont=0}' \
+       "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-blank-lines-in-continuations" "" "$bad"
 
 # A marker must sit above a top-level instruction. Inside a continuation it is only a comment,
 # so podman ignores it and the step it was meant to name goes unnamed.
-bad="$(awk '/\\$/{cont=1; next} cont && /^[[:space:]]*####>/{print FILENAME":"NR": "$0} {cont=0}' \
-       $PRIVATE/Containerfile)"
+bad="$(run_checker awk '/\\$/{cont=1; next} cont && /^[[:space:]]*####>/{print FILENAME":"NR": "$0} {cont=0}' \
+       "$PRIVATE/Containerfile")"
 assert_eq  "containerfile:no-markers-in-continuations" "" "$bad"
 
 # THE FIRST MARKER MUST PRECEDE FROM, or step 1 -- the base-image download, the longest part of
@@ -2468,10 +2530,10 @@ assert_ok  "containerfile:node-version-asserted-at-build-time" \
            grep -q 'test "\$(node --version)" = "v\${NODE_VERSION}"' $PRIVATE/Containerfile
 # Holding the package would re-create exactly the problem that moving off the tarball fixed.
 assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs" \
-                    "$(cat $PRIVATE/Containerfile)"
+                    "$(run_checker cat "$PRIVATE/Containerfile")"
 # No tarball left behind.
 assert_not_contains "containerfile:no-node-tarball-download" "nodejs.org/dist" \
-                    "$(cat $PRIVATE/Containerfile)"
+                    "$(run_checker cat "$PRIVATE/Containerfile")"
 
 # ─── the globals go in the STUDENT's npm prefix  (issue #13) ───────────────────
 # Every `npm install -g` in the build must run as `student`. Installed as root they land in
@@ -2625,7 +2687,7 @@ fi
 # And setup-git must not reach for the launcher's file, which would work on the host and be empty
 # in the image -- the exact shape of bug the welcome banner's rule exists to prevent.
 assert_not_contains "setup-git:does-not-read-messages.txt" "private/messages.txt" \
-                    "$(cat $PRIVATE/files/setup-git)"
+                    "$(run_checker cat "$PRIVATE/files/setup-git")"
 # [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
 assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
                 "$(cat $PRIVATE/files/cs193v-welcome)"
@@ -3162,7 +3224,7 @@ assert_not_contains "shell:the-fault-box-does-not-send-a-student-to-a-raw-shell"
 # The catalogue is checked whole and by the plainer needle: nothing in it is a shell command a
 # student should ever have been given, so there is no legitimate occurrence to scope around.
 assert_not_contains "messages:no-message-sends-a-student-to-a-raw-shell" \
-                    'bash -l' "$(sed 's/^#.*//' $PRIVATE/messages.txt)"
+                    'bash -l' "$(run_checker sed 's/^#.*//' "$PRIVATE/messages.txt")"
 # THE BOX STILL NAMES A WAY FORWARD, which is the half that deleting a line could lose: a fault
 # box saying only "this is not your fault" leaves a student with nowhere to go. Both survivors
 # are asserted, because either alone is a dead end -- a report with nobody to send it to, or
@@ -3179,10 +3241,10 @@ assert_contains "shell:the-fault-box-still-names-the-staff" 'course staff'    "$
 # THE WHOLE SCRIPT for this one, not just the box: a variable can be referenced anywhere, and
 # what is being asserted is that nothing reads it at all. Comments stripped, so the paragraph
 # above -- which names it in order to explain why it went -- does not answer its own question.
-shell_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/files/cs193v-shell)"
+shell_code="$(run_checker sed 's/^[[:space:]]*#.*//' "$PRIVATE/files/cs193v-shell")"
 assert_not_contains "shell:no-dead-container-name" 'CS193V_CONTAINER' "$shell_code"
 assert_not_contains "launcher:passes-no-dead-container-name" 'CS193V_CONTAINER' \
-                    "$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
+                    "$(run_checker sed 's/^[[:space:]]*#.*//' "$REPO/cs193v")"
 
 # ─── man  (issue #8) ───────────────────────────────────────────────────────────
 # Manual pages are deliberately absent and tldr stands in, but Ubuntu's minimized base
@@ -3198,13 +3260,16 @@ assert_ok  "man:containerfile-replaces-usr-bin-man" \
            grep -qE 'files/man +/usr/bin/man' $PRIVATE/Containerfile
 # grep, not assert_not_contains: its needle is matched literally, so a `*` in it would
 # assert nothing at all rather than acting as a wildcard.
-assert_fail "man:not-shadowed-from-usr-local" \
-            grep -qE 'files/man +/usr/local/bin' $PRIVATE/Containerfile
+# EXIT 1 EXACTLY, not any failure: grep's 2 is a file it could not read, and assert_fail took that
+# for "not shadowed" (#437).
+assert_exit "man:not-shadowed-from-usr-local" 1 \
+            grep -qE 'files/man +/usr/local/bin' "$PRIVATE/Containerfile"
 man_stub="$(cat $PRIVATE/files/man)"
 assert_contains "man:points-at-tldr"      'tldr'   "$man_stub"
 assert_contains "man:stub-exits-nonzero"  'exit 1' "$man_stub"
 # The one word that must never reach a student from this container.
-assert_not_contains "man:never-says-unminimize" "unminimize" "$(sed 's/#.*//' $PRIVATE/files/man)"
+assert_not_contains "man:never-says-unminimize" "unminimize" \
+                    "$(run_checker sed 's/#.*//' "$PRIVATE/files/man")"
 # And the build refuses an image whose `man git` still carries the base image's advice, so
 # a base-image change that reinstates it fails CI rather than a student.
 assert_ok  "man:build-checks-the-stub-took" \
@@ -3363,7 +3428,7 @@ assert_contains "tmux:copy-mode-new-tab-chip" \
 # Asserted over the CODE, not the file: the config deliberately names both removed commands in prose,
 # in a "what used to be here, so nobody rebuilds it by accident" note, and a whole-file grep would
 # fail on the documentation of the very invariant it is checking.
-conf_code="$(grep -v '^[[:space:]]*#' $PRIVATE/files/tmux/tmux.conf || true)"
+conf_code="$(lint_grep -v -e '^[[:space:]]*#' -- "$PRIVATE/files/tmux/tmux.conf")"
 assert_not_contains "tmux:no-mouse-copy-path" "copy-pipe" "$conf_code"
 assert_not_contains "tmux:no-mouse-selection" "begin-selection" "$conf_code"
 # ...and the gesture that used to copy has to say what does work instead. One user option, because
@@ -3680,11 +3745,10 @@ done
 # BRACKET CLASSES rather than backslash escapes, for the reason the KEEP -vE note records above:
 # `\{` and `\$` are ERE extensions BSD and GNU grep read differently, and a pattern one of them
 # rejects goes silently green inside the house `$( ... || true )` idiom on exactly one platform.
-pf_hits="$(sed 's/#.*//' $REPO/cs193v \
-           | grep -nE '[$][(][^)]*[$][{]?(TUNNEL_PID|TUNNEL_SUP_PIDFILE)' || true)"
+pf_hits="$(lint_grep --strip-comments -E -e '[$][(][^)]*[$][{]?(TUNNEL_PID|TUNNEL_SUP_PIDFILE)' -- "$REPO/cs193v")"
 assert_eq "gate:no-pidfile-is-read-through-a-fork" "" "$pf_hits"
 
-sup_body="$(fn_body verb_supervise $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
+sup_body="$(run_checker fn_body verb_supervise "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"
 assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup_body"
 
@@ -3833,7 +3897,7 @@ assert_contains "launcher:bare-launch-announces-itself" "status.entering" "$bare
 # nothing, which is exactly how #34's self-matching pgrep made this suite green whatever
 # happened. Rename the helper and the loop above fails loudly rather than this quietly.
 assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
-                    "refuse_if_session_live" "$(fn_body verb_reset_tunnel $REPO/cs193v)"
+                    "refuse_if_session_live" "$(run_checker fn_body verb_reset_tunnel "$REPO/cs193v")"
 
 # ─── podman that is installed but not on PATH: issue #121 ──────────────────────
 #
@@ -4097,8 +4161,8 @@ assert_eq "text116:no-printf-carries-a-sentence" "" "$printf_hits"
 # these greps and fail forever. NOT `sed 's/#.*//'` -- that also eats inline `#` inside code,
 # and every tmux format string here is of the form '#{session_name}', so the broader strip would
 # hide a genuinely surviving `#{@cs193v_host_pid}` instead of catching it.
-launcher_code="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
-shell_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/files/cs193v-shell)"
+launcher_code="$(run_checker sed 's/^[[:space:]]*#.*//' "$REPO/cs193v")"
+shell_code="$(run_checker sed 's/^[[:space:]]*#.*//' "$PRIVATE/files/cs193v-shell")"
 assert_not_contains "launcher:no-stale-client-pruning-left" \
                     "prune_stale_tmux_clients" "$launcher_code"
 assert_not_contains "launcher:no-client-pid-plumbing-left" "CS193V_CLIENT_PID" "$launcher_code"
@@ -4110,7 +4174,7 @@ assert_not_contains "tmux:shell-no-longer-hunts-for-a-free-session" \
 # Only one client can exist now, so a warning about having six of them can never fire.
 assert_not_contains "launcher:no-many-shells-warning-left" "warn.many-shells" "$launcher_code"
 assert_not_contains "messages:no-many-shells-string-left" \
-                    "[[warn.many-shells]]" "$(cat $PRIVATE/messages.txt)"
+                    "[[warn.many-shells]]" "$(run_checker cat "$PRIVATE/messages.txt")"
 
 # The race the state check cannot win on its own. `podman start` is idempotent and reports
 # nothing (measured against podman 5.7.0), so two launches that both see `exited` both reach
@@ -4147,7 +4211,8 @@ env_block="$(sed -n '/^ENV /,/^$/p' $PRIVATE/Containerfile)"
 for v in LANG EDITOR VISUAL PAGER LESS BROWSER; do
     assert_contains "containerfile:env-has-$v" "$v=" "$env_block"
 done
-assert_not_contains "containerfile:no-GIT_EDITOR" "GIT_EDITOR" "$(sed 's/#.*//' $PRIVATE/Containerfile)"
+assert_not_contains "containerfile:no-GIT_EDITOR" "GIT_EDITOR" \
+                    "$(run_checker sed 's/#.*//' "$PRIVATE/Containerfile")"
 # HOST and FLASK_RUN_HOST are gone with the bind-0.0.0.0 rule, and must stay gone: with the
 # tunnel reaching the container's loopback there is nothing for them to nudge, so all they
 # could do is silently change what a student's server binds to for a reason that no longer
@@ -4160,7 +4225,7 @@ done
 
 # PIPX_HOME/PIPX_BIN_DIR must be inline on the RUN, never ENV: as ENV they persist into
 # the runtime and point a student's own `pipx install` at root-owned /usr/local.
-assert_not_match "containerfile:pipx-vars-not-ENV" '^ENV.*PIPX' "$(cat $PRIVATE/Containerfile)"
+assert_not_match "containerfile:pipx-vars-not-ENV" '^ENV.*PIPX' "$(run_checker cat "$PRIVATE/Containerfile")"
 
 # PIP_BREAK_SYSTEM_PACKAGES is the exact mirror of that rule, and the reason is the same one read
 # the other way round: the pipx variables must not reach the student's shell, and this one is
@@ -4173,7 +4238,7 @@ assert_contains "containerfile:pip-guard-is-ENV" "PIP_BREAK_SYSTEM_PACKAGES=" "$
 # to pip, but `apt reinstall libpython3.14-stdlib` restores the file, so a stdlib security update
 # mid-quarter would silently re-break pip. Verified, not assumed.
 assert_not_contains "containerfile:pep668-marker-not-deleted" "EXTERNALLY-MANAGED" \
-                    "$(sed 's/#.*//' $PRIVATE/Containerfile)"
+                    "$(run_checker sed 's/#.*//' "$PRIVATE/Containerfile")"
 
 assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' $PRIVATE/Containerfile
 
@@ -4188,7 +4253,7 @@ assert_ok  "containerfile:workdir-is-the-projects-mount" \
 # The old path must be gone, not merely shadowed — two directories would be worse than one
 # wrong one, because the docs would be right about a directory nobody is standing in.
 assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
-                    "$(cat $PRIVATE/Containerfile)"
+                    "$(run_checker cat "$PRIVATE/Containerfile")"
 
 # WORKDIR, the launcher's -w and the mount destination must all name the same directory, or
 # the student's shell opens somewhere other than their files.
@@ -4375,7 +4440,7 @@ assert_eq "ports:no-port-list-is-declared" "" \
 #          rebuild cover the consequence, which is what actually matters.
 #
 # What is left below either has no runtime symptom to test, or is a build-time structural fact.
-launcher_live="$(sed 's/#.*//' $REPO/cs193v)"
+launcher_live="$(run_checker sed 's/#.*//' "$REPO/cs193v")"
 assert_not_contains "tunnel:no-agent-forwarding" "ForwardAgent=yes" "$launcher_live"
 # -F none, or the student's own ~/.ssh/config could redirect or decorate the connection. No
 # runtime symptom: it only shows up on a machine whose ssh config happens to interfere.
@@ -4412,7 +4477,7 @@ assert_match "sshd:build-time-host-key-is-deleted" \
 # populates its cache ended in `|| true`, which means a network hiccup during a CI build
 # would ship an image with NO help at all and nothing would report it. The build must fail
 # loudly instead.
-tldr_layer="$(sed -n '/tldr --update/p' $PRIVATE/Containerfile)"
+tldr_layer="$(run_checker sed -n '/tldr --update/p' "$PRIVATE/Containerfile")"
 assert_not_contains "tldr:build-does-not-swallow-failure" "|| true" "$tldr_layer"
 assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
                 "$(sed -n '/tldr --update/,+3p' $PRIVATE/Containerfile)"
@@ -4424,13 +4489,13 @@ assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
 # to disagree with now -- but the section is still the natural place for someone to write a claim
 # about what doctor does, so the guard stays and is retargeted at the section as it now stands.
 assert_not_contains "claims:no-phantom-doctor-ports-warning" "doctor" \
-                    "$(sed -n '/─── Environment/,/^# ═══/p' $REPO/.config/container.args)"
+                    "$(run_checker sed -n '/─── Environment/,/^# ═══/p' "$REPO/.config/container.args")"
 
 # CONTAINER-DESIGN.md said "macOS and Windows are case-insensitive". On Windows this design
 # puts projects/ inside the WSL distro's ext4 home, which IS case-sensitive -- and the doc
 # gives that very path a few lines later.
 assert_not_contains "claims:windows-not-called-case-insensitive" \
-                    "macOS and Windows are case-insensitive" "$(cat $PRIVATE/CONTAINER-DESIGN.md)"
+                    "macOS and Windows are case-insensitive" "$(run_checker cat "$PRIVATE/CONTAINER-DESIGN.md")"
 
 # INVERTED BY #41. This used to require the doc to state the Linux measurement that closing a
 # window does NOT stop a server. That is no longer the behaviour, so the old promise must be gone
@@ -4444,7 +4509,7 @@ assert_not_contains "claims:windows-not-called-case-insensitive" \
 # 70-sighup.sh looked only for the phrase "terminal window" and stayed green through a complete
 # reversal of what the doc said about it, which is how a documentation test survives the thing it
 # exists to catch.
-design_md="$(cat $PRIVATE/CONTAINER-DESIGN.md)"
+design_md="$(run_checker cat "$PRIVATE/CONTAINER-DESIGN.md")"
 assert_not_contains "claims:no-stale-promise-that-work-survives-a-closed-window" \
                     "does not stop a server" "$design_md"
 assert_not_contains "claims:no-stale-promise-of-tabs-coming-back" \
