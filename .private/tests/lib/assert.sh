@@ -774,19 +774,43 @@ Build it first:  ./cs193v --rebuild
 # carry on, while nothing here traps or ignores USR2. bash still runs the suite's EXIT trap on
 # the way out.
 FWD_CTL='' FWD_PIDFILE='' FWD_BUILDLOG='' FWD_SUPPID='' FWD_SUPLOG='' FWD_READY='' FWD_REFUSED=''
+
+# STOP THE SUITE, FROM WHEREVER THIS RUNS: record the FAIL, signal the suite's own shell if this is
+# a subshell, and exit. The protocol fwd_init's subshell refusal above describes, in one place
+# since #442 gave it three callers -- fwd_init, fwd_require_ctl and fwd_master_pids' ps arm --
+# because each of them is reached through some value helper's `$( )`, where an exit is swallowed.
+# fail's detail goes to stderr: stdout here is that `$( )`, and stderr is what reaches a human.
+#
+# ONCE PER SUITE. A refusal happens in a subshell, so nothing in the suite's own shell can
+# remember it the way FWD_REFUSED remembers fwd_init's -- and the suite's EXIT trap then meets the
+# same fault again: restore() in 80-launcher-live.sh asks for the owner and waits on no_forwards,
+# and a second refusal there was a second FAIL and a USR2 that cut the trap short. The results
+# file is the one record every subshell shares, so a suite that has already recorded one of THESE
+# refusals is already on its way out, and this only ends the value helper it was reached through.
+# THESE TWO NAMES AND NO OTHER require:, because nothing writes them without stopping the suite --
+# fwd_init's statement refusal exits, and everything else goes through here. Any require: would
+# also match one recorded in a `( )` that did not stop anything, and silence the next refusal.
+fwd_refuse() {                        # fwd_refuse NAME DETAIL
+    if do_awk -F'\t' -v s="$CS193V_SUITE" '$1 == "FAIL" && $2 == s &&
+                                           ($3 == "require:dev-tunnel" || $3 == "require:ps") { f = 1 }
+                                           END { exit !f }' "$CS193V_RESULTS" 2>/dev/null; then
+        exit 1
+    fi
+    fail "$1" "$2
+  called from:  ${FUNCNAME[*]:2}" >&2
+    [ "${BASH_SUBSHELL:-0}" -gt 0 ] && kill -s USR2 "$$" 2>/dev/null
+    exit 1
+}
+
 fwd_init() {
     [ -n "$FWD_READY" ] && return 0
     [ -n "$FWD_REFUSED" ] && return 1
     local out rc ctl pidf buildlog suppid suplog why=''
     if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
-        # fail's detail goes to stdout, which here is somebody's `$( )`; stderr reaches a human.
-        fail "require:dev-tunnel" "fwd_init was first reached inside a subshell, where neither what cs193v
+        fwd_refuse "require:dev-tunnel" "fwd_init was first reached inside a subshell, where neither what cs193v
 --dev-tunnel answers nor a refusal of it can reach the suite: the cache would be lost with the
 subshell and an exit would end only the subshell (#164).
-  called from:  ${FUNCNAME[*]:1}
-Call fwd_init as a statement before the first \$( ) that reads the tunnel." >&2
-        kill -s USR2 "$$" 2>/dev/null
-        exit 1
+Call fwd_init as a statement before the first \$( ) that reads the tunnel."
     fi
     out="$("$REPO/cs193v" --dev-tunnel 2>/dev/null)"; rc=$?
     ctl="$(printf '%s\n' "$out"      | awk -F'\t' '$1 == "ctl"  { print $2 }')"
@@ -863,17 +887,46 @@ dyn_free_port() {                     # dyn_free_port [AVOID...] -> one port, or
 # Start a listener on the container's OWN loopback and leave it running. 127.0.0.1 and not
 # 0.0.0.0: the tunnel's far end is the container's IPv4 loopback, and `lo` is the class the
 # supervisor forwards, so this is what a student's dev server looks like to it.
+#
+# MARKED, SO THAT IT IS THE ONLY THING ITS TEARDOWNS MATCH (#443). dyn_serve_stop used to pkill
+# `http.server`, and so took a developer's own server in the same instance with it; the
+# `--bind 127.0.0.1` form clean_vt_processes matched took the one this course teaches students
+# to type. `-X NAME` is CPython's slot for arbitrary options -- it lands in sys._xoptions and
+# changes nothing, with no warning even under -W error (3.14.4, measured) -- so the mark is in
+# the server's own argv, where `pgrep -f` reads it, and in no command a person would write.
+# dyn_serve_stop, clean_vt_processes and count_vt_processes all match it, by this one name.
+# Letters and dashes only: it is both an argv word and an ERE.
+DYN_SERVE_MARK='cs193v-dyn-serve'
 dyn_serve() {                         # dyn_serve PORT
-    podman exec -d "$NAME" python3 -m http.server "$1" --bind 127.0.0.1 >/dev/null 2>&1
+    podman exec -d "$NAME" python3 -X "$DYN_SERVE_MARK" -m http.server "$1" --bind 127.0.0.1 \
+        >/dev/null 2>&1
 }
 # AND IT TAKES dyn_ports' MEMO WITH IT (#415). Every server the memo names is one this kills, so
 # a $DYN_PORTS that outlived them was answered from as live: a request no larger than it got dead
 # ports with rc 0, and a larger one waited 30 s per dead port to blame the tunnel. A statement,
 # then, for the same reason dyn_ports is one: the reset is lost inside a `$( )`.
 dyn_serve_stop() {
-    container_pkill "http.server" >/dev/null 2>&1 || true
-    DYN_PORTS=''
+    container_pkill "$DYN_SERVE_MARK" >/dev/null 2>&1 || true
+    dyn_servers_gone
 }
+
+# THE FIXTURE'S SERVERS ARE GONE, so the memo that names them goes too (#415, #443). The one place
+# $DYN_PORTS is dropped, called by everything here that ends them: dyn_serve_stop and
+# clean_vt_processes, which pkill them, release_container, which stops the container under them,
+# and hold_container, which finds it stopped -- the catch for a stop nothing here made, such as
+# the launcher's own or a raw `podman stop`.
+#
+# RATHER THAN dyn_ports RE-CHECKING ITS MEMO, because the cheap check cannot see this. Whether
+# the tunnel carries a port is a HOST question, and the forward outlives its server: measured,
+# with both of dyn_ports' servers killed by clean_vt_processes, dyn_is_forwarded still said yes
+# for both, and the memo was handed back. The question that does tell is inside the container --
+# a podman exec per call on the path #328 made free -- and it would then have to tell "this
+# server is gone" from "the tunnel dropped a live one", which #328 requires to fail loudly.
+#
+# WHAT IT CANNOT SEE is a teardown inside a `$( )`, where the reset is lost with the subshell, or
+# a stop with no hold_container after it. A suite that calls dyn_ports must stop its container
+# through these helpers.
+dyn_servers_gone() { DYN_PORTS=''; }
 
 # Is OUR master holding this host port?
 dyn_is_forwarded() { fwd_owned_ports | grep -qx "$1"; }
@@ -1020,8 +1073,14 @@ free_unforwarded_ports() {            # free_unforwarded_ports N -> up to N port
 # require_tunnel -- because you may not signal a pid you merely inferred. It is the WRONG question
 # for a measurement taken AFTER a teardown, because `tunnel_down` ends by deleting the very file it
 # reads (cs193v:2113). Measuring is fwd_master_pids' job, below.
+#
+# NOTHING AFTER A REFUSAL (#442), when only the suite's EXIT trap is still running: restore() in
+# 80-launcher-live.sh asks for this pid unconditionally, and a refusal there would add a second
+# FAIL and signal the trap out of the cleanup it exists for. rc 0, like every other "no pid"
+# answer here: its callers read the output, never the status. fwd_master_pids returns 1 in the
+# same place, because fwd_owned_ports reads ITS status.
 tunnel_owner_pid() {                  # -> the pid the LAUNCHER records as its master, or nothing
-    fwd_init
+    fwd_init || return 0
     fwd_require_ctl
     local pid
     pid="$(cat "$FWD_PIDFILE" 2>/dev/null)"
@@ -1040,12 +1099,20 @@ tunnel_owner_pid() {                  # -> the pid the LAUNCHER records as its m
 # by hand, as 14-test-harness.sh's fixtures do, or by an EXIT trap after fwd_init has refused.
 # Same discipline as do_listeners' missing backend: refuse to answer rather than answer wrongly.
 #
-# ITS EXIT ENDS ONLY THE VALUE HELPER IT IS CALLED FROM, because both of those are read through a
-# `$( )`, so stopping the suite falls to whoever captures them -- which fwd_owned_ports does
-# (#424). 10-static.sh bars `$(fwd_require_ctl`, which could only swallow it.
+# AND IT STOPS THE SUITE ITSELF, from inside whichever `$( )` it was reached through (#442). Both of
+# its callers are value helpers, read through a `$( )` at every site, and its exit used to end
+# only that: #424 carried the status out of fwd_owned_ports' capture, and every other capture --
+# 60-container.sh's mpid, 70-sighup.sh's FWD_OWNER, SL_MASTERS and sl_masters_gone, require_tunnel,
+# 80-launcher-live.sh's tunnel_pid -- read the empty answer as "no master of ours". Refusing at the
+# source covers all of them and any capture written later, which patching each could not: a pipe
+# drops the status and `[ -z "$( )" ]` has none to carry. Its own message, too: _pt_fatal's
+# closing line blamed a preflight that never looks at --dev-tunnel.
 fwd_require_ctl() {
-    [ -n "$FWD_CTL" ] || _pt_fatal dev-tunnel \
-        'cs193v --dev-tunnel named no control socket, so no listener can be identified as ours'
+    [ -n "$FWD_CTL" ] || fwd_refuse "require:dev-tunnel" "\$FWD_CTL is empty, so no process can be identified as this instance's ssh master:
+an empty needle matches every command line, so any answer about forwards or masters would be about
+nobody's tunnel. fwd_init refuses a --dev-tunnel answer with no ctl row, so this cache was filled
+some other way -- by hand, as 14-test-harness.sh's fixtures do.
+Check:  ./cs193v --dev-tunnel"
 }
 
 # IS OUR SUPERVISOR RUNNING? Same identity discipline as tunnel_owner_pid and for the same reason:
@@ -1089,17 +1156,20 @@ sup_owner_alive() {
 # THE NEEDLE TRAVELS IN THE ENVIRONMENT, not in argv, so this pipeline cannot match itself and
 # needs no equivalent of the launcher's `grep -v ' grep '`.
 fwd_master_pids() {                   # -> every live pid whose argv names OUR control socket
-    fwd_init
+    # rc 1 after a refusal, so the trap's fwd_owned_ports declines to answer (see tunnel_owner_pid).
+    fwd_init || return 1
     fwd_require_ctl
     # AND A ps THAT LISTED NOTHING IS FATAL TOO, for the reason this whole function exists: an
     # empty answer here is indistinguishable from "no master of ours is running", which is the
     # happy answer. `ps` is not a tool that can be missing the way `ss` was, so this is insurance
-    # rather than a scenario -- but an unguarded silent zero is what #159 was.
+    # rather than a scenario -- but an unguarded silent zero is what #159 was. It stops the suite
+    # for the reason fwd_require_ctl does (#442): sl_masters_gone read it as "the masters are gone".
     ps -Awwo pid=,args= 2>/dev/null \
         | FWD_CTL="$FWD_CTL" do_awk 'BEGIN { c = ENVIRON["FWD_CTL"] }
                                      index($0, c) { print $1 }
                                      END { if (NR == 0) exit 3 }' \
-      || _pt_fatal ps 'ps -A listed no processes, so no tunnel of ours can be identified'
+      || fwd_refuse "require:ps" "ps -A listed no processes, so no ssh master of ours can be identified, and the empty
+list it leaves reads as \"none of ours is running\"."
 }
 
 # Every host port one of OUR masters is listening on, one per line. `ss -ltnp` and `lsof` yield the
@@ -1112,30 +1182,22 @@ fwd_master_pids() {                   # -> every live pid whose argv names OUR c
 # of view, which is the right way round -- 60-container.sh:150 inverts this filter deliberately.
 #
 # AND A SCAN THAT COULD NOT RUN STOPS THE SUITE, rather than reading as "no master of ours"
-# (#424). Both of fwd_master_pids' fatals -- no control socket, and a ps that listed nothing --
-# exit 96, and inside this `$( )` that exit only emptied $pids, which the next line took as the
-# happy answer: count_forwards 0, no_forwards TRUE, dyn_is_forwarded FALSE. So the status is
-# carried out, and the refusal is fwd_init's subshell one, for fwd_init's reason: every caller
-# of this is itself inside a `$( )` or a pipeline, so only a signal reaches the suite.
+# (#424). Both of fwd_master_pids' fatals used to exit 96, and inside this `$( )` that only
+# emptied $pids, which the next line took as the happy answer: count_forwards 0, no_forwards TRUE,
+# dyn_is_forwarded FALSE. #424 carried the status out of this one capture; since #442 both fatals
+# stop the suite themselves, through fwd_refuse, so this only declines to go on and answer for
+# them. It must not refuse again: that would be a second FAIL for the one fault.
 #
 # fwd_init FIRST, OUTSIDE THE CAPTURE, for two reasons. A first reach from in here is refused once,
-# by fwd_init, before the scan can add a second FAIL for the same fault. And after a refusal --
-# when only the suite's EXIT trap is still running -- this returns 1 rather than signalling the
-# trap out of its cleanup. Its callers still read that as nothing forwarded, as they did before
-# #424, which is tolerable there and only there: a trap cleans up rather than asserts, and the
-# FAIL that explains the run is already recorded.
+# by fwd_init, rather than from one subshell further down. And after a refusal -- when only the
+# suite's EXIT trap is still running -- this returns 1 rather than signalling the trap out of its
+# cleanup. Its callers still read that as nothing forwarded, as they did before #424, which is
+# tolerable there and only there: a trap cleans up rather than asserts, and the FAIL that explains
+# the run is already recorded.
 fwd_owned_ports() {
-    local pids rc
+    local pids
     fwd_init || return 1
-    pids="$(fwd_master_pids)" || {
-        rc=$?
-        fail "require:dev-tunnel" "fwd_master_pids could not say which processes are this instance's ssh master
-(it exited $rc, for the reason printed above it), so no listener can be counted as ours. Its
-empty answer would read as \"nothing is forwarded\" to every caller (#424).
-  called from:  ${FUNCNAME[*]:1}" >&2
-        [ "${BASH_SUBSHELL:-0}" -gt 0 ] && kill -s USR2 "$$" 2>/dev/null
-        exit 1
-    }
+    pids="$(fwd_master_pids)" || exit 1
     # No process of ours exists, so it holds no ports. A zero DERIVED from a measurement, unlike
     # the zero this returned when it could not work out whom to ask.
     [ -n "$pids" ] || return 0
@@ -1259,8 +1321,12 @@ Check:  ./cs193v doctor
 #
 # The tunnel comes back via --reset-tunnel, which is exempt from the session refusal for exactly
 # the reason it is used here: its whole purpose is fixing the tunnel while a session is live.
+#
+# A CONTAINER THAT HAS TO BE STARTED HOLDS NONE OF dyn_serve's SERVERS, whoever stopped it, so the
+# memo goes before the start (#443).
 hold_container() {
     [ "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" = running ] && return 0
+    dyn_servers_gone
     podman start "$NAME" >/dev/null 2>&1 || return 1
     wait_until 15 sh -c "[ \"\$(podman inspect $NAME --format '{{.State.Status}}' 2>/dev/null)\" = running ]"
 }
@@ -1274,7 +1340,11 @@ hold_container() {
 # not a hang or an error -- the verb prints err.session-in-use and exits 1, so an idempotency test
 # quietly becomes a test of twenty refusals and still counts as having run. That is exactly what it
 # did the first time this was written, and it is why both helpers say so here.
+#
+# The memo goes FIRST, on both arms (#443): a container that is not running holds no server, and
+# one this stops is about to hold none either.
 release_container() {
+    dyn_servers_gone
     case "$(podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)" in
         running) : ;;
         *) return 0 ;;
@@ -1650,11 +1720,11 @@ orphans_gone() {                      # orphans_gone "PID PID ..."
 # nothing exposed to the LAN (#34).
 #
 # One marker per thing the suites start, and every pattern is NARROW on purpose: a developer's own
-# dev server in their own container is not this suite's to kill. `http.server ... --bind 127.0.0.1`
-# is the exact form dyn_serve starts and nothing else does -- it used to be narrowed by naming the
-# single port the suites shared, which no longer exists now that ports are established per run
-# rather than declared. A student running `python3 -m http.server 3000` by hand has no --bind flag
-# and is left alone.
+# dev server in their own container is not this suite's to kill. dyn_serve's servers carry
+# $DYN_SERVE_MARK in their argv, which nothing else does. That replaced `http.server ... --bind
+# 127.0.0.1`, which was argued here to be "the exact form dyn_serve starts and nothing else does"
+# and was not: it is the loopback form this course teaches, so a student's own `python3 -m
+# http.server 8000 --bind 127.0.0.1` was killed and counted as a leftover of ours (#443).
 #
 # A no-op when the container is not running: podman exec fails, pkill matches nothing and
 # container_pkill returns immediately. That is what lets 80-launcher-live.sh call it before
@@ -1664,7 +1734,8 @@ clean_vt_processes() {
     container_pkill cs193v-portprobe
     container_pkill inotifywait
     container_pkill shortlink
-    container_pkill "http.server .*--bind 127.0.0.1"
+    container_pkill "$DYN_SERVE_MARK"
+    dyn_servers_gone
     # make_orphans' sleeps, which the reaper checks kill themselves in the happy case. The
     # duration is the marker: nothing else in this project or a student's work sleeps 1793 s.
     container_pkill "sleep $CS193V_ORPHAN_SLEEP"
@@ -1682,7 +1753,7 @@ clean_vt_processes() {
 count_vt_processes() {
     local n
     fwd_init
-    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|shortlink|http\.server .*--bind 127[.]0[.]0[.]1|sleep $CS193V_ORPHAN_SLEEP" 2>/dev/null | head -1)"
+    n="$(podman exec "$NAME" pgrep -cf "cs193v-portprobe|inotifywait|shortlink|$DYN_SERVE_MARK|sleep $CS193V_ORPHAN_SLEEP" 2>/dev/null | head -1)"
     printf '%s' "${n:-0}"
 }
 
