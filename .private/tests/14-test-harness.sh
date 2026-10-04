@@ -1456,12 +1456,18 @@ printf 'A DIFFERENT SCREEN $PD_SHOW'
 IFS= read -r a
 printf '\ndone\n'
 CHILD
-pd_out="$(CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=6 \
-          pd_step line ghost 'THIS SCREEN DOES NOT EXIST' 'x\n' \
-          | pd_run "$WORK/pd-r3" "bash $WORK/pd-other.sh")"
+pd_out="$(pd_step line ghost 'THIS SCREEN DOES NOT EXIST' 'x\n' \
+          | CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=6 \
+            pd_run "$WORK/pd-r3" "bash $WORK/pd-other.sh")"
 assert_contains "ptydrive:names-the-step-that-diverged" "ghost" "$(cat "$WORK/pd-r3")"
 assert_contains "ptydrive:shows-the-screen-the-child-is-parked-on" \
                 "A DIFFERENT SCREEN" "$(cat "$WORK/pd-r3")"
+# AND IT RAN AT THE TIMINGS IT ASKED FOR (#458). A prefix binds to the one simple command it
+# precedes, so on the pipeline's first stage it set them for pd_step and ptydrive ran at its 2s/20s
+# defaults -- green all the same, at four times the cost. The report states both timings it had,
+# and the settle is the one this case spends: a divergence is called after it, never the deadline.
+assert_contains "ptydrive:the-divergence-case-reaches-ptydrive-with-its-timings" \
+                "(6s allowed, 0.5s to settle)" "$(cat "$WORK/pd-r3")"
 
 # rc 90 IS THE CONVERSATION GOING WRONG, and it is deliberately not a child status and not 124.
 # A caller reading only the exit code can still tell "the flow diverged" from "the program failed"
@@ -1506,6 +1512,11 @@ assert_contains "ptydrive:reports-bytes-stranded-by-a-tty-mode-change" \
                 "LOST" "$(cat "$WORK/pd-r6")"
 assert_contains "ptydrive:counts-the-bytes-that-were-stranded" \
                 "5 byte(s) still unread" "$(cat "$WORK/pd-r6")"
+# AND IT BLAMES THE STEP THAT SENT THEM (#465). The detector notices once the gate has moved on, so
+# the step it is waiting on is `later`, which sent nothing; sg_conversation prints this name as
+# "diverged at step:", and naming `later` sends whoever reads it to the wrong keystroke.
+assert_eq "ptydrive:a-loss-names-the-step-that-sent-the-bytes" "oversend LOST" \
+          "$(awk -F '\t' '$1 == "FAIL" { print $2, $3 }' "$WORK/pd-r6")"
 # AND THE CONTROL FOR IT, which is the half that matters: the ordinary end of a `read -rsn1` IS a
 # cbreak -> canonical transition, so a detector comparing a mode change against a stale queue count
 # calls every clean run a loss. An earlier draft did exactly that. Same child, driven one step per
@@ -1535,6 +1546,15 @@ assert_eq "ptydrive:a-clean-read-restore-is-not-a-loss" "0" \
 # way: a byte that really had been lost leaves that `read` blocked until the ceiling. A SECOND STEP
 # FOLLOWS IT for the same reason pd-loss has one — the detector is not asked anything once the
 # script is exhausted, so a one-step fixture would pass against any driver at all.
+#
+# AND THE SECOND STEP WAITS OUT THE DETECTOR'S GRACE (#465), which is the half the first draft of
+# this missed: its screen came 0.3s after the drain, the script was then exhausted, and a detector
+# that never let go of a drained queue passed -- measured, with a mutant that never confirms a
+# suspicion away. So the child sleeps past STRAND_SECS before drawing it, and STRAND_SECS is
+# pinned on pd_run so an exported one cannot outlast the sleep. FIXED rather than a `wait_until`,
+# for the reason lib/assert.sh gives: what this proves is that NO LOST came, and polling for an
+# absence succeeds immediately. Whether a suspicion was armed at all is a 0.3s window on a real
+# pty, so the replay below asserts that half, where no window is involved.
 cat > "$WORK/pd-inflight.sh" <<CHILD
 printf 'KEY SCREEN $PD_SHOW'
 sleep 0.3
@@ -1542,13 +1562,14 @@ stty -icanon -echo
 sleep 0.3
 IFS= read -rsn1 k
 stty icanon echo
+sleep 2
 printf '\nLINE SCREEN $PD_SHOW'
 IFS= read -r b
 printf '\nB=[%s]\n' "\$b"
 CHILD
 pd_out="$({ pd_step line inflight 'KEY SCREEN' '\n'
             pd_step line later 'LINE SCREEN' 'two\n'; } \
-          | pd_run "$WORK/pd-r8" "bash $WORK/pd-inflight.sh")"
+          | CS193V_DRIVE_STRAND_SECS=1 pd_run "$WORK/pd-r8" "bash $WORK/pd-inflight.sh")"
 assert_says "ptydrive:a-keystroke-in-flight-still-reaches-the-read" "B=[two]" "$pd_out"
 assert_eq "ptydrive:delivery-in-flight-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r8" || true)"
@@ -1575,17 +1596,22 @@ assert_says "ptydrive:really-waits-rather-than-sleeping" "A=[typed]" \
 # played, which lands the arm between every two adjacent looks of the first few ticks. Fake time,
 # so the forty runs cost a fraction of a second.
 #
-# THE CHILD IS pd-loss.sh, op for op, under the line discipline lib/ptydrive.py's header measured:
-# a cbreak -> canonical restore with bytes queued makes the whole queue ONE line, and a canonical
-# FIONREAD counts complete lines only. Two verdicts, each over all forty placements:
+# THE CHILD IS pd-loss.sh, op for op -- or pd-inflight.sh for the third verdict -- under the line
+# discipline lib/ptydrive.py's header measured: a cbreak -> canonical restore with bytes queued
+# makes the whole queue ONE line, and a canonical FIONREAD counts complete lines only. Three
+# verdicts, each over all forty placements:
 #
 #     strand   the over-send is LOST, five bytes, across the edge that stranded them
-#              (icanon False -> True), not on a suspicion armed early on the wrong edge -- and
-#              with the NOTE every suspicion writes, which is what makes clean's zero mean anything
+#              (icanon False -> True), not on a suspicion armed early on the wrong edge, blaming
+#              the step that sent them (#465) -- and with the NOTE every suspicion writes, which is
+#              what makes clean's zero mean anything
 #     clean    one step per read goes through with no NOTE, i.e. no suspicion ever armed: a menu
 #              leaves raw only by reading, so `icanon True -> False with N queued` (#255's shape)
 #              means a detector look older than the gate's. Also strand's control -- a detector
 #              that called everything stranded would pass that one.
+#     inflight a key written canonical and read raw IS suspected (a NOTE), and is then let go of
+#              rather than called LOST, with the run outlasting the grace (#465): the real-pty
+#              pd-inflight above can only show the second half, its suspicion being a 0.3s window
 cat > "$WORK/pd-replay.py" <<'PY'
 import io
 import os
@@ -1724,10 +1750,20 @@ STRANDED = "5 byte(s) still unread: icanon False -> True"
 verdict("strand", LOSS, session(("menu", "oversend", "KEY SCREEN", "X\\ntwo\\n"),
                                 ("line", "later", "LINE SCREEN", "z\\n")),
         lambda f, all_sent, notes: f is not None and f[0] == "LOST" and STRANDED in f[2]
+                                   and f[1]["name"] == "oversend"
                                    and notes >= 1)
 verdict("clean", LOSS, session(("menu", "k", "KEY SCREEN", "X"),
                                ("line", "l", "LINE SCREEN", "two\\n")),
         lambda f, all_sent, notes: f is None and all_sent and notes == 0)
+
+# pd-inflight.sh: a line read's Enter arrives, then the child goes raw before reading it, reads it,
+# restores, and outlives the grace before its next screen.
+INFLIGHT = [("say", "KEY SCREEN \x1b[?25h"), ("sleep", 0.3), ("hold",), ("raw",), ("sleep", 0.3),
+            ("key",), ("cooked",), ("sleep", 2 * pd.STRAND_SECS),
+            ("say", "\nLINE SCREEN \x1b[?25h"), ("line",), ("say", "\ndone\n")]
+verdict("inflight", INFLIGHT, session(("line", "inflight", "KEY SCREEN", "\\n"),
+                                      ("line", "later", "LINE SCREEN", "two\\n")),
+        lambda f, all_sent, notes: f is None and all_sent and notes >= 1)
 
 # #447's report, reached two ways: a menu drawn and then never at its read, and one drawn half a
 # tick after the deadline whose read arms a tick later. Printed whole, for the shell to read.
@@ -1748,6 +1784,8 @@ assert_eq "ptydrive:replay-a-strand-is-reported-wherever-the-child-arms" "strand
           "$(pd_replay '^strand ')"
 assert_eq "ptydrive:replay-a-clean-keystroke-is-never-suspected-wherever-the-child-arms" \
           "clean 40/40" "$(pd_replay '^clean ')"
+assert_eq "ptydrive:replay-delivery-in-flight-is-suspected-and-then-let-go" \
+          "inflight 40/40" "$(pd_replay '^inflight ')"
 
 # #447, WHICH THE SENTENCE ALONE CANNOT DIAGNOSE. A menu step that times out says "the screen
 # arrived but the terminal was never at a menu read (icanon=True echo=True, cursor_show=False)",
