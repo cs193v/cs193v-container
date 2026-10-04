@@ -2511,6 +2511,11 @@ assert_eq "helpers:no-negative-key-assertion-rests-on-a-short-needle" "" \
 # arm's first name -- a chain the rule cannot see reports no gaps either, so that is how a check
 # knows §9 is read at all -- and `chains` gives each one's first and last line, so that the fake-curl
 # drive below runs exactly the chains this rule reads. URLVAR `*` is any curl at all.
+#
+# AND A REGISTRY ASKED BY PODMAN IS A FETCH TOO (#457). §2 asks `podman manifest inspect` about
+# "$from_digest", and its failure arm dropped two names for a third. So a named URLVAR matches an arm
+# that curls it or inspects it. `*` stays curl only: it feeds the fake-curl drive, which would
+# otherwise run the real podman in the static tier.
 arm_name_gaps() {                     # arm_name_gaps FILE URLVAR [list|chains] -> one line per gap, or nothing
     do_awk -v url="\"\$$2\"" -v anyurl="$([ "$2" = '*' ] && printf 1)" -v list="${3:-}" '
         function then_ends(s) {
@@ -2574,14 +2579,15 @@ arm_name_gaps() {                     # arm_name_gaps FILE URLVAR [list|chains] 
             for (i = 1; i <= c; i++) {
                 fa = -1
                 for (j = 0; j < arms[i]; j++)
-                    if (head[i, j] ~ /curl/ && (anyurl || index(head[i, j], url))) fa = j
+                    if (anyurl ? head[i, j] ~ /curl/ \
+                               : head[i, j] ~ /curl|podman manifest inspect/ && index(head[i, j], url)) fa = j
                 if (fa < 0) continue
                 found = 1
                 if (list == "chains") printf "%06d %06d\n", first_nr[i], last_nr[i]
                 else if (list) { split(names[i, fa], first, " "); print first[1] }
                 else compare(i, fa)
             }
-            if (!found) print "NO-ARM-CURLS-" url
+            if (!found) print "NO-ARM-FETCHES-" url
         }
     ' "$1" | LC_ALL=C sort
 }
@@ -2597,6 +2603,11 @@ assert_eq "release-gates:every-tarball-failure-arm-names-what-the-fetch-arm-does
 assert_eq "release-gates:the-tarball-rule-reads-sections-9-and-10" \
           "$(printf '%s\n' export:tarball-is-fetchable payload:the-published-archive-unpacks)" \
           "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" rel_tarball list)"
+# §2 TOO (#457). A failed `podman manifest inspect` named build:base-digest-resolves, which the
+# arm that worked never did, and dropped both platform names -- 50 names instead of 51, measured
+# with a FROM digest that does not exist.
+assert_eq "release-gates:every-base-image-arm-names-what-the-inspect-arm-does" "" \
+          "$(arm_name_gaps "$PRIVATE/tests/00-release-gates.sh" from_digest)"
 
 rg_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-relgate.XXXXXX")"
 # AND THE RULE GOES RED ON THE SHAPE THAT BROKE, so an awk that dies or a comparison that stops
@@ -2629,7 +2640,7 @@ assert_eq "release-gates:the-arm-rule-catches-the-gap-it-exists-for" \
           "$(arm_name_gaps "$rg_tmp/broke.sh" stage2_url)"
 
 # AND ON §10's SHAPE, where the curl is the second line of a `( set -o pipefail` condition. Read a
-# line at a time, no arm curls at all and this answers NO-ARM-CURLS rather than the gap. The pin
+# line at a time, no arm curls at all and this answers NO-ARM-FETCHES rather than the gap. The pin
 # arm's condition runs over two lines as well, and is quoted by its first.
 cat > "$rg_tmp/piped.sh" <<'RGPIPED'
 unpack_rest() {                       # unpack_rest WHY
@@ -2679,6 +2690,31 @@ RGTWO
 assert_eq "release-gates:the-arm-rule-reads-every-chain-that-fetches" \
           'never named by `if [ -n "$why" ]; then`: export:github-ships-nothing-extra' \
           "$(arm_name_gaps "$rg_tmp/two.sh" rel_tarball)"
+
+# AND ON §2's SHAPE, where the fetch is `podman manifest inspect` and no arm curls (#457). Read as
+# curl only, this answers NO-ARM-FETCHES. The one-line `if` above it is not a chain, and `*` -- what
+# the fake-curl drive enumerates -- must not pick the real one up, or the static tier would run the
+# real podman.
+cat > "$rg_tmp/inspect.sh" <<'RGINSPECT'
+if podman manifest inspect "$from_digest" >/dev/null 2>&1; then skip "build:nothing" "x"; fi
+if ! command -v podman >/dev/null 2>&1; then
+    skip "build:base-digest-resolves" "podman not installed"
+    skip "build:base-has-amd64"       "podman not installed"
+    skip "build:base-has-arm64"       "podman not installed"
+elif podman manifest inspect "$from_digest" >/dev/null 2>&1; then
+    pass "build:base-digest-resolves"
+    assert_contains "build:base-has-amd64" "linux/amd64" "$plats"
+    assert_contains "build:base-has-arm64" "linux/arm64" "$plats"
+else
+    fail "build:base-digest-resolves" "it did not resolve"
+    skip "build:base-has-amd64"       "it did not resolve"
+fi
+RGINSPECT
+assert_eq "release-gates:the-arm-rule-reads-a-podman-inspect" \
+          'never named by `else`: build:base-has-arm64' \
+          "$(arm_name_gaps "$rg_tmp/inspect.sh" from_digest)"
+assert_eq "release-gates:the-fake-curl-drive-never-reads-a-podman-chain" \
+          'NO-ARM-FETCHES-"$*"' "$(arm_name_gaps "$rg_tmp/inspect.sh" '*' chains)"
 
 # AND EVERY PROBE GOES THROUGH tag_skip_why (#409). The carve below proves the function right and
 # cannot prove anybody calls it: §1c and §9 kept probes of their own that read the output, and went
