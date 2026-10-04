@@ -426,51 +426,122 @@ for mode in dry uncarried dropped; do
               "$(do_awk -F'\t' '{print $1, $3}' "$WORK/dyn-top-up-$mode.tsv" | do_tr '\n' '|' | sed 's/|$//')"
 done
 
-# ─── ...and STOPPING THE SERVERS DROPS THE MEMO THAT NAMES THEM ────────────────
-# #415. dyn_serve_stop kills every http.server inside and left $DYN_PORTS set, so the memo outlived
-# what it described. A request no larger than the memo is answered from it unlooked-at, so the
-# next `dyn_ports 2` handed back two dead ports with rc 0; a larger one re-validates (#328) and so
-# waited 30 s per dead port and then blamed the TUNNEL for servers this suite had stopped itself.
-# Measured with these fakes before the fix: the memo still said [20000 20001] with nothing live,
-# and the second call served nothing.
+# ─── EVERY teardown drops the memo, and takes only the fixture's own servers (#415, #443) ──────
+# #415 FIRST. dyn_serve_stop killed the servers and left $DYN_PORTS set, so the memo outlived what
+# it described. A request no larger than the memo is answered from it unlooked-at, so the next
+# `dyn_ports 2` handed back two dead ports with rc 0; a larger one re-validates (#328) and so waited
+# 30 s per dead port and then blamed the TUNNEL for servers this suite had stopped itself. #443
+# found the same in every other teardown, and a stop pattern that took a developer's own servers.
 #
-# #328's FAKES, PLUS A LIVE SET. dyn_serve adds to it and container_pkill, which is all
-# dyn_serve_stop reaches, empties it -- so "carried" means "served and not stopped since", which
-# is what the real tunnel reports. wait_until polls once, as above.
-cat > "$WORK/dyn-after-stop.sh" <<'CHILD'
+# THE CONTAINER IS FAKED AT podman ITSELF, one layer below the fakes above, so the command line
+# dyn_serve really starts and the patterns the teardowns really use are the things under test. Its
+# process table is a file of command lines; `pkill -f` and `pgrep -f` are `grep -E` over it, which
+# is what procps does with -f -- an ERE against the whole argv, joined by spaces -- and a stop ends
+# every process in it. A port is carried while something in the table serves it.
+#
+# release_container and hold_container wait through `sh -c "... podman inspect ..."`, which a
+# function cannot reach. Those waits are answered at once: this podman's stop and start have
+# already happened by the time anyone asks.
+cat > "$WORK/dyn-teardown.sh" <<'CHILD'
 set -u
 . "$1"
-SERVED="$2" LIVE="$3"
+PROCS="$2" STATE="$3" STARTED="$4"
+podman() {
+    case "$1" in
+        inspect) cat "$STATE" ;;
+        start)   printf 'running\n' > "$STATE" ;;
+        stop)    : > "$PROCS"; printf 'exited\n' > "$STATE" ;;
+        exec)    shift
+                 if [ "$1" = -d ]; then
+                     shift 2
+                     printf '%s\n' "$*" >> "$PROCS"
+                     printf '%s\n' "$*" >> "$STARTED"
+                     return 0
+                 fi
+                 shift
+                 case "$1 $2" in
+                     'pkill -f')  grep -vE -- "$3" "$PROCS" > "$PROCS.left"
+                                  mv "$PROCS.left" "$PROCS" ;;
+                     'pgrep -f')  grep -qE -- "$3" "$PROCS" ;;
+                     'pgrep -cf') grep -cE -- "$3" "$PROCS" ;;
+                     *)           return 1 ;;
+                 esac ;;
+        *)       return 1 ;;
+    esac
+}
 fwd_init()         { FWD_READY=1; }
+fwd_owned_ports()  { :; }
 dyn_free_port()    { printf '%s' "$((20000 + $#))"; }
-dyn_serve()        { printf '%s\n' "$1" >> "$SERVED"; printf '%s\n' "$1" >> "$LIVE"; }
-container_pkill()  { : > "$LIVE"; }
-dyn_is_forwarded() { grep -qx "$1" "$LIVE"; }
-fwd_owned_ports()  { cat "$LIVE"; }
-podman()           { return 1; }
-wait_until()       { shift; "$@"; }
-dyn_ports 2
-dyn_serve_stop
-printf 'AFTER-STOP=[%s]\n' "$DYN_PORTS"
-dyn_ports 2
-printf 'SECOND=[%s] LIVE=[%s]\n' "$DYN_PORTS" "$(do_tr '\n' ' ' < "$LIVE" | sed 's/ $//')"
+dyn_is_forwarded() { grep -qE "http[.]server $1( |\$)" "$PROCS"; }
+wait_until()       { shift; [ "$1" = sh ] && return 0; "$@"; }
+serving() { sed -n 's/.*http[.]server \(200[0-9][0-9]\) .*/\1/p' "$PROCS" | do_tr '\n' ' ' | sed 's/ $//'; }
+case "$5" in
+    # A DEVELOPER'S OWN SERVERS in the same instance: the plain form, the loopback form this
+    # course teaches, and the wildcard one. None of them is the suite's to count or to kill.
+    pattern)
+        developers() {
+            printf '%s\n' 'python3 -m http.server 18080' \
+                          'python3 -m http.server 18081 --bind 127.0.0.1' \
+                          'python3 -m http.server 18082 --bind 0.0.0.0' > "$PROCS"
+        }
+        developers
+        printf 'DEVELOPERS=[%s]\n' "$(do_tr '\n' '|' < "$PROCS")"
+        dyn_ports 2
+        printf 'COUNTED=[%s]\n' "$(count_vt_processes)"
+        dyn_serve_stop
+        printf 'AFTER-dyn_serve_stop=[%s]\n' "$(do_tr '\n' '|' < "$PROCS")"
+        # A fresh table, so each teardown is judged on servers the other did not already take.
+        developers
+        dyn_ports 2
+        clean_vt_processes
+        printf 'AFTER-clean_vt_processes=[%s]\n' "$(do_tr '\n' '|' < "$PROCS")" ;;
+    # THE MEMO, through each of the other teardowns. outside-stop is a stop no helper made --
+    # the launcher's own, or a raw podman stop -- which the next hold_container is what notices.
+    *)  dyn_ports 2
+        case "$5" in
+            outside-stop) podman stop -t 3 "$NAME"; hold_container ;;
+            *)            "$5" ;;
+        esac
+        printf 'AFTER=[%s]\n' "$DYN_PORTS"
+        hold_container
+        dyn_ports 2
+        printf 'SECOND=[%s] SERVING=[%s]\n' "$DYN_PORTS" "$(serving)" ;;
+esac
 printf 'REACHED-THE-END\n'
 CHILD
-: > "$WORK/dyn-stop-served"
-: > "$WORK/dyn-stop-live"
-out="$(CS193V_RESULTS="$WORK/dyn-after-stop.tsv" CS193V_SUITE=child NO_COLOR=1 \
-       bash "$WORK/dyn-after-stop.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dyn-stop-served" \
-            "$WORK/dyn-stop-live" 2>&1)"
-assert_contains "dynports:a-stop-drops-the-memo" "AFTER-STOP=[]" "$out"
-# The issue's own guard: the call after a stop binds its ports again rather than reading the memo.
-assert_eq "dynports:the-call-after-a-stop-serves-afresh" "20000 20001 20000 20001" \
-          "$(do_tr '\n' ' ' < "$WORK/dyn-stop-served" | sed 's/ $//')"
-assert_contains "dynports:and-hands-back-ports-that-are-being-served" \
-                "SECOND=[20000 20001] LIVE=[20000 20001]" "$out"
-# The control: serving afresh is a first call, so it passes, reaches the end and records nothing.
-assert_contains "dynports:the-call-after-a-stop-lets-the-suite-run" "REACHED-THE-END" "$out"
-assert_eq "dynports:the-call-after-a-stop-records-nothing" "" \
-          "$(cat "$WORK/dyn-after-stop.tsv" 2>/dev/null)"
+dyn_teardown() {                      # dyn_teardown MODE -> the child's output
+    rm -f "$WORK/dt-$1".*
+    : > "$WORK/dt-$1.procs"; : > "$WORK/dt-$1.started"; printf 'running\n' > "$WORK/dt-$1.state"
+    CS193V_RESULTS="$WORK/dt-$1.tsv" CS193V_SUITE=child NO_COLOR=1 \
+        bash "$WORK/dyn-teardown.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dt-$1.procs" \
+             "$WORK/dt-$1.state" "$WORK/dt-$1.started" "$1" 2>&1
+}
+for mode in dyn_serve_stop clean_vt_processes release_container outside-stop; do
+    out="$(dyn_teardown "$mode")"
+    assert_contains "dynports:$mode:drops-the-memo" "AFTER=[]" "$out"
+    # Four starts, not two: the call after the teardown bound its ports again.
+    assert_eq "dynports:$mode:the-next-call-serves-afresh" "4" \
+              "$(do_awk 'END { printf "%d", NR }' "$WORK/dt-$mode.started")"
+    assert_contains "dynports:$mode:and-hands-back-ports-that-are-being-served" \
+                    "SECOND=[20000 20001] SERVING=[20000 20001]" "$out"
+    assert_contains "dynports:$mode:the-suite-runs-on" "REACHED-THE-END" "$out"
+    assert_eq "dynports:$mode:it-records-nothing" "" "$(cat "$WORK/dt-$mode.tsv" 2>/dev/null)"
+done
+out="$(dyn_teardown pattern)"
+# What the table held before the fixture started anything, read back rather than restated, so
+# "only the developer's servers are left" is one list and not two copies of it.
+DEV_LEFT="$(printf '%s\n' "$out" | sed -n 's/^DEVELOPERS=\[\(.*\)\]$/\1/p')"
+assert_contains "dynserve:the-table-holds-the-developers-loopback-server" \
+                "http.server 18081 --bind 127.0.0.1|" "$DEV_LEFT"
+assert_contains "dynserve:a-developers-servers-are-not-counted-as-ours" "COUNTED=[2]" "$out"
+assert_contains "dynserve:dyn_serve_stop-takes-only-the-fixtures-servers" \
+                "AFTER-dyn_serve_stop=[$DEV_LEFT]" "$out"
+assert_contains "dynserve:clean_vt_processes-takes-only-the-fixtures-servers" \
+                "AFTER-clean_vt_processes=[$DEV_LEFT]" "$out"
+# The control: each teardown had two fixture servers in the table to take, so the two above, which
+# leave exactly the developer's three, cannot pass on a pattern that has stopped matching anything.
+assert_eq "dynserve:each-teardown-had-the-fixtures-servers-to-take" "4" \
+          "$(do_awk 'END { printf "%d", NR }' "$WORK/dt-pattern.started")"
 
 # ─── a CHECKER that could not run must fail, not pass ──────────────────────────
 # THE SAME DEFECT AS #76, one layer in. box_problems and render_pty both pipe their input
@@ -1979,9 +2050,23 @@ wait "$CO_PID" 2>/dev/null || true
 # rather than a nicety: an empty needle matches every process, and taken as the launcher's own
 # `awk 'NR == 1'` would resolve to pid 1 -- which holds no loopback listener, so the count would
 # read 0 and the assertion would pass. That is #159 reintroduced by its own fix, silently. Same
-# discipline as do_listeners' missing backend: exit 96 rather than answer.
-ctl_unidentified() { ( FWD_READY=1; FWD_CTL=''; fwd_master_pids >/dev/null 2>&1 ); }
+# discipline as do_listeners' missing backend: refuse rather than answer -- since #442 through
+# fwd_refuse, which records the FAIL and stops the suite, where this used to be _pt_fatal's exit 96.
+#
+# IN A CHILD PROCESS, not a `( )`, because since #442 the refusal stops the SUITE from inside any
+# subshell -- and in a `( )` here, the suite it stops is this one. fwdinit:lost-ctl-* below has
+# the shapes that refusal is for.
+ctl_unidentified() {
+    CS193V_RESULTS="$WORK/ctl-unidentified.tsv" CS193V_SUITE=child NO_COLOR=1 \
+        bash -c '. "$1"; FWD_READY=1; FWD_CTL=""; fwd_master_pids' _ "$TESTS_DIR/lib/assert.sh" \
+        >/dev/null 2>&1
+}
+rm -f "$WORK/ctl-unidentified.tsv"
 assert_fail "harness:an-unidentifiable-tunnel-is-fatal-rather-than-empty" ctl_unidentified
+# ...and it is THAT refusal, not any death of the child: a source that failed, or an exit 96 from
+# somewhere else, would satisfy the line above as well.
+assert_eq "harness:and-the-refusal-is-the-one-recorded" "FAIL require:dev-tunnel" \
+          "$(do_awk -F'\t' '{ print $1, $3 }' "$WORK/ctl-unidentified.tsv" 2>/dev/null)"
 # PUT THE SEAM BACK, so nothing later in this file inherits a fixture path -- and FWD_READY with
 # it, or a later fwd_init would short-circuit onto an empty FWD_CTL and fwd_require_ctl would
 # (correctly) kill the suite.
@@ -1992,8 +2077,9 @@ FWD_READY='' FWD_CTL='' FWD_PIDFILE=''
 # THE VACUOUS ZERO ABOVE, ONE LAYER FURTHER OUT. fwd_init set FWD_READY before it ran
 # `cs193v --dev-tunnel` and threw the launcher's rc away, so one failed read cached empty paths
 # for the whole suite process. Measured with a stand-in that exits 1: count_forwards 0 and
-# no_forwards TRUE -- fwd_require_ctl's exit 96 above ends only fwd_owned_ports' `$( )` -- while
-# require_tunnel blamed "no working tunnel" for what was really "we could not ask".
+# no_forwards TRUE -- fwd_require_ctl's exit 96, as it was then, ended only fwd_owned_ports' `$( )`
+# (#424, #442 below) -- while require_tunnel blamed "no working tunnel" for what was really "we could
+# not ask".
 #
 # AND THE CACHE ONLY CACHED WHEN THE FIRST REACH WAS A STATEMENT. Every value helper is called
 # inside a `$( )`, and a flag set in there is lost with the subshell: five reads forked the
@@ -2080,6 +2166,65 @@ case "$3" in
                fwd_init
                ps() { :; }
                no_forwards && printf 'ANSWERED no_forwards TRUE\n' ;;
+    # #442: THE SAME LOST SOCKET, through every OTHER capture of the two helpers that need it, each
+    # spelled the way its suite spells it. 60-container.sh's mpid and 70-sighup.sh's FWD_OWNER:
+    lost-ctl-owner)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               [ -n "$(tunnel_owner_pid)" ] || printf 'ANSWERED tunnel_owner_pid EMPTY\n' ;;
+    # ...70-sighup.sh's sl_masters_gone, and its SL_MASTERS, whose pipe drops the status too...
+    lost-ctl-gone)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               [ -z "$(fwd_master_pids)" ] && printf 'ANSWERED fwd_master_pids EMPTY\n' ;;
+    lost-ctl-piped)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init; FWD_CTL=''
+               printf 'ANSWERED fwd_master_pids [%s]\n' "$(fwd_master_pids | do_tr '\n' ' ')" ;;
+    # ...and require_tunnel, which read the empty pid as "no tunnel", started the container and
+    # reset the tunnel, and then blamed the tunnel. Both of those are faked, so this child cannot
+    # touch a real one.
+    lost-ctl-require)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               hold_container() { printf 'ANSWERED by starting the container\n'; }
+               do_timeout()     { printf 'ANSWERED by resetting the tunnel\n'; return 1; }
+               fwd_init; FWD_CTL=''
+               require_tunnel ;;
+    # ...and the scan's own fatal through sl_masters_gone's shape.
+    ps-empty-gone)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init
+               ps() { :; }
+               [ -z "$(fwd_master_pids)" ] && printf 'ANSWERED fwd_master_pids EMPTY\n' ;;
+    # 80-launcher-live.sh's restore(): after a refusal its EXIT trap asks tunnel_pid, unconditionally.
+    trapped-owner)
+               trap 'o="$(tunnel_owner_pid)"; printf "TRAP-FINISHED owner=[%s]\n" "$o"' EXIT
+               fwd_init ;;
+    # ...and the scan, which a cleanup asking "are our masters gone" would reach the same way.
+    trapped-masters)
+               trap 'm="$(fwd_master_pids)"; printf "TRAP-FINISHED masters=[%s]\n" "$m"' EXIT
+               fwd_init ;;
+    # AND AFTER ONE OF THE NEW REFUSALS, where the cache is READY and fwd_init has nothing to say,
+    # so it is the refusal itself that must not happen twice: restore()'s release_tunnel asks for
+    # the owner and then waits on no_forwards, and each of those meets the same fault again.
+    lost-ctl-trap-asks)
+               trap 'o="$(tunnel_owner_pid)"; no_forwards; printf "TRAP-FINISHED\n"' EXIT
+               fwd_init; FWD_CTL=''
+               no_forwards && printf 'ANSWERED no_forwards TRUE\n' ;;
+    ps-empty-trap-asks)
+               trap 'no_forwards; printf "TRAP-FINISHED\n"' EXIT
+               fwd_init
+               ps() { :; }
+               no_forwards && printf 'ANSWERED no_forwards TRUE\n' ;;
+    # ...but only its OWN refusal counts as "on its way out": some other require: FAIL, recorded
+    # in a `( )` that stopped nothing, must not silence the next one.
+    prior-require)
+               trap 'printf "EXIT-TRAP-RAN\n"' EXIT
+               fwd_init
+               ( fail "require:something-else" "recorded in a subshell that stops nothing" ) \
+                   >/dev/null 2>&1
+               FWD_CTL=''
+               [ -n "$(tunnel_owner_pid)" ] || printf 'ANSWERED tunnel_owner_pid EMPTY\n' ;;
 esac
 printf 'REACHED-THE-END\n'
 CHILD
@@ -2183,16 +2328,34 @@ assert_eq "fwdinit:or-recorded-twice" "FAIL require:dev-tunnel" "$(fwdi_recorded
 #    TRUE, dyn_is_forwarded FALSE. Measured against the real launcher before the fix: all three
 #    answered, rc 0, nothing recorded. The rc is SIGUSR2's because every reader is itself
 #    inside a `$( )` or a pipeline, which no `exit` escapes -- the same reason as E.
-for shape in lost-ctl-no lost-ctl-count lost-ctl-dyn ps-empty; do
+#
+#    AND THROUGH EVERY OTHER CAPTURE (#442). #424 carried the status out of fwd_owned_ports'
+#    capture alone, and the same exit was swallowed at each of the others: measured before this
+#    fix, tunnel_owner_pid answered empty, sl_masters_gone TRUE and SL_MASTERS empty, each with
+#    rc 0 and nothing recorded, and require_tunnel started the container and reset the tunnel
+#    before blaming the tunnel. So the refusal itself now stops the suite, and says what it is:
+#    _pt_fatal's "the preflight should have caught this" sent the reader to the wrong place.
+for shape in lost-ctl-no lost-ctl-count lost-ctl-dyn ps-empty \
+             lost-ctl-owner lost-ctl-gone lost-ctl-piped lost-ctl-require ps-empty-gone; do
+    case "$shape" in
+        ps-*) why="ps -A listed no processes" name="require:ps" ;;
+        *)    why="no process can be identified as this instance's ssh master" \
+              name="require:dev-tunnel" ;;
+    esac
     out="$(fwdi real "$shape")"
     assert_not_contains "fwdinit:$shape:the-reader-gives-no-answer"  "ANSWERED"         "$out"
     assert_contains     "fwdinit:$shape:it-stops-the-suite"          "[rc=$FWDI_SIGRC]" "$out"
     assert_not_contains "fwdinit:$shape:nothing-downstream-runs"     "REACHED-THE-END"  "$out"
-    assert_contains     "fwdinit:$shape:it-says-why"   "no listener can be counted as ours" "$out"
+    assert_contains     "fwdinit:$shape:it-says-why"                 "$why"             "$out"
+    assert_not_contains "fwdinit:$shape:it-does-not-blame-the-preflight" \
+                        "preflight in run-tests.sh should have caught" "$out"
     assert_contains     "fwdinit:$shape:the-suite-still-cleans-up"   "EXIT-TRAP-RAN"    "$out"
-    assert_eq "fwdinit:$shape:it-records-one-fail-and-no-pass" "FAIL require:dev-tunnel" \
+    assert_eq "fwdinit:$shape:it-records-one-fail-and-no-pass" "FAIL $name" \
               "$(fwdi_recorded real "$shape")"
+    [ "$shape" = lost-ctl-owner ] && owner_out="$out"
 done
+# The lost socket names the command that tells you why, which is the seam rather than the machine.
+assert_contains "fwdinit:lost-ctl-owner:it-names-the-seam" "./cs193v --dev-tunnel" "$owner_out"
 
 # I. ...EXCEPT AFTER A REFUSAL, where the suite is already in its EXIT trap with the FAIL recorded.
 #    A reader there must neither add a second FAIL for the one fault nor signal the suite out of
@@ -2203,6 +2366,33 @@ out="$(fwdi fails trapped-reads)"
 assert_contains "fwdinit:a-reader-in-the-trap-after-a-refusal-lets-it-finish" "TRAP-FINISHED" "$out"
 assert_eq "fwdinit:and-records-nothing-more" "FAIL require:dev-tunnel" \
           "$(fwdi_recorded fails trapped-reads)"
+# ...and the same for the pid restore() asks for. Green before #442 as well, but only by the exit
+# being swallowed, so the trap printed _pt_fatal's line about a preflight on its way through.
+for shape in trapped-owner trapped-masters; do
+    out="$(fwdi fails "$shape")"
+    assert_contains "fwdinit:$shape:asked-in-the-trap-after-a-refusal-it-lets-it-finish" \
+                    "TRAP-FINISHED" "$out"
+    assert_not_contains "fwdinit:$shape:and-blames-nothing-on-the-way" "FATAL" "$out"
+    assert_eq "fwdinit:$shape:and-records-nothing-more" "FAIL require:dev-tunnel" \
+              "$(fwdi_recorded fails "$shape")"
+done
+# ...and after a refusal of fwd_refuse's own, which nothing in the suite's shell can have
+# remembered: it happened in a subshell. So the refusal reads the suite's results for a require:
+# FAIL of its own before making another (#442).
+for shape in lost-ctl-trap-asks ps-empty-trap-asks; do
+    case "$shape" in ps-*) name="require:ps" ;; *) name="require:dev-tunnel" ;; esac
+    out="$(fwdi real "$shape")"
+    assert_contains "fwdinit:$shape:the-trap-that-asks-again-finishes" "TRAP-FINISHED" "$out"
+    assert_contains "fwdinit:$shape:and-the-suite-still-stops" "[rc=$FWDI_SIGRC]" "$out"
+    assert_eq "fwdinit:$shape:with-one-fail-for-the-one-fault" "FAIL $name" \
+              "$(fwdi_recorded real "$shape")"
+done
+out="$(fwdi real prior-require)"
+assert_not_contains "fwdinit:prior-require:another-require-fail-does-not-silence-the-refusal" \
+                    "ANSWERED" "$out"
+assert_contains "fwdinit:prior-require:the-suite-still-stops" "[rc=$FWDI_SIGRC]" "$out"
+assert_eq "fwdinit:prior-require:and-records-both" \
+          "FAIL require:something-else|FAIL require:dev-tunnel" "$(fwdi_recorded real prior-require)"
 
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.

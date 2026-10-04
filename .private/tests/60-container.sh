@@ -61,6 +61,9 @@ TMP="$(new_tmpdir)"
 cleanup() {
     # Never leave stray servers or scratch files behind in the student's projects/.
     clean_vt_processes
+    # The two developer-shaped servers the #443 check starts carry no mark, by design, so the
+    # sweep above cannot see them. Set only while they may be running.
+    [ -n "${DEVP_PAT:-}" ] && container_pkill "$DEVP_PAT"
     rm -rf "$TMP" 2>/dev/null || true
     clean_vt_fixtures
     # pty_start makes a keystroke feed and a pidfile per launch, and start_client runs twice.
@@ -204,6 +207,54 @@ nproc_fwd="$(do_listeners | do_awk -F'\t' -v re="^127[.]0[.]0[.]1:($re_ports)\$"
                  '$1 ~ re && $2 ~ /pid=[0-9]/ { print $2 }' \
              | sort -u | grep -c . || true)"
 assert_eq "ports:one-ssh-process-carries-them-all" "1" "${nproc_fwd:-0}"
+
+# THE FIXTURE'S TEARDOWN TAKES ITS OWN SERVERS AND NOBODY ELSE'S (#443). dyn_serve_stop ran
+# `pkill -f http.server`, so a developer's own server in this instance went with the suite's two.
+# These are the two shapes one would type: the plain form, and the loopback form this course
+# teaches, which is why matching on `--bind 127.0.0.1` would not have been narrower. Here because
+# nothing below needs $DYN2's servers any more.
+# shellcheck disable=SC2086   # deliberately word-split: an AVOID list
+DEVP1="$(dyn_free_port $DYN2)"
+# shellcheck disable=SC2086
+DEVP2="$(dyn_free_port $DYN2 "$DEVP1")"
+dev_plain()    { container_pgrep "http[.]server $DEVP1\$"; }
+dev_loopback() { container_pgrep "http[.]server $DEVP2 --bind 127[.]0[.]0[.]1\$"; }
+dev_up()       { dev_plain && dev_loopback; }
+fixture_gone() {
+    local p
+    for p in $DYN2; do container_pgrep "http[.]server $p " && return 1; done
+    return 0
+}
+# BOTH PORTS OR NEITHER SERVER: an empty one would leave an empty branch in DEVP_PAT, which then
+# matches every http.server in the container -- this check's own bug, in its cleanup.
+if [ -n "$DEVP1" ] && [ -n "$DEVP2" ]; then
+    DEVP_PAT="http[.]server ($DEVP1|$DEVP2)( |\$)"
+    vt_before="$(count_vt_processes)"
+    podman exec -d "$NAME" python3 -m http.server "$DEVP1" >/dev/null 2>&1
+    podman exec -d "$NAME" python3 -m http.server "$DEVP2" --bind 127.0.0.1 >/dev/null 2>&1
+fi
+if [ -n "${DEVP_PAT:-}" ] && wait_until 10 dev_up; then
+    assert_eq "ports:a-developers-servers-are-not-counted-as-the-suites" "$vt_before" \
+              "$(count_vt_processes)"
+    assert_fail "ports:the-fixtures-own-servers-are-up-before-the-teardown" fixture_gone
+    dyn_serve_stop
+    # NO SETTLE BEFORE ASKING, and this is not the absence trap: container_pkill waits until its
+    # own pattern matches nothing, so a server it signalled is gone by the time it returns, and one
+    # still here is one it never signalled.
+    assert_ok   "ports:the-teardown-spares-a-developers-plain-server"    dev_plain
+    assert_ok   "ports:the-teardown-spares-a-developers-loopback-server" dev_loopback
+    # The control, which stops the two above passing on a pattern that matches nothing at all.
+    assert_ok   "ports:the-teardown-takes-the-fixtures-own-servers"     fixture_gone
+else
+    fail "ports:a-developers-servers-came-up" "python3 -m http.server ${DEVP1:-<no free port>} and
+${DEVP2:-<no free port>} --bind 127.0.0.1 were not both running inside $NAME 10 s after podman exec
+-d, so there is nothing for the teardown to spare and the checks after it would measure nothing.
+  inside: $(podman exec "$NAME" pgrep -af 'http.server' 2>&1 | do_tr '\n' ';')"
+fi
+if [ -n "${DEVP_PAT:-}" ]; then
+    container_pkill "$DEVP_PAT"
+    DEVP_PAT=''
+fi
 
 mounts="$(I '{{json .Mounts}}')"
 # sshd cannot serve the tunnel without these, and they must be READ-ONLY so a compromised

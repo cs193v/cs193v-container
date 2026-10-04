@@ -2040,10 +2040,11 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-g
 # swallowed exactly the same way. Third time the subshell boundary has eaten something
 # load-bearing here, so it is a rule rather than a fix.
 #
-# fwd_require_ctl IS ON IT AND fwd_master_pids IS NOT, and the difference is stdout (#424). The
-# first prints nothing, so a `$( )` around it can only swallow its exit. The second is a value
-# every caller must capture, and a grep cannot tell fwd_owned_ports' `pids="$(fwd_master_pids)"
-# || {` -- which carries the status out and stops the suite -- from a capture that drops it.
+# NO VALUE HELPER IS ON IT, and since #442 none needs to be: the tunnel helpers' refusals stop the
+# suite from inside any `$( )` (fwd_refuse in lib/assert.sh), so capturing fwd_master_pids or
+# tunnel_owner_pid cannot swallow one -- which a grep could never have policed, because every
+# caller has to capture them. fwd_init and fwd_require_ctl stay listed as statements: neither
+# prints anything, so a `$( )` around either is a mistake whatever it does on failure.
 #
 # THE SINGLE-LINE `$( )` FORM ONLY, which is worth being honest about: a substitution spanning
 # lines, or an assertion on the right of a pipe, is invisible to a grep. Both were measured at
@@ -2056,6 +2057,50 @@ subshelled="$(grep -HnE '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
               $PRIVATE/tests/[0-9][0-9]-*.sh $PRIVATE/tests/lib/*.sh \
               | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
 assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
+
+# ...AND NOTHING THAT DROPS dyn_ports' MEMO, the same boundary eating state rather than an exit
+# (#443). Every teardown of dyn_serve's servers clears $DYN_PORTS through dyn_servers_gone, and one
+# run inside a `$( )` clears the subshell's copy and leaves the suite's naming ports that nothing
+# serves. Same single-line limit as the rule above, and a wider boundary after the name: a `;`, a
+# `&&` or a redirect ends the call just as a space does, and drops the reset just the same.
+#
+# THE LIBRARY'S HELPERS ONLY. 80-launcher-live.sh captures its release_container wrappers, LV and
+# LB, at three sites, and listing them meant copying their bodies there to guard nothing: that suite
+# never calls dyn_ports, so its memo is never set.
+#
+# AND IT PROVES IT READ ITS FILES, which the rule above does not (#432's lesson, 94e17a7's shape):
+# the list is an array, so a checkout path with a space cannot split it; grep's exit 2 travels as
+# $CHECKER_DIED, so "could not read" cannot pass as "found nothing"; and a specimen under a path
+# with a space must be found, one line per boundary. ASSEMBLED, because this file is on the list.
+memoful='dyn_serve_stop|dyn_servers_gone|clean_vt_processes|release_container|hold_container'
+memo_scan() {                         # memo_scan FILE... -> grep's hits, or $CHECKER_DIED
+    local rc
+    grep -HnE '\$\([[:space:]]*('"$memoful"')([[:space:]]|[);&|<>])' "$@" </dev/null
+    rc=$?
+    [ "$rc" -le 1 ] || printf '%s (exit %s from: grep)\n' "$CHECKER_DIED" "$rc"
+}
+memo_tmp="$(new_tmpdir)"
+case "$(memo_scan "$memo_tmp/absent" 2>/dev/null)" in
+    *"$CHECKER_DIED"*) pass "harness:memo-scan-fails-on-a-file-it-cannot-read" ;;
+    *) fail "harness:memo-scan-fails-on-a-file-it-cannot-read" \
+            "grep was handed a file that does not exist and the scan reported nothing" ;;
+esac
+memo_specimen="$memo_tmp/a checkout with spaces/planted.sh"
+mkdir -p "${memo_specimen%/*}"
+{ printf 'out="$(%s)"\n' release_container
+  printf 'out="$(%s; L --rebuild)"\n' hold_container
+} > "$memo_specimen"
+memo_files=("$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh "$memo_specimen")
+memo_raw="$(memo_scan ${memo_files[@]+"${memo_files[@]}"})"
+case "$memo_raw" in
+    *"$memo_specimen:1:"*"$memo_specimen:2:"*) pass "harness:memo-scan-finds-a-planted-capture" ;;
+    *) fail "harness:memo-scan-finds-a-planted-capture" \
+            "the scan did not report both captures planted in $memo_specimen" ;;
+esac
+memosub="$(printf '%s\n' "$memo_raw" | grep -vF -- "$memo_specimen:" \
+           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_eq "harness:no-memo-dropping-helper-runs-in-a-subshell" "" "$memosub"
+rm -rf "$memo_tmp"
 
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
