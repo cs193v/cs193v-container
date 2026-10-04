@@ -73,12 +73,17 @@ def oracle(root):
 # so a walk that padded its digest passed every property that read one -- measured: a leading
 # space, a leading or trailing blank line, a trailing space, each 11 pass 0 fail. Every reader of
 # stdout below gets it raw, refusal-is-quiet included, so a refusal that prints only a newline now
-# counts as printing something. stderr is left stripped, as it was.
+# counts as printing something.
+#
+# AND stderr AS WRITTEN TOO (#460). success-writes-no-stderr judges it, and the strip that stayed
+# here after #454 let a success that wrote only a newline there pass -- measured, 13 pass 0 fail.
+# Empty means empty. Where a refusal is asked to give its reason, whitespace is not one, and that
+# reader strips for itself.
 def run_verb(d, boot=BOOT):           # -> (rc, stdout, stderr)
     p = subprocess.run(["bash", boot, "--dev-manifest-hash", d],
                        capture_output=True)
     return p.returncode, p.stdout.decode("utf-8", "replace"), \
-           p.stderr.decode("utf-8", "replace").strip()
+           p.stderr.decode("utf-8", "replace")
 
 # ONE DIGEST LINE AND NOTHING ELSE, which is the verb's own contract (install-cs193v.sh: "ONE LINE
 # ON STDOUT AND NOTHING ELSE") and narrower than what its readers forgive. The verb prints exactly
@@ -205,6 +210,27 @@ for k, (text, want) in enumerate(JUDGED):
         misjudged.append("%r %s" % (text, "refused" if want else "accepted"))
 out("judge-misjudged", "; ".join(misjudged))
 
+# AND stderr AS WRITTEN (#460), asked of the same path the same way and then of the very predicate
+# success-writes-no-stderr uses: a strip in run_verb used to turn whitespace alone into nothing
+# written at all, and a strip in the predicate would do the same from the other end.
+def wrote_stderr(err):                # success-writes-no-stderr's question: was anything written?
+    return err != ""
+
+JUDGE_ERR = os.path.join(WORK, "judge-verb-stderr.sh")
+with open(JUDGE_ERR, "w") as fh:
+    fh.write('cat -- "$2" >&2\n')
+err_changed = []
+for k, text in enumerate(("\n", "  \n", " ", "a reason\n", "  a reason  \n")):
+    f = os.path.join(WORK, "judged-err%d" % k)
+    with open(f, "w") as fh:
+        fh.write(text)
+    _, _, err = run_verb(f, boot=JUDGE_ERR)
+    if err != text:
+        err_changed.append("%r came back as %r" % (text, err))
+    elif not wrote_stderr(err):
+        err_changed.append("%r counted as nothing written" % (text,))
+out("judge-stderr-changed", "; ".join(err_changed))
+
 # ─── property 1: valid input first, which is what stops "refuse everything" passing ──
 disagree, nonhex, dirty_err = [], [], []
 n_ok = 0
@@ -221,10 +247,10 @@ for i, name in enumerate(NAMES):
     n_ok += 1
     got = digest_of(printed)
     if rc != 0 or got is None:
-        nonhex.append("%r rc=%d out=%r" % (name, rc, printed[:80]))
+        nonhex.append("%r rc=%d out=%r err=%r" % (name, rc, printed[:80], err[:80]))
         continue
-    if err:
-        dirty_err.append("%r: %s" % (name, err[:80]))
+    if wrote_stderr(err):
+        dirty_err.append("%r: %r" % (name, err[:80]))
     want = oracle(d)
     if got != want:
         disagree.append("%r shell=%s oracle=%s" % (name, got, want))
@@ -244,6 +270,7 @@ rand_disagree = []
 n_rand_skipped = 0
 p2_asked = p2_landed = p2_collided = 0
 p2_refused_from = len(refused)
+skipped_trees = []
 for i in range(N_RANDOM):
     reached += 1
     d = fresh("rand%d" % i)
@@ -275,23 +302,38 @@ for i in range(N_RANDOM):
     p2_landed += n_planted
     # AN EMPTY TREE IS NOT A SUBJECT. --dev-manifest-hash refuses one ("the course files are
     # empty", rc 1) and it is right to, so judging it here would count a correct refusal as a
-    # disagreement. Reachable two ways: every planting collided, which any platform can do at
-    # some seed, or the tree drew only a name this filesystem refuses, as a file or a directory --
-    # which is tree 27 at the default seed on a Mac, and is what turned #305 into a red here
-    # instead of a dead suite.
-    if n_planted == 0:
+    # disagreement. Reachable only one way: every planting the tree drew was refused before it made
+    # anything -- the name this filesystem refuses, or its directory spelling as the first
+    # component -- which is tree 27 at the default seed on a Mac, and is what turned #305 into a
+    # red here instead of a dead suite. A collision cannot empty a tree, since it needs something
+    # already there; so on a filesystem that refuses nothing, no tree is ever skipped.
+    #
+    # EMPTY ON DISK, NOT "NO FILE LANDED" (#460). A planting that fails part-way has often made its
+    # directories first, and the walk hashes a tree of bare directories rather than refusing it --
+    # so that tree is a subject, and it used to be skipped as empty. Measured: 3 of the 7 trees
+    # skipped across ten seeds held something, tree 2 at the default seed among them.
+    if not os.listdir(os.fsencode(d)):
         n_rand_skipped += 1
+        skipped_trees.append((i, d))
         continue
-    rc, printed, _ = run_verb(d)
+    rc, printed, err = run_verb(d)
     got = digest_of(printed)
     if rc != 0 or got is None:
-        rand_disagree.append("tree %d did not hash: rc=%d out=%r" % (i, rc, printed[:80]))
+        rand_disagree.append("tree %d did not hash: rc=%d out=%r err=%r" % (i, rc, printed[:80], err[:80]))
         continue
     if got != oracle(d):
         rand_disagree.append("tree %d: shell=%s oracle=%s" % (i, got, oracle(d)))
 out("cases-random", str(N_RANDOM - n_rand_skipped))
 out("cases-random-skipped", str(n_rand_skipped))
 out("random-disagree", "; ".join(rand_disagree[:4]))
+# EVERY TREE SKIPPED AS EMPTY IS EMPTY (#460), looked at afterwards on disk rather than taken from
+# whatever decided to skip it, since that decision is the thing being checked.
+not_empty = []
+for i, sd in skipped_trees:
+    held = sorted(os.listdir(os.fsencode(sd)))
+    if held:
+        not_empty.append("tree %d holds %r" % (i, held))
+out("skipped-but-not-empty", "; ".join(not_empty[:4]))
 p2_unaccounted = p2_asked - p2_landed - p2_collided - (len(refused) - p2_refused_from)
 out("plantings-unaccounted", "" if p2_unaccounted == 0 else
     "%d of the %d plantings property 2 asked for neither landed, collided nor were recorded as refused"
@@ -318,7 +360,7 @@ for i in range(N_MUTATED):
     rc0, printed0, err0 = run_verb(d)
     base = digest_of(printed0)
     if rc0 != 0 or base is None:
-        insensitive.append("base tree %d did not hash (rc=%d, out=%r): %s" % (i, rc0, printed0[:80], err0[:80]))
+        insensitive.append("base tree %d did not hash (rc=%d, out=%r): %r" % (i, rc0, printed0[:80], err0[:80]))
         continue
     op = i % len(MUTATIONS)
     if op == 0:                                   # flip a content byte
@@ -335,7 +377,7 @@ for i in range(N_MUTATED):
     rc1, printed1, err1 = run_verb(d)
     after = digest_of(printed1)
     if rc1 != 0 or after is None:
-        insensitive.append("tree %d, %s: the mutated tree did not hash (rc=%d, out=%r): %s"
+        insensitive.append("tree %d, %s: the mutated tree did not hash (rc=%d, out=%r): %r"
                            % (i, MUTATIONS[op], rc1, printed1[:80], err1[:80]))
     elif after == base:
         insensitive.append("tree %d, %s: digest unchanged" % (i, MUTATIONS[op]))
@@ -373,7 +415,7 @@ for tag, build in (("symlink", lambda d: (plant(d, b"real"), os.symlink("real", 
     rc, got, err = run_verb(d)
     if got:
         noisy.append("%s printed %r" % (tag, got[:40]))
-    if rc == 0 or not err:
+    if rc == 0 or not err.strip():    # it says why on stderr, and whitespace does not say why
         noisy.append("%s rc=%d err=%r" % (tag, rc, err[:40]))
 out("refusal-is-quiet", "; ".join(noisy[:4]))
 
@@ -396,8 +438,8 @@ for i in range(N_STABLE):
     rb, pb, eb = run_verb(d)
     a, b = digest_of(pa), digest_of(pb)
     if ra != 0 or rb != 0 or a is None or b is None:
-        unstable.append("tree %d did not hash: rc=%d %r, then rc=%d %r: %s"
-                        % (i, ra, pa[:80], rb, pb[:80], (ea or eb)[:80]))
+        unstable.append("tree %d did not hash: rc=%d %r, then rc=%d %r: %r"
+                        % (i, ra, pa[:80], rb, pb[:80], ea[:40] + " / " + eb[:40]))
     elif a != b:
         unstable.append("tree %d: %s then %s" % (i, a, b))
 out("unstable", "; ".join(unstable[:4]))
@@ -443,10 +485,12 @@ fi
 pass "mffuzz:the-fuzzer-ran-to-the-end"
 
 assert_eq "mffuzz:only-one-digest-line-is-a-digest" "" "$(fz judge-misjudged)"
+assert_eq "mffuzz:stderr-reaches-the-judge-as-written" "" "$(fz judge-stderr-changed)"
 assert_eq "mffuzz:every-valid-tree-hashes"        "" "$(fz nonhex)"
 assert_eq "mffuzz:the-walk-agrees-with-the-oracle" "" "$(fz disagree)"
 assert_eq "mffuzz:success-writes-no-stderr"       "" "$(fz stderr-on-success)"
 assert_eq "mffuzz:random-trees-agree"             "" "$(fz random-disagree)"
+assert_eq "mffuzz:a-tree-skipped-as-empty-is-empty" "" "$(fz skipped-but-not-empty)"
 assert_eq "mffuzz:every-mutation-moves-the-digest" "" "$(fz insensitive)"
 assert_eq "mffuzz:it-refuses-what-it-says-it-refuses" "" "$(fz accepted-what-it-refuses)"
 assert_eq "mffuzz:a-refusal-prints-no-digest"     "" "$(fz refusal-is-quiet)"
