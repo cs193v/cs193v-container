@@ -2394,6 +2394,105 @@ assert_contains "fwdinit:prior-require:the-suite-still-stops" "[rc=$FWDI_SIGRC]"
 assert_eq "fwdinit:prior-require:and-records-both" \
           "FAIL require:something-else|FAIL require:dev-tunnel" "$(fwdi_recorded real prior-require)"
 
+# ─── a wait's ceiling is SECONDS, not a count of polls (#401) ──────────────────
+# wait_until SECS used to mean SECS x 20 polls, each the condition and then a 0.05 s sleep, so a
+# condition that costs a `podman exec` stretched the ceiling by its own cost: a "15 s" wait gave
+# up after 53.5 s, and an outer timeout sized from the stated ceilings could fire first. The tmux
+# harness's five waits did the same through _hx_polls. Measured before the fix, a 1 s ceiling on a
+# condition that takes 0.2 s and never holds: wait_until 5.3 s, the harness's five 5.6 to 5.9 s.
+#
+# BOTH ENDS OF THE BOUND, because a deadline on $SECONDS can be wrong in either direction: whole
+# seconds tick early, so a loop that stopped AT its deadline could give up a moment after it
+# began. More than the ceiling and within about a second of it is the contract; 3 s rather than 2
+# leaves room for the one condition still running when the deadline passes, on a loaded machine,
+# and the bug this is here for costs 5.
+#
+# EVERY TIMED WAIT STARTS 0.85 s INTO A SECOND, which is what makes the lower bounds deterministic
+# rather than a matter of luck: how early a loop that stopped AT its deadline gives up depends on
+# where in the current second it began. Started 0.85 s in, it gives up about 0.25 s later, and a
+# correct one after more than a second. The tick is polled for and the 0.85 is an offset from it --
+# a phase of the clock, not a wait for anything to happen. Whatever the phase, the correct loops
+# pass; only how surely a broken one is caught depends on it.
+#
+# THE HARNESS'S FIVE RUN ON THE HOST, alongside wait_until so the ceilings are paid once.
+# tmux-harness/lib.sh runs inside the container, but its waits are plain shell and the file
+# sources under this bash 3.2 once HX_TMUX names something executable, so they are timed here
+# against a stand-in tmux whose every capture takes 0.2 s and shows the same line. The directory
+# is otherwise exempt from the bash 3.2 rule, so a construct that stops it parsing here gets a
+# check of its own rather than nine failures that blame the waits.
+mkdir -p "$WORK/hx"
+printf '#!/bin/sh\nsleep 0.2\necho STILL HERE\n' > "$WORK/hx/tmux"
+chmod 755 "$WORK/hx/tmux"
+cat > "$WORK/hx/child.sh" <<'CHILD'
+set -u
+HX_TMUX="$1"
+. "$2" && command -v _hx_deadline >/dev/null 2>&1 || { printf 'LIB-DID-NOT-SOURCE\n'; exit 1; }
+printf 'LIB-SOURCED\n'
+took() {                              # took NAME CMD... -> "NAME rc=N took=SECS"
+    local n="$1" t rc; shift
+    t="$( { TIMEFORMAT=%R; time "$@" >/dev/null 2>&1; } 2>&1 )"; rc=$?
+    printf '%s rc=%s took=%s\n' "$n" "$rc" "$t"
+}
+phase() { local s0="$SECONDS"; while [ "$SECONDS" = "$s0" ]; do sleep 0.01; done; sleep 0.85; }
+phase
+took hx_wait     hx_wait s NEVER 1 &
+took hx_gone     hx_gone s STILL 1 &
+took hx_until    hx_until 'hx_cap s' NEVER 1 &
+took hx_until_ne hx_until_ne 'hx_cap s' 'STILL HERE' 1 &
+took hx_until_ok hx_until_ok 'hx_cap s | grep NEVER >/dev/null' 1 &
+took hx_until-fractional-never hx_until 'hx_cap s' NEVER 0.5 &
+wait
+took hx_until-holds hx_until 'echo ok' ok 10
+took hx_until-fractional hx_until 'echo ok' ok 0.5
+CHILD
+bash "$WORK/hx/child.sh" "$WORK/hx/tmux" "$TESTS_DIR/tmux-harness/lib.sh" > "$WORK/hx/out" 2>&1 &
+wt_child=$!
+wt_phase() { local s0="$SECONDS"; while [ "$SECONDS" = "$s0" ]; do sleep 0.01; done; sleep 0.85; }
+wt_slow_false() { sleep 0.2; return 1; }
+wt_phase
+wt_t="$(elapsed wait_until 1 wt_slow_false)"; wt_rc=$?
+wait "$wt_child"
+record    "waits:wait_until-1-on-a-slow-false-took" "$wt_t"
+assert_eq "waits:a-wait_until-that-never-holds-returns-1" "1" "$wt_rc"
+assert_ok "waits:a-slow-condition-does-not-stretch-wait_until" faster_than 3 "$wt_t"
+if faster_than 1 "$wt_t"; then fail "waits:wait_until-waits-at-least-its-ceiling" "gave up after $wt_t s"
+else pass "waits:wait_until-waits-at-least-its-ceiling"; fi
+# AND A PASSING WAIT STILL RETURNS THE MOMENT ITS CONDITION HOLDS, at the 20 Hz it always polled
+# at: the third poll is two sleeps in, a tenth of a second against a ten-second ceiling.
+wt_third() { WT_N=$((WT_N + 1)); [ "$WT_N" -ge 3 ]; }
+WT_N=0
+wt_t="$(elapsed wait_until 10 wt_third)"; wt_rc=$?
+assert_eq "waits:a-wait_until-that-holds-returns-0" "0" "$wt_rc"
+assert_ok "waits:and-returns-as-soon-as-it-holds" faster_than 1 "$wt_t"
+
+wt_hx="$(cat "$WORK/hx/out")"
+record "waits:the-harness-waits-took" "$(printf '%s' "$wt_hx" | do_tr '\n' ' ')"
+assert_contains "waits:tmux-harness-lib-still-sources-under-this-bash" "LIB-SOURCED" "$wt_hx"
+for wt_w in hx_wait hx_gone hx_until hx_until_ne hx_until_ok; do
+    wt_line="$(printf '%s\n' "$wt_hx" | grep "^$wt_w rc=")"
+    assert_contains "waits:$wt_w-that-never-holds-returns-1" "rc=1" "$wt_line"
+    wt_t="${wt_line##*took=}"
+    if [ -n "$wt_t" ] && faster_than 3 "$wt_t" && ! faster_than 1 "$wt_t"; then
+        pass "waits:$wt_w-is-bounded-in-seconds"
+    else fail "waits:$wt_w-is-bounded-in-seconds" "a 1 s ceiling on a 0.2 s probe: ${wt_line:-no line}"; fi
+done
+wt_line="$(printf '%s\n' "$wt_hx" | grep '^hx_until-holds rc=')"
+assert_contains "waits:an-hx_until-that-holds-returns-0" "rc=0" "$wt_line"
+wt_t="${wt_line##*took=}"
+if [ -n "$wt_t" ] && faster_than 1 "$wt_t"; then pass "waits:and-an-hx-wait-returns-as-soon-as-it-holds"
+else fail "waits:and-an-hx-wait-returns-as-soon-as-it-holds" "${wt_line:-no line}"; fi
+# A FRACTIONAL CEILING STILL POLLS, AND IS ROUNDED UP. The old poll count took one through awk;
+# $(( )) does not, and a deadline built from `SECONDS + 0.5` is an arithmetic error that leaves the
+# wait polling nothing. Rounded DOWN, 0.5 would mean "until the clock next ticks", which from 0.85
+# s into a second is about 0.25 s -- less than the ceiling it was given.
+assert_contains "waits:a-fractional-ceiling-still-polls" "rc=0" \
+                "$(printf '%s\n' "$wt_hx" | grep '^hx_until-fractional rc=')"
+wt_line="$(printf '%s\n' "$wt_hx" | grep '^hx_until-fractional-never rc=')"
+wt_t="${wt_line##*took=}"
+if [ -n "$wt_t" ] && faster_than 3 "$wt_t" && ! faster_than 0.5 "$wt_t"; then
+    pass "waits:a-fractional-ceiling-is-rounded-up"
+else fail "waits:a-fractional-ceiling-is-rounded-up" "a 0.5 s ceiling on a 0.2 s probe: ${wt_line:-no line}"; fi
+
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.
 # NOT via `sh -c`: a child shell does not inherit a function, so that would assert 127 and pass

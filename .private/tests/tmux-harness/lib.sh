@@ -343,61 +343,70 @@ hx_cap_ansi() { hx_tmux capture-pane -p -e -t "$1" 2>/dev/null; }    # text + SG
 # just later. Nothing here can turn a red check green.
 HX_POLL=0.05                          # 20 Hz. A tmux client round trip is ~5 ms.
 
-# Once per wait, not once per poll: awk is the only float arithmetic available and a fork per
-# tick would cost more than the sleep it is timing.
-_hx_polls() { awk "BEGIN{printf \"%d\", ($1) / $HX_POLL}"; }
+# THE CEILING IS ELAPSED SECONDS, NOT A COUNT OF POLLS (#401). These ran timeout / HX_POLL
+# iterations, each a probe and then a sleep, so a probe that costs anything stretched the ceiling
+# by its own cost: a 1 s wait on a 0.2 s probe that never held gave up after 5.6 to 5.9 s, in all
+# five. A deadline on $SECONDS cannot be stretched. Whole seconds are plenty for a failure bound, so
+# a fractional ceiling rounds UP; and since $SECONDS can tick a moment after a wait begins, a wait
+# gives up only once the clock is PAST the deadline -- a ceiling of N gives up after more than N
+# seconds and at most N+1, plus one probe. The deadline is checked after the probe, so the last
+# poll is always one taken after it passed. wait_until in lib/assert.sh is the same loop.
+#
+# 14-test-harness.sh TIMES THESE FIVE ON THE HOST, sourcing this file under the bash 3.2 there, so
+# the file has to keep parsing under it; that suite says so by name if it stops.
+_hx_deadline() { # timeout_seconds -> the last $SECONDS value a wait still polls at
+  local t="$1"
+  case "$t" in *.*) t=$(( ${t%%.*} + 1 )) ;; esac
+  printf '%d' "$(( SECONDS + t ))"
+}
 
 # Wait until the screen matches an extended regex. Returns 1 on timeout.
 hx_wait() { # session regex [timeout_seconds]
-  local name="$1" re="$2" i=0 max
-  max="$(_hx_polls "${3:-8}")"
-  while [ "$i" -lt "$max" ]; do
+  local name="$1" re="$2" end
+  end="$(_hx_deadline "${3:-8}")"
+  while :; do
     if hx_cap "$name" | grep -E "$re" >/dev/null; then return 0; fi
+    [ "$SECONDS" -le "$end" ] || return 1
     sleep "$HX_POLL"
-    i=$((i + 1))
   done
-  return 1
 }
 
 # Wait until a probe reports an expected value. The probe is a command STRING, evaluated the
 # same way hx_test_forbidden_keys evaluates its own probe argument.
 hx_until() { # 'probe command' expected [timeout_seconds]
-  local cmd="$1" want="$2" i=0 max
-  max="$(_hx_polls "${3:-8}")"
-  while [ "$i" -lt "$max" ]; do
+  local cmd="$1" want="$2" end
+  end="$(_hx_deadline "${3:-8}")"
+  while :; do
     [ "$(eval "$cmd" 2>/dev/null)" = "$want" ] && return 0
+    [ "$SECONDS" -le "$end" ] || return 1
     sleep "$HX_POLL"
-    i=$((i + 1))
   done
-  return 1
 }
 
 # ...or until it reports anything other than what it reported before. NON-EMPTY and different,
 # not merely different: a probe answers "" for the moment a window is being created or
 # destroyed, and treating that as the change would return before the thing had happened.
 hx_until_ne() { # 'probe command' baseline [timeout_seconds]
-  local cmd="$1" base="$2" i=0 max out
-  max="$(_hx_polls "${3:-8}")"
-  while [ "$i" -lt "$max" ]; do
+  local cmd="$1" base="$2" end out
+  end="$(_hx_deadline "${3:-8}")"
+  while :; do
     out="$(eval "$cmd" 2>/dev/null)"
     [ -n "$out" ] && [ "$out" != "$base" ] && return 0
+    [ "$SECONDS" -le "$end" ] || return 1
     sleep "$HX_POLL"
-    i=$((i + 1))
   done
-  return 1
 }
 
 # The general case: wait until a command succeeds. For conditions that are not one probe's
 # value -- "the clipboard contains COPYME", "the session is gone".
 hx_until_ok() { # 'command' [timeout_seconds]
-  local cmd="$1" i=0 max
-  max="$(_hx_polls "${2:-8}")"
-  while [ "$i" -lt "$max" ]; do
+  local cmd="$1" end
+  end="$(_hx_deadline "${2:-8}")"
+  while :; do
     eval "$cmd" >/dev/null 2>&1 && return 0
+    [ "$SECONDS" -le "$end" ] || return 1
     sleep "$HX_POLL"
-    i=$((i + 1))
   done
-  return 1
 }
 
 # The other half of hx_wait: something must go AWAY on its own. ONLY for things that expire by
@@ -405,14 +414,13 @@ hx_until_ok() { # 'command' [timeout_seconds]
 # Never for "nothing happened": an absence that was never a presence is not evidence, and the
 # checks that prove a forbidden key did nothing keep their fixed sleep for that reason.
 hx_gone() { # session regex [timeout_seconds]
-  local name="$1" re="$2" i=0 max
-  max="$(_hx_polls "${3:-8}")"
-  while [ "$i" -lt "$max" ]; do
+  local name="$1" re="$2" end
+  end="$(_hx_deadline "${3:-8}")"
+  while :; do
     hx_cap "$name" | grep -E "$re" >/dev/null || return 0
+    [ "$SECONDS" -le "$end" ] || return 1
     sleep "$HX_POLL"
-    i=$((i + 1))
   done
-  return 1
 }
 
 hx_settle() { sleep "${1:-0.6}"; }
