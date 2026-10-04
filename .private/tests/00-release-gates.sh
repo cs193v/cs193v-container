@@ -13,10 +13,10 @@
 # THEY ARE GREEN NOW. This header used to say they "fail today by design: the repo is scaffolding
 # with four deliberate blanks in it", and that stopped being true once the blanks were filled --
 # REPO_OWNER is cs193v, the stage-two URL serves the installer, the token expiry is set, and the
-# GitHub org and sandbox prefix are both real. Measured 2026-10-03: 49 pass, 0 fail, 2 skip. The
+# GitHub org and sandbox prefix are both real. Measured 2026-10-03: 50 pass, 0 fail, 2 skip. The
 # skips are opt-in rather than broken: they need CS193V_RELEASE_BUILD=yes (a ~6 GB no-cache
-# build). Offline it is 26 pass, 0 fail, 25 skip: an offline run, an unpushed tag and a failed
-# fetch all name the same 51 assertions as this one (#409).
+# build). Offline it is 27 pass, 0 fail, 25 skip: an offline run, an unpushed tag, a failed fetch
+# and a base digest that will not resolve all name the same 52 assertions as this one (#409, #457).
 #
 # Run this before the quarter starts, and again after any change to the publishing setup.
 
@@ -522,24 +522,37 @@ assert_contains "build:base-image-pinned-by-digest" "@sha256:" "$from"
 from_digest="${from%@*}@${from##*@}"
 from_digest="${from_digest%%:*}@${from##*@}"
 record "build:FROM-normalised" "$from_digest"
-if command -v podman >/dev/null 2>&1 && [ "$from" != "${from#*@sha256:}" ]; then
-    if podman manifest inspect "$from_digest" >/dev/null 2>&1; then
-        plats="$(podman manifest inspect "$from_digest" \
-                 | python3 -c 'import json,sys
+# EVERY ARM NAMES ALL THREE (#457). A failed inspect used to name build:base-digest-resolves, which
+# the arm that worked never did, and drop both platform names, so a run with the digest unresolved
+# named 50 assertions to everybody else's 51. ONE FLAT CHAIN, §1's shape, so that 10-static.sh's arm
+# rule -- which counts `podman manifest inspect` as a fetch -- compares every arm against it.
+base_skip_body() {                    # base_skip_body WHY -> skip every §2 name after the inspect
+    skip "build:base-has-amd64" "$1"
+    skip "build:base-has-arm64" "$1"
+}
+if ! command -v podman >/dev/null 2>&1; then
+    skip "build:base-digest-resolves" "podman not installed"
+    base_skip_body "podman not installed"
+elif [ "$from" = "${from#*@sha256:}" ]; then
+    # Its own arm, so that an unpinned FROM is not reported as a missing podman. The pin itself is
+    # build:base-image-pinned-by-digest's to fail, above.
+    skip "build:base-digest-resolves" "the FROM line names no digest, so there is nothing to inspect"
+    base_skip_body "the FROM line names no digest, so there is nothing to inspect"
+elif podman manifest inspect "$from_digest" >/dev/null 2>&1; then
+    pass "build:base-digest-resolves"
+    plats="$(podman manifest inspect "$from_digest" \
+             | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 print(" ".join(sorted("%s/%s" % (m["platform"]["os"], m["platform"]["architecture"])
                       for m in d.get("manifests", []))))' 2>/dev/null)"
-        record "build:base-platforms" "$plats"
-        # Both legs must be in the list the digest names, or the pin builds on exactly one
-        # of the two architectures students actually have.
-        assert_contains "build:base-has-amd64" "linux/amd64" "$plats"
-        assert_contains "build:base-has-arm64" "linux/arm64" "$plats"
-    else
-        fail "build:base-digest-resolves" "podman manifest inspect $from_digest failed"
-    fi
+    record "build:base-platforms" "$plats"
+    # Both legs must be in the list the digest names, or the pin builds on exactly one
+    # of the two architectures students actually have.
+    assert_contains "build:base-has-amd64" "linux/amd64" "$plats"
+    assert_contains "build:base-has-arm64" "linux/arm64" "$plats"
 else
-    skip "build:base-has-amd64" "podman not installed"
-    skip "build:base-has-arm64" "podman not installed"
+    fail "build:base-digest-resolves" "podman manifest inspect $from_digest failed"
+    base_skip_body "the digest did not resolve, so there is no platform list to read"
 fi
 
 # ─── 3. reproducible build inputs ──────────────────────────────────────────────
