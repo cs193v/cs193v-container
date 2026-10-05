@@ -255,6 +255,12 @@ pty_inner_pid() {                     # pty_inner_pid -> PID on stdout, rc 0; el
     return 1
 }
 
+# pid_state PID -> that pid's state letters as ps gives them (S, R, Z, Ss+ ...), empty when the pid
+# is gone. Portable as written: macOS and Linux both accept `-p PID -o state=`.
+pid_state() {                         # pid_state PID
+    ps -p "${1:-0}" -o state= 2>/dev/null | do_tr -d ' \n'
+}
+
 # pid_is_gone PID -> 0 when that pid is no longer a running process.
 #
 # STATE, NOT `kill -0`, and 12-run-timeout.sh already paid for this lesson: "kill -0 succeeds on
@@ -262,9 +268,8 @@ pty_inner_pid() {                     # pty_inner_pid -> PID on stdout, rc 0; el
 # in the process table -- so a check built on `kill -0` would report the thing we killed as alive
 # for as long as the reap took, which is a race whose failures look like real ones. `ps -o state=`
 # is empty when the pid is gone and `Z` while it is a zombie, and both mean gone for our purposes.
-# Portable as written: macOS and Linux both accept `-p PID -o state=`.
 pid_is_gone() {                       # pid_is_gone PID
-    case "$(ps -p "${1:-0}" -o state= 2>/dev/null | do_tr -d ' \n')" in
+    case "$(pid_state "$1")" in
         ''|Z*) return 0 ;;
         *)     return 1 ;;
     esac

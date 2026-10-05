@@ -4378,21 +4378,50 @@ hdir="$TMP/helper-strand"; mkdir -p "$hdir"
 hfifo="$hdir/fifo"; mkfifo "$hfifo" 2>/dev/null
 ( read -r hv < "$hfifo" || true; printf '%s' "${hv:-}" > "$hdir/verdict" ) &
 hreader=$!
-"$PRIVATE/macapp/cs193v-run" "$hdir/no-such-course-dir" "$hfifo" >/dev/null 2>&1
-hrc=$?
-if wait_until 10 test -f "$hdir/verdict"; then
-    pass      "helper:releases-the-waiter-when-it-fails-before-the-launcher"
-    assert_eq "helper:sends-no-verdict-on-an-early-failure" "" "$(cat "$hdir/verdict" 2>/dev/null)"
-else
-    kill "$hreader" 2>/dev/null
-    fail "helper:releases-the-waiter-when-it-fails-before-the-launcher" \
-         "the helper exited $hrc against a missing course directory and the reader was STILL
+# THE READER HAS TO BE IN open(2) BEFORE THE HELPER RUNS (#490). Left to race, the helper sometimes
+# opened, failed and exited first, and a reader that opens a fifo after its last writer has gone
+# waits for one that never comes -- the strand this check exists to catch, made by the check: 1 run
+# in 300 idle, 8 in 1000 on one busy CPU. Before its open the reader has nothing to sleep on, so
+# asleep means there. Where the kernel names the sleep it has to be the fifo's open, so a `sleep`
+# put ahead of the open cannot pass for it. Where it does not -- macOS has no /proc, and some Linux
+# kernels read 0 -- the state has to do.
+waiter_in_open() {                    # waiter_in_open PID
+    local wchan=
+    case "$(pid_state "$1")" in S*) ;; *) return 1 ;; esac
+    { read -r wchan < "/proc/$1/wchan"; } 2>/dev/null
+    case "$wchan" in wait_for_partner|fifo_open|0|'') return 0 ;; esac
+    return 1
+}
+if wait_until 10 waiter_in_open "$hreader"; then
+    pass "helper:the-waiter-is-in-open-before-the-helper-runs"
+    "$PRIVATE/macapp/cs193v-run" "$hdir/no-such-course-dir" "$hfifo" >/dev/null 2>&1
+    hrc=$?
+    record "helper:early-failure-exit-status" "$hrc"
+    # THE READER'S EXIT, NOT ITS VERDICT FILE: the file exists from the moment the reader's
+    # redirection opens it, before anything is written, and read then it passes a helper that did
+    # send a verdict.
+    if wait_until 10 pid_is_gone "$hreader"; then
+        pass      "helper:releases-the-waiter-when-it-fails-before-the-launcher"
+        assert_eq "helper:sends-no-verdict-on-an-early-failure" "" \
+                  "$(cat "$hdir/verdict" 2>/dev/null)"
+    else
+        fail "helper:releases-the-waiter-when-it-fails-before-the-launcher" \
+             "the helper exited $hrc against a missing course directory and the reader was STILL
 blocked 10s later -- which is the applet hanging forever on a fifo with no writer. Check that the
 fifo is opened before the cd; see helper:opens-the-fifo-before-anything-that-can-fail."
-    skip "helper:sends-no-verdict-on-an-early-failure" "the waiter never returned"
+        skip "helper:sends-no-verdict-on-an-early-failure" "the waiter never returned"
+    fi
+else
+    fail "helper:the-waiter-is-in-open-before-the-helper-runs" \
+         "the reader standing in for the applet was not asleep in open(2) on the fifo 10s after it
+started (ps: '$(ps -p "$hreader" -o state= -o wchan= 2>/dev/null)'), so the helper was not run.
+That is this harness on this platform, not the helper: see #490."
+    skip "helper:releases-the-waiter-when-it-fails-before-the-launcher" "the helper was not run"
+    skip "helper:sends-no-verdict-on-an-early-failure" "the helper was not run"
 fi
+# KILL, NOT TERM: a TERM ignored above this run would leave the wait below hanging forever.
+pid_is_gone "$hreader" || kill -KILL "$hreader" 2>/dev/null
 wait "$hreader" 2>/dev/null || true
-record "helper:early-failure-exit-status" "$hrc"
 assert_contains "helper:runs-the-launcher"           './cs193v' "$helper_code"
 # THE SENTINEL IS GATED ON THE EXIT STATUS. Unconditional, it would close the window ~100ms
 # after a fast refusal and the student would never read the error.
