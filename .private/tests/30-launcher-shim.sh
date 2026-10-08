@@ -844,6 +844,47 @@ assert_says_key "doctor:asks-for-a-paste"  doctor.paste "$out"
 assert_eq "doctor:creates-nothing" "0" "$(shim_count '^run ')"
 assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
 
+# WHERE YOUR FILES ARE, AND HOW TO OPEN THEM (#498). The row is READ BACK OUT OF PODMAN rather than
+# printed from $WORKSPACE -- verb_doctor's own comment forbids that simplification -- so the fake
+# reports a mount deliberately unlike $COPY/projects, which only a read-back can print. Rendered
+# for the platform by the launcher's gui_projects_path, worked out here with the same function in
+# a subshell as print:publishes-the-host-projects-dir does, and under a made-up distro, so that on
+# WSL a doctor spelling out CS193V rather than reading $WSL_DISTRO_NAME goes red as well.
+#
+# BOTH GUARDED FIRST. An empty render is a needle every output contains, and an empty open string
+# makes assert_says pass on anything.
+shim_new
+shim_set state exited
+shim_set mounts_out /probe/mounted/projects
+dr_plat="$(. "$COPY/.private/files/cs193v-ui.sh"; platform)"
+dr_want="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$dr_plat" /probe/mounted/projects Probe-Distro)"
+assert_ne "doctor:the-your-files-expectation-rendered-something" "" "$dr_want"
+assert_eq "doctor:the-open-strings-were-readable" "mw" "${CS193V_OPEN_MACOS:+m}${CS193V_OPEN_WINDOWS:+w}"
+out="$(export WSL_DISTRO_NAME=Probe-Distro; launcher doctor)"
+assert_contains "doctor:your-files-is-the-mount-read-back" "$dr_want" \
+                "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
+# THE OPEN LINE IS PER PLATFORM, and only the arms this host can reach are asserted here: WSL gets
+# File Explorer's route and Linux gets the path alone. A Mac is forced below, so that arm is
+# reached from every host.
+if [ "$dr_plat" = wsl ]; then
+    assert_says "doctor:wsl-says-how-to-open-it" "${CS193V_OPEN_WINDOWS:-}" "$out"
+else
+    assert_says_not "doctor:only-wsl-gives-the-windows-route" "${CS193V_OPEN_WINDOWS:-}" "$out"
+fi
+if [ "$dr_plat" != macos ]; then
+    assert_says_not "doctor:only-macos-gives-the-finder-route" "${CS193V_OPEN_MACOS:-}" "$out"
+fi
+# ...AND ON A MAC, where Finder opens the path as mounted and the route is Finder's alone.
+shim_new
+shim_fake_uname Darwin arm64
+shim_set state exited
+shim_set mounts_out /probe/mounted/projects
+out="$(launcher doctor)"
+assert_contains "doctor:macos-your-files-is-the-path-as-mounted" "/probe/mounted/projects" \
+                "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
+assert_says     "doctor:macos-says-how-to-open-it"     "${CS193V_OPEN_MACOS:-}"   "$out"
+assert_says_not "doctor:macos-gives-no-windows-route" "${CS193V_OPEN_WINDOWS:-}" "$out"
+
 # The positive case, and the one that was broken. A container created from the current
 # container.args must be reported as matching it. verb_doctor hashed IMAGE="" because it
 # never resolved the image, while the launch path hashed the resolved dev image — so with an
