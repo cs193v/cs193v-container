@@ -79,11 +79,26 @@ assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/st
 # AND THE SAME DIRECTORY IS PUBLISHED INSIDE (#257), so the agents can tell a student where their
 # files are rather than handing back a container path. THE SAME $COPY AS THE MOUNT ABOVE is the
 # assertion: these two are written by one `podman run` precisely so they cannot disagree, and a
-# test that accepted any non-empty value would not notice them coming apart. This is the shim
-# tier, so the platform is whatever the host is -- the per-platform RENDERING is 21-host-paths.sh
-# and the arm that consumes it is 50-image.sh; what is checked here is that the launcher forwards
-# it at all, and forwards the directory it actually mounted.
-assert_contains "print:publishes-the-host-projects-dir" "CS193V_HOST_PROJECTS=$COPY/projects" "$line"
+# test that accepted any non-empty value would not notice them coming apart.
+#
+# RENDERED BY THE LAUNCHER'S OWN gui_projects_path, FROM $COPY (#291). This is the shim tier, so
+# the platform is whatever the host is, and inside WSL what is published is the UNC form -- a
+# literal $COPY/projects spelled one platform's answer and could never match there. Sharing the
+# renderer is not the test agreeing with itself: 21-host-paths.sh owns every arm of it, and what
+# this checks is the INPUT, that the launcher renders the directory it actually mounted for the
+# platform it is actually on. In a subshell, so box(), die() and msg() stay out of this suite.
+#
+# GUARDED FIRST: an empty expectation would make the needle `CS193V_HOST_PROJECTS=`, which every
+# run line contains whatever it publishes.
+hp_want="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$COPY/projects" "${WSL_DISTRO_NAME:-}")"
+assert_ne "print:the-host-projects-expectation-rendered-something" "" "$hp_want"
+assert_contains "print:publishes-the-host-projects-dir" "CS193V_HOST_PROJECTS=$hp_want" "$line"
+# AND THE DISTRO IS THE ONE IT RUNS IN, asked with a name no install uses, so a launcher that
+# spelled out CS193V rather than reading $WSL_DISTRO_NAME goes red on the CS193V distro as well.
+# Only a WSL host can tell the two apart; everywhere else the render ignores the distro.
+hp_probe="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$COPY/projects" Probe-Distro)"
+assert_contains "print:publishes-the-distro-it-runs-in" "CS193V_HOST_PROJECTS=$hp_probe" \
+                "$(export WSL_DISTRO_NAME=Probe-Distro; launcher --dev-print-command)"
 assert_contains "print:publishes-the-host-os" "CS193V_HOST_OS=" "$line"
 
 # ─── --dev-print-image  (#312) ────────────────────────────────────────────────
