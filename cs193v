@@ -2614,8 +2614,10 @@ verb_doctor() {
             # the launcher runs inside the WSL distro, so what podman reports is a Linux path
             # File Explorer cannot follow. gui_projects_path turns it into the UNC form there and
             # leaves it alone everywhere else. Guarded on a non-empty read, so the "?" fallback
-            # is still a "?" rather than a UNC path wrapped around nothing.
-            local ws_gui; ws_gui="$(host_projects)"
+            # is still a "?" rather than a UNC path wrapped around nothing -- and STARTED EMPTY
+            # for the same reason (#500): seeded from host_projects, an empty read printed
+            # $WORKSPACE as though it were mounted.
+            local ws_gui=''
             [ -n "${RT_OUT:-}" ] && \
                 ws_gui="$(gui_projects_path "$(platform)" "$RT_OUT" "${WSL_DISTRO_NAME:-}")"
             drow "$(msg doctor.row.your-files)" "${ws_gui:-?}"

@@ -884,6 +884,17 @@ assert_contains "doctor:macos-your-files-is-the-path-as-mounted" "/probe/mounted
                 "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
 assert_says     "doctor:macos-says-how-to-open-it"     "${CS193V_OPEN_MACOS:-}"   "$out"
 assert_says_not "doctor:macos-gives-no-windows-route" "${CS193V_OPEN_WINDOWS:-}" "$out"
+# AND NO MOUNT READS AS "?" (#500), not as the launcher's intent. A container with no bind at the
+# projects destination -- made before the mount moved, or by a bare `podman run` -- is the one
+# this row exists to report, and a row seeded from host_projects printed $WORKSPACE there as
+# though it were mounted. Matched at the end of the row: "?" is the whole value, not a character
+# somewhere in one.
+shim_new
+shim_set state exited
+shim_set mounts_out ''
+out="$(launcher doctor)"
+assert_match "doctor:no-mount-reads-as-unknown" ' [?]$' \
+             "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
 
 # The positive case, and the one that was broken. A container created from the current
 # container.args must be reported as matching it. verb_doctor hashed IMAGE="" because it
