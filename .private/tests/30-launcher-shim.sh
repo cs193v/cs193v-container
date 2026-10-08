@@ -2745,7 +2745,7 @@ assert_not_contains "forward:a-healthy-forward-is-not-an-unresponsive-master" \
 sup_reap
 
 # ─── ...and a master that has gone is published as gone  (#338) ───────────────
-# A master that exits cleanly -- ServerAlive after a sleep, `-O exit`, a TERM -- deletes its
+# A master that exits cleanly -- ServerAlive giving up, `-O exit`, a TERM -- deletes its
 # control socket, and every forward it held goes with it. The supervisor used to recheck nothing
 # it had already forwarded, so the state file kept `state healthy` and the old `up` rows, and
 # `cs193v-portwatch --show` went on telling a student (and the agent-notes it teaches) that ports
@@ -3264,7 +3264,7 @@ assert_eq "dead:the-replacement-is-asked-for-the-port" "2" \
 sup_reap
 
 # ─── a master that dies is restarted by the supervisor  (#343) ─────────────────
-# WHAT USED TO NEED --reset-tunnel. A master that died -- a sleep past ServerAlive, the OOM killer
+# WHAT USED TO NEED --reset-tunnel. A master that died -- ServerAlive giving up, the OOM killer
 # -- stayed dead until a student was told to run something, and most of them never are. The
 # supervisor that notices the death now starts a new master itself, but only for a death PROVED by
 # the pidfile's pid: a socket that has merely gone, or a forward that fails, can both happen with
@@ -3338,9 +3338,9 @@ assert_says "restart:the-supervisor-says-it-restarted-the-master" "has been rest
             "$(cat "$SHIM/sup-restart-kill.out" 2>/dev/null)"
 sup_reap
 
-# ─── ...one that exits cleanly, as ServerAlive makes it after a sleep ───────────
+# ─── ...one that exits cleanly, as ServerAlive makes it ───────────────────────
 # TERM IS THE CLEAN EXIT a case can cause: the holder removes its socket and goes, as a master does
-# when ServerAlive gives up -- the death #343 is mostly about. The pid going is waited for inside
+# when ServerAlive gives up -- or `-O exit`, or a plain TERM. The pid going is waited for inside
 # the STALL, so the frames after it see a death proved rather than a socket that has merely gone.
 restart_setup sup-restart-term.out
 wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true

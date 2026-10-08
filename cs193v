@@ -1595,10 +1595,11 @@ sup_log() { printf '%s\n' "$*" >&2; }
 #
 # NO RATE LIMIT ON THE RETRY, deliberately. A failure costs one exec a frame while it lasts, which
 # for one that never clears is the per-tick figure above. An exec that HANGS -- what pm's ceiling
-# is for, after a Mac wakes -- would stall this loop for pmq's 20s every frame; that has not been
-# measured with this podman (#157). If it is, note that frames queued behind a stall are read
-# instantly afterwards, so a backoff counted in ticks must be well over 20 of them or forwarding
-# falls further behind.
+# is for, reported after a Mac wakes -- would stall this loop for pmq's 20s every frame. Not seen
+# (#157): overnight sleeps on Apple Silicon (libkrun, podman 6.0.2: 135 wakes, every exec back in
+# under 4s) and Intel (applehv, 5.8.7) hung nothing. If one is ever seen, note that frames queued
+# behind a stall are read instantly afterwards, so a backoff counted in ticks must be well over 20
+# of them or forwarding falls further behind.
 SUP_PUBLISHED=''; SUP_PUBFAIL=''
 sup_publish() {                       # sup_publish REFUSED_LIST
     local up refused sig e rc why
@@ -1646,7 +1647,9 @@ sup_master_died() {
 }
 
 # A MASTER THAT HAS DIED IS PUT BACK BY THE SUPERVISOR THAT NOTICED (#343), so a student whose
-# laptop slept past ServerAlive gets their ports back without being told to run anything. Called
+# master was killed or gave up gets their ports back without being told to run anything. NOT FOR
+# SLEEP, which was the reason first given: overnight sleeps on Apple Silicon and Intel never killed
+# a master (.private/README.md has the measurement). Called
 # by sup_tick only when sup_master_died -- the death PROVED by the pidfile's pid -- and never on the
 # two things that merely look like one: a socket that is missing (a TMPDIR cleaner, a hand) and a
 # refused -O check with no pid to confirm it. The master can be alive through the first, and the
@@ -1667,7 +1670,7 @@ sup_master_died() {
 # to it, which a master that already holds a forward accepts and keeps once (measured).
 #
 # THE DEAD MASTER'S LOG IS COPIED IN FIRST: tunnel_start truncates it, and it is the only record of
-# why the master died -- a sleep that outlasted ServerAlive, a VM that went away.
+# why the master died -- a transport that stopped answering, a VM that went away.
 #
 # NO tunnel_keys. It can die(), which would end this process, and the keys live in $CONFIG and were
 # made when the session began.
@@ -1714,7 +1717,7 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     fi
 
     # A MASTER THAT HAS GONE TAKES ITS FORWARDS WITH IT (#338). One that exits cleanly --
-    # ServerAlive after a sleep, `-O exit`, a TERM -- deletes its control socket, and nothing
+    # ServerAlive giving up, `-O exit`, a TERM -- deletes its control socket, and nothing
     # below used to notice: ports already in SUP_UP are skipped, so the state file went on saying
     # healthy with every one of them up, and `cs193v-portwatch --show` told a student (and the
     # agent agent-notes.md sends to it) that ports nobody was carrying were reachable. The SOCKET

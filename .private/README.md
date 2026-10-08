@@ -2344,6 +2344,16 @@ reuse, `check_clock`'s VM restart — stops the supervisor first, so only one th
 while it runs. The window that leaves is a writer stopping the supervisor mid-restart, whose
 in-flight `ssh -f` can finish after the writer's `rm` and leave a master holding no ports.
 
+**Sleep is not what kills a master, though it was the reason #343 was first given.** Measured
+overnight, lid closed, on battery: on Apple Silicon (libkrun, podman 6.0.2) the same master and
+supervisor ran 23 hours across 135 sleeps — all but two ended by a dark wake, the longest 18 minutes
+— with the supervisor's log empty and a forwarded probe answering on 1195 of 1197 one-second ticks
+(the other two were requests sent in the second before the lid closed and answered after it opened).
+An Intel Mac (applehv, podman 5.8.7) saw the same overnight. ServerAlive does not fire across a
+sleep that leaves the transport intact: ssh's keepalive timer goes off once on waking, the container
+answers at once, and the count resets. So the restart earns its place on the deaths above — a
+SIGKILL, a master that exits on its own — and not on a lid.
+
 This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
 carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
 one acknowledged exception to "a failure must be loud", and because both obvious fixes are worse:
