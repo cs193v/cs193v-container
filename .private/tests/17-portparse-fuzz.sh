@@ -349,7 +349,6 @@ hostile_fatal "warn-line-too-long"   "$H" "WARN $FZ_F" "BEGIN 0" "END"
 # the same as one that died on time, which is what a 64-character line did before #505.
 BAD_RC=''; BAD_ERR=''; BAD_PORT=''; N=0
 check_run() {                         # check_run LABEL
-    N=$(( N + 1 ))
     case "$RUN_RC" in 0|1|2) ;; *) BAD_RC="${BAD_RC:-$1 -> rc=$RUN_RC}" ;; esac
     case "$RUN_ERR" in
         '') ;;
@@ -364,6 +363,8 @@ check_run() {                         # check_run LABEL
         [ "$p" = "$(( 10#$p ))" ] || BAD_PORT="${BAD_PORT:-$1 -> noncanonical '$e'}"
         case " $CLASSES " in *" $c "*) ;; *) BAD_PORT="${BAD_PORT:-$1 -> class '$e'}" ;; esac
     done
+    # COUNTED LAST, for hostile_fatal's reason: a case that unwound part-way through is not a case.
+    N=$(( N + 1 ))
 }
 
 # THE CASES, each with a tag naming its generator and, when the generator built it to be legal,
@@ -766,6 +767,14 @@ assert_eq "fuzz:only-three-outcomes-ever" "" "$BAD_RC"
 assert_eq "fuzz:stderr-stays-clean"       "" "$BAD_ERR"
 assert_eq "fuzz:accepted-ports-are-sound" "" "$BAD_PORT"
 record "fuzz:cases-run" "$N (seed $SEED)"
+# AND ASSERTED, for the reason the hostile corpus's count is (below): an arithmetic error abandons
+# the rest of the loop it falls in, and every property above then holds over the cases that did
+# run. Measured, when (a) and (b) were all there was: one in (a)'s eighth case left 408 of 800 and
+# this suite green (#506). A LITERAL, because a generator cut short makes fewer cases to drive, and
+# the check below -- every case driven and judged -- counts the same short list twice and passes.
+# N, counted last in check_run, also catches a drive abandoned part-way. The same under any seed:
+# the generators draw what goes in a case, never how many cases there are.
+assert_eq "fuzz:every-generated-case-ran" "1635" "$N"
 
 # ─── the grammar: what the watcher writes, from the format, not from the gate ──
 # One awk process for every case, each handed over after a \036 that no case contains, as
