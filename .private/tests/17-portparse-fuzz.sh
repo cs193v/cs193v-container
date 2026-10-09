@@ -249,7 +249,6 @@ hostile_fatal "unknown-line-type"    "$H" "BEGIN 1" "MAYBE 3" "END"
 # design and fell through, which is exactly the shape "never fail silently" forbids.
 BAD_RC=''; BAD_ERR=''; BAD_PORT=''; N=0
 check_run() {                         # check_run LABEL
-    N=$(( N + 1 ))
     case "$RUN_RC" in 0|1|2) ;; *) BAD_RC="${BAD_RC:-$1 -> rc=$RUN_RC}" ;; esac
     case "$RUN_ERR" in
         '') ;;
@@ -264,6 +263,8 @@ check_run() {                         # check_run LABEL
         [ "$p" = "$(( 10#$p ))" ] || BAD_PORT="${BAD_PORT:-$1 -> noncanonical '$e'}"
         case " $CLASSES " in *" $c "*) ;; *) BAD_PORT="${BAD_PORT:-$1 -> class '$e'}" ;; esac
     done
+    # COUNTED LAST, for hostile_fatal's reason: a case that unwound part-way through is not a case.
+    N=$(( N + 1 ))
 }
 
 # (a) random bytes
@@ -310,6 +311,10 @@ assert_eq "fuzz:only-three-outcomes-ever" "" "$BAD_RC"
 assert_eq "fuzz:stderr-stays-clean"       "" "$BAD_ERR"
 assert_eq "fuzz:accepted-ports-are-sound" "" "$BAD_PORT"
 record "fuzz:cases-run" "$N (seed $SEED)"
+# AND ASSERTED, for the reason the hostile corpus's count is (below): an arithmetic error in either
+# loop abandons the rest of that loop, and every property above then holds over the cases that did
+# run. Measured: one in (a)'s eighth case left 408 cases and this suite green (#506).
+assert_eq "fuzz:every-generated-case-ran" "800" "$N"
 
 # ─── every hostile case actually RAN ───────────────────────────────────────────
 # NOT BOOKKEEPING. A bash arithmetic error -- $(( 08 )) with no 10# prefix, say -- does not
