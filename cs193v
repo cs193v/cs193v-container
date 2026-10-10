@@ -1569,7 +1569,8 @@ tunnel_dyn_classify() {               # tunnel_dyn_classify PORT CLASS -> DYN_WH
 #
 # TICKS, NOT SECONDS, for everything counted here: no `date` fork and no dependence on a clock.
 # The single exception is the frame-arrival timeout, and it has to be -- ticks are DEFINED by
-# frames arriving, so "frames stopped" is the one thing that cannot be measured in them.
+# frames arriving, so "frames stopped" is the one thing that cannot be measured in them. The
+# resync after a timed-out read (#340) is bounded in LINES, not seconds, for the same reason.
 #
 # SUP_BUSY IS THE ONLY RETRYABLE OUTCOME and therefore the only one that needs state. Every
 # refusal reason is a pure function of the frame plus the floor, so it is recomputed each tick and
@@ -1840,6 +1841,15 @@ sup_loop() {
     # a dead one closes the pipe and a lid close contributes at most ONE timeout (a frozen read
     # returns once; the next call starts a fresh timer on a woken machine).
     #
+    # BUT THAT ONE TIMEOUT IS NOT HARMLESS, and #340 is how it was found out. On bash 5.2 and later
+    # `read -t` checks its deadline against the wall clock after every byte, and a WSL resume
+    # steps that clock forward, so the first line after a wake loses its front: `EGIN 1` was a
+    # protocol violation that ended the supervisor, and `8343:lo` from `28343:lo` was a wrong
+    # port. So every timeout now puts the parser into a resync, which drops the frame in progress
+    # and skips to the next one (cs193v-ui.sh, dynports_lost). Only an ACCEPTED line resets the
+    # count -- a skipped one is no evidence the watcher is well -- so thirty seconds is a floor:
+    # six consecutive timeouts with nothing accepted between them.
+    #
     # "ONLY A DEADLOCKED WATCHER" WAS NOT TRUE, and #337 is how it was found out. A watcher that is
     # merely SLOW is silent for as long as one scan takes, and the scan used to cost the square of
     # the socket table: ten Playwright Chromiums pushed a tick past thirty seconds, this gave up,
@@ -1853,7 +1863,8 @@ sup_loop() {
     # was unreachable on every Mac, this tolerance was dead code, and the first five-second gap
     # in the frames was read as the watcher having gone away: one laptop waking ended dynamic
     # port forwarding for the rest of the session, silently, with nothing to restart it.
-    # cs193v-ui.sh carries the measurement and the reason the read lives beside the gate.
+    # cs193v-ui.sh carries the measurement and the reason the read lives beside the gate. Its
+    # timeout answer has also already put the parser into its resync.
     local ready=''
     while :; do
         dynports_read "$TUNNEL_SUP_SILENCE"
@@ -1868,17 +1879,28 @@ sup_loop() {
                continue ;;
             2) sup_log "the watcher's stream ended"; return 0 ;;
         esac
-        SUP_SILENT=0
         dynports_line "$DYNPORTS_LINE"
         case "$?" in
-            0) [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
-            1) sup_tick "$DYNPORTS_FRAME" ;;
+            0) SUP_SILENT=0; [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
+            1) SUP_SILENT=0; sup_tick "$DYNPORTS_FRAME" ;;
             2) SUP_STATE=broken
                sup_log "protocol violation: $DYNPORTS_FATAL"
                sup_publish ''
                return 1 ;;
+            # SKIPPED WHILE RESYNCHRONISING (#340), and deliberately NOT a reset of SUP_SILENT: a line
+            # the resync skips is no evidence the watcher is well, and counting it would let a
+            # watcher that alternates junk with silences live for ever.
+            3) ;;
         esac
         [ -n "${DYNPORTS_WARN:-}" ] && { sup_log "watcher warning: $DYNPORTS_WARN"; DYNPORTS_WARN=''; }
+        # A RESYNC THAT SKIPPED NOTHING IS A CLEAN TIMEOUT and says nothing, so a `skipped` line in
+        # the log always means a read really did time out part-way through a line or a frame.
+        # `case`, not `-gt`, to keep this side free of arithmetic on the parser's output.
+        case "${DYNPORTS_RESYNCED:-}" in
+            ''|0) ;;
+            *) sup_log "a read timed out mid-stream; skipped $DYNPORTS_RESYNCED line(s) and resumed at the next frame" ;;
+        esac
+        DYNPORTS_RESYNCED=''
     done
 }
 

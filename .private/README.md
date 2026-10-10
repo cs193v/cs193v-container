@@ -2365,6 +2365,30 @@ one acknowledged exception to "a failure must be loud", and because both obvious
 
 `cs193v --reset-tunnel` fixes it immediately if a student happens to ask before the timeout does.
 
+### A read that times out may tear the next line — resynchronised, not fatal (#340)
+
+A `read -t` whose deadline lands part-way through a line has already eaten its front, and the rest
+arrives as a line of its own. On bash 5.2 and later that is routine: they check the deadline against
+the wall clock after every byte, and a WSL resume steps that clock forward, so the first line after
+a wake was torn every time — measured on WSL's first lid close, where `EGIN 1` ended the supervisor
+for the session. A torn record is worse: `8343:lo` from `28343:lo` is a wrong port.
+
+**So every timeout past the handshake resynchronises.** The parser drops the frame in progress and
+skips to the next line that starts a tick (`BEGIN`, `WARN`) or an `ERR`, which it parses as strictly
+as any other. At most one frame's worth of lines per timeout, logged when it resumes, and a skipped
+line is no sign of life, so six timeouts with nothing accepted between them still end it. Frames are
+full snapshots, so a dropped one costs a second of staleness and nothing else. Host-only: the
+watcher, the protocol and the image are unchanged. A *protocol violation* — a malformed line the
+watcher really sent — still ends the supervisor.
+
+**This reverses an earlier decision.** The review that filed #340 considered resynchronising and
+rejected it, and no reason was recorded; it was then believed the tear needed a ~17 µs race per
+timeout. It proposed a split read instead — the first byte on the silence timer, the rest of the
+line on a fresh one. Measured against the wake, that survives on bash 5.3 but **not on 5.2**, where
+the one-byte read times out too; and on 3.2, whose SIGALRM can still land just after the first byte
+is taken, it leaves a sub-microsecond window (by analysis, not measured) that loses that byte
+silently and can forward a wrong port. Resync absorbs every case, on every shell, in one path.
+
 ### Python's library set — deferred, not refused (issue #44)
 
 The image installs no Python library. On demand costs **11 s and 56 MB** for pandas, matplotlib,

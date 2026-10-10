@@ -1462,11 +1462,20 @@ meter_cleanup() {
 # IFS juggling, no whitespace-collapse detector. A stray space simply fails the digit or class
 # test. The earlier single-line format needed all three.
 #
+# AFTER A TIMED-OUT READ THE NEXT LINE MAY HAVE LOST ITS FRONT (#340), and the parser skips to the
+# next line that starts a tick -- `BEGIN ` or `WARN ` -- or an `ERR `, then parses that line as
+# strictly as any other. Those three because a tear loses bytes only from the FRONT of a line and
+# no watcher line carries one of them anywhere but at its start, so no remainder can begin with
+# one; END is not among them, because a resync entered mid-frame would take that frame's own END.
+# Bounded at one frame's worth of lines per timeout (DYNPORTS_RESYNC_MAX). dynports_lost below has
+# the rest, and 10-static.sh pins the watcher's half.
+#
 # FRAMES ARE ATOMIC. Records accumulate in DYNPORTS_FRAME and nothing is handed back until a
 # well-formed END. Found in testing: without the `seen -lt n` guard below, a `BEGIN 1` followed by
 # two records handed the second one out before the count mismatch was noticed at END -- it still
 # failed loudly, but it had already published a port from a frame that turned out to be malformed.
-# It also makes EOF mid-frame free: a partial frame is simply never applied.
+# It also makes EOF mid-frame free: a partial frame is simply never applied. And so is a timeout
+# mid-frame: the frame the loss fell in is dropped.
 #
 # WHY `case` FIRST, ALWAYS. Measured on bash 5.3: `$(( ))`, `(( ))`, `[[ -eq ]]`, `${v:x:y}` and
 # `${a[x]}` all EXECUTE a command substitution found in their operand. `[ -eq ]` rejected it, but
@@ -1480,6 +1489,12 @@ DYNPORTS_N=0
 DYNPORTS_SEEN=0
 DYNPORTS_MAX=128
 DYNPORTS_PROTO='cs193v-portwatch 1'
+# The resync after a timed-out read (#340): lines skipped since the last loss; what the last resync
+# skipped, for sup_loop to log and clear; and the most a valid stream can put between a loss and
+# the next line that starts a tick -- the torn line's remainder, DYNPORTS_MAX records, and END.
+DYNPORTS_SKIP=0
+DYNPORTS_RESYNCED=''
+DYNPORTS_RESYNC_MAX=$(( DYNPORTS_MAX + 2 ))
 
 # ─── the read that feeds it ───────────────────────────────────────────────────
 # THE INPUT SIDE OF THE GATE, and it lives beside the parse rather than in the launcher for the
@@ -1498,6 +1513,14 @@ DYNPORTS_PROTO='cs193v-portwatch 1'
 #     EOF                      rc 1,   set ""         rc 1,   set ""
 #     EOF, partial input       rc 1,   set "BEG"      rc 1,   set "BEG"
 #     a line arrives           rc 0,   set            rc 0,   set
+#
+# "TIMEOUT, PARTIAL INPUT" MEANS BYTES GONE FROM THE FRONT OF A LINE on every shell -- 3.2 discards
+# them, and 4.4 on keep them in a variable nothing reads after a timeout -- and the rest of that
+# line then arrives as a line of its own. bash 5.2 and later make it routine: they check the
+# deadline against the wall clock after every byte (measured: 5.2.37, 5.3.9 and 5.3.20 tear on a
+# 10 s step; 3.2.57, 4.4.23, 5.0.18 and 5.1.16, which arm a timer, do not), so the first line after
+# a WSL resume or an NTP step is torn every time. That is why every timeout tells the parser
+# (dynports_lost), and why 3.2, which cannot tell a torn timeout from a clean one, does too.
 #
 # So the status is asked where it means something, and where it does not the question becomes
 # whether `read` ASSIGNED ANYTHING -- which is why the `unset` above it is load-bearing rather
@@ -1527,7 +1550,8 @@ DYNPORTS_PROTO='cs193v-portwatch 1'
 #
 # DYNPORTS_LINE IS TRANSPORT, NOT PARSER STATE. dynports_reset deliberately leaves it alone --
 # it is cleared by the `unset` on every single call, which is stronger than any reset, and
-# adding it there would suggest a frame's worth of meaning it does not have.
+# adding it there would suggest a frame's worth of meaning it does not have. The read touches
+# parser state in exactly one place, and only through dynports_lost: on a timeout.
 DYNPORTS_LINE=''
 dynports_read() {                     # dynports_read SECS -> 0 DYNPORTS_LINE | 1 timeout | 2 ended
     local rc
@@ -1535,7 +1559,7 @@ dynports_read() {                     # dynports_read SECS -> 0 DYNPORTS_LINE | 
     IFS= read -r -t "$1" -n 64 DYNPORTS_LINE
     rc=$?
     [ "$rc" -eq 0 ] && return 0
-    { [ "$rc" -gt 128 ] || [ -z "${DYNPORTS_LINE+set}" ]; } && return 1
+    { [ "$rc" -gt 128 ] || [ -z "${DYNPORTS_LINE+set}" ]; } && { dynports_lost; return 1; }
     return 2
 }
 
@@ -1543,6 +1567,22 @@ dynports_reset() {
     DYNPORTS_STATE=handshake
     DYNPORTS_FRAME=''; DYNPORTS_FATAL=''; DYNPORTS_WARN=''
     DYNPORTS_N=0; DYNPORTS_SEEN=0
+}
+
+# A READ TIMED OUT, so the front of the next line may already be gone (#340): the table above
+# dynports_read says why, and on which shells. Every timeout past the handshake is treated as a
+# possible tear, and dynports_line skips to the next line that starts a tick. The budget is per
+# loss, so two tears in a row cannot add up to a false fatal; what bounds a watcher that keeps
+# timing out is sup_loop's silence count, which a skipped line does not reset.
+#
+# THE HANDSHAKE STAYS STRICT: a timeout before it is a slow `podman exec` and changes nothing, and
+# a torn handshake is still `bad handshake`. Nothing else is cleared here, deliberately -- a resync
+# ends only at a BEGIN (which resets the frame), a WARN (outside a frame, where none of it is read
+# before the next BEGIN) or an ERR (fatal).
+dynports_lost() {
+    case "${DYNPORTS_STATE:-}" in ''|handshake) return 0 ;; esac
+    DYNPORTS_STATE=resync; DYNPORTS_SKIP=0
+    return 0
 }
 
 # Rendering a rejected value for a human. NOT a security boundary -- it runs AFTER a value has
@@ -1586,9 +1626,25 @@ dynports_port() {                     # dynports_port STR -> sets DYNPORTS_PORT,
     return 0
 }
 
-dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
+dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal | 3 skipped
     local line="$1" cnt rec p c
     [ -n "${DYNPORTS_STATE:-}" ] || dynports_reset
+
+    # RESYNC: skip to the next line that starts a tick (#340). The line that ends it falls through
+    # to the strict parse below, unchanged, so a malformed BEGIN is as fatal after a timeout as
+    # before one. A WARN is only ever sent between frames, so ending at one leaves the state
+    # `outside`, where it belongs. `case` first and the only arithmetic on our own counter, as the
+    # gate requires.
+    if [ "$DYNPORTS_STATE" = resync ]; then
+        case "$line" in
+            "BEGIN "*|"WARN "*|"ERR "*) DYNPORTS_STATE=outside; DYNPORTS_RESYNCED="$DYNPORTS_SKIP" ;;
+            *)  [ "$DYNPORTS_SKIP" -lt "$DYNPORTS_RESYNC_MAX" ] || {
+                    dynports_fatal "no frame began within $DYNPORTS_RESYNC_MAX lines of a timed-out read" "$line"
+                    return 2; }
+                DYNPORTS_SKIP=$(( DYNPORTS_SKIP + 1 ))
+                return 3 ;;
+        esac
+    fi
 
     if [ "$DYNPORTS_STATE" = handshake ]; then
         # A fixed-string compare, so there is no parsing at all. Forward compatibility lives in

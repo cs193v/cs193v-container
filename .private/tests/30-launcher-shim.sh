@@ -2536,10 +2536,13 @@ SUP_PIDFILE="$(sup_pidfile)"
 assert_ne "supervisor:the-pidfile-path-was-readable" "" "$SUP_PIDFILE"
 # 7s: longer than TUNNEL_SUP_SILENCE (5) so a timeout is certain, far short of the 30 the
 # tolerance allows. The second frame carries a port the first did not, so a supervisor that
-# merely SURVIVED but stopped parsing cannot pass.
+# merely SURVIVED but stopped parsing cannot pass. THE WARN AFTER THE GAP is #340's: every timeout
+# now resynchronises, and the watcher sends a WARN before the frame it describes, so this is the
+# clean timeout that must lose neither the WARN nor the frame, and must report no skip.
 shim_watch 'cs193v-portwatch 1' \
            'BEGIN 1' '21500:v6lo' 'END' \
            'STALL 7' \
+           'WARN too-many-listeners 200' \
            'BEGIN 1' '8123:v6lo' 'END' \
            'STALL 20'
 sup_start "$SHIM/sup-gap.out"
@@ -2585,22 +2588,34 @@ else
 "the fake stalled for ${GAP_HB:-0}s, not the 5+ that TUNNEL_SUP_SILENCE needs -- so the
 assertion above passed without a gap having happened at all."
 fi
-assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" \
-                    "stream ended" "$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+GAP_OUT="$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" "stream ended" "$GAP_OUT"
 assert_not_contains "supervisor:a-tolerated-gap-is-not-published-as-broken" \
                     "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+# GUARDS, green before #340 and after it. A gap that tore nothing resumes at the WARN that starts
+# the next tick, so the WARN is logged and no resync is reported; skipping a WARN during the
+# resync (the first design) lost it and logged "skipped 1 line(s)" for a clean timeout.
+assert_contains "supervisor:a-WARN-after-a-gap-is-logged" "watcher warning: too-many-listeners" "$GAP_OUT"
+assert_not_contains "supervisor:a-gap-that-tore-nothing-logs-no-resync" "skipped" "$GAP_OUT"
 sup_reap
 
 # ─── ...and a silence past the tolerance must ──────────────────────────────────
-# The other half, and the reason it is worth its ~32s: without it, nothing distinguishes "the
+# The other half, and the reason it is worth its ~36s: without it, nothing distinguishes "the
 # tolerance is generous" from "the tolerance is infinite", and TUNNEL_SUP_SILENCE_MAX would
-# still never execute. 32 > TUNNEL_SUP_SILENCE x TUNNEL_SUP_SILENCE_MAX, with the writer alive
+# still never execute. 36 > TUNNEL_SUP_SILENCE x TUNNEL_SUP_SILENCE_MAX, with the writer alive
 # throughout -- so this is silence, not a stream that ended.
+#
+# WITH ONE LINE IN IT THAT THE RESYNC SKIPS (#340). The first timeout puts the parser in resync, so
+# 21599:v6lo arrives with no frame around it and is skipped -- and a skipped line is no sign of
+# life, so five more timeouts still end the loop, at ~33s, inside the 36 the stream stays open.
+# Counted as activity, the sixth would fall at ~38s, after EOF, and the loop would end "stream
+# ended" with status 0. 8 AND NOT 6: the line must arrive after the first timeout, at 5 + x where x
+# is the pre-silence frame's publish, so 8 leaves ~3s of margin and 6 left ~1s (measured).
 shim_new
 SUP_PIDFILE="$(sup_pidfile)"
 shim_watch 'cs193v-portwatch 1' \
            'BEGIN 1' '21500:v6lo' 'END' \
-           'STALL 32'
+           'STALL 8' '21599:v6lo' 'STALL 28'
 sup_start "$SHIM/sup-silent.out"
 assert_ok "supervisor:the-loop-started-again" wait_until 10 sup_up
 if wait_until 15 sup_published 'refused=21500:v6lo'; then
@@ -2609,7 +2624,7 @@ else
     fail "supervisor:the-frame-before-the-silence-was-published" \
 "the supervisor never published the pre-silence frame, so nothing below is about the silence."
 fi
-# BOUNDED BY THE STREAM, not by trust: the staged stall is 32s and nothing follows it, so even
+# BOUNDED BY THE STREAM, not by trust: the staged stalls are 36s and nothing follows them, so even
 # a supervisor that had stopped honouring the threshold would reach EOF and exit a second later.
 # A wait here cannot become the hang that a suite with no per-suite ceiling could not survive --
 # and the status assertion below is what tells the two endings apart.
@@ -2634,6 +2649,66 @@ assert_eq  "supervisor:a-silence-past-the-tolerance-exits-nonzero" "1" "$SUP_RC"
 assert_says "supervisor:it-names-the-silence-it-measured" "no frames for 30s" "$SILENT_OUT"
 assert_says "supervisor:it-says-the-watcher-has-stopped" "the watcher has stopped" "$SILENT_OUT"
 assert_ok  "supervisor:it-publishes-broken-on-the-way-out" sup_published 'state=broken'
+# THE SKIPPED LINE, BY WORDING, NOT BY STATUS: before #340 it was a protocol violation, which also
+# exits 1, so the status assertion above passes either way. The second is a guard: no mutation of
+# the parser reaches it, only one of sup_loop that counts a skipped line as a sign of life.
+assert_not_contains "supervisor:a-skipped-line-is-not-a-violation" "protocol violation" "$SILENT_OUT"
+assert_not_contains "supervisor:a-skipped-line-is-not-a-sign-of-life" "stream ended" "$SILENT_OUT"
+sup_reap
+
+# ─── a read that times out part-way through a line  (#340) ─────────────────────
+# WHAT A WSL RESUME DOES TO bash 5.2+, made by the bytes rather than by a clock. `PART X` writes X
+# with no newline and the STALL after it outlasts TUNNEL_SUP_SILENCE, so the supervisor's read
+# consumes X and its deadline passes: on every bash the rest of the line then arrives alone.
+# Before #340 the first of these, `EGIN 1`, was a protocol violation and ended the supervisor --
+# the very line the WSL sleep test logged -- and the second, `1503`, was a port nobody bound.
+#
+# THE MARGIN IS 8 - 5 - x, where x is how long after the fake wrote X the read began: the previous
+# frame's sup_tick and publish for the torn BEGIN (measured 0.02-0.12s), next to nothing for the
+# torn record. Run out of it and there is no tear -- which the two alibis at the end report as a
+# red, rather than letting everything else pass.
+shim_new
+SUP_PIDFILE="$(sup_pidfile)"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '21500:v6lo' 'END' \
+           'PART B' 'STALL 8' 'EGIN 1' '21501:v6lo' 'END' \
+           'BEGIN 1' '21502:v6lo' 'END' \
+           'BEGIN 1' 'PART 2' 'STALL 8' '1503:v6lo' 'END' \
+           'BEGIN 1' '21504:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-torn.out"
+assert_ok "supervisor:torn:the-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'refused=21500:v6lo'; then
+    pass "supervisor:torn:the-frame-before-the-tear-was-published"
+else
+    fail "supervisor:torn:the-frame-before-the-tear-was-published" \
+"the supervisor never published the frame before the tear, so nothing below is about the tear.
+its output:
+$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+if wait_until 25 sup_published 'refused=21502:v6lo'; then
+    pass "supervisor:torn:a-torn-BEGIN-does-not-end-the-loop"
+else
+    fail "supervisor:torn:a-torn-BEGIN-does-not-end-the-loop" "$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+if wait_until 25 sup_published 'refused=21504:v6lo'; then
+    pass "supervisor:torn:the-frame-after-a-torn-record-arrives"
+else
+    fail "supervisor:torn:the-frame-after-a-torn-record-arrives" "$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+# ONLY AFTER BOTH POSITIVE WAITS: a supervisor that died at the first tear publishes neither of
+# these, and would pass them. The frame a tear landed in is dropped WHOLE -- 21501 never reaches a
+# publish, though every line of it after the torn one arrived intact -- and a torn record's
+# remainder never becomes a port. [=,] anchors 1503 to the start of a published entry.
+TORN_OUT="$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+assert_eq "supervisor:torn:a-torn-record-is-never-published" "" "$(grep -E '[=,]1503:' "$SHIM/argv.log" || true)"
+assert_eq "supervisor:torn:a-torn-frame-is-dropped-whole" "" "$(grep -F '21501:' "$SHIM/argv.log" || true)"
+assert_not_contains "supervisor:torn:no-protocol-violation" "protocol violation" "$TORN_OUT"
+assert_not_contains "supervisor:torn:never-published-broken" "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+# THE ALIBIS: both tears happened, and were resynchronised rather than merely survived. 3 is the
+# torn BEGIN's remainder, its record and its END; 2 is the torn record's remainder and its END.
+assert_contains "supervisor:torn:the-torn-BEGIN-was-resynchronised" "skipped 3 line(s)" "$TORN_OUT"
+assert_contains "supervisor:torn:the-torn-record-was-resynchronised" "skipped 2 line(s)" "$TORN_OUT"
 sup_reap
 
 # ─── and a port that CAN be forwarded actually is  (#251) ──────────────────────
