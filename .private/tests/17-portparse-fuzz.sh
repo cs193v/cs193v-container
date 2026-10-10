@@ -41,10 +41,12 @@ cd "$REPO" || exit 1
 # ─── the contract under test ───────────────────────────────────────────────────
 # dynports_reset              start a fresh parse
 # dynports_read SECS          0 = a line in $DYNPORTS_LINE, 1 = timeout, 2 = the stream ended
-# dynports_line LINE          0 = consumed, 1 = frame complete, 2 = fatal
+# dynports_line LINE          0 = consumed, 1 = frame complete, 2 = fatal, 3 = skipped
 #                             on 0: $DYNPORTS_WARN may hold a warning the line carried
 #                             on 1: $DYNPORTS_FRAME is "port:class port:class ..."
 #                             on 2: $DYNPORTS_FATAL is a one-line reason
+# dynports_lost               a read timed out: the front of the next line may be gone (#340).
+#                             3 is only ever returned after one; see the last section.
 #
 # Asserted first and on its own, because every property below is vacuous if the functions are
 # missing -- a fuzzer that drives nothing passes everything.
@@ -334,7 +336,8 @@ hostile_fatal "warn-line-too-long"   "$H" "WARN $FZ_F" "BEGIN 0" "END"
 #
 # THE "MUST NOT" PROPERTIES, on every case:
 # 2 always terminates       (the suite's own timeout catches a hang)
-# 3 exactly three outcomes  (0, 1 or 2 -- never a bash error status)
+# 3 exactly three outcomes  (0, 1 or 2 -- never a bash error status; no read is lost here, so
+#                            the fourth, 3, cannot occur. The last section covers it.)
 # 4 clean stderr            (no "integer expected", no "value too great for base", no "unbound")
 # 5 accepted ports are sound
 # 6 bounded                 (nothing here should be slow; the tier budget catches it)
@@ -944,7 +947,8 @@ assert_eq "fuzz:every-hostile-case-ran" "49" "$HOSTILE_RAN"
 
 # ─── a malformed frame must not corrupt the next parse ─────────────────────────
 # Halting, not resyncing: after a fatal the supervisor stops. What must hold is that a FRESH
-# parse is unaffected by the last one -- otherwise one bad frame poisons the session.
+# parse is unaffected by the last one -- otherwise one bad frame poisons the session. (The resync
+# after a TIMED-OUT READ is a different thing, and is not a fatal; see the last section.)
 run_case "$H" "BEGIN 1" "0x1f:lo" "END"
 run_case "$H" "BEGIN 1" "3000:lo" "END"
 assert_eq "fuzz:a-fresh-parse-is-not-poisoned" " 3000:lo" "$RUN_PORTS"
@@ -955,3 +959,322 @@ run_case "$H" "BEGIN 2" "3000:lo" "5000:lo"
 dynports_reset
 assert_eq "fuzz:a-reset-leaves-no-parse-state" "handshake 0 0 0 []" \
           "$DYNPORTS_STATE $DYNPORTS_N $DYNPORTS_SEEN $DYNPORTS_LAST [$DYNPORTS_FRAME]"
+
+# ─── a read that timed out, and the resync after it  (#340) ────────────────────
+# A `read -t` whose deadline lands part-way through a line has already consumed the front of it,
+# and the rest then arrives as a line of its own: `EGIN 1` from `BEGIN 1`, which ended the
+# supervisor, or `8343:lo` from `28343:lo`, which is somebody else's port. dynports_read now tells
+# the parser after every timeout (dynports_lost), and the parser skips to the next line that starts
+# a tick -- `BEGIN ` or `WARN ` -- or an `ERR `, then parses that line exactly as strictly as ever.
+#
+# @LOST IN A TRANSCRIPT IS dynports_read's TIMEOUT ARM, and the line after it is whatever survived
+# the tear. 12-run-timeout.sh makes real torn reads on whatever bash runs it; here the parser is
+# driven with what they produce, which is what lets a fuzz reach every cut of every line.
+if command -v dynports_lost >/dev/null 2>&1; then
+    pass "resync:the-loss-hook-exists"
+else
+    fail "resync:the-loss-hook-exists" \
+"dynports_lost is not defined in files/cs193v-ui.sh, so every resync case below drives nothing."
+fi
+
+# run_case plus @LOST, with sup_loop's bookkeeping: a WARN and a resync's report are each taken
+# and cleared after every line, as sup_loop does. RUN_RCS is the SEQUENCE of return codes, with L
+# for a loss, because "strictness came back" is a property of the sequence and not of the last rc.
+#   -> RUN_RC RUN_RCS RUN_FRAMES RUN_N RUN_WARNS RUN_WARN RUN_RESYNCS RUN_ERR
+run_lost() {
+    local l
+    dynports_reset
+    DYNPORTS_RESYNCED=''
+    RUN_RC=0; RUN_RCS=''; RUN_FRAMES=''; RUN_N=0; RUN_WARNS=0; RUN_WARN=''; RUN_RESYNCS=''
+    { for l in "$@"; do
+        if [ "$l" = @LOST ]; then dynports_lost; RUN_RCS="$RUN_RCS L"; continue; fi
+        RUN_N=$(( RUN_N + 1 ))
+        dynports_line "$l"; RUN_RC=$?; RUN_RCS="$RUN_RCS $RUN_RC"
+        [ -n "${DYNPORTS_WARN:-}" ] && { RUN_WARNS=$(( RUN_WARNS + 1 )); RUN_WARN="$DYNPORTS_WARN"; DYNPORTS_WARN=''; }
+        [ -n "${DYNPORTS_RESYNCED:-}" ] && { RUN_RESYNCS="$RUN_RESYNCS $DYNPORTS_RESYNCED"; DYNPORTS_RESYNCED=''; }
+        case "$RUN_RC" in
+            0|3) ;;
+            1) RUN_FRAMES="${RUN_FRAMES}[${DYNPORTS_FRAME:-}]" ;;
+            *) break ;;
+        esac
+      done; } 2>"$ERRF"
+    RUN_ERR="$(<"$ERRF")"
+}
+
+# The WSL lid close (a torn BEGIN), and the 3.2 race's wrong port (a torn record).
+run_lost "$H" "BEGIN 1" "28343:lo" "END" @LOST "EGIN 1" "28343:lo" "END" "BEGIN 1" "28343:lo" "END"
+assert_eq "resync:a-torn-BEGIN-is-skipped-to-the-next-frame" "[28343:lo][28343:lo]|1|" "$RUN_FRAMES|$RUN_RC|$RUN_ERR"
+run_lost "$H" "BEGIN 1" "28343:lo" "END" "BEGIN 1" @LOST "8343:lo" "END" "BEGIN 1" "28343:lo" "END"
+assert_eq "resync:a-torn-record-is-never-a-port" "[28343:lo][28343:lo]" "$RUN_FRAMES"
+run_lost "$H" "BEGIN 2" "3000:lo" @LOST "8343:lo" "END" "BEGIN 1" "5173:lo" "END"
+assert_eq "resync:the-frame-in-progress-is-dropped" "[5173:lo]" "$RUN_FRAMES"
+
+# THE BOUND, ON BOTH SIDES, AS A LITERAL. 130 is the most a valid stream can put between a timeout
+# and the next line that starts a tick: a torn `BEGIN 128`'s remainder, 128 records and END. The
+# first case reaches it and must be accepted; the second is the 131st line and must be fatal --
+# asserted as 130, not as "fatal eventually", so a looser bound is a red and not a pass. The WARN
+# that ends it opens the next capped frame, which must then hold exactly DYNPORTS_MAX (#505).
+FZ_CAPPED=(); FZ_CAP=''; FZ_CAP_RCS=''; i=0
+while [ "$i" -lt "$DYNPORTS_MAX" ]; do
+    FZ_CAPPED+=("$(( 2000 + i )):lo"); FZ_CAP="$FZ_CAP $(( 2000 + i )):lo"; FZ_CAP_RCS="$FZ_CAP_RCS 0"
+    i=$(( i + 1 ))
+done
+FZ_CAP="${FZ_CAP# }"
+run_lost "$H" "BEGIN 0" "END" @LOST "EGIN $DYNPORTS_MAX" ${FZ_CAPPED[@]+"${FZ_CAPPED[@]}"} "END" \
+         "WARN too-many-listeners 200" "BEGIN $DYNPORTS_MAX" ${FZ_CAPPED[@]+"${FZ_CAPPED[@]}"} "END"
+assert_eq "resync:the-largest-legitimate-skip-fits-the-bound" "[][$FZ_CAP]|1| 130" "$RUN_FRAMES|$RUN_RC|$RUN_RESYNCS"
+T=("$H" "BEGIN 0" "END" @LOST)
+i=0; while [ "$i" -lt 1000 ]; do T+=("3000:lo"); i=$(( i + 1 )); done
+run_lost ${T[@]+"${T[@]}"}
+assert_eq "resync:the-131st-skipped-line-is-fatal" \
+          "2|130|no frame began within 130 lines of a timed-out read: 3000:lo" \
+          "$RUN_RC|$(( RUN_N - 4 ))|${DYNPORTS_FATAL:-}"
+
+# THE LINE THAT ENDS IT IS PARSED STRICTLY, asserted at that line and by its reason, with a valid
+# frame after it so that a lax exit cannot be rescued by a later check.
+for spec in "count-1x|BEGIN 1x|non-decimal count: 1x" "count-129|BEGIN 129|count over 128" \
+            "count-empty|BEGIN |non-decimal count: ''" "count-01|BEGIN 01|non-canonical count: 01" \
+            "WARN-over-64|WARN too-many-listeners 2000000000000000000000000000000000000000000|line too long"; do
+    tag=${spec%%|*}; rest=${spec#*|}; b=${rest%%|*}; want=${rest#*|}
+    run_lost "$H" "BEGIN 0" "END" @LOST "junk" "$b" "BEGIN 1" "3000:lo" "END"
+    assert_eq "resync:the-exit-line-is-strict:$tag" " 0 0 1 L 3 2|$want" "$RUN_RCS|${DYNPORTS_FATAL:-}"
+done
+# ...AND A LINE TOO LONG TO BE THE WATCHER'S IS FATAL, NOT SKIPPED. dynports_read hands back at most
+# DYNPORTS_LINE_MAX characters, so a line that long is the front of a longer one and its rest comes
+# back as a line of its own: these are the pieces of 64 x's and `BEGIN 1` written as one line.
+# Skipped, the front would hand the resync that rest as the start of a tick, and apply a frame the
+# watcher never wrote. A tear only shortens a line, so refusing the long one costs nothing real.
+fz_fill x "$FZ_LINE_MAX"
+run_lost "$H" "BEGIN 0" "END" @LOST "$FZ_F" "BEGIN 1" "3000:lo" "END"
+assert_eq "resync:a-line-too-long-is-fatal-not-skipped" "[]|2|line too long" \
+          "$RUN_FRAMES|$RUN_RC|${DYNPORTS_FATAL:-}"
+# ...AND STRICTNESS COMES BACK AFTER IT, whichever line ended it. A resync that never ended would
+# skip junk between frames for the rest of the session and pass every case above.
+run_lost "$H" "BEGIN 0" "END" @LOST "junk" "BEGIN 0" "END" "junk"
+assert_eq "resync:strictness-returns-after-a-BEGIN" " 0 0 1 L 3 0 1 2|line outside a frame: junk" "$RUN_RCS|${DYNPORTS_FATAL:-}"
+run_lost "$H" "BEGIN 0" "END" @LOST "junk" "WARN too-many-listeners 200" "junk"
+assert_eq "resync:strictness-returns-after-a-WARN" " 0 0 1 L 3 0 2|line outside a frame: junk" "$RUN_RCS|${DYNPORTS_FATAL:-}"
+run_lost "$H" "BEGIN 0" "END" @LOST "junk" "ERR cannot-open-tick-fifo"
+assert_eq "resync:an-ERR-ends-it-as-the-watcher-stopping" "2|the watcher stopped: cannot-open-tick-fifo" "$RUN_RC|${DYNPORTS_FATAL:-}"
+
+# A CLEAN TIMEOUT LOSES NOTHING. The watcher sends a WARN BEFORE the frame it describes, so the
+# timeout before a >128-listener tick resumes at the WARN: it is honoured, and the resync reports
+# that it skipped nothing -- which is what lets sup_loop log a skip only when there was one. The
+# capped frame after it is taken whole.
+run_lost "$H" "BEGIN 0" "END" @LOST "WARN too-many-listeners 200" "BEGIN $DYNPORTS_MAX" \
+         ${FZ_CAPPED[@]+"${FZ_CAPPED[@]}"} "END"
+assert_eq "resync:a-WARN-after-a-clean-timeout-is-honoured" \
+          "[][$FZ_CAP]| 0 0 1 L 0 0$FZ_CAP_RCS 1|1|too-many-listeners 200| 0|" \
+          "$RUN_FRAMES|$RUN_RCS|$RUN_WARNS|$RUN_WARN|$RUN_RESYNCS|$RUN_ERR"
+
+# THE HANDSHAKE STAYS STRICT. Guards, green before #340 and after it: a timeout before the
+# handshake is a slow `podman exec` and changes nothing, and the version check is never skipped.
+run_lost @LOST "$H" "BEGIN 1" "3000:lo" "END"
+assert_eq "handshake:a-timeout-before-it-changes-nothing" "[3000:lo]" "$RUN_FRAMES"
+run_lost @LOST "s193v-portwatch 1" "BEGIN 1" "3000:lo" "END"
+assert_eq "handshake:a-torn-handshake-is-fatal" "2|bad handshake: s193v-portwatch\ 1" "$RUN_RC|${DYNPORTS_FATAL:-}"
+run_lost @LOST "cs193v-portwatch 2" "BEGIN 1" "3000:lo" "END"
+assert_eq "handshake:a-timeout-does-not-skip-the-version-check" "2" "$RUN_RC"
+run_lost @LOST "BEGIN 1" "3000:lo" "END"
+assert_eq "handshake:a-timeout-does-not-admit-a-frame-before-it" "2" "$RUN_RC"
+
+run_lost "$H" "BEGIN 0" "END" @LOST "junk" "28343:lo"
+assert_eq "resync:a-skipped-line-returns-3" " 0 0 1 L 3 3" "$RUN_RCS"
+# THE BUDGET IS PER LOSS: two tears in a row may legitimately skip up to twice the bound.
+T=("$H" "BEGIN 0" "END" @LOST)
+i=0; while [ "$i" -lt 100 ]; do T+=("3000:lo"); i=$(( i + 1 )); done
+T+=(@LOST)
+i=0; while [ "$i" -lt 100 ]; do T+=("3000:lo"); i=$(( i + 1 )); done
+run_lost ${T[@]+"${T[@]}"} "BEGIN 1" "5173:lo" "END"
+assert_eq "resync:each-loss-gets-a-fresh-budget" "[][5173:lo]|1" "$RUN_FRAMES|$RUN_RC"
+# A torn BEGIN (3 skipped), a torn record (2) and a clean timeout (0): what sup_loop logs, or not.
+run_lost "$H" "BEGIN 0" "END" @LOST "EGIN 1" "28343:lo" "END" "BEGIN 1" @LOST "8343:lo" "END" "BEGIN 0" "END" @LOST "BEGIN 0" "END"
+assert_eq "resync:each-resync-reports-what-it-skipped" " 3 2 0" "$RUN_RESYNCS"
+# AND A RESET LEAVES NO RESYNC STATE BEHIND, as fuzz:a-reset-leaves-no-parse-state asks of the rest.
+# A report left behind is logged as a skip by whatever reads it next -- run_lost clears it by hand
+# for exactly that reason. Read before the reset too, so a case that set nothing cannot pass.
+dynports_reset
+dynports_line "$H"; dynports_line "BEGIN 0"; dynports_line "END"
+dynports_lost; dynports_line junk; dynports_line junk; dynports_line "BEGIN 0"
+dynports_lost; dynports_line junk
+before="$DYNPORTS_SKIP [${DYNPORTS_RESYNCED:-}]"
+dynports_reset
+assert_eq "resync:a-reset-leaves-no-resync-state" "1 [2] -> handshake 0 []" \
+          "$before -> $DYNPORTS_STATE $DYNPORTS_SKIP [${DYNPORTS_RESYNCED:-}]"
+
+# ─── the property: one or two losses anywhere, any cut, and only whole frames ──
+# A CUT is how many bytes of that line the timed-out read took. 0 is a clean timeout before the
+# line; its length leaves only the newline; length + 1 loses the newline too, which bash 3.2's
+# SIGALRM can do by landing after the delimiter is read. A second loss may tear what the first
+# left of the same line.
+#
+# THE ORACLE: a frame is accepted iff no loss falls in [its BEGIN, its END], a cut-0 loss on its
+# BEGIN counting as before it; a WARN is honoured iff no loss took bytes from it.
+#
+# AIMED, NOT UNIFORM. Half the losses fall on a WARN, BEGIN or END -- the lines a resync starts and
+# ends at -- and half of those are a clean timeout just before the line; the rest fall anywhere, so
+# the frames' insides and the longest skip are still reached. Uniform over lines, the capped frames'
+# records took nearly every loss: 4 of 400 cases tore a WARN. THE KIND IS DRAWN BEFORE THE LINE, so
+# the one WARN in a case is aimed at as often as its several BEGINs. The coverage is asserted below.
+#
+# lcgh, ON A STREAM OF ITS OWN, as the generators above it draw. With lcg's low bits two draws of 2
+# in a row agree -- the bottom bit alternates -- and every aimed loss came out clean.
+fz_loss_at() {                        # fz_loss_at FROM -> T_AT, B_AT: a line at or after FROM, and its cut
+    local c x k
+    c=()
+    lcgh 2
+    if [ "$R" = 0 ]; then
+        lcgh 3; case "$R" in 0) k=W ;; 1) k=B ;; *) k=E ;; esac
+        for x in ${BL[@]+"${BL[@]}"}; do
+            case "$x" in "$k:"*) [ "${x#*:}" -ge "$1" ] && c+=("${x#*:}") ;; esac
+        done
+        # None of that kind at or after FROM: any boundary that is.
+        if [ "${#c[@]}" -eq 0 ]; then
+            for x in ${BL[@]+"${BL[@]}"}; do [ "${x#*:}" -ge "$1" ] && c+=("${x#*:}"); done
+        fi
+    fi
+    if [ "${#c[@]}" -gt 0 ]; then
+        lcgh ${#c[@]}; T_AT=${c[$R]}
+        lcgh 2; [ "$R" = 0 ] && { B_AT=0; return; }
+    else
+        lcgh $(( n - $1 )); T_AT=$(( R + $1 ))
+    fi
+    x="${L[$T_AT]}"; lcgh $(( ${#x} + 2 )); B_AT=$R
+}
+# What each loss fell on and whether it took bytes, counted into FZ_COV_<KIND>_<TORN|CLEAN>.
+fz_cover() {                          # fz_cover LINE CUT
+    local kind v
+    case "$1" in "WARN "*) kind=WARN ;; "BEGIN "*) kind=BEGIN ;; END) kind=END ;; *) kind=REC ;; esac
+    if [ "$2" -gt 0 ]; then kind="${kind}_TORN"; else kind="${kind}_CLEAN"; fi
+    v="FZ_COV_$kind"; printf -v "$v" '%d' "$(( ${!v} + 1 ))"
+}
+for k in WARN BEGIN END REC; do printf -v "FZ_COV_${k}_TORN" 0; printf -v "FZ_COV_${k}_CLEAN" 0; done
+FZ_COV_FULL_SKIP=0; FZ_COV_CAPPED=0
+BAD=''; BADRC=''; BADERR=''; BADWARN=''; NL=0; N2=0; NWHOLE=0
+lcgh_seed 4
+i=0
+while [ "$i" -lt 400 ]; do
+    L=("$H"); FB=(); FE=(); FR=(); WI=(); BL=(); nf=0; nw=0
+    lcgh 4; k=$(( R + 2 )); j=0
+    while [ "$j" -lt "$k" ]; do
+        # AS THE WATCHER WRITES THEM (#505): a WARN is followed by a capped frame of exactly
+        # DYNPORTS_MAX records, and records go up strictly -- each a random step past the last,
+        # from a start low enough that a capped frame still ends under 65536.
+        lcgh 5
+        if [ "$R" = 0 ]; then
+            WI[$nw]=${#L[@]}; BL+=("W:${#L[@]}"); nw=$(( nw + 1 )); L+=("WARN too-many-listeners 200")
+            nr=$DYNPORTS_MAX
+        else
+            lcgh 4; nr=$R
+        fi
+        FB[$nf]=${#L[@]}; BL+=("B:${#L[@]}"); L+=("BEGIN $nr"); s=''; r=0
+        lcgh $(( 64000 - nr * 400 )); p=$(( R + 1023 ))
+        while [ "$r" -lt "$nr" ]; do
+            lcgh 400; p=$(( p + R + 1 )); lcgh 5
+            # shellcheck disable=SC2086   # deliberately word-split: it is a list of class names
+            set -- $CLASSES; shift "$R"
+            L+=("$p:$1"); s="$s $p:$1"; r=$(( r + 1 ))
+        done
+        FE[$nf]=${#L[@]}; BL+=("E:${#L[@]}"); L+=("END"); FR[$nf]="[${s# }]"
+        nf=$(( nf + 1 )); j=$(( j + 1 ))
+    done
+    n=${#L[@]}
+    fz_loss_at 1; t1=$T_AT; b1=$B_AT
+    losses="$t1:$b1"
+    lcgh 7
+    if [ "$R" -lt 4 ]; then
+        fz_loss_at "$t1"; t2=$T_AT; b2=$B_AT
+        if [ "$t2" -gt "$t1" ]; then losses="$losses $t2:$b2"; N2=$(( N2 + 1 ))
+        elif [ "$b1" -le "${#L[$t1]}" ]; then [ "$b2" -ge "$b1" ] || b2=$b1; losses="$losses $t2:$b2"; N2=$(( N2 + 1 ))
+        fi
+    fi
+    for x in $losses; do fz_cover "${L[${x%%:*}]}" "${x#*:}"; done
+    FZ_COV_CAPPED=$(( FZ_COV_CAPPED + nw ))
+    want=''; f=0
+    while [ "$f" -lt "$nf" ]; do
+        ok=1
+        for x in $losses; do
+            t=${x%%:*}; b=${x#*:}
+            if [ "$t" -lt "${FB[$f]}" ] || [ "$t" -gt "${FE[$f]}" ] || { [ "$t" -eq "${FB[$f]}" ] && [ "$b" -eq 0 ]; }; then :; else ok=''; fi
+        done
+        [ -n "$ok" ] && want="$want${FR[$f]}"
+        f=$(( f + 1 ))
+    done
+    wantw=0; w=0
+    while [ "$w" -lt "$nw" ]; do
+        ok=1
+        for x in $losses; do [ "${x%%:*}" -eq "${WI[$w]}" ] && [ "${x#*:}" -gt 0 ] && ok=''; done
+        [ -n "$ok" ] && wantw=$(( wantw + 1 ))
+        w=$(( w + 1 ))
+    done
+    # LINEAR, because a capped frame makes a transcript hundreds of lines long. Into an array, not
+    # `set -- "$@" x`, which copies every word so far on every line; and over "${L[@]}", not
+    # ${L[$li]}, which bash 3.2 finds by walking the array from its head on every access.
+    T=(); li=0
+    for w in ${L[@]+"${L[@]}"}; do
+        bl=-1
+        for x in $losses; do
+            [ "${x%%:*}" -eq "$li" ] && { T+=(@LOST); [ "${x#*:}" -gt "$bl" ] && bl=${x#*:}; }
+        done
+        if [ "$bl" -lt 0 ]; then T+=("$w")
+        elif [ "$bl" -le "${#w}" ]; then T+=("${w:$bl}")
+        else NWHOLE=$(( NWHOLE + 1 ))
+        fi
+        li=$(( li + 1 ))
+    done
+    run_lost ${T[@]+"${T[@]}"}
+    [ "$RUN_FRAMES" = "$want" ] || BAD="${BAD:-case $i (losses $losses): want $want got $RUN_FRAMES}"
+    case "$RUN_RC" in 0|1|3) ;; *) BADRC="${BADRC:-case $i (losses $losses) rc=$RUN_RC ${DYNPORTS_FATAL:-}}" ;; esac
+    [ -z "$RUN_ERR" ] || BADERR="${BADERR:-case $i: $RUN_ERR}"
+    [ "$RUN_WARNS" = "$wantw" ] || BADWARN="${BADWARN:-case $i (losses $losses): want $wantw WARNs got $RUN_WARNS}"
+    case "$RUN_RESYNCS " in *" $DYNPORTS_RESYNC_MAX "*) FZ_COV_FULL_SKIP=$(( FZ_COV_FULL_SKIP + 1 )) ;; esac
+    NL=$(( NL + 1 ))                  # COUNTED LAST, for hostile_fatal's reason
+    i=$(( i + 1 ))
+done
+assert_eq "resync:fuzz:only-whole-frames-are-accepted" "" "$BAD"
+assert_eq "resync:fuzz:a-loss-is-never-fatal" "" "$BADRC"
+assert_eq "resync:fuzz:stderr-stays-clean" "" "$BADERR"
+assert_eq "resync:fuzz:every-intact-WARN-is-honoured" "" "$BADWARN"
+assert_eq "resync:fuzz:every-case-ran" "400" "$NL"
+record "resync:fuzz:cases-run" "$NL ($N2 with two losses, $NWHOLE whole lines lost, seed $SEED)"
+FZ_COV="WARN torn $FZ_COV_WARN_TORN clean $FZ_COV_WARN_CLEAN, BEGIN torn $FZ_COV_BEGIN_TORN clean $FZ_COV_BEGIN_CLEAN, END torn $FZ_COV_END_TORN clean $FZ_COV_END_CLEAN, record torn $FZ_COV_REC_TORN clean $FZ_COV_REC_CLEAN, full skip $FZ_COV_FULL_SKIP, capped frames $FZ_COV_CAPPED"
+record "resync:fuzz:coverage" "$FZ_COV"
+# AND THE AIM IS ASSERTED, AS FLOORS: each kind of loss must still be reached at least about half as
+# often as this seed reaches it today. Floors, not literals, because the point is that the aim lands
+# and not by how much. A full skip is a torn capped BEGIN followed by another tick: its remainder,
+# DYNPORTS_MAX records and END, which is the bound exactly, reached by a stream and not by hand.
+for spec in "WARN-torn $FZ_COV_WARN_TORN 8" "WARN-clean $FZ_COV_WARN_CLEAN 8" \
+            "BEGIN-torn $FZ_COV_BEGIN_TORN 50" "BEGIN-clean $FZ_COV_BEGIN_CLEAN 35" \
+            "END-torn $FZ_COV_END_TORN 50" "END-clean $FZ_COV_END_CLEAN 45" \
+            "record-torn $FZ_COV_REC_TORN 100" "full-skip $FZ_COV_FULL_SKIP 1"; do
+    name=${spec%% *}; rest=${spec#* }; got=${rest%% *}; floor=${rest#* }
+    if [ "$got" -ge "$floor" ]; then
+        pass "resync:fuzz:reaches:$name"
+    else
+        fail "resync:fuzz:reaches:$name" "$got across 400 cases, under the floor of $floor: the aim no longer lands here.
+coverage: $FZ_COV"
+    fi
+done
+
+# ─── ...and random bytes after a loss: property 4, clean stderr, on the resync path
+BADERR=''; NR=0
+lcgh_seed 5
+i=0
+while [ "$i" -lt 300 ]; do
+    T=("$H" "BEGIN 0" "END" @LOST)
+    lcgh 8; m=$(( R + 1 )); j=0
+    while [ "$j" -lt "$m" ]; do
+        lcgh 20; len=$R; s=''; q=0
+        while [ "$q" -lt "$len" ]; do lcgh 95; s="$s${CHARS:$R:1}"; q=$(( q + 1 )); done
+        lcgh 4
+        case "$R" in 0) s="BEGIN $s" ;; 1) s="WARN $s" ;; esac
+        T+=("$s"); j=$(( j + 1 ))
+    done
+    run_lost ${T[@]+"${T[@]}"}
+    [ -z "$RUN_ERR" ] || BADERR="${BADERR:-random#$i: $RUN_ERR}"
+    NR=$(( NR + 1 ))                  # COUNTED LAST, as above
+    i=$(( i + 1 ))
+done
+assert_eq "resync:random:stderr-stays-clean" "" "$BADERR"
+assert_eq "resync:random:every-case-ran" "300" "$NR"
+record "resync:random:cases-run" "$NR (seed $SEED)"
