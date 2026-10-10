@@ -2324,8 +2324,35 @@ those ports reachable and says to run `cs193v --reset-tunnel`. That is one built
 per frame, not the cross-check rejected below. **Since #266 it notices a master that is alive but
 wedged**, though only when a forward to it times out: that publishes the same state, and only an
 `ssh -O check` that the master answers ends it, so a tick with nothing new to forward cannot
-quietly call the tunnel healthy again. What it still cannot see is a master killed with SIGKILL,
-which leaves its socket behind (#339).
+quietly call the tunnel healthy again. **A master killed with SIGKILL leaves its socket behind**
+(#339), so the same frame also asks `kill -0` about the pidfile's pid — another builtin — and a
+forward that fails is called `busy` only once `ssh -O check` has shown the master alive. A dead
+master refuses a forward with the same exit status as a taken port, and every new port used to be
+reported as "another program on your own computer"; `-O check` against it is refused at once, where
+a wedged one's times out, and that difference is what tells gone from mute.
+
+**Since #343 it also puts the master back.** A death proved by the pidfile's pid — TERM, `-O exit`
+and ServerAlive remove the socket and exit, SIGKILL exits and leaves it — makes the supervisor start
+a new master itself and re-forward everything, so the window above now ends with the ports coming
+back rather than with advice to reset. It deliberately does not restart on a socket that has merely
+gone, or on a forward that fails: the master can be alive through both, and a second one would
+strand it under a deleted socket holding host ports. Nor does it retry a start that fails — that
+leaves no pidfile, so nothing proves another death — which leaves `--show`'s advice to run
+`cs193v --reset-tunnel` standing exactly when it is true. **One writer at a time, not a lock:** every
+other path that starts or stops a master — teardown, `--reset-tunnel`, a launch that finds none to
+reuse, `check_clock`'s VM restart — stops the supervisor first, so only one thing can start a master
+while it runs. The window that leaves is a writer stopping the supervisor mid-restart, whose
+in-flight `ssh -f` can finish after the writer's `rm` and leave a master holding no ports.
+
+**Sleep is not what kills a master, though it was the reason #343 was first given.** Measured
+overnight, lid closed, on battery: on Apple Silicon (libkrun, podman 6.0.2) the same master and
+supervisor ran 23 hours across 135 sleeps — all but two ended by a dark wake, the longest 18 minutes
+— with the supervisor's log empty and a forwarded probe answering on 1195 of 1197 one-second ticks
+(the other two were requests sent in the second before the lid closed and answered after it opened).
+An Intel Mac (applehv, podman 5.8.7) saw the same overnight. ServerAlive does not fire across a
+sleep that leaves the transport intact: ssh's keepalive timer goes off once on waking, the container
+answers at once, and the count resets. So the restart earns its place on the deaths above — a
+SIGKILL, a master that exits on its own — and not on a lid.
 
 This is a **pre-existing property of the tunnel**, identical for the 46 static forwards it used to
 carry, so dynamic forwarding neither created nor widened it. It is recorded here because it is the
@@ -2337,6 +2364,30 @@ one acknowledged exception to "a failure must be loud", and because both obvious
   are deliberately independent — a merely-slow watcher would then read as a dead transport.
 
 `cs193v --reset-tunnel` fixes it immediately if a student happens to ask before the timeout does.
+
+### A read that times out may tear the next line — resynchronised, not fatal (#340)
+
+A `read -t` whose deadline lands part-way through a line has already eaten its front, and the rest
+arrives as a line of its own. On bash 5.2 and later that is routine: they check the deadline against
+the wall clock after every byte, and a WSL resume steps that clock forward, so the first line after
+a wake was torn every time — measured on WSL's first lid close, where `EGIN 1` ended the supervisor
+for the session. A torn record is worse: `8343:lo` from `28343:lo` is a wrong port.
+
+**So every timeout past the handshake resynchronises.** The parser drops the frame in progress and
+skips to the next line that starts a tick (`BEGIN`, `WARN`) or an `ERR`, which it parses as strictly
+as any other. At most one frame's worth of lines per timeout, logged when it resumes, and a skipped
+line is no sign of life, so six timeouts with nothing accepted between them still end it. Frames are
+full snapshots, so a dropped one costs a second of staleness and nothing else. Host-only: the
+watcher, the protocol and the image are unchanged. A *protocol violation* — a malformed line the
+watcher really sent — still ends the supervisor.
+
+**This reverses an earlier decision.** The review that filed #340 considered resynchronising and
+rejected it, and no reason was recorded; it was then believed the tear needed a ~17 µs race per
+timeout. It proposed a split read instead — the first byte on the silence timer, the rest of the
+line on a fresh one. Measured against the wake, that survives on bash 5.3 but **not on 5.2**, where
+the one-byte read times out too; and on 3.2, whose SIGALRM can still land just after the first byte
+is taken, it leaves a sub-microsecond window (by analysis, not measured) that loses that byte
+silently and can forward a wrong port. Resync absorbs every case, on every shell, in one path.
 
 ### Python's library set — deferred, not refused (issue #44)
 

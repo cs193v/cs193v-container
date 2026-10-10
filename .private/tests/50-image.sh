@@ -353,6 +353,13 @@ assert_contains "helper:open-url-shortened-says-it-expires" "15 minutes" "$out"
 # (17-portparse-fuzz.sh) and the watcher had a fault mode, and the two had never been introduced.
 # A rule nothing exercises is a rule that quietly stops being true.
 #
+# ONE NARROWING, AND IT IS NOT SILENT (#340). After a read that timed out, the lines up to the next
+# BEGIN, WARN or ERR are skipped unvalidated -- because those bytes may have been damaged by OUR
+# read rather than sent malformed. The skip is bounded (one frame's worth of lines per timeout,
+# and six timeouts with nothing accepted between them end the supervisor), it is logged when it
+# resumes, and the line that ends it is validated as strictly as ever. None of these faults is
+# sent after a timeout, so every verdict below is unchanged.
+#
 # THE REAL WATCHER AND THE REAL GATE, joined. The fuzzer feeds the gate strings this file's author
 # made up; this feeds it bytes the SHIPPED binary actually emits, which is the half that catches
 # the two of them drifting apart -- a fault renamed, a frame shape changed, an emit that stopped

@@ -32,6 +32,8 @@ sup_reap() {
     # ...and the fake watchers with them. A stalling one is asleep, not writing, so killing
     # the supervisor gives it no EPIPE to notice; removing the file that armed it does.
     rm -f "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/watch_out 2>/dev/null || true
+    # ...and the fake ssh masters, which end when their sentinel does (lib/ssh-master-fake.py).
+    rm -f "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/ssh_alive 2>/dev/null || true
 }
 trap 'sup_reap; shim_cleanup' EXIT
 # ...and at START as well, because that trap cannot run if the suite is KILLED, which is
@@ -2534,10 +2536,13 @@ SUP_PIDFILE="$(sup_pidfile)"
 assert_ne "supervisor:the-pidfile-path-was-readable" "" "$SUP_PIDFILE"
 # 7s: longer than TUNNEL_SUP_SILENCE (5) so a timeout is certain, far short of the 30 the
 # tolerance allows. The second frame carries a port the first did not, so a supervisor that
-# merely SURVIVED but stopped parsing cannot pass.
+# merely SURVIVED but stopped parsing cannot pass. THE WARN AFTER THE GAP is #340's: every timeout
+# now resynchronises, and the watcher sends a WARN before the frame it describes, so this is the
+# clean timeout that must lose neither the WARN nor the frame, and must report no skip.
 shim_watch 'cs193v-portwatch 1' \
            'BEGIN 1' '21500:v6lo' 'END' \
            'STALL 7' \
+           'WARN too-many-listeners 200' \
            'BEGIN 1' '8123:v6lo' 'END' \
            'STALL 20'
 sup_start "$SHIM/sup-gap.out"
@@ -2583,22 +2588,34 @@ else
 "the fake stalled for ${GAP_HB:-0}s, not the 5+ that TUNNEL_SUP_SILENCE needs -- so the
 assertion above passed without a gap having happened at all."
 fi
-assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" \
-                    "stream ended" "$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+GAP_OUT="$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" "stream ended" "$GAP_OUT"
 assert_not_contains "supervisor:a-tolerated-gap-is-not-published-as-broken" \
                     "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+# GUARDS, green before #340 and after it. A gap that tore nothing resumes at the WARN that starts
+# the next tick, so the WARN is logged and no resync is reported; skipping a WARN during the
+# resync (the first design) lost it and logged "skipped 1 line(s)" for a clean timeout.
+assert_contains "supervisor:a-WARN-after-a-gap-is-logged" "watcher warning: too-many-listeners" "$GAP_OUT"
+assert_not_contains "supervisor:a-gap-that-tore-nothing-logs-no-resync" "skipped" "$GAP_OUT"
 sup_reap
 
 # ─── ...and a silence past the tolerance must ──────────────────────────────────
-# The other half, and the reason it is worth its ~32s: without it, nothing distinguishes "the
+# The other half, and the reason it is worth its ~36s: without it, nothing distinguishes "the
 # tolerance is generous" from "the tolerance is infinite", and TUNNEL_SUP_SILENCE_MAX would
-# still never execute. 32 > TUNNEL_SUP_SILENCE x TUNNEL_SUP_SILENCE_MAX, with the writer alive
+# still never execute. 36 > TUNNEL_SUP_SILENCE x TUNNEL_SUP_SILENCE_MAX, with the writer alive
 # throughout -- so this is silence, not a stream that ended.
+#
+# WITH ONE LINE IN IT THAT THE RESYNC SKIPS (#340). The first timeout puts the parser in resync, so
+# 21599:v6lo arrives with no frame around it and is skipped -- and a skipped line is no sign of
+# life, so five more timeouts still end the loop, at ~33s, inside the 36 the stream stays open.
+# Counted as activity, the sixth would fall at ~38s, after EOF, and the loop would end "stream
+# ended" with status 0. 8 AND NOT 6: the line must arrive after the first timeout, at 5 + x where x
+# is the pre-silence frame's publish, so 8 leaves ~3s of margin and 6 left ~1s (measured).
 shim_new
 SUP_PIDFILE="$(sup_pidfile)"
 shim_watch 'cs193v-portwatch 1' \
            'BEGIN 1' '21500:v6lo' 'END' \
-           'STALL 32'
+           'STALL 8' '21599:v6lo' 'STALL 28'
 sup_start "$SHIM/sup-silent.out"
 assert_ok "supervisor:the-loop-started-again" wait_until 10 sup_up
 if wait_until 15 sup_published 'refused=21500:v6lo'; then
@@ -2607,7 +2624,7 @@ else
     fail "supervisor:the-frame-before-the-silence-was-published" \
 "the supervisor never published the pre-silence frame, so nothing below is about the silence."
 fi
-# BOUNDED BY THE STREAM, not by trust: the staged stall is 32s and nothing follows it, so even
+# BOUNDED BY THE STREAM, not by trust: the staged stalls are 36s and nothing follows them, so even
 # a supervisor that had stopped honouring the threshold would reach EOF and exit a second later.
 # A wait here cannot become the hang that a suite with no per-suite ceiling could not survive --
 # and the status assertion below is what tells the two endings apart.
@@ -2632,6 +2649,66 @@ assert_eq  "supervisor:a-silence-past-the-tolerance-exits-nonzero" "1" "$SUP_RC"
 assert_says "supervisor:it-names-the-silence-it-measured" "no frames for 30s" "$SILENT_OUT"
 assert_says "supervisor:it-says-the-watcher-has-stopped" "the watcher has stopped" "$SILENT_OUT"
 assert_ok  "supervisor:it-publishes-broken-on-the-way-out" sup_published 'state=broken'
+# THE SKIPPED LINE, BY WORDING, NOT BY STATUS: before #340 it was a protocol violation, which also
+# exits 1, so the status assertion above passes either way. The second is a guard: no mutation of
+# the parser reaches it, only one of sup_loop that counts a skipped line as a sign of life.
+assert_not_contains "supervisor:a-skipped-line-is-not-a-violation" "protocol violation" "$SILENT_OUT"
+assert_not_contains "supervisor:a-skipped-line-is-not-a-sign-of-life" "stream ended" "$SILENT_OUT"
+sup_reap
+
+# ─── a read that times out part-way through a line  (#340) ─────────────────────
+# WHAT A WSL RESUME DOES TO bash 5.2+, made by the bytes rather than by a clock. `PART X` writes X
+# with no newline and the STALL after it outlasts TUNNEL_SUP_SILENCE, so the supervisor's read
+# consumes X and its deadline passes: on every bash the rest of the line then arrives alone.
+# Before #340 the first of these, `EGIN 1`, was a protocol violation and ended the supervisor --
+# the very line the WSL sleep test logged -- and the second, `1503`, was a port nobody bound.
+#
+# THE MARGIN IS 8 - 5 - x, where x is how long after the fake wrote X the read began: the previous
+# frame's sup_tick and publish for the torn BEGIN (measured 0.02-0.12s), next to nothing for the
+# torn record. Run out of it and there is no tear -- which the two alibis at the end report as a
+# red, rather than letting everything else pass.
+shim_new
+SUP_PIDFILE="$(sup_pidfile)"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 1' '21500:v6lo' 'END' \
+           'PART B' 'STALL 8' 'EGIN 1' '21501:v6lo' 'END' \
+           'BEGIN 1' '21502:v6lo' 'END' \
+           'BEGIN 1' 'PART 2' 'STALL 8' '1503:v6lo' 'END' \
+           'BEGIN 1' '21504:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-torn.out"
+assert_ok "supervisor:torn:the-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'refused=21500:v6lo'; then
+    pass "supervisor:torn:the-frame-before-the-tear-was-published"
+else
+    fail "supervisor:torn:the-frame-before-the-tear-was-published" \
+"the supervisor never published the frame before the tear, so nothing below is about the tear.
+its output:
+$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+if wait_until 25 sup_published 'refused=21502:v6lo'; then
+    pass "supervisor:torn:a-torn-BEGIN-does-not-end-the-loop"
+else
+    fail "supervisor:torn:a-torn-BEGIN-does-not-end-the-loop" "$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+if wait_until 25 sup_published 'refused=21504:v6lo'; then
+    pass "supervisor:torn:the-frame-after-a-torn-record-arrives"
+else
+    fail "supervisor:torn:the-frame-after-a-torn-record-arrives" "$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+fi
+# ONLY AFTER BOTH POSITIVE WAITS: a supervisor that died at the first tear publishes neither of
+# these, and would pass them. The frame a tear landed in is dropped WHOLE -- 21501 never reaches a
+# publish, though every line of it after the torn one arrived intact -- and a torn record's
+# remainder never becomes a port. [=,] anchors 1503 to the start of a published entry.
+TORN_OUT="$(cat "$SHIM/sup-torn.out" 2>/dev/null)"
+assert_eq "supervisor:torn:a-torn-record-is-never-published" "" "$(grep -E '[=,]1503:' "$SHIM/argv.log" || true)"
+assert_eq "supervisor:torn:a-torn-frame-is-dropped-whole" "" "$(grep -F '21501:' "$SHIM/argv.log" || true)"
+assert_not_contains "supervisor:torn:no-protocol-violation" "protocol violation" "$TORN_OUT"
+assert_not_contains "supervisor:torn:never-published-broken" "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+# THE ALIBIS: both tears happened, and were resynchronised rather than merely survived. 3 is the
+# torn BEGIN's remainder, its record and its END; 2 is the torn record's remainder and its END.
+assert_contains "supervisor:torn:the-torn-BEGIN-was-resynchronised" "skipped 3 line(s)" "$TORN_OUT"
+assert_contains "supervisor:torn:the-torn-record-was-resynchronised" "skipped 2 line(s)" "$TORN_OUT"
 sup_reap
 
 # ─── and a port that CAN be forwarded actually is  (#251) ──────────────────────
@@ -2659,11 +2736,11 @@ DEVT="$(launcher --dev-tunnel)"
 SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
 CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
 shim_ssh_master "$CTL"
-# THE VACUITY GUARD FOR EVERYTHING BELOW, and it carries a detail because it is thin ice twice
-# over. The fake SWALLOWS python's bind failure and exits 0 regardless, so `[ -S ]` is the only
-# thing that can tell; and the path is 102 bytes on a stock Mac against an AF_UNIX cap of about
-# 104, so a longer TMPDIR or instance name is a real way for this to go red. Saying which is
-# the difference between "the path got too long" and "the fake is broken".
+# THE VACUITY GUARD FOR EVERYTHING BELOW, and it carries a detail because the path is 102 bytes
+# on a stock Mac against an AF_UNIX cap of about 104, so a longer TMPDIR or instance name is a real
+# way for this to go red. The fake now fails loudly when it cannot bind, but this case does not
+# read its status, so `[ -S ]` is still what tells; saying which is the difference between "the
+# path got too long" and "the fake is broken".
 if [ -S "$CTL" ]; then
     pass "forward:a-master-left-a-control-socket"
 else
@@ -2743,7 +2820,7 @@ assert_not_contains "forward:a-healthy-forward-is-not-an-unresponsive-master" \
 sup_reap
 
 # ─── ...and a master that has gone is published as gone  (#338) ───────────────
-# A master that exits cleanly -- ServerAlive after a sleep, `-O exit`, a TERM -- deletes its
+# A master that exits cleanly -- ServerAlive giving up, `-O exit`, a TERM -- deletes its
 # control socket, and every forward it held goes with it. The supervisor used to recheck nothing
 # it had already forwarded, so the state file kept `state healthy` and the old `up` rows, and
 # `cs193v-portwatch --show` went on telling a student (and the agent-notes it teaches) that ports
@@ -2999,4 +3076,490 @@ assert_eq "publish:a-failed-publish-is-sent-again-until-it-lands" \
 # between the episodes are what let B's and C's be said at all. The timeout is named as one.
 assert_eq "publish:each-failing-episode-is-logged-once-with-its-reason" \
           "exit 1, exit 1, timed out after 20s" "$(sup_publish_reasons)"
+sup_reap
+
+# ─── a refused forward is busy, waits out its cooldown, then clears itself  (#267) ─
+# EVERYTHING DOWNSTREAM OF tunnel_dyn_forward's "1" HAD NO COVER, because the fake could not refuse
+# a forward: the SUP_BUSY cooldown had never been decremented in a test, the short-circuit that stops
+# a busy port being asked every tick had never run, and the self-clearing CLAUDE.md promises for
+# `busy` was a claim about code nothing executed. ssh_busy_ports is the refusal.
+#
+# ONE STREAM, IN THE ORDER IT HAPPENS. The first frame forwards 3000 and is refused 3001; a STALL
+# lets the case lift the refusal, so a retry would now succeed; nothing inside the cooldown may
+# retry it; the first frame after the cooldown must, and must get it.
+#
+# THE FRAME COUNTS COME FROM THE LAUNCHER, not from here. Staged as a literal 35, this would become
+# a test of TUNNEL_SUP_COOLDOWN's value the day somebody raised it.
+#
+# THE ANCHOR IS 21500:v6lo, which first appears halfway through the cooldown and changes the
+# publish. The "asked only once" count is read during the STALL that follows it, so it is an
+# absence pinned to a frame that was demonstrably processed after every ask it is counting --
+# and frames arrive as fast as they are read, so without the STALL the retry would race the count.
+COOLDOWN="$(sed -n 's/^TUNNEL_SUP_COOLDOWN=\([0-9][0-9]*\)$/\1/p' "$LAUNCHER_DIR/cs193v")"
+busy_stream() {                       # busy_stream COOLDOWN -> stages the stream described above
+    local c="$1" i=2 half
+    half=$(( c / 2 ))
+    set -- 'cs193v-portwatch 1' 'BEGIN 2' '3000:lo' '3001:lo' 'END' 'STALL 3'
+    while [ "$i" -le $(( c + 3 )) ]; do
+        if [ "$i" -lt "$half" ]; then
+            set -- "$@" 'BEGIN 2' '3000:lo' '3001:lo' 'END'
+        else
+            set -- "$@" 'BEGIN 3' '3000:lo' '3001:lo' '21500:v6lo' 'END'
+        fi
+        [ "$i" -eq "$half" ] && set -- "$@" 'STALL 3'
+        i=$(( i + 1 ))
+    done
+    shim_watch "$@" 'STALL 20'
+}
+busy_asks() { grep -cF -- '-O forward -L 127.0.0.1:3001:127.0.0.1:3001' "$SHIM/ssh.log" 2>/dev/null; }
+# THE FIRST PUBLISH, and one line carrying both halves. "Some publish says busy" is satisfied a
+# tick late by the short-circuit below, which publishes the refusal too -- measured: with the
+# refused arm's own publish deleted, a search of every publish stayed green. floor= is not in the
+# needle: it is the HOST's unprivileged-port floor, 1024 here and not necessarily on Linux.
+busy_first_publish() {
+    sup_publishes | head -1 | grep -F -- 'state=healthy' | grep -qF -- 'up=3000:lo refused=3001:busy'
+}
+
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+assert_ne "busy:the-cooldown-was-read-from-the-launcher" "" "$COOLDOWN"
+shim_set ssh_busy_ports '3001'
+busy_stream "${COOLDOWN:-30}"
+sup_start "$SHIM/sup-busy.out"
+assert_ok "busy:the-loop-started" wait_until 10 sup_up
+
+# A GATE, not a case: it only lets the first publish land before it is read.
+wait_until 15 sup_published 'cs193v-portwatch --publish' || true
+if busy_first_publish; then
+    pass "busy:a-refused-port-is-published-busy-beside-a-forwarded-one"
+else
+    fail "busy:a-refused-port-is-published-busy-beside-a-forwarded-one" \
+"3001 was refused by the master and 3000 was not, and no publish said so.
+publishes:
+$(sup_publishes)
+ssh.log:
+$(shim_ssh_log)"
+fi
+# Lifted DURING the first STALL: from here on a retry would succeed, so anything below that sees
+# 3001 up before the cooldown has run out is a retry that should not have happened.
+shim_set ssh_busy_ports ''
+# THE ASK, NOT ONLY THE CONCLUSION (#267): the publish says what the supervisor decided, and only
+# ssh.log says the master was asked at all.
+assert_eq "busy:the-refused-ask-is-in-the-log" "1" "$(busy_asks)"
+# ...AND THE MASTER WAS ASKED WHETHER IT IS ALIVE before the port was called busy (#339): a dead
+# master refuses a forward exactly as a taken port does, so without this check "busy" is a guess.
+assert_eq "busy:the-master-was-asked-before-the-port-was-called-busy" "1" \
+          "$(grep -cF -- '-O check ' "$SHIM/ssh.log" 2>/dev/null)"
+
+if wait_until 15 sup_published 'refused=3001:busy,21500:v6lo'; then
+    pass "busy:the-anchor-frame-inside-the-cooldown-was-read"
+else
+    fail "busy:the-anchor-frame-inside-the-cooldown-was-read" \
+"the frame that adds 21500 was never published, so the count below would be read before the
+frames it is about.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "busy:a-busy-port-is-not-asked-again-inside-its-cooldown" "1" "$(busy_asks)"
+
+if wait_until 15 sup_published 'up=3000:lo,3001:lo refused=21500:v6lo'; then
+    pass "busy:a-busy-port-is-forwarded-once-its-cooldown-ends"
+else
+    fail "busy:a-busy-port-is-forwarded-once-its-cooldown-ends" \
+"the refusal was lifted and $COOLDOWN frames went by, and 3001 was never forwarded: busy did not
+clear itself.
+publishes:
+$(sup_publishes)
+ssh.log:
+$(shim_ssh_log)"
+fi
+assert_eq "busy:it-was-asked-exactly-twice" "2" "$(busy_asks)"
+sup_reap
+
+# ─── a master killed with SIGKILL is gone, not busy  (#339) ──────────────────────
+# A MASTER KILLED WITH SIGKILL CANNOT REMOVE ITS SOCKET. The supervisor's only witness was the
+# socket, so after one -- the OOM killer, a stray `kill -9` -- it went on saying healthy with the
+# dead forwards up, and every NEW port was refused by the dead master and published `busy`:
+# "another program on your own computer is using that port". Measured live: exactly that.
+#
+# `kill -9` OF THE FAKE'S HOLDER IS THAT DEATH: the socket file stays and nothing answers on it,
+# which is what OpenSSH 10.2 does (lib/ssh-master-fake.py). Its own two controls come first --
+# the pid is gone, the socket is not -- because each is what makes this a SIGKILL rather than a
+# clean exit, and the #338 case above already covers the clean one.
+holder_gone() { ! kill -0 "$1" 2>/dev/null; }
+# The same sequence reading as sup_published_after_gone, for whatever up/refused a case expects.
+sup_healthy_after_gone() {            # sup_healthy_after_gone NEEDLE
+    sup_publishes | do_awk -v n="$1" '/state=master-unresponsive/ { g = 1; next }
+                                       g && /state=healthy/ && index($0, n) { f = 1 }
+                                       END { exit !f }'
+}
+ssh_log_since() {                     # ssh_log_since LINE PATTERN -> how many asks after LINE
+    tail -n +"$(( $1 + 1 ))" "$SHIM/ssh.log" 2>/dev/null | grep -cF -- "$2"
+}
+
+# ─── ...found by the forward that asks it, when there is no pidfile ──────────────
+# NO PIDFILE, which is what tunnel_record_pid leaves when it cannot learn a pid, so the per-tick
+# pid check is blind here and the only witness is a forward. The frame after the death adds THREE
+# new ports: the first asks the dead master and is answered "gone"; the other two must not be
+# asked at all. That is the whole cost of a dead socket -- one forward and one -O check a tick --
+# and it is read during the STALL after that frame, before the next one could ask again.
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+shim_ssh_master "$CTL"
+H1="$(shim_ssh_master_pid "$CTL")"
+assert_ne "dead:the-master-has-a-pid-to-kill" "" "$H1"
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 5' '3000:lo' '3001:lo' '3002:lo' '3003:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 5' '3000:lo' '3001:lo' '3002:lo' '3003:lo' '21500:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-kill-nopid.out"
+assert_ok "dead:the-no-pidfile-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:the-port-was-up-before-the-master-was-killed"
+else
+    fail "dead:the-port-was-up-before-the-master-was-killed" \
+"3000 was never published as up, so nothing below is about a master dying.
+ssh.log:
+$(shim_ssh_log)"
+fi
+BASE="$(wc -l < "$SHIM/ssh.log" | do_tr -d ' ')"
+kill -9 "$H1" 2>/dev/null
+assert_ok "dead:the-killed-master-is-gone" wait_until 5 holder_gone "$H1"
+assert_ok "dead:a-killed-master-leaves-its-socket" test -S "$CTL"
+if wait_until 15 sup_published 'state=master-unresponsive'; then
+    pass "dead:a-killed-master-is-published-gone"
+else
+    fail "dead:a-killed-master-is-published-gone" \
+"the master was killed with its socket left behind, three new ports were asked for, and nothing
+was published as gone.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-kill-nopid.out" 2>/dev/null)"
+fi
+assert_contains "dead:a-killed-master-is-published-with-nothing-up" 'up= refused=21500:v6lo' \
+                "$(sup_publishes | grep -F 'state=master-unresponsive' | head -1)"
+assert_not_contains "dead:no-port-of-a-dead-master-is-called-busy" ':busy' "$(sup_publishes)"
+assert_says "dead:the-supervisor-says-a-forward-found-it-gone" "a forward found nothing answering" \
+            "$(cat "$SHIM/sup-kill-nopid.out" 2>/dev/null)"
+assert_eq "dead:the-dead-master-is-asked-one-forward" "1" "$(ssh_log_since "$BASE" '-O forward ')"
+assert_eq "dead:the-dead-master-is-asked-one-check" "1" "$(ssh_log_since "$BASE" '-O check ')"
+# ...AND IT COMES BACK the way --reset-tunnel brings it back: a new socket, still no pidfile.
+rm -f "$CTL"
+shim_ssh_master "$CTL"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo,3001:lo,3002:lo,3003:lo refused=21500:v6lo'; then
+    pass "dead:a-replaced-master-carries-every-port-again"
+else
+    fail "dead:a-replaced-master-carries-every-port-again" \
+"a new master came up after the dead one and the next frame did not forward all four ports.
+publishes:
+$(sup_publishes)"
+fi
+sup_reap
+
+# ─── ...and found by its pid, with no new port to ask about ──────────────────────
+# THE HALF THE FORWARD CANNOT SEE: the ports are all forwarded already, so no frame asks the
+# master anything and the state file went on saying healthy with 3000 up. The pidfile is written
+# BEFORE the supervisor starts, the way tunnel_start leaves one; written after, the pidfile change
+# would reset the state and the re-forward of 3000 would find the death instead, through the path
+# the case above covers, and this would pass with the pid check deleted.
+#
+# THE RESTART IS MADE TO FAIL (#343): a death proved by the pid is one the supervisor now puts
+# back, and this case is about the state between -- what is published while there is no master.
+# The section after this one lets the restart succeed.
+shim_new
+shim_fake_ssh
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+shim_ssh_master "$CTL"
+H1="$(shim_ssh_master_pid "$CTL")"
+printf '%s\n' "$H1" > "$MPIDFILE"
+shim_touch ssh_start_fails
+shim_watch 'cs193v-portwatch 1' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 4' \
+           'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+           'STALL 20'
+sup_start "$SHIM/sup-kill-pid.out"
+assert_ok "dead:the-pidfile-loop-started" wait_until 10 sup_up
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:the-port-was-up-before-the-named-master-was-killed"
+else
+    fail "dead:the-port-was-up-before-the-named-master-was-killed" \
+"3000 was never published as up, so nothing below is about a master dying.
+ssh.log:
+$(shim_ssh_log)"
+fi
+kill -9 "$H1" 2>/dev/null
+assert_ok "dead:the-named-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 sup_published 'state=master-unresponsive'; then
+    pass "dead:a-killed-master-is-found-with-no-new-port"
+else
+    fail "dead:a-killed-master-is-found-with-no-new-port" \
+"the pidfile's master was killed and the next frame published nothing: the state file still says
+healthy, with 3000 up.
+publishes:
+$(sup_publishes)"
+fi
+assert_contains "dead:it-is-published-with-nothing-up" 'up= refused=21500:v6lo' \
+                "$(sup_publishes | grep -F 'state=master-unresponsive' | head -1)"
+assert_says "dead:the-supervisor-names-the-pid-that-died" "pid $H1 is no longer running" \
+            "$(cat "$SHIM/sup-kill-pid.out" 2>/dev/null)"
+# NOTHING WAS ASKED OF IT: found by the builtin, not by a forward.
+assert_eq "dead:the-dead-master-is-not-asked-for-the-port" "1" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+# ...AND IT COMES BACK the way --reset-tunnel leaves things: socket and pidfile both replaced.
+rm -f "$CTL" "$MPIDFILE" "$SHIM/ssh_start_fails"
+shim_ssh_master "$CTL"
+shim_ssh_master_pid "$CTL" > "$MPIDFILE"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "dead:a-replaced-named-master-is-published-healthy-again"
+else
+    fail "dead:a-replaced-named-master-is-published-healthy-again" \
+"a new master and pidfile replaced the dead one and the next frame did not bring 3000 back.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "dead:the-replacement-is-asked-for-the-port" "2" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+sup_reap
+
+# ─── a master that dies is restarted by the supervisor  (#343) ─────────────────
+# WHAT USED TO NEED --reset-tunnel. A master that died -- ServerAlive giving up, the OOM killer
+# -- stayed dead until a student was told to run something, and most of them never are. The
+# supervisor that notices the death now starts a new master itself, but only for a death PROVED by
+# the pidfile's pid: a socket that has merely gone, or a forward that fails, can both happen with
+# the master still alive, and starting another then would strand it holding host ports.
+#
+# ONE STREAM SHAPE FOR ALL FOUR CASES: a frame, a STALL in which the case does its damage, frames
+# for the supervisor to react to, and an anchor frame adding 21501 that changes the publish, so
+# "how many starts" is counted after a frame demonstrably processed after every start it is
+# counting. The start is the master's own `-f` line in ssh.log, counted from a baseline taken
+# after the case's own shim_ssh_master, which logs one too.
+restart_stream() {
+    shim_watch 'cs193v-portwatch 1' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'STALL 4' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 2' '3000:lo' '21500:v6lo' 'END' \
+               'BEGIN 3' '3000:lo' '21500:v6lo' '21501:v6lo' 'END' \
+               'STALL 20'
+}
+restart_setup() {                     # restart_setup NAME -> SHIM, CTL, MPIDFILE, H1, BASE; output in $SHIM/NAME
+    shim_new
+    shim_fake_ssh
+    DEVT="$(launcher --dev-tunnel)"
+    SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+    CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+    MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+    shim_ssh_master "$CTL"
+    H1="$(shim_ssh_master_pid "$CTL")"
+    printf '%s\n' "$H1" > "$MPIDFILE"
+    BASE="$(wc -l < "$SHIM/ssh.log" | do_tr -d ' ')"
+    restart_stream
+    # A NAME, NOT A PATH: the caller's "$SHIM/..." would expand before the shim_new above, and the
+    # supervisor's output would land in the previous case's shim.
+    sup_start "$SHIM/$1"
+    wait_until 10 sup_up
+}
+starts_since_base() { ssh_log_since "$BASE" '-f -N -M -S '; }
+the_anchor() { sup_published 'refused=21500:v6lo,21501:v6lo'; }
+
+# ─── ...one killed with SIGKILL ──────────────────────────────────────────────────
+restart_setup sup-restart-kill.out
+if wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:the-port-was-up-before-the-master-was-killed"
+else
+    fail "restart:the-port-was-up-before-the-master-was-killed" "3000 was never published as up.
+ssh.log:
+$(shim_ssh_log)"
+fi
+kill -9 "$H1" 2>/dev/null
+assert_ok "restart:the-killed-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:a-killed-master-is-replaced-without-a-reset"
+else
+    fail "restart:a-killed-master-is-replaced-without-a-reset" \
+"the master was killed and the supervisor never brought forwarding back: no healthy publish with
+3000 up followed the gone one.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-restart-kill.out" 2>/dev/null)"
+fi
+H2="$(cat "$MPIDFILE" 2>/dev/null)"
+assert_ne "restart:the-pidfile-names-a-new-master" "$H1" "${H2:-$H1}"
+# THE PIDFILE'S MASTER IS THE ONE ON THE SOCKET, not merely a new number: a pidfile naming some
+# other process would pass the line above and leave the next death unprovable.
+assert_eq "restart:the-new-master-is-the-one-answering" "${H2:-none}" "$(shim_ssh_master_pid "$CTL")"
+assert_eq "restart:the-new-master-is-asked-for-the-port" "2" \
+          "$(grep -cF -- '-O forward -L 127.0.0.1:3000:127.0.0.1:3000' "$SHIM/ssh.log" 2>/dev/null)"
+assert_says "restart:the-supervisor-says-it-restarted-the-master" "has been restarted" \
+            "$(cat "$SHIM/sup-restart-kill.out" 2>/dev/null)"
+sup_reap
+
+# ─── ...one that exits cleanly, as ServerAlive makes it ───────────────────────
+# TERM IS THE CLEAN EXIT a case can cause: the holder removes its socket and goes, as a master does
+# when ServerAlive gives up -- or `-O exit`, or a plain TERM. The pid going is waited for inside
+# the STALL, so the frames after it see a death proved rather than a socket that has merely gone.
+restart_setup sup-restart-term.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+kill "$H1" 2>/dev/null
+assert_ok "restart:the-exited-master-is-gone" wait_until 5 holder_gone "$H1"
+assert_fail "restart:an-exited-master-takes-its-socket" test -S "$CTL"
+if wait_until 15 sup_healthy_after_gone 'up=3000:lo refused=21500:v6lo'; then
+    pass "restart:an-exited-master-is-replaced-without-a-reset"
+else
+    fail "restart:an-exited-master-is-replaced-without-a-reset" \
+"the master exited cleanly and the supervisor never brought forwarding back.
+publishes:
+$(sup_publishes)
+its output:
+$(cat "$SHIM/sup-restart-term.out" 2>/dev/null)"
+fi
+sup_reap
+
+# ─── ...and one that cannot be restarted is tried once, then left to the student ─
+# ONE ATTEMPT PER DEATH, and the count is the assertion: a failed start leaves no pidfile, so no
+# later frame can prove another death. A supervisor that retried on "gone" instead would start a
+# master every frame for as long as the failure lasted -- an ssh and a podman exec a second.
+restart_setup sup-restart-fails.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+shim_touch ssh_start_fails
+kill -9 "$H1" 2>/dev/null
+assert_ok "restart:the-unrestartable-master-is-gone" wait_until 5 holder_gone "$H1"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-a-failed-restart-were-read"
+else
+    fail "restart:the-frames-after-a-failed-restart-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-master-that-will-not-start-is-tried-once" "1" "$(starts_since_base)"
+assert_contains "restart:it-is-still-published-gone" 'state=master-unresponsive' \
+                "$(sup_publishes | tail -1)"
+assert_says "restart:the-supervisor-says-to-reset" "could not be restarted; run cs193v --reset-tunnel" \
+            "$(cat "$SHIM/sup-restart-fails.out" 2>/dev/null)"
+sup_reap
+
+# ─── ...but a socket that has merely gone, under a master still alive, is not a death ─
+# THE CASE THE RESTART MUST NOT FIRE ON. Something unlinked the socket -- a TMPDIR cleaner, a hand
+# -- and the master is still running, holding its forwards. Starting another would remove nothing
+# the old one holds and strand it, alive, under a socket nobody can reach; the new master's
+# forwards would then find those host ports busy. So: published gone, and no start at all.
+restart_setup sup-restart-unlinked.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+rm -f "$CTL"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-an-unlinked-socket-were-read"
+else
+    fail "restart:the-frames-after-an-unlinked-socket-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-live-master-is-not-replaced" "0" "$(starts_since_base)"
+assert_ok "restart:the-live-master-is-still-running" kill -0 "$H1"
+sup_reap
+
+# ─── ...and a pidfile naming the wrong process is repaired, not obeyed ──────────
+# THE ONE WAY THE PROOF CAN BE WRONG: a pidfile naming something other than the master -- nothing
+# has been seen to write one, but tunnel_record_pid has a ps fallback that could. kill -0 then
+# says "dead" about a healthy master. The restart asks the master first, and when it answers, the
+# pidfile is rewritten from that answer and nothing is started: a second master beside a live one
+# would strand the first, holding host ports. The wrong pid here is a process this case started
+# and killed, so it is certainly not running.
+restart_setup sup-restart-wrongpid.out
+wait_until 15 sup_published 'up=3000:lo refused=21500:v6lo' || true
+sleep 60 >/dev/null 2>&1 &
+WRONG=$!
+kill -9 "$WRONG" 2>/dev/null; wait "$WRONG" 2>/dev/null
+printf '%s\n' "$WRONG" > "$MPIDFILE"
+if wait_until 15 the_anchor; then
+    pass "restart:the-frames-after-a-wrong-pidfile-were-read"
+else
+    fail "restart:the-frames-after-a-wrong-pidfile-were-read" \
+"the anchor frame was never published, so the count below would be read too early.
+publishes:
+$(sup_publishes)"
+fi
+assert_eq "restart:a-live-master-behind-a-wrong-pidfile-is-not-replaced" "0" "$(starts_since_base)"
+assert_eq "restart:the-pidfile-is-rewritten-from-the-master-itself" "$H1" \
+          "$(cat "$MPIDFILE" 2>/dev/null)"
+assert_contains "restart:it-is-published-healthy-again" 'state=healthy' "$(sup_publishes | tail -1)"
+sup_reap
+
+# ─── --reset-tunnel stops the supervisor before it touches the master  (#343) ───
+# ONE WRITER AT A TIME. The supervisor now starts masters, so --reset-tunnel -- which kills one and
+# starts another -- has to stop it first, or the two race: each starts a master, and one is
+# stranded under a socket the other deleted. Before #343 it left the supervisor running, and
+# tunnel_sup_start returned early because one was alive.
+#
+# WHAT THIS CAN AND CANNOT SEE. It sees that the reset ends with the old supervisor stopped and a
+# new one in its place -- red before #343, which left the old one running. It cannot see WHEN in the
+# reset the stop happens: ensure_tunnel's own stop catches the supervisor too, once the reset has
+# killed the master, and the race the early stop exists for -- a tick landing between the kill and
+# the new start -- cannot be staged on demand. Measured: with the reset's own stop deleted, this
+# stays green. The ORDER is 10-static.sh's supervisor:reset-tunnel-stops-the-supervisor-first.
+#
+# THE OLD SUPERVISOR IS KEPT ALIVE BY ITS STREAM, and the new one gets its own, swapped in with mv:
+# the old watcher keeps reading the inode it opened, and the path still exists, so its STALL goes
+# on. Removing watch_out instead ends that STALL, the old supervisor exits on end-of-stream within
+# a second, and "it is gone afterwards" passes with nothing having stopped it. Hence the status
+# too: a supervisor TERMinated by tunnel_sup_stop exits by signal, one whose stream ended exits 0.
+shim_new
+shim_fake_ssh
+shim_set state running
+DEVT="$(launcher --dev-tunnel)"
+SUP_PIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+MPIDFILE="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "pid" { print $2 }')"
+SUPLOG="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suplog" { print $2 }')"
+shim_ssh_master "$CTL"
+shim_ssh_master_pid "$CTL" > "$MPIDFILE"
+# What a supervisor had written before the reset, which the reset must not destroy (#252).
+printf 'the supervisor before the reset\n' > "$SUPLOG"
+shim_watch 'cs193v-portwatch 1' 'BEGIN 1' '21500:v6lo' 'END' 'STALL 25'
+sup_start "$SHIM/sup-reset-old.out"
+OLD_SUP="$SUP_PID"
+wait_until 10 sup_up || true
+wait_until 15 sup_published 'refused=21500:v6lo' || true
+assert_ok "reset:the-old-supervisor-runs-until-the-reset" kill -0 "$OLD_SUP"
+printf '%s\n' 'cs193v-portwatch 1' 'BEGIN 1' '21501:v6lo' 'END' 'STALL 25' > "$SHIM/watch_out.next"
+mv -f "$SHIM/watch_out.next" "$SHIM/watch_out"
+reset_out="$(launcher --reset-tunnel)"
+NEW_SUP="$(cat "$SUP_PIDFILE" 2>/dev/null)"
+SUP_PIDS="$SUP_PIDS $NEW_SUP"
+assert_says_key "reset:the-reset-says-it-finished" status.tunnel-reset "$reset_out"
+wait "$OLD_SUP" 2>/dev/null; OLD_RC=$?
+if [ "$OLD_RC" -gt 128 ]; then
+    pass "reset:the-old-supervisor-was-stopped"
+else
+    fail "reset:the-old-supervisor-was-stopped" \
+"the supervisor running before --reset-tunnel exited $OLD_RC rather than by a signal, so nothing
+stopped it: it ran until its own stream ran out, alongside the reset's.
+its output:
+$(cat "$SHIM/sup-reset-old.out" 2>/dev/null)"
+fi
+assert_ne "reset:a-new-supervisor-replaced-it" "$OLD_SUP" "${NEW_SUP:-$OLD_SUP}"
+# THE OLD LOG IS KEPT, one deep: the reset is the moment a student is sent to, and deleting the
+# log there destroyed the only record of why forwarding had stopped (#252).
+assert_contains "reset:the-last-supervisor-log-is-kept" 'the supervisor before the reset' \
+                "$(cat "$SUPLOG.prev" 2>/dev/null)"
 sup_reap

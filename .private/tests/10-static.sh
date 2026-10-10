@@ -3645,7 +3645,8 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
 # further up this file, and placed earlier the whole block errored out with "fn_body: command not
 # found" while assert_eq compared two empty strings and passed. Measured -- it did.
 sup_parse="$(for f in tunnel_dyn_read_floor tunnel_dyn_forward tunnel_dyn_check tunnel_dyn_cancel \
-                      tunnel_dyn_classify sup_log sup_publish sup_gone sup_tick sup_loop; do
+                      tunnel_dyn_classify sup_log sup_publish sup_gone sup_master_died \
+                      sup_tick sup_loop; do
                  fn_body "$f" "$REPO/cs193v"
              done | sed 's/^[[:space:]]*#.*//')"
 if [ -z "$sup_parse" ]; then
@@ -3664,7 +3665,9 @@ assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
 #
 # A blanket ban on arithmetic is impossible here -- converting an already-digit-checked string
 # with `$(( 10#$1 ))` is the whole design -- so what is pinned is the SET of arithmetic
-# expressions, which is three. Adding `$(( p ))` anywhere in the gate changes the set.
+# expressions, which is four: two conversions of digit-checked strings, and two counters of our
+# own (records seen, and lines a resync skipped -- #340). Adding `$(( p ))` anywhere in the gate
+# changes the set.
 #
 # THIS IS THE STATIC HALF of 17-portparse-fuzz.sh :: fuzz:nothing-is-executed, and the #155
 # audit needed both halves. The dynamic canary could not see an injection at all, because its
@@ -3672,7 +3675,7 @@ assert_eq "supervisor:no-array-subscripts-in-the-parse-path" "" \
 # `${a[x]}` but not `$(( ))` -- the first construct its own comment lists. So a mutation that
 # evaluated the raw port arithmetically passed the entire static+unit tier, 912 assertions, with
 # only an unrelated counter noticing.
-gate="$(for f in dynports_read dynports_reset dynports_fatal dynports_port dynports_line; do
+gate="$(for f in dynports_read dynports_reset dynports_lost dynports_fatal dynports_port dynports_line; do
             fn_body "$f" "$PRIVATE/files/cs193v-ui.sh"
         done | sed 's/^[[:space:]]*#.*//')"
 if [ -z "$gate" ]; then
@@ -3681,8 +3684,8 @@ so every assertion below would compare empty strings and pass."
 else
     pass "gate:the-parse-gate-was-found"
 fi
-assert_eq "gate:arithmetic-is-only-the-three-safe-forms" \
-          '$(( 10#$1 )) $(( 10#$cnt )) $(( DYNPORTS_SEEN + 1 ))' \
+assert_eq "gate:arithmetic-is-only-the-four-safe-forms" \
+          '$(( 10#$1 )) $(( 10#$cnt )) $(( DYNPORTS_SEEN + 1 )) $(( DYNPORTS_SKIP + 1 ))' \
           "$(printf '%s\n' "$gate" | grep -oE '[$]\(\([^)]*\)\)' \
              | LC_ALL=C sort -u | do_tr '\n' ' ' | sed 's/ $//')"
 assert_not_contains "gate:no-double-bracket" "[[" "$gate"
@@ -3717,6 +3720,27 @@ assert_contains "gate:the-read-clears-the-line-first" \
                 "unset DYNPORTS_LINE" "$gate_read"
 assert_contains "gate:the-read-does-not-trust-the-status-alone" \
                 '[ -z "${DYNPORTS_LINE+set}" ]' "$gate_read"
+
+# ─── ...AND THE WATCHER'S HALF OF THE RESYNC'S PREMISE  (#340) ─────────────────
+# After a timed-out read the host skips to the first line beginning `BEGIN `, `WARN ` or `ERR `.
+# That is sound only because a tear loses bytes from the FRONT of a line, no line the watcher
+# emits carries one of those words past its start -- so no remainder can begin with one -- and a
+# WARN is only ever sent between frames, so ending a resync at one leaves the parser outside a
+# frame. Those two facts live in cs193v-portwatch, and nothing in the parser can check them. The
+# template set is a literal, so a new or changed pw_emit is made to come and look here.
+#
+# WHAT THIS CANNOT SEE: it reads only double-quoted `pw_emit "..."` literals. The variable parts
+# are held elsewhere -- $PW_PROTO is parsed only in the handshake, where no resync applies; $e is
+# port:class from closed vocabularies (18-portwatch-fuzz.sh); $n is a count.
+pw_emits="$(grep -oE 'pw_emit "[^"]*"' "$PRIVATE/files/cs193v-portwatch" | LC_ALL=C sort -u)"
+assert_eq "watcher:the-emitted-lines-are-the-known-set" \
+          'pw_emit "$PW_PROTO"|pw_emit "$e"|pw_emit "03000:lo"|pw_emit "3000:lo"|pw_emit "3000:wat"|pw_emit "BEGIN $n"|pw_emit "BEGIN 1"|pw_emit "BEGIN 3"|pw_emit "END"|pw_emit "ERR cannot-create-tick-fifo"|pw_emit "ERR cannot-open-tick-fifo"|pw_emit "ERR deliberate-fault"|pw_emit "WARN too-many-listeners $n"|pw_emit "cs193v-portwatch 99"' \
+          "$(printf '%s\n' "$pw_emits" | do_tr '\n' '|' | sed 's/|$//')"
+assert_eq "watcher:no-line-carries-a-resync-marker-past-its-start" "" \
+          "$(printf '%s\n' "$pw_emits" | grep -E '^pw_emit ".+(BEGIN |WARN |ERR )' || true)"
+assert_eq "watcher:a-WARN-comes-before-the-frame-it-describes" \
+          'pw_emit "WARN too-many-listeners $n"|pw_emit "BEGIN $n"|pw_emit "END"|' \
+          "$(fn_body pw_watch "$PRIVATE/files/cs193v-portwatch" | grep -oE 'pw_emit "(WARN|BEGIN|END)[^"]*"' | do_tr '\n' '|')"
 
 # ─── ...AND run_timeout's TWO DRAINS, PINNED FOR THE SAME REASON  (#170) ──────
 # THE SAME ARGUMENT AS THE BLOCK ABOVE, on a different mechanism. On macOS a write to fd 1 that
@@ -3794,6 +3818,27 @@ done
 # rejects goes silently green inside the house `$( ... || true )` idiom on exactly one platform.
 pf_hits="$(lint_grep --strip-comments -E -e '[$][(][^)]*[$][{]?(TUNNEL_PID|TUNNEL_SUP_PIDFILE)' -- "$REPO/cs193v")"
 assert_eq "gate:no-pidfile-is-read-through-a-fork" "" "$pf_hits"
+
+# ONE WRITER AT A TIME (#343). The supervisor restarts a master that dies, so every other path that
+# starts or stops one must stop the supervisor FIRST, or the two race and one master is stranded
+# under a socket the other deleted. Line ORDER within each function, comments stripped, and each
+# needle found at all -- a missing one would otherwise compare an empty line number and pass.
+first_line() { printf '%s\n' "$2" | grep -nF -- "$1" | head -1 | cut -d: -f1; }
+for spec in 'reset-tunnel-stops-the-supervisor-first|verb_reset_tunnel|tunnel_sup_stop|tunnel_kill_pid' \
+            'ensure-tunnel-stops-the-supervisor-first|ensure_tunnel|tunnel_sup_stop|tunnel_start' \
+            'check-clock-takes-the-tunnel-down-before-the-vm|check_clock|tunnel_down|podman machine stop' \
+            'tunnel-down-stops-the-supervisor-first|tunnel_down|tunnel_sup_stop|-O exit'; do
+    name="${spec%%|*}"; rest="${spec#*|}"
+    fn="${rest%%|*}"; rest="${rest#*|}"; a="${rest%%|*}"; b="${rest#*|}"
+    body="$(run_checker fn_body "$fn" "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+    la="$(first_line "$a" "$body")"; lb="$(first_line "$b" "$body")"
+    if [ -n "$la" ] && [ -n "$lb" ] && [ "$la" -lt "$lb" ]; then
+        pass "supervisor:$name"
+    else
+        fail "supervisor:$name" "in $fn, '$a' is at line ${la:-<missing>} and '$b' at
+${lb:-<missing>}: the supervisor would still be running when the master is touched."
+    fi
+done
 
 sup_body="$(run_checker fn_body verb_supervise "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 assert_not_contains "supervisor:the-loop-is-not-behind-a-pipe" "| sup_loop" "$sup_body"

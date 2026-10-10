@@ -528,6 +528,57 @@ fi
 assert_match "read:the-sequence-is-line-line-gap-line-end" \
              '^line:alpha line:beta( timeout)+ line:gamma ended$' "$RD_SAW"
 
+# ─── a deadline that lands part-way through a line  (#340) ─────────────────────
+# THE TABLE ABOVE'S SECOND ROW, AND WHAT IT COSTS THE PARSER. A timeout with partial input has
+# already consumed the front of the line -- 3.2 discards it, 4.4 and later leave it in the variable,
+# which nothing reads after a timeout -- and the rest then arrives as a line of its own. bash 5.2
+# and later make this deterministic: they check the deadline against the wall clock after every
+# byte, so the first line after a WSL resume is torn every time. 17-portparse-fuzz.sh holds the
+# parser's half; this is the gate as sup_loop drives it, dynports_read then dynports_line, over a
+# REAL torn read on whatever bash runs it.
+#
+# THE STIMULUS IS THE RD.FIFO ONE ABOVE: this process's own fifo, opened read-write, so nothing can
+# end it and nothing races it. The front of a line goes in, ONE dynports_read consumes it and times
+# out, and only then does the rest go in. Program order is the whole synchronisation -- there is
+# no second process and no sleep -- and the one second each tear spends is the deadline under test.
+gate_drain() {                        # gate_drain N   <&7 -> GD_FRAMES GD_SKIPPED GD_FATAL GD_FIRST
+    local n=$1
+    while [ "$n" -gt 0 ]; do
+        dynports_read 1 <&7
+        case "$?" in 1) GD_FATAL="unexpected timeout"; return ;; 2) GD_FATAL="ended"; return ;; esac
+        n=$(( n - 1 ))
+        [ -n "$GD_WANTFIRST" ] && { GD_FIRST="$DYNPORTS_LINE"; GD_WANTFIRST=''; }
+        dynports_line "$DYNPORTS_LINE"
+        case "$?" in
+            1) GD_FRAMES="${GD_FRAMES}[${DYNPORTS_FRAME}]" ;;
+            2) GD_FATAL="$DYNPORTS_FATAL"; return ;;
+            3) GD_SKIPPED="$GD_SKIPPED|$DYNPORTS_LINE" ;;
+        esac
+    done
+}
+torn_case() {                         # torn_case HEAD PART REST
+    RDT="$WORK/rd.torn"; mkfifo "$RDT"; exec 7<>"$RDT"; rm -f "$RDT"
+    GD_FRAMES=''; GD_SKIPPED=''; GD_FATAL=''; GD_FIRST=''; GD_WANTFIRST=''
+    dynports_reset
+    printf '%b' "$1" >&7; gate_drain "$(printf '%b' "$1" | grep -c '')"
+    printf '%s' "$2" >&7
+    dynports_read 1 <&7; GD_TEAR=$?   # THE TEAR: it takes PART, then waits out its own deadline
+    GD_WANTFIRST=1
+    printf '%b' "$3" >&7; [ -n "$GD_FATAL" ] || gate_drain "$(printf '%b' "$3" | grep -c '')"
+    exec 7<&-
+}
+TH='cs193v-portwatch 1\nBEGIN 1\n28343:lo\nEND\n'
+torn_case "$TH" B 'EGIN 1\n28343:lo\nEND\nBEGIN 1\n28343:lo\nEND\n'
+# THE FIRST TWO ARE GUARDS AND THE INSTRUMENT'S ALIBI: the tearing read was a timeout and not an
+# ending, and the line after it really did arrive alone. If this process were ever descheduled for
+# longer than the deadline, the second goes red, rather than everything after it passing.
+assert_eq "read:a-deadline-mid-line-is-a-timeout" "1" "$GD_TEAR"
+assert_eq "read:the-rest-of-a-torn-line-arrives-alone" "EGIN 1" "$GD_FIRST"
+assert_eq "read:a-torn-BEGIN-resumes-at-the-next-frame" "[28343:lo][28343:lo]|" "$GD_FRAMES|$GD_FATAL"
+torn_case "${TH}BEGIN 1\n" 2 '8343:lo\nEND\nBEGIN 1\n28343:lo\nEND\n'
+assert_eq "read:the-rest-of-a-torn-record-arrives-alone" "8343:lo" "$GD_FIRST"
+assert_eq "read:a-torn-record-is-not-a-port" "[28343:lo][28343:lo]|" "$GD_FRAMES|$GD_FATAL"
+
 # ─── A DEAD TERMINAL, AND THE BYTES A FAILED WRITE LEAVES BEHIND  (#170) ──────
 # WHAT THIS IS ABOUT, because the failure does not look like its cause. On macOS a write(2) to
 # fd 1 that FAILS leaves the unwritten bytes in bash 3.2's stdout buffer -- BSD stdio keeps the
