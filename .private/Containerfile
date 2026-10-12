@@ -791,12 +791,12 @@ COPY files/ /tmp/cs193v-files/
 #     10-cs193v-shell.sh, because the hook composes PROMPT_COMMAND and anything assigning
 #     that wholesale afterwards would silently drop it.
 #
-#     The new-tab hook, files/tmux/newtab.bash, goes just ahead of it, and runs only in a shell
-#     a tmux new-tab binding has marked. It moves the shell -- into the real directory behind the
-#     /proc link tmux started it in, or to ~/projects -- so it has to finish before the label
-#     hook's DEBUG trap and PS1's \w ever look at where the shell is. bash.bashrc rather than
-#     profile.d, which would be the other way to reach every tab: 10-cs193v-shell.sh shows that
-#     route means two copies, both run, and a profile.d copy that must also parse as POSIX sh.
+#     The new-tab hook, files/tmux/newtab.bash, goes just ahead of it -- the label hook is the one
+#     that must be last -- and runs only in a shell a tmux new-tab binding has marked. It moves
+#     the shell into the real directory behind the /proc link tmux started it in, or to
+#     ~/projects. bash.bashrc rather than profile.d, which would be the other way to reach every
+#     tab: 10-cs193v-shell.sh shows that route means two copies, both run, and a profile.d copy
+#     that must also parse as POSIX sh.
 #
 #     VALIDATED at build time, on the same principle as `sshd -t` and the JSON parse above,
 #     and with more reason than either: tmux is now the only way in, so a configuration
@@ -923,7 +923,7 @@ RUN set -eux; \
     install -m 0644 /tmp/cs193v-files/tmux/tmux.conf     /etc/cs193v/tmux.conf; \
     install -m 0644 /tmp/cs193v-files/tmux/tabname.bash  /etc/cs193v/tabname.bash; \
     install -m 0644 /tmp/cs193v-files/tmux/newtab.bash   /etc/cs193v/newtab.bash; \
-    printf '\n# CS193V: a new tab opens where the tab it came from was. Before the tab labels.\nif [ -n "${CS193V_NEW_TAB:-}" ]; then . /etc/cs193v/newtab.bash; fi\n' >> /etc/bash.bashrc; \
+    printf '\n# CS193V: a new tab opens where the tab it came from was.\nif [ -n "${CS193V_NEW_TAB:-}" ]; then . /etc/cs193v/newtab.bash; fi\n' >> /etc/bash.bashrc; \
     printf '\n# CS193V tab labels inside tmux. Must stay last: it composes PROMPT_COMMAND.\nif [ -n "${TMUX:-}" ]; then . /etc/cs193v/tabname.bash; fi\n' >> /etc/bash.bashrc; \
     bash -n /etc/cs193v/tabname.bash; \
     bash -n /etc/cs193v/newtab.bash; \

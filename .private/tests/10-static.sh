@@ -3427,14 +3427,11 @@ done
 # does not -- that reaches tab one only, which is a silent half-working state.
 assert_ok  "tmux:containerfile-wires-the-tabname-hook" \
            grep -q 'etc/cs193v/tabname.bash; fi' $PRIVATE/Containerfile
-# The new-tab hook (#493) the same way, and AHEAD of the tab labels: it moves the shell, and
-# tabname's DEBUG trap and PS1's \w should only ever see where the shell ended up.
+# The new-tab hook (#493) the same way: every tab a binding opens is an interactive bash.
 assert_ok  "tmux:containerfile-installs-newtab" \
-           grep -q 'tmux/newtab.bash   /etc/cs193v/newtab.bash' $PRIVATE/Containerfile
-newtab_at="$(grep -n 'etc/cs193v/newtab.bash; fi' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-tabname_at="$(grep -n 'etc/cs193v/tabname.bash; fi' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-assert_ok  "tmux:newtab-sourced-before-tabname" \
-           test "${newtab_at:-0}" -gt 0 -a "${newtab_at:-0}" -lt "${tabname_at:-0}"
+           grep -qE 'tmux/newtab\.bash +/etc/cs193v/newtab\.bash' $PRIVATE/Containerfile
+assert_ok  "tmux:containerfile-wires-the-newtab-hook" \
+           grep -q 'etc/cs193v/newtab.bash; fi' $PRIVATE/Containerfile
 # A bad config is now a container nobody can get into, so it must fail the BUILD.
 assert_ok  "tmux:containerfile-validates-the-config" \
            grep -q 'tmux -L cs193vbuild' $PRIVATE/Containerfile
@@ -3457,6 +3454,14 @@ assert_eq  "tmux:six-root-tab-bindings" "6" "$n"
 n="$(grep -cE '^bind -T copy-mode (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
      $PRIVATE/files/tmux/tmux.conf || true)"
 assert_eq  "tmux:six-copy-mode-tab-bindings" "6" "$n"
+# Every binding that opens a tab opens it in the current tab's shell directory (#493): the two
+# keys and the chip, in both tables, each the same new-window. The tmux harness proves what that
+# does; this is the millisecond check that none of the six was left behind.
+n="$(grep -E '^bind ' $PRIVATE/files/tmux/tmux.conf | grep -c 'new-window' || true)"
+assert_eq  "tmux:six-new-tab-bindings" "6" "$n"
+n="$(grep -E '^bind ' $PRIVATE/files/tmux/tmux.conf |
+     grep -cF 'new-window -e CS193V_NEW_TAB=1 -c "/proc/#{pane_pid}/cwd"' || true)"
+assert_eq  "tmux:every-new-tab-binding-follows-the-shell" "6" "$n"
 # The escape hatch out of copy mode. Without it a stray scroll leaves a dead keyboard.
 #
 # GUARDED, and the guard is the whole assertion. tmux's `Any` matches MOUSE events as well as
@@ -4317,10 +4322,12 @@ assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
 wd="$(sed -n 's/^WORKDIR //p' $PRIVATE/Containerfile | head -1)"
 assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" \
           "$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
-# And where a new tab lands when the tab it came from cannot be followed (#493).
+# And where a new tab lands when the tab it came from cannot be followed (#493). A missing line
+# reads as a sentence rather than as empty, so two failed extractions cannot agree with each other.
+fallback="$(sed -n 's/^_cs193v_fallback=//p' $PRIVATE/files/tmux/newtab.bash 2>/dev/null | head -1)"
 assert_eq "newtab:fallback-matches-MOUNT_DST" \
           "$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)" \
-          "$(sed -n 's/^_cs193v_fallback=//p' $PRIVATE/files/tmux/newtab.bash 2>/dev/null | head -1)"
+          "${fallback:-<no _cs193v_fallback= line in newtab.bash>}"
 
 # config_hash decides whether an existing container is stale. It must cover the mount
 # DESTINATION, not just the source: when this moved from /workspaces to ~/projects, every
