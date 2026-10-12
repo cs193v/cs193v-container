@@ -1453,8 +1453,9 @@ command's clothes**.
 that stand in for a checkout live under `HOSTILE_NAME` (`lib/assert.sh`), every command string
 handed to a pty is built with `sh_quote` (`lib/portable.sh`), and `10-static.sh` runs an SC2086
 pass that fails on an unquoted expansion. **The image, container and live tiers drive the real
-launcher**, which cannot yet build or mount from a path holding `"`, `,` or `\` (#530, #531,
-#532), so those tiers and the four checks that read `cs193v --dev-steps` need a path without them.
+launcher**, which cannot yet build, mount or tunnel from a path holding a space, `'`, `"`, `%`,
+`,` or `\` (#530, #531, #532, #534), so those tiers and the four checks that read
+`cs193v --dev-steps` need a path without them.
 
 **Bringing the container up on a new platform is one command** (#160):
 

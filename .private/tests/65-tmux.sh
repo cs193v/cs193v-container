@@ -153,7 +153,11 @@ podman exec "$NAME" rm -rf "$STALE" >/dev/null 2>&1 || true
 # that actually ran.
 podman exec "$NAME" rm -rf "$DEST" >/dev/null 2>&1 || true
 podman exec "$NAME" mkdir -p "$DEST" >/dev/null 2>&1
-if ! podman cp "$HARNESS_SRC/." "$NAME:$DEST/" >/dev/null 2>&1; then
+# FROM A COPY UNDER $TMP (#436): podman cp reads its host path as a GLOB -- a relative one too, it
+# resolves it first -- so a checkout under a directory with a `[` in its name matched nothing and
+# copied nothing. Measured, both spellings.
+rm -rf "$TMP/harness"
+if ! { mkdir -p "$TMP/harness" && cp -R "$HARNESS_SRC/." "$TMP/harness/" && podman cp "$TMP/harness/." "$NAME:$DEST/"; } >/dev/null 2>&1; then
     fail "tmux:harness-copied-into-the-container" "podman cp failed"
     exit 0
 fi
