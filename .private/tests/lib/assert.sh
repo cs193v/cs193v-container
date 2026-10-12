@@ -964,6 +964,7 @@ dyn_ports() {                         # dyn_ports [N] -> $DYN_PORTS, at least N 
     [ "$i" -ge "$want" ] && return 0
     fwd_init
     while [ "$i" -lt "$want" ]; do
+        # shellcheck disable=SC2086   # deliberately word-split: the ports already taken, one word each
         p="$(dyn_free_port $got)" || break
         # dyn_serve's rc, WHICH USED TO BE DROPPED (#178). `podman exec -d` failing leaves nothing
         # listening inside; the wait below then times out correctly and blames the TUNNEL, whose
@@ -1044,6 +1045,7 @@ Check:  ./cs193v doctor
 free_unforwarded_ports() {            # free_unforwarded_ports N -> up to N ports, space separated
     local want="${1:-1}" out='' n=0 p
     while [ "$n" -lt "$want" ]; do
+        # shellcheck disable=SC2086   # deliberately word-split: the ports already taken, one word each
         p="$(dyn_free_port $out)" || break
         out="$out $p"
         n=$((n + 1))

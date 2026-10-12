@@ -230,7 +230,7 @@ assert_contains "version:refusal-shows-found"  "4.3.1" "$out"
 # reports it -- so raising the floor would redden this for the wrong reason. The sed is
 # 25-installer.sh:137's idiom, reading the same constant for the same reason.
 assert_contains "version:refusal-shows-needed" \
-                "$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)" \
+                "$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")" \
                 "$out"
 # THE REMEDY SITS PAST THE LAST PLACEHOLDER. err.podman-too-old opens with "you have: {{FOUND}} /
 # we need: {{NEED}}", so msg_text stops before it and everything the message offers is in the
@@ -490,6 +490,7 @@ for spec in "rebuild:--rebuild" "rebuild-logout:--rebuild --logout" "rebuild-noc
     launcher >/dev/null 2>&1
     shim_set state running
     shim_clear_log
+    # shellcheck disable=SC2086   # deliberately word-split: $v is a launcher flag, or nothing
     assert_says_key "lifecycle:$name-refuses-while-a-session-is-live" \
                     err.session-in-use "$(launcher $v)"
     assert_eq "lifecycle:$name-does-not-remove-a-live-container" "0" "$(shim_count '^rm ')"
@@ -505,6 +506,7 @@ for spec in "rebuild:--rebuild" "rebuild-logout:--rebuild --logout"; do
     name="${spec%%:*}"; v="${spec#*:}"
     shim_new
     shim_clear_log
+    # shellcheck disable=SC2086   # deliberately word-split: $v is a launcher flag, or nothing
     launcher $v >/dev/null 2>&1
     assert_eq "lifecycle:$name-leaves-nothing-running" "exited" "$(shim_state)"
 done

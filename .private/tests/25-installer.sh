@@ -51,9 +51,9 @@ ICAT="$PRIVATE/course-install-messages.txt"
 # bundle name is also the Start Menu label and the string students are told to look for; the two
 # fixed paths are the entire interface between course-install.sh and the .cmd. Spelling any of
 # them in this file would be the copy that drifts.
-MAC_LABEL="$(sed -n 's/^MAC_APP_LABEL="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
-WIN_SHIM_PATH="$(sed -n 's/^WIN_SHIM_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
-WIN_ICON_PATH="$(sed -n 's/^WIN_ICON_NAME="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+MAC_LABEL="$(sed -n 's/^MAC_APP_LABEL="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+WIN_SHIM_PATH="$(sed -n 's/^WIN_SHIM_NAME="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
+WIN_ICON_PATH="$(sed -n 's/^WIN_ICON_NAME="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
 # AND THE SETTINGS #350 ADDED: the two podman versions a Mac is given, and the two macOS floors an
 # Intel Mac is held to. Through setting_of, which answers the checker sentinel rather than an empty
 # string when a constant is missing or doubled, so the assertions that read them fail and say why.
@@ -117,7 +117,7 @@ assert_no_signoff() {                 # assert_no_signoff NAME TEXT
     pass "$1"
 }
 
-carve_func $PRIVATE/course-install.sh say_done "$TMP/say_done.sh"
+carve_func "$PRIVATE/course-install.sh" say_done "$TMP/say_done.sh"
 if [ -s "$TMP/say_done.sh" ]; then pass "extract:say-done"
 else fail "extract:say-done" "could not carve say_done out of course-install.sh"; fi
 
@@ -194,13 +194,13 @@ record "shim:leftover-dirs-from-an-earlier-run" "$(shim_sweep_stale)"
 #
 # carve_func (lib/shared.sh) is this sed, lifted out because three other places now need it;
 # the reason it anchors on /^name()/ rather than the brace is recorded there.
-carve_func $PRIVATE/files/cs193v-ui.sh version_lt "$TMP/vl_ui.sh"
+carve_func "$PRIVATE/files/cs193v-ui.sh" version_lt "$TMP/vl_ui.sh"
 if [ "$(wc -l < "$TMP/vl_ui.sh" | do_tr -d ' ')" -gt 3 ]; then pass "extract:vl_ui"
 else fail "extract:vl_ui" "could not extract version_lt"; exit 1; fi
 # AND NOBODY ELSE CARRIES ONE, which is the half that catches a copy coming back rather than
 # the shared one going wrong.
 assert_eq "version_lt:course-install-has-no-copy" "0" \
-          "$(grep -c '^version_lt() {$' $PRIVATE/course-install.sh)"
+          "$(grep -c '^version_lt() {$' "$PRIVATE/course-install.sh")"
 
 # 5.7.0 vs 5.7.0 is the case that matters most: MIN_PODMAN is 5.7.0 and Ubuntu 26.04 ships
 # exactly that, so "equal" must mean "acceptable" or every stock Ubuntu student is refused.
@@ -212,6 +212,7 @@ run_vl() { ( . "$TMP/$1.sh"; version_lt "$2" "$3" ); }
 for pair in "5.7.0 5.7.0 no" "5.6.0 5.7.0 yes" "5.6.9 5.7.0 yes" "5.7.1 5.7.0 no" \
             "10.0.0 5.7.0 no" "5.7 5.7.0 no" "5.7.0 5.7 no" "6 5.7.0 no" \
             "4.9.3 5.7.0 yes" "0.0.1 5.7.0 yes" "5.10.0 5.9.0 no" "5.9.0 5.10.0 yes"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $pair
     a="$1"; b="$2"; want="$3"
     assert_eq "version_lt:ui($a<$b)" "$want" "$(run_vl vl_ui "$a" "$b")"
@@ -247,27 +248,27 @@ done
 # FIRST and the launcher runs LAST, so a floor either of them disagreed about produced an install
 # that passed every reassuring step and then a STOP box from the launcher.
 for plat in LINUX MACOS; do
-    mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" $PRIVATE/files/cs193v-ui.sh)"
+    mp_lnch="$(sed -n "s/^MIN_PODMAN_$plat=\"\([^\"]*\)\".*/\1/p" "$PRIVATE/files/cs193v-ui.sh")"
     # NON-EMPTY FIRST, and this is the guard rather than pedantry: a renamed constant or a changed
     # quoting style would make the sed match nothing, and an empty-vs-empty comparison passes
     # forever -- the exact trap this file records at its top for version_lt.
     assert_ne "min-podman:ui-declares-$plat"  "" "$mp_lnch"
     assert_eq "min-podman:course-install-declares-no-$plat-floor" "0" \
-              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/course-install.sh)"
+              "$(grep -c "^MIN_PODMAN_$plat=" "$PRIVATE/course-install.sh")"
     record    "min-podman:$plat-floor" "$mp_lnch"
     # EXACTLY ONE DECLARATION IN EACH, because a second one later in either file would shadow the
     # first and the check above would read the wrong number. Counted rather than assumed: the sed
     # takes every match, so two lines would give "4.9.0\n5.7.0" and compare unequal by luck
     # rather than by design -- and two IDENTICAL extra lines would compare equal and hide it.
     assert_eq "min-podman:ui-declares-$plat-once"  "1" \
-              "$(grep -c "^MIN_PODMAN_$plat=" $PRIVATE/files/cs193v-ui.sh)"
+              "$(grep -c "^MIN_PODMAN_$plat=" "$PRIVATE/files/cs193v-ui.sh")"
 done
 # AND THE MAC FLOOR IS NEVER THE LOWER OF THE TWO, which is the whole point of splitting them: the
 # Linux floor exists to be lowered as distros are measured, and the macOS one exists to stay put.
 # Someone lowering "the floor" and touching only the pair they noticed would invert that silently.
 # Checked with the installer's own version_lt, already extracted above.
-mp_lin="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
-mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+mp_lin="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
+mp_mac="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
 assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
           "$(run_vl vl_ui "$mp_mac" "$mp_lin")"
 # AND WHAT THE INSTALLER PUTS ON A MAC CLEARS THAT FLOOR, on both architectures (#350). The Intel
@@ -275,6 +276,7 @@ assert_eq "min-podman:mac-floor-is-not-below-the-linux-one" "no" \
 # at every start -- so a floor raised past 5.8 would turn every Intel install into a STOP box on
 # first launch, with nothing on the installer's side to say so.
 for row in "ARM64 $PKG_VER" "AMD64 $PKG_VER_AMD64"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $row
     assert_eq "min-podman:the-$1-pin-clears-the-mac-floor" "no" "$(run_vl vl_ui "$2" "$mp_mac")"
 done
@@ -290,24 +292,24 @@ done
 # installer runs first and reports success, the launcher runs last and cannot find podman. There
 # is one declaration now and both read it, so the comparison has nothing to compare; what is
 # left is that the shared file declares it exactly once and that nothing else declares one.
-pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+pkg_lnch="$(sed -n 's/^PODMAN_PKG_ID="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
 # NON-EMPTY FIRST, both of them, for the reason the floors above give: empty-vs-empty passes
 # forever, and a renamed constant makes the sed match nothing.
 assert_ne "probe:ui-declares-the-package-id"  "" "$pkg_lnch"
 record    "probe:package-id" "$pkg_lnch"
 assert_eq "probe:course-install-declares-no-package-id" "0" \
-          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/course-install.sh)"
+          "$(grep -c '^PODMAN_PKG_ID=' "$PRIVATE/course-install.sh")"
 assert_eq "probe:ui-declares-the-package-id-once"  "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/files/cs193v-ui.sh)"
+          "$(grep -c '^PODMAN_PKG_ID=' "$PRIVATE/files/cs193v-ui.sh")"
 
 # AND THE BODIES, not just the constant. carve_func's own header explains why an empty carving
 # is the trap here: sourced, it asserts nothing and passes.
-carve_func $PRIVATE/files/cs193v-ui.sh ensure_podman_path "$TMP/probe_ui.sh"
+carve_func "$PRIVATE/files/cs193v-ui.sh" ensure_podman_path "$TMP/probe_ui.sh"
 assert_ok "extract:probe_ui"  test -s "$TMP/probe_ui.sh"
 # AND NOBODY ELSE CARRIES ONE. The byte-for-byte diff that used to live here compared the
 # installer's copy with the launcher's; this is the assertion that catches a copy coming back.
 assert_eq "probe:course-install-has-no-probe" "0" \
-          "$(grep -c '^ensure_podman_path() {$' $PRIVATE/course-install.sh)"
+          "$(grep -c '^ensure_podman_path() {$' "$PRIVATE/course-install.sh")"
 
 # ─── and what that code actually decides  (issue #121) ─────────────────────────
 # Driven against BOTH carvings, so a divergence that somehow survived the diff above still
@@ -467,7 +469,7 @@ MAC_VM_MAX_GB=8
 MAC_VM_MIN_GB=4
 host_ram_mb() { printf '%s' "$FAKE_RAM_MB"; }
 EOF
-sed -n '/^mac_vm_target_mb()/,/^}$/p' $PRIVATE/course-install.sh >> "$TMP/vm.sh"
+sed -n '/^mac_vm_target_mb()/,/^}$/p' "$PRIVATE/course-install.sh" >> "$TMP/vm.sh"
 vm_for() { ( . "$TMP/vm.sh"; FAKE_RAM_MB="$1" mac_vm_target_mb ); }
 #  4 GB: 50% = 2, floored at 4 -> 4 GB (the whole Mac; a machine this small is out of scope)
 #  8 GB: 50% = 4 -> 4 GB
@@ -915,9 +917,9 @@ assert_eq "unsupported-os:exits-1" "1" \
 # OUT OF install-utils.sh SINCE #217, not course-install.sh. The table and the steps that need
 # root moved there when the root pass that prepares a new CS193V WSL instance became a second
 # reader of them -- which is the same reason this carve exists: one copy of a package name.
-carve_func $PRIVATE/install-utils.sh os_release_field "$TMP/orf.sh"
-carve_func $PRIVATE/install-utils.sh distro_family    "$TMP/df.sh"
-carve_func $PRIVATE/install-utils.sh distro_packages  "$TMP/dp.sh"
+carve_func "$PRIVATE/install-utils.sh" os_release_field "$TMP/orf.sh"
+carve_func "$PRIVATE/install-utils.sh" distro_family    "$TMP/df.sh"
+carve_func "$PRIVATE/install-utils.sh" distro_packages  "$TMP/dp.sh"
 for f in orf df dp; do
     if [ -s "$TMP/$f.sh" ]; then pass "extract:$f"
     else fail "extract:$f" "could not carve the distro helpers out of install-utils.sh"; fi
@@ -939,7 +941,7 @@ shim_set version "podman version 4.3.1"
 out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/old")"
 # Darwin is the same thing platform() keys its macos arm off, so this forks where it forks.
 if [ "$(uname -s)" = Darwin ]; then
-    po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+    po_floor="$(sed -n 's/^MIN_PODMAN_MACOS="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
     po_key=err.podman-old-mac
     # THE REMEDY IS A NESTED MESSAGE ON THIS ARM rather than a table entry: the Mac branch picks
     # how-homebrew or how-pkg from where `command -v podman` found it, and under this fixture that
@@ -949,7 +951,7 @@ if [ "$(uname -s)" = Darwin ]; then
     # it will APPEAR -- see the needle below.
     po_fix="$(msg_text_tail err.podman-old-mac.how-pkg "$ICAT")"
 else
-    po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' $PRIVATE/files/cs193v-ui.sh)"
+    po_floor="$(sed -n 's/^MIN_PODMAN_LINUX="\([^"]*\)".*/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
     po_key=err.podman-old-linux
     po_fix="$(host_upgrade_cmd)"
 fi
@@ -1490,9 +1492,9 @@ EOF
 # these assertions can no longer pass against a private copy of either that had drifted from it.
 {
     printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
-    sed -n '/^msg() {$/,/^}$/p'            $PRIVATE/files/cs193v-ui.sh
-    sed -n '/^notes() {/p'                 $PRIVATE/course-install.sh
-    sed -n '/^check_disk()/,/^}$/p'        $PRIVATE/course-install.sh
+    sed -n '/^msg() {$/,/^}$/p'            "$PRIVATE/files/cs193v-ui.sh"
+    sed -n '/^notes() {/p'                 "$PRIVATE/course-install.sh"
+    sed -n '/^check_disk()/,/^}$/p'        "$PRIVATE/course-install.sh"
 } >> "$TMP/cd.sh"
 if [ "$(grep -c '.' "$TMP/cd.sh")" -gt 8 ]; then pass "extract:check_disk"
 else fail "extract:check_disk" "could not extract check_disk"; fi
@@ -2393,6 +2395,7 @@ run_carved() { ( . "$TMP/carved-$1.sh"; "$@" ); }   # run_carved FUNCTION [ARGS.
 shim_new
 for row in "1 x86_64 arm64" "- arm64 arm64" "0 x86_64 x86_64" "- x86_64 x86_64" \
            "yes x86_64 x86_64"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $row
     shim_fake_uname Darwin "$2"
     if [ "$1" = - ]; then shim_fake_sysctl 17179869184
@@ -2404,6 +2407,7 @@ done
 # Because the cost of the two mistakes is not the same: calling a PKU Mac clean lets it hang
 # forever, and calling a clean one PKU asks it to install a macOS update it can have for free.
 for row in "pku yes" "nopku no" "absent yes" "empty yes"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $row
     case "$1" in
         pku)    shim_fake_sysctl 17179869184 "machdep.cpu.leaf7_features=$SHIM_LEAF7_PKU" ;;
@@ -2423,6 +2427,7 @@ cat "$TMP/vl_ui.sh" >> "$TMP/carved-intel_mac_verdict.sh"
 for row in "12.7.6 no too-old" "12.7.6 yes needs-update" "13.0 no ok" "13.0 yes needs-update" \
            "14.6.1 no ok" "14.6.1 yes needs-update" "15.4.1 no ok" "15.4.1 yes needs-update" \
            "15.5 yes ok" "15.5.0 yes ok" "26.0 yes ok"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $row
     assert_eq "intel-mac:verdict($1,pku=$2)" "$3" \
               "$(INTEL_MACOS_MIN="$IMAC_MIN" INTEL_PKU_MACOS_MIN="$IMAC_PKU_MIN" \
@@ -4434,10 +4439,10 @@ assert_not_contains "helper:does-not-exec-the-launcher" 'exec ./cs193v' "$helper
 # STILL PORTABLE, AND DELIBERATELY SO: the function copies a directory and writes one text file,
 # neither of which needs a Mac. That is what keeps a Linux developer able to break this code and
 # find out. The read-back names come out of the installer so there is one definition of each.
-MAC_RECORD_REL="$(sed -n 's/^MAC_APP_RECORD="\([^"]*\)".*/\1/p' $PRIVATE/course-install.sh)"
+MAC_RECORD_REL="$(sed -n 's/^MAC_APP_RECORD="\([^"]*\)".*/\1/p' "$PRIVATE/course-install.sh")"
 assert_ne "mac-app:record-path-was-readable" "" "$MAC_RECORD_REL"
 
-carve_func $PRIVATE/course-install.sh install_mac_app "$TMP/mac_app.sh"
+carve_func "$PRIVATE/course-install.sh" install_mac_app "$TMP/mac_app.sh"
 if [ -s "$TMP/mac_app.sh" ]; then pass "extract:mac-app"
 else fail "extract:mac-app" "could not carve install_mac_app out of course-install.sh"; fi
 
@@ -4514,7 +4519,7 @@ assert_no_file "mac-app:writes-no-record-off-macos" "$TMP/mac/home-linux/$MAC_RE
 # and the .cmd points a shortcut at that fixed path. No student-specific value crosses the
 # boundary, which is what keeps `for /f` out of the .cmd and means none of this depends on WSL
 # interop being available from inside the student pass.
-carve_func $PRIVATE/course-install.sh install_win_shim "$TMP/win_shim.sh"
+carve_func "$PRIVATE/course-install.sh" install_win_shim "$TMP/win_shim.sh"
 if [ -s "$TMP/win_shim.sh" ]; then pass "extract:win-shim"
 else fail "extract:win-shim" "could not carve install_win_shim out of course-install.sh"; fi
 
@@ -4801,7 +4806,7 @@ assert_eq "sign-off:windows-without-a-shortcut-falls-back" \
 say_done_as_a_linux_install() {       # -> the key, or the shell's own error text
     (
         set -u
-        eval "$(grep '^[A-Z][A-Z0-9_]*_READY=' $PRIVATE/course-install.sh)"
+        eval "$(grep '^[A-Z][A-Z0-9_]*_READY=' "$PRIVATE/course-install.sh")"
         . "$TMP/say_done.sh"
         msg() { printf '%s' "$1"; }
         win_projects_path() { printf 'UNC'; }
@@ -4819,7 +4824,7 @@ record    "sign-off:the-flags-say-done-reads" "${sd_flags:-none}"
 assert_ne "sign-off:the-flag-list-was-readable" "" "$sd_flags"
 for v in $sd_flags; do
     assert_ne "sign-off:$(printf '%s' "$v" | do_tr 'A-Z_' 'a-z-')-is-initialised-before-the-flow" \
-              "" "$(grep "^$v=" $PRIVATE/course-install.sh)"
+              "" "$(grep "^$v=" "$PRIVATE/course-install.sh")"
 done
 # AND THE WINDOWS FLAG WINS OVER A STALE MAC FLAG. Nothing sets both today; the arms are ordered
 # so that if something ever did, a Windows student is not sent to an Applications folder.
@@ -4839,7 +4844,7 @@ assert_eq "sign-off:windows-wins-over-a-mac-flag" \
 #
 # READ OFF THE CALL SEQUENCE, not the function definitions, which sit elsewhere in the file and
 # in a different order on purpose.
-flow="$(sed -n '/^say_welcome$/,/^say_done$/p' $PRIVATE/course-install.sh \
+flow="$(sed -n '/^say_welcome$/,/^say_done$/p' "$PRIVATE/course-install.sh" \
         | grep -vE '^[[:space:]]*(#|$)')"
 flow_n() { printf '%s\n' "$flow" | grep -n "^$1\$" | head -1 | cut -d: -f1; }
 for step in say_welcome install_files build_image smoke_test install_mac_app install_win_shim say_done; do

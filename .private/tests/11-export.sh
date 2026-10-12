@@ -210,6 +210,7 @@ assert_eq "export:no-icon-sources" "" \
 # it names the files IT hands over, which is a different claim from what the student's tree
 # needs. This is the one that gates the tree.
 sentinels="$(sed -n 's/^ *for f in \(cs193v .*\); do$/\1/p' "$PRIVATE/course-install.sh" | head -1)"
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of the names course-install.sh checks for
 n_sent="$(printf '%s\n' $sentinels | grep -c '' | do_tr -d ' ')"
 assert_eq "export:installer-sentinel-list-was-parsed" "4" "$n_sent"
 missing=''

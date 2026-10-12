@@ -288,7 +288,9 @@ while [ "$i" -lt 400 ]; do
     lcg 4; np=$(( R + 1 )); j=0; recs=()
     while [ "$j" -lt "$np" ]; do
         lcg 64000; port=$(( R + 1024 ))
-        lcg 5; set -- $CLASSES; shift $R 2>/dev/null || set -- lo
+        lcg 5
+        # shellcheck disable=SC2086   # deliberately word-split: it is a list of class names
+        set -- $CLASSES; shift $R 2>/dev/null || set -- lo
         recs[$j]="$port:${1:-lo}"; j=$(( j + 1 ))
     done
     lines=("cs193v-portwatch 1" "BEGIN $np" ${recs[@]+"${recs[@]}"} "END")

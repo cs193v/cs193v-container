@@ -69,6 +69,7 @@ LOG="$(mktemp "${TMPDIR:-/tmp}/cs193v-sighup.XXXXXX")"
 st() { podman inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null; }
 container_running() { [ "$(st)" = running ]; }
 container_stopped() { case "$(st)" in running) return 1 ;; *) return 0 ;; esac; }
+# shellcheck disable=SC2086   # deliberately word-split: $TM is a command prefix
 session_up() { podman exec "$NAME" $TM has-session -t '=cs193v' >/dev/null 2>&1; }
 srv_up()     { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$SRV_PORT/"; }
 

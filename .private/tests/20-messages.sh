@@ -52,7 +52,7 @@ MESSAGES="$PRIVATE/messages.txt"
 # LC_ALL=C throughout: under en_US.UTF-8, sort and comm disagree about how to order
 # punctuation and comm aborts with "file 1 is not in sorted order" — which VERIFICATION.md
 # §A.1 does today, so its cross-reference has never actually run.
-grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
+grep -oE '^\[\[[a-z0-9._-]+\]\]' "$PRIVATE/messages.txt" | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
 # THE LAUNCHER ALONE (#221). This reconciles msg keys against messages.txt, and the only
 # other file that reads that catalogue is gone: install-cs193v.sh is the bootstrap now and has
 # no catalogue at all, while course-install.sh reads its OWN via txt() -- which is why the
@@ -79,8 +79,19 @@ missing="$(LC_ALL=C comm -13 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
 assert_eq "keys:no-orphans" "" "$(printf '%s' "$orphans" | sed 's/ *$//')"
 assert_eq "keys:none-missing" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 
-dupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' $PRIVATE/messages.txt | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
-assert_eq "keys:no-duplicates" "" "$(printf '%s' "$dupes" | sed 's/ *$//')"
+# dup_keys CATALOGUE -> the keys it defines more than once, or $CHECKER_DIED if it was not read.
+#
+# THE READ IS CHECKED BEFORE uniq -d (#521). A catalogue grep could not open defines no key, so it
+# defines none twice, and all three of these passed having read nothing. run_checker puts the
+# failure in the value, and that line has to reach the assertion rather than uniq -d, which keeps
+# only lines that repeat.
+dup_keys() {
+    local keys
+    keys="$(run_checker grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1")"
+    case "$keys" in *"$CHECKER_DIED"*) printf '%s' "$keys"; return 0 ;; esac
+    printf '%s\n' "$keys" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ' | sed 's/ *$//'
+}
+assert_eq "keys:no-duplicates" "" "$(dup_keys "$PRIVATE/messages.txt")"
 
 # A key defined with an empty body makes msg() return "(missing message: k)" at runtime,
 # which reaches the student verbatim.
@@ -88,7 +99,7 @@ empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
               # A NOTE-ONLY BODY IS EMPTY (#221): msg() drops column-0 hashes now, so a key
               # whose body is nothing but staff notes renders as "(missing message: k)".
               /^#/{next}
-              /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' $PRIVATE/messages.txt)"
+              /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$PRIVATE/messages.txt")"
 assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 
 # ─── the installer's own catalogue ─────────────────────────────────────────────
@@ -140,8 +151,7 @@ imissing="$(LC_ALL=C comm -13 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
 assert_eq "itext:no-orphans"   "" "$(printf '%s' "$iorphans" | sed 's/ *$//')"
 assert_eq "itext:none-missing" "" "$(printf '%s' "$imissing" | sed 's/ *$//')"
 
-idupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
-assert_eq "itext:no-duplicates" "" "$(printf '%s' "$idupes" | sed 's/ *$//')"
+assert_eq "itext:no-duplicates" "" "$(dup_keys "$ICAT")"
 
 iempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
                /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$ICAT")"
@@ -267,8 +277,7 @@ grep -v '^[[:space:]]*#' "$SGS" \
 assert_eq "sgkeys:none-missing" "" \
           "$(LC_ALL=C comm -13 "$TMP/sg_defined" "$TMP/sg_used" | do_tr '\n' ' ' | sed 's/ *$//')"
 
-sgdupes="$(grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ')"
-assert_eq "sgkeys:no-duplicates" "" "$(printf '%s' "$sgdupes" | sed 's/ *$//')"
+assert_eq "sgkeys:no-duplicates" "" "$(dup_keys "$SGM")"
 
 sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
                 /^#/{next}
@@ -1269,6 +1278,7 @@ assert_says "installer:die-shows-the-diagnosis" "Unable to locate package" "$out
 # and a key's prefix stops at the first of them.
 for row in "too-old err.intel-mac-too-old 12.7.6 $IMAC_MIN" \
            "needs-update err.intel-mac-update-macos 14.6.1 $IMAC_PKU_MIN"; do
+    # shellcheck disable=SC2086   # deliberately word-split: a row of the table above
     set -- $row
     ireason="$1"; ikey="$2"; iv="$3"; imin="$4"
     out="$(bash -c '. "$1"; say_intel_mac "$2" "$3"' _ "$TMP/idie.sh" "$ireason" "$iv" 2>&1)"

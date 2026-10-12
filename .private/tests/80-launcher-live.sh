@@ -69,7 +69,7 @@ release_tunnel() {
 
 # container.args is edited in place to provoke config drift, so restore it from the backup
 # on ANY exit — an interrupted run must not leave the student's flag file modified.
-cp $REPO/.config/container.args "$TMP/ca.orig"
+cp "$REPO/.config/container.args" "$TMP/ca.orig"
 restore() {
     if [ -f "$TMP/ca.orig" ] && ! cmp -s "$TMP/ca.orig" "$REPO/.config/container.args"; then
         cp "$TMP/ca.orig" "$REPO/.config/container.args"
@@ -521,25 +521,30 @@ release_container
 # Refuse to start if container.args is already dirty. An earlier interrupted run leaving a
 # stray -p line in it made six later assertions fail in confusing ways, because the
 # container was created WITH the flag before the drift test ever appended it.
-if grep -q 9998 $REPO/.config/container.args; then
-    fail "drift:$REPO/.config/container.args-is-clean-before-we-start" \
-         "container.args already contains a 9998 test flag from an earlier interrupted run.
+#
+# ON grep'S STATUS, NOT ITS TRUTH (#523): `if grep` sent a 2 -- a file it could not read -- down
+# the else arm, and "could not read container.args" passed as "it is clean".
+grep -q 9998 "$REPO/.config/container.args"
+case $? in
+    0) fail "drift:$REPO/.config/container.args-is-clean-before-we-start" \
+            "container.args already contains a 9998 test flag from an earlier interrupted run.
 Run: git checkout -- $REPO/.config/container.args"
-    edit_remove $REPO/.config/container.args '9998'
-else
-    pass "drift:$REPO/.config/container.args-is-clean-before-we-start"
-fi
+       edit_remove "$REPO/.config/container.args" '9998' ;;
+    1) pass "drift:$REPO/.config/container.args-is-clean-before-we-start" ;;
+    *) fail "drift:$REPO/.config/container.args-is-clean-before-we-start" \
+            "could not read $REPO/.config/container.args" ;;
+esac
 # This is the one that cannot be faked: podman start reuses the container's STORED config
 # and ignores the port list entirely, so without the confighash check a student's flags
 # would be frozen at first run forever.
-cp $REPO/.config/container.args "$TMP/ca.bak"
+cp "$REPO/.config/container.args" "$TMP/ca.bak"
 # The drift vehicle is an ENV VAR, not a -p line. It used to be `-p 127.0.0.1:9998:9998`, and
 # that is now a forbidden flag: -p and the tunnel's ssh -L both bind the same host port, so a
 # static test forbids -p from appearing in container.args at all. Writing one here, even
 # temporarily, would mean the suite itself produced the state it forbids -- and an interrupted
 # run would leave it behind. An env var tests exactly the same thing: podman start reuses the
 # container's STORED config, so an edit here must not take effect without a recreate.
-echo '-e CS193V_DRIFT_TEST=9998' >> $REPO/.config/container.args
+echo '-e CS193V_DRIFT_TEST=9998' >> "$REPO/.config/container.args"
 drift_applied() { podman inspect "$NAME" --format '{{json .Config.Env}}' | grep -q 9998; }
 
 assert_contains "drift:new-flag-appears-in-print-command" "9998" "$(L --dev-print-command)"
@@ -582,13 +587,13 @@ fi
 assert_ne "drift:accepting-created-a-new-container" "$before" \
           "$(podman inspect "$NAME" --format '{{.Id}}')"
 
-edit_remove $REPO/.config/container.args '9998'
-if cmp -s "$TMP/ca.bak" $REPO/.config/container.args; then
+edit_remove "$REPO/.config/container.args" '9998'
+if cmp -s "$TMP/ca.bak" "$REPO/.config/container.args"; then
     pass "drift:$REPO/.config/container.args-restored-exactly"
 else
     fail "drift:$REPO/.config/container.args-restored-exactly" \
-         "$(diff -u "$TMP/ca.bak" $REPO/.config/container.args | head -10)"
-    cp "$TMP/ca.bak" $REPO/.config/container.args
+         "$(diff -u "$TMP/ca.bak" "$REPO/.config/container.args" | head -10)"
+    cp "$TMP/ca.bak" "$REPO/.config/container.args"
 fi
 LV --rebuild >/dev/null 2>&1
 # The container publishes nothing; the 46 forwards live on the host, in one ssh process.
