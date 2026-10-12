@@ -1137,9 +1137,10 @@ if [ "$(printf '%s' "$ttydoor" | grep -c '.')" -ge 4 ]; then pass "installer-doo
 else fail "installer-door:tty-extractable" "could not find installer_tty"; fi
 assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
 # QUOTED, and the needle says so (#141): this string is re-parsed by `sh -c` inside ptyrun.py,
-# so an unquoted $PATH word-splits on any host whose PATH has a space in it. The behavioural
-# half of this lives in 14-test-harness.sh, which injects one and drives the door through it.
-assert_contains "installer-door:tty-puts-the-shim-first" "PATH='\$SHIM" "$ttydoor"
+# so an unquoted $PATH word-splits on any host whose PATH has a space in it -- and through
+# sh_quote, since a bare '...' ends at a `'` (#436). The behavioural half of this lives in
+# 14-test-harness.sh, which injects both and drives the door through them.
+assert_contains "installer-door:tty-puts-the-shim-first" 'sh_quote "PATH=$SHIM:' "$ttydoor"
 
 # And the third, which carries the script on stdin the way `curl | bash` does (#297). Same two
 # properties, asserted the same way and for the same reasons; the extraction guard first, because
@@ -1148,11 +1149,11 @@ pipedoor="$(sed -n '/^installer_pipe()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.
 if [ "$(printf '%s' "$pipedoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:pipe-extractable"
 else fail "installer-door:pipe-extractable" "could not find installer_pipe"; fi
 assert_contains "installer-door:pipe-redirects-HOME"      'HOME=' "$pipedoor"
-assert_contains "installer-door:pipe-puts-the-shim-first" "PATH='\$SHIM" "$pipedoor"
+assert_contains "installer-door:pipe-puts-the-shim-first" 'sh_quote "PATH=$SHIM:' "$pipedoor"
 # AND IT REALLY PIPES. A door that quietly became `bash '$script'` would still satisfy everything
 # above while testing the case that already had two doors -- and every piped assertion under it
 # would go green against a seekable script, which is the one thing they are not about.
-assert_contains "installer-door:pipe-feeds-the-script-on-stdin" "cat '\$script' |" "$pipedoor"
+assert_contains "installer-door:pipe-feeds-the-script-on-stdin" 'cat $(sh_quote "$script") |' "$pipedoor"
 
 # ─── nothing may infer a pty child's pid from the process tree again (#151) ────
 # THE PREMISE THAT MADE THIS NECESSARY. lib/ptyrun.py used to claim that `sh -c 'simple command'`
@@ -1252,7 +1253,7 @@ assert_not_match "sh-fake:has-no-exec-of-the-command" '(^|[[:space:]])exec[[:spa
 ptystart="$(sed -n "/^pty_start()/,/^}$/p" "$PRIVATE/tests/lib/portable.sh")"
 if [ "$(printf '%s' "$ptystart" | grep -c '.')" -ge 4 ]; then pass "pty-start:extractable"
 else fail "pty-start:extractable" "could not find pty_start in lib/portable.sh"; fi
-assert_contains "pty-start:single-quotes-what-it-interpolates" "'\$a'" "$ptystart"
+assert_contains "pty-start:single-quotes-what-it-interpolates" 'sh_quote "$a"' "$ptystart"
 assert_contains "pty-start:hands-the-pidfile-through-the-environment" 'CS193V_PTY_PIDFILE=' "$ptystart"
 # AND IT PREPENDS THE WRAPPER ITSELF. This was a caller's job for one revision and two of the
 # three callers forgot it; the point of the fix is a pid channel guaranteed by the interface
@@ -1283,7 +1284,7 @@ assert_eq "pty-start:both-shapes-run-through-pty-announce" "2" \
 # nothing re-parses it, so a quote added for symmetry becomes a literal byte of argv[0] and the
 # exec answers ENOENT -- in the container tier only, which is where it would be found.
 assert_eq "pty-start:only-the-shell-branch-quotes-what-it-interpolates" "1" \
-          "$(printf '%s\n' "$ptystart_code" | grep -cF "'\$a'" || true)"
+          "$(printf '%s\n' "$ptystart_code" | grep -cF 'sh_quote "$a"' || true)"
 # ONE BACKGROUNDED INVOCATION FOR BOTH, so the pidfile, the keystroke feed and $! cannot drift
 # between the shapes -- three properties the assertions above and in 14-test-harness.sh assume.
 assert_eq "pty-start:one-backgrounded-invocation-for-both-shapes" "1" \
@@ -5184,8 +5185,10 @@ assert_ok  "shellcheck:release" \
 # NAMED RATHER THAN ABSENT, per VERIFICATION.md §A.15: a check that quietly disappears on the
 # machines that cannot run it is indistinguishable from one that was never written.
 if command -v pwsh >/dev/null 2>&1; then
-    assert_ok "syntax:windows-bootstrap" pwsh -NoProfile -Command \
-        "\$e = \$null; \$null = [System.Management.Automation.Language.Parser]::ParseFile('$PRIVATE/install-cs193v.ps1', [ref]\$null, [ref]\$e); if (\$e.Count) { \$e | ForEach-Object { \$_.Message }; exit 1 }"
+    # THE PATH TRAVELS IN THE ENVIRONMENT (#436). Spliced into the script it sat inside PowerShell's
+    # own single quotes, which a `'` in the checkout's path ends.
+    CS193V_PS1="$PRIVATE/install-cs193v.ps1" assert_ok "syntax:windows-bootstrap" pwsh -NoProfile -Command \
+        '$e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($env:CS193V_PS1, [ref]$null, [ref]$e); if ($e.Count) { $e | ForEach-Object { $_.Message }; exit 1 }'
 else
     skip "syntax:windows-bootstrap" \
          "pwsh is not installed; PowerShell 7 parses close enough to 5.1 for a typo gate, and nothing here can run 5.1 at all"

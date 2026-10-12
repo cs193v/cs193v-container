@@ -49,10 +49,10 @@ SGM="$PRIVATE/files/setup-git-messages.txt"
 # Every run needs these four: two to find the helper and the catalogue in the CHECKOUT rather than
 # at the image paths, and two to pin the organization and the date, so a staff member with either
 # exported in their shell gets the same answers CI does. sg_run appends TMPDIR and CS193V_SGSHIM
-# per run, because those change with each fresh shim.
-SG_ENV="CS193V_UI=$PRIVATE/files/cs193v-ui.sh CS193V_MESSAGES=$SGM"
+# per run, because those change with each fresh shim. One VAR=VALUE per element: see sg_cmd.
+SG_ENV=("CS193V_UI=$PRIVATE/files/cs193v-ui.sh" "CS193V_MESSAGES=$SGM")
 SG_ORG=cs193v-students
-SG_ENV="$SG_ENV CS193V_GH_ORG=$SG_ORG CS193V_TOKEN_EXPIRY=2026-12-31 CS193V_TODAY=2026-08-17"
+SG_ENV+=("CS193V_GH_ORG=$SG_ORG" CS193V_TOKEN_EXPIRY=2026-12-31 CS193V_TODAY=2026-08-17)
 
 # THE STAFF BOX'S TWO LABELS, read from the catalogue once. err.setup-failed-details is four
 # "Label: {{VALUE}}" lines, so neither msg_text nor msg_text_tail can reach the labels -- the
@@ -754,7 +754,7 @@ sg_has_not "junk-token:no-count-for-five-characters" \
 # in the sense that the good one pasted after it does.
 sg_new
 HALF="$(printf '%s' "$TOKEN" | cut -c1-50)"
-sg_run partial-token identity checkpoint-ok partial-token account-ok HALF=$HALF
+sg_run partial-token identity checkpoint-ok partial-token account-ok "HALF=$HALF"
 sg_says "partial-token:says-it-is-only-part-of-one" err.token-partial "$SG_OUT"
 sg_says_not "partial-token:does-not-say-it-is-not-a-token" err.token-shape "$SG_OUT"
 # 44 = 50 - the six dots. The number a student compares against the one a whole token shows.
@@ -974,7 +974,7 @@ assert_contains "cursor:restored-on-failure"    "[?25h" "$SG_OUT"
 # typing invisibly for the rest of the session. sg_cleanup gives it back on every path the cursor is
 # given back on, but no transcript can show tty state — so this asks the pty itself, afterwards.
 sg_new
-SG_RUN="bash -c 'env $SG_ENV TMPDIR=$SGSHIM CS193V_SGSHIM=$SGSHIM bash $SG_SETUP_GIT; stty -a'"
+SG_RUN="$(sg_cmd); stty -a"
 sg_run tty happy
 SG_RUN=''
 sg_says "tty:the-run-still-succeeds" status.all-set "$SG_OUT"

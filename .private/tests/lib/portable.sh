@@ -160,6 +160,22 @@ do_drive() {                          # do_drive SECS CMD
     "$DO_TIMEOUT" "$1" "$DO_PY" "$PT_LIB/ptydrive.py" "$2"
 }
 
+# ─── sh_quote: one word, quoted for the /bin/sh that re-parses a command string (#436) ────────
+#
+# EVERY COMMAND STRING HANDED TO do_script, do_drive OR pty_start IS PARSED TWICE: by this shell,
+# which builds it, and again by the `/bin/sh -c` inside ptyrun.py or ptydrive.py. #141 wrapped each
+# word in single quotes, which survives a space and not a `'` -- that ends the wrap early and hands
+# /bin/sh a string it cannot parse, from a checkout path as ordinary as "Keith's Mac". So each `'`
+# inside becomes '\'' (close, an escaped quote, reopen), the transform course-install.sh:1320 uses.
+#
+# NOT printf %q, which writes $'...' for a control character, and dash -- Ubuntu's /bin/sh -- cannot
+# read that. The replacement holds no `&`, which bash 5.2's patsub_replacement would expand; measured
+# identical on 3.2.57 and 5.3.9, read back through bash-as-sh and dash.
+sh_quote() {                          # sh_quote WORD -> WORD, single-quoted for /bin/sh
+    local q="'\\''"
+    printf "'%s'" "${1//\'/$q}"
+}
+
 # ─── pty_start / pty_inner_pid: a backgrounded pty, and the pid of what is IN it ──────────────
 #
 # THE SIX BACKGROUNDED SITES USED TO HAND-ROLL THIS, and three of them then inferred the
@@ -216,13 +232,14 @@ pty_start() {                         # pty_start KEYS CMD... -> sets PTY_OWNER,
         # `exec "$@"` is a shell exec, so a bare `sleep` is still PATH-searched.
         set -- "$PT_LIB/pty-announce" "$@"
     else
-        cmd="'$PT_LIB/pty-announce'"
-        # EVERY INTERPOLATED ARGUMENT SINGLE-QUOTED (#141). This string is parsed a SECOND time, by
+        cmd="$(sh_quote "$PT_LIB/pty-announce")"
+        # EVERY INTERPOLATED ARGUMENT QUOTED (#141, #436). This string is parsed a SECOND time, by
         # the `/bin/sh -c` inside ptyrun.py, so an unquoted path containing a space word-splits there.
         # Measured: an unquoted $REPO with a space dies with `/bin/sh: /.../Keith: No such file or
         # directory`, and that was true of all three of these call sites as they stood. Not exotic --
-        # WSL's interop.appendWindowsPath is on by default and a spacey $HOME is ordinary.
-        for a in "$@"; do cmd="$cmd '$a'"; done
+        # WSL's interop.appendWindowsPath is on by default and a spacey $HOME is ordinary. Through
+        # sh_quote rather than a bare '...', because a `'` in the path ends one of those.
+        for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
         set -- "$cmd"
     fi
     # ONE BACKGROUNDED INVOCATION FOR BOTH SHAPES, so the pidfile, the keystroke feed and $! -- the
