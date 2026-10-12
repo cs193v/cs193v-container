@@ -5325,7 +5325,8 @@ fi
 
 # ─── the test suite's own shellcheck, over the list derived at the top ─────────
 # NINE LISTS BECAME THIS ONE CALL, and the property that buys is the one #158 asked for: a file
-# added to this tree tomorrow is linted at the strictest setting without anyone editing anything.
+# added to this tree tomorrow is linted without anyone editing anything -- at `warning`, which is
+# NOT the strictest setting: SC2086 is info-level, and has its own pass below.
 # What is left to write down is an EXCLUSION -- and an exclusion now lives in the file it excuses,
 # as a `# shellcheck disable=`, where it shows up in the diff that needs it. lib/shared.sh:215-222
 # already made that argument for one line of one file; this is the same move for the whole tree.
@@ -5356,3 +5357,39 @@ fi
 # BELOW THE PRODUCT-SIDE GROUPS, so it inherits their require_cmd rather than repeating it -- and
 # last in the file for the reason that line gives.
 assert_ok  "shellcheck:tests" shellcheck --severity=warning ${testfiles[@]+"${testfiles[@]}"}
+
+# ─── ...and nothing here word-splits a path it did not mean to (#436) ─────────
+# THE CHECKOUT'S PATH IS IN NEARLY EVERY COMMAND HERE, through $PRIVATE and $REPO, so an unquoted
+# one splits on any space in it and globs on any bracket. About two hundred were, and a checkout
+# under a directory with a space in its name ran nothing. shellcheck names that SC2086, and it is
+# an INFO-level code, which is why the warning-level pass above never once said so.
+#
+# -S info IS LOAD-BEARING. `--include=SC2086` under -S warning prints nothing and exits 0,
+# measured: the include list narrows what the severity lets through, it cannot widen it. SC2231
+# rides along, the same mistake in a `for` over a glob.
+#
+# IT PROVES IT RAN on a file planted under HOSTILE_NAME holding exactly one such expansion. That
+# finding makes exit 1 the only good status -- 0 means the plant was not read, 2 a file that could
+# not be, 3 and 4 a bad option -- and it proves the severity, the include list, and a hostile path
+# arriving whole, at once.
+#
+# WHAT IT CANNOT SEE, which 14-test-harness.sh's hostile fixtures and the specimens above cover
+# instead: a `for` over a space-joined list, a command string re-parsed by `sh -c`, a path inside a
+# sed or awk program, and a file it cannot parse, which shellcheck:tests reports.
+sc86_tmp="$(new_tmpdir)"
+sc86_plant="$sc86_tmp/$HOSTILE_NAME/planted.sh"
+mkdir -p "${sc86_plant%/*}"
+printf '%s\n' '#!/bin/bash' 'cat $PRIVATE/planted' > "$sc86_plant"
+sc86_raw="$(shellcheck -S info --include=SC2086,SC2231 -f gcc \
+            ${testfiles[@]+"${testfiles[@]}"} "$sc86_plant" 2>&1)"
+sc86_rc=$?
+[ "$sc86_rc" -eq 1 ] || sc86_raw="$sc86_raw
+$CHECKER_DIED (exit $sc86_rc from: shellcheck)"
+case "$sc86_raw" in
+    *"$sc86_plant:2:"*) pass "shellcheck:the-split-lint-finds-a-planted-split" ;;
+    *) fail "shellcheck:the-split-lint-finds-a-planted-split" "nothing reported for $sc86_plant
+$sc86_raw" ;;
+esac
+assert_eq "shellcheck:no-test-file-word-splits-an-expansion" "" \
+          "$(printf '%s\n' "$sc86_raw" | grep -vF -- "$sc86_plant:")"
+rm -rf "$sc86_tmp"
