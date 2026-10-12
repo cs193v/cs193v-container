@@ -62,6 +62,8 @@ it() { tmux -L "$SOCK" "$@"; }     # "inner tmux": the instance under test
 # a signal, and both kill-server and rm -rf are happy to be told twice.
 cleanup() {
   for _s in $INNER_SOCKS; do [ -n "$_s" ] && tmux -L "$_s" kill-server 2>/dev/null; done
+  # The new-tab section's unreachable directory, given back its mode so the scratch root can go.
+  [ -n "${NT_Z:-}" ] && chmod 755 "$NT_Z" 2>/dev/null
   hx_teardown
 }
 trap cleanup EXIT
@@ -2284,5 +2286,148 @@ else
 fi
 it3 kill-server 2>/dev/null
 hx_stop "$S3"
+
+# ============================================================================
+hx_section "new tab: opens where the current tab's shell is (#493)"
+# Every way of opening a tab -- CTRL+T, ALT+T and the chip, each also while scrolled back -- must
+# open it in the directory of the SHELL in the current tab, not of whatever program that shell is
+# running, and in ~/projects whenever that directory cannot be used. See the note at the bindings
+# in tmux.conf Part 2 for how, and files/tmux/newtab.bash for the shell's half of it.
+#
+# ITS OWN SERVER, like the two sections above, so the tabs opened and closed here move nobody
+# else's counts. Started with the command cs193v-shell gives the real tab one, so a change that
+# stops tab one's pane_pid being the shell -- dropping that `exec` -- is caught here too.
+#
+# EVERY FIXTURE DIRECTORY IS UNDER THE SCRATCH ROOT. This suite's own cwd is the developer's real,
+# bind-mounted ~/projects.
+S4=tmuxnewtab
+SOCK4="cs193vnt$$"; INNER_SOCKS="$INNER_SOCKS $SOCK4"
+it4() { tmux -L "$SOCK4" "$@"; }
+NT_ROOT="$(hx_scratch_dir)"
+NT_D="$NT_ROOT/a b#S"       # the shell's directory; a space and a '#' must arrive untouched
+NT_F="$NT_ROOT/fg"          # the foreground program's, which must NOT be followed
+NT_E="$NT_ROOT/deleted"
+NT_Z="$NT_ROOT/unreachable"
+NT_HOME=/home/student/projects
+mkdir -p "$NT_D" "$NT_F" "$NT_Z"
+
+nt_count() { it4 list-windows -t '=cs193v' 2>/dev/null | wc -l | tr -d ' '; }
+nt_path()  { it4 display-message -p -t "=cs193v:$1" '#{pane_current_path}' 2>/dev/null; }
+nt_mode()  { it4 display-message -p -t '=cs193v:1' '#{pane_in_mode}' 2>/dev/null; }
+nt_cmd()   { it4 display-message -p -t '=cs193v:1' '#{pane_current_command}' 2>/dev/null; }
+# Fixed strings, not hx_wait: its grep -E would read the brackets, the dot and the '#' as a regex.
+nt_shows() { hx_cap "$S4" | grep -F -- "$1" >/dev/null; }
+
+# The gestures. Each reports its own failure, so a case that could not be set up is red rather
+# than skipped.
+nt_key()  { hx_hex "$S4" "$1"; }
+nt_chip() {
+  local loc
+  if ! loc="$(hx_find "$S4" "+ NEW TAB")"; then
+    hx_fail "$NT_LABEL: the + NEW TAB chip is on the bar"; return 1
+  fi
+  set -- $loc
+  hx_click "$S4" "$1" "$(($2 + 2))"
+}
+# Scrolled back FIRST, and proved, or the root bindings would answer and the copy-mode case would
+# pass without its binding ever running.
+nt_scrolled() {
+  it4 copy-mode -t '=cs193v:1' 2>/dev/null
+  if ! hx_until 'nt_mode' 1 5; then
+    hx_fail "$NT_LABEL: tab 1 is scrolled back before the gesture" "pane_in_mode: $(nt_mode)"
+    return 1
+  fi
+  hx_pass "$NT_LABEL: tab 1 is scrolled back before the gesture"
+  "$@"
+}
+
+# Open a tab from tab 1 and check where it landed. The new shell's own $PWD first, from the
+# screen: that is what its prompt shows, and its appearing means the shell has finished starting.
+# Only then tmux's view of the same pane, which before that can still be mid-chdir. NT_LINE keeps
+# the line for checks a caller adds. The tab is closed again, so every case starts from tab 1.
+nt_open() { # label expected-dir gesture...
+  NT_LABEL="$1"; local want="$2" where n idx; shift 2
+  # Named for what the directory IS, not spelled out: the scratch path differs every run, and a
+  # check's name is its identity in the results.
+  case "$want" in "$NT_HOME") where='~/projects' ;; *) where="the shell's directory" ;; esac
+  NT_LINE=''
+  it4 select-window -t '=cs193v:1' 2>/dev/null
+  n="$(nt_count)"
+  "$@" || return 1
+  if ! hx_until_ne 'nt_count' "$n" 6; then
+    hx_fail "$NT_LABEL opens a tab" "window count stayed at $n"; return 1
+  fi
+  hx_cmd "$S4" 'echo "PWD=[$PWD] MARK=[${CS193V_NEW_TAB-unset}]"'
+  NT_WANT="PWD=[$want]"
+  if hx_until_ok 'nt_shows "$NT_WANT"' 8; then
+    hx_pass "$NT_LABEL opens the tab in $where"
+  else
+    hx_fail "$NT_LABEL opens the tab in $where" \
+            "want $NT_WANT; the new tab said: $(hx_cap "$S4" | grep -F 'PWD=[' | grep -vF 'echo' | tail -1)"
+  fi
+  NT_LINE="$(hx_cap "$S4" | grep -F 'PWD=[' | grep -vF 'echo' | tail -1)"
+  hx_expect_eq "$NT_LABEL: tmux has the new tab in $where too" "$(nt_path '')" "$want"
+  idx="$(it4 display-message -p -t '=cs193v:' '#{window_index}' 2>/dev/null)"
+  [ -n "$idx" ] && [ "$idx" != 1 ] && it4 kill-window -t "=cs193v:$idx" 2>/dev/null
+  hx_until 'nt_count' "$n" 5 || hx_fail "$NT_LABEL: the new tab closes again" "count $(nt_count)"
+}
+
+# Tab 1: the shell in D, and a program in the foreground that has moved itself to F.
+nt_fixture() {
+  hx_cmd "$S4" "cd '$NT_D'"
+  hx_until "nt_path 1" "$NT_D" 5 || return 1
+  hx_cmd "$S4" "(cd '$NT_F' && exec sleep 300)"
+  hx_until "nt_path 1" "$NT_F" 5
+}
+
+hx_start "$S4" "tmux -L $SOCK4 -f $CONF new-session -s cs193v 'cs193v-welcome; exec bash -l'"
+if hx_wait "$S4" '\+ NEW TAB' 12 && hx_until 'nt_cmd' bash 10; then
+  # The drift guard, from tmux's own parse of the config: there are six ways to open a tab, and
+  # none of them may be the one that forgot. Separate substrings, because list-keys reorders flags.
+  nt_binds="$(it4 list-keys 2>/dev/null | grep -F 'new-window')"
+  hx_expect_eq "six bindings open a tab" "$(printf '%s\n' "$nt_binds" | grep -c .)" 6
+  hx_expect_eq "all six open it in the current tab's shell directory" \
+    "$(printf '%s\n' "$nt_binds" | grep -F -- '/proc/#{pane_pid}/cwd' | grep -cF 'CS193V_NEW_TAB=1')" 6
+
+  # The precondition that makes the rest mean something: tmux's own idea of tab 1's directory is
+  # the foreground program's, so a new tab in D can only have come from following the shell.
+  if nt_fixture; then
+    hx_pass "tab 1's shell is in the fixture and its foreground program is elsewhere"
+  else
+    hx_fail "tab 1's shell is in the fixture and its foreground program is elsewhere" \
+            "tab 1 pane_current_path: $(nt_path 1)"
+  fi
+
+  # The two chip clicks are first and last, as far apart as this section can put them: two clicks
+  # inside tmux's double-click interval (fixed in 3.6, no option for it) do not open a tab.
+  nt_open "the + NEW TAB chip" "$NT_D" nt_chip
+  nt_open "CTRL+T" "$NT_D" nt_key "$KEY_CTRL_T"
+  hx_expect_contains "the new tab's shell does not keep the marker" "$NT_LINE" "MARK=[unset]"
+  nt_open "ALT+T" "$NT_D" nt_key "$KEY_ALT_T_ESCPREFIX"
+  nt_open "CTRL+T while scrolled back" "$NT_D" nt_scrolled nt_key "$KEY_CTRL_T"
+  nt_open "ALT+T while scrolled back" "$NT_D" nt_scrolled nt_key "$KEY_ALT_T_ESCPREFIX"
+
+  # --- and ~/projects whenever the directory cannot be used ---------------
+  it4 select-window -t '=cs193v:1' 2>/dev/null
+  hx_hex "$S4" "03"
+  hx_until 'nt_cmd' bash 5
+  # Deleted: the /proc link still resolves, so tmux enters it happily and the shell has to notice.
+  hx_cmd "$S4" "mkdir '$NT_E' && cd '$NT_E' && rmdir \"\$PWD\""
+  hx_until_ok '[ ! -e "$NT_E" ]' 5
+  nt_open "CTRL+T from a deleted directory" "$NT_HOME" nt_key "$KEY_CTRL_T"
+  # Unreachable: tmux's chdir fails and tmux falls back to ~ by itself. The marker is what lets
+  # the shell tell that apart from a tab that really was opened from ~.
+  hx_cmd "$S4" "cd '$NT_Z' && chmod 000 '$NT_Z'"
+  hx_until_ok '[ "$(stat -c %a "$NT_Z")" = 0 ]' 5
+  nt_open "CTRL+T from a directory tmux cannot enter" "$NT_HOME" nt_key "$KEY_CTRL_T"
+  chmod 755 "$NT_Z"
+
+  nt_fixture || hx_fail "tab 1 can be put back in the fixture" "tab 1 pane_current_path: $(nt_path 1)"
+  nt_open "the + NEW TAB chip while scrolled back" "$NT_D" nt_scrolled nt_chip
+else
+  hx_fail "the new-tab session starts" "screen: $(hx_cap "$S4" | head -3)"
+fi
+it4 kill-server 2>/dev/null
+hx_stop "$S4"
 
 hx_summary "tmux prototype"
