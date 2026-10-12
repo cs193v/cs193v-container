@@ -1491,7 +1491,7 @@ EOF
 # cs193v-ui.sh -- the same one the product uses -- and MESSAGES points at the real catalogue, so
 # these assertions can no longer pass against a private copy of either that had drifted from it.
 {
-    printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
+    printf 'MESSAGES=%s\n' "$(sh_quote "$PRIVATE/course-install-messages.txt")"
     sed -n '/^msg() {$/,/^}$/p'            "$PRIVATE/files/cs193v-ui.sh"
     sed -n '/^notes() {/p'                 "$PRIVATE/course-install.sh"
     sed -n '/^check_disk()/,/^}$/p'        "$PRIVATE/course-install.sh"

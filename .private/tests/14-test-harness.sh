@@ -148,6 +148,24 @@ want="$want ./.private/files ./.private/files/ui.sh ./cs193v ./projects ./projec
 got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
 assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$got"
 
+# ...AND THE SAME TREE FROM A CHECKOUT WHOSE PATH IS HOSTILE (#436). export_tree lends git the
+# checkout's object store as an alternate, and handing it over in GIT_ALTERNATE_OBJECT_DIRECTORIES
+# -- a colon-separated list -- split a path with a colon in it in two, so the archive came out empty
+# and every repo_copy with it.
+HFIX="$WORK/$HOSTILE_NAME/fix"
+mkdir -p "${HFIX%/*}"
+cp -R "$FIX" "$HFIX"
+# BACK-DATED, THEN REFRESHED, or git calls every entry racily clean -- written in the second the
+# index was -- and `git add -u` re-hashes each file into the scratch store, so the alternate this
+# case is about is never consulted and it passes against the bug (measured). A checkout that was
+# cloned a while ago is not racy, and that is the shape that failed.
+find "$HFIX" -path "$HFIX/.git" -prune -o -type f -exec touch -t 202001010000 {} +
+git -C "$HFIX" update-index -q --refresh
+hfix_export() { ( REPO="$HFIX"; export_tree "$1" ); }
+assert_ok "copy:succeeds-from-a-hostile-checkout-path" hfix_export "$WORK/copy-hostile"
+assert_eq "copy:a-hostile-checkout-path-ships-the-same-tree" "$want" \
+          "$( cd "$WORK/copy-hostile" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
+
 # THE SIZE, not just the names. The listing above is the leak we know about; this is the one that
 # catches whatever lands in the course directory next. 8 MB of payload in the fixture against a
 # 2 MB ceiling, so it cannot fail narrowly — and a zero is a failure, not a pass, because that is
@@ -1131,8 +1149,10 @@ assert_says "ptyrun:the-child-sees-a-tty" "ISTTY" \
 # The child's status must survive. util-linux script needs -e for this and BSD script does it
 # by default; a replacement that swallowed it would make every rc assertion behind these
 # helpers meaningless.
-assert_exit "ptyrun:propagates-the-child-status" 7 \
-            sh -c "printf '\n' | python3 '$PTYRUN' 'exit 7' >/dev/null 2>&1"
+# A FUNCTION, NOT AN `sh -c` STRING: $PTYRUN is a path into the checkout, and a `'` in it ended
+# the single quotes this was written with (#436).
+pr_exit7() { printf '\n' | python3 "$PTYRUN" 'exit 7' >/dev/null 2>&1; }
+assert_exit "ptyrun:propagates-the-child-status" 7 pr_exit7
 
 # IT MUST BE A FILE, NOT A SHELL FUNCTION, because do_script hands it to `timeout`, which
 # execvp()s its argument and cannot see a function. rc 127 with output on stderr is
@@ -1453,7 +1473,8 @@ pc_close() {                          # pc_close usr1|kill9 SHELL -> sets PC_REP
 }
 
 for pc_arm in "/bin/sh:host-shell" "$PT_LIB/sh-fake:an-interposing-shell"; do
-    pc_sh="${pc_arm%%:*}"; pc_name="${pc_arm##*:}"
+    # AT THE LAST COLON, not the first: the shell half is a path, and a path can hold one (#436).
+    pc_sh="${pc_arm%:*}"; pc_name="${pc_arm##*:}"
     # THE POLITE CLOSE: the foreground group is signalled and the terminal survives, so the
     # subject's handler -- still running a second later -- can still write to it.
     pc_close usr1 "$pc_sh"
@@ -1644,9 +1665,13 @@ assert_contains "ptydrive:the-divergence-case-reaches-ptydrive-with-its-timings"
 # rc 90 IS THE CONVERSATION GOING WRONG, and it is deliberately not a child status and not 124.
 # A caller reading only the exit code can still tell "the flow diverged" from "the program failed"
 # from "the whole-run ceiling fired".
-assert_exit "ptydrive:a-divergence-exits-90" 90 \
-            sh -c "printf 'line\tghost\tNOPE\tx\\\\n\n' | CS193V_DRIVE_SETTLE_SECS=0.5 \
-                   CS193V_DRIVE_STEP_SECS=4 python3 '$PTYDRIVE' 'bash $WORK/pd-other.sh' >/dev/null 2>&1"
+# A FUNCTION, for :1135's reason: $PTYDRIVE is a path into the checkout (#436).
+pd_diverge() {
+    printf 'line\tghost\tNOPE\tx\\n\n' \
+        | CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=4 \
+          python3 "$PTYDRIVE" "bash $WORK/pd-other.sh" >/dev/null 2>&1
+}
+assert_exit "ptydrive:a-divergence-exits-90" 90 pd_diverge
 
 # NOTHING THIS PROCESS SAYS MAY REACH stdout OR stderr. lib/setup-git-shim.sh's runner ends `2>&1`,
 # so a diagnostic of ours would land IN the transcript under test -- read by every assertion in
@@ -2305,8 +2330,9 @@ fwdi_launcher silent 0 ''
 fwdi_launcher short  0 "$(printf 'ctl\t%s\npid\t%s' "$FWDI/t.ctl" "$FWDI/t.pid")"
 fwdi_launcher lies   1 "$FWDI_ROWS"
 mkdir -p "$FWDI/real"
-printf '#!/bin/sh\necho asked >> "%s/asked"\nexec "%s/cs193v" "$@"\n' \
-       "$FWDI/real" "$REAL_REPO" > "$FWDI/real/cs193v"
+# THE CHECKOUT'S LAUNCHER THROUGH sh_quote (#436): in "%s" a `$` or a backquote in its path ran.
+printf '#!/bin/sh\necho asked >> "%s/asked"\nexec %s "$@"\n' \
+       "$FWDI/real" "$(sh_quote "$REAL_REPO/cs193v")" > "$FWDI/real/cs193v"
 chmod 755 "$FWDI/real/cs193v"
 
 cat > "$FWDI/child.sh" <<'CHILD'

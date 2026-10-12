@@ -4945,12 +4945,12 @@ assert_ok  "notes:entrypoint-links-the-codex-global-slot" \
 # exactly that version", which is safe only because it is backticked. This is the one thing in a
 # shared file that breaks differently for each reader, so it is checked rather than remembered.
 at_imports="$(python3 -c "
-import re
-t = open('$NOTES').read()
+import re, sys
+t = open(sys.argv[1]).read()
 t = re.sub(r'\`\`\`.*?\`\`\`', '', t, flags=re.S)
 t = re.sub(r'\`[^\`]*\`', '', t)
 print(' '.join(re.findall(r'(?:^|\s)(@[A-Za-z0-9._/-]+)', t, flags=re.M)))
-" 2>&1)" || at_imports="the check itself failed: $at_imports"
+" "$NOTES" 2>&1)" || at_imports="the check itself failed: $at_imports"
 assert_eq  "notes:no-unbackticked-at-import" "" "$at_imports"
 
 lines="$(wc -l < "$NOTES" | do_tr -d ' ')"

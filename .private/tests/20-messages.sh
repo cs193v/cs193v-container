@@ -1234,7 +1234,7 @@ IMAC_MIN="$(setting_of INTEL_MACOS_MIN)"
 IMAC_PKU_MIN="$(setting_of INTEL_PKU_MACOS_MIN)"
 {
     printf 'NO_COLOR=1\n'
-    printf 'MESSAGES="%s"\n' "$PRIVATE/course-install-messages.txt"
+    printf 'MESSAGES=%s\n' "$(sh_quote "$PRIVATE/course-install-messages.txt")"
     cat "$UI"
     printf 'INTEL_MACOS_MIN="%s"\nINTEL_PKU_MACOS_MIN="%s"\n' "$IMAC_MIN" "$IMAC_PKU_MIN"
     carve_func "$PRIVATE/course-install.sh" say_intel_mac "$TMP/say-intel-mac.sh" \

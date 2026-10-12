@@ -1447,6 +1447,13 @@ banner and the summary print how many suites ran and in which tiers, because the
 goes wrong here is never a wrong answer, it is **a narrower measurement wearing a wide
 command's clothes**.
 
+**The suite runs from a checkout whose path holds any printable character** (#436): a space, a
+`'`, brackets, a colon, `é`. Newline and tab are not supported. Until #436 a single space made
+`run-tests.sh` run nothing and a third of `10-static.sh` fail. Three things keep it true: fixtures
+that stand in for a checkout live under `HOSTILE_NAME` (`lib/assert.sh`), every command string
+handed to a pty is built with `sh_quote` (`lib/portable.sh`), and `10-static.sh` runs an SC2086
+pass that fails on an unquoted expansion.
+
 **Bringing the container up on a new platform is one command** (#160):
 
 ```
