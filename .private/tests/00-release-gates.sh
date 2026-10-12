@@ -29,7 +29,7 @@ cd "$REPO" || exit 1
 # REPO_OWNER=CHANGEME makes the tarball URL a 404, so the installer cannot complete at all
 # and VERIFICATION.md §1 cannot be run as shipped. This is now the ONLY blank left that is
 # engineering rather than website work.
-owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' $PRIVATE/install-cs193v.sh | head -1)"
+owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
 assert_ne "installer:REPO_OWNER-is-set" "CHANGEME" "$owner"
 record    "installer:REPO_OWNER" "$owner"
 assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
@@ -396,6 +396,7 @@ rm -rf "$ps1_tmp"
 # asset is.
 mos_ver=""                            # the amd64 pass leaves its version here for 1b'
 for pkg_row in "arm64 ARM64" "amd64 AMD64"; do
+    # shellcheck disable=SC2086   # deliberately word-split: an ARCH NAME row
     set -- $pkg_row
     pkg_arch="$1"
     pkg_ver="$(setting_of "PODMAN_MACOS_${2}_VERSION")"
@@ -512,7 +513,7 @@ rm -rf "$mos_tmp"
 # closed: `ubuntu:26.04` is republished as the base rolls forward, and on the tag alone two
 # students a week apart build on different foundations. Pinned by MANIFEST-LIST digest, not
 # a per-architecture one, so the single line serves both the arm64 and amd64 legs.
-from="$(sed -n 's/^FROM \(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
+from="$(sed -n 's/^FROM \(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
 record "build:FROM" "$from"
 assert_contains "build:base-image-pinned-by-digest" "@sha256:" "$from"
 # `podman manifest inspect` and skopeo both REFUSE a name:tag@digest reference outright
@@ -562,7 +563,7 @@ fi
 # being taught, and the managed-settings.json schema it has to accept is only checked for
 # valid JSON at build time — never against the version that actually installs.
 for arg in VERCEL_VERSION CODEX_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
-    v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" $PRIVATE/Containerfile | head -1)"
+    v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" "$PRIVATE/Containerfile" | head -1)"
     record "build:$arg" "$v"
     assert_ne "build:$arg-is-pinned" "latest" "$v"
     assert_match "build:$arg-looks-like-a-version" '^[0-9]+\.[0-9]+\.[0-9]+$' "$v"
@@ -571,7 +572,7 @@ done
 # suite retains the whole 24.x patch history, so unlike a distro archive that drops
 # superseded packages this pin does not expire mid-quarter. Re-check with
 # `apt-cache madison nodejs` before trusting the same of a future major.
-nv="$(sed -n 's/^ARG NODE_VERSION=\(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
+nv="$(sed -n 's/^ARG NODE_VERSION=\(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
 assert_match "build:NODE_VERSION-is-explicit" '^[0-9]+\.[0-9]+\.[0-9]+$' "$nv"
 record "build:NODE_VERSION" "$nv"
 
@@ -658,8 +659,8 @@ fi
 # ─── 5. the published checksums the install docs promise ───────────────────────
 # Both installers say their SHA-256 is published next to the download link, which is the
 # only thing making "read it before you run it" checkable for a student.
-record "checksum:$PRIVATE/install-cs193v.sh"          "$(do_sha256 $PRIVATE/install-cs193v.sh | awk '{print $1}')"
-record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(do_sha256 $PRIVATE/install-cs193v-windows.cmd | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v.sh"          "$(do_sha256 "$PRIVATE/install-cs193v.sh" | awk '{print $1}')"
+record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(do_sha256 "$PRIVATE/install-cs193v-windows.cmd" | awk '{print $1}')"
 
 # ─── 6. the token expiry a student is told to choose ───────────────────────────
 # setup-git hands students a prefilled link with an expiration in it, and names the same date in
@@ -674,7 +675,7 @@ record "checksum:$PRIVATE/install-cs193v-windows.cmd" "$(do_sha256 $PRIVATE/inst
 # setup-git clamps a stale date to a 30-day floor rather than emitting a negative lifetime, so the
 # consequence of ignoring this is a token that expires mid-quarter, not a broken link.
 expiry="$(sed -n 's/^CS193V_TOKEN_EXPIRY="${CS193V_TOKEN_EXPIRY:-\([0-9-]*\)}".*/\1/p' \
-          $PRIVATE/files/setup-git | head -1)"
+          "$PRIVATE/files/setup-git" | head -1)"
 record "setup-git:token-expiry" "$expiry"
 assert_match "setup-git:token-expiry-is-a-date" '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$expiry"
 # 60 days, not one: a date inside the quarter it is meant to outlast is as wrong as a past one,
@@ -701,7 +702,7 @@ fi
 # placeholder left in either would fail on every student at once. Recorded rather than asserted
 # against a literal: the point is that a human reads them before the quarter starts.
 sgval() {                             # sgval VAR -> the default compiled into files/setup-git
-    sed -n "s/^$1=\"\${$1:-\([^}]*\)}\".*/\1/p" $PRIVATE/files/setup-git | head -1
+    sed -n "s/^$1=\"\${$1:-\([^}]*\)}\".*/\1/p" "$PRIVATE/files/setup-git" | head -1
 }
 for v in CS193V_GH_ORG CS193V_GH_SANDBOX_PREFIX; do
     val="$(sgval "$v")"

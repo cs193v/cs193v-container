@@ -135,6 +135,7 @@ assert_ok "net:lsof-is-on-PATH" \
 # The Subsystem line is not optional either. OpenSSH 9 and later carry scp over SFTP, so
 # without it `ssh` succeeds and `scp` fails with a bare "Connection closed" — which looks
 # like a broken scp rather than a missing subsystem.
+# shellcheck disable=SC2086   # deliberately word-split: $VT_RUN is a command prefix (lib/assert.sh)
 sshout="$(do_timeout 240 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 set -e
 cd /tmp
@@ -179,6 +180,7 @@ assert_contains "net:scp-can-copy-a-file-across"        "SCP-GOT:scp-payload" "$
 #  * Hold stdin open afterwards. telnet exits as soon as its input reaches EOF, and with a
 #    plain `printf | telnet` that happens before the server's reply comes back, so the
 #    output is the three connection lines and nothing else.
+# shellcheck disable=SC2086   # deliberately word-split: $VT_RUN is a command prefix (lib/assert.sh)
 telout="$(do_timeout 120 $VT_RUN --rm --network=none --entrypoint bash "$TEST_IMAGE" -c '
 python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &
 i=0
@@ -1361,7 +1363,7 @@ record    "codex:version" "$(R 'codex --version 2>&1' | head -1)"
 # The pin took effect. Asserted rather than recorded: a floating version means two students in
 # one lab section get different software, which 00-release-gates.sh guards in the recipe and this
 # guards in the artifact.
-codex_want="$(sed -n 's/^ARG CODEX_VERSION=\(.*\)/\1/p' $PRIVATE/Containerfile | head -1)"
+codex_want="$(sed -n 's/^ARG CODEX_VERSION=\(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
 assert_contains "codex:installed-version-matches-the-pin" "$codex_want" "$(R 'codex --version 2>&1')"
 # System bubblewrap. NOT a sandbox assertion: no sandbox policy is shipped, and Anthropic's own
 # docs say bwrap cannot mount a fresh /proc in an unprivileged container. This is here because

@@ -93,19 +93,19 @@ done
 
 # ─── syntax ────────────────────────────────────────────────────────────────────
 assert_ok  "syntax:cs193v"            bash -n cs193v
-assert_ok  "syntax:bootstrap"         bash -n $PRIVATE/install-cs193v.sh
-assert_ok  "syntax:course-install"    bash -n $PRIVATE/course-install.sh
+assert_ok  "syntax:bootstrap"         bash -n "$PRIVATE/install-cs193v.sh"
+assert_ok  "syntax:course-install"    bash -n "$PRIVATE/course-install.sh"
 # TWO MORE SINCE #217, and both ship in the tarball: install-utils.sh is the half the two
 # installer scripts share, and wsl-provision.sh is the root pass the Windows installer runs
 # inside the CS193V WSL instance it creates. Named here rather than globbed for the reason the
 # whole block is: .private/ holds staff files too, and a glob would lint whatever lands there
 # next.
-assert_ok  "syntax:install-utils"     bash -n $PRIVATE/install-utils.sh
-assert_ok  "syntax:wsl-provision"     bash -n $PRIVATE/wsl-provision.sh
+assert_ok  "syntax:install-utils"     bash -n "$PRIVATE/install-utils.sh"
+assert_ok  "syntax:wsl-provision"     bash -n "$PRIVATE/wsl-provision.sh"
 # THE RELEASE SCRIPT (#232). Nothing sources it and nothing else runs it, so a parse error in it
 # is discovered by the next person cutting a release -- which is the worst possible moment, and the
 # reason this gate is NOT vacuous where the module's below would be.
-assert_ok  "syntax:release"           bash -n $PRIVATE/release.sh
+assert_ok  "syntax:release"           bash -n "$PRIVATE/release.sh"
 # AND IT IS EXECUTABLE, because .private/README.md's checklist tells a TA to run it by path. The
 # module beside it is sourced and correctly has no bit.
 assert_exec "exec:release"            "$PRIVATE/release.sh"
@@ -116,22 +116,22 @@ assert_exec "exec:release"            "$PRIVATE/release.sh"
 # reports `SUITES THAT DIED / 10-static.sh exited 1 without finishing`, naming the file and the
 # line. An assertion here could never fail, and the harness already says more than it would.
 # release.sh gets one below for the opposite reason: nothing sources it, so nothing else notices.
-assert_ok  "syntax:entrypoint"        bash -n $PRIVATE/files/entrypoint.sh
-assert_ok  "syntax:profile.d"         bash -n $PRIVATE/files/profile.d/10-cs193v-shell.sh
-assert_ok  "syntax:open-url"          sh -n $PRIVATE/files/open-url
+assert_ok  "syntax:entrypoint"        bash -n "$PRIVATE/files/entrypoint.sh"
+assert_ok  "syntax:profile.d"         bash -n "$PRIVATE/files/profile.d/10-cs193v-shell.sh"
+assert_ok  "syntax:open-url"          sh -n "$PRIVATE/files/open-url"
 # bash, not sh, and deliberately: the link box needs $SECONDS for a countdown that a
 # keystroke cannot stall, and `read -rsn1 -t` to poll for one. Neither is POSIX.
-assert_ok  "syntax:linkbox"           bash -n $PRIVATE/files/cs193v-linkbox
+assert_ok  "syntax:linkbox"           bash -n "$PRIVATE/files/cs193v-linkbox"
 # /bin/sh, unlike the box it feeds: it is a case statement over two variables with no output but
 # one line, and it is called from a tmux command substitution at session-claim time.
-assert_ok  "syntax:platform-messages" sh -n $PRIVATE/files/cs193v-platform-messages
+assert_ok  "syntax:platform-messages" sh -n "$PRIVATE/files/cs193v-platform-messages"
 # THE ONE PYTHON PROGRAM THIS IMAGE INSTALLS UNDER A BARE NAME, and `compile()` rather than
 # py_compile for the reason the Containerfile records: py_compile would drop a .pyc beside it.
 # It is named rather than globbed because it has no extension to glob on -- which is exactly what
 # shortlink:is-python-not-shell below asserts, so the two halves of that decision cannot drift.
 assert_ok  "syntax:shortlink"         python3 -c \
            "import sys; p = sys.argv[1]; compile(open(p).read(), p, 'exec')" \
-           $PRIVATE/files/shortlink
+           "$PRIVATE/files/shortlink"
 # EVERY OTHER .py IN THE TREE, DERIVED rather than named -- the same move, and for the same
 # reason, as the shell file list in the section above. This was `syntax:ptyrun`, a list of ONE,
 # and it had already been wrong for longer than lib/ptyrun.py has existed:
@@ -167,9 +167,9 @@ else fail "syntax:python-files-were-found" \
 assert_ok  "syntax:python"            python3 -c \
            "import sys
 for p in sys.argv[1:]: compile(open(p).read(), p, 'exec')" ${pyfiles[@]+"${pyfiles[@]}"}
-assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
-assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
-assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
+assert_ok  "syntax:man"               sh -n "$PRIVATE/files/man"
+assert_ok  "syntax:ui"                bash -n "$PRIVATE/files/cs193v-ui.sh"
+assert_ok  "syntax:setup-git"         bash -n "$PRIVATE/files/setup-git"
 
 # ─── every test file, parsed by the shell that will run it ────────────────────
 # THIS REPLACES FIVE NAMED ASSERTIONS -- podman-fake, pty-announce, sh-fake, run-tests and
@@ -1414,7 +1414,7 @@ done
 # is not a mount; every real bind mount is HOST:CONTAINER and so contains one. That is the whole
 # discriminator, which is why it is spelled out rather than being a list of files to keep updated.
 mounts_missing_z="$(grep -rnoE -- '-v "[^"]*:[^"]*"' \
-                    $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh 2>/dev/null \
+                    "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh 2>/dev/null \
                     | grep -v 'VT_MOUNT_Z' || true)"
 assert_eq "selinux:every-bind-mount-carries-the-label" "" "$mounts_missing_z"
 
@@ -1465,6 +1465,7 @@ assert_match "rootsteps:the-registry-was-readable" '^[a-z]+( [a-z]+)*$' "$rs_nam
 # EVERY NAME HAS A FUNCTION, and every function is named -- both directions, because a step
 # added to install-utils.sh without a registry entry is exactly the step the root pass would skip.
 rs_defined="$(sed -n 's/^root_step_\([a-z]*\)() {.*/\1/p' "$UTILS" | LC_ALL=C sort | do_tr '\n' ' ')"
+# shellcheck disable=SC2086   # deliberately word-split: it is a list of step names
 assert_eq "rootsteps:the-registry-and-the-functions-agree" \
           "$(printf '%s\n' $rs_names | LC_ALL=C sort | do_tr '\n' ' ')" "$rs_defined"
 
@@ -2470,8 +2471,8 @@ assert_eq  "containerfile:no-markers-in-continuations" "" "$bad"
 
 # THE FIRST MARKER MUST PRECEDE FROM, or step 1 -- the base-image download, the longest part of
 # a cold install -- is the one step with no name beside its bar.
-first_marker="$(grep -nE '^[[:space:]]*####>' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
-first_instr="$(grep -nE '^[[:space:]]*FROM[[:space:]]' $PRIVATE/Containerfile | head -1 | cut -d: -f1)"
+first_marker="$(grep -nE '^[[:space:]]*####>' "$PRIVATE/Containerfile" | head -1 | cut -d: -f1)"
+first_instr="$(grep -nE '^[[:space:]]*FROM[[:space:]]' "$PRIVATE/Containerfile" | head -1 | cut -d: -f1)"
 if [ -n "$first_marker" ] && [ -n "$first_instr" ] && [ "$first_marker" -lt "$first_instr" ]; then
     pass "containerfile:a-marker-precedes-FROM"
 else
@@ -2508,7 +2509,7 @@ assert_eq  "containerfile:closing-marker-covers-the-tail" "Finishing up..." "$la
 # Containerfile's own prose about the thing it is checking. Layer 2's comment contains the
 # words "every `npm install -g` in this file depends on them", which is exactly that trap —
 # the same one the ban-list greps at the top of this file have to dodge.
-cf_code="$(sed 's/^[[:space:]]*#.*//' $PRIVATE/Containerfile)"
+cf_code="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/Containerfile")"
 cf_grep() { printf '%s\n' "$cf_code" | grep -nE "$1" | head -1 | cut -d: -f1; }
 
 # Layer order is load-bearing: podman cannot resume a partial layer download but does keep
@@ -2558,7 +2559,7 @@ fi
 # ARGs at the top cost 250 s and 726 MB (18 of 23 steps re-ran); with each declared at its
 # point of use, 89 s and 95 MB. Nothing breaks if someone tidies them back into a block, so
 # nothing would catch it. This does. See ERRORS.md B5.
-cf_lines="$(sed 's/#.*//' $PRIVATE/Containerfile)"
+cf_lines="$(sed 's/#.*//' "$PRIVATE/Containerfile")"
 for pair in NODE_VERSION:nodesource PLAYWRIGHT_VERSION:playwright@ VERCEL_VERSION:vercel@ \
             CODEX_VERSION:@openai/codex@ CLAUDE_CODE_VERSION:claude-code@; do
     var="${pair%%:*}"; use="${pair#*:}"
@@ -2581,11 +2582,11 @@ done
 # a tarball in /usr/local cannot be patched by anything a student runs. Authenticity comes
 # from the signed repository rather than a hand-checked SHASUMS file.
 assert_ok  "containerfile:node-from-signed-apt-repo" \
-           grep -q 'signed-by=/etc/apt/keyrings/nodesource.asc' $PRIVATE/Containerfile
+           grep -q 'signed-by=/etc/apt/keyrings/nodesource.asc' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:node-version-pinned-exactly" \
-           grep -q 'nodejs=\${NODE_VERSION}-1nodesource1' $PRIVATE/Containerfile
+           grep -q 'nodejs=\${NODE_VERSION}-1nodesource1' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:node-version-asserted-at-build-time" \
-           grep -q 'test "\$(node --version)" = "v\${NODE_VERSION}"' $PRIVATE/Containerfile
+           grep -q 'test "\$(node --version)" = "v\${NODE_VERSION}"' "$PRIVATE/Containerfile"
 # Holding the package would re-create exactly the problem that moving off the tarball fixed.
 assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs" \
                     "$(run_checker cat "$PRIVATE/Containerfile")"
@@ -2625,9 +2626,9 @@ fi
 # 254 with ENOENT instead of printing an empty tree.
 assert_ok "containerfile:student-node-modules-precreated" \
           grep -qE 'install -d -o student -g student .*/home/student/\.local/lib/node_modules' \
-          $PRIVATE/Containerfile
+          "$PRIVATE/Containerfile"
 
-args_live_early="$(sed 's/#.*//' $REPO/.config/container.args)"
+args_live_early="$(sed 's/#.*//' "$REPO/.config/container.args")"
 # ─── identity: hostname, banner, title, goodbye  (issues #3 and #4) ────────────
 # The hostname is the cheapest possible "you are somewhere else" signal: it lands in the
 # default prompt on every line, survives nano, and costs nothing. Without it the prompt
@@ -2641,17 +2642,21 @@ assert_contains "args:hostname-is-cs193v-development" "--hostname cs193v-develop
 # does either. What is left of it is staff running a raw shell to look at a container, and staff
 # do not need to be greeted or seen off. Asserted as absences so the install lines cannot come
 # back without the prose that justified them.
-assert_ok  "containerfile:installs-no-welcome-hook" \
-           sh -c "! grep -q '20-cs193v-welcome.sh /etc/profile.d/' $PRIVATE/Containerfile"
-assert_ok  "containerfile:installs-no-bash-logout" \
-           sh -c "! grep -qE 'bash_logout .*/home/student/.bash_logout' $PRIVATE/Containerfile"
-assert_ok  "containerfile:installs-no-goodbye" \
-           sh -c "! grep -qE 'cs193v-goodbye +/usr/local/bin' $PRIVATE/Containerfile"
+#
+# EXIT 1 AND NOTHING ELSE (#519). These were `sh -c "! grep ..."`, and `!` turns grep's 2 -- a
+# Containerfile it could not open -- into the same 0 as an absence, so all three passed having
+# read nothing. Only grep's own "no match" is an absence.
+assert_exit "containerfile:installs-no-welcome-hook" 1 \
+            grep -q '20-cs193v-welcome.sh /etc/profile.d/' "$PRIVATE/Containerfile"
+assert_exit "containerfile:installs-no-bash-logout" 1 \
+            grep -qE 'bash_logout .*/home/student/.bash_logout' "$PRIVATE/Containerfile"
+assert_exit "containerfile:installs-no-goodbye" 1 \
+            grep -qE 'cs193v-goodbye +/usr/local/bin' "$PRIVATE/Containerfile"
 
 # ~/.bashrc sets the window title THROUGH PS1 and re-emits it every prompt, so a title set
 # once at login is immediately overwritten. The image rewrites that one escape.
 assert_ok  "containerfile:rewrites-the-bashrc-window-title" \
-           grep -q 'CS193V Development Environment' $PRIVATE/Containerfile
+           grep -q 'CS193V Development Environment' "$PRIVATE/Containerfile"
 
 # The banner runs INSIDE the container, which cannot reach messages.txt — only projects/ is
 # mounted. So this text has to live in the image, and must not be "tidied" into messages.txt
@@ -2668,8 +2673,8 @@ assert_ok  "containerfile:rewrites-the-bashrc-window-title" \
 # the scripts that print it AND by this suite (lib/assert.sh sources it). So these check the
 # DEFINITIONS are present and non-empty; the checks further down then use the values rather
 # than repeating them, and rewording a string no longer reddens tests in three tiers.
-assert_ok  "strings:file-exists" test -f $PRIVATE/files/cs193v-strings.sh
-assert_ok  "strings:syntax"      sh -n $PRIVATE/files/cs193v-strings.sh
+assert_ok  "strings:file-exists" test -f "$PRIVATE/files/cs193v-strings.sh"
+assert_ok  "strings:syntax"      sh -n "$PRIVATE/files/cs193v-strings.sh"
 assert_ne  "strings:title-is-defined"   "" "${CS193V_TITLE:-}"
 assert_ne  "strings:welcome-is-defined" "" "${CS193V_WELCOME:-}"
 # AND THE GOODBYE IS NOT AMONG THEM (#220). The host says the farewell now, from
@@ -2678,9 +2683,9 @@ assert_ne  "strings:welcome-is-defined" "" "${CS193V_WELCOME:-}"
 # against the FILE rather than against the sourced value: lib/assert.sh no longer exports it, so
 # `${CS193V_GOODBYE:-}` would be empty here whether the definition survived or not.
 assert_not_contains "strings:goodbye-is-gone" 'CS193V_GOODBYE' \
-                    "$(cat $PRIVATE/files/cs193v-strings.sh)"
+                    "$(cat "$PRIVATE/files/cs193v-strings.sh")"
 assert_ok  "containerfile:installs-the-strings" \
-           grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' $PRIVATE/Containerfile
+           grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' "$PRIVATE/Containerfile"
 
 # ─── the two strings BOTH sides print (#257) ──────────────────────────────────
 # CS193V_OPEN_MACOS and CS193V_OPEN_WINDOWS are the one exception to "host prose in messages.txt,
@@ -2693,22 +2698,22 @@ assert_ne  "strings:open-macos-is-defined"   "" "${CS193V_OPEN_MACOS:-}"
 assert_ne  "strings:open-windows-is-defined" "" "${CS193V_OPEN_WINDOWS:-}"
 assert_contains "launcher:reads-the-shared-strings" 'files/cs193v-strings.sh' "$(cat cs193v)"
 assert_contains "platform-messages:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
-                "$(cat $PRIVATE/files/cs193v-platform-messages)"
+                "$(cat "$PRIVATE/files/cs193v-platform-messages")"
 # AND NEITHER SPELLS THE SENTENCE OUT. A literal in either consumer is the drift this whole
 # arrangement exists to prevent, and it would pass every other check in this file.
-open_copies="$(grep -l -F "$CS193V_OPEN_MACOS" cs193v $PRIVATE/messages.txt \
-                  $PRIVATE/files/cs193v-platform-messages 2>/dev/null || true)"
+open_copies="$(grep -l -F "$CS193V_OPEN_MACOS" cs193v "$PRIVATE/messages.txt" \
+                  "$PRIVATE/files/cs193v-platform-messages" 2>/dev/null || true)"
 assert_eq "strings:no-consumer-carries-its-own-copy" "" "$open_copies"
 
-assert_ok  "welcome:script-exists" test -f $PRIVATE/files/cs193v-welcome
+assert_ok  "welcome:script-exists" test -f "$PRIVATE/files/cs193v-welcome"
 # The script must SOURCE the shared definitions rather than carry its own copy, or the two
 # drift and the tests go on passing against text nobody sees.
 assert_contains "welcome:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
-                "$(cat $PRIVATE/files/cs193v-welcome)"
+                "$(cat "$PRIVATE/files/cs193v-welcome")"
 assert_contains "welcome:has-the-welcome-line" 'CS193V_WELCOME' \
-                "$(cat $PRIVATE/files/cs193v-welcome)"
+                "$(cat "$PRIVATE/files/cs193v-welcome")"
 assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELCOME" \
-                    "$(cat $PRIVATE/messages.txt)"
+                    "$(cat "$PRIVATE/messages.txt")"
 
 # THE SAME RULE, for setup-git's prose. It runs in the container too, so its catalogue is a
 # separate file installed into the image — and the tidy-looking mistake is to fold those keys into
@@ -2718,10 +2723,17 @@ assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELC
 # this file against setup-git's; course-install-messages.txt is a third file read by the same
 # msg() with a different MESSAGES, so it can collide with either. Derived from a list rather
 # than written out twice, so a fourth catalogue is one line here.
-cat_keys() { grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | LC_ALL=C sort -u; }
+#
+# A CATALOGUE THAT CANNOT BE READ IS NAMED, NOT SKIPPED (#522). It contributes no keys, so it
+# overlaps nothing and holds no short needle, and both rules below passed beside it -- the
+# has-keys check here went red, but each verdict has to mean what its own name says.
+cat_keys() { run_checker grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | LC_ALL=C sort -u; }
 CATS=("$PRIVATE/messages.txt" "$PRIVATE/course-install-messages.txt" "$PRIVATE/files/setup-git-messages.txt")
+cats_unread=''
 for c in ${CATS[@]+"${CATS[@]}"}; do
-    assert_ne "setup-git:catalogue-has-keys-$(basename "$c")" "" "$(cat_keys "$c")"
+    c_keys="$(cat_keys "$c")"
+    assert_ne "setup-git:catalogue-has-keys-$(basename "$c")" "" "$c_keys"
+    case "$c_keys" in *"$CHECKER_DIED"*) cats_unread="$cats_unread $(basename "$c")" ;; esac
 done
 both=''
 for a in ${CATS[@]+"${CATS[@]}"}; do
@@ -2733,7 +2745,9 @@ for a in ${CATS[@]+"${CATS[@]}"}; do
         [ -n "$dup" ] && both="$both$(basename "$a")/$(basename "$b"): $dup"
     done
 done
-if [ -z "$both" ]; then
+if [ -n "$cats_unread" ]; then
+    fail "setup-git:catalogues-do-not-overlap" "could not read:$cats_unread"
+elif [ -z "$both" ]; then
     pass "setup-git:catalogues-do-not-overlap"
 else
     fail "setup-git:catalogues-do-not-overlap" "defined in BOTH catalogues: $both
@@ -2748,8 +2762,8 @@ assert_not_contains "setup-git:does-not-read-messages.txt" "private/messages.txt
                     "$(run_checker cat "$PRIVATE/files/setup-git")"
 # [3J clears the SCROLLBACK too, which is what "prior commands are no longer visible" means.
 assert_contains "welcome:clears-scrollback-not-just-screen" '[3J' \
-                "$(cat $PRIVATE/files/cs193v-welcome)"
-assert_ok  "welcome:syntax" sh -n $PRIVATE/files/cs193v-welcome
+                "$(cat "$PRIVATE/files/cs193v-welcome")"
+assert_ok  "welcome:syntax" sh -n "$PRIVATE/files/cs193v-welcome"
 
 # ─── every assertion a suite calls is one lib/assert.sh defines ────────────────
 # A MISSPELLED ASSERTION IS A MISSING TEST, AND IT IS SILENT. `assert_says_not_sub` was called
@@ -2774,15 +2788,14 @@ assert_ok  "welcome:syntax" sh -n $PRIVATE/files/cs193v-welcome
 # assert_[a-z_]*` over whole lines also finds the word in prose -- lib/assert.sh's own comments
 # say "Six `podman run --rm` sites in 50-image.sh are assert_fails", and assert_fails is not a
 # function. The anchor set is 20-messages.sh's, which reads msg keys out of scripts the same way.
-# shellcheck disable=SC2086
 assert_ne "helpers:the-assertion-list-was-readable" "" \
-          "$(grep -chE '^assert_[a-z0-9_]+\(\)' $PRIVATE/tests/lib/assert.sh)"
+          "$(grep -chE '^assert_[a-z0-9_]+\(\)' "$PRIVATE/tests/lib/assert.sh")"
 assert_eq "helpers:every-assertion-used-is-defined" "" \
           "$(LC_ALL=C comm -13 \
-               <(grep -ohE '^assert_[a-z0-9_]+\(\)' $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh \
+               <(grep -ohE '^assert_[a-z0-9_]+\(\)' "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh \
                    | sed 's/()$//' | LC_ALL=C sort -u) \
                <(grep -ohE '(^|[;&|(]|\$\()[[:space:]]*assert_[a-z0-9_]+' \
-                     $PRIVATE/tests/*.sh $PRIVATE/tests/lib/*.sh \
+                     "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh \
                    | grep -oE 'assert_[a-z0-9_]+' | LC_ALL=C sort -u) \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 
@@ -2802,10 +2815,13 @@ assert_eq "helpers:every-assertion-used-is-defined" "" \
 #
 # 20-messages.sh's sgflow:* block makes this argument for setup-git's pty gates, where a short
 # needle deadlocks a step instead of reddening a line. This is the same hazard on the other side.
-# shellcheck disable=SC2086
+#
+# AND THE NEEDLES ARE READ, NOT ASSUMED (#522): a grep that could not open tests/*.sh found no
+# negative assertion, and so no short needle.
+nk_found="$(run_checker grep -ohE 'assert_says_not_key +"[^"]*" +[a-z0-9._-]+' "$PRIVATE"/tests/*.sh)"
+assert_ne "helpers:the-negative-key-assertions-were-found" "" "$nk_found"
 nk_weak=''
-for nk_k in $(grep -ohE 'assert_says_not_key +"[^"]*" +[a-z0-9._-]+' $PRIVATE/tests/*.sh \
-                | awk '{print $NF}' | LC_ALL=C sort -u); do
+for nk_k in $(printf '%s\n' "$nk_found" | grep -vF -- "$CHECKER_DIED" | awk '{print $NF}' | LC_ALL=C sort -u); do
     for nk_c in ${CATS[@]+"${CATS[@]}"}; do
         grep -q "^\[\[$nk_k\]\]\$" "$nk_c" || continue
         nk_n="$(printf '%s' "$(msg_text "$nk_k" "$nk_c")" | wc -c | do_tr -d ' ')"
@@ -2813,7 +2829,7 @@ for nk_k in $(grep -ohE 'assert_says_not_key +"[^"]*" +[a-z0-9._-]+' $PRIVATE/te
     done
 done
 assert_eq "helpers:no-negative-key-assertion-rests-on-a-short-needle" "" \
-          "$(printf '%s' "$nk_weak" | sed 's/^ *//')"
+          "$(printf '%s' "$nk_weak${cats_unread:+ could not read:$cats_unread}" | sed 's/^ *//')"
 
 # ─── a release gate that does not run still names what it did not run  (#331) ──
 # 00-release-gates.sh §1 STATED THE RULE AND BROKE IT. Its fetched arm emitted seven names and its
@@ -3253,9 +3269,9 @@ rm -rf "$rg_tmp"
 # something still installs is a broken build; a deleted file that nothing installs but which is
 # still SITTING in files/ is worse, because the next person reads it as live and wires it back
 # up. So the tree is checked as well as the recipe.
-assert_ok "logout:no-goodbye-script"      test ! -f $PRIVATE/files/cs193v-goodbye
-assert_ok "logout:no-bash-logout-hook"    test ! -f $PRIVATE/files/bash_logout
-assert_ok "welcome:no-profile-d-hook"     test ! -f $PRIVATE/files/profile.d/20-cs193v-welcome.sh
+assert_ok "logout:no-goodbye-script"      test ! -f "$PRIVATE/files/cs193v-goodbye"
+assert_ok "logout:no-bash-logout-hook"    test ! -f "$PRIVATE/files/bash_logout"
+assert_ok "welcome:no-profile-d-hook"     test ! -f "$PRIVATE/files/profile.d/20-cs193v-welcome.sh"
 
 # AND NOTHING SENDS A STUDENT TO A RAW SHELL. This is the reason the three files above could go,
 # so it is the assertion that has to hold for them to stay gone. `podman exec -it cs193v bash -l`
@@ -3275,7 +3291,7 @@ assert_ok "welcome:no-profile-d-hook"     test ! -f $PRIVATE/files/profile.d/20-
 #
 # Extracted inline rather than with fn_body, which is defined further down this file than this
 # block reads. An empty extraction would make the negative pass vacuously, so it is checked.
-fault_box="$(sed -n '/^fail() {/,/^}/p' $PRIVATE/files/cs193v-shell | sed 's/^[[:space:]]*#.*//')"
+fault_box="$(sed -n '/^fail() {/,/^}/p' "$PRIVATE/files/cs193v-shell" | sed 's/^[[:space:]]*#.*//')"
 assert_ne "shell:the-fault-box-is-extractable" "" "$(printf '%s' "$fault_box" | do_tr -d ' \n')"
 assert_not_contains "shell:the-fault-box-does-not-send-a-student-to-a-raw-shell" \
                     'podman exec' "$fault_box"
@@ -3313,16 +3329,16 @@ assert_not_contains "launcher:passes-no-dead-container-name" 'CS193V_CONTAINER' 
 # /usr/bin, not /usr/local/bin: shadowing would leave the original reachable by full path
 # and to anything with a fixed PATH. If this assertion is ever "fixed" by moving the
 # install to /usr/local/bin, the unminimize advice comes straight back.
-assert_ok  "man:script-exists" test -f $PRIVATE/files/man
+assert_ok  "man:script-exists" test -f "$PRIVATE/files/man"
 assert_ok  "man:containerfile-replaces-usr-bin-man" \
-           grep -qE 'files/man +/usr/bin/man' $PRIVATE/Containerfile
+           grep -qE 'files/man +/usr/bin/man' "$PRIVATE/Containerfile"
 # grep, not assert_not_contains: its needle is matched literally, so a `*` in it would
 # assert nothing at all rather than acting as a wildcard.
 # EXIT 1 EXACTLY, not any failure: grep's 2 is a file it could not read, and assert_fail took that
 # for "not shadowed" (#437).
 assert_exit "man:not-shadowed-from-usr-local" 1 \
             grep -qE 'files/man +/usr/local/bin' "$PRIVATE/Containerfile"
-man_stub="$(cat $PRIVATE/files/man)"
+man_stub="$(cat "$PRIVATE/files/man")"
 assert_contains "man:points-at-tldr"      'tldr'   "$man_stub"
 assert_contains "man:stub-exits-nonzero"  'exit 1' "$man_stub"
 # The one word that must never reach a student from this container.
@@ -3331,7 +3347,7 @@ assert_not_contains "man:never-says-unminimize" "unminimize" \
 # And the build refuses an image whose `man git` still carries the base image's advice, so
 # a base-image change that reinstates it fails CI rather than a student.
 assert_ok  "man:build-checks-the-stub-took" \
-           grep -q 'man git 2>&1 | grep -F unminimize' $PRIVATE/Containerfile
+           grep -q 'man git 2>&1 | grep -F unminimize' "$PRIVATE/Containerfile"
 
 # ─── ssh, scp and telnet  (issue #2) ───────────────────────────────────────────
 # These are course tools: logging into a remote machine, copying a file across, and typing
@@ -3392,13 +3408,13 @@ assert_not_contains "python:no-apt-setuptools"        "python3-setuptools" "$apt
 # container and asserts on rendered screens for that. This is the cheap tier: the files
 # exist, the image installs them, and the handful of settings that no screen makes obvious
 # are set.
-tmux_conf="$(cat $PRIVATE/files/tmux/tmux.conf)"
+tmux_conf="$(cat "$PRIVATE/files/tmux/tmux.conf")"
 
-assert_ok  "tmux:conf-exists"    test -f $PRIVATE/files/tmux/tmux.conf
+assert_ok  "tmux:conf-exists"    test -f "$PRIVATE/files/tmux/tmux.conf"
 # The two shell hooks: tab labels, and where a new tab opens (#493).
 for hook in tabname newtab; do
-    assert_ok "tmux:$hook-exists" test -f $PRIVATE/files/tmux/$hook.bash
-    assert_ok "tmux:$hook-syntax" bash -n $PRIVATE/files/tmux/$hook.bash
+    assert_ok "tmux:$hook-exists" test -f "$PRIVATE/files/tmux/$hook.bash"
+    assert_ok "tmux:$hook-syntax" bash -n "$PRIVATE/files/tmux/$hook.bash"
 done
 # Every course tool must be ON the label list, and this is a grep rather than a behavioural test
 # on purpose: the MECHANISM is already proven behaviourally in the tmux harness ("claude is
@@ -3413,39 +3429,39 @@ done
 # now and reports `claude` on its own, and `gh` is a native ELF too. Both stay listed anyway --
 # `gh` as a genuine multi-tool, `claude` because a repackaging back to a node shim would
 # otherwise relabel every tab in the course. See the rationale in tabname.bash.
-tabname_list="$(sed -n '/^_CS193V_SHOW_ARG=/,/"$/p' $PRIVATE/files/tmux/tabname.bash)"
+tabname_list="$(sed -n '/^_CS193V_SHOW_ARG=/,/"$/p' "$PRIVATE/files/tmux/tabname.bash")"
 for tool in claude codex gh vercel setup-git; do
     assert_match "tmux:tabname-lists-$tool" "(^|[[:space:]])$tool([[:space:]]|\"|$)" "$tabname_list"
 done
-assert_ok  "tmux:shell-exists"   test -f $PRIVATE/files/cs193v-shell
-assert_ok  "tmux:shell-syntax"   bash -n $PRIVATE/files/cs193v-shell
+assert_ok  "tmux:shell-exists"   test -f "$PRIVATE/files/cs193v-shell"
+assert_ok  "tmux:shell-syntax"   bash -n "$PRIVATE/files/cs193v-shell"
 
 assert_ok  "tmux:package-installed" \
-           grep -qE '^ +tmux ncurses-term' $PRIVATE/Containerfile
+           grep -qE '^ +tmux ncurses-term' "$PRIVATE/Containerfile"
 # ncurses-term carries the tmux-256color terminfo entry and is only a Recommends, so
 # --no-install-recommends drops it. Without it tmux does not start AT ALL, which with tmux
 # as the landing point means nobody can open a shell.
-assert_contains "tmux:ncurses-term-installed" "ncurses-term" "$(cat $PRIVATE/Containerfile)"
+assert_contains "tmux:ncurses-term-installed" "ncurses-term" "$(cat "$PRIVATE/Containerfile")"
 
 assert_ok  "tmux:containerfile-installs-conf" \
-           grep -q 'tmux/tmux.conf     /etc/cs193v/tmux.conf' $PRIVATE/Containerfile
+           grep -q 'tmux/tmux.conf     /etc/cs193v/tmux.conf' "$PRIVATE/Containerfile"
 for hook in tabname newtab; do
     assert_ok "tmux:containerfile-installs-$hook" \
-              grep -qE "tmux/$hook\\.bash +/etc/cs193v/$hook\\.bash" $PRIVATE/Containerfile
+              grep -qE "tmux/$hook\\.bash +/etc/cs193v/$hook\\.bash" "$PRIVATE/Containerfile"
 done
 for cmd in cs193v-shell cs193v-welcome; do
     assert_ok "tmux:containerfile-installs-$cmd" \
-              grep -qE "$cmd +/usr/local/bin/$cmd" $PRIVATE/Containerfile
+              grep -qE "$cmd +/usr/local/bin/$cmd" "$PRIVATE/Containerfile"
 done
 # The hooks must reach every tab, which /etc/bash.bashrc does and a tmux default-command
 # does not -- that reaches tab one only, which is a silent half-working state.
 for hook in tabname newtab; do
     assert_ok "tmux:containerfile-wires-the-$hook-hook" \
-              grep -q "etc/cs193v/$hook.bash; fi" $PRIVATE/Containerfile
+              grep -q "etc/cs193v/$hook.bash; fi" "$PRIVATE/Containerfile"
 done
 # A bad config is now a container nobody can get into, so it must fail the BUILD.
 assert_ok  "tmux:containerfile-validates-the-config" \
-           grep -q 'tmux -L cs193vbuild' $PRIVATE/Containerfile
+           grep -q 'tmux -L cs193vbuild' "$PRIVATE/Containerfile"
 
 # The disarm. Emptying all four tables is the whole basis of "only these actions exist";
 # `unbind -a` without -T clears the prefix table alone, so each one is named.
@@ -3458,12 +3474,12 @@ done
 # without Meta. macOS terminals compose Option by default, so an ALT-only keymap would be
 # unreachable for most of the class.
 n="$(grep -cE '^bind -N ".*" +-n +(M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
-     $PRIVATE/files/tmux/tmux.conf || true)"
+     "$PRIVATE/files/tmux/tmux.conf" || true)"
 assert_eq  "tmux:six-root-tab-bindings" "6" "$n"
 # ...and the same six inside copy mode, or the tab bar goes dead the moment the wheel is
 # brushed, which is exactly when a confused student reaches for it.
 n="$(grep -cE '^bind -T copy-mode (M-t|C-t|M-Left|S-Left|M-Right|S-Right) ' \
-     $PRIVATE/files/tmux/tmux.conf || true)"
+     "$PRIVATE/files/tmux/tmux.conf" || true)"
 assert_eq  "tmux:six-copy-mode-tab-bindings" "6" "$n"
 # Every binding that opens a tab opens it in the current tab's shell directory (#493): the two
 # keys and the chip, in both tables, each the same new-window. The tmux harness proves what that
@@ -3563,10 +3579,10 @@ assert_not_contains "tmux:title-bar-not-missing-the-V" "CS193 Development" "$tmu
 # -f suppresses BOTH /etc/tmux.conf and ~/.tmux.conf. Installing to /etc/tmux.conf instead
 # would let a student's own ~/.tmux.conf win and re-arm a prefix key.
 assert_contains "tmux:shell-names-the-config-explicitly" '-f "$CONF"' \
-                "$(cat $PRIVATE/files/cs193v-shell)"
+                "$(cat "$PRIVATE/files/cs193v-shell")"
 assert_contains "tmux:shell-uses-a-dedicated-socket" '-L "$SOCKET"' \
-                "$(cat $PRIVATE/files/cs193v-shell)"
-assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat $REPO/cs193v)"
+                "$(cat "$PRIVATE/files/cs193v-shell")"
+assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat "$REPO/cs193v")"
 
 # ─── the lifecycle: closing the terminal stops the container  (#41) ─────────────
 # Four assertions used to live here, and they pinned the OPPOSITE design: reattach to an
@@ -3583,15 +3599,15 @@ assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat $
 fn_body() {                           # fn_body NAME FILE -> that function's source
     sed -n "/^$1() {/,/^}/p" "$2"
 }
-launcher_src="$(cat $REPO/cs193v)"
-shell_src="$(cat $PRIVATE/files/cs193v-shell)"
-open_shell_body="$(fn_body open_shell $REPO/cs193v)"
+launcher_src="$(cat "$REPO/cs193v")"
+shell_src="$(cat "$PRIVATE/files/cs193v-shell")"
+open_shell_body="$(fn_body open_shell "$REPO/cs193v")"
 # stop_container, not shell_teardown: the latter is only the once-guarded wrapper the trap uses,
 # and the ordering that matters lives in the former, which --stop and the maintenance verbs
 # also call. Asserting the order against the wrapper would pass while the real stop had it
 # backwards.
-teardown_body="$(fn_body stop_container $REPO/cs193v)"
-guard_body="$(fn_body shell_teardown $REPO/cs193v)"
+teardown_body="$(fn_body stop_container "$REPO/cs193v")"
+guard_body="$(fn_body shell_teardown "$REPO/cs193v")"
 
 # ─── the teardown stops the animator before it does anything else ─────────────
 # ORDER, NOT PRESENCE, and presence is the easy half. transient_cleanup calls meter_cleanup and
@@ -3807,10 +3823,10 @@ fi
 # the assert_eq gates above: an empty body does not contain the needle, so an unextractable
 # function fails rather than passes.
 assert_eq "gate:both-pidfile-paths-are-declared-once" "2" \
-          "$(grep -cE '^TUNNEL_PID=|^TUNNEL_SUP_PIDFILE=' $REPO/cs193v || true)"
+          "$(grep -cE '^TUNNEL_PID=|^TUNNEL_SUP_PIDFILE=' "$REPO/cs193v" || true)"
 for f in tunnel_sup_alive tunnel_sup_stop tunnel_kill_pid tunnel_doctor; do
     assert_contains "gate:$f-reads-its-pidfile-without-forking" "pidfile_read" \
-                    "$(fn_body $f $REPO/cs193v | sed 's/^[[:space:]]*#.*//')"
+                    "$(fn_body $f "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 done
 # ANY substitution naming either path, not just `$(cat`. `$(head -1 ...)`, `$(awk ...)` and
 # bash's own `$(< ...)` all fork, and the FORK is the bug rather than the command it runs.
@@ -3831,7 +3847,7 @@ assert_contains "supervisor:the-loop-reads-a-substitution" "sup_loop < <(" "$sup
 # watcher and start another beside it. Measured: four accumulated across one testing session.
 for f in tunnel_sup_start tunnel_sup_stop; do
     assert_contains "supervisor:$f-reaps-the-watcher" \
-                    'pkill -f "cs193v-portwatch --watch"' "$(fn_body $f $REPO/cs193v)"
+                    'pkill -f "cs193v-portwatch --watch"' "$(fn_body $f "$REPO/cs193v")"
 done
 
 # The tunnel goes down BEFORE the container, always. remove_container documents why in full:
@@ -3874,7 +3890,7 @@ guard_code="$(printf '%s\n' "$guard_body" | sed 's/^[[:space:]]*#.*//')"
 # prevent. Counted rather than merely found, the way the podman floor is (#221), so a second
 # declaration cannot drift away from the first.
 assert_eq "teardown:the-clean-exit-flag-is-declared-once" "1" \
-          "$(grep -c '^SESSION_LEFT=' $REPO/cs193v)"
+          "$(grep -c '^SESSION_LEFT=' "$REPO/cs193v")"
 
 # ONE STOP, NOT ONE PER ARM. The clean exit and the signal paths print different things, which
 # invites an `if` with a stop in each branch -- and that shape is one edit away from an arm that
@@ -3913,7 +3929,7 @@ fi
 #
 # `fail` is deliberately NOT in this list. It exits 1, so the launcher never erases behind a
 # fault box, and the box's own printfs are inside that function rather than here.
-attach_tail="$(fn_body do_attach $PRIVATE/files/cs193v-shell | sed 's/^[[:space:]]*#.*//' \
+attach_tail="$(fn_body do_attach "$PRIVATE/files/cs193v-shell" | sed 's/^[[:space:]]*#.*//' \
                | sed -n '/tm attach-session/,$p' | sed 1d)"
 assert_ne "exit:the-attach-tail-was-really-found" "" "$attach_tail"
 assert_eq "exit:the-attach-says-nothing-after-tmux" "" \
@@ -3931,7 +3947,7 @@ assert_eq "exit:the-attach-states-its-exit-status" "return 0" \
 # One session at a time. The refusal is the whole student-facing contract of #41, and its
 # message has to name the way out or a force-quit strands somebody.
 assert_contains "launcher:refuses-a-second-session" "err.session-in-use" "$launcher_src"
-assert_contains "messages:refusal-exists" "[[err.session-in-use]]" "$(cat $PRIVATE/messages.txt)"
+assert_contains "messages:refusal-exists" "[[err.session-in-use]]" "$(cat "$PRIVATE/messages.txt")"
 # messages:refusal-names-the-way-out AND messages:refusal-admits-it-may-be-a-crash WERE HERE,
 # reading err.session-in-use out of the catalogue and requiring it to contain "--stop" and
 # "crash". They are the purest form of the thing this sweep removes: an assertion that dictates
@@ -3947,12 +3963,12 @@ assert_contains "launcher:has-a-stop-verb" "--stop)" "$launcher_src"
 # CONTAINER-CREATING VERB IS EVER ADDED it needs its own line here: the assert_not_contains
 # below is only meaningful while at least one positive assertion names this helper.
 assert_contains "launcher:verb_rebuild-refuses-while-a-session-is-live" \
-                "refuse_if_session_live" "$(fn_body verb_rebuild $REPO/cs193v)"
+                "refuse_if_session_live" "$(fn_body verb_rebuild "$REPO/cs193v")"
 # THE WHOLE ARM, not one line of it. The bare launch's statements are spread over several lines --
 # it announces itself before the first probe (issue #57) and reflowing that was enough to make a
 # line-scoped match fail while the invariant it exists for was untouched. Extracted from `'')` to
 # its `;;`, so an empty extraction fails this rather than passing it vacuously.
-bare_arm="$(sed -n "/^    '')/,/;;/p" $REPO/cs193v)"
+bare_arm="$(sed -n "/^    '')/,/;;/p" "$REPO/cs193v")"
 assert_contains "launcher:bare-launch-refuses-while-a-session-is-live" \
                 "refuse_if_session_live" "$bare_arm"
 # And it says so BEFORE any of them. 30-launcher-shim.sh pins the order in the output; this pins
@@ -3978,16 +3994,16 @@ assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
 # announces /opt/podman/bin only in /etc/paths.d, and nothing reads that but path_helper,
 # from /etc/zprofile, at login. These lints pin the four properties of that repair that a
 # behavioural test cannot see, and the two that it would only see on a Mac.
-probe_body="$(fn_body ensure_podman_path $PRIVATE/files/cs193v-ui.sh)"
+probe_body="$(fn_body ensure_podman_path "$PRIVATE/files/cs193v-ui.sh")"
 # THE GUARD FOR EVERYTHING BELOW. fn_body anchors on /^name() {/, so a rename or a reflow
 # yields an EMPTY body -- and every assert_contains against an empty string fails while every
 # assert_not_contains passes, which is half a suite going quietly vacuous.
 assert_ne "probe:the-probe-is-extractable" "" "$probe_body"
 
 assert_eq "probe:ui-declares-the-package-id-once" "1" \
-          "$(grep -c '^PODMAN_PKG_ID=' $PRIVATE/files/cs193v-ui.sh)"
+          "$(grep -c '^PODMAN_PKG_ID=' "$PRIVATE/files/cs193v-ui.sh")"
 assert_eq "probe:ui-declares-the-marker-once" "1" \
-          "$(grep -c '^PODMAN_PATH_ADDED=' $PRIVATE/files/cs193v-ui.sh)"
+          "$(grep -c '^PODMAN_PATH_ADDED=' "$PRIVATE/files/cs193v-ui.sh")"
 
 # A NO-OP ON A HEALTHY MACHINE, and this is the line that makes it one: without it every
 # launch on every platform pays three forks and a pkgutil to rediscover what PATH already
@@ -4011,8 +4027,8 @@ assert_not_contains "probe:it-does-not-prepend" '$d:$PATH' "$probe_body"
 
 # BOTH PROBERS REPAIR, and neither inherits the other's repair: verb_doctor deliberately does
 # not call preflight, because its job is reporting on a machine preflight would refuse.
-preflight_body="$(fn_body preflight $REPO/cs193v)"
-doctor_body="$(fn_body verb_doctor $REPO/cs193v)"
+preflight_body="$(fn_body preflight "$REPO/cs193v")"
+doctor_body="$(fn_body verb_doctor "$REPO/cs193v")"
 assert_ne "probe:preflight-is-extractable" "" "$preflight_body"
 assert_ne "probe:doctor-is-extractable"    "" "$doctor_body"
 assert_contains "probe:preflight-repairs-the-path" "ensure_podman_path" "$preflight_body"
@@ -4028,11 +4044,11 @@ assert_eq "probe:preflight-repairs-before-it-refuses" "yes" \
 # no repair; the shape that brings it back is a THIRD prober added later whose author did not
 # know to repair first. Comments blanked, so the reasoning above -- which names the function
 # repeatedly -- does not count as a call.
-probe_code="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v)"
+probe_code="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v")"
 # AND THE DECIDING SITES NOW SPAN TWO FILES, since ensure_podman_path moved into the shared
 # presentation layer. The invariant is the TOTAL, not either file's share: a fifth place that
 # decides podman is absent is issue #121 again wherever it is written, so the count covers both.
-probe_code_all="$(sed 's/^[[:space:]]*#.*//' $REPO/cs193v $PRIVATE/files/cs193v-ui.sh)"
+probe_code_all="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh")"
 assert_eq "probe:exactly-two-callers" "2" \
           "$(printf '%s\n' "$probe_code" | grep -c '^ *ensure_podman_path$')"
 # And exactly four places TEST for podman: the probe's own guard, preflight, and doctor's two
@@ -4050,13 +4066,13 @@ assert_eq "probe:podman-is-tested-in-exactly-four-places" "4" \
 # call would export it into every child of every verb including the long-lived
 # --dev-supervise. The four below are the verbs the unit tier drives on a machine with no
 # podman at all; keeping the repair out of them keeps that promise literally true.
-dispatch_arm="$(sed -n '/^case "${1:-}" in/,/^esac/p' $REPO/cs193v)"
+dispatch_arm="$(sed -n '/^case "${1:-}" in/,/^esac/p' "$REPO/cs193v")"
 assert_ne "probe:the-dispatch-case-is-extractable" "" "$dispatch_arm"
 assert_not_contains "probe:dispatch-does-not-repair" "ensure_podman_path" "$dispatch_arm"
 for v in verb_dev_args verb_dev_tunnel verb_dev_steps verb_print_command; do
-    assert_ne           "probe:$v-is-extractable" "" "$(fn_body $v $REPO/cs193v)"
+    assert_ne           "probe:$v-is-extractable" "" "$(fn_body $v "$REPO/cs193v")"
     assert_not_contains "probe:$v-does-not-repair" \
-                        "ensure_podman_path" "$(fn_body $v $REPO/cs193v)"
+                        "ensure_podman_path" "$(fn_body $v "$REPO/cs193v")"
 done
 
 # RETIRED WITH #221, not weakened. These insisted the installer carried its OWN copy of
@@ -4265,21 +4281,21 @@ assert_contains "launcher:agrees-on-the-lost-race-status" "RACE_LOST_STATUS=3" "
 # to spend that arming flag, which disabled EVERY label silently -- the fallback looks
 # exactly like having no hook at all. See ERRORS.md D0.
 assert_contains "tmux:tabname-ignores-other-prompt-command-entries" 'PROMPT_COMMAND[@]' \
-                "$(cat $PRIVATE/files/tmux/tabname.bash)"
+                "$(cat "$PRIVATE/files/tmux/tabname.bash")"
 
 # Since 23.04 the Ubuntu base image ships its own `ubuntu` user at uid AND gid 1000, so a
 # bare `groupadd -g 1000` exits 4 with "GID '1000' already exists" and aborts the build.
 # That is what stopped this image from ever building. The layer must clear 1000 first.
 assert_ok  "containerfile:handles-base-image-uid-1000" \
-           grep -q 'getent passwd 1000' $PRIVATE/Containerfile
+           grep -q 'getent passwd 1000' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:handles-base-image-gid-1000" \
-           grep -q 'getent group 1000' $PRIVATE/Containerfile
+           grep -q 'getent group 1000' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:asserts-student-ids-at-build-time" \
-           grep -q 'id -u student' $PRIVATE/Containerfile
+           grep -q 'id -u student' "$PRIVATE/Containerfile"
 
 # GIT_EDITOR must stay unset: git resolves GIT_EDITOR -> core.editor -> VISUAL -> EDITOR
 # -> vi, and /usr/bin/vi is vim.tiny, which strands a novice on `git commit` with no -m.
-env_block="$(sed -n '/^ENV /,/^$/p' $PRIVATE/Containerfile)"
+env_block="$(sed -n '/^ENV /,/^$/p' "$PRIVATE/Containerfile")"
 for v in LANG EDITOR VISUAL PAGER LESS BROWSER; do
     assert_contains "containerfile:env-has-$v" "$v=" "$env_block"
 done
@@ -4290,7 +4306,7 @@ assert_not_contains "containerfile:no-GIT_EDITOR" "GIT_EDITOR" \
 # could do is silently change what a student's server binds to for a reason that no longer
 # exists. Comments are stripped first, or the Containerfile's own explanation of the removal
 # matches itself and this passes while the ENV line is back.
-env_live="$(sed 's/#.*//' $PRIVATE/Containerfile | sed -n '/^ENV /,/^$/p')"
+env_live="$(sed 's/#.*//' "$PRIVATE/Containerfile" | sed -n '/^ENV /,/^$/p')"
 for v in HOST FLASK_RUN_HOST; do
     assert_not_contains "containerfile:no-$v-env" "$v=" "$env_live"
 done
@@ -4312,16 +4328,16 @@ assert_contains "containerfile:pip-guard-is-ENV" "PIP_BREAK_SYSTEM_PACKAGES=" "$
 assert_not_contains "containerfile:pep668-marker-not-deleted" "EXTERNALLY-MANAGED" \
                     "$(run_checker sed 's/#.*//' "$PRIVATE/Containerfile")"
 
-assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' $PRIVATE/Containerfile
+assert_ok  "containerfile:runs-as-student" grep -qx 'USER student' "$PRIVATE/Containerfile"
 
 # The bind mount lands at ~/projects, INSIDE $HOME alongside the five credential volumes.
 # The target must be pre-created student-owned in the image: podman auto-chowns an empty
 # named volume, but a bind mount onto a missing directory gets created root-owned, and then
 # nothing the student runs can write to their own work.
 assert_ok  "containerfile:precreates-the-projects-mount-student-owned" \
-           grep -qE 'install -d -o student -g student .*/home/student/projects' $PRIVATE/Containerfile
+           grep -qE 'install -d -o student -g student .*/home/student/projects' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:workdir-is-the-projects-mount" \
-           grep -qx 'WORKDIR /home/student/projects' $PRIVATE/Containerfile
+           grep -qx 'WORKDIR /home/student/projects' "$PRIVATE/Containerfile"
 # The old path must be gone, not merely shadowed — two directories would be worse than one
 # wrong one, because the docs would be right about a directory nobody is standing in.
 assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
@@ -4329,12 +4345,12 @@ assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
 
 # WORKDIR, the launcher's -w and the mount destination must all name the same directory, or
 # the student's shell opens somewhere other than their files.
-wd="$(sed -n 's/^WORKDIR //p' $PRIVATE/Containerfile | head -1)"
+wd="$(sed -n 's/^WORKDIR //p' "$PRIVATE/Containerfile" | head -1)"
 mount_dst="$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
 assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" "$mount_dst"
 # And where a new tab lands when the tab it came from cannot be followed (#493). A missing line
 # reads as a sentence rather than as empty, so two failed extractions cannot agree with each other.
-fallback="$(sed -n 's/^_cs193v_fallback=//p' $PRIVATE/files/tmux/newtab.bash 2>/dev/null | head -1)"
+fallback="$(sed -n 's/^_cs193v_fallback=//p' "$PRIVATE/files/tmux/newtab.bash" 2>/dev/null | head -1)"
 assert_eq "newtab:fallback-matches-MOUNT_DST" "$mount_dst" \
           "${fallback:-<no _cs193v_fallback= line in newtab.bash>}"
 
@@ -4349,7 +4365,7 @@ assert_contains "launcher:confighash-covers-the-mount-destination" "MOUNT_DST" \
 # ─── container.args invariants ──────────────────────────────────────────────────
 # The block at the top of container.args lists these as "never add any of these". Host
 # isolation comes from the user namespace, and each of these punches through it.
-args_live="$(sed 's/#.*//' $REPO/.config/container.args)"
+args_live="$(sed 's/#.*//' "$REPO/.config/container.args")"
 for bad_flag in --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE --network=host \
                 --pid=host --ipc=host --userns=host seccomp=unconfined unmask=ALL \
                 label=disable docker.sock podman.sock; do
@@ -4378,7 +4394,7 @@ assert_not_contains "rejected:no-type=tmpfs" "type=tmpfs" "$args_live"
 # restart, and the stale-file bug is back. Each haystack is the one line that names the path, and
 # never a comment, so a comment cannot stand in for the code.
 assert_contains "volatile:shortlink-reads-where-the-watcher-writes" "PORTS_FILE = \"$PORTS_STATE\"" \
-                "$(grep -e '^PORTS_FILE = ' $PRIVATE/files/shortlink)"
+                "$(grep -e '^PORTS_FILE = ' "$PRIVATE/files/shortlink")"
 assert_contains "volatile:doctor-reads-where-the-watcher-writes" "cat $PORTS_STATE" \
                 "$(printf '%s\n' "$launcher_code" | grep -e ' cat /tmp/')"
 # AND THE NAME SAYS WHAT IT IS. Everything else under /tmp survives a restart; this name is the
@@ -4527,7 +4543,7 @@ assert_contains "tunnel:ignores-the-users-ssh-config" "-F none" "$launcher_live"
 assert_contains "tunnel:uses-nohup-not-setsid" "nohup ssh" "$launcher_live"
 assert_not_match "tunnel:no-setsid" '(^|[[:space:]])setsid[[:space:]]' "$launcher_live"
 
-sshd_conf="$(sed 's/^#.*//' $PRIVATE/files/sshd_config)"
+sshd_conf="$(sed 's/^#.*//' "$PRIVATE/files/sshd_config")"
 assert_contains "sshd:no-agent-forwarding"        "AllowAgentForwarding no"  "$sshd_conf"
 assert_contains "sshd:no-x11"                     "X11Forwarding no"         "$sshd_conf"
 assert_contains "sshd:no-passwords"               "PasswordAuthentication no" "$sshd_conf"
@@ -4540,7 +4556,7 @@ assert_not_contains "sshd:no-second-authorized-keys-file" "authorized_keys2" "$s
 # build time. ~/.ssh is load-bearing and was measured, not guessed: without it podman creates
 # the bind mount's parent as ROOT (verified root:root 0755), which would lock a student out of
 # writing their own keys there.
-cf="$(cat $PRIVATE/Containerfile)"
+cf="$(cat "$PRIVATE/Containerfile")"
 assert_contains "sshd:image-installs-openssh-server" "openssh-server" "$cf"
 assert_contains "sshd:image-precreates-dot-ssh" \
                 "install -d -o student -g student -m 0700 /home/student/.ssh" "$cf"
@@ -4557,7 +4573,7 @@ assert_match "sshd:build-time-host-key-is-deleted" \
 tldr_layer="$(run_checker sed -n '/tldr --update/p' "$PRIVATE/Containerfile")"
 assert_not_contains "tldr:build-does-not-swallow-failure" "|| true" "$tldr_layer"
 assert_contains "tldr:build-asserts-the-cache-is-populated" "cache/tldr" \
-                "$(sed -n '/tldr --update/,+3p' $PRIVATE/Containerfile)"
+                "$(sed -n '/tldr --update/,+3p' "$PRIVATE/Containerfile")"
 
 # ─── documented claims must be true  (#11, #12, #14) ───────────────────────────
 # A comment that promises behaviour which does not exist is worse than no comment: the next
@@ -4612,11 +4628,15 @@ assert_ok  "gitignore:gitkeep-is-tracked" git -C "$REPO" ls-files --error-unmatc
 # undoing the entire reason the host key is not baked into the image. Asserted by asking git
 # itself rather than by grepping .gitignore, so any spelling that actually works passes and
 # any that silently does not fails.
+#
+# NOT TRACKED IS EXIT 1, and only 1 (#520). This was `sh -c "! git ..."`, which turned 128 -- not a
+# work tree -- and 127 -- no git -- into a pass, and single-quoted $REPO into a string that a `'`
+# in the checkout's path ends.
 for f in tunnel-key tunnel-key.pub tunnel-host-key tunnel-host-key.pub tunnel-known-hosts; do
     assert_ok "gitignore:$f-is-ignored" \
               git -C "$REPO" check-ignore -q ".config/$f"
-    assert_ok "gitignore:$f-not-tracked" \
-              sh -c "! git -C '$REPO' ls-files --error-unmatch '.config/$f' >/dev/null 2>&1"
+    assert_exit "gitignore:$f-not-tracked" 1 \
+                git -C "$REPO" ls-files --error-unmatch ".config/$f"
 done
 
 # ─── the icon assets  (#134) ───────────────────────────────────────────────────
@@ -4824,7 +4844,7 @@ print(json.load(open(sys.argv[1])).get("tui", "ABSENT"))
 # -- read the other way round. The Containerfile's own note now EXPLAINS the removal and names
 # the variable, so an un-stripped whole-file grep would match the explanation and report the bug
 # as still present.
-claude_env_live="$(sed 's/#.*//' $PRIVATE/Containerfile | sed -n '/^ENV /,/^$/p')"
+claude_env_live="$(sed 's/#.*//' "$PRIVATE/Containerfile" | sed -n '/^ENV /,/^$/p')"
 # THE POSITIVE CONTROL, and it is load-bearing rather than ceremonial: an absence measured
 # through a sed that returned nothing is not an absence, it is a silent pass. LANG= is the one
 # entry in that block that cannot go away.
@@ -4839,17 +4859,17 @@ assert_not_contains "claude:no-mouse-mode-override-in-the-recipe" \
 # ENV line. files/entrypoint.sh merges it into the volume's copy instead; 50-image.sh drives that
 # end to end, and the matrix below drives the helper itself.
 assert_ok "claude:the-global-defaults-helper-exists" \
-          test -r $PRIVATE/files/claude-code/global-config-defaults.py
+          test -r "$PRIVATE/files/claude-code/global-config-defaults.py"
 # COMMENTS STRIPPED HERE TOO, and this one was caught vacuous by hand mutation rather than
 # reasoned about: entrypoint.sh's own note names the helper, so pointing the INVOCATION at a
 # different file left this green. Same self-match as the Containerfile check above.
-entrypoint_live="$(sed 's/#.*//' $PRIVATE/files/entrypoint.sh)"
+entrypoint_live="$(sed 's/#.*//' "$PRIVATE/files/entrypoint.sh")"
 assert_contains "entrypoint:merges-the-claude-global-defaults" \
                 "python3 /etc/cs193v/claude-global-defaults.py" "$entrypoint_live"
 # CONTINUATIONS JOINED FIRST: the install is written across two lines, so a per-line grep
 # cannot see the source and the destination together -- and matching the destination alone
 # would also be satisfied by the smoke-test lines that merely run the helper.
-claude_cf_joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' $PRIVATE/Containerfile)"
+claude_cf_joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$PRIVATE/Containerfile")"
 assert_contains "containerfile:installs-the-claude-global-defaults" \
                 "global-config-defaults.py /etc/cs193v/claude-global-defaults.py" \
                 "$(printf '%s' "$claude_cf_joined" | tr -s ' ')"
@@ -4862,7 +4882,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("gcd", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.DEFAULTS, sort_keys=True))
-' $PRIVATE/files/claude-code/global-config-defaults.py)"
+' "$PRIVATE/files/claude-code/global-config-defaults.py")"
 
 # ─── the global-config merge, driven on the host (#307) ────────────────────────
 #
@@ -4916,9 +4936,9 @@ done
 # baked inside it would be seeded once on first mount and never refreshed.
 assert_file "notes:the-one-real-file-exists" "$NOTES"
 assert_ok  "notes:containerfile-links-the-claude-managed-slot" \
-           grep -q 'ln -sfn /etc/cs193v/agent-notes.md /etc/claude-code/CLAUDE.md' $PRIVATE/Containerfile
+           grep -q 'ln -sfn /etc/cs193v/agent-notes.md /etc/claude-code/CLAUDE.md' "$PRIVATE/Containerfile"
 assert_ok  "notes:entrypoint-links-the-codex-global-slot" \
-           grep -qE 'ln -sfn /etc/cs193v/agent-notes\.md .*\.codex/AGENTS\.md' $PRIVATE/files/entrypoint.sh
+           grep -qE 'ln -sfn /etc/cs193v/agent-notes\.md .*\.codex/AGENTS\.md' "$PRIVATE/files/entrypoint.sh"
 
 # An `@word` outside backticks is an IMPORT to Claude Code -- it expands the file at that path
 # into context -- and ordinary prose to codex. The notes already say "add `@playwright/test` at
@@ -4933,7 +4953,7 @@ print(' '.join(re.findall(r'(?:^|\s)(@[A-Za-z0-9._/-]+)', t, flags=re.M)))
 " 2>&1)" || at_imports="the check itself failed: $at_imports"
 assert_eq  "notes:no-unbackticked-at-import" "" "$at_imports"
 
-lines="$(wc -l < $NOTES | do_tr -d ' ')"
+lines="$(wc -l < "$NOTES" | do_tr -d ' ')"
 if [ "$lines" -lt 200 ]; then pass "notes:under-200-lines"
 else fail "notes:under-200-lines" "$lines lines"; fi
 
@@ -4971,10 +4991,10 @@ assert_eq "notes:no-host-path-literals" "" "$host_paths"
 # helper would have left the notes sending the agent after a command that is not there, which
 # fails silently: the agent reads "command not found" and answers from its own guesses instead.
 # THE INSTALL LINE IS THE SOURCE, so this cannot pass by both sides being wrong together.
-notes_cmds="$(grep -oE 'cs193v-[a-z-]+' $NOTES | LC_ALL=C sort -u)"
+notes_cmds="$(grep -oE 'cs193v-[a-z-]+' "$NOTES" | LC_ALL=C sort -u)"
 notes_missing=''
 for nc in $notes_cmds; do
-    grep -q "install -m 0755 /tmp/cs193v-files/$nc /usr/local/bin/$nc" $PRIVATE/Containerfile \
+    grep -q "install -m 0755 /tmp/cs193v-files/$nc /usr/local/bin/$nc" "$PRIVATE/Containerfile" \
         || notes_missing="$notes_missing $nc"
 done
 # NAMED SOMETHING, or the loop above is a loop over nothing and the assertion is vacuous.
@@ -5034,7 +5054,7 @@ assert_file "codex:managed-config-exists" "$CODEX_POLICY"
 
 assert_ok "codex:containerfile-installs-the-managed-policy" \
           grep -q 'install -m 0644 /tmp/cs193v-files/codex/managed_config.toml /etc/codex/managed_config.toml' \
-          $PRIVATE/Containerfile
+          "$PRIVATE/Containerfile"
 
 # ─── the credential stores: ONE list, three files ─────────────────────────────
 # Every credential store that gets a volume must also get a deny rule, or a login token lands in
@@ -5148,13 +5168,13 @@ require_cmd shellcheck "Run: sudo apt install -y shellcheck"
 # dead variable. The `source-path=SCRIPTDIR` directive in cs193v is what makes this work from
 # any working directory rather than only from the repo root.
 assert_ok  "shellcheck:cs193v"  shellcheck -x --severity=warning cs193v
-assert_ok  "shellcheck:bootstrap" shellcheck --severity=warning $PRIVATE/install-cs193v.sh
+assert_ok  "shellcheck:bootstrap" shellcheck --severity=warning "$PRIVATE/install-cs193v.sh"
 # -x, AND REQUIRED RATHER THAN TIDIER (#221): course-install.sh sources cs193v-ui.sh, and without
 # -x every knob it sets for that file reads as unused at WARNING severity. Its runtime path comes
 # from the handover directory, which does not matter -- source= resolves at LINT time against the
 # checked file's own location, the trick cs193v:151-153 already uses and explains.
 assert_ok  "shellcheck:course-install" \
-           shellcheck -x --severity=warning $PRIVATE/course-install.sh
+           shellcheck -x --severity=warning "$PRIVATE/course-install.sh"
 # THE TWO HALVES THE INSTALLER GAINED WITH #217, and both need -x for the same reason
 # course-install.sh does: they source each other and cs193v-ui.sh out of the downloaded tree, and
 # without -x shellcheck reports every function that arrives that way as undefined.
@@ -5163,18 +5183,18 @@ assert_ok  "shellcheck:course-install" \
 # every variable in a library looks unused from inside it. PM_UPGRADE is read by a message
 # course-install.sh renders, SUBUID_RANGE by a test, PKG_CA by install_podman.
 assert_ok  "shellcheck:install-utils" \
-           shellcheck -x --severity=warning --exclude=SC2034 $PRIVATE/install-utils.sh
+           shellcheck -x --severity=warning --exclude=SC2034 "$PRIVATE/install-utils.sh"
 assert_ok  "shellcheck:wsl-provision" \
-           shellcheck -x --severity=warning $PRIVATE/wsl-provision.sh
+           shellcheck -x --severity=warning "$PRIVATE/wsl-provision.sh"
 # THE STAFF-SIDE MODULE (#232). No -x: it sources nothing. SC2034 is not excluded -- it defines
 # one variable, _ET_REPO, and reads it in the same file, so nothing here looks unused from inside.
 assert_ok  "shellcheck:export-tree" \
-           shellcheck --severity=warning $PRIVATE/lib/export-tree.sh
+           shellcheck --severity=warning "$PRIVATE/lib/export-tree.sh"
 
 # THE RELEASE SCRIPT. -x, because it sources lib/export-tree.sh and without it export_tree reads
 # as undefined.
 assert_ok  "shellcheck:release" \
-           shellcheck -x --severity=warning $PRIVATE/release.sh
+           shellcheck -x --severity=warning "$PRIVATE/release.sh"
 
 # ─── the Windows bootstrap, if this machine happens to be able to parse it (#299) ───
 # THIS GATE SKIPS ALMOST EVERYWHERE AND IS STILL WORTH ITS LINES. There is no shellcheck for
@@ -5208,15 +5228,15 @@ fi
 # quoting bug in it is discovered the next time a master changes and not before. No -x: it
 # sources nothing.
 assert_ok  "shellcheck:make-icons" \
-           shellcheck --severity=warning $PRIVATE/icons/make-icons.sh
+           shellcheck --severity=warning "$PRIVATE/icons/make-icons.sh"
 # THE APPLET BUILDER AND THE HELPER IT BUNDLES (#134). The builder ships to nobody, but it is
 # the only thing that can rebuild the applet that DOES ship. The helper is different: it is
 # copied INTO the bundle and runs on every student's Mac, inside the Terminal window, so a
 # quoting bug in it is a session nobody can start. No -x on either: neither sources anything.
 assert_ok  "shellcheck:make-macapp" \
-           shellcheck --severity=warning $PRIVATE/macapp/make-macapp.sh
+           shellcheck --severity=warning "$PRIVATE/macapp/make-macapp.sh"
 assert_ok  "shellcheck:macapp-helper" \
-           shellcheck --severity=warning $PRIVATE/macapp/cs193v-run
+           shellcheck --severity=warning "$PRIVATE/macapp/cs193v-run"
 # The shared presentation layer, checked ALONE as well as through the launcher: the container
 # sources it with no launcher in the picture, so it has to stand up by itself.
 #
@@ -5224,21 +5244,21 @@ assert_ok  "shellcheck:macapp-helper" \
 # C_YEL is read by the launcher's warn(), RT_OUT by half its callers — so the check cannot say
 # anything true about this file. It stays on for both scripts that consume it.
 assert_ok  "shellcheck:ui" shellcheck --severity=warning --exclude=SC2034 \
-                           $PRIVATE/files/cs193v-ui.sh
+                           "$PRIVATE/files/cs193v-ui.sh"
 # setup-git and any future setup-*: they source the helper, so -x here too.
-assert_ok  "shellcheck:setup-git" shellcheck -x --severity=warning $PRIVATE/files/setup-git
+assert_ok  "shellcheck:setup-git" shellcheck -x --severity=warning "$PRIVATE/files/setup-git"
 # The landing point and its two helpers. cs193v-shell is the only way a student gets a
 # shell, so a quoting bug in it is a container nobody can enter.
 assert_ok  "shellcheck:landing-point" shellcheck --severity=warning \
-                                      $PRIVATE/files/cs193v-shell \
-                                      $PRIVATE/files/cs193v-welcome
+                                      "$PRIVATE/files/cs193v-shell" \
+                                      "$PRIVATE/files/cs193v-welcome"
 # The small /bin/sh helpers. `man` is here rather than left to the image tier because it
 # runs as root-owned /usr/bin/man for every student: a quoting bug in it would turn every
 # `man something` into a shell error on top of the missing manual page.
 assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
-                                $PRIVATE/files/open-url \
-                                $PRIVATE/files/cs193v-platform-messages \
-                                $PRIVATE/files/man
+                                "$PRIVATE/files/open-url" \
+                                "$PRIVATE/files/cs193v-platform-messages" \
+                                "$PRIVATE/files/man"
 # cs193v-portwatch, which was in NO list at all until the #155 audit -- 455 lines of bash that
 # classifies /proc/net/tcp, emits the frames the host parses, and parses the host's replies.
 # It is the container half of the only trust boundary in the design, and its only build-time
@@ -5253,24 +5273,24 @@ assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
 # consistency rather than use. Excluded rather than fixed here: this change is about making the
 # lint cover the file at all, and dropping or using a variable is a change to the product.
 assert_ok  "shellcheck:portwatch" shellcheck --severity=warning --exclude=SC2034 \
-                                $PRIVATE/files/cs193v-portwatch
+                                "$PRIVATE/files/cs193v-portwatch"
 # -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
 # inside the image. shellcheck reports the unresolvable source at info level, which
 # --severity=warning drops, so this stays quiet without hiding a real finding.
 assert_ok  "shellcheck:linkbox" shellcheck -x --severity=warning \
-                                $PRIVATE/files/cs193v-linkbox
+                                "$PRIVATE/files/cs193v-linkbox"
 # files/shortlink is deliberately NOT in that list: it is python3, and shellcheck asked to read it
 # reports a syntax error on the first line it does not understand. Its check is the compile() above.
 assert_match "shortlink:is-python-not-shell" "^#!/usr/bin/env python3$" \
-             "$(head -1 $PRIVATE/files/shortlink)"
+             "$(head -1 "$PRIVATE/files/shortlink")"
 
 # THE BOX COUNTS DOWN TO THE MOMENT THE SERVER GIVES UP, so the two numbers have to be the
 # same one. open-url passes --timeout explicitly instead of letting shortlink default,
 # because the renderer has to draw that countdown and therefore needs the value too --
 # and a value in one file displayed by another is a value that drifts. This is the check
 # that notices. Both are plain literals, so it is a grep.
-sl_timeout="$(sed -n 's/^DEFAULT_TIMEOUT = \([0-9][0-9]*\)$/\1/p' $PRIVATE/files/shortlink)"
-ou_timeout="$(sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' $PRIVATE/files/open-url)"
+sl_timeout="$(sed -n 's/^DEFAULT_TIMEOUT = \([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/shortlink")"
+ou_timeout="$(sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/open-url")"
 # Asserted to BE a number first. Without this the comparison below passes vacuously the
 # moment either declaration is renamed -- the empty string equals the empty string, and the
 # check reports green having measured nothing. Same family as issue #79.
@@ -5284,9 +5304,9 @@ assert_eq    "linkbox:the-two-timeouts-agree" "$sl_timeout" "$ou_timeout"
 # error frame while the thing it is waiting for was still coming. shortlink's own bound is
 # CONFIRM_TIMEOUT per attempt times BUSY_RETRIES attempts; anything less than that product is
 # a box that gives up on a working link. Three literals in two files, so it is a grep.
-sl_confirm="$(sed -n 's/^CONFIRM_TIMEOUT = \([0-9][0-9]*\)\.0$/\1/p' $PRIVATE/files/shortlink)"
-sl_retries="$(sed -n 's/^BUSY_RETRIES = \([0-9][0-9]*\)$/\1/p' $PRIVATE/files/shortlink)"
-lb_cap="$(sed -n 's/^INIT_TIMEOUT=\([0-9][0-9]*\)$/\1/p' $PRIVATE/files/cs193v-linkbox)"
+sl_confirm="$(sed -n 's/^CONFIRM_TIMEOUT = \([0-9][0-9]*\)\.0$/\1/p' "$PRIVATE/files/shortlink")"
+sl_retries="$(sed -n 's/^BUSY_RETRIES = \([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/shortlink")"
+lb_cap="$(sed -n 's/^INIT_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-linkbox")"
 # Each asserted to BE a number before anything is computed from it, for the reason above: a
 # renamed declaration would otherwise make the comparison compare nothing and report green.
 assert_match "linkbox:shortlink-declares-a-confirm-timeout" "^[0-9]+$" "$sl_confirm"
