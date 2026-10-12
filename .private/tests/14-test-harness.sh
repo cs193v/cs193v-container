@@ -2024,10 +2024,105 @@ assert_says_not "installer-door:tty-does-not-word-split-PATH" "No such file or d
 assert_says "installer-door:tty-really-put-the-shim-first" "PROBE-PATH=[$SHIM:" "$door_out"
 assert_says "installer-door:tty-kept-the-spaced-entry"     "$PATH_SP"          "$door_out"
 assert_says "installer-door:tty-really-redirected-HOME"    "home=[$SHIM/home]" "$door_out"
+
+# ─── ...and every door survives a hostile checkout path (#436) ─────────────────
+# #141'S SINGLE QUOTES ARE ENOUGH FOR A SPACE AND NOT FOR A `'`, which ends the wrap early and hands
+# /bin/sh a string it cannot parse. The launcher's doors did not quote at all: launcher_tty_repo
+# pasted $REPO/cs193v in bare, so a checkout with a space in its path broke every pty launch in
+# 70-sighup.sh and 80-launcher-live.sh. Every door now builds its string through sh_quote
+# (lib/portable.sh), and each is driven here with a script or launcher that lives under
+# $HOSTILE_NAME and an argument that IS it. The stubs report what ARRIVED, argument by argument.
+HD="$WORK/$HOSTILE_NAME"
+mkdir -p "$HD"
+cat > "$HD/cs193v" <<'STUB'
+#!/bin/sh
+printf 'STUB-RAN argc=%s\n' "$#"
+for a in "$@"; do printf 'STUB-ARG=[%s]\n' "$a"; done
+IFS= read -r _ || :
+STUB
+chmod 755 "$HD/cs193v"
+cat > "$HD/probe.sh" <<'PROBE'
+printf 'PROBE-RAN extra=[%s]\n' "${HD_EXTRA-unset}"
+PROBE
+# sh_quote ITSELF, read back by the shell every door hands its string to: the worst name, a lone
+# quote, two, nothing at all, and quotes between letters.
+hd_cmd="printf '[%s]'"
+for hd_v in "$HOSTILE_NAME" "'" "''" "" "a'b'c"; do hd_cmd="$hd_cmd $(sh_quote "$hd_v")"; done
+assert_eq "hostile-door:sh-quote-reads-back-whole" "[$HOSTILE_NAME]['][''][][a'b'c]" \
+          "$(/bin/sh -c "$hd_cmd" 2>&1)"
+hd_out="$(LAUNCHER_DIR="$HD" launcher_tty '\n' --stop "$HOSTILE_NAME" | strip_ansi)"
+assert_says "hostile-door:launcher-tty-hands-over-two-arguments" "STUB-RAN argc=2"           "$hd_out"
+assert_says "hostile-door:launcher-tty-keeps-each-argument-whole" "STUB-ARG=[$HOSTILE_NAME]" "$hd_out"
+hd_out="$(REPO="$HD"; launcher_tty_repo '\n' --stop "$HOSTILE_NAME" | strip_ansi)"
+assert_says "hostile-door:launcher-tty-repo-hands-over-two-arguments" "STUB-RAN argc=2"           "$hd_out"
+assert_says "hostile-door:launcher-tty-repo-keeps-each-argument-whole" "STUB-ARG=[$HOSTILE_NAME]" "$hd_out"
+LAUNCHER_DIR="$HD" launcher_pty_silent_start --stop "$HOSTILE_NAME"
+if launcher_pty_silent_wait 20 "STUB-ARG=[$HOSTILE_NAME]"; then
+    pass "hostile-door:launcher-pty-silent-keeps-each-argument-whole"
+else
+    fail "hostile-door:launcher-pty-silent-keeps-each-argument-whole" "$(strip_ansi < "$PTY_OUT")"
+fi
+launcher_pty_silent_stop
+pty_start '\n' "$HD/cs193v" --stop "$HOSTILE_NAME" > "$HD/pty.out" 2>&1
+wait_until 20 grep -qF "STUB-ARG=[$HOSTILE_NAME]" "$HD/pty.out" || true
+wait "$PTY_OWNER" 2>/dev/null
+assert_says "hostile-door:pty-start-keeps-each-argument-whole" "STUB-ARG=[$HOSTILE_NAME]" \
+            "$(strip_ansi < "$HD/pty.out")"
+hd_out="$(installer_tty '\n' "$HD/probe.sh" "HD_EXTRA=$HOSTILE_NAME" | strip_ansi)"
+assert_says "hostile-door:installer-tty-runs-a-script-and-keeps-a-value-whole" \
+            "PROBE-RAN extra=[$HOSTILE_NAME]" "$hd_out"
+hd_out="$(installer_pipe '\n' "$HD/probe.sh" "HD_EXTRA=$HOSTILE_NAME" | strip_ansi)"
+assert_says "hostile-door:installer-pipe-runs-a-script-and-keeps-a-value-whole" \
+            "PROBE-RAN extra=[$HOSTILE_NAME]" "$hd_out"
+hd_out="$(installer_pipe_cut 4096 "$HD/probe.sh" "HD_EXTRA=$HOSTILE_NAME" | strip_ansi)"
+assert_says "hostile-door:installer-pipe-cut-runs-a-script-and-keeps-a-value-whole" \
+            "PROBE-RAN extra=[$HOSTILE_NAME]" "$hd_out"
 shim_cleanup
 # shim_new redirected TMPDIR into the shim shim_cleanup has just deleted, for the reason the
 # cleanup section above gives where it does the same thing.
 export TMPDIR="$WORK"
+
+# THE FIFTH DOOR, setup-git's, which built its string from SG_ENV: one space-joined run of
+# VAR=VALUE whose first entry was a path into the checkout. In a subshell with pass and fail
+# printing rather than recording, the sgp idiom below, because sg_run emits its own verdict. No
+# fakes and no flow, so this is a zero-step run through the real ptydrive and its `sh -c`.
+hd_sg() {                             # hd_sg -> the transcripts and verdicts of two runs
+    ( set -u
+      # shellcheck source=lib/setup-git-shim.sh
+      . "$TESTS_DIR/lib/setup-git-shim.sh"
+      # Read by sg_flow in the sourced lib, which shellcheck cannot follow from here.
+      # shellcheck disable=SC2034
+      SGM="$PRIVATE/files/setup-git-messages.txt"
+      pass() { printf 'PASS %s\n' "$1"; }
+      fail() { printf 'FAIL %s: %s\n' "$1" "${2:-}"; }
+      # The flow file read from under the hostile name gives the steps the checkout's copy does.
+      hd_real="$(sg_flow happy)"
+      cp "$SG_FLOWS" "$HD/flows.txt"
+      SG_FLOWS="$HD/flows.txt"
+      if [ -n "$hd_real" ] && [ "$(sg_flow happy)" = "$hd_real" ]; then printf 'FLOW-%s\n' SAME
+      else printf 'FLOW-%s\n' DIFFERS; fi
+      sg_new real
+      printf '%s\n' "printf 'SG-RAN ui=[%s] extra=[%s]\\n' \"\${CS193V_UI-unset}\" \"\${HD_EXTRA-unset}\"" \
+          > "$HD/setup-git"
+      # Both read by sg_cmd in the sourced lib, which shellcheck cannot follow from here.
+      # shellcheck disable=SC2034
+      { SG_SETUP_GIT="$HD/setup-git"; SG_ENV=("CS193V_UI=$HD/ui file.sh"); }
+      sg_run hostile "HD_EXTRA=$HOSTILE_NAME"
+      printf '%s\n' "$SG_OUT"
+      # shellcheck disable=SC2034   # read by sg_run, in the sourced lib
+      SG_RUN="$(sg_cmd); printf 'AFTER-%s\n' RAN"
+      sg_run hostile-run
+      printf '%s\n' "$SG_OUT" )
+}
+# NEEDLES THE COMMAND'S OWN TEXT CANNOT SUPPLY. /bin/sh echoes a string it cannot parse into its
+# error, so a literal `AFTER-RAN` in the command would be found in the complaint about it.
+hd_out="$(hd_sg 2>&1 | strip_ansi)"
+assert_says "hostile-door:sg-flow-reads-a-flow-file-at-a-hostile-path" "FLOW-SAME" "$hd_out"
+assert_says "hostile-door:sg-run-keeps-every-value-whole" \
+            "SG-RAN ui=[$HD/ui file.sh] extra=[$HOSTILE_NAME]" "$hd_out"
+assert_says "hostile-door:sg-cmd-keeps-the-environment-whole" \
+            "SG-RAN ui=[$HD/ui file.sh] extra=[unset]" "$hd_out"
+assert_says "hostile-door:sg-cmd-composes-into-a-longer-command" "AFTER-RAN" "$hd_out"
 
 # ─── lib/portable.sh: the wrappers, and the properties they exist for ─────────
 # Each of these guards a MEASURED macOS failure, not a hypothetical one. The tools divide three

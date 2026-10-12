@@ -461,9 +461,9 @@ for i in 1 2 3 4; do
     # ever kills the owner, and four of these run at once, so it wants nothing that a shared
     # PTY_PIDFILE would have to be untangled from.
     #
-    # $REPO IS SINGLE-QUOTED (#141): ptyrun's own `/bin/sh -c` parses this string a second time,
-    # so an unquoted path with a space in it word-splits there.
-    printf '\nsleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "'$REPO/cs193v'" >"$RACE_OUT/$i" 2>&1 &
+    # $REPO IS QUOTED (#141, #436): ptyrun's own `/bin/sh -c` parses this string a second time,
+    # so an unquoted path with a space in it word-splits there, and a bare '...' ends at a `'`.
+    printf '\nsleep 600\n' | "$DO_PY" "$PT_LIB/ptyrun.py" "$(sh_quote "$REPO/cs193v")" >"$RACE_OUT/$i" 2>&1 &
     RACE_PIDS="$RACE_PIDS $!"
 done
 refused_count() { grep -l 'already have a CS193V session' "$RACE_OUT"/* 2>/dev/null | grep -c . || true; }

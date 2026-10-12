@@ -146,7 +146,10 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
         esac
     done
     for n in ID NAME TOKEN; do eval "[ -n \"\${SGV_$n-}\" ] || SGV_$n=\"\${SG_DEFAULT_$n-}\""; done
-    out="$(awk -v want="$names" -v FLOWFILE="$SG_FLOWS" '
+    # THE FLOW FILE'S NAME THROUGH ENVIRON, NOT -v (#436): -v rewrites a backslash in the checkout's
+    # path, and the name then matches no FILENAME, so every flow is read as prose.
+    out="$(SG_FLOWFILE="$SG_FLOWS" awk -v want="$names" '
+        BEGIN { FLOWFILE = ENVIRON["SG_FLOWFILE"] }
         function flat(s) {
             gsub(/\*/, "", s); gsub(/[\t]/, " ", s)
             while (sub(/  /, " ", s)) ; sub(/^ /, "", s); sub(/ $/, "", s); return s
@@ -242,6 +245,18 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
 # inside the container. Per-run VAR=VALUE extras still go to the former only, for the reason that
 # file gives: `env A=B podman exec` sets A on podman, not in the container.
 #
+# SG_ENV IS AN ARRAY, ONE VAR=VALUE PER ELEMENT (#436). It was one space-joined string pasted into
+# the command unquoted, and its first entry is a path into the checkout -- so a checkout with a
+# space in its path handed `env` half a path as its program. sg_cmd builds the line, every word
+# through sh_quote, and a suite that wants the same line with more after it calls sg_cmd itself.
+sg_cmd() {                            # sg_cmd [VAR=VALUE...] -> the shim tier's command line
+    local cmd=env a
+    for a in ${SG_ENV[@]+"${SG_ENV[@]}"} "TMPDIR=$SGSHIM" "CS193V_SGSHIM=$SGSHIM" "$@"; do
+        cmd="$cmd $(sh_quote "$a")"
+    done
+    printf '%s bash %s' "$cmd" "$(sh_quote "$SG_SETUP_GIT")"
+}
+#
 # THE ENVIRONMENT EXTRAS AND THE FLOW ARGUMENTS SHARE ONE `VAR=VALUE` SPELLING and are told apart
 # by name: a flow placeholder is one of the ones the fixture uses. Anything else is for `env`.
 #
@@ -253,18 +268,19 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
 { SG_DEFAULT_ID=jdoe; SG_DEFAULT_NAME='Jane Doe'; SG_DEFAULT_TOKEN=''; }
 sg_run() {                            # sg_run CASE FLOW|VAR=VAL...
     local case_name="$1"; shift
-    local a cmd flowargs='' envargs='' steps rc
+    local a cmd flowargs='' steps rc envargs
+    envargs=()
     for a in "$@"; do
         case "$a" in
             ID=*|NAME=*|TOKEN=*|HALF=*) flowargs="$flowargs${A_TAB}$a" ;;
-            *=*)                        envargs="$envargs $a" ;;
+            *=*)                        envargs+=("$a") ;;
             *)                          flowargs="$flowargs${A_TAB}$a" ;;
         esac
     done
     if [ -n "${SG_RUN:-}" ]; then
         cmd="$SG_RUN"
     else
-        cmd="env $SG_ENV TMPDIR=$SGSHIM CS193V_SGSHIM=$SGSHIM$envargs bash $SG_SETUP_GIT"
+        cmd="$(sg_cmd ${envargs[@]+"${envargs[@]}"})"
     fi
     SG_REPORT="$SGSHIM/drive.report"
     rm -f "$SG_REPORT"

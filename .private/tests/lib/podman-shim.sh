@@ -137,8 +137,11 @@ launcher_rc() {                       # launcher_rc [ARGS...] -> prints rc, disc
 # says what happened.
 launcher_tty() {                      # launcher_tty KEYS [ARGS...]
     local keys="$1"; shift
-    local cmd="${LAUNCHER_DIR:-$REPO}/cs193v" a
-    for a in "$@"; do cmd="$cmd $a"; done
+    local cmd a
+    # EACH WORD THROUGH sh_quote (#436): do_script's /bin/sh parses this string again, and the
+    # launcher path is the checkout's own, whatever characters that holds.
+    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
     # THE PTY COMES FROM lib/ptyrun.py, NOT script(1). This used to fork on
     # `script --version | grep util-linux`, and the BSD arm was wrong in a way no Linux run
     # could surface: `script -q /dev/null $cmd` unquoted word-splits $cmd and never invokes a
@@ -166,8 +169,9 @@ launcher_pty() {                      # launcher_pty [ARGS...]
 # $PTY_OUT (the transcript, which grows as it goes), $PTY_PID and $PTY_HOLDER; stop it with
 # launcher_pty_silent_stop, which must be called or the fifo's holder lives for two minutes.
 launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
-    local cmd="${LAUNCHER_DIR:-$REPO}/cs193v" a
-    for a in "$@"; do cmd="$cmd $a"; done
+    local cmd a
+    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
     PTY_FIFO="$SHIM/silent.fifo"; PTY_OUT="$SHIM/silent.out"
     rm -f "$PTY_FIFO" "$PTY_OUT"; mkfifo "$PTY_FIFO"
     : > "$PTY_OUT"
@@ -185,14 +189,16 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
     # this helper is a fifo held open by a writer that never writes. This site only ever kills
     # the pty owner, so it needs nothing from lib/pty-announce.
     #
-    # THE INTERPOLATED PATH IS SINGLE-QUOTED (#141). The string is parsed a second time by the
+    # EVERY WORD IS QUOTED, ONE BY ONE (#141, #436). The string is parsed a second time by the
     # `/bin/sh -c` inside ptyrun.py, so an unquoted $LAUNCHER_DIR containing a space word-splits
-    # there -- which is ordinary on WSL, where interop.appendWindowsPath is on by default.
+    # there -- which is ordinary on WSL, where interop.appendWindowsPath is on by default. This
+    # used to wrap the WHOLE string in one pair of quotes, path and arguments together, so any
+    # argument became part of the program name and the exec answered ENOENT.
     #
     # ptyrun.py also ACCEPTS THE FIFO, which BSD script refuses outright with
     # `tcgetattr/ioctl: Operation not supported on socket` -- and the fifo is the whole point
     # of this helper, per the comment above.
-    PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "'$cmd'" < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
+    PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_FIFO" > "$PTY_OUT" 2>&1 &
     PTY_PID=$!
 }
 
@@ -226,8 +232,11 @@ launcher_pty_silent_stop() {
 # pty never delivers EOF (see ERRORS.md B13).
 launcher_tty_repo() {                 # launcher_tty_repo KEYS [ARGS...]
     local keys="$1"; shift
-    local cmd="$REPO/cs193v" a
-    for a in "$@"; do cmd="$cmd $a"; done
+    local cmd a
+    # QUOTED LIKE launcher_tty's, and for its reason (#436): this one pasted $REPO in bare, so a
+    # checkout with a space in its path broke every pty launch in the live and container tiers.
+    cmd="$(sh_quote "$REPO/cs193v")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
@@ -329,7 +338,8 @@ installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
 # drives this door through it, because a machine with no space in $PATH cannot ask the question.
 #
 # SINGLE quotes, not double: this shell has already expanded these values, and they have to reach
-# `env` literally rather than exposing a `$` in a path to a second round of expansion.
+# `env` literally rather than exposing a `$` in a path to a second round of expansion. And through
+# sh_quote, not a bare '...', because a `'` in a value ends one of those early (#436).
 #
 # QUOTING IS ENOUGH, AND IT ONCE WAS NOT. This used to fork on `script --version`, and the BSD arm
 # word-split $cmd into argv with no shell in between, so quotes would have arrived literally.
@@ -340,9 +350,9 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     local cmd a
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
-    for a in "$@"; do cmd="$cmd '$a'"; done
-    cmd="$cmd bash '$script'"
+    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
+    cmd="$cmd bash $(sh_quote "$script")"
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
@@ -370,10 +380,10 @@ installer_pipe() {                    # installer_pipe KEYS SCRIPT [VAR=VALUE...
     local cmd a
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
-    for a in "$@"; do cmd="$cmd '$a'"; done
+    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
     cmd="$cmd bash"
-    printf '%b' "$keys" | do_script 120 "cat '$script' | $cmd" 2>&1
+    printf '%b' "$keys" | do_script 120 "cat $(sh_quote "$script") | $cmd" 2>&1
 }
 
 # The same door with the stream cut short, which is what a dropped connection delivers. BYTES
@@ -383,10 +393,10 @@ installer_pipe_cut() {                # installer_pipe_cut BYTES SCRIPT [VAR=VAL
     local cmd a
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
-    for a in "$@"; do cmd="$cmd '$a'"; done
+    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
+    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
     cmd="$cmd bash"
-    printf '' | do_script 120 "head -c '$bytes' '$script' | $cmd" 2>&1
+    printf '' | do_script 120 "head -c $(sh_quote "$bytes") $(sh_quote "$script") | $cmd" 2>&1
 }
 
 # Fake `uname`, `sysctl` and `sw_vers`, which is what makes the macOS arm executable on Linux.

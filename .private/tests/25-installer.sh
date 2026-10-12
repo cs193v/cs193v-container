@@ -2863,8 +2863,8 @@ STALEDRV="$TMP/stale-driver.sh"
 stale_missing=''
 {
     printf 'NO_COLOR=1\n'
-    printf 'MESSAGES=%s\n' "$ICAT"
-    printf '. %s\n' "$PRIVATE/files/cs193v-ui.sh"
+    printf 'MESSAGES=%s\n' "$(sh_quote "$ICAT")"
+    printf '. %s\n' "$(sh_quote "$PRIVATE/files/cs193v-ui.sh")"
 } > "$STALEDRV"
 for spec in $STALE_FNS; do
     stale_f="${spec%%:*}"; stale_fn="${spec#*:}"
@@ -3011,7 +3011,7 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
 
 {
     printf 'NO_COLOR=1\n'
-    printf 'MESSAGES=%s\n' "'$PRIVATE/course-install-messages.txt'"
+    printf 'MESSAGES=%s\n' "$(sh_quote "$PRIVATE/course-install-messages.txt")"
     cat "$PRIVATE/files/cs193v-ui.sh"
     for aptsrc in $APT_WRAPPER_FNS; do
         # NO $ AFTER THE BRACE: every one of these headers carries a signature comment
@@ -3021,7 +3021,7 @@ assert_file "aptbox:the-fixture-is-there" "$APTFIX"
     done
     # The four the wrapper owns, set here because sed extracts functions and not the
     # assignments between them. aptbox:the-globals-are-declared is what keeps these honest.
-    printf 'SETUP_LOG=%s\n' "'$APTLOG'"
+    printf 'SETUP_LOG=%s\n' "$(sh_quote "$APTLOG")"
     printf 'SETUP_RAW=""\nSETUP_TOTAL=0\nSETUP_PHASE=0\n'
 } > "$APTBOX"
 
@@ -3078,7 +3078,7 @@ apt_piped() {                         # apt_piped [RC] -> the non-tty output
     bash "$APTDRIVE" "$APTBOX" "$APTFIX" 0 4 "${1:-0}" 2>&1
 }
 apt_tty() {                           # apt_tty [DELAY] -> the raw pty transcript
-    printf '' | do_script 60 "bash '$APTDRIVE' '$APTBOX' '$APTFIX' '${1:-0.05}' 4 0" 2>&1
+    printf '' | do_script 60 "bash $(sh_quote "$APTDRIVE") $(sh_quote "$APTBOX") $(sh_quote "$APTFIX") $(sh_quote "${1:-0.05}") 4 0" 2>&1
 }
 
 # ─── the anchors, on the piped form  ───────────────────────────────────────────
@@ -3185,7 +3185,7 @@ assert_says "aptraw:the-log-is-truncated-too" "LOGLINES=$aptexpect" "$aptraw"
 # ...and on a terminal there is no block at all, which is the assertion that would catch the
 # guard being dropped from setup_meter_start alone.
 aptrawtty="$(printf '' | do_script 60 \
-             "env APT_RAW=1 bash '$APTDRIVE' '$APTBOX' '$APTFIX' 0.02 4 0" 2>&1)"
+             "env APT_RAW=1 bash $(sh_quote "$APTDRIVE") $(sh_quote "$APTBOX") $(sh_quote "$APTFIX") 0.02 4 0" 2>&1)"
 assert_not_contains "aptraw:no-box-on-a-terminal-either" "┏━━━━" "$aptrawtty"
 assert_contains "aptraw:the-raw-run-really-ran" "Unpacking podman" "$aptrawtty"
 
@@ -3459,8 +3459,8 @@ assert_contains "windows:the-root-pass-is-root" "-u root" \
                 "$(sed 's/\r$//' "$W" | grep -- 'env %XENV%CS193V_PROVISION=1 bash %STAGE2%' | head -1)"
 assert_contains "windows:the-download-is-root" "-u root" \
                 "$(sed 's/\r$//' "$W" | grep -- 'curl -fsSL' | head -1)"
-assert_ok "windows:names-the-same-distro-as-the-sh"  \
-          sh -c "grep -q 'DISTRO=CS193V' '$W' && grep -q 'WSL_DISTRO=\"CS193V\"' $PRIVATE/course-install.sh"
+same_distro() { grep -q 'DISTRO=CS193V' "$1" && grep -q 'WSL_DISTRO="CS193V"' "$2"; }
+assert_ok "windows:names-the-same-distro-as-the-sh" same_distro "$W" "$PRIVATE/course-install.sh"
 # ─── the one-liner bootstrap (#299) ───────────────────────────────────────────
 #
 # THIS BLOCK REPLACES windows:is-cmd-not-ps1, AND THE PROPERTY IS NARROWED RATHER THAN DROPPED.
@@ -3605,7 +3605,7 @@ assert_ok "winboot:it-verifies-before-it-converts" \
 # AND IT DOES CONVERT. raw serves the blob, which is LF; cmd.exe's label scanner assumes CRLF and
 # this installer is entirely goto-structured.
 assert_ok "winboot:it-converts-lf-to-crlf" \
-          sh -c "sed 's/\r\$//' '$P' | grep -q 'WriteAllText'"
+          sh -c 'sed "s/\r\$//" "$1" | grep -q WriteAllText' _ "$P"
 
 # ── what it may and may not do ──
 # THE SUCCESSOR TO windows:is-cmd-not-ps1. The launcher may be PowerShell; the installer may not.
