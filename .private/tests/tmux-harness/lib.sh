@@ -371,6 +371,18 @@ hx_wait() { # session regex [timeout_seconds]
   done
 }
 
+# ...or a FIXED string, for a needle full of regex metacharacters -- a path, a bracketed value.
+# Taken as an argument, so it needs none of the quoting a string passed through hx_until_ok's eval would.
+hx_wait_fixed() { # session needle [timeout_seconds]
+  local name="$1" needle="$2" end
+  end="$(_hx_deadline "${3:-8}")"
+  while :; do
+    if hx_cap "$name" | grep -F -- "$needle" >/dev/null; then return 0; fi
+    [ "$SECONDS" -le "$end" ] || return 1
+    sleep "$HX_POLL"
+  done
+}
+
 # Wait until a probe reports an expected value. The probe is a command STRING, evaluated the
 # same way hx_test_forbidden_keys evaluates its own probe argument.
 hx_until() { # 'probe command' expected [timeout_seconds]

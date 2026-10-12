@@ -3,13 +3,8 @@
 # Installed as /etc/cs193v/newtab.bash and sourced from /etc/bash.bashrc, only in a shell tmux has
 # marked as a new tab. Sourced, never executed: no exec bit.
 #
-# tmux does most of it. Every new-tab binding in tmux.conf is
-#
-#     new-window -e CS193V_NEW_TAB=1 -c "/proc/#{pane_pid}/cwd"
-#
-# #{pane_pid} is the old tab's shell, and /proc/PID/cwd is the kernel's link to that shell's
-# directory -- so this shell starts in it, whatever program the old tab was running at the time.
-# See the note at the bindings for why it is done that way and not with #{pane_current_path}.
+# tmux does most of it: its new-tab bindings start this shell in /proc/<old tab's shell>/cwd, with
+# CS193V_NEW_TAB set. See the note at the bindings, tmux.conf Part 2, for why it is done that way.
 #
 # WHAT IS LEFT FOR THE SHELL is to work out where tmux actually put it, from the $PWD tmux handed
 # over, and to land somewhere real. Four cases, all measured on tmux 3.6 in this image:

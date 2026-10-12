@@ -1275,9 +1275,8 @@ assert_eq "tmux:conf-is-root-owned" "root" "$(R 'stat -c %U /etc/cs193v/tmux.con
 assert_ok "tmux:tabname-installed" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/tabname.bash'"
 assert_eq "tmux:tabname-mode" "644" "$(R 'stat -c %a /etc/cs193v/tabname.bash')"
-# The new-tab hook (#493), on the same terms: sourced, never executed.
-assert_ok "tmux:newtab-installed" \
-          sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -f /etc/cs193v/newtab.bash'"
+# The new-tab hook (#493), on the same terms: sourced, never executed. No separate "installed"
+# check: R carries stat's own error on a missing file, which is not 644 either.
 assert_eq "tmux:newtab-mode" "644" "$(R 'stat -c %a /etc/cs193v/newtab.bash')"
 
 # NOT at tmux's default paths. cs193v-shell names the file with -f, which suppresses both
@@ -1290,12 +1289,11 @@ assert_ok "tmux:no-user-tmux-conf" \
 
 # Every interactive bash, and therefore every tab, must pick up the label hook. A tmux
 # default-command would reach tab one only.
-assert_contains "tmux:bashrc-sources-the-tabname-hook" "/etc/cs193v/tabname.bash" \
-                "$(R 'cat /etc/bash.bashrc')"
+bashrc="$(R 'cat /etc/bash.bashrc')"
+assert_contains "tmux:bashrc-sources-the-tabname-hook" "/etc/cs193v/tabname.bash" "$bashrc"
 # ...and the new-tab hook, but only in a shell a new-tab binding has marked (#493).
 assert_contains "tmux:bashrc-sources-the-newtab-hook" \
-                'if [ -n "${CS193V_NEW_TAB:-}" ]; then . /etc/cs193v/newtab.bash; fi' \
-                "$(R 'cat /etc/bash.bashrc')"
+                'if [ -n "${CS193V_NEW_TAB:-}" ]; then . /etc/cs193v/newtab.bash; fi' "$bashrc"
 
 assert_ok "tmux:binary-present" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'command -v tmux >/dev/null'"
