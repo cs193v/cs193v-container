@@ -118,9 +118,14 @@ _stage_tree() {                       # _stage_tree u|A DST -> 0 on success
         alt="$(git rev-parse --git-path objects)" || exit 1
         case "$alt" in /*) ;; *) alt="$(pwd -P)/$alt" ;; esac
         cp "$(git rev-parse --git-path index)" "$work/index" || exit 1
+        # THE ALTERNATE GOES IN THE STORE'S OWN FILE, one path per line, not in
+        # GIT_ALTERNATE_OBJECT_DIRECTORIES: that is a colon-separated list, so a checkout with a
+        # colon in its path lent git two halves of a directory and archived nothing (#436).
+        mkdir -p "$work/odb/info" || exit 1
+        printf '%s\n' "$alt" > "$work/odb/info/alternates" || exit 1
+        unset GIT_ALTERNATE_OBJECT_DIRECTORIES
         export GIT_INDEX_FILE="$work/index" \
-               GIT_OBJECT_DIRECTORY="$work/odb" \
-               GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt"
+               GIT_OBJECT_DIRECTORY="$work/odb"
         case "$mode" in
             u) git add -u || exit 1 ;;
             A) git -c core.excludesFile=/dev/null add -A . || exit 1 ;;
