@@ -3384,10 +3384,11 @@ assert_not_contains "python:no-apt-setuptools"        "python3-setuptools" "$apt
 tmux_conf="$(cat $PRIVATE/files/tmux/tmux.conf)"
 
 assert_ok  "tmux:conf-exists"    test -f $PRIVATE/files/tmux/tmux.conf
-assert_ok  "tmux:tabname-exists" test -f $PRIVATE/files/tmux/tabname.bash
-assert_ok  "tmux:tabname-syntax" bash -n $PRIVATE/files/tmux/tabname.bash
-assert_ok  "tmux:newtab-exists"  test -f $PRIVATE/files/tmux/newtab.bash
-assert_ok  "tmux:newtab-syntax"  bash -n $PRIVATE/files/tmux/newtab.bash
+# The two shell hooks: tab labels, and where a new tab opens (#493).
+for hook in tabname newtab; do
+    assert_ok "tmux:$hook-exists" test -f $PRIVATE/files/tmux/$hook.bash
+    assert_ok "tmux:$hook-syntax" bash -n $PRIVATE/files/tmux/$hook.bash
+done
 # Every course tool must be ON the label list, and this is a grep rather than a behavioural test
 # on purpose: the MECHANISM is already proven behaviourally in the tmux harness ("claude is
 # labeled 'claude', not 'node'", "setup-git is labeled 'setup-git', not 'bash'"), so what is
@@ -3417,21 +3418,20 @@ assert_contains "tmux:ncurses-term-installed" "ncurses-term" "$(cat $PRIVATE/Con
 
 assert_ok  "tmux:containerfile-installs-conf" \
            grep -q 'tmux/tmux.conf     /etc/cs193v/tmux.conf' $PRIVATE/Containerfile
-assert_ok  "tmux:containerfile-installs-tabname" \
-           grep -q 'tmux/tabname.bash  /etc/cs193v/tabname.bash' $PRIVATE/Containerfile
+for hook in tabname newtab; do
+    assert_ok "tmux:containerfile-installs-$hook" \
+              grep -qE "tmux/$hook\\.bash +/etc/cs193v/$hook\\.bash" $PRIVATE/Containerfile
+done
 for cmd in cs193v-shell cs193v-welcome; do
     assert_ok "tmux:containerfile-installs-$cmd" \
               grep -qE "$cmd +/usr/local/bin/$cmd" $PRIVATE/Containerfile
 done
-# The hook must reach every tab, which /etc/bash.bashrc does and a tmux default-command
+# The hooks must reach every tab, which /etc/bash.bashrc does and a tmux default-command
 # does not -- that reaches tab one only, which is a silent half-working state.
-assert_ok  "tmux:containerfile-wires-the-tabname-hook" \
-           grep -q 'etc/cs193v/tabname.bash; fi' $PRIVATE/Containerfile
-# The new-tab hook (#493) the same way: every tab a binding opens is an interactive bash.
-assert_ok  "tmux:containerfile-installs-newtab" \
-           grep -qE 'tmux/newtab\.bash +/etc/cs193v/newtab\.bash' $PRIVATE/Containerfile
-assert_ok  "tmux:containerfile-wires-the-newtab-hook" \
-           grep -q 'etc/cs193v/newtab.bash; fi' $PRIVATE/Containerfile
+for hook in tabname newtab; do
+    assert_ok "tmux:containerfile-wires-the-$hook-hook" \
+              grep -q "etc/cs193v/$hook.bash; fi" $PRIVATE/Containerfile
+done
 # A bad config is now a container nobody can get into, so it must fail the BUILD.
 assert_ok  "tmux:containerfile-validates-the-config" \
            grep -q 'tmux -L cs193vbuild' $PRIVATE/Containerfile
@@ -3457,11 +3457,10 @@ assert_eq  "tmux:six-copy-mode-tab-bindings" "6" "$n"
 # Every binding that opens a tab opens it in the current tab's shell directory (#493): the two
 # keys and the chip, in both tables, each the same new-window. The tmux harness proves what that
 # does; this is the millisecond check that none of the six was left behind.
-n="$(grep -E '^bind ' $PRIVATE/files/tmux/tmux.conf | grep -c 'new-window' || true)"
-assert_eq  "tmux:six-new-tab-bindings" "6" "$n"
-n="$(grep -E '^bind ' $PRIVATE/files/tmux/tmux.conf |
-     grep -cF 'new-window -e CS193V_NEW_TAB=1 -c "/proc/#{pane_pid}/cwd"' || true)"
-assert_eq  "tmux:every-new-tab-binding-follows-the-shell" "6" "$n"
+new_tab_binds="$(grep -E '^bind .*new-window' <<< "$tmux_conf" || true)"
+assert_eq  "tmux:six-new-tab-bindings" "6" "$(grep -c . <<< "$new_tab_binds" || true)"
+assert_eq  "tmux:every-new-tab-binding-follows-the-shell" "6" \
+           "$(grep -cF 'new-window -e CS193V_NEW_TAB=1 -c "/proc/#{pane_pid}/cwd"' <<< "$new_tab_binds" || true)"
 # The escape hatch out of copy mode. Without it a stray scroll leaves a dead keyboard.
 #
 # GUARDED, and the guard is the whole assertion. tmux's `Any` matches MOUSE events as well as
@@ -4320,13 +4319,12 @@ assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
 # WORKDIR, the launcher's -w and the mount destination must all name the same directory, or
 # the student's shell opens somewhere other than their files.
 wd="$(sed -n 's/^WORKDIR //p' $PRIVATE/Containerfile | head -1)"
-assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" \
-          "$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
+mount_dst="$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
+assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" "$mount_dst"
 # And where a new tab lands when the tab it came from cannot be followed (#493). A missing line
 # reads as a sentence rather than as empty, so two failed extractions cannot agree with each other.
 fallback="$(sed -n 's/^_cs193v_fallback=//p' $PRIVATE/files/tmux/newtab.bash 2>/dev/null | head -1)"
-assert_eq "newtab:fallback-matches-MOUNT_DST" \
-          "$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)" \
+assert_eq "newtab:fallback-matches-MOUNT_DST" "$mount_dst" \
           "${fallback:-<no _cs193v_fallback= line in newtab.bash>}"
 
 # config_hash decides whether an existing container is stale. It must cover the mount
