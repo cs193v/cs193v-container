@@ -59,12 +59,20 @@ require_python3
 #
 # WHICH MEANS A NEW DATA FILE DROPPED IN HERE GOES RED rather than being quietly linted as shell.
 # That is the intended trade -- data belongs in fixtures/ -- and the answer is to name it above.
-tf_nl="$(find -L $PRIVATE/tests -type f \
+tf_nl="$(find -L "$PRIVATE/tests" -type f \
               ! -path '*/tmux-harness/*' ! -path '*/fixtures/*' \
               ! -name '*.md' ! -name '*.py' ! -name '*.pyc' ! -path '*/__pycache__/*' \
          | LC_ALL=C sort)"
-testfiles="$(printf '%s' "$tf_nl" | do_tr '\n' ' ')"
-record "tests:shell-files-found" "$(printf '%s\n' "$tf_nl" | grep -c .)"
+# AN ARRAY, ONE PATH PER ELEMENT (#436). This was a space-joined string, so a checkout whose path
+# held a space handed shellcheck, the exec check and the waits rule two halves of every path, and a
+# tripwire here counted words to catch a FILE name with a space -- which an array holds too.
+testfiles=()
+while IFS= read -r f; do
+    [ -n "$f" ] && testfiles+=("$f")
+done <<TESTFILES
+$tf_nl
+TESTFILES
+record "tests:shell-files-found" "${#testfiles[@]}"
 
 # ASSERTED BEFORE ANY RULE READS IT, by the rule the socket cross-check states at :316: a set
 # that came back empty makes every check below it pass having measured nothing.
@@ -75,20 +83,13 @@ record "tests:shell-files-found" "$(printf '%s\n' "$tf_nl" | grep -c .)"
 # and an extensionless command -- so one of them dropping out is precisely the failure a narrowed
 # find produces, and a probe cannot go stale the way a count does.
 for probe in 10-static.sh lib/assert.sh lib/podman-fake; do
-    case " $testfiles " in
-        *" $PRIVATE/tests/$probe "*) pass "tests:the-file-list-reaches-$probe" ;;
-        *) fail "tests:the-file-list-reaches-$probe" \
-                "$probe is not in the derived list -- the find above has stopped reaching it" ;;
-    esac
+    if printf '%s\n' ${testfiles[@]+"${testfiles[@]}"} | grep -qxF -- "$PRIVATE/tests/$probe"; then
+        pass "tests:the-file-list-reaches-$probe"
+    else
+        fail "tests:the-file-list-reaches-$probe" \
+             "$probe is not in the derived list -- the find above has stopped reaching it"
+    fi
 done
-# AND NO NAME IN IT CARRIES A SPACE, which is the one thing this idiom cannot hold: $testfiles is
-# still word-split where shellcheck, the exec check and the waits rule read it (the parse gate and
-# the bash-4 ban read b32files, one path per element, since #437), so a space would become two paths --
-# neither of which exists, and both of which shellcheck would then refuse in a way that reads as a
-# lint failure rather than as a filename. Counted both ways rather than searched for: that IS the
-# failure.
-assert_eq "tests:no-shell-file-name-carries-a-space" \
-          "$(printf '%s\n' "$tf_nl" | grep -c .)" "$(printf '%s\n' $testfiles | grep -c .)"
 
 # ─── syntax ────────────────────────────────────────────────────────────────────
 assert_ok  "syntax:cs193v"            bash -n cs193v
@@ -149,20 +150,23 @@ assert_ok  "syntax:shortlink"         python3 -c \
 # .gitignore:22-25 exists to sweep up after exactly that line, and :103-104 and
 # Containerfile:609 both already record the reason not to. It also matters to the shell file list above, which is
 # inclusive by default: a .pyc dropped beside a source is a binary handed to shellcheck next run.
-pyfiles="$(find -L $PRIVATE/files $PRIVATE/tests -type f -name '*.py' \
-           | LC_ALL=C sort | do_tr '\n' ' ')"
-record "tests:python-files-found" "$(printf '%s\n' $pyfiles | grep -c .)"
+pyfiles=()
+while IFS= read -r f; do
+    [ -n "$f" ] && pyfiles+=("$f")
+done <<PYFILES
+$(find -L "$PRIVATE/files" "$PRIVATE/tests" -type f -name '*.py' | LC_ALL=C sort)
+PYFILES
+record "tests:python-files-found" "${#pyfiles[@]}"
 # NON-EMPTY FIRST, and here that guard is load-bearing rather than ceremonial: `for p in
 # sys.argv[1:]` over NO arguments compiles nothing and exits 0. The form this replaces was a
 # literal glob, which python failed to OPEN when it matched nothing -- loud by accident. A
 # derived list that came back empty would pass in silence, which is issue #79's whole family.
-if [ -n "$pyfiles" ]; then pass "syntax:python-files-were-found"
+if [ "${#pyfiles[@]}" -gt 0 ]; then pass "syntax:python-files-were-found"
 else fail "syntax:python-files-were-found" \
           'no .py under files/ or tests/ -- has the find above stopped reaching them?'; fi
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
 assert_ok  "syntax:python"            python3 -c \
            "import sys
-for p in sys.argv[1:]: compile(open(p).read(), p, 'exec')" $pyfiles
+for p in sys.argv[1:]: compile(open(p).read(), p, 'exec')" ${pyfiles[@]+"${pyfiles[@]}"}
 assert_ok  "syntax:man"               sh -n $PRIVATE/files/man
 assert_ok  "syntax:ui"                bash -n $PRIVATE/files/cs193v-ui.sh
 assert_ok  "syntax:setup-git"         bash -n $PRIVATE/files/setup-git
@@ -227,7 +231,7 @@ assert_eq  "syntax:every-test-file-parses" "" "$unparsed"
 # invokes every suite as `bash "$1"`, and 19 of them are not executable at all. A rule that said
 # otherwise would be asserting something this tree does not believe.
 notexec=''
-for f in $testfiles; do
+for f in ${testfiles[@]+"${testfiles[@]}"}; do
     case "$f" in *.sh) continue ;; esac
     [ -x "$f" ] || notexec="$notexec ${f#"$PRIVATE"/tests/}"
 done
@@ -860,37 +864,40 @@ pf_queue() {                          # pf_queue FILE [START END] -> adds what F
             '?') r='' ;;
             *)   continue ;;
         esac
-        if [ -n "$r" ] && [ -f "$r" ]; then pf_todo="$pf_todo $r"
-        else printf '? %s sources %s, which this rule cannot trace to a file\n' "$1" "$a"; fi
+        if [ -n "$r" ] && [ -f "$r" ]; then pf_todo+=("$r")
+        else printf '?\t%s sources %s, which this rule cannot trace to a file\n' "$1" "$a"; fi
     done <<EOF
 $(pf_sources "$@")
 EOF
 }
-pf_scope() {                          # pf_scope FILE... -> "FILE START END" per region, "? WHY" per gap
-    local f k a b seen=' '
-    pf_todo=''
+# TAB-DELIMITED RECORDS AND AN ARRAY FOR THE QUEUE (#436). Both were spaces, so a file under a
+# directory with a space in its name came apart in each: `read -r f a b` took half its path as f.
+pf_scope() {                          # pf_scope FILE... -> "FILE\tSTART\tEND" per region, "?\tWHY" per gap
+    local f k a b s i=0 seen
+    seen=()
+    pf_todo=()
     for f in "$@"; do
         while read -r k a b; do
             case "$k" in
-                whole) pf_todo="$pf_todo $f" ;;
-                part)  printf '%s %s %s\n' "$f" "$a" "$b"; pf_queue "$f" "$a" "$b" ;;
-                '?')   printf '? %s:%s turns pipefail on where this rule cannot tell how far it reaches\n' "$f" "$a" ;;
+                whole) pf_todo+=("$f") ;;
+                part)  printf '%s\t%s\t%s\n' "$f" "$a" "$b"; pf_queue "$f" "$a" "$b" ;;
+                '?')   printf '?\t%s:%s turns pipefail on where this rule cannot tell how far it reaches\n' "$f" "$a" ;;
             esac
         done <<EOF
 $(pf_regions "$f")
 EOF
     done
-    while [ -n "$pf_todo" ]; do
-        # shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-        set -- $pf_todo; f="$1"; shift; pf_todo="$*"
-        case "$seen" in *" $f "*) continue ;; esac
-        seen="$seen$f "
-        printf '%s 1 %s\n' "$f" "$(awk 'END { print NR }' "$f")"
+    while [ "$i" -lt "${#pf_todo[@]}" ]; do
+        f="${pf_todo[$i]}"; i=$((i + 1))
+        for s in ${seen[@]+"${seen[@]}"}; do [ "$s" = "$f" ] && continue 2; done
+        seen+=("$f")
+        printf '%s\t1\t%s\n' "$f" "$(awk 'END { print NR }' "$f")"
         pf_queue "$f"
     done
 }
 pf_scan() {                           # pf_scan FILE START END -> "FILE:LINE: TEXT" per piped grep -q
-    awk -v a="$2" -v b="$3" -v f="${1#"$REPO"/}" '
+    PF_NAME="${1#"$REPO"/}" awk -v a="$2" -v b="$3" '
+    BEGIN { f = ENVIRON["PF_NAME"] }
     NR < a || NR > b || /^[ \t]*#/ { next }
     { code = carry $0; carry = "" }
     code ~ /\\$/ { sub(/\\$/, "", code); carry = code " "; next }
@@ -901,10 +908,10 @@ pf_scan() {                           # pf_scan FILE START END -> "FILE:LINE: TE
 }
 pf_violations() {                     # pf_violations FILE... -> one line per piped grep -q in scope
     local f a b
-    while read -r f a b; do
+    while IFS="$A_TAB" read -r f a b; do
         case "$f" in
             '')  ;;
-            '?') printf '%s %s\n' "${a#"$REPO"/}" "$b" ;;
+            '?') printf '%s\n' "${a#"$REPO"/}" ;;
             *)   pf_scan "$f" "$a" "$b" ;;
         esac
     done <<EOF
@@ -912,17 +919,25 @@ $(pf_scope "$@")
 EOF
 }
 # Every file that so much as mentions pipefail; pf_regions decides which of them turn it on.
-pf_files="$(find -L "$REPO/cs193v" "$PRIVATE" -type f ! -name '*.md' -exec grep -l pipefail {} + \
-            | LC_ALL=C sort | do_tr '\n' ' ')"
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-pf_scope_txt="$(pf_scope $pf_files)"
-record "pipefail:scope" "$(printf '%s\n' "$pf_scope_txt" | sed "s|$REPO/||g" | do_tr '\n' ';')"
+pf_files=()
+while IFS= read -r f; do
+    [ -n "$f" ] && pf_files+=("$f")
+done <<PFFILES
+$(find -L "$REPO/cs193v" "$PRIVATE" -type f ! -name '*.md' -exec grep -l pipefail {} + | LC_ALL=C sort)
+PFFILES
+pf_scope_txt="$(pf_scope ${pf_files[@]+"${pf_files[@]}"})"
+# THE CHECKOUT'S PATH TAKEN OFF AS A STRING, not as a sed pattern, which every `.`, `[` and `|` in
+# it would change the meaning of (#436). record() turns the tabs into spaces.
+record "pipefail:scope" "$(printf '%s\n' "$pf_scope_txt" | PF_REPO="$REPO/" awk '
+    { r = ENVIRON["PF_REPO"]; out = ""
+      while ((i = index($0, r)) > 0) { out = out substr($0, 1, i - 1); $0 = substr($0, i + length(r)) }
+      print out $0 }' | do_tr '\n' ';')"
 # THE FIVE SHAPES THE DERIVATION HAS TO REACH, probed rather than counted, as the shell file list at
 # the top of this file is: a file that sets it unindented, a library it sources by a relative path,
 # one sourced by its installed path, a `( set -o pipefail` and a `set` straight under a `(`.
 pf_reach() {                          # pf_reach PATH whole|part -> 0 if the scope holds PATH that way
     local f a b
-    while read -r f a b; do
+    while IFS="$A_TAB" read -r f a b; do
         [ "$f" = "$PRIVATE/$1" ] || continue
         case "$2:$a" in whole:1) return 0 ;; part:1) ;; part:*) return 0 ;; esac
     done <<EOF
@@ -936,8 +951,8 @@ for pf_probe in tests/tmux-harness/suite.sh:whole tests/tmux-harness/lib.sh:whol
     else fail "pipefail:the-scope-reaches-$pf_probe" \
               "${pf_probe%:*} is not in the derived scope as $pf_probe -- has the derivation stopped reaching it?"; fi
 done
-# shellcheck disable=SC2086
-assert_eq "pipefail:no-piped-grep-q-where-pipefail-is-on" "" "$(pf_violations $pf_files)"
+assert_eq "pipefail:no-piped-grep-q-where-pipefail-is-on" "" \
+          "$(pf_violations ${pf_files[@]+"${pf_files[@]}"})"
 
 # AND THE RULE GOES RED WHERE IT SHOULD, and only there. The pipefail line is assembled, so this
 # file does not put its own specimens in scope.
@@ -977,6 +992,18 @@ pf_gaps="$(cd "$pf_tmp" && pf_violations fn.sh lost.sh other.sh cwd.sh)"
 assert_eq "pipefail:what-the-rule-cannot-place-fails-rather-than-shrinking-the-scope" \
           "fn.sh:2 lost.sh other.sh cwd.sh" "$(printf '%s\n' "$pf_gaps" | cut -d' ' -f1 | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_contains "pipefail:a-refusal-names-the-source-it-could-not-trace" '. "$OTHER/lib.sh"' "$pf_gaps"
+# ...AND FROM A HOSTILE PATH (#436), named whole. The cases above run inside $pf_tmp with relative
+# names, which is exactly what hid a queue split on spaces, records read back on spaces, and an
+# awk -v that rewrote the backslash in a file's name.
+pf_sp="$pf_tmp/$HOSTILE_NAME"
+mkdir -p "$pf_sp"
+{ printf '#!/bin/bash\n%s\n' "$pf_on"
+  printf '%s\n' 'HERE="$(cd "$(dirname "$0")" && pwd)"' '. "$HERE/lib.sh"' 'foo | grep -q y'
+} > "$pf_sp/top.sh"
+printf 'foo | grep -q y\n' > "$pf_sp/lib.sh"
+pf_sp_out="$(pf_violations "$pf_sp/top.sh")"
+assert_contains "pipefail:a-hostile-path-is-scanned-whole"         "$pf_sp/top.sh:5:" "$pf_sp_out"
+assert_contains "pipefail:a-hostile-path-is-followed-into-its-lib" "$pf_sp/lib.sh:1:" "$pf_sp_out"
 rm -rf "$pf_tmp"
 
 # ─── every throwaway container the suite starts is labelled as ours ────────────
@@ -1096,8 +1123,6 @@ rm -rf "$ft_tmp"
 # pattern -- bash first -- cannot match. The bash 3.2 ban list above has the same problem
 # and solves it by naming its files rather than globbing them.
 door_tail='install'; door_head='bash '
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-#
 # A CALL THAT PASSES AN ARGUMENT IS EXCLUDED (#232), and what makes that safe is a property of the
 # file rather than a hope about the call site: the bootstrap dispatches `case "${1:-}"` above the
 # TOOL= line and above the mktemp, and EVERY arm of it exits -- the verb, and the catch-all for
@@ -1916,36 +1941,33 @@ assert_eq "installer-door:every-call-names-the-script-it-runs" "" "$nameless"
 # So the requirements live in machine_flags and this asserts nothing else names them. A rule,
 # not a convention: the next person to add a machine cannot reintroduce the split by forgetting
 # a convention they never read.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
 # NOT this file: 10-static.sh names --cap-add=SYS_ADMIN in its own container.args invariant
 # list, which is a different job entirely. The rule is about the files that DECIDE what a
 # fixture machine gets.
-flagfiles="$PRIVATE/tests/lib/sandbox.sh $PRIVATE/tests/install-sandbox.sh $PRIVATE/tests/2[0-9]-*.sh"
-# shellcheck disable=SC2086
+#
+# AN ARRAY, AND READ THROUGH lint_grep (#436). It was a space-joined string with a glob in it,
+# split unquoted, and each hit was filtered for comments with `^[^:]*:[0-9]+:` -- which a colon in
+# the checkout's path pushes off the line number, so comments stopped being skipped.
+flagfiles=("$PRIVATE/tests/lib/sandbox.sh" "$PRIVATE/tests/install-sandbox.sh" "$PRIVATE"/tests/2[0-9]-*.sh)
 # ASSEMBLED TAIL-FIRST, or this line matches itself and the rule fails on its own definition --
 # the third time that has happened in this file, hence the shared idiom.
 sa_tail='SYS_ADMIN'; sa_head='--cap-add='
-naming="$(grep -Hn -- "$sa_head$sa_tail" $flagfiles \
-          | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming="$(lint_grep --skip-comments -e "$sa_head$sa_tail" -- ${flagfiles[@]+"${flagfiles[@]}"})"
 assert_eq "fixture-flags:only-one-place-names-SYS_ADMIN" "1" \
           "$(printf '%s\n' "$naming" | grep -c . )"
 assert_says "fixture-flags:and-that-place-is-machine_flags" 'lib/sandbox.sh' "$naming"
 # The same for the unmask, which is the other departure and the one container.args forbids in
 # its wider form -- so a second copy appearing anywhere is worth failing over.
-# shellcheck disable=SC2086
 um_tail='=/proc'; um_head='unmask'
-naming2="$(grep -Hn -- "$um_head$um_tail" $flagfiles \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming2="$(lint_grep --skip-comments -e "$um_head$um_tail" -- ${flagfiles[@]+"${flagfiles[@]}"})"
 assert_eq "fixture-flags:only-one-place-names-the-unmask" "1" \
           "$(printf '%s\n' "$naming2" | grep -c . )"
 # ...and the two devices, which are the other half of what a machine gets. They were demoted from
 # the --no-caps flag surface to unconditional constants precisely BECAUSE denying them models
 # nothing a student has -- so the risk is no longer that a case disagrees about them, it is that
 # a second place starts naming them and the demotion silently becomes a per-case choice again.
-# shellcheck disable=SC2086
 dv_tail='/dev/fuse'; dv_head='--device '
-naming3="$(grep -Hn -- "$dv_head$dv_tail" $flagfiles \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming3="$(lint_grep --skip-comments -e "$dv_head$dv_tail" -- ${flagfiles[@]+"${flagfiles[@]}"})"
 assert_eq "fixture-flags:only-one-place-names-dev-fuse" "1" \
           "$(printf '%s\n' "$naming3" | grep -c . )"
 
@@ -1962,25 +1984,21 @@ assert_eq "fixture-flags:only-one-place-names-dev-fuse" "1" \
 # TWO DIRECTIONS, because both are silent failures. A SECOND copy is the drift these one-place
 # rules exist to stop. ZERO copies is the fix being reverted -- and on a Fedora host that reopens
 # #119's twelve red assertions, while on Ubuntu it reopens nothing and reddens nothing.
-# shellcheck disable=SC2086
 # ASSEMBLED TAIL-FIRST like its neighbours. $flagfiles cannot reach this file today (its glob is
 # 2[0-9]-*.sh), so this cannot match its own definition -- but the neighbours' comment records
 # three occasions when a rule here did, and the day the list widens is not the day to find out.
 ld_tail='=disable'; ld_head='label'
-naming6="$(grep -Hn -- "$ld_head$ld_tail" $flagfiles \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming6="$(lint_grep --skip-comments -e "$ld_head$ld_tail" -- ${flagfiles[@]+"${flagfiles[@]}"})"
 assert_eq "fixture-flags:only-one-place-disables-the-label" "1" \
           "$(printf '%s\n' "$naming6" | grep -c . )"
 assert_says "fixture-flags:and-that-place-is-machine_flags-too" 'lib/sandbox.sh' "$naming6"
 # ...and no OTHER file may name a --security-opt at all, which is the wider half: the unmask and
 # this flag are both spelled that way, and the next fixture privilege probably will be too. A
 # count would have to be bumped every time machine_flags legitimately grows one; this does not.
-# shellcheck disable=SC2086
 so_tail='-opt'; so_head='--security'
-naming7="$(grep -Hn -- "$so_head$so_tail" $flagfiles \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming7="$(lint_grep --skip-comments -e "$so_head$so_tail" -- ${flagfiles[@]+"${flagfiles[@]}"})"
 if [ -n "$naming7" ]; then pass "fixture-flags:the-security-opts-were-found"
-else fail "fixture-flags:the-security-opts-were-found" "no --security-opt in $flagfiles -- did machine_flags change?"; fi
+else fail "fixture-flags:the-security-opts-were-found" "no --security-opt in ${flagfiles[*]} -- did machine_flags change?"; fi
 assert_eq "fixture-flags:no-other-file-names-a-security-opt" "" \
           "$(printf '%s\n' "$naming7" | grep -v 'lib/sandbox.sh' || true)"
 
@@ -2011,10 +2029,8 @@ assert_eq "fixture-flags:and-no-longer-passes-the-bare-drop-list" "0" \
 # This is the same rule as above for the same reason: the wsl.conf arrangement WAS duplicated
 # between run.sh and that file, and the copies disagreed for long enough that --wslconf silently
 # did nothing in one of them.
-# shellcheck disable=SC2086
 rm_tail='remove -y'; rm_head='apt-get '
-naming4="$(grep -Hn -- "$rm_head$rm_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming4="$(lint_grep --skip-comments -e "$rm_head$rm_tail" -- "$PRIVATE"/tests/lib/*.sh "$PRIVATE"/tests/*.sh)"
 assert_eq "fixture-prereqs:only-one-place-removes-a-package" "1" \
           "$(printf '%s\n' "$naming4" | grep -c . )"
 assert_says "fixture-prereqs:and-that-place-is-sandbox-guest" 'lib/sandbox-guest.sh' "$naming4"
@@ -2022,10 +2038,8 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest" 'lib/sandbox-guest
 # only knew about apt would let the very split it exists to prevent reappear through a second
 # package manager -- which is exactly how this would go wrong, since the natural place to put a
 # dnf removal is next to the case that needs it rather than in the one table.
-# shellcheck disable=SC2086
 rmd_tail='remove -y'; rmd_head='dnf '
-naming5="$(grep -Hn -- "$rmd_head$rmd_tail" $PRIVATE/tests/lib/*.sh $PRIVATE/tests/*.sh \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+naming5="$(lint_grep --skip-comments -e "$rmd_head$rmd_tail" -- "$PRIVATE"/tests/lib/*.sh "$PRIVATE"/tests/*.sh)"
 assert_eq "fixture-prereqs:only-one-place-removes-with-dnf" "1" \
           "$(printf '%s\n' "$naming5" | grep -c . )"
 assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-guest.sh' "$naming5"
@@ -2053,12 +2067,10 @@ assert_says "fixture-prereqs:and-that-place-is-sandbox-guest-too" 'lib/sandbox-g
 # lines, or an assertion on the right of a pipe, is invisible to a grep. Both were measured at
 # zero across the suites when this landed, and every guard in them is the statement form
 # `... || { fail ...; exit 1; }`.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
 exitful='dyn_ports|fwd_init|fwd_require_ctl|require_cmd|require_image|require_running|require_tunnel'
 exitful="$exitful|pass|fail|skip|record|assert_[a-z_]+"
-subshelled="$(grep -HnE '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
-              $PRIVATE/tests/[0-9][0-9]-*.sh $PRIVATE/tests/lib/*.sh \
-              | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+subshelled="$(lint_grep --skip-comments -E -e '\$\([[:space:]]*('"$exitful"')([[:space:]]|\))' \
+              -- "$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh)"
 assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 
 # ...AND NOTHING THAT DROPS dyn_ports' MEMO, the same boundary eating state rather than an exit
@@ -2073,14 +2085,13 @@ assert_eq "harness:no-exiting-helper-runs-in-a-subshell" "" "$subshelled"
 #
 # AND IT PROVES IT READ ITS FILES, which the rule above does not (#432's lesson, 94e17a7's shape):
 # the list is an array, so a checkout path with a space cannot split it; grep's exit 2 travels as
-# $CHECKER_DIED, so "could not read" cannot pass as "found nothing"; and a specimen under a path
-# with a space must be found, one line per boundary. ASSEMBLED, because this file is on the list.
+# $CHECKER_DIED, so "could not read" cannot pass as "found nothing"; and a specimen under a hostile
+# path must be found, one line per boundary, with its commented-out capture skipped. ASSEMBLED, because this file is on the list.
 memoful='dyn_serve_stop|dyn_servers_gone|clean_vt_processes|release_container|hold_container'
-memo_scan() {                         # memo_scan FILE... -> grep's hits, or $CHECKER_DIED
-    local rc
-    grep -HnE '\$\([[:space:]]*('"$memoful"')([[:space:]]|[);&|<>])' "$@" </dev/null
-    rc=$?
-    [ "$rc" -le 1 ] || printf '%s (exit %s from: grep)\n' "$CHECKER_DIED" "$rc"
+# THROUGH lint_grep, WHICH SKIPS COMMENTS ITSELF (#436). The skip used to be a `^[^:]*:[0-9]+:`
+# filter on grep -Hn's output, and a colon in the checkout's path moved the line number out of it.
+memo_scan() {                         # memo_scan FILE... -> the hits, or $CHECKER_DIED
+    lint_grep --skip-comments -E -e '\$\([[:space:]]*('"$memoful"')([[:space:]]|[);&|<>])' -- "$@"
 }
 memo_tmp="$(new_tmpdir)"
 case "$(memo_scan "$memo_tmp/absent" 2>/dev/null)" in
@@ -2088,10 +2099,11 @@ case "$(memo_scan "$memo_tmp/absent" 2>/dev/null)" in
     *) fail "harness:memo-scan-fails-on-a-file-it-cannot-read" \
             "grep was handed a file that does not exist and the scan reported nothing" ;;
 esac
-memo_specimen="$memo_tmp/a checkout with spaces/planted.sh"
+memo_specimen="$memo_tmp/$HOSTILE_NAME/planted.sh"
 mkdir -p "${memo_specimen%/*}"
 { printf 'out="$(%s)"\n' release_container
   printf 'out="$(%s; L --rebuild)"\n' hold_container
+  printf '# out="$(%s)"\n' release_container
 } > "$memo_specimen"
 memo_files=("$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh "$memo_specimen")
 memo_raw="$(memo_scan ${memo_files[@]+"${memo_files[@]}"})"
@@ -2100,8 +2112,8 @@ case "$memo_raw" in
     *) fail "harness:memo-scan-finds-a-planted-capture" \
             "the scan did not report both captures planted in $memo_specimen" ;;
 esac
-memosub="$(printf '%s\n' "$memo_raw" | grep -vF -- "$memo_specimen:" \
-           | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+assert_not_contains "harness:memo-scan-skips-a-comment-under-a-hostile-path" "$memo_specimen:3:" "$memo_raw"
+memosub="$(printf '%s\n' "$memo_raw" | grep -vF -- "$memo_specimen:" || true)"
 assert_eq "harness:no-memo-dropping-helper-runs-in-a-subshell" "" "$memosub"
 rm -rf "$memo_tmp"
 
@@ -2245,22 +2257,20 @@ frozen_waits() {                      # frozen_waits [--count] FILE... -> one li
 # BOTH HALVES MUST BE REACHED before the verdict means anything: a list or a pattern that stopped
 # reaching one of them would leave that half green forever. Counted WITHOUT this file, whose own
 # specimens below would otherwise satisfy both halves on their own.
-ws_files='' ws_reach=''
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-for f in $testfiles "$PRIVATE"/tests/tmux-harness/*.sh; do
-    ws_files="$ws_files $f"
-    case "$f" in */10-static.sh) ;; *) ws_reach="$ws_reach $f" ;; esac
+ws_files=() ws_reach=()
+for f in ${testfiles[@]+"${testfiles[@]}"} "$PRIVATE"/tests/tmux-harness/*.sh; do
+    ws_files+=("$f")
+    case "$f" in */10-static.sh) ;; *) ws_reach+=("$f") ;; esac
 done
-# shellcheck disable=SC2086
-ws_sites="$(frozen_waits --count $ws_reach)"
+ws_sites="$(frozen_waits --count ${ws_reach[@]+"${ws_reach[@]}"})"
 record "waits:condition-words-examined" "$ws_sites"
 case "$ws_sites" in
     "wait="[1-9]*" hx="[1-9]*) pass "waits:the-scan-reaches-both-kinds-of-wait" ;;
     *) fail "waits:the-scan-reaches-both-kinds-of-wait" "got '$ws_sites' -- one kind of wait has no
 call site the pattern recognises any more. Did they move, or change shape?" ;;
 esac
-# shellcheck disable=SC2086
-assert_eq "waits:no-condition-is-expanded-by-the-caller" "" "$(frozen_waits $ws_files)"
+assert_eq "waits:no-condition-is-expanded-by-the-caller" "" \
+          "$(frozen_waits ${ws_files[@]+"${ws_files[@]}"})"
 
 # AND THE RULE GOES RED ON THE LINE THAT BROKE, and on every shape it claims. ASSEMBLED, for the
 # reason the dollarq specimens above are: this file is in $ws_files, so the bad lines written out
@@ -2709,13 +2719,13 @@ assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELC
 # msg() with a different MESSAGES, so it can collide with either. Derived from a list rather
 # than written out twice, so a fourth catalogue is one line here.
 cat_keys() { grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | LC_ALL=C sort -u; }
-CATS="$PRIVATE/messages.txt $PRIVATE/course-install-messages.txt $PRIVATE/files/setup-git-messages.txt"
-for c in $CATS; do
+CATS=("$PRIVATE/messages.txt" "$PRIVATE/course-install-messages.txt" "$PRIVATE/files/setup-git-messages.txt")
+for c in ${CATS[@]+"${CATS[@]}"}; do
     assert_ne "setup-git:catalogue-has-keys-$(basename "$c")" "" "$(cat_keys "$c")"
 done
 both=''
-for a in $CATS; do
-    for b in $CATS; do
+for a in ${CATS[@]+"${CATS[@]}"}; do
+    for b in ${CATS[@]+"${CATS[@]}"}; do
         [ "$a" = "$b" ] && continue
         # ONE DIRECTION ONLY per pair, or every collision is reported twice.
         [ "$a" \< "$b" ] || continue
@@ -2796,7 +2806,7 @@ assert_eq "helpers:every-assertion-used-is-defined" "" \
 nk_weak=''
 for nk_k in $(grep -ohE 'assert_says_not_key +"[^"]*" +[a-z0-9._-]+' $PRIVATE/tests/*.sh \
                 | awk '{print $NF}' | LC_ALL=C sort -u); do
-    for nk_c in $CATS; do
+    for nk_c in ${CATS[@]+"${CATS[@]}"}; do
         grep -q "^\[\[$nk_k\]\]\$" "$nk_c" || continue
         nk_n="$(printf '%s' "$(msg_text "$nk_k" "$nk_c")" | wc -c | do_tr -d ' ')"
         [ "$nk_n" -ge 10 ] || nk_weak="$nk_weak $(basename "$nk_c"):$nk_k($nk_n)"
@@ -5325,5 +5335,4 @@ fi
 #
 # BELOW THE PRODUCT-SIDE GROUPS, so it inherits their require_cmd rather than repeating it -- and
 # last in the file for the reason that line gives.
-# shellcheck disable=SC2086   # deliberately word-split: it is a list of paths
-assert_ok  "shellcheck:tests" shellcheck --severity=warning $testfiles
+assert_ok  "shellcheck:tests" shellcheck --severity=warning ${testfiles[@]+"${testfiles[@]}"}

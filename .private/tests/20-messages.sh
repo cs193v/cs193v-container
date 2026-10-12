@@ -116,7 +116,8 @@ assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
 # the two alerts the applet shows when it cannot start -- because the applet ships without any
 # catalogue and cannot read one at launch. Nothing else consumes those keys, so without this
 # path they report as orphans; measured, two of them did.
-IREADERS="$PRIVATE/course-install.sh $PRIVATE/wsl-provision.sh $PRIVATE/install-utils.sh $PRIVATE/macapp/make-macapp.sh"
+IREADERS=("$PRIVATE/course-install.sh" "$PRIVATE/wsl-provision.sh" "$PRIVATE/install-utils.sh"
+          "$PRIVATE/macapp/make-macapp.sh")
 ICAT="$PRIVATE/course-install-messages.txt"
 assert_file "itext:the-catalogue-is-there" "$ICAT"
 
@@ -130,8 +131,7 @@ grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | do_tr -d '[]' \
 # "messages.txt for its early output" -- which registered `for` as a key in use and turned a
 # reconciliation red for a sentence. Whole-line comments go first for the same class of reason:
 # prose about the catalogue is not a call into it.
-# shellcheck disable=SC2086   # deliberately word-split: IREADERS is a list of paths
-sed 's/^[[:space:]]*#.*//' $IREADERS \
+sed 's/^[[:space:]]*#.*//' ${IREADERS[@]+"${IREADERS[@]}"} \
     | grep -ohE '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' | awk '{print $NF}' \
     | LC_ALL=C sort -u > "$TMP/iused"
 
