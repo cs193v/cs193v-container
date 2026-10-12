@@ -278,10 +278,14 @@ lane_of() {                           # lane_of TIER -> cheap | podman
 }
 
 # ─── discover ──────────────────────────────────────────────────────────────────
-SUITES=""
+# AN ARRAY, ONE PATH PER ELEMENT (#436). This was a space-joined string expanded unquoted, so from
+# a checkout with a space anywhere in its path every suite came apart into fragments: --list gave
+# each a bogus row and put the podman tiers in the cheap lane, and every suite exited 127. So are
+# CHEAP and PODMAN below, and every expansion is guarded for bash 3.2's empty-array abort.
+SUITES=()
 for f in "$DIR"/[0-9][0-9]-*.sh; do
     [ -f "$f" ] || continue
-    SUITES="$SUITES $f"
+    SUITES+=("$f")
 done
 
 # ─── every tier the suites declare ────────────────────────────────────────────
@@ -294,7 +298,7 @@ done
 # not pay for it. The selection loop below asks tier_of per suite either way.
 KNOWN=""
 if [ -n "$ASKED" ] || [ "$EVERYTHING" = yes ]; then
-    for f in $SUITES; do
+    for f in ${SUITES[@]+"${SUITES[@]}"}; do
         t="$(tier_of "$f")"
         case " $KNOWN " in *" $t "*) ;; *) KNOWN="$KNOWN $t" ;; esac
     done
@@ -344,7 +348,7 @@ fi
 
 if [ "$LIST_ONLY" = yes ]; then
     printf '%slane    tier       suite%s\n' "$C_BOLD" "$C_OFF"
-    for f in $SUITES; do
+    for f in ${SUITES[@]+"${SUITES[@]}"}; do
         t="$(tier_of "$f")"
         printf '%-7s %-10s %s\n' "$(lane_of "$t")" "$t" "$(basename "$f")"
     done
@@ -681,16 +685,16 @@ run_lane() {                          # run_lane FILE...  — sequential, in the
 }
 
 # ─── select, and sort into lanes ───────────────────────────────────────────────
-CHEAP=""
-PODMAN=""
+CHEAP=()
+PODMAN=()
 RAN=0
-for f in $SUITES; do
+for f in ${SUITES[@]+"${SUITES[@]}"}; do
     base="$(basename "$f")"
     tier="$(tier_of "$f")"
     wanted "$tier" || continue
     matches_filter "$base" || continue
     RAN=$((RAN + 1))
-    if [ "$(lane_of "$tier")" = cheap ]; then CHEAP="$CHEAP $f"; else PODMAN="$PODMAN $f"; fi
+    if [ "$(lane_of "$tier")" = cheap ]; then CHEAP+=("$f"); else PODMAN+=("$f"); fi
 done
 
 if [ "$RAN" -eq 0 ]; then
@@ -702,7 +706,7 @@ fi
 # in one lane gets no lane machinery and no buffering — which is most single-suite runs, and
 # the case where seeing the output live matters most.
 LANES=one
-[ "$PARALLEL" = yes ] && [ -n "$CHEAP" ] && [ -n "$PODMAN" ] && LANES=two
+[ "$PARALLEL" = yes ] && [ "${#CHEAP[@]}" -gt 0 ] && [ "${#PODMAN[@]}" -gt 0 ] && LANES=two
 
 # WHAT IS ABOUT TO BE MEASURED, IN FULL (#256). The tier list was here already; the suite count
 # and the -k patterns were not, and those are what separate `--tier static,unit,shim` from
@@ -776,14 +780,14 @@ fi
 # a two-second recreate when nothing moved and a full build when it did -- which is exactly the
 # state a new platform is in. See CLAUDE.md.
 #
-# AFTER THE LANE SORT, so `[ -n "$PODMAN" ]` can skip it: --everything-but-github with a `-k`
+# AFTER THE LANE SORT, so an empty PODMAN can skip it: --everything-but-github with a `-k`
 # that lands entirely in the cheap lane must not pay for an image nothing is going to look at.
 #
 # ABORTS ON FAILURE rather than carrying on. verb_rebuild is safe to drive from here -- no
 # confirm, no handover to a shell, it returns -- but it does refuse while a session is live, and
 # letting that through would mean six podman-tier suites each rediscovering it as require:image,
 # with the one line that explained it scrolled off the top.
-if [ "$EVERYTHING" = yes ] && [ -n "$PODMAN" ]; then
+if [ "$EVERYTHING" = yes ] && [ "${#PODMAN[@]}" -gt 0 ]; then
     if ! ( cd "$DIR/../.." && ./cs193v --rebuild ); then
         printf '\n%s./cs193v --rebuild failed%s, so the image and container the image, container\n' \
                "$C_RED" "$C_OFF"
@@ -837,7 +841,7 @@ if [ "$LANES" = two ]; then
     #
     # A LANE THAT EXITS NON-ZERO IS A CRASH, because the helper failing would otherwise run none of
     # this lane's suites and print a green summary of the other one.
-    # shellcheck disable=SC2016,SC2086
+    # shellcheck disable=SC2016
     C_BOLD="$C_BOLD" C_DIM="$C_DIM" C_OFF="$C_OFF" CRASHES="$CRASHES" TIMINGS="$TIMINGS" \
     TIMEFORMAT="$TIMEFORMAT" \
         "$DO_PY" -c 'import os, signal, sys
@@ -861,17 +865,15 @@ runner=\$1; shift
 watchdog=\$!
 run_lane \"\$@\"
 kill \"\$watchdog\" 2>/dev/null
-exit 0" "$CHEAPLOG" "$$" $CHEAP </dev/null &
+exit 0" "$CHEAPLOG" "$$" ${CHEAP[@]+"${CHEAP[@]}"} </dev/null &
     CHEAP_PID=$!
     lane_group_wait
-    # shellcheck disable=SC2086
-    run_lane $PODMAN
+    run_lane ${PODMAN[@]+"${PODMAN[@]}"}
     wait "$CHEAP_PID" 2>/dev/null || printf '%s\t%s\n' "$?" 'the no-podman lane' >> "$CRASHES"
     CHEAP_PID=""
     flush_cheap
 else
-    # shellcheck disable=SC2086
-    run_lane $CHEAP $PODMAN
+    run_lane ${CHEAP[@]+"${CHEAP[@]}"} ${PODMAN[@]+"${PODMAN[@]}"}
 fi
 
 # ─── summarise ─────────────────────────────────────────────────────────────────

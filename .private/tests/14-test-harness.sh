@@ -281,6 +281,44 @@ assert_contains "runner:still-counts-what-ran"      "2 pass"                "$ou
 assert_match    "runner:names-the-one-that-could-not-record" '03-cannot-record\.sh +exited 97' "$out"
 assert_contains "runner:says-results-were-lost"    "results were LOST"     "$out"
 
+# ─── the runner, from a checkout whose path is hostile (#436) ─────────────────
+# run-tests.sh KEPT ITS SUITE LIST AS ONE SPACE-JOINED STRING and split it unquoted, so from a
+# checkout with a space anywhere in its path every suite came apart into fragments: --list printed a
+# bogus row beside each one and put every podman-tier suite in the cheap lane, and each suite exited
+# 127. The fixture above runs from $WORK, which has no space in it, so it could never see that.
+#
+# EACH ARM COVERS ITS OWN EXPANSION, which is what lets a mutation land on one line: --tier makes the
+# runner derive the declared tiers, the default run has two lanes (the cheap lane's argv and the
+# podman lane's run_lane), --serial has one, and --list prints. The fakes say where they ran from,
+# so a suite that started but was handed the wrong path cannot pass as one that ran. Resolved
+# physically, because that is how the runner names its own directory.
+RSP="$WORK/$HOSTILE_NAME/tests"
+mkdir -p "$RSP"
+RSP="$(cd -- "$RSP" && pwd -P)"
+cp "$TESTS_DIR/run-tests.sh" "$RSP/run-tests.sh"
+ln -s "$TESTS_DIR/lib" "$RSP/lib"
+for rsp_f in 01-cheap.sh:static 50-pod.sh:container; do
+    { printf '# TIER: %s\n' "${rsp_f#*:}"
+      printf '%s\n' 'printf "RAN-AS=[%s]\n" "$0"'
+      printf 'printf "PASS\\t%s\\tfake:ran\\n" >> "$CS193V_RESULTS"\n' "${rsp_f%%:*}"
+    } > "$RSP/${rsp_f%%:*}"
+done
+rsp_run() { ( cd "$RSP" && NO_COLOR=1 bash ./run-tests.sh "$@" 2>&1; printf '[rc=%s]' "$?" ); }
+out="$(rsp_run --tier static,container)"
+assert_contains "runner-path:two-lanes-run-the-cheap-suite-whole"  "RAN-AS=[$RSP/01-cheap.sh]" "$out"
+assert_contains "runner-path:two-lanes-run-the-podman-suite-whole" "RAN-AS=[$RSP/50-pod.sh]"   "$out"
+assert_contains "runner-path:two-lanes-count-both"                 "2 pass"                    "$out"
+assert_contains "runner-path:two-lanes-pass"                       "[rc=0]"                    "$out"
+out="$(rsp_run --serial --tier static,container)"
+assert_contains "runner-path:one-lane-runs-the-cheap-suite-whole"  "RAN-AS=[$RSP/01-cheap.sh]" "$out"
+assert_contains "runner-path:one-lane-runs-the-podman-suite-whole" "RAN-AS=[$RSP/50-pod.sh]"   "$out"
+assert_contains "runner-path:one-lane-counts-both"                 "2 pass"                    "$out"
+assert_contains "runner-path:one-lane-passes"                      "[rc=0]"                    "$out"
+out="$(rsp_run --list)"
+assert_eq "runner-path:list-names-each-suite-once-in-its-lane" \
+          "cheap   static     01-cheap.sh
+podman  container  50-pod.sh" "$(printf '%s\n' "$out" | sed '1d; /^\[rc=/d')"
+
 # ─── a suite run DIRECTLY exits non-zero when an assertion failed (#394) ───────
 # The runner above counts FAILs from the results file, so a suite that fails an assertion and exits
 # 0 is still red there. Run directly -- which lib/assert.sh supports, and which a bisect or a
