@@ -521,8 +521,14 @@ fixture_build() {                     # fixture_build CASE -> builds only if the
     # The CONTEXT is the fixtures directory, not $REPO. There is no .containerignore here,
     # so a context of the repo would tar projects/ and .git into every build -- the same 69 MB
     # mistake #76 was, and the one the fixture copies now avoid by being `git archive`.
+    #
+    # A COPY OF IT, under $SB_TMP (#436). podman reads -f as a CSV field and cannot lay its overlay
+    # over a context whose path holds a backslash, so from a checkout under a directory with a `"`,
+    # a `,` or a `\` in its name no fixture built at all. Measured, each one. It is 220 KB.
+    rm -rf "$SB_TMP/fixture-ctx"
+    cp -R "$FIXTURE_DIR" "$SB_TMP/fixture-ctx" || { fail "fixture:$case-builds" "could not copy $FIXTURE_DIR"; return 1; }
     if podman build --label "cs193v.fixturehash=$want" --label "$VT_LABEL" \
-                    -f "$FIXTURE_DIR/Containerfile.$case" -t "$tag" "$FIXTURE_DIR" \
+                    -f "$SB_TMP/fixture-ctx/Containerfile.$case" -t "$tag" "$SB_TMP/fixture-ctx" \
                     > "$SB_TMP/build.$case.log" 2>&1; then
         record "fixture:$case" "built"
     else
