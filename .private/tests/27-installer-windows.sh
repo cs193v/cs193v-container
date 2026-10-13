@@ -1174,6 +1174,10 @@ assert_eq "win-lnk-guard:leaves-a-non-wsl-entry-in-the-app-list" "yes" \
 # THE SIGN-OFF IS NOT ASSERTED HERE, for the reason win-ok gives: course-install.sh prints it
 # inside WSL, and this file's half of #218 is the handover. What is asserted is the one line the
 # .cmd itself prints on this arm, and that a failed shortcut does not fail the install.
+#
+# THE DELETE HAS ALREADY RUN BY THEN, and this assertion used to say the reverse: it pinned that
+# :shortcutfailed never reached the delete, which was the ordering #356 is about. The environment
+# exists here, so the delete is the re-run arm's first command.
 wine_new
 wine_list CS193V
 wine_hide_shim_icon
@@ -1183,8 +1187,66 @@ assert_says "win-lnk-noicon:says-the-entry-failed" "could not be created" "$WINE
 assert_says "win-lnk-noicon:points-back-at-the-typed-commands" "commands shown above" "$WINE_OUT"
 assert_eq   "win-lnk-noicon:writes-no-course-entry" "no" \
             "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
-assert_eq   "win-lnk-noicon:never-reaches-the-delete" "0" \
+assert_eq   "win-lnk-noicon:has-already-run-the-delete" "1" \
             "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
+
+# ─── CLASS: WSL's own entry goes the moment it exists, whatever fails next  (#356) ─
+#
+# WHAT A STUDENT WAS LEFT WITH. The delete used to be the last step of a successful run, so every
+# exit between `wsl --install` and it left WSL's plain "CS193V" entry in the Start Menu. Opening
+# it gives a bare shell -- as root, before the root pass has named a default user -- with nothing
+# to say it is not the development environment. #356 is a student who did exactly that.
+#
+# ONE FRESH CREATE PER WAY OF FAILING AFTER IT, and every one of them is a run the fake's own
+# `--install` arm wrote the entry for, so nothing here is planted. `mv` is first because it is the
+# very next `wsl -d` call after the create; the rest follow the .cmd's own order, ending with the
+# icon copy, which exits ZERO and so is the one a student is least likely to re-run.
+#
+# WHAT EACH CASE PROVES IT REACHED: `creates-the-environment-once` says the entry was made, and
+# `writes-no-course-entry` says the run really did stop before the end -- a knob that stopped
+# arranging its failure would leave the run succeeding, and the old end-of-run delete would then
+# turn the entry assertion green for the wrong reason.
+for arm in mv download digest provision stage2 noicon; do
+    wine_new
+    wine_list                              # nothing registered: this run creates it, entry and all
+    case "$arm" in
+        mv)        wine_knob wsl.oobe.conf.missing 1 ;;
+        download)  wine_knob wsl.curl.rc 22 ;;
+        digest)    wine_body truncated ;;
+        provision) wine_knob wsl.provision.rc 1 ;;
+        stage2)    wine_knob wsl.bash.rc 1 ;;
+        noicon)    wine_hide_shim_icon ;;
+    esac
+    wine_run
+    assert_eq "win-early-$arm:creates-the-environment-once" "1" "$(wine_argv_count '\-\-install -d')"
+    assert_eq "win-early-$arm:writes-no-course-entry" "no" \
+              "$(wine_lnk_has 'Programs/CS193V Development Environment.lnk')"
+    assert_eq "win-early-$arm:runs-the-delete-once" "1" \
+              "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
+    assert_eq "win-early-$arm:leaves-no-entry-from-wsl" "no" "$(wine_lnk_has 'CS193V.lnk')"
+done
+
+# ...AND THE STUDENT WHO ALREADY HAS ONE, which is everybody #356 has happened to: an environment
+# from a run that failed, its plain entry still there, and a re-run that may fail again. The
+# entry is planted as WSL writes it, because the run that made it is not this one.
+#
+# TWO WAYS TO FAIL, AT EITHER END OF THE ARM. A VM that cannot start fails the very first `wsl -d`
+# call, which is what proves the delete is ahead of all of them; a failed stage two is the last
+# thing that can go wrong before the course entry is made.
+for arm in novm stage2; do
+    wine_new
+    wine_list CS193V
+    wine_plant_lnk 'CS193V.lnk' 'C:\Program Files\WSL\wsl.exe'
+    case "$arm" in
+        novm)   wine_knob wsl.vm.cannotstart 1 ;;
+        stage2) wine_knob wsl.bash.rc 1 ;;
+    esac
+    wine_run
+    assert_ne "win-leftover-$arm:refuses" "0" "$WINE_RC"
+    assert_eq "win-leftover-$arm:runs-the-delete-once" "1" \
+              "$(wine_argv_count 'powershell\.exe .*Remove-Item\b')"
+    assert_eq "win-leftover-$arm:removes-the-leftover-entry" "no" "$(wine_lnk_has 'CS193V.lnk')"
+done
 
 # ─── the two staff overrides, proved on the command line  (#280) ──────────────
 #
