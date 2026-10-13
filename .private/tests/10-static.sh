@@ -1199,17 +1199,28 @@ assert_contains "installer-door:pipe-feeds-the-script-on-stdin" 'cat $(sh_quote 
 # find what of the lane has left the group -- recursively, in awk over one `ps` table, which is the
 # reaping this rule always let pass and not a `pgrep -P` it would see. A `pgrep -P` back in it is.
 #
-# COMMENTS ARE STRIPPED BY CONTENT, not by a `:#` that an indented comment would slip past. And
-# THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, because the pattern is in the search's own source
+# COMMENTS ARE SKIPPED BY lint_grep, ON grep's OWN N:LINE (#436). This was `grep -rn` over the
+# absolute tree piped through `grep -vE ':[[:space:]]*#'`, which a checkout path holding `:#`
+# matches on every line -- so it dropped every hit, and a grep that could not read passed as well.
+# And THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, because the pattern is in the search's own source
 # line -- the same self-match lib/assert.sh warns about for `pgrep -f` through E(), where a check
 # "reports the thing it is looking for as present because it is looking for it" (#34).
 #
 # SHELL FILES ONLY. Only shell code can capture `$(pgrep -P ...)` into a pid; the other two hits
 # are prose in lib/ptyrun.py's docstring, describing the premise this change deleted. That ptyrun
 # itself cannot grow a tree walk is asserted separately, below.
-pty_pgrep="$(grep -rn --include='*.sh' 'pgrep -P' "$PRIVATE/tests" \
-             | grep -vE ':[[:space:]]*#' \
-             | grep -vE '/(14-test-harness|10-static)\.sh:')"
+tests_sh=()
+while IFS= read -r f; do
+    [ -n "$f" ] && tests_sh+=("$f")
+done <<TESTS_SH
+$(find "$PRIVATE/tests" -type f -name '*.sh' | LC_ALL=C sort)
+TESTS_SH
+pp_files=()
+for f in ${tests_sh[@]+"${tests_sh[@]}"}; do
+    case "$f" in "$PRIVATE/tests/10-static.sh"|"$PRIVATE/tests/14-test-harness.sh") continue ;; esac
+    pp_files+=("$f")
+done
+pty_pgrep="$(lint_grep --skip-comments -e 'pgrep -P' -- ${pp_files[@]+"${pp_files[@]}"})"
 assert_eq "ptyrun-pid:nothing-walks-the-tree-for-a-pty-child" "" "$pty_pgrep"
 # AND ptyrun ITSELF STAYS OUT OF THE PROCESS TABLE. It knows the pid it forked and has no business
 # inferring any other; a tree reader in here would need a per-platform backend (/proc on Linux,
@@ -1357,9 +1368,14 @@ fi
 #
 # THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, the self-match rule the pgrep -P ban above states:
 # the pattern is in this very line. Prefixing an EXTERNAL command is fine and is not matched.
-knob_prefix="$(grep -rnE '(CS193V_PTY_JOB|CS193V_PTY_NOSHELL)=[^ ]* +(CS193V_PTY_[A-Z]+=[^ ]* +)*pty_start' \
-               "$PRIVATE/tests" --include='*.sh' \
-               | grep -vE ':[[:space:]]*#' | grep -v '/10-static\.sh:' || true)"
+# Through lint_grep for the reason the pgrep -P ban gives.
+kp_files=()
+for f in ${tests_sh[@]+"${tests_sh[@]}"}; do
+    [ "$f" = "$PRIVATE/tests/10-static.sh" ] || kp_files+=("$f")
+done
+knob_prefix="$(lint_grep --skip-comments \
+                 -E -e '(CS193V_PTY_JOB|CS193V_PTY_NOSHELL)=[^ ]* +(CS193V_PTY_[A-Z]+=[^ ]* +)*pty_start' \
+                 -- ${kp_files[@]+"${kp_files[@]}"})"
 assert_eq "pty-knobs:no-shape-knob-is-prefixed-onto-pty_start" "" "$knob_prefix"
 # AND THE POSITIVE HALF, which is what stops that ban going vacuous the day a knob is renamed:
 # a file that turns a shape knob ON also turns it off somewhere. DERIVED rather than listed, so a
@@ -5373,6 +5389,10 @@ assert_ok  "shellcheck:tests" shellcheck --severity=warning ${testfiles[@]+"${te
 # not be, 3 and 4 a bad option -- and it proves the severity, the include list, and a hostile path
 # arriving whole, at once.
 #
+# AND THE TWO STAFF SCRIPTS THE SUITE RUNS FROM THE CHECKOUT, which $testfiles does not reach:
+# lib/export-tree.sh, which lib/assert.sh sources and where #436's colon split lived, and
+# release.sh, which 23-release.sh drives.
+#
 # WHAT IT CANNOT SEE, which 14-test-harness.sh's hostile fixtures and the specimens above cover
 # instead: a `for` over a space-joined list, a command string re-parsed by `sh -c`, a path inside a
 # sed or awk program, and a file it cannot parse, which shellcheck:tests reports.
@@ -5381,7 +5401,8 @@ sc86_plant="$sc86_tmp/$HOSTILE_NAME/planted.sh"
 mkdir -p "${sc86_plant%/*}"
 printf '%s\n' '#!/bin/bash' 'cat $PRIVATE/planted' > "$sc86_plant"
 sc86_raw="$(shellcheck -S info --include=SC2086,SC2231 -f gcc \
-            ${testfiles[@]+"${testfiles[@]}"} "$sc86_plant" 2>&1)"
+            ${testfiles[@]+"${testfiles[@]}"} "$PRIVATE/lib/export-tree.sh" "$PRIVATE/release.sh" \
+            "$sc86_plant" 2>&1)"
 sc86_rc=$?
 [ "$sc86_rc" -eq 1 ] || sc86_raw="$sc86_raw
 $CHECKER_DIED (exit $sc86_rc from: shellcheck)"

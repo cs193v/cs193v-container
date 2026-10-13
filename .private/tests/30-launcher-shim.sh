@@ -1331,7 +1331,8 @@ assert_says_not_key "exit:the-old-line-is-gone-on-the-clean-path" status.stoppin
 # these two fds pointing at different things through a pty. No shim_new: the quiet arrangement
 # above is what this needs too.
 printf 'exit\n' | PATH="$SHIM:$PATH" \
-    do_script 120 "'${LAUNCHER_DIR:-$REPO}/cs193v' > '$SHIM/piped.out' 2>&1" >/dev/null 2>&1
+    do_script 120 "$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v") > $(sh_quote "$SHIM/piped.out") 2>&1" \
+    >/dev/null 2>&1
 piped="$(cat "$SHIM/piped.out" 2>/dev/null)"
 assert_says     "exit:the-piped-run-still-exited"   "$(msg_text status.exiting)" "$piped"
 assert_not_contains "exit:no-escapes-when-piped" "$(printf '\033')[1A" "$piped"

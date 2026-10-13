@@ -158,8 +158,9 @@ cp -R "$FIX" "$HFIX"
 # BACK-DATED, THEN REFRESHED, or git calls every entry racily clean -- written in the second the
 # index was -- and `git add -u` re-hashes each file into the scratch store, so the alternate this
 # case is about is never consulted and it passes against the bug (measured). A checkout that was
-# cloned a while ago is not racy, and that is the shape that failed.
-find "$HFIX" -path "$HFIX/.git" -prune -o -type f -exec touch -t 202001010000 {} +
+# cloned a while ago is not racy, and that is the shape that failed. -name, not -path "$HFIX/.git":
+# find matches -path as a glob, and the [*?] in HOSTILE_NAME means that one never prunes.
+find "$HFIX" -name .git -prune -o -type f -exec touch -t 202001010000 {} +
 git -C "$HFIX" update-index -q --refresh
 hfix_export() { ( REPO="$HFIX"; export_tree "$1" ); }
 assert_ok "copy:succeeds-from-a-hostile-checkout-path" hfix_export "$WORK/copy-hostile"
@@ -1138,7 +1139,7 @@ printf 'A=[%s] B=[%s]\n' "$a" "$b"
 CHILD
 
 # THE ASSERTION THAT CAUGHT script(1). Two lines in, both out, in order, neither shifted.
-pr_out="$(printf 'one\ntwo\n' | python3 "$PTYRUN" "sh $WORK/reader.sh" 2>&1 | do_tr -d '\r')"
+pr_out="$(printf 'one\ntwo\n' | python3 "$PTYRUN" "sh $(sh_quote "$WORK/reader.sh")" 2>&1 | do_tr -d '\r')"
 assert_says "ptyrun:both-lines-arrive-in-order" "A=[one] B=[two]" "$pr_out"
 assert_says_not "ptyrun:no-eof-is-injected-first" "A=[]" "$pr_out"
 
@@ -1590,7 +1591,7 @@ IFS= read -rsn1 k
 printf '\nA=[%s] K=[%s]\n' "\$a" "\$k"
 CHILD
 pd_out="$( { pd_step line one 'FIRST SCREEN' 'hello\n'
-             pd_step menu two 'SECOND SCREEN' 'X'; } | pd_run "$WORK/pd-r1" "bash $WORK/pd-two.sh")"
+             pd_step menu two 'SECOND SCREEN' 'X'; } | pd_run "$WORK/pd-r1" "bash $(sh_quote "$WORK/pd-two.sh")")"
 assert_says "ptydrive:each-step-waits-for-its-own-screen" "A=[hello] K=[X]" "$pd_out"
 assert_eq "ptydrive:a-clean-run-reports-no-failure" "0" \
           "$(grep -c '^FAIL' "$WORK/pd-r1" || true)"
@@ -1607,7 +1608,7 @@ IFS= read -r pw
 stty echo
 printf '\nPW=[%s]\n' "$pw"
 CHILD
-pd_out="$(pd_step password pw 'PASSWORD SCREEN' 'hunter2\n' | pd_run "$WORK/pd-r-pw" "bash $WORK/pd-pw.sh")"
+pd_out="$(pd_step password pw 'PASSWORD SCREEN' 'hunter2\n' | pd_run "$WORK/pd-r-pw" "bash $(sh_quote "$WORK/pd-pw.sh")")"
 assert_says "ptydrive:answers-a-canonical-echo-off-read" "PW=[hunter2]" "$pd_out"
 assert_eq "ptydrive:the-password-kind-reports-no-failure" "0" \
           "$(grep -c '^FAIL' "$WORK/pd-r-pw" || true)"
@@ -1617,7 +1618,7 @@ assert_not_contains "ptydrive:does-not-echo-the-password" "hunter2
 " "$(printf '%s' "$pd_out" | sed 's/PW=\[hunter2\]//')"
 # THE NEGATIVE THAT KEEPS THE TWO KINDS APART. A `secret` step wants BOTH off; this child leaves
 # ICANON set, so it must refuse rather than type into it.
-pd_out="$(pd_step secret pw 'PASSWORD SCREEN' 'github_pat_NOTTHIS\n' | pd_run "$WORK/pd-r-pw2" "bash $WORK/pd-pw.sh")"
+pd_out="$(pd_step secret pw 'PASSWORD SCREEN' 'github_pat_NOTTHIS\n' | pd_run "$WORK/pd-r-pw2" "bash $(sh_quote "$WORK/pd-pw.sh")")"
 assert_not_contains "ptydrive:a-secret-step-refuses-a-canonical-read" "github_pat_NOTTHIS" "$pd_out"
 assert_contains "ptydrive:says-which-read-it-was-never-at" "never at a secret read" \
                 "$(cat "$WORK/pd-r-pw2")"
@@ -1631,7 +1632,7 @@ IFS= read -r a
 printf '\nGOT=[%s]\n' "\$a"
 CHILD
 pd_out="$(pd_step secret tok 'TOKEN SCREEN' 'github_pat_SECRETVALUE\n' \
-          | pd_run "$WORK/pd-r2" "bash $WORK/pd-echo.sh")"
+          | pd_run "$WORK/pd-r2" "bash $(sh_quote "$WORK/pd-echo.sh")")"
 # THE GUARD, and it is not decoration: the assertion below is a NEGATIVE one, so it passes on an
 # empty transcript and on a python traceback alike -- which is #79 exactly, and is what this very
 # group looked like before ptydrive.py existed. Prove the child ran before believing the secret
@@ -1651,7 +1652,7 @@ printf '\ndone\n'
 CHILD
 pd_out="$(pd_step line ghost 'THIS SCREEN DOES NOT EXIST' 'x\n' \
           | CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=6 \
-            pd_run "$WORK/pd-r3" "bash $WORK/pd-other.sh")"
+            pd_run "$WORK/pd-r3" "bash $(sh_quote "$WORK/pd-other.sh")")"
 assert_contains "ptydrive:names-the-step-that-diverged" "ghost" "$(cat "$WORK/pd-r3")"
 assert_contains "ptydrive:shows-the-screen-the-child-is-parked-on" \
                 "A DIFFERENT SCREEN" "$(cat "$WORK/pd-r3")"
@@ -1665,11 +1666,11 @@ assert_contains "ptydrive:the-divergence-case-reaches-ptydrive-with-its-timings"
 # rc 90 IS THE CONVERSATION GOING WRONG, and it is deliberately not a child status and not 124.
 # A caller reading only the exit code can still tell "the flow diverged" from "the program failed"
 # from "the whole-run ceiling fired".
-# A FUNCTION, for :1135's reason: $PTYDRIVE is a path into the checkout (#436).
+# A FUNCTION, for pr_exit7's reason: $PTYDRIVE is a path into the checkout (#436).
 pd_diverge() {
     printf 'line\tghost\tNOPE\tx\\n\n' \
         | CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=4 \
-          python3 "$PTYDRIVE" "bash $WORK/pd-other.sh" >/dev/null 2>&1
+          python3 "$PTYDRIVE" "bash $(sh_quote "$WORK/pd-other.sh")" >/dev/null 2>&1
 }
 assert_exit "ptydrive:a-divergence-exits-90" 90 pd_diverge
 
@@ -1678,7 +1679,7 @@ assert_exit "ptydrive:a-divergence-exits-90" 90 pd_diverge
 # 35-setup-git-shim.sh, counted by its 80-column row lint, and searched for the token. A malformed
 # script is the case that used to break this rule, by raising SystemExit.
 pd_out="$(printf 'line\tonly-three-fields\tNEEDLE\n' \
-          | pd_run "$WORK/pd-r4" "bash $WORK/pd-two.sh")"
+          | pd_run "$WORK/pd-r4" "bash $(sh_quote "$WORK/pd-two.sh")")"
 assert_eq "ptydrive:a-malformed-script-says-nothing-on-the-transcript" "" "$pd_out"
 assert_contains "ptydrive:a-malformed-script-is-reported-in-the-report-file" \
                 "want 4" "$(cat "$WORK/pd-r4")"
@@ -1704,7 +1705,7 @@ IFS= read -r b
 printf '\nK=[%s] B=[%s]\n' "\$k" "\$b"
 CHILD
 { pd_step menu oversend 'KEY SCREEN' 'X\ntwo\n'
-  pd_step line later 'LINE SCREEN' 'z\n'; } | pd_run "$WORK/pd-r6" "bash $WORK/pd-loss.sh" >/dev/null
+  pd_step line later 'LINE SCREEN' 'z\n'; } | pd_run "$WORK/pd-r6" "bash $(sh_quote "$WORK/pd-loss.sh")" >/dev/null
 assert_contains "ptydrive:reports-bytes-stranded-by-a-tty-mode-change" \
                 "LOST" "$(cat "$WORK/pd-r6")"
 assert_contains "ptydrive:counts-the-bytes-that-were-stranded" \
@@ -1719,7 +1720,7 @@ assert_eq "ptydrive:a-loss-names-the-step-that-sent-the-bytes" "oversend LOST" \
 # calls every clean run a loss. An earlier draft did exactly that. Same child, driven one step per
 # read, nothing stranded, nothing reported.
 { pd_step menu k 'KEY SCREEN' 'X'
-  pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "bash $WORK/pd-loss.sh" >/dev/null
+  pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "bash $(sh_quote "$WORK/pd-loss.sh")" >/dev/null
 assert_eq "ptydrive:a-clean-read-restore-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r7" || true)"
 
@@ -1766,7 +1767,7 @@ printf '\nB=[%s]\n' "\$b"
 CHILD
 pd_out="$({ pd_step line inflight 'KEY SCREEN' '\n'
             pd_step line later 'LINE SCREEN' 'two\n'; } \
-          | CS193V_DRIVE_STRAND_SECS=1 pd_run "$WORK/pd-r8" "bash $WORK/pd-inflight.sh")"
+          | CS193V_DRIVE_STRAND_SECS=1 pd_run "$WORK/pd-r8" "bash $(sh_quote "$WORK/pd-inflight.sh")")"
 assert_says "ptydrive:a-keystroke-in-flight-still-reaches-the-read" "B=[two]" "$pd_out"
 assert_eq "ptydrive:delivery-in-flight-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r8" || true)"
@@ -1781,7 +1782,7 @@ IFS= read -r a
 printf '\nA=[%s]\n' "\$a"
 CHILD
 assert_says "ptydrive:really-waits-rather-than-sleeping" "A=[typed]" \
-            "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "bash $WORK/pd-slow.sh")"
+            "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "bash $(sh_quote "$WORK/pd-slow.sh")")"
 
 # ─── the same rules, replayed against a child that runs where we say (#253, #447) ───
 # pd-loss ABOVE CANNOT GO RED ON DEMAND, and #253 is why that matters: it reported no LOST about
@@ -2010,7 +2011,7 @@ printf 'STUCK SCREEN '
 sleep 20
 CHILD
 pd_step menu stuck 'STUCK SCREEN' 'x' \
-    | CS193V_DRIVE_STEP_SECS=1 pd_run "$WORK/pd-r9" "bash $WORK/pd-stuck.sh" >/dev/null
+    | CS193V_DRIVE_STEP_SECS=1 pd_run "$WORK/pd-r9" "bash $(sh_quote "$WORK/pd-stuck.sh")" >/dev/null
 assert_contains "ptydrive:a-stuck-menu-times-out" "never at a menu read" "$(cat "$WORK/pd-r9")"
 assert_match "ptydrive:a-timeout-names-the-terminals-foreground-group" \
              "^#   the terminal's foreground process group: [0-9]+$" "$(cat "$WORK/pd-r9")"
@@ -2727,7 +2728,7 @@ assert_eq "portable:do_timeout-passes-stdout-through" "THROUGH" "$(do_timeout 10
 # see a shell function (rc 127), and the literal 120 discarded ${SG_TIMEOUT:-120} and the 600 at
 # 90-setup-git-github.sh:178 -- a silent 5x truncation.
 assert_says "portable:do_script-drives-a-pty-with-its-own-timeout" "A=[one] B=[two]" \
-            "$(printf 'one\ntwo\n' | do_script 20 "sh $WORK/reader.sh" 2>&1 | do_tr -d '\r')"
+            "$(printf 'one\ntwo\n' | do_script 20 "sh $(sh_quote "$WORK/reader.sh")" 2>&1 | do_tr -d '\r')"
 
 # do_sha256 -- exposed as a VARIABLE too, because 25-installer.sh:595 calls it as
 # `find ... -exec sha256sum {} +` and find needs a binary, not a function.
