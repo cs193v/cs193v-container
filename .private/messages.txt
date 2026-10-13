@@ -40,7 +40,9 @@ Podman is installed but is not responding.
 
 This is a known problem on Macs that have been asleep: podman
 commands hang rather than failing. The usual fix is to restart
-podman's virtual machine:
+podman's virtual machine by running these two commands, one after
+the other. Run the second one even if the first one prints an
+error:
 
     podman machine stop
     podman machine start
@@ -60,12 +62,73 @@ set up podman for you. Please contact the course staff.
 [[err.podman-unreachable]]
 Podman is installed but the course container cannot reach it.
 
+# THE INSTRUCTION IS ITS OWN KEY so that podman's words go BETWEEN the two and the last thing on
+# screen is what to do (#495). A Mac whose VM is merely stopped no longer gets here: the launcher
+# starts the VM itself. What still does is Linux and WSL, a podman pointed elsewhere by
+# CONTAINER_HOST, and a Mac with no default machine at all.
+[[err.podman-unreachable.fix]]
 On a Mac this almost always means podman's virtual machine is not
 running:
 
     podman machine start
 
 If the issue persists, contact the course staff.
+
+# #495: the VM was asked to start and has not finished within the launcher's deadline. The start
+# itself is still going (it is detached), so "try again in a minute" is usually all it takes; the
+# second paragraph is for a VM stuck in `starting`, which only a stop can clear.
+[[err.machine-still-starting]]
+Podman's virtual machine is still starting. Wait a minute, then
+run ./cs193v again.
+
+If this is the second time you have seen this message, restart
+the virtual machine by running these two commands, one after the
+other. Run the second one even if the first one prints an error:
+
+    podman machine stop
+    podman machine start
+
+Then run ./cs193v again.
+
+# #495: the VM says `running` and nothing answers -- gvproxy died (podman#29411), or it is wedged.
+# `podman machine start` alone would answer "already running"; only stop-then-start clears it, and
+# stop may print an error about gvproxy while working, which is why the instruction says so.
+[[err.machine-unreachable]]
+Podman's virtual machine is running, but podman cannot reach it.
+
+[[err.machine-unreachable.fix]]
+Restart the virtual machine by running these two commands, one
+after the other. Run the second one even if the first one prints
+an error:
+
+    podman machine stop
+    podman machine start
+
+Then run ./cs193v again. If the problem persists, contact the
+course staff.
+
+[[err.machine-start-failed]]
+Podman's virtual machine would not start.
+
+[[err.machine-start-failed.fix]]
+Try starting it yourself to see everything podman has to say:
+
+    podman machine start
+
+If it still will not start, contact the course staff.
+
+# #495: podman runs one VM at a time, and another one is up -- a machine the student made, or
+# another provider's. The launcher will not stop somebody else's VM on their behalf.
+[[err.machine-other-active]]
+Another podman virtual machine is already running, and podman
+can only run one at a time. The one that is running is called:
+
+    {{NAME}}
+
+[[err.machine-other-active.fix]]
+Stop it, then run ./cs193v again:
+
+    podman machine stop {{NAME}}
 
 [[err.rootless-unreadable]]
 Podman answered the "are you rootless?" question with something
@@ -254,6 +317,19 @@ cleaned up anyway. Run ./cs193v to start the container.
 
 [[status.entering]]
 Entering the CS193V development environment...
+
+# #495: a spinner label while the launcher starts a stopped VM itself -- what every Mac restart
+# leaves. Wording decided by Keith. status.waiting-machine is for a start somebody ELSE is making
+# (another window, Podman Desktop), where "Starting" would be false; status.machine-slow replaces
+# either label once the wait passes 20 s.
+[[status.starting-machine]]
+Starting the podman VM...
+
+[[status.waiting-machine]]
+Waiting for the podman VM to finish starting...
+
+[[status.machine-slow]]
+Still starting the podman VM. This can take up to a minute on some Macs.
 
 [[status.creating]]
 Setting up the course container...

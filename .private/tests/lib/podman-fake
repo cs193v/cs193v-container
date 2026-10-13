@@ -80,6 +80,31 @@
 #   machine_set_rc   exit code for `machine set`            [0]
 #   machine_start_rc exit code for `machine start`          [0]
 #   machine_stop_rc  exit code for `machine stop`           [0]
+#   machine_state    THE VM ITSELF, and the switch for everything indented below it (#495):
+#                    stopped | starting | running. ABSENT IS THE OLD WORLD, byte for byte: `machine
+#                    inspect --format {{.State}}` answers "VM does not exist", `info` follows
+#                    info_rc, and `machine start` / `stop` just exit machine_start_rc / _stop_rc --
+#                    which is what 25-installer.sh and every launcher test before #495 assume.
+#                    PRESENT, the fake behaves the way podman 6.0.2 was measured to: `info` fails
+#                    with podman's own words for that state, `machine start` takes podman's start
+#                    lock, refuses "already running", goes stopped -> starting -> running and
+#                    leaves a lib/vm-fake.pl behind under Go's signal rule, and `machine stop` kills it.
+#     machine_unreachable   present = running, yet nothing answers (gvproxy died, podman#29411)
+#     info_ok_after         running, but the first N `info` calls fail as a booting VM's do  [0]
+#     machine_start_delay   seconds the start takes, state `starting` throughout            [0]
+#     machine_start_hold    present = the start blocks, state `starting`, until it is removed
+#     machine_start_err     what a FAILING start (machine_start_rc != 0) writes to stderr
+#     machine_other_active  NAME: a different machine is up, so start fails as podman's
+#                           ErrMultipleActiveVM does
+#     machine_other_provider  with it: that machine is on another provider, which podman words
+#                           differently
+#   machine_inspect_rc     exit code for `machine inspect` itself                     [0]
+#   machine_inspect_hang   present = `machine inspect` sleeps forever
+#   info_hang        present = `podman info` ALONE sleeps forever: the slept Mac, where podman
+#                    answers --version and then hangs on the first real question. `hang` hangs
+#                    every call, --version included, which is a different refusal.
+#   attach_hold      present = the session's `exec ... --attach` blocks until it is removed, so a
+#                    launcher can be held IN its session while a test closes the window on it.
 #   exec_out         what `podman exec ... --attach` prints  []
 #   claim_out        what `podman exec ... --claim` prints   []
 #   ports_out        what `podman exec ... cs193v-portwatch --state` prints, i.e. the
@@ -146,6 +171,116 @@ case "${1:-}" in
 esac
 
 STATE="$(get state absent)"
+
+# ─── the macOS VM (#495; only with machine_state present) ─────────────────────
+# podman's GetMachineStartLock. Real starts SERIALISE: the second blocks until the first is done
+# and only then checks the state -- which is why it answers "already running" rather than racing.
+# A mkdir is the atomic step. The owner's pid goes inside so a lock whose owner died -- a fake
+# start killed mid-way by a test's signal -- is taken over instead of wedging every later start
+# in this shim.
+VM_LOCK="$SHIM/machine_start.lock"
+take_start_lock() {
+    while ! mkdir "$VM_LOCK" 2>/dev/null; do
+        owner="$(cat "$VM_LOCK/pid" 2>/dev/null)"
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "$VM_LOCK"; continue; fi
+        sleep 0.05
+    done
+    echo "$$" > "$VM_LOCK/pid"
+}
+
+# ONE ATOMIC WRITE PER STATE CHANGE. A truncate-then-write lets a concurrent `inspect` -- another
+# launcher, two of them at once -- read an empty file, which this fake answers as "no machine".
+set_mstate() {
+    printf '%s' "$1" > "$SHIM/machine_state.$$" && mv -f "$SHIM/machine_state.$$" "$SHIM/machine_state"
+}
+
+machine_start() {
+    # 6.0.2 ASKS A QUESTION when its stdin is a terminal (#495 review), which is the whole reason
+    # the launcher hands it </dev/null. Modelled unconditionally, the conservative direction: a
+    # caller that forgets the redirect then waits here instead of passing by luck.
+    if [ -t 0 ]; then
+        printf 'Set "podman-machine-default" as the default system connection? [y/N] '
+        read -r _answer
+    fi
+    take_start_lock
+    trap 'rm -rf "$VM_LOCK"' EXIT
+    # podman's exact words (pkg/machine/shim/host.go and define/errors.go, v6.0.2 and v5.8.7).
+    other="$(get machine_other_active '')"
+    if [ -n "$other" ]; then
+        prov="$(get machine_other_provider '')"
+        if [ -n "$prov" ]; then
+            echo "Error: unable to start: $other already starting or running on the $prov provider: only one VM can be active at a time" >&2
+        else
+            echo "Error: unable to start \"podman-machine-default\": $other already starting or running: only one VM can be active at a time" >&2
+        fi
+        return 125
+    fi
+    case "$(cat "$SHIM/machine_state" 2>/dev/null)" in
+        starting|running)
+            echo 'Error: unable to start "podman-machine-default": already running' >&2
+            return 125 ;;
+    esac
+    echo 'Starting machine "podman-machine-default"'
+    src="$(get machine_start_rc 0)"
+    if [ "$src" -ne 0 ]; then
+        get machine_start_err 'Error: machine did not transition into running state: vfkit exited unexpectedly with exit code 1' >&2
+        echo >&2
+        return "$src"
+    fi
+    set_mstate starting
+    rm -f "$SHIM/vm.snapshot" "$SHIM/vm.pid"
+    # GO'S RULE, which is what makes the fake VM's dispositions honest (#495, measured on the real
+    # krunkit via sysctl p_sigignore/p_sigcatch): before exec, Go resets every signal the parent is
+    # CATCHING to default -- and podman catches INT and TERM during a start, and Go catches QUIT --
+    # while a signal the parent IGNORES stays ignored. So the VM inherits only an ignored SIGHUP,
+    # and only when its caller arranged one (nohup). perl rather than `trap -`, because a
+    # non-interactive shell can neither trap nor reset a signal that was ignored on entry, and the
+    # `&` below hands this child INT and QUIT ignored. Stdio on /dev/null, as os/exec does with nil;
+    # every OTHER fd this fake was handed passes straight through, as it does through Go.
+    perl -e '$SIG{INT} = $SIG{QUIT} = $SIG{TERM} = "DEFAULT"; exec "perl", @ARGV or die "exec: $!\n"' \
+        "$SHIM/vm-fake.pl" "$SHIM" </dev/null >/dev/null 2>&1 &
+    sd="$(get machine_start_delay 0)"
+    [ "$sd" = 0 ] || sleep "$sd"
+    while [ -f "$SHIM/machine_start_hold" ]; do sleep 0.1; done
+    set_mstate running
+    # WHAT 6.0.2 REALLY PRINTS on success (measured 2026-10-06), including the two pieces of advice
+    # a student must never be shown: `--rootful` would earn them err.rootful, and the helper wants
+    # sudo. Printed so that "the launcher shows none of this" is an assertion that can fail.
+    cat <<'EOS'
+
+This machine is currently configured in rootless mode. If your containers
+require root permissions (e.g. ports < 1024), or if you run into compatibility
+issues with non-podman clients, you can switch using the following command:
+
+	podman machine set --rootful
+
+API forwarding listening on: /var/folders/zz/T/podman/podman-machine-default-api.sock
+
+The system helper service is not installed; the default Docker API socket
+address can't be used by podman. If you would like to install it, run the following commands:
+
+        sudo /opt/podman/bin/podman-mac-helper install
+        podman machine stop; podman machine start
+
+You can still connect Docker API clients by setting DOCKER_HOST using the
+following command in your terminal session:
+
+        export DOCKER_HOST='unix:///var/folders/zz/T/podman/podman-machine-default-api.sock'
+
+Machine "podman-machine-default" started successfully
+EOS
+    return 0
+}
+
+machine_stop() {
+    vp="$(cat "$SHIM/vm.pid" 2>/dev/null)"
+    # IDENTIFIED BEFORE KILLED: pids are reused, and tunnel_kill_pid states the same rule.
+    if [ -n "$vp" ] && ps -p "$vp" -o command= 2>/dev/null | grep -qF "$SHIM/vm-fake"; then
+        kill "$vp" 2>/dev/null
+    fi
+    set_mstate stopped
+    rm -f "$SHIM/machine_unreachable" "$SHIM/vm.pid"
+}
 
 # ─── inspect ───────────────────────────────────────────────────────────────────
 # Called as: podman inspect NAME --format FMT
@@ -218,6 +353,35 @@ case "${1:-}" in
         ;;
 
     info)
+        [ -f "$SHIM/info_hang" ] && { while :; do sleep 5; done; }
+        # WITH A MACHINE, podman's own failure for each state (#495), measured on 6.0.2: stdout
+        # still carries the client half of the report, stderr says why. A booting VM is a
+        # HANDSHAKE failure, not a refusal -- gvproxy is already listening -- so the two are
+        # separately expressible, and a refusal from a `running` machine is the gvproxy-dead case.
+        if [ -f "$SHIM/machine_state" ]; then
+            why=''
+            case "$(cat "$SHIM/machine_state")" in
+                running)
+                    if [ -f "$SHIM/machine_unreachable" ]; then
+                        why=refused
+                    else
+                        ic=0; [ -f "$SHIM/info_calls" ] && ic="$(cat "$SHIM/info_calls")"
+                        ic=$((ic + 1)); echo "$ic" > "$SHIM/info_calls"
+                        [ "$ic" -le "$(get info_ok_after 0)" ] && why=handshake
+                    fi ;;
+                starting) why=handshake ;;
+                *)        why=refused ;;
+            esac
+            if [ -n "$why" ]; then
+                printf 'OS: darwin/arm64\nbuildOrigin: pkginstaller\nprovider: libkrun\nversion: 6.0.2\n\n'
+                echo 'Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM' >&2
+                case "$why" in
+                    refused)   echo 'Error: unable to connect to Podman socket: failed to connect: dial tcp 127.0.0.1:49320: connect: connection refused' >&2 ;;
+                    handshake) echo 'Error: unable to connect to Podman socket: failed to connect: ssh: handshake failed: EOF' >&2 ;;
+                esac
+                exit 125
+            fi
+        fi
         RC="$(get info_rc 0)"
         ise="$(get info_stderr '')"
         [ -n "$ise" ] && printf '%s\n' "$ise" >&2
@@ -463,6 +627,17 @@ while os.path.exists(d + "/stop_hold"):
                 exit 0 ;;
             inspect)
                 case "$MFMT" in
+                    # THE STATE, and its default is "no machine" rather than "running" (#495 R5):
+                    # 30-launcher-shim.sh fails `info` with no uname shim, so on a Mac those cases
+                    # reach the launcher's macOS arm, and a `running` default would walk them into
+                    # the boot-window wait -- red on a Mac and green on Linux.
+                    *State*)
+                        [ -f "$SHIM/machine_inspect_hang" ] && { while :; do sleep 5; done; }
+                        irc="$(get machine_inspect_rc 0)"
+                        [ "$irc" -ne 0 ] && { echo "Error: cannot read machine configuration" >&2; exit "$irc"; }
+                        ms="$(get machine_state '')"
+                        [ -z "$ms" ] && { echo 'Error: podman-machine-default: VM does not exist' >&2; exit 125; }
+                        printf '%s\n' "$ms" ;;
                     *DiskSize*) printf '%s\n' "$(get machine_disk 64)" ;;
                     *Memory*)   printf '%s\n' "$(get machine_mem 16384)" ;;
                     *)          printf '\n' ;;
@@ -501,8 +676,12 @@ while os.path.exists(d + "/stop_hold"):
                 RC="$(get machine_set_rc 0)"
                 [ "$RC" -ne 0 ] && echo "Error: cannot change a running machine" >&2
                 exit "$RC" ;;
-            start) exit "$(get machine_start_rc 0)" ;;
-            stop)  exit "$(get machine_stop_rc 0)" ;;
+            start)
+                [ -f "$SHIM/machine_state" ] || exit "$(get machine_start_rc 0)"
+                machine_start; exit $? ;;
+            stop)
+                [ -f "$SHIM/machine_state" ] && machine_stop
+                exit "$(get machine_stop_rc 0)" ;;
             *)     echo ''; exit 0 ;;
         esac
         ;;
@@ -602,6 +781,10 @@ while os.path.exists(d + "/stop_hold"):
             # "the ENTER prompt comes before the container is opened" sees the claim and fails on
             # an ordering that is actually correct. Measured: it did.
             *--claim)         get claim_out ''; printf '' ;;
+            # THE SESSION ITSELF. Prints what it always did, then -- only if a test asked --
+            # stays, so the launcher is still in its session when the test closes the window.
+            *--attach)        get exec_out ''; echo
+                              while [ -f "$SHIM/attach_hold" ]; do sleep 0.1; done ;;
             *)                case "$*" in
                                   *'date +%s'*) get container_date "$(date +%s)"; echo ;;
                                   *) get exec_out ''; echo ;;

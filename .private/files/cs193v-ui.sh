@@ -407,6 +407,15 @@ msg() {
 # 900 of them for four characters of output.
 RT_OUT=''
 RT_SPIN=''
+# A SECOND LABEL FOR A WAIT THAT RUNS LONG (#495): once the call is RT_SPIN_AT seconds old, the
+# spinner's label becomes RT_SPIN_LATER. The launcher's VM start says "Starting the podman VM..."
+# and, at 20 s, that it can take up to a minute -- one wait, one spinner, two things to say, so the
+# switch lives in the loop that already owns the frame clock rather than in a second animator.
+# Only with RT_SPIN set: a probe with no label draws nothing, and gains nothing to draw from this.
+# Off a terminal the later label is printed as a line of its own when it takes effect, the same
+# way the first one is, so a piped transcript reads first-then-second and repeats neither.
+RT_SPIN_AT=''
+RT_SPIN_LATER=''
 # The second mode, added for setup-git's lists of commands. See run_step below for what it is
 # for; the only differences from RT_SPIN are the indent and the ending.
 RT_ROW=''
@@ -538,6 +547,14 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         fi
         while [ "$i" -lt "$((secs * 10))" ]; do
             if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
+            # THE LATER LABEL, on the tick it falls due and once. [K on the redraw because the two
+            # labels differ in length, and a shorter one drawn over a longer one leaves its tail.
+            if [ -n "$RT_SPIN_LATER" ] && [ -n "$RT_SPIN" ] && [ -z "$RT_ROW" ] \
+               && [ "$lbl" != "$RT_SPIN_LATER" ] && [ "$i" -ge "$(( ${RT_SPIN_AT:-0} * 10 ))" ]; then
+                lbl="$RT_SPIN_LATER"
+                if [ -t 1 ]; then printf '\r%s%s  %s%s[K' "$pad" "$(meter_glyph "$frame")" "$lbl" "$ESC"
+                else printf '%s\n' "$lbl"; fi
+            fi
             if [ -n "$lbl" ] && [ -t 1 ] && [ "$((i % 2))" -eq 0 ]; then
                 # Same braille frames as the meter, so the two never look like different
                 # programs. meter_glyph is the single definition of them.
@@ -622,7 +639,9 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         if [ -t 1 ]; then printf '\r%s%s  %s%s[K\n' "$pad" "$(meter_glyph "$end")" "$RT_ROW" "$ESC"
         else printf '%s%s  %s\n' "$pad" "$(meter_glyph "$end")" "$RT_ROW"; fi
     elif [ -n "$RT_SPIN" ] && [ -t 1 ]; then
-        printf '\r  %s%s[K\n' "$RT_SPIN" "$ESC"
+        # The label IN EFFECT, which is RT_SPIN_LATER once that has taken over (#495): the line a
+        # student is left reading is the last thing the spinner said, not the first.
+        printf '\r  %s%s[K\n' "$lbl" "$ESC"
     fi
     # THE COMMAND FIRST, THEN WHATEVER IS WRAPPING IT. Only the fifo branch has the two to tell
     # apart: there $! is a subshell AROUND the command, so ending the wait without killing $cpid
@@ -1055,6 +1074,77 @@ ensure_podman_path() {
     [ -f "$d/podman" ] && [ -x "$d/podman" ] || return 1
     export PATH="$PATH:$d"
     PODMAN_PATH_ADDED="$d"
+}
+
+# ─── starting the macOS VM so that it outlives the window  (#495) ──────────────
+# `podman machine start`, run so that the VM it leaves behind is NOT the caller's. Returns
+# podman's status; its output goes wherever the caller's stdout and stderr go.
+#
+# WHY IT CANNOT SIMPLY BE RUN. podman launches krunkit (vfkit on Intel) and gvproxy with a bare
+# exec.Cmd.Start() -- no new session, no new process group, in 5.8.0, 6.0.2 and upstream main -- so
+# they join whatever group ran the start. The launcher's group owns the terminal for the whole
+# session, and krunkit has no signal handlers at all. Measured on Apple silicon, podman 6.0.2: a
+# VM started in the launcher's group dies when the window closes and when Ctrl-C is pressed, 3/3
+# each, and every boot after a death like that replays the XFS log -- a power cut, not a shutdown.
+# run_timeout's own shape (an async list in a shell without job control) died the same way.
+#
+# WHAT EACH PIECE IS FOR, and each was measured alone before they were put together:
+#   * set -m      the start gets a process group of its own, so neither the hangup a closing
+#                 window sends the terminal's foreground group nor a typed Ctrl-C reaches the VM.
+#                 Survived window close 3/3 and Ctrl-C 3/3. Same session, though: it is a group,
+#                 not setsid -- which macOS has no command for.
+#   * nohup       SIGHUP ignored, inherited by krunkit and gvproxy through Go's exec (Go resets
+#                 only the signals it is CATCHING; measured via sysctl on the live VM: HUP ignored,
+#                 INT, QUIT and TERM at default). That covers a terminal that hangs up more than
+#                 its foreground group. Alone it survived the close and died on Ctrl-C, 3/3.
+#   * </dev/null  podman 6.0.2 asks a question when its stdin is a terminal.
+#   * 3>&- .. 9>&-  Go does not close the fds it inherits, so the VM -- which lives for days --
+#                 would hold open whatever the caller had on them: run-tests.sh's 3 and 4, a
+#                 future caller's pipe. 3..9 is every fd a shell script can name. Closed by a
+#                 bare `exec` of their own, BEFORE the one that runs nohup: see the comment there
+#                 for the fd 13 that closing them on the same line leaked.
+#   * the waiter is the CALLER'S OWN SHELL, and `set -m` is put back the way the caller had it.
+#                 The first version made the whole body a `( )` subshell, which looked tidier and
+#                 hung things: that subshell is a second bash, it inherits the copy of the caller's
+#                 stdout bash keeps while a function's output is redirected, and run_timeout's
+#                 ceiling kills its own wrapper but not this. So the subshell went on waiting for a
+#                 start that was still going -- holding the launcher's stdout open after the
+#                 launcher had exited. Measured: 31-machine-start.sh's E2 deadlocked on it, a `$( )`
+#                 that never saw EOF; anything reading the launcher's output to the end would have
+#                 hung the same way. Now the only process that outlives a ceiling is podman, and
+#                 podman was exec'd, so bash's saved copies (close-on-exec) never reached it.
+#   * ( exec nohup ... ) &   the JOB is a subshell that execs straight into nohup, so it can drop a
+#                 terminal stdout (below) without touching the caller's, and `$!` is podman.
+#
+# REAL Terminal.app, measured by hand (2026-10-12): a VM started this way is not listed among a
+# tab's processes -- Terminal counts the shell's descendants, and krunkit belongs to pid 1 once
+# podman exits -- so closing the window raises no "terminate running processes?" sheet for it, and
+# Terminate on a mid-session close killed the session's job and left the VM running.
+#
+# 31-machine-start.sh holds every one of these with a fake VM that inherits exactly what a real
+# one would, including the positive controls that show a naive start's VM dying.
+machine_start_detached() {
+    local p was_m=''
+    case "$-" in *m*) was_m=1 ;; esac
+    set -m
+    (
+        # NEVER A TERMINAL ON 1 OR 2: nohup would answer one by writing nohup.out into the current
+        # directory -- the student's course folder, which tunnel_start's comment already guards.
+        # The one caller, run_timeout, hands it files; a caller that hands it a terminal loses the
+        # output rather than littering. Inside the job, so the caller's own fds are untouched.
+        [ -t 1 ] && exec >/dev/null
+        [ -t 2 ] && exec 2>/dev/null
+        # THE CLOSES ARE A STATEMENT OF THEIR OWN, not redirections on the `exec nohup` line, and
+        # that is measured rather than tidy. Written on the line that runs a command, bash 3.2
+        # first SAVES each fd it is about to close -- so it could put them back if the exec failed
+        # -- and the saved copy survives the exec: the caller's fd 5 reached the VM as fd 13.
+        # `exec` with redirections and no command applies them for good and saves nothing.
+        exec </dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+        exec nohup podman machine start
+    ) &
+    p=$!
+    [ -n "$was_m" ] || set +m
+    wait "$p"
 }
 
 # ─── the build's progress meter: the RENDERER ──────────────────────────────────

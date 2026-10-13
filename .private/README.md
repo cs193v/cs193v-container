@@ -1623,6 +1623,68 @@ Two smaller decisions, both asserted rather than commented:
   shape that brings it back is a third prober added later by someone who did not know to repair
   first. `probe:exactly-two-callers` is the tripwire.
 
+### A stopped VM is started, not refused — and why that is harder than it looks (issue #495)
+
+Every Mac restart leaves podman's VM stopped, and nothing starts it again, so the first launch after
+one used to end in `err.podman-unreachable`. Students read that as "broken, ask staff", not least
+because the last thing on screen was podman's own advice, `podman machine init` included. Now
+`preflight` starts the VM itself — "Starting the podman VM..." on one spinner line — and refuses only
+when there is something the student has to do. The measurements are `ERRORS.md` D17.
+
+**The difficulty is the process group, not the command.** podman launches krunkit and gvproxy without
+detaching them, so a `podman machine start` run by the launcher leaves the VM in the launcher's group —
+the one that owns the terminal for the whole session. Closing the window, which is how a session ends,
+and Ctrl-C both kill it there, and krunkit has no handlers, so each is a power cut with XFS log recovery
+on the next boot. `machine_start_detached` in `files/cs193v-ui.sh` is the answer: `set -m` gives the
+start a process group of its own, `nohup` leaves the VM ignoring SIGHUP, `</dev/null` keeps podman 6
+from asking a question, and fds 3–9 are closed because Go passes inherited fds straight through to a
+process that lives for days. Each piece was measured alone first; its comment says what each one did.
+
+**The recovery's shape** (`machine_recover` in `cs193v`), decided with Keith:
+
+- One 60 s deadline for the whole of it, every step clipped to what is left; a 20 s update line. A
+  start measured 10–13 s; a launch queued behind another window's start needs about twice that.
+- A start that somebody else is making — another window, Podman Desktop — is waited for under its own
+  line, "Waiting for the podman VM to finish starting...", because "Starting" would be false.
+- A hang (rc 124) is the slept Mac and goes straight to `err.podman-hangs`; nothing is asked of the
+  machine on top of a 20 s hang.
+- `--stop` and `--reset-tunnel` never start a VM: a stopped one holds no running container, so both are
+  no-ops that say so.
+- `CONTAINER_HOST` / `CONTAINER_CONNECTION` set means podman is pointed somewhere else, while `podman
+  machine` still means the default VM — so the machine is not touched.
+
+**Considered and rejected, each for a measured reason:**
+
+- *A plain `podman machine start`.* Dies with the window and with Ctrl-C, 3/3 each.
+- *`nohup` alone.* Survives the close, dies on Ctrl-C, 3/3: it is still the launcher's group.
+- *Running it under `run_timeout` as it stands.* An async list in a shell without job control is the
+  launcher's group too; it died on Ctrl-C 3/3.
+- *`perl -MPOSIX -e 'POSIX::setsid()…'`.* Works — a new session, no controlling terminal — and was the
+  fallback had real Terminal.app counted the VM among a window's processes. It does not (D17), and
+  `/usr/bin/perl` is a runtime Apple has called deprecated since Catalina. Kept in reserve for a
+  terminal that hangs up more than its foreground group, which none measured does.
+- *`python3 -c 'os.setsid()'`.* `/usr/bin/python3` is a Command Line Tools shim that pops an install
+  dialog on a Mac without them. macOS has no `setsid(1)`.
+- *`launchctl submit`.* A legacy subcommand that keeps its job alive, so it would re-run a `podman machine
+  start` every time one exits. A LaunchAgent that starts the VM at login is a real option for later, but
+  it is an installer change and shows students a "Background Items Added" notice.
+- *Restarting a VM that says `running` and does not answer.* At the deadline the launcher cannot tell a
+  stuck VM from another window's start that is still finishing, and stopping that would wreck it. So it
+  refuses with the two commands and the student, who knows what else is open, runs them.
+
+**How it is tested without a VM.** `31-machine-start.sh` drives the real launcher against
+`lib/podman-fake`, whose `machine start` launches `lib/vm-fake.pl` under Go's exec rule — so the fake VM
+inherits exactly the process group, dispositions and fds a real one would — through every mode: no VM,
+somebody else's start, a running VM that does not answer, a VM that is not ours, a start that fails or
+overruns, a slept Mac, and the verbs that must not start anything. Its I-section closes the window and
+types Ctrl-C at the launcher in a pty, and runs the same shapes against a copy whose helper is the naive
+start, which must die there — the positive controls. A real Terminal.app window and a real VM are checked
+by hand, once (`tests/MANUAL.md`).
+
+**What stays open.** The installer still starts the VM in its own foreground group for the whole first
+`--rebuild`, and doctor's clock fix (`check_clock`) still restarts it the plain way; both are allowlisted
+by `10-static.sh`'s `machine:no-bare-podman-machine-start` until they move to the helper.
+
 
 ## Deliberately not here
 
