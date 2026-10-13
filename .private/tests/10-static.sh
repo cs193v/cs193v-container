@@ -2727,7 +2727,7 @@ assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELC
 # A CATALOGUE THAT CANNOT BE READ IS NAMED, NOT SKIPPED (#522). It contributes no keys, so it
 # overlaps nothing and holds no short needle, and both rules below passed beside it -- the
 # has-keys check here went red, but each verdict has to mean what its own name says.
-cat_keys() { run_checker grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | LC_ALL=C sort -u; }
+cat_keys() { catalogue_keys "$1" | LC_ALL=C sort -u; }
 CATS=("$PRIVATE/messages.txt" "$PRIVATE/course-install-messages.txt" "$PRIVATE/files/setup-git-messages.txt")
 cats_unread=''
 for c in ${CATS[@]+"${CATS[@]}"}; do

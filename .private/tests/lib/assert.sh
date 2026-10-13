@@ -262,6 +262,14 @@ msg_text() {                          # msg_text KEY [FILE] -> its literal prose
     printf '%s' "${t% }"
 }
 
+# Every key a catalogue defines, brackets dropped and in file order -- repeats kept, since
+# 20-messages.sh's dup_keys is looking for them -- or $CHECKER_DIED if it was not read (#521,
+# #538). A catalogue nothing could open defines no key, so it orphans, duplicates and overlaps
+# nothing, and every check built on its key list used to pass beside it.
+catalogue_keys() {                    # catalogue_keys FILE -> one key per line
+    run_checker grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1" | do_tr -d '[]'
+}
+
 # THE PROSE ON THE FAR SIDE OF THE SUBSTITUTION, which msg_text cannot reach. msg_text stops at
 # the first {{PLACEHOLDER}} because everything past it is filled in at runtime -- true of the
 # value, and not true of the sentences after it. Two shapes of message have their whole point
