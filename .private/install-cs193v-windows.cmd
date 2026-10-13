@@ -102,9 +102,10 @@ setlocal
 ::     %APPDATA%\Microsoft\Windows\Start Menu\Programs\CS193V Development Environment.lnk
 ::     %LOCALAPPDATA%\CS193V\cs193v.ico
 ::
-:: and deletes the Start Menu entry `wsl --install` made. Neither is downloaded -- the icon is
-:: copied out of the environment over \\wsl.localhost, so the mark-of-the-web argument above
-:: still holds for both. The third arrived with #275 and is transient:
+:: and the entry `wsl --install` makes for itself is deleted far earlier, the moment it exists
+:: (#356). Neither file is downloaded -- the icon is copied out of the environment over
+:: \\wsl.localhost, so the mark-of-the-web argument above still holds for both. The third
+:: arrived with #275 and is transient:
 ::
 ::     HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce  ->  CS193VSetup
 ::
@@ -774,15 +775,92 @@ echo   [1/3] WSL is installed.
 :: returns the same 1 for the same reason, so removing this waiver turns the tier red rather than
 :: shipping. Beyond that: a leftover entry is an untidy re-run of an install that is already
 :: complete and already idempotent, which is not worth failing a finished setup over -- the same
-:: trade as the %PSDEL% waiver near the end.
+:: trade as the %PSDEL% waivers below.
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSRESUMECLEAR%"
 
+:: ---- WSL's own Start Menu entry, which goes the moment it exists (#356) -------
+:: `wsl --install` CREATES A START MENU ENTRY OF ITS OWN, named after the distribution, and it
+:: opens a bare login shell in the home directory -- not the launcher, and not the course folder.
+:: Before the root pass below has named a default user it is a ROOT shell in a raw Ubuntu, with
+:: nothing in it to say this is not the development environment. That is #356: a run stopped
+:: part-way, the entry stayed, and a student opened it believing it was the real one.
+::
+:: SO IT IS DELETED STRAIGHT AFTER THE CREATE, AND FIRST THING ON A RE-RUN, which reverses the
+:: order this used to have. The delete was the last step of a successful run, after our own entry
+:: had been written and checked, on the theory that two entries a letter apart are worse than
+:: either alone. They are -- but every exit between the create and that step left the plain one
+:: behind: :provisionfailed, :curlfailed, :downloadfailed, both digest refusals, :foreignaccount,
+:: :stage2failed, :shortcutfailed (which exits 0), and a closed window. A failed install now has
+:: NO entry, which is right, because there is nothing working to open and every one of those arms
+:: already says what to do. The re-run call is for students who have one already: from a run that
+:: failed before this change, or one killed in the second between the create and the delete.
+::
+:: IT CANNOT BE PREVENTED, ONLY REMOVED. Read from WSL's source at 2.7.14 and on master
+:: (LxssUserSession.cpp, _ProcessImportResultMessage): there is no flag on `--install` or
+:: `--import` and no .wslconfig or wsl.conf key for it. The one switch is `[shortcut] enabled =
+:: false` in the image's own /etc/wsl-distribution.conf -- Canonical's file, inside a download WSL
+:: checks against a SHA-256 and opens read-only -- and WSL reads it once, while registering, before
+:: `--install` returns. Supplying an image of our own to change that line would make this file the
+:: owner of a 600 MB download. Nor can the entry be retargeted: [shortcut] has exactly two keys,
+:: `enabled` and `icon`, and nothing there sets the command.
+::
+:: AND NOTHING PUTS IT BACK, from the same source: the shortcut is written by that one registration
+:: path and no other -- not by `wsl --update`, a service start, a launch or `wsl --manage`. `wsl
+:: --unregister` deletes it by the path WSL recorded, and does not mind it being gone already.
+:: That answers MANUAL.md section 134.8, which asked whether a deleted entry stays deleted.
+::
+:: TWO DIRECTORIES, AND TELLING THEM APART IS THE WHOLE OF #270. %SMDIR% is the Start Menu
+:: ROOT, which is where `wsl --install` puts its own entry; %LNKDIR% is the app list, which
+:: is where ours goes, near the end. Derived from one another so the pair cannot drift, and
+:: the delete reads %SMDIR% rather than assuming both entries live in the same folder.
+::
+:: THE GUARD IS THE FILENAME AND A wsl TARGET, AND DELIBERATELY NOT THE ARGUMENTS. The obvious
+:: check -- does it mention this distribution -- cannot work: WSL writes
+:: `--distribution-id {GUID}`, not the name (microsoft/WSL#13414). So what is asserted is that
+:: the file is named for the distribution and points at something called wsl.
+::
+:: AND IT LOOKS IN THE START MENU ROOT, WHICH IS A MEASUREMENT AND NOT A READING OF THE DOCS
+:: (#270). This used to read %LNKDIR% -- the app list, where our own entry goes -- so it
+:: never removed anything, and because the call is waived it said nothing about that.
+:: Measured on Windows 11 26200.9445 with WSL 2.7.14.0: four environments created by
+:: `wsl --install --name`, four .lnk in %APPDATA%\Microsoft\Windows\Start Menu, none under
+:: Programs. Target is `C:\Program Files\WSL\wsl.exe` with `--distribution-id {GUID} --cd ~`,
+:: so the wsl match was right all along; only the directory was wrong.
+::
+:: WHAT MADE THE WRONG GUESS PLAUSIBLE, recorded because it still looks like the right answer:
+:: an empty `Programs\<distro>\` DIRECTORY appears beside the root .lnk, so a per-distro name
+:: really does appear under %LNKDIR%. It is a folder rather than a shortcut, and an empty one
+:: renders nowhere in the app list. Deliberately left alone: a directory a student may since
+:: have put something in is not ours to remove.
+::
+:: BOTH ARE CHECKED, and the second costs one Test-Path on a path that is normally absent.
+:: Nothing documents where WSL writes this, the location has moved before, and a version that
+:: put it in the app list instead would otherwise reintroduce this exact defect in this exact
+:: way -- silently, because the failure of a delete that finds nothing is indistinguishable
+:: from the success of one that had nothing to do.
+::
+:: DEFINED HERE, ABOVE %PROBE%, because both of the arms it chooses between call it, and nothing
+:: may sit between %PROBE% and the `if %errorlevel%` lines that read its answer.
+set "SMDIR=%APPDATA%\Microsoft\Windows\Start Menu"
+set "LNKDIR=%SMDIR%\Programs"
+set "PSDEL=foreach ($p in @('%SMDIR%\%DISTRO%.lnk', '%LNKDIR%\%DISTRO%.lnk')) { if (Test-Path -LiteralPath $p) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p); if ($t.TargetPath -match 'wsl') { Remove-Item -LiteralPath $p -Force } } }"
 
 :: ---- does the CS193V environment exist? --------------------------------------
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
-if %errorlevel% equ 0 goto havedistro
+if %errorlevel% equ 0 goto existingdistro
 if %errorlevel% equ 1 goto makedistro
 goto probefailed
+
+:existingdistro
+:: THE RE-RUN, AND WSL'S ENTRY GOES BEFORE ANYTHING ELSE CAN FAIL (#356). A label of its own
+:: rather than a line under :havedistro, because :makedistro falls through into that label and
+:: has already done this by then.
+::
+:: cmdlint-allow: unchecked-exit -- REFUSING WOULD NOT REMOVE IT. A delete that could not run
+:: leaves the entry exactly where it was, and turning that into a failed install adds a second
+:: problem without touching the first; the same holds at the call after the create below.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSDEL%"
+goto havedistro
 
 :makedistro
 echo   [2/3] Creating the %DISTRO% Linux environment.
@@ -846,12 +924,20 @@ if %errorlevel% neq 0 goto distrofailed
 "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PROBE%" >nul 2>&1
 if %errorlevel% neq 0 goto distrofailed
 
-:: UBUNTU'S FIRST-RUN QUESTIONS OFF, IMMEDIATELY, BEFORE ANYTHING ELSE. --install has already
-:: created the Start Menu entry and the Windows Terminal profile, so from the moment it returns
-:: there is a clickable CS193V with no account in it -- and for as long as the first-run setup is
-:: armed, clicking it starts asking a student for a username and a password. Worse than the
-:: confusion: the next `wsl -d` call this file makes would then block waiting for them to finish,
-:: on an event with no timeout.
+:: WSL'S OWN START MENU ENTRY, GONE BEFORE ANYTHING ELSE CAN FAIL (#356). --install wrote it before
+:: returning; every call from here on can fail, and every failure used to leave it behind. A
+:: PowerShell call and not a `wsl -d` one, so it cannot block on the environment it is cleaning
+:: up after. See the definition above %PROBE% for why it is deleted rather than prevented.
+::
+:: cmdlint-allow: unchecked-exit -- for the reason the re-run arm's call gives: refusing would not
+:: remove it.
+"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSDEL%"
+
+:: UBUNTU'S FIRST-RUN QUESTIONS OFF, IMMEDIATELY AFTER. --install has also created a Windows
+:: Terminal profile, so from the moment it returns there is still a clickable CS193V with no
+:: account in it -- and for as long as the first-run setup is armed, opening it starts asking a
+:: student for a username and a password. Worse than the confusion: the next `wsl -d` call this
+:: file makes would then block waiting for them to finish, on an event with no timeout.
 ::
 :: `mv` AND NOT `truncate -s 0`. truncate CREATES the file when it is absent and exits 0, so the
 :: day Ubuntu keeps that configuration somewhere else, truncate would report success and leave the
@@ -1055,12 +1141,9 @@ if not "%RC%"=="0" goto stage2failed
 :: NOT wt.exe EITHER. Windows Terminal is an App Execution Alias whose backing path moves with
 :: every Store update and which Settings can switch off; wsl opens in whatever the student's
 :: default terminal is, which on Windows 11 22H2 and later is Windows Terminal anyway.
-:: TWO DIRECTORIES, AND TELLING THEM APART IS THE WHOLE OF #270. %SMDIR% is the Start Menu
-:: ROOT, which is where `wsl --install` puts its own entry; %LNKDIR% is the app list, which
-:: is where ours goes. Derived from one another so the pair cannot drift, and the delete
-:: below reads %SMDIR% rather than assuming both entries live in the same folder.
-set "SMDIR=%APPDATA%\Microsoft\Windows\Start Menu"
-set "LNKDIR=%SMDIR%\Programs"
+::
+:: %LNKDIR% IS THE APP LIST, set above %PROBE% beside %SMDIR% -- the two directories #270 is
+:: about -- because the delete of WSL's own entry needs both of them long before this point.
 set "LNKNAME=CS193V Development Environment"
 set "ICODIR=%LOCALAPPDATA%\CS193V"
 set "SHIMUNC=\\wsl.localhost\%DISTRO%\home\%LINUX_USER%"
@@ -1094,48 +1177,9 @@ if %errorlevel% neq 0 goto shortcutfailed
 :: one is how the first would come to look redundant.
 if not exist "%LNKDIR%\%LNKNAME%.lnk" goto shortcutfailed
 
-:: ---- and remove the one wsl --install made -----------------------------------
-:: `wsl --install` CREATED A START MENU ENTRY OF ITS OWN, named after the distribution, and it
-:: opens a bare login shell in the home directory -- not the launcher, and not the course folder.
-:: Two entries a letter apart is worse than either alone, so the plain one goes.
-::
-:: IT CANNOT BE RETARGETED INSTEAD. /etc/wsl-distribution.conf's [shortcut] section has exactly
-:: two keys, `enabled` and `icon`; nothing there sets the command. The file is Canonical's and
-:: lives inside the tarball besides, and `wsl --install` has already read it and written both
-:: artifacts by the time the create above can move it aside.
-::
-:: THE GUARD IS THE FILENAME AND A wsl TARGET, AND DELIBERATELY NOT THE ARGUMENTS. The obvious
-:: check -- does it mention this distribution -- cannot work: WSL writes
-:: `--distribution-id {GUID}`, not the name (microsoft/WSL#13414). So what is asserted is that
-:: the file is named for the distribution and points at something called wsl. Failure here is
-:: ignored on purpose: a leftover entry is untidy, not broken, and is not worth losing an
-:: otherwise finished install over.
-::
-:: AND IT LOOKS IN THE START MENU ROOT, WHICH IS A MEASUREMENT AND NOT A READING OF THE DOCS
-:: (#270). This used to read %LNKDIR% -- the app list, where the entry above goes -- so it
-:: never removed anything, and because the call is waived below it said nothing about that.
-:: Measured on Windows 11 26200.9445 with WSL 2.7.14.0: four environments created by
-:: `wsl --install --name`, four .lnk in %APPDATA%\Microsoft\Windows\Start Menu, none under
-:: Programs. Target is `C:\Program Files\WSL\wsl.exe` with `--distribution-id {GUID} --cd ~`,
-:: so the wsl match was right all along; only the directory was wrong.
-::
-:: WHAT MADE THE WRONG GUESS PLAUSIBLE, recorded because it still looks like the right answer:
-:: `wsl --install` ALSO creates an empty `Programs\<distro>\` DIRECTORY beside the root .lnk,
-:: so a per-distro name really does appear under %LNKDIR%. It is a folder rather than a
-:: shortcut, and an empty one renders nowhere in the app list. Deliberately left alone: a
-:: directory a student may since have put something in is not ours to remove.
-::
-:: BOTH ARE CHECKED, and the second costs one Test-Path on a path that is normally absent.
-:: Nothing documents where WSL writes this, the location has moved before, and a version that
-:: put it in the app list instead would otherwise reintroduce this exact defect in this exact
-:: way -- silently, because the failure of a delete that finds nothing is indistinguishable
-:: from the success of one that had nothing to do.
-set "PSDEL=foreach ($p in @('%SMDIR%\%DISTRO%.lnk', '%LNKDIR%\%DISTRO%.lnk')) { if (Test-Path -LiteralPath $p) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p); if ($t.TargetPath -match 'wsl') { Remove-Item -LiteralPath $p -Force } } }"
-:: cmdlint-allow: unchecked-exit -- attached HERE and not above the `set`, because
-:: _cmdlint_waivers binds to the next non-comment line and `set` would consume it.
-:: A leftover plain-shell entry is cosmetic: the install is complete and usable either
-:: way, and there is no remediation worth offering a student for an extra Start Menu icon.
-"%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PSDEL%"
+:: NOTHING IS DELETED HERE ANY MORE. The plain entry `wsl --install` made used to be removed at
+:: this point, which only a fully successful run ever reached (#356); it is gone by now, deleted
+:: straight after the create or first thing on a re-run. See the definition above %PROBE%.
 goto shortcutdone
 
 :shortcutfailed

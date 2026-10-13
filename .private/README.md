@@ -1911,6 +1911,30 @@ executing assertions describe the one invocation students are now told not to us
 **What no tier can reach** is whether the *identity* is right on a real machine, since wine has no
 elevation and no second profile. `MANUAL.md` §134.7 carries the two-account reproduction.
 
+**WSL's own Start Menu entry is deleted, not prevented, and the distro keeps its name (#356).**
+`wsl --install` writes a plain `CS193V` entry that opens a bare shell. The installer used to delete
+it only at the end of a successful run, so a run that stopped part-way left it behind, and a
+student opened it believing it was the environment. It is now deleted straight after the create
+and again first thing on a re-run. Two other fixes were weighed and rejected:
+
+- **Prevent it.** WSL's source (2.7.14 and master) has no flag and no `.wslconfig` or `wsl.conf`
+  key for this. The only switch is `[shortcut] enabled = false` inside the image's
+  `/etc/wsl-distribution.conf`. That file is Canonical's, inside a download WSL checks against a
+  SHA-256, and WSL reads it once while registering, before `--install` returns. So preventing the
+  entry means supplying our own image through `wsl --install --from-file`. The installer would
+  then own a 600 MB download and its digest check, plus a Windows-side `tar.exe` rewrite of a Linux
+  rootfs, which is untested for owners, capabilities and hard links. All of that to save an entry
+  that now exists for about a second.
+- **Rename the distro** (e.g. `cs193v-linux`), so the leftover looks less inviting. Every release
+  so far used `CS193V`, and `%PROBE%` matches the name exactly. A student with an install would
+  therefore get a second 600 MB environment, with their Start Menu entry pointed at the empty one.
+  Any `cs193v-*` name also still sorts directly under *CS193V Development Environment* and still
+  matches the "type CS193" search the sign-off suggests.
+
+What would reopen it: the entry surviving the early delete on a real machine (`MANUAL.md`
+§134.11). A WSL release that rewrites the shortcut after registration would reopen it too
+(§134.8). The Windows Terminal profile `wsl --install` also writes was left alone on purpose.
+
 **No longer on this list: the Windows installer knowing where it is (issue #275).** `%~dp0` was
 banned outright, and the ban is now narrowed rather than kept. What it was protecting is worth
 restating, because the narrowing is only safe while that stays true: `%HERE%` existed to find a

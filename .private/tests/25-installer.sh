@@ -3910,14 +3910,18 @@ assert_eq "windows:a-declined-prompt-has-somewhere-to-go" "1" \
 # THE PROMPT COMES BEFORE ANY MACHINE-WIDE CHANGE AND AFTER NOTHING PER-USER, which is the ordering
 # that makes ":isadmin refuses everything elevated" survivable: the only elevated code in the
 # picture is the child, and it runs before the per-user road is taken at all.
+#
+# THE START MENU MARKER IS THE FIRST DELETE, NOT `set "SMDIR=`. Setting a variable writes nothing;
+# the delete is the first thing that touches the student's Start Menu, and since #356 moved it up
+# to meet the create, the definitions it reads sit above %PROBE% rather than after it.
 elev_ln="$(ln_of 'Command "%PSELEV%"')"
 havewsl_ln="$(ln_of '^:havewsl')"
 probe_ln="$(ln_of 'Command "%PROBE%"')"
-smdir_ln="$(ln_of 'set "SMDIR=')"
+smdel_ln="$(ln_of 'Command "%PSDEL%"')"
 assert_eq "windows:the-elevation-boundary-was-found" "4" \
-          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdir_ln" | grep -c .)"
+          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdel_ln" | grep -c .)"
 assert_eq "windows:the-prompt-precedes-every-per-user-step" "sorted" \
-          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdir_ln" \
+          "$(printf '%s\n' "$elev_ln" "$havewsl_ln" "$probe_ln" "$smdel_ln" \
              | { sort -nc 2>/dev/null && echo sorted || echo unsorted; })"
 
 # THE ELEVATED ARM WRITES NOTHING PER-USER, which is what makes an over-the-shoulder elevation
@@ -4735,16 +4739,45 @@ verify_path="$(printf '%s\n' "$WCMD" \
                | sed -n 's/^if not exist "\(.*\.lnk\)" goto shortcutfailed$/\1/p' | head -1)"
 assert_ne       "windows:the-created-entry-is-verified"          "" "$verify_path"
 assert_contains "windows:the-verification-reads-the-path-written" "$verify_path" "$lnk_ps"
-# AND IT SITS BETWEEN THE CREATE AND THE DELETE, so a failure stops before the delete runs -- the
-# same ordering win-lnk-noicon:never-reaches-the-delete pins by executing it.
+# AND THE CHECK COMES AFTER THE CREATE, or it is asking about a file nothing has written yet.
 create_ln="$(ln_of 'Command "%PSLNK%"')"
 verify_ln="$(ln_of 'if not exist "%LNKDIR%')"
-del_ln="$(ln_of 'Command "%PSDEL%"')"
-assert_eq "windows:the-verification-order-was-found" "3" \
-          "$(printf '%s\n' "$create_ln" "$verify_ln" "$del_ln" | grep -c .)"
-assert_eq "windows:the-entry-is-verified-before-anything-is-deleted" "sorted" \
-          "$(printf '%s\n' "$create_ln" "$verify_ln" "$del_ln" \
+assert_eq "windows:the-verification-order-was-found" "2" \
+          "$(printf '%s\n' "$create_ln" "$verify_ln" | grep -c .)"
+assert_eq "windows:the-entry-is-verified-after-it-is-made" "sorted" \
+          "$(printf '%s\n' "$create_ln" "$verify_ln" \
              | { sort -nc 2>/dev/null && echo sorted || echo unsorted; })"
+
+# ─── WSL'S ENTRY GOES THE MOMENT IT EXISTS  (#356) ────────────────────────────
+#
+# THIS USED TO BE THE OPPOSITE RULE: "the entry is verified before anything is deleted", with the
+# delete as the last step of a successful run. Every exit between `wsl --install` and that step
+# -- a failed download, a refused digest, a failed root pass, a failed stage two, a failed icon
+# copy, a closed window -- left WSL's plain entry in the Start Menu, and #356 is a student who
+# opened it and landed in a bare shell. So it is removed straight after the create, and again
+# first thing on a re-run, and a failed install now has NO entry: there is nothing working to open.
+#
+# READ FROM THE COMMANDS, NOT THE RAW FILE, so the comments that name %PSDEL% to explain it are
+# not counted as calls. _cmdlint_commands keeps the real line numbers.
+w_cmds="$(_cmdlint_commands "$W" | awk -F'\t' '{ print $2 "\t" $4 }')"
+# ONCE PER ARM AND NOWHERE ELSE. A third call would be the end-of-run delete coming back, which
+# is redundant at best and was the whole defect at worst.
+assert_eq "windows:deletes-wsls-entry-once-per-arm" "2" \
+          "$(printf '%s\n' "$w_cmds" | grep -c 'Command "%PSDEL%"')"
+# THE CREATE ARM: the first thing after `--install` and its re-probe is the delete. Nothing that
+# can fail -- in particular no `wsl -d` call, the `mv` included -- may come between them, because
+# whatever comes between them is a way to leave the entry behind.
+after_create="$(printf '%s\n' "$w_cmds" | awk -F'\t' -v from="$install_ln" '
+    $1 > from && $2 !~ /^if %errorlevel% / && $2 !~ /Command "%PROBE%"/ { print $2; exit }')"
+assert_contains "windows:the-create-is-followed-by-the-delete" 'Command "%PSDEL%"' "$after_create"
+# THE RE-RUN ARM: where %PROBE% says the environment already exists, the delete is the first
+# command. That is the student #356 describes, running the installer again with the plain entry
+# still sitting there from the run that failed -- and the re-run may fail too.
+present_to="$(sed 's/\r$//' "$W" | sed -n "$((probe_ln + 1))s/^if %errorlevel% equ 0 goto \([a-z0-9]*\)$/\1/p")"
+assert_ne "windows:the-existing-environment-arm-was-found" "" "$present_to"
+present_ln="$(ln_of "^:$present_to\$")"
+first_on_rerun="$(printf '%s\n' "$w_cmds" | awk -F'\t' -v from="${present_ln:-0}" '$1 > from { print $2; exit }')"
+assert_contains "windows:a-re-run-deletes-wsls-entry-first" 'Command "%PSDEL%"' "$first_on_rerun"
 
 # AND THE DELETE LOOKS IN THE ROOT. This is the assertion whose absence was #270.
 assert_contains "windows:the-delete-reads-the-start-menu-root" '%SMDIR%\%DISTRO%.lnk' "$del_ps"
