@@ -1389,11 +1389,11 @@ export TESTS_DIR PRIVATE REPO
 # a checkout whose path holds any printable character, and $PRIVATE and $REPO carry that path into
 # every list, pattern and command string here. One character from each class that has broken
 # something: a space splits, ' ends a #141 single-quote wrap, " $ ` \ are what a second round of
-# expansion eats, [*?] {a,b} glob, |&;<> ( ) end a command, : moves a grep -n line number, and é is
-# not ASCII. Newline and tab are NOT promised: lists here are one path per line, and results.tsv is
-# tab-separated.
+# expansion eats, [*?] {a,b} glob, |&;<> ( ) end a command, : moves a grep -n line number, :# reads
+# as a comment to a filter that does not anchor on that number, and é is not ASCII. Newline and tab
+# are NOT promised: lists here are one path per line, and results.tsv is tab-separated.
 # shellcheck disable=SC2034
-HOSTILE_NAME='a dir, it'\''s "q" (p) [*?] {a,b} $v \b `t` |&;<> !#%^~@:=+ é'
+HOSTILE_NAME='a dir, it'\''s "q" (p) [*?] {a,b} $v \b `t` |&;<> !%^~@=+:# é'
 
 # THE PORT STATE FILE, asked of the watcher that writes it (#370) rather than spelled here as one
 # more copy. cs193v-portwatch is built to be sourced -- 18-portwatch-fuzz.sh does it, behind the
