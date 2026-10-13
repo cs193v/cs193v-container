@@ -52,7 +52,7 @@ MESSAGES="$PRIVATE/messages.txt"
 # LC_ALL=C throughout: under en_US.UTF-8, sort and comm disagree about how to order
 # punctuation and comm aborts with "file 1 is not in sorted order" — which VERIFICATION.md
 # §A.1 does today, so its cross-reference has never actually run.
-grep -oE '^\[\[[a-z0-9._-]+\]\]' "$PRIVATE/messages.txt" | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/defined"
+catalogue_keys "$PRIVATE/messages.txt" | LC_ALL=C sort -u > "$TMP/defined"
 # THE LAUNCHER ALONE (#221). This reconciles msg keys against messages.txt, and the only
 # other file that reads that catalogue is gone: install-cs193v.sh is the bootstrap now and has
 # no catalogue at all, while course-install.sh reads its OWN via txt() -- which is why the
@@ -71,8 +71,20 @@ grep -oE '^\[\[[a-z0-9._-]+\]\]' "$PRIVATE/messages.txt" | do_tr -d '[]' | LC_AL
 # there because its readers hold prose ABOUT the catalogue. That prefix cannot match a call in
 # column 0; every msg call here is indented or inside a `$(`, so today it would agree, but that
 # is a property of the current indentation rather than a rule anything holds.
-sed 's/^[[:space:]]*#.*//' cs193v | grep -ohE 'msg +[a-z0-9._-]+' | awk '{print $2}' \
-    | LC_ALL=C sort -u > "$TMP/used"
+#
+# AND EITHER SIDE CAN COME BACK EMPTY HAVING READ NOTHING (#538): an empty defined side has no
+# orphans, and an empty used side has nothing missing. So a failed read puts $CHECKER_DIED on its
+# side instead. The other side never holds it, so comm reports it as an orphan or as missing, in
+# the check that depended on the read.
+died_in() { printf '%s\n' "$1" | grep -F "$CHECKER_DIED"; }   # died_in VALUE -> its sentinel lines
+calls_in() {                          # calls_in PATTERN FILE... -> last word of each match, sorted
+    local pat="$1" src
+    shift
+    src="$(run_checker sed 's/^[[:space:]]*#.*//' "$@")"
+    case "$src" in *"$CHECKER_DIED"*) died_in "$src"; return 0 ;; esac
+    printf '%s\n' "$src" | grep -oE "$pat" | awk '{print $NF}' | LC_ALL=C sort -u
+}
+calls_in 'msg +[a-z0-9._-]+' cs193v > "$TMP/used"
 
 orphans="$(LC_ALL=C comm -23 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
 missing="$(LC_ALL=C comm -13 "$TMP/defined" "$TMP/used" | do_tr '\n' ' ')"
@@ -87,20 +99,24 @@ assert_eq "keys:none-missing" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 # only lines that repeat.
 dup_keys() {
     local keys
-    keys="$(run_checker grep -oE '^\[\[[a-z0-9._-]+\]\]' "$1")"
+    keys="$(catalogue_keys "$1")"
     case "$keys" in *"$CHECKER_DIED"*) printf '%s' "$keys"; return 0 ;; esac
     printf '%s\n' "$keys" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ' | sed 's/ *$//'
 }
 assert_eq "keys:no-duplicates" "" "$(dup_keys "$PRIVATE/messages.txt")"
 
 # A key defined with an empty body makes msg() return "(missing message: k)" at runtime,
-# which reaches the student verbatim.
-empty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
-              # A NOTE-ONLY BODY IS EMPTY (#221): msg() drops column-0 hashes now, so a key
-              # whose body is nothing but staff notes renders as "(missing message: k)".
-              /^#/{next}
-              /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$PRIVATE/messages.txt")"
-assert_eq "keys:no-empty-bodies" "" "$(printf '%s' "$empty" | sed 's/ *$//')"
+# which reaches the student verbatim. Through run_checker for #538's reason: a catalogue awk
+# could not open has no key, and so no empty one.
+empty_bodies() {                      # empty_bodies CATALOGUE -> its keys with no prose
+    run_checker awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
+                     # A NOTE-ONLY BODY IS EMPTY (#221): msg() drops column-0 hashes now, so a key
+                     # whose body is nothing but staff notes renders as "(missing message: k)".
+                     /^#/{next}
+                     /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$1" \
+        | sed 's/ *$//'
+}
+assert_eq "keys:no-empty-bodies" "" "$(empty_bodies "$PRIVATE/messages.txt")"
 
 # ─── the installer's own catalogue ─────────────────────────────────────────────
 # ISSUE #116, FINISHED BY #221. The installer's prose used to live INSIDE the script, in a heredoc
@@ -132,8 +148,7 @@ IREADERS=("$PRIVATE/course-install.sh" "$PRIVATE/wsl-provision.sh" "$PRIVATE/ins
 ICAT="$PRIVATE/course-install-messages.txt"
 assert_file "itext:the-catalogue-is-there" "$ICAT"
 
-grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | do_tr -d '[]' \
-    | LC_ALL=C sort -u > "$TMP/idefined"
+catalogue_keys "$ICAT" | LC_ALL=C sort -u > "$TMP/idefined"
 # EVERY CALL FORM, and the nested one is why this is a grep for the word rather than a match on
 # the line: need's label composes `$(msg need.podman-linux.and ...)` INSIDE another msg call, so
 # a one-per-line pattern would never see the inner key.
@@ -142,9 +157,7 @@ grep -oE '^\[\[[a-z0-9._-]+\]\]' "$ICAT" | do_tr -d '[]' \
 # "messages.txt for its early output" -- which registered `for` as a key in use and turned a
 # reconciliation red for a sentence. Whole-line comments go first for the same class of reason:
 # prose about the catalogue is not a call into it.
-sed 's/^[[:space:]]*#.*//' ${IREADERS[@]+"${IREADERS[@]}"} \
-    | grep -ohE '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' | awk '{print $NF}' \
-    | LC_ALL=C sort -u > "$TMP/iused"
+calls_in '[^A-Za-z0-9_.]msg +[a-z0-9._-]+' ${IREADERS[@]+"${IREADERS[@]}"} > "$TMP/iused"
 
 iorphans="$(LC_ALL=C comm -23 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
 imissing="$(LC_ALL=C comm -13 "$TMP/idefined" "$TMP/iused" | do_tr '\n' ' ')"
@@ -153,9 +166,7 @@ assert_eq "itext:none-missing" "" "$(printf '%s' "$imissing" | sed 's/ *$//')"
 
 assert_eq "itext:no-duplicates" "" "$(dup_keys "$ICAT")"
 
-iempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
-               /^#/{next} /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$ICAT")"
-assert_eq "itext:no-empty-bodies" "" "$(printf '%s' "$iempty" | sed 's/ *$//')"
+assert_eq "itext:no-empty-bodies" "" "$(empty_bodies "$ICAT")"
 
 # ─── rule 2, asserted rather than remembered  (#226) ───────────────────────────
 # course-install.sh:20-28 promises "anything needing your password is announced before it
@@ -247,7 +258,7 @@ assert_says_not "itext:a-column-0-hash-is-not-printed" "#" "$(imsg welcome)"
 # 10-static.sh asserts that container-side prose stays out of it.
 SGM="$PRIVATE/files/setup-git-messages.txt"
 SGS="$PRIVATE/files/setup-git"
-grep -oE '^\[\[[a-z0-9._-]+\]\]' "$SGM" | do_tr -d '[]' | LC_ALL=C sort -u > "$TMP/sg_defined"
+catalogue_keys "$SGM" | LC_ALL=C sort -u > "$TMP/sg_defined"
 assert_ne "sgkeys:catalogue-found" "" "$(cat "$TMP/sg_defined")"
 
 # ORPHANS ARE FOUND BY SEARCHING FOR THE KEY, not by matching a call form, and that difference
@@ -271,18 +282,13 @@ assert_eq "sgkeys:no-orphans" "" "$(sed 's/ *$//' "$TMP/sg_orphans")"
 # COMMENTS ARE DROPPED FIRST, and the call has to be in command position. Without either, this
 # suite's own prose supplies the counter-example: "GitHub will not say who it belongs to" makes a
 # key called `who`, and the check then fails on a comment.
-grep -v '^[[:space:]]*#' "$SGS" \
-    | grep -ohE '(^|[;&|(]|\$\()[[:space:]]*(msg|render|say) +[a-z0-9._-]+' \
-    | awk '{print $NF}' | LC_ALL=C sort -u > "$TMP/sg_used"
+calls_in '(^|[;&|(]|\$\()[[:space:]]*(msg|render|say) +[a-z0-9._-]+' "$SGS" > "$TMP/sg_used"
 assert_eq "sgkeys:none-missing" "" \
           "$(LC_ALL=C comm -13 "$TMP/sg_defined" "$TMP/sg_used" | do_tr '\n' ' ' | sed 's/ *$//')"
 
 assert_eq "sgkeys:no-duplicates" "" "$(dup_keys "$SGM")"
 
-sgempty="$(awk '/^\[\[/{if (key && !body) printf "%s ", key; key=$0; body=0; next}
-                /^#/{next}
-                /[^[:space:]]/{body=1} END{if (key && !body) printf "%s ", key}' "$SGM")"
-assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')"
+assert_eq "sgkeys:no-empty-bodies" "" "$(empty_bodies "$SGM")"
 
 # ─── the keys the pty driver waits on (#206) ───────────────────────────────────
 # fixtures/setup-git-flows.txt names, for every keystroke, the catalogue key of the screen that
@@ -291,9 +297,12 @@ assert_eq "sgkeys:no-empty-bodies" "" "$(printf '%s' "$sgempty" | sed 's/ *$//')
 # that has started timing out.
 SGFLOWS="$TESTS_DIR/fixtures/setup-git-flows.txt"
 assert_file "sgflow:the-fixture-is-there" "$SGFLOWS"
-grep -oE '^(line|secret|menu)[[:space:]]+[a-z0-9._ -]+' "$SGFLOWS" \
-    | sed -E 's/^(line|secret|menu)[[:space:]]+//' | do_tr ' ' '\n' \
-    | grep -E '^[a-z]' | LC_ALL=C sort -u > "$TMP/sg_gatekeys"
+# READ ONCE, THROUGH run_checker (#538). A fixture that could not be read has no steps, so none of
+# them names a missing key or leans on a weak needle; its sentinel goes into both lists instead.
+sg_flows="$(run_checker cat "$SGFLOWS")"
+{ printf '%s\n' "$sg_flows" | grep -oE '^(line|secret|menu)[[:space:]]+[a-z0-9._ -]+' \
+      | sed -E 's/^(line|secret|menu)[[:space:]]+//' | do_tr ' ' '\n' | grep -E '^[a-z]'
+  died_in "$sg_flows"; } | LC_ALL=C sort -u > "$TMP/sg_gatekeys"
 assert_ne "sgflow:the-fixture-names-keys" "" "$(cat "$TMP/sg_gatekeys")"
 
 # A RENAMED KEY IS A GATE THAT CAN NEVER OPEN. It does not fail where the rename happened; it
@@ -316,8 +325,8 @@ assert_eq "sgflow:every-gate-key-exists" "" \
 # ELEVEN CHARACTERS is the threshold because the shortest needle the fixture leans on is
 # `Your token:`. That one is safe only because a step matches against output produced since the
 # PREVIOUS step, so read_secret's 94 tally redraws sit behind the cursor rather than in front of it.
-: > "$TMP/sg_weaksteps"
-grep -nE '^(line|secret|menu)[[:space:]]' "$SGFLOWS" | while IFS= read -r row; do
+died_in "$sg_flows" > "$TMP/sg_weaksteps"
+printf '%s\n' "$sg_flows" | grep -nE '^(line|secret|menu)[[:space:]]' | while IFS= read -r row; do
     lineno="${row%%:*}"
     keys="$(printf '%s' "${row#*:}" | sed -E 's/^(line|secret|menu)[[:space:]]+//; s/->.*//')"
     best=0
@@ -418,8 +427,8 @@ assert_eq "sgkeys:every-line-fits-an-80-column-terminal" "" "$sgwide"
 # token*.` renders the first half plain and the second half's full stop in cyan — inside out,
 # and invisible to every assertion in this suite, which strips the markup before comparing.
 # Introduced twice while rewrapping this file for issue #58, which is the argument for the check.
-sgodd="$(awk '/^\[\[[a-z0-9._-]+\]\]$/ { key = $0; next }
-              key != "" { n = gsub(/\*/, "*"); if (n % 2) printf "%s line %d; ", key, NR }' "$SGM")"
+sgodd="$(run_checker awk '/^\[\[[a-z0-9._-]+\]\]$/ { key = $0; next }
+                          key != "" { n = gsub(/\*/, "*"); if (n % 2) printf "%s line %d; ", key, NR }' "$SGM")"
 assert_eq "sgkeys:emphasis-is-paired-on-every-line" "" "$(printf '%s' "$sgodd" | sed 's/; *$//')"
 
 
