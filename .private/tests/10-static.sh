@@ -48,6 +48,8 @@ require_python3
 #                         error on the first line it does not understand.
 #   * *.pyc, __pycache__  not source. Kept even though syntax:python no longer creates any, so
 #                         this list does not depend on that fix staying made.
+#   * *.pl                syntax:perl below, for the same reason as *.py. lib/vm-fake.pl is perl
+#                         because a shell cannot see a signal disposition it inherited (#495).
 #   * *.md                not shell.
 #
 # A GLOB PLUS A SHEBANG TEST WAS THE FIRST TRY AND IT LEAKED FOUR WAYS, all measured: a future
@@ -69,6 +71,7 @@ done <<TESTFILES
 $(find -L "$PRIVATE/tests" -type f \
        ! -path '*/tmux-harness/*' ! -path '*/fixtures/*' \
        ! -name '*.md' ! -name '*.py' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+       ! -name '*.pl' \
   | LC_ALL=C sort)
 TESTFILES
 record "tests:shell-files-found" "${#testfiles[@]}"
@@ -166,6 +169,25 @@ else fail "syntax:python-files-were-found" \
 assert_ok  "syntax:python"            python3 -c \
            "import sys
 for p in sys.argv[1:]: compile(open(p).read(), p, 'exec')" ${pyfiles[@]+"${pyfiles[@]}"}
+# AND EVERY .pl, the same move for the same reason: the shell file list above exempts them, so
+# without this nothing would parse them at all. Derived, and non-empty first, because a `perl -c`
+# loop over no files passes having checked nothing (#79's family again). Only tests/ holds perl.
+# An array, one path per element, for #436's reason above.
+plfiles=()
+while IFS= read -r f; do
+    [ -n "$f" ] && plfiles+=("$f")
+done <<PLFILES
+$(find -L "$PRIVATE/tests" -type f -name '*.pl' | LC_ALL=C sort)
+PLFILES
+record "tests:perl-files-found" "${#plfiles[@]}"
+if [ "${#plfiles[@]}" -gt 0 ]; then pass "syntax:perl-files-were-found"
+else fail "syntax:perl-files-were-found" \
+          'no .pl under tests/ -- has the find above stopped reaching lib/vm-fake.pl?'; fi
+unparsed_pl=''
+for f in ${plfiles[@]+"${plfiles[@]}"}; do
+    err="$(perl -c "$f" 2>&1)" || unparsed_pl="$unparsed_pl [${f#"$PRIVATE"/tests/}: $err]"
+done
+assert_eq  "syntax:perl"              "" "$unparsed_pl"
 assert_ok  "syntax:man"               sh -n "$PRIVATE/files/man"
 assert_ok  "syntax:ui"                bash -n "$PRIVATE/files/cs193v-ui.sh"
 assert_ok  "syntax:setup-git"         bash -n "$PRIVATE/files/setup-git"
@@ -5486,6 +5508,58 @@ print('' if found else 'NO-CREDENTIAL-PATHS-FOUND')
 print(' '.join(sorted(set(bad))))
 " "$managed" "$NOTES" "$CRED_SECTION_RE" "$CRED_PATH_RE" 2>&1)" || uncovered="the check itself failed: $uncovered"
 assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$uncovered" | sed '/^$/d')"
+
+# ─── the macOS VM is started one way, and only one (#495) ─────────────────────
+# A `podman machine start` run in the caller's own process group leaves the VM in that group, and
+# measured on a real Mac a closed window or a Ctrl-C then power-cuts it, 3/3 each. So the tree
+# starts the VM through machine_start_detached in cs193v-ui.sh, and 31-machine-start.sh holds
+# what that helper does. These two checks hold that nothing goes AROUND it.
+#
+# EVERY OTHER SITE IS NAMED, BY FUNCTION. The installer's two (setup_machine,
+# grow_machine_disk_when_stopped) and doctor's clock fix (check_clock) predate the helper and stay
+# allowlisted until they move over -- #495's follow-ups. A new bare start anywhere goes red. Comment
+# lines are skipped, so prose that NAMES the command is not a call site.
+ms_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ms.XXXXXX")"
+for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.sh"; do
+    awk -v F="${f#"$REPO"/}" '
+        /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*[({]/ { fn = $0; sub(/\(\).*/, "", fn) }
+        /^[[:space:]]*#/ { next }
+        /podman machine start/ { print F ":" fn }
+    ' "$f"
+done > "$ms_tmp/sites"
+ms_allowed=' cs193v:check_clock .private/course-install.sh:setup_machine
+              .private/course-install.sh:grow_machine_disk_when_stopped
+              .private/files/cs193v-ui.sh:machine_start_detached '
+ms_bare=''
+while IFS= read -r ms_site; do
+    case "$(printf '%s' "$ms_allowed" | do_tr '\n' ' ')" in
+        *" $ms_site "*) : ;;
+        *) ms_bare="$ms_bare $ms_site" ;;
+    esac
+done < "$ms_tmp/sites"
+assert_eq "machine:no-bare-podman-machine-start" "" "$ms_bare"
+# THE SCAN MUST HAVE SEEN THE HELPER, or it read nothing and the line above passed in silence.
+if grep -qx '.private/files/cs193v-ui.sh:machine_start_detached' "$ms_tmp/sites"; then
+    pass "machine:the-scan-reaches-the-helper"
+else
+    fail "machine:the-scan-reaches-the-helper" \
+         "no call found in machine_start_detached -- has the scan, or the helper, moved?"
+fi
+# AND THE HELPER KEEPS EVERY PIECE, each of which was measured alone (see its comment). Tokens, not
+# behaviour -- 31-machine-start.sh is the behaviour -- but a token going missing is how one of
+# them would be dropped in a tidy-up, and this says which.
+if carve_func "$PRIVATE/files/cs193v-ui.sh" machine_start_detached "$ms_tmp/helper.sh"; then
+    ms_h="$(grep -v '^[[:space:]]*#' "$ms_tmp/helper.sh")"
+    assert_contains "machine:helper-gives-the-start-its-own-process-group" 'set -m' "$ms_h"
+    assert_contains "machine:helper-restores-the-callers-job-control"      'set +m' "$ms_h"
+    assert_contains "machine:helper-has-the-vm-ignore-sighup"  'exec nohup podman machine start' "$ms_h"
+    assert_contains "machine:helper-gives-podman-no-terminal-on-stdin"      '</dev/null' "$ms_h"
+    assert_contains "machine:helper-closes-fds-3-to-9" '3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "$ms_h"
+else
+    fail "machine:helper-gives-the-start-its-own-process-group" \
+         "machine_start_detached not found as a brace-bodied function in cs193v-ui.sh"
+fi
+rm -rf "$ms_tmp"
 
 # ─── shellcheck ────────────────────────────────────────────────────────────────
 # Last, because require_cmd aborts the suite: a missing shellcheck should not hide the

@@ -371,6 +371,46 @@ for f in 0 1 2 3 4 5 6 7; do
 done
 assert_eq "rt:the-spinner-turns-clockwise" "1 1 1 1 1 1 1 1" "${steps# }"
 
+# ─── RT_SPIN_LATER: the label changes once the wait runs long  (#495) ──────────
+# The launcher's VM start says "Starting the podman VM..." and, if that is still going at 20 s,
+# that it can take up to a minute. One wait, one spinner, two labels -- so the switch lives here,
+# in the loop that already owns the frame clock, rather than in a second animator. Off unless a
+# caller sets it, and the cases above, which never do, are the guard that it stays off.
+#
+# OFF A TERMINAL each label is a line of its own, printed once when it takes effect, so a piped
+# transcript reads "first, then second" and never repeats either. The subshells keep the three
+# knobs from leaking into the rest of this suite.
+lt="$( RT_SPIN='first label'; RT_SPIN_AT=1; RT_SPIN_LATER='second label'
+       run_timeout 5 sleep 2 )"; RC=$?
+assert_eq       "rt:later-the-status-still-passes-through" "0" "$RC"
+assert_eq       "rt:later-the-first-label-is-printed-once"  "1" "$(printf '%s\n' "$lt" | grep -cxF 'first label')"
+assert_eq       "rt:later-the-second-label-is-printed-once" "1" "$(printf '%s\n' "$lt" | grep -cxF 'second label')"
+assert_eq       "rt:later-in-that-order" "first label
+second label" "$lt"
+lt="$( RT_SPIN='first label'; RT_SPIN_AT=3; RT_SPIN_LATER='second label'
+       run_timeout 5 sh -c 'exit 4' )"; RC=$?
+assert_eq           "rt:later-a-quick-command-keeps-its-status"  "4" "$RC"
+assert_not_contains "rt:later-a-quick-command-never-sees-it"     "second label" "$lt"
+assert_exit         "rt:later-the-ceiling-still-returns-124" 124 \
+                    bash -c ". '$PRIVATE/files/cs193v-ui.sh'; RT_SPIN=a RT_SPIN_AT=1 RT_SPIN_LATER=b; run_timeout 2 sleep 5 >/dev/null"
+# WITHOUT A FIRST LABEL THERE IS NOTHING TO CHANGE: a probe with no RT_SPIN takes the fifo branch
+# and draws nothing, and a stray RT_SPIN_LATER must not start drawing on its behalf.
+lt="$( RT_SPIN=''; RT_SPIN_AT=0; RT_SPIN_LATER='second label'; run_timeout 5 sleep 1 )"
+assert_eq "rt:later-without-a-first-label-prints-nothing" "" "$lt"
+
+# ON A TERMINAL the row is redrawn in place, and a shorter second label must not leave the tail of
+# the longer first one behind -- the row a student reads afterwards is the label in effect at the
+# end, and nothing else.
+lt="$(do_script 20 "bash -c '. \"$PRIVATE/files/cs193v-ui.sh\"; RT_SPIN=\"a much longer first label\"; RT_SPIN_AT=1; RT_SPIN_LATER=short; run_timeout 5 sleep 2; echo done'" 2>&1 | render_pty)"
+lrow="$(printf '%s\n' "$lt" | grep -F 'short' | tail -1)"
+case "$lrow" in
+    '')        fail "rt:later-redraws-the-row-on-a-terminal" "no row carries the second label: $lt" ;;
+    *longer*)  fail "rt:later-redraws-the-row-on-a-terminal" "the first label survives beside it: $lrow" ;;
+    *)         pass "rt:later-redraws-the-row-on-a-terminal" ;;
+esac
+assert_not_contains "rt:later-leaves-the-first-label-behind-it-on-a-terminal" \
+                    "a much longer first label" "$(printf '%s\n' "$lt" | grep -v '^$' | tail -2)"
+
 # ─── and reading a version out of what it captured ─────────────────────────────
 # HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces and the launcher reads
 # the podman version out of it. Testing the parse next to the thing that fills it keeps the two

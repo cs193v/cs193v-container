@@ -1226,6 +1226,47 @@ sudo pkgutil --forget com.redhat.podman    # or the next run meets the stale-rec
 is `rosetta:downloads-the-arm64-package` in the shim tier — on a Mac that already has podman,
 nothing is downloaded at all.
 
+### A Mac restart: the launcher starts the stopped VM, and the window can close  (#495)
+What `31-machine-start.sh` cannot do: a real VM and a real Terminal.app window. It holds every mode
+against a fake VM that inherits what a real one would, and ptyrun's close stands in for Terminal's;
+this is the check that the stand-ins are still honest. Measured once on 2026-10-12 (Apple silicon,
+macOS 26.6.2, podman 6.0.2), recorded in `ERRORS.md` D17.
+
+**It stops the shared VM**, which takes down every developer's running containers on that Mac. Check
+`podman ps -a` for every instance first.
+
+```sh
+podman machine stop
+# then open the CS193V app (or `./cs193v` in a Terminal window)
+```
+
+1. *Expect* "Starting the podman VM..." on one spinner line, then the course shell — and none of
+   podman's own output (`podman machine set --rootful`, `podman-mac-helper`).
+2. Note krunkit's pid: `pgrep -x krunkit`. In another window, ask Terminal what it thinks is running
+   in the CS193V window — *expect* the session's own processes and **not** krunkit or gvproxy:
+   ```sh
+   osascript -e 'tell application "Terminal" to get processes of tab 1 of front window'
+   ```
+3. `exit` the session, so the app closes the window itself. *Expect* no "terminate running
+   processes?" sheet, `podman machine inspect --format '{{.State}}'` saying `running`, and the same
+   krunkit pid.
+4. Launch again and close the window MID-SESSION. *Expect* the sheet to name only the session's
+   processes; click **Terminate**. *Expect* `running` and the same pid.
+5. `podman machine stop`, launch, and press **Ctrl-C** while "Starting the podman VM..." shows.
+   *Expect* the launcher to exit and the VM to come up anyway: `running` a few seconds later.
+6. *Expect* no unclean shutdown in any of it — the next boot's kernel log has no XFS recovery:
+   ```sh
+   podman machine stop; podman machine start
+   podman machine ssh -- 'journalctl -k -b 0 | grep -c "Starting recovery"'    # 0
+   ```
+7. **On the slowest Macs the course supports** — an Intel Mac (vfkit, podman 5.8.x) and a low-memory
+   Apple silicon one — time a cold start: `podman machine stop; time podman machine start`. The
+   launcher gives the whole recovery 60 s and says "Still starting…" at 20 s; if a cold start there
+   is near 40 s, revisit those numbers in `cs193v`'s `machine_bring_up`.
+
+Leave the VM running afterwards, detached from every window:
+`/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' podman machine start`.
+
 ### §5.4 — WSL `--name` and `--no-launch`
 `wsl --install -d Ubuntu-26.04 --name CS193V --no-launch`
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is

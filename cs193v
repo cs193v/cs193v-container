@@ -501,17 +501,27 @@ pmv() { local RT_SPIN='' RT_ROW='' RT_BARE=1; pm "$@"; }
 # trigger that erases itself. See RT_ERR in cs193v-ui.sh for the measurement.
 #
 # EMPTY MEANS EMPTY, which is the whole reason this is a function rather than an extra {{ }} in
-# the messages: err.podman-unreachable is read far more often by a student whose podman machine
-# is simply stopped, and a blank stanza in their refusal would be a cost paid by everyone to
-# help the few. Composed by concatenation at the call site, so `$( )` strips no leading newline.
+# the messages: a podman that failed in silence is common, and a blank stanza in every one of those
+# refusals would be a cost paid by everyone to help the few. Composed by concatenation at the call
+# site, so `$( )` strips no leading newline.
+#
+# (It used to name err.podman-unreachable as the case, read most by a student whose machine was
+# merely stopped. Since #495 the launcher starts a stopped machine itself, so that student no
+# longer sees this refusal at all; the rule stands for everyone who still does.)
 #
 # ONLY REACHABLE WHERE THE READ WAS NOT IN A `$( )`. state and label_of are called inside command
 # substitutions, so their RT_ERR never reaches the parent -- the same channel problem rt_cleanup
 # documents. Their refusals name `podman info` instead, and there that is enough: podman is
 # unreachable rather than transiently noisy, so running it again reproduces the fault.
 podman_said() {                       # -> a stanza quoting RT_ERR, or nothing at all
-    [ -n "$RT_ERR" ] || return 0
-    printf '\n\n%s' "$(msg detail.podman-said TEXT="$RT_ERR")"
+    podman_said_text "$RT_ERR"
+}
+# The same stanza for TEXT that was saved earlier (#495). The machine recovery asks podman several
+# more things between the `info` that failed and the refusal, and every pmv clears RT_ERR -- so a
+# refusal built from RT_ERR would quote whichever read ran last, not the step that failed.
+podman_said_text() {                  # podman_said_text TEXT -> a stanza quoting TEXT, or nothing
+    [ -n "$1" ] || return 0
+    printf '\n\n%s' "$(msg detail.podman-said TEXT="$1")"
 }
 
 # ─── small utilities ───────────────────────────────────────────────────────────
@@ -912,7 +922,214 @@ config_hash() {
       printf '%s\n' ${ARGS[@]+"${ARGS[@]}"}; } | sha_stdin
 }
 
+# ─── a stopped VM is started, not refused  (#495) ──────────────────────────────
+# Every Mac restart leaves podman's VM stopped and nothing starts it again, so the first launch
+# after one used to end in err.podman-unreachable -- which students read as "broken, ask staff".
+# Now the launcher starts it, in a way that leaves the VM outside its own process group (see
+# machine_start_detached in cs193v-ui.sh for why that is the whole difficulty), and refuses only
+# when there is something the student has to do.
+#
+# THE SHAPE, decided with Keith (#495 plan):
+#   * One deadline for the whole recovery, 60 s by default, with every step's ceiling clipped to
+#     what is left of it. Unclipped, the ceilings chained to five and a half minutes.
+#   * One spinner line: "Starting the podman VM..." for our start, "Waiting for the podman VM to
+#     finish starting..." for somebody else's -- another window, Podman Desktop -- and, once 20 s
+#     have gone by, "Still starting ... up to a minute". A start measured 10-13 s.
+#   * A hang (rc 124) is the slept Mac, and goes straight to err.podman-hangs: no inspect, no
+#     wait on top of a 20 s hang.
+#   * `already running` from our start means somebody else got there first -- podman serialises
+#     starts on a lock -- so it means wait, not fail. `only one VM can be active` means a
+#     DIFFERENT machine is up, and that is the student's to stop, not ours.
+#   * Never `podman machine stop`. At the deadline a VM reading `running` may still be another
+#     window's start in progress, and stopping it would wreck that; the refusal tells the student
+#     how, and they know what else they have open.
+#
+# CS193V_MACHINE_DEADLINE AND CS193V_MACHINE_UPDATE_AT ARE FOR THE TESTS. 31-machine-start.sh
+# shortens both so its deadline cases take seconds; 31's h6:* reads these defaults out of this file.
+MS_OUT=''
+
+# A refusal in three parts -- what is wrong, what podman said, what to do -- with podman's words in
+# the MIDDLE, so the last thing on screen is the instruction (#495: students ran nothing, because
+# the last thing on screen used to be podman's own advice, `podman machine init` included).
+refusal() {                           # refusal HEAD STANZA FIX -> one message
+    printf '%s%s\n\n%s' "$1" "$2" "$3"
+}
+refuse_unreachable() {                # refuse_unreachable PODMAN_STDERR -> dies
+    die "$(refusal "$(msg err.podman-unreachable)" "$(podman_said_text "$1")" "$(msg err.podman-unreachable.fix)")"
+}
+refuse_machine_unreachable() {        # refuse_machine_unreachable PODMAN_STDERR -> dies
+    die "$(refusal "$(msg err.machine-unreachable)" "$(podman_said_text "$1")" "$(msg err.machine-unreachable.fix)")"
+}
+# podman's own complaint out of a start's whole output: its `Error:` lines, or its last few lines if
+# it printed none. Never the success chatter -- `podman machine set --rootful` is in there, and a
+# student who followed it would earn err.rootful.
+machine_error_lines() {               # machine_error_lines OUTPUT -> the lines worth quoting
+    local e
+    e="$(printf '%s\n' "$1" | grep '^Error:')"
+    [ -n "$e" ] || e="$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -3)"
+    printf '%s' "$e"
+}
+machine_refuse_start() {              # machine_refuse_start OUTPUT -> dies
+    die "$(refusal "$(msg err.machine-start-failed)" "$(podman_said_text "$(machine_error_lines "$1")")" \
+                   "$(msg err.machine-start-failed.fix)")"
+}
+# podman's two wordings, both measured in its source (shim/host.go, v6.0.2 and v5.8.7):
+#   unable to start "podman-machine-default": NAME already starting or running: only one VM ...
+#   unable to start: NAME already starting or running on the P provider: only one VM ...
+machine_refuse_other() {              # machine_refuse_other OUTPUT -> dies
+    local name
+    name="$(printf '%s\n' "$1" | sed -n 's/.*: \([^ ]*\) already starting or running.*/\1/p' | head -1)"
+    die "$(refusal "$(msg err.machine-other-active NAME="${name:-?}")" \
+                   "$(podman_said_text "$(machine_error_lines "$1")")" \
+                   "$(msg err.machine-other-active.fix NAME="${name:-?}")")"
+}
+
+# One `podman info`, clipped to SECS, answering only "did podman answer". No label, no stderr in
+# the answer, and nothing a caller's spinner settings can make it draw.
+machine_probe() {                     # machine_probe SECS -> 0 if podman answers
+    local RT_SPIN='' RT_SPIN_LATER='' RT_ROW='' RT_BARE=1
+    run_timeout "$1" podman info --format '{{.Host.Security.Rootless}}' >/dev/null
+}
+
+# Our start, under the spinner. podman's status, and everything it printed in MS_OUT -- merged,
+# because a failing start says why on stderr and that is what a refusal quotes.
+machine_try_start() {                 # machine_try_start DEADLINE UPDATE_AT -> podman's status
+    local left=$(( $1 - SECONDS )) at=$(( $2 - SECONDS )) rc
+    [ "$left" -ge 1 ] || left=1
+    [ "$at" -ge 0 ] || at=0
+    local RT_SPIN RT_SPIN_AT="$at" RT_SPIN_LATER RT_BARE='' RT_ROW=''
+    RT_SPIN="$(msg status.starting-machine)"
+    RT_SPIN_LATER="$(msg status.machine-slow)"
+    run_timeout "$left" machine_start_detached; rc=$?
+    MS_OUT="$RT_OUT"
+    return "$rc"
+}
+
+# Until END, ask podman whether it answers. Half a second between asks that failed FAST -- a
+# refused connection comes back in 40 ms, and a VM still booting fails in about three seconds on
+# its own. The launcher's wait_until, in other words, and polling the thing itself.
+machine_answer_by() {                 # machine_answer_by END [stop] -> 0 answered | 3 VM stopped | 1 END
+    local n RT_SPIN='' RT_SPIN_LATER='' RT_ROW='' RT_BARE=1
+    while :; do
+        n=$(( $1 - SECONDS ))
+        [ "$n" -ge 1 ] || return 1
+        [ "$n" -le 10 ] || n=10
+        machine_probe "$n" && return 0
+        # With `stop`, a VM that has gone back to stopped ends the wait: somebody else's start
+        # gave up, and the caller can make its own.
+        if [ "${2:-}" = stop ] && run_timeout 5 podman machine inspect --format '{{.State}}' \
+               && [ "$RT_OUT" = stopped ]; then
+            return 3
+        fi
+        [ "$SECONDS" -lt "$1" ] || return 1
+        sleep 0.5
+    done
+}
+
+# Somebody else's start, under the spinner. The loop decides when to give up; run_timeout's own
+# ceiling, two seconds later, only backstops it.
+machine_wait() {                      # machine_wait DEADLINE UPDATE_AT -> 0 | 3 | 1
+    local left=$(( $1 - SECONDS )) at=$(( $2 - SECONDS )) rc
+    [ "$left" -ge 1 ] || left=1
+    [ "$at" -ge 0 ] || at=0
+    local RT_SPIN RT_SPIN_AT="$at" RT_SPIN_LATER RT_BARE='' RT_ROW=''
+    RT_SPIN="$(msg status.waiting-machine)"
+    RT_SPIN_LATER="$(msg status.machine-slow)"
+    run_timeout "$(( left + 2 ))" machine_answer_by "$1" stop; rc=$?
+    case "$rc" in 0|3) return "$rc" ;; *) return 1 ;; esac
+}
+
+# Bring a stopped (FIRST=start) or starting/running-but-silent (FIRST=wait) VM to the point where
+# podman answers, or die saying what the student can do. On success RT_OUT holds preflight's own
+# rootless read, taken in THIS shell, so preflight carries on exactly as if it had answered first.
+machine_bring_up() {                  # machine_bring_up start|wait INFO_STDERR
+    local next="$1" ierr="$2" rc quick
+    local deadline=$(( SECONDS + ${CS193V_MACHINE_DEADLINE:-60} ))
+    local update_at=$(( SECONDS + ${CS193V_MACHINE_UPDATE_AT:-20} ))
+    while :; do
+        case "$next" in
+            start)
+                machine_try_start "$deadline" "$update_at"; rc=$?
+                case "$rc" in
+                    0)   next='answer' ;;
+                    # The budget ran out with the start still going. It is detached, so it carries
+                    # on; "try again in a minute" is true, and the message has a way out if not.
+                    124) die "$(msg err.machine-still-starting)" ;;
+                    *)   case "$MS_OUT" in
+                             *'only one VM can be active at a time'*) machine_refuse_other "$MS_OUT" ;;
+                             *'already running'*)                     next='wait' ;;
+                             *)                                       machine_refuse_start "$MS_OUT" ;;
+                         esac ;;
+                esac ;;
+            answer)
+                # OUR start returned 0, and podman was measured answering about two seconds
+                # BEFORE it does -- so this is the tail of the boot window, short and silent.
+                quick=$(( SECONDS + 15 ))
+                [ "$quick" -le "$deadline" ] || quick="$deadline"
+                # ...BUT A START THAT SUCCEEDED IS ALWAYS ASKED ABOUT, however little of the deadline
+                # it left. Clipped to nothing, this refused a VM it had just started successfully
+                # without asking podman once (31's e4:*).
+                [ "$quick" -gt "$SECONDS" ] || quick=$(( SECONDS + 5 ))
+                machine_answer_by "$quick" && break
+                refuse_machine_unreachable "$ierr" ;;
+            wait)
+                machine_wait "$deadline" "$update_at"; rc=$?
+                case "$rc" in
+                    0) break ;;
+                    # Somebody else's start gave up, so waiting will not bring the VM up -- make our
+                    # own. Even after one of ours heard "already running": that start never RAN, it
+                    # deferred to the one that has now failed (31's b6:*). NOT PAST THE DEADLINE,
+                    # though, and that line is the loop's only bound: every phase gets a one-second
+                    # floor and answers normally, so a VM flipping starting <-> stopped would
+                    # otherwise send this round for ever.
+                    3) [ "$SECONDS" -lt "$deadline" ] || die "$(msg err.machine-still-starting)"
+                       next='start'; continue ;;
+                    *) if pmv machine inspect --format '{{.State}}' && [ "$RT_OUT" = running ]; then
+                           refuse_machine_unreachable "$ierr"
+                       fi
+                       die "$(msg err.machine-still-starting)" ;;
+                esac ;;
+        esac
+    done
+    pmv info --format '{{.Host.Security.Rootless}}' || refuse_machine_unreachable "$RT_ERR"
+}
+
+# What a podman that did not answer means, and what to do about it. MODE is preflight's.
+# Returns 0 once podman answers (RT_OUT as preflight's read would have left it), or 2 when MODE
+# is ifup and the VM is simply not up; every other outcome is a refusal.
+machine_recover() {                   # machine_recover MODE INFO_RC INFO_STDERR
+    local mode="$1" irc="$2" ierr="$3"
+    # NOT A MAC'S STOPPED VM, or a caller that wants nothing started: the refusal, as before.
+    # CONTAINER_HOST and CONTAINER_CONNECTION point podman somewhere else, while `podman machine`
+    # still means podman-machine-default -- so starting it would boot a VM nobody is using.
+    if [ -z "$mode" ] || [ "$(platform)" != macos ] \
+       || [ -n "${CONTAINER_HOST:-}" ] || [ -n "${CONTAINER_CONNECTION:-}" ]; then
+        refuse_unreachable "$ierr"
+    fi
+    [ "$irc" -eq 124 ] && die "$(msg err.podman-hangs)"
+    pmv machine inspect --format '{{.State}}' || refuse_unreachable "$ierr"
+    case "$RT_OUT" in
+        stopped)  [ "$mode" = ifup ] && return 2
+                  machine_bring_up start "$ierr" ;;
+        starting) [ "$mode" = ifup ] && return 2
+                  machine_bring_up wait "$ierr" ;;
+        # RUNNING AND SILENT is not "down", so --stop and --reset-tunnel get the refusal as they
+        # always did, at once; a launch waits in case it is a start still finishing.
+        running)  [ "$mode" = ifup ] && refuse_unreachable "$ierr"
+                  machine_bring_up wait "$ierr" ;;
+        *)        refuse_unreachable "$ierr" ;;
+    esac
+}
+
 # ─── preflight ─────────────────────────────────────────────────────────────────
+# preflight [start|ifup]. The MODE decides what a podman that cannot be reached means on a Mac:
+#   start   the VM is started if it is stopped, waited for if it is starting (#495). A bare
+#           launch and --rebuild, which need a container.
+#   ifup    a VM that is stopped or still starting is reported back as MACHINE_DOWN instead,
+#           because nothing can be running in it. --stop and --reset-tunnel, which must never
+#           boot a VM in order to stop or reconnect nothing.
+#   (none)  the refusal, as before.
+MACHINE_DOWN=''
 preflight() {
     if [ "$(id -u)" -eq 0 ]; then die "$(msg err.running-as-root)"; fi
 
@@ -955,8 +1172,18 @@ preflight() {
     # store fix-ups and says so. Measured in the field on stock WSL2 with podman 5.7.0 and
     # nothing misconfigured -- and clean again nine minutes later, which is why the refusals
     # below quote what podman said instead of leaving a student to reproduce it.
-    if ! pmv info --format '{{.Host.Security.Rootless}}'; then
-        die "$(msg err.podman-unreachable)$(podman_said)"
+    #
+    # A FAILURE HERE IS, ON A MAC, USUALLY A STOPPED VM -- every restart leaves one (#495) -- and
+    # machine_recover starts it rather than refusing. It returns only once podman answers, with
+    # that answer in RT_OUT exactly as this read would have left it; or 2, for a caller that asked
+    # not to have the VM started (MODE ifup) and should treat "down" as "nothing is running".
+    local info_rc=0
+    pmv info --format '{{.Host.Security.Rootless}}' || info_rc=$?
+    # machine_recover returns non-zero ONLY for "down" (2); every other failure is a refusal it
+    # makes itself, so a false here can mean nothing else.
+    if [ "$info_rc" -ne 0 ] && ! machine_recover "${1:-}" "$info_rc" "$RT_ERR"; then
+        MACHINE_DOWN=1
+        return 0
     fi
     # THREE ANSWERS WHERE THERE WERE TWO. `!= "true"` inferred "rootful" from every answer that
     # was not the literal `true` -- including the empty string -- and err.rootful is the one
@@ -3054,7 +3281,7 @@ verb_rebuild() {
         shift
     done
 
-    preflight; refuse_if_session_live; load_args
+    preflight start; refuse_if_session_live; load_args
 
     if [ -n "$nocache" ] || ! pmq image exists "$IMAGE" || recipe_moved; then
         build_image "$nocache"
@@ -3117,7 +3344,15 @@ verb_rebuild() {
 # window dies with the container, and a student who mis-reads a refusal should not be one
 # keystroke from stopping the session they are actually using.
 verb_stop() {
-    preflight; load_args
+    preflight ifup
+    # A STOPPED OR STILL-STARTING VM HOLDS NO RUNNING CONTAINER (#495), so this is a no-op that
+    # says so -- and must not start a VM in order to stop nothing. Without it the read below would
+    # come back `unreadable`, which this verb rightly treats as "may be running", and prompt.
+    if [ -n "$MACHINE_DOWN" ]; then
+        info "$(msg status.already-stopped)"
+        return 0
+    fi
+    load_args
     # `unreadable` COUNTS AS "MAY BE RUNNING" (#171). "The container is not running, so there is
     # nothing to stop" is a claim, and on an unreadable read it is a claim we cannot make -- so
     # this used to answer it in the one situation the verb exists for. The student who needs
@@ -3145,10 +3380,11 @@ verb_stop() {
 # the container from starting. podman starts it regardless. What a stale tunnel blocks is the
 # NEXT tunnel binding the host ports it is still holding, so the symptom is "my browser cannot
 # reach my server", not "the container will not start".
-verb_reset_tunnel() {
-    preflight; load_args; require_image
-    info "$(msg status.tunnel-resetting)"
-
+# Steps 1-3 of --reset-tunnel: everything that is on the HOST and needs no podman. Its own function
+# because the verb runs it on two paths -- the ordinary one, and a Mac whose VM is down (#495),
+# where there is no container to reconnect but a stale pidfile or socket name may still be lying
+# around, and warn.tunnel-reset-not-running promises they were cleaned up.
+tunnel_force_down() {
     # 1. The clean way first, but TIME-BOXED. A wedged ssh may never answer -O exit, and
     #    waiting forever for it is precisely the failure this verb exists to break out of.
     if [ -S "$TUNNEL_CTL" ]; then
@@ -3164,6 +3400,22 @@ verb_reset_tunnel() {
     # 3. A leftover socket makes the next -O check report a dead tunnel as live, which would
     #    make ensure_tunnel decide there was nothing to do.
     rm -f "$TUNNEL_CTL" "$TUNNEL_PID" "$TUNNEL_LOG"
+}
+
+verb_reset_tunnel() {
+    preflight ifup
+    # THE VM IS DOWN, SO NO CONTAINER IS RUNNING (#495): there is nothing to reconnect, and
+    # require_image would refuse first about an image nobody needs for this. The host side is
+    # still worth tidying, and the warning says it was.
+    if [ -n "$MACHINE_DOWN" ]; then
+        tunnel_force_down
+        warn "$(msg warn.tunnel-reset-not-running)"
+        return 0
+    fi
+    load_args; require_image
+    info "$(msg status.tunnel-resetting)"
+
+    tunnel_force_down
 
     # 4. Only now is it meaningful to ask who still holds the ports. Anything left is NOT ours
     #    -- it is another program on the student's computer -- and naming it is the difference
@@ -3335,7 +3587,7 @@ case "${1:-}" in
     # losing it behind the session refusal would send a student to --stop and then straight back
     # into the wrong container. See the comment on the function.
     '')                  info "$(msg status.entering)"
-                         preflight; refuse_if_foreign_dir; refuse_if_session_live
+                         preflight start; refuse_if_foreign_dir; refuse_if_session_live
                          load_args; require_image; ensure_container
                          open_shell ;;
     doctor)              verb_doctor ;;

@@ -42,6 +42,11 @@ shim_new() {
     export TMPDIR="$SHIM/tmp"
     cp "$TESTS_DIR/lib/podman-fake" "$SHIM/podman"
     chmod +x "$SHIM/podman"
+    # The VM stand-in podman-fake's `machine start` leaves behind once a test opts in with
+    # machine_state (#495). Beside the fake rather than read out of the tree, so the path it runs
+    # under names this shim -- which is how machine_stop and shim_kill_vms identify it. Run as
+    # `perl FILE`, so it needs no exec bit and 10-static.sh does not lint it as shell.
+    cp "$TESTS_DIR/lib/vm-fake.pl" "$SHIM/vm-fake.pl"
     # UNCONDITIONALLY, not only for the cases that assert on it. Every shim run then has a
     # sudo that cannot execute anything, so no case -- including one written later, and
     # including a PTY case that could really sit prompting for the developer's password --
@@ -113,10 +118,30 @@ shim_count() {                        # shim_count ERE
 # shims per installer run (#76). The pid in every name is what lets one glob find exactly
 # ours and leave a concurrent run's alone.
 shim_cleanup() {
+    shim_kill_vms
     rm -rf "$SHIM_SNAPSHOT" "$SHIM_FARM" \
            "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".* \
            "$SHIM_HOST_TMPDIR"/cs193v-repo."$$".* \
            "$SHIM_HOST_TMPDIR"/cs193v-last."$$" 2>/dev/null || true
+}
+
+# Every fake VM a shim of OURS left running (#495). lib/vm-fake.pl ends itself within a second of its
+# shim being removed, but a run killed before shim_cleanup never removes the shim, and once the
+# fake podman has exited its VM belongs to pid 1 in a group of its own -- where neither
+# run-tests.sh's group TERM nor lane_outsiders can see it. So the cleanup kills by recorded pid,
+# and identifies first: pids are reused (tunnel_kill_pid's rule), and the command line naming
+# THIS shim's vm-fake is what says the pid is still ours.
+shim_kill_vms() {
+    local f p
+    for f in "$SHIM_HOST_TMPDIR"/cs193v-shim."$$".*/vm.pid; do
+        [ -f "$f" ] || continue
+        p="$(cat "$f" 2>/dev/null)"
+        case "$p" in ''|*[!0-9]*) continue ;; esac
+        if ps -p "$p" -o command= 2>/dev/null | grep -qF "${f%/vm.pid}/vm-fake"; then
+            kill "$p" 2>/dev/null
+        fi
+    done
+    return 0
 }
 
 # Run the launcher with the fake podman first on PATH. stdin is closed: the real launcher

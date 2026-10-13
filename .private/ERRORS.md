@@ -1797,3 +1797,110 @@ macOS-only for a second, independent reason, measured by forcing the door open o
 master is destroyed, `tcgetattr` on the slave fails `EIO`, so `isatty(1)` is **false** there, with
 the session-leader shape and without it. On macOS it stays true while every write fails, which is
 the state the five tty-only writes need.
+
+### D17. A VM started in the launcher's process group dies with the window (issue #495)
+
+Every Mac restart leaves podman's VM stopped, and nothing starts it again, so the first launch
+after one ended in `err.podman-unreachable`. The launcher now starts the VM itself — and the
+measurements below are why it cannot simply run `podman machine start` to do it. Apple silicon,
+macOS 26.6.2, podman 6.0.2 (libkrun), `/bin/bash` 3.2, measured 2026-10-06 to 2026-10-12. The
+full investigation, with the harness, is the comment on #495.
+
+**podman does not detach what it starts.** krunkit (vfkit on Intel) and gvproxy are launched with a
+bare `exec.Cmd.Start()` — no `Setsid`, no `Setpgid`, in 5.8.0, 6.0.2 and upstream main — so they
+join the process group of whatever ran `podman machine start`, keep its controlling terminal, and
+inherit its fds. krunkit installs no signal handlers at all. The live VM's dispositions, read with
+`sysctl KERN_PROC_PID` `p_sigignore`/`p_sigcatch` (the reader self-checked against known values):
+
+| process, started through the helper | SIGHUP | SIGINT | SIGQUIT | SIGTERM |
+|---|---|---|---|---|
+| krunkit | ignored | default | default | default |
+| gvproxy | ignored | caught | caught | caught |
+
+Go resets every signal it is *catching* before exec — podman catches INT and TERM during a start —
+and keeps a signal the parent *ignores*. So the only thing a caller can hand the VM is an ignored
+SIGHUP, and only through `nohup`. SIGTERM was measured too: it ends the guest with no shutdown,
+like the rest.
+
+**Where the VM was started, and what ended it** (`ptyrun.py` job mode; "close" is its polite close,
+SIGHUP to the terminal's foreground group; ^C is a real `\003` typed into the pty; 3/3 unless
+noted):
+
+| shape | window closed | Ctrl-C |
+|---|---|---|
+| plain, in the launcher's group | dies | dies |
+| an async list in a shell without job control (`run_timeout`'s shape) | dies (1/1) | dies |
+| `nohup` | survives | dies |
+| `set -m` background job (own process group, same session) | survives | survives |
+| `/usr/bin/perl -MPOSIX -e 'POSIX::setsid()…'` | survives | survives |
+
+With a real interactive bash as the pty's leader: a launcher that started the VM plainly and then
+EXITED left it surviving a later close; one still in the foreground at the close lost it; and a
+launcher that was itself the session leader (no login shell, the #134 shape) lost it the moment it
+exited, with no close at all.
+
+**Every one of those deaths is a power cut.** All six boots after a signal death logged `XFS (vda4):
+Starting recovery` and journald's `system.journal corrupted or uncleanly shut down`; none of the six
+after `podman machine stop` did. Across 55 boots of this VM there were 22 such recoveries and no
+filesystem error or corruption line in any kernel log. (A later `podman system check` reported 4,610
+"layer content modified" entries in 7 layers — every one a directory mtime, every one stamped
+2026-10-03, three days before the first kill. Not caused by this, and not explained.)
+
+**The boot window.** `.State` says `running` about five seconds before podman answers:
+
+| t | `.State` | `podman info` |
+|---|---|---|
+| 0.0 s | stopped | `connect: connection refused` |
+| 3.1 s | stopped | `ssh: handshake failed: … connection reset by peer` |
+| 6.1 s | running | same |
+| 9.0 s | running | `ssh: handshake failed: EOF` |
+| 11.0 s | running | answers |
+
+`podman machine start` returned at 13.1 s. Six timed starts took 10–13 s. Two concurrent starts: one
+succeeds, the other exits 125 with `unable to start "podman-machine-default": already running`,
+because podman takes a start lock *before* checking the state. gvproxy killed alone leaves the state
+`running` and `podman info` refused, and then `podman machine start` says "already running" — only
+stop-then-start clears it, and that stop prints `unable to clean up gvproxy` while working.
+
+**A real Terminal.app window, by hand** (2026-10-12; the user's own Terminal, no close-warning keys set,
+so stock behaviour). Terminal counts a tab's processes — what drives `busy`, the "terminate running
+processes?" sheet and the names on it — from the shell's DESCENDANTS, not from every process on the
+tty. After `podman machine start` returns, krunkit and gvproxy belong to pid 1, so a VM started
+through the helper is never listed, though it keeps the window's tty until the window closes:
+
+- launcher exited, then the CS193V app's own `close`: tab `login, -zsh`, not busy; no sheet; VM up.
+- launcher still in the foreground: the sheet listed only the job; Terminate killed it and the window;
+  VM up, same pids.
+- positive control: a foreground `sleep` held the same `close` open behind a sheet.
+- a signal-logging stand-in in the helper's shape was sent nothing at all.
+
+**Two bugs the tests found in the helper itself**, both reproduced before they were fixed:
+
+1. *A `( )` body leaked the launcher's stdout.* The first helper was a subshell function. That
+   subshell is a second bash, it inherits the copy of stdout bash keeps while a function's output is
+   redirected, and `run_timeout`'s ceiling kills its own wrapper but not this. So a start that ran past
+   the deadline left a waiter holding the launcher's stdout open after the launcher exited:
+   `31-machine-start.sh`'s E2 deadlocked in a `$( )` that never saw EOF, while the start it waited on
+   needed the suite to release it. Now the waiter is the caller's own shell and the only survivor of a
+   ceiling is podman.
+2. *Closing fds on the `exec` line leaked one.* `exec nohup podman … 5>&-` makes bash 3.2 save fd 5
+   first — so it could restore it if the exec failed — and the saved copy survives the exec: the
+   caller's fd 5 reached the VM as fd 13, measured with `lsof`. A bare `exec 3>&- … 9>&-` with no
+   command saves nothing. `lib/vm-fake.pl` now reports every fd from 3 to 255 for this reason.
+
+**The mutation pass** (22 mutations of the helper, the recovery and the messages, each applied to the
+real source, `31-machine-start.sh` run, and the source restored and verified byte for byte) caught 21
+on the first run. What it changed:
+
+- *`</dev/null` was invisible through the launcher.* `run_timeout` runs the helper as a background job
+  in a script, and bash hands such a job `/dev/null` already, so dropping the redirect turned nothing
+  red. It only matters to a caller that runs the helper directly — the installer, next — so `i11:*`
+  calls it directly on a terminal, where podman 6.0.2's question would stop the start.
+- *Two review-found holes, each made red first:* a start that succeeded with no time left was refused
+  without podman being asked once (`e4:*`), and a start that deferred to somebody else's with
+  "already running" never got made when that one failed (`b6:*`).
+- *`e2:the-start-is-still-going` read the state file*, which a killed start leaves saying `starting`.
+  It now asks whether the process holding podman's start lock is alive.
+- *A test that signals a process group must never signal its own.* Under the `drop set -m` mutation
+  the fake VM sat in the suite's own group, so `i7`'s hangup took down the suite, the driver and
+  everything above them, silently. `i7` now refuses when the group is its own.
