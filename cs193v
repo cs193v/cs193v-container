@@ -1488,8 +1488,14 @@ tunnel_dyn_read_floor() {
 # round trip -- 15-40ms. Ten seconds was copied from tunnel_alive, which runs once at startup;
 # here it would cost that per port per tick.
 #
-# THE SECOND [ -S ] IS THE ONE DOING WORK. The first is a cheap racy pre-check; the second is what
-# separates "the host port is taken" from "the master went away while we were asking".
+# A FAILED FORWARD IS "BUSY" ONLY ONCE THE MASTER HAS ANSWERED (#339). A host port that is taken
+# and a master that has died exit alike -- 255, measured against OpenSSH 10.2: "Port forwarding
+# failed" for one, "Control socket connect(...): Connection refused" for the other. A master
+# killed with SIGKILL cannot remove its socket, so the `[ -S ]` that used to be the whole test
+# passed, and every new port was published as "another program on your own computer" for a
+# master nobody was running. tunnel_dyn_check tells them apart: -O check answers after a
+# refusal and is refused by a dead socket, in ~5 ms, and it runs only on this failure path --
+# one more fork per cooldown for a port that really is busy.
 tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
     [ -S "$TUNNEL_CTL" ] || return 2
     run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O forward \
@@ -1498,21 +1504,35 @@ tunnel_dyn_forward() {                # tunnel_dyn_forward PORT
         0)   return 0 ;;
         124) return 3 ;;              # run_timeout's timeout convention
     esac
-    [ -S "$TUNNEL_CTL" ] || return 2
-    return 1
+    [ -S "$TUNNEL_CTL" ] || return 2  # it went while we were asking
+    tunnel_dyn_check
+    case "$?" in
+        0) return 1 ;;                # it answered, so the refusal was the host port's
+        1) return 3 ;;                # it is there and answers nothing (#266)
+    esac
+    return 2
 }
 
 # IS THE MASTER ANSWERING AT ALL (#266)? Asked only while the supervisor believes it is not, so a
 # healthy session never pays for it -- and it is the only way out of master-unresponsive. The
 # shape is tunnel_dyn_forward's, for its reasons: </dev/null for the watcher's stream, a
-# five-second backstop, and a second [ -S ] that tells a master that went from one that is mute.
-# NOT tunnel_alive, which has neither the redirect nor the ceiling.
-tunnel_dyn_check() {                  # 0 = it answered, 1 = it did not, 2 = its socket has gone
+# five-second backstop. NOT tunnel_alive, which has neither the redirect nor the ceiling.
+#
+# MUTE IS A TIMEOUT; ANY OTHER FAILURE IS GONE (#339). A stopped master still has a listener, so
+# the connect lands and the request hangs until run_timeout's ceiling -- that is 1. A master killed
+# with SIGKILL leaves its socket file with nothing behind it, and the connect is refused at once --
+# measured against OpenSSH 10.2, rc 255 in ~4 ms -- which used to read as mute too, and a master
+# nobody was running then sat in master-unresponsive asking itself every tick instead of being
+# found gone. With -F none on every control call, a fast failure cannot be the student's own ssh
+# config speaking.
+tunnel_dyn_check() {                  # 0 = it answered, 1 = it is there and mute, 2 = it has gone
     [ -S "$TUNNEL_CTL" ] || return 2
-    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" </dev/null \
-        && return 0
-    [ -S "$TUNNEL_CTL" ] || return 2
-    return 1
+    run_timeout 5 ssh -F none -S "$TUNNEL_CTL" -O check "$TUNNEL_USER@$TUNNEL_HOST" </dev/null
+    case "$?" in
+        0)   return 0 ;;
+        124) return 1 ;;              # run_timeout's timeout convention
+    esac
+    return 2
 }
 
 tunnel_dyn_cancel() {                 # tunnel_dyn_cancel PORT
@@ -1549,7 +1569,8 @@ tunnel_dyn_classify() {               # tunnel_dyn_classify PORT CLASS -> DYN_WH
 #
 # TICKS, NOT SECONDS, for everything counted here: no `date` fork and no dependence on a clock.
 # The single exception is the frame-arrival timeout, and it has to be -- ticks are DEFINED by
-# frames arriving, so "frames stopped" is the one thing that cannot be measured in them.
+# frames arriving, so "frames stopped" is the one thing that cannot be measured in them. The
+# resync after a timed-out read (#340) is bounded in LINES, not seconds, for the same reason.
 #
 # SUP_BUSY IS THE ONLY RETRYABLE OUTCOME and therefore the only one that needs state. Every
 # refusal reason is a pure function of the frame plus the floor, so it is recomputed each tick and
@@ -1575,10 +1596,11 @@ sup_log() { printf '%s\n' "$*" >&2; }
 #
 # NO RATE LIMIT ON THE RETRY, deliberately. A failure costs one exec a frame while it lasts, which
 # for one that never clears is the per-tick figure above. An exec that HANGS -- what pm's ceiling
-# is for, after a Mac wakes -- would stall this loop for pmq's 20s every frame; that has not been
-# measured with this podman (#157). If it is, note that frames queued behind a stall are read
-# instantly afterwards, so a backoff counted in ticks must be well over 20 of them or forwarding
-# falls further behind.
+# is for, reported after a Mac wakes -- would stall this loop for pmq's 20s every frame. Not seen
+# (#157): overnight sleeps on Apple Silicon (libkrun, podman 6.0.2: 135 wakes, every exec back in
+# under 4s) and Intel (applehv, 5.8.7) hung nothing. If one is ever seen, note that frames queued
+# behind a stall are read instantly afterwards, so a backoff counted in ticks must be well over 20
+# of them or forwarding falls further behind.
 SUP_PUBLISHED=''; SUP_PUBFAIL=''
 sup_publish() {                       # sup_publish REFUSED_LIST
     local up refused sig e rc why
@@ -1606,16 +1628,81 @@ sup_publish() {                       # sup_publish REFUSED_LIST
     return 0
 }
 
-# The master's control socket has gone, and every forward it held went with it (#338). Called
-# from sup_tick, whose `gone` it sets; logged on the way INTO the state, not once a tick.
-sup_gone() {
+# The master has gone, and every forward it held went with it (#338, #339). Called from sup_tick,
+# whose `gone` it sets; logged on the way INTO the state, not once a tick, with the evidence.
+sup_gone() {                          # sup_gone WHY
     [ "$SUP_STATE" = master-unresponsive ] \
-        || sup_log "the ssh master's control socket has gone; nothing is forwarded until it is replaced"
+        || sup_log "the ssh master has gone ($1); nothing is forwarded until it is replaced"
     gone=1; SUP_STATE=master-unresponsive; SUP_UP=' '; SUP_BUSY=' '; SUP_GONE=' '
 }
 
+# THE PIDFILE'S MASTER HAS DIED, which the socket cannot say when the death was SIGKILL -- the OOM
+# killer, a stray `kill -9` -- because nothing was left to remove it (#339). kill -0 is a builtin,
+# so asking costs nothing on every tick. A pid it cannot vouch for answers "not known to be dead":
+# no pidfile, a stranger's reused pid and a zombie all read as alive, which is the blindness this
+# had before rather than a wrong answer. NOT confirmed with -O check: the pid is the master's own
+# answer to one (tunnel_record_pid), and nothing has been seen to write any other.
+sup_master_died() {
+    case "$SUP_MASTER" in ''|0|*[!0-9]*) return 1 ;; esac
+    ! kill -0 "$SUP_MASTER" 2>/dev/null
+}
+
+# A MASTER THAT HAS DIED IS PUT BACK BY THE SUPERVISOR THAT NOTICED (#343), so a student whose
+# master was killed or gave up gets their ports back without being told to run anything. NOT FOR
+# SLEEP, which was the reason first given: overnight sleeps on Apple Silicon and Intel never killed
+# a master (.private/README.md has the measurement). Called
+# by sup_tick only when sup_master_died -- the death PROVED by the pidfile's pid -- and never on the
+# two things that merely look like one: a socket that is missing (a TMPDIR cleaner, a hand) and a
+# refused -O check with no pid to confirm it. The master can be alive through the first, and the
+# second is one ssh's word with nothing to identify the master by; either way tunnel_start's rm -f
+# would strand a live master under a deleted socket, holding host ports the new master's forwards
+# would find busy. Every death measured meets the proof: TERM, `-O exit` and ServerAlive remove the socket
+# and exit; SIGKILL exits and leaves it.
+#
+# ONE ATTEMPT PER DEATH, and that is the start's own doing rather than a counter's. tunnel_start
+# removes the pidfile first and writes one only once the new master answers, so a start that fails
+# leaves no pid, and with no pid sup_master_died cannot fire again. The state stays
+# master-unresponsive, and --show's advice to run --reset-tunnel is then the right advice. Nothing
+# has shown a first attempt failing for a reason a second would not, so there is no retry.
+#
+# A MASTER THAT ANSWERS AFTER ALL means the pidfile was what was wrong. It is rewritten from the
+# master's own answer -- rm first, because tunnel_record_pid writes nothing when it cannot learn a
+# pid and the wrong one would stay -- and the next tick's SUP_MASTER change re-forwards everything
+# to it, which a master that already holds a forward accepts and keeps once (measured).
+#
+# THE DEAD MASTER'S LOG IS COPIED IN FIRST: tunnel_start truncates it, and it is the only record of
+# why the master died -- a transport that stopped answering, a VM that went away.
+#
+# NO tunnel_keys. It can die(), which would end this process, and the keys live in $CONFIG and were
+# made when the session began.
+#
+# </dev/null ON BOTH CALLS, for tunnel_dyn_forward's reason: this process's stdin IS the watcher's
+# stream, and tunnel_alive's ssh -- and the one inside tunnel_start -- would otherwise inherit it
+# and eat frames. tunnel_start's own `ssh -f` already has one; the -O check after it does not.
+#
+# ONE WRITER AT A TIME is what makes tunnel_start safe to run here. Every other path that starts or
+# stops a master stops this process first -- tunnel_down (teardown, --stop, --rebuild, check_clock),
+# --reset-tunnel, and ensure_tunnel when it finds no master to reuse -- so this is the only thing
+# that can start one while it runs. The window that leaves: a writer that stops the supervisor while
+# this restart's `ssh -f` is still in flight lets that ssh finish after the writer's own rm, and a
+# master with no forwards -- holding no host port -- is left behind. Not closed; see #343.
+sup_restart_master() {
+    if tunnel_alive </dev/null; then
+        rm -f "$TUNNEL_PID"; tunnel_record_pid
+        sup_log "the ssh master answered after all; its pidfile has been rewritten"
+        return 0
+    fi
+    [ -s "$TUNNEL_LOG" ] && sup_log "the dead ssh master's last words: $(tail -5 "$TUNNEL_LOG")"
+    if tunnel_start </dev/null; then
+        sup_log "the ssh master has been restarted"
+    else
+        sup_log "the ssh master could not be restarted; run cs193v --reset-tunnel"
+    fi
+    return 0
+}
+
 sup_tick() {                          # sup_tick "port:class port:class ..."
-    local frame="$1" e port cls now seen refused='' out c n gone
+    local frame="$1" e port cls now seen refused='' out c n gone died
     # RE-READ THE MASTER EVERY TICK. One builtin file read, and it is the whole self-heal: a
     # --reset-tunnel in another window replaces the master, every forward it held died with it,
     # but the container's ports are all still listening so the watcher reports no change. Dropping
@@ -1631,19 +1718,27 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     fi
 
     # A MASTER THAT HAS GONE TAKES ITS FORWARDS WITH IT (#338). One that exits cleanly --
-    # ServerAlive after a sleep, `-O exit`, a TERM -- deletes its control socket, and nothing
+    # ServerAlive giving up, `-O exit`, a TERM -- deletes its control socket, and nothing
     # below used to notice: ports already in SUP_UP are skipped, so the state file went on saying
     # healthy with every one of them up, and `cs193v-portwatch --show` told a student (and the
     # agent agent-notes.md sends to it) that ports nobody was carrying were reachable. The SOCKET
     # rather than the pidfile, because tunnel_record_pid may leave no pidfile at all. The frame is
     # still read, so a refusal's advice is still published, and a port that would have been
-    # forwarded costs one builtin test: tunnel_dyn_forward answers 2 before running any ssh. It
-    # comes back through the -O check below, once --reset-tunnel has made a new socket -- with or
-    # without a new pidfile.
+    # forwarded costs nothing: the loop below asks no master once `gone` is set. It comes back
+    # once a new master has made a new socket -- the restart at the end of this tick (#343), or
+    # --reset-tunnel -- through the pidfile change above or, with no pidfile, the -O check below.
     #
-    # NOT SEEN HERE: a master killed with SIGKILL, which cannot remove its socket (#339).
-    gone=''
-    [ -S "$TUNNEL_CTL" ] || sup_gone
+    # A MASTER KILLED WITH SIGKILL LEAVES ITS SOCKET BEHIND (#339), so the socket cannot be the
+    # only witness: sup_master_died asks about the pidfile's pid. With no pidfile -- which
+    # tunnel_record_pid can leave -- that death is still found, by the first -O check or forward
+    # that asks the dead socket and is refused (tunnel_dyn_check's 2).
+    gone=''; died=''
+    sup_master_died && died=1
+    if [ ! -S "$TUNNEL_CTL" ]; then
+        sup_gone "its control socket has gone"
+    elif [ -n "$died" ]; then
+        sup_gone "pid $SUP_MASTER is no longer running"
+    fi
 
     # LEAVING master-unresponsive TAKES AN ANSWER (#266). A master that keeps its socket and
     # answers nothing -- stopped, or anything else that holds a request past run_timeout -- shows
@@ -1656,7 +1751,7 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
         tunnel_dyn_check
         case "$?" in
             0) SUP_STATE=healthy ;;
-            2) sup_gone ;;
+            2) sup_gone "nothing answers its control socket" ;;
             *) SUP_STUCK=1 ;;
         esac
     fi
@@ -1685,13 +1780,17 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
             refused="$refused $port:capped"; continue
         fi
         # STUCK SKIPS ONLY THE ASK. Everything above still ran, so every refusal in the frame is
-        # still published -- the tick goes on to the end rather than giving up on it.
+        # still published -- the tick goes on to the end rather than giving up on it. GONE DOES TOO:
+        # a missing socket made that free -- tunnel_dyn_forward answers 2 before forking -- but a
+        # dead one left behind (#339) does not, and every port would cost a forward and a check,
+        # every tick, to learn it again.
         [ -n "$SUP_STUCK" ] && continue
+        [ -n "$gone" ] && continue
         tunnel_dyn_forward "$port"
         case "$?" in
             0) SUP_UP="$SUP_UP$port " ;;
             1) SUP_BUSY="$SUP_BUSY$port:$TUNNEL_SUP_COOLDOWN "; refused="$refused $port:busy" ;;
-            2) sup_gone ;;                                   # it went while we asked
+            2) sup_gone "a forward found nothing answering its control socket" ;;
             3) SUP_STUCK=1; SUP_STATE=master-unresponsive
                sup_log "master not answering; not attempting more" ;;
         esac
@@ -1726,6 +1825,9 @@ sup_tick() {                          # sup_tick "port:class port:class ..."
     fi
 
     sup_publish "$refused"
+    # AFTER THE PUBLISH, so the state file says the master has gone for as long as putting it back
+    # takes, and a restart that fails leaves that true rather than a healthy word from before.
+    [ -n "$died" ] && sup_restart_master
     return 0
 }
 
@@ -1738,6 +1840,15 @@ sup_loop() {
     # of silence -- thirty missed frames -- and only a deadlocked watcher can produce that, since
     # a dead one closes the pipe and a lid close contributes at most ONE timeout (a frozen read
     # returns once; the next call starts a fresh timer on a woken machine).
+    #
+    # BUT THAT ONE TIMEOUT IS NOT HARMLESS, and #340 is how it was found out. On bash 5.2 and later
+    # `read -t` checks its deadline against the wall clock after every byte, and a WSL resume
+    # steps that clock forward, so the first line after a wake loses its front: `EGIN 1` was a
+    # protocol violation that ended the supervisor, and `8343:lo` from `28343:lo` was a wrong
+    # port. So every timeout now puts the parser into a resync, which drops the frame in progress
+    # and skips to the next one (cs193v-ui.sh, dynports_lost). Only an ACCEPTED line resets the
+    # count -- a skipped one is no evidence the watcher is well -- so thirty seconds is a floor:
+    # six consecutive timeouts with nothing accepted between them.
     #
     # "ONLY A DEADLOCKED WATCHER" WAS NOT TRUE, and #337 is how it was found out. A watcher that is
     # merely SLOW is silent for as long as one scan takes, and the scan used to cost the square of
@@ -1752,7 +1863,8 @@ sup_loop() {
     # was unreachable on every Mac, this tolerance was dead code, and the first five-second gap
     # in the frames was read as the watcher having gone away: one laptop waking ended dynamic
     # port forwarding for the rest of the session, silently, with nothing to restart it.
-    # cs193v-ui.sh carries the measurement and the reason the read lives beside the gate.
+    # cs193v-ui.sh carries the measurement and the reason the read lives beside the gate. Its
+    # timeout answer has also already put the parser into its resync.
     local ready=''
     while :; do
         dynports_read "$TUNNEL_SUP_SILENCE"
@@ -1767,17 +1879,28 @@ sup_loop() {
                continue ;;
             2) sup_log "the watcher's stream ended"; return 0 ;;
         esac
-        SUP_SILENT=0
         dynports_line "$DYNPORTS_LINE"
         case "$?" in
-            0) [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
-            1) sup_tick "$DYNPORTS_FRAME" ;;
+            0) SUP_SILENT=0; [ -n "$ready" ] || { ready=1; : > "$TUNNEL_SUP_READY"; } ;;
+            1) SUP_SILENT=0; sup_tick "$DYNPORTS_FRAME" ;;
             2) SUP_STATE=broken
                sup_log "protocol violation: $DYNPORTS_FATAL"
                sup_publish ''
                return 1 ;;
+            # SKIPPED WHILE RESYNCHRONISING (#340), and deliberately NOT a reset of SUP_SILENT: a line
+            # the resync skips is no evidence the watcher is well, and counting it would let a
+            # watcher that alternates junk with silences live for ever.
+            3) ;;
         esac
         [ -n "${DYNPORTS_WARN:-}" ] && { sup_log "watcher warning: $DYNPORTS_WARN"; DYNPORTS_WARN=''; }
+        # A RESYNC THAT SKIPPED NOTHING IS A CLEAN TIMEOUT and says nothing, so a `skipped` line in
+        # the log always means a read really did time out part-way through a line or a frame.
+        # `case`, not `-gt`, to keep this side free of arithmetic on the parser's output.
+        case "${DYNPORTS_RESYNCED:-}" in
+            ''|0) ;;
+            *) sup_log "a read timed out mid-stream; skipped $DYNPORTS_RESYNCED line(s) and resumed at the next frame" ;;
+        esac
+        DYNPORTS_RESYNCED=''
     done
 }
 
@@ -1834,7 +1957,11 @@ tunnel_sup_start() {
     # and so never reaches tunnel_sup_stop; without this, every reset would leave one behind and
     # start another beside it. Measured: four accumulated across one testing session.
     pmq exec "$NAME" pkill -f "cs193v-portwatch --watch" || true
-    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY" "$TUNNEL_SUP_LOG"
+    rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY"
+    # THE LAST SUPERVISOR'S LOG IS KEPT, ONE DEEP, rather than deleted (#252). --reset-tunnel now
+    # always comes through here (it stops the supervisor first, #343), so deleting would destroy
+    # the record of why forwarding stopped at the moment a student is told to reset it.
+    mv -f "$TUNNEL_SUP_LOG" "$TUNNEL_SUP_LOG.prev" 2>/dev/null || true
     nohup "$SELF" --dev-supervise >>"$TUNNEL_SUP_LOG" 2>&1 </dev/null &
     i=0
     while [ "$i" -lt 50 ]; do
@@ -1881,6 +2008,10 @@ tunnel_sup_stop() {
 
 ensure_tunnel() {
     tunnel_alive && { tunnel_sup_start || true; return 0; }
+    # A SUPERVISOR WITH NO MASTER TO REUSE may be restarting one itself (#343) -- one can outlive
+    # its launch, after a force-quit or a --reset-tunnel with no session open -- so it is stopped
+    # before this starts another. tunnel_sup_start below brings it back.
+    tunnel_sup_alive && tunnel_sup_stop
     tunnel_keys
     tunnel_start || return 1
     tunnel_sup_start || true
@@ -2820,13 +2951,15 @@ check_clock() {
     printf '\n'; msg prompt.clock-drift SKEW="$skew"
     if confirm "$(msg opt.leave-clock)" "$(msg opt.restart-machine)"; then
         info "$(msg status.restarting-machine)"
+        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
+        # into a VM that is about to go away. Without the ensure_tunnel below, the clock fix
+        # would silently cost the student every forwarded port, and the next symptom would look
+        # unrelated to the prompt they just accepted. DOWN BEFORE THE STOP, not after it (#343):
+        # the supervisor restarts a master that dies, and left running through the stop it would
+        # try to start one into the VM on its way out.
+        tunnel_down
         run_timeout 120 podman machine stop || true
         run_timeout 180 podman machine start || warn "$(msg warn.machine-restart-failed)"
-        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
-        # into a VM that just went away. Without this, the clock fix would silently cost the
-        # student every forwarded port, and the next symptom would look unrelated to the
-        # prompt they just accepted.
-        tunnel_down
         ensure_tunnel || true
     fi
 }
@@ -2948,6 +3081,12 @@ verb_stop() {
 verb_reset_tunnel() {
     preflight; load_args; require_image
     info "$(msg status.tunnel-resetting)"
+
+    # 0. THE SUPERVISOR FIRST (#343). It restarts a master that dies, so left running it would race
+    #    the kill and rm below -- each side starting a master, one stranded under a socket the other
+    #    deleted. ensure_tunnel starts it again at the end. GUARDED, because tunnel_sup_stop always
+    #    pays a podman exec, and a hung podman is one of the things that sends people to this verb.
+    tunnel_sup_alive && tunnel_sup_stop
 
     # 1. The clean way first, but TIME-BOXED. A wedged ssh may never answer -O exit, and
     #    waiting forever for it is precisely the failure this verb exists to break out of.

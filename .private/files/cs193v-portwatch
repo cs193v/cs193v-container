@@ -322,6 +322,11 @@ pw_once() { pw_scan_now; printf '%s\n' "$PW_SET"; }
 # EVERY WRITE IS `|| exit 0`. When the host end goes away the write fails, or SIGPIPE ends us --
 # either is a clean exit, and because there is a write every tick it happens within one interval.
 # That is what makes killing the supervisor enough to take this down too.
+#
+# ONE LINE PER CALL, AND THE HOST RESYNCHRONISES ON ITS FIRST WORD. After a read that timed out the
+# supervisor skips to the next line beginning BEGIN, WARN or ERR (cs193v-ui.sh, dynports_line,
+# #340). So none of those words may appear in an emitted line except at its start, and a WARN is
+# only ever emitted between frames. 10-static.sh pins both.
 pw_emit() { printf '%s\n' "$1" || exit 0; }
 
 # THE TICK TIMER IS A FIFO, NOT `sleep`. Measured: a sleep fork is 4.9ms against 0.2ms for a

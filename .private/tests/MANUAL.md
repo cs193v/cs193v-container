@@ -1508,13 +1508,16 @@ podman **self-corrected** on resume — if it does, the check may be unnecessary
 Then check `gvproxy` CPU: there are reports of ~400% after sleep (`podman#27279`).
 
 **AND THE PORT SUPERVISOR, WHICH THIS IS THE ONLY PLACE TO TEST.** It calls `read -t 5` on the
-watcher's stream and treats **six consecutive timeouts** as a fatal protocol violation, on the
+watcher's stream and treats **six consecutive timeouts** as the watcher having stopped, on the
 reasoning that a timeout is something a *running* process generates — so an hour asleep should
 produce at most one, not twelve hundred. That reasoning rests on an assumption about bash that
 only a real sleeping laptop can settle, and a Mac is the case that matters because the podman
-machine VM's resume behaviour is the variable:
+machine VM's resume behaviour is the variable. Record which bash the launcher runs under, in the
+shell that starts it — `cs193v` is `#!/usr/bin/env bash`, so Homebrew's bash wins if it is first
+on `PATH`:
 
 ```sh
+command -v bash; bash --version | head -1           # which bash the launcher will get
 podman exec cs193v cs193v-portwatch --show    # must work, not report a dead supervisor
 ./cs193v doctor | grep dynamic                # must not say "not running"
 podman exec -d cs193v python3 -m http.server 21500 --bind 127.0.0.1; sleep 5
@@ -1522,7 +1525,11 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:21500/    # expect 200
 ```
 *Expect:* no spurious `broken` state after the wake, and a port bound after it still becomes
 reachable. If it did fire, the supervisor's log (`cs193v --dev-tunnel` names it as `suplog`) says
-so, and the threshold in `TUNNEL_SUP_SILENCE_MAX` is what needs raising.
+so, and the threshold in `TUNNEL_SUP_SILENCE_MAX` is what needs raising. The log must also show
+no `protocol violation` (#340). On bash 5.2 or later — Homebrew's, or any WSL distro's — expect
+one `a read timed out mid-stream; skipped N line(s)` line per wake: those versions check
+`read -t`'s deadline against the wall clock, a wake steps it, and the first line after it is torn
+and skipped. Under `/bin/bash` 3.2, expect none.
 
 **A HALF OF THIS WAS NOT A QUESTION FOR A LAPTOP, AND WAS ANSWERED WRONG FOR AS LONG AS IT WENT
 UNASKED (#244).** Until it was fixed, `sup_loop` decided whether a gap was a timeout or a closed
