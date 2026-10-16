@@ -3083,7 +3083,7 @@ apt_piped() {                         # apt_piped [RC] -> the non-tty output
     bash "$APTDRIVE" "$APTBOX" "$APTFIX" 0 4 "${1:-0}" 2>&1
 }
 apt_tty() {                           # apt_tty [DELAY] -> the raw pty transcript
-    printf '' | do_script 60 "bash $(sh_quote "$APTDRIVE") $(sh_quote "$APTBOX") $(sh_quote "$APTFIX") $(sh_quote "${1:-0.05}") 4 0" 2>&1
+    printf '' | do_script 60 "bash $(sh_quote "$APTDRIVE" "$APTBOX" "$APTFIX" "${1:-0.05}") 4 0" 2>&1
 }
 
 # ─── the anchors, on the piped form  ───────────────────────────────────────────
@@ -3190,7 +3190,7 @@ assert_says "aptraw:the-log-is-truncated-too" "LOGLINES=$aptexpect" "$aptraw"
 # ...and on a terminal there is no block at all, which is the assertion that would catch the
 # guard being dropped from setup_meter_start alone.
 aptrawtty="$(printf '' | do_script 60 \
-             "env APT_RAW=1 bash $(sh_quote "$APTDRIVE") $(sh_quote "$APTBOX") $(sh_quote "$APTFIX") 0.02 4 0" 2>&1)"
+             "env APT_RAW=1 bash $(sh_quote "$APTDRIVE" "$APTBOX" "$APTFIX") 0.02 4 0" 2>&1)"
 assert_not_contains "aptraw:no-box-on-a-terminal-either" "┏━━━━" "$aptrawtty"
 assert_contains "aptraw:the-raw-run-really-ran" "Unpacking podman" "$aptrawtty"
 

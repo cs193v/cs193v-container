@@ -76,7 +76,6 @@ catalogue_keys "$PRIVATE/messages.txt" | LC_ALL=C sort -u > "$TMP/defined"
 # orphans, and an empty used side has nothing missing. So a failed read puts $CHECKER_DIED on its
 # side instead. The other side never holds it, so comm reports it as an orphan or as missing, in
 # the check that depended on the read.
-died_in() { printf '%s\n' "$1" | grep -F "$CHECKER_DIED"; }   # died_in VALUE -> its sentinel lines
 calls_in() {                          # calls_in PATTERN FILE... -> last word of each match, sorted
     local pat="$1" src
     shift
@@ -100,7 +99,7 @@ assert_eq "keys:none-missing" "" "$(printf '%s' "$missing" | sed 's/ *$//')"
 dup_keys() {
     local keys
     keys="$(catalogue_keys "$1")"
-    case "$keys" in *"$CHECKER_DIED"*) printf '%s' "$keys"; return 0 ;; esac
+    case "$keys" in *"$CHECKER_DIED"*) died_in "$keys"; return 0 ;; esac
     printf '%s\n' "$keys" | LC_ALL=C sort | uniq -d | do_tr '\n' ' ' | sed 's/ *$//'
 }
 assert_eq "keys:no-duplicates" "" "$(dup_keys "$PRIVATE/messages.txt")"

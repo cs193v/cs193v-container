@@ -145,8 +145,10 @@ want="$want ./.private/files ./.private/files/ui.sh ./cs193v ./projects ./projec
 # .gitattributes and .gitignore are absent from the copy as well, which is worth noticing —
 # they are export-ignored in the fixture exactly as they are in the real repo, so this line
 # also proves a rule can hide the file that declares it.
-got="$( cd "$D" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
-assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$got"
+tree_of() {                           # tree_of DIR -> its relative paths, sorted, on one line
+    ( cd "$1" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )
+}
+assert_eq "copy:is-a-fresh-checkout-and-nothing-more" "$want" "$(tree_of "$D")"
 
 # ...AND THE SAME TREE FROM A CHECKOUT WHOSE PATH IS HOSTILE (#436). export_tree lends git the
 # checkout's object store as an alternate, and handing it over in GIT_ALTERNATE_OBJECT_DIRECTORIES
@@ -165,7 +167,7 @@ git -C "$HFIX" update-index -q --refresh
 hfix_export() { ( REPO="$HFIX"; export_tree "$1" ); }
 assert_ok "copy:succeeds-from-a-hostile-checkout-path" hfix_export "$WORK/copy-hostile"
 assert_eq "copy:a-hostile-checkout-path-ships-the-same-tree" "$want" \
-          "$( cd "$WORK/copy-hostile" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort | do_tr '\n' ' ' | sed 's/ *$//' )"
+          "$(tree_of "$WORK/copy-hostile")"
 
 # THE SIZE, not just the names. The listing above is the leak we know about; this is the one that
 # catches whatever lands in the course directory next. 8 MB of payload in the fixture against a
@@ -1568,8 +1570,8 @@ PTYDRIVE="$TESTS_DIR/lib/ptydrive.py"
 pd_step() {                           # pd_step KIND NAME NEEDLES KEYS
     printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
 }
-pd_run() {                            # pd_run REPORT CMD  <script on stdin  -> transcript
-    CS193V_DRIVE_REPORT="$1" timeout 30 python3 "$PTYDRIVE" "$2" 2>&1 | do_tr -d '\r'
+pd_run() {                            # pd_run REPORT FIXTURE  <steps on stdin  -> transcript
+    CS193V_DRIVE_REPORT="$1" timeout 30 python3 "$PTYDRIVE" "bash $(sh_quote "$2")" 2>&1 | do_tr -d '\r'
 }
 
 # EVERY `line` FIXTURE SHOWS THE CURSOR, and that is a property of the driver worth stating here
@@ -1591,7 +1593,7 @@ IFS= read -rsn1 k
 printf '\nA=[%s] K=[%s]\n' "\$a" "\$k"
 CHILD
 pd_out="$( { pd_step line one 'FIRST SCREEN' 'hello\n'
-             pd_step menu two 'SECOND SCREEN' 'X'; } | pd_run "$WORK/pd-r1" "bash $(sh_quote "$WORK/pd-two.sh")")"
+             pd_step menu two 'SECOND SCREEN' 'X'; } | pd_run "$WORK/pd-r1" "$WORK/pd-two.sh")"
 assert_says "ptydrive:each-step-waits-for-its-own-screen" "A=[hello] K=[X]" "$pd_out"
 assert_eq "ptydrive:a-clean-run-reports-no-failure" "0" \
           "$(grep -c '^FAIL' "$WORK/pd-r1" || true)"
@@ -1608,7 +1610,7 @@ IFS= read -r pw
 stty echo
 printf '\nPW=[%s]\n' "$pw"
 CHILD
-pd_out="$(pd_step password pw 'PASSWORD SCREEN' 'hunter2\n' | pd_run "$WORK/pd-r-pw" "bash $(sh_quote "$WORK/pd-pw.sh")")"
+pd_out="$(pd_step password pw 'PASSWORD SCREEN' 'hunter2\n' | pd_run "$WORK/pd-r-pw" "$WORK/pd-pw.sh")"
 assert_says "ptydrive:answers-a-canonical-echo-off-read" "PW=[hunter2]" "$pd_out"
 assert_eq "ptydrive:the-password-kind-reports-no-failure" "0" \
           "$(grep -c '^FAIL' "$WORK/pd-r-pw" || true)"
@@ -1618,7 +1620,7 @@ assert_not_contains "ptydrive:does-not-echo-the-password" "hunter2
 " "$(printf '%s' "$pd_out" | sed 's/PW=\[hunter2\]//')"
 # THE NEGATIVE THAT KEEPS THE TWO KINDS APART. A `secret` step wants BOTH off; this child leaves
 # ICANON set, so it must refuse rather than type into it.
-pd_out="$(pd_step secret pw 'PASSWORD SCREEN' 'github_pat_NOTTHIS\n' | pd_run "$WORK/pd-r-pw2" "bash $(sh_quote "$WORK/pd-pw.sh")")"
+pd_out="$(pd_step secret pw 'PASSWORD SCREEN' 'github_pat_NOTTHIS\n' | pd_run "$WORK/pd-r-pw2" "$WORK/pd-pw.sh")"
 assert_not_contains "ptydrive:a-secret-step-refuses-a-canonical-read" "github_pat_NOTTHIS" "$pd_out"
 assert_contains "ptydrive:says-which-read-it-was-never-at" "never at a secret read" \
                 "$(cat "$WORK/pd-r-pw2")"
@@ -1632,7 +1634,7 @@ IFS= read -r a
 printf '\nGOT=[%s]\n' "\$a"
 CHILD
 pd_out="$(pd_step secret tok 'TOKEN SCREEN' 'github_pat_SECRETVALUE\n' \
-          | pd_run "$WORK/pd-r2" "bash $(sh_quote "$WORK/pd-echo.sh")")"
+          | pd_run "$WORK/pd-r2" "$WORK/pd-echo.sh")"
 # THE GUARD, and it is not decoration: the assertion below is a NEGATIVE one, so it passes on an
 # empty transcript and on a python traceback alike -- which is #79 exactly, and is what this very
 # group looked like before ptydrive.py existed. Prove the child ran before believing the secret
@@ -1652,7 +1654,7 @@ printf '\ndone\n'
 CHILD
 pd_out="$(pd_step line ghost 'THIS SCREEN DOES NOT EXIST' 'x\n' \
           | CS193V_DRIVE_SETTLE_SECS=0.5 CS193V_DRIVE_STEP_SECS=6 \
-            pd_run "$WORK/pd-r3" "bash $(sh_quote "$WORK/pd-other.sh")")"
+            pd_run "$WORK/pd-r3" "$WORK/pd-other.sh")"
 assert_contains "ptydrive:names-the-step-that-diverged" "ghost" "$(cat "$WORK/pd-r3")"
 assert_contains "ptydrive:shows-the-screen-the-child-is-parked-on" \
                 "A DIFFERENT SCREEN" "$(cat "$WORK/pd-r3")"
@@ -1679,7 +1681,7 @@ assert_exit "ptydrive:a-divergence-exits-90" 90 pd_diverge
 # 35-setup-git-shim.sh, counted by its 80-column row lint, and searched for the token. A malformed
 # script is the case that used to break this rule, by raising SystemExit.
 pd_out="$(printf 'line\tonly-three-fields\tNEEDLE\n' \
-          | pd_run "$WORK/pd-r4" "bash $(sh_quote "$WORK/pd-two.sh")")"
+          | pd_run "$WORK/pd-r4" "$WORK/pd-two.sh")"
 assert_eq "ptydrive:a-malformed-script-says-nothing-on-the-transcript" "" "$pd_out"
 assert_contains "ptydrive:a-malformed-script-is-reported-in-the-report-file" \
                 "want 4" "$(cat "$WORK/pd-r4")"
@@ -1705,7 +1707,7 @@ IFS= read -r b
 printf '\nK=[%s] B=[%s]\n' "\$k" "\$b"
 CHILD
 { pd_step menu oversend 'KEY SCREEN' 'X\ntwo\n'
-  pd_step line later 'LINE SCREEN' 'z\n'; } | pd_run "$WORK/pd-r6" "bash $(sh_quote "$WORK/pd-loss.sh")" >/dev/null
+  pd_step line later 'LINE SCREEN' 'z\n'; } | pd_run "$WORK/pd-r6" "$WORK/pd-loss.sh" >/dev/null
 assert_contains "ptydrive:reports-bytes-stranded-by-a-tty-mode-change" \
                 "LOST" "$(cat "$WORK/pd-r6")"
 assert_contains "ptydrive:counts-the-bytes-that-were-stranded" \
@@ -1720,7 +1722,7 @@ assert_eq "ptydrive:a-loss-names-the-step-that-sent-the-bytes" "oversend LOST" \
 # calls every clean run a loss. An earlier draft did exactly that. Same child, driven one step per
 # read, nothing stranded, nothing reported.
 { pd_step menu k 'KEY SCREEN' 'X'
-  pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "bash $(sh_quote "$WORK/pd-loss.sh")" >/dev/null
+  pd_step line l 'LINE SCREEN' 'two\n'; } | pd_run "$WORK/pd-r7" "$WORK/pd-loss.sh" >/dev/null
 assert_eq "ptydrive:a-clean-read-restore-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r7" || true)"
 
@@ -1767,7 +1769,7 @@ printf '\nB=[%s]\n' "\$b"
 CHILD
 pd_out="$({ pd_step line inflight 'KEY SCREEN' '\n'
             pd_step line later 'LINE SCREEN' 'two\n'; } \
-          | CS193V_DRIVE_STRAND_SECS=1 pd_run "$WORK/pd-r8" "bash $(sh_quote "$WORK/pd-inflight.sh")")"
+          | CS193V_DRIVE_STRAND_SECS=1 pd_run "$WORK/pd-r8" "$WORK/pd-inflight.sh")"
 assert_says "ptydrive:a-keystroke-in-flight-still-reaches-the-read" "B=[two]" "$pd_out"
 assert_eq "ptydrive:delivery-in-flight-is-not-a-loss" "0" \
           "$(grep -c 'LOST' "$WORK/pd-r8" || true)"
@@ -1782,7 +1784,7 @@ IFS= read -r a
 printf '\nA=[%s]\n' "\$a"
 CHILD
 assert_says "ptydrive:really-waits-rather-than-sleeping" "A=[typed]" \
-            "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "bash $(sh_quote "$WORK/pd-slow.sh")")"
+            "$(pd_step line slow 'LATE SCREEN' 'typed\n' | pd_run "$WORK/pd-r5" "$WORK/pd-slow.sh")"
 
 # ─── the same rules, replayed against a child that runs where we say (#253, #447) ───
 # pd-loss ABOVE CANNOT GO RED ON DEMAND, and #253 is why that matters: it reported no LOST about
@@ -2011,7 +2013,7 @@ printf 'STUCK SCREEN '
 sleep 20
 CHILD
 pd_step menu stuck 'STUCK SCREEN' 'x' \
-    | CS193V_DRIVE_STEP_SECS=1 pd_run "$WORK/pd-r9" "bash $(sh_quote "$WORK/pd-stuck.sh")" >/dev/null
+    | CS193V_DRIVE_STEP_SECS=1 pd_run "$WORK/pd-r9" "$WORK/pd-stuck.sh" >/dev/null
 assert_contains "ptydrive:a-stuck-menu-times-out" "never at a menu read" "$(cat "$WORK/pd-r9")"
 assert_match "ptydrive:a-timeout-names-the-terminals-foreground-group" \
              "^#   the terminal's foreground process group: [0-9]+$" "$(cat "$WORK/pd-r9")"
@@ -2071,9 +2073,8 @@ cat > "$HD/probe.sh" <<'PROBE'
 printf 'PROBE-RAN extra=[%s]\n' "${HD_EXTRA-unset}"
 PROBE
 # sh_quote ITSELF, read back by the shell every door hands its string to: the worst name, a lone
-# quote, two, nothing at all, and quotes between letters.
-hd_cmd="printf '[%s]'"
-for hd_v in "$HOSTILE_NAME" "'" "''" "" "a'b'c"; do hd_cmd="$hd_cmd $(sh_quote "$hd_v")"; done
+# quote, two, nothing at all, and quotes between letters, as one call's five words.
+hd_cmd="printf '[%s]' $(sh_quote "$HOSTILE_NAME" "'" "''" "" "a'b'c")"
 assert_eq "hostile-door:sh-quote-reads-back-whole" "[$HOSTILE_NAME]['][''][][a'b'c]" \
           "$(/bin/sh -c "$hd_cmd" 2>&1)"
 hd_out="$(LAUNCHER_DIR="$HD" launcher_tty '\n' --stop "$HOSTILE_NAME" | strip_ansi)"
