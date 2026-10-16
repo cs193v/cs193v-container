@@ -137,11 +137,10 @@ launcher_rc() {                       # launcher_rc [ARGS...] -> prints rc, disc
 # says what happened.
 launcher_tty() {                      # launcher_tty KEYS [ARGS...]
     local keys="$1"; shift
-    local cmd a
+    local cmd
     # EACH WORD THROUGH sh_quote (#436): do_script's /bin/sh parses this string again, and the
     # launcher path is the checkout's own, whatever characters that holds.
-    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
+    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v" "$@")"
     # THE PTY COMES FROM lib/ptyrun.py, NOT script(1). This used to fork on
     # `script --version | grep util-linux`, and the BSD arm was wrong in a way no Linux run
     # could surface: `script -q /dev/null $cmd` unquoted word-splits $cmd and never invokes a
@@ -169,9 +168,8 @@ launcher_pty() {                      # launcher_pty [ARGS...]
 # $PTY_OUT (the transcript, which grows as it goes), $PTY_PID and $PTY_HOLDER; stop it with
 # launcher_pty_silent_stop, which must be called or the fifo's holder lives for two minutes.
 launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
-    local cmd a
-    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
+    local cmd
+    cmd="$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v" "$@")"
     PTY_FIFO="$SHIM/silent.fifo"; PTY_OUT="$SHIM/silent.out"
     rm -f "$PTY_FIFO" "$PTY_OUT"; mkfifo "$PTY_FIFO"
     : > "$PTY_OUT"
@@ -232,11 +230,10 @@ launcher_pty_silent_stop() {
 # pty never delivers EOF (see ERRORS.md B13).
 launcher_tty_repo() {                 # launcher_tty_repo KEYS [ARGS...]
     local keys="$1"; shift
-    local cmd a
+    local cmd
     # QUOTED LIKE launcher_tty's, and for its reason (#436): this one pasted $REPO in bare, so a
     # checkout with a space in its path broke every pty launch in the live and container tiers.
-    cmd="$(sh_quote "$REPO/cs193v")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
+    cmd="$(sh_quote "$REPO/cs193v" "$@")"
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
@@ -347,12 +344,10 @@ installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
 # shell re-parsing this string. See launcher_tty above and lib/ptyrun.py.
 installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     local keys="$1" script="$2"; shift 2
-    local cmd a
+    local cmd
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
-    cmd="$cmd bash $(sh_quote "$script")"
+    cmd="env $(sh_quote "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "$@") bash $(sh_quote "$script")"
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
@@ -377,12 +372,10 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
 # length (#141): the string is re-parsed by `sh -c` inside ptyrun.py.
 installer_pipe() {                    # installer_pipe KEYS SCRIPT [VAR=VALUE...]
     local keys="$1" script="$2"; shift 2
-    local cmd a
+    local cmd
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
-    cmd="$cmd bash"
+    cmd="env $(sh_quote "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "$@") bash"
     printf '%b' "$keys" | do_script 120 "cat $(sh_quote "$script") | $cmd" 2>&1
 }
 
@@ -390,13 +383,11 @@ installer_pipe() {                    # installer_pipe KEYS SCRIPT [VAR=VALUE...
 # rather than lines: a transfer stops mid-buffer, not mid-statement.
 installer_pipe_cut() {                # installer_pipe_cut BYTES SCRIPT [VAR=VALUE...] -> output
     local bytes="$1" script="$2"; shift 2
-    local cmd a
+    local cmd
     mkdir -p "$SHIM/home"
     printf '%s' "$SHIM" > "$SHIM_LAST"
-    cmd="env $(sh_quote "HOME=$SHIM/home") $(sh_quote "PATH=$SHIM:$PATH")"
-    for a in "$@"; do cmd="$cmd $(sh_quote "$a")"; done
-    cmd="$cmd bash"
-    printf '' | do_script 120 "head -c $(sh_quote "$bytes") $(sh_quote "$script") | $cmd" 2>&1
+    cmd="env $(sh_quote "HOME=$SHIM/home" "PATH=$SHIM:$PATH" "$@") bash"
+    printf '' | do_script 120 "head -c $(sh_quote "$bytes" "$script") | $cmd" 2>&1
 }
 
 # Fake `uname`, `sysctl` and `sw_vers`, which is what makes the macOS arm executable on Linux.

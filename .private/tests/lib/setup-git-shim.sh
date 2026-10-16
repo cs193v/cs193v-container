@@ -231,6 +231,16 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
     done
 }
 
+# SG_ENV IS AN ARRAY, ONE VAR=VALUE PER ELEMENT (#436). It was one space-joined string pasted into
+# the command unquoted, and its first entry is a path into the checkout -- so a checkout with a
+# space in its path handed `env` half a path as its program. sg_cmd builds the line, every word
+# through sh_quote, and a suite that wants the same line with more after it calls sg_cmd itself.
+sg_cmd() {                            # sg_cmd [VAR=VALUE...] -> the shim tier's command line
+    printf 'env %s bash %s' \
+        "$(sh_quote ${SG_ENV[@]+"${SG_ENV[@]}"} "TMPDIR=$SGSHIM" "CS193V_SGSHIM=$SGSHIM" "$@")" \
+        "$(sh_quote "$SG_SETUP_GIT")"
+}
+
 # sg_run CASE FLOW... [VAR=VALUE ...] -- the transcript in $SG_OUT, and one named result for the
 # conversation itself.
 #
@@ -245,18 +255,6 @@ sg_flow() {                           # sg_flow [VAR=VALUE]... FLOW... -> wire s
 # inside the container. Per-run VAR=VALUE extras still go to the former only, for the reason that
 # file gives: `env A=B podman exec` sets A on podman, not in the container.
 #
-# SG_ENV IS AN ARRAY, ONE VAR=VALUE PER ELEMENT (#436). It was one space-joined string pasted into
-# the command unquoted, and its first entry is a path into the checkout -- so a checkout with a
-# space in its path handed `env` half a path as its program. sg_cmd builds the line, every word
-# through sh_quote, and a suite that wants the same line with more after it calls sg_cmd itself.
-sg_cmd() {                            # sg_cmd [VAR=VALUE...] -> the shim tier's command line
-    local cmd=env a
-    for a in ${SG_ENV[@]+"${SG_ENV[@]}"} "TMPDIR=$SGSHIM" "CS193V_SGSHIM=$SGSHIM" "$@"; do
-        cmd="$cmd $(sh_quote "$a")"
-    done
-    printf '%s bash %s' "$cmd" "$(sh_quote "$SG_SETUP_GIT")"
-}
-#
 # THE ENVIRONMENT EXTRAS AND THE FLOW ARGUMENTS SHARE ONE `VAR=VALUE` SPELLING and are told apart
 # by name: a flow placeholder is one of the ones the fixture uses. Anything else is for `env`.
 #
@@ -268,13 +266,13 @@ sg_cmd() {                            # sg_cmd [VAR=VALUE...] -> the shim tier's
 { SG_DEFAULT_ID=jdoe; SG_DEFAULT_NAME='Jane Doe'; SG_DEFAULT_TOKEN=''; }
 sg_run() {                            # sg_run CASE FLOW|VAR=VAL...
     local case_name="$1"; shift
-    local a cmd flowargs='' steps rc envargs
-    envargs=()
+    local a cmd steps rc flowargs envargs
+    flowargs=() envargs=()
     for a in "$@"; do
         case "$a" in
-            ID=*|NAME=*|TOKEN=*|HALF=*) flowargs="$flowargs${A_TAB}$a" ;;
+            ID=*|NAME=*|TOKEN=*|HALF=*) flowargs+=("$a") ;;
             *=*)                        envargs+=("$a") ;;
-            *)                          flowargs="$flowargs${A_TAB}$a" ;;
+            *)                          flowargs+=("$a") ;;
         esac
     done
     if [ -n "${SG_RUN:-}" ]; then
@@ -288,13 +286,7 @@ sg_run() {                            # sg_run CASE FLOW|VAR=VAL...
     # (issue #357), and an assertion about the second must not pass on the first one's commands.
     # A case that wants both reads sg_log before the second run.
     : > "$SGSHIM/argv.log"
-    # SPLIT ON TABS ONLY, so a flow value may contain spaces (`NAME=Jane Doe`).
-    local oldifs="$IFS"
-    IFS="$A_TAB"
-    # shellcheck disable=SC2086
-    set -- $flowargs
-    IFS="$oldifs"
-    steps="$(sg_flow "$@")"
+    steps="$(sg_flow ${flowargs[@]+"${flowargs[@]}"})"
     SG_OUT="$(printf '%s\n' "$steps" \
         | CS193V_DRIVE_REPORT="$SG_REPORT" PATH="$SGSHIM:$PATH" \
           do_drive "${SG_TIMEOUT:-120}" "$cmd" 2>&1)"

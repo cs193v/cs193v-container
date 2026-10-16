@@ -59,10 +59,6 @@ require_python3
 #
 # WHICH MEANS A NEW DATA FILE DROPPED IN HERE GOES RED rather than being quietly linted as shell.
 # That is the intended trade -- data belongs in fixtures/ -- and the answer is to name it above.
-tf_nl="$(find -L "$PRIVATE/tests" -type f \
-              ! -path '*/tmux-harness/*' ! -path '*/fixtures/*' \
-              ! -name '*.md' ! -name '*.py' ! -name '*.pyc' ! -path '*/__pycache__/*' \
-         | LC_ALL=C sort)"
 # AN ARRAY, ONE PATH PER ELEMENT (#436). This was a space-joined string, so a checkout whose path
 # held a space handed shellcheck, the exec check and the waits rule two halves of every path, and a
 # tripwire here counted words to catch a FILE name with a space -- which an array holds too.
@@ -70,7 +66,10 @@ testfiles=()
 while IFS= read -r f; do
     [ -n "$f" ] && testfiles+=("$f")
 done <<TESTFILES
-$tf_nl
+$(find -L "$PRIVATE/tests" -type f \
+       ! -path '*/tmux-harness/*' ! -path '*/fixtures/*' \
+       ! -name '*.md' ! -name '*.py' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+  | LC_ALL=C sort)
 TESTFILES
 record "tests:shell-files-found" "${#testfiles[@]}"
 
@@ -202,11 +201,9 @@ assert_ok  "syntax:setup-git"         bash -n "$PRIVATE/files/setup-git"
 # would hold them to a platform they never see. ONE LIST, b32files, read by this gate and by the
 # ban, one path per element (#437), so the two cannot disagree about which files are exempt.
 b32files=()
-while IFS= read -r f; do
-    case "$f" in ''|*-guest.sh) ;; *) b32files+=("$f") ;; esac
-done <<B32FILES
-$tf_nl
-B32FILES
+for f in ${testfiles[@]+"${testfiles[@]}"}; do
+    case "$f" in *-guest.sh) ;; *) b32files+=("$f") ;; esac
+done
 unparsed='' parsed=0
 for f in ${b32files[@]+"${b32files[@]}"}; do
     parsed=$((parsed + 1))
@@ -518,6 +515,12 @@ assert_eq "sudo-gate:every-privileged-function-is-registered" "" "$ungated"
 # `^[^:]*:[0-9]+:` filter gave -- and the name is the path from $REPO, so no filter downstream can
 # match the checkout's own path either. GREP-ARG must include the pattern.
 #
+# ONE `grep -l` OVER EVERY FILE FIRST, and the per-file loop only over the files it names: most
+# files have no hit, and one grep each for a dozen lints over forty files was most of a second.
+# Exit 1 is "no hit anywhere"; 2 and above means some file could not be read, and the loop then
+# takes every file so it can name which. Not under --strip-comments, where the stripped text can
+# match a line the raw file does not.
+#
 #   lint_grep [--skip-comments|--strip-comments] GREP-ARG... -- FILE...  -> NAME:N:LINE per hit
 lint_grep() {
     local mode='' f rc out ga
@@ -526,6 +529,16 @@ lint_grep() {
     while [ "$#" -gt 0 ] && [ "$1" != -- ]; do ga+=("$1"); shift; done
     [ "$#" -gt 0 ] && shift
     if [ "$#" -eq 0 ]; then printf '%s (lint_grep was handed no files)\n' "$CHECKER_DIED"; return 0; fi
+    if [ "$mode" != --strip-comments ]; then
+        out="$(grep -ls ${ga[@]+"${ga[@]}"} -- "$@" </dev/null)"; rc=$?
+        [ "$rc" -eq 1 ] && return 0
+        if [ "$rc" -eq 0 ]; then
+            set --
+            while IFS= read -r f; do set -- "$@" "$f"; done <<LG_HITS
+$out
+LG_HITS
+        fi
+    fi
     for f in "$@"; do
         if [ "$mode" = --strip-comments ]; then
             out="$(sed 's/#.*//' "$f" </dev/null)"; rc=$?
@@ -539,8 +552,8 @@ lint_grep() {
         if [ "$rc" -gt 1 ]; then
             printf '%s (exit %s from: grep %s)\n' "$CHECKER_DIED" "$rc" "${f#"$REPO"/}"; continue
         fi
-        # Most files have no hit and stop here, having cost one grep. The name goes in through
-        # ENVIRON, which unlike awk -v leaves a backslash in it alone.
+        # A file with no hit stops here. The name goes in through ENVIRON, which unlike awk -v
+        # leaves a backslash in it alone.
         [ -n "$out" ] || continue
         printf '%s\n' "$out" | LG_NAME="${f#"$REPO"/}" LG_MODE="$mode" awk '
             ENVIRON["LG_MODE"] == "--skip-comments" && /^[0-9]+:[[:space:]]*#/ { next }
@@ -556,8 +569,8 @@ assert_eq "lint-read:a-missing-file-fails-the-scan-skipping-comments" died \
 assert_eq "lint-read:a-missing-file-fails-the-scan-stripping-comments" died \
           "$(lr_has_died "$(lint_grep --strip-comments -e x -- "$lr_tmp/absent" 2>/dev/null)")"
 assert_eq "lint-read:no-files-fails-the-scan" died "$(lr_has_died "$(lint_grep -e x --)")"
-# A PATH WITH A SPACE AND A COLON IN IT, read whole, and each shape keeping the lines it claims.
-lr_sp="$lr_tmp/a dir: with spaces/specimen.sh"
+# A HOSTILE PATH, read whole, and each shape keeping the lines it claims.
+lr_sp="$lr_tmp/$HOSTILE_NAME/specimen.sh"
 mkdir -p "${lr_sp%/*}"
 printf 'hit\n# hit\ncode # hit\n' > "$lr_sp"
 assert_eq "lint-read:plain-keeps-every-hit" "$lr_sp:1:hit
@@ -873,8 +886,7 @@ EOF
 # TAB-DELIMITED RECORDS AND AN ARRAY FOR THE QUEUE (#436). Both were spaces, so a file under a
 # directory with a space in its name came apart in each: `read -r f a b` took half its path as f.
 pf_scope() {                          # pf_scope FILE... -> "FILE\tSTART\tEND" per region, "?\tWHY" per gap
-    local f k a b s i=0 seen
-    seen=()
+    local f k a b i=0 seen="$A_TAB"
     pf_todo=()
     for f in "$@"; do
         while read -r k a b; do
@@ -889,8 +901,8 @@ EOF
     done
     while [ "$i" -lt "${#pf_todo[@]}" ]; do
         f="${pf_todo[$i]}"; i=$((i + 1))
-        for s in ${seen[@]+"${seen[@]}"}; do [ "$s" = "$f" ] && continue 2; done
-        seen+=("$f")
+        case "$seen" in *"$A_TAB$f$A_TAB"*) continue ;; esac
+        seen="$seen$f$A_TAB"
         printf '%s\t1\t%s\n' "$f" "$(awk 'END { print NR }' "$f")"
         pf_queue "$f"
     done
@@ -1075,9 +1087,9 @@ done
 # Read through lint_grep --skip-comments, so a file grep cannot open fails the verdict.
 ft_tmp="$(new_tmpdir)"
 # A SPECIMEN THAT MUST BE FOUND, on the same list as the suites, so a green verdict is one grep
-# reached. It is #379's own two lines, under a path with a space in it, which is what a list that
-# word-splits cannot hand over whole. ASSEMBLED, because this file is on that list too.
-ft_specimen="$ft_tmp/a checkout with spaces/planted.sh"
+# reached. It is #379's own two lines, under HOSTILE_NAME, which is what a list that word-splits
+# cannot hand over whole. ASSEMBLED, because this file is on that list too.
+ft_specimen="$ft_tmp/$HOSTILE_NAME/planted.sh"
 mkdir -p "${ft_specimen%/*}"
 ft_root='/tmp'
 { printf '    pw_scan_text "$1" "$2" 2>%s/pw.err || true\n' "$ft_root"
@@ -1165,7 +1177,7 @@ assert_contains "installer-door:tty-redirects-HOME"      'HOME=' "$ttydoor"
 # so an unquoted $PATH word-splits on any host whose PATH has a space in it -- and through
 # sh_quote, since a bare '...' ends at a `'` (#436). The behavioural half of this lives in
 # 14-test-harness.sh, which injects both and drives the door through them.
-assert_contains "installer-door:tty-puts-the-shim-first" 'sh_quote "PATH=$SHIM:' "$ttydoor"
+assert_contains "installer-door:tty-puts-the-shim-first" 'sh_quote "HOME=$SHIM/home" "PATH=$SHIM:' "$ttydoor"
 
 # And the third, which carries the script on stdin the way `curl | bash` does (#297). Same two
 # properties, asserted the same way and for the same reasons; the extraction guard first, because
@@ -1174,7 +1186,7 @@ pipedoor="$(sed -n '/^installer_pipe()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.
 if [ "$(printf '%s' "$pipedoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:pipe-extractable"
 else fail "installer-door:pipe-extractable" "could not find installer_pipe"; fi
 assert_contains "installer-door:pipe-redirects-HOME"      'HOME=' "$pipedoor"
-assert_contains "installer-door:pipe-puts-the-shim-first" 'sh_quote "PATH=$SHIM:' "$pipedoor"
+assert_contains "installer-door:pipe-puts-the-shim-first" 'sh_quote "HOME=$SHIM/home" "PATH=$SHIM:' "$pipedoor"
 # AND IT REALLY PIPES. A door that quietly became `bash '$script'` would still satisfy everything
 # above while testing the case that already had two doors -- and every piped assertion under it
 # would go green against a seekable script, which is the one thing they are not about.
@@ -1215,12 +1227,8 @@ while IFS= read -r f; do
 done <<TESTS_SH
 $(find "$PRIVATE/tests" -type f -name '*.sh' | LC_ALL=C sort)
 TESTS_SH
-pp_files=()
-for f in ${tests_sh[@]+"${tests_sh[@]}"}; do
-    case "$f" in "$PRIVATE/tests/10-static.sh"|"$PRIVATE/tests/14-test-harness.sh") continue ;; esac
-    pp_files+=("$f")
-done
-pty_pgrep="$(lint_grep --skip-comments -e 'pgrep -P' -- ${pp_files[@]+"${pp_files[@]}"})"
+pty_pgrep="$(lint_grep --skip-comments -e 'pgrep -P' -- ${tests_sh[@]+"${tests_sh[@]}"} \
+             | grep -vE '^\.private/tests/(10-static|14-test-harness)\.sh:')"
 assert_eq "ptyrun-pid:nothing-walks-the-tree-for-a-pty-child" "" "$pty_pgrep"
 # AND ptyrun ITSELF STAYS OUT OF THE PROCESS TABLE. It knows the pid it forked and has no business
 # inferring any other; a tree reader in here would need a per-platform backend (/proc on Linux,
@@ -1289,7 +1297,7 @@ assert_not_match "sh-fake:has-no-exec-of-the-command" '(^|[[:space:]])exec[[:spa
 ptystart="$(sed -n "/^pty_start()/,/^}$/p" "$PRIVATE/tests/lib/portable.sh")"
 if [ "$(printf '%s' "$ptystart" | grep -c '.')" -ge 4 ]; then pass "pty-start:extractable"
 else fail "pty-start:extractable" "could not find pty_start in lib/portable.sh"; fi
-assert_contains "pty-start:single-quotes-what-it-interpolates" 'sh_quote "$a"' "$ptystart"
+assert_contains "pty-start:single-quotes-what-it-interpolates" 'sh_quote "$PT_LIB/pty-announce" "$@"' "$ptystart"
 assert_contains "pty-start:hands-the-pidfile-through-the-environment" 'CS193V_PTY_PIDFILE=' "$ptystart"
 # AND IT PREPENDS THE WRAPPER ITSELF. This was a caller's job for one revision and two of the
 # three callers forgot it; the point of the fix is a pid channel guaranteed by the interface
@@ -1320,7 +1328,7 @@ assert_eq "pty-start:both-shapes-run-through-pty-announce" "2" \
 # nothing re-parses it, so a quote added for symmetry becomes a literal byte of argv[0] and the
 # exec answers ENOENT -- in the container tier only, which is where it would be found.
 assert_eq "pty-start:only-the-shell-branch-quotes-what-it-interpolates" "1" \
-          "$(printf '%s\n' "$ptystart_code" | grep -cF 'sh_quote "$a"' || true)"
+          "$(printf '%s\n' "$ptystart_code" | grep -cF 'sh_quote' || true)"
 # ONE BACKGROUNDED INVOCATION FOR BOTH, so the pidfile, the keystroke feed and $! cannot drift
 # between the shapes -- three properties the assertions above and in 14-test-harness.sh assume.
 assert_eq "pty-start:one-backgrounded-invocation-for-both-shapes" "1" \
@@ -1369,13 +1377,9 @@ fi
 # THIS FILE IS EXCLUDED FROM ITS OWN SEARCH, the self-match rule the pgrep -P ban above states:
 # the pattern is in this very line. Prefixing an EXTERNAL command is fine and is not matched.
 # Through lint_grep for the reason the pgrep -P ban gives.
-kp_files=()
-for f in ${tests_sh[@]+"${tests_sh[@]}"}; do
-    [ "$f" = "$PRIVATE/tests/10-static.sh" ] || kp_files+=("$f")
-done
 knob_prefix="$(lint_grep --skip-comments \
                  -E -e '(CS193V_PTY_JOB|CS193V_PTY_NOSHELL)=[^ ]* +(CS193V_PTY_[A-Z]+=[^ ]* +)*pty_start' \
-                 -- ${kp_files[@]+"${kp_files[@]}"})"
+                 -- ${tests_sh[@]+"${tests_sh[@]}"} | grep -v '^\.private/tests/10-static\.sh:')"
 assert_eq "pty-knobs:no-shape-knob-is-prefixed-onto-pty_start" "" "$knob_prefix"
 # AND THE POSITIVE HALF, which is what stops that ban going vacuous the day a knob is renamed:
 # a file that turns a shape knob ON also turns it off somewhere. DERIVED rather than listed, so a

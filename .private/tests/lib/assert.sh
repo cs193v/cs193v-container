@@ -132,6 +132,10 @@ run_checker() {                       # run_checker CMD [ARGS...]
     return 0
 }
 
+# A READER WHOSE NEXT STAGE KEEPS ONLY SOME LINES HAS TO TAKE THESE OUT FIRST, or the stage drops
+# them and the value says nothing went wrong: uniq -d keeps only repeats, grep -o only matches.
+died_in() { printf '%s\n' "$1" | grep -F "$CHECKER_DIED"; }   # died_in VALUE -> its sentinel lines
+
 # The first line of every assertion that compares strings, so no call site has to remember. It
 # covers the negative forms too, which are the ones that cannot be fixed any other way: there is
 # no happy-side sentinel that satisfies "the output does not contain X".
@@ -148,7 +152,7 @@ _checker_ok() {                       # _checker_ok NAME [VALUE...]  -> 1, and F
     for v in "${2-}" "${3-}"; do
         case "$v" in
             *"$CHECKER_DIED"*)
-                why="$(printf '%s' "$v" | grep -F "$CHECKER_DIED" | head -3)"
+                why="$(died_in "$v" | head -3)"
                 fail "$1" "$why"; return 1 ;;
         esac
     done
