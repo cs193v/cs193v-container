@@ -8,8 +8,10 @@
 # wrong is the failure mode #67 exists to prevent. A reader that says "up" about a port that is
 # not forwarded hands a student a link their browser cannot reach, and the symptom -- connection
 # refused, from a URL that reads as perfectly ordinary -- arrives with nothing pointing back here.
-# The file is also the one piece of state that survives a supervisor crash, so a truncated or
-# half-written copy is reachable in normal operation rather than only under attack.
+# NOT BECAUSE A HALF-WRITTEN FILE CAN REACH IT, which this header used to say. The writer renames a
+# complete file into place (837e82f, the day before this suite), and shortlink now reads it through
+# `cs193v-portwatch --state`, which hands over only a file the watcher's reader accepts (#516). The
+# fuzzing is insurance on the function that answers for every port, kept because it is cheap.
 #
 # WRITTEN BEFORE THE PARSER, deliberately, which is the rule this project applies to every parser
 # that takes real input: the fuzzer states the contract before there is an implementation to shape
@@ -18,7 +20,8 @@
 #
 # A PURE FUNCTION, not the script. port_verdict(text, port) takes the file's CONTENTS, so the
 # fuzzer never touches a filesystem and runs thousands of cases per second. That is a design
-# constraint on shortlink, not a convenience here.
+# constraint on shortlink, not a convenience here. The one section that is not pure says so: it
+# drives read_ports_file through the checkout's portwatch, against a file in this suite's scratch.
 #
 # DETERMINISTIC, for the reason 17-portparse-fuzz.sh gives: this suite's results are compared
 # across instances and machines, so the generator is seeded and the seed is printed on failure.
@@ -37,10 +40,11 @@ trap 'rm -rf "$WORK"' EXIT
 # UNBUFFERED (-u), or a reader that dies without unwinding -- os._exit, a signal -- takes every line
 # still in python's buffer with it, `exists` included, and is reported as a parser that is not there.
 # Measured.
-python3 -u - "$PRIVATE/files/shortlink" "$SEED" "$CANARY" > "$OUT" 2>&1 <<'PY'
-import importlib.machinery, importlib.util, io, os, random, shlex, sys, traceback
+python3 -u - "$PRIVATE/files/shortlink" "$SEED" "$CANARY" "$PRIVATE/files/cs193v-portwatch" "$WORK/ports" \
+    > "$OUT" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, io, os, random, shlex, subprocess, sys, time, traceback
 
-PATH, SEED, CANARY = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+PATH, SEED, CANARY, PORTWATCH_PATH, STATE = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
 
 loader = importlib.machinery.SourceFileLoader("shortlink_under_test", PATH)
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -243,6 +247,60 @@ out("canary-aimed", CANARY if found == rows and n_any == len(rows) else
     "want %r once each and no other touch payload; found %r, and %d in all" % (rows, found, n_any))
 out("canary", "%s %s" % (CANARY, "present" if os.path.exists(CANARY) else "absent"))
 
+# ─── the file, through the watcher's own reader  (#516) ────────────────────────
+# NOT PURE, unlike everything above, and that is the point of it: read_ports_file no longer opens
+# the file but asks `cs193v-portwatch --state`, which hands over only a file the watcher's reader
+# accepts, so shortlink refuses exactly what --show and doctor refuse. Driven against the CHECKOUT's
+# portwatch, sourced, with its state file pointed into this suite's scratch directory -- the same
+# module constant a real install reads, overridden here and nowhere in the product.
+def portwatch(*args):
+    return ("bash", "-c",
+            'CS193V_PORTWATCH_SOURCED=1; . "$1"; PW_STATE_DIR="${2%/*}"; PW_STATE="$2"; shift 2; pw_main "$@"',
+            "_", PORTWATCH_PATH, STATE) + args
+
+def put(text):
+    with open(STATE, "w") as fh:
+        fh.write(text)
+
+statefile = []
+mod.PORTWATCH = portwatch("--state")
+# THE FIXTURE FIRST: GOOD is what every property above reads, so it had better be a file the
+# writer could have written, or those properties are about a file that cannot exist.
+put(GOOD)
+rc = subprocess.run(portwatch("--state"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+if rc != 0:
+    statefile.append("GOOD is not a legal state file: --state said %d" % rc)
+if os.path.exists(STATE):
+    os.remove(STATE)
+if mod.read_ports_file() is not None:
+    statefile.append("no file did not read as None")
+put("")
+if mod.read_ports_file() != "":
+    statefile.append("an empty file did not read as ''")
+published = subprocess.run(portwatch("--publish", "state=healthy", "floor=1024", "up=3000:lo", "refused="),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+if published != 0:
+    statefile.append("the checkout's --publish refused a legal publish: %d" % published)
+with open(STATE) as fh:
+    written = fh.read()
+if mod.read_ports_file() != written:
+    statefile.append("a published file did not read back exactly")
+if mod.await_verdict(3000) != "up":
+    statefile.append("await_verdict did not find a published port up")
+# A FILE THE READER REFUSES, here one without its floor line. shortlink would once have read it
+# and found port 3000 up; it must now read it as no file at all, and stop waiting at once rather
+# than spend the timeout. Half of it is the failure bound, not a delay a passing run pays.
+put("state\thealthy\nup\t3000\tlo\n")
+if mod.read_ports_file() is not None:
+    statefile.append("a refused file did not read as None")
+began = time.monotonic()
+if mod.await_verdict(3000) is not None or time.monotonic() - began > mod.CONFIRM_TIMEOUT / 2:
+    statefile.append("await_verdict did not give up at once on a refused file")
+mod.PORTWATCH = ("/nonexistent/cs193v-portwatch", "--state")
+if mod.read_ports_file() is not None:
+    statefile.append("a reader that cannot run did not read as None")
+out("statefile", "; ".join(statefile))
+
 # ─── THE LAST LINE: how many verdicts the corpus loop actually asked for ───────
 # Counted call by call, unlike cases-planned, which a loop cut short still printed in full -- and so
 # did this key, until #417 (measured). And printed last, so it is missing if anything above died at
@@ -295,6 +353,7 @@ assert_eq "slfuzz:stderr-stays-clean"         "" "$(fz stderr)"
 assert_eq "slfuzz:a-hostile-port-is-safe"     "" "$(fz weird-port)"
 assert_eq "slfuzz:text-need-not-be-text"      "" "$(fz nonstr-text)"
 assert_eq "slfuzz:only-canonical-ports-match" "" "$(fz noncanonical-port)"
+assert_eq "slfuzz:reads-through-the-watchers-reader" "" "$(fz statefile)"
 
 # ─── nothing in the input is ever run ──────────────────────────────────────────
 # THE GUARD FIRST. An absent canary is also what a missing case, a payload aimed somewhere else --

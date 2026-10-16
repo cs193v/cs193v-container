@@ -317,16 +317,30 @@ assert_eq "npm-prefix-is-in-home" "/home/student/.local" "$(R 'npm config get pr
 assert_ok "npm-install-g-needs-no-sudo" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c 'test -w /home/student/.local/bin'"
 
-# THE STATE FILE THE TUNNEL WOULD HAVE WRITTEN, faked. Defined here rather than beside the
-# shortlink cases below because open-url reaches shortlink too and needs it first.
+# THE TUNNEL'S HALF OF THE STATE FILE, stood in for. Defined here rather than beside the shortlink
+# cases below because open-url reaches shortlink too and needs it first.
 #
-# EVERY PORT MARKED UP, because shortlink asks the KERNEL for a port and no test can predict which
-# one it gets. Marking the whole range means whatever it picks is confirmed, which is what these
-# cases are about; the case where a port is NOT confirmed is asserted separately below.
-FAKE_UP='mkdir -p '"$PORTS_STATE_DIR"'; { printf "state\thealthy\nfloor\t1024\n"; seq 1 65535 | awk "{print \"up\\t\" \$1 \"\\tlo\"}"; } > '"$PORTS_STATE"
+# THE REAL WATCHER AND THE REAL WRITER, with a loop in place of the supervisor between them: on
+# every frame whose `lo` listeners differ from the last one's, it publishes them all as up. So the
+# port shortlink asks the kernel for -- which no test can predict -- is confirmed a tick after it
+# is bound, by the same --publish the launcher uses, into a file the strict reader then reads. It
+# used to be a file marking all 65,535 ports up, which the reader now refuses (#406): the host
+# never publishes more than PW_MAX.
+#
+# ITS OWN `sh -c`, NOT A SUBSHELL. A subshell would carry the command line of the R shell that
+# forked it, which names shortlink, and `pgrep -f "[s]hortlink"` below would find it instead of the
+# daemon. The file is truncated first, as the watcher does, so the empty file shortlink sees until
+# the first publish reads as a tunnel coming up rather than as no tunnel. Ends in a newline, so it
+# goes in front of a command with nothing between them.
+#
+# ONLY THE `sh -c` IN THE BACKGROUND, in braces. A bare `&` at the end of the && list sent the
+# whole list there, mkdir and truncation included, so the command after it could run before the
+# file existed.
+FAKE_TUNNEL='mkdir -p '"$PORTS_STATE_DIR"' && : > '"$PORTS_STATE"' && { sh -c '"'"'cs193v-portwatch --watch 1 | while read -r l; do case "$l" in "BEGIN "*) up="" ;; *:lo) up="${up:+$up,}$l" ;; END) [ "$up" = "${last-}" ] || { cs193v-portwatch --publish state=healthy floor=1024 "up=$up" refused= && last="$up"; } ;; esac; done'"'"' >/dev/null 2>&1 & }
+'
 # AND ITS OPPOSITE: a tunnel that is up and has confirmed nothing, so shortlink waits and is never
-# told yes.
-FAKE_HEALTHY='mkdir -p '"$PORTS_STATE_DIR"'; printf "state\thealthy\nfloor\t1024\n" > '"$PORTS_STATE"
+# told yes. Through the real --publish too.
+FAKE_HEALTHY='cs193v-portwatch --publish state=healthy floor=1024 up= refused='
 
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
@@ -341,7 +355,12 @@ assert_fail "helper:open-url-needs-an-argument" \
 # /tmp/cs193v-volatile/ports does not exist, shortlink has nothing to tell it a port is reachable,
 # degrades to printing its argument, and open-url prints exactly what it always did. That is the
 # contract every caller of shortlink leans on to need no conditional of its own.
-out="$(R "$FAKE_UP"' && /usr/local/bin/open-url https://example.com/verify?code=ABCD')"
+# THE FAKE TUNNEL'S FILE IS THERE BEFORE THE NEXT COMMAND RUNS, or shortlink can look first, read
+# "no tunnel" and print the long URL: a case that fails only under load. Asked in the container of
+# the first case that leans on it.
+out="$(R "$FAKE_TUNNEL"'test -e '"$PORTS_STATE"' && echo present || echo absent
+/usr/local/bin/open-url https://example.com/verify?code=ABCD')"
+assert_contains "harness:the-fake-tunnel-has-a-file-before-it-returns" "present" "$out"
 assert_match "helper:open-url-shortens-when-a-port-is-forwarded" \
              "http://localhost:[0-9]+/magic-link" "$out"
 assert_not_contains "helper:open-url-shortened-hides-the-long-url" \
@@ -426,20 +445,17 @@ assert_match "fault:the-shipped-watcher-emits-a-frame-the-gate-accepts" "^accept
 # is for -- the half only a real container and a real host can answer is whether the port is
 # reachable from OUTSIDE, and it is the only shortlink assertion that lives there.
 #
-# `sl` runs a whole shell line with the state file the TUNNEL would have written already in place.
-# There is no tunnel in a throwaway container and no way to raise one, but shortlink does not need
-# a tunnel -- it needs to be told a port is forwarded, and that is a file. Faking the file is a
-# great deal easier than faking the tunnel, and it is exactly the input the real thing supplies.
-#
-# EVERY PORT MARKED UP, because shortlink asks the KERNEL for a port and no test can predict which
-# one it gets. Marking the whole range means whatever it picks is confirmed, which is what these
-# cases are about; the case where a port is NOT confirmed is asserted separately below.
+# `sl` runs a whole shell line with $FAKE_TUNNEL standing in for the tunnel's half of the state
+# file. There is no tunnel in a throwaway container and no way to raise one, but shortlink does not
+# need a tunnel -- it needs to be told a port is forwarded, and that is a file, written by the same
+# watcher and the same --publish the real one uses. The case where a port is NOT confirmed is
+# asserted separately below.
 #
 # THE ASSERTIONS THIS REPLACED WERE ABOUT A LIST -- highest-first, comma-separated, malformed
 # chunk skipped. There is no list to parse any more, so they are gone rather than adapted; what
 # took their place is the property they were standing in for, which is that the port shortlink
 # prints is one it has been told is reachable.
-sl() { R "$FAKE_UP; $1"; }
+sl() { R "$FAKE_TUNNEL$1"; }
 
 assert_ok "shortlink:help-answers" \
           sh -c "$VT_RUN --rm --entrypoint sh '$TEST_IMAGE' -c '/usr/local/bin/shortlink --help > /dev/null'"
@@ -447,7 +463,8 @@ assert_ok "shortlink:help-answers" \
 # THE PORT IT PRINTS IS ONE IT WAS TOLD IS REACHABLE. "Any free port" on its own would be a bug
 # rather than a simplification: a server on a port the tunnel did not carry looks exactly like a
 # broken link. So the port is the kernel's choice, but printing it is the state file's decision.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; grep -c "^up	${p%%/*}	" '"$PORTS_STATE")"
+# Read through --state, so the file it confirms is also one the strict reader accepts.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; cs193v-portwatch --state | grep -c "^up	${p%%/*}	"')"
 assert_match "shortlink:prints-a-short-url" "http://localhost:[0-9]+/token" "$out"
 assert_contains "shortlink:the-port-it-printed-was-confirmed" "1" "$out"
 
@@ -464,6 +481,34 @@ assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
 out="$(R '/usr/local/bin/shortlink https://example.com/plain; echo rc=$?')"
 assert_contains "shortlink:no-ports-prints-the-input" "https://example.com/plain" "$out"
 assert_contains "shortlink:no-ports-exits-3" "rc=3" "$out"
+
+# ─── --state, the installed binary  (#516) ─────────────────────────────────────
+# The reader doctor and shortlink go through, against the real file in a real container: no file,
+# an empty one, one --publish wrote (printed byte for byte -- the sentinel keeps the final newline
+# that $( ) would strip), and one the reader refuses, with its reason. Then shortlink on that last
+# file, in the same container.
+out="$(R 'cs193v-portwatch --state; echo "none=$?"
+          mkdir -p '"$PORTS_STATE_DIR"' && : > '"$PORTS_STATE"'
+          cs193v-portwatch --state; echo "empty=$?"
+          cs193v-portwatch --publish state=healthy floor=1024 up=3000:lo refused=8080:busy
+          a=$(cs193v-portwatch --state; echo "rc=$?."); b=$(cat '"$PORTS_STATE"'; echo "rc=0.")
+          [ "$a" = "$b" ] && echo "published=same" || echo "published=[$a] file=[$b]"
+          printf "state\thealthy\n" > '"$PORTS_STATE"'
+          cs193v-portwatch --state; echo "refused=$?"
+          t0=$(date +%s)
+          o=$(/usr/local/bin/shortlink https://example.com/refused token); rc=$?
+          echo "rc=$rc out=[$o] took=$(( $(date +%s) - t0 ))"')"
+assert_contains "statecmd:no-file-is-4"           "none=4"     "$out"
+assert_contains "statecmd:an-empty-file-is-3"     "empty=3"    "$out"
+assert_contains "statecmd:prints-what-was-published" "published=same" "$out"
+assert_contains "statecmd:a-refused-file-is-5"    "refused=5"  "$out"
+assert_contains "statecmd:a-refused-file-says-why" "cs193v-portwatch: line 2 differs from what --publish writes" "$out"
+# A FILE THE READER REFUSES ENDS shortlink's WAIT AT ONCE (#516): that healthy file with no floor
+# line, which shortlink once read and polled for its full CONFIRM_TIMEOUT. Every publish renames a
+# complete file into place, so a bad one will not mend. The 5 is a failure ceiling: a shortlink
+# that kept waiting takes the full 10s.
+assert_contains "shortlink:a-refused-file-degrades"  "rc=3 out=[https://example.com/refused]" "$out"
+assert_match    "shortlink:a-refused-file-ends-the-wait" "took=[0-4]$" "$out"
 
 # ─── the redirect itself ───────────────────────────────────────────────────────
 # ONE SHELL LINE PER CASE because the server has to still be running when curl asks. -D- keeps the
@@ -613,8 +658,8 @@ assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
 
 # A cancel that arrives DURING the wait, which is the shape a keypress really has. The state
 # file says the tunnel is healthy but says nothing about any port, so await_verdict polls for its
-# full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_UP: with
-# every port confirmed there is no wait to interrupt.
+# full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_TUNNEL:
+# with the port confirmed a tick after it is bound there is barely a wait to interrupt.
 out="$(R "$FAKE_HEALTHY"'
           ( sleep 1; touch /tmp/c2 ) &
           t0=$(date +%s)

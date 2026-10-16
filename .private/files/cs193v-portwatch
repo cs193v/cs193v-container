@@ -181,51 +181,141 @@ pw_scan_text() {                      # pw_scan_text V4TEXT V6TEXT -> PW_SET
 }
 
 # ─── the writeback: argv in, state file out ────────────────────────────────────
-# The host runs `cs193v-portwatch --publish state=... up=... refused=...` whenever what it decided
-# changes, and this side writes the file. THE HOST DECIDES, THIS SIDE RECORDS: nothing here asks
-# for a port, and the argv carries only outcomes the host has already committed to.
+# The host runs `cs193v-portwatch --publish state=... floor=... up=... refused=...` whenever what it
+# decided changes, and this side writes the file. THE HOST DECIDES, THIS SIDE RECORDS: nothing here
+# asks for a port, and the argv carries only outcomes the host has already committed to.
 #
 # STATE IS PASSED AS ARGUMENTS, never on stdin, and the values are validated even though the host
 # built them. Not because the host is untrusted, but because a bug there would otherwise write
 # nonsense into a file that three readers believe -- --show, doctor over podman exec, and
-# shortlink, which consults it before printing a URL a student is about to click.
+# shortlink, which consults it before printing a URL a student is about to click. All three read it
+# through pw_state_parse (doctor and shortlink by way of --state), so what the writer refuses to
+# write, every reader refuses to read.
 PW_CLASSES='lo any v6lo eth loalt'
 PW_REASONS='busy v6lo loalt eth below-floor capped'
 PW_STATES='healthy master-unresponsive broken'
-PW_TAB="$(printf '\t')"
+PW_TAB=$'\t'
 
 PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
 PW_PAIRS=''
 
-# A comma-separated list of port:word, checked against a vocabulary. The port rules are the same
-# ones the host's own gate applies, and for the same reason: digits first, length before any
-# arithmetic, 10# to force base ten, then a canonicality compare so a non-canonical spelling is
-# refused rather than quietly normalised.
+# A REFUSAL NAMES WHAT IT REFUSED the way the host's gate does (quoted() and dynports_fatal in
+# cs193v-ui.sh): REASON: VALUE, the value through printf %q. doctor puts the reader's on a student's
+# screen, so nothing from outside reaches it unquoted -- %q writes an ESC as \E, never the byte --
+# and a \r, a tab and an ESC stay three different things, where the `?` this replaced made them one.
+# Under LC_ALL=C, or in a UTF-8 locale %q would write an é raw and the cut would count characters.
+#
+# CUT TO PW_VALUE_MAX BYTES BEFORE QUOTING, since a value has no length of its own and doctor gives
+# the reason one row. A cut after could split an escape like \303 and misreport the byte. Quoted,
+# a byte is at most four, so a reason stays short. printf -v, so no fork.
+PW_VALUE_MAX=32
+pw_refuse() {                         # pw_refuse REASON VALUE -> 1 with PWP_ERR
+    local v="$2" q cut='' LC_ALL=C
+    [ "${#v}" -le "$PW_VALUE_MAX" ] ||
+        { cut=" (the first $PW_VALUE_MAX of ${#v} bytes)"; v="${v:0:PW_VALUE_MAX}"; }
+    printf -v q '%q' "$v"
+    PWP_ERR="$1: $q$cut"
+    return 1
+}
+
+# A WORD IS IN A VOCABULARY WHEN IT EQUALS ONE OF ITS WORDS. Not a substring match: " $vocab "
+# contains " busy v6lo ", so `busy v6lo` passed for one reason, and the writer then rendered it as
+# two lines its own reader refused.
+pw_word() {                           # pw_word WORD VOCAB -> 0 if WORD is one of VOCAB's words
+    local w IFS=' '
+    for w in $2; do [ "$w" = "$1" ] && return 0; done
+    return 1
+}
+
+# A PORT, by the rules the host's own gate applies, and for the same reason: digits first, length
+# before any arithmetic, 10# to force base ten, then a canonicality compare so a non-canonical
+# spelling is refused rather than quietly normalised. ONE CHECK FOR EVERY PORT, the floor's
+# included: the reader used to take any run of digits for a floor, so it read floors the writer
+# could never have written (#406).
+pw_port() {                           # pw_port VALUE NOUN -> 0, or 1 with PWP_ERR
+    case "$1" in ''|*[!0-9]*) pw_refuse "non-decimal $2" "$1"; return 1 ;; esac
+    [ "${#1}" -le 5 ] || { pw_refuse "over-long $2" "$1"; return 1; }
+    [ "$(( 10#$1 ))" = "$1" ] || { pw_refuse "non-canonical $2" "$1"; return 1; }
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || { pw_refuse "$2 out of range" "$1"; return 1; }
+    return 0
+}
+
+# One port:word entry, as a list carries it and as a file line does.
+pw_entry() {                          # pw_entry PORT WORD VOCAB -> 0, or 1 with PWP_ERR
+    pw_word "$2" "$3" || { pw_refuse "unknown value" "$2"; return 1; }
+    pw_port "$1" port
+}
+
+# ONE SPLIT, OWING ITS CALLER TWO THINGS: IFS only for the split, and no globbing while it runs,
+# restored only if it was off. Without set -f a lone `*` would split into every file in the working
+# directory.
+PW_ITEMS=()
+pw_split() {                          # pw_split SEP TEXT -> PW_ITEMS
+    local IFS="$1" noglob=''
+    case "$-" in *f*) noglob=1 ;; *) set -f ;; esac
+    # shellcheck disable=SC2206   # splitting is the point, under set -f
+    PW_ITEMS=( $2 )
+    [ -n "$noglob" ] || set +f
+}
+
+# A comma-separated list of port:word, as --publish is given it.
+#
+# SPLIT ONCE, not peeled an entry at a time: each peel copied the rest of the list, and the whole
+# list was checked before pw_lists counted it, so one long argument cost the square of its length
+# -- 1.8 s at 2000 entries and 30 s at 8000, measured. And it stops past PW_MAX, as the reader does,
+# since pw_lists refuses the list whatever follows.
+#
+# A COMMA ADDED TO THE END: a split drops one trailing empty field, so `3000:lo,` read as
+# `3000:lo`. With it, every empty entry, at the end or anywhere else, is one the loop sees and
+# refuses. Added to the value pw_split is handed, not written into a split as `( $1, )`: only what
+# an expansion produced is split, so a comma typed there would have stayed on the last entry.
 pw_pairs() {                          # pw_pairs VALUE VOCAB -> PW_PAIRS, or 1 with PWP_ERR
-    local v="$1" vocab="$2" item port word out=''
+    local item n=0 out=''
     PW_PAIRS=''
-    [ -n "$v" ] || return 0
-    while [ -n "$v" ]; do
-        item="${v%%,*}"
-        if [ "$item" = "$v" ]; then v=''; else v="${v#*,}"; fi
-        case "$item" in *:*) ;; *) PWP_ERR="no colon in '$item'"; return 1 ;; esac
-        port="${item%%:*}"; word="${item#*:}"
-        case " $vocab " in *" $word "*) ;; *) PWP_ERR="unknown value '$word'"; return 1 ;; esac
-        case "$port" in ''|*[!0-9]*) PWP_ERR="non-decimal port '$port'"; return 1 ;; esac
-        [ "${#port}" -le 5 ] || { PWP_ERR="over-long port '$port'"; return 1; }
-        [ "$(( 10#$port ))" = "$port" ] || { PWP_ERR="non-canonical port '$port'"; return 1; }
-        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { PWP_ERR="port out of range '$port'"; return 1; }
-        out="$out $port:$word"
+    [ -n "$1" ] || return 0
+    pw_split , "$1,"
+    for item in ${PW_ITEMS[@]+"${PW_ITEMS[@]}"}; do
+        case "$item" in *:*) ;; *) pw_refuse "no colon in entry" "$item"; return 1 ;; esac
+        pw_entry "${item%%:*}" "${item#*:}" "$2" || return 1
+        out="$out $item"
+        n=$(( n + 1 ))
+        [ "$n" -le "$PW_MAX" ] || break
     done
     PW_PAIRS="${out# }"
     return 0
 }
 
+# WHAT THE HOST CAN SEND, which is narrower than the vocabularies, checked at both ends so the file
+# can hold nothing else. sup_publish writes every up entry as `$port:lo`. It adds a port to its list
+# only when the port is not already there, and refuses each record of a frame at most once. And it
+# forwards at most DYNPORTS_MAX ports, from frames of at most that many records, which 10-static.sh
+# holds equal to PW_MAX. A port in BOTH lists is allowed, because the host can publish one (#517).
+pw_lists() {                          # pw_lists UP REFUSED -> 0, or 1 with PWP_ERR
+    pw_list "$1" up lo && pw_list "$2" refused
+}
+pw_list() {                           # pw_list LIST NOUN [WORD] -> 0, or 1 with PWP_ERR
+    local e port n=0 seen=' ' IFS=$' \t\n'
+    for e in $1; do
+        n=$(( n + 1 ))
+        [ "$n" -le "$PW_MAX" ] || { PWP_ERR="more than $PW_MAX $2 entries"; return 1; }
+        [ -z "${3:-}" ] || [ "${e#*:}" = "$3" ] || { pw_refuse "$2 entry not on $3" "$e"; return 1; }
+        port="${e%%:*}"
+        case "$seen" in *" $port "*) pw_refuse "duplicate $2 port" "$port"; return 1 ;; esac
+        seen="$seen$port "
+    done
+    return 0
+}
+
 # WHAT KEEPS THE FILE WELL-FORMED IS THE VOCABULARIES, not an escaping pass. Every value below is
-# matched against a closed set or a digits-only pattern, so a tab or newline cannot survive to
-# reach the tab-separated, line-oriented file -- it fails the vocabulary first. This was measured:
-# a dedicated control-character check sat here and mutation testing could not make it fire, because
-# the vocabulary always got there first. It was removed rather than kept as decoration.
+# matched whole against a closed set or a digits-only pattern, so a tab or newline cannot survive
+# to reach the tab-separated, line-oriented file -- it fails the vocabulary first. This was
+# measured: a dedicated control-character check sat here and mutation testing could not make it
+# fire, because the vocabulary always got there first. It was removed rather than kept as
+# decoration. WHOLE is the word that matters: a match inside the space-joined list let a space
+# through, and the file split there.
+#
+# THE ONE-OF-EACH CHECKS HERE ARE NOT FOR A MESSAGE, as the reader's were. Nothing compares an
+# argument list against a rendering of itself, so without them a second state= would simply win.
 #
 # THE COROLLARY IS THE THING TO REMEMBER: a future key whose value is free text would have no such
 # protection, and would need its own escaping before it is written.
@@ -233,18 +323,16 @@ pw_publish_parse() {                  # key=value ... -> PWP_*, or 2 with PWP_ER
     local a k v seen_state='' seen_floor='' seen_up='' seen_ref=''
     PWP_STATE=''; PWP_FLOOR=''; PWP_UP=''; PWP_REFUSED=''; PWP_ERR=''
     for a in "$@"; do
-        case "$a" in *=*) ;; *) PWP_ERR="not key=value: '$a'"; return 2 ;; esac
+        case "$a" in *=*) ;; *) pw_refuse "not key=value" "$a"; return 2 ;; esac
         k="${a%%=*}"; v="${a#*=}"
         case "$k" in
             state)
                 [ -z "$seen_state" ] || { PWP_ERR="duplicate state"; return 2; }; seen_state=1
-                case " $PW_STATES " in *" $v "*) ;; *) PWP_ERR="unknown state '$v'"; return 2 ;; esac
+                pw_word "$v" "$PW_STATES" || { pw_refuse "unknown state" "$v"; return 2; }
                 PWP_STATE="$v" ;;
             floor)
                 [ -z "$seen_floor" ] || { PWP_ERR="duplicate floor"; return 2; }; seen_floor=1
-                case "$v" in ''|*[!0-9]*) PWP_ERR="non-decimal floor '$v'"; return 2 ;; esac
-                [ "${#v}" -le 5 ] || { PWP_ERR="over-long floor"; return 2; }
-                [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || { PWP_ERR="floor out of range '$v'"; return 2; }
+                pw_port "$v" floor || return 2
                 PWP_FLOOR="$v" ;;
             up)
                 [ -z "$seen_up" ] || { PWP_ERR="duplicate up"; return 2; }; seen_up=1
@@ -254,22 +342,33 @@ pw_publish_parse() {                  # key=value ... -> PWP_*, or 2 with PWP_ER
                 [ -z "$seen_ref" ] || { PWP_ERR="duplicate refused"; return 2; }; seen_ref=1
                 pw_pairs "$v" "$PW_REASONS" || return 2
                 PWP_REFUSED="$PW_PAIRS" ;;
-            *)  PWP_ERR="unknown key '$k'"; return 2 ;;
+            *)  pw_refuse "unknown key" "$k"; return 2 ;;
         esac
     done
-    [ -n "$PWP_STATE" ] || { PWP_ERR="no state given"; return 2; }
+    # ALL FOUR KEYS, because the host always sends all four. up= and refused= may be empty, but
+    # they are there; a publish without one came from something other than the launcher.
+    [ -n "$PWP_STATE" ]  || { PWP_ERR="no state given"; return 2; }
+    [ -n "$seen_floor" ] || { PWP_ERR="no floor given"; return 2; }
+    [ -n "$seen_up" ]    || { PWP_ERR="no up given"; return 2; }
+    [ -n "$seen_ref" ]   || { PWP_ERR="no refused given"; return 2; }
+    pw_lists "$PWP_UP" "$PWP_REFUSED" || return 2
     return 0
 }
 
 # Tab-separated, one record per line, repeated keys rather than comma-joined lists -- the same
 # idiom verb_dev_tunnel uses, so the suite parses it with the awk one-liner it already has and no
 # second format enters the project.
-pw_state_render() {
-    local e
-    printf 'state\t%s\n' "$PWP_STATE"
-    [ -n "$PWP_FLOOR" ] && printf 'floor\t%s\n' "$PWP_FLOOR"
-    for e in $PWP_UP;      do printf 'up\t%s\t%s\n'      "${e%%:*}" "${e#*:}"; done
-    for e in $PWP_REFUSED; do printf 'refused\t%s\t%s\n' "${e%%:*}" "${e#*:}"; done
+#
+# ONE RENDERER FOR BOTH ENDS. The writer prints it and the reader compares against it, so a file the
+# reader accepts is, byte for byte, one the writer could have written (#406). printf -v, so the
+# reader's comparison costs no fork.
+PW_RENDERED=''
+pw_state_text() {                     # pw_state_text STATE FLOOR UP REFUSED -> PW_RENDERED
+    local e line out IFS=$' \t\n'
+    printf -v out 'state\t%s\nfloor\t%s\n' "$1" "$2"
+    for e in $3; do printf -v line 'up\t%s\t%s\n'      "${e%%:*}" "${e#*:}"; out="$out$line"; done
+    for e in $4; do printf -v line 'refused\t%s\t%s\n' "${e%%:*}" "${e#*:}"; out="$out$line"; done
+    PW_RENDERED="$out"
     return 0
 }
 
@@ -278,34 +377,103 @@ PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
 # a bad one means our own writer is broken -- and the readers act on it: shortlink decides whether
 # to print a short URL, doctor tells a student what is reachable. Half of a broken file is worse
 # than none of it.
+#
+# AND IT ACCEPTS ONLY WHAT THE WRITER WRITES, exactly: every value passes the writer's own checks,
+# and then the whole file must be what pw_state_text renders from them (#406, #411).
 pw_state_parse() {                    # pw_state_parse TEXT -> PWS_*, or 2 with PWS_ERR
-    local raw="$1" line k a b
+    local raw="$1" line k a b n=0 nup=0 nref=0 LC_ALL=C
     PWS_STATE=''; PWS_FLOOR=''; PWS_UP=''; PWS_REFUSED=''; PWS_ERR=''
     [ -n "$raw" ] || { PWS_ERR="empty state file"; return 2; }
-    while [ -n "$raw" ]; do
-        line="${raw%%$'\n'*}"
-        if [ "$line" = "$raw" ]; then raw=''; else raw="${raw#*$'\n'}"; fi
-        [ -n "$line" ] || continue
+    # ONE SPLIT rather than peeling a line at a time: each peel copies the rest of the text, which
+    # is quadratic in the file. Blank lines vanish in the split, and the comparison at the end is
+    # what refuses them.
+    pw_split $'\n' "$raw"
+    for line in ${PW_ITEMS[@]+"${PW_ITEMS[@]}"}; do
+        n=$(( n + 1 ))
         k=''; a=''; b=''
         IFS="$PW_TAB" read -r k a b <<<"$line"
+        # THE STATE FIRST AND THE FLOOR SECOND, as the writer puts them. A line that is neither where
+        # it should be, a second of either, or a key the writer never writes, ends the parse: the
+        # comparison below refuses the file at that line or before it (#411), and reading on would
+        # only spend time on a file already refused.
         case "$k" in
             state)
-                case " $PW_STATES " in *" $a "*) ;; *) PWS_ERR="unknown state '$a'"; return 2 ;; esac
+                [ "$n" -eq 1 ] || break
+                pw_word "$a" "$PW_STATES" || { pw_refuse "unknown state" "$a"; PWS_ERR="$PWP_ERR"; return 2; }
                 PWS_STATE="$a" ;;
             floor)
-                case "$a" in ''|*[!0-9]*) PWS_ERR="non-decimal floor"; return 2 ;; esac
+                [ "$n" -eq 2 ] || break
+                pw_port "$a" floor || { PWS_ERR="$PWP_ERR"; return 2; }
                 PWS_FLOOR="$a" ;;
+            # ONE ENTRY A LINE, so never the writer's list parser: a comma is just another byte of a
+            # word that is not in the vocabulary. Handed to pw_pairs, one line held thousands of
+            # entries, and peeling them was quadratic before the cap could count them.
             up|refused)
                 [ -n "$a" ] && [ -n "$b" ] || { PWS_ERR="$k needs a port and a word"; return 2; }
-                if [ "$k" = up ]; then pw_pairs "$a:$b" "$PW_CLASSES"; else pw_pairs "$a:$b" "$PW_REASONS"; fi \
-                    || { PWS_ERR="${PWP_ERR:-bad $k record}"; return 2; }
-                if [ "$k" = up ]; then PWS_UP="$PWS_UP $PW_PAIRS"; else PWS_REFUSED="$PWS_REFUSED $PW_PAIRS"; fi ;;
-            *)  PWS_ERR="unknown key '$k'"; return 2 ;;
+                if [ "$k" = up ]; then pw_entry "$a" "$b" "$PW_CLASSES"; else pw_entry "$a" "$b" "$PW_REASONS"; fi \
+                    || { PWS_ERR="$PWP_ERR"; return 2; }
+                if [ "$k" = up ]; then
+                    PWS_UP="$PWS_UP $a:$b"; nup=$(( nup + 1 ))
+                else
+                    PWS_REFUSED="$PWS_REFUSED $a:$b"; nref=$(( nref + 1 ))
+                fi
+                # PAST THE CAP, pw_lists refuses the file whatever follows, so stop here: a file
+                # naming every port costs PW_MAX lines of this, not 65,535.
+                [ "$nup" -le "$PW_MAX" ] && [ "$nref" -le "$PW_MAX" ] || break ;;
+            *)  break ;;
         esac
     done
-    [ -n "$PWS_STATE" ] || { PWS_ERR="no state line"; return 2; }
     PWS_UP="${PWS_UP# }"; PWS_REFUSED="${PWS_REFUSED# }"
+    pw_lists "$PWS_UP" "$PWS_REFUSED" || { PWS_ERR="$PWP_ERR"; return 2; }
+    # THE SHAPE, BY CONSTRUCTION. Every value read has passed the writer's checks by now. What is
+    # left is the bytes around them: extra fields, runs of tabs (read takes a run as one), blank
+    # lines, the order, a missing, repeated or unknown line, the final newline. The reader missed
+    # most of those while it had a check per defect, so instead the file is rendered again from what
+    # was read, and must be identical. Those checks are gone, since all they added was a name for
+    # the defect, and the line number below is enough to find it in the file.
+    pw_state_text "$PWS_STATE" "$PWS_FLOOR" "$PWS_UP" "$PWS_REFUSED"
+    [ "$PW_RENDERED" = "$raw" ] || { pw_first_difference "$raw" "$PW_RENDERED"; return 2; }
     return 0
+}
+
+# Which line of a refused file is the first not to be what the writer writes, counting every
+# physical line, blank ones included. Only ever runs on a refusal, so its cost is no one's tick.
+pw_first_difference() {               # pw_first_difference RAW WANT -> PWS_ERR
+    local raw="$1" want="$2" done='' line n=0 nl=$'\n' LC_ALL=C
+    while [ -n "$want" ]; do
+        line="${want%%$'\n'*}"; want="${want#*$'\n'}"
+        n=$(( n + 1 ))
+        case "$raw" in
+            "$done$line$nl"*) done="$done$line$nl" ;;
+            "$done$line")     PWS_ERR="no newline at the end of line $n"; return 0 ;;
+            *)                PWS_ERR="line $n differs from what --publish writes"; return 0 ;;
+        esac
+    done
+    PWS_ERR="line $(( n + 1 )) differs from what --publish writes"
+    return 0
+}
+
+# THE FILE, EXACTLY. $(cat) strips the trailing newline the writer always writes, and drops any NUL
+# (silently, on bash 3.2), so a reader handed its output would be judging some other file. One
+# builtin read up to a NUL that should never be there: no fork, the newline kept, and a NUL found is
+# the read succeeding.
+PW_FILE=''
+pw_state_read() {                     # pw_state_read -> 0 with PW_FILE, 3 empty, 4 none, 5 with PWS_ERR
+    local rc='' LC_ALL=C
+    PW_FILE=''; PWS_ERR=''
+    [ -e "$PW_STATE" ] || return 4
+    [ -f "$PW_STATE" ] || { PWS_ERR="the state file is not a regular file"; return 5; }
+    { IFS= read -r -d '' PW_FILE; rc=$?; } 2>/dev/null < "$PW_STATE"
+    [ -n "$rc" ] || { PWS_ERR="cannot read the state file"; return 5; }
+    [ "$rc" -ne 0 ] || { PWS_ERR="NUL byte in the state file"; return 5; }
+    [ -n "$PW_FILE" ] || return 3
+    return 0
+}
+
+# THE ONE READING, which --state and --show both make: pw_state_read, then the reader.
+pw_state_load() {                     # pw_state_load -> 0 with PW_FILE and PWS_*, 3, 4, or 5 with PWS_ERR
+    pw_state_read || return
+    pw_state_parse "$PW_FILE" || return 5
 }
 
 # ─── modes ─────────────────────────────────────────────────────────────────────
@@ -386,29 +554,47 @@ pw_watch() {
 # the container does not ask for ports, it is told what happened to the ones it reported.
 pw_publish() {
     if ! pw_publish_parse "$@"; then
+        # For whoever ran it by hand. The supervisor's pmq sends stderr nowhere, and logs only the
+        # exit status.
         printf 'cs193v-portwatch: %s\n' "${PWP_ERR:-bad arguments}" >&2
         return 2
     fi
     mkdir -p "$PW_STATE_DIR" 2>/dev/null
     # Written .tmp then moved, so a reader never sees half a file. shortlink polls this while
     # deciding whether the URL it is about to print is reachable.
-    pw_state_render > "$PW_STATE.tmp" 2>/dev/null || return 1
+    pw_state_text "$PWP_STATE" "$PWP_FLOOR" "$PWP_UP" "$PWP_REFUSED"
+    printf '%s' "$PW_RENDERED" > "$PW_STATE.tmp" 2>/dev/null || return 1
     mv -f "$PW_STATE.tmp" "$PW_STATE" 2>/dev/null || return 1
     return 0
+}
+
+# --state: the file itself, for doctor and shortlink, which read it through this rather than
+# directly so that every reader refuses what this one does (#516). Byte for byte, and only a file
+# pw_state_parse accepts; never part of one. 0 printed; 3 empty, which is a watcher that has
+# started and published nothing yet; 4 no file, which is no tunnel at all; 5 anything else, with
+# the reason on stderr.
+pw_state_cat() {
+    local rc
+    pw_state_load; rc=$?
+    case "$rc" in
+        0) printf '%s' "$PW_FILE" ;;
+        5) printf 'cs193v-portwatch: %s\n' "${PWS_ERR:-unreadable}" >&2 ;;
+    esac
+    return "$rc"
 }
 
 # --show: for a student, or for an agent answering "why can't my browser reach this?". This is
 # the thing that used to be impossible: before the writeback, nothing inside the container could
 # see whether a port was forwarded on the host at all.
 pw_show() {
-    local text e port why
-    text="$(cat "$PW_STATE" 2>/dev/null)"
-    if [ -z "$text" ]; then
+    local e port why rc
+    pw_state_load; rc=$?
+    if [ "$rc" -eq 3 ] || [ "$rc" -eq 4 ]; then
         printf 'No forwarding information yet.\n'
         printf 'The launcher publishes it a moment after your container starts.\n'
         return 0
     fi
-    if ! pw_state_parse "$text"; then
+    if [ "$rc" -ne 0 ]; then
         printf 'The forwarding information is unreadable (%s).\n' "${PWS_ERR:-malformed}"
         printf 'Tell course staff; run ./cs193v doctor on your own computer.\n'
         return 1
@@ -466,7 +652,7 @@ pw_fault() {
 
 pw_usage() {
     cat <<'USAGE'
-usage: cs193v-portwatch [--once | --watch [SECONDS] | --publish KEY=VALUE... | --show]
+usage: cs193v-portwatch [--once | --watch [SECONDS] | --publish KEY=VALUE... | --state | --show]
 
 Reports which ports are listening in this container so the launcher on your own
 computer can make them reachable from your browser.
@@ -474,6 +660,9 @@ computer can make them reachable from your browser.
   --once      print the current set and exit
   --watch     stream it, one frame per second, until the reader goes away
   --publish   record what the launcher decided (the launcher calls this)
+  --state     print that record exactly, if it is valid: exit 0, or 3 if it is
+              empty, 4 if there is none, 5 if it is invalid (doctor and
+              shortlink read it this way)
   --show      what is reachable from your browser, and why anything is not
 USAGE
 }
@@ -483,6 +672,7 @@ pw_main() {
         --once)    pw_once ;;
         --watch)   shift; pw_watch "${1:-}" ;;
         --publish) shift; pw_publish "$@" ;;
+        --state)   pw_state_cat ;;
         --show)    pw_show ;;
         --fault)   shift; pw_fault "${1:-}" ;;
         -h|--help) pw_usage ;;

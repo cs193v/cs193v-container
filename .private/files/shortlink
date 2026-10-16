@@ -26,7 +26,8 @@
 # See CONTAINER-DESIGN.md, "Ports, and the one thing that will bite you".
 #
 # WHICH MEANS THIS HAS TO WAIT TO BE TOLD. Binding a port no longer implies being reachable on it
-# -- the tunnel decides that, a moment later, and says so in /tmp/cs193v-volatile/ports. Hence
+# -- the tunnel decides that, a moment later, and says so in /tmp/cs193v-volatile/ports, which
+# this reads through `cs193v-portwatch --state` rather than opening it (see PORTWATCH). Hence
 # the poll in acquire_forwarded_port, and hence the ~1 s this costs on a path that ends with a
 # human reading a URL and switching to a browser.
 #
@@ -41,6 +42,7 @@
 import html
 import os
 import re
+import subprocess
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -112,10 +114,17 @@ def check_url(url):
 # to appear as `up`, and only then print a short URL. Printing optimistically and letting the
 # student's click race the forward would remove the pause, but a dead link is far worse than a
 # wait.
-PORTS_FILE = "/tmp/cs193v-volatile/ports"
+#
+# AND IT IS READ THROUGH THE WATCHER, NOT OPENED. `cs193v-portwatch --state` prints the file only if
+# the watcher's own reader accepts it, byte for byte against what the writer writes, so shortlink
+# refuses exactly what --show and doctor refuse and carries no second parser to drift (#516). Its
+# answers: 0 and the file; 3, an empty file, which is a tunnel coming up; 4, no file, which is no
+# tunnel; 5, a file the reader refused.
+PORTWATCH = ("/usr/local/bin/cs193v-portwatch", "--state")
 
 # THE FILE'S WHOLE VOCABULARY, as a closed set, because that is what makes an unrecognised word
-# detectable rather than invisible. `up` is a state; the rest are reasons a port was refused.
+# detectable rather than invisible. `up` is a state; the rest are reasons a port was refused. Through
+# --state no such word can arrive any more; this keeps port_verdict total, below, and no more.
 VERDICTS = ("up", "busy", "capped", "v6lo", "loalt", "eth", "below-floor", "unknown")
 
 # Canonical decimal only. `03000` is not 3000: the file's writer never emits it, so a row that
@@ -139,10 +148,12 @@ CONFIRM_POLL = 0.1
 BUSY_RETRIES = 5
 
 
-# PURE AND TOTAL, and both words are load-bearing. It takes the file's CONTENTS rather than its
-# path so 19-shortlink-fuzz.sh can drive it thousands of times a second without a filesystem, and
-# it answers for ANY input without raising -- a half-written file is reachable in ordinary
-# operation, not just under attack, because the writer can be killed mid-rewrite.
+# PURE AND TOTAL. It takes the file's CONTENTS rather than its path so 19-shortlink-fuzz.sh can drive
+# it thousands of times a second without a filesystem, and it answers for ANY input without
+# raising. Not because a half-written file can reach it: the writer renames a complete file into
+# place, and the text arrives through --state, which hands over only a file the watcher's reader
+# accepted. A reader that can raise is one more way for a link never to be printed, and totality
+# costs nothing here.
 def port_verdict(text, port):
     """The state file's verdict on one port: "up", a refusal reason, or None if unmentioned."""
     if not isinstance(text, str):
@@ -167,13 +178,20 @@ def port_verdict(text, port):
 
 
 def read_ports_file():
+    """The state file's text, "" while a tunnel comes up, or None if nothing will confirm a port."""
     try:
-        with open(PORTS_FILE, "r") as fh:
-            return fh.read()
-    except OSError:
-        # No tunnel, no supervisor, or a bare `podman run` of this image with nothing outside it.
-        # Indistinguishable from here and treated the same: we will not be forwarded.
+        done = subprocess.run(PORTWATCH, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=CONFIRM_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        # A reader that cannot run cannot vouch for the file, so the file is not believed.
         return None
+    if done.returncode == 0:
+        return done.stdout.decode("utf-8", "replace")
+    if done.returncode == 3:
+        return ""
+    # 4: no tunnel, no supervisor, or a bare `podman run` of this image with nothing outside it. 5: a
+    # file the reader refused. Either way we will not be forwarded.
+    return None
 
 
 # WHY THIS PROCESS IS THE ONE THAT HAS TO NOTICE. open-url now raises its box BEFORE the link
@@ -211,6 +229,10 @@ def await_verdict(port, cancel_file=""):
         # means there is no supervisor to ever write it. Polling that for ten seconds would hang
         # every `$BROWSER` call in a container launched without a tunnel, and the build check
         # below is exactly that case.
+        #
+        # AND A FILE THE READER REFUSED IS NOT GOING TO MEND, so it is None too. Every publish
+        # renames a complete file into place, so what is there is what the writer wrote, and waiting
+        # would only spend the timeout arriving at the same answer.
         if text is None:
             return None
         verdict = port_verdict(text, port)
@@ -252,8 +274,9 @@ def acquire_forwarded_port(cancel_file=""):
         server.server_close()
         # ONLY `busy` IS WORTH ANOTHER GO: it means something on the STUDENT'S computer holds that
         # one port, and the kernel will hand us a different one. Everything else -- the cap, a
-        # refusal we do not recognise, or no answer at all -- says nothing about which port we
-        # picked, so retrying would just spend ten more seconds arriving at the same place.
+        # refusal we do not recognise, a file the reader refused, or no answer at all -- says
+        # nothing about which port we picked, so retrying would just spend ten more seconds
+        # arriving at the same place.
         if verdict != "busy":
             return None
     return None

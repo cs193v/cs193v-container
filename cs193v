@@ -2707,7 +2707,7 @@ tmux_doctor() {
 # at all, so when a student's server is listening on a forwarded port and their browser still
 # cannot reach it, this report is the answer, and nothing else is.
 tunnel_doctor() {
-    local pid state ports n up
+    local pid state ports n up rc why
     if tunnel_alive; then
         # `|| true` because the '?' below IS the failure path. This is the one of the four
         # sites whose next statement is not a test, so it is the one that would change meaning
@@ -2739,12 +2739,28 @@ tunnel_doctor() {
     # /dev/null, so reading it this way always saw an empty file and doctor silently printed no
     # dynamic line at all. run_timeout leaves the output in RT_OUT, which is how every other
     # probe in this report reads its answer.
+    #
+    # THROUGH THE WATCHER'S OWN READER, not `cat` (#516). --state prints the file only if the
+    # reader --show uses accepts it, so doctor can no longer report, row by row, a file that --show
+    # calls unreadable. Its 0 is a file to read; 3 and 4 are an empty file and none, a tunnel with
+    # nothing to say yet; anything else from it is a file nobody should believe, said once, with
+    # the reason it gave.
+    #
+    # AND IF PODMAN ITSELF FAILS, SAY NOTHING EXTRA: 124 is run_timeout's, 125 podman's own.
+    # verb_doctor has already run four probes through this same container by the time it reaches
+    # here, each of which renders visibly empty when podman is not answering. A fifth line saying
+    # so would be noise on top of a diagnosis the student already has.
     ports=''
-    pmv exec "$NAME" cat /tmp/cs193v-volatile/ports && ports="$RT_OUT"
-    # AND IF THAT READ FAILS, SAY NOTHING EXTRA. verb_doctor has already run four probes through
-    # this same container by the time it reaches here, each of which renders visibly empty when
-    # podman is not answering. A fifth line saying so would be noise on top of a diagnosis the
-    # student already has.
+    pmv exec "$NAME" cs193v-portwatch --state
+    rc=$?
+    case "$rc" in
+        0)              ports="$RT_OUT" ;;
+        3|4|124|125)    return 0 ;;
+        *)  why="$(printf '%s\n' "$RT_ERR" | sed -n 's/^cs193v-portwatch: //p' | tail -n 1)"
+            drow "$(msg doctor.row.ports)" \
+                 "$(msg doctor.ports.unreadable "HI=$C_YEL" "OFF=$C_OFF" "WHY=${why:-exit $rc}")"
+            return 0 ;;
+    esac
     [ -n "$ports" ] || return 0
 
     # A WORD PER STATE, not the state's name with a reason after it: the reason was read from a
