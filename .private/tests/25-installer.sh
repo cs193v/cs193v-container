@@ -1061,6 +1061,26 @@ assert_no_signoff "no-image:does-not-say-finished" "$out"
 assert_says_key_tail "no-image:tells-them-what-to-send-staff" err.image-missing-after-build \
                      "$out" "$ICAT"
 
+# THE BUILD'S HTTP CHECK, REACHED THE WAY A STUDENT REACHES IT (#355). The installer builds by
+# running `cs193v --rebuild`, so the refusal is the LAUNCHER's -- its catalogue, its box -- and
+# what this pins is that it arrives through the installer intact, ahead of any podman build, with
+# no sign-off claiming the install finished. 30-launcher-shim.sh's httpcheck:* own the rest.
+#
+# A STALE RECIPE, NOT AN ABSENT IMAGE, is what forces the build here, and the difference is the
+# sign-off assertion's whole value: with image_exists=no the smoke test refuses after any build
+# (no-image:* above), so "no sign-off" would hold with or without the check. A stale label builds,
+# the build stamps the current one, and without the check this install finishes.
+shim_new
+shim_set image_buildhash stale-recipe
+shim_fake_http_check differ
+out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$TMP/httpcheck")"
+assert_says_key   "httpcheck-install:refuses-through-the-installer" err.http-rewritten "$out"
+assert_no_signoff "httpcheck-install:does-not-say-finished" "$out"
+assert_eq         "httpcheck-install:builds-nothing" "0" "$(installer_log | grep -c '^build ' || true)"
+# AND THE CHECK REALLY RAN, rather than the install stopping somewhere earlier for another reason.
+# THROUGH shim_curl_log, which reads the shim installer_host recorded in $SHIM_LAST (#76).
+assert_ne         "httpcheck-install:the-check-ran" "0" "$(shim_curl_log | grep -c 'InRelease' || true)"
+
 # ── the check asks the LAUNCHER which image, rather than spelling one out (#312) ──
 # THE CASE THAT WAS RED ON A REAL VM. Under CS193V_INSTANCE the launcher builds and runs
 # localhost/cs193v:local-<instance>; a hard-coded `localhost/cs193v:local` in smoke_test then

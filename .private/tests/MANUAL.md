@@ -62,6 +62,24 @@ too, and is the better choice if you also want to watch the network fetches.
 
 Then let one fail (drop the network during the build): one red STOP box, no live box above it, a
 `✗` with the bar frozen where it stopped, and the failing lines readable inside the STOP box.
+Below the box is the log's path, whole on one line, and on a Mac an `open -R` command; run it and
+check Finder shows a file holding the whole build log, with the HTTP check's record at the end
+(#355).
+
+**The HTTP check, against the real thing (#355).** On a Mac, switch on System Settings → Screen
+Time → Content & Privacy, set App Store, Media, Web, & Games → Safari to Limit Adult Websites, and
+run `./cs193v --rebuild --no-cache`. *Expect:* `err.http-rewritten` within a few seconds, with no
+bar ever drawn, and a log below the box whose record says `differ`. **If the check passes instead and
+the build then dies at layer 1 on a hash mismatch**, that is the known gap `README.md` records —
+Screen Time left InRelease alone — and `HTTP_CHECK_FILE` needs to move to a release-pocket `.deb`.
+Either way, switch Content & Privacy off afterwards and confirm the build goes through.
+
+Then turn Wi-Fi off and run it again. *Expect:* `err.ubuntu-unreachable` after three attempts and
+still no bar. Measured against the real code: under a second when the name does not resolve, 16 s
+against a blackholed address (three attempts of a 5 s connect timeout, both schemes at once).
+
+*Automated:* every outcome of the check against a fake curl (`30-launcher-shim.sh ::
+httpcheck:*`). What needs a human is whether a real content filter alters the file it fetches.
 
 *Automated:* the layout, the sanitising, the eight rows, the geometry ladder and both endings,
 against a fake podman on a pty (`30-launcher-shim.sh :: tailbox:*`). What needs a human is

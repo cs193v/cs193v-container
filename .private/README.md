@@ -847,7 +847,75 @@ install want both streams anyway. Each script keeps a local name that says what 
 
 A failed build no longer leaves podman's output on the screen, so `err.build-failed` now
 carries the last lines of `$BUILD_LOG` inside the STOP box. That log is still the thing to
-ask a student for; it is not deleted on exit.
+ask a student for; it is not deleted on exit. **Its path is printed below the box** (#355), by
+`note.build-log` in `die()`'s trailer, because `$BUILD_LOG` is in `TMPDIR` — on a Mac a hidden
+`/var/folders/…` path wider than the box, which `box()` breaks mid-token, so inside the box the
+path a student was asked to send could not be copied out of the message asking for it. On a Mac
+the trailer adds `open -R "…"`, since Finder does not show `/var/folders`; on WSL the path is the
+`\\wsl.localhost` form. **Not a copy in the course folder**, which was the first version: #16
+above keeps that folder to the launcher and `projects/`, and a third file there after every
+failed build is exactly what #16 rules out.
+
+**Plain HTTP is checked before anything is built** (#355). The Ubuntu archive is the one origin
+this build reaches over plain `http://` — the base image's `ubuntu.sources` says so, and every
+other fetch is HTTPS — and a student whose Mac had Screen Time on died at layer 1 with apt's
+`Hashes of received file:`: the right number of bytes, the wrong content, under a box saying to
+check their connection. So `build_image` first fetches `dists/resolute/InRelease` from the archive
+apt will use (ports.ubuntu.com on arm64, archive.ubuntu.com otherwise) over both schemes, and
+refuses before podman has downloaded anything when a download the build depends on was seen to go
+wrong. That file has not changed since 26.04's release day; it is also apt's own first fetch, so a
+rewrite that reaches it fails apt too. It runs only when a build is about to happen, never on the
+two-second recreate, and costs well under a second: the two fetches run at once.
+
+**The table of what refuses and what builds is `http_check`'s comment in the launcher**, beside the
+`case` it describes, so it cannot drift from the code. In outline: differing bytes, or plain HTTP
+answered with something other than the file, is `err.http-rewritten`; plain HTTP failing is
+`err.http-blocked`; HTTPS failing is `err.https-failed`; both failing is `err.ubuntu-unreachable`.
+"Failed" means one of curl's network exit codes (`http_check_net_failure`) after three attempts,
+the build's allowance for a transient; an answered fetch is not retried. Each refusal is its own
+box because the causes and fixes differ. Everything else builds: the same bytes, **the same non-200 over both** (the file gone, which
+`00-release-gates.sh` §11 reports, or an Ubuntu outage — neither the student's machine), a fetch
+that ended for a reason that is not the network's (curl unable to write on a full disk), and a
+missing curl, which the installer rules out and which says nothing about a build that never uses
+the host's curl.
+
+**This is an exception to the pre-flight ban below, taken deliberately.** The ban's cases, #112 and
+#114, refused working machines on a guess *about the machine*. Every refusal here is an observation
+of a download the build itself needs going wrong: apt fetches this host over plain HTTP — on a
+rebuild with the base image cached it is the build's first network access — and the rest of the
+build is HTTPS. The first draft refused only on differing bytes and went ahead on every failed
+fetch; that was the ban applied past its reason, and it would have sent a student with no route to
+Ubuntu into a build that died minutes later under the old "check your connection" box. A certificate
+failure is not an old trust store: the archive's chain is Let's Encrypt YR1 → ISRG Root YR,
+cross-signed by ISRG Root X1. These limits are known and accepted:
+
+* **It may not see Screen Time at all.** On the student's Mac, `apt-get update` fetched InRelease
+  over plain HTTP and verified it; the file that came back altered was
+  `fontconfig_2.17.1-3ubuntu1_arm64.deb` (its MD5 is the screenshot's "expected" hash). A filter
+  that rewrites some files and not others can pass this check and still fail the build. Which
+  file to fetch was not measured against a live Screen Time — that was weighed and declined — so
+  if a student reports #355's symptom past a green check, the file in `HTTP_CHECK_FILE` is the
+  first thing to change, and a `.deb` from the release pocket is the candidate.
+* **It can refuse a build that would have worked**, two ways. An update that touches only
+  `files/` re-runs only the layers after `COPY files/`, and every apt step is above it, so that
+  build makes no plain-HTTP fetch for a filter to break. And `err.https-failed` is decided by the
+  host's curl and trust store — a stray `CURL_CA_BUNDLE`, a Homebrew curl with no certificates, a
+  campus DNS mirror with a mismatched certificate — while the build fetches Ubuntu over plain HTTP
+  only. Both were weighed and accepted: the box's remedy is harmless when it was not needed, and
+  the cases are rare. Telling a cached build apart would need podman's layer cache, which nothing
+  here can ask.
+* **An answer is believed at once, and a failure is retried immediately.** A transient 503 over
+  plain HTTP while HTTPS answers reads as a replaced response; three attempts back to back cannot
+  ride out a DNS blip of more than a moment. Both were weighed and kept as they are.
+* **It is retired by moving apt to HTTPS** (#537): after that the build
+  makes no plain-HTTP fetch for anything to rewrite, and this check guards nothing.
+
+`CS193V_SKIP_HTTP_CHECK=1` turns it off, for a false positive and for the shim tier, whose
+`shim_new` sets it so that no case reaches the network by accident. What it found either way is
+in `$BUILD_LOG.http-check`, and at the end of `$BUILD_LOG` after a refusal or a failed build: the
+verdict and the attempts it took, both URLs, curl's exit status and complaint, the HTTP status,
+sizes, SHA-256s, the first differing byte, and both sets of response headers —
+an intercepting proxy often names itself in `Via:` or `Server:`.
 
 `--no-cache` retries once only, deliberately — the retry exists because podman keeps
 completed layers, which is exactly what `--no-cache` throws away.

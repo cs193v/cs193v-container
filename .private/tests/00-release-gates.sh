@@ -915,3 +915,63 @@ $(cat "$pay_tmp/curl.err")"
     payload_skip_body "${pay_net:-the published archive could not be downloaded}"
 fi
 rm -rf "$pay_tmp"
+
+# ─── 11. the build's HTTP check still has a file to fetch  (#355) ──────────────
+# build_image fetches HTTP_CHECK_FILE from the Ubuntu archive over http:// and https:// and refuses
+# to build if the copies differ or either fetch fails -- but the SAME 404 over both builds, because
+# that is the file gone rather than the student's network. So the day the file stops being served
+# the check stops checking, with nothing on a student's screen to say so; this does.
+#
+# BOTH ARCHIVES, because the launcher picks by architecture: ports.ubuntu.com for arm64, the archive
+# for everything else. THE FILE AND THE ARCHIVES ARE THE LAUNCHER'S OWN CONSTANTS, read through
+# setting_of rather than retyped, for §1's reason: a retyped copy asserts that two strings agree
+# today, and would go on checking hosts the launcher had stopped using. setting_of's sentinel fails
+# the assert_ne below and skips the fetch, so a constant that cannot be read is red rather than a
+# fetch of nothing. Unreachable is a skip by §1's curl_skip_why; anything a server answered is
+# judged. One pass per archive, §1b's shape.
+#
+# THE SAME BYTES OVER BOTH SCHEMES IS ASSERTED TOO, and it can be red for two reasons that need
+# telling apart by hand: the file is no longer frozen (Ubuntu republished it, so the check would
+# refuse every student), or the network this gate ran on rewrites plain HTTP -- which is the
+# check's own subject, and worth knowing about the machine a release is cut from.
+hc_file="$(setting_of HTTP_CHECK_FILE "$REPO/cs193v")"
+record    "httpcheck:the-file" "$hc_file"
+assert_ne "httpcheck:the-launcher-names-a-file" "" "$hc_file"
+hc_skip_body() {                      # hc_skip_body NAME WHY -> skip every §11 name after the fetch
+    skip "httpcheck:$1:both-ways-are-the-same-bytes" "$2"
+}
+for hc_pair in "arm64-archive HTTP_CHECK_ARCHIVE_ARM64" "other-archive HTTP_CHECK_ARCHIVE"; do
+    hc_name="${hc_pair%% *}"
+    hc_var="${hc_pair#* }"
+    hc_base="$(setting_of "$hc_var" "$REPO/cs193v")"
+    record    "httpcheck:$hc_name" "$hc_base"
+    assert_ne "httpcheck:$hc_name:the-launcher-names-it" "" "$hc_base"
+    hc_tmp="$(new_tmpdir)"
+    hc_why=''
+    case "$hc_file$hc_base" in
+        *"$CHECKER_DIED"*) hc_why="the launcher's HTTP_CHECK_FILE or $hc_var could not be read" ;;
+        *)
+            curl -fsS -o "$hc_tmp/http"  "http://$hc_base/$hc_file"  2>"$hc_tmp/http.err";  hc_rc_http=$?
+            curl -fsS -o "$hc_tmp/https" "https://$hc_base/$hc_file" 2>"$hc_tmp/https.err"; hc_rc_https=$?
+            hc_why="$(curl_skip_why "$hc_rc_http" "http://$hc_base/$hc_file")"
+            [ -n "$hc_why" ] || hc_why="$(curl_skip_why "$hc_rc_https" "https://$hc_base/$hc_file")" ;;
+    esac
+    if [ -n "$hc_why" ]; then
+        skip "httpcheck:$hc_name:serves-the-file-both-ways" "$hc_why"
+        hc_skip_body "$hc_name" "$hc_why"
+    elif [ "$hc_rc_http" -eq 0 ] && [ "$hc_rc_https" -eq 0 ]; then
+        pass "httpcheck:$hc_name:serves-the-file-both-ways"
+        if cmp -s "$hc_tmp/http" "$hc_tmp/https"; then
+            pass "httpcheck:$hc_name:both-ways-are-the-same-bytes"
+        else
+            fail "httpcheck:$hc_name:both-ways-are-the-same-bytes" \
+                 "$hc_file differs between http:// and https:// on $hc_base -- either Ubuntu republished it, so the launcher's check would refuse every student and needs a new file, or this network rewrites plain HTTP"
+        fi
+    else
+        fail "httpcheck:$hc_name:serves-the-file-both-ways" \
+             "$hc_file did not come back from $hc_base (http curl exit $hc_rc_http, https $hc_rc_https): the same failure both ways leaves the launcher's check silently off, and one-sided it refuses every student
+$(cat "$hc_tmp/http.err" "$hc_tmp/https.err")"
+        hc_skip_body "$hc_name" "the file did not come back over both schemes"
+    fi
+    rm -rf "$hc_tmp"
+done
