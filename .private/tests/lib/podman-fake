@@ -69,8 +69,13 @@
 #   machine_stop_rc  exit code for `machine stop`           [0]
 #   exec_out         what `podman exec ... --attach` prints  []
 #   claim_out        what `podman exec ... --claim` prints   []
-#   ports_out        what `podman exec ... cat /tmp/cs193v-volatile/ports` prints, i.e.
-#                    the supervisor's state file as doctor reads it  []
+#   ports_out        what `podman exec ... cs193v-portwatch --state` prints, i.e. the
+#                    supervisor's state file as doctor reads it (#516). Printed WHATEVER the
+#                    status, though the real --state prints nothing unless it exits 0, so a
+#                    doctor that reads the output of a refusal has rows to show for it  []
+#   state_rc         the status that --state exits with  [0 with ports_out staged, 4 without:
+#                    a file, or none]
+#   state_err        what --state says on stderr  []
 #   top_out          what `podman top` prints               []
 #   port_out         what `podman port` prints              []
 #   watch_out        the WHOLE `cs193v-portwatch --watch` stream, one line of protocol
@@ -470,6 +475,13 @@ level=error msg="cannot set up pasta"' >&2
                     exit 0
                 fi
                 echo 'cs193v-portwatch 1'; echo 'BEGIN 0'; echo 'END'; exit 0 ;;
+            # --state, which is how doctor reads the state file (#516). See ports_out above.
+            *cs193v-portwatch*--state*)
+                if [ -f "$SHIM/ports_out" ]; then src=0; else src=4; fi
+                src="$(get state_rc "$src")"
+                get state_err '' >&2
+                get ports_out ''
+                exit "$src" ;;
             # A PUBLISH, which can be told to fail: one staged code per call (#368). Silent,
             # as pmq discards the output anyway.
             *cs193v-portwatch*--publish*)
@@ -489,7 +501,6 @@ level=error msg="cannot set up pasta"' >&2
             # "the ENTER prompt comes before the container is opened" sees the claim and fails on
             # an ordering that is actually correct. Measured: it did.
             *--claim)         get claim_out ''; printf '' ;;
-            */tmp/cs193v-volatile/ports) get ports_out ''; echo ;;
             *)                case "$*" in
                                   *'date +%s'*) get container_date "$(date +%s)"; echo ;;
                                   *) get exec_out ''; echo ;;

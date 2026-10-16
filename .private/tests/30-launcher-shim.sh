@@ -2914,16 +2914,19 @@ sup_reap
 # A STAND-IN SUPERVISOR, not a real one. tunnel_sup_alive asks only that the pidfile's process
 # is alive and has --dev-supervise in its argv; a real supervisor would publish over the state
 # this case stages, and the file podman-fake serves is the staged one regardless.
-shim_new
-shim_fake_ssh
-shim_set state running
-shim_set label_dir "$COPY"
-DEVT="$(launcher --dev-tunnel)"
-CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
-shim_ssh_master "$CTL"
-python3 -c 'import time; time.sleep(60)' --dev-supervise </dev/null >/dev/null 2>&1 &
-STANDIN=$!; SUP_PIDS="$SUP_PIDS $STANDIN"
-printf '%s\n' "$STANDIN" > "$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+doctor_standin() {                    # doctor_standin SECS -> a running container, its tunnel, and a stand-in alive SECS
+    shim_new
+    shim_fake_ssh
+    shim_set state running
+    shim_set label_dir "$COPY"
+    DEVT="$(launcher --dev-tunnel)"
+    CTL="$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "ctl" { print $2 }')"
+    shim_ssh_master "$CTL"
+    python3 -c "import time; time.sleep($1)" --dev-supervise </dev/null >/dev/null 2>&1 &
+    STANDIN=$!; SUP_PIDS="$SUP_PIDS $STANDIN"
+    printf '%s\n' "$STANDIN" > "$(printf '%s\n' "$DEVT" | do_awk -F'\t' '$1 == "suppid" { print $2 }')"
+}
+doctor_standin 60
 shim_set ports_out "$(printf 'state\tmaster-unresponsive\nfloor\t1024\nrefused\t21500\tv6lo\n')"
 out="$(launcher doctor)"
 # THE CONTROL: the refusal row is printed from the same file, so this says doctor got that far.
@@ -2933,6 +2936,73 @@ assert_says_sub "doctor:a-stalled-tunnel-says-what-to-do" doctor.ports.stalled "
 assert_says_not_key "doctor:a-stalled-tunnel-is-not-nothing-listening" \
                     doctor.ports.nothing-listening "$out"
 assert_not_match "doctor:no-row-ends-in-a-dangling-dash" '—[[:space:]]*$' "$out"
+sup_reap
+
+# ─── doctor reads the file through the watcher's reader  (#516, #418) ──────────
+# doctor used to `cat` the file and pick rows out of it with awk, so a file --show called
+# unreadable was reported row by row as if nothing were wrong (#516). It asks
+# `cs193v-portwatch --state` now, which podman-fake answers from ports_out, state_rc and
+# state_err, and it shows rows only from a file that call printed with status 0.
+#
+# THE ROWS ARE MATCHED WHOLE, as drow lays them out, from the catalogue: msg_text stops at the
+# first placeholder, and every one of these messages but nothing-listening starts with one, so a
+# key needle would be empty (helpers:no-negative-key-assertion-rests-on-a-short-needle). #418's
+# {{STATE}} row is nothing but a placeholder. The issue asked for the `reason` that followed the
+# state, which #266 removed along with the key nothing wrote.
+doctor_standin 300
+doctor_ports() {                      # doctor_ports STATE_RC STATE_ERR PORTS_OUT -> out
+    rm -f "$SHIM/state_rc" "$SHIM/state_err" "$SHIM/ports_out"
+    [ -z "$1" ] || shim_set state_rc "$1"
+    [ -z "$2" ] || shim_set state_err "$2"
+    [ -z "$3" ] || shim_set ports_out "$3"
+    out="$(launcher doctor)"
+}
+# A KEY NOT IN THE CATALOGUE, or a placeholder left unfilled, is no row at all, and every "0"
+# below would count it as a pass -- so it says so instead of counting, as assert_says_sub does.
+ports_rows() {                        # ports_rows TEXT KEY [NAME=VALUE...] -> how many rows of TEXT are that message
+    local text="$1" k="$2" row; shift 2
+    row="$(msg_of_in "$PRIVATE/messages.txt" "$k" "$@")"
+    case "$row" in ''|*'(missing message'*|*'{{'*) printf 'no row for %s: %s' "$k" "$row"; return 0 ;; esac
+    printf '%s\n' "$text" | grep -cxF -e "$(printf '  %-16s %s' "$(msg_text doctor.row.ports)" "$row")" || true
+}
+doctor_ports '' '' "$(printf 'state\tbroken\nfloor\t1024\nrefused\t21500\tv6lo\n')"
+# THE CONTROL, as in #266: the refusal row comes from the same file, so doctor read it.
+assert_says_key "doctor:a-broken-tunnel-still-explains-a-refusal" doctor.ports.why.v6lo "$out"
+assert_eq "doctor:a-broken-tunnel-says-so"         "1" "$(ports_rows "$out" doctor.ports.state STATE=broken)"
+assert_eq "doctor:a-broken-tunnel-is-not-stalled"  "0" "$(ports_rows "$out" doctor.ports.stalled HI= OFF=)"
+doctor_ports '' '' "$(printf 'state\thealthy\nfloor\t1024\nup\t3000\tlo\n')"
+# THE CONTROL: without it, a doctor that never reached the port rows would pass both absences.
+# It is also the forwarded row's first case on this tier; the live tier had the only other.
+assert_eq "doctor:a-healthy-tunnel-says-what-is-forwarded" "1" \
+          "$(ports_rows "$out" doctor.ports.forwarded N=1 PORTS=3000)"
+assert_eq "doctor:a-healthy-tunnel-has-no-state-row" "0" "$(ports_rows "$out" doctor.ports.state STATE=healthy)"
+assert_eq "doctor:a-healthy-tunnel-is-not-stalled"   "0" "$(ports_rows "$out" doctor.ports.stalled HI= OFF=)"
+
+# A FILE THE READER REFUSED is one row saying so, and nothing from the file: ports_out here has
+# an up row that a doctor reading a refusal's output would report as forwarded.
+doctor_ports 5 'cs193v-portwatch: line 3 differs from what --publish writes' "$(printf 'state\thealthy\nfloor\t1024\nup\t3000\tlo\n')"
+assert_eq "doctor:an-unreadable-state-file-says-why" "1" \
+          "$(ports_rows "$out" doctor.ports.unreadable HI= OFF= "WHY=line 3 differs from what --publish writes")"
+assert_eq "doctor:an-unreadable-state-file-shows-nothing-from-it" "0" \
+          "$(ports_rows "$out" doctor.ports.forwarded N=1 PORTS=3000)"
+assert_says_not_key "doctor:an-unreadable-state-file-is-not-nothing-listening" \
+                    doctor.ports.nothing-listening "$out"
+# A STATUS WITH NOTHING ON STDERR is still unreadable, and says which status.
+doctor_ports 1 '' ''
+assert_eq "doctor:a-silent-refusal-names-its-status" "1" \
+          "$(ports_rows "$out" doctor.ports.unreadable HI= OFF= "WHY=exit 1")"
+# NO FILE, AND PODMAN NOT ANSWERING, add nothing, as before: the first is a tunnel with nothing
+# to say, and the second has already shown as empty answers in every probe above this one. Each
+# with a control that doctor got as far as the read: the tunnel answered and the supervisor was
+# alive, or it would have stopped at "not running" and never asked.
+doctor_ports 4 '' ''
+assert_says_key "doctor:no-state-file-still-finds-the-tunnel-up" doctor.tunnel.up "$out"
+assert_eq       "doctor:no-state-file-still-finds-the-supervisor" "0" \
+                "$(ports_rows "$out" doctor.ports.not-running HI= OFF=)"
+assert_says_not_key_tail "doctor:no-state-file-is-not-unreadable" doctor.ports.unreadable "$out"
+doctor_ports 125 'Error: no container with name or ID "cs193v" found' ''
+assert_says_key "doctor:podman-failing-still-finds-the-tunnel-up" doctor.tunnel.up "$out"
+assert_says_not_key_tail "doctor:podman-failing-is-not-unreadable" doctor.ports.unreadable "$out"
 sup_reap
 
 # ─── ...and a publish that fails is sent again  (#368) ─────────────────────────

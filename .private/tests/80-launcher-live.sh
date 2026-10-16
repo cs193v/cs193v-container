@@ -401,7 +401,7 @@ assert_contains "volatile:the-previous-boot-state-is-gone" "ABSENT" \
 assert_contains "volatile:show-has-nothing-to-report" "No forwarding information yet" \
                 "$(E 'cs193v-portwatch --show')"
 assert_contains "volatile:the-state-dir-is-writable-after-a-restart" "PUBLISHED" \
-                "$(E 'cs193v-portwatch --publish state=healthy up= refused= && echo PUBLISHED')"
+                "$(E 'cs193v-portwatch --publish state=healthy floor=1024 up= refused= && echo PUBLISHED')"
 release_container
 
 # ─── the exited -> running race, which is the one podman cannot make atomic ─────
@@ -1020,8 +1020,9 @@ fi
 #
 # A FORWARDED PORT FIRST, because "nothing is up" is only news about a state file that had
 # something up.
+# THROUGH --state (#516), so the file the real supervisor wrote is also one the strict reader takes.
 state_says_gone() {
-    podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
+    podman exec "$NAME" cs193v-portwatch --state 2>/dev/null \
         | do_awk -F'\t' '$1 == "state" { s = $2 } $1 == "up" { u++ }
                          END { exit !(s == "master-unresponsive" && u == 0) }'
 }
@@ -1052,7 +1053,7 @@ fi
 # master and resets the supervisor through the pidfile. This is the other way out -- the same
 # master answering again -- and only the -O check the supervisor sends while unresponsive sees it.
 state_says_healthy_with() {           # state_says_healthy_with PORT
-    podman exec "$NAME" cat "$PORTS_STATE" 2>/dev/null \
+    podman exec "$NAME" cs193v-portwatch --state 2>/dev/null \
         | do_awk -F'\t' -v p="$1" '$1 == "state" { s = $2 } $1 == "up" && $2 == p { u = 1 }
                                    END { exit !(s == "healthy" && u) }'
 }

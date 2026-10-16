@@ -178,6 +178,10 @@ assert_eq "fuzz:an-empty-frame-is-accepted" "1" "$RUN_RC"
 # The boundaries are valid, not hostile: 1 and 65535 are real ports and must survive the gate.
 run_case "cs193v-portwatch 1" "BEGIN 2" "1:lo" "65535:eth" "END"
 assert_eq "fuzz:boundary-ports-are-accepted" " 1:lo 65535:eth" "$RUN_PORTS"
+# Nor is a port that ends or begins another a repeat: the gate's repeated-port check must match
+# whole ports. 3000 after 13000 needs its leading space, and 300 after 3000 its colon.
+run_case "cs193v-portwatch 1" "BEGIN 3" "13000:lo" "3000:lo" "300:lo" "END"
+assert_eq "fuzz:a-port-inside-another-is-not-a-repeat" " 13000:lo 3000:lo 300:lo" "$RUN_PORTS"
 
 # ─── the hostile corpus: every one of these MUST be fatal ──────────────────────
 # Hand-built during design, kept as permanent regressions. Anything a future fuzz run finds is
@@ -237,6 +241,13 @@ hostile_fatal "leading-space"        "$H" "BEGIN 1" " 3000:lo" "END"
 hostile_fatal "carriage-return"      "$H" "BEGIN 1" "$(printf '3000\r'):lo" "END"
 hostile_fatal "record-too-long"      "$H" "BEGIN 1" "3000:loooooooooooooooo" "END"
 hostile_fatal "unknown-line-type"    "$H" "BEGIN 1" "MAYBE 3" "END"
+# A PORT TWICE IN ONE FRAME. The watcher merges by port, so only a broken one sends this, and the
+# supervisor would publish the repeat -- a second refusal for the port, which the state file's
+# writer now refuses (#406), so every publish after it would fail and the file go stale. Fatal
+# here instead, like any other frame the watcher cannot have meant. Once with one class twice,
+# once with two, so a check that compared whole records would still let the second through.
+hostile_fatal "repeated-port"        "$H" "BEGIN 2" "21500:v6lo" "21500:v6lo" "END"
+hostile_fatal "repeated-port-two-classes" "$H" "BEGIN 2" "3000:lo" "3000:any" "END"
 
 # ─── properties 2-6, over generated input ──────────────────────────────────────
 # 2 always terminates       (the suite's own timeout catches a hang)
@@ -321,7 +332,7 @@ record "fuzz:cases-run" "$N (seed $SEED)"
 #
 # A LITERAL, deliberately, in the same spirit as ports:count-is-47 in 10-static.sh: add a case
 # and you are made to come and look at this line.
-assert_eq "fuzz:every-hostile-case-ran" "34" "$HOSTILE_RAN"
+assert_eq "fuzz:every-hostile-case-ran" "36" "$HOSTILE_RAN"
 
 # ─── a malformed frame must not corrupt the next parse ─────────────────────────
 # Halting, not resyncing: after a fatal the supervisor stops. What must hold is that a FRESH

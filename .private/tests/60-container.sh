@@ -952,9 +952,11 @@ host_gets_000() { [ "$(host_code "$1")" = 000 ]; }
 # What the container itself says about a port, which is the reason half of every refusal. Asserting
 # on it turns "unreachable" from an absence into a diagnosis -- the difference between "the tunnel
 # is broken" and "you bound ::1", which is the whole reason the state file carries a reason at all.
+# THROUGH --state, as doctor and shortlink read it (#516), so the file is also one the strict reader
+# accepts.
 dyn_reason() {
-    podman exec "$NAME" awk -F'\t' -v p="$1" \
-        '$1 == "refused" && $2 == p { print $3; exit }' "$PORTS_STATE" 2>/dev/null
+    podman exec "$NAME" cs193v-portwatch --state 2>/dev/null \
+        | do_awk -F'\t' -v p="$1" '$1 == "refused" && $2 == p { print $3; exit }'
 }
 # A FUNCTION, so wait_until re-reads the file on every poll. Written as
 # `sh -c "[ -n \"$(dyn_reason ...)\" ]"` the substitution ran once, before the first poll, and the
@@ -1156,8 +1158,9 @@ fi
 # THE CONTAINER'S OWN VIEW AGREES. shortlink only prints a short URL after the state file says its
 # port is up, so this is close to a tautology -- but it is the one assertion that would catch it
 # printing on the strength of a stale or misread file, which is the failure the fuzzer cannot see
-# because the fuzzer never touches a real one.
-if [ -n "$sl_port" ] && E "grep -q '^up	$sl_port	' $PORTS_STATE"; then
+# because the fuzzer never touches a real one. Read through --state, so the real supervisor's file
+# is also one the strict reader accepts (#516).
+if [ -n "$sl_port" ] && E "cs193v-portwatch --state | grep -q '^up	$sl_port	'"; then
     pass "shortlink:the-tunnel-says-that-port-is-up"
 else
     fail "shortlink:the-tunnel-says-that-port-is-up" \

@@ -616,6 +616,12 @@ dynamic ports
 [[doctor.ports.state]]
 {{STATE}}
 
+# The watcher's own reader refused the state file (#516), so nothing in it is shown. WHY is the
+# reader's reason, or the status it exited with if it gave none. Not a student's to fix: a bad
+# file means the launcher or the watcher is broken.
+[[doctor.ports.unreadable]]
+{{HI}}unreadable{{OFF}} ({{WHY}}) — tell course staff
+
 [[doctor.ports.forwarded]]
 {{N}} forwarded: {{PORTS}}
 

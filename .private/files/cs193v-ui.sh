@@ -1640,6 +1640,13 @@ dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
     rec="$line"; p="${rec%%:*}"; c="${rec#*:}"
     case "$c" in lo|any|v6lo|eth|loalt) ;; *) dynports_fatal "unknown class" "$c"; return 2 ;; esac
     dynports_port "$p" || return 2
+    # One record per port. The watcher merges by port, so a repeat is a broken watcher, and
+    # passing it on would publish the port twice -- which the state file's writer refuses (#406),
+    # leaving the file stale from then on. Matched on the port alone, so a second class is no way
+    # around it; the leading space keeps 3000 from matching 13000.
+    case "$DYNPORTS_FRAME" in
+        *" $DYNPORTS_PORT:"*) dynports_fatal "repeated port" "$DYNPORTS_PORT"; return 2 ;;
+    esac
     DYNPORTS_FRAME="$DYNPORTS_FRAME $DYNPORTS_PORT:$c"
     DYNPORTS_SEEN=$(( DYNPORTS_SEEN + 1 ))
     return 0

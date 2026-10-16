@@ -4409,10 +4409,23 @@ assert_not_contains "rejected:no-type=tmpfs" "type=tmpfs" "$args_live"
 # file would be read from somewhere the mount does not cover -- everything keeps working until a
 # restart, and the stale-file bug is back. Each haystack is the one line that names the path, and
 # never a comment, so a comment cannot stand in for the code.
-assert_contains "volatile:shortlink-reads-where-the-watcher-writes" "PORTS_FILE = \"$PORTS_STATE\"" \
-                "$(grep -e '^PORTS_FILE = ' "$PRIVATE/files/shortlink")"
-assert_contains "volatile:doctor-reads-where-the-watcher-writes" "cat $PORTS_STATE" \
-                "$(printf '%s\n' "$launcher_code" | grep -e ' cat /tmp/')"
+#
+# SHORTLINK NO LONGER NAMES THE PATH AT ALL (#516). It asks the installed watcher, whose --state
+# prints the file only if the watcher's own reader accepts it, so the path lives in one place and
+# shortlink cannot drift from it. Its code, comments stripped, must name no path under the state
+# directory. That the watcher is installed before the build checks shortlink is the build's own
+# check: it asks --state and requires its 4.
+assert_contains "volatile:shortlink-asks-the-watchers-reader" \
+                'PORTWATCH = ("/usr/local/bin/cs193v-portwatch", "--state")' \
+                "$(grep -e '^PORTWATCH = ' "$PRIVATE/files/shortlink")"
+assert_eq "volatile:shortlink-names-no-state-path" "" \
+          "$(lint_grep --strip-comments -F -e "$PORTS_STATE_DIR" -- "$PRIVATE/files/shortlink")"
+# DOCTOR TOO (#516): through the watcher's --state, and never by `cat`ing the path, which is how it
+# came to report a file --show called unreadable.
+assert_contains "volatile:doctor-asks-the-watchers-reader" 'pmv exec "$NAME" cs193v-portwatch --state' \
+                "$(printf '%s\n' "$launcher_code" | grep -F -e 'cs193v-portwatch --state')"
+assert_eq "volatile:doctor-names-no-state-path" "" \
+          "$(printf '%s\n' "$launcher_code" | grep -F -e "$PORTS_STATE_DIR" || true)"
 # AND THE NAME SAYS WHAT IT IS. Everything else under /tmp survives a restart; this name is the
 # only warning the next person to add a file there gets. The one literal spelling in the suite.
 assert_eq "volatile:the-state-dir-is-named-for-what-it-is" "/tmp/cs193v-volatile" "$PORTS_STATE_DIR"
@@ -5282,14 +5295,20 @@ assert_ok  "shellcheck:helpers" shellcheck --severity=warning \
 # name-a-file mechanism leaving 17 test files unlinted; this was the product-side instance of it,
 # which #158 does not cover.
 #
-# --exclude=SC2034 for exactly one variable: pw_state_parse validates `floor=` and stores it in
-# PWS_FLOOR, which nothing reads. Every other PWS_* is consumed by pw_show. The key has to be
-# ACCEPTED -- the parser is a closed vocabulary and an unknown key is fatal, so the host's
-# `floor=` would otherwise make the whole state file unreadable -- but storing the value is
-# consistency rather than use. Excluded rather than fixed here: this change is about making the
-# lint cover the file at all, and dropping or using a variable is a change to the product.
-assert_ok  "shellcheck:portwatch" shellcheck --severity=warning --exclude=SC2034 \
+# NO EXCLUSIONS. --exclude=SC2034 used to cover PWS_FLOOR, which pw_state_parse stored and nothing
+# read; the reader now re-renders the file from every PWS_* it parsed and compares (#406), so the
+# floor is read like the rest.
+assert_ok  "shellcheck:portwatch" shellcheck --severity=warning \
                                 "$PRIVATE/files/cs193v-portwatch"
+# THE STATE FILE'S CAP IS THE HOST'S. The host forwards at most DYNPORTS_MAX ports and its gate
+# refuses a frame of more records, so no list it publishes is longer; portwatch refuses a longer
+# one at both ends with PW_MAX. A value in one file enforced by another is a value that drifts, so
+# both are asserted to BE numbers first and then to agree.
+pw_max="$(sed -n 's/^PW_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-portwatch")"
+dyn_max="$(sed -n 's/^DYNPORTS_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
+assert_match "portwatch:declares-its-cap"   "^[0-9]+$" "$pw_max"
+assert_match "portwatch:the-gate-declares-its-cap" "^[0-9]+$" "$dyn_max"
+assert_eq    "portwatch:its-cap-is-the-hosts" "$dyn_max" "$pw_max"
 # -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
 # inside the image. shellcheck reports the unresolvable source at info level, which
 # --severity=warning drops, so this stays quiet without hiding a real finding.

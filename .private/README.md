@@ -1687,9 +1687,38 @@ whose tunnel failed never started one. The directory is now `/tmp/cs193v-volatil
   `/run` is on the writable layer in this container (only `/run/.containerenv` and `/run/secrets`
   are tmpfs), so the "`/run` is per-boot" convention would be half-true here.
 
-`10-static.sh` allows exactly that one `--tmpfs` line and checks that the watcher, shortlink and
-`doctor` all name the same directory; `80-launcher-live.sh` restarts the container and checks that
-the previous boot's file is gone and the directory is still writable.
+`10-static.sh` allows exactly that one `--tmpfs` line and checks that shortlink and `doctor` name
+no path under it at all — they read the file through the watcher, below; `80-launcher-live.sh`
+restarts the container and checks that the previous boot's file is gone and the directory is still
+writable.
+
+**The port state file has one reader, and it accepts only what the writer writes (#406, #411,
+#516).** `pw_state_parse` checks every value with the writer's own rules, plus the host's: a floor
+always present, every `up` entry on `lo`, no port twice within a list, at most `PW_MAX` of each.
+Each word is matched whole against its vocabulary; a substring match once took `busy v6lo` for one
+reason. Then it renders the file again from what it read, with the writer's own `pw_state_text`, and
+refuses it unless the two are byte for byte the same. That one comparison covers the shape: extra
+fields, runs of tabs, blank lines, order, a missing, repeated or unknown line, the final newline. So
+a shape has no message of its own, only the number of the first line that differs. It replaced a
+check per defect, which is how the reader came to accept all of those while every case in its table
+was green.
+
+- **doctor and shortlink go through `cs193v-portwatch --state`**, which prints the file only if that
+  reader accepts it: exit 0 and the file, 3 for an empty one (a tunnel coming up), 4 for none, 5
+  and a reason on stderr for anything else. doctor shows one "unreadable" row for a 5 and nothing
+  from the file. A reason that names a value quotes it as the host's gate does, `REASON: VALUE`
+  through `printf %q`, cut to `PW_VALUE_MAX` bytes first: an escape in the file reaches that row as
+  `\E`, and a CRLF file says `\r`. shortlink stops waiting at once, since a file the writer renamed into place will
+  not mend. Neither validates the file itself any more, though each still reads the rows it needs
+  out of what `--state` printed.
+- **`18-portwatch-fuzz.sh` generates its near misses, and its publishes.** Files the real writer
+  wrote are perturbed at every line by a fixed list of edits, and then by seeded random ones: bytes,
+  and the format's own tokens (separators, vocabulary words joined on by a space or a comma, edge
+  numbers). The reader is judged against an awk grammar that shares no code with it. Random
+  publishes are judged against a second awk grammar, of the arguments the host sends, and whatever
+  the writer takes must be a file the reader takes. Inputs of 65,535 entries are timed. The
+  hand-written table it had could only confirm checks that already existed. `CS193V_FUZZ_SEED` and
+  `CS193V_FUZZ_CASES` run other seeds, or more cases, by hand.
 
 **Every remediation the Windows installer used to offer, now rejected (issues #112 and #114).**
 The original argument was about one command. `hypervisorlaunchtype Off` is the likeliest *fixable*
