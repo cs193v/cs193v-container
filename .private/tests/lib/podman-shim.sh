@@ -50,6 +50,12 @@ shim_new() {
     chmod +x "$SHIM/sudo"
     : > "$SHIM/sudo.log"
     : > "$SHIM/argv.log"
+    # THE BUILD'S HTTP CHECK IS OFF UNLESS A CASE ASKS FOR IT (#355), for sudo-fake's reason: it is
+    # the launcher's one network fetch, and every shim build would otherwise make it -- to the real
+    # Ubuntu archive from a lane that promises no network, or into whichever shim_fake_curl a case
+    # had registered for something else, which refuses the URL and so turns an unrelated build case
+    # into an HTTP-check refusal. shim_fake_http_check turns it back on.
+    export CS193V_SKIP_HTTP_CHECK=1
 }
 
 shim_set() {                          # shim_set KEY VALUE
@@ -84,9 +90,10 @@ shim_ssh_log() { cat "$SHIM/ssh.log" 2>/dev/null; }
 # How many invocations matched an extended regex. Used for "exactly one container was
 # created across twenty launches".
 # grep -c prints 0 and exits 1 on no match, so take its output and drop its status.
-shim_count() {                        # shim_count ERE
+# FILE defaults to podman's argv.log; the HTTP check's cases count curl.log with it.
+shim_count() {                        # shim_count ERE [FILE]
     local n
-    n="$(grep -cE "$1" "$SHIM/argv.log" 2>/dev/null)" || true
+    n="$(grep -cE "$1" "${2:-$SHIM/argv.log}" 2>/dev/null)" || true
     printf '%s' "${n:-0}"
 }
 
@@ -603,6 +610,48 @@ EOF
     chmod +x "$SHIM/pkgutil"
 }
 
+# THE PART OF A FAKE curl THAT IS ABOUT NO URL IN PARTICULAR, shared by shim_fake_curl and
+# shim_fake_http_check, each of which writes it between its own settings and its own answers. It
+# logs the argv to $CURLLOG, parses it into $dest, $url, $hdr and $wfmt, refuses an argv with no -o,
+# and serves file:// by copying. ONE COPY because the second went wrong exactly as the first once
+# had: it did not consume --retry's value, so download_to's 10 was taken for the URL (#355).
+_shim_curl_prelude() {
+    cat <<'INNER'
+ARGV="$*"
+printf '%s\n' "$ARGV" >> "$CURLLOG"
+# THE FLAG FORMS EVERY CALLER REALLY USES, and they are not the same: course-install.sh sends
+# `-fL --retry 5`, install-cs193v.sh sends `-fsSL --retry 10 --retry-delay 3`, and the launcher's
+# HTTP check sends `-sS --connect-timeout 5 --max-time 15 -D HDR -o BODY -w FMT`. So the clusters
+# fall through `-*` and only the flags that TAKE a value are named.
+#
+# AND THE FIRST POSITIONAL WINS, WHICH IS WHAT MAKES THAT LIST LOAD-BEARING. Written the obvious
+# way -- `url="$1"` for every non-flag -- the last one wins, so the 5 in `--retry 5` set url=5
+# and the real URL then overwrote it: the value-taking arm above could be deleted entirely and
+# nothing went red. Measured, by deleting it. Taking the first instead means a value that leaks
+# through is the URL this fake answers on, so it refuses, so the case says so.
+dest=''; url=''; hdr=''; wfmt=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)  dest="$2"; shift 2 ;;
+        -D)  hdr="$2"; shift 2 ;;
+        -w)  wfmt="$2"; shift 2 ;;
+        --retry|--retry-delay|--max-time|--connect-timeout) shift 2 ;;
+        -*)  shift ;;
+        *)   if [ -z "$url" ]; then url="$1"; fi; shift ;;
+    esac
+done
+[ -n "$dest" ] || { echo "curl-fake: no -o in: $ARGV" >&2; exit 2; }
+# COPIED, because install-cs193v.sh fetches the suite's own course tarball this way, and a fake
+# that refused it would die in the BOOTSTRAP, before the case under test is reached.
+case "$url" in
+    file://*)
+        src=${url#file://}
+        cp "$src" "$dest" 2>/dev/null && exit 0
+        echo "curl: (37) Couldn't open file $src" >&2; exit 37 ;;
+esac
+INNER
+}
+
 # Fake `curl`, which is what makes install_podman's macOS arm executable off a Mac at all.
 #
 # THE FIRST curl FAKE IN THIS TREE, and the reason there was none is the reason this one is
@@ -634,6 +683,7 @@ EOF
 #
 # INDEPENDENT OF RC ON PURPOSE. The case that matters is the one where the download SUCCEEDS
 # noisily, which is what #298 actually was; tying the noise to a failure would leave it untested.
+
 shim_fake_curl() {                    # shim_fake_curl URL BODY [RC] [NOISE_LINES] [NOISE_TEXT]
     : > "$SHIM/curl.log"
     # TWO printfs, AND ONLY THE SECOND QUOTES. The values above it are paths and URLs with no
@@ -642,35 +692,8 @@ shim_fake_curl() {                    # shim_fake_curl URL BODY [RC] [NOISE_LINE
     { printf '#!/bin/sh\nCURLLOG=%s\nWANT=%s\nBODY=%s\nRC=%s\nNOISE_N=%s\n' \
              "$SHIM/curl.log" "$1" "$2" "${3:-0}" "${4:-0}"
       printf "NOISE='%s'\n" "${5:-}"
-    } > "$SHIM/curl"
-    cat >> "$SHIM/curl" <<'INNER'
-ARGV="$*"
-printf '%s\n' "$ARGV" >> "$CURLLOG"
-# THE FLAG FORMS BOTH CALLERS REALLY USE, and they are not the same: course-install.sh sends
-# `-fL --retry 5` and install-cs193v.sh sends `-fsSL --retry 10 --retry-delay 3`. So the clusters
-# fall through `-*` and only the flags that TAKE a value are named.
-#
-# AND THE FIRST POSITIONAL WINS, WHICH IS WHAT MAKES THAT LIST LOAD-BEARING. Written the obvious
-# way -- `url="$1"` for every non-flag -- the last one wins, so the 5 in `--retry 5` set url=5
-# and the real URL then overwrote it: the value-taking arm above could be deleted entirely and
-# nothing went red. Measured, by deleting it. Taking the first instead means a value that leaks
-# through is the URL this fake answers on, so it refuses, so the case says so.
-dest=''; url=''
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        -o)  dest="$2"; shift 2 ;;
-        --retry|--retry-delay|--max-time|--connect-timeout) shift 2 ;;
-        -*)  shift ;;
-        *)   if [ -z "$url" ]; then url="$1"; fi; shift ;;
-    esac
-done
-[ -n "$dest" ] || { echo "curl-fake: no -o in: $ARGV" >&2; exit 2; }
-case "$url" in
-    file://*)
-        src=${url#file://}
-        cp "$src" "$dest" 2>/dev/null && exit 0
-        echo "curl: (37) Couldn't open file $src" >&2; exit 37 ;;
-esac
+      _shim_curl_prelude
+      cat <<'INNER'
 # `[ -n "$WANT" ]` FIRST. A caller whose sed failed hands this an empty URL to register, and
 # without the guard an argv with no URL in it at all would match it and be served.
 if [ -n "$WANT" ] && [ "$url" = "$WANT" ]; then
@@ -687,6 +710,7 @@ fi
 echo "curl-fake: refusing a URL it was not given: $url" >&2
 exit 1
 INNER
+    } > "$SHIM/curl"
     chmod +x "$SHIM/curl"
 }
 
@@ -739,6 +763,85 @@ echo "wget-fake: refusing a URL it was not given: $url" >&2
 exit 1
 INNER
     chmod +x "$SHIM/wget"
+}
+
+# THE BUILD'S HTTP CHECK, answered (#355). build_image fetches one frozen file from the Ubuntu
+# archive over http:// and https:// and refuses to build if the two copies differ; this is the
+# Ubuntu archive for that one question and nothing else.
+#
+# BOTH URLS ARE SPELLED OUT, shim_fake_curl's doctrine: a URL the launcher composes differently
+# arrives unregistered and is refused, so the fake is also the assertion on what is asked for.
+# Every other URL is refused too, which keeps the cheap lane off the network.
+#
+#   same        both schemes serve the same bytes
+#   differ      http serves the same LENGTH with one word changed, which is #355's shape
+#               exactly: the student's fontconfig .deb arrived at 180530 bytes, as it should,
+#               with a different hash
+#   fail-http   http cannot resolve the host (curl 6); https is fine
+#   fail-https  https fails certificate verification (curl 60); http is fine
+#   timeout     both hit --max-time (curl 28) and write nothing, on every attempt
+#   timeout-once  the first attempt's two fetches time out and every later one is `same`: a stall
+#               on dorm wifi that clears, counted off curl.log, which is written before anything
+#   not-200     http answers 302 with a login page, as a captive portal does; https is fine
+#   gone        both answer 404, which is the file having been removed, not the student's network
+#   flap        http answers on its FIRST fetch and fails (curl 7) on every later one; https fails
+#               on its first and answers after. Only a check that keeps a fetch which worked,
+#               rather than re-fetching both, sees both halves succeed.
+#   write-error both fail with curl 23, which is curl unable to write what it fetched -- a full disk,
+#               a fault on this machine rather than on the network
+#
+# -w's format is answered with the status, which is all the launcher asks it for. -D gets a
+# minimal header block so the record the launcher keeps has something to quote. The argv parse and
+# the file:// arm are _shim_curl_prelude's, shared with shim_fake_curl.
+shim_fake_http_check() {              # shim_fake_http_check MODE
+    # INSTALLING THE FAKE IS ASKING FOR THE CHECK, so it turns back on here rather than in every
+    # case: shim_new turned it off, and a case that set up the fake and forgot would pass having
+    # checked nothing. A case that wants the switch sets it on the launcher call.
+    unset CS193V_SKIP_HTTP_CHECK
+    : > "$SHIM/curl.log"
+    # EVERY BODY WRITTEN UP FRONT, so the fake only chooses between files.
+    printf 'Origin: Ubuntu\nSuite: resolute\nThis is the frozen file both schemes serve.\n' \
+        > "$SHIM/inrelease"
+    sed 's/frozen/FROZEN/' "$SHIM/inrelease" > "$SHIM/inrelease.changed"
+    printf '<html>Please log in to the network</html>\n' > "$SHIM/inrelease.portal"
+    printf '<html>404 Not Found</html>\n'                > "$SHIM/inrelease.notfound"
+    { printf '#!/bin/sh\nCURLLOG=%s\nMODE=%s\nBODY=%s\n' "$SHIM/curl.log" "$1" "$SHIM/inrelease"
+      _shim_curl_prelude
+      cat <<'INNER'
+case "$url" in
+    http://ports.ubuntu.com/ubuntu-ports/dists/resolute/InRelease|\
+    http://archive.ubuntu.com/ubuntu/dists/resolute/InRelease)    scheme=http ;;
+    https://ports.ubuntu.com/ubuntu-ports/dists/resolute/InRelease|\
+    https://archive.ubuntu.com/ubuntu/dists/resolute/InRelease)   scheme=https ;;
+    *) echo "curl-fake: refusing a URL it was not given: $url" >&2; exit 1 ;;
+esac
+code=200; body="$BODY"
+case "$MODE:$scheme" in
+    differ:http)      body="$BODY.changed" ;;
+    fail-http:http)   echo "curl: (6) Could not resolve host: ${url#http://}" >&2; exit 6 ;;
+    fail-https:https) echo "curl: (60) SSL certificate problem: unable to get local issuer certificate" >&2; exit 60 ;;
+    timeout:*)        echo "curl: (28) Operation timed out after 15000 milliseconds" >&2; exit 28 ;;
+    timeout-once:*)
+        if [ "$(wc -l < "$CURLLOG")" -le 2 ]; then
+            echo "curl: (28) Operation timed out after 15000 milliseconds" >&2; exit 28
+        fi ;;
+    not-200:http)     code=302; body="$BODY.portal" ;;
+    gone:*)           code=404; body="$BODY.notfound" ;;
+    # THIS SCHEME'S FETCHES SO FAR, this one included: curl.log already has its line.
+    flap:*)
+        n="$(grep -c " $scheme://" "$CURLLOG")"
+        if { [ "$scheme" = http ] && [ "$n" -gt 1 ]; } || { [ "$scheme" = https ] && [ "$n" -eq 1 ]; }; then
+            echo "curl: (7) Failed to connect to ${url#*://}: Connection refused" >&2; exit 7
+        fi ;;
+    write-error:*)    echo "curl: (23) Failure writing output to destination" >&2; exit 23 ;;
+esac
+[ -n "$hdr" ] && printf 'HTTP/1.1 %s Fake\r\nServer: curl-fake\r\n\r\n' "$code" > "$hdr"
+cat "$body" > "$dest"
+case "$wfmt" in *http_code*) printf '%s' "$code" ;; esac
+exit 0
+INNER
+    } > "$SHIM/curl"
+    chmod +x "$SHIM/curl"
 }
 
 # THROUGH $SHIM_LAST, like sudo_log above and for the #76 reason its comment records: every call

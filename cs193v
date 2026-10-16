@@ -213,6 +213,9 @@ transient_cleanup() {
     # run_timeout's scratch files, which only it can name. A Ctrl-C inside a probe -- or inside
     # the three minutes of `podman run` -- otherwise leaves one in TMPDIR per call.
     rt_cleanup
+    # The HTTP check's downloads (#355), for the same reason; a directory, which rt_cleanup's
+    # `rm -f` would not take. `:-` because this trap is armed long before the variable is set.
+    if [ -n "${HTTP_CHECK_DIR:-}" ]; then rm -rf "${HTTP_CHECK_DIR:?}"; fi
 }
 trap transient_cleanup EXIT
 
@@ -640,6 +643,12 @@ BUILD_LOG="${TMPDIR:-/tmp}/cs193v-build-$TUNNEL_ID.log"
 # and does not use O_APPEND, so a concurrent append from awk would be overwritten by tee's
 # next write. It cannot go to the screen either, on a terminal that belongs to the meter.
 BUILD_NOTE="$BUILD_LOG.note"
+# What the build's HTTP check found, for staff (#355; see http_check). Keyed and overwritten like
+# $BUILD_LOG, so it cannot accumulate; build_log_ready appends it to the log a student is asked for.
+HTTP_CHECK_LOG="$BUILD_LOG.http-check"
+# The check's two downloads, in a directory made fresh for each run -- see http_check for why it is
+# not a fixed path -- and removed by transient_cleanup if the run is interrupted. Empty when none.
+HTTP_CHECK_DIR=
 # Set CS193V_SETUP_RAW_LOG=1 for podman's raw output instead of build_progress. Staff only, and
 # it earns its keep on a build that HANGS -- the one failure $BUILD_LOG cannot be read for
 # afterwards, because a bar shows nothing and the log is never written.
@@ -1074,6 +1083,236 @@ build_note_fold() {
     rm -f "$BUILD_NOTE"
 }
 
+# ─── the build's HTTP check  (#355) ────────────────────────────────────────────
+# ONE FROZEN FILE, FETCHED BOTH WAYS, BEFORE ANYTHING IS BUILT. The Ubuntu archive is the one origin
+# this build reaches over plain http:// -- the base image's ubuntu.sources says so; docker.io,
+# NodeSource, cli.github.com, npm, PyPI and the Playwright CDN are all HTTPS -- and plain HTTP is
+# what an on-device filter can rewrite. A student's Mac with Screen Time on did exactly that: layer
+# 1 died on apt's "Hashes of received file:", the right number of bytes with the wrong content,
+# under a box that said to check the internet connection. ERRORS.md D17 has the whole of it.
+#
+# THE FILE IS 26.04's RELEASE-POCKET InRelease. It has not changed since release day (Last-Modified
+# 23 Apr 2026, no Valid-Until), it is the same bytes over both schemes on both hosts, it stays put
+# until 26.04 is end-of-life, and it is apt's own first fetch -- so a rewrite that reaches it fails
+# apt too. It is NOT tied to the FROM line: a later base image does not make it stop being frozen.
+#
+# IT MAY NOT SEE SCREEN TIME, and that is recorded rather than assumed away. On the student's Mac
+# `apt-get update` fetched this same file over plain HTTP and verified it; what came back altered
+# was a .deb. Which file Screen Time alters was not measured. If #355's symptom is ever reported
+# past a green check, this is the line to change, to a release-pocket .deb -- README.md has why.
+HTTP_CHECK_FILE="dists/resolute/InRelease"
+# THE ARCHIVES apt uses: ports for arm64, the archive for everything else. Constants rather than
+# literals inside http_check_base so 00-release-gates.sh §11 reads them with setting_of.
+HTTP_CHECK_ARCHIVE_ARM64="ports.ubuntu.com/ubuntu-ports"
+HTTP_CHECK_ARCHIVE="archive.ubuntu.com/ubuntu"
+
+# The archive apt will use, which is the path the check has to measure.
+#
+# ASKED OF PODMAN, NOT OF uname. apt runs in podman's VM on a Mac, and in a Rosetta shell on Apple
+# Silicon `uname -m` says x86_64 while that VM is arm64 -- the trap course-install.sh's mac_cpu
+# exists for (#350). podman names the architecture its images run as on every platform. uname is
+# the fallback for a podman that will not say, which preflight has already ruled out in practice.
+http_check_base() {                   # -> host/path, no scheme
+    local arch
+    if pmv info --format '{{.Host.Arch}}'; then arch="$RT_OUT"; else arch="$(uname -m)"; fi
+    case "$arch" in
+        arm64|aarch64) printf '%s' "$HTTP_CHECK_ARCHIVE_ARM64" ;;
+        *)             printf '%s' "$HTTP_CHECK_ARCHIVE" ;;
+    esac
+}
+
+# ONE FETCH, and nothing decided here: it leaves its body, its response headers, the status curl
+# saw and curl's own exit status in $HTTP_CHECK_DIR, and http_check reads them.
+http_check_one() {                    # http_check_one SCHEME BASE
+    curl -sS --connect-timeout 5 --max-time 15 \
+         -D "$HTTP_CHECK_DIR/$1.hdr" -o "$HTTP_CHECK_DIR/$1.body" -w '%{http_code}' \
+         "$1://$2/$HTTP_CHECK_FILE" >"$HTTP_CHECK_DIR/$1.code" 2>"$HTTP_CHECK_DIR/$1.err"
+    printf '%s' "$?" >"$HTTP_CHECK_DIR/$1.rc"
+}
+
+# BOTH FETCHES AT ONCE, which halves the check: about 0.6 s on a healthy network rather than 1.2,
+# and 15 s rather than 30 against an address that never answers. Run under run_timeout for the
+# spinner, which its own poll loop draws; curl's limits bound the wait and the ceiling is a backstop.
+#
+# THREE ATTEMPTS WHILE A FETCH FAILS, which is the build's own allowance for a transient on dorm
+# wifi (see build_image), and one when it answered: an answer, even a wrong one, is not a transient.
+# Immediately, as build_image retries -- a stall has already cost its --max-time.
+#
+# ONLY THE FETCH THAT FAILED IS TRIED AGAIN. One that worked keeps its result: re-fetching it would
+# let a flapping network end on the half that happened to fail last, and refuse as "plain HTTP is
+# blocked" about a network on which plain HTTP was just seen to work. A retried fetch clears its own
+# files first, so what is left describes that fetch and not an earlier one.
+http_check_fetch() {                  # http_check_fetch BASE
+    local s n=0 pending='http https' still rc
+    while [ "$n" -lt 3 ] && [ -n "$pending" ]; do
+        n=$((n + 1))
+        for s in $pending; do
+            [ "$n" -eq 1 ] || rm -f "${HTTP_CHECK_DIR:?}/${s:?}".*
+            http_check_one "$s" "$1" &
+        done
+        wait
+        still=''
+        for s in $pending; do
+            rc=''; { read -r rc <"$HTTP_CHECK_DIR/$s.rc"; } 2>/dev/null || :
+            http_check_net_failure "$rc" && still="$still $s"
+        done
+        pending="$still"
+    done
+    printf '%s' "$n" >"$HTTP_CHECK_DIR/attempts"
+}
+
+# curl's exit codes for a fetch THE NETWORK failed: no proxy or host by that name (5, 6), no
+# connection (7), no answer in time (28), a transfer cut off or garbled (16, 18, 52, 55, 56), and a
+# TLS failure (35, 51, 58, 60, 77, 83, 90, 91). Listed, rather than "anything but 0", so that what
+# is left -- curl unable to write its own file on a full disk (23), out of memory (27), a fault
+# nobody foresaw -- is not reported to a student as a network problem. Those build, and the build
+# says what is actually wrong.
+http_check_net_failure() {            # http_check_net_failure RC -> 0 if the network failed it
+    case "$1" in
+        5|6|7|16|18|28|35|51|52|55|56|58|60|77|83|90|91) return 0 ;;
+    esac
+    return 1
+}
+
+# What the check found, for staff: build_log_ready appends it to the log a student is asked for.
+# Plain strings, not catalogue keys -- that catalogue is for students. The exit statuses and HTTP
+# statuses come in as arguments, already read the D16-safe way by http_check.
+http_check_record() {                 # http_check_record BASE VERDICT ATTEMPTS HRC HCODE SRC SCODE
+    local base="$1" verdict="$2" s f rc code
+    printf 'http-check: %s, after %s attempt(s)\n' "$verdict" "$3"
+    shift 3
+    for s in http https; do
+        rc="$1"; code="$2"; shift 2
+        f="$HTTP_CHECK_DIR/$s"
+        printf '  %s://%s/%s\n' "$s" "$base" "$HTTP_CHECK_FILE"
+        printf '    curl exit %s, http status %s' "$rc" "$code"
+        if [ -f "$f.body" ]; then
+            printf ', %s bytes, sha256 %s' "$(wc -c <"$f.body" | tr -d ' ')" "$(sha_stdin <"$f.body")"
+        fi
+        printf '\n'
+        [ -s "$f.err" ] && sed 's/^/    /' "$f.err"
+        [ -s "$f.hdr" ] && tr -d '\r' <"$f.hdr" | sed -e '/^$/d' -e 's/^/    > /'
+    done
+    if [ "$verdict" = differ ]; then
+        printf '  first difference: %s\n' \
+               "$(cmp "$HTTP_CHECK_DIR/http.body" "$HTTP_CHECK_DIR/https.body" 2>&1 | sed 's/^.*differ: //')"
+    fi
+}
+
+# THE CHECK ITSELF. Returns to build, or dies with one of four refusals.
+#
+# IT REFUSES WHEN A DOWNLOAD THE BUILD DEPENDS ON WAS SEEN TO FAIL OR TO BE ALTERED. apt fetches
+# from this host over plain HTTP -- on a rebuild with the base image cached it is the build's FIRST
+# network access -- and the rest of the build is HTTPS, so each refusal below predicts a build that
+# would have died minutes in, under a box saying to check the connection. THIS IS THE TABLE; the
+# README and the catalogue point here.
+#
+#   http       https      verdict        refusal
+#   200        200        differ         err.http-rewritten       the bytes were changed
+#   other      200        replaced       err.http-rewritten       a login page in the file's place
+#   failed     answered   http-blocked   err.http-blocked         plain HTTP does not get through
+#   answered   failed     https-failed   err.https-failed         interception, a portal, the clock
+#   failed     failed     unreachable    err.ubuntu-unreachable   nothing gets through
+#
+# "failed" is http_check_net_failure's, after three attempts; "answered" is any HTTP status.
+# Everything else builds: the same bytes, the same non-200 both ways -- the file gone, which
+# 00-release-gates §11 reports, or an outage at Ubuntu, which is not the student's machine -- a cmp
+# that could not compare, and any fetch that ended for a reason that is not the network's. That is
+# the exception to the README's pre-flight ban, and what keeps it one: #112 and #114 refused working
+# machines on a guess about the machine; this refuses only on a download that was observed to go
+# wrong. Two ways it can still refuse a build that would have worked are known and accepted --
+# every apt layer cached, and an HTTPS failure local to this host -- see README.md.
+#
+# NO curl BUILDS without needing a guard: it exits 127 on both fetches, which is not a network code.
+# The installer refuses a Mac without curl and installs it everywhere else, so this is a student
+# who removed it afterwards -- and the build never uses the host's curl. No scratch directory builds
+# too, with the reason in the record.
+#
+# A SCRATCH DIRECTORY PER RUN, not a fixed path. An interrupted run's fetch can outlive it -- the
+# poll branch's background job ignores SIGINT, and the ceiling's kill reaches only the subshell --
+# and with a fixed path its late writes would land in the next run's files and decide its verdict.
+# transient_cleanup removes it on the way out.
+#
+# CS193V_SKIP_HTTP_CHECK=1 turns it off, for a false positive and for the shim tier.
+http_check() {
+    local base verdict why='' attempts='' hrc='' hcode='' src='' scode='' hside sside
+    if [ -n "${CS193V_SKIP_HTTP_CHECK:-}" ]; then
+        why='CS193V_SKIP_HTTP_CHECK is set'
+    elif ! HTTP_CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-$$.httpcheck.XXXXXX" 2>/dev/null)"; then
+        why='no scratch directory could be made'
+    fi
+    if [ -n "$why" ]; then
+        HTTP_CHECK_DIR=''
+        printf 'http-check: skipped, %s\n' "$why" >"$HTTP_CHECK_LOG" 2>/dev/null
+        return 0
+    fi
+    base="$(http_check_base)"
+    RT_SPIN="$(msg status.http-check)"
+    run_timeout 50 http_check_fetch "$base"
+    RT_SPIN=''
+    # BUILTIN READS, not `$(cat ... 2>/dev/null)`: the verdict is decided from these, and on macOS
+    # that substitution can hand back bytes a failed terminal write left behind (ERRORS.md D16).
+    # None of these files ends in a newline, so read's status is ignored; the value is what is used.
+    { read -r attempts <"$HTTP_CHECK_DIR/attempts";   } 2>/dev/null || :
+    { read -r hrc      <"$HTTP_CHECK_DIR/http.rc";    } 2>/dev/null || :
+    { read -r hcode    <"$HTTP_CHECK_DIR/http.code";  } 2>/dev/null || :
+    { read -r src      <"$HTTP_CHECK_DIR/https.rc";   } 2>/dev/null || :
+    { read -r scode    <"$HTTP_CHECK_DIR/https.code"; } 2>/dev/null || :
+    # EACH SIDE IS ITS HTTP STATUS, "failed" if the network failed it, or "other" if it ended for a
+    # reason that is not the network's -- including a missing rc file, which is the ceiling or a
+    # full disk rather than anything observed about the network.
+    hside="$hcode"; sside="$scode"
+    if http_check_net_failure "$hrc"; then hside=failed; elif [ "$hrc" != 0 ]; then hside=other; fi
+    if http_check_net_failure "$src"; then sside=failed; elif [ "$src" != 0 ]; then sside=other; fi
+    case "$hside:$sside" in
+        other:*|*:other) verdict=inconclusive ;;
+        200:200)
+            cmp -s "$HTTP_CHECK_DIR/http.body" "$HTTP_CHECK_DIR/https.body"
+            case "$?" in
+                0) verdict=same ;;
+                1) verdict=differ ;;
+                *) verdict=inconclusive ;;
+            esac ;;
+        failed:failed) verdict=unreachable ;;
+        failed:*)      verdict=http-blocked ;;
+        *:failed)      verdict=https-failed ;;
+        *:200)         verdict=replaced ;;
+        *)             verdict=inconclusive ;;
+    esac
+    http_check_record "$base" "$verdict" "$attempts" "$hrc" "$hcode" "$src" "$scode" \
+        >"$HTTP_CHECK_LOG" 2>/dev/null
+    rm -rf "${HTTP_CHECK_DIR:?}"; HTTP_CHECK_DIR=''
+    case "$verdict" in
+        differ|replaced) build_log_ready; die "$(msg err.http-rewritten)" ;;
+        http-blocked)    build_log_ready; die "$(msg err.http-blocked)" ;;
+        https-failed)    build_log_ready; die "$(msg err.https-failed)" ;;
+        unreachable)     build_log_ready; die "$(msg err.ubuntu-unreachable)" ;;
+    esac
+}
+
+# THE LOG A STUDENT IS ASKED TO SEND, named where they can copy it (#355). Called on the way to a
+# box that asks for it -- AFTER anything that quotes the log's tail, since it appends the HTTP
+# check's record to $BUILD_LOG (all $BUILD_LOG will hold when the check refused) -- and it arms
+# die()'s trailer with the path. DIE_TRAILER was the installer's sign-off alone until this; the
+# comment saying so in cs193v-ui.sh is files/, so it waits for that file's next real change.
+#
+# BELOW THE BOX, because box() breaks a token wider than itself mid-word and a Mac's TMPDIR path
+# is, so inside it the path could not be copied out. On a Mac /var/folders is hidden from Finder,
+# so the trailer adds the command that reveals the file; WSL gets File Explorer's \\wsl.localhost
+# form of the path. Why not a copy in the course folder: README.md, under #16.
+build_log_ready() {
+    local plat shown
+    [ -f "$HTTP_CHECK_LOG" ] && cat "$HTTP_CHECK_LOG" >>"$BUILD_LOG" 2>/dev/null
+    plat="$(platform)"
+    shown="$(gui_projects_path "$plat" "$BUILD_LOG" "${WSL_DISTRO_NAME:-}")"
+    DIE_TRAILER="$(msg note.build-log LOG="$shown")"
+    if [ "$plat" = macos ]; then
+        DIE_TRAILER="$DIE_TRAILER
+
+$(msg note.build-log-finder LOG="$shown")"
+    fi
+}
+
 # `podman build`, plus the label that makes staleness detectable.
 #
 # Deliberately NOT wrapped in run_timeout, unlike run. run_timeout exists to stop a SILENT
@@ -1098,6 +1337,11 @@ build_image() {
     # first moment of the new build watching the last eight lines of the one that just failed.
     # Nothing is lost: tee truncates it milliseconds later anyway.
     rm -f "$BUILD_LOG"
+    # BEFORE THE METER AND BEFORE PODMAN, which is the point of it (#355): a rewrite of plain HTTP
+    # is found in about a second, rather than a few minutes into layer 1 as a hash mismatch. Here,
+    # inside build_image, so it runs only when a build is about to happen -- for the installer's
+    # `cs193v --rebuild` and every later one -- and never on the two-second recreate.
+    http_check
     # Started before podman with no total, and build_progress fills both the total and the
     # first label in from its own parse of the Containerfile within milliseconds of the
     # pipeline coming up. Deliberately not computed here as well: the arithmetic for what the
@@ -1186,7 +1430,12 @@ build_image() {
         # lines are the ones that name the failure, and the box wraps rather than spills.
         if [ "$attempt" -ge "$tries" ]; then
             meter_stop bad
-            die "$(msg err.build-failed OUT="$(tail -n 12 "$BUILD_LOG" 2>/dev/null)")"
+            # THE TAIL BEFORE build_log_ready, which appends the HTTP check's record to this same
+            # log: taken after, the box quoted the record and podman's own words were gone.
+            local failed_tail
+            failed_tail="$(tail -n 12 "$BUILD_LOG" 2>/dev/null)"
+            build_log_ready
+            die "$(msg err.build-failed OUT="$failed_tail")"
         fi
         # THE RETRY IS REPORTED BESIDE THE BAR, not underneath it. What was here was three
         # lines of yellow prose per attempt, which scrolled the meter up the screen and put a
@@ -2431,8 +2680,10 @@ verb_doctor() {
     # not a guess. It is also the manual half of the staleness check: that check fails open on
     # every network problem, and when it does this row is what a pasted report still carries.
     #
-    # A LOCAL FILE, AND THE LAUNCHER STILL FETCHES NOTHING. That property is asserted, and it is
-    # why the version SHIPS in the tarball rather than being asked for over the network here.
+    # A LOCAL FILE, AND DOCTOR STILL FETCHES NOTHING. The launcher's one network fetch is the
+    # build's HTTP check (#355), made only when a build is about to happen; doctor must keep
+    # answering offline, which is why the version SHIPS in the tarball rather than being asked for
+    # over the network here.
     #
     # ABSENT IS A REAL ANSWER, not a blank. A tree installed before this shipped has no VERSION,
     # and so does one somebody assembled by hand; both are worth telling staff about, and an empty

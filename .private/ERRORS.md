@@ -1797,3 +1797,76 @@ macOS-only for a second, independent reason, measured by forcing the door open o
 master is destroyed, `tcgetattr` on the slave fails `EIO`, so `isatty(1)` is **false** there, with
 the session-leader shape and without it. On macOS it stays true while every write fails, which is
 the state the five tty-only writes need.
+
+### D17. Screen Time alters plain-HTTP downloads, and the build blamed the network (issue #355)
+
+A student on an arm64 Mac failed at step 3/26, layer 1's `apt-get install`, every time. The STOP
+box showed the tail of apt's report — `Hashes of received file:` — under `err.build-failed`'s
+"Check your internet connection". Disabling Screen Time's Content & Privacy fixed it, verified on
+the student's machine. docker/for-mac#7025 is the same report from Docker users, down to the
+symptom.
+
+**The right length with the wrong content, and the file can be named.** Expected and received
+both say `Filesize:180530`; the hashes differ. The one 180,530-byte package in the arm64 release
+pocket is `fontconfig_2.17.1-3ubuntu1_arm64.deb`, and its MD5 is the screenshot's "expected"
+`bfe265819ae0305ca5397985a3db6060`. So it is not a truncated transfer or a mirror mid-sync — pool
+files never change once published — but bytes replaced in flight. `apt-get update` passed on that
+machine, so InRelease and the indexes came through intact: the filter alters some files and not
+others.
+
+**Why plain HTTP and nothing else.** The base image's `ubuntu.sources` points at `http://`, and the
+Ubuntu archive is the only origin the build reaches that way; docker.io, NodeSource, cli.github.com,
+npm, PyPI and the Playwright CDN are all HTTPS, which an on-device filter can read the hostname of
+but not rewrite. All three archive hosts serve HTTPS with valid certificates (measured 2026-10-12),
+which is what #537 builds on.
+
+**The check that replaced the guess.** `build_image` now fetches `dists/resolute/InRelease` from the
+archive apt will use over both schemes, before podman downloads anything, and refuses when either
+fetch fails after three attempts (`err.http-blocked`, `err.https-failed`, `err.ubuntu-unreachable`)
+or when plain HTTP comes back as different bytes or as something other than the file
+(`err.http-rewritten`); `http_check` in the launcher has the table. That file is frozen — `Last-Modified: Thu, 23
+Apr 2026`, release day, and no `Valid-Until` — and was byte-identical over both schemes on both
+hosts. The false-positive baseline, on the development Mac with Screen Time off, 20 trials of
+every candidate from the host and from inside the podman VM:
+
+| fetched, per vantage | size | correct, host | correct, VM |
+| --- | --- | --- | --- |
+| InRelease, http and https, 20 pairs | 135,549 B | 40/40, every pair identical | 40/40 |
+| the fontconfig `.deb`, http | 180,530 B | 20/20 | 20/20 |
+| a 2.4 MB `.deb`, http | 2,360,114 B | 20/20 | 20/20 |
+| five `.deb`s on one keep-alive connection, http | 1.4 MB | 100/100 | 100/100 |
+| the `.deb`s again over https, every 5th trial | — | 28/28 | 28/28 |
+
+416 fetches, none altered and none failed. "Correct" is the SHA-256 Ubuntu's signed index gives.
+
+**What was not measured, and why that is recorded rather than glossed.** The same harness was ready
+to run with Screen Time on, to learn which of those candidates it actually alters and from where;
+that was weighed and declined, since the root cause was already verified on the student's Mac. So
+whether InRelease — the file the check fetches — is one Screen Time alters is **unknown**, and the
+student's passing `apt-get update` is a reason to doubt it. If #355's symptom is reported past a
+green check, change `HTTP_CHECK_FILE` to a release-pocket `.deb` first.
+
+**Rejected:**
+
+* *Classify apt's own words after the build fails* — match `Hash Sum mismatch` / `Hashes of
+  received file:` in `$BUILD_LOG` and route to a Screen Time box. It sees every rewrite that
+  breaks the build, by construction, and costs nothing on the happy path. Declined in favour of a
+  general HTTP-against-HTTPS test that runs before the build and names causes beyond one product.
+* *Refuse only on differing bytes, and build on every failed fetch.* The first version did this,
+  importing the pre-flight ban's caution, and it was the ban applied past its reason: apt needs
+  this host over plain HTTP and the rest of the build needs HTTPS, so a fetch that fails predicts
+  a build that fails minutes later under the old box. A transient is what the three attempts are
+  for. A certificate failure is not an old trust store — the chain is cross-signed by ISRG Root X1.
+* *Copy the log into the course folder as `build-log.txt`*, so the box could name a short path. The
+  first version did; it broke README #16, which keeps that folder to the launcher and `projects/`.
+  The log stays in `TMPDIR` and its path is printed below the box, whole, with `open -R` on a Mac.
+* *Probe from inside the podman VM* (`podman machine ssh -- curl`), which is apt's real path through
+  gvproxy. macOS-only, about a second of ssh per build, and unmeasured as to whether it sees more
+  than the host does.
+* *Move apt to HTTPS now.* It changes layer 1, so every installed student pays a full rebuild, and
+  it needs a certificate bootstrap — Canonical's manifest for the 26.04 image lists apt 3.2.0 and
+  OpenSSL but no `ca-certificates`. That is #537, and it retires this check.
+
+**Why nothing caught it.** Nothing in the suite reaches the network through anything that rewrites
+it. The regression tests are `30-launcher-shim.sh`'s `httpcheck:*` and `build-log:*` and
+`25-installer.sh`'s `httpcheck-install:*`, against `lib/podman-shim.sh`'s `shim_fake_http_check`.

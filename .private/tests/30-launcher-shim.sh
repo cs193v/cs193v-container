@@ -1499,6 +1499,195 @@ assert_says_key_tail "build-failed:says-what-to-do-next" err.build-failed       
 assert_says_not "build-failed:no-longer-claims-output-is-above" "on the screen above"   "$out"
 assert_eq       "build-failed:exits-nonzero" "1" "$(launcher_rc --rebuild --no-cache)"
 
+# --- #355: the full log is named where it can be copied ---------------------------------------
+# The other half of the same issue: the box showed twelve lines of apt's hash dump and nothing
+# else, so staff could not see what had failed. The log stays in TMPDIR, and its path is printed
+# BELOW the box, on a line of its own, because box() breaks a token wider than itself mid-word and
+# a Mac's TMPDIR path is. shim_new points TMPDIR at $SHIM/tmp, so the one build log there is this
+# run's.
+build_log_of() { ls "$SHIM"/tmp/cs193v-build-*.log 2>/dev/null | head -1; }
+blog="$(build_log_of)"
+assert_ne       "build-log:the-log-is-kept"             "" "$blog"
+assert_contains "build-log:it-holds-the-failing-output" "Could not resolve host" "$(cat "$blog" 2>/dev/null)"
+assert_says_key "build-log:the-path-is-introduced"      note.build-log "$out"
+# WHOLE, which is the point of putting it outside the box: a raw match, not a flattened one.
+assert_contains "build-log:the-path-is-printed-whole"   "$blog" "$out"
+
+# --- #355: plain HTTP is checked before anything is built ---------------------------------------
+# A student's build died at layer 1 with apt's "Hashes of received file:" -- the right number of
+# bytes, the wrong content -- under a box that said to check their internet connection. The
+# cause was macOS Screen Time, which alters plain-HTTP traffic, and the Ubuntu archive is the one
+# origin this build reaches over plain HTTP. So build_image fetches one frozen file from it both
+# ways first, and before podman has downloaded anything refuses on a difference -- or on a fetch
+# that failed, since the build needs both halves.
+#
+# shim_new turns the check off and shim_fake_http_check turns it back on. --no-cache is what forces
+# the build (an absent container alone does not -- see build-raw above).
+#
+# UNAME IS GIVEN THE OPPOSITE ANSWER TO PODMAN'S on every run. The archive is picked from podman's
+# .Host.Arch, because in a Rosetta shell on Apple Silicon uname says x86_64 while the VM apt runs
+# in is arm64 -- the trap course-install.sh's mac_cpu exists for (#350). Darwin either way: a faked
+# Linux dies in preflight's subuid check on a Mac host before it gets anywhere near a build.
+httpcheck_setup() {                   # httpcheck_setup MODE [ARCH]
+    shim_new
+    case "${2:-arm64}" in
+        arm64) shim_fake_uname Darwin x86_64 ;;
+        *)     shim_fake_uname Darwin arm64 ;;
+    esac
+    shim_set host_arch "${2:-arm64}"
+    shim_set state absent
+    shim_fake_http_check "$1"
+}
+httpcheck_run() {                     # httpcheck_run MODE [ARCH]  -> $out $rc
+    httpcheck_setup "$@"
+    out="$(launcher --rebuild --no-cache 2>&1)"; rc=$?
+}
+curl_asked() { shim_count "$1" "$SHIM/curl.log"; }
+
+# A FETCH THAT FAILED IS A FINDING TOO, not an absence of one, so there are four refusals. Each has
+# its own box, because the causes and the fixes differ, and each is checked against the other three
+# so that a check which refused everything the same way could not pass.
+HC_KEYS="err.http-rewritten err.http-blocked err.https-failed err.ubuntu-unreachable"
+httpcheck_refuses() {                 # httpcheck_refuses NAME KEY  -- on the last httpcheck_run
+    local k
+    assert_says_key "httpcheck:$1-refuses"       "$2" "$out"
+    assert_eq       "httpcheck:$1-builds-nothing" "0" "$(shim_count '^build ')"
+    assert_eq       "httpcheck:$1-exits-1"        "1" "$rc"
+    for k in $HC_KEYS; do
+        [ "$k" = "$2" ] || assert_says_not_key "httpcheck:$1-is-not-$k" "$k" "$out"
+    done
+}
+
+httpcheck_run differ
+httpcheck_refuses a-difference err.http-rewritten
+assert_says_key_tail "httpcheck:a-difference-hands-over-the-log" err.http-rewritten "$out"
+assert_says_not_key "httpcheck:a-difference-is-not-a-build-failure" err.build-failed "$out"
+# AN ANSWER IS BELIEVED, NOT RETRIED: two fetches, one attempt. Retrying a wrong answer would
+# only spend the student's time arriving at the same one.
+assert_eq "httpcheck:a-difference-is-fetched-once" "2" "$(curl_asked .)"
+# arm64 IS ports.ubuntu.com, and this run's uname said x86_64.
+assert_eq "httpcheck:arm64-asks-ports-even-under-rosetta" "2" \
+          "$(curl_asked '://ports.ubuntu.com/ubuntu-ports/dists/resolute/InRelease')"
+# THE RECORD IS WHAT STAFF GET -- the build log, named below the box exactly as a failed build's
+# is -- and it has to name both fetches and say which way it went. Non-empty first: an empty path
+# is a needle every output contains.
+assert_ne       "httpcheck:a-difference-keeps-a-log"   "" "$(build_log_of)"
+assert_contains "httpcheck:a-difference-names-the-log" "$(build_log_of)" "$out"
+rec="$(cat "$(build_log_of)" 2>/dev/null)"
+assert_contains "httpcheck:record-names-the-http-fetch"  "http://ports.ubuntu.com/"  "$rec"
+assert_contains "httpcheck:record-names-the-https-fetch" "https://ports.ubuntu.com/" "$rec"
+assert_contains "httpcheck:record-says-they-differ"      "differ"                    "$rec"
+assert_contains "httpcheck:record-keeps-the-headers"     "Server: curl-fake"         "$rec"
+# ON A MAC, HOW TO FIND IT: /var/folders is hidden from Finder, so the trailer hands over the
+# command that reveals it. This run is a Mac's.
+assert_says_key "build-log:a-mac-is-shown-how-to-find-it" note.build-log-finder "$out"
+assert_contains "build-log:that-command-names-the-log"    "open -R \"$(build_log_of)\"" "$out"
+
+httpcheck_run same
+assert_says_key "httpcheck:identical-copies-build"      status.created "$out"
+assert_says_not_key "httpcheck:identical-copies-do-not-refuse" err.http-rewritten "$out"
+# THE ANTI-VACUITY HALF: the build went ahead because the copies MATCHED, not because nothing
+# was fetched -- which is also what a launcher with no check at all does. And once each: an
+# answered fetch is not retried.
+assert_eq "httpcheck:identical-copies-were-fetched-over-http"  "1" "$(curl_asked '^.* http://')"
+assert_eq "httpcheck:identical-copies-were-fetched-over-https" "1" "$(curl_asked '^.* https://')"
+
+# A FAILED BUILD STILL QUOTES PODMAN WITH THE CHECK ON. The check's record is appended to the build
+# log on the way to the box, so the tail the box quotes has to be taken first: taken after, it was
+# the record -- twenty-odd lines with real headers -- and podman's own words were gone.
+httpcheck_setup same
+shim_set build_rc 1
+shim_set build_out 'STEP 6/23: RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+curl: (6) Could not resolve host: deb.nodesource.com
+  retrying
+  retrying
+  retrying
+Error: building at STEP "RUN curl -fsSL https://deb.nodesource.com/...": exit status 6'
+out="$(launcher --rebuild --no-cache 2>&1)"
+assert_says_key "httpcheck:a-failed-build-is-a-build-failure"   err.build-failed "$out"
+assert_contains "httpcheck:a-failed-build-still-quotes-podman"  "STEP 6/23" "$out"
+assert_contains "httpcheck:a-failed-build-log-ends-with-the-record" "http-check: same" \
+                "$(tail -n 12 "$(build_log_of)" 2>/dev/null)"
+
+# HTTP ANSWERED WITH SOMETHING ELSE -- a 302 to a login page -- while HTTPS served the file. That is
+# the response replaced outright, which is rewriting, and apt would be handed the login page.
+httpcheck_run not-200
+httpcheck_refuses not-200 err.http-rewritten
+assert_eq "httpcheck:not-200-is-fetched-once" "2" "$(curl_asked .)"
+# PLAIN HTTP DOES NOT GET THROUGH while HTTPS does. apt is the half that needs plain HTTP.
+httpcheck_run fail-http
+httpcheck_refuses fail-http err.http-blocked
+# HTTPS FAILS while plain HTTP works: interception with a certificate this machine does not trust,
+# a portal on 443, or a wrong clock -- each of which breaks every HTTPS step the build has.
+httpcheck_run fail-https
+httpcheck_refuses fail-https err.https-failed
+# NOTHING GETS THROUGH: on a rebuild with the base image cached, layer 1 is the build's first access.
+httpcheck_run timeout
+httpcheck_refuses timeout err.ubuntu-unreachable
+# THE RECORD KEEPS CURL'S OWN COMPLAINT, which is the part of a failed fetch staff can act on.
+assert_contains "httpcheck:record-keeps-curls-complaint" "Operation timed out" \
+                "$(cat "$(build_log_of)" 2>/dev/null)"
+# A FAILED FETCH IS TRIED THREE TIMES, the build's own allowance for dorm wifi. Two per attempt.
+assert_eq "httpcheck:a-failing-fetch-is-tried-three-times" "6" "$(curl_asked .)"
+# ...AND A STALL THAT CLEARS IS NOT A REFUSAL: the first attempt times out, the second answers.
+httpcheck_run timeout-once
+assert_says_key "httpcheck:a-stall-that-clears-still-builds" status.created "$out"
+assert_eq       "httpcheck:a-stall-that-clears-took-two-attempts" "4" "$(curl_asked .)"
+
+# THE SAME NON-200 OVER BOTH is not the student's machine: the file is gone (release gate §11 says
+# so) or Ubuntu is having an outage, and either way the build is left to report it in its own words.
+# amd64, so this run also pins the other archive -- with uname saying arm64.
+httpcheck_run gone amd64
+assert_says_key "httpcheck:the-same-404-both-ways-still-builds" status.created "$out"
+assert_eq       "httpcheck:the-same-404-both-ways-was-fetched"  "2" "$(curl_asked .)"
+assert_eq "httpcheck:amd64-asks-archive-even-when-uname-says-arm64" "2" \
+          "$(curl_asked '://archive.ubuntu.com/ubuntu/dists/resolute/InRelease')"
+
+# A FETCH THAT WORKED IS KEPT, and only the failed one is fetched again. Here http answers first
+# time and fails ever after, and https fails first time and answers after: re-fetching both would
+# end on http failing and refuse as blocked, about a network on which both halves were seen to work.
+httpcheck_run flap
+assert_says_key "httpcheck:a-fetch-that-worked-is-kept" status.created "$out"
+assert_eq       "httpcheck:only-the-failed-fetch-is-retried" "3" "$(curl_asked .)"
+
+# A FAULT ON THIS MACHINE IS NOT A NETWORK FINDING. curl exits 23 when it cannot write what it
+# fetched -- a full disk -- and saying "cannot reach Ubuntu" about that is the wrong advice; the build
+# gets to say it, as err.build-no-disk.
+httpcheck_run write-error
+assert_says_key "httpcheck:a-local-write-error-still-builds" status.created "$out"
+for k in $HC_KEYS; do
+    assert_says_not_key "httpcheck:a-local-write-error-is-not-$k" "$k" "$out"
+done
+
+# A SCRATCH DIRECTORY PER RUN, removed when the check is done, so a fetch orphaned by an interrupted
+# run has nowhere in the next one's to write.
+assert_eq "httpcheck:leaves-no-scratch-directory" "" "$(ls -d "$SHIM"/tmp/*.httpcheck.* 2>/dev/null)"
+
+# NO curl AT ALL, which the installer rules out -- it refuses a Mac without one and installs it
+# everywhere else -- so only a student who removed it afterwards gets here. The build does not use
+# the host's curl, and a curl that is not there exits 127, which is no network finding: it builds.
+httpcheck_setup differ
+rm -f "$SHIM/curl"
+NOCURL="$SHIM/farm-nocurl"; mkdir -p "$NOCURL"
+ln -s "$(shim_toolfarm)"/* "$NOCURL/" 2>/dev/null
+rm -f "$NOCURL/curl"
+assert_eq "httpcheck:the-no-curl-farm-really-has-no-curl" "" "$(PATH="$SHIM:$NOCURL" command -v curl)"
+out="$(PATH="$NOCURL" launcher --rebuild --no-cache 2>&1)"
+assert_says_key "httpcheck:no-curl-still-builds" status.created "$out"
+
+# ONLY WHEN SOMETHING IS ABOUT TO BE BUILT. The recreate path builds nothing, so it fetches nothing
+# -- that is the two-second --rebuild every launch after a course update takes.
+httpcheck_setup differ
+out="$(launcher --rebuild 2>&1)"
+assert_says_key "httpcheck:the-recreate-path-is-the-one-taken" status.rebuilding "$out"
+assert_eq "httpcheck:the-recreate-path-fetches-nothing" "0" "$(curl_asked .)"
+
+# THE STAFF SWITCH, for a false positive, on top of a fixture that would refuse.
+httpcheck_setup differ
+out="$(CS193V_SKIP_HTTP_CHECK=1 launcher --rebuild --no-cache 2>&1)"
+assert_says_key "httpcheck:the-skip-switch-builds"         status.created "$out"
+assert_eq       "httpcheck:the-skip-switch-fetches-nothing" "0" "$(curl_asked .)"
+
 # --- the terminal case, which is the one a student is in ----------------------
 # Everything above runs with stdout redirected, where both indicators deliberately fall
 # back to plain lines. The redraw-in-place behaviour only exists on a pty, so it can only

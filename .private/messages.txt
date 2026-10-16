@@ -171,18 +171,151 @@ To stop the container so you can start again:
     ./cs193v --stop
 
 [[err.build-failed]]
+# THE LOG'S PATH IS PRINTED BELOW THIS BOX, not inside it (#355): note.build-log, die()'s trailer.
+# It is TMPDIR's, which on a Mac is a hidden /var/folders path wider than this box, and box()
+# breaks a token that long mid-word -- so inside, the one thing staff need could not be copied out
+# of the message asking for it. The log carries the HTTP check's record at the end.
 The course container could not be built. Podman stopped here:
 
 {{OUT}}
 
 Check your internet connection and try again. If the problem
-persists, contact the course staff.
+persists, contact the course staff. The full log is saved on this
+computer, at the path printed below this box. Please send that file
+to the course staff.
 
 [[err.build-no-disk]]
 The course container could not be built. This computer ran out of
 disk space part-way through. Free up some space and try again.
 
 If you cannot free up that much space, contact course staff.
+
+[[note.build-log]]
+# DIE()'S TRAILER after a box that asks for the log (#355): build_log_ready arms it. Outside the box
+# so the path is printed whole and can be copied. The path is already in the form this platform's
+# file manager opens -- File Explorer's \\wsl.localhost form on Windows.
+The full log, for the course staff:
+
+    {{LOG}}
+
+[[note.build-log-finder]]
+# A Mac's TMPDIR is under /var/folders, which Finder does not show, so this hands over the command
+# that reveals the file. Printed after note.build-log, on a Mac only.
+To show it in Finder, run:
+
+    open -R "{{LOG}}"
+
+[[err.http-rewritten]]
+# THE BUILD'S HTTP CHECK FOUND A DIFFERENCE (#355), and nothing has been built. build_image fetched
+# dists/resolute/InRelease from the Ubuntu archive apt will use, over http:// and https://, and
+# the two copies differed -- or plain HTTP answered with something else entirely, a redirect to a
+# login page, while HTTPS served the file. That file has not changed since 26.04's release day, so
+# either is something between this machine and Ubuntu rewriting plain HTTP, and the build would
+# have failed at its first apt step under a box saying to check the connection. The other three
+# refusals the check makes follow this one; http_check in the launcher has the table.
+#
+# THE ONE MEASURED CAUSE IS SCREEN TIME, and its fix is the one verified on the student's Mac:
+# Content & Privacy switched off. The rest of the list is the usual suspects for traffic that is
+# inspected in transit, not things anyone has reproduced. The record behind the refusal -- both
+# copies' hashes and headers -- is in the file this message names.
+The course container was not built, because something on this
+computer or its network is changing web downloads as they arrive.
+
+Most of the course software comes from Ubuntu over plain HTTP. A
+test file fetched that way came back different from the same file
+fetched over a secure (HTTPS) connection, so the build would fail
+part-way through.
+
+Common causes:
+
+  * On a Mac, Screen Time. Open System Settings, click Screen Time,
+    then Content & Privacy, and switch Content & Privacy off.
+  * A VPN, or a VPN app's ad-blocking or "protection" feature.
+  * Antivirus or security software that scans web traffic.
+  * Parental-control software.
+  * A school, workplace or hotel network that filters traffic. Try
+    a different network, such as your phone's hotspot.
+
+Turn off whichever of these applies, or switch networks, and try
+again. You can turn it back on once the course container is built.
+If you cannot change it, contact the course staff.
+
+The full log is saved on this computer, at the path printed below
+this box. Please send that file to the course staff.
+
+[[err.http-blocked]]
+# THE BUILD'S HTTP CHECK: PLAIN HTTP FAILED AND HTTPS ANSWERED (#355), three attempts running.
+# apt is the half of the build that needs plain HTTP, so layer 1 would have failed. Screen Time is
+# on the list because a content filter can drop a connection as readily as rewrite it -- listed,
+# not reproduced, like everything here but #355's own rewrite.
+The course container was not built, because plain HTTP downloads
+from Ubuntu are not getting through from this computer.
+
+Most of the course software comes from Ubuntu over plain HTTP. A
+test file could be fetched over a secure (HTTPS) connection but not
+over plain HTTP, so the build would fail part-way through.
+
+Common causes:
+
+  * A firewall, VPN or security program that blocks plain HTTP.
+  * On a Mac, Screen Time. Open System Settings, click Screen Time,
+    then Content & Privacy, and switch Content & Privacy off.
+  * A school, workplace or hotel network that blocks plain HTTP.
+    Try a different network, such as your phone's hotspot.
+
+Turn off whichever of these applies, or switch networks, and try
+again. You can turn it back on once the course container is built.
+If you cannot change it, contact the course staff.
+
+The full log is saved on this computer, at the path printed below
+this box. Please send that file to the course staff.
+
+[[err.https-failed]]
+# THE BUILD'S HTTP CHECK: HTTPS FAILED AND PLAIN HTTP ANSWERED (#355), three attempts running.
+# The archive's chain is Let's Encrypt YR1 -> ISRG Root YR, cross-signed by ISRG Root X1, which
+# every supported platform has trusted for years -- so an old trust store is not the explanation,
+# and every cause left breaks the build's other HTTPS steps too: docker.io, NodeSource, gh, npm
+# and PyPI. The record behind this names curl's error, which tells a certificate problem from a
+# refused connection.
+The course container was not built, because secure (HTTPS)
+downloads from Ubuntu are failing on this computer.
+
+A test file could be fetched from Ubuntu over plain HTTP but not
+over a secure connection. Much of the course software is fetched
+securely, so the build would fail part-way through.
+
+Common causes:
+
+  * This computer's date and time are wrong. Set them to update
+    automatically, then try again.
+  * Antivirus or security software that inspects secure
+    connections.
+  * A school or workplace network that inspects secure traffic.
+  * A wifi network that wants you to sign in. Open a web browser,
+    sign in, and try again.
+
+Fix whichever of these applies, or try a different network, such as
+your phone's hotspot, and try again. If you cannot change it,
+contact the course staff.
+
+The full log is saved on this computer, at the path printed below
+this box. Please send that file to the course staff.
+
+[[err.ubuntu-unreachable]]
+# THE BUILD'S HTTP CHECK: NEITHER FETCH GOT THROUGH, three attempts running (#355). On a rebuild
+# with the base image already cached, layer 1's apt is the build's first network access, so this
+# is where the build would have died -- minutes later and less clearly.
+The course container was not built, because this computer cannot
+reach Ubuntu's servers, where most of the course software comes
+from. Three tries to fetch a test file from them all failed.
+
+Check that you are connected to the internet, and try again. If
+you are on a wifi network that wants you to sign in, open a web
+browser and sign in first. If it keeps failing, try a different
+network, such as your phone's hotspot.
+
+The full log is saved on this computer, at the path printed below
+this box. Please send that file to the course staff.
 
 [[err.create-no-disk]]
 The course container was built, but there was not enough disk
@@ -280,6 +413,12 @@ Done. You will need to log in again the next time you use claude, codex or gh.
     This may take a few minutes.
 
     {{IMAGE}}
+
+[[status.http-check]]
+# The spinner beside the build's HTTP check (#355). It normally lasts about a second. On a network
+# that answers neither fetch it is three attempts of up to fifteen seconds each per scheme, which is
+# why it has a spinner at all.
+Checking that downloads from Ubuntu arrive unchanged...
 
 [[status.restarting-machine]]
 Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
