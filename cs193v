@@ -2143,6 +2143,15 @@ stop_container() {                     # stop_container [--quiet]
 # both senses.
 shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
     [ -n "$TEARDOWN_DONE" ] && return 0
+    # NOTHING ENDS A TEARDOWN HALFWAY (#512), and the first line past the guard is the only place
+    # that can promise it. Closing the window HUPs the terminal's whole foreground process group,
+    # which holds more than this shell: every podman call run_timeout starts with `&` is in it,
+    # with SIGHUP at its default. So a student who typed `exit` and closed the window during
+    # "Exiting..." killed the teardown's own `podman stop` -- measured, the container left running
+    # and " done." printed over it. A child takes its dispositions from the moment it starts, so
+    # this has to come before anything that starts one. The arm that brought us here still ends
+    # the process at the bottom; the INT branch's `trap - INT` undoes this first.
+    trap '' INT TERM HUP
     TEARDOWN_DONE=1
     transient_cleanup
     # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different
