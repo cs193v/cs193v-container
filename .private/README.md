@@ -1643,7 +1643,10 @@ process that lives for days. Each piece was measured alone first; its comment sa
 - A hang (rc 124) is the slept Mac and goes straight to `err.podman-hangs`; nothing is asked of the
   machine on top of a 20 s hang.
 - `--stop` and `--reset-tunnel` never start a VM: a stopped one holds no running container, so both are
-  no-ops that say so.
+  no-ops that say so. One that says `running` and does not answer gets the stop-then-start refusal at
+  once, without the launch's wait.
+- `err.podman-unreachable` now reaches only Linux, WSL, a podman pointed elsewhere and a Mac with no
+  usable machine, so its instruction no longer gives Mac advice: podman's own words, then contact staff.
 - `CONTAINER_HOST` / `CONTAINER_CONNECTION` set means podman is pointed somewhere else, while `podman
   machine` still means the default VM — so the machine is not touched.
 

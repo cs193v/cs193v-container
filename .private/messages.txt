@@ -64,15 +64,12 @@ Podman is installed but the course container cannot reach it.
 
 # THE INSTRUCTION IS ITS OWN KEY so that podman's words go BETWEEN the two and the last thing on
 # screen is what to do (#495). A Mac whose VM is merely stopped no longer gets here: the launcher
-# starts the VM itself. What still does is Linux and WSL, a podman pointed elsewhere by
-# CONTAINER_HOST, and a Mac with no default machine at all.
+# starts the VM itself, and a VM that says running but does not answer gets err.machine-unreachable.
+# What still does is Linux and WSL, a podman pointed elsewhere by CONTAINER_HOST or
+# CONTAINER_CONNECTION, and a Mac with no default machine or one that cannot be inspected -- none of
+# whom the old "on a Mac, run podman machine start" helped, so podman's own words carry it.
 [[err.podman-unreachable.fix]]
-On a Mac this almost always means podman's virtual machine is not
-running:
-
-    podman machine start
-
-If the issue persists, contact the course staff.
+If this keeps happening, contact the course staff.
 
 # #495: the VM was asked to start and has not finished within the launcher's deadline. The start
 # itself is still going (it is detached), so "try again in a minute" is usually all it takes; the

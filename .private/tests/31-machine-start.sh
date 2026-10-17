@@ -85,6 +85,13 @@ for k in status.starting-machine status.waiting-machine status.machine-slow; do
     else fail "suite:needle-$k-exists" "no prose for $k, so every wait on it would time out"; fi
 done
 
+# THE MAC ADVICE THE UNREACHABLE REFUSAL USED TO END WITH. Everyone it still reaches -- Linux and
+# WSL, a podman pointed elsewhere, a Mac with no machine -- is someone it is wrong for, now that a
+# Mac's stopped VM is started rather than refused. A literal rather than a key, because the key
+# stays and only this prose goes; and not `podman machine start`, which podman's own quoted error
+# can contain.
+OLD_MAC_ADVICE='On a Mac this almost always means'
+
 # Somebody else holding podman's start lock while the VM still reads `stopped`: the moment
 # between another window taking the lock and its start flipping the state. A sleeping process
 # owns it so the fake's dead-owner takeover cannot steal it; the case releases it.
@@ -402,6 +409,7 @@ shim_set machine_list other-vm
 shim_set info_rc 125
 out="$(launcher)"
 assert_says_key "d2:not-the-default-machine-refuses" err.podman-unreachable "$out"
+assert_not_contains "d2:no-mac-advice"               "$OLD_MAC_ADVICE" "$out"
 assert_eq       "d2:starts-nothing"                  "0" "$(starts)"
 # THE STEP THAT FAILED IS THE ONE QUOTED (R6): `podman info`'s words, not the `machine inspect`
 # asked afterwards -- whose "VM does not exist" is what a refusal built from the last read would
@@ -416,6 +424,7 @@ for var in CONTAINER_HOST CONTAINER_CONNECTION; do
     out="$(env "$var=unix:///tmp/cs193v-elsewhere.sock" PATH="$SHIM:$PATH" "$LAUNCHER_DIR/cs193v" 2>&1 </dev/null)"
     assert_eq       "d3:$var-asks-the-machine-nothing" "0" "$(machine_calls)"
     assert_says_key "d3:$var-refuses-as-before"         err.podman-unreachable "$out"
+    assert_not_contains "d3:$var-no-mac-advice"         "$OLD_MAC_ADVICE" "$out"
 done
 
 # D4: a rootful machine answers -- it is up -- and is refused exactly as before.
@@ -430,6 +439,7 @@ mac
 shim_set info_rc 125
 out="$(launcher)"
 assert_says_key "d5:no-machine-refuses-as-before" err.podman-unreachable "$out"
+assert_not_contains "d5:no-mac-advice"            "$OLD_MAC_ADVICE" "$out"
 assert_eq       "d5:starts-nothing"               "0" "$(starts)"
 
 # ═══ E. the start itself fails or overruns ══════════════════════════════════════
@@ -485,11 +495,13 @@ mac stopped
 shim_set machine_inspect_rc 125
 out="$(launcher)"
 assert_says_key "e3:inspect-failure-refuses-as-before" err.podman-unreachable "$out"
+assert_not_contains "e3:inspect-failure-no-mac-advice" "$OLD_MAC_ADVICE" "$out"
 assert_eq       "e3:starts-nothing"                    "0" "$(starts)"
 mac stopped
 shim_touch machine_inspect_hang
 out="$(launcher)"
 assert_says_key "e3:inspect-hang-refuses-as-before"    err.podman-unreachable "$out"
+assert_not_contains "e3:inspect-hang-no-mac-advice"    "$OLD_MAC_ADVICE" "$out"
 assert_eq       "e3:hang-starts-nothing"               "0" "$(starts)"
 
 # E4: a start that SUCCEEDS is always asked about at least once, however little of the deadline is
@@ -530,14 +542,21 @@ assert_says_key "g2:stop-while-starting-is-a-no-op" status.already-stopped "$out
 assert_eq       "g2:and-exits-0"                    "0" "$rc"
 assert_eq       "g2:and-starts-nothing"             "0" "$(starts)"
 
-mac running
-shim_touch machine_unreachable
-t0=$SECONDS
-out="$(launcher --stop)"
-took=$((SECONDS - t0))
-assert_says_key "g3:stop-on-an-unreachable-vm-refuses-as-before" err.podman-unreachable "$out"
-assert_eq       "g3:starts-nothing"                              "0" "$(starts)"
-if [ "$took" -le 5 ]; then pass "g3:without-waiting"; else fail "g3:without-waiting" "took ${took}s"; fi
+# G3: --stop, and G3b --reset-tunnel, on a VM that says `running` and does not answer -- gvproxy
+# gone. Neither verb waits or starts anything; both say what a bare launch says once its wait runs
+# out, stop then start, because this is the one unreachable case left with something to do.
+for verb in --stop --reset-tunnel; do
+    case "$verb" in --stop) g=g3 ;; *) g=g3b ;; esac
+    mac running
+    shim_touch machine_unreachable
+    t0=$SECONDS
+    out="$(launcher "$verb")"
+    took=$((SECONDS - t0))
+    assert_says_key "$g:an-unreachable-vm-gets-the-stop-start-refusal" err.machine-unreachable "$out"
+    assert_says_key "$g:with-the-two-commands"                         err.machine-unreachable.fix "$out"
+    assert_eq       "$g:starts-nothing"                                "0" "$(starts)"
+    if [ "$took" -le 5 ]; then pass "$g:without-waiting"; else fail "$g:without-waiting" "took ${took}s"; fi
+done
 
 mac stopped
 shim_set image_exists no
@@ -613,6 +632,7 @@ shim_fake_uname Linux x86_64
 shim_set machine_state stopped
 out="$(launcher)"
 assert_says_key "g7:linux-refuses-as-before" err.podman-unreachable "$out"
+assert_not_contains "g7:linux-gets-no-mac-advice" "$OLD_MAC_ADVICE" "$out"
 assert_eq       "g7:linux-asks-no-machine"   "0" "$(machine_calls)"
 
 # ═══ H. timing and screen invariants ════════════════════════════════════════════
