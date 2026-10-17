@@ -1113,9 +1113,10 @@ machine_recover() {                   # machine_recover MODE INFO_RC INFO_STDERR
                   machine_bring_up start "$ierr" ;;
         starting) [ "$mode" = ifup ] && return 2
                   machine_bring_up wait "$ierr" ;;
-        # RUNNING AND SILENT is not "down", so --stop and --reset-tunnel get the refusal as they
-        # always did, at once; a launch waits in case it is a start still finishing.
-        running)  [ "$mode" = ifup ] && refuse_unreachable "$ierr"
+        # RUNNING AND SILENT is not "down", so --stop and --reset-tunnel refuse at once, with the
+        # stop-then-start a launch gives when its wait runs out; a launch waits in case it is a
+        # start still finishing.
+        running)  [ "$mode" = ifup ] && refuse_machine_unreachable "$ierr"
                   machine_bring_up wait "$ierr" ;;
         *)        refuse_unreachable "$ierr" ;;
     esac
