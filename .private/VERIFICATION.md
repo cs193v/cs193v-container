@@ -1307,8 +1307,8 @@ than fail after a Mac wakes (`podman#21675`), which is why every probe is `timeo
 
 **6.2 — Clock skew.** After the same sleep:
 `echo "host=$(date +%s) container=$(podman exec cs193v date +%s)"`
-*Expect:* within a couple of seconds. If minutes or hours apart, confirm `cs193v doctor` detects it and
-offers the VM restart, and that the restart fixes it. Also record whether podman **self-corrected** on
+*Expect:* within a couple of seconds. If minutes or hours apart, confirm `cs193v doctor` reports it with
+the two commands that fix it, and that running them does. Also record whether podman **self-corrected** on
 resume — if it does, the check may be unnecessary.
 
 **6.3 — gvproxy CPU (macOS).** After wake, check CPU usage of `gvproxy`.

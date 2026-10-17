@@ -561,6 +561,46 @@ mac stopped
 launcher doctor >/dev/null 2>&1
 assert_eq "g5:doctor-starts-nothing" "0" "$(starts)"
 
+# G8: doctor finding the container's clock off REPORTS it and stops there (#494). It used to offer
+# to restart the VM, and measured on a real Mac (2026-10-16) that restart left the VM stopped
+# whenever doctor's session leader exited: the kernel hangs up the foreground group, and the bare
+# start had put the VM in it. So doctor runs here AS the session leader, on a pty, against a VM
+# that is up and detached -- and if a menu appears anyway, it is answered `2`, the old restart, so
+# that a menu coming back is counted in argv.log rather than left waiting.
+mac stopped
+PATH="$SHIM:$PATH" bash -c '. "$1"; machine_start_detached >/dev/null 2>&1' _ "$COPY/.private/files/cs193v-ui.sh"
+# The fake VM writes its pid as it comes up, a moment after the start has returned.
+wait_until 10 eval '[ -n "$(vm_pid)" ]'
+vm0="$(vm_pid)"
+shim_set state running
+shim_set container_date "$(( $(date +%s) + 600 ))"
+shim_clear_log
+PTY_IN="$SHIM/g8.in"; PTY_OUT="$SHIM/g8.out"
+rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
+CS193V_PTY_NOSHELL=1 PATH="$SHIM:$PATH" \
+    "$DO_PY" "$PT_LIB/ptyrun.py" "$COPY/cs193v" doctor < "$PTY_IN" > "$PTY_OUT" 2>&1 &
+g8pid=$!
+PTY_PIDS="$PTY_PIDS $g8pid"
+exec 7>"$PTY_IN"
+PASTE="$(msg_text doctor.paste)"
+OLDMENU='Restart the virtual machine to fix the clock'
+wait_until 30 eval 'pty_said "$PASTE" || pty_said "$OLDMENU"'
+pty_said "$OLDMENU" && { pty_type '2'; wait_until 30 pty_said "$PASTE"; }
+exec 7>&-
+wait "$g8pid" 2>/dev/null
+# Proving an absence: the leader has exited, and its hangup has had time to land.
+sleep 2
+g8="$(cat "$PTY_OUT")"
+assert_ne           "g8:the-vm-was-up-to-begin-with"       "" "$vm0"
+assert_says_key     "g8:doctor-reports-the-clock-problem"  doctor.row.clock "$g8"
+assert_says_key     "g8:and-says-how-to-fix-it"            doctor.clock.fix "$g8"
+assert_contains     "g8:and-the-report-runs-to-the-end"    "$PASTE" "$g8"
+assert_not_contains "g8:offers-no-restart"                 "$OLDMENU" "$g8"
+assert_eq           "g8:stops-nothing"                     "0" "$(shim_count '^machine stop')"
+assert_eq           "g8:starts-nothing"                    "0" "$(starts)"
+assert_eq           "g8:the-same-vm-is-still-running"      "$vm0" "$(vm_pid)"
+if vm_alive; then pass "g8:and-it-is-alive"; else fail "g8:and-it-is-alive" "doctor left the VM dead"; fi
+
 mac stopped
 launcher --dev-print-image >/dev/null 2>&1
 launcher --dev-args >/dev/null 2>&1

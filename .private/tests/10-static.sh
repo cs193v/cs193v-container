@@ -5518,9 +5518,10 @@ assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$unco
 # what that helper does. These two checks hold that nothing goes AROUND it.
 #
 # EVERY OTHER SITE IS NAMED, BY FUNCTION. The installer's two (setup_machine,
-# grow_machine_disk_when_stopped) and doctor's clock fix (check_clock) predate the helper and stay
-# allowlisted until they move over -- #495's follow-ups. A new bare start anywhere goes red. Comment
-# lines are skipped, so prose that NAMES the command is not a call site.
+# grow_machine_disk_when_stopped) predate the helper and stay allowlisted until they move over
+# (#543). Doctor's clock fix was the third, and it went the other way: doctor no longer restarts the
+# VM at all (#494). A new bare start anywhere goes red. Comment lines are skipped, so prose that
+# NAMES the command is not a call site.
 ms_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ms.XXXXXX")"
 for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.sh"; do
     awk -v F="${f#"$REPO"/}" '
@@ -5529,7 +5530,7 @@ for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.s
         /podman machine start/ { print F ":" fn }
     ' "$f"
 done > "$ms_tmp/sites"
-ms_allowed=' cs193v:check_clock .private/course-install.sh:setup_machine
+ms_allowed=' .private/course-install.sh:setup_machine
               .private/course-install.sh:grow_machine_disk_when_stopped
               .private/files/cs193v-ui.sh:machine_start_detached '
 ms_bare=''

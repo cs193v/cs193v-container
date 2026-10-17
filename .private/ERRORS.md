@@ -1904,3 +1904,32 @@ on the first run. What it changed:
 - *A test that signals a process group must never signal its own.* Under the `drop set -m` mutation
   the fake VM sat in the suite's own group, so `i7`'s hangup took down the suite, the driver and
   everything above them, silently. `i7` now refuses when the group is its own.
+
+### D18. Doctor's clock fix left the VM stopped because its session leader's exit hung it up (issue #494)
+
+`cs193v doctor` used to offer to restart the VM when the container's clock was off, and #494 found
+the VM stopped afterwards, 3/3. Measured on the real VM, 2026-10-16 (Apple silicon, macOS 26.6.2,
+podman 6.0.2, libkrun): each trial started from #494's state (container running, `--reset-tunnel`),
+skewed the VM clock by 600 s, restarted, and watched krunkit for 60 s. The shapes are a pty's:
+
+| the pty's session leader | what restarted the VM | the VM afterwards |
+|---|---|---|
+| doctor itself (`sh -c` with one command execs it: ptydrive/ptyrun's default) | doctor, bare start | stopped, 2/2 |
+| the same | doctor, through `machine_start_detached` | running, 2/2 |
+| `sh -c 'doctor; sleep 20'` | doctor, bare start | stopped, 20 s after doctor ended |
+| `sh -c 'podman machine stop; podman machine start'` | no doctor at all | stopped |
+| an interactive zsh, doctor typed at its prompt | doctor, bare start | running, 2/2 |
+| the same | stop and start typed, no doctor | running |
+
+Every death came 0.07–0.3 s after the session LEADER exited, never when doctor did. When a
+controlling process exits, the kernel hangs up its terminal's foreground process group (POSIX
+`_exit`), and a bare start had put krunkit in that group with SIGHUP at default; D17's session-leader
+row is the same thing. Each dead boot's journal stops mid-line, a power cut. A shell with job control
+takes the terminal back after every job, so in a Terminal-like shape the hangup never reached the VM.
+Neither the clock skew nor anything on doctor's path was needed. #494's "ruled out" control, a plain
+stop/start that survived in a pty, cannot have run in the shape that reproduced the bug.
+
+doctor now reports the skew and the two commands that fix it, and starts nothing (README, "doctor
+reports"). Two things seen along the way and not investigated: the stop took about 61 s in 8 of 9
+trials, against the old prompt's "about twenty seconds"; and a gvproxy from an earlier boot outlived
+every `podman machine stop`.
