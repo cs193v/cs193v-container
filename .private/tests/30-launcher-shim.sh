@@ -637,6 +637,167 @@ else
 fi
 rm -f "$SHIM/run_hold"
 
+# ─── a signal once the session is ours ENDS the launcher  (#449) ──────────────
+# open_shell's trap used to be `trap shell_teardown EXIT HUP INT TERM`, and a bash signal trap that
+# RETURNS resumes the script. So a ^C at the warnings prompt stopped the container, went back to
+# the prompt -- the interrupted `read` restarts -- and on ENTER ran `podman exec -it` against the
+# container it had just stopped (real podman: rc 125, "container state improper"). A second ^C did
+# nothing at all, the once-guard returning at once. Measured identically on bash 3.2 and 5.3.
+#
+# A REAL ^C, AND A REAL FOREGROUND JOB. The byte \003 through the pty's line discipline, under
+# launcher_fg_start, so SIGINT reaches the launcher the way a terminal sends it and arrives at its
+# default disposition -- the `interrupt:` group above has to use TERM for want of exactly this.
+#
+# AFTER THE BOUND, ENTER. A launcher that went back to the prompt is still alive when the wait
+# expires, and asserting "no exec -it" at that moment would pass on the broken shape. Pressing
+# ENTER is what lets it walk on into the exec, so the count measures something either way.
+#
+# THE FAKE TUNNEL FAILS, so every one of these launches warns and stops at the prompt -- see the
+# `ack:` group below.
+SIG_ACK="$(msg_of prompt.acknowledge-warnings | grep -v '^[[:space:]]*$' | tail -n 1)"
+# ONE LINE OF THE PROMPT, never the whole message: it holds a blank line, and grep -F reads each
+# line of a needle as a pattern of its own, so the empty one matches the first byte of output.
+assert_ne "setup-signal:the-prompt-needle-is-a-line" "" "$SIG_ACK"
+sig_at_prompt() {                     # sig_at_prompt -> 0 once a fresh launch waits at the prompt
+    shim_new
+    shim_set exec_out "SHELL-OPENED"
+    launcher_fg_start
+    wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"
+}
+# The verdict for one case: how it ended before anybody pressed ENTER, then what it ran.
+sig_verdict() {                       # sig_verdict NAME WANT_STATUS
+    local st
+    launcher_fg_ended 15 || true
+    st="$(launcher_fg_status)"
+    [ -n "$st" ] || { launcher_fg_keys '\n'; launcher_fg_ended 15 || true; }
+    assert_eq "setup-signal:$1-ends-the-launcher" "$2" "${st:-still running}"
+    assert_eq "setup-signal:$1-stops-the-container-once" "1" "$(shim_count '^stop ')"
+    assert_eq "setup-signal:$1-never-opens-the-shell" "0" "$(shim_count '^exec -it')"
+}
+
+# ^C AT THE PROMPT, and the CANARY the teardown cases below are gated on: a stop issued in
+# answer to the ^C is what says SIGINT reached a launcher able to trap it. It holds before #449
+# and after; what it guards against is the harness, not the launcher.
+SIG_CANARY=''
+if sig_at_prompt; then
+    shim_clear_log
+    launcher_fg_keys '\003'
+    wait_until 15 grep -q '^stop ' "$SHIM/argv.log" && SIG_CANARY=1
+    if [ -n "$SIG_CANARY" ]; then pass "setup-signal:a-ctrl-c-reaches-the-launcher"
+    else fail "setup-signal:a-ctrl-c-reaches-the-launcher" \
+              "no stop followed the ^C, so SIGINT never reached a launcher that could trap it"; fi
+    sig_verdict ctrl-c-at-the-prompt "signal 2"
+else
+    fail "setup-signal:a-ctrl-c-reaches-the-launcher" "the launch never reached the prompt:
+$(strip_ansi < "$FG_OUT")"
+fi
+launcher_fg_stop
+
+# TERM and a closed window, each with the status a caller reads it by: 128+15 and 128+1.
+if sig_at_prompt && SIG_PID="$(launcher_fg_pid)"; then
+    shim_clear_log
+    kill -TERM "$SIG_PID"
+    sig_verdict term-at-the-prompt "exit 143"
+else
+    fail "setup-signal:term-at-the-prompt-ends-the-launcher" "never reached the prompt"
+fi
+launcher_fg_stop
+if sig_at_prompt; then
+    shim_clear_log
+    launcher_fg_close
+    sig_verdict a-closed-window-at-the-prompt "exit 129"
+else
+    fail "setup-signal:a-closed-window-at-the-prompt-ends-the-launcher" "never reached the prompt"
+fi
+launcher_fg_stop
+
+# ^C INSIDE THE TUNNEL'S SETUP, the other half of what runs between the trap and the attach. The
+# old trap stopped the container here and setup carried on regardless: it started the port
+# supervisor against the stopped container and then ran the exec. Wedged on the first `-O check`,
+# so the signal lands inside `tunnel_alive`.
+#
+# NOT ASSERTING status.stopping. tunnel_alive's call is redirected to /dev/null, and a handler runs
+# with the redirections of whatever it interrupted, so that line goes there too -- #511.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+shim_fake_ssh
+shim_ssh_wedge 1 1
+launcher_fg_start
+if wait_until 30 grep -q WEDGED "$SHIM/ssh_wedge.log"; then
+    shim_clear_log
+    launcher_fg_keys '\003'
+    sig_verdict ctrl-c-in-the-tunnel-setup "signal 2"
+    # THE WATCHER'S OWN EXEC, `exec NAME cs193v-portwatch --watch 1`, anchored on the name before
+    # it: the teardown's reap is `exec NAME pkill -f "cs193v-portwatch --watch"` and holds the
+    # same words, so a looser needle counts the cleanup as the thing it cleans up.
+    assert_eq "setup-signal:ctrl-c-in-the-tunnel-setup-starts-no-supervisor" "0" \
+              "$(shim_count '^exec [^ ]+ cs193v-portwatch --watch')"
+else
+    fail "setup-signal:ctrl-c-in-the-tunnel-setup-ends-the-launcher" "the tunnel never wedged:
+$(strip_ansi < "$FG_OUT")"
+fi
+shim_ssh_unwedge
+launcher_fg_stop
+
+# ─── ...and a signal DURING the teardown lets it finish  (#449) ────────────────
+# The student has typed `exit` and is watching "Exiting the CS193V development environment...";
+# they press ^C, or the launcher is HUPed. That teardown already owns TEARDOWN_DONE, so a signal
+# arm that tears down and then ENDS THE PROCESS -- the obvious fix for the group above, and the
+# one #449 proposed -- returns from the guard and exits in the middle of it, before `podman stop`.
+# Measured that way on bash 3.2 and 5.3: no stop issued, the container left running. Green before
+# #449 and after it; it is here so the fix for the group above cannot be that one.
+#
+# hold_after_attach stops the teardown's first podman call, so the signal lands with the stop
+# still to come. HUP TO THE LAUNCHER ALONE, not a closed window: a window closing HUPs the
+# teardown's own children too, which is a different failure with its own group (#512).
+for sig_how in ctrl-c hup; do
+    # THE ^C CASE ONLY: a HUP sent with kill(2) does not depend on what the canary vouches for.
+    if [ "$sig_how" = ctrl-c ] && [ -z "$SIG_CANARY" ]; then
+        fail "teardown-signal:$sig_how-mid-teardown-still-stops-the-container" \
+             "not measured: the ^C canary above says SIGINT never reached the launcher"
+        continue
+    fi
+    shim_new
+    shim_set exec_out "SHELL-OPENED"
+    shim_touch hold_after_attach
+    launcher_fg_start
+    if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT" && SIG_PID="$(launcher_fg_pid)"; then
+        launcher_fg_keys '\n'
+        if wait_until 30 test -e "$SHIM/hold_reached"; then
+            sig_sent=1
+            case "$sig_how" in
+                # DELIVERED, NOT MERELY WRITTEN: the byte reaches the pty through ptyrun, so wait
+                # for the line discipline's own echo of it, which it prints as it signals the group.
+                ctrl-c) launcher_fg_keys '\003'
+                        wait_until 10 grep -qF '^C' "$FG_OUT" || sig_sent='' ;;
+                hup)    kill -HUP "$SIG_PID" ;;
+            esac
+            [ -n "$sig_sent" ] || fail "teardown-signal:$sig_how-was-delivered" \
+                                       "the terminal never echoed the ^C"
+            # PROVING AN ABSENCE, so a fixed wait: the right shape gives no sign at all that it saw
+            # the signal, so there is nothing to wait FOR -- only a moment for the handler to run
+            # before the held call lets go. The wrong shape does its damage once that call returns:
+            # measured, #449's own arms died there, between the held call and the `stop`.
+            sleep 1
+            rm -f "$SHIM/hold_after_attach"
+            launcher_fg_ended 30 || true
+            assert_eq "teardown-signal:$sig_how-mid-teardown-still-stops-the-container" \
+                      "1" "$(shim_count '^stop ')"
+            assert_eq "teardown-signal:$sig_how-mid-teardown-leaves-it-exited" "exited" "$(shim_state)"
+            assert_eq "teardown-signal:$sig_how-mid-teardown-still-exits-0" "exit 0" \
+                      "$(launcher_fg_status)"
+        else
+            fail "teardown-signal:$sig_how-mid-teardown-still-stops-the-container" \
+                 "the teardown never reached the held call:
+$(strip_ansi < "$FG_OUT")"
+        fi
+    else
+        fail "teardown-signal:$sig_how-mid-teardown-still-stops-the-container" "never reached the prompt"
+    fi
+    rm -f "$SHIM/hold_after_attach"
+    launcher_fg_stop
+done
+
 # ─── a container from a different copy of the course directory  (§2.7) ─────────
 # Without this a student who re-downloads after breaking something silently gets the old
 # container with the old mount, and their edits appear to vanish.

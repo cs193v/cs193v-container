@@ -45,6 +45,9 @@
 #   run_delay        seconds `podman run` takes             [0]
 #   run_hold         present = `podman run` blocks, container already up, until this file
 #                    is removed  [absent]
+#   hold_after_attach  present = the FIRST call made after `cs193v-shell --attach` writes
+#                    hold_reached and blocks until this file is removed  [absent]. A window
+#                    inside the clean-exit teardown, before its `stop`, to land a signal in (#449).
 #   build_out        whole `podman build` output, verbatim  [a realistic STEP i/N run]
 #   build_steps      how many STEPs the default emits       [23]
 #   build_rc         exit code for `podman build`           [0]
@@ -101,6 +104,20 @@ get() {                               # get KEY DEFAULT
 }
 
 [ -f "$SHIM/hang" ] && { while :; do sleep 5; done; }
+
+# hold_after_attach, header above. THE FIRST CALL AFTER THE ATTACH, whatever it is, rather than a
+# named one: the teardown's order is the launcher's business, and a hold aimed at `pkill` or
+# `inspect` would quietly stop holding anything the day that order changed. hold_reached doubles
+# as the once-only mark, so the calls after it run free.
+if [ -f "$SHIM/hold_after_attach" ]; then
+    case "$*" in
+        *cs193v-shell*--attach*) : > "$SHIM/attach_seen" ;;
+        *)  if [ -f "$SHIM/attach_seen" ] && [ ! -f "$SHIM/hold_reached" ]; then
+                : > "$SHIM/hold_reached"
+                while [ -f "$SHIM/hold_after_attach" ]; do sleep 0.1; done
+            fi ;;
+    esac
+fi
 
 # `podman --version` is checked before anything else and must stay cheap.
 case "${1:-}" in

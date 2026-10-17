@@ -224,6 +224,70 @@ launcher_pty_silent_stop() {
     rm -f "$PTY_FIFO"
 }
 
+# A bare launch as a student's FOREGROUND JOB, which is the one shape a signal test can trust (#449).
+#
+# THREE THINGS THE SILENT HELPER ABOVE CANNOT DO, and a signal test needs all of them:
+#   * TYPE ON DEMAND. The fifo's write end is held HERE, on fd 8, rather than by a writer that never
+#     writes, so a test can send ^C or ENTER at the moment it chooses. A ^C is the byte \003 through
+#     the pty's line discipline -- the terminal's own SIGINT to the foreground group, not a kill(2).
+#   * A LAUNCHER THAT CAN TRAP SIGINT. Under ptyrun alone it cannot -- see lib/fgjob.py, which
+#     resets what an `&` (this one included) hands down.
+#   * HOW IT ENDED. fgjob writes `exit N` or `signal N`, and publishes the launcher's own pid for a
+#     test that signals the launcher alone. CS193V_PTY_JOB=1 makes the launcher a job beneath a
+#     leader that stays, the shape 70-sighup.sh's launch_in_pty builds -- so launcher_fg_close is a
+#     real window close: SIGHUP to the foreground group, with the master kept open.
+#
+# 8>&- ON THE SPAWN: the key channel is this suite's, and a launcher that inherited the fifo's
+# write end would be holding open the very input it is reading. Sets $FG_OWNER (the pty owner),
+# $FG_OUT (the transcript), $FG_PIDFILE and $FG_STATUS; launcher_fg_stop must be called.
+launcher_fg_start() {                 # launcher_fg_start [ARGS...]
+    local cmd
+    cmd="$(sh_quote "$DO_PY" "$PT_LIB/fgjob.py" "${LAUNCHER_DIR:-$REPO}/cs193v" "$@")"
+    FG_FIFO="$SHIM/fg.fifo"; FG_OUT="$SHIM/fg.out"
+    FG_PIDFILE="$SHIM/fg.pid"; FG_STATUS="$SHIM/fg.status"
+    rm -f "$FG_FIFO" "$FG_OUT" "$FG_PIDFILE" "$FG_STATUS"
+    mkfifo "$FG_FIFO"
+    : > "$FG_OUT"
+    exec 8<>"$FG_FIFO"
+    CS193V_PTY_JOB=1 CS193V_FGJOB_PIDFILE="$FG_PIDFILE" CS193V_FGJOB_STATUS="$FG_STATUS" \
+        PATH="$SHIM:$PATH" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" \
+        < "$FG_FIFO" > "$FG_OUT" 2>&1 8>&- &
+    FG_OWNER=$!
+}
+
+launcher_fg_keys() { printf '%b' "$1" >&8; }   # launcher_fg_keys KEYS  (printf %b: \003, \n)
+
+# The launcher's own pid, once fgjob has published it. Empty, rc 1, if it never did -- which the
+# caller must treat as a failure rather than guess at the process tree (#151).
+launcher_fg_pid() {
+    wait_until 10 test -s "$FG_PIDFILE" || return 1
+    do_tr -d ' \n' < "$FG_PIDFILE"
+}
+
+# `exit N` or `signal N` once the launcher has ended, nothing before. Waits up to SECS.
+launcher_fg_ended() {                 # launcher_fg_ended SECS
+    wait_until "$1" test -s "$FG_STATUS"
+}
+launcher_fg_status() { do_tr -d '\n' < "$FG_STATUS" 2>/dev/null; }
+
+# Close the window: what a terminal does, and what 70-sighup.sh's close_window does -- WITHOUT its
+# wait, because a test that has held a podman call open has to let go of it while ptyrun is still
+# draining. ptyrun signals the foreground group and keeps the master open until the job is gone.
+launcher_fg_close() { kill -USR1 "$FG_OWNER" 2>/dev/null; }
+
+launcher_fg_stop() {
+    local p
+    p="$(do_tr -d ' \n' < "$FG_PIDFILE" 2>/dev/null)"
+    # ONLY WHILE fgjob HAS NOT REPORTED AN ENDING. It writes the status after reaping the launcher,
+    # so a pid with a status beside it may already be somebody else's -- "IDENTIFIED BEFORE KILLED"
+    # in cs193v's tunnel_kill_pid.
+    [ -n "$p" ] && [ ! -s "$FG_STATUS" ] && kill -9 "$p" 2>/dev/null
+    kill -9 "$FG_OWNER" 2>/dev/null
+    wait "$FG_OWNER" 2>/dev/null
+    exec 8>&-
+    rm -f "$FG_FIFO"
+}
+
 # The same thing against the REAL launcher and real podman — no shim on PATH. Used by the
 # live tier, where the whole point is that podman is genuine.
 # KEYS should end with an `exit\n` when the launcher will go on to open a shell, since a
@@ -814,7 +878,7 @@ shim_fake_ssh() {
     # entirely -- but because a second shim_fake_ssh inside ONE shim would otherwise leave the
     # first arrangement's forwards in place.
     : > "$SHIM/ssh.log"
-    rm -f "$SHIM/ssh_wedge" "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
+    rm -f "$SHIM/ssh_wedge" "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log" "$SHIM/ssh_wedge.pids"
     # TWO WRITES, AND THE FIRST ONE IS INTERPOLATED. The body must NOT be expanded -- it is
     # made of $*, $@ and $$ -- but the log path must be, so it is written ahead of the quoted
     # heredoc. shim_fake_pkgutil interpolates its state for the same reason.
@@ -835,6 +899,7 @@ if [ -s "$SSHWEDGE" ]; then
             n="$(cat "$SSHWEDGE.n" 2>/dev/null || echo 0)"; n=$((n + 1))
             printf '%s\n' "$n" > "$SSHWEDGE.n"
             if [ "$n" -ge "$wfrom" ] && [ "$n" -le "$wto" ]; then
+                printf '%s\n' "$$" >> "$SSHWEDGE.pids"
                 printf '%s WEDGED %s\n' "$n" "$*" >> "$SSHWEDGE.log"; exec sleep 30
             fi
             printf '%s ok %s\n' "$n" "$*" >> "$SSHWEDGE.log" ;;
@@ -878,9 +943,20 @@ shim_ssh_master() {                   # shim_ssh_master CTL
 # after this. Every counted call, wedged or answered, is logged in order: `N ok|WEDGED ARGV`.
 shim_ssh_wedge() {                    # shim_ssh_wedge FROM TO
     printf '%s %s\n' "$1" "$2" > "$SHIM/ssh_wedge"
-    rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log"
+    rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log" "$SHIM/ssh_wedge.pids"
 }
 shim_ssh_calls() { cat "$SHIM/ssh_wedge.log" 2>/dev/null; }
+# End every wedged call still asleep. A wedge that outlives the launcher which made it is an
+# orphan holding the pty for its full 30s -- which a launcher that EXITS mid-call, rather than
+# waiting out run_timeout's ceiling, leaves behind on purpose (#449). Each wedged call publishes
+# its pid BEFORE its WEDGED line, so a test that waited for the line can always find the pid.
+shim_ssh_unwedge() {
+    local p
+    while IFS= read -r p; do
+        [ -n "$p" ] && kill "$p" 2>/dev/null
+    done < "$SHIM/ssh_wedge.pids" 2>/dev/null
+    return 0
+}
 
 # Portable in-place file edits. `sed -i` is NOT portable: GNU takes an optional suffix,
 # BSD/macOS requires one, so `sed -i '/x/d' f` works on Linux and fails on a Mac.
