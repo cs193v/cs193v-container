@@ -1676,8 +1676,22 @@ start, which must die there — the positive controls. A real Terminal.app windo
 by hand, once (`tests/MANUAL.md`).
 
 **What stays open.** The installer still starts the VM in its own foreground group for the whole first
-`--rebuild`, and doctor's clock fix (`check_clock`) still restarts it the plain way; both are allowlisted
-by `10-static.sh`'s `machine:no-bare-podman-machine-start` until they move to the helper.
+`--rebuild` (#543); its two sites are allowlisted by `10-static.sh`'s `machine:no-bare-podman-machine-start`
+until they move to the helper.
+
+### doctor reports; it does not restart the VM (issue #494)
+
+`cs193v doctor` is the report a student pastes to staff, and its clock row was the one place it acted:
+on a skew it offered to restart the VM. That restart left the VM stopped whenever doctor's session
+leader exited, because a bare `podman machine start` puts krunkit in the terminal's foreground group
+and the leader's exit hangs that group up (`ERRORS.md` D18); and it ended any open session from inside
+the report. So `check_clock` now prints the skew and `doctor.clock.fix` — `podman machine stop`, then
+`./cs193v`, whose own start is detached — and asks nothing. Moving the restart onto
+`machine_start_detached` was measured to fix the VM's death too, and was not chosen: it would keep a
+repair inside a report, and the restart also stops the container, so the tunnel doctor then tried to
+bring back always failed with a false "The container started" warning. `31-machine-start.sh`'s G8
+runs doctor as the session leader against a skewed clock and counts zero `machine stop` and
+`machine start` calls.
 
 
 ## Deliberately not here

@@ -275,12 +275,6 @@ This almost always means the .config folder next to this script is
 not writable, or the disk is full. Check both, then try again. If
 neither looks wrong, contact the course staff.
 
-[[warn.machine-restart-failed]]
-Could not restart podman's virtual machine automatically. Try it by hand:
-
-    podman machine stop
-    podman machine start
-
 [[warn.tunnel-failed]]
 The container started, but your browser will not be able to reach servers running
 inside it. Everything else works normally, so you can keep going; you just will
@@ -356,9 +350,6 @@ Done. You will need to log in again the next time you use claude, codex or gh.
     This may take a few minutes.
 
     {{IMAGE}}
-
-[[status.restarting-machine]]
-Restarting podman's virtual machine to fix the clock. This takes about twenty seconds.
 
 [[status.exiting]]
 # THE FIRST HALF OF ONE LINE. The launcher prints this with no newline, leaves it on screen
@@ -436,22 +427,6 @@ affected.
 
 [[opt.stop-go]]
 Stop the container
-
-[[prompt.clock-drift]]
-The container's clock is {{SKEW}} seconds away from your computer's clock.
-
-This happens when a laptop sleeps: the small Linux virtual machine podman uses does not
-always catch up on waking. It causes confusing failures that look like network
-problems: secure connections rejected as "not yet valid", downloads failing,
-logins refused.
-
-The container cannot fix its own clock, so the fix is to restart podman's virtual
-machine. Anything currently running in the container will stop.
-
-[[opt.leave-clock]]
-Leave it for now
-[[opt.restart-machine]]
-Restart the virtual machine to fix the clock (recommended)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  WHAT `cs193v doctor` PRINTS
@@ -733,7 +708,8 @@ below the lowest port this computer lets a program open
 [[doctor.ports.why.other]]
 refused
 
-# The clock, which the container cannot fix for itself -- see prompt.clock-drift above.
+# The clock, which the container cannot fix for itself. doctor REPORTS it and says how to fix it;
+# it does not restart the VM itself any more (#494).
 
 [[doctor.row.clock]]
 clock skew
@@ -743,3 +719,15 @@ clock skew
 
 [[doctor.clock.problem]]
 {{SKEW}}s  {{HI}}PROBLEM{{OFF}}
+
+# Printed under the clock row, one label-less row per line, so every line has to fit the value
+# column: 61 columns of an 80-column terminal. Mac only -- the fix is podman's VM. The second
+# command is the launcher, which starts a stopped VM itself (#495).
+[[doctor.clock.fix]]
+A laptop that slept can leave podman's virtual machine with
+the wrong time. It causes failures that look like network
+problems: secure connections rejected as "not yet valid",
+downloads failing, logins refused. To fix it, run these two
+commands. The first one ends any open cs193v session.
+    podman machine stop
+    ./cs193v

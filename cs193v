@@ -3238,19 +3238,14 @@ check_clock() {
     fi
     drow "$(msg doctor.row.clock)" \
          "$(msg doctor.clock.problem "SKEW=$skew" "HI=$C_YEL" "OFF=$C_OFF")"
+    # A REPORT, NOT A REPAIR (#494). This used to offer to restart the VM, and that restart is how
+    # doctor left the VM stopped: measured on a real Mac, the VM died the moment doctor's session
+    # leader exited, because a bare `podman machine start` puts krunkit in the foreground group the
+    # kernel hangs up then. It also ended any open session from inside a command whose output is
+    # meant to be pasted. The fix is two commands, and the second is the launcher, which starts a
+    # stopped VM itself, detached (#495).
     has_machine || return 0
-    printf '\n'; msg prompt.clock-drift SKEW="$skew"
-    if confirm "$(msg opt.leave-clock)" "$(msg opt.restart-machine)"; then
-        info "$(msg status.restarting-machine)"
-        run_timeout 120 podman machine stop || true
-        run_timeout 180 podman machine start || warn "$(msg warn.machine-restart-failed)"
-        # Restarting the machine kills the tunnel with it: its transport is a `podman exec`
-        # into a VM that just went away. Without this, the clock fix would silently cost the
-        # student every forwarded port, and the next symptom would look unrelated to the
-        # prompt they just accepted.
-        tunnel_down
-        ensure_tunnel || true
-    fi
+    msg doctor.clock.fix | drows
 }
 
 # The only verb that creates a container. What decides whether it BUILDS first is the recipe
