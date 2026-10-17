@@ -2117,9 +2117,20 @@ TEARDOWN_DONE=''
 # which is the one promise #41 exists to make. 10-static.sh counts this line for that reason.
 SESSION_LEFT=''
 
-# What ends the session: `exit` from the last tab, the window closing, and Ctrl-C alike. All
-# three arrive here the same way, as the podman exec child terminating with a signal pending
-# that we trapped -- which is why there is one teardown and not three.
+# What ends the session: `exit` from the last tab, the window closing, and Ctrl-C alike, and all
+# three come through here -- which is why there is one teardown and not three. `exit` arrives
+# through the EXIT trap once the attach has returned; a signal arrives through its own arm, which
+# says which signal it was.
+#
+# THE ARM THAT STARTS THE TEARDOWN ENDS THE PROCESS, AND NO OTHER (#449). An arm that RETURNED
+# resumed the script wherever the signal had found it: a ^C at the warnings prompt stopped the
+# container, went back to the same prompt -- the interrupted `read` restarts -- and on ENTER ran
+# `podman exec -it` against the container it had just stopped. But an arm that tears down and
+# then exits is wrong too, in the other window: a signal landing DURING a teardown already under
+# way finds TEARDOWN_DONE set, gets nothing from the guard, and exits halfway through, before the
+# `podman stop`. That was #449's own proposal, measured on bash 3.2 and 5.3: container left
+# running. So the guard decides: a call that finds the flag set returns and lets the teardown in
+# progress finish, and the call that set it does the work and then ends the process itself.
 #
 # THEY NO LONGER ALL SAY THE SAME THING, though they still all do the same thing (#220). Only
 # the first is a student who chose to leave and is watching the screen; that path erases tmux's
@@ -2190,15 +2201,19 @@ stop_container() {                     # stop_container [--quiet]
 }
 
 # The trapped wrapper. Separate from stop_container because the once-guard is only needed on
-# this path: HUP runs the handler and EXIT then runs it again, and a second `podman stop` would
-# print a second "stopping" line at the student for something already done. The maintenance
-# verbs and --stop call stop_container directly, each exactly once.
+# this path: a signal arm runs the handler and its exit then runs the EXIT one, and a second
+# `podman stop` would print a second "stopping" line at the student for something already done.
+# The maintenance verbs and --stop call stop_container directly, each exactly once.
+#
+# THE ARGUMENT IS THE SIGNAL, from the arm that caught it, and it is what makes this call the one
+# that ends the process -- see "THE ARM THAT STARTS THE TEARDOWN" above. No argument is the EXIT
+# trap and the two direct callers in open_shell, all of which are on their way out already.
 #
 # transient_cleanup because installing this on EXIT replaces the trap that would otherwise have
 # done it. Nothing depends on that today -- the meter is stopped and the acknowledgement consumed
 # long before open_shell -- but a handler that silently drops the animator's kill is a trap in
 # both senses.
-shell_teardown() {
+shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
     [ -n "$TEARDOWN_DONE" ] && return 0
     TEARDOWN_DONE=1
     transient_cleanup
@@ -2221,10 +2236,24 @@ shell_teardown() {
     [ -n "$SESSION_LEFT" ] && printf '%s' "$(msg status.exiting)"
     stop_container ${SESSION_LEFT:+--quiet}
     [ -n "$SESSION_LEFT" ] && printf ' %s\n' "$(msg status.exiting-done)"
-    # EXPLICIT, because the line above is a test that comes out FALSE on every path but the
-    # clean exit, and this function is both a signal handler and the EXIT trap -- where bash can
-    # read a non-zero status back as the script's own. The body used to end in stop_container,
-    # which returns 0 whatever happened.
+    # THE SIGNAL'S OWN STATUS, so a caller can still tell a Ctrl-C from a closed window -- the
+    # rule rebuild_interrupted states. INT RE-RAISES rather than exiting 130, because a parent
+    # shell stops only on a child that DIED of SIGINT (#448, #450). And `exit 130` stays after
+    # the kill, which is not belt-and-braces, and it has to be `exit`: with the kill as the arm's
+    # last command, or followed only by the `return 0` below, bash 3.2 goes back into whatever
+    # the signal interrupted with the self-sent SIGINT still pending -- at the warnings prompt,
+    # the restarted `read` -- and dies only when ENTER is pressed. Measured both ways. At the
+    # `exit` it acts on that SIGINT and dies of it; were it ever unable to, the exit still ends
+    # the process.
+    case "${1:-}" in
+        INT)  trap - EXIT INT; kill -s INT $$; exit 130 ;;
+        TERM) exit 143 ;;
+        HUP)  exit 129 ;;
+    esac
+    # EXPLICIT, because the SESSION_LEFT test above the case comes out FALSE on every path but
+    # the clean exit, and this function is both a signal handler and the EXIT trap -- where bash
+    # can read a non-zero status back as the script's own. The body used to end in
+    # stop_container, which returns 0 whatever happened.
     return 0
 }
 
@@ -2420,13 +2449,20 @@ open_shell() {
     # process survived the shell to stop anything and the container simply stayed up forever. The
     # launcher now stays resident for the length of the session and tears it down afterwards.
     #
-    # HUP IS TRAPPED EXPLICITLY, and that is not redundant with EXIT: bash's default action for
-    # SIGHUP is to die WITHOUT running the EXIT trap, so closing the window -- the one case this
-    # exists for -- would leave the container up.
+    # HUP, INT AND TERM EACH HAVE AN ARM, and EXIT alone would not do -- though not for the reason
+    # this comment used to give, that bash dies of SIGHUP WITHOUT running the EXIT trap. That is
+    # false: bash 3.2.57 and 5.3.9 both run it on an untrapped HUP, measured (#449). EXIT alone
+    # fails in the teardown's own window instead: a signal with no arm kills bash halfway through
+    # the EXIT trap's teardown, before its `podman stop` -- measured, the container left running.
+    # Each arm names its signal, so that the teardown can end the process with that signal's
+    # status; see shell_teardown, and "THE ARM THAT STARTS THE TEARDOWN" above it.
     #
     # INSTALLED HERE rather than before the claim: from this point on we own a session, so dying
     # for any reason must take the container down with us.
-    trap shell_teardown EXIT HUP INT TERM
+    trap shell_teardown EXIT
+    trap 'shell_teardown INT' INT
+    trap 'shell_teardown TERM' TERM
+    trap 'shell_teardown HUP' HUP
 
     # ─── 3. SETUP WORK, now that it is provably ours ───────────────────────────
     # The tunnel lives here rather than in the dispatcher because it must come after the claim,
@@ -2964,7 +3000,8 @@ verb_rebuild() {
     [ -n "$wipe" ] && remove_volumes
     # Cleared on the line after stop_container rather than left installed: past there is nothing
     # running to clean up, and an interrupt during the closing line should behave like an
-    # interrupt anywhere else. Same shape as open_shell's handoff.
+    # interrupt anywhere else. One arm per signal, each carrying its own status, as open_shell's
+    # are.
     trap 'rebuild_interrupted 130' INT
     trap 'rebuild_interrupted 143' TERM
     trap 'rebuild_interrupted 129' HUP

@@ -1546,6 +1546,41 @@ for pc_stray in $(pgrep -f "$WORK/politeclose.sh" 2>/dev/null); do
 done
 trap - HUP                            # and the arrangement is scoped to the group above
 
+# ─── lib/fgjob.py hands its command a student's SIGINT, and says how it ended (#449) ──────────
+# THE SAME CLASS AS THE GROUP ABOVE, ONE SIGNAL OVER. Everything started with `&` by a
+# non-interactive shell inherits an ignored SIGINT, which is how every pty here is started -- and
+# ptyrun resets SIGHUP alone, so a launcher under it cannot arm its INT trap and a test typing ^C
+# at it measures nothing. fgjob is what 30-launcher-shim.sh's signal group runs the launcher
+# through. ARRANGED HERE for the reason given above: whether the suite itself arrived with SIGINT
+# ignored depends on which lane started it, and only the arrangement makes the defence observable
+# from both. Not through `timeout`, which resets inherited ignores and would sanitise it.
+fj_run() {                            # fj_run CMD... -> FJ_STATUS, FJ_PID
+    rm -f "$WORK/fj.pid" "$WORK/fj.status"
+    CS193V_FGJOB_PIDFILE="$WORK/fj.pid" CS193V_FGJOB_STATUS="$WORK/fj.status" \
+        "$DO_PY" "$PT_LIB/fgjob.py" "$@" >/dev/null 2>&1
+    FJ_STATUS="$(do_tr -d '\n' < "$WORK/fj.status" 2>/dev/null)"
+    FJ_PID="$(do_tr -d ' \n' < "$WORK/fj.pid" 2>/dev/null)"
+}
+trap '' INT                           # the arrangement: the suite now ignores SIGINT
+# A TRAP THE COMMAND ARMS FOR ITSELF, and the self-signal is what lets this run without a pty.
+# Under the inherited ignore `trap ... INT` arms nothing and the kill reaches nothing, so the
+# command falls through to its `exit 0`.
+fj_run bash -c 'trap "exit 7" INT; kill -s INT $$; exit 0'
+assert_eq "fgjob:a-command-can-trap-sigint-under-an-ignoring-ancestor" "exit 7" "$FJ_STATUS"
+# THE TWO ENDINGS 128+N CANNOT TELL APART, and a parent shell does: it stops on the first and
+# carries on past the second (#448, #450).
+fj_run /bin/sh -c 'kill -s INT $$; exit 0'
+assert_eq "fgjob:a-sigint-death-is-reported-as-a-signal" "signal 2" "$FJ_STATUS"
+fj_run /bin/sh -c 'exit 130'
+assert_eq "fgjob:an-exit-130-is-reported-as-an-exit" "exit 130" "$FJ_STATUS"
+trap - INT                            # and the arrangement is scoped to the group above
+# THE COMMAND'S OWN PID, which is what a test that signals the launcher alone has to have.
+fj_run /bin/sh -c 'echo "$$" > "$1"' sh "$WORK/fj.self"
+# NON-EMPTY FIRST: a pid never published and a command that never wrote one are equal, and empty.
+assert_ne "fgjob:a-pid-was-published" "" "$FJ_PID"
+assert_eq "fgjob:the-published-pid-is-the-commands-own" \
+          "$(do_tr -d ' \n' < "$WORK/fj.self" 2>/dev/null)" "$FJ_PID"
+
 
 # ─── lib/ptydrive.py drives a pty from a described conversation (#206) ────────
 # THE DIFFERENCE FROM ptyrun ABOVE, and why this is a second file rather than a flag. ptyrun

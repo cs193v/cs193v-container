@@ -3653,11 +3653,24 @@ assert_eq "teardown:the-animator-is-stopped-first" "meter_cleanup" \
 # #41 without this changing, and why it is asserted ahead of everything else here.
 assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shell_body"
 assert_contains "launcher:installs-the-teardown-trap" "trap shell_teardown" "$open_shell_body"
-# EXIT alone is not enough: a closed window delivers HUP, and bash without a HUP trap dies
-# without running the EXIT one. INT/TERM cover Ctrl-C and a kill.
-for sig in EXIT HUP INT TERM; do
-    assert_match "launcher:teardown-traps-$sig" "trap shell_teardown.*$sig" "$open_shell_body"
+# ONE ARM PER SIGNAL, AND EACH NAMES ITS SIGNAL (#449). EXIT alone is not enough, though not for the
+# reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped HUP,
+# measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
+# and that an arm which does not name its signal cannot end the process with that signal's status:
+# it returns, and the script resumes wherever the signal found it.
+#
+# AGAINST THE CODE WITH ITS COMMENTS STRIPPED, which the pin this replaces was not: the prose above
+# the trap discusses every one of these signals, so a match on the raw body could be satisfied by a
+# comment with no arm present at all.
+os_trap_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
+for sig in HUP INT TERM; do
+    assert_contains "launcher:teardown-traps-$sig" "trap 'shell_teardown $sig' $sig" "$os_trap_code"
 done
+# AND THE BARE FORM IS EXIT'S ALONE. A later `trap shell_teardown EXIT INT` would silently replace
+# the INT arm with one that returns, and every line above would still be there to match.
+assert_eq "launcher:teardown-traps-EXIT" "trap shell_teardown EXIT" \
+          "$(printf '%s\n' "$os_trap_code" | grep -E 'trap shell_teardown( |$)' \
+             | sed 's/^[[:space:]]*//')"
 
 # ─── nothing shared is touched before the session is WON ───────────────────────
 # open_shell claims the tmux session, THEN installs the trap, THEN raises the tunnel. That order
@@ -3930,6 +3943,16 @@ assert_contains "teardown:the-clean-exit-suppresses-the-old-line" "--quiet" "$gu
 assert_eq "teardown:the-handler-returns-success" "return 0" \
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' | grep -v '^}' \
              | tail -1 | sed 's/^[[:space:]]*//')"
+# ...BUT A SIGNAL'S CALL NEVER REACHES IT (#449). The arm that starts the teardown ends the process
+# with its signal's status; one that returned resumed the script, which ran `podman exec -it` into
+# the container it had just stopped. INT re-raises and then EXITS: with the kill as its last command,
+# or followed only by the `return 0` above, bash 3.2 sits on the self-sent SIGINT until whatever it
+# interrupted -- the warnings prompt's `read` -- returns. Measured, and only bash 3.2 shows it, so the
+# shim tier's ^C case cannot hold this on a Linux run; this line can.
+assert_match "teardown:int-re-raises-and-then-exits" \
+             'INT\)[[:space:]]+trap - EXIT INT; kill -s INT \$\$; exit 130' "$guard_code"
+assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code"
+assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
 
 # THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
 # rather than merely present: both lines in the wrong sequence would wipe a row of the student's

@@ -216,8 +216,8 @@ else
     fail "sighup:closing-the-window-stops-the-container" \
          "the container is still $(st) 45s after the window closed. Either the launcher never
 received SIGHUP, or its trap did not run -- and on this platform that is the whole of #41 not
-working. First thing to check: that open_shell traps HUP and not only EXIT. bash's default action
-for SIGHUP is to die WITHOUT running an EXIT trap, which would look exactly like this.
+working. First thing to check: open_shell's own HUP arm, \`trap 'shell_teardown HUP' HUP\`. (Not
+because bash skips the EXIT trap on SIGHUP: this used to say so, and 3.2 and 5.3 both run it, #449.)
 If the force-quit group below is ALSO red, suspect the teardown itself (#170) rather than the trap;
 if only this one is, the polite close is not reaching the launcher at all."
 fi
