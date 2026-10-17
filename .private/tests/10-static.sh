@@ -3953,6 +3953,14 @@ assert_match "teardown:int-re-raises-and-then-exits" \
              'INT\)[[:space:]]+trap - EXIT INT; kill -s INT \$\$; exit 130' "$guard_code"
 assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code"
 assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
+# AND NOTHING CAN KILL IT HALFWAY (#512): the first statement past the guard ignores all three,
+# before anything that starts a child. A window closing HUPs the whole foreground group, which holds
+# every podman call run_timeout started with `&`, so an ignore set any later lets the close kill the
+# in-flight `podman stop` -- and a child takes its disposition from the moment it is started.
+assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP" \
+          "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
+             | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
+                    /\[ -n "\$TEARDOWN_DONE" \] && return 0/ { f = 1 }')"
 
 # THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
 # rather than merely present: both lines in the wrong sequence would wipe a row of the student's

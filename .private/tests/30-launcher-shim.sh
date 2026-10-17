@@ -800,6 +800,45 @@ $(strip_ansi < "$FG_OUT")"
     launcher_fg_stop
 done
 
+# ─── ...and CLOSING THE WINDOW during it does not kill its own stop  (#512) ────
+# The same student, who closes the window instead of pressing ^C. A terminal closing HUPs its whole
+# foreground process group, and that group holds more than the launcher: run_timeout starts every
+# podman call with `&`, and a non-interactive shell leaves those in its own group with SIGHUP at its
+# default. So the in-flight `podman stop` dies, the container stays up -- and the teardown prints
+# " done." over it. A HUP sent to the launcher alone, as the group above sends it, cannot reach
+# those children and so cannot fail this; the close has to be a real one.
+#
+# stop_hold holds the stop itself, and stop_done is written only once it has FINISHED: a count of
+# `stop` calls would pass here, because the stop is always asked for.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+shim_touch stop_hold
+launcher_fg_start
+if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"; then
+    launcher_fg_keys '\n'
+    if wait_until 30 test -e "$SHIM/stop_reached"; then
+        launcher_fg_close
+        # PROVING AN ABSENCE, so a fixed wait: what is asserted is that the held stop is NOT
+        # killed, and a stop that survives the close gives no sign of having done so.
+        sleep 1
+        rm -f "$SHIM/stop_hold"
+        launcher_fg_ended 30 || true
+        if [ -e "$SHIM/stop_done" ]; then pass "teardown-signal:a-closed-window-mid-stop-lets-it-finish"
+        else fail "teardown-signal:a-closed-window-mid-stop-lets-it-finish" \
+                  "the window closed during the teardown's podman stop and that stop never finished"
+        fi
+        assert_eq "teardown-signal:a-closed-window-mid-stop-leaves-it-exited" "exited" "$(shim_state)"
+    else
+        fail "teardown-signal:a-closed-window-mid-stop-lets-it-finish" \
+             "the teardown never reached its stop:
+$(strip_ansi < "$FG_OUT")"
+    fi
+else
+    fail "teardown-signal:a-closed-window-mid-stop-lets-it-finish" "never reached the prompt"
+fi
+rm -f "$SHIM/stop_hold"
+launcher_fg_stop
+
 # ─── a container from a different copy of the course directory  (§2.7) ─────────
 # Without this a student who re-downloads after breaking something silently gets the old
 # container with the old mount, and their edits appear to vanish.
