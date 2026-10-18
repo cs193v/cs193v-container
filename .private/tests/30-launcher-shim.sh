@@ -675,9 +675,9 @@ launcher_fg_stop
 #
 # THE FAKE TUNNEL FAILS, so every one of these launches warns and stops at the prompt -- see the
 # `ack:` group below.
-SIG_ACK="$(msg_of prompt.acknowledge-warnings | grep -v '^[[:space:]]*$' | tail -n 1)"
+SIG_ACK="$(msg_last_line prompt.acknowledge-warnings)"
 # ONE LINE OF THE PROMPT, never the whole message: it holds a blank line, and grep -F reads each
-# line of a needle as a pattern of its own, so the empty one matches the first byte of output.
+# line of a needle as a pattern of its own, so the empty one matches the first byte of output (#509).
 assert_ne "setup-signal:the-prompt-needle-is-a-line" "" "$SIG_ACK"
 sig_at_prompt() {                     # sig_at_prompt -> 0 once a fresh launch waits at the prompt
     shim_new
@@ -1434,7 +1434,11 @@ assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
 # -F AND THE PROSE FROM THE CATALOGUE. grep -n needs a pattern and the prompt is prose, so a
 # key-built needle has to go in as a fixed string -- prompt.acknowledge-warnings ends in a full
 # stop today and the next rewording could put a bracket in it.
-p_ack="$(printf '%s\n' "$out" | grep -nF "$(msg_of prompt.acknowledge-warnings)" \
+#
+# ONE LINE OF IT (#509). The message holds a blank line, which grep -F reads as a pattern of its
+# own that matches line 1 of anything, so this was always 1 and the order was never measured:
+# with the shell opened BEFORE the prompt it still passed, p_ack=1 against a prompt on line 24.
+p_ack="$(printf '%s\n' "$out" | grep -nF "$(msg_last_line prompt.acknowledge-warnings)" \
          | head -1 | cut -d: -f1)"
 p_shell="$(printf '%s\n' "$out" | grep -n 'SHELL-OPENED' | head -1 | cut -d: -f1)"
 if [ -n "$p_ack" ] && [ -n "$p_shell" ] && [ "$p_ack" -lt "$p_shell" ]; then
@@ -1455,8 +1459,15 @@ launcher_pty_silent_start
 # this, so it is the one needle here whose failure mode is a 30-second deadline rather than a red
 # line -- which is the same hazard 20-messages.sh's sgflow:* block records for setup-git's pty
 # gates, and the reason it must not be a quotation.
-if launcher_pty_silent_wait 30 "$(msg_of prompt.acknowledge-warnings)"; then
+#
+# ONE LINE OF IT, and then A WHILE (#509). The whole message used to go in, and its blank line
+# matched the transcript's first byte, so the wait returned on "Entering..." and the count below
+# ran before the launcher could have got anywhere: both passed with the prompt's `read` deleted.
+# A matching line now proves the prompt was printed, and the fixed wait is what proves it is held.
+if launcher_pty_silent_wait 30 "$(msg_last_line prompt.acknowledge-warnings)"; then
     pass "ack:prompt-reached-on-a-silent-terminal"
+    # PROVING AN ABSENCE, so a fixed wait: a launcher that does not hold runs its exec at once.
+    sleep 2
     assert_eq "ack:silence-does-not-open-the-shell" "0" "$(shim_count '^exec -it')"
 else
     fail "ack:prompt-reached-on-a-silent-terminal" \

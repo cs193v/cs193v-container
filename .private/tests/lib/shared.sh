@@ -261,6 +261,21 @@ msg_of_in() {                         # msg_of_in FILE KEY [NAME=VALUE...] -> th
     )
 }
 
+# ONE LINE OF A MESSAGE, for a caller that hands it to `grep -F` (#509). grep reads each line of a
+# needle as a pattern of its own, so a message holding a blank line -- prompt.acknowledge-warnings
+# does -- matches the first byte of any output, and the wait or the line number built on it means
+# nothing. The LAST non-blank line, because that is the one printed last: a wait for it is a wait
+# for the whole message.
+#
+# NEVER EMPTY. An empty needle matches everything too, so a message with no line to give -- a key
+# gone from the catalogue -- answers with text no output will contain, and its caller fails loudly
+# instead of passing.
+msg_last_line() {                     # msg_last_line KEY [NAME=VALUE...] -> its last non-blank line
+    local l
+    l="$(msg_of "$@" | grep -v '^[[:space:]]*$' | tail -n 1)"
+    printf '%s' "${l:-(no line of $1 to match)}"
+}
+
 # ─── does THIS platform retain a failed write to fd 1?  (#170) ─────────────────
 #
 # THE FACT TWO SUITES NEED, which is why it is here and not in either of them. On macOS a write(2)
