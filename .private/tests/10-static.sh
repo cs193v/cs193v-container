@@ -3652,7 +3652,8 @@ assert_eq "teardown:the-animator-is-stopped-first" "meter_cleanup" \
 # shell to stop anything -- which is precisely why the old design could not have implemented
 # #41 without this changing, and why it is asserted ahead of everything else here.
 assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shell_body"
-assert_contains "launcher:installs-the-teardown-trap" "trap shell_teardown" "$open_shell_body"
+os_trap_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
+assert_contains "launcher:installs-the-teardown-trap" "trap 'shell_teardown" "$os_trap_code"
 # ONE ARM PER SIGNAL, AND EACH NAMES ITS SIGNAL (#449). EXIT alone is not enough, though not for the
 # reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped HUP,
 # measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
@@ -3662,15 +3663,21 @@ assert_contains "launcher:installs-the-teardown-trap" "trap shell_teardown" "$op
 # AGAINST THE CODE WITH ITS COMMENTS STRIPPED, which the pin this replaces was not: the prose above
 # the trap discusses every one of these signals, so a match on the raw body could be satisfied by a
 # comment with no arm present at all.
-os_trap_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
-for sig in HUP INT TERM; do
-    assert_contains "launcher:teardown-traps-$sig" "trap 'shell_teardown $sig' $sig" "$os_trap_code"
-done
-# AND THE BARE FORM IS EXIT'S ALONE. A later `trap shell_teardown EXIT INT` would silently replace
-# the INT arm with one that returns, and every line above would still be there to match.
-assert_eq "launcher:teardown-traps-EXIT" "trap shell_teardown EXIT" \
-          "$(printf '%s\n' "$os_trap_code" | grep -E 'trap shell_teardown( |$)' \
-             | sed 's/^[[:space:]]*//')"
+#
+# AND EVERY ARM WRITES TO THE TERMINAL COPIES (#511): a handler runs with the redirections of
+# whatever it interrupted, so without `>&7 2>&8` a ^C inside a redirected call sent the teardown's
+# own output to /dev/null.
+#
+# EXACTLY THESE FOUR, COMPARED WHOLE. A check for each line's presence would still find them all
+# under a later `trap shell_teardown EXIT INT`, which silently replaces the INT arm with one that
+# returns.
+assert_eq "launcher:teardown-traps-are-exactly-the-four-arms" \
+"trap 'shell_teardown >&7 2>&8' EXIT
+trap 'shell_teardown HUP >&7 2>&8' HUP
+trap 'shell_teardown INT >&7 2>&8' INT
+trap 'shell_teardown TERM >&7 2>&8' TERM" \
+          "$(printf '%s\n' "$os_trap_code" | grep -E '^[[:space:]]*trap .*shell_teardown' \
+             | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
 
 # ─── nothing shared is touched before the session is WON ───────────────────────
 # open_shell claims the tmux session, THEN installs the trap, THEN raises the tunnel. That order
@@ -3685,7 +3692,7 @@ assert_eq "launcher:teardown-traps-EXIT" "trap shell_teardown EXIT" \
 open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
 line_of() { printf '%s\n' "$open_shell_code" | grep -n -- "$1" | head -1 | cut -d: -f1; }
 claim_at="$(line_of 'cs193v-shell --claim')"
-trap_at="$(line_of 'trap shell_teardown')"
+trap_at="$(line_of "trap 'shell_teardown")"
 tun_at="$(line_of 'ensure_tunnel')"
 att_at="$(line_of 'cs193v-shell --attach')"
 if [ -n "$claim_at" ] && [ -n "$trap_at" ] && [ -n "$tun_at" ] && [ -n "$att_at" ] \
@@ -3702,6 +3709,43 @@ fi
 assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
                     "ensure_tunnel || true
                          open_shell" "$launcher_src"
+
+# ─── the handlers' copies of the terminal  (#511) ──────────────────────────────
+# TAKEN BEFORE THE FIRST ARM, in both places arms are installed: a redirection that fails does not
+# run the command it is attached to, so an arm that could fire before fd 7 exists could skip its
+# teardown altogether -- the one outcome worse than the message going missing.
+keep_at="$(line_of 'keep_terminal_fds')"
+if [ -n "$keep_at" ] && [ -n "$trap_at" ] && [ "$keep_at" -lt "$trap_at" ]; then
+    pass "launcher:the-terminal-copies-come-before-the-arms"
+else
+    fail "launcher:the-terminal-copies-come-before-the-arms" \
+         "open_shell must call keep_terminal_fds before its first arm: keep=$keep_at trap=$trap_at"
+fi
+rb_code="$(fn_body verb_rebuild "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+assert_eq "rebuild:the-interrupt-arms-write-to-the-terminal-copies" \
+"trap 'rebuild_interrupted 129 >&7 2>&8' HUP
+trap 'rebuild_interrupted 130 >&7 2>&8' INT
+trap 'rebuild_interrupted 143 >&7 2>&8' TERM" \
+          "$(printf '%s\n' "$rb_code" | grep -E "^[[:space:]]*trap 'rebuild_interrupted" \
+             | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
+rb_keep="$(printf '%s\n' "$rb_code" | grep -n 'keep_terminal_fds' | head -1 | cut -d: -f1)"
+rb_trap="$(printf '%s\n' "$rb_code" | grep -n "trap 'rebuild_interrupted" | head -1 | cut -d: -f1)"
+if [ -n "$rb_keep" ] && [ -n "$rb_trap" ] && [ "$rb_keep" -lt "$rb_trap" ]; then
+    pass "rebuild:the-terminal-copies-come-before-the-arms"
+else
+    fail "rebuild:the-terminal-copies-come-before-the-arms" \
+         "verb_rebuild must call keep_terminal_fds before its first arm: keep=$rb_keep trap=$rb_trap"
+fi
+# AND NOTHING THAT OUTLIVES THE LAUNCHER TAKES THEM ALONG. Every run_timeout spawn, which is how the
+# tunnel's `ssh -f` master starts, and the supervisor's. COUNTED FIRST, because a grep that stopped
+# finding the spawns would find none missing the close.
+rt_code="$(fn_body run_timeout "$PRIVATE/files/cs193v-ui.sh" | sed 's/^[[:space:]]*#.*//')"
+assert_eq "run-timeout:has-the-four-spawns-counted-here" "4" \
+          "$(printf '%s\n' "$rt_code" | grep -cF '"$@" >"$tmp"')"
+assert_eq "run-timeout:no-spawn-takes-the-terminal-copies" "" \
+          "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '7>&- 8>&-')"
+assert_match "tunnel:the-supervisor-does-not-take-the-terminal-copies" 'dev-supervise .*7>&- 8>&- &' \
+             "$(fn_body tunnel_sup_start "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 
 # THE SUPERVISOR'S PID MUST BE THE LOOP'S PID, and that is a claim about one shell metacharacter.
 # `podman exec ... | sup_loop` puts the loop in a SUBSHELL, so the $$ written to the pidfile names

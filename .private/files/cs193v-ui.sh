@@ -487,9 +487,12 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         rm -f "$fifo"
         # SPELLED TWICE RATHER THAN PARAMETERISED. `2>&"$efd"` is a bash extension and this file
         # has to run on the 3.2 macOS ships, which 10-static.sh polices.
-        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" ) & pid=$!
-        else                       ( "$@" >"$tmp" 2>&1 ) & pid=$!
+        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" 7>&- 8>&- ) & pid=$!
+        else                       ( "$@" >"$tmp" 2>&1 7>&- 8>&- ) & pid=$!
         fi
+        # 7>&- 8>&- IN BOTH BRANCHES: the launcher keeps copies of the terminal there for its
+        # signal handlers (#511), and a command started here can outlive the launcher -- the
+        # tunnel's `ssh -f` master does, by design -- so none of them may take those copies along.
         if [ -n "$lbl" ]; then
             # Drawn once up front rather than only from inside the loop, so a command that
             # returns immediately still announces itself instead of flashing nothing.
@@ -535,10 +538,10 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # command, and the ceiling's `kill -9 "$cpid"` below would then kill the wrapper and
         # leave the hung podman running -- which is the disowning the comment above warns about.
         if [ -n "$RT_BARE" ]; then
-          ( "$@" >"$tmp" 2>"$eout" 9>&- & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>"$eout" 9>&- 7>&- 8>&- & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
         else
-          ( "$@" >"$tmp" 2>&1 9>&- & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
         fi
         exec 9<"$fifo"

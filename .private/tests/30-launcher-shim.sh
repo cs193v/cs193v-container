@@ -737,8 +737,10 @@ launcher_fg_stop
 # supervisor against the stopped container and then ran the exec. Wedged on the first `-O check`,
 # so the signal lands inside `tunnel_alive`.
 #
-# NOT ASSERTING status.stopping. tunnel_alive's call is redirected to /dev/null, and a handler runs
-# with the redirections of whatever it interrupted, so that line goes there too -- #511.
+# AND THE STUDENT IS TOLD (#511). tunnel_alive's call is redirected to /dev/null, and a handler runs
+# with the redirections of whatever it interrupted, so status.stopping went there too: the ^C
+# appeared to do nothing while the container stopped. The arms now write to the terminal copies
+# open_shell keeps on fds 7 and 8, wherever the signal lands.
 shim_new
 shim_set exec_out "SHELL-OPENED"
 shim_fake_ssh
@@ -753,6 +755,8 @@ if wait_until 30 grep -q WEDGED "$SHIM/ssh_wedge.log"; then
     # same words, so a looser needle counts the cleanup as the thing it cleans up.
     assert_eq "setup-signal:ctrl-c-in-the-tunnel-setup-starts-no-supervisor" "0" \
               "$(shim_count '^exec [^ ]+ cs193v-portwatch --watch')"
+    assert_says_key "setup-signal:ctrl-c-in-the-tunnel-setup-says-it-is-stopping" status.stopping \
+                    "$(strip_ansi < "$FG_OUT")"
 else
     fail "setup-signal:ctrl-c-in-the-tunnel-setup-ends-the-launcher" "the tunnel never wedged:
 $(strip_ansi < "$FG_OUT")"
