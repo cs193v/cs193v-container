@@ -1907,7 +1907,9 @@ tunnel_sup_start() {
     # start another beside it. Measured: four accumulated across one testing session.
     pmq exec "$NAME" pkill -f "cs193v-portwatch --watch" || true
     rm -f "$TUNNEL_SUP_PIDFILE" "$TUNNEL_SUP_READY" "$TUNNEL_SUP_LOG"
-    nohup "$SELF" --dev-supervise >>"$TUNNEL_SUP_LOG" 2>&1 </dev/null &
+    # 7>&- 8>&-: those are the launcher's copies of the terminal for its signal handlers (#511),
+    # and this process outlives the launcher if anything goes wrong; it must not take them along.
+    nohup "$SELF" --dev-supervise >>"$TUNNEL_SUP_LOG" 2>&1 </dev/null 7>&- 8>&- &
     i=0
     while [ "$i" -lt 50 ]; do
         [ -f "$TUNNEL_SUP_READY" ] && return 0
@@ -2200,6 +2202,25 @@ stop_container() {                     # stop_container [--quiet]
     return 0
 }
 
+# Copies of stdout and stderr on fds 7 and 8, for the signal handlers to write to (#511). A handler
+# runs with the redirections of whatever it interrupted, and plenty of what it can interrupt is
+# redirected -- tunnel_alive's ssh, every pmq -- so a ^C landing there sent status.stopping to
+# /dev/null and the student watched a Ctrl-C that seemed to do nothing. Called just before each set
+# of arms is installed, and each arm runs its handler `>&7 2>&8`.
+#
+# A FALLBACK, NOT A BARE `exec 7>&1 8>&2`, because a redirection that fails does not run the command
+# it is attached to: were fd 7 never opened, every arm would skip its teardown outright. And a bare
+# exec CAN fail to open it -- with stdout closed it prints "Bad file descriptor" and carries on,
+# fatally only for the arms (bash 3.2 and 5.3, measured). So each falls back to /dev/null, and
+# stderr goes first, which lets fd 7's own failure be silenced through it.
+#
+# run_timeout and the supervisor's spawn close both again, so nothing that outlives this process
+# keeps a copy of the terminal.
+keep_terminal_fds() {
+    exec 8>&2 || exec 8>/dev/null
+    { exec 7>&1; } 2>/dev/null || exec 7>/dev/null
+}
+
 # The trapped wrapper. Separate from stop_container because the once-guard is only needed on
 # this path: a signal arm runs the handler and its exit then runs the EXIT one, and a second
 # `podman stop` would print a second "stopping" line at the student for something already done.
@@ -2474,10 +2495,14 @@ open_shell() {
     #
     # INSTALLED HERE rather than before the claim: from this point on we own a session, so dying
     # for any reason must take the container down with us.
-    trap shell_teardown EXIT
-    trap 'shell_teardown INT' INT
-    trap 'shell_teardown TERM' TERM
-    trap 'shell_teardown HUP' HUP
+    #
+    # `>&7 2>&8` ON EVERY ARM, so the teardown's own output reaches the terminal wherever the
+    # signal landed (#511); see keep_terminal_fds.
+    keep_terminal_fds
+    trap 'shell_teardown >&7 2>&8' EXIT
+    trap 'shell_teardown INT >&7 2>&8' INT
+    trap 'shell_teardown TERM >&7 2>&8' TERM
+    trap 'shell_teardown HUP >&7 2>&8' HUP
 
     # ─── 3. SETUP WORK, now that it is provably ours ───────────────────────────
     # The tunnel lives here rather than in the dispatcher because it must come after the claim,
@@ -3017,9 +3042,12 @@ verb_rebuild() {
     # running to clean up, and an interrupt during the closing line should behave like an
     # interrupt anywhere else. One arm per signal, each carrying its own status, as open_shell's
     # are.
-    trap 'rebuild_interrupted 130' INT
-    trap 'rebuild_interrupted 143' TERM
-    trap 'rebuild_interrupted 129' HUP
+    # `>&7 2>&8` as open_shell's arms have it (#511): this handler prints nothing of its own, but
+    # transient_cleanup's cursor_show is the last chance to give the student back their cursor.
+    keep_terminal_fds
+    trap 'rebuild_interrupted 130 >&7 2>&8' INT
+    trap 'rebuild_interrupted 143 >&7 2>&8' TERM
+    trap 'rebuild_interrupted 129 >&7 2>&8' HUP
     create_container
     # --quiet, BECAUSE THE STUDENT NEVER STARTED IT (#285). The stop is not optional -- see the
     # note above the dispatch -- but announcing it names a container they have not seen: the one
