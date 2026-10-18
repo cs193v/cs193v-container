@@ -3099,17 +3099,12 @@ LAUNCHER_DIR="$HCOPY"
 # and pass them all.
 assert_eq "hostile:the-copy-is-under-the-hostile-name" "$HOSTILE_NAME" "${HCOPY##*/}"
 
-# #530: THE METER STILL NAMES ITS STEPS. Its labels come from parsing the Containerfile by path,
-# and awk's -v turns a backslash in that path into an escape -- so from this folder the parse
-# found nothing and every step went unnamed. The STEP lines are the plain copy's parse, so the
-# only thing that differs from labels:names-the-node-step above is the folder the launcher is in.
-shim_new
-stage_build_out
-assert_eq "hostile:dev-steps-parses-what-the-plain-copy-parses" "$dev_steps" \
-          "$("$HCOPY/cs193v" --dev-steps)"
-out="$(launcher --rebuild --no-cache)"
-assert_match "hostile:labels-name-the-node-step" "\] +[0-9]+/$steps  Installing Node" "$out"
-assert_eq "hostile:no-step-is-left-unnamed" "0" "$(unnamed_frames "$out")"
+# #530: THE PARSE FINDS THE SAME RECIPE FROM HERE. It opens the Containerfile by path, and awk's -v
+# turned a backslash in that path into an escape -- so from this folder it found nothing, and a
+# build named no step. A build now parses build_image's copy under TMPDIR (#532, below), which
+# leaves --dev-steps the one caller still handed the course folder's own path.
+assert_eq "hostile:dev-steps-parses-what-the-plain-copy-parses" \
+          "$("$COPY/cs193v" --dev-steps)" "$("$HCOPY/cs193v" --dev-steps)"
 
 # THE src= OF THE RECORDED --mount WHOSE dst= IS $1, read as one CSV record the way podman reads the
 # word (encoding/csv, in podman 4.9 and 6 alike), each field split at its first `=`. Bytes in and
@@ -3149,5 +3144,91 @@ assert_eq "hostile:user-key-mount-src-arrives-whole" "$HCOPY/.config/tunnel-key.
           "$(mount_src /home/student/.ssh/authorized_keys)"
 assert_eq "hostile:host-key-mount-src-arrives-whole" "$HCOPY/.config/tunnel-host-key" \
           "$(mount_src /etc/ssh/cs193v_host_ed25519_key)"
+
+# #532: THE BUILD RUNS FROM A COPY UNDER TMPDIR, and leaves none behind. podman reads -f as a CSV
+# list and podman 6 lays an overlay over the context whose mount options are comma-separated, so
+# neither may name the course folder. The copy is only visible from inside the fake -- the
+# launcher removes it again -- which is why the fake records where it was told to build from and
+# whether Containerfile and files/ were there at the time.
+#
+# PASSES ONLY FOR A COPY UNDER THIS SHIM'S TMPDIR that has gone again. A build that ran from the
+# course folder fails here too, rather than passing because the folder still exists.
+ctx_gone() {                          # ctx_gone NAME
+    local ctx
+    ctx="$(cat "$SHIM/build_context" 2>/dev/null)"
+    case "$ctx" in
+        "$SHIM/tmp/"?*) assert_no_file "$1" "$ctx" ;;
+        *)              fail "$1" "the build did not run from a copy under TMPDIR: ${ctx:-no build ran}" ;;
+    esac
+}
+shim_new
+shim_set image_exists no
+launcher --rebuild >/dev/null
+assert_eq "hostile:a-missing-image-is-built" "1" "$(shim_count '^build ')"
+ctx="$(cat "$SHIM/build_context" 2>/dev/null)"
+assert_eq "hostile:build-file-is-the-copied-containerfile" "$ctx/Containerfile" \
+          "$(cat "$SHIM/build_file" 2>/dev/null)"
+assert_eq "hostile:build-context-held-what-copy-reads" "yes" \
+          "$(cat "$SHIM/build_context_complete" 2>/dev/null)"
+ctx_gone "hostile:no-copy-is-left-after-a-build"
+# ...AND IT WENT AS THE BUILD SUCCEEDED, not at exit. --rebuild exits a moment later either way, but
+# the bare launch builds and then holds a session open; the fake looks when the container is made.
+assert_eq "hostile:the-copy-is-gone-before-the-container-is-made" "gone" \
+          "$(cat "$SHIM/build_context_at_run" 2>/dev/null)"
+# THE LABEL STILL DESCRIBES THE RECIPE ON DISK. The hash is taken from the copy, and recipe_moved
+# takes it from the course folder: if those two ever disagree, every launch offers a rebuild that
+# changes nothing. The fake stamps the label the build was handed, so a second --rebuild with the
+# image present must recreate without building.
+shim_set image_exists yes
+launcher --rebuild >/dev/null
+assert_eq "hostile:the-built-label-matches-the-recipe" "1" "$(shim_count '^build ')"
+
+# ...AND NONE AFTER A FAILED ONE, whose way out is die() and the EXIT trap rather than a return.
+# A failed build is retried first, and THE METER READS THE COPY on every attempt: the fake empties
+# the course folder's Containerfile during the first, as an edit saved mid-build would, so a retry
+# that parsed the course folder rather than the copy would find no instructions and name no step.
+shim_new
+shim_set image_exists no
+shim_set build_rc 1
+shim_set build_clobber "$HCOPY/.private/Containerfile"
+stage_build_out
+out="$(launcher --rebuild)"
+# Guarded, or a knob that did nothing would leave both copies alike and this would pass on either.
+assert_eq "hostile:the-fake-emptied-the-course-recipe" "0" \
+          "$(wc -c < "$HCOPY/.private/Containerfile" | do_tr -d ' ')"
+cp "$COPY/.private/Containerfile" "$HCOPY/.private/Containerfile"
+assert_says_key "hostile:the-failed-build-is-reported" err.build-failed "$out"
+ctx_gone "hostile:no-copy-is-left-after-a-failed-build"
+assert_eq "hostile:the-build-was-retried" "3" "$(shim_count '^build ')"
+assert_match "hostile:the-retries-are-on-the-meter" "\] +[0-9]+/$steps .*\(retrying: 2/2\)" "$out"
+assert_eq "hostile:no-step-is-left-unnamed-on-a-retry" "0" "$(unnamed_frames "$out")"
+
+# ...NOR AFTER ONE INTERRUPTED THE WAY A STUDENT INTERRUPTS IT: SIGINT to the whole process group,
+# so the fake build, the tee and the meter go too, as they do on a Ctrl-C. `set -m` gives the job a
+# group of its own and leaves SIGINT un-ignored in it, which a background job of a non-interactive
+# shell otherwise starts with -- and only around the `&`, so the jobs started below keep the
+# suite's group. Measured with and without a controlling terminal: the launcher exits 130 and
+# nothing of the pipeline is left. Started directly rather than through `launcher`, whose function
+# body would put a subshell between $! and the launcher.
+shim_new
+shim_set image_exists no
+shim_set build_delay 1
+set -m
+PATH="$SHIM:$PATH" "$HCOPY/cs193v" --rebuild </dev/null >"$SHIM/interrupted.out" 2>&1 &
+ipid=$!
+set +m
+if wait_until 20 test -s "$SHIM/build_context"; then
+    kill -INT -- "-$ipid" 2>/dev/null
+    wait "$ipid" 2>/dev/null; irc=$?
+    # 128+INT. Anything else and the signal missed the group, the build ran to the end, and the copy
+    # went the way a successful build's does -- so the case below would pass without testing a thing.
+    assert_eq "hostile:the-interrupt-reached-the-launcher" "130" "$irc"
+    ctx_gone "hostile:no-copy-is-left-after-an-interrupted-build"
+else
+    kill -INT -- "-$ipid" 2>/dev/null; wait "$ipid" 2>/dev/null
+    fail "hostile:the-interrupt-reached-the-launcher" "see below"
+    fail "hostile:no-copy-is-left-after-an-interrupted-build" "no build started within 20s:
+$(cat "$SHIM/interrupted.out")"
+fi
 
 LAUNCHER_DIR="$COPY"

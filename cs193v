@@ -180,6 +180,18 @@ WARN_ACK="${TMPDIR:-/tmp}/cs193v-warned.$$"
 # Pids are reused, so a file left behind by a crash could otherwise make a launch with
 # nothing to say stop and ask to be acknowledged.
 rm -f "$WARN_ACK"
+
+# The plain-named copy build_image builds from (#532), and the one way it is removed. Defined up
+# here, ahead of the trap, because transient_cleanup calls it on EVERY exit, a die() long before
+# any build included. A GLOBAL rather than build_image's own local: an EXIT trap does see a dying
+# function's locals when the launcher runs as a script -- measured on bash 3.2, 5.2 and 5.3 -- but
+# not under `bash -c`, and the cleanup of a directory should not rest on which of those it is.
+# Removed only under the name mktemp gave it, because this is the launcher's one `rm -rf`.
+BUILD_CTX=''
+build_ctx_remove() {
+    case "${BUILD_CTX:-}" in */cs193v-ctx.??????) rm -rf "$BUILD_CTX" ;; esac
+    BUILD_CTX=''
+}
 # meter_kill, not just rm: an animator left running would draw its next frame over
 # whatever came after it -- a STOP box, a shell prompt -- 100ms after the launcher stopped
 # caring. See meter_stop.
@@ -213,6 +225,8 @@ transient_cleanup() {
     # run_timeout's scratch files, which only it can name. A Ctrl-C inside a probe -- or inside
     # the three minutes of `podman run` -- otherwise leaves one in TMPDIR per call.
     rt_cleanup
+    # And the build's copy of its context, which a failed or interrupted build leaves behind.
+    build_ctx_remove
 }
 trap transient_cleanup EXIT
 
@@ -259,7 +273,9 @@ acknowledge_warnings() {
 # (#530). awk processes escapes in a -v value -- so a course folder with a backslash in its name
 # opened some other file -- and BWK awk, which macOS ships, refuses a newline in one outright.
 # Either way the parse found nothing and every step of the build went unnamed. ENVIRON takes the
-# bytes as they are, on BWK awk, mawk and gawk alike.
+# bytes as they are, on BWK awk, mawk and gawk alike. Only --dev-steps still hands it a path in the
+# course folder: build_progress parses build_image's copy under TMPDIR (#532), and passes it the
+# same way so that the parser has one interface.
 #
 # COUNTING RULE, which is podman's: one instruction per line that is not blank, not a comment
 # and not the continuation of the line above. Comments are stripped BEFORE continuations are
@@ -334,10 +350,14 @@ function cf_parse(f, label, text,   line, sticky, n, cont, buf) {
 # NOT A TERMINAL -> no carriage returns, one line per step. A \r-redrawn bar in a CI log or
 # a `| tee build.txt` is an unreadable single line thousands of columns long, and this is
 # the exact path a student uses when staff ask them to send the output.
+#
+# THE LABELS COME FROM build_image's COPY (#532), the Containerfile podman is building, and not
+# from the course folder's: the two are the same bytes unless someone saves an edit mid-build, and
+# then only the copy names the steps podman is actually running. Each retry parses it afresh.
 build_progress() {                    # build_progress [RETRY] [FLOOR]
     local tty=0
     [ -t 1 ] && tty=1
-    CS193V_CF="$CONTAINERFILE" LC_ALL=C awk -v tty="$tty" -v esc="$ESC" \
+    CS193V_CF="$BUILD_CTX/Containerfile" LC_ALL=C awk -v tty="$tty" -v esc="$ESC" \
             -v statef="$METER_STATE" -v notef="$BUILD_NOTE" \
             -v retry="${1:--}" -v floor="${2:-0}" -v injected=1 "$CF_PARSE_AWK"'
         function rep(s, n,  o) { o = ""; while (n-- > 0) o = o s; return o }
@@ -1036,11 +1056,15 @@ image_label_of() { pmv image inspect "$1" --format "{{index .Labels \"$2\"}}" &&
 # a launcher whose whole overhead is ~511 ms (ERRORS.md D9), and this measures 14 ms for the
 # same result. `tr | xargs -0`, not a bare `xargs`, so a future filename containing a space
 # is hashed rather than silently split -- and -0 rather than GNU's -d, which macOS lacks.
-build_hash() {
-    local list
-    list="$( cd "$PRIVATE" 2>/dev/null && find Containerfile files -type f 2>/dev/null | LC_ALL=C sort )"
+#
+# DIR IS build_image's COPY OF THE CONTEXT when it builds, and $PRIVATE everywhere else, so the
+# label describes exactly the files podman was handed. The two agree because the copy is of
+# exactly these two names, and the relative paths are what make the folder they sit in not matter.
+build_hash() {                        # build_hash [DIR]
+    local list dir="${1:-$PRIVATE}"
+    list="$( cd "$dir" 2>/dev/null && find Containerfile files -type f 2>/dev/null | LC_ALL=C sort )"
     { printf '%s\n' "$list"
-      ( cd "$PRIVATE" 2>/dev/null && printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 cat 2>/dev/null )
+      ( cd "$dir" 2>/dev/null && printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 cat 2>/dev/null )
     } | sha_stdin
 }
 
@@ -1106,7 +1130,24 @@ build_image() {
     # --no-cache is precisely the flag that throws that away, so retrying it would mean
     # re-running a twenty-minute build from zero. It is a staff verb regardless.
     [ "${1:-}" = "--no-cache" ] && { nocache='--no-cache'; tries=1; }
-    hash="$(build_hash)"
+    # FROM A COPY UNDER TMPDIR, NEVER FROM THE COURSE FOLDER ITSELF (#532). podman reads -f as a CSV
+    # list, so a comma, a quote or a newline in the folder's name broke the build before it began;
+    # and from podman 6 on, buildah lays an overlay over the context and names it in a
+    # comma-separated option string, which a comma, a quote or a backslash breaks -- for a relative
+    # path or a Containerfile on stdin as much as for this one. Measured, each of them. A directory
+    # mktemp named has none of those characters. Containerfile and files/ are the whole context
+    # (see build_hash), so they are all that is copied, once for every attempt below; -p keeps the
+    # modes, which the COPY layer's cache key reads.
+    #
+    # BEFORE THE METER, so a copy that fails -- a full disk, most likely -- is a plain STOP box.
+    local cperr=''
+    BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ctx.XXXXXX")" \
+        && cperr="$(cp -Rp "$CONTAINERFILE" "$PRIVATE/files" "$BUILD_CTX" 2>&1)" \
+        || { case "$cperr" in
+                 *'no space left on device'*|*'No space left on device'*) die "$(msg err.build-no-disk)" ;;
+             esac
+             die "$(msg err.build-failed OUT="$cperr")"; }
+    hash="$(build_hash "$BUILD_CTX")"
     info "$(msg status.building IMAGE="$IMAGE")"
     rm -f "$BUILD_NOTE"
     # THE LOG IS CLEARED HERE rather than left for tee to truncate, because the output box opens
@@ -1155,11 +1196,11 @@ build_image() {
         if [ -n "$BUILD_RAW" ]; then
             podman build $nocache \
                     --label "cs193v.buildhash=$hash" \
-                    -t "$IMAGE" -f "$CONTAINERFILE" "$PRIVATE" 2>&1 | tee "$BUILD_LOG"
+                    -t "$IMAGE" -f "$BUILD_CTX/Containerfile" "$BUILD_CTX" 2>&1 | tee "$BUILD_LOG"
         else
             podman build $nocache \
                     --label "cs193v.buildhash=$hash" \
-                    -t "$IMAGE" -f "$CONTAINERFILE" "$PRIVATE" 2>&1 \
+                    -t "$IMAGE" -f "$BUILD_CTX/Containerfile" "$BUILD_CTX" 2>&1 \
                 | tee "$BUILD_LOG" | build_progress "$retry" "$floor"
         fi
         # The meter deliberately stays RUNNING on success: create_container is the next
@@ -1174,6 +1215,9 @@ build_image() {
         if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             build_note_fold
             BUILT=1
+            # NOW, not at exit: the bare launch's stale-image prompt builds and then goes on to a
+            # whole session, which would otherwise hold the copy for as long as the window is open.
+            build_ctx_remove
             return 0
         fi
         build_note_fold

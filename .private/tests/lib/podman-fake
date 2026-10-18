@@ -51,6 +51,7 @@
 #   build_die_at     stop after this many STEPs and fail,
 #                    on the FIRST build only                [0] (0 = never)
 #   build_delay      seconds to pause between output lines   [0] (0 = all at once)
+#   build_clobber    a file the FIRST build empties: the recipe, edited mid-build  [absent]
 #   started_at       .State.StartedAt                       [2026-08-04T00:00:00Z]
 #   mem_total        .Host.MemTotal, bytes                  [8589934592 = 8 GiB]
 #   host_arch        .Host.Arch                             [arm64]
@@ -92,6 +93,12 @@
 #                    separated, e.g. `1 1 0`. READ AND REWRITTEN BY THE FAKE: each call takes
 #                    the first code and leaves the rest [absent or empty = every one exits 0].
 #   mount.N          WRITTEN BY THE FAKE: the Nth `--mount` word of the last `run`, whole (#531).
+#   build_file       WRITTEN BY THE FAKE: the last build's `-f` word, whole (#532).
+#   build_context    WRITTEN BY THE FAKE: the last build's context, its final word, whole.
+#   build_context_complete  WRITTEN BY THE FAKE: `yes` if that context held Containerfile and
+#                    files/ while the build ran, `no` if it did not.
+#   build_context_at_run  WRITTEN BY THE FAKE: `present` or `gone`, that context as it was when
+#                    the next `run` began.
 
 SHIM="${CS193V_SHIM:?podman-fake needs CS193V_SHIM}"
 
@@ -239,6 +246,14 @@ case "${1:-}" in
             LAST="$a"
         done
         printf '%s' "${LAST:-}" > "$SHIM/last_image"
+        # WHETHER THE LAST BUILD'S COPY OF ITS CONTEXT WAS STILL THERE when the container was made
+        # (#532). The launcher removes it as soon as the build succeeds, because the bare launch goes
+        # on from the build to a whole session; the EXIT trap would remove it too, but only once the
+        # window closes, and after the launcher exits the two look the same. Only from here do not.
+        if [ -s "$SHIM/build_context" ]; then
+            if [ -e "$(cat "$SHIM/build_context")" ]; then echo present; else echo gone; fi \
+                > "$SHIM/build_context_at_run"
+        fi
         # Creating a container is the slowest single step of a real build and the meter counts
         # it as one, so anything asserting what that step LOOKS like needs it to take long
         # enough to be drawn. Returning instantly leaves a window of about zero milliseconds
@@ -299,6 +314,21 @@ level=error msg="cannot set up pasta"' >&2
         attempt=1
         [ -f "$SHIM/build_attempts" ] && attempt=$(( $(cat "$SHIM/build_attempts") + 1 ))
         echo "$attempt" > "$SHIM/build_attempts"
+        # A RECIPE EDITED WHILE IT BUILDS: the first attempt empties the file build_clobber names,
+        # which is how a test tells the copy the launcher builds from from the folder it came from.
+        if [ "$attempt" = 1 ] && [ -f "$SHIM/build_clobber" ]; then : > "$(cat "$SHIM/build_clobber")"; fi
+        # WHERE IT WAS TOLD TO BUILD FROM (#532): the -f word and the context, which is the last
+        # word, each whole -- and whether that context held what the Containerfile COPYs at the
+        # moment of the build. The launcher builds from a copy it removes again afterwards, so in
+        # here is the only place a test can see the copy's contents at all.
+        ctx=''
+        for a in "$@"; do
+            [ "$ctx" = -f ] && printf '%s' "$a" > "$SHIM/build_file"
+            ctx="$a"
+        done
+        printf '%s' "$ctx" > "$SHIM/build_context"
+        if [ -f "$ctx/Containerfile" ] && [ -d "$ctx/files" ]; then echo yes; else echo no; fi \
+            > "$SHIM/build_context_complete"
         die_at="$(get build_die_at 0)"
         if [ -f "$SHIM/build_out" ]; then
             if [ "$delay" = 0 ]; then
