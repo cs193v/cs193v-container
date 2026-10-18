@@ -921,7 +921,7 @@ current_hash() {
 # means a CLEAN run leaked all of them and not just a killed one. Measured at 51 copies and 51
 # snapshots in a 3.7 GB tmpfs, 2.9 GB between them (#76). Both now live at paths named from
 # $$, which is the suite's pid inside a command substitution as well as outside one.
-repo_copy() {                         # repo_copy -> prints the new directory
+repo_copy() {                         # repo_copy [SUBDIR] -> prints the new directory
     local d
     # SNAPSHOT ONCE, on the first call, and serve every later copy from that. Two reasons, and
     # the second is why it matters now that run-tests.sh runs two lanes:
@@ -944,6 +944,10 @@ repo_copy() {                         # repo_copy -> prints the new directory
     # ever compared as a string, whereas $SHIM carries the tunnel's unix socket and cannot afford
     # the extra 8 bytes (see the note on SHIM_HOST_TMPDIR above).
     d="$(cd -- "$d" && pwd -P)"
+    # SUBDIR puts the tree one level down, under a name of the caller's choosing -- HOSTILE_NAME,
+    # for the launcher's own path handling (#530-#534). The swept and cleaned directory is still
+    # the plain cs193v-repo.$$ one above it, so nothing about cleanup changes.
+    if [ -n "${1:-}" ]; then d="$d/$1"; mkdir "$d" || return 1; fi
     cp -a "$SHIM_SNAPSHOT/." "$d/"
     printf '%s' "$d"
 }

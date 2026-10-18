@@ -1713,13 +1713,20 @@ shim_set state absent
 # podman's total is every parsed instruction plus the LABEL step it injects from our --label.
 # DERIVED, not written down: 15-containerfile-parse.sh's literal is the canary for the count
 # itself, and a copy here only meant a dozen lines to bump by hand for every new layer.
-dev_steps="$("${LAUNCHER_DIR:-$REPO}/cs193v" --dev-steps)"
-steps=$(( $(printf '%s\n' "$dev_steps" | wc -l) + 1 ))
-{ printf '%s\n' "$dev_steps" \
-      | awk -F'\t' -v n="$steps" '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
-  printf 'STEP %d/%d: LABEL "cs193v.buildhash"="deadbeef"\n' "$steps" "$steps"
-  printf 'COMMIT localhost/cs193v:local\nSuccessfully tagged localhost/cs193v:local\n'
-} > "$SHIM/build_out"
+#
+# A FUNCTION, because the hostile-folder block at the end stages the same build. It sets dev_steps
+# and steps for the assertions after it, and parses from $COPY whatever LAUNCHER_DIR is: these are
+# podman's lines for the recipe, which is the same in every copy.
+stage_build_out() {
+    dev_steps="$("$COPY/cs193v" --dev-steps)"
+    steps=$(( $(printf '%s\n' "$dev_steps" | wc -l) + 1 ))
+    { printf '%s\n' "$dev_steps" \
+          | awk -F'\t' -v n="$steps" '{ printf "STEP %d/%d: %s\n", $1, n, $3 }'
+      printf 'STEP %d/%d: LABEL "cs193v.buildhash"="deadbeef"\n' "$steps" "$steps"
+      printf 'COMMIT localhost/cs193v:local\nSuccessfully tagged localhost/cs193v:local\n'
+    } > "$SHIM/build_out"
+}
+stage_build_out
 # --no-cache is what FORCES the build, and it is not decoration. --rebuild is the only verb that
 # builds now, and it builds only when the recipe moved or the image is missing -- podman-fake
 # reports image_exists=yes, so without this it would recreate the container and never call
@@ -1738,9 +1745,12 @@ assert_match "labels:names-the-first-step"     "\] +1/$steps  Downloading the ba
 # the Containerfile at all, so all five inherit the closing marker rather than going blank.
 assert_match "labels:tail-steps-inherit-the-closing-marker" "\] +$steps/$steps  Finishing up" "$out"
 # EVERY step is named. The whole point is that the side text is never blank mid-build, so a
-# step that reached the bar without a name is the regression to catch.
-unnamed="$(printf '%s\n' "$out" | grep -cE "\] +[0-9]+/$steps *\$" || true)"
-assert_eq "labels:no-step-is-left-unnamed" "0" "${unnamed:-0}"
+# step that reached the bar without a name is the regression to catch. A retry's marker may follow
+# the count, and a frame with only that beside it is just as unnamed.
+unnamed_frames() {                    # unnamed_frames OUT -> how many, out of $steps
+    printf '%s\n' "$1" | grep -cE "\] +[0-9]+/$steps *(\(retrying: [0-9]+/[0-9]+\) *)?\$" || true
+}
+assert_eq "labels:no-step-is-left-unnamed" "0" "$(unnamed_frames "$out")"
 
 # And on a terminal the same labels ride in the block, on the row under the bar. Layout only --
 # see above for why the content assertions do not live here.
@@ -3073,3 +3083,30 @@ assert_eq "publish:a-failed-publish-is-sent-again-until-it-lands" \
 assert_eq "publish:each-failing-episode-is-logged-once-with-its-reason" \
           "exit 1, exit 1, timed out after 20s" "$(sup_publish_reasons)"
 sup_reap
+
+# ─── a course folder with hostile characters in its name (#530, #531, #532, #534) ───────────
+# Everything above runs from a copy at a plain path, which is the one shape a course folder is not
+# promised to have: the installer lets a student type any directory (MANUAL §134.9), and nothing
+# stops them moving it. So this block runs the same verbs from a copy under HOSTILE_NAME, and at
+# each place the launcher hands its own path to another program's parser -- awk's -v, podman's CSV
+# readings of --mount and -f, buildah's overlay over the build context, ssh's option tokenizer --
+# asserts what that program received rather than what the launcher meant to send.
+HCOPY="$(repo_copy "$HOSTILE_NAME")"
+LAUNCHER_DIR="$HCOPY"
+# Guarded, or a repo_copy that ignored its argument would run every case below from a plain path
+# and pass them all.
+assert_eq "hostile:the-copy-is-under-the-hostile-name" "$HOSTILE_NAME" "${HCOPY##*/}"
+
+# #530: THE METER STILL NAMES ITS STEPS. Its labels come from parsing the Containerfile by path,
+# and awk's -v turns a backslash in that path into an escape -- so from this folder the parse
+# found nothing and every step went unnamed. The STEP lines are the plain copy's parse, so the
+# only thing that differs from labels:names-the-node-step above is the folder the launcher is in.
+shim_new
+stage_build_out
+assert_eq "hostile:dev-steps-parses-what-the-plain-copy-parses" "$dev_steps" \
+          "$("$HCOPY/cs193v" --dev-steps)"
+out="$(launcher --rebuild --no-cache)"
+assert_match "hostile:labels-name-the-node-step" "\] +[0-9]+/$steps  Installing Node" "$out"
+assert_eq "hostile:no-step-is-left-unnamed" "0" "$(unnamed_frames "$out")"
+
+LAUNCHER_DIR="$COPY"
