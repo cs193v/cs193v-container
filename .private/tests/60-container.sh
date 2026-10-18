@@ -315,31 +315,32 @@ assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
 # by one `podman run`, which is what makes the published path and the actual mount unable to
 # disagree -- so this is the check that would notice them being split apart.
 #
-# RENDERED BY THE LAUNCHER'S OWN gui_projects_path, FROM $REPO (#291). On macOS and Linux that is
-# the POSIX path, but on WSL it is the UNC form, and the literal $REPO/projects this used to be
-# could never match there. 21-host-paths.sh owns the renderer's arms; this hands it the directory
-# that was mounted, which keeps the assertion about the mount rather than about whatever the
-# launcher prints. Sourced only inside the substitution -- see the note below for why not here.
+# RENDERED BY THE LAUNCHER'S OWN gui_projects_path, FROM THE MOUNT'S SOURCE AS PODMAN REPORTS IT
+# (#291, #502). On macOS and Linux that is the POSIX path, but on WSL it is the UNC form, which an
+# unrendered path could never match. 21-host-paths.sh owns the renderer's arms; this hands it the
+# directory that was actually mounted, which keeps the assertion about the mount rather than about
+# whatever the launcher prints. Until #502 it rendered $REPO/projects, which is where the mount is
+# meant to point rather than where it does: a bind of $REPO/projects-old passed both this and the
+# substring check above. SOURCED ONLY INSIDE THE SUBSTITUTION, where nothing it defines outlives
+# the line: cs193v-ui.sh defines box(), die(), msg() and dozens of globals, and pulling those into a
+# suite this size would put them under the half of it that has not run yet.
 #
 # GUARDED FIRST: an empty expectation would pass against a container from before #257, which has
 # the variable unset.
-hp_want="$(. "$PRIVATE/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$REPO/projects" "${WSL_DISTRO_NAME:-}")"
+hp_src="$(I '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
+hp_want="$(. "$PRIVATE/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$hp_src" "${WSL_DISTRO_NAME:-}")"
 assert_ne "env:the-host-projects-expectation-rendered-something" "" "$hp_want"
 assert_eq "env:the-host-projects-dir-reaches-the-container" "$hp_want" \
           "$(E 'printenv CS193V_HOST_PROJECTS')"
 # AND THROUGH AN EXEC, not just in the container's stored config, because that is how every
 # process a student's agent runs will see it -- `podman exec` merges the container's spec
 # environment into the session, and this asserts that rather than assuming it.
-# ASKED OF THE LAUNCHER RATHER THAN RE-DERIVED, and not by sourcing cs193v-ui.sh either. An
-# expectation spelled `uname -s | grep darwin` would be a second implementation of platform() and
-# would be wrong on the platform this feature most needs to be right about -- WSL answers Linux to
-# uname and must not be called linux. Sourcing the real function INTO THIS SHELL looks like the
-# fix and is worse here: cs193v-ui.sh defines box(), die() and msg(), and pulling those into a
-# suite this size would redefine names under the half of it that has not run yet. (The projects
-# check above sources it inside $( ), where nothing it defines outlives the line; that one needs a
-# renderer to hand the mounted directory to, and this one has no input.) --dev-print-command already
-# prints the value the launcher would pass, so the two ends can be compared with neither side
-# re-deriving anything.
+# ASKED OF THE LAUNCHER RATHER THAN RE-DERIVED. An expectation spelled `uname -s | grep darwin`
+# would be a second implementation of platform() and would be wrong on the platform this feature
+# most needs to be right about -- WSL answers Linux to uname and must not be called linux. The
+# projects check above sources cs193v-ui.sh because it has an input to hand the renderer, the
+# mounted directory; this one has none, and --dev-print-command already prints the value the
+# launcher would pass, so the two ends are compared with neither side re-deriving anything.
 host_os_want="$(cd "$REPO" && ./cs193v --dev-print-command | do_tr ' ' '\n' \
                 | sed -n 's/^CS193V_HOST_OS=//p' | head -1)"
 assert_ne "env:the-launcher-names-a-host-os" "" "$host_os_want"
