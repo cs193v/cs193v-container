@@ -91,6 +91,7 @@
 #   publish_rcs      exit codes for successive `cs193v-portwatch --publish` execs, space-
 #                    separated, e.g. `1 1 0`. READ AND REWRITTEN BY THE FAKE: each call takes
 #                    the first code and leaves the rest [absent or empty = every one exits 0].
+#   mount.N          WRITTEN BY THE FAKE: the Nth `--mount` word of the last `run`, whole (#531).
 
 SHIM="${CS193V_SHIM:?podman-fake needs CS193V_SHIM}"
 
@@ -224,11 +225,17 @@ case "${1:-}" in
     run)
         # Record what we were told, so the next invocation sees a consistent container.
         # This is what makes drift detection and idempotency observable.
+        #
+        # EACH --mount WHOLE, one file apiece, in the order given (#531). argv.log joins words with
+        # spaces, so it cannot say where one ends -- and a course folder with a comma or a quote in
+        # its name is exactly the case where podman's CSV reading of the word is the whole question.
+        nm=0; LAST=''
         for a in "$@"; do
             case "$a" in
                 cs193v.confighash=*) printf '%s' "${a#cs193v.confighash=}" > "$SHIM/label_hash" ;;
                 cs193v.dir=*)        printf '%s' "${a#cs193v.dir=}"        > "$SHIM/label_dir" ;;
             esac
+            if [ "$LAST" = --mount ]; then nm=$((nm + 1)); printf '%s' "$a" > "$SHIM/mount.$nm"; fi
             LAST="$a"
         done
         printf '%s' "${LAST:-}" > "$SHIM/last_image"
