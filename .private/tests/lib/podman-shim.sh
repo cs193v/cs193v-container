@@ -205,8 +205,18 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
 # -F, BECAUSE THE ARGUMENT IS A PHRASE. It is called with prose read out of messages.txt now, and
 # a needle with a bracket or a full stop in it is a pattern nobody audited -- which here does not
 # redden a line, it times the wait out and reports "the launcher never asked".
+#
+# A PHRASE WITH AN EMPTY LINE IN IT IS REFUSED (#509): grep -F reads each line as a pattern of its
+# own and the empty one matches the first byte of output, so this returned at once, on "Entering
+# the CS193V development environment...", and the two ack: assertions behind it could not fail.
+# Take one line with msg_last_line.
 launcher_pty_silent_wait() {          # launcher_pty_silent_wait SECS PHRASE
     local i=0 n
+    if [ -z "$2" ] || printf '%s\n' "$2" | grep -q '^$'; then
+        printf 'launcher_pty_silent_wait: a phrase with an empty line matches anything: %s\n' \
+               "$2" >&2
+        return 2
+    fi
     n=$(( $1 * 2 ))
     while [ "$i" -lt "$n" ]; do
         grep -qF "$2" "$PTY_OUT" 2>/dev/null && return 0
