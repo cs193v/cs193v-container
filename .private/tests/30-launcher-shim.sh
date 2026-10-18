@@ -1341,6 +1341,10 @@ assert_eq "doctor:removes-nothing" "0" "$(shim_count '^rm ')"
 #
 # BOTH GUARDED FIRST. An empty render is a needle every output contains, and an empty open string
 # makes assert_says pass on anything.
+#
+# AND LAUNCHED WITHOUT THE SUITE'S OWN OPEN STRINGS, which lib/assert.sh exports (#501): the
+# launcher only overwrites them when it reads cs193v-strings.sh, so inherited copies would pass a
+# launcher that never loaded it. `unset` in the subshell, because `launcher` is a function.
 shim_new
 shim_set state exited
 shim_set mounts_out /probe/mounted/projects
@@ -1348,7 +1352,7 @@ dr_plat="$(. "$COPY/.private/files/cs193v-ui.sh"; platform)"
 dr_want="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$dr_plat" /probe/mounted/projects Probe-Distro)"
 assert_ne "doctor:the-your-files-expectation-rendered-something" "" "$dr_want"
 assert_eq "doctor:the-open-strings-were-readable" "mw" "${CS193V_OPEN_MACOS:+m}${CS193V_OPEN_WINDOWS:+w}"
-out="$(export WSL_DISTRO_NAME=Probe-Distro; launcher doctor)"
+out="$(unset CS193V_OPEN_MACOS CS193V_OPEN_WINDOWS; export WSL_DISTRO_NAME=Probe-Distro; launcher doctor)"
 assert_contains "doctor:your-files-is-the-mount-read-back" "$dr_want" \
                 "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
 # THE OPEN LINE IS PER PLATFORM, and only the arms this host can reach are asserted here: WSL gets
@@ -1367,7 +1371,7 @@ shim_new
 shim_fake_uname Darwin arm64
 shim_set state exited
 shim_set mounts_out /probe/mounted/projects
-out="$(launcher doctor)"
+out="$(unset CS193V_OPEN_MACOS CS193V_OPEN_WINDOWS; launcher doctor)"
 assert_contains "doctor:macos-your-files-is-the-path-as-mounted" "/probe/mounted/projects" \
                 "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
 assert_says     "doctor:macos-says-how-to-open-it"     "${CS193V_OPEN_MACOS:-}"   "$out"
