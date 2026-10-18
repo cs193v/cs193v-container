@@ -213,7 +213,8 @@ else
   hx_fail "the + NEW TAB chip is bound to a click" "MouseDown1StatusRight is not bound"
 fi
 # ...and every one of the six ways to open a tab opens it where the current tab's shell is (#493),
-# which the new-tab section at the end proves on screen. Separate substrings: list-keys reorders flags.
+# which the new-tab section at the end proves on screen. Separate substrings: list-keys reorders
+# flags.
 nt_binds="$(grep -F 'new-window' <<< "$keys")"
 hx_expect_eq "six bindings open a tab" "$(grep -c . <<< "$nt_binds")" 6
 hx_expect_eq "all six open it in the current tab's shell directory" \
@@ -732,16 +733,16 @@ ccopy() { it show-buffer 2>/dev/null; }
 cmouse() { it display-message -p -t "cs193v:$cwin" '#{mouse_any_flag}' 2>/dev/null; }
 calt()   { it display-message -p -t "cs193v:$cwin" '#{alternate_on}' 2>/dev/null; }
 ccmd()   { it display-message -p -t "cs193v:$cwin" '#{pane_current_command}' 2>/dev/null; }
-# A MESSAGE THAT MUST GO BEFORE THE NEXT GESTURE IS JUDGED (#428, #455). Judged only if SEEN shows it
-# appeared -- one that never did has "gone" on the first look, which proves nothing (hx_gone's own
-# rule). Returns 1 when it appeared and did not go, so the caller skips what it would have judged on
-# a screen still showing it. Measured: tmux dismisses an ordinary message on any key, mouse
-# included, so only one shown with `display-message -N` can stay -- and that kind swallows every key
-# while it does, so the gesture after it never happens at all.
+# A MESSAGE THAT MUST GO BEFORE THE NEXT GESTURE IS JUDGED (#428, #455). Judged only if SEEN shows
+# it appeared -- one that never did has "gone" on the first look, which proves nothing (hx_gone's
+# own rule). Returns 1 when it appeared and did not go, so the caller skips what it would have
+# judged on a screen still showing it. Measured: tmux dismisses an ordinary message on any key,
+# mouse included, so only one shown with `display-message -N` can stay -- and that kind swallows
+# every key while it does, so the gesture after it never happens at all.
 #
-# NEEDLE IS AN ERE IN BOTH HALVES, the way hx_gone reads it, so "appeared" and "gone" cannot disagree
-# about a `+` -- and it is the same either-arm set the gesture's own poll accepted, so a message
-# from the wrong arm has to go too.
+# NEEDLE IS AN ERE IN BOTH HALVES, the way hx_gone reads it, so "appeared" and "gone" cannot
+# disagree about a `+` -- and it is the same either-arm set the gesture's own poll accepted, so a
+# message from the wrong arm has to go too.
 msg_expires() { # desc needle seen
   if grep -E -- "$2" >/dev/null <<<"$3"; then
     hx_gone "$S" "$2" 8 && { hx_pass "$1"; return 0; }
@@ -796,31 +797,58 @@ hx_expect_eq "a drag in the scrollback copies NOTHING" "$(ccopy)" ""
 hx_expect_eq "a drag in the scrollback leaves the pane scrolled back" "$(cmode)" "1"
 hx_expect_eq "a drag in the scrollback does not move the view" "$(cpos)" "$cstart"
 hx_until_ok "hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
-hx_expect_contains "a drag in the scrollback explains SHIFT+drag instead" \
-                   "$(hx_cap "$S" | head -2)" "hold SHIFT"
+sb_msg="$(hx_cap "$S" | head -2)"
+hx_expect_contains "a drag in the scrollback explains SHIFT+drag instead" "$sb_msg" "hold SHIFT"
+# AND IT HAS TO GO BEFORE THE NEXT GESTURE IS JUDGED (#487), here and at the double-click's hint
+# below: msg_expires, the rule the live prompt's three messages answer to. The double-click answers
+# with these same words, so a leftover passes its hint check; and a key-proof one swallows the
+# gesture, so "copies NOTHING" and "does not move the view" hold of a click that never happened.
+sb_drag_gone=0
+msg_expires "the scrollback drag's hint expires on its own" 'hold SHIFT' "$sb_msg" && sb_drag_gone=1
 
 cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
 hx_multiclick "$S" "$cr" 16 2
 hx_settle 0.6
-hx_expect_eq "double-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
-hx_expect_eq "double-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
-hx_until_ok "hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
-hx_expect_contains "double-clicking explains SHIFT+drag too" "$(hx_cap "$S" | head -2)" "hold SHIFT"
+sb_dbl_gone=0
+if [ "$sb_drag_gone" = 1 ]; then
+  hx_expect_eq "double-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
+  hx_expect_eq "double-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+  hx_until_ok "hx_cap $S | head -2 | grep -F 'hold SHIFT'" 8
+  sb_msg="$(hx_cap "$S" | head -2)"
+  hx_expect_contains "double-clicking explains SHIFT+drag too" "$sb_msg" "hold SHIFT"
+  msg_expires "the scrollback double-click's hint expires on its own" 'hold SHIFT' "$sb_msg" \
+    && sb_dbl_gone=1
+else
+  for d in "double-clicking in the scrollback copies NOTHING" \
+           "double-clicking in the scrollback does not move the view" \
+           "double-clicking explains SHIFT+drag too" \
+           "the scrollback double-click's hint expires on its own"; do
+    hx_skip "$d" "the drag's hint never went, so this gesture could not be judged apart from it"
+  done
+fi
 
 cback; cr="$(crow SELECT_ME)"; cstart="$(cpos)"
 hx_multiclick "$S" "$cr" 16 3
 hx_settle 0.6
-hx_expect_eq "triple-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
-hx_expect_eq "triple-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+if [ "$sb_dbl_gone" = 1 ]; then
+  hx_expect_eq "triple-clicking in the scrollback copies NOTHING" "$(ccopy)" ""
+  hx_expect_eq "triple-clicking in the scrollback does not move the view" "$(cpos)" "$cstart"
+else
+  for d in "triple-clicking in the scrollback copies NOTHING" \
+           "triple-clicking in the scrollback does not move the view"; do
+    hx_skip "$d" "an earlier hint never went, so this gesture may not have happened"
+  done
+fi
 
 # --- and at a live prompt ----------------------------------------------------
 # Same three gestures, the other arm of every guard in Part 3. The mode check is the one that would
 # catch a copy path sneaking back in through copy-mode: a selection used to enter it.
 # CANCEL BEFORE TYPING, here and before the app fixture below. If any gesture above has left the
-# pane in a mode -- which is exactly what a regression to a tmux-side selection would do -- the `Any`
-# hatch eats the first character of the next command and the shell runs `lear; echo ...`. The command
-# then fails, crow finds nothing, every later gesture aims at row "" and the whole section reports a
-# cascade of unrelated failures. Seen for real in the red run that preceded this design.
+# pane in a mode -- which is exactly what a regression to a tmux-side selection would do -- the
+# `Any` hatch eats the first character of the next command and the shell runs `lear; echo ...`.
+# The command then fails, crow finds nothing, every later gesture aims at row "" and the whole
+# section reports a cascade of unrelated failures. Seen for real in the red run that preceded this
+# design.
 it send-keys -X -t "cs193v:$cwin" cancel 2>/dev/null || true
 hx_settle 0.3
 # NO `clear` ANYWHERE IN THIS SECTION, and it is not a style choice. ncurses' `clear` emits the E3
@@ -1166,11 +1194,11 @@ cback; cr="$(crow SELECT_ME)"
 hx_click "$S" "$cr" 5 2
 hx_settle 0.6
 hx_expect_eq "right-clicking while scrolled back does not move the view" "$(cmode)" "1"
-# The pane border is a LOCK, not a regression: measured, a border click never cancelled the mode even
-# with the bug present, because tmux does not deliver it to the pane's mode table at all. Kept
-# because "no mouse event anywhere in the chrome scrolls the view away" is the property, and a reader
-# who finds this green in both directions should know it was checked rather than assumed. Row 3 is
-# the border, drawn there by pane-border-status top.
+# The pane border is a LOCK, not a regression: measured, a border click never cancelled the mode
+# even with the bug present, because tmux does not deliver it to the pane's mode table at all. Kept
+# because "no mouse event anywhere in the chrome scrolls the view away" is the property, and a
+# reader who finds this green in both directions should know it was checked rather than assumed.
+# Row 3 is the border, drawn there by pane-border-status top.
 cback
 hx_click "$S" 3 40
 hx_settle 0.6
@@ -1222,8 +1250,9 @@ hx_section "R6  no clipboard write is emitted at all, on a bare pty"
 # WHY A SECOND INSTRUMENT EXISTS. Everything above watches the inner tmux through the outer one, and
 # an outer tmux is not a terminal: it accepts an OSC 52 write and stores the payload whatever
 # selection the sequence names. That blind spot passed a green "the drag reached the host clipboard"
-# while a real terminal was putting the text on PRIMARY, where Ctrl+V never looks -- and it could not
-# see a gesture that emitted no write at all. clipprobe.py runs tmux on a bare pty and reads the wire.
+# while a real terminal was putting the text on PRIMARY, where Ctrl+V never looks -- and it could
+# not see a gesture that emitted no write at all. clipprobe.py runs tmux on a bare pty and reads the
+# wire.
 #
 # The assertion is now that tmux writes NOTHING. Selection belongs to the terminal, so the config
 # must make no clipboard claim at all -- and this is the check that fails the day a copy path creeps
@@ -1439,7 +1468,7 @@ pin_label() { # name text -- pin the focused tab's label; fails unless the bar t
   lbl_verdict=setup lbl_tries=0 lbl_want='' lbl_detail="the bar never drew $1: [$(probe_bar)]"
   return 1
 }
-raced_verdict() { LABEL_GAP_HOOK="$1"; label_verdict; LABEL_GAP_HOOK=''; }
+raced_verdict() { local LABEL_GAP_HOOK="$1"; label_verdict; }
 lbl_raced=0
 race_once() { [ "$lbl_raced" = 1 ] && return 0; lbl_raced=1; pin_label HX-RACE-B " $(probe_win) HX-RACE-B "; }
 race_always() {
@@ -1465,7 +1494,7 @@ expect_label "at 40 columns a label that is really off the bar fails on the firs
 # the `18 TABS` badge contains; an empty index leaves ` bash`, which ` 17 bash ` contains; an
 # empty read leaves nothing, which every bar contains -- so all of them used to pass. Measured:
 # with the name read emptied, the main check passed on `18 `.
-probed_verdict() { LABEL_PROBE="$1"; label_verdict; LABEL_PROBE=probe_focus; }
+probed_verdict() { local LABEL_PROBE="$1"; label_verdict; }
 probe_no_name()    { printf '%s ' "$(probe_win)"; }
 probe_blank_name() { printf '%s  ' "$(probe_win)"; }
 probe_no_index()   { printf ' %s' "$(probe_name)"; }
@@ -1481,10 +1510,10 @@ expect_label "at 40 columns a read that answers nothing is refused as unreadable
 
 # AND THE LABEL IS MATCHED AS A WHOLE CELL OF THE BAR (#455), not as a substring of it: `1 bash` is
 # inside ` 11 bash `, so a bar that had lost the focused tab 1 passed on tab 11 carrying the same
-# name. Measured on a real screen -- tab 1 focused with its name dropped from the bar, tab 11 renamed
-# to match -- the check passed. These replay that bar and two others, so they cannot depend on
-# arranging it again: the measured one, a name that only BEGINS the wanted one, and a correct label
-# at the very edge of the line, which the anchoring must still find.
+# name. Measured on a real screen -- tab 1 focused with its name dropped from the bar, tab 11
+# renamed to match -- the check passed. These replay that bar and two others, so they cannot
+# depend on arranging it again: the measured one, a name that only BEGINS the wanted one, and a
+# correct label at the very edge of the line, which the anchoring must still find.
 replay_read() { printf '%s' "$lbl_replay_read"; }
 replay_bar()  { printf '%s' "$lbl_replay_bar"; }
 replayed_verdict() { # read bar -- local, so the swapped reads end with the call
@@ -1979,9 +2008,9 @@ if hx_wait "$S3" '\+ NEW TAB' 12; then
     # the container tier stayed green.
     #
     # AND IT MUST NOT BE PER-TERMINAL EITHER. The gesture line is chosen from the terminal token
-    # now (files/cs193v-platform-messages), and this harness renders inside a container that inherits none,
-    # so it draws the `unknown` row. The prose above the link is in every frame of every state
-    # and is the same for every token, which is what an off-target row has to be.
+    # now (files/cs193v-platform-messages), and this harness renders inside a container that
+    # inherits none, so it draws the `unknown` row. The prose above the link is in every frame of
+    # every state and is the same for every token, which is what an off-target row has to be.
     set -- $(hx_find "$S3" 'asks you to open')
     if [ -n "${1:-}" ]; then
       hx_click "$S3" "$1" "$2"
