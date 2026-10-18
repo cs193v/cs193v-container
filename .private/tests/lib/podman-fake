@@ -92,6 +92,9 @@
 #   publish_rcs      exit codes for successive `cs193v-portwatch --publish` execs, space-
 #                    separated, e.g. `1 1 0`. READ AND REWRITTEN BY THE FAKE: each call takes
 #                    the first code and leaves the rest [absent or empty = every one exits 0].
+#   real_sshd        an sshd_config: the tunnel's `exec -i ... /usr/sbin/sshd -i` runs this
+#                    machine's REAL `sshd -i` with it, logging to sshd.log [absent = it is
+#                    answered like any other exec, with exec_out]
 #   mount.N          WRITTEN BY THE FAKE: the Nth `--mount` word of the last `run`, whole (#531).
 #   build_file       WRITTEN BY THE FAKE: the last build's `-f` word, whole (#532).
 #   build_context    WRITTEN BY THE FAKE: the last build's context, its final word, whole.
@@ -468,6 +471,22 @@ level=error msg="cannot set up pasta"' >&2
         # watcher fell through to exec_out, answered the handshake with whatever a test had
         # staged, and every shim launch warned about a protocol violation. Measured: it did.
         case "$*" in
+            # THE TUNNEL'S TRANSPORT, HANDED TO A REAL sshd WHEN ASKED (#534). real_sshd names an
+            # sshd_config, and the ProxyCommand's `exec -i NAME /usr/sbin/sshd -i -f ...` then runs
+            # this machine's own sshd in inetd mode with it, so the launcher's real ssh does a real
+            # key exchange. It runs as the developer and not as student, so a healthy connection
+            # gets as far as user authentication and no further -- which is the step just past the
+            # host key, and the host key is what a hostile course folder breaks. Its log goes to
+            # sshd.log, which is where a test sees which key the client offered.
+            #
+            # OPT-IN, like watch_out. Without real_sshd this arm does nothing and the exec goes on
+            # to the LASTARG case below like any other, which prints exec_out and a newline -- so
+            # a case that stages exec_out for some other probe hands it to ssh as a banner too.
+            *'/usr/sbin/sshd -i'*)
+                if [ -f "$SHIM/real_sshd" ]; then
+                    exec "$(command -v sshd 2>/dev/null || echo /usr/sbin/sshd)" \
+                         -i -f "$(get real_sshd '')" -E "$SHIM/sshd.log"
+                fi ;;
             # PKILL FIRST. tunnel_sup_stop reaps the watcher with
             # `pkill -f "cs193v-portwatch --watch"`, whose ARGUMENT contains the very string the
             # next arm matches on, so without this the reap is answered with a frame instead.

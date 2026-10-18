@@ -1452,10 +1452,12 @@ command's clothes**.
 `run-tests.sh` run nothing and a third of `10-static.sh` fail. Three things keep it true: fixtures
 that stand in for a checkout live under `HOSTILE_NAME` (`lib/assert.sh`), every path in a command
 string handed to a pty is quoted with `sh_quote` (`lib/portable.sh`), and `10-static.sh` runs an
-SC2086 pass that fails on an unquoted expansion. **The image, container and live tiers drive the
-real launcher**, which cannot yet build, mount or tunnel from a path holding a space, `'`, `"`,
-`%`, `,` or `\` (#530, #531, #532, #534), so those tiers and the four checks that read
-`cs193v --dev-steps` need a path without them.
+SC2086 pass that fails on an unquoted expansion. **The launcher is held to the same standard**
+(#530, #531, #532, #534): it never hands its own path to a parser that would reinterpret it. awk
+reads the Containerfile's path from `ENVIRON`, each `--mount` quotes its `src=` for podman's CSV
+reader, the build runs from a copy under `TMPDIR`, and the tunnel's ssh is started inside `.config`
+and given bare file names. `30-launcher-shim.sh` drives all four from a copy under `HOSTILE_NAME`.
+The one name it still cannot take is a course folder whose own name ends in a newline.
 
 **Bringing the container up on a new platform is one command** (#160):
 
