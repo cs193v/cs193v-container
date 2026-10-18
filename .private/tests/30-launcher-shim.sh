@@ -1366,12 +1366,14 @@ fi
 if [ "$dr_plat" != macos ]; then
     assert_says_not "doctor:only-macos-gives-the-finder-route" "${CS193V_OPEN_MACOS:-}" "$out"
 fi
-# ...AND ON A MAC, where Finder opens the path as mounted and the route is Finder's alone.
+# ...AND ON A MAC, where Finder opens the path as mounted and the route is Finder's alone. Under
+# the made-up distro too (#504): the WSL arm returns the POSIX path when the distro is empty, so
+# off WSL a doctor rendering through it would otherwise pass here.
 shim_new
 shim_fake_uname Darwin arm64
 shim_set state exited
 shim_set mounts_out /probe/mounted/projects
-out="$(unset CS193V_OPEN_MACOS CS193V_OPEN_WINDOWS; launcher doctor)"
+out="$(unset CS193V_OPEN_MACOS CS193V_OPEN_WINDOWS; export WSL_DISTRO_NAME=Probe-Distro; launcher doctor)"
 assert_contains "doctor:macos-your-files-is-the-path-as-mounted" "/probe/mounted/projects" \
                 "$(printf '%s\n' "$out" | grep -F "$(msg_of doctor.row.your-files)")"
 assert_says     "doctor:macos-says-how-to-open-it"     "${CS193V_OPEN_MACOS:-}"   "$out"
