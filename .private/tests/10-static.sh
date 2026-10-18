@@ -1433,9 +1433,8 @@ done
 # A COLON IS WHAT MAKES IT A MOUNT. `-v "$1"` is `command -v`, which appears all over the suite and
 # is not a mount; every real bind mount is HOST:CONTAINER and so contains one. That is the whole
 # discriminator, which is why it is spelled out rather than being a list of files to keep updated.
-mounts_missing_z="$(grep -rnoE -- '-v "[^"]*:[^"]*"' \
-                    "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh 2>/dev/null \
-                    | grep -v 'VT_MOUNT_Z' || true)"
+mounts_missing_z="$(lint_grep -o -E -e '-v "[^"]*:[^"]*"' \
+                    -- "$PRIVATE"/tests/*.sh "$PRIVATE"/tests/lib/*.sh | grep -v 'VT_MOUNT_Z')"
 assert_eq "selinux:every-bind-mount-carries-the-label" "" "$mounts_missing_z"
 
 # ─── and so does every bind mount the LAUNCHER makes  (#107) ───────────────────
@@ -1460,10 +1459,12 @@ assert_eq "selinux:every-bind-mount-carries-the-label" "" "$mounts_missing_z"
 # permanent, so any past `podman run -v <the checkout>:...:z` leaves the whole tree
 # container_file_t and the tunnel then works whether or not this is fixed. That is exactly how it
 # hid here. `restorecon -F -R .` puts a checkout back.
-launcher_binds="$(grep -n 'type=bind' "$REPO/cs193v" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+launcher_binds="$(lint_grep --skip-comments -e 'type=bind' -- "$REPO/cs193v")"
 record "selinux:launcher-bind-mount-count" "$(printf '%s\n' "$launcher_binds" | grep -c . )"
 # Non-empty first: a renamed variable or a reshaped RUN_ARGS would make the check below vacuous.
-if [ -n "$launcher_binds" ]; then pass "selinux:the-launcher-mounts-were-found"
+# A failed read is not a find, though it is not empty either.
+if [ -n "$launcher_binds" ] && [ -z "$(died_in "$launcher_binds")" ]; then
+    pass "selinux:the-launcher-mounts-were-found"
 else fail "selinux:the-launcher-mounts-were-found" "no type=bind in cs193v -- did build_run_args change?"; fi
 assert_eq "selinux:launcher-bind-mounts-carry-the-relabel" "" \
           "$(printf '%s\n' "$launcher_binds" | grep -v 'relabel' || true)"
@@ -1495,8 +1496,8 @@ assert_eq "rootsteps:the-registry-and-the-functions-agree" \
 assert_contains "rootsteps:the-root-pass-iterates-the-registry" 'for s in $ROOT_STEPS' \
                 "$(sed 's/^[[:space:]]*#.*//' "$PROV")"
 assert_eq "rootsteps:the-root-pass-names-no-single-step" "" \
-          "$(sed 's/^[[:space:]]*#.*//' "$PROV" | grep -nE '(^|[^_[:alnum:]])root_step_[a-z]' \
-             | grep -v 'root_step_\$s' || true)"
+          "$(lint_grep --skip-comments -E -e '(^|[^_[:alnum:]])root_step_[a-z]' -- "$PROV" \
+             | grep -v 'root_step_\$s')"
 
 # AND THE STUDENT'S PASS CALLS EACH ONE EXACTLY ONCE, gated by its own DO_* flag. A step it
 # stopped calling would be one the root pass still runs -- fine on Windows, silently missing on
@@ -2726,8 +2727,8 @@ assert_contains "platform-messages:reads-the-shared-strings" '/etc/cs193v/string
                 "$(cat "$PRIVATE/files/cs193v-platform-messages")"
 # AND NEITHER SPELLS THE SENTENCE OUT. A literal in either consumer is the drift this whole
 # arrangement exists to prevent, and it would pass every other check in this file.
-open_copies="$(grep -l -F "$CS193V_OPEN_MACOS" cs193v "$PRIVATE/messages.txt" \
-                  "$PRIVATE/files/cs193v-platform-messages" 2>/dev/null || true)"
+open_copies="$(lint_grep -F -e "$CS193V_OPEN_MACOS" -- "$REPO/cs193v" "$PRIVATE/messages.txt" \
+                  "$PRIVATE/files/cs193v-platform-messages")"
 assert_eq "strings:no-consumer-carries-its-own-copy" "" "$open_copies"
 
 assert_ok  "welcome:script-exists" test -f "$PRIVATE/files/cs193v-welcome"
@@ -3433,7 +3434,7 @@ assert_not_contains "python:no-apt-setuptools"        "python3-setuptools" "$apt
 # container and asserts on rendered screens for that. This is the cheap tier: the files
 # exist, the image installs them, and the handful of settings that no screen makes obvious
 # are set.
-tmux_conf="$(cat "$PRIVATE/files/tmux/tmux.conf")"
+tmux_conf="$(run_checker cat "$PRIVATE/files/tmux/tmux.conf")"
 
 assert_ok  "tmux:conf-exists"    test -f "$PRIVATE/files/tmux/tmux.conf"
 # The two shell hooks: tab labels, and where a new tab opens (#493).
@@ -3637,7 +3638,7 @@ assert_before() {                     # assert_before NAME CODE A B
 }
 launcher_src="$(cat "$REPO/cs193v")"
 shell_src="$(cat "$PRIVATE/files/cs193v-shell")"
-open_shell_body="$(fn_body open_shell "$REPO/cs193v")"
+open_shell_body="$(run_checker fn_body open_shell "$REPO/cs193v")"
 # stop_container, not shell_teardown: the latter is only the once-guarded wrapper the trap uses,
 # and the ordering that matters lives in the former, which --stop and the maintenance verbs
 # also call. Asserting the order against the wrapper would pass while the real stop had it
@@ -4471,8 +4472,9 @@ assert_not_contains "containerfile:no-GIT_EDITOR" "GIT_EDITOR" \
 # tunnel reaching the container's loopback there is nothing for them to nudge, so all they
 # could do is silently change what a student's server binds to for a reason that no longer
 # exists. Comments are stripped first, or the Containerfile's own explanation of the removal
-# matches itself and this passes while the ENV line is back.
-env_live="$(sed 's/#.*//' "$PRIVATE/Containerfile" | sed -n '/^ENV /,/^$/p')"
+# matches itself and this passes while the ENV line is back. ONE sed, through run_checker (#476):
+# a second stage keeping only the ENV block would drop both the failed read and its marker.
+env_live="$(run_checker sed -n -e 's/#.*//' -e '/^ENV /,/^$/p' "$PRIVATE/Containerfile")"
 for v in HOST FLASK_RUN_HOST; do
     assert_not_contains "containerfile:no-$v-env" "$v=" "$env_live"
 done
@@ -4531,7 +4533,10 @@ assert_contains "launcher:confighash-covers-the-mount-destination" "MOUNT_DST" \
 # ─── container.args invariants ──────────────────────────────────────────────────
 # The block at the top of container.args lists these as "never add any of these". Host
 # isolation comes from the user namespace, and each of these punches through it.
-args_live="$(sed 's/#.*//' "$REPO/.config/container.args")"
+# THROUGH run_checker (#476): nearly every check below is a negative, so a read that failed and
+# left this empty passed them all. A grep below that keeps only some lines passes the marker on
+# with died_in.
+args_live="$(run_checker sed 's/#.*//' "$REPO/.config/container.args")"
 for bad_flag in --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE --network=host \
                 --pid=host --ipc=host --userns=host seccomp=unconfined unmask=ALL \
                 label=disable docker.sock podman.sock; do
@@ -4596,7 +4601,7 @@ assert_contains "args:userns-explicit-uid-gid" "--userns=keep-id:uid=1000,gid=10
 #
 # 60-container.sh :: mount:binds-are-exactly-the-three-expected asserts the same property from
 # the other end, against a live container. This one fails at edit time, before anything is built.
-hostmounts="$(printf '%s\n' "$args_live" \
+hostmounts="$(died_in "$args_live"; printf '%s\n' "$args_live" \
               | grep -nE '(^|[[:space:]])(-v|--volume)[[:space:]]+[/~.]' || true)"
 assert_eq "invariant:no-host-path-is-mounted" "" "$hostmounts"
 assert_not_contains "invariant:no-bind-mount-syntax" "type=bind" "$args_live"
@@ -4657,7 +4662,7 @@ assert_not_match "load_args:guard-is-not-an-emptiness-test" \
 # invariants and it replaced the old "every -p must be loopback-prefixed" check: with no -p
 # lines at all, the host side is loopback by construction, because the ssh client binds
 # 127.0.0.1 itself.
-published="$(printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
+published="$(died_in "$args_live"; printf '%s\n' "$args_live" | grep -E '^\s*-p( |$)' || true)"
 assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 
 # THE ARGS FILE DECLARES NO PORTS AT ALL, and that is now the invariant rather than a property of
@@ -4670,7 +4675,7 @@ assert_eq  "ports:no-p-lines-they-would-break-the-tunnel" "" "$published"
 # not fail anything on its own -- nothing reads it -- and would quietly reintroduce the second
 # source of truth this change exists to remove. Someone re-adding one is made to come here.
 assert_eq "ports:no-port-list-is-declared" "" \
-          "$(printf '%s\n' "$args_live" | grep -E 'CS193V_PORTS' || true)"
+          "$(died_in "$args_live"; printf '%s\n' "$args_live" | grep -E 'CS193V_PORTS' || true)"
 
 # ports:CS193V_PORTS-matches--p-lines is DELETED, not rewritten. It guarded the agreement
 # between CS193V_PORTS and a parallel set of -p lines; deriving the forwards from
@@ -4722,7 +4727,7 @@ assert_contains "tunnel:ignores-the-users-ssh-config" "-F none" "$launcher_live"
 assert_contains "tunnel:uses-nohup-not-setsid" "nohup ssh" "$launcher_live"
 assert_not_match "tunnel:no-setsid" '(^|[[:space:]])setsid[[:space:]]' "$launcher_live"
 
-sshd_conf="$(sed 's/^#.*//' "$PRIVATE/files/sshd_config")"
+sshd_conf="$(run_checker sed 's/^#.*//' "$PRIVATE/files/sshd_config")"
 assert_contains "sshd:no-agent-forwarding"        "AllowAgentForwarding no"  "$sshd_conf"
 assert_contains "sshd:no-x11"                     "X11Forwarding no"         "$sshd_conf"
 assert_contains "sshd:no-passwords"               "PasswordAuthentication no" "$sshd_conf"
