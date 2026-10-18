@@ -1342,9 +1342,12 @@ shim_new
 # NO_COLOR says and now fire before the hand-over. Keying on `ESC[...m` says what was meant all
 # along, and it keeps both halves honest: with colour on, step() emits ESC[36m, so the positive
 # arm cannot be satisfied by a cursor move either.
+#
+# NO_COLOR= IS SPELT OUT (#426): installer_tty hands the pty the caller's whole environment, so a
+# developer with NO_COLOR exported turned this red. Empty counts as unset under ${NO_COLOR:-}.
 pre() { sed -n '1,/Building the course container/p'; }
 SGR="$(printf '\033')\[[0-9;]*m"
-raw="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" | pre)"
+raw="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" NO_COLOR= CS193V_DIR="$SHIM/dest" | pre)"
 if printf '%s' "$raw" | grep -q "$SGR"; then pass "colour:on-with-a-terminal"
 else fail "colour:on-with-a-terminal" "no colour sequences in a pty transcript"; fi
 assert_says_key "colour:the-coloured-run-got-that-far" step.survey "$raw" "$ICAT"
