@@ -637,6 +637,27 @@ else
 fi
 rm -f "$SHIM/run_hold"
 
+# ...AND A Ctrl-C THERE STOPS A SHELL LOOPING OVER --rebuild (#510). rebuild_interrupted used to
+# EXIT 130 for a Ctrl-C, and a parent bash stops only on a child that DIED of SIGINT (#448, #450),
+# so a loop over `cs193v --rebuild` carried on past the student's Ctrl-C into the next rebuild.
+# Measured: `ITER-1 rc=130`, then a second `podman run`. A real ^C this time, through fg_start, so
+# the loop and the launcher both get SIGINT at its default; the status asserted is the LOOP's.
+shim_new
+shim_set state absent
+shim_set run_hold 1
+fg_start bash -c 'for i in 1 2; do "$1" --rebuild; done' rebuild-loop "${LAUNCHER_DIR:-$REPO}/cs193v"
+if wait_until 60 container_is_up; then
+    launcher_fg_keys '\003'
+    launcher_fg_ended 20 || true
+    assert_eq "interrupt:a-ctrl-c-stops-a-loop-around-rebuild" "signal 2" "$(launcher_fg_status)"
+    assert_eq "interrupt:a-ctrl-c-in-a-loop-runs-one-rebuild" "1" "$(shim_count '^run ')"
+else
+    fail "interrupt:a-ctrl-c-stops-a-loop-around-rebuild" "podman run never reported a container up:
+$(strip_ansi < "$FG_OUT")"
+fi
+rm -f "$SHIM/run_hold"
+launcher_fg_stop
+
 # ─── a signal once the session is ours ENDS the launcher  (#449) ──────────────
 # open_shell's trap used to be `trap shell_teardown EXIT HUP INT TERM`, and a bash signal trap that
 # RETURNS resumes the script. So a ^C at the warnings prompt stopped the container, went back to
