@@ -3349,7 +3349,7 @@ ebg_run() {                           # ebg_run [ARG...] -> output with [rc=N]
 out="$(ebg_run)"
 assert_contains "ebg:a-bare-run-still-runs-the-default-tiers" \
                 "EBG-RAN 01-cheap build=no gates=unset,unset,unset,unset,unset" "$out"
-assert_not_contains "ebg:a-bare-run-does-not-build"          "--rebuild" "$(cat "$EBG_LOG")"
+assert_not_contains "ebg:a-bare-run-does-not-build"          "--rebuild" "$(run_checker cat "$EBG_LOG")"
 # The three tiers a bare run leaves out, one of which is the bug this flag exists to stop
 # repeating -- `windows` is in neither DEFAULT_TIERS nor --all.
 assert_not_contains "ebg:a-bare-run-skips-windows"           "EBG-RAN 60-win" "$out"
@@ -3882,7 +3882,7 @@ assert_eq       "rtsig:the-runner-was-handed-an-ignored-sigpipe" "1" "$(cat "$RT
 assert_eq       "rtsig:the-background-lane-gets-a-shells-sigpipe-anyway" "141" \
                 "$(cat "$RTS/pipe/pipe.cheap" 2>/dev/null)"
 assert_eq       "rtsig:a-run-to-the-end-ends-0" "exit 0" "$(rts_said pipe 1)"
-assert_not_contains "rtsig:and-records-no-lane-as-having-died" "SUITES THAT DIED" "$(cat "$RTS/pipe/out")"
+assert_not_contains "rtsig:and-records-no-lane-as-having-died" "SUITES THAT DIED" "$(run_checker cat "$RTS/pipe/out")"
 
 # ─── telling this run's podman images from a colleague's (#199) ────────────────
 # THE INSTRUMENT THE INSTALL TIER'S THREE HOST CANARIES ARE READ THROUGH. They used to cksum the

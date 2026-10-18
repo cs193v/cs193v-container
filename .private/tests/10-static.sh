@@ -2708,7 +2708,7 @@ assert_ne  "strings:welcome-is-defined" "" "${CS193V_WELCOME:-}"
 # against the FILE rather than against the sourced value: lib/assert.sh no longer exports it, so
 # `${CS193V_GOODBYE:-}` would be empty here whether the definition survived or not.
 assert_not_contains "strings:goodbye-is-gone" 'CS193V_GOODBYE' \
-                    "$(cat "$PRIVATE/files/cs193v-strings.sh")"
+                    "$(run_checker cat "$PRIVATE/files/cs193v-strings.sh")"
 assert_ok  "containerfile:installs-the-strings" \
            grep -q 'cs193v-strings.sh  */etc/cs193v/strings.sh' "$PRIVATE/Containerfile"
 
@@ -2737,8 +2737,8 @@ assert_contains "welcome:reads-the-shared-strings" '/etc/cs193v/strings.sh' \
                 "$(cat "$PRIVATE/files/cs193v-welcome")"
 assert_contains "welcome:has-the-welcome-line" 'CS193V_WELCOME' \
                 "$(cat "$PRIVATE/files/cs193v-welcome")"
-assert_not_contains "welcome:text-is-NOT-in-$PRIVATE/messages.txt" "$CS193V_WELCOME" \
-                    "$(cat "$PRIVATE/messages.txt")"
+assert_not_contains "welcome:text-is-NOT-in-messages.txt" "$CS193V_WELCOME" \
+                    "$(run_checker cat "$PRIVATE/messages.txt")"
 
 # THE SAME RULE, for setup-git's prose. It runs in the container too, so its catalogue is a
 # separate file installed into the image — and the tidy-looking mistake is to fold those keys into

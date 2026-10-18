@@ -3100,9 +3100,9 @@ else
 assertion above passed without a gap having happened at all."
 fi
 assert_not_contains "supervisor:the-gap-is-not-read-as-end-of-stream" \
-                    "stream ended" "$(cat "$SHIM/sup-gap.out" 2>/dev/null)"
+                    "stream ended" "$(run_checker cat "$SHIM/sup-gap.out")"
 assert_not_contains "supervisor:a-tolerated-gap-is-not-published-as-broken" \
-                    "state=broken" "$(cat "$SHIM/argv.log" 2>/dev/null)"
+                    "state=broken" "$(run_checker cat "$SHIM/argv.log")"
 sup_reap
 
 # ─── ...and a silence past the tolerance must ──────────────────────────────────
@@ -3255,7 +3255,7 @@ assert_contains "forward:the-last-publish-carried-nothing" 'up= refused=' \
 # yet. This is the assertion that names the bug: an unanswered -O forward turns a healthy
 # forward into run_timeout's ceiling, and rc 124 into master-unresponsive.
 assert_not_contains "forward:a-healthy-forward-is-not-an-unresponsive-master" \
-                    "master not answering" "$(cat "$SHIM/sup-fwd.out" 2>/dev/null)"
+                    "master not answering" "$(run_checker cat "$SHIM/sup-fwd.out")"
 sup_reap
 
 # ─── ...and a master that has gone is published as gone  (#338) ───────────────
