@@ -1474,13 +1474,24 @@ tunnel_start() {
     # failing means the same thing to a student and gets the same message -- the log is where
     # the difference between them is written down.
     #
-    if ! run_timeout 30 nohup ssh -f -N -M -S "$TUNNEL_CTL" -E "$TUNNEL_LOG" -F none \
-           -i "$TUNNEL_KEY" -o IdentitiesOnly=yes \
+    # FROM INSIDE .config, AND BY NAME (#534). ssh does not take -i or UserKnownHostsFile as a
+    # plain path: it splits the second at whitespace, reads quotes in both as its own quoting, and
+    # expands % tokens and ${VAR} in both -- and ${VAR} has no escape, so quoting for ssh cannot be
+    # finished. A course folder with a space, a quote or a % in its name brought up no tunnel. Both
+    # files sit directly in $CONFIG, so the subshell steps in there and hands ssh their bare names,
+    # which never vary. ssh -f keeps that working directory when it daemonizes, so the known-hosts
+    # file it reads again at every rekey still resolves, even once the folder has been renamed.
+    #
+    # tunnel_alive STAYS OUTSIDE THE SUBSHELL, because the RT_OUT it fills is what
+    # tunnel_record_pid reads. And the cd stays outside run_timeout, which kills the command it was
+    # handed at its ceiling -- ssh here -- and would kill a shell instead if one stood in between.
+    if ! ( cd "$CONFIG" && run_timeout 30 nohup ssh -f -N -M -S "$TUNNEL_CTL" -E "$TUNNEL_LOG" -F none \
+           -i "${TUNNEL_KEY##*/}" -o IdentitiesOnly=yes \
            -o "ProxyCommand=podman exec -i $NAME /usr/sbin/sshd -i -f $TUNNEL_SSHD_CONFIG" \
-           -o "UserKnownHostsFile=$TUNNEL_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+           -o "UserKnownHostsFile=${TUNNEL_KNOWN_HOSTS##*/}" -o StrictHostKeyChecking=yes \
            -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no \
            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-           "$TUNNEL_USER@$TUNNEL_HOST" </dev/null || ! tunnel_alive; then
+           "$TUNNEL_USER@$TUNNEL_HOST" </dev/null ) || ! tunnel_alive; then
         warn "$(msg warn.tunnel-failed LOG="$TUNNEL_LOG" OUT="$(tail -5 "$TUNNEL_LOG" 2>/dev/null)")"
         return 1
     fi

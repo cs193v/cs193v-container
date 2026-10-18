@@ -3231,4 +3231,47 @@ else
 $(cat "$SHIM/interrupted.out")"
 fi
 
+# #534: SSH GETS AS FAR AS ITS PROXYCOMMAND. The tunnel's key and known-hosts file live in the
+# course folder, and ssh tokenizes, %-expands and ${}-expands both: from this folder a quote or a
+# % made it die parsing its own options, before it ever ran `podman exec ... sshd`. Real ssh,
+# against fake podman, so the exec it asks for lands in argv.log and goes no further. (A space
+# fails one step later, at the host key, which is the case after this one.)
+shim_new
+shim_set state running
+launcher --reset-tunnel >/dev/null
+assert_ne "hostile:ssh-reaches-its-proxycommand" "0" \
+          "$(shim_count '^exec -i [^ ]+ /usr/sbin/sshd ')"
+
+# ...AND THEN READS THE KNOWN-HOSTS FILE IT WAS MEANT TO. A space parses fine and fails here instead:
+# ssh splits UserKnownHostsFile at whitespace, finds no key for cs193v-tunnel in either half, and
+# refuses the host. Only a real key exchange can show that, so the fake hands this exec to a real
+# sshd on this machine, serving the key pair the launcher generated -- copied to a plain path,
+# because sshd_config reads paths with the same parser. That sshd runs as us and not as student,
+# so the furthest a healthy connection gets is user authentication: "Permission denied" is the
+# step just past the host key, which is the one being asserted. The fake finds sshd the same way.
+SSHD_BIN="$(command -v sshd 2>/dev/null || printf '%s' /usr/sbin/sshd)"
+if [ -x "$SSHD_BIN" ]; then
+    shim_new
+    launcher --rebuild >/dev/null     # the container's create is what generates the tunnel's keys
+    shim_set state running
+    mkdir "$SHIM/sshd"
+    cp "$HCOPY/.config/tunnel-host-key" "$SHIM/sshd/host-key" && chmod 600 "$SHIM/sshd/host-key"
+    cp "$HCOPY/.config/tunnel-key.pub" "$SHIM/sshd/authorized-keys"
+    printf 'HostKey %s\nAuthorizedKeysFile %s\nUsePAM no\nStrictModes no\nPidFile none\nLogLevel DEBUG1\n' \
+           "$SHIM/sshd/host-key" "$SHIM/sshd/authorized-keys" > "$SHIM/sshd/config"
+    shim_set real_sshd "$SHIM/sshd/config"
+    launcher --reset-tunnel >/dev/null
+    tlog="$(launcher --dev-tunnel | do_awk -F'\t' '$1 == "log" { print $2 }')"
+    assert_contains "hostile:ssh-gets-past-the-host-key" "Permission denied" "$(cat "$tlog" 2>/dev/null)"
+    # ...OFFERING THE TUNNEL'S OWN KEY. "Permission denied" is where ssh ends with no key at all, too:
+    # an -i it cannot open is a warning, not an error, so the check above passes without one. sshd at
+    # DEBUG1 names the fingerprint of each key it is offered, even for a user it then refuses.
+    fp="$(ssh-keygen -lf "$HCOPY/.config/tunnel-key.pub" | do_awk '{ print $2 }')"
+    assert_contains "hostile:ssh-offers-the-tunnel-key" "pkblob ED25519 $fp" \
+                    "$(cat "$SHIM/sshd.log" 2>/dev/null)"
+else
+    skip "hostile:ssh-gets-past-the-host-key" "no sshd on this machine to stand in for the container's"
+    skip "hostile:ssh-offers-the-tunnel-key" "see above"
+fi
+
 LAUNCHER_DIR="$COPY"
