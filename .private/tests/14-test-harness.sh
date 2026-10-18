@@ -2810,6 +2810,16 @@ wt_t="${wt_line##*took=}"
 if [ -n "$wt_t" ] && faster_than 3 "$wt_t" && ! faster_than 0.5 "$wt_t"; then
     pass "waits:a-fractional-ceiling-is-rounded-up"
 else fail "waits:a-fractional-ceiling-is-rounded-up" "a 0.5 s ceiling on a 0.2 s probe: ${wt_line:-no line}"; fi
+# pty_inner_pid's PTY_INNER_WAIT was the same poll count (#484). A pidfile holding no pid makes
+# every poll read it and reject it through do_tr, slowed to 0.2 s here.
+printf 'garbage\n' > "$WORK/garbage-pid"
+pr_slow() ( do_tr() { sleep 0.2; LC_ALL=C tr "$@"; }; PTY_PIDFILE="$WORK/garbage-pid" PTY_INNER_WAIT=1 pty_inner_pid )
+wt_phase
+wt_t="$(elapsed pr_slow)"; wt_rc=$?
+record    "waits:pty_inner_pid-1-on-a-slow-garbage-pidfile-took" "$wt_t"
+assert_eq "waits:a-pty_inner_pid-that-never-reads-a-pid-returns-1" "1" "$wt_rc"
+if faster_than 3 "$wt_t" && ! faster_than 1 "$wt_t"; then pass "waits:a-slow-poll-does-not-stretch-pty_inner_pid"
+else fail "waits:a-slow-poll-does-not-stretch-pty_inner_pid" "a 1 s ceiling on a 0.2 s poll took $wt_t s"; fi
 
 # do_timeout -- macOS ships NO timeout(1) at all, so this is absence, not divergence. rc 124 is
 # the ceiling's number and sandbox.sh:846 branches on it to clean up an abandoned container.

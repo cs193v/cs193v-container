@@ -251,9 +251,11 @@ pty_start() {                         # pty_start KEYS CMD... -> sets PTY_OWNER,
 # pty_inner_pid -> prints the pid the COMMAND itself runs as; rc 1 and prints nothing if it never
 # announced one. THE CALLER MUST TREAT THAT AS A FAILURE, not fall back to a pid it can guess:
 # close_client's old `else kill -9 "$1"` arm is precisely how #151 stayed invisible there.
+# PTY_INNER_WAIT IS ELAPSED SECONDS, NOT A COUNT OF POLLS (#484) -- the same loop as wait_until in
+# lib/assert.sh, whose comment says why the deadline is checked after the poll.
 pty_inner_pid() {                     # pty_inner_pid -> PID on stdout, rc 0; else rc 1
-    local i=0 max=$(( ${PTY_INNER_WAIT:-10} * 20 )) pid
-    while [ "$i" -lt "$max" ]; do
+    local end=$(( SECONDS + ${PTY_INNER_WAIT:-10} )) pid
+    while :; do
         if [ -s "${PTY_PIDFILE:-/nonexistent}" ]; then
             pid="$(cat "$PTY_PIDFILE" 2>/dev/null | do_tr -d ' \n')"
             # ALL DIGITS, not merely non-empty. lib/podman-shim.sh's fake-sysctl comment states
@@ -264,10 +266,9 @@ pty_inner_pid() {                     # pty_inner_pid -> PID on stdout, rc 0; el
                 *) printf '%s\n' "$pid"; return 0 ;;
             esac
         fi
+        [ "$SECONDS" -le "$end" ] || return 1
         sleep 0.05
-        i=$((i + 1))
     done
-    return 1
 }
 
 # pid_state PID -> that pid's state letters as ps gives them (S, R, Z, Ss+ ...), empty when the pid
