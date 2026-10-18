@@ -100,10 +100,16 @@ assert_ne "print:the-host-projects-expectation-rendered-something" "" "$hp_want"
 assert_contains "print:publishes-the-host-projects-dir" "CS193V_HOST_PROJECTS=$hp_want" "$line"
 # AND THE DISTRO IS THE ONE IT RUNS IN, asked with a name no install uses, so a launcher that
 # spelled out CS193V rather than reading $WSL_DISTRO_NAME goes red on the CS193V distro as well.
-# Only a WSL host can tell the two apart; everywhere else the render ignores the distro.
-hp_probe="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$COPY/projects" Probe-Distro)"
-assert_contains "print:publishes-the-distro-it-runs-in" "CS193V_HOST_PROJECTS=$hp_probe" \
-                "$(export WSL_DISTRO_NAME=Probe-Distro; launcher --dev-print-command)"
+# Only a WSL host can tell the two apart; everywhere else the render ignores the distro, so the
+# expectation IS hp_want and a PASS would repeat the check above while claiming this one (#503).
+hp_plat="$(. "$COPY/.private/files/cs193v-ui.sh"; platform)"
+if [ "$hp_plat" = wsl ]; then
+    hp_probe="$(. "$COPY/.private/files/cs193v-ui.sh"; gui_projects_path "$hp_plat" "$COPY/projects" Probe-Distro)"
+    assert_contains "print:publishes-the-distro-it-runs-in" "CS193V_HOST_PROJECTS=$hp_probe" \
+                    "$(export WSL_DISTRO_NAME=Probe-Distro; launcher --dev-print-command)"
+else
+    skip "print:publishes-the-distro-it-runs-in" "needs WSL: the render ignores the distro everywhere else"
+fi
 assert_contains "print:publishes-the-host-os" "CS193V_HOST_OS=" "$line"
 
 # ─── --dev-print-image  (#312) ────────────────────────────────────────────────
