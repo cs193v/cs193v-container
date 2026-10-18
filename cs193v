@@ -255,6 +255,12 @@ acknowledge_warnings() {
 # would come to disagree about a continuation line, and a parse that disagrees with podman
 # silently names the wrong step for the rest of a build.
 #
+# BOTH CALLERS HAND IT THE PATH AS $CS193V_CF, read through ENVIRON, and never through `-v`
+# (#530). awk processes escapes in a -v value -- so a course folder with a backslash in its name
+# opened some other file -- and BWK awk, which macOS ships, refuses a newline in one outright.
+# Either way the parse found nothing and every step of the build went unnamed. ENVIRON takes the
+# bytes as they are, on BWK awk, mawk and gawk alike.
+#
 # COUNTING RULE, which is podman's: one instruction per line that is not blank, not a comment
 # and not the continuation of the line above. Comments are stripped BEFORE continuations are
 # joined, so a `#` line in the middle of a continued RUN does not end it. A line ending in a
@@ -331,8 +337,8 @@ function cf_parse(f, label, text,   line, sticky, n, cont, buf) {
 build_progress() {                    # build_progress [RETRY] [FLOOR]
     local tty=0
     [ -t 1 ] && tty=1
-    LC_ALL=C awk -v tty="$tty" -v esc="$ESC" -v statef="$METER_STATE" \
-            -v cf="$CONTAINERFILE" -v notef="$BUILD_NOTE" \
+    CS193V_CF="$CONTAINERFILE" LC_ALL=C awk -v tty="$tty" -v esc="$ESC" \
+            -v statef="$METER_STATE" -v notef="$BUILD_NOTE" \
             -v retry="${1:--}" -v floor="${2:-0}" -v injected=1 "$CF_PARSE_AWK"'
         function rep(s, n,  o) { o = ""; while (n-- > 0) o = o s; return o }
         # On a terminal this RECORDS rather than draws: meter_animate owns the line, so that
@@ -360,7 +366,7 @@ build_progress() {                    # build_progress [RETRY] [FLOOR]
         }
         BEGIN {
             width = 40; cur = 0; tot = 0; pulled = 0; label = ""
-            ninstr = cf_parse(cf, cflabel, cftext)
+            ninstr = cf_parse(ENVIRON["CS193V_CF"], cflabel, cftext)
             labels_ok = (ninstr > 0)
             # THE BAR EXISTS FROM THE FIRST FRAME, which is the whole reason the parse
             # happens. podman announces its own step count only after the download, so a
@@ -3101,9 +3107,9 @@ verb_dev_tunnel() {
 verb_dev_steps() {
     local f="${1:-$CONTAINERFILE}"
     [ -f "$f" ] || die "$(msg err.no-containerfile FILE="$f")"
-    LC_ALL=C awk -v cf="$f" "$CF_PARSE_AWK"'
+    CS193V_CF="$f" LC_ALL=C awk "$CF_PARSE_AWK"'
         BEGIN {
-            n = cf_parse(cf, label, text)
+            n = cf_parse(ENVIRON["CS193V_CF"], label, text)
             for (i = 1; i <= n; i++) printf "%d\t%s\t%s\n", i, label[i], text[i]
         }
     '

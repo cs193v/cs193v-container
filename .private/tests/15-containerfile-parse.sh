@@ -244,4 +244,14 @@ assert_match "real:first-step-is-the-base-image" \
 blank="$(steps "$PRIVATE/Containerfile" | awk -F'\t' '$3 == "" { print $1 }')"
 assert_eq "real:no-instruction-parses-to-nothing" "" "$blank"
 
+# ─── the path, not only the contents (#530) ────────────────────────────────────
+# The parser opens the file by name, and that name used to reach awk through -v, which turns a
+# backslash into an escape and refuses a newline outright -- so from a course folder with either
+# in its name the parse found NOTHING, and the build meter named no step. Same fixture as
+# count:one-per-line, in a directory named with both: the path is the only thing that differs.
+odd="$WORK/back\\slash"$'\n'"line"
+mkdir -p "$odd" && cp "$WORK/plain" "$odd/Containerfile"
+assert_eq "path:a-backslash-and-a-newline-in-the-folder-name" "$(steps "$WORK/plain")" \
+          "$(steps "$odd/Containerfile")"
+
 rm -rf "$WORK"
