@@ -635,9 +635,10 @@ hx_check_colors() { # session label [extra screencheck args...]
 
 # --- what a key binding can run (#377) --------------------------------------
 #
-# The commands no binding may reach. suite.sh's danger loop walks this list, and selftest.sh's
-# fixtures check the audit against it.
-HX_DANGER='split-window detach-client command-prompt choose-tree choose-window kill-window
+# The commands no binding may reach, each by the full name list-keys prints. suite.sh's danger loop
+# walks this list, selftest.sh's fixtures check the audit against it, and selftest.sh checks tmux
+# has every one.
+HX_DANGER='split-window detach-client command-prompt choose-tree kill-window
 kill-pane kill-session kill-server display-menu display-popup rename-window rename-session
 resize-pane swap-pane next-layout break-pane join-pane switch-client suspend-client source-file
 run-shell new-session'

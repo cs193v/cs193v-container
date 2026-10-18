@@ -146,4 +146,15 @@ danger_fixture "nothing in a clean binding"     'if -F 1 "select-window -t 1" { 
 danger_fixture "nothing in a binding for ;"     'select-window'                                '' '\;'
 danger_fixture "an arm tmux cannot parse"       'if -F 1 "nosuchcommand"'                      '?'
 
+# 9. Every HX_DANGER entry must be a command this tmux has, under the full name list-keys prints,
+#    or its check in suite.sh can never fail (#480). choose-window was one: tmux keeps it only as a
+#    command-alias for choose-tree -w, which is how a binding to it comes back.
+danger_fixture "choose-window, as choose-tree"  'choose-window'                                'choose-tree'
+hx_expect_eq "every HX_DANGER entry is a command tmux knows by that name" \
+  "$("$HX_TMUX" -L "hxcmds-$$" -f /dev/null start-server \; \
+       list-commands -F '#{command_list_name}' \; kill-server 2>&1 |
+     awk -v deny="${HX_DANGER//$'\n'/ }" '{ known[$1] = 1 }
+       END { n = split(deny, d, " "); for (i = 1; i <= n; i++) if (!(d[i] in known)) printf "%s ", d[i] }' |
+     sed 's/ $//')" ""
+
 hx_summary "harness self-test"
