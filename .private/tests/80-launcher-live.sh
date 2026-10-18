@@ -1106,13 +1106,11 @@ fi
 # A tunnel that outlives its container would hold its host ports against a dead pipe. It must
 # notice and let go, or those ports are neither usable nor free.
 podman kill "$NAME" >/dev/null 2>&1
-i=0
-while [ "$i" -lt 15 ]; do
-    [ "$(count_fwd)" = 0 ] && break
-    sleep 1; i=$((i + 1))
-done
+# In seconds, not 15 polls of count_fwd a second apart, each costing its own time on top (#484).
+rel_t0=$SECONDS
+wait_until 15 no_forwards || true
 assert_eq "tunnel:releases-its-ports-when-the-container-dies" "0" "$(count_fwd)"
-record "tunnel:seconds-to-release-ports" "$i"
+record "tunnel:seconds-to-release-ports" "$((SECONDS - rel_t0))"
 # --reset-tunnel must be safe to suggest even then, rather than erroring at a stopped container.
 assert_says_key "reset-tunnel:says-so-when-nothing-is-running" warn.tunnel-reset-not-running "$(L --reset-tunnel)"
 # INVERTED BY #41: a rebuild used to end with a fresh tunnel and its forwards up. It now ends
