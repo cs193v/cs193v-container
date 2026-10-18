@@ -250,14 +250,13 @@ for i, name in enumerate(NAMES):
         nonhex.append("%r rc=%d out=%r err=%r" % (name, rc, printed[:80], err[:80]))
         continue
     if wrote_stderr(err):
-        dirty_err.append("%r: %r" % (name, err[:80]))
+        dirty_err.append("property 1, %r: %r" % (name, err[:80]))
     want = oracle(d)
     if got != want:
         disagree.append("%r shell=%s oracle=%s" % (name, got, want))
 out("cases-valid", str(n_ok))
 out("nonhex", "; ".join(nonhex[:4]))
 out("disagree", "; ".join(disagree[:4]))
-out("stderr-on-success", "; ".join(dirty_err[:4]))
 
 # ─── property 2: random trees, same comparison ────────────────────────────────
 GENERATOR_COLLISIONS = {errno.ENOTDIR, errno.EEXIST, errno.EISDIR}
@@ -321,6 +320,8 @@ for i in range(N_RANDOM):
     if rc != 0 or got is None:
         rand_disagree.append("tree %d did not hash: rc=%d out=%r err=%r" % (i, rc, printed[:80], err[:80]))
         continue
+    if wrote_stderr(err):
+        dirty_err.append("property 2, tree %d: %r" % (i, err[:80]))
     if got != oracle(d):
         rand_disagree.append("tree %d: shell=%s oracle=%s" % (i, got, oracle(d)))
 out("cases-random", str(N_RANDOM - n_rand_skipped))
@@ -362,6 +363,8 @@ for i in range(N_MUTATED):
     if rc0 != 0 or base is None:
         insensitive.append("base tree %d did not hash (rc=%d, out=%r): %r" % (i, rc0, printed0[:80], err0[:80]))
         continue
+    if wrote_stderr(err0):
+        dirty_err.append("property 3, base tree %d: %r" % (i, err0[:80]))
     op = i % len(MUTATIONS)
     if op == 0:                                   # flip a content byte
         with open(os.path.join(d, "file0"), "r+b") as fh:
@@ -381,6 +384,8 @@ for i in range(N_MUTATED):
                            % (i, MUTATIONS[op], rc1, printed1[:80], err1[:80]))
     elif after == base:
         insensitive.append("tree %d, %s: digest unchanged" % (i, MUTATIONS[op]))
+    if rc1 == 0 and after is not None and wrote_stderr(err1):
+        dirty_err.append("property 3, tree %d, %s: %r" % (i, MUTATIONS[op], err1[:80]))
 out("cases-mutated", str(N_MUTATED))
 out("insensitive", "; ".join(insensitive[:4]))
 
@@ -442,7 +447,14 @@ for i in range(N_STABLE):
                         % (i, ra, pa[:80], rb, pb[:80], ea[:40] + " / " + eb[:40]))
     elif a != b:
         unstable.append("tree %d: %s then %s" % (i, a, b))
+    for walk, (r, p, e) in enumerate(((ra, a, ea), (rb, b, eb)), 1):
+        if r == 0 and p is not None and wrote_stderr(e):
+            dirty_err.append("property 5, tree %d, walk %d: %r" % (i, walk, e[:80]))
 out("unstable", "; ".join(unstable[:4]))
+
+# EVERY SUCCESSFUL WALK, NOT PROPERTY 1'S ALONE (#468). Properties 2, 3 and 5 each run the walk to
+# success too, and a warning written only for a random, mutated or repeated tree passed here.
+out("stderr-on-success", "; ".join(dirty_err[:4]))
 
 out("plantings-refused", str(len(refused)))
 out("plantings-refused-as-dir", str(len(refused_as_dir)))
