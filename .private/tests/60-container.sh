@@ -190,9 +190,17 @@ mpid="$(tunnel_owner_pid)"
 # a pid with -p -- so the awk pattern never matched, `wild` was unconditionally empty, and the
 # security property above was asserted against nothing on every platform. do_listeners always
 # carries the pid, so the question is finally being put.
-wild="$(do_listeners | do_awk -F'\t' -v p="pid=$mpid" '$2 == p { print $1 }' \
-        | grep -v '^127\.0\.0\.1:' || true)"
-assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
+# AND NOT ON AN EMPTY PID (#482): a stale pidfile makes tunnel_owner_pid answer nothing, and
+# `pid=` then matches only listeners that show no pid -- someone else's, never our master's.
+if [ -z "$mpid" ]; then
+    fail "ports:no-forward-is-lan-exposed" "$FWD_PIDFILE names no live master of this instance's
+(it holds '$(cat "$FWD_PIDFILE" 2>/dev/null)'), so there is no pid to filter on: an empty one
+matches only listeners that show no pid, and none of our master's would be examined."
+else
+    wild="$(do_listeners | do_awk -F'\t' -v p="pid=$mpid" '$2 == p { print $1 }' \
+            | grep -v '^127\.0\.0\.1:' || true)"
+    assert_eq "ports:no-forward-is-lan-exposed" "" "$wild"
+fi
 
 # One process for every forward -- the multiplexing that makes a new connection cost a channel
 # rather than a 158ms podman exec. If this ever became one process per port, the design regressed.
@@ -1093,9 +1101,10 @@ probe_stop
 # exact failure the loalt class was added to prevent elsewhere.
 #
 # NOT THE PROBE, which binds AF_INET: this needs an AF_INET6 socket with IPV6_V6ONLY cleared, so
-# it is its own one-liner.
+# it is its own one-liner. It carries dyn_serve's mark, so clean_vt_processes sweeps it after an
+# interrupted run and dyn_serve_stop takes it and no developer's server on the same class (#482).
 PM="$(dyn_free_port)"
-podman exec -d "$NAME" python3 -c 'import http.server, socket, socketserver
+podman exec -d "$NAME" python3 -X "$DYN_SERVE_MARK" -c 'import http.server, socket, socketserver
 class S(socketserver.TCPServer):
     address_family = socket.AF_INET6; allow_reuse_address = True
     def server_bind(self):
@@ -1115,7 +1124,7 @@ and must be carried like any other loopback bind. The classifier reads it out of
 fi
 assert_eq "ports:a-v4-mapped-bind-classifies-as-loopback" "$PM:lo" \
           "$(podman exec "$NAME" cs193v-portwatch --once 2>/dev/null | do_tr ' ' '\n' | grep "^$PM:")"
-container_pkill "SimpleHTTPRequestHandler"
+dyn_serve_stop
 
 # `ss` is how a student -- or the agent answering their question -- finds out what a server is
 # actually bound to, so it has to report real sockets from inside, not just exist. Two probes at
