@@ -2283,6 +2283,11 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
 # The status is passed in rather than fixed at 130, because all three signals arrive here and
 # 128+signal is what a caller reads to tell "the student pressed Ctrl-C" from "the window was
 # closed". Reporting SIGINT for a SIGHUP would be a small lie told to every script that checks.
+#
+# AND A Ctrl-C IS NOT REPORTED AS 130 AT ALL, BUT RE-RAISED (#510): a parent shell stops only on a
+# child that DIED of SIGINT (#448, #450), so a loop over `cs193v --rebuild` carried on past an exit
+# 130 into the next rebuild -- measured. The exit after the kill is shell_teardown's, for its
+# reason: bash 3.2 acts on the self-sent SIGINT there, and would otherwise sit on it.
 rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
     # RT_SPIN FIRST, and it is not cosmetic. create_container sets it for `podman run` and clears
     # it on the line after; interrupting in between leaves it set, and run_timeout then prints it
@@ -2296,6 +2301,7 @@ rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
     # a rebuild never started a container, so "Stopping the container..." names something they
     # have never seen. The stop itself is not optional -- see verb_rebuild.
     stop_container --quiet
+    [ "${1:-130}" = 130 ] && { trap - EXIT INT; kill -s INT $$; }
     exit "${1:-130}"
 }
 

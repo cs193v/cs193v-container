@@ -241,8 +241,13 @@ launcher_pty_silent_stop() {
 # write end would be holding open the very input it is reading. Sets $FG_OWNER (the pty owner),
 # $FG_OUT (the transcript), $FG_PIDFILE and $FG_STATUS; launcher_fg_stop must be called.
 launcher_fg_start() {                 # launcher_fg_start [ARGS...]
+    fg_start "${LAUNCHER_DIR:-$REPO}/cs193v" "$@"
+}
+# THE SAME JOB AROUND ANY COMMAND, for a test whose subject is a caller of the launcher rather than
+# the launcher itself -- a shell looping over it (#510). The pid and status are then that command's.
+fg_start() {                          # fg_start ARGV...
     local cmd
-    cmd="$(sh_quote "$DO_PY" "$PT_LIB/fgjob.py" "${LAUNCHER_DIR:-$REPO}/cs193v" "$@")"
+    cmd="$(sh_quote "$DO_PY" "$PT_LIB/fgjob.py" "$@")"
     FG_FIFO="$SHIM/fg.fifo"; FG_OUT="$SHIM/fg.out"
     FG_PIDFILE="$SHIM/fg.pid"; FG_STATUS="$SHIM/fg.status"
     rm -f "$FG_FIFO" "$FG_OUT" "$FG_PIDFILE" "$FG_STATUS"
