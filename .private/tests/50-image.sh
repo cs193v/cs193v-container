@@ -464,9 +464,11 @@ assert_ok "shortlink:help-answers" \
 # rather than a simplification: a server on a port the tunnel did not carry looks exactly like a
 # broken link. So the port is the kernel's choice, but printing it is the state file's decision.
 # Read through --state, so the file it confirms is also one the strict reader accepts.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; cs193v-portwatch --state | grep -c "^up	${p%%/*}	"')"
+# THE COUNT HAS A LABEL AND A LINE OF ITS OWN (#535): $out also holds the URL and, through R, any
+# error --state prints, and either can carry a 1 -- the port, or the name cs193v.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; echo "confirmed=$(cs193v-portwatch --state | grep -c "^up	${p%%/*}	")"')"
 assert_match "shortlink:prints-a-short-url" "http://localhost:[0-9]+/token" "$out"
-assert_contains "shortlink:the-port-it-printed-was-confirmed" "1" "$out"
+assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out"
 
 # AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
 # the group above passing for a shortlink that ignores the file entirely: with a state file that
