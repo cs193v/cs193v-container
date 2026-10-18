@@ -5282,12 +5282,25 @@ print("\n".join(json.load(open(sys.argv[1]))["permissions"]["deny"]))
 # Measured: with ~/.config/gh/ moved to Miscellaneous, or ~/.codex/auth.json deleted from the
 # section, 10-static.sh stayed green. ONE PATTERN serves both halves, so they cannot disagree about
 # where the section ends, and a missing section says so rather than calling every store unnamed.
-CRED_SECTION_RE='^#+ *Credentials\b(.*?)(?=^#+ |\Z)'
-cred_section="$(python3 -c '
+#
+# THE HEADING AS A WHOLE LINE, ENDING AT ITS OWN LEVEL (#474). `^#+ *Credentials\b` also took
+# `## Credentials-free tips` or `#Credentials`, and stopping at any `#` cut the section off at its
+# first `###`, hiding every path below it from both halves. Still blind to fenced code: a fenced
+# `## Credentials` line is taken for the heading, and a fenced `# comment` ends the section.
+CRED_SECTION_RE='^## +Credentials *$(.*?)(?=^#{1,2} |\Z)'
+# AND ONE PATTERN FOR A PATH, for the same reason (#474). This was a substring search of the
+# section, so `.config/gh` was named by ~/.config/ghostty/ and `.codex` by prose. Both halves now
+# see only these tokens; here each is normalised and given a trailing `/`, so a store is named by
+# itself or by a path under it and by nothing that merely starts with the same letters.
+CRED_PATH_RE='(?:~|/home/student)/[A-Za-z0-9._/-]+'
+cred_paths="$(python3 -c '
 import re, sys
 sec = re.search(sys.argv[2], open(sys.argv[1]).read(), flags=re.S | re.M)
-print(sec.group(1) if sec else "NO-CREDENTIALS-SECTION")
-' "$NOTES" "$CRED_SECTION_RE" 2>&1)" || cred_section="the check itself failed: $cred_section"
+if not sec:
+    print("NO-CREDENTIALS-SECTION")
+for named in re.findall(sys.argv[3], sec.group(1) if sec else ""):
+    print(" " + re.sub(r"^~/", "/home/student/", named).rstrip("/") + "/", end="")
+' "$NOTES" "$CRED_SECTION_RE" "$CRED_PATH_RE" 2>&1)" || cred_paths="the check itself failed: $cred_paths"
 
 # EACH RULE AS A WHOLE ENTRY, BOTH TOOLS (#560). This was a substring search for the store over
 # every rule joined together, so either rule alone satisfied it -- measured: with the Read rule
@@ -5304,10 +5317,10 @@ for store in $CRED_STORES; do
         assert_eq "claude:denies-$tool-of-$store" "$tool($want)" \
             "$(printf '%s\n' "$deny_rules" | grep -xF -- "$tool($want)" || printf 'MISSING from: %s' "$deny_rules")"
     done
-    case "$cred_section" in
+    case "$cred_paths" in
         NO-CREDENTIALS-SECTION)
             fail "notes:names-$store" "$NOTES has no Credentials heading to name it under" ;;
-        *)  assert_contains "notes:names-$store" "$store" "$cred_section" ;;
+        *)  assert_contains "notes:names-$store" " /home/student/$store/" "$cred_paths" ;;
     esac
 done
 
@@ -5342,7 +5355,7 @@ for r in json.load(open(sys.argv[1]))['permissions']['deny']:
         rules.append(re.sub(r'^/+', '/', m.group(1)))
 text = open(sys.argv[2]).read()
 sec = re.search(sys.argv[3], text, flags=re.S | re.M)
-found = re.findall(r'(?:~|/home/student)/[A-Za-z0-9._/-]+', sec.group(1) if sec else '')
+found = re.findall(sys.argv[4], sec.group(1) if sec else '')
 bad = []
 for named in found:
     path = '/home/student/' + named[2:] if named.startswith('~/') else named
@@ -5359,7 +5372,7 @@ for named in found:
 print('' if sec else 'NO-CREDENTIALS-SECTION')
 print('' if found else 'NO-CREDENTIAL-PATHS-FOUND')
 print(' '.join(sorted(set(bad))))
-" "$managed" "$NOTES" "$CRED_SECTION_RE" 2>&1)" || uncovered="the check itself failed: $uncovered"
+" "$managed" "$NOTES" "$CRED_SECTION_RE" "$CRED_PATH_RE" 2>&1)" || uncovered="the check itself failed: $uncovered"
 assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$uncovered" | sed '/^$/d')"
 
 # ─── shellcheck ────────────────────────────────────────────────────────────────
