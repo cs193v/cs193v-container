@@ -75,7 +75,9 @@ assert_contains "print:has-name"       "--name $NAME"  "$line"
 assert_contains "print:has-detach"     "--detach"      "$line"
 assert_contains "print:has-confighash" "cs193v.confighash=" "$line"
 assert_contains "print:has-dir-label"  "cs193v.dir=$COPY"   "$line"
-assert_contains "print:mounts-sibling-projects" "src=$COPY/projects,dst=/home/student/projects,rw" "$line"
+# CSV-QUOTED, the whole src= field, because podman reads the --mount word as one CSV record and
+# a course folder may hold a comma or a quote (#531).
+assert_contains "print:mounts-sibling-projects" "\"src=$COPY/projects\",dst=/home/student/projects,rw" "$line"
 # AND THE SAME DIRECTORY IS PUBLISHED INSIDE (#257), so the agents can tell a student where their
 # files are rather than handing back a container path. THE SAME $COPY AS THE MOUNT ABOVE is the
 # assertion: these two are written by one `podman run` precisely so they cannot disagree, and a
@@ -3108,5 +3110,44 @@ assert_eq "hostile:dev-steps-parses-what-the-plain-copy-parses" "$dev_steps" \
 out="$(launcher --rebuild --no-cache)"
 assert_match "hostile:labels-name-the-node-step" "\] +[0-9]+/$steps  Installing Node" "$out"
 assert_eq "hostile:no-step-is-left-unnamed" "0" "$(unnamed_frames "$out")"
+
+# THE src= OF THE RECORDED --mount WHOSE dst= IS $1, read as one CSV record the way podman reads the
+# word (encoding/csv, in podman 4.9 and 6 alike), each field split at its first `=`. Bytes in and
+# bytes out, so the comparison is byte for byte whatever the locale. Prints nothing when no mount
+# has that destination or the word is not one CSV record -- neither of which is the path.
+#
+# PYTHON'S csv IS LAXER THAN GO'S, so this is not podman's decoder exactly: it takes a `"` inside an
+# unquoted field as a literal where Go refuses the record, and keeps a CR before LF where Go drops
+# it. Neither lets a broken mount through here, because HOSTILE_NAME has a comma and no CR, and an
+# unquoted src= splits at the comma whatever else it does. A name without a comma would need more.
+mount_src() {                         # mount_src DST
+    python3 -c '
+import csv, glob, io, sys
+for p in sorted(glob.glob(sys.argv[1] + "/mount.*")):
+    text = open(p, "rb").read().decode("utf-8", "surrogateescape")
+    try:
+        rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+    except csv.Error:
+        continue
+    if len(rows) != 1:
+        continue
+    kv = dict(f.split("=", 1) for f in rows[0] if "=" in f)
+    if kv.get("dst") == sys.argv[2]:
+        sys.stdout.buffer.write(kv.get("src", "").encode("utf-8", "surrogateescape"))
+        break
+' "$SHIM" "$1"
+}
+
+# #531: ALL THREE BIND MOUNTS, not just the workspace. The two key mounts come out of the same
+# course folder too, and each hands run_bind a path of its own -- one of them with `.pub` added.
+shim_new
+launcher --rebuild >/dev/null
+assert_eq "hostile:rebuild-created-a-container" "1" "$(shim_count '^run ')"
+assert_eq "hostile:workspace-mount-src-arrives-whole" "$HCOPY/projects" \
+          "$(mount_src /home/student/projects)"
+assert_eq "hostile:user-key-mount-src-arrives-whole" "$HCOPY/.config/tunnel-key.pub" \
+          "$(mount_src /home/student/.ssh/authorized_keys)"
+assert_eq "hostile:host-key-mount-src-arrives-whole" "$HCOPY/.config/tunnel-host-key" \
+          "$(mount_src /etc/ssh/cs193v_host_ed25519_key)"
 
 LAUNCHER_DIR="$COPY"
