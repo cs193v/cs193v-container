@@ -24,10 +24,13 @@ set -u
 # rm -rf's, it kills nothing, and the supervisor section below backgrounds a real
 # `cs193v --dev-supervise` whose fake watcher would otherwise outlive this run. By recorded
 # pid only -- a `pkill -f` here would be machine-wide, which lib/portable.sh has a scar about.
+# WAITED FOR as well as killed, or bash prints a `Terminated: 15` job notice into the run log
+# for each one (#430). The 2>/dev/null is on wait because bash 3.2 prints the notice from
+# inside it; it also hides "not a child" for a supervisor that was already reaped.
 SUP_PIDS=''
 sup_reap() {
     local p
-    for p in $SUP_PIDS; do kill "$p" 2>/dev/null || true; done
+    for p in $SUP_PIDS; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
     SUP_PIDS=''
     # ...and the fake watchers with them. A stalling one is asleep, not writing, so killing
     # the supervisor gives it no EPIPE to notice; removing the file that armed it does.
