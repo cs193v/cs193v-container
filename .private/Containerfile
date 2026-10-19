@@ -559,9 +559,8 @@ RUN set -eux; \
 # ~/.codex is a named volume, so a file placed there is seeded once and never refreshed, and the
 # student can edit it. See files/codex/managed_config.toml for what each key is for; the short
 # version is `workspace-write` + `on-request` (codex's own defaults, written down so they cannot
-# drift under us) and `approvals_reviewer = "auto_review"`, a decision recorded as a divergence from
-# the Claude Code policy beside it until #526. It no longer is one: Claude Code now starts in auto
-# mode, so both agents put most questions to a reviewer model.
+# drift under us) and `approvals_reviewer = "auto_review"`, which is a decision rather than a
+# default; the staff README records it (#71, #526).
 #
 # TWO THINGS THAT BITE, both verified against the real binary rather than reasoned about:
 #
@@ -613,16 +612,15 @@ RUN set -eux; \
 # the schema rejects is dropped instead, and on 2.1.225 one bad value under `permissions` dropped
 # the deny rules with it. That the installed version accepts every field is checked in the image
 # by 50-image.sh's `claude doctor` checks (#569), so a bump that breaks the pair goes red there.
-# The version check below matches the pin's whole first word, captured rather than piped: dash
-# has no pipefail. Declared here rather than at the top of the file so the bump does not
-# invalidate the whole build -- see the note beside DEBIAN_FRONTEND.
+# The version check below is node's, against the whole line `claude --version` prints. Declared
+# here rather than at the top of the file so the bump does not invalidate the whole build -- see
+# the note beside DEBIAN_FRONTEND.
 ####> Installing Claude Code...
 ARG CLAUDE_CODE_VERSION=2.1.303
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
-    v="$(/home/student/.local/bin/claude --version)"; \
-    case "$v" in "${CLAUDE_CODE_VERSION} "*) ;; *) echo "FATAL: claude --version says '$v', not ${CLAUDE_CODE_VERSION}" >&2; exit 1 ;; esac
+    test "$(/home/student/.local/bin/claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 9 — course configuration

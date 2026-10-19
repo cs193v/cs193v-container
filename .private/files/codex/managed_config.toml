@@ -26,11 +26,8 @@
 #       hands it to codex's reviewer subagent instead.
 #
 #       THIS IS A DECISION, and the one thing in this file that is not simply a written-down
-#       default. It was recorded as a divergence from the Claude Code policy beside it, which kept
-#       Claude Code's permission prompts in front of the student; it no longer is one. Claude Code
-#       now starts in auto mode, where a classifier answers instead of the student, and the course
-#       keeps that default (#526). Both agents now put most questions to a reviewer model. Whoever
-#       revisits this should know it was chosen, and that it now agrees with Claude Code's policy.
+#       default. The staff README records why (#71), and why it now matches Claude Code's own
+#       starting mode, auto (#526).
 #
 # What is deliberately ABSENT:
 #   requirements.toml     - no HARD constraints are shipped. These are managed DEFAULTS, and a

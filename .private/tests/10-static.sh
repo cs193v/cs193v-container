@@ -2607,11 +2607,11 @@ assert_ok  "containerfile:node-version-pinned-exactly" \
            grep -q 'nodejs=\${NODE_VERSION}-1nodesource1' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:node-version-asserted-at-build-time" \
            grep -q 'test "\$(node --version)" = "v\${NODE_VERSION}"' "$PRIVATE/Containerfile"
-# The same for Claude Code (#569), whose pin is the one most often moved. Matched as the version's
-# whole first word, so a pin of 2.1.30 cannot pass on an installed 2.1.303, and captured with $()
-# rather than piped into grep: dash has no pipefail, so a pipe would answer for grep alone.
+# The same for Claude Code (#569), whose pin is the one most often moved: the whole version line,
+# so a pin of 2.1.30 cannot pass on an installed 2.1.303.
 assert_ok  "containerfile:claude-code-version-asserted-at-build-time" \
-           grep -qF 'case "$v" in "${CLAUDE_CODE_VERSION} "*)' "$PRIVATE/Containerfile"
+           grep -qF 'test "$(/home/student/.local/bin/claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)"' \
+           "$PRIVATE/Containerfile"
 # Holding the package would re-create exactly the problem that moving off the tarball fixed.
 assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs" \
                     "$(run_checker cat "$PRIVATE/Containerfile")"
@@ -4832,13 +4832,7 @@ assert_eq  "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" "$bad_rules"
 # satisfies, so assert_not_contains is the wrong verb here no matter how good the path is. A
 # document with no `permissions` key is reported as not understood rather than as clean, which
 # is the one reading under which "I could not find it" can never mean "it is not there".
-#
-# defaultMode AND disableAutoMode ARE ABSENT FOR A DIFFERENT REASON (#526): the course keeps
-# Claude Code's own starting mode, which is auto from 2.1.283. A managed defaultMode outranks the
-# student's ~/.claude/settings.json, so it would take away their one way to make Manual stick;
-# disableAutoMode would take auto mode away altogether. disableAutoMode is documented both at top
-# level and under `permissions`, and the walk finds a key at either.
-for forbidden in requiredMinimumVersion requiredMaximumVersion defaultMode disableAutoMode; do
+for forbidden in requiredMinimumVersion requiredMaximumVersion; do
     assert_eq "claude:no-$forbidden" "absent" "$(python3 -c '
 import json, sys
 def walk(node):
@@ -4856,6 +4850,18 @@ else:
     print("PRESENT as a setting key" if sys.argv[2] in keys else "absent")
 ' "$managed" "$forbidden")"
 done
+
+# THE EXACT KEY SET, at the top and under `permissions`, as codex's policy is pinned (#526). The
+# file's $comment keeps a "deliberately ABSENT" list, and a key added later -- an allow rule,
+# autoUpdatesChannel -- is the kind of quiet change that list exists to prevent. Two of them would
+# be a reversal of #526 in particular: defaultMode outranks the student's ~/.claude/settings.json,
+# their one way to make Manual stick, and disableAutoMode takes auto mode away; disableAutoMode is
+# documented at either level, which is why both are pinned.
+assert_eq "claude:policy-has-exactly-these-keys" "\$comment permissions tui | deny" "$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(" ".join(sorted(d)), "|", " ".join(sorted(d.get("permissions", {}))))
+' "$managed" 2>&1)"
 
 # THE FULLSCREEN RENDERER (#77), and the one env var that makes it safe here.
 #
@@ -5154,11 +5160,8 @@ for store in $CRED_STORES; do
         *)      want="//home/student/$store/**" ;;
     esac
     for tool in Read Edit; do
-        case "$deny_rules" in
-            "the check itself failed"*) got="$deny_rules" ;;
-            *) got="$(printf '%s\n' "$deny_rules" | grep -xF -- "$tool($want)" || echo "MISSING from the deny list")" ;;
-        esac
-        assert_eq "claude:denies-$tool-of-$store" "$tool($want)" "$got"
+        assert_eq "claude:denies-$tool-of-$store" "$tool($want)" \
+            "$(printf '%s\n' "$deny_rules" | grep -xF -- "$tool($want)" || printf 'MISSING from: %s' "$deny_rules")"
     done
     case "$cred_section" in
         NO-CREDENTIALS-SECTION)
