@@ -310,7 +310,7 @@ out("cases", str(ran))
 PY
 FUZZ_RC=$?
 
-fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
+fz() { run_checker awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
 
 # ─── the contract exists at all ────────────────────────────────────────────────
 # First and on its own: every property below is vacuous without it, and a fuzzer that drives
