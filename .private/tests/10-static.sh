@@ -3760,13 +3760,17 @@ assert_eq "run-timeout:detaches-both-branches" "2 2" \
           "$(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set -m') $(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set +m')"
 # EVERY LINE INSIDE EACH BRACKET, not only its two ends: an `if`, an `else`, a `fi`, or one of the four
 # spawns in exactly its own shape. Anything else there -- a probe slipped in before the else's spawn --
-# would run in the foreground under job control and be handed the terminal.
+# would run in the foreground under job control and be handed the terminal. AND THE `fi` CARRIES
+# `2>/dev/null`: under job control the forked bash sets its own process group before the command's
+# redirections exist, and bash 3.2 now and then reports that it could not -- `child setpgid (N to N):
+# Operation not permitted`, on the student's terminal, for a child its parent had already moved.
+# Measured: 4 such lines in 700 detached calls, every child in a group of its own regardless.
 assert_eq "run-timeout:the-detach-bracket-holds-only-the-spawn" "" \
           "$(printf '%s\n' "$rt_flat" | awk '
                 $0 == "[ -n \"$RT_DETACH\" ] && set -m" { inside = 1; next }
                 $0 == "[ -n \"$RT_DETACH\" ] && set +m" { inside = 0; next }
                 !inside { next }
-                /^if \[ -n "\$RT_BARE" \]; then$/ || /^else$/ || /^fi$/ { next }
+                /^if \[ -n "\$RT_BARE" \]; then$/ || /^else$/ || /^fi 2>\/dev\/null$/ { next }
                 /^(if \[ -n "\$RT_BARE" \]; then|else) +\( "\$@" >"\$tmp" [^;]*\) & pid=\$!$/ { next }
                 /^\( "\$@" >"\$tmp" [^;]* & c=\$!; printf .* >&9$/ { next }
                 /^wait "\$c"; printf .* >&9 \) 9>"\$fifo" 7>&- 8>&- & pid=\$!$/ { next }
