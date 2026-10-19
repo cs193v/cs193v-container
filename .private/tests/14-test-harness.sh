@@ -1599,25 +1599,22 @@ launcher_pty_silent_wait 1 "   " 2>/dev/null
 assert_eq "silent-wait:refuses-a-blank-phrase" "2" "$?"
 launcher_pty_silent_wait 1 "the second line of a phrase" 2>/dev/null
 assert_eq "silent-wait:finds-a-phrase-of-one-line" "0" "$?"
-# ORPHANED ON PURPOSE, so that init reaps them: a child of this shell lingers as a zombie once
-# killed, and kill -0 still finds a zombie. The wedge is what a wedged call becomes, `sleep 30`;
-# the decoy is anything else holding a pid the file names.
-uw_spawn() { ( "$@" >/dev/null 2>&1 & printf '%s\n' "$!" ); }
-uw_wedge="$(uw_spawn sleep 30)"; uw_decoy="$(uw_spawn sleep 31)"
+# The wedge is what a wedged call becomes, `sleep 30`; the decoy is anything else holding a pid the
+# file names. Children of this shell, which linger as zombies once killed -- pid_is_gone reads a
+# zombie as gone.
+sleep 30 >/dev/null 2>&1 & uw_wedge=$!
+sleep 31 >/dev/null 2>&1 & uw_decoy=$!
 printf '%s\n%s\n' "$uw_wedge" "$uw_decoy" > "$SHIM/ssh_wedge.pids"
 shim_ssh_unwedge
-if wait_until 10 pid_gone "$uw_wedge"; then pass "unwedge:ends-a-wedged-call"
+if wait_until 10 pid_is_gone "$uw_wedge"; then pass "unwedge:ends-a-wedged-call"
 else fail "unwedge:ends-a-wedged-call" "the wedged sleep $uw_wedge is still alive"; fi
 # PROVING AN ABSENCE, so a fixed wait: a decoy that is left alone gives no sign of it, and a kill
 # sent to it lands well inside this.
 sleep 0.5
-if pid_gone "$uw_decoy"; then fail "unwedge:leaves-any-other-pid-alone" "it killed $uw_decoy, a sleep 31"
+if pid_is_gone "$uw_decoy"; then fail "unwedge:leaves-any-other-pid-alone" "it killed $uw_decoy, a sleep 31"
 else pass "unwedge:leaves-any-other-pid-alone"; fi
-# IDENTIFIED BEFORE KILLED, the rule the helper under test now keeps: the wedge's pid is free again
-# once it has been killed, and can be another lane's by now.
-for uw_p in "$uw_wedge" "$uw_decoy"; do
-    case "$(ps -ww -o command= -p "$uw_p" 2>/dev/null)" in "sleep 30"|"sleep 31") kill "$uw_p" 2>/dev/null ;; esac
-done
+# IDENTIFIED BEFORE KILLED, the rule the helper under test now keeps.
+kill_if_argv "$uw_wedge" "sleep 30"; kill_if_argv "$uw_decoy" "sleep 31"
 # shellcheck disable=SC2034   # read by launcher_fg_status, in the sourced lib
 FG_STATUS="$SHIM/no-status-yet"
 assert_eq "fg-status:says-nothing-before-an-ending" "" "$(launcher_fg_status 2>&1)"
@@ -1628,9 +1625,9 @@ fg_start sh -c 'trap "" HUP; sleep 61 & printf "%s\n" "$!" > "$1"; wait' fg-stop
 if wait_until 10 test -s "$SHIM/fg-grandchild.pid"; then
     fg_gc="$(cat "$SHIM/fg-grandchild.pid")"
     launcher_fg_stop
-    if wait_until 10 pid_gone "$fg_gc"; then pass "fg-stop:takes-the-whole-job"
+    if wait_until 10 pid_is_gone "$fg_gc"; then pass "fg-stop:takes-the-whole-job"
     else fail "fg-stop:takes-the-whole-job" "the wrapper's grandchild $fg_gc outlived it"; fi
-    [ "$(ps -ww -o command= -p "$fg_gc" 2>/dev/null)" = "sleep 61" ] && kill -9 "$fg_gc" 2>/dev/null
+    kill_if_argv "$fg_gc" "sleep 61" KILL
 else
     fail "fg-stop:takes-the-whole-job" "the wrapper never published its grandchild"
     launcher_fg_stop

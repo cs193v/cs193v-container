@@ -521,7 +521,8 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # WHAT IS IN FLIGHT, for an arm that ends the process from inside this call; see
         # rt_kill_inflight.
         printf '%s\n' "$pid" > "$tmp.pids"
-        # 7>&- 8>&- IN BOTH BRANCHES: the launcher keeps copies of the terminal there for its
+        # 7>&- 8>&- IN BOTH BRANCHES -- here on the command, in the fifo branch on its wrapper, which
+        # covers the command inside it: the launcher keeps copies of the terminal there for its
         # signal handlers (#511), and a command started here can outlive the launcher -- the
         # tunnel's `ssh -f` master does, by design -- so none of them may take those copies along.
         if [ -n "$lbl" ]; then
@@ -572,16 +573,16 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # group, since a subshell runs without job control. Closed before the rendezvous below.
         [ -n "$RT_DETACH" ] && set -m
         if [ -n "$RT_BARE" ]; then
-          ( "$@" >"$tmp" 2>"$eout" 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>"$eout" 9>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" 7>&- 8>&- & pid=$!
         else
-          ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>&1 9>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" 7>&- 8>&- & pid=$!
         fi 2>/dev/null
         [ -n "$RT_DETACH" ] && set +m
         # The wrapper's pid now and the command's once it is read, for rt_kill_inflight. 7>&- 8>&-
-        # ON THE WRAPPER as well as the command: a wrapper is a fork that never execs, so it holds
-        # whatever this shell had open for as long as it lives.
+        # ON THE WRAPPER, which closes them for the command inside it too: a wrapper is a fork that
+        # never execs, so it holds whatever this shell had open for as long as it lives.
         printf '%s\n' "$pid" > "$tmp.pids"
         exec 9<"$fifo"
         # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
@@ -700,11 +701,15 @@ rt_cleanup() {
 # somebody else's. A GLOB ON OUR OWN PID for rt_cleanup's reason: a call made inside a command
 # substitution writes its record from the subshell, whose $$ is still ours.
 rt_kill_inflight() {
-    local f p g mine
-    mine="$(ps -o pgid= -p $$ 2>/dev/null)"; mine="${mine// /}"
-    [ -n "$mine" ] || return 0
+    local f p g mine=''
     for f in "${TMPDIR:-/tmp}"/cs193v-$$.*.pids; do
         [ -f "$f" ] || continue
+        # Our own group asked once, and only once there is a record: a clean exit has none and
+        # pays no fork.
+        if [ -z "$mine" ]; then
+            mine="$(ps -o pgid= -p $$ 2>/dev/null)"; mine="${mine// /}"
+            [ -n "$mine" ] || return 0
+        fi
         while IFS= read -r p; do
             case "$p" in ''|*[!0-9]*) continue ;; esac
             [ "$p" = "$$" ] && continue
