@@ -7,7 +7,7 @@ nothing, and nothing contains no needle (#437, #476, #539, #559). run_checker, r
 lint_grep turn that failure into $CHECKER_DIED, which the assertions refuse; this finds the values
 that do not go through one of them.
 
-Five shapes, each a line `FILE:LINE: WHY`:
+Seven shapes, each a line `FILE:LINE: WHY`:
   bare       the value is a reader's own output: "$(cat F)", "$(grep x F | ...)", or a
              pipe with a later `grep -f FILE` in it, which reads FILE.
   filtered   a checked reader piped into a stage that keeps only some lines, which can drop the
@@ -15,7 +15,10 @@ Five shapes, each a line `FILE:LINE: WHY`:
   var-filtered  the same through a variable this file filled from a checked reader, without
              died_in in front: "$(printf '%s\\n' "$v" | grep x)".
   var-bare   the value is a variable this file filled from a bare reader, or printf of one.
-  count      assert_eq NAME "0" over a piped wc or grep -c whose input can fail (#586).
+  count      assert_eq NAME "0" over a piped wc or grep -c, a helper that counts, or a fallback
+             of `|| printf 0`, whose input can fail (#586).
+  both-sides an assert_eq whose expected side can fail the same way as its actual.
+  refused-side  an assert_ne whose refused side can fail, which then differs from anything.
 
 A file it cannot read, and a statement it cannot parse, print MARKER and why, so that neither can
 pass as "found nothing". Comment lines are skipped. The parser is a shell tokenizer for exactly
@@ -29,7 +32,8 @@ import sys
 NEG = {"assert_not_contains", "assert_says_not", "assert_says_not_key", "assert_says_not_key_tail",
        "assert_says_not_sub", "assert_not_match"}
 READERS = {"cat", "sed", "grep", "egrep", "fgrep", "awk", "do_awk", "head", "tail", "cut", "sort",
-           "uniq", "tr", "do_tr", "jq", "find", "ls", "xargs", "paste", "strings", "python3"}
+           "uniq", "tr", "do_tr", "jq", "find", "ls", "xargs", "paste", "strings", "python3",
+           "do_sha256", "sha256sum", "shasum"}
 CHECKED = {"run_checker", "run_grep", "lint_grep"}
 # Stages that keep only SOME lines. grep -v keeps the marker unless its pattern matches it, and
 # sed without -n prints every line, so neither is here.
@@ -230,21 +234,44 @@ def reads_a_file(sts):                # a stage past the first that is a bare gr
     return False
 
 
-# `cmd || printf 'failed'` turns its own failure into a line; `|| true` does not.
+def said(st):                         # what a printf or echo stage prints, quotes and \n dropped
+    return ''.join(w.strip('\'"') for w in st[1:]).replace('\\n', '').strip()
+
+
+# `cmd || printf 'failed'` turns its own failure into a line; `|| true` does not, and neither does
+# `|| printf 0`, which turns it into the count a negative check is hoping for.
 def answers_for_itself(sts):
-    return any(sep == '||' and first_cmd(st) in ('printf', 'echo') for sep, st in sts[1:])
+    return any(sep == '||' and first_cmd(st) in ('printf', 'echo') and said(st) not in ('', '0')
+               for sep, st in sts[1:])
 
 
-def counts(sts):                      # a count of nothing is 0, not empty
-    return any(first_cmd(st) == 'wc' for _, st in sts)
+def falls_back_to_zero(sts):
+    return any(sep == '||' and first_cmd(st) in ('printf', 'echo') and said(st) == '0'
+               for sep, st in sts[1:])
 
 
-def classify(sts, helpers):           # a pipe's stages -> (bare|filtered|checked|other, what)
-    if answers_for_itself(sts) or counts(sts):
+def counts(sts):                      # a piped wc counts nothing as 0, not empty
+    return any(first_cmd(st) == 'wc' for _, st in sts[1:])
+
+
+def redirected(ws):                   # a stage reading a file through `< FILE`
+    return any(w == '<' or (w.startswith('<') and not w.startswith(('<<', '<(', '<&')))
+               for w in ws[1:])
+
+
+# `|| printf 'failed'` ANSWERS ONLY assert_eq NAME "": against a negative form, or assert_ne, the
+# word it prints contains no needle and is not the value refused, so it passes like the empty read.
+def classify(sts, helpers, fallback_ok=True):  # pipe stages -> (bare|filtered|checked|other, what)
+    if (fallback_ok and answers_for_itself(sts)) or counts(sts):
         return 'other', ''
     head = first_cmd(sts[0][1])
     if head in READERS:
         return 'bare', f"{head}'s own output"
+    # wc FIRST, reading a file or a redirect it cannot open, never runs or prints no count: empty.
+    if head == 'wc':
+        return 'bare', "wc of a file it could not open"
+    if redirected(sts[0][1]):
+        return 'bare', f"{head} reading a redirected file"
     if head in helpers:
         return 'bare', f"{head}, a helper that reads with a bare {helpers[head]}"
     if reads_a_file(sts):
@@ -276,9 +303,16 @@ STMT = re.compile(r'(?:^|\|\||&&|;|[({]|\bthen\b|\bdo\b|\belse\b)[ \t]*', re.M)
 NAME_EQ = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)', re.S)
 
 
+ASSIGNISH = re.compile(r'(?:local|export|readonly|declare)\b|[A-Za-z_][A-Za-z0-9_]*=')
+
+
 def assignments(text, helpers):       # -> {name: [(pos, kind, what)]}, each list in order
     out = {}
     for m in STMT.finditer(text):
+        # MOST STATEMENTS ARE NOT ASSIGNMENTS, and tokenizing each one whole was nearly all of the
+        # scan's time (#559 review): look at its first characters before reading it.
+        if not ASSIGNISH.match(text, m.end()):
+            continue
         try:
             ws, end = words_at(text, m.end(), 64)
             if not ws:
@@ -314,7 +348,7 @@ FNDEF = re.compile(r'^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{', re.M)
 FNEND = re.compile(r'^[ \t]*\}[ \t]*$', re.M)
 
 
-def definitions(text):                # -> {name: the bare reader its one statement is, or None}
+def definitions(text):                # -> {name: ('reader'|'counter', what) or None}
     out = {}
     for m in FNDEF.finditer(text):
         eol = text.find('\n', m.end())
@@ -333,12 +367,18 @@ def definitions(text):                # -> {name: the bare reader its one statem
             continue
         if any(sep not in ('|', '||') for sep, _ in sts[1:]):
             continue
-        if classify(sts, {})[0] in ('bare', 'filtered'):
-            out[m.group(1)] = first_cmd(sts[0][1])
+        head = first_cmd(sts[0][1])
+        if classify(sts, {})[0] in ('bare', 'filtered') and not falls_back_to_zero(sts):
+            out[m.group(1)] = ('reader', head)
+        # A HELPER THAT COUNTS (#586): `sg_count() { sg_log | grep -cE "$1"; }` is 0 for a log
+        # it could not read. One whose input is printf of its own argument counts no read.
+        elif head not in ('died_in', 'printf') and (
+                falls_back_to_zero(sts) or any(sep == '|' and is_count(st) for sep, st in sts[1:])):
+            out[m.group(1)] = ('counter', head)
     return out
 
 
-def why(value, sets, pos, helpers):
+def why(value, sets, pos, helpers, fallback_ok=True):
     body = subst_body(value)
     if body is None:
         v = unquote_var(value)
@@ -347,7 +387,7 @@ def why(value, sets, pos, helpers):
             return f"var-bare: ${v} was filled by {got[1]}"
         return None
     sts = stages(body)
-    k, what = classify(sts, helpers)
+    k, what = classify(sts, helpers, fallback_ok)
     if k == 'bare':
         return f"bare: the value is {what}"
     if k == 'filtered':
@@ -373,13 +413,17 @@ def is_count(st):                     # wc, or grep -c
 # that failed -- and a checked one does not help, because the count turns the marker line into a
 # number. died_in in front is the way through. A printf of what the test computed itself, rather
 # than read, has no read to fail.
-def why_count(value, sets, pos):
+def why_count(value, sets, pos, counters):
     body = subst_body(value)
     if body is None:
         return None
     sts = stages(body)
     head = first_cmd(sts[0][1])
+    if head in counters:
+        return f"count: {head} is a helper that counts 0 when its {counters[head]} fails"
     counted = [st for sep, st in sts[1:] if sep == '|' and is_count(st)]
+    if head != 'died_in' and falls_back_to_zero(sts):
+        return f"count: {head}'s failure falls back to printing 0"
     if head == 'died_in' or not counted:
         return None
     if head == 'printf':
@@ -394,9 +438,18 @@ def why_count(value, sets, pos):
 def scan(path, text, marker, lib_helpers):
     line_of = lambda i: text.count('\n', 0, i) + 1
     own = definitions(text)
-    helpers = {n: r for n, r in lib_helpers.items() if n not in own}
-    helpers.update({n: r for n, r in own.items() if r})
+    both = {n: d for n, d in lib_helpers.items() if n not in own}
+    both.update({n: d for n, d in own.items() if d})
+    helpers = {n: d[1] for n, d in both.items() if d[0] == 'reader'}
+    counters = {n: d[1] for n, d in both.items() if d[0] == 'counter'}
     sets = assignments(text, helpers)
+
+    def side(v):                      # how one argument can fail: ('empty'|'zero', why) or None
+        w = why(v, sets, m.start(1), helpers)
+        if w:
+            return 'empty', w
+        w = why_count(v, sets, m.start(1), counters)
+        return ('zero', w) if w else None
     for m in START.finditer(text):
         fn = m.group(1)
         if fn not in NEG and fn not in ('assert_eq', 'assert_ne'):
@@ -408,14 +461,28 @@ def scan(path, text, marker, lib_helpers):
             ws = words(text, m.start(1), 4)
             if len(ws) < 4:
                 continue
-            # assert_eq passes on empty only when it expects empty, or on a count of nothing when it
-            # expects 0; assert_ne passes on empty only when it does not expect empty.
+            # assert_eq passes on a failed read when it expects empty, or 0 of a count, or when its
+            # EXPECTED side can fail the same way its actual can. assert_ne passes when its actual
+            # fails to empty and it refuses something else, or when the side it refuses fails.
+            literal = not any(c in ws[2] for c in '$`')
             if fn == 'assert_eq' and ws[2] in ('"0"', "'0'", '0'):
-                w = why_count(ws[3], sets, m.start(1))
-            elif (fn == 'assert_eq') != (ws[2] in ('""', "''")):
-                continue
-            else:
+                w = why_count(ws[3], sets, m.start(1), counters)
+            elif fn == 'assert_eq' and ws[2] in ('""', "''"):
                 w = why(ws[3], sets, m.start(1), helpers)
+            elif fn == 'assert_eq':
+                a = None if literal else side(ws[2])
+                b = side(ws[3]) if a else None
+                w = (f"both-sides: expected is {a[1]}; actual is {b[1]}"
+                     if a and b and a[0] == b[0] else None)
+            elif fn == 'assert_ne':
+                w = None
+                if ws[2] not in ('""', "''"):
+                    w = why(ws[3], sets, m.start(1), helpers, fallback_ok=False)
+                if not w and not literal:
+                    x = side(ws[2])
+                    w = f"refused-side: {x[1]}" if x else None
+            else:
+                w = why(ws[3], sets, m.start(1), helpers, fallback_ok=False)
         except Unparsed as e:
             print(f"{path}:{line_of(m.start(1))}: {marker} (could not parse this {fn}: {e})")
             continue
@@ -438,7 +505,7 @@ def main(argv):
     lib_helpers = {}
     for path, text in texts.items():
         if os.path.basename(os.path.dirname(path)) == 'lib':
-            lib_helpers.update({n: r for n, r in definitions(text).items() if r})
+            lib_helpers.update({n: d for n, d in definitions(text).items() if d})
     for path, text in texts.items():
         scan(path, text, argv[1], lib_helpers)
     return 0

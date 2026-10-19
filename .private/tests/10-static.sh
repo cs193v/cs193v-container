@@ -2155,17 +2155,19 @@ memosub="$(printf '%s\n' "$memo_raw" | grep -vF -- "$memo_specimen:" || true)"
 assert_eq "harness:no-memo-dropping-helper-runs-in-a-subshell" "" "$memosub"
 rm -rf "$memo_tmp"
 
-# AN ABSENCE CHECK MUST TELL "ABSENT" FROM "COULD NOT READ" (#559). Every negative assertion,
-# assert_eq NAME "", and assert_ne against anything but "" passes on an empty value, and a reader
-# that failed hands it one: `cat` of a missing file prints nothing, and nothing contains no needle.
-# #437, #476 and #539 fixed these a site at a time, and #559's sweep fixed the rest; this keeps the
-# next one out. lib/readerscan.py names every such assertion whose value is a bare reader's output
-# -- directly, through a helper whose whole body is one read, or through a variable last filled that
-# way -- or a checked read piped into a stage that keeps only some lines. run_checker, run_grep,
-# lint_grep and died_in are the ways through; a read that answers for itself with `|| printf` fails
-# on its own, and so does a count -- unless it is expected to be 0 (#586), when a count of nothing
-# passes and only died_in in front catches it. It is a tokenizer for assertion arguments, not a
-# shell, and it prints $CHECKER_DIED for a file it cannot read or a statement it cannot parse.
+# AN ABSENCE CHECK MUST TELL "ABSENT" FROM "COULD NOT READ" (#559, #586). Every negative assertion,
+# assert_eq NAME "", assert_eq NAME "0" over a count, and assert_ne against anything but "" passes
+# on a failed read: `cat` of a missing file prints nothing, nothing contains no needle, and a count
+# of nothing is 0. So does an assert_eq whose two sides can fail alike, and an assert_ne whose
+# refused side can. lib/readerscan.py names each one whose value comes from a bare reader --
+# directly, through a one-statement helper that reads or counts, through a `< FILE` redirect, or
+# through a variable last filled that way -- or from a checked read piped into a stage that can drop
+# the sentinel. run_checker, run_grep, lint_grep and died_in are the ways through; a fallback that
+# prints a message answers only assert_eq NAME "". WHAT IT CANNOT SEE is listed so nobody reads
+# green as more than it is: helpers of more than one statement, taint carried from one variable into
+# another, readers missing from its READERS list (podman, git, comm and diff among them), and
+# hand-written emptiness tests. It is a tokenizer for assertion arguments, not a shell, and it
+# prints $CHECKER_DIED for a file it cannot read or a statement it cannot parse.
 #
 # THE SPECIMEN IS WRITTEN WITH A LEADING @, AND ITS ONE `; assert` AS `;%`, because this file is
 # on the list.
@@ -2206,13 +2208,23 @@ sed -e 's/^@//' -e 's/;%/; /' > "$rs_specimen" <<'SPECIMEN'
 @c="$(printf 'a b')"
 @assert_eq "count-of-a-computed-value" "0" "$(printf '%s' "$c" | grep -c y)"
 @assert_eq "count-behind-died-in" "0" "$(died_in "$v"; printf '%s\n' "$v" | grep -c y)"
+@cnt() { cat "$F" | wc -l; }
+@assert_eq "count-helper" "0" "$(cnt)"
+@assert_eq "zero-fallback" "0" "$(awk 'END { print NR }' "$F" || printf 0)"
+@assert_ne "redirect" "x" "$(base64 < "$F")"
+@assert_eq "both-sides" "$(cat "$F")" "$(cat "$G")"
+@assert_eq "one-side" "abc" "$(cat "$F")"
+@assert_ne "refused-side" "$(cat "$F")" "lit"
+@assert_not_contains "fallback-negative" "x" "$(cat "$F" || printf 'failed\n')"
 SPECIMEN
 rs_raw="$(rs_scan "$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh "$rs_specimen")"
 rs_mine="$(printf '%s\n' "$rs_raw" | grep -F -- "$rs_specimen:")"
 for rs_shape in 1:bare:bare 2:filtered:filtered 4:var-filtered:var-filtered 6:var-bare:var-bare \
                 12:bare:pattern-file 15:bare:helper 16:bare:ne-literal 21:var-bare:printf-of-bare \
                 22:filtered:python-filter 23:count:count-of-a-read \
-                24:count:count-of-a-checked-read; do        # LINE:SHAPE:LABEL
+                24:count:count-of-a-checked-read 29:count:count-helper 30:count:zero-fallback \
+                31:bare:redirect 32:both-sides:both-sides 34:refused-side:refused-side \
+                35:bare:fallback-negative; do               # LINE:SHAPE:LABEL
     rs_n="${rs_shape%%:*}"; rs_label="${rs_shape##*:}"
     rs_why="${rs_shape#*:}"; rs_why="${rs_why%%:*}"
     rs_line="$(printf '%s\n' "$rs_mine" | grep -F -- "$rs_specimen:$rs_n: ")"
@@ -2223,7 +2235,7 @@ for rs_shape in 1:bare:bare 2:filtered:filtered 4:var-filtered:var-filtered 6:va
 $rs_mine" ;;
     esac
 done
-assert_eq "readers:the-scan-passes-comments-and-checked-reads" "11" \
+assert_eq "readers:the-scan-passes-comments-and-checked-reads" "17" \
           "$(printf '%s\n' "$rs_mine" | grep -c .)"
 assert_eq "readers:no-absence-check-reads-through-a-bare-reader" "" \
           "$(died_in "$rs_raw"; printf '%s\n' "$rs_raw" | grep -vF -- "$rs_specimen:")"
