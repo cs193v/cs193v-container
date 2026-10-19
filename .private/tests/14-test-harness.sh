@@ -385,7 +385,7 @@ case "$sa_results" in
     *) fail "standalone:makes-its-results-file-in-its-own-TMPDIR" "it said: ${sa_results:-nothing}" ;;
 esac
 assert_contains "standalone:which-existed-while-it-ran"       "RESULTS-EXISTED"        "$out"
-assert_eq       "standalone:and-is-removed-at-exit"           "" "$(ls -A "$SA/tmp")"
+assert_eq       "standalone:and-is-removed-at-exit"           "" "$(run_checker ls -A "$SA/tmp")"
 out="$(standalone clean)"
 assert_contains "standalone:a-clean-run-still-exits-0"        "[rc=0]"                 "$out"
 # A status the suite chose for itself is the more specific one, so it is kept: a require_* refusal
@@ -441,7 +441,7 @@ out="$(CS193V_RESULTS="$WORK/dyn-carries.tsv" CS193V_SUITE=child NO_COLOR=1 \
 assert_contains "dynports:the-ports-come-back-in-a-variable" "DYN_PORTS=[20000 20001]" "$out"
 # The one that was red. Its ports on stdout are what made `DYN2="$(dyn_ports 2)"` the natural
 # thing to write, and $DYN_PORTS dead: set in the subshell, lost with it.
-assert_eq       "dynports:and-not-on-stdout" "" "$(cat "$WORK/dyn-stdout")"
+assert_eq       "dynports:and-not-on-stdout" "" "$(run_checker cat "$WORK/dyn-stdout")"
 assert_contains "dynports:a-carried-port-does-not-stop-the-suite" "REACHED-THE-END" "$out"
 
 cat > "$WORK/dyn-carries-nothing.sh" <<'CHILD'
@@ -634,6 +634,8 @@ CHILD
 dyn_teardown() {                      # dyn_teardown MODE -> the child's output
     rm -f "$WORK/dt-$1".*
     : > "$WORK/dt-$1.procs"; : > "$WORK/dt-$1.started"; printf 'running\n' > "$WORK/dt-$1.state"
+    # The results file too: "it recorded nothing" is then an empty file, never a missing one.
+    : > "$WORK/dt-$1.tsv"
     CS193V_RESULTS="$WORK/dt-$1.tsv" CS193V_SUITE=child NO_COLOR=1 \
         bash "$WORK/dyn-teardown.sh" "$TESTS_DIR/lib/assert.sh" "$WORK/dt-$1.procs" \
              "$WORK/dt-$1.state" "$WORK/dt-$1.started" "$1" 2>&1
@@ -647,7 +649,7 @@ for mode in dyn_serve_stop clean_vt_processes release_container outside-stop; do
     assert_contains "dynports:$mode:and-hands-back-ports-that-are-being-served" \
                     "SECOND=[20000 20001] SERVING=[20000 20001]" "$out"
     assert_contains "dynports:$mode:the-suite-runs-on" "REACHED-THE-END" "$out"
-    assert_eq "dynports:$mode:it-records-nothing" "" "$(cat "$WORK/dt-$mode.tsv" 2>/dev/null)"
+    assert_eq "dynports:$mode:it-records-nothing" "" "$(run_checker cat "$WORK/dt-$mode.tsv")"
 done
 out="$(dyn_teardown pattern)"
 # What the table held before the fixture started anything, read back rather than restated, so
@@ -1086,7 +1088,8 @@ ceil_results() {                      # ceil_results -> "STATUS name" per result
 assert_eq "ceiling:a-run-that-finished-returns-0"        "RETURNED=0" "$(ceil_run 0)"
 assert_eq "ceiling:a-run-that-finished-says-nothing"     "STEP 3/25: RUN apt-get update" "$(ceil_said)"
 assert_eq "ceiling:a-run-that-finished-records-nothing"  "" "$(ceil_results)"
-assert_eq "ceiling:a-run-that-finished-touches-no-container" "" "$(cat "$WORK/ceil.podman")"
+assert_eq "ceiling:a-run-that-finished-touches-no-container" "" \
+          "$(run_checker cat "$WORK/ceil.podman")"
 
 # ─── rc 255: podman's own --timeout, which is the one a real hang produces ─────
 assert_eq "ceiling:podmans-own-ceiling-returns-1" "RETURNED=1" "$(ceil_run 255)"
@@ -1102,7 +1105,8 @@ assert_eq "ceiling:podmans-own-ceiling-is-a-named-result" \
           "FAIL ceil:the-run-stayed-inside-its-ceiling" "$(ceil_results)"
 # NOT REMOVED HERE. sandbox_run is deliberately not --rm so `podman diff` can read the container;
 # conmon has already stopped it, and sandbox_reap collects it.
-assert_eq "ceiling:podmans-own-ceiling-leaves-the-container-for-diff" "" "$(cat "$WORK/ceil.podman")"
+assert_eq "ceiling:podmans-own-ceiling-leaves-the-container-for-diff" "" \
+          "$(run_checker cat "$WORK/ceil.podman")"
 
 # ─── rc 124: the outer backstop, where no container ever existed ───────────────
 # Measured: a podman that hangs BEFORE the container exists -- a stalled pull, a storage lock --
@@ -2897,7 +2901,7 @@ assert_eq "livetrap:80-traps-exit-int-and-term-into-restore" "" "$lt_missing"
 # release_tunnel was, behind a `command -v` guard, so a real run interrupted before the tunnel
 # group left its tunnel up (measured, #425). Followed through every function 80 defines, since
 # release_tunnel itself calls tunnel_pid; the stubs below cannot see this, so it is read here.
-lt_late="$(do_awk '
+lt_late="$(run_checker do_awk '
     function strip(s) { sub(/[[:space:]]#.*$/, "", s); return s }
     /^trap[[:space:]].*restore/ && !t { t = NR }
     /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
@@ -3420,7 +3424,7 @@ assert_not_contains "ebg:a-failed-build-runs-no-suite"   "EBG-RAN"         "$out
 # -k static` becomes the slowest way to run milliseconds of assertions.
 out="$(ebg_run --everything-but-github --serial -k 01-cheap)"
 assert_contains "ebg:a-cheap-only-run-still-runs"        "EBG-RAN 01-cheap" "$out"
-assert_eq       "ebg:a-cheap-only-run-does-not-build"    ""                 "$(cat "$EBG_LOG")"
+assert_eq       "ebg:a-cheap-only-run-does-not-build"    "" "$(run_checker cat "$EBG_LOG")"
 # AND IT STILL SAYS WHAT IT IS, off the same run. It deletes the claude/codex/gh/vercel/git
 # volumes and runs three multi-GB builds. There is no prompt, because "one command and
 # everything goes" is the request -- so this announcement is the only thing standing between
@@ -3820,7 +3824,8 @@ RTS_BOTH_READY='cheap.pid cheap.busy pod.pid pod.busy'
 
 # A CTRL+C TO A SHELL RUNNING THE RUNNER and then something else, which is the whole of a loop.
 rts_run loop group INT "$RTS_BOTH_READY" "$RTS_BOTH"'; echo "THE-CALLER-CARRIED-ON rc=$?" >> "$RTS_LOG"'
-assert_eq       "rtsig:a-ctrl-c-stops-the-shell-that-ran-it-too" "" "$(cat "$RTS/loop/log")"
+assert_eq       "rtsig:a-ctrl-c-stops-the-shell-that-ran-it-too" "" \
+                "$(run_checker cat "$RTS/loop/log")"
 assert_eq       "rtsig:that-shell-dies-of-sigint" "signal SIGINT" "$(rts_said loop 1)"
 # ...because the runner itself does, which is the only thing a calling shell reads.
 rts_run int group INT "$RTS_BOTH_READY" "exec $RTS_BOTH"
