@@ -699,7 +699,10 @@ launcher_fg_stop
 SIG_ACK="$(msg_last_line prompt.acknowledge-warnings)"
 # ONE LINE OF THE PROMPT, never the whole message: it holds a blank line, and grep -F reads each
 # line of a needle as a pattern of its own, so the empty one matches the first byte of output (#509).
-assert_ne "setup-signal:the-prompt-needle-is-a-line" "" "$SIG_ACK"
+# COUNTED AS WHOLE LINES OF THE MESSAGE: one of them is exactly one match. The whole message matches
+# every line of itself, and msg_last_line's answer for a missing key matches none.
+assert_eq "setup-signal:the-prompt-needle-is-a-line" "1" \
+          "$(msg_of prompt.acknowledge-warnings | grep -cxF -- "$SIG_ACK")"
 sig_at_prompt() {                     # sig_at_prompt -> 0 once a fresh launch waits at the prompt
     shim_new
     shim_set exec_out "SHELL-OPENED"

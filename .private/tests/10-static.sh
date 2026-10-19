@@ -3652,8 +3652,10 @@ assert_eq "teardown:the-animator-is-stopped-first" "meter_cleanup" \
 # shell to stop anything -- which is precisely why the old design could not have implemented
 # #41 without this changing, and why it is asserted ahead of everything else here.
 assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shell_body"
-os_trap_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
-assert_contains "launcher:installs-the-teardown-trap" "trap 'shell_teardown" "$os_trap_code"
+# open_shell WITH ITS COMMENTS STRIPPED, which every check on its code below reads -- see
+# "COMMENTS STRIPPED FIRST" under the session-claim check for what the raw body cost.
+open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
+assert_contains "launcher:installs-the-teardown-trap" "trap 'shell_teardown" "$open_shell_code"
 # ONE ARM PER SIGNAL, AND EACH NAMES ITS SIGNAL (#449). EXIT alone is not enough, though not for the
 # reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped HUP,
 # measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
@@ -3677,7 +3679,7 @@ trap 'shell_teardown HUP >&7 2>&8' HUP
 trap 'shell_teardown INT >&7 2>&8' INT
 trap 'shell_teardown QUIT >&7 2>&8' QUIT
 trap 'shell_teardown TERM >&7 2>&8' TERM" \
-          "$(printf '%s\n' "$os_trap_code" | grep -E '^[[:space:]]*trap .*shell_teardown' \
+          "$(printf '%s\n' "$open_shell_code" | grep -E '^[[:space:]]*trap .*shell_teardown' \
              | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
 
 # ─── nothing shared is touched before the session is WON ───────────────────────
@@ -3690,7 +3692,6 @@ trap 'shell_teardown TERM >&7 2>&8' TERM" \
 # COMMENTS STRIPPED FIRST, and that is not tidiness: the prose here mentions ensure_tunnel by
 # name several times, so searching the raw body finds a comment and reports the wrong line. The
 # first version of this check passed with the regression in place for exactly that reason.
-open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
 line_of() { printf '%s\n' "$open_shell_code" | grep -n -- "$1" | head -1 | cut -d: -f1; }
 claim_at="$(line_of 'cs193v-shell --claim')"
 trap_at="$(line_of "trap 'shell_teardown")"

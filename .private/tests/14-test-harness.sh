@@ -1558,8 +1558,8 @@ fj_run() {                            # fj_run CMD... -> FJ_STATUS, FJ_PID
     rm -f "$WORK/fj.pid" "$WORK/fj.status"
     CS193V_FGJOB_PIDFILE="$WORK/fj.pid" CS193V_FGJOB_STATUS="$WORK/fj.status" \
         "$DO_PY" "$PT_LIB/fgjob.py" "$@" >/dev/null 2>&1
-    FJ_STATUS="$(do_tr -d '\n' < "$WORK/fj.status" 2>/dev/null)"
-    FJ_PID="$(do_tr -d ' \n' < "$WORK/fj.pid" 2>/dev/null)"
+    FJ_STATUS="$(do_tr -d '\n' 2>/dev/null < "$WORK/fj.status")"
+    FJ_PID="$(do_tr -d ' \n' 2>/dev/null < "$WORK/fj.pid")"
 }
 trap '' INT                           # the arrangement: the suite now ignores SIGINT
 # A TRAP THE COMMAND ARMS FOR ITSELF, and the self-signal is what lets this run without a pty.
@@ -1579,7 +1579,48 @@ fj_run /bin/sh -c 'echo "$$" > "$1"' sh "$WORK/fj.self"
 # NON-EMPTY FIRST: a pid never published and a command that never wrote one are equal, and empty.
 assert_ne "fgjob:a-pid-was-published" "" "$FJ_PID"
 assert_eq "fgjob:the-published-pid-is-the-commands-own" \
-          "$(do_tr -d ' \n' < "$WORK/fj.self" 2>/dev/null)" "$FJ_PID"
+          "$(do_tr -d ' \n' 2>/dev/null < "$WORK/fj.self")" "$FJ_PID"
+
+# ─── the shim's signal-test helpers refuse what would measure nothing (#449) ───
+# Three things 30-launcher-shim.sh's signal groups lean on, each of which goes wrong in silence:
+#   * launcher_pty_silent_wait takes ONE line and not a blank one, because grep -F reads each line
+#     of a needle as a pattern of its own (#509): two lines return the wait on either.
+#   * shim_ssh_unwedge kills only what is still a wedged call. Its pid file outlives the calls,
+#     and a pid the wedge left behind can be a concurrent lane's by the time it runs.
+#   * launcher_fg_status says nothing before an ending, not the shell's "No such file".
+shim_new
+printf 'the second line of a phrase\n' > "$SHIM/silent.out"
+PTY_OUT="$SHIM/silent.out"
+# shellcheck disable=SC2034   # read by launcher_pty_silent_wait, in the sourced lib
+PTY_PID=$$
+launcher_pty_silent_wait 1 "$(printf 'a first line\nthe second line of a phrase')" 2>/dev/null
+assert_eq "silent-wait:refuses-a-phrase-of-two-lines" "2" "$?"
+launcher_pty_silent_wait 1 "   " 2>/dev/null
+assert_eq "silent-wait:refuses-a-blank-phrase" "2" "$?"
+launcher_pty_silent_wait 1 "the second line of a phrase" 2>/dev/null
+assert_eq "silent-wait:finds-a-phrase-of-one-line" "0" "$?"
+# ORPHANED ON PURPOSE, so that init reaps them: a child of this shell lingers as a zombie once
+# killed, and kill -0 still finds a zombie. The wedge is what a wedged call becomes, `sleep 30`;
+# the decoy is anything else holding a pid the file names.
+uw_spawn() { ( "$@" >/dev/null 2>&1 & printf '%s\n' "$!" ); }
+uw_gone() { ! kill -0 "$1" 2>/dev/null; }
+uw_wedge="$(uw_spawn sleep 30)"; uw_decoy="$(uw_spawn sleep 31)"
+printf '%s\n%s\n' "$uw_wedge" "$uw_decoy" > "$SHIM/ssh_wedge.pids"
+shim_ssh_unwedge
+if wait_until 10 uw_gone "$uw_wedge"; then pass "unwedge:ends-a-wedged-call"
+else fail "unwedge:ends-a-wedged-call" "the wedged sleep $uw_wedge is still alive"; fi
+# PROVING AN ABSENCE, so a fixed wait: a decoy that is left alone gives no sign of it, and a kill
+# sent to it lands well inside this.
+sleep 0.5
+if uw_gone "$uw_decoy"; then fail "unwedge:leaves-any-other-pid-alone" "it killed $uw_decoy, a sleep 31"
+else pass "unwedge:leaves-any-other-pid-alone"; fi
+kill "$uw_wedge" "$uw_decoy" 2>/dev/null
+# shellcheck disable=SC2034   # read by launcher_fg_status, in the sourced lib
+FG_STATUS="$SHIM/no-status-yet"
+assert_eq "fg-status:says-nothing-before-an-ending" "" "$(launcher_fg_status 2>&1)"
+shim_cleanup
+# shim_new redirected TMPDIR into the shim shim_cleanup has just deleted; see the cleanup section.
+export TMPDIR="$WORK"
 
 
 # ─── lib/ptydrive.py drives a pty from a described conversation (#206) ────────
