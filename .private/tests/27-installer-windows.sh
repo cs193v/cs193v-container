@@ -46,12 +46,13 @@ wine_require || { skip "windows:wine" "$WINE_SKIP_WHY"; exit 0; }
 MSGFILE="$FIXTURE_DIR/wsl-messages.$WINE_MSG_VERSION"
 assert_file "windows:message-table-exists" "$MSGFILE"
 assert_eq "windows:every-message-has-a-provenance-tier" "" \
-    "$(awk -F'\t' '!/^#/ && NF && NF!=3 {print "malformed: " $0}' "$MSGFILE")"
+    "$(run_checker awk -F'\t' '!/^#/ && NF && NF!=3 {print "malformed: " $0}' "$MSGFILE")"
 assert_eq "windows:no-unknown-provenance-tier" "" \
-    "$(awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABCDE]$/ {print $1 " has tier " $2}' "$MSGFILE")"
+    "$(run_checker awk -F'\t' '!/^#/ && NF==3 && $2 !~ /^[ABCDE]$/ {print $1 " has tier " $2}' \
+                   "$MSGFILE")"
 # The fakes must hold no prose of their own -- that is what makes the table auditable.
 assert_eq "windows:fakes-hold-no-prose" "" \
-    "$(grep -nE '(printf|fputs)\s*\(\s*"[A-Z][a-z]+ [a-z]' "$FIXTURE_DIR"/win-fakes/fake-*.c || true)"
+    "$(run_grep -nE '(printf|fputs)\s*\(\s*"[A-Z][a-z]+ [a-z]' "$FIXTURE_DIR"/win-fakes/fake-*.c)"
 
 # ─── AND EVERY MESSAGE IN IT MUST BE REACHABLE ────────────────────────────────
 #
