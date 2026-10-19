@@ -464,10 +464,11 @@ assert_ok "shortlink:help-answers" \
 # rather than a simplification: a server on a port the tunnel did not carry looks exactly like a
 # broken link. So the port is the kernel's choice, but printing it is the state file's decision.
 # Read through --state, so the file it confirms is also one the strict reader accepts.
-# THE COUNT HAS A LABEL AND A LINE OF ITS OWN (#535): $out also holds the URL and, through R, any
-# error --state prints, and either can carry a 1 -- the port, or the name cs193v.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "$l"; p=${l##*:}; echo "confirmed=$(cs193v-portwatch --state | grep -c "^up	${p%%/*}	")"')"
-assert_match "shortlink:prints-a-short-url" "http://localhost:[0-9]+/token" "$out"
+# THE URL AND THE COUNT EACH HAVE A LABEL AND A LINE OF THEIR OWN (#535): through R, $out also
+# holds whatever shortlink and --state print to stderr. Unlabelled, a 1 in the port or in the name
+# cs193v passed the count, and a URL printed to the wrong stream passed the URL.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "url=$l"; p=${l##*:}; echo "confirmed=$(cs193v-portwatch --state | grep -c "^up	${p%%/*}	")"')"
+assert_match "shortlink:prints-a-short-url" "^url=http://localhost:[0-9]+/token$" "$out"
 assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out"
 
 # AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
@@ -662,12 +663,14 @@ assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
 # file says the tunnel is healthy but says nothing about any port, so await_verdict polls for its
 # full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_TUNNEL:
 # with the port confirmed a tick after it is bound there is barely a wait to interrupt.
+# THE LISTENERS ARE COUNTED ONLY ONCE ss HAS SUCCEEDED (#558): a failing ss fed `grep -c` nothing,
+# and the 0 it printed is the passing answer.
 out="$(R "$FAKE_HEALTHY"'
           ( sleep 1; touch /tmp/c2 ) &
           t0=$(date +%s)
           o=$(/usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c2 token); rc=$?
           echo "rc=$rc took=$(( $(date +%s) - t0 ))s out=[$o]"
-          echo "listeners=$(ss -Hltn 2>/dev/null | grep -c 127.0.0.1)"')"
+          n=$(ss -Hltn) && echo "listeners=$(printf "%s\n" "$n" | grep -c 127.0.0.1)"')"
 record "shortlink:cancel-during" "$(printf '%s' "$out" | do_tr '\n' '|')"
 assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
 # NOTHING ON STDOUT is the difference between a cancel and a degradation, and it is what lets
