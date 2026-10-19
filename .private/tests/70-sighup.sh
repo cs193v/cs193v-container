@@ -217,7 +217,7 @@ else
          "the container is still $(st) 45s after the window closed. Either the launcher never
 received SIGHUP, or its trap did not run -- and on this platform that is the whole of #41 not
 working. First thing to check: open_shell's own HUP arm,
-\`trap 'shell_teardown HUP >&7 2>&8' HUP\`. (Not because bash skips the EXIT trap on SIGHUP: this
+\`trap 'shell_teardown 129 >&7 2>&8' HUP\`. (Not because bash skips the EXIT trap on SIGHUP: this
 used to say so, and 3.2 and 5.3 both run it, #449.)
 If the force-quit group below is ALSO red, suspect the teardown itself (#170) rather than the trap;
 if only this one is, the polite close is not reaching the launcher at all."

@@ -705,7 +705,7 @@ sig_at_prompt() {                     # sig_at_prompt -> 0 once a fresh launch w
     shim_new
     shim_set exec_out "SHELL-OPENED"
     launcher_fg_start
-    wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"
+    launcher_fg_wait 30 "$SIG_ACK"
 }
 # The verdict for one case: how it ended before anybody pressed ENTER, then what it ran.
 sig_verdict() {                       # sig_verdict NAME WANT_STATUS
@@ -716,6 +716,17 @@ sig_verdict() {                       # sig_verdict NAME WANT_STATUS
     assert_eq "setup-signal:$1-ends-the-launcher" "$2" "${st:-still running}"
     assert_eq "setup-signal:$1-stops-the-container-once" "1" "$(shim_count '^stop ')"
     assert_eq "setup-signal:$1-never-opens-the-shell" "0" "$(shim_count '^exec -it')"
+}
+# The two keys these groups type, and what the line discipline echoes as it signals the group --
+# the witness that a key was DELIVERED, not merely written.
+key_for() {                           # key_for ctrl-c|ctrl-backslash -> RKEY (to type), RECHO
+    case "$1" in
+        ctrl-c)         RKEY='\003'; RECHO='^C' ;;
+        ctrl-backslash) RKEY='\034'; RECHO='^\' ;;
+    esac
+}
+key_echoed() {                        # key_echoed ECHO N -> 0 once the terminal has echoed it N times
+    [ "$(grep -o -F -- "$1" "$FG_OUT" 2>/dev/null | wc -l | do_tr -d ' ')" -ge "$2" ]
 }
 
 # ^C AT THE PROMPT, and the CANARY the teardown cases below are gated on: a stop issued in
@@ -736,34 +747,27 @@ $(strip_ansi < "$FG_OUT")"
 fi
 launcher_fg_stop
 
-# TERM and a closed window, each with the status a caller reads it by: 128+15 and 128+1.
-if sig_at_prompt && SIG_PID="$(launcher_fg_pid)"; then
-    shim_clear_log
-    kill -TERM "$SIG_PID"
-    sig_verdict term-at-the-prompt "exit 143"
-else
-    fail "setup-signal:term-at-the-prompt-ends-the-launcher" "never reached the prompt"
-fi
-launcher_fg_stop
-if sig_at_prompt; then
-    shim_clear_log
-    launcher_fg_close
-    sig_verdict a-closed-window-at-the-prompt "exit 129"
-else
-    fail "setup-signal:a-closed-window-at-the-prompt-ends-the-launcher" "never reached the prompt"
-fi
-launcher_fg_stop
-# CTRL-\, which the terminal sends the foreground group as it sends ^C, and which had no arm: bash
-# dies of an untrapped SIGQUIT WITHOUT running the EXIT trap, unlike HUP, so the launcher went
-# with the container still up and nobody in it -- the #41 failure (#564). 128+3.
-if sig_at_prompt; then
-    shim_clear_log
-    launcher_fg_keys '\034'
-    sig_verdict ctrl-backslash-at-the-prompt "exit 131"
-else
-    fail "setup-signal:ctrl-backslash-at-the-prompt-ends-the-launcher" "never reached the prompt"
-fi
-launcher_fg_stop
+# TERM, A CLOSED WINDOW AND CTRL-\, each with the status a caller reads it by: 128+15, 128+1, 128+3.
+# The terminal sends ^\ to the foreground group as it sends ^C, and it had no arm: bash dies of an
+# untrapped SIGQUIT WITHOUT running the EXIT trap, unlike HUP, so the launcher went with the
+# container still up and nobody in it -- the #41 failure (#564).
+for sig_case in "term-at-the-prompt:exit 143" "a-closed-window-at-the-prompt:exit 129" \
+                "ctrl-backslash-at-the-prompt:exit 131"; do
+    sig_name="${sig_case%%:*}"
+    if sig_at_prompt && SIG_PID="$(launcher_fg_pid)"; then
+        shim_clear_log
+        case "$sig_name" in
+            term-*)            kill -TERM "$SIG_PID" ;;
+            a-closed-window-*) launcher_fg_close ;;
+            ctrl-backslash-*)  launcher_fg_keys '\034' ;;
+        esac
+        sig_verdict "$sig_name" "${sig_case#*:}"
+    else
+        fail "setup-signal:$sig_name-ends-the-launcher" "never reached the prompt:
+$(strip_ansi < "$FG_OUT")"
+    fi
+    launcher_fg_stop
+done
 
 # ^C INSIDE THE TUNNEL'S SETUP, the other half of what runs between the trap and the attach. The
 # old trap stopped the container here and setup carried on regardless: it started the port
@@ -795,7 +799,7 @@ if wait_until 30 grep -q WEDGED "$SHIM/ssh_wedge.log"; then
     # so the wedged `-O check` outlived the launcher by its whole 30s, and a hung podman would have
     # outlived it for good.
     wedge_pid="$(head -1 "$SHIM/ssh_wedge.pids" 2>/dev/null)"
-    if [ -n "$wedge_pid" ] && wait_until 10 pid_gone "$wedge_pid"; then
+    if [ -n "$wedge_pid" ] && wait_until 10 pid_is_gone "$wedge_pid"; then
         pass "setup-signal:ctrl-c-in-the-tunnel-setup-leaves-no-call-running"
     else
         fail "setup-signal:ctrl-c-in-the-tunnel-setup-leaves-no-call-running" \
@@ -855,10 +859,10 @@ cat > "$SHIM/piped" <<'EOF'
 EOF
 chmod +x "$SHIM/piped"
 fg_start "$SHIM/piped" "${LAUNCHER_DIR:-$REPO}/cs193v" "$SHIM/reader.pid"
-if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT" && wait_until 10 test -s "$SHIM/reader.pid"; then
+if launcher_fg_wait 30 "$SIG_ACK" && wait_until 10 test -s "$SHIM/reader.pid"; then
     reader="$(cat "$SHIM/reader.pid")"
     kill "$reader"
-    if wait_until 10 pid_gone "$reader"; then
+    if wait_until 10 pid_is_gone "$reader"; then
         shim_clear_log
         launcher_fg_keys '\003'
         launcher_fg_ended 15 || true
@@ -895,23 +899,15 @@ for sig_how in ctrl-c ctrl-backslash hup; do
              "not measured: the ^C canary above says SIGINT never reached the launcher"
         continue
     fi
-    shim_new
-    shim_set exec_out "SHELL-OPENED"
-    shim_touch hold_after_attach
-    launcher_fg_start
-    if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT" && SIG_PID="$(launcher_fg_pid)"; then
+    if sig_at_prompt && SIG_PID="$(launcher_fg_pid)"; then
+        shim_touch hold_after_attach
         launcher_fg_keys '\n'
         if wait_until 30 test -e "$SHIM/hold_reached"; then
             sig_sent=1
             case "$sig_how" in
-                # DELIVERED, NOT MERELY WRITTEN: the byte reaches the pty through ptyrun, so wait
-                # for the line discipline's own echo of it, which it prints as it signals the group.
-                ctrl-c) launcher_fg_keys '\003'
-                        wait_until 10 grep -qF '^C' "$FG_OUT" || sig_sent='' ;;
-                ctrl-backslash)
-                        launcher_fg_keys '\034'
-                        wait_until 10 grep -qF '^\' "$FG_OUT" || sig_sent='' ;;
-                hup)    kill -HUP "$SIG_PID" ;;
+                hup) kill -HUP "$SIG_PID" ;;
+                *)   key_for "$sig_how"; launcher_fg_keys "$RKEY"
+                     wait_until 10 key_echoed "$RECHO" 1 || sig_sent='' ;;
             esac
             [ -n "$sig_sent" ] || fail "teardown-signal:$sig_how-was-delivered" \
                                        "the terminal never echoed the key"
@@ -953,11 +949,8 @@ done
 #
 # stop_hold holds the stop itself, and stop_done is written only once it has FINISHED: a count of
 # `stop` calls would pass here, because the stop is always asked for.
-shim_new
-shim_set exec_out "SHELL-OPENED"
-shim_touch stop_hold
-launcher_fg_start
-if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"; then
+if sig_at_prompt; then
+    shim_touch stop_hold
     launcher_fg_keys '\n'
     if wait_until 30 test -e "$SHIM/stop_reached"; then
         launcher_fg_close
@@ -995,26 +988,17 @@ launcher_fg_stop
 # positively, or the cases after it prove nothing. --stop's launcher is started with INT and QUIT
 # ignored, so that it is the stop the key ends and not the launcher: a ^\ would kill a launcher with
 # no arm for it, a death macOS files as a crash report on every run.
-key_echoed() {                        # key_echoed ECHO N -> 0 once the terminal has echoed it N times
-    [ "$(grep -o -F -- "$1" "$FG_OUT" 2>/dev/null | wc -l | do_tr -d ' ')" -ge "$2" ]
-}
-stop_pid_gone() { pid_gone "$(cat "$SHIM/stop_pid" 2>/dev/null)"; }
+stop_pid_gone() { pid_is_gone "$(cat "$SHIM/stop_pid" 2>/dev/null)"; }
 stop_pid_alive() { ! stop_pid_gone; }
-rearm_key() {                         # rearm_key NAME -> RKEY (to type) and RECHO (what it echoes)
-    case "$1" in
-        ctrl-c)         RKEY='\003'; RECHO='^C' ;;
-        ctrl-backslash) RKEY='\034'; RECHO='^\' ;;
-    esac
-}
 REARM_OK=''
 for rk in ctrl-c ctrl-backslash; do
-    rearm_key "$rk"
+    key_for "$rk"
     shim_new
     shim_set state running
     shim_touch stop_hold
     shim_touch stop_rearm
     fg_start bash -c 'trap "" INT QUIT; exec "$1" --stop' rearm-canary "${LAUNCHER_DIR:-$REPO}/cs193v"
-    if wait_until 30 grep -qF -- "$(msg_of opt.stop-go)" "$FG_OUT"; then
+    if launcher_fg_wait 30 "$(msg_of opt.stop-go)"; then
         launcher_fg_keys '\033[B\n'
         if wait_until 30 test -e "$SHIM/stop_reached"; then
             launcher_fg_keys "$RKEY"
@@ -1049,17 +1033,14 @@ rearm_measured() { case " $REARM_OK " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # The student typed `exit`, and presses ^C or ^\ while "Exiting..." is on screen.
 for rk in ctrl-c ctrl-backslash; do
-    rearm_key "$rk"
+    key_for "$rk"
     if ! rearm_measured "$rk"; then
         fail "teardown-signal:a-$rk-mid-stop-lets-it-finish" "not measured: see the rearm: canary"
         continue
     fi
-    shim_new
-    shim_set exec_out "SHELL-OPENED"
-    shim_touch stop_hold
-    shim_touch stop_rearm
-    launcher_fg_start
-    if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"; then
+    if sig_at_prompt; then
+        shim_touch stop_hold
+        shim_touch stop_rearm
         launcher_fg_keys '\n'
         if wait_until 30 test -e "$SHIM/stop_reached"; then
             launcher_fg_keys "$RKEY"
@@ -1090,11 +1071,11 @@ done
 
 # AND THE SAME IN --rebuild's HANDLER, which had no ignore at all: a second key during its stop
 # re-entered it on bash 5.3, which issued a second stop, and on bash 3.2 was queued behind it and
-# lost to die_of_sigint's `trap - INT`, which left the container up. (On macOS the remote client
+# lost to exit_for_signal's `trap - INT`, which left the container up. (On macOS the remote client
 # keeps INT ignored, measured; Go arms QUIT whatever it inherits, so a ^\ is expected to reach it,
 # unmeasured.) The first ^C starts the handler; the second key lands in its stop.
 for rk in ctrl-c ctrl-backslash; do
-    rearm_key "$rk"
+    key_for "$rk"
     if ! rearm_measured "$rk"; then
         fail "interrupt:a-second-$rk-mid-stop-lets-it-finish" "not measured: see the rearm: canary"
         continue
@@ -1707,7 +1688,7 @@ assert_contains "ack:enter-then-opens-the-shell" "cs193v-shell" "$(shim_log)"
 # ONE LINE OF IT (#509). The message holds a blank line, which grep -F reads as a pattern of its
 # own that matches line 1 of anything, so this was always 1 and the order was never measured:
 # with the shell opened BEFORE the prompt it still passed, p_ack=1 against a prompt on line 24.
-p_ack="$(printf '%s\n' "$out" | grep -nF "$(msg_last_line prompt.acknowledge-warnings)" \
+p_ack="$(printf '%s\n' "$out" | grep -nF "$SIG_ACK" \
          | head -1 | cut -d: -f1)"
 p_shell="$(printf '%s\n' "$out" | grep -n 'SHELL-OPENED' | head -1 | cut -d: -f1)"
 if [ -n "$p_ack" ] && [ -n "$p_shell" ] && [ "$p_ack" -lt "$p_shell" ]; then
@@ -1733,7 +1714,7 @@ launcher_pty_silent_start
 # matched the transcript's first byte, so the wait returned on "Entering..." and the count below
 # ran before the launcher could have got anywhere: both passed with the prompt's `read` deleted.
 # A matching line now proves the prompt was printed, and the fixed wait is what proves it is held.
-if launcher_pty_silent_wait 30 "$(msg_last_line prompt.acknowledge-warnings)"; then
+if launcher_pty_silent_wait 30 "$SIG_ACK"; then
     pass "ack:prompt-reached-on-a-silent-terminal"
     # PROVING AN ABSENCE, so a fixed wait: a launcher that does not hold runs its exec at once.
     sleep 2

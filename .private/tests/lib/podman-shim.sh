@@ -200,28 +200,30 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
     PTY_PID=$!
 }
 
-# Wait up to SECS for PHRASE to appear in the transcript. Returns 1 if the launcher exits
-# first, so a launcher that does not wait fails in a second rather than after the timeout.
-# -F, BECAUSE THE ARGUMENT IS A PHRASE. It is called with prose read out of messages.txt now, and
-# a needle with a bracket or a full stop in it is a pattern nobody audited -- which here does not
-# redden a line, it times the wait out and reports "the launcher never asked".
-#
-# ONE LINE, AND NOT A BLANK ONE, OR IT IS REFUSED (#509). grep -F reads each line of a needle as a
+# A NEEDLE grep -F CAN BE TRUSTED WITH: ONE LINE, AND NOT A BLANK ONE, OR IT IS REFUSED (#509). grep -F reads each line of a needle as a
 # pattern of its own: a blank one matches the first byte of output -- this returned at once, on
 # "Entering the CS193V development environment...", and the two ack: assertions behind it could not
 # fail -- and any other line returns the wait as soon as that one line is printed, not the whole
 # phrase. Take one line with msg_last_line.
+needle_ok() {                         # needle_ok CALLER PHRASE -> 0, or 2 and why on stderr
+    case "$2" in
+        *$'\n'*) printf '%s: a phrase of more than one line matches any one of them: %s\n' "$1" "$2" >&2
+                 return 2 ;;
+    esac
+    [ -n "${2//[[:space:]]/}" ] && return 0
+    printf '%s: a blank phrase matches anything\n' "$1" >&2
+    return 2
+}
+
+# Wait up to SECS for PHRASE to appear in the transcript. Returns 1 if the launcher exits
+# first, so a launcher that does not wait fails in a second rather than after the timeout.
+# -F, BECAUSE THE ARGUMENT IS A PHRASE. It is called with prose read out of messages.txt now, and
+# a needle with a bracket or a full stop in it is a pattern nobody audited -- which here does not
+# redden a line, it times the wait out and reports "the launcher never asked". The needle goes
+# through needle_ok first.
 launcher_pty_silent_wait() {          # launcher_pty_silent_wait SECS PHRASE
     local i=0 n
-    if [ $(( $(printf '%s\n' "$2" | wc -l) )) -gt 1 ]; then
-        printf 'launcher_pty_silent_wait: a phrase of more than one line matches any one of them: %s\n' \
-               "$2" >&2
-        return 2
-    fi
-    if [ -z "$(printf '%s' "$2" | do_tr -d '[:space:]')" ]; then
-        printf 'launcher_pty_silent_wait: a blank phrase matches anything\n' >&2
-        return 2
-    fi
+    needle_ok launcher_pty_silent_wait "$2" || return 2
     n=$(( $1 * 2 ))
     while [ "$i" -lt "$n" ]; do
         grep -qF "$2" "$PTY_OUT" 2>/dev/null && return 0
@@ -277,11 +279,19 @@ fg_start() {                          # fg_start ARGV...
 
 launcher_fg_keys() { printf '%b' "$1" >&8; }   # launcher_fg_keys KEYS  (printf %b: \003, \n)
 
+# Wait up to SECS for PHRASE in the job's transcript, refusing a needle grep -F would read as several
+# patterns -- launcher_pty_silent_wait's rule (#509), for this helper's transcript.
+launcher_fg_wait() {                  # launcher_fg_wait SECS PHRASE
+    needle_ok launcher_fg_wait "$2" || return 2
+    wait_until "$1" grep -qF -- "$2" "$FG_OUT"
+}
+
 # The launcher's own pid, once fgjob has published it. Empty, rc 1, if it never did -- which the
 # caller must treat as a failure rather than guess at the process tree (#151).
 launcher_fg_pid() {
-    wait_until 10 test -s "$FG_PIDFILE" || return 1
-    do_tr -d ' \n' < "$FG_PIDFILE"
+    # shellcheck disable=SC2034   # read by pty_inner_pid, in lib/portable.sh
+    local PTY_PIDFILE="$FG_PIDFILE"
+    pty_inner_pid
 }
 
 # `exit N` or `signal N` once the launcher has ended, nothing before. Waits up to SECS.
@@ -309,8 +319,7 @@ launcher_fg_stop() {
     # with the launcher beneath it, and a launcher mid-teardown ignores the HUP that closing the pty
     # sends. ptyrun makes the job a process group of its own, and never this suite's, which is checked.
     if [ -n "$p" ] && [ ! -s "$FG_STATUS" ]; then
-        g="$(ps -o pgid= -p "$p" 2>/dev/null | do_tr -d ' ')"
-        mine="$(ps -o pgid= -p $$ 2>/dev/null | do_tr -d ' ')"
+        g="$(pid_pgid "$p")"; mine="$(pid_pgid $$)"
         [ -n "$g" ] && [ "$g" != "$mine" ] && kill -9 -- "-$g" 2>/dev/null
         kill -9 "$p" 2>/dev/null
     fi
@@ -910,7 +919,7 @@ shim_fake_ssh() {
     # entirely -- but because a second shim_fake_ssh inside ONE shim would otherwise leave the
     # first arrangement's forwards in place.
     : > "$SHIM/ssh.log"
-    rm -f "$SHIM/ssh_wedge" "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log" "$SHIM/ssh_wedge.pids"
+    rm -f "$SHIM/ssh_wedge"; shim_ssh_wedge_reset
     # TWO WRITES, AND THE FIRST ONE IS INTERPOLATED. The body must NOT be expanded -- it is
     # made of $*, $@ and $$ -- but the log path must be, so it is written ahead of the quoted
     # heredoc. shim_fake_pkgutil interpolates its state for the same reason.
@@ -975,8 +984,10 @@ shim_ssh_master() {                   # shim_ssh_master CTL
 # after this. Every counted call, wedged or answered, is logged in order: `N ok|WEDGED ARGV`.
 shim_ssh_wedge() {                    # shim_ssh_wedge FROM TO
     printf '%s %s\n' "$1" "$2" > "$SHIM/ssh_wedge"
-    rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log" "$SHIM/ssh_wedge.pids"
+    shim_ssh_wedge_reset
 }
+# The count, the log and the published pids of a wedge, which every new arrangement starts without.
+shim_ssh_wedge_reset() { rm -f "$SHIM/ssh_wedge.n" "$SHIM/ssh_wedge.log" "$SHIM/ssh_wedge.pids"; }
 shim_ssh_calls() { cat "$SHIM/ssh_wedge.log" 2>/dev/null; }
 # End every wedged call still asleep. A wedge that outlives the launcher which made it is an
 # orphan holding the pty for its full 30s -- which a launcher that EXITS mid-call, rather than

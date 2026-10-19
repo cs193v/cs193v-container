@@ -3619,6 +3619,17 @@ assert_contains "launcher:lands-on-cs193v-shell" '"$NAME" cs193v-shell' "$(cat "
 fn_body() {                           # fn_body NAME FILE -> that function's source
     sed -n "/^$1() {/,/^}/p" "$2"
 }
+# The same with its comment lines blanked, which is what nearly every check on CODE reads: prose
+# beside a line routinely quotes the line, so a match on the raw body can be answered by a comment.
+fn_code() { fn_body "$1" "$2" | sed 's/^[[:space:]]*#.*//'; }   # fn_code NAME FILE
+# A comes before B in CODE, each found as fixed text and by its first line. Absent either, it fails.
+assert_before() {                     # assert_before NAME CODE A B
+    local a b
+    a="$(printf '%s\n' "$2" | grep -nF -- "$3" | head -1 | cut -d: -f1)"
+    b="$(printf '%s\n' "$2" | grep -nF -- "$4" | head -1 | cut -d: -f1)"
+    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then pass "$1"
+    else fail "$1" "want '$3' before '$4'; got lines ${a:-none} and ${b:-none}"; fi
+}
 launcher_src="$(cat "$REPO/cs193v")"
 shell_src="$(cat "$PRIVATE/files/cs193v-shell")"
 open_shell_body="$(fn_body open_shell "$REPO/cs193v")"
@@ -3655,11 +3666,11 @@ assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shel
 # open_shell WITH ITS COMMENTS STRIPPED, which every check on its code below reads -- see
 # "COMMENTS STRIPPED FIRST" under the session-claim check for what the raw body cost.
 open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
-# ONE ARM PER SIGNAL, AND EACH NAMES ITS SIGNAL (#449). EXIT alone is not enough, though not for the
-# reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped HUP,
-# measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
-# and that an arm which does not name its signal cannot end the process with that signal's status:
-# it returns, and the script resumes wherever the signal found it.
+# ONE ARM PER SIGNAL, AND EACH PASSES ITS SIGNAL'S STATUS (#449). EXIT alone is not enough, though not
+# for the reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped
+# HUP, measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
+# and that an arm which passes no status cannot end the process with that signal's: it returns,
+# and the script resumes wherever the signal found it.
 #
 # AGAINST THE CODE WITH ITS COMMENTS STRIPPED, which the pin this replaces was not: the prose above
 # the trap discusses every one of these signals, so a match on the raw body could be satisfied by a
@@ -3669,15 +3680,15 @@ open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//'
 # whatever it interrupted, so without `>&7 2>&8` a ^C inside a redirected call sent the teardown's
 # own output to /dev/null.
 #
-# EXACTLY THESE FIVE, COMPARED WHOLE, QUIT among them (#564). A check for each line's presence would still find them all
-# under a later `trap shell_teardown EXIT INT`, which silently replaces the INT arm with one that
-# returns.
+# EXACTLY THESE FIVE, COMPARED WHOLE, QUIT among them (#564). A check for each line's presence would
+# still find them all under a later `trap shell_teardown EXIT INT`, which silently replaces the INT
+# arm with one that returns.
 assert_eq "launcher:teardown-traps-are-exactly-the-five-arms" \
-"trap 'shell_teardown >&7 2>&8' EXIT
-trap 'shell_teardown HUP >&7 2>&8' HUP
-trap 'shell_teardown INT >&7 2>&8' INT
-trap 'shell_teardown QUIT >&7 2>&8' QUIT
-trap 'shell_teardown TERM >&7 2>&8' TERM" \
+"trap 'shell_teardown 129 >&7 2>&8' HUP
+trap 'shell_teardown 130 >&7 2>&8' INT
+trap 'shell_teardown 131 >&7 2>&8' QUIT
+trap 'shell_teardown 143 >&7 2>&8' TERM
+trap 'shell_teardown >&7 2>&8' EXIT" \
           "$(printf '%s\n' "$open_shell_code" | grep -E '^[[:space:]]*trap .*shell_teardown' \
              | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
 
@@ -3715,14 +3726,9 @@ assert_not_contains "launcher:dispatch-does-not-raise-the-tunnel" \
 # TAKEN BEFORE THE FIRST ARM, in both places arms are installed: a redirection that fails does not
 # run the command it is attached to, so an arm that could fire before fd 7 exists could skip its
 # teardown altogether -- the one outcome worse than the message going missing.
-keep_at="$(line_of 'keep_terminal_fds')"
-if [ -n "$keep_at" ] && [ -n "$trap_at" ] && [ "$keep_at" -lt "$trap_at" ]; then
-    pass "launcher:the-terminal-copies-come-before-the-arms"
-else
-    fail "launcher:the-terminal-copies-come-before-the-arms" \
-         "open_shell must call keep_terminal_fds before its first arm: keep=$keep_at trap=$trap_at"
-fi
-rb_code="$(fn_body verb_rebuild "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+assert_before "launcher:the-terminal-copies-come-before-the-arms" "$open_shell_code" \
+              keep_terminal_fds "trap 'shell_teardown"
+rb_code="$(fn_code verb_rebuild "$REPO/cs193v")"
 assert_eq "rebuild:the-interrupt-arms-write-to-the-terminal-copies" \
 "trap 'rebuild_interrupted 129 >&7 2>&8' HUP
 trap 'rebuild_interrupted 130 >&7 2>&8' INT
@@ -3730,22 +3736,18 @@ trap 'rebuild_interrupted 131 >&7 2>&8' QUIT
 trap 'rebuild_interrupted 143 >&7 2>&8' TERM" \
           "$(printf '%s\n' "$rb_code" | grep -E "^[[:space:]]*trap 'rebuild_interrupted" \
              | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
-rb_keep="$(printf '%s\n' "$rb_code" | grep -n 'keep_terminal_fds' | head -1 | cut -d: -f1)"
-rb_trap="$(printf '%s\n' "$rb_code" | grep -n "trap 'rebuild_interrupted" | head -1 | cut -d: -f1)"
-if [ -n "$rb_keep" ] && [ -n "$rb_trap" ] && [ "$rb_keep" -lt "$rb_trap" ]; then
-    pass "rebuild:the-terminal-copies-come-before-the-arms"
-else
-    fail "rebuild:the-terminal-copies-come-before-the-arms" \
-         "verb_rebuild must call keep_terminal_fds before its first arm: keep=$rb_keep trap=$rb_trap"
-fi
+assert_before "rebuild:the-terminal-copies-come-before-the-arms" "$rb_code" \
+              keep_terminal_fds "trap 'rebuild_interrupted"
 # AND NOTHING THAT OUTLIVES THE LAUNCHER TAKES THEM ALONG. Every run_timeout spawn, which is how the
 # tunnel's `ssh -f` master starts, the supervisor's, and the attach's. COUNTED FIRST, because a grep that stopped
 # finding the spawns would find none missing the close.
-rt_code="$(fn_body run_timeout "$PRIVATE/files/cs193v-ui.sh" | sed 's/^[[:space:]]*#.*//')"
+rt_code="$(fn_code run_timeout "$PRIVATE/files/cs193v-ui.sh")"
 assert_eq "run-timeout:has-the-four-spawns-counted-here" "4" \
           "$(printf '%s\n' "$rt_code" | grep -cF '"$@" >"$tmp"')"
+# The poll branch's two close them on the command; the fifo branch's two inside a wrapper whose own
+# 7>&- 8>&- covers them, which the bracket check below holds in its exact shape.
 assert_eq "run-timeout:no-spawn-takes-the-terminal-copies" "" \
-          "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '7>&- 8>&-')"
+          "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -F ') & pid=$!' | grep -vF '7>&- 8>&-')"
 # AND A TEARDOWN'S CALLS START OUTSIDE THE TERMINAL'S PROCESS GROUP (#566). The terminal sends ^C
 # and ^\ to that whole group, and Linux podman re-arms INT, TERM and QUIT for itself, so the
 # teardown's ignore never covered its own `podman stop`. RT_DETACH brackets each branch's spawn
@@ -3772,7 +3774,7 @@ assert_eq "run-timeout:the-detach-bracket-holds-only-the-spawn" "" \
                 !inside { next }
                 /^if \[ -n "\$RT_BARE" \]; then$/ || /^else$/ || /^fi 2>\/dev\/null$/ { next }
                 /^(if \[ -n "\$RT_BARE" \]; then|else) +\( "\$@" >"\$tmp" [^;]*\) & pid=\$!$/ { next }
-                /^\( "\$@" >"\$tmp" [^;]* & c=\$!; printf .* >&9$/ { next }
+                /^\( "\$@" >"\$tmp" [^;]* & c=\$!; printf .* >&9$/ && !/7>&- 8>&-/ { next }
                 /^wait "\$c"; printf .* >&9 \) 9>"\$fifo" 7>&- 8>&- & pid=\$!$/ { next }
                 { print "inside the bracket: " $0 }')"
 rd_close="$(printf '%s\n' "$rt_flat" | grep -nxF '[ -n "$RT_DETACH" ] && set +m' | tail -1 | cut -d: -f1)"
@@ -3787,16 +3789,12 @@ assert_eq "run-timeout:no-spawn-reads-the-terminal" "" \
 # AND WHAT IS IN FLIGHT IS WRITTEN DOWN, for the arm that ends the process from inside a call (#449):
 # run_timeout records each call's pids beside its scratch file -- both branches' $pid, and the fifo
 # branch's command -- and rt_kill_inflight kills them, where a returning arm once left the call's
-# own ceiling to. The fifo's WRAPPERS close the terminal copies too: a wrapper is a fork that never
-# execs, and until it is killed it holds whatever the caller had open.
+# own ceiling to. (The fifo's wrappers closing the terminal copies is the bracket check's: a wrapper
+# is a fork that never execs, and until it is killed it holds whatever the caller had open.)
 assert_eq "run-timeout:records-what-is-in-flight" "2 1" \
           "$(printf '%s\n' "$rt_flat" | grep -cxF "printf '%s\\n' \"\$pid\" > \"\$tmp.pids\"") $(printf '%s\n' "$rt_flat" | grep -cF "printf '%s\\n' \"\$cpid\" >> \"\$tmp.pids\"")"
-assert_eq "run-timeout:the-wrappers-are-counted-here" "2" \
-          "$(printf '%s\n' "$rt_code" | grep -cF '9>"$fifo"')"
-assert_eq "run-timeout:no-wrapper-takes-the-terminal-copies" "" \
-          "$(printf '%s\n' "$rt_code" | grep -F '9>"$fifo"' | grep -vF ') 9>"$fifo" 7>&- 8>&- &')"
 assert_match "tunnel:the-supervisor-does-not-take-the-terminal-copies" 'dev-supervise .*7>&- 8>&- &' \
-             "$(fn_body tunnel_sup_start "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+             "$(fn_code tunnel_sup_start "$REPO/cs193v")"
 # THE ATTACH TOO, though it does not outlive the launcher: on Linux it hands them on to the exec
 # session's conmon, which does.
 assert_contains "launcher:the-attach-does-not-take-the-terminal-copies" \
@@ -3916,7 +3914,7 @@ assert_contains "gate:the-read-does-not-trust-the-status-alone" \
 # COMMENTS STRIPPED FIRST, for the reason the teardown-ordering check gives: the comments beside
 # both drains quote the literal being counted AND the two spellings that do not work, so an
 # unstripped body counts prose and passes with either drain deleted.
-rt_code="$(fn_body run_timeout "$PRIVATE/files/cs193v-ui.sh" | sed 's/^[[:space:]]*#.*//')"
+# rt_code is the body as computed for the spawn checks above, comments already stripped.
 if [ -z "$rt_code" ]; then
     fail "gate:run_timeout-was-found" "fn_body returned nothing for run_timeout,
 so both assertions below would search an empty string and pass."
@@ -4044,58 +4042,35 @@ assert_eq "teardown:the-handler-returns-success" "return 0" \
              | tail -1 | sed 's/^[[:space:]]*//')"
 # ...BUT A SIGNAL'S CALL NEVER REACHES IT (#449). The arm that starts the teardown ends the process
 # with its signal's status; one that returned resumed the script, which ran `podman exec -it` into
-# the container it had just stopped. INT dies of SIGINT, through the one helper both handlers use.
-assert_match "teardown:int-dies-of-sigint" 'INT\)[[:space:]]+die_of_sigint ;;' "$guard_code"
-assert_match "rebuild:a-ctrl-c-dies-of-sigint" '= 130 \] && die_of_sigint$' \
-             "$(fn_body rebuild_interrupted "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
-# AND THE HELPER RE-RAISES AND THEN EXITS, its whole body compared: with the kill as its last
+# the container it had just stopped. Both handlers end through the one helper.
+ri_code="$(fn_code rebuild_interrupted "$REPO/cs193v" | grep -vE '^[[:space:]]*$')"
+assert_contains "teardown:ends-with-the-signals-status" '[ -n "${1:-}" ] && exit_for_signal "$1"' "$guard_code"
+assert_contains "rebuild:ends-with-the-signals-status" 'exit_for_signal "${1:-130}"' "$ri_code"
+# AND THE HELPER RE-RAISES A Ctrl-C AND THEN EXITS, its whole body compared: with the kill as its last
 # command, or followed only by a `return`, bash 3.2 sits on the self-sent SIGINT until whatever it
 # interrupted -- the warnings prompt's `read` -- returns. Measured, and only bash 3.2 shows it, so the
 # shim tier's ^C case cannot hold this on a Linux run; this line can.
-assert_eq "sigint:re-raises-and-then-exits" 'trap - EXIT INT; kill -s INT $$; exit 130' \
-          "$(fn_body die_of_sigint "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//' \
-             | grep -vE '^[[:space:]]*$|^die_of_sigint\(\) \{$|^\}$' | sed 's/^[[:space:]]*//')"
-assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code"
-assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
-assert_match "teardown:quit-exits-131" 'QUIT\)[[:space:]]+exit 131' "$guard_code"
-# AND NOTHING CAN KILL IT HALFWAY (#512): the first statement past the guard ignores every signal
-# with an arm, and PIPE (#565), before anything that starts a child. A window closing HUPs the
-# whole foreground group, which holds every podman call run_timeout started with `&`, so an ignore
-# set any later lets the close kill the in-flight `podman stop` -- and a child takes its disposition
-# from the moment it is started.
-assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP QUIT PIPE" \
+fn_lines() { fn_code "$1" "$REPO/cs193v" | grep -vE "^[[:space:]]*\$|^$1\\(\\) \\{|^\\}\$" | sed 's/^[[:space:]]*//'; }
+assert_eq "exit:re-raises-a-ctrl-c-and-then-exits" '[ "$1" = 130 ] && { trap - EXIT INT; kill -s INT $$; }
+exit "$1"' "$(fn_lines exit_for_signal)"
+# AND NOTHING CAN KILL ONE HALFWAY (#512, #566): the shield ignores every signal with an arm, and PIPE
+# (#565), and detaches what is started after it. A window closing HUPs the whole foreground group,
+# which held every podman call run_timeout started; Linux podman re-arms the keys' signals for itself.
+assert_eq "shield:ignores-every-armed-signal-and-detaches" "trap '' INT TERM HUP QUIT PIPE
+RT_DETACH=1" "$(fn_lines shield_from_signals)"
+# ...AS THE FIRST THING EACH HANDLER DOES, before anything that starts a child: a child takes its
+# disposition from the moment it is started. shell_teardown's first statement past its once-guard;
+# rebuild_interrupted's first of all.
+assert_eq "teardown:shields-before-any-work" "shield_from_signals" \
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
              | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
                     /\[ -n "\$TEARDOWN_DONE" \] && return 0/ { f = 1 }')"
-# ...AND DETACHES WHAT IT STARTS, on the very next line (#566): the ignore covers the shell's own
-# children, and RT_DETACH covers the podman ones, which re-arm the keys' signals for themselves.
-assert_eq "teardown:podman-calls-start-outside-the-terminals-group" "RT_DETACH=1" \
-          "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
-             | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
-                    /^[[:space:]]*trap .. INT TERM HUP QUIT PIPE$/ { f = 1 }')"
+assert_eq "rebuild:shields-before-any-work" "shield_from_signals" \
+          "$(printf '%s\n' "$ri_code" | sed -n '2p' | sed 's/^[[:space:]]*//')"
 # AND IT KILLS THE CALL IT INTERRUPTED BEFORE ANYTHING ELSE (#449): the arm ends the process from
 # inside that call, so nothing else would. Before transient_cleanup, whose rt_cleanup removes the
 # record of what to kill.
-td_kill_at="$(printf '%s\n' "$guard_code" | grep -n '^[[:space:]]*rt_kill_inflight$' | head -1 | cut -d: -f1)"
-td_clean_at="$(printf '%s\n' "$guard_code" | grep -n '^[[:space:]]*transient_cleanup$' | head -1 | cut -d: -f1)"
-if [ -n "$td_kill_at" ] && [ -n "$td_clean_at" ] && [ "$td_kill_at" -lt "$td_clean_at" ]; then
-    pass "teardown:kills-the-interrupted-call-first"
-else
-    fail "teardown:kills-the-interrupted-call-first" "rt_kill_inflight at $td_kill_at, transient_cleanup at $td_clean_at"
-fi
-# THE REBUILD'S HANDLER THE SAME WAY, and its ignore FIRST: it had none, so a second key during its
-# stop was queued on bash 3.2 and lost, re-entered on 5.3 and stopped twice -- and a re-entry could
-# land inside run_timeout's set -m bracket.
-ri_code="$(fn_body rebuild_interrupted "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//' | grep -vE '^[[:space:]]*$')"
-assert_eq "rebuild:the-handler-ignores-signals-first" "trap '' INT TERM HUP QUIT PIPE" \
-          "$(printf '%s\n' "$ri_code" | sed -n '2p' | sed 's/^[[:space:]]*//')"
-ri_det="$(printf '%s\n' "$ri_code" | grep -nx '[[:space:]]*RT_DETACH=1' | head -1 | cut -d: -f1)"
-ri_stop="$(printf '%s\n' "$ri_code" | grep -n 'stop_container' | head -1 | cut -d: -f1)"
-if [ -n "$ri_det" ] && [ -n "$ri_stop" ] && [ "$ri_det" -lt "$ri_stop" ]; then
-    pass "rebuild:the-handler-detaches-its-stop"
-else
-    fail "rebuild:the-handler-detaches-its-stop" "RT_DETACH=1 at $ri_det, stop_container at $ri_stop"
-fi
+assert_before "teardown:kills-the-interrupted-call-first" "$guard_code" rt_kill_inflight transient_cleanup
 
 # THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
 # rather than merely present: both lines in the wrong sequence would wipe a row of the student's

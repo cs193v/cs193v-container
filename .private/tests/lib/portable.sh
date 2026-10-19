@@ -290,6 +290,20 @@ pid_is_gone() {                       # pid_is_gone PID
     esac
 }
 
+# pid_pgid PID -> its process group, digits only; empty once it has gone.
+pid_pgid() {                          # pid_pgid PID
+    ps -p "${1:-0}" -o pgid= 2>/dev/null | do_tr -d ' \n'
+}
+
+# kill_if_argv PID ARGV [SIGNAL] -> signals PID only while its command line is exactly ARGV.
+# IDENTIFIED BEFORE KILLED, cs193v's tunnel_kill_pid's rule: a pid a test recorded is free again
+# once that process has gone, and can be another lane's by cleanup time. -ww, because procps cuts a
+# piped `ps` at 80 columns. Returns 0 either way; it is cleanup.
+kill_if_argv() {                      # kill_if_argv PID ARGV [SIGNAL]
+    [ "$(ps -ww -o command= -p "${1:-0}" 2>/dev/null)" = "$2" ] && kill -"${3:-TERM}" "$1" 2>/dev/null
+    return 0
+}
+
 # pid_leads_its_session PID -> yes when that pid leads its own session, no when somebody else
 # leads it, gone when the pid has left, unknown when the answer could not be had.
 #

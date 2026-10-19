@@ -740,62 +740,62 @@ fi
 #
 # EVERY ONE WITH ITS CONTROL: the same call without the flag must answer the caller's own group,
 # or a `ps` that answered nothing at all would pass the first half of each pair.
-rd_pgid() { run_timeout 5 sh -c 'ps -o pgid= -p $$' >/dev/null 2>&1; printf '%s' "$RT_OUT" | do_tr -d ' \n'; }
-RD_MINE="$(ps -o pgid= -p $$ | do_tr -d ' ')"
+rd_pgid() { run_timeout 5 sh -c 'ps -o pgid= -p $$' >/dev/null 2>&1; RD_GOT="${RT_OUT//[[:space:]]/}"; }
+RD_MINE="$(pid_pgid $$)"
+rd_check() {                          # rd_check plain|detached BRANCH PGID
+    if [ "$1" = plain ]; then
+        assert_eq "rt:without-detach-the-$2-branch-shares-the-callers-group" "$RD_MINE" "$3"
+    else
+        assert_match "rt:detach-on-the-$2-branch-names-a-group" '^[0-9]+$' "$3"
+        assert_ne "rt:detach-on-the-$2-branch-is-a-group-of-its-own" "$RD_MINE" "$3"
+    fi
+}
 for rd_mode in plain detached; do
     RT_DETACH=''; [ "$rd_mode" = detached ] && RT_DETACH=1
-    rd_pgid >/dev/null; rd_fifo="$(printf '%s' "$RT_OUT" | do_tr -d ' \n')"
-    RT_SPIN='working'; rd_pgid >/dev/null; rd_poll="$(printf '%s' "$RT_OUT" | do_tr -d ' \n')"; RT_SPIN=''
+    rd_pgid; rd_check "$rd_mode" fifo "$RD_GOT"
+    RT_SPIN='working'; rd_pgid; RT_SPIN=''; rd_check "$rd_mode" poll "$RD_GOT"
     # INSIDE A COMMAND SUBSTITUTION, the shape `state` calls it in: the teardown's first podman read.
-    rd_subst="$(rd_pgid)"
-    RT_DETACH=''
-    for rd_branch in fifo poll subst; do
-        case "$rd_branch" in fifo) rd_got="$rd_fifo" ;; poll) rd_got="$rd_poll" ;; *) rd_got="$rd_subst" ;; esac
-        if [ "$rd_mode" = plain ]; then
-            assert_eq "rt:without-detach-the-$rd_branch-branch-shares-the-callers-group" "$RD_MINE" "$rd_got"
-        else
-            assert_match "rt:detach-on-the-$rd_branch-branch-names-a-group" '^[0-9]+$' "$rd_got"
-            assert_ne "rt:detach-on-the-$rd_branch-branch-is-a-group-of-its-own" "$RD_MINE" "$rd_got"
-        fi
-    done
+    rd_check "$rd_mode" subst "$(rd_pgid; printf '%s' "$RD_GOT")"
 done
+RT_DETACH=''
 # JOB CONTROL GOES BACK OFF. It is on for the spawn alone: a foreground command run under it is
 # handed the terminal, and bash 3.2 reports a job reaped while it is on as `[1]+ Exit N`.
 case "$-" in
     *m*) fail "rt:detach-leaves-job-control-off" "set -m was still on afterwards: \$- is $-" ;;
     *)   pass "rt:detach-leaves-job-control-off" ;;
 esac
-# THE CEILING STILL HOLDS, and still kills what it started -- the `exec -a` shape of
-# rt:the-ceiling-kills-the-command, under a name of its own.
+# A command named for this suite, by the `exec -a` of rt:the-ceiling-kills-the-command.
+nap_up() { pgrep -f "^$1 30\$" >/dev/null 2>&1; }   # nap_up NAME
+nap_gone() { ! nap_up "$1"; }
+# THE CEILING STILL HOLDS AND STILL KILLS, AND IT SAYS NOTHING OF ITS OWN, on either branch, whether
+# the command finished or was killed: the teardown's stderr is the student's terminal. IN A SCRIPT
+# OF ITS OWN, calling it as the teardown does, with that script's whole stderr kept: bash prints a
+# job's notice at the next command of the shell that reaped it, and inside a `$(...)` -- the first
+# shape this check had -- it prints none at all, so the check could not fail. Measured: with the
+# ceiling's `wait 2>/dev/null` removed, a direct call printed `Killed: 9` and the same call in a
+# substitution printed nothing. The ceiling's call is the `exec -a` nap, so one wait serves both.
 RD_NAP="vt-dnap-$$"
-RT_DETACH=1
-run_timeout 1 bash -c "exec -a $RD_NAP sleep 30" >/dev/null 2>&1; RC=$?
-RT_DETACH=''
-assert_eq "rt:detach-still-times-out" "124" "$RC"
-if pgrep -f "^$RD_NAP 30\$" >/dev/null 2>&1; then
-    fail "rt:detach-still-kills-the-command" "$RD_NAP 30 outlived the box"
-    pkill -9 -f "^$RD_NAP 30\$" 2>/dev/null
-else
-    pass "rt:detach-still-kills-the-command"
-fi
-# AND SAYS NOTHING OF ITS OWN, on either branch, whether the command finished or was killed: the
-# teardown's stderr is the student's terminal. IN A SCRIPT OF ITS OWN, calling it as the teardown
-# does, with that script's whole stderr kept: bash prints a job's notice at the next command of the
-# shell that reaped it, and inside a `$(...)` -- the first shape this check had -- it prints none at
-# all, so the check could not fail. Measured: with the ceiling's `wait 2>/dev/null` removed, a direct
-# call printed `Killed: 9` and the same call in a substitution printed nothing.
 cat > "$WORK/detach-quiet.sh" <<'SUBJECT'
 set -u
 . "$CS193V_UI"
 RT_DETACH=1
 run_timeout 5 sh -c 'exit 3' >/dev/null; :
-run_timeout 1 sleep 5 >/dev/null; :
+run_timeout 1 bash -c "exec -a $RD_NAP sleep 30" >/dev/null; printf '%s\n' "$?" > "$RD_RC"
 RT_SPIN='working'
 run_timeout 1 sleep 5 >/dev/null; :
 RT_SPIN=''
 :; :
 SUBJECT
-CS193V_UI="$PRIVATE/files/cs193v-ui.sh" bash "$WORK/detach-quiet.sh" >/dev/null 2>"$WORK/detach-quiet.err"
+rm -f "$WORK/detach-quiet.rc"
+CS193V_UI="$PRIVATE/files/cs193v-ui.sh" RD_NAP="$RD_NAP" RD_RC="$WORK/detach-quiet.rc" \
+    bash "$WORK/detach-quiet.sh" >/dev/null 2>"$WORK/detach-quiet.err"
+assert_eq "rt:detach-still-times-out" "124" "$(cat "$WORK/detach-quiet.rc" 2>/dev/null)"
+if nap_up "$RD_NAP"; then
+    fail "rt:detach-still-kills-the-command" "$RD_NAP 30 outlived the box"
+    pkill -9 -f "^$RD_NAP 30\$" 2>/dev/null
+else
+    pass "rt:detach-still-kills-the-command"
+fi
 assert_eq "rt:detach-says-nothing-of-its-own" "" "$(cat "$WORK/detach-quiet.err" 2>/dev/null)"
 # NOT FROM THE TERMINAL, on the branch where that is in its own hands. A job in a background group
 # that reads the terminal is stopped by SIGTTIN, and run_timeout then waits out its whole ceiling
@@ -811,9 +811,9 @@ run_timeout 3 sh -c 'read x' >/dev/null 2>&1; rc=$?
 printf '%s %s\n' "$rc" "$((SECONDS - start))" > "$RD_OUT"
 SUBJECT
 rm -f "$WORK/detach-read.out"
+# do_script's ceiling, so that a pty that never lets go fails this rather than hangs the suite.
 RD_UI="$PRIVATE/files/cs193v-ui.sh" RD_OUT="$WORK/detach-read.out" \
-    "$DO_PY" "$PT_LIB/ptyrun.py" "$(sh_quote bash "$WORK/detach-read.sh")" \
-    </dev/null >"$WORK/detach-read.log" 2>&1
+    do_script 20 "$(sh_quote bash "$WORK/detach-read.sh")" </dev/null >"$WORK/detach-read.log" 2>&1
 read -r rd_rc rd_secs 2>/dev/null < "$WORK/detach-read.out" || { rd_rc=''; rd_secs=''; }
 assert_match "rt:detach-reports-from-a-pty" '^[0-9]+$' "${rd_rc:-}"
 if [ "${rd_rc:-}" = 124 ]; then
@@ -836,24 +836,22 @@ set -u
 trap '[ -n "$IF_KILL" ] && rt_kill_inflight; rt_cleanup; exit 143' TERM
 run_timeout 30 bash -c "exec -a $IF_NAP sleep 30"
 SUBJECT
-if_nap_up() { pgrep -f "^$IF_NAP 30\$" >/dev/null 2>&1; }
-if_nap_gone() { ! if_nap_up; }
 for if_mode in kill leave; do
     IF_NAP="vt-ifnap-$if_mode-$$"
     IF_KILL=''; [ "$if_mode" = kill ] && IF_KILL=1
     CS193V_UI="$PRIVATE/files/cs193v-ui.sh" IF_NAP="$IF_NAP" IF_KILL="$IF_KILL" \
         bash "$WORK/inflight.sh" >/dev/null 2>&1 &
     if_victim=$!
-    if wait_until 5 if_nap_up; then
+    if wait_until 5 nap_up "$IF_NAP"; then
         kill -TERM "$if_victim" 2>/dev/null
         wait "$if_victim" 2>/dev/null
         if [ "$if_mode" = kill ]; then
-            if wait_until 5 if_nap_gone; then pass "rt:kill-inflight-ends-the-interrupted-call"
+            if wait_until 5 nap_gone "$IF_NAP"; then pass "rt:kill-inflight-ends-the-interrupted-call"
             else fail "rt:kill-inflight-ends-the-interrupted-call" "$IF_NAP outlived the arm that exited"; fi
         else
             # PROVING AN ABSENCE, so a fixed wait: a command nobody kills gives no sign of surviving.
             sleep 0.5
-            if if_nap_up; then pass "rt:without-it-the-interrupted-call-outlives-its-caller"
+            if nap_up "$IF_NAP"; then pass "rt:without-it-the-interrupted-call-outlives-its-caller"
             else fail "rt:without-it-the-interrupted-call-outlives-its-caller" \
                       "the command ended without rt_kill_inflight, so the case above proves nothing"; fi
         fi
@@ -864,18 +862,16 @@ for if_mode in kill leave; do
     pkill -9 -f "^$IF_NAP 30\$" 2>/dev/null
 done
 # THE RECORD GOES WITH THE CALL: rt_cleanup sweeps a .pids file as it sweeps the rest.
-if_records() { local f l=''; for f in "$WORK"/cs193v-*.pids; do [ -e "$f" ] && l="$l ${f##*/}"; done; printf '%s' "${l# }"; }
-assert_eq "rt:kill-inflight-leaves-no-record-behind" "" "$(if_records)"
+assert_eq "rt:kill-inflight-leaves-no-record-behind" "" "$(litter | do_tr ' ' '\n' | grep '\.pids$')"
 # IDENTIFIED BEFORE KILLED: a pid in a .pids file that is not in the caller's process group is a
-# stale record, or a reused number, and is left alone. Started in a session of its own and orphaned,
-# so that a kill, if one came, would show as its absence rather than as a zombie of ours.
-# Its output away from the substitution, which would otherwise wait the 31s for it.
+# stale record, or a reused number, and is left alone. Started in a session of its own, so outside
+# our group, with its output away from the substitution, which would otherwise wait the 31s for it.
 if_stranger="$("$DO_PY" -c 'import subprocess as s; print(s.Popen(["sleep", "31"], start_new_session=True, stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL).pid)')"
 printf '%s\n' "$if_stranger" > "${TMPDIR:-/tmp}/cs193v-$$.stale.pids"
 rt_kill_inflight
 # PROVING AN ABSENCE, as above.
 sleep 0.5
-if pid_gone "$if_stranger"; then fail "rt:kill-inflight-leaves-a-stranger-alone" "it killed $if_stranger, outside our group"
+if pid_is_gone "$if_stranger"; then fail "rt:kill-inflight-leaves-a-stranger-alone" "it killed $if_stranger, outside our group"
 else pass "rt:kill-inflight-leaves-a-stranger-alone"; fi
-[ "$(ps -o command= -p "$if_stranger" 2>/dev/null)" = "sleep 31" ] && kill "$if_stranger" 2>/dev/null
+kill_if_argv "$if_stranger" "sleep 31"
 rm -f "${TMPDIR:-/tmp}/cs193v-$$.stale.pids"
