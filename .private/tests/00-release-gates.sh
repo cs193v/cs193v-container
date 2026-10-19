@@ -29,7 +29,9 @@ cd "$REPO" || exit 1
 # REPO_OWNER=CHANGEME makes the tarball URL a 404, so the installer cannot complete at all
 # and VERIFICATION.md §1 cannot be run as shipped. This is now the ONLY blank left that is
 # engineering rather than website work.
-owner="$(sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' "$PRIVATE/install-cs193v.sh" | head -1)"
+# Read through run_checker, then died_in ahead of head (#559): head could drop the marker.
+owner="$(run_checker sed -n 's/^REPO_OWNER="\(.*\)".*/\1/p' "$PRIVATE/install-cs193v.sh")"
+owner="$(died_in "$owner"; printf '%s\n' "$owner" | head -1)"
 assert_ne "installer:REPO_OWNER-is-set" "CHANGEME" "$owner"
 record    "installer:REPO_OWNER" "$owner"
 assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
@@ -564,7 +566,8 @@ fi
 # the image installs only by 50-image.sh's `claude doctor` checks. A student's copy auto-updates
 # past that version, and nothing re-checks it there.
 for arg in VERCEL_VERSION CODEX_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
-    v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" "$PRIVATE/Containerfile" | head -1)"
+    v="$(run_checker sed -n "s/^ARG $arg=\(.*\)/\1/p" "$PRIVATE/Containerfile")"
+    v="$(died_in "$v"; printf '%s\n' "$v" | head -1)"
     record "build:$arg" "$v"
     assert_ne "build:$arg-is-pinned" "latest" "$v"
     assert_match "build:$arg-looks-like-a-version" '^[0-9]+\.[0-9]+\.[0-9]+$' "$v"
@@ -703,7 +706,9 @@ fi
 # placeholder left in either would fail on every student at once. Recorded rather than asserted
 # against a literal: the point is that a human reads them before the quarter starts.
 sgval() {                             # sgval VAR -> the default compiled into files/setup-git
-    sed -n "s/^$1=\"\${$1:-\([^}]*\)}\".*/\1/p" "$PRIVATE/files/setup-git" | head -1
+    local s
+    s="$(run_checker sed -n "s/^$1=\"\${$1:-\([^}]*\)}\".*/\1/p" "$PRIVATE/files/setup-git")"
+    died_in "$s"; printf '%s\n' "$s" | head -1
 }
 for v in CS193V_GH_ORG CS193V_GH_SANDBOX_PREFIX; do
     val="$(sgval "$v")"
