@@ -318,8 +318,10 @@ assert_eq "label:dir-is-this-repo" "$REPO" "$(I '{{index .Config.Labels "cs193v.
 # NOTHING NAMES A PORT IN THE CONTAINER'S ENVIRONMENT, which is the create-time half of the
 # no-declared-list invariant. 10-static.sh asserts the args file declares none; this asserts none
 # reached the container, so a -e line added by any other route is caught too.
+# THROUGH run_checker (#559): an inspect that failed answers with podman's error, which names no
+# port either. I's status is podman inspect's.
 assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
-                    "$(I '{{json .Config.Env}}')"
+                    "$(run_checker I '{{json .Config.Env}}')"
 # ...AND THE TWO THAT DO REACH IT ARRIVE AT CREATE TIME (#257), which is the other half of that
 # same invariant rather than an exception to it. The rule is that no PORT LIST is declared, because
 # which ports reach a browser is decided at runtime from what is actually listening. These two are
