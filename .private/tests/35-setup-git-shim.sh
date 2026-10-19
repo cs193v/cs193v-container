@@ -951,8 +951,12 @@ sg_has_not "cleanup:says-nothing-about-it" "--delete" "$SG_OUT"
 # with a paragraph break in it was affected.
 sg_new
 sg_run copy happy
+# THE MARKER GOES IN FRONT of the grep, which keeps only blank rows (#559): a transcript that
+# sg_conversation poisoned, or the rows of a stage that died, has none of those either.
+copy_rows="$(sg_rows "$SG_OUT")"
 assert_eq "copy:no-line-is-invisible-whitespace" "" \
-          "$(sg_rows "$SG_OUT" | grep -nE '^[[:space:]]+$' | head -3 | do_tr '\n' ' ')"
+          "$(died_in "$copy_rows"; printf '%s\n' "$copy_rows" \
+             | grep -nE '^[[:space:]]+$' | head -3 | do_tr '\n' ' ')"
 
 # ─── the cursor comes back ─────────────────────────────────────────────────────
 # run_step hides the cursor for the duration of a row. A script that exits with it hidden leaves
