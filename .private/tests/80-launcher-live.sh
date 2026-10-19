@@ -597,10 +597,10 @@ else
 fi
 LV --rebuild >/dev/null 2>&1
 # The container publishes nothing; the 46 forwards live on the host, in one ssh process.
-# THROUGH run_checker (#586): a podman port that failed printed no mappings either.
-pmaps="$(run_checker podman port "$NAME")"
-assert_eq "drift:restored-config-publishes-nothing" "0" \
-          "$(died_in "$pmaps"; printf '%s' "$pmaps" | grep -c .)"
+# ITS CONFIG, NOT `podman port`, which answers a stopped container -- and --rebuild leaves this one
+# stopped -- with nothing and exit 0 whatever it publishes. 60-container.sh's
+# ports:container-publishes-nothing reads the same field.
+assert_eq "drift:restored-config-publishes-nothing" "{}" "$(I '{{json .HostConfig.PortBindings}}')"
 
 # INVERTED BY #41. This used to assert 46 forwards immediately after --rebuild, because a rebuild
 # left the container running with a fresh tunnel. Maintenance verbs now stop what they built --
@@ -727,8 +727,10 @@ if [ "${CS193V_DESTRUCTIVE:-0}" = 1 ]; then
     # The git volume goes with the others, and that is the right reading of "log out": the
     # credential helper `gh auth setup-git` wrote lives in it, so leaving it behind would point git
     # at a token that had just been deleted.
-    assert_eq "logout:git-identity-is-gone" "" \
-              "$(podman exec "$NAME" git config --global user.email 2>/dev/null)"
+    # GIT'S OWN STATUS, because exit 1 IS "not set": read on its own, an unset key and an exec
+    # that never ran were both the empty string.
+    assert_eq "logout:git-identity-is-gone" "rc=1" \
+              "$(podman exec "$NAME" sh -c 'git config --global user.email; echo "rc=$?"' 2>&1)"
     # INVERTED BY #41: like every maintenance verb, this leaves nothing running. Read BEFORE the
     # hold_container above would confuse it, so this samples the state the verb itself left --
     # which is why it re-stops first rather than trusting where we happen to be.
