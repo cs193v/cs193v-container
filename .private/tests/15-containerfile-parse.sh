@@ -31,9 +31,15 @@ trap 'rm -rf "$WORK"' EXIT
 # steps FIXTURE  -> the parse, as "index<TAB>label<TAB>instruction" rows
 steps() { "$REPO/cs193v" --dev-steps "$1"; }
 # Compact forms, so a case can assert on the one column it is about.
-count()  { steps "$1" | wc -l | do_tr -d ' '; }
 labels() { steps "$1" | cut -f2 | paste -sd'|' -; }
 texts()  { steps "$1" | cut -f3 | paste -sd'|' -; }
+# ...and how many rows, THROUGH run_checker (#586): a parse that died printed none, and wc counted
+# 0 of them. The x keeps $( ) from stripping a trailing empty row, which wc would have counted.
+count()  {
+    local s
+    s="$(run_checker steps "$1"; printf x)"
+    died_in "$s"; printf '%s' "${s%x}" | wc -l | do_tr -d ' '
+}
 
 # WRITES THE FILE AND PRINTS NOTHING, and the caller names the path itself. It used to print the
 # path, so every call site wrapped it in `f="$(fixture NAME <<'EOF' ... EOF)"` -- and a heredoc
