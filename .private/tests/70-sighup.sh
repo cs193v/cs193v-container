@@ -232,7 +232,9 @@ fi
 # ON THE POLITE CLOSE, DELIBERATELY, and not on the force quit below: the comment on
 # close_window records that this ordering never revokes the controlling terminal, so every
 # write the teardown makes lands in $LOG. After a force quit there may be nothing to read.
-hup_out="$(cat "$LOG" 2>/dev/null)"
+# THROUGH run_checker: mktemp made $LOG and launch_in_pty rewrote it, so a read that fails here is
+# a failure, not an empty transcript for the negative below to pass on.
+hup_out="$(run_checker cat "$LOG")"
 assert_says_key     "sighup:a-closed-window-still-says-stopping" status.stopping "$hup_out"
 assert_says_not_key "sighup:a-closed-window-does-not-claim-a-clean-exit" \
                     status.exiting "$hup_out"
