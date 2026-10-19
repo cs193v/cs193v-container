@@ -299,12 +299,21 @@ launcher_fg_status() { do_tr -d '\n' 2>/dev/null < "$FG_STATUS"; }
 launcher_fg_close() { kill -USR1 "$FG_OWNER" 2>/dev/null; }
 
 launcher_fg_stop() {
-    local p
+    local p g mine
     p="$(do_tr -d ' \n' 2>/dev/null < "$FG_PIDFILE")"
     # ONLY WHILE fgjob HAS NOT REPORTED AN ENDING. It writes the status after reaping the launcher,
     # so a pid with a status beside it may already be somebody else's -- "IDENTIFIED BEFORE KILLED"
     # in cs193v's tunnel_kill_pid.
-    [ -n "$p" ] && [ ! -s "$FG_STATUS" ] && kill -9 "$p" 2>/dev/null
+    #
+    # THE WHOLE JOB, not fgjob's child alone: that can be a wrapper -- fg_start's loop, a pipeline --
+    # with the launcher beneath it, and a launcher mid-teardown ignores the HUP that closing the pty
+    # sends. ptyrun makes the job a process group of its own, and never this suite's, which is checked.
+    if [ -n "$p" ] && [ ! -s "$FG_STATUS" ]; then
+        g="$(ps -o pgid= -p "$p" 2>/dev/null | do_tr -d ' ')"
+        mine="$(ps -o pgid= -p $$ 2>/dev/null | do_tr -d ' ')"
+        [ -n "$g" ] && [ "$g" != "$mine" ] && kill -9 -- "-$g" 2>/dev/null
+        kill -9 "$p" 2>/dev/null
+    fi
     kill -9 "$FG_OWNER" 2>/dev/null
     wait "$FG_OWNER" 2>/dev/null
     exec 8>&-
@@ -982,7 +991,8 @@ shim_ssh_unwedge() {
     [ -s "$SHIM/ssh_wedge.pids" ] || return 0
     while IFS= read -r p; do
         [ -n "$p" ] || continue
-        case "$(ps -o command= -p "$p" 2>/dev/null)" in
+        # -ww: procps cuts a piped `ps` at 80 columns, and a long $SHIM would never match.
+        case "$(ps -ww -o command= -p "$p" 2>/dev/null)" in
             "sleep 30"|*"$SHIM/ssh "*) kill "$p" 2>/dev/null ;;
         esac
     done < "$SHIM/ssh_wedge.pids"

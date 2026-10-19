@@ -808,13 +808,24 @@ else
     pass "rt:detach-still-kills-the-command"
 fi
 # AND SAYS NOTHING OF ITS OWN, on either branch, whether the command finished or was killed: the
-# teardown's stderr is the student's terminal.
-rd_err() { RT_DETACH=1; { run_timeout "$@" >/dev/null; } 2>&1; RT_DETACH=''; }   # -> its stderr alone
-assert_eq "rt:detach-is-silent-when-it-finishes" "" "$(rd_err 5 sh -c 'exit 3')"
-assert_eq "rt:detach-is-silent-at-the-ceiling" "" "$(rd_err 1 sleep 5)"
+# teardown's stderr is the student's terminal. IN A SCRIPT OF ITS OWN, calling it as the teardown
+# does, with that script's whole stderr kept: bash prints a job's notice at the next command of the
+# shell that reaped it, and inside a `$(...)` -- the first shape this check had -- it prints none at
+# all, so the check could not fail. Measured: with the ceiling's `wait 2>/dev/null` removed, a direct
+# call printed `Killed: 9` and the same call in a substitution printed nothing.
+cat > "$WORK/detach-quiet.sh" <<'SUBJECT'
+set -u
+. "$CS193V_UI"
+RT_DETACH=1
+run_timeout 5 sh -c 'exit 3' >/dev/null; :
+run_timeout 1 sleep 5 >/dev/null; :
 RT_SPIN='working'
-assert_eq "rt:detach-is-silent-at-the-ceiling-on-the-poll-branch" "" "$(rd_err 1 sleep 5)"
+run_timeout 1 sleep 5 >/dev/null; :
 RT_SPIN=''
+:; :
+SUBJECT
+CS193V_UI="$PRIVATE/files/cs193v-ui.sh" bash "$WORK/detach-quiet.sh" >/dev/null 2>"$WORK/detach-quiet.err"
+assert_eq "rt:detach-says-nothing-of-its-own" "" "$(cat "$WORK/detach-quiet.err" 2>/dev/null)"
 # NOT FROM THE TERMINAL, on the branch where that is in its own hands. A job in a background group
 # that reads the terminal is stopped by SIGTTIN, and run_timeout then waits out its whole ceiling
 # for a command that is never coming back. The fifo branch's command starts inside a subshell,
@@ -832,7 +843,7 @@ rm -f "$WORK/detach-read.out"
 RD_UI="$PRIVATE/files/cs193v-ui.sh" RD_OUT="$WORK/detach-read.out" \
     "$DO_PY" "$PT_LIB/ptyrun.py" "$(sh_quote bash "$WORK/detach-read.sh")" \
     </dev/null >"$WORK/detach-read.log" 2>&1
-read -r rd_rc rd_secs < "$WORK/detach-read.out" 2>/dev/null || { rd_rc=''; rd_secs=''; }
+read -r rd_rc rd_secs 2>/dev/null < "$WORK/detach-read.out" || { rd_rc=''; rd_secs=''; }
 assert_match "rt:detach-reports-from-a-pty" '^[0-9]+$' "${rd_rc:-}"
 if [ "${rd_rc:-}" = 124 ]; then
     fail "rt:detach-never-reads-the-terminal" "the command was stopped reading the pty and waited out its ${rd_secs}s ceiling"

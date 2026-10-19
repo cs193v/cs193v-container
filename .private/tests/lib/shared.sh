@@ -267,13 +267,16 @@ msg_of_in() {                         # msg_of_in FILE KEY [NAME=VALUE...] -> th
 # nothing. The LAST non-blank line, because that is the one printed last: a wait for it is a wait
 # for the whole message.
 #
-# NEVER EMPTY. An empty needle matches everything too, so a message with no line to give -- a key
-# gone from the catalogue -- answers with text no output will contain, and its caller fails loudly
-# instead of passing.
+# NEVER EMPTY, AND NEVER msg()'s PLACEHOLDER. An empty needle matches everything too, so a message
+# with no line to give answers with text no output will contain, and its caller fails loudly
+# instead of passing. A key gone from the catalogue is one: msg() answers it with
+# `(missing message: KEY)` -- which the launcher prints at the very same moment, so as a needle it
+# would match and every wait on it would succeed.
 msg_last_line() {                     # msg_last_line KEY [NAME=VALUE...] -> its last non-blank line
     local l
     l="$(msg_of "$@" | grep -v '^[[:space:]]*$' | tail -n 1)"
-    printf '%s' "${l:-(no line of $1 to match)}"
+    case "$l" in ''|"(missing message: $1)") l="(no line of $1 to match)" ;; esac
+    printf '%s' "$l"
 }
 
 # ─── does THIS platform retain a failed write to fd 1?  (#170) ─────────────────
