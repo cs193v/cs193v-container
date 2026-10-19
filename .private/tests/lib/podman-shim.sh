@@ -206,15 +206,20 @@ launcher_pty_silent_start() {         # launcher_pty_silent_start [ARGS...]
 # a needle with a bracket or a full stop in it is a pattern nobody audited -- which here does not
 # redden a line, it times the wait out and reports "the launcher never asked".
 #
-# A PHRASE WITH AN EMPTY LINE IN IT IS REFUSED (#509): grep -F reads each line as a pattern of its
-# own and the empty one matches the first byte of output, so this returned at once, on "Entering
-# the CS193V development environment...", and the two ack: assertions behind it could not fail.
-# Take one line with msg_last_line.
+# ONE LINE, AND NOT A BLANK ONE, OR IT IS REFUSED (#509). grep -F reads each line of a needle as a
+# pattern of its own: a blank one matches the first byte of output -- this returned at once, on
+# "Entering the CS193V development environment...", and the two ack: assertions behind it could not
+# fail -- and any other line returns the wait as soon as that one line is printed, not the whole
+# phrase. Take one line with msg_last_line.
 launcher_pty_silent_wait() {          # launcher_pty_silent_wait SECS PHRASE
     local i=0 n
-    if [ -z "$2" ] || printf '%s\n' "$2" | grep -q '^$'; then
-        printf 'launcher_pty_silent_wait: a phrase with an empty line matches anything: %s\n' \
+    if [ $(( $(printf '%s\n' "$2" | wc -l) )) -gt 1 ]; then
+        printf 'launcher_pty_silent_wait: a phrase of more than one line matches any one of them: %s\n' \
                "$2" >&2
+        return 2
+    fi
+    if [ -z "$(printf '%s' "$2" | do_tr -d '[:space:]')" ]; then
+        printf 'launcher_pty_silent_wait: a blank phrase matches anything\n' >&2
         return 2
     fi
     n=$(( $1 * 2 ))
@@ -283,7 +288,10 @@ launcher_fg_pid() {
 launcher_fg_ended() {                 # launcher_fg_ended SECS
     wait_until "$1" test -s "$FG_STATUS"
 }
-launcher_fg_status() { do_tr -d '\n' < "$FG_STATUS" 2>/dev/null; }
+# 2>/dev/null BEFORE THE <, here and below: redirections apply left to right, so the other order
+# prints the shell's own "No such file or directory" -- into a FAIL's output, the one time a
+# launcher still running is being reported.
+launcher_fg_status() { do_tr -d '\n' 2>/dev/null < "$FG_STATUS"; }
 
 # Close the window: what a terminal does, and what 70-sighup.sh's close_window does -- WITHOUT its
 # wait, because a test that has held a podman call open has to let go of it while ptyrun is still
@@ -292,7 +300,7 @@ launcher_fg_close() { kill -USR1 "$FG_OWNER" 2>/dev/null; }
 
 launcher_fg_stop() {
     local p
-    p="$(do_tr -d ' \n' < "$FG_PIDFILE" 2>/dev/null)"
+    p="$(do_tr -d ' \n' 2>/dev/null < "$FG_PIDFILE")"
     # ONLY WHILE fgjob HAS NOT REPORTED AN ENDING. It writes the status after reaping the launcher,
     # so a pid with a status beside it may already be somebody else's -- "IDENTIFIED BEFORE KILLED"
     # in cs193v's tunnel_kill_pid.
@@ -965,11 +973,19 @@ shim_ssh_calls() { cat "$SHIM/ssh_wedge.log" 2>/dev/null; }
 # orphan holding the pty for its full 30s -- which a launcher that EXITS mid-call, rather than
 # waiting out run_timeout's ceiling, leaves behind on purpose (#449). Each wedged call publishes
 # its pid BEFORE its WEDGED line, so a test that waited for the line can always find the pid.
+#
+# IDENTIFIED BEFORE KILLED, as cs193v's tunnel_kill_pid has it: a wedged call ends by itself after
+# 30s, and its pid can be anybody's by the time this runs -- a concurrent lane's. What is killed is
+# a pid that is still this shim's fake ssh, or the `sleep 30` it became.
 shim_ssh_unwedge() {
     local p
+    [ -s "$SHIM/ssh_wedge.pids" ] || return 0
     while IFS= read -r p; do
-        [ -n "$p" ] && kill "$p" 2>/dev/null
-    done < "$SHIM/ssh_wedge.pids" 2>/dev/null
+        [ -n "$p" ] || continue
+        case "$(ps -o command= -p "$p" 2>/dev/null)" in
+            "sleep 30"|*"$SHIM/ssh "*) kill "$p" 2>/dev/null ;;
+        esac
+    done < "$SHIM/ssh_wedge.pids"
     return 0
 }
 
