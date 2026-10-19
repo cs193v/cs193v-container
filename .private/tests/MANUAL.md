@@ -1311,6 +1311,46 @@ podman machine stop
 Leave the VM running afterwards, detached from every window:
 `/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' podman machine start`.
 
+### A first install from a fresh macOS user: Ctrl-C and a closed window leave the VM up  (#543)
+What `25-installer.sh :: vmshape:*, vmsurvives:*` cannot do: a real VM, a real Terminal window, and
+the real three-caption block. The installer starts the VM through `machine_start_detached`, so the
+VM is not in the installer's process group, which holds the terminal through the first
+`--rebuild`.
+
+**From a separate macOS user account**, so that the install is a true first one and this account's
+VM, images and containers are untouched. podman's machines are per-user and `/opt/podman` is
+shared. Creating the account needs an admin. **On an 8 GB Mac, stop this account's VM for the
+duration** (check `podman ps -a` for every instance first), because two 4 GB VMs will not fit.
+
+```sh
+# on the dev account, in the checkout -- tracked edits only, so `git add` any new file first
+t="$(.private/tests/make-tarball.sh)"; cp "$t" .private/install-cs193v.sh /Users/Shared/
+```
+```sh
+# in the test account's Terminal
+CS193V_TARBALL=/Users/Shared/<the tarball> /bin/bash /Users/Shared/install-cs193v.sh
+```
+1. *Expect* the `CS193V_TARBALL is set` banner, then the machine block. Its captions go
+   *Downloading the virtual machine...* → *Initializing the virtual machine...* → **Starting the
+   virtual machine...**, the bar reaches 3/3 only at `✓ created and started`, and there is no
+   flicker, with the box's right wall straight.
+2. During the first `--rebuild`, from a second window: `pgrep -x krunkit`, then
+   `ps -o pgid= -p <that pid>`. *Expect* a pgid that is **not** the installer's
+   (`ps -o pgid= -p $(pgrep -f course-install.sh)`).
+3. Press **Ctrl-C** in the installer's window. *Expect* the installer to exit, and
+   `podman machine inspect --format '{{.State}}'` to say `running`, with the same krunkit pid.
+4. Run the installer again and let it finish. This is the re-run path: the machine exists, and it is
+   already running. Open the CS193V app, then quit it.
+5. `podman rmi -a -f`, then `podman machine stop`. The first leaves a real build to interrupt: with
+   the image there, `--rebuild` is a two-second recreate. Run the installer again, and close its
+   window mid-build: Cmd-W, then **Terminate**. *Expect* `running` from another window, with the
+   krunkit pid it had during the build. This is the re-run path's own start.
+6. Clean up as the test user: `podman machine rm -f`. Then delete the account, and start this
+   account's VM again with `./cs193v`.
+
+Run on 2026-10-18 (Apple silicon, 8 GB, podman 6.0.2, libkrun) with the main account's VM still
+up. Every step matched what it expected.
+
 ### §5.4 — WSL `--name` and `--no-launch`
 `wsl --install -d Ubuntu-26.04 --name CS193V --no-launch`
 *Expect:* succeeds on current WSL. If `--name` is unsupported, the fallback is

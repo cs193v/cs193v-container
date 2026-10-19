@@ -841,7 +841,7 @@ m="$(PATH="$SHIM:$PATH" bash -c '. "$1"; machine_start_detached >/dev/null 2>&1;
 assert_eq "i9:the-helper-ran-and-started-the-vm" "running" "$(vm_state)"
 assert_eq "i9:the-helper-leaves-the-callers-job-control-alone" "off" "$m"
 
-# I11: the helper called DIRECTLY, with a terminal on stdin -- as the installer will call it. Through
+# I11: the helper called DIRECTLY, with a terminal on stdin -- as the installer calls it (#543). Through
 # the launcher run_timeout's background job already hands it /dev/null (the mutation pass showed no
 # case there could see `</dev/null` go), so only a direct call can. podman 6.0.2 asks a question on
 # a terminal; from a background job that read stops it, and the start never finishes.

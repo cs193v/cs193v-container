@@ -1130,8 +1130,9 @@ machine_start_detached() {
     (
         # NEVER A TERMINAL ON 1 OR 2: nohup would answer one by writing nohup.out into the current
         # directory -- the student's course folder, which tunnel_start's comment already guards.
-        # The one caller, run_timeout, hands it files; a caller that hands it a terminal loses the
-        # output rather than littering. Inside the job, so the caller's own fds are untouched.
+        # Both callers hand it files -- run_timeout in the launcher, and the installer its setup
+        # log (#543); a caller that hands it a terminal loses the output rather than littering.
+        # Inside the job, so the caller's own fds are untouched.
         [ -t 1 ] && exec >/dev/null
         [ -t 2 ] && exec 2>/dev/null
         # THE CLOSES ARE A STATEMENT OF THEIR OWN, not redirections on the `exec nohup` line, and

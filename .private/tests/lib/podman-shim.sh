@@ -500,6 +500,36 @@ installer_tty() {                     # installer_tty KEYS SCRIPT [VAR=VALUE...]
     printf '%b' "$keys" | do_script 120 "$cmd" 2>&1
 }
 
+# THE FOURTH DOOR (#543): the installer as a JOB on a pty -- a lingering leader above it, the shape
+# a Terminal window has -- with stdin a fifo the caller writes into on fd 7, so a keystroke or a
+# polite close lands when the case decides rather than up front. installer_tty cannot do that: it
+# sends every key before the run and hands back no pid. The same two properties as the other three
+# doors, held by 10-static.sh the same way. The caller ends it: close fd 7, then kill $PTY_PID.
+#
+# SIGINT AT DEFAULT, reset in python before ptyrun runs: bash hands every `&` command SIGINT and
+# SIGQUIT ignored, and a shell cannot reset a signal that was ignored when it started. These are
+# 31-machine-start.sh's INTRESET lines.
+installer_job() {                     # installer_job SCRIPT [VAR=VALUE...] -> PTY_PID PTY_OUT, fd 7
+    local script="$1"; shift
+    local cmd a
+    mkdir -p "$SHIM/home"
+    printf '%s' "$SHIM" > "$SHIM_LAST"
+    PTY_IN="$SHIM/pty.in"; PTY_OUT="$SHIM/pty.out"
+    rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
+    cmd="env HOME='$SHIM/home' PATH='$SHIM:$PATH'"
+    for a in "$@"; do cmd="$cmd '$a'"; done
+    cmd="$cmd bash '$script'"
+    CS193V_PTY_JOB=1 "$DO_PY" -c 'import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])' "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" \
+        < "$PTY_IN" > "$PTY_OUT" 2>&1 &
+    PTY_PID=$!
+    # Held open on fd 7 so the pty never sees EOF; opened after the background started, so ptyrun
+    # does not inherit it, and its open is the rendezvous with ptyrun's.
+    exec 7>"$PTY_IN"
+}
+
 # THE THIRD DOOR: the script arrives ON STDIN, the way `curl -fsSL URL | bash` delivers it (#297).
 #
 # WHAT MAKES THIS A DIFFERENT DOOR RATHER THAN A FLAG ON installer_tty. Under a pipe, bash's own
