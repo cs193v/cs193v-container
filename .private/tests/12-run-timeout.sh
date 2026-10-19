@@ -650,7 +650,7 @@ rtp_closed() {                        # rtp_closed MODE -> runs the subject with
     RTP_UI="$PRIVATE/files/cs193v-ui.sh" RTP_MODE="$1" RTP_OUT="$RTP/report" \
         RTP_PIDFILE="$RTP/pidfile" bash "$RTP/subject.sh" 2>/dev/null
 }
-rtp_field() { sed -n "$1p" "$RTP/report" 2>/dev/null; }
+rtp_field() { run_checker sed -n "$1p" "$RTP/report"; }
 
 # THE PTY ARM'S RIG. pty_start + `kill -9` on the pty owner is exactly 70-sighup.sh's
 # force_quit_terminal: the master is destroyed first, so the kernel HUPs the session leader --
