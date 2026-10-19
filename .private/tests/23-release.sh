@@ -189,9 +189,11 @@ assert_eq "release:the-stage2-digest-is-the-staged-blob" \
 # AND THE .cmd IS STILL CRLF, which is not a tidiness check: cmd.exe's label scanner assumes a
 # two-byte terminator, so a rewrite that ate one carriage return makes `goto` fail by byte offset.
 # A `.*` to end-of-line in either sed would have done exactly that.
+# EACH SIDE THROUGH run_grep (#559): a .cmd neither grep could read counted nothing twice, and ""
+# equals "".
 assert_eq "release:the-cmd-keeps-its-crlf" \
-          "$(grep -c '' "$CASE/.private/install-cs193v-windows.cmd")" \
-          "$(grep -c $'\r$' "$CASE/.private/install-cs193v-windows.cmd")"
+          "$(run_grep -c '' "$CASE/.private/install-cs193v-windows.cmd")" \
+          "$(run_grep -c $'\r$' "$CASE/.private/install-cs193v-windows.cmd")"
 
 # ─── and the Windows bootstrap, which is the last link of the chain (#299) ────
 assert_eq "release:the-ps1-names-the-new-tag" "release-$NEW_V" "$(pget RepoTag)"
@@ -213,9 +215,12 @@ assert_eq "release:the-ps1-pins-the-staged-cmd-blob" \
 # equal for an innocent reason and assert_ne would go red while release.sh was correct -- or,
 # worse, a future fixture change could make them equal and leave this passing vacuously. The CRLF
 # check above is what rules that out, so this line depends on it and says so.
-assert_ne "release:the-ps1-does-not-pin-the-working-copy" \
-          "$(do_sha256 < "$CASE/.private/install-cs193v-windows.cmd" | awk '{print $1}')" \
-          "$(pget CmdSha256)"
+#
+# AND IT READS THE .cmd THROUGH A CHECKER, as that check does (#559): a .cmd the redirect could not
+# open hashed to "", which is not the pin either, so this passed on a file it never read.
+cmd_sha="$(run_checker do_sha256 "$CASE/.private/install-cs193v-windows.cmd")"
+cmd_sha="$(died_in "$cmd_sha"; printf '%s\n' "$cmd_sha" | awk '{print $1}')"
+assert_ne "release:the-ps1-does-not-pin-the-working-copy" "$cmd_sha" "$(pget CmdSha256)"
 
 # The .ps1 is the one published file nothing downstream hashes, so its own bytes are checked here
 # and nowhere else. ASCII because Invoke-RestMethod falls back to ISO-8859-1 without a charset;
