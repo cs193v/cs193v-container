@@ -126,8 +126,9 @@ done
 # ============================================================================
 hx_section "config integrity"
 FAKEBIN="$(hx_fake_binary claude)"
-# Second fixture: `claude` installed the npm way, as a script run by a node interpreter.
-# /proc then reports the interpreter, which is the failure mode worth documenting.
+# Second fixture: `claude` as a script run by a node interpreter, which /proc reports as the
+# interpreter. The image's own claude is a native ELF (tabname.bash says so, measured), so this is
+# the repackaging the hook guards against rather than the case the course runs today (#416).
 cp "$(readlink -f "$(command -v python3)")" "$FAKEBIN/node"
 printf '#!/usr/bin/env node\nimport time; time.sleep(300)\n' > "$FAKEBIN/claude-npm"
 chmod +x "$FAKEBIN/claude-npm"
@@ -502,12 +503,36 @@ hx_hex "$S" "$KEY_CTRL_D"
 hx_until 'probe_name' bash 8
 hx_expect_eq "tab label reverts to 'bash' when the process exits" "$(probe_name)" "bash"
 
+# SHIFT+TAB MUST REACH THE APP (#526). It is how a student leaves Claude Code's auto mode, which the
+# course keeps as the starting mode, and the docs tell them to press it -- so a binding that took
+# BTab would leave that advice naming a key the agent never sees. Read through `cat -v`; the pty's
+# own echo shows the same `^[[Z`, and either one means the bytes got past tmux.
+#
+# WAIT FOR THE MARKER, NOT THE LABEL, for the python3 reason above, and here it bit: sent once the
+# label read `cat`, the key reached bash's readline, which reads ahead and never echoed it. The
+# marker is printed after readline has returned the line, so from then on input queues for cat.
+# It is spelled in two halves on the command line so the typed text cannot satisfy the wait.
+hx_cmd "$S" "printf 'CAT-%s\n' READY; cat -v"
+hx_wait_fixed "$S" 'CAT-READY' 10 || true
+hx_hex "$S" "$KEY_SHIFT_TAB"
+hx_hex "$S" "$KEY_ENTER"
+if hx_wait_fixed "$S" '^[[Z' 8; then
+  hx_pass "SHIFT+TAB reaches the app in the pane"
+else
+  hx_fail "SHIFT+TAB reaches the app in the pane" \
+    "no ^[[Z on screen; its last lines: $(hx_cap "$S" | grep -v '^ *$' | tail -4)"
+fi
+hx_hex "$S" "$KEY_CTRL_D"
+hx_until 'probe_name' bash 8
+
 # FORK: THE REASON THE HOOK IS NOT OPTIONAL HERE.
 #
 # In the prototype this was an informational skip: a `#!/usr/bin/env node` script is reported
 # by /proc as `node`, but that machine's `claude` happened to be a native binary so nothing
-# was actually broken. This image installs Claude Code with `npm install -g`, so the script
-# case IS the real case, and `node` would be the label on most tabs in the course.
+# was actually broken. That is still true of this image: `npm install -g` lands a native ELF
+# (`bin/claude.exe`), which /proc reports as `claude` (#416). The script case is the one a
+# repackaging back to a node shim would bring, and `node` would then be the label on most tabs in
+# the course -- so it is kept, as insurance rather than as the real case.
 #
 # `claude-npm` is deliberately NOT on the tab-label list, so it still demonstrates the raw
 # behaviour -- and that is the point: the label is wrong exactly until a name is listed,
@@ -1769,10 +1794,12 @@ if hx_wait "$S2" '\+ NEW TAB' 12; then
   hx_until 'probe_wincount2' "$((c0 - 1))" 8
 
   # FORK: `claude` IS on the list now, so it can no longer stand in for "a command the hook
-  # ignores". That is the single most important divergence in this file, and it is not a
-  # test-only detail: Claude Code is installed here with `npm install -g`, so
-  # /usr/local/bin/claude is a script with a `#!/usr/bin/env node` shebang and /proc reports
-  # the INTERPRETER. Without the hook every Claude Code tab in the course reads `node`.
+  # ignores". It is on the list as insurance (#416): the image's claude is
+  # ~/.local/bin/claude, linked to the npm package's native `bin/claude.exe`, and /proc reports it
+  # as `claude` with no help from the hook. A repackaging back to a `#!/usr/bin/env node` shim
+  # would make /proc report the INTERPRETER, and every Claude Code tab in the course would read
+  # `node`. What would notice that repackaging is the ELF check in "the no-real-claude note
+  # recognises the image's own claude", not this fixture.
   #
   # So the claude case is now a positive assertion, using the fixture rather than the real
   # CLI -- see hx_fake_run for why that must never be a bare command name.

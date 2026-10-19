@@ -709,11 +709,11 @@ went (it only ever fired on the clean expiry, which lands when the countdown doe
 
 **The link is shown in a tmux popup, and stdout is now the fallback rather than the plan.**
 `open-url` used to print its box to stdout, which was fine while every caller inherited stdio.
-Claude Code (measured on 2.1.225) consults `$BROWSER` correctly, runs the stub, and *captures
-its stdout* — so the box went to a pipe nobody read and the student saw Claude's own long URL
-instead. That was issue #85, and the lesson is worth keeping: a `$BROWSER` handler's contract is
-*open a browser*, so its stdout is legitimately noise to whoever called it, and this stub cannot
-rely on being read.
+Claude Code (measured on 2.1.225, and again on 2.1.303) consults `$BROWSER` correctly, runs the
+stub, and *captures its stdout* — so the box went to a pipe nobody read and the student saw Claude's
+own long URL instead. That was issue #85, and the lesson is worth keeping: a `$BROWSER` handler's
+contract is *open a browser*, so its stdout is legitimately noise to whoever called it, and this
+stub cannot rely on being read.
 
 Writing to `/dev/tty` does escape the pipe — verified — and was still no good, because the box
 lands inside a full-screen TUI that repaints over it. What survives is a tmux popup: tmux draws
@@ -2459,6 +2459,34 @@ Playwright and Chromium (224 s), and a `CLAUDE_CODE_VERSION` bump, the pin most 
 not re-run the libraries. `--no-cache-dir` matters: pip's cache is 56 MB and would otherwise ship in
 the layer, the same reason `npm cache clean --force` runs in-layer two steps up.
 
+### ~~Claude Code's starting permission mode~~ — decided (issue #526)
+
+**Kept at Claude Code's own default, which is now auto mode.** From 2.1.283, an interactive session
+that no setting steers starts in auto mode on every plan: a classifier model reviews each action
+that is not a read or an edit in the working directory, and blocks what it judges risky instead of
+asking the student. `managed-settings.json` left `defaultMode` unset on the grounds that permission
+prompts are how a student learns what the agent wants to do; the premise moved under the file, not
+the file itself.
+
+Both fixes #526 proposed were declined:
+
+- **`"defaultMode": "default"`** would bring the prompts back, but a managed `defaultMode` outranks
+  the student's own settings, so it would also take away the one way a student has to make their
+  own choice stick.
+- **`"disableAutoMode": "disable"`** removes auto mode altogether. Measured on 2.1.225: it works,
+  and `--permission-mode auto` then falls back to Manual and makes no classifier calls.
+
+What leaving it unset buys: a student who wants Manual presses Shift+Tab, or puts
+`"permissions": {"defaultMode": "default"}` in `~/.claude/settings.json`, which is in the
+`cs193v-claude` volume and survives `--rebuild` (only `--rebuild --logout` clears it). What it
+costs: the starting mode floats with Claude Code, and floating is how #526 happened.
+`10-static.sh` pins both keys absent, so adding either is a visible decision, but nothing automated
+can see which mode a session starts in. `MANUAL.md` §8.7(a) is the detector.
+
+Deny rules resolve before the classifier in every mode, so the credential-store rules bind in auto
+mode as before. Auto mode is not universal: an organization with the HIPAA configuration, an
+organization that turns it off, or a model that does not support it starts the session in Manual.
+
 ### ~~Codex's sandbox posture~~ — decided (issue #71)
 
 **Resolved after staff used the tool.** `/etc/codex/managed_config.toml` now ships three keys, and
@@ -2471,11 +2499,13 @@ approvals_reviewer = "auto_review"
 ```
 
 The first two are codex's own defaults, written down rather than left implicit so an upstream
-default cannot move under the course. **The third is a deliberate divergence from the Claude Code
-policy beside it**, and the argument against it is on the record: `managed-settings.json` keeps
-Claude Code's prompts because answering them is the course's core skill, and the same reasoning
-says a student should answer codex's escalations. Course staff chose the reviewer subagent anyway,
-with the documented behaviour in hand. Recorded here so whoever revisits it knows it was a decision.
+default cannot move under the course. **The third was recorded as a deliberate divergence from the
+Claude Code policy beside it**, which kept Claude Code's prompts in front of the student because
+answering them was the course's core skill. Course staff chose the reviewer subagent anyway, with
+the documented behaviour in hand. It no longer diverges: Claude Code now starts in auto mode and the
+course keeps that (the entry above, #526), so both agents put most decisions to a reviewer model by
+default. They still differ in reach: codex asks its reviewer only when it wants out of its sandbox,
+while Claude Code's classifier sees anything beyond reads and working-directory edits.
 
 Three things learned against the real binary, all of which shape what the suite can and cannot
 promise:

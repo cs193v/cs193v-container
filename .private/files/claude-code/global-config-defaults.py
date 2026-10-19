@@ -11,8 +11,9 @@ the clipboard either. A message claiming a copy that did not happen is issue #66
 
 IT CANNOT BE A SETTING. `copyOnSelect` is not in Claude Code's settings schema at all; it
 is read from the GLOBAL CONFIG, ~/.claude.json. /etc/claude-code/managed-settings.json
-cannot carry it, and there is no environment variable for it (all 647 CLAUDE_CODE_* names
-in the shipped binary were enumerated; none touch the clipboard).
+cannot carry it, and there is no environment variable for it (every CLAUDE_CODE_* name in
+the shipped binary was enumerated, on 2.1.225 and again on 2.1.303, where `grep -ao` finds
+776 distinct names; none touch the clipboard).
 
 WHY IT RESOLVES THE PATH FIRST, and this is the trap that makes the file worth testing.
 rename(2) does NOT follow a symlink on its destination, and ~/.claude.json IS a symlink

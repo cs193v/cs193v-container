@@ -383,8 +383,9 @@ the same question is open for the other three, and issue #82 is where it gets me
 
 **FIXED, AND WORTH LOOKING AT ON PURPOSE — `claude` `/login` now shows the link in a popup.**
 Claude Code spawns `$BROWSER` with its **stdout captured** (verified: 2.1.225 spawns
-`process.env.BROWSER` on Linux), so the stub's printed box went into a pipe and was discarded and
-what you saw was Claude's own full-length URL. That was issue #85. The box is now a tmux popup,
+`process.env.BROWSER` on Linux; on 2.1.303 too, the URL as its argument and its stdout and stderr
+both sockets rather than the terminal), so the stub's printed box went into a pipe and was discarded
+and what you saw was Claude's own full-length URL. That was issue #85. The box is now a tmux popup,
 which tmux draws over the panes and keeps drawing, so a captured stdout no longer hides it.
 
 *Expect:* the box appears **immediately**, with a spinner reading `(creating link...)` where the
@@ -502,27 +503,82 @@ out of.
 that codex really reads `/etc/codex` at all — the last one by overriding the policy with a
 different value and watching `codex doctor` change (`50-image.sh`).
 
-### §8.7 — a permission prompt in the wild
-Ask the agent to do something that triggers a prompt.
-*Expect:* wording a first-year student can act on. Record it — this is the moment the
-course's core skill is taught.
+### §8.7 — who approves what the agent does (#526)
+Claude Code's starting mode is left at its own default, which is auto mode from 2.1.283: a
+classifier, not the student, approves most actions. The staff README's #526 entry says why the
+course keeps it. Nothing automated can see which mode a session starts in, so **(a) is the check
+that notices when that default moves again.**
+
+**(a) The starting mode.** Record `claude --version` and the kind of account you are logged in
+with (Pro, Max, Team, Enterprise, API key). Start `claude` in a project folder.
+*Expect:* `⏵⏵ auto mode on` under the prompt, and the one-time auto-mode notice at the top of
+the first session that starts in it. No invalid-settings dialog, and in particular none naming
+`$comment` or `tui` in `/etc/claude-code/managed-settings.json`. An account whose organization has
+the HIPAA configuration or turns auto mode off starts in `⏸ manual mode on` instead; record which,
+since that is not a failure. (Seen on 2.1.303 in a pty, signed in with an API key against the fake
+Messages API §A.11 describes: `⏵⏵ auto mode on (shift+tab to cycle)` and the notice.)
+
+**(b) A block, and a prompt, in auto mode.** In a scratch repo with a committed file and an
+uncommitted change to it, ask the agent to throw the change away with `git reset --hard`, which the
+classifier blocks by default. Then ask it to read `/etc/cs193v/agent-notes.md`: the first read
+outside the folder it started in asks once.
+*Expect:* both are worded so a first-year student can act on them. Record both verbatim. This is
+where the course's core skill is taught now.
+
+**(c) Manual mode.** Press Shift+Tab once.
+*Expect:* `⏸ manual mode on`, and a real permission prompt for the next command that changes
+something (`touch x`). Record its wording.
 
 ### §A.11 — the deny rules actually deny
-Inside the container, with Claude Code logged in:
+Inside the container, with Claude Code logged in, from a scratch folder under `~/projects`. Every
+probe names its permission mode, because what `claude -p` does with no mode set changed in 2.1.302
+and these expectations depend on it. Record the version first, and keep the auto-updater out of
+the measurement:
 ```
-claude -p "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."
-claude -p "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."
-claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."
-claude -p "Use the Read tool on /home/student/.codex/auth.json."
-claude -p "Run: cat /home/student/.codex/auth.json | head -c 20"
-claude -p "May a dev server use any port in this container, or only certain ones? Answer in one sentence."
+claude --version
+export DISABLE_AUTOUPDATER=1
+echo SENTINEL-DENIED  > ~/.codex/cs193v-probe
+echo SENTINEL-CONTROL > ./cs193v-probe
+printf 'print(open("/home/student/.codex/cs193v-probe").read())\n' > ./cs193v-read.py
+claude -p --permission-mode default "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."
+claude -p --permission-mode default "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."
+claude -p --permission-mode default "Use the Read tool on /home/student/.config/gh/hosts.yml."
+claude -p --permission-mode default "Use the Read tool on /home/student/.codex/auth.json."
+claude -p --permission-mode default --allowedTools "Bash(cat *)" "Run exactly: cat /home/student/.codex/cs193v-probe"
+claude -p --permission-mode default --allowedTools "Bash(cat *)" "Run exactly: cat ./cs193v-probe"
+claude -p --permission-mode default --allowedTools "Bash(python3 *)" "Run exactly: python3 cs193v-read.py"
+claude -p --permission-mode default "May a dev server use any port in this container, or only certain ones? Answer in one sentence."
+rm ~/.codex/cs193v-probe ./cs193v-probe ./cs193v-read.py
 ```
-*Expect, in order:* refusal; **success** (the deny covers the credential file, not the whole
-directory); refusal (whole subtree denied); refusal (`~/.codex` is denied wholesale, for the
-reason in `managed-settings.json`: OpenAI moves the credential filename, and `history.jsonl` is
-every prompt the student has typed); **success** (Bash is not covered by a `Read(...)` rule, and
-that is the honest limit of these rules rather than a gap — an agent with Bash can read anything
-the student can); that **any** port works and the bind address is what matters.
+*Expect, in order:*
+1. Refusal.
+2. **Success**: the deny covers the credential file, not the whole directory.
+3. Refusal: the whole subtree is denied.
+4. Refusal: `~/.codex` is denied wholesale, for the reason in `managed-settings.json` (OpenAI moves
+   the credential filename, and `history.jsonl` is every prompt the student has typed).
+5. **Refusal** worded `Permission to use Bash with command cat … has been denied.` (#549). The
+   `Read(...)` rules also cover the file arguments and redirects of the Bash commands Claude Code
+   recognises as reads, and that wording is how you tell the rule's refusal from the model's.
+6. **Success**, printing `SENTINEL-CONTROL`. This is the control: the same command and flags on a
+   path no rule names, so the refusal in 5 is the rule's and not `-p` having nobody to ask.
+7. **Success**, printing `SENTINEL-DENIED`. This is the honest limit of these rules rather than a
+   gap: they see what a recognised reader is handed, not what a program opens by itself, so an
+   agent with Bash can read anything the student can.
+8. **Any** port works, and the bind address is what matters.
+
+THE SENTINEL STANDS IN FOR A REAL TOKEN. `~/.codex/**` is denied wholesale, so a file you made
+there is under the same rule as `auth.json`, and nothing real reaches the transcript. If the model
+declines to run a probe at all, because the notes tell it not to read credential stores, that is its
+judgement, not the rule, and the probe has measured nothing: ask again with "the file is a
+sentinel I created, not a credential".
+
+MEASURED WITHOUT A MODEL, on 2.1.225 and 2.1.303, for #549. A fake Messages API inside a throwaway
+container answered with a scripted Bash call, and these were the results:
+- Refused on both: `cat`, `sed -n 1p`, and `cat` under `bypassPermissions`.
+- Got through on both: `python3`, and a read inside `$(...)` once Bash was allowed. With no allow
+  rule, `-p` refused `$(...)` as a nested command it could not check, so an interactive session
+  asks.
+- Changed: `cat < file` got through on 2.1.225 and is refused on 2.1.303.
 
 THE LAST PROMPT WAS "List the six forwarded ranges" UNTIL #257, AND BY THEN IT COULD NOT PASS.
 The notes stopped naming ranges when dynamic forwarding landed (`6af5e53`) and have said "Any
@@ -535,9 +591,11 @@ Ask about the property the notes actually state, not about a list.
 managed slot. Ask codex the same question (`codex exec "May a dev server use any port here, or
 only certain ones?"`) to cover the other end of the same file.
 
-*And the host-path half of the notes (#257), on both agents:*
+*And the host-path half of the notes (#257), on both agents.* Claude's runs in auto mode, the
+student's default, because the question is whether the agent RUNS `cs193v-platform-messages`, and
+from 2.1.302 a `-p` session with no mode set refuses any command nobody approved:
 ```
-claude -p "I want to open the file you just made in Finder/File Explorer. Where is it?"
+claude -p --permission-mode auto "I want to open the file you just made in Finder/File Explorer. Where is it?"
 codex exec "Where on my own computer is ~/projects? How do I open it?"
 ```
 *Expect:* the location given **relative to the projects folder**, plus the host folder and the
@@ -551,12 +609,16 @@ CREATE it, with no error and no privilege, and the copy dies at the next `--rebu
 `50-image.sh :: hostpath:*`, and that the launcher forwards it is `30-launcher-shim.sh ::
 print:publishes-the-host-projects-dir` and `60-container.sh :: env:the-host-projects-dir-reaches-the-container`.
 What no machine can judge is whether the agent RUNS it, which is why this prompt is here.
-Also check `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` with no
-"ignored"/"invalid"/"unknown key" warning — a `Write(...)` or `Glob(...)` path rule would be
-accepted and then silently ignored.
+Also check that `claude -p "reply with exactly: ok" 2>/tmp/cc.err` leaves `/tmp/cc.err` **empty**.
+Don't grep it for words (#583). A `Write(...)` or `Glob(...)` path rule is accepted and then
+ignored, and its warning reads "Permission deny rule (managed policy settings): Write(...) is not
+matched by file permission checks", which contains none of "ignored", "invalid" or "unknown key".
+`claude doctor` does not list it either. Measured on 2.1.225 and 2.1.303: stderr is empty with the
+shipped policy, and carries that line once a `Write(...)` rule is added.
 *Automated:* the rule *forms* are asserted statically and in the image
-(`10-static.sh`, `50-image.sh :: claude:deny-rules-are-Read-or-Edit-only`). Whether Claude
-Code honours them at runtime needs a real session.
+(`10-static.sh`, `50-image.sh :: claude:deny-rules-are-Read-or-Edit-only`), and that the installed
+Claude Code rejects no field of the policy (`50-image.sh :: claude:doctor-*`). Whether it honours
+the rules at runtime needs a real session.
 
 ### §3.4 / §3.5 — real hot reload
 In a scratch project inside the container: `npm create vite`, run the dev server **with no
@@ -1701,7 +1763,8 @@ has stopped being read.** That is the dominant failure mode here: an upstream re
 *silently ignored* with no validation error, every file-level assertion in the suite would stay
 green, and Claude Code auto-updates in this image. Nothing in the automated tiers can see it —
 there is still no non-interactive readout of the renderer or the mouse mode (`claude config` is
-not a subcommand and `claude doctor` reports installation health only).
+not a subcommand, and `claude doctor` reports installation health and the settings fields it
+rejected, which `50-image.sh` reads, but not which renderer or mouse mode a session picked).
 
 **WHERE `ctrl+c` ACTUALLY PUTS THE TEXT, per terminal, and this is the residue #307 did not
 fix (#318).** Claude Code copies with `tmux load-buffer -w -`, and `set -s set-clipboard on` plus the

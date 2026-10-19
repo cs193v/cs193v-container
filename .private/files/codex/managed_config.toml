@@ -25,12 +25,12 @@
 #       WHO answers. `user` is the default and puts the question to the student; `auto_review`
 #       hands it to codex's reviewer subagent instead.
 #
-#       THIS IS A DELIBERATE DIVERGENCE from the Claude Code policy beside it, and it is the one
-#       thing in this file that is not simply a written-down default. managed-settings.json keeps
-#       Claude Code's permission prompts on the grounds that they are how a student learns what
-#       an agent wants to do -- and the same argument says a student should answer codex's
-#       escalations too. Course staff chose the reviewer subagent anyway. Recorded here rather
-#       than argued: whoever revisits this should know it was a decision and not an oversight.
+#       THIS IS A DECISION, and the one thing in this file that is not simply a written-down
+#       default. It was recorded as a divergence from the Claude Code policy beside it, which kept
+#       Claude Code's permission prompts in front of the student; it no longer is one. Claude Code
+#       now starts in auto mode, where a classifier answers instead of the student, and the course
+#       keeps that default (#526). Both agents now put most questions to a reviewer model. Whoever
+#       revisits this should know it was chosen, and that it now agrees with Claude Code's policy.
 #
 # What is deliberately ABSENT:
 #   requirements.toml     - no HARD constraints are shipped. These are managed DEFAULTS, and a
