@@ -7,7 +7,7 @@ nothing, and nothing contains no needle (#437, #476, #539, #559). run_checker, r
 lint_grep turn that failure into $CHECKER_DIED, which the assertions refuse; this finds the values
 that do not go through one of them.
 
-Four shapes, each a line `FILE:LINE: WHY`:
+Five shapes, each a line `FILE:LINE: WHY`:
   bare       the value is a reader's own output: "$(cat F)", "$(grep x F | ...)", or a
              pipe with a later `grep -f FILE` in it, which reads FILE.
   filtered   a checked reader piped into a stage that keeps only some lines, which can drop the
@@ -15,6 +15,7 @@ Four shapes, each a line `FILE:LINE: WHY`:
   var-filtered  the same through a variable this file filled from a checked reader, without
              died_in in front: "$(printf '%s\\n' "$v" | grep x)".
   var-bare   the value is a variable this file filled from a bare reader, or printf of one.
+  count      assert_eq NAME "0" over a piped wc or grep -c whose input can fail (#586).
 
 A file it cannot read, and a statement it cannot parse, print MARKER and why, so that neither can
 pass as "found nothing". Comment lines are skipped. The parser is a shell tokenizer for exactly
@@ -362,6 +363,34 @@ def why(value, sets, pos, helpers):
     return None
 
 
+def is_count(st):                     # wc, or grep -c
+    cmd = first_cmd(st)
+    return cmd == 'wc' or (cmd in ('grep', 'egrep', 'fgrep') and
+                           any(re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', w) for w in st[1:]))
+
+
+# A COUNT OF NOTHING IS 0 (#586), so assert_eq NAME "0" over a piped count passes on a producer
+# that failed -- and a checked one does not help, because the count turns the marker line into a
+# number. died_in in front is the way through. A printf of what the test computed itself, rather
+# than read, has no read to fail.
+def why_count(value, sets, pos):
+    body = subst_body(value)
+    if body is None:
+        return None
+    sts = stages(body)
+    head = first_cmd(sts[0][1])
+    counted = [st for sep, st in sts[1:] if sep == '|' and is_count(st)]
+    if head == 'died_in' or not counted:
+        return None
+    if head == 'printf':
+        read = [v for v in filter(None, (unquote_var(w) for w in sts[0][1][1:]))
+                if (last_set(sets, v, pos) or ('other',))[0] in ('bare', 'checked')]
+        if not read:
+            return None
+        return f"count: ${read[0]} reaches {first_cmd(counted[0])} without died_in"
+    return f"count: {first_cmd(counted[0])} counts 0 when {head} fails"
+
+
 def scan(path, text, marker, lib_helpers):
     line_of = lambda i: text.count('\n', 0, i) + 1
     own = definitions(text)
@@ -379,10 +408,14 @@ def scan(path, text, marker, lib_helpers):
             ws = words(text, m.start(1), 4)
             if len(ws) < 4:
                 continue
-            # assert_eq passes on empty only when it expects empty; assert_ne only when it does not.
-            if (fn == 'assert_eq') != (ws[2] in ('""', "''")):
+            # assert_eq passes on empty only when it expects empty, or on a count of nothing when it
+            # expects 0; assert_ne passes on empty only when it does not expect empty.
+            if fn == 'assert_eq' and ws[2] in ('"0"', "'0'", '0'):
+                w = why_count(ws[3], sets, m.start(1))
+            elif (fn == 'assert_eq') != (ws[2] in ('""', "''")):
                 continue
-            w = why(ws[3], sets, m.start(1), helpers)
+            else:
+                w = why(ws[3], sets, m.start(1), helpers)
         except Unparsed as e:
             print(f"{path}:{line_of(m.start(1))}: {marker} (could not parse this {fn}: {e})")
             continue

@@ -187,8 +187,10 @@ assert_ne       "dev-args:prints-something"            ""                  "$dev
 assert_contains "dev-args:every-word-reaches-run-line" "$dev_args_joined" \
                 "$(launcher --dev-print-command)"
 # One word per line is the contract 16-args-parse.sh relies on to see a word boundary at all.
+# THROUGH run_checker (#586): a launcher that failed printed no lines, and none has a space in it.
+dev_args="$(run_checker launcher --dev-args)"
 assert_eq "dev-args:one-word-per-line" "0" \
-    "$(launcher --dev-args | grep -c '[[:space:]]' || true)"
+    "$(died_in "$dev_args"; printf '%s\n' "$dev_args" | grep -c '[[:space:]]')"
 # ─── refuses to run as root  (§1.5) ────────────────────────────────────────────
 shim_new
 shim_fake_id 0 root

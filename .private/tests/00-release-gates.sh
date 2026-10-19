@@ -349,8 +349,11 @@ elif curl -fsSL --retry 3 -o "$ps1_tmp/win.cmd" "$cmd_url" 2>"$ps1_tmp/curl.err"
     # to cmd.exe -- whose label scanner assumes a two-byte terminator. If GitHub ever served CRLF
     # the conversion would still be correct (it normalises first, deliberately), but the pin would
     # be wrong, so this records the assumption rather than leaving it implied.
+    # THROUGH run_checker (#586): a copy that could not be read had no CRs in it either.
+    served_cmd="$(run_checker cat "$ps1_tmp/win.cmd")"
     assert_eq "winboot:the-served-cmd-is-lf" "0" \
-              "$(do_tr -dc '\r' < "$ps1_tmp/win.cmd" | wc -c | do_tr -d ' ')"
+              "$(died_in "$served_cmd"; printf '%s' "$served_cmd" | do_tr -dc '\r' | wc -c \
+                 | do_tr -d ' ')"
 else
     ps1_net="$(curl_skip_why "$?" "the .cmd")"   # $? is the failed curl's, as in §1
     if [ -n "$ps1_net" ]; then

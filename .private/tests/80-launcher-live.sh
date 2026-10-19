@@ -597,7 +597,10 @@ else
 fi
 LV --rebuild >/dev/null 2>&1
 # The container publishes nothing; the 46 forwards live on the host, in one ssh process.
-assert_eq "drift:restored-config-publishes-nothing" "0" "$(podman port "$NAME" | wc -l | do_tr -d ' ')"
+# THROUGH run_checker (#586): a podman port that failed printed no mappings either.
+pmaps="$(run_checker podman port "$NAME")"
+assert_eq "drift:restored-config-publishes-nothing" "0" \
+          "$(died_in "$pmaps"; printf '%s' "$pmaps" | grep -c .)"
 
 # INVERTED BY #41. This used to assert 46 forwards immediately after --rebuild, because a rebuild
 # left the container running with a fresh tunnel. Maintenance verbs now stop what they built --
@@ -922,9 +925,11 @@ elif [ -n "$CTL" ]; then
     #     already carries a comment about a fallback that "could never match"; the same lesson
     #     had not reached these two lines. `ss` inside the container is fine -- the image
     #     installs iproute2 -- and that is the copy this now uses.
+    # THROUGH run_checker (#586): an exec that failed listed no listeners, and counted 0 of them.
+    rf_ss="$(run_checker podman exec "$NAME" ss -ltn)"
     assert_eq "tunnel:refused-forward-creates-no-listener" "0" \
-              "$(podman exec "$NAME" ss -ltn 2>/dev/null \
-                 | do_awk '{print $4}' | grep -cE ":$RFWD_PORT\$" || true)"
+              "$(died_in "$rf_ss"; printf '%s\n' "$rf_ss" \
+                 | do_awk '{print $4}' | grep -cE ":$RFWD_PORT\$")"
     # ...and it must not be usable as a proxy to anywhere but the container's own loopback.
     #
     # THE FORWARD IS ESTABLISHED BEFORE ANYTHING MEASURES IT (#194), and the pair it straddles is
