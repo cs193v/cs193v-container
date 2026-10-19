@@ -807,8 +807,12 @@ assert_says_key "consent:explains-why"        need.subuid.why "$out" "$ICAT"
 # The claim that replaces it is stronger, because it looks at the disk rather than the words:
 # no student tree (above) and no temp tree (here). 26-installer-sandbox.sh asserts the same pair
 # on a real Linux machine through ===BOOT-TMP===.
+#
+# THE DIRECTORY IS LISTED AND THE NAME LOOKED FOR, not the glob ls'd: an ls that could not read
+# $TMP/boot-consent printed nothing too, and nothing was the answer this wants (#559).
+boot_left="$(run_checker ls -A "$TMP/boot-consent")"
 assert_eq "consent:declining-leaves-no-temp-tree" "" \
-          "$(ls -d "$TMP/boot-consent"/cs193v-install.* 2>/dev/null)"
+          "$(died_in "$boot_left"; printf '%s\n' "$boot_left" | grep '^cs193v-install\.')"
 else
 skip_linux_arm "consent:non-tty-declines" "consent:non-tty-exits-2" \
                "consent:declining-creates-no-directory" "consent:names-what-it-wants" \
@@ -1234,7 +1238,7 @@ UM_COUNT=$(( UM_END - UM_START + 1 ))
 # the fixture had simply been seeded with the answer. Asserted empty before, and a CONTROL root
 # that usermod is never pointed at is asserted still empty after -- so a pass needs the command
 # to have done it.
-assert_eq "usermod:the-synthetic-root-starts-with-no-range" "" "$(cat "$UM/etc/subuid")"
+assert_eq "usermod:the-synthetic-root-starts-with-no-range" "" "$(run_checker cat "$UM/etc/subuid")"
 mkdir -p "$TMP/control/etc"; : > "$TMP/control/etc/subuid"
 
 if usermod --prefix "$UM" --add-subuids "$UM_RANGE" --add-subgids "$UM_RANGE" student \
@@ -1248,7 +1252,7 @@ fi
 #    failure much later, inside podman.
 assert_eq "usermod:writes-the-range-into-subuid" "student:$UM_START:$UM_COUNT" "$(cat "$UM/etc/subuid")"
 assert_eq "usermod:writes-the-range-into-subgid" "student:$UM_START:$UM_COUNT" "$(cat "$UM/etc/subgid")"
-assert_eq "usermod:left-the-control-root-alone"  "" "$(cat "$TMP/control/etc/subuid")"
+assert_eq "usermod:left-the-control-root-alone"  "" "$(run_checker cat "$TMP/control/etc/subuid")"
 
 # 2. THE WRITTEN FORM IS WHAT THE LAUNCHER LATER GREPS FOR, and this is the one place both halves
 #    are visible at once. setup_subuid writes the file; cs193v:1073 reads it back with
@@ -1846,7 +1850,11 @@ probe_setup absent
 NOSUDO="$SHIM/farm-nosudo"; mkdir -p "$NOSUDO"
 ln -s "$IFARM"/* "$NOSUDO/" 2>/dev/null
 rm -f "$NOSUDO/sudo" "$SHIM/sudo"
-assert_eq "password:the-no-sudo-farm-really-has-no-sudo" "" "$(ls "$NOSUDO/sudo" 2>/dev/null)"
+# BY NAME IN A LISTING OF THE FARM, which sees a dangling sudo link as `ls "$NOSUDO/sudo"` did and
+# `[ -e ]` would not -- and which, unlike that ls, says so when it could not read the farm (#559).
+nosudo_ls="$(run_checker ls -A "$NOSUDO")"
+assert_eq "password:the-no-sudo-farm-really-has-no-sudo" "" \
+          "$(died_in "$nosudo_ls"; printf '%s\n' "$nosudo_ls" | grep -x 'sudo')"
 out="$(installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course-probe.tar.gz" CS193V_DIR="$TMP/nosudo" PATH="$SHIM:$NOSUDO")"
 assert_says_key "password:no-sudo-says-why" err.no-sudo "$out" \
                 "$PRIVATE/course-install-messages.txt"
@@ -3258,8 +3266,8 @@ assert_not_match "aptbox:the-bar-does-not-fill-while-it-runs" \
 # restoring "the old check" would produce. The digest's own shape and position are pinned in the
 # windows: block below.
 assert_eq "installer:the-stage-two-token-is-gone" "" \
-          "$(grep -l 'CS193V-INSTALLER-COMPLETE' "$PRIVATE/install-cs193v.sh" \
-             "$PRIVATE/install-cs193v-windows.cmd" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+          "$(run_grep -l 'CS193V-INSTALLER-COMPLETE' "$PRIVATE/install-cs193v.sh" \
+             "$PRIVATE/install-cs193v-windows.cmd" | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── the Windows stage-one script ──────────────────────────────────────────────
 # The .cmd cannot be EXECUTED here -- that is 27-installer-windows.sh, which drives it under
@@ -3275,7 +3283,7 @@ W=$PRIVATE/install-cs193v-windows.cmd
 # The whole file with \r stripped, read once here rather than at each block that wants it. It used
 # to be read halfway down, which silently made it the empty string for anything above that point:
 # every extraction from it matched nothing and every assert_not_contains against "" passed.
-WCMD="$(sed 's/\r$//' "$W")"
+WCMD="$(run_checker sed 's/\r$//' "$W")"
 assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
 # ─── the .cmd reader every block below shares ──────────────────────────────────
 # SOURCED HERE AND NOT FURTHER DOWN (#232). It used to sit beside the cmdlint_* rules near the end
@@ -3389,7 +3397,7 @@ assert_eq "windows:the-digest-override-precedes-the-probe" "yes" \
 # `curl: (6) Could not resolve host ...` line belongs in the window a student pastes to staff.
 # The first assertion is what keeps the second honest -- on a file with no download line at all,
 # a "no redirection found" check would pass for free.
-curl_line="$(sed 's/\r$//' "$W" | grep -n 'curl -fsSL' || true)"
+curl_line="$(run_grep -n 'curl -fsSL' "$W" | sed 's/\r$//')"
 assert_match "windows:downloads-the-shared-installer" \
              '\-u root \-e curl -fsSL --retry 10 --retry-delay 3 -o %STAGE2% %INSTALLER_URL%$' "$curl_line"
 assert_not_match "windows:curl-diagnostics-reach-the-student" '>' "$curl_line"
@@ -3486,7 +3494,7 @@ assert_eq "windows:the-provisioning-sequence-is-in-order" "sorted" \
 # deliberately -- the download, so a re-run can overwrite its own root-owned file; the probes and
 # the root pass, so they mean the same thing whichever way /etc/wsl.conf has been left. The last
 # call must NOT, or the whole point of the split is gone.
-stage2_full="$(sed 's/\r$//' "$W" | grep -- '-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' | head -1)"
+stage2_full="$(run_grep -m 1 -- '-e env %XENV%CS193V_WINDOWS=1 bash %STAGE2%' "$W" | sed 's/\r$//')"
 assert_ne "windows:the-student-pass-line-is-there" "" "$stage2_full"
 assert_not_contains "windows:the-student-pass-is-not-root" "-u root" "$stage2_full"
 assert_contains "windows:the-root-pass-is-root" "-u root" \
@@ -3599,8 +3607,11 @@ assert_eq "winboot:the-repo-triple-composes-the-url" "1" \
 # than a comment, because the wrong form looks more idiomatic than the right one.
 assert_eq "winboot:the-refusal-exists" "1" \
           "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -c 'HKEY_USERS.S-1-5-19')"
+# THE CODE LINES, READ ONCE THROUGH A CHECKER for the absence checks below. Each one greps for
+# what must not be there, and a grep keeps no line of a sed that could not read $P (#559).
+ps_code="$(run_checker sed -e 's/\r$//' -e '/^[[:space:]]*#/d' "$P")"
 assert_eq "winboot:it-does-not-use-Test-Path-for-elevation" "" \
-          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep 'Test-Path.*S-1-5-19')"
+          "$(died_in "$ps_code"; printf '%s\n' "$ps_code" | grep 'Test-Path.*S-1-5-19')"
 # UNCONDITIONAL, the same shape as windows:the-refusal-is-not-conditional above. An identity
 # comparison here would hand every path below to whoever answered a UAC prompt.
 #
@@ -3623,7 +3634,7 @@ assert_ok "winboot:the-refusal-precedes-every-effect" \
 # UPPER-case hex, and every digest this project publishes is lower-case. Measured on
 # 5.1.26100.9444: -cne here would refuse every correct download, on every machine, always.
 assert_eq "winboot:the-comparison-is-case-insensitive" "" \
-          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -E '\-c(ne|eq) ')"
+          "$(died_in "$ps_code"; printf '%s\n' "$ps_code" | grep -E '\-c(ne|eq) ')"
 # CHECKED FIRST, CONVERTED SECOND. The pin is of the bytes GitHub served; converting to CRLF
 # before hashing would check something GitHub never sent, and the published number would be one
 # nobody could reproduce with `git cat-file blob`.
@@ -3647,7 +3658,7 @@ assert_ok "winboot:it-converts-lf-to-crlf" \
 # it downloads one file, checks it, and starts it. If wsl.exe is ever named here, the split has
 # stopped being real and the deleted assertion's reasoning needs revisiting rather than patching.
 assert_eq "winboot:it-installs-nothing-itself" "" \
-          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep -i 'wsl')"
+          "$(died_in "$ps_code"; printf '%s\n' "$ps_code" | grep -i 'wsl')"
 # ONE FOLDER, AND IT IS THE ONE THE INSTALLER ALREADY OWNS (cs193v.ico lives there). The RunOnce
 # entry the .cmd writes names this file by absolute path across a reboot, so it has to persist:
 # %TEMP% is emptied by Storage Sense out of the box (measured: StoragePolicy 01=1, 04=1) and
@@ -3655,7 +3666,7 @@ assert_eq "winboot:it-installs-nothing-itself" "" \
 # %APPDATA% roams, so a domain profile would copy 92 KB at every sign-in; %ProgramData% needs an
 # administrator, which setup refuses to be.
 assert_eq "winboot:it-writes-only-under-LOCALAPPDATA" "" \
-          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' \
+          "$(died_in "$ps_code"; printf '%s\n' "$ps_code" \
              | grep -E '\$env:(TEMP|TMP|APPDATA|USERPROFILE|ProgramData)')"
 assert_contains "winboot:it-works-in-the-installers-own-folder" 'Join-Path $env:LOCALAPPDATA "CS193V"' \
                 "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep 'Join-Path \$env:LOCALAPPDATA')"
@@ -3669,7 +3680,7 @@ assert_contains "winboot:it-passes-one-argument-string" '/s /c' \
 # No pipes, matching the .cmd's rule. Comments are stripped first: the header quotes both
 # `irm | iex` and `curl | bash`, which is the trap cmdlint_bcdedit_writes records.
 assert_eq "winboot:it-has-no-pipes" "" \
-          "$(sed 's/\r$//' "$P" | grep -v '^[[:space:]]*#' | grep '|')"
+          "$(died_in "$ps_code"; printf '%s\n' "$ps_code" | grep '|')"
 
 
 # CRLF is not a tidiness preference. cmd.exe reads a batch file in 512-byte chunks and its label
@@ -3880,7 +3891,7 @@ assert_match "windows:an-elevated-run-is-refused" \
 # conditional is exactly what was removed. Neither can be seen by running the file.
 assert_not_match "windows:the-refusal-is-not-conditional" \
                  '^if %errorlevel%' \
-                 "$(printf '%s\n' "$WCMD" | sed -n "$((reg_ln + 2))p")"
+                 "$(died_in "$WCMD"; printf '%s\n' "$WCMD" | sed -n "$((reg_ln + 2))p")"
 assert_eq "windows:elevation-is-asked-about-in-one-place" "1" \
           "$(_cmdlint_commands "$W" | awk -F'\t' '$4 ~ /S-1-5-19/ { n++ } END { print n + 0 }')"
 # IT REFUSES BEFORE IT LOOKS AT ANYTHING, so a run that is about to be refused has not read the
@@ -3958,7 +3969,7 @@ assert_eq "windows:the-prompt-precedes-every-per-user-step" "sorted" \
 # Derived by parsing the span rather than from a list typed here, so a per-user call added to that
 # arm later fails on the day it lands.
 assert_eq "windows:the-elevated-arm-touches-nothing-per-user" "" \
-          "$(printf '%s\n' "$WCMD" \
+          "$(died_in "$WCMD"; printf '%s\n' "$WCMD" \
              | awk '/^:installwsl$/ { inarm = 1 }
                     inarm && /^exit \/b 0$/ { inarm = 0; next }
                     inarm && /%APPDATA%|%LOCALAPPDATA%|%PROBE%|-l -q|--install -d|-d %DISTRO%|CreateShortcut|Remove-Item|%STAGE2%/ \
@@ -4379,7 +4390,7 @@ fi
 # EVERY TOKEN HERE WAS MEASURED, and an earlier design that opened the fd in the typed command
 # instead could block the waiter forever. Comments stripped first, because the helper documents
 # its own rules and a substring search would match the documentation -- 10-static.sh:13.
-helper_code="$(sed 's/#.*//' "$PRIVATE/macapp/cs193v-run" 2>/dev/null)"
+helper_code="$(run_checker sed 's/#.*//' "$PRIVATE/macapp/cs193v-run")"
 assert_ne       "helper:code-survived-comment-stripping" "" "$(printf '%s' "$helper_code" | do_tr -d ' \n')"
 assert_contains "helper:opens-the-fifo-read-write"   '9<>'  "$helper_code"
 # AND IT OPENS THAT FIFO BEFORE ANYTHING THAT CAN FAIL, which is an ORDERING and so needs an
@@ -4441,7 +4452,7 @@ if wait_until 10 waiter_in_open "$hreader"; then
     if wait_until 10 pid_is_gone "$hreader"; then
         pass      "helper:releases-the-waiter-when-it-fails-before-the-launcher"
         assert_eq "helper:sends-no-verdict-on-an-early-failure" "" \
-                  "$(cat "$hdir/verdict" 2>/dev/null)"
+                  "$(run_checker cat "$hdir/verdict")"
     else
         fail "helper:releases-the-waiter-when-it-fails-before-the-launcher" \
              "the helper exited $hrc against a missing course directory and the reader was STILL
@@ -4639,7 +4650,7 @@ assert_contains "win-shim:says-where-it-looked" "$windir" "$moved_out"
 # its child -- inside the process group that a window close signals, and not the session leader,
 # which is the one shape in which #170 is deterministic. Comments stripped first for the reason
 # mac-app:never-execs records.
-shim_code="$(sed 's/#.*//' "$SHIM" 2>/dev/null)"
+shim_code="$(run_checker sed 's/#.*//' "$SHIM")"
 assert_ne           "win-shim:code-survived-comment-stripping" "" "$(printf '%s' "$shim_code" | do_tr -d ' \n')"
 assert_not_contains "win-shim:never-execs" "exec" "$shim_code"
 
