@@ -654,8 +654,9 @@ assert_eq   "win-portal:never-runs-bash"           "0" "$(wine_argv_count '\-e b
 wine_new
 wine_list CS193V
 wine_body altered
-assert_ne "win-altered:the-body-really-differs" \
-          "$(do_sha256 "$PRIVATE/install-cs193v.sh" | awk '{print $1}')" "$(wine_body_digest)"
+alt_src_sha="$(run_checker do_sha256 "$PRIVATE/install-cs193v.sh")"
+alt_src_sha="$(died_in "$alt_src_sha"; printf '%s\n' "$alt_src_sha" | awk '{print $1}')"
+assert_ne "win-altered:the-body-really-differs" "$alt_src_sha" "$(wine_body_digest)"
 assert_eq "win-altered:the-body-is-the-same-length" \
           "$(wc -c < "$PRIVATE/install-cs193v.sh" | do_tr -d ' ')" \
           "$(wc -c < "$WINE_CASE/stage2.src" | do_tr -d ' ')"
