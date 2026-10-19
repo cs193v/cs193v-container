@@ -70,9 +70,22 @@ shim_watch() {                        # shim_watch LINE...
     : > "$SHIM/watch_alive"
 }
 
-shim_log()  { cat "$SHIM/argv.log" 2>/dev/null; }
+# THROUGH A CHECKER, and so are sudo_log, installer_log and shim_curl_log (#559). What they are
+# asked is mostly what a run did NOT do, and a cat that could not read its log printed nothing --
+# the answer each of those checks wants. Each log exists from the moment its fake does, and the
+# fakes only append: shim_new creates argv.log and sudo.log, shim_fake_curl creates curl.log. So
+# "never called" is an empty file, and a missing one is a fixture that went wrong.
+shim_log()  { run_checker cat "$SHIM/argv.log"; }
+# A log in the shim of the most recent installer run, found through $SHIM_LAST for the #76 reason
+# given where that is defined. A $SHIM_LAST that cannot be read fails too, rather than becoming a
+# cat of "/sudo.log" that prints nothing.
+shim_last_log() {                     # shim_last_log LOG -> that log, or the checker's marker
+    local d
+    d="$(run_checker cat "$SHIM_LAST")"
+    died_in "$d" || run_checker cat "$d/$1"
+}
 # What the installer WOULD have run as root, from the most recent installer_host run.
-sudo_log()  { cat "$(cat "$SHIM_LAST" 2>/dev/null)/sudo.log" 2>/dev/null; }
+sudo_log()  { shim_last_log sudo.log; }
 # And the digest of every file it would have handed `installer -pkg`, one line per call (#350).
 installed_digests() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/installed.sha256" 2>/dev/null; }
 shim_clear_log() { : > "$SHIM/argv.log"; }
@@ -410,7 +423,7 @@ installer_host_rc() {                 # installer_host_rc SCRIPT [VAR=VALUE...] 
 }
 
 # argv.log from the most recent installer_host run, whichever subshell it happened in.
-installer_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/argv.log" 2>/dev/null; }
+installer_log() { shim_last_log argv.log; }
 
 # The same door, through a real pty. Needed because menu() deliberately takes the safe
 # default when stdin or stdout is not a terminal, so with no tty ask_consent DECLINES and
@@ -840,7 +853,7 @@ INNER
 # THROUGH $SHIM_LAST, like sudo_log above and for the #76 reason its comment records: every call
 # site is `out="$(... installer_tty ...)"`, and a reader that trusted $SHIM would silently read
 # the PREVIOUS case's log, which is a pass.
-shim_curl_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/curl.log" 2>/dev/null; }
+shim_curl_log() { shim_last_log curl.log; }
 shim_wget_log() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/wget.log" 2>/dev/null; }
 
 # The same receipt shim_fake_pkgutil writes, except that it does not exist until
