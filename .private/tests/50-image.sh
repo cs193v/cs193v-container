@@ -1449,18 +1449,18 @@ assert_eq "notes:not-student-writable" "ok" \
 # need the internet, and because a codex that phoned home on startup would be worth knowing about.
 assert_ok "codex:runs-as-the-student-with-no-network" \
           sh -c "$VT_RUN --rm --network=none --entrypoint sh '$TEST_IMAGE' -c 'codex --version'"
-record    "codex:version" "$(R 'codex --version 2>&1' | head -1)"
+codex_version="$(R 'codex --version 2>&1' | head -1)"
+record    "codex:version" "$codex_version"
 # The pin took effect. Asserted rather than recorded: a floating version means two students in
 # one lab section get different software, which 00-release-gates.sh guards in the recipe and this
 # guards in the artifact.
 #
-# THE PIN IS CHECKED FOR A SHAPE FIRST, AND THE VERSION IS COMPARED WHOLE. This was assert_contains,
-# which passes on an empty needle, so a sed that found no ARG line made it green having compared
-# nothing; and a substring, so a pin of 0.14 passed on an installed 0.148.0 (#582).
+# THE VERSION IS COMPARED WHOLE, AND A PIN THE SED CANNOT FIND IS A SENTINEL. This was
+# assert_contains, which passes on an empty needle, so a sed that found no ARG line made it green
+# having compared nothing; and a substring, so a pin of 0.14 passed on an installed 0.148.0 (#582).
 codex_want="$(sed -n 's/^ARG CODEX_VERSION=\(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
-assert_match "codex:pin-looks-like-a-version" '^[0-9]+\.[0-9]+\.[0-9]+$' "$codex_want"
-assert_eq "codex:installed-version-matches-the-pin" "$codex_want" \
-          "$(R 'codex --version 2>&1' | awk '{ print $NF }')"
+assert_eq "codex:installed-version-matches-the-pin" "${codex_want:-NO-PIN-IN-CONTAINERFILE}" \
+          "$(printf '%s\n' "$codex_version" | awk '{ print $NF }')"
 # System bubblewrap. NOT a sandbox assertion: no sandbox policy is shipped, and Anthropic's own
 # docs say bwrap cannot mount a fresh /proc in an unprivileged container. This is here because
 # without the package codex prints "could not find system bubblewrap ... install bubblewrap with
@@ -1494,11 +1494,9 @@ codex_keys="$(R "python3 -c 'import tomllib;[print(k) for k in tomllib.load(open
 assert_eq "codex:policy-has-exactly-the-three-keys" \
           "approval_policy approvals_reviewer sandbox_mode" "$codex_keys"
 
-# approvals_reviewer = auto_review is a DECISION, recorded until #526 as a divergence from the
-# Claude Code policy, which kept its prompts in front of the student. Claude Code now starts in auto
-# mode and the course keeps that, so both agents put most questions to a reviewer model. It is
-# asserted here so the decision stays on the record rather than drifting by accident in either
-# direction. See the staff README.
+# approvals_reviewer = auto_review is a DECISION rather than a default (the staff README, #71 and
+# #526). It is asserted here so the decision stays on the record rather than drifting by accident
+# in either direction.
 codex_values="$(R "python3 -c 'import tomllib;d=tomllib.load(open(\"$CODEX_IMG_POLICY\",\"rb\"));print(d[\"sandbox_mode\"],d[\"approval_policy\"],d[\"approvals_reviewer\"])'")"
 assert_eq "codex:policy-is-workspace-write-on-request-auto-review" \
           "workspace-write on-request auto_review" "$codex_values"
@@ -1540,13 +1538,15 @@ rm -rf "$codex_probe"
 # key would leave the course shipping a setting that does nothing.
 
 # ─── Claude Code ───────────────────────────────────────────────────────────────
+# ONE CONTAINER FOR THE SHIPPED IMAGE'S CLAUDE: its version line, then `claude doctor`'s report,
+# which the policy checks further down read too. Offline, because neither may need the internet.
+cc_shipped="$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" \
+    -c 'claude --version 2>&1; timeout 60 claude doctor </dev/null 2>&1' 2>&1)"
 # The pin took effect (#569), for codex's reason above: this is a course about using Claude Code,
-# so two versions in one lab section is a skew in the subject being taught. Same shape as codex's:
-# the pin's shape first, so a sed that finds nothing cannot pass, then the version word whole.
+# so two versions in one lab section is a skew in the subject being taught. Same shape as codex's.
 claude_want="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=\(.*\)/\1/p' "$PRIVATE/Containerfile" | head -1)"
-assert_match "claude:pin-looks-like-a-version" '^[0-9]+\.[0-9]+\.[0-9]+$' "$claude_want"
-assert_eq "claude:installed-version-matches-the-pin" "$claude_want" \
-          "$(R 'claude --version 2>&1' | awk '{ print $1 }')"
+assert_eq "claude:installed-version-matches-the-pin" "${claude_want:-NO-PIN-IN-CONTAINERFILE}" \
+          "$(printf '%s\n' "$cc_shipped" | sed -n 1p | awk '{ print $1 }')"
 
 # ─── Claude Code policy, in /etc so a rebuild restores it ──────────────────────
 # Deliberately NOT under ~/.claude, which is a named volume: an image-provided file there
@@ -1593,32 +1593,30 @@ assert_eq "claude:policy-not-student-writable" "ok" \
 # THE CONTROL FIRST, as with codex's doctor check: a policy with one field the schema rejects
 # must be named, or "nothing listed" below could mean the section moved or was renamed. `tui` is
 # the field broken because nothing else depends on it. The block is cut out by its heading and
-# the blank line that ends it, so a doctor line elsewhere that mentions the path does not count.
-CC_DOCTOR_INVALID='out="$(timeout 60 claude doctor </dev/null 2>&1)"
-case "$out" in *"Claude Code doctor"*) ;; *) echo "DOCTOR-DID-NOT-RUN: $out"; exit 0 ;; esac
-bad="$(printf "%s\n" "$out" | awk "/^Invalid settings/ { f = 1; next } f && /^\$/ { f = 0 } f" | grep -F /etc/claude-code/)"
-echo "${bad:-NO-INVALID-MANAGED-ENTRIES}"'
+# the blank line that ends it, so a doctor line elsewhere that mentions the path does not count,
+# and a doctor that printed no report at all is CHECKER_DIED, which fails every assertion it meets.
+cc_invalid_managed() {   # cc_invalid_managed DOCTOR-OUTPUT -> its managed-file lines, or a sentinel
+    local bad
+    case "$1" in
+        *"Claude Code doctor"*) ;;
+        *) printf '%s: claude doctor printed no report: %s\n' "$CHECKER_DIED" "$1"; return ;;
+    esac
+    bad="$(printf '%s\n' "$1" | awk '/^Invalid settings/ { f = 1; next } f && !NF { f = 0 } f && index($0, "/etc/claude-code/")')"
+    printf '%s\n' "${bad:-NO-INVALID-MANAGED-ENTRIES}"
+}
 cc_probe="$(new_tmpdir)"
-python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-d["tui"] = 42
-json.dump(d, open(sys.argv[2], "w"))
-' "$PRIVATE/files/claude-code/managed-settings.json" "$cc_probe/managed-settings.json"
-chmod 644 "$cc_probe/managed-settings.json"
-cc_invalid="$($VT_RUN --rm --network=none \
-    -v "$cc_probe/managed-settings.json:/etc/claude-code/managed-settings.json:ro$VT_MOUNT_Z" \
-    --entrypoint sh "$TEST_IMAGE" -c "$CC_DOCTOR_INVALID" 2>&1)"
-assert_contains "claude:doctor-names-an-invalid-managed-field" "managed-settings.json" "$cc_invalid"
-assert_contains "claude:doctor-names-the-field-it-dropped" "tui:" "$cc_invalid"
+printf '{"tui": 42}\n' > "$cc_probe/managed-settings.json"
+assert_contains "claude:doctor-names-the-field-it-dropped" "tui:" "$(cc_invalid_managed \
+    "$($VT_RUN --rm --network=none \
+       -v "$cc_probe/managed-settings.json:/etc/claude-code/managed-settings.json:ro$VT_MOUNT_Z" \
+       --entrypoint sh "$TEST_IMAGE" -c 'timeout 60 claude doctor </dev/null 2>&1' 2>&1)")"
 rm -rf "$cc_probe"
 assert_eq "claude:doctor-finds-no-invalid-managed-fields" "NO-INVALID-MANAGED-ENTRIES" \
-    "$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c "$CC_DOCTOR_INVALID" 2>&1)"
+    "$(cc_invalid_managed "$cc_shipped")"
 # The install method the auto-updater keys on (#13): npm-global is what makes it run `npm install
 # -g` into the student's own prefix, which is what the managed policy's autoUpdatesChannel note
 # rests on. Read from the same doctor, so a repackaging that changes it is a red here.
-assert_contains "claude:doctor-sees-an-npm-global-install" "Running: npm-global" \
-    "$($VT_RUN --rm --network=none --entrypoint sh "$TEST_IMAGE" -c 'timeout 60 claude doctor </dev/null 2>&1')"
+assert_contains "claude:doctor-sees-an-npm-global-install" "Running: npm-global" "$cc_shipped"
 
 # ─── the two halves of #77 ──────────────────────────────────────────────────────
 # The renderer, read out of the file the image actually ships rather than out of the repo copy

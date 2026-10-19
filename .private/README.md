@@ -2482,8 +2482,8 @@ What leaving it unset buys: a student who wants Manual presses Shift+Tab, or put
 `"permissions": {"defaultMode": "default"}` in `~/.claude/settings.json`, which is in the
 `cs193v-claude` volume and survives `--rebuild` (only `--rebuild --logout` clears it). What it
 costs: the starting mode floats with Claude Code, and floating is how #526 happened.
-`10-static.sh` pins both keys absent, so adding either is a visible decision, but nothing automated
-can see which mode a session starts in. `MANUAL.md` §8.7(a) is the detector.
+`10-static.sh` pins the policy's exact key set, so adding either is a visible decision, but nothing
+automated can see which mode a session starts in. `MANUAL.md` §8.7(a) is the detector.
 
 Deny rules resolve before the classifier in every mode, so the credential-store rules bind in auto
 mode as before. Auto mode is not universal: an organization with the HIPAA configuration, an
