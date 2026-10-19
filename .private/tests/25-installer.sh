@@ -3934,7 +3934,7 @@ assert_eq "windows:asks-for-elevation-exactly-once" "1" \
 # AND IT NEVER SENDS AN UN-ELEVATED STUDENT AWAY TO COME BACK ELEVATED. This is the instruction
 # that produced the cross-account installs, so its absence is asserted rather than assumed.
 assert_eq "windows:never-sends-a-student-away-to-re-run-elevated" "0" \
-          "$(printf '%s\n' "$WCMD" | grep -c 'goto needadmin')"
+          "$(died_in "$WCMD"; printf '%s\n' "$WCMD" | grep -c 'goto needadmin')"
 
 # THE ELEVATED CHILD RUNS ONE PROGRAM LIST AND WAITS FOR IT. -Wait and -PassThru are the only way
 # the parent learns anything: -Verb RunAs is in Start-Process's UseShellExecute parameter set,

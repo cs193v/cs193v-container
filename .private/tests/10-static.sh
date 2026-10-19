@@ -1682,19 +1682,22 @@ assert_eq "pkgsha:checked-after-the-download-and-before-the-install" "yes" \
 # honest: that case derives its removal list from these very `command -v` occurrences, so a tool
 # reached by fallthrough never appears in the derivation, the fixture leaves it on PATH, the hash
 # succeeds, and the case passes having tested nothing.
-ps_body="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-utils.sh" | sed -n '/^pkg_sha256() {/,/^}/p')"
+ps_body="$(run_checker sed -n -e 's/^[[:space:]]*#.*//' -e '/^pkg_sha256() {/,/^}/p' \
+                         "$PRIVATE/install-utils.sh")"
 assert_ne "pkgsha:pkg_sha256-was-found" "" "$ps_body"
 assert_eq "pkgsha:every-hasher-is-probed" \
-          "$(printf '%s\n' "$ps_body" | grep -c 'command -v ')" \
-          "$(printf '%s\n' "$ps_body" | grep -cE '^[[:space:]]+(sha256sum|shasum|openssl)')"
+          "$(died_in "$ps_body"; printf '%s\n' "$ps_body" | grep -c 'command -v ')" \
+          "$(died_in "$ps_body"; printf '%s\n' "$ps_body" \
+             | grep -cE '^[[:space:]]+(sha256sum|shasum|openssl)')"
 assert_eq "pkgsha:the-hasher-has-no-fallthrough" "0" \
-          "$(printf '%s\n' "$ps_body" | grep -cE '^[[:space:]]*else[[:space:]]*$')"
+          "$(died_in "$ps_body"; printf '%s\n' "$ps_body" \
+             | grep -cE '^[[:space:]]*else[[:space:]]*$')"
 # AND IT CANNOT REFUSE ON ITS OWN BEHALF. It is called inside a command substitution, and a die()
 # there prints the STOP box into the captured string and lets the script carry on -- the hazard
 # harness:no-exiting-helper-runs-in-a-subshell exists for. So the refusals live at the call site
 # and this function's contract is the string it prints, not its exit status.
 assert_eq "pkgsha:the-hasher-does-not-refuse-for-itself" "0" \
-          "$(printf '%s\n' "$ps_body" | grep -cE '(die|exit)[[:space:]]')"
+          "$(died_in "$ps_body"; printf '%s\n' "$ps_body" | grep -cE '(die|exit)[[:space:]]')"
 
 # ─── the payload is pinned to a tag, and the tag agrees with VERSION  (#232) ───
 #
@@ -2151,9 +2154,10 @@ rm -rf "$memo_tmp"
 # next one out. lib/readerscan.py names every such assertion whose value is a bare reader's output
 # -- directly, through a helper whose whole body is one read, or through a variable last filled that
 # way -- or a checked read piped into a stage that keeps only some lines. run_checker, run_grep,
-# lint_grep and died_in are the ways through; a count through wc, and a read that answers for itself
-# with `|| printf`, fail on their own. It is a tokenizer for assertion arguments, not a shell, and
-# it prints $CHECKER_DIED for a file it cannot read or a statement it cannot parse.
+# lint_grep and died_in are the ways through; a read that answers for itself with `|| printf` fails
+# on its own, and so does a count -- unless it is expected to be 0 (#586), when a count of nothing
+# passes and only died_in in front catches it. It is a tokenizer for assertion arguments, not a
+# shell, and it prints $CHECKER_DIED for a file it cannot read or a statement it cannot parse.
 #
 # THE SPECIMEN IS WRITTEN WITH A LEADING @, AND ITS ONE `; assert` AS `;%`, because this file is
 # on the list.
@@ -2189,12 +2193,18 @@ sed -e 's/^@//' -e 's/;%/; /' > "$rs_specimen" <<'SPECIMEN'
 @u="$(sed 1p "$F")"
 @assert_eq "printf-of-bare" "" "$(printf '%s\n' "$u" | grep y)"
 @assert_eq "python-filter" "" "$(run_checker cat "$F" | python3 -c pass)"
+@assert_eq "count-of-a-read" "0" "$(cat "$F" | wc -l)"
+@assert_eq "count-of-a-checked-read" "0" "$(printf '%s\n' "$v" | grep -c y)"
+@c="$(printf 'a b')"
+@assert_eq "count-of-a-computed-value" "0" "$(printf '%s' "$c" | grep -c y)"
+@assert_eq "count-behind-died-in" "0" "$(died_in "$v"; printf '%s\n' "$v" | grep -c y)"
 SPECIMEN
 rs_raw="$(rs_scan "$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh "$rs_specimen")"
 rs_mine="$(printf '%s\n' "$rs_raw" | grep -F -- "$rs_specimen:")"
 for rs_shape in 1:bare:bare 2:filtered:filtered 4:var-filtered:var-filtered 6:var-bare:var-bare \
                 12:bare:pattern-file 15:bare:helper 16:bare:ne-literal 21:var-bare:printf-of-bare \
-                22:filtered:python-filter; do               # LINE:SHAPE:LABEL
+                22:filtered:python-filter 23:count:count-of-a-read \
+                24:count:count-of-a-checked-read; do        # LINE:SHAPE:LABEL
     rs_n="${rs_shape%%:*}"; rs_label="${rs_shape##*:}"
     rs_why="${rs_shape#*:}"; rs_why="${rs_why%%:*}"
     rs_line="$(printf '%s\n' "$rs_mine" | grep -F -- "$rs_specimen:$rs_n: ")"
@@ -2205,7 +2215,7 @@ for rs_shape in 1:bare:bare 2:filtered:filtered 4:var-filtered:var-filtered 6:va
 $rs_mine" ;;
     esac
 done
-assert_eq "readers:the-scan-passes-comments-and-checked-reads" "9" \
+assert_eq "readers:the-scan-passes-comments-and-checked-reads" "11" \
           "$(printf '%s\n' "$rs_mine" | grep -c .)"
 assert_eq "readers:no-absence-check-reads-through-a-bare-reader" "" \
           "$(died_in "$rs_raw"; printf '%s\n' "$rs_raw" | grep -vF -- "$rs_specimen:")"

@@ -163,7 +163,9 @@ assert_contains "flag:userns-keep-id-explicit" "--userns=keep-id:uid=1000,gid=10
 # that race, because the container is created before the tunnel starts, so a stray -p line
 # would silently take the port away from the student rather than double-serve it.
 assert_eq "ports:container-publishes-nothing" "{}" "$(I '{{json .HostConfig.PortBindings}}')"
-assert_eq "ports:no-podman-mappings" "0" "$(podman port "$NAME" | wc -l | do_tr -d ' ')"
+# THROUGH run_checker (#586): a podman port that failed printed no mappings either.
+pmaps="$(run_checker podman port "$NAME")"
+assert_eq "ports:no-podman-mappings" "0" "$(died_in "$pmaps"; printf '%s' "$pmaps" | grep -c .)"
 
 # The forwards live on the HOST instead, in one ssh process. Loopback-only is now structural
 # rather than a flag that could be forgotten -- the ssh client binds 127.0.0.1 itself -- but it
