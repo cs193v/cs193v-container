@@ -414,10 +414,11 @@ assert_not_contains "fail-clone:the-token-is-not-in-the-transcript" "$TOKEN"   "
 # hold a command's output rather than being cleaned up on the way past.
 #
 # GUARDED, because "grep found nothing" and "there was nothing to search" produce the same
-# empty string, and this whole audit exists because that distinction kept being missed.
+# empty string, and this whole audit exists because that distinction kept being missed. A file
+# grep could not read is a third way to it, which is why this is run_grep (#559).
 assert_file "fail-clone:the-shim-really-has-files-to-search" "$SGSHIM/argv.log"
 assert_eq   "fail-clone:the-token-is-on-no-file-this-run-left" "" \
-            "$(grep -rl -- "$TOKEN" "$SGSHIM" 2>/dev/null || true)"
+            "$(run_grep -rl -- "$TOKEN" "$SGSHIM")"
 
 # AND THE NEXT RUN SAYS WHICH ROW IT WAS (issue #357). Each of the five failures is recorded under
 # its own word and shown as its own line on the second run, so these four blocks and wrong-owner's
@@ -467,7 +468,7 @@ assert_eq "unfinished:quitting-configures-nothing" "$before" "$(sg_config)"
 # The fake gh itself holds the stand-in, so that one is looked for in the record, the log and the
 # screens rather than in every file.
 assert_eq "unfinished:the-token-is-on-no-file-either-run-left" "" \
-          "$(grep -rl -- "$TOKEN" "$SGSHIM" 2>/dev/null || true)"
+          "$(run_grep -rl -- "$TOKEN" "$SGSHIM")"
 assert_not_contains "unfinished:the-stand-in-is-not-in-the-record" "$SG_FAKE_TOKEN" "$(sg_config)"
 assert_not_contains "unfinished:the-stand-in-is-not-in-the-log" "$SG_FAKE_TOKEN" \
                     "$(sg_unwrap "$firstlog$(sg_log)")"
