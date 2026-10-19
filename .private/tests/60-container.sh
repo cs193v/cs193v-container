@@ -1142,9 +1142,12 @@ probe_stop
 # derive and nothing to compare against a declared list. What replaces the old equality is
 # strictly stronger: read the port back out of the URL it printed, and prove the TUNNEL agrees
 # that exact port is forwarded, from both sides of it.
+#
+# STDOUT ALONE, IN BRACKETS (#563). E merges stderr, and a caller that does `link=$(shortlink ...)`
+# sees none of it, so a URL printed there is no link at all.
 container_pkill shortlink
-sl_url="$(E 'shortlink https://example.com/e2e?a=1 token')"
-sl_port="$(printf '%s' "$sl_url" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+sl_url="$(E 'echo "url=[$(shortlink https://example.com/e2e?a=1 token)]"')"
+sl_port="$(printf '%s' "$sl_url" | sed -n 's|^url=\[http://localhost:\([0-9]\{1,5\}\)/token]$|\1|p')"
 record "shortlink:port-under-test" "${sl_port:-none} (from $sl_url)"
 if [ -n "$sl_port" ]; then
     pass "shortlink:prints-a-short-url-on-a-real-port"
@@ -1206,8 +1209,8 @@ container_pkill shortlink
 # with an outbound socket that already holds it.
 SL_BUSY=20777
 assert_probe "shortlink:a-dev-server-holds-a-port" "$SL_BUSY" 127.0.0.1
-sl_url2="$(E 'shortlink https://example.com/second token')"
-sl_port2="$(printf '%s' "$sl_url2" | sed -n 's|^http://localhost:\([0-9]\{1,5\}\)/token$|\1|p')"
+sl_url2="$(E 'echo "url=[$(shortlink https://example.com/second token)]"')"
+sl_port2="$(printf '%s' "$sl_url2" | sed -n 's|^url=\[http://localhost:\([0-9]\{1,5\}\)/token]$|\1|p')"
 record "shortlink:coexists-on" "${sl_port2:-none} beside $SL_BUSY"
 if [ -n "$sl_port2" ] && [ "$sl_port2" != "$SL_BUSY" ]; then
     pass "shortlink:coexists-with-a-dev-server"

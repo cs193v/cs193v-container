@@ -482,19 +482,20 @@ assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out
 # is present, healthy and simply never mentions the port, it must degrade rather than guess.
 # AND IT WAITS FIRST (#551). The wait is the one thing that tells this path from no file at all,
 # which also prints the input and exits 3, but at once. The 9 is a floor: CONFIRM_TIMEOUT is 10s,
-# and load only adds to it.
-out="$(R "$FAKE_HEALTHY"'; t0=$(date +%s); /usr/local/bin/shortlink https://example.com/unconfirmed; rc=$?; echo "rc=$rc took=$(( $(date +%s) - t0 ))"')"
+# and load only adds to it. What it printed is read from stdout alone, in brackets, as
+# prints-a-short-url reads it (#563).
+out="$(R "$FAKE_HEALTHY"'; t0=$(date +%s); o=$(/usr/local/bin/shortlink https://example.com/unconfirmed); rc=$?; echo "rc=$rc out=[$o] took=$(( $(date +%s) - t0 ))"')"
 assert_match "harness:fake-healthy-reads-back:unconfirmed" "$FAKE_HEALTHY_SAID" "$out"
-assert_contains "shortlink:an-unconfirmed-port-degrades"  "https://example.com/unconfirmed" "$out"
-assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
+assert_contains "shortlink:an-unconfirmed-port-degrades"  "out=[https://example.com/unconfirmed]" "$out"
+assert_match "shortlink:an-unconfirmed-port-exits-3"   "^rc=3 " "$out"
 assert_match "shortlink:an-unconfirmed-port-waits-out-the-timeout" "took=(9|[1-9][0-9]+)$" "$out"
 
 # THE DEGRADATION, asserted in both of its shapes: no state file at all, and one that never
 # confirms. Both print the input and exit 3, because a caller must be able to print the answer
-# unconditionally.
-out="$(R '/usr/local/bin/shortlink https://example.com/plain; echo rc=$?')"
-assert_contains "shortlink:no-ports-prints-the-input" "https://example.com/plain" "$out"
-assert_contains "shortlink:no-ports-exits-3" "rc=3" "$out"
+# unconditionally. Stdout alone, in brackets (#563).
+out="$(R 'o=$(/usr/local/bin/shortlink https://example.com/plain); rc=$?; echo "rc=$rc out=[$o]"')"
+assert_contains "shortlink:no-ports-prints-the-input" "out=[https://example.com/plain]" "$out"
+assert_match "shortlink:no-ports-exits-3" "^rc=3 " "$out"
 
 # ─── --state, the installed binary  (#516) ─────────────────────────────────────
 # The reader doctor and shortlink go through, against the real file in a real container: no file,
@@ -547,8 +548,9 @@ assert_eq "shortlink:redirects-every-time" "302 302 302" "$(printf '%s' "$out" |
 # THE SLUG IS NEVER EMPTY, and `/` is the path it must never serve: the browser keys its cache and
 # any service worker on the ORIGIN, which outlives whatever used to listen there, so the one path a
 # student's own project is likely to have served is the one we stay off. Nothing routes /magic-link.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a); echo "$l"; curl -s -o /dev/null -w " root=%{http_code}" --max-time 5 "${l%/*}/"; curl -s -o /dev/null -w " slug=%{http_code}" --max-time 5 "$l"')"
-assert_match "shortlink:default-slug-is-magic-link" "http://localhost:[0-9]+/magic-link" "$out"
+# Stdout alone, in brackets (#563).
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a); echo "url=[$l]"; curl -s -o /dev/null -w " root=%{http_code}" --max-time 5 "${l%/*}/"; curl -s -o /dev/null -w " slug=%{http_code}" --max-time 5 "$l"')"
+assert_match "shortlink:default-slug-is-magic-link" "^url=\[http://localhost:[0-9]+/magic-link\]$" "$out"
 assert_contains "shortlink:bare-root-is-not-served"    "root=404" "$out"
 assert_contains "shortlink:default-slug-redirects"     "slug=302" "$out"
 out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${l%/*}/nope"')"
@@ -637,12 +639,12 @@ out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp
 assert_eq "shortlink:still-serves-after-the-first-hit" "302" "$out"
 
 # CONCURRENT CALLS CANNOT COLLIDE, because binding IS the free-port test -- never check and then
-# bind, which two racing callers would both pass.
-out="$(sl 'for s in one two three; do /usr/local/bin/shortlink https://example.com/$s $s; done')"
+# bind, which two racing callers would both pass. Each caller's stdout alone, in brackets (#563).
+out="$(sl 'for s in one two three; do echo "url=[$(/usr/local/bin/shortlink https://example.com/$s $s)]"; done')"
 assert_eq "shortlink:three-callers-get-three-ports" "3" \
-          "$(printf '%s' "$out" | grep -cE 'http://localhost:[0-9]+/')"
+          "$(printf '%s' "$out" | grep -cE '^url=\[http://localhost:[0-9]+/(one|two|three)\]$')"
 assert_eq "shortlink:those-ports-are-distinct" "3" \
-          "$(printf '%s' "$out" | sed 's|.*localhost:||;s|/.*||' | sort -u | grep -c .)"
+          "$(printf '%s' "$out" | sed -n 's|^url=\[http://localhost:\([0-9]*\)/[a-z]*]$|\1|p' | sort -u | grep -c .)"
 
 # ─── what it refuses ──────────────────────────────────────────────────────────
 # THIS IS AN OPEN REDIRECTOR BY DESIGN and its argument reaches a response header, so the two
