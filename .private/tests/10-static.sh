@@ -3655,7 +3655,6 @@ assert_not_contains "launcher:does-not-exec-the-shell" "exec podman" "$open_shel
 # open_shell WITH ITS COMMENTS STRIPPED, which every check on its code below reads -- see
 # "COMMENTS STRIPPED FIRST" under the session-claim check for what the raw body cost.
 open_shell_code="$(printf '%s\n' "$open_shell_body" | sed 's/^[[:space:]]*#.*//')"
-assert_contains "launcher:installs-the-teardown-trap" "trap 'shell_teardown" "$open_shell_code"
 # ONE ARM PER SIGNAL, AND EACH NAMES ITS SIGNAL (#449). EXIT alone is not enough, though not for the
 # reason this comment used to give -- bash 3.2 and 5.3 both run the EXIT trap on an untrapped HUP,
 # measured. It is that a signal with no arm kills bash halfway through the EXIT trap's teardown,
@@ -3759,11 +3758,19 @@ assert_eq "run-timeout:declares-rt-detach" "1" \
 rt_flat="$(printf '%s\n' "$rt_code" | grep -vE '^[[:space:]]*$' | sed 's/^[[:space:]]*//')"
 assert_eq "run-timeout:detaches-both-branches" "2 2" \
           "$(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set -m') $(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set +m')"
+# EVERY LINE INSIDE EACH BRACKET, not only its two ends: an `if`, an `else`, a `fi`, or one of the four
+# spawns in exactly its own shape. Anything else there -- a probe slipped in before the else's spawn --
+# would run in the foreground under job control and be handed the terminal.
 assert_eq "run-timeout:the-detach-bracket-holds-only-the-spawn" "" \
           "$(printf '%s\n' "$rt_flat" | awk '
-                prev == "[ -n \"$RT_DETACH\" ] && set -m" && $0 !~ /^if \[ -n "\$RT_BARE" \]; then/ { print "after set -m: " $0 }
-                $0 == "[ -n \"$RT_DETACH\" ] && set +m" && prev != "fi" { print "before set +m: " prev }
-                { prev = $0 }')"
+                $0 == "[ -n \"$RT_DETACH\" ] && set -m" { inside = 1; next }
+                $0 == "[ -n \"$RT_DETACH\" ] && set +m" { inside = 0; next }
+                !inside { next }
+                /^if \[ -n "\$RT_BARE" \]; then$/ || /^else$/ || /^fi$/ { next }
+                /^(if \[ -n "\$RT_BARE" \]; then|else) +\( "\$@" >"\$tmp" [^;]*\) & pid=\$!$/ { next }
+                /^\( "\$@" >"\$tmp" [^;]* & c=\$!; printf .* >&9$/ { next }
+                /^wait "\$c"; printf .* >&9 \) 9>"\$fifo" 7>&- 8>&- & pid=\$!$/ { next }
+                { print "inside the bracket: " $0 }')"
 rd_close="$(printf '%s\n' "$rt_flat" | grep -nxF '[ -n "$RT_DETACH" ] && set +m' | tail -1 | cut -d: -f1)"
 rd_meet="$(printf '%s\n' "$rt_flat" | grep -nF 'exec 9<"$fifo"' | head -1 | cut -d: -f1)"
 if [ -n "$rd_close" ] && [ -n "$rd_meet" ] && [ "$rd_close" -lt "$rd_meet" ]; then

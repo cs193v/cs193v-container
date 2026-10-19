@@ -854,7 +854,6 @@ cat > "$SHIM/piped" <<'EOF'
 "$1" 2>&1 | sh -c 'printf "%s\n" "$$" > "$0"; exec cat' "$2"
 EOF
 chmod +x "$SHIM/piped"
-pid_gone() { ! kill -0 "$1" 2>/dev/null; }
 fg_start "$SHIM/piped" "${LAUNCHER_DIR:-$REPO}/cs193v" "$SHIM/reader.pid"
 if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT" && wait_until 10 test -s "$SHIM/reader.pid"; then
     reader="$(cat "$SHIM/reader.pid")"
@@ -992,15 +991,15 @@ launcher_fg_stop
 #
 # stop_rearm makes the fake's held stop a process that re-arms those signals the way podman does,
 # so it ends on a key that reaches it. THE CANARY FIRST: --stop is meant to be interruptible, sets
-# nothing up, and so runs its stop in the foreground group -- where a ^C has to end the stop,
-# positively, or the cases after it prove nothing. ^\'s canary is a QUIT sent to the stop itself:
-# the ^C has already shown the key reaches the group, and a ^\ there would kill --stop's launcher,
-# which has no arm for it -- a death macOS files as a crash report every run.
+# nothing up, and so runs its stop in the foreground group -- where a TYPED key has to end the stop,
+# positively, or the cases after it prove nothing. --stop's launcher is started with INT and QUIT
+# ignored, so that it is the stop the key ends and not the launcher: a ^\ would kill a launcher with
+# no arm for it, a death macOS files as a crash report on every run.
 key_echoed() {                        # key_echoed ECHO N -> 0 once the terminal has echoed it N times
     [ "$(grep -o -F -- "$1" "$FG_OUT" 2>/dev/null | wc -l | do_tr -d ' ')" -ge "$2" ]
 }
-stop_pid_alive() { kill -0 "$(cat "$SHIM/stop_pid" 2>/dev/null)" 2>/dev/null; }
-stop_pid_gone() { ! stop_pid_alive; }
+stop_pid_gone() { pid_gone "$(cat "$SHIM/stop_pid" 2>/dev/null)"; }
+stop_pid_alive() { ! stop_pid_gone; }
 rearm_key() {                         # rearm_key NAME -> RKEY (to type) and RECHO (what it echoes)
     case "$1" in
         ctrl-c)         RKEY='\003'; RECHO='^C' ;;
@@ -1014,15 +1013,12 @@ for rk in ctrl-c ctrl-backslash; do
     shim_set state running
     shim_touch stop_hold
     shim_touch stop_rearm
-    launcher_fg_start --stop
+    fg_start bash -c 'trap "" INT QUIT; exec "$1" --stop' rearm-canary "${LAUNCHER_DIR:-$REPO}/cs193v"
     if wait_until 30 grep -qF -- "$(msg_of opt.stop-go)" "$FG_OUT"; then
         launcher_fg_keys '\033[B\n'
         if wait_until 30 test -e "$SHIM/stop_reached"; then
-            case "$rk" in
-                ctrl-c) launcher_fg_keys "$RKEY" ;;
-                *)      kill -QUIT "$(cat "$SHIM/stop_pid")" 2>/dev/null ;;
-            esac
-            if wait_until 10 stop_pid_gone; then
+            launcher_fg_keys "$RKEY"
+            if [ -s "$SHIM/stop_pid" ] && wait_until 10 stop_pid_gone; then
                 REARM_OK="$REARM_OK $rk"
                 pass "rearm:a-$rk-ends-a-stop-in-the-foreground-group"
                 # AND THE STOP IT ENDED NEVER FINISHES, which is the fake's `|| exit 1`: the fake is
