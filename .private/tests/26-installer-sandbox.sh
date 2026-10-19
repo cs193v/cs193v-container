@@ -449,6 +449,7 @@ assert_says_key "sb-consent:explains-why"        need.subuid.why "$out" "$ICAT"
 # BY KEY, AND ONCE. "Nothing was changed" and "contact course staff" are the first and last
 # sentences of consent.declined, so #219's rewording reddened one and left the other green.
 assert_says_key "sb-consent:declining-says-nothing-changed" consent.declined "$out" "$ICAT"
+assert_says     "sb-consent:declining-exits-2" "===INSTALLER-RC=2===" "$out"
 # A refusal must leave no course files on the machine. IT NO LONGER SKIPS THE DOWNLOAD, and the
 # assertion that used to say so is retired rather than reworded, because it asserted the opposite
 # of the design (#221): the bootstrap fetches the tree BEFORE this script exists to ask anything,

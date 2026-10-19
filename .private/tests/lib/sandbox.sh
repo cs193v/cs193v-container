@@ -1341,7 +1341,7 @@ sb_ceiling_note() {                   # sb_ceiling_note LABEL RC CAP OUTER NAME 
 # KEYSTROKES AND A TTY, which this did not need until the end-to-end case existed. With no
 # prereqs removed there is nothing to consent to, so `</dev/null` and no terminal were fine --
 # menu() takes the safe default and there is no menu. The moment a case removes podman there are
-# consent items, and the safe default for consent is DECLINING: the run would exit 0 having
+# consent items, and the safe default for consent is DECLINING: the run would exit 2 having
 # changed nothing, and "the installer finished" would fail for a reason that looks nothing like
 # the cause.
 # ONE NESTED BUILD AT A TIME, and the container name says nothing about the base on purpose: they

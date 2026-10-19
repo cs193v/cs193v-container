@@ -759,7 +759,10 @@ ask_consent() {
         printf '\n'
         msg consent.declined
         printf '\n'
-        exit 0
+        # NOT 0, because nothing was installed (#225). install-cs193v-windows.cmd reads 0 as a
+        # finished install and goes on to make the Start Menu entry. 2 rather than 1 so a caller
+        # can tell "the student said no" apart from a refusal, which is always 1.
+        exit 2
     fi
 }
 
