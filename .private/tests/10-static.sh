@@ -250,11 +250,13 @@ assert_exec "exec:bootstrap"          "$PRIVATE/install-cs193v.sh"
 #
 # `exec bash` IS NOT SOURCING and is the point of the file, so the needle is anchored: a leading
 # `.` or `source` as the first word of a line, comments stripped first.
-boot_code="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-cs193v.sh")"
+boot_code="$(run_checker sed 's/^[[:space:]]*#.*//' "$PRIVATE/install-cs193v.sh")"
 assert_eq "bootstrap:sources-nothing" "" \
-          "$(printf '%s\n' "$boot_code" | grep -nE '^[[:space:]]*(\.|source)[[:space:]]' || true)"
+          "$(died_in "$boot_code"; printf '%s\n' "$boot_code" \
+             | grep -nE '^[[:space:]]*(\.|source)[[:space:]]')"
 assert_eq "bootstrap:evals-nothing" "" \
-          "$(printf '%s\n' "$boot_code" | grep -nE '(^|[^[:alnum:]_])eval[[:space:]]' || true)"
+          "$(died_in "$boot_code"; printf '%s\n' "$boot_code" \
+             | grep -nE '(^|[^[:alnum:]_])eval[[:space:]]')"
 
 # ─── and the environment it reads, named so that a fourth variable is a decision  (#280) ───────
 # THE SURFACE, FROZEN. Nothing used to freeze it, and the cost of that showed up the first time
@@ -351,7 +353,8 @@ record    "bootstrap:the-group" "opens $boot_open closes $boot_lastln"
 # hang lives inside an `if`, so the line it is written on is INDENTED, and an anchor that
 # demands `exec` in column 1 never sees it. Found by mutation, not by reading.
 assert_eq "bootstrap:reattaches-only-at-the-hand-over" "" \
-          "$(printf '%s\n' "$boot_code" | grep -nE '(^[[:space:]]*|[;&|{][[:space:]]*)exec[[:space:]]+0?<' || true)"
+          "$(died_in "$boot_code"; printf '%s\n' "$boot_code" \
+             | grep -nE '(^[[:space:]]*|[;&|{][[:space:]]*)exec[[:space:]]+0?<')"
 # AND IT REALLY REATTACHES, which is the non-vacuous half: the assertion above is satisfied just
 # as well by a file that gave up on the pipe entirely, which is the state #297 filed.
 assert_match "bootstrap:the-hand-over-can-take-the-terminal" 'hand_over[[:space:]]*</dev/tty' \
@@ -389,7 +392,8 @@ boot_arm_tail() {                     # boot_arm_tail LABEL_RE -> the arm's last
 # "fixed" to match.
 assert_says "bootstrap:an-unknown-argument-exits" "exit " "$(boot_arm_tail '^[[:space:]]*[*])')"
 assert_eq "bootstrap:every-verb-arm-exits" "" \
-          "$(printf '%s\n' "$boot_code" | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
+          "$(died_in "$boot_code"; printf '%s\n' "$boot_code" \
+             | sed -n '/^case "${1:-}" in$/,/^esac$/p' \
              | sed -n 's/^[[:space:]]*\(--[a-z][a-z-]*\)).*/\1/p' \
              | while IFS= read -r v; do
                  boot_arm_tail "^[[:space:]]*$v\\)" | grep -q 'exit ' || printf '%s ' "$v"
@@ -438,7 +442,7 @@ assert_eq "tmptree:the-guard-matches-the-template" \
 #     nothing. Counting them makes survey and ask_password "privileged functions", which is
 #     how the registration assertion below first failed against the very gate it checks.
 # Comments are stripped first, or the prose explaining the gate would count as a call site.
-inst_nc="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
+inst_nc="$(run_checker sed 's/^[[:space:]]*#.*//' "$PRIVATE/course-install.sh")"
 inst_cmd="$(printf '%s\n' "$inst_nc" | sed 's/"[^"]*"//g')"
 # AND `setup_run READER sudo ...` IS COMMAND POSITION TOO (#219). setup_run execs "$@", so
 # the sudo in it is the command however it looks -- and the progress block that wraps the
@@ -1801,7 +1805,7 @@ assert_eq "manifest:no-case-colliding-paths" "" "$case_dupes"
 # made this assertion red against the very fix it is checking for -- the prose is the record of
 # why the constant went, and a gate that forbids mentioning it forbids explaining it.
 assert_eq "smoke:the-installer-does-not-spell-the-image-out" "" \
-          "$(printf '%s\n' "$inst_nc" | grep -n 'localhost/cs193v:' || true)"
+          "$(died_in "$inst_nc"; printf '%s\n' "$inst_nc" | grep -n 'localhost/cs193v:')"
 # AND THE VERB IT ASKS WITH EXISTS, because the assertion above is also satisfied by an
 # installer that stopped checking the image at all -- which is the failure smoke_test was
 # written for (ERRORS.md A6: a build that produced nothing, reported as success).
@@ -1883,7 +1887,8 @@ assert_eq  "fake-ssh:answers-every-control-verb-the-launcher-sends" "" "$unanswe
 #
 # -F none ON THE ssh LINE, so this stays a grep rather than a parse. The count is the vacuity
 # guard and, as with the verbs above, it makes a new call get looked at.
-sshcalls="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" \
+ssh_src="$(run_checker sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh")"
+sshcalls="$(died_in "$ssh_src"; printf '%s\n' "$ssh_src" \
             | grep -E '(^|[[:space:]])ssh[[:space:]]+-')"
 assert_eq "ssh:seven-ssh-calls-were-found" "7" "$(printf '%s\n' "$sshcalls" | grep -c .)"
 assert_eq "ssh:every-call-ignores-the-students-config" "" \
@@ -2530,7 +2535,7 @@ assert_eq  "containerfile:closing-marker-covers-the-tail" "Finishing up..." "$la
 # Containerfile's own prose about the thing it is checking. Layer 2's comment contains the
 # words "every `npm install -g` in this file depends on them", which is exactly that trap —
 # the same one the ban-list greps at the top of this file have to dodge.
-cf_code="$(sed 's/^[[:space:]]*#.*//' "$PRIVATE/Containerfile")"
+cf_code="$(run_checker sed 's/^[[:space:]]*#.*//' "$PRIVATE/Containerfile")"
 cf_grep() { printf '%s\n' "$cf_code" | grep -nE "$1" | head -1 | cut -d: -f1; }
 
 # Layer order is load-bearing: podman cannot resume a partial layer download but does keep
@@ -2569,7 +2574,7 @@ if [ -z "$ln_codex_arg" ]; then
     fail "containerfile:no-apt-from-the-codex-arg-down" "could not locate ARG CODEX_VERSION"
 else
     assert_eq "containerfile:no-apt-from-the-codex-arg-down" "" \
-        "$(printf '%s\n' "$cf_code" | awk -v from="$ln_codex_arg" \
+        "$(died_in "$cf_code"; printf '%s\n' "$cf_code" | awk -v from="$ln_codex_arg" \
             'NR >= from && /(^|[^a-z_])apt(-get)?[[:space:]]|install-deps/ { print NR ": " $0 }')"
 fi
 
@@ -4096,11 +4101,13 @@ fi
 #
 # `fail` is deliberately NOT in this list. It exits 1, so the launcher never erases behind a
 # fault box, and the box's own printfs are inside that function rather than here.
-attach_tail="$(fn_body do_attach "$PRIVATE/files/cs193v-shell" | sed 's/^[[:space:]]*#.*//' \
+attach_src="$(run_checker fn_body do_attach "$PRIVATE/files/cs193v-shell")"
+attach_tail="$(died_in "$attach_src"; printf '%s\n' "$attach_src" | sed 's/^[[:space:]]*#.*//' \
                | sed -n '/tm attach-session/,$p' | sed 1d)"
 assert_ne "exit:the-attach-tail-was-really-found" "" "$attach_tail"
 assert_eq "exit:the-attach-says-nothing-after-tmux" "" \
-          "$(printf '%s\n' "$attach_tail" | grep -nE 'printf|echo|cs193v-goodbye' || true)"
+          "$(died_in "$attach_tail"; printf '%s\n' "$attach_tail" \
+             | grep -nE 'printf|echo|cs193v-goodbye')"
 # AND IT STATES ITS EXIT STATUS, which the assertion above quietly made necessary. With nothing
 # printing at the end of do_attach, its last command became `rm -f "$errfile"` -- and $errfile is
 # /dev/null whenever mktemp failed, which a full or unwritable TMPDIR really does (#76). `rm -f
@@ -4638,7 +4645,7 @@ assert_contains "args:network-pasta"           "--network=pasta"                
 # Read out of the FUNCTION BODY, not the file, so line numbers cannot drift with edits elsewhere,
 # and the patterns are specific enough that the function's own comments — which discuss both the
 # guard and the retired `[ -z ]` test — cannot match them.
-la_body="$(awk '/^load_args\(\) \{/ { f = 1 } f { print } f && /^}/ { exit }' cs193v)"
+la_body="$(run_checker awk '/^load_args\(\) \{/ { f = 1 } f { print } f && /^}/ { exit }' cs193v)"
 la_guard="$(printf '%s\n' "$la_body" | grep -n 'case "\$line" in \*\[!\[:space:\]\]\*)' | head -1 | cut -d: -f1)"
 la_trim="$( printf '%s\n' "$la_body" | grep -n "sed -e 's/\^\[\[:space:\]\]\*//'"      | head -1 | cut -d: -f1)"
 assert_ne "load_args:body-was-found"    ""  "$la_body"
