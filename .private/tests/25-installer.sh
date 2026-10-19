@@ -788,7 +788,10 @@ out="$(run_consent)"
 assert_says_key "consent:non-tty-declines" consent.declined "$out" "$ICAT"
 # NOTE: this one PASSED on macOS, and vacuously -- with nothing needing consent the installer
 # runs to the end and exits 0 for an unrelated reason. It belongs inside the guard.
-assert_eq   "consent:non-tty-exits-0"       "0" \
+#
+# 2, AND NOT 0 ANY MORE (#225). install-cs193v-windows.cmd reads 0 as a finished install, and a
+# decline has finished nothing.
+assert_eq   "consent:non-tty-exits-2"       "2" \
             "$(run_consent >/dev/null 2>&1; printf '%s' "$?")"
 assert_no_file "consent:declining-creates-no-directory" "$TMP/consent"
 # It must say WHAT it wants permission for, and why, before asking.
@@ -807,7 +810,7 @@ assert_says_key "consent:explains-why"        need.subuid.why "$out" "$ICAT"
 assert_eq "consent:declining-leaves-no-temp-tree" "" \
           "$(ls -d "$TMP/boot-consent"/cs193v-install.* 2>/dev/null)"
 else
-skip_linux_arm "consent:non-tty-declines" "consent:non-tty-exits-0" \
+skip_linux_arm "consent:non-tty-declines" "consent:non-tty-exits-2" \
                "consent:declining-creates-no-directory" "consent:names-what-it-wants" \
                "consent:explains-why" "consent:declining-leaves-no-temp-tree"
 fi
@@ -1131,6 +1134,10 @@ out="$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/cour
 assert_says_key "consent-no:declines-on-a-tty" consent.declined "$out" "$ICAT"
 assert_says_not "consent-no:the-log-shows-no-resize" "machine set" "$(installer_log)"
 assert_says     "consent-no:the-log-was-really-read" "machine list" "$(installer_log)"
+# THE EXIT STATUS OF A REAL "NO", on every host. consent:non-tty-exits-2 checks the same thing
+# but sits inside the Linux guard, so on a Mac nothing would see a decline go back to 0 (#225).
+assert_eq       "consent-no:exits-2" "2" \
+                "$(installer_tty '\n' "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" CS193V_DIR="$SHIM/dest" >/dev/null 2>&1; printf '%s' "$?")"
 
 # The digit shortcut. The key TABLE is diffed against the launcher's copy above, which proves
 # the digits are listed; this proves they work in the installer's own copy.
