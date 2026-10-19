@@ -1718,7 +1718,26 @@ was green.
   publishes are judged against a second awk grammar, of the arguments the host sends, and whatever
   the writer takes must be a file the reader takes. Inputs of 65,535 entries are timed. The
   hand-written table it had could only confirm checks that already existed. `CS193V_FUZZ_SEED` and
-  `CS193V_FUZZ_CASES` run other seeds, or more cases, by hand.
+  `CS193V_FUZZ_CASES` run other seeds, or more cases, by hand. The largest legal files, every port
+  five digits and every reason the longest, are written whole and must be accepted too.
+
+**The frame gate takes exactly what the watcher writes, too (#505).** `dynports_line` once capped a
+record at 10 characters. `65535:loalt` is 11, so the first server on another 127.x address with a
+five-digit port ended forwarding for the session. Its fuzzer generated such records in 101 of 800
+cases and stayed green, because every property it had was a "must not", and a refusal broke none of
+them. The per-field caps are gone. One rule, a line under `DYNPORTS_LINE_MAX`, which is also the
+read's `-n`, replaces them, so a line the read could not take whole is refused before its tail is
+parsed as a line of its own. A NUL byte is the exception: bash 3.2 cuts the read short at one, so
+what follows it can come back as a line of its own. The comment above the wire format says why
+that is still safe. The other rules are the watcher's own: records strictly ascending, and
+`WARN too-many-listeners N` only between frames, with N over the cap and `BEGIN DYNPORTS_MAX` next.
+That last rule makes the cap part of the protocol, because the launcher and the image can be
+different versions, so `10-static.sh` pins the cap and the handshake's version as a pair.
+`17-portparse-fuzz.sh` now drives every case, hand-built and generated, through `dynports_read`
+and `dynports_line` as `sup_loop` does, and the gate counts bytes in any locale, as its grammar
+does. Each generated case's outcome (the frames applied, the warnings, the line it died on) must match an
+independent awk grammar of the watcher's output, and for a case built legal, what its generator
+built. The real `pw_watch`, fed more listeners than its cap, must get its capped frame through.
 
 **Every remediation the Windows installer used to offer, now rejected (issues #112 and #114).**
 The original argument was about one command. `hypervisorlaunchtype Off` is the likeliest *fixable*

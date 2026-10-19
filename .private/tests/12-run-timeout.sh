@@ -454,8 +454,8 @@ assert_eq "read:a-whole-line-is-a-line" "line:hello" "$(verdict 1 < <(echo hello
 # WHAT THAT PUTS UNDER TEST is the `unset` in dynports_read, and the reason it is load-bearing
 # is #244's, not a new one: on the bash 3.2 macOS ships a `read -t` timeout returns 1 -- the
 # same status as EOF -- and leaves the variable UNTOUCHED, so set-versus-unset is the only thing
-# telling a five-second silence from the watcher having gone away. See the measured table at
-# files/cs193v-ui.sh:1491. Without the `unset`, the previous line is still set when the timeout
+# telling a five-second silence from the watcher having gone away. See the measured table above
+# dynports_read in files/cs193v-ui.sh. Without the `unset`, the previous line is still set when the timeout
 # is classified and the read is called ENDED: sup_loop exits on the first gap, which is what
 # #244 cost. Measured here -- deleting it gives `line:alpha line:beta ended`.
 #

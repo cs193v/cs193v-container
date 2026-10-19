@@ -1462,6 +1462,33 @@ meter_cleanup() {
 # IFS juggling, no whitespace-collapse detector. A stray space simply fails the digit or class
 # test. The earlier single-line format needed all three.
 #
+# EXACTLY WHAT THE WATCHER WRITES, AND NOTHING ELSE (#505) -- the rule 7c75e2f set for the state
+# file, applied to its other reader. The watcher (pw_watch in cs193v-portwatch) writes:
+#   * the handshake, once;
+#   * per frame, `BEGIN n` with n canonical and at most DYNPORTS_MAX, then n records -- a canonical
+#     port 1-65535 and one of five classes -- in strictly ascending port order, then END;
+#   * before a frame, and only when more than DYNPORTS_MAX ports are listening,
+#     `WARN too-many-listeners N`, N being how many; the frame after it then holds exactly
+#     DYNPORTS_MAX, the lowest;
+#   * every line under DYNPORTS_LINE_MAX characters -- the longest is 29;
+#   * ERR only before the handshake, when it cannot start, and then nothing more.
+# Anything else is a watcher this launcher does not know, and forward compatibility lives in the
+# handshake's version token, not in tolerance here. That includes the cap: the frame after a WARN
+# must hold exactly DYNPORTS_MAX, so a launcher and an image of different versions must not disagree
+# about it under one handshake, and 10-static.sh pins the cap and the version as a pair. #505 is
+# what tolerance in the other direction cost: a 10-character record cap, one short of `65535:loalt`,
+# ended forwarding for the session the first time a server bound another 127.x address on a
+# five-digit port.
+#
+# ONE GAP NO SHELL CAN CLOSE: a NUL byte. A shell string cannot hold one. bash 3.2's `read` stops
+# the value at it but goes on counting bytes toward -n (measured), so a line carrying one comes back
+# cut short at the NUL -- and where that leaves the read's limit unspent, the bytes after it come
+# back as a line of their own: `3000:lo`, a NUL, 56 bytes and `5173:lo` were two records. So the
+# line rule below cannot promise to refuse every piece of an over-long line that carries a NUL.
+# What does hold is that each line applied is one the watcher could have written, character for
+# character, so this cannot validate one value and forward another. (Later bash versions skip the
+# NUL instead; only 3.2 was measured.)
+#
 # FRAMES ARE ATOMIC. Records accumulate in DYNPORTS_FRAME and nothing is handed back until a
 # well-formed END. Found in testing: without the `seen -lt n` guard below, a `BEGIN 1` followed by
 # two records handed the second one out before the count mismatch was noticed at END -- it still
@@ -1478,7 +1505,9 @@ DYNPORTS_WARN=''
 DYNPORTS_STATE=''
 DYNPORTS_N=0
 DYNPORTS_SEEN=0
+DYNPORTS_LAST=0
 DYNPORTS_MAX=128
+DYNPORTS_LINE_MAX=64
 DYNPORTS_PROTO='cs193v-portwatch 1'
 
 # ─── the read that feeds it ───────────────────────────────────────────────────
@@ -1520,19 +1549,31 @@ DYNPORTS_PROTO='cs193v-portwatch 1'
 # 12-run-timeout.sh drives this function through all five outcomes on whatever bash is running,
 # so a shell that does not behave this way fails the suite instead of killing the supervisor.
 #
-# -n 64 IS CARRIED OVER UNCHANGED from where this read used to be inline. It is the reader's
-# own backstop, not the gate's rule -- dynports_line checks WARN and ERR against 64 separately
-# -- and what it buys is that a peer which never sends a newline cannot make this grow a
-# buffer while it waits.
+# -n DYNPORTS_LINE_MAX IS WHAT KEEPS THE BUFFER BOUNDED: a peer which never sends a newline cannot
+# make this grow one while it waits. It is also the gate's line rule, and has to be (#505). Measured
+# on bash 3.2.57: a 63-character line comes back whole, newline consumed; a 64-character one comes
+# back as its 64 characters with the newline LEFT in the pipe, so the next read returned an empty
+# line; a 70-character one came back as 64 and then 6, the 6 parsed as a line of their own. So
+# inside a frame `WARN ` + 59 characters + `3000:lo` was a warning and then a record the watcher
+# never sent as one. Nothing legal is 64 long, so dynports_line refuses any line of 64 or more: the
+# first piece of a line this could not take whole is fatal before the rest is ever read -- unless a
+# NUL cut that piece short, the one gap described above the wire format.
+#
+# BYTES, ON EVERY BASH: LC_ALL=C here and in dynports_line, as the watcher's own parsers have it. In
+# the student's multibyte locale bash 3.2's -n counted bytes while ${#} counted characters (both
+# measured), so a 64-byte piece of multibyte text measured under 64 and was refused for what it
+# said rather than its length; and a bash whose -n counts characters would end an unterminated
+# multibyte tail somewhere else again. In C, -n, ${#} and the grammar 17-portparse-fuzz.sh judges
+# against all count bytes. Function-local, so nothing outside the gate changes: about 25us a call.
 #
 # DYNPORTS_LINE IS TRANSPORT, NOT PARSER STATE. dynports_reset deliberately leaves it alone --
 # it is cleared by the `unset` on every single call, which is stronger than any reset, and
 # adding it there would suggest a frame's worth of meaning it does not have.
 DYNPORTS_LINE=''
 dynports_read() {                     # dynports_read SECS -> 0 DYNPORTS_LINE | 1 timeout | 2 ended
-    local rc
+    local rc LC_ALL=C
     unset DYNPORTS_LINE
-    IFS= read -r -t "$1" -n 64 DYNPORTS_LINE
+    IFS= read -r -t "$1" -n "$DYNPORTS_LINE_MAX" DYNPORTS_LINE
     rc=$?
     [ "$rc" -eq 0 ] && return 0
     { [ "$rc" -gt 128 ] || [ -z "${DYNPORTS_LINE+set}" ]; } && return 1
@@ -1542,7 +1583,7 @@ dynports_read() {                     # dynports_read SECS -> 0 DYNPORTS_LINE | 
 dynports_reset() {
     DYNPORTS_STATE=handshake
     DYNPORTS_FRAME=''; DYNPORTS_FATAL=''; DYNPORTS_WARN=''
-    DYNPORTS_N=0; DYNPORTS_SEEN=0
+    DYNPORTS_N=0; DYNPORTS_SEEN=0; DYNPORTS_LAST=0
 }
 
 # Rendering a rejected value for a human. NOT a security boundary -- it runs AFTER a value has
@@ -1587,8 +1628,16 @@ dynports_port() {                     # dynports_port STR -> sets DYNPORTS_PORT,
 }
 
 dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
-    local line="$1" cnt rec p c
+    local line="$1" cnt rec p c LC_ALL=C
     [ -n "${DYNPORTS_STATE:-}" ] || dynports_reset
+
+    # ONE LENGTH RULE, FOR EVERY LINE, AND FIRST. dynports_read hands back at most
+    # DYNPORTS_LINE_MAX characters, so a line that long is the first piece of one it could not take
+    # whole, and the rest is still in the pipe; refusing it here means the rest is never parsed as
+    # a line of its own. The rule replaces four caps -- 9 on BEGIN, 10 on a record, 64 on WARN and
+    # ERR -- and the record's is the one #505 is about: one short of `65535:loalt`. A cap on a
+    # field the checks below already bound exactly can only repeat them or fall behind.
+    [ "${#line}" -lt "$DYNPORTS_LINE_MAX" ] || { dynports_fatal "line too long"; return 2; }
 
     if [ "$DYNPORTS_STATE" = handshake ]; then
         # A fixed-string compare, so there is no parsing at all. Forward compatibility lives in
@@ -1601,15 +1650,22 @@ dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
 
     case "$line" in
         "BEGIN "*)
-            [ "$DYNPORTS_STATE" = outside ] || { dynports_fatal "BEGIN inside a frame"; return 2; }
-            [ "${#line}" -le 9 ] || { dynports_fatal "BEGIN line too long"; return 2; }
+            case "$DYNPORTS_STATE" in
+                outside|warned) ;;
+                *) dynports_fatal "BEGIN inside a frame"; return 2 ;;
+            esac
             cnt="${line#BEGIN }"
             case "$cnt" in ''|*[!0-9]*) dynports_fatal "non-decimal count" "$cnt"; return 2 ;; esac
-            [ "${#cnt}" -le 3 ] || { dynports_fatal "count too long"; return 2; }
+            # Length before arithmetic, as in dynports_port, and as long as DYNPORTS_MAX is: a
+            # literal 3 would refuse a raised cap's largest frame, which is #505 over again.
+            [ "${#cnt}" -le "${#DYNPORTS_MAX}" ] || { dynports_fatal "count too long"; return 2; }
             DYNPORTS_N=$(( 10#$cnt ))
             [ "$DYNPORTS_N" = "$cnt" ] || { dynports_fatal "non-canonical count" "$cnt"; return 2; }
             [ "$DYNPORTS_N" -le "$DYNPORTS_MAX" ] || { dynports_fatal "count over $DYNPORTS_MAX"; return 2; }
-            DYNPORTS_STATE=inside; DYNPORTS_SEEN=0; DYNPORTS_FRAME=''
+            if [ "$DYNPORTS_STATE" = warned ] && [ "$DYNPORTS_N" -ne "$DYNPORTS_MAX" ]; then
+                dynports_fatal "BEGIN $DYNPORTS_N after too-many-listeners, not $DYNPORTS_MAX"; return 2
+            fi
+            DYNPORTS_STATE=inside; DYNPORTS_SEEN=0; DYNPORTS_LAST=0; DYNPORTS_FRAME=''
             return 0 ;;
         END)
             [ "$DYNPORTS_STATE" = inside ] || { dynports_fatal "END outside a frame"; return 2; }
@@ -1619,34 +1675,44 @@ dynports_line() {                     # 0 consumed | 1 frame complete | 2 fatal
             DYNPORTS_STATE=outside
             DYNPORTS_FRAME="${DYNPORTS_FRAME# }"
             return 1 ;;
-        "WARN "*)
-            # Degraded but continuing -- currently only `too-many-listeners <total>`, sent
-            # alongside a truncated frame. Recorded and shown; deliberately NOT fatal, because a
-            # container with more listeners than we will report is the world being unusual, not
-            # our code being wrong, and it clears itself when the count drops.
-            [ "${#line}" -le 64 ] || { dynports_fatal "WARN line too long"; return 2; }
-            quoted "${line#WARN }"; DYNPORTS_WARN="$QUOTED"
+        "WARN too-many-listeners "*)
+            # Degraded but continuing: more ports are listening than we will report. Recorded and
+            # shown; deliberately NOT fatal, because that is the world being unusual, not our code
+            # being wrong, and it clears itself when the count drops. But only in the one shape the
+            # watcher sends -- between frames, a count over the cap -- and then the next line must
+            # open the capped frame (see the `warned` arm of BEGIN above). Any other WARN is below.
+            [ "$DYNPORTS_STATE" = outside ] || { dynports_fatal "WARN not between frames"; return 2; }
+            cnt="${line#WARN too-many-listeners }"
+            # The port checks are exactly a listener count's: no more than 65535 ports can listen.
+            dynports_port "$cnt" || { dynports_fatal "bad listener count" "$cnt"; return 2; }
+            if [ "$DYNPORTS_PORT" -le "$DYNPORTS_MAX" ]; then
+                dynports_fatal "listener count within $DYNPORTS_MAX" "$cnt"; return 2
+            fi
+            DYNPORTS_WARN="too-many-listeners $DYNPORTS_PORT"
+            DYNPORTS_STATE=warned
             return 0 ;;
+        "WARN "*)
+            dynports_fatal "unknown warning" "${line#WARN }"; return 2 ;;
         "ERR "*)
-            [ "${#line}" -le 64 ] || { dynports_fatal "ERR line too long"; return 2; }
             dynports_fatal "the watcher stopped" "${line#ERR }"; return 2 ;;
     esac
 
     # Anything else must be a record, and a record is only legal inside a frame.
     [ "$DYNPORTS_STATE" = inside ] || { dynports_fatal "line outside a frame" "$line"; return 2; }
     [ "$DYNPORTS_SEEN" -lt "$DYNPORTS_N" ] || { dynports_fatal "more records than declared"; return 2; }
-    [ "${#line}" -le 10 ] || { dynports_fatal "record too long"; return 2; }
     case "$line" in *:*) ;; *) dynports_fatal "malformed record" "$line"; return 2 ;; esac
     rec="$line"; p="${rec%%:*}"; c="${rec#*:}"
     case "$c" in lo|any|v6lo|eth|loalt) ;; *) dynports_fatal "unknown class" "$c"; return 2 ;; esac
     dynports_port "$p" || return 2
-    # One record per port. The watcher merges by port, so a repeat is a broken watcher, and
-    # passing it on would publish the port twice -- which the state file's writer refuses (#406),
-    # leaving the file stale from then on. Matched on the port alone, so a second class is no way
-    # around it; the leading space keeps 3000 from matching 13000.
-    case "$DYNPORTS_FRAME" in
-        *" $DYNPORTS_PORT:"*) dynports_fatal "repeated port" "$DYNPORTS_PORT"; return 2 ;;
-    esac
+    # STRICTLY ASCENDING, as the watcher sorts them (pw_scan_text), which also makes a port twice
+    # impossible. A repeat matters beyond order: passing it on would publish the port twice, which
+    # the state file's writer refuses (#406), leaving the file stale from then on. Compared as
+    # numbers -- both sides are canonical integers this gate produced -- so 3000 after 13000 is
+    # caught and 13000 after 3000 is not.
+    if [ "$DYNPORTS_PORT" -le "$DYNPORTS_LAST" ]; then
+        dynports_fatal "port out of order: $DYNPORTS_PORT after $DYNPORTS_LAST"; return 2
+    fi
+    DYNPORTS_LAST=$DYNPORTS_PORT
     DYNPORTS_FRAME="$DYNPORTS_FRAME $DYNPORTS_PORT:$c"
     DYNPORTS_SEEN=$(( DYNPORTS_SEEN + 1 ))
     return 0
