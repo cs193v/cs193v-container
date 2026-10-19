@@ -3204,19 +3204,26 @@ assert_match "hostile:the-retries-are-on-the-meter" "\] +[0-9]+/$steps .*\(retry
 assert_eq "hostile:no-step-is-left-unnamed-on-a-retry" "0" "$(unnamed_frames "$out")"
 
 # ...NOR AFTER ONE INTERRUPTED THE WAY A STUDENT INTERRUPTS IT: SIGINT to the whole process group,
-# so the fake build, the tee and the meter go too, as they do on a Ctrl-C. `set -m` gives the job a
-# group of its own and leaves SIGINT un-ignored in it, which a background job of a non-interactive
-# shell otherwise starts with -- and only around the `&`, so the jobs started below keep the
-# suite's group. Measured with and without a controlling terminal: the launcher exits 130 and
-# nothing of the pipeline is left. Started directly rather than through `launcher`, whose function
-# body would put a subshell between $! and the launcher.
+# so the fake build, the tee and the meter go too, as they do on a Ctrl-C. Started directly rather
+# than through `launcher`, whose function body would put a subshell between $! and the launcher.
+#
+# THROUGH python, BECAUSE THIS SUITE MAY ALREADY BE IGNORING SIGINT. A two-lane run starts the
+# cheap lane with `&` and no job control, so every suite in it inherits SIGINT ignored, and a shell
+# can neither trap nor reset a signal that was ignored when it started. The first version of this
+# used `set -m`, which only stops bash adding that ignore at its own `&`: measured, it passed under
+# `-k 30-launcher-shim` and failed in a two-lane run, where the build ran to the end and the
+# launcher exited 0. So python hands the launcher a student's SIGINT, and SIGPIPE and SIGXFSZ back
+# too, which CPython ignores at startup and an exec keeps. setpgid gives it a group of its own in
+# place -- an `&` child does not lead one, so $! is the group -- and leaves the suite's alone.
 shim_new
 shim_set image_exists no
 shim_set build_delay 1
-set -m
-PATH="$SHIM:$PATH" "$HCOPY/cs193v" --rebuild </dev/null >"$SHIM/interrupted.out" 2>&1 &
+PATH="$SHIM:$PATH" python3 -c 'import os, signal, sys
+for s in (signal.SIGINT, signal.SIGPIPE, signal.SIGXFSZ):
+    signal.signal(s, signal.SIG_DFL)
+os.setpgid(0, 0)
+os.execv(sys.argv[1], sys.argv[1:])' "$HCOPY/cs193v" --rebuild </dev/null >"$SHIM/interrupted.out" 2>&1 &
 ipid=$!
-set +m
 if wait_until 20 test -s "$SHIM/build_context"; then
     kill -INT -- "-$ipid" 2>/dev/null
     wait "$ipid" 2>/dev/null; irc=$?
