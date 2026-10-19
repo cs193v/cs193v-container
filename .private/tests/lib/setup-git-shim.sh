@@ -41,17 +41,22 @@ sg_new() {
         chmod +x "$SGSHIM/gh" "$SGSHIM/git" "$SGSHIM/shortlink" \
                  "$SGSHIM/cs193v-platform-messages" "$SGSHIM/sha256sum"
     fi
+    # BOTH RECORDS EXIST FROM THE START, EMPTY (#559), so "never called" and "configured nothing"
+    # are an empty file and sg_log and sg_config can read them through run_checker: a record that
+    # is not there is then a failed read rather than the empty answer every negative is hoping for.
+    # The fakes only ever append, and git-fake reads an empty config exactly as a missing one.
     : > "$SGSHIM/argv.log"
+    : > "$SGSHIM/gitconfig"
     SGDIRS="$SGDIRS $SGSHIM"
 }
 sg_set()   { printf '%s' "$2" > "$SGSHIM/$1"; }
 sg_touch() { : > "$SGSHIM/$1"; }
 sg_unset() { rm -f "$SGSHIM/$1"; }
-sg_log()   { cat "$SGSHIM/argv.log" 2>/dev/null; }
+sg_log()   { run_checker cat "$SGSHIM/argv.log"; }
 # The fake git config, whole. git-fake appends every write to it and no read touches it, so the
 # same text before and after a run is a run that configured nothing -- whatever the key was called,
 # and whether or not it was written with a flag.
-sg_config() { cat "$SGSHIM/gitconfig" 2>/dev/null; }
+sg_config() { run_checker cat "$SGSHIM/gitconfig"; }
 
 # A FRESH SHIM THAT STARTS WHERE ANOTHER RUN LEFT OFF (issue #357): its git config and its login,
 # copied out of SEED. So a second run reads what a real first run wrote, without paying for that
