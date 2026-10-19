@@ -5530,14 +5530,42 @@ assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$unco
 # the VM with it -- and doctor's clock fix went the other way: it no longer restarts the VM at all
 # (#494). A new bare start anywhere goes red. Comment lines are skipped, so prose that NAMES the
 # command is not a call site.
+#
+# ANY SPELLING, IN ANY SHIPPED SCRIPT (#495 review). The first cut grepped three named files for the
+# words `podman machine start`, so the launcher's own idiom -- `pmq machine start`, which is how
+# every other podman call in cs193v is spelled -- went straight past it, and so would a start added
+# to install-utils.sh or wsl-provision.sh. Now it is `machine start` after anything at all, in every
+# tracked shell script outside the tests; they are out because they start the fake on purpose. And
+# a function ends at its closing brace: the first cut credited every top-level line after one to
+# it, so a bare start just below the helper read as the helper's own.
 ms_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ms.XXXXXX")"
-for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.sh"; do
-    awk -v F="${f#"$REPO"/}" '
-        /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*[({]/ { fn = $0; sub(/\(\).*/, "", fn) }
+git -C "$REPO" ls-files | grep -v '^\.private/tests/' | while IFS= read -r f; do
+    [ -f "$REPO/$f" ] || continue
+    case "$f" in
+        *.sh) printf '%s\n' "$f" ;;
+        *)    head -n 1 "$REPO/$f" 2>/dev/null | grep -qE '^#!.*(/|env[[:space:]]+)(ba|da|z)?sh([[:space:]]|$)' \
+                  && printf '%s\n' "$f" ;;
+    esac
+done > "$ms_tmp/files"
+record "machine:shell-scripts-scanned-for-a-start" "$(grep -c . "$ms_tmp/files")"
+# THE LIST MUST REACH EVERY SCRIPT THAT TALKS TO A STUDENT'S PODMAN, or a derivation that quietly
+# stopped reaching one would pass for it.
+for ms_must in cs193v .private/files/cs193v-ui.sh .private/course-install.sh .private/install-cs193v.sh \
+               .private/install-utils.sh .private/wsl-provision.sh; do
+    if grep -qxF "$ms_must" "$ms_tmp/files"; then pass "machine:the-scan-reaches-$ms_must"
+    else fail "machine:the-scan-reaches-$ms_must" "not among the shell scripts git tracks -- has the derivation moved?"; fi
+done
+while IFS= read -r f; do
+    awk -v F="$f" '
+        /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*[({]/ {
+            fn = $0; sub(/\(\).*/, "", fn); one = ($0 ~ /[})][[:space:]]*$/)
+        }
         /^[[:space:]]*#/ { next }
-        /podman machine start/ { print F ":" fn }
-    ' "$f"
-done > "$ms_tmp/sites"
+        /(^|[^A-Za-z0-9_-])machine[[:space:]]+start([^A-Za-z0-9_-]|$)/ { print F ":" fn }
+        one { fn = ""; one = 0 }
+        /^[})]/ { fn = "" }
+    ' "$REPO/$f"
+done < "$ms_tmp/files" > "$ms_tmp/sites"
 ms_allowed=' .private/files/cs193v-ui.sh:machine_start_detached '
 ms_bare=''
 while IFS= read -r ms_site; do
@@ -5563,6 +5591,7 @@ if carve_func "$PRIVATE/files/cs193v-ui.sh" machine_start_detached "$ms_tmp/help
     assert_contains "machine:helper-restores-the-callers-job-control"      'set +m' "$ms_h"
     assert_contains "machine:helper-has-the-vm-ignore-sighup"  'exec nohup podman machine start' "$ms_h"
     assert_contains "machine:helper-gives-podman-no-terminal-on-stdin"      '</dev/null' "$ms_h"
+    assert_contains "machine:helper-leaves-the-callers-directory"           'cd /' "$ms_h"
     assert_contains "machine:helper-closes-fds-3-to-9" '3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-' "$ms_h"
 else
     fail "machine:helper-gives-the-start-its-own-process-group" \

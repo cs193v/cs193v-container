@@ -56,16 +56,12 @@ machine_calls() { shim_count '^machine '; }
 # The launch got past preflight: it went on to create the container.
 created()       { shim_count '^run '; }
 vm_state()      { cat "$SHIM/machine_state" 2>/dev/null; }
-vm_pid()        { cat "$SHIM/vm.pid" 2>/dev/null | do_tr -d ' \n'; }
-vm_snap()       { cat "$SHIM/vm.snapshot" 2>/dev/null; }
-vm_alive()      { local p; p="$(vm_pid)"; [ -n "$p" ] && ! pid_is_gone "$p"; }
+# vm_pid, vm_snap, vm_alive, pgid_of and sid_of are lib/podman-shim.sh's, shared with 25-installer.sh.
 vm_gone()       { ! vm_alive; }
 vm_up()         { [ "$(vm_state)" = running ] && vm_alive; }
 # Another window's start moving the state on, written atomically for the reason podman-fake's
 # set_mstate gives: a launcher reading it mid-write would see "no machine".
 vm_set()        { printf '%s' "$1" > "$SHIM/machine_state.t" && mv -f "$SHIM/machine_state.t" "$SHIM/machine_state"; }
-pgid_of()       { ps -o pgid= -p "$1" 2>/dev/null | do_tr -d ' '; }
-sid_of()        { "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
 # AN EMPTY NEEDLE NEVER MATCHES. grep -F with "" matches every line, so a wait on a message whose key
 # is missing would return at once and the case after it would measure a race, not the launcher.
 said()          { [ -n "$1" ] && grep -qF -- "$1" "$2" 2>/dev/null; }
@@ -116,16 +112,8 @@ launch_bg() {                         # launch_bg -> a bare launch, sets LPID
 launch_rc() { wait "$LPID" 2>/dev/null; }
 
 # ─── the pty, with a student's Ctrl-C (I) ──────────────────────────────────────
-# THE LAUNCHER HAS TO GET SIGINT AT DEFAULT, and from this harness it would not: bash hands every
-# `&` command SIGINT and SIGQUIT ignored, and that reaches the launcher through ptyrun -- the rule
-# 30-launcher-shim.sh's interrupt case records. A student's Ctrl-C reaches a foreground job of an
-# interactive shell, where nothing is ignored, so both are reset here before ptyrun runs. Python
-# can reset a disposition that was ignored at its start; a shell cannot.
-INTRESET='import os, signal, sys
-signal.signal(signal.SIGINT, signal.SIG_DFL)
-signal.signal(signal.SIGQUIT, signal.SIG_DFL)
-os.execvp(sys.argv[1], sys.argv[1:])'
-
+# THE LAUNCHER HAS TO GET SIGINT AT DEFAULT, and lib/podman-shim.sh's SHIM_INTRESET is how: see it
+# for why a harness cannot simply hand it on.
 # A bare launch on a pty in JOB MODE -- a lingering leader above the launcher, the shape
 # a Terminal window has -- whose stdin is a fifo this suite writes into: keystrokes are typed when
 # the case decides, not up front. Transcript in $PTY_OUT; ptyrun's pid in $PTY_PID.
@@ -135,20 +123,21 @@ pty_launch() {                        # pty_launch -> a bare launch on a pty
     PTY_IN="$SHIM/pty.in"; PTY_OUT="$SHIM/pty.out"
     rm -f "$PTY_IN"; mkfifo "$PTY_IN"; : > "$PTY_OUT"
     CS193V_PTY_JOB=1 PATH="$SHIM:$PATH" \
-        "$DO_PY" -c "$INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_IN" > "$PTY_OUT" 2>&1 &
+        "$DO_PY" -c "$SHIM_INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$cmd" < "$PTY_IN" > "$PTY_OUT" 2>&1 &
     PTY_PID=$!
     PTY_PIDS="$PTY_PIDS $PTY_PID"
     # The writer, held open on fd 7 so the pty never sees EOF. Opened AFTER the background
     # started, so ptyrun does not inherit it, and its open is the rendezvous with ptyrun's.
     exec 7>"$PTY_IN"
 }
-pty_type()  { printf '%b' "$1" >&7; }
-pty_close() { kill -USR1 "$PTY_PID" 2>/dev/null; }   # ptyrun's polite close: SIGHUP to the fg group
-pty_end()   { exec 7>&-; kill "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null; rm -f "$PTY_IN"; }
-pty_said()  { [ -n "$1" ] && grep -qF -- "$1" "$PTY_OUT" 2>/dev/null; }
+# pty_type, pty_close, pty_end and pty_said are lib/podman-shim.sh's.
 # The launcher itself, found as the process whose argv is our copy's cs193v -- the pty announces
-# no pid in this shape, and ptyrun's tree is leader -> job shell -> launcher.
-launcher_pids() { pgrep -f "${PTY_DIR:-$LAUNCHER_DIR}/cs193v" 2>/dev/null; }
+# no pid in this shape, and ptyrun's tree is leader -> job shell -> launcher. AS BASH RUNS IT, which
+# is `bash PATH` through its env shebang, and so is every subshell it forks. The bare path also
+# matched ptyrun and the job shell, whose argv carry it quoted, so while the pty was open this
+# never came back empty: every `wait_until 15 no_launcher` below waited its full fifteen seconds,
+# and C5 reported the harness as a leftover launcher (#495 review).
+launcher_pids() { pgrep -f "bash ${PTY_DIR:-$LAUNCHER_DIR}/cs193v" 2>/dev/null; }
 no_launcher()   { [ -z "$(launcher_pids)" ]; }
 
 # ═══ A. no VM running, nobody else starting it ══════════════════════════════════
@@ -166,6 +155,12 @@ for needle in 'machine set --rootful' 'podman-mac-helper' 'machine init' 'Cannot
               'started successfully' 'Starting machine'; do
     assert_not_contains "a1:shows-none-of-podmans-output:$needle" "$needle" "$out"
 done
+# ONE ANSWER AFTER THE START, NOT TWO (#495 review). The probe that heard podman answer ran in the
+# launcher's own shell, so its answer IS preflight's rootless read; asking again cost a round trip
+# on every launch that starts the VM.
+after="$(awk '/^machine start/ { s = 1; next } s && $0 == "info --format {{.Host.Security.Rootless}}" { n++ }
+              END { print n + 0 }' "$SHIM/argv.log")"
+assert_eq "a1:asks-podman-once-after-the-start" "1" "$after"
 
 # A2: the next launch finds it running and starts nothing.
 shim_clear_log
@@ -385,6 +380,84 @@ knobs 20 10
 assert_eq       "c3:started-once"                  "1" "$(starts)"
 assert_says_key "c3:then-says-restart-the-vm"      err.machine-unreachable "$out"
 
+# C4: THE REFUSAL QUOTES WHAT PODMAN SAYS NOW (#495 review), not the `info` that failed before the
+# start, while the VM was still stopped. Stopped, the fake refuses the connection; started and
+# never answering, it fails the handshake -- so each refusal says which one it quoted. Compared
+# with the box and every space taken out, because the box wraps podman's line where it likes.
+unboxed() { printf '%s' "$1" | sed -e 's/[┃┏┓┗┛━]//g' | do_tr -d '[:space:]'; }
+mac stopped
+shim_set info_ok_after 100000
+knobs 4 2
+out="$(launcher)"
+knobs 20 10
+assert_says_key     "c4:after-our-start-says-restart-the-vm"     err.machine-unreachable "$out"
+assert_contains     "c4:quotes-what-podman-said-after-the-start" "ssh:handshakefailed" "$(unboxed "$out")"
+assert_not_contains "c4:not-what-it-said-before-it"              "connectionrefused" "$(unboxed "$out")"
+# ...and the same after a WAIT: the VM read `running` and refused, then went on failing the
+# handshake for the whole of the wait.
+mac running
+shim_touch machine_unreachable
+knobs 6 3
+launch_bg
+if wait_until 15 said "$WAITING" "$SHIM/l.out"; then
+    shim_set info_ok_after 100000
+    rm -f "$SHIM/machine_unreachable"
+    launch_rc
+    l_out="$(cat "$SHIM/l.out")"
+    assert_says_key     "c4:after-a-wait-says-restart-the-vm"     err.machine-unreachable "$l_out"
+    assert_contains     "c4:quotes-what-podman-said-during-the-wait" "ssh:handshakefailed" "$(unboxed "$l_out")"
+    assert_not_contains "c4:not-what-it-said-before-it-after-a-wait" "connectionrefused" "$(unboxed "$l_out")"
+else
+    launch_rc
+    fail "c4:after-a-wait-says-restart-the-vm" "never waited: $(cat "$SHIM/l.out")"
+fi
+knobs 20 10
+
+# C5: CTRL-C WHILE WAITING ENDS THE WAITING TOO (#495 review). The wait is run_timeout's command, a
+# `&` subshell, and a non-interactive shell hands those SIGINT ignored -- so a Ctrl-C that ended
+# the launcher left that subshell asking podman twice a second until the deadline. It is a fork of
+# the launcher, so it answers to the launcher's own command line.
+mac starting
+pty_launch
+if wait_until 15 pty_said "$WAITING"; then
+    pty_type '\003'
+    if wait_until 10 no_launcher; then pass "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman"
+    else
+        c5_left=''
+        for p in $(launcher_pids); do
+            c5_left="$c5_left [$(ps -o pid=,ppid=,pgid=,stat= -p "$p" 2>/dev/null) children: $(pgrep -lP "$p" 2>/dev/null | do_tr '\n' ',')]"
+        done
+        fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" \
+             "still running:$c5_left; podman asked $(shim_count '^info ') times; last calls: $(tail -3 "$SHIM/argv.log" | do_tr '\n' '|')"
+    fi
+else
+    fail "c5:ctrl-c-while-waiting-leaves-nothing-asking-podman" "never waited: $(tail -3 "$PTY_OUT")"
+fi
+pty_end
+
+# C6: A STATE READ THAT HANGS NEAR THE DEADLINE leaves nothing behind (#495 review). The wait's own
+# reads are clipped to what is left of it, so they finish inside the ceiling it is given; unclipped,
+# a 5 s read outlived that ceiling, whose kill reaches the subshell but not the read it was waiting
+# on -- and a hung read then runs for ever. The first state read is machine_recover's own; the
+# second is the wait's.
+#
+# INTO A FILE, NOT A $( ). The hung read is a fork of the launcher and holds a copy of its stdout,
+# so a `$(launcher)` never sees EOF and the suite hangs instead of failing -- measured, red-first.
+mac starting
+shim_set machine_inspect_hang_at 2
+knobs 2 1
+launch_bg
+launch_rc
+out="$(cat "$SHIM/l.out")"
+knobs 20 10
+hung="$(pgrep -f "$SHIM/podman machine inspect" 2>/dev/null | do_tr '\n' ' ')"
+if [ -z "$hung" ]; then pass "c6:a-hung-state-read-does-not-outlive-the-launcher"
+else
+    fail "c6:a-hung-state-read-does-not-outlive-the-launcher" "still running: $hung"
+    pkill -f "$SHIM/podman machine inspect" 2>/dev/null
+fi
+assert_says_key "c6:and-it-still-says-it-is-starting" err.machine-still-starting "$out"
+
 # ═══ D. a VM running that is not ours, or no target at all ══════════════════════
 # D1: another machine is up. Say which, at once -- there is nothing to wait for.
 mac stopped
@@ -402,6 +475,16 @@ shim_set machine_other_active pmd-other
 shim_set machine_other_provider applehv
 out="$(launcher)"
 assert_says_sub "d1:names-it-on-another-provider-too" err.machine-other-active "$out" "$PRIVATE/messages.txt" NAME=pmd-other
+# ...and a wording this cannot read the name out of: no `podman machine stop ?`, but the command
+# that lists the machines, so the student can find the name themselves (#495 review).
+mac stopped
+shim_set machine_start_rc 125
+shim_set machine_start_err 'Error: only one VM can be active at a time'
+out="$(launcher)"
+assert_says_key     "d1:an-unnamed-one-still-says-another-is-running" err.machine-other-active-unnamed "$out"
+assert_says_key     "d1:an-unnamed-one-says-how-to-find-it"           err.machine-other-active-unnamed.fix "$out"
+assert_contains     "d1:an-unnamed-one-names-machine-list"            "podman machine list" "$out"
+assert_not_contains "d1:an-unnamed-one-names-no-placeholder"          "stop ?" "$out"
 
 # D2: a machine exists, but not the default one: nothing to start.
 mac
@@ -681,16 +764,11 @@ assert_contains "h6:update-defaults-to-20s"   'CS193V_MACHINE_UPDATE_AT:-20' "$(
 # anything; I10 says so out loud.
 NAIVE="$(repo_copy)"
 ui="$NAIVE/.private/files/cs193v-ui.sh"
-# THE NAIVE HELPER is the plain `podman machine start` everything here exists to replace: in the
-# caller's own process group, SIGHUP not ignored, the caller's fds passed straight through.
-perl -0pi -e 's/^machine_start_detached\(\) \{\n.*?\n\}\n/machine_start_detached() {\n    podman machine start <\/dev\/null\n}\n/ms' "$ui"
-naive_body="$(sed -n '/^machine_start_detached() {$/,/^}$/p' "$ui")"
-case "$naive_body" in
-    '')         fail "i10:the-naive-control-was-built" "no helper found to replace in the naive copy" ;;
-    *'set -m'*) fail "i10:the-naive-control-was-built" "the helper in the naive copy still detaches" ;;
-    *'podman machine start </dev/null'*) pass "i10:the-naive-control-was-built" ;;
-    *)          fail "i10:the-naive-control-was-built" "unexpected naive helper: $naive_body" ;;
-esac
+# THE NAIVE HELPER: see shim_naive_helper in lib/podman-shim.sh, which 25-installer.sh's controls
+# are built with too.
+naive_why="$(shim_naive_helper "$ui")"
+if [ -z "$naive_why" ]; then pass "i10:the-naive-control-was-built"
+else fail "i10:the-naive-control-was-built" "$naive_why"; fi
 
 # I1 + I8: one start, with fds 5 and 8 held open on pipes by THIS suite. The snapshot says what the
 # VM inherited; the readers say whether anything still holds the pipes once the launcher is gone.
@@ -707,6 +785,9 @@ if wait_until 10 vm_alive; then
     snap="$(vm_snap)"
     assert_contains "i1:the-vm-ignores-sighup"        "HUP=IGNORE" "$snap"
     assert_contains "i1:the-vm-takes-sigint-default"  "INT=DEFAULT" "$snap"
+    # NOT THE CALLER'S DIRECTORY (#573): the VM holds the one it was started in for days, and a
+    # drive holding a process's directory cannot be ejected.
+    assert_contains "i1:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
     # 3..9 BY NUMBER: those are the helper's to close. Anything above that arrived from whoever
     # started this suite -- the launcher cannot name what it does not know about -- and a copy of
     # one of OUR pipes at a high number is i8's to catch, by EOF, below.
@@ -824,7 +905,7 @@ as_leader() {                         # as_leader DIR -> sets AL_VM
     local dir="$1"
     mac stopped
     CS193V_PTY_NOSHELL=1 PATH="$SHIM:$PATH" \
-        "$DO_PY" -c "$INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$dir/cs193v" --rebuild \
+        "$DO_PY" -c "$SHIM_INTRESET" "$DO_PY" "$PT_LIB/ptyrun.py" "$dir/cs193v" --rebuild \
         </dev/null > "$SHIM/i6.out" 2>&1
     # Proving an absence: the leader has exited and the hangup has been sent.
     sleep 2
@@ -878,6 +959,7 @@ if wait_until 10 vm_alive; then
         pass "i10:naive-start-keeps-the-held-pipe-open"
     fi
     assert_not_contains "i10:naive-start-vm-does-not-ignore-sighup" "HUP=IGNORE" "$(vm_snap)"
+    assert_not_contains "i10:naive-start-vm-keeps-the-callers-directory" " cwd=/ " "$(vm_snap)"
 else
     fail "i10:naive-start-keeps-the-held-pipe-open" "no VM came up in the naive copy"
 fi

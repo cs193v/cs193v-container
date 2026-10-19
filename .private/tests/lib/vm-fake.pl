@@ -15,8 +15,10 @@
 #
 # IT SAYS WHAT IT INHERITED, FIRST, before it opens anything of its own:
 #
-#   $SHIM/vm.snapshot   `pid=N HUP=IGNORE INT=DEFAULT QUIT=DEFAULT TERM=DEFAULT fds=5,9`
-#                       one line; fds lists which of 3..255 were open when it started
+#   $SHIM/vm.snapshot   `pid=N HUP=IGNORE INT=DEFAULT QUIT=DEFAULT TERM=DEFAULT cwd=/ fds=5,9`
+#                       one line; cwd is the directory it was started in, which it holds for its
+#                       whole life (#573); fds lists which of 3..255 were open when it started,
+#                       and stays last so a reader can take everything after `fds=`
 #   $SHIM/vm.pid        its pid, for `machine stop`, the tests and shim_kill_vms
 #
 # The snapshot is written to a temporary name and renamed, so a reader that sees the file sees
@@ -35,6 +37,7 @@
 use strict;
 use warnings;
 use POSIX qw(:signal_h);
+use Cwd ();
 
 my $shim = shift @ARGV or die "usage: vm-fake SHIM\n";
 
@@ -61,7 +64,8 @@ sub put {
     close $fh;
     rename $tmp, "$shim/$name";
 }
-put('vm.snapshot', sprintf "pid=%d %s fds=%s\n", $$, join(' ', @disp), join(',', @fds));
+my $cwd = Cwd::getcwd() // '?';
+put('vm.snapshot', sprintf "pid=%d %s cwd=%s fds=%s\n", $$, join(' ', @disp), $cwd, join(',', @fds));
 put('vm.pid', "$$\n");
 
 my $end = time + ($ENV{CS193V_FAKE_VM_SECS} || 300);

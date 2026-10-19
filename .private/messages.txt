@@ -127,6 +127,21 @@ Stop it, then run ./cs193v again:
 
     podman machine stop {{NAME}}
 
+# The same, when podman's words did not give the name away -- another release, or a provider that
+# says it differently (#495 review). The fix names the command that shows it, rather than printing
+# `podman machine stop ?`.
+[[err.machine-other-active-unnamed]]
+Another podman virtual machine is already running, and podman
+can only run one at a time.
+
+[[err.machine-other-active-unnamed.fix]]
+The first command lists them, and the one that is running says
+"Currently running". Stop that one with the second command,
+putting its name in place of NAME, then run ./cs193v again:
+
+    podman machine list
+    podman machine stop NAME
+
 [[err.rootless-unreadable]]
 Podman answered the "are you rootless?" question with something
 the course container could not read.

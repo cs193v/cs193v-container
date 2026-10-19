@@ -26,6 +26,9 @@
 #                    Checked AFTER the state=absent arm, so `absent` keeps meaning 125 and
 #                    "the container is there but the query failed" -- issue #171's case --
 #                    becomes separately expressible. Before this knob it was not.
+#   dir_label_rc     exit code for the cs193v.dir LABEL read alone, on a container that exists  [0].
+#                    The state answers and the folder label does not, which reaches the launcher's
+#                    refuse_if_foreign_dir: inspect_rc fails the state read first and stops short.
 #   inspect_stderr   a line `podman inspect` writes to STDERR before its answer, exiting 0.
 #                    Together with info_stderr this is the #171 case: podman warns on stderr
 #                    and succeeds, and run_timeout merges the two.
@@ -102,6 +105,8 @@
 #                           differently
 #   machine_inspect_rc     exit code for `machine inspect` itself                     [0]
 #   machine_inspect_hang   present = `machine inspect` sleeps forever
+#   machine_inspect_hang_at  N: the Nth `machine inspect` state read sleeps forever and every
+#                          other one answers -- a hang that arrives mid-wait rather than at the start
 #   info_hang        present = `podman info` ALONE sleeps forever: the slept Mac, where podman
 #                    answers --version and then hangs on the first real question. `hang` hangs
 #                    every call, --version included, which is a different refusal.
@@ -314,6 +319,11 @@ case "${1:-}" in
             case "$1" in --format) shift; FMT="${1:-}" ;; --format=*) FMT="${1#--format=}" ;; esac
             shift
         done
+        case "$FMT" in
+            *cs193v.dir*)
+                LRC="$(get dir_label_rc 0)"
+                [ "$LRC" -ne 0 ] && { echo "Error: cannot connect to podman" >&2; exit "$LRC"; } ;;
+        esac
         fmt_container "$FMT"
         exit 0
         ;;
@@ -635,6 +645,12 @@ while os.path.exists(d + "/stop_hold"):
                     # the boot-window wait -- red on a Mac and green on Linux.
                     *State*)
                         [ -f "$SHIM/machine_inspect_hang" ] && { while :; do sleep 5; done; }
+                        ha="$(get machine_inspect_hang_at '')"
+                        if [ -n "$ha" ]; then
+                            mic=0; [ -f "$SHIM/machine_inspect_calls" ] && mic="$(cat "$SHIM/machine_inspect_calls")"
+                            mic=$((mic + 1)); echo "$mic" > "$SHIM/machine_inspect_calls"
+                            [ "$mic" -eq "$ha" ] && { while :; do sleep 5; done; }
+                        fi
                         irc="$(get machine_inspect_rc 0)"
                         [ "$irc" -ne 0 ] && { echo "Error: cannot read machine configuration" >&2; exit "$irc"; }
                         ms="$(get machine_state '')"

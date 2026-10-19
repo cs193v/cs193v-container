@@ -474,9 +474,29 @@ RT_ERR=''
 # DEFAULT OFF, and its two callers never clear it, both being on their way out. Declared because
 # every consumer of this file runs under `set -u`.
 RT_DETACH=''
+# The terminal's width, for a label that has to be redrawn in place. Asked of the terminal ITSELF:
+# `$(tput cols 2>/dev/null)` cannot see it -- tput's stdout is the substitution's pipe, so it falls
+# back to stderr, and with that thrown away to terminfo's 80. Measured in a 50-column pty: that
+# said 80, `stty size </dev/tty` said `24 50`.
+term_cols() {                         # term_cols -> columns, or 80 when there is no telling
+    local sz
+    sz="$(stty size </dev/tty 2>/dev/null)"
+    sz="${sz#* }"
+    case "$sz" in ''|0|*[!0-9]*) sz=80 ;; esac
+    printf '%s' "$sz"
+}
+# TEXT cut to WIDTH, with "..." on the end when anything was cut. Into RT_FIT rather than onto
+# stdout, so the poll loop can call it without forking.
+rt_fit() {                            # rt_fit TEXT WIDTH -> RT_FIT
+    RT_FIT="$1"
+    [ "${#1}" -gt "$2" ] || return 0
+    if [ "$2" -gt 3 ]; then RT_FIT="${1:0:$(( $2 - 3 ))}..."
+    else RT_FIT="${1:0:$2}"; fi
+}
+RT_FIT=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
-    local tmp fifo eout pid cpid i rc frame lbl pad end line
+    local tmp fifo eout pid cpid i rc frame lbl pad end line t0 room
     # DRAIN THE STDOUT BUFFER BEFORE THE FIRST FORK, and this is not hygiene (#170). On macOS a
     # write to fd 1 that FAILS leaves its bytes in bash 3.2's buffer -- BSD stdio keeps the
     # unwritten tail and 3.2 has no fpurge -- and the buffer is never cleared, so every later
@@ -534,6 +554,18 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # covers the command inside it: the launcher keeps copies of the terminal there for its
         # signal handlers (#511), and a command started here can outlive the launcher -- the
         # tunnel's `ssh -f` master does, by design -- so none of them may take those copies along.
+        # WHAT A FRAME CAN HOLD (#495 review). A frame goes back to the start of its row with a
+        # bare \r, so a label that wrapped has left the row: every frame then prints the whole
+        # label again from the row it wrapped onto, and the screen scrolls a column of them. So a
+        # frame shows the label cut to fit -- the indent, the glyph and its two spaces, and one
+        # column short of the last, which some terminals answer with a pending wrap. Only frames:
+        # the ending below prints the label whole, once, where wrapping costs nothing.
+        room=0
+        if [ -n "$lbl" ] && [ -t 1 ]; then
+            room=$(( $(term_cols) - ${#pad} - 4 ))
+            [ "$room" -ge 1 ] || room=1
+        fi
+        rt_fit "$lbl" "$room"
         if [ -n "$lbl" ]; then
             # Drawn once up front rather than only from inside the loop, so a command that
             # returns immediately still announces itself instead of flashing nothing.
@@ -542,23 +574,31 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
             # overwrite, so it says nothing here and prints its one line at the end WITH the
             # outcome on it. That is what makes a piped transcript one line per step rather
             # than one line per step twice.
-            if [ -t 1 ]; then printf '%s%s  %s' "$pad" "$(meter_glyph 0)" "$lbl"
+            if [ -t 1 ]; then printf '%s%s  %s' "$pad" "$(meter_glyph 0)" "$RT_FIT"
             elif [ -z "$RT_ROW" ]; then printf '%s\n' "$lbl"; fi
         fi
-        while [ "$i" -lt "$((secs * 10))" ]; do
+        # TICKS OR SECONDS, WHICHEVER RUNS OUT FIRST (#495 review). A tick is a `sleep 0.1` plus the
+        # fork that runs it and, every other tick, a frame, so ticks alone ran long on a loaded
+        # machine: a labelled `run_timeout 10` measured 11 s, and the launcher's 60 s VM deadline
+        # 66. SECONDS alone would be up to a second SHORT, since it counts whole seconds from
+        # wherever in one this call began -- so it ends the loop only once it reads more than
+        # secs, which is always at least secs and at most one over.
+        t0=$SECONDS
+        while [ "$i" -lt "$((secs * 10))" ] && [ "$(( SECONDS - t0 ))" -le "$secs" ]; do
             if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; break; fi
             # THE LATER LABEL, on the tick it falls due and once. [K on the redraw because the two
             # labels differ in length, and a shorter one drawn over a longer one leaves its tail.
             if [ -n "$RT_SPIN_LATER" ] && [ -n "$RT_SPIN" ] && [ -z "$RT_ROW" ] \
                && [ "$lbl" != "$RT_SPIN_LATER" ] && [ "$i" -ge "$(( ${RT_SPIN_AT:-0} * 10 ))" ]; then
                 lbl="$RT_SPIN_LATER"
-                if [ -t 1 ]; then printf '\r%s%s  %s%s[K' "$pad" "$(meter_glyph "$frame")" "$lbl" "$ESC"
+                rt_fit "$lbl" "$room"
+                if [ -t 1 ]; then printf '\r%s%s  %s%s[K' "$pad" "$(meter_glyph "$frame")" "$RT_FIT" "$ESC"
                 else printf '%s\n' "$lbl"; fi
             fi
             if [ -n "$lbl" ] && [ -t 1 ] && [ "$((i % 2))" -eq 0 ]; then
                 # Same braille frames as the meter, so the two never look like different
                 # programs. meter_glyph is the single definition of them.
-                printf '\r%s%s  %s' "$pad" "$(meter_glyph "$frame")" "$lbl"
+                printf '\r%s%s  %s' "$pad" "$(meter_glyph "$frame")" "$RT_FIT"
                 frame=$(( (frame + 1) % 8 ))
             fi
             sleep 0.1
@@ -1098,6 +1138,8 @@ ensure_podman_path() {
 #                 INT, QUIT and TERM at default). That covers a terminal that hangs up more than
 #                 its foreground group. Alone it survived the close and died on Ctrl-C, 3/3.
 #   * </dev/null  podman 6.0.2 asks a question when its stdin is a terminal.
+#   * cd /        krunkit and gvproxy keep the directory they were started in for as long as the
+#                 VM runs, and a drive holding a process's directory will not eject (#573).
 #   * 3>&- .. 9>&-  Go does not close the fds it inherits, so the VM -- which lives for days --
 #                 would hold open whatever the caller had on them: run-tests.sh's 3 and 4, a
 #                 future caller's pipe. 3..9 is every fd a shell script can name. Closed by a
@@ -1141,6 +1183,12 @@ machine_start_detached() {
         # -- and the saved copy survives the exec: the caller's fd 5 reached the VM as fd 13.
         # `exec` with redirections and no command applies them for good and saves nothing.
         exec </dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+        # NOT THE CALLER'S DIRECTORY (#573). krunkit and gvproxy keep the directory they were
+        # started in for as long as the VM runs, and a drive holding some process's directory
+        # will not eject: measured, `diskutil eject` "dissented by PID", `hdiutil detach` "Resource
+        # busy". Neither the launcher nor the installer `cd`s, so that was wherever the student's
+        # Terminal happened to be. Inside the job, so the caller's own directory is untouched.
+        cd / || :
         exec nohup podman machine start
     ) &
     p=$!

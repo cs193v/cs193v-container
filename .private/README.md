@@ -1637,13 +1637,20 @@ the one that owns the terminal for the whole session. Closing the window, which 
 and Ctrl-C both kill it there, and krunkit has no handlers, so each is a power cut with XFS log recovery
 on the next boot. `machine_start_detached` in `files/cs193v-ui.sh` is the answer: `set -m` gives the
 start a process group of its own, `nohup` leaves the VM ignoring SIGHUP, `</dev/null` keeps podman 6
-from asking a question, and fds 3–9 are closed because Go passes inherited fds straight through to a
-process that lives for days. Each piece was measured alone first; its comment says what each one did.
+from asking a question, fds 3–9 are closed because Go passes inherited fds straight through to a
+process that lives for days, and it starts from `/` because the VM keeps the directory it started in,
+and a drive holding one will not eject (#573). Each piece was measured alone first; its comment says
+what each one did.
 
 **The recovery's shape** (`machine_recover` in `cs193v`), decided with Keith:
 
 - One 60 s deadline for the whole of it, every step clipped to what is left; a 20 s update line. A
-  start measured 10–13 s; a launch queued behind another window's start needs about twice that.
+  start measured 10–13 s; a launch queued behind another window's start needs about twice that. The
+  deadline is time, not spinner ticks: counted in ticks it ran to 66 s on a loaded machine.
+- A Ctrl-C during the wait ends the wait too. Its loop is run_timeout's command, a `&` subshell that a
+  shell without job control hands SIGINT ignored, so it stops once the launcher has gone.
+- A refusal after our start or a wait quotes what podman said last, not the `info` that failed
+  before the start.
 - A start that somebody else is making — another window, Podman Desktop — is waited for under its own
   line, "Waiting for the podman VM to finish starting...", because "Starting" would be false.
 - A hang (rc 124) is the slept Mac and goes straight to `err.podman-hangs`; nothing is asked of the

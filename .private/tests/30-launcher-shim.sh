@@ -2848,12 +2848,29 @@ shim_set run_err 'Error: creating container storage: the container name "cs193v"
 shim_clear_log
 out="$(launcher)"
 assert_says_key     "query-failed:says-podman-could-not-be-reached" err.podman-unreachable "$out"
+# AND WHAT TO DO ABOUT IT. err.podman-unreachable is a head since #495 split the instruction into
+# its own key, and this site went on printing the head alone (#495 review).
+assert_says_key     "query-failed:says-what-to-do"                  err.podman-unreachable.fix "$out"
 assert_says_not_key "query-failed:not-reported-as-a-live-session"   err.session-in-use "$out"
 assert_eq "query-failed:creates-nothing" "0" "$(shim_count '^run ')"
 # THE ONE WITH TEETH. Believing the container absent, ensure_container's tail runs `podman start`,
 # and on failure removes and recreates -- `podman rm -f` on a container that may be perfectly
 # fine, and which somebody may be working in.
 assert_eq "query-failed:removes-nothing" "0" "$(shim_count '^rm ')"
+
+# THE SAME FAULT ONE READ LATER, in refuse_if_foreign_dir: the state answered, and the folder label
+# did not. Same key and the same instruction, because it is the same fault -- and this read had no
+# case at all until the head was found printed alone here too (#495 review).
+shim_new
+launcher >/dev/null 2>&1
+shim_set state running
+shim_set label_dir "$COPY"
+shim_set dir_label_rc 125
+shim_clear_log
+out="$(launcher)"
+assert_says_key "label-failed:says-podman-could-not-be-reached" err.podman-unreachable "$out"
+assert_says_key "label-failed:says-what-to-do"                  err.podman-unreachable.fix "$out"
+assert_eq       "label-failed:opens-no-shell"                   "0" "$(shim_count '^exec ')"
 
 # --stop is the escape hatch the refusals name, and it must not answer "there is nothing to stop"
 # when what it means is "I could not tell". This is the case a slept Mac produces, which is the
