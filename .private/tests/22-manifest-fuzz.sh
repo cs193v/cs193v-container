@@ -467,7 +467,7 @@ out("cases-reached", str(reached))
 PY
 FUZZ_RC=$?
 
-fz() { awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
+fz() { run_checker awk -F'\t' -v k="$1" '$1==k{print $2}' "$OUT"; }
 
 # ─── the oracle ran, and ran to its last line ──────────────────────────────────
 # FIRST AND ON ITS OWN, the rule 19-shortlink-fuzz.sh states: every property below is satisfied by
