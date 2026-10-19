@@ -5313,6 +5313,24 @@ dyn_max="$(sed -n 's/^DYNPORTS_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v
 assert_match "portwatch:declares-its-cap"   "^[0-9]+$" "$pw_max"
 assert_match "portwatch:the-gate-declares-its-cap" "^[0-9]+$" "$dyn_max"
 assert_eq    "portwatch:its-cap-is-the-hosts" "$dyn_max" "$pw_max"
+# AND THE CAP IS PART OF THE PROTOCOL. Equal within one checkout is not enough: the launcher runs the
+# gate from the student's checkout and the watcher runs from their image, so the two can be different
+# versions. Since #505 the gate takes the frame after a WARN only at exactly its own cap, so a cap
+# that moved under an unchanged handshake would work until a container had more listeners than the
+# smaller cap, and then end forwarding for the session. Moved with a new version instead, a mismatched
+# pair is refused at the handshake, on the first line. Pinned as a pair, so moving either says so.
+pw_proto="$(sed -n "s/^PW_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-portwatch")"
+dyn_proto="$(sed -n "s/^DYNPORTS_PROTO='\(.*\)'$/\1/p" "$PRIVATE/files/cs193v-ui.sh")"
+assert_eq    "portwatch:its-handshake-is-the-hosts" "$dyn_proto" "$pw_proto"
+if [ "$pw_proto/$pw_max" = "cs193v-portwatch 1/128" ]; then
+    pass "portwatch:the-cap-moves-only-with-the-version"
+else
+    fail "portwatch:the-cap-moves-only-with-the-version" \
+"the handshake and the cap are '$pw_proto' and $pw_max; this pins 'cs193v-portwatch 1' and 128.
+A launcher and an image of different versions must not disagree about the cap under the same
+handshake. If the cap moved, bump the version in PW_PROTO and DYNPORTS_PROTO with it, then update
+this pin."
+fi
 # -x, like setup-git above: it sources /etc/cs193v/ui.sh for box(), a path that exists only
 # inside the image. shellcheck reports the unresolvable source at info level, which
 # --severity=warning drops, so this stays quiet without hiding a real finding.

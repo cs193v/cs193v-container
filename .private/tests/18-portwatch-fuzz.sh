@@ -350,12 +350,15 @@ pub_ok "a-port-in-both-lists" "3000:lo" "state=healthy" "floor=1024" "up=3000:lo
 
 # PW_MAX OF EACH is the most the host can send: it forwards at most DYNPORTS_MAX ports, its gate
 # refuses a frame of more records than that, and 10-static.sh holds the two caps equal. Built from
-# PW_MAX rather than written out, so the cases follow the cap wherever it moves.
-pw_nlist() {                          # pw_nlist N WORD -> PW_NLIST (comma-joined), PW_NLIST_SP
+# PW_MAX rather than written out, so the cases follow the cap wherever it moves. Ports count up from
+# FIRST+1, 1001 unless it is given, and the WORDS take turns. Split by the watcher's own pw_split,
+# which is the one split here that cannot glob.
+pw_nlist() {                          # pw_nlist N WORDS [FIRST] -> PW_NLIST (comma-joined), PW_NLIST_SP
     local i=1
+    pw_split ' ' "$2"
     PW_NLIST=''
     while [ "$i" -le "$1" ]; do
-        PW_NLIST="$PW_NLIST,$(( 1000 + i )):$2"
+        PW_NLIST="$PW_NLIST,$(( ${3:-1000} + i )):${PW_ITEMS[(i - 1) % ${#PW_ITEMS[@]}]}"
         i=$(( i + 1 ))
     done
     PW_NLIST="${PW_NLIST#,}"; PW_NLIST_SP="${PW_NLIST//,/ }"
@@ -893,19 +896,74 @@ prop_base() {                         # prop_base NAME TEXT -- TEXT itself, and 
     prop_add "$b/no-final-newline"    "${text%$'\n'}"
     prop_add "$b/extra-final-newline" "$text"$'\n'
 }
-prop_written() {                      # prop_written NAME PUBLISH-ARGS...
+# THE WRITER'S OWN FILES, each noted in PROP_WRITTEN by its case number as it is added, so the check
+# that the reader and the grammar accept them all knows them by what made them, not by their names.
+# CALLED BY NAME, NOT THROUGH A VARIABLE. Measured: with the adder passed in and called as "$add",
+# checking this file and lib/ together with shellcheck took 900s, against 2s, and 10-static.sh,
+# which checks every suite with lib/ at once, went from about a minute to a quarter of an hour.
+PROP_WRITTEN=''
+prop_writer() {                       # prop_writer NAME PUBLISH-ARGS... -> PW_FILE, its case number noted
     local name="$1"; shift
     if pw_written "$@"; then
-        prop_base "$name" "$PW_FILE"
+        PROP_WRITTEN="$PROP_WRITTEN ${#PROP_NAMES[@]}"
     else
-        fail "pw:prop:$name-is-written" "--publish refused the base's own arguments: ${PWP_ERR:-no reason given}"
+        fail "pw:prop:$name-is-written" "--publish refused the case's own arguments: ${PWP_ERR:-no reason given}"
+        return 1
     fi
 }
+prop_written() { prop_writer "$@" && prop_base "$1" "$PW_FILE"; }   # prop_written NAME PUBLISH-ARGS...
 prop_written B1 "state=healthy" "floor=1024" "up=" "refused="
 prop_written B2 "state=healthy" "floor=1024" "up=3000:lo,41573:lo" "refused=8080:busy,9000:v6lo"
 prop_written B3 "state=master-unresponsive" "floor=80" "up=" "refused=21500:v6lo,22:below-floor"
 prop_written B4 "state=broken" "floor=65535" "up=1:lo" "refused=1:eth,65535:capped"
 prop_add "empty-file" ""
+
+# THE LARGEST LEGAL FILES, which no base above comes near: every list above is four entries at most,
+# and the PW_MAX-entry lists the tables use are four-digit ports with `lo` or `busy`. So the same
+# question the dynamic gate's suite now asks of its own extremes (#505): does the reader take the
+# biggest thing the writer can write? W1 is that -- the longest state, PW_MAX up entries and PW_MAX
+# refused entries, every port five digits and every reason the longest. W2 has every reason, on
+# five-digit ports. Whole, with no near misses: at thousands of bytes each, those would be
+# thousands of cases. C1 is small enough to perturb: every reason, each on a five-digit port.
+prop_whole() { prop_writer "$@" && prop_add "$1" "$PW_FILE"; }      # prop_whole NAME PUBLISH-ARGS... -- no near misses
+pw_longest() {                        # pw_longest WORDS -> PW_LONGEST, the longest word
+    local w
+    PW_LONGEST=''
+    pw_split ' ' "$1"
+    for w in ${PW_ITEMS[@]+"${PW_ITEMS[@]}"}; do [ "${#w}" -le "${#PW_LONGEST}" ] || PW_LONGEST="$w"; done
+}
+pw_longest "$PROP_STATES";  PROP_LONG_STATE="$PW_LONGEST"
+pw_longest "$PROP_REASONS"; PROP_LONG_REASON="$PW_LONGEST"
+pw_nlist "$PW_MAX" lo "$(( 65535 - PW_MAX ))";                 PROP_UP5="$PW_NLIST"
+pw_nlist "$PW_MAX" "$PROP_LONG_REASON" "$(( 65535 - PW_MAX ))"; PROP_REF5="$PW_NLIST"
+prop_whole W1 "state=$PROP_LONG_STATE" "floor=65535" "up=$PROP_UP5" "refused=$PROP_REF5"
+PROP_W1="${PW_FILE:-}"
+pw_nlist "$PW_MAX" "$PROP_REASONS" 9999
+prop_whole W2 "state=healthy" "floor=1024" "up=$PROP_UP5" "refused=$PW_NLIST"
+PROP_W2="${PW_FILE:-}"
+pw_split ' ' "$PROP_REASONS"; n=${#PW_ITEMS[@]}
+pw_nlist "$n" "$PROP_REASONS" "$(( 65535 - n ))"
+prop_written C1 "state=$PROP_LONG_STATE" "floor=65535" "up=65535:lo" "refused=$PW_NLIST"
+PROP_C1="${PW_FILE:-}"
+# EVERY REASON ON A FIVE-DIGIT PORT, in the file the writer wrote for each: that is what W2 and C1
+# are for, and a pw_nlist that stopped taking turns made every one of them `busy` with each assertion
+# here still green.
+miss=''
+pw_split ' ' "$PROP_REASONS"
+for r in ${PW_ITEMS[@]+"${PW_ITEMS[@]}"}; do
+    case "$PROP_W2" in *$'\nrefused\t'?????$'\t'"$r"$'\n'*) ;; *) miss="$miss W2:$r" ;; esac
+    case "$PROP_C1" in *$'\nrefused\t'?????$'\t'"$r"$'\n'*) ;; *) miss="$miss C1:$r" ;; esac
+done
+assert_eq "pw:prop:every-reason-is-written-on-a-five-digit-port" "" "$miss"
+# W1's size, worked out from the vocabularies rather than measured from the writer: a state line
+# of the longest state, a five-digit floor, then PW_MAX of `up<TAB>NNNNN<TAB>lo` and PW_MAX of
+# `refused<TAB>NNNNN<TAB>` and the longest reason, each line ending in a newline. The longest
+# lengths are measured by awk and not taken from pw_longest, which built W1: a pw_longest that
+# picked a shorter word shrank W1 and this sum together, and the assertion stayed green.
+read -r ls_len lr_len < <(printf '%s\n%s\n' "$PROP_STATES" "$PROP_REASONS" |
+    do_awk '{ m = 0; for (i = 1; i <= NF; i++) if (length($i) > m) m = length($i); printf "%d ", m }')
+assert_eq "pw:prop:the-largest-legal-file-is-generated" \
+          "$(( 7 + ls_len + 12 + PW_MAX * 12 + PW_MAX * (15 + lr_len) ))" "${#PROP_W1}"
 
 # The reader's verdicts on JUDGE, one character per case, and its reason for each it refused: timed
 # as a function because elapsed runs its command in a subshell, so both come back through files.
@@ -978,17 +1036,14 @@ PROP_ORACLE="$(grammar_verdicts "$PROP_GRAMMAR" ${PROP_TEXTS[@]+"${PROP_TEXTS[@]
 
 # THE BASES FIRST: a grammar or a reader that refuses the writer's own files would make every
 # verdict after them meaningless, and agreeing about that would still pass the comparison below.
-PROP_BASE_BAD=''
-i=0
-while [ "$i" -lt "${#PROP_NAMES[@]}" ]; do
-    case "${PROP_NAMES[i]}" in
-        B[0-9])
-            [ "${PROP_READER:i:1}" = 1 ] || PROP_BASE_BAD="$PROP_BASE_BAD ${PROP_NAMES[i]}(reader)"
-            [ "${PROP_ORACLE:i:1}" = 1 ] || PROP_BASE_BAD="$PROP_BASE_BAD ${PROP_NAMES[i]}(grammar)" ;;
-    esac
-    i=$(( i + 1 ))
+PROP_BASE_BAD=''; nw=0
+for i in $PROP_WRITTEN; do
+    nw=$(( nw + 1 ))
+    [ "${PROP_READER:i:1}" = 1 ] || PROP_BASE_BAD="$PROP_BASE_BAD ${PROP_NAMES[i]}(reader)"
+    [ "${PROP_ORACLE:i:1}" = 1 ] || PROP_BASE_BAD="$PROP_BASE_BAD ${PROP_NAMES[i]}(grammar)"
 done
-assert_eq "pw:prop:the-writers-own-files-are-accepted" "" "$PROP_BASE_BAD"
+# The count too, so a PROP_WRITTEN that came out empty cannot pass by checking nothing.
+assert_eq "pw:prop:the-writers-own-files-are-accepted" "7 files," "$nw files,$PROP_BASE_BAD"
 
 # WHERE TWO SIDES' VERDICTS DIFFER: how many, and the first five, each with SHOW[i] quoted so every
 # byte shows. N is how many verdicts each side must hold, so a side that stopped short cannot agree
@@ -1021,8 +1076,8 @@ verdicts_agree "pw:prop:the-reader-accepts-exactly-what-the-grammar-does" "$PROP
 PROP_ACCEPTED="${PROP_ORACLE//0/}"; PROP_ACCEPTED="${#PROP_ACCEPTED}"
 # LITERAL COUNTS, so a generator that quietly stops making cases, or a grammar that stops accepting
 # any, cannot leave the comparison above agreeing about nothing.
-assert_eq "pw:prop:cases-generated"          "400" "${#PROP_NAMES[@]}"
-assert_eq "pw:prop:cases-the-grammar-allows" "67"  "$PROP_ACCEPTED"
+assert_eq "pw:prop:cases-generated"          "647" "${#PROP_NAMES[@]}"
+assert_eq "pw:prop:cases-the-grammar-allows" "107" "$PROP_ACCEPTED"
 
 # ─── random near misses, from a seed: bytes, and the format's own tokens ───────
 # THE LIST ABOVE FINDS ONLY THE EDITS IT NAMES, and it named neither a space inside a value nor a
