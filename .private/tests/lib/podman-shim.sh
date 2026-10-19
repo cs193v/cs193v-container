@@ -49,6 +49,7 @@ shim_new() {
     cp "$TESTS_DIR/lib/sudo-fake" "$SHIM/sudo"
     chmod +x "$SHIM/sudo"
     : > "$SHIM/sudo.log"
+    : > "$SHIM/installed.sha256"
     : > "$SHIM/argv.log"
 }
 
@@ -70,11 +71,12 @@ shim_watch() {                        # shim_watch LINE...
     : > "$SHIM/watch_alive"
 }
 
-# THROUGH A CHECKER, and so are sudo_log, installer_log and shim_curl_log (#559). What they are
-# asked is mostly what a run did NOT do, and a cat that could not read its log printed nothing --
-# the answer each of those checks wants. Each log exists from the moment its fake does, and the
-# fakes only append: shim_new creates argv.log and sudo.log, shim_fake_curl creates curl.log. So
-# "never called" is an empty file, and a missing one is a fixture that went wrong.
+# THROUGH A CHECKER, and so are sudo_log, installer_log, installed_digests and shim_curl_log
+# (#559). What they are asked is mostly what a run did NOT do, and a cat that could not read its
+# log printed nothing -- the answer each of those checks wants. Each log exists from the moment
+# its fake does, and the fakes only append: shim_new creates argv.log, sudo.log and
+# installed.sha256, shim_fake_curl creates curl.log. So "never called" is an empty file, and a
+# missing one is a fixture that went wrong.
 shim_log()  { run_checker cat "$SHIM/argv.log"; }
 # A log in the shim of the most recent installer run, found through $SHIM_LAST for the #76 reason
 # given where that is defined. A $SHIM_LAST that cannot be read fails too, rather than becoming a
@@ -87,7 +89,7 @@ shim_last_log() {                     # shim_last_log LOG -> that log, or the ch
 # What the installer WOULD have run as root, from the most recent installer_host run.
 sudo_log()  { shim_last_log sudo.log; }
 # And the digest of every file it would have handed `installer -pkg`, one line per call (#350).
-installed_digests() { cat "$(cat "$SHIM_LAST" 2>/dev/null)/installed.sha256" 2>/dev/null; }
+installed_digests() { shim_last_log installed.sha256; }
 shim_clear_log() { : > "$SHIM/argv.log"; }
 # What the fake ssh was asked to do with the master's control socket. A separate log because a
 # forward is a MESSAGE and leaves no other trace -- nothing binds, nothing listens, and
@@ -96,11 +98,11 @@ shim_ssh_log() { cat "$SHIM/ssh.log" 2>/dev/null; }
 
 # How many invocations matched an extended regex. Used for "exactly one container was
 # created across twenty launches".
-# grep -c prints 0 and exits 1 on no match, so take its output and drop its status.
+# THROUGH run_grep (#586), to which grep -c's exit 1 is "none matched". A log it could not read
+# answers the checker's marker, not the 0 every "creates nothing" check is hoping for -- so a
+# caller that branches on it with -gt or -eq must not let the marker fall into the hoped-for arm.
 shim_count() {                        # shim_count ERE
-    local n
-    n="$(grep -cE "$1" "$SHIM/argv.log" 2>/dev/null)" || true
-    printf '%s' "${n:-0}"
+    run_grep -cE "$1" "$SHIM/argv.log"
 }
 
 # BY GLOB ON OUR OWN PID, NOT FROM A LIST OF DIRECTORIES. This kept a list, and both makers
