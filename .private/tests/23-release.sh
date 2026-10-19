@@ -220,7 +220,7 @@ assert_ne "release:the-ps1-does-not-pin-the-working-copy" \
 # no BOM because `iex` will not parse one. Line endings are deliberately NOT checked -- see the
 # note in release.sh for why the third guard the .sh gets would pin nothing here.
 assert_eq "release:the-ps1-stays-ascii" "" \
-          "$(LC_ALL=C grep -n '[^ -~	]' "$CASE/.private/install-cs193v.ps1" || true)"
+          "$(LC_ALL=C run_grep -n '[^ -~	]' "$CASE/.private/install-cs193v.ps1")"
 assert_ne "release:the-ps1-has-no-bom" "efbbbf" \
           "$(head -c 3 "$CASE/.private/install-cs193v.ps1" | od -An -tx1 | tr -d ' \n')"
 
