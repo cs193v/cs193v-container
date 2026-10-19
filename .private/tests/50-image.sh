@@ -474,7 +474,11 @@ assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out
 # AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
 # the group above passing for a shortlink that ignores the file entirely: with a state file that
 # is present, healthy and simply never mentions the port, it must degrade rather than guess.
-out="$(R "$FAKE_HEALTHY"'; /usr/local/bin/shortlink https://example.com/unconfirmed; echo rc=$?')"
+# THE FILE IS READ BACK, NOT ASSUMED (#551), through the reader shortlink uses. With no file,
+# shortlink takes the no-tunnel path, which also prints the input and exits 3, so a publish that
+# failed or a file that went missing would leave this group passing as a copy of the one below.
+out="$(R "$FAKE_HEALTHY"'; cs193v-portwatch --state > /dev/null; echo "state=$?"; /usr/local/bin/shortlink https://example.com/unconfirmed; echo rc=$?')"
+assert_match "harness:the-fake-healthy-file-is-there" "^state=0$" "$out"
 assert_contains "shortlink:an-unconfirmed-port-degrades"  "https://example.com/unconfirmed" "$out"
 assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
 
