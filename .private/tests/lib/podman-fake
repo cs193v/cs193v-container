@@ -51,6 +51,12 @@
 #   stop_hold        present = `stop` writes stop_reached and blocks until this file is removed,
 #                    THEN flips state to exited and writes stop_done  [absent]. stop_done is the
 #                    witness that a stop FINISHED rather than merely being asked for (#512).
+#   stop_rearm       present, with stop_hold = the held stop is a python3 that first arms INT,
+#                    TERM and QUIT with handlers that exit, as Linux podman arms them for itself,
+#                    then writes stop_pid and stop_reached  [absent]. So a ^C that reaches it ends
+#                    the stop before its state flip, which is #566's failure; a shell would keep
+#                    the ignore it inherited and could not be ended at all. AN EXIT, NOT SIG_DFL:
+#                    a python that DIES of SIGQUIT is a crash to macOS, which says so in a dialog.
 #   build_out        whole `podman build` output, verbatim  [a realistic STEP i/N run]
 #   build_steps      how many STEPs the default emits       [23]
 #   build_rc         exit code for `podman build`           [0]
@@ -314,7 +320,20 @@ level=error msg="cannot set up pasta"' >&2
     start)   printf 'running\n' > "$SHIM/state"; echo cs193v; exit 0 ;;
     # stop_hold, header above: held BEFORE the state flips, so a stop killed while held leaves the
     # container `running` -- which is what a podman stop that never finished leaves (#512).
-    stop)    if [ -f "$SHIM/stop_hold" ]; then
+    #
+    # stop_rearm: `|| exit 1` IS THE POINT. This script is sh with INT inherited as ignored, so it
+    # carries on after its python dies -- and would flip the state for a stop that was killed.
+    stop)    if [ -f "$SHIM/stop_hold" ] && [ -f "$SHIM/stop_rearm" ]; then
+                 python3 -c 'import os, signal, sys, time
+for s in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
+    signal.signal(s, lambda n, f: os._exit(128 + n))
+d = sys.argv[1]
+with open(d + "/stop_pid", "w") as f:
+    f.write("%d\n" % os.getpid())
+open(d + "/stop_reached", "w").close()
+while os.path.exists(d + "/stop_hold"):
+    time.sleep(0.1)' "$SHIM" || exit 1
+             elif [ -f "$SHIM/stop_hold" ]; then
                  : > "$SHIM/stop_reached"
                  while [ -f "$SHIM/stop_hold" ]; do sleep 0.1; done
              fi

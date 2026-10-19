@@ -2262,14 +2262,17 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     # the process at the bottom; the INT branch's `trap - INT` undoes this first. Every signal
     # with an arm is here, QUIT included (#564).
     #
-    # THE SHELL'S CHILDREN, NOT PODMAN'S OWN CHOICES: on Linux the stop runs in the podman client,
-    # which re-arms INT, TERM and QUIT for itself, so a ^C there still ends it with the container
-    # up (#566). HUP it leaves ignored, which is the closed window this was written for.
-    #
     # AND PIPE, which has no arm: with the output in a pipe whose reader the same ^C killed --
     # `./cs193v 2>&1 | tee log` -- the teardown's first write raised SIGPIPE, and bash died of it
     # before the stop (#565). Ignored, that write fails with EPIPE and the teardown goes on.
     trap '' INT TERM HUP QUIT PIPE
+    # AND RT_DETACH ON THE NEXT LINE, because the ignore reaches the shell's children and not what
+    # podman chooses for itself. On Linux the stop runs in the podman client, which re-arms INT,
+    # TERM and QUIT, so a ^C during "Exiting..." killed it with the container up -- measured, 10
+    # tries of 10 (#566). Detached, every podman call from here on starts in a process group the
+    # terminal's keys do not reach; see run_timeout. The ignore stays for the shell's own
+    # foreground children -- ps, sleep, kill -- which a closed window would otherwise HUP.
+    RT_DETACH=1
     TEARDOWN_DONE=1
     transient_cleanup
     # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different
@@ -2328,6 +2331,14 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
 # child that DIED of SIGINT (#448, #450), so a loop over `cs193v --rebuild` carried on past an exit
 # 130 into the next rebuild -- measured. See die_of_sigint.
 rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
+    # NOTHING ENDS THIS HALFWAY EITHER (#566), shell_teardown's two lines in its order. It used to
+    # do without: a second key during its stop re-entered it on bash 5.3, which stopped twice, and
+    # on bash 3.2 was queued behind it and lost to die_of_sigint's `trap - INT` -- while the key
+    # itself killed a Linux podman stop. (macOS's remote client keeps INT ignored, measured; Go
+    # arms QUIT whatever it inherits, so a ^\ is expected to reach it there too, unmeasured.)
+    # die_of_sigint still works: its `trap - INT` comes before the kill.
+    trap '' INT TERM HUP QUIT PIPE
+    RT_DETACH=1
     # RT_SPIN FIRST, and it is not cosmetic. create_container sets it for `podman run` and clears
     # it on the line after; interrupting in between leaves it set, and run_timeout then prints it
     # to STDOUT on every later call -- including the one inside `$(state)`, whose `[ -t 1 ]` is

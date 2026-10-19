@@ -441,6 +441,25 @@ RT_BARE=''
 # a second copy would be a second thing to keep in step. Cleared on every call either way, so a
 # caller testing it cannot be handed the PREVIOUS call's stderr.
 RT_ERR=''
+# The command in a PROCESS GROUP OF ITS OWN, for the teardowns (#566). A terminal sends ^C and ^\
+# to its whole foreground process group, and that is the caller's: every command started here was
+# in it. The teardowns ignore those signals, which their shell children inherit -- but Linux podman
+# puts INT, TERM and QUIT back for itself, so a ^C during "Exiting..." killed the `podman stop`
+# with the container still up (measured in the podman VM, 10 tries of 10). Set, each spawn below
+# runs under `set -m`, which starts it as a background job in a group no key reaches.
+#
+# THE BRACKET HOLDS THE SPAWN AND NOTHING ELSE, and 10-static.sh pins that: bash 3.2 reports a job
+# reaped while job control is on as `[1]+ Exit N`, on the student's terminal, and a foreground
+# command run under it is handed the terminal. And every spawn reads /dev/null, which bash does by
+# itself without job control and not with it: a background job reading the terminal is stopped by
+# SIGTTIN, and the call would wait out its whole ceiling.
+#
+# THE COST, stated rather than found later: on Linux a wedged teardown can no longer be cut short
+# with ^C, as it could by accident before. Its ceilings add up to about 71s.
+#
+# DEFAULT OFF, and its two callers never clear it, both being on their way out. Declared because
+# every consumer of this file runs under `set -u`.
+RT_DETACH=''
 run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, returns rc
     local secs="$1"; shift
     local tmp fifo eout pid cpid i rc frame lbl pad end line
@@ -488,9 +507,12 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         rm -f "$fifo"
         # SPELLED TWICE RATHER THAN PARAMETERISED. `2>&"$efd"` is a bash extension and this file
         # has to run on the 3.2 macOS ships, which 10-static.sh polices.
-        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" 7>&- 8>&- ) & pid=$!
-        else                       ( "$@" >"$tmp" 2>&1 7>&- 8>&- ) & pid=$!
+        # RT_DETACH's bracket, spawn only; see its declaration.
+        [ -n "$RT_DETACH" ] && set -m
+        if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" 7>&- 8>&- </dev/null ) & pid=$!
+        else                       ( "$@" >"$tmp" 2>&1 7>&- 8>&- </dev/null ) & pid=$!
         fi
+        [ -n "$RT_DETACH" ] && set +m
         # 7>&- 8>&- IN BOTH BRANCHES: the launcher keeps copies of the terminal there for its
         # signal handlers (#511), and a command started here can outlive the launcher -- the
         # tunnel's `ssh -f` master does, by design -- so none of them may take those copies along.
@@ -538,13 +560,17 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         # factored into a helper called from both: that would put a shell between $c and the
         # command, and the ceiling's `kill -9 "$cpid"` below would then kill the wrapper and
         # leave the hung podman running -- which is the disowning the comment above warns about.
+        # RT_DETACH's bracket again: the wrapper is the job, and the command inside it stays in its
+        # group, since a subshell runs without job control. Closed before the rendezvous below.
+        [ -n "$RT_DETACH" ] && set -m
         if [ -n "$RT_BARE" ]; then
-          ( "$@" >"$tmp" 2>"$eout" 9>&- 7>&- 8>&- & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>"$eout" 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
         else
-          ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- & c=$!; printf '%s\n' "$c" >&9
+          ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
         fi
+        [ -n "$RT_DETACH" ] && set +m
         exec 9<"$fifo"
         # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
         # signal arriving during the wait leaves nothing behind in TMPDIR.
