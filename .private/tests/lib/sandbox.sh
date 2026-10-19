@@ -1650,10 +1650,10 @@ assert_system_diff() {                # assert_system_diff CASE DIR [LABEL]
     got="$(sandbox_system_diff "$2")"
     if [ -n "$got" ]; then pass "sb-$lbl:the-diff-was-really-read"
     else fail "sb-$lbl:the-diff-was-really-read" "podman diff produced nothing"; return; fi
-    extra="$(printf '%s\n' "$got" | grep -vxF -f "$want" || true)"
+    extra="$(printf '%s\n' "$got" | run_grep -vxF -f "$want")"
     assert_eq "sb-$lbl:changed-nothing-it-did-not-claim" "" "$extra"
     local missing
-    missing="$(grep -vxF -f <(printf '%s\n' "$got") "$want" || true)"
+    missing="$(run_grep -vxF -f <(printf '%s\n' "$got") "$want")"
     assert_eq "sb-$lbl:changed-everything-it-claimed" "" "$missing"
 }
 
