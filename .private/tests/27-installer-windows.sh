@@ -657,9 +657,11 @@ wine_body altered
 alt_src_sha="$(run_checker do_sha256 "$PRIVATE/install-cs193v.sh")"
 alt_src_sha="$(died_in "$alt_src_sha"; printf '%s\n' "$alt_src_sha" | awk '{print $1}')"
 assert_ne "win-altered:the-body-really-differs" "$alt_src_sha" "$(wine_body_digest)"
+# wc GIVEN THE FILE, THROUGH run_checker (#559): a redirect it could not open never ran wc, and
+# "" == "". The sed keeps only the count, and leaves a sentinel line alone.
 assert_eq "win-altered:the-body-is-the-same-length" \
-          "$(wc -c < "$PRIVATE/install-cs193v.sh" | do_tr -d ' ')" \
-          "$(wc -c < "$WINE_CASE/stage2.src" | do_tr -d ' ')"
+          "$(run_checker wc -c "$PRIVATE/install-cs193v.sh" | sed 's/^ *\([0-9][0-9]*\) .*/\1/')" \
+          "$(run_checker wc -c "$WINE_CASE/stage2.src" | sed 's/^ *\([0-9][0-9]*\) .*/\1/')"
 wine_run
 assert_ne   "win-altered:does-not-exit-zero"       "0" "$WINE_RC"
 assert_says "win-altered:is-refused"               "not the file this installer" "$WINE_OUT"
