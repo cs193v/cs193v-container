@@ -78,7 +78,10 @@ sg_recorded() {                       # sg_recorded NAME WORD
 # one `printf '%s\n'` per invocation (lib/gh-fake:28, lib/git-fake:24, lib/shortlink-fake:21), so a
 # row IS a call here and rows and occurrences are the same number. Do not "fix" it into sg_times
 # below: that reads a TRANSCRIPT, where they are not.
-sg_count() { sg_log | grep -cE "$1" || true; }
+# ITS OWN grep READS THE LOG, through run_grep (#586). To grep -c, sg_log's marker was one
+# more line that did not match, so a log that could not be read counted 0 -- the answer every
+# "ran nothing" check is hoping for.
+sg_count() { run_grep -cE "$1" "$SGSHIM/argv.log"; }
 sg_cleanup_all() { local d; for d in $SGDIRS; do rm -rf "$d"; done; SGDIRS=''; }
 
 # What an earlier, KILLED run left behind. The pid in each name is what makes this safe to run
@@ -412,9 +415,13 @@ sg_says_not() {                       # sg_says_not NAME KEY TEXT
 # states onto one physical line and only the last of them was ever on a screen. Splitting on \r is
 # what turns those back into something assertable — the same thing box() does with podman's
 # self-overwriting output, and for the same reason. Colour comes off here too, so neither reader
-# below has to know about it.
+# below has to know about it. BOTH STAGES THROUGH run_checker (#586), so a stage that died leaves
+# its marker among the rows rather than no rows at all. Each reader below that keeps only some
+# rows puts died_in in front, or it would drop that marker -- and the one sg_conversation puts in
+# a diverged transcript -- along with the rows it does not keep.
 sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, colour removed
-    printf '%s' "$1" | do_tr '\r' '\n' | LC_ALL=C sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
+    printf '%s' "$1" | run_checker do_tr '\r' '\n' \
+        | LC_ALL=C run_checker sed -e "s/${SG_ESC}\[[0-9;?]*[A-Za-z]//g"
 }
 
 # EVERY ROW THAT DID NOT FIT, which is the shape issue #67 needed and nothing here had. The
@@ -428,7 +435,8 @@ sg_rows() {                           # sg_rows TEXT -> one row per \r-segment, 
 # WIDTHS IN CODE POINTS, via python3, for the reason 20-messages.sh records: these rows carry box
 # art, and mawk counts bytes, so `━` would score three columns and every box would look overwide.
 sg_rows_over() {                      # sg_rows_over LIMIT TEXT -> "COLUMNS: row" per row too wide
-    sg_rows "$2" | LIMIT="$1" run_checker python3 -c '
+    local r; r="$(sg_rows "$2")"
+    died_in "$r"; printf '%s\n' "$r" | LIMIT="$1" run_checker python3 -c '
 import os, sys
 limit = int(os.environ["LIMIT"])
 for row in sys.stdin.read().splitlines():
@@ -451,7 +459,8 @@ print(max([len(r) for r in rows]) if rows else 0)
 # The last row mentioning a needle: the final state of the line it was drawn on, which is what a
 # student was left looking at.
 sg_final() {                          # sg_final TEXT NEEDLE -> the last row mentioning NEEDLE
-    sg_rows "$1" | grep -- "$2" | tail -1
+    local r; r="$(sg_rows "$1")"
+    died_in "$r"; printf '%s\n' "$r" | grep -- "$2" | tail -1
 }
 
 # HOW MANY TIMES A PROMPT WAS ASKED, which is not how many times it was written: one 93-character
@@ -467,8 +476,12 @@ sg_final() {                          # sg_final TEXT NEEDLE -> the last row men
 # it is worth saying twice. This one ANCHORS -- `^ prompt $` -- so it answers 0 on any prompt whose
 # answer the terminal echoes onto the same row: measured 0 for prompt.sunetid and prompt.name on
 # real transcripts, where the answers are 1 and 2. sg_times is the reader for those.
+#
+# THE MARKER GOES IN FRONT OF THE COUNT (#586). grep -c scored a transcript sg_conversation had
+# poisoned, or the rows of a stage that died, as 0 asks -- what "does not ask" is hoping for.
 sg_asks() {                           # sg_asks TEXT PROMPT -> times PROMPT was drawn with nothing after it
-    sg_rows "$1" | grep -cE "^[[:space:]]*$2[[:space:]]*$" || true
+    local r; r="$(sg_rows "$1")"
+    died_in "$r"; printf '%s\n' "$r" | grep -cE "^[[:space:]]*$2[[:space:]]*$"
 }
 
 # HOW MANY TIMES A PHRASE IS THERE, which is not how many ROWS carry it -- and the difference is
