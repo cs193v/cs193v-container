@@ -267,10 +267,20 @@ assert_says_key_tail "version:refusal-says-what-to-do-next" err.podman-too-old "
 # an end-to-end check simply cannot run the Linux arm here. Measured: faking Linux and asserting
 # on `^run ` failed all six, including the three that used to pass, with the launcher dying on
 # err.no-subuid long after it had accepted the version.
+#
+# A COUNT THAT IS NOT A NUMBER IS NEITHER VERDICT (#586). This was `[ "$(shim_count ...)" -gt 0 ]`,
+# and `[`, erroring on shim_count's marker, took the else arm -- so the three macOS refusals below
+# passed on an argv.log nobody read. The marker is handed on instead, for assert_eq to name.
 floor_verdict() {                     # floor_verdict SYSNAME MACHINE VERSION -> accepted|refused
+    local n
     shim_new; shim_fake_uname "$1" "$2"; shim_set version "podman version $3"
     launcher >/dev/null 2>&1
-    if [ "$(shim_count '^info')" -gt 0 ]; then printf accepted; else printf refused; fi
+    n="$(shim_count '^info')"
+    case "$n" in
+        0) printf refused ;;
+        [1-9]*) printf accepted ;;
+        *) printf '%s\n' "$n" ;;
+    esac
 }
 for v in 4.9.0 4.9.3 5.4.2 5.7.0 6.0.2 10.0.0; do
     assert_eq "version:$v-accepted" "accepted" "$(floor_verdict Linux x86_64 "$v")"
