@@ -2144,6 +2144,73 @@ memosub="$(printf '%s\n' "$memo_raw" | grep -vF -- "$memo_specimen:" || true)"
 assert_eq "harness:no-memo-dropping-helper-runs-in-a-subshell" "" "$memosub"
 rm -rf "$memo_tmp"
 
+# AN ABSENCE CHECK MUST TELL "ABSENT" FROM "COULD NOT READ" (#559). Every negative assertion,
+# assert_eq NAME "", and assert_ne against anything but "" passes on an empty value, and a reader
+# that failed hands it one: `cat` of a missing file prints nothing, and nothing contains no needle.
+# #437, #476 and #539 fixed these a site at a time, and #559's sweep fixed the rest; this keeps the
+# next one out. lib/readerscan.py names every such assertion whose value is a bare reader's output
+# -- directly, through a helper whose whole body is one read, or through a variable last filled that
+# way -- or a checked read piped into a stage that keeps only some lines. run_checker, run_grep,
+# lint_grep and died_in are the ways through; a count through wc, and a read that answers for itself
+# with `|| printf`, fail on their own. It is a tokenizer for assertion arguments, not a shell, and
+# it prints $CHECKER_DIED for a file it cannot read or a statement it cannot parse.
+#
+# THE SPECIMEN IS WRITTEN WITH A LEADING @, AND ITS ONE `; assert` AS `;%`, because this file is
+# on the list.
+rs_scan() { python3 "$PRIVATE/tests/lib/readerscan.py" "$CHECKER_DIED" "$@"; }   # rs_scan FILE...
+rs_tmp="$(new_tmpdir)"
+case "$(rs_scan "$rs_tmp/absent")" in
+    *"$CHECKER_DIED"*) pass "readers:the-scan-fails-on-a-file-it-cannot-read" ;;
+    *) fail "readers:the-scan-fails-on-a-file-it-cannot-read" \
+            "readerscan.py was handed a file that does not exist and reported nothing" ;;
+esac
+rs_specimen="$rs_tmp/$HOSTILE_NAME/planted.sh"
+mkdir -p "${rs_specimen%/*}"
+sed -e 's/^@//' -e 's/;%/; /' > "$rs_specimen" <<'SPECIMEN'
+@assert_eq "bare" "" "$(cat "$F")"
+@assert_not_contains "filtered" "x" "$(run_checker sed -n 1p "$F" | grep y)"
+@v="$(run_checker cat "$F")"
+@assert_eq "var-filtered" "" "$(printf '%s\n' "$v" | grep y)"
+@w="$(sed 1p "$F")"
+@assert_says_not "var-bare" "x" \
+@                "$w"
+@# before #559: f;%assert_eq "commented" "" "$(cat "$F")"
+@assert_eq "checked" "" "$(run_checker cat "$F")"
+@assert_eq "died-in" "" "$(died_in "$v"; printf '%s\n' "$v" | grep y)"
+@assert_eq "nested-quotes" "" "$(f "O'Brien" | grep -v "a b")"
+@assert_eq "pattern-file" "" "$(printf '%s\n' "$v" | grep -vxF -f "$F")"
+@assert_eq "pattern-file-checked" "" "$(printf '%s\n' "$v" | run_grep -vxF -f "$F")"
+@rd() { cat "$F"; }
+@assert_says_not "helper" "x" "$(rd)"
+@assert_ne "ne-literal" "efbbbf" "$(head -c 3 "$F" | od -An -tx1)"
+@assert_ne "ne-empty" "" "$(cat "$F")"
+@assert_eq "count" "" "$(grep x "$F" | wc -l)"
+@assert_eq "answers" "" "$(python3 x.py "$F" || printf 'failed\n')"
+@u="$(sed 1p "$F")"
+@assert_eq "printf-of-bare" "" "$(printf '%s\n' "$u" | grep y)"
+@assert_eq "python-filter" "" "$(run_checker cat "$F" | python3 -c pass)"
+SPECIMEN
+rs_raw="$(rs_scan "$PRIVATE"/tests/[0-9][0-9]-*.sh "$PRIVATE"/tests/lib/*.sh "$rs_specimen")"
+rs_mine="$(printf '%s\n' "$rs_raw" | grep -F -- "$rs_specimen:")"
+for rs_shape in 1:bare:bare 2:filtered:filtered 4:var-filtered:var-filtered 6:var-bare:var-bare \
+                12:bare:pattern-file 15:bare:helper 16:bare:ne-literal 21:var-bare:printf-of-bare \
+                22:filtered:python-filter; do               # LINE:SHAPE:LABEL
+    rs_n="${rs_shape%%:*}"; rs_label="${rs_shape##*:}"
+    rs_why="${rs_shape#*:}"; rs_why="${rs_why%%:*}"
+    rs_line="$(printf '%s\n' "$rs_mine" | grep -F -- "$rs_specimen:$rs_n: ")"
+    case "$rs_line" in
+        *": $rs_why: "*) pass "readers:the-scan-finds-a-planted-$rs_label" ;;
+        *) fail "readers:the-scan-finds-a-planted-$rs_label" \
+                "line $rs_n of $rs_specimen was not reported as $rs_why:
+$rs_mine" ;;
+    esac
+done
+assert_eq "readers:the-scan-passes-comments-and-checked-reads" "9" \
+          "$(printf '%s\n' "$rs_mine" | grep -c .)"
+assert_eq "readers:no-absence-check-reads-through-a-bare-reader" "" \
+          "$(died_in "$rs_raw"; printf '%s\n' "$rs_raw" | grep -vF -- "$rs_specimen:")"
+rm -rf "$rs_tmp"
+
 # Expanding an empty array under `set -u` is fatal on bash < 4.4. Every such expansion
 # must be guarded with the ${arr[@]+"${arr[@]}"} idiom.
 #
