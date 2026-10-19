@@ -513,6 +513,9 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         else                       ( "$@" >"$tmp" 2>&1 7>&- 8>&- </dev/null ) & pid=$!
         fi
         [ -n "$RT_DETACH" ] && set +m
+        # WHAT IS IN FLIGHT, for an arm that ends the process from inside this call; see
+        # rt_kill_inflight.
+        printf '%s\n' "$pid" > "$tmp.pids"
         # 7>&- 8>&- IN BOTH BRANCHES: the launcher keeps copies of the terminal there for its
         # signal handlers (#511), and a command started here can outlive the launcher -- the
         # tunnel's `ssh -f` master does, by design -- so none of them may take those copies along.
@@ -565,12 +568,16 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         [ -n "$RT_DETACH" ] && set -m
         if [ -n "$RT_BARE" ]; then
           ( "$@" >"$tmp" 2>"$eout" 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
-            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" 7>&- 8>&- & pid=$!
         else
           ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
-            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" & pid=$!
+            wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" 7>&- 8>&- & pid=$!
         fi
         [ -n "$RT_DETACH" ] && set +m
+        # The wrapper's pid now and the command's once it is read, for rt_kill_inflight. 7>&- 8>&-
+        # ON THE WRAPPER as well as the command: a wrapper is a fork that never execs, so it holds
+        # whatever this shell had open for as long as it lives.
+        printf '%s\n' "$pid" > "$tmp.pids"
         exec 9<"$fifo"
         # Unlinked with both ends open: the fd pair survives, the name is finished with, and a
         # signal arriving during the wait leaves nothing behind in TMPDIR.
@@ -586,7 +593,8 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         read -t "$secs" -r cpid <&9
         case "$cpid" in
             ''|*[!0-9]*) cpid='' ;;
-            *)           read -t "$secs" -r line <&9 ;;
+            *)           printf '%s\n' "$cpid" >> "$tmp.pids"
+                         read -t "$secs" -r line <&9 ;;
         esac
         exec 9<&-
         # WHETHER A NUMBER ARRIVED, deliberately not read's own exit status -- which is >128 on
@@ -650,7 +658,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
     # so removing the stderr file separately cost bare mode a SECOND fork+exec on every read --
     # 10.6-13.1 ms per call became 12.5-16.7 ms, on a path a launch takes about fourteen times.
     # `-f` on a name that was never created (every non-bare call) is silent and free.
-    rm -f "$tmp" "$eout"
+    rm -f "$tmp" "$eout" "$tmp.pids"
     return "$rc"
 }
 
@@ -671,6 +679,34 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
 # a wider glob would delete them mid-probe.
 rt_cleanup() {
     rm -f "${TMPDIR:-/tmp}"/cs193v-$$.* 2>/dev/null
+    return 0
+}
+
+# What an arm that ends the process from inside a call would leave running (#449). A teardown's arm
+# used to RETURN, and the call it had interrupted went on to its own ceiling and killed its command
+# there. Now the arm exits mid-call, so the command -- a wedged ssh, a podman hung on a slept Mac --
+# and the fifo branch's wrapper ran on without the launcher, the wrapper holding what the launcher
+# had open: with `./cs193v 2>&1 | tee log`, tee saw no EOF until the call ended by itself. Measured,
+# the arm's exit at +1s against EOF at +6s. run_timeout writes each call's pids to $tmp.pids, and
+# this kills them -- BEFORE rt_cleanup, which removes the record.
+#
+# IDENTIFIED BEFORE KILLED, as cs193v's tunnel_kill_pid has it: only a pid still in this process's
+# own group. Every call this means was started in it, and a stale record's number, reused, is
+# somebody else's. A GLOB ON OUR OWN PID for rt_cleanup's reason: a call made inside a command
+# substitution writes its record from the subshell, whose $$ is still ours.
+rt_kill_inflight() {
+    local f p g mine
+    mine="$(ps -o pgid= -p $$ 2>/dev/null)"; mine="${mine// /}"
+    [ -n "$mine" ] || return 0
+    for f in "${TMPDIR:-/tmp}"/cs193v-$$.*.pids; do
+        [ -f "$f" ] || continue
+        while IFS= read -r p; do
+            case "$p" in ''|*[!0-9]*) continue ;; esac
+            [ "$p" = "$$" ] && continue
+            g="$(ps -o pgid= -p "$p" 2>/dev/null)"; g="${g// /}"
+            [ "$g" = "$mine" ] && kill -9 "$p" 2>/dev/null
+        done < "$f"
+    done
     return 0
 }
 
