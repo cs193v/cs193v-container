@@ -1740,7 +1740,7 @@ assert_eq "pin:nobody-else-declares-a-tag" "" \
 # until the next one -- including the commit that introduced it. 00-release-gates.sh fetches the
 # published archive and runs this file's own --dev-manifest-hash over it, which is the comparison
 # that can be made honestly.
-pin_payload="$(sed -n 's/^PAYLOAD_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/install-cs193v.sh")"
+pin_payload="$(run_checker sed -n 's/^PAYLOAD_SHA256="\([^"]*\)".*/\1/p' "$PRIVATE/install-cs193v.sh")"
 assert_eq "pin:the-payload-digest-is-declared-once" "1" \
           "$(grep -c '^PAYLOAD_SHA256=' "$PRIVATE/install-cs193v.sh")"
 record    "pin:the-payload-digest" "$pin_payload"
@@ -3094,7 +3094,7 @@ assert_eq "release-gates:the-fake-curl-drive-never-reads-a-podman-chain" \
 # a variable outside its body is one of those: asking after one tag needs its name, and §10's
 # listing of them all and its reachability check do not.
 raw_tag_probes() {                    # raw_tag_probes FILE -> one line per probe of its own, or nothing
-    do_awk '
+    run_checker do_awk '
         /^tag_skip_why\(\)/ { inprobe = 1 }
         inprobe { if ($0 ~ /^}/) inprobe = 0; next }
         /^[ \t]*#/ { next }
@@ -4161,7 +4161,7 @@ assert_not_contains "launcher:reset-tunnel-is-exempt-from-the-refusal" \
 # announces /opt/podman/bin only in /etc/paths.d, and nothing reads that but path_helper,
 # from /etc/zprofile, at login. These lints pin the four properties of that repair that a
 # behavioural test cannot see, and the two that it would only see on a Mac.
-probe_body="$(fn_body ensure_podman_path "$PRIVATE/files/cs193v-ui.sh")"
+probe_body="$(run_checker fn_body ensure_podman_path "$PRIVATE/files/cs193v-ui.sh")"
 # THE GUARD FOR EVERYTHING BELOW. fn_body anchors on /^name() {/, so a rename or a reflow
 # yields an EMPTY body -- and every assert_contains against an empty string fails while every
 # assert_not_contains passes, which is half a suite going quietly vacuous.
@@ -4239,7 +4239,7 @@ assert_not_contains "probe:dispatch-does-not-repair" "ensure_podman_path" "$disp
 for v in verb_dev_args verb_dev_tunnel verb_dev_steps verb_print_command; do
     assert_ne           "probe:$v-is-extractable" "" "$(fn_body $v "$REPO/cs193v")"
     assert_not_contains "probe:$v-does-not-repair" \
-                        "ensure_podman_path" "$(fn_body $v "$REPO/cs193v")"
+                        "ensure_podman_path" "$(run_checker fn_body $v "$REPO/cs193v")"
 done
 
 # RETIRED WITH #221, not weakened. These insisted the installer carried its OWN copy of
