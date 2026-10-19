@@ -2986,6 +2986,25 @@ assert_eq "stale:no-url-at-all-is-silent" "" "$(stale_run release-1.0.0 '')"
 assert_eq "stale:a-local-tarball-is-silent" "" \
           "$( cd "$TMP" && CS193V_TARBALL=/some/where bash "$STALEDRV" release-1.0.0 "$url" 2>&1 )"
 
+# ON A TERMINAL, WHERE THE STUDENT CAN CHOOSE TO STOP (#578). Everything above is off one, so it
+# could only ever take the default -- and the stop arm, never run, exited 0, which
+# install-cs193v-windows.cmd reads as a finished install. `2` is menu()'s digit for that option.
+stale_tty() {                         # stale_tty KEYS -> the raw pty transcript; status is the check's
+    printf '%b' "$1" | do_script 30 "cd $(sh_quote "$TMP") && bash $(sh_quote "$STALEDRV") release-1.0.0 $(sh_quote "$url")" 2>&1
+}
+stale_raw="$(stale_tty '2')"
+stale_rc=$?
+assert_says_key "stale:on-a-terminal-2-stops" newer-release.stopped \
+                "$(printf '%s' "$stale_raw" | strip_ansi)" "$ICAT"
+assert_eq       "stale:and-stopping-exits-2" "2" "$stale_rc"
+# THE CONTROL: Enter keeps the default on a terminal too, so a check that exited 2 on every pty
+# run would fail here. The step line is the positive that says the menu was really drawn.
+stale_raw="$(stale_tty '\n')"
+stale_rc=$?
+assert_says_key "stale:on-a-terminal-the-menu-is-drawn" step.newer-release \
+                "$(printf '%s' "$stale_raw" | strip_ansi)" "$ICAT"
+assert_eq       "stale:and-enter-carries-on" "0" "$stale_rc"
+
 # ─── the progress block around the package manager  (#219) ─────────────────────
 # WHY THIS DRIVES THE FUNCTIONS AND NOT THE INSTALLER. install_podman's apt arm needs the
 # installer's LINUX arm -- /etc/os-release, which no PATH shim can fake, see linux_arm above --
