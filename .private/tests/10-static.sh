@@ -410,14 +410,16 @@ assert_eq "bootstrap:every-verb-arm-exits" "" \
 # no error anywhere. Nothing about that is visible in either file on its own, so it is asserted
 # here rather than trusted -- and asserted as the two halves AGREEING, not as either literal, so
 # renaming the prefix on purpose means changing both and this stays true.
-boot_tpl="$(sed -n 's/.*mktemp -d "\${TMPDIR:-\/tmp}\/\([^"]*\)".*/\1/p' \
+# THROUGH run_checker, BOTH HALVES (#559): two reads that failed agreed as "" == "". The counts put
+# died_in first, or a sentinel on its own would count as the one template.
+boot_tpl="$(run_checker sed -n 's/.*mktemp -d "\${TMPDIR:-\/tmp}\/\([^"]*\)".*/\1/p' \
                  "$PRIVATE/install-cs193v.sh")"
 assert_eq "tmptree:the-bootstrap-declares-one-template" 1 \
-          "$(printf '%s\n' "$boot_tpl" | grep -c .)"
-boot_guard="$(sed -n 's/.*case "\${BOOT_TMP##\*\/}" in \([^)]*\)).*/\1/p' \
+          "$(died_in "$boot_tpl"; printf '%s\n' "$boot_tpl" | grep -c .)"
+boot_guard="$(run_checker sed -n 's/.*case "\${BOOT_TMP##\*\/}" in \([^)]*\)).*/\1/p' \
                    "$PRIVATE/install-utils.sh")"
 assert_eq "tmptree:the-installer-declares-one-guard" 1 \
-          "$(printf '%s\n' "$boot_guard" | grep -c .)"
+          "$(died_in "$boot_guard"; printf '%s\n' "$boot_guard" | grep -c .)"
 # The template's X's become the guard's ?'s; everything before them must be identical.
 assert_eq "tmptree:the-guard-matches-the-template" \
           "$(printf '%s' "$boot_tpl"   | tr 'X' '?')" "$boot_guard"
@@ -725,16 +727,19 @@ assert_eq  "tmux:harness-scratch-stays-under-the-root" "" "$hits"
 # satisfied by "$SOCK2", so a check written that way would pass with the FIRST socket
 # unregistered. Comparing both sides as sorted sets also catches the other direction, a name
 # left on the list after its server was removed.
-sock_vars="$(grep -hoE '^[A-Za-z_][A-Za-z0-9_]*="cs193v[^"]*\$\$"' \
-             "$PRIVATE/tests/tmux-harness/suite.sh" \
+# ONE CHECKED READ FOR BOTH SIDES (#559), so the two sets cannot agree by both being empty.
+sock_src="$(run_checker cat "$PRIVATE/tests/tmux-harness/suite.sh")"
+sock_vars="$(died_in "$sock_src"; printf '%s\n' "$sock_src" \
+             | grep -oE '^[A-Za-z_][A-Za-z0-9_]*="cs193v[^"]*\$\$"' \
              | sed 's/=.*//' | sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
 # Extraction asserted first, by the same rule as the installer doors below: an empty set
 # would make the equality below true forever and mean nothing.
 record "tmux:inner-sockets-found" "$sock_vars"
-if [ -n "$sock_vars" ]; then pass "tmux:inner-sockets-were-found"
+if [ -n "$sock_vars" ] && [ -z "$(died_in "$sock_vars")" ]; then
+    pass "tmux:inner-sockets-were-found"
 else fail "tmux:inner-sockets-were-found" \
           'no cs193v...$$ socket assignment in suite.sh -- did they move, or change shape?'; fi
-registered="$(grep -h 'INNER_SOCKS=' "$PRIVATE/tests/tmux-harness/suite.sh" \
+registered="$(died_in "$sock_src"; printf '%s\n' "$sock_src" | grep 'INNER_SOCKS=' \
               | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | sed 's/^\$//' \
               | grep -v '^INNER_SOCKS$' | sort -u | do_tr '\n' ' ' | sed 's/ *$//')"
 assert_eq  "tmux:every-inner-socket-is-registered-for-cleanup" "$sock_vars" "$registered"
@@ -1902,9 +1907,12 @@ assert_eq "ssh:every-call-ignores-the-students-config" "" \
 # passes whatever happens: `no-frames` sat in PW_STATES with nothing to set it, and MANUAL.md's
 # "no spurious no-frames state after the wake" could not fail. The other direction costs a
 # student: pw_publish_parse refuses a word it does not know, so that state never reaches the file.
-sup_states="$(sed 's/^[[:space:]]*#.*//' "$REPO/cs193v" | grep -oE 'SUP_STATE=[a-z-]+' \
+# BOTH SIDES THROUGH A CHECKER (#559), with died_in ahead of the stages that keep only some lines.
+sup_src="$(run_checker sed 's/^[[:space:]]*#.*//' "$REPO/cs193v")"
+sup_states="$(died_in "$sup_src"; printf '%s\n' "$sup_src" | grep -oE 'SUP_STATE=[a-z-]+' \
               | sed 's/^SUP_STATE=//' | LC_ALL=C sort -u | tr '\n' ' ')"
-pw_states="$(sed -n "s/^PW_STATES='\([^']*\)'.*/\1/p" "$PRIVATE/files/cs193v-portwatch" \
+pw_src="$(run_checker sed -n "s/^PW_STATES='\([^']*\)'.*/\1/p" "$PRIVATE/files/cs193v-portwatch")"
+pw_states="$(died_in "$pw_src"; printf '%s\n' "$pw_src" \
              | tr ' ' '\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ')"
 assert_ne "states:the-supervisor-sets-some" "" "$sup_states"
 assert_ne "states:the-port-file-accepts-some" "" "$pw_states"
@@ -4597,8 +4605,11 @@ assert_not_contains "containerfile:no-stale-workspaces-path" "/workspaces" \
 
 # WORKDIR, the launcher's -w and the mount destination must all name the same directory, or
 # the student's shell opens somewhere other than their files.
-wd="$(sed -n 's/^WORKDIR //p' "$PRIVATE/Containerfile" | head -1)"
-mount_dst="$(sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v | head -1)"
+# BOTH SIDES THROUGH A CHECKER (#559): two renamed declarations agreed as "" == "", unguarded.
+wd="$(run_checker sed -n 's/^WORKDIR //p' "$PRIVATE/Containerfile")"
+wd="$(died_in "$wd"; printf '%s\n' "$wd" | head -1)"
+mount_dst="$(run_checker sed -n 's/^MOUNT_DST="\(.*\)"/\1/p' cs193v)"
+mount_dst="$(died_in "$mount_dst"; printf '%s\n' "$mount_dst" | head -1)"
 assert_eq "launcher:mount-destination-matches-WORKDIR" "$wd" "$mount_dst"
 # And where a new tab lands when the tab it came from cannot be followed (#493). A missing line
 # reads as a sentence rather than as empty, so two failed extractions cannot agree with each other.
@@ -5581,8 +5592,9 @@ assert_ok  "shellcheck:portwatch" shellcheck --severity=warning \
 # refuses a frame of more records, so no list it publishes is longer; portwatch refuses a longer
 # one at both ends with PW_MAX. A value in one file enforced by another is a value that drifts, so
 # both are asserted to BE numbers first and then to agree.
-pw_max="$(sed -n 's/^PW_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-portwatch")"
-dyn_max="$(sed -n 's/^DYNPORTS_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-ui.sh")"
+pw_max="$(run_checker sed -n 's/^PW_MAX=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/cs193v-portwatch")"
+dyn_max="$(run_checker sed -n 's/^DYNPORTS_MAX=\([0-9][0-9]*\)$/\1/p' \
+                              "$PRIVATE/files/cs193v-ui.sh")"
 assert_match "portwatch:declares-its-cap"   "^[0-9]+$" "$pw_max"
 assert_match "portwatch:the-gate-declares-its-cap" "^[0-9]+$" "$dyn_max"
 assert_eq    "portwatch:its-cap-is-the-hosts" "$dyn_max" "$pw_max"
@@ -5619,8 +5631,9 @@ assert_match "shortlink:is-python-not-shell" "^#!/usr/bin/env python3$" \
 # because the renderer has to draw that countdown and therefore needs the value too --
 # and a value in one file displayed by another is a value that drifts. This is the check
 # that notices. Both are plain literals, so it is a grep.
-sl_timeout="$(sed -n 's/^DEFAULT_TIMEOUT = \([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/shortlink")"
-ou_timeout="$(sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/open-url")"
+sl_timeout="$(run_checker sed -n 's/^DEFAULT_TIMEOUT = \([0-9][0-9]*\)$/\1/p' \
+                                 "$PRIVATE/files/shortlink")"
+ou_timeout="$(run_checker sed -n 's/^LINK_TIMEOUT=\([0-9][0-9]*\)$/\1/p' "$PRIVATE/files/open-url")"
 # Asserted to BE a number first. Without this the comparison below passes vacuously the
 # moment either declaration is renamed -- the empty string equals the empty string, and the
 # check reports green having measured nothing. Same family as issue #79.
