@@ -833,7 +833,9 @@ check_release() {
     printf '\n'
     msg newer-release.stopped
     printf '\n'
-    exit 0
+    # 2, FOR ask_consent's REASON (#578): the student stopped, nothing was installed, and
+    # install-cs193v-windows.cmd reads 0 as a finished install.
+    exit 2
 }
 
 # ─── the password, once, where the consent screen said it would be  (#226, #223) ────
