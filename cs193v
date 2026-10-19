@@ -2059,8 +2059,9 @@ SESSION_LEFT=''
 # then exits is wrong too, in the other window: a signal landing DURING a teardown already under
 # way finds TEARDOWN_DONE set, gets nothing from the guard, and exits halfway through, before the
 # `podman stop`. That was #449's own proposal, measured on bash 3.2 and 5.3: container left
-# running. So the guard decides: a call that finds the flag set returns and lets the teardown in
-# progress finish, and the call that set it does the work and then ends the process itself.
+# running. So the call that starts the teardown does the work and then ends the process itself,
+# and no arm can interrupt it: the teardown's first act is to ignore every signal that has one
+# (#512). That leaves the once-guard a single job, the EXIT trap that an arm's own `exit` runs.
 #
 # THEY NO LONGER ALL SAY THE SAME THING, though they still all do the same thing (#220). Only
 # the first is a student who chose to leave and is watching the screen; that path erases tmux's
@@ -2142,11 +2143,26 @@ stop_container() {                     # stop_container [--quiet]
 # fatally only for the arms (bash 3.2 and 5.3, measured). So each falls back to /dev/null, and
 # stderr goes first, which lets fd 7's own failure be silenced through it.
 #
-# run_timeout and the supervisor's spawn close both again, so nothing that outlives this process
-# keeps a copy of the terminal.
+# run_timeout, the supervisor's spawn and the attach close both again, so nothing that outlives
+# this process keeps a copy of the terminal. The attach is not one of those itself, but on Linux it
+# hands them on: the exec session's conmon held both, measured on podman 6.0.2.
 keep_terminal_fds() {
     exec 8>&2 || exec 8>/dev/null
     { exec 7>&1; } 2>/dev/null || exec 7>/dev/null
+}
+
+# How both signal handlers end on a Ctrl-C: by dying of SIGINT, not exiting 130, because a parent
+# shell stops only on a child that DIED of it (#448, #450) -- a loop over `cs193v --rebuild` went
+# on past an exit 130 into the next rebuild (#510). ONE DEFINITION because the line is fragile,
+# and 10-static.sh pins it.
+#
+# THE `exit 130` IS NOT BELT-AND-BRACES, and it has to be `exit`: with the kill as the handler's
+# last command, or followed only by a `return`, bash 3.2 goes back into whatever the signal
+# interrupted with the self-sent SIGINT still pending -- at the warnings prompt, the restarted
+# `read` -- and dies only when ENTER is pressed. Measured both ways. At the `exit` it acts on that
+# SIGINT and dies of it; were it ever unable to, the exit still ends the process.
+die_of_sigint() {
+    trap - EXIT INT; kill -s INT $$; exit 130
 }
 
 # The trapped wrapper. Separate from stop_container because the once-guard is only needed on
@@ -2174,6 +2190,10 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     # the process at the bottom; the INT branch's `trap - INT` undoes this first. Every signal
     # with an arm is here, QUIT included (#564).
     #
+    # THE SHELL'S CHILDREN, NOT PODMAN'S OWN CHOICES: on Linux the stop runs in the podman client,
+    # which re-arms INT, TERM and QUIT for itself, so a ^C there still ends it with the container
+    # up (#566). HUP it leaves ignored, which is the closed window this was written for.
+    #
     # AND PIPE, which has no arm: with the output in a pipe whose reader the same ^C killed --
     # `./cs193v 2>&1 | tee log` -- the teardown's first write raised SIGPIPE, and bash died of it
     # before the stop (#565). Ignored, that write fails with EPIPE and the teardown goes on.
@@ -2200,16 +2220,9 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     stop_container ${SESSION_LEFT:+--quiet}
     [ -n "$SESSION_LEFT" ] && printf ' %s\n' "$(msg status.exiting-done)"
     # THE SIGNAL'S OWN STATUS, so a caller can still tell a Ctrl-C from a closed window -- the
-    # rule rebuild_interrupted states. INT RE-RAISES rather than exiting 130, because a parent
-    # shell stops only on a child that DIED of SIGINT (#448, #450). And `exit 130` stays after
-    # the kill, which is not belt-and-braces, and it has to be `exit`: with the kill as the arm's
-    # last command, or followed only by the `return 0` below, bash 3.2 goes back into whatever
-    # the signal interrupted with the self-sent SIGINT still pending -- at the warnings prompt,
-    # the restarted `read` -- and dies only when ENTER is pressed. Measured both ways. At the
-    # `exit` it acts on that SIGINT and dies of it; were it ever unable to, the exit still ends
-    # the process.
+    # rule rebuild_interrupted states. INT dies of SIGINT instead; see die_of_sigint.
     case "${1:-}" in
-        INT)  trap - EXIT INT; kill -s INT $$; exit 130 ;;
+        INT)  die_of_sigint ;;
         TERM) exit 143 ;;
         HUP)  exit 129 ;;
         QUIT) exit 131 ;;
@@ -2241,8 +2254,7 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
 #
 # AND A Ctrl-C IS NOT REPORTED AS 130 AT ALL, BUT RE-RAISED (#510): a parent shell stops only on a
 # child that DIED of SIGINT (#448, #450), so a loop over `cs193v --rebuild` carried on past an exit
-# 130 into the next rebuild -- measured. The exit after the kill is shell_teardown's, for its
-# reason: bash 3.2 acts on the self-sent SIGINT there, and would otherwise sit on it.
+# 130 into the next rebuild -- measured. See die_of_sigint.
 rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
     # RT_SPIN FIRST, and it is not cosmetic. create_container sets it for `podman run` and clears
     # it on the line after; interrupting in between leaves it set, and run_timeout then prints it
@@ -2256,7 +2268,7 @@ rebuild_interrupted() {                # rebuild_interrupted EXIT_STATUS
     # a rebuild never started a container, so "Stopping the container..." names something they
     # have never seen. The stop itself is not optional -- see verb_rebuild.
     stop_container --quiet
-    [ "${1:-130}" = 130 ] && { trap - EXIT INT; kill -s INT $$; }
+    [ "${1:-130}" = 130 ] && die_of_sigint
     exit "${1:-130}"
 }
 
@@ -2467,7 +2479,7 @@ open_shell() {
         -w "$MOUNT_DST" \
         -e "TERM=$(safe_term)" \
         -e "COLORTERM=${COLORTERM:-}" \
-        "$NAME" cs193v-shell --attach
+        "$NAME" cs193v-shell --attach 7>&- 8>&-
     # NO CS193V_TERM_CLASS HERE, deliberately: this exec is a tmux CLIENT, and a client's
     # environment does not reach panes -- `update-environment` names neither variable and clears
     # what it does not copy. The claim exec above is where they have to go. Adding them here

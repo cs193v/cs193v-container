@@ -3739,7 +3739,7 @@ else
          "verb_rebuild must call keep_terminal_fds before its first arm: keep=$rb_keep trap=$rb_trap"
 fi
 # AND NOTHING THAT OUTLIVES THE LAUNCHER TAKES THEM ALONG. Every run_timeout spawn, which is how the
-# tunnel's `ssh -f` master starts, and the supervisor's. COUNTED FIRST, because a grep that stopped
+# tunnel's `ssh -f` master starts, the supervisor's, and the attach's. COUNTED FIRST, because a grep that stopped
 # finding the spawns would find none missing the close.
 rt_code="$(fn_body run_timeout "$PRIVATE/files/cs193v-ui.sh" | sed 's/^[[:space:]]*#.*//')"
 assert_eq "run-timeout:has-the-four-spawns-counted-here" "4" \
@@ -3748,6 +3748,10 @@ assert_eq "run-timeout:no-spawn-takes-the-terminal-copies" "" \
           "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '7>&- 8>&-')"
 assert_match "tunnel:the-supervisor-does-not-take-the-terminal-copies" 'dev-supervise .*7>&- 8>&- &' \
              "$(fn_body tunnel_sup_start "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+# THE ATTACH TOO, though it does not outlive the launcher: on Linux it hands them on to the exec
+# session's conmon, which does.
+assert_contains "launcher:the-attach-does-not-take-the-terminal-copies" \
+                'cs193v-shell --attach 7>&- 8>&-' "$open_shell_code"
 
 # THE SUPERVISOR'S PID MUST BE THE LOOP'S PID, and that is a claim about one shell metacharacter.
 # `podman exec ... | sup_loop` puts the loop in a SUBSHELL, so the $$ written to the pidfile names
@@ -3991,12 +3995,17 @@ assert_eq "teardown:the-handler-returns-success" "return 0" \
              | tail -1 | sed 's/^[[:space:]]*//')"
 # ...BUT A SIGNAL'S CALL NEVER REACHES IT (#449). The arm that starts the teardown ends the process
 # with its signal's status; one that returned resumed the script, which ran `podman exec -it` into
-# the container it had just stopped. INT re-raises and then EXITS: with the kill as its last command,
-# or followed only by the `return 0` above, bash 3.2 sits on the self-sent SIGINT until whatever it
+# the container it had just stopped. INT dies of SIGINT, through the one helper both handlers use.
+assert_match "teardown:int-dies-of-sigint" 'INT\)[[:space:]]+die_of_sigint ;;' "$guard_code"
+assert_match "rebuild:a-ctrl-c-dies-of-sigint" '= 130 \] && die_of_sigint$' \
+             "$(fn_body rebuild_interrupted "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
+# AND THE HELPER RE-RAISES AND THEN EXITS, its whole body compared: with the kill as its last
+# command, or followed only by a `return`, bash 3.2 sits on the self-sent SIGINT until whatever it
 # interrupted -- the warnings prompt's `read` -- returns. Measured, and only bash 3.2 shows it, so the
 # shim tier's ^C case cannot hold this on a Linux run; this line can.
-assert_match "teardown:int-re-raises-and-then-exits" \
-             'INT\)[[:space:]]+trap - EXIT INT; kill -s INT \$\$; exit 130' "$guard_code"
+assert_eq "sigint:re-raises-and-then-exits" 'trap - EXIT INT; kill -s INT $$; exit 130' \
+          "$(fn_body die_of_sigint "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//' \
+             | grep -vE '^[[:space:]]*$|^die_of_sigint\(\) \{$|^\}$' | sed 's/^[[:space:]]*//')"
 assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code"
 assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
 assert_match "teardown:quit-exits-131" 'QUIT\)[[:space:]]+exit 131' "$guard_code"
