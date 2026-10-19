@@ -1528,6 +1528,12 @@ wait_until() {                        # wait_until SECS CMD [ARGS...]  -> 0 as s
     done
 }
 
+# The condition most waits above are for. EMPTY IS GONE, so a pid that was never published reads as
+# gone rather than as `kill -0 ''`'s usage error -- callers that need it to have existed check that
+# first. A child of the CALLER lingers as a zombie once killed, and kill -0 still finds a zombie, so
+# what is waited on this way should not be one.
+pid_gone() { [ -z "${1:-}" ] || ! kill -0 "$1" 2>/dev/null; }   # pid_gone PID
+
 # Elapsed real seconds, to milliseconds, WITHOUT EPOCHREALTIME -- that is bash 5 and this suite
 # runs on the 3.2 macOS ships. The `time` keyword with TIMEFORMAT is in every bash that matters,
 # and the command substitution passes the command's own exit status through, so a caller can have

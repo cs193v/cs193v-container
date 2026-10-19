@@ -2202,6 +2202,9 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     # foreground children -- ps, sleep, kill -- which a closed window would otherwise HUP.
     RT_DETACH=1
     TEARDOWN_DONE=1
+    # THE CALL THE SIGNAL INTERRUPTED, before anything else: the arm that brought us here ends the
+    # process from inside it, so nothing else would kill it (#449). See rt_kill_inflight.
+    rt_kill_inflight
     transient_cleanup
     # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different
     # things, which invites an `if` with a stop in each branch -- and that shape is one edit

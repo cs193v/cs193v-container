@@ -810,3 +810,61 @@ if [ "${rd_rc:-}" = 124 ]; then
 else
     pass "rt:detach-never-reads-the-terminal"
 fi
+
+# ─── rt_kill_inflight: what an arm that exits mid-call would leave running  (#449) ──
+# Since #449 a teardown's arm ENDS THE PROCESS from inside whatever call it interrupted, where it used
+# to return and let that call's own ceiling kill the command. So the arm kills it instead: run_timeout
+# writes the pids of each call in flight beside its scratch file, and rt_kill_inflight kills them --
+# the command, and the fifo branch's wrapper, which holds whatever the caller had open.
+#
+# WITH ITS CONTROL: the same interrupted call, its arm not calling rt_kill_inflight, has to leave the
+# command running, or the first half proves only that the command ended by itself.
+cat > "$WORK/inflight.sh" <<'SUBJECT'
+set -u
+. "$CS193V_UI"
+trap '[ -n "$IF_KILL" ] && rt_kill_inflight; rt_cleanup; exit 143' TERM
+run_timeout 30 bash -c "exec -a $IF_NAP sleep 30"
+SUBJECT
+if_nap_up() { pgrep -f "^$IF_NAP 30\$" >/dev/null 2>&1; }
+if_nap_gone() { ! if_nap_up; }
+for if_mode in kill leave; do
+    IF_NAP="vt-ifnap-$if_mode-$$"
+    IF_KILL=''; [ "$if_mode" = kill ] && IF_KILL=1
+    CS193V_UI="$PRIVATE/files/cs193v-ui.sh" IF_NAP="$IF_NAP" IF_KILL="$IF_KILL" \
+        bash "$WORK/inflight.sh" >/dev/null 2>&1 &
+    if_victim=$!
+    if wait_until 5 if_nap_up; then
+        kill -TERM "$if_victim" 2>/dev/null
+        wait "$if_victim" 2>/dev/null
+        if [ "$if_mode" = kill ]; then
+            if wait_until 5 if_nap_gone; then pass "rt:kill-inflight-ends-the-interrupted-call"
+            else fail "rt:kill-inflight-ends-the-interrupted-call" "$IF_NAP outlived the arm that exited"; fi
+        else
+            # PROVING AN ABSENCE, so a fixed wait: a command nobody kills gives no sign of surviving.
+            sleep 0.5
+            if if_nap_up; then pass "rt:without-it-the-interrupted-call-outlives-its-caller"
+            else fail "rt:without-it-the-interrupted-call-outlives-its-caller" \
+                      "the command ended without rt_kill_inflight, so the case above proves nothing"; fi
+        fi
+    else
+        kill "$if_victim" 2>/dev/null
+        fail "rt:kill-inflight-ends-the-interrupted-call" "$IF_NAP never started ($if_mode)"
+    fi
+    pkill -9 -f "^$IF_NAP 30\$" 2>/dev/null
+done
+# THE RECORD GOES WITH THE CALL: rt_cleanup sweeps a .pids file as it sweeps the rest.
+if_records() { local f l=''; for f in "$WORK"/cs193v-*.pids; do [ -e "$f" ] && l="$l ${f##*/}"; done; printf '%s' "${l# }"; }
+assert_eq "rt:kill-inflight-leaves-no-record-behind" "" "$(if_records)"
+# IDENTIFIED BEFORE KILLED: a pid in a .pids file that is not in the caller's process group is a
+# stale record, or a reused number, and is left alone. Started in a session of its own and orphaned,
+# so that a kill, if one came, would show as its absence rather than as a zombie of ours.
+# Its output away from the substitution, which would otherwise wait the 31s for it.
+if_stranger="$("$DO_PY" -c 'import subprocess as s; print(s.Popen(["sleep", "31"], start_new_session=True, stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL).pid)')"
+printf '%s\n' "$if_stranger" > "${TMPDIR:-/tmp}/cs193v-$$.stale.pids"
+rt_kill_inflight
+# PROVING AN ABSENCE, as above.
+sleep 0.5
+if pid_gone "$if_stranger"; then fail "rt:kill-inflight-leaves-a-stranger-alone" "it killed $if_stranger, outside our group"
+else pass "rt:kill-inflight-leaves-a-stranger-alone"; fi
+[ "$(ps -o command= -p "$if_stranger" 2>/dev/null)" = "sleep 31" ] && kill "$if_stranger" 2>/dev/null
+rm -f "${TMPDIR:-/tmp}/cs193v-$$.stale.pids"

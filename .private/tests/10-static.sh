@@ -3773,6 +3773,17 @@ else
 fi
 assert_eq "run-timeout:no-spawn-reads-the-terminal" "" \
           "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '</dev/null')"
+# AND WHAT IS IN FLIGHT IS WRITTEN DOWN, for the arm that ends the process from inside a call (#449):
+# run_timeout records each call's pids beside its scratch file -- both branches' $pid, and the fifo
+# branch's command -- and rt_kill_inflight kills them, where a returning arm once left the call's
+# own ceiling to. The fifo's WRAPPERS close the terminal copies too: a wrapper is a fork that never
+# execs, and until it is killed it holds whatever the caller had open.
+assert_eq "run-timeout:records-what-is-in-flight" "2 1" \
+          "$(printf '%s\n' "$rt_flat" | grep -cxF "printf '%s\\n' \"\$pid\" > \"\$tmp.pids\"") $(printf '%s\n' "$rt_flat" | grep -cF "printf '%s\\n' \"\$cpid\" >> \"\$tmp.pids\"")"
+assert_eq "run-timeout:the-wrappers-are-counted-here" "2" \
+          "$(printf '%s\n' "$rt_code" | grep -cF '9>"$fifo"')"
+assert_eq "run-timeout:no-wrapper-takes-the-terminal-copies" "" \
+          "$(printf '%s\n' "$rt_code" | grep -F '9>"$fifo"' | grep -vF ') 9>"$fifo" 7>&- 8>&- &')"
 assert_match "tunnel:the-supervisor-does-not-take-the-terminal-copies" 'dev-supervise .*7>&- 8>&- &' \
              "$(fn_body tunnel_sup_start "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 # THE ATTACH TOO, though it does not outlive the launcher: on Linux it hands them on to the exec
@@ -4051,6 +4062,16 @@ assert_eq "teardown:podman-calls-start-outside-the-terminals-group" "RT_DETACH=1
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
              | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
                     /^[[:space:]]*trap .. INT TERM HUP QUIT PIPE$/ { f = 1 }')"
+# AND IT KILLS THE CALL IT INTERRUPTED BEFORE ANYTHING ELSE (#449): the arm ends the process from
+# inside that call, so nothing else would. Before transient_cleanup, whose rt_cleanup removes the
+# record of what to kill.
+td_kill_at="$(printf '%s\n' "$guard_code" | grep -n '^[[:space:]]*rt_kill_inflight$' | head -1 | cut -d: -f1)"
+td_clean_at="$(printf '%s\n' "$guard_code" | grep -n '^[[:space:]]*transient_cleanup$' | head -1 | cut -d: -f1)"
+if [ -n "$td_kill_at" ] && [ -n "$td_clean_at" ] && [ "$td_kill_at" -lt "$td_clean_at" ]; then
+    pass "teardown:kills-the-interrupted-call-first"
+else
+    fail "teardown:kills-the-interrupted-call-first" "rt_kill_inflight at $td_kill_at, transient_cleanup at $td_clean_at"
+fi
 # THE REBUILD'S HANDLER THE SAME WAY, and its ignore FIRST: it had none, so a second key during its
 # stop was queued on bash 3.2 and lost, re-entered on 5.3 and stopped twice -- and a re-entry could
 # land inside run_timeout's set -m bracket.

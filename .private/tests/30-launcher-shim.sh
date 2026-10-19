@@ -790,8 +790,50 @@ if wait_until 30 grep -q WEDGED "$SHIM/ssh_wedge.log"; then
               "$(shim_count '^exec [^ ]+ cs193v-portwatch --watch')"
     assert_says_key "setup-signal:ctrl-c-in-the-tunnel-setup-says-it-is-stopping" status.stopping \
                     "$(strip_ansi < "$FG_OUT")"
+    # AND NOTHING OF THE CALL IT INTERRUPTED IS LEFT RUNNING. The arm ends the process from inside
+    # that call now, where it used to return and let run_timeout kill the command at its ceiling --
+    # so the wedged `-O check` outlived the launcher by its whole 30s, and a hung podman would have
+    # outlived it for good.
+    wedge_pid="$(head -1 "$SHIM/ssh_wedge.pids" 2>/dev/null)"
+    if [ -n "$wedge_pid" ] && wait_until 10 pid_gone "$wedge_pid"; then
+        pass "setup-signal:ctrl-c-in-the-tunnel-setup-leaves-no-call-running"
+    else
+        fail "setup-signal:ctrl-c-in-the-tunnel-setup-leaves-no-call-running" \
+             "the wedged call (${wedge_pid:-never published}) outlived the launcher"
+    fi
 else
     fail "setup-signal:ctrl-c-in-the-tunnel-setup-ends-the-launcher" "the tunnel never wedged:
+$(strip_ansi < "$FG_OUT")"
+fi
+shim_ssh_unwedge
+launcher_fg_stop
+
+# ...AND IT LETS GO OF THE LAUNCHER'S OUTPUT. That call's fifo wrapper is a fork of the launcher that
+# never execs, so it holds what the launcher held -- bash's saved copy of stdout for the call's
+# `>/dev/null`, and the arms' copies on 7 and 8 -- and with `./cs193v 2>&1 | tee log` the reader saw
+# no EOF until the wedge ended. The reader here ignores the ^C, as tee would not, so that what is
+# timed is the pipe; 15s against the wedge's 30.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+shim_fake_ssh
+shim_ssh_wedge 1 1
+cat > "$SHIM/held" <<'EOF'
+#!/bin/sh
+# held LAUNCHER MARKER -- the launcher's output through a reader that outlives a ^C and marks its EOF
+"$1" 2>&1 | sh -c 'trap "" INT QUIT; cat; : > "$0"' "$2"
+EOF
+chmod +x "$SHIM/held"
+fg_start "$SHIM/held" "${LAUNCHER_DIR:-$REPO}/cs193v" "$SHIM/reader.eof"
+if wait_until 30 grep -q WEDGED "$SHIM/ssh_wedge.log"; then
+    launcher_fg_keys '\003'
+    if wait_until 15 test -e "$SHIM/reader.eof"; then
+        pass "setup-signal:ctrl-c-in-the-tunnel-setup-lets-go-of-the-output"
+    else
+        fail "setup-signal:ctrl-c-in-the-tunnel-setup-lets-go-of-the-output" \
+             "no EOF reached the reader within 15s of the ^C: something the launcher left holds its output"
+    fi
+else
+    fail "setup-signal:ctrl-c-in-the-tunnel-setup-lets-go-of-the-output" "the tunnel never wedged:
 $(strip_ansi < "$FG_OUT")"
 fi
 shim_ssh_unwedge
