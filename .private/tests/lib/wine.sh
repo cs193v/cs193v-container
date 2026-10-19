@@ -128,8 +128,9 @@ wine_body() {                         # wine_body whole|truncated|altered
     do_sha256 "$WINE_CASE/stage2.src" | awk '{print $1}' > "$WINE_CASE/stage2.sha256"
 }
 
-# The digest of whatever wine_body last prepared, so a case can assert on it.
-wine_body_digest() { cat "$WINE_CASE/stage2.sha256"; }
+# The digest of whatever wine_body last prepared, so a case can assert on it. Through run_checker
+# (#559): win-altered asserts it DIFFERS, which a digest that could not be read always does.
+wine_body_digest() { run_checker cat "$WINE_CASE/stage2.sha256"; }
 
 # ─── the .cmd's OWN ENVIRONMENT, for the staff overrides (#280) ────────────────
 # WHY THIS HAD TO EXIST. wine_run's podman line named two variables and no more, so a case could
