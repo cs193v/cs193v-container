@@ -2564,15 +2564,16 @@ esac
 printf 'REACHED-THE-END\n'
 CHILD
 fwdi() {                              # fwdi LAUNCHER SHAPE -> the child's output, then [rc=N]
-    # THE RESULTS FILE IS CREATED EMPTY, NOT REMOVED: a child that records nothing never writes
-    # one, and fwdi_recorded has to tell "recorded nothing" from a file it could not read.
-    rm -f "$FWDI/$1/asked"
+    # THE RESULTS FILE AND THE ASK LOG ARE CREATED EMPTY, NOT REMOVED: a child that records nothing
+    # never writes the one, a launcher nobody asked never appends to the other, and fwdi_recorded
+    # and fwdi_asked have to tell "nothing" from a file they could not read (#586).
+    : > "$FWDI/$1/asked"
     : > "$FWDI/$1-$2.tsv"
     CS193V_RESULTS="$FWDI/$1-$2.tsv" CS193V_SUITE=child NO_COLOR=1 \
         bash "$FWDI/child.sh" "$TESTS_DIR/lib/assert.sh" "$FWDI/$1" "$2" 2>&1
     printf '[rc=%s]' "$?"
 }
-fwdi_asked()    { do_awk 'END { printf "%d", NR }' "$FWDI/$1/asked" 2>/dev/null || printf 0; }
+fwdi_asked()    { run_checker do_awk 'END { printf "%d", NR }' "$FWDI/$1/asked"; }
 fwdi_recorded() {
     run_checker do_awk -F'\t' '{ print $1, $3 }' "$FWDI/$1-$2.tsv" | do_tr '\n' '|' | sed 's/|$//'
 }
