@@ -770,8 +770,8 @@ sg_new
 sg_run checkpoint-help identity checkpoint-help
 sg_says "checkpoint-help:ends-in-the-staff-box" err.setup-failed "$SG_OUT"
 sg_says_not "checkpoint-help:never-asks-for-a-token" token.paste "$SG_OUT"
-# A FRESH SHIM HAS NO GIT CONFIG AT ALL, so any write -- under any key, with or without a flag --
-# is a file where there was none. Counting argv for writes could not see cs193v.* keys (#363).
+# A FRESH SHIM'S GIT CONFIG IS EMPTY, so any write -- under any key, with or without a flag -- is
+# text where there was none. Counting argv for writes could not see cs193v.* keys (#363).
 assert_eq "checkpoint-help:configures-nothing" "" "$(sg_config)"
 
 # ─── a failed config command ───────────────────────────────────────────────────
