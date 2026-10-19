@@ -633,8 +633,9 @@ if wait_until 30 container_is_up; then
     # NEITHER WORDING BELONGS HERE, and they are refused for two different reasons.
     # status.stopping is suppressed because this student never started a container (#285), the
     # same reason the ordinary --rebuild ending is silent; status.exiting would be a lie,
-    # because nobody typed exit -- a signal is not a clean exit.
-    rb_out="$(cat "$SHIM/rb.out" 2>/dev/null)"
+    # because nobody typed exit -- a signal is not a clean exit. THROUGH run_checker (#559): the
+    # shell made rb.out before the launcher started, so a read that fails is a failure.
+    rb_out="$(run_checker cat "$SHIM/rb.out")"
     assert_says_not_key "interrupt:the-signal-path-is-quiet-too" \
                         status.stopping "$rb_out"
     assert_says_not_key "interrupt:the-signal-path-does-not-claim-a-clean-exit" \
@@ -1836,7 +1837,9 @@ assert_says_not_key "exit:the-old-line-is-gone-on-the-clean-path" status.stoppin
 printf 'exit\n' | PATH="$SHIM:$PATH" \
     do_script 120 "$(sh_quote "${LAUNCHER_DIR:-$REPO}/cs193v") > $(sh_quote "$SHIM/piped.out") 2>&1" \
     >/dev/null 2>&1
-piped="$(cat "$SHIM/piped.out" 2>/dev/null)"
+# THROUGH run_checker (#559): the pty's shell makes piped.out, so a missing one is a run that never
+# happened, and the negative below would pass on it.
+piped="$(run_checker cat "$SHIM/piped.out")"
 assert_says     "exit:the-piped-run-still-exited"   "$(msg_text status.exiting)" "$piped"
 assert_not_contains "exit:no-escapes-when-piped" "$(printf '\033')[1A" "$piped"
 
