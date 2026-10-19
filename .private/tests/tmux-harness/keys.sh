@@ -57,6 +57,7 @@ KEY_LEFT="1b 5b 44"
 KEY_RIGHT="1b 5b 43"
 KEY_UP="1b 5b 41"
 KEY_DOWN="1b 5b 42"
+KEY_SHIFT_TAB="1b 5b 5a"              # CSI Z          (back-tab; Claude Code's mode switch)
 
 # --- The "forbidden keys" battery -------------------------------------------
 #

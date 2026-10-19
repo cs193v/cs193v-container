@@ -86,7 +86,8 @@ case "$-" in *i*) ;; *) return 0 ;; esac
 # shebang ... every Claude Code tab would be labelled `node`"). Measured 2026-08: the npm
 # package's bin is a 297 MB native ELF (`claude.exe`, hardlinked over the `linux-x64` payload),
 # /proc/PID/exe points at it, and a running `claude` reports `claude` with no help from this
-# hook; `gh` is a native ELF too. Both stay on the list -- `gh` as a genuine multi-tool
+# hook (re-measured on 2.1.303, #569: 285 MB, still hardlinked over the platform payload, still
+# `claude`); `gh` is a native ELF too. Both stay on the list -- `gh` as a genuine multi-tool
 # (`gh auth`, `gh repo`), `claude` because a repackaging back to a node shim would otherwise
 # relabel every tab in the course with nothing pointing at why.
 _CS193V_SHOW_ARG="sudo doas env time nice ionice nohup stdbuf xargs setsid

@@ -11,8 +11,10 @@
 # for. It was written when students PULLED this image: podman cannot resume a partial layer
 # download, so putting the most volatile software last meant a dropped connection cost at
 # most one layer. Building locally, the same ordering buys BUILD-CACHE reuse — measured,
-# bumping CLAUDE_CODE_VERSION costs 89 s and 95 MB against 224 s and 728 MB cold. A killed
-# build also resumes at the failed step, which is finer-grained than layer-level pull
+# bumping CLAUDE_CODE_VERSION costs 89 s and 95 MB against 224 s and 728 MB cold. (The bump to
+# 2.1.303, #569, measured on an arm64 Mac rather than that x86-64 machine: 134 s and 142 MB
+# received by the podman VM, re-running steps 17-26 of 26, Claude Code and everything after it.)
+# A killed build also resumes at the failed step, which is finer-grained than layer-level pull
 # resume ever was.
 #
 # THAT PAYOFF DEPENDS ENTIRELY ON WHERE THE VERSION ARGs SIT -- see the note above each of
@@ -481,8 +483,10 @@ RUN set -eux; \
 # and scripts run commands in, never load it. A new tab costs about 20 ms more on an idle machine
 # and about 80 ms at load average 7, timed as `bash -lic exit` with both loads included. It turns
 # on `extglob` in those shells. Claude Code's shell snapshot does read ~/.bashrc, but it does not
-# pass that on: the pinned 2.1.225 runs `shopt -u extglob` ahead of an agent's command, and the
-# dozen completion helpers the snapshot keeps (`quote`, `__git_ps1` and the like) are inert.
+# pass that on: 2.1.225 ran `shopt -u extglob` ahead of an agent's command, and the dozen
+# completion helpers its snapshot kept (`quote`, `__git_ps1` and the like) were inert. Re-measured
+# on 2.1.303 (#569) through a fake Messages API: the agent's command still runs with extglob off,
+# where a login shell has it on.
 #
 # bubblewrap is codex's, and it is here rather than beside codex for the rebuild-cost reason above.
 # See layer 7 for what it is for.
@@ -517,8 +521,9 @@ RUN set -eux; \
 # spawns a native binary out of a platform optionalDependency (`@openai/codex-linux-x64` or
 # `-linux-arm64`, aliased to this exact version, so pinning the wrapper pins the binary too).
 # Two consequences elsewhere in this repo: /proc reports the INTERPRETER for a `#!/usr/bin/env
-# node` script, which is why files/tmux/tabname.bash lists `codex` for the same reason it lists
-# `claude`; and the vendored tree carries its own `rg` and `zsh` off the student's PATH, so the
+# node` script, which is why files/tmux/tabname.bash lists `codex` (Claude Code's npm bin is a
+# native ELF and needs no such help, though the list keeps `claude` against a repackaging, #416);
+# and the vendored tree carries its own `rg` and `zsh` off the student's PATH, so the
 # "ripgrep is deliberately absent" decision in the staff README is untouched.
 #
 # INSTALLED AS THE STUDENT for the reason in layer 2, and codex makes the same demand Claude
@@ -554,8 +559,9 @@ RUN set -eux; \
 # ~/.codex is a named volume, so a file placed there is seeded once and never refreshed, and the
 # student can edit it. See files/codex/managed_config.toml for what each key is for; the short
 # version is `workspace-write` + `on-request` (codex's own defaults, written down so they cannot
-# drift under us) and `approvals_reviewer = "auto_review"`, which is a deliberate divergence from
-# the Claude Code policy beside it and is recorded as one.
+# drift under us) and `approvals_reviewer = "auto_review"`, a decision recorded as a divergence from
+# the Claude Code policy beside it until #526. It no longer is one: Claude Code now starts in auto
+# mode, so both agents put most questions to a reviewer model.
 #
 # TWO THINGS THAT BITE, both verified against the real binary rather than reasoned about:
 #
@@ -600,17 +606,23 @@ RUN set -eux; \
 # image put it in and the update is genuinely in place; installed as root it was a different
 # directory, and the update quietly shadowed the image's copy via PATH. Issue #13.
 #
-# THE PIN is the one most often bumped, and the only one whose partner is checked at build
-# time but never verified: /etc/claude-code/managed-settings.json is parsed for valid JSON
-# further down, which does NOT prove the installed Claude Code accepts its schema. Bumping
-# this means re-testing that pair. Declared here rather than at the top of the file so the
-# bump does not invalidate the whole build -- see the note beside DEBIAN_FRONTEND.
+# THE PIN is the one most often bumped, and its partner is /etc/claude-code/managed-settings.json.
+# The build only parses that file as JSON further down, and since 2.1.259 that parse is
+# load-bearing: a managed file that is not valid JSON stops `claude` from starting at all (measured:
+# 2.1.303 exits 1 naming the file, where 2.1.225 warned and ran without the policy). A field
+# the schema rejects is dropped instead, and on 2.1.225 one bad value under `permissions` dropped
+# the deny rules with it. That the installed version accepts every field is checked in the image
+# by 50-image.sh's `claude doctor` checks (#569), so a bump that breaks the pair goes red there.
+# The version check below matches the pin's whole first word, captured rather than piped: dash
+# has no pipefail. Declared here rather than at the top of the file so the bump does not
+# invalidate the whole build -- see the note beside DEBIAN_FRONTEND.
 ####> Installing Claude Code...
-ARG CLAUDE_CODE_VERSION=2.1.225
+ARG CLAUDE_CODE_VERSION=2.1.303
 RUN set -eux; \
     su student -s /bin/sh -c "npm install -g '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}'"; \
     su student -s /bin/sh -c 'npm cache clean --force'; \
-    /home/student/.local/bin/claude --version
+    v="$(/home/student/.local/bin/claude --version)"; \
+    case "$v" in "${CLAUDE_CODE_VERSION} "*) ;; *) echo "FATAL: claude --version says '$v', not ${CLAUDE_CODE_VERSION}" >&2; exit 1 ;; esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 9 — course configuration
@@ -985,7 +997,8 @@ RUN set -eux; \
 #
 # `CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1` sat in the ENV block below from #77 until #307, on a
 # reading of the escape sequences alone. Read out of the binary this image ships (2.1.225,
-# re-read in 2.1.277) it selects mouse mode "scroll", and that does TWO things, not one:
+# re-read in 2.1.277 and 2.1.303) it selects mouse mode "scroll", and that does TWO things, not
+# one:
 #
 #   * the tracking modes narrow from `?1000h ?1002h ?1003h ?1006h` to `?1000h ?1006h`, so
 #     press and release are still reported ON THE WIRE -- the half the old note got right;
@@ -1006,9 +1019,12 @@ RUN set -eux; \
 # press AND release, with MouseUp1Pane unbound -- tests/tmux-harness/suite.sh holds that now,
 # along with the buttonless motion report (Cb=35) that hovering needs.
 #
-# DELETED RATHER THAN SET TO 0, because the mode chooser keys on `!== undefined`: `=0` is
-# functionally identical and leaves behind a variable whose name says "disable" and whose value
-# says "don't". Same argument as the HOST/FLASK_RUN_HOST note below.
+# DELETED RATHER THAN SET TO 0. This note used to say `=0` was functionally identical to `=1`,
+# because the mode chooser tests `!== undefined`. It does, but it then returns the variable's
+# PARSED value, and in a pty on 2.1.225 and 2.1.303 `=0` turned on the same four tracking modes as
+# no variable at all, where `=1` turned on two (#569). So `=0` would work; it is still deleted,
+# because a variable whose name says "disable" and whose value says "don't" is one the next
+# reader has to measure before trusting. Same argument as the HOST/FLASK_RUN_HOST note below.
 #
 # WHAT REMOVING IT COSTS, which is a real cost and not a clean win. The fullscreen renderer
 # (`"tui": "fullscreen"`, files/claude-code/managed-settings.json) has `copyOnSelect` defaulting

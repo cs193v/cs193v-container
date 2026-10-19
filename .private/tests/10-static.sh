@@ -2607,6 +2607,11 @@ assert_ok  "containerfile:node-version-pinned-exactly" \
            grep -q 'nodejs=\${NODE_VERSION}-1nodesource1' "$PRIVATE/Containerfile"
 assert_ok  "containerfile:node-version-asserted-at-build-time" \
            grep -q 'test "\$(node --version)" = "v\${NODE_VERSION}"' "$PRIVATE/Containerfile"
+# The same for Claude Code (#569), whose pin is the one most often moved. Matched as the version's
+# whole first word, so a pin of 2.1.30 cannot pass on an installed 2.1.303, and captured with $()
+# rather than piped into grep: dash has no pipefail, so a pipe would answer for grep alone.
+assert_ok  "containerfile:claude-code-version-asserted-at-build-time" \
+           grep -qF 'case "$v" in "${CLAUDE_CODE_VERSION} "*)' "$PRIVATE/Containerfile"
 # Holding the package would re-create exactly the problem that moving off the tarball fixed.
 assert_not_contains "containerfile:node-not-apt-mark-held" "apt-mark hold nodejs" \
                     "$(run_checker cat "$PRIVATE/Containerfile")"
@@ -4968,7 +4973,13 @@ assert_eq  "claude:deny-rules-are-Read-or-Edit-only" "rules-ok" "$bad_rules"
 # satisfies, so assert_not_contains is the wrong verb here no matter how good the path is. A
 # document with no `permissions` key is reported as not understood rather than as clean, which
 # is the one reading under which "I could not find it" can never mean "it is not there".
-for forbidden in requiredMinimumVersion requiredMaximumVersion; do
+#
+# defaultMode AND disableAutoMode ARE ABSENT FOR A DIFFERENT REASON (#526): the course keeps
+# Claude Code's own starting mode, which is auto from 2.1.283. A managed defaultMode outranks the
+# student's ~/.claude/settings.json, so it would take away their one way to make Manual stick;
+# disableAutoMode would take auto mode away altogether. disableAutoMode is documented both at top
+# level and under `permissions`, and the walk finds a key at either.
+for forbidden in requiredMinimumVersion requiredMaximumVersion defaultMode disableAutoMode; do
     assert_eq "claude:no-$forbidden" "absent" "$(python3 -c '
 import json, sys
 def walk(node):
@@ -4991,9 +5002,9 @@ done
 #
 # Claude Code ships two renderers. The classic one draws on the MAIN screen and never asks for
 # mouse reporting, so all three terms of tmux's wheel guard -- alternate_on, pane_in_mode,
-# mouse_any_flag (files/tmux/tmux.conf:195) -- are false, and the wheel scrolls TMUX instead of
-# the agent. Measured in the container against a logged-in session: classic gives
-# `alt=0 mouse=0`, `tui: fullscreen` gives `alt=1 mouse=1`.
+# mouse_any_flag (the WheelUpPane binding in files/tmux/tmux.conf) -- are false, and the wheel
+# scrolls TMUX instead of the agent. Measured in the container against a logged-in session:
+# classic gives `alt=0 mouse=0`, `tui: fullscreen` gives `alt=1 mouse=1`.
 #
 # READ AS A KEY rather than grepped, for exactly the reason the two forbidden keys above are:
 # this file's own $comment prose names the value, so a text search would pass on the comment
@@ -5272,8 +5283,24 @@ sec = re.search(sys.argv[2], open(sys.argv[1]).read(), flags=re.S | re.M)
 print(sec.group(1) if sec else "NO-CREDENTIALS-SECTION")
 ' "$NOTES" "$CRED_SECTION_RE" 2>&1)" || cred_section="the check itself failed: $cred_section"
 
+# EACH RULE AS A WHOLE ENTRY, BOTH TOOLS (#560). This was a substring search for the store over
+# every rule joined together, so either rule alone satisfied it -- measured: with the Read rule
+# deleted, the one that keeps the token out of Claude's context, this stayed green -- and so would
+# a rule for a path that merely contains the store's name (.config/gh in .config/ghostty/**).
+# A store is a file or a directory, and the file is the one spelled with an extension: the
+# directories are denied wholesale, for the reasons above.
 for store in $CRED_STORES; do
-    assert_contains "claude:denies-$store" "$store" "$deny_rules"
+    case "$store" in
+        *.json) want="//home/student/$store" ;;
+        *)      want="//home/student/$store/**" ;;
+    esac
+    for tool in Read Edit; do
+        case "$deny_rules" in
+            "the check itself failed"*) got="$deny_rules" ;;
+            *) got="$(printf '%s\n' "$deny_rules" | grep -xF -- "$tool($want)" || echo "MISSING from the deny list")" ;;
+        esac
+        assert_eq "claude:denies-$tool-of-$store" "$tool($want)" "$got"
+    done
     case "$cred_section" in
         NO-CREDENTIALS-SECTION)
             fail "notes:names-$store" "$NOTES has no Credentials heading to name it under" ;;

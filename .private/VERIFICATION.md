@@ -614,21 +614,36 @@ cp /tmp/vt-ca.bak "$ARGS"; "$DIR/cs193v" --rebuild
 
 ```sh
 rec claude-version E 'claude --version'
-# settings must load with no warning about ignored rules
+# settings must load with NOTHING on stderr. Not a grep for words: a Write(...) or Glob(...) rule's
+# warning reads "... is not matched by file permission checks", which the old word list
+# (ignor|invalid|unknown key|warn) never matched (#583). Measured on 2.1.225 and 2.1.303.
 E 'claude -p "reply with exactly: ok" 2>/tmp/cc.err >/dev/null'; E 'cat /tmp/cc.err'
-ckfail no-settings-warning E 'grep -iE "ignor|invalid|unknown key|warn" /tmp/cc.err'
+ckx no-settings-warning E 'test ! -s /tmp/cc.err'
 
-# deny rules must actually deny — and must be narrowly scoped
-E 'claude -p "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."'
+# deny rules must actually deny — and must be narrowly scoped. Every probe names its mode,
+# because claude -p's default changed in 2.1.302 and these expectations depend on it.
+E 'claude -p --permission-mode default "Use the Read tool on /home/student/.claude/.credentials.json and print what you get."'
    # expect a permission refusal, NOT the file contents
-E 'claude -p "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."'
+E 'claude -p --permission-mode default "Use the Read tool on /home/student/.claude/settings.json and list its top-level keys."'
    # expect SUCCESS — the deny covers the credential file, not the whole directory
-E 'claude -p "Use the Read tool on /home/student/.config/gh/hosts.yml."'
+E 'claude -p --permission-mode default "Use the Read tool on /home/student/.config/gh/hosts.yml."'
    # expect refusal — whole subtree denied
 
+# Bash reads of a denied store (#549), on sentinels rather than real tokens: ~/.codex/** is
+# denied wholesale, so a file made there is under the same rule as auth.json.
+E 'echo SENTINEL-DENIED > ~/.codex/cs193v-probe; echo SENTINEL-CONTROL > ~/projects/cs193v-probe'
+E 'printf "print(open(\"/home/student/.codex/cs193v-probe\").read())\n" > ~/projects/cs193v-read.py'
+E 'cd ~/projects && claude -p --permission-mode default --allowedTools "Bash(cat *)" "Run exactly: cat /home/student/.codex/cs193v-probe"'
+   # expect "Permission to use Bash with command cat ... has been denied." — the rule's wording
+E 'cd ~/projects && claude -p --permission-mode default --allowedTools "Bash(cat *)" "Run exactly: cat ./cs193v-probe"'
+   # expect SENTINEL-CONTROL: the control, so the refusal above is the rule's, not -p's
+E 'cd ~/projects && claude -p --permission-mode default --allowedTools "Bash(python3 *)" "Run exactly: python3 cs193v-read.py"'
+   # expect SENTINEL-DENIED: the rules see a recognised reader's arguments, not what a program opens
+E 'rm ~/.codex/cs193v-probe ~/projects/cs193v-probe ~/projects/cs193v-read.py'
+
 # the managed CLAUDE.md must be in effect
-E 'claude -p "Which port ranges may a dev server use in this container? List them and nothing else."'
-   # expect the six ranges
+E 'claude -p --permission-mode default "May a dev server use any port in this container, or only certain ones? Answer in one sentence."'
+   # expect: any port works, and the bind address is what matters (tests/MANUAL.md §A.11)
 
 # policy survives a rebuild (image layer, not the ~/.claude volume)
 "$DIR/cs193v" --rebuild >/dev/null
@@ -1337,10 +1352,12 @@ Mostly automated in §A.11. What still needs a person:
 `-p`, deliberately, but the ssh tunnel forwards any port a program binds inside the container to
 the same port on host loopback, so an OAuth callback on a random ephemeral port **is** reachable —
 the claim that used to sit here, that a redirect-only flow must fail, stopped being true when the
-tunnel landed (#82), and it is no longer limited to a declared set either. Known and measured, so do not re-diagnose it from a 298 MB binary: Claude Code consults
-`$BROWSER` and really does run the stub, but captures its stdout, so the box is discarded and what
-you see is Claude's own full-length URL. `podman exec <container> pgrep -af '[s]hortlink'` confirms
-the stub ran. `tests/MANUAL.md` §8.1 is the fuller account.
+tunnel landed (#82), and it is no longer limited to a declared set either. Known and measured on
+2.1.225 and 2.1.303, so do not re-diagnose it from the binary: Claude Code consults `$BROWSER` and
+really does run the stub, but captures its stdout, which is why the link is shown in a tmux popup
+rather than printed (#85). *Expect* the popup immediately, its link a beat later.
+`podman exec <container> pgrep -af '[s]hortlink'` confirms the stub ran. `tests/MANUAL.md` §8.1 is
+the fuller account.
 
 **8.2 — `gh`, `vercel` and `codex` login.** `gh auth login`, then `vercel login`, then
 `codex login`. Codex's callback on `localhost:1455` needs nothing arranged for it, so try its
@@ -1350,9 +1367,16 @@ the measurement #82 asks for, and the same question is open for the other two.
 **yes** to "Authenticate Git with your GitHub credentials?" and then confirm `git push` works from
 a test repo.
 
-**8.7 — A permission prompt in the wild.** Ask the agent to do something that triggers a prompt.
-*Expect:* the prompt is comprehensible to a first-year student. Record the wording; this is the moment
-the course's core skill is taught.
+**8.7 — Who approves what the agent does (#526).** Claude Code is left at its own starting mode,
+auto from 2.1.283. `tests/MANUAL.md` §8.7 has the full steps.
+- **(a)** Record `claude --version` and the account type. *Expect:* a new session shows
+  `⏵⏵ auto mode on` and no invalid-settings dialog. An organization that turns auto mode off, or has
+  the HIPAA configuration, starts in `⏸ manual mode on`; record which. This is the only check that
+  notices the default moving.
+- **(b)** *Expect:* a classifier block (`git reset --hard` over an uncommitted change in a scratch
+  repo) and the first-read-outside-the-folder prompt, both comprehensible to a first-year student.
+  Record the wording; this is where the course's core skill is taught now.
+- **(c)** Shift+Tab. *Expect:* `⏸ manual mode on`, then a real prompt for `touch x`.
 
 ---
 
@@ -1393,7 +1417,7 @@ DATE:
 §5  disputed            5.1 __  5.2 __  5.3 __  5.4 __  5.5 __  5.6 __
 §6  sleep/drift         6.1 __  6.2 __  6.3 __
 §7  ergonomics          7.2 __  7.3 __  7.6 __  7.8 __
-§8  Claude Code         8.1 __  8.2 __  8.7 __
+§8  Claude Code         8.1 __  8.2 __  8.7a __  8.7b __  8.7c __
 §9  teardown            9.1 __  9.2 __  9.3 __
 
 BLOCKERS (a student could not do the assignment):

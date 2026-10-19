@@ -320,8 +320,20 @@ worth more than being able to resume them by reopening it.
 
 ## The two agents answer to different rules
 
-Claude Code asks **you** before it does things. That is deliberate — deciding what to allow is one
-of the skills this course is about — and the container is what makes saying yes survivable.
+Claude Code starts in **auto mode**. A second model, the classifier, looks at each action that goes
+beyond reading files and editing your project, and blocks the ones that look risky (deleting work
+that was there before you started, force-pushing, sending data somewhere it has no business going)
+instead of asking you. You will still see a prompt now and then: the first time it wants to read
+something outside the folder you started it in, or after the classifier has blocked several things
+in a row. Press **Shift+Tab** to switch to manual mode, where it asks **you** before it does anything
+but read; the line under the prompt says which mode you are in. To start in manual mode every time,
+put `"permissions": {"defaultMode": "default"}` in `~/.claude/settings.json`, which survives a
+`--rebuild`. Some organizations and some models don't offer auto mode, and Claude Code then starts
+in manual mode instead.
+
+Deciding what to allow is still one of the skills this course is about, and manual mode is where you
+practise it. The classifier is a judgement, not a guarantee, and the container is what makes saying
+yes survivable.
 
 Codex is set up differently, and you should know which is which. It runs with a workspace boundary:
 it may read widely, write inside the project you are working in, and anything beyond that counts as

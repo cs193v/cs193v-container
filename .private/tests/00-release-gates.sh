@@ -560,8 +560,9 @@ fi
 # `latest` in a build ARG means the student who installs on Tuesday and the student who
 # installs on Thursday are running different software. CLAUDE_CODE_VERSION is the sharpest
 # case: this is a course about using Claude Code, so a skew there is a skew in the subject
-# being taught, and the managed-settings.json schema it has to accept is only checked for
-# valid JSON at build time — never against the version that actually installs.
+# being taught, and the managed-settings.json it has to accept is checked against the version
+# the image installs only by 50-image.sh's `claude doctor` checks. A student's copy auto-updates
+# past that version, and nothing re-checks it there.
 for arg in VERCEL_VERSION CODEX_VERSION CLAUDE_CODE_VERSION PLAYWRIGHT_VERSION; do
     v="$(sed -n "s/^ARG $arg=\(.*\)/\1/p" "$PRIVATE/Containerfile" | head -1)"
     record "build:$arg" "$v"
