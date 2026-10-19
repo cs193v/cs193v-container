@@ -2044,13 +2044,20 @@ cat > "$TMP/pkgbody-portal" <<'PORTAL'
 <form action="/login"><input name="user"><input name="pass" type="password">
 <button>Connect</button></form></body></html>
 PORTAL
+# THE FIRST WORD OF A CHECKED READ, for do_sha256 and wc, which print the file's name after their
+# answer (#559). The marker goes in front of the awk that keeps only that word: a read that failed
+# printed nothing, and nothing equals every other nothing and differs from every digest.
+first_word() {                        # first_word CMD [ARGS...] -> its first word, or the marker
+    local x; x="$(run_checker "$@")"
+    died_in "$x"; printf '%s\n' "$x" | awk '{print $1}'
+}
 assert_eq "pkgsha:the-two-bodies-are-the-same-length" \
-          "$(wc -c < "$TMP/pkgbody-good")" "$(wc -c < "$TMP/pkgbody-hostile")"
+          "$(first_word wc -c "$TMP/pkgbody-good")" "$(first_word wc -c "$TMP/pkgbody-hostile")"
 assert_ne "pkgsha:the-two-bodies-hash-differently" \
-          "$(do_sha256 "$TMP/pkgbody-good"    | awk '{print $1}')" \
-          "$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')"
+          "$(first_word do_sha256 "$TMP/pkgbody-good")" \
+          "$(first_word do_sha256 "$TMP/pkgbody-hostile")"
 assert_eq "pkgsha:the-cut-body-is-a-prefix-of-the-good-one" \
-          "$(head -c 9 "$TMP/pkgbody-good")" "$(cat "$TMP/pkgbody-cut")"
+          "$(run_checker head -c 9 "$TMP/pkgbody-good")" "$(run_checker cat "$TMP/pkgbody-cut")"
 assert_eq "pkgsha:the-empty-body-really-is-empty" "0" \
           "$(wc -c < "$TMP/pkgbody-empty" | do_tr -d ' ')"
 assert_eq "pkgsha:the-portal-body-really-is-a-login-page" "1" \
@@ -2088,9 +2095,9 @@ assert_says  "pkgsha:the-intel-url-names-the-amd64-package" \
 # naming the same body, an install_podman that compared an Intel download against the arm64 pin
 # would pass every case below; with a body each, the swap refuses both.
 printf 'cs193v test pkg C\n' > "$TMP/pkgbody-intel"
-PKG_GOOD_SHA="$(do_sha256 "$TMP/pkgbody-good" | awk '{print $1}')"
-PKG_INTEL_SHA="$(do_sha256 "$TMP/pkgbody-intel" | awk '{print $1}')"
-PKG_HOSTILE_SHA="$(do_sha256 "$TMP/pkgbody-hostile" | awk '{print $1}')"
+PKG_GOOD_SHA="$(first_word do_sha256 "$TMP/pkgbody-good")"
+PKG_INTEL_SHA="$(first_word do_sha256 "$TMP/pkgbody-intel")"
+PKG_HOSTILE_SHA="$(first_word do_sha256 "$TMP/pkgbody-hostile")"
 assert_match "pkgsha:the-good-bodys-digest-is-hex"  '^[0-9a-f]{64}$' "$PKG_GOOD_SHA"
 assert_match "pkgsha:the-intel-bodys-digest-is-hex" '^[0-9a-f]{64}$' "$PKG_INTEL_SHA"
 assert_ne    "pkgsha:the-two-good-bodies-differ"    "$PKG_GOOD_SHA" "$PKG_INTEL_SHA"
@@ -2192,7 +2199,7 @@ assert_exit "pkgsha:the-fake-refuses-an-unregistered-url" "1" \
 # assertion above passes on a fake that refuses everything, including what the installer asks for.
 PATH="$SHIM:$IFARM" curl -fL --retry 5 -o "$SHIM/served" "$PKG_URL" >/dev/null 2>&1
 assert_eq "pkgsha:the-fake-serves-the-body-it-was-given" "$PKG_GOOD_SHA" \
-          "$(do_sha256 "$SHIM/served" | awk '{print $1}')"
+          "$(first_word do_sha256 "$SHIM/served")"
 
 # ── the digest matches: the install proceeds  (THE POSITIVE FOR EVERYTHING BELOW) ──
 pkgsha_setup "$TMP/pkgbody-good"
