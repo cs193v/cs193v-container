@@ -342,6 +342,35 @@ else
     pass "rt:the-poll-branch-ceiling-kills-the-command"
 fi
 
+# ─── the frames it draws turn clockwise  (#576) ────────────────────────────────
+# Every frame is a full 2x4 braille cell with one dot left out, and the gap is what the eye
+# follows. It used to go DOWN the left side and UP the right, which is counterclockwise.
+#
+# READ OFF THE BYTES, NOT COMPARED AGAINST A LIST OF GLYPHS. A list would be meter_glyph's table
+# copied out, and a copy agrees with whatever order the table has. Unicode numbers the dots
+# 1 4 / 2 5 / 3 6 / 7 8 and gives dot n bit n-1, so the case below is the cell's edge walked
+# clockwise from the top left, and each frame must leave out the dot one place further round.
+# od rather than printf "'c", which reads one BYTE of the glyph in the C locale.
+ring_of() {                           # ring_of N  -> where frame N's gap sits on the ring, or ?
+    local b1 b2 b3 rest
+    read -r b1 b2 b3 rest <<EOF
+$(meter_glyph "$1" | od -An -tu1)
+EOF
+    # U+2800-U+28FF is E2 A0..A3 xx in UTF-8; anything else is not one braille cell.
+    if [ "$b1" != 226 ] || [ -z "$b3" ] || [ -n "$rest" ] || [ "$b2" -lt 160 ] || [ "$b2" -gt 163 ]
+    then printf '?'; return; fi
+    case $(( 255 ^ (((b2 & 3) << 6) | (b3 & 63)) )) in
+        1) printf 0 ;; 8) printf 1 ;; 16) printf 2 ;; 32) printf 3 ;;
+        128) printf 4 ;; 64) printf 5 ;; 4) printf 6 ;; 2) printf 7 ;; *) printf '?' ;;
+    esac
+}
+steps=''
+for f in 0 1 2 3 4 5 6 7; do
+    a="$(ring_of "$f")"; b="$(ring_of $(( (f + 1) % 8 )))"
+    case "$a$b" in *'?'*) steps="$steps ?" ;; *) steps="$steps $(( (b - a + 8) % 8 ))" ;; esac
+done
+assert_eq "rt:the-spinner-turns-clockwise" "1 1 1 1 1 1 1 1" "${steps# }"
+
 # ─── and reading a version out of what it captured ─────────────────────────────
 # HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces and the launcher reads
 # the podman version out of it. Testing the parse next to the thing that fills it keeps the two

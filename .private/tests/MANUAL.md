@@ -297,8 +297,8 @@ on.
   on anything under ~160 columns; that is issue #67, not this.
 - **Arrowing down to "That link didn't work for me" reaches the eight by-hand steps**, and
   choosing the default reaches the paste prompt without them ever appearing.
-- One row per command, the braille spinner turning in column 5 while each runs, replaced by a
-  green `✓` — no flicker, and no row drawn twice or left half-erased.
+- One row per command, the braille spinner turning clockwise in column 5 while each runs,
+  replaced by a green `✓` — no flicker, and no row drawn twice or left half-erased.
 - A failing row's `✗` in red, in the same column, with the rows above it untouched.
 - **The cursor blinking at `Your token:` before you type anything.** Issue #53: it was hidden for
   the whole run, and a prompt with no cursor in it reads as a program that has stopped. Same at
