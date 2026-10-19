@@ -3668,13 +3668,14 @@ assert_contains "launcher:installs-the-teardown-trap" "trap 'shell_teardown" "$o
 # whatever it interrupted, so without `>&7 2>&8` a ^C inside a redirected call sent the teardown's
 # own output to /dev/null.
 #
-# EXACTLY THESE FOUR, COMPARED WHOLE. A check for each line's presence would still find them all
+# EXACTLY THESE FIVE, COMPARED WHOLE, QUIT among them (#564). A check for each line's presence would still find them all
 # under a later `trap shell_teardown EXIT INT`, which silently replaces the INT arm with one that
 # returns.
-assert_eq "launcher:teardown-traps-are-exactly-the-four-arms" \
+assert_eq "launcher:teardown-traps-are-exactly-the-five-arms" \
 "trap 'shell_teardown >&7 2>&8' EXIT
 trap 'shell_teardown HUP >&7 2>&8' HUP
 trap 'shell_teardown INT >&7 2>&8' INT
+trap 'shell_teardown QUIT >&7 2>&8' QUIT
 trap 'shell_teardown TERM >&7 2>&8' TERM" \
           "$(printf '%s\n' "$os_trap_code" | grep -E '^[[:space:]]*trap .*shell_teardown' \
              | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
@@ -3725,6 +3726,7 @@ rb_code="$(fn_body verb_rebuild "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 assert_eq "rebuild:the-interrupt-arms-write-to-the-terminal-copies" \
 "trap 'rebuild_interrupted 129 >&7 2>&8' HUP
 trap 'rebuild_interrupted 130 >&7 2>&8' INT
+trap 'rebuild_interrupted 131 >&7 2>&8' QUIT
 trap 'rebuild_interrupted 143 >&7 2>&8' TERM" \
           "$(printf '%s\n' "$rb_code" | grep -E "^[[:space:]]*trap 'rebuild_interrupted" \
              | sed 's/^[[:space:]]*//' | LC_ALL=C sort)"
@@ -3997,11 +3999,13 @@ assert_match "teardown:int-re-raises-and-then-exits" \
              'INT\)[[:space:]]+trap - EXIT INT; kill -s INT \$\$; exit 130' "$guard_code"
 assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code"
 assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
-# AND NOTHING CAN KILL IT HALFWAY (#512): the first statement past the guard ignores all three,
-# before anything that starts a child. A window closing HUPs the whole foreground group, which holds
-# every podman call run_timeout started with `&`, so an ignore set any later lets the close kill the
-# in-flight `podman stop` -- and a child takes its disposition from the moment it is started.
-assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP" \
+assert_match "teardown:quit-exits-131" 'QUIT\)[[:space:]]+exit 131' "$guard_code"
+# AND NOTHING CAN KILL IT HALFWAY (#512): the first statement past the guard ignores every signal
+# with an arm, before anything that starts a child. A window closing HUPs the whole foreground
+# group, which holds every podman call run_timeout started with `&`, so an ignore set any later lets
+# the close kill the in-flight `podman stop` -- and a child takes its disposition from the moment it
+# is started.
+assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP QUIT" \
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
              | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
                     /\[ -n "\$TEARDOWN_DONE" \] && return 0/ { f = 1 }')"
