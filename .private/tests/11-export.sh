@@ -65,8 +65,12 @@ fi
 HOSTILE="$TMP/hostile-home"
 mkdir -p "$HOSTILE"
 printf '[core]\n\tautocrlf = true\n' > "$HOSTILE/.gitconfig"
+# THROUGH run_checker (#586): a file the redirect could not open held no CRs either, which is the
+# answer the second half hopes for and the first half reads as git having stopped converting.
 crlf_bytes() {                        # crlf_bytes FILE -> how many CR bytes it holds
-    do_tr -cd '\r' < "$1" | wc -c | do_tr -d ' '
+    local s
+    s="$(run_checker cat "$1")"
+    died_in "$s"; printf '%s' "$s" | do_tr -cd '\r' | wc -c | do_tr -d ' '
 }
 ( cd "$REPO" && HOME="$HOSTILE" git archive HEAD ) | ( cd "$TMP" && mkdir -p bare && tar xf - -C bare )
 assert_ne "export:autocrlf-really-would-convert" "0" "$(crlf_bytes "$TMP/bare/cs193v")"
