@@ -173,5 +173,5 @@ chmod +x "$SHIM/podman"
 tc_out="$(PATH="$SHIM:$PATH" env -u TMUX -u STY TERM_PROGRAM=Apple_Terminal \
             ./cs193v --dev-term-class 2>"$SHIM/err")"
 assert_eq "term-class:answers-without-calling-podman" "apple-terminal" "$tc_out"
-assert_eq "term-class:really-did-not-call-podman"     ""               "$(cat "$SHIM/err")"
+assert_eq "term-class:really-did-not-call-podman"     "" "$(run_checker cat "$SHIM/err")"
 rm -rf "$SHIM"
