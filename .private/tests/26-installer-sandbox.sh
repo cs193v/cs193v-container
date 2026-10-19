@@ -1349,7 +1349,7 @@ vols_before="$SB_TMP/host-vols.before.nest"; host_volumes > "$vols_before"
 # sides come back the empty string, and the assertion reported PASS on every Mac run without
 # ever having read anything. A skip says so instead (#155's rule, one assertion over).
 subuid_before=''
-[ -r /etc/subuid ] && subuid_before="$(cksum < /etc/subuid)"
+[ -r /etc/subuid ] && subuid_before="$(run_checker cksum /etc/subuid)"
 
 # ─── THE CASE THAT DID NOT EXIST: no podman, install succeeds, image builds ─────
 # nest_build takes the prereq list, so this is the whole point of one machine with everything
@@ -1397,7 +1397,7 @@ assert_says_not "nest:SYS_ADMIN-did-not-reach-the-course-container" "SYS_ADMIN" 
 
 assert_host_state nest machine "$imgs_before" "$vols_before"
 if [ -n "$subuid_before" ]; then
-    assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(cksum < /etc/subuid)"
+    assert_eq "nest:host-subuid-untouched" "$subuid_before" "$(run_checker cksum /etc/subuid)"
 else
     skip "nest:host-subuid-untouched" "no /etc/subuid on this host"
 fi
