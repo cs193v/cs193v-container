@@ -79,8 +79,10 @@ sget() {                              # sget NAME -> the .sh's value for it
     sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$CASE/.private/install-cs193v.sh" | head -1
 }
 pget() {                              # pget NAME -> the .ps1's value for it
-    sed 's/\r$//' "$CASE/.private/install-cs193v.ps1" \
-        | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1
+    local s
+    s="$(run_checker sed 's/\r$//' "$CASE/.private/install-cs193v.ps1")"
+    died_in "$s"
+    printf '%s\n' "$s" | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1
 }
 
 # ─── and the promise every refusal makes ───────────────────────────────────────
@@ -221,8 +223,10 @@ assert_ne "release:the-ps1-does-not-pin-the-working-copy" \
 # note in release.sh for why the third guard the .sh gets would pin nothing here.
 assert_eq "release:the-ps1-stays-ascii" "" \
           "$(LC_ALL=C run_grep -n '[^ -~	]' "$CASE/.private/install-cs193v.ps1")"
+# THROUGH A VARIABLE, which can lose a trailing newline but never a byte of a BOM.
+ps1_head="$(run_checker head -c 3 "$CASE/.private/install-cs193v.ps1")"
 assert_ne "release:the-ps1-has-no-bom" "efbbbf" \
-          "$(head -c 3 "$CASE/.private/install-cs193v.ps1" | od -An -tx1 | tr -d ' \n')"
+          "$(died_in "$ps1_head"; printf '%s' "$ps1_head" | od -An -tx1 | tr -d ' \n')"
 
 # ─── and every refusal, each of which exists because publishing past it is costly ──
 reset_case
