@@ -273,7 +273,7 @@ while IFS= read -r k; do
     grep -qE "(^|[^a-z0-9._-])$(printf '%s' "$k" | sed 's/\./\\./g')([^a-z0-9._-]|$)" "$SGS" \
         || printf '%s ' "$k" >> "$TMP/sg_orphans"
 done < "$TMP/sg_defined"
-assert_eq "sgkeys:no-orphans" "" "$(sed 's/ *$//' "$TMP/sg_orphans")"
+assert_eq "sgkeys:no-orphans" "" "$(run_checker sed 's/ *$//' "$TMP/sg_orphans")"
 
 # The other direction still needs the call forms: a key that is *asked for* and not defined
 # renders "(missing message: k)" into the middle of a screen.
@@ -337,7 +337,7 @@ printf '%s\n' "$sg_flows" | grep -nE '^(line|secret|menu)[[:space:]]' | while IF
     [ "$best" -ge 11 ] || printf 'line %s(%s) ' "$lineno" "$best" >> "$TMP/sg_weaksteps"
 done
 assert_eq "sgflow:no-step-is-gated-on-weak-needles-alone" "" \
-          "$(sed 's/ *$//' "$TMP/sg_weaksteps" 2>/dev/null)"
+          "$(run_checker sed 's/ *$//' "$TMP/sg_weaksteps")"
 
 # ─── the container's prose fits an 80-column terminal ──────────────────────────
 # WHY 76 AND NOT 80. render() indents every line by two columns, and a line that reaches the
@@ -1010,8 +1010,9 @@ record    "box:say-functions-drawing-a-box" "$(printf '%s' "$saybox" | do_tr '\n
 assert_ne "box:the-say-functions-were-found" "" "$saybox"
 assert_eq "box:every-say-box-names-a-literal-key" "" "$(printf '%s\n' "$saybox" | grep '=$')"
 assert_eq "box:no-say-box-names-a-key-in-a-variable" "" \
-          "$(sed -n 's/^SAYBOX-VARKEY://p' "$TMP/width")"
-assert_eq "box:every-installer-box-is-measured" "" "$(sed -n 's/^UNLINTED://p' "$TMP/width")"
+          "$(run_checker sed -n 's/^SAYBOX-VARKEY://p' "$TMP/width")"
+assert_eq "box:every-installer-box-is-measured" "" \
+          "$(run_checker sed -n 's/^UNLINTED://p' "$TMP/width")"
 
 # ─── setup-git's boxed messages ────────────────────────────────────────────────
 # NO EMPHASIS MARKUP IN ANYTHING THAT GOES IN A BOX. setup-git renders *asterisks* as colour AFTER
@@ -1031,7 +1032,7 @@ assert_eq "box:every-installer-box-is-measured" "" "$(sed -n 's/^UNLINTED://p' "
 for k in $( { grep -oE '(celebrate|box) [^|]*msg [a-z0-9._-]+' "$SGS"
               grep -oE 'msg [a-z0-9._-]+[^|]*\|[[:space:]]*(celebrate|box)' "$SGS"; } \
             | grep -oE 'msg [a-z0-9._-]+' | awk '{print $2}' | LC_ALL=C sort -u); do
-    body="$(sed -n "/^\[\[$k\]\]$/,/^\[\[/p" "$SGM" | grep -v '^\[\[')"
+    body="$(run_checker sed -n "/^\[\[$k\]\]$/,/^\[\[/p" "$SGM" | grep -v '^\[\[')"
     assert_ne "sgkeys:$k-was-found" "" "$body"
     assert_not_contains "sgkeys:$k-has-no-markup" "*" "$body"
     # And it has to FIT, for the same reason every boxed message in messages.txt does: box() wraps
@@ -1040,8 +1041,9 @@ for k in $( { grep -oE '(celebrate|box) [^|]*msg [a-z0-9._-]+' "$SGS"
     # by python3, because mawk would score a — at 3× and pass vacuously.
     # run_checker for the reason the catalogue lint above carries it: `assert_eq NAME ""` is
     # satisfied by a checker that printed nothing at all. These four were the rest of #79's
-    # residue.
-    wide="$(printf '%s\n' "$body" | run_checker python3 -c '
+    # residue. died_in first (#559): python keeps only the long lines, so it would drop the marker
+    # a failed read of $body carries.
+    wide="$(died_in "$body"; printf '%s\n' "$body" | run_checker python3 -c '
 import sys
 lim = int(sys.argv[1]) - 4
 for line in sys.stdin.read().splitlines():
@@ -1104,7 +1106,7 @@ for boxsrc in "ui:$PRIVATE/files/cs193v-ui.sh" \
     # Comments are exempt. The geometry needs explaining somewhere, and explaining it means
     # naming the characters -- "┏━━ is four columns" is documentation, not a second box. The
     # first version of this check had no such exemption and failed on its own comment.
-    hand="$(grep -n '[┏┗┃]' "$f" | grep -v printf | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    hand="$(run_grep -n '[┏┗┃]' "$f" | grep -v printf | grep -vE '^[0-9]+:[[:space:]]*#')"
     assert_eq "box:$who-draws-the-box-in-one-place" "" "$hand"
 done
 
