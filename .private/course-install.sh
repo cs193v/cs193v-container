@@ -1096,8 +1096,9 @@ setup_subuid() {
     ok "$(msg ok.subuid "USER=$TARGET_USER")"
 }
 
-# `podman machine init --now` fetches an image of a few hundred MB and then does local work on
-# it, which is the split the two captions name.
+# `podman machine init` fetches an image of a few hundred MB and then does local work on it,
+# which is the split the first two captions name. The third, the start, is setup_machine's own:
+# the init no longer starts the VM (#543), so nothing in the init's output marks it.
 #
 # TWO ANCHORS FOR THE SECOND PHASE, neither load-bearing alone: `Extracting compressed file` is
 # where the download ends, and `Machine init complete` still fires if podman ever rewords the
@@ -1120,11 +1121,28 @@ setup_machine() {
         step "$(msg step.machine-create "WANT=$want" "DISK=$MAC_VM_DISK_GB")"
         # THE INIT ARM ONLY, and the resize arm below deliberately keeps its raw output: it
         # interleaves a notes() block from grow_machine_disk, and the animator would overdraw it.
-        setup_meter_start 2 "$(msg meter.vm-downloading)"
+        setup_meter_start 3 "$(msg meter.vm-downloading)"
         if ! setup_run machine_phases podman machine init --memory "$want" \
-                                             --disk-size "$MAC_VM_DISK_GB" --now; then
+                                             --disk-size "$MAC_VM_DISK_GB"; then
             setup_meter_stop bad
             die "$(msg err.machine-create "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
+        fi
+        # NOT `init --now`, AND NOT THROUGH setup_run (#543). `--now` starts the VM inside the
+        # init, and podman puts krunkit and gvproxy in whatever process group ran it -- this
+        # one, which holds the terminal through the first --rebuild, so a Ctrl-C or a closed
+        # window there used to power-cut the VM it had just made. machine_start_detached gives
+        # the start a group of its own (cs193v-ui.sh). It is handed the LOG FILE rather than
+        # setup_run's pipe, as run_timeout hands it a file: that is the helper's contract, and a
+        # file is the one stdout nothing left running afterwards can hold a reader hostage on. The
+        # box tails the same file, so podman still shows there. Under CS193V_SETUP_RAW_LOG the
+        # start's lines go to the log only.
+        #
+        # THE PHASE COUNTER IS THIS SHELL'S, and still reads 1: machine_phases moved it inside
+        # setup_run's pipeline, in a subshell, which is why setup_phase can only move forward.
+        setup_phase 3 "$(msg meter.vm-starting)"
+        if ! machine_start_detached >>"$SETUP_LOG" 2>&1; then
+            setup_meter_stop bad
+            die "$(msg err.machine-start "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
         fi
         setup_meter_stop ok
         ok "$(msg ok.machine-created)"
@@ -1133,10 +1151,15 @@ setup_machine() {
         podman machine stop >/dev/null 2>&1
         podman machine set --memory "$want" || die "$(msg err.machine-resize)"
         grow_machine_disk
-        podman machine start || die "$(msg err.machine-restart)"
+        # Detached for the init arm's reason, and into the log for the same reason too -- which
+        # also keeps podman's start chatter off the screen, its `--rootful` advice included. The
+        # log starts empty, as every block's does, so the tail a failure quotes is this start's.
+        : > "$SETUP_LOG"
+        machine_start_detached >>"$SETUP_LOG" 2>&1 \
+            || die "$(msg err.machine-restart "OUT=$(setup_tail)" "LOG=$SETUP_LOG")"
         ok "$(msg ok.machine-resized)"
     else
-        podman machine start >/dev/null 2>&1 || true
+        machine_start_detached >/dev/null 2>&1 || true
         skip "$(msg skip.machine)"
         grow_machine_disk_when_stopped
     fi
@@ -1171,7 +1194,7 @@ grow_machine_disk_when_stopped() {
     [ "$have" -ge "$MAC_VM_DISK_GB" ] && return 0
     podman machine stop >/dev/null 2>&1
     grow_machine_disk
-    podman machine start >/dev/null 2>&1 || true
+    machine_start_detached >/dev/null 2>&1 || true
 }
 
 # The course files are already downloaded -- the bootstrap fetched them before this script

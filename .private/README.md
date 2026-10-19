@@ -1678,9 +1678,13 @@ types Ctrl-C at the launcher in a pty, and runs the same shapes against a copy w
 start, which must die there — the positive controls. A real Terminal.app window and a real VM are checked
 by hand, once (`tests/MANUAL.md`).
 
-**What stays open.** The installer still starts the VM in its own foreground group for the whole first
-`--rebuild` (#543); its two sites are allowlisted by `10-static.sh`'s `machine:no-bare-podman-machine-start`
-until they move to the helper.
+**The installer starts it the same way (#543).** Its first install used `podman machine init --now`,
+which starts the VM inside the init, in the installer's own group, and the installer then holds the
+terminal through the whole first `--rebuild`. It now inits, then calls the helper under a third caption,
+"Starting the virtual machine...", and every other start in `course-install.sh` goes through the helper
+too. `10-static.sh`'s `machine:no-bare-podman-machine-start` allows only the helper itself, and a
+`--now` in `setup_machine` is red. `25-installer.sh`'s `vmsurvives:*` types Ctrl-C and closes the
+window during the first build, with naive-start positive controls whose VM dies.
 
 ### doctor reports; it does not restart the VM (issue #494)
 

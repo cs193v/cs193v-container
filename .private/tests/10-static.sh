@@ -1223,6 +1223,14 @@ assert_contains "installer-door:pipe-puts-the-shim-first" 'sh_quote "HOME=$SHIM/
 # would go green against a seekable script, which is the one thing they are not about.
 assert_contains "installer-door:pipe-feeds-the-script-on-stdin" 'cat $(sh_quote "$script") |' "$pipedoor"
 
+# And the fourth, the installer as a job on a pty, typed at when a case decides (#543). Same two
+# properties, the same way; PATH quoted as installer_tty's is, because it is the same `sh -c` string.
+jobdoor="$(sed -n '/^installer_job()/,/^}$/p' "$PRIVATE/tests/lib/podman-shim.sh")"
+if [ "$(printf '%s' "$jobdoor" | grep -c '.')" -ge 4 ]; then pass "installer-door:job-extractable"
+else fail "installer-door:job-extractable" "could not find installer_job"; fi
+assert_contains "installer-door:job-redirects-HOME"      'HOME=' "$jobdoor"
+assert_contains "installer-door:job-puts-the-shim-first" "PATH='\$SHIM" "$jobdoor"
+
 # ─── nothing may infer a pty child's pid from the process tree again (#151) ────
 # THE PREMISE THAT MADE THIS NECESSARY. lib/ptyrun.py used to claim that `sh -c 'simple command'`
 # exec-optimises, so `pgrep -P` on the pty owner names the command. It is not a property any
@@ -5515,11 +5523,11 @@ assert_eq "notes:every-credential-path-named-is-denied" "" "$(printf '%s' "$unco
 # starts the VM through machine_start_detached in cs193v-ui.sh, and 31-machine-start.sh holds
 # what that helper does. These two checks hold that nothing goes AROUND it.
 #
-# EVERY OTHER SITE IS NAMED, BY FUNCTION. The installer's two (setup_machine,
-# grow_machine_disk_when_stopped) predate the helper and stay allowlisted until they move over
-# (#543). Doctor's clock fix was the third, and it went the other way: doctor no longer restarts the
-# VM at all (#494). A new bare start anywhere goes red. Comment lines are skipped, so prose that
-# NAMES the command is not a call site.
+# THE HELPER IS THE ONLY SITE. The installer's (setup_machine, grow_machine_disk_when_stopped)
+# moved over in #543 -- its first `--rebuild` is minutes of terminal in which a Ctrl-C used to take
+# the VM with it -- and doctor's clock fix went the other way: it no longer restarts the VM at all
+# (#494). A new bare start anywhere goes red. Comment lines are skipped, so prose that NAMES the
+# command is not a call site.
 ms_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cs193v-ms.XXXXXX")"
 for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.sh"; do
     awk -v F="${f#"$REPO"/}" '
@@ -5528,9 +5536,7 @@ for f in "$REPO/cs193v" "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/course-install.s
         /podman machine start/ { print F ":" fn }
     ' "$f"
 done > "$ms_tmp/sites"
-ms_allowed=' .private/course-install.sh:setup_machine
-              .private/course-install.sh:grow_machine_disk_when_stopped
-              .private/files/cs193v-ui.sh:machine_start_detached '
+ms_allowed=' .private/files/cs193v-ui.sh:machine_start_detached '
 ms_bare=''
 while IFS= read -r ms_site; do
     case "$(printf '%s' "$ms_allowed" | do_tr '\n' ' ')" in
@@ -5559,6 +5565,16 @@ if carve_func "$PRIVATE/files/cs193v-ui.sh" machine_start_detached "$ms_tmp/help
 else
     fail "machine:helper-gives-the-start-its-own-process-group" \
          "machine_start_detached not found as a brace-bodied function in cs193v-ui.sh"
+fi
+# AND NO START HIDDEN INSIDE AN INIT. `podman machine init --now` starts the VM too, in the same
+# group as whoever ran the init, and the scan above cannot see it -- the words are not there. The
+# installer's first install used to start the VM exactly that way (#543); it now inits, then calls
+# the helper. Carved from setup_machine, comments stripped, because the init's flags span lines.
+if carve_func "$PRIVATE/course-install.sh" setup_machine "$ms_tmp/setup_machine.sh"; then
+    assert_not_contains "machine:the-installer-does-not-init-with-now" '--now' \
+                        "$(grep -v '^[[:space:]]*#' "$ms_tmp/setup_machine.sh")"
+else
+    fail "machine:the-installer-does-not-init-with-now" "setup_machine not found in course-install.sh"
 fi
 rm -rf "$ms_tmp"
 

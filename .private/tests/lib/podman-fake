@@ -89,6 +89,8 @@
 #                    with podman's own words for that state, `machine start` takes podman's start
 #                    lock, refuses "already running", goes stopped -> starting -> running and
 #                    leaves a lib/vm-fake.pl behind under Go's signal rule, and `machine stop` kills it.
+#                    `machine init` leaves it `stopped`, and `init --now` then starts it in-process,
+#                    in the init's own group, as podman does (#543).
 #     machine_unreachable   present = running, yet nothing answers (gvproxy died, podman#29411)
 #     info_ok_after         running, but the first N `info` calls fail as a booting VM's do  [0]
 #     machine_start_delay   seconds the start takes, state `starting` throughout            [0]
@@ -653,6 +655,14 @@ while os.path.exists(d + "/stop_hold"):
                 #
                 # machine_delay dribbles it out the way build_delay does, so that a phase is
                 # ever actually IN PROGRESS for a frame to catch.
+                #
+                # --now IS A START, and is modelled as one (#543). Without it podman says how to
+                # start the machine and leaves it stopped. With it, in the #495 mode, the start runs
+                # right here, inside the init -- so the VM lands in whatever group ran the init,
+                # which is the hazard the installer's first install had. </dev/null because
+                # `init --now` asks no question; the start's tty prompt is a `machine start` thing.
+                NOW=''
+                for a in "$@"; do [ "$a" = --now ] && NOW=1; done
                 if [ "$RC" -eq 0 ]; then
                     D="$(get machine_delay 0)"
                     for ML in \
@@ -661,13 +671,25 @@ while os.path.exists(d + "/stop_hold"):
                         'Copying blob sha256:2a1f0a0c9e5b1f0d 1.1GiB / 1.1GiB' \
                         'Downloading VM image: podman-machine.aarch64.applehv.raw.zst: done' \
                         'Extracting compressed file: podman-machine-default-arm64.raw: done' \
-                        'Machine init complete' \
-                        'Starting machine "podman-machine-default"' \
-                        'API forwarding listening on: /var/run/docker.sock' \
-                        'Machine "podman-machine-default" started successfully'; do
+                        'Machine init complete'; do
                         printf '%s\n' "$ML"
                         [ "$D" = 0 ] || sleep "$D"
                     done
+                    if [ -f "$SHIM/machine_state" ]; then
+                        set_mstate stopped
+                        [ -n "$NOW" ] && { machine_start </dev/null; exit $?; }
+                    fi
+                    if [ -n "$NOW" ]; then
+                        for ML in \
+                            'Starting machine "podman-machine-default"' \
+                            'API forwarding listening on: /var/run/docker.sock' \
+                            'Machine "podman-machine-default" started successfully'; do
+                            printf '%s\n' "$ML"
+                            [ "$D" = 0 ] || sleep "$D"
+                        done
+                    else
+                        printf 'To start your machine run:\n\n\tpodman machine start\n\n'
+                    fi
                 else
                     echo "Error: machine init failed" >&2
                 fi
