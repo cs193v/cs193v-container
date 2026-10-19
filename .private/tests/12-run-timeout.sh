@@ -393,10 +393,30 @@ assert_eq           "rt:later-a-quick-command-keeps-its-status"  "4" "$RC"
 assert_not_contains "rt:later-a-quick-command-never-sees-it"     "second label" "$lt"
 assert_exit         "rt:later-the-ceiling-still-returns-124" 124 \
                     bash -c ". '$PRIVATE/files/cs193v-ui.sh'; RT_SPIN=a RT_SPIN_AT=1 RT_SPIN_LATER=b; run_timeout 2 sleep 5 >/dev/null"
-# WITHOUT A FIRST LABEL THERE IS NOTHING TO CHANGE: a probe with no RT_SPIN takes the fifo branch
-# and draws nothing, and a stray RT_SPIN_LATER must not start drawing on its behalf.
-lt="$( RT_SPIN=''; RT_SPIN_AT=0; RT_SPIN_LATER='second label'; run_timeout 5 sleep 1 )"
+# WITHOUT A FIRST LABEL THERE IS NOTHING TO CHANGE, and a stray RT_SPIN_LATER must not start drawing
+# on a probe's behalf. ON THE POLL BRANCH, which is the only one with the later-label code in it: a
+# probe with no RT_SPIN normally takes the fifo branch and could not draw if it tried, so this case
+# used to pass with the guard deleted (#495 review). mkfifo declining is the poll branch's other way
+# in -- the WSL /mnt/c TMPDIR -- and a function shadowing it is that, without the filesystem.
+nofifo="$(mktemp "${TMPDIR:-/tmp}/rt-nofifo.XXXXXX")"
+lt="$( mkfifo() { echo declined > "$nofifo"; return 1; }
+       RT_SPIN=''; RT_SPIN_AT=0; RT_SPIN_LATER='second label'; run_timeout 5 sleep 1 )"
+assert_eq "rt:later-the-no-label-case-reached-the-poll-branch" "declined" "$(cat "$nofifo")"
 assert_eq "rt:later-without-a-first-label-prints-nothing" "" "$lt"
+rm -f "$nofifo"
+
+# THE CEILING IS TIME, NOT TICKS (#495 review). The poll loop counted ten ticks a second, and a tick
+# is a `sleep 0.1` plus the fork that runs it and, every other tick, a frame -- so on a loaded machine
+# the ceiling ran long. Measured: a labelled `run_timeout 10` took 11 s, which made the launcher's
+# 60 s VM deadline 66. Modelled by making every tick three times as long: counted in ticks, this
+# 3 s ceiling would take nine.
+rt0=$SECONDS
+( sleep() { command sleep 0.3; }; RT_SPIN='working'; run_timeout 3 sh -c 'exec sleep 30' ) >/dev/null 2>&1
+RC=$?
+took=$(( SECONDS - rt0 ))
+assert_eq "rt:slow-ticks-still-reach-the-ceiling" "124" "$RC"
+if [ "$took" -le 6 ]; then pass "rt:slow-ticks-do-not-stretch-the-ceiling"
+else fail "rt:slow-ticks-do-not-stretch-the-ceiling" "a 3 s ceiling took ${took}s"; fi
 
 # ON A TERMINAL the row is redrawn in place, and a shorter second label must not leave the tail of
 # the longer first one behind -- the row a student reads afterwards is the label in effect at the
@@ -410,6 +430,29 @@ case "$lrow" in
 esac
 assert_not_contains "rt:later-leaves-the-first-label-behind-it-on-a-terminal" \
                     "a much longer first label" "$(printf '%s\n' "$lt" | grep -v '^$' | tail -2)"
+
+# A LABEL WIDER THAN THE TERMINAL IS CUT, NOT WRAPPED (#495 review). A frame goes back to the start
+# of its row with a bare \r, and a label that wrapped has left that row: every frame then prints the
+# whole label again from the row it wrapped onto, five times a second. status.machine-slow is 77
+# columns with its indent and glyph, so a 60-column split pane scrolled a column of them for the
+# 40 s it is up. Read off the RAW frames, because render_pty does not model wrapping: every piece of
+# output that carries a spinner glyph must fit in one column less than the pty.
+LONGLBL='a label that is a good deal longer than forty columns of terminal'
+lt="$(CS193V_PTY_COLS=40 do_script 20 "bash -c '. \"$PRIVATE/files/cs193v-ui.sh\"; RT_SPIN=short; RT_SPIN_AT=0; RT_SPIN_LATER=\"$LONGLBL\"; run_timeout 5 sleep 1; echo done'" 2>&1)"
+widest="$(printf '%s' "$lt" | "$DO_PY" -c '
+import re, sys
+raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+frames = [re.sub(r"\x1b\[[?0-9;]*[A-Za-z]", "", f) for f in re.split(r"[\r\n]", raw)]
+frames = [f for f in frames if re.search("[⠀-⣿]", f)]
+print(max(map(len, frames)) if frames else "none")')"
+case "$widest" in
+    none)        fail "rt:a-wide-label-fits-the-terminal" "no spinner frame was drawn: $lt" ;;
+    *[!0-9]*|'') fail "rt:a-wide-label-fits-the-terminal" "could not measure the frames: $widest" ;;
+    *) if [ "$widest" -le 39 ]; then pass "rt:a-wide-label-fits-the-terminal"
+       else fail "rt:a-wide-label-fits-the-terminal" "a frame $widest columns wide on a 40-column pty"; fi ;;
+esac
+# ...AND THE WHOLE OF IT IS LEFT ON SCREEN AT THE END, where it is printed once and may wrap.
+assert_contains "rt:a-wide-label-is-printed-whole-when-the-wait-ends" "$LONGLBL" "$lt"
 
 # ─── and reading a version out of what it captured ─────────────────────────────
 # HERE, BESIDE run_timeout, because RT_OUT is what run_timeout produces and the launcher reads

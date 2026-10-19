@@ -1692,13 +1692,8 @@ assert_says "machinebox:failure-names-the-log" "cs193v-setup.log" "$macfail"
 # Ctrl-C or a closed window there used to power-cut the VM it had just made (#495's measurements).
 # Every start now goes through machine_start_detached, and these cases run the installer against
 # the fake's #495 mode, where `machine start` leaves a lib/vm-fake.pl behind under Go's signal rule
-# and its snapshot says what the VM inherited. The shapes are 31-machine-start.sh's, copied rather
-# than sourced, because that suite's helpers assume its own launcher copy.
-vm_pid()   { cat "$SHIM/vm.pid" 2>/dev/null | do_tr -d ' \n'; }
-vm_snap()  { cat "$SHIM/vm.snapshot" 2>/dev/null; }
-vm_alive() { local p; p="$(vm_pid)"; [ -n "$p" ] && ! pid_is_gone "$p"; }
-pgid_of()  { ps -o pgid= -p "$1" 2>/dev/null | do_tr -d ' '; }
-sid_of()   { "$DO_PY" -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$1" 2>/dev/null; }
+# and its snapshot says what the VM inherited. The questions are 31-machine-start.sh's, and both
+# suites ask them through lib/podman-shim.sh's vm_pid, vm_snap, vm_alive, pgid_of and sid_of.
 
 # A Mac whose VM the fake models, in THIS shell so that $SHIM still names it afterwards -- mac_run
 # makes its shim inside $( ), which is right for a transcript and useless for a pid file.
@@ -1721,6 +1716,7 @@ vm_detached() {                       # vm_detached NAME TRANSCRIPT
     pass "$name:a-vm-came-up"
     snap="$(vm_snap)"; vp="$(vm_pid)"
     assert_contains "$name:the-vm-ignores-sighup" "HUP=IGNORE" "$snap"
+    assert_contains "$name:the-vm-is-started-from-the-root-directory" " cwd=/ " "$snap"
     low="$(printf '%s\n' "$snap" | sed -n 's/.*fds=//p' | do_tr ',' '\n' \
            | awk '$1 >= 3 && $1 <= 9' | do_tr '\n' ' ')"
     assert_eq "$name:the-vm-inherited-no-fd-3-to-9" "" "$low"
@@ -1795,24 +1791,19 @@ course_job() {                        # course_job TARBALL -> the installer, as 
     installer_job "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$1" CS193V_DIR="$SHIM/dest"
     PTY_PIDS="$PTY_PIDS $PTY_PID"
 }
-pty_type()  { printf '%b' "$1" >&7; }
-pty_close() { kill -USR1 "$PTY_PID" 2>/dev/null; }   # ptyrun's polite close: SIGHUP to the fg group
-pty_end()   { exec 7>&-; kill "$PTY_PID" 2>/dev/null; wait "$PTY_PID" 2>/dev/null; rm -f "$PTY_IN"; }
-pty_said()  { [ -n "$1" ] && grep -qF -- "$1" "$PTY_OUT" 2>/dev/null; }
+# pty_type, pty_close, pty_end and pty_said are lib/podman-shim.sh's.
 # The installer and everything it ran live under the shim: its boot tree in $SHIM/tmp, the course
 # tree and its launcher in $SHIM/dest. The fake VM is $SHIM/vm-fake.pl, so it is not counted.
 installer_gone() { ! pgrep -f "$SHIM/(tmp|dest)/" >/dev/null 2>&1; }
 
 # THE NAIVE INSTALLER, for the positive controls: the same tree with its helper replaced by the
-# plain start everything above exists to replace (31-machine-start.sh's I10 patch). A case its VM
-# survives is a case that measures nothing.
+# plain start everything above exists to replace -- lib/podman-shim.sh's shim_naive_helper, which
+# builds 31-machine-start.sh's I10 controls too. A case its VM survives is a case that measures
+# nothing.
 export_tree "$TMP/pkg-naive/cs193v-main"
-nui="$TMP/pkg-naive/cs193v-main/.private/files/cs193v-ui.sh"
-perl -0pi -e 's/^machine_start_detached\(\) \{\n.*?\n\}\n/machine_start_detached() {\n    podman machine start <\/dev\/null\n}\n/ms' "$nui"
-case "$(sed -n '/^machine_start_detached() {$/,/^}$/p' "$nui")" in
-    *'set -m'*|'') fail "vmsurvives:the-naive-control-was-built" "the naive copy's helper still detaches, or is gone" ;;
-    *)             pass "vmsurvives:the-naive-control-was-built" ;;
-esac
+naive_why="$(shim_naive_helper "$TMP/pkg-naive/cs193v-main/.private/files/cs193v-ui.sh")"
+if [ -z "$naive_why" ]; then pass "vmsurvives:the-naive-control-was-built"
+else fail "vmsurvives:the-naive-control-was-built" "$naive_why"; fi
 ( cd "$TMP/pkg-naive" && tar czf "$TMP/course-naive.tar.gz" cs193v-main )
 
 BUILDING="$(msg_text step.build "$ICAT")"

@@ -979,9 +979,17 @@ machine_refuse_start() {              # machine_refuse_start OUTPUT -> dies
 machine_refuse_other() {              # machine_refuse_other OUTPUT -> dies
     local name
     name="$(printf '%s\n' "$1" | sed -n 's/.*: \([^ ]*\) already starting or running.*/\1/p' | head -1)"
-    die "$(refusal "$(msg err.machine-other-active NAME="${name:-?}")" \
+    if [ -n "$name" ]; then
+        die "$(refusal "$(msg err.machine-other-active NAME="$name")" \
+                       "$(podman_said_text "$(machine_error_lines "$1")")" \
+                       "$(msg err.machine-other-active.fix NAME="$name")")"
+    fi
+    # A WORDING NEITHER PATTERN READS -- another release, another provider. The fix used to be
+    # `podman machine stop ?`, at the one refusal whose point is a command to paste (#495 review);
+    # now it is the command that lists the machines, so the student can read the name off it.
+    die "$(refusal "$(msg err.machine-other-active-unnamed)" \
                    "$(podman_said_text "$(machine_error_lines "$1")")" \
-                   "$(msg err.machine-other-active.fix NAME="${name:-?}")")"
+                   "$(msg err.machine-other-active-unnamed.fix)")"
 }
 
 # One `podman info`, clipped to SECS, answering only "did podman answer". No label, no stderr in
@@ -991,51 +999,83 @@ machine_probe() {                     # machine_probe SECS -> 0 if podman answer
     run_timeout "$1" podman info --format '{{.Host.Security.Rootless}}' >/dev/null
 }
 
+# CMD under the recovery's one spinner: LABEL first, status.machine-slow from UPDATE_AT, and a
+# ceiling of what is left of DEADLINE -- a second at least -- plus SLACK. Our start and the wait for
+# somebody else's both come here, so their timing cannot drift apart (#495 review). The label is
+# rendered by the caller, so each key is named where it is used.
+machine_spin() {                      # machine_spin LABEL DEADLINE UPDATE_AT SLACK CMD... -> CMD's status
+    local left=$(( $2 - SECONDS )) at=$(( $3 - SECONDS )) slack="$4"
+    local RT_SPIN="$1" RT_SPIN_AT RT_SPIN_LATER RT_BARE='' RT_ROW=''
+    shift 4
+    [ "$left" -ge 1 ] || left=1
+    [ "$at" -ge 0 ] || at=0
+    RT_SPIN_AT="$at"
+    RT_SPIN_LATER="$(msg status.machine-slow)"
+    run_timeout "$(( left + slack ))" "$@"
+}
+
 # Our start, under the spinner. podman's status, and everything it printed in MS_OUT -- merged,
 # because a failing start says why on stderr and that is what a refusal quotes.
 machine_try_start() {                 # machine_try_start DEADLINE UPDATE_AT -> podman's status
-    local left=$(( $1 - SECONDS )) at=$(( $2 - SECONDS )) rc
-    [ "$left" -ge 1 ] || left=1
-    [ "$at" -ge 0 ] || at=0
-    local RT_SPIN RT_SPIN_AT="$at" RT_SPIN_LATER RT_BARE='' RT_ROW=''
-    RT_SPIN="$(msg status.starting-machine)"
-    RT_SPIN_LATER="$(msg status.machine-slow)"
-    run_timeout "$left" machine_start_detached; rc=$?
+    local rc
+    machine_spin "$(msg status.starting-machine)" "$1" "$2" 0 machine_start_detached; rc=$?
     MS_OUT="$RT_OUT"
     return "$rc"
 }
+
+# What podman said the last time it did not answer, for the refusal after a wait that ran out. The
+# words from NOW, rather than the `info` that failed before the VM was started (#495 review).
+MA_ERR=''
 
 # Until END, ask podman whether it answers. Half a second between asks that failed FAST -- a
 # refused connection comes back in 40 ms, and a VM still booting fails in about three seconds on
 # its own. The launcher's wait_until, in other words, and polling the thing itself.
 machine_answer_by() {                 # machine_answer_by END [stop] -> 0 answered | 3 VM stopped | 1 END
     local n RT_SPIN='' RT_SPIN_LATER='' RT_ROW='' RT_BARE=1
+    MA_ERR=''
     while :; do
+        # A LAUNCHER THAT HAS GONE ends the wait (#495 review). As machine_wait's command this loop
+        # is a `&` subshell, which a shell without job control hands SIGINT ignored -- so the Ctrl-C
+        # that ends the launcher does not end this, and it went on asking podman until END. $$ is
+        # still the launcher's pid in here; in the launcher's own shell it is always alive.
+        kill -0 "$$" 2>/dev/null || return 1
         n=$(( $1 - SECONDS ))
         [ "$n" -ge 1 ] || return 1
         [ "$n" -le 10 ] || n=10
         machine_probe "$n" && return 0
+        MA_ERR="$RT_ERR"
         # With `stop`, a VM that has gone back to stopped ends the wait: somebody else's start
-        # gave up, and the caller can make its own.
-        if [ "${2:-}" = stop ] && run_timeout 5 podman machine inspect --format '{{.State}}' \
-               && [ "$RT_OUT" = stopped ]; then
-            return 3
+        # gave up, and the caller can make its own. CLIPPED TO END like the probe, so the loop
+        # finishes inside the ceiling machine_wait gives it: that ceiling's kill reaches this
+        # subshell and not the read it is waiting on, and a hung read then runs for ever.
+        if [ "${2:-}" = stop ]; then
+            n=$(( $1 - SECONDS ))
+            [ "$n" -ge 1 ] || return 1
+            [ "$n" -le 5 ] || n=5
+            if run_timeout "$n" podman machine inspect --format '{{.State}}' && [ "$RT_OUT" = stopped ]; then
+                return 3
+            fi
         fi
         [ "$SECONDS" -lt "$1" ] || return 1
         sleep 0.5
     done
 }
 
+# machine_answer_by as run_timeout's command, which runs it in a subshell -- so what podman last
+# said comes back on stdout, the one way out of there.
+machine_wait_loop() {                 # machine_wait_loop END -> machine_answer_by's status; MA_ERR on stdout
+    local rc
+    machine_answer_by "$1" stop; rc=$?
+    printf '%s' "$MA_ERR"
+    return "$rc"
+}
+
 # Somebody else's start, under the spinner. The loop decides when to give up; run_timeout's own
 # ceiling, two seconds later, only backstops it.
 machine_wait() {                      # machine_wait DEADLINE UPDATE_AT -> 0 | 3 | 1
-    local left=$(( $1 - SECONDS )) at=$(( $2 - SECONDS )) rc
-    [ "$left" -ge 1 ] || left=1
-    [ "$at" -ge 0 ] || at=0
-    local RT_SPIN RT_SPIN_AT="$at" RT_SPIN_LATER RT_BARE='' RT_ROW=''
-    RT_SPIN="$(msg status.waiting-machine)"
-    RT_SPIN_LATER="$(msg status.machine-slow)"
-    run_timeout "$(( left + 2 ))" machine_answer_by "$1" stop; rc=$?
+    local rc
+    machine_spin "$(msg status.waiting-machine)" "$1" "$2" 2 machine_wait_loop "$1"; rc=$?
+    MA_ERR="$RT_OUT"
     case "$rc" in 0|3) return "$rc" ;; *) return 1 ;; esac
 }
 
@@ -1070,8 +1110,12 @@ machine_bring_up() {                  # machine_bring_up start|wait INFO_STDERR
                 # it left. Clipped to nothing, this refused a VM it had just started successfully
                 # without asking podman once (31's e4:*).
                 [ "$quick" -gt "$SECONDS" ] || quick=$(( SECONDS + 5 ))
-                machine_answer_by "$quick" && break
-                refuse_machine_unreachable "$ierr" ;;
+                # THE PROBE THAT ANSWERED RAN IN THIS SHELL, so its RT_OUT is preflight's rootless
+                # read already, and asking again was a round trip on every launch that starts the
+                # VM (#495 review). The refusal quotes what podman says now, not $ierr from before
+                # the start -- or $ierr, if no probe said anything.
+                machine_answer_by "$quick" && return 0
+                refuse_machine_unreachable "${MA_ERR:-$ierr}" ;;
             wait)
                 machine_wait "$deadline" "$update_at"; rc=$?
                 case "$rc" in
@@ -1085,12 +1129,14 @@ machine_bring_up() {                  # machine_bring_up start|wait INFO_STDERR
                     3) [ "$SECONDS" -lt "$deadline" ] || die "$(msg err.machine-still-starting)"
                        next='start'; continue ;;
                     *) if pmv machine inspect --format '{{.State}}' && [ "$RT_OUT" = running ]; then
-                           refuse_machine_unreachable "$ierr"
+                           refuse_machine_unreachable "${MA_ERR:-$ierr}"
                        fi
                        die "$(msg err.machine-still-starting)" ;;
                 esac ;;
         esac
     done
+    # AFTER A WAIT, asked again: the answer was heard in machine_wait's subshell, and preflight reads
+    # RT_OUT in this one.
     pmv info --format '{{.Host.Security.Rootless}}' || refuse_machine_unreachable "$RT_ERR"
 }
 
@@ -2272,8 +2318,11 @@ ensure_container() {
     # and it assumes an exit exists. It does: --stop acts on an unreadable read, and so does
     # --rebuild, whose remove-and-recreate is the cure for the damaged entry that produces this.
     # What must not happen is a bare `./cs193v` guessing.
+    # refuse_unreachable, not the bare head: since #495 the instruction is a key of its own, and
+    # the head alone ended the refusal with no next step (#495 review). No podman words to quote --
+    # state() asked in a $( ), so they stayed there.
     if [ "$st" = unreadable ]; then
-        die "$(msg err.podman-unreachable)"
+        refuse_unreachable ''
     fi
 
     refuse_if_foreign_dir
@@ -2630,7 +2679,7 @@ refuse_if_foreign_dir() {
     # failure worth refusing over.
     if [ "$rc" -ne 0 ]; then
         [ "$rc" -eq 125 ] && container_absent && return 0
-        die "$(msg err.podman-unreachable)"
+        refuse_unreachable ''
     fi
     [ -n "$owner_dir" ] || return 0
     [ "$owner_dir" = "$DIR" ] && return 0
