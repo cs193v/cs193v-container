@@ -340,10 +340,12 @@ FAKE_TUNNEL='mkdir -p '"$PORTS_STATE_DIR"' && : > '"$PORTS_STATE"' && { sh -c '"
 '
 # AND ITS OPPOSITE: a tunnel that is up and has confirmed nothing, so shortlink waits and is never
 # told yes. Through the real --publish too.
-# READ BACK, NOT ASSUMED (#551), through the reader shortlink uses, and every caller asserts
-# fake-healthy=0. With no file shortlink takes the no-tunnel path and degrades at once, so a
-# publish that failed or a file that went missing would quietly turn a caller into another case.
-FAKE_HEALTHY='cs193v-portwatch --publish state=healthy floor=1024 up= refused=; cs193v-portwatch --state > /dev/null; echo "fake-healthy=$?"'
+# READ BACK, NOT ASSUMED (#551), through the reader shortlink uses: its exit status and the whole
+# file on one line, which every caller matches against $FAKE_HEALTHY_SAID. With no file shortlink
+# takes the no-tunnel path and degrades at once, so a publish that failed, a file that went missing
+# or a different file would quietly turn a caller into another case.
+FAKE_HEALTHY='cs193v-portwatch --publish state=healthy floor=1024 up= refused=; fh=$(cs193v-portwatch --state); fh_rc=$?; echo "fake-healthy=$fh_rc [$(printf "%s" "$fh" | tr "\t\n" " |")]"'
+FAKE_HEALTHY_SAID='^fake-healthy=0 \[state healthy\|floor 1024\]$'
 
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
@@ -469,9 +471,10 @@ assert_ok "shortlink:help-answers" \
 # Read through --state, so the file it confirms is also one the strict reader accepts.
 # THE URL AND THE COUNT EACH HAVE A LABEL AND A LINE OF THEIR OWN (#535): through R, $out also
 # holds whatever shortlink and --state print to stderr. Unlabelled, a 1 in the port or in the name
-# cs193v passed the count, and a URL printed to the wrong stream passed the URL.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "url=$l"; p=${l##*:}; echo "confirmed=$(cs193v-portwatch --state | grep -c "^up	${p%%/*}	")"')"
-assert_match "shortlink:prints-a-short-url" "^url=http://localhost:[0-9]+/token$" "$out"
+# cs193v passed the count, and a URL printed to the wrong stream passed the URL. The brackets make
+# the URL the whole of stdout: a second line leaves the first one unclosed.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); echo "url=[$l]"; p=${l##*:}; echo "confirmed=$(cs193v-portwatch --state | grep -c "^up	${p%%/*}	")"')"
+assert_match "shortlink:prints-a-short-url" "^url=\[http://localhost:[0-9]+/token\]$" "$out"
 assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out"
 
 # AND IT WILL NOT PRINT ONE IT WAS NOT TOLD ABOUT. The mirror image, and the assertion that stops
@@ -481,7 +484,7 @@ assert_match "shortlink:the-port-it-printed-was-confirmed" "^confirmed=1$" "$out
 # which also prints the input and exits 3, but at once. The 9 is a floor: CONFIRM_TIMEOUT is 10s,
 # and load only adds to it.
 out="$(R "$FAKE_HEALTHY"'; t0=$(date +%s); /usr/local/bin/shortlink https://example.com/unconfirmed; rc=$?; echo "rc=$rc took=$(( $(date +%s) - t0 ))"')"
-assert_match "harness:the-fake-healthy-file-is-there:unconfirmed" "^fake-healthy=0$" "$out"
+assert_match "harness:fake-healthy-reads-back:unconfirmed" "$FAKE_HEALTHY_SAID" "$out"
 assert_contains "shortlink:an-unconfirmed-port-degrades"  "https://example.com/unconfirmed" "$out"
 assert_contains "shortlink:an-unconfirmed-port-exits-3"   "rc=3" "$out"
 assert_match "shortlink:an-unconfirmed-port-waits-out-the-timeout" "took=(9|[1-9][0-9]+)$" "$out"
@@ -681,7 +684,7 @@ out="$(R "$FAKE_HEALTHY"'
           echo "rc=$rc took=$(( $(date +%s) - t0 ))s out=[$o]"
           n=$(ss -Hltn) && echo "listeners=$(printf "%s\n" "$n" | grep -c .)"')"
 record "shortlink:cancel-during" "$(printf '%s' "$out" | do_tr '\n' '|')"
-assert_match "harness:the-fake-healthy-file-is-there:cancel-during" "^fake-healthy=0$" "$out"
+assert_match "harness:fake-healthy-reads-back:cancel-during" "$FAKE_HEALTHY_SAID" "$out"
 assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
 # NOTHING ON STDOUT is the difference between a cancel and a degradation, and it is what lets
 # open-url stay silent rather than printing a URL the student closed the window on.
