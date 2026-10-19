@@ -3747,6 +3747,32 @@ assert_eq "run-timeout:has-the-four-spawns-counted-here" "4" \
           "$(printf '%s\n' "$rt_code" | grep -cF '"$@" >"$tmp"')"
 assert_eq "run-timeout:no-spawn-takes-the-terminal-copies" "" \
           "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '7>&- 8>&-')"
+# AND A TEARDOWN'S CALLS START OUTSIDE THE TERMINAL'S PROCESS GROUP (#566). The terminal sends ^C
+# and ^\ to that whole group, and Linux podman re-arms INT, TERM and QUIT for itself, so the
+# teardown's ignore never covered its own `podman stop`. RT_DETACH brackets each branch's spawn
+# with `set -m` / `set +m` and NOTHING ELSE: bash 3.2 reports a job reaped while job control is on
+# as `[1]+ Exit N`, and a foreground command run under it is handed the terminal. The fifo's
+# bracket closes before its rendezvous. Every spawn reads /dev/null, which under job control is
+# what keeps a background job from stopping on SIGTTIN at the terminal.
+assert_eq "run-timeout:declares-rt-detach" "1" \
+          "$(grep -c "^RT_DETACH=''$" "$PRIVATE/files/cs193v-ui.sh")"
+rt_flat="$(printf '%s\n' "$rt_code" | grep -vE '^[[:space:]]*$' | sed 's/^[[:space:]]*//')"
+assert_eq "run-timeout:detaches-both-branches" "2 2" \
+          "$(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set -m') $(printf '%s\n' "$rt_flat" | grep -cxF '[ -n "$RT_DETACH" ] && set +m')"
+assert_eq "run-timeout:the-detach-bracket-holds-only-the-spawn" "" \
+          "$(printf '%s\n' "$rt_flat" | awk '
+                prev == "[ -n \"$RT_DETACH\" ] && set -m" && $0 !~ /^if \[ -n "\$RT_BARE" \]; then/ { print "after set -m: " $0 }
+                $0 == "[ -n \"$RT_DETACH\" ] && set +m" && prev != "fi" { print "before set +m: " prev }
+                { prev = $0 }')"
+rd_close="$(printf '%s\n' "$rt_flat" | grep -nxF '[ -n "$RT_DETACH" ] && set +m' | tail -1 | cut -d: -f1)"
+rd_meet="$(printf '%s\n' "$rt_flat" | grep -nF 'exec 9<"$fifo"' | head -1 | cut -d: -f1)"
+if [ -n "$rd_close" ] && [ -n "$rd_meet" ] && [ "$rd_close" -lt "$rd_meet" ]; then
+    pass "run-timeout:the-detach-bracket-closes-before-the-rendezvous"
+else
+    fail "run-timeout:the-detach-bracket-closes-before-the-rendezvous" "set +m=$rd_close exec 9<=$rd_meet"
+fi
+assert_eq "run-timeout:no-spawn-reads-the-terminal" "" \
+          "$(printf '%s\n' "$rt_code" | grep -F '"$@" >"$tmp"' | grep -vF '</dev/null')"
 assert_match "tunnel:the-supervisor-does-not-take-the-terminal-copies" 'dev-supervise .*7>&- 8>&- &' \
              "$(fn_body tunnel_sup_start "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//')"
 # THE ATTACH TOO, though it does not outlive the launcher: on Linux it hands them on to the exec
@@ -4019,6 +4045,25 @@ assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP Q
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
              | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
                     /\[ -n "\$TEARDOWN_DONE" \] && return 0/ { f = 1 }')"
+# ...AND DETACHES WHAT IT STARTS, on the very next line (#566): the ignore covers the shell's own
+# children, and RT_DETACH covers the podman ones, which re-arm the keys' signals for themselves.
+assert_eq "teardown:podman-calls-start-outside-the-terminals-group" "RT_DETACH=1" \
+          "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
+             | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
+                    /^[[:space:]]*trap .. INT TERM HUP QUIT PIPE$/ { f = 1 }')"
+# THE REBUILD'S HANDLER THE SAME WAY, and its ignore FIRST: it had none, so a second key during its
+# stop was queued on bash 3.2 and lost, re-entered on 5.3 and stopped twice -- and a re-entry could
+# land inside run_timeout's set -m bracket.
+ri_code="$(fn_body rebuild_interrupted "$REPO/cs193v" | sed 's/^[[:space:]]*#.*//' | grep -vE '^[[:space:]]*$')"
+assert_eq "rebuild:the-handler-ignores-signals-first" "trap '' INT TERM HUP QUIT PIPE" \
+          "$(printf '%s\n' "$ri_code" | sed -n '2p' | sed 's/^[[:space:]]*//')"
+ri_det="$(printf '%s\n' "$ri_code" | grep -nx '[[:space:]]*RT_DETACH=1' | head -1 | cut -d: -f1)"
+ri_stop="$(printf '%s\n' "$ri_code" | grep -n 'stop_container' | head -1 | cut -d: -f1)"
+if [ -n "$ri_det" ] && [ -n "$ri_stop" ] && [ "$ri_det" -lt "$ri_stop" ]; then
+    pass "rebuild:the-handler-detaches-its-stop"
+else
+    fail "rebuild:the-handler-detaches-its-stop" "RT_DETACH=1 at $ri_det, stop_container at $ri_stop"
+fi
 
 # THE ERASE COMES AFTER THE ATTACH, because it erases something the attach produced. Ordered
 # rather than merely present: both lines in the wrong sequence would wipe a row of the student's

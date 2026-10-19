@@ -906,6 +906,10 @@ done
 # " done." over it. A HUP sent to the launcher alone, as the group above sends it, cannot reach
 # those children and so cannot fail this; the close has to be a real one.
 #
+# SINCE #566 THE STOP IS NOT IN THAT GROUP AT ALL: the teardown starts its podman calls in a process
+# group of their own, which the close's HUP does not reach either. So this now holds the detachment
+# as much as the ignore, and the ignore's HUP is held by 10-static.sh alone.
+#
 # stop_hold holds the stop itself, and stop_done is written only once it has FINISHED: a count of
 # `stop` calls would pass here, because the stop is always asked for.
 shim_new
@@ -936,6 +940,158 @@ else
 fi
 rm -f "$SHIM/stop_hold"
 launcher_fg_stop
+
+# ─── ...and a ^C or ^\ during it does not kill its podman stop  (#566) ─────────
+# The ignore above protects the teardown's SHELL children. Linux podman is not one: the stop client
+# puts INT, TERM and QUIT back for itself, and a terminal sends ^C and ^\ to its whole foreground
+# process group -- which held every podman call run_timeout started. Measured in the podman VM: a
+# ^C before the client sent its TERM left the container running, 10 tries of 10. The teardown now
+# starts its podman calls in a process group of their own, which the terminal's keys cannot reach.
+#
+# stop_rearm makes the fake's held stop a process that re-arms those signals the way podman does,
+# so it ends on a key that reaches it. THE CANARY FIRST: --stop is meant to be interruptible, sets
+# nothing up, and so runs its stop in the foreground group -- where a ^C has to end the stop,
+# positively, or the cases after it prove nothing. ^\'s canary is a QUIT sent to the stop itself:
+# the ^C has already shown the key reaches the group, and a ^\ there would kill --stop's launcher,
+# which has no arm for it -- a death macOS files as a crash report every run.
+key_echoed() {                        # key_echoed ECHO N -> 0 once the terminal has echoed it N times
+    [ "$(grep -o -F -- "$1" "$FG_OUT" 2>/dev/null | wc -l | do_tr -d ' ')" -ge "$2" ]
+}
+stop_pid_alive() { kill -0 "$(cat "$SHIM/stop_pid" 2>/dev/null)" 2>/dev/null; }
+stop_pid_gone() { ! stop_pid_alive; }
+rearm_key() {                         # rearm_key NAME -> RKEY (to type) and RECHO (what it echoes)
+    case "$1" in
+        ctrl-c)         RKEY='\003'; RECHO='^C' ;;
+        ctrl-backslash) RKEY='\034'; RECHO='^\' ;;
+    esac
+}
+REARM_OK=''
+for rk in ctrl-c ctrl-backslash; do
+    rearm_key "$rk"
+    shim_new
+    shim_set state running
+    shim_touch stop_hold
+    shim_touch stop_rearm
+    launcher_fg_start --stop
+    if wait_until 30 grep -qF -- "$(msg_of opt.stop-go)" "$FG_OUT"; then
+        launcher_fg_keys '\033[B\n'
+        if wait_until 30 test -e "$SHIM/stop_reached"; then
+            case "$rk" in
+                ctrl-c) launcher_fg_keys "$RKEY" ;;
+                *)      kill -QUIT "$(cat "$SHIM/stop_pid")" 2>/dev/null ;;
+            esac
+            if wait_until 10 stop_pid_gone; then
+                REARM_OK="$REARM_OK $rk"
+                pass "rearm:a-$rk-ends-a-stop-in-the-foreground-group"
+                # AND THE STOP IT ENDED NEVER FINISHES, which is the fake's `|| exit 1`: the fake is
+                # sh with the signal ignored, and without it would go on to flip the state.
+                # PROVING AN ABSENCE, so a fixed wait: the flip, if it came, is the next line it runs.
+                sleep 0.5
+                if [ -e "$SHIM/stop_done" ]; then
+                    fail "rearm:a-$rk-leaves-the-stop-unfinished" "the fake flipped the state for a stop that was ended"
+                else
+                    pass "rearm:a-$rk-leaves-the-stop-unfinished"
+                fi
+            else
+                fail "rearm:a-$rk-ends-a-stop-in-the-foreground-group" \
+                     "the held stop outlived the key, so the cases below cannot fail"
+            fi
+        else
+            fail "rearm:a-$rk-ends-a-stop-in-the-foreground-group" "--stop never reached its stop:
+$(strip_ansi < "$FG_OUT")"
+        fi
+    else
+        fail "rearm:a-$rk-ends-a-stop-in-the-foreground-group" "--stop never asked:
+$(strip_ansi < "$FG_OUT")"
+    fi
+    rm -f "$SHIM/stop_hold"
+    launcher_fg_stop
+done
+rearm_measured() { case " $REARM_OK " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# The student typed `exit`, and presses ^C or ^\ while "Exiting..." is on screen.
+for rk in ctrl-c ctrl-backslash; do
+    rearm_key "$rk"
+    if ! rearm_measured "$rk"; then
+        fail "teardown-signal:a-$rk-mid-stop-lets-it-finish" "not measured: see the rearm: canary"
+        continue
+    fi
+    shim_new
+    shim_set exec_out "SHELL-OPENED"
+    shim_touch stop_hold
+    shim_touch stop_rearm
+    launcher_fg_start
+    if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT"; then
+        launcher_fg_keys '\n'
+        if wait_until 30 test -e "$SHIM/stop_reached"; then
+            launcher_fg_keys "$RKEY"
+            wait_until 10 key_echoed "$RECHO" 1 \
+                || fail "teardown-signal:a-$rk-mid-stop-was-delivered" "the terminal never echoed it"
+            # PROVING AN ABSENCE, so a fixed wait: a stop the key never reached gives no sign of it,
+            # and one it did reach is dead well inside this.
+            sleep 1
+            if stop_pid_alive; then pass "teardown-signal:a-$rk-mid-stop-does-not-reach-the-stop"
+            else fail "teardown-signal:a-$rk-mid-stop-does-not-reach-the-stop" \
+                      "the key killed the teardown's own podman stop"; fi
+            rm -f "$SHIM/stop_hold"
+            launcher_fg_ended 30 || true
+            if [ -e "$SHIM/stop_done" ]; then pass "teardown-signal:a-$rk-mid-stop-lets-it-finish"
+            else fail "teardown-signal:a-$rk-mid-stop-lets-it-finish" "the stop never finished"; fi
+            assert_eq "teardown-signal:a-$rk-mid-stop-leaves-it-exited" "exited" "$(shim_state)"
+            assert_eq "teardown-signal:a-$rk-mid-stop-still-exits-0" "exit 0" "$(launcher_fg_status)"
+        else
+            fail "teardown-signal:a-$rk-mid-stop-lets-it-finish" "the teardown never reached its stop:
+$(strip_ansi < "$FG_OUT")"
+        fi
+    else
+        fail "teardown-signal:a-$rk-mid-stop-lets-it-finish" "never reached the prompt"
+    fi
+    rm -f "$SHIM/stop_hold"
+    launcher_fg_stop
+done
+
+# AND THE SAME IN --rebuild's HANDLER, which had no ignore at all: a second key during its stop
+# re-entered it on bash 5.3, which issued a second stop, and on bash 3.2 was queued behind it and
+# lost to die_of_sigint's `trap - INT`, which left the container up. (On macOS the remote client
+# keeps INT ignored, measured; Go arms QUIT whatever it inherits, so a ^\ is expected to reach it,
+# unmeasured.) The first ^C starts the handler; the second key lands in its stop.
+for rk in ctrl-c ctrl-backslash; do
+    rearm_key "$rk"
+    if ! rearm_measured "$rk"; then
+        fail "interrupt:a-second-$rk-mid-stop-lets-it-finish" "not measured: see the rearm: canary"
+        continue
+    fi
+    shim_new
+    shim_set state absent
+    shim_set run_hold 1
+    shim_touch stop_hold
+    shim_touch stop_rearm
+    launcher_fg_start --rebuild
+    if wait_until 60 container_is_up; then
+        launcher_fg_keys '\003'
+        if wait_until 30 test -e "$SHIM/stop_reached"; then
+            launcher_fg_keys "$RKEY"
+            # The first ^C has been echoed already, so a second ^C is the second echo.
+            n=1; [ "$rk" = ctrl-c ] && n=2
+            wait_until 10 key_echoed "$RECHO" "$n" \
+                || fail "interrupt:a-second-$rk-mid-stop-was-delivered" "the terminal never echoed it"
+            # PROVING AN ABSENCE, as above.
+            sleep 1
+            rm -f "$SHIM/stop_hold" "$SHIM/run_hold"
+            launcher_fg_ended 30 || true
+            if [ -e "$SHIM/stop_done" ]; then pass "interrupt:a-second-$rk-mid-stop-lets-it-finish"
+            else fail "interrupt:a-second-$rk-mid-stop-lets-it-finish" "the stop never finished"; fi
+            assert_eq "interrupt:a-second-$rk-mid-stop-stops-once" "1" "$(shim_count '^stop ')"
+        else
+            fail "interrupt:a-second-$rk-mid-stop-lets-it-finish" "the handler never reached its stop:
+$(strip_ansi < "$FG_OUT")"
+        fi
+    else
+        fail "interrupt:a-second-$rk-mid-stop-lets-it-finish" "podman run never reported a container up"
+    fi
+    rm -f "$SHIM/stop_hold" "$SHIM/run_hold"
+    launcher_fg_stop
+done
 
 # ─── a container from a different copy of the course directory  (§2.7) ─────────
 # Without this a student who re-downloads after breaking something silently gets the old

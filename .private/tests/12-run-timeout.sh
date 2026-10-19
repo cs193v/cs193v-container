@@ -730,3 +730,83 @@ pty log: $(tail -3 "$RTP/ptylog" 2>/dev/null)"
         fail "rt:and-the-same-when-the-terminal-is-still-a-terminal" "see above"
     fi
 fi
+
+# ─── RT_DETACH: the command in a process group of its own  (#566) ─────────────
+# A terminal's ^C and ^\ go to its whole foreground process group, and every command run_timeout
+# starts is in that group -- the caller's. Linux podman re-arms INT, TERM and QUIT for itself, so the
+# teardown's ignore never protected its `podman stop`: a ^C killed it with the container still up.
+# RT_DETACH starts the command in a background group of its own, which no key reaches. Asserted
+# here by group; 30-launcher-shim.sh sends the keys.
+#
+# EVERY ONE WITH ITS CONTROL: the same call without the flag must answer the caller's own group,
+# or a `ps` that answered nothing at all would pass the first half of each pair.
+rd_pgid() { run_timeout 5 sh -c 'ps -o pgid= -p $$' >/dev/null 2>&1; printf '%s' "$RT_OUT" | do_tr -d ' \n'; }
+RD_MINE="$(ps -o pgid= -p $$ | do_tr -d ' ')"
+for rd_mode in plain detached; do
+    RT_DETACH=''; [ "$rd_mode" = detached ] && RT_DETACH=1
+    rd_pgid >/dev/null; rd_fifo="$(printf '%s' "$RT_OUT" | do_tr -d ' \n')"
+    RT_SPIN='working'; rd_pgid >/dev/null; rd_poll="$(printf '%s' "$RT_OUT" | do_tr -d ' \n')"; RT_SPIN=''
+    # INSIDE A COMMAND SUBSTITUTION, the shape `state` calls it in: the teardown's first podman read.
+    rd_subst="$(rd_pgid)"
+    RT_DETACH=''
+    for rd_branch in fifo poll subst; do
+        case "$rd_branch" in fifo) rd_got="$rd_fifo" ;; poll) rd_got="$rd_poll" ;; *) rd_got="$rd_subst" ;; esac
+        if [ "$rd_mode" = plain ]; then
+            assert_eq "rt:without-detach-the-$rd_branch-branch-shares-the-callers-group" "$RD_MINE" "$rd_got"
+        else
+            assert_match "rt:detach-on-the-$rd_branch-branch-names-a-group" '^[0-9]+$' "$rd_got"
+            assert_ne "rt:detach-on-the-$rd_branch-branch-is-a-group-of-its-own" "$RD_MINE" "$rd_got"
+        fi
+    done
+done
+# JOB CONTROL GOES BACK OFF. It is on for the spawn alone: a foreground command run under it is
+# handed the terminal, and bash 3.2 reports a job reaped while it is on as `[1]+ Exit N`.
+case "$-" in
+    *m*) fail "rt:detach-leaves-job-control-off" "set -m was still on afterwards: \$- is $-" ;;
+    *)   pass "rt:detach-leaves-job-control-off" ;;
+esac
+# THE CEILING STILL HOLDS, and still kills what it started -- the `exec -a` shape of
+# rt:the-ceiling-kills-the-command, under a name of its own.
+RD_NAP="vt-dnap-$$"
+RT_DETACH=1
+run_timeout 1 bash -c "exec -a $RD_NAP sleep 30" >/dev/null 2>&1; RC=$?
+RT_DETACH=''
+assert_eq "rt:detach-still-times-out" "124" "$RC"
+if pgrep -f "^$RD_NAP 30\$" >/dev/null 2>&1; then
+    fail "rt:detach-still-kills-the-command" "$RD_NAP 30 outlived the box"
+    pkill -9 -f "^$RD_NAP 30\$" 2>/dev/null
+else
+    pass "rt:detach-still-kills-the-command"
+fi
+# AND SAYS NOTHING OF ITS OWN, on either branch, whether the command finished or was killed: the
+# teardown's stderr is the student's terminal.
+rd_err() { RT_DETACH=1; { run_timeout "$@" >/dev/null; } 2>&1; RT_DETACH=''; }   # -> its stderr alone
+assert_eq "rt:detach-is-silent-when-it-finishes" "" "$(rd_err 5 sh -c 'exit 3')"
+assert_eq "rt:detach-is-silent-at-the-ceiling" "" "$(rd_err 1 sleep 5)"
+RT_SPIN='working'
+assert_eq "rt:detach-is-silent-at-the-ceiling-on-the-poll-branch" "" "$(rd_err 1 sleep 5)"
+RT_SPIN=''
+# NOT FROM THE TERMINAL, on the branch where that is in its own hands. A job in a background group
+# that reads the terminal is stopped by SIGTTIN, and run_timeout then waits out its whole ceiling
+# for a command that is never coming back. The fifo branch's command starts inside a subshell,
+# which bash gives /dev/null by itself; the poll branch's, under job control, would read the
+# terminal -- so this runs the poll branch, on a pty, where there is a terminal to read.
+cat > "$WORK/detach-read.sh" <<'SUBJECT'
+set -u
+. "$RD_UI"
+RT_SPIN='working'; RT_DETACH=1
+start=$SECONDS
+run_timeout 3 sh -c 'read x' >/dev/null 2>&1; rc=$?
+printf '%s %s\n' "$rc" "$((SECONDS - start))" > "$RD_OUT"
+SUBJECT
+rm -f "$WORK/detach-read.out"
+RD_UI="$PRIVATE/files/cs193v-ui.sh" RD_OUT="$WORK/detach-read.out" \
+    "$DO_PY" "$PT_LIB/ptyrun.py" "$(sh_quote bash "$WORK/detach-read.sh")" \
+    </dev/null >"$WORK/detach-read.log" 2>&1
+read -r rd_rc rd_secs < "$WORK/detach-read.out" 2>/dev/null || { rd_rc=''; rd_secs=''; }
+assert_match "rt:detach-reports-from-a-pty" '^[0-9]+$' "${rd_rc:-}"
+if [ "${rd_rc:-}" = 124 ]; then
+    fail "rt:detach-never-reads-the-terminal" "the command was stopped reading the pty and waited out its ${rd_secs}s ceiling"
+else
+    pass "rt:detach-never-reads-the-terminal"
+fi
