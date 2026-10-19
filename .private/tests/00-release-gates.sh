@@ -84,8 +84,15 @@ assert_ne "installer:REPO_OWNER-not-empty" "" "$owner"
 # The .cmd is parsed rather than the URL retyped, or this would assert that a constant equals
 # itself. \r is stripped first: the file is CRLF, and a trailing carriage return in a URL is a
 # 400 from a server and a mystery in a log.
+#
+# READ ONCE, THROUGH run_checker (#559): a .cmd that could not be read answers every cget with the
+# sentinel, which names the read that failed, rather than with an empty string. pget's the same.
 cmdfile=$PRIVATE/install-cs193v-windows.cmd
-cget() { sed 's/\r$//' "$cmdfile" | sed -n "s/^set \"$1=\(.*\)\"\$/\1/p" | head -1; }
+cmd_text="$(run_checker sed 's/\r$//' "$cmdfile")"
+cget() {                              # cget NAME -> the .cmd's `set "NAME=..."`, or the sentinel
+    died_in "$cmd_text"
+    printf '%s\n' "$cmd_text" | sed -n "s/^set \"$1=\(.*\)\"\$/\1/p" | head -1
+}
 stage2_url="$(cget INSTALLER_URL \
               | sed -e "s|%REPO_OWNER%|$(cget REPO_OWNER)|" \
                     -e "s|%REPO_NAME%|$(cget REPO_NAME)|" \
@@ -109,10 +116,11 @@ record "installer:stage2-url" "$stage2_url"
 #
 # AND AN EMPTY TAG IS NOT ASKED ABOUT (#440). origin answers refs/tags/ with nothing and exit 0, so a
 # constant that failed to parse was told to push the tag. It applies to every caller, §1's and §1c's
-# as much as §9's.
+# as much as §9's -- and so does a tag that is the checker's sentinel, which is what cget and pget
+# answer when their file could not be read (#559).
 tag_skip_why() {                      # tag_skip_why TAG -> why TAG's gates skip, or nothing if pushed
     local out
-    if [ -z "$1" ]; then
+    if [ -z "$1" ] || died_in "$1" >/dev/null; then
         printf '%s' "no tag could be read out of the installer, so there is nothing to ask origin about"
     elif ! out="$(git ls-remote --tags origin "refs/tags/$1" 2>/dev/null)"; then
         printf '%s' "could not reach origin to ask whether $1 is published -- see \`git ls-remote origin\`, then re-run --release"
@@ -262,9 +270,10 @@ elif curl -fsSL --retry 3 -o "$rel_tmp/stage2.sh" "$stage2_url" 2>"$rel_tmp/curl
     cmd_pin="$(cget STAGE2_SHA256)"
     if printf '%s' "$cmd_pin" | grep -qE '^[0-9a-f]{64}$'; then
         pass "installer:the-stage2-pin-is-a-digest"
-        record "installer:stage2-url-digest" "$(do_sha256 "$rel_tmp/stage2.sh" | awk '{print $1}')"
-        assert_eq "installer:stage2-url-hashes-to-the-pin" "$cmd_pin" \
-                  "$(do_sha256 "$rel_tmp/stage2.sh" | awk '{print $1}')"
+        stage2_sha="$(run_checker do_sha256 "$rel_tmp/stage2.sh")"
+        stage2_sha="$(died_in "$stage2_sha"; printf '%s\n' "$stage2_sha" | awk '{print $1}')"
+        record "installer:stage2-url-digest" "$stage2_sha"
+        assert_eq "installer:stage2-url-hashes-to-the-pin" "$cmd_pin" "$stage2_sha"
     else
         fail "installer:the-stage2-pin-is-a-digest" \
              "install-cs193v-windows.cmd's STAGE2_SHA256 is not 64 lowercase hex: '$cmd_pin'"
@@ -300,7 +309,11 @@ rm -rf "$rel_tmp"
 # bumping the .cmd after the .ps1 was written. Every Windows student stops at the digest refusal,
 # so a red here is a class-wide outage caught before the upload rather than after it.
 ps1file="$PRIVATE/install-cs193v.ps1"
-pget() { sed 's/\r$//' "$ps1file" | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1; }
+ps1_text="$(run_checker sed 's/\r$//' "$ps1file")"
+pget() {                              # pget NAME -> the .ps1's `$NAME = "..."`, or the sentinel
+    died_in "$ps1_text"
+    printf '%s\n' "$ps1_text" | sed -n "s/^\\\$$1 *= *\"\([^\"]*\)\".*/\1/p" | head -1
+}
 ps1_tag="$(pget RepoTag)"
 # COMPOSED THE WAY THE .ps1 COMPOSES IT, out of its own three constants, so that a gate cannot
 # pass by testing a URL the bootstrap would not build. 25-installer.sh already pins that the .ps1
@@ -334,9 +347,10 @@ elif curl -fsSL --retry 3 -o "$ps1_tmp/win.cmd" "$cmd_url" 2>"$ps1_tmp/curl.err"
     ps1_pin="$(pget CmdSha256)"
     if printf '%s' "$ps1_pin" | grep -qE '^[0-9a-f]{64}$'; then
         pass "winboot:the-cmd-pin-is-a-digest"
-        record "winboot:cmd-url-digest" "$(do_sha256 "$ps1_tmp/win.cmd" | awk '{print $1}')"
-        assert_eq "winboot:the-cmd-url-hashes-to-the-pin" "$ps1_pin" \
-                  "$(do_sha256 "$ps1_tmp/win.cmd" | awk '{print $1}')"
+        cmd_sha="$(run_checker do_sha256 "$ps1_tmp/win.cmd")"
+        cmd_sha="$(died_in "$cmd_sha"; printf '%s\n' "$cmd_sha" | awk '{print $1}')"
+        record "winboot:cmd-url-digest" "$cmd_sha"
+        assert_eq "winboot:the-cmd-url-hashes-to-the-pin" "$ps1_pin" "$cmd_sha"
     else
         fail "winboot:the-cmd-pin-is-a-digest" \
              "install-cs193v.ps1's CmdSha256 is not 64 lowercase hex: '$ps1_pin'"
