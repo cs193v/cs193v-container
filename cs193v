@@ -2162,7 +2162,7 @@ keep_terminal_fds() {
 # done it. Nothing depends on that today -- the meter is stopped and the acknowledgement consumed
 # long before open_shell -- but a handler that silently drops the animator's kill is a trap in
 # both senses.
-shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
+shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     [ -n "$TEARDOWN_DONE" ] && return 0
     # NOTHING ENDS A TEARDOWN HALFWAY (#512), and the first line past the guard is the only place
     # that can promise it. Closing the window HUPs the terminal's whole foreground process group,
@@ -2171,8 +2171,9 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
     # "Exiting..." killed the teardown's own `podman stop` -- measured, the container left running
     # and " done." printed over it. A child takes its dispositions from the moment it starts, so
     # this has to come before anything that starts one. The arm that brought us here still ends
-    # the process at the bottom; the INT branch's `trap - INT` undoes this first.
-    trap '' INT TERM HUP
+    # the process at the bottom; the INT branch's `trap - INT` undoes this first. Every signal
+    # with an arm is here, QUIT included (#564).
+    trap '' INT TERM HUP QUIT
     TEARDOWN_DONE=1
     transient_cleanup
     # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different
@@ -2207,6 +2208,7 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
         INT)  trap - EXIT INT; kill -s INT $$; exit 130 ;;
         TERM) exit 143 ;;
         HUP)  exit 129 ;;
+        QUIT) exit 131 ;;
     esac
     # EXPLICIT, because the SESSION_LEFT test above the case comes out FALSE on every path but
     # the clean exit, and this function is both a signal handler and the EXIT trap -- where bash
@@ -2229,7 +2231,7 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP]
 # order free: the animator owns the cursor and the row it is drawing on, so it has to stop
 # before the shell exits into whatever the student's terminal does next.
 #
-# The status is passed in rather than fixed at 130, because all three signals arrive here and
+# The status is passed in rather than fixed at 130, because all four signals arrive here and
 # 128+signal is what a caller reads to tell "the student pressed Ctrl-C" from "the window was
 # closed". Reporting SIGINT for a SIGHUP would be a small lie told to every script that checks.
 #
@@ -2421,6 +2423,11 @@ open_shell() {
     # Each arm names its signal, so that the teardown can end the process with that signal's
     # status; see shell_teardown, and "THE ARM THAT STARTS THE TEARDOWN" above it.
     #
+    # AND QUIT, which a terminal sends on Ctrl-\ as it sends INT on Ctrl-C (#564). Unlike HUP, an
+    # untrapped QUIT kills bash WITHOUT running the EXIT trap, so with no arm here a Ctrl-\ at the
+    # warnings prompt left the container up with nobody in it. Inside the session the terminal is
+    # in raw mode and the byte goes to the container instead.
+    #
     # INSTALLED HERE rather than before the claim: from this point on we own a session, so dying
     # for any reason must take the container down with us.
     #
@@ -2431,6 +2438,7 @@ open_shell() {
     trap 'shell_teardown INT >&7 2>&8' INT
     trap 'shell_teardown TERM >&7 2>&8' TERM
     trap 'shell_teardown HUP >&7 2>&8' HUP
+    trap 'shell_teardown QUIT >&7 2>&8' QUIT
 
     # ─── 3. SETUP WORK, now that it is provably ours ───────────────────────────
     # The tunnel lives here rather than in the dispatcher because it must come after the claim,
@@ -2976,12 +2984,13 @@ verb_rebuild() {
     trap 'rebuild_interrupted 130 >&7 2>&8' INT
     trap 'rebuild_interrupted 143 >&7 2>&8' TERM
     trap 'rebuild_interrupted 129 >&7 2>&8' HUP
+    trap 'rebuild_interrupted 131 >&7 2>&8' QUIT
     create_container
     # --quiet, BECAUSE THE STUDENT NEVER STARTED IT (#285). The stop is not optional -- see the
     # note above the dispatch -- but announcing it names a container they have not seen: the one
     # this verb created two lines ago and nobody was ever in.
     stop_container --quiet
-    trap - INT TERM HUP
+    trap - INT TERM HUP QUIT
 
     # A RUN THAT BUILT SAYS NOTHING HERE (#285), and that is not an omission: create_container
     # has just closed the meter on "Ready.", which is the completion signal, and the green

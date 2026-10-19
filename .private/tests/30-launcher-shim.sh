@@ -658,6 +658,25 @@ fi
 rm -f "$SHIM/run_hold"
 launcher_fg_stop
 
+# ...AND A Ctrl-\ THERE STOPS IT TOO (#564). verb_rebuild armed INT, TERM and HUP only, and
+# bash dies of an untrapped SIGQUIT without running anything, so the container it had just created
+# stayed up -- the next ./cs193v refusing, as above. 128+3.
+shim_new
+shim_set state absent
+shim_set run_hold 1
+launcher_fg_start --rebuild
+if wait_until 60 container_is_up; then
+    launcher_fg_keys '\034'
+    launcher_fg_ended 20 || true
+    assert_eq "interrupt:a-ctrl-backslash-ends-the-rebuild" "exit 131" "$(launcher_fg_status)"
+    assert_eq "interrupt:a-ctrl-backslash-stops-the-container-it-created" "1" "$(shim_count '^stop ')"
+else
+    fail "interrupt:a-ctrl-backslash-ends-the-rebuild" "podman run never reported a container up:
+$(strip_ansi < "$FG_OUT")"
+fi
+rm -f "$SHIM/run_hold"
+launcher_fg_stop
+
 # ─── a signal once the session is ours ENDS the launcher  (#449) ──────────────
 # open_shell's trap used to be `trap shell_teardown EXIT HUP INT TERM`, and a bash signal trap that
 # RETURNS resumes the script. So a ^C at the warnings prompt stopped the container, went back to
@@ -731,6 +750,17 @@ else
     fail "setup-signal:a-closed-window-at-the-prompt-ends-the-launcher" "never reached the prompt"
 fi
 launcher_fg_stop
+# CTRL-\, which the terminal sends the foreground group as it sends ^C, and which had no arm: bash
+# dies of an untrapped SIGQUIT WITHOUT running the EXIT trap, unlike HUP, so the launcher went
+# with the container still up and nobody in it -- the #41 failure (#564). 128+3.
+if sig_at_prompt; then
+    shim_clear_log
+    launcher_fg_keys '\034'
+    sig_verdict ctrl-backslash-at-the-prompt "exit 131"
+else
+    fail "setup-signal:ctrl-backslash-at-the-prompt-ends-the-launcher" "never reached the prompt"
+fi
+launcher_fg_stop
 
 # ^C INSIDE THE TUNNEL'S SETUP, the other half of what runs between the trap and the attach. The
 # old trap stopped the container here and setup carried on regardless: it started the port
@@ -775,7 +805,10 @@ launcher_fg_stop
 # hold_after_attach stops the teardown's first podman call, so the signal lands with the stop
 # still to come. HUP TO THE LAUNCHER ALONE, not a closed window: a window closing HUPs the
 # teardown's own children too, which is a different failure with its own group (#512).
-for sig_how in ctrl-c hup; do
+#
+# CTRL-\ TOO, which had no arm and killed the teardown outright: an untrapped SIGQUIT does not run
+# the EXIT trap, so the stop never came (#564).
+for sig_how in ctrl-c ctrl-backslash hup; do
     # THE ^C CASE ONLY: a HUP sent with kill(2) does not depend on what the canary vouches for.
     if [ "$sig_how" = ctrl-c ] && [ -z "$SIG_CANARY" ]; then
         fail "teardown-signal:$sig_how-mid-teardown-still-stops-the-container" \
@@ -795,10 +828,13 @@ for sig_how in ctrl-c hup; do
                 # for the line discipline's own echo of it, which it prints as it signals the group.
                 ctrl-c) launcher_fg_keys '\003'
                         wait_until 10 grep -qF '^C' "$FG_OUT" || sig_sent='' ;;
+                ctrl-backslash)
+                        launcher_fg_keys '\034'
+                        wait_until 10 grep -qF '^\' "$FG_OUT" || sig_sent='' ;;
                 hup)    kill -HUP "$SIG_PID" ;;
             esac
             [ -n "$sig_sent" ] || fail "teardown-signal:$sig_how-was-delivered" \
-                                       "the terminal never echoed the ^C"
+                                       "the terminal never echoed the key"
             # PROVING AN ABSENCE, so a fixed wait: the right shape gives no sign at all that it saw
             # the signal, so there is nothing to wait FOR -- only a moment for the handler to run
             # before the held call lets go. The wrong shape does its damage once that call returns:
