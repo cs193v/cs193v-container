@@ -1238,7 +1238,7 @@ assert_eq "ptyrun-pid:nothing-walks-the-tree-for-a-pty-child" "" "$pty_pgrep"
 # THE DOCSTRING IS STRIPPED FIRST, because it names `pgrep` and `/proc` on purpose -- it is where
 # the premise this change deleted is written down, and a rule that could not survive its own
 # explanation would just get the explanation deleted instead.
-ptyrun_src="$(sed '1,/^"""$/d' "$PRIVATE/tests/lib/ptyrun.py")"
+ptyrun_src="$(run_checker sed '1,/^"""$/d' "$PRIVATE/tests/lib/ptyrun.py")"
 assert_not_match "ptyrun-pid:ptyrun-does-not-read-the-process-table" \
                  '(import subprocess|/proc/|pgrep|Popen)' "$ptyrun_src"
 
@@ -1269,8 +1269,8 @@ done
 # token. Everything it has to say goes to $CS193V_DRIVE_REPORT. The two `usage:`/`cannot exec`
 # writes are the deliberate exceptions ptyrun.py records -- a transcript that is silent about an
 # unreachable shell is the shape that makes ~125 negative assertions pass vacuously.
-ptydrive_says="$(grep -nE '(sys\.(stdout|stderr)\.write|print\()' \
-                 "$PRIVATE/tests/lib/ptydrive.py" | grep -v 'usage: ptydrive' || true)"
+ptydrive_says="$(run_grep -nE '(sys\.(stdout|stderr)\.write|print\()' \
+                 "$PRIVATE/tests/lib/ptydrive.py" | grep -v 'usage: ptydrive')"
 assert_eq "ptydrive:says-nothing-on-the-transcript" "" "$ptydrive_says"
 
 # AND THE FIXTURE'S TWO LOAD-BEARING LINES STAY. lib/sh-fake exists to interpose a shell, and two
@@ -1280,7 +1280,7 @@ assert_eq "ptydrive:says-nothing-on-the-transcript" "" "$ptydrive_says"
 # one; and fd 3 left open leaks into the command, where lib/shared.sh's convention has 3 and 4
 # held by run-tests.sh. Asserted for the same reason lib/sudo-fake's missing exec branch is: a
 # plausible simplification would leave the assertions that use this file green and empty.
-shfake="$(cat "$PRIVATE/tests/lib/sh-fake")"
+shfake="$(run_checker cat "$PRIVATE/tests/lib/sh-fake")"
 assert_contains "sh-fake:saves-stdin"        'exec 3<&0' "$shfake"
 assert_contains "sh-fake:restores-stdin"     '<&3' "$shfake"
 assert_contains "sh-fake:closes-fd3-in-the-child" '3<&-' "$shfake"
@@ -1639,9 +1639,9 @@ assert_match "pkgsha:the-intel-pin-is-below-podman-6" '^[0-5]\.' \
 # probe:* keeps for the receipt id. Any architecture's, and the unsuffixed single-pin names from
 # before #350, which are the copy most likely to come back from an old branch.
 assert_eq "pkgsha:nobody-else-declares-a-pin" "" \
-          "$(grep -lE '^PODMAN_MACOS_([A-Z0-9]+_)?(SHA256|VERSION)=' cs193v \
+          "$(run_grep -lE '^PODMAN_MACOS_([A-Z0-9]+_)?(SHA256|VERSION)=' cs193v \
              "$PRIVATE/files/cs193v-ui.sh" "$PRIVATE/install-cs193v.sh" \
-             "$PRIVATE/install-utils.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+             "$PRIVATE/install-utils.sh" | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # THE ORDER, BY LINE NUMBER INSIDE THE ONE FUNCTION, which is the shape
 # rootsteps:the-prime-asks-nothing-before-the-gate uses just above and for its reason: "both
@@ -1729,8 +1729,8 @@ assert_eq "pin:the-tag-agrees-with-the-version" "release-$pin_version" "$pin_tag
 # where the course files come from. course-install.sh's handover header records that in prose -- the
 # coordinates live in the bootstrap -- and this is what holds it.
 assert_eq "pin:nobody-else-declares-a-tag" "" \
-          "$(grep -l '^REPO_TAG=' cs193v "$PRIVATE/course-install.sh" "$PRIVATE/install-utils.sh" \
-             "$PRIVATE/wsl-provision.sh" "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null \
+          "$(run_grep -l '^REPO_TAG=' cs193v "$PRIVATE/course-install.sh" "$PRIVATE/install-utils.sh" \
+             "$PRIVATE/wsl-provision.sh" "$PRIVATE/files/cs193v-ui.sh" \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── and the payload digest beside it ──────────────────────────────────────────
@@ -1755,9 +1755,9 @@ assert_match "pin:the-payload-digest-is-64-lowercase-hex" '^[0-9a-f]{64}$' "$pin
 assert_ne "pin:the-payload-digest-is-not-the-empty-digest" \
           "$(printf '' | do_sha256 | awk '{print $1}')" "$pin_payload"
 assert_eq "pin:nobody-else-declares-a-payload-digest" "" \
-          "$(grep -l '^PAYLOAD_SHA256=' cs193v "$PRIVATE/course-install.sh" \
+          "$(run_grep -l '^PAYLOAD_SHA256=' cs193v "$PRIVATE/course-install.sh" \
              "$PRIVATE/install-utils.sh" "$PRIVATE/wsl-provision.sh" \
-             "$PRIVATE/files/cs193v-ui.sh" 2>/dev/null | do_tr '\n' ' ' | sed 's/ *$//')"
+             "$PRIVATE/files/cs193v-ui.sh" | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── and no two paths in the tree differ only in case  (#302) ──────────────────
 # THE DIGEST ABOVE IS ONLY MEANINGFUL IF EVERY MACHINE SEES THE SAME TREE, and that is not a
@@ -1834,8 +1834,8 @@ assert_says "smoke:the-refusal-names-the-image" '{{IMAGE}}' \
 # been tidier and would have put a hole right here.
 sudofake="$PRIVATE/tests/lib/sudo-fake"
 assert_ok "sudo-fake:exists" test -x "$sudofake"
-bare="$(grep -nE '(^|[^-[:alnum:]_])(exec|eval)([^[:alnum:]_]|$)' "$sudofake" \
-        | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+bare="$(run_grep -nE '(^|[^-[:alnum:]_])(exec|eval)([^[:alnum:]_]|$)' "$sudofake" \
+        | grep -vE '^[0-9]+:[[:space:]]*#')"
 assert_eq "sudo-fake:never-executes-anything" "" "$bare"
 # ...and it is on PATH for EVERY shim run, not only the cases that assert on it, so a case
 # written later cannot reach the real sudo by forgetting to ask for the fake.
@@ -3317,7 +3317,7 @@ assert_ok "welcome:no-profile-d-hook"     test ! -f "$PRIVATE/files/profile.d/20
 #
 # Extracted inline rather than with fn_body, which is defined further down this file than this
 # block reads. An empty extraction would make the negative pass vacuously, so it is checked.
-fault_box="$(sed -n '/^fail() {/,/^}/p' "$PRIVATE/files/cs193v-shell" | sed 's/^[[:space:]]*#.*//')"
+fault_box="$(run_checker sed -n '/^fail() {/,/^}/p' "$PRIVATE/files/cs193v-shell" | sed 's/^[[:space:]]*#.*//')"
 assert_ne "shell:the-fault-box-is-extractable" "" "$(printf '%s' "$fault_box" | do_tr -d ' \n')"
 assert_not_contains "shell:the-fault-box-does-not-send-a-student-to-a-raw-shell" \
                     'podman exec' "$fault_box"
@@ -3636,8 +3636,8 @@ assert_before() {                     # assert_before NAME CODE A B
     if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then pass "$1"
     else fail "$1" "want '$3' before '$4'; got lines ${a:-none} and ${b:-none}"; fi
 }
-launcher_src="$(cat "$REPO/cs193v")"
-shell_src="$(cat "$PRIVATE/files/cs193v-shell")"
+launcher_src="$(run_checker cat "$REPO/cs193v")"
+shell_src="$(run_checker cat "$PRIVATE/files/cs193v-shell")"
 open_shell_body="$(run_checker fn_body open_shell "$REPO/cs193v")"
 # stop_container, not shell_teardown: the latter is only the once-guarded wrapper the trap uses,
 # and the ordering that matters lives in the former, which --stop and the maintenance verbs
@@ -4233,7 +4233,7 @@ assert_eq "probe:podman-is-tested-in-exactly-four-places" "4" \
 # call would export it into every child of every verb including the long-lived
 # --dev-supervise. The four below are the verbs the unit tier drives on a machine with no
 # podman at all; keeping the repair out of them keeps that promise literally true.
-dispatch_arm="$(sed -n '/^case "${1:-}" in/,/^esac/p' "$REPO/cs193v")"
+dispatch_arm="$(run_checker sed -n '/^case "${1:-}" in/,/^esac/p' "$REPO/cs193v")"
 assert_ne "probe:the-dispatch-case-is-extractable" "" "$dispatch_arm"
 assert_not_contains "probe:dispatch-does-not-repair" "ensure_podman_path" "$dispatch_arm"
 for v in verb_dev_args verb_dev_tunnel verb_dev_steps verb_print_command; do
@@ -4580,7 +4580,7 @@ assert_eq "volatile:shortlink-names-no-state-path" "" \
 assert_contains "volatile:doctor-asks-the-watchers-reader" 'pmv exec "$NAME" cs193v-portwatch --state' \
                 "$(printf '%s\n' "$launcher_code" | grep -F -e 'cs193v-portwatch --state')"
 assert_eq "volatile:doctor-names-no-state-path" "" \
-          "$(printf '%s\n' "$launcher_code" | grep -F -e "$PORTS_STATE_DIR" || true)"
+          "$(died_in "$launcher_code"; printf '%s\n' "$launcher_code" | grep -F -e "$PORTS_STATE_DIR")"
 # AND THE NAME SAYS WHAT IT IS. Everything else under /tmp survives a restart; this name is the
 # only warning the next person to add a file there gets. The one literal spelling in the suite.
 assert_eq "volatile:the-state-dir-is-named-for-what-it-is" "/tmp/cs193v-volatile" "$PORTS_STATE_DIR"
@@ -5040,7 +5040,7 @@ print(json.load(open(sys.argv[1])).get("tui", "ABSENT"))
 # -- read the other way round. The Containerfile's own note now EXPLAINS the removal and names
 # the variable, so an un-stripped whole-file grep would match the explanation and report the bug
 # as still present.
-claude_env_live="$(sed 's/#.*//' "$PRIVATE/Containerfile" | sed -n '/^ENV /,/^$/p')"
+claude_env_live="$(run_checker sed -n -e 's/#.*//' -e '/^ENV /,/^$/p' "$PRIVATE/Containerfile")"
 # THE POSITIVE CONTROL, and it is load-bearing rather than ceremonial: an absence measured
 # through a sed that returned nothing is not an absence, it is a silent pass. LANG= is the one
 # entry in that block that cannot go away.
@@ -5211,7 +5211,7 @@ host_os_sites="$(grep -c 'CS193V_HOST_OS=\$(platform)' cs193v || true)"
 assert_eq "launcher:both-host-os-sites-read-platform" "2" "$host_os_sites"
 # AND NOTHING SPELLS IT ANY OTHER WAY, so the count above cannot be satisfied by two of three.
 assert_eq "launcher:no-host-os-is-spelled-any-other-way" "" \
-          "$(grep -n 'CS193V_HOST_OS=' cs193v | grep -v 'CS193V_HOST_OS=\$(platform)' || true)"
+          "$(run_grep -n 'CS193V_HOST_OS=' cs193v | grep -v 'CS193V_HOST_OS=\$(platform)')"
 
 # NOTHING asserts on the PROSE of the notes, or of CONTAINER-DESIGN.md, by decision.
 # Assertions forbidding the old bind-0.0.0.0 imperatives lived in both places briefly and were
