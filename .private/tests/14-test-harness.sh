@@ -1078,7 +1078,7 @@ ceil_said() {                         # ceil_said -> the transcript, one line
     do_tr '\n' ' ' < "$WORK/ceil.txt" | sed 's/ *$//'
 }
 ceil_results() {                      # ceil_results -> "STATUS name" per result
-    awk -F'\t' '{ print $1, $3 }' "$WORK/ceil.tsv" | do_tr '\n' ' ' | sed 's/ *$//'
+    run_checker awk -F'\t' '{ print $1, $3 }' "$WORK/ceil.tsv" | do_tr '\n' ' ' | sed 's/ *$//'
 }
 
 # ─── rc 0: nothing happened, and nothing is said about it ──────────────────────
@@ -2564,14 +2564,17 @@ esac
 printf 'REACHED-THE-END\n'
 CHILD
 fwdi() {                              # fwdi LAUNCHER SHAPE -> the child's output, then [rc=N]
-    rm -f "$FWDI/$1/asked" "$FWDI/$1-$2.tsv"
+    # THE RESULTS FILE IS CREATED EMPTY, NOT REMOVED: a child that records nothing never writes
+    # one, and fwdi_recorded has to tell "recorded nothing" from a file it could not read.
+    rm -f "$FWDI/$1/asked"
+    : > "$FWDI/$1-$2.tsv"
     CS193V_RESULTS="$FWDI/$1-$2.tsv" CS193V_SUITE=child NO_COLOR=1 \
         bash "$FWDI/child.sh" "$TESTS_DIR/lib/assert.sh" "$FWDI/$1" "$2" 2>&1
     printf '[rc=%s]' "$?"
 }
 fwdi_asked()    { do_awk 'END { printf "%d", NR }' "$FWDI/$1/asked" 2>/dev/null || printf 0; }
 fwdi_recorded() {
-    do_awk -F'\t' '{ print $1, $3 }' "$FWDI/$1-$2.tsv" 2>/dev/null | do_tr '\n' '|' | sed 's/|$//'
+    run_checker do_awk -F'\t' '{ print $1, $3 }' "$FWDI/$1-$2.tsv" | do_tr '\n' '|' | sed 's/|$//'
 }
 
 # A. A LAUNCHER THAT FAILS, first reached as a statement.
@@ -2992,7 +2995,7 @@ sys.exit(rc)' "$d/status" "$BASH" "$LT/child.sh" "$LT/restore.sh" "$d" "$1" > "$
     wait_until 60 pid_is_gone "$pid" || kill -s KILL -- "-$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
 }
-lt_log()       { cat "$LT/$1/log" 2>/dev/null; }
+lt_log()       { run_checker cat "$LT/$1/log"; }
 lt_status()    { cat "$LT/$1/status" 2>/dev/null; }
 lt_teardowns() { grep -c '^release_tunnel$' "$LT/$1/log" 2>/dev/null || true; }
 lt_args()      { cat "$LT/$1/repo/.config/container.args" 2>/dev/null; }
