@@ -727,6 +727,19 @@ ctl="$(CS193V_RESULTS="$WORK/checker-ok.tsv" CS193V_SUITE=checker \
        bash "$WORK/checker.sh" "$TESTS_DIR/lib/assert.sh" 2>/dev/null)"
 assert_not_contains "checker:the-fixture-is-green-with-a-real-interpreter" "FAIL" "$ctl"
 
+# run_grep (#559): grep's exit 1 is a search that found nothing, which is not a death; 2 is. Read
+# through a mapping for the reason saw_sentinel below gives -- the guard would answer for itself.
+printf 'alpha\nbeta\n' > "$WORK/rg.txt"
+rg_said() { case "$1" in *"$CHECKER_DIED"*) printf 'sentinel%s' "${1#*"$CHECKER_DIED"}" ;; *) printf '%s' "$1" ;; esac; }
+assert_eq "run-grep:a-match-is-its-line"          "beta" "$(rg_said "$(run_grep beta "$WORK/rg.txt")")"
+assert_eq "run-grep:no-match-is-empty-not-a-death" "" "$(rg_said "$(run_grep gamma "$WORK/rg.txt")")"
+assert_eq "run-grep:an-unreadable-file-is-the-sentinel" "sentinel (exit 2 from: grep)" \
+          "$(rg_said "$(run_grep beta "$WORK/absent" 2>/dev/null)")"
+assert_eq "run-grep:a-refused-pattern-is-the-sentinel" "sentinel (exit 2 from: grep)" \
+          "$(rg_said "$(run_grep -E '[' "$WORK/rg.txt" 2>/dev/null)")"
+assert_eq "run-grep:returns-0-either-way" "0 0" \
+          "$(run_grep gamma "$WORK/rg.txt"; a=$?; run_grep x "$WORK/absent" >/dev/null 2>&1; echo "$a $?")"
+
 # ─── ...and a POISONED interpreter is caught at the door ───────────────────────
 # The other half, and the one no sentinel can see: an interpreter that exits 0 and prints
 # something else. run_checker cannot help — there is no failure to notice — so this is what

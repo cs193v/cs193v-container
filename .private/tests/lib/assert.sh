@@ -132,6 +132,18 @@ run_checker() {                       # run_checker CMD [ARGS...]
     return 0
 }
 
+# run_checker FOR grep (#559), WHOSE EXIT 1 IS ITS OWN "NO LINE MATCHED" -- the answer every
+# negative search is hoping for -- so run_checker would call each clean search a death. Only 2 and
+# above, a file grep could not read or a pattern it would not take, carries the sentinel. Drop the
+# `2>/dev/null || true` such a grep used to wear: that is what hid exit 2.
+run_grep() {                          # run_grep GREP-ARGS...
+    local rc
+    grep "$@"
+    rc=$?
+    [ "$rc" -le 1 ] || printf '%s (exit %s from: grep)\n' "$CHECKER_DIED" "$rc"
+    return 0
+}
+
 # A READER WHOSE NEXT STAGE KEEPS ONLY SOME LINES HAS TO TAKE THESE OUT FIRST, or the stage drops
 # them and the value says nothing went wrong: uniq -d keeps only repeats, grep -o only matches.
 died_in() { printf '%s\n' "$1" | grep -F "$CHECKER_DIED"; }   # died_in VALUE -> its sentinel lines
