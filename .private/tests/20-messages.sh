@@ -1005,10 +1005,11 @@ record "box:messages-drawn-in-a-box" \
 
 # #290's route, read back. A say_* body that boxes a key held in a variable contributes no key and
 # would be measured against nothing; `=` with nothing after it is that case.
-saybox="$(sed -n 's/^SAYBOX://p' "$TMP/width")"
+saybox="$(run_checker sed -n 's/^SAYBOX://p' "$TMP/width")"
 record    "box:say-functions-drawing-a-box" "$(printf '%s' "$saybox" | do_tr '\n' ' ')"
 assert_ne "box:the-say-functions-were-found" "" "$saybox"
-assert_eq "box:every-say-box-names-a-literal-key" "" "$(printf '%s\n' "$saybox" | grep '=$')"
+assert_eq "box:every-say-box-names-a-literal-key" "" \
+          "$(died_in "$saybox"; printf '%s\n' "$saybox" | grep '=$')"
 assert_eq "box:no-say-box-names-a-key-in-a-variable" "" \
           "$(run_checker sed -n 's/^SAYBOX-VARKEY://p' "$TMP/width")"
 assert_eq "box:every-installer-box-is-measured" "" \
@@ -1053,7 +1054,8 @@ for line in sys.stdin.read().splitlines():
     assert_eq "sgkeys:$k-fits-the-box" "" "$wide"
 done
 
-long="$(grep '^LONG:' "$TMP/width" | sed 's/^LONG://')"
+# run_grep (#559): a width file grep could not read has no LONG: lines either, and empty passes.
+long="$(run_grep '^LONG:' "$TMP/width" | sed 's/^LONG://')"
 if [ -z "$long" ]; then
     pass "box:no-message-line-overflows"
 else
