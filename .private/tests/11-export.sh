@@ -155,7 +155,7 @@ assert_ok "export:applet-executable-keeps-its-bit" test -x "$TREE/.private/macap
 # a staff Mac; the loose cs193v-run is copied INTO the bundle at build time, so shipping it too
 # would hand students a second copy that could diverge from the sealed one.
 assert_eq "export:no-applet-sources" "" \
-          "$(grep -E '^\.private/macapp/(cs193v-app|make-macapp|cs193v-run)' "$TMP/paths" \
+          "$(run_grep -E '^\.private/macapp/(cs193v-app|make-macapp|cs193v-run)' "$TMP/paths" \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # THE ATTRIBUTE ITSELF, ASKED OF GIT, and this is the assertion that actually guards the rule.
@@ -199,7 +199,8 @@ fi
 # un-ignores src/ and make-icons.sh with it. Per-file negations are what keep them out, and a
 # `/**` added later in the name of symmetry is exactly what this catches.
 assert_eq "export:no-icon-sources" "" \
-          "$(grep -E '^\.private/icons/(src/|make-icons)' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
+          "$(run_grep -E '^\.private/icons/(src/|make-icons)' "$TMP/paths" \
+             | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── 2. what the installer itself insists on ───────────────────────────────────
 # READ OUT OF THE INSTALLER PROPER rather than repeated here: install_files checks these four
@@ -237,7 +238,8 @@ assert_eq "export:every-COPY-input-survives" "" "$(printf '%s' "$absent" | sed '
 
 # ─── 4. and the reasons, so a failure explains itself ──────────────────────────
 # §1 already fails if any of these appear, but it fails as a diff. These name the mistake.
-assert_eq "export:no-test-suite"  "" "$(grep '^\.private/tests/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
+assert_eq "export:no-test-suite"  "" \
+          "$(run_grep '^\.private/tests/' "$TMP/paths" | do_tr '\n' ' ' | sed 's/ *$//')"
 # NAMED, NOT MATCHED ON "installer" (#221). One installer ships now -- course-install.sh, which
 # the bootstrap execs out of the archive -- so the claim is about the THREE files a student is
 # handed from outside the tarball: the POSIX bootstrap, the Windows batch file, and the Windows
@@ -252,13 +254,13 @@ assert_eq "export:no-test-suite"  "" "$(grep '^\.private/tests/' "$TMP/paths" | 
 # would change the payload manifest and stale PAYLOAD_SHA256 behind release.sh's back; the
 # export-ignore is what keeps the release ordering acyclic, and this is the test of it.
 assert_eq "export:no-bootstrap" "" \
-          "$(grep -E '^\.private/install-cs193v\.(sh|cmd|ps1)$|install-cs193v-windows' "$TMP/paths" \
+          "$(run_grep -E '^\.private/install-cs193v\.(sh|cmd|ps1)$|install-cs193v-windows' "$TMP/paths" \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 # agent-notes.md is the one .md that ships: Containerfile:803 installs it as
 # /etc/cs193v/agent-notes.md and /etc/claude-code/CLAUDE.md is a symlink to it, so both agents
 # read the same text. Every other .md in this repo is written for staff.
 assert_eq "export:no-staff-docs" "" \
-          "$(grep '\.md$' "$TMP/paths" | grep -v '^\.private/files/agent-notes\.md$' \
+          "$(run_grep '\.md$' "$TMP/paths" | grep -v '^\.private/files/agent-notes\.md$' \
              | do_tr '\n' ' ' | sed 's/ *$//')"
 
 # ─── 4b. the size, not just the names ──────────────────────────────────────────
