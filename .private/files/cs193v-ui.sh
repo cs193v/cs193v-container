@@ -298,6 +298,7 @@ celebrate() {                         # celebrate TITLE  <- body on stdin
 # Braille rather than the ASCII / - \ | this replaced. Eight frames of a dot pattern
 # orbiting a 2x4 cell, which reads as motion at a glance instead of as a character
 # flickering between four shapes -- and cannot be mistaken for punctuation in the output.
+# Clockwise (#576): the gap goes along the top and down the right, and backwards looks wrong.
 #
 # A `case` rather than ${FRAMES:i:1}: substring extraction on a multibyte string is
 # character-wise in a UTF-8 locale and BYTE-wise in the C locale, so indexing would slice
@@ -309,8 +310,8 @@ meter_glyph() {                       # meter_glyph N|ok|bad  -> one cell
     case "$1" in
         ok)  printf '%s✓%s' "$C_GRN" "$C_OFF" ;;
         bad) printf '%s✗%s' "$C_RED" "$C_OFF" ;;
-        0) printf '⣾' ;; 1) printf '⣽' ;; 2) printf '⣻' ;; 3) printf '⢿' ;;
-        4) printf '⡿' ;; 5) printf '⣟' ;; 6) printf '⣯' ;; *) printf '⣷' ;;
+        0) printf '⣾' ;; 1) printf '⣷' ;; 2) printf '⣯' ;; 3) printf '⣟' ;;
+        4) printf '⡿' ;; 5) printf '⢿' ;; 6) printf '⣻' ;; *) printf '⣽' ;;
     esac
 }
 
