@@ -1089,8 +1089,10 @@ assert_says_key_tail "no-image:tells-them-what-to-send-staff" err.image-missing-
 shim_new
 installer_host "$PRIVATE/install-cs193v.sh" CS193V_TARBALL="$TMP/course.tar.gz" \
                CS193V_DIR="$TMP/instimg" CS193V_INSTANCE=tryout >/dev/null 2>&1
+inst_log="$(installer_log)"
 assert_eq "instance:never-asks-about-the-unsuffixed-image" "" \
-          "$(installer_log | grep -x 'image exists localhost/cs193v:local' || true)"
+          "$(died_in "$inst_log"; printf '%s\n' "$inst_log" \
+             | grep -x 'image exists localhost/cs193v:local')"
 # AND THE LOG WAS REALLY READ. An empty log satisfies the assertion above forever, which is the
 # shape 22-manifest-fuzz.sh's own oracle gate exists for.
 assert_says "instance:the-image-was-really-queried" "image exists" "$(installer_log)"
@@ -1370,7 +1372,12 @@ DEST="$TMP/dest"
 # name is random -- so the only way to ask about it is to own the directory it goes in. The
 # real /tmp cannot answer: any other run's leftovers would read as this run's leak.
 BOOTTMP="$TMP/boot"; mkdir -p "$BOOTTMP"
-boot_leftovers() { ls -d "$BOOTTMP"/cs193v-install.* 2>/dev/null; }
+# LISTED AND LOOKED FOR, not globbed: an ls that could not read $BOOTTMP printed nothing as well,
+# and nothing is the answer this is asked for (#559). pkg_leftovers and fail_leftovers do the same.
+boot_leftovers() {
+    local d; d="$(run_checker ls -A "$BOOTTMP")"
+    died_in "$d"; printf '%s\n' "$d" | grep '^cs193v-install\.'
+}
 # AND TMPDIR IS REALLY THE ONE IT USES, proved through the refusal rather than by finding the
 # directory afterwards. That distinction is the whole reason this assertion exists: a successful
 # run is SUPPOSED to leave nothing behind, so "I looked and found no tree" is what a leak-free
@@ -2166,7 +2173,10 @@ pkgsha_run() {                        # pkgsha_run TARBALL -> the transcript, AN
                   CS193V_DIR="$SHIM/dest" PATH="$SHIM:$IFARM" | strip_ansi
 }
 # The .pkg course-install.sh mktemps, which lands under shim_new's own exported TMPDIR.
-pkg_leftovers() { ls "$SHIM/tmp"/podman.*.pkg 2>/dev/null; }
+pkg_leftovers() {
+    local d; d="$(run_checker ls -A "$SHIM/tmp")"
+    died_in "$d"; printf '%s\n' "$d" | grep '^podman\..*\.pkg$'
+}
 
 # ── the fixture is not vacuous ──
 pkgsha_setup "$TMP/pkgbody-good"
@@ -2601,7 +2611,10 @@ run_with_tarball() {                  # run_with_tarball FILE DEST
     printf '%s' "$?" > "$TMP/rc"
 }
 last_rc() { cat "$TMP/rc"; }
-fail_leftovers() { ls -d "$TMP/boot-fail"/cs193v-install.* 2>/dev/null; }
+fail_leftovers() {
+    local d; d="$(run_checker ls -A "$TMP/boot-fail")"
+    died_in "$d"; printf '%s\n' "$d" | grep '^cs193v-install\.'
+}
 
 # 1. A truncated gzip stream. GNU tar exits nonzero here of its own accord; pipefail makes
 #    that independent of which tar is installed.
@@ -3309,8 +3322,12 @@ assert_ok "windows:handles-utf16-wsl-output" grep -q 'WSL_UTF8' "$W"
 #
 # CRLF: every read of the .cmd below strips \r first. Without that, a value extracted from it
 # ends with a carriage return and compares unequal to the .sh's for a reason nothing prints.
+#
+# THE MARKER GOES IN FRONT of the sed -n, which keeps only the match: a $W that could not be read
+# matched nothing, and the assert_ne on $cmd_digest below took that for a digest (#559).
 cmd_get() {                           # cmd_get REGEX -> the \1 of the first match, \r stripped
-    sed 's/\r$//' "$W" | sed -n "s/^$1\$/\1/p" | head -1
+    local s; s="$(run_checker sed 's/\r$//' "$W")"
+    died_in "$s"; printf '%s\n' "$s" | sed -n "s/^$1\$/\1/p" | head -1
 }
 cmd_owner="$(cmd_get 'set "REPO_OWNER=\(.*\)"')"
 cmd_name="$(cmd_get 'set "REPO_NAME=\(.*\)"')"
@@ -3519,7 +3536,8 @@ assert_file "winboot:the-bootstrap-exists" "$P"
 
 # The same reader idiom as cmd_get above, against `$Name = "value"` instead of `set "NAME=value"`.
 ps_get() {                            # ps_get NAME -> the quoted value of the first assignment
-    sed 's/\r$//' "$P" | sed -n "s/^\\\$$1 *= *\"\\(.*\\)\"\$/\\1/p" | head -1
+    local s; s="$(run_checker sed 's/\r$//' "$P")"
+    died_in "$s"; printf '%s\n' "$s" | sed -n "s/^\\\$$1 *= *\"\\(.*\\)\"\$/\\1/p" | head -1
 }
 # The first line number, among lines that are not whole-line comments, matching a pattern. Used
 # for the ordering assertions, so that prose NAMING a construct cannot satisfy or break them --
