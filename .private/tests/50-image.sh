@@ -347,6 +347,14 @@ FAKE_TUNNEL='mkdir -p '"$PORTS_STATE_DIR"' && : > '"$PORTS_STATE"' && { sh -c '"
 FAKE_HEALTHY='cs193v-portwatch --publish state=healthy floor=1024 up= refused=; fh=$(cs193v-portwatch --state); fh_rc=$?; echo "fake-healthy=$fh_rc [$(printf "%s" "$fh" | tr "\t\n" " |")]"'
 FAKE_HEALTHY_SAID='^fake-healthy=0 \[state healthy\|floor 1024\]$'
 
+# wait_until FOR THE THROWAWAY'S OWN SHELL (#552), on lib/assert.sh's terms: SECS is a failure
+# ceiling, not a delay a passing run pays. The host's cannot reach inside R, and the cases that use
+# this wait on something only the container can see. `refused URL` is what two of them wait for:
+# nothing listening there any more. Ends in a newline, like $FAKE_TUNNEL.
+IN_WAIT_UNTIL='wait_until() { wu_end=$(( $(date +%s) + $1 )); shift; until "$@"; do [ "$(date +%s)" -le "$wu_end" ] || return 1; sleep 0.05; done; }
+refused() { [ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 "$1")" = 000 ]; }
+'
+
 # ─── the $BROWSER stub ─────────────────────────────────────────────────────────
 # Without it, `gh auth login` and `claude /login` leave a student
 # staring at a prompt that never returns.
@@ -582,7 +590,9 @@ assert_match "shortlink:command-substitution-returns" "returned=http://localhost
 # contains the literal `/usr/local/bin/shortlink https://...` it is about to run. Measured: pgrep
 # returns pid 1 (that shell) and pid 7 (the daemon), in that order, so `head -1` picked the shell
 # and compared it against itself. Excluding $$ is what leaves the daemon.
-out="$(sl 'dpid=""; /usr/local/bin/shortlink https://example.com/a token > /dev/null; sleep 1; dpid=$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1); echo "dpid=${dpid:-none} daemon=$(ps -o sid= -p "${dpid:-1}" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
+# NO WAIT BEFORE pgrep (#552): detach() waits for the middle child, which exits only once it has
+# forked the daemon, so the daemon is there before shortlink prints.
+out="$(sl 'dpid=""; /usr/local/bin/shortlink https://example.com/a token > /dev/null; dpid=$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1); echo "dpid=${dpid:-none} daemon=$(ps -o sid= -p "${dpid:-1}" | tr -d " ") caller=$(ps -o sid= -p $$ | tr -d " ")"')"
 record "shortlink:sessions" "$out"
 # FOUND FIRST, or the comparison below is vacuous: with no pid, `daemon=` is empty, the "they are
 # equal" pattern cannot match, and the assertion reports green having measured nothing. Issue #79.
@@ -602,12 +612,15 @@ assert_eq "shortlink:runs-in-its-own-session" "" \
 # the shell running this, whose command line carries the same string. That happens to be harmless
 # -- the kernel drops signals to a PID namespace's init unless it has installed a handler, and sh
 # has not -- but depending on that is depending on something this test is not about.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a token); sleep 1; kill "$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1)"; sleep 1; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"')"
+# THE DEATH IS WAITED FOR, NOT SLEPT ON (#552), and the 10 is a ceiling: the case polls until
+# nothing answers on the port, then asks once more for the record.
+out="$(sl "$IN_WAIT_UNTIL"'l=$(/usr/local/bin/shortlink https://example.com/a token); kill "$(pgrep -f "[s]hortlink" | grep -vx "$$" | head -1)"; wait_until 10 refused "$l"; echo "gone=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l")"')"
 assert_contains "shortlink:a-signal-stops-it" "gone=000" "$out"
 
 # AND IT LETS GO ON ITS OWN, so nothing depends on a caller remembering. --timeout 1 rather than
-# waiting out the real 900s default.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); sleep 3; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
+# waiting out the real 900s default. Waited for, with 10 as a ceiling (#552): serve() looks at its
+# deadline only between one-second polls, so the 3 s this used to sleep was a guess.
+out="$(sl "$IN_WAIT_UNTIL"'l=$(/usr/local/bin/shortlink https://example.com/a --timeout 1 token); wait_until 10 refused "$l"; curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$l"')"
 assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
 
 # ─── --served-file, the "they clicked it" signal  (issue #85) ──────────────────
@@ -623,18 +636,25 @@ assert_eq "shortlink:timeout-releases-the-port" "000" "$out"
 # server STARTS would satisfy "it exists after a click" every time while signalling nothing --
 # the box would close the instant it opened, and the suite would be green. So: absent while the
 # server is up and unvisited, present after exactly one request.
-out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/hit token); sleep 1; test -e /tmp/hit && echo before=present || echo before=absent; curl -s -o /dev/null --max-time 5 "$l"; sleep 1; test -e /tmp/hit && echo after=present || echo after=absent')"
+# THE SECOND BEFORE before= STAYS FIXED (#552): it proves an absence, room for a server that
+# wrongly touched the file at start to have done it, and a poll for an absence passes at once.
+# None after the curl: the file is made before the response is sent, so it is there when curl
+# returns, and a server that made it later fails here instead of racing.
+out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/hit token); sleep 1; test -e /tmp/hit && echo before=present || echo before=absent; curl -s -o /dev/null --max-time 5 "$l"; test -e /tmp/hit && echo after=present || echo after=absent')"
 assert_contains "shortlink:served-file-absent-until-visited" "before=absent" "$out"
 assert_contains "shortlink:served-file-appears-when-served"  "after=present" "$out"
 
 # A request to a path that is NOT the slug is a 404 and must not count as a click. Otherwise a
 # browser asking this origin for /favicon.ico takes the box down before the student has read it.
+# The second after the 404 is an absence proved, so it stays fixed (#552).
 out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/h2 token); curl -s -o /dev/null --max-time 5 "${l%/*}/favicon.ico"; sleep 1; test -e /tmp/h2 && echo present || echo absent')"
 assert_eq "shortlink:a-404-is-not-a-click" "absent" "$out"
 
 # The link keeps working afterwards. Collapsing "served once" into "server exits" would have
 # saved this flag, but then a prefetch or a retry would kill the link before the student
 # arrived -- see shortlink:redirects-every-time above, which this must not contradict.
+# The second between the requests is an absence proved, room for a server that wrongly exits
+# after its first response to have gone, so it stays fixed (#552).
 out="$(sl 'l=$(/usr/local/bin/shortlink https://example.com/a --served-file /tmp/h3 token); curl -s -o /dev/null --max-time 5 "$l"; sleep 1; curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$l"')"
 assert_eq "shortlink:still-serves-after-the-first-hit" "302" "$out"
 
@@ -676,17 +696,22 @@ assert_eq "shortlink:a-cancel-file-stops-it" "rc=4" "$out"
 # file says the tunnel is healthy but says nothing about any port, so await_verdict polls for its
 # full CONFIRM_TIMEOUT -- and the cancel has to cut that short. Deliberately NOT $FAKE_TUNNEL:
 # with the port confirmed a tick after it is bound there is barely a wait to interrupt.
+# THE CANCEL GOES IN ONCE shortlink HOLDS ITS PORT, which it does only while it waits (#552). A
+# fixed second stood in for that, and when shortlink was slow to start the cancel beat it there
+# and this quietly became the cancel-before case above. held= says the port was taken first.
 # THE LISTENERS ARE COUNTED ONLY ONCE ss HAS SUCCEEDED (#558): a failing ss fed `grep -c` nothing,
 # and the 0 it printed is the passing answer. AND ALL OF THEM, not only 127.0.0.1: nothing else
 # listens in a throwaway, so any listener left after the cancel is one too many.
-out="$(R "$FAKE_HEALTHY"'
-          ( sleep 1; touch /tmp/c2 ) &
+out="$(R "$IN_WAIT_UNTIL$FAKE_HEALTHY"'
+          held() { [ -n "$(ss -Hltn)" ]; }
+          ( wait_until 10 held; echo "held=$(ss -Hltn | grep -c .)"; touch /tmp/c2 ) &
           t0=$(date +%s)
           o=$(/usr/local/bin/shortlink https://example.com/a --cancel-file /tmp/c2 token); rc=$?
           echo "rc=$rc took=$(( $(date +%s) - t0 ))s out=[$o]"
           n=$(ss -Hltn) && echo "listeners=$(printf "%s\n" "$n" | grep -c .)"')"
 record "shortlink:cancel-during" "$(printf '%s' "$out" | do_tr '\n' '|')"
 assert_match "harness:fake-healthy-reads-back:cancel-during" "$FAKE_HEALTHY_SAID" "$out"
+assert_match "shortlink:a-cancel-file-lands-while-the-port-is-held" "^held=1$" "$out"
 assert_contains "shortlink:a-cancel-file-interrupts-the-wait" "rc=4" "$out"
 # NOTHING ON STDOUT is the difference between a cancel and a degradation, and it is what lets
 # open-url stay silent rather than printing a URL the student closed the window on.
