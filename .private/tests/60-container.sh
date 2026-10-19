@@ -276,7 +276,13 @@ print(" ".join(m["Destination"] for m in json.load(sys.stdin)
                if ("/.ssh/" in m["Destination"] or "cs193v_host" in m["Destination"])
                and m["RW"]))')"
 assert_eq "tunnel:key-mounts-are-read-only" "" "$writable"
-assert_contains "mount:workspace-bind-points-at-projects" "$REPO/projects" "$mounts"
+# THE SOURCE OF THE ONE BIND AT /home/student/projects, EXACTLY (#562). This was a substring
+# search of the whole mounts JSON, which a bind of $REPO/projects-old or $REPO/projects/sub also
+# satisfied. Since #502 the env check below renders from this same source, so with the launcher's
+# one WORKSPACE variable pointed wrong, only the files:* checks far below went red, and none of
+# them says which directory was mounted.
+hp_src="$(I '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
+assert_eq "mount:workspace-bind-points-at-projects" "$REPO/projects" "$hp_src"
 # Base names, matching the launcher's remove_volumes: the instance suffix lives in $NAME, so
 # these read cs193v-claude for a student and cs193v-<instance>-claude for a developer. The
 # assertion NAME stays instance-free so results files compare across instances.
@@ -328,14 +334,14 @@ assert_not_contains "env:no-port-list-reaches-the-container" "CS193V_PORTS" \
 # unrendered path could never match. 21-host-paths.sh owns the renderer's arms; this hands it the
 # directory that was actually mounted, which keeps the assertion about the mount rather than about
 # whatever the launcher prints. Until #502 it rendered $REPO/projects, which is where the mount is
-# meant to point rather than where it does: a bind of $REPO/projects-old passed both this and the
-# substring check above. SOURCED ONLY INSIDE THE SUBSTITUTION, where nothing it defines outlives
+# meant to point rather than where it does: a bind of $REPO/projects-old passed this. Where the
+# mount SHOULD point is mount:workspace-bind-points-at-projects's question, asked of the same
+# $hp_src above. SOURCED ONLY INSIDE THE SUBSTITUTION, where nothing it defines outlives
 # the line: cs193v-ui.sh defines box(), die(), msg() and dozens of globals, and pulling those into a
 # suite this size would put them under the half of it that has not run yet.
 #
 # GUARDED FIRST: an empty expectation would pass against a container from before #257, which has
 # the variable unset.
-hp_src="$(I '{{range .Mounts}}{{if eq .Destination "/home/student/projects"}}{{.Source}}{{end}}{{end}}')"
 hp_want="$(. "$PRIVATE/files/cs193v-ui.sh"; gui_projects_path "$(platform)" "$hp_src" "${WSL_DISTRO_NAME:-}")"
 assert_ne "env:the-host-projects-expectation-rendered-something" "" "$hp_want"
 assert_eq "env:the-host-projects-dir-reaches-the-container" "$hp_want" \
