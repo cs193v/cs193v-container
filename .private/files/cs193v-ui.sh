@@ -449,9 +449,14 @@ RT_ERR=''
 #
 # THE BRACKET HOLDS THE SPAWN AND NOTHING ELSE, and 10-static.sh pins that: bash 3.2 reports a job
 # reaped while job control is on as `[1]+ Exit N`, on the student's terminal, and a foreground
-# command run under it is handed the terminal. And every spawn reads /dev/null, which bash does by
-# itself without job control and not with it: a background job reading the terminal is stopped by
-# SIGTTIN, and the call would wait out its whole ceiling.
+# command run under it is handed the terminal. The bracketed `fi` sends bash's OWN stderr to
+# /dev/null for the fork: under job control the child sets its process group before the command's
+# redirections exist, and bash 3.2 now and then reports that it could not -- `child setpgid (N to N):
+# Operation not permitted`, for a child its parent had already moved (4 in 700 calls, measured;
+# every child detached regardless). The command's own stderr is redirected inside, as before. And
+# every spawn reads /dev/null, which bash does by itself without job control and not with it: a
+# background job reading the terminal is stopped by SIGTTIN, and the call would wait out its whole
+# ceiling.
 #
 # THE COST, stated rather than found later: on Linux a wedged teardown can no longer be cut short
 # with ^C, as it could by accident before. Its ceilings add up to about 71s.
@@ -510,7 +515,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         [ -n "$RT_DETACH" ] && set -m
         if [ -n "$RT_BARE" ]; then ( "$@" >"$tmp" 2>"$eout" 7>&- 8>&- </dev/null ) & pid=$!
         else                       ( "$@" >"$tmp" 2>&1 7>&- 8>&- </dev/null ) & pid=$!
-        fi
+        fi 2>/dev/null
         [ -n "$RT_DETACH" ] && set +m
         # WHAT IS IN FLIGHT, for an arm that ends the process from inside this call; see
         # rt_kill_inflight.
@@ -571,7 +576,7 @@ run_timeout() {                       # run_timeout SECS CMD...  -> RT_OUT, retu
         else
           ( "$@" >"$tmp" 2>&1 9>&- 7>&- 8>&- </dev/null & c=$!; printf '%s\n' "$c" >&9
             wait "$c"; printf '%s\n' "$?" >&9 ) 9>"$fifo" 7>&- 8>&- & pid=$!
-        fi
+        fi 2>/dev/null
         [ -n "$RT_DETACH" ] && set +m
         # The wrapper's pid now and the command's once it is read, for rt_kill_inflight. 7>&- 8>&-
         # ON THE WRAPPER as well as the command: a wrapper is a fork that never execs, so it holds
