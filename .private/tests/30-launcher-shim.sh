@@ -796,6 +796,42 @@ fi
 shim_ssh_unwedge
 launcher_fg_stop
 
+# ^C WITH THE OUTPUT IN A PIPE WHOSE READER HAS GONE: `./cs193v 2>&1 | tee log`, where the same ^C
+# kills tee. The teardown's first write raised SIGPIPE, which bash dies of after running the EXIT
+# trap -- and that trap's teardown returned at the once-guard, the teardown it would have finished
+# being the one SIGPIPE had just ended. No stop, the container left up (#565).
+#
+# THE READER IS KILLED FIRST rather than left to the ^C, which would race tee's death against that
+# first write; this way the write always finds the pipe broken.
+shim_new
+shim_set exec_out "SHELL-OPENED"
+cat > "$SHIM/piped" <<'EOF'
+#!/bin/sh
+# piped LAUNCHER PIDFILE -- the launcher's output through a reader that publishes its own pid
+"$1" 2>&1 | sh -c 'printf "%s\n" "$$" > "$0"; exec cat' "$2"
+EOF
+chmod +x "$SHIM/piped"
+pid_gone() { ! kill -0 "$1" 2>/dev/null; }
+fg_start "$SHIM/piped" "${LAUNCHER_DIR:-$REPO}/cs193v" "$SHIM/reader.pid"
+if wait_until 30 grep -qF -- "$SIG_ACK" "$FG_OUT" && wait_until 10 test -s "$SHIM/reader.pid"; then
+    reader="$(cat "$SHIM/reader.pid")"
+    kill "$reader"
+    if wait_until 10 pid_gone "$reader"; then
+        shim_clear_log
+        launcher_fg_keys '\003'
+        launcher_fg_ended 15 || true
+        assert_eq "setup-signal:ctrl-c-into-a-broken-pipe-stops-the-container" "1" \
+                  "$(shim_count '^stop ')"
+        assert_eq "setup-signal:ctrl-c-into-a-broken-pipe-leaves-it-exited" "exited" "$(shim_state)"
+    else
+        fail "setup-signal:ctrl-c-into-a-broken-pipe-stops-the-container" "the reader never died"
+    fi
+else
+    fail "setup-signal:ctrl-c-into-a-broken-pipe-stops-the-container" "never reached the prompt:
+$(strip_ansi < "$FG_OUT")"
+fi
+launcher_fg_stop
+
 # ─── ...and a signal DURING the teardown lets it finish  (#449) ────────────────
 # The student has typed `exit` and is watching "Exiting the CS193V development environment...";
 # they press ^C, or the launcher is HUPed. That teardown already owns TEARDOWN_DONE, so a signal

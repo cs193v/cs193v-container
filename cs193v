@@ -2245,7 +2245,11 @@ shell_teardown() {                     # shell_teardown [INT|TERM|HUP|QUIT]
     # this has to come before anything that starts one. The arm that brought us here still ends
     # the process at the bottom; the INT branch's `trap - INT` undoes this first. Every signal
     # with an arm is here, QUIT included (#564).
-    trap '' INT TERM HUP QUIT
+    #
+    # AND PIPE, which has no arm: with the output in a pipe whose reader the same ^C killed --
+    # `./cs193v 2>&1 | tee log` -- the teardown's first write raised SIGPIPE, and bash died of it
+    # before the stop (#565). Ignored, that write fails with EPIPE and the teardown goes on.
+    trap '' INT TERM HUP QUIT PIPE
     TEARDOWN_DONE=1
     transient_cleanup
     # ONE STOP, NOT ONE PER ARM, and 10-static.sh counts it. The two paths print different

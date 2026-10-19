@@ -4001,11 +4001,11 @@ assert_match "teardown:term-exits-143" 'TERM\)[[:space:]]+exit 143' "$guard_code
 assert_match "teardown:hup-exits-129" 'HUP\)[[:space:]]+exit 129' "$guard_code"
 assert_match "teardown:quit-exits-131" 'QUIT\)[[:space:]]+exit 131' "$guard_code"
 # AND NOTHING CAN KILL IT HALFWAY (#512): the first statement past the guard ignores every signal
-# with an arm, before anything that starts a child. A window closing HUPs the whole foreground
-# group, which holds every podman call run_timeout started with `&`, so an ignore set any later lets
-# the close kill the in-flight `podman stop` -- and a child takes its disposition from the moment it
-# is started.
-assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP QUIT" \
+# with an arm, and PIPE (#565), before anything that starts a child. A window closing HUPs the
+# whole foreground group, which holds every podman call run_timeout started with `&`, so an ignore
+# set any later lets the close kill the in-flight `podman stop` -- and a child takes its disposition
+# from the moment it is started.
+assert_eq "teardown:signals-are-ignored-before-any-work" "trap '' INT TERM HUP QUIT PIPE" \
           "$(printf '%s\n' "$guard_code" | grep -vE '^[[:space:]]*$' \
              | awk 'f { sub(/^[[:space:]]+/, ""); print; exit }
                     /\[ -n "\$TEARDOWN_DONE" \] && return 0/ { f = 1 }')"
